@@ -211,13 +211,13 @@ class RecordStepTests(TickTestCase):
         self.assertEqual(lines, ['tick: origin moved during the tick — rebased onto origin/main and pushed'])
 
     def test_conflicting_hand_commit_leaves_the_clone_clean_and_reports_refused(self):
-        """B-0030, the conflict case: the rebase is aborted, push() is False, no rebase is left
+        """B-0030, the conflict case (a body both sides edited, B-0044): the rebase is aborted, push() is False, no rebase is left
         in progress, and the next record run resets and re-derives as today."""
         path = self.clone_and_operator()
         with open(os.path.join(path, 'features', 'F-0001.md'), 'w') as f:
-            f.write('---\nid: F-0001\ntitle: from the clone\n---\n')
+            f.write('---\nid: F-0001\ntitle: sample\n---\nbody from the clone\n')
         self.assertTrue(shadow.commit_local(path, 'tick: state t'))
-        self.operator_commits_and_pushes('features/F-0001.md', '---\nid: F-0001\ntitle: by hand\n---\n',
+        self.operator_commits_and_pushes('features/F-0001.md', '---\nid: F-0001\ntitle: sample\n---\nbody by hand\n',
                                          'feature(F-0001): by hand')
         self.assertFalse(shadow.push(path))
         for d in ('rebase-merge', 'rebase-apply'):
@@ -226,6 +226,29 @@ class RecordStepTests(TickTestCase):
         rc, out = self.run_tick(steps='record')
         self.assertEqual(rc, 0)
         self.assertIn('committed and pushed', out)
+
+    def test_conflict_on_machine_owned_card_content_is_re_derived_and_pushed(self):
+        """B-0044: the tick rewrote a card's machine block and a hand commit edited the same card's
+        typed lines — the rebase conflicted, was aborted, and the tick's push was refused. Now the
+        hand side wins the conflict, the derivation re-runs, the rebase continues and pushes."""
+        from asf.record import frontmatter
+        marker = frontmatter.MARKER
+        path = self.clone_and_operator()
+        card = os.path.join(path, 'features', 'F-0001.md')
+        with open(card, 'w') as f:
+            f.write(f'---\nid: F-0001\ntitle: sample\n{marker}\nstate: Active\n---\n')
+        self.assertTrue(shadow.commit_local(path, 'tick: state t'))
+        self.operator_commits_and_pushes('features/F-0001.md', '---\nid: F-0001\ntitle: by hand\n---\n',
+                                         'feature(F-0001): groomed by hand')
+        lines = []
+        self.assertTrue(shadow.push(path, out=lines.append))
+        self.assertEqual(lines, ['tick: origin moved — re-derived onto origin/main and pushed'])
+        self.assertEqual(self.origin_commits(), 3)
+        pushed = _git(['show', 'main:features/F-0001.md'], self.origin)
+        self.assertIn('title: by hand', pushed)
+        self.assertNotIn('<<<<<<<', pushed)
+        for d in ('rebase-merge', 'rebase-apply'):
+            self.assertFalse(os.path.isdir(os.path.join(path, '.git', d)), d)
 
     def test_operator_checkout_is_untouched(self):
         before = _tree_digest(self.operator)

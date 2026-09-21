@@ -112,8 +112,8 @@ def push(path, out=None):
     On a refusal: fetch; if ``origin/<branch>`` is still an ancestor of HEAD origin has not
     moved and the refusal has another cause (a hook, an unreachable remote) — False, as before.
     If origin moved (a card pushed by hand while the tick ran — B-0030), rebase onto it once and
-    push again: True, and one line through ``out`` when given. A rebase that conflicts is
-    aborted and the push is False: the clone is derived state plus that tick's appended lines,
+    push again: True, and one line through ``out`` when given. A rebase that conflicts on cards or ``index.json`` is resolved by ownership and
+    re-derived (B-0044); any other conflict is aborted and the push is False: the clone is derived state plus that tick's appended lines,
     and the next run resets it and re-derives (the appended lines of that one tick are lost, as
     the docstring above says)."""
     branch = _default_branch(path)
@@ -126,11 +126,54 @@ def push(path, out=None):
         return False
     rebase = _sh(['git', '-c', 'core.editor=true', 'rebase', f'origin/{branch}'],
                  cwd=path, check=False)
-    if rebase.returncode != 0:
-        _sh(['git', 'rebase', '--abort'], cwd=path, check=False)
-        return False
+    rederived = False
+    while rebase.returncode != 0:
+        if not _resolve_by_ownership(path):
+            _sh(['git', 'rebase', '--abort'], cwd=path, check=False)
+            return False
+        rederived = True
+        rebase = _sh(['git', '-c', 'core.editor=true', 'rebase', '--continue'], cwd=path, check=False)
     if not _push_once(path, branch):
         return False
     if out:
-        out(f'tick: origin moved during the tick — rebased onto origin/{branch} and pushed')
+        if rederived:
+            out(f'tick: origin moved — re-derived onto origin/{branch} and pushed')
+        else:
+            out(f'tick: origin moved during the tick — rebased onto origin/{branch} and pushed')
     return True
+
+
+def _stage(path, n, rel):
+    r = _sh(['git', 'show', f':{n}:{rel}'], cwd=path, check=False)
+    return r.stdout if r.returncode == 0 else None
+
+
+def _body(text):
+    """The card text after its closing frontmatter ``---`` line."""
+    parts = text.split('\n---\n', 1)
+    return parts[1] if len(parts) == 2 else text
+
+
+def _resolve_by_ownership(path):
+    """Mid-rebase (B-0044): ``ours`` is origin (the hand side), ``theirs`` the tick's commit. Every
+    conflicted card and ``index.json`` take the hand side, then the index derivation re-runs in the
+    clone; the ingest machine block is left as the hand side has it and the next tick re-derives it.
+    False when a conflict falls outside those regions (not a card, or a body both sides edited)."""
+    from asf.record.index import do_index
+    conflicted = _sh(['git', 'diff', '--name-only', '--diff-filter=U'], cwd=path, check=False).stdout.split()
+    if not conflicted:
+        return False
+    for rel in conflicted:
+        if rel != 'index.json':
+            if not rel.endswith('.md'):
+                return False
+            base, ours, theirs = (_stage(path, n, rel) for n in (1, 2, 3))
+            if ours is None or theirs is None:
+                return False
+            if base is not None and _body(base) != _body(ours) != _body(theirs) != _body(base):
+                return False
+        if _sh(['git', 'checkout', '--ours', '--', rel], cwd=path, check=False).returncode != 0:
+            return False
+    if do_index(path) != 0:
+        return False
+    return _sh(['git', 'add', '-A'], cwd=path, check=False).returncode == 0
