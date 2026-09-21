@@ -48,7 +48,8 @@ def make_repo():
 
 
 def item_text(id_, type_, title, parent=None, typed_lines=(),
-              machine_lines=('state: New',
+              machine_lines=('schema_version: 1',
+                             'state: New',
                               'stage_since: 2026-01-01T00:00:00Z',
                               'updated: 2026-01-01T00:00:00Z'),
               body=None):

@@ -196,8 +196,9 @@ class InitTest(HomeCase):
         self.write(os.path.join(self.backlog, 'epics', 'E-0001.md'),
                    '---\nid: E-0001\ntype: epic\ntitle: A goal\nrank: 1\n# ---- machine ----\nstate: New\n---\n## Description\n\n'
                    '## Children\n\n## Backlinks\n')
-        _quiet(__import__('asf.record.index', fromlist=['do_index']).do_index, self.backlog)
         idx_path = os.path.join(self.backlog, 'index.json')
+        self.write(idx_path, '{"items": {}}')  # a record from before schema stamps
+        _quiet(__import__('asf.record.index', fromlist=['do_index']).do_index, self.backlog)
         with open(idx_path) as f:
             before_idx = json.load(f)
         self.assertNotIn('schema_version', before_idx)

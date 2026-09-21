@@ -20,6 +20,7 @@ from asf.evidence import evidence
 from asf.record import frontmatter
 from asf.record.core import TYPE_ORDER, TYPES, BARE_DECISION_RE, canonicalize, load_items, now_iso, today
 from asf.record.ingest import _path_only, cmd_ingest
+from asf.schema import SCHEMA_VERSION
 
 # Resolved per call from the product config unless a test overrides it directly
 # (`mock.patch.object(migrate, 'GOALS_PATH', ...)`).
@@ -399,10 +400,11 @@ def cmd_migrate(args, root):
             if 'legacy_id' not in meta:
                 meta['legacy_id'] = legacy_id
             ts = now_iso()
+            meta['schema_version'] = SCHEMA_VERSION
             meta['state'] = 'New'
             meta['stage_since'] = ts
             meta['updated'] = ts
-            meta.machine_keys = {'state', 'stage_since', 'updated'}
+            meta.machine_keys = {'schema_version', 'state', 'stage_since', 'updated'}
             write_record(type_, new_id, meta, body, folder)
             legacy_lookup[(type_, legacy_id)] = new_id
             report[type_]['created'] += 1
@@ -455,10 +457,11 @@ def cmd_migrate(args, root):
         if row['supersedes']:
             meta['supersedes'] = row['supersedes']
         ts = now_iso()
+        meta['schema_version'] = SCHEMA_VERSION
         meta['state'] = 'New'
         meta['stage_since'] = ts
         meta['updated'] = ts
-        meta.machine_keys = {'state', 'stage_since', 'updated'}
+        meta.machine_keys = {'schema_version', 'state', 'stage_since', 'updated'}
         body = _decision_body(row['statement'], row['context'])
         write_record('decision', new_id, meta, body, TYPES['decision'][0])
         report['decision']['created'] += 1

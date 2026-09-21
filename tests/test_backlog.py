@@ -33,7 +33,8 @@ def make_repo():
 
 
 def item_text(id_, type_, title, parent=None, typed_lines=(),
-              machine_lines=('state: New',
+              machine_lines=('schema_version: 1',
+                             'state: New',
                               'stage_since: 2026-01-01T00:00:00Z',
                               'updated: 2026-01-01T00:00:00Z'),
               body=None):
@@ -347,11 +348,13 @@ class CheckCommandTests(unittest.TestCase):
         write_item(self.root, 'F-0001', 'feature', 'Free plan', parent='E-0001')
         write_item(self.root, 'T-0001', 'task', 'First', parent='F-0001',
                    typed_lines=["writes: [apps/web/app/billing/**]"],
-                   machine_lines=['state: Active', 'stage_since: 2026-01-01T00:00:00Z',
+                   machine_lines=['schema_version: 1', 'state: Active',
+                                  'stage_since: 2026-01-01T00:00:00Z',
                                   'updated: 2026-01-01T00:00:00Z'])
         write_item(self.root, 'T-0002', 'task', 'Second', parent='F-0001',
                    typed_lines=["writes: [apps/web/app/marketing/page.tsx]"],
-                   machine_lines=['state: Active', 'stage_since: 2026-01-01T00:00:00Z',
+                   machine_lines=['schema_version: 1', 'state: Active',
+                                  'stage_since: 2026-01-01T00:00:00Z',
                                   'updated: 2026-01-01T00:00:00Z'])
         run(['index'], self.root)
         r = run(['check'], self.root)

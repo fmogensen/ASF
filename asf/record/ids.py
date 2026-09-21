@@ -8,6 +8,7 @@ import re
 
 from asf.record import frontmatter
 from asf.record.core import TYPES, now_iso
+from asf.schema import SCHEMA_VERSION
 
 
 def _id_range(prefix):
@@ -64,10 +65,11 @@ def write_new_item(root, canonical, type_, new_id, typed_fields, body, date, why
         if v not in (None, [], {}):
             meta[k] = v
     ts = now_iso()
+    meta['schema_version'] = SCHEMA_VERSION
     meta['state'] = 'New'
     meta['stage_since'] = ts
     meta['updated'] = ts
-    meta.machine_keys = {'state', 'stage_since', 'updated'}
+    meta.machine_keys = {'schema_version', 'state', 'stage_since', 'updated'}
     full_body = (
         f"## Description\n{body}\n\n" if body else "## Description\n\n"
     ) + (

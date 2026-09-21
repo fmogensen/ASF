@@ -8,6 +8,7 @@ from asf.record.core import (
     today, tokenize,
 )
 from asf.record.ids import mint_id
+from asf.schema import SCHEMA_VERSION
 
 
 SEVERITIES = ('S1', 'S2', 'S3')
@@ -127,10 +128,11 @@ def cmd_new(args, root):
         else:
             meta[key] = value
     ts = now_iso()
+    meta['schema_version'] = SCHEMA_VERSION
     meta['state'] = 'New'
     meta['stage_since'] = ts
     meta['updated'] = ts
-    meta.machine_keys = {'state', 'stage_since', 'updated'}
+    meta.machine_keys = {'schema_version', 'state', 'stage_since', 'updated'}
 
     if args.body_file:
         with open(args.body_file, encoding='utf-8') as f:

@@ -119,6 +119,7 @@ def write_epic(repo, id_, title, desc='Original text'):
     header = '\n'.join([
         f'id: {id_}', 'type: epic', f'title: {title}',
         '# ---- machine ----',
+        'schema_version: 1',
         'state: New', 'stage_since: 2026-09-21T00:00:00Z', 'updated: 2026-09-21T00:00:00Z',
     ])
     with open(path, 'w', encoding='utf-8') as f:
