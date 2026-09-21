@@ -165,11 +165,19 @@ def make_repo():
     return base, origin, repo, state_dir
 
 
-def write_session(state_dir, job, branch, rc=0, ended=True):
+def dead_pid():
+    """A process id that has ended — a finished session's pid, as harvest must find it."""
+    proc = subprocess.Popen([sys.executable, '-c', 'pass'])
+    proc.wait()
+    return proc.pid
+
+
+def write_session(state_dir, job, branch, rc=0, ended=True, pid=None):
     """The registry line a launch writes, and the one that ends the session — the same
     append-only shape asf.workers.pool writes (see its `load_sessions`)."""
     with open(os.path.join(state_dir, 'sessions.jsonl'), 'a', encoding='utf-8') as f:
-        f.write(json.dumps({'job': job, 'branch': branch, 'account': 'test', 'pid': 1,
+        f.write(json.dumps({'job': job, 'branch': branch, 'account': 'test',
+                            'pid': dead_pid() if pid is None else pid,
                             'started': '2026-09-21T00:00:00Z'}) + '\n')
         if ended:
             f.write(json.dumps({'job': job, 'ended': '2026-09-21T00:05:00Z',
@@ -330,6 +338,33 @@ class HarvestTests(unittest.TestCase):
         self.assertEqual(out.strip(), '')
         self.assertTrue(os.path.isdir(os.path.join(self.state_dir, 'worktrees', 'running1')))
 
+    # -- B-0010: a reap needs a finished line AND a dead pid; otherwise it holds ------------
+    def worktree_survives(self, job, branch):
+        self.assertTrue(os.path.isdir(os.path.join(self.state_dir, 'worktrees', job)))
+        self.assertNotEqual(sh(['git', 'branch', '--list', branch], cwd=self.repo).stdout.strip(), '')
+        self.assertFalse(harvested(self.state_dir, job))
+
+    def test_reap_holds_for_live_pid_and_for_no_finished_line(self):
+        live = os.getpid()  # a process that is certainly running
+        branch, wt = add_job_worktree(self.repo, self.state_dir, 'live1')
+        write_epic(wt, 'E-0006', 'Live pid')
+        index_and_commit(wt, 'live1: add E-0006')
+        write_session(self.state_dir, 'live1', branch, pid=live)
+
+        rc, out = run_harvest(self.repo, self.state_dir)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.count('HARVEST HOLD live1'), 1, out)
+        self.assertNotIn('HARVEST OK', out)
+        self.worktree_survives('live1', branch)
+
+        branch, wt = add_job_worktree(self.repo, self.state_dir, 'open1')
+        write_session(self.state_dir, 'open1', branch, ended=False, pid=dead_pid())
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            harvest.reap(self.repo, self.state_dir, 'open1', branch)
+        self.assertEqual(buf.getvalue().count('HARVEST HOLD open1'), 1, buf.getvalue())
+        self.worktree_survives('open1', branch)
+
 
 # ---- the product repo: remote lane branches, sessions keyed by branch --------------------------
 
@@ -392,7 +427,7 @@ class ProductHarvestTests(unittest.TestCase):
     def session(self, job, item, branch, rc=0):
         with open(os.path.join(self.state_dir, 'sessions.jsonl'), 'a', encoding='utf-8') as f:
             f.write(json.dumps({'job': job, 'item': item, 'branch': branch, 'account': 'test',
-                                'pid': 1, 'started': '2026-09-21T00:00:00Z'}) + '\n')
+                                'pid': dead_pid(), 'started': '2026-09-21T00:00:00Z'}) + '\n')
             f.write(json.dumps({'job': job, 'ended': '2026-09-21T00:05:00Z',
                                 'end_reason': 'finished' if rc == 0 else 'failed', 'rc': rc}) + '\n')
 
