@@ -544,6 +544,47 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertEqual(sh(['git', 'rev-parse', 'main'], cwd=self.repo).stdout.strip(), before)
         self.assertEqual(lines[-1], f'harvest: {self.repo} not fast-forwarded — working tree has local changes')
 
+    def push_main(self, subject, files):
+        """A fix pushed straight to main — not through a lane landing."""
+        sh(['git', 'checkout', '-q', '-B', 'main', 'origin/main'], cwd=self.worker)
+        for rel, text in files.items():
+            self.write(self.worker, rel, text)
+        sh(['git', 'add', '-A'], cwd=self.worker)
+        sh(['git', 'commit', '-qm', subject], cwd=self.worker)
+        sh(['git', 'push', '-q', 'origin', 'main'], cwd=self.worker)
+
+    def test_b0042_direct_push_to_main_fast_forwards_the_checkout(self):
+        """A fix pushed to main any way but a lane landing left the factory on old code: the
+        checkout is fast-forwarded whenever origin/<trunk> is ahead, with no landing at all."""
+        self.push_main('fix(B-0001): straight to main', {'a.txt': 'a\n'})
+        before = sh(['git', 'rev-parse', 'main'], cwd=self.repo).stdout.strip()
+        results, lines = self.harvest(self.product())
+        sha = self.origin_main()
+        self.assertEqual(results, {})
+        self.assertNotEqual(sha, before)
+        self.assertEqual(sh(['git', 'rev-parse', 'main'], cwd=self.repo).stdout.strip(), sha)
+        self.assertEqual(lines, [f'harvest: {self.repo} fast-forwarded to {sha}'])
+
+    def test_b0042_checkout_moves_before_any_landed_line(self):
+        self.push_main('fix(B-0002): straight to main', {'m.txt': 'm\n'})
+        direct = self.origin_main()
+        self.push_lane('fix/B-0001', [('fix(B-0001): the change', {'a.txt': 'a\n'})])
+        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
+        results, lines = self.harvest(self.product())
+        sha = self.origin_main()
+        self.assertEqual(results, {'fix/B-0001': 'landed'})
+        self.assertEqual(lines, [f'harvest: {self.repo} fast-forwarded to {direct}',
+                                 f'landed fix/B-0001 → {sha}',
+                                 f'harvest: {self.repo} fast-forwarded to {sha}'])
+
+    def test_b0042_direct_push_leaves_a_dirty_checkout_alone(self):
+        self.push_main('fix(B-0001): straight to main', {'a.txt': 'a\n'})
+        before = sh(['git', 'rev-parse', 'main'], cwd=self.repo).stdout.strip()
+        self.write(self.repo, 'checks/test_fx.py', GREEN_TEST + '# local edit\n')
+        _results, lines = self.harvest(self.product())
+        self.assertEqual(sh(['git', 'rev-parse', 'main'], cwd=self.repo).stdout.strip(), before)
+        self.assertEqual(lines, [f'harvest: {self.repo} not fast-forwarded — working tree has local changes'])
+
     def test_session_is_matched_by_branch_not_by_job_name(self):
         self.push_lane('worker/add-thing', [('feat(T-0007): add the thing', {'t.txt': 't\n'})])
         # the job is keyed differently from the branch; the latest start line for the branch wins

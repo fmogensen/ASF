@@ -696,11 +696,15 @@ def land_ff(repo, state_dir, branch, record, item, conv, asf_repo, bug_root, dry
 
 
 def sync_checkout(repo, trunk, out=print):
-    """Fast-forward the checkout at ``repo`` to ``origin/<trunk>`` after a landing. The scheduler
-    runs that checkout (an editable install: its working tree is the code), and a landing that
-    reached only origin left the factory running the code from before its own fix (B-0036).
-    Only when the checkout is on the trunk with a clean tree, and only ``--ff-only`` — never a
-    reset, never a force; anything else is left alone and named in one line. True when moved."""
+    """Fast-forward the checkout at ``repo`` to ``origin/<trunk>`` whenever that is ahead of it.
+    The scheduler runs that checkout (an editable install: its working tree is the code), and a
+    fix that reached only origin — a landing (B-0036) or any direct push (B-0042) — left the
+    factory running the code from before it. Not ahead: silent. Only when the checkout is on the
+    trunk with a clean tree, and only ``--ff-only`` — never a reset, never a force; anything else
+    is left alone and named in one line. True when moved."""
+    behind = sh(['git', 'rev-list', '--count', f'HEAD..origin/{trunk}'], cwd=repo)
+    if behind.returncode != 0 or behind.stdout.strip() in ('', '0'):
+        return False
     head = sh(['git', 'symbolic-ref', '-q', '--short', 'HEAD'], cwd=repo).stdout.strip()
     if head != trunk:
         out(f'harvest: {repo} not fast-forwarded — on {head or "a detached HEAD"}, not {trunk}')
@@ -731,6 +735,8 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
     trunk = conv.main
     mode = landing(product)
     sh(['git', 'fetch', '-q', '--prune', 'origin'], cwd=repo)
+    if not dry_run:
+        sync_checkout(repo, trunk, out)  # a direct push to the trunk too (B-0042)
     sessions = sessions_by_branch(state_dir)
     asf_repo = None
     results = {}
