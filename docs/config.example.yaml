@@ -1,0 +1,34 @@
+# ~/.ASF/config.yaml — the operator's shared configuration. Copy this file there and edit.
+# One file, not per product: the scheduler, the worker pool and quota guards are shared; a
+# product's own conventions live in ~/.ASF/products/<name>.yaml (see docs/products.example.yaml).
+
+# Which product `asf <command>` targets when --product is not given.
+default_product: sample
+
+# scheduler: cron | launchd | systemd | gh-actions | claude-routines
+scheduler:
+  provider: cron
+  # the one job every provider's adapter installs
+  job: asf tick
+
+# worker pool: the accounts or API keys a spawn can use, and how much of the pool each product
+# gets. A launch is always tagged with the product it runs for, so cost per product is a sum
+# and a product can be given a floor/ceiling share.
+worker_pool:
+  backend: claude-code   # claude-code | api-key
+  accounts:
+    - name: acct-a
+      share: 0.5
+    - name: acct-b
+      share: 0.5
+  quota_guard:
+    # stop launching new work above this fraction of an account's 5h/7d window
+    max_5h: 0.85
+    max_7d: 0.85
+
+# paths: everything under ~/.ASF the tools read/write. state is per product
+# (~/.ASF/state/<product>/); logs are shared.
+paths:
+  home: ~/.ASF
+  state_dir: ~/.ASF/state
+  log_dir: ~/.ASF/logs

@@ -1,0 +1,104 @@
+# ~/.ASF/products/<name>.yaml — one file per product. Copy this to e.g. ~/.ASF/products/sample.yaml,
+# fill in your own values, and pass --product sample (or set default_product in config.yaml, or
+# $ASF_PRODUCT) so the tools resolve it. Every key below is read by asf.env.Product; nothing
+# product-specific belongs in the asf/ package itself — if a tool needs a new fact about a
+# product, it becomes a new key here, not a literal in code.
+
+# The product's own name, matching this file's name (products/<name>.yaml).
+product: sample
+
+# github.com slug, e.g. "acme/sample" — used for `gh` calls (PRs, Actions runs, issues).
+repo_slug: acme/sample
+
+# where the product's own code repo is checked out on this machine.
+repo_dir: ~/Code/acme/sample
+
+# the branch releases deploy from.
+main: main
+
+# where this product's record (the backlog) lives — a directory with epics/ features/ stories/
+# tasks/ bugs/ decisions/ rules/ inbox/ groom/ releases/ metrics/ index.json.
+backlog_dir: ~/Code/acme/sample-backlog
+
+# conventions: every path/naming choice the record and tick tools need, so no tool hardcodes a
+# directory name or branch prefix.
+conventions:
+  specs_dir: docs/specs
+  plans_dir: docs/plans
+  reviews_dir: docs/reviews
+  briefs_dir: docs/briefs
+  branch_prefixes:
+    spec: spec
+    plan: plan
+    task: task
+    batch: batch
+  # the filename pattern a review lives at, {n} is the review round number.
+  review_pattern: "docs/reviews/{n}-{slug}.md"
+  # the heading a plan uses to mark one task's section, read by asf.tick.migrate's plan parser.
+  task_heading: "## Task"
+  # asf.tick.migrate: the one spec file (if any) excluded from the "every other main spec"
+  # decision-row scan because it's already read separately as the product's design spec.
+  design_spec_name: design.md
+  # asf.groom.inbox / asf.tick.file_bugs: the Epic an inbox Bug or a filed Bug is parented under
+  # when no explicit parent is given. Leave unset to have groom ask instead of guessing.
+  default_bug_epic: E-0001
+
+# CI: which provider runs checks, which workflow file, budgets and runner labels.
+ci:
+  provider: gh-actions   # gh-actions | other
+  workflow: ci.yml
+  budgets:
+    minutes_per_day: 500
+  runner_org: acme
+  labels:
+    - self-hosted
+    - linux
+
+# how a deployed sha is discovered, for the evidence pass and release notes.
+deploy_sha:
+  provider: github-deployments   # github-deployments | fly | vercel | script
+  workflow: deploy-prod.yml
+  # only when provider: script
+  # script: tools/deploy-sha.sh
+
+# the product's own live URL, used by the prod probe / release notes.
+app_host: https://sample.example.com
+
+# path globs whose diffs are customer-visible — used to classify a Task's blast radius.
+customer_paths:
+  - apps/web/**
+  - apps/api/**
+
+# per-stage age limits before an item is "stale" (asf stale). Same shape as tools/limits.json
+# today; duration strings are <n><s|m|h|d>.
+stage_limits:
+  card_undecided: 3d
+  spec-draft: 24h
+  spec-review: 12h
+  plan-draft: 24h
+  plan-review: 12h
+  plan-approved: 24h
+  task_active: 45m
+  pr_approved_unbatched: 10m
+  bug_S1: 10m
+  bug_S2: 24h
+  undecided_close: 14d
+
+# size classes: how a Task's footprint maps to a train/lane.
+size_classes:
+  small:
+    max_files: 3
+  medium:
+    max_files: 10
+  large:
+    max_files: 30
+
+# the approval matrix as code: action class -> auto | groom | human-now.
+approvals:
+  spend_money: human-now
+  touch_prod_credentials: human-now
+  touch_customer_data: human-now
+  new_epic: human-now
+  merge_amendable_set: human-now
+  merge_routine_pr: auto
+  file_bug: auto

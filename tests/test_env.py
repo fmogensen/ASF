@@ -4,6 +4,26 @@ import unittest
 
 from asf import env
 
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+class TestExampleConfigsParse(unittest.TestCase):
+    def test_config_example_parses(self):
+        path = os.path.join(REPO_ROOT, 'docs', 'config.example.yaml')
+        data = env.loads(open(path, encoding='utf-8').read())
+        self.assertEqual(data['default_product'], 'sample')
+        self.assertIn('worker_pool', data)
+
+    def test_products_example_parses_into_a_product(self):
+        path = os.path.join(REPO_ROOT, 'docs', 'products.example.yaml')
+        data = env.loads(open(path, encoding='utf-8').read())
+        product = env.Product('sample', data)
+        self.assertEqual(product.repo_slug, 'acme/sample')
+        self.assertEqual(product.branch_prefix('task'), 'task')
+        self.assertEqual(product.conventions['design_spec_name'], 'design.md')
+        self.assertEqual(product.stage_limits['task_active'], '45m')
+        self.assertEqual(product.approvals['spend_money'], 'human-now')
+
 
 class TestYamlSubset(unittest.TestCase):
     def test_scalars_and_nesting(self):
