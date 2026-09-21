@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 
+from asf.conventions import Conventions
 from asf.record import frontmatter
 from asf.record.core import today
 from asf.tick import file_bugs
@@ -87,6 +88,9 @@ def write_check_script(root, name, script):
 def run(args, cwd):
     env = dict(os.environ)
     env['PYTHONPATH'] = REPO_ROOT + os.pathsep + env.get('PYTHONPATH', '')
+    # no operator config: the run reads asf.conventions' documented defaults, not this
+    # machine's ~/.ASF, so the test asserts the same thing everywhere it runs
+    env['ASF_HOME'] = os.path.join(cwd, 'no-such-asf-home')
     return subprocess.run([sys.executable, '-m', 'asf.cli'] + args, cwd=cwd, env=env,
                            capture_output=True, text=True)
 
@@ -220,7 +224,7 @@ class FileBugsIntegrationTests(unittest.TestCase):
         for i, ts in enumerate([self.now - datetime.timedelta(hours=1),
                                 self.now - datetime.timedelta(hours=2)]):
             write_ci_line(self.root, today(), {
-                'run': 100 + i, 'sha': 'deadbee', 'branch': 'worktree-m-batch-x', 'ts': iso(ts),
+                'run': 100 + i, 'sha': 'deadbee', 'branch': 'main', 'ts': iso(ts),
                 'jobs': [{'name': 'gate', 'failed_step': 'flaky', 'conclusion': 'failure'}],
             })
 
@@ -282,7 +286,7 @@ class DeterministicBugIdTests(unittest.TestCase):
         now = datetime.datetime.now(datetime.timezone.utc)
         for i, ts in enumerate([now - datetime.timedelta(hours=1), now - datetime.timedelta(hours=2)]):
             write_ci_line(root, today(), {
-                'run': 100 + i, 'sha': 'deadbee', 'branch': 'worktree-m-batch-x', 'ts': iso(ts),
+                'run': 100 + i, 'sha': 'deadbee', 'branch': 'main', 'ts': iso(ts),
                 'jobs': [{'name': 'zzz-job', 'failed_step': 'boom', 'conclusion': 'failure'}],
             })
         write_tick_line(root, today(), {
@@ -320,3 +324,40 @@ class DeterministicBugIdTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class BranchSeverityTests(unittest.TestCase):
+    """A CI failure's severity comes from the branch it happened on — and which branches are the
+    trunk and the merge-batch lane is the product's convention, never a literal here."""
+
+    def setUp(self):
+        self.root = make_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.now = datetime.datetime.now(datetime.timezone.utc)
+
+    def write_two_reds(self, branch):
+        for i, ts in enumerate([self.now - datetime.timedelta(hours=1),
+                                self.now - datetime.timedelta(hours=2)]):
+            write_ci_line(self.root, today(), {
+                'run': 200 + i, 'sha': 'deadbee', 'branch': branch, 'ts': iso(ts),
+                'jobs': [{'name': 'gate', 'failed_step': 'flaky', 'conclusion': 'failure'}],
+            })
+
+    def sig(self, conv):
+        sigs = file_bugs.ci_signatures(self.root, self.now, conv)
+        return sigs['gate: flaky']['severity']
+
+    def test_a_product_branch_is_one_severity_lower_than_the_trunk(self):
+        self.write_two_reds('feature/add-login')
+        self.assertEqual(self.sig(Conventions(main='trunk')), 'S3')
+
+    def test_the_products_own_trunk_name_is_read_from_the_conventions(self):
+        self.write_two_reds('trunk')
+        self.assertEqual(self.sig(Conventions(main='trunk')), 'S2')
+        self.assertEqual(self.sig(Conventions(main='main')), 'S3')
+
+    def test_the_batch_lane_is_a_branch_prefix_not_a_literal(self):
+        self.write_two_reds('merge-queue/2026-09-21')
+        conv = Conventions.from_mapping({'branch_prefixes': {'batch': 'merge-queue/'}})
+        self.assertEqual(self.sig(conv), 'S2')
+        self.assertEqual(self.sig(Conventions()), 'S3')   # no batch lane configured

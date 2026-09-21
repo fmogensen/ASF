@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 
+from asf.conventions import Conventions
 from asf.record import frontmatter
 from asf.record.core import canonicalize, load_items, today
 from asf.record.index import do_index
@@ -25,10 +26,12 @@ from asf.tick.stale import parse_iso
 
 CI_REFUSAL_WINDOW_H = 24
 
-# The default Epic a filed Bug is parented under. A product with no such convention configured
-# leaves this None; `_file_or_bump_bug` then omits `parent`, which `asf check` flags for a human
-# to fix once — the same "ask rather than guess" rule the groom's inbox intake follows.
-DEFAULT_BUG_EPIC = os.environ.get('ASF_DEFAULT_BUG_EPIC')
+#: The conventions a caller with no Product reads: the trunk is `main`, no batch lane, no
+#: default Bug Epic. The Epic a filed Bug is parented under is `conventions.default_bug_epic`;
+#: a product that configures none leaves it unset, `_file_or_bump_bug` omits `parent`, and
+#: `asf check` flags it for a human to fix once — the same "ask rather than guess" rule the
+#: groom's inbox intake follows. ``$ASF_DEFAULT_BUG_EPIC`` still overrides, for one run.
+DEFAULTS = Conventions()
 
 
 def _jsonl_lines(pattern):
@@ -44,7 +47,10 @@ def _jsonl_lines(pattern):
                     continue
 
 
-def ci_signatures(root, now):
+def ci_signatures(root, now, conv=None):
+    """CI failures seen twice in the window. A failure on the trunk or on a merge-batch branch
+    (`conventions.branch_prefixes`) is one severity worse: it blocks everyone, not one branch."""
+    conv = conv or DEFAULTS
     cutoff = now - datetime.timedelta(hours=CI_REFUSAL_WINDOW_H)
     raw = {}
     for run in _jsonl_lines(os.path.join(root, 'metrics', 'ci', '*.jsonl')):
@@ -52,7 +58,7 @@ def ci_signatures(root, now):
         if ts is None or ts < cutoff:
             continue
         branch = run.get('branch') or ''
-        main_or_batch = branch == 'main' or branch.startswith('worktree-m-batch')
+        main_or_batch = conv.is_trunk(branch) or conv.branch_kind(branch) == 'batch'
         for job in run.get('jobs') or []:
             failed_step = job.get('failed_step')
             if not failed_step:
@@ -194,6 +200,19 @@ def _file_or_bump_bug(root, canonical, sig, info, date, default_bug_epic=None):
     return 'filed'
 
 
+def _conventions(args):
+    """The product's conventions, or the defaults when there is no product config to read
+    (a test, or `asf file-bugs` run against a checkout on its own)."""
+    from asf import env
+    conv = getattr(args, 'conventions', None)
+    if conv is not None:
+        return conv
+    try:
+        return env.load_product(getattr(args, 'product', None)).conventions
+    except (env.ConfigError, OSError):
+        return DEFAULTS
+
+
 def cmd_file_bugs(args, root):
     by_id, parse_errors = load_items(root)
     if parse_errors:
@@ -204,10 +223,13 @@ def cmd_file_bugs(args, root):
     now = datetime.datetime.now(datetime.timezone.utc)
     date = today()
 
-    default_bug_epic = getattr(args, 'default_bug_epic', None) or DEFAULT_BUG_EPIC
+    conv = _conventions(args)
+    default_bug_epic = (getattr(args, 'default_bug_epic', None)
+                        or os.environ.get('ASF_DEFAULT_BUG_EPIC')
+                        or conv.default_bug_epic)
 
     signatures = {}
-    signatures.update(ci_signatures(root, now))
+    signatures.update(ci_signatures(root, now, conv))
     signatures.update(refusal_signatures(root, now))
     signatures.update(rule_violation_signatures(root))
 
