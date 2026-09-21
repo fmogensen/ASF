@@ -13,8 +13,22 @@ import sys
 
 from asf import __version__
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PLUGIN_DIR = os.path.join(REPO_ROOT, 'plugin')
+PACKAGE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def default_plugin_dir(cwd=None):
+    """The plugin directory is a property of the CHECKOUT, not the package (B-0047): under a
+    plain install the package sits in a venv with no ``plugin/`` beside it. A checkout is
+    recognised by its ``.claude-plugin/marketplace.json``; the cwd wins, then the package's own
+    parent (the editable install), else None."""
+    for root in (os.path.abspath(cwd or os.getcwd()), PACKAGE_ROOT):
+        if os.path.isfile(os.path.join(root, '.claude-plugin', 'marketplace.json')) \
+                or os.path.isdir(os.path.join(root, 'plugin', 'skills')):
+            return os.path.join(root, 'plugin')
+    return None
+
+
+PLUGIN_DIR = default_plugin_dir() or os.path.join(PACKAGE_ROOT, 'plugin')
 
 # Operator views: print the table verbatim and stop.
 VIEWS = ('status', 'next', 'backlog', 'roadmap', 'parity', 'prod', 'sessions', 'doctor')
@@ -142,16 +156,25 @@ def check(plugin_dir=PLUGIN_DIR, out=print):
 def register(sub):
     p = sub.add_parser('plugin', help='the Claude Code plugin, generated from the CLI: build | check')
     p.add_argument('action', choices=['build', 'check'])
-    p.add_argument('--dir', default=PLUGIN_DIR, help='the plugin directory (default: <repo>/plugin)')
-    p.set_defaults(run=lambda args: (build if args.action == 'build' else check)(args.dir))
+    p.add_argument('--dir', default=None,
+                   help='the plugin directory (default: <checkout>/plugin, found from the cwd)')
+    p.set_defaults(run=lambda args: run_action(args.action, args.dir))
+
+
+def run_action(action, plugin_dir=None, out=print, cwd=None):
+    d = plugin_dir or default_plugin_dir(cwd)
+    if not d:
+        out('plugin: no checkout here (no .claude-plugin/marketplace.json in the cwd) — pass --dir <checkout>/plugin')
+        return 2
+    return (build if action == 'build' else check)(d, out=out)
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog='asf plugin')
     ap.add_argument('action', choices=['build', 'check'])
-    ap.add_argument('--dir', default=PLUGIN_DIR)
+    ap.add_argument('--dir', default=None)
     a = ap.parse_args(argv)
-    return (build if a.action == 'build' else check)(a.dir)
+    return run_action(a.action, a.dir)
 
 
 if __name__ == '__main__':

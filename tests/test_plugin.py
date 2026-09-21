@@ -3,6 +3,7 @@ import os
 import re
 import subprocess
 import unittest
+from unittest import mock
 
 from asf import __version__
 from asf.cli import build_parser
@@ -50,6 +51,24 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(m['name'], 'asf')
         self.assertEqual(m['plugins'][0]['source'], './plugin')
         self.assertEqual(m['plugins'][0]['name'], 'asf')
+
+    def test_b0047_plugin_dir_comes_from_the_checkout_not_the_package(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            # a checkout layout somewhere else, the package untouched: cwd decides
+            os.makedirs(os.path.join(tmp, '.claude-plugin'))
+            with open(os.path.join(tmp, '.claude-plugin', 'marketplace.json'), 'w') as f:
+                f.write('{}')
+            self.assertEqual(plugin_build.default_plugin_dir(tmp), os.path.join(tmp, 'plugin'))
+            self.assertEqual(plugin_build.run_action('build', cwd=tmp, out=lambda s: None), 0)
+            self.assertEqual(plugin_build.run_action('check', cwd=tmp, out=lambda s: None), 0)
+            # a cwd with no checkout and a package with no plugin beside it (a plain install):
+            # refuse with one line, never report every skill as stale
+            elsewhere = os.path.join(tmp, 'elsewhere')
+            os.makedirs(elsewhere)
+            with mock.patch.object(plugin_build, 'PACKAGE_ROOT', os.path.join(tmp, 'venv')):
+                self.assertIsNone(plugin_build.default_plugin_dir(elsewhere))
+                self.assertEqual(plugin_build.run_action('check', cwd=elsewhere, out=lambda s: None), 2)
 
     def test_build_and_check_roundtrip_in_a_temp_dir(self):
         import tempfile
