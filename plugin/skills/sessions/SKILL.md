@@ -1,6 +1,6 @@
 ---
 name: sessions
-description: "ASF: show the SESSIONS table"
+description: "ASF: the SESSIONS table"
 allowed-tools: Bash
 ---
 

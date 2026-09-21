@@ -1,6 +1,6 @@
 ---
 name: roadmap
-description: "ASF: show the ROADMAP table, one row per Epic"
+description: "ASF: the ROADMAP table: one row per Epic"
 allowed-tools: Bash
 ---
 

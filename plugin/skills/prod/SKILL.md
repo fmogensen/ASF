@@ -1,6 +1,6 @@
 ---
 name: prod
-description: "ASF: show the PROD table, deploy state and what just shipped"
+description: "ASF: the PROD table: deploy state and what just shipped"
 allowed-tools: Bash
 ---
 

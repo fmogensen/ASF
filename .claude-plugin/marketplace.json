@@ -1,0 +1,14 @@
+{
+  "name": "asf",
+  "owner": {
+    "name": "ASF contributors"
+  },
+  "description": "ASF — Autonomous Software Factory: the factory's tables and grooming in the Claude Code console",
+  "plugins": [
+    {
+      "name": "asf",
+      "source": "./plugin",
+      "description": "ASF — Autonomous Software Factory: /asf:status, /asf:next, /asf:backlog, /asf:roadmap, /asf:parity, /asf:prod, /asf:sessions, /asf:doctor, /asf:groom"
+    }
+  ]
+}

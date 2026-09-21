@@ -1,6 +1,6 @@
 ---
 name: next
-description: "ASF: show the next item the factory would pick up"
+description: "ASF: the NEXT table: what the tick would start, S1 first"
 allowed-tools: Bash
 ---
 

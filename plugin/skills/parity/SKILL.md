@@ -1,6 +1,6 @@
 ---
 name: parity
-description: "ASF: show the PARITY table, one row per Story"
+description: "ASF: the PARITY table: one row per Story"
 allowed-tools: Bash
 ---
 

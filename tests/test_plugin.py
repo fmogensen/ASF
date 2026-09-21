@@ -10,7 +10,9 @@ from asf.cli import build_parser
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SKILLS = sorted(glob.glob(os.path.join(REPO_ROOT, 'plugin', 'skills', '*', 'SKILL.md')))
 # a skill may precede its view: `next` lands with the feeder
-PENDING_VIEWS = {'next'}
+from asf import plugin_build
+
+PENDING_VIEWS = set()
 
 
 def forbidden_patterns():
@@ -32,6 +34,32 @@ class PluginTests(unittest.TestCase):
     def test_skills_exist(self):
         names = {os.path.basename(os.path.dirname(p)) for p in SKILLS}
         self.assertTrue({'roadmap', 'backlog', 'parity', 'prod', 'sessions', 'status'} <= names)
+
+    def test_plugin_is_generated_from_the_cli(self):
+        # the tree on disk is exactly what `asf plugin build` writes; every view has a skill,
+        # every skill is a view or a dialogue, and no stray skill directory exists
+        self.assertEqual(plugin_build.diff(), [], 'run `asf plugin build`')
+        names = {os.path.basename(os.path.dirname(p)) for p in SKILLS}
+        self.assertEqual(names, set(plugin_build.skill_names()))
+        self.assertTrue(set(plugin_build.skill_names()) <= registered_commands())
+
+    def test_marketplace_names_the_plugin(self):
+        import json
+        with open(os.path.join(REPO_ROOT, '.claude-plugin', 'marketplace.json'), encoding='utf-8') as f:
+            m = json.load(f)
+        self.assertEqual(m['name'], 'asf')
+        self.assertEqual(m['plugins'][0]['source'], './plugin')
+        self.assertEqual(m['plugins'][0]['name'], 'asf')
+
+    def test_build_and_check_roundtrip_in_a_temp_dir(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            d = os.path.join(tmp, 'plugin')
+            self.assertEqual(plugin_build.check(d, out=lambda s: None), 1)
+            self.assertEqual(plugin_build.build(d, out=lambda s: None), 0)
+            self.assertEqual(plugin_build.check(d, out=lambda s: None), 0)
+            os.makedirs(os.path.join(d, 'skills', 'stray'))
+            self.assertEqual(plugin_build.check(d, out=lambda s: None), 1)
 
     def test_every_skill_is_well_formed(self):
         commands = registered_commands()

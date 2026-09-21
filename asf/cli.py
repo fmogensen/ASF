@@ -132,6 +132,9 @@ def build_parser():
     p_shadow_diff = build_shadow_diff_parser(sub)
     p_shadow_diff.add_argument('--product')
 
+    from asf import plugin_build
+    plugin_build.register(sub)
+
     return p
 
 

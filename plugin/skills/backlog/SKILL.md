@@ -1,6 +1,6 @@
 ---
 name: backlog
-description: "ASF: show the BOARD table, one row per Feature grouped by Epic"
+description: "ASF: the BOARD table: one row per Feature, grouped by Epic"
 allowed-tools: Bash
 ---
 

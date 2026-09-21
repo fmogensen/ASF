@@ -1,6 +1,6 @@
 ---
 name: status
-description: "ASF: show the FACTORY STATUS table"
+description: "ASF: the FACTORY STATUS table"
 allowed-tools: Bash
 ---
 

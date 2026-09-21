@@ -1,6 +1,6 @@
 {
   "name": "asf",
-  "description": "ASF — Autonomous Software Factory: the factory's tables in the console",
+  "description": "ASF — Autonomous Software Factory: the factory's tables in the console — /asf:status, /asf:next, /asf:backlog, /asf:roadmap, /asf:parity, /asf:prod, /asf:sessions, /asf:doctor, /asf:groom",
   "version": "0.1.0",
   "author": {
     "name": "ASF contributors"
