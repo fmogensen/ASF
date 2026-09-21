@@ -781,16 +781,38 @@ def session_event(record, result, items=None):
         if start is not None and start <= ended:
             minutes = round((ended - start).total_seconds() / 60, 1)
     usd = (result or {}).get('total_cost_usd')
-    ev = {'ts': iso(ended), 'task': record.get('job'), 'account': str(record.get('account') or '?'),
+    # The record may be public: a session line carries the account's INDEX in the pool, never its
+    # name, and only the first line of the session's report, capped (B-0023). The registry under
+    # ~/.ASF/state keeps the name and the full report.
+    reason = (result or {}).get('result') or None
+    if reason:
+        reason = str(reason).strip().splitlines()[0][:200]
+    ev = {'ts': iso(ended), 'task': record.get('job'), 'account': account_index(record.get('account')),
           'model': record.get('model'), 'kind': session_kind(record),
           'branch': record.get('branch') or None,
           'result': str(record.get('end_reason') or ('running' if not record.get('ended') else 'unknown')),
-          'reason': (result or {}).get('result') or None,
+          'reason': reason,
           'minutes': minutes, 'usd': usd if isinstance(usd, (int, float)) else None}
     item = record.get('item')
     if item and ID_RE.match(str(item)) and (not items or item in items):
         ev['item'] = item
     return ev
+
+
+def account_index(name):
+    """``a<n>``: the account's 1-based position in ``worker_pool.accounts`` — the record never
+    carries an account name (B-0023). Unknown or unset → ``a?``."""
+    if not name:
+        return 'a?'
+    try:
+        from asf import env
+        accounts = (env.load_config().get('worker_pool') or {}).get('accounts') or []
+        for i, a in enumerate(accounts, 1):
+            if (a.get('name') if isinstance(a, dict) else a) == name:
+                return f'a{i}'
+    except Exception:
+        pass
+    return 'a?'
 
 
 def sessions_from_registry(product, since_day=None, items=None, state_path=None, logs_dir=None):

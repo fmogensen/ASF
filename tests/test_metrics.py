@@ -640,11 +640,32 @@ class Backfill(Base):
             evs = metrics.sessions_from_registry(product, since_day='2026-09-20', items=self.items)
         self.assertEqual(len(evs), 1)                  # the session still running is not an event
         ev = evs[0]
+        # the record may be public: the account is an index into the pool, never a name (B-0023)
         self.assertEqual((ev['task'], ev['result'], ev['kind'], ev['item'], ev['account']),
-                         ('fix-free-plan-t3-r1', 'finished', 'fix', 'T-0001', 'acct-a'))
+                         ('fix-free-plan-t3-r1', 'finished', 'fix', 'T-0001', 'a?'))
+        self.assertNotIn('acct-a', json.dumps(ev))
         self.assertEqual((ev['minutes'], ev['usd'], ev['reason']), (4.0, 0.42, 'fixed'))
         self.assertEqual(ev['ts'], '2026-09-21T04:20:00Z')
         metrics.validate('sessions', ev, self.items)   # it is a valid event as it stands
+
+    def test_account_index_and_capped_reason(self):
+        with mock.patch.object(env, 'load_config',
+                               lambda: {'worker_pool': {'accounts': [{'name': 'x1'}, {'name': 'x2'}]}}):
+            self.assertEqual(metrics.account_index('x2'), 'a2')
+            self.assertEqual(metrics.account_index('nobody'), 'a?')
+            self.assertEqual(metrics.account_index(None), 'a?')
+        d, _res = self.write_results()
+        home = os.path.join(d, 'asf-home3')
+        state, logs = self.write_registry(home)
+        with open(os.path.join(logs, 'fix-free-plan-t3-r1.jsonl'), 'w') as f:
+            f.write(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
+                                'result': 'first line ' + 'x' * 400 + '\nsecond line with a path /home/someone',
+                                'total_cost_usd': 0.1, 'duration_ms': 1000}) + '\n')
+        product = env.Product('sample', {})
+        with mock.patch.object(env, 'ASF_HOME', home):
+            evs = metrics.sessions_from_registry(product, since_day='2026-09-20', items=self.items)
+        self.assertEqual(len(evs[0]['reason']), 200)
+        self.assertNotIn('second line', evs[0]['reason'])
 
     def test_import_sessions_reads_a_legacy_results_file(self):
         d, res = self.write_results()
