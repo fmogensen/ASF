@@ -1,30 +1,58 @@
 #!/usr/bin/env bash
-# tools/cutover.sh <product> [--ref DIR] [--force] [--apply]
+# tools/cutover.sh <product> [--ref DIR] [--force] [--dry-run|--apply]
 #
-# Switches one product's factory to `asf` in one command. Dry-run by default (prints every step
-# it would take, changes nothing); `--apply` performs them. Idempotent: a second `--apply` for a
-# product that has already been cut over reports that and exits 0 without touching anything.
-# Reversible: every file this moves or replaces lands under
-# `~/.ASF/state/<product>/retired/<date>/` first — `tools/rollback.sh <product>` restores it.
+# Switches one product's factory to `asf` in one command. Dry-run by default (prints the gate
+# table and every step it would take, changes nothing); `--apply` performs them. Idempotent: a
+# second `--apply` for a product that has already been cut over reports that and exits 0 without
+# touching anything. Reversible: every file this moves or replaces, every job it installs and
+# every job it boots out is written to `~/.ASF/state/<product>/retired/<date>/manifest.tsv` —
+# `tools/rollback.sh <product> --apply` inverts exactly that list.
 #
-# Gate (a): `asf doctor` and `asf shadow-diff --ref DIR` must both exit 0, or pass --force. DIR is
-#      the reference tables/index.json the pre-asf tools produced for the same minute the shadow
-#      tick ran; without --ref, shadow-diff has nothing to compare against and the gate refuses.
-# (b): the operator's tick procedure file (config `operator.tick_file`) — step 0 calls
-#      `asf tick --product <p>`, its tables come from `asf <view> --product <p>`.
-# (c): the `/asf` plugin skills (config `operator.plugin_dir`) — each calls
-#      `asf <command> --product <p>` and carries a stamp line.
-# (d): the scheduler job (launchd today: config `scheduler.launchd_label`) — replaced by one
-#      that runs `asf tick`; the old plist retired, not deleted.
-# (e): the legacy tool directories (config `legacy_paths:`) — moved to `retired/<date>/`, not
-#      deleted.
-# (f): a `cutover` event recorded in the product's own metrics, then the doctor table.
+# ---- the gates ------------------------------------------------------------------------------
+#
+# Installing must leave a working factory or refuse. Three numbered gates stand in the way; each
+# prints one line and exits 3 (gate 3 exits 4, having rolled back). `--force` does NOT bypass
+# gates 1-3 — it only overrides the shadow-diff/doctor gate (a), which is a comparison against
+# the old tools, not a statement about whether the new factory can run.
+#
+#   gate 1 referenced dirs   — no `legacy_paths` directory is still referenced by a loaded job.
+#                              Moving a directory out from under a running job stops dispatch
+#                              silently: the clock still fires, the script is no longer there.
+#   gate 2 manifest complete — `asf tick --product <p> --manifest` exits 0, i.e. every step of
+#                              the tick has an owner. A tick that carries only some of the work
+#                              is a factory that looks alive and does a fraction of its job.
+#   gate 3 the job runs      — after installing, the job must actually complete once: runs >= 1,
+#                              last exit 0, and the record's origin gained a `tick: state`
+#                              commit (or the log says the tick found no change). Otherwise this
+#                              run is rolled back and the cutover exits 4 having changed nothing.
+#
+# Gate 1 is evaluated twice: once up front over every loaded job except the one this run retires
+# itself (`scheduler.launchd_label`), and again per directory at the moment of retiring it, by
+# which time that job has been booted out. A directory is retired only if its own check passes.
+# A job whose label the operator has declared in `legacy_steps:` is excused: that is the
+# operator saying "this step is still the old factory's, on purpose".
+#
+# ---- what it changes --------------------------------------------------------------------------
+# (a) the gate: `asf doctor` and `asf shadow-diff --ref DIR` must both exit 0, or pass --force.
+#     DIR is the reference tables/index.json the pre-asf tools produced for the same minute the
+#     shadow tick ran; without --ref, shadow-diff has nothing to compare against.
+# (b) the operator's tick procedure file (config `operator.tick_file`).
+# (c) the `/asf` plugin skills (config `operator.plugin_dir`).
+# (d) the scheduler jobs — the clock is split in three, because one job doing everything means
+#     one failing step takes the whole factory down: `record` (steps record), `dispatch` (steps
+#     health,wave,prs,batch, installed only when the manifest owns all four) and `daily`. The
+#     old job (config `scheduler.launchd_label`) is booted out and its plist retired, not
+#     deleted. The new ones come from `asf scheduler`, never from a plist written here by hand.
+# (e) the legacy tool directories (config `legacy_paths:`) — moved to `retired/<date>/`.
+# (f) a `cutover` event recorded in the product's own metrics, then the doctor table.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 ASF_HOME="${ASF_HOME:-$HOME/.ASF}"
 DATE="$(date -u +%Y-%m-%d)"
+
+USAGE="usage: cutover.sh <product> [--ref DIR] [--force] [--dry-run|--apply]"
 
 PRODUCT=""
 REF=""
@@ -33,34 +61,52 @@ APPLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --ref)
-      [ $# -ge 2 ] || { echo "usage: cutover.sh <product> [--ref DIR] [--force] [--apply]" >&2; exit 2; }
+      [ $# -ge 2 ] || { echo "$USAGE" >&2; exit 2; }
       REF="$2"; shift 2 ;;
     --force) FORCE=1; shift ;;
     --apply) APPLY=1; shift ;;
-    -h|--help) echo "usage: cutover.sh <product> [--ref DIR] [--force] [--apply]"; exit 0 ;;
-    -*) echo "usage: cutover.sh <product> [--ref DIR] [--force] [--apply]" >&2; exit 2 ;;
+    --dry-run) APPLY=0; shift ;;
+    -h|--help) echo "$USAGE"; exit 0 ;;
+    -*) echo "$USAGE" >&2; exit 2 ;;
     *)
-      if [ -n "$PRODUCT" ]; then
-        echo "usage: cutover.sh <product> [--ref DIR] [--force] [--apply]" >&2
-        exit 2
-      fi
+      if [ -n "$PRODUCT" ]; then echo "$USAGE" >&2; exit 2; fi
       PRODUCT="$1"; shift ;;
   esac
 done
-if [ -z "$PRODUCT" ]; then
-  echo "usage: cutover.sh <product> [--ref DIR] [--force] [--apply]" >&2
-  exit 2
-fi
+if [ -z "$PRODUCT" ]; then echo "$USAGE" >&2; exit 2; fi
 
 MODE="dry-run"
 [ "$APPLY" -eq 1 ] && MODE="apply"
 
+# The `asf` entry point. Defaults to this checkout; an operator with `asf` on PATH, or a test
+# with a stub standing in for a subcommand, overrides it with $ASF_CMD (word-split on purpose).
+ASF_CMD_DEFAULT="python3 -m asf.cli"
+
 run_asf() {
-  PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" ASF_HOME="$ASF_HOME" python3 -m asf.cli "$@"
+  PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" ASF_HOME="$ASF_HOME" \
+    ${ASF_CMD:-$ASF_CMD_DEFAULT} "$@"
+}
+
+# `asf scheduler ...`, falling back to the module entry point on a checkout whose cli.py does
+# not have the subcommand wired yet. Same code either way.
+SCHEDULER_VIA_CLI=0
+if run_asf scheduler --help >/dev/null 2>&1; then SCHEDULER_VIA_CLI=1; fi
+
+run_scheduler() {
+  if [ "$SCHEDULER_VIA_CLI" -eq 1 ]; then
+    run_asf scheduler "$@"
+  else
+    PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" ASF_HOME="$ASF_HOME" \
+      python3 -m asf.scheduler "$@"
+  fi
+}
+
+py() {
+  PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" ASF_HOME="$ASF_HOME" python3 "$@"
 }
 
 cfg_get() {
-  PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" ASF_HOME="$ASF_HOME" python3 -c "
+  py -c "
 import os, sys
 from asf import env
 cfg = env.load_config()
@@ -72,17 +118,20 @@ print(os.path.expanduser(v) if isinstance(v, str) else (v if v is not None else 
 }
 
 cfg_list() {
-  PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" ASF_HOME="$ASF_HOME" python3 -c "
-import os
+  py -c "
+import os, sys
 from asf import env
 cfg = env.load_config()
-for p in (cfg.get('$1') or []):
-    print(os.path.expanduser(p))
-" 2>/dev/null || true
+v = cfg
+for part in sys.argv[1].split('.'):
+    v = (v or {}).get(part) if isinstance(v, dict) else None
+for p in (v or []):
+    print(os.path.expanduser(p) if isinstance(p, str) else p)
+" "$1" 2>/dev/null || true
 }
 
 product_get() {
-  PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" ASF_HOME="$ASF_HOME" python3 -c "
+  py -c "
 import sys
 from asf import env
 p = env.load_product(sys.argv[1])
@@ -101,8 +150,9 @@ MARKER="$STATE_DIR/cutover-done"
 MANIFEST="$RETIRED_DIR/manifest.tsv"
 
 record_manifest() {
-  # kind, original path, retired-copy path, extra (scheduler label) — tools/rollback.sh's input
-  printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "${4:-}" >> "$MANIFEST"
+  # kind, original path, retired-copy path ('-' when there is none), extra (scheduler label).
+  # tools/rollback.sh reads exactly this back.
+  printf '%s\t%s\t%s\t%s\n' "$1" "$2" "${3:--}" "${4:-}" >> "$MANIFEST"
 }
 
 echo "== CUTOVER $PRODUCT ($MODE)"
@@ -111,6 +161,97 @@ if [ -f "$MARKER" ]; then
   echo "cutover: $PRODUCT already cut over on $(cat "$MARKER") — nothing to do"
   echo "(tools/rollback.sh $PRODUCT undoes it if you need to redo this)"
   exit 0
+fi
+
+DISPATCH_STEPS="health,wave,prs,batch"
+LAUNCHD_LABEL="$(cfg_get scheduler.launchd_label)"
+INTERVAL="$(cfg_get scheduler.interval_s)"
+[ -n "$INTERVAL" ] || INTERVAL=600
+JOB_TIMEOUT="$(cfg_get cutover.job_timeout_s)"
+[ -n "$JOB_TIMEOUT" ] || JOB_TIMEOUT=90
+BACKLOG_DIR="$(product_get backlog_dir)"
+
+# ---- gate 1: is any legacy_paths dir still referenced by a loaded job? -------------------------
+
+LEGACY_DIRS="$(cfg_list legacy_paths)"
+LEGACY_STEPS="$(cfg_list legacy_steps)"
+
+# Prints one refusal line per offending directory; empty output means the gate passes. $1 is a
+# label to exempt (the job this run retires itself), '' for none.
+referencing_jobs() {
+  local exempt="$1"
+  run_scheduler list --product "$PRODUCT" --json 2>/dev/null | py -c '
+import fnmatch, json, os, sys
+exempt, dirs_blob, excused_blob = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    jobs = json.load(sys.stdin)
+except ValueError:
+    jobs = []
+excused = [p for p in excused_blob.splitlines() if p.strip()]
+for raw in dirs_blob.splitlines():
+    directory = raw.strip()
+    if not directory:
+        continue
+    target = os.path.normpath(os.path.expanduser(directory))
+    for job in jobs:
+        label = job.get("label", "")
+        if label == exempt or any(fnmatch.fnmatch(label, p) for p in excused):
+            continue
+        for path in job.get("paths") or []:
+            if path == target or path.startswith(target + os.sep):
+                print(f"cutover: {directory} is still used by loaded job {label} ({path}) "
+                      "— retire the job first or declare the step under legacy_steps")
+                break
+' "$exempt" "$LEGACY_DIRS" "$LEGACY_STEPS" 2>/dev/null || true
+}
+
+GATE1_LINES="$(referencing_jobs "$LAUNCHD_LABEL")"
+if [ -z "$GATE1_LINES" ]; then
+  GATE1_RESULT="pass"
+  GATE1_LINE="no legacy_paths directory is referenced by a loaded job"
+else
+  GATE1_RESULT="REFUSE"
+  GATE1_LINE="$(printf '%s' "$GATE1_LINES" | head -1)"
+fi
+
+# ---- gate 2: does the tick manifest own every step? -------------------------------------------
+
+set +e
+MANIFEST_OUT="$(run_asf tick --product "$PRODUCT" --manifest 2>&1)"
+MANIFEST_RC=$?
+set -e
+
+if [ "$MANIFEST_RC" -eq 0 ]; then
+  GATE2_RESULT="pass"
+  GATE2_LINE="every tick step has an owner"
+else
+  GATE2_RESULT="REFUSE"
+  GATE2_LINE="$(printf '%s\n' "$MANIFEST_OUT" | grep -i -m1 'no owner' || true)"
+  if [ -z "$GATE2_LINE" ]; then
+    GATE2_LINE="$(printf '%s\n' "$MANIFEST_OUT" | grep -v '^[[:space:]]*$' | tail -1)"
+  fi
+  GATE2_LINE="cutover: $GATE2_LINE"
+fi
+
+echo
+echo "== GATES $PRODUCT"
+echo "gate · result · line"
+echo "1 referenced-dirs · $GATE1_RESULT · $GATE1_LINE"
+echo "2 manifest · $GATE2_RESULT · $GATE2_LINE"
+if [ "$APPLY" -eq 1 ]; then
+  echo "3 installed-job-runs · pending · checked after the job is installed"
+else
+  echo "3 installed-job-runs · skip · only --apply installs a job to check"
+fi
+echo
+
+if [ "$GATE1_RESULT" = "REFUSE" ]; then
+  printf '%s\n' "$GATE1_LINES" >&2
+  exit 3
+fi
+if [ "$GATE2_RESULT" = "REFUSE" ]; then
+  echo "$GATE2_LINE" >&2
+  exit 3
 fi
 
 # ---- (a) the gate: doctor + shadow-diff clean, or --force ------------------------------------
@@ -145,7 +286,24 @@ fi
 
 FAILED=0
 mkdir -p "$STATE_DIR"
-[ "$APPLY" -eq 1 ] && mkdir -p "$RETIRED_DIR"
+if [ "$APPLY" -eq 1 ]; then
+  mkdir -p "$RETIRED_DIR"
+  # The marker goes down before the first change, not after the last: from here on this run owns
+  # a retired dir and a manifest, and `tools/rollback.sh` must be able to find them even if the
+  # run dies halfway through.
+  echo "$DATE" > "$MARKER"
+fi
+
+# Gate 3's baseline: where the record's origin stood before this run installed anything. It has
+# to be read now — the job may complete its first run the moment it is bootstrapped.
+git -C "$BACKLOG_DIR" fetch -q origin 2>/dev/null || true
+ORIGIN_BASE="$(git -C "$BACKLOG_DIR" rev-parse FETCH_HEAD 2>/dev/null || true)"
+
+rollback_and_exit() {
+  echo "$1" >&2
+  bash "$HERE/rollback.sh" "$PRODUCT" --apply >&2 || true
+  exit 4
+}
 
 # ---- (b) the operator's tick procedure file ------------------------------------------------
 
@@ -167,7 +325,7 @@ $BLOCK_END" ]; then
       echo "  $TICK_FILE: already up to date"
     elif [ "$APPLY" -eq 1 ]; then
       cp "$TICK_FILE" "$RETIRED_DIR/$(basename "$TICK_FILE").bak"
-      python3 - "$TICK_FILE" "$BLOCK_BEGIN" "$BLOCK_END" "$BLOCK_BODY" <<'PYEOF'
+      py - "$TICK_FILE" "$BLOCK_BEGIN" "$BLOCK_END" "$BLOCK_BODY" <<'PYEOF'
 import sys
 path, begin, end, body = sys.argv[1:5]
 text = open(path, encoding='utf-8').read()
@@ -227,45 +385,129 @@ else
   shopt -u nullglob
 fi
 
-# ---- (d) the scheduler job ------------------------------------------------------------------
+# ---- (d) the scheduler jobs: retire the old one, split the clock in three ----------------------
 
-LAUNCHD_LABEL="$(cfg_get scheduler.launchd_label)"
-echo "== scheduler job"
+echo "== scheduler jobs"
+
+# Does the manifest own every one of these steps? A step the manifest never mentions has no
+# owner in the new factory, so the old job that does own it stays loaded.
+manifest_owns() {
+  printf '%s\n' "$MANIFEST_OUT" | py -c '
+import sys
+wanted = [s for s in sys.argv[1].split(",") if s]
+seen = set()
+for line in sys.stdin:
+    parts = [p.strip() for p in line.replace("·", "|").split("|")]
+    if parts and parts[0]:
+        seen.add(parts[0].split()[0])
+sys.exit(0 if all(w in seen for w in wanted) else 1)
+' "$1"
+}
+
 if ! is_set "$LAUNCHD_LABEL"; then
-  echo "  scheduler.launchd_label not set in $ASF_HOME/config.yaml — skipping"
+  echo "  scheduler.launchd_label not set in $ASF_HOME/config.yaml — no old job to retire"
 else
-  PLIST_PATH="$HOME/Library/LaunchAgents/$LAUNCHD_LABEL.plist"
+  OLD_PLIST="$HOME/Library/LaunchAgents/$LAUNCHD_LABEL.plist"
   if [ "$APPLY" -eq 1 ]; then
-    if [ ! -f "$PLIST_PATH" ]; then
-      echo "  $PLIST_PATH not found — cannot retire it, leaving the scheduler untouched" >&2
-      FAILED=1
+    if [ ! -f "$OLD_PLIST" ]; then
+      echo "  $LAUNCHD_LABEL: no plist at $OLD_PLIST — nothing to retire"
     else
-      launchctl unload "$PLIST_PATH" 2>/dev/null || true
-      cp "$PLIST_PATH" "$RETIRED_DIR/$LAUNCHD_LABEL.plist"
-      NEW_LABEL="${LAUNCHD_LABEL}.asf"
-      cat > "$PLIST_PATH" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>$NEW_LABEL</string>
-  <key>ProgramArguments</key>
-  <array><string>python3</string><string>-m</string><string>asf.cli</string><string>tick</string>
-    <string>--product</string><string>$PRODUCT</string></array>
-  <key>StartInterval</key><integer>600</integer>
-</dict></plist>
-PLIST
-      launchctl load "$PLIST_PATH" 2>/dev/null || true
-      record_manifest scheduler "$PLIST_PATH" "$RETIRED_DIR/$LAUNCHD_LABEL.plist" "$LAUNCHD_LABEL"
-      echo "  $LAUNCHD_LABEL: retired to $RETIRED_DIR/$LAUNCHD_LABEL.plist; $PLIST_PATH now runs \`asf tick --product $PRODUCT\`"
+      cp "$OLD_PLIST" "$RETIRED_DIR/$LAUNCHD_LABEL.plist"
+      launchctl bootout "gui/$(id -u)/$LAUNCHD_LABEL" 2>/dev/null || true
+      rm -f "$OLD_PLIST"
+      record_manifest scheduler_retire "$OLD_PLIST" "$RETIRED_DIR/$LAUNCHD_LABEL.plist" "$LAUNCHD_LABEL"
+      echo "  $LAUNCHD_LABEL: booted out, plist retired to $RETIRED_DIR/$LAUNCHD_LABEL.plist"
     fi
   else
-    echo "  would unload $LAUNCHD_LABEL, retire $PLIST_PATH to $RETIRED_DIR/, install a job there running \`asf tick --product $PRODUCT\`"
+    echo "  would boot out $LAUNCHD_LABEL and retire $OLD_PLIST to $RETIRED_DIR/"
   fi
 fi
 
+DISPATCH_OWNED=0
+if manifest_owns "$DISPATCH_STEPS"; then DISPATCH_OWNED=1; fi
+
+INSTALLED_LABELS=""
+install_job() {  # steps, extra `asf scheduler install` args
+  local steps="$1"; shift
+  local label
+  label="$(run_scheduler render --product "$PRODUCT" --steps "$steps" --json 2>/dev/null \
+            | py -c 'import json,sys; print(json.load(sys.stdin)["label"])' 2>/dev/null || true)"
+  if [ -z "$label" ]; then
+    echo "  $steps: could not render a job definition" >&2
+    FAILED=1
+    return 1
+  fi
+  if [ "$APPLY" -eq 1 ]; then
+    run_scheduler install --product "$PRODUCT" --steps "$steps" "$@" | sed 's/^/  /'
+    record_manifest scheduler_install "$HOME/Library/LaunchAgents/$label.plist" "-" "$label"
+    INSTALLED_LABELS="$INSTALLED_LABELS $label"
+    echo "  $label: installed (steps $steps)"
+  else
+    echo "  would install $label (steps $steps)"
+  fi
+}
+
+install_job record --interval "$INTERVAL"
+if [ "$DISPATCH_OWNED" -eq 1 ]; then
+  install_job "$DISPATCH_STEPS" --interval "$INTERVAL"
+else
+  echo "  dispatch ($DISPATCH_STEPS): the manifest does not own these steps — leaving the legacy dispatch job loaded"
+fi
+install_job daily
+
+# ---- gate 3: the installed job must actually complete once ------------------------------------
+
+RECORD_LABEL="$(run_scheduler render --product "$PRODUCT" --steps record --json 2>/dev/null \
+                 | py -c 'import json,sys; print(json.load(sys.stdin)["label"])' 2>/dev/null || true)"
+RECORD_LOG="$ASF_HOME/logs/tick-$PRODUCT-record.log"
+
+job_completed() {
+  run_scheduler status --product "$PRODUCT" --steps record --json 2>/dev/null | py -c '
+import json, sys
+try:
+    info = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+sys.exit(0 if info.get("loaded") and (info.get("runs") or 0) >= 1
+         and info.get("last_exit") == 0 else 1)
+' 2>/dev/null
+}
+
+record_advanced() {
+  [ -n "$BACKLOG_DIR" ] || return 1
+  if [ -f "$RECORD_LOG" ] && grep -q 'no change' "$RECORD_LOG"; then return 0; fi
+  git -C "$BACKLOG_DIR" fetch -q origin 2>/dev/null || return 1
+  local head subject
+  head="$(git -C "$BACKLOG_DIR" rev-parse FETCH_HEAD 2>/dev/null || true)"
+  [ -n "$head" ] && [ "$head" != "$ORIGIN_BASE" ] || return 1
+  subject="$(git -C "$BACKLOG_DIR" log -1 --format=%s FETCH_HEAD 2>/dev/null || true)"
+  case "$subject" in "tick: state"*) return 0 ;; esac
+  return 1
+}
+
+if [ "$APPLY" -eq 1 ]; then
+  echo "== gate 3: waiting up to ${JOB_TIMEOUT}s for $RECORD_LABEL to complete a run"
+  DEADLINE=$(( $(date +%s) + JOB_TIMEOUT ))
+  GATE3_OK=0
+  while :; do
+    if job_completed && record_advanced; then GATE3_OK=1; break; fi
+    [ "$(date +%s)" -ge "$DEADLINE" ] && break
+    sleep 3
+  done
+  if [ "$GATE3_OK" -ne 1 ]; then
+    rollback_and_exit "cutover: installed job did not complete — rolled back"
+  fi
+  echo "  $RECORD_LABEL: completed a run, the record's origin has it"
+fi
+
 # ---- (e) the legacy tool directories ---------------------------------------------------------
+#
+# Re-checked per directory: the old job has been booted out by now, so a directory that gate 1
+# excused for it is free to move — and one that some *other* loaded job still points at is not,
+# no matter what the up-front gate said.
 
 echo "== legacy tool directories"
+STILL_REFERENCED="$(referencing_jobs '')"
 while IFS= read -r dir; do
   [ -z "$dir" ] && continue
   # basename alone collides when two legacy_paths share a leaf name (e.g. two "tools" dirs);
@@ -275,6 +517,12 @@ while IFS= read -r dir; do
     echo "  $dir: not present (already retired, or never existed here)"
     continue
   fi
+  BLOCKER="$(printf '%s\n' "$STILL_REFERENCED" | grep -F "cutover: $dir is still used" | head -1 || true)"
+  if [ -n "$BLOCKER" ]; then
+    echo "  $BLOCKER"
+    echo "  $dir: left in place (gate 1)"
+    continue
+  fi
   if [ "$APPLY" -eq 1 ]; then
     mv "$dir" "$RETIRED_DIR/$NAME"
     record_manifest legacy_dir "$dir" "$RETIRED_DIR/$NAME"
@@ -282,18 +530,17 @@ while IFS= read -r dir; do
   else
     echo "  would move $dir to $RETIRED_DIR/$NAME"
   fi
-done < <(cfg_list legacy_paths)
+done <<< "$LEGACY_DIRS"
 
 # ---- (f) metrics event + doctor table ---------------------------------------------------------
 
 echo "== cutover event"
-BACKLOG_DIR="$(product_get backlog_dir)"
 if [ -z "$BACKLOG_DIR" ]; then
   echo "  no backlog_dir for $PRODUCT — cannot record the event"
 elif [ "$APPLY" -eq 1 ]; then
   EVENTS_DIR="$BACKLOG_DIR/metrics/events"
   mkdir -p "$EVENTS_DIR"
-  python3 -c "
+  py -c "
 import json, datetime
 ev = {'ts': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
       'event': 'cutover', 'product': '$PRODUCT', 'mode': '$MODE'}
@@ -301,7 +548,6 @@ with open('$EVENTS_DIR/$DATE.jsonl', 'a', encoding='utf-8') as f:
     f.write(json.dumps(ev, sort_keys=True) + chr(10))
 "
   echo "  recorded in $EVENTS_DIR/$DATE.jsonl"
-  echo "$DATE" > "$MARKER"
 else
   echo "  would record {event: cutover, product: $PRODUCT} in $BACKLOG_DIR/metrics/events/$DATE.jsonl"
 fi

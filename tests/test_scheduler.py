@@ -43,6 +43,16 @@ case "$1" in
     ;;
   bootstrap)
     printf '%s\n' "$3" >> "$FAKE_LAUNCHCTL_DIR/bootstrapped.txt"
+    label="$(basename "$3" .plist)"
+    # Stand in for launchd actually running the job: a template makes `print` answer for the
+    # new label, and a hook script lets a test do what the job itself would have done.
+    if [ -f "$FAKE_LAUNCHCTL_DIR/print-template.txt" ]; then
+      sed "s/@LABEL@/$label/g" "$FAKE_LAUNCHCTL_DIR/print-template.txt" \
+        > "$FAKE_LAUNCHCTL_DIR/print-$label.txt"
+    fi
+    if [ -x "$FAKE_LAUNCHCTL_DIR/on-bootstrap.sh" ]; then
+      "$FAKE_LAUNCHCTL_DIR/on-bootstrap.sh" "$label" || true
+    fi
     exit 0
     ;;
 esac

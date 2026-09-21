@@ -1,10 +1,23 @@
 #!/usr/bin/env bash
 # tools/rollback.sh <product> [--apply]
 #
-# The inverse of tools/cutover.sh: restores every file cutover moved or rewrote, from the
-# manifest cutover.sh wrote under `~/.ASF/state/<product>/retired/<date>/manifest.tsv`. Dry-run
-# by default; `--apply` performs it. Refuses (exit 1) if the product was never cut over, or
-# was already rolled back — nothing to invert.
+# The inverse of tools/cutover.sh: restores every file cutover moved or rewrote, every job it
+# installed and every job it booted out, from the manifest cutover.sh wrote under
+# `~/.ASF/state/<product>/retired/<date>/manifest.tsv`. Dry-run by default; `--apply` performs
+# it. Refuses (exit 1) if the product was never cut over, or was already rolled back — nothing
+# to invert.
+#
+# The manifest kinds, and what each one's inverse is:
+#
+#   tick_file, plugin_skill  — copy the `.bak` back over the file.
+#   legacy_dir               — move the retired directory back where it came from.
+#   scheduler_retire         — the job cutover booted out and whose plist it retired: put the
+#                              plist back and bootstrap it, so the old clock runs again.
+#   scheduler_install        — a job cutover installed: boot it out and delete its plist. This
+#                              is what has to happen when gate 3 fails, or the machine is left
+#                              holding a job that loads and never runs.
+#   scheduler                — the pre-split kind, kept so a manifest written by an older
+#                              cutover still inverts.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -64,15 +77,26 @@ while IFS=$'\t' read -r kind original retired extra; do
         echo "  would restore $original from $retired"
       fi
       ;;
-    scheduler)
+    scheduler|scheduler_retire)
       LABEL="$extra"
       if [ "$APPLY" -eq 1 ]; then
-        launchctl unload "$original" 2>/dev/null || true
+        launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+        mkdir -p "$(dirname "$original")"
         cp "$retired" "$original"
-        launchctl load "$original" 2>/dev/null || true
-        echo "  scheduler: restored $original ($LABEL) from $retired"
+        launchctl bootstrap "gui/$(id -u)" "$original" 2>/dev/null || true
+        echo "  $kind: restored $original ($LABEL) from $retired and bootstrapped it"
       else
-        echo "  would restore $original ($LABEL) from $retired"
+        echo "  would restore $original ($LABEL) from $retired and bootstrap it"
+      fi
+      ;;
+    scheduler_install)
+      LABEL="$extra"
+      if [ "$APPLY" -eq 1 ]; then
+        launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+        rm -f "$original"
+        echo "  scheduler_install: booted out $LABEL and removed $original"
+      else
+        echo "  would boot out $LABEL and remove $original"
       fi
       ;;
     legacy_dir)
