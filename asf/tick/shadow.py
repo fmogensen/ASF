@@ -1,13 +1,15 @@
-"""asf.tick.shadow — the shadow clone every ``asf tick --shadow`` run works against.
+"""asf.tick.shadow — the clones ``asf tick`` works in.
 
-A clone of a product's backlog at ``~/.ASF/state/<product>/shadow/``: fetched and hard-reset to
-its origin's default branch before every shadow tick (it holds derived state only, so a stray
-local commit — e.g. from a prior run whose push failed — is discarded, not fast-forwarded past),
-committed to locally (never pushed) after one. It exists so the shadow tick can be compared
-against the real tools without ever touching a product's real backlog checkout — see
-``asf shadow-diff``.
+A clone of a product's backlog, fetched and hard-reset to its origin's default branch before
+every tick (it holds derived state only, so a stray local commit — e.g. from a prior run whose
+push failed — is discarded, not fast-forwarded past). The live tick's clone is
+``~/.ASF/state/<product>/record/``: it commits there and pushes (:func:`push`). The shadow tick's
+is ``…/shadow/``: it commits locally and never pushes, so it can be compared against the real
+tools without touching anything — see ``asf shadow-diff``. Neither ever touches the operator's own
+backlog checkout.
 """
 import os
+import re
 import subprocess
 
 from asf import env
@@ -33,37 +35,73 @@ def _default_branch(clone_dir):
     return 'main'
 
 
-def ensure_shadow_clone(product):
-    """Clone or reset the shadow, return its path. Never touches the real backlog checkout.
+def record_dir(product):
+    return os.path.join(env.state_dir(product), 'record')
+
+
+def factory_identity():
+    """``(name, email)`` from config ``factory.git_identity`` (``Name <email>``), default
+    ``ASF <asf@localhost>`` — what a state commit from a tick clone is authored as."""
+    raw = ((env.load_config().get('factory') or {}).get('git_identity')) or 'ASF <asf@localhost>'
+    m = re.match(r'^\s*(.*?)\s*<([^>]*)>\s*$', str(raw))
+    return (m.group(1), m.group(2)) if m else (str(raw).strip(), 'asf@localhost')
+
+
+def ensure_clone(product, path, exclude_tables=False):
+    """Clone or reset the clone at ``path``, return the path. Never touches the operator's backlog
+    checkout — it is read once, for the ``origin`` url, and never again.
 
     A derived-state clone owns no state of its own (bug class B-1352): ``git pull --ff-only``
     leaves a clone stuck the moment a prior run's push failed and its local commit didn't reach
     origin, so every run instead resets hard to ``origin/<default branch>`` — a stray local
-    commit is discarded, not fought.
+    commit is discarded, not fought. The clone commits as the factory identity (repo-local
+    ``user.name``/``user.email``, set every run).
+
+    ``exclude_tables``: keep ``tables/`` (the shadow tick's rendered views, ``asf shadow-diff``'s
+    inputs) out of the clone's history — they are not backlog content.
     """
-    path = shadow_dir(product)
     if not os.path.isdir(os.path.join(path, '.git')):
-        url = _remote_url(product.backlog_dir) or product.backlog_dir
+        url = _remote_url(product.backlog_dir) if product.backlog_dir else None
+        url = url or product.backlog_dir
+        if not url:
+            raise env.ConfigError(f'product {product.name} has no backlog_dir to learn the origin url from')
         os.makedirs(os.path.dirname(path), exist_ok=True)
         _sh(['git', 'clone', '-q', url, path])
-        # `tables/*.md` (asf shadow-diff's inputs) live inside this clone at the path the shadow
-        # tick spec names, but are not backlog content — exclude locally so `git add -A` never
-        # stages them into the shadow's history.
-        exclude = os.path.join(path, '.git', 'info', 'exclude')
-        with open(exclude, 'a', encoding='utf-8') as f:
-            f.write('\n/tables/\n')
     else:
         _sh(['git', 'fetch', '-q', 'origin'], cwd=path)
         branch = _default_branch(path)
         _sh(['git', 'reset', '-q', '--hard', f'origin/{branch}'], cwd=path)
+        _sh(['git', 'clean', '-fdq'], cwd=path)
+    name, email = factory_identity()
+    _sh(['git', 'config', 'user.name', name], cwd=path)
+    _sh(['git', 'config', 'user.email', email], cwd=path)
+    if exclude_tables:
+        exclude = os.path.join(path, '.git', 'info', 'exclude')
+        with open(exclude, 'a+', encoding='utf-8') as f:
+            f.seek(0)
+            if '/tables/' not in f.read().splitlines():
+                f.write('\n/tables/\n')
     return path
 
 
+def ensure_shadow_clone(product):
+    """The shadow clone (``…/shadow``): :func:`ensure_clone` with ``tables/`` excluded."""
+    return ensure_clone(product, shadow_dir(product), exclude_tables=True)
+
+
 def commit_local(path, message):
-    """``git add -A; git commit -s`` in the shadow; a no-change tick makes no commit."""
+    """``git add -A; git commit -s`` in the clone; a no-change tick makes no commit."""
     _sh(['git', 'add', '-A'], cwd=path)
     status = _sh(['git', 'status', '--porcelain'], cwd=path)
     if not status.stdout.strip():
         return False
     _sh(['git', 'commit', '-q', '-s', '-m', message], cwd=path)
     return True
+
+
+def push(path):
+    """``git push origin HEAD:<default branch>``; True if origin took it. A refusal (a hook, a
+    non-fast-forward because origin moved, an unreachable remote) is not an error: the clone is
+    derived state, the next run resets it and re-derives."""
+    branch = _default_branch(path)
+    return _sh(['git', 'push', '-q', 'origin', f'HEAD:{branch}'], cwd=path, check=False).returncode == 0

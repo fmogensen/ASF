@@ -78,6 +78,31 @@ class EnsureShadowCloneTests(unittest.TestCase):
                                  capture_output=True, text=True, check=True)
         self.assertEqual(status.stdout.strip(), '')
 
+    def test_ensure_clone_sets_the_factory_identity_and_can_exclude_tables(self):
+        path = os.path.join(self.tmp, 'elsewhere', 'clone')
+        for _ in range(2):  # the clone, then the reset path
+            shadow.ensure_clone(self.product, path, exclude_tables=True)
+        ident = subprocess.run(['git', 'config', 'user.name'], cwd=path, capture_output=True, text=True).stdout
+        self.assertEqual(ident.strip(), 'ASF')
+        with open(os.path.join(path, '.git', 'info', 'exclude')) as f:
+            self.assertEqual(f.read().count('/tables/'), 1)
+
+    def test_ensure_clone_drops_untracked_leftovers(self):
+        path = shadow.ensure_clone(self.product, os.path.join(self.tmp, 'c'))
+        with open(os.path.join(path, 'half-written.txt'), 'w') as f:
+            f.write('x')
+        shadow.ensure_clone(self.product, path)
+        self.assertFalse(os.path.exists(os.path.join(path, 'half-written.txt')))
+
+    def test_push_reports_a_refusal_as_false(self):
+        path = shadow.ensure_clone(self.product, os.path.join(self.tmp, 'c'))
+        with open(os.path.join(path, 'new.txt'), 'w') as f:
+            f.write('x')
+        self.assertTrue(shadow.commit_local(path, 'add'))
+        self.assertFalse(shadow.commit_local(path, 'again'))
+        _git(['remote', 'set-url', 'origin', os.path.join(self.tmp, 'missing')], path)
+        self.assertFalse(shadow.push(path))
+
 
 if __name__ == '__main__':
     unittest.main()
