@@ -375,3 +375,62 @@ class LoadRulesTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CoreRulesTests(unittest.TestCase):
+    """B-0021: the core check scripts ship in the ASF repo's `rules/`; a card's `check:` resolves
+    against the product first, then the core set; a card whose script is in neither is a violation."""
+
+    def setUp(self):
+        self.root = make_repo()
+        self.core = tempfile.mkdtemp(prefix='core_rules_')
+        self.home = tempfile.mkdtemp(prefix='asf_home_')
+        write_rule(self.root, 'R-0001', 'A core rule',
+                   typed_lines=['scope: tick', 'check: tools/checks/r0001.sh'])
+        reindex(self.root)
+
+    def tearDown(self):
+        for d in (self.root, self.core, self.home):
+            shutil.rmtree(d, ignore_errors=True)
+
+    def _core_script(self, name, script):
+        path = os.path.join(self.core, name)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(script)
+
+    def _run(self, args, root=None):
+        env = dict(os.environ)
+        env['BACKLOG_ROOT'] = root or self.root
+        env['ASF_HOME'] = self.home
+        env['ASF_CORE_RULES_DIR'] = self.core
+        env['PYTHONPATH'] = PROJECT_ROOT + os.pathsep + env.get('PYTHONPATH', '')
+        return subprocess.run([sys.executable, '-m', 'asf.rules.rules'] + args, cwd=self.root,
+                              env=env, capture_output=True, text=True)
+
+    def test_core_check_script_runs_when_the_product_has_none(self):
+        self._core_script('r0001.sh', "echo 'core rule broken here since today'\nexit 1\n")
+        proc = self._run(['check'])
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertEqual(proc.stdout.strip().split('\n'),
+                         ['== RULES 1 checked, 1 violations, 0 unenforced',
+                          'R-0001 core rule broken here since today'])
+
+    def test_a_rule_with_no_script_anywhere_is_a_violation(self):
+        proc = self._run(['check'])
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn('R-0001 check script missing tools/checks/r0001.sh', proc.stdout)
+
+    def test_the_product_script_wins_over_the_core_one(self):
+        self._core_script('r0001.sh', "echo broken\nexit 1\n")
+        write_check(self.root, 'r0001.sh', "#!/usr/bin/env bash\nexit 0\n")
+        proc = self._run(['check'])
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+
+    def test_check_takes_a_product(self):
+        self._core_script('r0001.sh', "exit 0\n")
+        os.makedirs(os.path.join(self.home, 'products'))
+        with open(os.path.join(self.home, 'products', 'p.yaml'), 'w') as f:
+            f.write(f"product: p\nbacklog_dir: {self.root}\n")
+        proc = self._run(['check', '--product', 'p'], root='/nonexistent')
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(proc.stdout.strip(), '== RULES 1 checked, 0 violations, 0 unenforced')
