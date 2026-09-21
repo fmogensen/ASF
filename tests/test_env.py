@@ -3,6 +3,7 @@ import tempfile
 import unittest
 
 from asf import env
+from asf.conventions import Conventions
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -86,6 +87,50 @@ class TestYamlSubset(unittest.TestCase):
           "a: b": 1
         """))
         self.assertEqual(data['labels'], {'a: b': 1})
+
+
+class TestProductConventions(unittest.TestCase):
+    """`Product.conventions` is the dataclass, defaults filled in — and still a mapping for the
+    callers that read it as one."""
+
+    def product(self, data):
+        return env.Product('sample', data)
+
+    def test_the_yaml_block_becomes_a_conventions_object(self):
+        p = self.product({'main': 'trunk', 'conventions': {'specs_dir': 'specs',
+                                                           'branch_prefixes': {'code': 'feature/'}}})
+        self.assertIsInstance(p.conventions, Conventions)
+        self.assertEqual(p.conventions.specs_dir, 'specs')
+        self.assertEqual(p.conventions.plans_dir, 'docs/plans')          # documented default
+        self.assertEqual(p.conventions.branch('code', 'j1'), 'feature/j1')
+
+    def test_a_product_with_no_conventions_block_gets_the_defaults(self):
+        p = self.product({'repo_slug': 'acme/sample'})
+        self.assertEqual(p.conventions.main, 'main')
+        self.assertEqual(p.conventions.branch('code', 'j1'), 'worker/j1')
+
+    def test_top_level_main_stage_limits_and_test_command_feed_the_conventions(self):
+        p = self.product({'main': 'trunk', 'stage_limits': {'spec': 4},
+                          'ci': {'test_command': 'make test'}})
+        self.assertEqual(p.conventions.main, 'trunk')
+        self.assertEqual(p.conventions.stage_limits, {'spec': 4})
+        self.assertEqual(p.conventions.test_command, 'make test')
+        # a conventions: key of the same name wins over the top-level one
+        p2 = self.product({'main': 'trunk', 'conventions': {'main': 'mainline'}})
+        self.assertEqual(p2.conventions.main, 'mainline')
+
+    def test_the_mapping_face_the_existing_callers_use(self):
+        p = self.product({'conventions': {'preamble_max_lines': 40, 'rules_tail': 'be nice'}})
+        self.assertEqual(p.conventions.get('preamble_max_lines'), 40)
+        self.assertEqual(p.conventions.get('rules_tail'), 'be nice')     # an extra key survives
+        self.assertEqual(p.conventions['specs_dir'], 'docs/specs')
+        self.assertEqual((p.conventions or {}).get('prs_per_tick'), 6)
+
+    def test_branch_prefix_keeps_returning_a_prefix_without_its_separator(self):
+        # asf.workers.spawn composes `<prefix>/<job>` itself
+        p = self.product({'conventions': {'branch_prefixes': {'code': 'feature/'}}})
+        self.assertEqual(p.branch_prefix('code'), 'feature')
+        self.assertEqual(p.branch_prefix('task'), 'task')
 
 
 class TestProduct(unittest.TestCase):

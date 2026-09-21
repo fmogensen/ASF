@@ -1,0 +1,33 @@
+# Forbidden-convention patterns for tools/check_conventions.sh.
+#
+# One extended regex (grep -E) per line; blank lines and lines starting with `#` are ignored.
+# A match in any `asf/**/*.py` outside the two documented exceptions (asf/conventions.py and
+# asf/metrics/import_sessions.py) fails the build: the code carries a convention that belongs in
+# the product yaml. See the rule "Code carries no product convention".
+#
+# Unlike tools/forbidden-names.txt these are not names — check_generic.sh cannot see them. Each
+# line below is a path, prefix, file name or id that one product happens to use and another does
+# not; the generic form of each is a field of asf.conventions.Conventions.
+
+# Branch prefixes → conventions.branch_prefixes (+ `legacy` for retired ones).
+cloud/
+worktree-m-
+refs/heads/hb
+
+# Document trees → conventions.specs_dir / plans_dir / reviews_dir / intake_dir.
+docs/superpowers
+\.sdd-input
+goals\.txt
+feature-matrix
+
+# A hardcoded item id → conventions.default_bug_epic (an id in generated prose is data too).
+\bE-[0-9]{4}\b
+
+# Another repo's tooling called by path → an `asf` subcommand, or conventions.test_command.
+tools/[A-Za-z0-9_-]+\.(py|sh|json)
+
+# Operator state outside ~/.ASF → asf.env.state_dir(product) / asf.env.log_dir().
+session-results\.jsonl
+\.claude-workers
+\.claude/
+/tmp/

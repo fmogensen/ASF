@@ -13,6 +13,8 @@ here.
 import os
 import re
 
+from asf.conventions import Conventions
+
 ASF_HOME = os.environ.get('ASF_HOME') or os.path.expanduser('~/.ASF')
 
 
@@ -224,6 +226,7 @@ class Product:
     def __init__(self, name, data):
         self.name = name
         self._data = data or {}
+        self._conventions = None
 
     def _get(self, key, default=None):
         return self._data.get(key, default)
@@ -248,7 +251,23 @@ class Product:
 
     @property
     def conventions(self):
-        return self._get('conventions', {})
+        """The product's :class:`asf.conventions.Conventions`, defaults filled in.
+
+        Built from the yaml's ``conventions:`` block, plus three values that live at the top
+        level of a product file because more than the conventions read them: ``main``,
+        ``stage_limits`` and ``ci.test_command`` (the gate harvest runs). A ``conventions:``
+        key of the same name wins. Still answers ``.get()``/``[]``, so the callers that read it
+        as a mapping — and an operator's extra keys — keep working."""
+        if self._conventions is None:
+            data = dict(self._get('conventions') or {})
+            data.setdefault('main', self._get('main') or 'main')
+            if self._get('stage_limits') is not None:
+                data.setdefault('stage_limits', self._get('stage_limits'))
+            test_command = (self._get('ci') or {}).get('test_command')
+            if test_command:
+                data.setdefault('test_command', test_command)
+            self._conventions = Conventions.from_mapping(data)
+        return self._conventions
 
     @property
     def ci(self):
@@ -279,7 +298,9 @@ class Product:
         return self._get('approvals', {})
 
     def branch_prefix(self, kind):
-        return self.conventions.get('branch_prefixes', {}).get(kind, kind)
+        """The prefix *without* its separator (``worker``), for the callers that compose
+        ``<prefix>/<job>`` themselves. :meth:`Conventions.branch` builds the whole name."""
+        return self.conventions.prefix(kind).rstrip('/')
 
 
 def load_product(name=None):
