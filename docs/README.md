@@ -5,6 +5,8 @@ procedure (operator); `docs/` holds the specification (contributor). A mechanism
 place; the other two link to it.
 
 - `specs/` — the design specs, one per release
-- `decisions/` — ADRs
-- `research/` — prior art and measurements
+- [`decisions/`](decisions/) — ADRs
+  - [0001 — the 2026-08 prototype is prior art, not a base](decisions/0001-prior-art-not-base.md)
+- [`research/`](research/) — prior art and measurements
+  - [Prior art — the 2026-08 prototype](research/prior-art-prototype.md) (five parts: specs and directives, findings, gates and evals, roles, what never shipped)
 - `CONSTITUTION.md` — the directives every role runs on, each mapped to the rule cards that enforce it
