@@ -8,6 +8,27 @@ from asf.conventions import Conventions
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+class TestSuiteIsolatedFromOperatorHome(unittest.TestCase):
+    def test_asf_home_is_a_temp_dir_not_the_operators(self):
+        real = os.path.realpath(os.path.expanduser('~/.ASF'))
+        home = os.path.realpath(env.ASF_HOME)
+        self.assertNotEqual(home, real)
+        if not os.environ.get('ASF_TESTS_HOME'):
+            self.assertTrue(home.startswith(os.path.realpath(tempfile.gettempdir()) + os.sep))
+
+    def test_default_product_ignores_the_real_home_config(self):
+        saved = os.environ.pop('ASF_PRODUCT', None)
+        try:
+            real_cfg = os.path.join(os.path.expanduser('~/.ASF'), 'config.yaml')
+            self.assertNotEqual(os.path.realpath(env.config_path()), os.path.realpath(real_cfg))
+            if not os.path.exists(env.config_path()):
+                with self.assertRaises(env.ConfigError):
+                    env.default_product_name()
+        finally:
+            if saved is not None:
+                os.environ['ASF_PRODUCT'] = saved
+
+
 class TestExampleConfigsParse(unittest.TestCase):
     def test_config_example_parses(self):
         path = os.path.join(REPO_ROOT, 'docs', 'config.example.yaml')
