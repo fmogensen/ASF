@@ -1,0 +1,4 @@
+#!/bin/sh
+# tools/asf — run the asf CLI from this checkout, from any cwd (symlink-safe).
+ROOT="$(cd "$(dirname "$(readlink "$0" 2>/dev/null || echo "$0")")/.." && pwd)"
+PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m asf.cli "$@"
