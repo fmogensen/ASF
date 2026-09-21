@@ -89,12 +89,12 @@ def _sessions_path(product):
 def ready_cell(root, product):
     """``asf next --json``'s rows: how many would launch, and the first of them."""
     from asf.feeder import rows as feeder_rows
-    from asf.tick.step_wave import capacity, inflight
+    from asf.tick.step_wave import attempts, capacity, inflight
     from asf.views import index_reader as ix
     if not root or not os.path.exists(os.path.join(root, 'index.json')):
         return not_configured('backlog_dir (no index.json)')
     items, _generated = ix.load(root)
-    rows = feeder_rows.plan_rows(items, product, inflight(product), capacity())
+    rows = feeder_rows.plan_rows(items, product, inflight(product), capacity(), attempts=attempts(product))
     launching = [r for r in rows if r.launches]
     if not launching:
         return f"0 ({len(rows)} row(s) waiting)" if rows else "0"

@@ -10,7 +10,8 @@ The row kinds::
 
     BUG → FIX              an open, decided S1/S2 Bug with no session (the S1 lane)
     STALEMATE → ADJUDICATE a Feature at spec-/plan-review round >= 4: adjudicate, and nothing
-                           else for that Feature (another review round will not converge)
+                           else for that Feature (another review round will not converge); or a
+                           Bug with 3 sessions behind it and still open (not a fourth fix)
     CONFLICT → REBASE      an Active Task/Bug whose PR no longer merges, no session on it
     STALE → CLOSE          an Active Task/Bug whose PR was closed unmerged, branch left behind
     CARD → SPEC            a decided Feature card with no spec
@@ -40,6 +41,7 @@ PLAN_CODE = 'PLAN → CODE'
 LAUNCH = 'would launch'
 DONE_STATES = ('Resolved', 'Closed')
 STALEMATE_ROUND = 4
+ATTEMPT_LIMIT = 3
 REVIEW_RE = re.compile(r'^(spec|plan)-review r(\d+)')
 CLOSED_PR_RE = re.compile(r'\bPR #\d+ CLOSED\b')
 CONFLICTING = 'CONFLICTING'
@@ -108,6 +110,12 @@ def stalemate_round(product):
     return v if isinstance(v, int) and v > 0 else STALEMATE_ROUND
 
 
+def attempt_limit(product):
+    """``conventions.attempt_limit`` (default 3): fix sessions a Bug gets before it is adjudicated."""
+    v = _conventions(product).get('attempt_limit')
+    return v if isinstance(v, int) and v > 0 else ATTEMPT_LIMIT
+
+
 # ---- per-item predicates ----------------------------------------------------
 
 def is_open(item):
@@ -155,9 +163,19 @@ def _branch_of(item, product, kind):
 
 # ---- rows -------------------------------------------------------------------
 
-def bug_rows(items, product, busy):
-    out = []
-    for b in sorted(ix.of_type(items, 'bug'), key=lambda v: v['id']):
+def _age_key(item):
+    """Older card first: an ISO timestamp sorts as text; a card with none goes last."""
+    return item.get('created') or item.get('stage_since') or '~'
+
+
+def bug_rows(items, product, busy, attempts=None):
+    """Within a tier: fewest attempts, then the older card, then id. ``attempts`` is ``{id: sessions
+    the registry holds}``, ended or not. A Bug at the limit gets one adjudicate row — its session
+    is the next attempt, so the row is gone once it has run (attempts above the limit: silent)."""
+    attempts, out = attempts or {}, []
+    limit = attempt_limit(product)
+    bugs = sorted(ix.of_type(items, 'bug'), key=lambda v: (attempts.get(v['id'], 0), _age_key(v), v['id']))
+    for b in bugs:
         sev = b.get('severity')
         if sev not in ('S1', 'S2') or b.get('decided') is not True or not is_open(b) or b['id'] in busy:
             continue
@@ -165,8 +183,17 @@ def bug_rows(items, product, busy):
         if b.get('state') == 'Active':
             continue
         f = feature_of(items, b)
+        fid, n = f['id'] if f else '', attempts.get(b['id'], 0)
+        if n > limit:
+            continue
+        if n == limit:
+            out.append(Row(tier=0 if sev == 'S1' else 1, kind=STALEMATE, item_id=b['id'],
+                           feature_id=fid, action=LAUNCH, brief_kind='adjudicate',
+                           branch=branch_for(product, 'fix', b['id'], default='fix/'),
+                           reason=f"{sev} open after {n} sessions: adjudicate, not another fix"))
+            continue
         out.append(Row(tier=0 if sev == 'S1' else 1, kind=BUG_FIX, item_id=b['id'],
-                       feature_id=f['id'] if f else '', action=LAUNCH, brief_kind='fix-bug',
+                       feature_id=fid, action=LAUNCH, brief_kind='fix-bug',
                        branch=branch_for(product, 'fix', b['id'], default='fix/'),
                        reason=f"{sev} open, decided, no session — its ## Fix is the plan"))
     return out
@@ -263,7 +290,7 @@ def task_rows(items, product, feature, busy, running):
 KIND_ORDER = {STALEMATE: 0, CONFLICT: 1, STALE: 2}
 
 
-def candidates(index, product, inflight):
+def candidates(index, product, inflight, attempts=None):
     """Every row the index supports right now, uncut by capacity, in emit order: tier, then the
     Feature's rank and id, then within a Feature the stalemate, branch housekeeping, new work."""
     items = items_of(index)
@@ -271,7 +298,7 @@ def candidates(index, product, inflight):
     limit = stalemate_round(product)
     stalled = {f['id'] for f in ix.of_type(items, 'feature') if review_round(f)[1] >= limit}
     running = running_footprints(items, busy)
-    rows = bug_rows(items, product, busy)
+    rows = bug_rows(items, product, busy, attempts)
     rows += [r for r in branch_rows(items, product, busy) if r.feature_id not in stalled]
     rows += feature_rows(items, product, busy, running)
 
@@ -284,7 +311,7 @@ def candidates(index, product, inflight):
     return [r for _seq, r in sorted(enumerate(rows), key=key)]
 
 
-def plan_rows(index, product, inflight, capacity):
+def plan_rows(index, product, inflight, capacity, attempts=None):
     """The rows the tick emits: tiered, S1 first, cut to ``capacity`` less what is in flight."""
     from asf.feeder import tiers
-    return tiers.select(candidates(index, product, inflight), inflight, capacity)
+    return tiers.select(candidates(index, product, inflight, attempts), inflight, capacity)
