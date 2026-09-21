@@ -77,6 +77,23 @@ def reserve_id_range(product, job, prefixes=None, start=DEFAULT_ID_START, size=D
     return rng
 
 
+def release_id_range(product, job):
+    """Drop ``job``'s row from ``id-ranges.tsv``. Called once nothing can mint against the
+    range any more (the worktree is gone — see ``asf.workers.health``), so a finished job does
+    not hold its block forever. Returns whether a row was actually dropped."""
+    path = id_ranges_path(product)
+    if not os.path.exists(path):
+        return False
+    with open(path, encoding='utf-8') as f:
+        lines = f.readlines()
+    kept = [ln for ln in lines if ln.split('\t', 1)[0] != job]
+    if len(kept) == len(lines):
+        return False
+    with open(path, 'w', encoding='utf-8') as f:
+        f.writelines(kept)
+    return True
+
+
 # ---- worktree + brief -------------------------------------------------------
 
 def worktrees_dir(product):

@@ -2,6 +2,8 @@
 same-session correction. Every run goes through the fake runtime; git is a bare repo in a temp
 dir; no network, no account, no real product."""
 import argparse
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -10,6 +12,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from asf import env
 from asf.workers import health as health_mod
@@ -272,6 +275,15 @@ class TestSpawn(Home):
         self.assertEqual((r1, r2), ('T:5000-5049', 'T:5050-5099'))
         self.assertEqual(spawn_mod.reserve_id_range(self.product, 'j1', prefixes=['T']), r1)
 
+    def test_b0007_release_id_range_drops_only_that_jobs_row(self):
+        spawn_mod.reserve_id_range(self.product, 'j1', prefixes=['T'])
+        spawn_mod.reserve_id_range(self.product, 'j2', prefixes=['T'])
+        self.assertTrue(spawn_mod.release_id_range(self.product, 'j1'))
+        rows = spawn_mod._read_ranges(spawn_mod.id_ranges_path(self.product))
+        self.assertEqual([j for j, _ in rows], ['j2'])
+        # already gone: releasing again reports nothing to do
+        self.assertFalse(spawn_mod.release_id_range(self.product, 'j1'))
+
     def test_existing_worktree_refuses(self):
         rt = runtime_mod.FakeRuntime([{'running': True}])
         spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b', runtime=rt, cfg=self.cfg)
@@ -413,6 +425,17 @@ class TestHealth(Home):
         self.assertIn(('done', 'reaped', 'ended'), found)
         self.assertFalse(os.path.exists(wt))
 
+    def test_b0007_reap_releases_the_id_range(self):
+        rec = self.spawn('done', {'ok': True, 'pid': 11})
+        wt = rec['worktree']
+        self.commit(wt)
+        self.land(wt, rec['branch'])
+        rows = spawn_mod._read_ranges(spawn_mod.id_ranges_path(self.product))
+        self.assertIn('done', [j for j, _ in rows])
+        health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
+        rows = spawn_mod._read_ranges(spawn_mod.id_ranges_path(self.product))
+        self.assertNotIn('done', [j for j, _ in rows])
+
     def test_local_commit_not_pushed_is_kept(self):
         rec = self.spawn('done', {'ok': True})
         wt = rec['worktree']
@@ -526,14 +549,38 @@ class TestCorrectOnce(Home):
 
 
 class TestCli(unittest.TestCase):
-    def test_register_adds_the_five_verbs(self):
+    def test_register_adds_the_six_verbs(self):
         p = argparse.ArgumentParser()
         sub = p.add_subparsers(dest='command')
         register(sub)
-        for verb in ('spawn --row x --brief y', 'wave -n 2', 'health --fix', 'stall', 'quota'):
+        for verb in ('spawn --row x --brief y', 'wave -n 2', 'health --fix', 'stall', 'quota',
+                     'reserve-id --job j'):
             args = p.parse_args(['workers', *verb.split(), '--product', 'sample'])
             self.assertEqual(args.product, 'sample')
             self.assertTrue(callable(args.func))
+
+
+class TestReserveIdCli(Home):
+    def test_b0007_reserve_id_prints_the_range_a_launcher_can_export(self):
+        p = argparse.ArgumentParser()
+        sub = p.add_subparsers(dest='command')
+        register(sub)
+        args = p.parse_args(['workers', 'reserve-id', '--product', 'sample', '--job', 'fix-b-0007'])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), \
+             mock.patch('asf.workers._product', return_value=self.product), \
+             mock.patch('asf.workers.spawn.load_cfg', return_value=self.cfg):
+            rc = args.func(args)
+        self.assertEqual(rc, 0)
+        printed = buf.getvalue().strip()
+        self.assertEqual(printed, 'S:5000-5049,T:5000-5049,B:5000-5049')
+        # sticky: a second reservation for the same job returns the same range, unchanged
+        buf2 = io.StringIO()
+        with contextlib.redirect_stdout(buf2), \
+             mock.patch('asf.workers._product', return_value=self.product), \
+             mock.patch('asf.workers.spawn.load_cfg', return_value=self.cfg):
+            args.func(args)
+        self.assertEqual(buf2.getvalue().strip(), printed)
 
 
 if __name__ == '__main__':

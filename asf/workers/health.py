@@ -13,7 +13,8 @@ the tree is clean, HEAD is already on the pushed branch, and the branch carries 
 commit of its own that is contained in ``origin/<main>`` (fast-forwarded) — a fresh branch with no
 commits is an ancestor of the trunk too, and that is "opening", never "merged" (B-0019). A live
 session whose worktree has no commits yet is listed ``opening``. Anything else is kept and listed
-with why.
+with why. A reap also releases the job's ``BACKLOG_ID_RANGE`` reservation (B-0007) — nothing can
+mint against it once the worktree is gone.
 """
 import os
 import subprocess
@@ -143,6 +144,7 @@ def health(product, fix=False, alive=pid_alive, out=print):
         elif not in_trunk(path, product.main):
             found.append((name, 'keep', f'{what}: not in origin/{product.main}'))
         elif fix and remove_worktree(product, path):
+            spawn_mod.release_id_range(product, name)
             found.append((name, 'reaped', what))
         else:
             found.append((name, 'reapable', what))
