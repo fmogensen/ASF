@@ -40,6 +40,26 @@ def repo_root():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def core_rules_dir():
+    """The core check scripts the ASF repo ships (`rules/`, generic — paths come from the
+    environment, ids from index.json). $ASF_CORE_RULES_DIR overrides it for tests."""
+    env = os.environ.get('ASF_CORE_RULES_DIR')
+    if env:
+        return env
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), 'rules')
+
+
+def resolve_script(root, script):
+    """A card's `check:` path: the product's own script first, else the core script of the
+    same file name. None when neither exists (the caller reports it as a violation)."""
+    path = os.path.join(root, script)
+    if os.path.isfile(path):
+        return path
+    core = os.path.join(core_rules_dir(), os.path.basename(script))
+    return core if os.path.isfile(core) else None
+
+
 # ---------------------------------------------------------------- loading --
 
 def load_rules(root):
@@ -91,8 +111,8 @@ def run_check(root, rule):
     """
     rid = rule['id']
     script = rule.get('check')
-    path = os.path.join(root, script)
-    if not os.path.isfile(path):
+    path = resolve_script(root, script)
+    if path is None:
         return [f"{rid} check script missing {script}"]
 
     env = dict(os.environ)
@@ -178,10 +198,19 @@ def cmd_check(args, root):
 
 # -------------------------------------------------------------------- cli --
 
+def product_root(args, root):
+    """`--product <p>` runs against that product's backlog_dir, else the given root."""
+    if getattr(args, 'product', None):
+        from asf import env
+        return env.load_product(args.product).backlog_dir
+    return root
+
+
 def build_parser():
     p = argparse.ArgumentParser(prog='rules.py')
     sub = p.add_subparsers(dest='command', required=True)
     p_check = sub.add_parser('check', help="run every rule's check script")
+    p_check.add_argument('--product', help="the product whose backlog's rules run with the core set")
     p_check.add_argument('--json', action='store_true',
                          help='machine form for the Bug filer')
     p_check.add_argument('--verbose', action='store_true',
@@ -194,6 +223,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     root = repo_root()
     if args.command == 'check':
+        root = product_root(args, root)
         return cmd_check(args, root)
     parser.print_help()
     return 2

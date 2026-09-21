@@ -76,6 +76,7 @@ def build_parser():
 
     p_rules = sub.add_parser('rules', help='run the rule checks')
     p_rules.add_argument('rules_command', choices=['check'])
+    p_rules.add_argument('--product')
     p_rules.add_argument('--json', action='store_true')
     p_rules.add_argument('--verbose', action='store_true')
 
@@ -165,7 +166,8 @@ def main(argv=None):
         return cmd_file_bugs(args, root)
     if args.command == 'rules':
         from asf.rules.rules import cmd_check as rules_cmd_check
-        return rules_cmd_check(args, root)
+        from asf.rules.rules import product_root
+        return rules_cmd_check(args, product_root(args, root))
     if args.command == 'evidence':
         from asf.evidence.evidence import main as evidence_main
         evidence_args = ['--json']
