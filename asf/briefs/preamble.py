@@ -132,6 +132,14 @@ def section_lines(sections, name, limit_chars=2000):
 
 # ---- facts -------------------------------------------------------------------
 
+#: Kinds whose preamble carries a review path at all, and of those, the ones that ANSWER the
+#: round already on the branch rather than writing the next one. A fact belonging to neither is
+#: left out of the preamble: an irrelevant path is a line the session pays for on every turn.
+REVIEW_KINDS = ('review', 'fixer', 'adjudicate')
+ANSWER_KINDS = ('fixer', 'adjudicate')
+STORY_KINDS = ('spec', 'plan', 'review', 'adjudicate')
+
+
 def _strip_rev(value):
     """A link may be recorded as ``<rev>:<path>``; the path is what a session opens."""
     if isinstance(value, str) and ':' in value and not value.startswith(('http://', 'https://')):
@@ -215,8 +223,14 @@ def collect(product, row, index, inflight=None, repo_facts=None):
     spec_path = _strip_rev(links.get('spec')) or doc_path_for(product, 'spec', slug)
     plan_path = _strip_rev(links.get('plan')) or doc_path_for(product, 'plan', slug)
     rnd = feeder_rows.review_round(feature or item)[1]
+    kind = kind_of(row)
+    # a reviewer writes the NEXT round's file; a fixer and an adjudicator answer the one that is
+    # already on the branch — pointing either at the other's file is how a round gets lost
+    read_round = rnd or 1
+    review_path = review_path_for(product, slug,
+                                  read_round if kind in ANSWER_KINDS else rnd + 1 if rnd else 1)
     return {
-        'kind': kind_of(row),
+        'kind': kind,
         'items': items,
         'item': item,
         'feature': feature,
@@ -232,9 +246,9 @@ def collect(product, row, index, inflight=None, repo_facts=None):
         'writes': list(item.get('writes') or []),
         'tests': named_tests(sections, item, repo_facts),
         'stories': stories_of(items, feature),
-        'round': rnd,
+        'round': read_round,
         'next_round': rnd + 1 if rnd else 1,
-        'review_path': review_path_for(product, slug, rnd + 1 if rnd else 1),
+        'review_path': review_path,
         'branch': getattr(row, 'branch', '') or '',
         'head': (repo_facts or {}).get('head') or '',
         'branch_exists': (repo_facts or {}).get('branch_exists'),
@@ -327,13 +341,6 @@ def identity_lines(row, facts):
     return out
 
 
-#: Kinds that write or answer a review file, and kinds that work from the Story list. A fact
-#: that belongs to neither is left out of their preamble: an irrelevant path is a line the
-#: session pays for on every turn.
-REVIEW_KINDS = ('review', 'fixer', 'adjudicate')
-STORY_KINDS = ('spec', 'plan', 'review', 'adjudicate')
-
-
 def state_lines(product, facts):
     kind = facts.get('kind') or ''
     out = [f"Branch: `{facts['branch'] or '—'}` (exists: {_flag(facts['branch_exists'])})",
@@ -341,8 +348,9 @@ def state_lines(product, facts):
            _doc_line('Spec', facts['spec_path'], facts['spec_lines'], facts['spec_recorded']),
            _doc_line('Plan', facts['plan_path'], facts['plan_lines'], facts['plan_recorded'])]
     if kind in REVIEW_KINDS:
-        out.append(f"Review file for this round: `{facts['review_path']}` "
-                   f"(round {facts['next_round']})")
+        verb, n = ('to answer', facts['round']) if kind in ANSWER_KINDS \
+            else ('to write', facts['next_round'])
+        out.append(f"Review file {verb}: `{facts['review_path']}` (round {n})")
     out += [f"Writes (the footprint this job may touch): "
             f"{', '.join(facts['writes']) if facts['writes'] else '(none declared)'}",
             f"Tests named by the card: "

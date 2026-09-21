@@ -242,6 +242,15 @@ class PreambleTest(unittest.TestCase):
         text = preamble_mod.build(p, ROWS['fixer'], index(), [], REPO_FACTS)
         self.assertIn('`reviews/t-0001/r1.md`', text)
 
+    def test_a_reviewer_writes_the_next_round_and_a_fixer_answers_this_one(self):
+        # F-0002 sits at spec-review r4: the adjudicator answers r4, a reviewer would write r5.
+        answering = preamble_mod.build(product(), ROWS['adjudicate'], index(), [], REPO_FACTS)
+        self.assertIn('Review file to answer: `docs/reviews/4-f-0002.md` (round 4)', answering)
+        r = row('CODE → REVIEW', 'F-0002', 'review', 'spec/F-0002', 'another round',
+                feature_id='F-0002')
+        writing = preamble_mod.build(product(), r, index(), [], REPO_FACTS)
+        self.assertIn('Review file to write: `docs/reviews/5-f-0002.md` (round 5)', writing)
+
 
 class PlaceholderTest(unittest.TestCase):
     def context(self, kind='coder'):

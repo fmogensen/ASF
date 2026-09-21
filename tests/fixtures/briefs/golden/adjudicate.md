@@ -9,7 +9,7 @@ Branch: `spec/F-0002` (exists: no)
 Head: abc1234 record the provider outcome
 Spec: not in the record — its place is `docs/specs/f-0002.md`
 Plan: not in the record — its place is `docs/plans/f-0002.md`
-Review file for this round: `docs/reviews/5-f-0002.md` (round 5)
+Review file to answer: `docs/reviews/4-f-0002.md` (round 4)
 Writes (the footprint this job may touch): (none declared)
 Tests named by the card: (none named)
 Sessions in flight: (none)
@@ -45,7 +45,7 @@ left out: the retry itself, F-0001 owns it
 that the findings are false positives. Nobody rules. You rule, and your ruling ends the branch's
 review loop — there is no round after yours.
 
-Read, in full: the newest review `docs/reviews/5-f-0002.md`, the fixer's last report, and the document under
+Read, in full: the newest review `docs/reviews/4-f-0002.md`, the fixer's last report, and the document under
 review (`docs/specs/f-0002.md` / `docs/plans/f-0002.md` as the dispute requires).
 
 FOR EACH OPEN FINDING, one of two outcomes — never "noted", never a question back:

@@ -9,7 +9,7 @@ Branch: `task/T-0001` (exists: no)
 Head: abc1234 record the provider outcome
 Spec: `docs/specs/checkout-resilience.md` (312 lines)
 Plan: `docs/plans/checkout-resilience.md` (188 lines)
-Review file for this round: `docs/reviews/1-t-0001.md` (round 1)
+Review file to answer: `docs/reviews/1-t-0001.md` (round 1)
 Writes (the footprint this job may touch): app/checkout/attempts.py, tests/test_checkout.py
 Tests named by the card: tests/test_checkout.py::test_attempt_row_per_try
 Sessions in flight: (none)
