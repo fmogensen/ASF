@@ -21,6 +21,7 @@ The trunk is `main`; every commit is signed off (`git commit -s`).
 When the payment provider times out, the checkout must hold the order, retry once with a second
 provider, and tell the customer what happened — instead of dropping the basket and returning a
 500 with no record of the attempt.
+
 The attempt itself is the thing that is missing today: nothing is written down when a provider
 fails, so nobody can tell a timeout from a decline, and support answers every such ticket by
 guessing.

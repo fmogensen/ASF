@@ -119,10 +119,15 @@ def card_sections(product, item):
 
 
 def section_lines(sections, name, limit_chars=2000):
+    """One card section as lines, its paragraph breaks kept — a card's prose reads as the author
+    wrote it, or the session reads a wall."""
     text = (sections.get(name) or '').strip()
     if not text:
         return []
-    return [l.rstrip() for l in text[:limit_chars].splitlines() if l.strip()]
+    lines = [l.rstrip() for l in text[:limit_chars].splitlines()]
+    while lines and not lines[-1]:
+        lines.pop()
+    return lines
 
 
 # ---- facts -------------------------------------------------------------------
