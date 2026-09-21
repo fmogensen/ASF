@@ -10,7 +10,10 @@ Then the worktrees under ``~/.ASF/state/<product>/worktrees/``: one with no sess
 ``orphan``; one whose session has ended is a reap candidate. With ``fix=True`` a worktree is
 removed only under the reap rule — the session finished (or there is none), its pid is dead,
 the tree is clean, and HEAD is already on the pushed branch (fast-forwarded + pushed). Anything
-else is kept and listed with why.
+else is kept and listed with why. The one exception (B-0025): a worktree whose session has ended
+with a dead pid and whose branch has no commit beyond ``origin/<main>`` (and a clean tree) holds
+nothing to lose, so it is reaped — worktree and branch — whether or not it was pushed; otherwise
+the next ``spawn`` of that job would refuse ``worktree already exists``.
 """
 import os
 import subprocess
@@ -104,10 +107,15 @@ def health(product, fix=False, alive=pid_alive, out=print):
             found.append((name, 'keep', f'{what}: pid still alive'))
             continue
         if s is not None and s.get('end_reason') != 'finished':
-            found.append((name, 'keep', f'{what}: session {s.get("end_reason")}, not finished'))
-            continue
-        ok, why = pushed(path, (s or {}).get('branch'))
-        if not ok:
+            ok, why = False, f'session {s.get("end_reason")}, not finished'
+        else:
+            ok, why = pushed(path, (s or {}).get('branch'))
+        if not ok and s is not None and spawn_mod.unused_worktree(product, path, s.get('branch'))[0]:
+            # B-0025: a dead session that committed nothing leaves nothing to lose
+            if fix:
+                spawn_mod.discard_worktree(product, path, s.get('branch'))
+            found.append((name, 'reaped' if fix else 'reapable', f'{what}: nothing committed'))
+        elif not ok:
             found.append((name, 'keep', f'{what}: {why}'))
         elif fix and remove_worktree(product, path):
             found.append((name, 'reaped', what))

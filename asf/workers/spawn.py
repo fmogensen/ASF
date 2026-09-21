@@ -95,13 +95,54 @@ def branch_for(product, row):
     return row.branch or f'{product.branch_prefix(row.kind)}/{row.job}'
 
 
-def make_worktree(product, job, branch):
+def _git_ok(args, cwd):
+    return subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True)
+
+
+def unused_worktree(product, path, branch):
+    """``(ok, why)``: nothing in the worktree can be lost — a clean tree, and no commit on its
+    HEAD or its branch beyond ``origin/<main>``. ``why`` is the reason it is not empty."""
+    base = f'origin/{product.main}'
+    st = _git_ok(['status', '--porcelain'], path)
+    if st.returncode != 0:
+        return False, 'not a git worktree'
+    if st.stdout.strip():
+        return False, 'uncommitted changes'
+    ahead = 0
+    for ref in ('HEAD', f'refs/heads/{branch}' if branch else None):
+        if ref is None:
+            continue
+        n = _git_ok(['rev-list', '--count', f'{base}..{ref}'], path)
+        if n.returncode == 0:
+            ahead = max(ahead, int(n.stdout.strip() or 0))
+    if ahead:
+        return False, f'{ahead} commit{"" if ahead == 1 else "s"} on {branch or "HEAD"}'
+    return True, ''
+
+
+def discard_worktree(product, path, branch):
+    """Remove an unused worktree and its (empty) local branch, so the job can be cut afresh."""
+    repo = product.repo_dir
+    _git(['worktree', 'remove', path], repo)
+    if branch and _git_ok(['rev-parse', '--verify', '-q', f'refs/heads/{branch}'], repo).returncode == 0:
+        _git(['branch', '-D', branch], repo)
+
+
+def make_worktree(product, job, branch, alive=None):
     repo = product.repo_dir
     if not repo or not os.path.isdir(repo):
         raise SpawnError(f'product repo_dir missing: {repo!r}')
     path = os.path.join(worktrees_dir(product), job)
     if os.path.exists(path):
-        raise SpawnError(f'worktree already exists: {path}')
+        # B-0025: a dead session that committed nothing is cleared away; one with work is not
+        from asf.workers import health as health_mod
+        s = pool_mod.load_sessions(product).get(job)
+        if s is None or (not s.get('ended') and (alive or health_mod.pid_alive)(s.get('pid'))):
+            raise SpawnError(f'worktree already exists: {path}')
+        ok, why = unused_worktree(product, path, branch)
+        if not ok:
+            raise SpawnError(f'worktree already exists: {path} — {why}; not removing it')
+        discard_worktree(product, path, branch)
     _git(['fetch', '-q', 'origin', product.main], repo)
     _git(['worktree', 'add', '-q', '-b', branch, path, f'origin/{product.main}'], repo)
     return path
@@ -146,13 +187,13 @@ def settings_file(wp):
     return path
 
 
-def spawn(product, row, account, brief_text, runtime=None, cfg=None):
+def spawn(product, row, account, brief_text, runtime=None, cfg=None, alive=None):
     """Launch one row on ``account``. Returns the session record written to the ledger."""
     cfg = load_cfg() if cfg is None else cfg
     wp = cfg.get('worker_pool') or {}
     runtime = runtime or runtime_mod.from_config(cfg)
     branch = branch_for(product, row)
-    worktree = make_worktree(product, row.job, branch)
+    worktree = make_worktree(product, row.job, branch, alive=alive)
     id_range = reserve_id_range(product, row.job,
                                 prefixes=wp.get('id_range_prefixes') or DEFAULT_ID_PREFIXES,
                                 start=int(wp.get('id_range_start', DEFAULT_ID_START)),

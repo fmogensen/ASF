@@ -31,6 +31,15 @@ def git(*args, cwd):
     return p.stdout.strip()
 
 
+def commit_file(wt, name):
+    for k, v in (('user.email', 'ci@example.com'), ('user.name', 'ci')):
+        git('config', k, v, cwd=wt)
+    with open(os.path.join(wt, name), 'w') as f:
+        f.write(name)
+    git('add', name, cwd=wt)
+    git('commit', '-q', '-m', name, cwd=wt)
+
+
 def feature_row(job, item='F-0001'):
     return pool_mod.parse_row(f'STARVED → SPEC {item} "a feature"   → launch {job} (Opus)')
 
@@ -275,7 +284,34 @@ class TestSpawn(Home):
         rt = runtime_mod.FakeRuntime([{'running': True}])
         spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b', runtime=rt, cfg=self.cfg)
         with self.assertRaises(spawn_mod.SpawnError):
-            spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b', runtime=rt, cfg=self.cfg)
+            spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b', runtime=rt, cfg=self.cfg,
+                            alive=lambda pid: True)
+
+    def test_b0025_spawn_removes_a_dead_sessions_empty_worktree_and_proceeds(self):
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 12}, {'running': True, 'pid': 13}])
+        first = spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b', runtime=rt,
+                                cfg=self.cfg)
+        pool_mod.update_session(self.product, 'j', ended=pool_mod.now_iso(), end_reason='dead pid')
+        again = spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b', runtime=rt,
+                                cfg=self.cfg, alive=lambda pid: False)
+        self.assertEqual(again['worktree'], first['worktree'])
+        self.assertEqual(again['pid'], 13)
+        self.assertEqual(git('rev-parse', 'HEAD', cwd=again['worktree']),
+                         git('rev-parse', 'origin/main', cwd=self.repo))
+
+    def test_b0025_spawn_refuses_a_dead_sessions_worktree_with_commits(self):
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 12}])
+        rec = spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b', runtime=rt,
+                              cfg=self.cfg)
+        wt = rec['worktree']
+        commit_file(wt, 'x')
+        pool_mod.update_session(self.product, 'j', ended=pool_mod.now_iso(), end_reason='dead pid')
+        with self.assertRaises(spawn_mod.SpawnError) as cm:
+            spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b', runtime=rt,
+                            cfg=self.cfg, alive=lambda pid: False)
+        self.assertIn(rec['branch'], str(cm.exception))
+        self.assertIn('1 commit', str(cm.exception))
+        self.assertTrue(os.path.isdir(wt))
 
 
 class TestWave(Home):
@@ -330,8 +366,10 @@ class TestHealth(Home):
         self.assertEqual(s['done']['end_reason'], 'finished')
         self.assertFalse(s['live'].get('ended'))
         keep = {j: d for j, w, d in found if w == 'keep'}
-        self.assertEqual(keep['done'], 'ended: branch not pushed')
-        self.assertEqual(keep['gone'], 'ended: session dead pid, not finished')
+        self.assertEqual(keep, {})
+        reapable = {j: d for j, w, d in found if w == 'reapable'}
+        self.assertEqual(reapable, {'done': 'ended: nothing committed',
+                                    'gone': 'ended: nothing committed'})
 
     def test_b0028_dead_pid_is_rejudged_when_the_result_arrives(self):
         rec = self.spawn('late', {'running': True, 'pid': 12})
@@ -348,6 +386,29 @@ class TestHealth(Home):
         # settled: the next pass leaves it alone
         found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
         self.assertFalse([f for f in found if f[1] == 're-judged'])
+
+    def test_b0025_health_reaps_a_dead_sessions_worktree_with_nothing_committed(self):
+        rec = self.spawn('gone', {'running': True, 'pid': 12})
+        wt = rec['worktree']
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('gone', 'reapable', 'ended: nothing committed'), found)
+        self.assertTrue(os.path.isdir(wt))
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('gone', 'reaped', 'ended: nothing committed'), found)
+        self.assertFalse(os.path.exists(wt))
+        # the branch went with it, so the relaunch can cut it again
+        self.assertEqual(git('branch', '--list', rec['branch'], cwd=self.repo), '')
+
+    def test_b0025_health_keeps_a_live_session_and_a_branch_with_commits(self):
+        live = self.spawn('live', {'running': True, 'pid': 13})
+        work = self.spawn('work', {'running': True, 'pid': 14})
+        commit_file(work['worktree'], 'x')
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: pid == 13,
+                                  out=lambda s: None)
+        self.assertNotIn('live', [j for j, w, d in found if w in ('reaped', 'reapable')])
+        self.assertEqual([w for j, w, d in found if j == 'work' and w != 'ended'], ['keep'])
+        self.assertTrue(os.path.isdir(live['worktree']))
+        self.assertTrue(os.path.isdir(work['worktree']))
 
     def test_reap_only_when_pushed(self):
         rec = self.spawn('done', {'ok': True, 'pid': 11})
