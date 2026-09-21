@@ -263,7 +263,9 @@ class Product:
             data.setdefault('main', self._get('main') or 'main')
             if self._get('stage_limits') is not None:
                 data.setdefault('stage_limits', self._get('stage_limits'))
-            test_command = (self._get('ci') or {}).get('test_command')
+            ci = self._get('ci')
+            # `ci: none` (a product without CI) is a string, not a mapping
+            test_command = ci.get('test_command') if isinstance(ci, dict) else None
             if test_command:
                 data.setdefault('test_command', test_command)
             self._conventions = Conventions.from_mapping(data)
