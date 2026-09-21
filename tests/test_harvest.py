@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -7,18 +8,25 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+from asf.conventions import Conventions
 from asf.harvest import harvest
+
+# The product under test: a record repo on trunk `main`, code branches under `worker/`, and a
+# test command of its own. Nothing here is a default of the package — harvest reads all three.
+CONV = Conventions.from_mapping({
+    'test_command': f'{sys.executable} -m unittest discover -s tools -p test_*.py',
+})
 
 DEFAULT_BODY = (
     "## Description\n{desc}\n\n## Acceptance\n- [ ] \n\n## Non-goals\n\n"
     "## History\n- 2026-09-21: created\n\n## Children\n\n## Backlinks\n"
 )
 
-# A minimal stand-in for a product repo's own `tools/backlog.py` — just enough of the
-# `index`/`check` contract for harvest.py's gate (see harvest.py's module docstring: the gate
-# runs only when `tools/backlog.py` is on disk, and is `index` + `check`, the same two
-# subcommands this stub implements). The real tool lives in the product repo being harvested,
-# not in this package, so the test fixture only needs to honor that contract.
+# A minimal stand-in for the record repo's own index tool — just enough of the `index`/`check`
+# contract to seed the fixture (an `index.json` at the root is what makes harvest treat a repo as
+# the record repo). Harvest itself runs `asf index` / `asf check`, never this stub.
 FIXTURE_BACKLOG_PY = '''\
 import json
 import os
@@ -80,6 +88,14 @@ if __name__ == '__main__':
 '''
 
 
+def gate_importable_env():
+    """`asf check` runs as a subprocess from the rebased worktree — it finds the package the
+    same way the tests do."""
+    env = clean_env()
+    env['PYTHONPATH'] = REPO_ROOT + os.pathsep + env.get('PYTHONPATH', '')
+    return env
+
+
 def clean_env():
     """The pre-commit hook exports GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE; a `git` child that
     inherits them ignores its `cwd` and writes into the real repo instead of the temp one."""
@@ -117,8 +133,8 @@ def index_and_commit(repo, message):
 
 
 def make_repo():
-    """A bare `origin`, a `repo` clone (the tick clone / main checkout) seeded with a minimal
-    backlog.py toolset and one epic, and a `workers` dir with logs/ + worktrees/ + worktrees.tsv."""
+    """A bare `origin`, a `repo` clone (the tick clone / main checkout) seeded with one epic and
+    an index, and a state dir with worktrees/ + the session registry."""
     base = tempfile.mkdtemp(prefix='harvest_test_')
     origin = os.path.join(base, 'origin.git')
     repo = os.path.join(base, 'repo')
@@ -142,36 +158,29 @@ def make_repo():
     index_and_commit(repo, 'init')
     sh(['git', 'push', '-q', 'origin', 'HEAD:main'], cwd=repo)
 
-    workers_dir = os.path.join(base, 'workers')
-    os.makedirs(os.path.join(workers_dir, 'logs'))
-    os.makedirs(os.path.join(workers_dir, 'worktrees'))
-    return base, origin, repo, workers_dir
+    state_dir = os.path.join(base, 'state')
+    os.makedirs(os.path.join(state_dir, 'worktrees'))
+    return base, origin, repo, state_dir
 
 
-def write_meta(workers_dir, job, rc=0, finished=True):
-    path = os.path.join(workers_dir, 'logs', f'{job}.meta')
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write(f'job={job} account=test cwd=/tmp/{job} pid=1 started=2026-09-21T00:00:00+00:00\n')
-        if finished:
-            f.write(f'finished=2026-09-21T00:05:00+00:00 rc={rc}\n')
+def write_session(state_dir, job, branch, rc=0, ended=True):
+    """The registry line a launch writes, and the one that ends the session — the same
+    append-only shape asf.workers.pool writes (see its `load_sessions`)."""
+    with open(os.path.join(state_dir, 'sessions.jsonl'), 'a', encoding='utf-8') as f:
+        f.write(json.dumps({'job': job, 'branch': branch, 'account': 'test', 'pid': 1,
+                            'started': '2026-09-21T00:00:00Z'}) + '\n')
+        if ended:
+            f.write(json.dumps({'job': job, 'ended': '2026-09-21T00:05:00Z',
+                                'end_reason': 'finished' if rc == 0 else 'failed', 'rc': rc}) + '\n')
 
 
-def write_tsv_row(workers_dir, job, branch):
-    with open(os.path.join(workers_dir, 'worktrees.tsv'), 'a', encoding='utf-8') as f:
-        f.write(f'{job}\ttest\t{branch}\tabc123\t2026-09-21T00:00:00Z\trunning\n')
+def harvested(state_dir, job):
+    return bool(harvest.read_sessions(state_dir).get(job, {}).get('harvested'))
 
 
-def tsv_has_job(workers_dir, job):
-    path = os.path.join(workers_dir, 'worktrees.tsv')
-    if not os.path.isfile(path):
-        return False
-    with open(path, encoding='utf-8') as f:
-        return any(l.split('\t', 1)[0] == job for l in f)
-
-
-def add_job_worktree(repo, workers_dir, job, base_ref='main'):
-    branch = f'worker/{job}'
-    wt = os.path.join(workers_dir, 'worktrees', job)
+def add_job_worktree(repo, state_dir, job, base_ref='main'):
+    branch = CONV.branch('code', job)
+    wt = os.path.join(state_dir, 'worktrees', job)
     sh(['git', 'worktree', 'add', '-q', '-b', branch, wt, base_ref], cwd=repo)
     sh(['git', 'config', 'user.name', 'Test'], cwd=wt)
     sh(['git', 'config', 'user.email', 'test@example.com'], cwd=wt)
@@ -179,27 +188,26 @@ def add_job_worktree(repo, workers_dir, job, base_ref='main'):
     return branch, wt
 
 
-def run_harvest(repo, workers_dir, dry_run=False):
+def run_harvest(repo, state_dir, dry_run=False):
     buf = io.StringIO()
     with redirect_stdout(buf):
-        rc = harvest.run_harvest(repo, workers_dir, dry_run)
+        rc = harvest.run_harvest(repo, state_dir, dry_run, CONV)
     return rc, buf.getvalue()
 
 
 class HarvestTests(unittest.TestCase):
     def setUp(self):
-        self.base, self.origin, self.repo, self.workers_dir = make_repo()
+        self.base, self.origin, self.repo, self.state_dir = make_repo()
         self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
 
     # -- a fast-forwardable branch lands on main with no controller action -----------------
     def test_green_branch_lands_on_main(self):
-        branch, wt = add_job_worktree(self.repo, self.workers_dir, 'ff1')
+        branch, wt = add_job_worktree(self.repo, self.state_dir, 'ff1')
         write_epic(wt, 'E-0002', 'New epic from ff1')
         index_and_commit(wt, 'ff1: add E-0002')
-        write_meta(self.workers_dir, 'ff1', rc=0)
-        write_tsv_row(self.workers_dir, 'ff1', branch)
+        write_session(self.state_dir, 'ff1', branch)
 
-        rc, out = run_harvest(self.repo, self.workers_dir)
+        rc, out = run_harvest(self.repo, self.state_dir)
         self.assertEqual(rc, 0)
         self.assertIn('HARVEST OK ff1', out)
 
@@ -207,18 +215,17 @@ class HarvestTests(unittest.TestCase):
         log = sh(['git', 'log', '--oneline', 'origin/main'], cwd=self.repo).stdout
         self.assertIn('ff1: add E-0002', log)
 
-        self.assertFalse(os.path.isdir(os.path.join(self.workers_dir, 'worktrees', 'ff1')))
+        self.assertFalse(os.path.isdir(os.path.join(self.state_dir, 'worktrees', 'ff1')))
         branches = sh(['git', 'branch', '--list', branch], cwd=self.repo).stdout
         self.assertEqual(branches.strip(), '')
-        self.assertFalse(tsv_has_job(self.workers_dir, 'ff1'))
+        self.assertTrue(harvested(self.state_dir, 'ff1'))
 
     # -- a non-machine conflict holds the branch and names the file ------------------------
     def test_non_machine_conflict_is_held(self):
-        branch, wt = add_job_worktree(self.repo, self.workers_dir, 'conflict1')
+        branch, wt = add_job_worktree(self.repo, self.state_dir, 'conflict1')
         write_epic(wt, 'E-0001', 'Seed epic', desc='Worker edit')
         index_and_commit(wt, 'conflict1: edit description')
-        write_meta(self.workers_dir, 'conflict1', rc=0)
-        write_tsv_row(self.workers_dir, 'conflict1', branch)
+        write_session(self.state_dir, 'conflict1', branch)
 
         # a different edit to the same line lands on main first, out from under the branch
         write_epic(self.repo, 'E-0001', 'Seed epic', desc='Main edit')
@@ -226,23 +233,23 @@ class HarvestTests(unittest.TestCase):
         sh(['git', 'push', '-q', 'origin', 'HEAD:main'], cwd=self.repo)
         main_sha = sh(['git', 'rev-parse', 'origin/main'], cwd=self.repo).stdout.strip()
 
-        rc, out = run_harvest(self.repo, self.workers_dir)
+        rc, out = run_harvest(self.repo, self.state_dir)
         self.assertEqual(rc, 0)
         self.assertIn('HARVEST HOLD conflict1', out)
         self.assertIn('conflict in', out)
         self.assertIn('E-0001.md', out)
 
         # nothing touched: worktree, branch, tsv row and main all unchanged
-        self.assertTrue(os.path.isdir(os.path.join(self.workers_dir, 'worktrees', 'conflict1')))
+        self.assertTrue(os.path.isdir(os.path.join(self.state_dir, 'worktrees', 'conflict1')))
         branches = sh(['git', 'branch', '--list', branch], cwd=self.repo).stdout
         self.assertIn(branch, branches)
-        self.assertTrue(tsv_has_job(self.workers_dir, 'conflict1'))
+        self.assertFalse(harvested(self.state_dir, 'conflict1'))
         sh(['git', 'fetch', '-q', 'origin', 'main'], cwd=self.repo)
         self.assertEqual(sh(['git', 'rev-parse', 'origin/main'], cwd=self.repo).stdout.strip(), main_sha)
 
     # -- a branch whose tests fail is held, never landed ------------------------------------
     def test_failing_tests_are_held(self):
-        branch, wt = add_job_worktree(self.repo, self.workers_dir, 'redtest')
+        branch, wt = add_job_worktree(self.repo, self.state_dir, 'redtest')
         with open(os.path.join(wt, 'tools', 'test_fixture.py'), 'w', encoding='utf-8') as f:
             f.write(
                 "import unittest\n\n"
@@ -252,20 +259,19 @@ class HarvestTests(unittest.TestCase):
             )
         sh(['git', 'add', '-A'], cwd=wt)
         sh(['git', 'commit', '-qm', 'redtest: break the gate'], cwd=wt)
-        write_meta(self.workers_dir, 'redtest', rc=0)
-        write_tsv_row(self.workers_dir, 'redtest', branch)
+        write_session(self.state_dir, 'redtest', branch)
 
-        rc, out = run_harvest(self.repo, self.workers_dir)
+        rc, out = run_harvest(self.repo, self.state_dir)
         self.assertEqual(rc, 0)
         self.assertIn('HARVEST HOLD redtest', out)
         self.assertIn('tests failed', out)
 
-        self.assertTrue(os.path.isdir(os.path.join(self.workers_dir, 'worktrees', 'redtest')))
-        self.assertTrue(tsv_has_job(self.workers_dir, 'redtest'))
+        self.assertTrue(os.path.isdir(os.path.join(self.state_dir, 'worktrees', 'redtest')))
+        self.assertFalse(harvested(self.state_dir, 'redtest'))
 
     # -- an index.json-only conflict is resolved by regenerating it ------------------------
     def test_index_json_only_conflict_is_resolved(self):
-        branch, wt = add_job_worktree(self.repo, self.workers_dir, 'idxconf')
+        branch, wt = add_job_worktree(self.repo, self.state_dir, 'idxconf')
         write_epic(wt, 'E-0003', 'Worker-side epic')
         index_and_commit(wt, 'idxconf: add E-0003')
 
@@ -274,10 +280,9 @@ class HarvestTests(unittest.TestCase):
         index_and_commit(self.repo, 'main: add E-0002')
         sh(['git', 'push', '-q', 'origin', 'HEAD:main'], cwd=self.repo)
 
-        write_meta(self.workers_dir, 'idxconf', rc=0)
-        write_tsv_row(self.workers_dir, 'idxconf', branch)
+        write_session(self.state_dir, 'idxconf', branch)
 
-        rc, out = run_harvest(self.repo, self.workers_dir)
+        rc, out = run_harvest(self.repo, self.state_dir)
         self.assertEqual(rc, 0)
         self.assertIn('HARVEST OK idxconf', out)
 
@@ -285,46 +290,43 @@ class HarvestTests(unittest.TestCase):
         r = sh(['git', 'show', 'origin/main:index.json'], cwd=self.repo)
         self.assertIn('E-0002', r.stdout)
         self.assertIn('E-0003', r.stdout)
-        check = subprocess.run([sys.executable, os.path.join('tools', 'backlog.py'), 'check'],
-                                cwd=self.repo, capture_output=True, text=True, env=clean_env())
-        # check runs against the checked-out worktree, which is still on main pre-fetch content;
-        # fast-forward the local main branch to origin so check sees the landed state
+        # the landed index is the one `asf index` regenerated — check runs against the checked-out
+        # worktree, so fast-forward the local main branch to origin first
         sh(['git', 'checkout', '-q', 'main'], cwd=self.repo)
         sh(['git', 'merge', '-q', '--ff-only', 'origin/main'], cwd=self.repo)
-        check = subprocess.run([sys.executable, os.path.join('tools', 'backlog.py'), 'check'],
-                                cwd=self.repo, capture_output=True, text=True, env=clean_env())
+        check = subprocess.run([sys.executable, '-m', 'asf.cli', 'check'], cwd=self.repo,
+                                capture_output=True, text=True, env=gate_importable_env())
         self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
 
     # -- dry-run reports without mutating anything ------------------------------------------
     def test_dry_run_prints_and_does_not_push(self):
-        branch, wt = add_job_worktree(self.repo, self.workers_dir, 'dry1')
+        branch, wt = add_job_worktree(self.repo, self.state_dir, 'dry1')
         write_epic(wt, 'E-0004', 'Dry run epic')
         index_and_commit(wt, 'dry1: add E-0004')
-        write_meta(self.workers_dir, 'dry1', rc=0)
-        write_tsv_row(self.workers_dir, 'dry1', branch)
+        write_session(self.state_dir, 'dry1', branch)
 
         before = sh(['git', 'rev-parse', 'origin/main'], cwd=self.repo).stdout.strip()
-        rc, out = run_harvest(self.repo, self.workers_dir, dry_run=True)
+        rc, out = run_harvest(self.repo, self.state_dir, dry_run=True)
         self.assertEqual(rc, 0)
         self.assertIn('DRY: would push dry1', out)
 
         sh(['git', 'fetch', '-q', 'origin', 'main'], cwd=self.repo)
         after = sh(['git', 'rev-parse', 'origin/main'], cwd=self.repo).stdout.strip()
         self.assertEqual(before, after)
-        self.assertTrue(os.path.isdir(os.path.join(self.workers_dir, 'worktrees', 'dry1')))
-        self.assertTrue(tsv_has_job(self.workers_dir, 'dry1'))
+        self.assertTrue(os.path.isdir(os.path.join(self.state_dir, 'worktrees', 'dry1')))
+        self.assertFalse(harvested(self.state_dir, 'dry1'))
 
     # -- an unfinished or non-zero-rc job is left alone, not even attempted -----------------
     def test_ineligible_job_is_skipped(self):
-        branch, wt = add_job_worktree(self.repo, self.workers_dir, 'running1')
+        branch, wt = add_job_worktree(self.repo, self.state_dir, 'running1')
         write_epic(wt, 'E-0005', 'Still running')
         index_and_commit(wt, 'running1: wip')
-        write_meta(self.workers_dir, 'running1', finished=False)
+        write_session(self.state_dir, 'running1', branch, ended=False)
 
-        rc, out = run_harvest(self.repo, self.workers_dir)
+        rc, out = run_harvest(self.repo, self.state_dir)
         self.assertEqual(rc, 0)
         self.assertEqual(out.strip(), '')
-        self.assertTrue(os.path.isdir(os.path.join(self.workers_dir, 'worktrees', 'running1')))
+        self.assertTrue(os.path.isdir(os.path.join(self.state_dir, 'worktrees', 'running1')))
 
 
 class RulesSourceMergeTests(unittest.TestCase):

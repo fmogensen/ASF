@@ -13,13 +13,16 @@ NOW = ph.ts('2026-09-21T14:30:00Z')
 
 # A fake product, so these tests exercise pr_hygiene without needing a real ~/.ASF/ — see
 # asf.env.Product's docstring: tests build one directly from a plain dict.
-FAKE_PRODUCT = ph.env.Product('sample', {'repo_slug': 'acme/widgets', 'repo_dir': '/tmp/acme-widgets-checkout'})
+FAKE_PRODUCT = ph.env.Product('sample', {
+    'repo_slug': 'acme/widgets', 'repo_dir': os.path.join(tempfile.gettempdir(), 'acme-widgets-checkout'),
+    'conventions': {'branch_prefixes': {'code': 'feature/'}, 'reviews_dir': 'docs/reviews'}})
+CONV = FAKE_PRODUCT.conventions
 
 ITEMS = {
-    'T-0002': {'id': 'T-0002', 'type': 'task', 'links': {'branches': ['cloud/computer-per-bot-t2'], 'prs': [680]}},
-    'T-0003': {'id': 'T-0003', 'type': 'task', 'links': {'branches': ['cloud/free-plan-t1'], 'prs': [681]}},
-    'T-0004': {'id': 'T-0004', 'type': 'task', 'links': {'branches': ['cloud/vox-t1'], 'prs': [682]}},
-    'T-0005': {'id': 'T-0005', 'type': 'task', 'links': {'branches': ['cloud/fact-t3'], 'prs': [683]}},
+    'T-0002': {'id': 'T-0002', 'type': 'task', 'links': {'branches': ['feature/computer-per-bot-t2'], 'prs': [680]}},
+    'T-0003': {'id': 'T-0003', 'type': 'task', 'links': {'branches': ['feature/free-plan-t1'], 'prs': [681]}},
+    'T-0004': {'id': 'T-0004', 'type': 'task', 'links': {'branches': ['feature/vox-t1'], 'prs': [682]}},
+    'T-0005': {'id': 'T-0005', 'type': 'task', 'links': {'branches': ['feature/fact-t3'], 'prs': [683]}},
 }
 
 
@@ -29,15 +32,15 @@ def pull(n, branch, updated, draft=False, base='main'):
 
 
 def prs_fixture(dirty=('dirty', 'dirty', 'dirty', 'clean'), decisions=None):
-    pulls = [pull(680, 'cloud/computer-per-bot-t2', '2026-09-21T13:00:00Z'),   # approved
-             pull(681, 'cloud/free-plan-t1', '2026-09-13T10:00:00Z'),          # unreviewed, 8 d
-             pull(682, 'cloud/vox-t1', '2026-09-19T10:00:00Z'),                # unreviewed, 2 d
-             pull(683, 'cloud/fact-t3', '2026-09-13T10:00:00Z')]               # approved, clean
+    pulls = [pull(680, 'feature/computer-per-bot-t2', '2026-09-21T13:00:00Z'),   # approved
+             pull(681, 'feature/free-plan-t1', '2026-09-13T10:00:00Z'),          # unreviewed, 8 d
+             pull(682, 'feature/vox-t1', '2026-09-19T10:00:00Z'),                # unreviewed, 2 d
+             pull(683, 'feature/fact-t3', '2026-09-13T10:00:00Z')]               # approved, clean
     details = {p['number']: {'mergeable_state': s} for p, s in zip(pulls, dirty)}
     return ph.normalize(pulls, details, decisions or {})
 
 
-VERDICTS = {'cloud/computer-per-bot-t2': 'APPROVED', 'cloud/fact-t3': 'APPROVED'}
+VERDICTS = {'feature/computer-per-bot-t2': 'APPROVED', 'feature/fact-t3': 'APPROVED'}
 
 
 def run_classify(prs, state=None, now=NOW, verdicts=VERDICTS, items=ITEMS):
@@ -54,8 +57,8 @@ class ClassifyTest(unittest.TestCase):
         rows, _ = run_classify(prs, state=self.seen_earlier(prs))
         rebase = [r for r in rows if r['kind'] == 'REBASE']
         self.assertEqual([r['pr']['n'] for r in rebase], [680])
-        line = ph.render(rebase[0])
-        self.assertEqual(line, 'CONFLICT → REBASE  #680 cloud/computer-per-bot-t2 (T-0002) approved, dirty since 1h'
+        line = ph.render(rebase[0], CONV)
+        self.assertEqual(line, 'CONFLICT → REBASE  #680 feature/computer-per-bot-t2 (T-0002) approved, dirty since 1h'
                                '   → launch rebase-computer-per-bot-t2 (Sonnet)')
 
     def test_first_sighting_is_not_yet_a_rebase_row(self):
@@ -69,7 +72,7 @@ class ClassifyTest(unittest.TestCase):
         rows, _ = run_classify(prs, state=self.seen_earlier(prs))
         close = [r for r in rows if r['kind'] == 'CLOSE']
         self.assertEqual([r['pr']['n'] for r in close], [681])
-        self.assertEqual(ph.render(close[0]), 'STALE → CLOSE  #681 cloud/free-plan-t1 (T-0003) unreviewed, dirty 8d   → close')
+        self.assertEqual(ph.render(close[0], CONV), 'STALE → CLOSE  #681 feature/free-plan-t1 (T-0003) unreviewed, dirty 8d   → close')
 
     def test_unreviewed_dirty_2_days_gives_nothing(self):
         prs = prs_fixture()
@@ -89,7 +92,7 @@ class ClassifyTest(unittest.TestCase):
 
     def test_a_review_that_asked_for_changes_is_in_neither_lane(self):
         prs = prs_fixture()
-        rows, _ = run_classify(prs, state=self.seen_earlier(prs), verdicts={'cloud/free-plan-t1': 'CHANGES REQUESTED'})
+        rows, _ = run_classify(prs, state=self.seen_earlier(prs), verdicts={'feature/free-plan-t1': 'CHANGES REQUESTED'})
         self.assertEqual(rows, [])
 
     def test_a_push_resets_the_clock(self):
@@ -108,7 +111,7 @@ class ClassifyTest(unittest.TestCase):
         self.assertIn('not closed', ph.render([r for r in rows if r['pr']['n'] == 681][0]))
 
     def test_drafts_and_other_bases_are_skipped(self):
-        pulls = [pull(1, 'cloud/a', '2026-09-01T00:00:00Z', draft=True), pull(2, 'cloud/b', '2026-09-01T00:00:00Z', base='dev')]
+        pulls = [pull(1, 'feature/a', '2026-09-01T00:00:00Z', draft=True), pull(2, 'feature/b', '2026-09-01T00:00:00Z', base='dev')]
         self.assertEqual(ph.normalize(pulls, {1: {'mergeable_state': 'dirty'}, 2: {'mergeable_state': 'dirty'}}, {}), [])
 
     def test_unknown_mergeable_state_is_not_dirty(self):
@@ -131,8 +134,8 @@ class VerdictTest(unittest.TestCase):
             if a[0] == 'ls-tree':
                 return '.sdd-input/reviews/x-review-r2.md\n.sdd-input/reviews/x-review-r10.md\n.sdd-input/reviews/x-writer-report.md\n'
             return 'Verdict: APPROVED' if a[1].endswith('x-review-r10.md') else 'Verdict: BOUNCE'
-        self.assertEqual(ph.branch_verdict('cloud/x', git), 'APPROVED')
-        self.assertEqual(calls[-1], ('show', 'origin/cloud/x:.sdd-input/reviews/x-review-r10.md'))
+        self.assertEqual(ph.branch_verdict('feature/x', git), 'APPROVED')
+        self.assertEqual(calls[-1], ('show', 'origin/feature/x:.sdd-input/reviews/x-review-r10.md'))
 
     def test_missing_ref_is_no_verdict(self):
         def git(*a):
@@ -146,7 +149,7 @@ class CloseTest(unittest.TestCase):
         os.makedirs(os.path.join(self.root, 'tasks'))
         with open(os.path.join(self.root, 'tasks', 'T-0003.md'), 'w') as f:
             f.write('---\nid: T-0003\ntype: task\ntitle: Free plan\nparent: F-0001\ndecided: true\n'
-                    'links:\n  branches: [cloud/free-plan-t1]\n  prs: [681]\n  plan: "docs/p.md#task-1"\n'
+                    'links:\n  branches: [feature/free-plan-t1]\n  prs: [681]\n  plan: "docs/p.md#task-1"\n'
                     '# ---- machine ----\nstate: Active\n---\n## Description\n\n## History\n- 2026-09-01: created\n\n## Children\n')
         self.product = ph.env.Product('sample', {'repo_slug': 'acme/widgets', 'backlog_dir': self.root})
 
@@ -171,10 +174,10 @@ class CloseTest(unittest.TestCase):
         meta, body = ph.frontmatter.parse(self.read())
         self.assertEqual(dict(meta['links']), {'plan': 'docs/p.md#task-1'})
         self.assertEqual(meta['state'], 'Active')
-        self.assertIn('pr-hygiene: PR #681 (cloud/free-plan-t1) closed', body)
+        self.assertIn('pr-hygiene: PR #681 (feature/free-plan-t1) closed', body)
 
     def test_a_failed_close_leaves_the_links(self):
-        row = {'kind': 'CLOSE', 'pr': {'n': 681, 'branch': 'cloud/free-plan-t1'}, 'ids': ['T-0003'], 'tasks': ['T-0003'], 'since': 8 * DAY}
+        row = {'kind': 'CLOSE', 'pr': {'n': 681, 'branch': 'feature/free-plan-t1'}, 'ids': ['T-0003'], 'tasks': ['T-0003'], 'since': 8 * DAY}
 
         def gh(*a):
             if 'PATCH' in a:

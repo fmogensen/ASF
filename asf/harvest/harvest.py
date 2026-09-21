@@ -1,47 +1,53 @@
 #!/usr/bin/env python3
-"""harvest.py — land green `worker/*` branches on `main` with no hand merge.
+"""harvest.py — land a finished job's green branch on the trunk with no hand merge.
 
-Run by the tick (`~/.claude-workers/backlog-tick`), in step 0 after the pull. For every
-`worker/<job>` branch of a repo whose `~/.claude-workers/logs/<job>.meta` says `finished=` and
-`rc=0` and which carries commits not on `origin/main`: rebase it onto `origin/main` in a
-throwaway worktree (never the job's own, never the main checkout — that branch is already
-checked out there), resolve only machine-owned conflicts, gate it, then land it.
+Run by the tick, in step 0 after the pull. For every branch under the product's code prefix
+(``conventions.branch_prefixes``, ``worker/`` by default) whose session in the registry
+(``~/.ASF/state/<product>/sessions.jsonl``) has ``ended`` with ``rc: 0`` — or, when the runtime
+wrote no return code, ``end_reason: finished`` — and which carries commits not on the trunk:
+rebase it onto ``origin/<trunk>`` in a throwaway worktree (never the job's own, never the main
+checkout — that branch is already checked out there), resolve only machine-owned conflicts,
+gate it, then land it.
 
 Machine-owned conflicts (README.md "The machine block"): `index.json` (regenerated wholesale
-by `backlog.py index` at the end, so a conflicted copy is just discarded — either side would be
+by `asf index` at the end, so a conflicted copy is just discarded — either side would be
 overwritten), a `## Children`/`## Backlinks` section (same reasoning: take main's side of the
-hunk, `backlog.py index` regenerates it for real afterwards), and a Rule's `source:` line
+hunk, `asf index` regenerates it for real afterwards), and a Rule's `source:` line
 (unioned — every `; memory …` clause either side carries, deduplicated, README.md's typed-field
 grammar makes this a one-line scalar so the merge is a single-hunk text splice). Anything else
 conflicting aborts the rebase and holds the branch with one line naming the file — never a
 silent guess at someone's intent.
 
-The gate is `python3 -m unittest discover -s tools -p 'test_*.py'` + `backlog.py check`, run
-only when `--repo` looks like the record repo itself (a `tools/backlog.py` on disk). A product
-repo has no such gate; its branch is rebased and pushed under its own name — never merged to
-main, the merge queue owns that (README.md "Non-goals") — and harvest prints the `gh pr create`
-line for the tick to run, same as `open-prs.sh` does today.
+The gate is the product's ``conventions.test_command`` (nothing runs when it configures none)
+followed by ``asf check``, run only when ``--repo`` is the record repo itself (an ``index.json``
+at its root). A product repo has no such gate; its branch is rebased and pushed under its own
+name — never merged to the trunk, the merge queue owns that (README.md "Non-goals") — and
+harvest prints the `gh pr create` line for the tick to run.
 
-Landing on `main` is fast-forward only: `git push --force*` to `main` is never used (a rewritten
-main is exactly the 2026-09-21 near-miss this card exists to prevent). Instead: fetch, verify
-`origin/main` is an ancestor of the rebased tip, plain `git push origin <sha>:refs/heads/main`
-(which git itself refuses if that ever turns out false), retried once — re-rebasing onto the new
-tip — if `main` moved in between.
+Landing on the trunk is fast-forward only: `git push --force*` is never used (a rewritten trunk
+is exactly the near-miss this card exists to prevent). Instead: fetch, verify `origin/<trunk>`
+is an ancestor of the rebased tip, plain `git push origin <sha>:refs/heads/<trunk>` (which git
+itself refuses if that ever turns out false), retried once — re-rebasing onto the new tip — if
+the trunk moved in between.
 
-Cleanup (worktree, branch, the `worktrees.tsv` row) only happens after a push lands; a held
+Cleanup (the worktree, the branch, the registry line) only happens after a push lands; a held
 branch is never touched. Python 3 stdlib only.
 """
 import argparse
+import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
 
 from asf import env
+from asf.conventions import Conventions
 
-HOME = os.path.expanduser('~')
-DEFAULT_WORKERS_DIR = os.path.join(HOME, '.claude-workers')
+#: The conventions a caller with no Product reads: trunk `main`, code branches `worker/`, no
+#: test command (so the gate is `asf check` alone).
+DEFAULTS = Conventions()
 
 CONFLICT_START_RE = re.compile(r'^<{7}(?: |$)')
 CONFLICT_MID_RE = re.compile(r'^={7}$')
@@ -75,6 +81,10 @@ def gate_env():
     does, would otherwise misjudge an unrelated branch's tests as failing."""
     env = clean_env()
     env.pop('BACKLOG_ID_RANGE', None)
+    # `asf index`/`asf check` run as `python -m asf.cli` from the rebased worktree, whose cwd is
+    # the repo being gated, not this package: point the child at the package that is harvesting.
+    pkg_parent = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    env['PYTHONPATH'] = pkg_parent + os.pathsep + env.get('PYTHONPATH', '')
     return env
 
 
@@ -85,43 +95,57 @@ def tail(text, n=1):
 
 # ------------------------------------------------------------- job records --
 
-def read_job_meta(workers_dir, job):
-    """Parse `logs/<job>.meta` (`key=value` tokens, one line at start, one appended at finish)."""
-    path = os.path.join(workers_dir, 'logs', f'{job}.meta')
+def sessions_path(state_dir):
+    return os.path.join(state_dir, 'sessions.jsonl')
+
+
+def read_sessions(state_dir):
+    """``{job: folded record}`` from the registry — the same fold
+    :func:`asf.workers.pool.load_sessions` does, over a path instead of a Product, so harvest
+    reads a temp state directory in a test exactly as it reads the operator's."""
+    out = {}
+    path = sessions_path(state_dir)
     if not os.path.isfile(path):
-        return None
-    fields = {}
+        return out
     with open(path, encoding='utf-8') as f:
         for line in f:
-            for tok in line.split():
-                if '=' in tok:
-                    k, _, v = tok.partition('=')
-                    fields[k] = v
-    return fields
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(rec, dict) and rec.get('job'):
+                out.setdefault(rec['job'], {}).update(rec)
+    return out
 
 
-def is_eligible(meta):
-    return bool(meta) and meta.get('finished') and meta.get('rc') == '0'
+def is_eligible(record):
+    """A session that ended without failing. ``rc`` decides when the runtime recorded one;
+    otherwise ``end_reason: finished`` does (a session killed as a dead pid is not eligible)."""
+    if not record or not record.get('ended'):
+        return False
+    if record.get('harvested'):
+        return False
+    rc = record.get('rc')
+    if rc is not None:
+        return str(rc) == '0'
+    return record.get('end_reason') == 'finished'
 
 
-def drop_tsv_row(workers_dir, job):
-    path = os.path.join(workers_dir, 'worktrees.tsv')
-    if not os.path.isfile(path):
-        return
-    with open(path, encoding='utf-8') as f:
-        lines = f.readlines()
-    kept = [l for l in lines if l.split('\t', 1)[0] != job]
-    if kept != lines:
-        with open(path, 'w', encoding='utf-8') as f:
-            f.writelines(kept)
+def mark_harvested(state_dir, job, sha):
+    """One appended registry line: this job's branch has landed. The registry is append-only —
+    a later line for the same job is a field update (see asf.workers.pool)."""
+    path = sessions_path(state_dir)
+    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    with open(path, 'a', encoding='utf-8') as f:
+        f.write(json.dumps({'job': job, 'harvested': sha}, sort_keys=True) + '\n')
 
 
-def reap(repo, workers_dir, job, branch):
-    wt_path = os.path.join(workers_dir, 'worktrees', job)
+def reap(repo, state_dir, job, branch, sha=None):
+    wt_path = os.path.join(state_dir, 'worktrees', job)
     if os.path.isdir(wt_path):
         sh(['git', 'worktree', 'remove', '--force', wt_path], cwd=repo)
     sh(['git', 'branch', '-D', branch], cwd=repo)
-    drop_tsv_row(workers_dir, job)
+    mark_harvested(state_dir, job, sha)
 
 
 # ------------------------------------------------------- conflict resolution --
@@ -240,12 +264,12 @@ def try_resolve_conflict(tmp, relpath):
     return True
 
 
-def rebase_and_resolve(tmp):
-    """Rebase HEAD onto origin/main, resolving only machine-owned conflicts.
+def rebase_and_resolve(tmp, trunk='main'):
+    """Rebase HEAD onto ``origin/<trunk>``, resolving only machine-owned conflicts.
 
     Returns (ok, reason). On failure the rebase has already been aborted.
     """
-    sh(['git', 'rebase', 'origin/main'], cwd=tmp)
+    sh(['git', 'rebase', f'origin/{trunk}'], cwd=tmp)
     for _ in range(MAX_REBASE_STEPS):
         conflicted = list_conflicted(tmp)
         if conflicted:
@@ -269,27 +293,38 @@ def rebase_and_resolve(tmp):
 
 # --------------------------------------------------------------------- gate --
 
-def run_gate(tmp):
+def asf_cmd(*args):
+    """``asf <args>`` as this interpreter runs it — the module, not a binary on PATH, so a
+    worktree is gated by the code that is harvesting it."""
+    return [sys.executable, '-m', 'asf.cli', *args]
+
+
+def run_gate(tmp, conv=None):
+    """The product's test command, then ``asf check``. A product that configures no
+    ``conventions.test_command`` is gated by ``asf check`` alone — never by a command this
+    package guessed at."""
+    conv = conv or DEFAULTS
     env = gate_env()
-    t = sh([sys.executable, '-m', 'unittest', 'discover', '-s', 'tools', '-p', 'test_*.py'], cwd=tmp, env=env)
-    if t.returncode != 0:
-        return False, f'tests failed: {tail(t.stderr or t.stdout)}'
-    c = sh([sys.executable, os.path.join('tools', 'backlog.py'), 'check'], cwd=tmp, env=env)
+    if conv.test_command:
+        t = sh(shlex.split(str(conv.test_command)), cwd=tmp, env=env)
+        if t.returncode != 0:
+            return False, f'tests failed: {tail(t.stderr or t.stdout)}'
+    c = sh(asf_cmd('check'), cwd=tmp, env=env)
     if c.returncode != 0:
-        return False, f'backlog.py check failed: {tail(c.stdout or c.stderr)}'
+        return False, f'asf check failed: {tail(c.stdout or c.stderr)}'
     return True, None
 
 
 # --------------------------------------------------------------------- push --
 
-def push_ff(repo, sha):
-    """Fast-forward-only push of `sha` to origin/main. Returns (pushed, not_ff)."""
-    sh(['git', 'fetch', '-q', 'origin', 'main'], cwd=repo)
-    origin_sha = sh(['git', 'rev-parse', 'origin/main'], cwd=repo).stdout.strip()
+def push_ff(repo, sha, trunk='main'):
+    """Fast-forward-only push of `sha` to ``origin/<trunk>``. Returns (pushed, not_ff)."""
+    sh(['git', 'fetch', '-q', 'origin', trunk], cwd=repo)
+    origin_sha = sh(['git', 'rev-parse', f'origin/{trunk}'], cwd=repo).stdout.strip()
     anc = sh(['git', 'merge-base', '--is-ancestor', origin_sha, sha], cwd=repo)
     if anc.returncode != 0:
         return False, True
-    push = sh(['git', 'push', 'origin', f'{sha}:refs/heads/main'], cwd=repo)
+    push = sh(['git', 'push', 'origin', f'{sha}:refs/heads/{trunk}'], cwd=repo)
     return push.returncode == 0, False
 
 
@@ -305,19 +340,21 @@ def repo_slug(repo):
     return m.group(1) if m else url
 
 
-def pr_create_line(repo, tmp, branch):
+def pr_create_line(repo, tmp, branch, trunk='main'):
     slug = repo_slug(repo)
     subj = sh(['git', 'log', '-1', '--format=%s'], cwd=tmp).stdout.strip() or branch
     title = subj[:69] + '…' if len(subj) > 70 else subj
     title = title.replace('"', '\\"')
     body = f'Opened by the tick (harvest.py) from {branch}.'
-    return (f'PR: gh pr create -R {slug} --base main --head {branch} '
+    return (f'PR: gh pr create -R {slug} --base {trunk} --head {branch} '
             f'--title "{title}" --body "{body}"')
 
 
 # ---------------------------------------------------------------- per-branch --
 
-def harvest_branch(repo, workers_dir, is_backlog, job, branch, dry_run):
+def harvest_branch(repo, state_dir, is_record, job, branch, dry_run, conv=None):
+    conv = conv or DEFAULTS
+    trunk = conv.main
     for _attempt in (1, 2):
         holder = tempfile.mkdtemp(prefix=f'harvest-{job}-')
         tmp = os.path.join(holder, 'wt')
@@ -327,49 +364,49 @@ def harvest_branch(repo, workers_dir, is_backlog, job, branch, dry_run):
             if add.returncode != 0:
                 return hold(job, f'worktree add failed: {tail(add.stderr)}')
 
-            sh(['git', 'fetch', '-q', 'origin', 'main'], cwd=tmp)
-            ok, reason = rebase_and_resolve(tmp)
+            sh(['git', 'fetch', '-q', 'origin', trunk], cwd=tmp)
+            ok, reason = rebase_and_resolve(tmp, trunk)
             if not ok:
                 return hold(job, reason)
 
-            if is_backlog:
-                idx = sh([sys.executable, os.path.join('tools', 'backlog.py'), 'index'], cwd=tmp, env=gate_env())
+            if is_record:
+                idx = sh(asf_cmd('index'), cwd=tmp, env=gate_env())
                 if idx.returncode != 0:
-                    return hold(job, f'backlog.py index failed: {tail(idx.stderr or idx.stdout)}')
+                    return hold(job, f'asf index failed: {tail(idx.stderr or idx.stdout)}')
                 if sh(['git', 'status', '--porcelain'], cwd=tmp).stdout.strip():
                     sh(['git', 'add', '-A'], cwd=tmp)
                     commit = sh(['git', '-c', 'core.editor=true', 'commit', '-qm',
                                  'harvest: regenerate index.json'], cwd=tmp)
                     if commit.returncode != 0:
                         return hold(job, f'index regen commit failed: {tail(commit.stderr or commit.stdout)}')
-                gate_ok, gate_reason = run_gate(tmp)
+                gate_ok, gate_reason = run_gate(tmp, conv)
                 if not gate_ok:
                     return hold(job, gate_reason)
 
             sha = sh(['git', 'rev-parse', 'HEAD'], cwd=tmp).stdout.strip()
 
             if dry_run:
-                dest = 'main' if is_backlog else f'origin/{branch}'
+                dest = trunk if is_record else f'origin/{branch}'
                 print(f'DRY: would push {job} {sha} -> {dest}')
                 return 'dry'
 
-            if is_backlog:
-                pushed, not_ff = push_ff(repo, sha)
+            if is_record:
+                pushed, not_ff = push_ff(repo, sha, trunk)
                 if not_ff:
-                    continue  # origin/main moved under us — retry the whole cycle once
+                    continue  # the trunk moved under us — retry the whole cycle once
                 if not pushed:
-                    return hold(job, 'push to main failed (not a fast-forward)')
+                    return hold(job, f'push to {trunk} failed (not a fast-forward)')
             else:
                 if not push_branch(repo, sha, branch):
                     return hold(job, 'push branch failed')
-                print(pr_create_line(repo, tmp, branch))
+                print(pr_create_line(repo, tmp, branch, trunk))
 
-            reap(repo, workers_dir, job, branch)
+            reap(repo, state_dir, job, branch, sha)
             print(f'HARVEST OK {job} {sha}')
             return 'ok'
         finally:
             sh(['git', 'worktree', 'remove', '--force', tmp], cwd=repo)
-    return hold(job, 'main moved again on retry')
+    return hold(job, f'{trunk} moved again on retry')
 
 
 def hold(job, reason):
@@ -379,42 +416,59 @@ def hold(job, reason):
 
 # -------------------------------------------------------------------- main --
 
-def worker_branches(repo):
-    r = sh(['git', 'branch', '--list', 'worker/*', '--format=%(refname:short)'], cwd=repo)
-    return sorted(l for l in r.stdout.splitlines() if l.strip())
+def worker_branches(repo, conv=None):
+    """Every local branch under the product's code prefix (and its retired ones)."""
+    conv = conv or DEFAULTS
+    prefixes = (conv.prefix('code'),) + conv.legacy_prefixes()
+    out = []
+    for prefix in prefixes:
+        r = sh(['git', 'branch', '--list', f'{prefix}*', '--format=%(refname:short)'], cwd=repo)
+        out.extend(l for l in r.stdout.splitlines() if l.strip())
+    return sorted(dict.fromkeys(out))
 
 
-def run_harvest(repo, workers_dir, dry_run):
+def is_record_repo(repo):
+    """The record repo carries the generated ``index.json`` at its root; a product repo does
+    not, and is pushed under its own branch instead of landed on the trunk."""
+    return os.path.isfile(os.path.join(repo, 'index.json'))
+
+
+def run_harvest(repo, state_dir, dry_run, conv=None):
+    conv = conv or DEFAULTS
     repo = os.path.abspath(repo)
-    workers_dir = os.path.abspath(workers_dir)
-    is_backlog = os.path.isfile(os.path.join(repo, 'tools', 'backlog.py'))
-    sh(['git', 'fetch', '-q', 'origin', 'main'], cwd=repo)
-    for branch in worker_branches(repo):
-        job = branch[len('worker/'):]
-        meta = read_job_meta(workers_dir, job)
-        if not is_eligible(meta):
+    state_dir = os.path.abspath(state_dir)
+    is_record = is_record_repo(repo)
+    sessions = read_sessions(state_dir)
+    sh(['git', 'fetch', '-q', 'origin', conv.main], cwd=repo)
+    for branch in worker_branches(repo, conv):
+        job = conv.strip_prefix(branch)
+        if not is_eligible(sessions.get(job)):
             continue
-        ahead = sh(['git', 'rev-list', '--count', f'origin/main..{branch}'], cwd=repo).stdout.strip()
+        ahead = sh(['git', 'rev-list', '--count', f'origin/{conv.main}..{branch}'],
+                   cwd=repo).stdout.strip()
         if ahead in ('', '0'):
             continue
-        harvest_branch(repo, workers_dir, is_backlog, job, branch, dry_run)
+        harvest_branch(repo, state_dir, is_record, job, branch, dry_run, conv)
     return 0
 
 
 def build_parser():
     p = argparse.ArgumentParser(prog='harvest.py')
     p.add_argument('--repo', default=None,
-                    help="backlog repo path (default: the product's backlog_dir, see --product)")
+                    help="record repo path (default: the product's backlog_dir, see --product)")
     env.add_product_arg(p)
-    p.add_argument('--workers-dir', default=DEFAULT_WORKERS_DIR)
+    p.add_argument('--state-dir', default=None,
+                    help="the product's state directory (default: ~/.ASF/state/<product>)")
     p.add_argument('--dry-run', action='store_true')
     return p
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    repo = args.repo or env.load_product(args.product).backlog_dir
-    return run_harvest(repo, args.workers_dir, args.dry_run)
+    product = env.load_product(args.product)
+    repo = args.repo or product.backlog_dir
+    state_dir = args.state_dir or env.state_dir(product)
+    return run_harvest(repo, state_dir, args.dry_run, product.conventions)
 
 
 if __name__ == '__main__':

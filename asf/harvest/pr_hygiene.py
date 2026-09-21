@@ -4,7 +4,8 @@
 Reads a product's open PRs and sorts the ones GitHub calls `dirty` (conflicting with main) into two lanes:
 
   CONFLICT → REBASE  #<n> <branch> (<item>) approved, dirty since <age>   → launch rebase-<slug> (Sonnet)
-      an APPROVED PR (the branch's newest `.sdd-input/reviews/*-review-r*.md` verdict, else reviewDecision) that has been
+      an APPROVED PR (the branch's newest review file under the product's `conventions.reviews_dir`,
+      else reviewDecision) that has been
       dirty for more than one tick. The review stands: a Sonnet merges main into the branch, the PR's own CI reruns.
   STALE → CLOSE      #<n> <branch> (<item>) unreviewed, dirty <days>d   → close
       a PR with no review at all that has been dirty for more than 7 days. `--close` closes it with a comment naming its
@@ -13,15 +14,15 @@ Reads a product's open PRs and sorts the ones GitHub calls `dirty` (conflicting 
 
 Approved PRs are never closed; nobody's branch is pushed to or deleted here.
 
-`mergeable_state` carries no timestamp, so "dirty since" is kept in /tmp/pr-hygiene-state.json: the first run that saw the
+`mergeable_state` carries no timestamp, so "dirty since" is kept in `~/.ASF/state/<product>/pr-hygiene.json`: the first run that saw the
 PR dirty at its current head sha records `first_seen` (now) and `since` (the PR's `updated_at`, the last activity — a PR
 nobody has touched for 8 days that we see dirty for the first time is 8 days dirty for our purposes). A new push resets
 both, and a PR that turns clean drops out. The rebase lane waits for `first_seen` to be older than one tick (PRH_TICK_S,
 default 300 s) — a PR that is dirty for one look is a queue race, not work.
 
-    pr_hygiene.py            print the rows (read-only; PR reads cached 3 minutes in /tmp)
+    pr_hygiene.py            print the rows (read-only; PR reads cached 3 minutes under the state dir)
     pr_hygiene.py --close    close the STALE → CLOSE PRs (the tick's one line)
-    pr_hygiene.py --lanes    the PR numbers in either lane, one per line (tools/checks/r0032.sh skips them)
+    pr_hygiene.py --lanes    the PR numbers in either lane, one per line (the rule check skips them)
     pr_hygiene.py --product <name>   which product's PRs/checkout to read (default: see asf.env)
 """
 import datetime
@@ -35,6 +36,7 @@ import sys
 import time
 
 from asf import env
+from asf.conventions import Conventions
 from asf.record import core as backlog
 from asf.record import frontmatter
 from asf.record import match
@@ -44,15 +46,19 @@ STALE_DAYS = 7
 TICK_S = int(os.environ.get('PRH_TICK_S', '300'))
 VERDICT = re.compile(r'APPROVED|CHANGES REQUESTED|BOUNCE|REVISE', re.I)
 VERDICT_LINE = re.compile(r'^[\s*#>-]*verdict\b', re.I)
-REVIEW_FILE = re.compile(r'^\.sdd-input/reviews/.*-review-r(\d+)[a-z]?\.md$')
+#: A review file of round `n` inside the product's reviews_dir: `<anything>-review-r<n>[a-z].md`.
+REVIEW_ROUND = re.compile(r'-review-r(\d+)[a-z]?\.md$')
+DEFAULTS = Conventions()
 
 
-def cache_dir():
-    return os.environ.get('PRH_CACHE_DIR', '/tmp')
+def cache_dir(product=None):
+    """Where the PR reads and the dirty-since state are kept: ``$PRH_CACHE_DIR`` when the
+    operator points it somewhere, else the product's own state directory under ``~/.ASF``."""
+    return os.environ.get('PRH_CACHE_DIR') or env.state_dir(product)
 
 
-def state_path():
-    return os.path.join(cache_dir(), 'pr-hygiene-state.json')
+def state_path(product=None):
+    return os.path.join(cache_dir(product), 'pr-hygiene.json')
 
 
 def run(cmd):
@@ -63,10 +69,10 @@ def run(cmd):
     return p.stdout
 
 
-def cached(key, fn, now=None):
-    """`fn()` (JSON-able) cached 3 minutes in /tmp under `key`."""
+def cached(key, fn, now=None, product=None):
+    """`fn()` (JSON-able) cached 3 minutes in the state directory under `key`."""
     now = now or time.time()
-    path = os.path.join(cache_dir(), 'pr-hygiene-' + hashlib.md5(key.encode()).hexdigest()[:12] + '.json')
+    path = os.path.join(cache_dir(product), 'pr-hygiene-' + hashlib.md5(key.encode()).hexdigest()[:12] + '.json')
     try:
         if now - os.stat(path).st_mtime < CACHE_TTL:
             with open(path, encoding='utf-8') as f:
@@ -89,20 +95,23 @@ def fetch_open_prs(product=None):
     """(pulls list JSON, {n: mergeable_state JSON}, {n: reviewDecision})."""
     product = product or env.load_product()
     repo = product.repo_slug
-    pulls = cached('pulls', lambda: json.loads(run(['gh', 'api', f'repos/{repo}/pulls?state=open&per_page=100'])))
+    pulls = cached('pulls', lambda: json.loads(run(['gh', 'api', f'repos/{repo}/pulls?state=open&per_page=100'])),
+                   product=product)
     decisions = cached('decisions', lambda: {str(d['number']): d.get('reviewDecision') or '' for d in json.loads(run(
-        ['gh', 'pr', 'list', '-R', repo, '--state', 'open', '--limit', '100', '--json', 'number,reviewDecision']))})
+        ['gh', 'pr', 'list', '-R', repo, '--state', 'open', '--limit', '100', '--json', 'number,reviewDecision']))},
+                       product=product)
     details = {p['number']: cached(f"pull-{p['number']}", lambda n=p['number']: json.loads(
-        run(['gh', 'api', f'repos/{repo}/pulls/{n}']))) for p in pulls}
+        run(['gh', 'api', f'repos/{repo}/pulls/{n}'])), product=product) for p in pulls}
     return pulls, details, decisions
 
 
-def normalize(pulls, details, decisions):
-    """The GitHub JSON → one flat dict per PR: only non-draft PRs into main, whatever their mergeable_state."""
+def normalize(pulls, details, decisions, conv=None):
+    """The GitHub JSON → one flat dict per PR: only non-draft PRs into the trunk, whatever their mergeable_state."""
+    conv = conv or DEFAULTS
     out = []
     for p in pulls:
         n = p['number']
-        if p.get('draft') or (p.get('base') or {}).get('ref', 'main') != 'main':
+        if p.get('draft') or (p.get('base') or {}).get('ref', conv.main) != conv.main:
             continue
         out.append({'n': n, 'branch': p['head']['ref'], 'sha': p['head']['sha'], 'title': p.get('title') or '',
                     'body': p.get('body') or '', 'updated': ts(p['updated_at']),
@@ -122,14 +131,16 @@ def parse_verdict(text):
     return m.group(0).upper() if m else ''
 
 
-def branch_verdict(branch, git=None, product=None):
-    """The verdict of the branch's newest review file, read-only from origin/<branch>; '' = no review file or no such ref."""
+def branch_verdict(branch, git=None, product=None, conv=None):
+    """The verdict of the branch's newest review file, read-only from origin/<branch>; '' = no review file or no
+    such ref. Reviews live under the product's `conventions.reviews_dir`."""
     if git is None:
         product = product or env.load_product()
         git = lambda *a: run(['git', '-C', product.repo_dir, *a])
+    conv = conv or (product.conventions if product is not None else DEFAULTS)
     try:
-        names = git('ls-tree', '-r', '--name-only', f'origin/{branch}', '--', '.sdd-input/reviews').splitlines()
-        rounds = sorted((int(m.group(1)), f) for f in names for m in [REVIEW_FILE.match(f)] if m)
+        names = git('ls-tree', '-r', '--name-only', f'origin/{branch}', '--', conv.reviews_dir).splitlines()
+        rounds = sorted((int(m.group(1)), f) for f in names for m in [REVIEW_ROUND.search(f)] if m)
         return parse_verdict(git('show', f'origin/{branch}:{rounds[-1][1]}')) if rounds else ''
     except RuntimeError:
         return ''
@@ -144,19 +155,20 @@ def review_state(pr, verdict):
     return 'reviewed' if pr['decision'] == 'CHANGES_REQUESTED' else 'unreviewed'
 
 
-def load_state():
+def load_state(product=None):
     try:
-        with open(state_path(), encoding='utf-8') as f:
+        with open(state_path(product), encoding='utf-8') as f:
             return json.load(f)
     except (OSError, ValueError):
         return {}
 
 
-def save_state(state):
-    tmp = f'{state_path()}.{os.getpid()}'
+def save_state(state, product=None):
+    path = state_path(product)
+    tmp = f'{path}.{os.getpid()}'
     with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(state, f)
-    os.replace(tmp, state_path())
+    os.replace(tmp, path)
 
 
 def age(sec):
@@ -165,7 +177,7 @@ def age(sec):
 
 
 def find_items(items, pr):
-    """(ids matched by tools/match.py, the Tasks among them)."""
+    """(ids matched by :mod:`asf.record.match`, the Tasks among them)."""
     ids, _why = match.match_event(items, branch=pr['branch'], pr=pr['n'], title=pr['title'], body=pr['body'])
     return ids, [i for i in ids if items[i].get('type') == 'task']
 
@@ -197,11 +209,12 @@ def item_label(row):
     return ','.join(row['ids'][:2]) or '—'
 
 
-def render(row):
+def render(row, conv=None):
+    conv = conv or DEFAULTS
     pr = row['pr']
     head = f"#{pr['n']} {pr['branch']} ({item_label(row)})"
     if row['kind'] == 'REBASE':
-        slug = pr['branch'].removeprefix('cloud/').replace('/', '-')
+        slug = conv.strip_prefix(pr['branch']).replace('/', '-')
         return f"CONFLICT → REBASE  {head} approved, dirty since {age(row['since'])}   → launch rebase-{slug} (Sonnet)"
     days = int(row['since'] // 86400)
     if row['kind'] == 'CLOSE':
@@ -217,9 +230,12 @@ def load_index(product=None):
 def compute(now=None, git=None, product=None):
     now = now or time.time()
     product = product or env.load_product()
-    prs = normalize(*fetch_open_prs(product))
-    rows, new_state = classify(prs, load_index(product), lambda b: branch_verdict(b, git, product), load_state(), now)
-    save_state(new_state)
+    conv = product.conventions
+    prs = normalize(*fetch_open_prs(product), conv=conv)
+    rows, new_state = classify(prs, load_index(product),
+                               lambda b: branch_verdict(b, git, product, conv),
+                               load_state(product), now)
+    save_state(new_state, product)
     return rows
 
 
@@ -273,7 +289,7 @@ def close_row(row, gh=None, now=None, product=None):
     pr, days = row['pr'], int(row['since'] // 86400)
     task = row['tasks'][0]
     gh('api', f"repos/{repo}/issues/{pr['n']}/comments", '-f', 'body=' + (
-        f"Closed by PR hygiene (F-0143): this PR was never reviewed and has conflicted with `main` for {days} days. "
+        f"Closed by PR hygiene: this PR was never reviewed and has conflicted with `main` for {days} days. "
         f"Its Task {task} is re-queued — the PR and branch links are cleared so the feeder builds it again from current "
         f"`main`. The branch `{pr['branch']}` is left in place."))
     gh('api', '-X', 'PATCH', f"repos/{repo}/pulls/{pr['n']}", '-f', 'state=closed')
@@ -310,7 +326,7 @@ def main(argv):
         return 0
     for r in rows:
         if r['ready']:
-            print(render(r))
+            print(render(r, product.conventions))
     return 0
 
 
