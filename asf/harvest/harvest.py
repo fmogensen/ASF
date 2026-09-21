@@ -452,10 +452,251 @@ def run_harvest(repo, state_dir, dry_run, conv=None):
     return 0
 
 
+# ------------------------------------------------------------ product repo --
+#
+# A product repo's lane branches (every prefix: code, fix, spec, plan, legacy) live on its
+# origin, pushed by the session; the registry keys a session by its job and records the branch
+# it pushed. Harvest finds each ``origin/<prefix>*`` branch's session by that ``branch`` field,
+# checks it is finished and that every commit names the branch's item, then lands it by the
+# product's ``landing`` convention:
+#
+# * ``fast-forward`` (the default when the product's ``batch`` step is off or unset — nothing
+#   else would ever land it): rebase onto ``origin/<main>`` in a throwaway worktree, gate it,
+#   push ``HEAD:<main>`` fast-forward only, mark the session ``harvested``, delete the branch;
+# * ``pull-request`` (the default when a ``batch`` step runs a merge queue): never touch the
+#   trunk — the ``prs`` step already opened the PR — and only mark the session ``harvest: pr``.
+
+LANDING_FF = 'fast-forward'
+LANDING_PR = 'pull-request'
+ITEM_ID_RE = re.compile(r'\b([A-Za-z]+-\d{4})\b')
+FAIL_LINE_RE = re.compile(r'^(FAIL|ERROR)\b|\b(failed|FAILED|error|Error|violation)\b')
+#: asf's own gate scripts, run on top of the test command only when the repo harvested is this
+#: package's own (under its ``tools`` directory) — no product carries them.
+ASF_GATE_SCRIPTS = ('check_generic', 'check_conventions')
+
+
+def landing(product):
+    """``conventions.landing``, else ``fast-forward`` when ``steps.batch`` is off or unset, else
+    ``pull-request``."""
+    value = product.conventions.get('landing')
+    if value:
+        return str(value).strip().lower()
+    batch = (product._get('steps') or {}).get('batch')
+    if batch is None or batch is False or str(batch).strip().lower() == 'off':
+        return LANDING_FF
+    return LANDING_PR
+
+
+def sessions_by_branch(state_dir):
+    """``{branch: record}``: for every branch, the latest start line naming it (a line carrying
+    ``branch`` and ``started``/``pid``), folded with the later lines for its job (``ended``,
+    ``rc``, ``end_reason``, ``harvested``…). A job relaunched on another branch starts a fresh
+    record; the old branch keeps the one it had."""
+    by_job, by_branch = {}, {}
+    path = sessions_path(state_dir)
+    if not os.path.isfile(path):
+        return by_branch
+    with open(path, encoding='utf-8') as f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(rec, dict) or not rec.get('job'):
+                continue
+            if rec.get('branch') and ('started' in rec or 'pid' in rec):
+                cur = dict(rec)
+                by_job[rec['job']] = cur
+                by_branch[rec['branch']] = cur
+            else:
+                by_job.setdefault(rec['job'], {}).update(rec)
+    return by_branch
+
+
+def mark_session(state_dir, job, **fields):
+    path = sessions_path(state_dir)
+    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    with open(path, 'a', encoding='utf-8') as f:
+        f.write(json.dumps(dict(fields, job=job), sort_keys=True) + '\n')
+
+
+def remote_branches(repo, conv):
+    """Every ``origin/<prefix>*`` branch, the prefix stripped of ``origin/``, for every prefix the
+    product's branches can carry."""
+    out = []
+    for prefix in conv.all_prefixes():
+        r = sh(['git', 'for-each-ref', '--format=%(refname:short)',
+                f'refs/remotes/origin/{prefix}*'], cwd=repo)
+        out.extend(l[len('origin/'):] for l in r.stdout.splitlines() if l.startswith('origin/'))
+    return sorted(dict.fromkeys(out))
+
+
+def item_of(branch, record):
+    """The branch's item id: the session's ``item``, else the id token in the branch name."""
+    item = (record or {}).get('item')
+    if item:
+        return str(item)
+    m = ITEM_ID_RE.search(branch.rsplit('/', 1)[-1]) or ITEM_ID_RE.search(branch)
+    return m.group(1).upper() if m else None
+
+
+def commits_name_item(repo, trunk, branch, item):
+    """True when every commit subject on ``origin/<branch>`` not on ``origin/<trunk>`` names
+    ``item`` as a token."""
+    subjects = sh(['git', 'log', '--no-merges', '--format=%s',
+                   f'origin/{trunk}..origin/{branch}'], cwd=repo).stdout.splitlines()
+    token = re.compile(r'(?<![\w-])' + re.escape(item) + r'(?![\w])', re.I)
+    return bool(subjects) and all(token.search(s) for s in subjects)
+
+
+def is_asf_repo(repo):
+    """True when ``repo`` is this package's own repo (same real path, or the same git common
+    dir — a linked worktree of it counts)."""
+    import asf
+    own = os.path.dirname(os.path.dirname(os.path.realpath(asf.__file__)))
+    if os.path.realpath(repo) == own:
+        return True
+
+    def common(path):
+        d = sh(['git', 'rev-parse', '--git-common-dir'], cwd=path).stdout.strip()
+        return os.path.realpath(os.path.join(path, d)) if d else None
+    theirs = common(repo)
+    return theirs is not None and theirs == common(own)
+
+
+def first_failing_line(text):
+    lines = [l.strip() for l in (text or '').splitlines() if l.strip()]
+    for l in lines:
+        if FAIL_LINE_RE.search(l):
+            return l
+    return lines[-1] if lines else 'no output'
+
+
+def product_gate(tmp, conv, asf_repo):
+    """``(ok, first failing line)``: the product's test command, then — on asf's own repo — its
+    generic and conventions checks."""
+    cmds = []
+    if conv.test_command:
+        cmds.append(shlex.split(str(conv.test_command)))
+    if asf_repo:
+        cmds += [['bash', os.path.join('tools', name + '.sh')] for name in ASF_GATE_SCRIPTS]
+    env = gate_env()
+    for cmd in cmds:
+        r = sh(cmd, cwd=tmp, env=env)
+        if r.returncode != 0:
+            return False, first_failing_line((r.stdout or '') + '\n' + (r.stderr or ''))
+    return True, None
+
+
+def file_gate_bug(root, branch, item, line, conv):
+    """File (or bump) the Bug for a red harvest gate in the record at ``root``, keyed on the
+    failing line. Returns ``filed``/``bumped``/``skipped``, or None when the record could not
+    be read."""
+    from asf.tick import file_bugs as fb
+    by_id, errors = fb.load_items(root)
+    if errors:
+        return None
+    canonical, _dupes = fb.canonicalize(by_id)
+    sig = f'harvest gate red: {line}'[:200]
+    info = {'title': fb.truncate(f'Harvest gate red: {line}', 100), 'severity': 'S2',
+            'runs': [], 'evidence': [f'{branch} ({item}): {line}']}
+    return fb._file_or_bump_bug(root, canonical, sig, info, fb.today(),
+                                default_bug_epic=conv.default_bug_epic)
+
+
+def land_ff(repo, state_dir, branch, record, item, conv, asf_repo, bug_root, dry_run, out):
+    trunk = conv.main
+    job = record.get('job') or branch
+    for _attempt in (1, 2):
+        holder = tempfile.mkdtemp(prefix='harvest-')
+        tmp = os.path.join(holder, 'wt')
+        try:
+            add = sh(['git', 'worktree', 'add', '--detach', tmp, f'origin/{branch}'], cwd=repo)
+            if add.returncode != 0:
+                out(f'held {branch}: worktree add failed: {tail(add.stderr)}')
+                return 'held'
+            ok, reason = rebase_and_resolve(tmp, trunk)
+            if not ok:
+                out(f'held {branch}: {reason}')
+                return 'held'
+            ok, line = product_gate(tmp, conv, asf_repo)
+            if not ok:
+                out(f'held {branch}: {line}')
+                root = bug_root() if callable(bug_root) else bug_root
+                filed = file_gate_bug(root, branch, item, line, conv) if root else None
+                if filed is None:
+                    out(f'BUG: harvest gate red {branch}')
+                else:
+                    out(f'bug {filed}: harvest gate red {branch}')
+                return 'held'
+            sha = sh(['git', 'rev-parse', 'HEAD'], cwd=tmp).stdout.strip()
+            if dry_run:
+                out(f'DRY: would land {branch} → {sha}')
+                return 'dry'
+            pushed, not_ff = push_ff(repo, sha, trunk)
+            if not_ff:
+                continue  # the trunk moved under us — rebase again, once
+            if not pushed:
+                out(f'held {branch}: push to {trunk} refused')
+                return 'held'
+            mark_session(state_dir, job, harvested=sha)
+            sh(['git', 'push', '-q', 'origin', '--delete', branch], cwd=repo)
+            out(f'landed {branch} → {sha}')
+            return 'landed'
+        finally:
+            sh(['git', 'worktree', 'remove', '--force', tmp], cwd=repo)
+    out(f'held {branch}: {trunk} moved again on retry')
+    return 'held'
+
+
+def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, out=print):
+    """Land (or hand to the PR lane) every finished lane branch on the product repo's origin.
+    ``bug_root`` is the record a red gate files its Bug in — a path, or a callable returning
+    one (the tick's record clone, made only when needed); None prints ``BUG:`` instead.
+    Returns ``{branch: outcome}``."""
+    conv = product.conventions
+    repo = os.path.abspath(product.repo_dir)
+    if is_record_repo(repo):  # the record's own gate and index regeneration, as before
+        run_harvest(repo, state_dir or env.state_dir(product), dry_run, conv)
+        return {}
+    state_dir = os.path.abspath(state_dir or env.state_dir(product))
+    trunk = conv.main
+    mode = landing(product)
+    sh(['git', 'fetch', '-q', '--prune', 'origin'], cwd=repo)
+    sessions = sessions_by_branch(state_dir)
+    asf_repo = None
+    results = {}
+    for branch in remote_branches(repo, conv):
+        record = sessions.get(branch)
+        if not is_eligible(record) or record.get('harvest') == 'pr':
+            continue
+        ahead = sh(['git', 'rev-list', '--count', f'origin/{trunk}..origin/{branch}'],
+                   cwd=repo).stdout.strip()
+        if ahead in ('', '0'):
+            continue
+        item = item_of(branch, record)
+        if not item or not commits_name_item(repo, trunk, branch, item):
+            out(f'held {branch}: commits do not name {item or "an item id"}')
+            results[branch] = 'held'
+            continue
+        if mode == LANDING_PR:
+            if not dry_run:
+                mark_session(state_dir, record.get('job') or branch, harvest='pr')
+            out(f'pr-lane {branch}')
+            results[branch] = 'pr'
+            continue
+        if asf_repo is None:
+            asf_repo = is_asf_repo(repo)
+        results[branch] = land_ff(repo, state_dir, branch, record, item, conv, asf_repo,
+                                  bug_root, dry_run, out)
+    return results
+
+
 def build_parser():
     p = argparse.ArgumentParser(prog='harvest.py')
     p.add_argument('--repo', default=None,
-                    help="record repo path (default: the product's backlog_dir, see --product)")
+                    help="a repo to harvest its local code branches in (the record repo's "
+                         "path); default: the product's repo_dir, its origin's lane branches")
     env.add_product_arg(p)
     p.add_argument('--state-dir', default=None,
                     help="the product's state directory (default: ~/.ASF/state/<product>)")
@@ -466,9 +707,14 @@ def build_parser():
 def main(argv=None):
     args = build_parser().parse_args(argv)
     product = env.load_product(args.product)
-    repo = args.repo or product.backlog_dir
     state_dir = args.state_dir or env.state_dir(product)
-    return run_harvest(repo, state_dir, args.dry_run, product.conventions)
+    if args.repo:
+        return run_harvest(args.repo, state_dir, args.dry_run, product.conventions)
+    if not product.repo_dir:
+        print(f'harvest: product {product.name} has no repo_dir — nothing to harvest')
+        return 0
+    run_product_harvest(product, state_dir, args.dry_run)
+    return 0
 
 
 if __name__ == '__main__':
