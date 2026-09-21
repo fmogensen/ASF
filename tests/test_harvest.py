@@ -249,6 +249,22 @@ class HarvestTests(unittest.TestCase):
         self.assertEqual(branches.strip(), '')
         self.assertTrue(harvested(self.state_dir, 'ff1'))
 
+    # -- B-0009: no reap unless the trunk really holds the branch tip ----------------------
+    def test_no_reap_unless_fast_forward_landed(self):
+        branch, wt = add_job_worktree(self.repo, self.state_dir, 'nr1')
+        write_epic(wt, 'E-0002', 'New epic from nr1')
+        index_and_commit(wt, 'nr1: add E-0002')
+        write_session(self.state_dir, 'nr1', branch)
+
+        # a push that claims success while origin/main never received the commit
+        with mock.patch.object(harvest, 'push_ff', return_value=(True, False)):
+            rc, out = run_harvest(self.repo, self.state_dir)
+        self.assertNotIn('HARVEST OK', out)
+        self.assertIn('HARVEST HOLD nr1', out)
+        self.assertTrue(os.path.isdir(wt))
+        self.assertNotEqual(sh(['git', 'branch', '--list', branch], cwd=self.repo).stdout.strip(), '')
+        self.assertFalse(harvested(self.state_dir, 'nr1'))
+
     # -- a non-machine conflict holds the branch and names the file ------------------------
     def test_non_machine_conflict_is_held(self):
         branch, wt = add_job_worktree(self.repo, self.state_dir, 'conflict1')

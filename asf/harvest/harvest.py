@@ -430,6 +430,10 @@ def harvest_branch(repo, state_dir, is_record, job, branch, dry_run, conv=None):
                     continue  # the trunk moved under us — retry the whole cycle once
                 if not pushed:
                     return hold(job, f'push to {trunk} failed (not a fast-forward)')
+                sh(['git', 'fetch', '-q', 'origin', trunk], cwd=repo)
+                landed = sh(['git', 'merge-base', '--is-ancestor', sha, f'origin/{trunk}'], cwd=repo)
+                if landed.returncode != 0:
+                    return hold(job, f'{sha} is not on origin/{trunk} after the push — nothing reaped')
             else:
                 if not push_branch(repo, sha, branch):
                     return hold(job, 'push branch failed')
@@ -676,6 +680,10 @@ def land_ff(repo, state_dir, branch, record, item, conv, asf_repo, bug_root, dry
                 continue  # the trunk moved under us — rebase again, once
             if not pushed:
                 out(f'held {branch}: push to {trunk} refused')
+                return 'held'
+            sh(['git', 'fetch', '-q', 'origin', trunk], cwd=repo)
+            if sh(['git', 'merge-base', '--is-ancestor', sha, f'origin/{trunk}'], cwd=repo).returncode != 0:
+                out(f'held {branch}: {sha} is not on origin/{trunk} after the push')
                 return 'held'
             mark_session(state_dir, job, harvested=sha)
             sh(['git', 'push', '-q', 'origin', '--delete', branch], cwd=repo)
