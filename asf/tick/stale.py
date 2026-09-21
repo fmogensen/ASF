@@ -1,16 +1,17 @@
 """asf.tick.stale — items over their configured stage limit (``asf stale``).
 
-The stage limits (README's "Stale" rule) are checked against `stage_since`, the one clock
-ingest already keeps for every item. `card_undecided`/`undecided_close` read `decided`; a
+The stage limits (README's "Stale" rule) come from the product yaml's `stage_limits` (durations
+like `3d`, `24h`, `45m`), each key falling back to `DEFAULT_LIMITS`, and are checked against
+`stage_since`, the one clock ingest already keeps for every item. `card_undecided`/`undecided_close` read `decided`; a
 Feature's spec/plan/build limits read `stage`; `task_active` and the two Bug severities read
 `state`.
 """
 import datetime
 import json
-import os
 import re
 import sys
 
+from asf import env
 from asf.record import frontmatter
 from asf.record.core import canonicalize, load_items
 
@@ -20,14 +21,44 @@ _DURATION_SECS = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}
 CLOSED_LIKE = {'Resolved', 'Closed'}
 
 
-def load_limits(root):
-    path = os.path.join(root, 'tools', 'limits.json')
-    with open(path, encoding='utf-8') as f:
-        return json.load(f)
+# The limits every product gets unless its `stage_limits` says otherwise.
+DEFAULT_LIMITS = {
+    'card_undecided': '3d',
+    'spec-draft': '24h',
+    'spec-review': '12h',
+    'plan-draft': '24h',
+    'plan-review': '12h',
+    'plan-approved': '24h',
+    'task_active': '45m',
+    'pr_approved_unbatched': '10m',
+    'bug_S1': '10m',
+    'bug_S2': '24h',
+    'undecided_close': '14d',
+}
+
+
+def load_limits(product=None):
+    """DEFAULT_LIMITS overlaid with the product's `stage_limits`. A value that is not a duration
+    (a key another step reads, like a plain number) is left out."""
+    limits = dict(DEFAULT_LIMITS)
+    given = (product.stage_limits if product is not None else None) or {}
+    for key, value in given.items():
+        if isinstance(value, str) and DURATION_RE.match(value.strip()):
+            limits[key] = value.strip()
+    return limits
+
+
+def product_of(args):
+    """The product `--product`, `$ASF_PRODUCT` or the config default names; None when there is
+    no config at all, which leaves the defaults in force."""
+    try:
+        return env.load_product(getattr(args, 'product', None))
+    except env.ConfigError:
+        return None
 
 
 def limit_seconds(limit):
-    m = DURATION_RE.match(limit)
+    m = DURATION_RE.match(str(limit))
     if not m:
         raise ValueError(f"bad duration {limit!r}")
     return int(m.group(1)) * _DURATION_SECS[m.group(2)]
@@ -117,7 +148,7 @@ def cmd_stale(args, root):
             print(f"{f}:{line}: {why}", file=sys.stderr)
         return 1
     canonical, _dupes = canonicalize(by_id)
-    limits = load_limits(root)
+    limits = load_limits(product_of(args))
     now = datetime.datetime.now(datetime.timezone.utc)
     rows = find_stale(canonical, limits, now)
 
