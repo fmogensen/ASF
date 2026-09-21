@@ -92,6 +92,33 @@ def build_parser():
     p_doctor = sub.add_parser('doctor', help='is this product\'s ASF install sound — one table')
     p_doctor.add_argument('--product')
 
+    p_tick =sub.add_parser('tick', help='metrics backfill -> ingest -> file-bugs -> rollup -> index')
+    p_tick.add_argument('--product')
+    p_tick.add_argument('--shadow', action='store_true', help='run against a shadow clone, never the real backlog')
+    p_tick.add_argument('--fresh', action='store_true', help="bypass evidence's cache")
+
+    p_roadmap = sub.add_parser('roadmap', help='the ROADMAP table: one row per Epic')
+    p_roadmap.add_argument('--product')
+
+    p_backlog_view = sub.add_parser('backlog', help='the BOARD table: one row per Feature, grouped by Epic')
+    p_backlog_view.add_argument('--product')
+
+    p_parity = sub.add_parser('parity', help='the PARITY table: one row per Story')
+    p_parity.add_argument('--product')
+
+    p_prod = sub.add_parser('prod', help='the PROD table: deploy state and what just shipped')
+    p_prod.add_argument('--product')
+
+    p_sessions = sub.add_parser('sessions', help='the SESSIONS table')
+    p_sessions.add_argument('--product')
+
+    p_status = sub.add_parser('status', help='the FACTORY STATUS table')
+    p_status.add_argument('--product')
+
+    from asf.tick.shadow_diff import build_parser as build_shadow_diff_parser
+    p_shadow_diff = build_shadow_diff_parser(sub)
+    p_shadow_diff.add_argument('--product')
+
     return p
 
 
@@ -150,6 +177,33 @@ def main(argv=None):
     if args.command == 'doctor':
         from asf.doctor import cmd_doctor
         return cmd_doctor(args, root)
+    if args.command == 'tick':
+        from asf.tick.tick import cmd_tick
+        return cmd_tick(args)
+    if args.command in ('roadmap', 'backlog', 'parity', 'prod', 'sessions', 'status'):
+        from asf import env
+        view_root = env.load_product(args.product).backlog_dir
+        if args.command == 'roadmap':
+            from asf.views.roadmap import cmd_roadmap
+            return cmd_roadmap(args, view_root)
+        if args.command == 'backlog':
+            from asf.views.board import cmd_backlog
+            return cmd_backlog(args, view_root)
+        if args.command == 'parity':
+            from asf.views.parity import cmd_parity
+            return cmd_parity(args, view_root)
+        if args.command == 'prod':
+            from asf.views.prod import cmd_prod
+            return cmd_prod(args, view_root)
+        if args.command == 'sessions':
+            from asf.views.sessions import cmd_sessions
+            return cmd_sessions(args, view_root)
+        if args.command == 'status':
+            from asf.views.status import cmd_status
+            return cmd_status(args, view_root)
+    if args.command == 'shadow-diff':
+        from asf.tick.shadow_diff import cmd_shadow_diff
+        return cmd_shadow_diff(args)
 
     parser.print_help()
     return 2

@@ -87,6 +87,19 @@ def _strip_comment(line):
     return line
 
 
+KEY_RE = re.compile(r'^(?:([A-Za-z_][A-Za-z0-9_.-]*)|"([^"]*)"|\'([^\']*)\'):\s*(.*)$')
+
+
+def _match_key(content):
+    """(key, rest) off a ``key: value`` line — bare (``[A-Za-z_][\\w.-]*``) or quoted (so a key
+    like ``"*e2e*"`` works too, e.g. a glob pattern used as a budget-table key)."""
+    m = KEY_RE.match(content)
+    if not m:
+        return None
+    key = m.group(1) or m.group(2) or m.group(3)
+    return key, m.group(4)
+
+
 def loads(text):
     """Parse the YAML subset into nested dict/list/scalar data."""
     lines = []
@@ -109,10 +122,10 @@ def _parse_block(lines, start, end, indent, target):
             raise ConfigError(f"unexpected indent: {content!r}")
         if content.startswith('- '):
             raise ConfigError(f"top-level list item without a key: {content!r}")
-        m = re.match(r'^([A-Za-z_][A-Za-z0-9_.-]*):\s*(.*)$', content)
+        m = _match_key(content)
         if not m:
             raise ConfigError(f"not a key: line {content!r}")
-        key, rest = m.group(1), m.group(2)
+        key, rest = m
         j = i + 1
         block_end = j
         while block_end < end and lines[block_end][0] > cur_indent:
@@ -146,13 +159,13 @@ def _parse_list(lines, start, end, indent):
         block_end = j
         while block_end < end and lines[block_end][0] > indent:
             block_end += 1
-        m = re.match(r'^([A-Za-z_][A-Za-z0-9_.-]*):\s*(.*)$', rest) if rest else None
-        if m and (m.group(2) != '' or block_end > j):
+        m = _match_key(rest) if rest else None
+        if m and (m[1] != '' or block_end > j):
             sub = {}
-            if m.group(2) != '':
-                sub[m.group(1)] = _scalar(m.group(2)) if not (
-                    m.group(2).startswith('[') and m.group(2).endswith(']')
-                ) else _split_inline_list(m.group(2))
+            if m[1] != '':
+                sub[m[0]] = _scalar(m[1]) if not (
+                    m[1].startswith('[') and m[1].endswith(']')
+                ) else _split_inline_list(m[1])
             if block_end > j:
                 _parse_block(lines, j, block_end, lines[j][0], sub)
             items.append(sub)
