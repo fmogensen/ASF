@@ -1,6 +1,6 @@
 ## Your job: close {item_id} out
 
-It is stale: {reason}. Branch `{branch}` is left behind and no session is moving it.
+It is stale: {reason}. No session is moving branch `{branch}`.
 
 This is one line of work, and no more than one. Write the single line that says **why** it is
 closed — what was attempted, and what ended it — and put that line in your report. Do not revive

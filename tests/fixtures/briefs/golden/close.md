@@ -40,7 +40,7 @@ left out: the retry itself, F-0001 owns it
 
 ## Your job: close T-0001 out
 
-It is stale: PR closed unmerged, branch left behind. Branch `task/T-0001` is left behind and no session is moving it.
+It is stale: PR closed unmerged, branch left behind. No session is moving branch `task/T-0001`.
 
 This is one line of work, and no more than one. Write the single line that says **why** it is
 closed — what was attempted, and what ended it — and put that line in your report. Do not revive
