@@ -171,6 +171,12 @@ class PreambleTest(unittest.TestCase):
                      'app/checkout/attempts.py'):
             self.assertIn(fact, text)
 
+    def test_a_spec_path_in_the_prose_is_not_read_as_a_test(self):
+        sections = {'fix': 'see `docs/specs/checkout-resilience.md`, then run '
+                           '`tests/test_checkout.py::test_one`'}
+        self.assertEqual(preamble_mod.named_tests(sections, {}, None),
+                         ['tests/test_checkout.py::test_one'])
+
     def test_a_document_the_record_does_not_carry_is_not_passed_off_as_one(self):
         text = preamble_mod.build(product(), ROWS['adjudicate'], index(), [], REPO_FACTS)
         self.assertIn('Spec: not in the record — its place is `docs/specs/f-0002.md`', text)

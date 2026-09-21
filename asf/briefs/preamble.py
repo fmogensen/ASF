@@ -46,8 +46,11 @@ DEFAULT_RULES = """- Commit with `git commit -s`; the sign-off is the record tha
 - Finish with the typed REPORT below, as the last thing you print.
 - Anything a human must decide or run: `NEEDS OPERATOR: <what> — <the command or the answer>`."""
 
-TEST_RE = re.compile(r'(?:^|[\s`(])((?:[\w./-]*)(?:tests?|spec)[\w./:-]*\.[\w:.-]+|'
-                     r'[\w./-]+::[\w:.-]+)')
+#: What counts as "a test the card names": a path whose name carries ``test``, with or without a
+#: ``::node`` suffix, or any ``file::node`` id. Deliberately narrow — a spec path in the prose is
+#: not a test, and a brief that calls one a test sends the session to the wrong file.
+TEST_RE = re.compile(r'(?:^|[\s`(\[])([\w./-]*test[\w./-]*\.\w+(?:::[\w.:-]+)?|'
+                     r'[\w./-]+::[\w.:-]+)')
 
 
 # ---- product conventions -----------------------------------------------------
@@ -354,9 +357,10 @@ def convention_lines(product):
            f"`{conv.get('plans_dir') or DEFAULT_PLANS_DIR}`, reviews in "
            f"`{conv.get('reviews_dir') or DEFAULT_REVIEWS_DIR}`."]
     if prefixes:
-        out.append('Branch prefixes: ' + ', '.join(f'{k} → `{v}`' for k, v in sorted(prefixes.items())) + '.')
-    out.append(f"The trunk is `{getattr(product, 'main', 'main') if product is not None else 'main'}`; "
-               'every commit is signed off (`git commit -s`).')
+        out.append('Branch prefixes: '
+                   + ', '.join(f'{k} → `{v}`' for k, v in sorted(prefixes.items())) + '.')
+    main = getattr(product, 'main', 'main') if product is not None else 'main'
+    out.append(f"The trunk is `{main}`; every commit is signed off (`git commit -s`).")
     return out
 
 
