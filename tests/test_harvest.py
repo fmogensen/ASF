@@ -202,6 +202,16 @@ class HarvestTests(unittest.TestCase):
         self.base, self.origin, self.repo, self.state_dir = make_repo()
         self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
 
+    def test_b0033_gate_env_drops_the_callers_identity(self):
+        # the tick sets ASF_PRODUCT for its own steps; a worker session carries ASF_JOB and
+        # BACKLOG_ID_RANGE — none of them may reach the branch's own test run
+        with mock.patch.dict(os.environ, {'ASF_PRODUCT': 'asf', 'ASF_JOB': 'fix-bug-b-0002',
+                                          'BACKLOG_ID_RANGE': 'B:1-9', 'ASF_HOME': '/x/.ASF'}):
+            genv = harvest.gate_env()
+        for var in ('ASF_PRODUCT', 'ASF_JOB', 'BACKLOG_ID_RANGE'):
+            self.assertNotIn(var, genv, var)
+        self.assertEqual(genv.get('ASF_HOME'), '/x/.ASF')  # the operator's home is not identity
+
     # -- a fast-forwardable branch lands on main with no controller action -----------------
     def test_green_branch_lands_on_main(self):
         branch, wt = add_job_worktree(self.repo, self.state_dir, 'ff1')

@@ -73,14 +73,22 @@ def sh(cmd, cwd=None, env=None):
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, env=clean_env(env))
 
 
+# The variables that name the CALLER — the tick's product, a worker session's job and mint
+# range. None may reach the branch's own test run: the gate is the branch's result, not the
+# caller's (B-0033: the tick's ASF_PRODUCT made ASF's own "no product configured" tests read
+# the live product and go red). ASF_HOME stays: it is the operator's home, not an identity.
+CALLER_IDENTITY_VARS = ('ASF_PRODUCT', 'ASF_JOB', 'BACKLOG_ID_RANGE')
+
+
 def gate_env():
-    """The environment the gate and index regeneration run in: the caller's own, minus
-    BACKLOG_ID_RANGE — that variable names the calling session's own mint range (or the
-    tick's, if it ever carries one) and must never leak into a branch it didn't spawn; a
-    worker session invoking `--dry-run` against the live repo, as this card's own report
-    does, would otherwise misjudge an unrelated branch's tests as failing."""
+    """The environment the gate and index regeneration run in: the caller's own, minus the
+    caller's identity (:data:`CALLER_IDENTITY_VARS`) — BACKLOG_ID_RANGE names the calling
+    session's own mint range and must never leak into a branch it didn't spawn (a worker
+    session invoking `--dry-run` against the live repo would otherwise misjudge an unrelated
+    branch's tests as failing); ASF_PRODUCT/ASF_JOB name the tick or session running the gate."""
     env = clean_env()
-    env.pop('BACKLOG_ID_RANGE', None)
+    for var in CALLER_IDENTITY_VARS:
+        env.pop(var, None)
     # `asf index`/`asf check` run as `python -m asf.cli` from the rebased worktree, whose cwd is
     # the repo being gated, not this package: point the child at the package that is harvesting.
     pkg_parent = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
