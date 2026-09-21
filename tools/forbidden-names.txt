@@ -11,12 +11,13 @@
 \bcom\.[a-z]+\.factory\b
 
 # Specific words this repo's history was found to contain and had to remove (P0d migration).
+# Note: generic public platform names that are legitimate config *values* (e.g. a deploy_sha
+# provider choice) are deliberately NOT listed here — only names that were hardcoded as this
+# operator's own private choice belong on this public list.
 \bbotseon\b
 \bnordio\b
 \bhetzner\b
 \bcontabo\b
-\bfly\.io\b
-\bvercel\b
 \bfrank\b
 \bniels\b
 \bnina\b
