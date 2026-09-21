@@ -7,6 +7,9 @@ feeder:
   capacity: 1
 worker_pool:
   backend: fake
+  models:                 # brief labels → the fake runtime's model ids (an unmapped label is refused)
+    heavy: fake-heavy
+    light: fake-light
   fake_script: @SAMPLE@/fake_script.json
   accounts:
     - name: worker-1
