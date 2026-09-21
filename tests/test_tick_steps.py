@@ -12,6 +12,7 @@ from unittest import mock
 from asf import env
 from asf.feeder import rows as feeder_rows
 from asf.metrics import metrics
+from asf.metrics import metrics as metrics_mod
 from asf.tick import shadow, step_daily, step_harvest, step_health, step_prs, step_wave, steps, tick
 from asf.workers import pool as pool_mod
 from asf.workers import runtime as runtime_mod
@@ -121,7 +122,9 @@ class OrderedTickTests(StepsTestCase):
         self.assertTrue(_git(['log', '-1', '--format=%s', 'main'], self.origin).startswith('tick: state '))
         files = _git(['show', '--name-only', '--format=', 'main'], self.origin).splitlines()
         self.assertIn('state/rollup.md', files)
-        day = _git(['log', '-1', '--format=%cs', 'main'], self.origin)
+        # the stream is dated in UTC (metrics.today()); %cs is the committer's local date and
+        # differs from it for two hours a day in a CET zone
+        day = metrics_mod.today()
         self.assertIn(f'metrics/ticks/{day}.jsonl', files)
         tick_log = _git(['show', f'main:metrics/ticks/{day}.jsonl'], self.origin)
         line = json.loads(tick_log.splitlines()[-1])
