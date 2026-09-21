@@ -170,6 +170,23 @@ class HealthStepTests(StepsTestCase):
         self.assertIn('CORRECTION: the step failed with:', fake.calls[0][1])
         self.assertEqual(self.events(ctx), [])
 
+    def test_b0028_corrected_session_is_recorded_finished(self):
+        self.dead_session()
+        fake = runtime_mod.FakeRuntime([{'ok': True}])
+        step_health.run(self.ctx(), out=self.lines.append, runtime_fn=lambda: fake)
+        s = pool_mod.load_sessions(self.product)['fix-b-0001']
+        self.assertEqual(s['end_reason'], 'finished')
+        self.assertEqual(s['rc'], 0)
+        self.assertTrue(s.get('ended'))
+
+    def test_b0028_failed_correction_is_recorded_failed(self):
+        self.dead_session()
+        fake = runtime_mod.FakeRuntime([{'ok': False, 'result': 'still broken'}])
+        step_health.run(self.ctx(), out=self.lines.append, runtime_fn=lambda: fake)
+        s = pool_mod.load_sessions(self.product)['fix-b-0001']
+        self.assertEqual(s['end_reason'], 'failed')
+        self.assertEqual(s['rc'], 1)
+
     def test_already_corrected_is_one_needs_operator_event(self):
         self.dead_session(corrected=1)
         ctx = self.ctx()

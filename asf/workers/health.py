@@ -3,7 +3,8 @@
 For every live session in ``sessions.jsonl``:
 
 * its log's last line is a result → ended, ``end_reason: finished`` (or ``failed``);
-* its pid is dead and there is no result → ended, ``end_reason: dead pid``.
+* its pid is dead and there is no result → ended, ``end_reason: dead pid``;
+* a ``dead pid`` session whose log later carries a result → ``re-judged`` finished/failed (B-0028).
 
 Then the worktrees under ``~/.ASF/state/<product>/worktrees/``: one with no session at all is an
 ``orphan``; one whose session has ended is a reap candidate. With ``fix=True`` a worktree is
@@ -69,6 +70,16 @@ def health(product, fix=False, alive=pid_alive, out=print):
     sessions = pool_mod.load_sessions(product)
     for job, s in sessions.items():
         if s.get('ended'):
+            # a `dead pid` judgement is revisited: the result may have landed after the check,
+            # or a correction may have finished the run (B-0028)
+            if s.get('end_reason') == 'dead pid' and not s.get('harvested'):
+                rec = runtime_mod.read_result(s.get('log'))
+                if rec is not None:
+                    ok = runtime_mod.result_ok(rec)
+                    reason = 'finished' if ok else 'failed'
+                    pool_mod.update_session(product, job, end_reason=reason, rc=0 if ok else 1)
+                    s.update(end_reason=reason, rc=0 if ok else 1)
+                    found.append((job, 're-judged', reason))
             continue
         rec = runtime_mod.read_result(s.get('log'))
         if rec is not None:

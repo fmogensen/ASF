@@ -92,21 +92,31 @@ def build_env(job, base=None):
 
 
 def read_result(log_path):
-    """The parsed last line of a job log when it is a result line, else None."""
+    """The parsed result line of the log's **last run**, else None.
+
+    A run opens with a ``system``/``init`` line and closes with a ``result`` line — but the
+    runtime may write more ``system`` lines (background-task bookkeeping) after the result, so
+    the result is not necessarily the last line (B-0028). A later ``init`` (a same-session
+    correction appended to the same log) starts a new run: its result is the one that counts,
+    and until it arrives the session is still running."""
     if not log_path or not os.path.exists(log_path):
         return None
-    last = None
+    result = None
     with open(log_path, encoding='utf-8', errors='replace') as f:
         for line in f:
-            if line.strip():
-                last = line
-    if last is None:
-        return None
-    try:
-        rec = json.loads(last)
-    except json.JSONDecodeError:
-        return None
-    return rec if isinstance(rec, dict) and rec.get('type') == 'result' else None
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            if rec.get('type') == 'system' and rec.get('subtype') == 'init':
+                result = None
+            elif rec.get('type') == 'result':
+                result = rec
+    return result
 
 
 def result_ok(rec):

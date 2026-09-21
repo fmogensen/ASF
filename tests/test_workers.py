@@ -124,6 +124,30 @@ class TestRuntime(unittest.TestCase):
         finally:
             shutil.rmtree(tmp)
 
+    def test_b0028_result_followed_by_system_lines_is_still_the_result(self):
+        # the runtime writes background-task system lines after the result line
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, 'j.jsonl')
+            with open(log, 'w') as f:
+                for rec in ({'type': 'system', 'subtype': 'init'},
+                            {'type': 'assistant'},
+                            {'type': 'result', 'subtype': 'success', 'is_error': False},
+                            {'type': 'system', 'subtype': 'background_tasks_changed'},
+                            {'type': 'system', 'subtype': 'task_updated'},
+                            {'type': 'system', 'subtype': 'task_notification'}):
+                    f.write(json.dumps(rec) + '\n')
+            rec = runtime_mod.read_result(log)
+            self.assertIsNotNone(rec)
+            self.assertTrue(runtime_mod.result_ok(rec))
+            # a second run (a correction) appended after it is a new run: no result until it ends
+            with open(log, 'a') as f:
+                f.write(json.dumps({'type': 'system', 'subtype': 'init'}) + '\n')
+                f.write(json.dumps({'type': 'assistant'}) + '\n')
+            self.assertIsNone(runtime_mod.read_result(log))
+            with open(log, 'a') as f:
+                f.write(json.dumps({'type': 'result', 'subtype': 'error', 'is_error': True}) + '\n')
+            self.assertFalse(runtime_mod.result_ok(runtime_mod.read_result(log)))
+
     def test_fake_runtime_replays_a_fixture(self):
         rt = runtime_mod.FakeRuntime(path=os.path.join(FIXTURES, 'fake-results.json'))
         self.assertEqual([s['ok'] for s in rt.script], [False, True])
@@ -308,6 +332,22 @@ class TestHealth(Home):
         keep = {j: d for j, w, d in found if w == 'keep'}
         self.assertEqual(keep['done'], 'ended: branch not pushed')
         self.assertEqual(keep['gone'], 'ended: session dead pid, not finished')
+
+    def test_b0028_dead_pid_is_rejudged_when_the_result_arrives(self):
+        rec = self.spawn('late', {'running': True, 'pid': 12})
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('late', 'ended', 'dead pid'), found)
+        with open(rec['log'], 'a') as f:
+            f.write(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False}) + '\n')
+            f.write(json.dumps({'type': 'system', 'subtype': 'task_notification'}) + '\n')
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('late', 're-judged', 'finished'), found)
+        s = pool_mod.load_sessions(self.product)['late']
+        self.assertEqual(s['end_reason'], 'finished')
+        self.assertEqual(s['rc'], 0)
+        # settled: the next pass leaves it alone
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertFalse([f for f in found if f[1] == 're-judged'])
 
     def test_reap_only_when_pushed(self):
         rec = self.spawn('done', {'ok': True, 'pid': 11})

@@ -63,6 +63,10 @@ def handle_dead(ctx, session, runtime_fn=_runtime, out=print):
         except (OSError, KeyError) as e:
             out(f"DEAD  {job:<24} correction could not start: {e}")
             ok = False
+        # the correction's outcome is the session's outcome; without it the record would keep
+        # `dead pid` and harvest would never land the branch (B-0028)
+        pool_mod.update_session(product, job, ended=pool_mod.now_iso(),
+                                end_reason='finished' if ok else 'failed', rc=0 if ok else 1)
         if ok:
             out(f"DEAD  {job:<24} corrected in the same session")
             return 'corrected'
