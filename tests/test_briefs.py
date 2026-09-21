@@ -135,6 +135,9 @@ class GoldenBriefTest(unittest.TestCase):
         self.assertIn('Catch the provider\'s timeout in `app/checkout/pay.py`', text)
         self.assertIn('tests/test_checkout.py::test_timeout_is_pending_not_500', text)
         self.assertNotIn('docs/reviews/', text)   # the S1 lane has no review round
+        # a commit that names the card is the evidence; an already-landed fix still gets one
+        self.assertIn('fix(B-0001):', text)
+        self.assertIn('--allow-empty', text)
 
     def test_a_coder_brief_names_the_writes_boundary(self):
         text = briefs.build(product(), ROWS['coder'], index(), [], REPO_FACTS).text
