@@ -73,6 +73,9 @@ def cmd_check(args, root):
                 ptype = canonical[parent]['meta'].get('type')
                 if ptype not in PARENT_TYPES[type_]:
                     add(rec, find_line(rec, 'parent'), f"parent {parent} has wrong type {ptype}")
+        # a Bug carries its severity
+        if type_ == 'bug' and not meta.get('severity'):
+            add(rec, find_line(rec, 'id'), f"{iid}: bug without severity")
         # blockedBy
         for b in meta.get('blockedBy') or []:
             if isinstance(b, str) and ID_RE.match(b) and b not in canonical:

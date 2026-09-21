@@ -387,5 +387,74 @@ class IndexCommandTests(unittest.TestCase):
         self.assertEqual(idx1.split('"generated"')[1], idx2.split('"generated"')[1])
 
 
+class BugSeverityTests(unittest.TestCase):
+    """B-0015: `asf new bug` takes --severity/--signature/--found-in; `asf check` flags none."""
+
+    def setUp(self):
+        self.root = make_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+
+    def new_bug(self, *extra):
+        import argparse
+        import contextlib
+        import io
+        from asf.record import new as new_mod
+        p = argparse.ArgumentParser(prog='asf')
+        p_new = p.add_subparsers(dest='command').add_parser('new')
+        p_new.add_argument('type')
+        p_new.add_argument('--title', required=True)
+        p_new.add_argument('--parent')
+        p_new.add_argument('--priority')
+        p_new.add_argument('--area')
+        p_new.add_argument('--legacy-id')
+        p_new.add_argument('--body-file')
+        p_new.add_argument('--force', action='store_true')
+        new_mod.add_arguments(p_new)
+        args = p.parse_args(['new', 'bug', '--title', 'Crash on save', '--parent', 'E-0001',
+                             *extra])
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = new_mod.cmd_new(args, self.root)
+        return rc, out.getvalue().strip(), err.getvalue()
+
+    def test_bug_without_severity_is_refused_with_usage(self):
+        rc, _out, err = self.new_bug()
+        self.assertEqual(rc, 2)
+        self.assertIn('usage:', err)
+        self.assertIn('--severity', err)
+        self.assertEqual(os.listdir(os.path.join(self.root, 'bugs')), [])
+
+    def test_severity_signature_found_in_written_in_order_before_machine_block(self):
+        rc, out, _err = self.new_bug('--severity', 'S2', '--signature', 'crash-save',
+                                     '--found-in', 'prod')
+        self.assertEqual(rc, 0)
+        text = open(os.path.join(self.root, 'bugs', f'{out}.md'), encoding='utf-8').read()
+        keys = ['severity: S2', 'found_in: prod', 'signature: crash-save', '# ---- machine ----']
+        positions = [text.index(k) for k in keys]
+        self.assertEqual(positions, sorted(positions))
+
+    def test_found_in_defaults_to_dev(self):
+        rc, out, _err = self.new_bug('--severity', 'S3')
+        self.assertEqual(rc, 0)
+        text = open(os.path.join(self.root, 'bugs', f'{out}.md'), encoding='utf-8').read()
+        self.assertIn('found_in: dev', text)
+        self.assertNotIn('signature:', text)
+
+    def test_check_flags_bug_without_severity(self):
+        write_item(self.root, 'B-0001', 'bug', 'No severity', parent='E-0001')
+        run(['index'], self.root)
+        r = run(['check'], self.root)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('B-0001: bug without severity', r.stdout)
+
+    def test_check_accepts_bug_with_severity(self):
+        write_item(self.root, 'B-0001', 'bug', 'Has severity', parent='E-0001',
+                   typed_lines=('severity: S1',))
+        run(['index'], self.root)
+        r = run(['check'], self.root)
+        self.assertNotIn('without severity', r.stdout)
+
+
 if __name__ == '__main__':
     unittest.main()

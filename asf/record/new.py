@@ -10,13 +10,32 @@ from asf.record.core import (
 from asf.record.ids import mint_id
 
 
+SEVERITIES = ('S1', 'S2', 'S3')
+
+
+def add_arguments(p_new):
+    """The Bug-only flags of ``asf new`` (cli.py calls this on the ``new`` subparser)."""
+    p_new.add_argument('--severity', choices=SEVERITIES, help='required for bug')
+    p_new.add_argument('--signature', help='bug: the key "same signature = same Bug" files under')
+    p_new.add_argument('--found-in', default='dev', help='bug: where it was found (default dev)')
+
+
 def cmd_new(args, root):
     type_ = args.type
+    severity = getattr(args, 'severity', None)
+    signature = getattr(args, 'signature', None)
+    found_in = getattr(args, 'found_in', None) or 'dev'
     if type_ not in TYPES:
         print(f"error: unknown type {type_!r}", file=sys.stderr)
         return 2
     if args.priority and args.priority not in ('need', 'nice'):
         print("error: --priority must be need or nice", file=sys.stderr)
+        return 2
+
+    if type_ == 'bug' and severity not in SEVERITIES:
+        print("usage: asf new bug --title T --parent E-nnnn --severity {S1,S2,S3} "
+              "[--signature S] [--found-in WHERE]", file=sys.stderr)
+        print("error: bug requires --severity (S1, S2 or S3)", file=sys.stderr)
         return 2
 
     by_id, _errors = load_items(root)
@@ -68,6 +87,11 @@ def cmd_new(args, root):
         meta['area'] = args.area
     if args.legacy_id:
         meta['legacy_id'] = args.legacy_id
+    if type_ == 'bug':
+        meta['severity'] = severity
+        meta['found_in'] = found_in
+        if signature:
+            meta['signature'] = signature
     ts = now_iso()
     meta['state'] = 'New'
     meta['stage_since'] = ts
