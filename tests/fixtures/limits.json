@@ -1,0 +1,13 @@
+{
+  "card_undecided": "3d",
+  "spec-draft": "24h",
+  "spec-review": "12h",
+  "plan-draft": "24h",
+  "plan-review": "12h",
+  "plan-approved": "24h",
+  "task_active": "45m",
+  "pr_approved_unbatched": "10m",
+  "bug_S1": "10m",
+  "bug_S2": "24h",
+  "undecided_close": "14d"
+}

@@ -1,0 +1,99 @@
+"""asf.record.new — mint a new work item (``asf new``)."""
+import os
+import sys
+
+from asf.record import frontmatter
+from asf.record.core import (
+    NO_PARENT_TYPES, PARENT_TYPES, TYPES, canonicalize, is_open, jaccard, load_items, now_iso,
+    today, tokenize,
+)
+from asf.record.ids import mint_id
+
+
+def cmd_new(args, root):
+    type_ = args.type
+    if type_ not in TYPES:
+        print(f"error: unknown type {type_!r}", file=sys.stderr)
+        return 2
+    if args.priority and args.priority not in ('need', 'nice'):
+        print("error: --priority must be need or nice", file=sys.stderr)
+        return 2
+
+    by_id, _errors = load_items(root)
+    canonical, _dupes = canonicalize(by_id)
+
+    folder, prefix = TYPES[type_]
+
+    if type_ in NO_PARENT_TYPES:
+        if args.parent:
+            print(f"error: {type_} has no parent", file=sys.stderr)
+            return 2
+    else:
+        if not args.parent:
+            print(f"error: {type_} requires --parent", file=sys.stderr)
+            return 2
+        prec = canonical.get(args.parent)
+        if prec is None:
+            print(f"error: parent {args.parent} not found", file=sys.stderr)
+            return 2
+        ptype = prec['meta'].get('type')
+        if ptype not in PARENT_TYPES[type_]:
+            print(f"error: {type_} cannot have parent type {ptype}", file=sys.stderr)
+            return 2
+
+    tokens_new = tokenize(args.title)
+    matches = []
+    for iid, rec in canonical.items():
+        if rec['meta'].get('type') != type_ or not is_open(rec):
+            continue
+        score = jaccard(tokens_new, tokenize(rec['meta'].get('title', '')))
+        if score > 0.6:
+            matches.append((iid, rec['meta'].get('title', ''), score))
+    if matches and not args.force:
+        for iid, title2, score in sorted(matches, key=lambda m: -m[2]):
+            print(f"{iid}: {title2} (overlap {score:.2f})", file=sys.stderr)
+        return 3
+
+    new_id = mint_id(root, canonical, type_)
+
+    meta = frontmatter.FrontmatterDict()
+    meta['id'] = new_id
+    meta['type'] = type_
+    meta['title'] = args.title
+    if args.parent:
+        meta['parent'] = args.parent
+    if args.priority:
+        meta['priority'] = args.priority
+    if args.area:
+        meta['area'] = args.area
+    if args.legacy_id:
+        meta['legacy_id'] = args.legacy_id
+    ts = now_iso()
+    meta['state'] = 'New'
+    meta['stage_since'] = ts
+    meta['updated'] = ts
+    meta.machine_keys = {'state', 'stage_since', 'updated'}
+
+    if args.body_file:
+        with open(args.body_file, encoding='utf-8') as f:
+            body = f.read()
+    else:
+        body = (
+            "## Description\n\n"
+            "## Acceptance\n"
+            "- [ ] \n\n"
+            "## Non-goals\n\n"
+            "## History\n"
+            f"- {today()}: created\n\n"
+            "## Children\n\n"
+            "## Backlinks\n"
+        )
+
+    text = frontmatter.render(meta, body)
+    d = os.path.join(root, folder)
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, f"{new_id}.md")
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(text)
+    print(new_id)
+    return 0
