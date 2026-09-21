@@ -1,0 +1,25 @@
+# The `asf` command as a normal Python tool: `pipx install git+<repo>@v<version>`, then
+# `pipx upgrade asf-factory`. Python 3 stdlib only — no dependencies.
+# (`asf migrate` adopts items from a product repo; the record's schema migration is
+# `asf schema-migrate`.)
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "asf-factory"
+dynamic = ["version"]
+description = "ASF — Autonomous Software Factory"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+asf = "asf.cli:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "asf.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["asf", "asf.*"]
