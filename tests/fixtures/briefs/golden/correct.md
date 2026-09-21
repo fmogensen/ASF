@@ -41,7 +41,7 @@ left out: the retry itself, F-0001 owns it
 
 ## Your job: correct B-0001 — the harvest held `fix/B-0001`
 
-The harvest gate held `fix/B-0001` and sent it back to you: rebase onto `origin/main`, fix what the failure below names (a conflict is resolved so both sides survive), run the full suite, and push the same branch — never a new one, never a force. Change nothing the failure does not ask for; paste the suite's last line in the report.
+The harvest gate held `fix/B-0001` and sent it back to you: your worktree is already on `fix/B-0001`, and the rebase onto `origin/main` was started for you — if `git status` shows a conflict it is still in place: resolve it (or, if the rebase finished cleanly, carry on), fix what the failure below names (a conflict is resolved so both sides survive), run the full suite, and push the same branch — never a new one, never a force. Change nothing the failure does not ask for; paste the suite's last line in the report.
 
 CORRECTION: the step failed with:
 FAIL: test_red_gate

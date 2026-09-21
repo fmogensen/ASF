@@ -3,7 +3,8 @@
 ``spawn(product, row, account, brief_text)``:
 
 1. a worktree ``~/.ASF/state/<product>/worktrees/<job>`` on a new branch (the row's, else
-   ``<branch prefix for the kind>/<job>``) off ``origin/<main>`` of ``Product.repo_dir``;
+   ``<branch prefix for the kind>/<job>``) off ``origin/<main>`` of ``Product.repo_dir`` — a
+   ``correct`` row instead reuses its held branch from origin, rebased onto ``origin/<main>``;
 2. an id range reserved for the job in ``~/.ASF/state/<product>/id-ranges.tsv`` and handed to
    the session as ``BACKLOG_ID_RANGE`` (so parallel writers never mint the same id — see
    ``asf.record.ids``);
@@ -112,7 +113,21 @@ def branch_for(product, row):
     return row.branch or f'{product.branch_prefix(row.kind)}/{row.job}'
 
 
-def make_worktree(product, job, branch):
+def _holding_worktree(repo, branch):
+    out = _git(['worktree', 'list', '--porcelain'], repo)
+    path = None
+    for line in out.splitlines():
+        if line.startswith('worktree '):
+            path = line[len('worktree '):]
+        elif line == f'branch refs/heads/{branch}':
+            return path
+    return None
+
+
+def make_worktree(product, job, branch, existing=False):
+    """``existing``: the branch is already on origin (a held branch sent back for correction):
+    the worktree is added on it, then rebased onto ``origin/<main>`` — a conflict is left in
+    place for the session to resolve."""
     repo = product.repo_dir
     if not repo or not os.path.isdir(repo):
         raise SpawnError(f'product repo_dir missing: {repo!r}')
@@ -120,6 +135,16 @@ def make_worktree(product, job, branch):
     if os.path.exists(path):
         raise SpawnError(f'worktree already exists: {path}')
     _git(['fetch', '-q', 'origin', product.main], repo)
+    if existing:
+        _git(['fetch', '-q', 'origin', branch], repo)
+        held = _holding_worktree(repo, branch)
+        if held:
+            # a stale worktree of a session that has ended still holds the branch
+            _git(['worktree', 'remove', '--force', held], repo)
+        _git(['worktree', 'add', '-q', '-B', branch, path, f'origin/{branch}'], repo)
+        subprocess.run(['git', 'rebase', '-q', f'origin/{product.main}'], cwd=path,
+                       capture_output=True, text=True)
+        return path
     _git(['worktree', 'add', '-q', '-b', branch, path, f'origin/{product.main}'], repo)
     return path
 
@@ -176,7 +201,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
     runtime = runtime or runtime_mod.from_config(cfg)
     model = model_arg(row.model, cfg)
     branch = branch_for(product, row)
-    worktree = make_worktree(product, row.job, branch)
+    worktree = make_worktree(product, row.job, branch, existing=row.kind == 'correct')
     id_range = reserve_id_range(product, row.job,
                                 prefixes=wp.get('id_range_prefixes') or DEFAULT_ID_PREFIXES,
                                 start=int(wp.get('id_range_start', DEFAULT_ID_START)),

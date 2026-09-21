@@ -269,6 +269,32 @@ class TestSpawn(Home):
         self.assertEqual((s['pid'], s['account'], s['kind'], s['model'], s['item']),
                          (4242, 'acct-a', 'fix-bug', 'opus', 'B-0001'))
 
+    def test_b0046_correct_row_spawns_on_the_held_branch_rebased_onto_main(self):
+        def commit(cwd, name, text, msg):
+            with open(os.path.join(cwd, name), 'w') as f:
+                f.write(text)
+            git('add', '.', cwd=cwd)
+            git('-c', 'user.email=ci@example.com', '-c', 'user.name=ci', 'commit', '-q', '-m', msg,
+                cwd=cwd)
+        other = os.path.join(self.tmp, 'other')
+        git('clone', '-q', os.path.join(self.tmp, 'origin.git'), other, cwd=self.tmp)
+        git('checkout', '-q', '-b', 'fix/B-0046', cwd=other)
+        commit(other, 'a.txt', 'branch\n', 'held work')
+        git('push', '-q', 'origin', 'fix/B-0046', cwd=other)
+        git('checkout', '-q', 'main', cwd=other)
+        commit(other, 'b.txt', 'main\n', 'main moves on')
+        git('push', '-q', 'origin', 'main', cwd=other)
+        row = pool_mod.Row('correct-b-0046', 'B-0046', kind='correct', branch='fix/B-0046')
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 1}])
+        rec = spawn_mod.spawn(self.product, row, self.acct(), 'fix it\n', runtime=rt, cfg=self.cfg)
+        wt = rec['worktree']
+        self.assertTrue(wt.endswith(os.path.join('worktrees', 'correct-b-0046')))
+        self.assertEqual(rec['branch'], 'fix/B-0046')
+        self.assertEqual(git('rev-parse', '--abbrev-ref', 'HEAD', cwd=wt), 'fix/B-0046')
+        self.assertTrue(os.path.exists(os.path.join(wt, 'a.txt')))
+        self.assertTrue(os.path.exists(os.path.join(wt, 'b.txt')))
+        git('merge-base', '--is-ancestor', 'origin/main', 'HEAD', cwd=wt)
+
     def test_id_ranges_do_not_overlap_and_are_sticky(self):
         r1 = spawn_mod.reserve_id_range(self.product, 'j1', prefixes=['T'])
         r2 = spawn_mod.reserve_id_range(self.product, 'j2', prefixes=['T'])
