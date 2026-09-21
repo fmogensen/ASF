@@ -214,6 +214,76 @@ def default_product_name():
     return name
 
 
+# ---- the product file's declared fields ------------------------------------
+
+_MAP, _LIST, _STR = 'a map', 'a list', 'a scalar'
+# key -> the shape its value must have; a None value (`key:   # TODO`) is "not filled in yet",
+# which `asf doctor` reports separately, so it is not a schema error here.
+PRODUCT_FIELDS = {
+    'product': _STR, 'repo_slug': _STR, 'repo_dir': _STR, 'main': _STR, 'backlog_dir': _STR,
+    'app_host': _STR, 'conventions': _MAP, 'ci': None, 'deploy_sha': None,
+    'customer_paths': _LIST, 'stage_limits': _MAP, 'size_classes': _MAP, 'approvals': _MAP,
+    'steps': _MAP, 'job_grants': _LIST,
+}
+# `ci:` is a map (or the bare word `none`, a product without CI); these are its keys.
+CI_FIELDS = {
+    'provider': _STR, 'workflow': _STR, 'test_command': _STR, 'budgets': _MAP,
+    'runner_org': _STR, 'labels': _LIST,
+}
+
+
+def _shape_ok(value, shape):
+    if value is None or shape is None:
+        return True
+    if shape == _MAP:
+        return isinstance(value, dict)
+    if shape == _LIST:
+        return isinstance(value, list)
+    return not isinstance(value, (dict, list))
+
+
+def validate_product_text(text):
+    """The product file checked against the declared field list: a sorted list of
+    ``(line, key, problem)``, empty when the file is well-formed. ``key`` is dotted for a
+    nested one (``ci.runner_labels``); ``line`` is 1-based in ``text``."""
+    try:
+        data = loads(text)
+    except ConfigError as e:
+        return [(0, '', str(e))]
+    lines = {}
+    section = None
+    for n, raw in enumerate(text.splitlines(), 1):
+        line = _strip_comment(raw).rstrip()
+        m = _match_key(line.strip()) if line.strip() else None
+        if not m:
+            continue
+        if len(line) == len(line.lstrip(' ')):
+            section = m[0]
+            lines.setdefault(section, n)
+        elif section == 'ci':
+            lines.setdefault('ci.' + m[0], n)
+    problems = []
+
+    def check(fields, mapping, prefix):
+        for key, value in mapping.items():
+            dotted = prefix + key
+            if key not in fields:
+                problems.append((lines.get(dotted, 0), dotted, 'is not a field of the product file'))
+            elif not _shape_ok(value, fields[key]):
+                problems.append((lines.get(dotted, 0), dotted, f'must be {fields[key]}, not {value!r}'))
+
+    check(PRODUCT_FIELDS, data, '')
+    if isinstance(data.get('ci'), dict):
+        check(CI_FIELDS, data['ci'], 'ci.')
+    return sorted(problems)
+
+
+def format_problems(problems):
+    return '; '.join(
+        f"line {ln}: '{key}' {why}" if ln else f"'{key}' {why}" if key else why
+        for ln, key, why in problems)
+
+
 class Product:
     """One product's convention set — the only place a path, repo or vendor name lives.
 
@@ -307,9 +377,14 @@ class Product:
 
 def load_product(name=None):
     name = name or default_product_name()
-    data = load_file(product_path(name))
+    path = product_path(name)
+    data = load_file(path)
     if not data:
-        raise ConfigError(f'no product config at {product_path(name)}')
+        raise ConfigError(f'no product config at {path}')
+    with open(path, encoding='utf-8') as f:
+        problems = validate_product_text(f.read())
+    if problems:
+        raise ConfigError(f'{path}: {format_problems(problems)}')
     return Product(name, data)
 
 

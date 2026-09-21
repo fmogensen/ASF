@@ -157,6 +157,53 @@ class TestProduct(unittest.TestCase):
                 env.ASF_HOME = old
 
 
+class TestProductSchema(unittest.TestCase):
+    def _load(self, body):
+        with tempfile.TemporaryDirectory() as home:
+            os.makedirs(os.path.join(home, 'products'))
+            with open(os.path.join(home, 'products', 'sample.yaml'), 'w') as f:
+                f.write(_dedent(body))
+            old = env.ASF_HOME
+            env.ASF_HOME = home
+            try:
+                return env.load_product('sample')
+            finally:
+                env.ASF_HOME = old
+
+    def test_product_file_that_does_not_match_the_schema_is_refused_with_key_and_line(self):
+        body = """
+        product: sample
+        repo:
+          dir: /tmp/sample
+          slug: acme/sample
+        backlog:
+          dir: /tmp/backlog
+        stage_limits: TODO
+        """
+        with self.assertRaises(env.ConfigError) as cm:
+            self._load(body)
+        msg = str(cm.exception)
+        self.assertIn("'repo'", msg)
+        self.assertIn('line 2', msg)
+        self.assertIn("'backlog'", msg)
+        self.assertIn("'stage_limits'", msg)
+
+    def test_nested_ci_keys_are_checked_too(self):
+        with self.assertRaises(env.ConfigError) as cm:
+            self._load("""
+            repo_slug: a/b
+            ci:
+              provider: gh-actions
+              runner_labels: [x]
+            """)
+        self.assertIn("'ci.runner_labels'", str(cm.exception))
+        self.assertIn('line 4', str(cm.exception))
+
+    def test_the_documented_example_validates(self):
+        self.assertEqual(env.validate_product_text(open(os.path.join(
+            os.path.dirname(__file__), '..', 'docs', 'products.example.yaml')).read()), [])
+
+
 def _dedent(text):
     lines = [l for l in text.splitlines() if l.strip() != '']
     if not lines:
