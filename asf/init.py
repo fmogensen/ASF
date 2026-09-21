@@ -43,13 +43,13 @@ literal in a tool.
 
 | Type | Folder | Id | Parent | What it is |
 | --- | --- | --- | --- | --- |
-| Epic | `epics/` | `E-0001` | — | a goal: a business outcome |
-| Feature | `features/` | `F-0001` | Epic | one spec + one plan |
-| User Story | `stories/` | `S-0001` | Feature | one requirement a customer can see |
-| Task | `tasks/` | `T-0001` | Story or Feature | one plan task = one branch = one PR |
-| Bug | `bugs/` | `B-0001` | Feature, Story or Epic | something broken, with a severity |
-| Decision | `decisions/` | `D-0001` | — | a ruling, who made it and when |
-| Rule | `rules/` | `R-0001` | — | a factory rule with a check script, or `enforced: false` |
+| Epic | `epics/` | `E-nnnn` | — | a goal: a business outcome |
+| Feature | `features/` | `F-nnnn` | Epic | one spec + one plan |
+| User Story | `stories/` | `S-nnnn` | Feature | one requirement a customer can see |
+| Task | `tasks/` | `T-nnnn` | Story or Feature | one plan task = one branch = one PR |
+| Bug | `bugs/` | `B-nnnn` | Feature, Story or Epic | something broken, with a severity |
+| Decision | `decisions/` | `D-nnnn` | — | a ruling, who made it and when |
+| Rule | `rules/` | `R-nnnn` | — | a factory rule with a check script, or `enforced: false` |
 
 | Folder | What |
 | --- | --- |
