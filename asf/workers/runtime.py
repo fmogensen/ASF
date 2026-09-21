@@ -24,7 +24,8 @@ class Job:
     """Everything one run needs. ``account`` is a :class:`asf.workers.pool.Account` (or None)."""
 
     def __init__(self, product, name, cwd, brief_path, model, account=None, add_dirs=(),
-                 permission_mode=DEFAULT_PERMISSION_MODE, env=None, log_path=None):
+                 permission_mode=DEFAULT_PERMISSION_MODE, env=None, log_path=None,
+                 settings_file=None):
         self.product = product
         self.name = name
         self.cwd = cwd
@@ -35,6 +36,9 @@ class Job:
         self.permission_mode = permission_mode
         self.env = dict(env or {})
         self.log_path = log_path
+        # the worker's permission rules (allow list + the deny rules, e.g. never push to the main
+        # branch); ``worker_pool.settings_file`` in config — a session without it runs unfenced
+        self.settings_file = settings_file
 
 
 class Result:
@@ -65,6 +69,8 @@ def build_command(job, binary=DEFAULT_BINARY):
         cmd += ['--add-dir', d]
     if job.model:
         cmd += ['--model', job.model]
+    if job.settings_file:
+        cmd += ['--settings', job.settings_file]
     cmd += ['--output-format', 'stream-json', '--verbose']
     return cmd
 

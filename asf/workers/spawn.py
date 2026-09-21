@@ -134,6 +134,18 @@ def model_arg(model, cfg=None):
 
 # ---- spawn ------------------------------------------------------------------
 
+def settings_file(wp):
+    """``worker_pool.settings_file`` expanded, or None. Refuses a path that does not exist: a
+    worker launched without its deny rules is worse than no worker."""
+    raw = wp.get('settings_file')
+    if not raw:
+        return None
+    path = os.path.expanduser(raw)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f'worker_pool.settings_file not found: {path}')
+    return path
+
+
 def spawn(product, row, account, brief_text, runtime=None, cfg=None):
     """Launch one row on ``account``. Returns the session record written to the ledger."""
     cfg = load_cfg() if cfg is None else cfg
@@ -151,7 +163,8 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
                           account=account, add_dirs=add_dirs,
                           permission_mode=wp.get('permission_mode')
                           or runtime_mod.DEFAULT_PERMISSION_MODE,
-                          env={'BACKLOG_ID_RANGE': id_range})
+                          env={'BACKLOG_ID_RANGE': id_range},
+                          settings_file=settings_file(wp))
     result = runtime.run(job)
     record = {'job': row.job, 'item': row.item, 'feature': row.feature, 'kind': row.kind,
               'account': account.name if account else None, 'model': job.model,

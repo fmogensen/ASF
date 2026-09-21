@@ -84,6 +84,17 @@ class TestRuntime(unittest.TestCase):
             '--add-dir', '/grant/a', '--add-dir', '/grant/b', '--model', 'opus',
             '--output-format', 'stream-json', '--verbose'])
 
+    def test_command_line_carries_the_settings_file(self):
+        job = runtime_mod.Job('sample', 'j', '/wt', '/b.md', 'opus', settings_file='/cfg/settings.json')
+        cmd = runtime_mod.build_command(job)
+        self.assertEqual(cmd[cmd.index('--settings') + 1], '/cfg/settings.json')
+
+    def test_settings_file_must_exist(self):
+        from asf.workers import spawn as spawn_mod
+        self.assertIsNone(spawn_mod.settings_file({}))
+        with self.assertRaises(FileNotFoundError):
+            spawn_mod.settings_file({'settings_file': '/nowhere/settings.json'})
+
     def test_env_isolates_the_account_and_carries_the_id_range(self):
         acct = pool_mod.Account('acct-a', home='/homes/a', config_dir='/cfg/a')
         job = runtime_mod.Job('sample', 'j1', '/wt', '/b.md', 'opus', account=acct,
