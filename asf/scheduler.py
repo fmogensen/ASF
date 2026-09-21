@@ -33,6 +33,9 @@ import sys
 
 from asf import env
 
+# this repo's own cutover script (relative to the ASF checkout) — named once, here, not per mention
+CUTOVER_TOOL = os.path.join('tools', 'cutover.sh')
+
 DEFAULT_INTERVAL_S = 600
 DEFAULT_LABEL_PREFIX = 'asf'
 DAILY_STEP = 'daily'
@@ -509,8 +512,8 @@ def main(argv=None):
 
     ``asf.cli`` wires :func:`register` into its subparsers and dispatches here; this entry
     point is the same code reached without going through the top-level parser, which is what
-    ``tools/cutover.sh`` falls back to when it is run against a checkout whose ``cli.py`` does
-    not have the subcommand wired yet.
+    the cutover script (:data:`CUTOVER_TOOL`) falls back to when it is run against a checkout
+    whose ``cli.py`` does not have the subcommand wired yet.
     """
     import argparse
     parser = argparse.ArgumentParser(prog='asf scheduler')

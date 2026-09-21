@@ -147,6 +147,54 @@ class TestOneFactoryCheck(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn('old-tool.sh', detail)
 
+    def test_the_factory_repo_itself_is_not_a_second_copy(self):
+        with tempfile.TemporaryDirectory() as d:
+            legacy = os.path.join(d, 'legacy')
+            os.makedirs(legacy)
+            # a name this checkout itself carries under tools/
+            open(os.path.join(legacy, 'check_generic.sh'), 'w').close()
+            link = os.path.join(d, 'factory')  # a symlink: real paths are what is compared
+            os.symlink(PROJECT_ROOT, link)
+            cfg = {'legacy_paths': [legacy]}
+            ok, detail = doctor.check_one_factory(cfg, env.Product('asf', {'repo_dir': link}))
+            self.assertTrue(ok, detail)
+            self.assertIn('repo skipped: it is the factory itself', detail)
+            # a copy of the checkout elsewhere is still a second copy
+            copy = os.path.join(d, 'copy')
+            shutil.copytree(os.path.join(PROJECT_ROOT, 'tools'), os.path.join(copy, 'tools'))
+            ok, detail = doctor.check_one_factory(cfg, env.Product('x', {'repo_dir': copy}))
+            self.assertFalse(ok)
+            self.assertIn('check_generic.sh in product repo', detail)
+
+
+class TestNoPrHost(unittest.TestCase):
+    """``ci: {provider: none}``: no repo_slug to demand, and gh is optional."""
+
+    def test_repo_slug_not_required_without_a_pr_host(self):
+        with tempfile.TemporaryDirectory() as home:
+            old = env.ASF_HOME
+            env.ASF_HOME = home
+            try:
+                os.makedirs(os.path.join(home, 'products'))
+                with open(os.path.join(home, 'products', 'p.yaml'), 'w') as f:
+                    f.write('product: p\nrepo_dir: /r\nbacklog_dir: /b\nci:\n  provider: none\n')
+                self.assertTrue(doctor.check_config('p')[0])
+                with open(os.path.join(home, 'products', 'p.yaml'), 'w') as f:
+                    f.write('product: p\nrepo_dir: /r\nbacklog_dir: /b\n')
+                ok, detail = doctor.check_config('p')[:2]
+                self.assertFalse(ok)
+                self.assertIn('repo_slug', detail)
+            finally:
+                env.ASF_HOME = old
+
+    def test_gh_is_optional_without_a_pr_host(self):
+        hostless = env.Product('p', {'ci': {'provider': 'none'}})
+        hosted = env.Product('p', {'ci': {'provider': 'gh-actions'}})
+        gh = lambda product: [r for r in doctor.check_cli_sessions(product) if r[0] == 'gh'][0]
+        self.assertFalse(gh(hostless)[1])
+        self.assertTrue(gh(hosted)[1])
+        self.assertFalse(doctor.has_pr_host(env.Product('p', {'ci': 'none'})))
+
 
 class TestFormatAndExit(unittest.TestCase):
     def test_is_red_true_only_for_required_failures(self):

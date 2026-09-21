@@ -1,11 +1,14 @@
 """asf.doctor — one table: is this product's ASF installation sound (``asf doctor --product <p>``).
 
-Six checks, each a row: config, product repo, backlog, scheduler job, CLI sessions (gh/git
-required; gcloud/az/aws/flyctl/vercel optional, skipped if not installed), and the **one-factory
-check** — no second copy of a factory tool on PATH or inside the product repo. The search set for
-that last check is never a literal path in this code: it is ``legacy_paths:`` in the operator's
-``~/.ASF/config.yaml``, a list of directories that once held the old, per-product tooling this
-product's ``asf`` install replaces.
+Six checks, each a row: config, product repo, backlog, scheduler job, CLI sessions (git required;
+gh required when the product has a PR host; gcloud, az, aws, flyctl and vercel optional, skipped if
+not installed), and the **one-factory check** — no second copy of a factory tool on PATH or inside
+the product repo. The search set for that last check is never a literal path in this code: it is
+``legacy_paths:`` in the operator's ``~/.ASF/config.yaml``, a list of directories that once held
+the old, per-product tooling this product's ``asf`` install replaces. A product whose repo is this
+package's own checkout skips the repo half: its tools are the factory, not a second copy of it.
+
+A product with no PR host — ``ci: {provider: none}`` — needs no ``repo_slug`` and no ``gh``.
 
 Exit 1 if any required row is red; optional rows that are unavailable print ``skip``, not red.
 """
@@ -31,6 +34,23 @@ def _run(cmd, timeout=10):
         return False, str(e)
 
 
+def has_pr_host(product):
+    """False only for ``ci: {provider: none}`` (or ``ci: none``): no hosted repo, no ``gh``."""
+    ci = product.ci if isinstance(product.ci, dict) else {'provider': product.ci}
+    provider = ci.get('provider')
+    return provider is None or str(provider).strip().lower() != 'none'
+
+
+def package_root():
+    """The checkout (or install dir) this ``asf`` package runs from."""
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def is_factory_repo(product):
+    """True when the product's repo is the ASF package's own checkout (real paths compared)."""
+    return bool(product.repo_dir) and os.path.realpath(product.repo_dir) == os.path.realpath(package_root())
+
+
 def check_config(product_name):
     """config.yaml and products/<name>.yaml both parse and carry the fields every other check needs."""
     try:
@@ -41,7 +61,8 @@ def check_config(product_name):
         product = env.load_product(product_name)
     except env.ConfigError as e:
         return False, f'products/{product_name}.yaml: {e}'
-    missing = [k for k in ('repo_dir', 'repo_slug', 'backlog_dir') if not getattr(product, k, None)]
+    keys = ('repo_dir', 'repo_slug', 'backlog_dir') if has_pr_host(product) else ('repo_dir', 'backlog_dir')
+    missing = [k for k in keys if not getattr(product, k, None)]
     if missing:
         return False, f'products/{product.name}.yaml missing {", ".join(missing)}', cfg, product
     return True, f'config.yaml + products/{product.name}.yaml', cfg, product
@@ -87,10 +108,13 @@ _CLI_TOOLS = [
 ]
 
 
-def check_cli_sessions():
-    """[(name, required, ok_or_None, detail)] — ``ok`` is ``None`` for an optional tool not installed."""
+def check_cli_sessions(product=None):
+    """[(name, required, ok_or_None, detail)] — ``ok`` is ``None`` for an optional tool not
+    installed. ``gh`` is optional for a product with no PR host."""
     rows = []
     for name, required, argv in _CLI_TOOLS:
+        if name == 'gh' and product is not None and not has_pr_host(product):
+            required = False
         if not required and shutil.which(argv[0]) is None:
             rows.append((name, required, None, 'not installed'))
             continue
@@ -141,13 +165,16 @@ def check_one_factory(cfg, product):
         found = shutil.which(name)
         if found and os.path.normpath(os.path.dirname(found)) not in legacy_dirs:
             dupes.append(f'{name} on PATH at {found}')
-    dupes.extend(f'{os.path.basename(p)} in product repo at {p}'
-                 for p in _find_in_repo(product.repo_dir, names))
+    own = is_factory_repo(product)
+    if not own:
+        dupes.extend(f'{os.path.basename(p)} in product repo at {p}'
+                     for p in _find_in_repo(product.repo_dir, names))
     if dupes:
         shown = '; '.join(dupes[:3])
         more = f' (+{len(dupes) - 3} more)' if len(dupes) > 3 else ''
         return False, shown + more
-    return True, f'{len(names)} legacy tool name(s) checked, no second copy found'
+    return True, (f'{len(names)} legacy tool name(s) checked, no second copy found'
+                  + (' (repo skipped: it is the factory itself)' if own else ''))
 
 
 # ---- the scheduler section --------------------------------------------------
@@ -163,8 +190,8 @@ def check_one_factory(cfg, product):
 #     is B-0014 (b): a job whose ProgramArguments could not resolve an interpreter.
 #
 # A `legacy_paths` directory that a loaded job still points at is yellow, not red: nothing is
-# broken yet, but retiring that directory would break it (which is what `tools/cutover.sh`'s
-# gate 1 refuses to do).
+# broken yet, but retiring that directory would break it (which is what the cutover script's —
+# `scheduler.CUTOVER_TOOL` — gate 1 refuses to do).
 
 OK, RED, YELLOW = 'ok', 'RED', 'YELLOW'
 NEVER_EXITED_INTERVALS = 2
@@ -288,7 +315,7 @@ def run(product_name):
     rows.append(('backlog', True, ok, detail))
     ok, detail = check_scheduler(cfg)
     rows.append(('scheduler', True, ok, detail))
-    for name, required, ok, detail in check_cli_sessions():
+    for name, required, ok, detail in check_cli_sessions(product):
         rows.append((f'cli:{name}', required, ok, detail))
     ok, detail = check_one_factory(cfg, product)
     rows.append(('one-factory', True, ok, detail))
