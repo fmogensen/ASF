@@ -133,6 +133,44 @@ def _branch_exists_on_origin(repo, branch):
     return bool(_git(['ls-remote', '--heads', 'origin', branch], repo).strip())
 
 
+def _git_ok(args, cwd):
+    return subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True)
+
+
+def unused_worktree(product, path, branch):
+    """``(ok, why)``: nothing in the worktree can be lost — a clean tree, and no commit on its
+    HEAD or its local branch beyond ``origin/<main>``. ``why`` is the reason it is not empty."""
+    base = f'origin/{product.main}'
+    st = _git_ok(['status', '--porcelain'], path)
+    if st.returncode != 0:
+        return False, 'not a git worktree'
+    if st.stdout.strip():
+        return False, 'uncommitted changes'
+    ahead = 0
+    refs = ['HEAD'] + ([f'refs/heads/{branch}'] if branch else [])
+    for ref in refs:
+        if _git_ok(['rev-parse', '--verify', '-q', ref], path).returncode != 0:
+            continue
+        n = _git_ok(['rev-list', '--count', f'{base}..{ref}'], path)
+        if n.returncode == 0:
+            ahead = max(ahead, int(n.stdout.strip() or 0))
+    if ahead:
+        return False, f'{ahead} commit{"" if ahead == 1 else "s"} on {branch or "HEAD"}'
+    return True, ''
+
+
+def discard_worktree(product, path, branch):
+    """Remove an unused worktree, and its local branch too — unless that branch is on origin,
+    where deleting it locally would strand pushed work that ``make_worktree``'s reuse path is
+    about to check out again."""
+    repo = product.repo_dir
+    _git(['worktree', 'remove', path], repo)
+    if not branch or _branch_exists_on_origin(repo, branch):
+        return
+    if _git_ok(['rev-parse', '--verify', '-q', f'refs/heads/{branch}'], repo).returncode == 0:
+        _git(['branch', '-D', branch], repo)
+
+
 def make_worktree(product, job, branch):
     """A branch already on origin — any row kind, a held branch sent back for another round —
     is reused: the worktree is added on it, then rebased onto ``origin/<main>`` — a conflict is
@@ -141,7 +179,12 @@ def make_worktree(product, job, branch):
     A worktree already sitting at this job's path is refused only while its session is still
     live — the same worktree left behind by a session that *ended* (e.g. it finished without
     pushing, B-0051) is reused as-is: its branch and tree, rebased onto the fetched trunk. A
-    live session's worktree is never touched (B-0025)."""
+    live session's worktree is never touched (B-0025).
+
+    A worktree with *no* session line at all is an orphan: the launch died between this call and
+    the ledger write, so there is nothing to reuse and nothing that says whose it is. Empty, it
+    is discarded and the job cut afresh; holding anything, it is refused with what it holds, for
+    an operator to look at (B-0025)."""
     repo = product.repo_dir
     if not repo or not os.path.isdir(repo):
         raise SpawnError(f'product repo_dir missing: {repo!r}')
@@ -149,11 +192,20 @@ def make_worktree(product, job, branch):
     _git(['fetch', '-q', 'origin', product.main], repo)
     if os.path.exists(path):
         s = pool_mod.load_sessions(product).get(job)
-        if s is None or not s.get('ended'):
+        if s is None:
+            # B-0025: no ledger line — the launch died before it was written. Nothing owns this
+            # tree, so it cannot be reused the way an ended session's is; empty, it is cleared
+            # and the job cut afresh below rather than refused for good.
+            ok, why = unused_worktree(product, path, branch)
+            if not ok:
+                raise SpawnError(f'worktree already exists: {path} — {why}; not removing it')
+            discard_worktree(product, path, branch)
+        elif not s.get('ended'):
             raise SpawnError(f'worktree already exists: {path}')
-        subprocess.run(['git', 'rebase', '-q', f'origin/{product.main}'], cwd=path,
-                       capture_output=True, text=True)
-        return path
+        else:
+            subprocess.run(['git', 'rebase', '-q', f'origin/{product.main}'], cwd=path,
+                           capture_output=True, text=True)
+            return path
     if _branch_exists_on_origin(repo, branch):
         _git(['fetch', '-q', 'origin', branch], repo)
         held = _holding_worktree(repo, branch)

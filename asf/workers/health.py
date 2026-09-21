@@ -13,7 +13,7 @@ For every live session in ``sessions.jsonl``:
 
 Then the worktrees under ``~/.ASF/state/<product>/worktrees/``: one with no session at all is an
 ``orphan``; one whose session has ended is a reap candidate. With ``fix=True`` a worktree is
-removed under any of three rules:
+removed under any of four rules:
 
 * the session is ``harvested`` — harvest lands a rebased tip from its own throwaway worktree and
   deletes the remote branch, so this worktree's HEAD never shows up on origin; the landing itself
@@ -25,7 +25,11 @@ removed under any of three rules:
   too, and that is "opening", never "merged" (B-0019);
 * any other ended session (stopped by an operator, a dead pid never re-judged, …) whose worktree
   has no commits ahead of ``origin/<main>`` and no uncommitted changes — there is nothing in it to
-  lose (B-0025, B-0049).
+  lose (B-0025, B-0049);
+* an ``orphan`` — a worktree with no session line at all, left when a launch died between
+  ``make_worktree`` and the ledger write — whose tree is likewise empty. No ``pushed()`` check can
+  ever clear an orphan (there is no branch to have pushed), so without this rule it is kept
+  forever and ``spawn`` refuses its job for good (B-0025).
 
 A live session whose worktree has no commits yet is listed ``opening``. Anything else is kept and
 listed with why. A reap also releases the job's ``BACKLOG_ID_RANGE`` reservation (B-0007) —
@@ -141,6 +145,14 @@ def remove_worktree(product, path, branch=None):
     return True
 
 
+def worktree_branch(worktree):
+    """The branch a worktree sits on, or ''. An orphan has no ledger line to read it from, and
+    leaving its (empty) branch behind would still fail the next ``worktree add -b`` (B-0025)."""
+    p = _git(['rev-parse', '--abbrev-ref', 'HEAD'], worktree)
+    name = p.stdout.strip() if p.returncode == 0 else ''
+    return '' if name == 'HEAD' else name
+
+
 def worktree_empty(worktree, main):
     """No commits ahead of ``origin/<main>`` and no uncommitted changes: nothing here that a
     reap would lose (B-0025, B-0049)."""
@@ -210,6 +222,15 @@ def health(product, fix=False, alive=pid_alive, out=print):
                     found.append((name, 'reapable', 'empty'))
             else:
                 found.append((name, 'keep', f'{what}: session {s.get("end_reason")}, not finished'))
+            continue
+        if s is None and worktree_empty(path, product.main):
+            # an orphan has no branch anyone pushed, so `pushed()` below would keep it forever
+            # and spawn would refuse its job forever. Empty, it holds nothing to lose (B-0025).
+            if fix and remove_worktree(product, path, branch=worktree_branch(path)):
+                spawn_mod.release_id_range(product, name)
+                found.append((name, 'reaped', 'empty orphan'))
+            else:
+                found.append((name, 'reapable', 'empty orphan'))
             continue
         ok, why = pushed(path, (s or {}).get('branch'))
         if not ok:

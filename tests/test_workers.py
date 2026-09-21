@@ -34,6 +34,15 @@ def git(*args, cwd):
     return p.stdout.strip()
 
 
+def commit_file(wt, name):
+    for k, v in (('user.email', 'ci@example.com'), ('user.name', 'ci')):
+        git('config', k, v, cwd=wt)
+    with open(os.path.join(wt, name), 'w') as f:
+        f.write(name)
+    git('add', name, cwd=wt)
+    git('commit', '-q', '-m', name, cwd=wt)
+
+
 def feature_row(job, item='F-0001'):
     return pool_mod.parse_row(f'STARVED → SPEC {item} "a feature"   → launch {job} (Opus)')
 
@@ -343,7 +352,49 @@ class TestSpawn(Home):
         rt = runtime_mod.FakeRuntime([{'running': True}])
         spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b', runtime=rt, cfg=self.cfg)
         with self.assertRaises(spawn_mod.SpawnError):
-            spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b', runtime=rt, cfg=self.cfg)
+            spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b', runtime=rt,
+                            cfg=self.cfg)
+
+    def test_b0025_dead_sessions_empty_worktree_is_reused_and_proceeds(self):
+        # the session ended, so B-0051's reuse arm takes it: same worktree, rebased onto the
+        # trunk. (It is not discarded — that is the orphan's path, below.)
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 12}, {'running': True, 'pid': 13}])
+        first = spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b', runtime=rt,
+                                cfg=self.cfg)
+        pool_mod.update_session(self.product, 'j', ended=pool_mod.now_iso(), end_reason='dead pid')
+        again = spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b', runtime=rt,
+                                cfg=self.cfg)
+        self.assertEqual(again['worktree'], first['worktree'])
+        self.assertEqual(again['pid'], 13)
+        self.assertEqual(git('rev-parse', 'HEAD', cwd=again['worktree']),
+                         git('rev-parse', 'origin/main', cwd=self.repo))
+
+    def test_b0025_spawn_discards_an_empty_orphan_worktree_and_cuts_afresh(self):
+        # no ledger line: the launch died before it was written. Nothing owns the tree, so it
+        # cannot be reused the way an ended session's is — empty, it is cleared and cut again.
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 12}, {'running': True, 'pid': 13}])
+        first = spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b', runtime=rt,
+                                cfg=self.cfg)
+        open(pool_mod.sessions_path(self.product), 'w').close()
+        again = spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b', runtime=rt,
+                                cfg=self.cfg)
+        self.assertEqual(again['worktree'], first['worktree'])
+        self.assertEqual(again['pid'], 13)
+        self.assertEqual(git('rev-parse', 'HEAD', cwd=again['worktree']),
+                         git('rev-parse', 'origin/main', cwd=self.repo))
+
+    def test_b0025_spawn_refuses_an_orphan_worktree_that_holds_work(self):
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 12}])
+        rec = spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b', runtime=rt,
+                              cfg=self.cfg)
+        wt = rec['worktree']
+        commit_file(wt, 'x')
+        open(pool_mod.sessions_path(self.product), 'w').close()
+        with self.assertRaises(spawn_mod.SpawnError) as cm:
+            spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b', runtime=rt,
+                            cfg=self.cfg)
+        self.assertIn('1 commit', str(cm.exception))
+        self.assertTrue(os.path.isdir(wt))
 
     def test_b0051_ended_sessions_worktree_is_reused_not_refused(self):
         # a session that ended 'finished' without pushing (B-0051) must not permanently block
@@ -543,6 +594,42 @@ class TestHealth(Home):
         s = pool_mod.load_sessions(self.product)['late']
         self.assertEqual(s['end_reason'], reason)
         self.assertEqual(s['rc'], 1)
+
+    def test_b0025_health_keeps_a_live_session_and_a_branch_with_commits(self):
+        live = self.spawn('live', {'running': True, 'pid': 13})
+        work = self.spawn('work', {'running': True, 'pid': 14})
+        commit_file(work['worktree'], 'x')
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: pid == 13,
+                                  out=lambda s: None)
+        self.assertNotIn('live', [j for j, w, d in found if w in ('reaped', 'reapable')])
+        self.assertEqual([w for j, w, d in found if j == 'work' and w != 'ended'], ['keep'])
+        self.assertTrue(os.path.isdir(live['worktree']))
+        self.assertTrue(os.path.isdir(work['worktree']))
+
+    def test_b0025_health_reaps_an_empty_orphan_worktree(self):
+        # no session line at all: the launch died between `make_worktree` and the ledger write.
+        # `pushed()` can never clear an orphan, so without B-0025's rule it is kept forever.
+        rec = self.spawn('lost', {'running': True, 'pid': 12})
+        wt, branch = rec['worktree'], rec['branch']
+        open(pool_mod.sessions_path(self.product), 'w').close()
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('lost', 'reapable', 'empty orphan'), found)
+        self.assertTrue(os.path.isdir(wt))
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False,
+                                  out=lambda s: None)
+        self.assertIn(('lost', 'reaped', 'empty orphan'), found)
+        self.assertFalse(os.path.exists(wt))
+        # the branch goes too, or the next `worktree add -b` still fails
+        self.assertEqual(git('branch', '--list', branch, cwd=self.repo), '')
+
+    def test_b0025_health_keeps_an_orphan_that_holds_work(self):
+        rec = self.spawn('lost', {'running': True, 'pid': 12})
+        commit_file(rec['worktree'], 'x')
+        open(pool_mod.sessions_path(self.product), 'w').close()
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False,
+                                  out=lambda s: None)
+        self.assertEqual([w for j, w, d in found if j == 'lost'], ['keep'])
+        self.assertTrue(os.path.isdir(rec['worktree']))
 
     def test_reap_only_when_pushed(self):
         rec = self.spawn('done', {'ok': True, 'pid': 11})
