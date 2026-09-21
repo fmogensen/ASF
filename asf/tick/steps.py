@@ -3,13 +3,15 @@
 The scheduler ran six steps: ``record``, ``health``, ``wave``, ``prs``, ``batch`` (its own job)
 and daily ``daily``. Each resolves to an owner:
 
-* ``asf``    — a python callable in this package (today only ``record``);
+* ``asf``    — a python callable in this package (``record``, ``health``, ``wave``, ``prs``,
+  ``daily`` — :data:`ASF_CALLABLES`);
 * a command  — ``steps: {health: "bash ~/x/health.sh --fix"}`` in the product yaml, run as a
   subprocess with a timeout, its output written to the tick log with a ``[command:<step>]`` prefix;
 * ``off``    — ``steps: {batch: off}``: the operator says another job still runs it.
 
 A step declared nowhere is a refusal, not a silent skip — the tick exits 2 before running anything.
-``record`` defaults to ``asf`` (it is what ``asf`` has); every other step must be declared.
+A step ``asf`` implements defaults to ``asf``; ``batch`` (a product's own merge-queue script, from
+its repo) has no ``asf`` implementation and must be declared.
 """
 import datetime
 import os
@@ -21,8 +23,15 @@ from asf import env
 
 STEPS = ['record', 'health', 'wave', 'prs', 'batch', 'daily']
 
-# the steps with an asf implementation (see asf.tick.tick.run_record_step)
-ASF_STEPS = ('record',)
+# the steps with an asf implementation, and where each lives (the --manifest command column)
+ASF_CALLABLES = {
+    'record': 'asf.tick.tick:run_record_step',
+    'health': 'asf.tick.step_health:run',
+    'wave': 'asf.tick.step_wave:run',
+    'prs': 'asf.tick.step_prs:run',
+    'daily': 'asf.tick.step_daily:run',
+}
+ASF_STEPS = tuple(ASF_CALLABLES)
 
 DEFAULT_LEGACY_TIMEOUT_S = 900
 
@@ -45,7 +54,7 @@ def resolve(product, steps=None):
         value = decl.get(step)
         text = str(value).strip() if value is not None else None
         if text is None or text == 'asf':
-            # undeclared falls back to asf only for a step asf has (record); `asf` for a step
+            # undeclared falls back to asf only for a step asf has; `asf` for a step
             # with no asf implementation is as ownerless as no declaration at all
             owner, command = ('asf' if step in ASF_STEPS else 'undeclared'), None
         elif text == 'off':
@@ -78,7 +87,7 @@ def manifest_table(rows):
     """The ``--manifest`` table: a header and one line per step, columns padded to their widest."""
     def cell(row):
         step, owner, command = row
-        return (step, owner, command or ('asf.tick.tick:run_record_step' if owner == 'asf' else '-'))
+        return (step, owner, command or (ASF_CALLABLES[step] if owner == 'asf' else '-'))
     body = [('step', 'owner', 'command')] + [cell(r) for r in rows]
     w0 = max(len(r[0]) for r in body)
     w1 = max(len(r[1]) for r in body)

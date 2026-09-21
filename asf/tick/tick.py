@@ -1,8 +1,19 @@
-"""asf.tick.tick — ``asf tick``: the scheduled steps (:mod:`asf.tick.steps`).
+"""asf.tick.tick — ``asf tick``: the scheduled steps (:mod:`asf.tick.steps`), in order
+``record → health → wave → prs → batch → daily``.
 
 ``record`` is step 0: metrics backfill → ingest → file-bugs → rollup → index, run in the tick's
 own clone of the product's backlog (:mod:`asf.tick.shadow`), committed and pushed to origin.
-Every other step is a command command the product declares, or ``off``.
+``health``, ``wave``, ``prs`` and ``daily`` are :mod:`asf.tick.step_health`, ``step_wave``,
+``step_prs`` and ``step_daily``; ``batch`` is a command the product declares (or ``off``), as is
+any step a product chooses to run with its own command.
+
+A step that fails prints one ``[step:<name>] FAILED <why>`` and the tick goes on to the next one;
+the exit code is 1 when any step failed. Every step shares one :class:`Context`, so the record
+clone is made (reset to origin) once per tick however many steps read it. After the steps, one
+line goes to ``metrics/ticks/<day>.jsonl`` in the record clone — the ``ticks`` stream's schema
+(``tick``, ``launches``, ``stalls``, ...) plus ``product`` and ``steps: [{step, ok, seconds}]`` —
+and is committed and pushed. One line per tick, not per step: ``asf metrics rollup`` counts
+the stream's lines as ticks and reads every stream field off each one.
 
 ``--shadow`` runs step 0 against a shadow clone instead — never pushes, commits locally, never
 runs a command step — then renders the six tables (:mod:`asf.views`) into ``<shadow>/tables/*.md``
@@ -10,9 +21,11 @@ so ``asf shadow-diff`` has something to compare against the pre-``asf`` tools' o
 """
 import argparse
 import datetime
+import json
 import os
 import subprocess
 import sys
+import time
 
 from asf import env
 from asf.record.index import do_index
@@ -73,16 +86,54 @@ def _stamp():
     return datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
-def run_record_step(product, fresh=False):
+class Context:
+    """What one tick's steps share: the product, the flags, the record clone (made — cloned or
+    reset to origin — at most once per tick), and the counters the tick line carries."""
+
+    def __init__(self, product, fresh=False):
+        self.product = product
+        self.fresh = fresh
+        self._record = None
+        self.counts = {'launches': 0, 'merges': 0, 'stalls': 0, 'refusals': 0, 'relaunches': 0}
+
+    @property
+    def has_record(self):
+        return self._record is not None
+
+    def record_root(self):
+        """The record clone's path; the first call clones it or resets it to origin."""
+        if self._record is None:
+            from asf.tick import shadow
+            self._record = shadow.ensure_clone(self.product, shadow.record_dir(self.product))
+        return self._record
+
+    def event(self, kind, **fields):
+        """Append one line to ``metrics/events/<day>.jsonl`` in the record clone."""
+        root = self.record_root()
+        stamp = _stamp()
+        rec = dict(fields, kind=kind, product=self.product.name, ts=stamp)
+        path = os.path.join(root, 'metrics', 'events', f'{stamp[:10]}.jsonl')
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(rec, sort_keys=True, ensure_ascii=False) + '\n')
+        return rec
+
+
+class StepFailed(Exception):
+    """An ``asf`` step's own failure: the tick prints ``[step:<name>] FAILED <message>``."""
+
+
+def run_record_step(product, fresh=False, ctx=None):
     """The ``record`` step, live: step 0 in the tick's own clone (``…/state/<product>/record``),
     committed as the factory identity, pushed to the backlog's origin. Never touches the operator's
     backlog checkout (B-0013). Returns the exit code: 0 (nothing to push, or pushed), 1 (push
     refused or the clone could not be made — the clone is derived state, the next run resets it
     and re-derives)."""
     from asf.tick import shadow
+    ctx = ctx or Context(product, fresh=fresh)
     path = shadow.record_dir(product)
     try:
-        shadow.ensure_clone(product, path)
+        path = ctx.record_root()
         run_step0(path, product, fresh=fresh)
         committed = shadow.commit_local(path, f"tick: state {_stamp()}")
     except (subprocess.CalledProcessError, env.ConfigError) as e:
@@ -129,7 +180,9 @@ def cmd_tick(args, root=None):
         print(e)
         return 2
 
+    ctx = Context(product, fresh=fresh)
     rc = 0
+    ran = []
     for step, owner, command in rows:
         if owner == 'off':
             print(f"tick: step {step} off (another job runs it)")
@@ -137,23 +190,75 @@ def cmd_tick(args, root=None):
         if step == 'daily' and not steps.daily_due(product, getattr(args, 'daily', False)):
             print("tick: step daily already ran today")
             continue
+        t0 = time.monotonic()
         if owner == 'asf':
-            step_rc = run_record_step(product, fresh=fresh)
+            step_rc = run_asf_step(step, ctx)
         else:
             step_rc = steps.run_command(step, command, steps.command_timeout())
             if step_rc:
                 print(f"tick: step {step} exited {step_rc}")
+        ran.append({'step': step, 'ok': not step_rc, 'seconds': round(time.monotonic() - t0, 1)})
         if step == 'daily' and step_rc == 0:
             steps.write_daily_stamp(product)
         rc = rc or (1 if step_rc else 0)
+    if ran:
+        write_tick_line(ctx, ran)
     return rc
+
+
+def _asf_step(step):
+    """The callable ``(ctx) -> rc`` for an ``asf`` step (looked up at call time, so a test can
+    replace one module attribute)."""
+    if step == 'record':
+        return lambda ctx: run_record_step(ctx.product, fresh=ctx.fresh, ctx=ctx)
+    import importlib
+    return importlib.import_module(f'asf.tick.step_{step}').run
+
+
+def run_asf_step(step, ctx):
+    """Run one ``asf`` step; any failure is one ``[step:<name>] FAILED`` line and rc 1 — never
+    an exception out of the tick."""
+    try:
+        return _asf_step(step)(ctx) or 0
+    except Exception as e:  # noqa: BLE001 — one step's failure never stops the rest
+        detail = (getattr(e, 'stderr', None) or str(e) or type(e).__name__).strip()
+        print(f"[step:{step}] FAILED {detail.splitlines()[0] if detail else type(e).__name__}")
+        return 1
+
+
+def tick_line(ctx, ran, now=None):
+    """The ``metrics/ticks`` line for this tick (the stream's schema + ``product`` + ``steps``)."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    return dict(ctx.counts, ts=now.strftime('%Y-%m-%dT%H:%M:%SZ'), tick=int(now.strftime('%H%M')),
+                duration_s=round(sum(r['seconds'] for r in ran), 1), quota={},
+                refused_files={}, product=ctx.product.name, steps=ran)
+
+
+def write_tick_line(ctx, ran):
+    """Append the tick line to the record clone and commit + push it. Only when a step already
+    made the clone this tick: a ``--steps`` run of command steps alone does not clone the record
+    to log itself. A failure here is printed, never raised (the steps already ran)."""
+    if not ctx.has_record:
+        return
+    from asf.tick import shadow
+    try:
+        root = ctx.record_root()
+        line = tick_line(ctx, ran)
+        path = os.path.join(root, 'metrics', 'ticks', f"{line['ts'][:10]}.jsonl")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(line, sort_keys=True, ensure_ascii=False) + '\n')
+        if shadow.commit_local(root, f"tick: steps {line['ts']}") and not shadow.push(root):
+            print(f"tick: step log committed, push refused — re-derived next run ({root})")
+    except (subprocess.CalledProcessError, OSError, env.ConfigError) as e:
+        print(f"tick: step log not written ({(getattr(e, 'stderr', None) or str(e)).strip()})")
 
 
 def register(subparsers):
     """Add the ``tick`` subcommand (replaces the bare one in ``asf.cli``)."""
     p = subparsers.add_parser(
-        'tick', help='the scheduled steps: record (metrics backfill -> ingest -> file-bugs -> rollup '
-                     '-> index, committed and pushed) plus every step declared under steps')
+        'tick', help='the scheduled steps, in order: record, health, wave, prs, batch, daily '
+                     '(a failing step never stops the rest; exit 1 if any failed)')
     p.add_argument('--product')
     p.add_argument('--shadow', action='store_true',
                    help='run record against a shadow clone, never pushed, never a command step')

@@ -104,6 +104,14 @@ class TickTestCase(unittest.TestCase):
 
 
 class RecordStepTests(TickTestCase):
+    """The record step's own commit and push; the tick's step-log commit is TickLineTests'."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(tick, 'write_tick_line', lambda ctx, ran: None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_run_produces_one_pushed_commit(self):
         rc, out = self.run_tick(steps='record')
         self.assertEqual(rc, 0)
@@ -170,15 +178,16 @@ class ManifestTests(TickTestCase):
             ('record', 'asf', None),
             ('health', 'command', 'bash ~/x/health.sh --fix'),
             ('wave', 'off', None),
-            ('prs', 'undeclared', None),
+            ('prs', 'asf', None),
             ('batch', 'undeclared', None),
-            ('daily', 'undeclared', None),
+            ('daily', 'asf', None),
         ])
 
     def test_asf_declared_for_a_step_asf_lacks_is_undeclared(self):
-        self.write_product('steps:\n  health: asf\n')
+        self.write_product('steps:\n  batch: asf\n  health: asf\n')
         rows = dict((s, o) for s, o, _ in steps.resolve(env.load_product('sample')))
-        self.assertEqual(rows['health'], 'undeclared')
+        self.assertEqual(rows['batch'], 'undeclared')
+        self.assertEqual(rows['health'], 'asf')
 
     def test_manifest_table_golden(self):
         rc, out = self.run_tick(manifest=True)
@@ -188,16 +197,36 @@ class ManifestTests(TickTestCase):
             'record  asf         asf.tick.tick:run_record_step\n'
             'health  command     bash ~/x/health.sh --fix\n'
             'wave    off         -\n'
-            'prs     undeclared  -\n'
+            'prs     asf         asf.tick.step_prs:run\n'
             'batch   undeclared  -\n'
-            'daily   undeclared  -\n'))
+            'daily   asf         asf.tick.step_daily:run\n'))
+
+    def test_manifest_golden_all_asf_and_a_batch_command(self):
+        self.write_product('steps:\n  batch: bash ~/q/merge-queue.sh --once\n')
+        rc, out = self.run_tick(manifest=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, (
+            'step    owner    command\n'
+            'record  asf      asf.tick.tick:run_record_step\n'
+            'health  asf      asf.tick.step_health:run\n'
+            'wave    asf      asf.tick.step_wave:run\n'
+            'prs     asf      asf.tick.step_prs:run\n'
+            'batch   command  bash ~/q/merge-queue.sh --once\n'
+            'daily   asf      asf.tick.step_daily:run\n'))
+
+    def test_undeclared_batch_exits_2(self):
+        self.write_product('')
+        rc, out = self.run_tick()
+        self.assertEqual(rc, 2)
+        self.assertEqual(out, 'tick: step batch has no owner — declare it under steps in '
+                              'products/sample.yaml (asf | <command> | off)\n')
 
     def test_undeclared_step_refuses_before_running_anything(self):
         marker = os.path.join(self.tmp, 'ran')
         self.write_product(f'steps:\n  health: touch {marker}\n  wave: off\n')
         rc, out = self.run_tick()
         self.assertEqual(rc, 2)
-        self.assertEqual(out, 'tick: step prs has no owner — declare it under steps in '
+        self.assertEqual(out, 'tick: step batch has no owner — declare it under steps in '
                               'products/sample.yaml (asf | <command> | off)\n')
         self.assertFalse(os.path.exists(marker))
         self.assertFalse(os.path.exists(self.record_path()))
