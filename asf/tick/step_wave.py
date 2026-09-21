@@ -32,6 +32,15 @@ def inflight(product):
             for s in pool_mod.live_sessions(product)]
 
 
+def attempts(product):
+    """``{item: sessions the ledger holds for it}`` — ended or not — for the feeder's tier order."""
+    out = {}
+    for s in pool_mod.load_sessions(product).values():
+        if s.get('item'):
+            out[s['item']] = out.get(s['item'], 0) + 1
+    return out
+
+
 def _git(repo, args):
     p = subprocess.run(['git', '-C', repo, *args], capture_output=True, text=True)
     return p.stdout.strip() if p.returncode == 0 else ''
@@ -78,7 +87,7 @@ def run(ctx, out=print):
     product = ctx.product
     items, _generated = index_reader.load(ctx.record_root())
     running = inflight(product)
-    planned = feeder_rows.plan_rows(items, product, running, capacity())
+    planned = feeder_rows.plan_rows(items, product, running, capacity(), attempts=attempts(product))
     worker_rows, texts, kinds = [], {}, {}
     for row in planned:
         if not row.launches:

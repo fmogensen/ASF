@@ -253,7 +253,7 @@ class WaveStepTests(StepsTestCase):
         self.write_config('feeder:\n  capacity: 3\n')
         seen = {}
 
-        def plan(index, product, inflight, capacity):
+        def plan(index, product, inflight, capacity, attempts=None):
             seen.update(capacity=capacity, inflight=[s['item'] for s in inflight], ids=sorted(index))
             return self.rows
         ctx = self.ctx()
@@ -281,7 +281,7 @@ class WaveStepTests(StepsTestCase):
                                  'last_commit': ''})
 
     def test_nothing_to_launch(self):
-        with mock.patch.object(feeder_rows, 'plan_rows', lambda *a: []):
+        with mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **kw: []):
             step_wave.run(self.ctx(), out=self.lines.append)
         self.assertEqual(self.lines, ['wave: nothing to launch'])
         self.assertEqual(self.waved, [])
