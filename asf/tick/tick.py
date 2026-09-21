@@ -1,16 +1,22 @@
-"""asf.tick.tick — ``asf tick``: metrics backfill → ingest → file-bugs → rollup → index.
+"""asf.tick.tick — ``asf tick``: the scheduled steps (:mod:`asf.tick.steps`).
 
-``--shadow`` runs the same sequence against a shadow clone of the product's backlog
-(:mod:`asf.tick.shadow`) instead of the real one — never pushes, commits locally — then renders
-the six tables (:mod:`asf.views`) into ``<shadow>/tables/*.md`` so ``asf shadow-diff`` has
-something to compare against the pre-``asf`` tools' output.
+``record`` is step 0: metrics backfill → ingest → file-bugs → rollup → index, run in the tick's
+own clone of the product's backlog (:mod:`asf.tick.shadow`), committed and pushed to origin.
+Every other step is a legacy command the product declares, or ``off``.
+
+``--shadow`` runs step 0 against a shadow clone instead — never pushes, commits locally, never
+runs a legacy step — then renders the six tables (:mod:`asf.views`) into ``<shadow>/tables/*.md``
+so ``asf shadow-diff`` has something to compare against the pre-``asf`` tools' output.
 """
 import argparse
 import datetime
 import os
+import subprocess
+import sys
 
 from asf import env
 from asf.record.index import do_index
+from asf.tick import steps
 
 
 def _ns(**kw):
@@ -63,24 +69,96 @@ def write_tables(root, tables):
     return tables_dir
 
 
+def _stamp():
+    return datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def run_record_step(product, fresh=False):
+    """The ``record`` step, live: step 0 in the tick's own clone (``…/state/<product>/record``),
+    committed as the factory identity, pushed to the backlog's origin. Never touches the operator's
+    backlog checkout (B-0013). Returns the exit code: 0 (nothing to push, or pushed), 1 (push
+    refused or the clone could not be made — the clone is derived state, the next run resets it
+    and re-derives)."""
+    from asf.tick import shadow
+    path = shadow.record_dir(product)
+    try:
+        shadow.ensure_clone(product, path)
+        run_step0(path, product, fresh=fresh)
+        committed = shadow.commit_local(path, f"tick: state {_stamp()}")
+    except (subprocess.CalledProcessError, env.ConfigError) as e:
+        detail = (getattr(e, 'stderr', None) or str(e)).strip()
+        print(f"tick: record failed ({detail})")
+        return 1
+    if not committed:
+        print(f"tick: no change ({path})")
+        return 0
+    if shadow.push(path):
+        print(f"tick: state committed and pushed ({path})")
+        return 0
+    print(f"tick: state committed, push refused — re-derived next run ({path})")
+    return 1
+
+
+def run_shadow(product, fresh=False):
+    from asf.tick.shadow import ensure_shadow_clone, commit_local
+    backlog_root = ensure_shadow_clone(product)
+    run_step0(backlog_root, product, fresh=fresh)
+    committed = commit_local(backlog_root, f"tick: state {_stamp()}")
+    tables = render_tables(backlog_root, product)
+    tables_dir = write_tables(backlog_root, tables)
+    print(f"tick --shadow: {'state committed' if committed else 'no change'} "
+          f"in {backlog_root}; tables in {tables_dir}")
+    return 0
+
+
 def cmd_tick(args, root=None):
     product = env.load_product(getattr(args, 'product', None))
-    shadow = getattr(args, 'shadow', False)
     fresh = getattr(args, 'fresh', False)
 
-    if shadow:
-        from asf.tick.shadow import ensure_shadow_clone, commit_local
-        backlog_root = ensure_shadow_clone(product)
-        run_step0(backlog_root, product, fresh=fresh)
-        stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-        committed = commit_local(backlog_root, f"tick: state {stamp}")
-        tables = render_tables(backlog_root, product)
-        tables_dir = write_tables(backlog_root, tables)
-        print(f"tick --shadow: {'state committed' if committed else 'no change'} "
-              f"in {backlog_root}; tables in {tables_dir}")
-        return 0
+    if getattr(args, 'shadow', False):
+        return run_shadow(product, fresh=fresh)  # record only, never a legacy step
 
-    backlog_root = product.backlog_dir
-    run_step0(backlog_root, product, fresh=fresh)
-    print("tick: state updated")
-    return 0
+    try:
+        chosen = steps.parse_steps(args.steps) if getattr(args, 'steps', None) else None
+        rows = steps.resolve(product, chosen)
+        if getattr(args, 'manifest', False):
+            sys.stdout.write(steps.manifest_table(rows))
+            return 0
+        steps.check_owned(rows, product)
+    except steps.StepError as e:
+        print(e)
+        return 2
+
+    rc = 0
+    for step, owner, command in rows:
+        if owner == 'off':
+            print(f"tick: step {step} off (another job runs it)")
+            continue
+        if step == 'daily' and not steps.daily_due(product, getattr(args, 'daily', False)):
+            print("tick: step daily already ran today")
+            continue
+        if owner == 'asf':
+            step_rc = run_record_step(product, fresh=fresh)
+        else:
+            step_rc = steps.run_legacy(step, command, steps.legacy_timeout())
+            if step_rc:
+                print(f"tick: step {step} exited {step_rc}")
+        if step == 'daily' and step_rc == 0:
+            steps.write_daily_stamp(product)
+        rc = rc or (1 if step_rc else 0)
+    return rc
+
+
+def register(subparsers):
+    """Add the ``tick`` subcommand (replaces the bare one in ``asf.cli``)."""
+    p = subparsers.add_parser(
+        'tick', help='the scheduled steps: record (metrics backfill -> ingest -> file-bugs -> rollup '
+                     '-> index, committed and pushed) plus every step declared under legacy_steps')
+    p.add_argument('--product')
+    p.add_argument('--shadow', action='store_true',
+                   help='run record against a shadow clone, never pushed, never a legacy step')
+    p.add_argument('--fresh', action='store_true', help="bypass evidence's cache")
+    p.add_argument('--steps', help=f"comma list, a subset of {','.join(steps.STEPS)} (default: all)")
+    p.add_argument('--manifest', action='store_true', help='print step / owner / command and exit')
+    p.add_argument('--daily', action='store_true', help='run the daily step even if it already ran today')
+    return p
