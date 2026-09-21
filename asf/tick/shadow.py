@@ -1,8 +1,11 @@
 """asf.tick.shadow — the clones ``asf tick`` works in.
 
 A clone of a product's backlog, fetched and hard-reset to its origin's default branch before
-every tick (it holds derived state only, so a stray local commit — e.g. from a prior run whose
-push failed — is discarded, not fast-forwarded past). The live tick's clone is
+every tick (a stray local commit — from a prior run whose push finally failed — is discarded,
+not fast-forwarded past). Its push has one recovery (B-0030): when origin moved while the tick
+ran, the clone is rebased onto it once and pushed again, so the lines the steps appended
+(events, the tick line, filed cards) are not lost with a refused commit; a conflict on that
+rebase is aborted and the refusal stands. The live tick's clone is
 ``~/.ASF/state/<product>/record/``: it commits there and pushes (:func:`push`). The shadow tick's
 is ``…/shadow/``: it commits locally and never pushes, so it can be compared against the real
 tools without touching anything — see ``asf shadow-diff``. Neither ever touches the operator's own
@@ -103,24 +106,31 @@ def _push_once(path, branch):
     return _sh(['git', 'push', '-q', 'origin', f'HEAD:{branch}'], cwd=path, check=False).returncode == 0
 
 
-def push(path):
-    """``git push origin HEAD:<default branch>``; truthy if origin took it — True at once, or
-    ``'rebased'`` when origin had moved while the tick ran (a card filed by hand between the
-    tick's reset and its push) and the clone was rebased onto it once and pushed again (B-0030:
-    the appended streams — events, session lines — were thrown away with the refused commit).
-    Any other refusal (a hook, an unreachable remote, a conflict on that rebase) is not an
-    error: the clone is derived state, the next run resets it and re-derives."""
+def push(path, out=None):
+    """``git push origin HEAD:<default branch>``; True if origin took it.
+
+    On a refusal: fetch; if ``origin/<branch>`` is still an ancestor of HEAD origin has not
+    moved and the refusal has another cause (a hook, an unreachable remote) — False, as before.
+    If origin moved (a card pushed by hand while the tick ran — B-0030), rebase onto it once and
+    push again: True, and one line through ``out`` when given. A rebase that conflicts is
+    aborted and the push is False: the clone is derived state plus that tick's appended lines,
+    and the next run resets it and re-derives (the appended lines of that one tick are lost, as
+    the docstring above says)."""
     branch = _default_branch(path)
     if _push_once(path, branch):
         return True
-    _sh(['git', 'fetch', '-q', 'origin'], cwd=path, check=False)
-    moved = _sh(['git', 'merge-base', '--is-ancestor', f'origin/{branch}', 'HEAD'],
-                cwd=path, check=False).returncode != 0
-    if not moved:
+    if _sh(['git', 'fetch', '-q', 'origin'], cwd=path, check=False).returncode != 0:
+        return False
+    if _sh(['git', 'merge-base', '--is-ancestor', f'origin/{branch}', 'HEAD'],
+           cwd=path, check=False).returncode == 0:
         return False
     rebase = _sh(['git', '-c', 'core.editor=true', 'rebase', f'origin/{branch}'],
                  cwd=path, check=False)
     if rebase.returncode != 0:
         _sh(['git', 'rebase', '--abort'], cwd=path, check=False)
         return False
-    return 'rebased' if _push_once(path, branch) else False
+    if not _push_once(path, branch):
+        return False
+    if out:
+        out(f'tick: origin moved during the tick — rebased onto origin/{branch} and pushed')
+    return True

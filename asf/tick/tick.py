@@ -166,17 +166,16 @@ def run_record_step(product, fresh=False, ctx=None):
 
 
 def commit_and_push(ctx):
-    """Commit the record clone as ``tick: state <ts>`` and push it; one line saying which. Returns
+    """Commit the record clone as ``tick: state <ts>`` and push it; one line saying which (two when
+    origin moved during the tick and the clone was rebased onto it first — B-0030). Returns
     0 (nothing to commit, or pushed) or 1 (push refused — re-derived next run)."""
     from asf.tick import shadow
     path = ctx.record_root()
     if not shadow.commit_local(path, f"tick: state {_stamp()}"):
         print(f"tick: no change ({path})")
         return 0
-    pushed = shadow.push(path)
-    if pushed:
-        how = ' after a rebase onto origin' if pushed == 'rebased' else ''
-        print(f"tick: state committed and pushed{how} ({path})")
+    if shadow.push(path, out=print):
+        print(f"tick: state committed and pushed ({path})")
         return 0
     print(f"tick: state committed, push refused — re-derived next run ({path})")
     return 1
