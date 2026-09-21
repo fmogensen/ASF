@@ -1,0 +1,313 @@
+"""asf.groom.groom — inbox -> cards, then write groom/<date>.md (``asf groom``)."""
+import datetime
+import os
+import re
+
+from asf import env
+from asf.record import frontmatter
+from asf.record.core import canonicalize, compute_derived, is_open, jaccard, load_items, tokenize
+from asf.record.index import do_index
+from asf.record.ingest import append_history_lines
+from asf.tick.stale import format_age, parse_iso
+from asf.groom.inbox import process_inbox
+
+ANSWER_LINE_RE = re.compile(r'^- \[[ xX]\]\s+(?P<id>[A-Z]-\d{4})\b.*→\s*answer:\s*(?P<answer>.*)$')
+ANSWER_YES = re.compile(r'^yes$', re.IGNORECASE)
+ANSWER_NO = re.compile(r'^(no|close)$', re.IGNORECASE)
+ANSWER_RANK = re.compile(r'^rank\s+(\d+)$', re.IGNORECASE)
+ANSWER_PARENT = re.compile(r'^parent\s+(\S+)$', re.IGNORECASE)
+ANSWER_SEVERITY = re.compile(r'^(S[123])$', re.IGNORECASE)
+CONTROLLER_PREFIX = re.compile(r'^controller:\s*', re.IGNORECASE)
+
+
+def _previous_groom_file(root, date):
+    d = os.path.join(root, 'groom')
+    if not os.path.isdir(d):
+        return None
+    dates = [m.group(1) for name in os.listdir(d)
+             for m in [re.match(r'^(\d{4}-\d{2}-\d{2})\.md$', name)] if m and m.group(1) < date]
+    if not dates:
+        return None
+    return os.path.join(d, f"{sorted(dates)[-1]}.md")
+
+
+def _parse_answer(answer):
+    """(field, value) for one groom answer word, or (None, None) when it's blank or unrecognized."""
+    a = answer.strip()
+    if not a or a == '____':
+        return None, None
+    if ANSWER_YES.match(a):
+        return 'decided', True
+    if ANSWER_NO.match(a):
+        return 'removed', None  # caller fills in the reason text
+    m = ANSWER_RANK.match(a)
+    if m:
+        return 'rank', int(m.group(1))
+    m = ANSWER_PARENT.match(a)
+    if m:
+        return 'parent', m.group(1)
+    m = ANSWER_SEVERITY.match(a)
+    if m:
+        return 'severity', m.group(1).upper()
+    return None, None
+
+
+def _fmt_history_value(value):
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    return str(value)
+
+
+def apply_groom_answers(root, canonical, prev_path, date):
+    """Read `prev_path`'s answered lines, write each as a typed field, append one History line
+    each. A no-op line (blank/`____`, or a field already at the target value) changes nothing —
+    this is what makes re-running `--apply` for the same date idempotent."""
+    with open(prev_path, encoding='utf-8') as f:
+        lines = f.read().split('\n')
+
+    applied = 0
+    for line in lines:
+        m = ANSWER_LINE_RE.match(line)
+        if not m:
+            continue
+        iid, raw_answer = m.group('id'), m.group('answer').strip()
+        rec = canonical.get(iid)
+        if rec is None:
+            continue
+
+        who = '(operator)'
+        cm = CONTROLLER_PREFIX.match(raw_answer)
+        if cm:
+            raw_answer = raw_answer[cm.end():].strip()
+            who = '(controller, starvation policy)'
+
+        field, value = _parse_answer(raw_answer)
+        if field is None:
+            continue
+        if field == 'removed':
+            value = f"groom {date}"
+
+        typed, _machine = frontmatter.split_machine(rec['meta'])
+        if typed.get(field) == value:
+            continue  # already applied
+
+        frontmatter.write_typed(rec['path'], {field: value})
+        with open(rec['path'], encoding='utf-8') as f:
+            text = f.read()
+        meta2, body2 = frontmatter.parse(text, path=rec['relpath'])
+        hist = f"- {date} groom: {field} → {_fmt_history_value(value)} {who}"
+        new_body = append_history_lines(body2, [hist])
+        if new_body != body2:
+            with open(rec['path'], 'w', encoding='utf-8') as f:
+                f.write(frontmatter.render(meta2, new_body))
+        rec['meta'][field] = value
+        applied += 1
+    return applied
+
+
+def _card_line(iid, title, why):
+    return f"- [ ] {iid} {title} — {why} → answer: ____"
+
+
+def _open_items(canonical, exclude_types=()):
+    return {iid: rec for iid, rec in canonical.items()
+            if is_open(rec) and rec['meta'].get('type') not in exclude_types}
+
+
+def inbox_origin_ids(canonical):
+    """Every item `process_inbox` ever minted (its History says so), open or not. A card stays
+    in this set for its whole life, so "Inbox cards to decide" keeps naming it every day it sits
+    undecided instead of only on the day it was created."""
+    return {iid for iid, rec in canonical.items() if 'created (inbox)' in (rec.get('body') or '')}
+
+
+def groom_inbox_section(canonical, origin_ids):
+    lines = []
+    for iid in sorted(origin_ids):
+        rec = canonical.get(iid)
+        if rec is None:
+            continue
+        typed, _machine = frontmatter.split_machine(rec['meta'])
+        if typed.get('decided') is True or typed.get('removed'):
+            continue
+        lines.append(_card_line(iid, typed.get('title', ''), 'from inbox, awaiting a decision'))
+    return lines
+
+
+def groom_undecided_section(canonical, now, days, exclude=()):
+    lines = []
+    threshold = days * 86400
+    for iid, rec in sorted(_open_items(canonical, ('decision', 'rule')).items()):
+        if iid in exclude:
+            continue
+        typed, machine = frontmatter.split_machine(rec['meta'])
+        if typed.get('decided') is True:
+            continue
+        since = parse_iso(machine.get('stage_since'))
+        if since is None:
+            continue
+        age = (now - since).total_seconds()
+        if age > threshold:
+            lines.append(_card_line(iid, typed.get('title', ''), f"undecided {format_age(age)}"))
+    return lines
+
+
+def groom_features_without_stories(canonical, derived):
+    lines = []
+    for iid, rec in sorted(_open_items(canonical).items()):
+        if rec['meta'].get('type') != 'feature':
+            continue
+        stories = [cid for cid in derived[iid]['children'] if canonical[cid]['meta'].get('type') == 'story']
+        if not stories:
+            lines.append(_card_line(iid, rec['meta'].get('title', ''), 'no Stories'))
+    return lines
+
+
+_AFTER_PLAN_APPROVED = ('plan-approved', 'landed', 'on-prod')
+
+
+def groom_stories_without_tasks(canonical, derived):
+    task_story_ids = set()
+    for rec in canonical.values():
+        if rec['meta'].get('type') == 'task':
+            for s in rec['meta'].get('stories') or []:
+                task_story_ids.add(s)
+    lines = []
+    for fid, frec in sorted(canonical.items()):
+        if frec['meta'].get('type') != 'feature':
+            continue
+        _typed, machine = frontmatter.split_machine(frec['meta'])
+        stage = machine.get('stage') or ''
+        if stage not in _AFTER_PLAN_APPROVED and not stage.startswith('building'):
+            continue
+        for sid in derived[fid]['children']:
+            srec = canonical[sid]
+            if srec['meta'].get('type') != 'story' or not is_open(srec):
+                continue
+            if sid not in task_story_ids:
+                lines.append(_card_line(sid, srec['meta'].get('title', ''),
+                                        f"{fid} is {stage}, no Task lists it"))
+    return lines
+
+
+def groom_blocked_on_closed(canonical):
+    lines = []
+    for iid, rec in sorted(_open_items(canonical).items()):
+        for b in rec['meta'].get('blockedBy') or []:
+            if isinstance(b, str) and b in canonical:
+                _t, bm = frontmatter.split_machine(canonical[b]['meta'])
+                if bm.get('state') == 'Closed':
+                    lines.append(_card_line(iid, rec['meta'].get('title', ''),
+                                            f"blockedBy {b}, which is Closed"))
+    return lines
+
+
+def groom_near_duplicates(canonical):
+    lines = []
+    by_type = {}
+    for iid, rec in canonical.items():
+        if is_open(rec):
+            by_type.setdefault(rec['meta'].get('type'), []).append(iid)
+    seen_pairs = set()
+    for type_, ids in by_type.items():
+        ids = sorted(ids)
+        for i in range(len(ids)):
+            for j in range(i + 1, len(ids)):
+                a, b = ids[i], ids[j]
+                score = jaccard(tokenize(canonical[a]['meta'].get('title', '')),
+                                tokenize(canonical[b]['meta'].get('title', '')))
+                if score > 0.6 and (a, b) not in seen_pairs:
+                    seen_pairs.add((a, b))
+                    lines.append(_card_line(b, canonical[b]['meta'].get('title', ''),
+                                            f"near-duplicate of {a} (overlap {score:.2f})"))
+    return sorted(lines)
+
+
+def groom_auto_bugs_section(canonical):
+    lines = []
+    for iid, rec in sorted(canonical.items()):
+        typed, _machine = frontmatter.split_machine(rec['meta'])
+        if typed.get('type') != 'bug' or not typed.get('signature'):
+            continue
+        if typed.get('decided') is True or typed.get('removed'):
+            continue
+        lines.append(_card_line(iid, typed.get('title', ''),
+                                f"auto-filed, count {typed.get('count', 1)}"))
+    return lines
+
+
+GROOM_SECTIONS = [
+    ('Inbox cards to decide', 'inbox'),
+    ('Undecided > 3 days', 'undecided3'),
+    ('Features without Stories', 'no_stories'),
+    ('Stories without Tasks after plan-approved', 'no_tasks'),
+    ('Blocked on a Closed item', 'blocked_closed'),
+    ('Near-duplicate titles', 'dupes'),
+    ('Undecided > 14 days', 'undecided14'),
+    ('Auto-filed Bugs not yet decided', 'auto_bugs'),
+]
+
+
+def build_groom_sections(canonical, derived, date):
+    now = datetime.datetime.now(datetime.timezone.utc)
+    origin_ids = inbox_origin_ids(canonical)
+    return {
+        'inbox': groom_inbox_section(canonical, origin_ids),
+        'undecided3': groom_undecided_section(canonical, now, 3, exclude=origin_ids),
+        'no_stories': groom_features_without_stories(canonical, derived),
+        'no_tasks': groom_stories_without_tasks(canonical, derived),
+        'blocked_closed': groom_blocked_on_closed(canonical),
+        'dupes': groom_near_duplicates(canonical),
+        'undecided14': groom_undecided_section(canonical, now, 14, exclude=origin_ids),
+        'auto_bugs': groom_auto_bugs_section(canonical),
+    }
+
+
+def render_groom_file(date, sections):
+    out = [f"# Groom {date}\n"]
+    for title, key in GROOM_SECTIONS:
+        lines = sections.get(key) or []
+        out.append(f"## {title}\n")
+        if lines:
+            out.append('\n'.join(lines) + '\n')
+        else:
+            out.append("(none)\n")
+        out.append('')
+    return '\n'.join(out).rstrip('\n') + '\n'
+
+
+def cmd_groom(args, root):
+    date = args.date or datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
+    by_id, parse_errors = load_items(root)
+    if parse_errors:
+        for f, line, why in parse_errors:
+            print(f"{f}:{line}: {why}")
+        return 1
+    canonical, _dupes = canonicalize(by_id)
+
+    applied = 0
+    if args.apply:
+        prev = _previous_groom_file(root, date)
+        if prev:
+            applied = apply_groom_answers(root, canonical, prev, date)
+
+    default_bug_parent = getattr(args, 'default_bug_epic', None)
+    if default_bug_parent is None:
+        try:
+            default_bug_parent = env.load_product(getattr(args, 'product', None)).conventions.get('default_bug_epic')
+        except env.ConfigError:
+            pass
+    created_ids = process_inbox(root, canonical, date, default_bug_parent=default_bug_parent)
+
+    derived = compute_derived(canonical)
+    sections = build_groom_sections(canonical, derived, date)
+    text = render_groom_file(date, sections)
+    groom_dir = os.path.join(root, 'groom')
+    os.makedirs(groom_dir, exist_ok=True)
+    with open(os.path.join(groom_dir, f"{date}.md"), 'w', encoding='utf-8') as f:
+        f.write(text)
+
+    rc = do_index(root)
+    counts = ', '.join(f"{title}: {len(sections.get(key) or [])}" for title, key in GROOM_SECTIONS)
+    print(f"groom {date}: applied {applied}, inbox {len(created_ids)} card(s) — {counts}")
+    return rc
