@@ -29,9 +29,13 @@ def do_index(root):
     if os.path.isfile(index_path):
         with open(index_path, encoding='utf-8') as f:
             try:
-                old_items = json.load(f).get('items')
+                old = json.load(f)
             except json.JSONDecodeError:
-                old_items = None
+                old = {}
+        old_items = old.get('items')
+        # the schema stamp is the record's, not the items': a rewrite carries it over (asf schema)
+        if 'schema_version' in old:
+            data['schema_version'] = old['schema_version']
     if old_items != data['items']:
         with open(index_path, 'w', encoding='utf-8') as f:
             f.write(render_index_json(data))

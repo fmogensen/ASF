@@ -96,6 +96,14 @@ def build_parser():
 
     from asf.tick.tick import register as register_tick
     register_tick(sub)
+    from asf.init import register_commands as register_install
+    register_install(sub)
+    from asf.scheduler import register as register_scheduler
+    register_scheduler(sub)
+    from asf.feeder.render import register as register_feeder
+    register_feeder(sub)
+    from asf.workers import register as register_workers
+    register_workers(sub)
 
     p_roadmap = sub.add_parser('roadmap', help='the ROADMAP table: one row per Epic')
     p_roadmap.add_argument('--product')
@@ -204,6 +212,15 @@ def main(argv=None):
     if args.command == 'shadow-diff':
         from asf.tick.shadow_diff import cmd_shadow_diff
         return cmd_shadow_diff(args)
+    if args.command == 'scheduler':
+        from asf.scheduler import cmd_scheduler
+        return cmd_scheduler(args, root)
+    # commands registered with set_defaults(run=…) (init, schema-migrate, upgrade, hooks, hook)
+    if getattr(args, 'run', None):
+        return args.run(args)
+    # commands registered with set_defaults(func=…) (next, workers …)
+    if getattr(args, 'func', None):
+        return args.func(args)
 
     parser.print_help()
     return 2
