@@ -212,6 +212,15 @@ class HarvestTests(unittest.TestCase):
             self.assertNotIn(var, genv, var)
         self.assertEqual(genv.get('ASF_HOME'), '/x/.ASF')  # the operator's home is not identity
 
+    def test_b0033_gate_env_puts_the_gated_worktree_first_on_pythonpath(self):
+        # a test that runs `python -m asf.cli` from another cwd must import the branch's code
+        with mock.patch.dict(os.environ, {'PYTHONPATH': '/elsewhere'}):
+            genv = harvest.gate_env('/tmp/harvest-x/wt')
+        parts = genv['PYTHONPATH'].split(os.pathsep)
+        self.assertEqual(parts[0], '/tmp/harvest-x/wt')
+        self.assertTrue(os.path.isdir(os.path.join(parts[1], 'asf')), parts[1])
+        self.assertEqual(parts[-1], '/elsewhere')
+
     # -- a fast-forwardable branch lands on main with no controller action -----------------
     def test_green_branch_lands_on_main(self):
         branch, wt = add_job_worktree(self.repo, self.state_dir, 'ff1')

@@ -80,19 +80,26 @@ def sh(cmd, cwd=None, env=None):
 CALLER_IDENTITY_VARS = ('ASF_PRODUCT', 'ASF_JOB', 'BACKLOG_ID_RANGE')
 
 
-def gate_env():
+def gate_env(worktree=None):
     """The environment the gate and index regeneration run in: the caller's own, minus the
     caller's identity (:data:`CALLER_IDENTITY_VARS`) — BACKLOG_ID_RANGE names the calling
     session's own mint range and must never leak into a branch it didn't spawn (a worker
     session invoking `--dry-run` against the live repo would otherwise misjudge an unrelated
-    branch's tests as failing); ASF_PRODUCT/ASF_JOB name the tick or session running the gate."""
+    branch's tests as failing); ASF_PRODUCT/ASF_JOB name the tick or session running the gate.
+
+    PYTHONPATH: the gated ``worktree`` first, then the package that is harvesting. A test in
+    the worktree that runs ``python -m asf.cli`` from some other cwd must get the worktree's
+    own code — the branch under test — not the harvester's (B-0033: the sample-product test
+    ran main's package against the branch's fixtures); `asf index`/`asf check` from a product
+    repo with no ``asf`` package of its own still find the harvester's."""
     env = clean_env()
     for var in CALLER_IDENTITY_VARS:
         env.pop(var, None)
-    # `asf index`/`asf check` run as `python -m asf.cli` from the rebased worktree, whose cwd is
-    # the repo being gated, not this package: point the child at the package that is harvesting.
     pkg_parent = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    env['PYTHONPATH'] = pkg_parent + os.pathsep + env.get('PYTHONPATH', '')
+    parts = ([os.path.abspath(worktree)] if worktree else []) + [pkg_parent]
+    if env.get('PYTHONPATH'):
+        parts.append(env['PYTHONPATH'])
+    env['PYTHONPATH'] = os.pathsep.join(parts)
     return env
 
 
@@ -312,7 +319,7 @@ def run_gate(tmp, conv=None):
     ``conventions.test_command`` is gated by ``asf check`` alone — never by a command this
     package guessed at."""
     conv = conv or DEFAULTS
-    env = gate_env()
+    env = gate_env(tmp)
     if conv.test_command:
         t = sh(shlex.split(str(conv.test_command)), cwd=tmp, env=env)
         if t.returncode != 0:
@@ -378,7 +385,7 @@ def harvest_branch(repo, state_dir, is_record, job, branch, dry_run, conv=None):
                 return hold(job, reason)
 
             if is_record:
-                idx = sh(asf_cmd('index'), cwd=tmp, env=gate_env())
+                idx = sh(asf_cmd('index'), cwd=tmp, env=gate_env(tmp))
                 if idx.returncode != 0:
                     return hold(job, f'asf index failed: {tail(idx.stderr or idx.stdout)}')
                 if sh(['git', 'status', '--porcelain'], cwd=tmp).stdout.strip():
@@ -588,7 +595,7 @@ def product_gate(tmp, conv, asf_repo):
         cmds.append(shlex.split(str(conv.test_command)))
     if asf_repo:
         cmds += [['bash', os.path.join('tools', name + '.sh')] for name in ASF_GATE_SCRIPTS]
-    env = gate_env()
+    env = gate_env(tmp)
     for cmd in cmds:
         r = sh(cmd, cwd=tmp, env=env)
         if r.returncode != 0:
