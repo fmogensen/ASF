@@ -1,0 +1,24 @@
+asf.sample.dispatch = {
+	active count = 0
+	path = /Users/operator/Library/LaunchAgents/asf.sample.dispatch.plist
+	state = not running
+
+	program = python3
+
+	arguments = {
+		python3
+		-m
+		asf.cli
+		tick
+		--product
+		sample
+		--steps
+		health,wave,prs,batch
+	}
+
+	domain = gui/501 [100005]
+	runs = 0
+	last exit code = (never exited)
+
+	properties = runatload | inferred program
+}

@@ -1,0 +1,45 @@
+asf.sample.record = {
+	active count = 1
+	path = /Users/operator/Library/LaunchAgents/asf.sample.record.plist
+	state = running
+
+	program = /usr/local/bin/python3.12
+
+	arguments = {
+		/usr/local/bin/python3.12
+		-m
+		asf.cli
+		tick
+		--product
+		sample
+		--steps
+		record
+	}
+
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		PATH => /usr/local/bin:/usr/bin:/bin
+		HOME => /Users/operator
+		PYTHONPATH => /Users/operator/src/asf
+	}
+
+	domain = gui/501 [100005]
+	asid = 100005
+	minimum runtime = 10
+	exit timeout = 5
+	runs = 7
+	last exit code = 0
+
+	stdout path = /Users/operator/.ASF/logs/tick-sample-record.log
+	stderr path = /Users/operator/.ASF/logs/tick-sample-record.log
+
+	spawn type = daemon (3)
+	jetsam priority = 40
+	jetsam memory limit (active) = (unlimited)
+	jetsam memory limit (inactive) = (unlimited)
+	jetsamproperties category = daemon
+	properties = keepalive | runatload | inferred program
+}
