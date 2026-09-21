@@ -160,15 +160,15 @@ class RecordStepTests(TickTestCase):
 
 
 class ManifestTests(TickTestCase):
-    product_yaml = ('legacy_steps:\n'
+    product_yaml = ('steps:\n'
                     '  health: bash ~/x/health.sh --fix\n'
                     '  wave: off\n')
 
-    def test_resolution_asf_legacy_off_undeclared(self):
+    def test_resolution_asf_command_off_undeclared(self):
         rows = steps.resolve(env.load_product('sample'))
         self.assertEqual(rows, [
             ('record', 'asf', None),
-            ('health', 'legacy', 'bash ~/x/health.sh --fix'),
+            ('health', 'command', 'bash ~/x/health.sh --fix'),
             ('wave', 'off', None),
             ('prs', 'undeclared', None),
             ('batch', 'undeclared', None),
@@ -176,7 +176,7 @@ class ManifestTests(TickTestCase):
         ])
 
     def test_asf_declared_for_a_step_asf_lacks_is_undeclared(self):
-        self.write_product('legacy_steps:\n  health: asf\n')
+        self.write_product('steps:\n  health: asf\n')
         rows = dict((s, o) for s, o, _ in steps.resolve(env.load_product('sample')))
         self.assertEqual(rows['health'], 'undeclared')
 
@@ -186,7 +186,7 @@ class ManifestTests(TickTestCase):
         self.assertEqual(out, (
             'step    owner       command\n'
             'record  asf         asf.tick.tick:run_record_step\n'
-            'health  legacy      bash ~/x/health.sh --fix\n'
+            'health  command     bash ~/x/health.sh --fix\n'
             'wave    off         -\n'
             'prs     undeclared  -\n'
             'batch   undeclared  -\n'
@@ -194,10 +194,10 @@ class ManifestTests(TickTestCase):
 
     def test_undeclared_step_refuses_before_running_anything(self):
         marker = os.path.join(self.tmp, 'ran')
-        self.write_product(f'legacy_steps:\n  health: touch {marker}\n  wave: off\n')
+        self.write_product(f'steps:\n  health: touch {marker}\n  wave: off\n')
         rc, out = self.run_tick()
         self.assertEqual(rc, 2)
-        self.assertEqual(out, 'tick: step prs has no owner — declare it under legacy_steps in '
+        self.assertEqual(out, 'tick: step prs has no owner — declare it under steps in '
                               'products/sample.yaml (asf | <command> | off)\n')
         self.assertFalse(os.path.exists(marker))
         self.assertFalse(os.path.exists(self.record_path()))
@@ -215,23 +215,23 @@ class ManifestTests(TickTestCase):
 
 
 class LegacyStepTests(TickTestCase):
-    product_yaml = ('legacy_steps:\n'
+    product_yaml = ('steps:\n'
                     '  health: python3 -c \'print("hi")\'\n'
                     '  wave: off\n'
                     '  prs: off\n'
                     '  batch: off\n'
                     '  daily: python3 -c \'print("daily ran")\'\n')
 
-    def test_legacy_output_is_prefixed_in_the_log(self):
+    def test_command_output_is_prefixed_in_the_log(self):
         rc, out = self.run_tick(steps='health')
         self.assertEqual(rc, 0)
-        self.assertEqual(out, '[legacy:health] hi\n')
+        self.assertEqual(out, '[command:health] hi\n')
 
     def test_steps_subset_runs_only_those_and_in_manifest_order(self):
         rc, out = self.run_tick(steps='health,record')
         self.assertEqual(rc, 0)
         self.assertEqual(out.splitlines()[0], f'tick: state committed and pushed ({self.record_path()})')
-        self.assertEqual(out.splitlines()[1], '[legacy:health] hi')
+        self.assertEqual(out.splitlines()[1], '[command:health] hi')
         self.assertNotIn('daily', out)
 
     def test_off_step_is_reported_not_run(self):
@@ -239,32 +239,32 @@ class LegacyStepTests(TickTestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(out, 'tick: step batch off (another job runs it)\n')
 
-    def test_failing_legacy_step_exits_1_and_later_steps_still_run(self):
-        self.write_product('legacy_steps:\n  health: python3 -c \'import sys; print("bad"); sys.exit(3)\'\n'
+    def test_failing_command_step_exits_1_and_later_steps_still_run(self):
+        self.write_product('steps:\n  health: python3 -c \'import sys; print("bad"); sys.exit(3)\'\n'
                            '  wave: python3 -c \'print("after")\'\n')
         rc, out = self.run_tick(steps='health,wave')
         self.assertEqual(rc, 1)
-        self.assertEqual(out.splitlines(), ['[legacy:health] bad', 'tick: step health exited 3',
-                                            '[legacy:wave] after'])
+        self.assertEqual(out.splitlines(), ['[command:health] bad', 'tick: step health exited 3',
+                                            '[command:wave] after'])
 
     def test_timeout_kills_a_sleep(self):
-        self.write_config('tick:\n  legacy_timeout_s: 1\n')
-        self.write_product('legacy_steps:\n  health: sleep 30\n')
+        self.write_config('tick:\n  step_timeout_s: 1\n')
+        self.write_product('steps:\n  health: sleep 30\n')
         t0 = time.monotonic()
         rc, out = self.run_tick(steps='health')
         self.assertLess(time.monotonic() - t0, 15)
         self.assertEqual(rc, 1)
-        self.assertIn('[legacy:health] timeout after 1s — killed', out)
+        self.assertIn('[command:health] timeout after 1s — killed', out)
         self.assertIn('tick: step health exited 124', out)
 
     def test_timeout_kills_the_whole_process_group(self):
         lines = []
-        rc = steps.run_legacy('health', "sh -c 'sleep 30 & sleep 30'", 1, emit=lines.append)
+        rc = steps.run_command('health', "sh -c 'sleep 30 & sleep 30'", 1, emit=lines.append)
         self.assertEqual(rc, 124)
 
-    def test_shadow_never_runs_a_legacy_step(self):
+    def test_shadow_never_runs_a_command_step(self):
         marker = os.path.join(self.tmp, 'ran')
-        self.write_product(f'legacy_steps:\n  health: touch {marker}\n')
+        self.write_product(f'steps:\n  health: touch {marker}\n')
         with mock.patch.object(tick, 'render_tables', return_value={}):
             rc, out = self.run_tick(shadow=True)
         self.assertEqual(rc, 0)
@@ -274,7 +274,7 @@ class LegacyStepTests(TickTestCase):
 
     def test_daily_runs_once_a_day(self):
         rc, out = self.run_tick(steps='daily')
-        self.assertEqual(out, '[legacy:daily] daily ran\n')
+        self.assertEqual(out, '[command:daily] daily ran\n')
         with open(steps.stamp_path(env.load_product('sample'))) as f:
             self.assertEqual(f.read().strip(), steps._today())
 
@@ -282,17 +282,17 @@ class LegacyStepTests(TickTestCase):
         self.assertEqual(out, 'tick: step daily already ran today\n')
 
         rc, out = self.run_tick(steps='daily', daily=True)
-        self.assertEqual(out, '[legacy:daily] daily ran\n')
+        self.assertEqual(out, '[command:daily] daily ran\n')
 
     def test_daily_runs_when_the_stamp_is_from_another_day(self):
         product = env.load_product('sample')
         with open(steps.stamp_path(product), 'w') as f:
             f.write('2001-01-01\n')
         rc, out = self.run_tick(steps='daily')
-        self.assertEqual(out, '[legacy:daily] daily ran\n')
+        self.assertEqual(out, '[command:daily] daily ran\n')
 
     def test_failed_daily_is_not_stamped(self):
-        self.write_product('legacy_steps:\n  daily: python3 -c \'raise SystemExit(1)\'\n')
+        self.write_product('steps:\n  daily: python3 -c \'raise SystemExit(1)\'\n')
         self.run_tick(steps='daily')
         self.assertFalse(os.path.exists(steps.stamp_path(env.load_product('sample'))))
 

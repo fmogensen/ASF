@@ -4,9 +4,9 @@ The scheduler ran six steps: ``record``, ``health``, ``wave``, ``prs``, ``batch`
 and daily ``daily``. Each resolves to an owner:
 
 * ``asf``    — a python callable in this package (today only ``record``);
-* a command  — ``legacy_steps: {health: "bash ~/x/health.sh --fix"}`` in the product yaml, run as a
-  subprocess with a timeout, its output written to the tick log with a ``[legacy:<step>]`` prefix;
-* ``off``    — ``legacy_steps: {batch: off}``: the operator says another job still runs it.
+* a command  — ``steps: {health: "bash ~/x/health.sh --fix"}`` in the product yaml, run as a
+  subprocess with a timeout, its output written to the tick log with a ``[command:<step>]`` prefix;
+* ``off``    — ``steps: {batch: off}``: the operator says another job still runs it.
 
 A step declared nowhere is a refusal, not a silent skip — the tick exits 2 before running anything.
 ``record`` defaults to ``asf`` (it is what ``asf`` has); every other step must be declared.
@@ -32,12 +32,12 @@ class StepError(Exception):
 
 
 def declared(product):
-    return product._get('legacy_steps') or {}
+    return product._get('steps') or {}
 
 
 def resolve(product, steps=None):
     """``[(step, owner, command)]`` for ``steps`` (default: all, in manifest order). ``owner`` is
-    ``asf``, ``legacy``, ``off`` or ``undeclared``; ``command`` is the command line for a legacy
+    ``asf``, ``command``, ``off`` or ``undeclared``; ``command`` is the command line for a command
     step, else None. Does not run anything."""
     decl = declared(product)
     rows = []
@@ -51,7 +51,7 @@ def resolve(product, steps=None):
         elif text == 'off':
             owner, command = 'off', None
         else:
-            owner, command = 'legacy', text
+            owner, command = 'command', text
         rows.append((step, owner, command))
     return rows
 
@@ -70,7 +70,7 @@ def check_owned(rows, product):
     for step, owner, _ in rows:
         if owner == 'undeclared':
             raise StepError(
-                f"tick: step {step} has no owner — declare it under legacy_steps in "
+                f"tick: step {step} has no owner — declare it under steps in "
                 f"products/{product.name}.yaml (asf | <command> | off)")
 
 
@@ -85,19 +85,19 @@ def manifest_table(rows):
     return '\n'.join(f'{a:<{w0}}  {b:<{w1}}  {c}' for a, b, c in body) + '\n'
 
 
-# ---- legacy steps -------------------------------------------------------------
+# ---- command steps -------------------------------------------------------------
 
-def legacy_timeout():
-    """Seconds a legacy step may run: config ``tick.legacy_timeout_s`` (default 900)."""
-    v = (env.load_config().get('tick') or {}).get('legacy_timeout_s')
+def command_timeout():
+    """Seconds a command step may run: config ``tick.step_timeout_s`` (default 900)."""
+    v = (env.load_config().get('tick') or {}).get('step_timeout_s')
     return v if isinstance(v, (int, float)) and v > 0 else DEFAULT_LEGACY_TIMEOUT_S
 
 
-def run_legacy(step, command, timeout, emit=print):
+def run_command(step, command, timeout, emit=print):
     """Run ``command`` (split shell-style, ``~`` expanded, no shell) and send each output line —
-    stderr merged in — to ``emit`` as ``[legacy:<step>] <line>``. Returns the exit code; 124 if it
+    stderr merged in — to ``emit`` as ``[command:<step>] <line>``. Returns the exit code; 124 if it
     outlived ``timeout`` (its whole process group is killed)."""
-    prefix = f'[legacy:{step}] '
+    prefix = f'[command:{step}] '
     argv = [os.path.expanduser(a) for a in shlex.split(command)]
     try:
         proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,

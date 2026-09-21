@@ -45,6 +45,8 @@ def build_parser():
     p_new.add_argument('--legacy-id')
     p_new.add_argument('--body-file')
     p_new.add_argument('--force', action='store_true')
+    from asf.record.new import add_arguments as add_new_bug_arguments
+    add_new_bug_arguments(p_new)
 
     p_check = sub.add_parser('check', help='validate the backlog')
     p_check.add_argument('paths', nargs='*')
@@ -92,10 +94,8 @@ def build_parser():
     p_doctor = sub.add_parser('doctor', help='is this product\'s ASF install sound — one table')
     p_doctor.add_argument('--product')
 
-    p_tick =sub.add_parser('tick', help='metrics backfill -> ingest -> file-bugs -> rollup -> index')
-    p_tick.add_argument('--product')
-    p_tick.add_argument('--shadow', action='store_true', help='run against a shadow clone, never the real backlog')
-    p_tick.add_argument('--fresh', action='store_true', help="bypass evidence's cache")
+    from asf.tick.tick import register as register_tick
+    register_tick(sub)
 
     p_roadmap = sub.add_parser('roadmap', help='the ROADMAP table: one row per Epic')
     p_roadmap.add_argument('--product')

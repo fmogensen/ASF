@@ -2,10 +2,10 @@
 
 ``record`` is step 0: metrics backfill → ingest → file-bugs → rollup → index, run in the tick's
 own clone of the product's backlog (:mod:`asf.tick.shadow`), committed and pushed to origin.
-Every other step is a legacy command the product declares, or ``off``.
+Every other step is a command command the product declares, or ``off``.
 
 ``--shadow`` runs step 0 against a shadow clone instead — never pushes, commits locally, never
-runs a legacy step — then renders the six tables (:mod:`asf.views`) into ``<shadow>/tables/*.md``
+runs a command step — then renders the six tables (:mod:`asf.views`) into ``<shadow>/tables/*.md``
 so ``asf shadow-diff`` has something to compare against the pre-``asf`` tools' output.
 """
 import argparse
@@ -116,7 +116,7 @@ def cmd_tick(args, root=None):
     fresh = getattr(args, 'fresh', False)
 
     if getattr(args, 'shadow', False):
-        return run_shadow(product, fresh=fresh)  # record only, never a legacy step
+        return run_shadow(product, fresh=fresh)  # record only, never a command step
 
     try:
         chosen = steps.parse_steps(args.steps) if getattr(args, 'steps', None) else None
@@ -140,7 +140,7 @@ def cmd_tick(args, root=None):
         if owner == 'asf':
             step_rc = run_record_step(product, fresh=fresh)
         else:
-            step_rc = steps.run_legacy(step, command, steps.legacy_timeout())
+            step_rc = steps.run_command(step, command, steps.command_timeout())
             if step_rc:
                 print(f"tick: step {step} exited {step_rc}")
         if step == 'daily' and step_rc == 0:
@@ -153,10 +153,10 @@ def register(subparsers):
     """Add the ``tick`` subcommand (replaces the bare one in ``asf.cli``)."""
     p = subparsers.add_parser(
         'tick', help='the scheduled steps: record (metrics backfill -> ingest -> file-bugs -> rollup '
-                     '-> index, committed and pushed) plus every step declared under legacy_steps')
+                     '-> index, committed and pushed) plus every step declared under steps')
     p.add_argument('--product')
     p.add_argument('--shadow', action='store_true',
-                   help='run record against a shadow clone, never pushed, never a legacy step')
+                   help='run record against a shadow clone, never pushed, never a command step')
     p.add_argument('--fresh', action='store_true', help="bypass evidence's cache")
     p.add_argument('--steps', help=f"comma list, a subset of {','.join(steps.STEPS)} (default: all)")
     p.add_argument('--manifest', action='store_true', help='print step / owner / command and exit')
