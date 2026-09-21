@@ -63,6 +63,15 @@ you found next to this one, a rename that would be tidier: all of those go in th
 this diff. Speed here is the point — the lane exists so an incident closes in hours while the
 Feature work waits.
 
+Every commit subject names the card — `fix(B-0001): <what>` — because a commit on the trunk that
+names the id is what turns the card `Resolved`; a fix nobody can trace to the card does not exist.
+
+If the fix is ALREADY on `origin/main` when you look (someone landed it before this session):
+verify it against THE FIX above and run the test that covers it, then make one empty, signed commit
+on your branch — `git commit --allow-empty -s -m "fix(B-0001): already landed in <sha> — verified
+by <test name>"` — and push. That commit is the evidence the record needs; a branch pushed with no
+commit closes nothing and the lane relaunches this session every wave.
+
 Final message: the pushed sha, the test's name and the run's last line, what you changed.
 
 ## The heartbeat, the marker, and the report
