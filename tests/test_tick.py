@@ -12,7 +12,7 @@ import unittest
 from unittest import mock
 
 from asf import env
-from asf.tick import steps, tick
+from asf.tick import shadow, steps, tick
 
 
 def _git(args, cwd=None):
@@ -151,6 +151,30 @@ class RecordStepTests(TickTestCase):
         self.assertIn('committed and pushed', out)
         self.assertEqual(self.origin_commits(), 2)
         self.assertEqual(_git(['rev-list', '--count', 'HEAD'], self.record_path()), '2')  # not stacked on it
+        self.assertEqual(_git(['rev-parse', 'HEAD'], self.record_path()), _git(['rev-parse', 'main'], self.origin))
+
+    def test_origin_moved_during_the_tick_is_rebased_onto_and_pushed(self):
+        """B-0030: a card pushed to the record while the tick ran made its push a non-fast-forward
+        — and the commit, with the events the steps appended, was thrown away. Now the clone
+        rebases onto the moved origin once and pushes again; both commits land."""
+        real_commit = shadow.commit_local
+
+        def commit_then_origin_moves(path, message):
+            committed = real_commit(path, message)
+            with open(os.path.join(self.operator, 'bugs.md'), 'w') as f:  # someone else's card
+                f.write('filed by hand\n')
+            _git(['add', '-A'], self.operator)
+            _git(['commit', '-q', '-m', 'bug(B-0099): by hand'], self.operator)
+            _git(['push', '-q', 'origin', 'HEAD:main'], self.operator)
+            return committed
+        with mock.patch.object(shadow, 'commit_local', commit_then_origin_moves):
+            rc, out = self.run_tick(steps='record')
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, f'tick: state committed and pushed after a rebase onto origin '
+                              f'({self.record_path()})\n')
+        self.assertEqual(self.origin_commits(), 3)
+        self.assertEqual(_git(['show', 'main:state/rollup.md'], self.origin), 'derived')
+        self.assertEqual(_git(['show', 'main:bugs.md'], self.origin), 'filed by hand')
         self.assertEqual(_git(['rev-parse', 'HEAD'], self.record_path()), _git(['rev-parse', 'main'], self.origin))
 
     def test_operator_checkout_is_untouched(self):

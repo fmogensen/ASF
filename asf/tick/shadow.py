@@ -99,9 +99,28 @@ def commit_local(path, message):
     return True
 
 
-def push(path):
-    """``git push origin HEAD:<default branch>``; True if origin took it. A refusal (a hook, a
-    non-fast-forward because origin moved, an unreachable remote) is not an error: the clone is
-    derived state, the next run resets it and re-derives."""
-    branch = _default_branch(path)
+def _push_once(path, branch):
     return _sh(['git', 'push', '-q', 'origin', f'HEAD:{branch}'], cwd=path, check=False).returncode == 0
+
+
+def push(path):
+    """``git push origin HEAD:<default branch>``; truthy if origin took it — True at once, or
+    ``'rebased'`` when origin had moved while the tick ran (a card filed by hand between the
+    tick's reset and its push) and the clone was rebased onto it once and pushed again (B-0030:
+    the appended streams — events, session lines — were thrown away with the refused commit).
+    Any other refusal (a hook, an unreachable remote, a conflict on that rebase) is not an
+    error: the clone is derived state, the next run resets it and re-derives."""
+    branch = _default_branch(path)
+    if _push_once(path, branch):
+        return True
+    _sh(['git', 'fetch', '-q', 'origin'], cwd=path, check=False)
+    moved = _sh(['git', 'merge-base', '--is-ancestor', f'origin/{branch}', 'HEAD'],
+                cwd=path, check=False).returncode != 0
+    if not moved:
+        return False
+    rebase = _sh(['git', '-c', 'core.editor=true', 'rebase', f'origin/{branch}'],
+                 cwd=path, check=False)
+    if rebase.returncode != 0:
+        _sh(['git', 'rebase', '--abort'], cwd=path, check=False)
+        return False
+    return 'rebased' if _push_once(path, branch) else False

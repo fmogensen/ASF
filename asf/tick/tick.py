@@ -173,8 +173,10 @@ def commit_and_push(ctx):
     if not shadow.commit_local(path, f"tick: state {_stamp()}"):
         print(f"tick: no change ({path})")
         return 0
-    if shadow.push(path):
-        print(f"tick: state committed and pushed ({path})")
+    pushed = shadow.push(path)
+    if pushed:
+        how = ' after a rebase onto origin' if pushed == 'rebased' else ''
+        print(f"tick: state committed and pushed{how} ({path})")
         return 0
     print(f"tick: state committed, push refused — re-derived next run ({path})")
     return 1
