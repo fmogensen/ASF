@@ -3,13 +3,19 @@
 
     metrics.py append <ci|sessions|ticks> '<json>' | --stdin   validate, match to items, append one line
     metrics.py rollup [<day>]                                  metrics/daily/<day>.md, item cost:, releases/, budget
-    metrics.py backfill --days N [--sessions f] [--log f]      fill the streams from the API / runner logs
+    metrics.py backfill --days N                               fill the streams from the CI API and the registry
 
 Streams are JSONL under metrics/<stream>/<YYYY-MM-DD>.jsonl: one object per line, UTC ISO timestamps,
 keys sorted, no trailing spaces. See README.md "Metrics". python3 stdlib only; `gh` and `git` by subprocess.
 
-An item's `cost:` counts only the events matched to that id (tools/match.py); a Feature's row in the
-scorecard, and an Epic's `spend_usd`, sum the item's subtree, so nothing is counted twice.
+The `sessions` stream's source is the factory's own bookkeeping: the session registry
+``~/.ASF/state/<product>/sessions.jsonl`` (:mod:`asf.workers.pool` writes it as a wave launches and
+as a session ends) plus each job's log ``~/.ASF/logs/jobs/<product>/<job>.jsonl``, whose result line
+carries the cost and the wall clock. A *previous* runner's logs are imported once with
+``asf import-sessions`` (:mod:`asf.metrics.import_sessions`), never read live.
+
+An item's `cost:` counts only the events matched to that id (:mod:`asf.record.match`); a Feature's row
+in the scorecard, and an Epic's `spend_usd`, sum the item's subtree, so nothing is counted twice.
 """
 import argparse
 import collections
@@ -23,6 +29,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 
 from asf import env
+from asf.conventions import Conventions
 from asf.record import frontmatter
 from asf.record import match
 from asf.record.index import do_index
@@ -36,7 +43,11 @@ KIND_PREFIXES = (
     (r'(rebase|remerge)', 'rebase'), (r'(relaunch)', 'relaunch'), (r'(launch)', 'launch'), (r'(tick)', 'tick'),
     (r'(code)', 'code'), (r'(adjudicate|job|bounce)', 'other'),
 )
-LAUNCH_DIR = os.path.expanduser('~/.claude-workers/launch')
+#: The conventions a caller that has no Product (a test, `metrics.py` run by hand) reads.
+DEFAULTS = Conventions()
+#: A session record's ``kind`` (a feeder row kind) → the `sessions` stream's `kind`.
+RECORD_KINDS = {'fix-bug': 'fix', 'fix': 'fix', 'task': 'code', 'code': 'code', 'spec': 'spec',
+                'plan': 'plan', 'review': 'review', 'rebase': 'rebase', 'relaunch': 'relaunch'}
 TS_RE = re.compile(r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$')
 DAY_RE = re.compile(r'^\d{4}-\d\d-\d\d$')
 ID_RE = re.compile(r'^[EFSTBDR]-\d{4}$')
@@ -330,7 +341,8 @@ def descendants(items, iid):
 
 
 def feature_of(items, iid):
-    """The Feature at or above an item; None when it hangs off no Feature (an Epic, a bug under E-0009)."""
+    """The Feature at or above an item; None when it hangs off no Feature (an Epic, or a Bug filed
+    straight under the product's `conventions.default_bug_epic`)."""
     seen = set()
     while iid in items and iid not in seen:
         seen.add(iid)
@@ -375,19 +387,24 @@ def esc(s):
     return str(s).replace('|', '\\|').replace('\n', ' ')
 
 
-def _kind_of_branch(ev):
+def _kind_of_branch(ev, conv=None):
+    """Which lane a CI run's minutes were spent in: the trunk, a merge batch, or a branch.
+    `conv.branch_prefixes['batch']` names the batch lane; a product with no merge queue has
+    none and only the `batch` field of the event marks one."""
+    conv = conv or DEFAULTS
     b = ev.get('branch') or ''
-    if ev.get('batch') or 'batch' in b:
+    if ev.get('batch') or conv.branch_kind(b) == 'batch':
         return 'batch'
-    return 'main' if b == 'main' else 'branch'
+    return 'trunk' if conv.is_trunk(b) else 'branch'
 
 
 def _pct(a, b):
     return 100 * a // max(1, b)
 
 
-def scorecard_rows(ci, sessions, ticks):
-    """The rows of factory-waste.py's Metric | Value | Note table, computed from the streams."""
+def scorecard_rows(ci, sessions, ticks, conv=None):
+    """The rows of the waste table, computed from the streams."""
+    conv = conv or DEFAULTS
     rows = []
     n = len(ci)
     green = sum(1 for r in ci if r['conclusion'] == 'success')
@@ -397,7 +414,7 @@ def scorecard_rows(ci, sessions, ticks):
     total = sum(r['minutes'] for r in ci)
     cancelled = collections.Counter()
     for r in ci:
-        cancelled[_kind_of_branch(r)] += r.get('cancelled_minutes') or 0
+        cancelled[_kind_of_branch(r, conv)] += r.get('cancelled_minutes') or 0
     canc_total = sum(cancelled.values())
     useful = round(100 * (total - canc_total) / max(1, total))
     note = ', '.join(f"{k} {v} ({_pct(v, total)} %)" for k, v in sorted(cancelled.items(), key=lambda x: (-x[1], x[0])) if v)
@@ -481,7 +498,7 @@ def cost_table(items, ci7, sessions7):
     return lines
 
 
-def render_daily(root, day, items):
+def render_daily(root, day, items, conv=None):
     ci = read_stream(root, 'ci', [day])
     sessions = read_stream(root, 'sessions', [day])
     ticks = read_stream(root, 'ticks', [day])
@@ -489,7 +506,7 @@ def render_daily(root, day, items):
     out = [f"# Factory scorecard {day}", '',
            f"generated: {day} — from metrics/ci ({len(ci)}), metrics/sessions ({len(sessions)}), metrics/ticks ({len(ticks)})", '',
            '## Waste', '', '| Metric | Value | Note |', '|---|---|---|']
-    for m, v, n in scorecard_rows(ci, sessions, ticks):
+    for m, v, n in scorecard_rows(ci, sessions, ticks, conv):
         out.append(f"| {esc(m)} | {esc(v)} | {esc(n)} |".replace('|  |', '| |'))
     out += ['', f"## Cost per Feature (7 days)", '', f"{week[0]} … {week[-1]}; a Feature's row sums its Tasks, Stories and Bugs; "
             "a CI run's minutes are split over the items it names.", '']
@@ -698,7 +715,11 @@ def cmd_rollup(args, root):
         print(f"error: day must be YYYY-MM-DD, got {day!r}", file=sys.stderr)
         return 2
     items = match.load_index(root)
-    text = render_daily(root, day, items)
+    try:
+        conv = _resolve_product(getattr(args, 'product', None)).conventions
+    except env.ConfigError:
+        conv = DEFAULTS     # a rollup over a checkout is readable with no product config
+    text = render_daily(root, day, items, conv)
     daily = os.path.join(root, 'metrics', 'daily', f"{day}.md")
     print(f"{'wrote' if write_if_changed(daily, text) else 'unchanged'} {os.path.relpath(daily, root)}")
     changed, spend = write_costs(root, items, read_stream(root, 'ci'), read_stream(root, 'sessions'))
@@ -718,174 +739,97 @@ def cmd_rollup(args, root):
 
 # -------------------------------------------------------------- backfill --
 
-LOG_LINE = re.compile(r'^(\d\d):(\d\d) (.*)$')
-CUT_LINE = re.compile(r'LAND: batch (\w+) (worktree-m-batch-[\d-]+) cut[^(]*\(([^)]*)\)')
-WAVE_ID = re.compile(r'\bWAVE (\d{4}):')
-WAVE_LINE = re.compile(r'WAVE (\d{4}): (\d+) launches')
-QUOTA = re.compile(r'(\w+) (\d+)%/(\d+)%')
+def job_log_path(product_name, job):
+    """``~/.ASF/logs/jobs/<product>/<job>.jsonl`` — read-only here; the runtime writes it."""
+    return os.path.join(env.log_dir(), 'jobs', str(product_name), f'{job}.jsonl')
 
 
-def parse_log(lines, now=None):
-    """[(aware local datetime, text)] from `HH:MM text` lines. The log has no dates: the last line is today (or
-    yesterday when its clock is ahead of `now`), and every step where the clock jumps forward going backwards
-    is midnight."""
-    now = (now or dt.datetime.now().astimezone()).astimezone()
-    recs = [(int(m.group(1)), int(m.group(2)), m.group(3)) for m in map(LOG_LINE.match, lines) if m]
-    out = []
-    day = now.date()
-    prev = None
-    if recs and (recs[-1][0], recs[-1][1]) > (now.hour, now.minute):
-        day -= dt.timedelta(days=1)
-    for h, m, text in reversed(recs):
-        if prev is not None and (h, m) > prev:
-            day -= dt.timedelta(days=1)
-        prev = (h, m)
-        out.append((dt.datetime(day.year, day.month, day.day, h, m).astimezone(), text))
-    out.reverse()
-    return out
-
-
-def batch_prs_from_log(recs):
-    """{batch branch: [PR numbers]} from the LAND … cut lines."""
-    out = {}
-    for _t, text in recs:
-        m = CUT_LINE.search(text)
-        if m:
-            out[m.group(2)] = [int(n) for n in re.findall(r'(?:^|\s)#?(\d+)(?=[\s,;)]|$)', m.group(3))]
-    return out
-
-
-TICK_WINDOW = dt.timedelta(minutes=9)
-STALL_LINE = re.compile(r'\bstall(ed)?\b|\bhung since\b', re.I)
-
-
-def wave_centres(recs):
-    """[(tick id, centre datetime)] for every `WAVE HHMM:` id in the log, in order of first appearance. The id is the
-    tick's clock; its date is the one (yesterday, the line's own day or tomorrow) closest to the line that names it."""
-    seen, out = set(), []
-    for t, text in recs:
-        w = WAVE_ID.search(text)
-        if not w:
-            continue
-        hh, mm = int(w.group(1)[:2]), int(w.group(1)[2:])
-        if hh > 23 or mm > 59:
-            continue
-        cands = [dt.datetime.combine(t.date() + dt.timedelta(days=d), dt.time(hh, mm)).astimezone() for d in (-1, 0, 1)]
-        centre = min(cands, key=lambda c: abs(c - t))
-        if (int(w.group(1)), centre) not in seen:
-            seen.add((int(w.group(1)), centre))
-            out.append((int(w.group(1)), centre))
-    return out
-
-
-def ticks_from_log(recs):
-    """One tick event per `WAVE HHMM` (the id is the HHMM). Every other log line goes to the wave whose clock is
-    nearest, within 9 minutes either side; the lines of that window give its launches (the `N launches` summary),
-    merges, relaunches, batch refusals (`REFUSED … on: <file>`; a REFUSED-WRITE is a store write, not a refusal),
-    stalls (`stall`, `hung since … killed`) and the quota after it."""
-    cuts_by_name = {}
-    for _t, text in recs:
-        m = CUT_LINE.search(text)
-        if m:
-            cuts_by_name[m.group(1)] = len(re.findall(r'(?:^|\s)#?(\d+)(?=[\s,;)]|$)', m.group(3))) or 1
-    waves = [{'tick': tid, 'centre': c, 'first': None, 'last': None, 'launches': 0, 'merges': 0, 'stalls': 0,
-              'refusals': 0, 'relaunches': 0, 'quota': {}, 'refused_files': collections.Counter()}
-             for tid, c in wave_centres(recs)]
-    for t, text in recs:
-        w = WAVE_ID.search(text)
-        if w:
-            cur = min((x for x in waves if x['tick'] == int(w.group(1))), key=lambda x: abs(x['centre'] - t), default=None)
-        else:
-            near = [x for x in waves if abs(x['centre'] - t) <= TICK_WINDOW]
-            cur = min(near, key=lambda x: (abs(x['centre'] - t), x['centre']), default=None)
-        if cur is None:
-            continue
-        cur['first'] = cur['first'] or t
-        cur['last'] = t
-        if w:
-            lm = WAVE_LINE.search(text)
-            if lm:
-                cur['launches'] = int(lm.group(2))
-                if 'quota after:' in text:
-                    cur['quota'] = {a: {'h5': int(x), 'd7': int(y)}
-                                    for a, x, y in QUOTA.findall(text.split('quota after:')[1])}
-            continue
-        if text.startswith('MERGE: '):
-            bm = re.match(r'MERGE: batch (\w+)', text)
-            cur['merges'] += cuts_by_name.get(bm.group(1), 1) if bm else 1
-        if 'RELAUNCH: ' in text and ' → ' in text:
-            cur['relaunches'] += 1
-        if 'REFUSED' in text and 'REFUSED-WRITE' not in text:
-            cur['refusals'] += 1
-            fm = re.search(r'on: (\S+)', text)
-            if fm:
-                cur['refused_files'][fm.group(1)] += 1
-        if STALL_LINE.search(text):
-            cur['stalls'] += 1
-    out = []
-    for c in waves:
-        secs = int((c['last'] - c['first']).total_seconds()) if c['first'] else 0
-        out.append({'ts': iso(c['last'] or c['centre']), 'tick': c['tick'], 'duration_s': secs or None,
-                    'launches': c['launches'], 'merges': c['merges'], 'stalls': c['stalls'],
-                    'refusals': c['refusals'], 'relaunches': c['relaunches'], 'quota': c['quota'],
-                    'refused_files': dict(c['refused_files'])})
-    return out
-
-
-def launch_ledger(launch_dir):
-    """{(account, id): model} and {id: [accounts]} from <acct>/dispatched.json."""
-    models, accts = {}, collections.defaultdict(list)
-    for p in sorted(glob.glob(os.path.join(launch_dir, '*', 'dispatched.json'))):
-        acct = os.path.basename(os.path.dirname(p))
-        if acct.startswith(('_', '.')):
-            continue
-        try:
-            with open(p, encoding='utf-8') as f:
-                rows = json.load(f)
-        except (OSError, ValueError):
-            continue
-        for r in rows if isinstance(rows, list) else []:
-            models[(acct, r.get('id'))] = r.get('model')
-            accts[r.get('id')].append(acct)
-    return models, accts
-
-
-def sessions_from_results(path, launch_dir, recs, items, since_day):
-    """Events for every ended session in a session-results.jsonl (the last line per task wins)."""
-    models, accts = launch_ledger(launch_dir)
-    launched = {}
-    for t, text in recs:
-        m = re.match(r'LAUNCH\w*:?\s+(\S+)', text)
-        if m:
-            launched.setdefault(m.group(1), t)
-    last = {}
+def _result_line(path):
+    """The job log's last line when it is the session's result record, else None."""
+    if not path or not os.path.isfile(path):
+        return None
+    last = None
     with open(path, encoding='utf-8', errors='replace') as f:
         for line in f:
-            try:
-                r = json.loads(line)
-                last[r['task']] = r
-            except (ValueError, KeyError, TypeError):
-                pass
-    out = []
-    for task, r in last.items():
-        ended = parse_ts(r.get('ended_at'))
-        if ended is None or iso(ended)[:10] < since_day:
-            continue
-        acct = r.get('account') or (accts.get(task) or ['?'])[0]
-        start = launched.get(task)
-        if start is None:
-            for a in [acct] + accts.get(task, []):
-                bp = os.path.join(launch_dir, a, f"brief-{task}.md")
-                if os.path.exists(bp):
-                    start = dt.datetime.fromtimestamp(os.path.getmtime(bp)).astimezone()
-                    break
-        minutes = None
+            if line.strip():
+                last = line
+    try:
+        rec = json.loads(last) if last else None
+    except json.JSONDecodeError:
+        return None
+    return rec if isinstance(rec, dict) and rec.get('type') == 'result' else None
+
+
+def session_kind(record):
+    """The stream's `kind` for a session record: its row kind, else derived from the job name."""
+    kind = RECORD_KINDS.get(str(record.get('kind') or '').lower())
+    return kind or derive_kind(record.get('job') or '')
+
+
+def session_event(record, result, items=None):
+    """One `sessions` event from a registry record (+ its log's result line, if any).
+    `minutes` prefers the log's own duration, else the registry's started→ended clock; `usd` is
+    the log's cost. An event whose item is not in the index is left to the matcher."""
+    ended = parse_ts(record.get('ended')) or parse_ts(record.get('started'))
+    if ended is None:
+        return None
+    minutes = None
+    if result and isinstance(result.get('duration_ms'), (int, float)):
+        minutes = round(result['duration_ms'] / 60000.0, 1)
+    else:
+        start = parse_ts(record.get('started'))
         if start is not None and start <= ended:
             minutes = round((ended - start).total_seconds() / 60, 1)
-        out.append({'ts': iso(ended), 'task': task, 'account': acct,
-                    'model': models.get((acct, task)) or next((models[(a, task)] for a in accts.get(task, [])), None),
-                    'branch': r.get('branch') or None, 'result': str(r.get('result') or 'unknown'),
-                    'reason': r.get('reason') or None, 'minutes': minutes})
+    usd = (result or {}).get('total_cost_usd')
+    ev = {'ts': iso(ended), 'task': record.get('job'), 'account': str(record.get('account') or '?'),
+          'model': record.get('model'), 'kind': session_kind(record),
+          'branch': record.get('branch') or None,
+          'result': str(record.get('end_reason') or ('running' if not record.get('ended') else 'unknown')),
+          'reason': (result or {}).get('result') or None,
+          'minutes': minutes, 'usd': usd if isinstance(usd, (int, float)) else None}
+    item = record.get('item')
+    if item and ID_RE.match(str(item)) and (not items or item in items):
+        ev['item'] = item
+    return ev
+
+
+def sessions_from_registry(product, since_day=None, items=None, state_path=None, logs_dir=None):
+    """Events for every ended session of a product, from its own bookkeeping.
+
+    The spine is the registry ``state/<p>/sessions.jsonl``; a job log under ``logs/jobs/<p>/``
+    with no registry line still counts (a session the registry lost, or one launched before the
+    ledger existed) — its file name is the job and its result line the whole record."""
+    from asf.workers import pool as pool_mod
+
+    records = {}
+    if state_path is None and product is not None:
+        records = pool_mod.load_sessions(product)
+    elif state_path and os.path.isfile(state_path):
+        with open(state_path, encoding='utf-8') as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(rec, dict) and rec.get('job'):
+                    records.setdefault(rec['job'], {}).update(rec)
+    name = product.name if isinstance(product, env.Product) else product
+    if logs_dir is None and name:
+        logs_dir = os.path.dirname(job_log_path(name, 'x'))
+    logs = {}
+    for path in sorted(glob.glob(os.path.join(logs_dir, '*.jsonl'))) if logs_dir else []:
+        logs[os.path.basename(path)[: -len('.jsonl')]] = path
+    for job in logs:
+        records.setdefault(job, {'job': job})
+    out = []
+    for job in sorted(records):
+        rec = records[job]
+        if not rec.get('ended'):
+            continue
+        ev = session_event(rec, _result_line(logs.get(job) or rec.get('log')), items)
+        if ev is None or (since_day and ev['ts'][:10] < since_day):
+            continue
+        out.append(ev)
     return out
 
 
@@ -896,9 +840,12 @@ def mins(a, b):
         return 0
 
 
-def ci_from_api(days, workflow, batch_prs, items, repo_slug=None, product=None):
-    """Finished CI runs of the last `days` days, with their jobs, as validated events (not yet appended)."""
+def ci_from_api(days, workflow, batch_prs, items, repo_slug=None, product=None, conv=None):
+    """Finished CI runs of the last `days` days, with their jobs, as validated events (not yet appended).
+    A run on a branch under the product's `batch` prefix (a merge queue's cut) carries that branch as
+    its `batch`; a product with no such prefix has no batch runs."""
     repo_slug = _repo_slug(repo_slug, product)
+    conv = conv or DEFAULTS
     since = days_back(today(), days)[0]
     runs = [r for r in gh_lines(['api', f'repos/{repo_slug}/actions/runs?created=%3E%3D{since}&status=completed&per_page=100',
                                  '--paginate', '--jq',
@@ -930,7 +877,7 @@ def ci_from_api(days, workflow, batch_prs, items, repo_slug=None, product=None):
                'failed_step': (j.get('failed') or [None])[0]} for j in jobs]
         branch = r['head_branch'] or ''
         prs = r['pr'][0] if r['pr'] else None
-        batch = branch if branch.startswith('worktree-m-batch-') else None
+        batch = branch if conv.branch_kind(branch) == 'batch' else None
         hints = {}
         if batch and batch_prs.get(batch):
             hints['prs'] = batch_prs[batch]
@@ -949,9 +896,17 @@ def ci_from_api(days, workflow, batch_prs, items, repo_slug=None, product=None):
 
 
 def cmd_backfill(args, root):
+    """The `ci` stream from the CI API, the `sessions` stream from the factory's own registry.
+    A previous runner's logs are a separate, one-shot import (`asf import-sessions`)."""
     items = match.load_index(root)
     since = days_back(today(), args.days)[0]
     counts = collections.Counter()
+    product = None
+    try:
+        product = _resolve_product(getattr(args, 'product', None))
+    except env.ConfigError as e:
+        print(f"no product config: {e}", file=sys.stderr)
+    conv = product.conventions if product is not None else DEFAULTS
 
     def put(stream, ev):
         try:
@@ -962,18 +917,11 @@ def cmd_backfill(args, root):
             return
         counts[f'{stream} {status}'] += 1
 
-    recs = []
-    if args.log:
-        with open(args.log, encoding='utf-8', errors='replace') as f:
-            recs = parse_log(f.read().splitlines())
-    for ev in ci_from_api(args.days, args.workflow, batch_prs_from_log(recs), items, product=args.product):
-        put('ci', ev)
-    if args.sessions:
-        for ev in sessions_from_results(args.sessions, args.launch_dir, recs, items, since):
+    if product is not None:
+        for ev in ci_from_api(args.days, args.workflow, {}, items, product=product, conv=conv):
+            put('ci', ev)
+        for ev in sessions_from_registry(product, since_day=since, items=items):
             put('sessions', ev)
-    for ev in ticks_from_log(recs):
-        if ev['ts'][:10] >= since:
-            put('ticks', ev)
     for k in sorted(counts):
         print(f"{k}: {counts[k]}")
     return 0
@@ -993,12 +941,10 @@ def build_parser():
     r = sub.add_parser('rollup', help='daily scorecard, item cost:, releases, budget')
     r.add_argument('day', nargs='?')
     r.add_argument('--no-releases', action='store_true')
-    b = sub.add_parser('backfill', help='fill the streams from the Actions API and the runner logs')
+    b = sub.add_parser('backfill',
+                       help="fill the streams from the CI API and the product's session registry")
     b.add_argument('--days', type=int, required=True)
-    b.add_argument('--sessions', help='a session-results.jsonl')
-    b.add_argument('--log', help='the runner log')
     b.add_argument('--workflow', default='ci')
-    b.add_argument('--launch-dir', default=LAUNCH_DIR)
     return p
 
 

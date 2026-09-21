@@ -16,6 +16,8 @@ from asf.record import frontmatter
 from asf.record import match
 from asf.record.check import cmd_check
 from asf.record.index import do_index
+from asf.conventions import Conventions
+from asf.metrics import import_sessions
 from asf.metrics import metrics
 
 DAY = '2026-09-21'
@@ -530,7 +532,7 @@ class Backfill(Base):
     NOW = dt.datetime(2026, 9, 21, 6, 30).astimezone()
 
     def recs(self):
-        return metrics.parse_log(LOG.splitlines(), now=self.NOW)
+        return import_sessions.parse_log(LOG.splitlines(), now=self.NOW)
 
     def test_log_days_are_inferred_from_the_clock_wrapping(self):
         recs = self.recs()
@@ -538,14 +540,14 @@ class Backfill(Base):
         self.assertEqual(recs[1][0].date().isoformat(), '2026-09-21')
         self.assertEqual(recs[-1][0].strftime('%Y-%m-%d %H:%M'), '2026-09-21 06:03')
         # a log whose last line is later than now ended yesterday
-        late = metrics.parse_log(['22:00 a', '23:00 b'], now=dt.datetime(2026, 9, 21, 6, 30).astimezone())
+        late = import_sessions.parse_log(['22:00 a', '23:00 b'], now=dt.datetime(2026, 9, 21, 6, 30).astimezone())
         self.assertEqual(late[-1][0].date().isoformat(), '2026-09-20')
 
     def test_batch_pr_lists_come_from_the_cut_lines(self):
-        self.assertEqual(metrics.batch_prs_from_log(self.recs()), {'worktree-m-batch-20260921-0006': [11, 12, 13]})
+        self.assertEqual(import_sessions.batch_prs_from_log(self.recs()), {'worktree-m-batch-20260921-0006': [11, 12, 13]})
 
     def test_ticks_from_the_log(self):
-        ticks = metrics.ticks_from_log(self.recs())
+        ticks = import_sessions.ticks_from_log(self.recs())
         self.assertEqual([t['tick'] for t in ticks], [5, 600])
         t = ticks[0]
         self.assertEqual((t['launches'], t['merges'], t['refusals'], t['relaunches'], t['stalls']), (2, 4, 1, 1, 0))
@@ -558,8 +560,8 @@ class Backfill(Base):
 
     def test_one_tick_per_wave_on_the_real_log_shapes(self):
         lines = SAMPLE_LOG.splitlines()
-        recs = metrics.parse_log(lines, now=dt.datetime(2026, 9, 21, 4, 30).astimezone())
-        ticks = metrics.ticks_from_log(recs)
+        recs = import_sessions.parse_log(lines, now=dt.datetime(2026, 9, 21, 4, 30).astimezone())
+        ticks = import_sessions.ticks_from_log(recs)
         self.assertEqual(len([l for l in lines if re.search(r'WAVE \d{4}: \d+ launches', l)]), 3)
         self.assertEqual([t['tick'] for t in ticks], [308, 332, 352])
         by = {t['tick']: t for t in ticks}
@@ -579,15 +581,15 @@ class Backfill(Base):
         lines = ['01:06 TICK: tick-0038 job hung since 00:40 (no log writes) — killed; tick-0106 spawned',
                  '01:07 RELAUNCH: fix-a-r1 → fix-a-r2', '01:08 WAVE 0100: 3 launches — accta 3; ',
                  '01:20 RELAUNCH: fix-b-r1 → fix-b-r2', '01:21 WAVE 0120: nothing ready']
-        ticks = {t['tick']: t for t in metrics.ticks_from_log(
-            metrics.parse_log(lines, now=dt.datetime(2026, 9, 21, 2, 0).astimezone()))}
+        ticks = {t['tick']: t for t in import_sessions.ticks_from_log(
+            import_sessions.parse_log(lines, now=dt.datetime(2026, 9, 21, 2, 0).astimezone()))}
         self.assertEqual((ticks[100]['stalls'], ticks[100]['relaunches'], ticks[100]['launches']), (1, 1, 3))
         self.assertEqual((ticks[120]['stalls'], ticks[120]['relaunches'], ticks[120]['launches']), (0, 1, 0))
 
     def test_backfill_ticks_are_idempotent_on_tick(self):
-        recs = metrics.parse_log(SAMPLE_LOG.splitlines(), now=dt.datetime(2026, 9, 21, 4, 30).astimezone())
+        recs = import_sessions.parse_log(SAMPLE_LOG.splitlines(), now=dt.datetime(2026, 9, 21, 4, 30).astimezone())
         for _ in range(2):
-            for ev in metrics.ticks_from_log(recs):
+            for ev in import_sessions.ticks_from_log(recs):
                 metrics.append_event(self.root, 'ticks', metrics.validate('ticks', ev, self.items))
         self.assertEqual(len(metrics.read_stream(self.root, 'ticks')), 3)
 
@@ -607,10 +609,73 @@ class Backfill(Base):
             f.write(json.dumps({'task': 'old', 'account': 'accta', 'result': 'done', 'ended_at': '2026-01-01T00:00:00+0100'}) + '\n')
         return d, res
 
+    def write_registry(self, home):
+        """A session registry and a job log, exactly as asf.workers.pool/runtime write them."""
+        state = os.path.join(home, 'state', 'sample')
+        logs = os.path.join(home, 'logs', 'jobs', 'sample')
+        os.makedirs(state)
+        os.makedirs(logs)
+        with open(os.path.join(state, 'sessions.jsonl'), 'w') as f:
+            f.write(json.dumps({'job': 'fix-free-plan-t3-r1', 'item': 'T-0001', 'kind': 'fix-bug',
+                                'account': 'acct-a', 'model': 'claude-sonnet-5',
+                                'branch': 'feature/free-plan-t3',
+                                'started': '2026-09-21T04:16:00Z'}) + '\n')
+            f.write(json.dumps({'job': 'fix-free-plan-t3-r1', 'ended': '2026-09-21T04:20:00Z',
+                                'end_reason': 'finished'}) + '\n')
+            f.write(json.dumps({'job': 'still-running', 'item': 'T-0002', 'kind': 'task',
+                                'account': 'acct-a', 'started': '2026-09-21T04:16:00Z'}) + '\n')
+        with open(os.path.join(logs, 'fix-free-plan-t3-r1.jsonl'), 'w') as f:
+            f.write(json.dumps({'type': 'system', 'subtype': 'init'}) + '\n')
+            f.write(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
+                                'result': 'fixed', 'total_cost_usd': 0.42,
+                                'duration_ms': 240000}) + '\n')
+        return state, logs
+
+    def test_sessions_come_from_the_registry_and_the_job_log(self):
+        d, _res = self.write_results()
+        home = os.path.join(d, 'asf-home2')
+        self.write_registry(home)
+        product = env.Product('sample', {})
+        with mock.patch.object(env, 'ASF_HOME', home):
+            evs = metrics.sessions_from_registry(product, since_day='2026-09-20', items=self.items)
+        self.assertEqual(len(evs), 1)                  # the session still running is not an event
+        ev = evs[0]
+        self.assertEqual((ev['task'], ev['result'], ev['kind'], ev['item'], ev['account']),
+                         ('fix-free-plan-t3-r1', 'finished', 'fix', 'T-0001', 'acct-a'))
+        self.assertEqual((ev['minutes'], ev['usd'], ev['reason']), (4.0, 0.42, 'fixed'))
+        self.assertEqual(ev['ts'], '2026-09-21T04:20:00Z')
+        metrics.validate('sessions', ev, self.items)   # it is a valid event as it stands
+
+    def test_import_sessions_reads_a_legacy_results_file(self):
+        d, res = self.write_results()
+        log = os.path.join(d, 'runner.log')
+        with open(log, 'w') as f:
+            f.write(LOG)
+        counts = import_sessions.import_file(self.root, res, 'legacy-results', log=log,
+                                             launch_dir=d, since_day='2026-09-20',
+                                             now=self.NOW)
+        self.assertEqual(counts['sessions appended'], 1)
+        ev = json.loads(self.read('metrics/sessions/2026-09-21.jsonl').strip())
+        self.assertEqual((ev['task'], ev['result'], ev['model'], ev['item']),
+                         ('fix-free-plan-t3-r1', 'done', 'claude-sonnet-5', 'T-0001'))
+        # a second import of the same file changes nothing
+        again = import_sessions.import_file(self.root, res, 'legacy-results', log=log,
+                                            launch_dir=d, since_day='2026-09-20', now=self.NOW)
+        self.assertEqual(again['sessions exists'], 1)
+
+    def test_import_sessions_reads_a_legacy_runner_log(self):
+        d, _res = self.write_results()
+        log = os.path.join(d, 'runner.log')
+        with open(log, 'w') as f:
+            f.write(LOG)
+        counts = import_sessions.import_file(self.root, log, 'legacy-log', since_day='2026-09-20',
+                                             now=self.NOW)
+        self.assertEqual(counts['ticks appended'], 2)
+
     def test_sessions_from_results(self):
         d, res = self.write_results()
         recs = self.recs()
-        evs = metrics.sessions_from_results(res, d, recs, self.items, '2026-09-20')
+        evs = import_sessions.sessions_from_results(res, d, recs, self.items, '2026-09-20')
         self.assertEqual(len(evs), 1)                       # last line per task wins; the January one is out of the window
         ev = evs[0]
         self.assertEqual((ev['task'], ev['result'], ev['model'], ev['ts']),
@@ -640,31 +705,36 @@ class Backfill(Base):
                  'created_at': '2026-09-21T01:00:00Z', 'updated_at': '2026-09-21T01:01:00Z', 'run_attempt': 1, 'pr': []}]
 
     def test_ci_backfill_and_idempotence(self):
-        d, res = self.write_results()
-        log = os.path.join(d, 'runner.log')
-        with open(log, 'w') as f:
-            f.write(LOG)
-        argv = ['backfill', '--days', '2', '--sessions', res, '--log', log, '--launch-dir', d]
+        d, _res = self.write_results()
+        argv = ['backfill', '--days', '2']
         prs = {623: {'merged': True, 'merge_commit_sha': '2' * 40, 'body': '', 'title': 'x'},
                11: {'title': 'T-0002 form', 'body': '', 'merged': True, 'merge_commit_sha': None},
                12: None, 13: None}
         # no ~/.ASF is present in CI: stub the product lookup so ci_from_api's repo-slug resolution
         # (used only to build the (mocked) gh_lines request, never a real API call) doesn't need one.
-        stub_product = env.Product('sample', {'repo_slug': 'sample/sample'})
+        # the merge-batch lane is a branch prefix this product happens to have, not a literal
+        stub_product = env.Product('sample', {
+            'repo_slug': 'sample/sample',
+            'conventions': {'branch_prefixes': {'code': 'feature/', 'batch': 'worktree-m-batch-'}}})
+        home = os.path.join(d, 'asf-home')
+        self.write_registry(home)
         with mock.patch.object(metrics, 'gh_lines', side_effect=self.fake_gh_lines), \
                 mock.patch.object(metrics, 'pr_info', side_effect=lambda n, *a, **kw: prs.get(n)), \
                 mock.patch.object(metrics, 'today', return_value='2026-09-21'), \
-                mock.patch.object(metrics, 'parse_log', return_value=self.recs()), \
+                mock.patch.object(env, 'ASF_HOME', home), \
                 mock.patch.object(env, 'load_product', return_value=stub_product):
             rc, out, _ = run_cli(self.root, *argv)
             self.assertEqual(rc, 0)
             self.assertIn('ci appended: 2', out)
-            self.assertIn('ticks appended: 2', out)
             self.assertIn('sessions appended: 1', out)
-            snap = {p: self.read(p) for p in ('metrics/ci/2026-09-21.jsonl', 'metrics/ticks/2026-09-21.jsonl')}
+            snap = {p: self.read(p) for p in ('metrics/ci/2026-09-21.jsonl',)}
             rc, out, _ = run_cli(self.root, *argv)
             self.assertIn('ci exists: 2', out)
             self.assertNotIn('appended', out)
+            sessions = [json.loads(l) for l in self.read('metrics/sessions/2026-09-21.jsonl').splitlines()]
+            self.assertEqual([(e['task'], e['result'], e['kind'], e['usd'], e['minutes']) for e in sessions],
+                             [('fix-free-plan-t3-r1', 'finished', 'fix', 0.42, 4.0)])
+            self.assertEqual(sessions[0]['item'], 'T-0001')
         for p, text in snap.items():
             self.assertEqual(self.read(p), text)
         ci = [json.loads(l) for l in snap['metrics/ci/2026-09-21.jsonl'].splitlines()]
@@ -672,7 +742,10 @@ class Backfill(Base):
         self.assertEqual((red['minutes'], red['pr'], red['items'], red['conclusion']), (10, 623, ['T-0001'], 'failure'))
         self.assertEqual([j['failed_step'] for j in red['jobs']], [None, 'Run tests'])
         batch = next(e for e in ci if e['run'] == 2)
-        self.assertEqual((batch['batch'], batch['cancelled_minutes'], batch['items']), ('worktree-m-batch-20260921-0006', 3, ['T-0002']))
+        # the branch is recognised as the batch lane by the product's `batch` prefix; with no PR
+        # list for it (that came from the previous runner's log, now an import) it matches no item
+        self.assertEqual((batch['batch'], batch['cancelled_minutes'], batch['items'], batch['item_reason']),
+                         ('worktree-m-batch-20260921-0006', 3, None, 'batch run without a PR list'))
         self.assertFalse(batch['superseded'])           # no later run on that branch
 
 
