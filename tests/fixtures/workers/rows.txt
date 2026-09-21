@@ -1,0 +1,3 @@
+STARVED → SPEC F-0031 "Add export"   → launch spec-f-0031 (Opus)
+BUG → FIX B-0012 "Login loops" (S1)   → launch fix-b-0012 (Opus)
+STARVED → PLAN F-0032 "Import" (spec docs/specs/import.md)   → launch plan-f-0032 (Opus)
