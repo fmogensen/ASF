@@ -12,8 +12,9 @@ Exit 1 if any required row is red; optional rows that are unavailable print ``sk
 import os
 import shutil
 import subprocess
+import time
 
-from asf import env
+from asf import env, scheduler
 
 _SKIP_DIRS = {'.git', 'node_modules', '__pycache__', 'dist', 'build', '.next', 'vendor', 'venv',
               '.venv', 'target'}
@@ -149,6 +150,128 @@ def check_one_factory(cfg, product):
     return True, f'{len(names)} legacy tool name(s) checked, no second copy found'
 
 
+# ---- the scheduler section --------------------------------------------------
+#
+# The six rows above answer "is the install sound". They cannot answer "is the factory running",
+# because an installed job that never runs looks exactly like a healthy one from the outside:
+# `launchctl list` shows the label either way. So every loaded factory job — ours by label
+# prefix, the operator's old ones by `scheduler.legacy_labels` — gets a line of its own with
+# what launchd knows about it and the last line of its log, and two situations are red:
+#
+#   * last exit != 0 — it ran and failed.
+#   * never exited, more than two intervals after it was installed — it never ran at all. That
+#     is B-0014 (b): a job whose ProgramArguments could not resolve an interpreter.
+#
+# A `legacy_paths` directory that a loaded job still points at is yellow, not red: nothing is
+# broken yet, but retiring that directory would break it (which is what `tools/cutover.sh`'s
+# gate 1 refuses to do).
+
+OK, RED, YELLOW = 'ok', 'RED', 'YELLOW'
+NEVER_EXITED_INTERVALS = 2
+
+
+def _log_tail(path):
+    """The log's last non-empty line, or None when there is no log yet."""
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            lines = [line.rstrip() for line in f if line.strip()]
+    except OSError:
+        return None
+    return lines[-1] if lines else ''
+
+
+def _age_s(path):
+    if not path:
+        return None
+    try:
+        return max(0.0, time.time() - os.path.getmtime(path))
+    except OSError:
+        return None
+
+
+def format_age(seconds):
+    if seconds is None:
+        return '-'
+    if seconds < 90:
+        return f'{int(seconds)}s'
+    if seconds < 5400:
+        return f'{int(seconds // 60)}m'
+    if seconds < 172800:
+        return f'{int(seconds // 3600)}h'
+    return f'{int(seconds // 86400)}d'
+
+
+def _job_plist(job):
+    path = job.get('plist')
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        import plistlib
+        with open(path, 'rb') as f:
+            return plistlib.load(f)
+    except Exception:  # an unreadable plist is a missing one for this section's purposes
+        return {}
+
+
+def scheduler_rows(cfg, product, jobs=None):
+    """[(level, label, detail)] — one line per loaded factory job, then the yellow dir lines."""
+    kind = scheduler.kind(cfg)
+    if kind != 'launchd':
+        return [(OK, f'kind:{kind}',
+                 f'scheduler kind {kind!r} has no launchd adapter — nothing to read back')]
+
+    jobs = scheduler.loaded_jobs(cfg=cfg) if jobs is None else jobs
+    rows = []
+    if not jobs:
+        rows.append((RED, '(none)', 'no factory job is loaded — nothing ticks this product'))
+    for job in sorted(jobs, key=lambda j: j['label']):
+        label = job['label']
+        info = scheduler.status(label)
+        data = _job_plist(job)
+        log = data.get('StandardOutPath') or job.get('log')
+        interval = data.get('StartInterval') or scheduler.interval_s(cfg)
+        installed_age = _age_s(job.get('plist')) if job.get('plist') else None
+
+        if not info.get('loaded'):
+            rows.append((RED, label, 'listed by launchd but `launchctl print` does not know it'))
+            continue
+        exit_text = 'never exited' if info.get('never_exited') else str(info.get('last_exit'))
+        detail = (f"state={info.get('state')}  runs={info.get('runs') or 0}  "
+                  f"last-exit={exit_text}  last-run={format_age(_age_s(log))}")
+        tail = _log_tail(log)
+        detail += f"  log: {tail}" if tail else "  log: (empty)"
+
+        level = OK
+        if info.get('never_exited') and installed_age is not None \
+                and installed_age > NEVER_EXITED_INTERVALS * int(interval):
+            level = RED
+            detail += (f"  — never ran in {format_age(installed_age)}, over "
+                       f"{NEVER_EXITED_INTERVALS} intervals")
+        elif info.get('last_exit'):
+            level = RED
+        rows.append((level, label, detail))
+
+    for raw in cfg.get('legacy_paths') or []:
+        directory = os.path.expanduser(raw)
+        for label, path in scheduler.jobs_using(directory, jobs):
+            rows.append((YELLOW, directory, f'still in use by {label} ({path})'))
+    return rows
+
+
+def format_scheduler(product_name, rows):
+    lines = [f'== SCHEDULER {product_name}']
+    width = max((len(r[1]) for r in rows), default=8)
+    for level, label, detail in rows:
+        lines.append(f'{level.ljust(6)}  {label.ljust(width)}  {detail}')
+    return '\n'.join(lines)
+
+
+def scheduler_is_red(rows):
+    return any(level == RED for level, _label, _detail in rows)
+
+
 def run(product_name):
     """[(row, required, ok, detail)] for every doctor row, in table order."""
     rows = []
@@ -195,5 +318,14 @@ def cmd_doctor(args, root):
     product_name = args.product or env.default_product_name()
     rows = run(product_name)
     print(format_table(product_name, rows))
+
+    red = is_red(rows)
+    if rows[0][2]:  # config parsed: the scheduler section has a config and a product to read
+        cfg = env.load_config()
+        srows = scheduler_rows(cfg, env.load_product(product_name))
+        print()
+        print(format_scheduler(product_name, srows))
+        red = red or scheduler_is_red(srows)
+
     print(stamp('doctor'))
-    return 1 if is_red(rows) else 0
+    return 1 if red else 0

@@ -1,10 +1,17 @@
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 from asf import doctor, env
+
+try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_doctor` does not
+    from test_scheduler import fake_launchctl, fake_loaded, fake_print, read_fixture
+except ImportError:  # pragma: no cover - import shape only
+    from tests.test_scheduler import fake_launchctl, fake_loaded, fake_print, read_fixture
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -202,6 +209,160 @@ class TestCmdDoctorSubprocess(unittest.TestCase):
             lines = {l.split()[0]: l for l in result.stdout.splitlines() if l.split()[:1]}
             for row in ('config', 'repo', 'backlog', 'scheduler'):
                 self.assertIn(' ok ', lines[row], lines[row])
+
+
+class TestSchedulerSection(unittest.TestCase):
+    """`asf doctor`'s scheduler section, against the fake launchctl from test_scheduler."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='asf-doctor-sched-')
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.home = os.path.join(self.tmp, 'home')
+        self.agents = os.path.join(self.home, 'Library', 'LaunchAgents')
+        self.asf_home = os.path.join(self.tmp, 'ASF')
+        self.logs = os.path.join(self.asf_home, 'logs')
+        for d in (self.agents, self.logs, os.path.join(self.asf_home, 'products')):
+            os.makedirs(d)
+        self.bindir, self.statedir = fake_launchctl(self.tmp)
+
+        self._old_env = dict(os.environ)
+        self._old_asf_home = env.ASF_HOME
+        os.environ['HOME'] = self.home
+        os.environ['PATH'] = self.bindir + os.pathsep + os.environ.get('PATH', '')
+        os.environ['FAKE_LAUNCHCTL_DIR'] = self.statedir
+        env.ASF_HOME = self.asf_home
+        self.addCleanup(self._restore)
+
+        self.legacy_dir = os.path.join(self.tmp, 'legacy')
+        os.makedirs(self.legacy_dir)
+        self.product = env.Product('sample', {'repo_dir': self.tmp, 'repo_slug': 'acme/sample',
+                                              'backlog_dir': self.tmp})
+
+    def _restore(self):
+        os.environ.clear()
+        os.environ.update(self._old_env)
+        env.ASF_HOME = self._old_asf_home
+
+    def cfg(self, legacy_labels=(), legacy_paths=()):
+        return {'scheduler': {'kind': 'launchd', 'label_prefix': 'asf',
+                              'legacy_labels': list(legacy_labels), 'interval_s': 600},
+                'legacy_paths': list(legacy_paths)}
+
+    def install_plist(self, label, argv, log=None, interval=600, age_s=0):
+        import plistlib
+        path = os.path.join(self.agents, f'{label}.plist')
+        data = {'Label': label, 'ProgramArguments': argv, 'StartInterval': interval}
+        if log:
+            data['StandardOutPath'] = log
+        with open(path, 'wb') as f:
+            plistlib.dump(data, f)
+        if age_s:
+            stamp = time.time() - age_s
+            os.utime(path, (stamp, stamp))
+        return path
+
+    def write_log(self, name, text, age_s=0):
+        path = os.path.join(self.logs, name)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+        if age_s:
+            stamp = time.time() - age_s
+            os.utime(path, (stamp, stamp))
+        return path
+
+    # ---- the rows ---------------------------------------------------------------------------
+
+    def test_a_healthy_job_is_ok_and_shows_its_log_tail(self):
+        log = self.write_log('tick-sample-record.log', 'starting\ntick: state committed\n')
+        self.install_plist('asf.sample.record', ['/usr/bin/python3', '-m', 'asf.cli'], log=log)
+        fake_loaded(self.statedir, ['asf.sample.record'])
+        fake_print(self.statedir, 'asf.sample.record', read_fixture('launchctl-print.txt'))
+
+        rows = doctor.scheduler_rows(self.cfg(), self.product)
+        self.assertEqual([r[0] for r in rows], [doctor.OK])
+        self.assertIn('runs=7', rows[0][2])
+        self.assertIn('last-exit=0', rows[0][2])
+        self.assertIn('log: tick: state committed', rows[0][2])
+        self.assertFalse(doctor.scheduler_is_red(rows))
+
+    def test_a_job_that_never_exited_past_two_intervals_is_red(self):
+        """B-0014 (b): the job was installed, launchd holds it, and it has never once run."""
+        self.install_plist('asf.sample.dispatch', ['python3', '-m', 'asf.cli'],
+                           interval=600, age_s=3600)
+        fake_loaded(self.statedir, ['asf.sample.dispatch'])
+        fake_print(self.statedir, 'asf.sample.dispatch',
+                   read_fixture('launchctl-print-never-exited.txt'))
+
+        rows = doctor.scheduler_rows(self.cfg(), self.product)
+        self.assertEqual(rows[0][0], doctor.RED)
+        self.assertIn('never exited', rows[0][2])
+        self.assertIn('over 2 intervals', rows[0][2])
+        self.assertTrue(doctor.scheduler_is_red(rows))
+
+    def test_a_job_that_never_exited_inside_two_intervals_is_not_yet_red(self):
+        self.install_plist('asf.sample.dispatch', ['python3'], interval=600, age_s=60)
+        fake_loaded(self.statedir, ['asf.sample.dispatch'])
+        fake_print(self.statedir, 'asf.sample.dispatch',
+                   read_fixture('launchctl-print-never-exited.txt'))
+        rows = doctor.scheduler_rows(self.cfg(), self.product)
+        self.assertEqual(rows[0][0], doctor.OK)
+
+    def test_a_nonzero_last_exit_is_red(self):
+        self.install_plist('asf.sample.record', ['/usr/bin/python3'])
+        fake_loaded(self.statedir, ['asf.sample.record'])
+        fake_print(self.statedir, 'asf.sample.record',
+                   read_fixture('launchctl-print.txt').replace('last exit code = 0',
+                                                               'last exit code = 1'))
+        rows = doctor.scheduler_rows(self.cfg(), self.product)
+        self.assertEqual(rows[0][0], doctor.RED)
+        self.assertIn('last-exit=1', rows[0][2])
+
+    def test_no_loaded_job_at_all_is_red(self):
+        fake_loaded(self.statedir, [])
+        rows = doctor.scheduler_rows(self.cfg(), self.product)
+        self.assertEqual(rows[0][0], doctor.RED)
+        self.assertIn('nothing ticks', rows[0][2])
+
+    def test_a_legacy_dir_a_loaded_job_still_points_at_is_yellow(self):
+        script = os.path.join(self.legacy_dir, 'dispatch.sh')
+        open(script, 'w').close()
+        self.install_plist('old.factory.dispatch', ['/bin/bash', script])
+        self.install_plist('asf.sample.record', ['/usr/bin/python3'])
+        fake_loaded(self.statedir, ['asf.sample.record', 'old.factory.dispatch'])
+        for label in ('asf.sample.record', 'old.factory.dispatch'):
+            fake_print(self.statedir, label, read_fixture('launchctl-print.txt'))
+
+        rows = doctor.scheduler_rows(
+            self.cfg(legacy_labels=['old.factory.*'], legacy_paths=[self.legacy_dir]),
+            self.product)
+        yellow = [r for r in rows if r[0] == doctor.YELLOW]
+        self.assertEqual(len(yellow), 1, rows)
+        self.assertEqual(yellow[0][1], self.legacy_dir)
+        self.assertEqual(yellow[0][2], f'still in use by old.factory.dispatch ({script})')
+        self.assertFalse(doctor.scheduler_is_red(rows), 'in-use is a warning, not a failure')
+
+    def test_a_non_launchd_kind_says_so_in_one_line(self):
+        rows = doctor.scheduler_rows({'scheduler': {'kind': 'gh-actions'}}, self.product)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], doctor.OK)
+        self.assertIn('gh-actions', rows[0][2])
+
+    def test_format_puts_every_job_on_its_own_line(self):
+        rows = [(doctor.OK, 'asf.sample.record', 'state=running'),
+                (doctor.RED, 'asf.sample.dispatch', 'last-exit=1'),
+                (doctor.YELLOW, '/opt/legacy', 'still in use by old.dispatch')]
+        out = doctor.format_scheduler('sample', rows)
+        self.assertIn('== SCHEDULER sample', out)
+        self.assertEqual(len(out.splitlines()), 4)
+        self.assertIn('RED', out)
+        self.assertIn('YELLOW', out)
+
+    def test_format_age(self):
+        self.assertEqual(doctor.format_age(None), '-')
+        self.assertEqual(doctor.format_age(30), '30s')
+        self.assertEqual(doctor.format_age(600), '10m')
+        self.assertEqual(doctor.format_age(7200), '2h')
+        self.assertEqual(doctor.format_age(200000), '2d')
 
 
 if __name__ == '__main__':
