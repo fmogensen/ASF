@@ -140,8 +140,12 @@ def make_repo():
     base = tempfile.mkdtemp(prefix='harvest_test_')
     origin = os.path.join(base, 'origin.git')
     repo = os.path.join(base, 'repo')
-    sh(['git', 'init', '-q', '--bare', origin])
+    # B-0038: the trunk is `main` whatever the host's init.defaultBranch says — the CI runner
+    # has none and would otherwise start the clone on `master`, and `add_job_worktree`'s `main`
+    # would resolve to a tracking branch instead of the worker branch's base
+    sh(['git', 'init', '-q', '--bare', '-b', 'main', origin])
     sh(['git', 'clone', '-q', origin, repo])
+    sh(['git', 'symbolic-ref', 'HEAD', 'refs/heads/main'], cwd=repo)
     sh(['git', 'config', 'user.name', 'Test'], cwd=repo)
     sh(['git', 'config', 'user.email', 'test@example.com'], cwd=repo)
     sh(['git', 'config', 'commit.gpgsign', 'false'], cwd=repo)
@@ -228,6 +232,22 @@ class HarvestTests(unittest.TestCase):
         self.assertEqual(parts[0], '/tmp/harvest-x/wt')
         self.assertTrue(os.path.isdir(os.path.join(parts[1], 'asf')), parts[1])
         self.assertEqual(parts[-1], '/elsewhere')
+
+    # -- B-0038: the fixture is on `main` whatever the host's init.defaultBranch says ----------
+    def test_b0038_fixture_trunk_is_main_without_a_host_default_branch(self):
+        # the CI runner has no init.defaultBranch; a clone there starts on `master`, and
+        # `git worktree add -b worker/<job> <path> main` then checks out a tracking `main`
+        # instead of creating the worker branch — harvest finds nothing and prints nothing
+        with tempfile.NamedTemporaryFile('w', suffix='.gitconfig', delete=False) as f:
+            f.write('[user]\n\tname = ci\n\temail = ci@localhost\n')
+        self.addCleanup(os.unlink, f.name)
+        with mock.patch.dict(os.environ, {'GIT_CONFIG_GLOBAL': f.name, 'GIT_CONFIG_NOSYSTEM': '1'}):
+            base, origin, repo, state_dir = make_repo()
+            self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+            head = sh(['git', 'symbolic-ref', '--short', 'HEAD'], cwd=repo).stdout.strip()
+            self.assertEqual(head, 'main')
+            branch, wt = add_job_worktree(repo, state_dir, 'trunk1')
+            self.assertEqual(harvest.worker_branches(repo, CONV), [branch])
 
     # -- a fast-forwardable branch lands on main with no controller action -----------------
     def test_green_branch_lands_on_main(self):
