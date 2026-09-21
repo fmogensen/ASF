@@ -12,7 +12,7 @@ from unittest import mock
 from asf import env
 from asf.feeder import rows as feeder_rows
 from asf.metrics import metrics
-from asf.tick import shadow, step_daily, step_health, step_prs, step_wave, steps, tick
+from asf.tick import shadow, step_daily, step_harvest, step_health, step_prs, step_wave, steps, tick
 from asf.workers import pool as pool_mod
 from asf.workers import runtime as runtime_mod
 from tests.test_tick import TickTestCase, _git
@@ -104,11 +104,12 @@ class OrderedTickTests(StepsTestCase):
         with mock.patch.object(step_health, 'run', boom), \
                 mock.patch.object(step_wave, 'run', ok('wave')), \
                 mock.patch.object(step_prs, 'run', ok('prs')), \
+                mock.patch.object(step_harvest, 'run', ok('harvest')), \
                 mock.patch.object(step_daily, 'run', ok('daily')), \
                 mock.patch.object(shadow, 'ensure_clone', wraps=shadow.ensure_clone) as clone:
             rc, out = self.run_tick()
         self.assertEqual(rc, 1)
-        self.assertEqual(ran, ['health', 'wave', 'prs', 'daily'])
+        self.assertEqual(ran, ['health', 'wave', 'prs', 'harvest', 'daily'])
         lines = out.splitlines()
         self.assertEqual(lines[0], '[step:health] FAILED health blew up')
         self.assertEqual(lines[1], '[command:batch] batch ran')
@@ -126,7 +127,7 @@ class OrderedTickTests(StepsTestCase):
         line = json.loads(tick_log.splitlines()[-1])
         self.assertEqual([(s['step'], s['ok']) for s in line['steps']],
                          [('record', True), ('health', False), ('wave', True), ('prs', True),
-                          ('batch', True), ('daily', True)])
+                          ('harvest', True), ('batch', True), ('daily', True)])
         self.assertEqual(line['product'], 'sample')
         # the line keeps the ticks stream's schema: the scorecard reads it without a KeyError
         metrics.scorecard_rows([], [], [line])
@@ -360,6 +361,53 @@ class PrsStepTests(StepsTestCase):
     def test_slug_comes_from_a_hosted_origin_when_the_yaml_has_none(self):
         _git(['remote', 'set-url', 'origin', 'git@example.com:owner/name.git'], self.repo)
         self.assertEqual(step_prs.repo_slug(env.Product('p', {'repo_dir': self.repo})), 'owner/name')
+
+
+# ---- harvest ----------------------------------------------------------------------
+
+class HarvestStepTests(StepsTestCase):
+    """``batch: off`` → the lane lands by fast-forward, in the tick, after ``prs``."""
+
+    def origin_main(self):
+        return _git(['rev-parse', 'main'], self.repo_origin)
+
+    def test_finished_fix_branch_lands_through_the_tick(self):
+        self.push_branch('fix/B-0001')  # its commit is `work on fix/B-0001`: names the item
+        _git(['branch', '-D', 'fix/B-0001'], self.repo)  # remote-only, as a session leaves it
+        self.session(job='fix-bug-b-0001', item='B-0001', branch='fix/B-0001', pid=DEAD_PID,
+                     started='2026-09-21T00:00:00Z')
+        self.session(job='fix-bug-b-0001', ended='2026-09-21T00:05:00Z', end_reason='finished',
+                     rc=0)
+        rc, out = self.run_tick(steps='harvest')
+        self.assertEqual(rc, 0)
+        sha = self.origin_main()
+        self.assertIn(f'landed fix/B-0001 → {sha}', out)
+        self.assertEqual(_git(['log', '-1', '--format=%s', 'main'], self.repo_origin),
+                         'work on fix/B-0001')
+        self.assertEqual(_git(['branch', '--list', 'fix/B-0001'], self.repo_origin), '')
+        self.assertEqual(pool_mod.load_sessions(self.product)['fix-bug-b-0001']['harvested'], sha)
+
+    def test_nothing_finished_is_one_line(self):
+        step_harvest.run(self.ctx(), out=self.lines.append)
+        self.assertEqual(self.lines, ['harvest: none to land'])
+
+    def test_no_repo_dir_is_one_line(self):
+        ctx = tick.Context(env.Product('p', {}))
+        step_harvest.run(ctx, out=self.lines.append)
+        self.assertEqual(self.lines, ['harvest: no repo_dir — nothing to harvest'])
+
+    def test_shadow_never_runs_harvest(self):
+        with mock.patch.object(step_harvest, 'run', side_effect=AssertionError('ran')), \
+                mock.patch.object(tick, 'run_step0', lambda root, product, fresh=False: None), \
+                mock.patch.object(tick, 'render_tables', return_value={}):
+            rc, out = self.run_tick(shadow=True)
+        self.assertEqual(rc, 0)
+        self.assertIn('tick --shadow:', out)
+
+    def test_harvest_runs_after_prs_before_batch(self):
+        self.assertEqual(steps.STEPS[steps.STEPS.index('prs') + 1], 'harvest')
+        self.assertEqual(steps.STEPS[steps.STEPS.index('harvest') + 1], 'batch')
+        self.assertIn(('harvest', 'asf', None), steps.resolve(self.product))
 
 
 # ---- daily ------------------------------------------------------------------------

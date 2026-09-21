@@ -179,6 +179,7 @@ class ManifestTests(TickTestCase):
             ('health', 'command', 'bash ~/x/health.sh --fix'),
             ('wave', 'off', None),
             ('prs', 'asf', None),
+            ('harvest', 'asf', None),
             ('batch', 'undeclared', None),
             ('daily', 'asf', None),
         ])
@@ -193,26 +194,28 @@ class ManifestTests(TickTestCase):
         rc, out = self.run_tick(manifest=True)
         self.assertEqual(rc, 0)
         self.assertEqual(out, (
-            'step    owner       command\n'
-            'record  asf         asf.tick.tick:run_record_step\n'
-            'health  command     bash ~/x/health.sh --fix\n'
-            'wave    off         -\n'
-            'prs     asf         asf.tick.step_prs:run\n'
-            'batch   undeclared  -\n'
-            'daily   asf         asf.tick.step_daily:run\n'))
+            'step     owner       command\n'
+            'record   asf         asf.tick.tick:run_record_step\n'
+            'health   command     bash ~/x/health.sh --fix\n'
+            'wave     off         -\n'
+            'prs      asf         asf.tick.step_prs:run\n'
+            'harvest  asf         asf.tick.step_harvest:run\n'
+            'batch    undeclared  -\n'
+            'daily    asf         asf.tick.step_daily:run\n'))
 
     def test_manifest_golden_all_asf_and_a_batch_command(self):
         self.write_product('steps:\n  batch: bash ~/q/merge-queue.sh --once\n')
         rc, out = self.run_tick(manifest=True)
         self.assertEqual(rc, 0)
         self.assertEqual(out, (
-            'step    owner    command\n'
-            'record  asf      asf.tick.tick:run_record_step\n'
-            'health  asf      asf.tick.step_health:run\n'
-            'wave    asf      asf.tick.step_wave:run\n'
-            'prs     asf      asf.tick.step_prs:run\n'
-            'batch   command  bash ~/q/merge-queue.sh --once\n'
-            'daily   asf      asf.tick.step_daily:run\n'))
+            'step     owner    command\n'
+            'record   asf      asf.tick.tick:run_record_step\n'
+            'health   asf      asf.tick.step_health:run\n'
+            'wave     asf      asf.tick.step_wave:run\n'
+            'prs      asf      asf.tick.step_prs:run\n'
+            'harvest  asf      asf.tick.step_harvest:run\n'
+            'batch    command  bash ~/q/merge-queue.sh --once\n'
+            'daily    asf      asf.tick.step_daily:run\n'))
 
     def test_undeclared_batch_exits_2(self):
         self.write_product('')

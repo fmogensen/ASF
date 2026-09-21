@@ -1,10 +1,10 @@
 """asf.tick.tick — ``asf tick``: the scheduled steps (:mod:`asf.tick.steps`), in order
-``record → health → wave → prs → batch → daily``.
+``record → health → wave → prs → harvest → batch → daily``.
 
 ``record`` is step 0: metrics backfill → ingest → file-bugs → rollup → index, run in the tick's
 own clone of the product's backlog (:mod:`asf.tick.shadow`).
-``health``, ``wave``, ``prs`` and ``daily`` are :mod:`asf.tick.step_health`, ``step_wave``,
-``step_prs`` and ``step_daily``; ``batch`` is a command the product declares (or ``off``), as is
+``health``, ``wave``, ``prs``, ``harvest`` and ``daily`` are :mod:`asf.tick.step_health`,
+``step_wave``, ``step_prs``, ``step_harvest`` and ``step_daily``; ``batch`` is a command the product declares (or ``off``), as is
 any step a product chooses to run with its own command.
 
 A step that fails prints one ``[step:<name>] FAILED <why>`` and the tick goes on to the next one;
@@ -297,7 +297,7 @@ def write_tick_line(ctx, ran):
 def register(subparsers):
     """Add the ``tick`` subcommand (replaces the bare one in ``asf.cli``)."""
     p = subparsers.add_parser(
-        'tick', help='the scheduled steps, in order: record, health, wave, prs, batch, daily '
+        'tick', help='the scheduled steps, in order: record, health, wave, prs, harvest, batch, daily '
                      '(a failing step never stops the rest; exit 1 if any failed)')
     p.add_argument('--product')
     p.add_argument('--shadow', action='store_true',
