@@ -474,7 +474,8 @@ class ProductHarvestTests(unittest.TestCase):
         results, lines = self.harvest(self.product())
         self.assertEqual(results, {'fix/B-0001': 'landed'})
         sha = self.origin_main()
-        self.assertEqual(lines, [f'landed fix/B-0001 → {sha}'])
+        self.assertEqual(lines, [f'landed fix/B-0001 → {sha}',
+                                 f'harvest: {self.repo} fast-forwarded to {sha}'])
         log = sh(['git', 'log', '--format=%s', 'main'], cwd=self.origin).stdout
         self.assertIn('fix(B-0001): the change', log)
         self.assertFalse(self.origin_has('fix/B-0001'))
@@ -482,6 +483,30 @@ class ProductHarvestTests(unittest.TestCase):
 
         # landed once: the next tick has nothing to do
         self.assertEqual(self.harvest(self.product()), ({}, []))
+
+    def test_b0036_landing_fast_forwards_the_checkout(self):
+        """The scheduler runs the ``repo_dir`` checkout; a landing that only reached origin left
+        it running the code from before its own fix. On the trunk with a clean tree, it is
+        fast-forwarded to the landed sha — never reset."""
+        self.push_lane('fix/B-0001', [('fix(B-0001): the change', {'a.txt': 'a\n'})])
+        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
+        before = sh(['git', 'rev-parse', 'main'], cwd=self.repo).stdout.strip()
+        results, lines = self.harvest(self.product())
+        sha = self.origin_main()
+        self.assertEqual(results, {'fix/B-0001': 'landed'})
+        self.assertNotEqual(sha, before)
+        self.assertEqual(sh(['git', 'rev-parse', 'main'], cwd=self.repo).stdout.strip(), sha)
+        self.assertEqual(lines[-1], f'harvest: {self.repo} fast-forwarded to {sha}')
+
+    def test_b0036_dirty_or_off_trunk_checkout_is_left_alone(self):
+        self.push_lane('fix/B-0001', [('fix(B-0001): the change', {'a.txt': 'a\n'})])
+        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
+        before = sh(['git', 'rev-parse', 'main'], cwd=self.repo).stdout.strip()
+        self.write(self.repo, 'checks/test_fx.py', GREEN_TEST + '# local edit\n')
+        results, lines = self.harvest(self.product())
+        self.assertEqual(results, {'fix/B-0001': 'landed'})
+        self.assertEqual(sh(['git', 'rev-parse', 'main'], cwd=self.repo).stdout.strip(), before)
+        self.assertEqual(lines[-1], f'harvest: {self.repo} not fast-forwarded — working tree has local changes')
 
     def test_session_is_matched_by_branch_not_by_job_name(self):
         self.push_lane('worker/add-thing', [('feat(T-0007): add the thing', {'t.txt': 't\n'})])

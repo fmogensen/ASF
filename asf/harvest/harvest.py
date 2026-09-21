@@ -687,6 +687,28 @@ def land_ff(repo, state_dir, branch, record, item, conv, asf_repo, bug_root, dry
     return 'held'
 
 
+def sync_checkout(repo, trunk, out=print):
+    """Fast-forward the checkout at ``repo`` to ``origin/<trunk>`` after a landing. The scheduler
+    runs that checkout (an editable install: its working tree is the code), and a landing that
+    reached only origin left the factory running the code from before its own fix (B-0036).
+    Only when the checkout is on the trunk with a clean tree, and only ``--ff-only`` — never a
+    reset, never a force; anything else is left alone and named in one line. True when moved."""
+    head = sh(['git', 'symbolic-ref', '-q', '--short', 'HEAD'], cwd=repo).stdout.strip()
+    if head != trunk:
+        out(f'harvest: {repo} not fast-forwarded — on {head or "a detached HEAD"}, not {trunk}')
+        return False
+    if sh(['git', 'status', '--porcelain', '--untracked-files=no'], cwd=repo).stdout.strip():
+        out(f'harvest: {repo} not fast-forwarded — working tree has local changes')
+        return False
+    merge = sh(['git', 'merge', '-q', '--ff-only', f'origin/{trunk}'], cwd=repo)
+    if merge.returncode != 0:
+        out(f'harvest: {repo} not fast-forwarded — {tail(merge.stderr or merge.stdout)}')
+        return False
+    sha = sh(['git', 'rev-parse', 'HEAD'], cwd=repo).stdout.strip()
+    out(f'harvest: {repo} fast-forwarded to {sha}')
+    return True
+
+
 def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, out=print):
     """Land (or hand to the PR lane) every finished lane branch on the product repo's origin.
     ``bug_root`` is the record a red gate files its Bug in — a path, or a callable returning
@@ -727,6 +749,8 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
             asf_repo = is_asf_repo(repo)
         results[branch] = land_ff(repo, state_dir, branch, record, item, conv, asf_repo,
                                   bug_root, dry_run, out)
+    if any(r == 'landed' for r in results.values()):
+        sync_checkout(repo, trunk, out)
     return results
 
 
