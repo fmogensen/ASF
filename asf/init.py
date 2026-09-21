@@ -108,6 +108,12 @@ def slug_from_url(url):
     return f'{m.group(1)}/{m.group(2)}'
 
 
+# where discovery looks for the specs/plans dirs, first hit wins: the usual places, then any
+# `spec*`/`plan*` dir at any depth under docs/ — a product's own layout, found rather than named
+SPECS_GLOBS = ['docs/specs', 'specs', 'docs/**/specs', 'docs/**/spec*']
+PLANS_GLOBS = ['docs/plans', 'plans', 'docs/**/plans', 'docs/**/plan*']
+
+
 def _first_dir(repo, patterns):
     for pat in patterns:
         hits = sorted(p for p in glob.glob(os.path.join(repo, pat), recursive=True) if os.path.isdir(p))
@@ -153,8 +159,8 @@ def discover(name, repo, backlog):
         'repo_dir': repo,
         'main': branch,
         'backlog_dir': os.path.abspath(backlog) if backlog else None,
-        'specs_dir': _first_dir(repo, ['docs/specs', 'docs/superpowers/specs', 'docs/**/spec*']),
-        'plans_dir': _first_dir(repo, ['docs/plans', 'docs/superpowers/plans', 'docs/**/plan*']),
+        'specs_dir': _first_dir(repo, SPECS_GLOBS),
+        'plans_dir': _first_dir(repo, PLANS_GLOBS),
         'ci_provider': ci,
         'test_command': _test_command(repo),
     }

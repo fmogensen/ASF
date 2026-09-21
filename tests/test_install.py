@@ -209,6 +209,18 @@ class InitTest(HomeCase):
         self.assertIsNone(init.slug_from_url('/tmp/origin.git'))
         self.assertIsNone(init.slug_from_url(None))
 
+    def test_specs_and_plans_found_wherever_the_product_keeps_them(self):
+        with tempfile.TemporaryDirectory() as repo:
+            for d in ('specs', 'plans'):  # at the repo root
+                os.makedirs(os.path.join(repo, d))
+            self.assertEqual(init._first_dir(repo, init.SPECS_GLOBS), 'specs')
+            self.assertEqual(init._first_dir(repo, init.PLANS_GLOBS), 'plans')
+        with tempfile.TemporaryDirectory() as repo:
+            for d in ('docs/team/specs', 'docs/team/plans'):  # nested under docs/, any name
+                os.makedirs(os.path.join(repo, d))
+            self.assertEqual(init._first_dir(repo, init.SPECS_GLOBS), 'docs/team/specs')
+            self.assertEqual(init._first_dir(repo, init.PLANS_GLOBS), 'docs/team/plans')
+
 
 # ---- 3. the schema check and asf schema-migrate -----------------------------
 

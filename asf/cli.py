@@ -68,7 +68,7 @@ def build_parser():
     p_groom.add_argument('--product')
     p_groom.add_argument('--default-bug-epic', help='the Epic an inbox Bug with no parent: line is filed under')
 
-    p_stale = sub.add_parser('stale', help='items over their tools/limits.json stage limit')
+    p_stale = sub.add_parser('stale', help="items over their stage limit (the product's stage_limits)")
     p_stale.add_argument('--json', action='store_true')
 
     p_file_bugs = sub.add_parser('file-bugs', help='file/bump Bugs from ci, refusals and rule violations')
