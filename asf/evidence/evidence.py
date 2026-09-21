@@ -39,6 +39,43 @@ PR_TTL = 180
 EVIDENCE_CACHE = "/tmp/backlog-evidence.json"
 EVIDENCE_TTL = 180
 
+# `conventions.branch_prefixes` in the product yaml overrides any of these; `legacy` is a list of
+# older task-branch prefixes still honoured when reading plans and PR heads.
+DEFAULT_BRANCH_PREFIXES = {"code": "worker/", "fix": "fix/", "spec": "spec/", "plan": "plan/"}
+# The `ci.provider` values whose green runs on main `ci_green_runs` knows how to read.
+GH_ACTIONS = ("gh-actions", "github-actions")
+
+
+def branch_prefixes(product=None):
+    """{code, fix, spec, plan: str, legacy: [str]} — the product's branch conventions."""
+    conv = (product.conventions if product is not None else {}) or {}
+    given = conv.get("branch_prefixes") or {}
+    out = dict(DEFAULT_BRANCH_PREFIXES)
+    out.update({k: v for k, v in given.items() if k != "legacy" and isinstance(v, str) and v})
+    legacy = given.get("legacy") or []
+    out["legacy"] = [legacy] if isinstance(legacy, str) else [x for x in legacy if x]
+    return out
+
+
+def branch_token(prefixes=None):
+    """The regex that finds a task branch named in a plan: the code prefix or a legacy one."""
+    prefixes = prefixes or branch_prefixes()
+    alts = sorted({prefixes["code"], *prefixes.get("legacy", [])}, key=len, reverse=True)
+    return re.compile(r"(?:" + "|".join(re.escape(a) for a in alts) + r")([A-Za-z0-9][\w.]*(?:-[\w.]+)*)")
+
+
+def conv_dir(product, key, default):
+    """A repo-relative directory from `conventions.<key>`, else the default."""
+    conv = (product.conventions if product is not None else {}) or {}
+    return conv.get(key) or default
+
+
+def _cache_file(base, product):
+    """One cache file per product: two products must never read each other's evidence."""
+    name = getattr(product, "name", None)
+    return f"{base}.{name}" if name else base
+
+
 PLANS_DIR = "docs/superpowers/plans"
 SPECS_DIR = "docs/superpowers/specs"
 BRIEFS_DIR = "docs/superpowers/briefs"
@@ -157,25 +194,26 @@ def remote_branches(product=None):
 
 def pr_list(product=None):
     product = product or env.load_product()
-    if os.path.exists(PR_CACHE) and time.time() - os.path.getmtime(PR_CACHE) < PR_TTL:
+    cache = _cache_file(PR_CACHE, product)
+    if os.path.exists(cache) and time.time() - os.path.getmtime(cache) < PR_TTL:
         try:
-            with open(PR_CACHE) as f:
+            with open(cache) as f:
                 return json.load(f)
         except Exception:
             pass
     # mergeCommit is extra vs. factory-board.py's field list: evidence.py needs the merge sha
-    # (Feature/Task Closed rules), factory-board.py's board never did.
+    # (Feature/Task Closed rules), factory-board.py's board never did; `body` carries id tokens.
     raw = sh(f"gh pr list -R {product.repo_slug} --state all --limit 300 "
-             "--json number,title,state,headRefName,mergedAt,mergeCommit", timeout=180,
+             "--json number,title,body,state,headRefName,mergedAt,mergeCommit", timeout=180,
              product=product)
     try:
         data = json.loads(raw) if raw else []
     except Exception:
         data = []
     try:
-        with open(PR_CACHE + f".{os.getpid()}", "w") as f:
+        with open(cache + f".{os.getpid()}", "w") as f:
             json.dump(data, f)
-        os.replace(PR_CACHE + f".{os.getpid()}", PR_CACHE)
+        os.replace(cache + f".{os.getpid()}", cache)
     except Exception:
         pass
     return data
@@ -222,7 +260,7 @@ def rx_review(*prefixes):
 TASK_HEAD = re.compile(r"^#{2,4}\s+(?:Task\s+|T(?=\d))(\d+[a-z]?)\b(?P<rest>[^\n]*)",
                        re.MULTILINE | re.IGNORECASE)
 BRANCH_STEM = re.compile(r"^(.*?)-(?:t\d+[a-z]?|w\d+[a-z]?)$", re.IGNORECASE)
-BRANCH_TOKEN = re.compile(r"(?:worktree-m-|cloud/)([A-Za-z0-9][\w.]*(?:-[\w.]+)*)")
+BRANCH_TOKEN = branch_token()  # the default prefixes; discover() builds the product's own
 TASK_TOKEN = re.compile(r"\bT(\d+[a-z]?)\b")
 CONSUMES_LINE = re.compile(r"consumes", re.IGNORECASE)
 
@@ -234,14 +272,16 @@ def natural_key(tid):
     return (int(m.group(1)), m.group(2)) if m else (10 ** 6, tid)
 
 
-def plan_tasks(text, slug):
+def plan_tasks(text, slug, token=None):
     """[(Tn, [branch-id …], declared_done)] — the plan's task headings.
 
-    The dispatch table is the authority on branch names (FACT-6's tasks live on `cloud/fact6-t*`,
-    not `cloud/clean-floor-t*`), and where a plan names branches per wave rather than per task
-    (`worktree-m-rename-<task>`) the common stem of the names it does give carries the same
-    answer. `<slug>-t<n>` is the fallback when it names neither.
+    The dispatch table is the authority on branch names (FACT-6's tasks live on `<code>fact6-t*`,
+    not `<code>clean-floor-t*`), and where a plan names branches per wave rather than per task
+    (`<legacy>rename-<task>`) the common stem of the names it does give carries the same
+    answer. `<slug>-t<n>` is the fallback when it names neither. `token` is `branch_token()` of
+    the product's prefixes (the default prefixes when omitted).
     """
+    token = token or BRANCH_TOKEN
     ids, seen, declared = [], set(), set()
     for m in TASK_HEAD.finditer(text):
         tid = "T" + m.group(1).lower()
@@ -252,7 +292,7 @@ def plan_tasks(text, slug):
             declared.add(tid)
     stated = {}
     for line in text.splitlines():
-        found = BRANCH_TOKEN.findall(line)
+        found = token.findall(line)
         tasks = {"T" + t.lower() for t in TASK_TOKEN.findall(line)}
         if len(tasks) != 1:
             continue
@@ -261,7 +301,7 @@ def plan_tasks(text, slug):
             if b.lower().endswith(tid.lower()):
                 stated.setdefault(tid, b)
     # the stem is read out of the dispatch table's own rows only. Branch names in prose are
-    # dependencies, not ownership: MOBILE-1's plan names `cloud/brand-t7` nine times as a
+    # dependencies, not ownership: MOBILE-1's plan names `<code>brand-t7` nine times as a
     # precondition, and a stem taken from prose handed BRAND-1's whole task list to MOBILE-1.
     stems = {}
     for b in stated.values():
@@ -337,6 +377,16 @@ def _matrix_paths(spec_paths):
 def discover(product=None, checked_file=None):
     """The raw evidence `backlog.py ingest` needs, gathered fresh from the product repo and gh."""
     product = product or env.load_product()
+    prefixes = branch_prefixes(product)
+    code, spec_p, plan_p = prefixes["code"], prefixes["spec"], prefixes["plan"]
+    token = branch_token(prefixes)
+    main_ref = f"origin/{product.main}"
+    plans_dir = conv_dir(product, "plans_dir", PLANS_DIR)
+    specs_dir = conv_dir(product, "specs_dir", SPECS_DIR)
+    briefs_dir = conv_dir(product, "briefs_dir", BRIEFS_DIR)
+    reviews_dir = conv_dir(product, "reviews_dir", REVIEWS_DIR)
+    matrix_path = conv_dir(product, "matrix_path", MATRIX_PATH)
+
     branches = remote_branches(product=product)
     prs = pr_list(product=product)
     pr_by_head = {}
@@ -345,13 +395,13 @@ def discover(product=None, checked_file=None):
     merged = {p["number"]: p["mergeCommit"]["oid"]
               for p in prs if p.get("state") == "MERGED" and p.get("mergeCommit")}
 
-    main_trees = read_trees([f"origin/main:{PLANS_DIR}", f"origin/main:{SPECS_DIR}",
-                             f"origin/main:{REVIEWS_DIR}", f"origin/main:{BRIEFS_DIR}"],
+    main_trees = read_trees([f"{main_ref}:{plans_dir}", f"{main_ref}:{specs_dir}",
+                             f"{main_ref}:{reviews_dir}", f"{main_ref}:{briefs_dir}"],
                             product=product)
-    main_plans = main_trees[f"origin/main:{PLANS_DIR}"]
-    main_specs = main_trees[f"origin/main:{SPECS_DIR}"]
-    main_reviews = set(main_trees[f"origin/main:{REVIEWS_DIR}"])
-    main_briefs = main_trees[f"origin/main:{BRIEFS_DIR}"]
+    main_plans = main_trees[f"{main_ref}:{plans_dir}"]
+    main_specs = main_trees[f"{main_ref}:{specs_dir}"]
+    main_reviews = set(main_trees[f"{main_ref}:{reviews_dir}"])
+    main_briefs = main_trees[f"{main_ref}:{briefs_dir}"]
 
     # ---- discovery: spec/plan branches, plans and specs already on main
     inits = {}
@@ -361,25 +411,25 @@ def discover(product=None, checked_file=None):
                                        "plan_doc": None, "spec_doc": None})
 
     for b in branches:
-        if b.startswith("cloud/spec-"):
-            init(b[len("cloud/spec-"):])["spec_branch"] = b
-        elif b.startswith("cloud/plan-"):
-            init(b[len("cloud/plan-"):])["plan_branch"] = b
+        if b.startswith(spec_p):
+            init(b[len(spec_p):])["spec_branch"] = b
+        elif b.startswith(plan_p):
+            init(b[len(plan_p):])["plan_branch"] = b
     for name in main_plans:
         if name.startswith("preflight-") or not name.endswith(".md"):
             continue
-        init(doc_slug(name))["plan_doc"] = (f"origin/main:{PLANS_DIR}/{name}", main_plans[name])
+        init(doc_slug(name))["plan_doc"] = (f"{main_ref}:{plans_dir}/{name}", main_plans[name])
     for name in main_specs:
         if not name.endswith(".md"):
             continue
         slug = doc_slug(name)
-        init(slug)["spec_doc"] = (f"origin/main:{SPECS_DIR}/{name}", main_specs[name])
+        init(slug)["spec_doc"] = (f"{main_ref}:{specs_dir}/{name}", main_specs[name])
 
     # ---- trees: reviews/plans/specs on every spec/plan branch we found
     doc_branches = [it[k] for it in inits.values() for k in ("spec_branch", "plan_branch") if it[k]]
-    tree_paths = [f"origin/{b}:{REVIEWS_DIR}" for b in doc_branches]
-    tree_paths += [f"origin/{b}:{PLANS_DIR}" for b in doc_branches]
-    tree_paths += [f"origin/{b}:{SPECS_DIR}" for b in doc_branches]
+    tree_paths = [f"origin/{b}:{reviews_dir}" for b in doc_branches]
+    tree_paths += [f"origin/{b}:{plans_dir}" for b in doc_branches]
+    tree_paths += [f"origin/{b}:{specs_dir}" for b in doc_branches]
     trees = read_trees(tree_paths, product=product)
 
     plan_req, spec_req = {}, {}
@@ -389,17 +439,17 @@ def discover(product=None, checked_file=None):
             for b in (it["plan_branch"], it["spec_branch"]):
                 if not b:
                     continue
-                t = trees.get(f"origin/{b}:{PLANS_DIR}", {})
+                t = trees.get(f"origin/{b}:{plans_dir}", {})
                 hit = next((n for n in t if n.endswith(f"-{slug}.md") and not n.startswith("preflight-")), None)
                 if hit:
-                    it["plan_doc"] = (f"origin/{b}:{PLANS_DIR}/{hit}", t[hit])
+                    it["plan_doc"] = (f"origin/{b}:{plans_dir}/{hit}", t[hit])
                     break
         if not it["spec_doc"]:
             b = it["spec_branch"] or it["plan_branch"]
-            t = trees.get(f"origin/{b}:{SPECS_DIR}", {}) if b else {}
+            t = trees.get(f"origin/{b}:{specs_dir}", {}) if b else {}
             hit = next((n for n in t if n.endswith(f"-{slug}.md")), None)
             if hit:
-                it["spec_doc"] = (f"origin/{b}:{SPECS_DIR}/{hit}", t[hit])
+                it["spec_doc"] = (f"origin/{b}:{specs_dir}/{hit}", t[hit])
         if it["plan_doc"]:
             plan_req[slug] = it["plan_doc"][1]
         if it["spec_doc"]:
@@ -409,9 +459,9 @@ def discover(product=None, checked_file=None):
         for kind in ("spec", "plan"):
             doc = it.get(f"{kind}_doc")
             rev = doc[0].split(":", 1)[0] if doc else None
-            it[f"{kind}_on_main"] = rev == "origin/main"
+            it[f"{kind}_on_main"] = rev == main_ref
             it[f"{kind}_carrier"] = (it[f"{kind}_branch"] or
-                                     (rev[len("origin/"):] if rev and rev != "origin/main" else None))
+                                     (rev[len("origin/"):] if rev and rev != main_ref else None))
 
     # ---- the review files each row needs a verdict from
     wanted = {}
@@ -421,7 +471,7 @@ def discover(product=None, checked_file=None):
             branch = it[f"{kind}_carrier"]
             if not branch:
                 continue
-            names = trees.get(f"origin/{branch}:{REVIEWS_DIR}", {})
+            names = trees.get(f"origin/{branch}:{reviews_dir}", {})
             pats = rx_review(re.escape(f"{kind}-{slug}"), re.escape(slug), re.escape(f"{slug}-{kind}"))
             f, r = newest_review(names, pats)
             if f:
@@ -434,7 +484,7 @@ def discover(product=None, checked_file=None):
     for slug in inits:
         hit = [d for d in main_briefs if d == slug or d.endswith("-" + slug)]
         if hit:
-            brief_dirs[slug] = f"origin/main:{BRIEFS_DIR}/{sorted(hit)[-1]}"
+            brief_dirs[slug] = f"{main_ref}:{briefs_dir}/{sorted(hit)[-1]}"
     brief_trees = read_trees(sorted(set(brief_dirs.values())), product=product)
 
     for it in inits.values():
@@ -454,10 +504,10 @@ def discover(product=None, checked_file=None):
         slug = it["slug"]
         text = (blobs.get(plan_req.get(slug)) or b"").decode("utf-8", "replace")
         it["plan_text"] = text
-        it["tasks_parsed"] = plan_tasks(text, slug) if text else []
+        it["tasks_parsed"] = plan_tasks(text, slug, token) if text else []
         it["edges"] = consumes_edges(text) if text else {}
         for _tid, cand, _d in it["tasks_parsed"]:
-            claimed.update(f"cloud/{c}" for c in cand if f"cloud/{c}" in branches)
+            claimed.update(f"{code}{c}" for c in cand if f"{code}{c}" in branches)
 
     task_tree_paths = []
     task_rows = {}
@@ -469,13 +519,14 @@ def discover(product=None, checked_file=None):
         briefs = brief_trees.get(brief_dirs.get(slug, ""), {})
         rows = []
         for tid, cand, declared_done in it["tasks_parsed"]:
-            br = next((f"cloud/{c}" for c in cand if f"cloud/{c}" in branches), None)
+            br = next((f"{code}{c}" for c in cand if f"{code}{c}" in branches), None)
             if not br and alias_stem and alias_stem != slug:
                 weak = f"{alias_stem}-{tid.lower()}"
-                if f"cloud/{weak}" in branches and f"cloud/{weak}" not in claimed:
-                    br, cand = f"cloud/{weak}", cand + [weak]
+                if f"{code}{weak}" in branches and f"{code}{weak}" not in claimed:
+                    br, cand = f"{code}{weak}", cand + [weak]
                     claimed.add(br)
-            cand_prs = [p for c in cand for p in pr_by_head.get(f"cloud/{c}", []) + pr_by_head.get(f"worktree-m-{c}", [])]
+            cand_prs = [p for c in cand for pre in [code] + prefixes["legacy"]
+                        for p in pr_by_head.get(f"{pre}{c}", [])]
             merged_pr = next((p for p in cand_prs if p.get("state") == "MERGED"), None)
             n = tid[1:]
             landed = (declared_done
@@ -493,7 +544,7 @@ def discover(product=None, checked_file=None):
                 "landed_no_branch": landed and not br,
             })
             if br:
-                task_tree_paths.append(f"origin/{br}:{REVIEWS_DIR}")
+                task_tree_paths.append(f"origin/{br}:{reviews_dir}")
         task_rows[slug] = rows
     task_trees = read_trees(sorted(set(task_tree_paths)), product=product)
 
@@ -502,7 +553,7 @@ def discover(product=None, checked_file=None):
         for row in rows:
             if not row["branch"]:
                 continue
-            names = task_trees.get(f"origin/{row['branch']}:{REVIEWS_DIR}", {})
+            names = task_trees.get(f"origin/{row['branch']}:{reviews_dir}", {})
             ids = row["cand"] + [row["branch"].split("/", 1)[-1]]
             pats = [p for i in ids for p in rx_review(re.escape(i), re.escape(f"hotfix-{i}"), re.escape(f"review-{i}"))]
             f, r = newest_review(names, pats)
@@ -515,7 +566,7 @@ def discover(product=None, checked_file=None):
             rev = row.pop("review", None)
             if rev:
                 r, _v, f = rev
-                names = task_trees.get(f"origin/{row['branch']}:{REVIEWS_DIR}", {})
+                names = task_trees.get(f"origin/{row['branch']}:{reviews_dir}", {})
                 row["review"] = (r, verdict_of(task_blobs.get(names.get(f))))
             else:
                 row["review"] = None
@@ -561,7 +612,7 @@ def discover(product=None, checked_file=None):
         }
 
     # ---- the parity matrix, for Stories
-    matrix_text = sh(f"git show origin/main:{MATRIX_PATH}", product=product)
+    matrix_text = sh(f"git show {main_ref}:{matrix_path}", product=product)
     rows, _broken = parse_rows(matrix_text) if matrix_text else ([], [])
     stories = {r["id"]: {"status": r["status"], "impl": _matrix_paths(r["impl"]),
                          "test": _matrix_paths(r["tests"]), "area": r["area"], "milestone": r["ms"],
@@ -573,7 +624,7 @@ def discover(product=None, checked_file=None):
     prod_runs = _gh_json("run list --workflow deploy-prod.yml --limit 15 "
                          "--json headSha,conclusion,updatedAt", product=product)
     prod = next((r for r in prod_runs if r.get("conclusion") == "success"), None)
-    main_runs = _gh_json("run list --branch main --workflow ci.yml --limit 40 "
+    main_runs = _gh_json(f"run list --branch {product.main} --workflow ci.yml --limit 40 "
                          "--json headSha,conclusion,updatedAt,status,databaseId", product=product)
     dev = None
     for r in main_runs:
@@ -595,7 +646,7 @@ def discover(product=None, checked_file=None):
                 if m:
                     checked.add(int(m.group(1)))
 
-    main_sha = sh("git rev-parse origin/main", product=product)
+    main_sha = sh(f"git rev-parse {main_ref}", product=product)
 
     return {
         "features": features,
@@ -606,7 +657,147 @@ def discover(product=None, checked_file=None):
         "main_sha": main_sha or None,
         "merged": merged,
         "branches": sorted(branches),
+        "ids": id_evidence(product, branches, prs),
+        "ci": ci_provider(product),
     }
+
+
+# ---- id tokens: an item's own id in a branch name, a PR or a commit subject on main ----------
+ID_TOKEN = re.compile(r"\b([EFSTBDR])-(\d{4})\b")
+# branch names are often lower-cased (`fix/b-0003`); titles, bodies and subjects are not read so
+BRANCH_ID_TOKEN = re.compile(r"\b([EFSTBDR])-(\d{4})\b", re.IGNORECASE)
+
+
+def id_tokens(text, rx=ID_TOKEN):
+    """Every `<TYPE>-<nnnn>` in text, in order, deduplicated; `(B-0001)` and `[B-0001]` count."""
+    return list(dict.fromkeys(f"{t.upper()}-{n}" for t, n in rx.findall(text or "")))
+
+
+def ci_provider(product):
+    """The product's `ci.provider`, lower-cased; None for `ci: none` or no provider at all."""
+    ci = product.ci if product is not None else None
+    name = ci if isinstance(ci, str) else (ci or {}).get("provider") if isinstance(ci, dict) else None
+    name = str(name).strip().lower() if name else ""
+    return None if name in ("", "none", "off") else name
+
+
+def ci_green_runs(product):
+    """[headSha, …] of the newest successful CI runs on main, newest first; [] if unreadable."""
+    if ci_provider(product) not in GH_ACTIONS:
+        return []
+    runs = _gh_json(f"run list --branch {product.main} --status success --limit 20 "
+                    "--json headSha,createdAt", product=product)
+    runs = sorted((r for r in runs if isinstance(r, dict) and r.get("headSha")),
+                  key=lambda r: r.get("createdAt") or "", reverse=True)
+    return list(dict.fromkeys(r["headSha"] for r in runs))
+
+
+def record_since(product):
+    """The committer date of the record's first commit (the backlog repo's root), or None.
+
+    Commits on main older than the record predate every id in it, so they are not read."""
+    d = product.backlog_dir if product is not None else None
+    if not d or not os.path.isdir(d):
+        return None
+    try:
+        roots = subprocess.run(["git", "-C", d, "rev-list", "--max-parents=0", "HEAD"],
+                               capture_output=True, text=True, timeout=30).stdout.split()
+        if not roots:
+            return None
+        dates = subprocess.run(["git", "-C", d, "show", "-s", "--format=%cI"] + roots,
+                               capture_output=True, text=True, timeout=30).stdout.split()
+    except Exception:
+        return None
+    return min(dates) if dates else None
+
+
+def main_commits(product):
+    """[(sha, subject)] on origin/<main> since the record's first commit, newest first."""
+    since = record_since(product)
+    cmd = f"git log --format=%H%x09%s origin/{product.main}"
+    if since:
+        cmd += f" --since={since}"
+    out = []
+    for line in sh(cmd, product=product).splitlines():
+        sha, _, subject = line.partition("\t")
+        if sha:
+            out.append((sha, subject))
+    return out
+
+
+def id_evidence(product, branches, prs, commits=None, green=None):
+    """{id: {branches, open_prs, commit, green}} — every id a branch, PR or commit on main names.
+
+    `commit` is the newest commit on main naming the id (a merged PR naming it in its title or
+    body counts through its merge commit); `green` says a CI run on main passed at or after it,
+    and is true outright for a product with no CI provider.
+    """
+    main_ref = f"origin/{product.main}"
+    out = {}
+
+    def rec(iid):
+        return out.setdefault(iid, {"branches": [], "open_prs": [], "commit": None,
+                                    "pr": None, "green": False})
+
+    for b in sorted(branches):
+        if b == product.main:
+            continue
+        for iid in id_tokens(b, BRANCH_ID_TOKEN):
+            rec(iid)["branches"].append(b)
+    commits = main_commits(product) if commits is None else commits
+    for sha, subject in commits:  # newest first: the first commit seen per id is the newest
+        for iid in id_tokens(subject):
+            r = rec(iid)
+            r["commit"] = r["commit"] or sha
+    for p in sorted(prs, key=lambda p: p.get("number") or 0):
+        ids = id_tokens(f"{p.get('title') or ''}\n{p.get('body') or ''}")
+        state = p.get("state")
+        sha = (p.get("mergeCommit") or {}).get("oid") if state == "MERGED" else None
+        for iid in ids:
+            if state == "OPEN":
+                rec(iid)["open_prs"].append(p["number"])
+            elif (sha and not (out.get(iid) or {}).get("commit")
+                  and ancestor_of(sha, main_ref, product=product)):
+                r = rec(iid)
+                r["commit"], r["pr"] = sha, p["number"]
+
+    if ci_provider(product) is None:
+        for r in out.values():
+            r["green"] = bool(r["commit"])
+        return out
+    green = ci_green_runs(product) if green is None else green
+    covered = {}
+    for r in out.values():
+        c = r["commit"]
+        if not c:
+            continue
+        if c not in covered:
+            covered[c] = any(ancestor_of(c, g, product=product) for g in green)
+        r["green"] = covered[c]
+    return out
+
+
+def id_state(iid, iev, has_ci=True):
+    """(state, [evidence line]) for an item from its id-token evidence, or (None, []) if none.
+
+    A commit on main naming it → Resolved, Closed once CI is green at or after that commit (or
+    at once without a CI provider); else an open PR naming it → Active; else a branch → Active.
+    """
+    if not iev:
+        return None, []
+    if iev.get("commit"):
+        line = f"commit {iev['commit'][:7]} names {iid}"
+        if iev.get("pr"):
+            line += f" (PR #{iev['pr']})"
+        if iev.get("green"):
+            return "Closed", [line, "CI green on main at or after it" if has_ci else "no CI provider"]
+        return "Resolved", [line]
+    if iev.get("open_prs"):
+        lines = [f"PR #{n} OPEN" for n in iev["open_prs"]]
+        return "Active", lines + [f"branch {b}" for b in iev.get("branches") or []]
+    if iev.get("branches"):
+        return "Active", [f"branch {b}" for b in iev["branches"]]
+    return None, []
 
 
 # A spec filename to look for, not per-product config — no obvious Product field for it.
@@ -619,7 +810,7 @@ HOTFIX_RE = re.compile(r"^(?:hotfix-.+-report|ci-diag-.+)\.md$")
 def migrate_sources(product=None, design_spec_name=None):
     """Raw content `backlog.py migrate` needs beyond discover(): every spec doc on origin/main
     (the design spec's D-row table lives among them), `.sdd-input/decisions.md`, and every
-    hotfix/ci-diag report on origin/main and on cloud/* branches whose PR is not merged. All
+    hotfix/ci-diag report on origin/main and on code/spec/plan branches whose PR is not merged. All
     git/gh access `migrate` needs stays behind this one function, same as `discover()`.
     """
     product = product or env.load_product()
@@ -629,9 +820,11 @@ def migrate_sources(product=None, design_spec_name=None):
     pr_by_head = {}
     for p in prs:
         pr_by_head.setdefault(p.get("headRefName") or "", []).append(p)
+    prefixes = branch_prefixes(product)
+    work = tuple({prefixes[k] for k in ("code", "spec", "plan")})
     open_branches = sorted(
         b for b in branches
-        if b.startswith("cloud/")
+        if b.startswith(work)
         and not any(p.get("state") == "MERGED" for p in pr_by_head.get(b, []))
     )
 
@@ -785,11 +978,14 @@ def blocked_of(blocked_by, state_by_id):
 
 # -------------------------------------------------------------------------------------- cli ----
 def load(fresh=False, product=None, checked_file=None):
-    """discover(), through the 3-minute cache at EVIDENCE_CACHE. Shared by the CLI and by
-    `backlog.py ingest`, so two calls a few seconds apart cost one round-trip to gh/git."""
-    if not fresh and os.path.exists(EVIDENCE_CACHE):
-        if time.time() - os.path.getmtime(EVIDENCE_CACHE) < EVIDENCE_TTL:
-            with open(EVIDENCE_CACHE) as f:
+    """discover(), through the 3-minute cache at EVIDENCE_CACHE (one file per product). Shared by
+    the CLI and by `backlog.py ingest`, so two calls a few seconds apart cost one round-trip to
+    gh/git — the main-branch commit log and the CI green runs included."""
+    product = product or env.load_product()
+    cache = _cache_file(EVIDENCE_CACHE, product)
+    if not fresh and os.path.exists(cache):
+        if time.time() - os.path.getmtime(cache) < EVIDENCE_TTL:
+            with open(cache) as f:
                 data = json.load(f)
             data["checked"] = set(data["checked"])
             return data
@@ -797,9 +993,9 @@ def load(fresh=False, product=None, checked_file=None):
     data = discover(product=product, checked_file=checked_file)
     text = json.dumps({**data, "checked": sorted(data["checked"])}, indent=2, sort_keys=True) + "\n"
     try:
-        with open(EVIDENCE_CACHE + f".{os.getpid()}", "w") as f:
+        with open(cache + f".{os.getpid()}", "w") as f:
             f.write(text)
-        os.replace(EVIDENCE_CACHE + f".{os.getpid()}", EVIDENCE_CACHE)
+        os.replace(cache + f".{os.getpid()}", cache)
     except Exception:
         pass
     return data

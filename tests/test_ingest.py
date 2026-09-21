@@ -261,6 +261,29 @@ class CmdIngestEndToEndTests(unittest.TestCase):
         with mock.patch.object(ingest.evidence, 'load', return_value=ev):
             return ingest.cmd_ingest(types.SimpleNamespace(fresh=False), self.root)
 
+    def test_id_token_fills_an_unmatched_task(self):
+        write(self.root, 'T-0002', 'task', 'Wire it', 'tasks')
+        ev = dict(EMPTY_EV, ids={'T-0002': {'branches': ['worker/T-0002-wire'], 'open_prs': [],
+                                            'commit': None, 'pr': None, 'green': False}})
+        self.assertEqual(self.run_ingest(ev), 0)
+        meta, _body = read_meta(self.root, 'tasks', 'T-0002')
+        self.assertEqual(meta['state'], 'Active')
+        self.assertEqual(meta['evidence'], ['branch worker/T-0002-wire'])
+
+    def test_id_token_never_overrides_a_legacy_match(self):
+        write(self.root, 'T-0001', 'task', 'Wire it', 'tasks', typed_lines=['legacy_id: FREE-1/T3'])
+        ev = dict(EMPTY_EV, features={'free-plan': {
+            'alias': 'FREE-1', 'spec': None, 'spec_branch': None, 'plan': None,
+            'plan_branch': None, 'prs': [],
+            'tasks': {'T3': {'branch': None, 'pr': None, 'pr_state': None, 'review': None,
+                             'merged_sha': None, 'landed_no_branch': False}},
+        }}, ids={'T-0001': {'branches': [], 'open_prs': [], 'commit': 'abcdef0123',
+                            'pr': None, 'green': True}}, ci=None)
+        self.assertEqual(self.run_ingest(ev), 0)
+        meta, _body = read_meta(self.root, 'tasks', 'T-0001')
+        self.assertEqual(meta['state'], 'New')
+        self.assertEqual(meta['evidence'], ['in plan free-plan (T3), no branch yet'])
+
     def test_unmatched_feature_gets_no_evidence_line(self):
         write(self.root, 'E-0001', 'epic', 'Factory', 'epics')
         write(self.root, 'F-0001', 'feature', 'Free plan', 'features', parent='E-0001')

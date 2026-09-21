@@ -8,12 +8,14 @@ change. Decisions and Rules have no lifecycle, so ingest never touches them.
 import re
 import sys
 
+from asf import env
 from asf.evidence import evidence
 from asf.record import frontmatter
 from asf.record.core import canonicalize, load_items, now_iso, parse_sections, render_sections, section_content, today
 from asf.record.index import do_index
 
 EVIDENCE_TYPES = {'epic', 'feature', 'story', 'task', 'bug'}
+LANDING_CHILD_TYPES = {'story', 'task', 'bug'}
 MACHINE_KEY_ORDER = ['state', 'stage', 'stage_since', 'cost', 'evidence', 'blocked',
                      'blocked_by_open', 'updated']
 
@@ -139,6 +141,14 @@ def match_bug(meta, ev):
     return {'has_fixer': has_fixer, 'merged_sha': merged_sha}
 
 
+def match_ids(iid, ev):
+    """(state, [evidence line]) from the id tokens naming `iid` in a branch, a PR or a commit on
+    main — `(None, [])` when nothing names it. Only ever fills what the legacy-id and spec-path
+    matching left unmatched; it never overrides a match."""
+    iev = (ev.get('ids') or {}).get(iid)
+    return evidence.id_state(iid, iev, has_ci=bool(ev.get('ci')))
+
+
 def _section_lines(content):
     """The `- ...` lines inside a section's raw content, as section_content() would round-trip."""
     return [l for l in content.split('\n') if l.strip() != '']
@@ -203,7 +213,9 @@ def _ingest_fields(machine, new_state, stage, ev_lines, blocked_pair, now):
 
 
 def cmd_ingest(args, root):
-    ev = evidence.load(fresh=getattr(args, 'fresh', False))
+    name = getattr(args, 'product', None)
+    ev = evidence.load(fresh=getattr(args, 'fresh', False),
+                       product=env.load_product(name) if name else None)
     by_id, parse_errors = load_items(root)
     if parse_errors:
         for f, line, why in parse_errors:
@@ -229,7 +241,10 @@ def cmd_ingest(args, root):
         slug, tid, tev = match_task(rec['meta'], ev)
         task_ev[iid] = tev
         if tev is None:
-            ev_lines[iid] = [f"no evidence found ({date})"]
+            state, lines = match_ids(iid, ev)
+            if state:
+                new_state[iid] = state
+            ev_lines[iid] = lines or [f"no evidence found ({date})"]
             continue
         new_state[iid] = evidence.task_state(True, tev.get('branch'), tev.get('pr_state'),
                                              tev.get('merged_sha'))
@@ -259,7 +274,10 @@ def cmd_ingest(args, root):
             continue
         legacy, sev = match_story(rec['meta'], ev)
         if sev is None:
-            ev_lines[iid] = [f"no evidence found ({date})"]
+            state, lines = match_ids(iid, ev)
+            if state:
+                new_state[iid] = state
+            ev_lines[iid] = lines or [f"no evidence found ({date})"]
             continue
         any_active = story_any_active.get(iid, False)
         new_state[iid] = evidence.story_state(any_active, sev['status'])
@@ -273,8 +291,14 @@ def cmd_ingest(args, root):
         if rec['meta'].get('type') != 'bug':
             continue
         bev = match_bug(rec['meta'], ev)
-        if bev is None:
-            ev_lines[iid] = [f"no evidence found ({date})"]
+        if bev is None or not (bev['has_fixer'] or bev['merged_sha']):
+            # no link, or links that show nothing: the item's own id is the evidence left
+            state, lines = match_ids(iid, ev)
+            if state:
+                new_state[iid] = state
+            elif bev is not None:
+                new_state[iid] = evidence.bug_state(False, None, False)
+            ev_lines[iid] = lines or [f"no evidence found ({date})"]
             continue
         merged_in_prod = bool(bev['merged_sha']) and evidence.ancestor_of(bev['merged_sha'], ev.get('prod_sha'))
         new_state[iid] = evidence.bug_state(bev['has_fixer'], bev['merged_sha'], merged_in_prod)
@@ -292,10 +316,25 @@ def cmd_ingest(args, root):
             continue
         slug, fev = match_feature(rec['meta'], ev)
         if fev is None:
+            # no spec/plan/legacy match: its children and its own id tokens are what is left.
+            # All of its Stories/Tasks/Bugs Closed, or a commit on main naming it → landed.
+            kids = [new_state.get(cid) for cid, crec in canonical.items()
+                    if crec['meta'].get('parent') == iid
+                    and crec['meta'].get('type') in LANDING_CHILD_TYPES]
+            kids_closed = bool(kids) and all(s == 'Closed' for s in kids)
+            state, lines = match_ids(iid, ev)
+            named = bool(((ev.get('ids') or {}).get(iid) or {}).get('commit'))
+            if kids_closed or named:
+                new_state[iid] = 'Resolved'
+                stage_val[iid] = 'landed'
+                lines = (lines if named else []) + (
+                    [f"{len(kids)}/{len(kids)} children Closed"] if kids_closed else [])
+                ev_lines[iid] = lines
+                continue
             # a Feature nothing in the product repo knows yet IS a card — an empty stage would
             # make a decided card invisible to the CARD → SPEC feeder row that reads this stage.
-            ev_lines[iid] = [f"no evidence found ({date})"]
-            new_state[iid] = 'New'
+            ev_lines[iid] = lines or [f"no evidence found ({date})"]
+            new_state[iid] = state or 'New'
             stage_val[iid] = 'card'
             continue
         child_ids = [cid for cid, crec in canonical.items()
