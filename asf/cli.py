@@ -138,7 +138,30 @@ def build_parser():
     return p
 
 
+def needs_operator_line(err, product=None):
+    return f"NEEDS OPERATOR: {err} — edit the file or run asf init --product {product or '<p>'}"
+
+
+def _product_of(argv):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    for i, a in enumerate(argv):
+        if a == '--product' and i + 1 < len(argv):
+            return argv[i + 1]
+        if a.startswith('--product='):
+            return a.split('=', 1)[1]
+    return None
+
+
 def main(argv=None):
+    from asf import env
+    try:
+        return _main(argv)
+    except env.ConfigError as e:
+        print(needs_operator_line(e, _product_of(argv)))
+        return 2
+
+
+def _main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     root = os.getcwd()

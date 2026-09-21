@@ -212,6 +212,20 @@ def cmd_tick(args, root=None):
         return 2
 
     ctx = Context(product, fresh=fresh)
+    try:
+        return _run_steps(args, product, ctx, rows)
+    except env.ConfigError as e:
+        from asf.cli import needs_operator_line
+        line = needs_operator_line(e, product.name)
+        print(line)
+        try:
+            ctx.event('needs-operator', message=line)
+        except (subprocess.CalledProcessError, OSError, env.ConfigError):
+            pass
+        return 2
+
+
+def _run_steps(args, product, ctx, rows):
     rc = 0
     ran = []
     for step, owner, command in rows:
