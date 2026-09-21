@@ -1,8 +1,8 @@
 """asf.views.roadmap — the ``ROADMAP`` table (``asf roadmap``): one row per Epic.
 
-Ported from the operator's Epic-table script's index-backed path (its pre-index ``goals.txt``
-path is not ported: the index has carried every Epic since the record model landed, so there is
-no scan fallback to keep).
+Read off the record's ``index.json`` only: every Epic is a card there. A product that keeps its
+goals in a file of its own brings them in once with ``asf migrate`` (``conventions.goals_file``);
+the roadmap never reads the product repo for them.
 """
 from asf.views import index_reader as ix
 from asf.views.pr_annotate import annotator, pr_states, table

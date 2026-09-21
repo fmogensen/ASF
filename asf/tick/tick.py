@@ -90,7 +90,7 @@ def render_tables(root, product):
         'backlog': board.render(root, product),
         'parity': parity.render(root),
         'prod': prod.render(root, product),
-        'sessions': sessions.render(root),
+        'sessions': sessions.render(root, product),
         'status': status.render(root, product),
     }
 

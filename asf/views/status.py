@@ -1,15 +1,26 @@
 """asf.views.status — the ``FACTORY STATUS`` table (``asf status``).
 
-A reduced port. The operator's original script's rows split into two kinds: product/CI state
-(Runners, Batches in CI, Merged today) — derivable from ``Product.ci``/``repo_slug`` — and
-operator-fleet state (Agents, Ready to launch, Quota, Cron) that reads the launcher's own
-ledgers (the in-flight job ledger, the next-work cache, the quota probe, the cron log). Only the
-first kind is ported here; the second has no product-config home
-yet — see ``asf shadow-diff`` for the one-line note.
+Every row is filled from what exists, or says which key would fill it —
+``— (not configured: <key>)`` — never a bare ``—``:
+
+* **Runners** — the CI provider's runner pool (``ci.runner_org``, read with ``gh``);
+* **Prod** — how far ``main`` is ahead of the last successful ``ci.deploy_workflow`` run;
+* **Agents** — the workers' session registry, ``~/.ASF/state/<product>/sessions.jsonl``;
+* **Ready to launch** — what ``asf next --json`` would print (the feeder over the record's
+  ``index.json``, less the sessions in flight);
+* **Quota 5h/7d** — each account through the quota source (``worker_pool.quota_command``);
+* **Cron** — the scheduler adapter's ``status()`` of this product's loaded jobs.
 """
 import datetime
 import json
+import os
 import subprocess
+
+from asf import env
+
+
+def not_configured(key):
+    return f"— (not configured: {key})"
 
 
 def _sh(cmd, timeout=30):
@@ -20,60 +31,136 @@ def _sh(cmd, timeout=30):
         return ''
 
 
-def _runner_counts(product):
-    org = (product.ci or {}).get('runner_org')
+def _ci(product):
+    return product.ci if isinstance(product.ci, dict) else {'provider': product.ci}
+
+
+def runners_cell(product):
+    ci = _ci(product)
+    if str(ci.get('provider')).lower() == 'none':
+        return not_configured('ci.provider (none)')
+    org = ci.get('runner_org')
     if not org:
-        return None
+        return not_configured('ci.runner_org')
     out = _sh(['gh', 'api', f'/orgs/{org}/actions/runners', '--paginate', '-q',
                '.runners[] | "\\(.status) \\(.busy)"'])
-    lines = [l for l in out.splitlines() if l]
-    on = sum(1 for l in lines if l.startswith('online'))
-    busy = sum(1 for l in lines if l.startswith('online true'))
+    lines = [ln for ln in out.splitlines() if ln]
+    if not lines:
+        return f"? (no runners readable for {org})"
+    on = sum(1 for ln in lines if ln.startswith('online'))
+    busy = sum(1 for ln in lines if ln.startswith('online true'))
     off = len(lines) - on
-    return on, busy, off
+    return f"{on} online, {busy} busy, {on - busy} idle" + (f", {off} offline" if off else "")
 
 
-def render(root, product):
+def prod_cell(product):
+    workflow = _ci(product).get('deploy_workflow')
+    if not workflow:
+        return not_configured('ci.deploy_workflow')
+    if not product.repo_slug or not product.repo_dir:
+        return not_configured('repo_slug')
+    out_j = _sh(['gh', 'run', 'list', '-R', product.repo_slug, '--workflow', workflow,
+                 '--limit', '8', '--json', 'headSha,conclusion,updatedAt'])
+    try:
+        runs = json.loads(out_j) if out_j else []
+    except json.JSONDecodeError:
+        runs = []
+    prod_sha = next((r.get('headSha', '') for r in runs if r.get('conclusion') == 'success'), '')
+    if not prod_sha:
+        return f"? (no successful {workflow} run readable)"
+    behind = _sh(['git', '-C', product.repo_dir, 'rev-list', '--count',
+                  f'{prod_sha}..origin/{product.main}']) or '?'
+    return f"{product.main} is {behind} commits ahead of prod `{prod_sha[:9]}`"
+
+
+def agents_cell(product):
+    from asf.views import sessions
+    working, dead = sessions.live_rows(product)
+    if not working and not dead and not os.path.exists(_sessions_path(product)):
+        return "0 (no session registry yet — nothing launched)"
+    return f"{len(working)} working" + (f", {len(dead)} dead" if dead else "")
+
+
+def _sessions_path(product):
+    from asf.workers import pool as pool_mod
+    return pool_mod.sessions_path(product)
+
+
+def ready_cell(root, product):
+    """``asf next --json``'s rows: how many would launch, and the first of them."""
+    from asf.feeder import rows as feeder_rows
+    from asf.tick.step_wave import capacity, inflight
+    from asf.views import index_reader as ix
+    if not root or not os.path.exists(os.path.join(root, 'index.json')):
+        return not_configured('backlog_dir (no index.json)')
+    items, _generated = ix.load(root)
+    rows = feeder_rows.plan_rows(items, product, inflight(product), capacity())
+    launching = [r for r in rows if r.launches]
+    if not launching:
+        return f"0 ({len(rows)} row(s) waiting)" if rows else "0"
+    first = launching[0]
+    return f"{len(launching)} — first: {first.kind} {first.item_id}"
+
+
+def quota_cell(cfg):
+    from asf.workers import pool as pool_mod
+    from asf.workers import quota as quota_mod
+    if not ((cfg.get('worker_pool') or {}).get('quota_command')):
+        return not_configured('worker_pool.quota_command')
+    accounts = pool_mod.accounts_from_config(cfg)
+    if not accounts:
+        return not_configured('worker_pool.accounts')
+    source = quota_mod.source_from_config(cfg)
+    parts = []
+    for a in accounts:
+        try:
+            u = source.read(a) or {}
+        except Exception:  # noqa: BLE001 — an unreadable account is shown, not raised
+            u = {}
+        five, seven = u.get('five_h_pct'), u.get('seven_d_pct')
+        parts.append(f"{a.name} {five if five is not None else '?'}%/"
+                     f"{seven if seven is not None else '?'}%")
+    return ', '.join(parts)
+
+
+def cron_cell(cfg, product):
+    from asf import scheduler
+    kind = scheduler.kind(cfg)
+    if kind != 'launchd':
+        return not_configured(f'scheduler.kind ({kind} has no status adapter)')
+    mine = [j for j in scheduler.loaded_jobs(cfg=cfg)
+            if f'.{product.name}.' in j.get('label', '')]
+    if not mine:
+        return f"no job loaded for {product.name} — `asf scheduler install --product {product.name}`"
+    parts = []
+    for job in sorted(mine, key=lambda j: j['label']):
+        info = scheduler.status(job['label'])
+        exit_text = 'never exited' if info.get('never_exited') else f"exit {info.get('last_exit')}"
+        parts.append(f"{job['label']} {info.get('state') or '?'} ({exit_text})")
+    return '; '.join(parts)
+
+
+def render(root, product, cfg=None):
+    cfg = env.load_config() if cfg is None else cfg
     now = datetime.datetime.now().strftime('%H:%M')
     out = [f"**FACTORY STATUS {now}**", ""]
     out.append("| Metric | Now |")
     out.append("|---|---|")
-    counts = _runner_counts(product)
-    if counts:
-        on, busy, off = counts
-        out.append(f"| Runners | {on} online, {busy} busy, {on - busy} idle"
-                    + (f", {off} offline" if off else "") + " |")
-    else:
-        out.append("| Runners | — (no `ci.runner_org` in product config) |")
-
-    repo_dir = product.repo_dir
-    workflow = (product.ci or {}).get('deploy_workflow')
-    prod_sha = ''
-    if repo_dir and workflow and product.repo_slug:
-        out_j = _sh(['gh', 'run', 'list', '-R', product.repo_slug, '--workflow', workflow,
-                     '--limit', '8', '--json', 'headSha,conclusion,updatedAt'])
+    for name, cell in (('Runners', lambda: runners_cell(product)),
+                       ('Prod', lambda: prod_cell(product)),
+                       ('Agents', lambda: agents_cell(product)),
+                       ('Ready to launch', lambda: ready_cell(root, product)),
+                       ('Quota 5h/7d', lambda: quota_cell(cfg)),
+                       ('Cron', lambda: cron_cell(cfg, product))):
         try:
-            runs = json.loads(out_j) if out_j else []
-        except json.JSONDecodeError:
-            runs = []
-        for r in runs:
-            if r.get('conclusion') == 'success':
-                prod_sha = r.get('headSha', '')
-                break
-    behind = '?'
-    if prod_sha and repo_dir:
-        behind = _sh(['git', '-C', repo_dir, 'rev-list', '--count', f'{prod_sha}..origin/main']) or '?'
-    out.append(f"| Merged today | — (needs the runner log's per-day boundary; not product config) "
-               f"· main is {behind} commits ahead of prod `{prod_sha[:9] if prod_sha else '?'}` |")
-    out.append("| Agents | — (operator launch ledger, no product-config home yet) |")
-    out.append("| Ready to launch | — (see `asf next-work`) |")
-    out.append("| Quota 5h/7d | — (operator-wide account state, no product-config home yet) |")
-    out.append("| Cron | — (operator scheduler state, no product-config home yet) |")
+            text = cell()
+        except Exception as e:  # noqa: BLE001 — one unreadable row never loses the table
+            text = f"? ({type(e).__name__}: {e})"
+        out.append(f"| {name} | {text} |")
     return "\n".join(out) + "\n"
 
 
 def cmd_status(args, root):
-    from asf import env
     product = env.load_product(getattr(args, 'product', None))
     print(render(root, product), end='')
     return 0

@@ -1,14 +1,14 @@
 """asf.views.sessions — the ``SESSIONS`` table (``asf sessions``).
 
-Only the "Ended" group is ported: it is the one group the operator's original script itself
-sourced from the product's own backlog (``metrics/sessions/<day>.jsonl``, written by
-``asf metrics backfill``) rather than from operator machinery. "Working"/"Dead" need a live
-session registry — heartbeat git refs in the product repo, ``~/.claude/factory.db``, the launch
-ledger under ``~/.claude-workers/launch/`` — none of which is a product config field today; that
-is a genuine gap, not a bug, and is called out by name in ``asf shadow-diff``.
+Three groups:
+
+* **Working** — a session in the workers' registry (``~/.ASF/state/<product>/sessions.jsonl``) with
+  no ``ended`` whose pid is still alive;
+* **Dead** — the same, but its pid is gone (the tick's ``health`` step will reconcile it);
+* **Ended** — ``metrics/sessions/<day>.jsonl`` in the record for yesterday and today (written by
+  ``asf metrics backfill``).
 """
 import datetime
-import glob
 import json
 import os
 
@@ -37,25 +37,71 @@ def _ended_rows(root):
     return rows
 
 
-def render(root):
-    rows = _ended_rows(root)
-    out = [f"**SESSIONS** — {len(rows)} ended (from metrics/sessions/*.jsonl; "
-           f"Working/Dead need a live session registry — not yet in product config, see "
-           f"`asf shadow-diff`)"]
-    out.append("")
-    if not rows:
+def pid_alive(pid):
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # alive, someone else's
+    except OSError:
+        return False
+    return True
+
+
+def live_rows(product, alive=pid_alive):
+    """(working, dead): the registry's sessions with no ``ended``, split on whether the pid lives."""
+    if product is None:
+        return [], []
+    from asf.workers import pool as pool_mod
+    working, dead = [], []
+    for s in pool_mod.live_sessions(product):
+        (working if alive(s.get('pid')) else dead).append(s)
+    return working, dead
+
+
+LIVE_COLUMNS = ('job', 'item', 'kind', 'account', 'model', 'branch', 'started')
+
+
+def _table(rows, columns, header):
+    out = [f"| {' | '.join(header)} |", '|' + '---|' * len(header)]
+    for r in rows:
+        out.append("| " + " | ".join(str(r.get(k, '—') or '—') for k in columns) + " |")
+    return out
+
+
+def render(root, product=None, alive=pid_alive):
+    ended = _ended_rows(root)
+    working, dead = live_rows(product, alive)
+    out = [f"**SESSIONS** — {len(working)} working · {len(dead)} dead · {len(ended)} ended", ""]
+    header = ('Job', 'Item', 'Kind', 'Account', 'Model', 'Branch', 'Started')
+    for name, rows in (('Working', working), ('Dead', dead)):
+        if not rows:
+            out.append(f"{name}: none")
+            out.append("")
+            continue
+        out.append(f"**{name}**")
+        out.append("")
+        out.extend(_table(rows, LIVE_COLUMNS, header))
+        out.append("")
+    if not ended:
         out.append("Ended: none")
         return "\n".join(out) + "\n"
     out.append("**Ended**")
     out.append("")
-    out.append("| Task | Item | Kind | Account | Model | Result |")
-    out.append("|---|---|---|---|---|---|")
-    for r in rows:
-        out.append("| " + " | ".join(str(r.get(k, '—') or '—') for k in
-                    ('id', 'item', 'kind', 'account', 'model', 'result')) + " |")
+    out.extend(_table(ended, ('id', 'item', 'kind', 'account', 'model', 'result'),
+                      ('Task', 'Item', 'Kind', 'Account', 'Model', 'Result')))
     return "\n".join(out) + "\n"
 
 
 def cmd_sessions(args, root):
-    print(render(root), end='')
+    from asf import env
+    product = env.load_product(getattr(args, 'product', None))
+    print(render(root, product), end='')
     return 0

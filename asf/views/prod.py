@@ -4,8 +4,8 @@ A reduced port of the operator's tick closing block's ENV line + "ON PROD" secti
 of that block that are pure deploy state (:mod:`asf.env`'s ``Product.deploy_sha``/
 ``customer_paths`` conventions carry exactly the discovery rules the original script had
 hardcoded). The rest of that block (ON DEV, NEXT, WORKING NOW, SPAWNING, QUOTA, CI POOL) is
-operator fleet/launcher state with no product-config home yet — see ``asf shadow-diff`` for the
-one-line note on what that leaves out.
+``asf next``, ``asf sessions`` and ``asf status``. A product with ``deploy_sha: none`` gets one
+line: ``no deploy configured``.
 """
 import json
 import re
@@ -30,9 +30,17 @@ def _gh_json(args, repo_slug, timeout=60):
         return []
 
 
+def deploy_configured(product):
+    """False for ``deploy_sha: none`` (or no ``deploy_sha`` at all): nothing is deployed."""
+    d = product.deploy_sha
+    return isinstance(d, dict) and bool(d)
+
+
 def _deploy_sha(product, kind):
     """(sha, iso_time) for a ``deploy_sha.<kind>`` rule from the product config, or (None, None)."""
-    cfg = (product.deploy_sha or {}).get(kind) or {}
+    if not deploy_configured(product):
+        return None, None
+    cfg = product.deploy_sha.get(kind) or {}
     source = cfg.get('source')
     if source == 'github-deployments':
         workflow = cfg.get('workflow')
@@ -88,7 +96,10 @@ def _is_customer(paths, non_customer_hint, changed_files):
 
 def render(root, product):
     repo_dir = product.repo_dir
-    main_sha = _sh(['git', 'rev-parse', '--short=9', 'origin/main'], cwd=repo_dir) or '?'
+    main_sha = _sh(['git', 'rev-parse', '--short=9', f'origin/{product.main}'], cwd=repo_dir) or '?'
+    if not deploy_configured(product):
+        return (f"**PROD** no deploy configured (`deploy_sha: none`) · **{product.main}** "
+                f"`{main_sha}`\n")
     prod_sha, prod_ts = _deploy_sha(product, 'prod')
     dev_sha, dev_ts = _deploy_sha(product, 'dev')
     site_sha, site_ts = _deploy_sha(product, 'site')
@@ -98,7 +109,7 @@ def render(root, product):
 
     out = [f"**Prod app** `{short(prod_sha)}` {_local(prod_ts)} · "
            f"**Dev app** `{short(dev_sha)}` {_local(dev_ts)} · "
-           f"**Site** `{short(site_sha)}` {_local(site_ts)} · **main** `{main_sha}`"]
+           f"**Site** `{short(site_sha)}` {_local(site_ts)} · **{product.main}** `{main_sha}`"]
     out.append("")
     out.append("**ON PROD — check these**")
     out.append("")
