@@ -95,17 +95,14 @@ class Conventions:
 
     @classmethod
     def from_mapping(cls, data):
-        """A ``conventions:`` mapping → a Conventions. Extra keys are kept, not rejected;
-        ``branch_prefixes`` is merged over the defaults, so a product that renames only its
-        code branch still has a prefix for a spec."""
+        """A ``conventions:`` mapping → a Conventions. Extra keys are kept, not rejected.
+
+        ``branch_prefixes`` is taken as the product wrote it — it stays readable as the mapping
+        the yaml carried (a brief prints it; a PR step iterates it) — and a kind the product
+        does not name falls back to the default in :meth:`prefix`, not here."""
         data = dict(data or {})
         known = set(cls.field_names())
         kwargs = {}
-        prefixes = dict(DEFAULT_BRANCH_PREFIXES)
-        given = data.pop('branch_prefixes', None)
-        if isinstance(given, dict):
-            prefixes.update(given)
-        kwargs['branch_prefixes'] = prefixes
         for key in list(data):
             if key in known:
                 value = data.pop(key)
@@ -116,8 +113,9 @@ class Conventions:
     # ---- branches ------------------------------------------------------------
 
     def prefix(self, kind):
-        """The branch prefix for a job kind, ``<kind>/`` when the product names none."""
-        value = self.branch_prefixes.get(kind)
+        """The branch prefix for a job kind: the product's, else the documented default for
+        that kind, else ``<kind>/``."""
+        value = self.branch_prefixes.get(kind, DEFAULT_BRANCH_PREFIXES.get(kind))
         if isinstance(value, (list, tuple)) or not value:
             return _normalise_prefix(kind)
         return _normalise_prefix(value)
