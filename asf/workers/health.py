@@ -83,7 +83,8 @@ def health(product, fix=False, alive=pid_alive, out=print):
             continue
         rec = runtime_mod.read_result(s.get('log'))
         if rec is not None:
-            reason = 'finished' if runtime_mod.result_ok(rec) else 'failed'
+            sig = runtime_mod.failure_reason(rec)
+            reason = 'finished' if runtime_mod.result_ok(rec) else f'failed: {sig}' if sig else 'failed'
         elif not alive(s.get('pid')):
             reason = 'dead pid'
         else:

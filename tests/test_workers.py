@@ -64,7 +64,8 @@ class Home(unittest.TestCase):
         self.product = env.Product('sample', {'repo_dir': self.repo, 'main': 'main',
                                               'job_grants': [self.grant],
                                               'stage_limits': {'silent_min': 30}})
-        self.cfg = {'worker_pool': {'accounts': [{'name': 'acct-a', 'role': 'local', 'cap': 2}]}}
+        self.cfg = {'worker_pool': {'accounts': [{'name': 'acct-a', 'role': 'local', 'cap': 2}],
+                                    'models': {'Opus': 'opus'}}}
 
     def tearDown(self):
         env.ASF_HOME = self._home
@@ -276,6 +277,26 @@ class TestSpawn(Home):
         spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b', runtime=rt, cfg=self.cfg)
         with self.assertRaises(spawn_mod.SpawnError):
             spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b', runtime=rt, cfg=self.cfg)
+
+    def test_b0024_unmapped_model_label_spawns_nothing(self):
+        cfg = {'worker_pool': {'accounts': [{'name': 'acct-a', 'role': 'local', 'cap': 2}]}}
+        rt = runtime_mod.FakeRuntime([{'running': True}])
+        with self.assertRaises(spawn_mod.SpawnError) as cm:
+            spawn_mod.spawn(self.product, s1_row(), self.acct(), 'b', runtime=rt, cfg=cfg)
+        self.assertEqual(str(cm.exception), 'NEEDS OPERATOR: worker_pool.models has no entry '
+                                            'for Opus — add it to config.yaml')
+        self.assertEqual(rt.calls, [])
+        self.assertFalse(os.path.exists(os.path.join(env.ASF_HOME, 'state', 'sample',
+                                                     'worktrees', 'fix-b-0001')))
+
+    def test_b0024_result_with_model_error_is_not_ok(self):
+        log = os.path.join(self.tmp, 'r.jsonl')
+        rec = {'type': 'result', 'subtype': 'success', 'is_error': False,
+               'result': 'There is an issue with the selected model (light)'}
+        with open(log, 'w') as f:
+            f.write(json.dumps(rec) + '\n')
+        self.assertFalse(runtime_mod.result_ok(runtime_mod.read_result(log)))
+        self.assertEqual(runtime_mod.failure_reason(rec), 'unknown model')
 
 
 class TestWave(Home):

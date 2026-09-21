@@ -44,7 +44,7 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
                 try:
                     rec = spawn_fn(product, row, acct, brief_fn(row), runtime=runtime, cfg=cfg)
                 except spawn_mod.SpawnError as e:
-                    reason = f'spawn failed: {e}'
+                    reason = str(e) if str(e).startswith('NEEDS OPERATOR') else f'spawn failed: {e}'
                 else:
                     pool.take(acct, rec.get('model'), row.job)
                     running.add(row.job)
