@@ -1,9 +1,10 @@
 """asf.tick.step_daily — the tick's once-a-day step, in the record clone.
 
 ``groom --apply`` (yesterday's answers applied, the inbox filed, today's ``groom/<day>.md``),
-``stale``, ``file-bugs``, ``rollup`` for yesterday with its releases; then the record clone is
-committed and pushed. One line per part: ``daily: <part> ok|FAILED — <its last line>``. A part
-that fails does not stop the others; the step fails (and the day is not stamped) when any did.
+``stale``, ``file-bugs``, ``rollup`` for yesterday with its releases, written into the record
+clone — the tick's one commit (:func:`asf.tick.tick.finish`) carries them with the rest of the
+tick. One line per part: ``daily: <part> ok|FAILED — <its last line>``. A part that fails does
+not stop the others; the step fails (and the day is not stamped) when any did.
 Whether it is due today is the tick's stamp (:func:`asf.tick.steps.daily_due`).
 """
 import argparse
@@ -51,7 +52,6 @@ def run_part(thunk):
 
 
 def run(ctx, out=print):
-    from asf.tick import shadow
     product = ctx.product
     root = ctx.record_root()
     failed = []
@@ -60,14 +60,6 @@ def run(ctx, out=print):
         if rc:
             failed.append(name)
         out(f"daily: {name} {'FAILED' if rc else 'ok'}" + (f' — {last}' if last else ''))
-    day = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
-    if not shadow.commit_local(root, f'tick: daily {day}'):
-        out('daily: record unchanged')
-    elif shadow.push(root):
-        out('daily: record committed and pushed')
-    else:
-        out('daily: record committed, push refused — re-derived next run')
-        failed.append('push')
     if failed:
         raise RuntimeError(f"daily parts failed: {', '.join(failed)}")
     return 0

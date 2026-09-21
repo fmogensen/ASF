@@ -2,7 +2,7 @@
 ``record → health → wave → prs → batch → daily``.
 
 ``record`` is step 0: metrics backfill → ingest → file-bugs → rollup → index, run in the tick's
-own clone of the product's backlog (:mod:`asf.tick.shadow`), committed and pushed to origin.
+own clone of the product's backlog (:mod:`asf.tick.shadow`).
 ``health``, ``wave``, ``prs`` and ``daily`` are :mod:`asf.tick.step_health`, ``step_wave``,
 ``step_prs`` and ``step_daily``; ``batch`` is a command the product declares (or ``off``), as is
 any step a product chooses to run with its own command.
@@ -12,8 +12,10 @@ the exit code is 1 when any step failed. Every step shares one :class:`Context`,
 clone is made (reset to origin) once per tick however many steps read it. After the steps, one
 line goes to ``metrics/ticks/<day>.jsonl`` in the record clone — the ``ticks`` stream's schema
 (``tick``, ``launches``, ``stalls``, ...) plus ``product`` and ``steps: [{step, ok, seconds}]`` —
-and is committed and pushed. One line per tick, not per step: ``asf metrics rollup`` counts
-the stream's lines as ticks and reads every stream field off each one.
+and only then is the clone committed (``tick: state <ts>``) and pushed: one commit per tick, so
+the derived state, the events the steps appended and the step log land together. One line per
+tick, not per step: ``asf metrics rollup`` counts the stream's lines as ticks and reads every
+stream field off each one.
 
 ``--shadow`` runs step 0 against a shadow clone instead — never pushes, commits locally, never
 runs a command step — then renders the six tables (:mod:`asf.views`) into ``<shadow>/tables/*.md``
@@ -36,9 +38,28 @@ def _ns(**kw):
     return argparse.Namespace(**kw)
 
 
+DEFAULT_CI_WORKFLOW = 'ci'
+
+
+def ci_provider(product):
+    """``ci.provider`` of the product yaml, lowercased; ``none`` (no CI to read) is a value."""
+    ci = product.ci if isinstance(product.ci, dict) else {'provider': product.ci}
+    v = ci.get('provider')
+    return str(v).strip().lower() if v is not None else None
+
+
+def ci_workflow(product):
+    """``ci.workflow``: the name of the CI workflow whose runs the backfill reads (default ``ci``)."""
+    ci = product.ci if isinstance(product.ci, dict) else {}
+    return ci.get('workflow') or DEFAULT_CI_WORKFLOW
+
+
 def run_step0(root, product, fresh=False):
     """metrics backfill → ingest → file-bugs → rollup → index, against ``root``. Returns nothing;
     prints what each step printed, same as running the commands one at a time would.
+
+    The backfill reads CI runs only — sessions come from the workers' own ledger, not from a
+    launcher directory — and a product with ``ci: {provider: none}`` has none to read.
 
     ``asf.record.ingest.cmd_ingest`` calls ``evidence.load()`` with no product (a gap the fuller
     0.1 command surface is meant to close — see ``asf/cli.py``'s module docstring): it falls back
@@ -51,8 +72,9 @@ def run_step0(root, product, fresh=False):
     from asf.record.ingest import cmd_ingest
     from asf.tick.file_bugs import cmd_file_bugs
 
-    cmd_backfill(_ns(days=1, sessions=None, log=None, workflow='ci',
-                     launch_dir=os.path.expanduser('~/.claude-workers/launch'), product=product.name), root)
+    if ci_provider(product) != 'none':
+        cmd_backfill(_ns(days=1, sessions=None, log=None, workflow=ci_workflow(product),
+                         launch_dir=None, product=product.name), root)
     cmd_ingest(_ns(fresh=fresh, product=product.name), root)
     default_bug_epic = product.conventions.get('default_bug_epic')
     cmd_file_bugs(_ns(default_bug_epic=default_bug_epic), root)
@@ -124,23 +146,31 @@ class StepFailed(Exception):
 
 
 def run_record_step(product, fresh=False, ctx=None):
-    """The ``record`` step, live: step 0 in the tick's own clone (``…/state/<product>/record``),
-    committed as the factory identity, pushed to the backlog's origin. Never touches the operator's
-    backlog checkout (B-0013). Returns the exit code: 0 (nothing to push, or pushed), 1 (push
-    refused or the clone could not be made — the clone is derived state, the next run resets it
-    and re-derives)."""
-    from asf.tick import shadow
+    """The ``record`` step, live: step 0 in the tick's own clone (``…/state/<product>/record``).
+    Never touches the operator's backlog checkout (B-0013).
+
+    Inside a tick (``ctx`` given) it only derives: the tick commits once, after its line
+    (:func:`finish`). Called alone it commits (as the factory identity) and pushes itself.
+    Returns the exit code: 0, or 1 when the clone could not be made or step 0 failed (the clone is
+    derived state, the next run resets it and re-derives) — and, alone, when the push was
+    refused."""
+    alone = ctx is None
     ctx = ctx or Context(product, fresh=fresh)
-    path = shadow.record_dir(product)
     try:
-        path = ctx.record_root()
-        run_step0(path, product, fresh=fresh)
-        committed = shadow.commit_local(path, f"tick: state {_stamp()}")
+        run_step0(ctx.record_root(), product, fresh=fresh)
     except (subprocess.CalledProcessError, env.ConfigError) as e:
         detail = (getattr(e, 'stderr', None) or str(e)).strip()
         print(f"tick: record failed ({detail})")
         return 1
-    if not committed:
+    return commit_and_push(ctx) if alone else 0
+
+
+def commit_and_push(ctx):
+    """Commit the record clone as ``tick: state <ts>`` and push it; one line saying which. Returns
+    0 (nothing to commit, or pushed) or 1 (push refused — re-derived next run)."""
+    from asf.tick import shadow
+    path = ctx.record_root()
+    if not shadow.commit_local(path, f"tick: state {_stamp()}"):
         print(f"tick: no change ({path})")
         return 0
     if shadow.push(path):
@@ -202,8 +232,24 @@ def cmd_tick(args, root=None):
             steps.write_daily_stamp(product)
         rc = rc or (1 if step_rc else 0)
     if ran:
-        write_tick_line(ctx, ran)
+        rc = finish(ctx, ran) or rc
     return rc
+
+
+def finish(ctx, ran):
+    """The tick's one commit: the ``metrics/ticks`` line first, then ``tick: state`` over the
+    derived state, the steps' events and that line together. Only when a step made the record
+    clone this tick: a ``--steps`` run of command steps alone does not clone the record to log
+    itself. Returns 1 when the commit or its push failed, else 0 — printed, never raised (the
+    steps already ran)."""
+    if not ctx.has_record:
+        return 0
+    write_tick_line(ctx, ran)
+    try:
+        return commit_and_push(ctx)
+    except (subprocess.CalledProcessError, OSError, env.ConfigError) as e:
+        print(f"tick: state not committed ({(getattr(e, 'stderr', None) or str(e)).strip()})")
+        return 1
 
 
 def _asf_step(step):
@@ -235,12 +281,8 @@ def tick_line(ctx, ran, now=None):
 
 
 def write_tick_line(ctx, ran):
-    """Append the tick line to the record clone and commit + push it. Only when a step already
-    made the clone this tick: a ``--steps`` run of command steps alone does not clone the record
-    to log itself. A failure here is printed, never raised (the steps already ran)."""
-    if not ctx.has_record:
-        return
-    from asf.tick import shadow
+    """Append the tick line to the record clone (:func:`finish` commits it). A failure here is
+    printed, never raised (the steps already ran)."""
     try:
         root = ctx.record_root()
         line = tick_line(ctx, ran)
@@ -248,8 +290,6 @@ def write_tick_line(ctx, ran):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, 'a', encoding='utf-8') as f:
             f.write(json.dumps(line, sort_keys=True, ensure_ascii=False) + '\n')
-        if shadow.commit_local(root, f"tick: steps {line['ts']}") and not shadow.push(root):
-            print(f"tick: step log committed, push refused — re-derived next run ({root})")
     except (subprocess.CalledProcessError, OSError, env.ConfigError) as e:
         print(f"tick: step log not written ({(getattr(e, 'stderr', None) or str(e)).strip()})")
 

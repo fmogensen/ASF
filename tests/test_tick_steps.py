@@ -110,12 +110,18 @@ class OrderedTickTests(StepsTestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(ran, ['health', 'wave', 'prs', 'daily'])
         lines = out.splitlines()
-        self.assertEqual(lines[0], f'tick: state committed and pushed ({self.record_path()})')
-        self.assertEqual(lines[1], '[step:health] FAILED health blew up')
-        self.assertEqual(lines[2], '[command:batch] batch ran')
+        self.assertEqual(lines[0], '[step:health] FAILED health blew up')
+        self.assertEqual(lines[1], '[command:batch] batch ran')
+        self.assertEqual(lines[-1], f'tick: state committed and pushed ({self.record_path()})')
         self.assertEqual(clone.call_count, 1)  # one record clone per tick, however many steps
 
+        # one commit per tick: the derived state and the step log land together
+        self.assertEqual(self.origin_commits(), 3)  # seed, index, this tick
+        self.assertTrue(_git(['log', '-1', '--format=%s', 'main'], self.origin).startswith('tick: state '))
+        files = _git(['show', '--name-only', '--format=', 'main'], self.origin).splitlines()
+        self.assertIn('state/rollup.md', files)
         day = _git(['log', '-1', '--format=%cs', 'main'], self.origin)
+        self.assertIn(f'metrics/ticks/{day}.jsonl', files)
         tick_log = _git(['show', f'main:metrics/ticks/{day}.jsonl'], self.origin)
         line = json.loads(tick_log.splitlines()[-1])
         self.assertEqual([(s['step'], s['ok']) for s in line['steps']],
@@ -338,6 +344,21 @@ class PrsStepTests(StepsTestCase):
         self.assertEqual(self.lines, ['prs: worker/one not opened — no permission'])
         self.assertEqual(self.hygiene, ['sample'])
 
+    def test_no_pr_host_is_one_line_no_gh_no_hygiene(self):
+        with open(env.product_path('sample'), 'w') as f:  # no repo_slug; origin is a local path
+            f.write(f'backlog_dir: {self.operator}\nrepo_dir: {self.repo}\n{self.product_extra}')
+        self.product = env.load_product('sample')
+        self.push_branch('worker/one')
+        self.finished('one', 'worker/one')
+        self.assertEqual(step_prs.run(self.ctx(), out=self.lines.append), 0)
+        self.assertEqual(self.lines, ['prs: no PR host (no repo_slug, origin is not a hosted repo) — '
+                                      '1 finished branch(es) left as they are'])
+        self.assertEqual((self.gh_calls, self.hygiene), ([], []))
+
+    def test_slug_comes_from_a_hosted_origin_when_the_yaml_has_none(self):
+        _git(['remote', 'set-url', 'origin', 'git@example.com:owner/name.git'], self.repo)
+        self.assertEqual(step_prs.repo_slug(env.Product('p', {'repo_dir': self.repo})), 'owner/name')
+
 
 # ---- daily ------------------------------------------------------------------------
 
@@ -357,15 +378,19 @@ class DailyStepTests(StepsTestCase):
             return [(n, make(n)) for n in ('groom', 'stale', 'file-bugs', 'rollup')]
         return mock.patch.object(step_daily, 'parts', parts)
 
-    def test_one_line_per_part_then_commit_and_push(self):
+    def test_one_line_per_part_and_no_commit_of_its_own(self):
+        before = self.origin_commits()
+        ctx = self.ctx()
         with self.fake_parts():
-            step_daily.run(self.ctx(), out=self.lines.append)
+            step_daily.run(ctx, out=self.lines.append)
         self.assertEqual(self.lines, ['daily: groom ok — groom summary', 'daily: stale ok — stale summary',
                                       'daily: file-bugs ok — file-bugs summary',
-                                      'daily: rollup ok — rollup summary',
-                                      'daily: record committed and pushed'])
+                                      'daily: rollup ok — rollup summary'])
+        self.assertTrue(os.path.exists(os.path.join(ctx.record_root(), 'rollup.out')))
+        self.assertEqual(self.origin_commits(), before)  # the tick's one commit carries it
+        self.assertEqual(tick.finish(ctx, [{'step': 'daily', 'ok': True, 'seconds': 0}]), 0)
         self.assertEqual(_git(['show', 'main:rollup.out'], self.origin), 'rollup')
-        self.assertTrue(_git(['log', '-1', '--format=%s', 'main'], self.origin).startswith('tick: daily '))
+        self.assertTrue(_git(['log', '-1', '--format=%s', 'main'], self.origin).startswith('tick: state '))
 
     def test_a_failing_part_does_not_stop_the_others(self):
         with self.fake_parts(fail=('stale',)):

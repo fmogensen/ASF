@@ -259,8 +259,9 @@ class LegacyStepTests(TickTestCase):
     def test_steps_subset_runs_only_those_and_in_manifest_order(self):
         rc, out = self.run_tick(steps='health,record')
         self.assertEqual(rc, 0)
-        self.assertEqual(out.splitlines()[0], f'tick: state committed and pushed ({self.record_path()})')
-        self.assertEqual(out.splitlines()[1], '[command:health] hi')
+        self.assertEqual(out.splitlines()[0], '[command:health] hi')
+        # the one commit comes last: after every step, over the state and the tick line together
+        self.assertEqual(out.splitlines()[-1], f'tick: state committed and pushed ({self.record_path()})')
         self.assertNotIn('daily', out)
 
     def test_off_step_is_reported_not_run(self):

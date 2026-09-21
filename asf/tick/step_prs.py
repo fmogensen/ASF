@@ -9,7 +9,8 @@ The PR: ``gh pr create -R <slug> --base <main> --head <branch>`` (the command ha
 a product repo), titled ``<id> — <title>`` from the item, its body the card's path (a link when
 the record's origin is a hosted repo) and the card's acceptance lines as checkboxes. Then PR
 hygiene runs once (``--close``: the stale, unreviewed, conflicting PRs). Every ``gh`` call goes
-through :func:`_gh`.
+through :func:`_gh`. A product with no PR host — no ``repo_slug`` and an origin that is not a
+hosted repo — gets one line and no ``gh`` call at all.
 """
 import json
 import os
@@ -63,10 +64,14 @@ def remote_heads(repo):
 
 
 def repo_slug(product):
+    """``repo_slug`` from the product yaml, else ``owner/name`` off the repo's origin url; None
+    when the origin is no hosted repo (a local path) — there is no PR host to open PRs on."""
     if product.repo_slug:
         return product.repo_slug
-    from asf.harvest import harvest
-    return harvest.repo_slug(product.repo_dir)
+    if not product.repo_dir:
+        return None
+    from asf.init import slug_from_url
+    return slug_from_url(_git(product.repo_dir, ['remote', 'get-url', 'origin']).strip())
 
 
 def has_open_pr(slug, branch):
@@ -158,7 +163,11 @@ def run(ctx, out=print):
     if todo:
         root = ctx.record_root()
         items, _generated = index_reader.load(root)
-    slug = repo_slug(product) if todo else None
+    slug = repo_slug(product)
+    if not slug:
+        out(f'prs: no PR host (no repo_slug, origin is not a hosted repo) — '
+            f'{len(todo)} finished branch(es) left as they are')
+        return 0
     opened, failed = 0, []
     for branch, s in todo:
         if opened >= cap:
