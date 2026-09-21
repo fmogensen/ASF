@@ -96,7 +96,7 @@ def run(ctx, out=print):
     launched, _waits = _wave(product, worker_rows, len(worker_rows),
                              brief_fn=lambda r: texts[r.job], out=out)
     for wrow, rec in launched:
-        ctx.event('launch', item=wrow.item, job=wrow.job, account=rec.get('account'),
+        ctx.event('launch', item=wrow.item, job=wrow.job,
                   model=rec.get('model'), brief_kind=kinds[wrow.job])
     ctx.counts['launches'] += len(launched)
     return 0

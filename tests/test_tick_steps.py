@@ -251,8 +251,10 @@ class WaveStepTests(StepsTestCase):
         self.assertEqual(self.lines, ['waits    -                        T-0002     — WAITS ON T-0001',
                                       'launched fix-bug-b-0001           B-0001     → acct-a (opus) pid 1'])
         evs = self.events(ctx)
-        self.assertEqual([(e['kind'], e['item'], e['account'], e['model'], e['brief_kind']) for e in evs],
-                         [('launch', 'B-0001', 'acct-a', 'opus', 'fix-bug')])
+        self.assertEqual([(e['kind'], e['item'], e['model'], e['brief_kind']) for e in evs],
+                         [('launch', 'B-0001', 'opus', 'fix-bug')])
+        # the record is public: an event never carries an account name (B-0023)
+        self.assertNotIn('account', evs[0])
         self.assertEqual(ctx.counts['launches'], 1)
 
     def test_unpushed_branch_facts(self):
