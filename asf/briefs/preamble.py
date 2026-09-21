@@ -1,0 +1,386 @@
+"""asf.briefs.preamble — the facts the runner already knows, written down instead of discovered.
+
+The prior-art reading behind this module is blunt: **93 % of a run's cost was the agent
+discovering what the runner already knew** (``docs/research/prior-art-prototype.md``, row 23) —
+twelve million input tokens and ninety-six tool calls for one phase, nearly all of it a session
+reading its way to the card, the spec, the plan and the branch state that the tick had in hand
+before it launched anything. So the preamble is generated, never searched for: the card and its
+parents, the documents and their sizes, the footprint, the tests, the last report, the branch,
+the conventions and the standing rules, as text, at the top of every brief.
+
+Two rules keep it honest:
+
+* **No git, no network.** Anything that can change under the builder — a branch head, whether a
+  branch exists, a file's line count, the last report — arrives in ``repo_facts``, filled by the
+  caller that *does* run git. A fact nobody passed is printed as unknown, never guessed.
+* **Identifiers survive truncation.** Over ``conventions.preamble_max_lines`` (default 120) the
+  description goes first, then the acceptance, then the last report; the ids, paths, branch and
+  footprint are never cut, because a session that loses those goes searching again — which is
+  the cost this module exists to remove.
+"""
+import importlib
+import os
+import re
+
+from asf.feeder import rows as feeder_rows
+from asf.record import frontmatter
+from asf.record.core import parse_sections
+from asf.views import index_reader as ix
+
+DEFAULT_MAX_LINES = 120
+DEFAULT_SPECS_DIR = 'docs/specs'
+DEFAULT_PLANS_DIR = 'docs/plans'
+DEFAULT_REVIEWS_DIR = 'docs/reviews'
+DEFAULT_REVIEW_PATTERN = '{reviews_dir}/{n}-{slug}.md'
+UNKNOWN = '(not known here)'
+NONE = '(none)'
+
+#: The standing rules, when the product yaml sets no ``conventions.rules_tail``. Six lines: the
+#: same six every job in this factory owes, whatever its kind.
+DEFAULT_RULES = """- Commit with `git commit -s`; the sign-off is the record that you did this work.
+- Never push to `{main}`, never force-push, never `--no-verify`, never open a pull request.
+- Push your own branch before your turn ends — after every commit, and once at the end even if
+  nothing changed.
+- Keep a heartbeat: print a progress line as you go; a silent session is read as a dead one and
+  relaunched on top of you.
+- Finish with the typed REPORT below, as the last thing you print.
+- Anything a human must decide or run: `NEEDS OPERATOR: <what> — <the command or the answer>`."""
+
+TEST_RE = re.compile(r'(?:^|[\s`(])((?:[\w./-]*)(?:tests?|spec)[\w./:-]*\.[\w:.-]+|'
+                     r'[\w./-]+::[\w:.-]+)')
+
+
+# ---- product conventions -----------------------------------------------------
+
+def conventions(product):
+    return (getattr(product, 'conventions', None) or {}) if product is not None else {}
+
+
+def max_lines(product):
+    v = conventions(product).get('preamble_max_lines')
+    return v if isinstance(v, int) and v > 0 else DEFAULT_MAX_LINES
+
+
+def rules_block(product, main='main'):
+    """``conventions.rules_tail`` verbatim when set, else the six standing rules."""
+    text = conventions(product).get('rules_tail')
+    text = text if isinstance(text, str) and text.strip() else DEFAULT_RULES
+    return text.replace('{main}', main)
+
+
+def review_path_for(product, slug, n):
+    """Where round ``n`` of a review lives — ``conventions.review_pattern``, ``{n}``/``{slug}``."""
+    conv = conventions(product)
+    pattern = conv.get('review_pattern') or DEFAULT_REVIEW_PATTERN
+    reviews_dir = conv.get('reviews_dir') or DEFAULT_REVIEWS_DIR
+    return (str(pattern).replace('{reviews_dir}', reviews_dir)
+            .replace('{n}', str(n)).replace('{slug}', slug))
+
+
+def doc_path_for(product, key, slug):
+    """A spec/plan path the record does not carry yet: ``<dir>/<slug>.md``."""
+    conv = conventions(product)
+    d = conv.get(f'{key}s_dir') or (DEFAULT_SPECS_DIR if key == 'spec' else DEFAULT_PLANS_DIR)
+    return f'{d}/{slug}.md'
+
+
+# ---- the card on disk --------------------------------------------------------
+
+def card_path(product, item):
+    """``<backlog_dir>/<folder>/<id>.md``, or None when either half is unknown."""
+    root = getattr(product, 'backlog_dir', None) if product is not None else None
+    folder = (item or {}).get('folder')
+    if not root or not folder or not (item or {}).get('id'):
+        return None
+    return os.path.join(root, folder, f"{item['id']}.md")
+
+
+def card_sections(product, item):
+    """``{'description': text, 'acceptance': text, ...}`` off the card file, lowercased headings.
+
+    An unreadable or absent card is not an error: the brief then carries what the index holds.
+    """
+    path = card_path(product, item)
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding='utf-8') as f:
+            _meta, body = frontmatter.parse(f.read(), path=path)
+    except (OSError, frontmatter.FrontmatterError):
+        return {}
+    out = {}
+    _lead, secs = parse_sections(body)
+    for heading, content in secs:
+        out[heading[3:].strip().lower()] = content.strip()
+    return out
+
+
+def section_lines(sections, name, limit_chars=2000):
+    text = (sections.get(name) or '').strip()
+    if not text:
+        return []
+    return [l.rstrip() for l in text[:limit_chars].splitlines() if l.strip()]
+
+
+# ---- facts -------------------------------------------------------------------
+
+def _strip_rev(value):
+    """A link may be recorded as ``<rev>:<path>``; the path is what a session opens."""
+    if isinstance(value, str) and ':' in value and not value.startswith(('http://', 'https://')):
+        return value.rpartition(':')[2]
+    return value if isinstance(value, str) else ''
+
+
+def _links_of(items, item):
+    """The item's own links, with the Feature's spec/plan filled in for a Task or a Story."""
+    links = dict((item or {}).get('links') or {})
+    feature = feeder_rows.feature_of(items, item) if item else None
+    if feature and feature.get('id') != (item or {}).get('id'):
+        for key in ('spec', 'plan'):
+            if not links.get(key) and (feature.get('links') or {}).get(key):
+                links[key] = feature['links'][key]
+    return links
+
+
+def _line_count(repo_facts, path):
+    files = (repo_facts or {}).get('files')
+    if isinstance(files, dict):
+        n = files.get(path)
+        return n if isinstance(n, int) else None
+    return None
+
+
+def named_tests(sections, item, repo_facts):
+    """Every test the card names — its typed ``tests:`` field, the Fix/Acceptance prose, and
+    whatever the caller found in the checkout — once each, in first-seen order."""
+    out = []
+    for v in (item or {}).get('tests') or []:
+        if v and v not in out:
+            out.append(str(v))
+    for name in ('fix', 'acceptance', 'description'):
+        for m in TEST_RE.finditer(sections.get(name) or ''):
+            v = m.group(1).strip('`.,;')
+            if v and v not in out:
+                out.append(v)
+    for v in (repo_facts or {}).get('tests') or []:
+        if v and v not in out:
+            out.append(str(v))
+    return out
+
+
+def stories_of(items, feature):
+    """``S-0001 title`` per Story of the Feature — the ids a spec's ``## Stories`` block and a
+    plan's ``stories:`` lines are checked against."""
+    if not feature:
+        return []
+    return [f"{c['id']} {c.get('title', '')}".rstrip()
+            for c in ix.children(items, feature, 'story')]
+
+
+def kind_of(row):
+    """The row's template kind, or ``''`` when it names none.
+
+    Imported late and by name: :mod:`asf.briefs.build` owns the kind table and imports this
+    module, and the package re-exports its ``build`` function under the submodule's own name.
+    """
+    build_mod = importlib.import_module('asf.briefs.build')
+    try:
+        return build_mod.normalize_kind(getattr(row, 'brief_kind', '')
+                                        or getattr(row, 'kind', ''))
+    except build_mod.BriefError:
+        return ''
+
+
+def collect(product, row, index, inflight=None, repo_facts=None):
+    """Every fact the preamble and the kind templates draw on, as one flat dict."""
+    items = feeder_rows.items_of(index) if index else {}
+    item_id = getattr(row, 'item_id', '') or ''
+    item = items.get(item_id) or {}
+    feature = items.get(getattr(row, 'feature_id', '') or '') or \
+        (feeder_rows.feature_of(items, item) if item else None) or {}
+    epic = (ix.epic_of(items, item) if item else None) or {}
+    sections = card_sections(product, item)
+    links = _links_of(items, item)
+    slug = (item_id or 'item').lower()
+    spec_recorded = bool(_strip_rev(links.get('spec')))
+    plan_recorded = bool(_strip_rev(links.get('plan')))
+    spec_path = _strip_rev(links.get('spec')) or doc_path_for(product, 'spec', slug)
+    plan_path = _strip_rev(links.get('plan')) or doc_path_for(product, 'plan', slug)
+    rnd = feeder_rows.review_round(feature or item)[1]
+    return {
+        'kind': kind_of(row),
+        'items': items,
+        'item': item,
+        'feature': feature,
+        'epic': epic,
+        'sections': sections,
+        'links': links,
+        'spec_path': spec_path,
+        'plan_path': plan_path,
+        'spec_recorded': spec_recorded,
+        'plan_recorded': plan_recorded,
+        'spec_lines': _line_count(repo_facts, spec_path),
+        'plan_lines': _line_count(repo_facts, plan_path),
+        'writes': list(item.get('writes') or []),
+        'tests': named_tests(sections, item, repo_facts),
+        'stories': stories_of(items, feature),
+        'round': rnd,
+        'next_round': rnd + 1 if rnd else 1,
+        'review_path': review_path_for(product, slug, rnd + 1 if rnd else 1),
+        'branch': getattr(row, 'branch', '') or '',
+        'head': (repo_facts or {}).get('head') or '',
+        'branch_exists': (repo_facts or {}).get('branch_exists'),
+        'last_report': (repo_facts or {}).get('last_report') or '',
+        'inflight': list(inflight or []),
+    }
+
+
+# ---- assembling the text -----------------------------------------------------
+
+class Section:
+    """One block of the preamble. ``trimmable`` blocks lose lines, worst last, when the
+    preamble is over the cap; the rest never do."""
+
+    def __init__(self, name, heading, body, trimmable=False, marker=''):
+        self.name = name
+        self.heading = heading
+        self.body = list(body)
+        self.trimmable = trimmable
+        self.marker = marker
+        self.truncated = False
+
+    def lines(self):
+        if not self.body:
+            # cut to nothing: one line saying so beats a heading with nothing under it
+            return [f'{self.heading} {self.marker}'.strip()] if self.truncated else []
+        head = ['', self.heading] if self.heading.startswith('###') else \
+            ([self.heading] if self.heading else [])
+        out = head + list(self.body)
+        if self.truncated:
+            out.append(self.marker)
+        return out
+
+    def trim(self):
+        if not self.body:
+            return False
+        self.body.pop()
+        self.truncated = True
+        return True
+
+
+TRIM_ORDER = ('description', 'acceptance', 'last_report')
+
+
+def fit(sections, limit):
+    """Cut the trimmable blocks, in :data:`TRIM_ORDER`, until the whole thing fits."""
+    def total():
+        return sum(len(s.lines()) for s in sections)
+
+    for name in TRIM_ORDER:
+        block = next((s for s in sections if s.name == name), None)
+        if block is None:
+            continue
+        guard = len(block.body) + 2
+        while total() > limit and guard > 0 and block.trim():
+            guard -= 1
+    return [l for s in sections for l in s.lines()]
+
+
+def _card_marker(product, item):
+    path = card_path(product, item)
+    return f"…truncated — the whole card is `{path}`" if path else '…truncated'
+
+
+def _flag(value):
+    return {True: 'yes', False: 'no'}.get(value, UNKNOWN)
+
+
+def _doc_line(label, path, lines, recorded=True):
+    """A path the record carries is a fact; one derived from the conventions is where the
+    document *goes*, and says so rather than passing for a file that exists."""
+    if not recorded:
+        return f"{label}: not in the record — its place is `{path}`"
+    size = f' ({lines} lines)' if isinstance(lines, int) else ''
+    return f"{label}: `{path}`{size}"
+
+
+def identity_lines(row, facts):
+    item, feature, epic = facts['item'], facts['feature'], facts['epic']
+    out = [f"Item: {item.get('id', getattr(row, 'item_id', '') or UNKNOWN)} — "
+           f"{item.get('title', UNKNOWN)} ({item.get('type', '?')}, "
+           f"state {item.get('state', 'New')}, stage {item.get('stage') or '—'})"]
+    if item.get('severity'):
+        out.append(f"Severity: {item['severity']}")
+    out.append(f"Feature: {feature.get('id', '—')} — {feature.get('title', '—')}"
+               if feature else 'Feature: —')
+    out.append(f"Epic: {epic.get('id', '—')} — {epic.get('title', '—')}" if epic else 'Epic: —')
+    out.append(f"Why this session exists: {getattr(row, 'kind', '?')} — "
+               f"{getattr(row, 'reason', '') or '—'}")
+    return out
+
+
+#: Kinds that write or answer a review file, and kinds that work from the Story list. A fact
+#: that belongs to neither is left out of their preamble: an irrelevant path is a line the
+#: session pays for on every turn.
+REVIEW_KINDS = ('review', 'fixer', 'adjudicate')
+STORY_KINDS = ('spec', 'plan', 'review', 'adjudicate')
+
+
+def state_lines(product, facts):
+    kind = facts.get('kind') or ''
+    out = [f"Branch: `{facts['branch'] or '—'}` (exists: {_flag(facts['branch_exists'])})",
+           f"Head: {facts['head'] or UNKNOWN}",
+           _doc_line('Spec', facts['spec_path'], facts['spec_lines'], facts['spec_recorded']),
+           _doc_line('Plan', facts['plan_path'], facts['plan_lines'], facts['plan_recorded'])]
+    if kind in REVIEW_KINDS:
+        out.append(f"Review file for this round: `{facts['review_path']}` "
+                   f"(round {facts['next_round']})")
+    out += [f"Writes (the footprint this job may touch): "
+            f"{', '.join(facts['writes']) if facts['writes'] else '(none declared)'}",
+            f"Tests named by the card: "
+            f"{', '.join(facts['tests']) if facts['tests'] else '(none named)'}"]
+    if facts['stories'] and kind in STORY_KINDS:
+        out.append(f"Stories of the Feature: {'; '.join(facts['stories'])}")
+    busy = [f"{s.get('item', '?')} ({s.get('kind', '?')}, {s.get('age', '?')})"
+            for s in facts['inflight']]
+    out.append(f"Sessions in flight: {'; '.join(busy) if busy else NONE}")
+    return out
+
+
+def convention_lines(product):
+    conv = conventions(product)
+    prefixes = conv.get('branch_prefixes') or {}
+    out = [f"Specs live in `{conv.get('specs_dir') or DEFAULT_SPECS_DIR}`, plans in "
+           f"`{conv.get('plans_dir') or DEFAULT_PLANS_DIR}`, reviews in "
+           f"`{conv.get('reviews_dir') or DEFAULT_REVIEWS_DIR}`."]
+    if prefixes:
+        out.append('Branch prefixes: ' + ', '.join(f'{k} → `{v}`' for k, v in sorted(prefixes.items())) + '.')
+    out.append(f"The trunk is `{getattr(product, 'main', 'main') if product is not None else 'main'}`; "
+               'every commit is signed off (`git commit -s`).')
+    return out
+
+
+def build(product, row, index, inflight=None, repo_facts=None, facts=None):
+    """The preamble text for one row — capped, identifiers intact."""
+    facts = facts if facts is not None else collect(product, row, index, inflight, repo_facts)
+    main = getattr(product, 'main', 'main') if product is not None else 'main'
+    marker = _card_marker(product, facts['item'])
+    sections = [
+        Section('identity', '## What is already known (do not go looking for it)',
+                identity_lines(row, facts)),
+        Section('state', '', state_lines(product, facts)),
+        Section('conventions', '', convention_lines(product)),
+        Section('description', '### Description',
+                section_lines(facts['sections'], 'description') or
+                ([facts['item'].get('title')] if facts['item'].get('title') else []),
+                trimmable=True, marker=marker),
+        Section('acceptance', '### Acceptance',
+                section_lines(facts['sections'], 'acceptance'), trimmable=True, marker=marker),
+        Section('links', '### Links the card names',
+                section_lines(facts['sections'], 'links', limit_chars=600)),
+        Section('last_report', '### The last report for this item',
+                [l.rstrip() for l in str(facts['last_report']).splitlines() if l.strip()],
+                trimmable=True, marker='…truncated'),
+        Section('rules', '### Standing rules', rules_block(product, main).splitlines()),
+    ]
+    return '\n'.join(fit(sections, max_lines(product)))
