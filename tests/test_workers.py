@@ -319,6 +319,19 @@ class TestHealth(Home):
         return spawn_mod.spawn(self.product, feature_row(job), self.acct(), 'b', runtime=rt,
                                cfg=self.cfg)
 
+    def commit(self, wt, name='x'):
+        for k, v in (('user.email', 'ci@example.com'), ('user.name', 'ci')):
+            git('config', k, v, cwd=wt)
+        with open(os.path.join(wt, name), 'w') as f:
+            f.write(name)
+        git('add', name, cwd=wt)
+        git('commit', '-q', '-m', name, cwd=wt)
+
+    def land(self, wt, branch):
+        """Push the branch and fast-forward origin/main onto it, as a harvest does."""
+        git('push', '-q', 'origin', branch, cwd=wt)
+        git('push', '-q', 'origin', branch + ':main', cwd=wt)
+
     def test_transitions(self):
         self.spawn('done', {'ok': True, 'pid': 11})
         self.spawn('gone', {'running': True, 'pid': 12})
@@ -352,7 +365,8 @@ class TestHealth(Home):
     def test_reap_only_when_pushed(self):
         rec = self.spawn('done', {'ok': True, 'pid': 11})
         wt = rec['worktree']
-        git('push', '-q', 'origin', rec['branch'], cwd=wt)
+        self.commit(wt)
+        self.land(wt, rec['branch'])
         found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
         self.assertIn(('done', 'reapable', 'ended'), found)
         self.assertTrue(os.path.isdir(wt))
@@ -381,7 +395,41 @@ class TestHealth(Home):
         self.assertIn(('stray', 'keep', 'orphan: branch not pushed'), found)
         git('push', '-q', 'origin', 'stray', cwd=path)
         found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('stray', 'keep', 'orphan: no commits yet'), found)
+        self.commit(path)
+        self.land(path, 'stray')
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
         self.assertIn(('stray', 'reaped', 'orphan'), found)
+
+    def test_b0019_live_session_with_no_commits_survives_and_is_opening(self):
+        rec = self.spawn('fresh', {'running': True, 'pid': 21})
+        wt = rec['worktree']
+        git('push', '-q', 'origin', rec['branch'], cwd=wt)
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: True, out=lambda s: None)
+        self.assertTrue([f for f in found if f[:2] == ('fresh', 'opening')], found)
+        self.assertFalse([f for f in found if f[1] in ('reaped', 'reapable')], found)
+        self.assertTrue(os.path.isdir(wt))
+
+    def test_b0019_ended_session_with_no_commits_is_not_merged(self):
+        rec = self.spawn('empty', {'ok': True, 'pid': 22})
+        wt = rec['worktree']
+        git('push', '-q', 'origin', rec['branch'], cwd=wt)
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('empty', 'keep', 'ended: no commits yet'), found)
+        self.assertTrue(os.path.isdir(wt))
+
+    def test_b0019_pushed_but_unlanded_commit_is_kept_until_it_reaches_main(self):
+        rec = self.spawn('done', {'ok': True, 'pid': 23})
+        wt = rec['worktree']
+        self.commit(wt)
+        git('push', '-q', 'origin', rec['branch'], cwd=wt)
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('done', 'keep', 'ended: not in origin/main'), found)
+        self.assertTrue(os.path.isdir(wt))
+        self.land(wt, rec['branch'])
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('done', 'reaped', 'ended'), found)
+        self.assertFalse(os.path.exists(wt))
 
 
 class TestStall(Home):
