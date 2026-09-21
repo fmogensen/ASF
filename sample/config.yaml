@@ -1,0 +1,14 @@
+# config.yaml the sample product runs under: the fake worker runtime (no agent, no network, no
+# account), one launch slot so a second row waits. @SAMPLE@ is the copied sample/ directory.
+default_product: sample
+scheduler:
+  kind: none
+feeder:
+  capacity: 1
+worker_pool:
+  backend: fake
+  fake_script: @SAMPLE@/fake_script.json
+  accounts:
+    - name: worker-1
+      role: local
+      cap: 2

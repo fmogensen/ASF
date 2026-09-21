@@ -26,3 +26,5 @@ jobs:
           git config --global user.name ci
           git config --global user.email ci@localhost
           python3 -m unittest discover -s tests
+      - name: the sample product, end to end (init, one tick, next, doctor)
+        run: python3 -m unittest -v tests.test_sample_product

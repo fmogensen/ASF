@@ -1,0 +1,166 @@
+{
+  "generated": "2026-09-21T17:16:00Z",
+  "items": {
+    "B-0001": {
+      "backlinks": [],
+      "children": [],
+      "decided": true,
+      "folder": "bugs",
+      "id": "B-0001",
+      "parent": "F-0001",
+      "severity": "S1",
+      "stage_since": "2026-01-01T09:00:00Z",
+      "state": "New",
+      "title": "The counter crashes on an empty file",
+      "type": "bug",
+      "updated": "2026-01-01T09:00:00Z"
+    },
+    "D-0001": {
+      "backlinks": [],
+      "children": [],
+      "folder": "decisions",
+      "id": "D-0001",
+      "stage_since": "2026-01-01T09:00:00Z",
+      "state": "New",
+      "title": "Words are split on whitespace only",
+      "type": "decision",
+      "updated": "2026-01-01T09:00:00Z"
+    },
+    "E-0001": {
+      "backlinks": [],
+      "children": [
+        "F-0001",
+        "F-0002"
+      ],
+      "decided": true,
+      "folder": "epics",
+      "id": "E-0001",
+      "priority": "need",
+      "rank": 1,
+      "stage_since": "2026-01-01T09:00:00Z",
+      "state": "New",
+      "title": "The counter tells the truth",
+      "type": "epic",
+      "updated": "2026-01-01T09:00:00Z"
+    },
+    "F-0001": {
+      "backlinks": [
+        "T-0001"
+      ],
+      "children": [
+        "S-0001",
+        "S-0002",
+        "B-0001"
+      ],
+      "decided": true,
+      "folder": "features",
+      "id": "F-0001",
+      "parent": "E-0001",
+      "priority": "need",
+      "rank": 1,
+      "stage_since": "2026-01-01T09:00:00Z",
+      "state": "New",
+      "title": "Count words, not bytes",
+      "type": "feature",
+      "updated": "2026-01-01T09:00:00Z"
+    },
+    "F-0002": {
+      "backlinks": [
+        "T-0002"
+      ],
+      "children": [
+        "S-0003"
+      ],
+      "decided": true,
+      "folder": "features",
+      "id": "F-0002",
+      "parent": "E-0001",
+      "priority": "nice",
+      "rank": 2,
+      "stage_since": "2026-01-01T09:00:00Z",
+      "state": "New",
+      "title": "Count lines too",
+      "type": "feature",
+      "updated": "2026-01-01T09:00:00Z"
+    },
+    "S-0001": {
+      "backlinks": [],
+      "children": [
+        "T-0001"
+      ],
+      "folder": "stories",
+      "id": "S-0001",
+      "parent": "F-0001",
+      "rank": 1,
+      "stage_since": "2026-01-01T09:00:00Z",
+      "state": "New",
+      "title": "Words split on any whitespace",
+      "type": "story",
+      "updated": "2026-01-01T09:00:00Z"
+    },
+    "S-0002": {
+      "backlinks": [],
+      "children": [],
+      "folder": "stories",
+      "id": "S-0002",
+      "parent": "F-0001",
+      "rank": 2,
+      "stage_since": "2026-01-01T09:00:00Z",
+      "state": "New",
+      "title": "Empty input counts zero",
+      "type": "story",
+      "updated": "2026-01-01T09:00:00Z"
+    },
+    "S-0003": {
+      "backlinks": [],
+      "children": [
+        "T-0002"
+      ],
+      "folder": "stories",
+      "id": "S-0003",
+      "parent": "F-0002",
+      "rank": 1,
+      "stage_since": "2026-01-01T09:00:00Z",
+      "state": "New",
+      "title": "Lines end on a newline",
+      "type": "story",
+      "updated": "2026-01-01T09:00:00Z"
+    },
+    "T-0001": {
+      "backlinks": [],
+      "children": [],
+      "feature": "F-0001",
+      "folder": "tasks",
+      "id": "T-0001",
+      "parent": "S-0001",
+      "rank": 1,
+      "stage_since": "2026-01-01T09:00:00Z",
+      "state": "New",
+      "title": "Split on whitespace",
+      "type": "task",
+      "updated": "2026-01-01T09:00:00Z",
+      "writes": [
+        "src/count.py",
+        "tests/test_count.py"
+      ]
+    },
+    "T-0002": {
+      "backlinks": [],
+      "children": [],
+      "feature": "F-0002",
+      "folder": "tasks",
+      "id": "T-0002",
+      "parent": "S-0003",
+      "rank": 1,
+      "stage_since": "2026-01-01T09:00:00Z",
+      "state": "New",
+      "title": "Count lines",
+      "type": "task",
+      "updated": "2026-01-01T09:00:00Z",
+      "writes": [
+        "src/count.py"
+      ]
+    }
+  },
+  "schema_version": 1
+}

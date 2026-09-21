@@ -1,0 +1,25 @@
+# products/sample.yaml — the sample product: a second product with conventions of its own, run by
+# ASF's own tests (tests/test_sample_product.py) so "works for any product" is something CI proves.
+# The test copies sample/ into a temp dir and replaces @REPO@ and @BACKLOG@ with the copies' paths.
+product: sample
+repo_dir: @REPO@
+backlog_dir: @BACKLOG@
+main: main
+conventions:
+  specs_dir: specs
+  plans_dir: plans
+  default_bug_epic: E-0001
+  branch_prefixes:
+    code: feature/
+    task: feature/
+    fix: bugfix/
+    spec: spec/
+    plan: plan/
+ci:
+  provider: none
+  test_command: python3 -m unittest discover -s tests
+deploy_sha: none
+steps:
+  batch: off
+  daily: off
+job_grants: []
