@@ -41,6 +41,25 @@ def attempts(product):
     return out
 
 
+def corrections(product):
+    """``{item: {kind, text, at, rounds}}`` — the newest correction the harvest recorded for each
+    item, unless a session started since (it is already the correction's answer)."""
+    sessions, out = {}, {}
+    for s in pool_mod.load_sessions(product).values():
+        if s.get('item'):
+            sessions.setdefault(s['item'], []).append(s)
+    for item, group in sessions.items():
+        held = [s for s in group if (s.get('correction') or {}).get('text')]
+        if not held:
+            continue
+        s = max(held, key=lambda r: r['correction'].get('at') or '')
+        at = s['correction'].get('at') or ''
+        if any((r.get('started') or '') > at for r in group):
+            continue
+        out[item] = dict(s['correction'], rounds=max(r.get('rounds') or 0 for r in group))
+    return out
+
+
 def _git(repo, args):
     p = subprocess.run(['git', '-C', repo, *args], capture_output=True, text=True)
     return p.stdout.strip() if p.returncode == 0 else ''
@@ -87,7 +106,8 @@ def run(ctx, out=print):
     product = ctx.product
     items, _generated = index_reader.load(ctx.record_root())
     running = inflight(product)
-    planned = feeder_rows.plan_rows(items, product, running, capacity(), attempts=attempts(product))
+    planned = feeder_rows.plan_rows(items, product, running, capacity(), attempts=attempts(product),
+                                     corrections=corrections(product))
     worker_rows, texts, kinds = [], {}, {}
     for row in planned:
         if not row.launches:

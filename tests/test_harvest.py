@@ -613,31 +613,31 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertTrue(self.origin_has('fix/B-0001'))
         self.assertFalse(self.record('fix/B-0001').get('harvested'))
 
-    def test_red_test_command_holds_and_files_a_bug(self):
+    def test_red_test_command_holds_and_records_a_correction(self):
         self.push_lane('fix/B-0001', [('fix(B-0001): breaks the gate',
                                        {'checks/test_fx.py': RED_TEST})])
         self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
         record_root = os.path.join(self.base, 'record')
         os.makedirs(os.path.join(record_root, 'bugs'))
         before = self.origin_main()
-        with mock.patch.dict(os.environ, {'BACKLOG_ALLOW_MINT': '1'}):
-            results, lines = self.harvest(self.product(), bug_root=lambda: record_root)
+        results, lines = self.harvest(self.product(), bug_root=lambda: record_root)
         self.assertEqual(results, {'fix/B-0001': 'held'})
+        self.assertEqual(len(lines), 1, lines)
         self.assertTrue(lines[0].startswith('held fix/B-0001: FAIL: test_red_gate'), lines)
-        self.assertEqual(lines[1], 'bug filed: harvest gate red fix/B-0001')
+        self.assertTrue(lines[0].endswith(' — back to its session (round 1)'), lines)
         self.assertEqual(self.origin_main(), before)
         self.assertTrue(self.origin_has('fix/B-0001'))
-        bugs = os.listdir(os.path.join(record_root, 'bugs'))
-        self.assertEqual(len(bugs), 1)
-        with open(os.path.join(record_root, 'bugs', bugs[0]), encoding='utf-8') as f:
-            self.assertIn('test_red_gate', f.read())
-
-    def test_red_gate_with_no_record_prints_bug_line(self):
-        self.push_lane('fix/B-0001', [('fix(B-0001): breaks the gate',
-                                       {'checks/test_fx.py': RED_TEST})])
-        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
+        self.assertEqual(os.listdir(os.path.join(record_root, 'bugs')), [])  # no Bug filed
+        rec = self.record('fix/B-0001')
+        self.assertEqual(rec['rounds'], 1)
+        self.assertEqual(rec['correction']['kind'], 'gate')
+        self.assertIn('test_red_gate', rec['correction']['text'])
+        self.assertTrue(rec['correction']['at'])
+        self.assertFalse(rec.get('harvested'))
+        # a second red tick is round 2
         _results, lines = self.harvest(self.product())
-        self.assertEqual(lines[-1], 'BUG: harvest gate red fix/B-0001')
+        self.assertTrue(lines[0].endswith('(round 2)'), lines)
+        self.assertEqual(self.record('fix/B-0001')['rounds'], 2)
 
     def test_pull_request_landing_never_pushes_main(self):
         self.push_lane('fix/B-0001', [('fix(B-0001): the change', {'a.txt': 'a\n'})])

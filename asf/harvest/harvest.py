@@ -45,6 +45,7 @@ import tempfile
 from asf import env
 from asf.conventions import Conventions
 from asf.workers.health import pid_alive
+from asf.workers.pool import now_iso
 
 #: The conventions a caller with no Product reads: trunk `main`, code branches `worker/`, no
 #: test command (so the gate is `asf check` alone).
@@ -648,20 +649,17 @@ def product_gate(tmp, conv, asf_repo):
     return True, None
 
 
-def file_gate_bug(root, branch, item, line, conv):
-    """File (or bump) the Bug for a red harvest gate in the record at ``root``, keyed on the
-    failing line. Returns ``filed``/``bumped``/``skipped``, or None when the record could not
-    be read."""
-    from asf.tick import file_bugs as fb
-    by_id, errors = fb.load_items(root)
-    if errors:
-        return None
-    canonical, _dupes = fb.canonicalize(by_id)
-    sig = f'harvest gate red: {line}'[:200]
-    info = {'title': fb.truncate(f'Harvest gate red: {line}', 100), 'severity': 'S2',
-            'runs': [], 'evidence': [f'{branch} ({item}): {line}']}
-    return fb._file_or_bump_bug(root, canonical, sig, info, fb.today(),
-                                default_bug_epic=conv.default_bug_epic)
+def hold_with_correction(state_dir, branch, record, kind, text, out):
+    """Hold ``branch`` and hand it back to its session: the failing output goes on the session's
+    record as ``correction`` and the rounds counter (over every session of the item) goes up."""
+    item = record.get('item')
+    prev = max([r.get('rounds') or 0 for r in read_sessions(state_dir).values()
+                if item and r.get('item') == item] + [record.get('rounds') or 0])
+    rounds = prev + 1
+    mark_session(state_dir, record.get('job') or branch, rounds=rounds,
+                 correction={'kind': kind, 'text': text, 'at': now_iso()})
+    out(f'held {branch}: {text} — back to its session (round {rounds})')
+    return 'held'
 
 
 def land_ff(repo, state_dir, branch, record, item, conv, asf_repo, bug_root, dry_run, out):
@@ -677,18 +675,10 @@ def land_ff(repo, state_dir, branch, record, item, conv, asf_repo, bug_root, dry
                 return 'held'
             ok, reason = rebase_and_resolve(tmp, trunk)
             if not ok:
-                out(f'held {branch}: {reason}')
-                return 'held'
+                return hold_with_correction(state_dir, branch, record, 'conflict', reason, out)
             ok, line = product_gate(tmp, conv, asf_repo)
             if not ok:
-                out(f'held {branch}: {line}')
-                root = bug_root() if callable(bug_root) else bug_root
-                filed = file_gate_bug(root, branch, item, line, conv) if root else None
-                if filed is None:
-                    out(f'BUG: harvest gate red {branch}')
-                else:
-                    out(f'bug {filed}: harvest gate red {branch}')
-                return 'held'
+                return hold_with_correction(state_dir, branch, record, 'gate', line, out)
             sha = sh(['git', 'rev-parse', 'HEAD'], cwd=tmp).stdout.strip()
             if dry_run:
                 out(f'DRY: would land {branch} → {sha}')
@@ -703,7 +693,7 @@ def land_ff(repo, state_dir, branch, record, item, conv, asf_repo, bug_root, dry
             if sh(['git', 'merge-base', '--is-ancestor', sha, f'origin/{trunk}'], cwd=repo).returncode != 0:
                 out(f'held {branch}: {sha} is not on origin/{trunk} after the push')
                 return 'held'
-            mark_session(state_dir, job, harvested=sha)
+            mark_session(state_dir, job, harvested=sha, correction=None)
             sh(['git', 'push', '-q', 'origin', '--delete', branch], cwd=repo)
             out(f'landed {branch} → {sha}')
             return 'landed'

@@ -9,6 +9,8 @@ fact the feeder can use.
 The row kinds::
 
     BUG → FIX              an open, decided S1/S2 Bug with no session (the S1 lane)
+    FIX → CORRECT          an item whose branch the harvest held (red gate, conflict) fewer than
+                           3 times: back to a session with the failing output
     STALEMATE → ADJUDICATE a Feature at spec-/plan-review round >= 4: adjudicate, and nothing
                            else for that Feature (another review round will not converge); or a
                            Bug with 3 sessions behind it and still open (not a fourth fix)
@@ -30,6 +32,8 @@ from asf.feeder import footprint
 from asf.views import index_reader as ix
 
 BUG_FIX = 'BUG → FIX'
+FIX_CORRECT = 'FIX → CORRECT'
+CORRECTION_ROUNDS = 3
 STALEMATE = 'STALEMATE → ADJUDICATE'
 CONFLICT = 'CONFLICT → REBASE'
 STALE = 'STALE → CLOSE'
@@ -58,6 +62,7 @@ class Row:
     branch: str
     reason: str
     waits_on: str = ''
+    correction: str = ''
 
     @property
     def launches(self):
@@ -199,6 +204,32 @@ def bug_rows(items, product, busy, attempts=None):
     return out
 
 
+def correction_rows(items, product, busy, corrections):
+    """``corrections`` is ``{item: {kind, text, rounds, at}}`` — a branch the harvest held. Fewer
+    than 3 rounds: a FIX → CORRECT row in the item's severity tier; 3 or more: the ADJUDICATE row.
+    Returns ``(rows, ids)``; ``ids`` are the items these rows speak for."""
+    out, ids = [], set()
+    for iid, c in sorted((corrections or {}).items()):
+        item = items.get(iid)
+        if not item or not c or not c.get('text') or not is_open(item) or iid in busy:
+            continue
+        ids.add(iid)
+        f = feature_of(items, item)
+        fid, rounds = f['id'] if f else '', c.get('rounds') or 0
+        tier = {'S1': 0, 'S2': 1}.get(item.get('severity'), 2)
+        kind = 'fix' if item['type'] == 'bug' else 'task'
+        branch = branch_for(product, kind, iid, default='fix/' if kind == 'fix' else None)
+        if rounds >= CORRECTION_ROUNDS:
+            out.append(Row(tier=tier, kind=STALEMATE, item_id=iid, feature_id=fid, action=LAUNCH,
+                           brief_kind='adjudicate', branch=branch,
+                           reason=f"held {rounds} times ({c.get('kind')}): adjudicate, not another correction"))
+        else:
+            out.append(Row(tier=tier, kind=FIX_CORRECT, item_id=iid, feature_id=fid, action=LAUNCH,
+                           brief_kind='correct', branch=branch, correction=c['text'],
+                           reason=f"harvest held it ({c.get('kind')}), round {rounds}: back to a session"))
+    return out, ids
+
+
 def branch_rows(items, product, busy):
     """CONFLICT → REBASE and STALE → CLOSE over Active Tasks and Bugs no session holds."""
     out = []
@@ -290,7 +321,7 @@ def task_rows(items, product, feature, busy, running):
 KIND_ORDER = {STALEMATE: 0, CONFLICT: 1, STALE: 2}
 
 
-def candidates(index, product, inflight, attempts=None):
+def candidates(index, product, inflight, attempts=None, corrections=None):
     """Every row the index supports right now, uncut by capacity, in emit order: tier, then the
     Feature's rank and id, then within a Feature the stalemate, branch housekeeping, new work."""
     items = items_of(index)
@@ -298,7 +329,8 @@ def candidates(index, product, inflight, attempts=None):
     limit = stalemate_round(product)
     stalled = {f['id'] for f in ix.of_type(items, 'feature') if review_round(f)[1] >= limit}
     running = running_footprints(items, busy)
-    rows = bug_rows(items, product, busy, attempts)
+    corrected, spoken = correction_rows(items, product, busy, corrections)
+    rows = corrected + bug_rows(items, product, busy | spoken, attempts)
     rows += [r for r in branch_rows(items, product, busy) if r.feature_id not in stalled]
     rows += feature_rows(items, product, busy, running)
 
@@ -311,7 +343,7 @@ def candidates(index, product, inflight, attempts=None):
     return [r for _seq, r in sorted(enumerate(rows), key=key)]
 
 
-def plan_rows(index, product, inflight, capacity, attempts=None):
+def plan_rows(index, product, inflight, capacity, attempts=None, corrections=None):
     """The rows the tick emits: tiered, S1 first, cut to ``capacity`` less what is in flight."""
     from asf.feeder import tiers
-    return tiers.select(candidates(index, product, inflight, attempts), inflight, capacity)
+    return tiers.select(candidates(index, product, inflight, attempts, corrections), inflight, capacity)

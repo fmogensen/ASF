@@ -210,6 +210,32 @@ class AttemptOrderTest(unittest.TestCase):
         self.assertEqual(out, [])
 
 
+class CorrectionRowTest(unittest.TestCase):
+    """B-0032: a held branch goes back to its session as a FIX → CORRECT row."""
+
+    def corr(self, rounds, text='FAIL: test_x'):
+        return {'B-0001': {'kind': 'gate', 'text': text, 'rounds': rounds, 'at': '2026-09-21T00:00:00Z'}}
+
+    def test_a_correction_yields_a_correct_row_in_the_items_tier(self):
+        out = rows.plan_rows(s1_bugs('B-0001'), product(), [], 1, attempts={'B-0001': 1},
+                             corrections=self.corr(1))
+        self.assertEqual(kinds(out), [('FIX → CORRECT', 'B-0001')])
+        self.assertEqual((out[0].brief_kind, out[0].tier, out[0].branch, out[0].correction),
+                         ('correct', 0, 'fix/B-0001', 'FAIL: test_x'))
+        self.assertTrue(out[0].launches)
+
+    def test_three_rounds_is_the_adjudicate_row(self):
+        out = rows.plan_rows(s1_bugs('B-0001'), product(), [], 1, attempts={'B-0001': 1},
+                             corrections=self.corr(3))
+        self.assertEqual([(r.kind, r.brief_kind) for r in out],
+                         [('STALEMATE → ADJUDICATE', 'adjudicate')])
+
+    def test_a_busy_item_gets_no_correct_row(self):
+        out = rows.plan_rows(s1_bugs('B-0001'), product(), [{'item': 'B-0001'}], 1,
+                             corrections=self.corr(1))
+        self.assertEqual(out, [])
+
+
 class TiersTest(unittest.TestCase):
     """F-0071 acceptance 1: the S1 lane."""
 
@@ -279,7 +305,8 @@ class RenderTest(unittest.TestCase):
         data = json.loads(render.rows_json(rows.plan_rows(fixture_index(), product(), [], 10)))
         self.assertEqual(data[0]['item_id'], 'B-0001')
         self.assertEqual(set(data[0]), {'tier', 'kind', 'item_id', 'feature_id', 'action',
-                                        'brief_kind', 'branch', 'reason', 'waits_on'})
+                                        'brief_kind', 'branch', 'reason', 'waits_on',
+                                        'correction'})
 
 
 class CliTest(unittest.TestCase):
