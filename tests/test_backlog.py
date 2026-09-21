@@ -179,6 +179,34 @@ class NewCommandTests(unittest.TestCase):
         self.assertIn('updated', meta)
 
 
+class NewSetFieldsTests(unittest.TestCase):
+    def setUp(self):
+        self.root = make_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+
+    def test_new_set_types_the_schema_fields(self):
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        r = run(['new', 'bug', '--title', 'Broken thing', '--parent', 'E-0001',
+                 '--severity', 'S2', '--set', 'rank=5', '--set', 'source=review',
+                 '--set', 'blockedBy=[E-0001]', '--set', 'links.spec=docs/specs/x.md'],
+                self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        iid = r.stdout.strip()
+        text = open(os.path.join(self.root, 'bugs', f'{iid}.md'), encoding='utf-8').read()
+        meta, _body = frontmatter.parse(text)
+        self.assertEqual(meta['rank'], 5)
+        self.assertEqual(meta['source'], 'review')
+        self.assertEqual(meta['blockedBy'], ['E-0001'])
+        self.assertEqual(meta['links'], {'spec': 'docs/specs/x.md'})
+
+    def test_new_set_refuses_a_field_the_type_does_not_have(self):
+        r = run(['new', 'epic', '--title', 'Factory', '--set', 'severity=S1'], self.root)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('severity', r.stderr)
+        r = run(['new', 'epic', '--title', 'Factory', '--set', 'noequals'], self.root)
+        self.assertEqual(r.returncode, 2)
+
+
 class CheckCommandTests(unittest.TestCase):
     def setUp(self):
         self.root = make_repo()
