@@ -23,3 +23,6 @@ version = {attr = "asf.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["asf", "asf.*"]
+
+[tool.setuptools.package-data]
+"asf.briefs" = ["templates/*.md"]

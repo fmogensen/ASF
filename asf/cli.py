@@ -104,6 +104,8 @@ def build_parser():
     register_feeder(sub)
     from asf.workers import register as register_workers
     register_workers(sub)
+    from asf.briefs import register as register_briefs
+    register_briefs(sub)
 
     p_roadmap = sub.add_parser('roadmap', help='the ROADMAP table: one row per Epic')
     p_roadmap.add_argument('--product')
