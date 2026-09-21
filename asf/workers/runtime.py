@@ -14,6 +14,7 @@
 """
 import json
 import os
+import re
 import subprocess
 
 DEFAULT_BINARY = 'claude'
@@ -44,8 +45,9 @@ class Job:
 class Result:
     """``ok`` is True/False once the session finished, None while it still runs (detached)."""
 
-    def __init__(self, ok=None, pid=None, returncode=None, text='', log_path=None):
+    def __init__(self, ok=None, pid=None, returncode=None, text='', log_path=None, reason=None):
         self.ok = ok
+        self.reason = reason
         self.pid = pid
         self.returncode = returncode
         self.text = text
@@ -119,8 +121,27 @@ def read_result(log_path):
     return result
 
 
+# the CLI's own error texts, which it reports with ``subtype: success``
+FAILURE_SIGNATURES = (
+    ('unknown model', re.compile(r'issue with the selected model|model .* (?:not found|does not exist)', re.I)),
+    ('auth', re.compile(r'invalid api key|please run /login|authentication[_ ]error|oauth token', re.I)),
+    ('quota', re.compile(r'usage limit reached|rate limit|quota (?:exceeded|exhausted)', re.I)),
+    ('permission', re.compile(r'permission denied|not permitted to use', re.I)),
+)
+
+
+def failure_reason(rec):
+    """The signature name when a result's text is one of the CLI's error messages, else None."""
+    text = str((rec or {}).get('result') or '')
+    for name, pattern in FAILURE_SIGNATURES:
+        if pattern.search(text):
+            return name
+    return None
+
+
 def result_ok(rec):
-    return bool(rec) and not rec.get('is_error') and rec.get('subtype', 'success') == 'success'
+    return (bool(rec) and not rec.get('is_error') and rec.get('subtype', 'success') == 'success'
+            and failure_reason(rec) is None)
 
 
 class Runtime:
@@ -147,7 +168,8 @@ class ClaudeCodeRuntime(Runtime):
         rc = proc.wait()
         rec = read_result(log_path)
         return Result(ok=rc == 0 and result_ok(rec), pid=proc.pid, returncode=rc,
-                      text=(rec or {}).get('result', ''), log_path=log_path)
+                      text=(rec or {}).get('result', ''), log_path=log_path,
+                      reason=failure_reason(rec))
 
 
 class FakeRuntime(Runtime):

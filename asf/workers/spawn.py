@@ -127,9 +127,15 @@ def write_brief(product, job, text):
 
 
 def model_arg(model, cfg=None):
-    """``worker_pool.models: {Opus: <id>}`` maps a row's model label; default lowercased."""
+    """``worker_pool.models: {Opus: <id>}`` maps a row's model label. A label with no entry is
+    refused — the literal label is not a model id the runtime knows, and the session dies at once."""
+    if not model:
+        return None
     table = (((cfg or {}).get('worker_pool') or {}).get('models')) or {}
-    return table.get(model, str(model or '').lower() or None)
+    if model not in table:
+        raise SpawnError(f'NEEDS OPERATOR: worker_pool.models has no entry for {model} '
+                         '— add it to config.yaml')
+    return table[model]
 
 
 # ---- spawn ------------------------------------------------------------------
@@ -151,6 +157,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
     cfg = load_cfg() if cfg is None else cfg
     wp = cfg.get('worker_pool') or {}
     runtime = runtime or runtime_mod.from_config(cfg)
+    model = model_arg(row.model, cfg)
     branch = branch_for(product, row)
     worktree = make_worktree(product, row.job, branch)
     id_range = reserve_id_range(product, row.job,
@@ -159,7 +166,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
                                 size=int(wp.get('id_range_size', DEFAULT_ID_SIZE)))
     brief_path = write_brief(product, row.job, brief_for(row, brief_text))
     add_dirs = [os.path.expanduser(d) for d in (product._get('job_grants') or [])]
-    job = runtime_mod.Job(product.name, row.job, worktree, brief_path, model_arg(row.model, cfg),
+    job = runtime_mod.Job(product.name, row.job, worktree, brief_path, model,
                           account=account, add_dirs=add_dirs,
                           permission_mode=wp.get('permission_mode')
                           or runtime_mod.DEFAULT_PERMISSION_MODE,
