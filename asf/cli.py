@@ -89,6 +89,9 @@ def build_parser():
     p_pr_hygiene = sub.add_parser('pr-hygiene', help='sort open PRs into land/fix lanes')
     p_pr_hygiene.add_argument('--product')
 
+    p_doctor = sub.add_parser('doctor', help='is this product\'s ASF install sound — one table')
+    p_doctor.add_argument('--product')
+
     return p
 
 
@@ -144,6 +147,9 @@ def main(argv=None):
         from asf.harvest.pr_hygiene import main as pr_hygiene_main
         pr_hygiene_args = ['--product', args.product] if args.product else []
         return pr_hygiene_main(pr_hygiene_args)
+    if args.command == 'doctor':
+        from asf.doctor import cmd_doctor
+        return cmd_doctor(args, root)
 
     parser.print_help()
     return 2
