@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Installed via `git config core.hooksPath .githooks`. Runs the test suite and the
+# generic-repo check before every commit; both must be clean.
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+echo "pre-commit: running tests..."
+python3 -m unittest discover -s tests
+
+echo "pre-commit: checking for forbidden names..."
+bash tools/check_generic.sh

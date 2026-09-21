@@ -1,0 +1,24 @@
+# Forbidden-name patterns for tools/check_generic.sh.
+#
+# One extended regex (grep -E, case-insensitive) per line; blank lines and lines starting with
+# `#` are ignored. This is the PUBLIC list: only generic patterns and the specific product/
+# company/person/vendor/account/host words this repo's own history was found to contain. The
+# operator may keep a second, private list (see check_generic.sh --extra) with anything specific
+# to their own deployment; that list is never committed here.
+#
+# Generic patterns — catch a class of name, not one instance of it.
+@[a-z]+\.ai\b
+\bcom\.[a-z]+\.factory\b
+
+# Specific words this repo's history was found to contain and had to remove (P0d migration).
+\bbotseon\b
+\bnordio\b
+\bhetzner\b
+\bcontabo\b
+\bfly\.io\b
+\bvercel\b
+\bfrank\b
+\bniels\b
+\bnina\b
+\banette\b
+\bjan\b
