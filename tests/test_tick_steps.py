@@ -290,7 +290,10 @@ class WaveStepTests(StepsTestCase):
 # ---- prs --------------------------------------------------------------------------
 
 class PrsStepTests(StepsTestCase):
-    product_extra = 'steps:\n  batch: off\nconventions:\n  branch_prefixes:\n    fix-bug: fix/\n'
+    """A ``pull-request`` landing: the PR is the mechanism, so the step opens one per finished
+    branch. (``batch: off`` alone would land by fast-forward — see the last two tests.)"""
+    product_extra = ('steps:\n  batch: off\nconventions:\n  landing: pull-request\n'
+                     '  branch_prefixes:\n    fix-bug: fix/\n')
 
     def setUp(self):
         super().setUp()
@@ -378,6 +381,32 @@ class PrsStepTests(StepsTestCase):
     def test_slug_comes_from_a_hosted_origin_when_the_yaml_has_none(self):
         _git(['remote', 'set-url', 'origin', 'git@example.com:owner/name.git'], self.repo)
         self.assertEqual(step_prs.repo_slug(env.Product('p', {'repo_dir': self.repo})), 'owner/name')
+
+    def test_fast_forward_landing_opens_nothing(self):
+        """B-0029: ``asf`` lands by fast-forward (``batch: off``, no ``landing``) — a PR is never
+        the mechanism there, so the step opens none, says so once, runs hygiene and exits 0."""
+        self.write_product(f'repo_dir: {self.repo}\nsteps:\n  batch: off\n'
+                           'conventions:\n  branch_prefixes:\n    fix-bug: fix/\n')
+        self.product = env.load_product('sample')
+        self.push_branch('fix/B-0001')
+        self.finished('fix-bug-b-0001', 'fix/B-0001')
+        self.assertEqual(step_prs.run(self.ctx(), out=self.lines.append), 0)
+        self.assertEqual(self.creates(), [])
+        self.assertEqual(self.lines, ['prs: landing is fast-forward — harvest lands the branches'])
+        self.assertEqual(self.hygiene, ['sample'])
+
+    def test_harvested_and_at_trunk_branches_are_not_candidates(self):
+        """B-0029: a session already ``harvested`` has landed; a pushed branch with no commits
+        past the trunk has nothing to open. Neither reaches ``gh``, and the step does not fail."""
+        self.push_branch('fix/B-0001')
+        self.finished('fix-bug-b-0001', 'fix/B-0001')
+        self.session(job='fix-bug-b-0001', harvested='abc123')
+        _git(['push', '-q', 'origin', 'main:refs/heads/fix/B-0002'], self.repo)  # at the trunk head
+        self.finished('fix-bug-b-0002', 'fix/B-0002', item='B-0002')
+        self.assertEqual(step_prs.run(self.ctx(), out=self.lines.append), 0)
+        self.assertEqual(self.creates(), [])
+        self.assertEqual(self.lines, ['prs: fix/B-0002 at trunk — nothing to open', 'prs: none to open'])
+        self.assertEqual(self.hygiene, ['sample'])
 
 
 # ---- harvest ----------------------------------------------------------------------
