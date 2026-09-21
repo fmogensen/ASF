@@ -56,6 +56,21 @@ CONFLICT_END_RE = re.compile(r'^>{7}(?: |$)')
 MEMORY_CLAUSE_RE = re.compile(r'; memory [^;"]+')
 MAX_REBASE_STEPS = 100
 
+#: B-0031 (interim): a tick runs on a clock, and CI races the landings it triggers — gating every
+#: eligible branch in one tick can run past the clock and pile up races. Cap how many a single
+#: tick gates; the rest sit as still-eligible and are picked up by the next tick.
+MAX_BRANCHES_PER_TICK = 3
+
+
+def cap_to_tick(items, out):
+    """``items`` trimmed to :data:`MAX_BRANCHES_PER_TICK`, printing the cap line via ``out``
+    when there were more eligible than that — the rest wait for the next tick."""
+    if len(items) > MAX_BRANCHES_PER_TICK:
+        out(f'harvest: {len(items)} branches eligible — capping this tick at '
+            f'{MAX_BRANCHES_PER_TICK}, the rest wait for the next')
+        return items[:MAX_BRANCHES_PER_TICK]
+    return items
+
 
 GIT_HOOK_VARS = ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE')
 
@@ -478,6 +493,7 @@ def run_harvest(repo, state_dir, dry_run, conv=None):
     is_record = is_record_repo(repo)
     sessions = read_sessions(state_dir)
     sh(['git', 'fetch', '-q', 'origin', conv.main], cwd=repo)
+    eligible = []
     for branch in worker_branches(repo, conv):
         job = conv.strip_prefix(branch)
         if not is_eligible(sessions.get(job)):
@@ -486,6 +502,8 @@ def run_harvest(repo, state_dir, dry_run, conv=None):
                    cwd=repo).stdout.strip()
         if ahead in ('', '0'):
             continue
+        eligible.append((job, branch))
+    for job, branch in cap_to_tick(eligible, print):
         why = reap_hold(sessions.get(job))
         if why:  # never land what cannot then be reaped: a live job still owns its worktree
             hold(job, f'not reaped: {why}')
@@ -740,6 +758,7 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
     sessions = sessions_by_branch(state_dir)
     asf_repo = None
     results = {}
+    eligible = []
     for branch in remote_branches(repo, conv):
         record = sessions.get(branch)
         if not is_eligible(record) or record.get('harvest') == 'pr':
@@ -748,6 +767,8 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
                    cwd=repo).stdout.strip()
         if ahead in ('', '0'):
             continue
+        eligible.append((branch, record))
+    for branch, record in cap_to_tick(eligible, out):
         item = item_of(branch, record)
         if not item or not commits_name_item(repo, trunk, branch, item):
             out(f'held {branch}: commits do not name {item or "an item id"}')

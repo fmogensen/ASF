@@ -678,6 +678,27 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertTrue(harvest.is_asf_repo(REPO_ROOT))
         self.assertFalse(harvest.is_asf_repo(self.repo))
 
+    # -- B-0031: a tick gates only so many branches — the rest wait for the next -----------
+    def test_b0031_caps_branches_gated_per_tick(self):
+        for i in range(1, 5):
+            item = f'B-000{i}'
+            branch = f'fix/{item}'
+            self.push_lane(branch, [(f'fix({item}): change {i}', {f'f{i}.txt': f'{i}\n'})])
+            self.session(f'fix-bug-{item.lower()}', item, branch)
+
+        results, lines = self.harvest(self.product())
+        self.assertEqual(len(results), 3, results)
+        self.assertTrue(all(r == 'landed' for r in results.values()), results)
+        self.assertTrue(any('cap' in l.lower() for l in lines), lines)
+
+        remaining = [f'fix/B-000{i}' for i in range(1, 5) if f'fix/B-000{i}' not in results]
+        self.assertEqual(len(remaining), 1, remaining)
+        self.assertTrue(self.origin_has(remaining[0]))
+
+        # the next tick lands what the cap left waiting
+        results2, _lines2 = self.harvest(self.product())
+        self.assertEqual(results2, {remaining[0]: 'landed'})
+
     def test_record_repo_keeps_its_own_path(self):
         with mock.patch.object(harvest, 'is_record_repo', return_value=True), \
                 mock.patch.object(harvest, 'run_harvest', return_value=0) as old:
