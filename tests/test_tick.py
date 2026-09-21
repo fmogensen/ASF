@@ -327,5 +327,33 @@ class LegacyStepTests(TickTestCase):
         self.assertFalse(os.path.exists(steps.stamp_path(env.load_product('sample'))))
 
 
+class Step0Tests(unittest.TestCase):
+    """What step 0 hands the backfill: CI runs only, of the product's workflow; no launcher dir."""
+
+    def step0(self, product):
+        from asf.metrics import metrics
+        from asf.record import ingest
+        from asf.tick import file_bugs
+        calls = []
+        with mock.patch.object(metrics, 'cmd_backfill', lambda a, r: calls.append(a)), \
+                mock.patch.object(metrics, 'cmd_rollup', lambda a, r: 0), \
+                mock.patch.object(ingest, 'cmd_ingest', lambda a, r: 0), \
+                mock.patch.object(file_bugs, 'cmd_file_bugs', lambda a, r: 0), \
+                mock.patch.object(tick, 'do_index', lambda r: 0), \
+                mock.patch.dict(os.environ):
+            tick.run_step0('/nowhere', product)
+        return calls
+
+    def test_backfill_reads_the_products_workflow_and_no_launcher_dir(self):
+        (a,) = self.step0(env.Product('p', {'ci': {'provider': 'gh-actions', 'workflow': 'build'}}))
+        self.assertEqual((a.workflow, a.launch_dir, a.sessions, a.log), ('build', None, None, None))
+        (a,) = self.step0(env.Product('p', {}))
+        self.assertEqual(a.workflow, 'ci')
+
+    def test_no_ci_no_backfill(self):
+        self.assertEqual(self.step0(env.Product('p', {'ci': {'provider': 'none'}})), [])
+        self.assertEqual(self.step0(env.Product('p', {'ci': 'none'})), [])
+
+
 if __name__ == '__main__':
     unittest.main()
