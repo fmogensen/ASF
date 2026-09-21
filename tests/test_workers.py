@@ -353,6 +353,24 @@ class TestHealth(Home):
         git('push', '-q', 'origin', branch, cwd=wt)
         git('push', '-q', 'origin', branch + ':main', cwd=wt)
 
+    def test_b0041_relaunch_starts_a_clean_run(self):
+        # first run fails; the relaunch must not inherit ended/end_reason from it
+        rt = runtime_mod.FakeRuntime([{'ok': False, 'pid': 21}, {'running': True, 'pid': 22}])
+        spawn_mod.spawn(self.product, feature_row('again'), self.acct(), 'b', runtime=rt, cfg=self.cfg)
+        health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertEqual(pool_mod.load_sessions(self.product)['again']['end_reason'], 'failed')
+        wt = pool_mod.load_sessions(self.product)['again']['worktree']
+        git('worktree', 'remove', '--force', wt, cwd=self.repo)
+        git('branch', '-D', pool_mod.load_sessions(self.product)['again']['branch'], cwd=self.repo)
+        spawn_mod.spawn(self.product, feature_row('again'), self.acct(), 'b', runtime=rt, cfg=self.cfg)
+        s = pool_mod.load_sessions(self.product)['again']
+        for k in ('ended', 'end_reason', 'rc', 'corrected', 'operator_flagged', 'harvested'):
+            self.assertNotIn(k, s, k)
+        self.assertEqual(s['pid'], 22)
+        found = health_mod.health(self.product, alive=lambda pid: pid == 22, out=lambda s: None)
+        self.assertFalse([f for f in found if f[0] == 'again' and f[1] == 'ended'])
+        self.assertIn('again', [x['job'] for x in pool_mod.live_sessions(self.product)])
+
     def test_transitions(self):
         self.spawn('done', {'ok': True, 'pid': 11})
         self.spawn('gone', {'running': True, 'pid': 12})

@@ -178,8 +178,12 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
               'pid': result.pid, 'worktree': worktree, 'branch': branch,
               'started': pool_mod.now_iso(), 'log': result.log_path, 'brief': brief_path,
               'id_range': id_range, 'runtime': runtime.name}
+    # a launch line is a new run: the previous run's terminal fields must not fold into it
+    # (B-0041 — a relaunch read as `ended: failed`, so health skipped it, the feeder re-emitted
+    # it and harvest never landed its branch)
+    record.update({k: None for k in pool_mod.RUN_FIELDS})
     pool_mod.append_session(product, record)
-    return record
+    return {k: v for k, v in record.items() if not (k in pool_mod.RUN_FIELDS and v is None)}
 
 
 def load_cfg():
