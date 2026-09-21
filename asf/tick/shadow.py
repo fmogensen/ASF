@@ -1,9 +1,11 @@
 """asf.tick.shadow — the shadow clone every ``asf tick --shadow`` run works against.
 
-A clone of a product's backlog at ``~/.ASF/state/<product>/shadow/``: fetched and fast-forwarded
-from the backlog's own origin before every shadow tick, committed to locally (never pushed) after
-one. It exists so the shadow tick can be compared against the real tools without ever touching a
-product's real backlog checkout — see ``asf shadow-diff``.
+A clone of a product's backlog at ``~/.ASF/state/<product>/shadow/``: fetched and hard-reset to
+its origin's default branch before every shadow tick (it holds derived state only, so a stray
+local commit — e.g. from a prior run whose push failed — is discarded, not fast-forwarded past),
+committed to locally (never pushed) after one. It exists so the shadow tick can be compared
+against the real tools without ever touching a product's real backlog checkout — see
+``asf shadow-diff``.
 """
 import os
 import subprocess
@@ -32,7 +34,13 @@ def _default_branch(clone_dir):
 
 
 def ensure_shadow_clone(product):
-    """Clone or fast-forward the shadow, return its path. Never touches the real backlog checkout."""
+    """Clone or reset the shadow, return its path. Never touches the real backlog checkout.
+
+    A derived-state clone owns no state of its own (bug class B-1352): ``git pull --ff-only``
+    leaves a clone stuck the moment a prior run's push failed and its local commit didn't reach
+    origin, so every run instead resets hard to ``origin/<default branch>`` — a stray local
+    commit is discarded, not fought.
+    """
     path = shadow_dir(product)
     if not os.path.isdir(os.path.join(path, '.git')):
         url = _remote_url(product.backlog_dir) or product.backlog_dir
@@ -47,8 +55,7 @@ def ensure_shadow_clone(product):
     else:
         _sh(['git', 'fetch', '-q', 'origin'], cwd=path)
         branch = _default_branch(path)
-        _sh(['git', 'checkout', '-q', branch], cwd=path)
-        _sh(['git', 'pull', '-q', '--ff-only', 'origin', branch], cwd=path)
+        _sh(['git', 'reset', '-q', '--hard', f'origin/{branch}'], cwd=path)
     return path
 
 

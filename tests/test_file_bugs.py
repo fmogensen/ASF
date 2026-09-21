@@ -255,5 +255,68 @@ class FileBugsIntegrationTests(unittest.TestCase):
         self.assertNotIn('parent', meta)
 
 
+class DeterministicBugIdTests(unittest.TestCase):
+    """The legacy tool merges ci_signatures, then refusal_signatures, then
+    rule_violation_signatures into one dict and files/bumps in `sorted(signatures)` order — so a
+    run's new ids depend only on the sorted signature strings, never on which source found them
+    first. Chosen so that source (insertion) order and sorted order disagree: a naive dict-order
+    iteration would mint B-0001 for the CI signature; the sorted order must mint it for the rule
+    violation instead.
+    """
+
+    GOLDEN = {
+        'R-0001: rule violated': 'B-0001',
+        'refusal: apps/web/foo.ts': 'B-0002',
+        'zzz-job: boom': 'B-0003',
+    }
+
+    def _build_fixture(self):
+        root = make_repo()
+        write_item(root, 'E-0009', 'epic', 'Factory', typed_lines=['decided: true'])
+        write_rule(root, 'R-0001', 'Never merge red',
+                  typed_lines=['scope: merge', 'check: tools/checks/r0001.sh'])
+        write_check_script(root, 'r0001.sh',
+                           "#!/usr/bin/env bash\necho 'R-0001 merged with no green run sha=abc1234 3d'\nexit 1\n")
+        run(['index'], root)
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        for i, ts in enumerate([now - datetime.timedelta(hours=1), now - datetime.timedelta(hours=2)]):
+            write_ci_line(root, today(), {
+                'run': 100 + i, 'sha': 'deadbee', 'branch': 'worktree-m-batch-x', 'ts': iso(ts),
+                'jobs': [{'name': 'zzz-job', 'failed_step': 'boom', 'conclusion': 'failure'}],
+            })
+        write_tick_line(root, today(), {
+            'tick': 1, 'ts': iso(now - datetime.timedelta(hours=1)),
+            'refused_files': {'apps/web/foo.ts': 2},
+        })
+        return root
+
+    def _run_and_collect(self):
+        root = self._build_fixture()
+        try:
+            r = run(['file-bugs', '--default-bug-epic', 'E-0009'], root)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn('3 filed', r.stdout)
+            by_sig = {}
+            for name in os.listdir(os.path.join(root, 'bugs')):
+                if not name.endswith('.md'):
+                    continue
+                with open(os.path.join(root, 'bugs', name)) as f:
+                    meta, _body = frontmatter.parse(f.read(), path=f'bugs/{name}')
+                by_sig[meta['signature']] = meta['id']
+            return by_sig
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_ids_match_the_sorted_signature_golden(self):
+        self.assertEqual(self._run_and_collect(), self.GOLDEN)
+
+    def test_two_runs_over_the_same_fixture_mint_the_same_ids(self):
+        first = self._run_and_collect()
+        second = self._run_and_collect()
+        self.assertEqual(first, second)
+        self.assertEqual(first, self.GOLDEN)
+
+
 if __name__ == '__main__':
     unittest.main()
