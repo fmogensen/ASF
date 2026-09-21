@@ -1,7 +1,10 @@
 """asf.tick.migrate — create the live item set from the product repo (``asf migrate``).
 
 The one-time-then-idempotent adopter pass that creates the LIVE set of items from the product
-repo and its ``goals.txt``, then runs ingest and index. Re-running matches every candidate on
+repo and its goals file (``conventions.goals_file``; none configured → no Epics are migrated,
+said in the report), then runs ingest and index. ``conventions.parity_goal`` names the GOAL
+whose Epic parents parity Features (none → they are reported as Features with no Epic).
+Re-running matches every candidate on
 `legacy_id` (Features also try `links.spec`/`links.plan`) and never overwrites a typed field a
 human may have changed — title, priority, rank, decided, blockedBy, body sections — once the
 item file exists; only `links` and an empty `parent` are refreshed on a match. All git/gh access
@@ -118,7 +121,7 @@ def _decision_body(statement, context):
     )
 
 
-# ---- goals.txt: one GOAL block per Epic --------------------------------------------------
+# ---- the goals file: one GOAL block per Epic ---------------------------------------------
 
 GOAL_TITLE_RE = re.compile(r'^GOAL\s+\d+\s*[—–-]+\s*([^.]+)\.\s*(.*)$', re.DOTALL)
 BLOCKED_RE = re.compile(r'BLOCKED:\s*(.*?)(?:\s+RULES:|$)', re.DOTALL)
@@ -160,7 +163,7 @@ def parse_goal_block(num, joined):
 
 
 def parse_goals(text):
-    """[{...}] in file order — the order goals.txt writes them, not numeric order."""
+    """[{...}] in file order — the order the goals file writes them, not numeric order."""
     matches = list(evidence.GOAL_HEAD.finditer(text))
     out = []
     for i, m in enumerate(matches):
@@ -461,11 +464,16 @@ def cmd_migrate(args, root):
         report['decision']['created'] += 1
         return new_id
 
-    # ---- 1. Epics from goals.txt --------------------------------------------------------
-    goals_path = GOALS_PATH or os.path.join(
-        env.load_product(getattr(args, 'product', None)).repo_dir, 'goals.txt')
-    with open(goals_path, encoding='utf-8') as f:
-        goals_text = f.read()
+    # ---- 1. Epics from the goals file (conventions.goals_file) ----------------------------
+    conventions = _conventions(args)
+    goals_path = GOALS_PATH or goals_file_path(args, conventions)
+    goals_text = ''
+    if goals_path and os.path.isfile(goals_path):
+        with open(goals_path, encoding='utf-8') as f:
+            goals_text = f.read()
+    else:
+        unmatched.append(('epic', goals_path or '(conventions.goals_file unset)',
+                          'no goals file — no Epics migrated'))
     goals = parse_goals(goals_text)
     epic_id_by_num = {}
     goal_raw = {g['num']: g['raw'] for g in goals}
@@ -477,12 +485,14 @@ def cmd_migrate(args, root):
                                           _default_body(g['description']))
 
     def epic_for_goal(num):
-        # goals.txt can be live-edited outside this run; an Epic already on disk from an earlier
-        # GOAL block stays reachable by its `legacy_id` even on a run where goals.txt no longer
-        # mentions that GOAL number.
+        # the goals file can be live-edited outside this run; an Epic already on disk from an
+        # earlier GOAL block stays reachable by its `legacy_id` even on a run where the file no
+        # longer mentions that GOAL number.
         return epic_id_by_num.get(num) or legacy_lookup.get(('epic', f'GOAL {num}'))
 
-    e0014 = epic_for_goal('14')
+    # the Epic that parents parity Features and Features cited but placed under no GOAL
+    parity_goal = conventions.get('parity_goal')
+    parity_epic = epic_for_goal(str(parity_goal)) if parity_goal is not None else None
 
     def epic_mentioning(token):
         if not token:
@@ -538,7 +548,7 @@ def cmd_migrate(args, root):
         parent, _off = hits.get(slug, (None, None))
         rank = rank_of.get(slug)
         if parent is None and slug in cited_slugs:
-            parent = e0014
+            parent = parity_epic
 
         spec_path, plan_path = _path_only(spec_ref), _path_only(plan_ref)
         links = {}
@@ -573,7 +583,7 @@ def cmd_migrate(args, root):
         if area not in parity_area_feature:
             legacy_id = CARD_PREFIX + 'parity-' + re.sub(r'[^a-z0-9]+', '-', area.lower()).strip('-')
             typed = {'title': f"Parity — {area}", 'priority': 'need', 'decided': True,
-                     'parent': e0014, 'legacy_id': legacy_id, 'links': {}}
+                     'parent': parity_epic, 'legacy_id': legacy_id, 'links': {}}
             body = _default_body(f"Stories in {area} with no Feature of their own.")
             parity_area_feature[area] = upsert('feature', legacy_id, typed, body)
         return parity_area_feature[area]
@@ -638,9 +648,8 @@ def cmd_migrate(args, root):
                 typed['writes'] = writes
             upsert('task', task_legacy, typed, _default_body(''))
 
-    # ---- 5. Bugs ← hotfix/ci-diag reports on open cloud/* branches -------------------------
-    default_bug_epic = (env.load_product(getattr(args, 'product', None)).conventions.get('default_bug_epic')
-                        if _has_product_config(args) else None)
+    # ---- 5. Bugs ← hotfix/ci-diag reports on open work branches -----------------------------
+    default_bug_epic = conventions.get('default_bug_epic')
 
     def bug_parent(text):
         for slug, legacy in feature_legacy_id.items():
@@ -664,8 +673,7 @@ def cmd_migrate(args, root):
         upsert('bug', stem, typed, _default_body(first_paragraph(text)))
 
     # ---- 6. Decisions -----------------------------------------------------------------------
-    design_spec_name = env.load_product(getattr(args, 'product', None)).conventions.get('design_spec_name') \
-        if _has_product_config(args) else None
+    design_spec_name = conventions.get('design_spec_name')
     seen_nums = set()
     sources = [src.get('design_spec_text')]
     sources += [t for n, t in sorted(src.get('main_spec_texts', {}).items())
@@ -704,9 +712,28 @@ def cmd_migrate(args, root):
     return cmd_ingest(argparse.Namespace(fresh=False), root)
 
 
-def _has_product_config(args):
+def _product(args):
     try:
-        env.load_product(getattr(args, 'product', None))
-        return True
+        return env.load_product(getattr(args, 'product', None))
     except env.ConfigError:
-        return False
+        return None
+
+
+def _conventions(args):
+    """The product's ``conventions`` (``{}`` when there is no product config)."""
+    product = _product(args)
+    return (product.conventions if product is not None else None) or {}
+
+
+def goals_file_path(args, conventions):
+    """``conventions.goals_file`` under the product repo (an absolute path is kept); None when
+    the product keeps no goals file — the goals are the adopter's own, never a name this module
+    knows."""
+    name = conventions.get('goals_file')
+    product = _product(args)
+    if not name:
+        return None
+    name = os.path.expanduser(str(name))
+    if os.path.isabs(name) or product is None or not product.repo_dir:
+        return name
+    return os.path.join(product.repo_dir, name)

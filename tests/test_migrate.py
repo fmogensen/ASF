@@ -255,5 +255,37 @@ class MigrateEndToEndTests(unittest.TestCase):
             self.assertEqual(before[k], after[k], k)
 
 
+class MigrateConventionsTests(unittest.TestCase):
+    """The goals file and the parity Epic come from the product's conventions, never a name."""
+
+    def product(self, conventions, repo='/repo'):
+        from asf import env
+        return env.Product('p', {'repo_dir': repo, 'conventions': conventions})
+
+    def resolve(self, conventions, repo='/repo'):
+        with mock.patch.object(migrate.env, 'load_product', return_value=self.product(conventions, repo)):
+            args = types.SimpleNamespace(product='p')
+            return migrate.goals_file_path(args, migrate._conventions(args))
+
+    def test_goals_file_under_the_repo_absolute_kept_unset_none(self):
+        self.assertEqual(self.resolve({'goals_file': 'plans/goals.md'}), '/repo/plans/goals.md')
+        self.assertEqual(self.resolve({'goals_file': '/elsewhere/g.txt'}), '/elsewhere/g.txt')
+        self.assertIsNone(self.resolve({}))
+
+    def test_no_goals_file_is_reported_not_raised(self):
+        root = make_repo()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        ev = {'features': {}, 'stories': {}, 'prod_sha': None, 'dev_sha': None, 'checked': set(),
+              'main_sha': None, 'merged': {}, 'branches': []}
+        out = []
+        with mock.patch.object(migrate.env, 'load_product', return_value=self.product({})), \
+                mock.patch.object(migrate.evidence, 'load', return_value=ev), \
+                mock.patch.object(migrate.evidence, 'migrate_sources', return_value=dict(EMPTY_SRC)), \
+                mock.patch('builtins.print', lambda *a, **k: out.append(' '.join(map(str, a)))):
+            rc = migrate.cmd_migrate(types.SimpleNamespace(dry_run=True, fresh=False, product='p'), root)
+        self.assertEqual(rc, 0)
+        self.assertIn('epic (conventions.goals_file unset): no goals file — no Epics migrated', '\n'.join(out))
+
+
 if __name__ == '__main__':
     unittest.main()
