@@ -63,6 +63,30 @@ class TestYamlSubset(unittest.TestCase):
         self.assertIs(data['disabled'], False)
         self.assertIsNone(data['missing'])
 
+    def test_quoted_keys(self):
+        text = """
+        ci:
+          budgets_minutes:
+            site: 40
+            "*e2e*": 30
+            '*soak*': 35
+            default: 20
+          pools:
+            - "gpu-*": 2
+              note: "quoted key opening a list item"
+        """
+        data = env.loads(_dedent(text))
+        budgets = data['ci']['budgets_minutes']
+        self.assertEqual(budgets, {'site': 40, '*e2e*': 30, '*soak*': 35, 'default': 20})
+        self.assertEqual(data['ci']['pools'][0]['gpu-*'], 2)
+
+    def test_quoted_key_with_a_colon_in_it(self):
+        data = env.loads(_dedent("""
+        labels:
+          "a: b": 1
+        """))
+        self.assertEqual(data['labels'], {'a: b': 1})
+
 
 class TestProduct(unittest.TestCase):
     def test_load_product_from_tmp_home(self):

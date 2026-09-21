@@ -1,8 +1,8 @@
 """tools/cutover.sh and tools/rollback.sh on a fixture operator dir (``ASF_HOME=/tmp/asf/home``).
 
-`asf shadow-diff` doesn't exist yet at the time this kit was built (a separate, concurrent job);
-these tests stub it out with a tiny fake `asf.cli` subcommand shim isn't needed — instead they
-pass `--force` so the gate (item (a)) doesn't block on a command that may not be implemented yet.
+The gate (item (a)) also runs `asf doctor`, whose result depends on which CLIs are logged in on
+the machine running the tests; tests that are not about the gate pass `--force`, and the gate's
+own tests drive `asf shadow-diff --ref` against fixture trees.
 """
 import json
 import os
@@ -105,6 +105,37 @@ class CutoverFixtureTest(unittest.TestCase):
         result = run(CUTOVER, ['sample'], FIXTURE_HOME)
         self.assertEqual(result.returncode, 1)
         self.assertIn('refusing', result.stdout + result.stderr)
+
+    def _write_tree(self, root, table_text):
+        os.makedirs(os.path.join(root, 'tables'), exist_ok=True)
+        with open(os.path.join(root, 'index.json'), 'w') as f:
+            json.dump({'items': []}, f)
+        for name in ('roadmap', 'backlog', 'parity', 'prod', 'sessions', 'status'):
+            with open(os.path.join(root, 'tables', f'{name}.md'), 'w') as f:
+                f.write(f'stamp line\n{table_text}\n')
+
+    def test_ref_is_forwarded_to_shadow_diff(self):
+        shadow = os.path.join(FIXTURE_HOME, 'state', 'sample', 'shadow')
+        ref = os.path.join(FIXTURE_SRC, 'ref')
+        self._write_tree(shadow, '| a | b |')
+        self._write_tree(ref, '| a | b |')
+        result = run(CUTOVER, ['sample', '--ref', ref, '--force'], FIXTURE_HOME)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('shadow-diff: clean', result.stdout)
+
+    def test_ref_that_differs_from_the_shadow_fails_the_gate(self):
+        shadow = os.path.join(FIXTURE_HOME, 'state', 'sample', 'shadow')
+        ref = os.path.join(FIXTURE_SRC, 'ref')
+        self._write_tree(shadow, '| a | b |')
+        self._write_tree(ref, '| a | DIFFERENT |')
+        result = run(CUTOVER, ['sample', '--ref', ref], FIXTURE_HOME)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('DIFFERENT', result.stdout)
+        self.assertIn('refusing', result.stdout + result.stderr)
+
+    def test_missing_ref_says_so(self):
+        result = run(CUTOVER, ['sample'], FIXTURE_HOME)
+        self.assertIn('--ref', result.stdout + result.stderr)
 
     # ---- apply -------------------------------------------------------------------------------
 

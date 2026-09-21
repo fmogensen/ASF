@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tools/cutover.sh <product> [--force] [--apply]
+# tools/cutover.sh <product> [--ref DIR] [--force] [--apply]
 #
 # Switches one product's factory to `asf` in one command. Dry-run by default (prints every step
 # it would take, changes nothing); `--apply` performs them. Idempotent: a second `--apply` for a
@@ -7,7 +7,9 @@
 # Reversible: every file this moves or replaces lands under
 # `~/.ASF/state/<product>/retired/<date>/` first — `tools/rollback.sh <product>` restores it.
 #
-# Gate (a): `asf doctor` and `asf shadow-diff` must both exit 0, or pass --force.
+# Gate (a): `asf doctor` and `asf shadow-diff --ref DIR` must both exit 0, or pass --force. DIR is
+#      the reference tables/index.json the pre-asf tools produced for the same minute the shadow
+#      tick ran; without --ref, shadow-diff has nothing to compare against and the gate refuses.
 # (b): the operator's tick procedure file (config `operator.tick_file`) — step 0 calls
 #      `asf tick --product <p>`, its tables come from `asf <view> --product <p>`.
 # (c): the `/asf` plugin skills (config `operator.plugin_dir`) — each calls
@@ -25,24 +27,28 @@ ASF_HOME="${ASF_HOME:-$HOME/.ASF}"
 DATE="$(date -u +%Y-%m-%d)"
 
 PRODUCT=""
+REF=""
 FORCE=0
 APPLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
+    --ref)
+      [ $# -ge 2 ] || { echo "usage: cutover.sh <product> [--ref DIR] [--force] [--apply]" >&2; exit 2; }
+      REF="$2"; shift 2 ;;
     --force) FORCE=1; shift ;;
     --apply) APPLY=1; shift ;;
-    -h|--help) echo "usage: cutover.sh <product> [--force] [--apply]"; exit 0 ;;
-    -*) echo "usage: cutover.sh <product> [--force] [--apply]" >&2; exit 2 ;;
+    -h|--help) echo "usage: cutover.sh <product> [--ref DIR] [--force] [--apply]"; exit 0 ;;
+    -*) echo "usage: cutover.sh <product> [--ref DIR] [--force] [--apply]" >&2; exit 2 ;;
     *)
       if [ -n "$PRODUCT" ]; then
-        echo "usage: cutover.sh <product> [--force] [--apply]" >&2
+        echo "usage: cutover.sh <product> [--ref DIR] [--force] [--apply]" >&2
         exit 2
       fi
       PRODUCT="$1"; shift ;;
   esac
 done
 if [ -z "$PRODUCT" ]; then
-  echo "usage: cutover.sh <product> [--force] [--apply]" >&2
+  echo "usage: cutover.sh <product> [--ref DIR] [--force] [--apply]" >&2
   exit 2
 fi
 
@@ -112,7 +118,9 @@ fi
 set +e
 DOCTOR_OUT="$(run_asf doctor --product "$PRODUCT" 2>&1)"
 DOCTOR_RC=$?
-SHADOW_OUT="$(run_asf shadow-diff --product "$PRODUCT" 2>&1)"
+SHADOW_ARGS=(shadow-diff --product "$PRODUCT")
+[ -n "$REF" ] && SHADOW_ARGS+=(--ref "$REF")
+SHADOW_OUT="$(run_asf "${SHADOW_ARGS[@]}" 2>&1)"
 SHADOW_RC=$?
 set -e
 
