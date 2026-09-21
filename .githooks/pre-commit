@@ -6,6 +6,10 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
+# A hook inherits GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE; a test that runs git in a temporary
+# repository would then operate on this one instead.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+
 echo "pre-commit: running tests..."
 python3 -m unittest discover -s tests
 
