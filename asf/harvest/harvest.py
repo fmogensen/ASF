@@ -44,6 +44,7 @@ import tempfile
 
 from asf import env
 from asf.conventions import Conventions
+from asf.workers.health import pid_alive
 
 #: The conventions a caller with no Product reads: trunk `main`, code branches `worker/`, no
 #: test command (so the gate is `asf check` alone).
@@ -155,12 +156,30 @@ def mark_harvested(state_dir, job, sha):
         f.write(json.dumps({'job': job, 'harvested': sha}, sort_keys=True) + '\n')
 
 
+def reap_hold(record):
+    """Why a job's worktree may not be reaped, or None. Both must hold: the job's own record
+    carries a finished line (``ended``), and the process id in it is dead (B-0010)."""
+    if not record or not record.get('ended'):
+        return 'no finished line in its record'
+    pid = record.get('pid')
+    if pid_alive(pid):
+        return f'pid {pid} is still alive'
+    return None
+
+
 def reap(repo, state_dir, job, branch, sha=None):
+    """Remove the job's worktree, branch and registry row — but only once :func:`reap_hold`
+    clears it; otherwise print one hold line and touch nothing. True when reaped."""
+    why = reap_hold(read_sessions(state_dir).get(job))
+    if why:
+        hold(job, f'not reaped: {why}')
+        return False
     wt_path = os.path.join(state_dir, 'worktrees', job)
     if os.path.isdir(wt_path):
         sh(['git', 'worktree', 'remove', '--force', wt_path], cwd=repo)
     sh(['git', 'branch', '-D', branch], cwd=repo)
     mark_harvested(state_dir, job, sha)
+    return True
 
 
 # ------------------------------------------------------- conflict resolution --
@@ -462,6 +481,10 @@ def run_harvest(repo, state_dir, dry_run, conv=None):
         ahead = sh(['git', 'rev-list', '--count', f'origin/{conv.main}..{branch}'],
                    cwd=repo).stdout.strip()
         if ahead in ('', '0'):
+            continue
+        why = reap_hold(sessions.get(job))
+        if why:  # never land what cannot then be reaped: a live job still owns its worktree
+            hold(job, f'not reaped: {why}')
             continue
         harvest_branch(repo, state_dir, is_record, job, branch, dry_run, conv)
     return 0
