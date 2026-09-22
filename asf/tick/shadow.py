@@ -2,10 +2,12 @@
 
 A clone of a product's backlog, fetched and hard-reset to its origin's default branch before
 every tick (a stray local commit — from a prior run whose push finally failed — is discarded,
-not fast-forwarded past). Its push has one recovery (B-0030): when origin moved while the tick
-ran, the clone is rebased onto it once and pushed again, so the lines the steps appended
-(events, the tick line, filed cards) are not lost with a refused commit; a conflict on that
-rebase is aborted and the refusal stands. The live tick's clone is
+not fast-forwarded past). Its push is one function, :func:`push` (B-0030, B-0044): when origin
+moved while the tick ran — or again between the push's own fetch and push — the clone is
+rebased onto it and pushed again, up to :data:`PUSH_RETRIES` times, so the lines the steps
+appended (events, the tick line, filed cards) are not lost with a refused commit; a conflict on
+machine-owned content is resolved by ownership, any other conflict is aborted and the refusal
+stands. The live tick's clone is
 ``~/.ASF/state/<product>/record/``: it commits there and pushes (:func:`push`). The shadow tick's
 is ``…/shadow/``: it commits locally and never pushes, so it can be compared against the real
 tools without touching anything — see ``asf shadow-diff``. Neither ever touches the operator's own
@@ -106,41 +108,49 @@ def _push_once(path, branch):
     return _sh(['git', 'push', '-q', 'origin', f'HEAD:{branch}'], cwd=path, check=False).returncode == 0
 
 
-def push(path, out=None):
-    """``git push origin HEAD:<default branch>``; True if origin took it.
+#: How many times origin may move under one push before the tick gives up on this tick's
+#: lines (the next run resets the clone and re-derives, as the module docstring says).
+PUSH_RETRIES = 3
 
-    On a refusal: fetch; if ``origin/<branch>`` is still an ancestor of HEAD origin has not
-    moved and the refusal has another cause (a hook, an unreachable remote) — False, as before.
-    If origin moved (a card pushed by hand while the tick ran — B-0030), rebase onto it once and
-    push again: True, and one line through ``out`` when given. A rebase that conflicts on cards or ``index.json`` is resolved by ownership and
-    re-derived (B-0044); any other conflict is aborted and the push is False: the clone is derived state plus that tick's appended lines,
-    and the next run resets it and re-derives (the appended lines of that one tick are lost, as
-    the docstring above says)."""
+
+def push(path, out=None, retries=PUSH_RETRIES):
+    """``git push origin HEAD:<default branch>``; True if origin took it. The one record push
+    (B-0030, B-0044): every path that moves the clone onto origin lives here.
+
+    On a refusal: fetch; if ``origin/<branch>`` is still an ancestor of HEAD, origin has not
+    moved and the refusal has another cause (a hook, an unreachable remote) — False. If origin
+    moved — a card pushed by hand while the tick ran, or between this function's fetch and its
+    push — rebase onto it and push again, up to ``retries`` times, so a race between the fetch
+    and the push is just the next round. A rebase that conflicts on cards or ``index.json`` is
+    resolved by ownership (the hand side's typed fields and body, the tick's derivation re-run)
+    and continued; any other conflict is aborted and the push is False. One line through
+    ``out`` when the push needed a rebase."""
     branch = _default_branch(path)
     if _push_once(path, branch):
         return True
-    if _sh(['git', 'fetch', '-q', 'origin'], cwd=path, check=False).returncode != 0:
-        return False
-    if _sh(['git', 'merge-base', '--is-ancestor', f'origin/{branch}', 'HEAD'],
-           cwd=path, check=False).returncode == 0:
-        return False
-    rebase = _sh(['git', '-c', 'core.editor=true', 'rebase', f'origin/{branch}'],
-                 cwd=path, check=False)
     rederived = False
-    while rebase.returncode != 0:
-        if not _resolve_by_ownership(path):
-            _sh(['git', 'rebase', '--abort'], cwd=path, check=False)
+    for _round in range(retries):
+        if _sh(['git', 'fetch', '-q', 'origin'], cwd=path, check=False).returncode != 0:
             return False
-        rederived = True
-        rebase = _sh(['git', '-c', 'core.editor=true', 'rebase', '--continue'], cwd=path, check=False)
-    if not _push_once(path, branch):
-        return False
-    if out:
-        if rederived:
-            out(f'tick: origin moved — re-derived onto origin/{branch} and pushed')
-        else:
-            out(f'tick: origin moved during the tick — rebased onto origin/{branch} and pushed')
-    return True
+        if _sh(['git', 'merge-base', '--is-ancestor', f'origin/{branch}', 'HEAD'],
+               cwd=path, check=False).returncode == 0:
+            return False  # origin has not moved: the refusal has another cause
+        rebase = _sh(['git', '-c', 'core.editor=true', 'rebase', f'origin/{branch}'],
+                     cwd=path, check=False)
+        while rebase.returncode != 0:
+            if not _resolve_by_ownership(path):
+                _sh(['git', 'rebase', '--abort'], cwd=path, check=False)
+                return False
+            rederived = True
+            rebase = _sh(['git', '-c', 'core.editor=true', 'rebase', '--continue'], cwd=path, check=False)
+        if _push_once(path, branch):
+            if out:
+                if rederived:
+                    out(f'tick: origin moved — re-derived onto origin/{branch} and pushed')
+                else:
+                    out(f'tick: origin moved during the tick — rebased onto origin/{branch} and pushed')
+            return True
+    return False
 
 
 def _stage(path, n, rel):

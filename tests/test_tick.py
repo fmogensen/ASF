@@ -210,6 +210,87 @@ class RecordStepTests(TickTestCase):
         self.assertEqual(_git(['show', 'main:bugs/B-0001.md'], self.origin), '---\nid: B-0001\n---')
         self.assertEqual(lines, ['tick: origin moved during the tick — rebased onto origin/main and pushed'])
 
+    def moving_origin(self, times):
+        """A ``_push_once`` that moves origin — a hand commit pushed from the operator's clone —
+        right before each of its first ``times`` attempts: the race between the push's own
+        fetch/rebase and its push, ``times`` times over."""
+        real = shadow._push_once
+        calls = []
+
+        def push_once(path, branch):
+            n = len(calls)
+            calls.append(branch)
+            if n < times:
+                self.operator_commits_and_pushes(f'bugs/B-{n + 1:04d}.md', f'---\nid: B-{n + 1:04d}\n---\n',
+                                                 f'bug(B-{n + 1:04d}): by hand, mid-push')
+            return real(path, branch)
+        return push_once, calls
+
+    def test_f0087_origin_moving_between_the_fetch_and_the_push_is_the_next_round(self):
+        # F-0087, class "push races": origin moves in the window between push()'s own fetch
+        # and its push — twice — and both the tick's line and every hand commit land
+        path = self.clone_and_operator()
+        os.makedirs(os.path.join(path, 'metrics', 'ticks'))
+        with open(os.path.join(path, 'metrics', 'ticks', 'x.jsonl'), 'w') as f:
+            f.write('{"tick": 1}\n')
+        self.assertTrue(shadow.commit_local(path, 'tick: state t'))
+        push_once, calls = self.moving_origin(times=2)
+        lines = []
+        with mock.patch.object(shadow, '_push_once', push_once):
+            self.assertTrue(shadow.push(path, out=lines.append))
+        self.assertEqual(len(calls), 3)   # refused, refused, pushed
+        self.assertEqual(self.origin_commits(), 4)
+        subjects = _git(['log', '--format=%s', 'main'], self.origin).splitlines()
+        self.assertEqual(subjects[0], 'tick: state t')
+        self.assertEqual(sorted(subjects[1:3]), ['bug(B-0001): by hand, mid-push', 'bug(B-0002): by hand, mid-push'])
+        self.assertEqual(_git(['show', 'main:metrics/ticks/x.jsonl'], self.origin), '{"tick": 1}')
+        self.assertEqual(lines, ['tick: origin moved during the tick — rebased onto origin/main and pushed'])
+        for d in ('rebase-merge', 'rebase-apply'):
+            self.assertFalse(os.path.isdir(os.path.join(path, '.git', d)), d)
+
+    def test_f0087_origin_moving_past_the_retry_cap_is_refused_and_the_clone_is_clean(self):
+        path = self.clone_and_operator()
+        with open(os.path.join(path, 'state.md'), 'w') as f:
+            f.write('derived\n')
+        self.assertTrue(shadow.commit_local(path, 'tick: state t'))
+        push_once, calls = self.moving_origin(times=shadow.PUSH_RETRIES + 1)
+        with mock.patch.object(shadow, '_push_once', push_once):
+            self.assertFalse(shadow.push(path))
+        self.assertEqual(len(calls), shadow.PUSH_RETRIES + 1)
+        for d in ('rebase-merge', 'rebase-apply'):
+            self.assertFalse(os.path.isdir(os.path.join(path, '.git', d)), d)
+        # the next record run resets and re-derives, as always
+        rc, out = self.run_tick(steps='record')
+        self.assertEqual(rc, 0)
+        self.assertIn('committed and pushed', out)
+
+    def test_f0087_typed_field_and_machine_block_on_one_card_resolve_by_ownership_under_the_race(self):
+        # B-0044 under the race: the hand commit lands mid-push and touches the card the tick
+        # re-derived; the typed line is the hand's, the machine block the tick's, nothing is lost
+        from asf.record import frontmatter
+        marker = frontmatter.MARKER
+        path = self.clone_and_operator()
+        with open(os.path.join(path, 'features', 'F-0001.md'), 'w') as f:
+            f.write(f'---\nid: F-0001\ntitle: sample\n{marker}\nstate: Active\n---\n')
+        self.assertTrue(shadow.commit_local(path, 'tick: state t'))
+        real = shadow._push_once
+        calls = []
+
+        def push_once(p, branch):
+            calls.append(branch)
+            if len(calls) == 1:
+                self.operator_commits_and_pushes('features/F-0001.md',
+                                                 '---\nid: F-0001\ntitle: sample\ndecided: true\n---\n',
+                                                 'feature(F-0001): decided by hand')
+            return real(p, branch)
+        lines = []
+        with mock.patch.object(shadow, '_push_once', push_once):
+            self.assertTrue(shadow.push(path, out=lines.append))
+        self.assertEqual(lines, ['tick: origin moved — re-derived onto origin/main and pushed'])
+        pushed = _git(['show', 'main:features/F-0001.md'], self.origin)
+        self.assertIn('decided: true', pushed)
+        self.assertNotIn('<<<<<<<', pushed)
+
     def test_conflicting_hand_commit_leaves_the_clone_clean_and_reports_refused(self):
         """B-0030, the conflict case (a body both sides edited, B-0044): the rebase is aborted, push() is False, no rebase is left
         in progress, and the next record run resets and re-derives as today."""
