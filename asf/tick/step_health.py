@@ -6,9 +6,11 @@ live sessions that went silent (``STALL``) or lost their pid (``DEAD``). Both pr
 lines (``ended`` / ``orphan`` / ``reaped`` / ``keep`` …, ``STALL`` / ``DEAD``).
 
 A dead session — ``DEAD`` from the stall check, or ended ``dead pid`` by health this tick — gets
-the workers module's same-session correction (``correct_once``) first. Only a session whose
-correction already ran (or just ran and failed again) becomes a ``needs-operator`` event, once:
-the session is marked ``operator_flagged`` so the next tick does not raise it again.
+one cold retry first (``correct_once``): its own job, its own ledger line, so the dead run's
+``dead pid`` record stands as what actually happened and the retry's outcome is never folded
+onto it (D-0048, part b). Only a session whose correction already ran (or just ran and failed
+again) becomes a ``needs-operator`` event, once: the session is marked ``operator_flagged`` so
+the next tick does not raise it again.
 """
 from asf.workers import health as health_mod
 from asf.workers import pool as pool_mod
@@ -63,12 +65,8 @@ def handle_dead(ctx, session, runtime_fn=_runtime, out=print):
         except (OSError, KeyError) as e:
             out(f"DEAD  {job:<24} correction could not start: {e}")
             ok = False
-        # the correction's outcome is the session's outcome; without it the record would keep
-        # `dead pid` and harvest would never land the branch (B-0028)
-        pool_mod.update_session(product, job, ended=pool_mod.now_iso(),
-                                end_reason='finished' if ok else 'failed', rc=0 if ok else 1)
         if ok:
-            out(f"DEAD  {job:<24} corrected in the same session")
+            out(f"DEAD  {job:<24} corrected — relaunched cold as {job}-correction")
             return 'corrected'
     line = operator_line(session)
     ctx.event('needs-operator', job=job, item=session.get('item'), text=line)

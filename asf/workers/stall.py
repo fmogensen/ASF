@@ -1,4 +1,4 @@
-"""asf.workers.stall — which live sessions need a look, and the same-session correction hook.
+"""asf.workers.stall — which live sessions need a look, and the cold-retry correction hook.
 
 ``stall(product)`` over the live sessions in the ledger:
 
@@ -9,11 +9,13 @@
 ``~/.ASF/state/<product>/stall-ack.txt`` suppresses a known one: a line ``<job>`` acks it in
 any state, ``<job> STALL`` / ``<job> DEAD`` only in that state.
 
-``correct_once(product, session, error_text, runtime)`` — a step that fails gets one more try in
-the same session context before anyone files a Bug: the runtime is re-invoked with the original
-brief + ``CORRECTION: the step failed with:`` + the error, and ``corrected: 1`` is recorded on
-the session. It returns True when that retry succeeds; a second failure (or a session already
-corrected once) returns False so the caller files the Bug.
+``correct_once(product, session, error_text, runtime)`` — a step that fails gets one more try,
+cold, before anyone files a Bug: the runtime is relaunched in the same worktree with the original
+brief + ``CORRECTION: the step failed with:`` + the error, but under its own job name and log —
+never the dead session's — so the retry's own ledger line carries its outcome and the dead run's
+line is never rewritten to look like the one that passed (D-0048, part b). ``corrected: 1`` is
+recorded on the original session so a second failure (or a session already corrected once)
+returns False and the caller files the Bug instead.
 """
 import os
 import re
@@ -92,7 +94,8 @@ def stall(product, now=None, alive=health_mod.pid_alive, out=print):
 
 
 def correct_once(product, session, error_text, runtime):
-    """One same-session retry with the error appended to the brief. True = it now passes."""
+    """One retry, cold: its own job and log, its own ledger line — never the dead session's.
+    True = it now passes."""
     if session.get('corrected'):
         return False
     with open(session['brief'], encoding='utf-8') as f:
@@ -101,14 +104,23 @@ def correct_once(product, session, error_text, runtime):
         else session['brief'] + '.correction'
     with open(path, 'w', encoding='utf-8') as f:
         f.write(original + CORRECTION_HEAD + error_text.rstrip() + '\n')
-    job = runtime_mod.Job(product.name, session['job'], session.get('worktree'), path,
+    retry_job = f"{session['job']}-correction"
+    job = runtime_mod.Job(product.name, retry_job, session.get('worktree'), path,
                           session.get('model'), account=_account(session),
                           env={'BACKLOG_ID_RANGE': session['id_range']}
-                          if session.get('id_range') else None,
-                          log_path=session.get('log'))
+                          if session.get('id_range') else None)
     result = runtime.run(job, wait=True)
     pool_mod.update_session(product, session['job'], corrected=1)
     session['corrected'] = 1
+    pool_mod.append_session(product, {
+        'job': retry_job, 'item': session.get('item'), 'feature': session.get('feature'),
+        'kind': session.get('kind'), 'account': session.get('account'),
+        'model': session.get('model'), 'pid': result.pid, 'worktree': session.get('worktree'),
+        'branch': session.get('branch'), 'started': pool_mod.now_iso(),
+        'log': result.log_path, 'brief': path, 'id_range': session.get('id_range'),
+        'runtime': runtime.name, 'ended': pool_mod.now_iso(),
+        'end_reason': 'finished' if result.ok else 'failed', 'rc': 0 if result.ok else 1,
+    })
     return bool(result.ok)
 
 

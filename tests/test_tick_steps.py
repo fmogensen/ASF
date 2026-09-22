@@ -168,25 +168,31 @@ class HealthStepTests(StepsTestCase):
         ctx = self.ctx()
         step_health.run(ctx, out=self.lines.append, runtime_fn=lambda: fake)
         self.assertIn('ended     fix-b-0001               dead pid', self.lines)
-        self.assertIn('DEAD  fix-b-0001               corrected in the same session', self.lines)
+        self.assertIn('DEAD  fix-b-0001               corrected — relaunched cold as '
+                      'fix-b-0001-correction', self.lines)
         self.assertEqual(len(fake.calls), 1)
         self.assertIn('CORRECTION: the step failed with:', fake.calls[0][1])
         self.assertEqual(self.events(ctx), [])
 
-    def test_b0028_corrected_session_is_recorded_finished(self):
+    def test_b0039_corrected_session_is_recorded_finished_as_its_own_job(self):
         self.dead_session()
         fake = runtime_mod.FakeRuntime([{'ok': True}])
         step_health.run(self.ctx(), out=self.lines.append, runtime_fn=lambda: fake)
-        s = pool_mod.load_sessions(self.product)['fix-b-0001']
+        sessions = pool_mod.load_sessions(self.product)
+        # the dead run's own record stands — it is not rewritten as the one that passed
+        self.assertEqual(sessions['fix-b-0001']['end_reason'], 'dead pid')
+        s = sessions['fix-b-0001-correction']
         self.assertEqual(s['end_reason'], 'finished')
         self.assertEqual(s['rc'], 0)
         self.assertTrue(s.get('ended'))
 
-    def test_b0028_failed_correction_is_recorded_failed(self):
+    def test_b0039_failed_correction_is_recorded_failed_as_its_own_job(self):
         self.dead_session()
         fake = runtime_mod.FakeRuntime([{'ok': False, 'result': 'still broken'}])
         step_health.run(self.ctx(), out=self.lines.append, runtime_fn=lambda: fake)
-        s = pool_mod.load_sessions(self.product)['fix-b-0001']
+        sessions = pool_mod.load_sessions(self.product)
+        self.assertEqual(sessions['fix-b-0001']['end_reason'], 'dead pid')
+        s = sessions['fix-b-0001-correction']
         self.assertEqual(s['end_reason'], 'failed')
         self.assertEqual(s['rc'], 1)
 

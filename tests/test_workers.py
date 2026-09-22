@@ -1,5 +1,5 @@
 """asf.workers — runtime command line, pick rule, S1 reserve, spawn, wave, health, stall,
-same-session correction. Every run goes through the fake runtime; git is a bare repo in a temp
+cold-retry correction. Every run goes through the fake runtime; git is a bare repo in a temp
 dir; no network, no account, no real product."""
 import argparse
 import contextlib
@@ -721,6 +721,26 @@ class TestCorrectOnce(Home):
         session = pool_mod.load_sessions(self.product)['j']
         self.assertTrue(stall_mod.correct_once(self.product, session, 'boom',
                                                runtime_mod.FakeRuntime([{'ok': True}])))
+
+    def test_b0039_the_retry_relaunches_cold_its_own_job_and_log(self):
+        """D-0048 part b: a correction is a fresh session, not the dead one resumed — its own
+        job and log, its own ledger line; the dead run's record is never rewritten to look like
+        the one that passed."""
+        rec = spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b\n',
+                              runtime=runtime_mod.FakeRuntime([{'ok': False}]), cfg=self.cfg)
+        session = pool_mod.load_sessions(self.product)['j']
+        self.assertTrue(stall_mod.correct_once(self.product, session, 'boom',
+                                               runtime_mod.FakeRuntime([{'ok': True}])))
+        sessions = pool_mod.load_sessions(self.product)
+        new_jobs = [j for j in sessions if j != 'j']
+        self.assertEqual(len(new_jobs), 1, sessions)
+        retry = sessions[new_jobs[0]]
+        self.assertNotEqual(retry['log'], session['log'])
+        self.assertEqual(retry['end_reason'], 'finished')
+        self.assertEqual(retry['rc'], 0)
+        self.assertEqual(retry['branch'], rec['branch'])
+        self.assertEqual(retry['worktree'], rec['worktree'])
+        self.assertNotIn('end_reason', sessions['j'])
 
 
 class TestCli(unittest.TestCase):
