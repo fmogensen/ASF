@@ -90,7 +90,7 @@ class T10GateScenario(unittest.TestCase):
         for f in FOLDERS:
             os.makedirs(os.path.join(self.root, f))
         for d in ('inbox/done', 'groom', 'metrics/ci', 'metrics/ticks', 'metrics/sessions',
-                 'metrics/daily', 'releases', 'tools/checks'):
+                 'metrics/events', 'metrics/daily', 'releases', 'tools/checks'):
             os.makedirs(os.path.join(self.root, d))
         with open(os.path.join(self.root, 'tools', 'limits.json'), 'w', encoding='utf-8') as f:
             json.dump(LIMITS, f)

@@ -14,6 +14,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 from asf import env
 from asf.conventions import Conventions
 from asf.harvest import harvest
+from asf.init import ITEM_FOLDERS, STREAM_FOLDERS
 
 # The product under test: a record repo on trunk `main`, code branches under `worker/`, and a
 # test command of its own. Nothing here is a default of the package — harvest reads all three.
@@ -151,6 +152,12 @@ def make_repo():
     sh(['git', 'config', 'user.email', 'test@example.com'], cwd=repo)
     sh(['git', 'config', 'commit.gpgsign', 'false'], cwd=repo)
 
+    # a `.gitkeep` per folder, not a bare `os.makedirs` — git tracks no empty directory, so an
+    # untracked one would vanish the moment a job's `git worktree add` checks out a branch
+    for f in ITEM_FOLDERS + STREAM_FOLDERS:
+        d = os.path.join(repo, f)
+        os.makedirs(d, exist_ok=True)
+        open(os.path.join(d, '.gitkeep'), 'w').close()
     os.makedirs(os.path.join(repo, 'tools'), exist_ok=True)
     with open(os.path.join(repo, 'tools', 'backlog.py'), 'w', encoding='utf-8') as f:
         f.write(FIXTURE_BACKLOG_PY)

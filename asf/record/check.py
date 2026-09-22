@@ -4,6 +4,7 @@ import json
 import os
 import re
 
+from asf.init import ITEM_FOLDERS as LAYOUT_FOLDERS, STREAM_FOLDERS
 from asf.record import frontmatter
 from asf.record.core import (
     BARE_DECISION_RE, FOLDER_TO_TYPE, ID_RE, NO_PARENT_TYPES, PARENT_TYPES, build_index_data,
@@ -27,6 +28,13 @@ def cmd_check(args, root):
     derived = compute_derived(canonical)
 
     findings = []  # (relpath, line, message)
+
+    # the layout the README names — item folders plus the stream folders `asf init` lays down;
+    # a record missing one of these isn't a bad item, it's a tick waiting to fail on a missing dir
+    layout_folders = LAYOUT_FOLDERS + STREAM_FOLDERS
+    for folder in layout_folders:
+        if not os.path.isdir(os.path.join(root, folder)):
+            findings.append((folder, 1, f"{folder}/ is missing (run `mkdir -p {folder}`)"))
 
     def add(rec_or_path, line, msg):
         relpath = rec_or_path if isinstance(rec_or_path, str) else rec_or_path['relpath']
@@ -171,7 +179,8 @@ def cmd_check(args, root):
             findings.append(('index.json', 1, 'index.json is stale (run `asf index`)'))
 
     if restrict is not None:
-        findings = [f for f in findings if f[0] in restrict or f[0] == 'index.json']
+        findings = [f for f in findings
+                    if f[0] in restrict or f[0] == 'index.json' or f[0] in layout_folders]
 
     findings.sort(key=lambda f: (f[0], f[1]))
     for path, line, msg in findings:

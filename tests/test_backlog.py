@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from asf.init import STREAM_FOLDERS
 from asf.record import frontmatter
 from asf.record import check as check_mod
 from asf import hermetic
@@ -212,7 +213,22 @@ class NewSetFieldsTests(unittest.TestCase):
 class CheckCommandTests(unittest.TestCase):
     def setUp(self):
         self.root = make_repo()
+        for f in STREAM_FOLDERS:
+            os.makedirs(os.path.join(self.root, f))
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+
+    def test_missing_layout_folder_finding(self):
+        # B-0005: `check` validated the record's items but never the layout the README names —
+        # a backlog missing a stream folder (inbox/, groom/, releases/, a metrics/ stream) passed.
+        root = make_repo()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        write_item(root, 'E-0001', 'epic', 'Factory')
+        run(['index'], root)
+        r = run(['check'], root)
+        self.assertEqual(r.returncode, 1)
+        for f in STREAM_FOLDERS:
+            self.assertIn(f"{f}/ is missing", r.stdout)
+        self.assertIn('mkdir -p inbox', r.stdout)
 
     def test_clean_repo_passes(self):
         write_item(self.root, 'E-0001', 'epic', 'Factory')

@@ -12,6 +12,7 @@ import unittest
 from unittest import mock
 
 from asf import env
+from asf.init import STREAM_FOLDERS
 from asf.record import frontmatter
 from asf.record import match
 from asf.record.check import cmd_check
@@ -81,8 +82,8 @@ def build_repo():
     """E-0001 Billing (budget 100) > F-0001 Free plan (FREE-1, PR 601) > S-0001 > T-0002; F-0001 > T-0001 (PR 623,
     FREE-1/T3); E-0001 > F-0002 Other > B-0001; then `asf index`."""
     root = make_repo()
-    os.makedirs(os.path.join(root, 'metrics'), exist_ok=True)
-    os.makedirs(os.path.join(root, 'releases'), exist_ok=True)
+    for f in STREAM_FOLDERS:
+        os.makedirs(os.path.join(root, f), exist_ok=True)
     write_item(root, 'E-0001', 'epic', 'Billing', typed_lines=('budget_usd: 100',))
     write_item(root, 'F-0001', 'feature', 'Free plan', parent='E-0001',
                typed_lines=('priority: need', 'legacy_id: FREE-1', 'links:', '  prs: [601]'))
