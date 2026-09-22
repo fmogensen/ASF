@@ -103,15 +103,16 @@ def command_timeout():
     return v if isinstance(v, (int, float)) and v > 0 else DEFAULT_LEGACY_TIMEOUT_S
 
 
-def run_command(step, command, timeout, emit=print):
-    """Run ``command`` (split shell-style, ``~`` expanded, no shell) and send each output line —
-    stderr merged in — to ``emit`` as ``[command:<step>] <line>``. Returns the exit code; 124 if it
-    outlived ``timeout`` (its whole process group is killed)."""
+def run_command(step, command, timeout, emit=print, cwd=None):
+    """Run ``command`` (split shell-style, ``~`` expanded, no shell) in ``cwd`` — the product's
+    ``repo_dir`` (B-0050: never the tick's own cwd) — and send each output line, stderr merged
+    in, to ``emit`` as ``[command:<step>] <line>``. Returns the exit code; 124 if it outlived
+    ``timeout`` (its whole process group is killed)."""
     prefix = f'[command:{step}] '
     argv = [os.path.expanduser(a) for a in shlex.split(command)]
     try:
         proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                                start_new_session=True)
+                                start_new_session=True, cwd=cwd or None)
     except OSError as e:
         emit(f'{prefix}cannot start: {e}')
         return 127

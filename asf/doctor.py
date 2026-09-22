@@ -354,5 +354,10 @@ def cmd_doctor(args, root):
         print(format_scheduler(product_name, srows))
         red = red or scheduler_is_red(srows)
 
-    print(stamp('doctor'))
+    repo = None
+    try:
+        repo = env.load_product(product_name).repo_dir
+    except env.ConfigError:
+        pass
+    print(stamp('doctor', repo))
     return 1 if red else 0

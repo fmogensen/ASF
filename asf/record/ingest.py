@@ -213,7 +213,14 @@ def _ingest_fields(machine, new_state, stage, ev_lines, blocked_pair, now):
 
 
 def cmd_ingest(args, root):
+    # the evidence is the record's product's (B-0050): the resolved --product, else the default
+    # when one is configured (a record with no product configured reads evidence's own default)
     name = getattr(args, 'product', None)
+    if not name:
+        try:
+            name = env.default_product_name()
+        except env.ConfigError:
+            name = None
     ev = evidence.load(fresh=getattr(args, 'fresh', False),
                        product=env.load_product(name) if name else None)
     by_id, parse_errors = load_items(root)

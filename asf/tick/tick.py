@@ -239,7 +239,8 @@ def _run_steps(args, product, ctx, rows):
         if owner == 'asf':
             step_rc = run_asf_step(step, ctx)
         else:
-            step_rc = steps.run_command(step, command, steps.command_timeout())
+            step_rc = steps.run_command(step, command, steps.command_timeout(),
+                                        cwd=product.repo_dir or None)
             if step_rc:
                 print(f"tick: step {step} exited {step_rc}")
         ran.append({'step': step, 'ok': not step_rc, 'seconds': round(time.monotonic() - t0, 1)})
