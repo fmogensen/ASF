@@ -4,15 +4,27 @@ The policy pass itself, its four rules, the suppression pass, the answers file a
 all arrive in later Tasks of F-0085's plan; this file gains their test classes as those Tasks
 land. For now: the single gate, ``open_questions``, and the threshold readers.
 """
+import datetime
 import os
 import shutil
+import tempfile
 import unittest
 
 from asf.env import Product
 from asf.groom import groom, policy
 from asf.record import frontmatter
-from asf.record.core import canonicalize, load_items, today
+from asf.record.core import canonicalize, compute_derived, load_items, today
 from tests.test_groom import make_repo, run, write_item
+
+UTC = datetime.timezone.utc
+
+
+def _fresh_machine_lines():
+    """``machine_lines`` for an item that must not also show up in ``undecided3``/``undecided14``
+    (whose age is measured against the real wall clock, not ``--date``) — a bug or feature whose
+    own section (``auto_bugs``, ``dupes``, ``blocked_closed``) is the only one meant to carry it."""
+    now = datetime.datetime.now(UTC).strftime('%Y-%m-%dT%H:%M:%SZ')
+    return ['state: New', f'stage_since: {now}', f'updated: {now}']
 
 
 def product(approvals=None, groom=None):
@@ -120,6 +132,259 @@ class ThresholdTests(unittest.TestCase):
         p = product(groom={'policies': {'close_exact_duplicate': 'off'}})
         self.assertFalse(policy.policy_on(p, 'close_exact_duplicate'))
         self.assertTrue(policy.policy_on(p, 'decide_recurring_bug'))
+
+
+class PolicyTests(unittest.TestCase):
+    """T2: one answering case and one nearest-miss case per policy, calling each function
+    directly against real parsed records (no ``cmd_groom`` involved)."""
+
+    def setUp(self):
+        self.root = make_repo()
+        write_item(self.root, 'E-0009', 'epic', 'Factory', typed_lines=['decided: true'])
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _load(self):
+        by_id, _errors = load_items(self.root)
+        canonical, _dupes = canonicalize(by_id)
+        return canonical, compute_derived(canonical)
+
+    def _ctx(self, **kw):
+        kw.setdefault('date', '2026-09-22')
+        kw.setdefault('now', datetime.datetime(2026, 9, 22, tzinfo=UTC))
+        return policy.Ctx(**kw)
+
+    def test_policy_names_match_groom_POLICY_NAMES(self):
+        self.assertEqual([name for name, _section, _fn in policy.POLICIES], list(groom.POLICY_NAMES))
+
+    # -- unblock_on_closed -----------------------------------------------------------------
+
+    def test_unblock_on_closed_answers_when_the_blocker_is_closed(self):
+        write_item(self.root, 'F-0001', 'feature', 'Blocker', parent='E-0009',
+                  typed_lines=['decided: true'],
+                  machine_lines=['state: Closed', 'stage_since: 2026-09-01T00:00:00Z',
+                                 'updated: 2026-09-01T00:00:00Z'])
+        write_item(self.root, 'F-0002', 'feature', 'Blocked', parent='E-0009',
+                  typed_lines=['decided: true', 'blockedBy: [F-0001]'])
+        canonical, derived = self._load()
+        ans = policy.unblock_on_closed('F-0002', canonical['F-0002'], canonical, derived, self._ctx())
+        self.assertEqual(ans, policy.Answer('unblock F-0001', 'unblock', 'F-0001',
+                                            'blocker F-0001 is Closed'))
+
+    def test_unblock_on_closed_nearest_miss_blocker_still_active(self):
+        write_item(self.root, 'F-0001', 'feature', 'Blocker', parent='E-0009',
+                  typed_lines=['decided: true'],
+                  machine_lines=['state: Active', 'stage_since: 2026-09-01T00:00:00Z',
+                                 'updated: 2026-09-01T00:00:00Z'])
+        write_item(self.root, 'F-0002', 'feature', 'Blocked', parent='E-0009',
+                  typed_lines=['decided: true', 'blockedBy: [F-0001]'])
+        canonical, derived = self._load()
+        ans = policy.unblock_on_closed('F-0002', canonical['F-0002'], canonical, derived, self._ctx())
+        self.assertIsNone(ans)
+
+    # -- close_exact_duplicate --------------------------------------------------------------
+
+    def test_close_exact_duplicate_answers_at_or_above_the_threshold(self):
+        write_item(self.root, 'F-0001', 'feature', 'Free plan signup flow', parent='E-0009',
+                  typed_lines=['decided: true'])
+        write_item(self.root, 'F-0002', 'feature', 'Free plan signup flow redesign', parent='E-0009',
+                  typed_lines=['decided: false'])
+        canonical, derived = self._load()
+        ans = policy.close_exact_duplicate('F-0002', canonical['F-0002'], canonical, derived,
+                                           self._ctx(duplicate_overlap=0.8))
+        self.assertEqual(ans.word, 'no')
+        self.assertEqual(ans.field, 'removed')
+        self.assertIn('duplicate of F-0001 (overlap 0.80)', ans.why)
+
+    def test_close_exact_duplicate_nearest_miss_below_the_threshold(self):
+        write_item(self.root, 'F-0001', 'feature', 'Free plan signup flow', parent='E-0009',
+                  typed_lines=['decided: true'])
+        write_item(self.root, 'F-0002', 'feature', 'Free plan signup flow redesign', parent='E-0009',
+                  typed_lines=['decided: false'])
+        canonical, derived = self._load()
+        ans = policy.close_exact_duplicate('F-0002', canonical['F-0002'], canonical, derived,
+                                           self._ctx(duplicate_overlap=0.81))
+        self.assertIsNone(ans)
+
+    # -- decide_recurring_bug ----------------------------------------------------------------
+
+    def test_decide_recurring_bug_answers_at_the_threshold_count(self):
+        write_item(self.root, 'B-0001', 'bug', 'Checkout fails', parent='E-0009',
+                  typed_lines=['decided: false', 'signature: checkout-fail', 'count: 2'])
+        canonical, derived = self._load()
+        ans = policy.decide_recurring_bug('B-0001', canonical['B-0001'], canonical, derived,
+                                          self._ctx(recurring_bug_count=2))
+        self.assertEqual(ans, policy.Answer('yes', 'decided', True, 'auto-filed, seen 2 times'))
+
+    def test_decide_recurring_bug_nearest_miss_count_one(self):
+        write_item(self.root, 'B-0001', 'bug', 'Checkout fails', parent='E-0009',
+                  typed_lines=['decided: false', 'signature: checkout-fail', 'count: 1'])
+        canonical, derived = self._load()
+        ans = policy.decide_recurring_bug('B-0001', canonical['B-0001'], canonical, derived,
+                                          self._ctx(recurring_bug_count=2))
+        self.assertIsNone(ans)
+
+    # -- close_on_starvation ------------------------------------------------------------------
+
+    def test_close_on_starvation_answers_past_the_limit(self):
+        write_item(self.root, 'F-0003', 'feature', 'Stale idea', parent='E-0009',
+                  typed_lines=['decided: false'],
+                  machine_lines=['state: New', 'stage_since: 2026-09-01T00:00:00Z',
+                                 'updated: 2026-09-01T00:00:00Z'])
+        canonical, derived = self._load()
+        ans = policy.close_on_starvation('F-0003', canonical['F-0003'], canonical, derived,
+                                         self._ctx(now=datetime.datetime(2026, 9, 16, 1, 0, 0, tzinfo=UTC),
+                                                   undecided_close='14d'))
+        self.assertEqual(ans.word, 'no')
+        self.assertEqual(ans.field, 'removed')
+        self.assertIn('starvation policy', ans.why)
+
+    def test_close_on_starvation_nearest_miss_one_hour_short(self):
+        write_item(self.root, 'F-0003', 'feature', 'Stale idea', parent='E-0009',
+                  typed_lines=['decided: false'],
+                  machine_lines=['state: New', 'stage_since: 2026-09-01T00:00:00Z',
+                                 'updated: 2026-09-01T00:00:00Z'])
+        canonical, derived = self._load()
+        ans = policy.close_on_starvation('F-0003', canonical['F-0003'], canonical, derived,
+                                         self._ctx(now=datetime.datetime(2026, 9, 14, 23, 0, 0, tzinfo=UTC),
+                                                   undecided_close='14d'))
+        self.assertIsNone(ans)
+
+    def test_close_on_starvation_never_answers_an_item_a_session_ever_ran_on(self):
+        write_item(self.root, 'F-0003', 'feature', 'Stale idea', parent='E-0009',
+                  typed_lines=['decided: false'],
+                  machine_lines=['state: New', 'stage_since: 2026-09-01T00:00:00Z',
+                                 'updated: 2026-09-01T00:00:00Z'])
+        canonical, derived = self._load()
+        ans = policy.close_on_starvation('F-0003', canonical['F-0003'], canonical, derived,
+                                         self._ctx(now=datetime.datetime(2026, 9, 16, 1, 0, 0, tzinfo=UTC),
+                                                   undecided_close='14d', ledger_items=frozenset({'F-0003'})))
+        self.assertIsNone(ans)
+
+
+class GroomAutoTestCase(unittest.TestCase):
+    """A :func:`make_repo` root plus a temp ``ASF_HOME`` with a ``sample`` product yaml pointed
+    at it (``backlog_dir``), for ``cmd_groom`` runs that need ``approvals.groom: auto`` — the
+    gate only turns on for a real, loadable product (T1), so these go through the ``asf`` CLI
+    subprocess (:func:`tests.test_groom.run`) rather than calling ``cmd_groom`` in-process."""
+
+    def setUp(self):
+        self.root = make_repo()
+        write_item(self.root, 'E-0009', 'epic', 'Factory', typed_lines=['decided: true'])
+        run(['index'], self.root)
+        self.asf_home = tempfile.mkdtemp(prefix='groom_asf_home_')
+        os.makedirs(os.path.join(self.asf_home, 'products'))
+        self._orig_asf_home = os.environ.get('ASF_HOME')
+        os.environ['ASF_HOME'] = self.asf_home
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+        shutil.rmtree(self.asf_home, ignore_errors=True)
+        if self._orig_asf_home is None:
+            os.environ.pop('ASF_HOME', None)
+        else:
+            os.environ['ASF_HOME'] = self._orig_asf_home
+
+    def write_product(self, approvals=None, groom_cfg=None, stage_limits=None):
+        lines = ['repo_slug: x/y', f'backlog_dir: {self.root}']
+        if approvals:
+            lines.append('approvals:')
+            lines.extend(f'  {k}: {v}' for k, v in approvals.items())
+        if groom_cfg:
+            lines.append('groom:')
+            for k, v in groom_cfg.items():
+                lines.append(f'  {k}: {v}')
+        if stage_limits:
+            lines.append('stage_limits:')
+            lines.extend(f'  {k}: {v}' for k, v in stage_limits.items())
+        with open(os.path.join(self.asf_home, 'products', 'sample.yaml'), 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines) + '\n')
+
+    def run_groom(self, extra_args=()):
+        return run(['groom', '--product', 'sample', *extra_args], self.root)
+
+
+class PolicyPassTests(GroomAutoTestCase):
+    """T3, T4: an answer becomes one typed field and one History line and nothing else, and a
+    second run on the same date changes no card."""
+
+    def test_answer_writes_one_field_one_history_line_and_nothing_else(self):
+        self.write_product(approvals={'groom': 'auto'})
+        write_item(self.root, 'B-0001', 'bug', 'Checkout fails', parent='E-0009',
+                  typed_lines=['decided: false', 'signature: checkout-fail', 'count: 2'],
+                  machine_lines=_fresh_machine_lines())
+        write_item(self.root, 'F-0001', 'feature', 'Untouched feature', parent='E-0009',
+                  typed_lines=['decided: true'])
+        run(['index'], self.root)
+        with open(os.path.join(self.root, 'features', 'F-0001.md')) as f:
+            before = f.read()
+
+        r = self.run_groom(['--date', '2026-09-22'])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('by rule 1', r.stdout)
+
+        with open(os.path.join(self.root, 'bugs', 'B-0001.md')) as f:
+            bug_text = f.read()
+        meta, body = frontmatter.parse(bug_text, path='bugs/B-0001.md')
+        self.assertEqual(meta['decided'], True)
+        self.assertIn('2026-09-22 groom: decided → true (controller, decide_recurring_bug)', body)
+
+        with open(os.path.join(self.root, 'features', 'F-0001.md')) as f:
+            after = f.read()
+        self.assertEqual(after, before)
+
+    def test_second_run_same_date_changes_nothing(self):
+        self.write_product(approvals={'groom': 'auto'})
+        write_item(self.root, 'B-0001', 'bug', 'Checkout fails', parent='E-0009',
+                  typed_lines=['decided: false', 'signature: checkout-fail', 'count: 2'],
+                  machine_lines=_fresh_machine_lines())
+        run(['index'], self.root)
+
+        r1 = self.run_groom(['--date', '2026-09-22'])
+        self.assertEqual(r1.returncode, 0, r1.stderr)
+        self.assertIn('by rule 1', r1.stdout)
+        with open(os.path.join(self.root, 'bugs', 'B-0001.md')) as f:
+            snapshot = f.read()
+
+        r2 = self.run_groom(['--date', '2026-09-22'])
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertIn('by rule 0', r2.stdout)
+        with open(os.path.join(self.root, 'bugs', 'B-0001.md')) as f:
+            self.assertEqual(f.read(), snapshot)
+
+
+class ApprovalBoundTests(GroomAutoTestCase):
+    """T7's policy half: with ``new_epic: human-now``, an inbox card inferred as an Epic is
+    answered by no policy and its line is not among ``open_questions``."""
+
+    def test_epic_inbox_card_is_barred_and_not_open(self):
+        self.write_product(approvals={'groom': 'auto', 'new_epic': 'human-now'})
+        with open(os.path.join(self.root, 'inbox', 'goal.md'), 'w', encoding='utf-8') as f:
+            f.write('# A new goal for the year\ntype: epic\nSomething ambitious.\n')
+
+        r = self.run_groom()
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+        with open(os.path.join(self.root, 'groom', today() + '.md')) as f:
+            text = f.read()
+        self.assertIn('(barred: approvals.new_epic)', text)
+        self.assertNotIn('controller:', text)
+        self.assertEqual(policy.open_questions(text), [])
+
+    def test_non_epic_question_is_unaffected_by_the_bound(self):
+        self.write_product(approvals={'groom': 'auto', 'new_epic': 'human-now'})
+        write_item(self.root, 'F-0001', 'feature', 'Lonely feature', parent='E-0009',
+                  typed_lines=['decided: true'])
+        run(['index'], self.root)
+
+        r = self.run_groom()
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+        with open(os.path.join(self.root, 'groom', today() + '.md')) as f:
+            text = f.read()
+        self.assertNotIn('barred', text)
+        self.assertIn('F-0001 Lonely feature — no Stories → answer: ____', text)
 
 
 class UnblockTests(unittest.TestCase):

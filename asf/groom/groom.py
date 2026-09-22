@@ -8,8 +8,11 @@ from asf.record import frontmatter
 from asf.record.core import canonicalize, compute_derived, is_open, jaccard, load_items, tokenize
 from asf.record.index import do_index
 from asf.record.ingest import append_history_lines
+from asf.tick import stale
 from asf.tick.stale import format_age, parse_iso
+from asf.groom import policy
 from asf.groom.inbox import process_inbox
+from asf.workers import lifecycle, pool
 
 ANSWER_LINE_RE = re.compile(r'^- \[[ xX]\]\s+(?P<id>[A-Z]-\d{4})\b.*→\s*answer:\s*(?P<answer>.*)$')
 ANSWER_YES = re.compile(r'^yes$', re.IGNORECASE)
@@ -311,6 +314,56 @@ def build_groom_sections(canonical, derived, date):
     }
 
 
+#: PD3 checked against §2.2's own order — a test asserts these equal ``[n for n, _s, _f in
+#: policy.POLICIES]``.
+_POLICY_BY_SECTION = {section: (name, fn) for name, section, fn in policy.POLICIES}
+
+
+def run_policy_pass(sections, canonical, derived, product, ctx):
+    """§2.2 steps 3-4's rendering half: every remaining ``→ answer: ____`` line either gets
+    barred (§2.8, PD4) or tried against its section's policy — never both. A barred line is
+    rewritten ``____ (barred: approvals.<key>)``; an answered line, ``controller: <policy>
+    <word>``. Returns ``(sections, barred_count)``; the actual field writes come from applying
+    the rendered file through :func:`apply_groom_answers` (D3), so this function only rewrites
+    text."""
+    out = {}
+    barred_count = 0
+    for key, lines in sections.items():
+        new_lines = []
+        for line in lines:
+            m = policy.OPEN_QUESTION_RE.match(line)
+            item = canonical.get(m.group('id')) if m else None
+            if m is None or item is None:
+                new_lines.append(line)
+                continue
+            probe = policy.Answer('yes', 'decided', True, '')
+            bar = policy.barred(probe, item, product)
+            if bar:
+                new_lines.append(re.sub(r'____$', f'____ (barred: approvals.{bar})', line))
+                barred_count += 1
+                continue
+            entry = _POLICY_BY_SECTION.get(key)
+            if entry is None or not policy.policy_on(product, entry[0]):
+                new_lines.append(line)
+                continue
+            name, fn = entry
+            ans = fn(m.group('id'), item, canonical, derived, ctx)
+            if ans is None:
+                new_lines.append(line)
+                continue
+            new_lines.append(re.sub(r'____$', f'controller: {name} {ans.word}', line))
+        out[key] = new_lines
+    return out, barred_count
+
+
+def _ledger_items(product):
+    """Every item id the session ledger has ever launched a job for — what
+    ``close_on_starvation`` must never answer out from under a session (§2.2)."""
+    if product is None:
+        return frozenset()
+    return frozenset(lifecycle.attempts(pool.sessions_path(product)).keys())
+
+
 def render_groom_file(date, sections):
     out = [f"# Groom {date}\n"]
     for title, key in GROOM_SECTIONS:
@@ -333,6 +386,11 @@ def cmd_groom(args, root):
         return 1
     canonical, _dupes = canonicalize(by_id)
 
+    try:
+        product = env.load_product(getattr(args, 'product', None))
+    except env.ConfigError:
+        product = None
+
     applied = 0
     if args.apply:
         prev = _previous_groom_file(root, date)
@@ -340,22 +398,38 @@ def cmd_groom(args, root):
             applied = apply_groom_answers(root, canonical, prev, date)
 
     default_bug_parent = getattr(args, 'default_bug_epic', None)
-    if default_bug_parent is None:
-        try:
-            default_bug_parent = env.load_product(getattr(args, 'product', None)).conventions.get('default_bug_epic')
-        except env.ConfigError:
-            pass
+    if default_bug_parent is None and product is not None:
+        default_bug_parent = product.conventions.get('default_bug_epic')
     created_ids = process_inbox(root, canonical, date, default_bug_parent=default_bug_parent)
 
     derived = compute_derived(canonical)
     sections = build_groom_sections(canonical, derived, date)
+
+    auto = policy.groom_auto(product)
+    by_rule = 0
+    if auto:
+        ctx = policy.Ctx(date=date, now=datetime.datetime.now(datetime.timezone.utc),
+                         duplicate_overlap=policy.duplicate_overlap(product),
+                         recurring_bug_count=policy.recurring_bug_count(product),
+                         undecided_close=stale.load_limits(product).get(
+                             'undecided_close', policy.DEFAULT_UNDECIDED_CLOSE),
+                         ledger_items=_ledger_items(product))
+        sections, _barred_count = run_policy_pass(sections, canonical, derived, product, ctx)
+
     text = render_groom_file(date, sections)
     groom_dir = os.path.join(root, 'groom')
     os.makedirs(groom_dir, exist_ok=True)
-    with open(os.path.join(groom_dir, f"{date}.md"), 'w', encoding='utf-8') as f:
+    groom_path = os.path.join(groom_dir, f"{date}.md")
+    with open(groom_path, 'w', encoding='utf-8') as f:
         f.write(text)
+
+    if auto:
+        by_rule = apply_groom_answers(root, canonical, groom_path, date)
+        canonical, _dupes = canonicalize(load_items(root)[0])
+        derived = compute_derived(canonical)
 
     rc = do_index(root)
     counts = ', '.join(f"{title}: {len(sections.get(key) or [])}" for title, key in GROOM_SECTIONS)
-    print(f"groom {date}: applied {applied}, inbox {len(created_ids)} card(s) — {counts}")
+    by_rule_part = f", by rule {by_rule}" if auto else ''
+    print(f"groom {date}: applied {applied}, inbox {len(created_ids)} card(s){by_rule_part} — {counts}")
     return rc

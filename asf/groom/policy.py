@@ -1,10 +1,13 @@
 """asf.groom.policy — rules as code (F-0085/D-0049): the ``approvals.groom`` gate, the open-
-question grammar, and the four policies' thresholds.
+question grammar, the four policies, and the approval bound.
 
-Module-level imports are stdlib and :mod:`asf.env` only, so :mod:`asf.feeder.rows` may import
-this module without an import cycle (the applier's side, :mod:`asf.groom.groom`, imports this
-module instead — see ``POLICIES``, added once the policy pass itself lands).
+Module-level imports stay stdlib and :mod:`asf.env` only, so :mod:`asf.feeder.rows` may import
+this module without an import cycle — :mod:`asf.groom.groom` (the applier's side) imports this
+module instead. The four policies and :func:`barred` need :mod:`asf.record.core`/
+:mod:`asf.record.frontmatter`, so they import those *inside* the function body rather than at
+module level, the same trick :mod:`asf.capacity` uses for :mod:`asf.workers.lifecycle`.
 """
+import dataclasses
 import re
 
 #: D11 — deliberately timid defaults. A policy that answers wrongly is a card closed or decided
@@ -68,3 +71,173 @@ def policy_on(product, name):
     it."""
     policies = _groom_config(product).get('policies') or {}
     return str(policies.get(name, 'on')).lower() != 'off'
+
+
+#: D11's default for the fourth policy, kept beside the other three even though it is read
+#: through ``stage_limits.undecided_close`` (``asf.tick.stale``), not ``groom:``.
+DEFAULT_UNDECIDED_CLOSE = '14d'
+
+
+@dataclasses.dataclass
+class Answer:
+    """One policy's ruling on one open question: ``word`` is what gets rendered into the groom
+    file (``→ answer: controller: <policy> <word>``); ``field``/``value`` are what
+    ``apply_groom_answers`` will end up writing, so a test can check a policy's decision without
+    going through the render/parse round trip; ``why`` is the policy's own reason (§2.2's
+    "Reason line" column) — not rendered anywhere itself (the card line already carries its
+    section's reason, PD5), but what a test asserts on."""
+    word: str
+    field: str
+    value: object
+    why: str
+
+
+@dataclasses.dataclass
+class Ctx:
+    """What a policy is handed instead of the clock or the config (§2.2): the run's date, its
+    ``now``, the three ``groom:`` thresholds already resolved for the product, the
+    ``stage_limits.undecided_close`` duration, and the ledger's item set — every id that has
+    ever had a session run on it, so ``close_on_starvation`` never answers a card a session is
+    (or was) already working."""
+    date: str
+    now: object
+    duplicate_overlap: float = DUPLICATE_OVERLAP
+    recurring_bug_count: int = RECURRING_BUG_COUNT
+    undecided_close: str = DEFAULT_UNDECIDED_CLOSE
+    ledger_items: frozenset = frozenset()
+
+
+def _named_in_blockedby(item_id, canonical):
+    """True when some open item's ``blockedBy`` names ``item_id`` — the "named in no [open
+    item's] blockedBy" condition §2.2 gives both ``close_exact_duplicate`` and
+    ``close_on_starvation``."""
+    from asf.record import frontmatter
+    from asf.record.core import is_open
+    for rec in canonical.values():
+        if not is_open(rec):
+            continue
+        typed, _machine = frontmatter.split_machine(rec['meta'])
+        if item_id in (typed.get('blockedBy') or []):
+            return True
+    return False
+
+
+def unblock_on_closed(item_id, rec, canonical, derived, ctx):
+    """Always — the blocker's ``state`` is ``Closed``: the card's first ``blockedBy`` entry
+    whose own record is ``Closed`` gets unblocked."""
+    from asf.record import frontmatter
+    typed, _machine = frontmatter.split_machine(rec['meta'])
+    for blocker in typed.get('blockedBy') or []:
+        if not isinstance(blocker, str) or blocker not in canonical:
+            continue
+        _btyped, bmachine = frontmatter.split_machine(canonical[blocker]['meta'])
+        if bmachine.get('state') == 'Closed':
+            return Answer(f'unblock {blocker}', 'unblock', blocker, f'blocker {blocker} is Closed')
+    return None
+
+
+def close_exact_duplicate(item_id, rec, canonical, derived, ctx):
+    """Overlap ≥ ``ctx.duplicate_overlap``, same ``type``, same ``parent``, and the younger card
+    (``item_id`` itself — the id a near-duplicate line always names, §2.9's ``dupes`` section) is
+    ``state: New``, ``decided != true``, childless, named in no blockedBy, and has no branch in
+    ``links``."""
+    from asf.record import frontmatter
+    from asf.record.core import is_open, jaccard, tokenize
+    typed, machine = frontmatter.split_machine(rec['meta'])
+    if machine.get('state', 'New') != 'New':
+        return None
+    if typed.get('decided') is True:
+        return None
+    if derived.get(item_id, {}).get('children'):
+        return None
+    if _named_in_blockedby(item_id, canonical):
+        return None
+    if (typed.get('links') or {}).get('branches'):
+        return None
+    my_type = typed.get('type')
+    my_parent = typed.get('parent')
+    my_tokens = tokenize(typed.get('title', ''))
+    best = None
+    for oid, orec in sorted(canonical.items()):
+        if oid == item_id or not is_open(orec):
+            continue
+        otyped, _omachine = frontmatter.split_machine(orec['meta'])
+        if otyped.get('type') != my_type or otyped.get('parent') != my_parent:
+            continue
+        score = jaccard(my_tokens, tokenize(otyped.get('title', '')))
+        if score >= ctx.duplicate_overlap and (best is None or score > best[1]):
+            best = (oid, score)
+    if best is None:
+        return None
+    oid, score = best
+    return Answer('no', 'removed', f'groom {ctx.date}', f'duplicate of {oid} (overlap {score:.2f})')
+
+
+def decide_recurring_bug(item_id, rec, canonical, derived, ctx):
+    """The Bug has a ``signature`` and ``count >= ctx.recurring_bug_count``."""
+    from asf.record import frontmatter
+    typed, _machine = frontmatter.split_machine(rec['meta'])
+    if typed.get('type') != 'bug' or not typed.get('signature'):
+        return None
+    count = typed.get('count', 1)
+    if not isinstance(count, int) or count < ctx.recurring_bug_count:
+        return None
+    return Answer('yes', 'decided', True, f'auto-filed, seen {count} times')
+
+
+def close_on_starvation(item_id, rec, canonical, derived, ctx):
+    """Older than ``ctx.undecided_close``, still ``decided != true``, childless, named in no open
+    item's ``blockedBy``, and no session in ``ctx.ledger_items`` ever ran on it."""
+    from asf.record import frontmatter
+    from asf.tick.stale import format_age, limit_seconds, parse_iso
+    typed, machine = frontmatter.split_machine(rec['meta'])
+    if typed.get('decided') is True:
+        return None
+    if derived.get(item_id, {}).get('children'):
+        return None
+    if _named_in_blockedby(item_id, canonical):
+        return None
+    if item_id in ctx.ledger_items:
+        return None
+    since = parse_iso(machine.get('stage_since'))
+    if since is None:
+        return None
+    age = (ctx.now - since).total_seconds()
+    if age <= limit_seconds(ctx.undecided_close):
+        return None
+    return Answer('no', 'removed', f'groom {ctx.date}',
+                  f'undecided {format_age(age)}, starvation policy')
+
+
+#: PD3, §2.2's order — ``(name, section key, policy)``. ``name`` must equal
+#: ``asf.groom.groom.POLICY_NAMES`` in the same order (a test asserts it); kept as plain strings
+#: rather than an import of that module, which would be the cycle this module's docstring rules
+#: out.
+POLICIES = (
+    ('unblock_on_closed', 'blocked_closed', unblock_on_closed),
+    ('close_exact_duplicate', 'dupes', close_exact_duplicate),
+    ('decide_recurring_bug', 'auto_bugs', decide_recurring_bug),
+    ('close_on_starvation', 'undecided14', close_on_starvation),
+)
+
+
+#: §2.8's one-row table, kept as data so F-0031 extends it without touching this module. Each
+#: entry: the ``approvals.<key>`` consulted, and a predicate over ``(answer, typed)`` that is
+#: true when ``answer`` would cross it.
+BARRED = (
+    ('new_epic', lambda answer, typed: answer.word == 'yes' and typed.get('type') == 'epic'),
+)
+
+
+def barred(answer, item, product):
+    """The ``approvals.<key>`` name when ``answer`` on ``item`` would cross an action class the
+    product does not map to ``auto`` (§2.8, D10); ``None`` when nothing bars it. A barred
+    question is answered by no policy, and — the same bound — never put to the adjudicate
+    session either."""
+    from asf.record import frontmatter
+    typed, _machine = frontmatter.split_machine(item['meta'])
+    approvals = (product.approvals if product is not None else None) or {}
+    for key, predicate in BARRED:
+        if predicate(answer, typed) and str(approvals.get(key, '')).lower() != 'auto':
+            return key
+    return None
