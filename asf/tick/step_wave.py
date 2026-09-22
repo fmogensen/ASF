@@ -11,7 +11,7 @@
    the ``launched`` / ``waits`` lines (``reserved for S1`` among them). A row the feeder holds
    back (``WAITS ON …``, no slot) prints its own ``waits`` line here.
 
-Each launch appends a ``launch`` event (item, account, model, brief kind) to ``metrics/events``.
+Each launch appends a ``launch`` event (item, job, model, brief kind) to ``metrics/events``.
 """
 import os
 import re
