@@ -18,6 +18,7 @@ import re
 import subprocess
 
 from asf import hermetic
+from asf.workers import report
 
 DEFAULT_BINARY = 'claude'
 DEFAULT_PERMISSION_MODE = 'bypassPermissions'
@@ -133,12 +134,14 @@ FAILURE_SIGNATURES = (
 
 
 def failure_reason(rec):
-    """The signature name when a result's text is one of the CLI's error messages, else None."""
+    """The signature name when a result's text is one of the CLI's error messages, else what
+    the session's own typed REPORT declares (``pushed: no`` → ``unpushed work``,
+    :mod:`asf.workers.report`), else None."""
     text = str((rec or {}).get('result') or '')
     for name, pattern in FAILURE_SIGNATURES:
         if pattern.search(text):
             return name
-    return None
+    return report.failure(text)
 
 
 def result_ok(rec):

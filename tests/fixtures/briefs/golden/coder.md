@@ -66,7 +66,8 @@ turn waiting for one.
 
 Run the gate in the foreground and wait for it. Your last act is `git push`. Never start a
 background task you do not wait for. A result with uncommitted or unpushed work is a failed
-session (B-0051) and comes back to you as a correction.
+session (B-0051) and comes back to you as a correction. Say so yourself in the report's
+`pushed:` line: `pushed: no` is read as that failure at once.
 
 Anything a human must decide, answer or run is never guessed and never buried in a comment:
 print `NEEDS OPERATOR: <what> — <the command or the answer needed>` on its own line, then carry on
@@ -80,6 +81,7 @@ item: T-0001
 kind: coder
 status: done | partial | blocked
 branch: task/T-0001
+pushed: yes <the sha origin/task/T-0001 now points at> | no — <why>
 commits: <sha> <subject> (one per line, or none)
 tests: <what you ran — and its last line>
 left out: <what and why, or none>

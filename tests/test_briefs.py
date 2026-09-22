@@ -182,6 +182,18 @@ class GoldenBriefTest(unittest.TestCase):
                     'unpushed work is a failed', text)
                 self.assertIn('session (B-0051) and comes back to you as a correction.', text)
 
+    def test_every_kind_ends_with_the_closing_paragraph_and_a_pushed_line_in_the_report(self):
+        # F-0087 (B-0024, B-0052): the closing paragraph and the REPORT's `pushed:` line are
+        # generated once for every kind; the report parser reads `pushed: no` as a failure
+        for kind, r in sorted(ROWS.items()):
+            with self.subTest(kind=kind):
+                text = briefs.build(product(), r, index(), [], REPO_FACTS).text
+                tail = text[text.rindex('## The heartbeat'):]
+                self.assertIn('Your last act is `git push`', tail)
+                self.assertIn('`pushed:` line: `pushed: no` is read as that failure at once', tail)
+                self.assertIn(f'pushed: yes <the sha origin/{r.branch} now points at> | no — <why>', tail)
+                self.assertTrue(text.rstrip().endswith('```'), text[-200:])
+
     def test_the_push_wording_is_not_duplicated_per_template(self):
         # fixer.md and rebase.md each carried their own copy of "a session that ends without a
         # push is counted dead and relaunched on top of you" — now that the closing paragraph
