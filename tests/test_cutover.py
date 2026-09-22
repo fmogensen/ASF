@@ -12,10 +12,12 @@ own tests drive `asf shadow-diff --ref` against fixture trees.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_cutover` does not
     from test_scheduler import fake_launchctl, fake_loaded
@@ -68,6 +70,76 @@ PRINT_TEMPLATE = """@LABEL@ = {
 
 
 class CutoverFixtureTest(unittest.TestCase):
+
+    # ---- fixture perf (B-0071) ---------------------------------------------------------------
+
+    def test_setup_reuses_the_class_template_instead_of_spawning_git(self):
+        """B-0071: `repo_dir`/`origin_dir`/`backlog_dir` come from a class-level template built
+        once in `setUpClass`; a single test's `setUp` clones/copies it, it does not `git init`,
+        `git clone`, `git commit` or `git push` again."""
+        calls = []
+        real_run = subprocess.run
+
+        def spy(args, *a, **kw):
+            if args and args[0] == 'git':
+                calls.append(list(args))
+            return real_run(args, *a, **kw)
+
+        other = CutoverFixtureTest('test_setup_reuses_the_class_template_instead_of_spawning_git')
+        with mock.patch('subprocess.run', side_effect=spy):
+            other.setUp()
+        self.addCleanup(other.doCleanups)
+        self.assertEqual(calls, [], f'setUp spawned git: {calls}')
+
+    # ---- class-level repo template (B-0071) --------------------------------------------------
+    #
+    # `repo_dir`, `origin_dir` and `backlog_dir` are the same three empty-history git trees for
+    # every test in this module (a `git init`, a bare `git init` and a clone carrying one `root`
+    # commit already pushed to it). Building them once here and `shutil.copytree`-ing the result
+    # into each test's own `self.tmp` is bit-for-bit what per-test `git init`/`clone`/`commit`/
+    # `push` produced, minus five subprocess spawns per test; each test still gets its own
+    # disposable copy, so nothing mutated by one test is visible to another.
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls._template_dir = tempfile.mkdtemp(prefix='asf-cutover-template-')
+        cls._template_repo_dir = os.path.join(cls._template_dir, 'repo')
+        cls._template_origin_dir = os.path.join(cls._template_dir, 'origin.git')
+        cls._template_backlog_dir = os.path.join(cls._template_dir, 'backlog')
+
+        os.makedirs(cls._template_repo_dir)
+        subprocess.run(['git', 'init', '-q'], cwd=cls._template_repo_dir, check=True)
+        subprocess.run(['git', 'init', '-q', '--bare', cls._template_origin_dir], check=True)
+        subprocess.run(['git', 'clone', '-q', cls._template_origin_dir, cls._template_backlog_dir],
+                       check=True)
+        env = dict(os.environ)
+        env.update({'GIT_AUTHOR_NAME': 'test', 'GIT_AUTHOR_EMAIL': 't@example.invalid',
+                    'GIT_COMMITTER_NAME': 'test', 'GIT_COMMITTER_EMAIL': 't@example.invalid'})
+        subprocess.run(['git', 'commit', '-q', '--allow-empty', '-m', 'root'],
+                       cwd=cls._template_backlog_dir, check=True, env=env,
+                       capture_output=True, text=True)
+        subprocess.run(['git', 'push', '-q', 'origin', 'HEAD'], cwd=cls._template_backlog_dir,
+                       check=True, env=env, capture_output=True, text=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls._template_dir, ignore_errors=True)
+        super().tearDownClass()
+
+    def _repoint_origin(self, backlog_dir, origin_dir):
+        """The copied clone's `.git/config` still names the class template's `origin.git` path
+        (that is where `git clone` pointed it when the template was built) — repoint it at this
+        test's own copy so the pushes/fetches a test drives land where its assertions look, a
+        text edit so per-test setup still spawns no git subprocess."""
+        config_path = os.path.join(backlog_dir, '.git', 'config')
+        with open(config_path, encoding='utf-8') as f:
+            text = f.read()
+        text, n = re.subn(r'(?m)^(\turl = ).*$', r'\g<1>' + origin_dir, text, count=1)
+        assert n == 1, f'no [remote "origin"] url line found in {config_path}'
+        with open(config_path, 'w', encoding='utf-8') as f:
+            f.write(text)
+
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix='asf-cutover-')
         self.addCleanup(shutil.rmtree, self.tmp, True)
@@ -90,12 +162,10 @@ class CutoverFixtureTest(unittest.TestCase):
         self.repo_dir = os.path.join(self.tmp, 'repo')
         self.origin_dir = os.path.join(self.tmp, 'origin.git')
         self.backlog_dir = os.path.join(self.tmp, 'backlog')
-        os.makedirs(self.repo_dir)
-        self._git(['init', '-q'], cwd=self.repo_dir)
-        subprocess.run(['git', 'init', '-q', '--bare', self.origin_dir], check=True)
-        subprocess.run(['git', 'clone', '-q', self.origin_dir, self.backlog_dir], check=True)
-        self._git(['commit', '-q', '--allow-empty', '-m', 'root'], cwd=self.backlog_dir)
-        self._git(['push', '-q', 'origin', 'HEAD'], cwd=self.backlog_dir)
+        shutil.copytree(self._template_repo_dir, self.repo_dir)
+        shutil.copytree(self._template_origin_dir, self.origin_dir)
+        shutil.copytree(self._template_backlog_dir, self.backlog_dir)
+        self._repoint_origin(self.backlog_dir, self.origin_dir)
         self.set_job_runs(True)
 
         self.tick_file = os.path.join(self.tmp, 'tick.md')
@@ -121,13 +191,6 @@ class CutoverFixtureTest(unittest.TestCase):
                     f'backlog_dir: {self.backlog_dir}\n')
 
     # ---- fixture knobs ------------------------------------------------------------------------
-
-    def _git(self, args, cwd):
-        env = dict(os.environ)
-        env.update({'GIT_AUTHOR_NAME': 'test', 'GIT_AUTHOR_EMAIL': 't@example.invalid',
-                    'GIT_COMMITTER_NAME': 'test', 'GIT_COMMITTER_EMAIL': 't@example.invalid'})
-        subprocess.run(['git'] + args, cwd=cwd, check=True, env=env,
-                       capture_output=True, text=True)
 
     def write_config(self, scheduler_extra='', legacy_steps=None):
         with open(os.path.join(self.asf_home, 'config.yaml'), 'w') as f:
