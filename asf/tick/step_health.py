@@ -13,6 +13,7 @@ again) becomes a ``needs-operator`` event, once: the session is marked ``operato
 the next tick does not raise it again.
 """
 from asf.workers import health as health_mod
+from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 from asf.workers import runtime as runtime_mod
 from asf.workers import spawn as spawn_mod
@@ -38,6 +39,13 @@ def error_text(session):
     tail = log_tail(session.get('log'))
     return (f"the session's process (pid {session.get('pid')}) died before it wrote a result"
             + (f"; the last lines of its log:\n{tail}" if tail else '.'))
+
+
+def died_text(session):
+    """The correction a twice-dead session hands its next run (B-0062)."""
+    tail = error_text(session).strip().splitlines()
+    return 'died twice: the session and its cold retry both ended without a result — ' + \
+        (tail[-1].strip() if tail else 'no log lines')
 
 
 def operator_line(session):
@@ -68,11 +76,17 @@ def handle_dead(ctx, session, runtime_fn=_runtime, out=print):
         if ok:
             out(f"DEAD  {job:<24} corrected — relaunched cold as {job}-correction")
             return 'corrected'
-    line = operator_line(session)
-    ctx.event('needs-operator', job=job, item=session.get('item'), text=line)
-    pool_mod.update_session(product, job, operator_flagged=1)
+    # B-0062: a session that died twice is held like a red gate — a correction on the run, a
+    # round on the item, the ADJUDICATE row at the cap — never a question to the operator
+    # (D-0049: the factory decides, the operator is informed). A hold already pending stands.
+    if lifecycle.pending_correction(session, pool_mod.sessions_path(product)):
+        return 'held'
+    fields, line = lifecycle.hold(pool_mod.sessions_path(product), session, 'died',
+                                  died_text(session), pool_mod.now_iso())
+    ctx.event('held', job=job, item=session.get('item'), text=line)
+    pool_mod.update_session(product, job, **fields)
     out(line)
-    return 'operator'
+    return 'held'
 
 
 def run(ctx, out=print, runtime_fn=_runtime):

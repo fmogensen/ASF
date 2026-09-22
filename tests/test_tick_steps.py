@@ -196,25 +196,32 @@ class HealthStepTests(StepsTestCase):
         self.assertEqual(s['end_reason'], 'failed')
         self.assertEqual(s['rc'], 1)
 
-    def test_already_corrected_is_one_needs_operator_event(self):
+    def test_b0062_already_corrected_is_held_not_a_question(self):
+        # "a manual question for me is a bug": a twice-dead session is a correction on the run
+        # and a round on the item, so the lane's own loop carries it to the cap
         self.dead_session(corrected=1)
         ctx = self.ctx()
         step_health.run(ctx, out=self.lines.append, runtime_fn=lambda: self.fail('no rerun'))
         evs = self.events(ctx)
-        self.assertEqual([e['kind'] for e in evs], ['needs-operator'])
-        self.assertTrue(evs[0]['text'].startswith('NEEDS OPERATOR: session fix-b-0001'))
-        self.assertTrue(any(ln.startswith('NEEDS OPERATOR:') for ln in self.lines))
-        # the next tick does not raise it again
-        self.assertEqual(step_health.handle_dead(
-            ctx, dict(pool_mod.load_sessions(self.product)['fix-b-0001']), out=self.lines.append),
-            'flagged')
+        self.assertEqual([e['kind'] for e in evs], ['held'])
+        self.assertFalse(any(ln.startswith('NEEDS OPERATOR:') for ln in self.lines), self.lines)
+        held = [ln for ln in self.lines if ln.startswith('held ')]
+        self.assertEqual(len(held), 1, self.lines)
+        self.assertIn('died twice: the session and its cold retry both ended without a result', held[0])
+        self.assertTrue(held[0].endswith('— back to its session (round 1)'), held[0])
+        s = pool_mod.load_sessions(self.product)['fix-b-0001']
+        self.assertEqual((s['correction']['kind'], s['rounds']), ('died', 1))
+        self.assertFalse(s.get('operator_flagged'))
+        # the next tick does not hold it again while the correction is pending
+        self.assertEqual(step_health.handle_dead(ctx, dict(s, job='fix-b-0001'), out=self.lines.append), 'held')
+        self.assertEqual(pool_mod.load_sessions(self.product)['fix-b-0001']['rounds'], 1)
 
-    def test_failed_correction_raises_the_operator(self):
+    def test_b0062_failed_correction_holds_the_run(self):
         self.dead_session()
         fake = runtime_mod.FakeRuntime([{'ok': False, 'result': 'still broken'}])
         ctx = self.ctx()
         step_health.run(ctx, out=self.lines.append, runtime_fn=lambda: fake)
-        self.assertEqual([e['kind'] for e in self.events(ctx)], ['needs-operator'])
+        self.assertEqual([e['kind'] for e in self.events(ctx)], ['held'])
 
     def test_stall_dead_counts_and_clean_ledger(self):
         ctx = self.ctx()

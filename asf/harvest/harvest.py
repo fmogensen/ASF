@@ -810,14 +810,15 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
     eligible = []
     for branch in remote_branches(repo, conv):
         record = sessions.get(branch)
-        if not is_eligible(record) or record.get('harvest') == 'pr':
+        if record is None or lifecycle.is_live(record) or record.get('harvest') == 'pr':
             continue
         ahead = sh(['git', 'rev-list', '--count', f'origin/{trunk}..origin/{branch}'],
                    cwd=repo).stdout.strip()
         if ahead in ('', '0'):
             continue
-        eligible.append((branch, record))
-    for branch, record in cap_to_tick(eligible, out):
+        # B-0061: content decides before the run's verdict does — a branch whose changes are on
+        # the trunk is landed, a Closed Bug's branch is archived, whatever the run ended as (a
+        # hand-written "superseded", a failed retry); only the gated landing needs `finished`
         item = item_of(branch, record)
         done, extras = already_on_trunk(repo, trunk, branch, conv, item)
         if done:
@@ -829,6 +830,11 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
             results[branch] = archive_superseded(repo, state_dir, branch, record, item, state,
                                                  dry_run, out)
             continue
+        if not is_eligible(record):
+            continue
+        eligible.append((branch, record))
+    for branch, record in cap_to_tick(eligible, out):
+        item = item_of(branch, record)
         if has_adjudicate_commit(repo, trunk, branch):
             out(f'held {branch}: ruling belongs in the record')
             results[branch] = 'held'

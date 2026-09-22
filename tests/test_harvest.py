@@ -690,6 +690,33 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertEqual(lines, [f'landed fix/B-0001: already on main at {before[:7]}'])
         self.assertFalse(self.origin_has('fix/B-0001'))
 
+    def test_b0061_content_decides_whatever_the_run_ended_as(self):
+        # a run marked by hand "superseded: the work is on main" (or a failed retry) is not
+        # finished, so the branch was never looked at: its worktree and branch stayed for ever
+        self.push_lane('fix/B-0001', [('fix(B-0001): the change', {'a.txt': 'a\n'})])
+        sh(['git', 'checkout', '-q', 'main'], cwd=self.worker)
+        self.write(self.worker, 'a.txt', 'a\n')
+        sh(['git', 'add', '-A'], cwd=self.worker)
+        sh(['git', 'commit', '-qm', 'fix(B-0001): landed another way'], cwd=self.worker)
+        sh(['git', 'push', '-q', 'origin', 'main'], cwd=self.worker)
+        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001', rc=1)  # ended, not finished
+        self.push_lane('fix/B-0002', [('fix(B-0002): an older approach', {'old.txt': 'old\n'})])
+        self.session('fix-bug-b-0002', 'B-0002', 'fix/B-0002', rc=1)
+        items = {'B-0002': {'id': 'B-0002', 'type': 'bug', 'state': 'Closed'}}
+        lines = []
+        results = harvest.run_product_harvest(self.product(), self.state_dir, out=lines.append, items=items)
+        self.assertEqual(results, {'fix/B-0001': 'landed', 'fix/B-0002': 'superseded'})
+        self.assertFalse(self.origin_has('fix/B-0001'))
+        self.assertTrue(self.origin_has('archive/fix/B-0002'))
+        self.assertTrue(self.record('fix/B-0001').get('harvested'))
+        # a live run's branch is never touched, and an unfinished run with real work is not gated
+        self.push_lane('fix/B-0003', [('fix(B-0003): live work', {'live.txt': 'live\n'})])
+        self.session('fix-bug-b-0003', 'B-0003', 'fix/B-0003', rc=1)
+        before = self.origin_main()
+        results = harvest.run_product_harvest(self.product(), self.state_dir, out=lines.append, items=items)
+        self.assertEqual(results, {})
+        self.assertEqual(self.origin_main(), before)
+
     def test_b0057_a_closed_bugs_branch_is_archived_not_held(self):
         self.push_lane('fix/B-0001', [('fix(B-0001): an older approach', {'old.txt': 'old\n'})])
         self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
