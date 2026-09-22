@@ -1,8 +1,16 @@
 ---
-id: D-nnnn (unminted — this job's BACKLOG_ID_RANGE reserves S, T, B only; see NEEDS OPERATOR)
+id: D-7850
 type: decision
 title: B-0016 is accepted as it stands; the review loop on fix/B-0016 is closed and does not reopen
+superseded_in_part_by: D-7850
 ---
+> **Filed as [`docs/decisions/D-7850.md`](../decisions/D-7850.md).** That card mints this ruling's
+> id and affirms everything below about the finding (there is none) and the fix (it stands). It
+> **overrules one thing**: the `-s ours` merge `59e8ebf` recorded below as the way the divergence
+> "stays closed … not by a force-push". It does not stay closed — the merge drags the superseded
+> `6fcb8df` into `origin/main..HEAD`, and harvest's rebase flattens merges and replays it, which is
+> the `conflict in asf/workers/spawn.py` hold. Read D-7850 for what now holds.
+
 ## Context
 `fix/B-0016` was routed to adjudication as a reviewer/fixer dispute after three holds, but there
 is no dispute on the record: `docs/reviews/1-b-0016.md` has never existed on any branch
