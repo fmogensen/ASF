@@ -10,13 +10,13 @@ state" table defines, so they can be unit-tested without touching git or gh.
 Most of the object-store plumbing below (`_batch`, `resolve`, `read_blobs`, `parse_tree`,
 `read_trees`, `remote_branches`, `pr_list`, `verdict_of`, `newest_review`, `rx_review`,
 `plan_tasks`, `consumes_edges`, their regexes and directory constants, and the `sh` helper
-`pr_list` depends on) is lifted verbatim from `~/.claude-workers/tools/factory-board.py`, which
-already solves "discover everything the board needs" in two `git cat-file --batch` passes over
-the product repo. `parse_rows` (the parity-matrix table parser) is lifted verbatim from
-`~/.claude-workers/tools/factory-parity.py`. The prod/dev deploy-sha lookups follow
-`~/.claude-workers/tools/tick-tables.py` (roughly its lines 44-58): newest successful
-`deploy-prod.yml` run for `prod_sha`, newest `ci.yml` run on `main` whose `deploy-dev` job
-succeeded for `dev_sha`.
+`pr_list` depends on) is lifted from the first product's pre-asf board, parity and tick-table
+scripts, which already solve "discover everything the board needs" in two `git cat-file --batch`
+passes over the product repo. `parse_rows` (the parity-matrix table parser) is lifted from the
+same. The prod/dev deploy-sha lookups follow the same shape: the newest successful run of
+`conventions.deploy_workflow` for `prod_sha`, the newest run of `conventions.ci_workflow` on the
+trunk whose `conventions.ci_dev_job` succeeded for `dev_sha` — both `None` when the product names
+no such workflow.
 
 Read-only against the product repo (see the resolved `Product.repo_dir`): never commit, checkout
 or fetch anything there but `git fetch --prune origin`. Python 3 stdlib only.
@@ -30,31 +30,27 @@ import sys
 import time
 
 from asf import env
+from asf.conventions import Conventions
 
 # An evidence-file path, not per-product config — no obvious Product field for it.
 # TODO(config): no Product field for this yet.
 CHECKED_FILE = os.path.join(env.ASF_HOME, "checked.txt")
-PR_CACHE = "/tmp/board-prs.json"
 PR_TTL = 180
-EVIDENCE_CACHE = "/tmp/backlog-evidence.json"
 EVIDENCE_TTL = 180
 
-# `conventions.branch_prefixes` in the product yaml overrides any of these; `legacy` is a list of
-# older task-branch prefixes still honoured when reading plans and PR heads.
-DEFAULT_BRANCH_PREFIXES = {"code": "worker/", "fix": "fix/", "spec": "spec/", "plan": "plan/"}
 # The `ci.provider` values whose green runs on main `ci_green_runs` knows how to read.
 GH_ACTIONS = ("gh-actions", "github-actions")
 
 
 def branch_prefixes(product=None):
-    """{code, fix, spec, plan: str, legacy: [str]} — the product's branch conventions."""
-    conv = (product.conventions if product is not None else {}) or {}
-    given = conv.get("branch_prefixes") or {}
-    out = dict(DEFAULT_BRANCH_PREFIXES)
-    out.update({k: v for k, v in given.items() if k != "legacy" and isinstance(v, str) and v})
-    legacy = given.get("legacy") or []
-    out["legacy"] = [legacy] if isinstance(legacy, str) else [x for x in legacy if x]
-    return out
+    """{code, fix, spec, plan: str, legacy: [str]} — the product's branch conventions, read
+    straight off `Conventions` (its own default when there is no product)."""
+    conv = product.conventions if product is not None else Conventions()
+    return {
+        "code": conv.prefix("code"), "fix": conv.prefix("fix"),
+        "spec": conv.prefix("spec"), "plan": conv.prefix("plan"),
+        "legacy": list(conv.legacy_prefixes()),
+    }
 
 
 def branch_token(prefixes=None):
@@ -64,29 +60,14 @@ def branch_token(prefixes=None):
     return re.compile(r"(?:" + "|".join(re.escape(a) for a in alts) + r")([A-Za-z0-9][\w.]*(?:-[\w.]+)*)")
 
 
-def conv_dir(product, key, default):
-    """A repo-relative directory from `conventions.<key>`, else the default."""
-    conv = (product.conventions if product is not None else {}) or {}
-    return conv.get(key) or default
-
-
-def _cache_file(base, product):
+def _cache_file(name, product):
     """One cache file per product, under the product's own state directory (``ASF_HOME``): two
     products — or two operator homes naming the same product, the suite's and the live one —
-    must never read each other's evidence (F-0087, the hermetic rule). ``base`` stands in only
-    when there is no product to key on."""
-    name = getattr(product, "name", None)
-    if not name:
-        return base
-    from asf import env
-    return os.path.join(env.state_dir(product), "cache-" + os.path.basename(base))
-
-
-PLANS_DIR = "docs/superpowers/plans"
-SPECS_DIR = "docs/superpowers/specs"
-BRIEFS_DIR = "docs/superpowers/briefs"
-REVIEWS_DIR = ".sdd-input/reviews"
-MATRIX_PATH = "docs/research/feature-matrix.md"
+    must never read each other's evidence (F-0087, the hermetic rule)."""
+    product_name = getattr(product, "name", None)
+    if not product_name:
+        raise ValueError("_cache_file needs a product")
+    return os.path.join(env.state_dir(product), "cache-" + name)
 
 
 def sh(cmd, timeout=120, product=None):
@@ -200,7 +181,7 @@ def remote_branches(product=None):
 
 def pr_list(product=None):
     product = product or env.load_product()
-    cache = _cache_file(PR_CACHE, product)
+    cache = _cache_file("prs.json", product)
     if os.path.exists(cache) and time.time() - os.path.getmtime(cache) < PR_TTL:
         try:
             with open(cache) as f:
@@ -380,6 +361,28 @@ def _matrix_paths(spec_paths):
     return [p.strip().strip("`") for p in inner.split(",") if p.strip()]
 
 
+def _newest_success(workflow, product=None):
+    """The newest successful run of `workflow`, or None."""
+    runs = _gh_json(f"run list --workflow {workflow} --limit 15 "
+                    "--json headSha,conclusion,updatedAt", product=product)
+    return next((r for r in runs if r.get("conclusion") == "success"), None)
+
+
+def _newest_with_job(workflow, job, branch, product=None):
+    """The newest completed run of `workflow` on `branch` whose `job` succeeded, or None."""
+    runs = _gh_json(f"run list --branch {branch} --workflow {workflow} --limit 40 "
+                    "--json headSha,conclusion,updatedAt,status,databaseId", product=product)
+    for r in runs:
+        if r.get("status") != "completed":
+            continue
+        jobs = _gh_json(f"api repos/{product.repo_slug}/actions/runs/{r['databaseId']}/jobs?per_page=60",
+                        product=product)
+        job_list = jobs.get("jobs", []) if isinstance(jobs, dict) else []
+        if any(j.get("name") == job and j.get("conclusion") == "success" for j in job_list):
+            return r
+    return None
+
+
 def discover(product=None, checked_file=None):
     """The raw evidence `backlog.py ingest` needs, gathered fresh from the product repo and gh."""
     product = product or env.load_product()
@@ -387,11 +390,13 @@ def discover(product=None, checked_file=None):
     code, spec_p, plan_p = prefixes["code"], prefixes["spec"], prefixes["plan"]
     token = branch_token(prefixes)
     main_ref = f"origin/{product.main}"
-    plans_dir = conv_dir(product, "plans_dir", PLANS_DIR)
-    specs_dir = conv_dir(product, "specs_dir", SPECS_DIR)
-    briefs_dir = conv_dir(product, "briefs_dir", BRIEFS_DIR)
-    reviews_dir = conv_dir(product, "reviews_dir", REVIEWS_DIR)
-    matrix_path = conv_dir(product, "matrix_path", MATRIX_PATH)
+    conv = product.conventions
+    plans_dir, specs_dir, reviews_dir = conv.plans_dir, conv.specs_dir, conv.reviews_dir
+    # `briefs_dir`/`matrix_path` are not yet fields of `Conventions` (asf/conventions.py is out
+    # of this Task's footprint) — `.get()` reads them from `extra` until they land there, and
+    # will keep reading them once they do (asf/conventions.py:97-111).
+    briefs_dir = conv.get("briefs_dir")
+    matrix_path = conv.get("matrix_path")
 
     branches = remote_branches(product=product)
     prs = pr_list(product=product)
@@ -401,13 +406,14 @@ def discover(product=None, checked_file=None):
     merged = {p["number"]: p["mergeCommit"]["oid"]
               for p in prs if p.get("state") == "MERGED" and p.get("mergeCommit")}
 
-    main_trees = read_trees([f"{main_ref}:{plans_dir}", f"{main_ref}:{specs_dir}",
-                             f"{main_ref}:{reviews_dir}", f"{main_ref}:{briefs_dir}"],
-                            product=product)
+    tree_paths = [f"{main_ref}:{plans_dir}", f"{main_ref}:{specs_dir}", f"{main_ref}:{reviews_dir}"]
+    if briefs_dir:
+        tree_paths.append(f"{main_ref}:{briefs_dir}")
+    main_trees = read_trees(tree_paths, product=product)
     main_plans = main_trees[f"{main_ref}:{plans_dir}"]
     main_specs = main_trees[f"{main_ref}:{specs_dir}"]
     main_reviews = set(main_trees[f"{main_ref}:{reviews_dir}"])
-    main_briefs = main_trees[f"{main_ref}:{briefs_dir}"]
+    main_briefs = main_trees.get(f"{main_ref}:{briefs_dir}", {}) if briefs_dir else {}
 
     # ---- discovery: spec/plan branches, plans and specs already on main
     inits = {}
@@ -617,31 +623,25 @@ def discover(product=None, checked_file=None):
             "prs": pr_numbers,
         }
 
-    # ---- the parity matrix, for Stories
-    matrix_text = sh(f"git show {main_ref}:{matrix_path}", product=product)
-    rows, _broken = parse_rows(matrix_text) if matrix_text else ([], [])
-    stories = {r["id"]: {"status": r["status"], "impl": _matrix_paths(r["impl"]),
-                         "test": _matrix_paths(r["tests"]), "area": r["area"], "milestone": r["ms"],
-                         "cap": r["cap"]}
-              for r in rows}
+    # ---- the parity matrix, for Stories — only when the product names one (D1: None = not
+    # looked for)
+    if matrix_path:
+        matrix_text = sh(f"git show {main_ref}:{matrix_path}", product=product)
+        rows, _broken = parse_rows(matrix_text) if matrix_text else ([], [])
+        stories = {r["id"]: {"status": r["status"], "impl": _matrix_paths(r["impl"]),
+                             "test": _matrix_paths(r["tests"]), "area": r["area"],
+                             "milestone": r["ms"], "cap": r["cap"]}
+                  for r in rows}
+    else:
+        stories = {}
 
-    # ---- deploy shas (tick-tables.py's approach): newest successful deploy-prod run; newest
-    # `ci` run on main whose deploy-dev job succeeded.
-    prod_runs = _gh_json("run list --workflow deploy-prod.yml --limit 15 "
-                         "--json headSha,conclusion,updatedAt", product=product)
-    prod = next((r for r in prod_runs if r.get("conclusion") == "success"), None)
-    main_runs = _gh_json(f"run list --branch {product.main} --workflow ci.yml --limit 40 "
-                         "--json headSha,conclusion,updatedAt,status,databaseId", product=product)
-    dev = None
-    for r in main_runs:
-        if r.get("status") != "completed":
-            continue
-        jobs = _gh_json(f"api repos/{product.repo_slug}/actions/runs/{r['databaseId']}/jobs?per_page=60",
-                        product=product)
-        job_list = jobs.get("jobs", []) if isinstance(jobs, dict) else []
-        if any(j.get("name") == "deploy-dev" and j.get("conclusion") == "success" for j in job_list):
-            dev = r
-            break
+    # ---- deploy shas: newest successful run of the product's deploy workflow; newest run of
+    # its ci workflow on the trunk whose named job succeeded. `None` → that query is not made.
+    deploy_workflow, ci_workflow, ci_dev_job = (
+        conv.get("deploy_workflow"), conv.get("ci_workflow"), conv.get("ci_dev_job"))
+    prod = _newest_success(deploy_workflow, product=product) if deploy_workflow else None
+    dev = (_newest_with_job(ci_workflow, ci_dev_job, branch=product.main, product=product)
+           if ci_workflow and ci_dev_job else None)
 
     checked_file = checked_file if checked_file is not None else CHECKED_FILE
     checked = set()
@@ -814,21 +814,32 @@ def id_state(iid, iev, has_ci=True):
     return None, []
 
 
-# A spec filename to look for, not per-product config — no obvious Product field for it.
-# TODO(config): no Product field for this yet.
-DESIGN_SPEC_NAME = "design.md"
-SDD_DECISIONS = ".sdd-input/decisions.md"
-HOTFIX_RE = re.compile(r"^(?:hotfix-.+-report|ci-diag-.+)\.md$")
+def _report_name_ok(name, report_re):
+    """A hotfix/diagnostic report's name is wanted: matching `report_re` when the product set
+    one, else any `.md` (D7 — `report_pattern: None` means every report is read)."""
+    if report_re is not None:
+        return bool(report_re.search(name))
+    return name.endswith(".md")
 
 
 def migrate_sources(product=None, design_spec_name=None):
     """Raw content `backlog.py migrate` needs beyond discover(): every spec doc on origin/main
-    (the design spec's D-row table lives among them), `.sdd-input/decisions.md`, and every
-    hotfix/ci-diag report on origin/main and on code/spec/plan branches whose PR is not merged. All
-    git/gh access `migrate` needs stays behind this one function, same as `discover()`.
+    (the design spec's D-row table lives among them), the product's decisions file, and every
+    report under its reports dir on origin/main and on code/spec/plan branches whose PR is not
+    merged. All git/gh access `migrate` needs stays behind this one function, same as
+    `discover()`. A product that declares none of `design_spec_name`, `decisions_file` or
+    `reports_dir` gets empty sources for it — the provider does not look for what was not named.
     """
     product = product or env.load_product()
-    design_spec_name = design_spec_name if design_spec_name is not None else DESIGN_SPEC_NAME
+    conv = product.conventions
+    # `design_spec_name`/`decisions_file`/`reports_dir`/`report_pattern` are not yet fields of
+    # `Conventions` (asf/conventions.py is out of this Task's footprint) — `.get()` reads them
+    # from `extra` until they land there, and will keep reading them once they do.
+    design_spec_name = design_spec_name if design_spec_name is not None else conv.get("design_spec_name")
+    decisions_file = conv.get("decisions_file")
+    reports_dir = conv.get("reports_dir")
+    report_re = re.compile(conv.get("report_pattern")) if conv.get("report_pattern") else None
+
     branches = remote_branches(product=product)
     prs = pr_list(product=product)
     pr_by_head = {}
@@ -842,28 +853,36 @@ def migrate_sources(product=None, design_spec_name=None):
         and not any(p.get("state") == "MERGED" for p in pr_by_head.get(b, []))
     )
 
-    main_specs_tree = list_tree("origin/main", SPECS_DIR, product=product)
-    spec_refs = [f"origin/main:{SPECS_DIR}/{n}" for n in main_specs_tree if n.endswith(".md")]
+    specs_dir = conv.specs_dir
+    main_specs_tree = list_tree("origin/main", specs_dir, product=product)
+    spec_refs = [f"origin/main:{specs_dir}/{n}" for n in main_specs_tree if n.endswith(".md")]
     main_spec_texts = {os.path.basename(r): t for r, t in read_refs(spec_refs, product=product).items()}
 
-    revs = ["origin/main"] + [f"origin/{b}" for b in open_branches]
-    sdd_trees = read_trees([f"{r}:.sdd-input" for r in revs], product=product)
-    main_names = {n for n in sdd_trees.get("origin/main:.sdd-input", {}) if HOTFIX_RE.match(n)}
-    hotfix_refs = [f"origin/main:.sdd-input/{n}" for n in main_names]
-    for r in revs[1:]:
-        names = sdd_trees.get(f"{r}:.sdd-input", {})
-        for n in names:
-            # a name already on origin/main is inherited history, not this branch's own
-            # unmerged report — counting it here would multiply one main-side report by
-            # every stale branch that happens to carry it too.
-            if HOTFIX_RE.match(n) and n not in main_names:
-                hotfix_refs.append(f"{r}:.sdd-input/{n}")
+    sdd_decisions_text = (read_ref(f"origin/main:{decisions_file}", product=product)
+                          if decisions_file else None)
+
+    hotfix_texts = {}
+    if reports_dir:
+        revs = ["origin/main"] + [f"origin/{b}" for b in open_branches]
+        report_trees = read_trees([f"{r}:{reports_dir}" for r in revs], product=product)
+        main_names = {n for n in report_trees.get(f"origin/main:{reports_dir}", {})
+                     if _report_name_ok(n, report_re)}
+        hotfix_refs = [f"origin/main:{reports_dir}/{n}" for n in main_names]
+        for r in revs[1:]:
+            names = report_trees.get(f"{r}:{reports_dir}", {})
+            for n in names:
+                # a name already on origin/main is inherited history, not this branch's own
+                # unmerged report — counting it here would multiply one main-side report by
+                # every stale branch that happens to carry it too.
+                if _report_name_ok(n, report_re) and n not in main_names:
+                    hotfix_refs.append(f"{r}:{reports_dir}/{n}")
+        hotfix_texts = read_refs(hotfix_refs, product=product)
 
     return {
         "design_spec_text": main_spec_texts.get(design_spec_name),
-        "sdd_decisions_text": read_ref(f"origin/main:{SDD_DECISIONS}", product=product),
+        "sdd_decisions_text": sdd_decisions_text,
         "main_spec_texts": main_spec_texts,
-        "hotfix_texts": read_refs(hotfix_refs, product=product),
+        "hotfix_texts": hotfix_texts,
         "open_branches": open_branches,
     }
 
@@ -992,11 +1011,11 @@ def blocked_of(blocked_by, state_by_id):
 
 # -------------------------------------------------------------------------------------- cli ----
 def load(fresh=False, product=None, checked_file=None):
-    """discover(), through the 3-minute cache at EVIDENCE_CACHE (one file per product). Shared by
-    the CLI and by `backlog.py ingest`, so two calls a few seconds apart cost one round-trip to
-    gh/git — the main-branch commit log and the CI green runs included."""
+    """discover(), through the 3-minute cache under the product's state directory (one file per
+    product). Shared by the CLI and by `backlog.py ingest`, so two calls a few seconds apart cost
+    one round-trip to gh/git — the main-branch commit log and the CI green runs included."""
     product = product or env.load_product()
-    cache = _cache_file(EVIDENCE_CACHE, product)
+    cache = _cache_file("evidence.json", product)
     if not fresh and os.path.exists(cache):
         if time.time() - os.path.getmtime(cache) < EVIDENCE_TTL:
             with open(cache) as f:

@@ -494,7 +494,7 @@ class DiscoverIdEvidenceTests(unittest.TestCase):
         from asf import env
         with mock.patch.object(evidence, "discover", return_value={"checked": set(), "x": 1}):
             evidence.load(fresh=True, product=self.r.product())
-        cache = os.path.join(env.state_dir(self.r.product()), "cache-backlog-evidence.json")
+        cache = os.path.join(env.state_dir(self.r.product()), "cache-evidence.json")
         self.assertTrue(os.path.exists(cache), cache)
         self.assertTrue(cache.startswith(env.ASF_HOME), cache)
 
@@ -616,6 +616,158 @@ class MatchPrefixesTests(unittest.TestCase):
         self.assertEqual(match.match_event(self.ITEMS, branch="worktree-m-free-plan")[0], [])
         self.assertEqual(match.match_event(self.ITEMS, branch="worktree-m-free-plan",
                                            prefixes=prefixes)[0], ["F-0042"])
+
+
+# ---- a second product: its own document tree, no briefs/matrix/workflow conventions ----------
+class SecondProductRepo:
+    """A bare origin with `specs/`, `plans/` and `reviews/` at the repo root — nothing under
+    `docs/superpowers` or `.sdd-input`, so a provider that still reads the first product's paths
+    finds nothing here. No `gh` call this repo triggers reaches the network: `pr_list` and
+    `_gh_json` are stubbed by every test that uses it."""
+
+    def __init__(self):
+        self.tmp = tempfile.mkdtemp(prefix="evidence_second_")
+        self.origin = os.path.join(self.tmp, "origin.git")
+        self.repo = os.path.join(self.tmp, "product")
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", self.origin], check=True,
+                       env=dict(os.environ, **GIT_ENV))
+        work = os.path.join(self.tmp, "work")
+        subprocess.run(["git", "clone", "-q", self.origin, work], check=True, capture_output=True,
+                       env=dict(os.environ, **GIT_ENV))
+        git(work, "checkout", "-q", "-b", "main")
+        for d in ("specs", "plans", "reviews"):
+            os.makedirs(os.path.join(work, d), exist_ok=True)
+        with open(os.path.join(work, "specs", "f-0002.md"), "w") as f:
+            f.write("# F-0002 — spec\n")
+        with open(os.path.join(work, "plans", "f-0002.md"), "w") as f:
+            f.write("# F-0002 — plan\n")
+        with open(os.path.join(work, "reviews", ".gitkeep"), "w") as f:
+            f.write("")
+        git(work, "add", ".")
+        git(work, "commit", "-q", "-m", "init")
+        git(work, "push", "-q", "origin", "main")
+        subprocess.run(["git", "clone", "-q", self.origin, self.repo], check=True,
+                       capture_output=True, env=dict(os.environ, **GIT_ENV))
+
+    def product(self, conventions=None):
+        conv = {"specs_dir": "specs", "plans_dir": "plans", "reviews_dir": "reviews"}
+        conv.update(conventions or {})
+        data = {"repo_dir": self.repo, "repo_slug": "sample/product", "main": "main",
+                "ci": "none", "conventions": conv}
+        return env.Product("sample", data)
+
+    def close(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+
+class SecondProductDiscoverTests(unittest.TestCase):
+    def setUp(self):
+        self.r = SecondProductRepo()
+        self.addCleanup(self.r.close)
+
+    def discover(self, product, gh_calls=None):
+        def fake_gh(args, timeout=60, product=None):
+            if gh_calls is not None:
+                gh_calls.append(args)
+            return [] if not args.startswith("api ") else {}
+
+        with mock.patch.object(evidence, "pr_list", return_value=[]), \
+                mock.patch.object(evidence, "_gh_json", side_effect=fake_gh):
+            return evidence.discover(product=product,
+                                     checked_file=os.path.join(self.r.tmp, "none.txt"))
+
+    def test_specs_and_plans_are_read_from_the_products_dirs(self):
+        # `features[slug]["spec"|"plan"]` is the ref string discover() already exposes
+        # (asf/evidence/evidence.py's features dict, unchanged by this Task).
+        ev = self.discover(self.r.product())
+        self.assertEqual(ev["features"]["f-0002"]["spec"], "origin/main:specs/f-0002.md")
+        self.assertEqual(ev["features"]["f-0002"]["plan"], "origin/main:plans/f-0002.md")
+
+    def test_no_briefs_dir_no_matrix_means_nothing_looked_for(self):
+        seen = []
+        real_read_trees = evidence.read_trees
+
+        def spy(paths, product=None):
+            seen.extend(paths)
+            return real_read_trees(paths, product=product)
+
+        with mock.patch.object(evidence, "read_trees", side_effect=spy):
+            ev = self.discover(self.r.product())
+        for p in seen:
+            self.assertTrue(p.endswith((":specs", ":plans", ":reviews")), p)
+        self.assertEqual(ev["stories"], {})
+
+    def test_no_workflows_means_no_gh_run_queries(self):
+        calls = []
+        ev = self.discover(self.r.product(), gh_calls=calls)
+        self.assertFalse(any(c.startswith("run list") for c in calls), calls)
+        self.assertIsNone(ev["prod_sha"])
+        self.assertIsNone(ev["dev_sha"])
+
+    def test_workflows_from_conventions(self):
+        calls = []
+        product = self.r.product(conventions={
+            "ci_workflow": "build.yml", "ci_dev_job": "stage", "deploy_workflow": "ship.yml"})
+        self.discover(product, gh_calls=calls)
+        joined = " ".join(calls)
+        self.assertIn("--workflow ship.yml", joined)
+        self.assertIn("--workflow build.yml", joined)
+        self.assertNotIn("deploy-prod.yml", joined)
+        self.assertNotIn("ci.yml", joined)
+
+
+class MigrateSourcesTests(unittest.TestCase):
+    def setUp(self):
+        self.r = SecondProductRepo()
+        self.addCleanup(self.r.close)
+
+    def migrate(self, product):
+        with mock.patch.object(evidence, "pr_list", return_value=[]):
+            return evidence.migrate_sources(product=product)
+
+    def test_unset_conventions_mean_nothing_found(self):
+        out = self.migrate(self.r.product())
+        self.assertIsNone(out["sdd_decisions_text"])
+        self.assertEqual(out["hotfix_texts"], {})
+
+    def test_decisions_file_and_reports_dir_read_when_set(self):
+        work = os.path.join(self.r.tmp, "work2")
+        subprocess.run(["git", "clone", "-q", self.r.origin, work], check=True, capture_output=True,
+                       env=dict(os.environ, **GIT_ENV))
+        os.makedirs(os.path.join(work, "notes"), exist_ok=True)
+        os.makedirs(os.path.join(work, "reports"), exist_ok=True)
+        with open(os.path.join(work, "notes", "decisions.md"), "w") as f:
+            f.write("D1: decided\n")
+        with open(os.path.join(work, "reports", "incident-1.md"), "w") as f:
+            f.write("incident\n")
+        with open(os.path.join(work, "reports", "other.md"), "w") as f:
+            f.write("not an incident\n")
+        git(work, "add", ".")
+        git(work, "commit", "-q", "-m", "add sources")
+        git(work, "push", "-q", "origin", "main")
+
+        product = self.r.product(conventions={
+            "decisions_file": "notes/decisions.md", "reports_dir": "reports",
+            "report_pattern": r"^incident-.*\.md$"})
+        out = self.migrate(product)
+        self.assertEqual(out["sdd_decisions_text"], "D1: decided\n")
+        self.assertEqual(set(out["hotfix_texts"]), {"origin/main:reports/incident-1.md"})
+
+
+class CacheTests(unittest.TestCase):
+    def test_cache_file_is_under_the_products_state_dir(self):
+        product = env.Product("cache-a", {})
+        path = evidence._cache_file("prs.json", product)
+        self.assertEqual(path, os.path.join(env.state_dir(product), "cache-prs.json"))
+
+    def test_two_products_give_two_paths(self):
+        a = evidence._cache_file("evidence.json", env.Product("cache-a", {}))
+        b = evidence._cache_file("evidence.json", env.Product("cache-b", {}))
+        self.assertNotEqual(a, b)
+
+    def test_no_product_raises(self):
+        with self.assertRaises(ValueError):
+            evidence._cache_file("evidence.json", None)
 
 
 if __name__ == "__main__":

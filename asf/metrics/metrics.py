@@ -623,9 +623,15 @@ TYPE_TITLES = [('epic', 'Epics'), ('feature', 'Features'), ('story', 'User Stori
 
 
 def deploy_runs(repo_slug=None, product=None):
-    """Recent deploy-prod.yml runs: [{headSha, conclusion, updatedAt}], newest first."""
+    """Recent runs of the product's deploy workflow: [{headSha, conclusion, updatedAt}], newest
+    first; `[]` when the product names no `conventions.deploy_workflow`."""
+    # Not yet a field of `Conventions` (asf/conventions.py is out of this Task's footprint) —
+    # `.get()` reads it from `extra` until it lands there, and will keep reading it once it does.
+    workflow = _resolve_product(product).conventions.get('deploy_workflow')
+    if not workflow:
+        return []
     repo_slug = _repo_slug(repo_slug, product)
-    return gh_lines(['api', f'repos/{repo_slug}/actions/workflows/deploy-prod.yml/runs?per_page=15', '--jq',
+    return gh_lines(['api', f'repos/{repo_slug}/actions/workflows/{workflow}/runs?per_page=15', '--jq',
                      '.workflow_runs[]|{headSha:.head_sha,conclusion,updatedAt:.updated_at}|@json']) or []
 
 
@@ -664,7 +670,7 @@ def release_items(items, new_sha, old_sha, repo=None, product=None):
 
 def render_release(day, new_sha, old_sha, deployed_at, items, found):
     out = [f"# Release {day} · {new_sha[:7]}", '',
-           f"Deployed sha `{new_sha}` (deploy-prod finished {deployed_at or 'unknown'})."
+           f"Deployed sha `{new_sha}` (deploy finished {deployed_at or 'unknown'})."
            + (f" Everything merged since `{old_sha[:7]}`." if old_sha else ''), '']
     if not found:
         out += ['No item reached prod in this release.']
