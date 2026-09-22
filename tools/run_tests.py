@@ -94,12 +94,21 @@ def run_modules(modules, root, package, home, env_base=None):
 
 def parse(output):
     """``(tests, seconds, verdict, counts)`` from one process's output; ``verdict`` is None when
-    the process never reached its summary (a crash, a collection error)."""
-    ran = RAN_RE.search(output or '')
-    verdict = VERDICT_RE.search(output or '')
+    the process never reached its summary (a crash, a collection error). The process's own
+    summary is the *last* one in its output: a test that runs an inner ``unittest`` and lets it
+    print writes a ``Ran N tests`` and a verdict of its own before it."""
+    ran = _last(RAN_RE, output)
+    verdict = _last(VERDICT_RE, output)
     counts = dict((k, int(v)) for k, v in COUNT_RE.findall(verdict.group(2) or '')) if verdict else {}
     return (int(ran.group(1)) if ran else 0, float(ran.group(2)) if ran else 0.0,
             verdict.group(1) if verdict else None, counts)
+
+
+def _last(regex, text):
+    found = None
+    for found in regex.finditer(text or ''):
+        pass
+    return found
 
 
 def summary(results, seconds, shards):

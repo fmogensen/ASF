@@ -148,6 +148,16 @@ class RunTests(FixtureSuite):
         self.assertEqual(rc, 0, text)
 
 
+class ParseTests(unittest.TestCase):
+    def test_the_processs_own_summary_is_the_last_one_in_its_output(self):
+        runner = load_runner()
+        inner = 'F\nFAIL: test_x\nRan 7 tests in 0.100s\n\nFAILED (failures=1)\n'
+        own = '..\n----\nRan 2 tests in 0.400s\n\nOK (skipped=1)\n'
+        self.assertEqual(runner.parse(inner + own), (2, 0.4, 'OK', {'skipped': 1}))
+        self.assertEqual(runner.parse(own + inner), (7, 0.1, 'FAILED', {'failures': 1}))
+        self.assertEqual(runner.parse('Traceback\nRuntimeError: boom\n'), (0, 0.0, None, {}))
+
+
 class CommandLineTests(unittest.TestCase):
     def test_list_prints_the_plan_and_shards_is_capped(self):
         r = subprocess.run([sys.executable, RUNNER, '--list', '--shards', '3'], cwd=REPO_ROOT,
