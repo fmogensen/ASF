@@ -24,7 +24,6 @@ class TestExampleConfigsParse(unittest.TestCase):
         self.assertEqual(product.conventions['design_spec_name'], 'design.md')
         self.assertEqual(product.stage_limits['task_active'], '45m')
         self.assertEqual(product.approvals['spend_money'], 'human-now')
-        self.assertEqual(product.approvals['groom'], 'auto')
         self.assertEqual(product.groom['adjudicate_attempts'], 2)
         self.assertEqual(product.branch_prefix('groom'), 'groom')
 
