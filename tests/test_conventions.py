@@ -1,5 +1,7 @@
 import os
+import re
 import subprocess
+import sys
 import unittest
 
 from asf import conventions as conv_mod
@@ -21,6 +23,15 @@ class DefaultsTests(unittest.TestCase):
         self.assertEqual((c.main, c.preamble_max_lines, c.prs_per_tick), ('main', 120, 6))
         self.assertEqual((c.harvest_gate, c.branches_per_tick, c.gate_timeout_s), ('combined', 12, 600))
         self.assertEqual(c.stage_limits, {})
+
+    def test_the_new_fields_default_to_none(self):
+        c = Conventions()
+        new_fields = ('briefs_dir', 'matrix_path', 'design_spec_name', 'decisions_file',
+                      'reports_dir', 'report_pattern', 'ci_workflow', 'ci_dev_job', 'deploy_workflow')
+        for name in new_fields:
+            self.assertIsNone(getattr(c, name), name)
+        for name in new_fields:
+            self.assertIn(name, Conventions.field_names())
 
     def test_two_instances_do_not_share_their_mutable_defaults(self):
         a, b = Conventions(), Conventions()
@@ -56,11 +67,11 @@ class FromMappingTests(unittest.TestCase):
                          'per-branch')
 
     def test_an_unknown_key_is_kept_not_rejected(self):
-        c = Conventions.from_mapping({'matrix_path': 'docs/matrix.md', 'specs_dir': 'specs'})
-        self.assertEqual(c.extra, {'matrix_path': 'docs/matrix.md'})
-        self.assertEqual(c.get('matrix_path'), 'docs/matrix.md')
-        self.assertEqual(c['matrix_path'], 'docs/matrix.md')
-        self.assertIn('matrix_path', c)
+        c = Conventions.from_mapping({'slack_channel': '#asf', 'specs_dir': 'specs'})
+        self.assertEqual(c.extra, {'slack_channel': '#asf'})
+        self.assertEqual(c.get('slack_channel'), '#asf')
+        self.assertEqual(c['slack_channel'], '#asf')
+        self.assertIn('slack_channel', c)
         self.assertIsNone(c.get('no_such_key'))
 
     def test_it_still_answers_as_a_mapping(self):
@@ -118,6 +129,36 @@ class PathTests(unittest.TestCase):
     def test_doc_dir(self):
         c = Conventions.from_mapping({'specs_dir': 'specs'})
         self.assertEqual((c.doc_dir('spec'), c.doc_dir('plan')), ('specs', 'docs/plans'))
+
+
+class ForbiddenPatternsTests(unittest.TestCase):
+    def test_one_pattern_per_path_shaped_default(self):
+        patterns = conv_mod.forbidden_patterns()
+        self.assertEqual(len(patterns), 9)
+        self.assertIn("['\"]worker/", patterns)
+        self.assertIn("['\"]docs/specs\\b", patterns)
+        self.assertIn("['\"]" + re.escape('{reviews_dir}/{n}-{slug}.md') + '\\b', patterns)
+        self.assertIn("['\"]" + re.escape('### Task') + '\\b', patterns)
+        for pattern in patterns:
+            self.assertIsNone(re.search(pattern, 'main'))
+            self.assertIsNone(re.search(pattern, 'inbox'))
+
+    def test_a_copied_default_matches_and_prose_does_not(self):
+        patterns = conv_mod.forbidden_patterns()
+
+        def matches_any(text):
+            return any(re.search(p, text) for p in patterns)
+
+        self.assertTrue(matches_any("X = 'docs/specs'"))
+        self.assertTrue(matches_any('default="fix/"'))
+        self.assertTrue(matches_any("f'worker/{iid}'"))
+        self.assertFalse(matches_any('the worker/ prefix'))
+
+    def test_the_module_prints_them(self):
+        result = subprocess.run([sys.executable, '-m', 'asf.conventions', '--forbidden'],
+                                cwd=REPO_ROOT, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), conv_mod.forbidden_patterns())
 
 
 class CheckConventionsScriptTests(unittest.TestCase):

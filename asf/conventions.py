@@ -16,6 +16,7 @@ The product yaml carries the overrides::
         fix: bugfix/
       default_bug_epic: E-0042
       test_command: make test
+      briefs_dir: docs/briefs
       harvest:
         gate: per-branch          # default combined: one gate per tick (B-0040)
         branches_per_tick: 3
@@ -26,6 +27,7 @@ written by an operator and may carry conventions a module older than it does not
 losing them on load would silently change behaviour. ``.get()``/``[]`` see the fields and the
 extras alike, so the callers that treat the conventions as a mapping keep working.
 """
+import re
 from dataclasses import dataclass, field, fields
 
 #: The branch a job of each kind pushes. A value ending in ``/`` or ``-`` is used as written;
@@ -79,11 +81,40 @@ DEFAULT_GATE_TIMEOUT_S = 600
 HARVEST_KEYS = {'gate': 'harvest_gate', 'branches_per_tick': 'branches_per_tick',
                 'gate_timeout_s': 'gate_timeout_s'}
 
+DEFAULT_BRIEFS_DIR = None        # where a product keeps brief documents on its trunk
+DEFAULT_MATRIX_PATH = None       # the parity matrix file, read for Story status
+DEFAULT_DESIGN_SPEC_NAME = None  # the one spec `asf migrate` reads as the design spec
+DEFAULT_DECISIONS_FILE = None    # a decisions file `asf migrate` mines for D-rows
+DEFAULT_REPORTS_DIR = None       # a directory of hotfix / diagnostic reports `asf migrate` adopts
+DEFAULT_REPORT_PATTERN = None    # regex over a file name in reports_dir; None → every .md
+DEFAULT_CI_WORKFLOW = None       # the workflow whose runs on the trunk are the green evidence
+DEFAULT_CI_DEV_JOB = None        # the job in that workflow whose success marks the dev sha
+DEFAULT_DEPLOY_WORKFLOW = None   # the workflow whose newest success marks the prod sha
+
 
 def _normalise_prefix(value):
     """``feature`` → ``feature/``; ``feature/`` and ``m-`` are already prefixes."""
     text = str(value)
     return text if text.endswith(('/', '-')) else text + '/'
+
+
+def forbidden_patterns():
+    """One extended regex per path-shaped string default, for tools/check_conventions.sh — a
+    copy of a default in code is a convention in code.
+
+    Walks the string values of :data:`DEFAULT_BRANCH_PREFIXES` (``legacy`` is a list and is
+    skipped) and every module-level ``DEFAULT_*`` string, keeps the ones containing ``/``,
+    ``{`` or ``#``, and returns ``['"]`` + the escaped default + a trailing ``\\b`` when the
+    default ends in a word character (so it anchors to a code literal, not to prose)."""
+    values = [v for k, v in DEFAULT_BRANCH_PREFIXES.items() if k != 'legacy']
+    values += [v for k, v in globals().items() if k.startswith('DEFAULT_') and isinstance(v, str)]
+    patterns = []
+    for value in values:
+        if not any(sep in value for sep in ('/', '{', '#')):
+            continue
+        suffix = r'\b' if value[-1].isalnum() or value[-1] == '_' else ''
+        patterns.append("['\"]" + re.escape(value) + suffix)
+    return patterns
 
 
 @dataclass
@@ -107,6 +138,15 @@ class Conventions:
     harvest_gate: str = DEFAULT_HARVEST_GATE
     branches_per_tick: int = DEFAULT_BRANCHES_PER_TICK
     gate_timeout_s: int = DEFAULT_GATE_TIMEOUT_S
+    briefs_dir: str = DEFAULT_BRIEFS_DIR
+    matrix_path: str = DEFAULT_MATRIX_PATH
+    design_spec_name: str = DEFAULT_DESIGN_SPEC_NAME
+    decisions_file: str = DEFAULT_DECISIONS_FILE
+    reports_dir: str = DEFAULT_REPORTS_DIR
+    report_pattern: str = DEFAULT_REPORT_PATTERN
+    ci_workflow: str = DEFAULT_CI_WORKFLOW
+    ci_dev_job: str = DEFAULT_CI_DEV_JOB
+    deploy_workflow: str = DEFAULT_DEPLOY_WORKFLOW
     stage_limits: dict = field(default_factory=dict)
     #: Everything the yaml carried that is not a field above, kept verbatim.
     extra: dict = field(default_factory=dict)
@@ -245,3 +285,16 @@ class Conventions:
 
     def values(self):
         return self.as_dict().values()
+
+
+if __name__ == '__main__':
+    import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] == '--forbidden':
+        for pattern in forbidden_patterns():
+            print(pattern)
+    else:
+        for name, value in list(globals().items()):
+            if name.startswith('DEFAULT_'):
+                print(f'{name} = {value}')
+    sys.exit(0)
