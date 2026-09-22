@@ -59,6 +59,10 @@ whose output has gone quiet is read as stalled and may be relaunched on top of y
 away everything you have not pushed. Never run a command in the background and never end your
 turn waiting for one.
 
+Run the gate in the foreground and wait for it. Your last act is `git push`. Never start a
+background task you do not wait for. A result with uncommitted or unpushed work is a failed
+session (B-0051) and comes back to you as a correction.
+
 Anything a human must decide, answer or run is never guessed and never buried in a comment:
 print `NEEDS OPERATOR: <what> — <the command or the answer needed>` on its own line, then carry on
 with every part of the job that does not depend on it.

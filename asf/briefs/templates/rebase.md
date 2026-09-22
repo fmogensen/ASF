@@ -10,8 +10,7 @@ regenerated with its script, never hand-merged. A conflicting test file is merge
 cases still run. If a number, an id or a register row this branch books collides with one `{main}`
 has taken since, re-number this branch's to the next free one and update every reference to it.
 
-ALWAYS PUSH SOMETHING — if the merge turns out to be a no-op, push a report saying so. A session
-that ends without a push is counted dead and relaunched on top of you.
+ALWAYS PUSH SOMETHING — if the merge turns out to be a no-op, push a report saying so.
 
 GATE before the push: the branch's own gate commands and the touched tests. Paste each one's last
 line in the report.

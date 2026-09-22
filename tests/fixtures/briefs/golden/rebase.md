@@ -50,8 +50,7 @@ regenerated with its script, never hand-merged. A conflicting test file is merge
 cases still run. If a number, an id or a register row this branch books collides with one `main`
 has taken since, re-number this branch's to the next free one and update every reference to it.
 
-ALWAYS PUSH SOMETHING — if the merge turns out to be a no-op, push a report saying so. A session
-that ends without a push is counted dead and relaunched on top of you.
+ALWAYS PUSH SOMETHING — if the merge turns out to be a no-op, push a report saying so.
 
 GATE before the push: the branch's own gate commands and the touched tests. Paste each one's last
 line in the report.
@@ -64,6 +63,10 @@ Print a progress line as you go — what you are doing, not that you are doing s
 whose output has gone quiet is read as stalled and may be relaunched on top of you, which throws
 away everything you have not pushed. Never run a command in the background and never end your
 turn waiting for one.
+
+Run the gate in the foreground and wait for it. Your last act is `git push`. Never start a
+background task you do not wait for. A result with uncommitted or unpushed work is a failed
+session (B-0051) and comes back to you as a correction.
 
 Anything a human must decide, answer or run is never guessed and never buried in a comment:
 print `NEEDS OPERATOR: <what> — <the command or the answer needed>` on its own line, then carry on

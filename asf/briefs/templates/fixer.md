@@ -13,8 +13,6 @@ alive.
 
 ALWAYS PUSH SOMETHING — even when the honest answer is "nothing to change". Then the push is a
 report saying what you checked, why no change was needed, and the sha that already carries it.
-A session that ends without a push is counted dead and relaunched on top of you; that is the
-single most expensive thing a fixer can do.
 
 Re-run the acceptance tests and the Gate, and append one line per C to the report: what it asked,
 where it is now closed.

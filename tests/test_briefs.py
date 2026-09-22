@@ -167,6 +167,30 @@ class GoldenBriefTest(unittest.TestCase):
         self.assertIn('\nREPORT\nitem: F-0001\nkind: spec\n', text)
         self.assertIn('NEEDS OPERATOR: <what> — <the command or the answer needed>', text)
 
+    def test_every_kind_ends_with_the_forbid_background_paragraph(self):
+        # B-0052: a session that backgrounds the suite and returns before it ends leaves no
+        # commit, no push — the closing paragraph is code-generated once, so no template can
+        # omit it or drift from its wording.
+        for kind, r in sorted(ROWS.items()):
+            with self.subTest(kind=kind):
+                text = briefs.build(product(), r, index(), [], REPO_FACTS).text
+                self.assertIn(
+                    'Run the gate in the foreground and wait for it. Your last act is '
+                    '`git push`. Never start a', text)
+                self.assertIn(
+                    'background task you do not wait for. A result with uncommitted or '
+                    'unpushed work is a failed', text)
+                self.assertIn('session (B-0051) and comes back to you as a correction.', text)
+
+    def test_the_push_wording_is_not_duplicated_per_template(self):
+        # fixer.md and rebase.md each carried their own copy of "a session that ends without a
+        # push is counted dead and relaunched on top of you" — now that the closing paragraph
+        # says this once for every kind, the template copies are dead weight.
+        for kind in ('fixer', 'rebase'):
+            with self.subTest(kind=kind):
+                text = build_mod.load_template(kind)
+                self.assertNotIn('counted dead and relaunched on top of you', text)
+
 
 class PreambleTest(unittest.TestCase):
     def test_identifiers_are_there_without_the_session_looking(self):
