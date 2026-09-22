@@ -2,8 +2,13 @@
 id: D-7850
 type: decision
 title: B-0016 is accepted as it stands; the review loop on fix/B-0016 is closed and does not reopen
-superseded_in_part_by: D-7850, D-7851, D-7852, D-7853
+superseded_in_part_by: D-7850, D-7851, D-7852, D-7853, D-7854
 ---
+> **Seventh routing: [`docs/decisions/D-7854.md`](../decisions/D-7854.md)** affirms D-7853 without
+> change. There is no finding, the fix stands, and the `--no-ff` merge is still clean at
+> `origin/main` `cc168ab` (tree `647c0fa`, `spawn.py` blob `44ee4df`). The stray rebase each session
+> finds is spawn's own relaunch rebase (`spawn.py:198`), so it is expected, not debris.
+
 > **Final ruling: [`docs/decisions/D-7853.md`](../decisions/D-7853.md).** The loop reopened a sixth
 > time. D-7853 affirms every prior card on the finding (there is none) and on the fix (it stands),
 > and **supersedes all three on the remedy**: no force-push is needed. `git merge-tree
