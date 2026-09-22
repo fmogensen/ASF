@@ -2,6 +2,7 @@
 cold-retry correction. Every run goes through the fake runtime; git is a bare repo in a temp
 dir; no network, no account, no real product."""
 import argparse
+import concurrent.futures
 import contextlib
 import io
 import json
@@ -323,6 +324,24 @@ class TestSpawn(Home):
         self.assertTrue(os.path.exists(os.path.join(wt, 'a.txt')))  # the held branch's own work
         self.assertTrue(os.path.exists(os.path.join(wt, 'b.txt')))  # rebased onto main
         git('merge-base', '--is-ancestor', 'origin/main', 'HEAD', cwd=wt)
+
+    def test_b0016_concurrent_worktree_adds_all_succeed(self):
+        # five-plus `git worktree add` calls against the same repo within the same second used
+        # to race on `.git/config` ("could not lock config file") and kill some of the jobs
+        n = 8
+        with concurrent.futures.ThreadPoolExecutor(max_workers=n) as pool:
+            futures = [pool.submit(spawn_mod.make_worktree, self.product, f'job{i}', f'branch{i}')
+                      for i in range(n)]
+            results, errors = [], []
+            for f in futures:
+                try:
+                    results.append(f.result())
+                except Exception as e:
+                    errors.append(e)
+        self.assertEqual(errors, [], f'{len(errors)} of {n} concurrent worktree adds failed: {errors}')
+        self.assertEqual(len(results), n)
+        for i, path in enumerate(results):
+            self.assertEqual(git('rev-parse', '--abbrev-ref', 'HEAD', cwd=path), f'branch{i}')
 
     def test_id_ranges_do_not_overlap_and_are_sticky(self):
         r1 = spawn_mod.reserve_id_range(self.product, 'j1', prefixes=['T'])

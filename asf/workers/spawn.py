@@ -15,6 +15,7 @@
 5. one line in ``sessions.jsonl``: job, item, feature, kind, account, model, pid, worktree,
    branch, started.
 """
+import fcntl
 import os
 import re
 import subprocess
@@ -133,6 +134,31 @@ def _branch_exists_on_origin(repo, branch):
     return bool(_git(['ls-remote', '--heads', 'origin', branch], repo).strip())
 
 
+def _repo_lock_path(repo):
+    return os.path.join(repo, '.git', 'asf-worktree.lock')
+
+
+def _with_repo_lock(repo, fn):
+    """Serialises worktree creation per repo (B-0016): ``git worktree add`` and the branch
+    create it does along the way both write ``.git/config``, and parallel spawns racing on
+    that file killed jobs before their first turn. One retry absorbs a lock still held by
+    something outside this lock (a plain concurrent ``git`` call) once it clears; ``fn`` must
+    be safe to call twice."""
+    lock_path = _repo_lock_path(repo)
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    with open(lock_path, 'w') as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            try:
+                return fn()
+            except SpawnError as e:
+                if 'lock config file' not in str(e):
+                    raise
+                return fn()
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
 def make_worktree(product, job, branch):
     """A branch already on origin — any row kind, a held branch sent back for another round —
     is reused: the worktree is added on it, then rebased onto ``origin/<main>`` — a conflict is
@@ -146,26 +172,30 @@ def make_worktree(product, job, branch):
     if not repo or not os.path.isdir(repo):
         raise SpawnError(f'product repo_dir missing: {repo!r}')
     path = os.path.join(worktrees_dir(product), job)
-    _git(['fetch', '-q', 'origin', product.main], repo)
-    if os.path.exists(path):
-        s = pool_mod.load_sessions(product).get(job)
-        if s is None or not s.get('ended'):
-            raise SpawnError(f'worktree already exists: {path}')
-        subprocess.run(['git', 'rebase', '-q', f'origin/{product.main}'], cwd=path,
-                       capture_output=True, text=True)
+
+    def add():
+        _git(['fetch', '-q', 'origin', product.main], repo)
+        if os.path.exists(path):
+            s = pool_mod.load_sessions(product).get(job)
+            if s is None or not s.get('ended'):
+                raise SpawnError(f'worktree already exists: {path}')
+            subprocess.run(['git', 'rebase', '-q', f'origin/{product.main}'], cwd=path,
+                           capture_output=True, text=True)
+            return path
+        if _branch_exists_on_origin(repo, branch):
+            _git(['fetch', '-q', 'origin', branch], repo)
+            held = _holding_worktree(repo, branch)
+            if held:
+                # a stale worktree of a session that has ended still holds the branch
+                _git(['worktree', 'remove', '--force', held], repo)
+            _git(['worktree', 'add', '-q', '-B', branch, path, f'origin/{branch}'], repo)
+            subprocess.run(['git', 'rebase', '-q', f'origin/{product.main}'], cwd=path,
+                           capture_output=True, text=True)
+            return path
+        _git(['worktree', 'add', '-q', '-b', branch, path, f'origin/{product.main}'], repo)
         return path
-    if _branch_exists_on_origin(repo, branch):
-        _git(['fetch', '-q', 'origin', branch], repo)
-        held = _holding_worktree(repo, branch)
-        if held:
-            # a stale worktree of a session that has ended still holds the branch
-            _git(['worktree', 'remove', '--force', held], repo)
-        _git(['worktree', 'add', '-q', '-B', branch, path, f'origin/{branch}'], repo)
-        subprocess.run(['git', 'rebase', '-q', f'origin/{product.main}'], cwd=path,
-                       capture_output=True, text=True)
-        return path
-    _git(['worktree', 'add', '-q', '-b', branch, path, f'origin/{product.main}'], repo)
-    return path
+
+    return _with_repo_lock(repo, add)
 
 
 def brief_for(row, brief_text):
