@@ -21,6 +21,7 @@ import subprocess
 import sys
 
 from asf import env, schema
+from asf.conventions import DEFAULT_BRANCH_PREFIXES
 
 ITEM_FOLDERS = ('epics', 'features', 'stories', 'tasks', 'bugs', 'decisions', 'rules')
 STREAM_FOLDERS = ('inbox', 'groom', 'releases', 'metrics/ci', 'metrics/sessions', 'metrics/ticks',
@@ -182,7 +183,13 @@ def render_product_yaml(d):
            'conventions:',
            _line('specs_dir', d['specs_dir'], '  '),
            _line('plans_dir', d['plans_dir'], '  '),
-           'ci:',
+           '  branch_prefixes:']
+    # written explicitly, every kind, so a product that overrides one prefix cannot silently
+    # drop the rest — `conventions.all_prefixes()` only knows the kinds actually in the yaml
+    # (B-0051: a kind missing here is a lane branch harvest never learns to look for)
+    out += [_line(kind, DEFAULT_BRANCH_PREFIXES[kind], '    ')
+           for kind in DEFAULT_BRANCH_PREFIXES if kind != 'legacy']
+    out += ['ci:',
            _line('provider', d['ci_provider'], '  '),
            _line('test_command', d['test_command'], '  ')]
     return '\n'.join(out) + '\n'

@@ -2,9 +2,14 @@
 
 For every live session in ``sessions.jsonl``:
 
-* its log's last line is a result → ended, ``end_reason: finished`` (or ``failed``);
+* its log's last line is a result → ended, ``end_reason: finished`` — but only once the job's
+  branch is actually pushed (``origin/<branch>`` exists and contains the worktree's HEAD); an
+  ``ok`` result that never pushed ends ``failed: not pushed: <n> uncommitted file(s), <m>
+  unpushed commit(s)`` instead, so the item it worked stays open rather than looking done forever
+  with nothing for harvest to land (B-0051);
 * its pid is dead and there is no result → ended, ``end_reason: dead pid``;
-* a ``dead pid`` session whose log later carries a result → ``re-judged`` finished/failed (B-0028).
+* a ``dead pid`` session whose log later carries a result → ``re-judged`` finished/failed, under
+  the same push rule (B-0028, B-0051).
 
 Then the worktrees under ``~/.ASF/state/<product>/worktrees/``: one with no session at all is an
 ``orphan``; one whose session has ended is a reap candidate. With ``fix=True`` a worktree is
@@ -74,6 +79,37 @@ def pushed(worktree, branch):
     return True, ''
 
 
+def push_gap(worktree, branch, main):
+    """(ok, detail): a session's own branch, actually on origin and holding its HEAD. ``detail``
+    counts what is missing — uncommitted files, and commits not on the branch's remote (or, when
+    the branch was never pushed at all, not on ``origin/<main>``) — as ``not pushed: <n>
+    uncommitted file(s), <m> unpushed commit(s)`` (B-0051: a result that says ok is not "finished"
+    until this is (0, 0))."""
+    st = _git(['status', '--porcelain'], worktree)
+    n = len([line for line in st.stdout.splitlines() if line.strip()]) if st.returncode == 0 else 0
+    remote = ''
+    if branch:
+        ls = _git(['ls-remote', '--heads', 'origin', branch], worktree)
+        remote = ls.stdout.split()[0] if ls.returncode == 0 and ls.stdout.strip() else ''
+    base = f'origin/{branch}' if remote else f'origin/{main}'
+    rc = _git(['rev-list', '--count', f'{base}..HEAD'], worktree)
+    m = int(rc.stdout.strip()) if rc.returncode == 0 and rc.stdout.strip().isdigit() else 0
+    if n == 0 and m == 0 and remote:
+        return True, ''
+    return False, f'not pushed: {n} uncommitted file(s), {m} unpushed commit(s)'
+
+
+def result_reason(worktree, branch, main, rec):
+    """'finished' only when the result says ok AND the branch is actually pushed — a session
+    that exits clean but never pushes must not read as done, or the item it was working on is
+    blocked forever (health says finished, harvest sees nothing to land) (B-0051)."""
+    if not runtime_mod.result_ok(rec):
+        sig = runtime_mod.failure_reason(rec)
+        return f'failed: {sig}' if sig else 'failed'
+    ok, why = push_gap(worktree, branch, main)
+    return 'finished' if ok else f'failed: {why}'
+
+
 def has_commits(worktree, branch):
     """True when the branch was ever committed to: its reflog holds more than its creation.
 
@@ -123,16 +159,15 @@ def health(product, fix=False, alive=pid_alive, out=print):
             if s.get('end_reason') == 'dead pid' and not s.get('harvested'):
                 rec = runtime_mod.read_result(s.get('log'))
                 if rec is not None:
-                    ok = runtime_mod.result_ok(rec)
-                    reason = 'finished' if ok else 'failed'
+                    reason = result_reason(s.get('worktree'), s.get('branch'), product.main, rec)
+                    ok = reason == 'finished'
                     pool_mod.update_session(product, job, end_reason=reason, rc=0 if ok else 1)
                     s.update(end_reason=reason, rc=0 if ok else 1)
                     found.append((job, 're-judged', reason))
             continue
         rec = runtime_mod.read_result(s.get('log'))
         if rec is not None:
-            sig = runtime_mod.failure_reason(rec)
-            reason = 'finished' if runtime_mod.result_ok(rec) else f'failed: {sig}' if sig else 'failed'
+            reason = result_reason(s.get('worktree'), s.get('branch'), product.main, rec)
         elif not alive(s.get('pid')):
             reason = 'dead pid'
         else:

@@ -13,7 +13,7 @@ import unittest
 from unittest import mock
 
 import asf
-from asf import env, hooks, init, schema, upgrade
+from asf import conventions, env, hooks, init, schema, upgrade
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -157,6 +157,17 @@ class InitTest(HomeCase):
         self.assertIsNone(data['conventions']['plans_dir'])
         self.assertIn('plans_dir:   # TODO', text)
         self.assertEqual(data['ci'], {'provider': 'gh-actions', 'test_command': 'npm test'})
+
+    def test_b0051_discovery_writes_every_branch_prefix_so_none_is_forgotten(self):
+        # a product yaml that only lists the prefix an operator happened to override loses the
+        # rest of `conventions.all_prefixes()` — a branch harvest never learns to look for
+        # (B-0051). `asf init` writes every kind explicitly so there is nothing left to forget.
+        rc, out, err = self.run_init()
+        self.assertEqual(rc, 0, err)
+        with open(env.product_path('sample')) as f:
+            data = env.loads(f.read())
+        expected = {k: v for k, v in conventions.DEFAULT_BRANCH_PREFIXES.items() if k != 'legacy'}
+        self.assertEqual(data['conventions']['branch_prefixes'], expected)
 
     def test_new_record_is_laid_down(self):
         rc, out, err = self.run_init()

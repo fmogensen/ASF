@@ -136,14 +136,24 @@ def _branch_exists_on_origin(repo, branch):
 def make_worktree(product, job, branch):
     """A branch already on origin — any row kind, a held branch sent back for another round —
     is reused: the worktree is added on it, then rebased onto ``origin/<main>`` — a conflict is
-    left in place for the session to resolve. Otherwise a fresh branch off ``origin/<main>``."""
+    left in place for the session to resolve. Otherwise a fresh branch off ``origin/<main>``.
+
+    A worktree already sitting at this job's path is refused only while its session is still
+    live — the same worktree left behind by a session that *ended* (e.g. it finished without
+    pushing, B-0051) is reused as-is: its branch and tree, rebased onto the fetched trunk. A
+    live session's worktree is never touched (B-0025)."""
     repo = product.repo_dir
     if not repo or not os.path.isdir(repo):
         raise SpawnError(f'product repo_dir missing: {repo!r}')
     path = os.path.join(worktrees_dir(product), job)
-    if os.path.exists(path):
-        raise SpawnError(f'worktree already exists: {path}')
     _git(['fetch', '-q', 'origin', product.main], repo)
+    if os.path.exists(path):
+        s = pool_mod.load_sessions(product).get(job)
+        if s is None or not s.get('ended'):
+            raise SpawnError(f'worktree already exists: {path}')
+        subprocess.run(['git', 'rebase', '-q', f'origin/{product.main}'], cwd=path,
+                       capture_output=True, text=True)
+        return path
     if _branch_exists_on_origin(repo, branch):
         _git(['fetch', '-q', 'origin', branch], repo)
         held = _holding_worktree(repo, branch)

@@ -345,6 +345,48 @@ class TestSpawn(Home):
         with self.assertRaises(spawn_mod.SpawnError):
             spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b', runtime=rt, cfg=self.cfg)
 
+    def test_b0051_ended_sessions_worktree_is_reused_not_refused(self):
+        # a session that ended 'finished' without pushing (B-0051) must not permanently block
+        # its item: the next spawn for the same job reuses the worktree as it stands — branch
+        # and tree — rebased onto the trunk, instead of refusing it forever. The refusal stays
+        # only for a worktree whose session is still live (B-0025).
+        row = feature_row('again')
+        rt = runtime_mod.FakeRuntime([{'ok': True, 'pid': 40}])
+        rec = spawn_mod.spawn(self.product, row, self.acct(), 'b', runtime=rt, cfg=self.cfg)
+        wt = rec['worktree']
+        for k, v in (('user.email', 'ci@example.com'), ('user.name', 'ci')):
+            git('config', k, v, cwd=wt)
+        with open(os.path.join(wt, 'x'), 'w') as f:
+            f.write('x')
+        git('add', 'x', cwd=wt)
+        git('commit', '-q', '-m', 'own work, never pushed', cwd=wt)
+        health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        s = pool_mod.load_sessions(self.product)['again']
+        self.assertTrue(s.get('ended'))
+        self.assertNotEqual(s['end_reason'], 'finished')
+        # the trunk moves on while the worktree sits there, unpushed
+        other = os.path.join(self.tmp, 'other')
+        git('clone', '-q', os.path.join(self.tmp, 'origin.git'), other, cwd=self.tmp)
+        with open(os.path.join(other, 'trunk.txt'), 'w') as f:
+            f.write('trunk moved\n')
+        git('add', '.', cwd=other)
+        git('-c', 'user.email=ci@example.com', '-c', 'user.name=ci', 'commit', '-q',
+           '-m', 'main moves on', cwd=other)
+        git('push', '-q', 'origin', 'main', cwd=other)
+        rt2 = runtime_mod.FakeRuntime([{'running': True, 'pid': 41}])
+        rec2 = spawn_mod.spawn(self.product, row, self.acct(), 'b', runtime=rt2, cfg=self.cfg)
+        self.assertEqual(rec2['worktree'], wt)
+        self.assertTrue(os.path.exists(os.path.join(wt, 'x')))
+        self.assertTrue(os.path.exists(os.path.join(wt, 'trunk.txt')))
+        git('merge-base', '--is-ancestor', 'origin/main', 'HEAD', cwd=wt)
+
+    def test_b0025_live_sessions_worktree_still_refuses(self):
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 50}])
+        row = feature_row('again')
+        spawn_mod.spawn(self.product, row, self.acct(), 'b', runtime=rt, cfg=self.cfg)
+        with self.assertRaises(spawn_mod.SpawnError):
+            spawn_mod.spawn(self.product, row, self.acct(), 'b', runtime=rt, cfg=self.cfg)
+
     def test_b0024_unmapped_model_label_spawns_nothing(self):
         cfg = {'worker_pool': {'accounts': [{'name': 'acct-a', 'role': 'local', 'cap': 2}]}}
         rt = runtime_mod.FakeRuntime([{'running': True}])
@@ -457,20 +499,22 @@ class TestHealth(Home):
         self.spawn('live', {'running': True, 'pid': 13})
         found = health_mod.health(self.product, alive=lambda pid: pid == 13, out=lambda s: None)
         ended = {j: d for j, w, d in found if w == 'ended'}
-        self.assertEqual(ended, {'done': 'finished', 'gone': 'dead pid'})
+        # 'done' finished ok but never pushed a thing — a finished result is only 'finished'
+        # once its branch is actually pushed, or the item it worked stays blocked forever:
+        # health says finished, harvest never sees a branch to land (B-0051).
+        self.assertEqual(ended, {'done': 'failed: not pushed: 0 uncommitted file(s), 0 unpushed commit(s)',
+                                 'gone': 'dead pid'})
         s = pool_mod.load_sessions(self.product)
-        self.assertEqual(s['done']['end_reason'], 'finished')
+        self.assertEqual(s['done']['end_reason'], ended['done'])
         self.assertFalse(s['live'].get('ended'))
-        keep = {j: d for j, w, d in found if w == 'keep'}
-        self.assertEqual(keep['done'], 'ended: branch not pushed')
-        # 'gone' never committed anything of its own: its worktree carries nothing ahead of
-        # main and nothing uncommitted, so B-0049's rule reaps it as empty rather than keeping
-        # it around forever just because it never finished cleanly.
+        # neither 'done' nor 'gone' carries anything ahead of main or uncommitted, so B-0049's
+        # rule reaps both as empty rather than keeping them around forever unfinished.
         reapable = {j: d for j, w, d in found if w == 'reapable'}
-        self.assertEqual(reapable['gone'], 'empty')
+        self.assertEqual(reapable, {'done': 'empty', 'gone': 'empty'})
 
     def test_b0028_dead_pid_is_rejudged_when_the_result_arrives(self):
         rec = self.spawn('late', {'running': True, 'pid': 12})
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
         found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
         self.assertIn(('late', 'ended', 'dead pid'), found)
         with open(rec['log'], 'a') as f:
@@ -484,6 +528,21 @@ class TestHealth(Home):
         # settled: the next pass leaves it alone
         found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
         self.assertFalse([f for f in found if f[1] == 're-judged'])
+
+    def test_b0051_rejudged_result_is_ok_but_never_pushed_stays_failed(self):
+        # the same re-judge path (B-0028), but the branch was never pushed — an `ok` result
+        # must not re-judge to 'finished' or the item it worked on is blocked forever: health
+        # says finished, harvest never sees a branch to land, and spawn refuses the worktree.
+        rec = self.spawn('late', {'running': True, 'pid': 12})
+        health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        with open(rec['log'], 'a') as f:
+            f.write(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False}) + '\n')
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        reason = dict((j, d) for j, w, d in found if w == 're-judged')['late']
+        self.assertTrue(reason.startswith('failed: not pushed:'), reason)
+        s = pool_mod.load_sessions(self.product)['late']
+        self.assertEqual(s['end_reason'], reason)
+        self.assertEqual(s['rc'], 1)
 
     def test_reap_only_when_pushed(self):
         rec = self.spawn('done', {'ok': True, 'pid': 11})
@@ -509,6 +568,10 @@ class TestHealth(Home):
         self.assertNotIn('done', [j for j, _ in rows])
 
     def test_local_commit_not_pushed_is_kept(self):
+        # B-0051: the result says ok, but a commit made after the last push never went out —
+        # that must not be read as 'finished' (or the item is blocked forever: health says
+        # finished, harvest sees nothing to land). It ends 'failed: not pushed: ...' instead,
+        # and the worktree with the unpushed work is kept, not reaped.
         rec = self.spawn('done', {'ok': True})
         wt = rec['worktree']
         git('push', '-q', 'origin', rec['branch'], cwd=wt)
@@ -519,7 +582,9 @@ class TestHealth(Home):
         git('add', 'x', cwd=wt)
         git('commit', '-q', '-m', 'x', cwd=wt)
         found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
-        self.assertIn(('done', 'keep', 'ended: local commits not pushed'), found)
+        end_reason = pool_mod.load_sessions(self.product)['done']['end_reason']
+        self.assertEqual(end_reason, 'failed: not pushed: 0 uncommitted file(s), 1 unpushed commit(s)')
+        self.assertIn(('done', 'keep', f'ended: session {end_reason}, not finished'), found)
         self.assertTrue(os.path.isdir(wt))
 
     def test_orphan_worktree(self):
