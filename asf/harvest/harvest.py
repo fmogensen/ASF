@@ -524,14 +524,22 @@ def mark_session(state_dir, job, **fields):
         f.write(json.dumps(dict(fields, job=job), sort_keys=True) + '\n')
 
 
-def remote_branches(repo, conv):
+def remote_branches(repo, conv, known=()):
     """Every ``origin/<prefix>*`` branch, the prefix stripped of ``origin/``, for every prefix the
-    product's branches can carry."""
+    product's branches can carry — plus every branch in ``known`` (the registry's, B-0067: eight
+    finished coder branches sat under a prefix no convention named and were never looked at)
+    that is on origin."""
     out = []
     for prefix in conv.all_prefixes():
         r = sh(['git', 'for-each-ref', '--format=%(refname:short)',
                 f'refs/remotes/origin/{prefix}*'], cwd=repo)
         out.extend(l[len('origin/'):] for l in r.stdout.splitlines() if l.startswith('origin/'))
+    for branch in known:
+        if branch and branch != conv.main and branch not in out:
+            r = sh(['git', 'for-each-ref', '--format=%(refname:short)',
+                    f'refs/remotes/origin/{branch}'], cwd=repo)
+            if r.stdout.strip() == f'origin/{branch}':
+                out.append(branch)
     return sorted(dict.fromkeys(out))
 
 
@@ -830,7 +838,7 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
     asf_repo = None
     results = {}
     eligible = []
-    for branch in remote_branches(repo, conv):
+    for branch in remote_branches(repo, conv, known=sessions):
         record = sessions.get(branch)
         if record is None or lifecycle.is_live(record) or record.get('harvest') == 'pr':
             continue

@@ -134,7 +134,7 @@ class RowsTest(unittest.TestCase):
 
     def test_conflict_and_stale(self):
         by = {r.item_id: r for r in self.cand()}
-        self.assertEqual((by['T-0007'].kind, by['T-0007'].branch), ('CONFLICT → REBASE', 'task/T-0007'))
+        self.assertEqual((by['T-0007'].kind, by['T-0007'].branch), ('CONFLICT → REBASE', 'task/T-0007'))  # its recorded branch
         self.assertEqual((by['T-0006'].kind, by['T-0006'].brief_kind), ('STALE → CLOSE', 'close'))
 
     def test_bug_rows(self):
@@ -276,6 +276,9 @@ class TiersTest(unittest.TestCase):
     def test_waits_on_rows_cost_no_slot(self):
         out = rows.plan_rows(fixture_index(), product(), [S1_SESSION], 6)
         self.assertEqual(sum(1 for r in out if r.launches), 5)
+        # B-0067: a coder's branch is the code lane's prefix, the one harvest scans for code
+        self.assertTrue(all(r.branch.startswith('worker/') for r in out if r.kind == 'PLAN → CODE'),
+                        [r.branch for r in out])
         self.assertEqual(kinds(out)[-3:], [('PLAN → CODE', 'T-0002'), ('PLAN → CODE', 'T-0003'),
                                            ('STALEMATE → ADJUDICATE', 'F-0003')])
 

@@ -101,9 +101,14 @@ def _conventions(product):
 
 
 def branch_for(product, kind, item_id, default=None):
-    """``<prefix><id>``; a prefix not already ending in ``/`` or ``-`` gets a ``/``."""
+    """``<prefix><id>``; a prefix not already ending in ``/`` or ``-`` gets a ``/``. The
+    product's prefix for ``kind``, else the caller's default, else the documented default
+    (``code`` → ``worker/``, B-0067), else ``<kind>/``."""
+    from asf.conventions import DEFAULT_BRANCH_PREFIXES
     prefixes = _conventions(product).get('branch_prefixes') or {}
-    prefix = prefixes.get(kind) or default or kind
+    prefix = prefixes.get(kind) or default or DEFAULT_BRANCH_PREFIXES.get(kind) or kind
+    if isinstance(prefix, (list, tuple)):
+        prefix = kind
     if not prefix.endswith(('/', '-')):
         prefix += '/'
     return f"{prefix}{item_id}"
@@ -163,7 +168,8 @@ def _pr_closed(item):
 
 def _branch_of(item, product, kind):
     branches = (item.get('links') or {}).get('branches') or []
-    return branches[0] if branches else branch_for(product, kind, item['id'])
+    lane = 'code' if kind == 'task' else kind  # B-0067: a Task's branch is the code lane's
+    return branches[0] if branches else branch_for(product, lane, item['id'])
 
 
 # ---- rows -------------------------------------------------------------------
@@ -312,11 +318,13 @@ def task_rows(items, product, feature, busy, running):
         if other:
             out.append(Row(tier=2, kind=PLAN_CODE, item_id=t['id'], feature_id=feature['id'],
                            action=f"WAITS ON {other}", brief_kind='task',
-                           branch=branch_for(product, 'task', t['id']),
+                           branch=branch_for(product, 'code', t['id']),
                            reason=f"writes: overlaps {other}", waits_on=other))
             continue
+        # B-0067: a coder works the code lane — `conventions.branch_prefixes.code` (worker/ by
+        # default), the one prefix harvest scans for code; `task/` was a lane nobody harvested
         out.append(Row(tier=2, kind=PLAN_CODE, item_id=t['id'], feature_id=feature['id'],
-                       action=LAUNCH, brief_kind='task', branch=branch_for(product, 'task', t['id']),
+                       action=LAUNCH, brief_kind='task', branch=branch_for(product, 'code', t['id']),
                        reason='plan approved, footprint free' if writes else 'plan approved, no writes: declared'))
         if writes:
             running.append((t['id'], list(writes)))

@@ -735,6 +735,18 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertEqual(lines, ['superseded fix/B-0001: B-0001 is removed in the record — archived as archive/fix/B-0001'])
         self.assertTrue(self.origin_has('archive/fix/B-0001'))
 
+    def test_b0067_a_branch_the_registry_knows_is_harvested_whatever_its_prefix(self):
+        # eight finished coder branches under task/ — a prefix no convention named — were never
+        # looked at: harvest scanned the conventions' prefixes only
+        self.push_lane('task/T-0001', [('task(T-0001): the change', {'a.txt': 'a\n'})])
+        self.session('coder-t-0001', 'T-0001', 'task/T-0001')
+        results, lines = self.harvest(self.product())
+        self.assertEqual(results, {'task/T-0001': 'landed'})
+        self.assertFalse(self.origin_has('task/T-0001'))
+        # a branch on origin the registry does not know, under no prefix, is still not the lane's
+        self.push_lane('scratch/x', [('scratch', {'x.txt': 'x\n'})])
+        self.assertEqual(self.harvest(self.product()), ({}, []))
+
     def test_b0057_a_closed_bugs_branch_is_archived_not_held(self):
         self.push_lane('fix/B-0001', [('fix(B-0001): an older approach', {'old.txt': 'old\n'})])
         self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
