@@ -2,8 +2,16 @@
 id: D-7850
 type: decision
 title: B-0016 is accepted as it stands; the review loop on fix/B-0016 is closed and does not reopen
-superseded_in_part_by: D-7850
+superseded_in_part_by: D-7850, D-7851
 ---
+> **Final ruling: [`docs/decisions/D-7851.md`](../decisions/D-7851.md).** The loop reopened a fourth
+> time after D-7850 closed it, with the worktree left mid-`rebase` replaying `6fcb8df` again.
+> D-7851 affirms D-7850 in substance entirely — no finding, the fix stands — and changes two
+> things: the handover moves from the local branch `fix/B-0016-clean` to a formula over origin refs
+> (a remedy only visible inside one worktree is why nothing happened), and **adjudication is
+> refused for this item from here**. B-0016 is not disputed; it is blocked on the operator. Read
+> D-7851 for what now holds.
+
 > **Filed as [`docs/decisions/D-7850.md`](../decisions/D-7850.md).** That card mints this ruling's
 > id and affirms everything below about the finding (there is none) and the fix (it stands). It
 > **overrules one thing**: the `-s ours` merge `59e8ebf` recorded below as the way the divergence
