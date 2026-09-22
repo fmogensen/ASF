@@ -19,6 +19,7 @@ The product yaml carries the overrides::
       harvest:
         gate: per-branch          # default combined: one gate per tick (B-0040)
         branches_per_tick: 3
+        gate_timeout_s: 900       # default 600: a gate past it is killed and red (B-0072)
 
 Unknown keys are kept (in :attr:`Conventions.extra`) rather than rejected: a product yaml is
 written by an operator and may carry conventions a module older than it does not read yet, and
@@ -69,8 +70,14 @@ DEFAULT_HARVEST_GATE = 'combined'
 #: ``harvest: {branches_per_tick: …}`` in the yaml.
 DEFAULT_BRANCHES_PER_TICK = 12
 
+#: The most seconds one gate run (the test command, each check) may take before harvest kills
+#: its process group and holds the branch as red (B-0072: a test that recursed through the
+#: pre-commit hook hung the tick, and every tick after it). The tick's clock, by default.
+DEFAULT_GATE_TIMEOUT_S = 600
+
 #: The keys of the yaml's ``harvest:`` block and the field each one is.
-HARVEST_KEYS = {'gate': 'harvest_gate', 'branches_per_tick': 'branches_per_tick'}
+HARVEST_KEYS = {'gate': 'harvest_gate', 'branches_per_tick': 'branches_per_tick',
+                'gate_timeout_s': 'gate_timeout_s'}
 
 
 def _normalise_prefix(value):
@@ -99,6 +106,7 @@ class Conventions:
     prs_per_tick: int = DEFAULT_PRS_PER_TICK
     harvest_gate: str = DEFAULT_HARVEST_GATE
     branches_per_tick: int = DEFAULT_BRANCHES_PER_TICK
+    gate_timeout_s: int = DEFAULT_GATE_TIMEOUT_S
     stage_limits: dict = field(default_factory=dict)
     #: Everything the yaml carried that is not a field above, kept verbatim.
     extra: dict = field(default_factory=dict)

@@ -47,6 +47,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -101,6 +102,37 @@ def clean_env(env=None):
 
 def sh(cmd, cwd=None, env=None):
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, env=clean_env(env))
+
+
+def sh_timed(cmd, cwd, env, timeout):
+    """``cmd`` in a process group of its own, killed whole when ``timeout`` seconds pass
+    (B-0072: a gate that never ends must not become a tick that never ends — and its
+    children, a nested suite, a hook, must go with it). ``(returncode, stdout, stderr)``;
+    ``returncode`` is None when it timed out."""
+    p = subprocess.Popen(cmd, cwd=cwd, env=clean_env(env), stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        out, err = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            p.kill()
+        out, err = p.communicate()
+        return None, out, err
+    return p.returncode, out, err
+
+
+def gate_timeout(conv):
+    """The seconds one gate command may take: ``conventions.harvest.gate_timeout_s``."""
+    try:
+        return max(1, int((conv or DEFAULTS).gate_timeout_s))
+    except (TypeError, ValueError):
+        return int(DEFAULTS.gate_timeout_s)
+
+
+def timed_out_line(cmd, timeout):
+    return f'gate timed out after {timeout} s: {" ".join(cmd)}'
 
 
 def gate_env(worktree=None, base=None):
@@ -346,13 +378,19 @@ def run_gate(tmp, conv=None):
     package guessed at."""
     conv = conv or DEFAULTS
     env = gate_env(tmp)
+    timeout = gate_timeout(conv)
     if conv.test_command:
-        t = sh(shlex.split(str(conv.test_command)), cwd=tmp, env=env)
-        if t.returncode != 0:
-            return False, f'tests failed: {tail(t.stderr or t.stdout)}'
-    c = sh(asf_cmd('check'), cwd=tmp, env=env)
-    if c.returncode != 0:
-        return False, f'asf check failed: {tail(c.stdout or c.stderr)}'
+        cmd = shlex.split(str(conv.test_command))
+        rc, out, err = sh_timed(cmd, tmp, env, timeout)
+        if rc is None:
+            return False, timed_out_line(cmd, timeout)
+        if rc != 0:
+            return False, f'tests failed: {tail(err or out)}'
+    rc, out, err = sh_timed(asf_cmd('check'), tmp, env, timeout)
+    if rc is None:
+        return False, timed_out_line(asf_cmd('check'), timeout)
+    if rc != 0:
+        return False, f'asf check failed: {tail(out or err)}'
     return True, None
 
 
@@ -627,17 +665,20 @@ def first_failing_line(text):
 
 def product_gate(tmp, conv, asf_repo):
     """``(ok, first failing line)``: the product's test command, then — on asf's own repo — its
-    generic and conventions checks."""
+    generic and conventions checks. Each within ``harvest.gate_timeout_s`` (B-0072)."""
     cmds = []
     if conv.test_command:
         cmds.append(shlex.split(str(conv.test_command)))
     if asf_repo:
         cmds += [['bash', os.path.join('tools', name + '.sh')] for name in ASF_GATE_SCRIPTS]
     env = gate_env(tmp)
+    timeout = gate_timeout(conv)
     for cmd in cmds:
-        r = sh(cmd, cwd=tmp, env=env)
-        if r.returncode != 0:
-            return False, first_failing_line((r.stdout or '') + '\n' + (r.stderr or ''))
+        rc, out, err = sh_timed(cmd, tmp, env, timeout)
+        if rc is None:  # B-0072: killed with its whole process group; held, never waited for
+            return False, timed_out_line(cmd, timeout)
+        if rc != 0:
+            return False, first_failing_line((out or '') + '\n' + (err or ''))
     return True, None
 
 

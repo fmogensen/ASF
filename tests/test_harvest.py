@@ -1065,6 +1065,32 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertEqual(len(shas), 3, shas)  # one landing each, three pushes
         self.assertIn(self.origin_main(), shas)
 
+    # -- B-0072: a hanging gate is held, not waited for ----------------------------------
+    def test_b0072_a_hanging_gate_is_held_with_the_timeout_line_and_its_children_are_gone(self):
+        import time
+        self.lanes(1)
+        mark = os.path.join(self.base, 'grandchild-ran')
+        script = os.path.join(self.base, 'hang.py')
+        with open(script, 'w', encoding='utf-8') as f:  # a gate that never ends, with a child of its own
+            f.write('import subprocess, sys, time\n'
+                    f'subprocess.Popen([sys.executable, "-c", "import time; time.sleep(2); open({mark!r}, \'w\').close()"])\n'
+                    'time.sleep(30)\n')
+        hang = f'{sys.executable} {script}'
+        before = self.origin_main()
+        t0 = time.monotonic()
+        results, lines = self.harvest(self.product(test_command=hang, harvest={'gate_timeout_s': 1}))
+        self.assertLess(time.monotonic() - t0, 10)
+        self.assertEqual(results, {'fix/B-0001': 'held'})
+        held = [l for l in lines if l.startswith('held ')][0]
+        self.assertTrue(held.startswith('held fix/B-0001: gate timed out after 1 s: '), held)
+        self.assertTrue(held.endswith(' — back to its session (round 1)'), held)
+        self.assertEqual(self.origin_main(), before)
+        rec = self.record('fix/B-0001')
+        self.assertEqual(rec['correction']['kind'], 'gate')
+        self.assertIn('timed out', rec['correction']['text'])
+        time.sleep(2.5)  # the grandchild would have written its mark by now — its group was killed
+        self.assertFalse(os.path.exists(mark))
+
     def test_record_repo_keeps_its_own_path(self):
         with mock.patch.object(harvest, 'is_record_repo', return_value=True), \
                 mock.patch.object(harvest, 'run_harvest', return_value=0) as old:

@@ -19,7 +19,7 @@ class DefaultsTests(unittest.TestCase):
         self.assertEqual((c.task_heading, c.intake_dir), ('### Task', 'inbox'))
         self.assertEqual((c.goals_file, c.default_bug_epic, c.test_command), (None, None, None))
         self.assertEqual((c.main, c.preamble_max_lines, c.prs_per_tick), ('main', 120, 6))
-        self.assertEqual((c.harvest_gate, c.branches_per_tick), ('combined', 12))
+        self.assertEqual((c.harvest_gate, c.branches_per_tick, c.gate_timeout_s), ('combined', 12, 600))
         self.assertEqual(c.stage_limits, {})
 
     def test_two_instances_do_not_share_their_mutable_defaults(self):
@@ -47,8 +47,9 @@ class FromMappingTests(unittest.TestCase):
         """``harvest: {gate: per-branch, branches_per_tick: 3}`` is how a product yaml spells
         the two harvest fields (B-0040); a key under it nobody reads is kept, not rejected."""
         c = Conventions.from_mapping({'harvest': {'gate': 'per-branch', 'branches_per_tick': 3,
-                                                  'later': 'x'}})
-        self.assertEqual((c.harvest_gate, c.branches_per_tick), ('per-branch', 3))
+                                                  'gate_timeout_s': 60, 'later': 'x'}})
+        self.assertEqual((c.harvest_gate, c.branches_per_tick, c.gate_timeout_s),
+                         ('per-branch', 3, 60))
         self.assertEqual(c.extra, {'harvest': {'later': 'x'}})
         self.assertEqual(Conventions.from_mapping({'harvest': {}}), Conventions())
         self.assertEqual(Conventions.from_mapping({'harvest_gate': 'per-branch'}).harvest_gate,
@@ -164,6 +165,7 @@ class ModuleConstantsTests(unittest.TestCase):
         self.assertEqual(conv_mod.DEFAULT_PRS_PER_TICK, c.prs_per_tick)
         self.assertEqual(conv_mod.DEFAULT_HARVEST_GATE, c.harvest_gate)
         self.assertEqual(conv_mod.DEFAULT_BRANCHES_PER_TICK, c.branches_per_tick)
+        self.assertEqual(conv_mod.DEFAULT_GATE_TIMEOUT_S, c.gate_timeout_s)
 
 
 if __name__ == '__main__':
