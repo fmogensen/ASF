@@ -8,6 +8,9 @@ main: main
 conventions:
   specs_dir: specs
   plans_dir: plans
+  reviews_dir: reviews
+  review_pattern: reviews/{slug}-r{n}.md
+  intake_dir: cards
   default_bug_epic: E-0001
   branch_prefixes:
     code: feature/

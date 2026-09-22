@@ -206,6 +206,36 @@ class SampleProductTest(unittest.TestCase):
         p = self.asf('doctor', '--product', 'sample')
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
 
+    def test_the_spec_brief_cites_the_samples_dirs(self):
+        # the review-kind brief is the one that cites a document path under every one of the
+        # sample's own dirs (spec, review) in a single body — the spec-kind brief for the same
+        # item only cites the spec path
+        p = self.asf('brief', '--product', 'sample', '--item', 'F-0001', '--kind', 'review')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('Specs live in `specs`, plans in `plans`, reviews in `reviews`.', p.stdout)
+        self.assertIn('specs/f-0001.md', p.stdout)
+        self.assertIn('reviews/f-0001-r1.md', p.stdout)
+        self.assertNotIn('docs/specs', p.stdout)
+        self.assertNotIn('docs/reviews', p.stdout)
+
+    def test_evidence_sees_the_spec_under_specs(self):
+        p = self.asf('evidence', '--product', 'sample', '--fresh')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        data = json.loads(p.stdout)
+        self.assertEqual(data['features']['f-0002']['spec'], 'origin/main:specs/f-0002.md')
+        # the sample declares no matrix_path, briefs_dir or decisions file — nothing looked for them
+        self.assertEqual(data['stories'], {})
+        self.assertNotIn('briefs', data)
+        self.assertNotIn('decisions', data)
+
+    def test_the_evidence_cache_is_under_the_products_state(self):
+        p = self.asf('evidence', '--product', 'sample', '--fresh')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        cache = os.path.join(self.home, 'state', 'sample', 'cache-backlog-evidence.json')
+        self.assertTrue(os.path.isfile(cache), cache)
+        with open(cache, encoding='utf-8') as f:
+            json.load(f)  # the cache the call just wrote, not a stale or foreign one
+
 
 # ---- the failure paths, whole loop (F-0087) ----------------------------------------------
 
