@@ -19,6 +19,16 @@ ci:
   provider: none
   test_command: python3 -m unittest discover -s tests
 deploy_sha: none
+approvals:
+  spend_money: human-now
+  touch_production: human-now
+  touch_security: human-now
+  touch_customer_data: human-now
+  touch_legal: human-now
+  new_epic: human-now
+  merge_amendable_set: human-now
+  merge_routine_pr: auto
+  file_bug: auto
 steps:
   batch: off
   daily: off

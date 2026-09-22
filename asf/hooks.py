@@ -22,6 +22,11 @@ from asf import env
 EVENTS = ('PreToolUse', 'PostToolUse', 'Stop')
 RULES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'rules')
 
+#: The runtime's own settings files, project-level — matched by `asf.approvals`'s
+#: `touch_security` path recogniser (F-0031). This module is `tools/check_conventions.sh`'s one
+#: exemption for the runtime settings path, so the path lives here, not in `asf/approvals.py`.
+RUNTIME_SETTINGS_GLOBS = ('.claude/settings.json', '.claude/settings.local.json')
+
 
 def declared_hooks(rules_dir=RULES_DIR):
     """``[(event, name)]`` from every rule card with a ``hook:`` line; empty if no ``rules/``."""

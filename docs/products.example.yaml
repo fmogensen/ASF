@@ -43,6 +43,9 @@ conventions:
   # asf.groom.inbox / asf.tick.file_bugs: the Epic an inbox Bug or a filed Bug is parented under
   # when no explicit parent is given. Leave unset to have groom ask instead of guessing.
   default_bug_epic: E-0001
+  # F-0031: globs whose match makes a landed branch's merge class merge_amendable_set (needs a
+  # person, see approvals: below) rather than merge_routine_pr. The factory's own rules.
+  amendable_paths: [rules/*, docs/CONSTITUTION.md]
 
 # CI: which provider runs checks, which workflow file, budgets and runner labels.
 ci:
@@ -94,17 +97,30 @@ size_classes:
   large:
     max_files: 30
 
-# the approval matrix as code: action class -> auto | groom | human-now.
+# the approval matrix: every class of asf.approvals.CLASSES -> auto | groom | human-now.
+#   auto       the factory acts
+#   groom      the hook refuses; the item waits for the next groom
+#   human-now  the hook refuses; the tick raises a NEEDS OPERATOR line every cycle until resolved
+# An unmapped class takes its default (see `asf approvals`). Widen or narrow here, nowhere else.
 approvals:
   spend_money: human-now
-  touch_prod_credentials: human-now
+  touch_production: human-now
+  touch_security: human-now
   touch_customer_data: human-now
+  touch_legal: human-now
   new_epic: human-now
   merge_amendable_set: human-now
   merge_routine_pr: auto
   file_bug: auto
-  groom: auto            # auto | groom | human-now — the one key asf.groom.policy reads.
-                         # unset or anything but `auto`: every groom behaviour below is off.
+
+# approval_signals: product-specific recognisers added to a class's built-ins (never removed) —
+# a class not in asf.approvals.CLASSES, or a key other than paths/commands, is a config error.
+# approval_signals:
+#   spend_money:
+#     commands: ['\bgh api\b.*\bbilling\b']
+#   touch_customer_data:
+#     paths: ['data/customers/*']
+#     commands: ['\bpsql\b.*\bprod\b']
 
 # F-0085/D-0049: the four policies' thresholds. A policy whose key is absent uses the default
 # shown.

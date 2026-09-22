@@ -21,6 +21,8 @@ The product yaml carries the overrides::
         gate: per-branch          # default combined: one gate per tick (B-0040)
         branches_per_tick: 3
         gate_timeout_s: 900       # default 600: a gate past it is killed and red (B-0072)
+      amendable_paths: [rules/*, docs/CONSTITUTION.md]  # F-0031: a landed branch touching one
+                                                          # of these globs is merge_amendable_set
 
 Unknown keys are kept (in :attr:`Conventions.extra`) rather than rejected: a product yaml is
 written by an operator and may carry conventions a module older than it does not read yet, and
@@ -148,6 +150,10 @@ class Conventions:
     ci_dev_job: str = DEFAULT_CI_DEV_JOB
     deploy_workflow: str = DEFAULT_DEPLOY_WORKFLOW
     stage_limits: dict = field(default_factory=dict)
+    #: Globs (F-0031 §2.1) whose match makes a landed branch's merge class
+    #: `merge_amendable_set` rather than `merge_routine_pr` — the factory's own rules. Empty by
+    #: default: no branch is treated specially until an operator names one.
+    amendable_paths: list = field(default_factory=list)
     #: Everything the yaml carried that is not a field above, kept verbatim.
     extra: dict = field(default_factory=dict)
 
