@@ -2,9 +2,17 @@
 id: D-7850
 type: decision
 title: B-0016 is accepted as it stands; the review loop on fix/B-0016 is closed and does not reopen
-superseded_in_part_by: D-7850, D-7851
+superseded_in_part_by: D-7850, D-7851, D-7852, D-7853
 ---
-> **Final ruling: [`docs/decisions/D-7851.md`](../decisions/D-7851.md).** The loop reopened a fourth
+> **Final ruling: [`docs/decisions/D-7853.md`](../decisions/D-7853.md).** The loop reopened a sixth
+> time. D-7853 affirms every prior card on the finding (there is none) and on the fix (it stands),
+> and **supersedes all three on the remedy**: no force-push is needed. `git merge-tree
+> --write-tree origin/main origin/fix/B-0016` exits 0 and the merged tree's `asf/workers/spawn.py`
+> is blob `44ee4df` — byte-identical to the branch tip, not the superseded `6fcb8df` variant — so
+> `git merge --no-ff origin/fix/B-0016` into `main` lands the fix and rewrites nothing. The
+> cherry-pick rebuild below remains a valid fallback, not the route. Read D-7853 for what holds.
+
+> **Superseded ruling: [`docs/decisions/D-7851.md`](../decisions/D-7851.md).** The loop reopened a fourth
 > time after D-7850 closed it, with the worktree left mid-`rebase` replaying `6fcb8df` again.
 > D-7851 affirms D-7850 in substance entirely — no finding, the fix stands — and changes two
 > things: the handover moves from the local branch `fix/B-0016-clean` to a formula over origin refs
