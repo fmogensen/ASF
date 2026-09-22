@@ -33,9 +33,10 @@ class StepsTestCase(TickTestCase):
 
     product_extra = 'steps:\n  batch: off\n'
 
-    def setUp(self):
-        super().setUp()
-        seed = os.path.join(self.tmp, 'seed')
+    @classmethod
+    def build_repos(cls, tmp):
+        super().build_repos(tmp)
+        seed = os.path.join(tmp, 'seed')
         os.makedirs(os.path.join(seed, 'bugs'))
         with open(os.path.join(seed, 'bugs', 'B-0001.md'), 'w') as f:
             f.write(CARD)
@@ -45,17 +46,22 @@ class StepsTestCase(TickTestCase):
         _git(['commit', '-q', '-m', 'index'], seed)
         _git(['push', '-q', 'origin', 'HEAD:main'], seed)
 
+        repo_origin = os.path.join(tmp, 'repo.git')
+        repo = os.path.join(tmp, 'repo')
+        _git(['init', '-q', '--bare', '-b', 'main', repo_origin])
+        _git(['clone', '-q', repo_origin, repo])
+        _git(['config', 'user.email', 'r@example.com'], repo)
+        _git(['config', 'user.name', 'r'], repo)
+        with open(os.path.join(repo, 'README'), 'w') as f:
+            f.write('r\n')
+        _git(['add', '-A'], repo)
+        _git(['commit', '-q', '-m', 'init'], repo)
+        _git(['push', '-q', 'origin', 'HEAD:main'], repo)
+
+    def setUp(self):
+        super().setUp()
         self.repo_origin = os.path.join(self.tmp, 'repo.git')
         self.repo = os.path.join(self.tmp, 'repo')
-        _git(['init', '-q', '--bare', '-b', 'main', self.repo_origin])
-        _git(['clone', '-q', self.repo_origin, self.repo])
-        _git(['config', 'user.email', 'r@example.com'], self.repo)
-        _git(['config', 'user.name', 'r'], self.repo)
-        with open(os.path.join(self.repo, 'README'), 'w') as f:
-            f.write('r\n')
-        _git(['add', '-A'], self.repo)
-        _git(['commit', '-q', '-m', 'init'], self.repo)
-        _git(['push', '-q', 'origin', 'HEAD:main'], self.repo)
         self.write_product(f'repo_dir: {self.repo}\n{self.product_extra}')
         self.product = env.load_product('sample')
         self.lines = []

@@ -14,6 +14,11 @@ from unittest import mock
 from asf import env
 from asf.tick import shadow, steps, tick
 
+try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_tick` does not
+    from gitfixture import Template
+except ImportError:  # pragma: no cover - import shape only
+    from tests.gitfixture import Template
+
 
 def _git(args, cwd=None):
     return subprocess.run(['git'] + args, cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
@@ -50,13 +55,18 @@ class TickTestCase(unittest.TestCase):
     """A temp ASF home, a bare origin seeded with a minimal record, the operator's own checkout."""
 
     product_yaml = ''
+    #: One :class:`Template` per test class (a subclass extends :meth:`build_repos`), built the
+    #: first time a test of the class runs and copied per test (B-0071).
+    _templates = {}
 
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix='tick_test_')
-        self.origin = os.path.join(self.tmp, 'origin.git')
-        seed = os.path.join(self.tmp, 'seed')
-        _git(['init', '-q', '--bare', '-b', 'main', self.origin])
-        _git(['clone', '-q', self.origin, seed])
+    @classmethod
+    def build_repos(cls, tmp):
+        """Lay the repos under ``tmp``: the record's bare origin, seeded through a clone, and
+        the operator's own checkout."""
+        origin = os.path.join(tmp, 'origin.git')
+        seed = os.path.join(tmp, 'seed')
+        _git(['init', '-q', '--bare', '-b', 'main', origin])
+        _git(['clone', '-q', origin, seed])
         _git(['config', 'user.email', 'seed@example.com'], seed)
         _git(['config', 'user.name', 'seed'], seed)
         os.makedirs(os.path.join(seed, 'features'))
@@ -65,8 +75,15 @@ class TickTestCase(unittest.TestCase):
         _git(['add', '-A'], seed)
         _git(['commit', '-q', '-m', 'seed'], seed)
         _git(['push', '-q', 'origin', 'HEAD:main'], seed)
+        _git(['clone', '-q', origin, os.path.join(tmp, 'operator')])
+
+    def setUp(self):
+        template = self._templates.get(type(self))
+        if template is None:
+            template = self._templates[type(self)] = Template(self.build_repos, prefix='tick_test_')
+        self.tmp = template.fresh()
+        self.origin = os.path.join(self.tmp, 'origin.git')
         self.operator = os.path.join(self.tmp, 'operator')
-        _git(['clone', '-q', self.origin, self.operator])
 
         self._orig_home = env.ASF_HOME
         env.ASF_HOME = os.path.join(self.tmp, 'home')

@@ -73,6 +73,26 @@ def fake_launchctl(directory):
     return bindir, statedir
 
 
+#: The CLIs `asf doctor` probes for a login (``asf.doctor._CLI_TOOLS``, git excepted — git is
+#: real everywhere in the suite). On the operator's machine each probe is a network round trip
+#: (`gh auth status`, `vercel whoami`: 1.6–8 s a call, B-0071), and its answer is that
+#: machine's, not the fixture's.
+DOCTOR_CLIS = ('gh', 'gcloud', 'az', 'aws', 'flyctl', 'vercel')
+
+
+def fake_clis(bindir, names=DOCTOR_CLIS, rc=0):
+    """Put an instant stub for each CLI in ``names`` into ``bindir`` (first on PATH): one line
+    of output, exit ``rc``. A test that wants one of them to answer differently writes its own
+    stub over it (``test_sample_product`` keeps ``gh`` offline)."""
+    os.makedirs(bindir, exist_ok=True)
+    for name in names:
+        stub = os.path.join(bindir, name)
+        with open(stub, 'w', encoding='utf-8') as f:
+            f.write(f'#!/bin/sh\necho "{name}: stubbed in tests"\nexit {rc}\n')
+        os.chmod(stub, 0o755)
+    return bindir
+
+
 def fake_loaded(statedir, labels):
     """Tell the stub which labels ``launchctl list`` reports."""
     with open(os.path.join(statedir, 'list.txt'), 'w', encoding='utf-8') as f:

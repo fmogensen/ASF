@@ -16,6 +16,11 @@ from asf.conventions import Conventions
 from asf.harvest import harvest
 from asf.init import ITEM_FOLDERS, STREAM_FOLDERS
 
+try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_harvest` does not
+    from gitfixture import Template
+except ImportError:  # pragma: no cover - import shape only
+    from tests.gitfixture import Template
+
 # The product under test: a record repo on trunk `main`, code branches under `worker/`, and a
 # test command of its own. Nothing here is a default of the package — harvest reads all three.
 CONV = Conventions.from_mapping({
@@ -138,8 +143,14 @@ def index_and_commit(repo, message):
 
 def make_repo():
     """A bare `origin`, a `repo` clone (the tick clone / main checkout) seeded with one epic and
-    an index, and a state dir with worktrees/ + the session registry."""
-    base = tempfile.mkdtemp(prefix='harvest_test_')
+    an index, and a state dir with worktrees/ + the session registry. Built once, copied per
+    test (B-0071)."""
+    base = RECORD_REPO.fresh()
+    return (base, os.path.join(base, 'origin.git'), os.path.join(base, 'repo'),
+            os.path.join(base, 'state'))
+
+
+def _build_record_repo(base):
     origin = os.path.join(base, 'origin.git')
     repo = os.path.join(base, 'repo')
     # B-0038: the trunk is `main` whatever the host's init.defaultBranch says — the CI runner
@@ -172,9 +183,10 @@ def make_repo():
     index_and_commit(repo, 'init')
     sh(['git', 'push', '-q', 'origin', 'HEAD:main'], cwd=repo)
 
-    state_dir = os.path.join(base, 'state')
-    os.makedirs(os.path.join(state_dir, 'worktrees'))
-    return base, origin, repo, state_dir
+    os.makedirs(os.path.join(base, 'state', 'worktrees'))
+
+
+RECORD_REPO = Template(_build_record_repo, prefix='harvest_test_')
 
 
 def dead_pid():
@@ -448,23 +460,27 @@ class ProductHarvestTests(unittest.TestCase):
     """A bare product origin, the product's own checkout (``repo_dir``, which never has the lane
     branch locally), and a worker's clone that pushes ``fix/B-0001`` — as a session does."""
 
+    @staticmethod
+    def build(base):
+        origin, repo, worker = (os.path.join(base, n) for n in ('origin.git', 'repo', 'worker'))
+        os.makedirs(os.path.join(base, 'state'))
+        sh(['git', 'init', '-q', '--bare', '-b', 'main', origin])
+        sh(['git', 'clone', '-q', origin, repo])
+        git_identity(repo)
+        ProductHarvestTests.write(None, repo, 'checks/test_fx.py', GREEN_TEST)
+        sh(['git', 'add', '-A'], cwd=repo)
+        sh(['git', 'commit', '-qm', 'init'], cwd=repo)
+        sh(['git', 'push', '-q', 'origin', 'HEAD:main'], cwd=repo)
+        sh(['git', 'clone', '-q', origin, worker])
+        git_identity(worker)
+
     def setUp(self):
-        self.base = tempfile.mkdtemp(prefix='harvest_product_')
+        self.base = PRODUCT_REPOS.fresh()  # built once, copied per test (B-0071)
         self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
         self.origin = os.path.join(self.base, 'origin.git')
         self.repo = os.path.join(self.base, 'repo')
         self.worker = os.path.join(self.base, 'worker')
         self.state_dir = os.path.join(self.base, 'state')
-        os.makedirs(self.state_dir)
-        sh(['git', 'init', '-q', '--bare', '-b', 'main', self.origin])
-        sh(['git', 'clone', '-q', self.origin, self.repo])
-        git_identity(self.repo)
-        self.write(self.repo, 'checks/test_fx.py', GREEN_TEST)
-        sh(['git', 'add', '-A'], cwd=self.repo)
-        sh(['git', 'commit', '-qm', 'init'], cwd=self.repo)
-        sh(['git', 'push', '-q', 'origin', 'HEAD:main'], cwd=self.repo)
-        sh(['git', 'clone', '-q', self.origin, self.worker])
-        git_identity(self.worker)
 
     def write(self, root, rel, text):
         path = os.path.join(root, rel)
@@ -1055,6 +1071,9 @@ class ProductHarvestTests(unittest.TestCase):
             self.assertEqual(harvest.run_product_harvest(self.product(), self.state_dir), {})
         old.assert_called_once()
         self.assertEqual(old.call_args[0][0], os.path.abspath(self.repo))
+
+
+PRODUCT_REPOS = Template(ProductHarvestTests.build, prefix='harvest_product_')
 
 
 class RulesSourceMergeTests(unittest.TestCase):

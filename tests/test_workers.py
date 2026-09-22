@@ -25,6 +25,11 @@ from asf.workers import wave as wave_mod
 from asf.workers import register
 from asf.tick.step_wave import corrections as step_wave_corrections
 
+try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_workers` does not
+    from gitfixture import Template
+except ImportError:  # pragma: no cover - import shape only
+    from tests.gitfixture import Template
+
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'workers')
 
 
@@ -43,26 +48,33 @@ def s1_row(job='fix-b-0001', item='B-0001', sev='S1'):
     return pool_mod.parse_row(f'BUG → FIX {item} "a bug" ({sev})   → launch {job} (Opus)')
 
 
+def _build_home_repos(tmp):
+    """A bare origin with one seed commit and its clone — built once, copied per test (B-0071)."""
+    origin = os.path.join(tmp, 'origin.git')
+    seed = os.path.join(tmp, 'seed')
+    git('init', '-q', '--bare', '-b', 'main', origin, cwd=tmp)
+    git('init', '-q', '-b', 'main', seed, cwd=tmp)
+    for k, v in (('user.email', 'ci@example.com'), ('user.name', 'ci')):
+        git('config', k, v, cwd=seed)
+    with open(os.path.join(seed, 'README'), 'w') as f:
+        f.write('seed\n')
+    git('add', '.', cwd=seed)
+    git('commit', '-q', '-m', 'seed', cwd=seed)
+    git('push', '-q', origin, 'main', cwd=seed)
+    git('clone', '-q', origin, os.path.join(tmp, 'repo'), cwd=tmp)
+
+
+HOME_REPOS = Template(_build_home_repos, prefix='workers_home_')
+
+
 class Home(unittest.TestCase):
     """A temp ASF_HOME with a product whose repo is a clone of a bare origin."""
 
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        self.tmp = HOME_REPOS.fresh()
         self._home = env.ASF_HOME
         env.ASF_HOME = os.path.join(self.tmp, 'asf-home')
-        origin = os.path.join(self.tmp, 'origin.git')
-        seed = os.path.join(self.tmp, 'seed')
-        git('init', '-q', '--bare', '-b', 'main', origin, cwd=self.tmp)
-        git('init', '-q', '-b', 'main', seed, cwd=self.tmp)
-        for k, v in (('user.email', 'ci@example.com'), ('user.name', 'ci')):
-            git('config', k, v, cwd=seed)
-        with open(os.path.join(seed, 'README'), 'w') as f:
-            f.write('seed\n')
-        git('add', '.', cwd=seed)
-        git('commit', '-q', '-m', 'seed', cwd=seed)
-        git('push', '-q', origin, 'main', cwd=seed)
         self.repo = os.path.join(self.tmp, 'repo')
-        git('clone', '-q', origin, self.repo, cwd=self.tmp)
         self.grant = os.path.join(self.tmp, 'grant')
         os.makedirs(self.grant)
         self.product = env.Product('sample', {'repo_dir': self.repo, 'main': 'main',

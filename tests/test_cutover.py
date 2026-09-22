@@ -18,9 +18,11 @@ import tempfile
 import unittest
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_cutover` does not
-    from test_scheduler import fake_launchctl, fake_loaded
+    from gitfixture import Template
+    from test_scheduler import fake_clis, fake_launchctl, fake_loaded
 except ImportError:  # pragma: no cover - import shape only
-    from tests.test_scheduler import fake_launchctl, fake_loaded
+    from tests.gitfixture import Template
+    from tests.test_scheduler import fake_clis, fake_launchctl, fake_loaded
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CUTOVER = os.path.join(PROJECT_ROOT, 'tools', 'cutover.sh')
@@ -67,9 +69,34 @@ PRINT_TEMPLATE = """@LABEL@ = {
 """
 
 
+def _git(args, cwd):
+    env = dict(os.environ)
+    env.update({'GIT_AUTHOR_NAME': 'test', 'GIT_AUTHOR_EMAIL': 't@example.invalid',
+                'GIT_COMMITTER_NAME': 'test', 'GIT_COMMITTER_EMAIL': 't@example.invalid'})
+    subprocess.run(['git'] + args, cwd=cwd, check=True, env=env, capture_output=True, text=True)
+
+
+def _build_repos(root):
+    """The product repo (empty), the record's bare origin and its clone with one root commit —
+    built once, copied per test (B-0071)."""
+    repo_dir = os.path.join(root, 'repo')
+    origin_dir = os.path.join(root, 'origin.git')
+    backlog_dir = os.path.join(root, 'backlog')
+    os.makedirs(repo_dir)
+    _git(['init', '-q'], cwd=repo_dir)
+    subprocess.run(['git', 'init', '-q', '--bare', origin_dir], check=True)
+    subprocess.run(['git', 'clone', '-q', origin_dir, backlog_dir], check=True,
+                   capture_output=True)
+    _git(['commit', '-q', '--allow-empty', '-m', 'root'], cwd=backlog_dir)
+    _git(['push', '-q', 'origin', 'HEAD'], cwd=backlog_dir)
+
+
+REPOS = Template(_build_repos, prefix='asf-cutover-')
+
+
 class CutoverFixtureTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix='asf-cutover-')
+        self.tmp = REPOS.fresh()
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.home = os.path.join(self.tmp, 'home')
         self.asf_home = os.path.join(self.tmp, 'ASF')
@@ -79,6 +106,7 @@ class CutoverFixtureTest(unittest.TestCase):
             os.makedirs(d)
 
         self.bindir, self.statedir = fake_launchctl(self.tmp)
+        fake_clis(self.bindir)  # `asf doctor` runs twice per cutover; its probes answer at once
         self.asf_stub = os.path.join(self.stub_dir, 'asf-stub.sh')
         with open(self.asf_stub, 'w', encoding='utf-8') as f:
             f.write(ASF_STUB)
@@ -90,12 +118,6 @@ class CutoverFixtureTest(unittest.TestCase):
         self.repo_dir = os.path.join(self.tmp, 'repo')
         self.origin_dir = os.path.join(self.tmp, 'origin.git')
         self.backlog_dir = os.path.join(self.tmp, 'backlog')
-        os.makedirs(self.repo_dir)
-        self._git(['init', '-q'], cwd=self.repo_dir)
-        subprocess.run(['git', 'init', '-q', '--bare', self.origin_dir], check=True)
-        subprocess.run(['git', 'clone', '-q', self.origin_dir, self.backlog_dir], check=True)
-        self._git(['commit', '-q', '--allow-empty', '-m', 'root'], cwd=self.backlog_dir)
-        self._git(['push', '-q', 'origin', 'HEAD'], cwd=self.backlog_dir)
         self.set_job_runs(True)
 
         self.tick_file = os.path.join(self.tmp, 'tick.md')
@@ -121,13 +143,6 @@ class CutoverFixtureTest(unittest.TestCase):
                     f'backlog_dir: {self.backlog_dir}\n')
 
     # ---- fixture knobs ------------------------------------------------------------------------
-
-    def _git(self, args, cwd):
-        env = dict(os.environ)
-        env.update({'GIT_AUTHOR_NAME': 'test', 'GIT_AUTHOR_EMAIL': 't@example.invalid',
-                    'GIT_COMMITTER_NAME': 'test', 'GIT_COMMITTER_EMAIL': 't@example.invalid'})
-        subprocess.run(['git'] + args, cwd=cwd, check=True, env=env,
-                       capture_output=True, text=True)
 
     def write_config(self, scheduler_extra='', legacy_steps=None):
         with open(os.path.join(self.asf_home, 'config.yaml'), 'w') as f:

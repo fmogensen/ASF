@@ -9,9 +9,9 @@ import unittest
 from asf import doctor, env
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_doctor` does not
-    from test_scheduler import fake_launchctl, fake_loaded, fake_print, read_fixture
+    from test_scheduler import fake_clis, fake_launchctl, fake_loaded, fake_print, read_fixture
 except ImportError:  # pragma: no cover - import shape only
-    from tests.test_scheduler import fake_launchctl, fake_loaded, fake_print, read_fixture
+    from tests.test_scheduler import fake_clis, fake_launchctl, fake_loaded, fake_print, read_fixture
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -191,8 +191,14 @@ class TestNoPrHost(unittest.TestCase):
         hostless = env.Product('p', {'ci': {'provider': 'none'}})
         hosted = env.Product('p', {'ci': {'provider': 'gh-actions'}})
         gh = lambda product: [r for r in doctor.check_cli_sessions(product) if r[0] == 'gh'][0]
-        self.assertFalse(gh(hostless)[1])
-        self.assertTrue(gh(hosted)[1])
+        with tempfile.TemporaryDirectory() as bindir:  # the probes answer at once (B-0071)
+            old_path = os.environ.get('PATH', '')
+            os.environ['PATH'] = fake_clis(bindir) + os.pathsep + old_path
+            try:
+                self.assertFalse(gh(hostless)[1])
+                self.assertTrue(gh(hosted)[1])
+            finally:
+                os.environ['PATH'] = old_path
         self.assertFalse(doctor.has_pr_host(env.Product('p', {'ci': 'none'})))
 
 
@@ -278,6 +284,8 @@ class TestCmdDoctorSubprocess(unittest.TestCase):
         env_vars = dict(os.environ)
         env_vars['ASF_HOME'] = home
         env_vars['PYTHONPATH'] = PROJECT_ROOT + os.pathsep + env_vars.get('PYTHONPATH', '')
+        # the login probes answer at once (B-0071); the rows these tests pin are not theirs
+        env_vars['PATH'] = fake_clis(os.path.join(home, 'bin')) + os.pathsep + env_vars.get('PATH', '')
         return subprocess.run([sys.executable, '-m', 'asf.cli', 'doctor', '--product', product],
                               env=env_vars, capture_output=True, text=True, timeout=30)
 

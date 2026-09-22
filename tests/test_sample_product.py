@@ -22,6 +22,11 @@ import unittest
 
 from asf import hermetic
 
+try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_sample_product` does not
+    from test_scheduler import fake_clis
+except ImportError:  # pragma: no cover - import shape only
+    from tests.test_scheduler import fake_clis
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SAMPLE = os.path.join(ROOT, 'sample')
 
@@ -85,8 +90,9 @@ class SampleProductTest(unittest.TestCase):
 
     @staticmethod
     def _path_with_offline_gh(stub_dir):
-        """PATH with a stub ``gh`` first: every call fails the way an offline ``gh`` does."""
-        os.makedirs(stub_dir)
+        """PATH with a stub ``gh`` first: every call fails the way an offline ``gh`` does. The
+        other CLIs ``asf doctor`` probes answer at once (B-0071) instead of asking the network."""
+        fake_clis(stub_dir)
         stub = os.path.join(stub_dir, 'gh')
         with open(stub, 'w') as f:
             f.write('#!/bin/sh\necho "gh: offline in tests" >&2\nexit 1\n')
