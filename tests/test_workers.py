@@ -675,17 +675,29 @@ class TestHealth(Home):
         self.assertTrue(os.path.isdir(wt))
 
     def test_orphan_worktree(self):
+        # an orphan that has committed is kept until its branch lands, then reaped as 'orphan'.
+        # (An orphan that never committed is B-0025's case and is reaped empty — below.)
         path = os.path.join(spawn_mod.worktrees_dir(self.product), 'stray')
         git('worktree', 'add', '-q', '-b', 'stray', path, 'origin/main', cwd=self.repo)
+        self.commit(path)
         found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
         self.assertIn(('stray', 'keep', 'orphan: branch not pushed'), found)
-        git('push', '-q', 'origin', 'stray', cwd=path)
-        found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
-        self.assertIn(('stray', 'keep', 'orphan: no commits yet'), found)
-        self.commit(path)
+        self.assertTrue(os.path.isdir(path))
         self.land(path, 'stray')
         found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
         self.assertIn(('stray', 'reaped', 'orphan'), found)
+
+    def test_b0025_an_orphan_that_never_committed_is_reaped_not_kept_forever(self):
+        # this used to be kept as 'orphan: branch not pushed' on every pass, for a `pushed()`
+        # check it could never pass, while spawn refused its job with 'worktree already exists'.
+        path = os.path.join(spawn_mod.worktrees_dir(self.product), 'stray')
+        git('worktree', 'add', '-q', '-b', 'stray', path, 'origin/main', cwd=self.repo)
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('stray', 'reapable', 'empty orphan'), found)
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('stray', 'reaped', 'empty orphan'), found)
+        self.assertFalse(os.path.exists(path))
+        self.assertEqual(git('branch', '--list', 'stray', cwd=self.repo), '')
 
     def test_b0019_live_session_with_no_commits_survives_and_is_opening(self):
         rec = self.spawn('fresh', {'running': True, 'pid': 21})

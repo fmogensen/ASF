@@ -223,9 +223,14 @@ def health(product, fix=False, alive=pid_alive, out=print):
             else:
                 found.append((name, 'keep', f'{what}: session {s.get("end_reason")}, not finished'))
             continue
-        if s is None and worktree_empty(path, product.main):
-            # an orphan has no branch anyone pushed, so `pushed()` below would keep it forever
-            # and spawn would refuse its job forever. Empty, it holds nothing to lose (B-0025).
+        if (s is None and not has_commits(path, worktree_branch(path))
+                and worktree_empty(path, product.main)):
+            # an orphan that was never committed to has no branch anyone could push, so the
+            # `pushed()` check below keeps it forever and spawn refuses its job forever. It
+            # holds nothing to lose (B-0025). An orphan that *did* commit is not this case:
+            # unlanded it is kept, landed it is reaped as 'orphan' by the rule below — being
+            # contained in the trunk is what landing means, so `in_trunk` alone cannot tell
+            # the two apart and `has_commits` is the discriminator (B-0019).
             if fix and remove_worktree(product, path, branch=worktree_branch(path)):
                 spawn_mod.release_id_range(product, name)
                 found.append((name, 'reaped', 'empty orphan'))
