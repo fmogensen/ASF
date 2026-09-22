@@ -83,8 +83,24 @@ class StatusViewTests(ViewsTestCase):
         self.assertEqual(rows['Prod'], '— (not configured: ci.deploy_workflow)')
         self.assertEqual(rows['Quota 5h/7d'], '— (not configured: worker_pool.quota_command)')
         self.assertEqual(rows['Cron'], '— (not configured: scheduler.kind (none has no status adapter))')
+        self.assertEqual(rows['Groom'], '— (not configured: approvals.groom)')
         for name, cell in rows.items():
             self.assertFalse(cell.strip() == '—', name)
+
+    def test_groom_row_reads_the_newest_digest(self):
+        product = env.Product('p', {'repo_dir': self.tmp, 'main': 'trunk', 'ci': {'provider': 'none'},
+                                    'deploy_sha': 'none', 'approvals': {'groom': 'auto'}})
+        os.makedirs(os.path.join(self.root, 'groom'))
+        with open(os.path.join(self.root, 'groom', '2026-09-21-digest.md'), 'w') as f:
+            f.write("# Groom digest 2026-09-21\n\n"
+                   "2 answered by rule · 1 ruled by the adjudicator · 0 spoken for · 1 for you\n")
+        with open(os.path.join(self.root, 'groom', '2026-09-22-digest.md'), 'w') as f:
+            f.write("# Groom digest 2026-09-22\n\n"
+                   "3 answered by rule · 5 ruled by the adjudicator · 2 spoken for · 1 for you\n")
+        text = status.render(self.root, product, cfg={'scheduler': {'kind': 'none'}})
+        rows = {ln.split(' | ')[0].lstrip('| '): ln.split(' | ', 1)[1].rstrip(' |')
+               for ln in text.splitlines() if ln.startswith('| ') and 'Metric' not in ln}
+        self.assertEqual(rows['Groom'], '2026-09-22: 3 by rule, 5 ruled, 1 for you')
 
     def test_agents_from_the_registry_and_ready_from_the_feeder(self):
         rows = self.rows({'scheduler': {'kind': 'none'}})

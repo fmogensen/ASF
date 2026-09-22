@@ -11,6 +11,7 @@ from asf.record.ingest import append_history_lines
 from asf.tick import stale
 from asf.tick.stale import format_age, parse_iso
 from asf.groom import policy
+from asf.groom.digest import write_digest
 from asf.groom.inbox import process_inbox
 from asf.views import index_reader
 from asf.workers import lifecycle, pool
@@ -446,6 +447,7 @@ def cmd_groom(args, root):
                                           sections=prev_sections)
 
     answers_file = getattr(args, 'answers_file', None)
+    answers_text = None
     if answers_file and os.path.isfile(answers_file):
         m = ANSWERS_FILE_RE.match(os.path.basename(answers_file))
         adj_date = m.group(1) if m else date
@@ -454,6 +456,8 @@ def cmd_groom(args, root):
         if os.path.isfile(adj_groom_path):
             with open(adj_groom_path, encoding='utf-8') as f:
                 adj_sections = _line_sections(f.read())
+        with open(answers_file, encoding='utf-8') as f:
+            answers_text = f.read()
         applied += apply_groom_answers(root, canonical, answers_file, date,
                                        adjudicator_job=f'groom-{adj_date}', event=event,
                                        sections=adj_sections)
@@ -496,6 +500,11 @@ def cmd_groom(args, root):
                                       sections=_line_sections(text))
         canonical, _dupes = canonicalize(load_items(root)[0])
         derived = compute_derived(canonical)
+        cap = policy.adjudicate_attempts(product)
+        attempts = sum(1 for rec in lifecycle.read_lines(pool.sessions_path(product))
+                       if rec.get('job') == f'groom-{date}')
+        write_digest(root, date, canonical, text,
+                     [answers_text] if answers_text is not None else [], attempts, cap)
 
     rc = do_index(root)
     counts = ', '.join(f"{title}: {len(sections.get(key) or [])}" for title, key in GROOM_SECTIONS)

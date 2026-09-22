@@ -1,6 +1,6 @@
 """asf.groom.policy — the gate (T1), the open-question grammar it reads (PD4), the four policies
-and the policy pass (T2-T4), suppression (T6), the approval bound (T7) and the answers file
-(T10). The digest (T11) arrives in a later Task of F-0085's plan.
+and the policy pass (T2-T4), suppression (T6), the approval bound (T7), the answers file (T10)
+and the digest (T11).
 """
 import argparse
 import datetime
@@ -11,7 +11,7 @@ import tempfile
 import unittest
 
 from asf.env import Product
-from asf.groom import groom, policy
+from asf.groom import digest, groom, policy
 from asf.record import frontmatter
 from asf.record.core import canonicalize, compute_derived, load_items, today
 from tests.test_groom import make_repo, run, write_item
@@ -346,12 +346,26 @@ class PolicyPassTests(GroomAutoTestCase):
         self.assertIn('by rule 1', r1.stdout)
         with open(os.path.join(self.root, 'bugs', 'B-0001.md')) as f:
             snapshot = f.read()
+        digest_path = os.path.join(self.root, 'groom', '2026-09-22-digest.md')
+        with open(digest_path) as f:
+            digest1 = f.read()
+        self.assertIn('1 answered by rule · 0 ruled by the adjudicator · 0 spoken for · 0 for you',
+                      digest1)
+        self.assertIn('- B-0001 decided → true — decide_recurring_bug', digest1)
 
         r2 = self.run_groom(['--date', '2026-09-22'])
         self.assertEqual(r2.returncode, 0, r2.stderr)
         self.assertIn('by rule 0', r2.stdout)
         with open(os.path.join(self.root, 'bugs', 'B-0001.md')) as f:
             self.assertEqual(f.read(), snapshot)
+        with open(digest_path) as f:
+            digest2 = f.read()
+        # The card is decided now, so it drops out of the day's own groom file — the digest still
+        # derives the same answer from History (D9), just without the reason that file no longer
+        # carries; the summary count and the rule line's id/field/value stay the same either way.
+        self.assertIn('1 answered by rule · 0 ruled by the adjudicator · 0 spoken for · 0 for you',
+                      digest2)
+        self.assertIn('- B-0001 decided → true — decide_recurring_bug', digest2)
 
 
 class ApprovalBoundTests(GroomAutoTestCase):
@@ -371,6 +385,12 @@ class ApprovalBoundTests(GroomAutoTestCase):
         self.assertIn('(barred: approvals.new_epic)', text)
         self.assertNotIn('controller:', text)
         self.assertEqual(policy.open_questions(text), [])
+
+        with open(os.path.join(self.root, 'groom', today() + '-digest.md')) as f:
+            digest_text = f.read()
+        for_you = digest_text[digest_text.index('## For you'):]
+        self.assertIn('NEEDS OPERATOR:', for_you)
+        self.assertIn('approvals.new_epic', for_you)
 
     def test_non_epic_question_is_unaffected_by_the_bound(self):
         """An undecided card is the control case: it holds no policy (§2.2's ``undecided3`` row)
@@ -588,6 +608,127 @@ class AttributionTests(unittest.TestCase):
             adjudicator_job='groom-2026-09-21')
         self.assertEqual(applied, 1)
         self.assertIn('(adjudicator, groom-2026-09-21)', text)
+
+
+def _body_with_history(*history_lines):
+    return ("## Description\n\n## Acceptance\n- [ ] \n\n## Non-goals\n\n## History\n"
+           "- 2026-09-01: created\n" + '\n'.join(history_lines) +
+           "\n\n## Children\n\n## Backlinks\n")
+
+
+class DigestTests(unittest.TestCase):
+    """T11: the digest is regenerated from History plus the day's own files, never state of its
+    own — each test calls :func:`digest.render_digest` directly against a hand-built record and
+    a hand-built groom/answers text, the same way ``PolicyTests`` calls a policy directly."""
+
+    def setUp(self):
+        self.root = make_repo()
+        write_item(self.root, 'E-0009', 'epic', 'Factory', typed_lines=['decided: true'])
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _load(self):
+        by_id, _errors = load_items(self.root)
+        canonical, _dupes = canonicalize(by_id)
+        return canonical
+
+    def test_answered_by_rule_section(self):
+        write_item(self.root, 'B-0001', 'bug', 'Checkout fails', parent='E-0009',
+                  typed_lines=['decided: true'],
+                  body=_body_with_history(
+                      '- 2026-09-22 groom: decided → true (controller, decide_recurring_bug)'))
+        groom_text = ("# Groom 2026-09-22\n\n## Auto-filed Bugs not yet decided\n\n"
+                     "- [ ] B-0001 Checkout fails — auto-filed, count 3 → answer: "
+                     "controller: decide_recurring_bug yes\n")
+        text = digest.render_digest(self.root, '2026-09-22', self._load(), groom_text, [], 0, 2)
+        self.assertIn('1 answered by rule · 0 ruled by the adjudicator · 0 spoken for · 0 for you', text)
+        self.assertIn('## Answered by rule', text)
+        self.assertIn('- B-0001 decided → true — decide_recurring_bug: auto-filed, count 3', text)
+        self.assertIn('generated by asf groom@', text)
+
+    def test_ruled_by_adjudicator_section(self):
+        write_item(self.root, 'F-0081', 'feature', 'Some idea', parent='E-0009',
+                  typed_lines=['decided: true'],
+                  body=_body_with_history(
+                      '- 2026-09-22 groom: decided → true (adjudicator, groom-2026-09-22)'))
+        answers_done = "- [ ] F-0081 Some idea — undecided 5d → answer: adjudicator: yes\n"
+        text = digest.render_digest(self.root, '2026-09-22', self._load(), "# Groom 2026-09-22\n",
+                                    [answers_done], 0, 2)
+        self.assertIn('0 answered by rule · 1 ruled by the adjudicator · 0 spoken for · 0 for you', text)
+        self.assertIn('## Ruled by the adjudicator (groom-2026-09-22)', text)
+        self.assertIn('- F-0081 decided → true — undecided 5d', text)
+
+    def test_spoken_for_holds_suppressed_and_capped_open_questions(self):
+        groom_text = ("# Groom 2026-09-22\n\n## Features without Stories\n\n"
+                     "- [x] F-0012 Some feature — no Stories → answer: (spoken for: CARD → SPEC)\n\n"
+                     "## Undecided > 3 days\n\n"
+                     "- [ ] F-0020 Another idea — undecided 4d → answer: ____\n")
+        text = digest.render_digest(self.root, '2026-09-22', self._load(), groom_text, [], 0, 2)
+        self.assertIn('0 answered by rule · 0 ruled by the adjudicator · 2 spoken for · 0 for you', text)
+        self.assertIn('- F-0012 no Stories — (spoken for: CARD → SPEC)', text)
+        self.assertIn('- F-0020 undecided 4d — (spoken for: GROOM → ADJUDICATE)', text)
+
+    def test_for_you_holds_barred_over_cap_open_and_answers_file_needs_operator(self):
+        groom_text = ("# Groom 2026-09-22\n\n## Inbox cards to decide\n\n"
+                     "- [ ] E-0004 New goal — reads as a new Epic → answer: "
+                     "____ (barred: approvals.new_epic)\n\n"
+                     "## Undecided > 3 days\n\n"
+                     "- [ ] F-0020 Another idea — undecided 4d → answer: ____\n")
+        answers_done = "NEEDS OPERATOR: F-0030 rewrite the billing page — touches money\n"
+        text = digest.render_digest(self.root, '2026-09-22', self._load(), groom_text,
+                                    [answers_done], attempts=2, cap=2)
+        self.assertIn('0 answered by rule · 0 ruled by the adjudicator · 0 spoken for · 3 for you', text)
+        self.assertIn('NEEDS OPERATOR: E-0004 — reads as a new Epic; approvals.new_epic is not auto.', text)
+        self.assertIn('NEEDS OPERATOR: F-0020 — undecided 4d', text)
+        self.assertIn('NEEDS OPERATOR: F-0030 rewrite the billing page — touches money', text)
+
+    def test_open_question_under_the_cap_stays_spoken_for(self):
+        groom_text = ("# Groom 2026-09-22\n\n## Undecided > 3 days\n\n"
+                     "- [ ] F-0020 Another idea — undecided 4d → answer: ____\n")
+        text = digest.render_digest(self.root, '2026-09-22', self._load(), groom_text, [], attempts=1, cap=2)
+        self.assertIn('GROOM → ADJUDICATE', text)
+        self.assertNotIn('NEEDS OPERATOR: F-0020', text)
+
+    def test_empty_sections_print_none(self):
+        text = digest.render_digest(self.root, '2026-09-22', self._load(), "# Groom 2026-09-22\n",
+                                    [], 0, 2)
+        self.assertEqual(text.count('(none)'), 4)
+        self.assertIn('0 answered by rule · 0 ruled by the adjudicator · 0 spoken for · 0 for you', text)
+
+    def test_write_digest_writes_even_when_everything_is_empty(self):
+        path = digest.write_digest(self.root, '2026-09-22', self._load(), "# Groom 2026-09-22\n",
+                                   [], 0, 2)
+        self.assertEqual(path, os.path.join(self.root, 'groom', '2026-09-22-digest.md'))
+        self.assertTrue(os.path.isfile(path))
+
+
+class DigestWiringTests(GroomAutoTestCase):
+    """T11's ``cmd_groom`` half: the digest is written on every gated run, and only then."""
+
+    def test_digest_written_on_a_gated_run(self):
+        self.write_product(approvals={'groom': 'auto'})
+        write_item(self.root, 'B-0001', 'bug', 'Checkout fails', parent='E-0009',
+                  typed_lines=['decided: false', 'signature: checkout-fail', 'count: 2'],
+                  machine_lines=_fresh_machine_lines())
+        run(['index'], self.root)
+
+        r = self.run_groom(['--date', '2026-09-22'])
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+        digest_path = os.path.join(self.root, 'groom', '2026-09-22-digest.md')
+        self.assertTrue(os.path.isfile(digest_path))
+        with open(digest_path) as f:
+            text = f.read()
+        self.assertIn('1 answered by rule · 0 ruled by the adjudicator · 0 spoken for · 0 for you', text)
+        self.assertIn('decide_recurring_bug', text)
+
+    def test_no_digest_when_the_gate_is_off(self):
+        self.write_product()
+        run(['index'], self.root)
+        r = self.run_groom(['--date', '2026-09-22'])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.isfile(os.path.join(self.root, 'groom', '2026-09-22-digest.md')))
 
 
 if __name__ == '__main__':

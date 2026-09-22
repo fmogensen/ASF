@@ -14,6 +14,7 @@ Every row is filled from what exists, or says which key would fill it —
 import datetime
 import json
 import os
+import re
 import subprocess
 
 from asf import env
@@ -21,6 +22,35 @@ from asf import env
 
 def not_configured(key):
     return f"— (not configured: {key})"
+
+
+_DIGEST_FILE_RE = re.compile(r'^(\d{4}-\d{2}-\d{2})-digest\.md$')
+_DIGEST_SUMMARY_RE = re.compile(
+    r'^(?P<rule>\d+) answered by rule · (?P<adjudicator>\d+) ruled by the adjudicator · '
+    r'(?P<spoken>\d+) spoken for · (?P<for_you>\d+) for you$')
+
+
+def groom_cell(root, product):
+    """§2.7: the newest ``groom/<date>-digest.md``'s summary line, reduced to the three counts
+    the operator reads at a glance — the fourth (spoken for) is already reflected in the printed
+    ``groom`` tick line, not this row."""
+    from asf.groom import policy
+    if not policy.groom_auto(product):
+        return not_configured('approvals.groom')
+    groom_dir = os.path.join(root or '', 'groom')
+    dates = [m.group(1) for name in (os.listdir(groom_dir) if root and os.path.isdir(groom_dir) else [])
+             for m in [_DIGEST_FILE_RE.match(name)] if m]
+    if not dates:
+        return "no digest yet — `asf groom` has not run"
+    date = sorted(dates)[-1]
+    with open(os.path.join(groom_dir, f"{date}-digest.md"), encoding='utf-8') as f:
+        text = f.read()
+    for line in text.splitlines():
+        m = _DIGEST_SUMMARY_RE.match(line.strip())
+        if m:
+            return (f"{date}: {m.group('rule')} by rule, {m.group('adjudicator')} ruled, "
+                    f"{m.group('for_you')} for you")
+    return f"{date}: (digest unreadable)"
 
 
 def _sh(cmd, timeout=30):
@@ -151,7 +181,8 @@ def render(root, product, cfg=None):
                        ('Agents', lambda: agents_cell(product)),
                        ('Ready to launch', lambda: ready_cell(root, product)),
                        ('Quota 5h/7d', lambda: quota_cell(cfg)),
-                       ('Cron', lambda: cron_cell(cfg, product))):
+                       ('Cron', lambda: cron_cell(cfg, product)),
+                       ('Groom', lambda: groom_cell(root, product))):
         try:
             text = cell()
         except Exception as e:  # noqa: BLE001 — one unreadable row never loses the table
