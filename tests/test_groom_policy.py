@@ -9,8 +9,9 @@ import shutil
 import unittest
 
 from asf.env import Product
-from asf.groom import policy
-from asf.record.core import today
+from asf.groom import groom, policy
+from asf.record import frontmatter
+from asf.record.core import canonicalize, load_items, today
 from tests.test_groom import make_repo, run, write_item
 
 
@@ -119,6 +120,111 @@ class ThresholdTests(unittest.TestCase):
         p = product(groom={'policies': {'close_exact_duplicate': 'off'}})
         self.assertFalse(policy.policy_on(p, 'close_exact_duplicate'))
         self.assertTrue(policy.policy_on(p, 'decide_recurring_bug'))
+
+
+class UnblockTests(unittest.TestCase):
+    """T5: applying ``unblock <id>`` removes it from ``blockedBy``, one of two ids, the last id,
+    twice, and an absent id — all through ``apply_groom_answers`` directly."""
+
+    def setUp(self):
+        self.root = make_repo()
+        write_item(self.root, 'E-0009', 'epic', 'Factory', typed_lines=['decided: true'])
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _apply(self, answer_line, date):
+        prev = os.path.join(self.root, 'groom', '2026-09-20.md')
+        with open(prev, 'w', encoding='utf-8') as f:
+            f.write("# Groom 2026-09-20\n\n## Blocked on a Closed item\n\n" + answer_line + "\n")
+        by_id, _errors = load_items(self.root)
+        canonical, _dupes = canonicalize(by_id)
+        applied = groom.apply_groom_answers(self.root, canonical, prev, date)
+        with open(os.path.join(self.root, 'features', 'F-0002.md')) as f:
+            text = f.read()
+        return applied, text
+
+    def test_removes_one_of_two_ids(self):
+        write_item(self.root, 'F-0002', 'feature', 'Blocked one', parent='E-0009',
+                  typed_lines=['decided: true', 'blockedBy: [F-0000, F-0001]'])
+        applied, text = self._apply(
+            "- [ ] F-0002 Blocked one — blockedBy F-0001, which is Closed → answer: unblock F-0001",
+            '2026-09-21')
+        self.assertEqual(applied, 1)
+        meta, body = frontmatter.parse(text, path='features/F-0002.md')
+        self.assertEqual(meta['blockedBy'], ['F-0000'])
+        self.assertIn('2026-09-21 groom: blockedBy → F-0000 (operator)', body)
+
+    def test_removes_the_last_id_and_the_field_is_gone(self):
+        write_item(self.root, 'F-0002', 'feature', 'Blocked one', parent='E-0009',
+                  typed_lines=['decided: true', 'blockedBy: [F-0001]'])
+        applied, text = self._apply(
+            "- [ ] F-0002 Blocked one — blockedBy F-0001, which is Closed → answer: unblock F-0001",
+            '2026-09-21')
+        self.assertEqual(applied, 1)
+        meta, body = frontmatter.parse(text, path='features/F-0002.md')
+        self.assertNotIn('blockedBy', meta)
+        self.assertIn('2026-09-21 groom: blockedBy → (none) (operator)', body)
+
+    def test_applying_twice_is_a_noop(self):
+        write_item(self.root, 'F-0002', 'feature', 'Blocked one', parent='E-0009',
+                  typed_lines=['decided: true', 'blockedBy: [F-0001]'])
+        line = "- [ ] F-0002 Blocked one — blockedBy F-0001, which is Closed → answer: unblock F-0001"
+        applied1, _text1 = self._apply(line, '2026-09-21')
+        self.assertEqual(applied1, 1)
+        applied2, text2 = self._apply(line, '2026-09-22')
+        self.assertEqual(applied2, 0)
+        meta, _body = frontmatter.parse(text2, path='features/F-0002.md')
+        self.assertNotIn('blockedBy', meta)
+
+    def test_an_absent_id_is_a_noop(self):
+        write_item(self.root, 'F-0002', 'feature', 'Blocked one', parent='E-0009',
+                  typed_lines=['decided: true', 'blockedBy: [F-0000]'])
+        applied, text = self._apply(
+            "- [ ] F-0002 Blocked one — blockedBy F-0000, which is Closed → answer: unblock F-9999",
+            '2026-09-21')
+        self.assertEqual(applied, 0)
+        meta, _body = frontmatter.parse(text, path='features/F-0002.md')
+        self.assertEqual(meta['blockedBy'], ['F-0000'])
+
+
+class AttributionTests(unittest.TestCase):
+    """PD2, PD3: ``controller: <policy> <word>`` attributes that policy, and ``adjudicator:
+    <word>`` attributes the job — beside the existing bare ``controller: <word>`` form."""
+
+    def setUp(self):
+        self.root = make_repo()
+        write_item(self.root, 'E-0009', 'epic', 'Factory', typed_lines=['decided: true'])
+        write_item(self.root, 'F-0001', 'feature', 'Some idea', parent='E-0009',
+                  typed_lines=['decided: false'])
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _apply(self, answer_line, date='2026-09-21', **kwargs):
+        prev = os.path.join(self.root, 'groom', '2026-09-20.md')
+        with open(prev, 'w', encoding='utf-8') as f:
+            f.write("# Groom 2026-09-20\n\n## Undecided > 3 days\n\n" + answer_line + "\n")
+        by_id, _errors = load_items(self.root)
+        canonical, _dupes = canonicalize(by_id)
+        applied = groom.apply_groom_answers(self.root, canonical, prev, date, **kwargs)
+        with open(os.path.join(self.root, 'features', 'F-0001.md')) as f:
+            text = f.read()
+        return applied, text
+
+    def test_controller_with_a_known_policy_name_attributes_that_policy(self):
+        applied, text = self._apply(
+            "- [ ] F-0001 Some idea — undecided 4d → answer: controller: decide_recurring_bug yes")
+        self.assertEqual(applied, 1)
+        self.assertIn('(controller, decide_recurring_bug)', text)
+        self.assertNotIn('starvation policy', text)
+
+    def test_adjudicator_prefix_attributes_the_job(self):
+        applied, text = self._apply(
+            "- [ ] F-0001 Some idea — undecided 4d → answer: adjudicator: yes",
+            adjudicator_job='groom-2026-09-21')
+        self.assertEqual(applied, 1)
+        self.assertIn('(adjudicator, groom-2026-09-21)', text)
 
 
 if __name__ == '__main__':

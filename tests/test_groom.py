@@ -120,6 +120,9 @@ class AnswerParsingTests(unittest.TestCase):
     def test_severity(self):
         self.assertEqual(groom._parse_answer('S1'), ('severity', 'S1'))
 
+    def test_unblock(self):
+        self.assertEqual(groom._parse_answer('unblock S-0140'), ('unblock', 'S-0140'))
+
     def test_blank_and_placeholder(self):
         self.assertEqual(groom._parse_answer(''), (None, None))
         self.assertEqual(groom._parse_answer('____'), (None, None))

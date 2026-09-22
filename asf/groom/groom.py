@@ -17,7 +17,15 @@ ANSWER_NO = re.compile(r'^(no|close)$', re.IGNORECASE)
 ANSWER_RANK = re.compile(r'^rank\s+(\d+)$', re.IGNORECASE)
 ANSWER_PARENT = re.compile(r'^parent\s+(\S+)$', re.IGNORECASE)
 ANSWER_SEVERITY = re.compile(r'^(S[123])$', re.IGNORECASE)
+ANSWER_UNBLOCK = re.compile(r'^unblock\s+([A-Z]-\d{4})$', re.IGNORECASE)
 CONTROLLER_PREFIX = re.compile(r'^controller:\s*', re.IGNORECASE)
+ADJUDICATOR_PREFIX = re.compile(r'^adjudicator:\s*', re.IGNORECASE)
+
+#: PD3 — the applier's side of the policy names §2.2 defines. ``policy.POLICIES`` (a later Task)
+#: must name exactly these; kept here, not in ``asf.groom.policy``, because that module is
+#: imported by ``asf.feeder.rows`` and must not import this one back.
+POLICY_NAMES = ('unblock_on_closed', 'close_exact_duplicate', 'decide_recurring_bug',
+                'close_on_starvation')
 
 
 def _previous_groom_file(root, date):
@@ -49,6 +57,9 @@ def _parse_answer(answer):
     m = ANSWER_SEVERITY.match(a)
     if m:
         return 'severity', m.group(1).upper()
+    m = ANSWER_UNBLOCK.match(a)
+    if m:
+        return 'unblock', m.group(1)
     return None, None
 
 
@@ -58,10 +69,14 @@ def _fmt_history_value(value):
     return str(value)
 
 
-def apply_groom_answers(root, canonical, prev_path, date):
+def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None):
     """Read `prev_path`'s answered lines, write each as a typed field, append one History line
     each. A no-op line (blank/`____`, or a field already at the target value) changes nothing —
-    this is what makes re-running `--apply` for the same date idempotent."""
+    this is what makes re-running `--apply` for the same date idempotent.
+
+    `controller: <word>` attributes `(controller, starvation policy)`; `controller: <policy>
+    <word>`, where `<policy>` is one of `POLICY_NAMES` (PD2, PD3), attributes `(controller,
+    <policy>)` instead. `adjudicator: <word>` attributes `(adjudicator, <adjudicator_job>)`."""
     with open(prev_path, encoding='utf-8') as f:
         lines = f.read().split('\n')
 
@@ -77,17 +92,50 @@ def apply_groom_answers(root, canonical, prev_path, date):
 
         who = '(operator)'
         cm = CONTROLLER_PREFIX.match(raw_answer)
+        am = ADJUDICATOR_PREFIX.match(raw_answer) if cm is None else None
         if cm:
             raw_answer = raw_answer[cm.end():].strip()
-            who = '(controller, starvation policy)'
+            pm = re.match(r'^(\S+)\s+(.*)$', raw_answer)
+            if pm and pm.group(1) in POLICY_NAMES:
+                who = f'(controller, {pm.group(1)})'
+                raw_answer = pm.group(2).strip()
+            else:
+                who = '(controller, starvation policy)'
+        elif am:
+            raw_answer = raw_answer[am.end():].strip()
+            who = f'(adjudicator, {adjudicator_job})'
 
         field, value = _parse_answer(raw_answer)
         if field is None:
             continue
+
+        typed, _machine = frontmatter.split_machine(rec['meta'])
+
+        if field == 'unblock':
+            blocked_by = typed.get('blockedBy') or []
+            if value not in blocked_by:
+                continue  # not there — no-op, keeps --apply idempotent
+            remainder = [b for b in blocked_by if b != value]
+            frontmatter.write_typed(rec['path'], {'blockedBy': remainder or None})
+            with open(rec['path'], encoding='utf-8') as f:
+                text = f.read()
+            meta2, body2 = frontmatter.parse(text, path=rec['relpath'])
+            hist_value = ', '.join(remainder) if remainder else '(none)'
+            hist = f"- {date} groom: blockedBy → {hist_value} {who}"
+            new_body = append_history_lines(body2, [hist])
+            if new_body != body2:
+                with open(rec['path'], 'w', encoding='utf-8') as f:
+                    f.write(frontmatter.render(meta2, new_body))
+            if remainder:
+                rec['meta']['blockedBy'] = remainder
+            else:
+                rec['meta'].pop('blockedBy', None)
+            applied += 1
+            continue
+
         if field == 'removed':
             value = f"groom {date}"
 
-        typed, _machine = frontmatter.split_machine(rec['meta'])
         if typed.get(field) == value:
             continue  # already applied
 
