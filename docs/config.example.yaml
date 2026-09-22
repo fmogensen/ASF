@@ -21,10 +21,14 @@ worker_pool:
       share: 0.5
     - name: acct-b
       share: 0.5
-  quota_guard:
-    # stop launching new work above this fraction of an account's 5h/7d window
-    max_5h: 0.85
-    max_7d: 0.85
+
+# quota band (percent of each window, not a fraction). An account at or above `cooldown` in any
+# window takes one job at a time; at or above `stop` it takes none. Running sessions are never
+# stopped — the band gates new launches only. The older `worker_pool.quota_guard: {max_5h, max_7d}`
+# is still read, as the `stop` for those two windows.
+quota_guards:
+  stop:     {five_h: 95, seven_d: 95, seven_d_model: 95}
+  cooldown: {five_h: 90, seven_d: 90, seven_d_model: 90}
 
 # paths: everything under ~/.ASF the tools read/write. state is per product
 # (~/.ASF/state/<product>/); logs are shared.
