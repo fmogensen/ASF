@@ -19,6 +19,7 @@ class DefaultsTests(unittest.TestCase):
         self.assertEqual((c.task_heading, c.intake_dir), ('### Task', 'inbox'))
         self.assertEqual((c.goals_file, c.default_bug_epic, c.test_command), (None, None, None))
         self.assertEqual((c.main, c.preamble_max_lines, c.prs_per_tick), ('main', 120, 6))
+        self.assertEqual((c.harvest_gate, c.branches_per_tick), ('combined', 12))
         self.assertEqual(c.stage_limits, {})
 
     def test_two_instances_do_not_share_their_mutable_defaults(self):
@@ -41,6 +42,17 @@ class FromMappingTests(unittest.TestCase):
         self.assertEqual(c.branch('spec', 'x'), 'spec/x')       # not overridden: still the default
         self.assertEqual((c.specs_dir, c.plans_dir, c.main), ('specs', 'plans', 'trunk'))
         self.assertEqual((c.default_bug_epic, c.prs_per_tick), ('E-0042', 2))
+
+    def test_the_harvest_block_names_the_gate_and_the_cap(self):
+        """``harvest: {gate: per-branch, branches_per_tick: 3}`` is how a product yaml spells
+        the two harvest fields (B-0040); a key under it nobody reads is kept, not rejected."""
+        c = Conventions.from_mapping({'harvest': {'gate': 'per-branch', 'branches_per_tick': 3,
+                                                  'later': 'x'}})
+        self.assertEqual((c.harvest_gate, c.branches_per_tick), ('per-branch', 3))
+        self.assertEqual(c.extra, {'harvest': {'later': 'x'}})
+        self.assertEqual(Conventions.from_mapping({'harvest': {}}), Conventions())
+        self.assertEqual(Conventions.from_mapping({'harvest_gate': 'per-branch'}).harvest_gate,
+                         'per-branch')
 
     def test_an_unknown_key_is_kept_not_rejected(self):
         c = Conventions.from_mapping({'matrix_path': 'docs/matrix.md', 'specs_dir': 'specs'})
@@ -150,6 +162,8 @@ class ModuleConstantsTests(unittest.TestCase):
         self.assertEqual(conv_mod.DEFAULT_BRANCH_PREFIXES['code'], c.branch_prefixes['code'])
         self.assertEqual(conv_mod.DEFAULT_SPECS_DIR, c.specs_dir)
         self.assertEqual(conv_mod.DEFAULT_PRS_PER_TICK, c.prs_per_tick)
+        self.assertEqual(conv_mod.DEFAULT_HARVEST_GATE, c.harvest_gate)
+        self.assertEqual(conv_mod.DEFAULT_BRANCHES_PER_TICK, c.branches_per_tick)
 
 
 if __name__ == '__main__':

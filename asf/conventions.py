@@ -16,6 +16,9 @@ The product yaml carries the overrides::
         fix: bugfix/
       default_bug_epic: E-0042
       test_command: make test
+      harvest:
+        gate: per-branch          # default combined: one gate per tick (B-0040)
+        branches_per_tick: 3
 
 Unknown keys are kept (in :attr:`Conventions.extra`) rather than rejected: a product yaml is
 written by an operator and may carry conventions a module older than it does not read yet, and
@@ -57,6 +60,17 @@ DEFAULT_MAIN = 'main'
 DEFAULT_TEST_COMMAND = None
 DEFAULT_PREAMBLE_MAX_LINES = 120
 DEFAULT_PRS_PER_TICK = 6
+#: How harvest gates a tick's eligible branches (B-0040): ``combined`` — every branch rebased in
+#: turn onto one throwaway head, one gate, one fast-forward push, bisecting on red — or
+#: ``per-branch``, one gate and one push per landing. Spelt ``harvest: {gate: …}`` in the yaml.
+DEFAULT_HARVEST_GATE = 'combined'
+#: The most branches one tick's harvest gates; the rest wait for the next tick. A safety valve on
+#: the tick's clock (B-0031), not the cost driver once the gate is one per tick. Spelt
+#: ``harvest: {branches_per_tick: …}`` in the yaml.
+DEFAULT_BRANCHES_PER_TICK = 12
+
+#: The keys of the yaml's ``harvest:`` block and the field each one is.
+HARVEST_KEYS = {'gate': 'harvest_gate', 'branches_per_tick': 'branches_per_tick'}
 
 
 def _normalise_prefix(value):
@@ -83,6 +97,8 @@ class Conventions:
     test_command: str = DEFAULT_TEST_COMMAND
     preamble_max_lines: int = DEFAULT_PREAMBLE_MAX_LINES
     prs_per_tick: int = DEFAULT_PRS_PER_TICK
+    harvest_gate: str = DEFAULT_HARVEST_GATE
+    branches_per_tick: int = DEFAULT_BRANCHES_PER_TICK
     stage_limits: dict = field(default_factory=dict)
     #: Everything the yaml carried that is not a field above, kept verbatim.
     extra: dict = field(default_factory=dict)
@@ -103,6 +119,19 @@ class Conventions:
         data = dict(data or {})
         known = set(cls.field_names())
         kwargs = {}
+        harvest = data.pop('harvest', None)
+        if isinstance(harvest, dict):  # ``harvest: {gate, branches_per_tick}`` → the two fields
+            rest = {}
+            for key, value in harvest.items():
+                name = HARVEST_KEYS.get(key)
+                if name and value is not None:
+                    kwargs[name] = value
+                elif not name:
+                    rest[key] = value
+            if rest:
+                data['harvest'] = rest
+        elif harvest is not None:
+            data['harvest'] = harvest
         for key in list(data):
             if key in known:
                 value = data.pop(key)

@@ -33,6 +33,14 @@ the trunk moved in between.
 
 Cleanup (the worktree, the branch, the registry line) only happens after a push lands; a held
 branch is never touched. Python 3 stdlib only.
+
+One gate per tick (B-0040, ``conventions.harvest.gate: combined``, the default): every eligible
+branch is rebased in turn onto one throwaway worktree that starts at ``origin/<trunk>``, the gate
+runs once on the combined head, and that head is pushed as the trunk's new tip — every branch in
+it lands at that sha. A branch that conflicts on its rebase is held as before and never enters
+the set. A red gate bisects: the set is split in half, each half re-stacked and gated, recursing
+until a branch is red on its own — that one is held with its failing line, and everything else
+still lands in the tick. ``harvest.gate: per-branch`` keeps one gate and one push per landing.
 """
 import argparse
 import json
@@ -59,19 +67,21 @@ CONFLICT_END_RE = re.compile(r'^>{7}(?: |$)')
 MEMORY_CLAUSE_RE = re.compile(r'; memory [^;"]+')
 MAX_REBASE_STEPS = 100
 
-#: B-0031 (interim): a tick runs on a clock, and CI races the landings it triggers — gating every
-#: eligible branch in one tick can run past the clock and pile up races. Cap how many a single
-#: tick gates; the rest sit as still-eligible and are picked up by the next tick.
-MAX_BRANCHES_PER_TICK = 3
+#: ``conventions.harvest.gate``: one gate over the combined head (B-0040), or one per branch.
+GATE_COMBINED = 'combined'
+GATE_PER_BRANCH = 'per-branch'
 
 
-def cap_to_tick(items, out):
-    """``items`` trimmed to :data:`MAX_BRANCHES_PER_TICK`, printing the cap line via ``out``
-    when there were more eligible than that — the rest wait for the next tick."""
-    if len(items) > MAX_BRANCHES_PER_TICK:
+def cap_to_tick(items, out, conv=None):
+    """``items`` trimmed to the product's ``branches_per_tick`` (B-0031: a tick runs on a clock,
+    and CI races the landings it triggers — a safety valve, now that the gate runs once for all
+    of them), printing the cap line via ``out`` when there were more eligible than that — the
+    rest wait for the next tick."""
+    cap = int((conv or DEFAULTS).branches_per_tick)
+    if len(items) > cap:
         out(f'harvest: {len(items)} branches eligible — capping this tick at '
-            f'{MAX_BRANCHES_PER_TICK}, the rest wait for the next')
-        return items[:MAX_BRANCHES_PER_TICK]
+            f'{cap}, the rest wait for the next')
+        return items[:cap]
     return items
 
 
@@ -277,12 +287,30 @@ def try_resolve_conflict(tmp, relpath):
     return True
 
 
-def rebase_and_resolve(tmp, trunk='main'):
+def rebase_and_resolve(tmp, trunk='main', onto=None, tip=None):
     """Rebase HEAD onto ``origin/<trunk>``, resolving only machine-owned conflicts.
 
-    Returns (ok, reason). On failure the rebase has already been aborted.
+    With ``tip`` and ``onto``: replay ``tip``'s commits above ``origin/<trunk>`` onto the commit
+    ``onto`` (the combined head of B-0040) — the worktree ends detached at the new tip.
+
+    Returns (ok, reason). On failure the rebase has already been aborted and the worktree is
+    back where it was.
     """
-    sh(['git', 'rebase', f'origin/{trunk}'], cwd=tmp)
+    was = sh(['git', 'rev-parse', 'HEAD'], cwd=tmp).stdout.strip()
+    cmd = ['git', 'rebase']
+    if onto:
+        cmd += ['--onto', onto]
+    cmd.append(f'origin/{trunk}')
+    if tip:
+        cmd.append(tip)
+    ok, reason = _rebase_loop(tmp, cmd)
+    if not ok and tip:  # an abort returns to ``tip``, not to where the worktree was
+        sh(['git', 'checkout', '-q', '--detach', was], cwd=tmp)
+    return ok, reason
+
+
+def _rebase_loop(tmp, cmd):
+    sh(cmd, cwd=tmp)
     for _ in range(MAX_REBASE_STEPS):
         conflicted = list_conflicted(tmp)
         if conflicted:
@@ -467,7 +495,7 @@ def run_harvest(repo, state_dir, dry_run, conv=None):
         if ahead in ('', '0'):
             continue
         eligible.append((job, branch))
-    for job, branch in cap_to_tick(eligible, print):
+    for job, branch in cap_to_tick(eligible, print, conv):
         why = reap_hold(sessions.get(job))
         if why:  # never land what cannot then be reaped: a live job still owns its worktree
             hold(job, f'not reaped: {why}')
@@ -790,6 +818,116 @@ def land_ff(repo, state_dir, branch, record, item, conv, asf_repo, bug_root, dry
     return 'held'
 
 
+# ------------------------------------------------------------- one gate --
+
+def combined_head(tmp, trunk, entries, hold):
+    """Reset the throwaway worktree to ``origin/<trunk>`` and replay each entry's branch on top,
+    in order. Returns the entries that applied; one that conflicts is handed to ``hold`` with
+    the reason and never enters the set. ``entries``: ``[(branch, record)]``."""
+    sh(['git', 'checkout', '-q', '--detach', f'origin/{trunk}'], cwd=tmp)
+    stacked = []
+    for entry in entries:
+        head = sh(['git', 'rev-parse', 'HEAD'], cwd=tmp).stdout.strip()
+        ok, reason = rebase_and_resolve(tmp, trunk, onto=head, tip=f'origin/{entry[0]}')
+        if ok:
+            stacked.append(entry)
+        else:
+            hold(entry, 'conflict', reason)
+    return stacked
+
+
+def gate_groups(tmp, trunk, entries, conv, asf_repo, hold, out, announce=False):
+    """Gate ``entries`` as one combined head; on red, bisect (B-0040). Returns the green groups
+    as ``[(entries, sha)]`` — each a set that was gated together and the head it was gated at.
+    A branch red on its own is handed to ``hold`` with the gate's first failing line."""
+    stacked = combined_head(tmp, trunk, entries, hold)
+    if not stacked:
+        return []
+    if announce:
+        out(f'harvest: {len(stacked)} branch(es), one gate')
+    ok, line = product_gate(tmp, conv, asf_repo)
+    if ok:
+        return [(stacked, sh(['git', 'rev-parse', 'HEAD'], cwd=tmp).stdout.strip())]
+    if len(stacked) == 1:
+        hold(stacked[0], 'gate', line)
+        return []
+    out(f'harvest: bisecting {len(stacked)} branches')
+    mid = len(stacked) // 2
+    return (gate_groups(tmp, trunk, stacked[:mid], conv, asf_repo, hold, out)
+            + gate_groups(tmp, trunk, stacked[mid:], conv, asf_repo, hold, out))
+
+
+def land_combined(repo, state_dir, entries, conv, asf_repo, dry_run, out):
+    """Land every entry of ``entries`` (``[(branch, record)]``) behind one gate on the combined
+    head, bisecting on red; ``{branch: outcome}``. The head is pushed fast-forward as the
+    trunk's new tip and every branch in it is marked harvested at that sha, then deleted."""
+    trunk = conv.main
+    results = {}
+
+    def hold(entry, kind, text):
+        results[entry[0]] = hold_with_correction(state_dir, entry[0], entry[1], kind, text, out)
+
+    pending = list(entries)
+    for _attempt in (1, 2):
+        holder = tempfile.mkdtemp(prefix='harvest-')
+        tmp = os.path.join(holder, 'wt')
+        try:
+            add = sh(['git', 'worktree', 'add', '--detach', tmp, f'origin/{trunk}'], cwd=repo)
+            if add.returncode != 0:
+                for branch, _record in pending:
+                    out(f'held {branch}: worktree add failed: {tail(add.stderr)}')
+                    results[branch] = 'held'
+                return results
+            groups = gate_groups(tmp, trunk, pending, conv, asf_repo, hold, out, announce=True)
+            if not groups:
+                return results
+            if len(groups) > 1:  # green apart: once more together, the head that is pushed
+                union = [e for group, _sha in groups for e in group]
+                groups = gate_groups(tmp, trunk, union, conv, asf_repo, hold, out, announce=True)
+                if len(groups) != 1:  # green apart, red together: the first set lands, the rest wait
+                    first = groups[0][0] if groups else []
+                    for branch, _record in union:
+                        if not any(branch == b for b, _r in first):
+                            out(f'held {branch}: green alone, red with the others — next tick')
+                            results[branch] = 'held'
+                    if not groups:
+                        return results
+                    groups = groups[:1]
+            landing, sha = groups[0]
+            if dry_run:
+                for branch, _record in landing:
+                    out(f'DRY: would land {branch} → {sha}')
+                    results[branch] = 'dry'
+                return results
+            pushed, not_ff = push_ff(repo, sha, trunk)
+            if not_ff:
+                pending = landing  # the trunk moved under us — stack and gate again, once
+                continue
+            if not pushed:
+                for branch, _record in landing:
+                    out(f'held {branch}: push to {trunk} refused')
+                    results[branch] = 'held'
+                return results
+            sh(['git', 'fetch', '-q', 'origin', trunk], cwd=repo)
+            if sh(['git', 'merge-base', '--is-ancestor', sha, f'origin/{trunk}'], cwd=repo).returncode != 0:
+                for branch, _record in landing:
+                    out(f'held {branch}: {sha} is not on origin/{trunk} after the push')
+                    results[branch] = 'held'
+                return results
+            for branch, record in landing:
+                mark_session(state_dir, record.get('job') or branch, harvested=sha, correction=None)
+                sh(['git', 'push', '-q', 'origin', '--delete', branch], cwd=repo)
+                out(f'landed {branch} → {sha}')
+                results[branch] = 'landed'
+            return results
+        finally:
+            sh(['git', 'worktree', 'remove', '--force', tmp], cwd=repo)
+    for branch, _record in pending:
+        out(f'held {branch}: {trunk} moved again on retry')
+        results[branch] = 'held'
+    return results
+
+
 def sync_checkout(repo, trunk, out=print):
     """Fast-forward the checkout at ``repo`` to ``origin/<trunk>`` whenever that is ahead of it.
     The scheduler runs that checkout (an editable install: its working tree is the code), and a
@@ -863,7 +1001,8 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
         if not is_eligible(record):
             continue
         eligible.append((branch, record))
-    for branch, record in cap_to_tick(eligible, out):
+    to_land = []
+    for branch, record in cap_to_tick(eligible, out, conv):
         item = item_of(branch, record)
         if has_adjudicate_commit(repo, trunk, branch):
             out(f'held {branch}: ruling belongs in the record')
@@ -881,8 +1020,13 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
             continue
         if asf_repo is None:
             asf_repo = is_asf_repo(repo)
-        results[branch] = land_ff(repo, state_dir, branch, record, item, conv, asf_repo,
-                                  bug_root, dry_run, out)
+        if str(conv.harvest_gate).strip().lower() == GATE_PER_BRANCH:
+            results[branch] = land_ff(repo, state_dir, branch, record, item, conv, asf_repo,
+                                      bug_root, dry_run, out)
+        else:
+            to_land.append((branch, record))
+    if to_land:  # B-0040: one gate over the combined head, bisecting on red
+        results.update(land_combined(repo, state_dir, to_land, conv, asf_repo, dry_run, out))
     if any(r == 'landed' for r in results.values()):
         sync_checkout(repo, trunk, out)
     return results

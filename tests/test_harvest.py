@@ -518,7 +518,8 @@ class ProductHarvestTests(unittest.TestCase):
         results, lines = self.harvest(self.product())
         self.assertEqual(results, {'fix/B-0001': 'landed'})
         sha = self.origin_main()
-        self.assertEqual(lines, [f'landed fix/B-0001 → {sha}',
+        self.assertEqual(lines, ['harvest: 1 branch(es), one gate',
+                                 f'landed fix/B-0001 → {sha}',
                                  f'harvest: {self.repo} fast-forwarded to {sha}'])
         log = sh(['git', 'log', '--format=%s', 'main'], cwd=self.origin).stdout
         self.assertIn('fix(B-0001): the change', log)
@@ -582,6 +583,7 @@ class ProductHarvestTests(unittest.TestCase):
         sha = self.origin_main()
         self.assertEqual(results, {'fix/B-0001': 'landed'})
         self.assertEqual(lines, [f'harvest: {self.repo} fast-forwarded to {direct}',
+                                 'harvest: 1 branch(es), one gate',
                                  f'landed fix/B-0001 → {sha}',
                                  f'harvest: {self.repo} fast-forwarded to {sha}'])
 
@@ -799,9 +801,10 @@ class ProductHarvestTests(unittest.TestCase):
         before = self.origin_main()
         results, lines = self.harvest(self.product(), bug_root=lambda: record_root)
         self.assertEqual(results, {'fix/B-0001': 'held'})
-        self.assertEqual(len(lines), 1, lines)
-        self.assertTrue(lines[0].startswith('held fix/B-0001: FAIL: test_red_gate'), lines)
-        self.assertTrue(lines[0].endswith(' — back to its session (round 1)'), lines)
+        self.assertEqual(len(lines), 2, lines)
+        self.assertEqual(lines[0], 'harvest: 1 branch(es), one gate')
+        self.assertTrue(lines[1].startswith('held fix/B-0001: FAIL: test_red_gate'), lines)
+        self.assertTrue(lines[1].endswith(' — back to its session (round 1)'), lines)
         self.assertEqual(self.origin_main(), before)
         self.assertTrue(self.origin_has('fix/B-0001'))
         self.assertEqual(os.listdir(os.path.join(record_root, 'bugs')), [])  # no Bug filed
@@ -813,7 +816,7 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertFalse(rec.get('harvested'))
         # a second red tick is round 2
         _results, lines = self.harvest(self.product())
-        self.assertTrue(lines[0].endswith('(round 2)'), lines)
+        self.assertTrue(lines[-1].endswith('(round 2)'), lines)
         self.assertEqual(self.record('fix/B-0001')['rounds'], 2)
 
     def test_b0048_rounds_cap_at_the_adjudicate_switch_then_flags_the_operator(self):
@@ -828,19 +831,19 @@ class ProductHarvestTests(unittest.TestCase):
         product = self.product()
         for expected_round in (1, 2, 3):
             _results, lines = self.harvest(product)
-            self.assertTrue(lines[0].endswith(f'(round {expected_round})'), lines)
+            self.assertTrue(lines[-1].endswith(f'(round {expected_round})'), lines)
             self.assertEqual(self.record('fix/B-0001')['rounds'], expected_round)
 
         # capped: the round no longer climbs, and the message names the adjudicate row instead
         _results, lines = self.harvest(product)
-        self.assertTrue(lines[0].startswith('held fix/B-0001: FAIL: test_red_gate'), lines)
-        self.assertTrue(lines[0].endswith(' — adjudicate pending'), lines)
+        self.assertTrue(lines[-1].startswith('held fix/B-0001: FAIL: test_red_gate'), lines)
+        self.assertTrue(lines[-1].endswith(' — adjudicate pending'), lines)
         self.assertEqual(self.record('fix/B-0001')['rounds'], 3)
         self.assertFalse(self.record('fix/B-0001').get('operator_flagged'))
 
         # a second hold at the cap: the adjudicate row's own attempt failed too
         _results, lines = self.harvest(product)
-        self.assertTrue(lines[0].endswith(' — adjudicate pending'), lines)
+        self.assertTrue(lines[-1].endswith(' — adjudicate pending'), lines)
         self.assertEqual(self.record('fix/B-0001')['rounds'], 3)
         self.assertEqual(self.record('fix/B-0001').get('operator_flagged'), 1)
 
@@ -891,7 +894,7 @@ class ProductHarvestTests(unittest.TestCase):
             self.push_lane(branch, [(f'fix({item}): change {i}', {f'f{i}.txt': f'{i}\n'})])
             self.session(f'fix-bug-{item.lower()}', item, branch)
 
-        results, lines = self.harvest(self.product())
+        results, lines = self.harvest(self.product(harvest={'branches_per_tick': 3}))
         self.assertEqual(len(results), 3, results)
         self.assertTrue(all(r == 'landed' for r in results.values()), results)
         self.assertTrue(any('cap' in l.lower() for l in lines), lines)
@@ -903,6 +906,148 @@ class ProductHarvestTests(unittest.TestCase):
         # the next tick lands what the cap left waiting
         results2, _lines2 = self.harvest(self.product())
         self.assertEqual(results2, {remaining[0]: 'landed'})
+
+    # -- B-0040: one gate per tick over the combined head, bisecting on red ----------------
+    def lanes(self, n, red=()):
+        """``n`` fix branches with a finished session each; those in ``red`` break the gate."""
+        for i in range(1, n + 1):
+            item = f'B-{i:04d}'
+            branch = f'fix/{item}'
+            files = {f'f{i}.txt': f'{i}\n'}
+            if i in red:
+                files[f'checks/test_red{i}.py'] = RED_TEST.replace('test_red_gate', f'test_red_{i}')
+            self.push_lane(branch, [(f'fix({item}): change {i}', files)])
+            self.session(f'fix-bug-{item.lower()}', item, branch)
+        return [f'fix/B-{i:04d}' for i in range(1, n + 1)]
+
+    def gated(self):
+        """Patch the gate to count its runs (the gate itself still runs)."""
+        return mock.patch.object(harvest, 'product_gate', wraps=harvest.product_gate)
+
+    def test_b0040_several_branches_land_in_one_gate(self):
+        branches = self.lanes(4)
+        with self.gated() as gate:
+            results, lines = self.harvest(self.product())
+        self.assertEqual(gate.call_count, 1, lines)
+        sha = self.origin_main()
+        self.assertEqual(results, {b: 'landed' for b in branches})
+        self.assertEqual(lines, ['harvest: 4 branch(es), one gate']
+                         + [f'landed {b} → {sha}' for b in branches]
+                         + [f'harvest: {self.repo} fast-forwarded to {sha}'])
+        log = sh(['git', 'log', '--format=%s', 'main'], cwd=self.origin).stdout.splitlines()
+        self.assertEqual(log[:4], [f'fix(B-{i:04d}): change {i}' for i in (4, 3, 2, 1)])
+        for b in branches:
+            self.assertFalse(self.origin_has(b), b)
+            self.assertEqual(self.record(b).get('harvested'), sha, b)
+        self.assertEqual(self.harvest(self.product()), ({}, []))
+
+    def test_b0040_red_gate_bisects_and_holds_only_the_bad_branch(self):
+        branches = self.lanes(4, red=(3,))
+        before = self.origin_main()
+        with self.gated() as gate:
+            results, lines = self.harvest(self.product())
+        # all four (red) → [1,2] green, [3,4] red → [3] red, [4] green → 1+2+4 together, green
+        self.assertEqual(gate.call_count, 6, lines)
+        sha = self.origin_main()
+        self.assertNotEqual(sha, before)
+        self.assertEqual(results, {'fix/B-0001': 'landed', 'fix/B-0002': 'landed',
+                                   'fix/B-0003': 'held', 'fix/B-0004': 'landed'})
+        self.assertIn('harvest: 4 branch(es), one gate', lines)
+        self.assertIn('harvest: bisecting 4 branches', lines)
+        self.assertIn('harvest: bisecting 2 branches', lines)
+        held = [l for l in lines if l.startswith('held ')]
+        self.assertEqual(len(held), 1, lines)
+        self.assertTrue(held[0].startswith('held fix/B-0003: FAIL: test_red_3'), held)
+        self.assertTrue(held[0].endswith(' — back to its session (round 1)'), held)
+        log = sh(['git', 'log', '--format=%s', 'main'], cwd=self.origin).stdout
+        self.assertNotIn('change 3', log)
+        for b in ('fix/B-0001', 'fix/B-0002', 'fix/B-0004'):
+            self.assertIn(f'landed {b} → {sha}', lines)
+            self.assertFalse(self.origin_has(b), b)
+            self.assertEqual(self.record(b).get('harvested'), sha, b)
+        self.assertTrue(self.origin_has('fix/B-0003'))
+        rec = self.record('fix/B-0003')
+        self.assertEqual((rec['rounds'], rec['correction']['kind']), (1, 'gate'))
+        self.assertIn('test_red_3', rec['correction']['text'])
+        self.assertFalse(rec.get('harvested'))
+
+    def test_b0040_every_branch_red_holds_each_with_its_own_line(self):
+        self.lanes(2, red=(1, 2))
+        before = self.origin_main()
+        results, lines = self.harvest(self.product())
+        self.assertEqual(results, {'fix/B-0001': 'held', 'fix/B-0002': 'held'})
+        self.assertEqual(self.origin_main(), before)
+        held = [l for l in lines if l.startswith('held ')]
+        self.assertTrue(held[0].startswith('held fix/B-0001: FAIL: test_red_1'), lines)
+        self.assertTrue(held[1].startswith('held fix/B-0002: FAIL: test_red_2'), lines)
+        self.assertEqual(self.record('fix/B-0001')['correction']['kind'], 'gate')
+        self.assertEqual(self.record('fix/B-0002')['correction']['kind'], 'gate')
+
+    def test_b0040_a_conflicting_branch_never_enters_the_set(self):
+        self.push_lane('fix/B-0001', [('fix(B-0001): the change', {'shared.txt': 'one\n'})])
+        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
+        self.push_lane('fix/B-0002', [('fix(B-0002): the other', {'shared.txt': 'two\n'})])
+        self.session('fix-bug-b-0002', 'B-0002', 'fix/B-0002')
+        self.push_lane('fix/B-0003', [('fix(B-0003): apart', {'apart.txt': 'three\n'})])
+        self.session('fix-bug-b-0003', 'B-0003', 'fix/B-0003')
+        with self.gated() as gate:
+            results, lines = self.harvest(self.product())
+        self.assertEqual(gate.call_count, 1, lines)
+        sha = self.origin_main()
+        self.assertEqual(results, {'fix/B-0001': 'landed', 'fix/B-0002': 'held',
+                                   'fix/B-0003': 'landed'})
+        self.assertEqual(lines[0], 'held fix/B-0002: conflict in shared.txt — back to its session (round 1)')
+        self.assertEqual(lines[1], 'harvest: 2 branch(es), one gate')
+        self.assertEqual(self.record('fix/B-0002')['correction']['kind'], 'conflict')
+        self.assertTrue(self.origin_has('fix/B-0002'))
+        self.assertEqual(self.record('fix/B-0001').get('harvested'), sha)
+        self.assertEqual(self.record('fix/B-0003').get('harvested'), sha)
+
+    def test_b0040_trunk_moved_under_the_combined_head_is_restacked_once(self):
+        branches = self.lanes(2)
+        real_push = harvest.push_ff
+        moved = []
+
+        def push_then(repo, sha, trunk='main'):
+            if not moved:  # the trunk moves between the gate and the push, once
+                moved.append(sha)
+                self.write(self.repo, 'other.txt', 'o\n')
+                sh(['git', 'add', '-A'], cwd=self.repo)
+                sh(['git', 'commit', '-qm', 'another change'], cwd=self.repo)
+                sh(['git', 'push', '-q', 'origin', 'HEAD:main'], cwd=self.repo)
+            return real_push(repo, sha, trunk)
+        with mock.patch.object(harvest, 'push_ff', side_effect=push_then), self.gated() as gate:
+            results, lines = self.harvest(self.product())
+        self.assertEqual(results, {b: 'landed' for b in branches}, lines)
+        self.assertEqual(gate.call_count, 2, lines)
+        log = sh(['git', 'log', '--format=%s', 'main'], cwd=self.origin).stdout.splitlines()
+        self.assertEqual(log[:3], ['fix(B-0002): change 2', 'fix(B-0001): change 1', 'another change'])
+
+    def test_b0040_dry_run_gates_once_and_pushes_nothing(self):
+        branches = self.lanes(3)
+        before = self.origin_main()
+        lines = []
+        with self.gated() as gate:
+            results = harvest.run_product_harvest(self.product(), self.state_dir, dry_run=True,
+                                                  out=lines.append)
+        self.assertEqual(gate.call_count, 1)
+        self.assertEqual(results, {b: 'dry' for b in branches})
+        self.assertEqual(self.origin_main(), before)
+        self.assertTrue(all(l.startswith('DRY: would land ') for l in lines[1:]), lines)
+        for b in branches:
+            self.assertTrue(self.origin_has(b))
+            self.assertFalse(self.record(b).get('harvested'))
+
+    def test_b0040_per_branch_gate_stays_reachable(self):
+        branches = self.lanes(3)
+        with self.gated() as gate:
+            results, lines = self.harvest(self.product(harvest={'gate': 'per-branch'}))
+        self.assertEqual(gate.call_count, 3, lines)
+        self.assertEqual(results, {b: 'landed' for b in branches})
+        self.assertFalse(any('one gate' in l for l in lines), lines)
+        shas = {self.record(b).get('harvested') for b in branches}
+        self.assertEqual(len(shas), 3, shas)  # one landing each, three pushes
+        self.assertIn(self.origin_main(), shas)
 
     def test_record_repo_keeps_its_own_path(self):
         with mock.patch.object(harvest, 'is_record_repo', return_value=True), \
