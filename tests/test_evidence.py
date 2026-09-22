@@ -488,11 +488,15 @@ class DiscoverIdEvidenceTests(unittest.TestCase):
         self.assertNotIn("B-0001", ev["ids"])
         self.assertIn("B-0003", ev["ids"])  # branches are live, not history
 
-    def test_evidence_cache_is_per_product(self):
-        with mock.patch.object(evidence, "EVIDENCE_CACHE", os.path.join(self.r.tmp, "ev.json")), \
-                mock.patch.object(evidence, "discover", return_value={"checked": set(), "x": 1}):
+    def test_evidence_cache_is_per_product_under_its_own_state_dir(self):
+        # F-0087 (the hermetic rule): the cache lives under the product's state directory in
+        # ASF_HOME — never a shared path two homes naming the same product would both read
+        from asf import env
+        with mock.patch.object(evidence, "discover", return_value={"checked": set(), "x": 1}):
             evidence.load(fresh=True, product=self.r.product())
-            self.assertTrue(os.path.exists(os.path.join(self.r.tmp, "ev.json.sample")))
+        cache = os.path.join(env.state_dir(self.r.product()), "cache-backlog-evidence.json")
+        self.assertTrue(os.path.exists(cache), cache)
+        self.assertTrue(cache.startswith(env.ASF_HOME), cache)
 
 
 class IngestIdEvidenceTests(unittest.TestCase):

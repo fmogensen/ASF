@@ -203,8 +203,10 @@ def health(product, fix=False, alive=pid_alive, out=print):
         if what is None:
             continue
         job = s.get('job', name) if s else name
-        if what == 'reapable' and fix and remove_worktree(product, path, branch=(s or {}).get('branch')
-                                                          if lifecycle.landed(s) else None):
+        # a landed or empty worktree takes its local branch with it: nothing in it is anywhere
+        # else, and a branch left behind blocks the next launch on it (`worktree add -b`)
+        gone = (s or {}).get('branch') if (lifecycle.landed(s) or detail == 'empty') else None
+        if what == 'reapable' and fix and remove_worktree(product, path, branch=gone):
             spawn_mod.release_id_range(product, job)
             found.append((name, 'reaped', detail))
         else:

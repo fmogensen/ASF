@@ -428,6 +428,39 @@ class TestSpawn(Home):
             spawn_mod.spawn(self.product, s1_row('fix-bug-b-0001'), self.acct(), 'b',
                             runtime=runtime_mod.FakeRuntime([{'ok': True}]), cfg=self.cfg)
 
+    def test_f0087_an_empty_reaped_branch_never_blocks_the_next_launch_on_it(self):
+        rec = spawn_mod.spawn(self.product, feature_row('spec-f-0001'), self.acct(), 'b',
+                              runtime=runtime_mod.FakeRuntime([{'ok': True, 'pid': 51}]), cfg=self.cfg)
+        health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
+        self.assertFalse(os.path.exists(rec['worktree']))
+        self.assertEqual(git('branch', '--list', rec['branch'], cwd=self.repo), '')  # gone with it
+        # the same branch, another job (the correction row): a fresh worktree, no refusal
+        row = pool_mod.parse_row(json.dumps({'job': 'correct-f-0001', 'item': 'F-0001', 'state': 'FIX',
+                                             'action': 'CORRECT', 'model': 'Opus', 'kind': 'correct',
+                                             'branch': rec['branch']}))
+        rec2 = spawn_mod.spawn(self.product, row, self.acct(), 'b',
+                               runtime=runtime_mod.FakeRuntime([{'running': True, 'pid': 52}]), cfg=self.cfg)
+        self.assertEqual(git('rev-parse', '--abbrev-ref', 'HEAD', cwd=rec2['worktree']), rec['branch'])
+
+    def test_f0087_a_stray_local_branch_with_commits_is_refused_with_the_count(self):
+        git('branch', 'spec/F-0001', 'origin/main', cwd=self.repo)
+        tmp_wt = os.path.join(self.tmp, 'stray')
+        git('worktree', 'add', '-q', tmp_wt, 'spec/F-0001', cwd=self.repo)
+        with open(os.path.join(tmp_wt, 'x'), 'w') as f:
+            f.write('x')
+        for k, v in (('user.email', 'ci@example.com'), ('user.name', 'ci')):
+            git('config', k, v, cwd=tmp_wt)
+        git('add', 'x', cwd=tmp_wt)
+        git('commit', '-q', '-m', 'x', cwd=tmp_wt)
+        git('worktree', 'remove', '--force', tmp_wt, cwd=self.repo)
+        row = pool_mod.parse_row(json.dumps({'job': 'spec-f-0001', 'item': 'F-0001', 'state': 'CARD',
+                                             'action': 'SPEC', 'model': 'Opus', 'kind': 'spec',
+                                             'branch': 'spec/F-0001'}))
+        with self.assertRaises(spawn_mod.SpawnError) as cm:
+            spawn_mod.spawn(self.product, row, self.acct(), 'b',
+                            runtime=runtime_mod.FakeRuntime([{'ok': True}]), cfg=self.cfg)
+        self.assertIn('spec/F-0001 exists locally with 1 commit(s)', str(cm.exception))
+
     def test_b0024_unmapped_model_label_spawns_nothing(self):
         cfg = {'worker_pool': {'accounts': [{'name': 'acct-a', 'role': 'local', 'cap': 2}]}}
         rt = runtime_mod.FakeRuntime([{'running': True}])

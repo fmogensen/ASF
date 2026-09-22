@@ -63,6 +63,22 @@ pid` verdict is revisited every tick while the run is not landed (B-0028).
 
 ## Rulings made here (D-0049: the factory decides, the operator is informed)
 
+- A pushed branch waiting for harvest holds its item **busy** for the feeder but takes no
+  session slot (`awaiting_harvest`): the branch is harvest's, not a session's. Before this the
+  feeder relaunched every finished branch until harvest reached it, and the relaunch's live run
+  hid the finished one from harvest (the dogfood tick showed it on the first run).
+- A correction row runs on the branch the held run was on (`corrections[...]['branch']`), not
+  on the item's default prefix — a held `spec/<id>` is corrected on `spec/<id>`.
+- Reaping an empty worktree deletes its local branch too; a stray local branch with no worktree
+  is reused by the next launch when it carries nothing and refused with the commit count when it
+  does (B-0025's rule, now in spawn).
+- A session's own REPORT says `pushed: yes <sha> | no — <why>`; `pushed: no` is a failed result
+  at the source (`asf.workers.report`), before health measures the same thing against git.
+- `asf new` and `asf stale` print their `record:` line on stderr: their stdout is a value a
+  script reads (the minted id, the `--json` table).
+- The record push retries its rebase up to `PUSH_RETRIES` (3) times while origin keeps moving
+  between its fetch and its push; past that the refusal stands and the next run re-derives.
+
 - A run that ends ok without pushing is **held**, not merely failed: its own work is the
   correction's input, the next session runs in the same worktree, and it counts as a round
   (else it would loop until the attempt limit).

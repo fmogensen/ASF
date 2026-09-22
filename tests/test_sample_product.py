@@ -6,6 +6,11 @@ The test copies it into a temp dir, makes bare origins for the repo and the reco
 ``ASF_HOME``, then drives the real ``asf`` command line — ``init``, one ``tick``, ``next``,
 ``doctor`` — as a subprocess. No network, no account, no agent: a literal left over from the first
 product shows up here as a wrong branch, a missing launch or a failed step.
+
+The second half (F-0087) walks the failure paths through whole ticks on the same fake runtime:
+a held branch → the correction row → landed (with the trunk moving under it), and a session that
+ends "done" without pushing → held → the correction in the same worktree → landed. The test
+plays the session between ticks and asserts the tick's printed lines.
 """
 import json
 import os
@@ -194,6 +199,203 @@ class SampleProductTest(unittest.TestCase):
     def test_doctor_is_clean(self):
         p = self.asf('doctor', '--product', 'sample')
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
+
+# ---- the failure paths, whole loop (F-0087) ----------------------------------------------
+
+RED_TEST = ('import unittest\n\nfrom src.count import count\n\n\nclass EmptyTests(unittest.TestCase):\n'
+            '    def test_empty(self):\n        self.assertEqual(count(None), 0)\n')
+GREEN_COUNT = ('def count(text):\n    if not text:\n        return 0\n'
+               '    return len(text.split())\n')
+
+
+class FailurePathsBase(unittest.TestCase):
+    """A fresh copy of ``sample/`` per class; the test plays the session between ticks (the fake
+    runtime returns at once and touches no git), rewriting ``fake_script.json`` before each tick
+    so every launch in that tick gets the scripted result. Every tick's printed lines are kept."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = os.path.realpath(tempfile.mkdtemp(prefix='asf_sample_fail_'))
+        cls.sample = os.path.join(cls.tmp, 'sample')
+        shutil.copytree(SAMPLE, cls.sample)
+        cls.repo = os.path.join(cls.sample, 'repo')
+        cls.backlog = os.path.join(cls.sample, 'backlog')
+        cls.repo_origin = os.path.join(cls.tmp, 'repo.git')
+        _publish(cls.repo, cls.repo_origin)
+        _publish(cls.backlog, os.path.join(cls.tmp, 'backlog.git'))
+        cls.home = os.path.join(cls.tmp, 'asf-home')
+        os.makedirs(os.path.join(cls.home, 'products'))
+        _fill(os.path.join(cls.sample, 'product.yaml'),
+              os.path.join(cls.home, 'products', 'sample.yaml'), REPO=cls.repo, BACKLOG=cls.backlog)
+        _fill(os.path.join(cls.sample, 'config.yaml'), os.path.join(cls.home, 'config.yaml'),
+              SAMPLE=cls.sample)
+        cls.env = hermetic.build(dict(os.environ, ASF_HOME=cls.home, PYTHONPATH=ROOT,
+                                      GIT_AUTHOR_NAME='sample', GIT_AUTHOR_EMAIL='sample@example.com',
+                                      GIT_COMMITTER_NAME='sample', GIT_COMMITTER_EMAIL='sample@example.com',
+                                      GH_TOKEN='', PATH=SampleProductTest._path_with_offline_gh(
+                                          os.path.join(cls.tmp, 'bin'))),
+                                 home=cls.tmp)
+        cls.ticks = []
+        init = cls.asf('init', '--product', 'sample')
+        assert init.returncode == 0, init.stdout + init.stderr
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    @classmethod
+    def asf(cls, *argv):
+        return subprocess.run([sys.executable, '-m', 'asf.cli', *argv], cwd=cls.tmp, env=cls.env,
+                              capture_output=True, text=True, timeout=300)
+
+    @classmethod
+    def script(cls, *steps):
+        with open(os.path.join(cls.sample, 'fake_script.json'), 'w') as f:
+            json.dump(list(steps), f)
+
+    @classmethod
+    def tick(cls):
+        p = cls.asf('tick', '--product', 'sample', '--fresh')  # ticks seconds apart: no evidence cache
+        assert p.returncode == 0 and 'Traceback' not in p.stdout + p.stderr, p.stdout + p.stderr
+        lines = [ln for ln in p.stdout.splitlines() if ln.strip()]
+        cls.ticks.append(lines)
+        return lines
+
+    @classmethod
+    def sessions(cls):
+        from asf.workers import lifecycle
+        return lifecycle.latest(os.path.join(cls.home, 'state', 'sample', 'sessions.jsonl'))
+
+    @staticmethod
+    def session_commits(worktree, rel, text, subject):
+        path = os.path.join(worktree, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            f.write(text)
+        _git(['add', '-A'], cwd=worktree)
+        _git(['commit', '-q', '-m', subject], cwd=worktree)
+
+    @staticmethod
+    def session_pushes(worktree):
+        branch = _git(['rev-parse', '--abbrev-ref', 'HEAD'], cwd=worktree)
+        _git(['push', '-q', 'origin', branch], cwd=worktree)
+        return branch
+
+    def origin_subjects(self):
+        return _git(['log', '--format=%s', 'main'], cwd=self.repo_origin).splitlines()
+
+    @staticmethod
+    def find(lines, prefix):
+        hits = [ln for ln in lines if ln.startswith(prefix)]
+        return hits[0] if hits else None
+
+
+class HeldThenCorrectedThenLanded(FailurePathsBase):
+    """held branch → correction row → landed, with the trunk moving under the correction."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.script({'ok': True, 'result': 'fixed B-0001, pushed'})
+        cls.t1 = cls.tick()                                   # launches fix-bug-b-0001
+        s = cls.sessions()['fix-bug-b-0001']
+        cls.wt = s['worktree']
+        # the session's work: a test that names the fix — and is red
+        cls.session_commits(cls.wt, 'tests/test_empty.py', RED_TEST, 'fix(B-0001): add test_empty')
+        cls.session_pushes(cls.wt)
+        cls.t2 = cls.tick()                                   # health: finished; harvest: held
+        cls.t3 = cls.tick()                                   # wave: the correction row launches
+        s = cls.sessions()['correct-b-0001']
+        cls.wt2 = s['worktree']
+        cls.wt2_branch = _git(['rev-parse', '--abbrev-ref', 'HEAD'], cwd=cls.wt2)
+        cls.session_commits(cls.wt2, 'src/count.py', GREEN_COUNT, 'fix(B-0001): return 0 on empty')
+        cls.session_pushes(cls.wt2)
+        # the trunk moves before harvest looks again: someone landed a README change
+        other = os.path.join(cls.tmp, 'other')
+        _git(['clone', '-q', cls.repo_origin, other], cwd=cls.tmp)
+        _git(['config', 'user.email', 'o@example.com'], cwd=other)
+        _git(['config', 'user.name', 'o'], cwd=other)
+        with open(os.path.join(other, 'README'), 'a') as f:
+            f.write('moved\n')
+        _git(['commit', '-qam', 'docs: README moved the trunk'], cwd=other)
+        _git(['push', '-q', 'origin', 'HEAD:main'], cwd=other)
+        cls.t4 = cls.tick()                                   # health: finished; harvest: rebased, landed
+        cls.t5 = cls.tick()                                   # health: reaped
+
+    def test_tick_1_launches_the_fix(self):
+        self.assertIsNotNone(self.find(self.t1, 'launched fix-bug-b-0001'), self.t1)
+
+    def test_tick_2_holds_the_red_gate_and_sends_it_back(self):
+        self.assertIn('ended     fix-bug-b-0001           finished', self.t2)
+        held = self.find(self.t2, 'held bugfix/B-0001: ')
+        self.assertIsNotNone(held, self.t2)
+        self.assertTrue(held.endswith('— back to its session (round 1)'), held)
+        self.assertIn('test_empty', held)
+
+    def test_tick_3_launches_the_correction_on_the_same_branch_and_worktree(self):
+        self.assertIsNotNone(self.find(self.t3, 'launched correct-b-0001'), self.t3)
+        self.assertEqual(os.path.realpath(self.wt2), os.path.realpath(self.wt))
+        self.assertEqual(self.wt2_branch, 'bugfix/B-0001')
+        self.assertIsNone(self.find(self.t3, 'launched fix-bug-b-0001'), 'no second fix session')
+
+    def test_tick_4_rebases_onto_the_moved_trunk_and_lands(self):
+        self.assertIn('ended     correct-b-0001           finished', self.t4)
+        landed = self.find(self.t4, 'landed bugfix/B-0001 → ')
+        self.assertIsNotNone(landed, self.t4)
+        sha = landed.split('→ ')[1].strip()
+        self.assertEqual(_git(['rev-parse', 'main'], cwd=self.repo_origin), sha)
+        subjects = self.origin_subjects()
+        self.assertEqual(subjects[:3], ['fix(B-0001): return 0 on empty', 'fix(B-0001): add test_empty',
+                                        'docs: README moved the trunk'])
+        self.assertEqual(_git(['branch', '--list', 'bugfix/B-0001'], cwd=self.repo_origin), '')
+        self.assertEqual(self.sessions()['correct-b-0001']['harvested'], sha)
+
+    def test_tick_5_reaps_the_landed_worktree(self):
+        self.assertTrue(self.find(self.t5, 'reaped fix-bug-b-0001 (landed '), self.t5)
+        self.assertFalse(os.path.exists(self.wt))
+
+    def test_every_tick_committed_and_pushed_the_record(self):
+        for i, lines in enumerate(self.ticks):
+            self.assertTrue(self.find(lines, 'tick: state committed and pushed'), (i, lines))
+
+
+class FinishedWithoutPushIsCorrected(FailurePathsBase):
+    """a result that says done with nothing pushed → held with the unpushed-work correction →
+    the correction runs in the same worktree → pushed → landed."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.script({'ok': True, 'result': 'done — waiting for the background suite'})
+        cls.t1 = cls.tick()
+        cls.wt = cls.sessions()['fix-bug-b-0001']['worktree']
+        with open(os.path.join(cls.wt, 'src', 'count.py'), 'w') as f:   # half done, uncommitted
+            f.write(GREEN_COUNT)
+        cls.t2 = cls.tick()                                   # health: not pushed → held; wave: correct
+        cls.wt2 = cls.sessions()['correct-b-0001']['worktree']
+        cls.session_commits(cls.wt2, 'tests/test_empty.py', RED_TEST.replace('count("")', 'count("")'),
+                            'fix(B-0001): return 0 on empty, with test_empty')
+        cls.session_pushes(cls.wt2)
+        cls.t3 = cls.tick()                                   # landed
+
+    def test_tick_2_judges_not_pushed_holds_and_relaunches_in_the_same_worktree(self):
+        self.assertIn('ended     fix-bug-b-0001           failed: not pushed: 1 uncommitted file(s), 0 unpushed commit(s)', self.t2)
+        held = self.find(self.t2, 'held      fix-bug-b-0001           unpushed work: ')
+        self.assertIsNotNone(held, self.t2)
+        self.assertIn('commit and push what you have', held)
+        self.assertIsNotNone(self.find(self.t2, 'launched correct-b-0001'), self.t2)
+        self.assertEqual(os.path.realpath(self.wt2), os.path.realpath(self.wt))
+        self.assertTrue(os.path.exists(os.path.join(self.wt2, 'src', 'count.py')))
+
+    def test_the_correction_brief_carries_the_unpushed_work_reason(self):
+        with open(self.sessions()['correct-b-0001']['brief'], encoding='utf-8') as f:
+            text = f.read()
+        self.assertIn('CORRECTION: the step failed with:\nunpushed work: not pushed: 1 uncommitted file(s)', text)
+
+    def test_tick_3_lands_the_corrected_branch(self):
+        self.assertIsNotNone(self.find(self.t3, 'landed bugfix/B-0001 → '), self.t3)
+        self.assertEqual(self.origin_subjects()[0], 'fix(B-0001): return 0 on empty, with test_empty')
 
 
 if __name__ == '__main__':

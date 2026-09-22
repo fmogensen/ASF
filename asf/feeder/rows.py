@@ -205,7 +205,8 @@ def bug_rows(items, product, busy, attempts=None):
 
 
 def correction_rows(items, product, busy, corrections):
-    """``corrections`` is ``{item: {kind, text, rounds, at}}`` — a branch the harvest held. Fewer
+    """``corrections`` is ``{item: {kind, text, rounds, at, branch}}`` — a branch the harvest held
+    (the row runs on that branch when it is given). Fewer
     than 3 rounds: a FIX → CORRECT row in the item's severity tier; 3 or more: the ADJUDICATE row.
     Returns ``(rows, ids)``; ``ids`` are the items these rows speak for."""
     out, ids = [], set()
@@ -218,7 +219,7 @@ def correction_rows(items, product, busy, corrections):
         fid, rounds = f['id'] if f else '', c.get('rounds') or 0
         tier = {'S1': 0, 'S2': 1}.get(item.get('severity'), 2)
         kind = 'fix' if item['type'] == 'bug' else 'task'
-        branch = branch_for(product, kind, iid, default='fix/' if kind == 'fix' else None)
+        branch = c.get('branch') or branch_for(product, kind, iid, default='fix/' if kind == 'fix' else None)
         if rounds >= CORRECTION_ROUNDS:
             out.append(Row(tier=tier, kind=STALEMATE, item_id=iid, feature_id=fid, action=LAUNCH,
                            brief_kind='adjudicate', branch=branch,
@@ -321,11 +322,13 @@ def task_rows(items, product, feature, busy, running):
 KIND_ORDER = {STALEMATE: 0, CONFLICT: 1, STALE: 2}
 
 
-def candidates(index, product, inflight, attempts=None, corrections=None):
+def candidates(index, product, inflight, attempts=None, corrections=None, busy=None):
     """Every row the index supports right now, uncut by capacity, in emit order: tier, then the
-    Feature's rank and id, then within a Feature the stalemate, branch housekeeping, new work."""
+    Feature's rank and id, then within a Feature the stalemate, branch housekeeping, new work.
+    ``busy``: item ids held by something that is not a session and takes no slot — a pushed
+    branch waiting for harvest (:func:`asf.workers.lifecycle.awaiting_harvest`)."""
     items = items_of(index)
-    busy = inflight_ids(inflight)
+    busy = inflight_ids(inflight) | set(busy or ())
     limit = stalemate_round(product)
     stalled = {f['id'] for f in ix.of_type(items, 'feature') if review_round(f)[1] >= limit}
     running = running_footprints(items, busy)
@@ -343,7 +346,8 @@ def candidates(index, product, inflight, attempts=None, corrections=None):
     return [r for _seq, r in sorted(enumerate(rows), key=key)]
 
 
-def plan_rows(index, product, inflight, capacity, attempts=None, corrections=None):
+def plan_rows(index, product, inflight, capacity, attempts=None, corrections=None, busy=None):
     """The rows the tick emits: tiered, S1 first, cut to ``capacity`` less what is in flight."""
     from asf.feeder import tiers
-    return tiers.select(candidates(index, product, inflight, attempts, corrections), inflight, capacity)
+    return tiers.select(candidates(index, product, inflight, attempts, corrections, busy=busy),
+                        inflight, capacity)

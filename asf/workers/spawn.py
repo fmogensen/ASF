@@ -173,8 +173,22 @@ def make_worktree(product, job, branch):
     if held:
         _git(['worktree', 'remove', '--force', held], repo)
         _git(['branch', '-D', branch], repo)
+    elif _local_branch_exists(repo, branch):
+        # a branch with no worktree and not on origin (a reaped one): reused when it carries
+        # nothing, refused with the count when it does (B-0025) — never silently reset
+        ahead = _git(['rev-list', '--count', f'origin/{product.main}..{branch}'], repo)
+        if ahead not in ('', '0'):
+            raise SpawnError(f'branch {branch} exists locally with {ahead} commit(s) not on '
+                             f'origin/{product.main} and no worktree — look before relaunching')
+        _git(['branch', '-D', branch], repo)
     _git(['worktree', 'add', '-q', '-b', branch, path, f'origin/{product.main}'], repo)
     return path
+
+
+def _local_branch_exists(repo, branch):
+    p = subprocess.run(['git', 'rev-parse', '--verify', '-q', f'refs/heads/{branch}'], cwd=repo,
+                       capture_output=True, text=True)
+    return p.returncode == 0
 
 
 def _worktree_branch(path):

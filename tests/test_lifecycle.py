@@ -224,6 +224,7 @@ class StateMachineInvariants(unittest.TestCase):
         run = lc.latest(path)['a']
         self.assertEqual(lc.derive(run, lc.Evidence(), path=path).name, lc.HELD)
         self.assertEqual(lc.corrections(path)['B-0001']['rounds'], 1)
+        self.assertEqual(lc.corrections(path)['B-0001']['branch'], 'b')
         with open(path, 'a') as f:
             f.write(json.dumps({'job': 'correct-b-0001', 'pid': 2, 'started': 't4', 'item': 'B-0001', 'branch': 'b'}) + '\n')
         self.assertEqual(lc.derive(run, lc.Evidence(), path=path).name, lc.CORRECTED)
@@ -269,6 +270,28 @@ class HoldInvariants(unittest.TestCase):
                    {'job': 'c', 'item': 'B-0001', 'branch': 'b', 'pid': 2, 'started': 't2'})
         fields, _ = lc.hold(self.path, lc.latest(self.path)['c'], 'conflict', 'x', 't3')
         self.assertEqual(fields['rounds'], 3)
+
+
+class AwaitingHarvestInvariants(unittest.TestCase):
+    def test_a_pushed_branch_holds_its_item_busy_until_harvest_lands_or_holds_it(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        path = os.path.join(d, 's.jsonl')
+
+        def write(rec):
+            with open(path, 'a') as f:
+                f.write(json.dumps(rec) + '\n')
+        write({'job': 'a', 'item': 'B-0001', 'branch': 'fix/B-0001', 'pid': 1, 'started': 't1'})
+        self.assertEqual(lc.awaiting_harvest(path), set())            # live: a session holds it
+        write({'job': 'a', 'ended': 't2', 'end_reason': 'finished'})
+        self.assertEqual(lc.awaiting_harvest(path), {'B-0001'})       # pushed: harvest's turn
+        write({'job': 'a', 'rounds': 1, 'correction': {'kind': 'gate', 'text': 'x', 'at': 't3'}})
+        self.assertEqual(lc.awaiting_harvest(path), set())            # held: the feeder's turn
+        write({'job': 'c', 'item': 'B-0001', 'branch': 'fix/B-0001', 'pid': 2, 'started': 't4',
+               'ended': 't5', 'end_reason': 'finished'})
+        self.assertEqual(lc.awaiting_harvest(path), {'B-0001'})
+        write({'job': 'c', 'harvested': 'sha'})
+        self.assertEqual(lc.awaiting_harvest(path), set())            # landed
 
 
 class LaunchAndReapInvariants(unittest.TestCase):

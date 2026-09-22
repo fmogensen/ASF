@@ -1,7 +1,8 @@
 """asf.tick.step_wave — the tick's ``wave`` step: what the feeder says to start, launched.
 
 1. the index from the record clone (the tick's own, made once per tick — :class:`Context`);
-2. ``inflight``: the sessions in ``~/.ASF/state/<product>/sessions.jsonl`` with no ``ended``;
+2. ``inflight``: the sessions in ``~/.ASF/state/<product>/sessions.jsonl`` with no ``ended``; and
+   ``busy``, the items whose pushed branch waits for harvest — no slot, but no second session;
 3. ``feeder.plan_rows(index, product, inflight, capacity)`` — ``capacity`` is ``config.yaml
    feeder.capacity`` (default 4); the feeder takes the sessions in flight off it itself;
 4. per launching row, a brief (``asf.briefs.build``) with the facts of its branch on the product
@@ -34,6 +35,12 @@ def inflight(product):
 def attempts(product):
     """``{item: runs the ledger holds for it}`` — :func:`asf.workers.lifecycle.attempts`."""
     return lifecycle.attempts(pool_mod.sessions_path(product))
+
+
+def awaiting_harvest(product):
+    """Items whose pushed branch waits for harvest: busy, but holding no slot
+    (:func:`asf.workers.lifecycle.awaiting_harvest`)."""
+    return lifecycle.awaiting_harvest(pool_mod.sessions_path(product))
 
 
 def corrections(product):
@@ -89,7 +96,7 @@ def run(ctx, out=print):
     items, _generated = index_reader.load(ctx.record_root())
     running = inflight(product)
     planned = feeder_rows.plan_rows(items, product, running, capacity(), attempts=attempts(product),
-                                     corrections=corrections(product))
+                                     corrections=corrections(product), busy=awaiting_harvest(product))
     worker_rows, texts, kinds = [], {}, {}
     for row in planned:
         if not row.launches:

@@ -71,9 +71,15 @@ def conv_dir(product, key, default):
 
 
 def _cache_file(base, product):
-    """One cache file per product: two products must never read each other's evidence."""
+    """One cache file per product, under the product's own state directory (``ASF_HOME``): two
+    products — or two operator homes naming the same product, the suite's and the live one —
+    must never read each other's evidence (F-0087, the hermetic rule). ``base`` stands in only
+    when there is no product to key on."""
     name = getattr(product, "name", None)
-    return f"{base}.{name}" if name else base
+    if not name:
+        return base
+    from asf import env
+    return os.path.join(env.state_dir(product), "cache-" + os.path.basename(base))
 
 
 PLANS_DIR = "docs/superpowers/plans"

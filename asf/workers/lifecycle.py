@@ -214,6 +214,18 @@ def inflight(path):
             for job, r in latest(path).items() if is_live(r)]
 
 
+def awaiting_harvest(path):
+    """The items whose branch is ``pushed`` — its latest run finished, not landed, no correction
+    pending — and so waits for harvest, not for another session. The feeder holds them busy
+    (B-0025's loop: a finished branch was relaunched every tick until harvest got to it, each
+    relaunch a live run that then hid the finished one from harvest)."""
+    out = set()
+    for run in by_branch(path).values():
+        if run.get('item') and eligible(run) and not pending_correction(run, path):
+            out.add(run['item'])
+    return out
+
+
 def attempts(path):
     """``{item: runs the registry holds for it}`` — every launch, ended or not."""
     out = {}
@@ -225,7 +237,9 @@ def attempts(path):
 
 
 def corrections(path):
-    """``{item: {kind, text, at, rounds}}``: the newest pending correction per item."""
+    """``{item: {kind, text, at, rounds, branch}}``: the newest pending correction per item, with
+    the branch of the run it was written on (a held spec branch is corrected on ``spec/<id>``,
+    not on the item's task prefix)."""
     out = {}
     for item in {r.get('item') for rs in runs(path).values() for r in rs if r.get('item')}:
         held = [(r, pending_correction(r, path)) for r in item_runs(path, item)]
@@ -233,7 +247,7 @@ def corrections(path):
         if not held:
             continue
         run, corr = max(held, key=lambda rc: rc[1].get('at') or '')
-        out[item] = dict(corr, rounds=rounds_of(path, item))
+        out[item] = dict(corr, rounds=rounds_of(path, item), branch=run.get('branch'))
     return out
 
 
