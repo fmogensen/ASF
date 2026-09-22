@@ -2,7 +2,8 @@
 import os
 import re
 
-from asf.record.core import is_open, tokenize
+from asf.groom.shape import infer_parent_epic
+from asf.record.core import tokenize
 from asf.record.ids import mint_id, write_new_item
 
 INBOX_TYPES = ('bug', 'epic', 'feature')
@@ -17,18 +18,6 @@ def infer_inbox_type(text):
     if GOAL_WORD_RE.search(text):
         return 'epic'
     return 'feature'
-
-
-def infer_parent_epic(canonical, tokens):
-    """The open Epic sharing the most title words with `tokens`, or None."""
-    best_id, best_n = None, 0
-    for iid, rec in sorted(canonical.items()):
-        if rec['meta'].get('type') != 'epic' or not is_open(rec):
-            continue
-        shared = len(tokens & tokenize(rec['meta'].get('title', '')))
-        if shared > best_n:
-            best_id, best_n = iid, shared
-    return best_id
 
 
 def parse_inbox_file(text):
