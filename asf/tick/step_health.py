@@ -12,6 +12,8 @@ onto it (D-0048, part b). Only a session whose correction already ran (or just r
 again) becomes a ``needs-operator`` event, once: the session is marked ``operator_flagged`` so
 the next tick does not raise it again.
 """
+import os
+
 from asf.workers import health as health_mod
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
@@ -89,9 +91,51 @@ def handle_dead(ctx, session, runtime_fn=_runtime, out=print):
     return 'held'
 
 
+def file_rulings(ctx, out=print):
+    """B-0064: an adjudicate session's ruling is the ``ruling:`` line of its REPORT; the factory
+    files it on the item's card in the record clone as a ``## History`` line and marks the run
+    ``adjudicated`` — the session never commits a ruling or mints an id. A run whose report
+    carries no ruling is marked too (``adjudicated: none``) and named once. Returns the jobs
+    filed."""
+    from asf.record.core import TYPES
+    from asf.record import frontmatter
+    from asf.record.ingest import append_history_lines
+    from asf.workers import report as report_mod
+    product = ctx.product
+    done = []
+    for job, run in pool_mod.load_sessions(product).items():
+        if run.get('kind') != 'adjudicate' or not run.get('ended') or run.get('adjudicated'):
+            continue
+        rec = runtime_mod.read_result(run.get('log'))
+        if rec is None:
+            continue
+        text = report_mod.ruling(rec.get('result') if isinstance(rec, dict) else '')
+        item = run.get('item') or ''
+        folder = next((f for t, (f, p) in TYPES.items() if item.startswith(p + '-')), None)
+        path = os.path.join(ctx.record_root(), folder, f'{item}.md') if folder else ''
+        stamp = pool_mod.now_iso()[:16].replace('T', ' ')
+        if text and path and os.path.isfile(path):
+            with open(path, encoding='utf-8') as f:
+                meta, body = frontmatter.parse(f.read(), path=path)
+            line = f'- {stamp} adjudicate ({job}): {" ".join(text.split())}'
+            new_body = append_history_lines(body, [line])
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(frontmatter.render(meta, new_body))
+            pool_mod.update_session(product, job, adjudicated=stamp)
+            ctx.event('ruling', job=job, item=item, text=text)
+            out(f'ruling {job} filed on {item}: {text[:120]}')
+        else:
+            why = 'no ruling in its report' if not text else f'no card for {item or "?"} in the record'
+            pool_mod.update_session(product, job, adjudicated='none')
+            out(f'ruling {job}: {why} — marked, not filed')
+        done.append(job)
+    return done
+
+
 def run(ctx, out=print, runtime_fn=_runtime):
     product = ctx.product
     found = health_mod.health(product, fix=True, out=out)
+    file_rulings(ctx, out=out)  # B-0064
     stalled = stall_mod.stall(product, out=out)
     ctx.counts['stalls'] += len(stalled)
     sessions = pool_mod.load_sessions(product)

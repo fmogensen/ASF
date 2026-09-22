@@ -216,6 +216,36 @@ class HealthStepTests(StepsTestCase):
         self.assertEqual(step_health.handle_dead(ctx, dict(s, job='fix-b-0001'), out=self.lines.append), 'held')
         self.assertEqual(pool_mod.load_sessions(self.product)['fix-b-0001']['rounds'], 1)
 
+    def test_b0064_an_adjudicate_runs_ruling_is_filed_on_the_card_by_the_factory(self):
+        ctx = self.ctx()
+        root = ctx.record_root()
+        os.makedirs(os.path.join(root, 'bugs'), exist_ok=True)
+        card = os.path.join(root, 'bugs', 'B-0001.md')
+        with open(card, 'w') as f:
+            f.write('---\nid: B-0001\ntype: bug\ntitle: x\nseverity: S1\n# ---- machine ----\nstate: Active\n---\n'
+                    '## Symptom\ns\n\n## History\n- 2026-09-01: created\n\n## Children\n\n## Backlinks\n')
+        log = os.path.join(self.tmp, 'adj.jsonl')
+        with open(log, 'w') as f:
+            f.write(json.dumps({'type': 'system', 'subtype': 'init'}) + '\n')
+            f.write(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
+                                'result': 'REPORT\nitem: B-0001\nkind: adjudicate\nstatus: done\n'
+                                          'branch: fix/B-0001\npushed: yes abc\ncommits: none\ntests: none\n'
+                                          'left out: none\nruling: no open finding; the fix stands\n```\n'}) + '\n')
+        self.session(job='adjudicate-b-0001', item='B-0001', kind='adjudicate', pid=DEAD_PID, log=log,
+                     started='2026-09-22T10:00:00Z', ended='2026-09-22T10:30:00Z', end_reason='finished')
+        filed = step_health.file_rulings(ctx, out=self.lines.append)
+        self.assertEqual(filed, ['adjudicate-b-0001'])
+        with open(card) as f:
+            body = f.read()
+        self.assertIn('adjudicate (adjudicate-b-0001): no open finding; the fix stands', body)
+        self.assertTrue(pool_mod.load_sessions(self.product)['adjudicate-b-0001'].get('adjudicated'))
+        self.assertEqual([e['kind'] for e in self.events(ctx)], ['ruling'])
+        self.assertTrue(self.lines[0].startswith('ruling adjudicate-b-0001 filed on B-0001:'), self.lines)
+        # filed once: a second pass finds nothing to do, and the card gains no second line
+        self.assertEqual(step_health.file_rulings(ctx, out=self.lines.append), [])
+        with open(card) as f:
+            self.assertEqual(f.read().count('adjudicate (adjudicate-b-0001)'), 1)
+
     def test_b0062_failed_correction_holds_the_run(self):
         self.dead_session()
         fake = runtime_mod.FakeRuntime([{'ok': False, 'result': 'still broken'}])

@@ -2,6 +2,20 @@
 the source: ``pushed: no`` (F-0087, class "worker behaviour": B-0024, B-0052)."""
 import unittest
 
+RULED = """REPORT
+item: B-0001
+kind: adjudicate
+status: done
+branch: fix/B-0001
+pushed: yes abc1234
+commits: none
+tests: none
+left out: none
+ruling: the hold was an add/add conflict, not a finding; the fix stands
+  and the reviewer's point about the retry is overruled
+```
+"""
+
 from asf.workers import report
 from asf.workers import runtime as runtime_mod
 
@@ -63,6 +77,20 @@ class FailureAtTheSourceTests(unittest.TestCase):
         ok = {'type': 'result', 'subtype': 'success', 'is_error': False, 'result': DONE}
         self.assertIsNone(runtime_mod.failure_reason(ok))
         self.assertTrue(runtime_mod.result_ok(ok))
+
+
+if __name__ == '__main__':
+    unittest.main()
+
+
+class RulingTests(unittest.TestCase):
+    def test_b0064_the_ruling_paragraph_is_read_off_the_report(self):
+        from asf.workers import report
+        self.assertEqual(report.ruling(RULED),
+                         "the hold was an add/add conflict, not a finding; the fix stands\n"
+                         "and the reviewer's point about the retry is overruled")
+        self.assertEqual(report.ruling('REPORT\nitem: B-0001\npushed: yes\n'), '')
+        self.assertEqual(report.ruling('no report at all'), '')
 
 
 if __name__ == '__main__':

@@ -157,10 +157,13 @@ class GoldenBriefTest(unittest.TestCase):
         text = briefs.build(product(), ROWS['fixer'], index(), [], REPO_FACTS).text
         self.assertIn('ALWAYS PUSH SOMETHING', text)
 
-    def test_an_adjudicate_brief_asks_for_a_decision_card_body(self):
+    def test_b0064_an_adjudicate_brief_puts_the_ruling_in_the_report_not_a_commit(self):
+        # B-0054/B-0064: sessions wrote docs/reviews/…-ruling.md and minted D-7851, D-8200…
         text = briefs.build(product(), ROWS['adjudicate'], index(), [], REPO_FACTS).text
-        self.assertIn('DECISION CARD BODY', text)
-        self.assertIn('## Consequences', text)
+        self.assertNotIn('DECISION CARD BODY', text)
+        self.assertIn('THE RULING GOES TO THE RECORD, AND THE FACTORY WRITES IT THERE', text)
+        self.assertIn('you never write a decision id', text)
+        self.assertIn('ruling: <adjudicate only', text)
 
     def test_the_tail_carries_the_typed_report_and_the_operator_marker(self):
         text = briefs.build(product(), ROWS['spec'], index(), [], REPO_FACTS).text

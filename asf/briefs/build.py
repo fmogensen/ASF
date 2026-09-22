@@ -86,6 +86,7 @@ pushed: yes <the sha origin/{branch} now points at> | rebased <sha> — the fact
 commits: <sha> <subject> (one per line, or none)
 tests: <what you ran — and its last line>
 left out: <what and why, or none>
+ruling: <adjudicate only — one paragraph: what was disputed, what now holds, what changes; else omit>
 NEEDS OPERATOR: <only if something needs a human, else omit>
 ```
 """

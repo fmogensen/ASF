@@ -21,9 +21,9 @@ nothing; the evidence rule still applies.
 """
 import re
 
-FIELDS = ('item', 'kind', 'status', 'branch', 'pushed', 'commits', 'tests', 'left out')
+FIELDS = ('item', 'kind', 'status', 'branch', 'pushed', 'commits', 'tests', 'left out', 'ruling')
 HEAD_RE = re.compile(r'^\s*REPORT\s*$', re.M)
-FIELD_RE = re.compile(r'^(?P<key>item|kind|status|branch|pushed|commits|tests|left out)\s*:\s*(?P<value>.*)$', re.I)
+FIELD_RE = re.compile(r'^(?P<key>item|kind|status|branch|pushed|commits|tests|left out|ruling)\s*:\s*(?P<value>.*)$', re.I)
 NO_RE = re.compile(r'^\s*(no|none|not pushed|unpushed)\b', re.I)
 UNPUSHED = 'unpushed work'
 
@@ -53,6 +53,12 @@ def unpushed(report):
     """True when the report says its work is not on origin."""
     value = (report or {}).get('pushed')
     return bool(value) and bool(NO_RE.match(value))
+
+
+def ruling(text):
+    """The ``ruling:`` paragraph of an adjudicate session's REPORT, or '' (B-0064): the one
+    place a ruling lives — the factory files it on the item's card, the session commits none."""
+    return (parse(text).get('ruling') or '').strip()
 
 
 def failure(text):
