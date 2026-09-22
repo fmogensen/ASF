@@ -16,6 +16,7 @@ from unittest import mock
 
 from asf import env
 from asf.workers import health as health_mod
+from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 from asf.workers import quota as quota_mod
 from asf.workers import runtime as runtime_mod
@@ -609,6 +610,7 @@ class TestHealth(Home):
 
     def test_b0028_dead_pid_is_rejudged_when_the_result_arrives(self):
         rec = self.spawn('late', {'running': True, 'pid': 12})
+        self.commit(rec['worktree'])
         git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
         found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
         self.assertIn(('late', 'ended', 'dead pid'), found)
@@ -654,6 +656,20 @@ class TestHealth(Home):
         self.assertTrue(held, found)
         s = pool_mod.load_sessions(self.product)['waiting']
         self.assertEqual(s['rounds'], 1)
+
+    def test_b0076_a_finished_run_with_an_empty_branch_is_held_not_finished_forever(self):
+        # a session that ends ok and pushes its branch, but never committed anything on it, has
+        # nothing for harvest to land — read "finished" it sits `eligible` forever, and the item
+        # it worked stays "busy" for ever, blocking every task waiting on its footprint
+        rec = self.spawn('empty', {'ok': True, 'pid': 71})
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('empty', 'ended', 'failed: empty branch: nothing to land'), found)
+        held = [d for j, w, d in found if w == 'held']
+        self.assertTrue(held, found)
+        s = pool_mod.load_sessions(self.product)['empty']
+        self.assertEqual(s['rounds'], 1)
+        self.assertFalse(lifecycle.eligible(s))  # never sits `awaiting harvest` with nothing to land
 
     def test_reap_only_when_pushed(self):
         rec = self.spawn('done', {'ok': True, 'pid': 11})
@@ -782,12 +798,15 @@ class TestHealth(Home):
         self.assertTrue(os.path.isdir(wt))
 
     def test_b0019_ended_session_with_no_commits_is_not_merged(self):
+        # B-0076: never committed to, this is `failed: empty branch`, not `finished` — it never
+        # reads as landed, and reap takes the worktree at once since there is nothing to lose
         rec = self.spawn('empty', {'ok': True, 'pid': 22})
         wt = rec['worktree']
         git('push', '-q', 'origin', rec['branch'], cwd=wt)
         found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
-        self.assertIn(('empty', 'keep', 'ended: no commits yet'), found)
-        self.assertTrue(os.path.isdir(wt))
+        self.assertIn(('empty', 'ended', 'failed: empty branch: nothing to land'), found)
+        self.assertIn(('empty', 'reaped', 'empty'), found)
+        self.assertFalse(os.path.isdir(wt))
 
     def test_b0019_pushed_but_unlanded_commit_is_kept_until_it_reaches_main(self):
         rec = self.spawn('done', {'ok': True, 'pid': 23})
@@ -890,6 +909,10 @@ class TestCorrectOnce(Home):
     def test_retry_that_passes(self):
         rec = spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b\n',
                               runtime=runtime_mod.FakeRuntime([{'ok': False}]), cfg=self.cfg)
+        with open(os.path.join(rec['worktree'], 'x'), 'w') as f:
+            f.write('x')
+        git('add', 'x', cwd=rec['worktree'])
+        git('commit', '-q', '-m', 'the retry fixed it', cwd=rec['worktree'])
         git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])  # the retry pushed
         session = pool_mod.load_sessions(self.product)['j']
         self.assertTrue(stall_mod.correct_once(self.product, session, 'boom',
@@ -912,6 +935,10 @@ class TestCorrectOnce(Home):
         the one that passed."""
         rec = spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b\n',
                               runtime=runtime_mod.FakeRuntime([{'ok': False}]), cfg=self.cfg)
+        with open(os.path.join(rec['worktree'], 'x'), 'w') as f:
+            f.write('x')
+        git('add', 'x', cwd=rec['worktree'])
+        git('commit', '-q', '-m', 'the retry fixed it', cwd=rec['worktree'])
         git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])  # the retry pushed
         session = pool_mod.load_sessions(self.product)['j']
         self.assertTrue(stall_mod.correct_once(self.product, session, 'boom',

@@ -81,6 +81,7 @@ RUN_FIELDS = ('ended', 'end_reason', 'rc', 'corrected', 'operator_flagged', 'har
 
 FINISHED = 'finished'
 DEAD_PID = 'dead pid'
+EMPTY_BRANCH = 'empty branch: nothing to land'
 
 
 # ---- the registry -------------------------------------------------------------
@@ -383,14 +384,22 @@ def push_gap(ev):
 def judge(run, ev):
     """The ``end_reason`` health records for a run whose session is over, or None while it runs.
     A result that says ok is ``finished`` only when the branch is pushed; a run with no branch
-    (nothing to push) is judged on the result alone."""
+    (nothing to push) is judged on the result alone. A pushed branch never committed to
+    (``ev.has_commits``, the reflog beyond its creation — B-0019's distinction from ``in_trunk``,
+    which a branch fast-forward-landed onto the trunk is also true of) has nothing for harvest to
+    land — read ``finished`` it would sit ``eligible`` forever, blocking every task waiting on the
+    item's footprint (B-0076), so it is ``failed: empty branch: nothing to land`` instead, and
+    D-0048's loop sends it back to the same session to commit its work or say why there is none."""
     if ev.result is None:
         return None if ev.alive else DEAD_PID
     if not runtime_mod.result_ok(ev.result):
         sig = runtime_mod.failure_reason(ev.result)
         return f'failed: {sig}' if sig else 'failed'
-    if run.get('branch') and not ev.pushed:
-        return f'failed: {push_gap(ev)}'
+    if run.get('branch'):
+        if not ev.pushed:
+            return f'failed: {push_gap(ev)}'
+        if not ev.has_commits:
+            return f'failed: {EMPTY_BRANCH}'
     return FINISHED
 
 
@@ -447,6 +456,11 @@ def unpushed_text(reason):
     """The correction a run judged ``failed: not pushed: …`` hands its next session."""
     gap = reason.split('failed: ', 1)[-1]
     return f'{UNPUSHED} work: {gap} — commit and push what you have, or say why not in the report'
+
+
+def empty_branch_text():
+    """The correction a run judged ``failed: empty branch: …`` hands its next session (B-0076)."""
+    return f'{EMPTY_BRANCH} — commit and push what you have, or say why not in the report'
 
 
 # ---- what spawn and health ask ---------------------------------------------------

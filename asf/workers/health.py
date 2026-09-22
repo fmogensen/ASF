@@ -289,6 +289,13 @@ def health(product, fix=False, alive=pid_alive, out=print):
                                           lifecycle.unpushed_text(reason), now)
             pool_mod.update_session(product, job, **fields)
             found.append((job, 'held', line.split(': ', 1)[1]))
+        elif reason == f'failed: {lifecycle.EMPTY_BRANCH}':
+            # a pushed branch with nothing on it: the same loop, sent back to commit real work
+            # or say why there is none (B-0076)
+            fields, line = lifecycle.hold(registry, s, lifecycle.UNPUSHED,
+                                          lifecycle.empty_branch_text(), now)
+            pool_mod.update_session(product, job, **fields)
+            found.append((job, 'held', line.split(': ', 1)[1]))
     _git(['fetch', '-q', 'origin', product.main], product.repo_dir)
     wdir = spawn_mod.worktrees_dir(product)
     owners = lifecycle.by_worktree(registry)

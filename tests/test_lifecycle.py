@@ -170,6 +170,19 @@ class JudgementInvariants(unittest.TestCase):
         rec = dict(OK, result='Invalid API key · Please run /login')
         self.assertEqual(lc.judge(self.RUN, lc.Evidence(result=rec, remote_sha='s')), 'failed: auth')
 
+    def test_b0076_a_pushed_branch_never_committed_to_is_failed_empty_branch(self):
+        # a run that says ok on a branch that is pushed but was never itself committed to has
+        # nothing for harvest to land — read `finished` it sits `eligible` forever and the item
+        # it worked stays busy for ever, blocking every task waiting on its footprint
+        ev = lc.Evidence(result=OK, remote_sha='s', head_on_remote=True, in_trunk=True,
+                         has_commits=False, worktree=True)
+        self.assertEqual(lc.judge(self.RUN, ev), 'failed: empty branch: nothing to land')
+        self.assertEqual(lc.derive(self.RUN, ev).name, lc.ENDED)
+        # a branch fast-forward-landed onto the trunk is also `in_trunk`, but it was committed to
+        landed_ev = lc.Evidence(result=OK, remote_sha='s', head_on_remote=True, in_trunk=True,
+                                has_commits=True, worktree=True)
+        self.assertEqual(lc.judge(self.RUN, landed_ev), lc.FINISHED)
+
 
 class StateMachineInvariants(unittest.TestCase):
     def test_every_state_but_reaped_has_a_successor_and_all_successors_are_states(self):
