@@ -672,6 +672,9 @@ def discover(product=None, checked_file=None):
 ID_TOKEN = re.compile(r"\b([EFSTBDR])-(\d{4})\b")
 # branch names are often lower-cased (`fix/b-0003`); titles, bodies and subjects are not read so
 BRANCH_ID_TOKEN = re.compile(r"\b([EFSTBDR])-(\d{4})\b", re.IGNORECASE)
+# a commit that lands the lane's own paperwork (a spec, a plan, a review round, a ruling), not
+# the code it describes — the Feature/Bug it names is not landed just because this landed.
+DOC_LANE_SUBJECT = re.compile(r"^(?:spec|plan|review|adjudicate)\(")
 
 
 def id_tokens(text, rx=ID_TOKEN):
@@ -752,6 +755,8 @@ def id_evidence(product, branches, prs, commits=None, green=None):
             rec(iid)["branches"].append(b)
     commits = main_commits(product) if commits is None else commits
     for sha, subject in commits:  # newest first: the first commit seen per id is the newest
+        if DOC_LANE_SUBJECT.match(subject):
+            continue
         for iid in id_tokens(subject):
             r = rec(iid)
             r["commit"] = r["commit"] or sha

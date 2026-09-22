@@ -36,7 +36,8 @@ def _feature_branches(fev):
 
 
 def match_feature(meta, ev):
-    """(slug, feature_evidence) by links.spec/plan path, then legacy_id, then branches, then PRs."""
+    """(slug, feature_evidence) by links.spec/plan path, then legacy_id, then the card's own id
+    lower-cased as the slug, then branches, then PRs."""
     typed, _machine = frontmatter.split_machine(meta)
     links = typed.get('links') or {}
     features = ev['features']
@@ -56,6 +57,11 @@ def match_feature(meta, ev):
         for slug, f in features.items():
             if f.get('alias') == legacy:
                 return slug, f
+    own_id = typed.get('id') or ''
+    if own_id:
+        slug = own_id.lower()
+        if slug in features:
+            return slug, features[slug]
     branches = set(links.get('branches') or [])
     if branches:
         for slug, f in features.items():
@@ -358,17 +364,33 @@ def cmd_ingest(args, root):
 
         spec_review = fev.get('spec_review')
         plan_review = fev.get('plan_review')
-        spec_approved = bool(spec_review and spec_review[1] == 'APPROVED')
-        plan_approved = bool(plan_review and plan_review[1] == 'APPROVED')
-        new_state[iid] = evidence.feature_state(bool(fev.get('spec_on_main')), plan_approved,
-                                                all_closed, all_merged_in_prod, all_prs_checked)
-        spec_dict = {'exists': bool(fev.get('spec')), 'approved': spec_approved,
-                    'review': spec_review[:2] if spec_review else None}
-        plan_dict = {'exists': bool(fev.get('plan')), 'approved': plan_approved,
-                    'review': plan_review[:2] if plan_review else None}
-        stage_val[iid] = evidence.feature_stage(spec_dict, plan_dict, child_states, all_merged_in_prod)
+        # B-0059: the incident lane lands a spec/plan straight to main with no review round at
+        # all — gating "approved" on a review verdict left every such doc reading spec-draft
+        # forever. Landing on main is itself the lane's approval.
+        spec_approved = bool(fev.get('spec_on_main')) or bool(spec_review and spec_review[1] == 'APPROVED')
+        plan_approved = bool(fev.get('plan_on_main')) or bool(plan_review and plan_review[1] == 'APPROVED')
+
+        # B-0059: a matched Feature with no Task children of its own (the incident lane never
+        # opens one) is landed the same way an unmatched Feature already is — a code commit on
+        # main naming it, with doc-lane commits (spec/plan/review/adjudicate) already excluded
+        # from `ids` upstream so a spec landing does not count as the code landing.
+        landed_by_commit = not child_ids and bool(((ev.get('ids') or {}).get(iid) or {}).get('commit'))
+        if landed_by_commit:
+            new_state[iid] = 'Resolved'
+            stage_val[iid] = 'landed'
+        else:
+            new_state[iid] = evidence.feature_state(bool(fev.get('spec_on_main')), plan_approved,
+                                                    all_closed, all_merged_in_prod, all_prs_checked)
+            spec_dict = {'exists': bool(fev.get('spec')), 'approved': spec_approved,
+                        'review': spec_review[:2] if spec_review else None}
+            plan_dict = {'exists': bool(fev.get('plan')), 'approved': plan_approved,
+                        'review': plan_review[:2] if plan_review else None}
+            stage_val[iid] = evidence.feature_stage(spec_dict, plan_dict, child_states, all_merged_in_prod)
 
         lines = []
+        if landed_by_commit:
+            _named_state, named_lines = match_ids(iid, ev)
+            lines.extend(named_lines)
         if fev.get('spec_on_main'):
             lines.append('spec on origin/main')
         elif fev.get('spec_branch'):

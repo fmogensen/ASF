@@ -107,6 +107,36 @@ class MatchFeatureTests(unittest.TestCase):
         self.assertIsNone(slug)
         self.assertIsNone(fev)
 
+    def test_b0059_falls_back_to_the_cards_own_id_lowercased(self):
+        # docs/specs/f-0074.md's slug is the card's own id, lower-cased — no links.spec, no
+        # legacy_id needed for a spec named exactly after the Feature it belongs to.
+        lines = ['id: F-0074', 'type: feature', 'title: Generic by construction',
+                 '# ---- machine ----', 'state: New']
+        text = '---\n' + '\n'.join(lines) + '\n---\nbody\n'
+        meta, _body = frontmatter.parse(text, path='F-0074.md')
+        ev = dict(EMPTY_EV, features={'f-0074': {
+            'alias': None, 'spec': 'origin/main:docs/specs/f-0074.md', 'spec_branch': None,
+            'plan': None, 'plan_branch': None, 'tasks': {}, 'prs': [],
+        }})
+        slug, fev = ingest.match_feature(meta, ev)
+        self.assertEqual(slug, 'f-0074')
+        self.assertIs(fev, ev['features']['f-0074'])
+
+    def test_b0059_id_fallback_never_beats_an_explicit_spec_link(self):
+        lines = ['id: F-0074', 'type: feature', 'title: Generic by construction',
+                 'links:', '  spec: docs/specs/other.md',
+                 '# ---- machine ----', 'state: New']
+        text = '---\n' + '\n'.join(lines) + '\n---\nbody\n'
+        meta, _body = frontmatter.parse(text, path='F-0074.md')
+        ev = dict(EMPTY_EV, features={
+            'other': {'alias': None, 'spec': 'origin/main:docs/specs/other.md',
+                     'spec_branch': None, 'plan': None, 'plan_branch': None, 'tasks': {}, 'prs': []},
+            'f-0074': {'alias': None, 'spec': 'origin/main:docs/specs/f-0074.md',
+                      'spec_branch': None, 'plan': None, 'plan_branch': None, 'tasks': {}, 'prs': []},
+        })
+        slug, _fev = ingest.match_feature(meta, ev)
+        self.assertEqual(slug, 'other')
+
 
 class MatchTaskTests(unittest.TestCase):
     def _meta_from(self, typed_lines, id_='T-0001'):
@@ -306,7 +336,9 @@ class CmdIngestEndToEndTests(unittest.TestCase):
         self.assertEqual(self.run_ingest(ev), 0)
         meta, body = read_meta(self.root, 'features', 'F-0001')
         self.assertEqual(meta['state'], 'Active')
-        self.assertEqual(meta['stage'], 'spec-draft')
+        # B-0059: a spec on main is spec-approved outright — the lane that lands it never files
+        # a review round, so gating the stage on one left every such spec reading spec-draft.
+        self.assertEqual(meta['stage'], 'spec-approved')
         self.assertIn('spec on origin/main', meta['evidence'])
         self.assertIn('ingest: state New → Active', body)
 
@@ -423,6 +455,73 @@ class CmdIngestEndToEndTests(unittest.TestCase):
         meta, _body = read_meta(self.root, 'features', 'F-0001')
         self.assertEqual(meta['blocked'], True)
         self.assertEqual(meta['blocked_by_open'], ['Ops: key'])
+
+    def test_b0059_matched_by_own_id_and_spec_on_main_goes_spec_approved(self):
+        write(self.root, 'E-0001', 'epic', 'Factory', 'epics')
+        write(self.root, 'F-0074', 'feature', 'Generic by construction', 'features',
+              parent='E-0001')
+        ev = dict(EMPTY_EV, features={'f-0074': {
+            'alias': None, 'spec': 'origin/main:docs/specs/f-0074.md', 'spec_branch': None,
+            'spec_on_main': True, 'spec_review': None,
+            'plan': None, 'plan_branch': None, 'plan_on_main': False, 'plan_review': None,
+            'tasks': {}, 'prs': [],
+        }})
+        self.assertEqual(self.run_ingest(ev), 0)
+        meta, _body = read_meta(self.root, 'features', 'F-0074')
+        self.assertEqual(meta['stage'], 'spec-approved')
+        self.assertEqual(meta['state'], 'Active')
+
+    def test_b0059_plan_on_main_with_no_review_goes_plan_approved(self):
+        write(self.root, 'E-0001', 'epic', 'Factory', 'epics')
+        write(self.root, 'F-0074', 'feature', 'Generic by construction', 'features',
+              parent='E-0001')
+        ev = dict(EMPTY_EV, features={'f-0074': {
+            'alias': None, 'spec': 'origin/main:docs/specs/f-0074.md', 'spec_branch': None,
+            'spec_on_main': True, 'spec_review': None,
+            'plan': 'origin/main:docs/plans/f-0074.md', 'plan_branch': None,
+            'plan_on_main': True, 'plan_review': None,
+            'tasks': {}, 'prs': [],
+        }})
+        self.assertEqual(self.run_ingest(ev), 0)
+        meta, _body = read_meta(self.root, 'features', 'F-0074')
+        self.assertEqual(meta['stage'], 'plan-approved')
+
+    def test_b0059_matched_feature_with_no_tasks_lands_via_a_naming_commit(self):
+        # matched through the pre-existing links.spec path (not the id-slug fallback), to isolate
+        # the no-Task-children landed-by-commit rule from B-0059's other match_feature change
+        write(self.root, 'E-0001', 'epic', 'Factory', 'epics')
+        write(self.root, 'F-0074', 'feature', 'Generic by construction', 'features',
+              parent='E-0001', typed_lines=['links:', '  spec: docs/specs/f-0074.md'])
+        ev = dict(EMPTY_EV, features={'f-0074': {
+            'alias': None, 'spec': 'origin/main:docs/specs/f-0074.md', 'spec_branch': None,
+            'spec_on_main': True, 'spec_review': None,
+            'plan': None, 'plan_branch': None, 'plan_on_main': False, 'plan_review': None,
+            'tasks': {}, 'prs': [],
+        }}, ids={'F-0074': {'branches': [], 'open_prs': [], 'commit': 'cafefeed0000',
+                            'pr': None, 'green': True}}, ci='gh-actions')
+        self.assertEqual(self.run_ingest(ev), 0)
+        meta, _body = read_meta(self.root, 'features', 'F-0074')
+        self.assertEqual(meta['stage'], 'landed')
+        self.assertEqual(meta['state'], 'Resolved')
+        self.assertTrue(any('commit cafefee names F-0074' in l for l in meta['evidence']),
+                        meta['evidence'])
+
+    def test_b0059_matched_feature_with_open_tasks_is_not_landed_by_a_stray_commit(self):
+        # the no-Task-children shortcut must not fire once real Tasks exist under the Feature
+        write(self.root, 'E-0001', 'epic', 'Factory', 'epics')
+        write(self.root, 'F-0074', 'feature', 'Generic by construction', 'features',
+              parent='E-0001')
+        write(self.root, 'T-0001', 'task', 'Wire it', 'tasks', parent='F-0074')
+        ev = dict(EMPTY_EV, features={'f-0074': {
+            'alias': None, 'spec': 'origin/main:docs/specs/f-0074.md', 'spec_branch': None,
+            'spec_on_main': True, 'spec_review': None,
+            'plan': None, 'plan_branch': None, 'plan_on_main': False, 'plan_review': None,
+            'tasks': {}, 'prs': [],
+        }}, ids={'F-0074': {'branches': [], 'open_prs': [], 'commit': 'cafefeed0000',
+                            'pr': None, 'green': True}}, ci='gh-actions')
+        self.assertEqual(self.run_ingest(ev), 0)
+        meta, _body = read_meta(self.root, 'features', 'F-0074')
+        self.assertNotEqual(meta['stage'], 'landed')
 
 
 if __name__ == '__main__':

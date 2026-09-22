@@ -578,6 +578,44 @@ class IngestIdEvidenceTests(unittest.TestCase):
         self.assertEqual(m["evidence"], [f"fix merged ({self.r.head[:9]})"])
 
 
+class DocLaneCommitTests(unittest.TestCase):
+    """B-0059: a spec/plan/review/adjudicate landing commit is the lane's own paperwork, not a
+    code commit — `id_evidence` must not read it as evidence that the id it names has landed."""
+
+    def test_doc_lane_subjects_match(self):
+        for subject in ("spec(F-0074): generic by construction",
+                        "plan(F-0002): the dispatch table",
+                        "review(F-0002): round 1",
+                        "adjudicate(B-0053): the fix stands"):
+            self.assertTrue(evidence.DOC_LANE_SUBJECT.match(subject), subject)
+
+    def test_non_doc_lane_subjects_do_not_match(self):
+        for subject in ("fix(B-0059): the evidence learns the lane's own conventions",
+                        "asf(free): land the free plan F-0005",
+                        "respec(F-0001): not a doc-lane word"):
+            self.assertFalse(evidence.DOC_LANE_SUBJECT.match(subject), subject)
+
+    def test_a_spec_landing_commit_does_not_resolve_the_feature_it_names(self):
+        product = env.Product("x", {"ci": "none"})
+        commits = [("deadbeef1", "spec(F-0074): generic by construction")]
+        ids = evidence.id_evidence(product, branches=set(), prs=[], commits=commits)
+        self.assertNotIn("F-0074", ids)
+
+    def test_a_fix_commit_still_resolves_the_item_it_names(self):
+        product = env.Product("x", {"ci": "none"})
+        commits = [("cafefeed1", "fix(B-0059): the evidence learns the lane's own conventions")]
+        ids = evidence.id_evidence(product, branches=set(), prs=[], commits=commits)
+        self.assertEqual(ids["B-0059"]["commit"], "cafefeed1")
+
+    def test_a_doc_lane_commit_is_skipped_even_when_a_later_fix_commit_also_names_the_id(self):
+        # newest first: the doc-lane commit must not shadow the real landing commit behind it
+        product = env.Product("x", {"ci": "none"})
+        commits = [("newer00001", "spec(F-0059): draft"),
+                  ("older00001", "fix(F-0059): the actual landing")]
+        ids = evidence.id_evidence(product, branches=set(), prs=[], commits=commits)
+        self.assertEqual(ids["F-0059"]["commit"], "older00001")
+
+
 class MatchPrefixesTests(unittest.TestCase):
     ITEMS = {"F-0042": {"type": "feature", "title": "Free plan", "legacy_id": "free-plan",
                         "children": []}}
