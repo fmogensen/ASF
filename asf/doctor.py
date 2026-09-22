@@ -17,7 +17,8 @@ import shutil
 import subprocess
 import time
 
-from asf import env, scheduler
+from asf import env, schema, scheduler
+from asf.workers import pool
 
 _SKIP_DIRS = {'.git', 'node_modules', '__pycache__', 'dist', 'build', '.next', 'vendor', 'venv',
               '.venv', 'target'}
@@ -177,6 +178,75 @@ def check_one_factory(cfg, product):
                   + (' (repo skipped: it is the factory itself)' if own else ''))
 
 
+# ---- the capacity row --------------------------------------------------------
+#
+# Spec f-0079 §2.5 has this row read the operator's `capacity.total.sessions`, every product's
+# own `capacity.sessions`, `worker_pool.accounts[].cap` and the two deprecated keys through the
+# shared resolver `asf.capacity` (F-0079 Task 1). That module has not landed on this branch yet
+# (T-0008 is Task 6, out of wave order ahead of it), so the two helpers below read the same data
+# straight off the config/product dicts instead. Once `asf.capacity` exists, `check_capacity`
+# should delegate to its `product_sessions`/`deprecations` rather than keep this copy.
+
+def _product_declared_sessions(name):
+    """This product's own ``capacity.sessions``, or ``None`` for an absent, malformed or
+    unreadable value. Reads the file straight (``env.load_file``, not ``env.load_product``),
+    because ``capacity:`` is not yet a declared ``PRODUCT_FIELDS`` key on this branch (F-0079
+    Task 2) — going through the validated loader would reject the block as unknown."""
+    try:
+        data = env.load_file(env.product_path(name))
+    except (env.ConfigError, OSError):
+        return None
+    val = ((data or {}).get('capacity') or {}).get('sessions')
+    return val if isinstance(val, int) and val >= 0 else None
+
+
+def _capacity_deprecations(cfg):
+    """The two deprecated-key lines of spec f-0079 §4.2, named only when the old key is set."""
+    lines = []
+    if (cfg.get('feeder') or {}).get('capacity') is not None:
+        lines.append('feeder.capacity is set — move it to capacity.per_product.sessions')
+    if (cfg.get('worker_pool') or {}).get('reserve_for_s1') is not None:
+        lines.append('worker_pool.reserve_for_s1 is set — move it to capacity.reserve_for_s1')
+    return lines
+
+
+def check_capacity(cfg, product):
+    """[(ok, detail)] — the ``capacity`` doctor row's findings (spec f-0079 §2.5): every
+    product's declared sessions summed against ``capacity.total.sessions``, that total against
+    the worker pool's account caps, and any deprecated key still in use. Empty findings collapse
+    to one ok row naming the resolved numbers. None of these is a refusal — ``run()`` appends
+    each as ``required=False`` (PD6 of the F-0079 plan), so a capacity row never turns doctor red.
+    """
+    findings = []
+    total_sessions = ((cfg.get('capacity') or {}).get('total') or {}).get('sessions')
+    if not (isinstance(total_sessions, int) and total_sessions >= 0):
+        total_sessions = None
+
+    if total_sessions is not None:
+        declared = [(name, n) for name in schema._all_products()
+                    for n in [_product_declared_sessions(name)] if n is not None]
+        subscribed = sum(n for _name, n in declared)
+        if subscribed > total_sessions:
+            named = ', '.join(f'{name} {n}' for name, n in declared)
+            findings.append((False, f'products declare {subscribed} sessions ({named}) above '
+                                     f'capacity.total.sessions {total_sessions}'))
+
+        cap_sum = sum(a.cap for a in pool.accounts_from_config(cfg))
+        if total_sessions > cap_sum:
+            findings.append((False, f'capacity.total.sessions {total_sessions} is above the '
+                                     f'worker_pool account caps ({cap_sum})'))
+
+    for line in _capacity_deprecations(cfg):
+        findings.append((False, f'capacity: {line}'))
+
+    if not findings:
+        detail = ('no capacity: block configured (nothing to check)' if total_sessions is None
+                  else f'capacity.total.sessions {total_sessions}, no oversubscription or '
+                       f'deprecated keys')
+        findings.append((True, detail))
+    return findings
+
+
 # ---- the scheduler section --------------------------------------------------
 #
 # The six rows above answer "is the install sound". They cannot answer "is the factory running",
@@ -319,6 +389,8 @@ def run(product_name):
         rows.append((f'cli:{name}', required, ok, detail))
     ok, detail = check_one_factory(cfg, product)
     rows.append(('one-factory', True, ok, detail))
+    for ok, detail in check_capacity(cfg, product):
+        rows.append(('capacity', False, ok, detail))
     return rows
 
 

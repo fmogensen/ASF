@@ -196,6 +196,64 @@ class TestNoPrHost(unittest.TestCase):
         self.assertFalse(doctor.has_pr_host(env.Product('p', {'ci': 'none'})))
 
 
+class Capacity(unittest.TestCase):
+    """`doctor.check_capacity` — spec f-0079 §2.5, the doctor's `capacity` row."""
+
+    def _rows(self, cfg, home):
+        old = env.ASF_HOME
+        env.ASF_HOME = home
+        try:
+            return doctor.check_capacity(cfg, env.Product('a', {}))
+        finally:
+            env.ASF_HOME = old
+
+    @staticmethod
+    def _as_doctor_rows(findings):
+        return [('capacity', False, ok, detail) for ok, detail in findings]
+
+    def test_oversubscribed_products_are_named(self):
+        cfg = {'capacity': {'total': {'sessions': 3}}}
+        with tempfile.TemporaryDirectory() as home:
+            os.makedirs(os.path.join(home, 'products'))
+            with open(os.path.join(home, 'products', 'a.yaml'), 'w') as f:
+                f.write('product: a\ncapacity:\n  sessions: 2\n')
+            with open(os.path.join(home, 'products', 'b.yaml'), 'w') as f:
+                f.write('product: b\ncapacity:\n  sessions: 2\n')
+            findings = self._rows(cfg, home)
+        bad = [d for ok, d in findings if not ok]
+        self.assertTrue(any('4' in d and 'a' in d and 'b' in d for d in bad), bad)
+        self.assertFalse(doctor.is_red(self._as_doctor_rows(findings)))
+
+    def test_a_total_above_the_account_caps_is_named(self):
+        cfg = {'capacity': {'total': {'sessions': 10}},
+               'worker_pool': {'accounts': [{'name': 'x', 'cap': 3}]}}
+        with tempfile.TemporaryDirectory() as home:
+            os.makedirs(os.path.join(home, 'products'))
+            findings = self._rows(cfg, home)
+        bad = [d for ok, d in findings if not ok]
+        self.assertTrue(any('10' in d and '3' in d for d in bad), bad)
+        self.assertFalse(doctor.is_red(self._as_doctor_rows(findings)))
+
+    def test_a_deprecated_key_is_named_with_its_new_home(self):
+        cfg = {'feeder': {'capacity': 1}, 'worker_pool': {'reserve_for_s1': {'local': 1}}}
+        with tempfile.TemporaryDirectory() as home:
+            os.makedirs(os.path.join(home, 'products'))
+            findings = self._rows(cfg, home)
+        bad = [d for ok, d in findings if not ok]
+        self.assertTrue(any('feeder.capacity' in d and 'capacity.per_product.sessions' in d
+                            for d in bad), bad)
+        self.assertTrue(any('worker_pool.reserve_for_s1' in d and 'capacity.reserve_for_s1' in d
+                            for d in bad), bad)
+        self.assertFalse(doctor.is_red(self._as_doctor_rows(findings)))
+
+    def test_nothing_configured_is_one_ok_row(self):
+        with tempfile.TemporaryDirectory() as home:
+            os.makedirs(os.path.join(home, 'products'))
+            findings = self._rows({}, home)
+        self.assertEqual(len(findings), 1)
+        self.assertTrue(findings[0][0])
+
+
 class TestFormatAndExit(unittest.TestCase):
     def test_is_red_true_only_for_required_failures(self):
         rows = [('config', True, True, 'ok'), ('cli:aws', False, False, 'no creds'),
