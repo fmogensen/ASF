@@ -1,7 +1,12 @@
 name: tests
 
+# push is limited to main (B-0053): a push to a worker branch is in-progress work, not a landed
+# change, and firing the suite on every one of them is red notifications for work nobody asked to
+# gate yet plus wasted minutes. pull_request stays open for outside contributors and for any
+# product whose conventions.landing is pull-request, where a branch's gate IS the pull request.
 on:
   push:
+    branches: [main]
   pull_request:
 
 jobs:
