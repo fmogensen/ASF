@@ -2,6 +2,8 @@
 same-session correction. Every run goes through the fake runtime; git is a bare repo in a temp
 dir; no network, no account, no real product."""
 import argparse
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -10,6 +12,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from asf import env
 from asf.workers import health as health_mod
@@ -73,7 +76,8 @@ class Home(unittest.TestCase):
         self.product = env.Product('sample', {'repo_dir': self.repo, 'main': 'main',
                                               'job_grants': [self.grant],
                                               'stage_limits': {'silent_min': 30}})
-        self.cfg = {'worker_pool': {'accounts': [{'name': 'acct-a', 'role': 'local', 'cap': 2}]}}
+        self.cfg = {'worker_pool': {'accounts': [{'name': 'acct-a', 'role': 'local', 'cap': 2}],
+                                    'models': {'Opus': 'opus'}}}
 
     def tearDown(self):
         env.ASF_HOME = self._home
@@ -274,11 +278,75 @@ class TestSpawn(Home):
         self.assertEqual((s['pid'], s['account'], s['kind'], s['model'], s['item']),
                          (4242, 'acct-a', 'fix-bug', 'opus', 'B-0001'))
 
+    def test_b0046_correct_row_spawns_on_the_held_branch_rebased_onto_main(self):
+        def commit(cwd, name, text, msg):
+            with open(os.path.join(cwd, name), 'w') as f:
+                f.write(text)
+            git('add', '.', cwd=cwd)
+            git('-c', 'user.email=ci@example.com', '-c', 'user.name=ci', 'commit', '-q', '-m', msg,
+                cwd=cwd)
+        other = os.path.join(self.tmp, 'other')
+        git('clone', '-q', os.path.join(self.tmp, 'origin.git'), other, cwd=self.tmp)
+        git('checkout', '-q', '-b', 'fix/B-0046', cwd=other)
+        commit(other, 'a.txt', 'branch\n', 'held work')
+        git('push', '-q', 'origin', 'fix/B-0046', cwd=other)
+        git('checkout', '-q', 'main', cwd=other)
+        commit(other, 'b.txt', 'main\n', 'main moves on')
+        git('push', '-q', 'origin', 'main', cwd=other)
+        row = pool_mod.Row('correct-b-0046', 'B-0046', kind='correct', branch='fix/B-0046')
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 1}])
+        rec = spawn_mod.spawn(self.product, row, self.acct(), 'fix it\n', runtime=rt, cfg=self.cfg)
+        wt = rec['worktree']
+        self.assertTrue(wt.endswith(os.path.join('worktrees', 'correct-b-0046')))
+        self.assertEqual(rec['branch'], 'fix/B-0046')
+        self.assertEqual(git('rev-parse', '--abbrev-ref', 'HEAD', cwd=wt), 'fix/B-0046')
+        self.assertTrue(os.path.exists(os.path.join(wt, 'a.txt')))
+        self.assertTrue(os.path.exists(os.path.join(wt, 'b.txt')))
+        git('merge-base', '--is-ancestor', 'origin/main', 'HEAD', cwd=wt)
+
+    def test_b0048_adjudicate_row_spawns_on_the_held_branch(self):
+        """The reuse-a-held-branch rule (B-0046) was keyed on ``kind == 'correct'`` — a
+        STALEMATE → ADJUDICATE row's kind is ``adjudicate``, so it took the fresh-branch path and
+        silently lost the branch's own history. The check must be on the branch existing on
+        origin, not on the row's kind (B-0048)."""
+        def commit(cwd, name, text, msg):
+            with open(os.path.join(cwd, name), 'w') as f:
+                f.write(text)
+            git('add', '.', cwd=cwd)
+            git('-c', 'user.email=ci@example.com', '-c', 'user.name=ci', 'commit', '-q', '-m', msg,
+                cwd=cwd)
+        other = os.path.join(self.tmp, 'other')
+        git('clone', '-q', os.path.join(self.tmp, 'origin.git'), other, cwd=self.tmp)
+        git('checkout', '-q', '-b', 'fix/B-0048', cwd=other)
+        commit(other, 'a.txt', 'branch\n', 'held work')
+        git('push', '-q', 'origin', 'fix/B-0048', cwd=other)
+        git('checkout', '-q', 'main', cwd=other)
+        commit(other, 'b.txt', 'main\n', 'main moves on')
+        git('push', '-q', 'origin', 'main', cwd=other)
+        row = pool_mod.Row('adjudicate-b-0048', 'B-0048', kind='adjudicate', branch='fix/B-0048')
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 1}])
+        rec = spawn_mod.spawn(self.product, row, self.acct(), 'adjudicate it\n', runtime=rt, cfg=self.cfg)
+        wt = rec['worktree']
+        self.assertEqual(rec['branch'], 'fix/B-0048')
+        self.assertEqual(git('rev-parse', '--abbrev-ref', 'HEAD', cwd=wt), 'fix/B-0048')
+        self.assertTrue(os.path.exists(os.path.join(wt, 'a.txt')))  # the held branch's own work
+        self.assertTrue(os.path.exists(os.path.join(wt, 'b.txt')))  # rebased onto main
+        git('merge-base', '--is-ancestor', 'origin/main', 'HEAD', cwd=wt)
+
     def test_id_ranges_do_not_overlap_and_are_sticky(self):
         r1 = spawn_mod.reserve_id_range(self.product, 'j1', prefixes=['T'])
         r2 = spawn_mod.reserve_id_range(self.product, 'j2', prefixes=['T'])
         self.assertEqual((r1, r2), ('T:5000-5049', 'T:5050-5099'))
         self.assertEqual(spawn_mod.reserve_id_range(self.product, 'j1', prefixes=['T']), r1)
+
+    def test_b0007_release_id_range_drops_only_that_jobs_row(self):
+        spawn_mod.reserve_id_range(self.product, 'j1', prefixes=['T'])
+        spawn_mod.reserve_id_range(self.product, 'j2', prefixes=['T'])
+        self.assertTrue(spawn_mod.release_id_range(self.product, 'j1'))
+        rows = spawn_mod._read_ranges(spawn_mod.id_ranges_path(self.product))
+        self.assertEqual([j for j, _ in rows], ['j2'])
+        # already gone: releasing again reports nothing to do
+        self.assertFalse(spawn_mod.release_id_range(self.product, 'j1'))
 
     def test_existing_worktree_refuses(self):
         rt = runtime_mod.FakeRuntime([{'running': True}])
@@ -312,6 +380,26 @@ class TestSpawn(Home):
         self.assertIn(rec['branch'], str(cm.exception))
         self.assertIn('1 commit', str(cm.exception))
         self.assertTrue(os.path.isdir(wt))
+
+    def test_b0024_unmapped_model_label_spawns_nothing(self):
+        cfg = {'worker_pool': {'accounts': [{'name': 'acct-a', 'role': 'local', 'cap': 2}]}}
+        rt = runtime_mod.FakeRuntime([{'running': True}])
+        with self.assertRaises(spawn_mod.SpawnError) as cm:
+            spawn_mod.spawn(self.product, s1_row(), self.acct(), 'b', runtime=rt, cfg=cfg)
+        self.assertEqual(str(cm.exception), 'NEEDS OPERATOR: worker_pool.models has no entry '
+                                            'for Opus — add it to config.yaml')
+        self.assertEqual(rt.calls, [])
+        self.assertFalse(os.path.exists(os.path.join(env.ASF_HOME, 'state', 'sample',
+                                                     'worktrees', 'fix-b-0001')))
+
+    def test_b0024_result_with_model_error_is_not_ok(self):
+        log = os.path.join(self.tmp, 'r.jsonl')
+        rec = {'type': 'result', 'subtype': 'success', 'is_error': False,
+               'result': 'There is an issue with the selected model (light)'}
+        with open(log, 'w') as f:
+            f.write(json.dumps(rec) + '\n')
+        self.assertFalse(runtime_mod.result_ok(runtime_mod.read_result(log)))
+        self.assertEqual(runtime_mod.failure_reason(rec), 'unknown model')
 
 
 class TestWave(Home):
@@ -355,6 +443,50 @@ class TestHealth(Home):
         return spawn_mod.spawn(self.product, feature_row(job), self.acct(), 'b', runtime=rt,
                                cfg=self.cfg)
 
+    def commit(self, wt, name='x'):
+        for k, v in (('user.email', 'ci@example.com'), ('user.name', 'ci')):
+            git('config', k, v, cwd=wt)
+        with open(os.path.join(wt, name), 'w') as f:
+            f.write(name)
+        git('add', name, cwd=wt)
+        git('commit', '-q', '-m', name, cwd=wt)
+
+    def land(self, wt, branch):
+        """Push the branch and fast-forward origin/main onto it, as a harvest does."""
+        git('push', '-q', 'origin', branch, cwd=wt)
+        git('push', '-q', 'origin', branch + ':main', cwd=wt)
+
+    def harvest_land(self, wt, branch, job):
+        """As ``asf.harvest.harvest.land_ff`` actually lands a branch: it rebases the tip in a
+        throwaway worktree (a new commit, not the one sitting in ``wt``), pushes that to main,
+        deletes the remote branch, and marks the session ``harvested`` — leaving ``wt``'s own
+        branch behind with no remote counterpart at all (B-0049)."""
+        git('push', '-q', 'origin', branch, cwd=wt)
+        tree = git('rev-parse', 'HEAD^{tree}', cwd=wt)
+        sha = git('commit-tree', tree, '-p', 'origin/main', '-m', 'landed', cwd=wt)
+        git('push', '-q', 'origin', f'{sha}:refs/heads/main', cwd=wt)
+        git('push', '-q', 'origin', '--delete', branch, cwd=wt)
+        pool_mod.update_session(self.product, job, harvested=sha)
+        return sha
+
+    def test_b0041_relaunch_starts_a_clean_run(self):
+        # first run fails; the relaunch must not inherit ended/end_reason from it
+        rt = runtime_mod.FakeRuntime([{'ok': False, 'pid': 21}, {'running': True, 'pid': 22}])
+        spawn_mod.spawn(self.product, feature_row('again'), self.acct(), 'b', runtime=rt, cfg=self.cfg)
+        health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertEqual(pool_mod.load_sessions(self.product)['again']['end_reason'], 'failed')
+        wt = pool_mod.load_sessions(self.product)['again']['worktree']
+        git('worktree', 'remove', '--force', wt, cwd=self.repo)
+        git('branch', '-D', pool_mod.load_sessions(self.product)['again']['branch'], cwd=self.repo)
+        spawn_mod.spawn(self.product, feature_row('again'), self.acct(), 'b', runtime=rt, cfg=self.cfg)
+        s = pool_mod.load_sessions(self.product)['again']
+        for k in ('ended', 'end_reason', 'rc', 'corrected', 'operator_flagged', 'harvested'):
+            self.assertNotIn(k, s, k)
+        self.assertEqual(s['pid'], 22)
+        found = health_mod.health(self.product, alive=lambda pid: pid == 22, out=lambda s: None)
+        self.assertFalse([f for f in found if f[0] == 'again' and f[1] == 'ended'])
+        self.assertIn('again', [x['job'] for x in pool_mod.live_sessions(self.product)])
+
     def test_transitions(self):
         self.spawn('done', {'ok': True, 'pid': 11})
         self.spawn('gone', {'running': True, 'pid': 12})
@@ -366,10 +498,12 @@ class TestHealth(Home):
         self.assertEqual(s['done']['end_reason'], 'finished')
         self.assertFalse(s['live'].get('ended'))
         keep = {j: d for j, w, d in found if w == 'keep'}
-        self.assertEqual(keep, {})
+        self.assertEqual(keep['done'], 'ended: branch not pushed')
+        # 'gone' never committed anything of its own: its worktree carries nothing ahead of
+        # main and nothing uncommitted, so B-0049's rule reaps it as empty rather than keeping
+        # it around forever just because it never finished cleanly.
         reapable = {j: d for j, w, d in found if w == 'reapable'}
-        self.assertEqual(reapable, {'done': 'ended: nothing committed',
-                                    'gone': 'ended: nothing committed'})
+        self.assertEqual(reapable['gone'], 'empty')
 
     def test_b0028_dead_pid_is_rejudged_when_the_result_arrives(self):
         rec = self.spawn('late', {'running': True, 'pid': 12})
@@ -391,10 +525,10 @@ class TestHealth(Home):
         rec = self.spawn('gone', {'running': True, 'pid': 12})
         wt = rec['worktree']
         found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
-        self.assertIn(('gone', 'reapable', 'ended: nothing committed'), found)
+        self.assertIn(('gone', 'reapable', 'empty'), found)
         self.assertTrue(os.path.isdir(wt))
         found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
-        self.assertIn(('gone', 'reaped', 'ended: nothing committed'), found)
+        self.assertIn(('gone', 'reaped', 'empty'), found)
         self.assertFalse(os.path.exists(wt))
         # the branch went with it, so the relaunch can cut it again
         self.assertEqual(git('branch', '--list', rec['branch'], cwd=self.repo), '')
@@ -413,13 +547,25 @@ class TestHealth(Home):
     def test_reap_only_when_pushed(self):
         rec = self.spawn('done', {'ok': True, 'pid': 11})
         wt = rec['worktree']
-        git('push', '-q', 'origin', rec['branch'], cwd=wt)
+        self.commit(wt)
+        self.land(wt, rec['branch'])
         found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
         self.assertIn(('done', 'reapable', 'ended'), found)
         self.assertTrue(os.path.isdir(wt))
         found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
         self.assertIn(('done', 'reaped', 'ended'), found)
         self.assertFalse(os.path.exists(wt))
+
+    def test_b0007_reap_releases_the_id_range(self):
+        rec = self.spawn('done', {'ok': True, 'pid': 11})
+        wt = rec['worktree']
+        self.commit(wt)
+        self.land(wt, rec['branch'])
+        rows = spawn_mod._read_ranges(spawn_mod.id_ranges_path(self.product))
+        self.assertIn('done', [j for j, _ in rows])
+        health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
+        rows = spawn_mod._read_ranges(spawn_mod.id_ranges_path(self.product))
+        self.assertNotIn('done', [j for j, _ in rows])
 
     def test_local_commit_not_pushed_is_kept(self):
         rec = self.spawn('done', {'ok': True})
@@ -442,7 +588,79 @@ class TestHealth(Home):
         self.assertIn(('stray', 'keep', 'orphan: branch not pushed'), found)
         git('push', '-q', 'origin', 'stray', cwd=path)
         found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('stray', 'keep', 'orphan: no commits yet'), found)
+        self.commit(path)
+        self.land(path, 'stray')
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
         self.assertIn(('stray', 'reaped', 'orphan'), found)
+
+    def test_b0019_live_session_with_no_commits_survives_and_is_opening(self):
+        rec = self.spawn('fresh', {'running': True, 'pid': 21})
+        wt = rec['worktree']
+        git('push', '-q', 'origin', rec['branch'], cwd=wt)
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: True, out=lambda s: None)
+        self.assertTrue([f for f in found if f[:2] == ('fresh', 'opening')], found)
+        self.assertFalse([f for f in found if f[1] in ('reaped', 'reapable')], found)
+        self.assertTrue(os.path.isdir(wt))
+
+    def test_b0019_ended_session_with_no_commits_is_not_merged(self):
+        rec = self.spawn('empty', {'ok': True, 'pid': 22})
+        wt = rec['worktree']
+        git('push', '-q', 'origin', rec['branch'], cwd=wt)
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('empty', 'keep', 'ended: no commits yet'), found)
+        self.assertTrue(os.path.isdir(wt))
+
+    def test_b0019_pushed_but_unlanded_commit_is_kept_until_it_reaches_main(self):
+        rec = self.spawn('done', {'ok': True, 'pid': 23})
+        wt = rec['worktree']
+        self.commit(wt)
+        git('push', '-q', 'origin', rec['branch'], cwd=wt)
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('done', 'keep', 'ended: not in origin/main'), found)
+        self.assertTrue(os.path.isdir(wt))
+        self.land(wt, rec['branch'])
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('done', 'reaped', 'ended'), found)
+        self.assertFalse(os.path.exists(wt))
+
+    def test_b0049_harvested_worktree_is_reaped_though_never_pushed_from_here(self):
+        # harvest rebases the tip in its own throwaway worktree and deletes the remote branch,
+        # so `pushed()` can never see this worktree's HEAD on origin — it would stay 'reapable'
+        # forever without the `harvested` short-circuit.
+        rec = self.spawn('done', {'ok': True, 'pid': 11})
+        wt = rec['worktree']
+        self.commit(wt)
+        sha = self.harvest_land(wt, rec['branch'], 'done')
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('done', 'reapable', f'landed {sha}'), found)
+        lines = []
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False,
+                                  out=lines.append)
+        self.assertIn(('done', 'reaped', f'landed {sha}'), found)
+        self.assertIn(f'reaped done (landed {sha})', lines)
+        self.assertFalse(os.path.exists(wt))
+
+    def test_b0049_operator_stopped_session_with_empty_worktree_is_reaped(self):
+        rec = self.spawn('idle', {'running': True, 'pid': 30})
+        wt = rec['worktree']
+        pool_mod.update_session(self.product, 'idle', ended=pool_mod.now_iso(),
+                                end_reason='stopped by operator')
+        lines = []
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lines.append)
+        self.assertIn(('idle', 'reaped', 'empty'), found)
+        self.assertIn('reaped idle (empty)', lines)
+        self.assertFalse(os.path.exists(wt))
+
+    def test_b0049_stopped_session_with_local_commits_is_kept(self):
+        rec = self.spawn('wip', {'running': True, 'pid': 31})
+        wt = rec['worktree']
+        self.commit(wt)
+        pool_mod.update_session(self.product, 'wip', ended=pool_mod.now_iso(),
+                                end_reason='stopped by operator')
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('wip', 'keep', 'ended: session stopped by operator, not finished'), found)
+        self.assertTrue(os.path.isdir(wt))
 
 
 class TestStall(Home):
@@ -500,14 +718,38 @@ class TestCorrectOnce(Home):
 
 
 class TestCli(unittest.TestCase):
-    def test_register_adds_the_five_verbs(self):
+    def test_register_adds_the_six_verbs(self):
         p = argparse.ArgumentParser()
         sub = p.add_subparsers(dest='command')
         register(sub)
-        for verb in ('spawn --row x --brief y', 'wave -n 2', 'health --fix', 'stall', 'quota'):
+        for verb in ('spawn --row x --brief y', 'wave -n 2', 'health --fix', 'stall', 'quota',
+                     'reserve-id --job j'):
             args = p.parse_args(['workers', *verb.split(), '--product', 'sample'])
             self.assertEqual(args.product, 'sample')
             self.assertTrue(callable(args.func))
+
+
+class TestReserveIdCli(Home):
+    def test_b0007_reserve_id_prints_the_range_a_launcher_can_export(self):
+        p = argparse.ArgumentParser()
+        sub = p.add_subparsers(dest='command')
+        register(sub)
+        args = p.parse_args(['workers', 'reserve-id', '--product', 'sample', '--job', 'fix-b-0007'])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), \
+             mock.patch('asf.workers._product', return_value=self.product), \
+             mock.patch('asf.workers.spawn.load_cfg', return_value=self.cfg):
+            rc = args.func(args)
+        self.assertEqual(rc, 0)
+        printed = buf.getvalue().strip()
+        self.assertEqual(printed, 'S:5000-5049,T:5000-5049,B:5000-5049')
+        # sticky: a second reservation for the same job returns the same range, unchanged
+        buf2 = io.StringIO()
+        with contextlib.redirect_stdout(buf2), \
+             mock.patch('asf.workers._product', return_value=self.product), \
+             mock.patch('asf.workers.spawn.load_cfg', return_value=self.cfg):
+            args.func(args)
+        self.assertEqual(buf2.getvalue().strip(), printed)
 
 
 if __name__ == '__main__':

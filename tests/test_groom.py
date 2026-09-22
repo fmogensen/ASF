@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from asf.record import frontmatter
 from asf.record.core import canonicalize, load_items, today, tokenize
@@ -53,6 +54,7 @@ def write_item(root, id_, type_, title, parent=None, typed_lines=(), machine_lin
 
 def run(args, cwd):
     env = dict(os.environ)
+    env.pop('BACKLOG_ID_RANGE', None)  # a job's range must not leak into the fixture's own mints (B-0012)
     env['PYTHONPATH'] = REPO_ROOT + os.pathsep + env.get('PYTHONPATH', '')
     return subprocess.run([sys.executable, '-m', 'asf.cli'] + args, cwd=cwd, env=env,
                            capture_output=True, text=True)
@@ -180,6 +182,15 @@ class GroomInboxIntegrationTests(unittest.TestCase):
         with open(os.path.join(self.root, 'groom', today() + '.md')) as f:
             groom_text = f.read()
         self.assertIn('B-0001 Checkout is broken', groom_text)
+
+    def test_fixture_mints_the_first_id_with_a_job_range_exported(self):
+        # B-0012: a ranged worker exports BACKLOG_ID_RANGE; the fixture's own runs must not inherit it
+        with mock.patch.dict(os.environ, {'BACKLOG_ID_RANGE': 'B:0900-0949,S:0900-0949,T:0900-0949'}):
+            with open(os.path.join(self.root, 'inbox', 'thing.md'), 'w', encoding='utf-8') as f:
+                f.write("# Checkout is broken\nCustomers cannot pay.\n")
+            r = run(['groom', '--default-bug-epic', 'E-0009'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(os.listdir(os.path.join(self.root, 'bugs')), ['B-0001.md'])
 
     def test_inbox_bug_with_no_default_configured_asks_a_question(self):
         with open(os.path.join(self.root, 'inbox', 'thing.md'), 'w', encoding='utf-8') as f:

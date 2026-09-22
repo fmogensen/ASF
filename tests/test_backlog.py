@@ -33,7 +33,8 @@ def make_repo():
 
 
 def item_text(id_, type_, title, parent=None, typed_lines=(),
-              machine_lines=('state: New',
+              machine_lines=('schema_version: 1',
+                             'state: New',
                               'stage_since: 2026-01-01T00:00:00Z',
                               'updated: 2026-01-01T00:00:00Z'),
               body=None):
@@ -179,6 +180,34 @@ class NewCommandTests(unittest.TestCase):
         self.assertIn('updated', meta)
 
 
+class NewSetFieldsTests(unittest.TestCase):
+    def setUp(self):
+        self.root = make_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+
+    def test_new_set_types_the_schema_fields(self):
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        r = run(['new', 'bug', '--title', 'Broken thing', '--parent', 'E-0001',
+                 '--severity', 'S2', '--set', 'rank=5', '--set', 'source=review',
+                 '--set', 'blockedBy=[E-0001]', '--set', 'links.spec=docs/specs/x.md'],
+                self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        iid = r.stdout.strip()
+        text = open(os.path.join(self.root, 'bugs', f'{iid}.md'), encoding='utf-8').read()
+        meta, _body = frontmatter.parse(text)
+        self.assertEqual(meta['rank'], 5)
+        self.assertEqual(meta['source'], 'review')
+        self.assertEqual(meta['blockedBy'], ['E-0001'])
+        self.assertEqual(meta['links'], {'spec': 'docs/specs/x.md'})
+
+    def test_new_set_refuses_a_field_the_type_does_not_have(self):
+        r = run(['new', 'epic', '--title', 'Factory', '--set', 'severity=S1'], self.root)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('severity', r.stderr)
+        r = run(['new', 'epic', '--title', 'Factory', '--set', 'noequals'], self.root)
+        self.assertEqual(r.returncode, 2)
+
+
 class CheckCommandTests(unittest.TestCase):
     def setUp(self):
         self.root = make_repo()
@@ -319,11 +348,13 @@ class CheckCommandTests(unittest.TestCase):
         write_item(self.root, 'F-0001', 'feature', 'Free plan', parent='E-0001')
         write_item(self.root, 'T-0001', 'task', 'First', parent='F-0001',
                    typed_lines=["writes: [apps/web/app/billing/**]"],
-                   machine_lines=['state: Active', 'stage_since: 2026-01-01T00:00:00Z',
+                   machine_lines=['schema_version: 1', 'state: Active',
+                                  'stage_since: 2026-01-01T00:00:00Z',
                                   'updated: 2026-01-01T00:00:00Z'])
         write_item(self.root, 'T-0002', 'task', 'Second', parent='F-0001',
                    typed_lines=["writes: [apps/web/app/marketing/page.tsx]"],
-                   machine_lines=['state: Active', 'stage_since: 2026-01-01T00:00:00Z',
+                   machine_lines=['schema_version: 1', 'state: Active',
+                                  'stage_since: 2026-01-01T00:00:00Z',
                                   'updated: 2026-01-01T00:00:00Z'])
         run(['index'], self.root)
         r = run(['check'], self.root)

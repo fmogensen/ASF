@@ -1,9 +1,16 @@
 """asf.tick.step_prs — the tick's ``prs`` step: a PR for every finished, pushed worker branch.
 
 A branch qualifies when its session in the ledger has ended ``finished`` (the session's result
-was a success), it is on the product repo's origin, its name starts ``worker/`` or one of the
-product's ``conventions.branch_prefixes``, and ``gh pr list --head`` shows no open PR for it.
-At most ``conventions.prs_per_tick`` (default 6) are opened per tick, oldest session first.
+was a success) and is not ``harvested``, it is on the product repo's origin with commits past the
+trunk, its name starts ``worker/`` or one of the product's ``conventions.branch_prefixes``, and
+``gh pr list --head`` shows no open PR for it. At most ``conventions.prs_per_tick`` (default 6)
+are opened per tick, oldest session first.
+
+A product whose ``landing`` is ``fast-forward`` (:func:`asf.harvest.harvest.landing`: no merge
+queue) opens nothing — the ``harvest`` step lands its branches on the trunk, and a PR on a
+branch that then vanishes is noise at best (B-0029: a branch already at the trunk head was
+offered to ``gh``, which refused, and the step failed every tick). The step says so in one line
+and still runs PR hygiene.
 
 The PR: ``gh pr create -R <slug> --base <main> --head <branch>`` (the command harvest prints for
 a product repo), titled ``<id> — <title>`` from the item, its body the card's path (a link when
@@ -85,18 +92,36 @@ def has_open_pr(slug, branch):
         return True  # unreadable: never open a duplicate
 
 
-def candidates(product):
-    """``[(branch, session)]``: finished sessions whose branch is pushed and carries a PR prefix."""
+def ahead_of_trunk(repo, trunk, branch):
+    """True when ``origin/<branch>`` carries commits not on ``origin/<trunk>``. A branch at the
+    trunk head (landed by fast-forward, or never committed to) has nothing a PR could hold."""
+    n = _git(repo, ['rev-list', '--count', f'origin/{trunk}..origin/{branch}']).strip()
+    return n not in ('', '0')
+
+
+def candidates(product, out=None):
+    """``[(branch, session)]``: finished, unharvested sessions whose branch is pushed with
+    commits past the trunk and carries a PR prefix. A pushed branch at the trunk head gets one
+    ``prs: <branch> at trunk — nothing to open`` line through ``out`` and is left out."""
     prefixes = branch_prefixes(product)
-    heads = remote_heads(product.repo_dir) if product.repo_dir else set()
-    out = []
+    repo = product.repo_dir
+    heads = remote_heads(repo) if repo else set()
+    if repo:
+        subprocess.run(['git', '-C', repo, 'fetch', '-q', '--prune', 'origin'],
+                       capture_output=True, text=True)
+    out_list = []
     for s in pool_mod.load_sessions(product).values():
         branch = s.get('branch') or ''
-        if (s.get('ended') and s.get('end_reason') == 'finished' and branch.startswith(prefixes)
-                and branch in heads):
-            out.append((branch, s))
-    out.sort(key=lambda bs: bs[1].get('started') or '')
-    return out
+        if not (s.get('ended') and s.get('end_reason') == 'finished' and not s.get('harvested')
+                and branch.startswith(prefixes) and branch in heads):
+            continue
+        if not ahead_of_trunk(repo, product.main, branch):
+            if out:
+                out(f'prs: {branch} at trunk — nothing to open')
+            continue
+        out_list.append((branch, s))
+    out_list.sort(key=lambda bs: bs[1].get('started') or '')
+    return out_list
 
 
 # ---- title and body ------------------------------------------------------------
@@ -155,10 +180,15 @@ def pr_create_argv(product, slug, branch, title, body):
 
 
 def run(ctx, out=print):
+    from asf.harvest.harvest import LANDING_FF, landing
     from asf.views import index_reader
     product = ctx.product
+    if landing(product) == LANDING_FF:
+        out('prs: landing is fast-forward — harvest lands the branches')
+        _hygiene(product)
+        return 0
     cap = prs_per_tick(product)
-    todo = candidates(product)
+    todo = candidates(product, out)
     items, root = {}, None
     if todo:
         root = ctx.record_root()

@@ -119,6 +119,7 @@ def write_epic(repo, id_, title, desc='Original text'):
     header = '\n'.join([
         f'id: {id_}', 'type: epic', f'title: {title}',
         '# ---- machine ----',
+        'schema_version: 1',
         'state: New', 'stage_since: 2026-09-21T00:00:00Z', 'updated: 2026-09-21T00:00:00Z',
     ])
     with open(path, 'w', encoding='utf-8') as f:
@@ -140,8 +141,12 @@ def make_repo():
     base = tempfile.mkdtemp(prefix='harvest_test_')
     origin = os.path.join(base, 'origin.git')
     repo = os.path.join(base, 'repo')
-    sh(['git', 'init', '-q', '--bare', origin])
+    # B-0038: the trunk is `main` whatever the host's init.defaultBranch says — the CI runner
+    # has none and would otherwise start the clone on `master`, and `add_job_worktree`'s `main`
+    # would resolve to a tracking branch instead of the worker branch's base
+    sh(['git', 'init', '-q', '--bare', '-b', 'main', origin])
     sh(['git', 'clone', '-q', origin, repo])
+    sh(['git', 'symbolic-ref', 'HEAD', 'refs/heads/main'], cwd=repo)
     sh(['git', 'config', 'user.name', 'Test'], cwd=repo)
     sh(['git', 'config', 'user.email', 'test@example.com'], cwd=repo)
     sh(['git', 'config', 'commit.gpgsign', 'false'], cwd=repo)
@@ -165,11 +170,19 @@ def make_repo():
     return base, origin, repo, state_dir
 
 
-def write_session(state_dir, job, branch, rc=0, ended=True):
+def dead_pid():
+    """A process id that has ended — a finished session's pid, as harvest must find it."""
+    proc = subprocess.Popen([sys.executable, '-c', 'pass'])
+    proc.wait()
+    return proc.pid
+
+
+def write_session(state_dir, job, branch, rc=0, ended=True, pid=None):
     """The registry line a launch writes, and the one that ends the session — the same
     append-only shape asf.workers.pool writes (see its `load_sessions`)."""
     with open(os.path.join(state_dir, 'sessions.jsonl'), 'a', encoding='utf-8') as f:
-        f.write(json.dumps({'job': job, 'branch': branch, 'account': 'test', 'pid': 1,
+        f.write(json.dumps({'job': job, 'branch': branch, 'account': 'test',
+                            'pid': dead_pid() if pid is None else pid,
                             'started': '2026-09-21T00:00:00Z'}) + '\n')
         if ended:
             f.write(json.dumps({'job': job, 'ended': '2026-09-21T00:05:00Z',
@@ -212,6 +225,31 @@ class HarvestTests(unittest.TestCase):
             self.assertNotIn(var, genv, var)
         self.assertEqual(genv.get('ASF_HOME'), '/x/.ASF')  # the operator's home is not identity
 
+    def test_b0033_gate_env_puts_the_gated_worktree_first_on_pythonpath(self):
+        # a test that runs `python -m asf.cli` from another cwd must import the branch's code
+        with mock.patch.dict(os.environ, {'PYTHONPATH': '/elsewhere'}):
+            genv = harvest.gate_env('/tmp/harvest-x/wt')
+        parts = genv['PYTHONPATH'].split(os.pathsep)
+        self.assertEqual(parts[0], '/tmp/harvest-x/wt')
+        self.assertTrue(os.path.isdir(os.path.join(parts[1], 'asf')), parts[1])
+        self.assertEqual(parts[-1], '/elsewhere')
+
+    # -- B-0038: the fixture is on `main` whatever the host's init.defaultBranch says ----------
+    def test_b0038_fixture_trunk_is_main_without_a_host_default_branch(self):
+        # the CI runner has no init.defaultBranch; a clone there starts on `master`, and
+        # `git worktree add -b worker/<job> <path> main` then checks out a tracking `main`
+        # instead of creating the worker branch — harvest finds nothing and prints nothing
+        with tempfile.NamedTemporaryFile('w', suffix='.gitconfig', delete=False) as f:
+            f.write('[user]\n\tname = ci\n\temail = ci@localhost\n')
+        self.addCleanup(os.unlink, f.name)
+        with mock.patch.dict(os.environ, {'GIT_CONFIG_GLOBAL': f.name, 'GIT_CONFIG_NOSYSTEM': '1'}):
+            base, origin, repo, state_dir = make_repo()
+            self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+            head = sh(['git', 'symbolic-ref', '--short', 'HEAD'], cwd=repo).stdout.strip()
+            self.assertEqual(head, 'main')
+            branch, wt = add_job_worktree(repo, state_dir, 'trunk1')
+            self.assertEqual(harvest.worker_branches(repo, CONV), [branch])
+
     # -- a fast-forwardable branch lands on main with no controller action -----------------
     def test_green_branch_lands_on_main(self):
         branch, wt = add_job_worktree(self.repo, self.state_dir, 'ff1')
@@ -231,6 +269,22 @@ class HarvestTests(unittest.TestCase):
         branches = sh(['git', 'branch', '--list', branch], cwd=self.repo).stdout
         self.assertEqual(branches.strip(), '')
         self.assertTrue(harvested(self.state_dir, 'ff1'))
+
+    # -- B-0009: no reap unless the trunk really holds the branch tip ----------------------
+    def test_no_reap_unless_fast_forward_landed(self):
+        branch, wt = add_job_worktree(self.repo, self.state_dir, 'nr1')
+        write_epic(wt, 'E-0002', 'New epic from nr1')
+        index_and_commit(wt, 'nr1: add E-0002')
+        write_session(self.state_dir, 'nr1', branch)
+
+        # a push that claims success while origin/main never received the commit
+        with mock.patch.object(harvest, 'push_ff', return_value=(True, False)):
+            rc, out = run_harvest(self.repo, self.state_dir)
+        self.assertNotIn('HARVEST OK', out)
+        self.assertIn('HARVEST HOLD nr1', out)
+        self.assertTrue(os.path.isdir(wt))
+        self.assertNotEqual(sh(['git', 'branch', '--list', branch], cwd=self.repo).stdout.strip(), '')
+        self.assertFalse(harvested(self.state_dir, 'nr1'))
 
     # -- a non-machine conflict holds the branch and names the file ------------------------
     def test_non_machine_conflict_is_held(self):
@@ -340,6 +394,33 @@ class HarvestTests(unittest.TestCase):
         self.assertEqual(out.strip(), '')
         self.assertTrue(os.path.isdir(os.path.join(self.state_dir, 'worktrees', 'running1')))
 
+    # -- B-0010: a reap needs a finished line AND a dead pid; otherwise it holds ------------
+    def worktree_survives(self, job, branch):
+        self.assertTrue(os.path.isdir(os.path.join(self.state_dir, 'worktrees', job)))
+        self.assertNotEqual(sh(['git', 'branch', '--list', branch], cwd=self.repo).stdout.strip(), '')
+        self.assertFalse(harvested(self.state_dir, job))
+
+    def test_reap_holds_for_live_pid_and_for_no_finished_line(self):
+        live = os.getpid()  # a process that is certainly running
+        branch, wt = add_job_worktree(self.repo, self.state_dir, 'live1')
+        write_epic(wt, 'E-0006', 'Live pid')
+        index_and_commit(wt, 'live1: add E-0006')
+        write_session(self.state_dir, 'live1', branch, pid=live)
+
+        rc, out = run_harvest(self.repo, self.state_dir)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.count('HARVEST HOLD live1'), 1, out)
+        self.assertNotIn('HARVEST OK', out)
+        self.worktree_survives('live1', branch)
+
+        branch, wt = add_job_worktree(self.repo, self.state_dir, 'open1')
+        write_session(self.state_dir, 'open1', branch, ended=False, pid=dead_pid())
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            harvest.reap(self.repo, self.state_dir, 'open1', branch)
+        self.assertEqual(buf.getvalue().count('HARVEST HOLD open1'), 1, buf.getvalue())
+        self.worktree_survives('open1', branch)
+
 
 # ---- the product repo: remote lane branches, sessions keyed by branch --------------------------
 
@@ -402,7 +483,7 @@ class ProductHarvestTests(unittest.TestCase):
     def session(self, job, item, branch, rc=0):
         with open(os.path.join(self.state_dir, 'sessions.jsonl'), 'a', encoding='utf-8') as f:
             f.write(json.dumps({'job': job, 'item': item, 'branch': branch, 'account': 'test',
-                                'pid': 1, 'started': '2026-09-21T00:00:00Z'}) + '\n')
+                                'pid': dead_pid(), 'started': '2026-09-21T00:00:00Z'}) + '\n')
             f.write(json.dumps({'job': job, 'ended': '2026-09-21T00:05:00Z',
                                 'end_reason': 'finished' if rc == 0 else 'failed', 'rc': rc}) + '\n')
 
@@ -430,7 +511,8 @@ class ProductHarvestTests(unittest.TestCase):
         results, lines = self.harvest(self.product())
         self.assertEqual(results, {'fix/B-0001': 'landed'})
         sha = self.origin_main()
-        self.assertEqual(lines, [f'landed fix/B-0001 → {sha}'])
+        self.assertEqual(lines, [f'landed fix/B-0001 → {sha}',
+                                 f'harvest: {self.repo} fast-forwarded to {sha}'])
         log = sh(['git', 'log', '--format=%s', 'main'], cwd=self.origin).stdout
         self.assertIn('fix(B-0001): the change', log)
         self.assertFalse(self.origin_has('fix/B-0001'))
@@ -438,6 +520,71 @@ class ProductHarvestTests(unittest.TestCase):
 
         # landed once: the next tick has nothing to do
         self.assertEqual(self.harvest(self.product()), ({}, []))
+
+    def test_b0036_landing_fast_forwards_the_checkout(self):
+        """The scheduler runs the ``repo_dir`` checkout; a landing that only reached origin left
+        it running the code from before its own fix. On the trunk with a clean tree, it is
+        fast-forwarded to the landed sha — never reset."""
+        self.push_lane('fix/B-0001', [('fix(B-0001): the change', {'a.txt': 'a\n'})])
+        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
+        before = sh(['git', 'rev-parse', 'main'], cwd=self.repo).stdout.strip()
+        results, lines = self.harvest(self.product())
+        sha = self.origin_main()
+        self.assertEqual(results, {'fix/B-0001': 'landed'})
+        self.assertNotEqual(sha, before)
+        self.assertEqual(sh(['git', 'rev-parse', 'main'], cwd=self.repo).stdout.strip(), sha)
+        self.assertEqual(lines[-1], f'harvest: {self.repo} fast-forwarded to {sha}')
+
+    def test_b0036_dirty_or_off_trunk_checkout_is_left_alone(self):
+        self.push_lane('fix/B-0001', [('fix(B-0001): the change', {'a.txt': 'a\n'})])
+        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
+        before = sh(['git', 'rev-parse', 'main'], cwd=self.repo).stdout.strip()
+        self.write(self.repo, 'checks/test_fx.py', GREEN_TEST + '# local edit\n')
+        results, lines = self.harvest(self.product())
+        self.assertEqual(results, {'fix/B-0001': 'landed'})
+        self.assertEqual(sh(['git', 'rev-parse', 'main'], cwd=self.repo).stdout.strip(), before)
+        self.assertEqual(lines[-1], f'harvest: {self.repo} not fast-forwarded — working tree has local changes')
+
+    def push_main(self, subject, files):
+        """A fix pushed straight to main — not through a lane landing."""
+        sh(['git', 'checkout', '-q', '-B', 'main', 'origin/main'], cwd=self.worker)
+        for rel, text in files.items():
+            self.write(self.worker, rel, text)
+        sh(['git', 'add', '-A'], cwd=self.worker)
+        sh(['git', 'commit', '-qm', subject], cwd=self.worker)
+        sh(['git', 'push', '-q', 'origin', 'main'], cwd=self.worker)
+
+    def test_b0042_direct_push_to_main_fast_forwards_the_checkout(self):
+        """A fix pushed to main any way but a lane landing left the factory on old code: the
+        checkout is fast-forwarded whenever origin/<trunk> is ahead, with no landing at all."""
+        self.push_main('fix(B-0001): straight to main', {'a.txt': 'a\n'})
+        before = sh(['git', 'rev-parse', 'main'], cwd=self.repo).stdout.strip()
+        results, lines = self.harvest(self.product())
+        sha = self.origin_main()
+        self.assertEqual(results, {})
+        self.assertNotEqual(sha, before)
+        self.assertEqual(sh(['git', 'rev-parse', 'main'], cwd=self.repo).stdout.strip(), sha)
+        self.assertEqual(lines, [f'harvest: {self.repo} fast-forwarded to {sha}'])
+
+    def test_b0042_checkout_moves_before_any_landed_line(self):
+        self.push_main('fix(B-0002): straight to main', {'m.txt': 'm\n'})
+        direct = self.origin_main()
+        self.push_lane('fix/B-0001', [('fix(B-0001): the change', {'a.txt': 'a\n'})])
+        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
+        results, lines = self.harvest(self.product())
+        sha = self.origin_main()
+        self.assertEqual(results, {'fix/B-0001': 'landed'})
+        self.assertEqual(lines, [f'harvest: {self.repo} fast-forwarded to {direct}',
+                                 f'landed fix/B-0001 → {sha}',
+                                 f'harvest: {self.repo} fast-forwarded to {sha}'])
+
+    def test_b0042_direct_push_leaves_a_dirty_checkout_alone(self):
+        self.push_main('fix(B-0001): straight to main', {'a.txt': 'a\n'})
+        before = sh(['git', 'rev-parse', 'main'], cwd=self.repo).stdout.strip()
+        self.write(self.repo, 'checks/test_fx.py', GREEN_TEST + '# local edit\n')
+        _results, lines = self.harvest(self.product())
+        self.assertEqual(sh(['git', 'rev-parse', 'main'], cwd=self.repo).stdout.strip(), before)
+        self.assertEqual(lines, [f'harvest: {self.repo} not fast-forwarded — working tree has local changes'])
 
     def test_session_is_matched_by_branch_not_by_job_name(self):
         self.push_lane('worker/add-thing', [('feat(T-0007): add the thing', {'t.txt': 't\n'})])
@@ -467,31 +614,59 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertTrue(self.origin_has('fix/B-0001'))
         self.assertFalse(self.record('fix/B-0001').get('harvested'))
 
-    def test_red_test_command_holds_and_files_a_bug(self):
+    def test_red_test_command_holds_and_records_a_correction(self):
         self.push_lane('fix/B-0001', [('fix(B-0001): breaks the gate',
                                        {'checks/test_fx.py': RED_TEST})])
         self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
         record_root = os.path.join(self.base, 'record')
         os.makedirs(os.path.join(record_root, 'bugs'))
         before = self.origin_main()
-        with mock.patch.dict(os.environ, {'BACKLOG_ALLOW_MINT': '1'}):
-            results, lines = self.harvest(self.product(), bug_root=lambda: record_root)
+        results, lines = self.harvest(self.product(), bug_root=lambda: record_root)
         self.assertEqual(results, {'fix/B-0001': 'held'})
+        self.assertEqual(len(lines), 1, lines)
         self.assertTrue(lines[0].startswith('held fix/B-0001: FAIL: test_red_gate'), lines)
-        self.assertEqual(lines[1], 'bug filed: harvest gate red fix/B-0001')
+        self.assertTrue(lines[0].endswith(' — back to its session (round 1)'), lines)
         self.assertEqual(self.origin_main(), before)
         self.assertTrue(self.origin_has('fix/B-0001'))
-        bugs = os.listdir(os.path.join(record_root, 'bugs'))
-        self.assertEqual(len(bugs), 1)
-        with open(os.path.join(record_root, 'bugs', bugs[0]), encoding='utf-8') as f:
-            self.assertIn('test_red_gate', f.read())
+        self.assertEqual(os.listdir(os.path.join(record_root, 'bugs')), [])  # no Bug filed
+        rec = self.record('fix/B-0001')
+        self.assertEqual(rec['rounds'], 1)
+        self.assertEqual(rec['correction']['kind'], 'gate')
+        self.assertIn('test_red_gate', rec['correction']['text'])
+        self.assertTrue(rec['correction']['at'])
+        self.assertFalse(rec.get('harvested'))
+        # a second red tick is round 2
+        _results, lines = self.harvest(self.product())
+        self.assertTrue(lines[0].endswith('(round 2)'), lines)
+        self.assertEqual(self.record('fix/B-0001')['rounds'], 2)
 
-    def test_red_gate_with_no_record_prints_bug_line(self):
+    def test_b0048_rounds_cap_at_the_adjudicate_switch_then_flags_the_operator(self):
+        """Round 3 is where the feeder switches this item to an ADJUDICATE row instead of
+        another CORRECT one (``feeder.rows.CORRECTION_ROUNDS``) — from there the round must not
+        keep climbing (B-0048: it climbed past the cap forever). A first hold at the cap is the
+        adjudicate row's own attempt failing; only a second one — the adjudicate row cannot land
+        either — flags the item for an operator."""
         self.push_lane('fix/B-0001', [('fix(B-0001): breaks the gate',
                                        {'checks/test_fx.py': RED_TEST})])
         self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
-        _results, lines = self.harvest(self.product())
-        self.assertEqual(lines[-1], 'BUG: harvest gate red fix/B-0001')
+        product = self.product()
+        for expected_round in (1, 2, 3):
+            _results, lines = self.harvest(product)
+            self.assertTrue(lines[0].endswith(f'(round {expected_round})'), lines)
+            self.assertEqual(self.record('fix/B-0001')['rounds'], expected_round)
+
+        # capped: the round no longer climbs, and the message names the adjudicate row instead
+        _results, lines = self.harvest(product)
+        self.assertTrue(lines[0].startswith('held fix/B-0001: FAIL: test_red_gate'), lines)
+        self.assertTrue(lines[0].endswith(' — adjudicate pending'), lines)
+        self.assertEqual(self.record('fix/B-0001')['rounds'], 3)
+        self.assertFalse(self.record('fix/B-0001').get('operator_flagged'))
+
+        # a second hold at the cap: the adjudicate row's own attempt failed too
+        _results, lines = self.harvest(product)
+        self.assertTrue(lines[0].endswith(' — adjudicate pending'), lines)
+        self.assertEqual(self.record('fix/B-0001')['rounds'], 3)
+        self.assertEqual(self.record('fix/B-0001').get('operator_flagged'), 1)
 
     def test_pull_request_landing_never_pushes_main(self):
         self.push_lane('fix/B-0001', [('fix(B-0001): the change', {'a.txt': 'a\n'})])
@@ -531,6 +706,27 @@ class ProductHarvestTests(unittest.TestCase):
     def test_asf_own_repo_is_recognised(self):
         self.assertTrue(harvest.is_asf_repo(REPO_ROOT))
         self.assertFalse(harvest.is_asf_repo(self.repo))
+
+    # -- B-0031: a tick gates only so many branches — the rest wait for the next -----------
+    def test_b0031_caps_branches_gated_per_tick(self):
+        for i in range(1, 5):
+            item = f'B-000{i}'
+            branch = f'fix/{item}'
+            self.push_lane(branch, [(f'fix({item}): change {i}', {f'f{i}.txt': f'{i}\n'})])
+            self.session(f'fix-bug-{item.lower()}', item, branch)
+
+        results, lines = self.harvest(self.product())
+        self.assertEqual(len(results), 3, results)
+        self.assertTrue(all(r == 'landed' for r in results.values()), results)
+        self.assertTrue(any('cap' in l.lower() for l in lines), lines)
+
+        remaining = [f'fix/B-000{i}' for i in range(1, 5) if f'fix/B-000{i}' not in results]
+        self.assertEqual(len(remaining), 1, remaining)
+        self.assertTrue(self.origin_has(remaining[0]))
+
+        # the next tick lands what the cap left waiting
+        results2, _lines2 = self.harvest(self.product())
+        self.assertEqual(results2, {remaining[0]: 'landed'})
 
     def test_record_repo_keeps_its_own_path(self):
         with mock.patch.object(harvest, 'is_record_repo', return_value=True), \

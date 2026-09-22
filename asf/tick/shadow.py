@@ -1,8 +1,11 @@
 """asf.tick.shadow — the clones ``asf tick`` works in.
 
 A clone of a product's backlog, fetched and hard-reset to its origin's default branch before
-every tick (it holds derived state only, so a stray local commit — e.g. from a prior run whose
-push failed — is discarded, not fast-forwarded past). The live tick's clone is
+every tick (a stray local commit — from a prior run whose push finally failed — is discarded,
+not fast-forwarded past). Its push has one recovery (B-0030): when origin moved while the tick
+ran, the clone is rebased onto it once and pushed again, so the lines the steps appended
+(events, the tick line, filed cards) are not lost with a refused commit; a conflict on that
+rebase is aborted and the refusal stands. The live tick's clone is
 ``~/.ASF/state/<product>/record/``: it commits there and pushes (:func:`push`). The shadow tick's
 is ``…/shadow/``: it commits locally and never pushes, so it can be compared against the real
 tools without touching anything — see ``asf shadow-diff``. Neither ever touches the operator's own
@@ -99,9 +102,78 @@ def commit_local(path, message):
     return True
 
 
-def push(path):
-    """``git push origin HEAD:<default branch>``; True if origin took it. A refusal (a hook, a
-    non-fast-forward because origin moved, an unreachable remote) is not an error: the clone is
-    derived state, the next run resets it and re-derives."""
-    branch = _default_branch(path)
+def _push_once(path, branch):
     return _sh(['git', 'push', '-q', 'origin', f'HEAD:{branch}'], cwd=path, check=False).returncode == 0
+
+
+def push(path, out=None):
+    """``git push origin HEAD:<default branch>``; True if origin took it.
+
+    On a refusal: fetch; if ``origin/<branch>`` is still an ancestor of HEAD origin has not
+    moved and the refusal has another cause (a hook, an unreachable remote) — False, as before.
+    If origin moved (a card pushed by hand while the tick ran — B-0030), rebase onto it once and
+    push again: True, and one line through ``out`` when given. A rebase that conflicts on cards or ``index.json`` is resolved by ownership and
+    re-derived (B-0044); any other conflict is aborted and the push is False: the clone is derived state plus that tick's appended lines,
+    and the next run resets it and re-derives (the appended lines of that one tick are lost, as
+    the docstring above says)."""
+    branch = _default_branch(path)
+    if _push_once(path, branch):
+        return True
+    if _sh(['git', 'fetch', '-q', 'origin'], cwd=path, check=False).returncode != 0:
+        return False
+    if _sh(['git', 'merge-base', '--is-ancestor', f'origin/{branch}', 'HEAD'],
+           cwd=path, check=False).returncode == 0:
+        return False
+    rebase = _sh(['git', '-c', 'core.editor=true', 'rebase', f'origin/{branch}'],
+                 cwd=path, check=False)
+    rederived = False
+    while rebase.returncode != 0:
+        if not _resolve_by_ownership(path):
+            _sh(['git', 'rebase', '--abort'], cwd=path, check=False)
+            return False
+        rederived = True
+        rebase = _sh(['git', '-c', 'core.editor=true', 'rebase', '--continue'], cwd=path, check=False)
+    if not _push_once(path, branch):
+        return False
+    if out:
+        if rederived:
+            out(f'tick: origin moved — re-derived onto origin/{branch} and pushed')
+        else:
+            out(f'tick: origin moved during the tick — rebased onto origin/{branch} and pushed')
+    return True
+
+
+def _stage(path, n, rel):
+    r = _sh(['git', 'show', f':{n}:{rel}'], cwd=path, check=False)
+    return r.stdout if r.returncode == 0 else None
+
+
+def _body(text):
+    """The card text after its closing frontmatter ``---`` line."""
+    parts = text.split('\n---\n', 1)
+    return parts[1] if len(parts) == 2 else text
+
+
+def _resolve_by_ownership(path):
+    """Mid-rebase (B-0044): ``ours`` is origin (the hand side), ``theirs`` the tick's commit. Every
+    conflicted card and ``index.json`` take the hand side, then the index derivation re-runs in the
+    clone; the ingest machine block is left as the hand side has it and the next tick re-derives it.
+    False when a conflict falls outside those regions (not a card, or a body both sides edited)."""
+    from asf.record.index import do_index
+    conflicted = _sh(['git', 'diff', '--name-only', '--diff-filter=U'], cwd=path, check=False).stdout.split()
+    if not conflicted:
+        return False
+    for rel in conflicted:
+        if rel != 'index.json':
+            if not rel.endswith('.md'):
+                return False
+            base, ours, theirs = (_stage(path, n, rel) for n in (1, 2, 3))
+            if ours is None or theirs is None:
+                return False
+            if base is not None and _body(base) != _body(ours) != _body(theirs) != _body(base):
+                return False
+        if _sh(['git', 'checkout', '--ours', '--', rel], cwd=path, check=False).returncode != 0:
+            return False
+    if do_index(path) != 0:
+        return False
+    return _sh(['git', 'add', '-A'], cwd=path, check=False).returncode == 0

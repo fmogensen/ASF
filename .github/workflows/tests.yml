@@ -25,8 +25,9 @@ jobs:
       # provider is B-0020) — the modules they own still carry the first product's literals, and
       # a red required step on every PR until then would be noise, not a signal.
       - name: check conventions
-        continue-on-error: true
         run: bash tools/check_conventions.sh
+      - name: plugin is generated from the CLI
+        run: asf plugin check
       - name: tests
         run: |
           git config --global user.name ci

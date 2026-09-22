@@ -19,7 +19,9 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _git(args, cwd=None):
-    return subprocess.run(['git'] + args, cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+    env = {k: v for k, v in os.environ.items() if k not in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE')}
+    return subprocess.run(['git'] + args, cwd=cwd, check=True, capture_output=True, text=True,
+                          env=env).stdout.strip()
 
 
 def _quiet(fn, *a, **kw):
@@ -67,6 +69,31 @@ class PackageTest(unittest.TestCase):
         self.assertIn('version', data['project']['dynamic'])
         self.assertEqual(data['tool']['setuptools']['dynamic']['version'], {'attr': 'asf.__version__'})
         self.assertEqual(data['project'].get('dependencies', []), [])
+
+    def test_pre_commit_hook_runs_the_suite_without_the_git_hook_environment(self):
+        """The hook exports GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE; the suite it launches must not
+        inherit them, or a test's temporary repository resolves to the real one (B-0011)."""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        repo = os.path.join(tmp, 'repo')
+        os.makedirs(os.path.join(repo, 'tools'))
+        os.makedirs(os.path.join(repo, 'bin'))
+        _git(['init', '-q', repo])
+        with open(os.path.join(repo, 'tools', 'check_generic.sh'), 'w') as f:
+            f.write('exit 0\n')
+        seen = os.path.join(tmp, 'seen')
+        stub = os.path.join(repo, 'bin', 'python3')
+        with open(stub, 'w') as f:
+            f.write('#!/bin/sh\nenv | grep -E "^GIT_(DIR|WORK_TREE|INDEX_FILE)=" > "%s"\nexit 0\n' % seen)
+        os.chmod(stub, 0o755)
+        env = {**os.environ, 'PATH': os.path.join(repo, 'bin') + os.pathsep + os.environ['PATH'],
+               'GIT_DIR': os.path.join(repo, '.git'), 'GIT_WORK_TREE': repo,
+               'GIT_INDEX_FILE': os.path.join(repo, '.git', 'index')}
+        r = subprocess.run(['bash', os.path.join(REPO, '.githooks', 'pre-commit')], cwd=repo,
+                           env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(seen) as f:
+            self.assertEqual(f.read(), '')
 
     def test_version_is_semver(self):
         self.assertRegex(asf.__version__, r'^\d+\.\d+\.\d+$')
@@ -169,8 +196,9 @@ class InitTest(HomeCase):
         self.write(os.path.join(self.backlog, 'epics', 'E-0001.md'),
                    '---\nid: E-0001\ntype: epic\ntitle: A goal\nrank: 1\n# ---- machine ----\nstate: New\n---\n## Description\n\n'
                    '## Children\n\n## Backlinks\n')
-        _quiet(__import__('asf.record.index', fromlist=['do_index']).do_index, self.backlog)
         idx_path = os.path.join(self.backlog, 'index.json')
+        self.write(idx_path, '{"items": {}}')  # a record from before schema stamps
+        _quiet(__import__('asf.record.index', fromlist=['do_index']).do_index, self.backlog)
         with open(idx_path) as f:
             before_idx = json.load(f)
         self.assertNotIn('schema_version', before_idx)

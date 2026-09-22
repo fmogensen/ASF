@@ -11,6 +11,7 @@ tests.test_briefs``; read the diff before you commit one.
 import argparse
 import importlib
 import os
+import dataclasses
 import json
 import re
 import unittest
@@ -82,6 +83,9 @@ ROWS = {
                  'PR closed unmerged, branch left behind'),
     'adjudicate': row('STALEMATE → ADJUDICATE', 'F-0002', 'adjudicate', 'spec/F-0002',
                       'spec-review r4 >= r4: adjudicate, no further round', feature_id='F-0002'),
+    'correct': dataclasses.replace(
+        row('FIX → CORRECT', 'B-0001', 'correct', 'fix/B-0001', 'the harvest gate went red, round 1'),
+        correction='FAIL: test_red_gate'),
     'fix-bug': row('BUG → FIX', 'B-0001', 'fix-bug', 'fix/B-0001',
                    'S1 open, decided, no session — its ## Fix is the plan'),
 }

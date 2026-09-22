@@ -52,6 +52,9 @@ def cmd_check(args, root):
         expected_type = FOLDER_TO_TYPE.get(rec['folder'])
         if meta.get('type') != expected_type:
             add(rec, find_line(rec, 'type'), f"type {meta.get('type')!r} does not match folder {rec['folder']}")
+        # every card carries the schema it was written under
+        if not meta.get('schema_version'):
+            add(rec, 1, "missing schema_version (run `asf schema-migrate`)")
         # duplicate id
         if iid in dupes:
             add(rec, find_line(rec, 'id'), f"duplicate id {iid} across folders")

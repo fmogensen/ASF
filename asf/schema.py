@@ -35,7 +35,8 @@ DRAIN_TIMEOUT_S = 3600
 
 
 def _migrate_to_1(record_dir):
-    """0 → 1: the first stamped schema. Nothing in the record changes; the stamp is the change."""
+    """0 → 1: the first stamped schema. Nothing else in the record changes; the stamp (on
+    ``index.json`` and on every card, see :func:`stamp_cards`) is the change."""
 
 
 # target version -> fn(record_dir). A new schema adds one entry and bumps SCHEMA_VERSION.
@@ -76,6 +77,24 @@ def stamp(backlog_dir, version):
     with open(path, 'w', encoding='utf-8') as f:
         f.write(json.dumps(data, indent=2, sort_keys=True) + '\n')
     return True
+
+
+def stamp_cards(record_dir, version):
+    """Bring every card below ``version`` (unstamped counts as 0) up to it, rewriting only its
+    machine block. Returns how many cards changed."""
+    from asf.record import frontmatter
+    from asf.record.core import load_items
+    by_id, _errors = load_items(record_dir)
+    changed = 0
+    for recs in by_id.values():
+        for rec in recs:
+            _typed, machine = frontmatter.split_machine(rec['meta'])
+            if int(machine.get('schema_version') or 0) >= version:
+                continue
+            machine.pop('schema_version', None)
+            frontmatter.write_machine(rec['path'], {'schema_version': version, **machine})
+            changed += 1
+    return changed
 
 
 def config_version():
@@ -176,6 +195,7 @@ def migrate_dir(record_dir, commit=None, target=None):
     applied = []
     for v in range(current + 1, target + 1):
         MIGRATIONS[v](record_dir)
+        stamp_cards(record_dir, v)
         stamp(record_dir, v)
         if commit:
             commit(f'migrate: schema {v - 1} → {v}')

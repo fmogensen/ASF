@@ -5,6 +5,7 @@ import sys
 
 from asf.record import frontmatter
 from asf.record.core import build_index_data, canonicalize, compute_derived, expected_body, load_items, render_index_json
+from asf.schema import SCHEMA_VERSION
 
 
 def do_index(root):
@@ -26,6 +27,8 @@ def do_index(root):
     data = build_index_data(canonical, derived)
     index_path = os.path.join(root, 'index.json')
     old_items = None
+    # a record's first index is stamped with this package's schema; an existing one keeps its own
+    data['schema_version'] = SCHEMA_VERSION
     if os.path.isfile(index_path):
         with open(index_path, encoding='utf-8') as f:
             try:
@@ -36,6 +39,8 @@ def do_index(root):
         # the schema stamp is the record's, not the items': a rewrite carries it over (asf schema)
         if 'schema_version' in old:
             data['schema_version'] = old['schema_version']
+        else:
+            del data['schema_version']  # unstamped stays unstamped until `schema-migrate`
     if old_items != data['items']:
         with open(index_path, 'w', encoding='utf-8') as f:
             f.write(render_index_json(data))

@@ -3,6 +3,7 @@ import os
 import re
 import subprocess
 import unittest
+from unittest import mock
 
 from asf import __version__
 from asf.cli import build_parser
@@ -10,7 +11,9 @@ from asf.cli import build_parser
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SKILLS = sorted(glob.glob(os.path.join(REPO_ROOT, 'plugin', 'skills', '*', 'SKILL.md')))
 # a skill may precede its view: `next` lands with the feeder
-PENDING_VIEWS = {'next'}
+from asf import plugin_build
+
+PENDING_VIEWS = set()
 
 
 def forbidden_patterns():
@@ -32,6 +35,50 @@ class PluginTests(unittest.TestCase):
     def test_skills_exist(self):
         names = {os.path.basename(os.path.dirname(p)) for p in SKILLS}
         self.assertTrue({'roadmap', 'backlog', 'parity', 'prod', 'sessions', 'status'} <= names)
+
+    def test_plugin_is_generated_from_the_cli(self):
+        # the tree on disk is exactly what `asf plugin build` writes; every view has a skill,
+        # every skill is a view or a dialogue, and no stray skill directory exists
+        self.assertEqual(plugin_build.diff(), [], 'run `asf plugin build`')
+        names = {os.path.basename(os.path.dirname(p)) for p in SKILLS}
+        self.assertEqual(names, set(plugin_build.skill_names()))
+        self.assertTrue(set(plugin_build.skill_names()) <= registered_commands())
+
+    def test_marketplace_names_the_plugin(self):
+        import json
+        with open(os.path.join(REPO_ROOT, '.claude-plugin', 'marketplace.json'), encoding='utf-8') as f:
+            m = json.load(f)
+        self.assertEqual(m['name'], 'asf')
+        self.assertEqual(m['plugins'][0]['source'], './plugin')
+        self.assertEqual(m['plugins'][0]['name'], 'asf')
+
+    def test_b0047_plugin_dir_comes_from_the_checkout_not_the_package(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            # a checkout layout somewhere else, the package untouched: cwd decides
+            os.makedirs(os.path.join(tmp, '.claude-plugin'))
+            with open(os.path.join(tmp, '.claude-plugin', 'marketplace.json'), 'w') as f:
+                f.write('{}')
+            self.assertEqual(plugin_build.default_plugin_dir(tmp), os.path.join(tmp, 'plugin'))
+            self.assertEqual(plugin_build.run_action('build', cwd=tmp, out=lambda s: None), 0)
+            self.assertEqual(plugin_build.run_action('check', cwd=tmp, out=lambda s: None), 0)
+            # a cwd with no checkout and a package with no plugin beside it (a plain install):
+            # refuse with one line, never report every skill as stale
+            elsewhere = os.path.join(tmp, 'elsewhere')
+            os.makedirs(elsewhere)
+            with mock.patch.object(plugin_build, 'PACKAGE_ROOT', os.path.join(tmp, 'venv')):
+                self.assertIsNone(plugin_build.default_plugin_dir(elsewhere))
+                self.assertEqual(plugin_build.run_action('check', cwd=elsewhere, out=lambda s: None), 2)
+
+    def test_build_and_check_roundtrip_in_a_temp_dir(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            d = os.path.join(tmp, 'plugin')
+            self.assertEqual(plugin_build.check(d, out=lambda s: None), 1)
+            self.assertEqual(plugin_build.build(d, out=lambda s: None), 0)
+            self.assertEqual(plugin_build.check(d, out=lambda s: None), 0)
+            os.makedirs(os.path.join(d, 'skills', 'stray'))
+            self.assertEqual(plugin_build.check(d, out=lambda s: None), 1)
 
     def test_every_skill_is_well_formed(self):
         commands = registered_commands()

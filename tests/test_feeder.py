@@ -169,6 +169,73 @@ def ten_features_and_an_s1():
     return {'items': items}
 
 
+def s1_bugs(*ids):
+    """Open, decided S1 Bugs; the first id listed is the oldest card."""
+    return {'items': {i: {'id': i, 'type': 'bug', 'title': i, 'severity': 'S1', 'decided': True,
+                          'state': 'New', 'stage_since': f"2026-01-01T0{n}:00:00Z"}
+                      for n, i in enumerate(ids)}}
+
+
+class AttemptOrderTest(unittest.TestCase):
+    """B-0026: within a tier, fewer attempts first, so a spent Bug cannot starve a fresh one."""
+
+    def test_the_fresh_bug_launches_before_four_attempted_ones(self):
+        idx = s1_bugs('B-0003', 'B-0008', 'B-0014', 'B-0020', 'B-0023')
+        attempts = {'B-0003': 1, 'B-0008': 1, 'B-0014': 2, 'B-0020': 1}
+        out = rows.plan_rows(idx, product(), [], 1, attempts=attempts)
+        self.assertEqual([r.item_id for r in out if r.launches], ['B-0023'])
+        self.assertEqual([r.item_id for r in out],  # the rest wait on a slot, fewest attempts first
+                         ['B-0023', 'B-0003', 'B-0008', 'B-0020', 'B-0014'])
+
+    def test_equal_attempts_the_older_card_first_then_id(self):
+        idx = s1_bugs('B-0002', 'B-0001', 'B-0003')  # B-0002 is the oldest card
+        out = rows.plan_rows(idx, product(), [], 3, attempts={})
+        self.assertEqual([r.item_id for r in out], ['B-0002', 'B-0001', 'B-0003'])
+
+    def test_no_attempts_given_keeps_the_order_by_age(self):
+        out = rows.plan_rows(s1_bugs('B-0001', 'B-0002'), product(), [], 2)
+        self.assertEqual([r.item_id for r in out], ['B-0001', 'B-0002'])
+
+    def test_three_attempts_is_an_adjudicate_row_not_a_fourth_session(self):
+        out = rows.plan_rows(s1_bugs('B-0001'), product(), [], 1, attempts={'B-0001': 3})
+        self.assertEqual([(r.kind, r.item_id, r.brief_kind) for r in out],
+                         [('STALEMATE → ADJUDICATE', 'B-0001', 'adjudicate')])
+
+    def test_two_attempts_still_launch_a_fix(self):
+        out = rows.plan_rows(s1_bugs('B-0001'), product(), [], 1, attempts={'B-0001': 2})
+        self.assertEqual(kinds(out), [('BUG → FIX', 'B-0001')])
+
+    def test_once_adjudicated_the_bug_is_not_relaunched(self):
+        out = rows.plan_rows(s1_bugs('B-0001'), product(), [], 1, attempts={'B-0001': 4})
+        self.assertEqual(out, [])
+
+
+class CorrectionRowTest(unittest.TestCase):
+    """B-0032: a held branch goes back to its session as a FIX → CORRECT row."""
+
+    def corr(self, rounds, text='FAIL: test_x'):
+        return {'B-0001': {'kind': 'gate', 'text': text, 'rounds': rounds, 'at': '2026-09-21T00:00:00Z'}}
+
+    def test_a_correction_yields_a_correct_row_in_the_items_tier(self):
+        out = rows.plan_rows(s1_bugs('B-0001'), product(), [], 1, attempts={'B-0001': 1},
+                             corrections=self.corr(1))
+        self.assertEqual(kinds(out), [('FIX → CORRECT', 'B-0001')])
+        self.assertEqual((out[0].brief_kind, out[0].tier, out[0].branch, out[0].correction),
+                         ('correct', 0, 'fix/B-0001', 'FAIL: test_x'))
+        self.assertTrue(out[0].launches)
+
+    def test_three_rounds_is_the_adjudicate_row(self):
+        out = rows.plan_rows(s1_bugs('B-0001'), product(), [], 1, attempts={'B-0001': 1},
+                             corrections=self.corr(3))
+        self.assertEqual([(r.kind, r.brief_kind) for r in out],
+                         [('STALEMATE → ADJUDICATE', 'adjudicate')])
+
+    def test_a_busy_item_gets_no_correct_row(self):
+        out = rows.plan_rows(s1_bugs('B-0001'), product(), [{'item': 'B-0001'}], 1,
+                             corrections=self.corr(1))
+        self.assertEqual(out, [])
+
+
 class TiersTest(unittest.TestCase):
     """F-0071 acceptance 1: the S1 lane."""
 
@@ -238,7 +305,8 @@ class RenderTest(unittest.TestCase):
         data = json.loads(render.rows_json(rows.plan_rows(fixture_index(), product(), [], 10)))
         self.assertEqual(data[0]['item_id'], 'B-0001')
         self.assertEqual(set(data[0]), {'tier', 'kind', 'item_id', 'feature_id', 'action',
-                                        'brief_kind', 'branch', 'reason', 'waits_on'})
+                                        'brief_kind', 'branch', 'reason', 'waits_on',
+                                        'correction'})
 
 
 class CliTest(unittest.TestCase):

@@ -8,12 +8,24 @@ For every live session in ``sessions.jsonl``:
 
 Then the worktrees under ``~/.ASF/state/<product>/worktrees/``: one with no session at all is an
 ``orphan``; one whose session has ended is a reap candidate. With ``fix=True`` a worktree is
-removed only under the reap rule — the session finished (or there is none), its pid is dead,
-the tree is clean, and HEAD is already on the pushed branch (fast-forwarded + pushed). Anything
-else is kept and listed with why. The one exception (B-0025): a worktree whose session has ended
-with a dead pid and whose branch has no commit beyond ``origin/<main>`` (and a clean tree) holds
-nothing to lose, so it is reaped — worktree and branch — whether or not it was pushed; otherwise
-the next ``spawn`` of that job would refuse ``worktree already exists``.
+removed under any of three rules:
+
+* the session is ``harvested`` — harvest lands a rebased tip from its own throwaway worktree and
+  deletes the remote branch, so this worktree's HEAD never shows up on origin; the landing itself
+  (a sha on the ledger) is the evidence, so it is reaped regardless of what ``pushed()`` would say
+  (B-0049);
+* the session finished (or there is none), its pid is dead, the tree is clean, HEAD is already on
+  the pushed branch, and the branch carries at least one commit of its own that is contained in
+  ``origin/<main>`` (fast-forwarded) — a fresh branch with no commits is an ancestor of the trunk
+  too, and that is "opening", never "merged" (B-0019);
+* any other ended session (stopped by an operator, a dead pid never re-judged, …) whose worktree
+  has no commits ahead of ``origin/<main>`` and no uncommitted changes — there is nothing in it to
+  lose (B-0025, B-0049).
+
+A live session whose worktree has no commits yet is listed ``opening``. Anything else is kept and
+listed with why. A reap also releases the job's ``BACKLOG_ID_RANGE`` reservation (B-0007) —
+nothing can mint against it once the worktree is gone, and prints ``reaped <job> (<what landed, or
+empty>)``.
 """
 import os
 import subprocess
@@ -62,9 +74,42 @@ def pushed(worktree, branch):
     return True, ''
 
 
-def remove_worktree(product, path):
+def has_commits(worktree, branch):
+    """True when the branch was ever committed to: its reflog holds more than its creation.
+
+    A branch cut from the trunk and never committed to sits on a commit the trunk already
+    contains, so ancestry alone cannot tell it from a landed one. Unknown counts as "no".
+    """
+    if not branch:
+        head = _git(['rev-parse', '--abbrev-ref', 'HEAD'], worktree)
+        branch = head.stdout.strip() if head.returncode == 0 else ''
+    if not branch or branch == 'HEAD':
+        return False
+    log = _git(['reflog', 'show', '--format=%gs', f'refs/heads/{branch}'], worktree)
+    if log.returncode != 0:
+        return False
+    return any(not line.startswith('branch: Created from')
+               for line in log.stdout.splitlines() if line.strip())
+
+
+def in_trunk(worktree, main):
+    return _git(['merge-base', '--is-ancestor', 'HEAD', f'origin/{main}'], worktree).returncode == 0
+
+
+def remove_worktree(product, path, branch=None):
     p = _git(['worktree', 'remove', path], product.repo_dir)
-    return p.returncode == 0
+    if p.returncode != 0:
+        return False
+    if branch:
+        _git(['branch', '-D', branch], product.repo_dir)
+    return True
+
+
+def worktree_empty(worktree, main):
+    """No commits ahead of ``origin/<main>`` and no uncommitted changes: nothing here that a
+    reap would lose (B-0025, B-0049)."""
+    st = _git(['status', '--porcelain'], worktree)
+    return st.returncode == 0 and not st.stdout.strip() and in_trunk(worktree, main)
 
 
 def health(product, fix=False, alive=pid_alive, out=print):
@@ -86,7 +131,8 @@ def health(product, fix=False, alive=pid_alive, out=print):
             continue
         rec = runtime_mod.read_result(s.get('log'))
         if rec is not None:
-            reason = 'finished' if runtime_mod.result_ok(rec) else 'failed'
+            sig = runtime_mod.failure_reason(rec)
+            reason = 'finished' if runtime_mod.result_ok(rec) else f'failed: {sig}' if sig else 'failed'
         elif not alive(s.get('pid')):
             reason = 'dead pid'
         else:
@@ -94,6 +140,7 @@ def health(product, fix=False, alive=pid_alive, out=print):
         pool_mod.update_session(product, job, ended=pool_mod.now_iso(), end_reason=reason)
         s.update(ended=True, end_reason=reason)
         found.append((job, 'ended', reason))
+    _git(['fetch', '-q', 'origin', product.main], product.repo_dir)
     wdir = spawn_mod.worktrees_dir(product)
     for name in sorted(os.listdir(wdir)):
         path = os.path.join(wdir, name)
@@ -101,28 +148,53 @@ def health(product, fix=False, alive=pid_alive, out=print):
             continue
         s = sessions.get(name)
         if s is not None and not s.get('ended'):
+            if not has_commits(path, s.get('branch')):
+                found.append((name, 'opening', 'live session, no commits yet'))
             continue
         what = 'orphan' if s is None else 'ended'
         if s is not None and alive(s.get('pid')):
             found.append((name, 'keep', f'{what}: pid still alive'))
             continue
+        if s is not None and s.get('harvested'):
+            # harvest lands a rebased tip from its own throwaway worktree and deletes the
+            # remote branch, so this worktree's HEAD never appears on origin — `pushed()`
+            # would refuse it forever. The landing itself is the evidence (B-0049).
+            detail = f'landed {s["harvested"]}'
+            if fix and remove_worktree(product, path, branch=s.get('branch')):
+                spawn_mod.release_id_range(product, name)
+                found.append((name, 'reaped', detail))
+            else:
+                found.append((name, 'reapable', detail))
+            continue
         if s is not None and s.get('end_reason') != 'finished':
-            ok, why = False, f'session {s.get("end_reason")}, not finished'
-        else:
-            ok, why = pushed(path, (s or {}).get('branch'))
-        if not ok and s is not None and spawn_mod.unused_worktree(product, path, s.get('branch'))[0]:
-            # B-0025: a dead session that committed nothing leaves nothing to lose
-            if fix:
-                spawn_mod.discard_worktree(product, path, s.get('branch'))
-            found.append((name, 'reaped' if fix else 'reapable', f'{what}: nothing committed'))
-        elif not ok:
+            if worktree_empty(path, product.main):
+                # the branch goes too: left behind, the relaunch's `worktree add -b` would refuse
+                # it as already existing (B-0025)
+                if fix and remove_worktree(product, path, branch=s.get('branch')):
+                    spawn_mod.release_id_range(product, name)
+                    found.append((name, 'reaped', 'empty'))
+                else:
+                    found.append((name, 'reapable', 'empty'))
+            else:
+                found.append((name, 'keep', f'{what}: session {s.get("end_reason")}, not finished'))
+            continue
+        ok, why = pushed(path, (s or {}).get('branch'))
+        if not ok:
             found.append((name, 'keep', f'{what}: {why}'))
+        elif not has_commits(path, (s or {}).get('branch')):
+            found.append((name, 'keep', f'{what}: no commits yet'))
+        elif not in_trunk(path, product.main):
+            found.append((name, 'keep', f'{what}: not in origin/{product.main}'))
         elif fix and remove_worktree(product, path):
+            spawn_mod.release_id_range(product, name)
             found.append((name, 'reaped', what))
         else:
             found.append((name, 'reapable', what))
     for job, what, detail in found:
-        out(f'{what:<9} {job:<24} {detail}')
+        if what == 'reaped':
+            out(f'reaped {job} ({detail})')
+        else:
+            out(f'{what:<9} {job:<24} {detail}')
     if not found:
         out('health: clean')
     return found

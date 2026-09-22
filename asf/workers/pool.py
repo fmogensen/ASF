@@ -160,8 +160,15 @@ def append_session(product, record):
         f.write(json.dumps(record, sort_keys=True) + '\n')
 
 
+# The fields that belong to ONE run of a job. A new launch line writes them as null so the
+# fold below clears them (B-0041); `load_sessions` then drops the nulls.
+RUN_FIELDS = ('ended', 'end_reason', 'rc', 'corrected', 'operator_flagged', 'harvested',
+              'correction', 'rounds')
+
+
 def load_sessions(product):
-    """``{job: folded record}`` in launch order."""
+    """``{job: folded record}`` in launch order. A run field whose folded value is null is
+    dropped — that is how a relaunch line clears the previous run's terminal fields."""
     out = {}
     path = sessions_path(product)
     if not os.path.exists(path):
@@ -174,7 +181,8 @@ def load_sessions(product):
                 continue
             if isinstance(rec, dict) and rec.get('job'):
                 out.setdefault(rec['job'], {}).update(rec)
-    return out
+    return {job: {k: v for k, v in s.items() if not (k in RUN_FIELDS and v is None)}
+            for job, s in out.items()}
 
 
 def update_session(product, job, **fields):

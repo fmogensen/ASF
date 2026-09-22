@@ -44,6 +44,9 @@ import tempfile
 
 from asf import env
 from asf.conventions import Conventions
+from asf.feeder.rows import CORRECTION_ROUNDS
+from asf.workers.health import pid_alive
+from asf.workers.pool import now_iso
 
 #: The conventions a caller with no Product reads: trunk `main`, code branches `worker/`, no
 #: test command (so the gate is `asf check` alone).
@@ -54,6 +57,21 @@ CONFLICT_MID_RE = re.compile(r'^={7}$')
 CONFLICT_END_RE = re.compile(r'^>{7}(?: |$)')
 MEMORY_CLAUSE_RE = re.compile(r'; memory [^;"]+')
 MAX_REBASE_STEPS = 100
+
+#: B-0031 (interim): a tick runs on a clock, and CI races the landings it triggers — gating every
+#: eligible branch in one tick can run past the clock and pile up races. Cap how many a single
+#: tick gates; the rest sit as still-eligible and are picked up by the next tick.
+MAX_BRANCHES_PER_TICK = 3
+
+
+def cap_to_tick(items, out):
+    """``items`` trimmed to :data:`MAX_BRANCHES_PER_TICK`, printing the cap line via ``out``
+    when there were more eligible than that — the rest wait for the next tick."""
+    if len(items) > MAX_BRANCHES_PER_TICK:
+        out(f'harvest: {len(items)} branches eligible — capping this tick at '
+            f'{MAX_BRANCHES_PER_TICK}, the rest wait for the next')
+        return items[:MAX_BRANCHES_PER_TICK]
+    return items
 
 
 GIT_HOOK_VARS = ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE')
@@ -80,19 +98,26 @@ def sh(cmd, cwd=None, env=None):
 CALLER_IDENTITY_VARS = ('ASF_PRODUCT', 'ASF_JOB', 'BACKLOG_ID_RANGE')
 
 
-def gate_env():
+def gate_env(worktree=None):
     """The environment the gate and index regeneration run in: the caller's own, minus the
     caller's identity (:data:`CALLER_IDENTITY_VARS`) — BACKLOG_ID_RANGE names the calling
     session's own mint range and must never leak into a branch it didn't spawn (a worker
     session invoking `--dry-run` against the live repo would otherwise misjudge an unrelated
-    branch's tests as failing); ASF_PRODUCT/ASF_JOB name the tick or session running the gate."""
+    branch's tests as failing); ASF_PRODUCT/ASF_JOB name the tick or session running the gate.
+
+    PYTHONPATH: the gated ``worktree`` first, then the package that is harvesting. A test in
+    the worktree that runs ``python -m asf.cli`` from some other cwd must get the worktree's
+    own code — the branch under test — not the harvester's (B-0033: the sample-product test
+    ran main's package against the branch's fixtures); `asf index`/`asf check` from a product
+    repo with no ``asf`` package of its own still find the harvester's."""
     env = clean_env()
     for var in CALLER_IDENTITY_VARS:
         env.pop(var, None)
-    # `asf index`/`asf check` run as `python -m asf.cli` from the rebased worktree, whose cwd is
-    # the repo being gated, not this package: point the child at the package that is harvesting.
     pkg_parent = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    env['PYTHONPATH'] = pkg_parent + os.pathsep + env.get('PYTHONPATH', '')
+    parts = ([os.path.abspath(worktree)] if worktree else []) + [pkg_parent]
+    if env.get('PYTHONPATH'):
+        parts.append(env['PYTHONPATH'])
+    env['PYTHONPATH'] = os.pathsep.join(parts)
     return env
 
 
@@ -148,12 +173,30 @@ def mark_harvested(state_dir, job, sha):
         f.write(json.dumps({'job': job, 'harvested': sha}, sort_keys=True) + '\n')
 
 
+def reap_hold(record):
+    """Why a job's worktree may not be reaped, or None. Both must hold: the job's own record
+    carries a finished line (``ended``), and the process id in it is dead (B-0010)."""
+    if not record or not record.get('ended'):
+        return 'no finished line in its record'
+    pid = record.get('pid')
+    if pid_alive(pid):
+        return f'pid {pid} is still alive'
+    return None
+
+
 def reap(repo, state_dir, job, branch, sha=None):
+    """Remove the job's worktree, branch and registry row — but only once :func:`reap_hold`
+    clears it; otherwise print one hold line and touch nothing. True when reaped."""
+    why = reap_hold(read_sessions(state_dir).get(job))
+    if why:
+        hold(job, f'not reaped: {why}')
+        return False
     wt_path = os.path.join(state_dir, 'worktrees', job)
     if os.path.isdir(wt_path):
         sh(['git', 'worktree', 'remove', '--force', wt_path], cwd=repo)
     sh(['git', 'branch', '-D', branch], cwd=repo)
     mark_harvested(state_dir, job, sha)
+    return True
 
 
 # ------------------------------------------------------- conflict resolution --
@@ -312,7 +355,7 @@ def run_gate(tmp, conv=None):
     ``conventions.test_command`` is gated by ``asf check`` alone — never by a command this
     package guessed at."""
     conv = conv or DEFAULTS
-    env = gate_env()
+    env = gate_env(tmp)
     if conv.test_command:
         t = sh(shlex.split(str(conv.test_command)), cwd=tmp, env=env)
         if t.returncode != 0:
@@ -378,7 +421,7 @@ def harvest_branch(repo, state_dir, is_record, job, branch, dry_run, conv=None):
                 return hold(job, reason)
 
             if is_record:
-                idx = sh(asf_cmd('index'), cwd=tmp, env=gate_env())
+                idx = sh(asf_cmd('index'), cwd=tmp, env=gate_env(tmp))
                 if idx.returncode != 0:
                     return hold(job, f'asf index failed: {tail(idx.stderr or idx.stdout)}')
                 if sh(['git', 'status', '--porcelain'], cwd=tmp).stdout.strip():
@@ -404,6 +447,10 @@ def harvest_branch(repo, state_dir, is_record, job, branch, dry_run, conv=None):
                     continue  # the trunk moved under us — retry the whole cycle once
                 if not pushed:
                     return hold(job, f'push to {trunk} failed (not a fast-forward)')
+                sh(['git', 'fetch', '-q', 'origin', trunk], cwd=repo)
+                landed = sh(['git', 'merge-base', '--is-ancestor', sha, f'origin/{trunk}'], cwd=repo)
+                if landed.returncode != 0:
+                    return hold(job, f'{sha} is not on origin/{trunk} after the push — nothing reaped')
             else:
                 if not push_branch(repo, sha, branch):
                     return hold(job, 'push branch failed')
@@ -448,6 +495,7 @@ def run_harvest(repo, state_dir, dry_run, conv=None):
     is_record = is_record_repo(repo)
     sessions = read_sessions(state_dir)
     sh(['git', 'fetch', '-q', 'origin', conv.main], cwd=repo)
+    eligible = []
     for branch in worker_branches(repo, conv):
         job = conv.strip_prefix(branch)
         if not is_eligible(sessions.get(job)):
@@ -455,6 +503,12 @@ def run_harvest(repo, state_dir, dry_run, conv=None):
         ahead = sh(['git', 'rev-list', '--count', f'origin/{conv.main}..{branch}'],
                    cwd=repo).stdout.strip()
         if ahead in ('', '0'):
+            continue
+        eligible.append((job, branch))
+    for job, branch in cap_to_tick(eligible, print):
+        why = reap_hold(sessions.get(job))
+        if why:  # never land what cannot then be reaped: a live job still owns its worktree
+            hold(job, f'not reaped: {why}')
             continue
         harvest_branch(repo, state_dir, is_record, job, branch, dry_run, conv)
     return 0
@@ -588,7 +642,7 @@ def product_gate(tmp, conv, asf_repo):
         cmds.append(shlex.split(str(conv.test_command)))
     if asf_repo:
         cmds += [['bash', os.path.join('tools', name + '.sh')] for name in ASF_GATE_SCRIPTS]
-    env = gate_env()
+    env = gate_env(tmp)
     for cmd in cmds:
         r = sh(cmd, cwd=tmp, env=env)
         if r.returncode != 0:
@@ -596,20 +650,31 @@ def product_gate(tmp, conv, asf_repo):
     return True, None
 
 
-def file_gate_bug(root, branch, item, line, conv):
-    """File (or bump) the Bug for a red harvest gate in the record at ``root``, keyed on the
-    failing line. Returns ``filed``/``bumped``/``skipped``, or None when the record could not
-    be read."""
-    from asf.tick import file_bugs as fb
-    by_id, errors = fb.load_items(root)
-    if errors:
-        return None
-    canonical, _dupes = fb.canonicalize(by_id)
-    sig = f'harvest gate red: {line}'[:200]
-    info = {'title': fb.truncate(f'Harvest gate red: {line}', 100), 'severity': 'S2',
-            'runs': [], 'evidence': [f'{branch} ({item}): {line}']}
-    return fb._file_or_bump_bug(root, canonical, sig, info, fb.today(),
-                                default_bug_epic=conv.default_bug_epic)
+def hold_with_correction(state_dir, branch, record, kind, text, out):
+    """Hold ``branch`` and hand it back to its session: the failing output goes on the session's
+    record as ``correction`` and the rounds counter (over every session of the item) goes up —
+    until it reaches the cap the feeder switches an ADJUDICATE row on at (``CORRECTION_ROUNDS``,
+    see ``asf.feeder.rows``). From there the round no longer climbs (B-0048: it used to climb
+    past the cap forever, one more ADJUDICATE row each time) — a held branch at the cap is the
+    adjudicate row's own attempt, and a second hold there (it cannot land either) flags the item
+    for an operator instead of spawning yet another one."""
+    item = record.get('item')
+    job = record.get('job') or branch
+    history = [r for r in read_sessions(state_dir).values() if item and r.get('item') == item]
+    prev = max([r.get('rounds') or 0 for r in history] + [record.get('rounds') or 0])
+    if prev >= CORRECTION_ROUNDS:
+        at_cap_before = any((r.get('correction') or {}).get('at_cap') for r in history)
+        fields = {'correction': {'kind': kind, 'text': text, 'at': now_iso(), 'at_cap': True}}
+        if at_cap_before:
+            fields['operator_flagged'] = 1
+        mark_session(state_dir, job, **fields)
+        out(f'held {branch}: {text} — adjudicate pending')
+        return 'held'
+    rounds = prev + 1
+    mark_session(state_dir, job, rounds=rounds,
+                 correction={'kind': kind, 'text': text, 'at': now_iso()})
+    out(f'held {branch}: {text} — back to its session (round {rounds})')
+    return 'held'
 
 
 def land_ff(repo, state_dir, branch, record, item, conv, asf_repo, bug_root, dry_run, out):
@@ -625,18 +690,10 @@ def land_ff(repo, state_dir, branch, record, item, conv, asf_repo, bug_root, dry
                 return 'held'
             ok, reason = rebase_and_resolve(tmp, trunk)
             if not ok:
-                out(f'held {branch}: {reason}')
-                return 'held'
+                return hold_with_correction(state_dir, branch, record, 'conflict', reason, out)
             ok, line = product_gate(tmp, conv, asf_repo)
             if not ok:
-                out(f'held {branch}: {line}')
-                root = bug_root() if callable(bug_root) else bug_root
-                filed = file_gate_bug(root, branch, item, line, conv) if root else None
-                if filed is None:
-                    out(f'BUG: harvest gate red {branch}')
-                else:
-                    out(f'bug {filed}: harvest gate red {branch}')
-                return 'held'
+                return hold_with_correction(state_dir, branch, record, 'gate', line, out)
             sha = sh(['git', 'rev-parse', 'HEAD'], cwd=tmp).stdout.strip()
             if dry_run:
                 out(f'DRY: would land {branch} → {sha}')
@@ -647,7 +704,11 @@ def land_ff(repo, state_dir, branch, record, item, conv, asf_repo, bug_root, dry
             if not pushed:
                 out(f'held {branch}: push to {trunk} refused')
                 return 'held'
-            mark_session(state_dir, job, harvested=sha)
+            sh(['git', 'fetch', '-q', 'origin', trunk], cwd=repo)
+            if sh(['git', 'merge-base', '--is-ancestor', sha, f'origin/{trunk}'], cwd=repo).returncode != 0:
+                out(f'held {branch}: {sha} is not on origin/{trunk} after the push')
+                return 'held'
+            mark_session(state_dir, job, harvested=sha, correction=None)
             sh(['git', 'push', '-q', 'origin', '--delete', branch], cwd=repo)
             out(f'landed {branch} → {sha}')
             return 'landed'
@@ -655,6 +716,32 @@ def land_ff(repo, state_dir, branch, record, item, conv, asf_repo, bug_root, dry
             sh(['git', 'worktree', 'remove', '--force', tmp], cwd=repo)
     out(f'held {branch}: {trunk} moved again on retry')
     return 'held'
+
+
+def sync_checkout(repo, trunk, out=print):
+    """Fast-forward the checkout at ``repo`` to ``origin/<trunk>`` whenever that is ahead of it.
+    The scheduler runs that checkout (an editable install: its working tree is the code), and a
+    fix that reached only origin — a landing (B-0036) or any direct push (B-0042) — left the
+    factory running the code from before it. Not ahead: silent. Only when the checkout is on the
+    trunk with a clean tree, and only ``--ff-only`` — never a reset, never a force; anything else
+    is left alone and named in one line. True when moved."""
+    behind = sh(['git', 'rev-list', '--count', f'HEAD..origin/{trunk}'], cwd=repo)
+    if behind.returncode != 0 or behind.stdout.strip() in ('', '0'):
+        return False
+    head = sh(['git', 'symbolic-ref', '-q', '--short', 'HEAD'], cwd=repo).stdout.strip()
+    if head != trunk:
+        out(f'harvest: {repo} not fast-forwarded — on {head or "a detached HEAD"}, not {trunk}')
+        return False
+    if sh(['git', 'status', '--porcelain', '--untracked-files=no'], cwd=repo).stdout.strip():
+        out(f'harvest: {repo} not fast-forwarded — working tree has local changes')
+        return False
+    merge = sh(['git', 'merge', '-q', '--ff-only', f'origin/{trunk}'], cwd=repo)
+    if merge.returncode != 0:
+        out(f'harvest: {repo} not fast-forwarded — {tail(merge.stderr or merge.stdout)}')
+        return False
+    sha = sh(['git', 'rev-parse', 'HEAD'], cwd=repo).stdout.strip()
+    out(f'harvest: {repo} fast-forwarded to {sha}')
+    return True
 
 
 def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, out=print):
@@ -671,9 +758,12 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
     trunk = conv.main
     mode = landing(product)
     sh(['git', 'fetch', '-q', '--prune', 'origin'], cwd=repo)
+    if not dry_run:
+        sync_checkout(repo, trunk, out)  # a direct push to the trunk too (B-0042)
     sessions = sessions_by_branch(state_dir)
     asf_repo = None
     results = {}
+    eligible = []
     for branch in remote_branches(repo, conv):
         record = sessions.get(branch)
         if not is_eligible(record) or record.get('harvest') == 'pr':
@@ -682,6 +772,8 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
                    cwd=repo).stdout.strip()
         if ahead in ('', '0'):
             continue
+        eligible.append((branch, record))
+    for branch, record in cap_to_tick(eligible, out):
         item = item_of(branch, record)
         if not item or not commits_name_item(repo, trunk, branch, item):
             out(f'held {branch}: commits do not name {item or "an item id"}')
@@ -697,6 +789,8 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
             asf_repo = is_asf_repo(repo)
         results[branch] = land_ff(repo, state_dir, branch, record, item, conv, asf_repo,
                                   bug_root, dry_run, out)
+    if any(r == 'landed' for r in results.values()):
+        sync_checkout(repo, trunk, out)
     return results
 
 

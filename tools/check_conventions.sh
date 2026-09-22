@@ -8,6 +8,8 @@
 #   asf/conventions.py              the defaults themselves live there, documented, one per field
 #   asf/metrics/import_sessions.py  an adapter for a foreign log format: its literals describe
 #                                   that file's shape, not this factory's conventions
+#   asf/hooks.py                    an adapter for the worker runtime's own settings file: the
+#                                   path is the runtime's convention, not a product's
 # `~/.ASF` is allowed everywhere — that is the operator's own directory, not a product's.
 #
 #   check_conventions.sh                     check the package
@@ -24,6 +26,7 @@ PATTERNS_FILE="$HERE/forbidden-conventions.txt"
 excludes=(
   "asf/conventions.py"
   "asf/metrics/import_sessions.py"
+  "asf/hooks.py"
   "asf/evidence/evidence.py"
   "asf/record/match.py"
   "asf/record/ingest.py"

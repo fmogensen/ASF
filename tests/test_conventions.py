@@ -137,12 +137,9 @@ class CheckConventionsScriptTests(unittest.TestCase):
                                  'asf/tick/file_bugs.py'))]
         self.assertEqual(hits, [])
 
-    @unittest.expectedFailure
     def test_the_whole_package_is_clean(self):
-        """Expected to fail until the rest of the conventions cards land: `asf/tick/migrate.py`,
-        `asf/views/`, `asf/init.py`, `asf/doctor.py`, `asf/scheduler.py`, `asf/hooks.py`,
-        `asf/tick/tick.py` and `asf/cli.py` still carry the first product's literals, and the
-        four files the evidence card owns (B-0020) are excluded by the script for now."""
+        """The purge is complete: no product convention anywhere in `asf/` outside the
+        documented adapters (the script's own exclusion list)."""
         r = self.script()
         self.assertEqual(r.returncode, 0, r.stdout)
 

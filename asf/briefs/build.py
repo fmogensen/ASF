@@ -29,6 +29,7 @@ import string
 
 from asf import env
 from asf.briefs import preamble as preamble_mod
+from asf.workers.stall import CORRECTION_HEAD
 
 TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
 
@@ -37,12 +38,13 @@ TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templa
 HEAVY = 'heavy'
 LIGHT = 'light'
 
-KINDS = ('spec', 'plan', 'coder', 'review', 'fixer', 'rebase', 'close', 'adjudicate', 'fix-bug')
+KINDS = ('spec', 'plan', 'coder', 'review', 'fixer', 'rebase', 'close', 'adjudicate', 'fix-bug',
+         'correct')
 KIND_ALIASES = {'task': 'coder', 'code': 'coder', 'fix': 'fixer', 'bug': 'fix-bug',
                 'fix_bug': 'fix-bug'}
 DEFAULT_MODELS = {'spec': HEAVY, 'plan': HEAVY, 'adjudicate': HEAVY, 'review': HEAVY,
                   'coder': LIGHT, 'fixer': LIGHT, 'rebase': LIGHT, 'close': LIGHT,
-                  'fix-bug': LIGHT}
+                  'fix-bug': LIGHT, 'correct': LIGHT}
 #: The kinds that may mint new cards (Stories, Tasks, Decisions) and so need an id range.
 ID_RANGE_KINDS = ('spec', 'plan', 'adjudicate', 'fix-bug')
 
@@ -201,6 +203,12 @@ def context(product, row, kind, facts):
     }
 
 
+def correction_text(row, kind):
+    """A ``correct`` brief ends with the failure the harvest recorded, under stall's head."""
+    text = getattr(row, 'correction', '') or ''
+    return CORRECTION_HEAD + text.rstrip() if kind == 'correct' and text else ''
+
+
 def build(product, row, index, inflight=None, repo_facts=None):
     """The brief for one feeder row."""
     kind = normalize_kind(getattr(row, 'brief_kind', '') or getattr(row, 'kind', ''))
@@ -209,7 +217,7 @@ def build(product, row, index, inflight=None, repo_facts=None):
     ctx = context(product, row, kind, facts)
     parts = [item_line(row, facts['item']),
              preamble_mod.build(product, row, index, inflight, repo_facts, facts=facts),
-             render(load_template(kind), ctx),
+             render(load_template(kind), ctx).rstrip() + correction_text(row, kind),
              render(TAIL, ctx)]
     return Brief(kind=kind, item_id=ctx['item_id'], text='\n\n'.join(p.strip() for p in parts) + '\n',
                  model=model_for(product, kind), add_dirs=add_dirs_for(product),

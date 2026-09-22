@@ -87,6 +87,7 @@ def write_check_script(root, name, script):
 
 def run(args, cwd):
     env = dict(os.environ)
+    env.pop('BACKLOG_ID_RANGE', None)  # a job's range must not leak into the fixture's own mints (B-0012)
     env['PYTHONPATH'] = REPO_ROOT + os.pathsep + env.get('PYTHONPATH', '')
     # no operator config: the run reads asf.conventions' documented defaults, not this
     # machine's ~/.ASF, so the test asserts the same thing everywhere it runs

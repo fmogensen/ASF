@@ -3,7 +3,9 @@
 ``spawn(product, row, account, brief_text)``:
 
 1. a worktree ``~/.ASF/state/<product>/worktrees/<job>`` on a new branch (the row's, else
-   ``<branch prefix for the kind>/<job>``) off ``origin/<main>`` of ``Product.repo_dir``;
+   ``<branch prefix for the kind>/<job>``) off ``origin/<main>`` of ``Product.repo_dir`` — a row
+   of any kind whose branch already exists on origin (a held branch sent back for another round,
+   ``correct`` or ``adjudicate`` alike) instead reuses it, rebased onto ``origin/<main>``;
 2. an id range reserved for the job in ``~/.ASF/state/<product>/id-ranges.tsv`` and handed to
    the session as ``BACKLOG_ID_RANGE`` (so parallel writers never mint the same id — see
    ``asf.record.ids``);
@@ -77,6 +79,23 @@ def reserve_id_range(product, job, prefixes=None, start=DEFAULT_ID_START, size=D
     return rng
 
 
+def release_id_range(product, job):
+    """Drop ``job``'s row from ``id-ranges.tsv``. Called once nothing can mint against the
+    range any more (the worktree is gone — see ``asf.workers.health``), so a finished job does
+    not hold its block forever. Returns whether a row was actually dropped."""
+    path = id_ranges_path(product)
+    if not os.path.exists(path):
+        return False
+    with open(path, encoding='utf-8') as f:
+        lines = f.readlines()
+    kept = [ln for ln in lines if ln.split('\t', 1)[0] != job]
+    if len(kept) == len(lines):
+        return False
+    with open(path, 'w', encoding='utf-8') as f:
+        f.writelines(kept)
+    return True
+
+
 # ---- worktree + brief -------------------------------------------------------
 
 def worktrees_dir(product):
@@ -93,6 +112,25 @@ def briefs_dir(product):
 
 def branch_for(product, row):
     return row.branch or f'{product.branch_prefix(row.kind)}/{row.job}'
+
+
+def _holding_worktree(repo, branch):
+    out = _git(['worktree', 'list', '--porcelain'], repo)
+    path = None
+    for line in out.splitlines():
+        if line.startswith('worktree '):
+            path = line[len('worktree '):]
+        elif line == f'branch refs/heads/{branch}':
+            return path
+    return None
+
+
+def _branch_exists_on_origin(repo, branch):
+    """The check a held branch is reused on: not the row's kind (B-0048 — an ADJUDICATE row's
+    kind is ``adjudicate``, not ``correct``, so keying on kind alone missed it and spawned it
+    fresh off main, silently losing the branch's own history) but whether ``branch`` is already
+    a ref on origin."""
+    return bool(_git(['ls-remote', '--heads', 'origin', branch], repo).strip())
 
 
 def _git_ok(args, cwd):
@@ -129,6 +167,13 @@ def discard_worktree(product, path, branch):
 
 
 def make_worktree(product, job, branch, alive=None):
+    """A branch already on origin — any row kind, a held branch sent back for another round —
+    is reused: the worktree is added on it, then rebased onto ``origin/<main>`` — a conflict is
+    left in place for the session to resolve. Otherwise a fresh branch off ``origin/<main>``.
+
+    A worktree already at the job's path is removed when its session has ended (or its pid is
+    dead) and it holds nothing — clean, no commit beyond ``origin/<main>``; with work in it, or
+    with no session at all, spawn refuses (B-0025)."""
     repo = product.repo_dir
     if not repo or not os.path.isdir(repo):
         raise SpawnError(f'product repo_dir missing: {repo!r}')
@@ -144,6 +189,16 @@ def make_worktree(product, job, branch, alive=None):
             raise SpawnError(f'worktree already exists: {path} — {why}; not removing it')
         discard_worktree(product, path, branch)
     _git(['fetch', '-q', 'origin', product.main], repo)
+    if _branch_exists_on_origin(repo, branch):
+        _git(['fetch', '-q', 'origin', branch], repo)
+        held = _holding_worktree(repo, branch)
+        if held:
+            # a stale worktree of a session that has ended still holds the branch
+            _git(['worktree', 'remove', '--force', held], repo)
+        _git(['worktree', 'add', '-q', '-B', branch, path, f'origin/{branch}'], repo)
+        subprocess.run(['git', 'rebase', '-q', f'origin/{product.main}'], cwd=path,
+                       capture_output=True, text=True)
+        return path
     _git(['worktree', 'add', '-q', '-b', branch, path, f'origin/{product.main}'], repo)
     return path
 
@@ -168,9 +223,15 @@ def write_brief(product, job, text):
 
 
 def model_arg(model, cfg=None):
-    """``worker_pool.models: {Opus: <id>}`` maps a row's model label; default lowercased."""
+    """``worker_pool.models: {Opus: <id>}`` maps a row's model label. A label with no entry is
+    refused — the literal label is not a model id the runtime knows, and the session dies at once."""
+    if not model:
+        return None
     table = (((cfg or {}).get('worker_pool') or {}).get('models')) or {}
-    return table.get(model, str(model or '').lower() or None)
+    if model not in table:
+        raise SpawnError(f'NEEDS OPERATOR: worker_pool.models has no entry for {model} '
+                         '— add it to config.yaml')
+    return table[model]
 
 
 # ---- spawn ------------------------------------------------------------------
@@ -192,6 +253,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None, alive=None)
     cfg = load_cfg() if cfg is None else cfg
     wp = cfg.get('worker_pool') or {}
     runtime = runtime or runtime_mod.from_config(cfg)
+    model = model_arg(row.model, cfg)
     branch = branch_for(product, row)
     worktree = make_worktree(product, row.job, branch, alive=alive)
     id_range = reserve_id_range(product, row.job,
@@ -200,7 +262,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None, alive=None)
                                 size=int(wp.get('id_range_size', DEFAULT_ID_SIZE)))
     brief_path = write_brief(product, row.job, brief_for(row, brief_text))
     add_dirs = [os.path.expanduser(d) for d in (product._get('job_grants') or [])]
-    job = runtime_mod.Job(product.name, row.job, worktree, brief_path, model_arg(row.model, cfg),
+    job = runtime_mod.Job(product.name, row.job, worktree, brief_path, model,
                           account=account, add_dirs=add_dirs,
                           permission_mode=wp.get('permission_mode')
                           or runtime_mod.DEFAULT_PERMISSION_MODE,
@@ -212,8 +274,12 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None, alive=None)
               'pid': result.pid, 'worktree': worktree, 'branch': branch,
               'started': pool_mod.now_iso(), 'log': result.log_path, 'brief': brief_path,
               'id_range': id_range, 'runtime': runtime.name}
+    # a launch line is a new run: the previous run's terminal fields must not fold into it
+    # (B-0041 — a relaunch read as `ended: failed`, so health skipped it, the feeder re-emitted
+    # it and harvest never landed its branch)
+    record.update({k: None for k in pool_mod.RUN_FIELDS})
     pool_mod.append_session(product, record)
-    return record
+    return {k: v for k, v in record.items() if not (k in pool_mod.RUN_FIELDS and v is None)}
 
 
 def load_cfg():

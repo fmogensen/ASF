@@ -1,7 +1,7 @@
-"""asf.workers — the worker pool as code: spawn, launch wave, health, stall, quota.
+"""asf.workers — the worker pool as code: spawn, launch wave, health, stall, quota, reserve-id.
 
-``register(sub)`` adds ``asf workers spawn|wave|health|stall|quota --product X``; each leaf sets
-``func`` so the caller dispatches with ``args.func(args)``.
+``register(sub)`` adds ``asf workers spawn|wave|health|stall|quota|reserve-id --product X``; each
+leaf sets ``func`` so the caller dispatches with ``args.func(args)``.
 """
 import sys
 
@@ -46,6 +46,22 @@ def cmd_spawn(args):
         brief = f.read()
     rec = spawn.spawn(product, row, acct, brief, cfg=cfg)
     print(f"launched {rec['job']} → {rec['account']} ({rec['model']}) pid {rec['pid']}")
+    return 0
+
+
+def cmd_reserve_id(args):
+    """Reserve (or return, if the job already holds one) a BACKLOG_ID_RANGE block and print it —
+    for a launcher outside ``workers spawn`` to export before it runs ``new`` in a worktree
+    (B-0007). The block is released by ``workers health --fix`` once the worktree is reaped."""
+    from asf.workers import spawn
+    product = _product(args)
+    cfg = spawn.load_cfg()
+    wp = cfg.get('worker_pool') or {}
+    rng = spawn.reserve_id_range(product, args.job,
+                                 prefixes=wp.get('id_range_prefixes') or spawn.DEFAULT_ID_PREFIXES,
+                                 start=int(wp.get('id_range_start', spawn.DEFAULT_ID_START)),
+                                 size=int(wp.get('id_range_size', spawn.DEFAULT_ID_SIZE)))
+    print(rng)
     return 0
 
 
@@ -113,4 +129,9 @@ def register(sub):
     q = wsub.add_parser('quota', help="each account's windows against the guard")
     add_product_arg(q)
     q.set_defaults(func=cmd_quota)
+
+    ri = wsub.add_parser('reserve-id', help="a job's BACKLOG_ID_RANGE, for a launcher to export")
+    add_product_arg(ri)
+    ri.add_argument('--job', required=True, help='the job id the range is reserved for')
+    ri.set_defaults(func=cmd_reserve_id)
     return p
