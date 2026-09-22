@@ -639,6 +639,22 @@ class TestHealth(Home):
         self.assertEqual(s['end_reason'], reason)
         self.assertEqual(s['rc'], 1)
 
+    def test_b0075_a_self_reported_unpushed_result_is_held_for_correction_too(self):
+        # the brief's own words: "pushed: no is read as that failure at once" — a session that
+        # honestly backgrounds the suite and says so must be held for correction exactly like a
+        # git-detected unpushed run is, or an honest report is a dead end nobody comes back to
+        text = ('I stopped to wait for the background test run.\n\n'
+                'REPORT\nitem: F-0001\nkind: coder\nstatus: partial\nbranch: b\n'
+                'pushed: no — the suite is still running in the background\n'
+                'commits: none\ntests: python3 -m unittest (background)\nleft out: the push\n')
+        self.spawn('waiting', {'ok': True, 'result': text, 'pid': 61})
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('waiting', 'ended', 'failed: unpushed work'), found)
+        held = [d for j, w, d in found if w == 'held']
+        self.assertTrue(held, found)
+        s = pool_mod.load_sessions(self.product)['waiting']
+        self.assertEqual(s['rounds'], 1)
+
     def test_reap_only_when_pushed(self):
         rec = self.spawn('done', {'ok': True, 'pid': 11})
         wt = rec['worktree']

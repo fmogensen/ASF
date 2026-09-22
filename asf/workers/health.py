@@ -48,9 +48,16 @@ import os
 import subprocess
 
 from asf.workers import pool as pool_mod
+from asf.workers import report as report_mod
 from asf.workers import runtime as runtime_mod
 from asf.workers import lifecycle
 from asf.workers import spawn as spawn_mod
+
+#: A run's ``end_reason`` names the branch-not-pushed failure two ways: git evidence
+#: (``lifecycle.push_gap``, "not pushed: …") and a session's own honest report ("pushed: no",
+#: ``report.UNPUSHED`` = "unpushed work"). Both must be held for correction the same way, or an
+#: honest report is a dead end nobody comes back to (B-0075).
+UNPUSHED_REASON_PREFIXES = ('failed: not pushed', f'failed: {report_mod.UNPUSHED}')
 
 
 def pid_alive(pid):
@@ -168,7 +175,7 @@ def publish_gap(product, run, ev, reason, alive=pid_alive):
     Uncommitted files stay a hold: the factory never commits for a session. Returns
     ``(reason, evidence, line)``; ``line`` is None when nothing was attempted."""
     wt, branch = run.get('worktree'), run.get('branch')
-    result_ok = reason == lifecycle.FINISHED or (reason or '').startswith('failed: not pushed')
+    result_ok = reason == lifecycle.FINISHED or (reason or '').startswith(UNPUSHED_REASON_PREFIXES)
     if not result_ok or ev.uncommitted or not branch:
         return reason, ev, None
     if not wt or not os.path.isdir(wt):
@@ -275,7 +282,7 @@ def health(product, fix=False, alive=pid_alive, out=print):
         pool_mod.update_session(product, job, ended=now, end_reason=reason)
         s.update(ended=now, end_reason=reason)
         found.append((job, 'ended', reason))
-        if reason.startswith('failed: not pushed'):
+        if reason.startswith(UNPUSHED_REASON_PREFIXES):
             # the run's own work is the correction's input: the next session on the branch
             # commits and pushes it, or says why not (B-0051, B-0052)
             fields, line = lifecycle.hold(registry, s, lifecycle.UNPUSHED,
