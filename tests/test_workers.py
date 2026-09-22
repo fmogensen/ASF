@@ -391,6 +391,19 @@ class TestHealth(Home):
         git('push', '-q', 'origin', branch, cwd=wt)
         git('push', '-q', 'origin', branch + ':main', cwd=wt)
 
+    def harvest_land(self, wt, branch, job):
+        """As ``asf.harvest.harvest.land_ff`` actually lands a branch: it rebases the tip in a
+        throwaway worktree (a new commit, not the one sitting in ``wt``), pushes that to main,
+        deletes the remote branch, and marks the session ``harvested`` — leaving ``wt``'s own
+        branch behind with no remote counterpart at all (B-0049)."""
+        git('push', '-q', 'origin', branch, cwd=wt)
+        tree = git('rev-parse', 'HEAD^{tree}', cwd=wt)
+        sha = git('commit-tree', tree, '-p', 'origin/main', '-m', 'landed', cwd=wt)
+        git('push', '-q', 'origin', f'{sha}:refs/heads/main', cwd=wt)
+        git('push', '-q', 'origin', '--delete', branch, cwd=wt)
+        pool_mod.update_session(self.product, job, harvested=sha)
+        return sha
+
     def test_b0041_relaunch_starts_a_clean_run(self):
         # first run fails; the relaunch must not inherit ended/end_reason from it
         rt = runtime_mod.FakeRuntime([{'ok': False, 'pid': 21}, {'running': True, 'pid': 22}])
@@ -421,7 +434,11 @@ class TestHealth(Home):
         self.assertFalse(s['live'].get('ended'))
         keep = {j: d for j, w, d in found if w == 'keep'}
         self.assertEqual(keep['done'], 'ended: branch not pushed')
-        self.assertEqual(keep['gone'], 'ended: session dead pid, not finished')
+        # 'gone' never committed anything of its own: its worktree carries nothing ahead of
+        # main and nothing uncommitted, so B-0049's rule reaps it as empty rather than keeping
+        # it around forever just because it never finished cleanly.
+        reapable = {j: d for j, w, d in found if w == 'reapable'}
+        self.assertEqual(reapable['gone'], 'empty')
 
     def test_b0028_dead_pid_is_rejudged_when_the_result_arrives(self):
         rec = self.spawn('late', {'running': True, 'pid': 12})
@@ -518,6 +535,44 @@ class TestHealth(Home):
         found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
         self.assertIn(('done', 'reaped', 'ended'), found)
         self.assertFalse(os.path.exists(wt))
+
+    def test_b0049_harvested_worktree_is_reaped_though_never_pushed_from_here(self):
+        # harvest rebases the tip in its own throwaway worktree and deletes the remote branch,
+        # so `pushed()` can never see this worktree's HEAD on origin — it would stay 'reapable'
+        # forever without the `harvested` short-circuit.
+        rec = self.spawn('done', {'ok': True, 'pid': 11})
+        wt = rec['worktree']
+        self.commit(wt)
+        sha = self.harvest_land(wt, rec['branch'], 'done')
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('done', 'reapable', f'landed {sha}'), found)
+        lines = []
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False,
+                                  out=lines.append)
+        self.assertIn(('done', 'reaped', f'landed {sha}'), found)
+        self.assertIn(f'reaped done (landed {sha})', lines)
+        self.assertFalse(os.path.exists(wt))
+
+    def test_b0049_operator_stopped_session_with_empty_worktree_is_reaped(self):
+        rec = self.spawn('idle', {'running': True, 'pid': 30})
+        wt = rec['worktree']
+        pool_mod.update_session(self.product, 'idle', ended=pool_mod.now_iso(),
+                                end_reason='stopped by operator')
+        lines = []
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lines.append)
+        self.assertIn(('idle', 'reaped', 'empty'), found)
+        self.assertIn('reaped idle (empty)', lines)
+        self.assertFalse(os.path.exists(wt))
+
+    def test_b0049_stopped_session_with_local_commits_is_kept(self):
+        rec = self.spawn('wip', {'running': True, 'pid': 31})
+        wt = rec['worktree']
+        self.commit(wt)
+        pool_mod.update_session(self.product, 'wip', ended=pool_mod.now_iso(),
+                                end_reason='stopped by operator')
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('wip', 'keep', 'ended: session stopped by operator, not finished'), found)
+        self.assertTrue(os.path.isdir(wt))
 
 
 class TestStall(Home):
