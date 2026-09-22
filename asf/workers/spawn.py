@@ -16,6 +16,7 @@
 5. one line in ``sessions.jsonl``: job, item, feature, kind, account, model, pid, worktree,
    branch, started.
 """
+import fcntl
 import os
 import re
 import subprocess
@@ -135,6 +136,31 @@ def _branch_exists_on_origin(repo, branch):
     return bool(_git(['ls-remote', '--heads', 'origin', branch], repo).strip())
 
 
+def _repo_lock_path(repo):
+    return os.path.join(repo, '.git', 'asf-worktree.lock')
+
+
+def _with_repo_lock(repo, fn):
+    """Serialises worktree creation per repo (B-0016): ``git worktree add`` and the branch
+    create it does along the way both write ``.git/config``, and parallel spawns racing on
+    that file killed jobs before their first turn. One retry absorbs a lock still held by
+    something outside this lock (a plain concurrent ``git`` call) once it clears; ``fn`` must
+    be safe to call twice."""
+    lock_path = _repo_lock_path(repo)
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    with open(lock_path, 'w') as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            try:
+                return fn()
+            except SpawnError as e:
+                if 'lock config file' not in str(e):
+                    raise
+                return fn()
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
 def make_worktree(product, job, branch):
     """The worktree a run starts in — :func:`asf.workers.lifecycle.may_launch` decides whether
     one that already exists may be taken over.
@@ -151,38 +177,42 @@ def make_worktree(product, job, branch):
         raise SpawnError(f'product repo_dir missing: {repo!r}')
     registry = pool_mod.sessions_path(product)
     path = os.path.join(worktrees_dir(product), job)
-    _git(['fetch', '-q', 'origin', product.main], repo)
-    held = _holding_worktree(repo, branch)
-    for candidate in dict.fromkeys(p for p in (path, held) if p and os.path.exists(p)):
-        ok, why = lifecycle.may_launch(registry, job, candidate)
-        if not ok:
-            raise SpawnError(why)
-        if candidate == path or _worktree_branch(candidate) == branch:
-            subprocess.run(['git', 'rebase', '-q', f'origin/{product.main}'], cwd=candidate,
+
+    def add():
+        _git(['fetch', '-q', 'origin', product.main], repo)
+        held = _holding_worktree(repo, branch)
+        for candidate in dict.fromkeys(p for p in (path, held) if p and os.path.exists(p)):
+            ok, why = lifecycle.may_launch(registry, job, candidate)
+            if not ok:
+                raise SpawnError(why)
+            if candidate == path or _worktree_branch(candidate) == branch:
+                subprocess.run(['git', 'rebase', '-q', f'origin/{product.main}'], cwd=candidate,
+                               capture_output=True, text=True)
+                return candidate
+        if _branch_exists_on_origin(repo, branch):
+            _git(['fetch', '-q', 'origin', branch], repo)
+            if held:
+                # a stale worktree of an ended run still holds the branch and is not reusable here
+                _git(['worktree', 'remove', '--force', held], repo)
+            _git(['worktree', 'add', '-q', '-B', branch, path, f'origin/{branch}'], repo)
+            subprocess.run(['git', 'rebase', '-q', f'origin/{product.main}'], cwd=path,
                            capture_output=True, text=True)
-            return candidate
-    if _branch_exists_on_origin(repo, branch):
-        _git(['fetch', '-q', 'origin', branch], repo)
+            return path
         if held:
-            # a stale worktree of an ended run still holds the branch and is not reusable here
             _git(['worktree', 'remove', '--force', held], repo)
-        _git(['worktree', 'add', '-q', '-B', branch, path, f'origin/{branch}'], repo)
-        subprocess.run(['git', 'rebase', '-q', f'origin/{product.main}'], cwd=path,
-                       capture_output=True, text=True)
+            _git(['branch', '-D', branch], repo)
+        elif _local_branch_exists(repo, branch):
+            # a branch with no worktree and not on origin (a reaped one): reused when it carries
+            # nothing, refused with the count when it does (B-0025) — never silently reset
+            ahead = _git(['rev-list', '--count', f'origin/{product.main}..{branch}'], repo)
+            if ahead not in ('', '0'):
+                raise SpawnError(f'branch {branch} exists locally with {ahead} commit(s) not on '
+                                 f'origin/{product.main} and no worktree — look before relaunching')
+            _git(['branch', '-D', branch], repo)
+        _git(['worktree', 'add', '-q', '-b', branch, path, f'origin/{product.main}'], repo)
         return path
-    if held:
-        _git(['worktree', 'remove', '--force', held], repo)
-        _git(['branch', '-D', branch], repo)
-    elif _local_branch_exists(repo, branch):
-        # a branch with no worktree and not on origin (a reaped one): reused when it carries
-        # nothing, refused with the count when it does (B-0025) — never silently reset
-        ahead = _git(['rev-list', '--count', f'origin/{product.main}..{branch}'], repo)
-        if ahead not in ('', '0'):
-            raise SpawnError(f'branch {branch} exists locally with {ahead} commit(s) not on '
-                             f'origin/{product.main} and no worktree — look before relaunching')
-        _git(['branch', '-D', branch], repo)
-    _git(['worktree', 'add', '-q', '-b', branch, path, f'origin/{product.main}'], repo)
-    return path
+
+    return _with_repo_lock(repo, add)
 
 
 def _local_branch_exists(repo, branch):
