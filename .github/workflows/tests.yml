@@ -33,11 +33,13 @@ jobs:
         run: bash tools/check_conventions.sh
       - name: plugin is generated from the CLI
         run: asf plugin check
+      # B-0068: one test module per process, min(cpu_count, 8) at a time — the same modules
+      # `unittest discover -s tests` runs, the same summary shape, non-zero when any is red.
       - name: tests
         run: |
           git config --global user.name ci
           git config --global user.email ci@localhost
-          python3 -m unittest discover -s tests
+          python3 tools/run_tests.py
       - name: the sample product, end to end (init, one tick, next, doctor)
         run: python3 -m unittest -v tests.test_sample_product
       # F-0087 (B-0033, B-0038, B-0043, B-0047): the suite is hermetic. It runs once more under
@@ -55,4 +57,4 @@ jobs:
           HOME="$OPERATOR" git config --global user.email ci@localhost
           HOME="$OPERATOR" git config --global init.defaultBranch master
           env -i PATH="$PATH" HOME="$OPERATOR" ASF_HOME="$OPERATOR/.ASF" ASF_PRODUCT=asf \
-            python3 -m unittest discover -s tests
+            python3 tools/run_tests.py
