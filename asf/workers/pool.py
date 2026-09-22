@@ -9,7 +9,9 @@ Accounts come from ``config.yaml worker_pool.accounts``::
           cap: 3               # concurrent sessions
           caps: {opus: 2}      # optional per-model ceiling
           config_dir: ~/.ASF/accounts/acct-a   # the runtime's isolated config/home
-      reserve_for_s1: {local: 1, cloud: 1}
+      reserve_for_s1: {local: 1, cloud: 1}   # deprecated: now ``capacity.reserve_for_s1`` in
+                                              # config.yaml (asf.capacity.reserve); this key is
+                                              # still read when the new one is not set.
 
 The pick rule (the legacy one): among accounts under their caps and under the quota guard,
 the lowest load wins (ties by name). No account under the guard →
@@ -29,10 +31,11 @@ import os
 import re
 
 from asf import env
+from asf import capacity as capacity_mod
 from asf.workers import lifecycle
 from asf.workers import quota as quota_mod
 
-DEFAULT_RESERVE = {'local': 1, 'cloud': 1}
+DEFAULT_RESERVE = capacity_mod.DEFAULT_RESERVE  # re-export: existing importers keep working
 SESSION_FIELDS = ('job', 'item', 'feature', 'kind', 'account', 'model', 'pid', 'worktree',
                   'branch', 'started')
 
@@ -72,11 +75,7 @@ def accounts_from_config(cfg):
 
 
 def reserve_from_config(cfg):
-    out = dict(DEFAULT_RESERVE)
-    r = ((cfg or {}).get('worker_pool') or {}).get('reserve_for_s1')
-    if isinstance(r, dict):
-        out.update({k: int(v) for k, v in r.items()})
-    return out
+    return capacity_mod.reserve(cfg)
 
 
 # ---- the feeder row ---------------------------------------------------------
