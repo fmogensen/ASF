@@ -11,6 +11,8 @@ import argparse
 import contextlib
 import datetime
 import io
+import os
+import re
 
 
 def _ns(**kw):
@@ -22,16 +24,38 @@ def yesterday(today=None):
     return (today - datetime.timedelta(days=1)).isoformat()
 
 
-def parts(product, root):
-    """``[(name, thunk)]`` in order; each thunk returns an exit code."""
+_ANSWERS_FILE_RE = re.compile(r'^(\d{4}-\d{2}-\d{2})\.answers$')
+
+
+def _newest_answers_file(product):
+    """The state dir's newest ``groom/<date>.answers`` (F-0085 §2.6, D4) — the adjudicate
+    session's own answers, picked up by this tick's ``groom --apply``. ``None`` when there is
+    none, or none still unapplied (an applied one is renamed ``.answers.done``, so it no longer
+    matches)."""
+    from asf import env
+    d = os.path.join(env.state_dir(product), 'groom')
+    if not os.path.isdir(d):
+        return None
+    dates = [m.group(1) for name in os.listdir(d)
+             for m in [_ANSWERS_FILE_RE.match(name)] if m]
+    if not dates:
+        return None
+    return os.path.join(d, f'{sorted(dates)[-1]}.answers')
+
+
+def parts(product, root, event=None):
+    """``[(name, thunk)]`` in order; each thunk returns an exit code. ``event`` is ``ctx.event``
+    (§4) — handed to ``groom`` alone, the only part that writes events today."""
     from asf.groom.groom import cmd_groom
     from asf.metrics.metrics import cmd_rollup
     from asf.tick.file_bugs import cmd_file_bugs
     from asf.tick.stale import cmd_stale
     epic = (product.conventions or {}).get('default_bug_epic')
+    answers_file = _newest_answers_file(product)
     return [
         ('groom', lambda: cmd_groom(_ns(date=None, apply=True, product=product.name,
-                                        default_bug_epic=epic), root)),
+                                        default_bug_epic=epic, answers_file=answers_file,
+                                        event=event), root)),
         ('stale', lambda: cmd_stale(_ns(json=False), root)),
         ('file-bugs', lambda: cmd_file_bugs(_ns(default_bug_epic=epic), root)),
         ('rollup', lambda: cmd_rollup(_ns(day=yesterday(), no_releases=False,
@@ -55,7 +79,7 @@ def run(ctx, out=print):
     product = ctx.product
     root = ctx.record_root()
     failed = []
-    for name, thunk in parts(product, root):
+    for name, thunk in parts(product, root, event=ctx.event):
         rc, last = run_part(thunk)
         if rc:
             failed.append(name)

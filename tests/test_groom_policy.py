@@ -1,10 +1,10 @@
-"""asf.groom.policy — the gate (T1), and the open-question grammar it reads (PD4).
-
-The policy pass itself, its four rules, the suppression pass, the answers file and the digest
-all arrive in later Tasks of F-0085's plan; this file gains their test classes as those Tasks
-land. For now: the single gate, ``open_questions``, and the threshold readers.
+"""asf.groom.policy — the gate (T1), the open-question grammar it reads (PD4), the four policies
+and the policy pass (T2-T4), suppression (T6), the approval bound (T7) and the answers file
+(T10). The digest (T11) arrives in a later Task of F-0085's plan.
 """
+import argparse
 import datetime
+import json
 import os
 import shutil
 import tempfile
@@ -373,7 +373,32 @@ class ApprovalBoundTests(GroomAutoTestCase):
         self.assertEqual(policy.open_questions(text), [])
 
     def test_non_epic_question_is_unaffected_by_the_bound(self):
+        """An undecided card is the control case: it holds no policy (§2.2's ``undecided3`` row)
+        and no feeder row (``feature_rows`` only fires past ``decided: true``), so it stays a
+        plain open question — unlike a decided, spec-less Feature, which T6's suppression pass
+        would otherwise speak for as ``CARD → SPEC`` before the bound is ever reached."""
         self.write_product(approvals={'groom': 'auto', 'new_epic': 'human-now'})
+        write_item(self.root, 'F-0001', 'feature', 'Undecided idea', parent='E-0009',
+                  typed_lines=['decided: false'],
+                  machine_lines=['state: New', 'stage_since: 2026-09-17T00:00:00Z',
+                                 'updated: 2026-09-17T00:00:00Z'])
+        run(['index'], self.root)
+
+        r = self.run_groom()
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+        with open(os.path.join(self.root, 'groom', today() + '.md')) as f:
+            text = f.read()
+        self.assertNotIn('barred', text)
+        self.assertIn('F-0001 Undecided idea — undecided', text)
+        self.assertIn('→ answer: ____', text)
+
+
+class SuppressionTests(GroomAutoTestCase):
+    """T6: a question the feeder already has a row for is asked of nobody."""
+
+    def test_a_feature_with_a_card_spec_row_is_spoken_for(self):
+        self.write_product(approvals={'groom': 'auto'})
         write_item(self.root, 'F-0001', 'feature', 'Lonely feature', parent='E-0009',
                   typed_lines=['decided: true'])
         run(['index'], self.root)
@@ -383,8 +408,81 @@ class ApprovalBoundTests(GroomAutoTestCase):
 
         with open(os.path.join(self.root, 'groom', today() + '.md')) as f:
             text = f.read()
-        self.assertNotIn('barred', text)
-        self.assertIn('F-0001 Lonely feature — no Stories → answer: ____', text)
+        self.assertIn('- [x] F-0001 Lonely feature — no Stories → answer: '
+                      '(spoken for: CARD → SPEC)', text)
+        self.assertNotIn('controller:', text)
+        self.assertEqual(policy.open_questions(text), [])
+
+    def test_an_item_held_by_a_live_session_is_spoken_for(self):
+        self.write_product(approvals={'groom': 'auto'})
+        write_item(self.root, 'F-0003', 'feature', 'Stale idea', parent='E-0009',
+                  typed_lines=['decided: false'],
+                  machine_lines=['state: New', 'stage_since: 2026-09-01T00:00:00Z',
+                                 'updated: 2026-09-01T00:00:00Z'])
+        run(['index'], self.root)
+        # written straight to the session ledger's path, not through ``pool``/``env.load_product``
+        # — those read the module-level ``env.ASF_HOME``, set once at import and not refreshed by
+        # ``os.environ['ASF_HOME']`` alone, so an in-process write must build the path itself.
+        sessions_path = os.path.join(self.asf_home, 'state', 'sample', 'sessions.jsonl')
+        os.makedirs(os.path.dirname(sessions_path), exist_ok=True)
+        with open(sessions_path, 'w', encoding='utf-8') as f:
+            f.write(json.dumps({'job': 'spec-F-0003', 'item': 'F-0003', 'kind': 'spec',
+                               'account': 'a', 'started': '2026-09-22T00:00:00Z'}) + '\n')
+
+        r = self.run_groom()
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+        with open(os.path.join(self.root, 'groom', today() + '.md')) as f:
+            text = f.read()
+        self.assertIn('(spoken for: spec)', text)
+        self.assertEqual(policy.open_questions(text), [])
+
+
+class AnswersFileTests(unittest.TestCase):
+    """T10: the adjudicate session's answers file is applied once by the next ``cmd_groom``,
+    attributed to the job, and renamed so it is not applied twice."""
+
+    def setUp(self):
+        self.root = make_repo()
+        write_item(self.root, 'E-0009', 'epic', 'Factory', typed_lines=['decided: true'])
+        write_item(self.root, 'F-0001', 'feature', 'Some idea', parent='E-0009',
+                  typed_lines=['decided: false'])
+        self.answers_dir = tempfile.mkdtemp(prefix='groom_answers_')
+        self.answers_path = os.path.join(self.answers_dir, '2026-09-21.answers')
+        with open(self.answers_path, 'w', encoding='utf-8') as f:
+            f.write("- [ ] F-0001 Some idea — undecided 4d → answer: adjudicator: yes\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+        shutil.rmtree(self.answers_dir, ignore_errors=True)
+
+    def _cmd_groom(self, answers_file):
+        return groom.cmd_groom(argparse.Namespace(
+            date='2026-09-22', apply=False, product=None, default_bug_epic=None,
+            answers_file=answers_file, event=None), self.root)
+
+    def test_applied_once_attributed_and_renamed(self):
+        rc = self._cmd_groom(self.answers_path)
+        self.assertEqual(rc, 0)
+
+        self.assertFalse(os.path.exists(self.answers_path))
+        self.assertTrue(os.path.exists(self.answers_path + '.done'))
+
+        with open(os.path.join(self.root, 'features', 'F-0001.md')) as f:
+            text = f.read()
+        meta, body = frontmatter.parse(text, path='features/F-0001.md')
+        self.assertEqual(meta['decided'], True)
+        self.assertIn('2026-09-22 groom: decided → true (adjudicator, groom-2026-09-21)', body)
+
+    def test_second_run_does_not_reapply(self):
+        self._cmd_groom(self.answers_path)
+        with open(os.path.join(self.root, 'features', 'F-0001.md')) as f:
+            snapshot = f.read()
+
+        rc = self._cmd_groom(self.answers_path)  # renamed away by the first run — no-op
+        self.assertEqual(rc, 0)
+        with open(os.path.join(self.root, 'features', 'F-0001.md')) as f:
+            self.assertEqual(f.read(), snapshot)
 
 
 class UnblockTests(unittest.TestCase):

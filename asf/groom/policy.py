@@ -21,6 +21,10 @@ ADJUDICATE_ATTEMPTS = 2
 #: matches and is never counted open.
 OPEN_QUESTION_RE = re.compile(r'^- \[ \]\s+(?P<id>[A-Z]-\d{4})\b.*→\s*answer:\s*____$')
 
+#: An open question's line, split so :func:`suppress` can keep the ``<id> <title> — <why>``
+#: text and only replace the answer slot.
+_SUPPRESSABLE_RE = re.compile(r'^- \[ \]\s+(?P<id>[A-Z]-\d{4})\s+(?P<body>.*?)\s*→\s*answer:\s*____$')
+
 
 def groom_auto(product):
     """The single gate (§2.1): ``approvals.groom: auto`` turns on the policy pass, the
@@ -241,3 +245,36 @@ def barred(answer, item, product):
         if predicate(answer, typed) and str(approvals.get(key, '')).lower() != 'auto':
             return key
     return None
+
+
+def suppress(sections, index, inflight, product):
+    """§2.3: a question the factory is already acting on is asked of nobody. A line is rewritten
+    ``- [x] <id> <title> — <why> → answer: (spoken for: <ROW KIND>)`` when its item is either
+
+    - a live session's item (``inflight``), labelled with that session's own ``kind``; or
+    - the item of a row :func:`asf.feeder.rows.candidates` would launch right now, labelled with
+      that row's ``kind`` (e.g. ``CARD → SPEC``) — this is the more informative label, so it
+      wins when both hold.
+
+    Imports :mod:`asf.feeder.rows` inside the function body: that module imports this one at
+    module level (for :func:`groom_auto`), so the reverse import must stay lazy (module
+    docstring). Returns ``(sections, suppressed_count)``."""
+    from asf.feeder import rows as feeder_rows
+    spoken = {row.item_id: row.kind for row in feeder_rows.candidates(index, product, inflight)
+             if row.launches}
+    held = {s.get('item'): s.get('kind') for s in (inflight or ()) if s.get('item')}
+    out = {}
+    count = 0
+    for key, lines in sections.items():
+        new_lines = []
+        for line in lines:
+            m = _SUPPRESSABLE_RE.match(line)
+            label = (spoken.get(m.group('id')) or held.get(m.group('id'))) if m else None
+            if m and label:
+                new_lines.append(f"- [x] {m.group('id')} {m.group('body')} → answer: "
+                                 f"(spoken for: {label})")
+                count += 1
+            else:
+                new_lines.append(line)
+        out[key] = new_lines
+    return out, count

@@ -12,6 +12,7 @@ from asf.tick import stale
 from asf.tick.stale import format_age, parse_iso
 from asf.groom import policy
 from asf.groom.inbox import process_inbox
+from asf.views import index_reader
 from asf.workers import lifecycle, pool
 
 ANSWER_LINE_RE = re.compile(r'^- \[[ xX]\]\s+(?P<id>[A-Z]-\d{4})\b.*→\s*answer:\s*(?P<answer>.*)$')
@@ -72,14 +73,20 @@ def _fmt_history_value(value):
     return str(value)
 
 
-def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None):
+def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None, event=None,
+                        sections=None):
     """Read `prev_path`'s answered lines, write each as a typed field, append one History line
     each. A no-op line (blank/`____`, or a field already at the target value) changes nothing —
     this is what makes re-running `--apply` for the same date idempotent.
 
     `controller: <word>` attributes `(controller, starvation policy)`; `controller: <policy>
     <word>`, where `<policy>` is one of `POLICY_NAMES` (PD2, PD3), attributes `(controller,
-    <policy>)` instead. `adjudicator: <word>` attributes `(adjudicator, <adjudicator_job>)`."""
+    <policy>)` instead. `adjudicator: <word>` attributes `(adjudicator, <adjudicator_job>)`.
+
+    `event` (§4), when given, gets one `groom_answer` call per applied answer: `item`, `section`
+    (`sections.get(item, '')` — the `{item: section key}` map :func:`_line_sections` builds off
+    the file the question was asked in), `field`, `value`, `by` (`rule:<policy>` /
+    `adjudicator:<job>` / `operator`)."""
     with open(prev_path, encoding='utf-8') as f:
         lines = f.read().split('\n')
 
@@ -94,6 +101,7 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None):
             continue
 
         who = '(operator)'
+        by = 'operator'
         cm = CONTROLLER_PREFIX.match(raw_answer)
         am = ADJUDICATOR_PREFIX.match(raw_answer) if cm is None else None
         if cm:
@@ -101,12 +109,15 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None):
             pm = re.match(r'^(\S+)\s+(.*)$', raw_answer)
             if pm and pm.group(1) in POLICY_NAMES:
                 who = f'(controller, {pm.group(1)})'
+                by = f'rule:{pm.group(1)}'
                 raw_answer = pm.group(2).strip()
             else:
                 who = '(controller, starvation policy)'
+                by = 'rule:starvation policy'
         elif am:
             raw_answer = raw_answer[am.end():].strip()
             who = f'(adjudicator, {adjudicator_job})'
+            by = f'adjudicator:{adjudicator_job}'
 
         field, value = _parse_answer(raw_answer)
         if field is None:
@@ -134,6 +145,9 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None):
             else:
                 rec['meta'].pop('blockedBy', None)
             applied += 1
+            if event:
+                event('groom_answer', item=iid, section=(sections or {}).get(iid, ''),
+                     field=field, value=hist_value, by=by)
             continue
 
         if field == 'removed':
@@ -153,6 +167,9 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None):
                 f.write(frontmatter.render(meta2, new_body))
         rec['meta'][field] = value
         applied += 1
+        if event:
+            event('groom_answer', item=iid, section=(sections or {}).get(iid, ''),
+                 field=field, value=_fmt_history_value(value), by=by)
     return applied
 
 
@@ -314,6 +331,29 @@ def build_groom_sections(canonical, derived, date):
     }
 
 
+_SECTION_BY_TITLE = {title: key for title, key in GROOM_SECTIONS}
+_HEADER_RE = re.compile(r'^## (.+)$')
+_LINE_ID_RE = re.compile(r'^- \[[ xX]\]\s+([A-Z]-\d{4})\b')
+
+
+def _line_sections(text):
+    """``{item_id: section key}`` for a rendered groom file's bullet lines, tracking which ``##
+    <title>`` header each falls under. Used to attribute a ``groom_answer`` event's ``section``
+    to the file the question was actually asked in, whether that is today's groom file, a
+    previous one being ``--apply``-ed, or the groom day an answers file answers."""
+    out = {}
+    current = None
+    for line in text.splitlines():
+        h = _HEADER_RE.match(line)
+        if h:
+            current = _SECTION_BY_TITLE.get(h.group(1))
+            continue
+        m = _LINE_ID_RE.match(line)
+        if m and current:
+            out[m.group(1)] = current
+    return out
+
+
 #: PD3 checked against §2.2's own order — a test asserts these equal ``[n for n, _s, _f in
 #: policy.POLICIES]``.
 _POLICY_BY_SECTION = {section: (name, fn) for name, section, fn in policy.POLICIES}
@@ -377,6 +417,9 @@ def render_groom_file(date, sections):
     return '\n'.join(out).rstrip('\n') + '\n'
 
 
+ANSWERS_FILE_RE = re.compile(r'^(\d{4}-\d{2}-\d{2})\.answers$')
+
+
 def cmd_groom(args, root):
     date = args.date or datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
     by_id, parse_errors = load_items(root)
@@ -391,11 +434,30 @@ def cmd_groom(args, root):
     except env.ConfigError:
         product = None
 
+    event = getattr(args, 'event', None)
+
     applied = 0
     if args.apply:
         prev = _previous_groom_file(root, date)
         if prev:
-            applied = apply_groom_answers(root, canonical, prev, date)
+            with open(prev, encoding='utf-8') as f:
+                prev_sections = _line_sections(f.read())
+            applied = apply_groom_answers(root, canonical, prev, date, event=event,
+                                          sections=prev_sections)
+
+    answers_file = getattr(args, 'answers_file', None)
+    if answers_file and os.path.isfile(answers_file):
+        m = ANSWERS_FILE_RE.match(os.path.basename(answers_file))
+        adj_date = m.group(1) if m else date
+        adj_groom_path = os.path.join(root, 'groom', f'{adj_date}.md')
+        adj_sections = {}
+        if os.path.isfile(adj_groom_path):
+            with open(adj_groom_path, encoding='utf-8') as f:
+                adj_sections = _line_sections(f.read())
+        applied += apply_groom_answers(root, canonical, answers_file, date,
+                                       adjudicator_job=f'groom-{adj_date}', event=event,
+                                       sections=adj_sections)
+        os.rename(answers_file, answers_file + '.done')
 
     default_bug_parent = getattr(args, 'default_bug_epic', None)
     if default_bug_parent is None and product is not None:
@@ -407,14 +469,20 @@ def cmd_groom(args, root):
 
     auto = policy.groom_auto(product)
     by_rule = 0
+    spoken_for = 0
+    barred_count = 0
     if auto:
+        index, _generated = index_reader.load(root)
+        inflight = lifecycle.inflight(pool.sessions_path(product))
+        sections, spoken_for = policy.suppress(sections, index, inflight, product)
+
         ctx = policy.Ctx(date=date, now=datetime.datetime.now(datetime.timezone.utc),
                          duplicate_overlap=policy.duplicate_overlap(product),
                          recurring_bug_count=policy.recurring_bug_count(product),
                          undecided_close=stale.load_limits(product).get(
                              'undecided_close', policy.DEFAULT_UNDECIDED_CLOSE),
                          ledger_items=_ledger_items(product))
-        sections, _barred_count = run_policy_pass(sections, canonical, derived, product, ctx)
+        sections, barred_count = run_policy_pass(sections, canonical, derived, product, ctx)
 
     text = render_groom_file(date, sections)
     groom_dir = os.path.join(root, 'groom')
@@ -424,12 +492,19 @@ def cmd_groom(args, root):
         f.write(text)
 
     if auto:
-        by_rule = apply_groom_answers(root, canonical, groom_path, date)
+        by_rule = apply_groom_answers(root, canonical, groom_path, date, event=event,
+                                      sections=_line_sections(text))
         canonical, _dupes = canonicalize(load_items(root)[0])
         derived = compute_derived(canonical)
 
     rc = do_index(root)
     counts = ', '.join(f"{title}: {len(sections.get(key) or [])}" for title, key in GROOM_SECTIONS)
-    by_rule_part = f", by rule {by_rule}" if auto else ''
-    print(f"groom {date}: applied {applied}, inbox {len(created_ids)} card(s){by_rule_part} — {counts}")
+    open_count = len(policy.open_questions(text))
+    if auto:
+        print(f"groom {date}: applied {applied}, inbox {len(created_ids)} card(s), "
+             f"by rule {by_rule}, spoken for {spoken_for}, open {open_count} — {counts}")
+    else:
+        print(f"groom {date}: applied {applied}, inbox {len(created_ids)} card(s) — {counts}")
+    if event:
+        event('groom_open', count=open_count, barred=barred_count)
     return rc

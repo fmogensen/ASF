@@ -541,7 +541,7 @@ class HarvestStepTests(StepsTestCase):
 
 class DailyStepTests(StepsTestCase):
     def fake_parts(self, fail=()):
-        def parts(product, root):
+        def parts(product, root, event=None):
             def make(name):
                 def thunk():
                     if name in fail:
@@ -581,6 +581,20 @@ class DailyStepTests(StepsTestCase):
         names = [n for n, _ in step_daily.parts(self.product, self.tmp)]
         self.assertEqual(names, ['groom', 'stale', 'file-bugs', 'rollup'])
         self.assertEqual(step_daily.yesterday(__import__('datetime').date(2026, 3, 1)), '2026-02-28')
+
+    def test_parts_hands_the_event_sink_to_groom(self):
+        sentinel = object()
+        calls = []
+
+        def fake_cmd_groom(args, root):
+            calls.append(args)
+            return 0
+
+        with mock.patch('asf.groom.groom.cmd_groom', fake_cmd_groom):
+            name, thunk = step_daily.parts(self.product, self.tmp, event=sentinel)[0]
+            self.assertEqual(name, 'groom')
+            thunk()
+        self.assertEqual(calls[0].event, sentinel)
 
 
 if __name__ == '__main__':
