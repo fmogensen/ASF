@@ -223,13 +223,17 @@ PRODUCT_FIELDS = {
     'product': _STR, 'repo_slug': _STR, 'repo_dir': _STR, 'main': _STR, 'backlog_dir': _STR,
     'app_host': _STR, 'conventions': _MAP, 'ci': None, 'deploy_sha': None,
     'customer_paths': _LIST, 'stage_limits': _MAP, 'size_classes': _MAP, 'approvals': _MAP,
-    'steps': _MAP, 'job_grants': _LIST, 'groom': _MAP,
+    'steps': _MAP, 'job_grants': _LIST, 'groom': _MAP, 'capacity': _MAP,
 }
 # `ci:` is a map (or the bare word `none`, a product without CI); these are its keys.
 CI_FIELDS = {
     'provider': _STR, 'workflow': _STR, 'test_command': _STR, 'budgets': _MAP,
     'runner_org': _STR, 'labels': _LIST,
 }
+# `capacity:` is a map: this product's session/CI ceilings and its batch shape.
+CAPACITY_FIELDS = {'sessions': _STR, 'ci': _STR, 'batch': _MAP}
+# every product-file section whose own keys are checked, keyed by its own field table.
+NESTED_FIELDS = {'ci': CI_FIELDS, 'capacity': CAPACITY_FIELDS}
 
 
 def _shape_ok(value, shape):
@@ -260,8 +264,8 @@ def validate_product_text(text):
         if len(line) == len(line.lstrip(' ')):
             section = m[0]
             lines.setdefault(section, n)
-        elif section == 'ci':
-            lines.setdefault('ci.' + m[0], n)
+        elif section in NESTED_FIELDS:
+            lines.setdefault(section + '.' + m[0], n)
     problems = []
 
     def check(fields, mapping, prefix):
@@ -273,8 +277,9 @@ def validate_product_text(text):
                 problems.append((lines.get(dotted, 0), dotted, f'must be {fields[key]}, not {value!r}'))
 
     check(PRODUCT_FIELDS, data, '')
-    if isinstance(data.get('ci'), dict):
-        check(CI_FIELDS, data['ci'], 'ci.')
+    for section, fields in NESTED_FIELDS.items():
+        if isinstance(data.get(section), dict):
+            check(fields, data[section], section + '.')
     return sorted(problems)
 
 

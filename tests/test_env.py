@@ -244,6 +244,38 @@ class TestProductSchema(unittest.TestCase):
             os.path.dirname(__file__), '..', 'docs', 'products.example.yaml')).read()), [])
 
 
+class ProductValidation(unittest.TestCase):
+    def test_capacity_is_a_declared_field(self):
+        problems = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            capacity:
+              sessions: 3
+              ci: 2
+              batch:
+                per_run: 8
+                parallel: 2
+                runners: 4
+            """))
+        self.assertEqual(problems, [])
+
+    def test_an_unknown_capacity_key_is_reported_with_its_line(self):
+        problems = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            capacity:
+              sessions: 3
+              made_up_key: 1
+            """))
+        self.assertIn((4, 'capacity.made_up_key', 'is not a field of the product file'), problems)
+
+    def test_capacity_batch_must_be_a_map(self):
+        problems = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            capacity:
+              batch: TODO
+            """))
+        self.assertIn((3, 'capacity.batch', "must be a map, not 'TODO'"), problems)
+
+
 def _dedent(text):
     lines = [l for l in text.splitlines() if l.strip() != '']
     if not lines:
