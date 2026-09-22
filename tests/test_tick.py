@@ -12,7 +12,7 @@ import unittest
 from unittest import mock
 
 from asf import env
-from asf.tick import shadow, steps, tick
+from asf.tick import shadow, steps, summary, tick
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_tick` does not
     from gitfixture import Template
@@ -28,6 +28,12 @@ def _args(**kw):
     base = dict(product='sample', shadow=False, fresh=False, steps=None, manifest=False, daily=False)
     base.update(kw)
     return argparse.Namespace(**base)
+
+
+def steps_only(out):
+    """A tick's stdout without the two summary blocks — for the assertions whose subject is
+    the step log (F-0078)."""
+    return out.split('\n\nIN FLIGHT')[0] + '\n'
 
 
 def _tree_digest(path):
@@ -132,7 +138,7 @@ class RecordStepTests(TickTestCase):
     def test_run_produces_one_pushed_commit(self):
         rc, out = self.run_tick(steps='record')
         self.assertEqual(rc, 0)
-        self.assertEqual(out, f'tick: state committed and pushed ({self.record_path()})\n')
+        self.assertEqual(steps_only(out), f'tick: state committed and pushed ({self.record_path()})\n')
         self.assertEqual(self.origin_commits(), 2)
         self.assertEqual(_git(['show', 'main:state/rollup.md'], self.origin), 'derived')
         self.assertEqual(_git(['log', '-1', '--format=%an <%ae>', 'main'], self.origin), 'ASF <asf@localhost>')
@@ -147,7 +153,7 @@ class RecordStepTests(TickTestCase):
         self.run_tick(steps='record')
         rc, out = self.run_tick(steps='record')
         self.assertEqual(rc, 0)
-        self.assertEqual(out, f'tick: no change ({self.record_path()})\n')
+        self.assertEqual(steps_only(out), f'tick: no change ({self.record_path()})\n')
         self.assertEqual(self.origin_commits(), 2)
 
     def test_refused_push_exits_1_then_next_run_resets_the_stray_commit(self):
@@ -158,7 +164,8 @@ class RecordStepTests(TickTestCase):
 
         rc, out = self.run_tick(steps='record')
         self.assertEqual(rc, 1)
-        self.assertEqual(out, f'tick: state committed, push refused — re-derived next run ({self.record_path()})\n')
+        self.assertEqual(steps_only(out),
+                         f'tick: state committed, push refused — re-derived next run ({self.record_path()})\n')
         self.assertEqual(self.origin_commits(), 1)
         self.assertEqual(_git(['rev-list', '--count', 'HEAD'], self.record_path()), '2')  # seed + the stray
 
@@ -187,8 +194,9 @@ class RecordStepTests(TickTestCase):
         with mock.patch.object(shadow, 'commit_local', commit_then_origin_moves):
             rc, out = self.run_tick(steps='record')
         self.assertEqual(rc, 0)
-        self.assertEqual(out, 'tick: origin moved during the tick — rebased onto origin/main and pushed\n'
-                              f'tick: state committed and pushed ({self.record_path()})\n')
+        self.assertEqual(steps_only(out),
+                         'tick: origin moved during the tick — rebased onto origin/main and pushed\n'
+                         f'tick: state committed and pushed ({self.record_path()})\n')
         self.assertEqual(self.origin_commits(), 3)
         self.assertEqual(_git(['show', 'main:state/rollup.md'], self.origin), 'derived')
         self.assertEqual(_git(['show', 'main:bugs.md'], self.origin), 'filed by hand')
@@ -452,27 +460,27 @@ class LegacyStepTests(TickTestCase):
     def test_command_output_is_prefixed_in_the_log(self):
         rc, out = self.run_tick(steps='health')
         self.assertEqual(rc, 0)
-        self.assertEqual(out, '[command:health] hi\n')
+        self.assertEqual(steps_only(out), '[command:health] hi\n')
 
     def test_steps_subset_runs_only_those_and_in_manifest_order(self):
         rc, out = self.run_tick(steps='health,record')
         self.assertEqual(rc, 0)
         self.assertEqual(out.splitlines()[0], '[command:health] hi')
         # the one commit comes last: after every step, over the state and the tick line together
-        self.assertEqual(out.splitlines()[-1], f'tick: state committed and pushed ({self.record_path()})')
+        self.assertEqual(steps_only(out).splitlines()[-1], f'tick: state committed and pushed ({self.record_path()})')
         self.assertNotIn('daily', out)
 
     def test_off_step_is_reported_not_run(self):
         rc, out = self.run_tick(steps='batch')
         self.assertEqual(rc, 0)
-        self.assertEqual(out, 'tick: step batch off (another job runs it)\n')
+        self.assertEqual(steps_only(out), 'tick: step batch off (another job runs it)\n')
 
     def test_failing_command_step_exits_1_and_later_steps_still_run(self):
         self.write_product('steps:\n  health: python3 -c \'import sys; print("bad"); sys.exit(3)\'\n'
                            '  wave: python3 -c \'print("after")\'\n')
         rc, out = self.run_tick(steps='health,wave')
         self.assertEqual(rc, 1)
-        self.assertEqual(out.splitlines(), ['[command:health] bad', 'tick: step health exited 3',
+        self.assertEqual(steps_only(out).splitlines(), ['[command:health] bad', 'tick: step health exited 3',
                                             '[command:wave] after'])
 
     def test_timeout_kills_a_sleep(self):
@@ -502,27 +510,60 @@ class LegacyStepTests(TickTestCase):
 
     def test_daily_runs_once_a_day(self):
         rc, out = self.run_tick(steps='daily')
-        self.assertEqual(out, '[command:daily] daily ran\n')
+        self.assertEqual(steps_only(out), '[command:daily] daily ran\n')
         with open(steps.stamp_path(env.load_product('sample'))) as f:
             self.assertEqual(f.read().strip(), steps._today())
 
         rc, out = self.run_tick(steps='daily')
-        self.assertEqual(out, 'tick: step daily already ran today\n')
+        self.assertEqual(steps_only(out), 'tick: step daily already ran today\n')
 
         rc, out = self.run_tick(steps='daily', daily=True)
-        self.assertEqual(out, '[command:daily] daily ran\n')
+        self.assertEqual(steps_only(out), '[command:daily] daily ran\n')
 
     def test_daily_runs_when_the_stamp_is_from_another_day(self):
         product = env.load_product('sample')
         with open(steps.stamp_path(product), 'w') as f:
             f.write('2001-01-01\n')
         rc, out = self.run_tick(steps='daily')
-        self.assertEqual(out, '[command:daily] daily ran\n')
+        self.assertEqual(steps_only(out), '[command:daily] daily ran\n')
 
     def test_failed_daily_is_not_stamped(self):
         self.write_product('steps:\n  daily: python3 -c \'raise SystemExit(1)\'\n')
         self.run_tick(steps='daily')
         self.assertFalse(os.path.exists(steps.stamp_path(env.load_product('sample'))))
+
+
+class SummaryTests(TickTestCase):
+    def test_every_tick_ends_with_the_two_tables(self):
+        rc, out = self.run_tick(steps='record')
+        self.assertEqual(rc, 0)
+        lines = out.rstrip('\n').split('\n')
+        self.assertEqual(lines[0], f'tick: state committed and pushed ({self.record_path()})')
+        self.assertEqual(lines[1:3], ['', 'IN FLIGHT — none'])
+        self.assertTrue(lines[-1].startswith('DONE since '), lines[-1])
+        self.assertTrue(lines[-1].endswith('— none (first tick on this clock)'), lines[-1])
+        self.assertTrue(os.path.exists(summary.stamp_path(env.load_product('sample'), 'record')))
+
+    def test_a_tick_with_every_step_off_still_prints_the_tables(self):
+        self.write_product('steps:\n  batch: off\n')
+        rc, out = self.run_tick(steps='batch')
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.split('\n')[0], 'tick: step batch off (another job runs it)')
+        self.assertIn('\nIN FLIGHT — none\n', out)
+        self.assertIn('\nDONE since ', out)
+
+    def test_shadow_and_manifest_print_no_tables(self):
+        with mock.patch.object(tick, 'render_tables', return_value={}):
+            _, out = self.run_tick(shadow=True)
+        self.assertNotIn('IN FLIGHT', out)
+        _, out = self.run_tick(manifest=True)
+        self.assertNotIn('IN FLIGHT', out)
+
+    def test_a_summary_failure_never_changes_the_rc(self):
+        with mock.patch.object(summary, 'render', side_effect=ValueError('boom')):
+            rc, out = self.run_tick(steps='record')
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.rstrip('\n').split('\n')[-1], 'tick: summary not rendered (boom)')
 
 
 class Step0Tests(unittest.TestCase):

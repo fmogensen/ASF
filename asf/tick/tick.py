@@ -15,7 +15,8 @@ line goes to ``metrics/ticks/<day>.jsonl`` in the record clone — the ``ticks``
 and only then is the clone committed (``tick: state <ts>``) and pushed: one commit per tick, so
 the derived state, the events the steps appended and the step log land together. One line per
 tick, not per step: ``asf metrics rollup`` counts the stream's lines as ticks and reads every
-stream field off each one.
+stream field off each one. After the commit the tick prints its summary — the sessions in flight
+and the ones that ended since the last tick on this clock (:mod:`asf.tick.summary`).
 
 ``--shadow`` runs step 0 against a shadow clone instead — never pushes, commits locally, never
 runs a command step — then renders the six tables (:mod:`asf.views`) into ``<shadow>/tables/*.md``
@@ -31,7 +32,7 @@ import time
 
 from asf import env
 from asf.record.index import do_index
-from asf.tick import steps
+from asf.tick import steps, summary
 
 
 def _ns(**kw):
@@ -217,7 +218,7 @@ def cmd_tick(args, root=None):
 
     ctx = Context(product, fresh=fresh)
     try:
-        return _run_steps(args, product, ctx, rows)
+        return _run_steps(args, product, ctx, rows, chosen)
     except env.ConfigError as e:
         from asf.cli import needs_operator_line
         line = needs_operator_line(e, product.name)
@@ -229,7 +230,7 @@ def cmd_tick(args, root=None):
         return 2
 
 
-def _run_steps(args, product, ctx, rows):
+def _run_steps(args, product, ctx, rows, chosen):
     rc = 0
     ran = []
     for step, owner, command in rows:
@@ -253,6 +254,7 @@ def _run_steps(args, product, ctx, rows):
         rc = rc or (1 if step_rc else 0)
     if ran:
         rc = finish(ctx, ran) or rc
+    summary.run(ctx, chosen)
     return rc
 
 

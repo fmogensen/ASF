@@ -16,7 +16,7 @@ from asf.metrics import metrics as metrics_mod
 from asf.tick import shadow, step_daily, step_harvest, step_health, step_prs, step_wave, steps, tick
 from asf.workers import pool as pool_mod
 from asf.workers import runtime as runtime_mod
-from tests.test_tick import TickTestCase, _git
+from tests.test_tick import TickTestCase, _git, steps_only
 
 DEAD_PID = 999999
 CARD = ('---\nid: B-0001\ntype: bug\ntitle: the first bug\n---\n## Description\nx\n\n'
@@ -117,7 +117,7 @@ class OrderedTickTests(StepsTestCase):
             rc, out = self.run_tick()
         self.assertEqual(rc, 1)
         self.assertEqual(ran, ['health', 'wave', 'prs', 'harvest', 'daily'])
-        lines = out.splitlines()
+        lines = steps_only(out).splitlines()
         self.assertEqual(lines[0], '[step:health] FAILED health blew up')
         self.assertEqual(lines[1], '[command:batch] batch ran')
         self.assertEqual(lines[-1], f'tick: state committed and pushed ({self.record_path()})')
@@ -151,7 +151,7 @@ class OrderedTickTests(StepsTestCase):
     def test_command_steps_alone_do_not_clone_the_record_to_log(self):
         rc, out = self.run_tick(steps='batch')
         self.assertEqual(rc, 0)
-        self.assertEqual(out, '[command:batch] batch ran\n')
+        self.assertEqual(steps_only(out), '[command:batch] batch ran\n')
         self.assertFalse(os.path.exists(self.record_path()))
 
 
