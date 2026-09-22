@@ -314,13 +314,19 @@ def _job_plist(job):
 
 def scheduler_rows(cfg, product, jobs=None):
     """[(level, label, detail)] — one line per loaded factory job, then the yellow dir lines."""
+    rows = []
+    if 'interval_s' in (cfg.get('scheduler') or {}):
+        rows.append((YELLOW, 'config',
+                     'scheduler.interval_s is set but no longer read — clocks live in '
+                     f'products/{product.name}.yaml'))
+
     kind = scheduler.kind(cfg)
     if kind != 'launchd':
-        return [(OK, f'kind:{kind}',
-                 f'scheduler kind {kind!r} has no launchd adapter — nothing to read back')]
+        rows.append((OK, f'kind:{kind}',
+                     f'scheduler kind {kind!r} has no launchd adapter — nothing to read back'))
+        return rows
 
     jobs = scheduler.loaded_jobs(cfg=cfg) if jobs is None else jobs
-    rows = []
     if not jobs:
         rows.append((RED, '(none)', 'no factory job is loaded — nothing ticks this product'))
     for job in sorted(jobs, key=lambda j: j['label']):
@@ -328,7 +334,8 @@ def scheduler_rows(cfg, product, jobs=None):
         info = scheduler.status(label)
         data = _job_plist(job)
         log = data.get('StandardOutPath') or job.get('log')
-        interval = data.get('StartInterval') or scheduler.interval_s(cfg)
+        interval = data.get('StartInterval') or (86400 if data.get('StartCalendarInterval')
+                                                  else None)
         installed_age = _age_s(job.get('plist')) if job.get('plist') else None
 
         if not info.get('loaded'):
@@ -341,7 +348,7 @@ def scheduler_rows(cfg, product, jobs=None):
         detail += f"  log: {tail}" if tail else "  log: (empty)"
 
         level = OK
-        if info.get('never_exited') and installed_age is not None \
+        if info.get('never_exited') and installed_age is not None and interval is not None \
                 and installed_age > NEVER_EXITED_INTERVALS * int(interval):
             level = RED
             detail += (f"  — never ran in {format_age(installed_age)}, over "

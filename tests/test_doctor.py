@@ -357,15 +357,20 @@ class TestSchedulerSection(unittest.TestCase):
         os.environ.update(self._old_env)
         env.ASF_HOME = self._old_asf_home
 
-    def cfg(self, legacy_labels=(), legacy_paths=()):
-        return {'scheduler': {'kind': 'launchd', 'label_prefix': 'asf',
-                              'legacy_labels': list(legacy_labels), 'interval_s': 600},
-                'legacy_paths': list(legacy_paths)}
+    def cfg(self, legacy_labels=(), legacy_paths=(), interval_s=None):
+        sched = {'kind': 'launchd', 'label_prefix': 'asf', 'legacy_labels': list(legacy_labels)}
+        if interval_s is not None:
+            sched['interval_s'] = interval_s
+        return {'scheduler': sched, 'legacy_paths': list(legacy_paths)}
 
-    def install_plist(self, label, argv, log=None, interval=600, age_s=0):
+    def install_plist(self, label, argv, log=None, interval=600, calendar=None, age_s=0):
         import plistlib
         path = os.path.join(self.agents, f'{label}.plist')
-        data = {'Label': label, 'ProgramArguments': argv, 'StartInterval': interval}
+        data = {'Label': label, 'ProgramArguments': argv}
+        if calendar is not None:
+            data['StartCalendarInterval'] = calendar
+        else:
+            data['StartInterval'] = interval
         if log:
             data['StandardOutPath'] = log
         with open(path, 'wb') as f:
@@ -436,6 +441,31 @@ class TestSchedulerSection(unittest.TestCase):
         rows = doctor.scheduler_rows(self.cfg(), self.product)
         self.assertEqual(rows[0][0], doctor.RED)
         self.assertIn('nothing ticks', rows[0][2])
+
+    def test_daily_job_never_ran_uses_a_day_not_the_global_interval(self):
+        self.install_plist('asf.sample.daily', ['python3'],
+                           calendar={'Hour': 6, 'Minute': 50}, age_s=1800)
+        fake_loaded(self.statedir, ['asf.sample.daily'])
+        fake_print(self.statedir, 'asf.sample.daily',
+                   read_fixture('launchctl-print-never-exited.txt'))
+        rows = doctor.scheduler_rows(self.cfg(), self.product)
+        self.assertEqual(rows[0][0], doctor.OK)
+
+    def test_interval_job_never_ran_uses_its_own_interval(self):
+        self.install_plist('asf.sample.record', ['python3'], interval=300, age_s=660)
+        fake_loaded(self.statedir, ['asf.sample.record'])
+        fake_print(self.statedir, 'asf.sample.record',
+                   read_fixture('launchctl-print-never-exited.txt'))
+        rows = doctor.scheduler_rows(self.cfg(), self.product)
+        self.assertEqual(rows[0][0], doctor.RED)
+        self.assertIn('never ran', rows[0][2])
+
+    def test_interval_s_in_config_is_yellow(self):
+        fake_loaded(self.statedir, [])
+        rows = doctor.scheduler_rows(self.cfg(interval_s=600), self.product)
+        yellow = [r for r in rows if r[0] == doctor.YELLOW and r[1] == 'config']
+        self.assertEqual(len(yellow), 1, rows)
+        self.assertIn('scheduler.interval_s', yellow[0][2])
 
     def test_a_legacy_dir_a_loaded_job_still_points_at_is_yellow(self):
         script = os.path.join(self.legacy_dir, 'dispatch.sh')
