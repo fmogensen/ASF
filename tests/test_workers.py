@@ -350,6 +350,16 @@ class TestSpawn(Home):
         for i, path in enumerate(results):
             self.assertEqual(git('rev-parse', '--abbrev-ref', 'HEAD', cwd=path), f'branch{i}')
 
+    def test_b0016_retry_runs_the_add_path_again_over_a_half_made_worktree(self):
+        # the retry in `_with_repo_lock` calls `add` a second time, so `add` has to be safe to
+        # call twice. The state a first attempt can leave behind is the branch created and the
+        # worktree not: the reaped-branch arm (it carries nothing, so it is dropped and remade)
+        # takes it, and the second call succeeds rather than failing "already exists".
+        git('branch', 'fix/B-9999', 'origin/main', cwd=self.repo)
+        self.assertNotIn('fix/B-9999', git('worktree', 'list', cwd=self.repo))
+        path = spawn_mod.make_worktree(self.product, 'job-retry', 'fix/B-9999')
+        self.assertEqual(git('rev-parse', '--abbrev-ref', 'HEAD', cwd=path), 'fix/B-9999')
+
     def test_id_ranges_do_not_overlap_and_are_sticky(self):
         r1 = spawn_mod.reserve_id_range(self.product, 'j1', prefixes=['T'])
         r2 = spawn_mod.reserve_id_range(self.product, 'j2', prefixes=['T'])
