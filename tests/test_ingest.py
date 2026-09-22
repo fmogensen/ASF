@@ -56,6 +56,32 @@ def read_meta(root, folder, id_):
     return frontmatter.parse(text, path=f"{folder}/{id_}.md")
 
 
+class LandingOutranksThePlan(unittest.TestCase):
+    """B-0074: a Task listed in its plan's table stayed Active although its commit was on main
+    with a green run — the plan's `branch … exists` line won. A landing outranks every source."""
+
+    def evidence(self, **ids):
+        return {'features': {}, 'ids': ids}
+
+    def task_card(self, tid, plan='p'):
+        return {'id': tid, 'type': 'task', 'title': tid, 'links': {'plan': f'plans/{plan}.md'}}
+
+    def test_a_landed_task_closes_even_when_its_plan_lists_the_branch(self):
+        from asf.record import ingest
+        ev = self.evidence(**{'T-0010': {'branches': ['task/T-0010'], 'commit': 'cada650' * 6,
+                                         'green': True, 'open_prs': [], 'pr': None}})
+        state, lines = ingest.match_ids('T-0010', ev)
+        self.assertEqual(state, 'Closed')
+        self.assertTrue(any('names T-0010' in l for l in lines), lines)
+
+    def test_a_task_with_only_a_branch_is_active(self):
+        from asf.record import ingest
+        ev = self.evidence(**{'T-0011': {'branches': ['task/T-0011'], 'commit': None,
+                                         'green': False, 'open_prs': [], 'pr': None}})
+        state, _ = ingest.match_ids('T-0011', ev)
+        self.assertEqual(state, 'Active')
+
+
 class MatchFeatureTests(unittest.TestCase):
     def _meta_from(self, typed_lines):
         lines = ['id: F-0001', 'type: feature', 'title: Free plan'] + list(typed_lines) + \
@@ -281,7 +307,11 @@ class CmdIngestEndToEndTests(unittest.TestCase):
         self.assertEqual(meta['state'], 'Active')
         self.assertEqual(meta['evidence'], ['branch worker/T-0002-wire'])
 
-    def test_id_token_never_overrides_a_legacy_match(self):
+    def test_a_landing_outranks_a_legacy_plan_match(self):
+        # B-0074 (was: `id_token_never_overrides_a_legacy_match`): the plan's task table says what
+        # was intended, the commit says what landed. A commit naming the item on the trunk, with a
+        # green run where there is CI, is the strongest evidence there is — for every type. The
+        # plan's line stays as context so the reader still sees where the Task belongs.
         write(self.root, 'T-0001', 'task', 'Wire it', 'tasks', typed_lines=['legacy_id: FREE-1/T3'])
         ev = dict(EMPTY_EV, features={'free-plan': {
             'alias': 'FREE-1', 'spec': None, 'spec_branch': None, 'plan': None,
@@ -292,8 +322,9 @@ class CmdIngestEndToEndTests(unittest.TestCase):
                             'pr': None, 'green': True}}, ci=None)
         self.assertEqual(self.run_ingest(ev), 0)
         meta, _body = read_meta(self.root, 'tasks', 'T-0001')
-        self.assertEqual(meta['state'], 'New')
-        self.assertEqual(meta['evidence'], ['in plan free-plan (T3), no branch yet'])
+        self.assertEqual(meta['state'], 'Closed')
+        self.assertEqual(meta['evidence'][0], 'commit abcdef0 names T-0001')
+        self.assertIn('in plan free-plan (T3)', meta['evidence'])
 
     def test_unmatched_feature_gets_no_evidence_line(self):
         write(self.root, 'E-0001', 'epic', 'Factory', 'epics')

@@ -148,8 +148,9 @@ def match_bug(meta, ev):
 
 def match_ids(iid, ev):
     """(state, [evidence line]) from the id tokens naming `iid` in a branch, a PR or a commit on
-    main — `(None, [])` when nothing names it. Only ever fills what the legacy-id and spec-path
-    matching left unmatched; it never overrides a match."""
+    main — `(None, [])` when nothing names it. A `Resolved`/`Closed` verdict here outranks every
+    other source (B-0074: a landing beats a plan's task table); an `Active` one only fills what
+    the legacy-id and spec-path matching left unmatched."""
     iev = (ev.get('ids') or {}).get(iid)
     return evidence.id_state(iid, iev, has_ci=bool(ev.get('ci')))
 
@@ -252,11 +253,18 @@ def cmd_ingest(args, root):
             continue
         slug, tid, tev = match_task(rec['meta'], ev)
         task_ev[iid] = tev
+        # A commit on the trunk (with a green run where there is CI) is the strongest evidence
+        # there is, for every type — a plan's task table says what was intended, never what
+        # landed, and must not outrank the landing (B-0074). The plan's line stays as context.
+        landed_state, landed_lines = match_ids(iid, ev)
+        if landed_state in ('Resolved', 'Closed'):
+            new_state[iid] = landed_state
+            ev_lines[iid] = landed_lines + ([f"in plan {slug} ({tid})"] if tev is not None else [])
+            continue
         if tev is None:
-            state, lines = match_ids(iid, ev)
-            if state:
-                new_state[iid] = state
-            ev_lines[iid] = lines or [f"no evidence found ({date})"]
+            if landed_state:
+                new_state[iid] = landed_state
+            ev_lines[iid] = landed_lines or [f"no evidence found ({date})"]
             continue
         new_state[iid] = evidence.task_state(True, tev.get('branch'), tev.get('pr_state'),
                                              tev.get('merged_sha'))
