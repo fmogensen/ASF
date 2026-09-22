@@ -516,13 +516,17 @@ class GitHookTests(unittest.TestCase):
         _git(['config', 'user.email', 'test@example.com'], repo)
         _git(['config', 'user.name', 'test'], repo)
         shutil.copytree(os.path.join(REPO, '.githooks'), os.path.join(repo, '.githooks'))
-        _git(['config', 'core.hooksPath', '.githooks'], repo)
         # AWS-shaped access key, built from parts so this test file itself stays clean.
         secret = 'AKIA' + 'Q' * 16
         with open(os.path.join(repo, 'creds.txt'), 'w') as f:
             f.write(secret + '\n')
         _git(['add', 'creds.txt'], repo)
         _git(['commit', '-q', '-m', 'wip'], repo)
+        # core.hooksPath is set only now: setting it before the commit above would make that
+        # commit run the real, unstubbed pre-commit hook — the whole suite, recursively — since
+        # this fixture repo has no tests/ dir of its own and `discover -s tests` falls back to
+        # whatever `tests` package PYTHONPATH resolves to.
+        _git(['config', 'core.hooksPath', '.githooks'], repo)
         r = subprocess.run(['git', 'push', 'origin', 'HEAD:main'], cwd=repo,
                            env={**os.environ, 'PYTHONPATH': REPO},
                            capture_output=True, text=True)
