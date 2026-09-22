@@ -13,13 +13,20 @@
 
 Each launch appends a ``launch`` event (item, account, model, brief kind) to ``metrics/events``.
 """
+import os
+import re
 import subprocess
 
 from asf import env
+from asf.groom import policy as groom_policy
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 
 DEFAULT_CAPACITY = 4
+#: PD9 — for a kind whose job name is not ``<brief kind>-<item id>``, the Row attribute that
+#: carries the job's key instead (the groom brief's job is ``groom-<date>``, D7).
+KIND_JOB_KEY = {'groom': 'groom_date'}
+_GROOM_FILE_RE = re.compile(r'^(\d{4}-\d{2}-\d{2})\.md$')
 
 
 def capacity():
@@ -49,6 +56,37 @@ def corrections(product):
     return lifecycle.corrections(pool_mod.sessions_path(product))
 
 
+def _newest_groom_file(root):
+    d = os.path.join(root, 'groom')
+    if not os.path.isdir(d):
+        return None, None
+    dates = [m.group(1) for name in os.listdir(d)
+             for m in [_GROOM_FILE_RE.match(name)] if m]
+    if not dates:
+        return None, None
+    date = sorted(dates)[-1]
+    return date, os.path.join(d, f'{date}.md')
+
+
+def groom_state(product, root):
+    """§2.5's fact the feeder cannot derive from ``index.json`` (P5): the newest groom day's
+    still-open questions, and how many ``groom-<date>`` sessions the ledger already holds for
+    it. ``None`` when no groom file exists yet."""
+    date, path = _newest_groom_file(root)
+    if not date:
+        return None
+    with open(path, encoding='utf-8') as f:
+        text = f.read()
+    pairs = groom_policy.open_questions(text)
+    job = f'groom-{date}'
+    attempts = sum(1 for rec in lifecycle.read_lines(pool_mod.sessions_path(product))
+                   if rec.get('job') == job)
+    return {'date': date, 'file': path,
+            'answers': os.path.join(env.state_dir(product), 'groom', f'{date}.answers'),
+            'open': [iid for iid, _line in pairs], 'lines': [line for _iid, line in pairs],
+            'oldest': pairs[0][0] if pairs else None, 'attempts': attempts}
+
+
 def _git(repo, args):
     p = subprocess.run(['git', '-C', repo, *args], capture_output=True, text=True)
     return p.stdout.strip() if p.returncode == 0 else ''
@@ -75,15 +113,20 @@ def _wave(*a, **kw):
     return wave.wave(*a, **kw)
 
 
-def job_name(brief_kind, item_id):
-    return f'{brief_kind}-{item_id}'.lower()
+def job_name(brief_kind, item_id, key=None):
+    """``<brief kind>-<item id>``, lowercased — unless ``key`` is given (PD9: a kind whose job
+    must stay stable while ``item_id`` drifts, e.g. the groom day's oldest question), in which
+    case the job carries ``key`` instead."""
+    return f'{brief_kind}-{item_id if key is None else key}'.lower()
 
 
 def worker_row(row, brief, items):
     """The workers' row for a feeder row and its brief."""
     item = items.get(row.item_id) or {}
     state, _, action = row.kind.partition(' → ')
-    return pool_mod.Row(job_name(brief.kind, row.item_id), row.item_id, state=state,
+    attr = KIND_JOB_KEY.get(brief.kind)
+    key = getattr(row, attr) if attr else None
+    return pool_mod.Row(job_name(brief.kind, row.item_id, key=key), row.item_id, state=state,
                         action=action, title=item.get('title', ''), model=brief.model,
                         kind=brief.kind, severity=item.get('severity'),
                         feature=row.feature_id or None, branch=row.branch or None)
@@ -95,8 +138,10 @@ def run(ctx, out=print):
     product = ctx.product
     items, _generated = index_reader.load(ctx.record_root())
     running = inflight(product)
+    gstate = groom_state(product, ctx.record_root()) if groom_policy.groom_auto(product) else None
     planned = feeder_rows.plan_rows(items, product, running, capacity(), attempts=attempts(product),
-                                     corrections=corrections(product), busy=awaiting_harvest(product))
+                                     corrections=corrections(product), busy=awaiting_harvest(product),
+                                     groom_state=gstate)
     worker_rows, texts, kinds = [], {}, {}
     for row in planned:
         if not row.launches:

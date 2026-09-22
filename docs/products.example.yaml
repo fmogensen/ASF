@@ -32,6 +32,7 @@ conventions:
     plan: plan
     task: task
     batch: batch
+    groom: groom               # the groom session's throwaway branch
   # the filename pattern a review lives at, {n} is the review round number.
   review_pattern: "docs/reviews/{n}-{slug}.md"
   # the heading a plan uses to mark one task's section, read by asf.tick.migrate's plan parser.
@@ -102,3 +103,14 @@ approvals:
   merge_amendable_set: human-now
   merge_routine_pr: auto
   file_bug: auto
+  groom: auto            # auto | groom | human-now — the one key asf.groom.policy reads.
+                         # unset or anything but `auto`: every groom behaviour below is off.
+
+# F-0085/D-0049: the four policies' thresholds. A policy whose key is absent uses the default
+# shown.
+groom:
+  duplicate_overlap: 0.95      # close_exact_duplicate: title overlap at or above this
+  recurring_bug_count: 2       # decide_recurring_bug: auto-filed Bug seen this many times
+  adjudicate_attempts: 2       # D8: groom sessions per groom date before the operator is asked
+  policies:                    # a policy named here with `off` never runs
+    close_exact_duplicate: on

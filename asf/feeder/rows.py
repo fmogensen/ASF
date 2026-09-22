@@ -21,6 +21,10 @@ The row kinds::
     STARVED → PLAN         an approved spec with no plan, or a plan in draft/review, unmoved
     PLAN → CODE            a New Task of an approved plan — unless its ``writes:`` overlaps a
                            running Task's, then ``WAITS ON <task>`` (the footprint gate)
+    GROOM → ADJUDICATE     one adjudicate session per groom day, for every open question the
+                           groom policy pass did not answer (F-0085 §2.5) — gated on
+                           ``approvals.groom: auto``, given only when the caller passes a
+                           ``groom_state``
 
 ``candidates()`` lists every row; ``plan_rows()`` hands them to :mod:`asf.feeder.tiers` to order
 and cut to capacity.
@@ -29,6 +33,7 @@ import dataclasses
 import re
 
 from asf.feeder import footprint
+from asf.groom import policy as groom_policy
 from asf.views import index_reader as ix
 
 BUG_FIX = 'BUG → FIX'
@@ -41,6 +46,7 @@ CARD_SPEC = 'CARD → SPEC'
 STARVED_SPEC = 'STARVED → SPEC'
 STARVED_PLAN = 'STARVED → PLAN'
 PLAN_CODE = 'PLAN → CODE'
+GROOM_ADJUDICATE = 'GROOM → ADJUDICATE'
 
 LAUNCH = 'would launch'
 DONE_STATES = ('Resolved', 'Closed')
@@ -63,6 +69,12 @@ class Row:
     reason: str
     waits_on: str = ''
     correction: str = ''
+    #: the GROOM → ADJUDICATE row only (§2.5, PD8): the groom day, the record clone's groom
+    #: file and the state dir's answers file, and the open questions' own lines (for the brief).
+    groom_date: str = ''
+    groom_file: str = ''
+    answers_file: str = ''
+    open_questions: tuple = ()
 
     @property
     def launches(self):
@@ -331,14 +343,48 @@ def task_rows(items, product, feature, busy, running):
     return out
 
 
-KIND_ORDER = {STALEMATE: 0, CONFLICT: 1, STALE: 2}
+KIND_ORDER = {STALEMATE: 0, CONFLICT: 1, STALE: 2, GROOM_ADJUDICATE: 2}
 
 
-def candidates(index, product, inflight, attempts=None, corrections=None, busy=None):
+def groom_row(index, product, busy, groom_state, inflight):
+    """At most one GROOM → ADJUDICATE row (§2.5): one adjudicate session per groom day, for
+    every question the policy pass did not answer. ``groom_state`` is the one fact this module
+    cannot derive from ``index.json`` (P5) — the caller (:mod:`asf.tick.step_wave`) builds it
+    from the record clone's newest ``groom/<date>.md`` (:func:`asf.groom.policy.open_questions`)
+    and the ledger's ``groom-<date>`` attempts. No ``groom_state``, the gate off, no open
+    question, a live session already on that day's job, or the attempt cap reached: no row —
+    which keeps every existing feeder test and ``asf next`` unchanged (T8)."""
+    if not groom_state or not groom_policy.groom_auto(product):
+        return None
+    open_ids = list(groom_state.get('open') or ())
+    if not open_ids:
+        return None
+    date = groom_state.get('date')
+    if any(s.get('job') == f'groom-{date}' for s in inflight or ()):
+        return None
+    if (groom_state.get('attempts') or 0) >= groom_policy.adjudicate_attempts(product):
+        return None
+    items = items_of(index)
+    oldest = groom_state.get('oldest') or open_ids[0]
+    item = items.get(oldest) or {}
+    f = feature_of(items, item) if item else None
+    reason = (f"{len(open_ids)} groom questions no rule answers, oldest {oldest} "
+             f"(undecided {ix.age(item.get('stage_since'))})")
+    return Row(tier=2, kind=GROOM_ADJUDICATE, item_id=oldest, feature_id=f['id'] if f else '',
+              action=LAUNCH, brief_kind='groom',
+              branch=branch_for(product, 'groom', date, default='groom/'), reason=reason,
+              groom_date=date, groom_file=groom_state.get('file', ''),
+              answers_file=groom_state.get('answers', ''),
+              open_questions=tuple(groom_state.get('lines') or ()))
+
+
+def candidates(index, product, inflight, attempts=None, corrections=None, busy=None,
+              groom_state=None):
     """Every row the index supports right now, uncut by capacity, in emit order: tier, then the
     Feature's rank and id, then within a Feature the stalemate, branch housekeeping, new work.
     ``busy``: item ids held by something that is not a session and takes no slot — a pushed
-    branch waiting for harvest (:func:`asf.workers.lifecycle.awaiting_harvest`)."""
+    branch waiting for harvest (:func:`asf.workers.lifecycle.awaiting_harvest`). ``groom_state``:
+    §2.5's fact for the GROOM → ADJUDICATE row; a caller that passes none gets none."""
     items = items_of(index)
     busy = inflight_ids(inflight) | set(busy or ())
     limit = stalemate_round(product)
@@ -347,6 +393,9 @@ def candidates(index, product, inflight, attempts=None, corrections=None, busy=N
     corrected, spoken = correction_rows(items, product, busy, corrections)
     rows = corrected + bug_rows(items, product, busy | spoken, attempts)
     rows += [r for r in branch_rows(items, product, busy) if r.feature_id not in stalled]
+    gr = groom_row(index, product, busy, groom_state, inflight)
+    if gr is not None:
+        rows.append(gr)
     rows += feature_rows(items, product, busy, running)
 
     def key(pair):
@@ -358,8 +407,10 @@ def candidates(index, product, inflight, attempts=None, corrections=None, busy=N
     return [r for _seq, r in sorted(enumerate(rows), key=key)]
 
 
-def plan_rows(index, product, inflight, capacity, attempts=None, corrections=None, busy=None):
+def plan_rows(index, product, inflight, capacity, attempts=None, corrections=None, busy=None,
+              groom_state=None):
     """The rows the tick emits: tiered, S1 first, cut to ``capacity`` less what is in flight."""
     from asf.feeder import tiers
-    return tiers.select(candidates(index, product, inflight, attempts, corrections, busy=busy),
+    return tiers.select(candidates(index, product, inflight, attempts, corrections, busy=busy,
+                                   groom_state=groom_state),
                         inflight, capacity)

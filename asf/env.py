@@ -223,7 +223,7 @@ PRODUCT_FIELDS = {
     'product': _STR, 'repo_slug': _STR, 'repo_dir': _STR, 'main': _STR, 'backlog_dir': _STR,
     'app_host': _STR, 'conventions': _MAP, 'ci': None, 'deploy_sha': None,
     'customer_paths': _LIST, 'stage_limits': _MAP, 'size_classes': _MAP, 'approvals': _MAP,
-    'steps': _MAP, 'job_grants': _LIST,
+    'steps': _MAP, 'job_grants': _LIST, 'groom': _MAP,
 }
 # `ci:` is a map (or the bare word `none`, a product without CI); these are its keys.
 CI_FIELDS = {
@@ -368,6 +368,13 @@ class Product:
     @property
     def approvals(self):
         return self._get('approvals', {})
+
+    @property
+    def groom(self):
+        """The ``groom:`` block (F-0085/D-0049): the four policies' thresholds. ``{}`` when the
+        product sets none — every reader of it (:mod:`asf.groom.policy`) then falls back to the
+        documented default for the key it wants."""
+        return self._get('groom', {})
 
     def branch_prefix(self, kind):
         """The prefix *without* its separator (``worker``), for the callers that compose

@@ -159,6 +159,64 @@ class RowsTest(unittest.TestCase):
         self.assertEqual(kinds(rows.candidates(self.index['items'], self.p, [])), kinds(self.cand()))
 
 
+class GroomRowTests(unittest.TestCase):
+    """T8: one GROOM → ADJUDICATE row per groom day, for every question the policy pass did not
+    answer, capped at ``groom.adjudicate_attempts`` sessions (§2.5)."""
+
+    def setUp(self):
+        self.index = fixture_index()
+        self.auto = product(approvals={'groom': 'auto'})
+
+    def state(self, **over):
+        base = {'date': '2026-09-22', 'open': ['F-0001', 'F-0003'], 'oldest': 'F-0001',
+               'attempts': 0, 'file': 'groom/2026-09-22.md',
+               'answers': 'state/groom/2026-09-22.answers',
+               'lines': ['- [ ] F-0001 … → answer: ____', '- [ ] F-0003 … → answer: ____']}
+        base.update(over)
+        return base
+
+    def groom_rows(self, p=None, inflight=(), **state_over):
+        out = rows.candidates(self.index, p or self.auto, list(inflight),
+                              groom_state=self.state(**state_over))
+        return [r for r in out if r.kind == rows.GROOM_ADJUDICATE]
+
+    def test_row_emitted_with_two_open_questions(self):
+        gr = self.groom_rows()
+        self.assertEqual(len(gr), 1)
+        r = gr[0]
+        self.assertEqual((r.item_id, r.brief_kind, r.branch, r.tier),
+                         ('F-0001', 'groom', 'groom/2026-09-22', 2))
+        self.assertEqual(r.groom_date, '2026-09-22')
+        self.assertEqual(r.groom_file, 'groom/2026-09-22.md')
+        self.assertEqual(r.answers_file, 'state/groom/2026-09-22.answers')
+        self.assertEqual(r.open_questions,
+                         ('- [ ] F-0001 … → answer: ____', '- [ ] F-0003 … → answer: ____'))
+
+    def test_not_emitted_when_the_product_is_not_auto(self):
+        self.assertEqual(self.groom_rows(p=product()), [])
+
+    def test_not_emitted_when_open_is_empty(self):
+        self.assertEqual(self.groom_rows(open=[], oldest=None), [])
+
+    def test_not_emitted_when_a_live_session_holds_the_groom_day(self):
+        self.assertEqual(self.groom_rows(inflight=[{'job': 'groom-2026-09-22'}]), [])
+
+    def test_not_emitted_past_the_attempt_cap(self):
+        self.assertEqual(self.groom_rows(attempts=2), [])
+
+    def test_still_emitted_below_the_attempt_cap(self):
+        self.assertEqual(len(self.groom_rows(attempts=1)), 1)
+
+    def test_no_groom_state_is_todays_behaviour(self):
+        self.assertEqual(kinds(rows.candidates(self.index, self.auto, [])),
+                         kinds(rows.candidates(self.index, self.auto, [], groom_state=None)))
+
+    def test_adjudicate_attempts_is_configurable(self):
+        p = product(approvals={'groom': 'auto'}, groom={'adjudicate_attempts': 3})
+        self.assertEqual(len(self.groom_rows(p=p, attempts=2)), 1)
+        self.assertEqual(len(self.groom_rows(p=p, attempts=3)), 0)
+
+
 def ten_features_and_an_s1():
     items = {'B-0001': {'id': 'B-0001', 'type': 'bug', 'title': 'Down', 'severity': 'S1',
                         'decided': True, 'state': 'New'}}
@@ -320,7 +378,8 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(data[0]['item_id'], 'B-0001')
         self.assertEqual(set(data[0]), {'tier', 'kind', 'item_id', 'feature_id', 'action',
                                         'brief_kind', 'branch', 'reason', 'waits_on',
-                                        'correction'})
+                                        'correction', 'groom_date', 'groom_file',
+                                        'answers_file', 'open_questions'})
 
 
 class CliTest(unittest.TestCase):

@@ -299,7 +299,8 @@ class WaveStepTests(StepsTestCase):
         self.write_config('feeder:\n  capacity: 3\n')
         seen = {}
 
-        def plan(index, product, inflight, capacity, attempts=None, corrections=None, busy=None):
+        def plan(index, product, inflight, capacity, attempts=None, corrections=None, busy=None,
+                groom_state=None):
             seen.update(capacity=capacity, inflight=[s['item'] for s in inflight], ids=sorted(index))
             return self.rows
         ctx = self.ctx()
@@ -325,6 +326,34 @@ class WaveStepTests(StepsTestCase):
         facts = step_wave.repo_facts(self.product, 'fix/B-9999')
         self.assertEqual(facts, {'branch': 'fix/B-9999', 'pushed': False, 'remote_sha': '',
                                  'last_commit': ''})
+
+    def test_job_name_takes_a_key_over_the_item_id(self):
+        # PD9/D7: the groom brief's job is `groom-<date>`, stable while the row's item_id (the
+        # oldest open question) drifts as questions get answered.
+        self.assertEqual(step_wave.job_name('groom', 'F-0001', key='2026-09-22'),
+                         'groom-2026-09-22')
+        self.assertEqual(step_wave.job_name('fix-bug', 'B-0001'), 'fix-bug-b-0001')
+
+    def test_groom_state_is_none_with_no_groom_file(self):
+        self.assertIsNone(step_wave.groom_state(self.product, self.ctx().record_root()))
+
+    def test_groom_state_reads_the_newest_groom_file_and_the_ledger_attempts(self):
+        root = self.ctx().record_root()
+        groom_dir = os.path.join(root, 'groom')
+        os.makedirs(groom_dir, exist_ok=True)
+        with open(os.path.join(groom_dir, '2026-09-20.md'), 'w') as f:
+            f.write('- [ ] F-0001 old day — undecided 3d → answer: ____\n')
+        with open(os.path.join(groom_dir, '2026-09-22.md'), 'w') as f:
+            f.write('- [ ] F-0001 x — undecided 3d → answer: ____\n'
+                    '- [ ] F-0002 y — undecided 4d → answer: ____\n')
+        self.session(job='groom-2026-09-22', item='F-0001', kind='groom', account='acct-a')
+        state = step_wave.groom_state(self.product, root)
+        self.assertEqual(state['date'], '2026-09-22')
+        self.assertEqual(state['open'], ['F-0001', 'F-0002'])
+        self.assertEqual(state['oldest'], 'F-0001')
+        self.assertEqual(state['attempts'], 1)
+        self.assertTrue(state['file'].endswith('2026-09-22.md'))
+        self.assertTrue(state['answers'].endswith(os.path.join('groom', '2026-09-22.answers')))
 
     def test_nothing_to_launch(self):
         with mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **kw: []):

@@ -24,6 +24,9 @@ class TestExampleConfigsParse(unittest.TestCase):
         self.assertEqual(product.conventions['design_spec_name'], 'design.md')
         self.assertEqual(product.stage_limits['task_active'], '45m')
         self.assertEqual(product.approvals['spend_money'], 'human-now')
+        self.assertEqual(product.approvals['groom'], 'auto')
+        self.assertEqual(product.groom['adjudicate_attempts'], 2)
+        self.assertEqual(product.branch_prefix('groom'), 'groom')
 
 
 class TestYamlSubset(unittest.TestCase):
@@ -132,6 +135,14 @@ class TestProductConventions(unittest.TestCase):
         self.assertEqual(p.branch_prefix('code'), 'feature')
         self.assertEqual(p.branch_prefix('task'), 'task')
 
+    def test_groom_defaults_to_empty_when_the_product_sets_none(self):
+        self.assertEqual(self.product({}).groom, {})
+
+    def test_groom_reads_the_block(self):
+        p = self.product({'groom': {'adjudicate_attempts': 3, 'policies': {'close_exact_duplicate': 'off'}}})
+        self.assertEqual(p.groom['adjudicate_attempts'], 3)
+        self.assertEqual(p.groom['policies']['close_exact_duplicate'], 'off')
+
 
 class TestProduct(unittest.TestCase):
     def test_load_product_from_tmp_home(self):
@@ -198,6 +209,35 @@ class TestProductSchema(unittest.TestCase):
             """)
         self.assertIn("'ci.runner_labels'", str(cm.exception))
         self.assertIn('line 4', str(cm.exception))
+
+    def test_groom_must_be_a_map(self):
+        with self.assertRaises(env.ConfigError) as cm:
+            self._load("""
+            repo_slug: a/b
+            groom: TODO
+            """)
+        self.assertIn("'groom'", str(cm.exception))
+
+    def test_an_undeclared_key_inside_the_groom_block_is_not_itself_checked_but_its_shape_is(self):
+        # `groom:` is one field of the product file (a map); what an operator puts inside it is
+        # this card's own reader's business (asf.groom.policy), not the schema's — the schema
+        # only refuses a top-level key it does not declare.
+        p = self._load("""
+            repo_slug: a/b
+            groom:
+              made_up_key: 1
+            """)
+        self.assertEqual(p.groom['made_up_key'], 1)
+
+    def test_an_undeclared_top_level_key_still_fails_next_to_a_valid_groom_block(self):
+        with self.assertRaises(env.ConfigError) as cm:
+            self._load("""
+            repo_slug: a/b
+            groom:
+              adjudicate_attempts: 3
+            bogus_top_level_key: 1
+            """)
+        self.assertIn("'bogus_top_level_key'", str(cm.exception))
 
     def test_the_documented_example_validates(self):
         self.assertEqual(env.validate_product_text(open(os.path.join(
