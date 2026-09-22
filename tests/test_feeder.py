@@ -159,6 +159,74 @@ class RowsTest(unittest.TestCase):
         self.assertEqual(kinds(rows.candidates(self.index['items'], self.p, [])), kinds(self.cand()))
 
 
+class ReshapeRowsTest(unittest.TestCase):
+    """T-0053 / S-7904: the feeder holds a reshape-marked Task and launches one reshape session;
+    an unconfirmed split part waits too. Both holds are on the Task, never the Feature (D10)."""
+
+    def idx(self, tasks):
+        items = {'F-0001': {'id': 'F-0001', 'type': 'feature', 'decided': True, 'state': 'Active',
+                            'rank': 1, 'stage': 'building 1/2', 'children': list(tasks)}}
+        items.update(tasks)
+        return {'items': items}
+
+    def task(self, tid, **over):
+        base = {'id': tid, 'type': 'task', 'parent': 'F-0001', 'state': 'New',
+               'writes': [f'asf/{tid}.py']}
+        base.update(over)
+        return base
+
+    def test_reshape_holds_the_task_and_launches_a_reshape(self):
+        idx = self.idx({'T-0050': self.task(
+            'T-0050', reshape='split asf/feeder | asf/harvest (groom 2026-09-22)')})
+        by_id = [r for r in rows.candidates(idx, product(), []) if r.item_id == 'T-0050']
+        waits = [r for r in by_id if r.kind == rows.PLAN_CODE]
+        launched = [r for r in by_id if r.kind == rows.RESHAPE]
+        self.assertEqual(len(waits), 1)
+        self.assertEqual((waits[0].action, waits[0].waits_on, waits[0].launches),
+                         ('WAITS ON reshape', 'reshape', False))
+        self.assertEqual(len(launched), 1)
+        r = launched[0]
+        self.assertEqual((r.brief_kind, r.branch, r.feature_id, r.action),
+                         ('reshape', 'plan/T-0050', 'F-0001', rows.LAUNCH))
+
+    def test_other_tasks_of_the_feature_still_launch(self):
+        idx = self.idx({
+            'T-0050': self.task('T-0050',
+                                reshape='split asf/feeder | asf/harvest (groom 2026-09-22)'),
+            'T-0051': self.task('T-0051', writes=['docs/other.md']),
+        })
+        by = {r.item_id: r for r in rows.candidates(idx, product(), []) if r.kind == rows.PLAN_CODE}
+        self.assertEqual(by['T-0051'].action, rows.LAUNCH)
+
+    def test_busy_reshape_emits_nothing(self):
+        idx = self.idx({'T-0050': self.task(
+            'T-0050', reshape='split asf/feeder | asf/harvest (groom 2026-09-22)')})
+        out = rows.candidates(idx, product(), [{'item': 'T-0050'}])
+        self.assertNotIn('T-0050', {r.item_id for r in out})
+
+    def test_unconfirmed_part_waits(self):
+        idx = self.idx({'T-0060': self.task('T-0060', split_from='T-0050')})
+        r = [r for r in rows.candidates(idx, product(), []) if r.item_id == 'T-0060'][0]
+        self.assertEqual((r.action, r.waits_on, r.launches), ('WAITS ON confirm', 'confirm', False))
+
+        idx2 = self.idx({'T-0060': self.task('T-0060', split_from='T-0050', decided=True)})
+        r2 = [r for r in rows.candidates(idx2, product(), []) if r.item_id == 'T-0060'][0]
+        self.assertEqual(r2.action, rows.LAUNCH)
+
+    def test_reshape_row_takes_a_slot_and_waits_take_none(self):
+        idx = self.idx({
+            'T-0050': self.task('T-0050',
+                                reshape='split asf/feeder | asf/harvest (groom 2026-09-22)'),
+            'T-0060': self.task('T-0060', split_from='T-0050'),
+        })
+        cand = rows.candidates(idx, product(), [])
+        self.assertEqual(kinds(cand), [(rows.RESHAPE, 'T-0050'), (rows.PLAN_CODE, 'T-0050'),
+                                       (rows.PLAN_CODE, 'T-0060')])
+        out = rows.plan_rows(idx, product(), [], 1)
+        self.assertEqual([(r.kind, r.item_id, r.launches) for r in out],
+                         [(rows.RESHAPE, 'T-0050', True)])
+
+
 class GroomRowTests(unittest.TestCase):
     """T8: one GROOM → ADJUDICATE row per groom day, for every question the policy pass did not
     answer, capped at ``groom.adjudicate_attempts`` sessions (§2.5)."""

@@ -21,6 +21,7 @@ The row kinds::
     STARVED → PLAN         an approved spec with no plan, or a plan in draft/review, unmoved
     PLAN → CODE            a New Task of an approved plan — unless its ``writes:`` overlaps a
                            running Task's, then ``WAITS ON <task>`` (the footprint gate)
+    RESHAPE → PLAN         a Task the groom's split answer marked: hold it, reshape it
     GROOM → ADJUDICATE     one adjudicate session per groom day, for every open question the
                            groom policy pass did not answer (F-0085 §2.5) — gated on
                            ``approvals.groom: auto``, given only when the caller passes a
@@ -46,6 +47,7 @@ CARD_SPEC = 'CARD → SPEC'
 STARVED_SPEC = 'STARVED → SPEC'
 STARVED_PLAN = 'STARVED → PLAN'
 PLAN_CODE = 'PLAN → CODE'
+RESHAPE = 'RESHAPE → PLAN'
 GROOM_ADJUDICATE = 'GROOM → ADJUDICATE'
 
 LAUNCH = 'would launch'
@@ -325,6 +327,23 @@ def task_rows(items, product, feature, busy, running):
     tasks = [t for t in ix.feature_tasks(items, feature)
              if t.get('state', 'New') == 'New' and t['id'] not in busy and not t.get('blocked')]
     for t in sorted(tasks, key=lambda v: (ix.rank(v), v['id'])):
+        if t.get('reshape'):
+            out.append(Row(tier=2, kind=PLAN_CODE, item_id=t['id'], feature_id=feature['id'],
+                           action='WAITS ON reshape', brief_kind='task',
+                           branch=branch_for(product, 'code', t['id']),
+                           reason='groom marked it for reshape: waiting on its reshape session',
+                           waits_on='reshape'))
+            out.append(Row(tier=2, kind=RESHAPE, item_id=t['id'], feature_id=feature['id'],
+                           action=LAUNCH, brief_kind='reshape',
+                           branch=branch_for(product, 'plan', t['id']),
+                           reason=f"groom: {t['reshape']}"))
+            continue
+        if t.get('split_from') and t.get('decided') is not True:
+            out.append(Row(tier=2, kind=PLAN_CODE, item_id=t['id'], feature_id=feature['id'],
+                           action='WAITS ON confirm', brief_kind='task',
+                           branch=branch_for(product, 'code', t['id']),
+                           reason='groom split part, unconfirmed', waits_on='confirm'))
+            continue
         writes = t.get('writes') or []
         other = footprint.first_conflict(writes, running)
         if other:
@@ -343,7 +362,7 @@ def task_rows(items, product, feature, busy, running):
     return out
 
 
-KIND_ORDER = {STALEMATE: 0, CONFLICT: 1, STALE: 2, GROOM_ADJUDICATE: 2}
+KIND_ORDER = {STALEMATE: 0, CONFLICT: 1, STALE: 2, GROOM_ADJUDICATE: 2, RESHAPE: 3}
 
 
 def groom_row(index, product, busy, groom_state, inflight):
@@ -403,7 +422,7 @@ def candidates(index, product, inflight, attempts=None, corrections=None, busy=N
         f = items.get(r.feature_id) or {}
         if r.tier < 2:
             return (r.tier, 0, '', 0, seq)
-        return (r.tier, ix.rank(f), r.feature_id or '~', KIND_ORDER.get(r.kind, 3), seq)
+        return (r.tier, ix.rank(f), r.feature_id or '~', KIND_ORDER.get(r.kind, 4), seq)
     return [r for _seq, r in sorted(enumerate(rows), key=key)]
 
 
