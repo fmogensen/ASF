@@ -553,6 +553,19 @@ def commits_name_item(repo, trunk, branch, item):
     return bool(subjects) and all(token.search(s) for s in subjects)
 
 
+ADJUDICATE_SUBJECT_RE = re.compile(r'^adjudicate\(')
+
+
+def has_adjudicate_commit(repo, trunk, branch):
+    """True when a commit on ``origin/<branch>`` not on ``origin/<trunk>`` opens with
+    ``adjudicate(`` — an invented ruling committed to the product repo instead of the record
+    (B-0054): the brief says a ruling belongs in a decision or the item's ``## History``, never
+    a commit, so harvest refuses to land one rather than trust it as a normal fix."""
+    subjects = sh(['git', 'log', '--no-merges', '--format=%s',
+                   f'origin/{trunk}..origin/{branch}'], cwd=repo).stdout.splitlines()
+    return any(ADJUDICATE_SUBJECT_RE.match(s) for s in subjects)
+
+
 def is_asf_repo(repo):
     """True when ``repo`` is this package's own repo (same real path, or the same git common
     dir — a linked worktree of it counts)."""
@@ -815,6 +828,10 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
         if state:
             results[branch] = archive_superseded(repo, state_dir, branch, record, item, state,
                                                  dry_run, out)
+            continue
+        if has_adjudicate_commit(repo, trunk, branch):
+            out(f'held {branch}: ruling belongs in the record')
+            results[branch] = 'held'
             continue
         refusal = lane_refusal(repo, trunk, branch, item)
         if refusal:

@@ -710,6 +710,20 @@ class ProductHarvestTests(unittest.TestCase):
         results = harvest.run_product_harvest(self.product(), self.state_dir, out=lines.append, items=items)
         self.assertEqual(results, {'fix/B-0002': 'landed'})
 
+    def test_b0054_adjudicate_commit_is_held_ruling_belongs_in_record(self):
+        """A ruling belongs in the record (a decision or the item's ``## History``), never a
+        commit to the product repo — harvest refuses one whose subject opens ``adjudicate(``
+        (B-0054), holding instead of landing an invented ruling on the trunk."""
+        self.push_lane('fix/B-0001', [('adjudicate(B-0001): the fix stands', {'a.txt': 'a\n'})])
+        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
+        before = self.origin_main()
+        results, lines = self.harvest(self.product())
+        self.assertEqual(results, {'fix/B-0001': 'held'})
+        self.assertEqual(lines, ['held fix/B-0001: ruling belongs in the record'])
+        self.assertEqual(self.origin_main(), before)
+        self.assertTrue(self.origin_has('fix/B-0001'))
+        self.assertFalse(self.record('fix/B-0001').get('harvested'))
+
     def test_red_test_command_holds_and_records_a_correction(self):
         self.push_lane('fix/B-0001', [('fix(B-0001): breaks the gate',
                                        {'checks/test_fx.py': RED_TEST})])
