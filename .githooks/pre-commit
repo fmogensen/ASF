@@ -3,6 +3,13 @@
 # generic-repo check before every commit; both must be clean.
 set -euo pipefail
 
+# A test's own commit, inside a checkout this hook is also active for, would otherwise run the
+# suite again from within the suite: the marker makes the nested hook return at once (B-0073).
+if [ -n "${ASF_HOOK_RUNNING:-}" ]; then
+    exit 0
+fi
+export ASF_HOOK_RUNNING=1
+
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 

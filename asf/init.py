@@ -29,6 +29,11 @@ STREAM_FOLDERS = ('inbox', 'groom', 'releases', 'metrics/ci', 'metrics/sessions'
 
 PRE_COMMIT = """#!/bin/sh
 # The record's pre-commit hook, written by `asf init`: a commit that fails `asf check` is refused.
+# The marker makes a hook already running return at once instead of nesting (B-0073).
+if [ -n "$ASF_HOOK_RUNNING" ]; then
+    exit 0
+fi
+export ASF_HOOK_RUNNING=1
 cd "$(git rev-parse --show-toplevel)" || exit 1
 exec asf check
 """

@@ -11,6 +11,7 @@ Nothing is shared between tests: a test mutates its copy and the template is nev
 import atexit
 import os
 import shutil
+import subprocess
 import tempfile
 
 #: The files git keeps absolute paths in — a clone's remote URL, a worktree's ``gitdir``.
@@ -28,6 +29,7 @@ class Template:
             root = tempfile.mkdtemp(prefix=self.prefix + 'template-')
             atexit.register(shutil.rmtree, root, True)
             self.build(root)
+            _disable_hooks(root)
             self.root = root
         return self.root
 
@@ -45,6 +47,26 @@ class Template:
                 shutil.copy2(src, dst, follow_symlinks=False)
         _rewrite_paths(dest, {root: dest, os.path.realpath(root): os.path.realpath(dest)})
         return dest
+
+
+def _disable_hooks(root):
+    """``core.hooksPath=/dev/null`` on every working tree under ``root``: a fixture's own
+    ``git commit`` must never run a real ``pre-commit`` — a product's, or (recursively) the
+    suite's own (B-0073). Bare repos are left alone — a fixture that installs a server-side
+    hook (``pre-receive``, to test a refused push) relies on git's default hooks dir there."""
+    for git_dir in _working_tree_roots(root):
+        subprocess.run(['git', 'config', 'core.hooksPath', '/dev/null'], cwd=git_dir, check=True)
+
+
+def _working_tree_roots(root):
+    """Every non-bare git repo directory under ``root`` (has ``.git``). Never descends into a
+    ``.git`` directory."""
+    roots = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        if '.git' in dirnames or '.git' in filenames:
+            roots.append(dirpath)
+            dirnames[:] = [d for d in dirnames if d != '.git']
+    return roots
 
 
 def _rewrite_paths(dest, mapping):
