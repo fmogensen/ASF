@@ -1,4 +1,4 @@
-**NEXT** — 10 rows · 8 would launch
+**NEXT** — 10 rows · 9 would launch
 
 | Tier | Row | Item | Feature | Action |
 |---|---|---|---|---|
@@ -7,7 +7,7 @@
 | 2 | CONFLICT → REBASE | T-0007 | F-0002 | would launch rebase on task/T-0007 |
 | 2 | PLAN → CODE | T-0001 | F-0002 | would launch task on worker/T-0001 |
 | 2 | PLAN → CODE | T-0002 | F-0002 | WAITS ON T-0001 |
-| 2 | PLAN → CODE | T-0003 | F-0002 | WAITS ON T-0007 |
+| 2 | PLAN → CODE | T-0003 | F-0002 | would launch task on worker/T-0003 |
 | 2 | STALEMATE → ADJUDICATE | F-0003 | F-0003 | would launch adjudicate on plan/F-0003 |
 | 2 | STARVED → SPEC | F-0004 | F-0004 | would launch spec on spec/F-0004 |
 | 2 | STARVED → PLAN | F-0005 | F-0005 | would launch plan on plan/F-0005 |

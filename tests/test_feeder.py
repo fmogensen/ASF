@@ -40,6 +40,20 @@ def kinds(rs):
     return [(r.kind, r.item_id) for r in rs]
 
 
+class FootprintHoldersAreLiveRuns(unittest.TestCase):
+    """B-0076: only a live run (or one awaiting harvest) holds its files."""
+
+    def items(self):
+        return {'T-0001': {'id': 'T-0001', 'type': 'task', 'state': 'Active', 'writes': ['a.py']},
+                'T-0002': {'id': 'T-0002', 'type': 'task', 'state': 'New', 'writes': ['a.py']}}
+
+    def test_an_active_card_alone_holds_nothing(self):
+        self.assertEqual(rows.running_footprints(self.items(), set()), [])
+
+    def test_a_live_run_holds_its_files(self):
+        self.assertEqual(rows.running_footprints(self.items(), {'T-0001'}), [('T-0001', ['a.py'])])
+
+
 class FootprintTest(unittest.TestCase):
     def test_same_file(self):
         self.assertTrue(footprint.overlaps(['a/b.ts'], ['a/b.ts']))
@@ -87,9 +101,11 @@ class RowsTest(unittest.TestCase):
         self.assertEqual(by['T-0002'].action, 'WAITS ON T-0001')
         self.assertEqual(by['T-0002'].waits_on, 'T-0001')
 
-    def test_a_running_task_holds_its_footprint(self):
+    def test_an_active_card_with_nobody_writing_it_holds_nothing(self):
+        # B-0076: `Active` is a card state, not a worker. A held branch must not block a sibling
+        # that shares a file — that deadlocked a whole Feature; the two meet at the rebase.
         by = {r.item_id: r for r in self.cand()}
-        self.assertEqual(by['T-0003'].action, 'WAITS ON T-0007')
+        self.assertEqual(by['T-0003'].action, 'would launch')
 
     def test_an_inflight_task_holds_its_footprint_too(self):
         idx = copy.deepcopy(self.index)
@@ -401,12 +417,15 @@ class TiersTest(unittest.TestCase):
 
     def test_waits_on_rows_cost_no_slot(self):
         out = rows.plan_rows(fixture_index(), product(), [S1_SESSION], 6)
+        # B-0076: T-0003 no longer waits on an Active card nobody is writing; T-0002 still waits
+        # on T-0001, which this very cut launches.
         self.assertEqual(sum(1 for r in out if r.launches), 5)
         # B-0067: a coder's branch is the code lane's prefix, the one harvest scans for code
         self.assertTrue(all(r.branch.startswith('worker/') for r in out if r.kind == 'PLAN → CODE'),
                         [r.branch for r in out])
-        self.assertEqual(kinds(out)[-3:], [('PLAN → CODE', 'T-0002'), ('PLAN → CODE', 'T-0003'),
-                                           ('STALEMATE → ADJUDICATE', 'F-0003')])
+        self.assertEqual(kinds(out)[-3:], [('PLAN → CODE', 'T-0001'), ('PLAN → CODE', 'T-0002'),
+                                           ('PLAN → CODE', 'T-0003')])
+        self.assertEqual([r.action for r in out if r.item_id == 'T-0002'], ['WAITS ON T-0001'])
 
 
 class IncidentsTest(unittest.TestCase):

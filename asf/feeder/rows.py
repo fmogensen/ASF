@@ -276,10 +276,17 @@ def branch_rows(items, product, busy):
 
 
 def running_footprints(items, busy):
-    """[(task_id, writes)] of every Task in flight: held by a session, or Active in the index."""
+    """[(task_id, writes)] of every Task whose files are genuinely in play: a live session, or a
+    pushed branch waiting for harvest (both in ``busy``).
+
+    A Task that is merely ``Active`` in the index does NOT hold its footprint (B-0076): a held
+    branch — gate red, correction pending, or a card whose only evidence is a branch — is not
+    being written by anyone, and treating it as in flight deadlocks every sibling that shares a
+    file with it. Two branches that do touch the same file still meet at the rebase, where the
+    correction loop resolves it; a wait here must mean "someone is writing this now"."""
     out = []
     for t in sorted(ix.of_type(items, 'task'), key=lambda v: v['id']):
-        if (t['id'] in busy or t.get('state') == 'Active') and t.get('writes'):
+        if t['id'] in busy and t.get('writes'):
             out.append((t['id'], list(t['writes'])))
     return out
 
