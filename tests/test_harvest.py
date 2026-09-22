@@ -717,6 +717,24 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertEqual(results, {})
         self.assertEqual(self.origin_main(), before)
 
+    def test_b0065_a_removed_cards_branch_is_archived_whatever_its_type_and_state(self):
+        # the groom marked three cards `removed: superseded …`; items_of() drops removed cards,
+        # so harvest saw no card and held their branches for ever
+        self.push_lane('fix/B-0001', [('fix(B-0001): older work', {'old.txt': 'old\n'})])
+        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
+        root = os.path.join(self.base, 'record')
+        os.makedirs(root)
+        with open(os.path.join(root, 'index.json'), 'w') as f:
+            json.dump({'items': {'B-0001': {'id': 'B-0001', 'type': 'bug', 'state': 'Active',
+                                            'removed': 'superseded: on main — operator ruling'}}}, f)
+        items = harvest.record_items(root)
+        self.assertEqual(harvest.superseded_by(items, 'B-0001'), 'removed')
+        lines = []
+        results = harvest.run_product_harvest(self.product(), self.state_dir, out=lines.append, items=items)
+        self.assertEqual(results, {'fix/B-0001': 'superseded'})
+        self.assertEqual(lines, ['superseded fix/B-0001: B-0001 is removed in the record — archived as archive/fix/B-0001'])
+        self.assertTrue(self.origin_has('archive/fix/B-0001'))
+
     def test_b0057_a_closed_bugs_branch_is_archived_not_held(self):
         self.push_lane('fix/B-0001', [('fix(B-0001): an older approach', {'old.txt': 'old\n'})])
         self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')

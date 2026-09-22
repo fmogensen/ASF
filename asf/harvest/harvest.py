@@ -682,9 +682,13 @@ SUPERSEDED = 'superseded'
 
 
 def superseded_by(items, item):
-    """The state that supersedes a Bug's branch, or None: a fix branch of a Bug the record
-    already holds Closed or Resolved is another fix's leftover (B-0057), never work to land."""
+    """The state that supersedes a branch, or None: a fix branch of a Bug the record already
+    holds Closed or Resolved is another fix's leftover (B-0057), and a card the groom removed
+    (``removed:`` set — merged into another, superseded by a ruling) has no work to land
+    whatever its type (B-0065). Never work to land."""
     card = (items or {}).get(item or '') or {}
+    if card.get('removed'):
+        return 'removed'
     if card.get('type') == 'bug' and card.get('state') in ('Closed', 'Resolved'):
         return card['state']
     return None
@@ -859,13 +863,16 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
 
 
 def record_items(root):
-    """``{id: card}`` from the record at ``root``, or None when it has no index."""
+    """``{id: card}`` from the record at ``root`` — removed cards included, since a removed
+    card's branch is exactly what :func:`superseded_by` must see (B-0065) — or None when the
+    record has no index."""
     path = os.path.join(root or '', 'index.json')
     if not root or not os.path.isfile(path):
         return None
-    from asf.feeder import rows as feeder_rows
     with open(path, encoding='utf-8') as f:
-        return feeder_rows.items_of(json.load(f))
+        index = json.load(f)
+    raw = index.get('items') if isinstance(index.get('items'), dict) else index
+    return {k: v for k, v in raw.items() if isinstance(v, dict)}
 
 
 def build_parser():
