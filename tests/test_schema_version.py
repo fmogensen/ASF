@@ -4,6 +4,7 @@ import shutil
 import unittest
 
 from asf import schema
+from asf.init import STREAM_FOLDERS
 from asf.record import frontmatter
 from tests.test_backlog import make_repo, run, write_item
 
@@ -17,6 +18,9 @@ def card_version(root, folder, id_):
 class RecordCarriesSchemaVersionTests(unittest.TestCase):
     def setUp(self):
         self.root = make_repo()
+        # B-0005: `check` now requires the layout's stream folders; this test is about the stamp
+        for f in STREAM_FOLDERS:
+            os.makedirs(os.path.join(self.root, f))
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
     def test_index_and_every_card_carry_schema_version(self):
