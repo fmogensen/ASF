@@ -616,10 +616,99 @@ class ProductHarvestTests(unittest.TestCase):
         before = self.origin_main()
         results, lines = self.harvest(self.product())
         self.assertEqual(results, {'fix/B-0001': 'held'})
-        self.assertEqual(lines, ['held fix/B-0001: commits do not name B-0001'])
+        self.assertEqual(len(lines), 1, lines)
+        self.assertTrue(lines[0].startswith('held fix/B-0001: commits do not name B-0001:'), lines)
+        self.assertTrue(lines[0].endswith(' — back to its session (round 1)'), lines)
+        self.assertEqual(self.record('fix/B-0001')['correction']['kind'], 'naming')
         self.assertEqual(self.origin_main(), before)
         self.assertTrue(self.origin_has('fix/B-0001'))
         self.assertFalse(self.record('fix/B-0001').get('harvested'))
+
+    def test_b0056_a_merge_commit_on_a_lane_branch_is_held_with_the_named_reason(self):
+        self.push_lane('fix/B-0001', [('fix(B-0001): the change', {'a.txt': 'a\n'})])
+        # the trunk moves; the session merges it in (what a session did when its rebase could
+        # not be pushed) — the branch is no longer straight commits on the trunk
+        sh(['git', 'checkout', '-q', 'main'], cwd=self.worker)
+        self.write(self.worker, 'm.txt', 'm\n')
+        sh(['git', 'add', '-A'], cwd=self.worker)
+        sh(['git', 'commit', '-qm', 'trunk moves'], cwd=self.worker)
+        sh(['git', 'push', '-q', 'origin', 'main'], cwd=self.worker)
+        sh(['git', 'checkout', '-q', 'fix/B-0001'], cwd=self.worker)
+        sh(['git', 'merge', '-q', '--no-edit', 'main', '-m', 'fix(B-0001): merge main'], cwd=self.worker)
+        sh(['git', 'push', '-q', 'origin', 'fix/B-0001'], cwd=self.worker)
+        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
+        before = self.origin_main()
+        results, lines = self.harvest(self.product())
+        lines = [l for l in lines if not l.startswith('harvest: ')]  # the checkout's fast-forward
+        self.assertEqual(results, {'fix/B-0001': 'held'})
+        self.assertTrue(lines[0].startswith('held fix/B-0001: merge commit on a lane branch: '), lines)
+        self.assertIn('rebase onto it, never merge origin/fix/B-0001 or origin/main into it', lines[0])
+        self.assertTrue(lines[0].endswith(' — back to its session (round 1)'), lines)
+        rec = self.record('fix/B-0001')
+        self.assertEqual(rec['correction']['kind'], 'merge')
+        self.assertEqual(self.origin_main(), before)
+        self.assertTrue(self.origin_has('fix/B-0001'))
+
+    def test_b0057_a_spec_branch_whose_document_is_on_the_trunk_is_landed_without_a_gate(self):
+        spec = 'docs/specs/f-0001.md'
+        self.push_lane('spec/F-0001', [('spec(F-0001): first cut', {spec: 'v1\n'}),
+                                       ('spec(F-0001): final', {spec: 'final\n'}),
+                                       ('adjudicate(F-0001): a ruling that does not belong here',
+                                        {'docs/reviews/1-f-0001-ruling.md': 'no finding\n'})])
+        # the document reached the trunk another way (a hand landing), in its final form
+        sh(['git', 'checkout', '-q', 'main'], cwd=self.worker)
+        self.write(self.worker, spec, 'final\n')
+        sh(['git', 'add', '-A'], cwd=self.worker)
+        sh(['git', 'commit', '-qm', 'spec(F-0001): landed by hand'], cwd=self.worker)
+        sh(['git', 'push', '-q', 'origin', 'main'], cwd=self.worker)
+        self.session('spec-f-0001', 'F-0001', 'spec/F-0001')
+        before = self.origin_main()
+        results, lines = self.harvest(self.product(branch_prefixes={'spec': 'spec/', 'code': 'worker/'}))
+        lines = [l for l in lines if not l.startswith('harvest: ')]
+        self.assertEqual(results, {'spec/F-0001': 'landed'})
+        self.assertEqual(lines, [f'landed spec/F-0001: already on main at {before[:7]}; not its '
+                                 f'deliverable, dropped with the branch: docs/reviews/1-f-0001-ruling.md'])
+        self.assertEqual(self.origin_main(), before)  # no gate, no push: nothing to land
+        self.assertFalse(self.origin_has('spec/F-0001'))
+        rec = self.record('spec/F-0001')
+        self.assertEqual(rec['harvested'], before)
+        self.assertFalse(rec.get('correction'))
+        self.assertEqual(self.harvest(self.product()), ({}, []))
+
+    def test_b0057_a_branch_whose_every_change_is_on_the_trunk_is_landed(self):
+        self.push_lane('fix/B-0001', [('fix(B-0001): the change', {'a.txt': 'a\n'})])
+        sh(['git', 'checkout', '-q', 'main'], cwd=self.worker)
+        self.write(self.worker, 'a.txt', 'a\n')
+        sh(['git', 'add', '-A'], cwd=self.worker)
+        sh(['git', 'commit', '-qm', 'fix(B-0001): the same change, landed another way'], cwd=self.worker)
+        sh(['git', 'push', '-q', 'origin', 'main'], cwd=self.worker)
+        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
+        before = self.origin_main()
+        results, lines = self.harvest(self.product())
+        lines = [l for l in lines if not l.startswith('harvest: ')]
+        self.assertEqual(results, {'fix/B-0001': 'landed'})
+        self.assertEqual(lines, [f'landed fix/B-0001: already on main at {before[:7]}'])
+        self.assertFalse(self.origin_has('fix/B-0001'))
+
+    def test_b0057_a_closed_bugs_branch_is_archived_not_held(self):
+        self.push_lane('fix/B-0001', [('fix(B-0001): an older approach', {'old.txt': 'old\n'})])
+        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
+        items = {'B-0001': {'id': 'B-0001', 'type': 'bug', 'state': 'Closed'}}
+        before = self.origin_main()
+        lines = []
+        results = harvest.run_product_harvest(self.product(), self.state_dir, out=lines.append, items=items)
+        self.assertEqual(results, {'fix/B-0001': 'superseded'})
+        self.assertEqual(lines, ['superseded fix/B-0001: B-0001 is Closed in the record — archived as archive/fix/B-0001'])
+        self.assertEqual(self.origin_main(), before)
+        self.assertFalse(self.origin_has('fix/B-0001'))
+        self.assertTrue(self.origin_has('archive/fix/B-0001'))
+        self.assertEqual(self.record('fix/B-0001')['harvested'], 'superseded')
+        # an open Bug's branch, or a Feature's, is never superseded this way
+        self.push_lane('fix/B-0002', [('fix(B-0002): live work', {'live.txt': 'live\n'})])
+        self.session('fix-bug-b-0002', 'B-0002', 'fix/B-0002')
+        items['B-0002'] = {'id': 'B-0002', 'type': 'bug', 'state': 'Active'}
+        results = harvest.run_product_harvest(self.product(), self.state_dir, out=lines.append, items=items)
+        self.assertEqual(results, {'fix/B-0002': 'landed'})
 
     def test_red_test_command_holds_and_records_a_correction(self):
         self.push_lane('fix/B-0001', [('fix(B-0001): breaks the gate',

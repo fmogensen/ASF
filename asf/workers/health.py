@@ -10,6 +10,11 @@ For every live session in ``sessions.jsonl``:
 * its pid is dead and there is no result → ended, ``end_reason: dead pid``;
 * a ``dead pid`` session whose log later carries a result → ``re-judged`` finished/failed, under
   the same push rule (B-0028, B-0051);
+* a run that says ok with a clean tree but commits origin lacks — spawn rebased its branch onto
+  the trunk before the session started, the session finished a conflicted rebase, or it never
+  pushed — is **published by the factory** first (``--force-with-lease`` against the tip the
+  evidence saw when the branch is on origin, a plain push when not) and judged again, so a
+  session never needs the force the rules forbid (B-0056);
 * a run ended ``failed: not pushed`` is held like a red gate — a ``correction`` on the run and a
   round on the item — so the feeder's FIX → CORRECT row sends the next session back to the same
   worktree to commit and push what is there (B-0051, B-0052).
@@ -152,6 +157,27 @@ def worktree_empty(worktree, main):
     return st.returncode == 0 and not st.stdout.strip() and in_trunk(worktree, main)
 
 
+def publish_gap(product, run, ev, reason, alive=pid_alive):
+    """B-0056: a run judged ``failed: not pushed`` with a clean tree and commits origin lacks —
+    a rebase the factory started or the session finished, or work committed and never pushed —
+    is published by the factory (:func:`asf.workers.lifecycle.publish`), then judged again.
+    Uncommitted files stay a hold: the factory never commits for a session. Returns
+    ``(reason, evidence, line)``; ``line`` is None when nothing was attempted."""
+    wt, branch = run.get('worktree'), run.get('branch')
+    result_ok = reason == lifecycle.FINISHED or (reason or '').startswith('failed: not pushed')
+    if not result_ok or ev.uncommitted or not branch:
+        return reason, ev, None
+    if not wt or not os.path.isdir(wt):
+        return reason, ev, None
+    if not (ev.unpushed or (ev.remote_sha and not ev.head_on_remote)):
+        return reason, ev, None
+    ok, line = lifecycle.publish(wt, branch, ev.remote_sha, main=product.main)
+    if not ok:
+        return reason, ev, line
+    ev = lifecycle.gather(product, run, alive=alive, worktree=wt)
+    return lifecycle.judge(run, ev), ev, line
+
+
 def health(product, fix=False, alive=pid_alive, out=print):
     """Returns a list of ``(job, what, detail)`` transitions/findings. Every judgement is
     :mod:`asf.workers.lifecycle`'s: :func:`~asf.workers.lifecycle.judge` for the ``ended`` line,
@@ -168,14 +194,21 @@ def health(product, fix=False, alive=pid_alive, out=print):
                 ev = lifecycle.gather(product, s, alive=alive)
                 if ev.result is not None:
                     reason = lifecycle.judge(s, ev)
+                    reason, ev, line = publish_gap(product, s, ev, reason, alive)
+                    if line:
+                        found.append((job, 'published', line))
                     ok = reason == lifecycle.FINISHED
                     pool_mod.update_session(product, job, end_reason=reason, rc=0 if ok else 1)
                     s.update(end_reason=reason, rc=0 if ok else 1)
                     found.append((job, 're-judged', reason))
             continue
-        reason = lifecycle.judge(s, lifecycle.gather(product, s, alive=alive))
+        ev = lifecycle.gather(product, s, alive=alive)
+        reason = lifecycle.judge(s, ev)
         if reason is None:
             continue
+        reason, ev, line = publish_gap(product, s, ev, reason, alive)  # B-0056
+        if line:
+            found.append((job, 'published', line))
         now = pool_mod.now_iso()
         pool_mod.update_session(product, job, ended=now, end_reason=reason)
         s.update(ended=now, end_reason=reason)
@@ -214,6 +247,8 @@ def health(product, fix=False, alive=pid_alive, out=print):
     for job, what, detail in found:
         if what == 'reaped':
             out(f'reaped {job} ({detail})')
+        elif what == 'published':
+            out(detail)
         else:
             out(f'{what:<9} {job:<24} {detail}')
     if not found:

@@ -298,6 +298,9 @@ class TestSpawn(Home):
         self.assertTrue(os.path.exists(os.path.join(wt, 'a.txt')))
         self.assertTrue(os.path.exists(os.path.join(wt, 'b.txt')))
         git('merge-base', '--is-ancestor', 'origin/main', 'HEAD', cwd=wt)
+        # B-0056: the factory published the rebase — the session's own push is a fast-forward
+        self.assertEqual(git('ls-remote', '--heads', 'origin', 'fix/B-0046', cwd=wt).split()[0],
+                         git('rev-parse', 'HEAD', cwd=wt))
 
     def test_b0048_adjudicate_row_spawns_on_the_held_branch(self):
         """The reuse-a-held-branch rule (B-0046) was keyed on ``kind == 'correct'`` — a
@@ -353,7 +356,9 @@ class TestSpawn(Home):
         # a session that ended 'finished' without pushing (B-0051) must not permanently block
         # its item: the next spawn for the same job reuses the worktree as it stands — branch
         # and tree — rebased onto the trunk, instead of refusing it forever. The refusal stays
-        # only for a worktree whose session is still live (B-0025).
+        # only for a worktree whose session is still live (B-0025). Since B-0056 the factory
+        # publishes the committed work at health time, so the run is finished and pushed; the
+        # takeover and its rebase (published too) still hold.
         row = feature_row('again')
         rt = runtime_mod.FakeRuntime([{'ok': True, 'pid': 40}])
         rec = spawn_mod.spawn(self.product, row, self.acct(), 'b', runtime=rt, cfg=self.cfg)
@@ -367,8 +372,10 @@ class TestSpawn(Home):
         health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
         s = pool_mod.load_sessions(self.product)['again']
         self.assertTrue(s.get('ended'))
-        self.assertNotEqual(s['end_reason'], 'finished')
-        # the trunk moves on while the worktree sits there, unpushed
+        self.assertEqual(s['end_reason'], 'finished')  # B-0056: published by the factory
+        self.assertEqual(git('ls-remote', '--heads', 'origin', rec['branch'], cwd=wt).split()[0],
+                         git('rev-parse', 'HEAD', cwd=wt))
+        # the trunk moves on while the worktree sits there
         other = os.path.join(self.tmp, 'other')
         git('clone', '-q', os.path.join(self.tmp, 'origin.git'), other, cwd=self.tmp)
         with open(os.path.join(other, 'trunk.txt'), 'w') as f:
@@ -382,6 +389,8 @@ class TestSpawn(Home):
         self.assertEqual(os.path.realpath(rec2['worktree']), os.path.realpath(wt))
         self.assertTrue(os.path.exists(os.path.join(wt, 'x')))
         self.assertTrue(os.path.exists(os.path.join(wt, 'trunk.txt')))
+        self.assertEqual(git('ls-remote', '--heads', 'origin', rec['branch'], cwd=wt).split()[0],
+                         git('rev-parse', 'HEAD', cwd=wt))  # the takeover rebase, published
         git('merge-base', '--is-ancestor', 'origin/main', 'HEAD', cwd=wt)
 
     def test_b0025_live_sessions_worktree_still_refuses(self):
@@ -641,24 +650,53 @@ class TestHealth(Home):
         rows = spawn_mod._read_ranges(spawn_mod.id_ranges_path(self.product))
         self.assertNotIn('done', [j for j, _ in rows])
 
-    def test_local_commit_not_pushed_is_kept(self):
+    def test_local_commit_not_pushed_is_published_by_the_factory(self):
         # B-0051: the result says ok, but a commit made after the last push never went out —
-        # that must not be read as 'finished' (or the item is blocked forever: health says
-        # finished, harvest sees nothing to land). It ends 'failed: not pushed: ...' instead,
-        # and the worktree with the unpushed work is kept, not reaped.
+        # that must not be read as 'finished' with nothing on origin for harvest to land.
+        # B-0056: the factory publishes what a clean tree holds, then judges — finished, and
+        # origin has the commit; the session never needed a push it may not make.
         rec = self.spawn('done', {'ok': True})
         wt = rec['worktree']
         git('push', '-q', 'origin', rec['branch'], cwd=wt)
-        for k, v in (('user.email', 'ci@example.com'), ('user.name', 'ci')):
-            git('config', k, v, cwd=wt)
-        with open(os.path.join(wt, 'x'), 'w') as f:
-            f.write('x')
-        git('add', 'x', cwd=wt)
-        git('commit', '-q', '-m', 'x', cwd=wt)
+        self.commit(wt, 'x')
         found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
-        end_reason = pool_mod.load_sessions(self.product)['done']['end_reason']
-        self.assertEqual(end_reason, 'failed: not pushed: 0 uncommitted file(s), 1 unpushed commit(s)')
-        self.assertIn(('done', 'keep', f'ended: session {end_reason}, not finished'), found)
+        run = pool_mod.load_sessions(self.product)['done']
+        self.assertEqual(run['end_reason'], 'finished')
+        self.assertIn(('done', 'published', f"published {rec['branch']} at " + git('rev-parse', '--short', 'HEAD', cwd=wt)
+                       + ' (rebased; lease held)'), found)
+        self.assertEqual(git('ls-remote', '--heads', 'origin', rec['branch'], cwd=wt).split()[0],
+                         git('rev-parse', 'HEAD', cwd=wt))
+
+    def test_b0056_a_rebased_clean_run_is_published_and_finished(self):
+        # spawn rebased the branch (or the session finished a conflicted rebase): HEAD is off
+        # origin/<branch>, every patch is there; finished means pushed — the factory pushes
+        rec = self.spawn('rebased', {'ok': True})
+        wt, branch = rec['worktree'], rec['branch']
+        self.commit(wt, 'fix')
+        git('push', '-q', 'origin', branch, cwd=wt)
+        other = os.path.join(self.tmp, 'other')
+        git('clone', '-q', os.path.join(self.tmp, 'origin.git'), other, cwd=self.tmp)
+        self.commit(other, 'trunk-moves')
+        git('push', '-q', 'origin', 'HEAD:main', cwd=other)
+        git('fetch', '-q', 'origin', cwd=wt)
+        git('rebase', '-q', 'origin/main', cwd=wt)
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
+        self.assertEqual(pool_mod.load_sessions(self.product)['rebased']['end_reason'], 'finished')
+        self.assertEqual(git('ls-remote', '--heads', 'origin', branch, cwd=wt).split()[0],
+                         git('rev-parse', 'HEAD', cwd=wt))
+        self.assertTrue(any(w == 'published' for _j, w, _d in found), found)
+
+    def test_b0056_uncommitted_work_is_never_published(self):
+        rec = self.spawn('dirty', {'ok': True})
+        wt = rec['worktree']
+        self.commit(wt, 'fix')
+        git('push', '-q', 'origin', rec['branch'], cwd=wt)
+        with open(os.path.join(wt, 'loose'), 'w') as f:
+            f.write('loose')
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
+        end_reason = pool_mod.load_sessions(self.product)['dirty']['end_reason']
+        self.assertEqual(end_reason, 'failed: not pushed: 1 uncommitted file(s), 0 unpushed commit(s)')
+        self.assertFalse(any(w == 'published' for _j, w, _d in found), found)
         self.assertTrue(os.path.isdir(wt))
 
     def test_orphan_worktree(self):

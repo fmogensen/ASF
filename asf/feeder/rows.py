@@ -184,6 +184,8 @@ def bug_rows(items, product, busy, attempts=None):
         sev = b.get('severity')
         if sev not in ('S1', 'S2') or b.get('decided') is not True or not is_open(b) or b['id'] in busy:
             continue
+        if b.get('blocked'):  # B-0058: a blocked Bug waits like a blocked Feature
+            continue
         # an Active Bug has a fixer branch/PR already: CONFLICT/STALE rows speak for it
         if b.get('state') == 'Active':
             continue
@@ -213,6 +215,8 @@ def correction_rows(items, product, busy, corrections):
     for iid, c in sorted((corrections or {}).items()):
         item = items.get(iid)
         if not item or not c or not c.get('text') or not is_open(item) or iid in busy:
+            continue
+        if item.get('blocked'):  # B-0058: a blocked item gets no correction or adjudicate row either
             continue
         ids.add(iid)
         f = feature_of(items, item)

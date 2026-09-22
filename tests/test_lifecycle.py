@@ -412,6 +412,45 @@ class UnpushedAfterARebaseTest(unittest.TestCase):
         self.commit('more', 'new work the remote has never seen')
         self.assertEqual(lc.unpushed_commits(self.repo, self.remote_sha, 'main'), 1)
 
+    def test_b0056_the_factory_publishes_the_rebased_branch_under_a_lease(self):
+        # no push a session may make brings a rebased branch to origin; the factory's does
+        ok, line = lc.publish(self.repo, 'fix/B-9999', self.remote_sha, main='main')
+        self.assertTrue(ok, line)
+        self.assertEqual(self.sh(['rev-parse', 'HEAD'], self.repo),
+                         self.sh(['ls-remote', '--heads', 'origin', 'fix/B-9999'], self.repo).split()[0])
+        self.assertIn('published fix/B-9999 at', line)
+        self.assertIn('lease held', line)
+
+    def test_b0056_a_lease_that_moved_is_refused_and_nothing_is_overwritten(self):
+        # origin moved after the evidence was gathered: the push is refused, the branch stays
+        other = os.path.join(os.path.dirname(self.repo), 'other')
+        self.sh(['clone', '-q', '-b', 'fix/B-9999', self.sh(['remote', 'get-url', 'origin'], self.repo), other],
+                os.path.dirname(self.repo))
+        for k, v in (('user.name', 'Test'), ('user.email', 't@example.com')):
+            self.sh(['config', k, v], other)
+        with open(os.path.join(other, 'late'), 'w') as f:
+            f.write('late')
+        self.sh(['add', '-A'], other)
+        self.sh(['commit', '-qm', 'late work on origin'], other)
+        self.sh(['push', '-q', 'origin', 'fix/B-9999'], other)
+        moved = self.sh(['rev-parse', 'HEAD'], other)
+        ok, line = lc.publish(self.repo, 'fix/B-9999', self.remote_sha, main='main')
+        self.assertFalse(ok)
+        self.assertTrue(line.startswith('publish fix/B-9999 refused:'), line)
+        self.assertEqual(self.sh(['ls-remote', '--heads', 'origin', 'fix/B-9999'], self.repo).split()[0], moved)
+
+    def test_b0056_publish_never_targets_the_trunk(self):
+        ok, line = lc.publish(self.repo, 'main', '', main='main')
+        self.assertFalse(ok)
+        self.assertIn('not a lane branch', line)
+
+    def test_b0056_a_branch_not_on_origin_is_published_plainly(self):
+        self.sh(['checkout', '-q', '-b', 'fix/B-9998'], self.repo)
+        self.commit('new', 'new work')
+        ok, line = lc.publish(self.repo, 'fix/B-9998', '', main='main')
+        self.assertTrue(ok, line)
+        self.assertEqual(line, 'published fix/B-9998 at ' + self.sh(['rev-parse', '--short', 'HEAD'], self.repo))
+
     def test_a_branch_never_pushed_is_counted_against_the_trunk(self):
         self.assertEqual(lc.unpushed_commits(self.repo, '', 'main'), 1)
 

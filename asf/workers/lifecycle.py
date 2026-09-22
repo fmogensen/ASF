@@ -306,6 +306,32 @@ def unpushed_commits(wt, remote_sha, main='main'):
     return len([ln for ln in p.stdout.splitlines() if ln.startswith('+')])
 
 
+def publish(wt, branch, remote_sha='', main='main'):
+    """Push the worktree's HEAD to ``origin/<branch>`` as the factory (B-0056).
+
+    A rebased lane branch — spawn's takeover rebase (B-0046, B-0048) or a conflict the session
+    finished resolving — holds commits origin does not, and no push a session may make brings
+    them there: a plain push is not a fast-forward and the standing rules and the worker settings
+    forbid a force. Told "push the same branch, never a force", a session did the one thing left
+    and merged its own stale remote (eight spec branches, 13 to 20 commits of tangle each). So
+    the factory publishes, never the session: ``--force-with-lease=<branch>:<remote_sha>`` when
+    the branch is on origin (origin moving since the evidence was gathered refuses the push —
+    nothing is overwritten unseen), a plain push when it is not. The trunk is never a target.
+    ``(ok, line)``."""
+    if not branch or branch == main:
+        return False, f'publish refused: {branch or "no branch"} is not a lane branch'
+    ref = f'refs/heads/{branch}'
+    args = ['push', '-q', 'origin', f'HEAD:{ref}']
+    if remote_sha:
+        args.insert(2, f'--force-with-lease={ref}:{remote_sha}')
+    p = _git(args, wt)
+    if p.returncode != 0:
+        why = [ln for ln in (p.stderr or p.stdout).splitlines() if ln.strip()]
+        return False, f'publish {branch} refused: {why[-1].strip() if why else "push failed"}'
+    head = _git(['rev-parse', '--short', 'HEAD'], wt).stdout.strip()
+    return True, f'published {branch} at {head}' + (' (rebased; lease held)' if remote_sha else '')
+
+
 def gather(product, run, alive=None, worktree=None):
     """The :class:`Evidence` for ``run`` — git in its worktree (``run['worktree']`` unless given),
     ``origin/<branch>`` from the product repo's remote, the log through the runtime."""

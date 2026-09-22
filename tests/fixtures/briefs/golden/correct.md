@@ -41,7 +41,7 @@ left out: the retry itself, F-0001 owns it
 
 ## Your job: correct B-0001 — the harvest held `fix/B-0001`
 
-The harvest gate held `fix/B-0001` and sent it back to you: your worktree is already on `fix/B-0001`, and the rebase onto `origin/main` was started for you — if `git status` shows a conflict it is still in place: resolve it (or, if the rebase finished cleanly, carry on), fix what the failure below names (a conflict is resolved so both sides survive), run the full suite, and push the same branch — never a new one, never a force. Change nothing the failure does not ask for; paste the suite's last line in the report.
+The harvest gate held `fix/B-0001` and sent it back to you: your worktree is already on `fix/B-0001`, and the rebase onto `origin/main` was started for you — if `git status` shows a conflict it is still in place: resolve it (or, if the rebase finished cleanly, carry on), fix what the failure below names (a conflict is resolved so both sides survive), run the full suite, and push the same branch — never a new one, never a merge of `origin/fix/B-0001` or `origin/main` into it, never a force. A push refused as non-fast-forward is the rebase you were handed: stop there and report `pushed: rebased <sha> — the factory publishes`. Change nothing the failure does not ask for; paste the suite's last line in the report.
 
 CORRECTION: the step failed with:
 FAIL: test_red_gate
@@ -58,6 +58,16 @@ background task you do not wait for. A result with uncommitted or unpushed work 
 session (B-0051) and comes back to you as a correction. Say so yourself in the report's
 `pushed:` line: `pushed: no` is read as that failure at once.
 
+Your branch is `fix/B-0001`, and it may already be on origin (`exists:` above — a held branch
+comes back to its session, and the worktree was rebased onto `origin/main` before you started;
+if `git status` shows a rebase in progress, finish it first). A lane branch is straight commits
+on the trunk: never merge `origin/fix/B-0001` or `origin/main` into it, never force-push, never
+recut it or open another branch. Push with `git push origin fix/B-0001`. If that is refused as
+non-fast-forward, the rebase is why: stop there — do not merge, do not force — and write
+`pushed: rebased <sha> — the factory publishes` in the report; the factory publishes a rebased
+lane branch itself (B-0056). Never invent an id: a card id comes from `asf new` or the
+`BACKLOG_ID_RANGE` this session was given, and a ruling is never a commit in this repo.
+
 Anything a human must decide, answer or run is never guessed and never buried in a comment:
 print `NEEDS OPERATOR: <what> — <the command or the answer needed>` on its own line, then carry on
 with every part of the job that does not depend on it.
@@ -70,7 +80,7 @@ item: B-0001
 kind: correct
 status: done | partial | blocked
 branch: fix/B-0001
-pushed: yes <the sha origin/fix/B-0001 now points at> | no — <why>
+pushed: yes <the sha origin/fix/B-0001 now points at> | rebased <sha> — the factory publishes | no — <why>
 commits: <sha> <subject> (one per line, or none)
 tests: <what you ran — and its last line>
 left out: <what and why, or none>

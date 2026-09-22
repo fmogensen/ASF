@@ -592,6 +592,108 @@ def product_gate(tmp, conv, asf_repo):
     return True, None
 
 
+def merge_commits(repo, trunk, branch):
+    """The merge commits on ``origin/<branch>`` above the trunk, as ``<sha> <subject>``."""
+    r = sh(['git', 'log', '--merges', '--format=%h %s', f'origin/{trunk}..origin/{branch}'],
+           cwd=repo)
+    return [l for l in r.stdout.splitlines() if l.strip()]
+
+
+def lane_refusal(repo, trunk, branch, item):
+    """``(kind, text)`` for a branch harvest refuses before any gate, or None. A lane branch is
+    straight commits on the trunk: a merge commit on it (B-0056 — a session merging its own
+    stale remote or the trunk, because no push it may make publishes a rebase) and a commit not
+    naming the item are each a correction back to the session, never a silent hold. The
+    factory publishes the rewritten branch (:func:`asf.workers.lifecycle.publish`)."""
+    merges = merge_commits(repo, trunk, branch)
+    if merges:
+        return 'merge', (f'merge commit on a lane branch: {merges[0]} — a lane branch is straight '
+                         f'commits on origin/{trunk}: rebase onto it, never merge origin/{branch} '
+                         f'or origin/{trunk} into it; the factory publishes the rebased branch')
+    if not item or not commits_name_item(repo, trunk, branch, item):
+        return 'naming', (f'commits do not name {item or "an item id"}: every commit subject on '
+                          f'the branch names its item — reword them; the factory publishes the '
+                          f'rewritten branch')
+    return None
+
+
+def touched_files(repo, trunk, branch):
+    """The files ``origin/<branch>`` changed since it left the trunk."""
+    r = sh(['git', 'diff', '--name-only', f'origin/{trunk}...origin/{branch}'], cwd=repo)
+    return [l for l in r.stdout.splitlines() if l.strip()]
+
+
+def deliverable_of(conv, branch, item):
+    """A ``spec/`` or ``plan/`` branch delivers one document (its template: "create only that
+    file"); every other lane delivers what it touched."""
+    kind = conv.branch_kind(branch)
+    if kind in ('spec', 'plan') and item:
+        return f'{conv.doc_dir(kind)}/{item.lower()}.md'
+    return None
+
+
+def already_on_trunk(repo, trunk, branch, conv, item):
+    """``(landed, extras)`` — B-0057: a branch is landed when its changes are already on the
+    trunk, whatever its commit count says. Every file it touched is identical between
+    ``origin/<trunk>`` and ``origin/<branch>``; or, for a spec/plan branch, its one deliverable
+    is — ``extras`` then names what else it carried, which is not the item's and goes with the
+    branch. Counting commits held such a branch for ever: the rebase replayed commits adding a
+    file the trunk already had."""
+    files = touched_files(repo, trunk, branch)
+    same = [f for f in files
+            if sh(['git', 'diff', '--quiet', f'origin/{trunk}', f'origin/{branch}', '--', f],
+                  cwd=repo).returncode == 0]
+    deliverable = deliverable_of(conv, branch, item)
+    if deliverable and deliverable in same:
+        return True, [f for f in files if f not in same]
+    if len(same) == len(files):
+        return True, []
+    return False, []
+
+
+def land_already(repo, state_dir, branch, record, trunk, extras, dry_run, out):
+    """Mark a branch whose changes are on the trunk landed at the trunk's tip, and remove it as
+    after any landing (B-0057)."""
+    sha = sh(['git', 'rev-parse', f'origin/{trunk}'], cwd=repo).stdout.strip()
+    note = f'; not its deliverable, dropped with the branch: {", ".join(extras)}' if extras else ''
+    if dry_run:
+        out(f'DRY: would mark {branch} landed — already on {trunk} at {sha[:7]}{note}')
+        return 'dry'
+    mark_session(state_dir, record.get('job') or branch, harvested=sha, correction=None)
+    sh(['git', 'push', '-q', 'origin', '--delete', branch], cwd=repo)
+    out(f'landed {branch}: already on {trunk} at {sha[:7]}{note}')
+    return 'landed'
+
+
+SUPERSEDED = 'superseded'
+
+
+def superseded_by(items, item):
+    """The state that supersedes a Bug's branch, or None: a fix branch of a Bug the record
+    already holds Closed or Resolved is another fix's leftover (B-0057), never work to land."""
+    card = (items or {}).get(item or '') or {}
+    if card.get('type') == 'bug' and card.get('state') in ('Closed', 'Resolved'):
+        return card['state']
+    return None
+
+
+def archive_superseded(repo, state_dir, branch, record, item, state, dry_run, out):
+    """Move a superseded branch to ``archive/<branch>`` on origin — its commits stay reachable,
+    nothing is deleted unseen — and take it out of the lane (B-0057)."""
+    if dry_run:
+        out(f'DRY: would archive {branch} — {item} is {state} in the record')
+        return 'dry'
+    keep = sh(['git', 'push', '-q', 'origin', f'origin/{branch}:refs/heads/archive/{branch}'],
+              cwd=repo)
+    if keep.returncode != 0:
+        out(f'held {branch}: archive push refused: {tail(keep.stderr)}')
+        return 'held'
+    mark_session(state_dir, record.get('job') or branch, harvested=SUPERSEDED, correction=None)
+    sh(['git', 'push', '-q', 'origin', '--delete', branch], cwd=repo)
+    out(f'superseded {branch}: {item} is {state} in the record — archived as archive/{branch}')
+    return SUPERSEDED
+
+
 def hold_with_correction(state_dir, branch, record, kind, text, out):
     """Hold ``branch`` and hand it back to its session: :func:`asf.workers.lifecycle.hold` says
     what goes on the run (the failing output as ``correction``, the rounds over every session of
@@ -671,11 +773,13 @@ def sync_checkout(repo, trunk, out=print):
     return True
 
 
-def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, out=print):
+def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, out=print,
+                        items=None):
     """Land (or hand to the PR lane) every finished lane branch on the product repo's origin.
     ``bug_root`` is the record a red gate files its Bug in — a path, or a callable returning
     one (the tick's record clone, made only when needed); None prints ``BUG:`` instead.
-    Returns ``{branch: outcome}``."""
+    ``items`` is the record's index (``{id: card}``) when the caller has one: a Bug's branch is
+    superseded by its card being Closed or Resolved (B-0057). Returns ``{branch: outcome}``."""
     conv = product.conventions
     repo = os.path.abspath(product.repo_dir)
     if is_record_repo(repo):  # the record's own gate and index regeneration, as before
@@ -702,9 +806,19 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
         eligible.append((branch, record))
     for branch, record in cap_to_tick(eligible, out):
         item = item_of(branch, record)
-        if not item or not commits_name_item(repo, trunk, branch, item):
-            out(f'held {branch}: commits do not name {item or "an item id"}')
-            results[branch] = 'held'
+        done, extras = already_on_trunk(repo, trunk, branch, conv, item)
+        if done:
+            results[branch] = land_already(repo, state_dir, branch, record, trunk, extras,
+                                           dry_run, out)
+            continue
+        state = superseded_by(items, item)
+        if state:
+            results[branch] = archive_superseded(repo, state_dir, branch, record, item, state,
+                                                 dry_run, out)
+            continue
+        refusal = lane_refusal(repo, trunk, branch, item)
+        if refusal:
+            results[branch] = hold_with_correction(state_dir, branch, record, *refusal, out)
             continue
         if mode == LANDING_PR:
             if not dry_run:
@@ -719,6 +833,16 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
     if any(r == 'landed' for r in results.values()):
         sync_checkout(repo, trunk, out)
     return results
+
+
+def record_items(root):
+    """``{id: card}`` from the record at ``root``, or None when it has no index."""
+    path = os.path.join(root or '', 'index.json')
+    if not root or not os.path.isfile(path):
+        return None
+    from asf.feeder import rows as feeder_rows
+    with open(path, encoding='utf-8') as f:
+        return feeder_rows.items_of(json.load(f))
 
 
 def build_parser():

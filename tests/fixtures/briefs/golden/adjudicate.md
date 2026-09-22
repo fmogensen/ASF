@@ -79,6 +79,16 @@ background task you do not wait for. A result with uncommitted or unpushed work 
 session (B-0051) and comes back to you as a correction. Say so yourself in the report's
 `pushed:` line: `pushed: no` is read as that failure at once.
 
+Your branch is `spec/F-0002`, and it may already be on origin (`exists:` above — a held branch
+comes back to its session, and the worktree was rebased onto `origin/main` before you started;
+if `git status` shows a rebase in progress, finish it first). A lane branch is straight commits
+on the trunk: never merge `origin/spec/F-0002` or `origin/main` into it, never force-push, never
+recut it or open another branch. Push with `git push origin spec/F-0002`. If that is refused as
+non-fast-forward, the rebase is why: stop there — do not merge, do not force — and write
+`pushed: rebased <sha> — the factory publishes` in the report; the factory publishes a rebased
+lane branch itself (B-0056). Never invent an id: a card id comes from `asf new` or the
+`BACKLOG_ID_RANGE` this session was given, and a ruling is never a commit in this repo.
+
 Anything a human must decide, answer or run is never guessed and never buried in a comment:
 print `NEEDS OPERATOR: <what> — <the command or the answer needed>` on its own line, then carry on
 with every part of the job that does not depend on it.
@@ -91,7 +101,7 @@ item: F-0002
 kind: adjudicate
 status: done | partial | blocked
 branch: spec/F-0002
-pushed: yes <the sha origin/spec/F-0002 now points at> | no — <why>
+pushed: yes <the sha origin/spec/F-0002 now points at> | rebased <sha> — the factory publishes | no — <why>
 commits: <sha> <subject> (one per line, or none)
 tests: <what you ran — and its last line>
 left out: <what and why, or none>

@@ -158,8 +158,7 @@ def make_worktree(product, job, branch):
         if not ok:
             raise SpawnError(why)
         if candidate == path or _worktree_branch(candidate) == branch:
-            subprocess.run(['git', 'rebase', '-q', f'origin/{product.main}'], cwd=candidate,
-                           capture_output=True, text=True)
+            _rebase_onto_trunk(candidate, branch, product.main)
             return candidate
     if _branch_exists_on_origin(repo, branch):
         _git(['fetch', '-q', 'origin', branch], repo)
@@ -167,8 +166,7 @@ def make_worktree(product, job, branch):
             # a stale worktree of an ended run still holds the branch and is not reusable here
             _git(['worktree', 'remove', '--force', held], repo)
         _git(['worktree', 'add', '-q', '-B', branch, path, f'origin/{branch}'], repo)
-        subprocess.run(['git', 'rebase', '-q', f'origin/{product.main}'], cwd=path,
-                       capture_output=True, text=True)
+        _rebase_onto_trunk(path, branch, product.main)
         return path
     if held:
         _git(['worktree', 'remove', '--force', held], repo)
@@ -183,6 +181,25 @@ def make_worktree(product, job, branch):
         _git(['branch', '-D', branch], repo)
     _git(['worktree', 'add', '-q', '-b', branch, path, f'origin/{product.main}'], repo)
     return path
+
+
+def _rebase_onto_trunk(path, branch, main):
+    """Rebase the worktree onto the fetched trunk. A conflict is left in place for the session.
+    A rebase that completes and moves a branch already on origin is published by the factory at
+    once (:func:`asf.workers.lifecycle.publish`, B-0056): the session then starts on a branch
+    that origin holds, and its own pushes are fast-forwards — it never faces the non-fast-forward
+    that made sessions merge their stale remote."""
+    ls = subprocess.run(['git', 'ls-remote', '--heads', 'origin', branch], cwd=path,
+                        capture_output=True, text=True)
+    remote_sha = ls.stdout.split()[0] if ls.returncode == 0 and ls.stdout.strip() else ''
+    r = subprocess.run(['git', 'rebase', '-q', f'origin/{main}'], cwd=path,
+                       capture_output=True, text=True)
+    if r.returncode != 0 or not remote_sha:
+        return
+    head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=path, capture_output=True,
+                          text=True).stdout.strip()
+    if head and head != remote_sha:
+        lifecycle.publish(path, branch, remote_sha, main=main)
 
 
 def _local_branch_exists(repo, branch):

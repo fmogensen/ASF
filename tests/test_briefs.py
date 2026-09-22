@@ -191,8 +191,21 @@ class GoldenBriefTest(unittest.TestCase):
                 tail = text[text.rindex('## The heartbeat'):]
                 self.assertIn('Your last act is `git push`', tail)
                 self.assertIn('`pushed:` line: `pushed: no` is read as that failure at once', tail)
-                self.assertIn(f'pushed: yes <the sha origin/{r.branch} now points at> | no — <why>', tail)
+                self.assertIn(f'pushed: yes <the sha origin/{r.branch} now points at> | rebased <sha> — '
+                              f'the factory publishes | no — <why>', tail)
                 self.assertTrue(text.rstrip().endswith('```'), text[-200:])
+
+    def test_every_kind_carries_the_branch_rule_rebase_never_merge_never_force(self):
+        # B-0056: eight spec branches were merges of their own stale remote — the session could
+        # not publish the rebase it was handed and was told never to force; the rule is generated
+        # once, names the branch, and gives the session the report line that ends its turn
+        for kind, r in sorted(ROWS.items()):
+            with self.subTest(kind=kind):
+                text = briefs.build(product(), r, index(), [], REPO_FACTS).text
+                tail = text[text.rindex('## The heartbeat'):]
+                self.assertIn(f'never merge `origin/{r.branch}` or `origin/main` into it, never force-push', tail)
+                self.assertIn('`pushed: rebased <sha> — the factory publishes`', tail)
+                self.assertIn('Never invent an id', tail)
 
     def test_the_push_wording_is_not_duplicated_per_template(self):
         # fixer.md and rebase.md each carried their own copy of "a session that ends without a

@@ -16,7 +16,8 @@ def run(ctx, out=print):
     if not product.repo_dir:
         out('harvest: no repo_dir — nothing to harvest')
         return 0
-    results = harvest.run_product_harvest(product, bug_root=ctx.record_root, out=out)
+    items = harvest.record_items(ctx.record_root()) if ctx.has_record else None
+    results = harvest.run_product_harvest(product, bug_root=ctx.record_root, out=out, items=items)
     if not results:
         out('harvest: none to land')
     return 0

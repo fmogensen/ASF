@@ -230,6 +230,17 @@ class CorrectionRowTest(unittest.TestCase):
         self.assertEqual([(r.kind, r.brief_kind) for r in out],
                          [('STALEMATE → ADJUDICATE', 'adjudicate')])
 
+    def test_b0058_a_blocked_item_gets_no_correct_or_adjudicate_row(self):
+        # the controller blocked eleven held items on the Bug about their loop; the next tick
+        # still launched an adjudicate session on one — correction rows skipped `blocked`
+        items = s1_bugs('B-0001')
+        items['items']['B-0001']['blocked'] = True
+        for rounds in (1, 3):
+            with self.subTest(rounds=rounds):
+                out = rows.plan_rows(items, product(), [], 1, attempts={'B-0001': 1},
+                                     corrections=self.corr(rounds))
+                self.assertEqual(out, [])
+
     def test_a_busy_item_gets_no_correct_row(self):
         out = rows.plan_rows(s1_bugs('B-0001'), product(), [{'item': 'B-0001'}], 1,
                              corrections=self.corr(1))
