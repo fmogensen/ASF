@@ -42,10 +42,19 @@ case "$rc" in
     echo "check_generic: clean"
     ;;
   1)
-    # every finding line but the scanner's own trailer; check_generic prints its own below.
-    printf '%s\n' "$out" | sed '$d'
-    echo "check_generic: forbidden name found (see above) — this is a public repo; no product," >&2
-    echo "company, person, vendor, account or host name may appear outside LICENSE" >&2
+    # rc 1 is the scanner's "found", but a scanner that could not start (no module, no
+    # interpreter) exits 1 too. Only its own trailer distinguishes the two, and reporting the
+    # second as a finding hides the real reason behind a "see above" with nothing above it.
+    if printf '%s\n' "$out" | grep -q '^redact: refused'; then
+      # every finding line but the scanner's own trailer; check_generic prints its own below.
+      printf '%s\n' "$out" | sed '$d'
+      echo "check_generic: forbidden name found (see above) — this is a public repo; no product," >&2
+      echo "company, person, vendor, account or host name may appear outside LICENSE" >&2
+    else
+      echo "check_generic: the scanner did not run — no name was checked" >&2
+      printf '%s\n' "$out" >&2
+      rc=2
+    fi
     ;;
   *)
     printf '%s\n' "$out" >&2
