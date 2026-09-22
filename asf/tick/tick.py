@@ -55,7 +55,7 @@ def ci_workflow(product):
 
 
 def run_step0(root, product, fresh=False):
-    """metrics backfill → ingest → file-bugs → rollup → index, against ``root``. Returns nothing;
+    """metrics backfill → ingest → plan-tasks → file-bugs → rollup → index, against ``root``. Returns nothing;
     prints what each step printed, same as running the commands one at a time would.
 
     The backfill reads CI runs only — sessions come from the workers' own ledger, not from a
@@ -76,6 +76,10 @@ def run_step0(root, product, fresh=False):
         cmd_backfill(_ns(days=1, sessions=None, log=None, workflow=ci_workflow(product),
                          launch_dir=None, product=product.name), root)
     cmd_ingest(_ns(fresh=fresh, product=product.name), root)
+    if product.repo_dir:  # B-0060: a landed plan's Tasks become cards, once
+        from asf.evidence import evidence
+        from asf.record.plan_tasks import mint_plan_tasks
+        mint_plan_tasks(root, product, evidence.load(product=product))
     default_bug_epic = product.conventions.get('default_bug_epic')
     cmd_file_bugs(_ns(default_bug_epic=default_bug_epic), root)
     cmd_rollup(_ns(day=None, no_releases=False, product=product.name), root)
