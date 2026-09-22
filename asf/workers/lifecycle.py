@@ -281,6 +281,31 @@ def _count(p):
     return int(p.stdout.strip()) if p.returncode == 0 and p.stdout.strip().isdigit() else 0
 
 
+def unpushed_commits(wt, remote_sha, main='main'):
+    """How many of the session's *own* commits are missing from ``origin/<branch>``.
+
+    Counted above ``origin/<main>``, and by patch rather than by sha. Harvest rebases a branch
+    onto the trunk in its own throwaway worktree (:func:`asf.harvest.harvest.rebase_and_resolve`)
+    *after* the session pushed it, which does two things to a plain ``origin/<branch>..HEAD``
+    count: it drags every commit the trunk has gained into the range, and it gives the session's
+    own commits new shas. The count then reports the trunk's work as this session's unpushed work
+    and an already-pushed commit as missing — and no push a session is allowed to make can bring
+    it back to zero, because a plain push of a rebased branch is not a fast-forward and the
+    standing rules forbid a force. The branch is then held "unpushed" round after round with no
+    move that clears it (B-0053).
+
+    ``git cherry <remote> HEAD <limit>`` answers the question that was meant: of the commits above
+    the trunk, which have no equivalent patch on the remote branch (``+``) and which have one
+    (``-``).
+    """
+    if not remote_sha:
+        return _count(_git(['rev-list', '--count', f'origin/{main}..HEAD'], wt))
+    p = _git(['cherry', remote_sha, 'HEAD', f'origin/{main}'], wt)
+    if p.returncode != 0:  # no origin/<main> here, or a remote sha this repo has not fetched
+        return _count(_git(['rev-list', '--count', f'{remote_sha}..HEAD'], wt))
+    return len([ln for ln in p.stdout.splitlines() if ln.startswith('+')])
+
+
 def gather(product, run, alive=None, worktree=None):
     """The :class:`Evidence` for ``run`` — git in its worktree (``run['worktree']`` unless given),
     ``origin/<branch>`` from the product repo's remote, the log through the runtime."""
@@ -305,7 +330,7 @@ def gather(product, run, alive=None, worktree=None):
             not ln.startswith('branch: Created from') for ln in log.stdout.splitlines() if ln.strip())
     if ev.remote_sha:
         ev.head_on_remote = _git(['merge-base', '--is-ancestor', 'HEAD', ev.remote_sha], wt).returncode == 0
-        ev.unpushed = _count(_git(['rev-list', '--count', f'{ev.remote_sha}..HEAD'], wt))
+        ev.unpushed = unpushed_commits(wt, ev.remote_sha, main)
     else:
         ev.unpushed = _count(_git(['rev-list', '--count', f'origin/{main}..HEAD'], wt))
     ev.in_trunk = _git(['merge-base', '--is-ancestor', 'HEAD', f'origin/{main}'], wt).returncode == 0

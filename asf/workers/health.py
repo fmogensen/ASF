@@ -85,19 +85,19 @@ def pushed(worktree, branch):
 
 def push_gap(worktree, branch, main):
     """(ok, detail): a session's own branch, actually on origin and holding its HEAD. ``detail``
-    counts what is missing — uncommitted files, and commits not on the branch's remote (or, when
-    the branch was never pushed at all, not on ``origin/<main>``) — as ``not pushed: <n>
-    uncommitted file(s), <m> unpushed commit(s)`` (B-0051: a result that says ok is not "finished"
-    until this is (0, 0))."""
+    counts what is missing — uncommitted files, and the session's own commits whose patch is not
+    on the branch's remote (or, when the branch was never pushed at all, the commits above
+    ``origin/<main>``) — as ``not pushed: <n> uncommitted file(s), <m> unpushed commit(s)``
+    (B-0051: a result that says ok is not "finished" until this is (0, 0)). The count is
+    :func:`asf.workers.lifecycle.unpushed_commits`, by patch and above the trunk, so a branch
+    harvest rebased after the session pushed it is not held "unpushed" forever (B-0053)."""
     st = _git(['status', '--porcelain'], worktree)
     n = len([line for line in st.stdout.splitlines() if line.strip()]) if st.returncode == 0 else 0
     remote = ''
     if branch:
         ls = _git(['ls-remote', '--heads', 'origin', branch], worktree)
         remote = ls.stdout.split()[0] if ls.returncode == 0 and ls.stdout.strip() else ''
-    base = f'origin/{branch}' if remote else f'origin/{main}'
-    rc = _git(['rev-list', '--count', f'{base}..HEAD'], worktree)
-    m = int(rc.stdout.strip()) if rc.returncode == 0 and rc.stdout.strip().isdigit() else 0
+    m = lifecycle.unpushed_commits(worktree, remote, main)
     if n == 0 and m == 0 and remote:
         return True, ''
     return False, f'not pushed: {n} uncommitted file(s), {m} unpushed commit(s)'

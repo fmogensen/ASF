@@ -15,6 +15,7 @@ import json
 import os
 import random
 import shutil
+import subprocess
 import tempfile
 import unittest
 
@@ -352,6 +353,67 @@ class LaunchAndReapInvariants(unittest.TestCase):
 
 def dataclassfields(ev):
     return {f: getattr(ev, f) for f in ev.__dataclass_fields__}
+
+
+class UnpushedAfterARebaseTest(unittest.TestCase):
+    """B-0053: harvest rebases a branch onto the trunk after the session pushed it. Counting
+    ``origin/<branch>..HEAD`` by sha then calls the trunk's own commits this session's unpushed
+    work and its already-pushed commit missing — and no push a session may make clears it (a
+    plain push is not a fast-forward; a force is forbidden), so the branch is held every round.
+    The count is by patch and above the trunk instead."""
+
+    def sh(self, cmd, cwd):
+        env = {**os.environ}
+        for var in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE'):
+            env.pop(var, None)
+        r = subprocess.run(['git', *cmd], cwd=cwd, capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, f"git {cmd}:\n{r.stdout}\n{r.stderr}")
+        return r.stdout.strip()
+
+    def commit(self, name, text):
+        with open(os.path.join(self.repo, name), 'w', encoding='utf-8') as f:
+            f.write(text)
+        self.sh(['add', '-A'], self.repo)
+        self.sh(['commit', '-qm', text], self.repo)
+        return self.sh(['rev-parse', 'HEAD'], self.repo)
+
+    def setUp(self):
+        base = tempfile.mkdtemp(prefix='lifecycle_rebase_')
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        origin, self.repo = os.path.join(base, 'origin.git'), os.path.join(base, 'repo')
+        self.sh(['init', '-q', '--bare', '-b', 'main', origin], base)
+        self.sh(['clone', '-q', origin, self.repo], base)
+        for k, v in (('user.name', 'Test'), ('user.email', 't@example.com'),
+                     ('commit.gpgsign', 'false')):
+            self.sh(['config', k, v], self.repo)
+        self.commit('seed', 'seed')
+        self.sh(['push', '-q', 'origin', 'HEAD:main'], self.repo)
+        # the session's branch, committed and pushed — this is the state harvest picks up
+        self.sh(['checkout', '-q', '-b', 'fix/B-9999'], self.repo)
+        self.fix_sha = self.commit('fix', 'the fix')
+        self.sh(['push', '-q', 'origin', 'fix/B-9999'], self.repo)
+        self.remote_sha = self.sh(['rev-parse', 'origin/fix/B-9999'], self.repo)
+        # the trunk moves on under it, then harvest rebases the branch onto the new trunk
+        self.sh(['checkout', '-q', 'main'], self.repo)
+        self.commit('trunk', 'trunk moved')
+        self.sh(['push', '-q', 'origin', 'HEAD:main'], self.repo)
+        self.sh(['checkout', '-q', 'fix/B-9999'], self.repo)
+        self.sh(['rebase', '-q', 'origin/main'], self.repo)
+
+    def test_the_rebase_gave_the_fix_a_new_sha_but_the_same_patch(self):
+        self.assertNotEqual(self.sh(['rev-parse', 'HEAD'], self.repo), self.fix_sha)
+        self.assertEqual(int(self.sh(['rev-list', '--count', f'{self.remote_sha}..HEAD'],
+                                     self.repo)), 2, 'the raw sha count that caused B-0053')
+
+    def test_a_rebased_branch_whose_work_is_on_origin_is_not_unpushed(self):
+        self.assertEqual(lc.unpushed_commits(self.repo, self.remote_sha, 'main'), 0)
+
+    def test_work_committed_after_the_rebase_is_still_counted(self):
+        self.commit('more', 'new work the remote has never seen')
+        self.assertEqual(lc.unpushed_commits(self.repo, self.remote_sha, 'main'), 1)
+
+    def test_a_branch_never_pushed_is_counted_against_the_trunk(self):
+        self.assertEqual(lc.unpushed_commits(self.repo, '', 'main'), 1)
 
 
 if __name__ == '__main__':
