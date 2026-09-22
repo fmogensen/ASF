@@ -7,8 +7,9 @@ check-script form (``R-0042`` → ``r0042``), and its command is ``<absolute asf
 --product <p>`` with ``asf`` resolved from PATH — never a checkout. The merge is idempotent and
 leaves every unrelated key alone; an entry that differs only in the ``asf`` path is replaced.
 
-``asf hook <name>`` runs ``tools/checks/<name>.sh`` (the record's, then the cwd's) with the hook's
-stdin, and exits 0 when there is no such script.
+``asf hook <name>`` runs a hook built into ``asf`` when :data:`BUILTIN` names it (``approvals``,
+:func:`asf.approvals.run_hook`), else ``tools/checks/<name>.sh`` (the record's, then the cwd's)
+with the hook's stdin, exiting 0 when there is no such script.
 """
 import json
 import os
@@ -26,6 +27,10 @@ RULES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 #: `touch_security` path recogniser (F-0031). This module is `tools/check_conventions.sh`'s one
 #: exemption for the runtime settings path, so the path lives here, not in `asf/approvals.py`.
 RUNTIME_SETTINGS_GLOBS = ('.claude/settings.json', '.claude/settings.local.json')
+
+#: The hooks built into ``asf`` — ``{name: the events it answers}`` — run by :func:`cmd_hook`
+#: instead of a check script (F-0031 §2.3). A built-in name shadows a script of the same name.
+BUILTIN = {'approvals': ('PreToolUse',)}
 
 
 def declared_hooks(rules_dir=RULES_DIR):
@@ -132,6 +137,9 @@ def check_script(name, product_name=None, cwd=None):
 
 
 def cmd_hook(args):
+    if args.name in BUILTIN:
+        from asf import approvals  # local: asf.approvals reads this module's runtime globs
+        return approvals.run_hook(sys.stdin.read(), os.environ, product=args.product)
     script = check_script(args.name, args.product)
     if not script:
         return 0
@@ -143,7 +151,8 @@ def register(subparsers):
     p.add_argument('hooks_command', choices=['install'])
     p.add_argument('--product')
     p.set_defaults(run=cmd_hooks)
-    p = subparsers.add_parser('hook', help='run one hook: tools/checks/<name>.sh, if present')
+    p = subparsers.add_parser(
+        'hook', help='run one hook: a built-in (approvals), else tools/checks/<name>.sh')
     p.add_argument('name')
     p.add_argument('--product')
     p.set_defaults(run=cmd_hook)

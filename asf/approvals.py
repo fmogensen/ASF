@@ -8,8 +8,10 @@ authority. :func:`classify` turns one Claude Code tool call into the classes it 
 :func:`resolve`, :func:`holds`, :func:`open_holds`, :func:`is_granted`) is the append-only record
 of every hold and its resolution, in ``~/.ASF/state/<product>/approvals.jsonl`` (D14).
 
-Nothing here runs a hook or reads a session's job yet — that is ``asf hook approvals``
-(:mod:`asf.hooks`), built on top of this module in a later Task of the same plan.
+:func:`run_hook` is the ``PreToolUse`` hook itself — ``asf hook approvals``, dispatched by
+:mod:`asf.hooks` — which refuses a factory session's tool call whose class is not ``auto`` and
+records the hold. It governs only a session (``ASF_JOB`` in the environment, D4), never edits to
+the operator's own config (:func:`operator_config_target`, D8), and fails closed (D7).
 """
 import dataclasses
 import datetime
@@ -17,6 +19,7 @@ import fnmatch
 import json
 import os
 import re
+import sys
 
 from asf import env, hooks
 
@@ -341,3 +344,136 @@ def open_holds(product):
 def is_granted(product, hold):
     """Whether ``hold``'s latest ``resolved`` line's resolution is ``granted``."""
     return _fold(product).get(hold, {}).get('resolution') == 'granted'
+
+
+# ---- the hook — `asf hook approvals` (§2.3) ------------------------------------
+
+def item_of_job(product, job):
+    """The item ``job`` runs on, from the session ledger (P3); ``job`` itself when the ledger
+    does not name one, so a hold is always attributable to something typable."""
+    from asf.workers import lifecycle, pool  # local: pool reads this module's product paths
+    try:
+        run = lifecycle.latest(pool.sessions_path(product)).get(job) or {}
+    except OSError:
+        return job
+    return run.get('item') or job
+
+
+#: The Bash tokens that make a named path a *write* (§2.3 step 2). A command that names an
+#: operator-config path without one of these only reads it.
+_WRITING_TOKENS = (
+    r'>', r'\btee\b', r'\bsed\s+-i\b', r'\bperl\s+-i\b', r'\bcp\b', r'\bmv\b', r'\brm\b',
+)
+
+#: The words a shell command is split into when looking for a path in it.
+_BASH_WORD = re.compile(r"[^\s'\"|&;<>()]+")
+
+
+def _operator_config_path(path):
+    """``path`` resolved, when it is the operator's config — ``<ASF_HOME>/config.yaml`` or
+    anything under ``<ASF_HOME>/products/`` — else ``None`` (D8).
+
+    Both sides are expanded and realpath'd, and compared case-insensitively so the home spelled
+    ``~/.ASF`` and the same directory spelled ``~/.asf`` are one place."""
+    if not path:
+        return None
+    resolved = os.path.realpath(os.path.expanduser(str(path)))
+    home = os.path.realpath(os.path.expanduser(env.ASF_HOME)).lower()
+    low = resolved.lower()
+    if low == os.path.join(home, 'config.yaml'):
+        return resolved
+    if low.startswith(os.path.join(home, 'products') + os.sep):
+        return resolved
+    return None
+
+
+def operator_config_target(tool_name, tool_input):
+    """The operator-config path this call would write, or ``None`` (D8).
+
+    A ``Write``/``Edit``/``MultiEdit`` target, or a path named in a ``Bash`` command next to a
+    writing token (:data:`_WRITING_TOKENS`). The factory never edits the file that holds its own
+    authority, whatever the matrix in it says."""
+    tool_input = tool_input or {}
+    if tool_name in ('Write', 'Edit', 'MultiEdit'):
+        return _operator_config_path(tool_input.get('file_path'))
+    if tool_name == 'Bash':
+        command = tool_input.get('command') or ''
+        if not any(re.search(t, command) for t in _WRITING_TOKENS):
+            return None
+        for word in _BASH_WORD.findall(command):
+            hit = _operator_config_path(word)
+            if hit:
+                return hit
+    return None
+
+
+def _refusal_lines(item, cls, level, detail):
+    """The four lines of §2.3 step 7. ``products/<p>.yaml`` is literal: the session is told where
+    authority lives, not which file to go and edit (D8)."""
+    return [
+        f'REFUSED {cls} ({level}) on {item} — {detail}',
+        '  This action needs a person (approvals: in products/<p>.yaml). Do not retry it or work'
+        ' around it.',
+        f'  Print: NEEDS OPERATOR: {item} {cls} — asf approvals resolve {item}/{cls}'
+        ' granted|done|dropped',
+        '  and carry on with every part of the job that does not depend on it.',
+    ]
+
+
+def run_hook(stdin_text, environ, out=sys.stderr, product=None):
+    """``asf hook approvals`` (§2.3): the rc the runtime reads — 0 lets the call through, 2 blocks
+    it and feeds ``out`` back to the model.
+
+    ``product`` defaults to ``environ['ASF_PRODUCT']``. Every exception from the parse on refuses
+    (D7): a boundary that opens when it breaks is not one."""
+    if not (environ or {}).get('ASF_JOB'):
+        return 0                                    # not a factory session (D4)
+    try:
+        return _enforce(stdin_text, environ, out, product)
+    except Exception as e:                          # fail closed (D7)
+        print(f'approvals hook failed: {e or type(e).__name__} — refused', file=out)
+        return 2
+
+
+def _enforce(stdin_text, environ, out, product):
+    job = environ['ASF_JOB']
+    call = json.loads(stdin_text or '{}') or {}
+    tool_name = call.get('tool_name') or ''
+    tool_input = call.get('tool_input') or {}
+    cwd = call.get('cwd') or os.getcwd()
+
+    if operator_config_target(tool_name, tool_input):
+        print('REFUSED operator config — the factory never edits its own authority'
+              ' (products/<p>.yaml)', file=out)
+        return 2
+
+    prod = env.load_product(product or environ.get('ASF_PRODUCT'))
+    matched = classify(prod, tool_name, tool_input, cwd)
+    if not matched:
+        return 0
+
+    invalid = None
+    try:
+        levels = {name: level for name, (level, _) in matrix(prod).items()}
+    except env.ConfigError as e:
+        invalid, levels = str(e), None               # every matched class is human-now (D7)
+
+    item = item_of_job(prod, job)
+    refused = []
+    for cls, detail in matched:                      # catalogue order
+        level = 'human-now' if levels is None else levels[cls]
+        if level == 'auto':
+            continue
+        if is_granted(prod, f'{item}/{cls}'):
+            continue
+        refuse(prod, item, cls, level, job, tool_name, detail)
+        refused.append((cls, level, detail))
+    if not refused:
+        return 0
+    if invalid:
+        print(f'approvals: the matrix is invalid ({invalid})'
+              ' — every classified action is human-now', file=out)
+    for cls, level, detail in refused:
+        for line in _refusal_lines(item, cls, level, detail):
+            print(line, file=out)
+    return 2
