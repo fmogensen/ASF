@@ -748,6 +748,15 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertFalse(self.origin_has('fix/B-0001'))
         self.assertTrue(self.origin_has('archive/fix/B-0001'))
         self.assertEqual(self.record('fix/B-0001')['harvested'], 'superseded')
+        # B-0066: the archive ref's tip is an empty [skip ci] commit over the branch's own tip,
+        # so the push runs no workflow; the branch's history is intact underneath
+        tip = sh(['git', 'rev-parse', 'archive/fix/B-0001'], cwd=self.origin).stdout.strip()
+        subject = sh(['git', 'log', '-1', '--format=%s', tip], cwd=self.origin).stdout.strip()
+        self.assertTrue(subject.startswith('archive(B-0001): fix/B-0001 — B-0001 is Closed'), subject)
+        self.assertTrue(subject.endswith('[skip ci]'), subject)
+        self.assertEqual(sh(['git', 'log', '-1', '--format=%s', f'{tip}~1'], cwd=self.origin).stdout.strip(),
+                         'fix(B-0001): an older approach')
+        self.assertEqual(sh(['git', 'diff', '--stat', f'{tip}~1', tip], cwd=self.origin).stdout.strip(), '')
         # an open Bug's branch, or a Feature's, is never superseded this way
         self.push_lane('fix/B-0002', [('fix(B-0002): live work', {'live.txt': 'live\n'})])
         self.session('fix-bug-b-0002', 'B-0002', 'fix/B-0002')

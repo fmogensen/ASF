@@ -694,14 +694,32 @@ def superseded_by(items, item):
     return None
 
 
+def archive_commit(repo, branch, message):
+    """One empty commit on top of ``origin/<branch>`` carrying ``message`` — the tip the
+    archive ref is pushed as (B-0066). A push runs the workflow file *of the pushed commit*; a
+    branch cut before fix(B-0053) carries ``on: push`` for every ref, so pushing its tip under
+    ``archive/`` fired a red run and a mail. The head commit's ``[skip ci]`` is what the CI
+    provider reads; the branch's own history sits untouched underneath. The sha, or ''."""
+    tip = sh(['git', 'rev-parse', f'origin/{branch}'], cwd=repo).stdout.strip()
+    if not tip:
+        return ''
+    made = sh(['git', 'commit-tree', f'{tip}^{{tree}}', '-p', tip, '-m', message], cwd=repo)
+    return made.stdout.strip() if made.returncode == 0 else ''
+
+
 def archive_superseded(repo, state_dir, branch, record, item, state, dry_run, out):
     """Move a superseded branch to ``archive/<branch>`` on origin — its commits stay reachable,
-    nothing is deleted unseen — and take it out of the lane (B-0057)."""
+    nothing is deleted unseen — and take it out of the lane (B-0057). The archive ref's tip is
+    an empty ``[skip ci]`` commit over the branch's, so the push fires no run (B-0066)."""
     if dry_run:
         out(f'DRY: would archive {branch} — {item} is {state} in the record')
         return 'dry'
-    keep = sh(['git', 'push', '-q', 'origin', f'origin/{branch}:refs/heads/archive/{branch}'],
-              cwd=repo)
+    sha = archive_commit(repo, branch, f'archive({item}): {branch} — {item} is {state} in the '
+                                       f'record; superseded, kept for reference [skip ci]')
+    if not sha:
+        out(f'held {branch}: archive commit could not be made')
+        return 'held'
+    keep = sh(['git', 'push', '-q', 'origin', f'{sha}:refs/heads/archive/{branch}'], cwd=repo)
     if keep.returncode != 0:
         out(f'held {branch}: archive push refused: {tail(keep.stderr)}')
         return 'held'
