@@ -499,6 +499,30 @@ class DiscoverIdEvidenceTests(unittest.TestCase):
         self.assertTrue(cache.startswith(env.ASF_HOME), cache)
 
 
+class DocLaneCommitTests(unittest.TestCase):
+    """B-0059: the landing of eight specs — one commit, `spec(F-0031, F-0075, …)` — closed four
+    Features as "commit names it, CI green". A spec, plan, review or ruling commit names its item
+    by the lane's subject convention; only a code commit is landing evidence."""
+
+    def setUp(self):
+        self.r = ProductRepo()
+        self.addCleanup(self.r.close)
+
+    def evidence_for(self, commits):
+        return evidence.id_evidence(self.r.product(ci=None), [], [], commits=commits, green=[])
+
+    def test_a_spec_commit_is_not_the_landing_commit(self):
+        ev = self.evidence_for([("s1", "spec(F-0001, F-0002): the specs land"),
+                                ("c1", "asf(core): the loop, for F-0001")])
+        self.assertEqual(ev["F-0001"]["commit"], "c1")
+        self.assertNotIn("F-0002", ev)
+
+    def test_plan_review_and_adjudicate_commits_name_nothing(self):
+        ev = self.evidence_for([("p1", "plan(F-0003): the plan"), ("r1", "review(F-0003): round 1"),
+                                ("a1", "adjudicate(B-0004): a ruling")])
+        self.assertEqual(ev, {})
+
+
 class IngestIdEvidenceTests(unittest.TestCase):
     def setUp(self):
         self.r = ProductRepo()

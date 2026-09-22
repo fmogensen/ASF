@@ -74,6 +74,17 @@ class MatchFeatureTests(unittest.TestCase):
         self.assertEqual(slug, 'free-plan')
         self.assertIs(fev, ev['features']['free-plan'])
 
+    def test_b0059_matches_by_own_id_as_the_slug(self):
+        # the lane's own convention: spec/F-0001 lands docs/specs/f-0001.md; no typed link needed
+        meta = self._meta_from([])
+        ev = dict(EMPTY_EV, features={'f-0001': {
+            'alias': None, 'spec': 'origin/main:docs/specs/f-0001.md',
+            'spec_branch': None, 'plan': None, 'plan_branch': None, 'tasks': {}, 'prs': [],
+        }})
+        slug, fev = ingest.match_feature(meta, ev)
+        self.assertEqual(slug, 'f-0001')
+        self.assertIs(fev, ev['features']['f-0001'])
+
     def test_matches_by_legacy_id_alias(self):
         meta = self._meta_from(['legacy_id: FREE-1'])
         ev = dict(EMPTY_EV, features={'free-plan': {
@@ -306,9 +317,36 @@ class CmdIngestEndToEndTests(unittest.TestCase):
         self.assertEqual(self.run_ingest(ev), 0)
         meta, body = read_meta(self.root, 'features', 'F-0001')
         self.assertEqual(meta['state'], 'Active')
-        self.assertEqual(meta['stage'], 'spec-draft')
+        self.assertEqual(meta['stage'], 'spec-approved')  # B-0059: landed on the trunk = approved
         self.assertIn('spec on origin/main', meta['evidence'])
         self.assertIn('ingest: state New → Active', body)
+
+    def test_b0059_a_spec_landed_by_the_lane_is_approved_and_the_plan_lands_the_same_way(self):
+        write(self.root, 'E-0001', 'epic', 'Factory', 'epics')
+        write(self.root, 'F-0001', 'feature', 'Free plan', 'features', parent='E-0001')
+        fev = {'alias': None, 'spec': 'origin/main:docs/specs/f-0001.md', 'spec_branch': None,
+               'spec_on_main': True, 'spec_review': None, 'plan': None, 'plan_branch': None,
+               'plan_on_main': False, 'plan_review': None, 'tasks': {}, 'prs': []}
+        self.assertEqual(self.run_ingest(dict(EMPTY_EV, features={'f-0001': fev})), 0)
+        meta, _body = read_meta(self.root, 'features', 'F-0001')
+        self.assertEqual((meta['state'], meta['stage']), ('Active', 'spec-approved'))
+        fev.update(plan='origin/main:docs/plans/f-0001.md', plan_on_main=True)
+        self.assertEqual(self.run_ingest(dict(EMPTY_EV, features={'f-0001': fev})), 0)
+        meta, _body = read_meta(self.root, 'features', 'F-0001')
+        self.assertEqual((meta['state'], meta['stage']), ('Active', 'plan-approved'))
+
+    def test_b0059_a_matched_feature_with_no_tasks_lands_on_a_code_commit_naming_it(self):
+        write(self.root, 'E-0001', 'epic', 'Factory', 'epics')
+        write(self.root, 'F-0001', 'feature', 'Free plan', 'features', parent='E-0001')
+        fev = {'alias': None, 'spec': 'origin/main:docs/specs/f-0001.md', 'spec_branch': None,
+               'spec_on_main': True, 'spec_review': None, 'plan': None, 'plan_branch': None,
+               'plan_on_main': False, 'plan_review': None, 'tasks': {}, 'prs': []}
+        ev = dict(EMPTY_EV, features={'f-0001': fev},
+                  ids={'F-0001': {'branches': [], 'open_prs': [], 'commit': 'abc1234def', 'pr': None,
+                                  'green': False}})
+        self.assertEqual(self.run_ingest(ev), 0)
+        meta, _body = read_meta(self.root, 'features', 'F-0001')
+        self.assertEqual((meta['state'], meta['stage']), ('Resolved', 'landed'))
 
     def test_second_run_with_same_evidence_is_a_byte_no_op(self):
         write(self.root, 'E-0001', 'epic', 'Factory', 'epics')

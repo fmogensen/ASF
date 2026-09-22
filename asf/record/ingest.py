@@ -66,6 +66,11 @@ def match_feature(meta, ev):
         for slug, f in features.items():
             if prs & set(f.get('prs') or []):
                 return slug, f
+    # the lane's own convention (B-0059): spec/<ID> lands docs/specs/<id>.md, plan/<ID> lands
+    # docs/plans/<id>.md — the slug is the card's id, lower-cased, and needs no typed link
+    own = str(typed.get('id') or meta.get('id') or '').lower()
+    if own and own in features:
+        return own, features[own]
     return None, None
 
 
@@ -347,6 +352,14 @@ def cmd_ingest(args, root):
         child_ids = [cid for cid, crec in canonical.items()
                     if crec['meta'].get('type') == 'task' and crec['meta'].get('parent') == iid]
         child_states = [new_state[cid] for cid in child_ids]
+        if not child_ids and ((ev.get('ids') or {}).get(iid) or {}).get('commit'):
+            # no Tasks to judge by, and a code commit on main names it: landed, as for a
+            # Feature the documents never matched (a document-lane commit never counts, B-0059)
+            _state, lines = match_ids(iid, ev)
+            new_state[iid] = 'Resolved'
+            stage_val[iid] = 'landed'
+            ev_lines[iid] = lines
+            continue
         all_closed = bool(child_ids) and all(s == 'Closed' for s in child_states)
         all_merged_in_prod = all_prs_checked = False
         if all_closed:
@@ -358,8 +371,11 @@ def cmd_ingest(args, root):
 
         spec_review = fev.get('spec_review')
         plan_review = fev.get('plan_review')
-        spec_approved = bool(spec_review and spec_review[1] == 'APPROVED')
-        plan_approved = bool(plan_review and plan_review[1] == 'APPROVED')
+        # a document the lane landed on the trunk is approved (B-0059): the fast-forward lane
+        # has no reviewer row — harvest's gate is its review, and a spec on main that still read
+        # "spec-draft" sent the feeder back to write the same spec again
+        spec_approved = bool(spec_review and spec_review[1] == 'APPROVED') or bool(fev.get('spec_on_main'))
+        plan_approved = bool(plan_review and plan_review[1] == 'APPROVED') or bool(fev.get('plan_on_main'))
         new_state[iid] = evidence.feature_state(bool(fev.get('spec_on_main')), plan_approved,
                                                 all_closed, all_merged_in_prod, all_prs_checked)
         spec_dict = {'exists': bool(fev.get('spec')), 'approved': spec_approved,
