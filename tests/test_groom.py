@@ -311,6 +311,25 @@ class GroomSectionCoverageTests(unittest.TestCase):
         self.assertIn('S-0001 Uncovered story', text)
         self.assertIn('no Task lists it', text)
 
+    def test_removed_task_does_not_cover_a_story(self):
+        write_item(self.root, 'F-0001', 'feature', 'Feature with a gap', parent='E-0009',
+                  typed_lines=['decided: true'],
+                  machine_lines=['state: Active', 'stage: building 0/1',
+                                 'stage_since: 2026-09-01T00:00:00Z', 'updated: 2026-09-01T00:00:00Z'])
+        write_item(self.root, 'S-0001', 'story', 'Uncovered story', parent='F-0001',
+                  typed_lines=['decided: true'])
+        write_item(self.root, 'T-0001', 'task', 'Removed task', parent='F-0001',
+                  typed_lines=['stories: [S-0001]', 'removed: merged into T-0002 (groom 2026-09-21)'])
+        run(['index'], self.root)
+        r = run(['check'], self.root)
+        self.assertIn('S-0001 has no Task listing it in stories:', r.stdout)
+
+        run(['groom'], self.root)
+        with open(os.path.join(self.root, 'groom', today() + '.md')) as f:
+            text = f.read()
+        self.assertIn('S-0001 Uncovered story', text)
+        self.assertIn('no Task lists it', text)
+
     def test_blocked_on_a_closed_item(self):
         write_item(self.root, 'F-0001', 'feature', 'Blocker', parent='E-0009',
                   typed_lines=['decided: true'],

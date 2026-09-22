@@ -169,7 +169,7 @@ _AFTER_PLAN_APPROVED = ('plan-approved', 'landed', 'on-prod')
 def groom_stories_without_tasks(canonical, derived):
     task_story_ids = set()
     for rec in canonical.values():
-        if rec['meta'].get('type') == 'task':
+        if rec['meta'].get('type') == 'task' and not rec['meta'].get('removed'):
             for s in rec['meta'].get('stories') or []:
                 task_story_ids.add(s)
     lines = []

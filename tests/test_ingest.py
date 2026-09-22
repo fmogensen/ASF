@@ -1,3 +1,5 @@
+import contextlib
+import io
 import os
 import shutil
 import tempfile
@@ -5,8 +7,10 @@ import types
 import unittest
 from unittest import mock
 
+from asf.record import check
 from asf.record import frontmatter
 from asf.record import ingest
+from asf.record.index import do_index
 
 FOLDERS = ['epics', 'features', 'stories', 'tasks', 'bugs', 'decisions', 'rules']
 
@@ -492,6 +496,53 @@ class CmdIngestEndToEndTests(unittest.TestCase):
         meta, _body = read_meta(self.root, 'features', 'F-0001')
         self.assertEqual(meta['blocked'], True)
         self.assertEqual(meta['blocked_by_open'], ['Ops: key'])
+
+
+class RemovedTaskTests(unittest.TestCase):
+    """A Task marked `removed` (B-0067's `merged into <survivor>`) leaves its Feature's ladder
+    and stops covering the Stories it used to list — T-0051."""
+
+    def setUp(self):
+        self.root = make_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+
+    def run_ingest(self, ev):
+        with mock.patch.object(ingest.evidence, 'load', return_value=ev):
+            return ingest.cmd_ingest(types.SimpleNamespace(fresh=False), self.root)
+
+    def test_removed_task_does_not_hold_the_feature(self):
+        write(self.root, 'E-0001', 'epic', 'Factory', 'epics')
+        write(self.root, 'F-0001', 'feature', 'Free plan', 'features', parent='E-0001')
+        write(self.root, 'T-0001', 'task', 'Do it', 'tasks', parent='F-0001')
+        write(self.root, 'T-0002', 'task', 'Also do it', 'tasks', parent='F-0001',
+              typed_lines=['removed: merged into T-0001 (groom 2026-01-02)'])
+        fev = {'alias': None, 'spec': 'origin/main:docs/specs/f-0001.md', 'spec_branch': None,
+               'spec_on_main': True, 'spec_review': None, 'plan': None, 'plan_branch': None,
+               'plan_on_main': False, 'plan_review': None, 'tasks': {}, 'prs': []}
+        ev = dict(EMPTY_EV, features={'f-0001': fev}, ids={
+            'T-0001': {'branches': [], 'open_prs': [], 'commit': 'abc1234def', 'pr': None,
+                       'green': True},
+            'T-0002': {'branches': ['worker/T-0002-x'], 'open_prs': [], 'commit': None,
+                       'pr': None, 'green': False},
+        })
+        self.assertEqual(self.run_ingest(ev), 0)
+        meta, _body = read_meta(self.root, 'features', 'F-0001')
+        self.assertEqual(meta['stage'], 'landed')
+
+    def test_story_on_a_removed_task_only_is_uncovered(self):
+        write(self.root, 'E-0001', 'epic', 'Factory', 'epics')
+        write(self.root, 'F-0001', 'feature', 'Free plan', 'features', parent='E-0001',
+              machine_lines=['state: Active', 'stage: building 0/1',
+                             'stage_since: 2026-01-01T00:00:00Z', 'updated: 2026-01-01T00:00:00Z'])
+        write(self.root, 'S-0001', 'story', 'Uncovered', 'stories', parent='F-0001')
+        write(self.root, 'T-0001', 'task', 'Removed task', 'tasks', parent='F-0001',
+              typed_lines=['stories: [S-0001]',
+                          'removed: merged into T-0002 (groom 2026-01-02)'])
+        self.assertEqual(do_index(self.root), 0)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            check.cmd_check(types.SimpleNamespace(paths=None), self.root)
+        self.assertIn('S-0001 has no Task listing it in stories:', buf.getvalue())
 
 
 if __name__ == '__main__':

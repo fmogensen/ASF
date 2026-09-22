@@ -358,7 +358,8 @@ def cmd_ingest(args, root):
             stage_val[iid] = 'card'
             continue
         child_ids = [cid for cid, crec in canonical.items()
-                    if crec['meta'].get('type') == 'task' and crec['meta'].get('parent') == iid]
+                    if crec['meta'].get('type') == 'task' and crec['meta'].get('parent') == iid
+                    and not crec['meta'].get('removed')]
         child_states = [new_state[cid] for cid in child_ids]
         if not child_ids and ((ev.get('ids') or {}).get(iid) or {}).get('commit'):
             # no Tasks to judge by, and a code commit on main names it: landed, as for a

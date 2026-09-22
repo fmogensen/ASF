@@ -129,7 +129,7 @@ def cmd_check(args, root):
     # Feature stage vs story coverage
     task_story_ids = set()
     for rec in canonical.values():
-        if rec['meta'].get('type') == 'task':
+        if rec['meta'].get('type') == 'task' and not rec['meta'].get('removed'):
             for s in rec['meta'].get('stories') or []:
                 task_story_ids.add(s)
     for iid, rec in canonical.items():
