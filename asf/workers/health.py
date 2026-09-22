@@ -35,6 +35,10 @@ removed under any of three rules:
   has no commits ahead of ``origin/<main>`` and no uncommitted changes — there is nothing in it to
   lose (B-0025, B-0049).
 
+Then the checkout's own lane branches (B-0063): a local branch no worktree holds whose work is
+on the trunk, or whose run the lane landed or archived, is ``pruned`` with ``fix`` (``stale``
+without); one with work the trunk lacks is named ``stray`` and kept.
+
 A live session whose worktree has no commits yet is listed ``opening``. Anything else is kept and
 listed with why. A reap also releases the job's ``BACKLOG_ID_RANGE`` reservation (B-0007) —
 nothing can mint against it once the worktree is gone, and prints ``reaped <job> (<what landed, or
@@ -178,6 +182,64 @@ def publish_gap(product, run, ev, reason, alive=pid_alive):
     return lifecycle.judge(run, ev), ev, line
 
 
+def _lane_branches(product):
+    """Every local branch under a lane prefix of the product's checkout, with the worktree that
+    holds it (or None)."""
+    repo = product.repo_dir
+    prefixes = product.conventions.all_prefixes() if hasattr(product.conventions, 'all_prefixes') else ()
+    held = {}
+    path = None
+    for line in _git(['worktree', 'list', '--porcelain'], repo).stdout.splitlines():
+        if line.startswith('worktree '):
+            path = line[len('worktree '):]
+        elif line.startswith('branch refs/heads/'):
+            held[line[len('branch refs/heads/'):]] = path
+    out = []
+    for b in _git(['branch', '--list', '--format=%(refname:short)'], repo).stdout.splitlines():
+        b = b.strip()
+        if b and b != product.main and any(b.startswith(p) for p in prefixes):
+            out.append((b, held.get(b)))
+    return out
+
+
+def _branch_on_trunk(repo, main, branch):
+    """The branch's patches are all on the trunk (``git cherry``), or every file it touched
+    reads the same on both — a branch landed by a rebase or by another commit."""
+    cherry = _git(['cherry', f'origin/{main}', branch], repo)
+    if cherry.returncode == 0 and not any(l.startswith('+') for l in cherry.stdout.splitlines()):
+        return True
+    files = [l for l in _git(['diff', '--name-only', f'origin/{main}...{branch}'], repo).stdout.splitlines() if l.strip()]
+    return all(_git(['diff', '--quiet', f'origin/{main}', branch, '--', f], repo).returncode == 0
+               for f in files)
+
+
+def prune_branches(product, registry, fix=False):
+    """B-0063: the local lane branches of the product's checkout that no worktree holds. One
+    whose work is on the trunk, or whose run the lane has landed or archived (``harvested`` on
+    the registry), is stale: deleted with ``fix``, else named ``stale``; one with work the trunk
+    lacks and no landing is named ``stray`` and kept — nothing is deleted unseen. Returns
+    ``[(branch, what, detail)]``."""
+    repo, main = product.repo_dir, product.main
+    landed = {b for b, r in lifecycle.by_branch(registry).items() if r.get('harvested')}
+    found = []
+    for branch, wt in _lane_branches(product):
+        if wt:
+            continue
+        if branch in landed:
+            why = f'landed by the lane ({lifecycle.by_branch(registry)[branch]["harvested"]})'
+        elif _branch_on_trunk(repo, main, branch):
+            why = f'every change on origin/{main}'
+        else:
+            n = len([l for l in _git(['cherry', f'origin/{main}', branch], repo).stdout.splitlines() if l.startswith('+')])
+            found.append((branch, 'stray', f'{n} patch(es) not on origin/{main}, never landed — no worktree'))
+            continue
+        if fix and _git(['branch', '-D', branch], repo).returncode == 0:
+            found.append((branch, 'pruned', why))
+        else:
+            found.append((branch, 'stale', why))
+    return found
+
+
 def health(product, fix=False, alive=pid_alive, out=print):
     """Returns a list of ``(job, what, detail)`` transitions/findings. Every judgement is
     :mod:`asf.workers.lifecycle`'s: :func:`~asf.workers.lifecycle.judge` for the ``ended`` line,
@@ -244,9 +306,10 @@ def health(product, fix=False, alive=pid_alive, out=print):
             found.append((name, 'reaped', detail))
         else:
             found.append((name, what, detail))
+    found.extend(prune_branches(product, registry, fix=fix))  # B-0063
     for job, what, detail in found:
-        if what == 'reaped':
-            out(f'reaped {job} ({detail})')
+        if what in ('reaped', 'pruned'):
+            out(f'{what} {job} ({detail})')
         elif what == 'published':
             out(detail)
         else:

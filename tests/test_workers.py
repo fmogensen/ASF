@@ -686,6 +686,38 @@ class TestHealth(Home):
                          git('rev-parse', 'HEAD', cwd=wt))
         self.assertTrue(any(w == 'published' for _j, w, _d in found), found)
 
+    def test_b0063_stale_local_lane_branches_are_pruned_strays_named(self):
+        # thirty-seven local branches sat in the scheduler's checkout after their worktrees
+        # were reaped by hand or by a landing that rebased the tip: nothing pruned them
+        other = os.path.join(self.tmp, 'other')
+        git('clone', '-q', os.path.join(self.tmp, 'origin.git'), other, cwd=self.tmp)
+        self.commit(other, 'landed-fix')
+        git('push', '-q', 'origin', 'HEAD:main', cwd=other)
+        git('fetch', '-q', 'origin', cwd=self.repo)
+        git('branch', 'fix/B-0001', 'origin/main', cwd=self.repo)  # on the trunk already
+        git('branch', 'fix/B-0002', 'origin/main~1', cwd=self.repo)
+        git('branch', 'fix/B-0003', 'origin/main~1', cwd=self.repo)
+        git('branch', 'other/B-0004', 'origin/main~1', cwd=self.repo)  # not a lane prefix
+        wt = os.path.join(self.tmp, 'wt-b0003')
+        git('worktree', 'add', '-q', wt, 'fix/B-0003', cwd=self.repo)
+        self.commit(wt, 'unlanded-work')
+        git('branch', 'fix/B-0005', 'fix/B-0003', cwd=self.repo)  # same unlanded work, no worktree
+        pool_mod.update_session(self.product, 'fix-bug-b-0002', harvested='superseded', branch='fix/B-0002')
+        self.product = env.Product('sample', {'repo_dir': self.repo, 'main': 'main',
+                                              'conventions': {'branch_prefixes': {'fix': 'fix/', 'code': 'worker/'}}})
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
+        by = {b: (w, d) for b, w, d in found if b.startswith(('fix/', 'other/'))}
+        self.assertEqual(by['fix/B-0001'], ('pruned', 'every change on origin/main'))
+        self.assertEqual(by['fix/B-0002'], ('pruned', 'landed by the lane (superseded)'))
+        self.assertEqual(by['fix/B-0005'], ('stray', '1 patch(es) not on origin/main, never landed — no worktree'))
+        self.assertNotIn('fix/B-0003', by)  # held by a worktree: the worktree rules own it
+        self.assertNotIn('other/B-0004', by)
+        branches = git('branch', '--list', '--format=%(refname:short)', cwd=self.repo).split()
+        self.assertNotIn('fix/B-0001', branches)
+        self.assertNotIn('fix/B-0002', branches)
+        self.assertIn('fix/B-0005', branches)
+        self.assertIn('fix/B-0003', branches)
+
     def test_b0056_uncommitted_work_is_never_published(self):
         rec = self.spawn('dirty', {'ok': True})
         wt = rec['worktree']
