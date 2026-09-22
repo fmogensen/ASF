@@ -2,11 +2,14 @@
 
 ``spawn(product, row, account, brief_text)``:
 
-1. a worktree ``~/.ASF/state/<product>/worktrees/<job>`` on a new branch (the row's, else
-   ``<branch prefix for the kind>/<job>``) off ``origin/<main>`` of ``Product.repo_dir`` — an
-   ended run's worktree on that branch, or a branch already on origin (a held branch sent back
-   for another round, ``correct`` or ``adjudicate`` alike), is reused instead, rebased onto
-   ``origin/<main>``; only a live run's worktree refuses (:func:`make_worktree`);
+1. the product repo's git push gate confirmed in place (:func:`asf.hooks.ensure_git_hooks`) —
+   before any worktree is touched, so no session is ever launched into a repo with no gate
+   (F-0075, D10) — then a worktree ``~/.ASF/state/<product>/worktrees/<job>`` on a new branch
+   (the row's, else ``<branch prefix for the kind>/<job>``) off ``origin/<main>`` of
+   ``Product.repo_dir`` — an ended run's worktree on that branch, or a branch already on origin
+   (a held branch sent back for another round, ``correct`` or ``adjudicate`` alike), is reused
+   instead, rebased onto ``origin/<main>``; only a live run's worktree refuses
+   (:func:`make_worktree`);
 2. an id range reserved for the job in ``~/.ASF/state/<product>/id-ranges.tsv`` and handed to
    the session as ``BACKLOG_ID_RANGE`` (so parallel writers never mint the same id — see
    ``asf.record.ids``);
@@ -21,6 +24,7 @@ import re
 import subprocess
 
 from asf import env
+from asf import hooks
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 from asf.workers import runtime as runtime_mod
@@ -145,10 +149,17 @@ def make_worktree(product, job, branch):
     that recorded it has ended; a live run's worktree is never touched (B-0025, B-0051). A branch
     already on origin with no worktree left (any row kind: a held branch sent back for another
     round, B-0046, B-0048) gets a worktree on it, rebased the same way. Otherwise a fresh branch
-    off ``origin/<main>``. Returns the worktree path."""
+    off ``origin/<main>``. Returns the worktree path.
+
+    Before any of that, :func:`asf.hooks.ensure_git_hooks` confirms the product repo's push gate
+    is in place — missing hooks are written, a foreign one refuses the whole launch (F-0075,
+    D10) — so no path below can reach ``git worktree add`` without it."""
     repo = product.repo_dir
     if not repo or not os.path.isdir(repo):
         raise SpawnError(f'product repo_dir missing: {repo!r}')
+    ok, detail = hooks.ensure_git_hooks(product)
+    if not ok:
+        raise SpawnError(detail)
     registry = pool_mod.sessions_path(product)
     path = os.path.join(worktrees_dir(product), job)
     _git(['fetch', '-q', 'origin', product.main], repo)

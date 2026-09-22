@@ -15,6 +15,7 @@ import unittest
 from unittest import mock
 
 from asf import env
+from asf import hooks as hooks_mod
 from asf.workers import health as health_mod
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
@@ -83,6 +84,13 @@ class Home(unittest.TestCase):
                                               'stage_limits': {'silent_min': 30}})
         self.cfg = {'worker_pool': {'accounts': [{'name': 'acct-a', 'role': 'local', 'cap': 2}],
                                     'models': {'Opus': 'opus'}}}
+        # asf.hooks.ensure_git_hooks is Task 8353's (F-0075) and is not yet in this checkout;
+        # a test that cares about the push-gate check overrides this with its own
+        # mock.patch.object(hooks_mod, 'ensure_git_hooks', ..., create=True) around its call.
+        patcher = mock.patch.object(hooks_mod, 'ensure_git_hooks', create=True,
+                                    return_value=(True, 'ok'))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def tearDown(self):
         env.ASF_HOME = self._home
@@ -502,6 +510,92 @@ class TestSpawn(Home):
             f.write(json.dumps(rec) + '\n')
         self.assertFalse(runtime_mod.result_ok(runtime_mod.read_result(log)))
         self.assertEqual(runtime_mod.failure_reason(rec), 'unknown model')
+
+
+class SpawnHookTests(Home):
+    """T-0026 — no session is launched into a repo with no push gate: ``make_worktree`` calls
+    ``asf.hooks.ensure_git_hooks(product)`` first, before any of the four worktree paths.
+    ``ensure_git_hooks`` itself is Task 8353's (not yet in this checkout); these tests stand in
+    for it with ``create=True`` mocks, against the plan's stated contract — an ``(ok, detail)``
+    pair, ``detail`` the ``NEEDS OPERATOR`` line ``ensure_git_hooks`` produces on a foreign hook."""
+
+    def test_spawn_installs_missing_hooks_before_the_worktree(self):
+        wt = os.path.join(env.ASF_HOME, 'state', 'sample', 'worktrees', 'j')
+        calls = []
+
+        def fake(product):
+            calls.append(product)
+            self.assertFalse(os.path.exists(wt))  # called before the worktree is created
+            return True, 'hooks: installed'
+
+        with mock.patch.object(hooks_mod, 'ensure_git_hooks', side_effect=fake, create=True):
+            rec = spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b',
+                                  runtime=runtime_mod.FakeRuntime([{'running': True, 'pid': 1}]),
+                                  cfg=self.cfg)
+        self.assertEqual(calls, [self.product])
+        self.assertTrue(os.path.exists(rec['worktree']))
+
+    def test_spawn_refuses_to_launch_past_a_foreign_hook(self):
+        needs_operator = ('NEEDS OPERATOR: .git/hooks/pre-push is not asf\'s — add the line: '
+                          '"<asf>" redact --pre-push --product sample')
+        with mock.patch.object(hooks_mod, 'ensure_git_hooks', create=True,
+                               return_value=(False, needs_operator)):
+            with self.assertRaises(spawn_mod.SpawnError) as cm:
+                spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b',
+                                runtime=runtime_mod.FakeRuntime([{'running': True}]), cfg=self.cfg)
+        self.assertEqual(str(cm.exception), needs_operator)
+        self.assertFalse(os.path.exists(os.path.join(env.ASF_HOME, 'state', 'sample',
+                                                      'worktrees', 'j')))
+        self.assertNotIn('j', pool_mod.load_sessions(self.product))
+
+    def test_a_reused_ended_worktree_gets_the_hooks_too(self):
+        row = feature_row('again')
+        calls = []
+
+        def fake(product):
+            calls.append(product)
+            return True, 'ok'
+
+        with mock.patch.object(hooks_mod, 'ensure_git_hooks', side_effect=fake, create=True):
+            rec = spawn_mod.spawn(self.product, row, self.acct(), 'b',
+                                  runtime=runtime_mod.FakeRuntime([{'ok': True, 'pid': 40}]),
+                                  cfg=self.cfg)
+        wt = rec['worktree']
+        for k, v in (('user.email', 'ci@example.com'), ('user.name', 'ci')):
+            git('config', k, v, cwd=wt)
+        with open(os.path.join(wt, 'x'), 'w') as f:
+            f.write('x')
+        git('add', 'x', cwd=wt)
+        git('commit', '-q', '-m', 'own work, never pushed', cwd=wt)
+        health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        with mock.patch.object(hooks_mod, 'ensure_git_hooks', side_effect=fake, create=True):
+            rec2 = spawn_mod.spawn(self.product, row, self.acct(), 'b',
+                                   runtime=runtime_mod.FakeRuntime([{'running': True, 'pid': 41}]),
+                                   cfg=self.cfg)
+        self.assertEqual(os.path.realpath(rec2['worktree']), os.path.realpath(wt))
+        self.assertEqual(calls, [self.product, self.product])
+
+    def test_a_reused_local_branch_with_no_worktree_gets_the_hooks_too(self):
+        # a local branch left behind with no worktree and 0 commits ahead of trunk — B-0025's
+        # "carries nothing, reused" case — still gets the hook check before spawn takes it
+        git('branch', 'spec/F-0001', 'origin/main', cwd=self.repo)
+        calls = []
+
+        def fake(product):
+            calls.append(product)
+            self.assertEqual(git('branch', '--list', 'spec/F-0001', cwd=self.repo), 'spec/F-0001')
+            return True, 'ok'
+
+        row = pool_mod.parse_row(json.dumps({'job': 'spec-f-0001', 'item': 'F-0001', 'state': 'CARD',
+                                             'action': 'SPEC', 'model': 'Opus', 'kind': 'spec',
+                                             'branch': 'spec/F-0001'}))
+        with mock.patch.object(hooks_mod, 'ensure_git_hooks', side_effect=fake, create=True):
+            rec = spawn_mod.spawn(self.product, row, self.acct(), 'b',
+                                  runtime=runtime_mod.FakeRuntime([{'running': True, 'pid': 1}]),
+                                  cfg=self.cfg)
+        self.assertEqual(calls, [self.product])
+        self.assertEqual(git('rev-parse', '--abbrev-ref', 'HEAD', cwd=rec['worktree']),
+                         'spec/F-0001')
 
 
 class TestWave(Home):
