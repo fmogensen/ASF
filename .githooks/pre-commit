@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Installed via `git config core.hooksPath .githooks`. Runs the test suite and the
-# generic-repo check before every commit; both must be clean.
+# Installed via `git config core.hooksPath .githooks`. Runs the test suite, the generic-repo
+# check and the redaction gate before every commit; all three must be clean.
 set -euo pipefail
 
 # A test's own commit, inside a checkout this hook is also active for, would otherwise run the
@@ -22,3 +22,6 @@ python3 -m unittest discover -s tests
 
 echo "pre-commit: checking for forbidden names..."
 bash tools/check_generic.sh
+
+echo "pre-commit: checking staged lines for names and secrets..."
+python3 -m asf.redact --pre-commit

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Installed via `git config core.hooksPath .githooks`. Runs the redaction gate over every
+# commit this push would publish before it reaches origin (F-0075).
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+# Symmetry with pre-commit (hermetic.GIT_HOOK); harmless here since --pre-push reads refs from
+# stdin and git rev-list, never the index (P4).
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+
+python3 -m asf.redact --pre-push

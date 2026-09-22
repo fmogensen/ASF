@@ -62,6 +62,20 @@ class CheckGenericTests(unittest.TestCase):
         r = run_in(root)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_a_finding_prints_file_and_line_not_the_word(self):
+        root = make_git_repo()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        # Built from parts so this file's own tracked source never contains the literal word.
+        forbidden_word = 'bots' + 'eon'
+        with open(os.path.join(root, 'notes.md'), 'w', encoding='utf-8') as f:
+            f.write(f'first line\nthe product used to be called {forbidden_word} internally\n')
+        subprocess.run(['git', 'add', 'notes.md'], cwd=root, check=True)
+        shutil.copytree(os.path.join(REPO_ROOT, 'tools'), os.path.join(root, 'tools'))
+        r = run_in(root)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('notes.md:2: name (tools/forbidden-names.txt)', r.stdout)
+        self.assertNotIn(forbidden_word, r.stdout)
+
     def test_extra_private_list_is_honored(self):
         root = make_git_repo()
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)

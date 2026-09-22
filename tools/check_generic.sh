@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tools/check_generic.sh — no product, company or person name anywhere in this public repo,
-# except the project's own name ("ASF"). Fails if any tracked file other than LICENSE matches a
-# pattern in tools/forbidden-names.txt (one extended regex per line, case-insensitive).
+# except the project's own name ("ASF"). Delegates to the one scanner, `asf.redact --tree`
+# (F-0075, D11): every tracked file but LICENSE, matched against tools/forbidden-names.txt.
 #
 # An operator may keep a private extension list (anything specific to their own deployment) and
 # pass it with --extra <file>; it is never committed here.
@@ -30,47 +30,26 @@ if [ ! -f "$PATTERNS_FILE" ]; then
   exit 2
 fi
 
-patterns=()
-while IFS= read -r line; do
-  line="${line%%#*}"
-  line="$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-  [ -z "$line" ] && continue
-  patterns+=("$line")
-done < "$PATTERNS_FILE"
-
-if [ -n "$EXTRA_FILE" ] && [ -f "$EXTRA_FILE" ]; then
-  while IFS= read -r line; do
-    line="${line%%#*}"
-    line="$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-    [ -z "$line" ] && continue
-    patterns+=("$line")
-  done < "$EXTRA_FILE"
-fi
-
-if [ ${#patterns[@]} -eq 0 ]; then
-  echo "check_generic: no patterns loaded" >&2
-  exit 2
-fi
-
-regex="$(IFS='|'; echo "${patterns[*]}")"
-
 cd "$ROOT"
-files="$(git ls-files | grep -v '^LICENSE$' || true)"
 
-found=0
-while IFS= read -r f; do
-  [ -z "$f" ] && continue
-  [ -f "$f" ] || continue
-  if grep -HInE "$regex" -- "$f" 2>/dev/null; then
-    found=1
-  fi
-done <<< "$files"
+set +e
+out="$(PYTHONPATH="$HERE/.." python3 -m asf.redact --tree --names "$PATTERNS_FILE" ${EXTRA_FILE:+--names "$EXTRA_FILE"} 2>&1)"
+rc=$?
+set -e
 
-if [ "$found" -eq 1 ]; then
-  echo "check_generic: forbidden name found (see above) — this is a public repo; no product," >&2
-  echo "company, person, vendor, account or host name may appear outside LICENSE" >&2
-  exit 1
-fi
+case "$rc" in
+  0)
+    echo "check_generic: clean"
+    ;;
+  1)
+    # every finding line but the scanner's own trailer; check_generic prints its own below.
+    printf '%s\n' "$out" | sed '$d'
+    echo "check_generic: forbidden name found (see above) — this is a public repo; no product," >&2
+    echo "company, person, vendor, account or host name may appear outside LICENSE" >&2
+    ;;
+  *)
+    printf '%s\n' "$out" >&2
+    ;;
+esac
 
-echo "check_generic: clean"
-exit 0
+exit "$rc"

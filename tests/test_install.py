@@ -501,6 +501,38 @@ class HooksTest(HomeCase):
         self.assertIsNone(hooks.check_script('../x', 'sample'))
 
 
+class GitHookTests(unittest.TestCase):
+    """ASF's own tracked .githooks/pre-push (F-0075, S-7055). The rest of this class — the
+    hooks `asf hooks install` writes into a product repo and a record — is Task 8353's, queued
+    ahead of this one (P1); only the test this Task adds lives here so far."""
+
+    def test_the_tracked_pre_push_hook_refuses_an_unpublished_secret(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        origin = os.path.join(tmp, 'origin.git')
+        _git(['init', '-q', '--bare', '-b', 'main', origin])
+        repo = os.path.join(tmp, 'repo')
+        _git(['clone', '-q', origin, repo])
+        _git(['config', 'user.email', 'test@example.com'], repo)
+        _git(['config', 'user.name', 'test'], repo)
+        shutil.copytree(os.path.join(REPO, '.githooks'), os.path.join(repo, '.githooks'))
+        _git(['config', 'core.hooksPath', '.githooks'], repo)
+        # AWS-shaped access key, built from parts so this test file itself stays clean.
+        secret = 'AKIA' + 'Q' * 16
+        with open(os.path.join(repo, 'creds.txt'), 'w') as f:
+            f.write(secret + '\n')
+        _git(['add', 'creds.txt'], repo)
+        _git(['commit', '-q', '-m', 'wip'], repo)
+        r = subprocess.run(['git', 'push', 'origin', 'HEAD:main'], cwd=repo,
+                           env={**os.environ, 'PYTHONPATH': REPO},
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('secret', r.stdout + r.stderr)
+        self.assertNotIn(secret, r.stdout + r.stderr)
+        origin_log = _git(['log', '--format=%H', 'main'], origin)
+        self.assertEqual(origin_log, '')
+
+
 class NoCheckoutPathsTest(unittest.TestCase):
     """The install modules name no tools directory under the operator's home and no checkout."""
 
