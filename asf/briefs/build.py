@@ -39,14 +39,14 @@ HEAVY = 'heavy'
 LIGHT = 'light'
 
 KINDS = ('spec', 'plan', 'coder', 'review', 'fixer', 'rebase', 'close', 'adjudicate', 'fix-bug',
-         'correct')
+         'correct', 'groom')
 KIND_ALIASES = {'task': 'coder', 'code': 'coder', 'fix': 'fixer', 'bug': 'fix-bug',
                 'fix_bug': 'fix-bug'}
 DEFAULT_MODELS = {'spec': HEAVY, 'plan': HEAVY, 'adjudicate': HEAVY, 'review': HEAVY,
                   'coder': LIGHT, 'fixer': LIGHT, 'rebase': LIGHT, 'close': LIGHT,
-                  'fix-bug': LIGHT, 'correct': LIGHT}
+                  'fix-bug': LIGHT, 'correct': LIGHT, 'groom': HEAVY}
 #: The kinds that may mint new cards (Stories, Tasks, Decisions) and so need an id range.
-ID_RANGE_KINDS = ('spec', 'plan', 'adjudicate', 'fix-bug')
+ID_RANGE_KINDS = ('spec', 'plan', 'adjudicate', 'fix-bug', 'groom')
 
 TAIL = """## The heartbeat, the marker, and the report
 
@@ -151,13 +151,23 @@ def model_for(product, kind):
     return table.get(kind) or DEFAULT_MODELS.get(kind, LIGHT)
 
 
-def add_dirs_for(product):
+def add_dirs_for(product, row=None, kind=None):
     """``job_grants`` from the product yaml — the directories a session may read outside its
-    worktree, expanded but not checked (the runtime is what fails on a missing one)."""
+    worktree, expanded but not checked (the runtime is what fails on a missing one).
+
+    A ``groom`` row also grants the directories of ``groom_file`` and ``answers_file`` (PD7): the
+    session reads the one and writes the other, and neither sits inside its worktree."""
     grants = []
     if product is not None:
         raw = product._get('job_grants') if hasattr(product, '_get') else None
         grants = [os.path.expanduser(str(d)) for d in (raw or [])]
+    if kind == 'groom' and row is not None:
+        for attr in ('groom_file', 'answers_file'):
+            path = getattr(row, attr, '') or ''
+            if path:
+                d = os.path.dirname(os.path.expanduser(path))
+                if d and d not in grants:
+                    grants.append(d)
     return grants
 
 
@@ -217,6 +227,9 @@ def context(product, row, kind, facts):
         'fix': (sections.get('fix')
                 or '(the card carries no `## Fix` — write one line saying what you did instead, '
                    'and why)').strip(),
+        'groom_file': getattr(row, 'groom_file', '') or '—',
+        'answers_file': getattr(row, 'answers_file', '') or '—',
+        'open_questions': '\n'.join(getattr(row, 'open_questions', ()) or ()) or '(none)',
     }
 
 
@@ -237,7 +250,7 @@ def build(product, row, index, inflight=None, repo_facts=None):
              render(load_template(kind), ctx).rstrip() + correction_text(row, kind),
              render(TAIL, ctx)]
     return Brief(kind=kind, item_id=ctx['item_id'], text='\n\n'.join(p.strip() for p in parts) + '\n',
-                 model=model_for(product, kind), add_dirs=add_dirs_for(product),
+                 model=model_for(product, kind), add_dirs=add_dirs_for(product, row, kind),
                  id_ranges_needed=id_ranges_needed(kind))
 
 

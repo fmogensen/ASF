@@ -91,6 +91,22 @@ ROWS = {
 }
 
 
+def _groom_row():
+    r = row('GROOM → ADJUDICATE', 'F-0002', 'groom', 'groom/2026-09-22',
+            '2 groom questions no rule answers, oldest F-0002 (undecided 21d)')
+    r.groom_file = 'groom/2026-09-22.md'
+    r.answers_file = '~/.ASF/state/sample/groom/2026-09-22.answers'
+    r.open_questions = (
+        '- [ ] F-0002 Per-customer rate limits on the public API — no Stories → answer: ____',
+        '- [ ] B-0001 Checkout returns 500 when the payment provider times out — duplicate of '
+        'B-0002? → answer: ____',
+    )
+    return r
+
+
+ROWS['groom'] = _groom_row()
+
+
 def forbidden_regex():
     pats = []
     with open(PATTERNS_FILE, encoding='utf-8') as f:
@@ -147,6 +163,16 @@ class GoldenBriefTest(unittest.TestCase):
         text = briefs.build(product(), ROWS['coder'], index(), [], REPO_FACTS).text
         self.assertIn('app/checkout/attempts.py, tests/test_checkout.py', text)
         self.assertIn('outside that list is a refusal', text)
+
+    def test_a_groom_brief_names_the_groom_file_the_answers_file_and_unblock(self):
+        text = briefs.build(product(), ROWS['groom'], index(), [], REPO_FACTS).text
+        self.assertIn('groom/2026-09-22.md', text)
+        self.assertIn('~/.ASF/state/sample/groom/2026-09-22.answers', text)
+        self.assertIn('unblock <id>', text)
+        self.assertIn('THE REPOSITORY IS NOT YOUR WORK', text)
+        brief = briefs.build(product(), ROWS['groom'], index(), [], REPO_FACTS)
+        self.assertEqual(brief.model, 'heavy')
+        self.assertTrue(brief.id_ranges_needed)
 
     def test_a_review_brief_asks_for_the_check_table(self):
         text = briefs.build(product(), ROWS['review'], index(), [], REPO_FACTS).text
@@ -373,6 +399,11 @@ class KindModelGrantTest(unittest.TestCase):
     def test_no_grants_is_an_empty_list_not_a_failure(self):
         p = Product('bare', {'backlog_dir': RECORD})
         self.assertEqual(build_mod.add_dirs_for(p), [])
+
+    def test_a_groom_brief_grants_the_groom_and_answers_directories(self):
+        brief = briefs.build(product(), ROWS['groom'], index(), [], REPO_FACTS)
+        self.assertIn('groom', brief.add_dirs)
+        self.assertIn(os.path.expanduser('~/.ASF/state/sample/groom'), brief.add_dirs)
 
 
 class GenericTest(unittest.TestCase):
