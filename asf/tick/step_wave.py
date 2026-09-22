@@ -15,6 +15,7 @@ Each launch appends a ``launch`` event (item, account, model, brief kind) to ``m
 import subprocess
 
 from asf import env
+from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 
 DEFAULT_CAPACITY = 4
@@ -26,38 +27,19 @@ def capacity():
 
 
 def inflight(product):
-    """The feeder's ``inflight`` list off the session ledger: ``{item, kind, account, job, started}``."""
-    return [{'item': s.get('item'), 'kind': s.get('kind'), 'account': s.get('account'),
-             'job': s.get('job'), 'started': s.get('started')}
-            for s in pool_mod.live_sessions(product)]
+    """The feeder's ``inflight`` list off the session ledger — :func:`asf.workers.lifecycle.inflight`."""
+    return lifecycle.inflight(pool_mod.sessions_path(product))
 
 
 def attempts(product):
-    """``{item: sessions the ledger holds for it}`` — ended or not — for the feeder's tier order."""
-    out = {}
-    for s in pool_mod.load_sessions(product).values():
-        if s.get('item'):
-            out[s['item']] = out.get(s['item'], 0) + 1
-    return out
+    """``{item: runs the ledger holds for it}`` — :func:`asf.workers.lifecycle.attempts`."""
+    return lifecycle.attempts(pool_mod.sessions_path(product))
 
 
 def corrections(product):
-    """``{item: {kind, text, at, rounds}}`` — the newest correction the harvest recorded for each
-    item, unless a session started since (it is already the correction's answer)."""
-    sessions, out = {}, {}
-    for s in pool_mod.load_sessions(product).values():
-        if s.get('item'):
-            sessions.setdefault(s['item'], []).append(s)
-    for item, group in sessions.items():
-        held = [s for s in group if (s.get('correction') or {}).get('text')]
-        if not held:
-            continue
-        s = max(held, key=lambda r: r['correction'].get('at') or '')
-        at = s['correction'].get('at') or ''
-        if any((r.get('started') or '') > at for r in group):
-            continue
-        out[item] = dict(s['correction'], rounds=max(r.get('rounds') or 0 for r in group))
-    return out
+    """``{item: {kind, text, at, rounds}}`` — the newest correction still waiting for its session
+    (:func:`asf.workers.lifecycle.corrections`)."""
+    return lifecycle.corrections(pool_mod.sessions_path(product))
 
 
 def _git(repo, args):

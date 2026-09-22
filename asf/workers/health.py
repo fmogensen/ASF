@@ -9,7 +9,10 @@ For every live session in ``sessions.jsonl``:
   with nothing for harvest to land (B-0051);
 * its pid is dead and there is no result → ended, ``end_reason: dead pid``;
 * a ``dead pid`` session whose log later carries a result → ``re-judged`` finished/failed, under
-  the same push rule (B-0028, B-0051).
+  the same push rule (B-0028, B-0051);
+* a run ended ``failed: not pushed`` is held like a red gate — a ``correction`` on the run and a
+  round on the item — so the feeder's FIX → CORRECT row sends the next session back to the same
+  worktree to commit and push what is there (B-0051, B-0052).
 
 Then the worktrees under ``~/.ASF/state/<product>/worktrees/``: one with no session at all is an
 ``orphan``; one whose session has ended is a reap candidate. With ``fix=True`` a worktree is
@@ -37,6 +40,7 @@ import subprocess
 
 from asf.workers import pool as pool_mod
 from asf.workers import runtime as runtime_mod
+from asf.workers import lifecycle
 from asf.workers import spawn as spawn_mod
 
 
@@ -149,80 +153,62 @@ def worktree_empty(worktree, main):
 
 
 def health(product, fix=False, alive=pid_alive, out=print):
-    """Returns a list of ``(job, what, detail)`` transitions/findings."""
+    """Returns a list of ``(job, what, detail)`` transitions/findings. Every judgement is
+    :mod:`asf.workers.lifecycle`'s: :func:`~asf.workers.lifecycle.judge` for the ``ended`` line,
+    :func:`~asf.workers.lifecycle.reap_verdict` for the worktrees; this function gathers the
+    evidence, writes the one recorded transition and prints."""
     found = []
+    registry = pool_mod.sessions_path(product)
     sessions = pool_mod.load_sessions(product)
     for job, s in sessions.items():
         if s.get('ended'):
             # a `dead pid` judgement is revisited: the result may have landed after the check,
             # or a correction may have finished the run (B-0028)
-            if s.get('end_reason') == 'dead pid' and not s.get('harvested'):
-                rec = runtime_mod.read_result(s.get('log'))
-                if rec is not None:
-                    reason = result_reason(s.get('worktree'), s.get('branch'), product.main, rec)
-                    ok = reason == 'finished'
+            if s.get('end_reason') == lifecycle.DEAD_PID and not s.get('harvested'):
+                ev = lifecycle.gather(product, s, alive=alive)
+                if ev.result is not None:
+                    reason = lifecycle.judge(s, ev)
+                    ok = reason == lifecycle.FINISHED
                     pool_mod.update_session(product, job, end_reason=reason, rc=0 if ok else 1)
                     s.update(end_reason=reason, rc=0 if ok else 1)
                     found.append((job, 're-judged', reason))
             continue
-        rec = runtime_mod.read_result(s.get('log'))
-        if rec is not None:
-            reason = result_reason(s.get('worktree'), s.get('branch'), product.main, rec)
-        elif not alive(s.get('pid')):
-            reason = 'dead pid'
-        else:
+        reason = lifecycle.judge(s, lifecycle.gather(product, s, alive=alive))
+        if reason is None:
             continue
-        pool_mod.update_session(product, job, ended=pool_mod.now_iso(), end_reason=reason)
-        s.update(ended=True, end_reason=reason)
+        now = pool_mod.now_iso()
+        pool_mod.update_session(product, job, ended=now, end_reason=reason)
+        s.update(ended=now, end_reason=reason)
         found.append((job, 'ended', reason))
+        if reason.startswith('failed: not pushed'):
+            # the run's own work is the correction's input: the next session on the branch
+            # commits and pushes it, or says why not (B-0051, B-0052)
+            fields, line = lifecycle.hold(registry, s, lifecycle.UNPUSHED,
+                                          lifecycle.unpushed_text(reason), now)
+            pool_mod.update_session(product, job, **fields)
+            found.append((job, 'held', line.split(': ', 1)[1]))
     _git(['fetch', '-q', 'origin', product.main], product.repo_dir)
     wdir = spawn_mod.worktrees_dir(product)
+    owners = lifecycle.by_worktree(registry)
     for name in sorted(os.listdir(wdir)):
         path = os.path.join(wdir, name)
         if not os.path.isdir(path):
             continue
-        s = sessions.get(name)
-        if s is not None and not s.get('ended'):
-            if not has_commits(path, s.get('branch')):
-                found.append((name, 'opening', 'live session, no commits yet'))
+        s = owners.get(os.path.realpath(path)) or sessions.get(name)
+        ev = lifecycle.gather(product, s or {}, alive=alive, worktree=path)
+        if s is None and not ev.remote_sha:
+            # an orphan carries no branch on its record: read the one checked out
+            ev = lifecycle.gather(product, {'branch': _head_branch(path)}, alive=alive, worktree=path)
+        what, detail = lifecycle.reap_verdict(s, ev, product.main, alive)
+        if what is None:
             continue
-        what = 'orphan' if s is None else 'ended'
-        if s is not None and alive(s.get('pid')):
-            found.append((name, 'keep', f'{what}: pid still alive'))
-            continue
-        if s is not None and s.get('harvested'):
-            # harvest lands a rebased tip from its own throwaway worktree and deletes the
-            # remote branch, so this worktree's HEAD never appears on origin — `pushed()`
-            # would refuse it forever. The landing itself is the evidence (B-0049).
-            detail = f'landed {s["harvested"]}'
-            if fix and remove_worktree(product, path, branch=s.get('branch')):
-                spawn_mod.release_id_range(product, name)
-                found.append((name, 'reaped', detail))
-            else:
-                found.append((name, 'reapable', detail))
-            continue
-        if s is not None and s.get('end_reason') != 'finished':
-            if worktree_empty(path, product.main):
-                if fix and remove_worktree(product, path):
-                    spawn_mod.release_id_range(product, name)
-                    found.append((name, 'reaped', 'empty'))
-                else:
-                    found.append((name, 'reapable', 'empty'))
-            else:
-                found.append((name, 'keep', f'{what}: session {s.get("end_reason")}, not finished'))
-            continue
-        ok, why = pushed(path, (s or {}).get('branch'))
-        if not ok:
-            found.append((name, 'keep', f'{what}: {why}'))
-        elif not has_commits(path, (s or {}).get('branch')):
-            found.append((name, 'keep', f'{what}: no commits yet'))
-        elif not in_trunk(path, product.main):
-            found.append((name, 'keep', f'{what}: not in origin/{product.main}'))
-        elif fix and remove_worktree(product, path):
-            spawn_mod.release_id_range(product, name)
-            found.append((name, 'reaped', what))
+        job = s.get('job', name) if s else name
+        if what == 'reapable' and fix and remove_worktree(product, path, branch=(s or {}).get('branch')
+                                                          if lifecycle.landed(s) else None):
+            spawn_mod.release_id_range(product, job)
+            found.append((name, 'reaped', detail))
         else:
-            found.append((name, 'reapable', what))
+            found.append((name, what, detail))
     for job, what, detail in found:
         if what == 'reaped':
             out(f'reaped {job} ({detail})')
@@ -231,3 +217,9 @@ def health(product, fix=False, alive=pid_alive, out=print):
     if not found:
         out('health: clean')
     return found
+
+
+def _head_branch(worktree):
+    head = _git(['rev-parse', '--abbrev-ref', 'HEAD'], worktree)
+    b = head.stdout.strip() if head.returncode == 0 else ''
+    return b if b and b != 'HEAD' else None

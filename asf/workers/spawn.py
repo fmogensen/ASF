@@ -3,9 +3,10 @@
 ``spawn(product, row, account, brief_text)``:
 
 1. a worktree ``~/.ASF/state/<product>/worktrees/<job>`` on a new branch (the row's, else
-   ``<branch prefix for the kind>/<job>``) off ``origin/<main>`` of ``Product.repo_dir`` — a row
-   of any kind whose branch already exists on origin (a held branch sent back for another round,
-   ``correct`` or ``adjudicate`` alike) instead reuses it, rebased onto ``origin/<main>``;
+   ``<branch prefix for the kind>/<job>``) off ``origin/<main>`` of ``Product.repo_dir`` — an
+   ended run's worktree on that branch, or a branch already on origin (a held branch sent back
+   for another round, ``correct`` or ``adjudicate`` alike), is reused instead, rebased onto
+   ``origin/<main>``; only a live run's worktree refuses (:func:`make_worktree`);
 2. an id range reserved for the job in ``~/.ASF/state/<product>/id-ranges.tsv`` and handed to
    the session as ``BACKLOG_ID_RANGE`` (so parallel writers never mint the same id — see
    ``asf.record.ids``);
@@ -20,6 +21,7 @@ import re
 import subprocess
 
 from asf import env
+from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 from asf.workers import runtime as runtime_mod
 
@@ -134,38 +136,51 @@ def _branch_exists_on_origin(repo, branch):
 
 
 def make_worktree(product, job, branch):
-    """A branch already on origin — any row kind, a held branch sent back for another round —
-    is reused: the worktree is added on it, then rebased onto ``origin/<main>`` — a conflict is
-    left in place for the session to resolve. Otherwise a fresh branch off ``origin/<main>``.
+    """The worktree a run starts in — :func:`asf.workers.lifecycle.may_launch` decides whether
+    one that already exists may be taken over.
 
-    A worktree already sitting at this job's path is refused only while its session is still
-    live — the same worktree left behind by a session that *ended* (e.g. it finished without
-    pushing, B-0051) is reused as-is: its branch and tree, rebased onto the fetched trunk. A
-    live session's worktree is never touched (B-0025)."""
+    A worktree already holding ``branch`` (this job's own, or an ended job's that a correction on
+    the same branch follows) is reused as it stands — its tree and its branch, rebased onto the
+    fetched trunk (a conflict is left in place for the session to resolve) — as long as the run
+    that recorded it has ended; a live run's worktree is never touched (B-0025, B-0051). A branch
+    already on origin with no worktree left (any row kind: a held branch sent back for another
+    round, B-0046, B-0048) gets a worktree on it, rebased the same way. Otherwise a fresh branch
+    off ``origin/<main>``. Returns the worktree path."""
     repo = product.repo_dir
     if not repo or not os.path.isdir(repo):
         raise SpawnError(f'product repo_dir missing: {repo!r}')
+    registry = pool_mod.sessions_path(product)
     path = os.path.join(worktrees_dir(product), job)
     _git(['fetch', '-q', 'origin', product.main], repo)
-    if os.path.exists(path):
-        s = pool_mod.load_sessions(product).get(job)
-        if s is None or not s.get('ended'):
-            raise SpawnError(f'worktree already exists: {path}')
-        subprocess.run(['git', 'rebase', '-q', f'origin/{product.main}'], cwd=path,
-                       capture_output=True, text=True)
-        return path
+    held = _holding_worktree(repo, branch)
+    for candidate in dict.fromkeys(p for p in (path, held) if p and os.path.exists(p)):
+        ok, why = lifecycle.may_launch(registry, job, candidate)
+        if not ok:
+            raise SpawnError(why)
+        if candidate == path or _worktree_branch(candidate) == branch:
+            subprocess.run(['git', 'rebase', '-q', f'origin/{product.main}'], cwd=candidate,
+                           capture_output=True, text=True)
+            return candidate
     if _branch_exists_on_origin(repo, branch):
         _git(['fetch', '-q', 'origin', branch], repo)
-        held = _holding_worktree(repo, branch)
         if held:
-            # a stale worktree of a session that has ended still holds the branch
+            # a stale worktree of an ended run still holds the branch and is not reusable here
             _git(['worktree', 'remove', '--force', held], repo)
         _git(['worktree', 'add', '-q', '-B', branch, path, f'origin/{branch}'], repo)
         subprocess.run(['git', 'rebase', '-q', f'origin/{product.main}'], cwd=path,
                        capture_output=True, text=True)
         return path
+    if held:
+        _git(['worktree', 'remove', '--force', held], repo)
+        _git(['branch', '-D', branch], repo)
     _git(['worktree', 'add', '-q', '-b', branch, path, f'origin/{product.main}'], repo)
     return path
+
+
+def _worktree_branch(path):
+    p = subprocess.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], cwd=path,
+                       capture_output=True, text=True)
+    return p.stdout.strip() if p.returncode == 0 else ''
 
 
 def brief_for(row, brief_text):
@@ -239,12 +254,10 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
               'pid': result.pid, 'worktree': worktree, 'branch': branch,
               'started': pool_mod.now_iso(), 'log': result.log_path, 'brief': brief_path,
               'id_range': id_range, 'runtime': runtime.name}
-    # a launch line is a new run: the previous run's terminal fields must not fold into it
-    # (B-0041 — a relaunch read as `ended: failed`, so health skipped it, the feeder re-emitted
-    # it and harvest never landed its branch)
-    record.update({k: None for k in pool_mod.RUN_FIELDS})
+    # a launch line is a new run: the fold opens a run at every launch line, so the previous
+    # run's terminal fields never reach this one (B-0041 — see asf.workers.lifecycle)
     pool_mod.append_session(product, record)
-    return {k: v for k, v in record.items() if not (k in pool_mod.RUN_FIELDS and v is None)}
+    return record
 
 
 def load_cfg():

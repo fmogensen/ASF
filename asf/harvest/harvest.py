@@ -3,8 +3,9 @@
 
 Run by the tick, in step 0 after the pull. For every branch under the product's code prefix
 (``conventions.branch_prefixes``, ``worker/`` by default) whose session in the registry
-(``~/.ASF/state/<product>/sessions.jsonl``) has ``ended`` with ``rc: 0`` — or, when the runtime
-wrote no return code, ``end_reason: finished`` — and which carries commits not on the trunk:
+(``~/.ASF/state/<product>/sessions.jsonl``) is ``pushed`` — ended ``finished``, which health
+writes only for a pushed branch (:mod:`asf.workers.lifecycle`) — and which carries commits not
+on the trunk:
 rebase it onto ``origin/<trunk>`` in a throwaway worktree (never the job's own, never the main
 checkout — that branch is already checked out there), resolve only machine-owned conflicts,
 gate it, then land it.
@@ -44,7 +45,7 @@ import tempfile
 
 from asf import env
 from asf.conventions import Conventions
-from asf.feeder.rows import CORRECTION_ROUNDS
+from asf.workers import lifecycle
 from asf.workers.health import pid_alive
 from asf.workers.pool import now_iso
 
@@ -133,35 +134,15 @@ def sessions_path(state_dir):
 
 
 def read_sessions(state_dir):
-    """``{job: folded record}`` from the registry — the same fold
-    :func:`asf.workers.pool.load_sessions` does, over a path instead of a Product, so harvest
-    reads a temp state directory in a test exactly as it reads the operator's."""
-    out = {}
-    path = sessions_path(state_dir)
-    if not os.path.isfile(path):
-        return out
-    with open(path, encoding='utf-8') as f:
-        for line in f:
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(rec, dict) and rec.get('job'):
-                out.setdefault(rec['job'], {}).update(rec)
-    return out
+    """``{job: its latest run}`` — :func:`asf.workers.lifecycle.latest` over the registry at
+    ``state_dir`` (a temp state directory in a test reads exactly as the operator's)."""
+    return lifecycle.latest(sessions_path(state_dir))
 
 
 def is_eligible(record):
-    """A session that ended without failing. ``rc`` decides when the runtime recorded one;
-    otherwise ``end_reason: finished`` does (a session killed as a dead pid is not eligible)."""
-    if not record or not record.get('ended'):
-        return False
-    if record.get('harvested'):
-        return False
-    rc = record.get('rc')
-    if rc is not None:
-        return str(rc) == '0'
-    return record.get('end_reason') == 'finished'
+    """What harvest may gate: :func:`asf.workers.lifecycle.eligible` — ended ``finished`` (which
+    health writes only for a pushed branch), not landed, not handed to the PR lane."""
+    return lifecycle.eligible(record)
 
 
 def mark_harvested(state_dir, job, sha):
@@ -550,29 +531,9 @@ def landing(product):
 
 
 def sessions_by_branch(state_dir):
-    """``{branch: record}``: for every branch, the latest start line naming it (a line carrying
-    ``branch`` and ``started``/``pid``), folded with the later lines for its job (``ended``,
-    ``rc``, ``end_reason``, ``harvested``…). A job relaunched on another branch starts a fresh
-    record; the old branch keeps the one it had."""
-    by_job, by_branch = {}, {}
-    path = sessions_path(state_dir)
-    if not os.path.isfile(path):
-        return by_branch
-    with open(path, encoding='utf-8') as f:
-        for line in f:
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(rec, dict) or not rec.get('job'):
-                continue
-            if rec.get('branch') and ('started' in rec or 'pid' in rec):
-                cur = dict(rec)
-                by_job[rec['job']] = cur
-                by_branch[rec['branch']] = cur
-            else:
-                by_job.setdefault(rec['job'], {}).update(rec)
-    return by_branch
+    """``{branch: the latest run on it}`` — :func:`asf.workers.lifecycle.by_branch`: a job
+    relaunched on another branch starts a fresh run; the old branch keeps the one it had."""
+    return lifecycle.by_branch(sessions_path(state_dir))
 
 
 def mark_session(state_dir, job, **fields):
@@ -651,29 +612,14 @@ def product_gate(tmp, conv, asf_repo):
 
 
 def hold_with_correction(state_dir, branch, record, kind, text, out):
-    """Hold ``branch`` and hand it back to its session: the failing output goes on the session's
-    record as ``correction`` and the rounds counter (over every session of the item) goes up —
-    until it reaches the cap the feeder switches an ADJUDICATE row on at (``CORRECTION_ROUNDS``,
-    see ``asf.feeder.rows``). From there the round no longer climbs (B-0048: it used to climb
-    past the cap forever, one more ADJUDICATE row each time) — a held branch at the cap is the
-    adjudicate row's own attempt, and a second hold there (it cannot land either) flags the item
-    for an operator instead of spawning yet another one."""
-    item = record.get('item')
+    """Hold ``branch`` and hand it back to its session: :func:`asf.workers.lifecycle.hold` says
+    what goes on the run (the failing output as ``correction``, the rounds over every session of
+    the item, the cap the feeder switches an ADJUDICATE row on at) and what to print."""
     job = record.get('job') or branch
-    history = [r for r in read_sessions(state_dir).values() if item and r.get('item') == item]
-    prev = max([r.get('rounds') or 0 for r in history] + [record.get('rounds') or 0])
-    if prev >= CORRECTION_ROUNDS:
-        at_cap_before = any((r.get('correction') or {}).get('at_cap') for r in history)
-        fields = {'correction': {'kind': kind, 'text': text, 'at': now_iso(), 'at_cap': True}}
-        if at_cap_before:
-            fields['operator_flagged'] = 1
-        mark_session(state_dir, job, **fields)
-        out(f'held {branch}: {text} — adjudicate pending')
-        return 'held'
-    rounds = prev + 1
-    mark_session(state_dir, job, rounds=rounds,
-                 correction={'kind': kind, 'text': text, 'at': now_iso()})
-    out(f'held {branch}: {text} — back to its session (round {rounds})')
+    fields, line = lifecycle.hold(sessions_path(state_dir), dict(record, branch=branch, job=job),
+                                  kind, text, now_iso())
+    mark_session(state_dir, job, **fields)
+    out(line)
     return 'held'
 
 

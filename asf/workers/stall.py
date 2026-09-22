@@ -23,6 +23,7 @@ import time
 
 from asf import env
 from asf.workers import health as health_mod
+from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 from asf.workers import runtime as runtime_mod
 
@@ -112,16 +113,21 @@ def correct_once(product, session, error_text, runtime):
     result = runtime.run(job, wait=True)
     pool_mod.update_session(product, session['job'], corrected=1)
     session['corrected'] = 1
-    pool_mod.append_session(product, {
+    retry = {
         'job': retry_job, 'item': session.get('item'), 'feature': session.get('feature'),
         'kind': session.get('kind'), 'account': session.get('account'),
         'model': session.get('model'), 'pid': result.pid, 'worktree': session.get('worktree'),
         'branch': session.get('branch'), 'started': pool_mod.now_iso(),
         'log': result.log_path, 'brief': path, 'id_range': session.get('id_range'),
-        'runtime': runtime.name, 'ended': pool_mod.now_iso(),
-        'end_reason': 'finished' if result.ok else 'failed', 'rc': 0 if result.ok else 1,
-    })
-    return bool(result.ok)
+        'runtime': runtime.name,
+    }
+    pool_mod.append_session(product, retry)
+    # the retry is judged as any run is — its result AND its push (B-0051), never `ok` alone
+    reason = lifecycle.judge(retry, lifecycle.gather(product, retry, alive=lambda pid: False))
+    ok = reason == lifecycle.FINISHED
+    pool_mod.update_session(product, retry_job, ended=pool_mod.now_iso(), end_reason=reason or 'failed',
+                            rc=0 if ok else 1)
+    return ok
 
 
 def _account(session):

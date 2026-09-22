@@ -33,7 +33,7 @@ from asf.views import index_reader as ix
 
 BUG_FIX = 'BUG → FIX'
 FIX_CORRECT = 'FIX → CORRECT'
-CORRECTION_ROUNDS = 3
+CORRECTION_ROUNDS = 3  # == asf.workers.lifecycle.ROUND_CAP (the feeder imports no git module)
 STALEMATE = 'STALEMATE → ADJUDICATE'
 CONFLICT = 'CONFLICT → REBASE'
 STALE = 'STALE → CLOSE'

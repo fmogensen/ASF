@@ -18,9 +18,10 @@ the lowest load wins (ties by name). No account under the guard →
 Reserved S1 capacity: while any S1 Bug is open, a lane's non-``BUG → FIX`` rows may use at most
 ``lane cap − reserve`` slots; the reserved slot only goes to a ``BUG → FIX`` row.
 
-The session ledger is ``~/.ASF/state/<product>/sessions.jsonl``, append-only: the first line
-for a job is its launch record, later lines for the same job are field updates (``ended``,
-``end_reason``, ``corrected``); :func:`load_sessions` folds them, last write wins.
+The session ledger is ``~/.ASF/state/<product>/sessions.jsonl``, append-only: a launch line
+(``started`` + ``pid``) opens a run of its job, later lines for the same job update that run
+(``ended``, ``end_reason``, ``correction``, ``harvested``); :mod:`asf.workers.lifecycle` folds
+them per run and :func:`load_sessions` hands out each job's latest.
 """
 import datetime
 import json
@@ -28,6 +29,7 @@ import os
 import re
 
 from asf import env
+from asf.workers import lifecycle
 from asf.workers import quota as quota_mod
 
 DEFAULT_RESERVE = {'local': 1, 'cloud': 1}
@@ -160,29 +162,14 @@ def append_session(product, record):
         f.write(json.dumps(record, sort_keys=True) + '\n')
 
 
-# The fields that belong to ONE run of a job. A new launch line writes them as null so the
-# fold below clears them (B-0041); `load_sessions` then drops the nulls.
-RUN_FIELDS = ('ended', 'end_reason', 'rc', 'corrected', 'operator_flagged', 'harvested',
-              'correction', 'rounds')
+# The fields that belong to ONE run of a job (:data:`asf.workers.lifecycle.RUN_FIELDS`): a
+# launch line opens a new run and the fold never carries them across (B-0041).
+RUN_FIELDS = lifecycle.RUN_FIELDS
 
 
 def load_sessions(product):
-    """``{job: folded record}`` in launch order. A run field whose folded value is null is
-    dropped — that is how a relaunch line clears the previous run's terminal fields."""
-    out = {}
-    path = sessions_path(product)
-    if not os.path.exists(path):
-        return out
-    with open(path, encoding='utf-8') as f:
-        for line in f:
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(rec, dict) and rec.get('job'):
-                out.setdefault(rec['job'], {}).update(rec)
-    return {job: {k: v for k, v in s.items() if not (k in RUN_FIELDS and v is None)}
-            for job, s in out.items()}
+    """``{job: its latest run}`` in launch order — :func:`asf.workers.lifecycle.latest`."""
+    return lifecycle.latest(sessions_path(product))
 
 
 def update_session(product, job, **fields):
@@ -190,7 +177,7 @@ def update_session(product, job, **fields):
 
 
 def live_sessions(product):
-    return [s for s in load_sessions(product).values() if not s.get('ended')]
+    return [s for s in load_sessions(product).values() if lifecycle.is_live(s)]
 
 
 # ---- the pool ---------------------------------------------------------------

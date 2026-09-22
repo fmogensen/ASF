@@ -24,6 +24,7 @@ import os
 import re
 import subprocess
 
+from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 
 DEFAULT_PRS_PER_TICK = 6
@@ -112,7 +113,7 @@ def candidates(product, out=None):
     out_list = []
     for s in pool_mod.load_sessions(product).values():
         branch = s.get('branch') or ''
-        if not (s.get('ended') and s.get('end_reason') == 'finished' and not s.get('harvested')
+        if not (lifecycle.finished(s) and not lifecycle.landed(s)
                 and branch.startswith(prefixes) and branch in heads):
             continue
         if not ahead_of_trunk(repo, product.main, branch):

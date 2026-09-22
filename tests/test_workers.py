@@ -23,6 +23,7 @@ from asf.workers import spawn as spawn_mod
 from asf.workers import stall as stall_mod
 from asf.workers import wave as wave_mod
 from asf.workers import register
+from asf.tick.step_wave import corrections as step_wave_corrections
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'workers')
 
@@ -375,7 +376,7 @@ class TestSpawn(Home):
         git('push', '-q', 'origin', 'main', cwd=other)
         rt2 = runtime_mod.FakeRuntime([{'running': True, 'pid': 41}])
         rec2 = spawn_mod.spawn(self.product, row, self.acct(), 'b', runtime=rt2, cfg=self.cfg)
-        self.assertEqual(rec2['worktree'], wt)
+        self.assertEqual(os.path.realpath(rec2['worktree']), os.path.realpath(wt))
         self.assertTrue(os.path.exists(os.path.join(wt, 'x')))
         self.assertTrue(os.path.exists(os.path.join(wt, 'trunk.txt')))
         git('merge-base', '--is-ancestor', 'origin/main', 'HEAD', cwd=wt)
@@ -386,6 +387,43 @@ class TestSpawn(Home):
         spawn_mod.spawn(self.product, row, self.acct(), 'b', runtime=rt, cfg=self.cfg)
         with self.assertRaises(spawn_mod.SpawnError):
             spawn_mod.spawn(self.product, row, self.acct(), 'b', runtime=rt, cfg=self.cfg)
+
+    def test_f0087_a_correction_takes_over_the_ended_jobs_worktree_with_its_uncommitted_work(self):
+        # a fix session ends "done" with files it never committed (B-0051/B-0052); health holds
+        # it; the FIX → CORRECT row's job has another name, but the same branch — it must run
+        # in that worktree, where the work is, and health must not reap it meanwhile
+        rec = spawn_mod.spawn(self.product, s1_row('fix-bug-b-0001'), self.acct(), 'b',
+                              runtime=runtime_mod.FakeRuntime([{'ok': True, 'pid': 41}]), cfg=self.cfg)
+        wt = rec['worktree']
+        with open(os.path.join(wt, 'work.txt'), 'w') as f:
+            f.write('half done\n')
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('fix-bug-b-0001', 'ended',
+                       'failed: not pushed: 1 uncommitted file(s), 0 unpushed commit(s)'), found)
+        held = [d for j, w, d in found if w == 'held']
+        self.assertEqual(held, ['unpushed work: not pushed: 1 uncommitted file(s), 0 unpushed '
+                                'commit(s) — commit and push what you have, or say why not in the '
+                                'report — back to its session (round 1)'])
+        self.assertTrue(os.path.isdir(wt))  # kept: there is work in it
+        corr = step_wave_corrections(self.product)
+        self.assertEqual(corr['B-0001']['kind'], 'unpushed')
+        self.assertEqual(corr['B-0001']['rounds'], 1)
+        row = pool_mod.parse_row(json.dumps({'job': 'correct-b-0001', 'item': 'B-0001', 'state': 'FIX',
+                                             'action': 'CORRECT', 'model': 'Opus', 'kind': 'correct',
+                                             'branch': rec['branch']}))
+        rec2 = spawn_mod.spawn(self.product, row, self.acct(), 'b',
+                               runtime=runtime_mod.FakeRuntime([{'running': True, 'pid': 42}]), cfg=self.cfg)
+        self.assertEqual(os.path.realpath(rec2['worktree']), os.path.realpath(wt))
+        self.assertTrue(os.path.exists(os.path.join(wt, 'work.txt')))
+        self.assertEqual(git('rev-parse', '--abbrev-ref', 'HEAD', cwd=wt), rec['branch'])
+        self.assertEqual(step_wave_corrections(self.product), {})  # answered
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: pid == 42, out=lambda s: None)
+        self.assertTrue(os.path.isdir(wt))
+        self.assertFalse([f for f in found if f[1] in ('reaped', 'reapable')], found)
+        # a third session on the same branch while the correction is live: refused
+        with self.assertRaises(spawn_mod.SpawnError):
+            spawn_mod.spawn(self.product, s1_row('fix-bug-b-0001'), self.acct(), 'b',
+                            runtime=runtime_mod.FakeRuntime([{'ok': True}]), cfg=self.cfg)
 
     def test_b0024_unmapped_model_label_spawns_nothing(self):
         cfg = {'worker_pool': {'accounts': [{'name': 'acct-a', 'role': 'local', 'cap': 2}]}}
@@ -716,11 +754,23 @@ class TestCorrectOnce(Home):
         self.assertEqual(rec['job'], 'j')
 
     def test_retry_that_passes(self):
-        spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b\n',
-                        runtime=runtime_mod.FakeRuntime([{'ok': False}]), cfg=self.cfg)
+        rec = spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b\n',
+                              runtime=runtime_mod.FakeRuntime([{'ok': False}]), cfg=self.cfg)
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])  # the retry pushed
         session = pool_mod.load_sessions(self.product)['j']
         self.assertTrue(stall_mod.correct_once(self.product, session, 'boom',
                                                runtime_mod.FakeRuntime([{'ok': True}])))
+
+    def test_f0087_a_retry_that_says_ok_without_pushing_is_not_finished(self):
+        # the cold retry is judged like every run: by its result AND its push (B-0051)
+        spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b\n',
+                        runtime=runtime_mod.FakeRuntime([{'ok': False}]), cfg=self.cfg)
+        session = pool_mod.load_sessions(self.product)['j']
+        self.assertFalse(stall_mod.correct_once(self.product, session, 'boom',
+                                                runtime_mod.FakeRuntime([{'ok': True}])))
+        retry = pool_mod.load_sessions(self.product)['j-correction']
+        self.assertEqual(retry['end_reason'],
+                         'failed: not pushed: 0 uncommitted file(s), 0 unpushed commit(s)')
 
     def test_b0039_the_retry_relaunches_cold_its_own_job_and_log(self):
         """D-0048 part b: a correction is a fresh session, not the dead one resumed — its own
@@ -728,6 +778,7 @@ class TestCorrectOnce(Home):
         the one that passed."""
         rec = spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b\n',
                               runtime=runtime_mod.FakeRuntime([{'ok': False}]), cfg=self.cfg)
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])  # the retry pushed
         session = pool_mod.load_sessions(self.product)['j']
         self.assertTrue(stall_mod.correct_once(self.product, session, 'boom',
                                                runtime_mod.FakeRuntime([{'ok': True}])))
