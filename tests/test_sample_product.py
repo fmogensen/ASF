@@ -104,9 +104,9 @@ class SampleProductTest(unittest.TestCase):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     @classmethod
-    def asf(cls, *argv, cwd=None):
+    def asf(cls, *argv, cwd=None, env=None):
         return subprocess.run([sys.executable, '-m', 'asf.cli', *argv], cwd=cwd or cls.tmp,
-                              env=cls.env, capture_output=True, text=True, timeout=300)
+                              env=env or cls.env, capture_output=True, text=True, timeout=300)
 
     def sessions(self):
         path = os.path.join(self.home, 'state', 'sample', 'sessions.jsonl')
@@ -206,10 +206,11 @@ class SampleProductTest(unittest.TestCase):
         p = self.asf('doctor', '--product', 'sample')
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
 
-    def test_the_spec_brief_cites_the_samples_dirs(self):
-        # the review-kind brief is the one that cites a document path under every one of the
-        # sample's own dirs (spec, review) in a single body — the spec-kind brief for the same
-        # item only cites the spec path
+    def test_the_review_brief_cites_the_samples_dirs(self):
+        # the review-kind brief is the one body that cites a path under every one of the sample's
+        # own dirs at once: `state_lines` emits the review path only `if kind in REVIEW_KINDS`
+        # (asf/briefs/preamble.py:348), so a spec-kind brief carries `specs/` but no `reviews/`.
+        # The case is named for the kind it drives.
         p = self.asf('brief', '--product', 'sample', '--item', 'F-0001', '--kind', 'review')
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertIn('Specs live in `specs`, plans in `plans`, reviews in `reviews`.', p.stdout)
@@ -222,19 +223,41 @@ class SampleProductTest(unittest.TestCase):
         p = self.asf('evidence', '--product', 'sample', '--fresh')
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         data = json.loads(p.stdout)
+        # `serialise` writes the key as `spec`, holding `it['spec_doc'][0]` — a string, not the
+        # tuple (asf/evidence/evidence.py:610)
         self.assertEqual(data['features']['f-0002']['spec'], 'origin/main:specs/f-0002.md')
         # the sample declares no matrix_path, briefs_dir or decisions file — nothing looked for them
         self.assertEqual(data['stories'], {})
         self.assertNotIn('briefs', data)
         self.assertNotIn('decisions', data)
+        # and no literal of the first product's tree survives in what the pass emits
+        for literal in ('superpowers', 'sdd-input', 'feature-matrix'):
+            self.assertNotIn(literal, p.stdout)
 
     def test_the_evidence_cache_is_under_the_products_state(self):
-        p = self.asf('evidence', '--product', 'sample', '--fresh')
+        # a TMPDIR this case owns: the cache belongs under the product's state dir, and the old
+        # `/tmp/backlog-evidence.json` must not come back beside it
+        tmpdir = os.path.join(self.tmp, 'owned-tmp')
+        os.makedirs(tmpdir, exist_ok=True)
+        p = self.asf('evidence', '--product', 'sample', '--fresh',
+                     env=dict(self.env, TMPDIR=tmpdir))
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        cache = os.path.join(self.home, 'state', 'sample', 'cache-backlog-evidence.json')
+        cache = os.path.join(self.home, 'state', 'sample', 'cache-evidence.json')
         self.assertTrue(os.path.isfile(cache), cache)
         with open(cache, encoding='utf-8') as f:
             json.load(f)  # the cache the call just wrote, not a stale or foreign one
+        self.assertEqual(sorted(os.listdir(tmpdir)), [], 'evidence wrote under TMPDIR')
+
+    @unittest.skip("blocked: nothing reads conventions.intake_dir yet (Task 5 of F-0074 is "
+                   "unlanded — the field exists at asf/conventions.py:100 and appears nowhere "
+                   "under asf/groom, asf/record or asf/tick), and this fixture's `asf init` takes "
+                   "the adopt branch (asf/init.py:275), so `lay_down` — the only caller that "
+                   "creates the stream folders — never runs. Kept so F-0074 PD5's proof is a "
+                   "known debt, not a silent loss.")
+    def test_init_creates_the_intake_dir_not_inbox(self):
+        folders = os.listdir(self.record())
+        self.assertIn('cards', folders)
+        self.assertNotIn('inbox', folders)
 
 
 # ---- the failure paths, whole loop (F-0087) ----------------------------------------------
