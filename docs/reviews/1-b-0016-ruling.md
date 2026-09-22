@@ -2,8 +2,13 @@
 id: D-7850
 type: decision
 title: B-0016 is accepted as it stands; the review loop on fix/B-0016 is closed and does not reopen
-superseded_in_part_by: D-7850, D-7851, D-7852, D-7853, D-7854
+superseded_in_part_by: D-7850, D-7851, D-7852, D-7853, D-7854, D-7855
 ---
+> **Eighth routing: [`docs/decisions/D-7855.md`](../decisions/D-7855.md)** affirms that there is no finding and
+> that the fix stands. It **supersedes the `merge --no-ff` handover**, because under B-0056 (`6517bb2`) a merge
+> commit is refused. The branch is now a linear rebase onto `6517bb2`: `6fcb8df` is dropped and the
+> `-s ours` merge is gone. The factory publishes it with `--force-with-lease`.
+
 > **Seventh routing: [`docs/decisions/D-7854.md`](../decisions/D-7854.md)** affirms D-7853 without
 > change. There is no finding, the fix stands, and the `--no-ff` merge is still clean at
 > `origin/main` `cc168ab` (tree `647c0fa`, `spawn.py` blob `44ee4df`). The stray rebase each session
