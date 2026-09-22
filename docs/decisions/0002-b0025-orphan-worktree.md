@@ -44,6 +44,11 @@ one case neither B-0049 nor B-0051 covers: a worktree with **no session line at 
   fails), and `spawn` clears it rather than refusing.
 - An orphan that *holds* anything — uncommitted changes or commits ahead of the trunk — is still
   kept and still refused, with what it holds named in the error. Nothing is deleted unexamined.
+- "Empty" for the orphan rule means **never committed to** (`has_commits`, B-0019's reflog
+  check), not `in_trunk`. A landed orphan is contained in the trunk too, so `worktree_empty`
+  alone would have relabelled it `empty orphan` and shadowed the existing `orphan` reap.
+- `test_orphan_worktree` chained three stages, and its middle one asserted the bug — an empty
+  orphan `keep`-ed on every pass. It is split rather than deleted: the committed stages stay.
 - `spawn()` and `make_worktree()` are back to `main`'s signatures; no caller passes `alive`.
 - The review loop on `fix/B-0025` ends here. Findings 1 is overruled for good; a later round may
   not re-open it.
