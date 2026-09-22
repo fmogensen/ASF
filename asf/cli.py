@@ -142,6 +142,38 @@ def needs_operator_line(err, product=None):
     return f"NEEDS OPERATOR: {err} — edit the file or run asf init --product {product or '<p>'}"
 
 
+def _looks_like_record(path):
+    """``path`` is a record itself: an ``index.json`` beside ``epics/``. A product repo's cwd
+    never has both, so it is never mistaken for one."""
+    return (os.path.isdir(os.path.join(path, 'epics'))
+            and os.path.isfile(os.path.join(path, 'index.json')))
+
+
+def resolve_record(args):
+    """The record a record command runs against. ``--product`` given explicitly always wins:
+    that product's ``backlog_dir`` is the record, even when the cwd happens to be a record too —
+    a product repo's cwd is never mistaken for one. Otherwise, a cwd that already looks like a
+    record (an ``index.json`` beside ``epics/``) is used as it stands — the ordinary way these
+    tools are run, from inside the backlog checkout. Only when the cwd is *not* a record (it is
+    a product's code repo, say) does ``$ASF_PRODUCT`` or ``config.yaml``'s ``default_product``
+    stand in, so the command still resolves the right record instead of silently doing nothing
+    to the cwd. Prints ``record: <path>`` as the first line, so the operator always sees which
+    one ran."""
+    from asf import env
+    name = getattr(args, 'product', None)
+    cwd = os.getcwd()
+    if name is None and _looks_like_record(cwd):
+        print(f"record: {cwd}")
+        return cwd
+    if name is None:
+        name = env.default_product_name()
+    record = env.load_product(name).backlog_dir
+    if not record:
+        raise env.ConfigError(f"product {name!r} has no backlog_dir configured")
+    print(f"record: {record}")
+    return record
+
+
 def _product_of(argv):
     argv = list(sys.argv[1:] if argv is None else argv)
     for i, a in enumerate(argv):
@@ -180,10 +212,10 @@ def _main(argv=None):
         return cmd_ingest(args, root)
     if args.command == 'migrate':
         from asf.tick.migrate import cmd_migrate
-        return cmd_migrate(args, root)
+        return cmd_migrate(args, resolve_record(args))
     if args.command == 'groom':
         from asf.groom.groom import cmd_groom
-        return cmd_groom(args, root)
+        return cmd_groom(args, resolve_record(args))
     if args.command == 'stale':
         from asf.tick.stale import cmd_stale
         return cmd_stale(args, root)
@@ -192,8 +224,7 @@ def _main(argv=None):
         return cmd_file_bugs(args, root)
     if args.command == 'rules':
         from asf.rules.rules import cmd_check as rules_cmd_check
-        from asf.rules.rules import product_root
-        return rules_cmd_check(args, product_root(args, root))
+        return rules_cmd_check(args, resolve_record(args))
     if args.command == 'evidence':
         from asf.evidence.evidence import main as evidence_main
         evidence_args = ['--json']
@@ -221,8 +252,7 @@ def _main(argv=None):
         from asf.tick.tick import cmd_tick
         return cmd_tick(args)
     if args.command in ('roadmap', 'backlog', 'parity', 'prod', 'sessions', 'status'):
-        from asf import env
-        view_root = env.load_product(args.product).backlog_dir
+        view_root = resolve_record(args)
         if args.command == 'roadmap':
             from asf.views.roadmap import cmd_roadmap
             return cmd_roadmap(args, view_root)
