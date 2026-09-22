@@ -43,7 +43,7 @@ import subprocess
 import sys
 import tempfile
 
-from asf import env
+from asf import env, hermetic
 from asf.conventions import Conventions
 from asf.workers import lifecycle
 from asf.workers.health import pid_alive
@@ -75,7 +75,8 @@ def cap_to_tick(items, out):
     return items
 
 
-GIT_HOOK_VARS = ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE')
+GIT_HOOK_VARS = hermetic.GIT_HOOK
+CALLER_IDENTITY_VARS = hermetic.CALLER_IDENTITY
 
 
 def clean_env(env=None):
@@ -92,34 +93,14 @@ def sh(cmd, cwd=None, env=None):
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, env=clean_env(env))
 
 
-# The variables that name the CALLER — the tick's product, a worker session's job and mint
-# range. None may reach the branch's own test run: the gate is the branch's result, not the
-# caller's (B-0033: the tick's ASF_PRODUCT made ASF's own "no product configured" tests read
-# the live product and go red). ASF_HOME stays: it is the operator's home, not an identity.
-CALLER_IDENTITY_VARS = ('ASF_PRODUCT', 'ASF_JOB', 'BACKLOG_ID_RANGE')
-
-
-def gate_env(worktree=None):
-    """The environment the gate and index regeneration run in: the caller's own, minus the
-    caller's identity (:data:`CALLER_IDENTITY_VARS`) — BACKLOG_ID_RANGE names the calling
-    session's own mint range and must never leak into a branch it didn't spawn (a worker
-    session invoking `--dry-run` against the live repo would otherwise misjudge an unrelated
-    branch's tests as failing); ASF_PRODUCT/ASF_JOB name the tick or session running the gate.
-
-    PYTHONPATH: the gated ``worktree`` first, then the package that is harvesting. A test in
-    the worktree that runs ``python -m asf.cli`` from some other cwd must get the worktree's
-    own code — the branch under test — not the harvester's (B-0033: the sample-product test
-    ran main's package against the branch's fixtures); `asf index`/`asf check` from a product
-    repo with no ``asf`` package of its own still find the harvester's."""
-    env = clean_env()
-    for var in CALLER_IDENTITY_VARS:
-        env.pop(var, None)
-    pkg_parent = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    parts = ([os.path.abspath(worktree)] if worktree else []) + [pkg_parent]
-    if env.get('PYTHONPATH'):
-        parts.append(env['PYTHONPATH'])
-    env['PYTHONPATH'] = os.pathsep.join(parts)
-    return env
+def gate_env(worktree=None, base=None):
+    """The environment the gate and index regeneration run in: :func:`asf.hermetic.build` —
+    the caller's own minus the caller's identity (B-0033: the tick's ASF_PRODUCT made ASF's own
+    "no product configured" tests read the live product and go red) and the git-hook variables,
+    the gated ``worktree`` first on PYTHONPATH (B-0033b: a test in the worktree that runs
+    ``python -m asf.cli`` must get the branch under test, not the harvester's package), the
+    default branch pinned (B-0038). ASF_HOME stays: it is the operator's home, not an identity."""
+    return hermetic.build(base, worktree=worktree)
 
 
 def tail(text, n=1):

@@ -105,9 +105,12 @@ class TestRuntime(unittest.TestCase):
         job = runtime_mod.Job('sample', 'j1', '/wt', '/b.md', 'opus', account=acct,
                               env={'BACKLOG_ID_RANGE': 'S:5000-5049'})
         e = runtime_mod.build_env(job, base={'PATH': '/bin', 'HOME': '/me'})
-        self.assertEqual(e, {'PATH': '/bin', 'HOME': '/homes/a', 'CLAUDE_CONFIG_DIR': '/cfg/a',
-                             'ASF_PRODUCT': 'sample', 'ASF_JOB': 'j1',
-                             'BACKLOG_ID_RANGE': 'S:5000-5049'})
+        # the builder (asf.hermetic) pins git's default branch for every child of ASF
+        self.assertEqual({k: v for k, v in e.items() if not k.startswith('GIT_CONFIG_')},
+                         {'PATH': '/bin', 'HOME': '/homes/a', 'CLAUDE_CONFIG_DIR': '/cfg/a',
+                          'ASF_PRODUCT': 'sample', 'ASF_JOB': 'j1',
+                          'BACKLOG_ID_RANGE': 'S:5000-5049'})
+        self.assertEqual((e['GIT_CONFIG_KEY_0'], e['GIT_CONFIG_VALUE_0']), ('init.defaultBranch', 'main'))
 
     def test_claude_code_backend_runs_the_command_and_reads_the_last_line(self):
         tmp = tempfile.mkdtemp()

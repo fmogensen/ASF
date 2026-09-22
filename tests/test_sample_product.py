@@ -15,6 +15,8 @@ import sys
 import tempfile
 import unittest
 
+from asf import hermetic
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SAMPLE = os.path.join(ROOT, 'sample')
 
@@ -66,11 +68,12 @@ class SampleProductTest(unittest.TestCase):
         _fill(os.path.join(cls.sample, 'config.yaml'), os.path.join(cls.home, 'config.yaml'),
               SAMPLE=cls.sample)
 
-        cls.env = dict(os.environ, ASF_HOME=cls.home, HOME=cls.tmp, PYTHONPATH=ROOT,
-                       GIT_AUTHOR_NAME='sample', GIT_AUTHOR_EMAIL='sample@example.com',
-                       GIT_COMMITTER_NAME='sample', GIT_COMMITTER_EMAIL='sample@example.com',
-                       GH_TOKEN='', PATH=cls._path_with_offline_gh(os.path.join(cls.tmp, 'bin')))
-        cls.env.pop('ASF_PRODUCT', None)
+        cls.env = hermetic.build(dict(os.environ, ASF_HOME=cls.home, PYTHONPATH=ROOT,
+                                      GIT_AUTHOR_NAME='sample', GIT_AUTHOR_EMAIL='sample@example.com',
+                                      GIT_COMMITTER_NAME='sample', GIT_COMMITTER_EMAIL='sample@example.com',
+                                      GH_TOKEN='',
+                                      PATH=cls._path_with_offline_gh(os.path.join(cls.tmp, 'bin'))),
+                                 home=cls.tmp)
         cls.init = cls.asf('init', '--product', 'sample')
         cls.before = cls.asf('next', '--product', 'sample', '--json')
         cls.tick = cls.asf('tick', '--product', 'sample')

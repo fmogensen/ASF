@@ -9,6 +9,7 @@ from unittest import mock
 
 from asf.record import frontmatter
 from asf.record import check as check_mod
+from asf import hermetic
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FOLDERS = ['epics', 'features', 'stories', 'tasks', 'bugs', 'decisions', 'rules']
@@ -63,7 +64,7 @@ def write_item(root, id_, type_, title, **kw):
 
 
 def run(args, cwd):
-    env = dict(os.environ)
+    env = hermetic.build()
     env['PYTHONPATH'] = REPO_ROOT + os.pathsep + env.get('PYTHONPATH', '')
     return subprocess.run([sys.executable, '-m', 'asf.cli'] + args, cwd=cwd, env=env,
                            capture_output=True, text=True)

@@ -17,6 +17,8 @@ import os
 import re
 import subprocess
 
+from asf import hermetic
+
 DEFAULT_BINARY = 'claude'
 DEFAULT_PERMISSION_MODE = 'bypassPermissions'
 
@@ -78,18 +80,18 @@ def build_command(job, binary=DEFAULT_BINARY):
 
 
 def build_env(job, base=None):
-    """The job's environment: ``base`` (default ``os.environ``) + the account's isolated
-    home/config dir + the job's own variables (``BACKLOG_ID_RANGE``, ``ASF_JOB``, ...)."""
-    out = dict(os.environ if base is None else base)
+    """The job's environment: :func:`asf.hermetic.build` over ``base`` (default ``os.environ``)
+    — no caller identity inherited from the tick, no git-hook variable — plus the account's
+    isolated home/config dir and the job's own identity (``ASF_PRODUCT``, ``ASF_JOB``,
+    ``BACKLOG_ID_RANGE``, …). PYTHONPATH is left as the base has it: a session runs the
+    product's code, not this package."""
     acct = job.account
-    if acct is not None:
-        if getattr(acct, 'home', None):
-            out['HOME'] = os.path.expanduser(acct.home)
-        if getattr(acct, 'config_dir', None):
-            out['CLAUDE_CONFIG_DIR'] = os.path.expanduser(acct.config_dir)
-    out['ASF_PRODUCT'] = job.product
-    out['ASF_JOB'] = job.name
-    out.update(job.env)
+    home = getattr(acct, 'home', None) if acct is not None else None
+    identity = {'ASF_PRODUCT': job.product, 'ASF_JOB': job.name}
+    identity.update(job.env)
+    out = hermetic.build(base, home=home, identity=identity, pythonpath=False)
+    if acct is not None and getattr(acct, 'config_dir', None):
+        out['CLAUDE_CONFIG_DIR'] = os.path.expanduser(acct.config_dir)
     return out
 
 

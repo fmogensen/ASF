@@ -35,3 +35,19 @@ jobs:
           python3 -m unittest discover -s tests
       - name: the sample product, end to end (init, one tick, next, doctor)
         run: python3 -m unittest -v tests.test_sample_product
+      # F-0087 (B-0033, B-0038, B-0043, B-0047): the suite is hermetic. It runs once more under
+      # `env -i` with an operator-like home that names this checkout as the product `asf`,
+      # ASF_PRODUCT exported the way the tick exports it, and a host git config whose
+      # init.defaultBranch is not `main`. A test that reads the operator's home, the caller's
+      # identity or the host's git defaults goes red here, on a plain install.
+      - name: the suite is hermetic (env -i, an operator home, ASF_PRODUCT set, foreign default branch)
+        run: |
+          OPERATOR="$RUNNER_TEMP/operator"
+          mkdir -p "$OPERATOR/.ASF/products"
+          printf 'default_product: asf\nscheduler:\n  kind: none\n' > "$OPERATOR/.ASF/config.yaml"
+          printf 'product: asf\nrepo_dir: %s\nbacklog_dir: %s\nmain: main\n' "$PWD" "$OPERATOR/record" > "$OPERATOR/.ASF/products/asf.yaml"
+          HOME="$OPERATOR" git config --global user.name ci
+          HOME="$OPERATOR" git config --global user.email ci@localhost
+          HOME="$OPERATOR" git config --global init.defaultBranch master
+          env -i PATH="$PATH" HOME="$OPERATOR" ASF_HOME="$OPERATOR/.ASF" ASF_PRODUCT=asf \
+            python3 -m unittest discover -s tests

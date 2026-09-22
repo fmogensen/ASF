@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from asf import hermetic
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(HERE)
@@ -62,7 +63,7 @@ def write_item(root, id_, type_, title, parent=None, typed_lines=(), machine_lin
 
 
 def run(args, cwd):
-    env = dict(os.environ)
+    env = hermetic.build()
     env['PYTHONPATH'] = PROJECT_ROOT + os.pathsep + env.get('PYTHONPATH', '')
     return subprocess.run([sys.executable, '-m', 'asf.cli'] + args, cwd=cwd, env=env,
                           capture_output=True, text=True)

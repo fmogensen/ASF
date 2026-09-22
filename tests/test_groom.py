@@ -10,6 +10,7 @@ from asf.record import frontmatter
 from asf.record.core import canonicalize, load_items, today, tokenize
 from asf.groom import groom
 from asf.groom import inbox as inbox_mod
+from asf import hermetic
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
@@ -53,7 +54,7 @@ def write_item(root, id_, type_, title, parent=None, typed_lines=(), machine_lin
 
 
 def run(args, cwd):
-    env = dict(os.environ)
+    env = hermetic.build()
     env.pop('BACKLOG_ID_RANGE', None)  # a job's range must not leak into the fixture's own mints (B-0012)
     env['PYTHONPATH'] = REPO_ROOT + os.pathsep + env.get('PYTHONPATH', '')
     return subprocess.run([sys.executable, '-m', 'asf.cli'] + args, cwd=cwd, env=env,
