@@ -49,6 +49,7 @@ FULL_MANIFEST = (
     'wave · asf · asf tick --product sample --steps wave\n'
     'prs · asf · asf tick --product sample --steps prs\n'
     'batch · asf · asf tick --product sample --steps batch\n'
+    'daily · asf · asf tick --product sample --steps daily\n'
 )
 
 RECORD_ONLY_MANIFEST = (
@@ -137,10 +138,10 @@ class CutoverFixtureTest(unittest.TestCase):
         open(os.path.join(self.legacy_b, 'old-helper.sh'), 'w').close()
 
         self.write_config()
-        with open(os.path.join(self.asf_home, 'products', 'sample.yaml'), 'w') as f:
-            f.write('product: sample\nrepo_slug: acme/sample\n'
-                    f'repo_dir: {self.repo_dir}\nmain: main\n'
-                    f'backlog_dir: {self.backlog_dir}\n')
+        self.write_product_clocks(
+            '  record:\n    steps: [record]\n    every: 5m\n'
+            '  dispatch:\n    steps: [health, wave, prs, batch]\n    every: 10m\n'
+            '  daily:\n    steps: [daily]\n    at: "06:50"\n')
 
     # ---- fixture knobs ------------------------------------------------------------------------
 
@@ -163,6 +164,17 @@ class CutoverFixtureTest(unittest.TestCase):
                     f'  - {self.legacy_b}\n'
                     + ('legacy_steps:\n' + ''.join(f'  - {s}\n' for s in legacy_steps)
                        if legacy_steps else ''))
+
+    def write_product_clocks(self, clocks_yaml):
+        """Overwrite ``products/sample.yaml`` with a ``clocks:`` block (``batch`` is a legacy
+        step no ``asf`` implementation owns, so it must be declared ``off`` for
+        ``scheduler.clocks()`` to accept a clock that ticks it)."""
+        with open(os.path.join(self.asf_home, 'products', 'sample.yaml'), 'w') as f:
+            f.write('product: sample\nrepo_slug: acme/sample\n'
+                    f'repo_dir: {self.repo_dir}\nmain: main\n'
+                    f'backlog_dir: {self.backlog_dir}\n'
+                    'steps:\n  batch: off\n'
+                    'clocks:\n' + clocks_yaml)
 
     def set_manifest(self, text, rc):
         with open(os.path.join(self.stub_dir, 'manifest.txt'), 'w') as f:
@@ -310,13 +322,24 @@ class CutoverFixtureTest(unittest.TestCase):
         self.assertTrue(subject.startswith('tick: state'), subject)
         self.assertTrue(os.path.exists(self.marker_path()))
 
-    def test_apply_splits_the_clock_into_record_dispatch_and_daily(self):
+    def _manifest_rows(self):
+        with open(self.marker_path()) as f:
+            date = f.read().strip()
+        path = os.path.join(self.asf_home, 'state', 'sample', 'retired', date, 'manifest.tsv')
+        if not os.path.exists(path):
+            return []
+        with open(path) as f:
+            return [line.rstrip('\n').split('\t') for line in f if line.strip()]
+
+    def test_cutover_installs_the_declared_clocks(self):
         result = self.cutover(['sample', '--force', '--apply'])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        for label in ('asf.sample.record', 'asf.sample.health-wave-prs-batch',
-                      'asf.sample.daily'):
+        for label in ('asf.sample.record', 'asf.sample.dispatch', 'asf.sample.daily'):
             self.assertTrue(os.path.isfile(os.path.join(self.agents_dir(), f'{label}.plist')),
                             f'{label} not installed:\n{result.stdout}')
+        installs = [row for row in self._manifest_rows() if row[0] == 'scheduler_install']
+        self.assertEqual(sorted(row[3] for row in installs),
+                         sorted(['asf.sample.record', 'asf.sample.dispatch', 'asf.sample.daily']))
 
     def test_the_installed_job_is_runnable(self):
         """B-0014 (b): absolute interpreter, a working directory, PYTHONPATH and log paths."""
@@ -332,17 +355,29 @@ class CutoverFixtureTest(unittest.TestCase):
         self.assertIn('HOME', data['EnvironmentVariables'])
         self.assertTrue(data['StandardOutPath'].endswith('tick-sample-record.log'))
         self.assertTrue(data['StandardErrorPath'].endswith('tick-sample-record.log'))
-        self.assertEqual(data['StartInterval'], 600)
+        self.assertEqual(data['StartInterval'], 300)
 
-    def test_dispatch_is_not_installed_when_the_manifest_does_not_own_it(self):
+    def test_cutover_skips_an_unowned_clock(self):
         self.set_manifest(RECORD_ONLY_MANIFEST, 0)
         result = self.cutover(['sample', '--force', '--apply'])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('leaving the legacy dispatch job loaded', result.stdout)
+        self.assertIn('leaving the legacy job loaded', result.stdout)
         self.assertFalse(os.path.isfile(
-            os.path.join(self.agents_dir(), 'asf.sample.health-wave-prs-batch.plist')))
+            os.path.join(self.agents_dir(), 'asf.sample.dispatch.plist')))
         self.assertTrue(os.path.isfile(
             os.path.join(self.agents_dir(), 'asf.sample.record.plist')))
+
+    def test_cutover_without_clocks_stops_before_changing_anything(self):
+        with open(os.path.join(self.asf_home, 'products', 'sample.yaml'), 'w') as f:
+            f.write('product: sample\nrepo_slug: acme/sample\n'
+                    f'repo_dir: {self.repo_dir}\nmain: main\n'
+                    f'backlog_dir: {self.backlog_dir}\n')
+        result = self.cutover(['sample', '--force', '--apply'])
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('NEEDS OPERATOR', result.stdout + result.stderr)
+        self.assertFalse(os.path.exists(self.marker_path()))
+        self.assertFalse(os.path.isdir(self.agents_dir()))
+        self.assertTrue(os.path.isdir(self.legacy_a))
 
     # ---- dry-run ---------------------------------------------------------------------------
 
@@ -482,13 +517,13 @@ class CutoverFixtureTest(unittest.TestCase):
 
     def test_rollback_removes_the_jobs_cutover_installed(self):
         self.cutover(['sample', '--force', '--apply'])
-        for label in ('asf.sample.record', 'asf.sample.health-wave-prs-batch',
+        for label in ('asf.sample.record', 'asf.sample.dispatch',
                       'asf.sample.daily'):
             self.assertTrue(os.path.isfile(os.path.join(self.agents_dir(), f'{label}.plist')))
 
         result = self.rollback(['sample', '--apply'])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        for label in ('asf.sample.record', 'asf.sample.health-wave-prs-batch',
+        for label in ('asf.sample.record', 'asf.sample.dispatch',
                       'asf.sample.daily'):
             self.assertFalse(os.path.isfile(os.path.join(self.agents_dir(), f'{label}.plist')),
                              label)

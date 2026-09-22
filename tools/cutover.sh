@@ -163,13 +163,27 @@ if [ -f "$MARKER" ]; then
   exit 0
 fi
 
-DISPATCH_STEPS="health,wave,prs,batch"
 LAUNCHD_LABEL="$(cfg_get scheduler.launchd_label)"
-INTERVAL="$(cfg_get scheduler.interval_s)"
-[ -n "$INTERVAL" ] || INTERVAL=600
 JOB_TIMEOUT="$(cfg_get cutover.job_timeout_s)"
 [ -n "$JOB_TIMEOUT" ] || JOB_TIMEOUT=90
 BACKLOG_DIR="$(product_get backlog_dir)"
+
+# The declared clocks (products/<p>.yaml's `clocks:`), one row per clock: name, label, log,
+# comma-joined steps. A product with no clocks: block (or any other refused clock) stops here,
+# before gate 1 or gate 2 touches anything (D5).
+set +e
+CLOCKS_OUT="$(run_scheduler render --product "$PRODUCT" --json 2>&1)"
+CLOCKS_RC=$?
+set -e
+if [ "$CLOCKS_RC" -ne 0 ]; then
+  echo "$CLOCKS_OUT" >&2
+  exit 3
+fi
+CLOCKS_TSV="$(printf '%s' "$CLOCKS_OUT" | py -c '
+import json, sys
+for j in json.load(sys.stdin):
+    print("\t".join([j["clock"], j["label"], j["log"], ",".join(j.get("steps") or [])]))
+')"
 
 # ---- gate 1: is any legacy_paths dir still referenced by a loaded job? -------------------------
 
@@ -423,46 +437,41 @@ else
   fi
 fi
 
-DISPATCH_OWNED=0
-if manifest_owns "$DISPATCH_STEPS"; then DISPATCH_OWNED=1; fi
-
 INSTALLED_LABELS=""
-install_job() {  # steps, extra `asf scheduler install` args
-  local steps="$1"; shift
-  local label
-  label="$(run_scheduler render --product "$PRODUCT" --steps "$steps" --json 2>/dev/null \
-            | py -c 'import json,sys; print(json.load(sys.stdin)["label"])' 2>/dev/null || true)"
-  if [ -z "$label" ]; then
-    echo "  $steps: could not render a job definition" >&2
-    FAILED=1
-    return 1
-  fi
+RECORD_CLOCK=""
+RECORD_LABEL_RENDERED=""
+RECORD_LOG=""
+
+install_job() {  # clock, label
+  local clock="$1" label="$2"
   if [ "$APPLY" -eq 1 ]; then
-    run_scheduler install --product "$PRODUCT" --steps "$steps" "$@" | sed 's/^/  /'
+    run_scheduler install --product "$PRODUCT" --clock "$clock" | sed 's/^/  /'
     record_manifest scheduler_install "$HOME/Library/LaunchAgents/$label.plist" "-" "$label"
     INSTALLED_LABELS="$INSTALLED_LABELS $label"
-    echo "  $label: installed (steps $steps)"
+    echo "  $label: installed (clock $clock)"
   else
-    echo "  would install $label (steps $steps)"
+    echo "  would install $label (clock $clock)"
   fi
 }
 
-install_job record --interval "$INTERVAL"
-if [ "$DISPATCH_OWNED" -eq 1 ]; then
-  install_job "$DISPATCH_STEPS" --interval "$INTERVAL"
-else
-  echo "  dispatch ($DISPATCH_STEPS): the manifest does not own these steps — leaving the legacy dispatch job loaded"
-fi
-install_job daily
+while IFS=$'\t' read -r clock label log steps; do
+  [ -z "$clock" ] && continue
+  if manifest_owns "$steps"; then
+    install_job "$clock" "$label"
+  else
+    echo "  $clock ($steps): the manifest does not own these steps — leaving the legacy job loaded"
+  fi
+  if [ -z "$RECORD_CLOCK" ]; then
+    case ",$steps," in
+      *,record,*) RECORD_CLOCK="$clock"; RECORD_LABEL_RENDERED="$label"; RECORD_LOG="$log" ;;
+    esac
+  fi
+done <<< "$CLOCKS_TSV"
 
 # ---- gate 3: the installed job must actually complete once ------------------------------------
 
-RECORD_LABEL="$(run_scheduler render --product "$PRODUCT" --steps record --json 2>/dev/null \
-                 | py -c 'import json,sys; print(json.load(sys.stdin)["label"])' 2>/dev/null || true)"
-RECORD_LOG="$ASF_HOME/logs/tick-$PRODUCT-record.log"
-
 job_completed() {
-  run_scheduler status --product "$PRODUCT" --steps record --json 2>/dev/null | py -c '
+  run_scheduler status --product "$PRODUCT" --clock "$RECORD_CLOCK" --json 2>/dev/null | py -c '
 import json, sys
 try:
     info = json.load(sys.stdin)
@@ -486,6 +495,10 @@ record_advanced() {
 }
 
 if [ "$APPLY" -eq 1 ]; then
+  if [ -z "$RECORD_CLOCK" ]; then
+    rollback_and_exit "NEEDS OPERATOR: products/$PRODUCT.yaml has no clock that ticks record — add one (see docs/products.example.yaml)"
+  fi
+  RECORD_LABEL="$RECORD_LABEL_RENDERED"
   echo "== gate 3: waiting up to ${JOB_TIMEOUT}s for $RECORD_LABEL to complete a run"
   DEADLINE=$(( $(date +%s) + JOB_TIMEOUT ))
   GATE3_OK=0

@@ -13,16 +13,18 @@ the running interpreter and the installed package, and never written by hand:
   ``asf.__file__``.
 * ``PATH`` is the current ``PATH``'s absolute entries (a relative entry means something
   different under the scheduler than it does in a shell), ``HOME`` is the current home.
-* stdout and stderr go to ``<ASF_HOME>/logs/tick-<product>-<steps>.log``, so a job that fails
+* stdout and stderr go to ``<ASF_HOME>/logs/tick-<product>-<clock>.log``, so a job that fails
   leaves a trace the doctor can read back.
 
 The ``kind`` comes from ``config.yaml``'s ``scheduler.kind`` (default ``launchd``). ``launchd``
 is implemented end to end; ``cron`` renders the crontab line for an operator to install; any
 other kind renders a ``NEEDS OPERATOR`` marker rather than guessing.
 
-Steps name what a job ticks: ``render(product, ['record'], 600)`` is the record clock,
-``render(product, ['health', 'wave', 'prs', 'batch'], 600)`` the dispatch clock. The step
-``daily`` is the one special name — it renders ``asf tick --daily`` rather than ``--steps``.
+A clock is a job: ``products/<product>.yaml``'s ``clocks:`` block names each one, the steps it
+ticks (or ``shadow: true``) and exactly one of ``every: <duration>`` or ``at: "HH:MM"``. Each
+clock renders one job, labelled ``<label_prefix>.<product>.<clock-name>`` and logging to
+``<ASF_HOME>/logs/tick-<product>-<clock-name>.log``. The step ``daily`` is the one special
+name — a clock whose only step is ``daily`` renders ``asf tick --daily`` rather than ``--steps``.
 """
 import fnmatch
 import os
@@ -30,16 +32,23 @@ import plistlib
 import re
 import subprocess
 import sys
+from collections import namedtuple
 
 from asf import env
 
 # this repo's own cutover script (relative to the ASF checkout) — named once, here, not per mention
 CUTOVER_TOOL = os.path.join('tools', 'cutover.sh')
 
-DEFAULT_INTERVAL_S = 600
 DEFAULT_LABEL_PREFIX = 'asf'
 DAILY_STEP = 'daily'
-DAILY_CALENDAR = {'Hour': 6, 'Minute': 50}
+
+CLOCK_NAME_RE = re.compile(r'^[a-z0-9][a-z0-9-]*$')
+AT_RE = re.compile(r'^([01]?\d|2[0-3]):([0-5]\d)$')
+_CLOCK_KEYS = {'steps', 'shadow', 'every', 'at'}
+MIN_EVERY_S = 60
+_CRON_HOUR_DIVISORS = (1, 2, 3, 4, 6, 8, 12)
+
+Clock = namedtuple('Clock', 'name steps shadow interval_s calendar')
 
 
 class SchedulerError(Exception):
@@ -76,21 +85,12 @@ def legacy_labels(cfg=None):
     return [labels] if isinstance(labels, str) else list(labels)
 
 
-def interval_s(cfg=None):
-    cfg = env.load_config() if cfg is None else cfg
-    value = _sched(cfg).get('interval_s')
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return DEFAULT_INTERVAL_S
-
-
 def steps_slug(steps):
     return '-'.join(steps)
 
 
-def label_for(product_name, steps, cfg=None):
-    return f'{label_prefix(cfg)}.{product_name}.{steps_slug(steps)}'
+def label_for(product_name, clock_name, cfg=None):
+    return f'{label_prefix(cfg)}.{product_name}.{clock_name}'
 
 
 def launch_agents_dir():
@@ -101,8 +101,8 @@ def plist_path(label):
     return os.path.join(launch_agents_dir(), f'{label}.plist')
 
 
-def log_path(product_name, steps):
-    return os.path.join(env.ASF_HOME, 'logs', f'tick-{product_name}-{steps_slug(steps)}.log')
+def log_path(product_name, clock_name):
+    return os.path.join(env.ASF_HOME, 'logs', f'tick-{product_name}-{clock_name}.log')
 
 
 def _absolute_path_entries():
@@ -119,45 +119,164 @@ def _absolute_path_entries():
     return os.pathsep.join(out)
 
 
-def tick_argv(product_name, steps):
+def tick_argv(product_name, clock):
     """``asf tick`` as the scheduler will run it — absolute interpreter, module form."""
     argv = [sys.executable, '-m', 'asf.cli', 'tick', '--product', product_name]
-    if list(steps) == [DAILY_STEP]:
+    if clock.shadow:
+        argv.append('--shadow')
+    elif list(clock.steps) == [DAILY_STEP]:
         argv.append('--daily')
     else:
-        argv += ['--steps', ','.join(steps)]
+        argv += ['--steps', ','.join(clock.steps)]
     return argv
+
+
+# ---- clocks -------------------------------------------------------------------
+
+
+def _format_duration(seconds):
+    """Seconds back into the largest whole unit a clock's ``every:`` could have been written in."""
+    seconds = int(seconds)
+    for unit, size in (('d', 86400), ('h', 3600), ('m', 60)):
+        if seconds and seconds % size == 0:
+            return f'{seconds // size}{unit}'
+    return f'{seconds}s'
+
+
+def _parse_at(value):
+    m = AT_RE.match(str(value).strip())
+    return {'Hour': int(m.group(1)), 'Minute': int(m.group(2))}
+
+
+def _clock_refusal(name, entry, product, tick_steps, stale):
+    """The reason ``name: entry`` is not a usable clock, or ``None`` when it is fine."""
+    if not CLOCK_NAME_RE.match(name):
+        return 'name must match [a-z0-9][a-z0-9-]*'
+    if not isinstance(entry, dict):
+        return f'must be a map, not {entry!r}'
+    unknown = sorted(set(entry) - _CLOCK_KEYS)
+    if unknown:
+        return f'unknown key {unknown[0]!r} (steps, shadow, every, at)'
+
+    shadow = bool(entry.get('shadow'))
+    raw_steps = entry.get('steps')
+    if shadow and raw_steps is not None:
+        return 'shadow and steps are mutually exclusive'
+    if not shadow:
+        step_list = raw_steps if isinstance(raw_steps, list) else ([raw_steps] if raw_steps else [])
+        if not step_list:
+            return 'steps is missing or empty'
+        for step in step_list:
+            if step not in tick_steps.STEPS:
+                return f"step {step} is not a known step ({', '.join(tick_steps.STEPS)})"
+        try:
+            tick_steps.check_owned(tick_steps.resolve(product, step_list), product)
+        except tick_steps.StepError as e:
+            return str(e)
+
+    every, at = entry.get('every'), entry.get('at')
+    if (every is None) == (at is None):
+        return 'exactly one of every or at is required'
+    if every is not None:
+        try:
+            secs = stale.limit_seconds(every)
+        except ValueError:
+            return f'every {every!r} is not a valid duration (<n><s|m|h|d>)'
+        if secs < MIN_EVERY_S:
+            return f'every {every} is under the {MIN_EVERY_S}s minimum'
+    else:
+        if not AT_RE.match(str(at).strip()):
+            return f'at {at!r} is not HH:MM, 24h'
+    return None
+
+
+def _build_clock(name, entry, stale):
+    shadow = bool(entry.get('shadow'))
+    raw_steps = entry.get('steps')
+    steps_val = [] if shadow else (raw_steps if isinstance(raw_steps, list) else [raw_steps])
+    every, at = entry.get('every'), entry.get('at')
+    if every is not None:
+        return Clock(name, steps_val, shadow, stale.limit_seconds(every), None)
+    return Clock(name, steps_val, shadow, None, _parse_at(at))
+
+
+def clocks(product):
+    """``[Clock, ...]`` in file order, from ``products/<p>.yaml``'s ``clocks:`` block.
+
+    Raises :class:`SchedulerError` naming every refused clock (spec D8, one ``clock <name>:
+    <why>`` line each) — nothing is returned for a file with even one bad entry. A missing or
+    empty ``clocks:`` is the D5 ``NEEDS OPERATOR`` refusal.
+    """
+    from asf.tick import stale, steps as tick_steps
+
+    name = getattr(product, 'name', product)
+    declared = product._get('clocks') if hasattr(product, '_get') else None
+    if not declared:
+        raise SchedulerError(
+            f'NEEDS OPERATOR: products/{name}.yaml declares no clocks — add a clocks: block '
+            f'(see docs/products.example.yaml)')
+
+    errors, built = [], []
+    for clock_name, entry in declared.items():
+        why = _clock_refusal(clock_name, entry, product, tick_steps, stale)
+        if why:
+            errors.append(f'clock {clock_name}: {why}')
+        else:
+            built.append(_build_clock(clock_name, entry, stale))
+
+    if errors:
+        raise SchedulerError('\n'.join(errors))
+    return built
 
 
 # ---- render -----------------------------------------------------------------
 
 
-def render(product, steps, interval=None, cfg=None, calendar=None):
+def _cron_schedule(clock):
+    """The crontab line for ``clock``, or ``None`` when it can't be expressed (D9)."""
+    if clock.calendar:
+        return f"{clock.calendar['Minute']} {clock.calendar['Hour']} * * *"
+    seconds = clock.interval_s
+    if seconds % 60 == 0:
+        minutes = seconds // 60
+        if 1 <= minutes < 60:
+            return f'*/{minutes} * * * *'
+        if minutes % 60 == 0:
+            hours = minutes // 60
+            if hours in _CRON_HOUR_DIVISORS:
+                return f'0 */{hours} * * *'
+            if hours == 24:
+                return '0 0 * * *'
+    return None
+
+
+def _clock_when(clock):
+    if clock.calendar:
+        return f"at {clock.calendar['Hour']:02d}:{clock.calendar['Minute']:02d}"
+    return f'every {_format_duration(clock.interval_s)}'
+
+
+def render(product, clock, cfg=None):
     """The job definition for one clock: ``{kind, label, path, plist|line, log, argv}``.
 
-    ``product`` is a :class:`asf.env.Product` or a bare product name. ``steps`` is the step
-    list this clock ticks; ``interval`` its period in seconds. Pass ``calendar``
-    (``{'Hour': 6, 'Minute': 50}``) for a wall-clock job instead of an interval — the ``daily``
-    step defaults to :data:`DAILY_CALENDAR`.
+    ``product`` is a :class:`asf.env.Product` or a bare product name. ``clock`` is one
+    :class:`Clock` from :func:`clocks`.
     """
     cfg = env.load_config() if cfg is None else cfg
     name = getattr(product, 'name', product)
-    steps = list(steps)
-    if not steps:
-        raise SchedulerError('render: no steps given')
-    if interval is None:
-        interval = interval_s(cfg)
-    if calendar is None and steps == [DAILY_STEP]:
-        calendar = dict(DAILY_CALENDAR)
 
-    label = label_for(name, steps, cfg)
-    argv = tick_argv(name, steps)
-    log = log_path(name, steps)
+    label = label_for(name, clock.name, cfg)
+    argv = tick_argv(name, clock)
+    log = log_path(name, clock.name)
     root = repo_root()
     job_kind = kind(cfg)
 
     job = {'kind': job_kind, 'label': label, 'log': log, 'argv': argv, 'product': name,
-           'steps': steps}
+           'clock': clock.name, 'steps': clock.steps}
+    if clock.interval_s is not None:
+        job['every_s'] = clock.interval_s
+    else:
+        job['at'] = clock.calendar
 
     if job_kind == 'launchd':
         plist = {
@@ -174,20 +293,22 @@ def render(product, steps, interval=None, cfg=None, calendar=None):
             'StandardErrorPath': log,
             'RunAtLoad': True,
         }
-        if calendar:
-            plist['StartCalendarInterval'] = dict(calendar)
+        if clock.calendar:
+            plist['StartCalendarInterval'] = dict(clock.calendar)
         else:
-            plist['StartInterval'] = int(interval)
+            plist['StartInterval'] = int(clock.interval_s)
         job['plist'] = plist
         job['path'] = plist_path(label)
         return job
 
     if job_kind == 'cron':
-        if calendar:
-            schedule = f"{calendar.get('Minute', 0)} {calendar.get('Hour', 0)} * * *"
-        else:
-            minutes = max(1, int(interval) // 60)
-            schedule = f'*/{minutes} * * * *'
+        schedule = _cron_schedule(clock)
+        if schedule is None:
+            job['needs_operator'] = (
+                f"NEEDS OPERATOR: clock {clock.name}: {_clock_when(clock)} cannot be expressed "
+                f"as a cron schedule — install a job running `{' '.join(argv)}` "
+                f"{_clock_when(clock)} and log it to {log}")
+            return job
         envs = f"PATH={_absolute_path_entries()} PYTHONPATH={root} ASF_HOME={env.ASF_HOME}"
         command = ' '.join(argv)
         job['line'] = f"{schedule} cd {root} && {envs} {command} >> {log} 2>&1"
@@ -195,7 +316,7 @@ def render(product, steps, interval=None, cfg=None, calendar=None):
 
     job['needs_operator'] = (
         f"NEEDS OPERATOR: scheduler kind {job_kind!r} has no adapter — install a job running "
-        f"`{' '.join(argv)}` every {int(interval)}s and log it to {log}"
+        f"`{' '.join(argv)}` {_clock_when(clock)} and log it to {log}"
     )
     return job
 
@@ -430,11 +551,21 @@ def jobs_using(directory, jobs):
     return hits
 
 
+def retire_candidates(product_name, declared_labels, cfg=None):
+    """The loaded labels under this product's prefix that are not among ``declared_labels``.
+
+    The trailing dot in ``<prefix>.<product>.`` keeps another product's jobs
+    (``<prefix>.other.*``) and a ``legacy_labels`` match out — only this product's own jobs are
+    ever retired by a whole-file install (D4).
+    """
+    cfg = env.load_config() if cfg is None else cfg
+    prefix = f'{label_prefix(cfg)}.{product_name}.'
+    declared = set(declared_labels)
+    return [job['label'] for job in loaded_jobs(cfg=cfg)
+            if job['label'].startswith(prefix) and job['label'] not in declared]
+
+
 # ---- the CLI ----------------------------------------------------------------
-
-
-def _steps_arg(value):
-    return [s.strip() for s in (value or '').split(',') if s.strip()]
 
 
 def register(sub):
@@ -442,13 +573,18 @@ def register(sub):
     p = sub.add_parser('scheduler', help='the factory clock: render, install and read back jobs')
     p.add_argument('scheduler_command', choices=['render', 'install', 'status', 'list'])
     p.add_argument('--product')
-    p.add_argument('--steps', default='record',
-                   help="comma-separated tick steps this job runs (default 'record'; "
-                        "'daily' renders `asf tick --daily`)")
-    p.add_argument('--interval', type=int, help='seconds between runs (default scheduler.interval_s)')
-    p.add_argument('--label', help='status: the label to read (default: the one --steps renders)')
+    p.add_argument('--clock', help='the clock name from products/<p>.yaml (default: every clock)')
+    p.add_argument('--label', help='status: read this label directly instead of a declared clock')
     p.add_argument('--json', action='store_true', help='machine-readable output')
     return p
+
+
+def _status_line(info):
+    if not info.get('loaded'):
+        return f"{info['label']}  not loaded"
+    exit_text = 'never exited' if info.get('never_exited') else info.get('last_exit')
+    return (f"{info['label']}  state={info.get('state')}  runs={info.get('runs')}  "
+            f"last-exit={exit_text}  program={info.get('program')}")
 
 
 def cmd_scheduler(args, root=None):
@@ -471,40 +607,76 @@ def cmd_scheduler(args, root=None):
         return 0
 
     product_name = args.product or env.default_product_name()
-    steps = _steps_arg(args.steps)
-    if not steps:
-        print('scheduler: --steps is empty', file=sys.stderr)
-        return 2
 
-    if command == 'status':
-        label = args.label or label_for(product_name, steps, cfg)
-        info = status(label)
+    if command == 'status' and args.label:
+        info = status(args.label)
+        info['label'] = args.label
         if args.json:
             print(_json.dumps(info, indent=2, sort_keys=True, default=str))
             return 0
-        if not info.get('loaded'):
-            print(f'{label}  not loaded')
-            return 1
-        exit_text = 'never exited' if info.get('never_exited') else info.get('last_exit')
-        print(f"{label}  state={info.get('state')}  runs={info.get('runs')}  "
-              f"last-exit={exit_text}  program={info.get('program')}")
-        return 0
+        print(_status_line(info))
+        return 0 if info.get('loaded') else 1
 
-    job = render(env.load_product(product_name), steps, args.interval, cfg=cfg)
+    product = env.load_product(product_name)
+    try:
+        clock_list = clocks(product)
+    except SchedulerError as e:
+        print(str(e))
+        return 2
+
+    if args.clock:
+        selected = [c for c in clock_list if c.name == args.clock]
+        if not selected:
+            names = ', '.join(c.name for c in clock_list)
+            print(f'scheduler: no clock {args.clock} in products/{product_name}.yaml '
+                  f'(clocks: {names})')
+            return 2
+    else:
+        selected = clock_list
+
     if command == 'render':
+        jobs = [render(product, c, cfg=cfg) for c in selected]
         if args.json:
-            print(_json.dumps(job, indent=2, sort_keys=True, default=str))
-        elif job['kind'] == 'launchd':
-            print(render_plist(job), end='')
-        elif job['kind'] == 'cron':
-            print(job['line'])
-        else:
-            print(job['needs_operator'])
+            print(_json.dumps(jobs, indent=2, sort_keys=True, default=str))
+            return 0
+        for job in jobs:
+            print(f"# {job['label']}")
+            if job['kind'] == 'launchd':
+                print(render_plist(job), end='')
+            elif job['kind'] == 'cron':
+                print(job['line'])
+            else:
+                print(job['needs_operator'])
         return 0
 
-    for line in install(job):
+    if command == 'status':
+        infos = []
+        for c in selected:
+            info = status(label_for(product_name, c.name, cfg))
+            info['clock'] = c.name
+            infos.append(info)
+        if args.json:
+            print(_json.dumps(infos[0] if args.clock else infos, indent=2, sort_keys=True,
+                              default=str))
+        else:
+            for info in infos:
+                print(_status_line(info))
+        return 1 if any(not i.get('loaded') for i in infos) else 0
+
+    # install
+    job_kind = kind(cfg)
+    lines = []
+    for c in selected:
+        lines.extend(install(render(product, c, cfg=cfg)))
+    if not args.clock and job_kind == 'launchd':
+        declared_labels = [label_for(product_name, c.name, cfg) for c in clock_list]
+        for label in retire_candidates(product_name, declared_labels, cfg):
+            lines.extend(uninstall(label))
+            lines.append(f'scheduler: retired {label} (not a clock in '
+                         f'products/{product_name}.yaml)')
+    for line in lines:
         print(line)
-    return 0 if job['kind'] == 'launchd' else 3
+    return 0 if job_kind == 'launchd' else 3
 
 
 def main(argv=None):

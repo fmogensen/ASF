@@ -16,6 +16,7 @@ import tempfile
 import unittest
 
 from asf import env, scheduler
+from asf.scheduler import Clock
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures')
 
@@ -159,10 +160,21 @@ class SchedulerTestCase(unittest.TestCase):
             f.write('schema_version: 1\ndefault_product: sample\n'
                     'scheduler:\n  kind: launchd\n  label_prefix: asf\n' + extra)
 
+    def write_product(self, clocks_yaml, steps_yaml=''):
+        """Overwrite ``products/sample.yaml`` with a ``clocks:`` block (and any ``steps:``)."""
+        with open(os.path.join(self.asf_home, 'products', 'sample.yaml'), 'w') as f:
+            f.write('product: sample\nrepo_slug: acme/sample\n'
+                    f'repo_dir: {self.repo_dir}\nmain: main\nbacklog_dir: {self.backlog_dir}\n'
+                    + steps_yaml + 'clocks:\n' + clocks_yaml)
+
 
 class RenderTest(SchedulerTestCase):
+    RECORD = Clock('record', ['record'], False, 600, None)
+    DISPATCH = Clock('dispatch', ['health', 'wave', 'prs', 'batch'], False, 300, None)
+    DAILY = Clock('daily', ['daily'], False, None, {'Hour': 6, 'Minute': 50})
+
     def test_launchd_golden(self):
-        job = scheduler.render('sample', ['record'], 600)
+        job = scheduler.render('sample', self.RECORD)
         root = scheduler.repo_root()
         self.assertEqual(job['kind'], 'launchd')
         self.assertEqual(job['label'], 'asf.sample.record')
@@ -190,7 +202,7 @@ class RenderTest(SchedulerTestCase):
 
     def test_the_interpreter_is_absolute_and_the_package_importable(self):
         """B-0014 (b): a bare `python3` with no PYTHONPATH is a job that cannot run."""
-        job = scheduler.render('sample', ['record'], 600)
+        job = scheduler.render('sample', self.RECORD)
         argv = job['plist']['ProgramArguments']
         self.assertTrue(os.path.isabs(argv[0]), argv[0])
         self.assertNotEqual(argv[0], 'python3')
@@ -200,40 +212,37 @@ class RenderTest(SchedulerTestCase):
 
     def test_path_keeps_only_absolute_entries(self):
         os.environ['PATH'] = os.pathsep.join([self.bindir, '.', '', 'relative/bin', '/usr/bin'])
-        job = scheduler.render('sample', ['record'], 600)
+        job = scheduler.render('sample', self.RECORD)
         self.assertEqual(job['plist']['EnvironmentVariables']['PATH'],
                          os.pathsep.join([self.bindir, '/usr/bin']))
 
     def test_multi_step_label_and_log(self):
-        job = scheduler.render('sample', ['health', 'wave', 'prs', 'batch'], 300)
-        self.assertEqual(job['label'], 'asf.sample.health-wave-prs-batch')
+        job = scheduler.render('sample', self.DISPATCH)
+        self.assertEqual(job['label'], 'asf.sample.dispatch')
         self.assertEqual(job['plist']['ProgramArguments'][-2:],
                          ['--steps', 'health,wave,prs,batch'])
-        self.assertTrue(job['log'].endswith('tick-sample-health-wave-prs-batch.log'))
+        self.assertTrue(job['log'].endswith('tick-sample-dispatch.log'))
         self.assertEqual(job['plist']['StartInterval'], 300)
 
     def test_daily_is_a_calendar_job(self):
-        job = scheduler.render('sample', ['daily'])
+        job = scheduler.render('sample', self.DAILY)
         self.assertEqual(job['plist']['StartCalendarInterval'], {'Hour': 6, 'Minute': 50})
         self.assertNotIn('StartInterval', job['plist'])
         self.assertEqual(job['plist']['ProgramArguments'][-1], '--daily')
 
     def test_label_prefix_comes_from_config(self):
-        self.write_config()
-        with open(os.path.join(self.asf_home, 'config.yaml'), 'a') as f:
-            f.write('')
         cfg = {'scheduler': {'kind': 'launchd', 'label_prefix': 'factory'}}
-        job = scheduler.render('sample', ['record'], 600, cfg=cfg)
+        job = scheduler.render('sample', self.RECORD, cfg=cfg)
         self.assertEqual(job['label'], 'factory.sample.record')
 
     def test_plist_xml_round_trips(self):
-        job = scheduler.render('sample', ['record'], 600)
+        job = scheduler.render('sample', self.RECORD)
         parsed = plistlib.loads(scheduler.render_plist(job).encode('utf-8'))
         self.assertEqual(parsed, job['plist'])
 
     def test_cron_renders_a_line(self):
         cfg = {'scheduler': {'kind': 'cron'}}
-        job = scheduler.render('sample', ['record'], 600, cfg=cfg)
+        job = scheduler.render('sample', self.RECORD, cfg=cfg)
         self.assertEqual(job['kind'], 'cron')
         self.assertTrue(job['line'].startswith('*/10 * * * * cd '))
         self.assertIn(sys.executable, job['line'])
@@ -241,19 +250,17 @@ class RenderTest(SchedulerTestCase):
 
     def test_unknown_kind_needs_an_operator(self):
         cfg = {'scheduler': {'kind': 'systemd'}}
-        job = scheduler.render('sample', ['record'], 600, cfg=cfg)
+        job = scheduler.render('sample', self.RECORD, cfg=cfg)
         self.assertTrue(job['needs_operator'].startswith('NEEDS OPERATOR:'))
         self.assertIn('systemd', job['needs_operator'])
         self.assertEqual(scheduler.install(job), [job['needs_operator']])
 
-    def test_no_steps_refuses(self):
-        with self.assertRaises(scheduler.SchedulerError):
-            scheduler.render('sample', [])
-
 
 class InstallTest(SchedulerTestCase):
+    RECORD = Clock('record', ['record'], False, 600, None)
+
     def test_install_writes_the_plist_and_boots_out_before_bootstrap(self):
-        job = scheduler.render('sample', ['record'], 600)
+        job = scheduler.render('sample', self.RECORD)
         lines = scheduler.install(job)
         self.assertTrue(os.path.isfile(job['path']))
         with open(job['path'], 'rb') as f:
@@ -268,17 +275,17 @@ class InstallTest(SchedulerTestCase):
 
     def test_install_survives_a_bootout_that_fails(self):
         """Nothing holds the label on a first install — bootout failing there is not an error."""
-        job = scheduler.render('sample', ['record'], 600)
+        job = scheduler.render('sample', self.RECORD)
         lines = scheduler.install(job)
         self.assertNotIn('failed', ' '.join(lines))
 
     def test_install_creates_the_log_directory(self):
-        job = scheduler.render('sample', ['record'], 600)
+        job = scheduler.render('sample', self.RECORD)
         scheduler.install(job)
         self.assertTrue(os.path.isdir(os.path.join(self.asf_home, 'logs')))
 
     def test_uninstall_boots_out_and_removes_the_plist(self):
-        job = scheduler.render('sample', ['record'], 600)
+        job = scheduler.render('sample', self.RECORD)
         scheduler.install(job)
         fake_print(self.statedir, 'asf.sample.record', read_fixture('launchctl-print.txt'))
         lines = scheduler.uninstall('asf.sample.record')
@@ -287,7 +294,7 @@ class InstallTest(SchedulerTestCase):
 
     def test_cron_install_only_prints(self):
         cfg = {'scheduler': {'kind': 'cron'}}
-        job = scheduler.render('sample', ['record'], 600, cfg=cfg)
+        job = scheduler.render('sample', self.RECORD, cfg=cfg)
         lines = scheduler.install(job)
         self.assertTrue(any(l.startswith('NEEDS OPERATOR:') for l in lines))
         self.assertEqual(stub_argv(self.statedir), [])
@@ -394,9 +401,11 @@ class CliTest(SchedulerTestCase):
                               cwd=scheduler.repo_root(), timeout=60)
 
     def test_render_prints_a_plist(self):
-        result = self._run(['render', '--product', 'sample', '--steps', 'record'])
+        self.write_product('  record:\n    steps: [record]\n    every: 5m\n')
+        result = self._run(['render', '--product', 'sample', '--clock', 'record'])
         self.assertEqual(result.returncode, 0, result.stderr)
-        parsed = plistlib.loads(result.stdout.encode('utf-8'))
+        self.assertTrue(result.stdout.startswith('# asf.sample.record\n'))
+        parsed = plistlib.loads(result.stdout.split('\n', 1)[1].encode('utf-8'))
         self.assertEqual(parsed['Label'], 'asf.sample.record')
 
     def test_list_json_is_machine_readable(self):
@@ -408,8 +417,9 @@ class CliTest(SchedulerTestCase):
         self.assertEqual([j['label'] for j in json.loads(result.stdout)], ['old.dispatch'])
 
     def test_status_of_a_loaded_job(self):
+        self.write_product('  record:\n    steps: [record]\n    every: 5m\n')
         fake_print(self.statedir, 'asf.sample.record', read_fixture('launchctl-print.txt'))
-        result = self._run(['status', '--product', 'sample', '--steps', 'record'])
+        result = self._run(['status', '--product', 'sample', '--clock', 'record'])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('runs=7', result.stdout)
         self.assertIn('last-exit=0', result.stdout)

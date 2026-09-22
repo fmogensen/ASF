@@ -223,7 +223,7 @@ PRODUCT_FIELDS = {
     'product': _STR, 'repo_slug': _STR, 'repo_dir': _STR, 'main': _STR, 'backlog_dir': _STR,
     'app_host': _STR, 'conventions': _MAP, 'ci': None, 'deploy_sha': None,
     'customer_paths': _LIST, 'stage_limits': _MAP, 'size_classes': _MAP, 'approvals': _MAP,
-    'steps': _MAP, 'job_grants': _LIST, 'groom': _MAP, 'capacity': _MAP,
+    'steps': _MAP, 'job_grants': _LIST, 'groom': _MAP, 'capacity': _MAP, 'clocks': _MAP,
 }
 # `ci:` is a map (or the bare word `none`, a product without CI); these are its keys.
 CI_FIELDS = {
