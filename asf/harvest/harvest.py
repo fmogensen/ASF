@@ -44,6 +44,7 @@ import tempfile
 
 from asf import env
 from asf.conventions import Conventions
+from asf.feeder.rows import CORRECTION_ROUNDS
 from asf.workers.health import pid_alive
 from asf.workers.pool import now_iso
 
@@ -651,12 +652,26 @@ def product_gate(tmp, conv, asf_repo):
 
 def hold_with_correction(state_dir, branch, record, kind, text, out):
     """Hold ``branch`` and hand it back to its session: the failing output goes on the session's
-    record as ``correction`` and the rounds counter (over every session of the item) goes up."""
+    record as ``correction`` and the rounds counter (over every session of the item) goes up —
+    until it reaches the cap the feeder switches an ADJUDICATE row on at (``CORRECTION_ROUNDS``,
+    see ``asf.feeder.rows``). From there the round no longer climbs (B-0048: it used to climb
+    past the cap forever, one more ADJUDICATE row each time) — a held branch at the cap is the
+    adjudicate row's own attempt, and a second hold there (it cannot land either) flags the item
+    for an operator instead of spawning yet another one."""
     item = record.get('item')
-    prev = max([r.get('rounds') or 0 for r in read_sessions(state_dir).values()
-                if item and r.get('item') == item] + [record.get('rounds') or 0])
+    job = record.get('job') or branch
+    history = [r for r in read_sessions(state_dir).values() if item and r.get('item') == item]
+    prev = max([r.get('rounds') or 0 for r in history] + [record.get('rounds') or 0])
+    if prev >= CORRECTION_ROUNDS:
+        at_cap_before = any((r.get('correction') or {}).get('at_cap') for r in history)
+        fields = {'correction': {'kind': kind, 'text': text, 'at': now_iso(), 'at_cap': True}}
+        if at_cap_before:
+            fields['operator_flagged'] = 1
+        mark_session(state_dir, job, **fields)
+        out(f'held {branch}: {text} — adjudicate pending')
+        return 'held'
     rounds = prev + 1
-    mark_session(state_dir, record.get('job') or branch, rounds=rounds,
+    mark_session(state_dir, job, rounds=rounds,
                  correction={'kind': kind, 'text': text, 'at': now_iso()})
     out(f'held {branch}: {text} — back to its session (round {rounds})')
     return 'held'

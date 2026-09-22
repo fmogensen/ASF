@@ -640,6 +640,34 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertTrue(lines[0].endswith('(round 2)'), lines)
         self.assertEqual(self.record('fix/B-0001')['rounds'], 2)
 
+    def test_b0048_rounds_cap_at_the_adjudicate_switch_then_flags_the_operator(self):
+        """Round 3 is where the feeder switches this item to an ADJUDICATE row instead of
+        another CORRECT one (``feeder.rows.CORRECTION_ROUNDS``) — from there the round must not
+        keep climbing (B-0048: it climbed past the cap forever). A first hold at the cap is the
+        adjudicate row's own attempt failing; only a second one — the adjudicate row cannot land
+        either — flags the item for an operator."""
+        self.push_lane('fix/B-0001', [('fix(B-0001): breaks the gate',
+                                       {'checks/test_fx.py': RED_TEST})])
+        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
+        product = self.product()
+        for expected_round in (1, 2, 3):
+            _results, lines = self.harvest(product)
+            self.assertTrue(lines[0].endswith(f'(round {expected_round})'), lines)
+            self.assertEqual(self.record('fix/B-0001')['rounds'], expected_round)
+
+        # capped: the round no longer climbs, and the message names the adjudicate row instead
+        _results, lines = self.harvest(product)
+        self.assertTrue(lines[0].startswith('held fix/B-0001: FAIL: test_red_gate'), lines)
+        self.assertTrue(lines[0].endswith(' — adjudicate pending'), lines)
+        self.assertEqual(self.record('fix/B-0001')['rounds'], 3)
+        self.assertFalse(self.record('fix/B-0001').get('operator_flagged'))
+
+        # a second hold at the cap: the adjudicate row's own attempt failed too
+        _results, lines = self.harvest(product)
+        self.assertTrue(lines[0].endswith(' — adjudicate pending'), lines)
+        self.assertEqual(self.record('fix/B-0001')['rounds'], 3)
+        self.assertEqual(self.record('fix/B-0001').get('operator_flagged'), 1)
+
     def test_pull_request_landing_never_pushes_main(self):
         self.push_lane('fix/B-0001', [('fix(B-0001): the change', {'a.txt': 'a\n'})])
         self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')

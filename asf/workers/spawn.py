@@ -3,8 +3,9 @@
 ``spawn(product, row, account, brief_text)``:
 
 1. a worktree ``~/.ASF/state/<product>/worktrees/<job>`` on a new branch (the row's, else
-   ``<branch prefix for the kind>/<job>``) off ``origin/<main>`` of ``Product.repo_dir`` — a
-   ``correct`` row instead reuses its held branch from origin, rebased onto ``origin/<main>``;
+   ``<branch prefix for the kind>/<job>``) off ``origin/<main>`` of ``Product.repo_dir`` — a row
+   of any kind whose branch already exists on origin (a held branch sent back for another round,
+   ``correct`` or ``adjudicate`` alike) instead reuses it, rebased onto ``origin/<main>``;
 2. an id range reserved for the job in ``~/.ASF/state/<product>/id-ranges.tsv`` and handed to
    the session as ``BACKLOG_ID_RANGE`` (so parallel writers never mint the same id — see
    ``asf.record.ids``);
@@ -124,10 +125,18 @@ def _holding_worktree(repo, branch):
     return None
 
 
-def make_worktree(product, job, branch, existing=False):
-    """``existing``: the branch is already on origin (a held branch sent back for correction):
-    the worktree is added on it, then rebased onto ``origin/<main>`` — a conflict is left in
-    place for the session to resolve."""
+def _branch_exists_on_origin(repo, branch):
+    """The check a held branch is reused on: not the row's kind (B-0048 — an ADJUDICATE row's
+    kind is ``adjudicate``, not ``correct``, so keying on kind alone missed it and spawned it
+    fresh off main, silently losing the branch's own history) but whether ``branch`` is already
+    a ref on origin."""
+    return bool(_git(['ls-remote', '--heads', 'origin', branch], repo).strip())
+
+
+def make_worktree(product, job, branch):
+    """A branch already on origin — any row kind, a held branch sent back for another round —
+    is reused: the worktree is added on it, then rebased onto ``origin/<main>`` — a conflict is
+    left in place for the session to resolve. Otherwise a fresh branch off ``origin/<main>``."""
     repo = product.repo_dir
     if not repo or not os.path.isdir(repo):
         raise SpawnError(f'product repo_dir missing: {repo!r}')
@@ -135,7 +144,7 @@ def make_worktree(product, job, branch, existing=False):
     if os.path.exists(path):
         raise SpawnError(f'worktree already exists: {path}')
     _git(['fetch', '-q', 'origin', product.main], repo)
-    if existing:
+    if _branch_exists_on_origin(repo, branch):
         _git(['fetch', '-q', 'origin', branch], repo)
         held = _holding_worktree(repo, branch)
         if held:
@@ -201,7 +210,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
     runtime = runtime or runtime_mod.from_config(cfg)
     model = model_arg(row.model, cfg)
     branch = branch_for(product, row)
-    worktree = make_worktree(product, row.job, branch, existing=row.kind == 'correct')
+    worktree = make_worktree(product, row.job, branch)
     id_range = reserve_id_range(product, row.job,
                                 prefixes=wp.get('id_range_prefixes') or DEFAULT_ID_PREFIXES,
                                 start=int(wp.get('id_range_start', DEFAULT_ID_START)),

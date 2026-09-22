@@ -295,6 +295,35 @@ class TestSpawn(Home):
         self.assertTrue(os.path.exists(os.path.join(wt, 'b.txt')))
         git('merge-base', '--is-ancestor', 'origin/main', 'HEAD', cwd=wt)
 
+    def test_b0048_adjudicate_row_spawns_on_the_held_branch(self):
+        """The reuse-a-held-branch rule (B-0046) was keyed on ``kind == 'correct'`` — a
+        STALEMATE → ADJUDICATE row's kind is ``adjudicate``, so it took the fresh-branch path and
+        silently lost the branch's own history. The check must be on the branch existing on
+        origin, not on the row's kind (B-0048)."""
+        def commit(cwd, name, text, msg):
+            with open(os.path.join(cwd, name), 'w') as f:
+                f.write(text)
+            git('add', '.', cwd=cwd)
+            git('-c', 'user.email=ci@example.com', '-c', 'user.name=ci', 'commit', '-q', '-m', msg,
+                cwd=cwd)
+        other = os.path.join(self.tmp, 'other')
+        git('clone', '-q', os.path.join(self.tmp, 'origin.git'), other, cwd=self.tmp)
+        git('checkout', '-q', '-b', 'fix/B-0048', cwd=other)
+        commit(other, 'a.txt', 'branch\n', 'held work')
+        git('push', '-q', 'origin', 'fix/B-0048', cwd=other)
+        git('checkout', '-q', 'main', cwd=other)
+        commit(other, 'b.txt', 'main\n', 'main moves on')
+        git('push', '-q', 'origin', 'main', cwd=other)
+        row = pool_mod.Row('adjudicate-b-0048', 'B-0048', kind='adjudicate', branch='fix/B-0048')
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 1}])
+        rec = spawn_mod.spawn(self.product, row, self.acct(), 'adjudicate it\n', runtime=rt, cfg=self.cfg)
+        wt = rec['worktree']
+        self.assertEqual(rec['branch'], 'fix/B-0048')
+        self.assertEqual(git('rev-parse', '--abbrev-ref', 'HEAD', cwd=wt), 'fix/B-0048')
+        self.assertTrue(os.path.exists(os.path.join(wt, 'a.txt')))  # the held branch's own work
+        self.assertTrue(os.path.exists(os.path.join(wt, 'b.txt')))  # rebased onto main
+        git('merge-base', '--is-ancestor', 'origin/main', 'HEAD', cwd=wt)
+
     def test_id_ranges_do_not_overlap_and_are_sticky(self):
         r1 = spawn_mod.reserve_id_range(self.product, 'j1', prefixes=['T'])
         r2 = spawn_mod.reserve_id_range(self.product, 'j2', prefixes=['T'])
