@@ -244,6 +244,7 @@ def collect(product, row, index, inflight=None, repo_facts=None):
         'spec_lines': _line_count(repo_facts, spec_path),
         'plan_lines': _line_count(repo_facts, plan_path),
         'writes': list(item.get('writes') or []),
+        'merged': list(item.get('merged') or []),
         'tests': named_tests(sections, item, repo_facts),
         'stories': stories_of(items, feature),
         'round': read_round,
@@ -355,6 +356,9 @@ def state_lines(product, facts):
             f"{', '.join(facts['writes']) if facts['writes'] else '(none declared)'}",
             f"Tests named by the card: "
             f"{', '.join(facts['tests']) if facts['tests'] else '(none named)'}"]
+    if facts.get('merged'):
+        out.append(f"Also delivers: {', '.join(facts['merged'])} — their sections of "
+                   f"{facts['plan_path']}, acceptance byte-identical")
     if facts['stories'] and kind in STORY_KINDS:
         out.append(f"Stories of the Feature: {'; '.join(facts['stories'])}")
     busy = [f"{s.get('item', '?')} ({s.get('kind', '?')}, {s.get('age', '?')})"

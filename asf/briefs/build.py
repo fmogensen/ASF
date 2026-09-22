@@ -39,14 +39,14 @@ HEAVY = 'heavy'
 LIGHT = 'light'
 
 KINDS = ('spec', 'plan', 'coder', 'review', 'fixer', 'rebase', 'close', 'adjudicate', 'fix-bug',
-         'correct', 'groom')
+         'correct', 'groom', 'reshape')
 KIND_ALIASES = {'task': 'coder', 'code': 'coder', 'fix': 'fixer', 'bug': 'fix-bug',
                 'fix_bug': 'fix-bug'}
 DEFAULT_MODELS = {'spec': HEAVY, 'plan': HEAVY, 'adjudicate': HEAVY, 'review': HEAVY,
                   'coder': LIGHT, 'fixer': LIGHT, 'rebase': LIGHT, 'close': LIGHT,
-                  'fix-bug': LIGHT, 'correct': LIGHT, 'groom': HEAVY}
+                  'fix-bug': LIGHT, 'correct': LIGHT, 'groom': HEAVY, 'reshape': HEAVY}
 #: The kinds that may mint new cards (Stories, Tasks, Decisions) and so need an id range.
-ID_RANGE_KINDS = ('spec', 'plan', 'adjudicate', 'fix-bug', 'groom')
+ID_RANGE_KINDS = ('spec', 'plan', 'adjudicate', 'fix-bug', 'groom', 'reshape')
 
 TAIL = """## The heartbeat, the marker, and the report
 

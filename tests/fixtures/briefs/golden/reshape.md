@@ -1,27 +1,20 @@
-Backlog item: T-0001 — Record every payment attempt
+Backlog item: none (T-0050 is not in the index)
 
 ## What is already known (do not go looking for it)
-Item: T-0001 — Record every payment attempt (task, state New, stage —)
+Item: T-0050 — (not known here) (?, state New, stage —)
 Feature: F-0001 — Checkout survives a failed payment provider
-Epic: E-0001 — The storefront holds together under a bad day
-Why this session exists: PLAN → CODE — plan approved, footprint free
-Branch: `task/T-0001` (exists: no)
+Epic: —
+Why this session exists: RESHAPE → PLAN — groom: split asf/feeder | asf/harvest
+Branch: `plan/T-0050` (exists: no)
 Head: abc1234 record the provider outcome
-Spec: `docs/specs/checkout-resilience.md` (312 lines)
-Plan: `docs/plans/checkout-resilience.md` (188 lines)
-Writes (the footprint this job may touch): app/checkout/attempts.py, tests/test_checkout.py
-Tests named by the card: tests/test_checkout.py::test_attempt_row_per_try
+Spec: not in the record — its place is `docs/specs/t-0050.md`
+Plan: not in the record — its place is `docs/plans/t-0050.md`
+Writes (the footprint this job may touch): (none declared)
+Tests named by the card: (none named)
 Sessions in flight: (none)
 Specs live in `docs/specs`, plans in `docs/plans`, reviews in `docs/reviews`.
 Branch prefixes: fix → `fix`, plan → `plan`, spec → `spec`, task → `task`.
 The trunk is `main`; every commit is signed off (`git commit -s`).
-
-### Description
-One row per attempt: provider, outcome, latency, order id. Written whether the attempt succeeded
-or failed, and never inside the provider client itself.
-
-### Acceptance
-- [ ] `tests/test_checkout.py::test_attempt_row_per_try` passes.
 
 ### The last report for this item
 REPORT
@@ -38,24 +31,22 @@ left out: the retry itself, F-0001 owns it
 - Finish with the typed REPORT below, as the last thing you print.
 - Anything a human must decide or run: `NEEDS OPERATOR: <what> — <the command or the answer>`.
 
-## Your job: build T-0001
+## Your job: reshape T-0050
 
-Binding: this Task (and any it absorbed, listed above) of `docs/plans/checkout-resilience.md`, and the spec
-`docs/specs/checkout-resilience.md` behind it. Do exactly this Task — not the next one, not a cleanup you noticed on the
-way. Branch `task/T-0001`, cut from `origin/main`.
+Binding: the groom's approved split — groom: split asf/feeder | asf/harvest — of this Task of `docs/plans/t-0050.md`, under the
+approved spec `docs/specs/t-0050.md`. Add no scope. Change only how T-0050 is cut.
 
-THE BOUNDARY IS `writes:` — app/checkout/attempts.py, tests/test_checkout.py
-A file outside that list is a refusal, not a judgement call: leave it untouched, and say in the
-report under `left out` what you would have changed and why. If a Step cannot be done without
-touching one, take the plan's stated expectation for it, record the assumption in the report, and
-carry on. The footprint is what lets other sessions run beside you; widening it silently collides
-with work you cannot see.
+DELIVERABLE, on branch `plan/T-0050` cut from `origin/main`:
+- one Task per area, ids from `BACKLOG_ID_RANGE`, each carrying `split_from: T-0050`, its
+  `writes:` (the part of T-0050's `(none declared)` in that area) and `stories:`. Every Story of
+  T-0050 sits on at least one part;
+- T-0050's section of the plan replaced by one section per part, each with Files, Steps, Gate
+  and Acceptance (the spec's fenced tests, byte-identical);
+- T-0050 marked `removed: split into <ids>`.
+If a part cannot pass its own acceptance without another part, say so and leave T-0050 whole:
+`NEEDS OPERATOR: T-0050 does not split along <area> — answer no on the split line`.
 
-BEFORE THE PUSH: the Task's Gate commands, and its acceptance tests byte-identical from the plan
-and passing. Paste the last line of each in the report. A test you changed to make it pass is a
-failed Task, not a passed one.
-
-Final message: the pushed sha, the files written, the gate lines, the assumptions recorded.
+Final message: the pushed sha, the part ids with their writes, the coverage line.
 
 ## The heartbeat, the marker, and the report
 
@@ -69,11 +60,11 @@ background task you do not wait for. A result with uncommitted or unpushed work 
 session (B-0051) and comes back to you as a correction. Say so yourself in the report's
 `pushed:` line: `pushed: no` is read as that failure at once.
 
-Your branch is `task/T-0001`, and it may already be on origin (`exists:` above — a held branch
+Your branch is `plan/T-0050`, and it may already be on origin (`exists:` above — a held branch
 comes back to its session, and the worktree was rebased onto `origin/main` before you started;
 if `git status` shows a rebase in progress, finish it first). A lane branch is straight commits
-on the trunk: never merge `origin/task/T-0001` or `origin/main` into it, never force-push, never
-recut it or open another branch. Push with `git push origin task/T-0001`. If that is refused as
+on the trunk: never merge `origin/plan/T-0050` or `origin/main` into it, never force-push, never
+recut it or open another branch. Push with `git push origin plan/T-0050`. If that is refused as
 non-fast-forward, the rebase is why: stop there — do not merge, do not force — and write
 `pushed: rebased <sha> — the factory publishes` in the report; the factory publishes a rebased
 lane branch itself (B-0056). Never invent an id: a card id comes from `asf new` or the
@@ -87,11 +78,11 @@ Finish with this, and nothing after it:
 
 ```
 REPORT
-item: T-0001
-kind: coder
+item: T-0050
+kind: reshape
 status: done | partial | blocked
-branch: task/T-0001
-pushed: yes <the sha origin/task/T-0001 now points at> | rebased <sha> — the factory publishes | no — <why>
+branch: plan/T-0050
+pushed: yes <the sha origin/plan/T-0050 now points at> | rebased <sha> — the factory publishes | no — <why>
 commits: <sha> <subject> (one per line, or none)
 tests: <what you ran — and its last line>
 left out: <what and why, or none>

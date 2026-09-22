@@ -1,8 +1,8 @@
 ## Your job: build {item_id}
 
-Binding: this one Task of `{plan_path}`, and the spec `{spec_path}` behind it. Do exactly this
-Task — not the next one, not a cleanup you noticed on the way. Branch `{branch}`, cut from
-`origin/{main}`.
+Binding: this Task (and any it absorbed, listed above) of `{plan_path}`, and the spec
+`{spec_path}` behind it. Do exactly this Task — not the next one, not a cleanup you noticed on the
+way. Branch `{branch}`, cut from `origin/{main}`.
 
 THE BOUNDARY IS `writes:` — {writes}
 A file outside that list is a refusal, not a judgement call: leave it untouched, and say in the

@@ -105,6 +105,8 @@ def _groom_row():
 
 
 ROWS['groom'] = _groom_row()
+ROWS['reshape'] = row('RESHAPE → PLAN', 'T-0050', 'reshape', 'plan/T-0050',
+                      'groom: split asf/feeder | asf/harvest', feature_id='F-0001')
 
 
 def forbidden_regex():
@@ -244,6 +246,24 @@ class GoldenBriefTest(unittest.TestCase):
             with self.subTest(kind=kind):
                 text = build_mod.load_template(kind)
                 self.assertNotIn('counted dead and relaunched on top of you', text)
+
+
+class ReshapeBriefTest(unittest.TestCase):
+    def test_reshape_kind_renders_with_id_range(self):
+        text = briefs.build(product(), ROWS['reshape'], index(), [], REPO_FACTS).text
+        self.assertIn('## Your job: reshape T-0050', text)
+        self.assertIn('groom: split asf/feeder | asf/harvest', text)
+        self.assertIn('BACKLOG_ID_RANGE', text)
+        self.assertNotIn('{', text)
+
+    def test_merged_task_coder_brief_names_absorbed(self):
+        idx = index()
+        idx['items']['T-0001'] = dict(idx['items']['T-0001'], merged=['T-0002'])
+        text = briefs.build(product(), ROWS['coder'], idx, [], REPO_FACTS).text
+        self.assertIn('Also delivers: T-0002', text)
+
+    def test_reshape_is_a_known_kind(self):
+        self.assertEqual(build_mod.normalize_kind('reshape'), 'reshape')
 
 
 class PreambleTest(unittest.TestCase):
