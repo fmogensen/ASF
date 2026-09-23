@@ -12,7 +12,7 @@ import unittest
 
 from asf import hermetic
 from asf.groom import shape
-from asf.init import ITEM_FOLDERS, STREAM_FOLDERS
+from asf.init import DEFAULT_INTAKE_DIR, ITEM_FOLDERS, STREAM_FOLDERS
 from asf.record import frontmatter
 from asf.record.core import today
 
@@ -67,6 +67,9 @@ def make_repo():
         os.makedirs(os.path.join(root, f))
     for f in STREAM_FOLDERS:
         os.makedirs(os.path.join(root, f), exist_ok=True)
+    # the intake dir is the product's own now, not a fixed stream folder: `lay_down` creates it
+    # from the convention, so the fixture creates the default one the same way
+    os.makedirs(os.path.join(root, DEFAULT_INTAKE_DIR), exist_ok=True)
     return root
 
 
