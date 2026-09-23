@@ -21,10 +21,12 @@ nothing; the evidence rule still applies.
 """
 import re
 
-FIELDS = ('item', 'kind', 'status', 'branch', 'pushed', 'commits', 'tests', 'left out', 'ruling')
+FIELDS = ('item', 'kind', 'status', 'branch', 'pushed', 'commits', 'tests', 'left out', 'ruling',
+          'blocked_on', 'writes', 'superseded_by')
 HEAD_RE = re.compile(r'^\s*REPORT\s*$', re.M)
-FIELD_RE = re.compile(r'^(?P<key>item|kind|status|branch|pushed|commits|tests|left out|ruling)\s*:\s*(?P<value>.*)$', re.I)
+FIELD_RE = re.compile(r'^(?P<key>item|kind|status|branch|pushed|commits|tests|left out|ruling|blocked_on|writes|superseded_by)\s*:\s*(?P<value>.*)$', re.I)
 NO_RE = re.compile(r'^\s*(no|none|not pushed|unpushed)\b', re.I)
+NONE_RE = re.compile(r'^(none|n/a|-|—)$', re.I)
 UNPUSHED = 'unpushed work'
 
 
@@ -59,6 +61,23 @@ def ruling(text):
     """The ``ruling:`` paragraph of an adjudicate session's REPORT, or '' (B-0064): the one
     place a ruling lives — the factory files it on the item's card, the session commits none."""
     return (parse(text).get('ruling') or '').strip()
+
+
+def _claim(value):
+    """The value, or None when it is empty or says ``none`` — no claim."""
+    value = (value or '').strip()
+    return None if not value or NONE_RE.match(value) else value
+
+
+def ruling_fields(text):
+    """``{'blocked_on': id|None, 'writes': [glob, ...]|None, 'superseded_by': id|None}`` off the
+    last REPORT block — the ruling's mechanism (F-0090 D10). An absent field and a ``none``
+    value are both None: no claim."""
+    rep = parse(text)
+    writes = _claim(rep.get('writes'))
+    return {'blocked_on': _claim(rep.get('blocked_on')),
+            'writes': writes.split() if writes else None,
+            'superseded_by': _claim(rep.get('superseded_by'))}
 
 
 def failure(text):

@@ -16,6 +16,8 @@ import os
 import dataclasses
 import json
 import re
+import shutil
+import tempfile
 import unittest
 from unittest import mock
 
@@ -229,6 +231,32 @@ class GoldenBriefTest(unittest.TestCase):
                               f'the factory publishes | no — <why>', tail)
                 self.assertTrue(text.rstrip().endswith('```'), text[-200:])
 
+    def test_t8_every_kind_carries_the_three_ruling_fields_in_the_tail(self):
+        # F-0090 §2.6: the tail is one string, so every kind's brief ends with it byte for byte
+        for kind, r in sorted(ROWS.items()):
+            with self.subTest(kind=kind):
+                brief = briefs.build(product(), r, index(), [], REPO_FACTS)
+                ctx = build_mod.context(
+                    product(), r, kind, dict(preamble_mod.collect(product(), r, index(), [], REPO_FACTS),
+                                             kind=kind))
+                self.assertTrue(brief.text.endswith(build_mod.render(build_mod.TAIL, ctx)))
+                tail = brief.text[brief.text.rindex('## The heartbeat'):]
+                ruling = tail.index('\nruling: <adjudicate only')
+                fields = [tail.index(f'\n{name}: <adjudicate only') for name in
+                          ('blocked_on', 'writes', 'superseded_by')]
+                self.assertEqual(fields, sorted(fields))
+                self.assertLess(ruling, fields[0])
+                self.assertLess(fields[-1], tail.index('\nNEEDS OPERATOR: <only if'))
+
+    def test_t8_the_adjudicate_template_names_the_ruling_fields(self):
+        text = build_mod.load_template('adjudicate')
+        for name in ('blocked_on', 'writes', 'superseded_by'):
+            self.assertIn(name, text)
+        self.assertIn('A paragraph with no field behind it changes nothing', text)
+        self.assertLess(text.index('THE RULING GOES TO THE RECORD'), text.index('`blocked_on: T-0025`'))
+        ctx = PlaceholderTest().context('adjudicate')
+        self.assertEqual(build_mod.placeholders(build_mod.render(text, ctx)), [])
+
     def test_every_kind_carries_the_branch_rule_rebase_never_merge_never_force(self):
         # B-0056: eight spec branches were merges of their own stale remote — the session could
         # not publish the rebase it was handed and was told never to force; the rule is generated
@@ -427,6 +455,95 @@ class PlaceholderTest(unittest.TestCase):
                 text = briefs.build(product(), r, index(), [], REPO_FACTS).text
                 leftover = [f for f in build_mod.placeholders(text)]
                 self.assertEqual(leftover, [], f'{kind}: {leftover}')
+
+
+class CardDigestTests(unittest.TestCase):
+    """F-0090 D4: the digest changes when what a brief states changes, and only then."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.record = os.path.join(self.tmp, 'record')
+        shutil.copytree(RECORD, self.record)
+        self.product = product(backlog_dir=self.record)
+        self.index = index()
+
+    def digest(self, item_id='T-0001'):
+        return build_mod.card_digest(self.product, item_id, self.index)
+
+    def card(self, name='tasks/T-0001.md'):
+        return os.path.join(self.record, name)
+
+    def edit_card(self, old, new, name='tasks/T-0001.md'):
+        with open(self.card(name), encoding='utf-8') as f:
+            text = f.read()
+        self.assertIn(old, text)
+        with open(self.card(name), 'w', encoding='utf-8') as f:
+            f.write(text.replace(old, new, 1))
+
+    def test_it_is_sixteen_hex_and_stable_across_two_calls(self):
+        d = self.digest()
+        self.assertRegex(d, r'^[0-9a-f]{16}$')
+        self.assertEqual(d, self.digest())
+
+    def test_every_brief_carries_the_digest_of_its_card(self):
+        for kind, r in sorted(ROWS.items()):
+            with self.subTest(kind=kind):
+                brief = briefs.build(self.product, r, self.index, [], REPO_FACTS)
+                self.assertEqual(brief.card_digest,
+                                 build_mod.card_digest(self.product, r.item_id, self.index))
+                self.assertRegex(brief.card_digest, r'^[0-9a-f]{16}$')
+
+    def test_a_typed_field_that_changes_changes_the_digest(self):
+        before = self.digest()
+        for key, value in (('writes', ['app/other.py']), ('after', ['T-0002']),
+                           ('title', 'Something else'), ('tests', ['tests.test_x']),
+                           ('blockedBy', ['B-0001']), ('severity', 'S1')):
+            with self.subTest(key=key):
+                item = self.index['items']['T-0001']
+                original = item.get(key)
+                item[key] = value
+                self.assertNotEqual(self.digest(), before)
+                if original is None:
+                    del item[key]
+                else:
+                    item[key] = original
+                self.assertEqual(self.digest(), before)
+
+    def test_the_description_text_changes_the_digest(self):
+        before = self.digest()
+        self.edit_card('One row per attempt', 'Two rows per attempt')
+        self.assertNotEqual(self.digest(), before)
+
+    def test_a_linked_document_changes_the_digest(self):
+        before = self.digest('F-0001')
+        self.index['items']['F-0001']['links']['plan'] = 'docs/plans/other.md'
+        self.assertNotEqual(self.digest('F-0001'), before)
+
+    def test_a_feature_gaining_a_story_changes_the_digest(self):
+        before = self.digest('F-0001')
+        self.index['items']['S-9999'] = {'id': 'S-9999', 'type': 'story', 'title': 'new',
+                                         'parent': 'F-0001', 'folder': 'stories'}
+        self.index['items']['F-0001']['children'].append('S-9999')
+        self.assertNotEqual(self.digest('F-0001'), before)
+
+    def test_a_history_line_does_not_change_the_digest(self):
+        before = self.digest()
+        self.edit_card('- 2026-01-01: created',
+                       '- 2026-01-01: created\n- 2026-01-02: ruling — it waits for T-0002')
+        self.assertEqual(self.digest(), before)
+
+    def test_the_machine_block_does_not_change_the_digest(self):
+        before = self.digest()
+        self.edit_card('state: New', 'state: Active')
+        self.edit_card('updated: 2026-01-01T08:00:00Z', 'updated: 2026-02-01T08:00:00Z')
+        item = self.index['items']['T-0001']
+        item.update(state='Active', evidence=['abc1234'], stage_since='2026-02-01T08:00:00Z',
+                    updated='2026-02-01T08:00:00Z')
+        self.assertEqual(self.digest(), before)
+
+    def test_an_item_the_index_does_not_hold_still_digests(self):
+        self.assertRegex(self.digest('T-9999'), r'^[0-9a-f]{16}$')
 
 
 class KindModelGrantTest(unittest.TestCase):

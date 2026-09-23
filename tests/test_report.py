@@ -93,5 +93,38 @@ class RulingTests(unittest.TestCase):
         self.assertEqual(report.ruling('no report at all'), '')
 
 
+class RulingFieldsTests(unittest.TestCase):
+    """F-0090 D10: the ruling's mechanism is three typed fields, read off the last REPORT."""
+
+    def report(self, *lines):
+        return 'REPORT\nitem: T-0009\nkind: adjudicate\nstatus: done\n' + '\n'.join(lines) + '\n```\n'
+
+    def test_the_three_fields_are_read(self):
+        text = self.report('ruling: it waits', 'blocked_on: T-0025',
+                           'writes: asf/a.py tests/test_a.py  docs/**', 'superseded_by: T-0030')
+        self.assertEqual(report.ruling_fields(text),
+                         {'blocked_on': 'T-0025', 'writes': ['asf/a.py', 'tests/test_a.py', 'docs/**'],
+                          'superseded_by': 'T-0030'})
+
+    def test_none_and_dashes_and_absent_are_all_no_claim(self):
+        none = {'blocked_on': None, 'writes': None, 'superseded_by': None}
+        for value in ('none', 'None', 'n/a', '-', '—', ''):
+            with self.subTest(value=value):
+                text = self.report(f'blocked_on: {value}', f'writes: {value}', f'superseded_by: {value}')
+                self.assertEqual(report.ruling_fields(text), none)
+        self.assertEqual(report.ruling_fields(self.report('ruling: nothing')), none)
+        self.assertEqual(report.ruling_fields('no report at all'), none)
+
+    def test_a_field_outside_the_last_report_block_is_ignored(self):
+        earlier = 'REPORT\nitem: T-0009\nblocked_on: T-0001\n\nlater text\nREPORT\nitem: T-0009\n'
+        self.assertIsNone(report.ruling_fields(earlier)['blocked_on'])
+        before_any = 'blocked_on: T-0001\n' + self.report('blocked_on: none')
+        self.assertIsNone(report.ruling_fields(before_any)['blocked_on'])
+
+    def test_the_ruling_paragraph_is_untouched_by_the_fields(self):
+        text = self.report('ruling: it waits for T-0025', 'blocked_on: T-0025')
+        self.assertEqual(report.ruling(text), 'it waits for T-0025')
+
+
 if __name__ == '__main__':
     unittest.main()

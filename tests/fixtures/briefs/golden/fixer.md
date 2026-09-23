@@ -99,5 +99,8 @@ commits: <sha> <subject> (one per line, or none)
 tests: <what you ran — and its last line>
 left out: <what and why, or none>
 ruling: <adjudicate only — one paragraph: what was disputed, what now holds, what changes; else omit>
+blocked_on: <adjudicate only — the id this item must wait for, or none>
+writes: <adjudicate only — the corrected footprint, space-separated globs, or none>
+superseded_by: <adjudicate only — the id that replaces this item, or none>
 NEEDS OPERATOR: <only if something needs a human, else omit>
 ```

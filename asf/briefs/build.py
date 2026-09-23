@@ -24,6 +24,7 @@ The kinds are the feeder's row kinds plus the two the harvest loop raises (``rev
 """
 import argparse
 import dataclasses
+import hashlib
 import json
 import os
 import string
@@ -31,6 +32,8 @@ import string
 from asf import env
 from asf.briefs import facts as facts_mod
 from asf.briefs import preamble as preamble_mod
+from asf.feeder import rows as feeder_rows
+from asf.views import index_reader as ix
 from asf.workers.stall import CORRECTION_HEAD
 
 TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
@@ -49,6 +52,13 @@ DEFAULT_MODELS = {'spec': HEAVY, 'plan': HEAVY, 'adjudicate': HEAVY, 'review': H
                   'fix-bug': LIGHT, 'correct': LIGHT, 'groom': HEAVY, 'reshape': HEAVY}
 #: The kinds that may mint new cards (Stories, Tasks, Decisions) and so need an id range.
 ID_RANGE_KINDS = ('spec', 'plan', 'adjudicate', 'fix-bug', 'groom', 'reshape')
+
+#: The typed fields a brief states about its card, and so the ones whose change makes a brief
+#: stale (F-0090 D4). ``state``, ``evidence``, ``stage_since`` and ``updated`` are not here: they
+#: move on every ingest and would stale every brief.
+DIGEST_FIELDS = ('title', 'writes', 'tests', 'after', 'blockedBy', 'decided', 'severity')
+#: The card sections the brief renders; ``## History`` is deliberately not one.
+DIGEST_SECTIONS = ('description', 'acceptance', 'fix', 'links')
 
 TAIL = """## The heartbeat, the marker, and the report
 
@@ -89,6 +99,9 @@ commits: <sha> <subject> (one per line, or none)
 tests: <what you ran — and its last line>
 left out: <what and why, or none>
 ruling: <adjudicate only — one paragraph: what was disputed, what now holds, what changes; else omit>
+blocked_on: <adjudicate only — the id this item must wait for, or none>
+writes: <adjudicate only — the corrected footprint, space-separated globs, or none>
+superseded_by: <adjudicate only — the id that replaces this item, or none>
 NEEDS OPERATOR: <only if something needs a human, else omit>
 ```
 """
@@ -106,6 +119,7 @@ class Brief:
     model: str
     add_dirs: list
     id_ranges_needed: bool
+    card_digest: str = ''
 
 
 # ---- the kind ----------------------------------------------------------------
@@ -178,6 +192,38 @@ def add_dirs_for(product, row=None, kind=None):
 
 def id_ranges_needed(kind):
     return kind in ID_RANGE_KINDS
+
+
+# ---- the digest --------------------------------------------------------------
+
+def _digest_value(value):
+    """One typed value as text: a list keeps its order, an absent key is the empty string."""
+    if value is None:
+        return ''
+    if isinstance(value, (list, tuple)):
+        return json.dumps([str(v) for v in value], ensure_ascii=False)
+    return str(value)
+
+
+def card_digest(product, item_id, index):
+    """sha256, first 16 hex: what a brief states about this card — ``DIGEST_FIELDS``,
+    ``links.spec``, ``links.plan``, the Feature's Story ids, and the card's Description /
+    Acceptance / Fix / Links text (:func:`asf.briefs.preamble.card_sections`).
+
+    ``## History`` and the machine block are not read: filing a ruling or ingesting a push must
+    not stale every brief (D4). An absent key renders empty, so a card that gains a field changes
+    the digest and a card that never had one does not."""
+    items = feeder_rows.items_of(index) if index else {}
+    item = items.get(item_id) or {}
+    links = item.get('links') or {}
+    lines = [f'{key}={_digest_value(item.get(key))}' for key in DIGEST_FIELDS]
+    lines += [f'links.{key}={_digest_value(links.get(key))}' for key in ('spec', 'plan')]
+    if item.get('type') == 'feature':
+        lines.append('stories=' + json.dumps(sorted(c['id'] for c in ix.children(items, item, 'story'))))
+    sections = preamble_mod.card_sections(product, item)
+    for name in DIGEST_SECTIONS:
+        lines.append(f'## {name}\n{sections.get(name) or ""}')
+    return hashlib.sha256('\n'.join(lines).encode('utf-8')).hexdigest()[:16]
 
 
 # ---- the text ----------------------------------------------------------------
@@ -253,7 +299,8 @@ def build(product, row, index, inflight=None, repo_facts=None):
              render(TAIL, ctx)]
     return Brief(kind=kind, item_id=ctx['item_id'], text='\n\n'.join(p.strip() for p in parts) + '\n',
                  model=model_for(product, kind), add_dirs=add_dirs_for(product, row, kind),
-                 id_ranges_needed=id_ranges_needed(kind))
+                 id_ranges_needed=id_ranges_needed(kind),
+                 card_digest=card_digest(product, ctx['item_id'], index))
 
 
 # ---- the CLI verb ------------------------------------------------------------

@@ -63,6 +63,12 @@ commit a ruling, a review or a decision file to this repo, you never create a De
 you never write a decision id: ids are minted by `asf new`, not by a session — a `D-nnnn` you
 made up is a defect, not a ruling (B-0054).
 
+Your ruling's *mechanism* is the three fields `blocked_on`, `writes` and `superseded_by`; the
+paragraph is its *explanation*. If the answer is "this waits for T-0025", the answer is
+`blocked_on: T-0025` — not a sentence saying so. If the answer is "its footprint was wrong", the
+answer is the corrected `writes:` line. A paragraph with no field behind it changes nothing, and
+the loop you were asked to end restarts on the next tick.
+
 FOUR THINGS ARE NEVER YOURS: licence, money, security, and anything that changes what the customer
 sees. For those, leave the document as it is and write `NEEDS OPERATOR: <what> — <the question>`
 with your one-line recommendation.
@@ -109,5 +115,8 @@ commits: <sha> <subject> (one per line, or none)
 tests: <what you ran — and its last line>
 left out: <what and why, or none>
 ruling: <adjudicate only — one paragraph: what was disputed, what now holds, what changes; else omit>
+blocked_on: <adjudicate only — the id this item must wait for, or none>
+writes: <adjudicate only — the corrected footprint, space-separated globs, or none>
+superseded_by: <adjudicate only — the id that replaces this item, or none>
 NEEDS OPERATOR: <only if something needs a human, else omit>
 ```
