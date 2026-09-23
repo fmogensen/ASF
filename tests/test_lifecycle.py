@@ -324,6 +324,94 @@ class HoldInvariants(unittest.TestCase):
         self.assertEqual(fields['rounds'], 3)
 
 
+class EmptyEndsTests(unittest.TestCase):
+    """F-0095 §2.3: an empty end is its own kind, it is counted, and the second one parks."""
+    EMPTY_END = 'failed: ' + lc.EMPTY_BRANCH
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.path = os.path.join(self.d, 's.jsonl')
+
+    def write(self, *lines):
+        with open(self.path, 'a') as f:
+            for ln in lines:
+                f.write(json.dumps(ln) + '\n')
+
+    def run_of(self, job, n, end_reason=None, item='T-0001'):
+        """Launch ``job`` and, given an ``end_reason``, end it; return its folded run."""
+        self.write({'job': job, 'item': item, 'branch': 'worker/' + item, 'pid': n, 'started': 't%d' % n})
+        if end_reason:
+            self.write({'job': job, 'ended': 'e%d' % n, 'end_reason': end_reason})
+        return lc.latest(self.path)[job]
+
+    def test_it_counts_empty_ends_across_jobs_and_ignores_the_rest(self):
+        self.run_of('a', 1, self.EMPTY_END)
+        self.run_of('b', 2, 'failed: not pushed: 1 uncommitted file(s), 0 unpushed commit(s)')
+        self.run_of('c', 3, 'finished')
+        self.run_of('d', 4)
+        self.run_of('e', 5, self.EMPTY_END)
+        self.run_of('f', 6, self.EMPTY_END, item='T-0002')
+        self.assertEqual(lc.empty_ends(self.path, 'T-0001'), 2)
+        self.assertEqual(lc.empty_ends(self.path, 'T-0002'), 1)
+        self.assertEqual(lc.empty_ends(self.path, 'T-0003'), 0)
+        self.assertEqual(lc.empty_ends(self.path, None), 0)
+
+    def test_the_first_empty_end_is_an_ordinary_hold(self):
+        run = self.run_of('a', 1, self.EMPTY_END)
+        fields, line = lc.hold(self.path, run, lc.EMPTY, lc.empty_branch_text(), 'tn')
+        self.assertEqual(fields['rounds'], 1)
+        self.assertNotIn('parked', fields['correction'])
+        self.assertNotIn('operator_flagged', fields)
+        self.assertEqual(fields['correction']['kind'], lc.EMPTY)
+        self.assertEqual(line, 'held worker/T-0001: %s — back to its session (round 1)'
+                         % lc.empty_branch_text())
+
+    def test_the_second_empty_end_parks_and_spends_no_round(self):
+        first = self.run_of('a', 1, self.EMPTY_END)
+        fields, _ = lc.hold(self.path, first, lc.EMPTY, 'x', 't1')
+        self.write(dict(fields, job='a'))
+        second = self.run_of('b', 2, self.EMPTY_END)
+        fields, line = lc.hold(self.path, second, lc.EMPTY, 'x', 't2')
+        corr = fields['correction']
+        self.assertNotIn('rounds', fields)
+        self.assertIs(corr['parked'], True)
+        self.assertEqual(corr['kind'], lc.EMPTY)
+        self.assertIn('2 times', corr['reason'])
+        self.assertIn('asf unpark', corr['reason'])
+        self.assertEqual(fields['operator_flagged'], 1)
+        self.assertEqual(line, 'parked worker/T-0001: ' + corr['reason'])
+        self.write(dict(fields, job='b'))
+        self.assertEqual(lc.rounds_of(self.path, 'T-0001'), 1)
+
+    def test_the_cap_is_a_parameter(self):
+        self.run_of('a', 1, self.EMPTY_END)
+        second = self.run_of('b', 2, self.EMPTY_END)
+        fields, _ = lc.hold(self.path, second, lc.EMPTY, 'x', 't2', empty_cap=3)
+        self.assertNotIn('parked', fields['correction'])
+        self.assertEqual(fields['rounds'], 1)
+        third = self.run_of('c', 3, self.EMPTY_END)
+        fields, _ = lc.hold(self.path, third, lc.EMPTY, 'x', 't3', empty_cap=3)
+        self.assertIs(fields['correction']['parked'], True)
+        self.assertIn('3 times', fields['correction']['reason'])
+
+    def test_a_not_pushed_hold_still_spends_rounds_and_never_parks(self):
+        self.run_of('a', 1, self.EMPTY_END)
+        second = self.run_of('b', 2, self.EMPTY_END)
+        fields, _ = lc.hold(self.path, second, lc.UNPUSHED, 'x', 't2')
+        self.assertEqual(fields['rounds'], 1)
+        self.assertNotIn('parked', fields['correction'])
+        self.assertNotIn('operator_flagged', fields)
+
+    def test_derive_over_a_parked_run_is_held_not_adjudicate(self):
+        self.run_of('a', 1, self.EMPTY_END)
+        second = self.run_of('b', 2, self.EMPTY_END)
+        fields, _ = lc.hold(self.path, second, lc.EMPTY, 'x', 't2')
+        self.write(dict(fields, job='b', rounds=1))
+        run = lc.latest(self.path)['b']
+        self.assertEqual(lc.derive(run, lc.Evidence(), path=self.path).name, lc.HELD)
+
+
 class AwaitingHarvestInvariants(unittest.TestCase):
     def test_a_pushed_branch_holds_its_item_busy_until_harvest_lands_or_holds_it(self):
         d = tempfile.mkdtemp()

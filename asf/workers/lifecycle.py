@@ -587,15 +587,37 @@ def pushed_after_stop(run, ev):
 # ---- the hold: one rule for harvest's gate and health's unpushed verdict --------------
 
 UNPUSHED = 'unpushed'
+EMPTY = 'empty'        #: a correction kind of its own: `UNPUSHED` is work not on origin, this is no work
+EMPTY_CAP = 2          #: ends that wrote nothing before the item is parked (`conventions.empty_cap`)
 
 
-def hold(path, run, kind, text, now):
+def empty_ends(path, item):
+    """How many runs of ``item`` ended ``failed: empty branch: nothing to land``."""
+    if not item:
+        return 0
+    return sum(1 for r in item_runs(path, item)
+               if r.get('end_reason') == f'failed: {EMPTY_BRANCH}')
+
+
+def park_text(n):
+    return (f'ended empty {n} times: nothing was written on any of them — the Task is parked. '
+            f'Check whether its work is already on the trunk, then close it, reshape its plan, '
+            f'or `asf unpark <item>` to let the wave try again')
+
+
+def hold(path, run, kind, text, now, empty_cap=EMPTY_CAP):
     """``(fields, line)``: what to append to ``run`` to hold its branch and hand it back, and
     the line to print. The rounds counter runs over every run of the item; at :data:`ROUND_CAP`
     it stops climbing (B-0048) — the correction is marked ``at_cap`` so the feeder's ADJUDICATE
-    row takes it, and a second hold at the cap flags the operator instead of spawning another."""
+    row takes it, and a second hold at the cap flags the operator instead of spawning another.
+    An :data:`EMPTY` hold at ``empty_cap`` empty ends parks the item instead and spends no round."""
     item = run.get('item')
     branch = run.get('branch') or run.get('job')
+    if kind == EMPTY and empty_ends(path, item) >= empty_cap:
+        fields = {'correction': {'kind': kind, 'text': text, 'at': now,
+                                 'parked': True, 'reason': park_text(empty_ends(path, item))},
+                  'operator_flagged': 1}
+        return fields, f'parked {branch}: {fields["correction"]["reason"]}'
     prev = max([rounds_of(path, item), run.get('rounds') or 0])
     if prev >= ROUND_CAP:
         at_cap_before = any((r.get('correction') or {}).get('at_cap') for r in item_runs(path, item))
