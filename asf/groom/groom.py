@@ -473,7 +473,7 @@ def cmd_groom(args, root):
     if default_bug_parent is None and product is not None:
         default_bug_parent = product.conventions.get('default_bug_epic')
     created_ids = process_inbox(root, canonical, date, default_bug_parent=default_bug_parent,
-                                intake_dir=inbox.intake_dir(args))
+                                intake_dir=product.conventions.intake_dir if product else None)
 
     derived = compute_derived(canonical)
     sections = build_groom_sections(canonical, derived, date)

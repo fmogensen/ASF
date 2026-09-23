@@ -219,7 +219,9 @@ class CheckCommandTests(unittest.TestCase):
 
     def test_missing_layout_folder_finding(self):
         # B-0005: `check` validated the record's items but never the layout the README names —
-        # a backlog missing a stream folder (inbox/, groom/, releases/, a metrics/ stream) passed.
+        # a backlog missing a stream folder (groom/, releases/, a metrics/ stream) passed.
+        # T-0040/PD5: the intake dir left STREAM_FOLDERS when it became a product convention, so
+        # `check` no longer requires one; the finding still carries its runnable command.
         root = make_repo()
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         write_item(root, 'E-0001', 'epic', 'Factory')
@@ -228,7 +230,8 @@ class CheckCommandTests(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         for f in STREAM_FOLDERS:
             self.assertIn(f"{f}/ is missing", r.stdout)
-        self.assertIn('mkdir -p inbox', r.stdout)
+        self.assertIn('mkdir -p groom', r.stdout)
+        self.assertNotIn('inbox/ is missing', r.stdout)
 
     def test_clean_repo_passes(self):
         write_item(self.root, 'E-0001', 'epic', 'Factory')

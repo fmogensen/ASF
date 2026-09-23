@@ -28,7 +28,6 @@ from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 
 DEFAULT_PRS_PER_TICK = 6
-WORKER_PREFIX = 'worker/'
 ACCEPT_RE = re.compile(r'^\s*[-*]\s*(?:\[[ xX]\]\s*)?(.+?)\s*$')
 
 
@@ -54,11 +53,7 @@ def prs_per_tick(product):
 
 
 def branch_prefixes(product):
-    out = [WORKER_PREFIX]
-    for p in ((product.conventions or {}).get('branch_prefixes') or {}).values():
-        p = str(p)
-        out.append(p if p.endswith(('/', '-')) else p + '/')
-    return tuple(dict.fromkeys(out))
+    return list(product.conventions.all_prefixes())
 
 
 def remote_heads(repo):
@@ -104,7 +99,7 @@ def candidates(product, out=None):
     """``[(branch, session)]``: finished, unharvested sessions whose branch is pushed with
     commits past the trunk and carries a PR prefix. A pushed branch at the trunk head gets one
     ``prs: <branch> at trunk — nothing to open`` line through ``out`` and is left out."""
-    prefixes = branch_prefixes(product)
+    prefixes = tuple(branch_prefixes(product))
     repo = product.repo_dir
     heads = remote_heads(repo) if repo else set()
     if repo:

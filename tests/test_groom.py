@@ -203,6 +203,23 @@ class GroomInboxIntegrationTests(unittest.TestCase):
         with open(path) as f:
             self.assertIn('## Question', f.read())
 
+    def test_intake_dir_is_a_convention(self):
+        # T-0040: `process_inbox`'s `intake_dir` is the product's convention, not a hardcoded
+        # `inbox/` — a product that declares `intake_dir: cards` is read from `cards/`, and
+        # `inbox/` (pre-created by `make_repo`, empty) is left untouched.
+        os.makedirs(os.path.join(self.root, 'cards'))
+        with open(os.path.join(self.root, 'cards', 'thing.md'), 'w', encoding='utf-8') as f:
+            f.write("# Checkout is broken\nsignature: checkout-pay\nCustomers cannot pay.\n")
+        by_id, _ = load_items(self.root)
+        canonical, _ = canonicalize(by_id)
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('BACKLOG_ID_RANGE', None)
+            created = inbox_mod.process_inbox(self.root, canonical, today(),
+                                              default_bug_parent='E-0009', intake_dir='cards')
+        self.assertEqual(len(created), 1)
+        self.assertEqual(os.listdir(os.path.join(self.root, 'inbox', 'done')), [])
+        self.assertEqual(len(os.listdir(os.path.join(self.root, 'cards', 'done'))), 1)
+
     def test_ambiguous_feature_gets_one_question_and_is_left_in_inbox(self):
         path = os.path.join(self.root, 'inbox', 'vague.md')
         with open(path, 'w', encoding='utf-8') as f:

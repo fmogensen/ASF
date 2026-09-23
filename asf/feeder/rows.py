@@ -111,21 +111,15 @@ def session_of(inflight, item_id):
 # ---- product conventions ----------------------------------------------------
 
 def _conventions(product):
-    return (product.conventions if product is not None else {}) or {}
+    if product is None:
+        from asf.conventions import Conventions
+        return Conventions()
+    return product.conventions
 
 
-def branch_for(product, kind, item_id, default=None):
-    """``<prefix><id>``; a prefix not already ending in ``/`` or ``-`` gets a ``/``. The
-    product's prefix for ``kind``, else the caller's default, else the documented default
-    (``code`` → ``worker/``, B-0067), else ``<kind>/``."""
-    from asf.conventions import DEFAULT_BRANCH_PREFIXES
-    prefixes = _conventions(product).get('branch_prefixes') or {}
-    prefix = prefixes.get(kind) or default or DEFAULT_BRANCH_PREFIXES.get(kind) or kind
-    if isinstance(prefix, (list, tuple)):
-        prefix = kind
-    if not prefix.endswith(('/', '-')):
-        prefix += '/'
-    return f"{prefix}{item_id}"
+def branch_for(product, kind, item_id):
+    """``<prefix><id>`` — the product's prefix for ``kind`` (:meth:`Conventions.branch`, B-0067)."""
+    return _conventions(product).branch(kind, item_id)
 
 
 def stalemate_round(product):
@@ -216,12 +210,12 @@ def bug_rows(items, product, busy, attempts=None):
         if n == limit:
             out.append(Row(tier=0 if sev == 'S1' else 1, kind=STALEMATE, item_id=b['id'],
                            feature_id=fid, action=LAUNCH, brief_kind='adjudicate',
-                           branch=branch_for(product, 'fix', b['id'], default='fix/'),
+                           branch=branch_for(product, 'fix', b['id']),
                            reason=f"{sev} open after {n} sessions: adjudicate, not another fix"))
             continue
         out.append(Row(tier=0 if sev == 'S1' else 1, kind=BUG_FIX, item_id=b['id'],
                        feature_id=fid, action=LAUNCH, brief_kind='fix-bug',
-                       branch=branch_for(product, 'fix', b['id'], default='fix/'),
+                       branch=branch_for(product, 'fix', b['id']),
                        reason=f"{sev} open, decided, no session — its ## Fix is the plan"))
     return out
 
@@ -243,7 +237,7 @@ def correction_rows(items, product, busy, corrections):
         fid, rounds = f['id'] if f else '', c.get('rounds') or 0
         tier = {'S1': 0, 'S2': 1}.get(item.get('severity'), 2)
         kind = 'fix' if item['type'] == 'bug' else 'task'
-        branch = c.get('branch') or branch_for(product, kind, iid, default='fix/' if kind == 'fix' else None)
+        branch = c.get('branch') or branch_for(product, kind, iid)
         if rounds >= CORRECTION_ROUNDS:
             out.append(Row(tier=tier, kind=STALEMATE, item_id=iid, feature_id=fid, action=LAUNCH,
                            brief_kind='adjudicate', branch=branch,
@@ -409,7 +403,7 @@ def groom_row(index, product, busy, groom_state, inflight):
              f"(undecided {ix.age(item.get('stage_since'))})")
     return Row(tier=2, kind=GROOM_ADJUDICATE, item_id=oldest, feature_id=f['id'] if f else '',
               action=LAUNCH, brief_kind='groom',
-              branch=branch_for(product, 'groom', date, default='groom/'), reason=reason,
+              branch=branch_for(product, 'groom', date), reason=reason,
               groom_date=date, groom_file=groom_state.get('file', ''),
               answers_file=groom_state.get('answers', ''),
               open_questions=tuple(groom_state.get('lines') or ()))

@@ -21,10 +21,11 @@ import subprocess
 import sys
 
 from asf import env, schema
-from asf.conventions import DEFAULT_BRANCH_PREFIXES
+from asf.conventions import (DEFAULT_BRANCH_PREFIXES, DEFAULT_INTAKE_DIR, DEFAULT_PLANS_DIR,
+                             DEFAULT_SPECS_DIR)
 
 ITEM_FOLDERS = ('epics', 'features', 'stories', 'tasks', 'bugs', 'decisions', 'rules')
-STREAM_FOLDERS = ('inbox', 'groom', 'releases', 'metrics/ci', 'metrics/sessions', 'metrics/ticks',
+STREAM_FOLDERS = ('groom', 'releases', 'metrics/ci', 'metrics/sessions', 'metrics/ticks',
                   'metrics/events', 'metrics/daily')
 
 PRE_COMMIT = """#!/bin/sh
@@ -116,8 +117,8 @@ def slug_from_url(url):
 
 # where discovery looks for the specs/plans dirs, first hit wins: the usual places, then any
 # `spec*`/`plan*` dir at any depth under docs/ — a product's own layout, found rather than named
-SPECS_GLOBS = ['docs/specs', 'specs', 'docs/**/specs', 'docs/**/spec*']
-PLANS_GLOBS = ['docs/plans', 'plans', 'docs/**/plans', 'docs/**/plan*']
+SPECS_GLOBS = [DEFAULT_SPECS_DIR, 'specs', 'docs/**/specs', 'docs/**/spec*']
+PLANS_GLOBS = [DEFAULT_PLANS_DIR, 'plans', 'docs/**/plans', 'docs/**/plan*']
 
 
 def _first_dir(repo, patterns):
@@ -207,7 +208,7 @@ def is_asf_record(backlog):
             and os.path.isfile(os.path.join(backlog, 'index.json')))
 
 
-def lay_down(backlog):
+def lay_down(backlog, intake_dir=None):
     """The empty record. Never overwrites a file that is already there. Returns paths written."""
     written = []
 
@@ -222,7 +223,7 @@ def lay_down(backlog):
             os.chmod(path, mode)
         written.append(rel)
 
-    for folder in ITEM_FOLDERS + STREAM_FOLDERS:
+    for folder in ITEM_FOLDERS + STREAM_FOLDERS + (intake_dir or DEFAULT_INTAKE_DIR,):
         put(os.path.join(folder, '.gitkeep'), '')
     put('README.md', README)
     put(os.path.join('.githooks', 'pre-commit'), PRE_COMMIT, 0o755)
@@ -279,7 +280,8 @@ def cmd_init(args):
         print(f'init: adopted {_count_items(backlog)} items')
     else:
         os.makedirs(backlog, exist_ok=True)
-        written = lay_down(backlog)
+        conventions = env.Product(name, env.load_file(path)).conventions
+        written = lay_down(backlog, intake_dir=conventions.intake_dir)
         rc = do_index(backlog)
         schema.stamp(backlog, schema.SCHEMA_VERSION)
         print(f'init: laid down a new record at {backlog} ({len(written)} files)')

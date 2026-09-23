@@ -14,12 +14,12 @@ exists in the index. The rules run in order and the first one that finds anythin
      `conventions.branch_prefixes` (pass `prefixes=`, e.g. `branch_prefixes(product)`) — a
      prefix with no `/` in it, like a legacy one, only goes when it is passed
      A Feature is also found by its slugified title, because legacy ids (`FREE-1`) are not slugs
-  5. a review file name on the branch (`.sdd-input/reviews/spec-free-plan-r2.md`)
+  5. a review file name on the branch (`<reviews_dir>/spec-free-plan-r2.md`)
 
 A batch run carries the items of every PR in the batch: pass `prs=[…]` (and `pr_info` for their
 titles/bodies when known) and the result is the union of each PR matched on its own.
 
-    ids, why = match_event(items, branch="worker/free-plan-t3", pr=623)
+    ids, why = match_event(items, branch="<code prefix>free-plan-t3", pr=623)
 """
 import json
 import os

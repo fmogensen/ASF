@@ -435,7 +435,7 @@ class PrsStepTests(StepsTestCase):
     """A ``pull-request`` landing: the PR is the mechanism, so the step opens one per finished
     branch. (``batch: off`` alone would land by fast-forward — see the last two tests.)"""
     product_extra = ('steps:\n  batch: off\nconventions:\n  landing: pull-request\n'
-                     '  branch_prefixes:\n    fix-bug: fix/\n')
+                     '  branch_prefixes:\n    code: worker/\n    fix-bug: fix/\n')
 
     def setUp(self):
         super().setUp()
@@ -523,6 +523,14 @@ class PrsStepTests(StepsTestCase):
     def test_slug_comes_from_a_hosted_origin_when_the_yaml_has_none(self):
         _git(['remote', 'set-url', 'origin', 'git@example.com:owner/name.git'], self.repo)
         self.assertEqual(step_prs.repo_slug(env.Product('p', {'repo_dir': self.repo})), 'owner/name')
+
+    def test_prs_step_prefixes_come_from_the_product(self):
+        product = env.Product('p', {'conventions': {
+            'branch_prefixes': {'code': 'worker/', 'fix': 'fix/', 'spec': 'spec/', 'plan': 'plan/',
+                                 'fix-bug': 'feature/'}}})
+        self.assertEqual(sorted(step_prs.branch_prefixes(product)),
+                          sorted(product.conventions.all_prefixes()))
+        self.assertIn('feature/', step_prs.branch_prefixes(product))
 
     def test_fast_forward_landing_opens_nothing(self):
         """B-0029: ``asf`` lands by fast-forward (``batch: off``, no ``landing``) — a PR is never

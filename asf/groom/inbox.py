@@ -2,19 +2,11 @@
 import os
 import re
 
-from asf import env
 from asf.groom.shape import Card, Question, derive, infer_parent_epic
 from asf.record.ids import mint_id, write_new_item
 from asf.conventions import DEFAULT_INTAKE_DIR
 
 INBOX_KV_RE = re.compile(r'^(type|parent|signature|severity|writes|stories):\s*(.+?)\s*$', re.IGNORECASE)
-
-
-def intake_dir(args):
-    try:
-        return env.load_product(getattr(args, 'product', None)).conventions.intake_dir
-    except env.ConfigError:
-        return DEFAULT_INTAKE_DIR
 
 
 def _lift_section(lines, heading):
@@ -74,14 +66,19 @@ def parse_inbox_file(text):
     return Card(title, headers, description, features, acceptance)
 
 
-def process_inbox(root, canonical, date, default_bug_parent=None, intake_dir='inbox'):
+def process_inbox(root, canonical, date, default_bug_parent=None, intake_dir=None):
     """Turn every <intake_dir>/*.md into a card (moved to <intake_dir>/done/) or leave one
     `## Question` in place. Returns the list of newly minted ids, in filename order.
 
     `default_bug_parent` is the item a Bug with no explicit `parent:` line is filed under; when
     None (no such convention configured), a Bug always asks for its parent explicitly.
+
+    `intake_dir` is where a human drops a card for the groom to intake, relative to `root`; None
+    falls back to the documented default. The `why` a created card's History records —
+    `created (inbox)` — stays the literal word regardless: it names the intake stream, not
+    this path.
     """
-    inbox_dir = os.path.join(root, intake_dir)
+    inbox_dir = os.path.join(root, intake_dir or DEFAULT_INTAKE_DIR)
     if not os.path.isdir(inbox_dir):
         return []
     created = []

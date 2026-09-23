@@ -190,6 +190,13 @@ class RowsTest(unittest.TestCase):
         by = {r.item_id: r for r in rows.candidates(self.index, p, [])}
         self.assertEqual(by['B-0001'].branch, 'hotfix-B-0001')
 
+    def test_branch_for_reads_the_products_prefix(self):
+        import inspect
+        self.assertNotIn('default', inspect.signature(rows.branch_for).parameters)
+        p = product(conventions={'branch_prefixes': {'code': 'feature/'}})
+        self.assertEqual(rows.branch_for(p, 'code', 'T-0001'), 'feature/T-0001')
+        self.assertEqual(rows.branch_for(None, 'code', 'T-0001'), 'worker/T-0001')
+
     def test_blocked_feature_emits_nothing(self):
         idx = copy.deepcopy(self.index)
         idx['items']['F-0001']['blocked'] = True
