@@ -125,7 +125,7 @@ def ready_cell(root, product):
     if not root or not os.path.exists(os.path.join(root, 'index.json')):
         return not_configured('backlog_dir (no index.json)')
     items, _generated = ix.load(root)
-    rows = feeder_rows.plan_rows(items, product, inflight(product), capacity(), attempts=attempts(product))
+    rows = feeder_rows.plan_rows(items, product, inflight(product), capacity(product), attempts=attempts(product))
     launching = [r for r in rows if r.launches]
     if not launching:
         return f"0 ({len(rows)} row(s) waiting)" if rows else "0"
