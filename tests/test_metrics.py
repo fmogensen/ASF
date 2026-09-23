@@ -316,6 +316,54 @@ generated: 2026-09-21 — from metrics/ci (3), metrics/sessions (4), metrics/tic
 """
 
 
+def _at(minute):
+    return f"{DAY}T{9 + minute // 60:02d}:{minute % 60:02d}:00Z"
+
+
+def intake_events():
+    """Five cards filed at 09:00; A-D decided 10/20/30/40 min later; A, B, D launched 4/8/12 min after
+    that, C never; a launch of D before it was decided must not count."""
+    evs = []
+    for i in 'ABCDE':
+        evs.append({'kind': 'intake', 'item': f'T-{i}', 'filed': _at(0), 'ts': _at(3)})
+    for i, m in zip('ABCD', (10, 20, 30, 40)):
+        evs.append({'kind': 'groom_answer', 'item': f'T-{i}', 'field': 'decided', 'value': 'true', 'ts': _at(m)})
+    evs.append({'kind': 'groom_answer', 'item': 'T-E', 'field': 'priority', 'value': 'true', 'ts': _at(15)})
+    evs.append({'kind': 'launch', 'item': 'T-D', 'ts': _at(35)})
+    for i, m in zip('ABD', (14, 28, 52)):
+        evs.append({'kind': 'launch', 'item': f'T-{i}', 'ts': _at(m)})
+    return evs
+
+
+class IntakeLatencyTests(Base):
+    def test_median_p90_and_pair_counts(self):
+        (_, a, na), (_, b, nb) = metrics.intake_latency_rows(intake_events())
+        self.assertEqual(a, 'median 25 min, p90 40 min')
+        self.assertEqual(na, '4 of 5 cards measured (1 not decided by a groom answer)')
+        self.assertEqual(b, 'median 8 min, p90 12 min')
+        self.assertEqual(nb, '3 of 4 decided cards launched')
+
+    def test_empty_stream_divides_by_nothing(self):
+        rows = metrics.intake_latency_rows([])
+        self.assertEqual([r[1] for r in rows], ['no pairs measured'] * 2)
+
+    def test_render_daily_renders_both_rows(self):
+        os.makedirs(os.path.join(self.root, 'metrics', 'events'), exist_ok=True)
+        with open(os.path.join(self.root, 'metrics', 'events', f'{DAY}.jsonl'), 'w', encoding='utf-8') as f:
+            for ev in intake_events():
+                f.write(json.dumps(ev) + '\n')
+        md = metrics.render_daily(self.root, DAY, self.items)
+        self.assertIn('| intake → decided | median 25 min, p90 40 min | 4 of 5 cards measured', md)
+        self.assertIn('| decided → first session | median 8 min, p90 12 min | 3 of 4 decided cards launched |', md)
+
+    def test_no_events_argument_changes_nothing(self):
+        fixture_streams(self)
+        args = (metrics.read_stream(self.root, 'ci'), metrics.read_stream(self.root, 'sessions'),
+                metrics.read_stream(self.root, 'ticks'))
+        self.assertEqual(metrics.scorecard_rows(*args), metrics.scorecard_rows(*args, events=()))
+        self.assertFalse(any(r[0].startswith('intake') for r in metrics.scorecard_rows(*args)))
+
+
 class Rollup(Base):
     def test_daily_tables_match_the_expected_md(self):
         fixture_streams(self)

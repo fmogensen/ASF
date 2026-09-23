@@ -403,7 +403,53 @@ def _pct(a, b):
     return 100 * a // max(1, b)
 
 
-def scorecard_rows(ci, sessions, ticks, conv=None):
+def _minutes(a, b):
+    return round((b - a).total_seconds() / 60)
+
+
+def _median_p90(mins):
+    """Median and nearest-rank p90 of a non-empty list, in whole minutes."""
+    xs = sorted(mins)
+    n = len(xs)
+    mid = xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2
+    return f"median {round(mid)} min, p90 {xs[-(-9 * n // 10) - 1]} min"
+
+
+def intake_latency_rows(events, conv=None):
+    """The two latency rows over the `events` stream: `asf inbox` → decided (the `intake` event's
+    `filed` to the item's first `groom_answer` deciding it) and decided → first session (that
+    answer's `ts` to the item's first `launch` at or after it). Only pairs with both ends count;
+    the note says how many could not be measured."""
+    filed, decided, launches = {}, {}, collections.defaultdict(list)
+    for ev in events:
+        item, ts = ev.get('item'), parse_ts(ev.get('ts'))
+        if not item or ts is None:
+            continue
+        kind = ev.get('kind')
+        if kind == 'intake':
+            f = parse_ts(ev.get('filed'))
+            if f is not None and item not in filed:
+                filed[item] = f
+        elif kind == 'groom_answer' and ev.get('field') == 'decided' and str(ev.get('value')).lower() == 'true':
+            if item not in decided or ts < decided[item]:
+                decided[item] = ts
+        elif kind == 'launch':
+            launches[item].append(ts)
+    intake_n = sum(1 for ev in events if ev.get('kind') == 'intake')
+    to_decided = [_minutes(filed[i], d) for i, d in decided.items() if i in filed]
+    to_launch = []
+    for i, d in decided.items():
+        after = [t for t in launches.get(i, ()) if t >= d]
+        if after:
+            to_launch.append(_minutes(d, min(after)))
+    a = _median_p90(to_decided) if to_decided else 'no pairs measured'
+    b = _median_p90(to_launch) if to_launch else 'no pairs measured'
+    na = f"{len(to_decided)} of {intake_n} cards measured ({intake_n - len(to_decided)} not decided by a groom answer)" if intake_n else ''
+    nb = f"{len(to_launch)} of {len(decided)} decided cards launched" if decided else ''
+    return [('intake → decided', a, na), ('decided → first session', b, nb)]
+
+
+def scorecard_rows(ci, sessions, ticks, conv=None, events=()):
     """The rows of the waste table, computed from the streams."""
     conv = conv or DEFAULTS
     rows = []
@@ -463,6 +509,8 @@ def scorecard_rows(ci, sessions, ticks, conv=None):
     rows.append(('bandwidth',
                  'cux 5h/7d: ' + (', '.join(f"{a} {q['h5']}/{q['d7']} %" for a, q in sorted(quota.items())) or '—'),
                  f"{len(runner_min)} runners seen, {sum(runner_min.values())} runner-minutes"))
+    if events:
+        rows.extend(intake_latency_rows(events, conv))
     return rows
 
 
@@ -507,7 +555,7 @@ def render_daily(root, day, items, conv=None):
     out = [f"# Factory scorecard {day}", '',
            f"generated: {day} — from metrics/ci ({len(ci)}), metrics/sessions ({len(sessions)}), metrics/ticks ({len(ticks)})", '',
            '## Waste', '', '| Metric | Value | Note |', '|---|---|---|']
-    for m, v, n in scorecard_rows(ci, sessions, ticks, conv):
+    for m, v, n in scorecard_rows(ci, sessions, ticks, conv, read_stream(root, 'events', week)):
         out.append(f"| {esc(m)} | {esc(v)} | {esc(n)} |".replace('|  |', '| |'))
     out += ['', f"## Cost per Feature (7 days)", '', f"{week[0]} … {week[-1]}; a Feature's row sums its Tasks, Stories and Bugs; "
             "a CI run's minutes are split over the items it names.", '']
