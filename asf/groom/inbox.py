@@ -76,9 +76,10 @@ def parse_inbox_file(text):
 
     body_lines = rest[body_start:]
     features, body_lines = _lift_section(body_lines, 'Features')
+    assumptions, body_lines = _lift_section(body_lines, 'Assumptions')
     acceptance, body_lines = _lift_section(body_lines, 'Acceptance')
     description = '\n'.join(body_lines).strip()
-    return Card(title, headers, description, features, acceptance)
+    return Card(title, headers, description, features, acceptance, assumptions)
 
 
 def cmd_inbox(args, root):
@@ -122,6 +123,7 @@ def process_inbox(root, canonical, date, default_bug_parent=None, intake_dir=Non
     if not os.path.isdir(inbox_dir):
         return []
     created = []
+    minted = {}  # intake file name -> the id minted for it in this pass (PD9)
     for name in sorted(os.listdir(inbox_dir)):
         path = os.path.join(inbox_dir, name)
         if not name.endswith('.md') or not os.path.isfile(path):
@@ -132,7 +134,18 @@ def process_inbox(root, canonical, date, default_bug_parent=None, intake_dir=Non
             continue  # already asked: the groom puts it to the adjudicator (question_lines)
 
         card = parse_inbox_file(text)
-        result = derive(card, canonical, default_bug_parent=default_bug_parent)
+        result = None
+        ref = card.headers.get('parent', '')
+        if ref.startswith(TOKEN_PREFIX):
+            ref_name = ref[len(TOKEN_PREFIX):].strip()
+            if ref_name in minted:
+                card.headers['parent'] = minted[ref_name]
+            elif ref_name != name and os.path.isfile(os.path.join(inbox_dir, ref_name)):
+                continue  # its parent is not minted yet: wait, unquestioned (D4)
+            else:
+                result = Question(f"parent: names an intake card that is not there: {ref_name}")
+        if result is None:
+            result = derive(card, canonical, default_bug_parent=default_bug_parent)
 
         if isinstance(result, Question):
             new_text = text.rstrip('\n') + f"\n\n## Question\n{result.text}\n"
@@ -152,9 +165,11 @@ def process_inbox(root, canonical, date, default_bug_parent=None, intake_dir=Non
             typed['writes'] = [w.strip() for w in card.headers.get('writes', '').split(',') if w.strip()]
             typed['stories'] = [s.strip() for s in card.headers.get('stories', '').split(',') if s.strip()]
         write_new_item(root, canonical, type_, new_id, typed, card.description, date, 'inbox',
-                        acceptance=card.acceptance, sections={'Features': card.features},
+                        acceptance=card.acceptance, sections={'Features': card.features,
+                                  'Assumptions': card.assumptions},
                         shape=(rule, type_))
         created.append(new_id)
+        minted[name] = new_id
 
         done_dir = os.path.join(inbox_dir, 'done')
         os.makedirs(done_dir, exist_ok=True)

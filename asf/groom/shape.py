@@ -14,7 +14,7 @@ from asf.record.core import PARENT_TYPES, is_open, tokenize
 
 Shape = namedtuple('Shape', 'type rule parent')
 Question = namedtuple('Question', 'text')
-Card = namedtuple('Card', 'title headers description features acceptance')
+Card = namedtuple('Card', 'title headers description features acceptance assumptions')
 
 SIZE = {  # the card's definitions, in one place; the History line and asf check quote them
     'epic': 'a business outcome spanning several Features',

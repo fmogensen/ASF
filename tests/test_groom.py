@@ -362,3 +362,27 @@ class GroomSectionCoverageTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class AssumptionsThroughIntakeTests(unittest.TestCase):
+    """T-0058 (PD10): `## Assumptions` on an intake card lands in the minted card."""
+
+    def setUp(self):
+        self.root = make_repo()
+        write_item(self.root, 'E-0009', 'epic', 'Factory billing', typed_lines=['decided: true'])
+        run(['index'], self.root)
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_assumptions_survive_intake_into_the_minted_card(self):
+        with open(os.path.join(self.root, 'inbox', 'plans.md'), 'w', encoding='utf-8') as f:
+            f.write("# Billing plans\nparent: E-0009\n\nPlans.\n\n"
+                    "## Assumptions\n- one currency\n- monthly billing\n")
+        r = run(['groom'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(os.path.join(self.root, 'features', 'F-0001.md'), encoding='utf-8') as f:
+            text = f.read()
+        self.assertIn('## Assumptions\n- one currency\n- monthly billing\n', text)
+        self.assertLess(text.index('## Assumptions'), text.index('## Acceptance'))
+        self.assertEqual(inbox_mod.parse_inbox_file("# T\n\n## Assumptions\n- a\n").assumptions, ['a'])

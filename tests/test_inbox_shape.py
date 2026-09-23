@@ -28,7 +28,7 @@ MACHINE_LINES = ('state: New', 'stage_since: 2026-09-01T00:00:00Z', 'updated: 20
 
 
 def card(title, headers=None, description='', features=(), acceptance=()):
-    return shape.Card(title, dict(headers or {}), description, list(features), list(acceptance))
+    return shape.Card(title, dict(headers or {}), description, list(features), list(acceptance), [])
 
 
 def _record(header_lines):
@@ -556,3 +556,65 @@ class NewShapeTest(unittest.TestCase):
     def test_new_decision_unchanged(self):
         r = run(['new', 'decision', '--title', 'T'], self.root)
         self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class ForwardReferenceTest(unittest.TestCase):
+    """T-0058 (D3, D4, PD9, PD10): `parent: inbox:<file>` names an intake card by file, and
+    intake resolves it to the id minted for that file earlier in the same pass."""
+
+    def setUp(self):
+        self.root = make_repo()
+        self.intake = os.path.join(self.root, DEFAULT_INTAKE_DIR)
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _file(self, name, text):
+        with open(os.path.join(self.intake, name), 'w', encoding='utf-8') as f:
+            f.write(text)
+
+    def _item(self, folder, iid):
+        with open(os.path.join(self.root, folder, f"{iid}.md"), encoding='utf-8') as f:
+            return f.read()
+
+    def _epic_and_feature(self):
+        self._file('a-epic.md', "# Billing overhaul\n\n## Features\n- Plans\n- Invoices\n\n"
+                                "## Assumptions\n- one currency\n")
+        self._file('b-plans.md', "# Plans\nparent: inbox:a-epic.md\n\nThe plans page.\n")
+
+    def test_an_inbox_parent_resolves_to_the_id_minted_earlier_in_the_pass(self):
+        self._epic_and_feature()
+        r = run(['groom'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(os.listdir(os.path.join(self.root, 'epics')), ['E-0001.md'])
+        self.assertEqual(os.listdir(os.path.join(self.root, 'features')), ['F-0001.md'])
+        meta, _ = frontmatter.parse(self._item('features', 'F-0001'))
+        self.assertEqual(meta['parent'], 'E-0001')
+
+    def test_a_reference_whose_file_is_gone_asks_a_question(self):
+        self._file('b-plans.md', "# Plans\nparent: inbox:nowhere.md\n\nThe plans page.\n")
+        r = run(['groom'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(os.path.join(self.intake, 'b-plans.md'), encoding='utf-8') as f:
+            text = f.read()
+        self.assertIn('## Question', text)
+        self.assertIn('names an intake card that is not there', text)
+        self.assertEqual(os.listdir(os.path.join(self.root, 'features')), [])
+
+    def test_a_child_whose_parent_is_still_in_intake_is_left_alone(self):
+        # the parent sorts after the child, so it is not minted when the child is read (D4)
+        text = "# Plans\nparent: inbox:z-epic.md\n\nThe plans page.\n"
+        self._file('a-plans.md', text)
+        self._file('z-epic.md', "# Billing overhaul\n\n## Features\n- Plans\n- Invoices\n")
+        run(['groom'], self.root)
+        with open(os.path.join(self.intake, 'a-plans.md'), encoding='utf-8') as f:
+            self.assertEqual(f.read(), text)
+        self.assertEqual(os.listdir(os.path.join(self.root, 'epics')), ['E-0001.md'])
+        self.assertEqual(os.listdir(os.path.join(self.root, 'features')), [])
+
+    def test_assumptions_survive_intake_above_acceptance(self):
+        self._epic_and_feature()
+        run(['groom'], self.root)
+        text = self._item('epics', 'E-0001')
+        self.assertIn('## Assumptions\n- one currency\n', text)
+        self.assertLess(text.index('## Assumptions'), text.index('## Acceptance'))
