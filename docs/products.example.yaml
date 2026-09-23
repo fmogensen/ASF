@@ -43,6 +43,10 @@ conventions:
   # asf.groom.inbox / asf.tick.file_bugs: the Epic an inbox Bug or a filed Bug is parented under
   # when no explicit parent is given. Leave unset to have groom ask instead of guessing.
   default_bug_epic: E-0001
+  # asf.groom.shape: how many leading path segments make one area when the groom proposes a split,
+  # and the most globs a Task may write and still be batched. Both shown at their defaults.
+  # area_depth: 2
+  # batch_max_globs: 2
   # F-0031: globs whose match makes a landed branch's merge class merge_amendable_set (needs a
   # person, see approvals: below) rather than merge_routine_pr. The factory's own rules.
   amendable_paths: [rules/*, docs/CONSTITUTION.md]
