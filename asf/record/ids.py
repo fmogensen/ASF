@@ -56,7 +56,8 @@ def mint_id(root, canonical, type_):
     return f"{prefix}-{max_n + 1:04d}"
 
 
-def write_new_item(root, canonical, type_, new_id, typed_fields, body, date, why):
+def write_new_item(root, canonical, type_, new_id, typed_fields, body, date, why,
+                    acceptance=(), sections=None, shape=None):
     folder, _prefix = TYPES[type_]
     meta = frontmatter.FrontmatterDict()
     meta['id'] = new_id
@@ -70,15 +71,29 @@ def write_new_item(root, canonical, type_, new_id, typed_fields, body, date, why
     meta['stage_since'] = ts
     meta['updated'] = ts
     meta.machine_keys = {'schema_version', 'state', 'stage_since', 'updated'}
+
+    sections_text = ''
+    for heading, items in (sections or {}).items():
+        if not items:
+            continue
+        sections_text += f"## {heading}\n" + ''.join(f"- {item}\n" for item in items) + "\n"
+
+    acceptance_text = ''.join(f"- [ ] {item}\n" for item in acceptance) if acceptance else "- [ ] \n"
+
+    history_line = f"- {date}: created ({why})"
+    if shape is not None:
+        rule, shape_type = shape
+        history_line += f" — shape: {rule} → {shape_type}"
+
     full_body = (
-        f"## Description\n{body}\n\n" if body else "## Description\n\n"
-    ) + (
-        "## Acceptance\n- [ ] \n\n"
-        "## Non-goals\n\n"
-        "## History\n"
-        f"- {date}: created ({why})\n\n"
-        "## Children\n\n"
-        "## Backlinks\n"
+        (f"## Description\n{body}\n\n" if body else "## Description\n\n")
+        + sections_text
+        + f"## Acceptance\n{acceptance_text}\n"
+        + "## Non-goals\n\n"
+        + "## History\n"
+        + history_line + "\n\n"
+        + "## Children\n\n"
+        + "## Backlinks\n"
     )
     text = frontmatter.render(meta, full_body)
     path = os.path.join(root, folder, f"{new_id}.md")

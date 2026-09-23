@@ -4,12 +4,16 @@ import json
 import os
 import re
 
+from asf.groom import shape
 from asf.init import ITEM_FOLDERS as LAYOUT_FOLDERS, STREAM_FOLDERS
 from asf.record import frontmatter
 from asf.record.core import (
     BARE_DECISION_RE, FOLDER_TO_TYPE, ID_RE, NO_PARENT_TYPES, PARENT_TYPES, build_index_data,
-    canonicalize, compute_derived, expected_body, load_items, parse_sections, today,
+    canonicalize, compute_derived, expected_body, is_open, load_items, parse_sections, today,
 )
+
+ACCEPTANCE_ITEM_RE = re.compile(r'(?m)^- \[[ x]\]\s+\S')
+BULLET_RE = re.compile(r'(?m)^- \S')
 
 # A Feature normally requires a parent Epic, but `migrate` may leave one parentless when the
 # adopted source names no Epic for it and it carries no Story of its own to infer one from. Set
@@ -125,6 +129,48 @@ def cmd_check(args, root):
                             line = i + 1
                             break
                     add(rec, line or 1, f"{h} section is stale (run `asf index`)")
+
+    # Size: an item whose History records a shape reading is held to that type's size (D6) —
+    # an item never typed by shape (no `— shape:` line) is grandfathered and skipped.
+    for iid, rec in canonical.items():
+        if not is_open(rec):
+            continue
+        meta = rec['meta']
+        _preamble, sections = parse_sections(rec['body'])
+        section_by_heading = {heading.strip(): content for heading, content in sections}
+        history = section_by_heading.get('## History', '')
+        m = shape.SHAPE_LINE_RE.search(history)
+        if not m:
+            continue
+        shape_type = m.group(3)
+        if shape_type == 'bug':
+            if not meta.get('signature'):
+                add(rec, find_line(rec, 'id'),
+                    f"{iid}: bug without a signature (a Bug is {shape.SIZE['bug']})")
+        elif shape_type == 'task':
+            if not meta.get('writes'):
+                add(rec, find_line(rec, 'id'),
+                    f"{iid}: task without writes: (a Task is {shape.SIZE['task']})")
+        elif shape_type == 'story':
+            acceptance = section_by_heading.get('## Acceptance', '')
+            if not ACCEPTANCE_ITEM_RE.search(acceptance):
+                add(rec, find_line(rec, 'id'),
+                    f"{iid}: story without an acceptance list (a Story is {shape.SIZE['story']})")
+        elif shape_type == 'epic':
+            features = section_by_heading.get('## Features', '')
+            feature_bullets = len(BULLET_RE.findall(features))
+            feature_children = sum(
+                1 for cid in derived[iid]['children']
+                if canonical[cid]['meta'].get('type') == 'feature'
+            )
+            if feature_bullets < 2 and feature_children < 2:
+                add(rec, find_line(rec, 'id'),
+                    f"{iid}: epic spanning fewer than two Features (an Epic is {shape.SIZE['epic']})")
+        elif shape_type == 'feature':
+            if meta.get('writes') or meta.get('signature'):
+                add(rec, find_line(rec, 'id'),
+                    f"{iid}: feature carries writes:/signature: — that is a Task's/Bug's shape "
+                    f"(a Feature is {shape.SIZE['feature']})")
 
     # Feature stage vs story coverage
     task_story_ids = set()
