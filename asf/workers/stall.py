@@ -97,7 +97,7 @@ def stall(product, now=None, alive=health_mod.pid_alive, out=print):
 
 def correct_once(product, session, error_text, runtime):
     """One retry, cold: its own job and log, its own ledger line — never the dead session's.
-    True = it now passes."""
+    True = a correction is now running (B-0085); its verdict is the next tick's, not this one's."""
     if session.get('corrected'):
         return False
     with open(session['brief'], encoding='utf-8') as f:
@@ -116,7 +116,11 @@ def correct_once(product, session, error_text, runtime):
     job = runtime_mod.Job(product.name, retry_job, session.get('worktree'), path,
                           session.get('model'), account=_account(session),
                           env=retry_env, hooks_dir=hooks_dir)
-    result = runtime.run(job, wait=True)
+    # launched, not waited on (B-0085): this runs inside the tick's health step, and waiting
+    # here stopped health, harvest and the operator's tables for as long as a model session takes
+    # — one tick sat inside four serial adjudications for an hour. The run is in the registry
+    # with its pid; the next tick judges it exactly as it judges every other run.
+    result = runtime.run(job)
     pool_mod.update_session(product, session['job'], corrected=1)
     session['corrected'] = 1
     retry = {
@@ -128,12 +132,10 @@ def correct_once(product, session, error_text, runtime):
         'runtime': runtime.name, 'session': sid, 'product': product.name,
     }
     pool_mod.append_session(product, retry)
-    # the retry is judged as any run is — its result AND its push (B-0051), never `ok` alone
-    reason = lifecycle.judge(retry, lifecycle.gather(product, retry, alive=lambda pid: False))
-    ok = reason == lifecycle.FINISHED
-    pool_mod.update_session(product, retry_job, ended=pool_mod.now_iso(), end_reason=reason or 'failed',
-                            rc=0 if ok else 1)
-    return ok
+    # True means "a correction is now running", not "it passed": the run has a pid and a registry
+    # line, and health judges it on the next tick the way it judges any other run — its result AND
+    # its push (B-0051). Nothing here waits for it.
+    return True
 
 
 def _account(session):

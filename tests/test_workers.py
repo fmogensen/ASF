@@ -1070,7 +1070,8 @@ class TestCorrectOnce(Home):
                               runtime=runtime_mod.FakeRuntime([{'ok': False}]), cfg=self.cfg)
         rt = runtime_mod.FakeRuntime(path=os.path.join(FIXTURES, 'fake-results.json'))
         session = pool_mod.load_sessions(self.product)['j']
-        self.assertFalse(stall_mod.correct_once(self.product, session, 'test_x failed', rt))
+        # True = a correction is now running (B-0085); its verdict belongs to the next tick
+        self.assertTrue(stall_mod.correct_once(self.product, session, 'test_x failed', rt))
         _job, brief = rt.calls[0]
         self.assertEqual(brief, 'original brief\n\n\nCORRECTION: the step failed with:\ntest_x failed\n')
         self.assertEqual(pool_mod.load_sessions(self.product)['j']['corrected'], 1)
@@ -1091,16 +1092,21 @@ class TestCorrectOnce(Home):
         self.assertTrue(stall_mod.correct_once(self.product, session, 'boom',
                                                runtime_mod.FakeRuntime([{'ok': True}])))
 
-    def test_f0087_a_retry_that_says_ok_without_pushing_is_not_finished(self):
-        # the cold retry is judged like every run: by its result AND its push (B-0051)
+    def test_b0085_the_correction_is_launched_and_left_for_the_next_tick_to_judge(self):
+        # was: `f0087_a_retry_that_says_ok_without_pushing_is_not_finished`. The retry is still
+        # judged by its result AND its push (B-0051) — by health, on the next tick, exactly as
+        # every other run is. Judging it here meant waiting for it here, and that stopped the
+        # whole tick for as long as a model session takes (B-0085).
         spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b\n',
                         runtime=runtime_mod.FakeRuntime([{'ok': False}]), cfg=self.cfg)
         session = pool_mod.load_sessions(self.product)['j']
-        self.assertFalse(stall_mod.correct_once(self.product, session, 'boom',
-                                                runtime_mod.FakeRuntime([{'ok': True}])))
+        self.assertTrue(stall_mod.correct_once(self.product, session, 'boom',
+                                               runtime_mod.FakeRuntime([{'ok': True}])))
         retry = pool_mod.load_sessions(self.product)['j-correction']
-        self.assertEqual(retry['end_reason'],
-                         'failed: not pushed: 0 uncommitted file(s), 0 unpushed commit(s)')
+        self.assertIsNone(retry.get('ended'), 'the correction is running, not ended')
+        self.assertIsNone(retry.get('end_reason'))
+        self.assertTrue(retry.get('pid'), 'it is in the registry with its pid, so it can be seen')
+        self.assertTrue(retry.get('started'))
 
     def test_b0039_the_retry_relaunches_cold_its_own_job_and_log(self):
         """D-0048 part b: a correction is a fresh session, not the dead one resumed — its own
@@ -1121,8 +1127,8 @@ class TestCorrectOnce(Home):
         self.assertEqual(len(new_jobs), 1, sessions)
         retry = sessions[new_jobs[0]]
         self.assertNotEqual(retry['log'], session['log'])
-        self.assertEqual(retry['end_reason'], 'finished')
-        self.assertEqual(retry['rc'], 0)
+        self.assertEqual(retry['job'], 'j-correction')
+        self.assertIsNone(retry.get('end_reason'), 'the next tick judges it (B-0085)')
         self.assertEqual(retry['branch'], rec['branch'])
         self.assertEqual(retry['worktree'], rec['worktree'])
         self.assertNotIn('end_reason', sessions['j'])

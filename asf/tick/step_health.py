@@ -69,14 +69,19 @@ def handle_dead(ctx, session, runtime_fn=_runtime, out=print):
     job = session['job']
     if session.get('operator_flagged'):
         return 'flagged'
-    if not session.get('corrected'):
+    # a correction is never corrected again (B-0085): its own failure is what holds the item, and
+    # the round is counted there. Without this the tick would correct the correction for ever.
+    is_correction = str(job).endswith('-correction')
+    if not session.get('corrected') and not is_correction:
         try:
             ok = stall_mod.correct_once(product, session, error_text(session), runtime_fn())
         except (OSError, KeyError) as e:
             out(f"DEAD  {job:<24} correction could not start: {e}")
             ok = False
         if ok:
-            out(f"DEAD  {job:<24} corrected — relaunched cold as {job}-correction")
+            # launched, not finished (B-0085): the correction is running with its own registry
+            # line, and the next tick judges it. Nothing waits for it here.
+            out(f"DEAD  {job:<24} correction launched as {job}-correction")
             return 'corrected'
     # B-0062: a session that died twice is held like a red gate — a correction on the run, a
     # round on the item, the ADJUDICATE row at the cap — never a question to the operator
@@ -143,4 +148,31 @@ def run(ctx, out=print, runtime_fn=_runtime):
         session = sessions.get(job)
         if session is not None:
             handle_dead(ctx, dict(session, job=job), runtime_fn=runtime_fn, out=out)
+    hold_failed_corrections(ctx, sessions, out=out)
+    return 0
+
+
+def hold_failed_corrections(ctx, sessions, out=print):
+    """A correction that has ended without finishing holds the run it was correcting (B-0085).
+
+    The hold used to happen in the same pass that launched the correction, because that pass
+    waited for it. Nothing waits now, so the failure is discovered here, one tick later: the
+    correction is ended, it did not finish, and its original run is held exactly as before —
+    a correction on the run, a round on the item, the ADJUDICATE row at the cap (B-0062)."""
+    product = ctx.product
+    path = pool_mod.sessions_path(product)
+    for job, run_rec in sorted(sessions.items()):
+        if not job.endswith('-correction') or not run_rec.get('ended'):
+            continue
+        if run_rec.get('end_reason') == lifecycle.FINISHED or run_rec.get('harvested'):
+            continue
+        original = sessions.get(job[:-len('-correction')])
+        if original is None or lifecycle.pending_correction(original, path):
+            continue
+        original_job = job[:-len('-correction')]
+        fields, line = lifecycle.hold(path, dict(original, job=original_job), 'died',
+                                      died_text(run_rec), pool_mod.now_iso())
+        ctx.event('held', job=original_job, item=original.get('item'), text=line)
+        pool_mod.update_session(product, original_job, **fields)
+        out(line)
     return 0

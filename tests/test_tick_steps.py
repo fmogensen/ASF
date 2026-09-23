@@ -174,7 +174,7 @@ class HealthStepTests(StepsTestCase):
         ctx = self.ctx()
         step_health.run(ctx, out=self.lines.append, runtime_fn=lambda: fake)
         self.assertIn('ended     fix-b-0001               dead pid', self.lines)
-        self.assertIn('DEAD  fix-b-0001               corrected — relaunched cold as '
+        self.assertIn('DEAD  fix-b-0001               correction launched as '
                       'fix-b-0001-correction', self.lines)
         self.assertEqual(len(fake.calls), 1)
         self.assertIn('CORRECTION: the step failed with:', fake.calls[0][1])
@@ -183,24 +183,25 @@ class HealthStepTests(StepsTestCase):
     def test_b0039_corrected_session_is_recorded_finished_as_its_own_job(self):
         self.dead_session()
         fake = runtime_mod.FakeRuntime([{'ok': True}])
+        # tick one launches the correction, tick two judges it (B-0085): nothing waits inside a step
+        step_health.run(self.ctx(), out=self.lines.append, runtime_fn=lambda: fake)
         step_health.run(self.ctx(), out=self.lines.append, runtime_fn=lambda: fake)
         sessions = pool_mod.load_sessions(self.product)
         # the dead run's own record stands — it is not rewritten as the one that passed
         self.assertEqual(sessions['fix-b-0001']['end_reason'], 'dead pid')
         s = sessions['fix-b-0001-correction']
         self.assertEqual(s['end_reason'], 'finished')
-        self.assertEqual(s['rc'], 0)
         self.assertTrue(s.get('ended'))
 
     def test_b0039_failed_correction_is_recorded_failed_as_its_own_job(self):
         self.dead_session()
         fake = runtime_mod.FakeRuntime([{'ok': False, 'result': 'still broken'}])
         step_health.run(self.ctx(), out=self.lines.append, runtime_fn=lambda: fake)
+        step_health.run(self.ctx(), out=self.lines.append, runtime_fn=lambda: fake)
         sessions = pool_mod.load_sessions(self.product)
         self.assertEqual(sessions['fix-b-0001']['end_reason'], 'dead pid')
         s = sessions['fix-b-0001-correction']
         self.assertEqual(s['end_reason'], 'failed')
-        self.assertEqual(s['rc'], 1)
 
     def test_b0062_already_corrected_is_held_not_a_question(self):
         # "a manual question for me is a bug": a twice-dead session is a correction on the run
@@ -256,6 +257,9 @@ class HealthStepTests(StepsTestCase):
         self.dead_session()
         fake = runtime_mod.FakeRuntime([{'ok': False, 'result': 'still broken'}])
         ctx = self.ctx()
+        step_health.run(ctx, out=self.lines.append, runtime_fn=lambda: fake)
+        self.assertEqual([e['kind'] for e in self.events(ctx)], [],
+                         'the correction is running; a hold would pre-judge it (B-0085)')
         step_health.run(ctx, out=self.lines.append, runtime_fn=lambda: fake)
         self.assertEqual([e['kind'] for e in self.events(ctx)], ['held'])
 
