@@ -80,7 +80,7 @@ TRANSITIONS = {
 
 #: A run's own fields: they belong to one launch and never fold into the next (B-0041).
 RUN_FIELDS = ('ended', 'end_reason', 'rc', 'corrected', 'operator_flagged', 'harvested',
-              'harvest', 'correction', 'rounds', 'stop_tip')
+              'harvest', 'correction', 'rounds', 'stop_tip', 'capped')
 
 FINISHED = 'finished'
 DEAD_PID = 'dead pid'

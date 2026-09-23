@@ -161,9 +161,16 @@ FAILURE_SIGNATURES = (
 
 
 def failure_reason(rec):
-    """The signature name when a result's text is one of the CLI's error messages, else what
-    the session's own typed REPORT declares (``pushed: no`` → ``unpushed work``,
-    :mod:`asf.workers.report`), else None."""
+    """``'token cap'`` when the record carries the factory's structured ``asf.cap`` object, else
+    the signature name when a result's text is one of the CLI's error messages, else what the
+    session's own typed REPORT declares (``pushed: no`` → ``unpushed work``,
+    :mod:`asf.workers.report`), else None.
+
+    The structured field is read first: a session's own report text lands in ``result`` and is
+    forgeable, the factory's field is not (F-0028 D9)."""
+    asf = (rec or {}).get('asf')
+    if isinstance(asf, dict) and isinstance(asf.get('cap'), dict):
+        return 'token cap'
     text = str((rec or {}).get('result') or '')
     for name, pattern in FAILURE_SIGNATURES:
         if pattern.search(text):

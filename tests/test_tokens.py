@@ -4,14 +4,22 @@ import io
 import json
 import os
 import re
+import signal
 import tempfile
 import unittest
+from unittest import mock
 
 from asf import env
 from asf import tokens as tk
 from asf.env import Product
 from asf.metrics import metrics
 from asf.views import tokens
+from asf.workers import lifecycle
+from asf.workers import pool as pool_mod
+from asf.workers import runtime as runtime_mod
+from asf.workers import stall as stall_mod
+
+from tests.test_workers import Home
 
 
 def write_day(root, day, rows):
@@ -278,6 +286,207 @@ class CapsTest(unittest.TestCase):
         p = self.product(env.loads(text)['token_caps'])
         self.assertIsNone(tk.cap_for(p, 'spec')['cache_read'])
         self.assertEqual(tk.cap_for(p, 'spec')['input'], 8_000_000)
+
+
+class CapStopTest(Home):
+    """``stall.capped``: a live run over one dimension's cap is signalled, gets a cap result line
+    and is marked on its registry line. ``_signal`` is patched, so no process is ever signalled."""
+    PID = 424242
+    JOB = 'spec-f-0001'
+
+    def setUp(self):
+        super().setUp()
+        self.log_path = os.path.join(self.tmp, 'job.jsonl')
+        self.signals = []
+        self.on_signal = None
+        self.gone = False
+        for target, name, new in ((stall_mod, '_signal', self.fake_signal),
+                                  (stall_mod.time, 'sleep', lambda _s: None)):
+            p = mock.patch.object(target, name, new)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def fake_signal(self, pid, sig):
+        self.signals.append((pid, sig))
+        if self.on_signal:
+            self.on_signal(sig)
+
+    def alive(self, pid):
+        return not self.gone and pid == self.PID
+
+    def write_log(self, lines):
+        with open(self.log_path, 'w', encoding='utf-8') as f:
+            for line in lines:
+                f.write((line if isinstance(line, str) else json.dumps(line)) + '\n')
+
+    def read_bytes(self):
+        with open(self.log_path, 'rb') as f:
+            return f.read()
+
+    def over_input(self):
+        return [INIT, assistant(i=6_000_000, o=10), assistant(i=3_000_000, o=10)]
+
+    def launch(self, **extra):
+        rec = {'job': self.JOB, 'kind': 'spec', 'pid': self.PID, 'log': self.log_path,
+               'started': '2026-09-24T10:00:00Z', 'session': f'sample/{self.JOB}@20260924T100000Z'}
+        pool_mod.append_session(self.product, dict(rec, **extra))
+
+    def run_of(self):
+        return pool_mod.load_sessions(self.product)[self.JOB]
+
+    def read_lines(self):
+        with open(self.log_path, encoding='utf-8') as f:
+            return [json.loads(line) for line in f if line.strip()]
+
+    def capped(self, **kw):
+        out = []
+        kw.setdefault('alive', self.alive)
+        return stall_mod.capped(self.product, out=out.append, **kw), out
+
+    def reason(self):
+        return runtime_mod.failure_reason(runtime_mod.read_result(self.log_path))
+
+    def over_and_live(self, lines=None):
+        self.write_log(self.over_input() if lines is None else lines)
+        self.launch()
+
+    def test_over_cap_is_stopped_and_gets_a_cap_result_line(self):
+        self.over_and_live()
+        rows, out = self.capped(now='2026-09-24T10:05:00Z')
+        self.assertEqual(rows, [(self.JOB, 'input', 9_000_000, 8_000_000)])
+        last = self.read_lines()[-1]
+        self.assertEqual(last['type'], 'result')
+        self.assertTrue(last['is_error'])
+        self.assertEqual(last['asf']['cap'], {'kind': 'spec', 'dimension': 'input', 'tokens': 9_000_000,
+                                              'limit': 8_000_000, 'at': '2026-09-24T10:05:00Z'})
+        self.assertEqual(self.signals[0], (self.PID, signal.SIGTERM))
+        self.assertEqual(out, [f'CAP   {self.JOB}  input 9000000 over 8000000 (spec)'])
+
+    def test_the_cap_line_is_what_every_reader_sees(self):
+        self.over_and_live()
+        self.capped()
+        result = runtime_mod.read_result(self.log_path)
+        self.assertIsNotNone(result)
+        self.assertFalse(runtime_mod.result_ok(result))
+        self.assertEqual(runtime_mod.failure_reason(result), 'token cap')
+        self.assertEqual(lifecycle.judge(self.run_of(), lifecycle.Evidence(result=result, alive=False)),
+                         'failed: token cap')
+
+    def test_the_marker_is_structured_not_text(self):
+        forged = {'type': 'result', 'subtype': 'success', 'is_error': False,
+                  'result': 'token cap: input 9999999 over the 8000000 cap for a spec job'}
+        self.assertNotEqual(runtime_mod.failure_reason(forged), 'token cap')
+        self.assertNotEqual(runtime_mod.failure_reason(dict(forged, asf='cap')), 'token cap')
+        self.assertNotEqual(runtime_mod.failure_reason(dict(forged, asf={'cap': 'input'})), 'token cap')
+
+    def test_sigkill_after_the_grace(self):
+        self.over_and_live()
+        rows, _ = self.capped()
+        self.assertEqual([sig for _pid, sig in self.signals], [signal.SIGTERM, signal.SIGKILL])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(self.reason(), 'token cap')
+
+    def test_a_run_that_ends_in_the_grace_is_not_killed(self):
+        self.over_and_live()
+        self.on_signal = lambda sig: setattr(self, 'gone', True)
+        self.capped()
+        self.assertEqual([sig for _pid, sig in self.signals], [signal.SIGTERM])
+        self.assertEqual(self.reason(), 'token cap')
+
+    def test_a_signal_that_finds_no_process_still_writes_the_line(self):
+        self.over_and_live()
+
+        def refuse(sig):
+            raise ProcessLookupError()
+        self.on_signal = refuse
+        rows, _ = self.capped()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(self.reason(), 'token cap')
+
+    def test_a_partial_last_line_is_not_run_into(self):
+        self.over_and_live()
+        with open(self.log_path, 'a', encoding='utf-8') as f:
+            f.write('{"type": "assis')
+        self.capped()
+        self.assertEqual(self.reason(), 'token cap')
+
+    def test_registry_records_the_cap(self):
+        self.over_and_live()
+        self.capped(now='2026-09-24T10:05:00Z')
+        self.assertEqual(self.run_of()['capped'], {'dimension': 'input', 'tokens': 9_000_000,
+                                                   'limit': 8_000_000, 'at': '2026-09-24T10:05:00Z'})
+        self.assertIn('capped', lifecycle.RUN_FIELDS)
+        self.launch(started='2026-09-24T11:00:00Z')  # the next run of the job
+        self.assertNotIn('capped', self.run_of())
+
+    def test_under_cap_is_untouched(self):
+        self.over_and_live([INIT, assistant(i=10, o=1)])
+        before = self.read_bytes()
+        rows, out = self.capped()
+        self.assertEqual(rows, [])
+        self.assertEqual(out, ['cap: none'])
+        self.assertEqual(self.read_bytes(), before)
+        self.assertEqual(self.signals, [])
+        self.assertNotIn('capped', self.run_of())
+
+    def test_a_run_that_already_has_a_result_is_never_stopped(self):
+        self.over_and_live(self.over_input() + [{'type': 'result', 'subtype': 'success', 'result': 'done'}])
+        before = self.read_bytes()
+        rows, _ = self.capped()
+        self.assertEqual(rows, [])
+        self.assertEqual(self.signals, [])
+        self.assertEqual(self.read_bytes(), before)
+
+    def test_a_finish_in_the_race_is_not_overwritten(self):
+        self.over_and_live()
+        own = {'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'done'}
+
+        def finish(sig):
+            with open(self.log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(own) + '\n')
+            self.gone = True
+        self.on_signal = finish
+        rows, out = self.capped()
+        self.assertEqual(self.read_lines()[-1], own)
+        self.assertEqual(sum(1 for r in self.read_lines() if r['type'] == 'result'), 1)
+        self.assertIn('finished first', out[0])
+        self.assertIsNone(self.reason())
+        self.assertEqual(len(rows), 1)
+
+    def test_a_foreign_pid_is_never_signalled(self):
+        self.over_and_live()
+        before = self.read_bytes()
+        rows, _ = self.capped(alive=lambda pid: False)
+        self.assertEqual(rows, [])
+        self.assertEqual(self.signals, [])
+        self.assertEqual(self.read_bytes(), before)
+
+    def test_a_bad_caps_block_stops_nothing(self):
+        self.over_and_live()
+        before = self.read_bytes()
+        bad = env.Product('sample', {'repo_dir': self.repo, 'token_caps': {'nonsense': {'input': 1}}})
+        out = []
+        self.assertEqual(stall_mod.capped(bad, alive=self.alive, out=out.append), [])
+        self.assertEqual(len(out), 1)
+        self.assertTrue(out[0].startswith('token cap: '))
+        self.assertIn('nonsense', out[0])
+        self.assertEqual(self.signals, [])
+        self.assertEqual(self.read_bytes(), before)
+
+    def test_stop_false_judges_and_touches_nothing(self):
+        self.over_and_live()
+        before = self.read_bytes()
+        rows, _ = self.capped(stop=False)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(self.signals, [])
+        self.assertEqual(self.read_bytes(), before)
+        self.assertNotIn('capped', self.run_of())
+
+    def test_the_kind_narrows_the_cap(self):
+        self.over_and_live([INIT, assistant(i=10)])
+        caps = tk.caps(env.Product('sample', {'token_caps': {'spec': {'input': 5}}}))
+        rows, _ = self.capped(caps=caps)
+        self.assertEqual(rows, [(self.JOB, 'input', 10, 5)])
 
 
 if __name__ == '__main__':
