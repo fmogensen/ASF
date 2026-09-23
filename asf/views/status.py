@@ -8,7 +8,8 @@ Every row is filled from what exists, or says which key would fill it —
 * **Agents** — the workers' session registry, ``~/.ASF/state/<product>/sessions.jsonl``;
 * **Ready to launch** — what ``asf next --json`` would print (the feeder over the record's
   ``index.json``, less the sessions in flight);
-* **Quota 5h/7d** — each account through the quota source (``worker_pool.quota_command``);
+* **Quota 5h/7d** — each account through the quota source (``worker_pool.quota_command``), the
+  cell naming the band when it is not ``free``;
 * **Cron** — the scheduler adapter's ``status()`` of this product's loaded jobs.
 """
 import datetime
@@ -141,15 +142,21 @@ def quota_cell(cfg):
     if not accounts:
         return not_configured('worker_pool.accounts')
     source = quota_mod.source_from_config(cfg)
+    guards = quota_mod.guards_from_config(cfg)
     parts = []
     for a in accounts:
         try:
-            u = source.read(a) or {}
+            u = source.read(a)
         except Exception:  # noqa: BLE001 — an unreadable account is shown, not raised
-            u = {}
-        five, seven = u.get('five_h_pct'), u.get('seven_d_pct')
-        parts.append(f"{a.name} {five if five is not None else '?'}%/"
-                     f"{seven if seven is not None else '?'}%")
+            u = None
+        uu = u or {}
+        five, seven = uu.get('five_h_pct'), uu.get('seven_d_pct')
+        state, _why = quota_mod.band(u, guards)
+        part = (f"{a.name} {five if five is not None else '?'}%/"
+                f"{seven if seven is not None else '?'}%")
+        if state != quota_mod.FREE:
+            part += f" {state}"
+        parts.append(part)
     return ', '.join(parts)
 
 

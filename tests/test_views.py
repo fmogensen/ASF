@@ -118,6 +118,18 @@ class StatusViewTests(ViewsTestCase):
                         lambda self, a: {'five_h_pct': 12, 'seven_d_pct': 40}):
             self.assertEqual(self.rows(cfg)['Quota 5h/7d'], 'w1 12%/40%')
 
+    def test_quota_cell_names_the_band(self):
+        cfg = {'scheduler': {'kind': 'none'},
+               'worker_pool': {'quota_command': 'echo', 'accounts': [{'name': 'w1'}]}}
+        with mock.patch('asf.workers.quota.CommandQuotaSource.read',
+                        lambda self, a: {'five_h_pct': 12, 'seven_d_pct': 91}):
+            self.assertEqual(self.rows(cfg)['Quota 5h/7d'], 'w1 12%/91% cooldown')
+        with mock.patch('asf.workers.quota.CommandQuotaSource.read',
+                        lambda self, a: {'five_h_pct': 96, 'seven_d_pct': 12}):
+            self.assertEqual(self.rows(cfg)['Quota 5h/7d'], 'w1 96%/12% stop')
+        with mock.patch('asf.workers.quota.CommandQuotaSource.read', lambda self, a: None):
+            self.assertEqual(self.rows(cfg)['Quota 5h/7d'], 'w1 ?%/?% stop')
+
     def test_cron_from_the_scheduler_adapter(self):
         from asf import scheduler
         jobs = [{'label': 'asf.p.record-health'}, {'label': 'asf.other.record'}]
