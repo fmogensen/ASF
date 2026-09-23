@@ -187,7 +187,9 @@ def _file_or_bump_bug(root, canonical, sig, info, date, default_bug_epic=None):
 
     typed = {
         'title': info['title'], 'severity': info['severity'], 'found_in': 'ci',
-        'signature': sig, 'count': 1, 'last_filed': date, 'decided': False,
+        'signature': sig, 'count': 1, 'last_filed': date,
+        # B-0089: an S1/S2 is decided by its severity — BUG → FIX must not wait for the daily groom
+        'decided': info['severity'] in ('S1', 'S2'),
         'parent': default_bug_epic,
     }
     if info.get('places'):

@@ -244,8 +244,17 @@ class FileBugsIntegrationTests(unittest.TestCase):
         self.assertEqual(meta['found_in'], 'ci')
         self.assertEqual(meta['parent'], 'E-0009')
         self.assertEqual(meta['count'], 1)
-        self.assertEqual(meta['decided'], False)
         self.assertEqual(meta['links']['runs'], [100, 101])
+
+    def test_an_s1_s2_bug_is_filed_decided_so_bug_fix_need_not_wait_for_the_groom(self):
+        # B-0089: the severity is the decision for an S1/S2 — no 24h wait for the daily groom.
+        r = run(['file-bugs', '--default-bug-epic', 'E-0009'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        name = [n for n in os.listdir(os.path.join(self.root, 'bugs')) if n.endswith('.md')][0]
+        with open(os.path.join(self.root, 'bugs', name)) as f:
+            meta, _body = frontmatter.parse(f.read(), path=f'bugs/{name}')
+        self.assertEqual(meta['severity'], 'S2')
+        self.assertIs(meta['decided'], True)
 
     def test_with_no_default_bug_epic_configured_bug_is_still_filed_unparented(self):
         # file-bugs never blocks on a missing convention the way groom's inbox intake does — a
