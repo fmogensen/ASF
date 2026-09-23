@@ -45,8 +45,15 @@ When the test command names its red modules (a ``red: a, b`` line, as asf's own 
 prints), the halves re-run only those modules (``ASF_GATE_MODULES``) and the set kept is gated
 in full once more before it is pushed; when those modules are red on the trunk alone too, no
 branch is blamed or held — ``harvest: red on trunk too — <modules>`` — and the next tick retries.
+
+A branch whose diff is Markdown under the document trees only (:func:`is_inert` — a spec or plan
+branch) cannot turn a test red: it is gated by the checks alone, in a set of its own that lands
+whatever the code branches' gate says, and a red gate never sends its session a round. A red
+naming only files outside a branch's footprint — its item's ``writes:``, else its diff — is
+``foreign``: no correction, re-gated next tick.
 """
 import argparse
+import dataclasses
 import json
 import os
 import re
@@ -814,6 +821,32 @@ def touched_files(repo, trunk, branch):
     return [l for l in r.stdout.splitlines() if l.strip()]
 
 
+def doc_roots(conv):
+    """The top-level directories the product keeps its documents and record drops in — the first
+    segment of every document tree the conventions name (specs, plans, reviews, briefs, intake)."""
+    roots = set()
+    for key in ('specs_dir', 'plans_dir', 'reviews_dir', 'briefs_dir', 'intake_dir'):
+        value = conv.get(key)
+        if value:
+            roots.add(str(value).strip('/').split('/')[0])
+    return roots
+
+
+def is_inert(conv, files):
+    """True when every one of ``files`` is a Markdown document at the repo's root or under one of
+    :func:`doc_roots` — prose no test imports or executes, so it cannot turn a test red. A
+    ``.md`` inside a package (a brief template, a generated skill) is not inert, nor is any other
+    file under the document tree (an example yaml a test reads)."""
+    roots = doc_roots(conv)
+    return bool(files) and all(
+        f.endswith('.md') and ('/' not in f or f.split('/')[0] in roots) for f in files)
+
+
+def docs_only(conv):
+    """``conv`` with no test command: the gate an inert branch passes is the checks alone."""
+    return dataclasses.replace(conv, test_command=None)
+
+
 def deliverable_of(conv, branch, item):
     """A ``spec/`` or ``plan/`` branch delivers one document (its template: "create only that
     file"); every other lane delivers what it touched."""
@@ -922,16 +955,27 @@ def archive_superseded(repo, state_dir, branch, record, item, state, dry_run, ou
     return SUPERSEDED
 
 
-def hold_with_correction(state_dir, branch, record, kind, text, out, files=(), item_writes=()):
+def hold_with_correction(state_dir, branch, record, kind, text, out, files=(), item_writes=(),
+                         touched=(), conv=None):
     """Hold ``branch`` and hand it back to its session: :func:`asf.workers.lifecycle.hold` says
     what goes on the run (the failing output as ``correction``, the rounds over every session of
-    the item, the cap the feeder switches an ADJUDICATE row on at) and what to print."""
+    the item, the cap the feeder switches an ADJUDICATE row on at) and what to print.
+
+    A red gate is not the branch's when it names only files outside its footprint — the item's
+    ``writes:``, or, with none (a spec or plan branch), the files the branch's diff actually
+    ``touched`` — nor ever when that diff is :func:`is_inert` (docs no test runs): no
+    correction, no round, re-gated next tick."""
     job = record.get('job') or branch
     if kind == 'gate' and text.startswith(TIMED_OUT):  # B-0082: a clock is not a defect — no round,
         out(f'{TIMED_OUT} {branch}: {text} — retried next tick')  # no correction, eligible again
         return 'timed-out'
-    if kind == 'gate' and files and item_writes and footprint.overlaps(item_writes, files) is None:
-        out(f'foreign {branch}: gate red outside its writes: {files[0]} — re-gated next tick')
+    if kind == 'gate' and touched and is_inert(conv or DEFAULTS, touched) \
+            and not footprint.overlaps(touched, files):
+        out(f'foreign {branch}: gate red, its diff is docs only — re-gated next tick')
+        return 'foreign'
+    reach, what = (item_writes, 'writes') if item_writes else (touched, 'diff')
+    if kind == 'gate' and files and reach and footprint.overlaps(reach, files) is None:
+        out(f'foreign {branch}: gate red outside its {what}: {files[0]} — re-gated next tick')
         return 'foreign'  # D8: not this item's red — no correction, no round
     fields, line = lifecycle.hold(sessions_path(state_dir), dict(record, branch=branch, job=job),
                                   kind, text, now_iso())
@@ -944,6 +988,8 @@ def land_ff(repo, state_dir, branch, record, item, conv, asf_repo, bug_root, dry
             item_writes=()):
     trunk = conv.main
     job = record.get('job') or branch
+    touched = touched_files(repo, trunk, branch)
+    gate_conv = docs_only(conv) if is_inert(conv, touched) else conv  # docs run no test
     for _attempt in (1, 2):
         holder = tempfile.mkdtemp(prefix='harvest-')
         tmp = os.path.join(holder, 'wt')
@@ -955,10 +1001,10 @@ def land_ff(repo, state_dir, branch, record, item, conv, asf_repo, bug_root, dry
             ok, reason = rebase_and_resolve(tmp, trunk)
             if not ok:
                 return hold_with_correction(state_dir, branch, record, 'conflict', reason, out)
-            ok, line, files, _red = product_gate(tmp, conv, asf_repo, out)
+            ok, line, files, _red = product_gate(tmp, gate_conv, asf_repo, out)
             if not ok:
                 return hold_with_correction(state_dir, branch, record, 'gate', line, out,
-                                            files, item_writes)
+                                            files, item_writes, touched, conv)
             sha = sh(['git', 'rev-parse', 'HEAD'], cwd=tmp).stdout.strip()
             if dry_run:
                 out(f'DRY: would land {branch} → {sha}')
@@ -1080,12 +1126,29 @@ def land_combined(repo, state_dir, entries, conv, asf_repo, dry_run, out, items=
     head, bisecting on red; ``{branch: outcome}``. The head is pushed fast-forward as the
     trunk's new tip and every branch in it is marked harvested at that sha, then deleted."""
     trunk = conv.main
+    touched = {branch: touched_files(repo, trunk, branch) for branch, _record in entries}
+    docs = [e for e in entries if is_inert(conv, touched[e[0]])]
+    code = [e for e in entries if e not in docs]
+    results = {}
+    if docs:  # docs cannot turn a test red: they land on their own, behind the checks alone
+        results.update(land_set(repo, state_dir, docs, conv, docs_only(conv), asf_repo, dry_run,
+                                out, items, touched))
+    if code:
+        results.update(land_set(repo, state_dir, code, conv, conv, asf_repo, dry_run, out, items,
+                                touched))
+    return results
+
+
+def land_set(repo, state_dir, entries, conv, gate_conv, asf_repo, dry_run, out, items, touched):
+    """:func:`land_combined` for one set of ``entries``, gated under ``gate_conv``."""
+    trunk = conv.main
     results = {}
 
     def hold(entry, kind, text, files=()):
         card = (items or {}).get(item_of(entry[0], entry[1])) or {}  # P7: no index, no footprint
         results[entry[0]] = hold_with_correction(state_dir, entry[0], entry[1], kind, text, out,
-                                                 files, card.get('writes') or ())
+                                                 files, card.get('writes') or (),
+                                                 touched.get(entry[0]) or (), conv)
 
     pending = list(entries)
     for _attempt in (1, 2):
@@ -1099,7 +1162,8 @@ def land_combined(repo, state_dir, entries, conv, asf_repo, dry_run, out, items=
                     results[branch] = 'held'
                 return results
             try:
-                group = confirmed_group(tmp, trunk, pending, conv, asf_repo, hold, out, results)
+                group = confirmed_group(tmp, trunk, pending, gate_conv, asf_repo, hold, out,
+                                        results)
             except TrunkRed as red:  # no branch's doing: hold nothing, gate again next tick
                 out(f'harvest: red on trunk too — {" ".join(red.modules)}')
                 return results

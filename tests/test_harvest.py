@@ -1224,6 +1224,32 @@ class ProductHarvestTests(unittest.TestCase):
             rec = self.record(b)
             self.assertFalse(rec.get('rounds') or rec.get('correction'), rec)
 
+    # -- a docs-only branch cannot turn a test red ---------------------------------------
+    def plan_lane(self):
+        self.push_lane('plan/F-0001', [('plan(F-0001): the tasks',
+                                        {'docs/plans/f-0001.md': '# plan\n'})])
+        self.session('plan-f-0001', 'F-0001', 'plan/F-0001')
+        return 'plan/F-0001'
+
+    def test_a_docs_only_branch_lands_alone_when_the_rest_is_red(self):
+        branch = self.plan_lane()
+        self.lanes(1, red=(1,))
+        with self.gated() as gate:
+            results, lines = self.harvest(self.product())
+        self.assertEqual(results, {branch: 'landed', 'fix/B-0001': 'held'}, lines)
+        self.assertIsNone(gate.call_args_list[0].args[1].test_command)  # the docs ran no test
+        self.assertTrue(self.record(branch).get('harvested'))
+        self.assertFalse(self.record(branch).get('rounds'))
+        self.assertTrue(self.record('fix/B-0001').get('correction'))
+
+    def test_a_docs_only_branch_is_never_held_on_a_red_test_command(self):
+        branch = self.plan_lane()
+        red = f'{sys.executable} -c "import sys; sys.exit(1)"'
+        results, lines = self.harvest(self.product(test_command=red,
+                                                   harvest={'gate': 'per-branch'}))
+        self.assertEqual(results, {branch: 'landed'}, lines)
+        self.assertFalse(self.record(branch).get('rounds'))
+
     # -- B-0072: a hanging gate is held, not waited for ----------------------------------
     def test_b0072_a_hanging_gate_is_held_with_the_timeout_line_and_its_children_are_gone(self):
         import time
@@ -1323,6 +1349,37 @@ class ForeignRedTests(unittest.TestCase):
     def test_no_writes_or_no_files_holds_as_today(self):
         self.assertEqual(self.hold(['asf/other.py'], []), 'held')
         self.assertEqual(self.hold([], ['asf/harvest/harvest.py']), 'held')
+
+    def hold_diff(self, files, touched):
+        return harvest.hold_with_correction(self.state, 'plan/F-0039', self.record, 'gate',
+                                            'FAILED (failures=1)', self.lines.append, files, (),
+                                            touched)
+
+    def test_with_no_writes_the_diff_is_the_footprint(self):
+        self.assertEqual(self.hold_diff(['asf/other.py'], ['asf/mine.py']), 'foreign')
+        self.assertEqual(self.lines, ['foreign plan/F-0039: gate red outside its diff: '
+                                      'asf/other.py — re-gated next tick'])
+        self.assertEqual(self.hold_diff(['asf/mine.py'], ['asf/mine.py']), 'held')
+
+    def test_a_docs_only_diff_is_never_held_for_a_red_test(self):
+        docs = ['docs/plans/f-0039.md', 'README.md']
+        self.assertEqual(self.hold_diff([], docs), 'foreign')  # a bare verdict names no file
+        self.assertEqual(self.hold_diff(['tests/test_stop.py'], docs), 'foreign')
+        self.assertEqual(self.registry(), '')
+        self.assertTrue(all(l.startswith('foreign plan/F-0039: ') for l in self.lines), self.lines)
+
+    def test_a_red_naming_the_doc_itself_holds(self):
+        """The checks read documents too: a red that names the branch's own doc is its own."""
+        self.assertEqual(self.hold_diff(['docs/plans/f-0039.md'], ['docs/plans/f-0039.md']),
+                         'held')
+
+    def test_what_counts_as_docs_only(self):
+        conv = harvest.DEFAULTS
+        self.assertTrue(harvest.is_inert(conv, ['docs/plans/f-1.md', 'docs/reviews/1-x.md',
+                                                'README.md']))
+        for files in ([], ['docs/config.example.yaml'], ['asf/briefs/templates/plan.md'],
+                      ['plugin/skills/x/SKILL.md'], ['docs/plans/f-1.md', 'asf/x.py']):
+            self.assertFalse(harvest.is_inert(conv, files), files)
 
     def test_only_a_gate_red_can_be_foreign(self):
         self.assertEqual(self.hold(['asf/other.py'], ['asf/harvest/harvest.py'], kind='conflict'),
