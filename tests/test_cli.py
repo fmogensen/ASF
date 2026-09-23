@@ -148,3 +148,105 @@ class RecordCommandUsesTheProductRecordTests(unittest.TestCase):
         rc, out = self._run(['groom'])
         self.assertEqual(rc, 0, out)
         self.assertEqual(out.splitlines()[0], f"record: {os.path.realpath(self.backlog_dir)}", out)
+
+
+class UnparkTests(unittest.TestCase):
+    """F-0095 §2.5: ``asf unpark <item>`` appends the undo beside the park and clears it."""
+
+    PARK = {'kind': 'empty', 'text': 'nothing to land', 'at': '2026-09-01T10:00:00Z',
+            'parked': True, 'reason': 'ended empty 2 times: the Task is parked'}
+    LAUNCH = {'job': 'coder-t-0017', 'item': 'T-0017', 'kind': 'coder', 'pid': 1,
+              'started': '2026-09-01T09:00:00Z'}
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='cli_test_')
+        self._orig_home = env.ASF_HOME
+        env.ASF_HOME = self.tmp
+        os.makedirs(os.path.join(self.tmp, 'products'))
+        with open(env.product_path('sample'), 'w') as f:
+            f.write('product: sample\nrepo_slug: x/y\n')
+        self.path = os.path.join(env.state_dir('sample'), 'sessions.jsonl')
+
+    def tearDown(self):
+        env.ASF_HOME = self._orig_home
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _ledger(self, *records):
+        with open(self.path, 'w') as f:
+            for r in records:
+                f.write(json.dumps(r) + '\n')
+
+    def _parked(self):
+        ended = dict(self.LAUNCH, ended='2026-09-01T09:30:00Z',
+                     end_reason='failed: empty branch: nothing to land')
+        self._ledger(ended, {'job': 'coder-t-0017', 'correction': dict(self.PARK),
+                             'operator_flagged': 1})
+
+    def _run(self, argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = cli.main(argv)
+        return rc, out.getvalue()
+
+    def _read(self):
+        with open(self.path) as f:
+            return f.read()
+
+    def _lines(self):
+        return [json.loads(x) for x in self._read().splitlines()]
+
+    def test_unpark_clears_the_park_and_appends_one_line(self):
+        from asf.workers import lifecycle
+        self._parked()
+        before = self._read()
+        self.assertIn('T-0017', lifecycle.corrections(self.path))
+        rc, out = self._run(['unpark', 'T-0017', '--product', 'sample'])
+        self.assertEqual(rc, 0, out)
+        self.assertIn('T-0017', out)
+        self.assertIn('coder-t-0017', out)
+        self.assertIn('parked', out)
+        self.assertEqual(lifecycle.corrections(self.path), {})
+        after = self._read()
+        self.assertTrue(after.startswith(before), 'the park line is still in the file')
+        self.assertEqual(len(after.splitlines()), len(before.splitlines()) + 1)
+        last = self._lines()[-1]
+        self.assertEqual(last['job'], 'coder-t-0017')
+        self.assertIsNone(last['correction'])
+        self.assertTrue(last['unparked'])
+        self.assertEqual(last['unpark_why'], '')
+
+    def test_why_is_recorded(self):
+        self._parked()
+        rc, out = self._run(['unpark', 'T-0017', '--why', 'T-0022 supersedes it',
+                             '--product', 'sample'])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self._lines()[-1]['unpark_why'], 'T-0022 supersedes it')
+        self.assertIn('T-0022 supersedes it', out)
+
+    def test_the_run_keeps_its_end_reason_and_has_no_pending_correction(self):
+        from asf.workers import lifecycle
+        self._parked()
+        self._run(['unpark', 'T-0017', '--product', 'sample'])
+        run = lifecycle.latest(self.path)['coder-t-0017']
+        self.assertIsNone(lifecycle.pending_correction(run, self.path))
+        self.assertEqual(run['end_reason'], 'failed: empty branch: nothing to land')
+
+    def test_an_item_that_is_not_parked_is_refused(self):
+        self._ledger(dict(self.LAUNCH, ended='2026-09-01T09:30:00Z', end_reason='finished'))
+        before = self._read()
+        rc, out = self._run(['unpark', 'T-0017', '--product', 'sample'])
+        self.assertEqual(rc, 1, out)
+        self.assertIn('not parked', out)
+        self.assertEqual(self._read(), before)
+
+    def test_a_held_but_unparked_correction_is_refused(self):
+        held = {'kind': 'empty', 'text': 'x', 'at': '2026-09-01T10:00:00Z'}
+        self._ledger(dict(self.LAUNCH, correction=held))
+        rc, out = self._run(['unpark', 'T-0017', '--product', 'sample'])
+        self.assertEqual(rc, 1, out)
+
+    def test_an_item_the_ledger_does_not_know_is_refused(self):
+        self._parked()
+        rc, out = self._run(['unpark', 'T-9999', '--product', 'sample'])
+        self.assertEqual(rc, 1, out)
+        self.assertIn('not in the ledger', out)
