@@ -438,6 +438,10 @@ class KindModelGrantTest(unittest.TestCase):
         self.assertIn('groom', brief.add_dirs)
         self.assertIn(os.path.expanduser('~/.ASF/state/sample/groom'), brief.add_dirs)
 
+    def test_a_groom_brief_grants_the_intake_directory_its_inbox_lines_name(self):
+        brief = briefs.build(product(), ROWS['groom'], index(), [], REPO_FACTS)
+        self.assertIn('inbox', brief.add_dirs)
+
 
 class GenericTest(unittest.TestCase):
     def test_no_template_carries_a_forbidden_name(self):

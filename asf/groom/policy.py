@@ -19,7 +19,8 @@ ADJUDICATE_ATTEMPTS = 2
 #: A ``- [ ] <id> <title> — <why> → answer: ____`` line — a question no rule and no session has
 #: yet answered (PD4). A barred line's slot reads ``____ (barred: …)`` instead, so it never
 #: matches and is never counted open.
-OPEN_QUESTION_RE = re.compile(r'^- \[ \]\s+(?P<id>[A-Z]-\d{4})\b.*→\s*answer:\s*____$')
+OPEN_QUESTION_RE = re.compile(
+    r'^- \[ \]\s+(?P<id>[A-Z]-\d{4}\b|inbox:\S+).*→\s*answer:\s*____$')
 
 #: An open question's line, split so :func:`suppress` can keep the ``<id> <title> — <why>``
 #: text and only replace the answer slot.

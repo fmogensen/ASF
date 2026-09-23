@@ -505,6 +505,85 @@ class AnswersFileTests(unittest.TestCase):
             self.assertEqual(f.read(), snapshot)
 
 
+QUESTION = ('This reads as a defect. A Bug carries a signature — add signature: <the failing '
+            'test or error line>; or an ## Acceptance list if it is new work.')
+
+
+class InboxQuestionTests(GroomAutoTestCase):
+    """An inbox card intake could not type waited "on a human edit" for ever: its question was
+    in the card and nowhere else — not in the groom file, not before the adjudicator. Under
+    ``approvals.groom: auto`` nobody edits a card, so five cards sat in the inbox for good."""
+
+    def write_card(self, name='login.md', text='# The factory login fails on Safari\n\nUsers see a blank page.\n'):
+        path = os.path.join(self.root, 'inbox', name)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+        return path
+
+    def test_the_question_is_a_groom_line_the_adjudicator_sees(self):
+        self.write_product(approvals={'groom': 'auto'})
+        self.write_card()
+        r = self.run_groom()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(os.path.join(self.root, 'groom', today() + '.md')) as f:
+            text = f.read()
+        self.assertIn('## Inbox cards with a question', text)
+        line = (f'- [ ] inbox:login.md The factory login fails on Safari — {QUESTION} '
+                '→ answer: ____')
+        self.assertIn(line, text)
+        self.assertEqual(policy.open_questions(text)[-1], ('inbox:login.md', line))
+
+    def meta(self, folder, name):
+        with open(os.path.join(self.root, folder, name), encoding='utf-8') as f:
+            return frontmatter.parse(f.read())[0]
+
+    def answer(self, word, default_bug_epic=None):
+        path = self.write_card(text='# The factory login fails on Safari\n\nUsers see a blank page.\n'
+                                    f'\n## Question\n{QUESTION}\n')
+        answers_dir = tempfile.mkdtemp(prefix='groom_answers_')
+        self.addCleanup(shutil.rmtree, answers_dir, True)
+        answers = os.path.join(answers_dir, '2026-09-21.answers')
+        with open(answers, 'w', encoding='utf-8') as f:
+            f.write(f'- [ ] inbox:login.md The factory login fails on Safari — {QUESTION} '
+                    f'→ answer: adjudicator: {word}\n')
+        rc = groom.cmd_groom(argparse.Namespace(
+            date='2026-09-22', apply=False, product=None, default_bug_epic=default_bug_epic,
+            answers_file=answers, event=None), self.root)
+        self.assertEqual(rc, 0)
+        return path
+
+    def test_feature_makes_it_a_feature_card(self):
+        path = self.answer('feature')
+        self.assertFalse(os.path.exists(path))
+        meta = self.meta('features', 'F-0001.md')
+        self.assertEqual((meta['title'], meta['parent']), ('The factory login fails on Safari', 'E-0009'))
+
+    def test_bug_with_a_signature_makes_it_a_bug(self):
+        path = self.answer('bug blank page on /login in Safari', default_bug_epic='E-0009')
+        self.assertFalse(os.path.exists(path))
+        meta = self.meta('bugs', 'B-0001.md')
+        self.assertEqual(meta['signature'], 'blank page on /login in Safari')
+
+    def test_several_clauses_and_a_parent(self):
+        self.answer('feature; parent E-0009')
+        meta = self.meta('features', 'F-0001.md')
+        self.assertEqual(meta['parent'], 'E-0009')
+
+    def test_no_closes_the_card_without_minting(self):
+        path = self.answer('no')
+        self.assertFalse(os.path.exists(path))
+        self.assertEqual(os.listdir(os.path.join(self.root, 'features')), [])
+        done = os.listdir(os.path.join(self.root, 'inbox', 'done'))
+        self.assertEqual(len(done), 1)
+        with open(os.path.join(self.root, 'inbox', 'done', done[0])) as f:
+            self.assertTrue(f.read().startswith('→ closed (groom 2026-09-22, adjudicator'))
+
+    def test_an_answer_outside_the_grammar_changes_nothing(self):
+        path = self.answer('maybe later')
+        with open(path) as f:
+            self.assertIn('## Question', f.read())
+
+
 class UnblockTests(unittest.TestCase):
     """T5: applying ``unblock <id>`` removes it from ``blockedBy``, one of two ids, the last id,
     twice, and an absent id — all through ``apply_groom_answers`` directly."""

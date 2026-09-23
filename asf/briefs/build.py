@@ -162,12 +162,15 @@ def add_dirs_for(product, row=None, kind=None):
         raw = product._get('job_grants') if hasattr(product, '_get') else None
         grants = [os.path.expanduser(str(d)) for d in (raw or [])]
     if kind == 'groom' and row is not None:
-        for attr in ('groom_file', 'answers_file'):
-            path = getattr(row, attr, '') or ''
-            if path:
-                d = os.path.dirname(os.path.expanduser(path))
-                if d and d not in grants:
-                    grants.append(d)
+        dirs = [os.path.dirname(os.path.expanduser(getattr(row, attr, '') or ''))
+                for attr in ('groom_file', 'answers_file') if getattr(row, attr, '')]
+        groom_file = getattr(row, 'groom_file', '') or ''
+        if groom_file and product is not None:  # the cards its `inbox:` lines name
+            record = os.path.dirname(os.path.dirname(os.path.expanduser(groom_file)))
+            dirs.append(os.path.join(record, product.conventions.intake_dir))
+        for d in dirs:
+            if d and d not in grants:
+                grants.append(d)
     return grants
 
 

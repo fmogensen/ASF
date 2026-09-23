@@ -86,7 +86,9 @@ def groom_state(product, root):
     return {'date': date, 'file': path,
             'answers': os.path.join(env.state_dir(product), 'groom', f'{date}.answers'),
             'open': [iid for iid, _line in pairs], 'lines': [line for _iid, line in pairs],
-            'oldest': pairs[0][0] if pairs else None, 'attempts': attempts}
+            'oldest': next((iid for iid, _l in pairs if not iid.startswith('inbox:')),
+                           pairs[0][0] if pairs else None),
+            'attempts': attempts}
 
 
 def plan_inputs(product, root):

@@ -131,6 +131,16 @@ class ShapeRulesTest(unittest.TestCase):
         c = card('Checkout fails', headers={'signature': 'test_checkout::test_pay', 'parent': 'E-0001'})
         self.assertEqual(shape.derive(c, self.canonical), shape.Shape('bug', 'signature', 'E-0001'))
 
+    def test_an_explicit_type_feature_settles_the_defect_reading(self):
+        # the adjudicator's `feature` answer to "this reads as a defect" (the words are loose:
+        # "red", "fails" read a saving card as a Bug)
+        c = card('Billing fails less often', headers={'type': 'feature'},
+                 description='the red path costs money')
+        self.assertEqual(shape.derive(c, self.canonical), shape.Shape('feature', 'default', 'E-0001'))
+        self.assertIsInstance(shape.derive(card('Billing fails less often',
+                                                description='the red path'), self.canonical),
+                              shape.Question)
+
     def test_signature_uses_the_default_bug_parent(self):
         c = card('Checkout fails', headers={'signature': 'test_checkout::test_pay'})
         result = shape.derive(c, self.canonical, default_bug_parent='E-0001')

@@ -8,6 +8,10 @@ lines a policy could not answer. The open questions it still carries, exactly as
 FOR EACH ONE, one of two outcomes — never "noted", never a question back:
 - an answer in the grammar: `yes`, `no`, `rank <n>`, `parent <id>`, `S1`, `S2`, `S3`, or
   `unblock <id>`, each with one sentence of why;
+- for an `inbox:<file>` line — a card intake could not type, its question after the `—` — read
+  the card in the intake directory and answer with what settles it: `feature`, `bug <the
+  failing test or error line>`, `parent <id>`, `S1`/`S2`/`S3` (several joined by `; `), or `no`
+  to close the card unminted;
 - or, when the question is not yours to answer, the literal `NEEDS OPERATOR: <the question> —
   <your recommendation>`.
 

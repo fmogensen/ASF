@@ -129,7 +129,7 @@ def process_inbox(root, canonical, date, default_bug_parent=None, intake_dir=Non
         with open(path, encoding='utf-8') as f:
             text = f.read()
         if '\n## Question' in text or text.startswith('## Question'):
-            continue  # already asked; waiting on a human edit
+            continue  # already asked: the groom puts it to the adjudicator (question_lines)
 
         card = parse_inbox_file(text)
         result = derive(card, canonical, default_bug_parent=default_bug_parent)
@@ -163,3 +163,104 @@ def process_inbox(root, canonical, date, default_bug_parent=None, intake_dir=Non
             f.write(f"→ {new_id}\n\n{text}")
         os.remove(path)
     return created
+
+
+# ---- the questions intake leaves, put to the groom (F-0085 under approvals.groom: auto) ------
+
+#: A groom line's item token for an inbox card, which has no id yet: ``inbox:<file name>``.
+TOKEN_PREFIX = 'inbox:'
+QUESTION_HEADING = '## Question'
+
+
+def _split_question(text):
+    """``(card text without its ## Question block, the question)``."""
+    lines = text.split('\n')
+    start = next((i for i, l in enumerate(lines) if l.strip() == QUESTION_HEADING), None)
+    if start is None:
+        return text, ''
+    end = start + 1
+    while end < len(lines) and not lines[end].startswith('## '):
+        end += 1
+    question = ' '.join(l.strip() for l in lines[start + 1:end] if l.strip())
+    rest = lines[:start] + lines[end:]
+    return '\n'.join(rest).rstrip('\n') + '\n', question
+
+
+def question_lines(root, intake_dir=None):
+    """One open groom line per inbox card intake asked a question of, in file-name order:
+    ``- [ ] inbox:<name> <title> — <question> → answer: ____``. The groom file carries them so
+    the adjudicator answers them (:func:`apply_answer`) — nobody edits a card by hand."""
+    d = os.path.join(root, intake_dir or DEFAULT_INTAKE_DIR)
+    if not os.path.isdir(d):
+        return []
+    out = []
+    for name in sorted(os.listdir(d)):
+        path = os.path.join(d, name)
+        if not name.endswith('.md') or not os.path.isfile(path):
+            continue
+        with open(path, encoding='utf-8') as f:
+            text = f.read()
+        body, question = _split_question(text)
+        if not question:
+            continue
+        title = ' '.join(parse_inbox_file(body).title.split())
+        out.append(f"- [ ] {TOKEN_PREFIX}{name} {title} — {question} → answer: ____")
+    return out
+
+
+_CLAUSES = (
+    (re.compile(r'^feature$', re.IGNORECASE), lambda m: ('type', 'feature')),
+    (re.compile(r'^bug\s+(.+)$', re.IGNORECASE), lambda m: ('signature', m.group(1).strip())),
+    (re.compile(r'^parent\s+([A-Z]-\d{4})$', re.IGNORECASE), lambda m: ('parent', m.group(1).upper())),
+    (re.compile(r'^(S[123])$', re.IGNORECASE), lambda m: ('severity', m.group(1).upper())),
+)
+_CLOSE_RE = re.compile(r'^(no|close)$', re.IGNORECASE)
+
+
+def parse_answer(answer):
+    """An inbox answer: ``'close'``, or ``{header: value}`` from ``;``-separated clauses —
+    ``feature``, ``bug <signature>``, ``parent <id>``, ``S1|S2|S3`` — or None when any clause is
+    outside that grammar (the line then changes nothing)."""
+    a = answer.strip()
+    if _CLOSE_RE.match(a):
+        return 'close'
+    headers = {}
+    for clause in (c.strip() for c in a.split(';')):
+        for rx, make in _CLAUSES:
+            m = rx.match(clause)
+            if m:
+                k, v = make(m)
+                headers[k] = v
+                break
+        else:
+            return None
+    return headers or None
+
+
+def apply_answer(root, name, answer, date, who, intake_dir=None):
+    """Apply one answer to ``<intake_dir>/<name>``: its ``## Question`` block goes, the answer's
+    header lines go in under the title (replacing one of the same key), and the next intake
+    reads the card again — a card or, still unsettled, a fresh question. ``close`` moves it to
+    ``done/`` unminted. Returns True when the card changed."""
+    d = os.path.join(root, intake_dir or DEFAULT_INTAKE_DIR)
+    path = os.path.join(d, name)
+    parsed = parse_answer(answer)
+    if parsed is None or os.path.basename(name) != name or not os.path.isfile(path):
+        return False
+    with open(path, encoding='utf-8') as f:
+        text = f.read()
+    body, _question = _split_question(text)
+    if parsed == 'close':
+        os.makedirs(os.path.join(d, 'done'), exist_ok=True)
+        with open(os.path.join(d, 'done', name), 'w', encoding='utf-8') as f:
+            f.write(f"→ closed (groom {date}, {who})\n\n{text}")
+        os.remove(path)
+        return True
+    lines = body.split('\n')
+    idx = next((i for i, l in enumerate(lines) if l.strip()), 0)
+    keep = [l for l in lines[idx + 1:]
+            if not ((m := INBOX_KV_RE.match(l.strip())) and m.group(1).lower() in parsed)]
+    new = lines[:idx + 1] + [f'{k}: {v}' for k, v in parsed.items()] + keep
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(new))
+    return True

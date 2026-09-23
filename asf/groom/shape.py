@@ -101,7 +101,9 @@ def derive(card, canonical, default_bug_parent=None):
                 'Under a Story only a Task hangs — add a writes: line, or parent the card to the Feature.'
             )
 
-    if not card.acceptance and DEFECT_WORDS_RE.search(f"{card.title} {card.description}"):
+    explicit_feature = (headers.get('type') or '').lower() == 'feature'  # the answer to it
+    if (not card.acceptance and not explicit_feature
+            and DEFECT_WORDS_RE.search(f"{card.title} {card.description}")):
         return Question(
             'This reads as a defect. A Bug carries a signature — add signature: <the failing '
             'test or error line>; or an ## Acceptance list if it is new work.'

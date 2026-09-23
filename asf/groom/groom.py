@@ -13,12 +13,14 @@ from asf.tick.stale import format_age, parse_iso
 from asf.groom import policy
 from asf.groom import inbox
 from asf.groom.digest import write_digest
+from asf.groom import inbox as inbox_mod
 from asf.groom.inbox import process_inbox
 from asf.groom.shape import SHAPE_LINE_RE
 from asf.views import index_reader
 from asf.workers import lifecycle, pool
 
 ANSWER_LINE_RE = re.compile(r'^- \[[ xX]\]\s+(?P<id>[A-Z]-\d{4})\b.*→\s*answer:\s*(?P<answer>.*)$')
+INBOX_ANSWER_RE = re.compile(r'^- \[[ xX]\]\s+inbox:(?P<name>\S+)\s.*→\s*answer:\s*(?P<answer>.*)$')
 ANSWER_YES = re.compile(r'^yes$', re.IGNORECASE)
 ANSWER_NO = re.compile(r'^(no|close)$', re.IGNORECASE)
 ANSWER_RANK = re.compile(r'^rank\s+(\d+)$', re.IGNORECASE)
@@ -76,8 +78,28 @@ def _fmt_history_value(value):
     return str(value)
 
 
+def _attribution(raw_answer, adjudicator_job):
+    """``(answer word, who, by)`` — the answer with its ``controller:``/``adjudicator:`` prefix
+    taken off, and whom the History line and the event name."""
+    who, by = '(operator)', 'operator'
+    cm = CONTROLLER_PREFIX.match(raw_answer)
+    am = ADJUDICATOR_PREFIX.match(raw_answer) if cm is None else None
+    if cm:
+        raw_answer = raw_answer[cm.end():].strip()
+        pm = re.match(r'^(\S+)\s+(.*)$', raw_answer)
+        if pm and pm.group(1) in POLICY_NAMES:
+            who, by = f'(controller, {pm.group(1)})', f'rule:{pm.group(1)}'
+            raw_answer = pm.group(2).strip()
+        else:
+            who, by = '(controller, starvation policy)', 'rule:starvation policy'
+    elif am:
+        raw_answer = raw_answer[am.end():].strip()
+        who, by = f'(adjudicator, {adjudicator_job})', f'adjudicator:{adjudicator_job}'
+    return raw_answer, who, by
+
+
 def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None, event=None,
-                        sections=None):
+                        sections=None, intake_dir=None):
     """Read `prev_path`'s answered lines, write each as a typed field, append one History line
     each. A no-op line (blank/`____`, or a field already at the target value) changes nothing —
     this is what makes re-running `--apply` for the same date idempotent.
@@ -95,6 +117,16 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None, 
 
     applied = 0
     for line in lines:
+        im = INBOX_ANSWER_RE.match(line)
+        if im:  # an inbox card intake asked about: the answer edits the card, intake re-reads it
+            word, who, by = _attribution(im.group('answer').strip(), adjudicator_job)
+            if inbox_mod.apply_answer(root, im.group('name'), word, date, who.strip('()'),
+                                      intake_dir=intake_dir):
+                applied += 1
+                if event:
+                    event('groom_answer', item=f"inbox:{im.group('name')}", section='inbox_questions',
+                          field='inbox', value=word, by=by)
+            continue
         m = ANSWER_LINE_RE.match(line)
         if not m:
             continue
@@ -103,24 +135,7 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None, 
         if rec is None:
             continue
 
-        who = '(operator)'
-        by = 'operator'
-        cm = CONTROLLER_PREFIX.match(raw_answer)
-        am = ADJUDICATOR_PREFIX.match(raw_answer) if cm is None else None
-        if cm:
-            raw_answer = raw_answer[cm.end():].strip()
-            pm = re.match(r'^(\S+)\s+(.*)$', raw_answer)
-            if pm and pm.group(1) in POLICY_NAMES:
-                who = f'(controller, {pm.group(1)})'
-                by = f'rule:{pm.group(1)}'
-                raw_answer = pm.group(2).strip()
-            else:
-                who = '(controller, starvation policy)'
-                by = 'rule:starvation policy'
-        elif am:
-            raw_answer = raw_answer[am.end():].strip()
-            who = f'(adjudicator, {adjudicator_job})'
-            by = f'adjudicator:{adjudicator_job}'
+        raw_answer, who, by = _attribution(raw_answer, adjudicator_job)
 
         field, value = _parse_answer(raw_answer)
         if field is None:
@@ -338,7 +353,11 @@ def build_groom_sections(canonical, derived, date):
     }
 
 
-_SECTION_BY_TITLE = {title: key for title, key in GROOM_SECTIONS}
+#: Rendered only when it has lines: the inbox cards intake asked a question of (their lines
+#: carry an ``inbox:<file>`` token, not an id — :func:`asf.groom.inbox.question_lines`).
+INBOX_QUESTIONS = ('Inbox cards with a question', 'inbox_questions')
+
+_SECTION_BY_TITLE = {title: key for title, key in GROOM_SECTIONS + [INBOX_QUESTIONS]}
 _HEADER_RE = re.compile(r'^## (.+)$')
 _LINE_ID_RE = re.compile(r'^- \[[ xX]\]\s+([A-Z]-\d{4})\b')
 
@@ -421,6 +440,10 @@ def render_groom_file(date, sections):
         else:
             out.append("(none)\n")
         out.append('')
+    title, key = INBOX_QUESTIONS
+    if sections.get(key):
+        out.append(f"## {title}\n")
+        out.append('\n'.join(sections[key]) + '\n')
     return '\n'.join(out).rstrip('\n') + '\n'
 
 
@@ -442,6 +465,7 @@ def cmd_groom(args, root):
         product = None
 
     event = getattr(args, 'event', None)
+    intake_dir = product.conventions.intake_dir if product else None
 
     applied = 0
     if args.apply:
@@ -450,7 +474,7 @@ def cmd_groom(args, root):
             with open(prev, encoding='utf-8') as f:
                 prev_sections = _line_sections(f.read())
             applied = apply_groom_answers(root, canonical, prev, date, event=event,
-                                          sections=prev_sections)
+                                          sections=prev_sections, intake_dir=intake_dir)
 
     answers_file = getattr(args, 'answers_file', None)
     answers_text = None
@@ -466,17 +490,18 @@ def cmd_groom(args, root):
             answers_text = f.read()
         applied += apply_groom_answers(root, canonical, answers_file, date,
                                        adjudicator_job=f'groom-{adj_date}', event=event,
-                                       sections=adj_sections)
+                                       sections=adj_sections, intake_dir=intake_dir)
         os.rename(answers_file, answers_file + '.done')
 
     default_bug_parent = getattr(args, 'default_bug_epic', None)
     if default_bug_parent is None and product is not None:
         default_bug_parent = product.conventions.get('default_bug_epic')
     created_ids = process_inbox(root, canonical, date, default_bug_parent=default_bug_parent,
-                                intake_dir=product.conventions.intake_dir if product else None)
+                                intake_dir=intake_dir)
 
     derived = compute_derived(canonical)
     sections = build_groom_sections(canonical, derived, date)
+    sections[INBOX_QUESTIONS[1]] = inbox_mod.question_lines(root, intake_dir)
 
     auto = policy.groom_auto(product)
     by_rule = 0
@@ -504,7 +529,7 @@ def cmd_groom(args, root):
 
     if auto:
         by_rule = apply_groom_answers(root, canonical, groom_path, date, event=event,
-                                      sections=_line_sections(text))
+                                      sections=_line_sections(text), intake_dir=intake_dir)
         canonical, _dupes = canonicalize(load_items(root)[0])
         derived = compute_derived(canonical)
         cap = policy.adjudicate_attempts(product)
