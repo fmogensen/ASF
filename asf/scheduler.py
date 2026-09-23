@@ -24,7 +24,9 @@ A clock is a job: ``products/<product>.yaml``'s ``clocks:`` block names each one
 ticks (or ``shadow: true``) and exactly one of ``every: <duration>`` or ``at: "HH:MM"``. Each
 clock renders one job, labelled ``<label_prefix>.<product>.<clock-name>`` and logging to
 ``<ASF_HOME>/logs/tick-<product>-<clock-name>.log``. The step ``daily`` is the one special
-name — a clock whose only step is ``daily`` renders ``asf tick --daily`` rather than ``--steps``.
+name only to the tick, not here: a clock whose only step is ``daily`` renders ``--steps daily``
+like any other (the daily stamp keeps it once a day); ``--daily`` alone would run every step.
+An installed job still carrying the old ``--daily`` form reads back as the daily clock.
 """
 import fnmatch
 import os
@@ -124,9 +126,7 @@ def tick_argv(product_name, clock):
     argv = [sys.executable, '-m', 'asf.cli', 'tick', '--product', product_name]
     if clock.shadow:
         argv.append('--shadow')
-    elif list(clock.steps) == [DAILY_STEP]:
-        argv.append('--daily')
-    else:
+    else:  # the daily clock too: a bare ``--daily`` ran every step (B: two ticks, one clone)
         argv += ['--steps', ','.join(clock.steps)]
     return argv
 

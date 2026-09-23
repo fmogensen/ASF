@@ -200,6 +200,35 @@ def run_shadow(product, fresh=False):
     return 0
 
 
+#: The daily runs once a day, so it waits out a running tick; an interval tick skips (the next
+#: one is minutes away, and a tick's harvest gate can run for half an hour).
+DAILY_LOCK_WAIT_S = 45 * 60
+LOCK_POLL_S = 10
+
+
+def lock_path(product):
+    return os.path.join(env.state_dir(product), 'tick.lock')
+
+
+def acquire_lock(product, wait_s=0):
+    """The product's tick lock (an open file holding ``flock``), or ``None`` when another tick
+    of the product still holds it after ``wait_s``. Every job of one product shares the record
+    clone (``state/<product>/record``): two ticks at once raced its fetch and push
+    (``cannot lock ref 'refs/remotes/origin/main'``). The lock dies with its process."""
+    import fcntl
+    f = open(lock_path(product), 'a')
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return f
+        except OSError:
+            if time.monotonic() >= deadline:
+                f.close()
+                return None
+            time.sleep(LOCK_POLL_S)
+
+
 def cmd_tick(args, root=None):
     product = env.load_product(getattr(args, 'product', None))
     fresh = getattr(args, 'fresh', False)
@@ -218,6 +247,18 @@ def cmd_tick(args, root=None):
         print(e)
         return 2
 
+    wait_s = DAILY_LOCK_WAIT_S if any(r[0] == 'daily' for r in rows) else 0
+    lock = acquire_lock(product, wait_s)
+    if lock is None:
+        print(f"tick: another tick of {product.name} is running — skipped")
+        return 0
+    try:
+        return _run_locked(args, product, fresh, rows, chosen)
+    finally:
+        lock.close()
+
+
+def _run_locked(args, product, fresh, rows, chosen):
     ctx = Context(product, fresh=fresh)
     try:
         return _run_steps(args, product, ctx, rows, chosen)

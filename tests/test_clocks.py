@@ -106,7 +106,7 @@ class ClocksRenderTest(SchedulerTestCase):
         job = scheduler.render(product, clock)
         self.assertEqual(job['plist']['StartCalendarInterval'], {'Hour': 6, 'Minute': 50})
         self.assertNotIn('StartInterval', job['plist'])
-        self.assertEqual(job['plist']['ProgramArguments'][-1], '--daily')
+        self.assertEqual(job['plist']['ProgramArguments'][-2:], ['--steps', 'daily'])
 
     def test_shadow_clock(self):
         product, clock = self._clock('shadow')

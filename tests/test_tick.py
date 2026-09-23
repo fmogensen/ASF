@@ -566,6 +566,44 @@ class SummaryTests(TickTestCase):
         self.assertEqual(out.rstrip('\n').split('\n')[-1], 'tick: summary not rendered (boom)')
 
 
+class TickLockTests(TickTestCase):
+    """One tick per product at a time: two jobs of one product (the 10m clock and the daily one)
+    share the record clone, and a concurrent fetch/push there failed with ``cannot lock ref``."""
+
+    def hold_lock(self):
+        import fcntl
+        f = open(tick.lock_path(env.load_product('sample')), 'a')
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.addCleanup(f.close)
+        return f
+
+    def test_a_tick_while_another_holds_the_product_skips_and_touches_nothing(self):
+        self.hold_lock()
+        rc, out = self.run_tick(steps='record')
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, 'tick: another tick of sample is running — skipped\n')
+        self.assertEqual(self.origin_commits(), 1)
+        self.assertFalse(os.path.exists(self.record_path()))
+
+    def test_the_daily_waits_for_the_running_tick(self):
+        held = self.hold_lock()
+        waited = []
+
+        def sleep(s):  # the running tick ends while the daily waits
+            waited.append(s)
+            held.close()
+        with mock.patch.object(tick.time, 'sleep', sleep):
+            rc, out = self.run_tick(steps='record,daily')
+        self.assertTrue(waited)
+        self.assertNotIn('skipped', out)
+        self.assertEqual(self.origin_commits(), 2)
+
+    def test_the_lock_is_released_after_the_tick(self):
+        self.run_tick(steps='record')
+        rc, out = self.run_tick(steps='record')
+        self.assertNotIn('skipped', out)
+
+
 class Step0Tests(unittest.TestCase):
     """What step 0 hands the backfill: CI runs only, of the product's workflow; no launcher dir."""
 

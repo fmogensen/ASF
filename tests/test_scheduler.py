@@ -228,7 +228,19 @@ class RenderTest(SchedulerTestCase):
         job = scheduler.render('sample', self.DAILY)
         self.assertEqual(job['plist']['StartCalendarInterval'], {'Hour': 6, 'Minute': 50})
         self.assertNotIn('StartInterval', job['plist'])
-        self.assertEqual(job['plist']['ProgramArguments'][-1], '--daily')
+        self.assertEqual(job['plist']['ProgramArguments'][-2:], ['--steps', 'daily'])
+
+    def test_daily_job_runs_the_daily_step_only(self):
+        # a bare `--daily` means "every step, and daily even if it ran today": the daily job then
+        # ran record/wave/harvest beside the interval job, on the same record clone
+        argv = scheduler.render('sample', self.DAILY)['plist']['ProgramArguments']
+        self.assertNotIn('--daily', argv)
+        self.assertEqual(argv[argv.index('--steps') + 1], 'daily')
+
+    def test_daily_job_reads_back_as_its_clock(self):
+        job = scheduler.render('sample', self.DAILY)
+        back = scheduler.clock_of_plist(job['label'], job['plist'], 'sample')
+        self.assertEqual(back.steps, ['daily'])
 
     def test_label_prefix_comes_from_config(self):
         cfg = {'scheduler': {'kind': 'launchd', 'label_prefix': 'factory'}}
