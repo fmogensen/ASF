@@ -53,6 +53,15 @@ def pending_answers_files(product):
             if _ANSWERS_FILE_RE.match(name)]
 
 
+def _newest_applied(product):
+    """The newest date whose answers were applied (``<date>.answers.done``), or None."""
+    from asf import env
+    d = os.path.join(env.state_dir(product), 'groom')
+    done = sorted(name[:-len('.answers.done')] for name in os.listdir(d)
+                  if name.endswith('.answers.done')) if os.path.isdir(d) else []
+    return done[-1] if done else None
+
+
 def carry_staged_answers(product, out=print):
     """An ended groom session's ``<date>.answers`` left in its worktree (its sandbox refused the
     state dir, groom-2026-09-22) is moved to the state dir, where the tick reads it. A live
@@ -97,10 +106,17 @@ def apply_pending_answers(product, root, event=None, out=print):
     epic = (product.conventions or {}).get('default_bug_epic')
     n = 0
     for path in pending_answers_files(product):
+        date = os.path.basename(path)[:-len('.answers')]
+        newer = _newest_applied(product)
+        if newer and newer > date:
+            # a later day's adjudicator ruled the same questions afresh: these must not land on
+            # top of its answers
+            os.replace(path, path + '.superseded')
+            out(f'groom: answers {date} superseded by {newer} — not applied')
+            continue
         rc, last = run_part(lambda: cmd_groom(_ns(date=None, apply=False, product=product.name,
                                                   default_bug_epic=epic, answers_file=path,
                                                   event=event), root))
-        date = os.path.basename(path)[:-len('.answers')]
         out(f"groom: answers {date} {'FAILED' if rc else 'applied'}" + (f' — {last}' if last else ''))
         if rc:
             break

@@ -767,6 +767,18 @@ class GroomAnswersTests(StepsTestCase):
         self.assertTrue(all(c.event is sink and not c.apply for c in calls))
         self.assertEqual(self.lines[0], 'groom: answers 2026-01-01 applied — groom 2026-01-03: applied 1')
 
+    def test_a_day_older_than_one_already_applied_is_superseded_not_applied(self):
+        # the next day's adjudicator ruled the same questions afresh: the older ranks and closes
+        # must not land on top of them (groom-2026-09-22's answers reached the state dir late)
+        self.write_answers('2026-01-02')
+        self.applied()
+        older = self.write_answers('2026-01-01')
+        self.lines.clear()
+        n, calls, _ = self.applied()
+        self.assertEqual((n, calls), (0, []))
+        self.assertTrue(os.path.exists(older + '.superseded'))
+        self.assertEqual(self.lines, ['groom: answers 2026-01-01 superseded by 2026-01-02 — not applied'])
+
     def test_nothing_without_the_groom_gate(self):
         self.write_product(f'repo_dir: {self.repo}\nsteps:\n  batch: off\n')
         self.product = env.load_product('sample')
@@ -813,7 +825,7 @@ class GroomAnswersTests(StepsTestCase):
         with mock.patch.object(step_daily, 'apply_pending_answers',
                                lambda product, root, event=None, out=print: seen.append(event) or 1), \
                 mock.patch.object(tick, 'do_index') as index:
-            self.assertEqual(tick.run_record_step(self.product, ctx=ctx), 0)
+            self.assertEqual(tick.run_record_step(self.product, ctx=ctx), 0)  # in a tick: no commit
         self.assertEqual(seen, [ctx.event])
         index.assert_called_once_with(ctx.record_root())
 
