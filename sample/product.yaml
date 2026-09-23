@@ -35,4 +35,17 @@ approvals:
 steps:
   batch: off
   daily: off
+clocks:
+  record:
+    steps: [record]
+    every: 5m
+  dispatch:
+    steps: [health, wave, prs, harvest, batch]
+    every: 10m
+  daily:
+    steps: [daily]
+    at: "06:50"
+  shadow:
+    shadow: true
+    every: 30m
 job_grants: []

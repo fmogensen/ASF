@@ -130,3 +130,20 @@ groom:
   adjudicate_attempts: 2       # D8: groom sessions per groom date before the operator is asked
   policies:                    # a policy named here with `off` never runs
     close_exact_duplicate: on
+
+# clocks: each entry is one job labelled <prefix>.<product>.<name>.
+# Every entry needs steps: [..] or shadow: true,
+# and exactly one of every: <n><s|m|h|d> (at least 60s) or at: "HH:MM" (local time).
+clocks:
+  record:
+    steps: [record]
+    every: 5m
+  dispatch:
+    steps: [health, wave, prs, harvest, batch]
+    every: 10m
+  daily:
+    steps: [daily]
+    at: "06:50"
+  shadow:
+    shadow: true
+    every: 30m

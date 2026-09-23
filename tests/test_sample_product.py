@@ -20,7 +20,7 @@ import sys
 import tempfile
 import unittest
 
-from asf import hermetic
+from asf import env, hermetic, scheduler
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_sample_product` does not
     from test_scheduler import fake_clis
@@ -258,6 +258,17 @@ class SampleProductTest(unittest.TestCase):
         folders = os.listdir(self.record())
         self.assertIn('cards', folders)
         self.assertNotIn('inbox', folders)
+
+
+class SampleClocksTest(unittest.TestCase):
+    """F-0083/S-7207: the sample product's own clocks: block, read straight off disk — no
+    fixture, no subprocess, since scheduler.clocks() only needs the parsed product data."""
+
+    def test_sample_declares_clocks(self):
+        with open(os.path.join(SAMPLE, 'product.yaml'), encoding='utf-8') as f:
+            product = env.Product('sample', env.loads(f.read()))
+        clocks = scheduler.clocks(product)
+        self.assertEqual([c.name for c in clocks], ['record', 'dispatch', 'daily', 'shadow'])
 
 
 # ---- the failure paths, whole loop (F-0087) ----------------------------------------------

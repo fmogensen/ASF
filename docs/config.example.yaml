@@ -6,6 +6,8 @@
 default_product: sample
 
 # scheduler: cron | launchd | systemd | gh-actions | claude-routines
+# what runs, and when, is not here — it's each product's own clocks: block
+# (products/<name>.yaml, see docs/products.example.yaml).
 scheduler:
   provider: cron
   # the one job every provider's adapter installs
