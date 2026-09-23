@@ -8,6 +8,10 @@ the product repo. The search set for that last check is never a literal path in 
 the old, per-product tooling this product's ``asf`` install replaces. A product whose repo is this
 package's own checkout skips the repo half: its tools are the factory, not a second copy of it.
 
+A seventh row, **approvals**, reads the product's approval matrix (:func:`asf.approvals.check_doctor`,
+F-0031 §2.5): red when the matrix does not load, otherwise ok with what is legal but probably not
+meant — a class left to its default, a held class nothing can recognise, an empty amendable set.
+
 A product with no PR host — ``ci: {provider: none}`` — needs no ``repo_slug`` and no ``gh``.
 
 Exit 1 if any required row is red; optional rows that are unavailable print ``skip``, not red.
@@ -17,7 +21,7 @@ import shutil
 import subprocess
 import time
 
-from asf import env, schema, scheduler
+from asf import approvals, env, schema, scheduler
 from asf.workers import pool
 
 _SKIP_DIRS = {'.git', 'node_modules', '__pycache__', 'dist', 'build', '.next', 'vendor', 'venv',
@@ -396,6 +400,8 @@ def run(product_name):
         rows.append((f'cli:{name}', required, ok, detail))
     ok, detail = check_one_factory(cfg, product)
     rows.append(('one-factory', True, ok, detail))
+    ok, detail = approvals.check_doctor(cfg, product)
+    rows.append(('approvals', True, ok, detail))
     for ok, detail in check_capacity(cfg, product):
         rows.append(('capacity', False, ok, detail))
     return rows

@@ -1,8 +1,10 @@
 """tests.test_approvals — F-0031. Task 1: the catalogue, the matrix, the classifier and the hold
 ledger — ``CatalogueTest`` and ``MatrixTest`` are the plan's A1, ``LedgerTest`` the unit coverage
 behind D9/D14. Task 2: ``HookTest``, the unit half of A2 (the end-to-end block is §3's, run by
-path with the session's identity removed — PD7).
+path with the session's identity removed — PD7). Task 4: ``CliTest`` and ``DoctorTest`` are A5,
+the operator's side — ``asf approvals``, ``list``, ``resolve``, and the doctor's ``approvals`` row.
 """
+import contextlib
 import io
 import json
 import os
@@ -12,7 +14,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from asf import approvals, env, hooks
+from asf import approvals, cli, doctor, env, hooks
 from asf.env import Product
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -277,6 +279,212 @@ class HookTest(unittest.TestCase):
             rc, out = self.push()
         self.assertEqual(rc, 2, out)
         self.assertEqual(out, 'approvals hook failed: boom — refused\n')
+
+
+def _product_yaml(extra=''):
+    """A ``Product`` from the product file a person would write — the loader's own parse, so a
+    malformed block fails here the way it fails in the field."""
+    return Product('demo', env.loads(f'product: demo\nmain: main\n{extra}'))
+
+
+ALL_MAPPED = 'approvals:\n' + ''.join(f'  {c.name}: {c.default}\n' for c in approvals.CLASSES)
+AMENDABLE = 'conventions:\n  amendable_paths: [rules/*]\n'
+
+
+class CliTest(unittest.TestCase):
+    """§3 A5's first half, through ``cli.main`` so the subparser in ``asf/cli.py`` is covered
+    too: ``asf approvals`` prints nine rows with their level and their ``from``, ``list`` shows
+    the open holds, ``resolve`` of a hold that is not open exits 2."""
+
+    HOLD = 'F-0031/touch_production'
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._orig_home = env.ASF_HOME
+        env.ASF_HOME = os.path.join(self.tmp, 'home')
+        os.makedirs(os.path.join(env.ASF_HOME, 'products'))
+        os.makedirs(os.path.join(env.ASF_HOME, 'state', 'demo'))
+        self.write_product('approvals:\n  touch_production: human-now\n')
+
+    def tearDown(self):
+        env.ASF_HOME = self._orig_home
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def write_product(self, extra=''):
+        with open(env.product_path('demo'), 'w') as f:
+            f.write(f'product: demo\nmain: main\n{extra}')
+
+    def run_cli(self, *argv):
+        """``(rc, stdout, stderr)`` of ``asf <argv>``."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = cli.main(list(argv))
+        return rc, out.getvalue(), err.getvalue()
+
+    def rows(self, out):
+        """``{class: the row's words}`` from the printed matrix, the header dropped."""
+        lines = out.strip().splitlines()
+        self.assertTrue(lines[0].startswith('class'), lines[0])
+        return {line.split()[0]: line for line in lines[1:]}
+
+    def refuse(self):
+        return approvals.refuse(
+            'demo', 'F-0031', 'touch_production', 'human-now', 'code-F-0031', 'Bash',
+            'git push origin HEAD:main')
+
+    def test_the_matrix_prints_one_row_per_class_with_its_level_and_source(self):
+        rc, out, err = self.run_cli('approvals', '--product', 'demo')
+        self.assertEqual(rc, 0, out + err)
+        rows = self.rows(out)
+        self.assertEqual(set(rows), {c.name for c in approvals.CLASSES})
+        self.assertEqual(len(rows), 9)
+        self.assertEqual(rows['touch_production'].split()[1:3], ['human-now', 'yaml'])
+        self.assertEqual(rows['merge_routine_pr'].split()[1:3], ['auto', 'default'])
+        self.assertEqual(rows['file_bug'].split()[1:3], ['auto', 'default'])
+
+    def test_the_builtin_recognisers_are_named_in_words(self):
+        _rc, out, _err = self.run_cli('approvals', '--product', 'demo')
+        rows = self.rows(out)
+        self.assertIn('git push', rows['touch_production'])
+        self.assertIn('gh secret', rows['touch_security'])
+        self.assertIn('LICENSE*', rows['touch_legal'])
+        self.assertIn('asf new bug', rows['file_bug'])
+        self.assertIn('none — approval_signals only', rows['spend_money'])
+        # `hooks.RUNTIME_SETTINGS_GLOBS` is named, not spelled: the path is the runtime's.
+        for glob in hooks.RUNTIME_SETTINGS_GLOBS:
+            self.assertNotIn(glob, rows['touch_security'])
+
+    def test_a_signal_is_listed_beside_the_builtins(self):
+        self.write_product(
+            'approvals:\n  spend_money: human-now\n'
+            "approval_signals:\n  spend_money:\n    commands: ['gh api .*billing']\n")
+        _rc, out, _err = self.run_cli('approvals', '--product', 'demo')
+        self.assertIn('signal command: gh api .*billing', self.rows(out)['spend_money'])
+
+    def test_list_shows_the_open_holds_and_resolve_closes_one(self):
+        hold = self.refuse()
+        rc, out, err = self.run_cli('approvals', 'list', '--product', 'demo')
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn(hold, out)
+        self.assertIn('human-now', out)
+        self.assertIn('git push origin HEAD:main', out)
+
+        rc, out, err = self.run_cli('approvals', 'resolve', hold, 'granted', '--product', 'demo')
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn(f'resolved {hold} as granted', out)
+        self.assertTrue(approvals.is_granted('demo', hold))
+        self.assertEqual(approvals.open_holds('demo'), [])
+
+        _rc, out, _err = self.run_cli('approvals', 'list', '--product', 'demo')
+        self.assertIn('no open holds', out)
+
+    def test_resolve_of_a_hold_that_is_not_open_exits_2_and_writes_nothing(self):
+        rc, out, err = self.run_cli(
+            'approvals', 'resolve', self.HOLD, 'granted', '--product', 'demo')
+        self.assertEqual(rc, 2, out)
+        self.assertIn('is not an open hold', err)
+        self.assertEqual(approvals.read('demo'), [])
+
+    def test_resolving_the_same_hold_twice_exits_2(self):
+        hold = self.refuse()
+        self.assertEqual(self.run_cli('approvals', 'resolve', hold, 'done', '--product', 'demo')[0], 0)
+        rc, _out, err = self.run_cli('approvals', 'resolve', hold, 'done', '--product', 'demo')
+        self.assertEqual(rc, 2)
+        self.assertIn('is not an open hold', err)
+
+    def test_the_product_falls_back_to_the_environment(self):
+        with mock.patch.dict(os.environ, {'ASF_PRODUCT': 'demo'}):
+            rc, out, err = self.run_cli('approvals')
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(set(self.rows(out)), {c.name for c in approvals.CLASSES})
+
+
+class DoctorTest(unittest.TestCase):
+    """§3 A5's second half: the ``approvals`` row names the unmapped classes, the held classes
+    nothing can recognise, and an empty ``amendable_paths`` under a held ``merge_amendable_set``;
+    an unknown class or level fails the row."""
+
+    def check(self, extra=''):
+        return approvals.check_doctor({}, _product_yaml(extra))
+
+    def notes(self, detail):
+        return detail.split('; ')
+
+    def test_an_unknown_class_or_level_fails_the_row(self):
+        ok, detail = self.check('approvals:\n  touch_production: maybe\n')
+        self.assertFalse(ok)
+        self.assertIn('maybe', detail)
+        ok, detail = self.check('approvals:\n  frobnicate: auto\n')
+        self.assertFalse(ok)
+        self.assertIn('frobnicate', detail)
+
+    def test_a_malformed_signal_fails_the_row(self):
+        ok, detail = self.check(
+            ALL_MAPPED + AMENDABLE + 'approval_signals:\n  not_a_class:\n    paths: [x]\n')
+        self.assertFalse(ok)
+        self.assertIn('not_a_class', detail)
+
+    def test_unmapped_classes_are_named_and_mapped_ones_are_not(self):
+        ok, detail = self.check('approvals:\n  touch_production: human-now\n')
+        self.assertTrue(ok)
+        unmapped = [n for n in self.notes(detail) if n.startswith('unmapped')]
+        self.assertEqual(len(unmapped), 1, detail)
+        self.assertNotIn('touch_production', unmapped[0])
+        for c in approvals.CLASSES:
+            if c.name != 'touch_production':
+                self.assertIn(c.name, unmapped[0])
+
+    def test_a_held_class_with_no_recogniser_is_named(self):
+        ok, detail = self.check(ALL_MAPPED + AMENDABLE)
+        self.assertTrue(ok)
+        blind = [n for n in self.notes(detail) if 'unrecognisable' in n]
+        self.assertEqual(len(blind), 1, detail)
+        self.assertIn('spend_money', blind[0])
+        self.assertIn('touch_customer_data', blind[0])
+        self.assertNotIn('touch_production', blind[0])
+        # `file_bug` and `merge_routine_pr` default to auto — never held, never warned about
+        self.assertNotIn('file_bug', blind[0])
+
+    def test_a_signal_clears_the_blind_class_and_the_row_goes_quiet(self):
+        ok, detail = self.check(
+            ALL_MAPPED + AMENDABLE
+            + "approval_signals:\n  spend_money:\n    commands: ['gh api .*billing']\n"
+              "  touch_customer_data:\n    paths: ['data/customers/*']\n")
+        self.assertTrue(ok)
+        self.assertEqual(
+            detail,
+            f'{len(approvals.CLASSES)} classes mapped, every held class has a recogniser')
+
+    def test_an_empty_amendable_set_under_a_held_merge_class_is_named(self):
+        _ok, detail = self.check(ALL_MAPPED)
+        self.assertIn('amendable_paths is empty', detail)
+        _ok, detail = self.check(ALL_MAPPED + AMENDABLE)
+        self.assertNotIn('amendable_paths', detail)
+        # auto: the class is never read, so an empty set says nothing
+        _ok, detail = self.check(
+            ALL_MAPPED.replace('merge_amendable_set: human-now', 'merge_amendable_set: auto'))
+        self.assertNotIn('amendable_paths', detail)
+
+    def test_the_row_follows_one_factory_in_the_doctor_table(self):
+        product = _product_yaml(ALL_MAPPED + AMENDABLE)
+        with mock.patch.object(doctor, 'check_config', return_value=(True, '', {}, product)), \
+                mock.patch.object(doctor, 'check_repo', return_value=(True, '')), \
+                mock.patch.object(doctor, 'check_backlog', return_value=(True, '')), \
+                mock.patch.object(doctor, 'check_scheduler', return_value=(True, '')), \
+                mock.patch.object(doctor, 'check_cli_sessions', return_value=[]), \
+                mock.patch.object(doctor, 'check_one_factory', return_value=(True, '')), \
+                mock.patch.object(doctor, 'check_capacity', return_value=[]):
+            rows = doctor.run('demo')
+        self.assertEqual([r[0] for r in rows][-2:], ['one-factory', 'approvals'])
+        row = [r for r in rows if r[0] == 'approvals'][0]
+        self.assertTrue(row[1], 'the approvals row is required, so a bad matrix is red')
+        self.assertTrue(row[2])
+        self.assertFalse(doctor.is_red(rows))
+
+    def test_a_bad_matrix_makes_the_doctor_table_red(self):
+        product = _product_yaml('approvals:\n  touch_production: maybe\n')
+        rows = [('approvals', True) + approvals.check_doctor({}, product)]
+        self.assertTrue(doctor.is_red(rows))
 
 
 if __name__ == '__main__':

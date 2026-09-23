@@ -12,6 +12,10 @@ of every hold and its resolution, in ``~/.ASF/state/<product>/approvals.jsonl`` 
 :mod:`asf.hooks` — which refuses a factory session's tool call whose class is not ``auto`` and
 records the hold. It governs only a session (``ASF_JOB`` in the environment, D4), never edits to
 the operator's own config (:func:`operator_config_target`, D8), and fails closed (D7).
+
+:func:`cmd_approvals` is the operator's side of the same matrix — ``asf approvals`` prints it,
+``asf approvals list`` the open holds, ``asf approvals resolve`` closes one — and
+:func:`check_doctor` is the ``approvals`` row of ``asf doctor`` (§2.5).
 """
 import dataclasses
 import datetime
@@ -477,3 +481,176 @@ def _enforce(stdin_text, environ, out, product):
         for line in _refusal_lines(item, cls, level, detail):
             print(line, file=out)
     return 2
+
+
+# ---- the operator's side — `asf approvals` and the doctor row (§2.5) -----------
+
+#: The built-in recognisers that are code, not a glob or a pattern in the two tables above —
+#: named here in the words :func:`recognisers` prints. A class absent from both this map and
+#: those tables has no built-in at all: only a product's own `approval_signals` can match it.
+_CODE_RECOGNISERS = {
+    'touch_production': (
+        "Bash: a git push whose refspec targets the product's main",
+        'Bash: gh workflow run the deploy_sha.workflow, when one is set',
+    ),
+    'new_epic': ('Write of an epics/*.md that does not exist yet, in a record repo',),
+    'merge_amendable_set': ("the branch's changed files against conventions.amendable_paths",),
+    'merge_routine_pr': ('every branch that is not merge_amendable_set',),
+    'file_bug': ("the tick's bug filer",),
+}
+
+
+def _pattern_in_words(pattern):
+    r"""One :data:`_COMMAND_PATTERNS` regex as the command it recognises, for the table:
+    ``\bgh\s+secret\b`` -> ``gh secret``."""
+    return re.sub(r'\\s\+', ' ', pattern).replace(r'\b', '').replace('\\', '')
+
+
+def _builtin_recognisers(cls_name):
+    """``cls_name``'s built-ins in words, derived from the tables the classifier itself reads so
+    the two cannot drift apart."""
+    out = []
+    globs = list(_PATH_GLOBS.get(cls_name, ()))
+    if cls_name == 'touch_security':
+        # The runtime settings globs are `hooks.RUNTIME_SETTINGS_GLOBS` — named, not spelled:
+        # that path is the runtime adapter's convention and does not belong in this module.
+        globs.append("the runtime's own settings files")
+    if globs:
+        out.append('paths: ' + ', '.join(globs))
+    patterns = _COMMAND_PATTERNS.get(cls_name, ())
+    if patterns:
+        out.append('Bash: ' + ', '.join(_pattern_in_words(p) for p in patterns))
+    out.extend(_CODE_RECOGNISERS.get(cls_name, ()))
+    return out
+
+
+def recognisers(product):
+    """``{class: [recogniser in words]}`` — every built-in named, then the product's own
+    ``approval_signals`` listed. A class whose list is empty matches nothing at all, which is
+    what the doctor row warns about when that class is not ``auto``."""
+    sig = signals(product)
+    out = {}
+    for c in CLASSES:
+        words = _builtin_recognisers(c.name)
+        spec = sig.get(c.name) or {}
+        words += [f'signal path: {p}' for p in spec.get('paths') or []]
+        words += [f'signal command: {p}' for p in spec.get('commands') or []]
+        out[c.name] = words
+    return out
+
+
+_TABLE_HEADER = ('class', 'level', 'from', 'read by', 'recognisers')
+
+
+def _table(rows):
+    """``rows`` (the header first) as aligned columns, the last one left to run on."""
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]) - 1)]
+    return [
+        '  '.join(cell.ljust(w) for cell, w in zip(row, widths)) + '  ' + row[-1]
+        for row in rows
+    ]
+
+
+def format_matrix(product):
+    """The nine catalogue rows: ``class | level | from | read by | recognisers`` (§2.5)."""
+    levels = matrix(product)
+    known = recognisers(product)
+    rows = [_TABLE_HEADER]
+    for c in CLASSES:
+        level, source = levels[c.name]
+        rows.append((c.name, level, source, ', '.join(c.read_by),
+                     '; '.join(known[c.name]) or 'none — approval_signals only'))
+    return _table(rows)
+
+
+_LIST_HEADER = ('hold', 'level', 'first', 'last', 'count', 'detail')
+
+
+def format_open_holds(product_name):
+    """The open holds: ``hold | level | first | last | count | detail`` (§2.5)."""
+    open_ = open_holds(product_name)
+    if not open_:
+        return ['no open holds']
+    rows = [_LIST_HEADER] + [
+        (h['hold'], h['level'] or '', h['first'] or '', h['last'] or '', str(h['count']),
+         h['detail'] or '')
+        for h in open_
+    ]
+    return _table(rows)
+
+
+def cmd_approvals(args):
+    name = args.product or env.default_product_name()
+    action = getattr(args, 'approvals_command', None)
+
+    if action == 'list':
+        print('\n'.join(format_open_holds(name)))
+        return 0
+
+    if action == 'resolve':
+        hold, resolution = args.hold, args.resolution
+        if hold not in {h['hold'] for h in open_holds(name)}:
+            print(f'{hold} is not an open hold — asf approvals list', file=sys.stderr)
+            return 2
+        resolve(name, hold, resolution)
+        print(f'resolved {hold} as {resolution}')
+        return 0
+
+    print('\n'.join(format_matrix(env.load_product(name))))
+    return 0
+
+
+def register(subparsers):
+    p = subparsers.add_parser(
+        'approvals', help="the approval matrix, the open holds, and resolving one")
+    p.add_argument('approvals_command', nargs='?', choices=['list', 'resolve'],
+                   help='omitted: print the effective matrix')
+    p.add_argument('hold', nargs='?', help='resolve: <item>/<class>')
+    p.add_argument('resolution', nargs='?', choices=list(RESOLUTIONS),
+                   help='resolve: what happened to the held action')
+    p.add_argument('--product')
+    p.set_defaults(run=cmd_approvals)
+    return p
+
+
+def check_doctor(cfg, product):
+    """The doctor's ``approvals`` row: ``(ok, detail)``.
+
+    Not ok when the matrix does not load at all — an unknown class or an unknown level is a
+    config error a person must fix. Otherwise ok, with a detail naming everything that is legal
+    but probably not meant: a class left to its default, a class the factory can never recognise,
+    and ``merge_amendable_set`` mapped over an empty amendable set.
+
+    Spec f-0031 §2.5 has this row name one more thing — every worker account whose
+    ``hooks.account_settings_path`` lacks the approvals entry. That function is F-0031 Task 3's
+    and is not on this branch (``hooks.install`` still returns early on ``0 rules declare a
+    hook``, and ``_is_ours`` has no product-less form to match the account entry against), so the
+    clause is left out rather than guessed at — ``cfg``, where those accounts are declared, is in
+    the signature for it. It is one ``for`` loop to add here once Task 3 lands; §3 A5 does not
+    cover it."""
+    try:
+        levels = matrix(product)
+    except env.ConfigError as e:
+        return False, str(e)
+
+    notes = []
+    defaulted = [c.name for c in CLASSES if levels[c.name][1] == 'default']
+    if defaulted:
+        notes.append(f'unmapped (taking the catalogue default): {", ".join(defaulted)}')
+
+    try:
+        known = recognisers(product)
+    except env.ConfigError as e:
+        return False, str(e)
+    blind = [c.name for c in CLASSES
+             if levels[c.name][0] in ('groom', 'human-now') and not known[c.name]]
+    if blind:
+        notes.append(f'held but unrecognisable — add approval_signals: {", ".join(blind)}')
+
+    if levels['merge_amendable_set'][0] != 'auto' and not product.conventions.amendable_paths:
+        notes.append('merge_amendable_set is held but conventions.amendable_paths is empty —'
+                     ' no branch can ever match it')
+
+    if not notes:
+        return True, f'{len(CLASSES)} classes mapped, every held class has a recogniser'
+    return True, '; '.join(notes)
