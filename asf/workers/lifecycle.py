@@ -43,7 +43,9 @@ Every other module asks this one:
 import dataclasses
 import json
 import os
+import signal
 import subprocess
+import time
 
 from asf import env
 from asf.workers import runtime as runtime_mod
@@ -78,10 +80,12 @@ TRANSITIONS = {
 
 #: A run's own fields: they belong to one launch and never fold into the next (B-0041).
 RUN_FIELDS = ('ended', 'end_reason', 'rc', 'corrected', 'operator_flagged', 'harvested',
-              'harvest', 'correction', 'rounds')
+              'harvest', 'correction', 'rounds', 'stop_tip')
 
 FINISHED = 'finished'
 DEAD_PID = 'dead pid'
+STOPPED = 'stopped'
+PUSHED_AFTER_STOP = 'pushed after stop'
 EMPTY_BRANCH = 'empty branch: nothing to land'
 
 
@@ -509,6 +513,75 @@ def derive(run, ev, cap=ROUND_CAP, path=None):
     if reason == FINISHED:
         return State(PUSHED, FINISHED, rounds)
     return State(ENDED, reason, rounds)
+
+
+# ---- stop: the one place that stops a run (B-0069) ------------------------------------
+
+def _group_alive(pgid):
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def stop(path, run, grace=5.0, poll=0.1, alive=None, tip=None, sleep=time.sleep):
+    """``(ok, detail)``: stop ``run`` — signal its whole process group (``pgid``, else the pid,
+    which is the group id because spawn uses ``setsid``), TERM then KILL, wait for the group to
+    go, then for ``grace`` seconds verify the log stays quiet and ``tip()`` (the branch tip on
+    origin, when given) does not move. Only then is ``ended``/``end_reason: stopped`` recorded,
+    with ``stop_tip`` so a later push by the stopped run is caught (:func:`pushed_after_stop`)."""
+    pgid = run.get('pgid') or run.get('pid')
+    if not pgid:
+        return False, 'no pid or pgid recorded'
+    pgid = int(pgid)
+    pid_up = alive or (lambda _pid: _group_alive(pgid))
+
+    def gone():
+        return not _group_alive(pgid) or (alive is not None and not pid_up(run.get('pid')))
+
+    for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, grace)):
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            break
+        except PermissionError as e:
+            return False, f'cannot signal group {pgid}: {e}'
+        deadline = time.monotonic() + wait
+        while not gone() and time.monotonic() < deadline:
+            sleep(poll)
+        if gone():
+            break
+    if not gone():
+        return False, f'group {pgid} still alive after SIGKILL'
+
+    def mtime():
+        try:
+            return os.stat(run['log']).st_mtime_ns if run.get('log') else None
+        except OSError:
+            return None
+    before, tip_before = mtime(), (tip() if tip else '')
+    sleep(grace)
+    if mtime() != before:
+        return False, 'log still moving after the group died'
+    tip_after = tip() if tip else ''
+    if tip_after != tip_before:
+        return False, 'branch moved after the group died'
+    line = {'job': run['job'], 'ended': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+            'end_reason': STOPPED, 'pgid': pgid}
+    if tip_after:
+        line['stop_tip'] = tip_after
+    with open(path, 'a', encoding='utf-8') as f:
+        f.write(json.dumps(line, sort_keys=True) + '\n')
+    return True, f'stopped group {pgid}'
+
+
+def pushed_after_stop(run, ev):
+    """True when a stopped run's branch tip is not the one recorded at stop."""
+    return (run.get('end_reason') == STOPPED and bool(run.get('stop_tip'))
+            and bool(ev.remote_sha) and ev.remote_sha != run['stop_tip'])
 
 
 # ---- the hold: one rule for harvest's gate and health's unpushed verdict --------------

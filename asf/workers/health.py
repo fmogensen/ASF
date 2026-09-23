@@ -272,6 +272,13 @@ def health(product, fix=False, alive=None, session_source=None, out=print):
         alive = alive_for(product, sessions.values(), session_source)
     for job, s in sessions.items():
         if s.get('ended'):
+            if s.get('end_reason') == lifecycle.STOPPED and not s.get('correction'):
+                ev = lifecycle.gather(product, s, alive=alive)
+                if lifecycle.pushed_after_stop(s, ev):
+                    fields, line = lifecycle.hold(registry, s, lifecycle.PUSHED_AFTER_STOP,
+                                                  lifecycle.PUSHED_AFTER_STOP, pool_mod.now_iso())
+                    pool_mod.update_session(product, job, **fields)
+                    found.append((job, 'held', line.split(': ', 1)[1]))
             # a `dead pid` judgement is revisited: the result may have landed after the check,
             # or a correction may have finished the run (B-0028)
             if s.get('end_reason') == lifecycle.DEAD_PID and not s.get('harvested'):

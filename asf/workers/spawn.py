@@ -305,7 +305,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
     result = runtime.run(job)
     record = {'job': row.job, 'item': row.item, 'feature': row.feature, 'kind': row.kind,
               'account': account.name if account else None, 'model': job.model,
-              'pid': result.pid, 'worktree': worktree, 'branch': branch,
+              'pid': result.pid, 'pgid': result.pid, 'worktree': worktree, 'branch': branch,
               'started': started, 'log': result.log_path, 'brief': brief_path,
               'id_range': id_range, 'runtime': runtime.name, 'session': sid,
               'product': product.name}
