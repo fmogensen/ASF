@@ -30,7 +30,7 @@ import subprocess
 import sys
 import time
 
-from asf import env
+from asf import capacity, env
 from asf.record.index import do_index
 from asf.tick import steps, summary
 
@@ -235,6 +235,7 @@ def cmd_tick(args, root=None):
 def _run_steps(args, product, ctx, rows, chosen):
     rc = 0
     ran = []
+    resolved = None
     for step, owner, command in rows:
         if owner == 'off':
             print(f"tick: step {step} off (another job runs it)")
@@ -246,10 +247,18 @@ def _run_steps(args, product, ctx, rows, chosen):
         if owner == 'asf':
             step_rc = run_asf_step(step, ctx)
         else:
-            step_rc = steps.run_command(step, command, steps.command_timeout(),
-                                        cwd=product.repo_dir or None)
-            if step_rc:
-                print(f"tick: step {step} exited {step_rc}")
+            if resolved is None:
+                resolved = capacity.resolve(product)
+            if (step == 'batch' and resolved.ci is not None and resolved.ci_inflight is not None
+                    and resolved.ci_inflight >= resolved.ci):
+                print(f"waits    batch — at ci capacity ({resolved.ci_inflight}/{resolved.ci})")
+                step_rc = 0
+            else:
+                step_rc = steps.run_command(step, command, steps.command_timeout(),
+                                            cwd=product.repo_dir or None,
+                                            extra_env=capacity.env_overlay(resolved, product))
+                if step_rc:
+                    print(f"tick: step {step} exited {step_rc}")
         ran.append({'step': step, 'ok': not step_rc, 'seconds': round(time.monotonic() - t0, 1)})
         if step == 'daily' and step_rc == 0:
             steps.write_daily_stamp(product)

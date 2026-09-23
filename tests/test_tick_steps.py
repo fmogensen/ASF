@@ -9,7 +9,7 @@ import types
 import unittest
 from unittest import mock
 
-from asf import env
+from asf import capacity, env
 from asf.feeder import rows as feeder_rows
 from asf.metrics import metrics
 from asf.metrics import metrics as metrics_mod
@@ -535,6 +535,59 @@ class HarvestStepTests(StepsTestCase):
         self.assertEqual(steps.STEPS[steps.STEPS.index('prs') + 1], 'harvest')
         self.assertEqual(steps.STEPS[steps.STEPS.index('harvest') + 1], 'batch')
         self.assertIn(('harvest', 'asf', None), steps.resolve(self.product))
+
+
+# ---- batch (the CI hold) and the capacity overlay ----------------------------------
+
+class BatchStep(StepsTestCase):
+    """``batch`` is a command step, held at the CI ceiling before it runs."""
+
+    product_extra = 'steps:\n  batch: python3 -c \'print("batch ran")\'\n'
+
+    def resolved(self, ci, ci_inflight):
+        return capacity.Resolved(sessions=4, sessions_bound='default', ci=ci, ci_bound='product',
+                                  ci_inflight=ci_inflight, batch={}, reserve={})
+
+    def test_at_the_ci_ceiling_the_command_is_skipped_with_a_waits_line(self):
+        with mock.patch.object(capacity, 'resolve', return_value=self.resolved(2, 3)):
+            rc, out = self.run_tick(steps='batch')
+        self.assertEqual(rc, 0)
+        self.assertIn('waits    batch — at ci capacity (3/2)', out)
+        self.assertNotIn('[command:batch]', out)
+
+    def test_under_the_ceiling_the_command_runs(self):
+        with mock.patch.object(capacity, 'resolve', return_value=self.resolved(2, 1)):
+            rc, out = self.run_tick(steps='batch')
+        self.assertEqual(rc, 0)
+        self.assertIn('[command:batch] batch ran', out)
+
+    def test_an_unknown_ci_count_runs_the_command(self):
+        with mock.patch.object(capacity, 'resolve', return_value=self.resolved(2, None)):
+            rc, out = self.run_tick(steps='batch')
+        self.assertEqual(rc, 0)
+        self.assertIn('[command:batch] batch ran', out)
+
+    def test_no_ci_capacity_configured_makes_no_gh_call(self):
+        # the product declares no `ci:` block, so the resolver's own CI law never picks CiRuns —
+        # this proves it end to end, with the real resolver, not the stub above
+        with mock.patch('subprocess.run') as gh:
+            rc, out = self.run_tick(steps='batch')
+        self.assertEqual(rc, 0)
+        gh.assert_not_called()
+        self.assertIn('[command:batch] batch ran', out)
+
+
+class CommandStep(StepsTestCase):
+    """Every command step — not only ``batch`` — carries the capacity overlay."""
+
+    product_extra = ('steps:\n  batch: off\n'
+                      '  health: python3 -c \'import os; '
+                      'print(os.environ["ASF_CAPACITY_SESSIONS"])\'\n')
+
+    def test_the_capacity_overlay_is_in_the_command_environment(self):
+        rc, out = self.run_tick(steps='health')
+        self.assertEqual(rc, 0)
+        self.assertIn('[command:health] 4', out)
 
 
 # ---- daily ------------------------------------------------------------------------
