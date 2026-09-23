@@ -14,6 +14,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 from asf import env
 from asf.conventions import Conventions
 from asf.harvest import harvest
+from asf.workers import lifecycle
 from asf.init import ITEM_FOLDERS, STREAM_FOLDERS
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_harvest` does not
@@ -1185,6 +1186,26 @@ class EveryBranchAheadIsOwned(unittest.TestCase):
         run = {'ended': 'x', 'end_reason': 'failed: not pushed',
                'correction': {'text': 'commit and push what you have', 'at': '2026-09-23T09:00:00Z'}}
         self.assertFalse(harvest.is_eligible(run))
+
+    def test_an_answered_correction_does_not_hold_the_branch_for_ever(self):
+        # the correction text never goes away, so without the registry path a branch held once is
+        # skipped for ever — a regression that held three green branches on 2026-09-23
+        import json as _json, tempfile as _tf, os as _os
+        d = _tf.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        path = _os.path.join(d, 'sessions.jsonl')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(_json.dumps({'job': 'coder-t-1', 'item': 'T-0001', 'branch': 'worker/T-0001',
+                                 'started': '2026-09-23T09:00:00Z', 'pid': 1}) + '\n')
+            f.write(_json.dumps({'job': 'coder-t-1', 'ended': '2026-09-23T09:05:00Z',
+                                 'correction': {'text': 'push it', 'at': '2026-09-23T09:05:00Z'}}) + '\n')
+            f.write(_json.dumps({'job': 'correct-t-1', 'item': 'T-0001', 'branch': 'worker/T-0001',
+                                 'started': '2026-09-23T09:10:00Z', 'pid': 2}) + '\n')
+            f.write(_json.dumps({'job': 'correct-t-1', 'ended': '2026-09-23T09:20:00Z',
+                                 'end_reason': 'finished'}) + '\n')
+        held = lifecycle.latest(path)['coder-t-1']
+        self.assertFalse(harvest.is_eligible(held), 'without the path it looks pending')
+        self.assertTrue(harvest.is_eligible(held, path), 'a later run answered the correction')
 
     def test_no_record_at_all_is_not_gated(self):
         self.assertFalse(harvest.is_eligible(None))

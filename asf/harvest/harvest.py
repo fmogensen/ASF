@@ -162,7 +162,7 @@ def read_sessions(state_dir):
     return lifecycle.latest(sessions_path(state_dir))
 
 
-def is_eligible(record):
+def is_eligible(record, path=None):
     """What harvest may gate. The run's own verdict is *not* the test (B-0079): a branch with
     commits ahead of the trunk that no live run owns is work, whatever the session that made it
     said about itself. Sessions end `failed: empty branch` or `failed: not pushed` with their
@@ -180,7 +180,10 @@ def is_eligible(record):
             # the gate (D-0048). Re-gating an untouched branch every tick bumped its round with
             # no session having tried anything, and marched items to adjudication for nothing.
             # At the cap the item belongs to the adjudicate row, and the hold keeps printing.
-            and not (lifecycle.pending_correction(record)
+            # ``path`` is what tells a correction apart from an *answered* correction: without
+            # it a branch held once is skipped for ever, because the correction text never goes
+            # away (my own B-0079 regression, found holding three green branches).
+            and not (lifecycle.pending_correction(record, path)
                      and (record.get('rounds') or 0) < lifecycle.ROUND_CAP))
 
 
@@ -542,7 +545,7 @@ def run_harvest(repo, state_dir, dry_run, conv=None):
     eligible = []
     for branch in worker_branches(repo, conv):
         job = conv.strip_prefix(branch)
-        if not is_eligible(sessions.get(job)):
+        if not is_eligible(sessions.get(job), sessions_path(state_dir)):
             continue
         ahead = sh(['git', 'rev-list', '--count', f'origin/{conv.main}..{branch}'],
                    cwd=repo).stdout.strip()
@@ -1055,7 +1058,7 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
             results[branch] = archive_superseded(repo, state_dir, branch, record, item, state,
                                                  dry_run, out)
             continue
-        if not is_eligible(record):
+        if not is_eligible(record, sessions_path(state_dir)):
             continue
         eligible.append((branch, record))
     to_land = []
