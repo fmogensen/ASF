@@ -574,5 +574,15 @@ class CliTest(unittest.TestCase):
         self.assertEqual(ids[0], 'B-0002')
 
 
+    def test_next_reads_the_live_sessions_off_the_ledger_as_the_tick_does(self):
+        # without --inflight, `asf next` listed items whose coder was already live as "would launch"
+        ledger = [{'job': 'fix-bug-b-0001', 'item': 'B-0001', 'kind': 'fix', 'branch': 'fix/B-0001',
+                   'pid': 1, 'started': 't1'}]
+        rc, out = self.run_next(['next', '--product', 'sample', '--capacity', '10', '--json'],
+                                ledger=ledger)
+        self.assertEqual(rc, 0)
+        self.assertNotIn('B-0001', [d['item_id'] for d in json.loads(out)])
+
+
 if __name__ == '__main__':
     unittest.main()

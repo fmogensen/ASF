@@ -89,6 +89,14 @@ def groom_state(product, root):
             'oldest': pairs[0][0] if pairs else None, 'attempts': attempts}
 
 
+def plan_inputs(product, root):
+    """The ledger's and the record's facts ``plan_rows`` takes beside the index — one place, so
+    the tick, ``asf next`` and the status cell plan the same rows."""
+    return {'attempts': attempts(product), 'corrections': corrections(product),
+            'busy': awaiting_harvest(product),
+            'groom_state': groom_state(product, root) if groom_policy.groom_auto(product) else None}
+
+
 def _git(repo, args):
     p = subprocess.run(['git', '-C', repo, *args], capture_output=True, text=True)
     return p.stdout.strip() if p.returncode == 0 else ''
@@ -142,10 +150,8 @@ def run(ctx, out=print):
     items, _generated = index_reader.load(ctx.record_root())
     running = inflight(product)
     r = capacity_mod.resolve(product)
-    gstate = groom_state(product, ctx.record_root()) if groom_policy.groom_auto(product) else None
-    planned = feeder_rows.plan_rows(items, product, running, r.sessions, attempts=attempts(product),
-                                     corrections=corrections(product), busy=awaiting_harvest(product),
-                                     groom_state=gstate)
+    planned = feeder_rows.plan_rows(items, product, running, r.sessions,
+                                     **plan_inputs(product, ctx.record_root()))
     worker_rows, texts, kinds = [], {}, {}
     for row in planned:
         if not row.launches:

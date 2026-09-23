@@ -93,13 +93,13 @@ def cmd_next(args, root=None):
     product = env.load_product(getattr(args, 'product', None))
     root = root or product.backlog_dir
     items, _generated = ix.load(root)
-    inflight = load_inflight(getattr(args, 'inflight', None))
-    capacity = args.capacity if args.capacity is not None else _default_capacity(product)
-    # the tick's own ledger reads (step_wave.run): a branch awaiting harvest is busy in both views
+    # the tick's own ledger reads (step_wave.run): a live session and a branch awaiting harvest
+    # are busy in both views; ``--inflight`` replaces the live sessions (a what-if)
     from asf.tick import step_wave
-    rows = R.plan_rows(items, product, inflight, capacity, attempts=step_wave.attempts(product),
-                       corrections=step_wave.corrections(product),
-                       busy=step_wave.awaiting_harvest(product))
+    inflight_path = getattr(args, 'inflight', None)
+    inflight = load_inflight(inflight_path) if inflight_path else step_wave.inflight(product)
+    capacity = args.capacity if args.capacity is not None else _default_capacity(product)
+    rows = R.plan_rows(items, product, inflight, capacity, **step_wave.plan_inputs(product, root))
     if getattr(args, 'json', False):
         print(rows_json(rows), end='')
     else:
@@ -118,7 +118,7 @@ def register(sub):
     p = sub.add_parser('next', help='the NEXT table: what the tick would start, S1 first')
     env.add_product_arg(p)
     p.add_argument('--capacity', type=int, default=None, help='session slots (default: asf.capacity.resolve)')
-    p.add_argument('--inflight', default=None, help='JSON file: the running sessions [{item, kind, account, age}]')
+    p.add_argument('--inflight', default=None, help='JSON file: the running sessions [{item, kind, account, age}] (default: the session ledger)')
     p.add_argument('--json', action='store_true', help='print the rows as JSON')
     p.set_defaults(func=cmd_next)
     return p
