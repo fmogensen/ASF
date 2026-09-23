@@ -4,6 +4,7 @@ import re
 
 from asf.groom.shape import Card, Question, derive, infer_parent_epic
 from asf.record.ids import mint_id, write_new_item
+from asf.record.publish import publish
 from asf.conventions import DEFAULT_INTAKE_DIR
 
 INBOX_KV_RE = re.compile(r'^(type|parent|signature|severity|writes|stories):\s*(.+?)\s*$', re.IGNORECASE)
@@ -103,6 +104,7 @@ def cmd_inbox(args, root):
     with open(path, 'w', encoding='utf-8') as f:
         f.write(text)
     print(os.path.relpath(path, root))
+    publish(root, path, f"record: inbox {os.path.basename(path)}")
     return 0
 
 

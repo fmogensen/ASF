@@ -8,6 +8,7 @@ from asf.record.core import (
     today, tokenize,
 )
 from asf.record.ids import mint_id, write_new_item
+from asf.record.publish import publish
 from asf.schema import SCHEMA_VERSION
 
 
@@ -141,6 +142,7 @@ def cmd_new(args, root):
         write_new_item(root, canonical, type_, new_id, typed, body, today(), 'new',
                        acceptance=acceptance or (), shape=shape)
         print(new_id)
+        publish(root, canonical[new_id]['path'], f"record: new {type_} {new_id}")
         return 0
     ts = now_iso()
     meta['schema_version'] = SCHEMA_VERSION
@@ -171,4 +173,5 @@ def cmd_new(args, root):
     with open(path, 'w', encoding='utf-8') as f:
         f.write(text)
     print(new_id)
+    publish(root, path, f"record: new {type_} {new_id}")
     return 0
