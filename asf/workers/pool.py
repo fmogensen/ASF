@@ -13,8 +13,11 @@ Accounts come from ``config.yaml worker_pool.accounts``::
                                               # config.yaml (asf.capacity.reserve); this key is
                                               # still read when the new one is not set.
 
-The pick rule (the legacy one): among accounts under their caps and under the quota guard,
-the lowest load wins (ties by name). No account under the guard →
+The pick rule: among accounts under their caps, a free account wins over a cooling one, and a
+stopped account is never picked; the lowest load wins among free accounts (ties by name), and
+among cooling accounts (eligible only at load 0) ties go to the name. Nothing launchable, but
+some account held only by the cooldown → ``quota cooldown — one job at a time``, an ordinary
+wait. Every candidate at or above its stop, or unreadable →
 ``NEEDS OPERATOR: no account under quota — …`` as the row's reason, never an exception.
 
 Reserved S1 capacity: while any S1 Bug is open, a lane's non-``BUG → FIX`` rows may use at most
@@ -43,6 +46,7 @@ REASON_RESERVED = 'reserved for S1'
 REASON_FULL = 'pool full'
 REASON_NO_QUOTA = ('NEEDS OPERATOR: no account under quota — wait for a window to reset, or '
                    'add an account under worker_pool.accounts (see: asf workers quota)')
+REASON_COOLDOWN = 'quota cooldown — one job at a time'
 
 
 def now_iso():
@@ -188,7 +192,7 @@ class Pool:
     def __init__(self, accounts, quota_source=None, guards=None, reserve=None, live=()):
         self.accounts = list(accounts)
         self.quota = quota_source or quota_mod.NoQuotaSource()
-        self.guards = guards or dict(quota_mod.DEFAULT_GUARDS)
+        self.guards = guards or quota_mod.guards_from_config({})
         self.reserve = dict(DEFAULT_RESERVE if reserve is None else reserve)
         self.live = [dict(s) for s in live]
         self._usage = {}
@@ -204,6 +208,9 @@ class Pool:
         if account.name not in self._usage:
             self._usage[account.name] = self.quota.read(account)
         return self._usage[account.name]
+
+    def band(self, account):
+        return quota_mod.band(self.usage(account), self.guards)
 
     def load(self, account, model=None):
         return sum(1 for s in self.live if s.get('account') == account.name
@@ -233,11 +240,23 @@ class Pool:
                     if self.lane_load(a.role) < self.lane_cap(a.role) - self.reserve.get(a.role, 0)]
             if not room:
                 return None, REASON_RESERVED
-        guarded = [a for a in room if quota_mod.under_guard(self.usage(a), self.guards)[0]]
-        if not guarded:
-            return None, REASON_NO_QUOTA
-        guarded.sort(key=lambda a: (self.load(a), a.name))
-        return guarded[0], ''
+        free, cooling, held = [], [], False
+        for a in room:
+            state, _why = self.band(a)
+            if state == quota_mod.FREE:
+                free.append(a)
+            elif state == quota_mod.COOLDOWN:
+                if self.load(a) == 0:
+                    cooling.append(a)
+                else:
+                    held = True             # cooling and already carrying its one job
+        if free:
+            free.sort(key=lambda a: (self.load(a), a.name))
+            return free[0], ''
+        if cooling:
+            cooling.sort(key=lambda a: a.name)  # every one of them is at load 0
+            return cooling[0], ''
+        return None, (REASON_COOLDOWN if held else REASON_NO_QUOTA)
 
     def take(self, account, model, job=''):
         self.live.append({'job': job, 'account': account.name, 'model': model})

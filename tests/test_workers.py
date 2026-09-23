@@ -24,7 +24,7 @@ from asf.workers import runtime as runtime_mod
 from asf.workers import spawn as spawn_mod
 from asf.workers import stall as stall_mod
 from asf.workers import wave as wave_mod
-from asf.workers import register
+from asf.workers import cmd_quota, register
 from asf.tick.step_wave import corrections as step_wave_corrections
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_workers` does not
@@ -183,21 +183,44 @@ class TestRuntime(unittest.TestCase):
 
 
 class TestQuota(unittest.TestCase):
-    def test_default_guards_and_config(self):
-        self.assertEqual(quota_mod.guards_from_config({}),
-                         {'five_h': 92, 'seven_d': 85, 'seven_d_model': 90})
-        g = quota_mod.guards_from_config({'quota_guards': {'five_h': 80}})
-        self.assertEqual(g['five_h'], 80)
-        old = quota_mod.guards_from_config({'worker_pool': {'quota_guard': {'max_7d': 0.5}}})
-        self.assertEqual(old['seven_d'], 50)
-
-    def test_under_guard(self):
+    def test_default_guards_are_the_band(self):
         g = quota_mod.guards_from_config({})
-        self.assertEqual(quota_mod.under_guard({'five_h_pct': 91, 'seven_d_pct': 84}, g), (True, ''))
-        self.assertFalse(quota_mod.under_guard({'five_h_pct': 92, 'seven_d_pct': 0}, g)[0])
-        self.assertFalse(quota_mod.under_guard({'five_h_pct': 0, 'seven_d_pct': 85}, g)[0])
-        self.assertFalse(quota_mod.under_guard({'seven_d_model_pct': 90}, g)[0])
-        self.assertEqual(quota_mod.under_guard(None, g), (False, 'quota unreadable'))
+        self.assertEqual(g['stop'], {'five_h': 95, 'seven_d': 95, 'seven_d_model': 95})
+        self.assertEqual(g['cooldown'], {'five_h': 90, 'seven_d': 90, 'seven_d_model': 90})
+
+    def test_the_old_forms_set_the_stop_and_derive_the_cooldown(self):
+        g = quota_mod.guards_from_config({'quota_guards': {'five_h': 80}})
+        self.assertEqual((g['stop']['five_h'], g['cooldown']['five_h']), (80, 75))
+        self.assertEqual((g['stop']['seven_d'], g['cooldown']['seven_d']), (95, 90))
+        old = quota_mod.guards_from_config({'worker_pool': {'quota_guard': {'max_7d': 0.5}}})
+        self.assertEqual((old['stop']['seven_d'], old['cooldown']['seven_d']), (50, 45))
+
+    def test_a_named_band_wins_and_is_clamped_to_its_own_stop(self):
+        g = quota_mod.guards_from_config(
+            {'quota_guards': {'stop': {'seven_d': 96}, 'cooldown': {'seven_d': 88}}})
+        self.assertEqual((g['stop']['seven_d'], g['cooldown']['seven_d']), (96, 88))
+        g = quota_mod.guards_from_config({'quota_guards': {'cooldown': {'five_h': 99}}})
+        self.assertEqual(g['cooldown']['five_h'], 95)          # never above the stop
+
+    def test_band(self):
+        g = quota_mod.guards_from_config({})
+        self.assertEqual(quota_mod.band({'five_h_pct': 89, 'seven_d_pct': 89}, g), ('free', ''))
+        self.assertEqual(quota_mod.band({'five_h_pct': 0, 'seven_d_pct': 90}, g),
+                         ('cooldown', 'seven_d_pct 90 ≥ 90'))
+        self.assertEqual(quota_mod.band({'five_h_pct': 94.5, 'seven_d_pct': 0}, g),
+                         ('cooldown', 'five_h_pct 94.5 ≥ 90'))
+        self.assertEqual(quota_mod.band({'five_h_pct': 0, 'seven_d_pct': 95}, g),
+                         ('stop', 'seven_d_pct 95 ≥ 95'))
+        self.assertEqual(quota_mod.band({'seven_d_model_pct': 96}, g)[0], 'stop')
+        self.assertEqual(quota_mod.band(None, g), ('stop', 'quota unreadable'))
+
+    def test_a_stop_anywhere_beats_a_cooldown_in_an_earlier_window(self):
+        g = quota_mod.guards_from_config({})
+        self.assertEqual(quota_mod.band({'five_h_pct': 91, 'seven_d_pct': 97}, g),
+                         ('stop', 'seven_d_pct 97 ≥ 95'))
+
+    def test_under_guard_is_gone(self):
+        self.assertFalse(hasattr(quota_mod, 'under_guard'))
 
     def test_command_source_parses_one_json_line(self):
         cmd = (f'{sys.executable} -c "import json,sys; print(\'noise\'); '
@@ -250,6 +273,50 @@ class TestPick(unittest.TestCase):
         a, b = pool_mod.Account('a', cap=2), pool_mod.Account('b', cap=2)
         p = self.pool([a, b], usage={'a': {'five_h_pct': 0, 'seven_d_pct': 99}})
         self.assertEqual(p.pick_account('spec', 'opus')[0].name, 'b')
+
+    def test_cooldown_lets_one_job_through_then_holds(self):
+        a = pool_mod.Account('a', cap=3)
+        p = self.pool([a], usage={'a': {'five_h_pct': 0, 'seven_d_pct': 91}})
+        self.assertEqual(p.pick_account('spec', 'opus')[0].name, 'a')
+        p.take(a, 'opus', 'j1')
+        self.assertEqual(p.pick_account('spec', 'opus'), (None, pool_mod.REASON_COOLDOWN))
+
+    def test_a_cooling_account_that_is_already_busy_takes_nothing(self):
+        a = pool_mod.Account('a', cap=3)
+        p = self.pool([a], live=[{'account': 'a'}], usage={'a': {'seven_d_pct': 91}})
+        self.assertEqual(p.pick_account('spec', 'opus'), (None, pool_mod.REASON_COOLDOWN))
+
+    def test_at_the_stop_nothing_goes_through_and_it_pages(self):
+        a = pool_mod.Account('a', cap=3)
+        p = self.pool([a], usage={'a': {'five_h_pct': 0, 'seven_d_pct': 95}})
+        acct, reason = p.pick_account('spec', 'opus')
+        self.assertIsNone(acct)
+        self.assertTrue(reason.startswith('NEEDS OPERATOR: no account under quota — '))
+
+    def test_a_free_account_is_preferred_over_a_cooling_one(self):
+        a, b = pool_mod.Account('a', cap=3), pool_mod.Account('b', cap=3)
+        p = self.pool([a, b], live=[{'account': 'b'}, {'account': 'b'}],
+                      usage={'a': {'seven_d_pct': 92}})
+        self.assertEqual(p.pick_account('spec', 'opus')[0].name, 'b')   # busier, but free
+
+    def test_cooldown_beats_the_needs_operator_line(self):
+        a, b = pool_mod.Account('a', cap=3), pool_mod.Account('b', cap=3)
+        p = self.pool([a, b], live=[{'account': 'b'}],
+                      usage={'a': {'seven_d_pct': 99}, 'b': {'seven_d_pct': 92}})
+        self.assertEqual(p.pick_account('spec', 'opus'), (None, pool_mod.REASON_COOLDOWN))
+
+    def test_an_unreadable_account_is_stopped_not_cooling(self):
+        a = pool_mod.Account('a', cap=3)
+        p = self.pool([a], usage={'a': None})
+        self.assertEqual(p.pick_account('spec', 'opus'), (None, pool_mod.REASON_NO_QUOTA))
+
+    def test_the_band_is_applied_after_the_s1_reserve(self):
+        a = pool_mod.Account('a', role='local', cap=3)
+        p = self.pool([a], live=[{'account': 'a'}, {'account': 'a'}],
+                      usage={'a': {'seven_d_pct': 96}})
+        # the reserved slot exists, but the account is past its stop — the S1 fix waits too
+        self.assertEqual(p.pick_account('fix-bug', 'opus', is_fix=True, s1_is_open=True),
+                         (None, pool_mod.REASON_NO_QUOTA))
 
     def test_reserve_rule(self):
         a = pool_mod.Account('a', role='local', cap=3)
@@ -599,8 +666,9 @@ class SpawnHookTests(Home):
 
 
 class TestWave(Home):
-    def run_wave(self, rows, n, accounts, live=()):
-        pool = pool_mod.Pool(accounts, quota_source=quota_mod.FakeQuotaSource(), live=live)
+    def run_wave(self, rows, n, accounts, live=(), usage=None):
+        pool = pool_mod.Pool(accounts, quota_source=quota_mod.FakeQuotaSource(usage or {}),
+                             live=live)
         lines = []
         rt = runtime_mod.FakeRuntime([{'running': True}] * 10)
         launched, waits = wave_mod.wave(self.product, rows, n, pool=pool, runtime=rt,
@@ -631,6 +699,17 @@ class TestWave(Home):
         launched, waits, _ = self.run_wave([feature_row('a'), feature_row('b')], 1, [acct])
         self.assertEqual([r.job for r, _ in launched], ['a'])
         self.assertEqual([why for _, why in waits], ['wave full'])
+
+    def test_a_cooling_account_launches_one_row_and_the_rest_wait_without_paging(self):
+        acct = pool_mod.Account('acct-a', role='local', cap=3)
+        rows = [feature_row('spec-1'), feature_row('spec-2', item='F-0002')]
+        launched, waits, lines = self.run_wave(
+            rows, 5, [acct], usage={'acct-a': {'five_h_pct': 0, 'seven_d_pct': 93}})
+        self.assertEqual([r.job for r, _ in launched], ['spec-1'])
+        self.assertEqual([(r.job, why) for r, why in waits],
+                         [('spec-2', pool_mod.REASON_COOLDOWN)])
+        self.assertTrue(lines[1].endswith('— quota cooldown — one job at a time'), lines[1])
+        self.assertNotIn('NEEDS OPERATOR', '\n'.join(lines))
 
 
 class TestHealth(Home):
@@ -1059,6 +1138,29 @@ class TestCli(unittest.TestCase):
             args = p.parse_args(['workers', *verb.split(), '--product', 'sample'])
             self.assertEqual(args.product, 'sample')
             self.assertTrue(callable(args.func))
+
+
+class TestQuotaCli(Home):
+    def run_quota(self, usage):
+        cfg = {'worker_pool': {'accounts': [{'name': 'acct-a', 'role': 'local', 'cap': 3}],
+                               'quota_command': 'true {account}'}}
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), \
+             mock.patch('asf.workers._product', return_value=self.product), \
+             mock.patch('asf.workers.spawn.load_cfg', return_value=cfg), \
+             mock.patch.object(quota_mod.CommandQuotaSource, 'read', lambda self, a: usage):
+            rc = cmd_quota(argparse.Namespace(product='sample'))
+        return rc, buf.getvalue()
+
+    def test_the_table_names_the_band_and_the_window_that_decided_it(self):
+        rc, text = self.run_quota({'five_h_pct': 10, 'seven_d_pct': 91})
+        self.assertEqual(rc, 0)
+        self.assertIn('| Band |', text.splitlines()[0])
+        self.assertIn('| acct-a | local | 0 / 3 | 10 | 91 | cooldown — seven_d_pct 91 ≥ 90 |', text)
+        self.assertIn('| stop — seven_d_pct 96 ≥ 95 |',
+                      self.run_quota({'five_h_pct': 10, 'seven_d_pct': 96})[1])
+        self.assertIn('| free |', self.run_quota({'five_h_pct': 10, 'seven_d_pct': 10})[1])
+        self.assertIn('| ? | ? | stop — quota unreadable |', self.run_quota(None)[1])
 
 
 class TestReserveIdCli(Home):

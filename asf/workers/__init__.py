@@ -88,14 +88,15 @@ def cmd_quota(args):
     product = _product(args)
     cfg = spawn.load_cfg()
     p = pool.Pool.from_config(cfg, product)
-    print('| Account | Lane | Load / cap | 5h % | 7d % | Under guard |')
+    print('| Account | Lane | Load / cap | 5h % | 7d % | Band |')
     print('|---|---|---|---|---|---|')
     for a in p.accounts:
         u = p.usage(a)
-        ok, why = quota.under_guard(u, p.guards)
+        state, why = quota.band(u, p.guards)
         u = u or {}
+        cell = state if state == quota.FREE else f'{state} — {why}'
         print(f"| {a.name} | {a.role} | {p.load(a)} / {a.cap} | {u.get('five_h_pct', '?')} | "
-              f"{u.get('seven_d_pct', '?')} | {'yes' if ok else 'no — ' + why} |")
+              f"{u.get('seven_d_pct', '?')} | {cell} |")
     return 0
 
 

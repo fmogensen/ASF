@@ -1,4 +1,4 @@
-"""asf.workers.quota — each account's usage windows, and the guard a launch must be under.
+"""asf.workers.quota — each account's usage windows, and the band a launch is judged against.
 
 The READ is a provider: ``QuotaSource.read(account) -> {"five_h_pct": .., "seven_d_pct": ..}``
 (optionally ``seven_d_model_pct`` — a per-model 7-day window). Two sources: ``fake`` (a dict,
@@ -6,46 +6,69 @@ for tests) and ``command`` — ``config.yaml worker_pool.quota_command``, a comm
 ``{account}`` placeholder that prints one JSON line with those keys. Nothing here knows how a
 vendor's usage is actually fetched.
 
-The GUARD is ``config.yaml quota_guards`` (percent): ``five_h`` 92, ``seven_d`` 85,
-``seven_d_model`` 90 by default. An account is under the guard when every window it reports is
-below its threshold. An unreadable account is NOT under the guard (unknown ≠ free).
+The BAND is two thresholds per window, read from ``config.yaml quota_guards`` (percent): at or
+above ``cooldown`` an account takes one job at a time; at or above ``stop`` it takes none.
+Defaults: ``stop`` 95, ``cooldown`` 90, for every window. An unreadable account reads as
+``stop`` (unknown ≠ free).
 """
 import json
 import shlex
 import subprocess
 
-DEFAULT_GUARDS = {'five_h': 92, 'seven_d': 85, 'seven_d_model': 90}
+DEFAULT_STOP = {'five_h': 95, 'seven_d': 95, 'seven_d_model': 95}
+BAND = 5                       # how far below the stop the cooldown opens, when unnamed
 WINDOW_KEYS = {'five_h': 'five_h_pct', 'seven_d': 'seven_d_pct', 'seven_d_model': 'seven_d_model_pct'}
+FREE, COOLDOWN, STOP = 'free', 'cooldown', 'stop'
 
 
 def guards_from_config(cfg):
-    """``quota_guards:`` (percent) wins; the older ``worker_pool.quota_guard: {max_5h, max_7d}``
-    (fractions) is honoured when that is all there is."""
+    """``{'stop': {window: pct}, 'cooldown': {window: pct}}``. The older
+    ``worker_pool.quota_guard: {max_5h, max_7d}`` (fractions) and the flat ``quota_guards``
+    (percent) both set the stop; the new nested ``quota_guards: {stop, cooldown}`` wins over
+    both. A cooldown not named is derived as ``stop − BAND``, and every cooldown is clamped to
+    at most its own stop."""
     cfg = cfg or {}
-    out = dict(DEFAULT_GUARDS)
-    g = cfg.get('quota_guards')
-    if isinstance(g, dict):
-        for k in DEFAULT_GUARDS:
-            if g.get(k) is not None:
-                out[k] = float(g[k])
-        return out
+    stop = dict(DEFAULT_STOP)
+    cooldown = {}
     old = ((cfg.get('worker_pool') or {}).get('quota_guard')) or {}
     if old.get('max_5h') is not None:
-        out['five_h'] = float(old['max_5h']) * 100
+        stop['five_h'] = float(old['max_5h']) * 100
     if old.get('max_7d') is not None:
-        out['seven_d'] = float(old['max_7d']) * 100
-    return out
+        stop['seven_d'] = float(old['max_7d']) * 100
+    g = cfg.get('quota_guards')
+    if isinstance(g, dict):
+        for w in WINDOW_KEYS:
+            if g.get(w) is not None:
+                stop[w] = float(g[w])
+        named_stop = g.get('stop') or {}
+        named_cooldown = g.get('cooldown') or {}
+        for w in WINDOW_KEYS:
+            if named_stop.get(w) is not None:
+                stop[w] = float(named_stop[w])
+            if named_cooldown.get(w) is not None:
+                cooldown[w] = float(named_cooldown[w])
+    for w in WINDOW_KEYS:
+        if w not in cooldown:
+            cooldown[w] = max(0, stop[w] - BAND)
+        cooldown[w] = min(cooldown[w], stop[w])
+    return {'stop': stop, 'cooldown': cooldown}
 
 
-def under_guard(usage, guards):
-    """(ok, why). ``usage`` None → not ok."""
+def band(usage, guards):
+    """(state, why). ``usage`` None → ``(STOP, 'quota unreadable')``. Stop is judged over every
+    window before cooldown is — a stop in a later window must beat a cooldown in an earlier
+    one."""
     if usage is None:
-        return False, 'quota unreadable'
+        return STOP, 'quota unreadable'
     for gk, uk in WINDOW_KEYS.items():
         v = usage.get(uk)
-        if v is not None and float(v) >= guards[gk]:
-            return False, f'{uk} {float(v):g} ≥ {guards[gk]:g}'
-    return True, ''
+        if v is not None and float(v) >= guards['stop'][gk]:
+            return STOP, f'{uk} {float(v):g} ≥ {guards["stop"][gk]:g}'
+    for gk, uk in WINDOW_KEYS.items():
+        v = usage.get(uk)
+        if v is not None and float(v) >= guards['cooldown'][gk]:
+            return COOLDOWN, f'{uk} {float(v):g} ≥ {guards["cooldown"][gk]:g}'
+    return FREE, ''
 
 
 class QuotaSource:
