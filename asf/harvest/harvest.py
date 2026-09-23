@@ -785,6 +785,21 @@ def land_already(repo, state_dir, branch, record, trunk, extras, dry_run, out):
     return 'landed'
 
 
+def close_merged(repo, state_dir, branch, record, trunk, dry_run, out):
+    """A finished run whose branch is 0 ahead of the trunk, or gone from origin: it reached the
+    trunk some other way (a direct push). Its ledger is closed at the trunk's tip — left open,
+    ``awaiting_harvest`` held its item busy and its ``writes:`` blocked every sibling for ever."""
+    sha = sh(['git', 'rev-parse', '--verify', '-q', f'origin/{trunk}'], cwd=repo).stdout.strip()
+    if not sha:
+        return None
+    if dry_run:
+        out(f'DRY: would mark {branch} landed — already on {trunk} at {sha[:7]}')
+        return 'dry'
+    mark_harvested(state_dir, record.get('job') or branch, sha)
+    out(f'landed {branch}: already on {trunk} at {sha[:7]}')
+    return 'landed'
+
+
 SUPERSEDED = 'superseded'
 
 
@@ -1047,13 +1062,18 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
     asf_repo = None
     results = {}
     eligible = []
-    for branch in remote_branches(repo, conv, known=sessions):
+    on_origin = remote_branches(repo, conv, known=sessions)
+    for branch in on_origin:
         record = sessions.get(branch)
         if record is None or lifecycle.is_live(record) or record.get('harvest') == 'pr':
             continue
         ahead = sh(['git', 'rev-list', '--count', f'origin/{trunk}..origin/{branch}'],
                    cwd=repo).stdout.strip()
         if ahead in ('', '0'):
+            if ahead == '0' and lifecycle.eligible(record):  # reached the trunk by a direct push
+                closed = close_merged(repo, state_dir, branch, record, trunk, dry_run, out)
+                if closed:
+                    results[branch] = closed
             continue
         # B-0061: content decides before the run's verdict does — a branch whose changes are on
         # the trunk is landed, a Closed Bug's branch is archived, whatever the run ended as (a
@@ -1072,6 +1092,11 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
         if not is_eligible(record, sessions_path(state_dir)):
             continue
         eligible.append((branch, record))
+    for branch, record in sorted(sessions.items()):  # its branch gone from origin
+        if branch not in on_origin and branch != trunk and lifecycle.eligible(record):
+            closed = close_merged(repo, state_dir, branch, record, trunk, dry_run, out)
+            if closed:
+                results[branch] = closed
     to_land = []
     for branch, record in cap_to_tick(eligible, out, conv):
         item = item_of(branch, record)

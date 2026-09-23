@@ -415,9 +415,11 @@ def candidates(index, product, inflight, attempts=None, corrections=None, busy=N
     Feature's rank and id, then within a Feature the stalemate, branch housekeeping, new work.
     ``busy``: item ids held by something that is not a session and takes no slot — a pushed
     branch waiting for harvest (:func:`asf.workers.lifecycle.awaiting_harvest`). ``groom_state``:
-    §2.5's fact for the GROOM → ADJUDICATE row; a caller that passes none gets none."""
+    §2.5's fact for the GROOM → ADJUDICATE row; a caller that passes none gets none. A card
+    already Resolved/Closed is never ``busy``: its work is on the trunk whatever the ledger says
+    (an unclosed run held a landed Task's ``writes:`` against its siblings for ever)."""
     items = items_of(index)
-    busy = inflight_ids(inflight) | set(busy or ())
+    busy = inflight_ids(inflight) | {i for i in busy or () if is_open(items.get(i) or {})}
     limit = stalemate_round(product)
     stalled = {f['id'] for f in ix.of_type(items, 'feature') if review_round(f)[1] >= limit}
     running = running_footprints(items, busy)

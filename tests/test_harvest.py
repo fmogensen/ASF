@@ -733,6 +733,36 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertEqual(lines, [f'landed fix/B-0001: already on main at {before[:7]}'])
         self.assertFalse(self.origin_has('fix/B-0001'))
 
+    def test_a_finished_branch_pushed_straight_to_main_is_marked_landed(self):
+        """A finished run whose branch reached main by a direct push is 0 ahead: it is marked
+        harvested at main's tip, or its item stays busy and its footprint blocks for ever."""
+        self.push_lane('task/T-0001', [('task(T-0001): the change', {'a.txt': 'a\n'})])
+        sh(['git', 'push', '-q', 'origin', 'task/T-0001:main'], cwd=self.worker)
+        self.session('task-t-0001', 'T-0001', 'task/T-0001')
+        results, lines = self.harvest(self.product())
+        sha = self.origin_main()
+        self.assertEqual(results, {'task/T-0001': 'landed'})
+        self.assertIn(f'landed task/T-0001: already on main at {sha[:7]}', lines)
+        self.assertEqual(self.record('task/T-0001').get('harvested'), sha)
+        self.assertEqual(self.harvest(self.product()), ({}, []))
+
+    def test_a_finished_run_whose_branch_is_gone_is_marked_landed(self):
+        self.push_lane('task/T-0001', [('task(T-0001): the change', {'a.txt': 'a\n'})])
+        sh(['git', 'push', '-q', 'origin', 'task/T-0001:main'], cwd=self.worker)
+        sh(['git', 'push', '-q', 'origin', '--delete', 'task/T-0001'], cwd=self.worker)
+        self.session('task-t-0001', 'T-0001', 'task/T-0001')
+        results, _lines = self.harvest(self.product())
+        self.assertEqual(results, {'task/T-0001': 'landed'})
+        self.assertEqual(self.record('task/T-0001').get('harvested'), self.origin_main())
+
+    def test_a_live_or_unfinished_run_on_a_merged_branch_is_left_open(self):
+        self.push_lane('task/T-0001', [('task(T-0001): the change', {'a.txt': 'a\n'})])
+        sh(['git', 'push', '-q', 'origin', 'task/T-0001:main'], cwd=self.worker)
+        self.session('task-t-0001', 'T-0001', 'task/T-0001', rc=1)
+        results, _lines = self.harvest(self.product())
+        self.assertEqual(results, {})
+        self.assertFalse(self.record('task/T-0001').get('harvested'))
+
     def test_b0061_content_decides_whatever_the_run_ended_as(self):
         # a run marked by hand "superseded: the work is on main" (or a failed retry) is not
         # finished, so the branch was never looked at: its worktree and branch stayed for ever

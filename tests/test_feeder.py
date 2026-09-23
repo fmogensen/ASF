@@ -78,6 +78,32 @@ class FootprintHoldersAreLiveRuns(unittest.TestCase):
         self.assertEqual(rows.running_footprints(self.items(), {'T-0001'}), [('T-0001', ['a.py'])])
 
 
+class ADoneCardHoldsNoFootprint(unittest.TestCase):
+    """A Resolved/Closed card's branch is on the trunk: even when the ledger still lists it as
+    awaiting harvest, it blocks no sibling ("WAITS ON" a landed Task for ever)."""
+
+    def index(self, state):
+        return {'items': {
+            'F-0001': {'id': 'F-0001', 'type': 'feature', 'stage': 'building 1/2', 'decided': True,
+                       'state': 'Active', 'children': ['T-0001', 'T-0002']},
+            'T-0001': {'id': 'T-0001', 'type': 'task', 'parent': 'F-0001', 'rank': 1,
+                       'state': state, 'writes': ['a.py']},
+            'T-0002': {'id': 'T-0002', 'type': 'task', 'parent': 'F-0001', 'rank': 2,
+                       'state': 'New', 'writes': ['a.py']}}}
+
+    def action(self, state):
+        by = {r.item_id: r for r in rows.candidates(self.index(state), product(), [],
+                                                    busy={'T-0001'})}
+        return by['T-0002'].action
+
+    def test_an_open_card_awaiting_harvest_holds_its_files(self):
+        self.assertEqual(self.action('Active'), 'WAITS ON T-0001')
+
+    def test_a_done_card_awaiting_harvest_holds_nothing(self):
+        self.assertEqual(self.action('Resolved'), 'would launch')
+        self.assertEqual(self.action('Closed'), 'would launch')
+
+
 class FootprintTest(unittest.TestCase):
     def test_same_file(self):
         self.assertTrue(footprint.overlaps(['a/b.ts'], ['a/b.ts']))
@@ -501,9 +527,13 @@ class RenderTest(unittest.TestCase):
 
 
 class CliTest(unittest.TestCase):
-    def run_next(self, argv):
+    def run_next(self, argv, ledger=()):
         with tempfile.TemporaryDirectory() as home:
             os.makedirs(os.path.join(home, 'products'))
+            if ledger:
+                os.makedirs(os.path.join(home, 'state', 'sample'))
+                with open(os.path.join(home, 'state', 'sample', 'sessions.jsonl'), 'w') as f:
+                    f.writelines(json.dumps(r) + '\n' for r in ledger)
             with open(os.path.join(home, 'products', 'sample.yaml'), 'w') as f:
                 f.write(f"product: sample\nbacklog_dir: {FIXTURES}\nconventions:\n"
                         "  branch_prefixes:\n    spec: spec\n    plan: plan\n    task: task\n")
@@ -531,6 +561,17 @@ class CliTest(unittest.TestCase):
         rc, out = self.run_next(['next', '--product', 'sample', '--capacity', '10', '--json'])
         self.assertEqual(rc, 0)
         self.assertEqual([d['item_id'] for d in json.loads(out)], ['B-0001', 'B-0002'])
+
+    def test_next_holds_a_branch_awaiting_harvest_busy_as_the_tick_does(self):
+        ledger = [{'job': 'fix-bug-b-0001', 'item': 'B-0001', 'branch': 'fix/B-0001', 'pid': 1,
+                   'started': 't1'},
+                  {'job': 'fix-bug-b-0001', 'ended': 't2', 'end_reason': 'finished'}]
+        rc, out = self.run_next(['next', '--product', 'sample', '--capacity', '10', '--json'],
+                                ledger=ledger)
+        self.assertEqual(rc, 0)
+        ids = [d['item_id'] for d in json.loads(out)]
+        self.assertNotIn('B-0001', ids)
+        self.assertEqual(ids[0], 'B-0002')
 
 
 if __name__ == '__main__':

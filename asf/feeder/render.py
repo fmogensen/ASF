@@ -95,7 +95,11 @@ def cmd_next(args, root=None):
     items, _generated = ix.load(root)
     inflight = load_inflight(getattr(args, 'inflight', None))
     capacity = args.capacity if args.capacity is not None else _default_capacity(product)
-    rows = R.plan_rows(items, product, inflight, capacity)
+    # the tick's own ledger reads (step_wave.run): a branch awaiting harvest is busy in both views
+    from asf.tick import step_wave
+    rows = R.plan_rows(items, product, inflight, capacity, attempts=step_wave.attempts(product),
+                       corrections=step_wave.corrections(product),
+                       busy=step_wave.awaiting_harvest(product))
     if getattr(args, 'json', False):
         print(rows_json(rows), end='')
     else:
