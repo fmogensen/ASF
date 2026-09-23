@@ -533,8 +533,10 @@ class GitHookTests(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn('secret', r.stdout + r.stderr)
         self.assertNotIn(secret, r.stdout + r.stderr)
-        origin_log = _git(['log', '--format=%H', 'main'], origin)
-        self.assertEqual(origin_log, '')
+        # nothing was published: ask for the refs that exist, never `log main` — on a bare repo
+        # with no commits that is an unknown revision, and git exits 128 (B-0038's class again)
+        published = _git(['for-each-ref', '--format=%(refname)', 'refs/heads/'], origin)
+        self.assertEqual(published, '')
 
 
 class NoCheckoutPathsTest(unittest.TestCase):
