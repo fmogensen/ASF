@@ -41,6 +41,10 @@ it lands at that sha. A branch that conflicts on its rebase is held as before an
 the set. A red gate bisects: the set is split in half, each half re-stacked and gated, recursing
 until a branch is red on its own — that one is held with its failing line, and everything else
 still lands in the tick. ``harvest.gate: per-branch`` keeps one gate and one push per landing.
+When the test command names its red modules (a ``red: a, b`` line, as asf's own suite runner
+prints), the halves re-run only those modules (``ASF_GATE_MODULES``) and the set kept is gated
+in full once more before it is pushed; when those modules are red on the trunk alone too, no
+branch is blamed or held — ``harvest: red on trunk too — <modules>`` — and the next tick retries.
 """
 import argparse
 import json
@@ -51,6 +55,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 from asf import approvals, env, hermetic
 from asf.conventions import Conventions
@@ -719,24 +724,63 @@ def gate_files(text, cap=20):
     return found[:cap]
 
 
-def product_gate(tmp, conv, asf_repo):
-    """``(ok, first failing line, files)``: the product's test command, then — on asf's own repo — its
-    generic and conventions checks. Each within ``harvest.gate_timeout_s`` (B-0072)."""
+#: The line a test command prints naming its red modules (asf's own suite runner: ``red: a, b``).
+RED_MODULES_RE = re.compile(r'^red: (.+)$', re.M)
+#: The variable :func:`product_gate` names a subset of modules in for the test command to run
+#: (asf's own suite runner honours it); a command that ignores it runs whole — still correct.
+ONLY_VAR = 'ASF_GATE_MODULES'
+#: The summary shape of asf's own suite runner: ``Ran X tests in Ys (N module(s), …)``.
+MODULE_COUNT_RE = re.compile(r'^Ran \d+ tests? in [\d.]+s \((\d+) module', re.M)
+
+
+def red_modules(text):
+    """The modules the test command's *last* ``red:`` line names, in order; ``()`` when none."""
+    found = None
+    for found in RED_MODULES_RE.finditer(text or ''):
+        pass
+    if not found:
+        return ()
+    return tuple(dict.fromkeys(n for n in re.split(r'[\s,+]+', found.group(1)) if n))
+
+
+def product_gate(tmp, conv, asf_repo, out=None, only=None):
+    """``(ok, first failing line, files, red modules)``: the product's test command, then — on
+    asf's own repo — its generic and conventions checks. Each within ``harvest.gate_timeout_s``
+    (B-0072). With ``only`` (module names): just those modules of the test command, named in
+    :data:`ONLY_VAR`, and no checks — a bisection's targeted re-run; the full gate confirms
+    whatever lands. ``out`` gets one timing line per gate: ``gate: <n> modules, <s>s, red: …``."""
+    env = gate_env(tmp)
     cmds = []
     if conv.test_command:
         cmds.append(shlex.split(str(conv.test_command)))
-    if asf_repo:
+    if only:
+        env[ONLY_VAR] = ' '.join(only)
+    elif asf_repo:
         cmds += [['bash', os.path.join('tools', name + '.sh')] for name in ASF_GATE_SCRIPTS]
-    env = gate_env(tmp)
     timeout = gate_timeout(conv)
-    for cmd in cmds:
-        rc, out, err = sh_timed(cmd, tmp, env, timeout)
+    started = time.monotonic()
+    count = [len(only) if only else '?']
+
+    def timed(verdict):
+        if out:
+            out(f'gate: {count[0]} modules, {time.monotonic() - started:.0f}s, {verdict}')
+
+    for i, cmd in enumerate(cmds):
+        rc, stdout, err = sh_timed(cmd, tmp, env, timeout)
+        whole = (stdout or '') + '\n' + (err or '')
+        if i == 0 and conv.test_command:
+            m = MODULE_COUNT_RE.search(whole)
+            if m:
+                count[0] = int(m.group(1))
         if rc is None:  # B-0072: killed with its whole process group; held, never waited for
-            return False, timed_out_line(cmd, timeout), []
+            timed('timed out')
+            return False, timed_out_line(cmd, timeout), [], ()
         if rc != 0:
-            whole = (out or '') + '\n' + (err or '')
-            return False, first_failing_line(whole), gate_files(whole)  # P8: the whole output
-    return True, None, []
+            red = red_modules(whole) if i == 0 and conv.test_command else ()
+            timed('red: ' + (' '.join(red) if red else os.path.basename(cmd[-1])))
+            return False, first_failing_line(whole), gate_files(whole), red  # P8: the whole output
+    timed('green')
+    return True, None, [], ()
 
 
 def merge_commits(repo, trunk, branch):
@@ -911,7 +955,7 @@ def land_ff(repo, state_dir, branch, record, item, conv, asf_repo, bug_root, dry
             ok, reason = rebase_and_resolve(tmp, trunk)
             if not ok:
                 return hold_with_correction(state_dir, branch, record, 'conflict', reason, out)
-            ok, line, files = product_gate(tmp, conv, asf_repo)
+            ok, line, files, _red = product_gate(tmp, conv, asf_repo, out)
             if not ok:
                 return hold_with_correction(state_dir, branch, record, 'gate', line, out,
                                             files, item_writes)
@@ -957,25 +1001,78 @@ def combined_head(tmp, trunk, entries, hold):
     return stacked
 
 
-def gate_groups(tmp, trunk, entries, conv, asf_repo, hold, out, announce=False):
+class TrunkRed(Exception):
+    """The modules a combined head is red on are red on the trunk alone too: no branch is to
+    blame, none is held, the set is gated again next tick."""
+
+    def __init__(self, modules):
+        super().__init__(' '.join(modules))
+        self.modules = tuple(modules)
+
+
+def red_on_trunk(tmp, trunk, conv, asf_repo, out, modules):
+    """True when any of ``modules`` is red on ``origin/<trunk>`` alone (a targeted run)."""
+    sh(['git', 'checkout', '-q', '--detach', f'origin/{trunk}'], cwd=tmp)
+    return not product_gate(tmp, conv, asf_repo, out, only=modules)[0]
+
+
+def gate_groups(tmp, trunk, entries, conv, asf_repo, hold, out, announce=False, only=None):
     """Gate ``entries`` as one combined head; on red, bisect (B-0040). Returns the green groups
-    as ``[(entries, sha)]`` — each a set that was gated together and the head it was gated at.
-    A branch red on its own is handed to ``hold`` with the gate's first failing line."""
+    as ``[(entries, sha, full)]`` — each a set that was gated together, the head it was gated
+    at, and whether that gate was the full one (False: only ``only``, the modules the full gate
+    found red, were re-run — a candidate the caller confirms in full before it lands). A branch
+    red on its own is handed to ``hold`` with the gate's first failing line. When the full gate
+    names its red modules and they are red on the trunk alone too, :class:`TrunkRed` is raised
+    and nothing is bisected."""
     stacked = combined_head(tmp, trunk, entries, hold)
     if not stacked:
         return []
     if announce:
         out(f'harvest: {len(stacked)} branch(es), one gate')
-    ok, line, files = product_gate(tmp, conv, asf_repo)
+    ok, line, files, red = product_gate(tmp, conv, asf_repo, out, only)
     if ok:
-        return [(stacked, sh(['git', 'rev-parse', 'HEAD'], cwd=tmp).stdout.strip())]
+        return [(stacked, sh(['git', 'rev-parse', 'HEAD'], cwd=tmp).stdout.strip(), not only)]
+    if not only and red and red_on_trunk(tmp, trunk, conv, asf_repo, out, red):
+        raise TrunkRed(red)
     if len(stacked) == 1:
         hold(stacked[0], 'gate', line, files)
         return []
     out(f'harvest: bisecting {len(stacked)} branches')
     mid = len(stacked) // 2
-    return (gate_groups(tmp, trunk, stacked[:mid], conv, asf_repo, hold, out)
-            + gate_groups(tmp, trunk, stacked[mid:], conv, asf_repo, hold, out))
+    narrowed = red or only
+    return (gate_groups(tmp, trunk, stacked[:mid], conv, asf_repo, hold, out, only=narrowed)
+            + gate_groups(tmp, trunk, stacked[mid:], conv, asf_repo, hold, out, only=narrowed))
+
+
+#: Full gates one landing may spend: the first, and the confirmations after each bisection.
+CONFIRM_ROUNDS = 3
+
+
+def confirmed_group(tmp, trunk, entries, conv, asf_repo, hold, out, results):
+    """The one set of ``entries`` green under the *full* gate, as ``(entries, sha)``, or None.
+    A red gate bisects (targeted); the green candidates are stacked again and gated in full, so
+    what lands has always passed the whole gate. Green apart but red together: the first
+    candidate goes on alone and the rest wait for the next tick. :class:`TrunkRed` propagates."""
+    candidates = list(entries)
+    for _round in range(CONFIRM_ROUNDS):
+        groups = gate_groups(tmp, trunk, candidates, conv, asf_repo, hold, out, announce=True)
+        if not groups:
+            return None
+        if len(groups) == 1 and groups[0][2]:
+            return groups[0][0], groups[0][1]
+        union = [e for group, _sha, _full in groups for e in group]
+        if len(union) == len(candidates):  # nothing held: green apart, red together
+            first = groups[0][0]
+            for branch, _record in union:
+                if not any(branch == b for b, _r in first):
+                    out(f'held {branch}: green alone, red with the others — next tick')
+                    results[branch] = 'held'
+            union = first
+        candidates = union
+    for branch, _record in candidates:
+        out(f'held {branch}: green on the red modules, not confirmed in full — next tick')
+        results[branch] = 'held'
+    return None
 
 
 def land_combined(repo, state_dir, entries, conv, asf_repo, dry_run, out, items=None):
@@ -1001,22 +1098,14 @@ def land_combined(repo, state_dir, entries, conv, asf_repo, dry_run, out, items=
                     out(f'held {branch}: worktree add failed: {tail(add.stderr)}')
                     results[branch] = 'held'
                 return results
-            groups = gate_groups(tmp, trunk, pending, conv, asf_repo, hold, out, announce=True)
-            if not groups:
+            try:
+                group = confirmed_group(tmp, trunk, pending, conv, asf_repo, hold, out, results)
+            except TrunkRed as red:  # no branch's doing: hold nothing, gate again next tick
+                out(f'harvest: red on trunk too — {" ".join(red.modules)}')
                 return results
-            if len(groups) > 1:  # green apart: once more together, the head that is pushed
-                union = [e for group, _sha in groups for e in group]
-                groups = gate_groups(tmp, trunk, union, conv, asf_repo, hold, out, announce=True)
-                if len(groups) != 1:  # green apart, red together: the first set lands, the rest wait
-                    first = groups[0][0] if groups else []
-                    for branch, _record in union:
-                        if not any(branch == b for b, _r in first):
-                            out(f'held {branch}: green alone, red with the others — next tick')
-                            results[branch] = 'held'
-                    if not groups:
-                        return results
-                    groups = groups[:1]
-            landing, sha = groups[0]
+            if group is None:
+                return results
+            landing, sha = group
             if dry_run:
                 for branch, _record in landing:
                     out(f'DRY: would land {branch} → {sha}')

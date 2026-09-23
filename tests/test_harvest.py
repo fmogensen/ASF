@@ -10,6 +10,7 @@ from contextlib import redirect_stdout
 from unittest import mock
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RUNNER = os.path.join(REPO_ROOT, 'tools', 'run_tests.py')
 
 from asf import env
 from asf.conventions import Conventions
@@ -517,11 +518,12 @@ class ProductHarvestTests(unittest.TestCase):
             f.write(json.dumps({'job': job, 'ended': '2026-09-21T00:05:00Z',
                                 'end_reason': 'finished' if rc == 0 else 'failed', 'rc': rc}) + '\n')
 
-    def harvest(self, product, bug_root=None):
+    def harvest(self, product, bug_root=None, timings=False):
+        """``(results, lines)``; the gate's own timing lines only with ``timings``."""
         lines = []
         results = harvest.run_product_harvest(product, self.state_dir, bug_root=bug_root,
                                               out=lines.append)
-        return results, lines
+        return results, (lines if timings else [l for l in lines if not l.startswith('gate: ')])
 
     def origin_main(self):
         return sh(['git', 'rev-parse', 'main'], cwd=self.origin).stdout.strip()
@@ -1117,7 +1119,7 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertEqual(gate.call_count, 1)
         self.assertEqual(results, {b: 'dry' for b in branches})
         self.assertEqual(self.origin_main(), before)
-        self.assertTrue(all(l.startswith('DRY: would land ') for l in lines[1:]), lines)
+        self.assertTrue(all(l.startswith('DRY: would land ') for l in lines[2:]), lines)
         for b in branches:
             self.assertTrue(self.origin_has(b))
             self.assertFalse(self.record(b).get('harvested'))
@@ -1132,6 +1134,95 @@ class ProductHarvestTests(unittest.TestCase):
         shas = {self.record(b).get('harvested') for b in branches}
         self.assertEqual(len(shas), 3, shas)  # one landing each, three pushes
         self.assertIn(self.origin_main(), shas)
+
+    # -- the bisection re-runs only the modules the full gate found red ------------------
+    def runner_product(self):
+        """A product gated by ``tools/run_tests.py`` over ``checks/`` (made a package on main):
+        its ``red:`` line names the red modules and it honours ``ASF_GATE_MODULES``."""
+        self.write(self.repo, 'checks/__init__.py', '')
+        sh(['git', 'add', '-A'], cwd=self.repo)
+        sh(['git', 'commit', '-qm', 'checks as a package'], cwd=self.repo)
+        sh(['git', 'push', '-q', 'origin', 'HEAD:main'], cwd=self.repo)
+        return self.product(test_command=f'{sys.executable} {RUNNER} -s checks --shards 2')
+
+    @staticmethod
+    def onlys(gate):
+        return [c.kwargs.get('only', c.args[4] if len(c.args) > 4 else None)
+                for c in gate.call_args_list]
+
+    def test_red_modules_are_read_from_the_runners_last_red_line(self):
+        self.assertEqual(harvest.red_modules('red: inner\n...\nFAILED\nred: test_a, test_b\n'),
+                         ('test_a', 'test_b'))
+        self.assertEqual(harvest.red_modules('red: test_x+test_y'), ('test_x', 'test_y'))
+        self.assertEqual(harvest.red_modules('FAILED (failures=1)\n'), ())
+
+    def test_bisection_reruns_only_the_red_modules_and_confirms_the_landing_in_full(self):
+        product = self.runner_product()
+        self.lanes(4, red=(3,))
+        with self.gated() as gate:
+            results, lines = self.harvest(product, timings=True)
+        red = ('test_red3',)
+        # full (red: test_red3) → trunk alone on test_red3 (green) → [1,2] [3,4] [3] [4] on
+        # test_red3 only → 1+2+4 stacked again and gated in full before the push
+        self.assertEqual(self.onlys(gate), [None, red, red, red, red, red, None], lines)
+        self.assertEqual(results, {'fix/B-0001': 'landed', 'fix/B-0002': 'landed',
+                                   'fix/B-0003': 'held', 'fix/B-0004': 'landed'})
+        timings = [l for l in lines if l.startswith('gate: ')]
+        self.assertEqual(len(timings), 7, lines)
+        self.assertRegex(timings[0], r'^gate: 2 modules, \d+s, red: test_red3$')
+        self.assertRegex(timings[1], r'^gate: 0 modules, \d+s, green$')  # not on the trunk
+        self.assertRegex(timings[3], r'^gate: 1 modules, \d+s, red: test_red3$')  # [3,4]
+        self.assertRegex(timings[-1], r'^gate: 1 modules, \d+s, green$')
+        held = [l for l in lines if l.startswith('held ')]
+        self.assertEqual(len(held), 1, lines)
+        self.assertTrue(held[0].startswith('held fix/B-0003: '), held)
+        self.assertIn('test_red3', held[0])
+        sha = self.origin_main()
+        for b in ('fix/B-0001', 'fix/B-0002', 'fix/B-0004'):
+            self.assertEqual(self.record(b).get('harvested'), sha, b)
+
+    def test_a_candidate_red_in_full_does_not_land(self):
+        product = self.runner_product()
+        self.lanes(2, red=(2,))
+        before = self.origin_main()
+        real = harvest.product_gate
+        fulls = []
+
+        def gate(tmp, conv, asf_repo, out=None, only=None):
+            ok, line, files, red = real(tmp, conv, asf_repo, out, only)
+            if not only:
+                fulls.append(ok)
+                if len(fulls) > 1:  # every confirmation is red on a module nobody named
+                    return False, 'FAIL: test_elsewhere', [], ()
+            return ok, line, files, red
+
+        with mock.patch.object(harvest, 'product_gate', side_effect=gate):
+            results, lines = self.harvest(product)
+        self.assertEqual(self.origin_main(), before, lines)
+        self.assertEqual(results['fix/B-0002'], 'held')
+        self.assertNotEqual(results.get('fix/B-0001'), 'landed', lines)
+        self.assertFalse(self.record('fix/B-0001').get('harvested'))
+
+    def test_red_on_trunk_too_bisects_nothing_and_holds_nothing(self):
+        product = self.runner_product()
+        self.write(self.repo, 'checks/test_broken.py', RED_TEST)
+        sh(['git', 'add', '-A'], cwd=self.repo)
+        sh(['git', 'commit', '-qm', 'a red trunk'], cwd=self.repo)
+        sh(['git', 'push', '-q', 'origin', 'HEAD:main'], cwd=self.repo)
+        branches = self.lanes(3)
+        before = self.origin_main()
+        with self.gated() as gate:
+            results, lines = self.harvest(product)
+        self.assertEqual(self.onlys(gate), [None, ('test_broken',)], lines)
+        self.assertIn('harvest: red on trunk too — test_broken', lines)
+        self.assertFalse(any(l.startswith(('held ', 'foreign ', 'harvest: bisecting')) for l in lines),
+                         lines)
+        self.assertEqual(results, {})
+        self.assertEqual(self.origin_main(), before)
+        for b in branches:
+            self.assertTrue(self.origin_has(b), b)
+            rec = self.record(b)
+            self.assertFalse(rec.get('rounds') or rec.get('correction'), rec)
 
     # -- B-0072: a hanging gate is held, not waited for ----------------------------------
     def test_b0072_a_hanging_gate_is_held_with_the_timeout_line_and_its_children_are_gone(self):

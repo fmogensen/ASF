@@ -43,6 +43,10 @@ HOME_MODULE = 'test_00_home'
 SERIAL = ()
 #: The most processes the default runs at once.
 MAX_SHARDS = 8
+#: The variable a caller names a subset of modules in (space- or comma-separated): the harvest
+#: re-runs only the modules a full gate found red while it bisects. Read once and removed, so no
+#: child — a test that runs this runner on a fixture — inherits it.
+ONLY_VAR = 'ASF_GATE_MODULES'
 
 RAN_RE = re.compile(r'^Ran (\d+) tests? in ([\d.]+)s', re.M)
 VERDICT_RE = re.compile(r'^(OK|FAILED)(?: \((.*)\))?\s*$', re.M)
@@ -137,12 +141,21 @@ def summary(results, seconds, shards):
     return '\n'.join(l for l in lines if l is not None)
 
 
-def run(tests_dir, shards=None, verbose=False, out=print, serial=SERIAL):
-    """Run the suite; the exit status."""
+def parse_only(text):
+    """The module names in ``text`` (space- or comma-separated), or None when it names none."""
+    names = [n for n in re.split(r'[\s,]+', text or '') if n]
+    return names or None
+
+
+def run(tests_dir, shards=None, verbose=False, out=print, serial=SERIAL, only=None):
+    """Run the suite — or, with ``only``, just those modules of it; the exit status."""
     tests_dir = os.path.abspath(tests_dir)
     root, package = os.path.split(tests_dir)
     shards = shards or default_shards()
     pool, tail = plan(tests_dir, serial)
+    if only is not None:
+        pool = [m for m in pool if m in only]
+        tail = [m for m in tail if m in only]
     homes = tempfile.mkdtemp(prefix='asf-tests-')
     results = []
     started = time.monotonic()
@@ -194,6 +207,7 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    only = parse_only(os.environ.pop(ONLY_VAR, ''))
     if args.list:
         pool, tail = plan(args.start_directory)
         print(f'shards: {args.shards or default_shards()}')
@@ -202,7 +216,7 @@ def main(argv=None):
         for m in tail:
             print(f'serial  {m}')
         return 0
-    return run(args.start_directory, args.shards, args.verbose)
+    return run(args.start_directory, args.shards, args.verbose, only=only)
 
 
 if __name__ == '__main__':

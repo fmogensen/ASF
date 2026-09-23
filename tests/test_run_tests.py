@@ -148,6 +148,26 @@ class RunTests(FixtureSuite):
         self.assertEqual(rc, 0, text)
 
 
+class OnlyTests(FixtureSuite):
+    def test_the_named_modules_alone_run_and_the_red_line_names_the_red_ones(self):
+        self.module('test_a', GREEN)
+        self.module('test_red', RED)
+        self.module('test_leak', (  # the variable is the runner's, never its children's
+            "import os, unittest\n\nclass T(unittest.TestCase):\n"
+            "    def test_it(self):\n"
+            "        self.assertNotIn('ASF_GATE_MODULES', os.environ)\n"))
+        env = dict(os.environ, ASF_GATE_MODULES='test_red, test_leak test_gone')
+        r = subprocess.run([sys.executable, RUNNER, '-s', self.tests, '--shards', '2'],
+                           cwd=self.root, capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn('(2 module(s), 2 at a time)', r.stdout)
+        self.assertEqual(r.stdout.rstrip().splitlines()[-1], 'red: test_red')
+
+    def test_parse_only(self):
+        self.assertEqual(self.runner.parse_only(' a, b  c '), ['a', 'b', 'c'])
+        self.assertIsNone(self.runner.parse_only(''))
+
+
 class ParseTests(unittest.TestCase):
     def test_the_processs_own_summary_is_the_last_one_in_its_output(self):
         runner = load_runner()
