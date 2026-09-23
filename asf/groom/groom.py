@@ -463,7 +463,7 @@ def groom_auto_bugs_section(canonical):
 
 GROOM_SECTIONS = [
     ('Inbox cards to decide', 'inbox'),
-    ('Undecided > 3 days', 'undecided3'),
+    ('Undecided', 'undecided'),
     ('Features without Stories', 'no_stories'),
     ('Stories without Tasks after plan-approved', 'no_tasks'),
     ('Merges proposed', 'merge'),
@@ -506,16 +506,20 @@ def build_groom_sections(canonical, derived, date, capacity=DEFAULT_CAPACITY,
                          area_depth=DEFAULT_AREA_DEPTH, batch_max_globs=DEFAULT_BATCH_MAX_GLOBS):
     now = datetime.datetime.now(datetime.timezone.utc)
     origin_ids = inbox_origin_ids(canonical)
+    auto_bugs = groom_auto_bugs_section(canonical)
+    # An inbox-origin card and an auto-filed Bug are asked once, in the section whose reason
+    # is the one that matters — not again as "undecided".
+    asked_elsewhere = origin_ids | {m.group(1) for m in map(_LINE_ID_RE.match, auto_bugs) if m}
     return {
         **groom_shape_sections(canonical, derived, capacity, area_depth, batch_max_globs),
         'inbox': groom_inbox_section(canonical, origin_ids),
-        'undecided3': groom_undecided_section(canonical, now, 3, exclude=origin_ids),
+        'undecided': groom_undecided_section(canonical, now, 0, exclude=asked_elsewhere),
         'no_stories': groom_features_without_stories(canonical, derived),
         'no_tasks': groom_stories_without_tasks(canonical, derived),
         'blocked_closed': groom_blocked_on_closed(canonical),
         'dupes': groom_near_duplicates(canonical),
         'undecided14': groom_undecided_section(canonical, now, 14, exclude=origin_ids),
-        'auto_bugs': groom_auto_bugs_section(canonical),
+        'auto_bugs': auto_bugs,
     }
 
 
@@ -523,7 +527,12 @@ def build_groom_sections(canonical, derived, date, capacity=DEFAULT_CAPACITY,
 #: carry an ``inbox:<file>`` token, not an id — :func:`asf.groom.inbox.question_lines`).
 INBOX_QUESTIONS = ('Inbox cards with a question', 'inbox_questions')
 
-_SECTION_BY_TITLE = {title: key for title, key in GROOM_SECTIONS + [INBOX_QUESTIONS]}
+#: The title ``undecided`` was written under before every open item became a question from its
+#: first groom. Read, never written, so a day file made before the rename is still understood.
+_RETIRED_TITLES = {'Undecided > 3 days': 'undecided'}
+
+_SECTION_BY_TITLE = {**_RETIRED_TITLES,
+                     **{title: key for title, key in GROOM_SECTIONS + [INBOX_QUESTIONS]}}
 _HEADER_RE = re.compile(r'^## (.+)$')
 _LINE_ID_RE = re.compile(r'^- \[[ xX]\]\s+([A-Z]-\d{4})\b')
 

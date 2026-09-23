@@ -20,7 +20,7 @@ UTC = datetime.timezone.utc
 
 
 def _fresh_machine_lines():
-    """``machine_lines`` for an item that must not also show up in ``undecided3``/``undecided14``
+    """``machine_lines`` for an item that must not also show up in ``undecided``/``undecided14``
     (whose age is measured against the real wall clock, not ``--date``) — a bug or feature whose
     own section (``auto_bugs``, ``dupes``, ``blocked_closed``) is the only one meant to carry it."""
     now = datetime.datetime.now(UTC).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -263,6 +263,21 @@ class PolicyTests(unittest.TestCase):
         self.assertIsNone(ans)
 
 
+class UndecidedBindingTests(unittest.TestCase):
+    """§2.5 / T6: renaming the first section did not move ``close_on_starvation``."""
+
+    def test_close_on_starvation_is_bound_to_undecided14_and_nothing_else(self):
+        bound = [section for name, section, _fn in policy.POLICIES if name == 'close_on_starvation']
+        self.assertEqual(bound, ['undecided14'])
+        self.assertNotIn('undecided', [section for _name, section, _fn in policy.POLICIES])
+
+    def test_the_two_sections_are_distinct_keys_of_the_groom(self):
+        keys = [key for _title, key in groom.GROOM_SECTIONS]
+        self.assertIn('undecided', keys)
+        self.assertIn('undecided14', keys)
+        self.assertNotIn('undecided3', keys)
+
+
 class GroomAutoTestCase(unittest.TestCase):
     """A :func:`make_repo` root plus a temp ``ASF_HOME`` with a ``sample`` product yaml pointed
     at it (``backlog_dir``), for ``cmd_groom`` runs that need ``approvals.groom: auto`` — the
@@ -393,7 +408,7 @@ class ApprovalBoundTests(GroomAutoTestCase):
         self.assertIn('approvals.new_epic', for_you)
 
     def test_non_epic_question_is_unaffected_by_the_bound(self):
-        """An undecided card is the control case: it holds no policy (§2.2's ``undecided3`` row)
+        """An undecided card is the control case: it holds no policy (§2.2's ``undecided`` row)
         and no feeder row (``feature_rows`` only fires past ``decided: true``), so it stays a
         plain open question — unlike a decided, spec-less Feature, which T6's suppression pass
         would otherwise speak for as ``CARD → SPEC`` before the bound is ever reached."""

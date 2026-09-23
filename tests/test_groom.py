@@ -1,3 +1,4 @@
+import datetime
 import os
 import shutil
 import subprocess
@@ -7,7 +8,7 @@ import unittest
 from unittest import mock
 
 from asf.record import frontmatter
-from asf.record.core import canonicalize, load_items, today, tokenize
+from asf.record.core import canonicalize, compute_derived, load_items, today, tokenize
 from asf.groom import groom
 from asf.groom import inbox as inbox_mod
 from asf import hermetic
@@ -288,6 +289,83 @@ class GroomApplyIntegrationTests(unittest.TestCase):
         with open(os.path.join(self.root, 'features', 'F-0001.md')) as f:
             text = f.read()
         self.assertIn('(controller, starvation policy)', text)
+
+
+class UndecidedFromFirstGroomTests(unittest.TestCase):
+    """§2.5 / T6: every open item whose `decided` is not true is a question from its first groom."""
+
+    def setUp(self):
+        self.root = make_repo()
+        write_item(self.root, 'E-0009', 'epic', 'Factory', typed_lines=['decided: true'])
+        self.now = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def fresh(self):
+        return ['state: New', f'stage_since: {self.now}', f'updated: {self.now}']
+
+    def sections(self):
+        canonical, _dupes = canonicalize(load_items(self.root)[0])
+        return groom.build_groom_sections(canonical, compute_derived(canonical), today())
+
+    def ids(self, key):
+        return [m.group(1) for m in map(groom._LINE_ID_RE.match, self.sections()[key]) if m]
+
+    def test_a_feature_made_a_minute_ago_is_asked_on_the_next_groom(self):
+        write_item(self.root, 'F-0001', 'feature', 'Just filed', parent='E-0009',
+                  machine_lines=self.fresh())
+        run(['index'], self.root)
+        run(['groom'], self.root)
+        with open(os.path.join(self.root, 'groom', today() + '.md')) as f:
+            text = f.read()
+        self.assertIn('## Undecided\n', text)
+        self.assertNotIn('## Undecided > 3 days', text)
+        block = text.split('## Undecided\n', 1)[1].split('\n## ', 1)[0]
+        self.assertIn('F-0001 Just filed — undecided', block)
+        self.assertIn('→ answer: ____', block)
+
+    def test_a_decided_item_is_not_asked(self):
+        write_item(self.root, 'F-0001', 'feature', 'Settled', parent='E-0009',
+                  typed_lines=['decided: true'], machine_lines=self.fresh())
+        self.assertEqual(self.ids('undecided'), [])
+
+    def test_a_decision_and_a_rule_are_in_neither_section(self):
+        write_item(self.root, 'D-0001', 'decision', 'A ruling', machine_lines=self.fresh())
+        write_item(self.root, 'R-0001', 'rule', 'A standing rule', machine_lines=self.fresh())
+        old = ['state: New', 'stage_since: 2026-01-01T00:00:00Z', 'updated: 2026-01-01T00:00:00Z']
+        write_item(self.root, 'D-0002', 'decision', 'An old ruling', machine_lines=old)
+        write_item(self.root, 'R-0002', 'rule', 'An old rule', machine_lines=old)
+        self.assertEqual(self.ids('undecided'), [])
+        self.assertEqual(self.ids('undecided14'), [])
+
+    def test_an_inbox_origin_card_is_asked_once_in_the_inbox_section(self):
+        body = DEFAULT_BODY.replace('created\n', 'created\n- 2026-09-23: created (inbox) from a.md\n')
+        write_item(self.root, 'F-0001', 'feature', 'From the inbox', parent='E-0009',
+                  machine_lines=self.fresh(), body=body)
+        self.assertEqual(self.ids('inbox'), ['F-0001'])
+        self.assertEqual(self.ids('undecided'), [])
+
+    def test_an_auto_filed_bug_is_asked_once_in_its_own_section(self):
+        write_item(self.root, 'B-0001', 'bug', 'Blank page', parent='E-0009',
+                  typed_lines=['signature: blank-page'], machine_lines=self.fresh())
+        write_item(self.root, 'B-0002', 'bug', 'A hand-filed bug', parent='E-0009',
+                  machine_lines=self.fresh())
+        self.assertEqual(self.ids('auto_bugs'), ['B-0001'])
+        self.assertEqual(self.ids('undecided'), ['B-0002'])
+
+    def test_undecided14_holds_only_the_fourteen_day_set(self):
+        old = ['state: New', 'stage_since: 2026-01-01T00:00:00Z', 'updated: 2026-01-01T00:00:00Z']
+        write_item(self.root, 'F-0001', 'feature', 'Starved', parent='E-0009', machine_lines=old)
+        write_item(self.root, 'F-0002', 'feature', 'New arrival', parent='E-0009',
+                  machine_lines=self.fresh())
+        self.assertEqual(self.ids('undecided14'), ['F-0001'])
+        self.assertEqual(self.ids('undecided'), ['F-0001', 'F-0002'])
+
+    def test_a_day_file_written_under_the_retired_title_is_still_understood(self):
+        text = ('# Groom 2026-09-20\n\n## Undecided > 3 days\n\n'
+                '- [ ] F-0001 Some idea — undecided 4d → answer: controller: yes\n')
+        self.assertEqual(groom._line_sections(text), {'F-0001': 'undecided'})
 
 
 class GroomSectionCoverageTests(unittest.TestCase):
