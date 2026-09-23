@@ -251,6 +251,17 @@ class UnparkTests(unittest.TestCase):
         self.assertEqual(rc, 1, out)
         self.assertIn('not in the ledger', out)
 
+    def test_the_feeder_stops_holding_the_row_once_unparked(self):
+        from asf.feeder import rows
+        from asf.workers import lifecycle
+        items = {'T-0017': {'id': 'T-0017', 'type': 'task', 'state': 'New'}}
+        self._parked()
+        held, ids = rows.correction_rows(items, env.load_product('sample'), set(), lifecycle.corrections(self.path))
+        self.assertEqual([(r.item_id, r.waits_on) for r in held], [('T-0017', 'operator')])
+        self._run(['unpark', 'T-0017', '--product', 'sample'])
+        after, ids = rows.correction_rows(items, env.load_product('sample'), set(), lifecycle.corrections(self.path))
+        self.assertEqual((after, ids), ([], set()))
+
 
 class LineBufferedOutputTests(unittest.TestCase):
     """A scheduled tick writes to a log file: every line reaches it as it is printed."""
