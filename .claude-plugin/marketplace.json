@@ -8,7 +8,7 @@
     {
       "name": "asf",
       "source": "./plugin",
-      "description": "ASF — Autonomous Software Factory: /asf:status, /asf:next, /asf:backlog, /asf:roadmap, /asf:parity, /asf:prod, /asf:sessions, /asf:doctor, /asf:groom"
+      "description": "ASF — Autonomous Software Factory: /asf:status, /asf:next, /asf:backlog, /asf:roadmap, /asf:parity, /asf:prod, /asf:sessions, /asf:doctor, /asf:capacity, /asf:groom"
     }
   ]
 }

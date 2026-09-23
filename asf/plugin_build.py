@@ -31,7 +31,7 @@ def default_plugin_dir(cwd=None):
 PLUGIN_DIR = default_plugin_dir() or os.path.join(PACKAGE_ROOT, 'plugin')
 
 # Operator views: print the table verbatim and stop.
-VIEWS = ('status', 'next', 'backlog', 'roadmap', 'parity', 'prod', 'sessions', 'doctor')
+VIEWS = ('status', 'next', 'backlog', 'roadmap', 'parity', 'prod', 'sessions', 'doctor', 'capacity')
 
 # Operator dialogues: print, then a follow-up the skill carries out with the operator.
 DIALOGUES = {

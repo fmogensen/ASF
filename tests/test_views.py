@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 
 from asf import env
+from asf.views import capacity as capacity_view
 from asf.views import prod, sessions, status
 from asf.workers import pool as pool_mod
 
@@ -143,6 +144,47 @@ class StatusViewTests(ViewsTestCase):
     def test_no_index_names_the_backlog(self):
         self.assertEqual(status.ready_cell(os.path.join(self.tmp, 'nowhere'), self.product),
                          '— (not configured: backlog_dir (no index.json))')
+
+
+class CapacityTable(ViewsTestCase):
+    def test_one_row_per_product_with_the_bound_by_column(self):
+        asf = env.Product('asf', {'capacity': {'sessions': 3}})
+        web = env.Product('web', {})
+        cfg = {'capacity': {'per_product': {'sessions': 2}}}
+        text = capacity_view.render([asf, web], cfg)
+        lines = [ln for ln in text.splitlines() if ln]
+        header = next(ln for ln in lines if ln.startswith('CAPACITY'))
+        self.assertIn('operator total: sessions ?, ci ?', header)
+        col_header = next(ln for ln in lines if ln.startswith('product'))
+        for col in ('product', 'sessions', 'in flight', 'free', 'bound by', 'ci', 'runs', 'batch'):
+            self.assertIn(col, col_header)
+        asf_row = next(ln for ln in lines if ln.startswith('asf '))
+        web_row = next(ln for ln in lines if ln.startswith('web '))
+        self.assertIn('product', asf_row)
+        self.assertIn('operator default', web_row)
+
+    def test_json_shape(self):
+        asf = env.Product('asf', {'capacity': {
+            'sessions': 3, 'ci': 2, 'batch': {'per_run': 8, 'parallel': 2, 'runners': 4}}})
+        cfg = {'capacity': {'total': {'sessions': 6, 'ci': 4}}}
+        [data] = capacity_view.as_json([asf], cfg)
+        self.assertEqual(data, {
+            'product': 'asf',
+            'sessions': {'ceiling': 3, 'inflight': 0, 'free': 3, 'bound_by': 'product'},
+            'ci': {'ceiling': 2, 'inflight': None, 'free': None, 'bound_by': 'product'},
+            'batch': {'per_run': 8, 'parallel': 2, 'runners': 4},
+            'deprecated': [],
+        })
+
+
+class StatusRow(ViewsTestCase):
+    def test_capacity_row_says_not_configured_when_nothing_is_set(self):
+        self.assertEqual(status.capacity_cell({}, self.product), '— (not configured: capacity)')
+
+    def test_capacity_row_names_the_ceilings_when_configured(self):
+        product = env.Product('p', {'capacity': {'sessions': 3}})
+        cfg = {'capacity': {'total': {'sessions': 6}}}
+        self.assertEqual(status.capacity_cell(cfg, product), 'sessions 0/3 (operator total 6)')
 
 
 class ProdViewTests(ViewsTestCase):

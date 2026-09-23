@@ -147,6 +147,12 @@ def build_parser():
     p_status = sub.add_parser('status', help='the FACTORY STATUS table')
     p_status.add_argument('--product')
 
+    p_capacity = sub.add_parser('capacity', help='the CAPACITY table: sessions and CI runs per product')
+    g_capacity = p_capacity.add_mutually_exclusive_group()
+    g_capacity.add_argument('--product')
+    g_capacity.add_argument('--all', action='store_true', help='every product under ~/.ASF/products/')
+    p_capacity.add_argument('--json', action='store_true')
+
     from asf.tick.shadow_diff import build_parser as build_shadow_diff_parser
     p_shadow_diff = build_shadow_diff_parser(sub)
     p_shadow_diff.add_argument('--product')
@@ -299,6 +305,9 @@ def _main(argv=None):
         if args.command == 'status':
             from asf.views.status import cmd_status
             return cmd_status(args, view_root)
+    if args.command == 'capacity':
+        from asf.views.capacity import cmd_capacity
+        return cmd_capacity(args)
     if args.command == 'shadow-diff':
         from asf.tick.shadow_diff import cmd_shadow_diff
         return cmd_shadow_diff(args)

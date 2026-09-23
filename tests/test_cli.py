@@ -42,6 +42,38 @@ class RefusedProductFileTests(unittest.TestCase):
             self.assertIn('asf init --product sample', lines[0])
 
 
+class CapacityCommandTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='cli_test_')
+        self._orig_home = env.ASF_HOME
+        env.ASF_HOME = self.tmp
+        os.makedirs(os.path.join(self.tmp, 'products'))
+        with open(env.product_path('sample'), 'w') as f:
+            f.write('product: sample\nrepo_slug: x/y\ncapacity:\n  sessions: 3\n')
+
+    def tearDown(self):
+        env.ASF_HOME = self._orig_home
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = cli.main(argv)
+        return rc, out.getvalue()
+
+    def test_capacity_json_parses_and_dispatches(self):
+        rc, out = self._run(['capacity', '--product', 'sample', '--json'])
+        self.assertEqual(rc, 0, out)
+        data = json.loads(out)
+        self.assertEqual(data, [{
+            'product': 'sample',
+            'sessions': {'ceiling': 3, 'inflight': 0, 'free': 3, 'bound_by': 'product'},
+            'ci': {'ceiling': None, 'inflight': None, 'free': None, 'bound_by': None},
+            'batch': {},
+            'deprecated': [],
+        }])
+
+
 class RecordCommandUsesTheProductRecordTests(unittest.TestCase):
     """B-0050: ``asf groom`` (and the other record commands) resolve the record from the
     configured product, not from the cwd — a product repo's cwd is never mistaken for one."""

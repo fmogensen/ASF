@@ -6,6 +6,7 @@ Every row is filled from what exists, or says which key would fill it —
 * **Runners** — the CI provider's runner pool (``ci.runner_org``, read with ``gh``);
 * **Prod** — how far ``main`` is ahead of the last successful ``ci.deploy_workflow`` run;
 * **Agents** — the workers' session registry, ``~/.ASF/state/<product>/sessions.jsonl``;
+* **Capacity** — the session and CI ceilings the resolver (``asf.capacity.resolve``) hands back;
 * **Ready to launch** — what ``asf next --json`` would print (the feeder over the record's
   ``index.json``, less the sessions in flight);
 * **Quota 5h/7d** — each account through the quota source (``worker_pool.quota_command``), the
@@ -117,6 +118,26 @@ def _sessions_path(product):
     return pool_mod.sessions_path(product)
 
 
+def capacity_cell(cfg, product):
+    """§2.5's row: ``sessions <inflight>/<ceiling> (operator total <n>), ci <inflight>/<ci>`` —
+    the clauses that do not resolve are dropped — or ``not_configured('capacity')`` when neither
+    file carries a ``capacity:`` block and no deprecated key is in use."""
+    from asf import capacity as capacity_mod
+    prod_cap = product._get('capacity')
+    cfg_cap = (cfg or {}).get('capacity')
+    configured = (isinstance(prod_cap, dict) and prod_cap) or (isinstance(cfg_cap, dict) and cfg_cap) \
+        or capacity_mod.deprecations(cfg)
+    if not configured:
+        return not_configured('capacity')
+    r = capacity_mod.resolve(product, cfg)
+    inflight = capacity_mod.inflight_sessions(product.name)
+    total = capacity_mod.total_sessions(cfg)
+    parts = [f"sessions {inflight}/{r.sessions}" + (f" (operator total {total})" if total is not None else "")]
+    if r.ci is not None:
+        parts.append(f"ci {r.ci_inflight if r.ci_inflight is not None else '?'}/{r.ci}")
+    return ', '.join(parts)
+
+
 def ready_cell(root, product):
     """``asf next --json``'s rows: how many would launch, and the first of them."""
     from asf.feeder import rows as feeder_rows
@@ -186,6 +207,7 @@ def render(root, product, cfg=None):
     for name, cell in (('Runners', lambda: runners_cell(product)),
                        ('Prod', lambda: prod_cell(product)),
                        ('Agents', lambda: agents_cell(product)),
+                       ('Capacity', lambda: capacity_cell(cfg, product)),
                        ('Ready to launch', lambda: ready_cell(root, product)),
                        ('Quota 5h/7d', lambda: quota_cell(cfg)),
                        ('Cron', lambda: cron_cell(cfg, product)),
