@@ -420,6 +420,23 @@ def scheduler_rows(cfg, product, jobs=None):
     return rows
 
 
+def check_clock_steps(product):
+    """One ``NEEDS OPERATOR`` line per ``asf``-owned step no clock names. A step owned by a command
+    is the operator's own; one declared ``off`` is deliberate — neither is reported. A product whose
+    clocks do not load has nothing to compare: the scheduler section reports that."""
+    from asf.tick import steps as tick_steps
+    try:
+        ticked = {step for clock in scheduler.clocks(product) for step in clock.steps}
+    except scheduler.SchedulerError:
+        return []
+    lines = []
+    for step, owner, _command in tick_steps.resolve(product):
+        if owner == 'asf' and step not in ticked:
+            lines.append(f'NEEDS OPERATOR: step {step} is on no clock — add it to a clock in '
+                         f'products/{product.name}.yaml (steps: [..., {step}])')
+    return lines
+
+
 def format_scheduler(product_name, rows):
     lines = [f'== SCHEDULER {product_name}']
     width = max((len(r[1]) for r in rows), default=8)
@@ -494,6 +511,8 @@ def cmd_doctor(args, root):
         print()
         print(format_scheduler(product_name, srows))
         red = red or scheduler_is_red(srows)
+        for line in check_clock_steps(env.load_product(product_name)):
+            print(line)
 
     repo = None
     try:

@@ -106,6 +106,56 @@ class TestCheckScheduler(unittest.TestCase):
         self.assertIn('retire it', detail)
 
 
+class TestCheckClockSteps(unittest.TestCase):
+    def _product(self, clocks, steps=None):
+        data = {'clocks': clocks}
+        if steps:
+            data['steps'] = steps
+        return env.Product('x', data)
+
+    def _all_but(self, step):
+        from asf.tick import steps as tick_steps
+        return [s for s in tick_steps.ASF_STEPS if s != step]
+
+    def test_a_step_on_no_clock_is_named(self):
+        from asf.tick import steps as tick_steps
+        step = tick_steps.ASF_STEPS[-1]
+        product = self._product({'dispatch': {'every': '5m', 'steps': self._all_but(step)}})
+        lines = doctor.check_clock_steps(product)
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith('NEEDS OPERATOR:'))
+        self.assertIn(f'step {step} ', lines[0])
+
+    def test_every_step_on_a_clock_reports_nothing(self):
+        from asf.tick import steps as tick_steps
+        product = self._product({'a': {'every': '5m', 'steps': list(tick_steps.ASF_STEPS)}})
+        self.assertEqual(doctor.check_clock_steps(product), [])
+
+    def test_a_step_declared_off_is_not_reported(self):
+        from asf.tick import steps as tick_steps
+        step = tick_steps.ASF_STEPS[-1]
+        product = self._product({'a': {'every': '5m', 'steps': self._all_but(step)}},
+                                steps={step: 'off'})
+        self.assertEqual(doctor.check_clock_steps(product), [])
+
+    def test_asf_doctor_prints_the_line(self):
+        import argparse
+        import contextlib
+        import io
+        from asf.tick import steps as tick_steps
+        step = tick_steps.ASF_STEPS[-1]
+        product = self._product({'a': {'every': '5m', 'steps': self._all_but(step)}})
+        out = io.StringIO()
+        with mock.patch.object(doctor, 'run', return_value=[('config', True, True, 'ok')]), \
+                mock.patch.object(doctor, 'scheduler_rows', return_value=[]), \
+                mock.patch.object(env, 'load_config', return_value={}), \
+                mock.patch.object(env, 'load_product', return_value=product), \
+                mock.patch('asf.cli.stamp', return_value='stamp'), \
+                contextlib.redirect_stdout(out):
+            doctor.cmd_doctor(argparse.Namespace(product='x'), '.')
+        self.assertIn(f'NEEDS OPERATOR: step {step} ', out.getvalue())
+
+
 class TestOneFactoryCheck(unittest.TestCase):
     def test_no_legacy_paths_is_ok(self):
         ok, detail = doctor.check_one_factory({}, env.Product('x', {}))
