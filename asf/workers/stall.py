@@ -22,6 +22,7 @@ import re
 import time
 
 from asf import env
+from asf.workers import githooks
 from asf.workers import health as health_mod
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
@@ -106,10 +107,15 @@ def correct_once(product, session, error_text, runtime):
     with open(path, 'w', encoding='utf-8') as f:
         f.write(original + CORRECTION_HEAD + error_text.rstrip() + '\n')
     retry_job = f"{session['job']}-correction"
+    started = pool_mod.now_iso()
+    sid = lifecycle.session_id(product.name, retry_job, started)
+    hooks_dir = githooks.ensure(product)
+    retry_env = {'ASF_SESSION': sid}
+    if session.get('id_range'):
+        retry_env['BACKLOG_ID_RANGE'] = session['id_range']
     job = runtime_mod.Job(product.name, retry_job, session.get('worktree'), path,
                           session.get('model'), account=_account(session),
-                          env={'BACKLOG_ID_RANGE': session['id_range']}
-                          if session.get('id_range') else None)
+                          env=retry_env, hooks_dir=hooks_dir)
     result = runtime.run(job, wait=True)
     pool_mod.update_session(product, session['job'], corrected=1)
     session['corrected'] = 1
@@ -117,9 +123,9 @@ def correct_once(product, session, error_text, runtime):
         'job': retry_job, 'item': session.get('item'), 'feature': session.get('feature'),
         'kind': session.get('kind'), 'account': session.get('account'),
         'model': session.get('model'), 'pid': result.pid, 'worktree': session.get('worktree'),
-        'branch': session.get('branch'), 'started': pool_mod.now_iso(),
+        'branch': session.get('branch'), 'started': started,
         'log': result.log_path, 'brief': path, 'id_range': session.get('id_range'),
-        'runtime': runtime.name,
+        'runtime': runtime.name, 'session': sid, 'product': product.name,
     }
     pool_mod.append_session(product, retry)
     # the retry is judged as any run is — its result AND its push (B-0051), never `ok` alone

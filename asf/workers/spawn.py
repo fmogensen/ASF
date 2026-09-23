@@ -15,9 +15,12 @@
    ``asf.record.ids``);
 3. the brief written to ``~/.ASF/state/<product>/briefs/<job>.md`` (a ``fix-bug`` brief gets the
    named-test header harvest checks for);
-4. ``Runtime.run`` with ``--add-dir`` per entry of the product yaml's ``job_grants``;
+4. ``Runtime.run`` with ``--add-dir`` per entry of the product yaml's ``job_grants``, its
+   environment carrying the session's id (``ASF_SESSION``, minted from ``started`` before the
+   run) and its ``hooks_dir`` (:func:`asf.workers.githooks.ensure`), so every commit it makes
+   carries an ``ASF-Session`` trailer (F-0076);
 5. one line in ``sessions.jsonl``: job, item, feature, kind, account, model, pid, worktree,
-   branch, started.
+   branch, started, session, product.
 """
 import os
 import re
@@ -25,6 +28,7 @@ import subprocess
 
 from asf import env
 from asf import hooks
+from asf.workers import githooks
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 from asf.workers import runtime as runtime_mod
@@ -284,18 +288,22 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
                                 size=int(wp.get('id_range_size', DEFAULT_ID_SIZE)))
     brief_path = write_brief(product, row.job, brief_for(row, brief_text))
     add_dirs = [os.path.expanduser(d) for d in (product._get('job_grants') or [])]
+    started = pool_mod.now_iso()
+    sid = lifecycle.session_id(product.name, row.job, started)
+    hooks_dir = githooks.ensure(product)
     job = runtime_mod.Job(product.name, row.job, worktree, brief_path, model,
                           account=account, add_dirs=add_dirs,
                           permission_mode=wp.get('permission_mode')
                           or runtime_mod.DEFAULT_PERMISSION_MODE,
-                          env={'BACKLOG_ID_RANGE': id_range},
-                          settings_file=settings_file(wp))
+                          env={'BACKLOG_ID_RANGE': id_range, 'ASF_SESSION': sid},
+                          settings_file=settings_file(wp), hooks_dir=hooks_dir)
     result = runtime.run(job)
     record = {'job': row.job, 'item': row.item, 'feature': row.feature, 'kind': row.kind,
               'account': account.name if account else None, 'model': job.model,
               'pid': result.pid, 'worktree': worktree, 'branch': branch,
-              'started': pool_mod.now_iso(), 'log': result.log_path, 'brief': brief_path,
-              'id_range': id_range, 'runtime': runtime.name}
+              'started': started, 'log': result.log_path, 'brief': brief_path,
+              'id_range': id_range, 'runtime': runtime.name, 'session': sid,
+              'product': product.name}
     # a launch line is a new run: the fold opens a run at every launch line, so the previous
     # run's terminal fields never reach this one (B-0041 — see asf.workers.lifecycle)
     pool_mod.append_session(product, record)

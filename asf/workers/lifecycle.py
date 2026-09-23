@@ -45,6 +45,7 @@ import json
 import os
 import subprocess
 
+from asf import env
 from asf.workers import runtime as runtime_mod
 
 #: Corrections a held branch gets before the feeder switches to an ADJUDICATE row.
@@ -84,6 +85,28 @@ DEAD_PID = 'dead pid'
 EMPTY_BRANCH = 'empty branch: nothing to land'
 
 
+# ---- the session id -------------------------------------------------------------
+
+def session_id(product, job, started):
+    """``<product>/<job>@<YYYYMMDDTHHMMSSZ>`` — minted once per launch, from the same ``started``
+    the registry line carries (F-0076, D1)."""
+    return f"{product}/{job}@{started.replace('-', '').replace(':', '')}"
+
+
+def parse_session(sid):
+    """``(product, job, stamp)``, split on the first ``/`` and the last ``@``, or ``None`` for
+    anything that does not split into three non-empty parts."""
+    if not isinstance(sid, str) or '/' not in sid:
+        return None
+    product, rest = sid.split('/', 1)
+    if '@' not in rest:
+        return None
+    job, stamp = rest.rsplit('@', 1)
+    if not product or not job or not stamp:
+        return None
+    return product, job, stamp
+
+
 # ---- the registry -------------------------------------------------------------
 
 def is_launch(rec):
@@ -91,18 +114,37 @@ def is_launch(rec):
     return isinstance(rec, dict) and bool(rec.get('job')) and 'started' in rec and 'pid' in rec
 
 
+def _product_from_registry_dir(path):
+    """The product a registry line with no ``product`` of its own takes it from: ``path``'s
+    parent directory, but only when that directory sits directly under ``ASF_HOME/state`` (a
+    test's hand-built registry elsewhere gets no derived product, and so no derived id) —
+    F-0076, D12."""
+    state_root = os.path.realpath(os.path.join(env.ASF_HOME, 'state'))
+    parent = os.path.realpath(os.path.dirname(os.path.dirname(path)))
+    if parent != state_root:
+        return None
+    return os.path.basename(os.path.dirname(path))
+
+
 def read_lines(path):
     out = []
     if not path or not os.path.isfile(path):
         return out
+    product_from_dir = _product_from_registry_dir(path)
     with open(path, encoding='utf-8') as f:
         for line in f:
             try:
                 rec = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if isinstance(rec, dict) and rec.get('job'):
-                out.append(rec)
+            if not (isinstance(rec, dict) and rec.get('job')):
+                continue
+            if is_launch(rec) and not rec.get('session'):
+                product = rec.get('product') or product_from_dir
+                if product:
+                    rec = dict(rec, product=product,
+                              session=session_id(product, rec['job'], rec.get('started') or ''))
+            out.append(rec)
     return out
 
 
@@ -131,6 +173,21 @@ def runs(path):
 def latest(path):
     """``{job: its latest run}`` — what every reader of the registry means by "the session"."""
     return {job: rs[-1] for job, rs in runs(path).items()}
+
+
+def live_all(state_root):
+    """Every live run under every product's registry (``state_root/*/sessions.jsonl``), each
+    carrying its ``product`` and ``session`` (:func:`read_lines`) — what the pool sums load over
+    across products (F-0076)."""
+    out = []
+    if not state_root or not os.path.isdir(state_root):
+        return out
+    for name in sorted(os.listdir(state_root)):
+        path = os.path.join(state_root, name, 'sessions.jsonl')
+        if not os.path.isfile(path):
+            continue
+        out += [r for r in latest(path).values() if is_live(r)]
+    return out
 
 
 def by_branch(path):

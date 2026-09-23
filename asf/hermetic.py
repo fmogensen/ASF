@@ -13,15 +13,15 @@ Always: no git-hook variable, no caller identity (:data:`CALLER_IDENTITY`), and 
 ``init.defaultBranch`` pinned to the trunk through ``GIT_CONFIG_*`` (a child never learns the
 branch name from the host). Then what the caller asks for: ``worktree`` first on ``PYTHONPATH``
 (then the package that is running, then whatever the base had), ``identity`` for a worker (its
-own ``ASF_PRODUCT``/``ASF_JOB``/``BACKLOG_ID_RANGE`` — set, not inherited), ``home`` to point
-``HOME`` somewhere else (a test's temp home; a worker account's own).
+own ``ASF_PRODUCT``/``ASF_JOB``/``ASF_SESSION``/``BACKLOG_ID_RANGE`` — set, not inherited),
+``home`` to point ``HOME`` somewhere else (a test's temp home; a worker account's own).
 """
 import os
 
-#: The variables that name the caller — the tick's product, a session's job and mint range.
-#: None may reach a child that is not that caller: the gate is the branch's result, a worker's
-#: session its own.
-CALLER_IDENTITY = ('ASF_PRODUCT', 'ASF_JOB', 'BACKLOG_ID_RANGE')
+#: The variables that name the caller — the tick's product, a session's job, its session id and
+#: mint range. None may reach a child that is not that caller: the gate is the branch's result, a
+#: worker's session its own.
+CALLER_IDENTITY = ('ASF_PRODUCT', 'ASF_JOB', 'ASF_SESSION', 'BACKLOG_ID_RANGE')
 
 #: What a git hook exports; a ``git`` child that inherits them ignores its ``cwd``.
 GIT_HOOK = ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE')
@@ -51,18 +51,20 @@ def _git_config(env, pairs):
 
 
 def build(base=None, worktree=None, identity=None, home=None, trunk=DEFAULT_TRUNK,
-          pythonpath=True):
+          pythonpath=True, git_config=()):
     """The environment for a child of ASF.
 
     ``base``: the environment to start from (default the process's own). ``worktree``: a
     checkout whose own code must win — first on ``PYTHONPATH``. ``identity``: a worker's own
-    ``{ASF_PRODUCT, ASF_JOB, BACKLOG_ID_RANGE, …}``, set after the inherited ones are gone.
-    ``home``: ``HOME`` for the child. ``trunk``: the branch name pinned as
-    ``init.defaultBranch``. ``pythonpath=False`` leaves ``PYTHONPATH`` as the base had it."""
+    ``{ASF_PRODUCT, ASF_JOB, ASF_SESSION, BACKLOG_ID_RANGE, …}``, set after the inherited ones
+    are gone. ``home``: ``HOME`` for the child. ``trunk``: the branch name pinned as
+    ``init.defaultBranch``. ``pythonpath=False`` leaves ``PYTHONPATH`` as the base had it.
+    ``git_config``: more ``(key, value)`` pairs appended after ``init.defaultBranch`` (a
+    session's ``core.hooksPath``, F-0076)."""
     env = dict(os.environ if base is None else base)
     for var in GIT_HOOK + CALLER_IDENTITY:
         env.pop(var, None)
-    _git_config(env, [('init.defaultBranch', trunk or DEFAULT_TRUNK)])
+    _git_config(env, [('init.defaultBranch', trunk or DEFAULT_TRUNK), *git_config])
     if pythonpath:
         parts = ([os.path.abspath(worktree)] if worktree else []) + [package_parent()]
         if env.get('PYTHONPATH'):

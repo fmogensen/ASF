@@ -29,7 +29,7 @@ class Job:
 
     def __init__(self, product, name, cwd, brief_path, model, account=None, add_dirs=(),
                  permission_mode=DEFAULT_PERMISSION_MODE, env=None, log_path=None,
-                 settings_file=None):
+                 settings_file=None, hooks_dir=None):
         self.product = product
         self.name = name
         self.cwd = cwd
@@ -43,6 +43,13 @@ class Job:
         # the worker's permission rules (allow list + the deny rules, e.g. never push to the main
         # branch); ``worker_pool.settings_file`` in config — a session without it runs unfenced
         self.settings_file = settings_file
+        # the per-product git hook dir (asf.workers.githooks.ensure) — set as core.hooksPath so
+        # every commit the session makes carries its ASF-Session trailer (F-0076)
+        self.hooks_dir = hooks_dir
+
+    @property
+    def session(self):
+        return self.env.get('ASF_SESSION')
 
 
 class Result:
@@ -84,16 +91,36 @@ def build_env(job, base=None):
     """The job's environment: :func:`asf.hermetic.build` over ``base`` (default ``os.environ``)
     — no caller identity inherited from the tick, no git-hook variable — plus the account's
     isolated home/config dir and the job's own identity (``ASF_PRODUCT``, ``ASF_JOB``,
-    ``BACKLOG_ID_RANGE``, …). PYTHONPATH is left as the base has it: a session runs the
-    product's code, not this package."""
+    ``ASF_SESSION``, ``BACKLOG_ID_RANGE``, …). When the job has a ``hooks_dir``,
+    ``core.hooksPath`` is set to it, so every ``git`` the session runs picks up its
+    ``ASF-Session`` trailer hook (F-0076). PYTHONPATH is left as the base has it: a session runs
+    the product's code, not this package."""
     acct = job.account
     home = getattr(acct, 'home', None) if acct is not None else None
     identity = {'ASF_PRODUCT': job.product, 'ASF_JOB': job.name}
     identity.update(job.env)
-    out = hermetic.build(base, home=home, identity=identity, pythonpath=False)
+    git_config = [('core.hooksPath', job.hooks_dir)] if job.hooks_dir else []
+    out = hermetic.build(base, home=home, identity=identity, pythonpath=False,
+                         git_config=git_config)
     if acct is not None and getattr(acct, 'config_dir', None):
         out['CLAUDE_CONFIG_DIR'] = os.path.expanduser(acct.config_dir)
     return out
+
+
+def _session_line(job):
+    """The one ``{"type": "asf", "subtype": "session", ...}`` line a run's log segment opens
+    with, or None for a job with no session (F-0076). ``started`` is parsed back from the id's
+    own stamp, so the line and the registry agree without a new :class:`Job` field."""
+    if not job.session:
+        return None
+    from asf.workers import lifecycle  # local: lifecycle imports this module
+    parsed = lifecycle.parse_session(job.session)
+    if not parsed:
+        return None
+    product, name, stamp = parsed
+    started = f'{stamp[0:4]}-{stamp[4:6]}-{stamp[6:8]}T{stamp[9:11]}:{stamp[11:13]}:{stamp[13:15]}Z'
+    return json.dumps({'type': 'asf', 'subtype': 'session', 'session': job.session,
+                       'product': product, 'job': name, 'started': started})
 
 
 def read_result(log_path):
@@ -165,6 +192,10 @@ class ClaudeCodeRuntime(Runtime):
     def run(self, job, wait=False):
         log_path = job.log_path or job_log_path(job.product, job.name)
         with open(job.brief_path, 'rb') as brief, open(log_path, 'ab') as log:
+            line = _session_line(job)
+            if line is not None:
+                log.write((line + '\n').encode('utf-8'))
+                log.flush()
             proc = subprocess.Popen(build_command(job, self.binary), cwd=job.cwd,
                                     env=build_env(job), stdin=brief, stdout=log,
                                     stderr=subprocess.STDOUT, start_new_session=True)
@@ -199,6 +230,9 @@ class FakeRuntime(Runtime):
         pid = step.get('pid', self._next_pid)
         log_path = job.log_path or job_log_path(job.product, job.name)
         with open(log_path, 'a', encoding='utf-8') as log:
+            line = _session_line(job)
+            if line is not None:
+                log.write(line + '\n')
             log.write(json.dumps({'type': 'system', 'subtype': 'init', 'model': job.model}) + '\n')
             if step.get('running'):
                 return Result(pid=pid, log_path=log_path)
