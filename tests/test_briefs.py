@@ -9,12 +9,15 @@ those cards produce. Regenerate the goldens with ``ASF_UPDATE_GOLDEN=1 python3 -
 tests.test_briefs``; read the diff before you commit one.
 """
 import argparse
+import contextlib
 import importlib
+import io
 import os
 import dataclasses
 import json
 import re
 import unittest
+from unittest import mock
 
 from asf import briefs
 from asf.briefs import preamble as preamble_mod
@@ -342,6 +345,34 @@ class PreambleTest(unittest.TestCase):
         text = preamble_mod.build(p, ROWS['coder'], index(), [], REPO_FACTS)
         self.assertIn('T-0001 — Record every payment attempt', text)
 
+    def test_sized_tests_line(self):
+        facts_ = dict(REPO_FACTS, files={'tests/test_a.py': 476})
+        sections = {'acceptance': 'run `tests/test_a.py` and `tests/test_new.py`'}
+        collected = preamble_mod.collect(product(), ROWS['coder'], index(), [], facts_)
+        collected.update(sections=sections, tests=preamble_mod.named_tests(sections, {}, None))
+        text = '\n'.join(preamble_mod.state_lines(product(), collected))
+        self.assertIn('Tests named by the card: tests/test_a.py (476 lines); '
+                      'tests/test_new.py (new)', text)
+
+    def test_unknown_head_still_says_unknown(self):
+        text = preamble_mod.build(product(), ROWS['coder'], index(), [], None)
+        self.assertIn('Head: (not known here)', text)
+
+    def test_wanted_paths(self):
+        collected = preamble_mod.collect(product(), ROWS['review'], index(), [], REPO_FACTS)
+        collected.update(tests=['tests/test_checkout.py::test_one', 'tests/test_checkout.py'],
+                         writes=['app/checkout/attempts.py', 'app/**', 'tests/test_checkout.py'])
+        self.assertEqual(preamble_mod.wanted_paths(collected),
+                         [collected['spec_path'], collected['plan_path'], collected['review_path'],
+                          'tests/test_checkout.py', 'app/checkout/attempts.py'])
+        self.assertEqual(len(preamble_mod.wanted_paths(collected, limit=2)), 2)
+
+    def test_unknown_count(self):
+        bare = preamble_mod.build(product(), ROWS['coder'], index(), [], None)
+        self.assertGreaterEqual(preamble_mod.unknown_count(bare), 2)
+        full = preamble_mod.build(product(), ROWS['coder'], index(), [], REPO_FACTS)
+        self.assertEqual(preamble_mod.unknown_count(full), 0)
+
     def test_the_review_path_follows_the_product_pattern(self):
         p = product(conventions={'review_pattern': 'reviews/{slug}/r{n}.md'})
         text = preamble_mod.build(p, ROWS['fixer'], index(), [], REPO_FACTS)
@@ -470,6 +501,24 @@ class CliTest(unittest.TestCase):
         self.assertEqual(args.command, 'brief')
         self.assertEqual(args.item, 'B-0001')
         self.assertIs(args.func, build_mod.cmd_brief)
+
+    def test_asf_brief_fills_the_facts(self):
+        calls = []
+
+        def stub(prod, r, idx, inflight=None):
+            calls.append(r)
+            return REPO_FACTS
+
+        args = argparse.Namespace(product='sample', item='T-0001', kind=None, inflight=None,
+                                  json=False)
+        out = io.StringIO()
+        with mock.patch.object(build_mod.env, 'load_product', return_value=product()), \
+                mock.patch.object(build_mod.facts_mod, 'repo_facts', stub), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(build_mod.cmd_brief(args), 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].item_id, 'T-0001')
+        self.assertIn('Head: abc1234 record the provider outcome', out.getvalue())
 
 
 if __name__ == '__main__':

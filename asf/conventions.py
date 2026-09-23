@@ -65,6 +65,8 @@ DEFAULT_MAIN = 'main'
 #: The command that gates a branch before it lands. None → no test gate for this product.
 DEFAULT_TEST_COMMAND = None
 DEFAULT_PREAMBLE_MAX_LINES = 120
+#: The most documents and tests whose line counts the preamble measures per launch (F-0022).
+DEFAULT_PREAMBLE_MAX_FILES = 12
 DEFAULT_PRS_PER_TICK = 6
 #: How many leading path segments make one area, for the groom's split proposals (F-0086 D5).
 DEFAULT_AREA_DEPTH = 2
@@ -141,6 +143,8 @@ class Conventions:
     main: str = DEFAULT_MAIN
     test_command: str = DEFAULT_TEST_COMMAND
     preamble_max_lines: int = DEFAULT_PREAMBLE_MAX_LINES
+    #: The most paths whose line counts a brief's preamble measures (F-0022).
+    preamble_max_files: int = DEFAULT_PREAMBLE_MAX_FILES
     prs_per_tick: int = DEFAULT_PRS_PER_TICK
     area_depth: int = DEFAULT_AREA_DEPTH
     batch_max_globs: int = DEFAULT_BATCH_MAX_GLOBS

@@ -29,6 +29,7 @@ from asf.record.core import parse_sections
 from asf.views import index_reader as ix
 
 DEFAULT_MAX_LINES = 120
+DEFAULT_MAX_FILES = 12
 UNKNOWN = '(not known here)'
 NONE = '(none)'
 
@@ -59,6 +60,11 @@ def conventions(product):
 def max_lines(product):
     v = conventions(product).get('preamble_max_lines')
     return v if isinstance(v, int) and v > 0 else DEFAULT_MAX_LINES
+
+
+def max_files(product):
+    v = conventions(product).get('preamble_max_files')
+    return v if isinstance(v, int) and v > 0 else DEFAULT_MAX_FILES
 
 
 def rules_block(product, main='main'):
@@ -130,6 +136,12 @@ REVIEW_KINDS = ('review', 'fixer', 'adjudicate')
 ANSWER_KINDS = ('fixer', 'adjudicate')
 STORY_KINDS = ('spec', 'plan', 'review', 'adjudicate')
 
+#: The keys of ``repo_facts`` that :func:`collect` reads. :func:`asf.briefs.facts.repo_facts` is
+#: the one function that fills them, and ``tests.test_brief_facts.ContractTests`` holds the two
+#: equal — the drift between what a caller fills and what the preamble reads is the defect that
+#: left every brief printing ``(not known here)``.
+REPO_FACT_KEYS = ('head', 'branch_exists', 'files', 'tests', 'last_report')
+
 
 def _strip_rev(value):
     """A link may be recorded as ``<rev>:<path>``; the path is what a session opens."""
@@ -173,6 +185,42 @@ def named_tests(sections, item, repo_facts):
         if v and v not in out:
             out.append(str(v))
     return out
+
+
+def _path_of(test):
+    """A test name without its ``::node`` suffix — the file a session opens."""
+    return str(test).split('::', 1)[0]
+
+
+def wanted_paths(facts, limit=None, product=None):
+    """The paths whose sizes the brief prints, in the order it prints them: the spec, the plan,
+    the review file for a review kind, each named test, then each ``writes:`` entry that is a
+    literal path. Deduped, cut to ``limit`` (default ``preamble_max_files``). A glob is never
+    listed — expanding one could mean thousands of paths for a line nothing prints."""
+    paths = [facts.get('spec_path'), facts.get('plan_path')]
+    if facts.get('kind') in REVIEW_KINDS:
+        paths.append(facts.get('review_path'))
+    paths += [_path_of(t) for t in facts.get('tests') or []]
+    paths += [w for w in facts.get('writes') or [] if not any(c in w for c in '*?[')]
+    out = []
+    for p in paths:
+        if p and p not in out:
+            out.append(p)
+    return out[:limit or max_files(product)]
+
+
+def _test_line(name, files):
+    """One named test with its size, or ``(new)`` when the tree was read and lacks it. An empty
+    ``files`` means nothing was measured, and the bare name is printed — never a guess."""
+    path = _path_of(name)
+    if path in files:
+        return f'{name} ({files[path]} lines)'
+    return f'{name} (new)' if files else str(name)
+
+
+def unknown_count(text):
+    """How many facts the text prints as unknown."""
+    return str(text).count(UNKNOWN)
 
 
 def stories_of(items, feature):
@@ -232,6 +280,7 @@ def collect(product, row, index, inflight=None, repo_facts=None):
         'plan_path': plan_path,
         'spec_recorded': spec_recorded,
         'plan_recorded': plan_recorded,
+        'files': dict((repo_facts or {}).get('files') or {}),
         'spec_lines': _line_count(repo_facts, spec_path),
         'plan_lines': _line_count(repo_facts, plan_path),
         'writes': list(item.get('writes') or []),
@@ -343,10 +392,10 @@ def state_lines(product, facts):
         verb, n = ('to answer', facts['round']) if kind in ANSWER_KINDS \
             else ('to write', facts['next_round'])
         out.append(f"Review file {verb}: `{facts['review_path']}` (round {n})")
+    tests = '; '.join(_test_line(t, facts['files']) for t in facts['tests']) or '(none named)'
     out += [f"Writes (the footprint this job may touch): "
             f"{', '.join(facts['writes']) if facts['writes'] else '(none declared)'}",
-            f"Tests named by the card: "
-            f"{', '.join(facts['tests']) if facts['tests'] else '(none named)'}"]
+            f"Tests named by the card: {tests}"]
     if facts.get('merged'):
         out.append(f"Also delivers: {', '.join(facts['merged'])} — their sections of "
                    f"{facts['plan_path']}, acceptance byte-identical")

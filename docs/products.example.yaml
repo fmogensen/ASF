@@ -47,6 +47,10 @@ conventions:
   # and the most globs a Task may write and still be batched. Both shown at their defaults.
   # area_depth: 2
   # batch_max_globs: 2
+  # asf.briefs.preamble: the lines the preamble may run to, and the most documents and tests whose
+  # line counts it measures per launch. Both shown at their defaults.
+  # preamble_max_lines: 120
+  # preamble_max_files: 12
   # F-0031: globs whose match makes a landed branch's merge class merge_amendable_set (needs a
   # person, see approvals: below) rather than merge_routine_pr. The factory's own rules.
   amendable_paths: [rules/*, docs/CONSTITUTION.md]

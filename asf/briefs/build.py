@@ -3,7 +3,8 @@
 ``build(product, row, index, inflight, repo_facts=None) -> Brief``. The row is an
 :class:`asf.feeder.rows.Row`; the index is the loaded ``index.json``; ``inflight`` is the running
 sessions; ``repo_facts`` is the optional dict the *caller* fills from git (``head``,
-``branch_exists``, ``files``, ``tests``, ``last_report``) — this module never runs git, never
+``branch_exists``, ``files``, ``tests``, ``last_report``; :func:`asf.briefs.facts.repo_facts`
+is the filler) — this module never runs git, never
 opens a socket and never guesses a fact nobody gave it.
 
 The text is four parts, always in this order::
@@ -28,6 +29,7 @@ import os
 import string
 
 from asf import env
+from asf.briefs import facts as facts_mod
 from asf.briefs import preamble as preamble_mod
 from asf.workers.stall import CORRECTION_HEAD
 
@@ -279,7 +281,8 @@ def cmd_brief(args):
         return 1
     if args.kind:
         row = dataclasses.replace(row, brief_kind=args.kind)
-    brief = build(product, row, index, inflight)
+    brief = build(product, row, index, inflight,
+                  repo_facts=facts_mod.repo_facts(product, row, index, inflight))
     if args.json:
         print(json.dumps(dataclasses.asdict(brief), indent=2))
     else:

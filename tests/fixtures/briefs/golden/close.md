@@ -10,7 +10,7 @@ Head: abc1234 record the provider outcome
 Spec: `docs/specs/checkout-resilience.md` (312 lines)
 Plan: `docs/plans/checkout-resilience.md` (188 lines)
 Writes (the footprint this job may touch): app/checkout/attempts.py, tests/test_checkout.py
-Tests named by the card: tests/test_checkout.py::test_attempt_row_per_try
+Tests named by the card: tests/test_checkout.py::test_attempt_row_per_try (new)
 Sessions in flight: (none)
 Specs live in `docs/specs`, plans in `docs/plans`, reviews in `docs/reviews`.
 Branch prefixes: fix → `fix`, plan → `plan`, spec → `spec`, task → `task`.
