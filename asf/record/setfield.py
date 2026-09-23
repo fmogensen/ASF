@@ -33,6 +33,18 @@ def cmd_set(args, root):
         else:
             updates[top] = value
 
+    err = set_typed(rec, updates)
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        return 2
+    print(f"{args.id}: set {', '.join(updates)}")
+    return 0
+
+
+def set_typed(rec, updates):
+    """Write ``updates`` (typed fields) onto the card ``rec`` (a ``load_items`` record) through the
+    parser: rendered on a scratch copy, parsed back, written only when every field round-trips.
+    Returns None on success, else the reason the card is unchanged."""
     # write to a scratch copy first: the card is replaced only if it parses back to the ask
     fd, scratch = tempfile.mkstemp(suffix='.md')
     try:
@@ -44,18 +56,15 @@ def cmd_set(args, root):
         try:
             meta, _body = frontmatter.parse(new_text, path=rec['relpath'])
         except frontmatter.FrontmatterError as e:
-            print(f"error: {', '.join(updates)} cannot be written — {e.file}:{e.line}: {e.why}; "
-                  f"{rec['relpath']} is unchanged", file=sys.stderr)
-            return 2
+            return (f"{', '.join(updates)} cannot be written — {e.file}:{e.line}: {e.why}; "
+                    f"{rec['relpath']} is unchanged")
         for key, value in updates.items():
             if meta.get(key) != value:
-                print(f"error: {key}={value!r} does not round-trip through the parser "
-                      f"(it reads back as {meta.get(key)!r}); {rec['relpath']} is unchanged",
-                      file=sys.stderr)
-                return 2
+                return (f"{key}={value!r} does not round-trip through the parser "
+                        f"(it reads back as {meta.get(key)!r}); {rec['relpath']} is unchanged")
     finally:
         os.unlink(scratch)
     with open(rec['path'], 'w', encoding='utf-8') as f:
         f.write(new_text)
-    print(f"{args.id}: set {', '.join(updates)}")
-    return 0
+    rec['text'] = new_text
+    return None

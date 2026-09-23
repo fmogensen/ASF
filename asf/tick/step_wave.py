@@ -23,6 +23,7 @@ import subprocess
 from asf import approvals, env
 from asf import capacity as capacity_mod
 from asf.groom import policy as groom_policy
+from asf.record import plan_order
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 
@@ -173,6 +174,8 @@ def run(ctx, out=print):
     product = ctx.product
     held = approvals.raise_holds(ctx, out)
     items, _generated = index_reader.load(ctx.record_root())
+    if product.repo_dir:  # defence in depth: a Task whose card lacks `after:` waits on its plan's order
+        items = plan_order.overlay(items, plan_order.trunk_reader(product))
     running = inflight(product)
     r = capacity_mod.resolve(product)
     planned = feeder_rows.plan_rows(items, product, running, r.sessions,

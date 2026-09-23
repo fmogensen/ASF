@@ -8,7 +8,9 @@ launch. This pass runs in the tick's record step after the ingest: for every Fea
 is on the trunk and that has no Task child yet, the plan's ``### Task N:`` sections become Task
 cards — ``parent`` the Feature, ``writes`` from the Task's ``writes:``/``Files:`` line,
 ``stories`` from its ``stories:`` line (the ids the record holds), ``links.plan`` the plan's
-path, the section's text as the description, ``decided: true`` (the plan is approved: it landed).
+path, the section's text as the description, ``decided: true`` (the plan is approved: it landed),
+and ``after`` from the order the plan states (:mod:`asf.record.plan_order`) — without it every
+Task of a plan launched at once and each successor's coder found nothing to build on.
 Ids are minted by :func:`asf.record.ids.mint_id` — never by a session. A Feature that already
 has a Task child is left alone: the plan was read once, a re-run is a no-op.
 """
@@ -16,6 +18,7 @@ import re
 
 from asf.evidence import evidence
 from asf.record.core import canonicalize, load_items, today
+from asf.record import plan_order
 from asf.record.ids import mint_id, write_new_item
 
 STORIES_LINE_RE = re.compile(r'^\s*stories\s*:\s*(.+)$', re.IGNORECASE | re.MULTILINE)
@@ -81,4 +84,6 @@ def mint_plan_tasks(root, product, ev, out=print, read_ref=None):
             ids.append(new_id)
         made.extend(ids)
         out(f"plan-tasks: {fid}: {len(ids)} Task(s) from {plan_path}: {', '.join(ids)}")
+        # the order the plan states, written once every id exists (a Task may name a later one)
+        plan_order.backfill(root, lambda _path, _text=text: _text, out=out, only=set(ids))
     return made

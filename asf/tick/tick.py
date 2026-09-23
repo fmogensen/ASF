@@ -82,6 +82,9 @@ def run_step0(root, product, fresh=False):
         from asf.evidence import evidence
         from asf.record.plan_tasks import mint_plan_tasks
         mint_plan_tasks(root, product, evidence.load(product=product))
+        # open Tasks minted before the minter wrote order: the plan's order lands as `after:`
+        from asf.record import plan_order
+        plan_order.backfill(root, plan_order.trunk_reader(product))
     default_bug_epic = product.conventions.get('default_bug_epic')
     cmd_file_bugs(_ns(default_bug_epic=default_bug_epic,
                       file_bug_level=approvals.level_of(product, 'file_bug')), root)

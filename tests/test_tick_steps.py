@@ -353,6 +353,23 @@ class WaveStepTests(StepsTestCase):
         self.assertNotIn('account', launch_ev)
         self.assertEqual(ctx.counts['launches'], 1)
 
+    def test_the_wave_plans_over_the_plans_order(self):
+        # defence in depth: the wave overlays the plan's order before the feeder sees the index
+        seen = {}
+
+        def overlay(items, read_plan):
+            seen['read'] = read_plan
+            return dict(items, overlaid={'id': 'overlaid', 'type': 'task'})
+
+        def plan(index, *a, **kw):
+            seen['ids'] = sorted(index)
+            return []
+        with mock.patch.object(step_wave.plan_order, 'overlay', overlay), \
+                mock.patch.object(feeder_rows, 'plan_rows', plan):
+            step_wave.run(self.ctx(), out=self.lines.append)
+        self.assertIn('overlaid', seen['ids'])
+        self.assertIsNone(seen['read']('docs/plans/no-such-plan.md'))
+
     def test_unpushed_branch_facts(self):
         facts = step_wave.repo_facts(self.product, 'fix/B-9999')
         self.assertEqual(facts, {'branch': 'fix/B-9999', 'pushed': False, 'remote_sha': '',
