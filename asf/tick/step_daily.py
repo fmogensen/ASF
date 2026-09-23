@@ -43,6 +43,71 @@ def _newest_answers_file(product):
     return os.path.join(d, f'{sorted(dates)[-1]}.answers')
 
 
+def pending_answers_files(product):
+    """Every unapplied ``groom/<date>.answers`` in the state dir, oldest first."""
+    from asf import env
+    d = os.path.join(env.state_dir(product), 'groom')
+    if not os.path.isdir(d):
+        return []
+    return [os.path.join(d, name) for name in sorted(os.listdir(d))
+            if _ANSWERS_FILE_RE.match(name)]
+
+
+def carry_staged_answers(product, out=print):
+    """An ended groom session's ``<date>.answers`` left in its worktree (its sandbox refused the
+    state dir, groom-2026-09-22) is moved to the state dir, where the tick reads it. A live
+    session's worktree is never touched; a file the state dir already holds, applied or not, is
+    left where it is."""
+    from asf import env
+    from asf.workers import lifecycle, pool as pool_mod
+    d = os.path.join(env.state_dir(product), 'groom')
+    registry = pool_mod.sessions_path(product)
+    owners = lifecycle.by_worktree(registry)
+    moved = []
+    for job, run in sorted(lifecycle.latest(registry).items()):
+        if run.get('kind') not in lifecycle.NO_LANDING_KINDS or lifecycle.is_live(run):
+            continue
+        date = job.rsplit('groom-', 1)[-1]
+        wt = run.get('worktree') or ''
+        if lifecycle.is_live(owners.get(os.path.realpath(wt)) or {}):
+            continue  # a session sent back into the same worktree is still at work there
+        staged = os.path.join(wt, f'{date}.answers')
+        if not _ANSWERS_FILE_RE.match(os.path.basename(staged)) or not os.path.isfile(staged):
+            continue
+        target = os.path.join(d, f'{date}.answers')
+        if os.path.exists(target) or os.path.exists(target + '.done'):
+            continue
+        os.makedirs(d, exist_ok=True)
+        os.replace(staged, target)
+        out(f'groom: carried {staged} to the state dir')
+        moved.append(target)
+    return moved
+
+
+def apply_pending_answers(product, root, event=None, out=print):
+    """The adjudicate session's answers, applied in the record clone by the tick that first
+    sees them (F-0085 §2.6: "the next tick reads the answers file") rather than by the next
+    day's ``groom --apply``. Only under ``approvals.groom: auto``. Returns how many files were
+    applied; one line each."""
+    from asf.groom import policy
+    from asf.groom.groom import cmd_groom
+    if not policy.groom_auto(product):
+        return 0
+    carry_staged_answers(product, out=out)
+    epic = (product.conventions or {}).get('default_bug_epic')
+    n = 0
+    for path in pending_answers_files(product):
+        rc, last = run_part(lambda: cmd_groom(_ns(date=None, apply=False, product=product.name,
+                                                  default_bug_epic=epic, answers_file=path,
+                                                  event=event), root))
+        date = os.path.basename(path)[:-len('.answers')]
+        out(f"groom: answers {date} {'FAILED' if rc else 'applied'}" + (f' — {last}' if last else ''))
+        if rc:
+            break
+        n += 1
+    return n
+
+
 def parts(product, root, event=None):
     """``[(name, thunk)]`` in order; each thunk returns an exit code. ``event`` is ``ctx.event``
     (§4) — handed to ``groom`` alone, the only part that writes events today."""

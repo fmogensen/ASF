@@ -723,5 +723,100 @@ class DailyStepTests(StepsTestCase):
         self.assertEqual(calls[0].event, sentinel)
 
 
+class GroomAnswersTests(StepsTestCase):
+    """An adjudicate session's answers reach the cards on the next tick, not the next morning:
+    the brief says "the next tick reads the answers file and applies it", but only the daily step
+    passed it to ``groom`` — decided cards waited up to a day for their CARD → SPEC row. And an
+    answers file a session had to stage in its worktree (its sandbox refused the state dir) is
+    carried to the state dir once the session is over."""
+
+    product_extra = 'steps:\n  batch: off\napprovals:\n  groom: auto\n'
+
+    def answers_dir(self):
+        return os.path.join(env.state_dir(self.product), 'groom')
+
+    def write_answers(self, date, where=None):
+        d = where or self.answers_dir()
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, f'{date}.answers')
+        with open(path, 'w') as f:
+            f.write(f'- [ ] F-0001 sample — why → answer: adjudicator: yes ({date})\n')
+        return path
+
+    def applied(self, **kw):
+        calls = []
+
+        def fake_cmd_groom(args, root):
+            calls.append(args)
+            os.rename(args.answers_file, args.answers_file + '.done')
+            print('groom 2026-01-03: applied 1')
+            return 0
+        sink = object()
+        with mock.patch('asf.groom.groom.cmd_groom', fake_cmd_groom):
+            n = step_daily.apply_pending_answers(self.product, self.tmp, event=sink,
+                                                 out=self.lines.append, **kw)
+        return n, calls, sink
+
+    def test_every_pending_answers_file_is_applied_oldest_first(self):
+        self.write_answers('2026-01-02')
+        self.write_answers('2026-01-01')
+        n, calls, sink = self.applied()
+        self.assertEqual(n, 2)
+        self.assertEqual([os.path.basename(c.answers_file) for c in calls],
+                         ['2026-01-01.answers', '2026-01-02.answers'])
+        self.assertTrue(all(c.event is sink and not c.apply for c in calls))
+        self.assertEqual(self.lines[0], 'groom: answers 2026-01-01 applied — groom 2026-01-03: applied 1')
+
+    def test_nothing_without_the_groom_gate(self):
+        self.write_product(f'repo_dir: {self.repo}\nsteps:\n  batch: off\n')
+        self.product = env.load_product('sample')
+        self.write_answers('2026-01-01')
+        n, calls, _ = self.applied()
+        self.assertEqual((n, calls), (0, []))
+
+    def test_an_answers_file_staged_in_an_ended_groom_worktree_is_carried_and_applied(self):
+        wt = os.path.join(self.tmp, 'wt-groom')
+        staged = self.write_answers('2026-01-01', where=wt)
+        self.session(job='groom-2026-01-01', kind='groom', item='F-0001', pid=DEAD_PID,
+                     started='t1', worktree=wt, branch='groom/2026-01-01')
+        self.session(job='groom-2026-01-01', ended='t2', end_reason='failed')
+        n, calls, _ = self.applied()
+        self.assertEqual(n, 1)
+        self.assertFalse(os.path.exists(staged))
+        self.assertTrue(os.path.exists(os.path.join(self.answers_dir(), '2026-01-01.answers.done')))
+        self.assertIn(f'groom: carried {staged} to the state dir', self.lines)
+
+    def test_a_live_groom_sessions_worktree_is_left_alone(self):
+        wt = os.path.join(self.tmp, 'wt-groom')
+        staged = self.write_answers('2026-01-01', where=wt)
+        self.session(job='groom-2026-01-01', kind='groom', item='F-0001', pid=os.getpid(),
+                     started='t1', worktree=wt, branch='groom/2026-01-01')
+        n, calls, _ = self.applied()
+        self.assertEqual(n, 0)
+        self.assertTrue(os.path.exists(staged))
+
+    def test_a_live_session_sent_back_into_the_groom_worktree_keeps_it(self):
+        wt = os.path.join(self.tmp, 'wt-groom')
+        staged = self.write_answers('2026-01-01', where=wt)
+        self.session(job='groom-2026-01-01', kind='groom', item='F-0001', pid=DEAD_PID,
+                     started='t1', worktree=wt, branch='groom/2026-01-01')
+        self.session(job='groom-2026-01-01', ended='t2', end_reason='failed')
+        self.session(job='correct-f-0001', kind='correct', item='F-0001', pid=os.getpid(),
+                     started='t3', worktree=wt, branch='groom/2026-01-01')
+        n, calls, _ = self.applied()
+        self.assertEqual(n, 0)
+        self.assertTrue(os.path.exists(staged))
+
+    def test_the_record_step_applies_them_and_re_indexes(self):
+        seen = []
+        ctx = self.ctx()
+        with mock.patch.object(step_daily, 'apply_pending_answers',
+                               lambda product, root, event=None, out=print: seen.append(event) or 1), \
+                mock.patch.object(tick, 'do_index') as index:
+            self.assertEqual(tick.run_record_step(self.product, ctx=ctx), 0)
+        self.assertEqual(seen, [ctx.event])
+        index.assert_called_once_with(ctx.record_root())
+
+
 if __name__ == '__main__':
     unittest.main()

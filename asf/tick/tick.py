@@ -165,6 +165,9 @@ def run_record_step(product, fresh=False, ctx=None):
     ctx = ctx or Context(product, fresh=fresh)
     try:
         run_step0(ctx.record_root(), product, fresh=fresh)
+        from asf.tick import step_daily
+        if step_daily.apply_pending_answers(product, ctx.record_root(), event=ctx.event):
+            do_index(ctx.record_root())  # the decided cards' rows on this very tick
     except (subprocess.CalledProcessError, env.ConfigError) as e:
         detail = (getattr(e, 'stderr', None) or str(e)).strip()
         print(f"tick: record failed ({detail})")
