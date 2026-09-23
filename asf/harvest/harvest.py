@@ -54,6 +54,7 @@ import tempfile
 
 from asf import approvals, env, hermetic
 from asf.conventions import Conventions
+from asf.feeder import footprint
 from asf.workers import health as health_mod
 from asf.workers import lifecycle
 from asf.workers.pool import now_iso
@@ -411,15 +412,17 @@ def run_gate(tmp, conv=None):
         cmd = shlex.split(str(conv.test_command))
         rc, out, err = sh_timed(cmd, tmp, env, timeout)
         if rc is None:
-            return False, timed_out_line(cmd, timeout)
+            return False, timed_out_line(cmd, timeout), []
         if rc != 0:
-            return False, f'tests failed: {tail(err or out)}'
+            return (False, f'tests failed: {tail(err or out)}',
+                    gate_files((out or '') + '\n' + (err or '')))
     rc, out, err = sh_timed(asf_cmd('check'), tmp, env, timeout)
     if rc is None:
-        return False, timed_out_line(asf_cmd('check'), timeout)
+        return False, timed_out_line(asf_cmd('check'), timeout), []
     if rc != 0:
-        return False, f'asf check failed: {tail(out or err)}'
-    return True, None
+        return (False, f'asf check failed: {tail(out or err)}',
+                gate_files((out or '') + '\n' + (err or '')))
+    return True, None, []
 
 
 # --------------------------------------------------------------------- push --
@@ -487,7 +490,7 @@ def harvest_branch(repo, state_dir, is_record, job, branch, dry_run, conv=None, 
                                  'harvest: regenerate index.json'], cwd=tmp)
                     if commit.returncode != 0:
                         return hold(job, f'index regen commit failed: {tail(commit.stderr or commit.stdout)}')
-                gate_ok, gate_reason = run_gate(tmp, conv)
+                gate_ok, gate_reason, _files = run_gate(tmp, conv)
                 if not gate_ok:
                     return hold(job, gate_reason)
 
@@ -696,8 +699,28 @@ def first_failing_line(text):
     return lines[-1] if lines else 'no output'
 
 
+PATH_RE = re.compile(r'(?<![\w./-])((?:[\w.-]+/)*[\w.-]+\.(?:py|md|tsx?|jsx?|sh|ya?ml|json|toml))\b')
+DOTTED_RE = re.compile(r'\b(tests?(?:\.\w+)+)\b')
+
+
+def gate_files(text, cap=20):
+    """The repo-relative files a gate's output names, first-seen order, de-duplicated, at most
+    ``cap``: every path-like token, and each dotted unittest id as its module file
+    (``tests.test_feeder.X`` → ``tests/test_feeder.py``). No classification, no owner guessing."""
+    found = []
+    for m in re.finditer(PATH_RE.pattern + '|' + DOTTED_RE.pattern, text or ''):
+        if m.group(1):
+            path = m.group(1)
+        else:
+            parts = m.group(2).split('.')
+            path = '/'.join(parts[:2]) + '.py' if len(parts) > 1 else None
+        if path and path not in found:
+            found.append(path)
+    return found[:cap]
+
+
 def product_gate(tmp, conv, asf_repo):
-    """``(ok, first failing line)``: the product's test command, then — on asf's own repo — its
+    """``(ok, first failing line, files)``: the product's test command, then — on asf's own repo — its
     generic and conventions checks. Each within ``harvest.gate_timeout_s`` (B-0072)."""
     cmds = []
     if conv.test_command:
@@ -709,10 +732,11 @@ def product_gate(tmp, conv, asf_repo):
     for cmd in cmds:
         rc, out, err = sh_timed(cmd, tmp, env, timeout)
         if rc is None:  # B-0072: killed with its whole process group; held, never waited for
-            return False, timed_out_line(cmd, timeout)
+            return False, timed_out_line(cmd, timeout), []
         if rc != 0:
-            return False, first_failing_line((out or '') + '\n' + (err or ''))
-    return True, None
+            whole = (out or '') + '\n' + (err or '')
+            return False, first_failing_line(whole), gate_files(whole)  # P8: the whole output
+    return True, None, []
 
 
 def merge_commits(repo, trunk, branch):
@@ -854,7 +878,7 @@ def archive_superseded(repo, state_dir, branch, record, item, state, dry_run, ou
     return SUPERSEDED
 
 
-def hold_with_correction(state_dir, branch, record, kind, text, out):
+def hold_with_correction(state_dir, branch, record, kind, text, out, files=(), item_writes=()):
     """Hold ``branch`` and hand it back to its session: :func:`asf.workers.lifecycle.hold` says
     what goes on the run (the failing output as ``correction``, the rounds over every session of
     the item, the cap the feeder switches an ADJUDICATE row on at) and what to print."""
@@ -862,6 +886,9 @@ def hold_with_correction(state_dir, branch, record, kind, text, out):
     if kind == 'gate' and text.startswith(TIMED_OUT):  # B-0082: a clock is not a defect — no round,
         out(f'{TIMED_OUT} {branch}: {text} — retried next tick')  # no correction, eligible again
         return 'timed-out'
+    if kind == 'gate' and files and item_writes and footprint.overlaps(item_writes, files) is None:
+        out(f'foreign {branch}: gate red outside its writes: {files[0]} — re-gated next tick')
+        return 'foreign'  # D8: not this item's red — no correction, no round
     fields, line = lifecycle.hold(sessions_path(state_dir), dict(record, branch=branch, job=job),
                                   kind, text, now_iso())
     mark_session(state_dir, job, **fields)
@@ -869,7 +896,8 @@ def hold_with_correction(state_dir, branch, record, kind, text, out):
     return 'held'
 
 
-def land_ff(repo, state_dir, branch, record, item, conv, asf_repo, bug_root, dry_run, out):
+def land_ff(repo, state_dir, branch, record, item, conv, asf_repo, bug_root, dry_run, out,
+            item_writes=()):
     trunk = conv.main
     job = record.get('job') or branch
     for _attempt in (1, 2):
@@ -883,9 +911,10 @@ def land_ff(repo, state_dir, branch, record, item, conv, asf_repo, bug_root, dry
             ok, reason = rebase_and_resolve(tmp, trunk)
             if not ok:
                 return hold_with_correction(state_dir, branch, record, 'conflict', reason, out)
-            ok, line = product_gate(tmp, conv, asf_repo)
+            ok, line, files = product_gate(tmp, conv, asf_repo)
             if not ok:
-                return hold_with_correction(state_dir, branch, record, 'gate', line, out)
+                return hold_with_correction(state_dir, branch, record, 'gate', line, out,
+                                            files, item_writes)
             sha = sh(['git', 'rev-parse', 'HEAD'], cwd=tmp).stdout.strip()
             if dry_run:
                 out(f'DRY: would land {branch} → {sha}')
@@ -937,11 +966,11 @@ def gate_groups(tmp, trunk, entries, conv, asf_repo, hold, out, announce=False):
         return []
     if announce:
         out(f'harvest: {len(stacked)} branch(es), one gate')
-    ok, line = product_gate(tmp, conv, asf_repo)
+    ok, line, files = product_gate(tmp, conv, asf_repo)
     if ok:
         return [(stacked, sh(['git', 'rev-parse', 'HEAD'], cwd=tmp).stdout.strip())]
     if len(stacked) == 1:
-        hold(stacked[0], 'gate', line)
+        hold(stacked[0], 'gate', line, files)
         return []
     out(f'harvest: bisecting {len(stacked)} branches')
     mid = len(stacked) // 2
@@ -949,15 +978,17 @@ def gate_groups(tmp, trunk, entries, conv, asf_repo, hold, out, announce=False):
             + gate_groups(tmp, trunk, stacked[mid:], conv, asf_repo, hold, out))
 
 
-def land_combined(repo, state_dir, entries, conv, asf_repo, dry_run, out):
+def land_combined(repo, state_dir, entries, conv, asf_repo, dry_run, out, items=None):
     """Land every entry of ``entries`` (``[(branch, record)]``) behind one gate on the combined
     head, bisecting on red; ``{branch: outcome}``. The head is pushed fast-forward as the
     trunk's new tip and every branch in it is marked harvested at that sha, then deleted."""
     trunk = conv.main
     results = {}
 
-    def hold(entry, kind, text):
-        results[entry[0]] = hold_with_correction(state_dir, entry[0], entry[1], kind, text, out)
+    def hold(entry, kind, text, files=()):
+        card = (items or {}).get(item_of(entry[0], entry[1])) or {}  # P7: no index, no footprint
+        results[entry[0]] = hold_with_correction(state_dir, entry[0], entry[1], kind, text, out,
+                                                 files, card.get('writes') or ())
 
     pending = list(entries)
     for _attempt in (1, 2):
@@ -1134,11 +1165,13 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
             asf_repo = is_asf_repo(repo)
         if str(conv.harvest_gate).strip().lower() == GATE_PER_BRANCH:
             results[branch] = land_ff(repo, state_dir, branch, record, item, conv, asf_repo,
-                                      bug_root, dry_run, out)
+                                      bug_root, dry_run, out,
+                                      item_writes=((items or {}).get(item) or {}).get('writes') or ())
         else:
             to_land.append((branch, record))
     if to_land:  # B-0040: one gate over the combined head, bisecting on red
-        results.update(land_combined(repo, state_dir, to_land, conv, asf_repo, dry_run, out))
+        results.update(land_combined(repo, state_dir, to_land, conv, asf_repo, dry_run, out,
+                                     items=items))
     if any(r == 'landed' for r in results.values()):
         sync_checkout(repo, trunk, out)
     return results

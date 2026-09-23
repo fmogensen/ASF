@@ -1175,6 +1175,69 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertEqual(old.call_args[0][0], os.path.abspath(self.repo))
 
 
+class GateFilesTests(unittest.TestCase):
+    OUTPUT = (
+        'FAIL: test_x (tests.test_feeder.FeederTests.test_x)\n'
+        'Traceback (most recent call last):\n'
+        '  File "asf/feeder/rows.py", line 12, in rows\n'
+        '  File "tests/test_feeder.py", line 40, in test_x\n'
+        'FAIL: test_y (tests.test_feeder.Other.test_y)\n'
+        'FAILED (failures=2)\n')
+
+    def test_paths_and_dotted_ids_resolve_dedupe_in_first_seen_order(self):
+        self.assertEqual(harvest.gate_files(self.OUTPUT),
+                         ['tests/test_feeder.py', 'asf/feeder/rows.py'])
+
+    def test_cap(self):
+        text = ' '.join(f'src/m{i}.py' for i in range(30))
+        files = harvest.gate_files(text)
+        self.assertEqual(len(files), 20)
+        self.assertEqual(files[0], 'src/m0.py')
+        self.assertEqual(len(harvest.gate_files(text, cap=3)), 3)
+
+    def test_a_bare_verdict_names_no_file(self):
+        self.assertEqual(harvest.gate_files('FAILED (failures=1)'), [])
+        self.assertEqual(harvest.gate_files(''), [])
+        self.assertEqual(harvest.gate_files(None), [])
+
+
+class ForeignRedTests(unittest.TestCase):
+    def setUp(self):
+        self.state = tempfile.mkdtemp(prefix='foreign_')
+        self.addCleanup(shutil.rmtree, self.state, True)
+        self.record = {'job': 'code-t-0080', 'item': 'T-0080', 'branch': 'worker/T-0080'}
+        self.lines = []
+
+    def hold(self, files, writes, kind='gate', text='FAILED (failures=1)'):
+        return harvest.hold_with_correction(self.state, 'worker/T-0080', self.record, kind, text,
+                                            self.lines.append, files, writes)
+
+    def registry(self):
+        path = harvest.sessions_path(self.state)
+        if not os.path.exists(path):
+            return ''
+        with open(path) as f:
+            return f.read()
+
+    def test_red_outside_the_writes_is_foreign_and_costs_no_round(self):
+        self.assertEqual(self.hold(['asf/other.py'], ['asf/harvest/harvest.py']), 'foreign')
+        self.assertEqual(self.registry(), '')
+        self.assertEqual(self.lines, ['foreign worker/T-0080: gate red outside its writes: '
+                                      'asf/other.py — re-gated next tick'])
+
+    def test_red_inside_the_writes_holds_as_today(self):
+        self.assertEqual(self.hold(['asf/harvest/harvest.py'], ['asf/harvest/*.py']), 'held')
+        self.assertIn('"correction"', self.registry())
+
+    def test_no_writes_or_no_files_holds_as_today(self):
+        self.assertEqual(self.hold(['asf/other.py'], []), 'held')
+        self.assertEqual(self.hold([], ['asf/harvest/harvest.py']), 'held')
+
+    def test_only_a_gate_red_can_be_foreign(self):
+        self.assertEqual(self.hold(['asf/other.py'], ['asf/harvest/harvest.py'], kind='conflict'),
+                         'held')
+
+
 PRODUCT_REPOS = Template(ProductHarvestTests.build, prefix='harvest_product_')
 
 
