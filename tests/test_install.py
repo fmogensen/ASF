@@ -39,6 +39,49 @@ def _files(root):
     return out
 
 
+#: A literal that stands in for a secret in ``GitHookTests`` below — no real vendor shape, no
+#: real name, so ``check_generic.sh``/``check_conventions.sh`` stay clean on this file itself.
+_MARKER = 'THE-SECRET-MARKER'
+
+
+def _stub_asf(bin_dir):
+    """A stand-in ``asf`` executable for ``GitHookTests``: ``asf.redact`` (Task 8350 of
+    ``docs/plans/f-0075.md``) is not yet in this checkout, so this script answers
+    ``redact --pre-commit|--pre-push --product <p>`` in its place — refusing when the change it
+    is asked about contains :data:`_MARKER`, exactly as the real scanner will (D8: the marker
+    itself is never printed). It exercises this Task's own surface — is the right hook written,
+    does a refusal really block a commit or a push, is the index a hook sees the one git is
+    committing (D12) — not the scanner's patterns, which are Task 8350's to test."""
+    os.makedirs(bin_dir, exist_ok=True)
+    path = os.path.join(bin_dir, 'asf')
+    with open(path, 'w') as f:
+        f.write(f'''#!/usr/bin/env python3
+import subprocess, sys
+
+def refuse():
+    print('redact: refused — 1 finding(s)')
+    print('x:1: secret (rule:stand-in)')
+    sys.exit(1)
+
+if sys.argv[1:3] == ['redact', '--pre-commit']:
+    diff = subprocess.run(['git', 'diff', '--cached', '-U0'], capture_output=True, text=True).stdout
+    refuse() if {_MARKER!r} in diff else sys.exit(0)
+elif sys.argv[1:3] == ['redact', '--pre-push']:
+    found = False
+    for line in sys.stdin.read().splitlines():
+        parts = line.split()
+        if len(parts) < 2 or parts[1] == '0' * 40:
+            continue
+        shown = subprocess.run(['git', 'show', parts[1]], capture_output=True, text=True).stdout
+        found = found or {_MARKER!r} in shown
+    refuse() if found else sys.exit(0)
+else:
+    sys.exit(0)
+''')
+    os.chmod(path, 0o755)
+    return path
+
+
 class HomeCase(unittest.TestCase):
     """A temp ``ASF_HOME``; nothing under the operator's real one is read or written."""
 
@@ -439,6 +482,7 @@ class HooksTest(HomeCase):
         self.write(os.path.join(self.rules, 'R-0002.md'),
                    '---\nid: R-0002\ntype: rule\ntitle: no hook\nenforced: false\n---\n')
         self.repo = os.path.join(self.tmp, 'repo')
+        _git(['init', '-q', self.repo])  # ensure_git_hooks (F-0075) needs a real git repo
         self.settings = os.path.join(self.repo, '.claude', 'settings.json')
         self.product = env.Product('sample', {'repo_dir': self.repo})
         self.which = lambda name: '/opt/bin/asf'
@@ -455,7 +499,8 @@ class HooksTest(HomeCase):
     def test_no_rules_declare_a_hook(self):
         rc, msg = hooks.install(self.product, rules_dir=os.path.join(self.tmp, 'none'), which=self.which)
         self.assertEqual((rc, msg),
-                         (0, f'hooks: 0 rule hooks in {self.settings}; approvals in 0 worker accounts'))
+                         (0, f'hooks: 0 rule hooks in {self.settings}; approvals in 0 worker accounts; '
+                             'pre-commit, pre-push in 1 repos'))
         self.assertFalse(os.path.exists(self.settings))
 
     def test_merge_is_idempotent_and_keeps_unrelated_keys(self):
@@ -465,7 +510,8 @@ class HooksTest(HomeCase):
         }))
         rc, msg = hooks.install(self.product, rules_dir=self.rules, which=self.which)
         self.assertEqual(rc, 0, msg)
-        self.assertEqual(msg, f'hooks: 2 rule hooks in {self.settings}; approvals in 0 worker accounts')
+        self.assertEqual(msg, f'hooks: 2 rule hooks in {self.settings}; approvals in 0 worker accounts; '
+                              'pre-commit, pre-push in 1 repos')
         first = self.read()
         self.assertEqual(first['permissions'], {'allow': ['Bash(ls)']})
         pre = first['hooks']['PreToolUse']
@@ -502,9 +548,160 @@ class HooksTest(HomeCase):
 
 
 class GitHookTests(unittest.TestCase):
-    """ASF's own tracked .githooks/pre-push (F-0075, S-7055). The rest of this class — the
-    hooks `asf hooks install` writes into a product repo and a record — is Task 8353's, queued
-    ahead of this one (P1); only the test this Task adds lives here so far."""
+    """T-0025 (F-0075 Task 8353, ``docs/plans/f-0075.md``): the git hooks ``asf hooks install``
+    writes for ``asf redact``, and that an installed hook really refuses a commit or a push. See
+    :func:`_stub_asf` for why these stand a fake ``asf`` in for the scanner Task 8350 owns."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='git_hooks_test_')
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.asf_path = _stub_asf(os.path.join(self.tmp, 'bin'))
+        self.which = lambda name: self.asf_path if name == 'asf' else None
+
+    def _repo(self, name, bare=False):
+        path = os.path.join(self.tmp, name)
+        args = ['init', '-q', '-b', 'main']
+        if bare:
+            args.append('--bare')
+        _git(args + [path])
+        return path
+
+    def _product(self, repo_dir=None, backlog_dir=None, name='sample'):
+        data = {}
+        if repo_dir:
+            data['repo_dir'] = repo_dir
+        if backlog_dir:
+            data['backlog_dir'] = backlog_dir
+        return env.Product(name, data)
+
+    def test_install_writes_pre_commit_and_pre_push_in_repo_and_record(self):
+        repo, record = self._repo('repo'), self._repo('record')
+        product = self._product(repo_dir=repo, backlog_dir=record)
+        ok, detail = hooks.ensure_git_hooks(product, which=self.which)
+        self.assertTrue(ok, detail)
+        self.assertEqual(detail, 'pre-commit, pre-push in 2 repos')
+        for d in (repo, record):
+            for name in ('pre-commit', 'pre-push'):
+                path = os.path.join(d, '.git', 'hooks', name)
+                self.assertTrue(os.access(path, os.X_OK), path)
+                with open(path) as f:
+                    text = f.read()
+                self.assertIn(f'exec "{self.asf_path}" redact --{name} --product sample', text)
+
+    def test_install_honours_core_hooks_path(self):
+        repo = self._repo('repo')
+        custom = os.path.join(repo, 'custom-hooks')
+        os.makedirs(custom)
+        _git(['config', 'core.hooksPath', 'custom-hooks'], repo)
+        product = self._product(repo_dir=repo)
+        ok, detail = hooks.ensure_git_hooks(product, which=self.which)
+        self.assertTrue(ok, detail)
+        self.assertTrue(os.path.isfile(os.path.join(custom, 'pre-commit')))
+        self.assertTrue(os.path.isfile(os.path.join(custom, 'pre-push')))
+        self.assertFalse(os.path.isfile(os.path.join(repo, '.git', 'hooks', 'pre-commit')))
+
+    def test_install_is_idempotent(self):
+        repo = self._repo('repo')
+        product = self._product(repo_dir=repo)
+        ok, detail = hooks.ensure_git_hooks(product, which=self.which)
+        self.assertTrue(ok, detail)
+        path = os.path.join(repo, '.git', 'hooks', 'pre-commit')
+        with open(path, 'rb') as f:
+            before = f.read()
+        ok, detail = hooks.ensure_git_hooks(product, which=self.which)
+        self.assertTrue(ok, detail)
+        with open(path, 'rb') as f:
+            self.assertEqual(f.read(), before)
+
+    def test_a_foreign_hook_is_not_touched_and_is_one_needs_operator_line(self):
+        repo = self._repo('repo')
+        foreign = os.path.join(repo, '.git', 'hooks', 'pre-push')
+        with open(foreign, 'w') as f:
+            f.write('#!/bin/sh\necho not asf\n')
+        os.chmod(foreign, 0o755)
+        with open(foreign, 'rb') as f:
+            before = f.read()
+        product = self._product(repo_dir=repo)
+        ok, detail = hooks.ensure_git_hooks(product, which=self.which)
+        self.assertFalse(ok)
+        self.assertTrue(detail.startswith('NEEDS OPERATOR: '), detail)
+        self.assertIn(foreign, detail)
+        self.assertIn(f'"{self.asf_path}" redact --pre-push --product sample', detail)
+        with open(foreign, 'rb') as f:
+            self.assertEqual(f.read(), before)
+        # the pre-commit hook, which was not in the way, is still written
+        self.assertTrue(os.path.isfile(os.path.join(repo, '.git', 'hooks', 'pre-commit')))
+
+    def _clone_with_installed_hooks(self):
+        origin = self._repo('origin', bare=True)
+        repo = os.path.join(self.tmp, 'clone')
+        _git(['clone', '-q', origin, repo])
+        _git(['config', 'user.email', 'test@example.com'], repo)
+        _git(['config', 'user.name', 'test'], repo)
+        with open(os.path.join(repo, 'seed'), 'w') as f:
+            f.write('seed\n')
+        _git(['add', 'seed'], repo)
+        _git(['commit', '-q', '-m', 'seed'], repo)
+        _git(['push', '-q', 'origin', 'HEAD:main'], repo)
+        product = self._product(repo_dir=repo)
+        ok, detail = hooks.ensure_git_hooks(product, which=self.which)
+        self.assertTrue(ok, detail)
+        worktree = os.path.join(self.tmp, 'wt')
+        _git(['worktree', 'add', '-q', '-b', 'wtbranch', worktree], repo)
+        _git(['config', 'user.email', 'test@example.com'], worktree)
+        _git(['config', 'user.name', 'test'], worktree)
+        return origin, worktree
+
+    def test_a_commit_in_a_worktree_is_refused_by_the_installed_hook(self):
+        origin, worktree = self._clone_with_installed_hooks()
+        with open(os.path.join(worktree, 'secret.txt'), 'w') as f:
+            f.write(_MARKER + '\n')
+        _git(['add', 'secret.txt'], worktree)
+        before = _git(['rev-parse', 'HEAD'], worktree)
+        r = subprocess.run(['git', 'commit', '-q', '-m', 'wip'], cwd=worktree,
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('secret', r.stdout + r.stderr)
+        self.assertNotIn(_MARKER, r.stdout + r.stderr)
+        self.assertEqual(_git(['rev-parse', 'HEAD'], worktree), before)  # no commit was made
+
+    def test_a_push_from_a_worktree_is_refused_by_the_installed_hook(self):
+        origin, worktree = self._clone_with_installed_hooks()
+        with open(os.path.join(worktree, 'secret.txt'), 'w') as f:
+            f.write(_MARKER + '\n')
+        _git(['add', 'secret.txt'], worktree)
+        _git(['commit', '-q', '--no-verify', '-m', 'wip'], worktree)  # past pre-commit, so push is what's under test
+        r = subprocess.run(['git', 'push', 'origin', 'wtbranch'], cwd=worktree,
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('secret', r.stdout + r.stderr)
+        self.assertNotIn(_MARKER, r.stdout + r.stderr)
+        self.assertEqual(_git(['for-each-ref', 'refs/heads/wtbranch'], origin), '')  # unchanged origin
+
+    def test_a_commit_only_path_is_scanned_against_the_index_git_is_committing(self):
+        # D12: `git commit --only <path>` builds a *temporary* index (HEAD's tree plus only the
+        # named path) and runs the hook against it. `dirty.txt` is staged in the *real* index —
+        # elsewhere, not part of this commit — so a hook that scanned the real index instead of
+        # the temporary one git actually built would wrongly refuse the first commit below.
+        origin, worktree = self._clone_with_installed_hooks()
+        with open(os.path.join(worktree, 'clean.txt'), 'w') as f:
+            f.write('clean\n')
+        _git(['add', 'clean.txt'], worktree)
+        with open(os.path.join(worktree, 'dirty.txt'), 'w') as f:
+            f.write(_MARKER + '\n')
+        _git(['add', 'dirty.txt'], worktree)
+        r = subprocess.run(['git', 'commit', '--only', '-m', 'clean only', 'clean.txt'],
+                           cwd=worktree, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+        with open(os.path.join(worktree, 'clean.txt'), 'w') as f:
+            f.write(_MARKER + '\n')
+        _git(['add', 'clean.txt'], worktree)
+        r = subprocess.run(['git', 'commit', '--only', '-m', 'now dirty', 'clean.txt'],
+                           cwd=worktree, capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('secret', r.stdout + r.stderr)
+        self.assertNotIn(_MARKER, r.stdout + r.stderr)
 
     def test_the_tracked_pre_push_hook_refuses_an_unpublished_secret(self):
         tmp = tempfile.mkdtemp()

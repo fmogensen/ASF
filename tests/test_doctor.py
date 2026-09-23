@@ -6,7 +6,7 @@ import tempfile
 import time
 import unittest
 
-from asf import doctor, env
+from asf import doctor, env, hooks
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_doctor` does not
     from test_scheduler import fake_clis, fake_launchctl, fake_loaded, fake_print, read_fixture
@@ -165,6 +165,40 @@ class TestOneFactoryCheck(unittest.TestCase):
             ok, detail = doctor.check_one_factory(cfg, env.Product('x', {'repo_dir': copy}))
             self.assertFalse(ok)
             self.assertIn('check_generic.sh in product repo', detail)
+
+
+class RedactionHooksTests(unittest.TestCase):
+    """T-0025 (F-0075 §2.4): ``check_redaction_hooks`` reads back the git hooks
+    ``asf.hooks.ensure_git_hooks`` writes — read-only, so this row never writes one itself."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='doctor_redaction_')
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.repo = os.path.join(self.tmp, 'repo')
+        subprocess.run(['git', 'init', '-q', self.repo], check=True)
+        self.product = env.Product('sample', {'repo_dir': self.repo})
+
+    def test_row_is_ok_when_installed_and_not_ok_naming_the_command_when_not(self):
+        ok, detail = doctor.check_redaction_hooks(self.product)
+        self.assertFalse(ok)
+        self.assertIn('pre-commit', detail)
+        self.assertIn('missing', detail)
+        self.assertIn('asf hooks install --product sample', detail)
+
+        ok, detail = hooks.ensure_git_hooks(self.product, which=lambda name: '/opt/bin/asf')
+        self.assertTrue(ok, detail)
+
+        ok, detail = doctor.check_redaction_hooks(self.product)
+        self.assertTrue(ok, detail)
+        self.assertEqual(detail, 'pre-commit, pre-push in 1 repos')
+
+        # a hook file that is not asf's is named too, and never overwritten by the check
+        with open(os.path.join(self.repo, '.git', 'hooks', 'pre-push'), 'w') as f:
+            f.write('#!/bin/sh\necho not asf\n')
+        ok, detail = doctor.check_redaction_hooks(self.product)
+        self.assertFalse(ok)
+        self.assertIn('pre-push', detail)
+        self.assertIn('foreign', detail)
 
 
 class TestNoPrHost(unittest.TestCase):

@@ -12,6 +12,14 @@ It also merges the built-in ``approvals`` hook, product-less, into every worker 
 declares a hook (F-0031 §2.3, PD5): the approvals matrix binds every session, not just those in a
 product repo with a rule card.
 
+``install`` also writes the redaction gate's own *git* hooks (F-0075, T-0025): :func:`ensure_git_hooks`
+puts a ``pre-commit`` and a ``pre-push`` into ``git rev-parse --git-path hooks`` of each of
+``product.repo_dir`` and ``product.backlog_dir`` (when set), each a four-line script that
+``exec``s ``asf redact --pre-commit|--pre-push --product <p>``. A hook file already there and
+already asf's is left alone; one already there and not asf's is left untouched too, and turns the
+whole call into a ``NEEDS OPERATOR`` refusal (D10) — no hook file asf did not write is ever
+edited or overwritten.
+
 ``asf hook <name>`` runs a hook built into ``asf`` when :data:`BUILTIN` names it (``approvals``,
 :func:`asf.approvals.run_hook`), else ``tools/checks/<name>.sh`` (the record's, then the cwd's)
 with the hook's stdin, exiting 0 when there is no such script.
@@ -37,6 +45,78 @@ RUNTIME_SETTINGS_GLOBS = ('.claude/settings.json', '.claude/settings.local.json'
 #: The hooks built into ``asf`` — ``{name: the events it answers}`` — run by :func:`cmd_hook`
 #: instead of a check script (F-0031 §2.3). A built-in name shadows a script of the same name.
 BUILTIN = {'approvals': ('PreToolUse',)}
+
+#: The two git hooks the redaction gate installs (F-0075, D10). Each name doubles as the
+#: ``asf redact`` mode it execs (``--pre-commit`` / ``--pre-push``).
+GIT_HOOK_NAMES = ('pre-commit', 'pre-push')
+
+
+def git_hooks_dir(repo):
+    """``git -C <repo> rev-parse --git-path hooks``, made absolute — the real hooks directory of
+    ``repo`` whether or not ``core.hooksPath`` is set, and shared by every worktree of ``repo``
+    (git resolves it against the common ``.git`` dir, not the worktree's own). ``None`` when
+    ``repo`` is not a directory, or not a git repo — a caller reports that, it never raises."""
+    if not repo or not os.path.isdir(repo):
+        return None
+    p = subprocess.run(['git', '-C', repo, 'rev-parse', '--git-path', 'hooks'],
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        return None
+    out = p.stdout.strip()
+    return out if os.path.isabs(out) else os.path.join(repo, out)
+
+
+def _git_hook_body(name, asf_path, product_name):
+    return ('#!/bin/sh\n'
+            '# written by asf hooks install — the redaction gate (F-0075)\n'
+            f'exec "{asf_path}" redact --{name} --product {product_name}\n')
+
+
+def is_git_hook_ours(text, name):
+    """A hook file is *installed* when it contains ``asf redact --<name>`` or
+    ``asf.redact --<name>`` in any form (§2.4) — the quoted command form :func:`_git_hook_body`
+    writes (``"<path>/asf" redact ...``), unquoted (``asf`` on ``PATH``), or the module form
+    (``python3 -m asf.redact``) an operator or another product might write instead."""
+    return bool(re.search(rf'''asf['" .]*redact\s+--{re.escape(name)}\b''', text or ''))
+
+
+def ensure_git_hooks(product, which=shutil.which):
+    """Returns ``(ok, detail)`` (D10, §2.4). Writes the redaction gate's ``pre-commit`` and
+    ``pre-push`` into :func:`git_hooks_dir` of each of ``product.repo_dir`` and
+    ``product.backlog_dir`` that is set. A hook file already there and already asf's
+    (:func:`is_git_hook_ours`) is left alone — running this twice changes nothing. One already
+    there and not asf's is left untouched too, and the call refuses with the ``NEEDS OPERATOR``
+    line naming the one line the operator adds; every other missing hook in the same call is
+    still written."""
+    asf_path = which('asf')
+    if not asf_path:
+        return False, 'NEEDS OPERATOR: asf is not on PATH — pipx install asf-factory'
+    asf_path = os.path.abspath(asf_path)
+    repos = [r for r in (product.repo_dir, product.backlog_dir) if r]
+    if not repos:
+        return True, 'no repo_dir or backlog_dir configured'
+    foreign = None
+    for repo in repos:
+        hooks_dir = git_hooks_dir(repo)
+        if hooks_dir is None:
+            return False, f'NEEDS OPERATOR: {repo} is not a git repo — asf hooks install cannot place its hooks there'
+        for name in GIT_HOOK_NAMES:
+            path = os.path.join(hooks_dir, name)
+            if os.path.isfile(path):
+                with open(path, encoding='utf-8') as f:
+                    text = f.read()
+                if not is_git_hook_ours(text, name) and foreign is None:
+                    foreign = (path, name)
+                continue
+            os.makedirs(hooks_dir, exist_ok=True)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(_git_hook_body(name, asf_path, product.name))
+            os.chmod(path, 0o755)
+    if foreign:
+        path, name = foreign
+        return False, (f'NEEDS OPERATOR: {path} is not asf\'s — add the line: '
+                       f'"{asf_path}" redact --{name} --product {product.name}')
+    return True, f'pre-commit, pre-push in {len(repos)} repos'
 
 
 def declared_hooks(rules_dir=RULES_DIR):
@@ -122,12 +202,18 @@ def _write_merged(path, hooks, asf_path, product):
 def install(product, rules_dir=RULES_DIR, which=shutil.which, cfg=None):
     """Returns ``(rc, message)``. Rule hooks go to the product repo's own settings when any rule
     declares one (PD5); the approvals hook always goes into every worker account's settings
-    (§2.3), product-less, regardless."""
+    (§2.3), product-less, regardless. :func:`ensure_git_hooks` runs first — no session or
+    operator is left with Claude Code hooks but no push gate — and its result is folded into the
+    returned message; a foreign git hook turns the whole call into rc 2 (§2.4)."""
     rule_hooks = declared_hooks(rules_dir)
     asf_path = which('asf')
     if not asf_path:
         return 2, 'NEEDS OPERATOR: asf is not on PATH — pipx install asf-factory'
     asf_path = os.path.abspath(asf_path)
+
+    git_ok, git_detail = ensure_git_hooks(product, which=which)
+    if not git_ok:
+        return 2, git_detail
 
     if rule_hooks and not product.repo_dir:
         return 2, f'NEEDS OPERATOR: product {product.name} has no repo_dir — set it in products/{product.name}.yaml'
@@ -140,7 +226,7 @@ def install(product, rules_dir=RULES_DIR, which=shutil.which, cfg=None):
         _write_merged(account_settings_path(account), [('PreToolUse', 'approvals')], asf_path, None)
 
     return 0, (f'hooks: {len(rule_hooks)} rule hooks in {repo_settings}; '
-               f'approvals in {len(accounts)} worker accounts')
+               f'approvals in {len(accounts)} worker accounts; {git_detail}')
 
 
 def cmd_hooks(args):

@@ -12,6 +12,12 @@ A seventh row, **approvals**, reads the product's approval matrix (:func:`asf.ap
 F-0031 §2.5): red when the matrix does not load, otherwise ok with what is legal but probably not
 meant — a class left to its default, a held class nothing can recognise, an empty amendable set.
 
+An eighth row, **redaction-hooks** (:func:`check_redaction_hooks`, F-0075 §2.4, T-0025), confirms
+the redaction gate's ``pre-commit`` and ``pre-push`` are in place in every repo the product
+configures — read-only, unlike ``asf hooks install`` (:func:`asf.hooks.ensure_git_hooks`), which
+writes the ones it finds missing; red names each missing or foreign one and the command that
+installs it.
+
 A product with no PR host — ``ci: {provider: none}`` — needs no ``repo_slug`` and no ``gh``.
 
 Exit 1 if any required row is red; optional rows that are unavailable print ``skip``, not red.
@@ -21,7 +27,7 @@ import shutil
 import subprocess
 import time
 
-from asf import approvals, env, schema, scheduler
+from asf import approvals, env, hooks, schema, scheduler
 from asf.workers import pool
 
 _SKIP_DIRS = {'.git', 'node_modules', '__pycache__', 'dist', 'build', '.next', 'vendor', 'venv',
@@ -180,6 +186,35 @@ def check_one_factory(cfg, product):
         return False, shown + more
     return True, (f'{len(names)} legacy tool name(s) checked, no second copy found'
                   + (' (repo skipped: it is the factory itself)' if own else ''))
+
+
+def check_redaction_hooks(product):
+    """(ok, detail) — the redaction gate's git hooks (F-0075, T-0025): every one of
+    ``product.repo_dir`` and ``product.backlog_dir`` that is set has an asf pre-commit and
+    pre-push in place. Read-only — unlike ``asf hooks install`` (:func:`asf.hooks.ensure_git_hooks`)
+    this never writes a hook file; a missing or foreign one stays red until the operator runs the
+    command the detail names."""
+    repos = [r for r in (product.repo_dir, product.backlog_dir) if r]
+    if not repos:
+        return True, 'no repo_dir or backlog_dir configured'
+    problems = []
+    for repo in repos:
+        hooks_dir = hooks.git_hooks_dir(repo)
+        if hooks_dir is None:
+            problems.append(f'{repo} is not a git repo')
+            continue
+        for name in hooks.GIT_HOOK_NAMES:
+            path = os.path.join(hooks_dir, name)
+            if not os.path.isfile(path):
+                problems.append(f'{path} missing')
+                continue
+            with open(path, encoding='utf-8') as f:
+                text = f.read()
+            if not hooks.is_git_hook_ours(text, name):
+                problems.append(f'{path} foreign')
+    if problems:
+        return False, '; '.join(problems) + f' — asf hooks install --product {product.name}'
+    return True, f'pre-commit, pre-push in {len(repos)} repos'
 
 
 # ---- the capacity row --------------------------------------------------------
@@ -402,6 +437,8 @@ def run(product_name):
     rows.append(('one-factory', True, ok, detail))
     ok, detail = approvals.check_doctor(cfg, product)
     rows.append(('approvals', True, ok, detail))
+    ok, detail = check_redaction_hooks(product)
+    rows.append(('redaction-hooks', True, ok, detail))
     for ok, detail in check_capacity(cfg, product):
         rows.append(('capacity', False, ok, detail))
     return rows
