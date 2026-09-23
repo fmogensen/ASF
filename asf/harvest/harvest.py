@@ -131,6 +131,9 @@ def gate_timeout(conv):
         return int(DEFAULTS.gate_timeout_s)
 
 
+TIMED_OUT = 'gate timed out'
+
+
 def timed_out_line(cmd, timeout):
     return f'gate timed out after {timeout} s: {" ".join(cmd)}'
 
@@ -856,6 +859,9 @@ def hold_with_correction(state_dir, branch, record, kind, text, out):
     what goes on the run (the failing output as ``correction``, the rounds over every session of
     the item, the cap the feeder switches an ADJUDICATE row on at) and what to print."""
     job = record.get('job') or branch
+    if kind == 'gate' and text.startswith(TIMED_OUT):  # B-0082: a clock is not a defect — no round,
+        out(f'{TIMED_OUT} {branch}: {text} — retried next tick')  # no correction, eligible again
+        return 'timed-out'
     fields, line = lifecycle.hold(sessions_path(state_dir), dict(record, branch=branch, job=job),
                                   kind, text, now_iso())
     mark_session(state_dir, job, **fields)
