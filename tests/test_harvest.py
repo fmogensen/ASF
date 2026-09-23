@@ -620,11 +620,29 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertEqual(results, {'worker/add-thing': 'landed'})
         self.assertTrue(self.record('worker/add-thing').get('harvested'))
 
-    def test_unfinished_or_red_session_is_not_attempted(self):
+    def test_b0079_a_red_session_does_not_hide_the_branch_it_pushed(self):
+        # was: `unfinished_or_red_session_is_not_attempted`. The run's verdict is not the test
+        # (B-0079) — five branches sat ahead of the trunk for two days while `harvest: none to
+        # land` printed every tick, because their sessions had ended `failed: not pushed` with
+        # the commits already on origin. The gate and the naming check decide, as for any branch.
         self.push_lane('fix/B-0002', [('fix(B-0002): x', {'x.txt': 'x\n'})])
         self.session('fix-bug-b-0002', 'B-0002', 'fix/B-0002', rc=1)
+        results, _lines = self.harvest(self.product())
+        self.assertEqual(results, {'fix/B-0002': 'landed'})
+
+    def test_b0079_a_branch_awaiting_its_correction_is_left_to_that_round(self):
+        self.push_lane('fix/B-0004', [('fix(B-0004): x', {'y.txt': 'y\n'})])
+        self.session('fix-bug-b-0004', 'B-0004', 'fix/B-0004', rc=1)
+        self.record('fix/B-0004')  # the run exists; now give it an unanswered correction
+        import json as _json, os as _os
+        path = _os.path.join(self.state_dir, 'sessions.jsonl')
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(_json.dumps({'job': 'fix-bug-b-0004',
+                                 'correction': {'text': 'commit and push what you have',
+                                                'at': '2026-09-23T09:00:00Z'}}) + '\n')
         before = self.origin_main()
-        self.assertEqual(self.harvest(self.product()), ({}, []))
+        results, _lines = self.harvest(self.product())
+        self.assertEqual(results, {})
         self.assertEqual(self.origin_main(), before)
 
     def test_commit_not_naming_the_item_holds(self):
@@ -727,13 +745,12 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertFalse(self.origin_has('fix/B-0001'))
         self.assertTrue(self.origin_has('archive/fix/B-0002'))
         self.assertTrue(self.record('fix/B-0001').get('harvested'))
-        # a live run's branch is never touched, and an unfinished run with real work is not gated
-        self.push_lane('fix/B-0003', [('fix(B-0003): live work', {'live.txt': 'live\n'})])
+        # …and under B-0079 an unfinished run with real work is gated like any other: the branch
+        # is what is judged, never the sentence the session wrote about itself
+        self.push_lane('fix/B-0003', [('fix(B-0003): more work', {'more.txt': 'more\n'})])
         self.session('fix-bug-b-0003', 'B-0003', 'fix/B-0003', rc=1)
-        before = self.origin_main()
         results = harvest.run_product_harvest(self.product(), self.state_dir, out=lines.append, items=items)
-        self.assertEqual(results, {})
-        self.assertEqual(self.origin_main(), before)
+        self.assertEqual(results, {'fix/B-0003': 'landed'})
 
     def test_b0065_a_removed_cards_branch_is_archived_whatever_its_type_and_state(self):
         # the groom marked three cards `removed: superseded …`; items_of() drops removed cards,
@@ -830,7 +847,14 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertIn('test_red_gate', rec['correction']['text'])
         self.assertTrue(rec['correction']['at'])
         self.assertFalse(rec.get('harvested'))
-        # a second red tick is round 2
+        # the next tick does NOT re-gate it (B-0079): the correction has not been answered, so
+        # the branch belongs to the round to come. Re-gating an untouched branch bumped the round
+        # with no session having tried anything, and marched the item to adjudication for nothing.
+        _results, lines = self.harvest(self.product())
+        self.assertEqual(lines, [])
+        self.assertEqual(self.record('fix/B-0001')['rounds'], 1)
+        # once a session has answered — a new run on the branch — a red gate is round 2
+        self.session('correct-b-0001', 'B-0001', 'fix/B-0001')
         _results, lines = self.harvest(self.product())
         self.assertTrue(lines[-1].endswith('(round 2)'), lines)
         self.assertEqual(self.record('fix/B-0001')['rounds'], 2)
@@ -845,10 +869,17 @@ class ProductHarvestTests(unittest.TestCase):
                                        {'checks/test_fx.py': RED_TEST})])
         self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
         product = self.product()
+        # each round costs a session: the gate holds, a session answers, the gate holds again.
+        # Ticks in between do nothing (B-0079) — an unanswered correction owns the branch.
         for expected_round in (1, 2, 3):
             _results, lines = self.harvest(product)
             self.assertTrue(lines[-1].endswith(f'(round {expected_round})'), lines)
             self.assertEqual(self.record('fix/B-0001')['rounds'], expected_round)
+            if expected_round < 3:
+                # the quiet tick between rounds: an unanswered correction owns the branch, so
+                # nothing is gated until a session has answered it (B-0079)
+                self.assertEqual(self.harvest(product)[1], [])
+                self.session(f'correct-b-0001-r{expected_round}', 'B-0001', 'fix/B-0001')
 
         # capped: the round no longer climbs, and the message names the adjudicate row instead
         _results, lines = self.harvest(product)
@@ -1124,3 +1155,36 @@ class RulesSourceMergeTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class EveryBranchAheadIsOwned(unittest.TestCase):
+    """B-0079: a branch with commits ahead of the trunk that no live run owns is work, whatever
+    the session that made it said about itself. Sessions end `failed: empty branch` or
+    `failed: not pushed` with their commits already on origin, and those branches were invisible
+    to harvest for ever while `harvest: none to land` printed every tick."""
+
+    def test_a_failed_run_does_not_hide_its_branch(self):
+        for reason in ('failed: empty branch: nothing to land',
+                       'failed: not pushed: 3 uncommitted file(s), 0 unpushed commit(s)',
+                       'failed'):
+            self.assertTrue(harvest.is_eligible({'ended': 'x', 'end_reason': reason}), reason)
+
+    def test_a_finished_run_is_still_eligible(self):
+        self.assertTrue(harvest.is_eligible({'ended': 'x', 'end_reason': 'finished'}))
+
+    def test_a_live_run_is_never_gated(self):
+        self.assertFalse(harvest.is_eligible({'started': 'x', 'pid': os.getpid()}))
+
+    def test_a_landed_run_is_not_gated_again(self):
+        self.assertFalse(harvest.is_eligible({'ended': 'x', 'harvested': 'abc1234'}))
+
+    def test_the_pr_lane_keeps_its_branch(self):
+        self.assertFalse(harvest.is_eligible({'ended': 'x', 'harvest': 'pr'}))
+
+    def test_a_branch_waiting_for_its_correction_is_left_alone(self):
+        run = {'ended': 'x', 'end_reason': 'failed: not pushed',
+               'correction': {'text': 'commit and push what you have', 'at': '2026-09-23T09:00:00Z'}}
+        self.assertFalse(harvest.is_eligible(run))
+
+    def test_no_record_at_all_is_not_gated(self):
+        self.assertFalse(harvest.is_eligible(None))

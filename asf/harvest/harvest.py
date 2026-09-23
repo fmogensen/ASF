@@ -163,9 +163,25 @@ def read_sessions(state_dir):
 
 
 def is_eligible(record):
-    """What harvest may gate: :func:`asf.workers.lifecycle.eligible` — ended ``finished`` (which
-    health writes only for a pushed branch), not landed, not handed to the PR lane."""
-    return lifecycle.eligible(record)
+    """What harvest may gate. The run's own verdict is *not* the test (B-0079): a branch with
+    commits ahead of the trunk that no live run owns is work, whatever the session that made it
+    said about itself. Sessions end `failed: empty branch` or `failed: not pushed` with their
+    commits already on origin — the ledger read the tree a moment too early, or the run was
+    superseded — and those branches were then invisible for ever, while `harvest: none to land`
+    printed every tick.
+
+    So: not live, not landed, not handed to the PR lane. The caller has already established that
+    the branch is ahead of the trunk; the gate and the lane refusal decide the rest, exactly as
+    they do for a branch whose session ended cleanly."""
+    return (record is not None and not lifecycle.is_live(record)
+            and not lifecycle.landed(record) and record.get('harvest') != 'pr'
+            # …except a branch already sent back for a correction that no session has answered
+            # and is still below the round cap: that one is owned by the round to come, not by
+            # the gate (D-0048). Re-gating an untouched branch every tick bumped its round with
+            # no session having tried anything, and marched items to adjudication for nothing.
+            # At the cap the item belongs to the adjudicate row, and the hold keeps printing.
+            and not (lifecycle.pending_correction(record)
+                     and (record.get('rounds') or 0) < lifecycle.ROUND_CAP))
 
 
 def mark_harvested(state_dir, job, sha):
