@@ -61,17 +61,66 @@ def read_meta(root, folder, id_):
 
 
 class ProductionIsTheProductsOwn(unittest.TestCase):
-    """B-0077: a product with no deploy configured has the trunk as its production — otherwise no
-    Feature of a package, library or tool could ever leave `Resolved`."""
+    """B-0077/B-0078: what "in production" means is the product's own. A product that configures
+    a deploy sha waits for the merge to reach it and for the operator's tick; a product that
+    configures none — a package, a library, a tool — has its trunk as production, so a green
+    trunk is the close. Without this no Feature of such a product could leave `Resolved`."""
 
-    def test_no_deploy_closes_on_a_green_trunk(self):
-        from asf.evidence import evidence
-        # the ingest passes True/True when there is no prod sha; the rule itself is unchanged
-        self.assertEqual(evidence.feature_state(True, True, True, True, True), 'Closed')
+    def setUp(self):
+        self.root = make_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
-    def test_a_deploy_still_gates_the_close(self):
-        from asf.evidence import evidence
-        self.assertEqual(evidence.feature_state(True, True, True, False, False), 'Resolved')
+    def run_ingest(self, ev):
+        with mock.patch.object(ingest.evidence, 'load', return_value=ev):
+            return ingest.cmd_ingest(types.SimpleNamespace(fresh=False), self.root)
+
+    def landed(self, iid, sha):
+        return {iid: {'branches': [], 'open_prs': [], 'commit': sha, 'pr': None, 'green': True}}
+
+    def feature_with_a_closed_task(self):
+        write(self.root, 'F-0001', 'feature', 'The record', 'features')
+        write(self.root, 'T-0001', 'task', 'Write it', 'tasks', parent='F-0001')
+
+    def test_a_feature_whose_tasks_landed_closes_when_nothing_is_deployed(self):
+        self.feature_with_a_closed_task()
+        ev = dict(EMPTY_EV, ci=True, ids={**self.landed('T-0001', 'a' * 40),
+                                          **self.landed('F-0001', 'b' * 40)})
+        self.assertEqual(self.run_ingest(ev), 0)
+        meta, _b = read_meta(self.root, 'features', 'F-0001')
+        self.assertEqual(meta['state'], 'Closed')
+
+    def test_a_deploy_still_gates_that_close(self):
+        self.feature_with_a_closed_task()
+        ev = dict(EMPTY_EV, ci=True, prod_sha='c' * 40,
+                  ids={**self.landed('T-0001', 'a' * 40), **self.landed('F-0001', 'b' * 40)})
+        self.assertEqual(self.run_ingest(ev), 0)
+        meta, _b = read_meta(self.root, 'features', 'F-0001')
+        self.assertEqual(meta['state'], 'Resolved')
+
+    def test_a_feature_with_no_tasks_closes_on_a_green_trunk(self):
+        # B-0078: ingest threw away the state it had just derived and hardcoded `Resolved`
+        write(self.root, 'F-0002', 'feature', 'One property test per failure class', 'features')
+        ev = dict(EMPTY_EV, ci=True, ids=self.landed('F-0002', 'd' * 40))
+        self.assertEqual(self.run_ingest(ev), 0)
+        meta, _b = read_meta(self.root, 'features', 'F-0002')
+        self.assertEqual(meta['state'], 'Closed')
+        self.assertEqual(meta['stage'], 'landed')
+
+    def test_a_feature_with_no_tasks_waits_for_the_deploy_when_there_is_one(self):
+        write(self.root, 'F-0003', 'feature', 'The checkout page', 'features')
+        ev = dict(EMPTY_EV, ci=True, prod_sha='e' * 40, ids=self.landed('F-0003', 'd' * 40))
+        self.assertEqual(self.run_ingest(ev), 0)
+        meta, _b = read_meta(self.root, 'features', 'F-0003')
+        self.assertEqual(meta['state'], 'Resolved')
+
+    def test_the_ladder_says_landed_not_on_prod_when_nothing_is_deployed(self):
+        # "on prod" names a deployment; a product that deploys nothing has none to name
+        self.feature_with_a_closed_task()
+        ev = dict(EMPTY_EV, ci=True, ids={**self.landed('T-0001', 'a' * 40),
+                                          **self.landed('F-0001', 'b' * 40)})
+        self.assertEqual(self.run_ingest(ev), 0)
+        meta, _b = read_meta(self.root, 'features', 'F-0001')
+        self.assertEqual(meta['stage'], 'landed')
 
 
 class LandingOutranksThePlan(unittest.TestCase):

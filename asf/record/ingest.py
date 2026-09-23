@@ -345,7 +345,12 @@ def cmd_ingest(args, root):
             state, lines = match_ids(iid, ev)
             named = bool(((ev.get('ids') or {}).get(iid) or {}).get('commit'))
             if kids_closed or named:
-                new_state[iid] = 'Resolved'
+                # …and it is Closed, not merely Resolved, when the product deploys nothing
+                # (B-0078): the trunk IS production there (B-0077), so children Closed or a
+                # green commit naming it is the whole of the evidence. A product that
+                # configures `deploy_sha` still waits for the deploy and the operator's tick.
+                closed = bool(kids_closed) or state == 'Closed'
+                new_state[iid] = 'Resolved' if ev.get('prod_sha') or not closed else 'Closed'
                 stage_val[iid] = 'landed'
                 lines = (lines if named else []) + (
                     [f"{len(kids)}/{len(kids)} children Closed"] if kids_closed else [])
@@ -364,8 +369,12 @@ def cmd_ingest(args, root):
         if not child_ids and ((ev.get('ids') or {}).get(iid) or {}).get('commit'):
             # no Tasks to judge by, and a code commit on main names it: landed, as for a
             # Feature the documents never matched (a document-lane commit never counts, B-0059)
+            # …and it closes on that commit when the product deploys nothing, exactly as a Bug
+            # does (B-0078): for such a product the trunk IS production (B-0077), so the state
+            # `match_ids` derived — `Closed` once CI is green there — is the state. A product
+            # that configures `deploy_sha` still waits for the deploy and the operator's tick.
             _state, lines = match_ids(iid, ev)
-            new_state[iid] = 'Resolved'
+            new_state[iid] = 'Resolved' if ev.get('prod_sha') else (_state or 'Resolved')
             stage_val[iid] = 'landed'
             ev_lines[iid] = lines
             continue

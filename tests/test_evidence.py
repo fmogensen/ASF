@@ -586,7 +586,8 @@ class IngestIdEvidenceTests(unittest.TestCase):
         self.r.ingest(self.r.discover(self.r.product()))
         m = self.states()
         self.assertEqual(m["F-0005"]["stage"], "landed")
-        self.assertEqual(m["F-0005"]["state"], "Resolved")
+        # the fixture product deploys nothing, so its trunk is its production (B-0077/B-0078)
+        self.assertEqual(m["F-0005"]["state"], "Closed")
         self.assertIn("1/1 children Closed", m["F-0005"]["evidence"])
         # F-0007's children are not all Closed and no commit names it: still a card
         self.assertEqual(m["F-0007"]["stage"], "card")
