@@ -287,6 +287,44 @@ class HookTest(unittest.TestCase):
         self.assertEqual(rc, 2, out)
         self.assertEqual(out, 'approvals hook failed: boom — refused\n')
 
+    def test_install_writes_the_entry_into_every_worker_account(self):
+        acct_a = os.path.join(self.tmp, 'accounts', 'a')
+        acct_b = os.path.join(self.tmp, 'accounts', 'b')
+        os.makedirs(acct_a)
+        settings_a = os.path.join(acct_a, 'settings.json')
+        settings_b = os.path.join(acct_b, 'settings.json')
+        with open(settings_a, 'w') as f:
+            json.dump({'permissions': {'allow': ['Bash(ls)']}}, f)
+        cfg = {'worker_pool': {'accounts': [
+            {'name': 'a', 'config_dir': acct_a},
+            {'name': 'b', 'config_dir': acct_b},
+        ]}}
+        product = env.load_product('demo')
+        rc, msg = hooks.install(product, rules_dir=os.path.join(self.tmp, 'none'),
+                                which=lambda n: '/opt/bin/asf', cfg=cfg)
+        self.assertEqual(rc, 0, msg)
+        self.assertIn('approvals in 2 worker accounts', msg)
+
+        entry = {'matcher': '*', 'hooks': [{'type': 'command', 'command': '/opt/bin/asf hook approvals'}]}
+        with open(settings_a) as f:
+            data_a = json.load(f)
+        self.assertEqual(data_a['permissions'], {'allow': ['Bash(ls)']})
+        self.assertEqual(data_a['hooks']['PreToolUse'], [entry])
+        with open(settings_b) as f:
+            self.assertEqual(json.load(f)['hooks']['PreToolUse'], [entry])
+
+        with open(settings_a, 'rb') as f:
+            before_a = f.read()
+        with open(settings_b, 'rb') as f:
+            before_b = f.read()
+        rc, msg = hooks.install(product, rules_dir=os.path.join(self.tmp, 'none'),
+                                which=lambda n: '/opt/bin/asf', cfg=cfg)
+        self.assertEqual(rc, 0, msg)
+        with open(settings_a, 'rb') as f:
+            self.assertEqual(f.read(), before_a)
+        with open(settings_b, 'rb') as f:
+            self.assertEqual(f.read(), before_b)
+
 
 def _product_yaml(extra=''):
     """A ``Product`` from the product file a person would write — the loader's own parse, so a

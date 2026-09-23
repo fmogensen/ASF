@@ -442,6 +442,7 @@ class HooksTest(HomeCase):
         self.settings = os.path.join(self.repo, '.claude', 'settings.json')
         self.product = env.Product('sample', {'repo_dir': self.repo})
         self.which = lambda name: '/opt/bin/asf'
+        self.write(env.config_path(), '')  # an empty config.yaml: no real account is touched
 
     def read(self):
         with open(self.settings) as f:
@@ -453,7 +454,8 @@ class HooksTest(HomeCase):
 
     def test_no_rules_declare_a_hook(self):
         rc, msg = hooks.install(self.product, rules_dir=os.path.join(self.tmp, 'none'), which=self.which)
-        self.assertEqual((rc, msg), (0, 'hooks: 0 rules declare a hook'))
+        self.assertEqual((rc, msg),
+                         (0, f'hooks: 0 rule hooks in {self.settings}; approvals in 0 worker accounts'))
         self.assertFalse(os.path.exists(self.settings))
 
     def test_merge_is_idempotent_and_keeps_unrelated_keys(self):
@@ -463,6 +465,7 @@ class HooksTest(HomeCase):
         }))
         rc, msg = hooks.install(self.product, rules_dir=self.rules, which=self.which)
         self.assertEqual(rc, 0, msg)
+        self.assertEqual(msg, f'hooks: 2 rule hooks in {self.settings}; approvals in 0 worker accounts')
         first = self.read()
         self.assertEqual(first['permissions'], {'allow': ['Bash(ls)']})
         pre = first['hooks']['PreToolUse']
@@ -470,9 +473,12 @@ class HooksTest(HomeCase):
         self.assertEqual(pre[1]['hooks'][0]['command'], '/opt/bin/asf hook r0001 --product sample')
         self.assertEqual(first['hooks']['Stop'][0]['hooks'][0]['command'],
                          '/opt/bin/asf hook r0001 --product sample')
+        with open(self.settings, 'rb') as f:
+            before = f.read()
         rc, msg = hooks.install(self.product, rules_dir=self.rules, which=self.which)
-        self.assertIn('already installed', msg)
-        self.assertEqual(self.read(), first)
+        self.assertEqual(rc, 0, msg)
+        with open(self.settings, 'rb') as f:
+            self.assertEqual(f.read(), before)
 
     def test_a_moved_asf_replaces_its_own_entry(self):
         hooks.install(self.product, rules_dir=self.rules, which=self.which)

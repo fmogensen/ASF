@@ -7,6 +7,11 @@ check-script form (``R-0042`` → ``r0042``), and its command is ``<absolute asf
 --product <p>`` with ``asf`` resolved from PATH — never a checkout. The merge is idempotent and
 leaves every unrelated key alone; an entry that differs only in the ``asf`` path is replaced.
 
+It also merges the built-in ``approvals`` hook, product-less, into every worker account's own
+*user* settings file (:func:`account_settings_path`) — unconditionally, whether or not any rule
+declares a hook (F-0031 §2.3, PD5): the approvals matrix binds every session, not just those in a
+product repo with a rule card.
+
 ``asf hook <name>`` runs a hook built into ``asf`` when :data:`BUILTIN` names it (``approvals``,
 :func:`asf.approvals.run_hook`), else ``tools/checks/<name>.sh`` (the record's, then the cwd's)
 with the hook's stdin, exiting 0 when there is no such script.
@@ -19,6 +24,7 @@ import subprocess
 import sys
 
 from asf import env
+from asf.workers import pool
 
 EVENTS = ('PreToolUse', 'PostToolUse', 'Stop')
 RULES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'rules')
@@ -55,10 +61,14 @@ def declared_hooks(rules_dir=RULES_DIR):
 
 
 def hook_command(asf_path, name, product):
+    if product is None:
+        return f'{asf_path} hook {name}'
     return f'{asf_path} hook {name} --product {product}'
 
 
 def _is_ours(command, name, product):
+    if product is None:
+        return bool(re.search(rf'(^|/)asf hook {re.escape(name)}$', command or ''))
     return bool(re.search(rf'(^|/)asf hook {re.escape(name)} --product {re.escape(product)}$', command or ''))
 
 
@@ -86,28 +96,51 @@ def merge(settings, hooks, asf_path, product):
     return settings
 
 
-def install(product, rules_dir=RULES_DIR, which=shutil.which):
-    """Returns ``(rc, message)``."""
-    hooks = declared_hooks(rules_dir)
-    if not hooks:
-        return 0, 'hooks: 0 rules declare a hook'
-    asf_path = which('asf')
-    if not asf_path:
-        return 2, 'NEEDS OPERATOR: asf is not on PATH — pipx install asf-factory'
-    if not product.repo_dir:
-        return 2, f'NEEDS OPERATOR: product {product.name} has no repo_dir — set it in products/{product.name}.yaml'
-    path = os.path.join(product.repo_dir, '.claude', 'settings.json')
+def account_settings_path(account, home=None):
+    """The runtime's *user* settings file an account's sessions read (PD4): ``CLAUDE_CONFIG_DIR``
+    replaces the ``~/.claude`` directory itself, so a ``config_dir`` account's file sits directly
+    under it; otherwise it is the account's own ``home``, else ``home`` or the operator's."""
+    if account.config_dir:
+        return os.path.join(os.path.expanduser(account.config_dir), 'settings.json')
+    base = account.home or home or os.path.expanduser('~')
+    return os.path.join(os.path.expanduser(base), '.claude', 'settings.json')
+
+
+def _write_merged(path, hooks, asf_path, product):
     current = {}
     if os.path.isfile(path):
         with open(path, encoding='utf-8') as f:
             current = json.load(f)
-    merged = merge(current, hooks, os.path.abspath(asf_path), product.name)
+    merged = merge(current, hooks, asf_path, product)
     if merged == current:
-        return 0, f'hooks: {len(hooks)} already installed in {path}'
+        return
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, 'w', encoding='utf-8') as f:
         f.write(json.dumps(merged, indent=2) + '\n')
-    return 0, f'hooks: {len(hooks)} installed in {path}'
+
+
+def install(product, rules_dir=RULES_DIR, which=shutil.which, cfg=None):
+    """Returns ``(rc, message)``. Rule hooks go to the product repo's own settings when any rule
+    declares one (PD5); the approvals hook always goes into every worker account's settings
+    (§2.3), product-less, regardless."""
+    rule_hooks = declared_hooks(rules_dir)
+    asf_path = which('asf')
+    if not asf_path:
+        return 2, 'NEEDS OPERATOR: asf is not on PATH — pipx install asf-factory'
+    asf_path = os.path.abspath(asf_path)
+
+    if rule_hooks and not product.repo_dir:
+        return 2, f'NEEDS OPERATOR: product {product.name} has no repo_dir — set it in products/{product.name}.yaml'
+    repo_settings = os.path.join(product.repo_dir or '(no repo_dir)', '.claude', 'settings.json')
+    if rule_hooks:
+        _write_merged(repo_settings, rule_hooks, asf_path, product.name)
+
+    accounts = pool.accounts_from_config(cfg or env.load_config())
+    for account in accounts:
+        _write_merged(account_settings_path(account), [('PreToolUse', 'approvals')], asf_path, None)
+
+    return 0, (f'hooks: {len(rule_hooks)} rule hooks in {repo_settings}; '
+               f'approvals in {len(accounts)} worker accounts')
 
 
 def cmd_hooks(args):
