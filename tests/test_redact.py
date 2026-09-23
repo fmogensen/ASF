@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from asf import env, redact
 
@@ -376,3 +377,35 @@ class LedgerTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class EnvSecretEdges(unittest.TestCase):
+    """B-0081: a false positive here blocks every commit and every push, so a variable named for
+    git's own config injection, or for a location, is not a credential — and neither is a value
+    that is a path or a dotted identifier, whatever the variable is called."""
+
+    def test_git_config_injection_is_not_a_secret(self):
+        self.assertFalse(redact.env_value_is_secret('GIT_CONFIG_KEY_0', 'init.defaultBranch'))
+        self.assertFalse(redact.env_value_is_secret('GIT_CONFIG_VALUE_0', 'a-branch-name-here'))
+        self.assertFalse(redact.env_value_is_secret('GIT_CONFIG_COUNT', '000000000001'))
+
+    def test_a_location_is_not_a_credential(self):
+        for name in ('SSH_KEY_PATH', 'TOKEN_FILE', 'CREDENTIAL_DIR'):
+            self.assertFalse(redact.env_value_is_secret(name, '/Users/x/.ssh/id_rsa'), name)
+
+    def test_a_dotted_identifier_is_not_a_credential(self):
+        self.assertFalse(redact.env_value_is_secret('MY_SECRET', 'some.dotted.identifier'))
+
+    def test_a_real_credential_is_still_caught(self):
+        self.assertTrue(redact.env_value_is_secret('AWS_SECRET_ACCESS_KEY', 'AKIA' + 'Q' * 16))
+        self.assertTrue(redact.env_value_is_secret('GITHUB_TOKEN', 'ghp_' + 'a' * 36))
+        self.assertTrue(redact.env_value_is_secret('API_KEY', 'sk-' + 'b' * 32))
+
+    def test_a_short_value_is_never_a_pattern(self):
+        self.assertFalse(redact.env_value_is_secret('API_KEY', 'short'))
+
+    def test_the_tracked_tree_scans_clean_under_the_hermetic_env(self):
+        # the exact shape that fired: the suite runs with GIT_CONFIG_KEY_0 set
+        with mock.patch.dict(os.environ, {'GIT_CONFIG_KEY_0': 'init.defaultBranch'}):
+            pats = redact.patterns(environ=os.environ)
+        self.assertFalse([p for p in pats if p.source == 'env:GIT_CONFIG_KEY_0'])

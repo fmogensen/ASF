@@ -78,6 +78,26 @@ SECRET_RULES = (
 #: an environment variable whose name matches this is a secret when its value is long enough (D6)
 ENV_SECRET_NAME_RE = re.compile(r'TOKEN|SECRET|KEY|PASSWORD|PASS|CREDENTIAL', re.IGNORECASE)
 ENV_SECRET_MIN_LEN = 12
+#: …unless the name is one of git's own config-injection variables, or names a location rather
+#: than a credential (B-0081: `GIT_CONFIG_KEY_0=init.defaultBranch` flagged every line of the
+#: repo that mentions `init.defaultBranch`)
+ENV_NAME_EXEMPT_RE = re.compile(r'^GIT_CONFIG_(KEY|VALUE)_\d+$|^GIT_CONFIG_COUNT$'
+                                r'|_(PATH|FILE|DIR)$', re.IGNORECASE)
+#: …and whatever the variable is called, a value that is a path or a dotted identifier is not a
+#: secret. A credential does not look like `init.defaultBranch` or `/etc/ssl/private`.
+ENV_VALUE_BENIGN_RE = re.compile(r'^(?:[~.]?/|[A-Za-z]:\\)'
+                                 r'|^[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)+$')
+
+
+def env_value_is_secret(var_name, value):
+    """Is this environment variable's value worth searching for? The name must look like a
+    credential's and not be exempt, and the value must be long enough and not obviously benign
+    (B-0081). A false positive here blocks every commit and every push, so the edges matter."""
+    if not value or len(value) < ENV_SECRET_MIN_LEN:
+        return False
+    if ENV_NAME_EXEMPT_RE.search(var_name) or not ENV_SECRET_NAME_RE.search(var_name):
+        return False
+    return not ENV_VALUE_BENIGN_RE.search(value)
 
 
 def _names_from_lines(text):
@@ -139,7 +159,7 @@ def patterns(repo=None, cfg=None, environ=None, extra=()):
         pats.append(Pattern('secret', f'rule:{rule_id}', re.compile(rule_re, re.IGNORECASE)))
 
     for var_name, value in environ.items():
-        if value and len(value) >= ENV_SECRET_MIN_LEN and ENV_SECRET_NAME_RE.search(var_name):
+        if env_value_is_secret(var_name, value):
             pats.append(Pattern('secret', f'env:{var_name}',
                                  re.compile(re.escape(value), re.IGNORECASE)))
 
