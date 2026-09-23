@@ -1177,6 +1177,25 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
     return results
 
 
+def lock_path(state_dir):
+    return os.path.join(state_dir, 'harvest.lock')
+
+
+def try_lock(state_dir):
+    """The product's harvest lock (an open file holding ``flock``), or None when another harvest
+    holds it. Every product harvest runs under it — the tick's background run and a hand-run
+    ``asf harvest`` alike — so two gates never run at once. It dies with its process."""
+    import fcntl
+    os.makedirs(state_dir, exist_ok=True)
+    f = open(lock_path(state_dir), 'a')
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return f
+    except OSError:
+        f.close()
+        return None
+
+
 def record_items(root):
     """``{id: card}`` from the record at ``root`` — removed cards included, since a removed
     card's branch is exactly what :func:`superseded_by` must see (B-0065) — or None when the
@@ -1211,7 +1230,14 @@ def main(argv=None):
     if not product.repo_dir:
         print(f'harvest: product {product.name} has no repo_dir — nothing to harvest')
         return 0
-    run_product_harvest(product, state_dir, args.dry_run)
+    lock = try_lock(os.path.abspath(state_dir))
+    if lock is None:
+        print(f'harvest: another harvest of {product.name} is running — skipped')
+        return 0
+    try:
+        run_product_harvest(product, state_dir, args.dry_run)
+    finally:
+        lock.close()
     return 0
 
 

@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import io
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -30,10 +31,18 @@ def _args(**kw):
     return argparse.Namespace(**base)
 
 
+TIMING_RE = re.compile(r'^(\[step:[a-z]+\]|tick: total) \d+\.\ds$')
+
+
+def untimed(out):
+    """``out`` without the per-step timing lines and the tick's total."""
+    return ''.join(l for l in out.splitlines(True) if not TIMING_RE.match(l.rstrip('\n')))
+
+
 def steps_only(out):
-    """A tick's stdout without the two summary blocks — for the assertions whose subject is
-    the step log (F-0078)."""
-    return out.split('\n\nIN FLIGHT')[0] + '\n'
+    """A tick's stdout without the two summary blocks and the per-step timing lines — for the
+    assertions whose subject is the step log (F-0078)."""
+    return untimed(out.split('\n\nIN FLIGHT')[0] + '\n')
 
 
 def _tree_digest(path):
@@ -465,7 +474,7 @@ class LegacyStepTests(TickTestCase):
     def test_steps_subset_runs_only_those_and_in_manifest_order(self):
         rc, out = self.run_tick(steps='health,record')
         self.assertEqual(rc, 0)
-        self.assertEqual(out.splitlines()[0], '[command:health] hi')
+        self.assertEqual(untimed(out).splitlines()[0], '[command:health] hi')
         # the one commit comes last: after every step, over the state and the tick line together
         self.assertEqual(steps_only(out).splitlines()[-1], f'tick: state committed and pushed ({self.record_path()})')
         self.assertNotIn('daily', out)
@@ -537,7 +546,7 @@ class SummaryTests(TickTestCase):
     def test_every_tick_ends_with_the_two_tables(self):
         rc, out = self.run_tick(steps='record')
         self.assertEqual(rc, 0)
-        lines = out.rstrip('\n').split('\n')
+        lines = untimed(out).rstrip('\n').split('\n')
         self.assertEqual(lines[0], f'tick: state committed and pushed ({self.record_path()})')
         self.assertEqual(lines[1:3], ['', 'IN FLIGHT — none'])
         self.assertTrue(lines[-1].startswith('DONE since '), lines[-1])
@@ -564,6 +573,26 @@ class SummaryTests(TickTestCase):
             rc, out = self.run_tick(steps='record')
         self.assertEqual(rc, 0)
         self.assertEqual(out.rstrip('\n').split('\n')[-1], 'tick: summary not rendered (boom)')
+
+
+class StepTimingTests(TickTestCase):
+    """Each step names its seconds as it ends, and the tick its total: a slow step is visible in
+    the log while the tick still runs, not inferred after."""
+
+    def test_each_step_prints_its_seconds_at_its_end_and_the_tick_its_total(self):
+        self.write_product("steps:\n  health: python3 -c 'print(1)'\n  batch: off\n")
+        rc, out = self.run_tick(steps='record,health')
+        self.assertEqual(rc, 0)
+        lines = out.splitlines()
+        timings = [l for l in lines if TIMING_RE.match(l)]
+        self.assertEqual([l.split(' ')[0] for l in timings], ['[step:record]', '[step:health]', 'tick:'])
+        self.assertLess(lines.index(timings[0]), lines.index('[command:health] 1'))
+        self.assertLess(lines.index('[command:health] 1'), lines.index(timings[1]))
+        self.assertLess(lines.index(timings[2]), lines.index('IN FLIGHT — none'))
+
+    def test_the_line_shape(self):
+        self.assertEqual(tick.step_timing_line('wave', 3.14159), '[step:wave] 3.1s')
+        self.assertEqual(tick.total_line(12), 'tick: total 12.0s')
 
 
 class TickLockTests(TickTestCase):

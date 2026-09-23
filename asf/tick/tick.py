@@ -290,6 +290,7 @@ def _run_steps(args, product, ctx, rows, chosen):
     rc = 0
     ran = []
     resolved = None
+    started = time.monotonic()
     for step, owner, command in rows:
         if owner == 'off':
             print(f"tick: step {step} off (another job runs it)")
@@ -314,6 +315,7 @@ def _run_steps(args, product, ctx, rows, chosen):
                 if step_rc:
                     print(f"tick: step {step} exited {step_rc}")
         ran.append({'step': step, 'ok': not step_rc, 'seconds': round(time.monotonic() - t0, 1)})
+        print(step_timing_line(step, ran[-1]['seconds']))
         if step == 'daily' and step_rc == 0:
             steps.write_daily_stamp(product)
         rc = rc or (1 if step_rc else 0)
@@ -324,10 +326,21 @@ def _run_steps(args, product, ctx, rows, chosen):
             break
     if ran:
         rc = finish(ctx, ran) or rc
+    print(total_line(time.monotonic() - started))
     if ctx.stale_reason:
         print(f"RECORD STALE — {ctx.stale_reason}\n")
     summary.run(ctx, chosen)
     return rc
+
+
+def step_timing_line(step, seconds):
+    """``[step:<name>] <seconds>s`` — printed as each step ends, so a slow step is named in the
+    log while the tick is still running."""
+    return f'[step:{step}] {seconds:.1f}s'
+
+
+def total_line(seconds):
+    return f'tick: total {seconds:.1f}s'
 
 
 def finish(ctx, ran):

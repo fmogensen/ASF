@@ -238,8 +238,20 @@ def _product_of(argv):
     return None
 
 
+def line_buffered(*streams):
+    """Flush each stream at every newline. A scheduled tick writes to a log file, where Python
+    block-buffers: a tick running twenty minutes showed nothing of itself until it ended. A
+    stream that cannot be reconfigured (a test's StringIO) is left alone."""
+    for stream in streams:
+        try:
+            stream.reconfigure(line_buffering=True)
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def main(argv=None):
     from asf import env, tables
+    line_buffered(sys.stdout, sys.stderr)  # before BoxStream wraps stdout, which passes lines on
     finish = tables.install()   # markdown tables are drawn as box tables on a console
     try:
         return _main(argv)

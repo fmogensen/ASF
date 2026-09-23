@@ -3,15 +3,19 @@
 Workers, feeder, briefs and ``gh`` are stubbed (module attributes); git is real: a bare origin
 for the record (``TickTestCase``) and a bare origin + clone for the product repo.
 """
+import contextlib
+import io
 import json
 import os
 import subprocess
+import time
 import types
 import unittest
 from unittest import mock
 
 from asf import capacity, env
 from asf.feeder import rows as feeder_rows
+from asf.harvest import harvest as harvest_mod
 from asf.metrics import metrics
 from asf.metrics import metrics as metrics_mod
 from asf.tick import shadow, step_daily, step_harvest, step_health, step_prs, step_wave, steps, tick
@@ -614,35 +618,132 @@ class PrsStepTests(StepsTestCase):
 # ---- harvest ----------------------------------------------------------------------
 
 class HarvestStepTests(StepsTestCase):
-    """``batch: off`` → the lane lands by fast-forward, in the tick, after ``prs``."""
+    """``batch: off`` → the lane lands by fast-forward, after ``prs`` — in a harvest of its own
+    that the tick starts and never waits on."""
+
+    def setUp(self):
+        super().setUp()
+        self.spawned = []
+
+    def inline(self, sink=None):
+        """A spawn that runs the background harvest to its end, here, before returning."""
+        def spawn(product, items_file):
+            self.spawned.append(items_file)
+            step_harvest.background(product, items_file, out=(sink or (lambda line: None)))
+            return 4242
+        return spawn
 
     def origin_main(self):
         return _git(['rev-parse', 'main'], self.repo_origin)
 
-    def test_finished_fix_branch_lands_through_the_tick(self):
+    def finished_branch(self):
         self.push_branch('fix/B-0001')  # its commit is `work on fix/B-0001`: names the item
         _git(['branch', '-D', 'fix/B-0001'], self.repo)  # remote-only, as a session leaves it
         self.session(job='fix-bug-b-0001', item='B-0001', branch='fix/B-0001', pid=DEAD_PID,
                      started='2026-09-21T00:00:00Z')
         self.session(job='fix-bug-b-0001', ended='2026-09-21T00:05:00Z', end_reason='finished',
                      rc=0)
-        rc, out = self.run_tick(steps='harvest')
+
+    def test_finished_fix_branch_lands_through_the_tick(self):
+        self.finished_branch()
+        with mock.patch.object(step_harvest, 'spawn_background', self.inline(print)):
+            rc, out = self.run_tick(steps='harvest')
         self.assertEqual(rc, 0)
         sha = self.origin_main()
         self.assertIn(f'landed fix/B-0001 → {sha}', out)
+        self.assertIn('harvest: started in the background (pid 4242)', out)
         self.assertEqual(_git(['log', '-1', '--format=%s', 'main'], self.repo_origin),
                          'work on fix/B-0001')
         self.assertEqual(_git(['branch', '--list', 'fix/B-0001'], self.repo_origin), '')
         self.assertEqual(pool_mod.load_sessions(self.product)['fix-bug-b-0001']['harvested'], sha)
 
-    def test_nothing_finished_is_one_line(self):
+    def test_a_running_gate_is_neither_waited_on_nor_doubled(self):
+        self.finished_branch()
+        lock = harvest_mod.try_lock(env.state_dir(self.product))  # a gate mid-run elsewhere
+        self.addCleanup(lock.close)
+        step_harvest.write_status(self.product, {'pid': 777, 'started': '2026-09-23T22:31:00Z'})
+        before = self.origin_main()
+        spawn = mock.Mock(side_effect=AssertionError('a second gate'))
+        with mock.patch.object(harvest_mod, 'run_product_harvest',
+                               side_effect=AssertionError('gated in the tick')):
+            step_harvest.run(self.ctx(), out=self.lines.append, spawn=spawn)
+            # the background run a second spawn would start refuses too
+            step_harvest.background(self.product, out=self.lines.append)
+        spawn.assert_not_called()
+        self.assertEqual(self.lines, [
+            'harvest: gate running (pid 777, since 2026-09-23T22:31:00Z) — lands when it '
+            'finishes, this tick does not wait',
+            'harvest: another harvest of sample holds the lock — skipped'])
+        self.assertEqual(self.origin_main(), before)
+
+    def test_the_tick_after_a_green_gate_reports_the_landing_once(self):
+        self.finished_branch()
+        step_harvest.run(self.ctx(), out=self.lines.append, spawn=self.inline())
+        sha = self.origin_main()
+        self.assertEqual(_git(['log', '-1', '--format=%s', 'main'], self.repo_origin),
+                         'work on fix/B-0001')
+        self.lines.clear()
+        step_harvest.run(self.ctx(), out=self.lines.append, spawn=mock.Mock(return_value=4243))
+        self.assertTrue(self.lines[0].startswith('harvest: last run '), self.lines)
+        self.assertIn(f'landed fix/B-0001 → {sha}', self.lines)
+        self.lines.clear()
+        step_harvest.run(self.ctx(), out=self.lines.append, spawn=mock.Mock(return_value=4244))
+        self.assertNotIn(f'landed fix/B-0001 → {sha}', self.lines)  # once
+
+    def test_the_tick_after_a_red_gate_reports_the_hold_and_nothing_lands(self):
+        self.write_product(f'repo_dir: {self.repo}\n{self.product_extra}'
+                           'conventions:\n  test_command: "python3 -c \'raise SystemExit(\\"FAILED red\\")\'"\n')
+        self.product = env.load_product('sample')
+        self.finished_branch()
+        before = self.origin_main()
+        step_harvest.run(self.ctx(), out=self.lines.append, spawn=self.inline())
+        self.assertEqual(self.origin_main(), before)
+        self.lines.clear()
+        step_harvest.run(self.ctx(), out=self.lines.append, spawn=mock.Mock(return_value=1))
+        self.assertTrue(any(l.startswith('held fix/B-0001') for l in self.lines), self.lines)
+        self.assertNotIn('fix-bug-b-0001', {j for j, r in pool_mod.load_sessions(self.product).items()
+                                            if r.get('harvested')})
+
+    def test_the_step_hands_the_record_index_to_the_background_run(self):
+        ctx = self.ctx()
+        ctx.record_root()
+        step_harvest.run(ctx, out=self.lines.append, spawn=self.inline())
+        with open(self.spawned[0], encoding='utf-8') as f:
+            self.assertIn('B-0001', json.load(f))
+
+    def test_a_real_background_harvest_lands_and_the_tick_does_not_wait(self):
+        self.finished_branch()
+        t0 = time.monotonic()
         step_harvest.run(self.ctx(), out=self.lines.append)
-        self.assertEqual(self.lines, ['harvest: none to land'])
+        self.assertLess(time.monotonic() - t0, 10)
+        self.assertTrue(self.lines[-1].startswith('harvest: started in the background (pid '),
+                        self.lines)
+        deadline = time.monotonic() + 90
+        while not step_harvest.read_status(self.product).get('finished'):
+            self.assertLess(time.monotonic(), deadline, 'the background harvest never finished')
+            time.sleep(0.2)
+        self.assertEqual(_git(['log', '-1', '--format=%s', 'main'], self.repo_origin),
+                         'work on fix/B-0001')
+
+    def test_nothing_finished_is_one_line(self):
+        step_harvest.run(self.ctx(), out=self.lines.append, spawn=self.inline())
+        step_harvest.run(self.ctx(), out=self.lines.append, spawn=mock.Mock(return_value=1))
+        self.assertIn('harvest: none to land', self.lines)
 
     def test_no_repo_dir_is_one_line(self):
         ctx = tick.Context(env.Product('p', {}))
         step_harvest.run(ctx, out=self.lines.append)
         self.assertEqual(self.lines, ['harvest: no repo_dir — nothing to harvest'])
+
+    def test_a_hand_run_harvest_waits_for_no_one_and_gates_nothing_while_one_runs(self):
+        lock = harvest_mod.try_lock(env.state_dir(self.product))
+        self.addCleanup(lock.close)
+        out = io.StringIO()
+        with mock.patch.object(harvest_mod, 'run_product_harvest',
+                               side_effect=AssertionError('gated')), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(harvest_mod.main(['--product', 'sample']), 0)
+        self.assertEqual(out.getvalue(), 'harvest: another harvest of sample is running — skipped\n')
 
     def test_shadow_never_runs_harvest(self):
         with mock.patch.object(step_harvest, 'run', side_effect=AssertionError('ran')), \

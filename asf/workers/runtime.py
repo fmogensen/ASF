@@ -17,7 +17,7 @@ import os
 import re
 import subprocess
 
-from asf import hermetic
+from asf import detach, hermetic
 from asf.workers import report
 
 DEFAULT_BINARY = 'claude'
@@ -196,11 +196,14 @@ class ClaudeCodeRuntime(Runtime):
             if line is not None:
                 log.write((line + '\n').encode('utf-8'))
                 log.flush()
+            if not wait:  # never the caller's child: no <defunct> left in a running tick
+                pid = detach.spawn(build_command(job, self.binary), cwd=job.cwd,
+                                   env=build_env(job), stdin=brief, stdout=log,
+                                   stderr=subprocess.STDOUT)
+                return Result(pid=pid, log_path=log_path)
             proc = subprocess.Popen(build_command(job, self.binary), cwd=job.cwd,
                                     env=build_env(job), stdin=brief, stdout=log,
                                     stderr=subprocess.STDOUT, start_new_session=True)
-        if not wait:
-            return Result(pid=proc.pid, log_path=log_path)
         rc = proc.wait()
         rec = read_result(log_path)
         return Result(ok=rc == 0 and result_ok(rec), pid=proc.pid, returncode=rc,

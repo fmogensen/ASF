@@ -250,3 +250,27 @@ class UnparkTests(unittest.TestCase):
         rc, out = self._run(['unpark', 'T-9999', '--product', 'sample'])
         self.assertEqual(rc, 1, out)
         self.assertIn('not in the ledger', out)
+
+
+class LineBufferedOutputTests(unittest.TestCase):
+    """A scheduled tick writes to a log file: every line reaches it as it is printed."""
+
+    def test_main_flushes_each_line_to_a_file_stream(self):
+        import sys
+        from unittest import mock
+        raw = io.BytesIO()
+        stream = io.TextIOWrapper(raw, encoding='utf-8')  # a file, not a tty: block-buffered
+        err = io.TextIOWrapper(io.BytesIO(), encoding='utf-8')
+
+        def fake_main(argv):
+            print('first line')
+            self.assertEqual(raw.getvalue(), b'first line\n')  # there while the command runs
+            return 0
+        with mock.patch.object(sys, 'stdout', stream), mock.patch.object(sys, 'stderr', err), \
+                mock.patch.object(cli, '_main', fake_main):
+            self.assertEqual(cli.main([]), 0)
+        self.assertTrue(stream.line_buffering)
+        self.assertTrue(err.line_buffering)
+
+    def test_a_stream_that_cannot_reconfigure_is_left_alone(self):
+        cli.line_buffered(io.StringIO())  # no error

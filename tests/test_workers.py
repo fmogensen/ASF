@@ -153,6 +153,37 @@ class TestRuntime(unittest.TestCase):
         finally:
             shutil.rmtree(tmp)
 
+    def test_a_session_started_without_wait_is_never_the_callers_child(self):
+        # a tick that spawned sessions kept them as children: one that ended sat <defunct>
+        tmp = tempfile.mkdtemp()
+        try:
+            fake_bin = os.path.join(tmp, 'agent')
+            with open(fake_bin, 'w') as f:
+                f.write('#!/bin/sh\ncat >/dev/null\nsleep 1\n'
+                        'echo "{\\"type\\":\\"result\\",\\"subtype\\":\\"success\\",'
+                        '\\"result\\":\\"$ASF_JOB\\"}"\n')
+            os.chmod(fake_bin, 0o755)
+            brief = os.path.join(tmp, 'b.md')
+            with open(brief, 'w') as f:
+                f.write('do it\n')
+            log = os.path.join(tmp, 'j.jsonl')
+            job = runtime_mod.Job('sample', 'j8', tmp, brief, 'opus', log_path=log)
+            r = runtime_mod.ClaudeCodeRuntime(binary=fake_bin).run(job)
+            self.assertEqual(os.getpgid(r.pid), r.pid)  # its own group: what stop signals
+            with self.assertRaises(ChildProcessError):
+                os.waitpid(r.pid, os.WNOHANG)
+            deadline = time.monotonic() + 15
+            while runtime_mod.read_result(log) is None and time.monotonic() < deadline:
+                time.sleep(0.1)
+            self.assertEqual(runtime_mod.read_result(log)['result'], 'j8')
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_a_detached_command_that_cannot_start_is_an_oserror(self):
+        from asf import detach
+        with self.assertRaises(OSError):
+            detach.spawn(['/nowhere/agent'], stderr=subprocess.DEVNULL)
+
     def test_b0028_result_followed_by_system_lines_is_still_the_result(self):
         # the runtime writes background-task system lines after the result line
         with tempfile.TemporaryDirectory() as tmp:

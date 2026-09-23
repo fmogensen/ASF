@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 import sys
 import tempfile
 import unittest
@@ -329,8 +330,33 @@ class FailurePathsBase(unittest.TestCase):
         p = cls.asf('tick', '--product', 'sample', '--fresh')  # ticks seconds apart: no evidence cache
         assert p.returncode == 0 and 'Traceback' not in p.stdout + p.stderr, p.stdout + p.stderr
         lines = [ln for ln in p.stdout.splitlines() if ln.strip()]
+        lines += cls.background_harvest(lines)
         cls.ticks.append(lines)
         return lines
+
+    @classmethod
+    def background_harvest(cls, lines):
+        """The lines of the harvest this tick started in the background, once it has finished —
+        the tick itself never waits on it; the scenario does, so each tick's landing is its own."""
+        started = [ln for ln in lines if ln.startswith('harvest: started in the background (pid ')]
+        if not started:
+            return []
+        pid = int(started[0].split('(pid ')[1].split(')')[0])
+        path = os.path.join(cls.home, 'state', 'sample', 'harvest.json')
+        deadline = time.monotonic() + 240
+        while True:
+            try:
+                with open(path, encoding='utf-8') as f:
+                    rec = json.load(f)
+            except (OSError, ValueError):
+                rec = {}
+            if rec.get('pid') == pid and rec.get('finished'):
+                break
+            assert time.monotonic() < deadline, f'background harvest {pid} never finished: {rec}'
+            time.sleep(0.2)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(dict(rec, reported=True), f)
+        return list(rec.get('lines') or [])
 
     @classmethod
     def sessions(cls):
