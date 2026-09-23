@@ -94,7 +94,7 @@ def cmd_next(args, root=None):
     root = root or product.backlog_dir
     items, _generated = ix.load(root)
     inflight = load_inflight(getattr(args, 'inflight', None))
-    capacity = args.capacity if args.capacity is not None else _default_capacity()
+    capacity = args.capacity if args.capacity is not None else _default_capacity(product)
     rows = R.plan_rows(items, product, inflight, capacity)
     if getattr(args, 'json', False):
         print(rows_json(rows), end='')
@@ -103,17 +103,17 @@ def cmd_next(args, root=None):
     return 0
 
 
-def _default_capacity():
-    """``config.yaml``'s ``feeder.capacity`` (default 4)."""
-    v = (env.load_config().get('feeder') or {}).get('capacity')
-    return v if isinstance(v, int) and v >= 0 else 4
+def _default_capacity(product):
+    """This product's session ceiling — ``asf.capacity.resolve`` (PD2)."""
+    from asf import capacity as capacity_mod
+    return capacity_mod.resolve(product).sessions
 
 
 def register(sub):
     """``asf next --product <p> [--capacity n] [--inflight <json>] [--json]``."""
     p = sub.add_parser('next', help='the NEXT table: what the tick would start, S1 first')
     env.add_product_arg(p)
-    p.add_argument('--capacity', type=int, default=None, help='session slots (default: config feeder.capacity, 4)')
+    p.add_argument('--capacity', type=int, default=None, help='session slots (default: asf.capacity.resolve)')
     p.add_argument('--inflight', default=None, help='JSON file: the running sessions [{item, kind, account, age}]')
     p.add_argument('--json', action='store_true', help='print the rows as JSON')
     p.set_defaults(func=cmd_next)

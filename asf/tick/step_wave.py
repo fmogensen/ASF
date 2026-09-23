@@ -4,8 +4,9 @@
 1. the index from the record clone (the tick's own, made once per tick — :class:`Context`);
 2. ``inflight``: the sessions in ``~/.ASF/state/<product>/sessions.jsonl`` with no ``ended``; and
    ``busy``, the items whose pushed branch waits for harvest — no slot, but no second session;
-3. ``feeder.plan_rows(index, product, inflight, capacity)`` — ``capacity`` is ``config.yaml
-   feeder.capacity`` (default 4); the feeder takes the sessions in flight off it itself;
+3. ``feeder.plan_rows(index, product, inflight, capacity)`` — ``capacity`` is the resolver's
+   ceiling (``asf.capacity.resolve``, spec §2.2's session law); the feeder still takes this
+   product's in-flight sessions off it itself (P5);
 4. per launching row, a brief (``asf.briefs.build``) with the facts of its branch on the product
    repo's origin — whether it is pushed and its last commit, two ``git`` calls at most;
 5. one ``workers.wave`` over every briefed row, so the pool's S1 reserve sees them all; it prints
@@ -20,20 +21,19 @@ import re
 import subprocess
 
 from asf import approvals, env
+from asf import capacity as capacity_mod
 from asf.groom import policy as groom_policy
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 
-DEFAULT_CAPACITY = 4
 #: PD9 — for a kind whose job name is not ``<brief kind>-<item id>``, the Row attribute that
 #: carries the job's key instead (the groom brief's job is ``groom-<date>``, D7).
 KIND_JOB_KEY = {'groom': 'groom_date'}
 _GROOM_FILE_RE = re.compile(r'^(\d{4}-\d{2}-\d{2})\.md$')
 
 
-def capacity():
-    v = (env.load_config().get('feeder') or {}).get('capacity')
-    return v if isinstance(v, int) and v >= 0 else DEFAULT_CAPACITY
+def capacity(product=None):
+    return capacity_mod.resolve(product or env.load_product()).sessions
 
 
 def inflight(product):
@@ -141,8 +141,9 @@ def run(ctx, out=print):
     held = approvals.raise_holds(ctx, out)
     items, _generated = index_reader.load(ctx.record_root())
     running = inflight(product)
+    r = capacity_mod.resolve(product)
     gstate = groom_state(product, ctx.record_root()) if groom_policy.groom_auto(product) else None
-    planned = feeder_rows.plan_rows(items, product, running, capacity(), attempts=attempts(product),
+    planned = feeder_rows.plan_rows(items, product, running, r.sessions, attempts=attempts(product),
                                      corrections=corrections(product), busy=awaiting_harvest(product),
                                      groom_state=gstate)
     worker_rows, texts, kinds = [], {}, {}
@@ -161,6 +162,9 @@ def run(ctx, out=print):
         worker_rows.append(wrow)
         texts[wrow.job] = brief.text
         kinds[wrow.job] = brief.kind
+    ctx.event('capacity', sessions=r.sessions, sessions_inflight=len(running),
+              sessions_bound_by=r.sessions_bound, ci=r.ci, ci_inflight=r.ci_inflight,
+              ci_bound_by=r.ci_bound)
     if not worker_rows:
         out('wave: nothing to launch')
         return 0

@@ -322,10 +322,13 @@ class WaveStepTests(StepsTestCase):
         self.assertEqual(self.lines, ['waits    -                        T-0002     — WAITS ON T-0001',
                                       'launched fix-bug-b-0001           B-0001     → acct-a (opus) pid 1'])
         evs = self.events(ctx)
-        self.assertEqual([(e['kind'], e['item'], e['model'], e['brief_kind']) for e in evs],
-                         [('launch', 'B-0001', 'opus', 'fix-bug')])
+        # T-0005: the wave step now also writes one `capacity` event every tick (§4.3)
+        self.assertEqual([e['kind'] for e in evs], ['capacity', 'launch'])
+        launch_ev = evs[1]
+        self.assertEqual((launch_ev['kind'], launch_ev['item'], launch_ev['model'], launch_ev['brief_kind']),
+                         ('launch', 'B-0001', 'opus', 'fix-bug'))
         # the record is public: an event never carries an account name (B-0023)
-        self.assertNotIn('account', evs[0])
+        self.assertNotIn('account', launch_ev)
         self.assertEqual(ctx.counts['launches'], 1)
 
     def test_unpushed_branch_facts(self):
@@ -366,6 +369,64 @@ class WaveStepTests(StepsTestCase):
             step_wave.run(self.ctx(), out=self.lines.append)
         self.assertEqual(self.lines, ['wave: nothing to launch'])
         self.assertEqual(self.waved, [])
+
+
+class WaveStep(StepsTestCase):
+    """T-0005: the wave step's cut comes from ``asf.capacity.resolve``, and one ``capacity``
+    event is written every tick, bound or not."""
+
+    def other_product_inflight(self, n=1):
+        """A second product, ``other``, with ``n`` live sessions — the ledger
+        ``inflight_sessions_elsewhere`` reads."""
+        with open(os.path.join(env.ASF_HOME, 'products', 'other.yaml'), 'w') as f:
+            f.write('repo_slug: x/y\n')
+        for i in range(n):
+            pool_mod.append_session('other', {'job': f'w{i}', 'item': 'X', 'account': 'acct-b',
+                                              'started': pool_mod.now_iso(), 'pid': 1})
+
+    def test_capacity_comes_from_the_resolver(self):
+        seen = {}
+
+        def plan(index, product, inflight, capacity, attempts=None, corrections=None, busy=None,
+                groom_state=None):
+            seen['capacity'] = capacity
+            return []
+
+        resolved = capacity.Resolved(sessions=7, sessions_bound='product', ci=None,
+                                     ci_bound=None, ci_inflight=None, batch={}, reserve={})
+        with mock.patch.object(feeder_rows, 'plan_rows', plan), \
+             mock.patch.object(capacity, 'resolve', lambda *a, **kw: resolved):
+            step_wave.run(self.ctx(), out=self.lines.append)
+        self.assertEqual(seen['capacity'], 7)
+
+    def test_the_operator_total_cuts_the_wave(self):
+        self.other_product_inflight(1)
+        self.write_config('capacity:\n  total:\n    sessions: 1\n')
+        seen = {}
+
+        def plan(index, product, inflight, capacity, attempts=None, corrections=None, busy=None,
+                groom_state=None):
+            seen['capacity'] = capacity
+            return []
+
+        with mock.patch.object(feeder_rows, 'plan_rows', plan):
+            step_wave.run(self.ctx(), out=self.lines.append)
+        self.assertEqual(seen['capacity'], 0)
+
+    def test_a_capacity_event_names_what_bound_the_cut(self):
+        self.other_product_inflight(1)
+        self.write_config('capacity:\n  total:\n    sessions: 1\n')
+        ctx = self.ctx()
+        with mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **kw: []):
+            step_wave.run(ctx, out=self.lines.append)
+        evs = [e for e in self.events(ctx) if e['kind'] == 'capacity']
+        self.assertEqual(len(evs), 1)
+        self.assertEqual(evs[0]['sessions'], 0)
+        self.assertEqual(evs[0]['sessions_inflight'], 0)
+        self.assertEqual(evs[0]['sessions_bound_by'], 'operator total')
+        self.assertIsNone(evs[0]['ci'])
+        self.assertIsNone(evs[0]['ci_inflight'])
+        self.assertIsNone(evs[0]['ci_bound_by'])
 
 
 # ---- prs --------------------------------------------------------------------------
