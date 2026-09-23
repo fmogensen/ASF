@@ -525,7 +525,9 @@ class DoctorTest(unittest.TestCase):
                 mock.patch.object(doctor, 'check_one_factory', return_value=(True, '')), \
                 mock.patch.object(doctor, 'check_capacity', return_value=[]):
             rows = doctor.run('demo')
-        self.assertEqual([r[0] for r in rows][-2:], ['one-factory', 'approvals'])
+        # the claim is the order, not the tail: T-0025 appends `redaction-hooks` after these two
+        names = [r[0] for r in rows]
+        self.assertEqual(names[names.index('one-factory') + 1], 'approvals')
         row = [r for r in rows if r[0] == 'approvals'][0]
         self.assertTrue(row[1], 'the approvals row is required, so a bad matrix is red')
         self.assertTrue(row[2])

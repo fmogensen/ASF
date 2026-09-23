@@ -288,6 +288,12 @@ def cmd_init(args):
 
     from asf.views import roadmap
     product = env.Product(name, env.load_file(path))
+    # the push gate comes with adoption, not as a second command a human must remember: a repo
+    # ASF has adopted and has no gate on is exactly what F-0075 exists to prevent, and `doctor`
+    # would report it red the moment init finished.
+    from asf import hooks as hooks_mod
+    ok, detail = hooks_mod.ensure_git_hooks(product)
+    print(f"init: git hooks {'in place' if ok else 'NOT installed'}" + (f' — {detail}' if detail else ''))
     print(roadmap.render(backlog, product), end='')
     return 0
 
