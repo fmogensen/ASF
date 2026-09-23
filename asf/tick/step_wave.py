@@ -79,7 +79,13 @@ def groom_state(product, root):
         return None
     with open(path, encoding='utf-8') as f:
         text = f.read()
-    pairs = groom_policy.open_questions(text)
+    # the file may predate the index (answers applied since): what the factory already acts on
+    # is nobody's question — the same suppression the groom ran when it wrote the file
+    from asf.views import index_reader
+    items = index_reader.load(root)[0] if os.path.isfile(os.path.join(root, 'index.json')) else {}
+    sections, _n = groom_policy.suppress({'open': text.splitlines()}, items, inflight(product),
+                                         product)
+    pairs = groom_policy.open_questions('\n'.join(sections['open']))
     job = f'groom-{date}'
     attempts = sum(1 for rec in lifecycle.read_lines(pool_mod.sessions_path(product))
                    if rec.get('job') == job)

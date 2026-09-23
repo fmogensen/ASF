@@ -263,7 +263,10 @@ def suppress(sections, index, inflight, product):
     from asf.feeder import rows as feeder_rows
     spoken = {row.item_id: row.kind for row in feeder_rows.candidates(index, product, inflight)
              if row.launches}
-    held = {s.get('item'): s.get('kind') for s in (inflight or ()) if s.get('item')}
+    # a groom session's item is only the token its job was named by (the oldest question): it
+    # acts on no item, so it speaks for none — F-0080 went "(spoken for: groom)" for a day
+    held = {s.get('item'): s.get('kind') for s in (inflight or ())
+            if s.get('item') and s.get('kind') != 'groom'}
     out = {}
     count = 0
     for key, lines in sections.items():

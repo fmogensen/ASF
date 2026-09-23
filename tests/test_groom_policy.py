@@ -602,6 +602,16 @@ class InboxQuestionTests(GroomAutoTestCase):
             self.assertIn('## Question', f.read())
 
 
+class GroomSessionSpeaksForNothingTest(unittest.TestCase):
+    def test_a_live_groom_session_suppresses_no_question(self):
+        line = '- [ ] F-0001 x — from inbox, awaiting a decision → answer: ____'
+        p = Product('p', {})
+        out, n = policy.suppress({'k': [line]}, {}, [{'item': 'F-0001', 'kind': 'groom'}], p)
+        self.assertEqual((out['k'], n), ([line], 0))
+        out, n = policy.suppress({'k': [line]}, {}, [{'item': 'F-0001', 'kind': 'coder'}], p)
+        self.assertEqual(n, 1)
+
+
 class UnblockTests(unittest.TestCase):
     """T5: applying ``unblock <id>`` removes it from ``blockedBy``, one of two ids, the last id,
     twice, and an absent id — all through ``apply_groom_answers`` directly."""

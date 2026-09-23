@@ -368,6 +368,17 @@ class WaveStepTests(StepsTestCase):
         self.assertTrue(state['file'].endswith('2026-09-22.md'))
         self.assertTrue(state['answers'].endswith(os.path.join('groom', '2026-09-22.answers')))
 
+    def test_groom_state_leaves_out_what_the_factory_already_acts_on(self):
+        # a groom file written before its answers reached the index kept asking about work the
+        # feeder already has a row for; the adjudicator must not be launched to answer it again
+        root = self.ctx().record_root()
+        os.makedirs(os.path.join(root, 'groom'), exist_ok=True)
+        with open(os.path.join(root, 'groom', '2026-09-22.md'), 'w') as f:
+            f.write('- [ ] B-0001 the first bug — auto-filed, count 2 → answer: ____\n'
+                    '- [ ] F-0001 x — undecided 3d → answer: ____\n')
+        state = step_wave.groom_state(self.product, root)
+        self.assertEqual(state['open'], ['F-0001'])
+
     def test_nothing_to_launch(self):
         with mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **kw: []):
             step_wave.run(self.ctx(), out=self.lines.append)
