@@ -50,8 +50,11 @@ DIALOGUES = {
 PREAMBLE = ("Print the output below **verbatim** in a fenced code block{stop}. The product is "
             "`$ASF_PRODUCT`, else `default_product` in `~/.ASF/config.yaml`; arguments after the "
             "command are passed through.")
-COMMAND = ('!`PATH="$HOME/.local/bin:$PATH"; if command -v asf >/dev/null 2>&1; then asf {name} '
-           '$ARGUMENTS 2>&1; else echo "asf is not installed: pipx install -e <ASF checkout>"; fi`')
+# ASF_TABLES=box: the output is captured through a pipe, yet read in a console (asf.tables).
+# `|| true`: a RED exit code is the table's verdict, not a failure — Claude Code refuses to show
+# the output of a `!` command that exits non-zero.
+COMMAND = ('!`PATH="$HOME/.local/bin:$PATH"; if command -v asf >/dev/null 2>&1; then ASF_TABLES=box asf {name} '
+           '$ARGUMENTS 2>&1 || true; else echo "asf is not installed: pipx install -e <ASF checkout>"; fi`')
 
 
 def command_help():

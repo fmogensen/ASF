@@ -226,12 +226,15 @@ def _product_of(argv):
 
 
 def main(argv=None):
-    from asf import env
+    from asf import env, tables
+    finish = tables.install()   # markdown tables are drawn as box tables on a console
     try:
         return _main(argv)
     except env.ConfigError as e:
         print(needs_operator_line(e, _product_of(argv)))
         return 2
+    finally:
+        finish()
 
 
 def _main(argv=None):
