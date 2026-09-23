@@ -52,7 +52,7 @@ import subprocess
 import sys
 import tempfile
 
-from asf import env, hermetic
+from asf import approvals, env, hermetic
 from asf.conventions import Conventions
 from asf.workers import lifecycle
 from asf.workers.health import pid_alive
@@ -1052,6 +1052,16 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
         refusal = lane_refusal(repo, trunk, branch, item)
         if refusal:
             results[branch] = hold_with_correction(state_dir, branch, record, *refusal, out)
+            continue
+        cls, matched_file = approvals.merge_class(product, touched_files(repo, trunk, branch))
+        level = approvals.level_of(product, cls)
+        if level != 'auto' and not approvals.is_granted(product, f'{item}/{cls}'):
+            detail = matched_file or 'routine'
+            if not dry_run:
+                approvals.refuse(product, item, cls, level, record.get('job') or branch,
+                                 'harvest', detail)
+            out(f'held {branch}: {cls} ({level}) — {detail}')
+            results[branch] = 'held'
             continue
         if mode == LANDING_PR:
             if not dry_run:

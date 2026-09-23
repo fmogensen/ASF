@@ -4,7 +4,10 @@ behind D9/D14. Task 2: ``HookTest``, the unit half of A2 (the end-to-end block i
 path with the session's identity removed — PD7). Task 4: ``CliTest`` and ``DoctorTest`` are A5,
 the operator's side — ``asf approvals``, ``list``, ``resolve``, and the doctor's ``approvals`` row.
 Task 5: ``TickRaiseTest``, A3, on the tick's own harness — the raise, the parking and the
-once-only events.
+once-only events. Task 6: ``HarvestTest`` and ``FileBugsTest``, A4 — the harvest reads the merge
+classes before landing a branch, and the bug filer reads ``file_bug``'s level; both on the
+fixtures of ``tests.test_harvest.ProductHarvestTests`` and
+``tests.test_file_bugs.FileBugsIntegrationTests``, imported rather than copied.
 """
 import contextlib
 import io
@@ -21,7 +24,9 @@ from unittest import mock
 from asf import approvals, cli, doctor, env, hooks
 from asf.env import Product
 from asf.feeder import rows as feeder_rows
-from asf.tick import step_wave, tick
+from asf.tick import file_bugs, step_daily, step_wave, tick
+from tests.test_file_bugs import FileBugsIntegrationTests
+from tests.test_harvest import ProductHarvestTests
 from tests.test_tick import TickTestCase, _git
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -640,6 +645,115 @@ class TickRaiseTest(TickTestCase):
         self.raise_holds(ctx)
         self.assertEqual(len(self.events(ctx, 'hold-resolved')), 1)
         self.assertEqual(len(self.events(ctx, 'held')), 1)
+
+
+class HarvestTest(ProductHarvestTests):
+    """A4 (Task 6): the harvest reads the merge classes before it lands a branch — on
+    ``ProductHarvestTests``'s fixtures (a bare origin, the product's own checkout, a worker's
+    clone that pushes a lane branch), imported rather than copied."""
+
+    def setUp(self):
+        super().setUp()
+        self._orig_home = env.ASF_HOME
+        env.ASF_HOME = os.path.join(self.base, 'asf-home')
+
+    def tearDown(self):
+        env.ASF_HOME = self._orig_home
+        super().tearDown()
+
+    def product(self, approvals_map=None, **conventions):
+        conventions.setdefault('amendable_paths', ['rules/*'])
+        product = super().product(**conventions)
+        product._data['approvals'] = approvals_map or {}
+        return product
+
+    def test_amendable_branch_is_held_not_landed(self):
+        self.push_lane('fix/B-0001', [('fix(B-0001): touch the rules', {'rules/r1.md': 'x\n'})])
+        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
+        before = self.origin_main()
+
+        results, lines = self.harvest(self.product())  # merge_amendable_set defaults human-now
+        self.assertEqual(results, {'fix/B-0001': 'held'})
+        self.assertEqual(self.origin_main(), before)
+        self.assertIn('held fix/B-0001: merge_amendable_set (human-now) — rules/r1.md', lines)
+
+        refused = approvals.read('sample')
+        self.assertEqual(len(refused), 1, refused)
+        self.assertEqual(refused[0]['event'], 'refused')
+        self.assertEqual(refused[0]['hold'], 'B-0001/merge_amendable_set')
+        self.assertEqual(refused[0]['tool'], 'harvest')
+        self.assertNotIn('correction', self.record('fix/B-0001'))
+
+    def test_routine_branch_lands_under_auto(self):
+        self.push_lane('fix/B-0001', [('fix(B-0001): the change', {'a.txt': 'a\n'})])
+        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
+
+        results, _lines = self.harvest(self.product())  # merge_routine_pr defaults auto
+        self.assertEqual(results, {'fix/B-0001': 'landed'})
+        self.assertEqual(approvals.read('sample'), [])
+
+    def test_routine_branch_is_held_when_narrowed(self):
+        self.push_lane('fix/B-0001', [('fix(B-0001): the change', {'a.txt': 'a\n'})])
+        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
+        before = self.origin_main()
+
+        product = self.product(approvals_map={'merge_routine_pr': 'groom'})
+        results, lines = self.harvest(product)
+        self.assertEqual(results, {'fix/B-0001': 'held'})
+        self.assertEqual(self.origin_main(), before)
+        self.assertIn('held fix/B-0001: merge_routine_pr (groom) — routine', lines)
+
+    def test_granted_amendable_branch_lands(self):
+        self.push_lane('fix/B-0001', [('fix(B-0001): touch the rules', {'rules/r1.md': 'x\n'})])
+        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
+        approvals.resolve('sample', 'B-0001/merge_amendable_set', 'granted')
+
+        results, _lines = self.harvest(self.product())
+        self.assertEqual(results, {'fix/B-0001': 'landed'})
+
+
+class FileBugsTest(FileBugsIntegrationTests):
+    """A4 (Task 6): the bug filer reads ``file_bug``'s level — on
+    ``FileBugsIntegrationTests``'s fixtures (an ``E-0009`` epic, two ci reds 1h and 2h ago, so
+    ``ci_signatures`` names exactly one signature, ``gate: flaky``), imported rather than copied.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._orig_home = env.ASF_HOME
+        env.ASF_HOME = os.path.join(self.root, 'no-such-asf-home')
+
+    def tearDown(self):
+        env.ASF_HOME = self._orig_home
+        super().tearDown()
+
+    def bugs(self):
+        return [n for n in os.listdir(os.path.join(self.root, 'bugs')) if n.endswith('.md')]
+
+    def test_file_bug_not_auto_files_nothing_and_says_so(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = file_bugs.cmd_file_bugs(
+                types.SimpleNamespace(default_bug_epic='E-0009', file_bug_level='human-now'),
+                self.root)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.bugs(), [])
+        printed = out.getvalue()
+        self.assertIn('NEEDS OPERATOR: held file_bug on gate: flaky —'
+                      ' widen approvals: file_bug in products/<p>.yaml', printed)
+
+    def test_daily_file_bugs_part_reads_the_level_too(self):
+        product = Product('sample', {'approvals': {'file_bug': 'groom'}})
+        thunks = dict(step_daily.parts(product, self.root))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = thunks['file-bugs']()
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.bugs(), [])
+        printed = out.getvalue()
+        self.assertNotIn('NEEDS OPERATOR', printed)
+        self.assertIn('held file_bug on gate: flaky — widen approvals: file_bug'
+                      ' in products/<p>.yaml', printed)
 
 
 if __name__ == '__main__':

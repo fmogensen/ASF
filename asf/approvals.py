@@ -251,6 +251,30 @@ def classify(product, tool_name, tool_input, cwd):
     return []
 
 
+# ---- the harvest's merge classes (§2.4) ----------------------------------------
+
+def merge_class(product, files):
+    """``(class, first matched file or None)`` — ``merge_amendable_set`` when any of ``files``
+    (repo-relative, as :func:`asf.harvest.harvest.touched_files` returns them) matches
+    ``conventions.amendable_paths`` (the §2.1 glob rule, :func:`_match_glob`), else
+    ``merge_routine_pr`` with no matched file."""
+    globs = list(product.conventions.amendable_paths or [])
+    for f in files:
+        if any(_match_glob(g, f) for g in globs):
+            return 'merge_amendable_set', f
+    return 'merge_routine_pr', None
+
+
+def level_of(product, cls):
+    """``matrix(product)[cls]``'s level; an invalid matrix makes it ``human-now`` (D7) rather
+    than raise, since a harvest or a bug filer that cannot read the matrix must still fail
+    closed, not crash."""
+    try:
+        return matrix(product)[cls][0]
+    except env.ConfigError:
+        return 'human-now'
+
+
 # ---- the ledger ----------------------------------------------------------------
 
 def ledger_path(product):

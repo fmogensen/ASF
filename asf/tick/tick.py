@@ -69,6 +69,7 @@ def run_step0(root, product, fresh=False):
     """
     os.environ['ASF_PRODUCT'] = product.name
 
+    from asf import approvals
     from asf.metrics.metrics import cmd_backfill, cmd_rollup
     from asf.record.ingest import cmd_ingest
     from asf.tick.file_bugs import cmd_file_bugs
@@ -82,7 +83,8 @@ def run_step0(root, product, fresh=False):
         from asf.record.plan_tasks import mint_plan_tasks
         mint_plan_tasks(root, product, evidence.load(product=product))
     default_bug_epic = product.conventions.get('default_bug_epic')
-    cmd_file_bugs(_ns(default_bug_epic=default_bug_epic), root)
+    cmd_file_bugs(_ns(default_bug_epic=default_bug_epic,
+                      file_bug_level=approvals.level_of(product, 'file_bug')), root)
     cmd_rollup(_ns(day=None, no_releases=False, product=product.name), root)
     do_index(root)
 

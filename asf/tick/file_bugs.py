@@ -233,6 +233,13 @@ def cmd_file_bugs(args, root):
     signatures.update(refusal_signatures(root, now))
     signatures.update(rule_violation_signatures(root))
 
+    level = getattr(args, 'file_bug_level', 'auto')
+    if level != 'auto':
+        prefix = 'NEEDS OPERATOR: ' if level == 'human-now' else ''
+        for sig in sorted(signatures):
+            print(f'{prefix}held file_bug on {sig} — widen approvals: file_bug in products/<p>.yaml')
+        return 0
+
     filed = bumped = skipped = 0
     for sig in sorted(signatures):
         outcome = _file_or_bump_bug(root, canonical, sig, signatures[sig], date,

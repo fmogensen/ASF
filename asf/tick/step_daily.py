@@ -46,18 +46,21 @@ def _newest_answers_file(product):
 def parts(product, root, event=None):
     """``[(name, thunk)]`` in order; each thunk returns an exit code. ``event`` is ``ctx.event``
     (§4) — handed to ``groom`` alone, the only part that writes events today."""
+    from asf import approvals
     from asf.groom.groom import cmd_groom
     from asf.metrics.metrics import cmd_rollup
     from asf.tick.file_bugs import cmd_file_bugs
     from asf.tick.stale import cmd_stale
     epic = (product.conventions or {}).get('default_bug_epic')
     answers_file = _newest_answers_file(product)
+    file_bug_level = approvals.level_of(product, 'file_bug')
     return [
         ('groom', lambda: cmd_groom(_ns(date=None, apply=True, product=product.name,
                                         default_bug_epic=epic, answers_file=answers_file,
                                         event=event), root)),
         ('stale', lambda: cmd_stale(_ns(json=False), root)),
-        ('file-bugs', lambda: cmd_file_bugs(_ns(default_bug_epic=epic), root)),
+        ('file-bugs', lambda: cmd_file_bugs(_ns(default_bug_epic=epic,
+                                                file_bug_level=file_bug_level), root)),
         ('rollup', lambda: cmd_rollup(_ns(day=yesterday(), no_releases=False,
                                           product=product.name), root)),
     ]
