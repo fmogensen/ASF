@@ -11,8 +11,10 @@ from asf.record.ingest import append_history_lines
 from asf.tick import stale
 from asf.tick.stale import format_age, parse_iso
 from asf.groom import policy
+from asf.groom import inbox
 from asf.groom.digest import write_digest
 from asf.groom.inbox import process_inbox
+from asf.groom.shape import SHAPE_LINE_RE
 from asf.views import index_reader
 from asf.workers import lifecycle, pool
 
@@ -199,7 +201,11 @@ def groom_inbox_section(canonical, origin_ids):
         typed, _machine = frontmatter.split_machine(rec['meta'])
         if typed.get('decided') is True or typed.get('removed'):
             continue
-        lines.append(_card_line(iid, typed.get('title', ''), 'from inbox, awaiting a decision'))
+        why = 'from inbox, awaiting a decision'
+        m = SHAPE_LINE_RE.search(rec.get('body') or '')
+        if m:
+            why = f"from inbox as {m.group(3)} ({m.group(2)}), awaiting a decision"
+        lines.append(_card_line(iid, typed.get('title', ''), why))
     return lines
 
 
@@ -466,7 +472,8 @@ def cmd_groom(args, root):
     default_bug_parent = getattr(args, 'default_bug_epic', None)
     if default_bug_parent is None and product is not None:
         default_bug_parent = product.conventions.get('default_bug_epic')
-    created_ids = process_inbox(root, canonical, date, default_bug_parent=default_bug_parent)
+    created_ids = process_inbox(root, canonical, date, default_bug_parent=default_bug_parent,
+                                intake_dir=inbox.intake_dir(args))
 
     derived = compute_derived(canonical)
     sections = build_groom_sections(canonical, derived, date)

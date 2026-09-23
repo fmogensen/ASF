@@ -323,5 +323,110 @@ class CheckShapeTest(unittest.TestCase):
         self.assertNotIn('without a signature', r2.stdout)
 
 
+class IntakeTest(unittest.TestCase):
+    """`asf groom` through the CLI: an inbox card's shape decides its type."""
+
+    def setUp(self):
+        self.root = make_record()
+        seed(self.root)
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_bug_card_is_minted_with_its_signature_and_shape_line(self):
+        with open(os.path.join(self.root, 'inbox', 'thing.md'), 'w', encoding='utf-8') as f:
+            f.write("# Checkout is broken\nparent: E-0001\nsignature: test_pay\nseverity: S2\n"
+                    "Customers cannot pay.\n")
+        r = run(['groom'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        bugs = [n for n in os.listdir(os.path.join(self.root, 'bugs')) if n.endswith('.md')]
+        self.assertEqual(bugs, ['B-0001.md'])
+        with open(os.path.join(self.root, 'bugs', 'B-0001.md'), encoding='utf-8') as f:
+            text = f.read()
+        meta, _body = frontmatter.parse(text, path='bugs/B-0001.md')
+        self.assertEqual(meta['signature'], 'test_pay')
+        self.assertEqual(meta['severity'], 'S2')
+        self.assertIn('created (inbox) — shape: signature → bug', text)
+        self.assertEqual(os.listdir(os.path.join(self.root, 'inbox')), ['done'])
+
+    def test_story_card_keeps_its_acceptance_list(self):
+        with open(os.path.join(self.root, 'inbox', 'thing.md'), 'w', encoding='utf-8') as f:
+            f.write("# Add plan tiers\nparent: F-0001\n\n## Acceptance\n- [ ] python3 -m unittest tests.x\n"
+                    "- [ ] python3 -m unittest tests.y\n")
+        r = run(['groom'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        stories = [n for n in os.listdir(os.path.join(self.root, 'stories')) if n.endswith('.md')]
+        self.assertEqual(sorted(stories), ['S-0001.md', 'S-0002.md'])
+        with open(os.path.join(self.root, 'stories', 'S-0002.md'), encoding='utf-8') as f:
+            text = f.read()
+        self.assertEqual(text.count('## Acceptance'), 1)
+        self.assertIn('- [ ] python3 -m unittest tests.x\n', text)
+        self.assertIn('- [ ] python3 -m unittest tests.y\n', text)
+        self.assertNotIn('- [ ] \n', text)
+
+    def test_epic_card_keeps_its_features(self):
+        with open(os.path.join(self.root, 'inbox', 'thing.md'), 'w', encoding='utf-8') as f:
+            f.write("# A bigger outcome\n\n## Features\n- Plan tiers\n- Invoicing\n- Refunds\n")
+        r = run(['groom'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        epics = [n for n in os.listdir(os.path.join(self.root, 'epics')) if n.endswith('.md')]
+        self.assertEqual(sorted(epics), ['E-0001.md', 'E-0002.md'])
+        with open(os.path.join(self.root, 'epics', 'E-0002.md'), encoding='utf-8') as f:
+            text = f.read()
+        self.assertEqual(text.count('- Plan tiers\n- Invoicing\n- Refunds\n'), 1)
+        r2 = run(['index'], self.root)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        r3 = run(['check'], self.root)
+        self.assertEqual(r3.returncode, 0, r3.stdout)
+
+    def test_question_leaves_the_file(self):
+        path = os.path.join(self.root, 'inbox', 'thing.md')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write("# Checkout is broken\nCustomers cannot pay.\n")
+        r = run(['groom'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(os.path.isfile(path))
+        with open(path, encoding='utf-8') as f:
+            text = f.read()
+        self.assertEqual(text.count('## Question'), 1)
+        self.assertEqual(os.listdir(os.path.join(self.root, 'bugs')), [])
+
+        run(['groom'], self.root)
+        with open(path, encoding='utf-8') as f:
+            text2 = f.read()
+        self.assertEqual(text2.count('## Question'), 1)
+
+    def test_groom_line_names_type_and_rule(self):
+        with open(os.path.join(self.root, 'inbox', 'thing.md'), 'w', encoding='utf-8') as f:
+            f.write("# Billing invoices\nparent: E-0001\n\n## Features\n- Invoicing\n")
+        r = run(['groom'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(os.path.join(self.root, 'groom', today() + '.md'), encoding='utf-8') as f:
+            text = f.read()
+        self.assertIn('from inbox as feature (default), awaiting a decision', text)
+
+    def test_intake_dir_is_the_convention(self):
+        asf_home = tempfile.mkdtemp(prefix='inbox_shape_home_')
+        try:
+            products_dir = os.path.join(asf_home, 'products')
+            os.makedirs(products_dir)
+            with open(os.path.join(products_dir, 'p.yaml'), 'w', encoding='utf-8') as f:
+                f.write(f"product: p\nbacklog_dir: {self.root}\nconventions:\n  intake_dir: intake\n")
+            os.rename(os.path.join(self.root, 'inbox'), os.path.join(self.root, 'intake'))
+
+            env = hermetic.build()
+            env.pop('BACKLOG_ID_RANGE', None)
+            env['PYTHONPATH'] = REPO_ROOT + os.pathsep + env.get('PYTHONPATH', '')
+            env['ASF_HOME'] = asf_home
+            with open(os.path.join(self.root, 'intake', 'thing.md'), 'w', encoding='utf-8') as f:
+                f.write("# Billing invoices\nparent: E-0001\n\n## Features\n- Invoicing\n")
+            r = subprocess.run([sys.executable, '-m', 'asf.cli', 'groom', '--product', 'p'],
+                               cwd=self.root, env=env, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(os.listdir(os.path.join(self.root, 'intake')), ['done'])
+        finally:
+            shutil.rmtree(asf_home, ignore_errors=True)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -1,27 +1,50 @@
-"""asf.groom.inbox — turn inbox/*.md into cards or one question."""
+"""asf.groom.inbox — turn <intake_dir>/*.md into cards or one question, by shape."""
 import os
 import re
 
-from asf.groom.shape import infer_parent_epic
-from asf.record.core import tokenize
+from asf import env
+from asf.groom.shape import Card, Question, derive, infer_parent_epic
 from asf.record.ids import mint_id, write_new_item
+from asf.conventions import DEFAULT_INTAKE_DIR
 
-INBOX_TYPES = ('bug', 'epic', 'feature')
-INBOX_KV_RE = re.compile(r'^(type|parent):\s*(.+?)\s*$', re.IGNORECASE)
-BROKEN_WORDS_RE = re.compile(r'\b(broken|red|fails?|failing)\b', re.IGNORECASE)
-GOAL_WORD_RE = re.compile(r'\bgoal\b', re.IGNORECASE)
+INBOX_KV_RE = re.compile(r'^(type|parent|signature|severity|writes|stories):\s*(.+?)\s*$', re.IGNORECASE)
 
 
-def infer_inbox_type(text):
-    if BROKEN_WORDS_RE.search(text):
-        return 'bug'
-    if GOAL_WORD_RE.search(text):
-        return 'epic'
-    return 'feature'
+def intake_dir(args):
+    try:
+        return env.load_product(getattr(args, 'product', None)).conventions.intake_dir
+    except env.ConfigError:
+        return DEFAULT_INTAKE_DIR
+
+
+def _lift_section(lines, heading):
+    """Pull a `## <heading>` block out of `lines`, returning (items, remaining_lines)."""
+    start = None
+    for i, l in enumerate(lines):
+        if l.strip() == f"## {heading}":
+            start = i
+            break
+    if start is None:
+        return [], lines
+    end = start + 1
+    while end < len(lines) and not lines[end].startswith('## '):
+        end += 1
+    items = []
+    for l in lines[start + 1:end]:
+        s = l.strip()
+        if not s.startswith('- '):
+            continue
+        if heading == 'Acceptance':
+            m = re.match(r'^-\s*\[[xX ]\]\s*(.*)$', s)
+            if m and m.group(1):
+                items.append(m.group(1))
+        else:
+            items.append(s[2:])
+    return items, lines[:start] + lines[end:]
 
 
 def parse_inbox_file(text):
-    """(title, type_or_None, parent_or_None, body) from one inbox/*.md file's raw text."""
+    """A `shape.Card` from one inbox/*.md file's raw text."""
     lines = text.split('\n')
     idx = 0
     while idx < len(lines) and not lines[idx].strip():
@@ -29,31 +52,36 @@ def parse_inbox_file(text):
     title = re.sub(r'^#+\s*', '', lines[idx].strip()) if idx < len(lines) else ''
     rest = lines[idx + 1:] if idx < len(lines) else []
 
-    type_ = None
-    parent = None
-    body_lines = []
-    for l in rest:
-        m = INBOX_KV_RE.match(l.strip())
-        if m and body_lines == [] and l.strip():
-            key, val = m.group(1).lower(), m.group(2).strip()
-            if key == 'type':
-                type_ = val.lower()
-            else:
-                parent = val
+    headers = {}
+    body_start = 0
+    for i, l in enumerate(rest):
+        s = l.strip()
+        if not s:
             continue
-        body_lines.append(l)
-    body = '\n'.join(body_lines).strip()
-    return title, type_, parent, body
+        m = INBOX_KV_RE.match(s)
+        if not m:
+            body_start = i
+            break
+        headers[m.group(1).lower()] = m.group(2).strip()
+        body_start = i + 1
+    else:
+        body_start = len(rest)
+
+    body_lines = rest[body_start:]
+    features, body_lines = _lift_section(body_lines, 'Features')
+    acceptance, body_lines = _lift_section(body_lines, 'Acceptance')
+    description = '\n'.join(body_lines).strip()
+    return Card(title, headers, description, features, acceptance)
 
 
-def process_inbox(root, canonical, date, default_bug_parent=None):
-    """Turn every inbox/*.md into a card (moved to inbox/done/) or leave one `## Question` in
-    place. Returns the list of newly minted ids, in filename order.
+def process_inbox(root, canonical, date, default_bug_parent=None, intake_dir='inbox'):
+    """Turn every <intake_dir>/*.md into a card (moved to <intake_dir>/done/) or leave one
+    `## Question` in place. Returns the list of newly minted ids, in filename order.
 
     `default_bug_parent` is the item a Bug with no explicit `parent:` line is filed under; when
     None (no such convention configured), a Bug always asks for its parent explicitly.
     """
-    inbox_dir = os.path.join(root, 'inbox')
+    inbox_dir = os.path.join(root, intake_dir)
     if not os.path.isdir(inbox_dir):
         return []
     created = []
@@ -66,55 +94,34 @@ def process_inbox(root, canonical, date, default_bug_parent=None):
         if '\n## Question' in text or text.startswith('## Question'):
             continue  # already asked; waiting on a human edit
 
-        title, type_in, parent_in, body = parse_inbox_file(text)
-        question = None
+        card = parse_inbox_file(text)
+        result = derive(card, canonical, default_bug_parent=default_bug_parent)
 
-        if type_in:
-            if type_in not in INBOX_TYPES:
-                question = f"Unrecognized `type: {type_in}` — use bug, epic or feature, or remove the line."
-            type_ = type_in
-        else:
-            type_ = infer_inbox_type(title + '\n' + body)
-
-        parent = None
-        if question is None and type_ == 'feature':
-            if parent_in:
-                if parent_in in canonical:
-                    parent = parent_in
-                else:
-                    question = f"`parent: {parent_in}` does not exist — name an existing Epic or remove the line."
-            else:
-                parent = infer_parent_epic(canonical, tokenize(title))
-                if parent is None:
-                    question = "Which Epic is this under? No open Epic shares a title word with it."
-        elif question is None and type_ == 'bug':
-            if parent_in:
-                if parent_in not in canonical:
-                    question = f"`parent: {parent_in}` does not exist — name an existing item or remove the line."
-                else:
-                    parent = parent_in
-            elif default_bug_parent:
-                parent = default_bug_parent
-            else:
-                question = "Which item is this Bug under? Add a `parent: <id>` line."
-
-        if question:
-            new_text = text.rstrip('\n') + f"\n\n## Question\n{question}\n"
+        if isinstance(result, Question):
+            new_text = text.rstrip('\n') + f"\n\n## Question\n{result.text}\n"
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(new_text)
             continue
 
+        type_, rule, parent = result.type, result.rule, result.parent
         new_id = mint_id(root, canonical, type_)
-        typed = {'title': title, 'parent': parent, 'decided': False}
+        typed = {'title': card.title, 'parent': parent, 'decided': False}
         if type_ == 'bug':
-            typed['severity'] = 'S3'
+            severity = card.headers.get('severity')
+            typed['severity'] = severity if severity in ('S1', 'S2', 'S3') else 'S3'
             typed['found_in'] = 'dev'
-        write_new_item(root, canonical, type_, new_id, typed, body, date, 'inbox')
+            typed['signature'] = card.headers.get('signature')
+        elif type_ == 'task':
+            typed['writes'] = [w.strip() for w in card.headers.get('writes', '').split(',') if w.strip()]
+            typed['stories'] = [s.strip() for s in card.headers.get('stories', '').split(',') if s.strip()]
+        write_new_item(root, canonical, type_, new_id, typed, card.description, date, 'inbox',
+                        acceptance=card.acceptance, sections={'Features': card.features},
+                        shape=(rule, type_))
         created.append(new_id)
 
         done_dir = os.path.join(inbox_dir, 'done')
         os.makedirs(done_dir, exist_ok=True)
-        slug = re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-') or name[:-3]
+        slug = re.sub(r'[^a-z0-9]+', '-', card.title.lower()).strip('-') or name[:-3]
         with open(os.path.join(done_dir, f"{slug}.md"), 'w', encoding='utf-8') as f:
             f.write(f"→ {new_id}\n\n{text}")
         os.remove(path)

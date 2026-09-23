@@ -146,7 +146,7 @@ class T10GateScenario(unittest.TestCase):
         # default as a parameter (None unless an operator configures one), unlike the
         # original tool this scenario was ported from, which always assumed E-0009.
         with open(os.path.join(self.root, 'inbox', 'report.md'), 'w', encoding='utf-8') as f:
-            f.write("# Checkout is broken\nparent: E-0009\nCustomers cannot pay right now.\n")
+            f.write("# Checkout is broken\nparent: E-0009\nsignature: checkout-pay\nCustomers cannot pay right now.\n")
 
         # one answered groom file, from "yesterday"
         yesterday = (self.now - datetime.timedelta(days=1)).strftime('%Y-%m-%d')

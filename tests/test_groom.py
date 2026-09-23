@@ -63,30 +63,26 @@ def run(args, cwd):
 
 class InboxParsingTests(unittest.TestCase):
     def test_title_strips_leading_hash(self):
-        title, type_, parent, body = inbox_mod.parse_inbox_file("# Something is off\nmore text\n")
-        self.assertEqual(title, 'Something is off')
-        self.assertIsNone(type_)
-        self.assertIsNone(parent)
-        self.assertEqual(body, 'more text')
+        card = inbox_mod.parse_inbox_file("# Something is off\nmore text\n")
+        self.assertEqual(card.title, 'Something is off')
+        self.assertIsNone(card.headers.get('type'))
+        self.assertIsNone(card.headers.get('parent'))
+        self.assertEqual(card.description, 'more text')
 
     def test_explicit_type_and_parent_lines(self):
         text = "New idea\ntype: bug\nparent: F-0042\nIt is broken.\n"
-        title, type_, parent, body = inbox_mod.parse_inbox_file(text)
-        self.assertEqual(title, 'New idea')
-        self.assertEqual(type_, 'bug')
-        self.assertEqual(parent, 'F-0042')
-        self.assertEqual(body, 'It is broken.')
+        card = inbox_mod.parse_inbox_file(text)
+        self.assertEqual(card.title, 'New idea')
+        self.assertEqual(card.headers.get('type'), 'bug')
+        self.assertEqual(card.headers.get('parent'), 'F-0042')
+        self.assertEqual(card.description, 'It is broken.')
 
-    def test_infer_bug_from_broken_language(self):
-        self.assertEqual(inbox_mod.infer_inbox_type('the login page is broken'), 'bug')
-        self.assertEqual(inbox_mod.infer_inbox_type('CI keeps going red'), 'bug')
-        self.assertEqual(inbox_mod.infer_inbox_type('tests are failing'), 'bug')
-
-    def test_infer_epic_from_goal_language(self):
-        self.assertEqual(inbox_mod.infer_inbox_type('a new goal for the quarter'), 'epic')
-
-    def test_infer_feature_default(self):
-        self.assertEqual(inbox_mod.infer_inbox_type('a nicer settings page'), 'feature')
+    def test_header_lines_after_a_blank_line(self):
+        text = "New idea\n\nsignature: checkout-pay\n\nIt is broken.\n"
+        card = inbox_mod.parse_inbox_file(text)
+        self.assertEqual(card.title, 'New idea')
+        self.assertEqual(card.headers.get('signature'), 'checkout-pay')
+        self.assertEqual(card.description, 'It is broken.')
 
     def test_infer_parent_epic_by_shared_words(self):
         root = make_repo()
@@ -160,7 +156,7 @@ class GroomInboxIntegrationTests(unittest.TestCase):
 
     def test_inbox_file_becomes_a_bug_card_under_configured_default_epic(self):
         with open(os.path.join(self.root, 'inbox', 'thing.md'), 'w', encoding='utf-8') as f:
-            f.write("# Checkout is broken\nCustomers cannot pay.\n")
+            f.write("# Checkout is broken\nsignature: checkout-pay\nCustomers cannot pay.\n")
 
         r = run(['groom', '--default-bug-epic', 'E-0009'], self.root)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -191,14 +187,14 @@ class GroomInboxIntegrationTests(unittest.TestCase):
         # B-0012: a ranged worker exports BACKLOG_ID_RANGE; the fixture's own runs must not inherit it
         with mock.patch.dict(os.environ, {'BACKLOG_ID_RANGE': 'B:0900-0949,S:0900-0949,T:0900-0949'}):
             with open(os.path.join(self.root, 'inbox', 'thing.md'), 'w', encoding='utf-8') as f:
-                f.write("# Checkout is broken\nCustomers cannot pay.\n")
+                f.write("# Checkout is broken\nsignature: checkout-pay\nCustomers cannot pay.\n")
             r = run(['groom', '--default-bug-epic', 'E-0009'], self.root)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(os.listdir(os.path.join(self.root, 'bugs')), ['B-0001.md'])
 
     def test_inbox_bug_with_no_default_configured_asks_a_question(self):
         with open(os.path.join(self.root, 'inbox', 'thing.md'), 'w', encoding='utf-8') as f:
-            f.write("# Checkout is broken\nCustomers cannot pay.\n")
+            f.write("# Checkout is broken\nsignature: checkout-pay\nCustomers cannot pay.\n")
 
         r = run(['groom'], self.root)
         self.assertEqual(r.returncode, 0, r.stderr)
