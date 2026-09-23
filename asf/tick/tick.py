@@ -1,10 +1,10 @@
 """asf.tick.tick — ``asf tick``: the scheduled steps (:mod:`asf.tick.steps`), in order
-``record → health → wave → prs → harvest → batch → daily``.
+``record → health → groom → wave → prs → harvest → batch → daily``.
 
 ``record`` is step 0: metrics backfill → ingest → file-bugs → rollup → index, run in the tick's
 own clone of the product's backlog (:mod:`asf.tick.shadow`).
-``health``, ``wave``, ``prs``, ``harvest`` and ``daily`` are :mod:`asf.tick.step_health`,
-``step_wave``, ``step_prs``, ``step_harvest`` and ``step_daily``; ``batch`` is a command the product declares (or ``off``), as is
+``health``, ``groom``, ``wave``, ``prs``, ``harvest`` and ``daily`` are :mod:`asf.tick.step_health`,
+``step_groom``, ``step_wave``, ``step_prs``, ``step_harvest`` and ``step_daily``; ``batch`` is a command the product declares (or ``off``), as is
 any step a product chooses to run with its own command.
 
 A step that fails prints one ``[step:<name>] FAILED <why>`` and the tick goes on to the next one;
@@ -190,13 +190,6 @@ def run_record_step(product, fresh=False, ctx=None):
         with timed('clone'):
             root = ctx.record_root()
         run_step0(root, product, fresh=fresh)
-        from asf.tick import step_daily
-        with timed('answers'):
-            if step_daily.apply_pending_answers(product, root, event=ctx.event):
-                do_index(root)  # the decided cards' rows on this very tick
-        # new and edited inbox cards typed, new questions into today's groom file: every tick
-        with timed('groom'):
-            step_daily.groom_every_tick(product, root, event=ctx.event)
     except (subprocess.CalledProcessError, env.ConfigError) as e:
         detail = (getattr(e, 'stderr', None) or str(e)).strip()
         print(f"tick: record failed ({detail})")

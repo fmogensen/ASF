@@ -18,7 +18,8 @@ from asf.feeder import rows as feeder_rows
 from asf.harvest import harvest as harvest_mod
 from asf.metrics import metrics
 from asf.metrics import metrics as metrics_mod
-from asf.tick import shadow, step_daily, step_harvest, step_health, step_prs, step_wave, steps, tick
+from asf.groom import answers
+from asf.tick import shadow, step_daily, step_groom, step_harvest, step_health, step_prs, step_wave, steps, tick
 from asf.workers import pool as pool_mod
 from asf.workers import runtime as runtime_mod
 from tests.test_tick import TickTestCase, _git, steps_only
@@ -114,6 +115,7 @@ class OrderedTickTests(StepsTestCase):
                 return 0
             return run
         with mock.patch.object(step_health, 'run', boom), \
+                mock.patch.object(step_groom, 'run', ok('groom')), \
                 mock.patch.object(step_wave, 'run', ok('wave')), \
                 mock.patch.object(step_prs, 'run', ok('prs')), \
                 mock.patch.object(step_harvest, 'run', ok('harvest')), \
@@ -121,7 +123,7 @@ class OrderedTickTests(StepsTestCase):
                 mock.patch.object(shadow, 'ensure_clone', wraps=shadow.ensure_clone) as clone:
             rc, out = self.run_tick()
         self.assertEqual(rc, 1)
-        self.assertEqual(ran, ['health', 'wave', 'prs', 'harvest', 'daily'])
+        self.assertEqual(ran, ['health', 'groom', 'wave', 'prs', 'harvest', 'daily'])
         lines = steps_only(out).splitlines()
         self.assertEqual(lines[0], '[step:health] FAILED health blew up')
         self.assertEqual(lines[1], '[command:batch] batch ran')
@@ -140,7 +142,7 @@ class OrderedTickTests(StepsTestCase):
         tick_log = _git(['show', f'main:metrics/ticks/{day}.jsonl'], self.origin)
         line = json.loads(tick_log.splitlines()[-1])
         self.assertEqual([(s['step'], s['ok']) for s in line['steps']],
-                         [('record', True), ('health', False), ('wave', True), ('prs', True),
+                         [('record', True), ('health', False), ('groom', True), ('wave', True), ('prs', True),
                           ('harvest', True), ('batch', True), ('daily', True)])
         self.assertEqual(line['product'], 'sample')
         # the line keeps the ticks stream's schema: the scorecard reads it without a KeyError
@@ -150,7 +152,7 @@ class OrderedTickTests(StepsTestCase):
         boom = subprocess.CalledProcessError(
             1, ['asf', 'check'], stderr='tasks/T-0042.md:4: continuation line in frontmatter (rule: typed-field)\n')
         later = [mock.patch.object(m, 'run', return_value=0)
-                 for m in (step_health, step_wave, step_prs, step_harvest, step_daily)]
+                 for m in (step_health, step_groom, step_wave, step_prs, step_harvest, step_daily)]
         mocks = [p.start() for p in later]
         for p in later:
             self.addCleanup(p.stop)
@@ -828,7 +830,7 @@ class DailyStepTests(StepsTestCase):
                     print(f'{name} summary')
                     return 0
                 return thunk
-            return [(n, make(n)) for n in ('groom', 'stale', 'file-bugs', 'rollup')]
+            return [(n, make(n)) for n in ('stale', 'rollup')]
         return mock.patch.object(step_daily, 'parts', parts)
 
     def test_one_line_per_part_and_no_commit_of_its_own(self):
@@ -836,8 +838,7 @@ class DailyStepTests(StepsTestCase):
         ctx = self.ctx()
         with self.fake_parts():
             step_daily.run(ctx, out=self.lines.append)
-        self.assertEqual(self.lines, ['daily: groom ok — groom summary', 'daily: stale ok — stale summary',
-                                      'daily: file-bugs ok — file-bugs summary',
+        self.assertEqual(self.lines, ['daily: stale ok — stale summary',
                                       'daily: rollup ok — rollup summary'])
         self.assertTrue(os.path.exists(os.path.join(ctx.record_root(), 'rollup.out')))
         self.assertEqual(self.origin_commits(), before)  # the tick's one commit carries it
@@ -853,24 +854,61 @@ class DailyStepTests(StepsTestCase):
         self.assertIn('daily: stale FAILED — stale broke', self.lines)
         self.assertIn('daily: rollup ok — rollup summary', self.lines)
 
-    def test_real_parts_are_wired(self):
+
+class DailyPartsTests(StepsTestCase):
+    def test_the_daily_is_two_parts_and_only_two(self):
         names = [n for n, _ in step_daily.parts(self.product, self.tmp)]
-        self.assertEqual(names, ['groom', 'stale', 'file-bugs', 'rollup'])
+        self.assertEqual(names, ['stale', 'rollup'])
         self.assertEqual(step_daily.yesterday(__import__('datetime').date(2026, 3, 1)), '2026-02-28')
 
-    def test_parts_hands_the_event_sink_to_groom(self):
-        sentinel = object()
+    def test_asf_tick_daily_prints_those_two_and_stamps_the_day(self):
+        rc, out = self.run_tick(steps='daily')
+        lines = [ln for ln in steps_only(out).splitlines() if ln.startswith('daily:')]
+        self.assertEqual([ln.split()[1] for ln in lines], ['stale', 'rollup'])
+        self.assertNotIn('daily: groom', out)
+        self.assertNotIn('daily: file-bugs', out)
+        self.assertTrue(os.path.exists(steps.stamp_path(self.product)))
+
+
+class GroomStepTests(StepsTestCase):
+    def test_the_step_is_in_its_place_and_owned_by_asf(self):
+        self.assertEqual(steps.STEPS, ['record', 'health', 'groom', 'wave', 'prs', 'harvest',
+                                       'batch', 'daily'])
+        rows = {s: (owner, cmd) for s, owner, cmd in steps.resolve(self.product)}
+        self.assertEqual(rows['groom'][0], 'asf')
+        self.assertEqual(steps.ASF_CALLABLES['groom'], 'asf.tick.step_groom:run')
+
+    def test_the_manifest_lists_it(self):
+        rc, out = self.run_tick(manifest=True)
+        self.assertEqual(rc, 0)
+        self.assertRegex(out, r'groom\s+asf\s+asf\.tick\.step_groom:run')
+
+    def test_off_is_not_refused(self):
+        self.write_product(f'repo_dir: {self.repo}\nsteps:\n  batch: off\n  groom: off\n')
+        rc, out = self.run_tick(steps='groom')
+        self.assertEqual(rc, 0)
+        self.assertIn('tick: step groom off', out)
+
+    def test_tick_steps_groom_runs_it_alone(self):
+        seen = []
+        with mock.patch.object(step_groom, 'run', lambda ctx, out=print: seen.append(1) or 0):
+            rc, out = self.run_tick(steps='groom')
+        self.assertEqual((rc, seen), (0, [1]))
+
+    def test_the_step_runs_cmd_groom_applied_and_a_failure_raises(self):
         calls = []
 
-        def fake_cmd_groom(args, root):
+        def fake(args, root):
             calls.append(args)
-            return 0
-
-        with mock.patch('asf.groom.groom.cmd_groom', fake_cmd_groom):
-            name, thunk = step_daily.parts(self.product, self.tmp, event=sentinel)[0]
-            self.assertEqual(name, 'groom')
-            thunk()
-        self.assertEqual(calls[0].event, sentinel)
+            return 3
+        ctx = self.ctx()
+        with mock.patch('asf.groom.groom.cmd_groom', fake), \
+                mock.patch.object(answers, 'apply_pending_answers', lambda *a, **k: 0):
+            with self.assertRaises(tick.StepFailed):
+                step_groom.run(ctx, out=self.lines.append)
+        self.assertTrue(calls[0].apply)
+        self.assertIsNone(calls[0].answers_file)
+        self.assertEqual(calls[0].event, ctx.event)
 
 
 class GroomAnswersTests(StepsTestCase):
@@ -903,7 +941,7 @@ class GroomAnswersTests(StepsTestCase):
             return 0
         sink = object()
         with mock.patch('asf.groom.groom.cmd_groom', fake_cmd_groom):
-            n = step_daily.apply_pending_answers(self.product, self.tmp, event=sink,
+            n = answers.apply_pending_answers(self.product, self.tmp, event=sink,
                                                  out=self.lines.append, **kw)
         return n, calls, sink
 
@@ -969,15 +1007,44 @@ class GroomAnswersTests(StepsTestCase):
         self.assertEqual(n, 0)
         self.assertTrue(os.path.exists(staged))
 
-    def test_the_record_step_applies_them_and_re_indexes(self):
-        seen = []
-        ctx = self.ctx()
-        with mock.patch.object(step_daily, 'apply_pending_answers',
-                               lambda product, root, event=None, out=print: seen.append(event) or 1), \
-                mock.patch.object(tick, 'do_index') as index:
-            self.assertEqual(tick.run_record_step(self.product, ctx=ctx), 0)  # in a tick: no commit
-        self.assertEqual(seen, [ctx.event])
-        index.assert_called_once_with(ctx.record_root())
+
+
+class AnswersOwnershipTests(StepsTestCase):
+    """The answers helpers live in ``asf.groom.answers``; the record step no longer applies a file,
+    the ``groom`` step does."""
+
+    product_extra = 'steps:\n  batch: off\napprovals:\n  groom: auto\n'
+
+    def write_answers(self, date):
+        d = os.path.join(env.state_dir(self.product), 'groom')
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, f'{date}.answers')
+        with open(path, 'w') as f:
+            f.write(f'- [ ] F-0001 sample — why → answer: adjudicator: yes ({date})\n')
+        return path
+
+    def test_the_daily_module_no_longer_carries_them(self):
+        for name in ('apply_pending_answers', 'carry_staged_answers', 'pending_answers_files',
+                     'groom_every_tick'):
+            self.assertFalse(hasattr(step_daily, name), name)
+            self.assertEqual(hasattr(answers, name), name != 'groom_every_tick')
+
+    def test_a_record_tick_leaves_a_pending_file_and_a_groom_tick_applies_it(self):
+        path = self.write_answers('2026-01-01')
+        applied = []
+
+        def fake(args, root):
+            applied.append(args.answers_file)
+            if args.answers_file:
+                os.rename(args.answers_file, args.answers_file + '.done')
+            return 0
+        with mock.patch('asf.groom.groom.cmd_groom', fake):
+            self.run_tick(steps='record')
+            self.assertTrue(os.path.exists(path))
+            self.assertEqual(applied, [])
+            self.run_tick(steps='groom')
+        self.assertFalse(os.path.exists(path))
+        self.assertIn(path, applied)
 
 
 if __name__ == '__main__':

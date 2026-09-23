@@ -13,7 +13,8 @@ from asf.feeder import rows
 from asf.groom import groom as groom_mod
 from asf.groom import inbox as inbox_mod
 from asf.record.core import canonicalize, load_items, today
-from asf.tick import step_daily, step_wave, tick
+from asf.groom import answers
+from asf.tick import step_groom, step_wave, tick
 from tests.test_feeder import fixture_index, product
 from tests.test_inbox_shape import make_record, seed
 from tests.test_tick_steps import StepsTestCase
@@ -233,28 +234,28 @@ class GroomStateTests(StepsTestCase):
         self.assertEqual(state['attempts'], 1)
         self.assertEqual(state['new'], ['F-0002'])
 
-    def test_the_record_step_runs_the_groom_every_tick(self):
-        seen = []
-        ctx = self.ctx()
-        with mock.patch.object(step_daily, 'apply_pending_answers', lambda *a, **k: 0), \
-                mock.patch.object(step_daily, 'groom_every_tick',
-                                  lambda product, root, event=None, out=print:
-                                  seen.append((root, event)) or 0):
-            self.assertEqual(tick.run_record_step(self.product, ctx=ctx), 0)
-        self.assertEqual(seen, [(ctx.record_root(), ctx.event)])
-
-    def test_groom_every_tick_runs_cmd_groom_incrementally_and_is_quiet_when_nothing_changed(self):
+    def test_the_groom_step_runs_cmd_groom_incrementally_under_apply(self):
         calls = []
 
         def fake(args, root):
-            calls.append(args)
+            calls.append((args, root))
             return 0
-        with mock.patch('asf.groom.groom.cmd_groom', fake):
-            self.assertEqual(step_daily.groom_every_tick(self.product, self.tmp,
-                                                         out=self.lines.append), 0)
-        self.assertTrue(calls[0].incremental)
-        self.assertFalse(calls[0].apply)
+        ctx = self.ctx()
+        with mock.patch.object(answers, 'apply_pending_answers', lambda *a, **k: 0), \
+                mock.patch('asf.groom.groom.cmd_groom', fake):
+            self.assertEqual(step_groom.run(ctx, out=self.lines.append), 0)
+        args, root = calls[0]
+        self.assertEqual(root, ctx.record_root())
+        self.assertTrue(args.incremental)
+        self.assertTrue(args.apply)
+        self.assertEqual(args.event, ctx.event)
         self.assertEqual(self.lines, [])
+
+    def test_the_record_step_does_not_groom(self):
+        ctx = self.ctx()
+        with mock.patch('asf.groom.groom.cmd_groom') as cmd:
+            self.assertEqual(tick.run_record_step(self.product, ctx=ctx), 0)
+        cmd.assert_not_called()
 
     def test_a_staged_answers_file_of_a_later_session_the_same_day_is_carried(self):
         d = os.path.join(env.state_dir(self.product), 'groom')
@@ -268,7 +269,7 @@ class GroomStateTests(StepsTestCase):
         self.session(job='groom-2026-01-01', kind='groom', item='F-0001', pid=999999,
                      started='t1', worktree=wt, branch='groom/2026-01-01')
         self.session(job='groom-2026-01-01', ended='t2', end_reason='finished')
-        moved = step_daily.carry_staged_answers(self.product, out=self.lines.append)
+        moved = answers.carry_staged_answers(self.product, out=self.lines.append)
         self.assertEqual(moved, [os.path.join(d, '2026-01-01.answers')])
 
 

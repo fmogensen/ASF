@@ -379,6 +379,55 @@ class RecordStepTests(TickTestCase):
         self.assertIn('tick: record failed', out)
 
 
+class GroomStepOrderTests(TickTestCase):
+    """The tick's third step: after ``health``, before ``wave``, in the tick's own record clone."""
+
+    product_yaml = 'steps:\n  batch: off\n  daily: off\n  prs: off\n  harvest: off\n'
+
+    def test_the_groom_runs_between_health_and_wave_and_is_logged(self):
+        from asf.tick import step_groom, step_health, step_wave
+        seen = []
+
+        def fake_groom(args, root):
+            seen.append((args.apply, args.answers_file, root))
+            print('groom 2026-01-01: applied 0, inbox 1 card(s)')
+            return 0
+
+        def stub(name):
+            def run(ctx, out=print):
+                out(f'{name}: ran')
+                return 0
+            return run
+        with mock.patch.object(step_health, 'run', stub('health')), \
+                mock.patch.object(step_wave, 'run', stub('wave')), \
+                mock.patch('asf.groom.groom.cmd_groom', fake_groom):
+            rc, out = self.run_tick()
+        self.assertEqual(rc, 0)
+        lines = steps_only(out).splitlines()
+        order = [ln.split()[0].rstrip(':') for ln in lines
+                 if ln.split() and ln.split()[0].rstrip(':') in ('health', 'groom', 'wave')]
+        self.assertEqual(order, ['health', 'groom', 'wave'])
+        self.assertIn('groom 2026-01-01: applied 0, inbox 1 card(s)', out)
+        self.assertEqual(seen, [(True, None, self.record_path())])
+        import json
+        day = time.strftime('%Y-%m-%d', time.gmtime())
+        log = _git(['show', f'main:metrics/ticks/{day}.jsonl'], self.origin)
+        steps_run = json.loads(log.splitlines()[-1])['steps']
+        self.assertIn(('groom', True), [(s['step'], s['ok']) for s in steps_run])
+        self.assertEqual([s['step'] for s in steps_run][:4], ['record', 'health', 'groom', 'wave'])
+
+    def test_a_failing_groom_is_a_failed_step_and_the_wave_still_runs(self):
+        from asf.tick import step_health, step_wave
+        ran = []
+        with mock.patch.object(step_health, 'run', lambda ctx: 0), \
+                mock.patch.object(step_wave, 'run', lambda ctx: ran.append('wave') or 0), \
+                mock.patch('asf.groom.groom.cmd_groom', lambda args, root: 2):
+            rc, out = self.run_tick()
+        self.assertEqual(rc, 1)
+        self.assertIn('[step:groom] FAILED groom exited 2', out)
+        self.assertEqual(ran, ['wave'])
+
+
 class ManifestTests(TickTestCase):
     product_yaml = ('steps:\n'
                     '  health: bash ~/x/health.sh --fix\n'
@@ -389,6 +438,7 @@ class ManifestTests(TickTestCase):
         self.assertEqual(rows, [
             ('record', 'asf', None),
             ('health', 'command', 'bash ~/x/health.sh --fix'),
+            ('groom', 'asf', None),
             ('wave', 'off', None),
             ('prs', 'asf', None),
             ('harvest', 'asf', None),
@@ -409,6 +459,7 @@ class ManifestTests(TickTestCase):
             'step     owner       command\n'
             'record   asf         asf.tick.tick:run_record_step\n'
             'health   command     bash ~/x/health.sh --fix\n'
+            'groom    asf         asf.tick.step_groom:run\n'
             'wave     off         -\n'
             'prs      asf         asf.tick.step_prs:run\n'
             'harvest  asf         asf.tick.step_harvest:run\n'
@@ -423,6 +474,7 @@ class ManifestTests(TickTestCase):
             'step     owner    command\n'
             'record   asf      asf.tick.tick:run_record_step\n'
             'health   asf      asf.tick.step_health:run\n'
+            'groom    asf      asf.tick.step_groom:run\n'
             'wave     asf      asf.tick.step_wave:run\n'
             'prs      asf      asf.tick.step_prs:run\n'
             'harvest  asf      asf.tick.step_harvest:run\n'

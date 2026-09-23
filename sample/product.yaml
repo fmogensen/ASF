@@ -52,7 +52,7 @@ clocks:
     steps: [record]
     every: 5m
   dispatch:
-    steps: [health, wave, prs, harvest, batch]
+    steps: [health, groom, wave, prs, harvest, batch]
     every: 10m
   daily:
     steps: [daily]
