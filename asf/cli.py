@@ -55,8 +55,8 @@ def build_parser():
     p_new.add_argument('--body-file')
     p_new.add_argument('--force', action='store_true')
     p_new.add_argument('--product')
-    from asf.record.new import add_arguments as add_new_bug_arguments
-    add_new_bug_arguments(p_new)
+    from asf.record.new import add_arguments as add_new_shape_arguments
+    add_new_shape_arguments(p_new)
 
     p_inbox = sub.add_parser(
         'inbox', help="file an untyped card into the record's intake dir (the groom types it)")

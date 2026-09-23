@@ -17,6 +17,8 @@ from asf import cli, env
 
 CARD = ('---\nid: E-0001\ntype: epic\ntitle: the epic\n# ---- machine ----\nstate: New\n---\n'
         '## Description\nx\n\n## History\n- made\n')
+FEATURE = ('---\nid: F-0001\ntype: feature\ntitle: the feature\nparent: E-0001\n# ---- machine ----\nstate: New\n---\n'
+           '## Description\nx\n\n## History\n- made\n')
 BUG = ('---\nid: B-0001\ntype: bug\ntitle: the bug\nparent: E-0001\nseverity: S1\ndecided: true\n'
        '# ---- machine ----\nstate: New\n---\n## Description\nx\n\n## Fix\ny\n\n## History\n- made\n')
 
@@ -25,7 +27,7 @@ BUG = ('---\nid: B-0001\ntype: bug\ntitle: the bug\nparent: E-0001\nseverity: S1
 #: commands work in the product repo; ``view`` commands read the record. Every one of them,
 #: from an empty cwd, leaves that cwd empty.
 COMMANDS = [
-    (['new', 'bug', '--title', 'a bug from nowhere', '--parent', 'E-0001', '--severity', 'S2'], 'record'),
+    (['new', 'story', '--title', 'a story from nowhere', '--parent', 'F-0001', '--acceptance', 'x'], 'record'),
     (['inbox', '--title', 'a card from nowhere'], 'record'),
     (['check'], 'record'),
     (['index'], 'record'),
@@ -72,6 +74,9 @@ class EveryCommandFromNowhere(unittest.TestCase):
         os.makedirs(os.path.join(cls.record, 'bugs'))
         with open(os.path.join(cls.record, 'epics', 'E-0001.md'), 'w') as f:
             f.write(CARD)
+        os.makedirs(os.path.join(cls.record, 'features'))
+        with open(os.path.join(cls.record, 'features', 'F-0001.md'), 'w') as f:
+            f.write(FEATURE)
         with open(os.path.join(cls.record, 'bugs', 'B-0001.md'), 'w') as f:
             f.write(BUG)
         with open(os.path.join(cls.record, 'index.json'), 'w') as f:
@@ -139,8 +144,8 @@ class EveryCommandFromNowhere(unittest.TestCase):
         os.chdir(self.repo)
         try:
             before = sorted(os.listdir(self.repo))
-            rc, out = self.run_cli(['new', 'bug', '--title', 'from the repo', '--parent', 'E-0001',
-                                    '--severity', 'S2', '--product', 'sample'])
+            rc, out = self.run_cli(['new', 'story', '--title', 'from the repo', '--parent', 'F-0001',
+                                    '--acceptance', 'x', '--product', 'sample'])
             self.assertEqual(sorted(os.listdir(self.repo)), before, out)
             self.assertEqual(out.splitlines()[0], f'record: {self.record}', out)
         finally:

@@ -26,9 +26,13 @@ class RecordCarriesSchemaVersionTests(unittest.TestCase):
     def test_index_and_every_card_carry_schema_version(self):
         """B-0004: a record written from scratch is stamped — index.json and each card — and
         `check` fails a card without a stamp; the schema migration stamps the cards lacking one."""
-        r = run(['new', 'epic', '--title', 'Ship it'], self.root)
+        machine = ['schema_version: %s' % schema.SCHEMA_VERSION, 'state: New',
+                   'stage_since: 2026-09-01T00:00:00Z', 'updated: 2026-09-01T00:00:00Z']
+        write_item(self.root, 'E-0001', 'epic', 'Ship it', machine_lines=machine)
+        write_item(self.root, 'F-0001', 'feature', 'Shipping', parent='E-0001', machine_lines=machine)
+        r = run(['new', 'story', '--title', 'Ship it', '--parent', 'F-0001', '--acceptance', 'x'], self.root)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(card_version(self.root, 'epics', 'E-0001'), schema.SCHEMA_VERSION)
+        self.assertEqual(card_version(self.root, 'stories', 'S-0001'), schema.SCHEMA_VERSION)
 
         r = run(['index'], self.root)
         self.assertEqual(r.returncode, 0, r.stderr)

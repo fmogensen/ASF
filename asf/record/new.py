@@ -7,7 +7,7 @@ from asf.record.core import (
     NO_PARENT_TYPES, PARENT_TYPES, TYPES, canonicalize, is_open, jaccard, load_items, now_iso,
     today, tokenize,
 )
-from asf.record.ids import mint_id
+from asf.record.ids import mint_id, write_new_item
 from asf.schema import SCHEMA_VERSION
 
 
@@ -16,7 +16,6 @@ SEVERITIES = ('S1', 'S2', 'S3')
 # Typed fields `--set` may write, beyond the ones that have their own flag.
 _COMMON_SET = ('rank', 'decided', 'blockedBy', 'links', 'priority', 'area', 'legacy_id')
 SETTABLE = {t: set(_COMMON_SET) for t in TYPES}
-SETTABLE['bug'] |= {'source', 'severity', 'found_in', 'signature'}
 SETTABLE['rule'] |= {'scope', 'enforced', 'reason', 'check'}
 SETTABLE['decision'] |= {'decided_by', 'date'}
 
@@ -37,19 +36,22 @@ def _parse_sets(type_, pairs):
 
 
 def add_arguments(p_new):
-    """The Bug-only flags of ``asf new`` (cli.py calls this on the ``new`` subparser)."""
-    p_new.add_argument('--severity', choices=SEVERITIES, help='required for bug')
-    p_new.add_argument('--signature', help='bug: the key "same signature = same Bug" files under')
+    """The shape flags of ``asf new`` (cli.py calls this on the ``new`` subparser)."""
     p_new.add_argument('--set', action='append', metavar='KEY=VALUE',
                        help='any other typed field of the type (repeatable; links.KEY=V for links)')
-    p_new.add_argument('--found-in', default='dev', help='bug: where it was found (default dev)')
+    p_new.add_argument('--acceptance', action='append', metavar='TEXT',
+                       help='story: one acceptance item (repeatable; required)')
+    p_new.add_argument('--writes', action='append', metavar='GLOB',
+                       help='task: one path of the writes: footprint (repeatable; required)')
 
 
 def cmd_new(args, root):
     type_ = args.type
-    severity = getattr(args, 'severity', None)
-    signature = getattr(args, 'signature', None)
-    found_in = getattr(args, 'found_in', None) or 'dev'
+    if type_ in ('epic', 'feature', 'bug'):
+        print(f"error: {type_} is new work — it enters through the inbox: "
+              "asf inbox --title \"…\" [--body-file F]; the groom derives its type "
+              "from the card's shape", file=sys.stderr)
+        return 2
     if type_ not in TYPES:
         print(f"error: unknown type {type_!r}", file=sys.stderr)
         return 2
@@ -60,12 +62,6 @@ def cmd_new(args, root):
         return 2
     if args.priority and args.priority not in ('need', 'nice'):
         print("error: --priority must be need or nice", file=sys.stderr)
-        return 2
-
-    if type_ == 'bug' and severity not in SEVERITIES:
-        print("usage: asf new bug --title T --parent E-nnnn --severity {S1,S2,S3} "
-              "[--signature S] [--found-in WHERE]", file=sys.stderr)
-        print("error: bug requires --severity (S1, S2 or S3)", file=sys.stderr)
         return 2
 
     by_id, _errors = load_items(root)
@@ -89,6 +85,17 @@ def cmd_new(args, root):
         if ptype not in PARENT_TYPES[type_]:
             print(f"error: {type_} cannot have parent type {ptype}", file=sys.stderr)
             return 2
+
+    acceptance = getattr(args, 'acceptance', None)
+    writes = getattr(args, 'writes', None)
+    if type_ == 'story' and not acceptance:
+        print("error: a Story is one PR with one acceptance list — give --acceptance",
+              file=sys.stderr)
+        return 2
+    if type_ == 'task' and not writes:
+        print("error: a Task is one session with a writes: footprint — give --writes",
+              file=sys.stderr)
+        return 2
 
     tokens_new = tokenize(args.title)
     matches = []
@@ -117,16 +124,24 @@ def cmd_new(args, root):
         meta['area'] = args.area
     if args.legacy_id:
         meta['legacy_id'] = args.legacy_id
-    if type_ == 'bug':
-        meta['severity'] = severity
-        meta['found_in'] = found_in
-        if signature:
-            meta['signature'] = signature
+    if type_ == 'task':
+        meta['writes'] = writes
     for key, sub, value in sets:
         if sub:
             meta.setdefault(key, {})[sub] = value
         else:
             meta[key] = value
+    if type_ in ('story', 'task'):
+        body = ''
+        if args.body_file:
+            with open(args.body_file, encoding='utf-8') as f:
+                body = f.read().rstrip('\n')
+        shape = ('parent-feature', 'story') if type_ == 'story' else ('writes', 'task')
+        typed = {k: v for k, v in meta.items() if k not in ('id', 'type')}
+        write_new_item(root, canonical, type_, new_id, typed, body, today(), 'new',
+                       acceptance=acceptance or (), shape=shape)
+        print(new_id)
+        return 0
     ts = now_iso()
     meta['schema_version'] = SCHEMA_VERSION
     meta['state'] = 'New'

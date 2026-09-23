@@ -506,3 +506,53 @@ class InboxCommandTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class NewShapeTest(unittest.TestCase):
+    """`asf new` through the CLI: it mints only what a spec or plan cuts."""
+
+    def setUp(self):
+        self.root = make_record()
+        seed(self.root)
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _read(self, folder, id_):
+        with open(os.path.join(self.root, folder, f'{id_}.md'), encoding='utf-8') as f:
+            return f.read()
+
+    def test_new_epic_feature_bug_refused(self):
+        before = {f: sorted(os.listdir(os.path.join(self.root, f))) for f in ('epics', 'features', 'bugs')}
+        for type_ in ('epic', 'feature', 'bug'):
+            r = run(['new', type_, '--title', 'Something new'], self.root)
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn('enters through the inbox: asf inbox', r.stderr)
+        after = {f: sorted(os.listdir(os.path.join(self.root, f))) for f in ('epics', 'features', 'bugs')}
+        self.assertEqual(before, after)
+
+    def test_new_story_needs_acceptance(self):
+        r = run(['new', 'story', '--title', 'T', '--parent', 'F-0001'], self.root)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('give --acceptance', r.stderr)
+        r = run(['new', 'story', '--title', 'T', '--parent', 'F-0001',
+                 '--acceptance', 'python3 -m unittest tests.x'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        text = self._read('stories', r.stdout.strip())
+        self.assertIn('- [ ] python3 -m unittest tests.x\n', text)
+        self.assertIn('created (new) — shape: parent-feature → story', text)
+
+    def test_new_task_needs_writes(self):
+        r = run(['new', 'task', '--title', 'T', '--parent', 'F-0001'], self.root)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('give --writes', r.stderr)
+        r = run(['new', 'task', '--title', 'T', '--parent', 'F-0001',
+                 '--writes', 'asf/groom/**', '--writes', 'tests/test_groom.py'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        text = self._read('tasks', r.stdout.strip())
+        self.assertIn('writes: [asf/groom/**, tests/test_groom.py]', text)
+        self.assertIn('created (new) — shape: writes → task', text)
+
+    def test_new_decision_unchanged(self):
+        r = run(['new', 'decision', '--title', 'T'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)

@@ -90,7 +90,8 @@ machine block (`state: New | Active | Resolved | Closed`, `stage`, `evidence`, `
 ## Tooling
 
 ```
-asf new <type> --title "…"      mint an item
+asf inbox --title "…"      file new work (the groom types it)
+asf new story|task …      cut a Story or Task from a spec or plan
 asf check                       validate (the pre-commit hook runs it)
 asf index                       rewrite Children/Backlinks and index.json
 asf roadmap | backlog | status  the views

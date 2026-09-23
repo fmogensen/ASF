@@ -135,44 +135,47 @@ class NewCommandTests(unittest.TestCase):
     def setUp(self):
         self.root = make_repo()
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        write_item(self.root, 'F-0001', 'feature', 'Free plan', parent='E-0001')
 
     def test_mints_sequential_ids(self):
-        r1 = run(['new', 'epic', '--title', 'Factory'], self.root)
+        r1 = run(['new', 'story', '--title', 'Factory', '--parent', 'F-0001', '--acceptance', 'x'], self.root)
         self.assertEqual(r1.returncode, 0, r1.stderr)
-        self.assertEqual(r1.stdout.strip(), 'E-0001')
-        r2 = run(['new', 'epic', '--title', 'Something else entirely'], self.root)
-        self.assertEqual(r2.stdout.strip(), 'E-0002')
+        self.assertEqual(r1.stdout.strip(), 'S-0001')
+        r2 = run(['new', 'story', '--title', 'Something else entirely', '--parent', 'F-0001',
+                  '--acceptance', 'x'], self.root)
+        self.assertEqual(r2.stdout.strip(), 'S-0002')
 
     def test_overlap_refused_and_force_overrides(self):
-        run(['new', 'epic', '--title', 'Factory Operations'], self.root)
-        r = run(['new', 'epic', '--title', 'The Factory Operations'], self.root)
+        run(['new', 'story', '--title', 'Factory Operations', '--parent', 'F-0001', '--acceptance', 'x'], self.root)
+        r = run(['new', 'story', '--title', 'The Factory Operations', '--parent', 'F-0001',
+                 '--acceptance', 'x'], self.root)
         self.assertEqual(r.returncode, 3)
-        self.assertIn('E-0001', r.stderr)
-        r2 = run(['new', 'epic', '--title', 'The Factory Operations', '--force'], self.root)
+        self.assertIn('S-0001', r.stderr)
+        r2 = run(['new', 'story', '--title', 'The Factory Operations', '--parent', 'F-0001',
+                  '--acceptance', 'x', '--force'], self.root)
         self.assertEqual(r2.returncode, 0)
 
     def test_missing_parent_refused(self):
-        r = run(['new', 'feature', '--title', 'Free plan'], self.root)
+        r = run(['new', 'story', '--title', 'T', '--acceptance', 'x'], self.root)
         self.assertEqual(r.returncode, 2)
 
     def test_epic_rejects_parent(self):
-        write_item(self.root, 'E-0001', 'epic', 'Factory')
-        r = run(['new', 'epic', '--title', 'Other epic', '--parent', 'E-0001'], self.root)
+        r = run(['new', 'decision', '--title', 'T', '--parent', 'E-0001'], self.root)
         self.assertEqual(r.returncode, 2)
 
     def test_wrong_parent_type_refused(self):
-        write_item(self.root, 'E-0001', 'epic', 'Factory')
-        r = run(['new', 'story', '--title', 'A story', '--parent', 'E-0001'], self.root)
+        r = run(['new', 'story', '--title', 'A story', '--parent', 'E-0001', '--acceptance', 'x'], self.root)
         self.assertEqual(r.returncode, 2)
 
     def test_nonexistent_parent_refused(self):
-        r = run(['new', 'feature', '--title', 'Free plan', '--parent', 'E-0009'], self.root)
+        r = run(['new', 'story', '--title', 'Free plan', '--parent', 'F-0009', '--acceptance', 'x'], self.root)
         self.assertEqual(r.returncode, 2)
 
     def test_new_writes_skeleton_and_empty_machine_block(self):
-        r = run(['new', 'epic', '--title', 'Factory'], self.root)
+        r = run(['new', 'story', '--title', 'Factory', '--parent', 'F-0001', '--acceptance', 'x'], self.root)
         iid = r.stdout.strip()
-        text = open(os.path.join(self.root, 'epics', f'{iid}.md'), encoding='utf-8').read()
+        text = open(os.path.join(self.root, 'stories', f'{iid}.md'), encoding='utf-8').read()
         for heading in ('## Description', '## Acceptance', '## Non-goals',
                         '## History', '## Children', '## Backlinks'):
             self.assertIn(heading, text)
@@ -189,24 +192,24 @@ class NewSetFieldsTests(unittest.TestCase):
 
     def test_new_set_types_the_schema_fields(self):
         write_item(self.root, 'E-0001', 'epic', 'Factory')
-        r = run(['new', 'bug', '--title', 'Broken thing', '--parent', 'E-0001',
-                 '--severity', 'S2', '--set', 'rank=5', '--set', 'source=review',
+        write_item(self.root, 'F-0001', 'feature', 'Free plan', parent='E-0001')
+        r = run(['new', 'story', '--title', 'Broken thing', '--parent', 'F-0001',
+                 '--acceptance', 'x', '--set', 'rank=5',
                  '--set', 'blockedBy=[E-0001]', '--set', 'links.spec=docs/specs/x.md'],
                 self.root)
         self.assertEqual(r.returncode, 0, r.stderr)
         iid = r.stdout.strip()
-        text = open(os.path.join(self.root, 'bugs', f'{iid}.md'), encoding='utf-8').read()
+        text = open(os.path.join(self.root, 'stories', f'{iid}.md'), encoding='utf-8').read()
         meta, _body = frontmatter.parse(text)
         self.assertEqual(meta['rank'], 5)
-        self.assertEqual(meta['source'], 'review')
         self.assertEqual(meta['blockedBy'], ['E-0001'])
         self.assertEqual(meta['links'], {'spec': 'docs/specs/x.md'})
 
     def test_new_set_refuses_a_field_the_type_does_not_have(self):
-        r = run(['new', 'epic', '--title', 'Factory', '--set', 'severity=S1'], self.root)
+        r = run(['new', 'decision', '--title', 'Factory', '--set', 'severity=S1'], self.root)
         self.assertEqual(r.returncode, 2)
         self.assertIn('severity', r.stderr)
-        r = run(['new', 'epic', '--title', 'Factory', '--set', 'noequals'], self.root)
+        r = run(['new', 'decision', '--title', 'Factory', '--set', 'noequals'], self.root)
         self.assertEqual(r.returncode, 2)
 
 
@@ -501,58 +504,18 @@ class IndexCommandTests(unittest.TestCase):
 
 
 class BugSeverityTests(unittest.TestCase):
-    """B-0015: `asf new bug` takes --severity/--signature/--found-in; `asf check` flags none."""
+    """`asf new bug` is refused (a Bug enters through the inbox); `asf check` flags no severity."""
 
     def setUp(self):
         self.root = make_repo()
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
         write_item(self.root, 'E-0001', 'epic', 'Factory')
 
-    def new_bug(self, *extra):
-        import argparse
-        import contextlib
-        import io
-        from asf.record import new as new_mod
-        p = argparse.ArgumentParser(prog='asf')
-        p_new = p.add_subparsers(dest='command').add_parser('new')
-        p_new.add_argument('type')
-        p_new.add_argument('--title', required=True)
-        p_new.add_argument('--parent')
-        p_new.add_argument('--priority')
-        p_new.add_argument('--area')
-        p_new.add_argument('--legacy-id')
-        p_new.add_argument('--body-file')
-        p_new.add_argument('--force', action='store_true')
-        new_mod.add_arguments(p_new)
-        args = p.parse_args(['new', 'bug', '--title', 'Crash on save', '--parent', 'E-0001',
-                             *extra])
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = new_mod.cmd_new(args, self.root)
-        return rc, out.getvalue().strip(), err.getvalue()
-
-    def test_bug_without_severity_is_refused_with_usage(self):
-        rc, _out, err = self.new_bug()
-        self.assertEqual(rc, 2)
-        self.assertIn('usage:', err)
-        self.assertIn('--severity', err)
+    def test_new_bug_refused(self):
+        r = run(['new', 'bug', '--title', 'Crash on save', '--parent', 'E-0001'], self.root)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('enters through the inbox', r.stderr)
         self.assertEqual(os.listdir(os.path.join(self.root, 'bugs')), [])
-
-    def test_severity_signature_found_in_written_in_order_before_machine_block(self):
-        rc, out, _err = self.new_bug('--severity', 'S2', '--signature', 'crash-save',
-                                     '--found-in', 'prod')
-        self.assertEqual(rc, 0)
-        text = open(os.path.join(self.root, 'bugs', f'{out}.md'), encoding='utf-8').read()
-        keys = ['severity: S2', 'found_in: prod', 'signature: crash-save', '# ---- machine ----']
-        positions = [text.index(k) for k in keys]
-        self.assertEqual(positions, sorted(positions))
-
-    def test_found_in_defaults_to_dev(self):
-        rc, out, _err = self.new_bug('--severity', 'S3')
-        self.assertEqual(rc, 0)
-        text = open(os.path.join(self.root, 'bugs', f'{out}.md'), encoding='utf-8').read()
-        self.assertIn('found_in: dev', text)
-        self.assertNotIn('signature:', text)
 
     def test_check_flags_bug_without_severity(self):
         write_item(self.root, 'B-0001', 'bug', 'No severity', parent='E-0001')
