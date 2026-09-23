@@ -597,6 +597,32 @@ SAMPLE_LOG = """03:21 REFUSED-WRITE: session fix-spec-api-docs-r2: UNIQUE constr
 """
 
 
+class SessionEventTests(Base):
+    RECORD = {'job': 'p2-t1', 'account': 'accta', 'started': '2026-09-21T06:00:00Z',
+              'ended': '2026-09-21T06:10:00Z', 'end_reason': 'done'}
+
+    def event(self, result):
+        return metrics.session_event(self.RECORD, result, self.items)
+
+    def test_input_tokens_are_the_sum_of_the_three(self):
+        ev = self.event({'type': 'result', 'num_turns': 9,
+                         'usage': {'input_tokens': 10, 'cache_creation_input_tokens': 5,
+                                   'cache_read_input_tokens': 100, 'output_tokens': 7}})
+        self.assertEqual((ev['in_tokens'], ev['turns']), (115, 9))
+
+    def test_no_usage_is_null_not_zero(self):
+        ev = self.event({'type': 'result'})
+        self.assertEqual((ev['in_tokens'], ev['turns']), (None, None))
+        self.assertEqual((self.event(None)['in_tokens'], self.event(None)['turns']), (None, None))
+
+    def test_the_schema_takes_them(self):
+        ev = metrics.validate('sessions', dict(self.event({'num_turns': 3, 'usage': {'input_tokens': 4}}),
+                                               item=None), {})
+        self.assertEqual((ev['in_tokens'], ev['turns']), (4, 3))
+        old = metrics.validate('sessions', {'task': 't', 'account': 'a', 'result': 'done'}, {})
+        self.assertEqual((old['in_tokens'], old['turns']), (None, None))
+
+
 class Backfill(Base):
     NOW = dt.datetime(2026, 9, 21, 6, 30).astimezone()
 

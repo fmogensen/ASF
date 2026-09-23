@@ -123,6 +123,7 @@ SCHEMAS = {
         'branch': (('str', 'null'), None), 'result': (('str',), REQ), 'reason': (('str', 'null'), None),
         'round': (('int', 'null'), MATCH), 'pushes': (('int', 'null'), None), 'minutes': (('num', 'null'), None),
         'usd': (('num', 'null'), None), 'session': (('str', 'null'), None),
+        'in_tokens': (('int', 'null'), None), 'turns': (('int', 'null'), None),
     },
     'ticks': {
         'ts': (('str',), TS), 'tick': (('int',), REQ), 'duration_s': (('num', 'null'), None),
@@ -889,6 +890,21 @@ def session_kind(record):
     return kind or derive_kind(record.get('job') or '')
 
 
+INPUT_USAGE_KEYS = ('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens')
+
+
+def in_tokens(result):
+    """The input a session sent: uncached, cache-written and cache-read tokens from the result's
+    `usage`, summed over those present as numbers; None when none is. Cached input is re-sent
+    input, so the cache warming does not read as a smaller brief."""
+    usage = (result or {}).get('usage')
+    if not isinstance(usage, dict):
+        return None
+    got = [usage[k] for k in INPUT_USAGE_KEYS
+           if isinstance(usage.get(k), (int, float)) and not isinstance(usage.get(k), bool)]
+    return int(sum(got)) if got else None
+
+
 def session_event(record, result, items=None):
     """One `sessions` event from a registry record (+ its log's result line, if any).
     `minutes` prefers the log's own duration, else the registry's started→ended clock; `usd` is
@@ -904,6 +920,7 @@ def session_event(record, result, items=None):
         if start is not None and start <= ended:
             minutes = round((ended - start).total_seconds() / 60, 1)
     usd = (result or {}).get('total_cost_usd')
+    turns = (result or {}).get('num_turns')
     # The record may be public: a session line carries the account's INDEX in the pool, never its
     # name, and only the first line of the session's report, capped (B-0023). The registry under
     # ~/.ASF/state keeps the name and the full report.
@@ -916,7 +933,8 @@ def session_event(record, result, items=None):
           'result': str(record.get('end_reason') or ('running' if not record.get('ended') else 'unknown')),
           'reason': reason,
           'minutes': minutes, 'usd': usd if isinstance(usd, (int, float)) else None,
-          'session': record.get('session')}
+          'session': record.get('session'), 'in_tokens': in_tokens(result),
+          'turns': turns if isinstance(turns, int) and not isinstance(turns, bool) else None}
     item = record.get('item')
     if item and ID_RE.match(str(item)) and (not items or item in items):
         ev['item'] = item
