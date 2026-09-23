@@ -50,6 +50,17 @@ def fake_ps(directory, table=None):
     return bindir
 
 
+class RaisingSource(observe.SessionSource):
+    """A source that cannot be read (F-0076 D10), stated as a source rather than as a stub on
+    ``PATH``: what the pool does with ``why`` is the subject, not how ``ps`` failed."""
+
+    def __init__(self, why):
+        self.why = why
+
+    def read(self):
+        raise observe.ObserveError(self.why)
+
+
 class SessionIdTest(unittest.TestCase):
     def test_format_and_parse(self):
         sid = lifecycle.session_id('p', 'spec-f-0001', '2026-09-22T10:15:00Z')
@@ -320,6 +331,13 @@ class PoolAcrossProductsTest(Home):
                                                'product': product.name, 'started': '2026-09-23',
                                                'pid': 4242}, **fields))
 
+    def cfg_with_config_dir(self, cap=1):
+        """``self.cfg``, but acct-a carries the ``config_dir`` an observed session names: D7's
+        first rule is what attributes a session on the machine to one of our accounts."""
+        return {'worker_pool': {'accounts': [{'name': 'acct-a', 'role': 'local', 'cap': cap,
+                                              'config_dir': '/cfg/acct-a'}],
+                                'models': {'Opus': 'opus'}, 'sessions': 'fake'}}
+
     def test_other_products_sessions_count(self):
         self.register(self.other(), 'spec-f-0002')
         p = pool_mod.Pool.from_config(self.cfg, self.product)
@@ -367,6 +385,79 @@ class PoolAcrossProductsTest(Home):
 
     def test_a_hand_built_pool_is_readable(self):
         self.assertEqual(pool_mod.Pool([self.acct()]).unreadable, '')
+
+    def test_foreign_session_counts(self):
+        """A session of nobody's on one of our accounts still spends its seat (D8): no registry
+        run at all, and acct-a at ``cap: 1`` has no room."""
+        cfg = self.cfg_with_config_dir(cap=1)
+        acct = pool_mod.accounts_from_config(cfg)[0]
+        source = observe.FakeSource([{'pid': 5150, 'ppid': 1,
+                                      'env': {'CLAUDE_CONFIG_DIR': '/cfg/acct-a'}}])
+        p = pool_mod.Pool.from_config(cfg, self.product, quota_source=quota_mod.FakeQuotaSource({}),
+                                      session_source=source)
+        self.assertEqual(p.unreadable, '')
+        self.assertEqual(p.load(acct), 1)
+        self.assertEqual(p.live[-1]['owner'], 'foreign')
+        self.assertIsNone(p.live[-1]['model'])
+        self.assertEqual(p.pick_account('task', 'opus'), (None, pool_mod.REASON_FULL))
+
+    def test_an_extra_is_not_held_to_a_per_model_cap(self):
+        """An extra's model is not known, so ``model: None`` falls out of the per-model ceiling
+        while still counting toward ``cap``."""
+        cfg = self.cfg_with_config_dir(cap=2)
+        cfg['worker_pool']['accounts'][0]['caps'] = {'opus': 1}
+        acct = pool_mod.accounts_from_config(cfg)[0]
+        source = observe.FakeSource([{'pid': 5150, 'ppid': 1,
+                                      'env': {'CLAUDE_CONFIG_DIR': '/cfg/acct-a'}}])
+        p = pool_mod.Pool.from_config(cfg, self.product, quota_source=quota_mod.FakeQuotaSource({}),
+                                      session_source=source)
+        self.assertEqual((p.load(acct), p.load(acct, 'opus')), (1, 0))
+        self.assertTrue(p.under_caps(acct, 'opus'))
+
+    def test_no_double_count(self):
+        """One run and its own process are one seat, whether the pid or the id is what matches."""
+        sid = lifecycle.session_id('sample', 'spec-f-0001', '2026-09-23T10:15:00Z')
+        self.register(self.product, 'spec-f-0001', pid=5150, session=sid)
+        cfg = self.cfg_with_config_dir(cap=2)
+        acct = pool_mod.accounts_from_config(cfg)[0]
+        both = observe.FakeSource([{'pid': 5150, 'ppid': 1,
+                                    'env': {'CLAUDE_CONFIG_DIR': '/cfg/acct-a',
+                                            'ASF_SESSION': sid}}])
+        p = pool_mod.Pool.from_config(cfg, self.product, quota_source=quota_mod.FakeQuotaSource({}),
+                                      session_source=both)
+        self.assertEqual(p.load(acct), 1)
+        # The id alone is enough: the same run observed at a pid the registry never recorded.
+        by_id = observe.FakeSource([{'pid': 6001, 'ppid': 1,
+                                     'env': {'CLAUDE_CONFIG_DIR': '/cfg/acct-a',
+                                             'ASF_SESSION': sid}}])
+        p = pool_mod.Pool.from_config(cfg, self.product, quota_source=quota_mod.FakeQuotaSource({}),
+                                      session_source=by_id)
+        self.assertEqual(p.load(acct), 1)
+
+    def test_unreadable_prints_and_counts_registry(self):
+        """D10: the table cannot be read → the wave says so once, and load is the registered runs
+        across products. The factory degrades, it does not stop."""
+        self.register(self.product, 'spec-f-0001', pid=5150)
+        self.register(self.other(), 'spec-f-0002', pid=5151)
+        p = pool_mod.Pool.from_config(self.cfg, self.product,
+                                      quota_source=quota_mod.FakeQuotaSource({}),
+                                      session_source=RaisingSource('ps: not found'))
+        self.assertEqual(p.unreadable, 'ps: not found')
+        self.assertEqual(p.load(self.acct()), 2)
+        lines = []
+        wave_mod.wave(self.product, [feature_row('spec-f-0003')], 5, pool=p, cfg=self.cfg,
+                      out=lines.append)
+        self.assertEqual([l for l in lines if l.startswith('pool: sessions unreadable')],
+                         ['pool: sessions unreadable (ps: not found) — counting registered '
+                          'sessions only'])
+
+    def test_a_readable_pool_prints_no_unreadable_line(self):
+        lines = []
+        pool = pool_mod.Pool.from_config(self.cfg, self.product,
+                                         quota_source=quota_mod.FakeQuotaSource({}))
+        wave_mod.wave(self.product, [feature_row('spec-f-0001')], 0, pool=pool, cfg=self.cfg,
+                      out=lines.append)
+        self.assertEqual([l for l in lines if l.startswith('pool: sessions unreadable')], [])
 
 
 if __name__ == '__main__':

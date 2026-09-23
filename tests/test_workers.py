@@ -1148,8 +1148,11 @@ class TestCli(unittest.TestCase):
 
 class TestQuotaCli(Home):
     def run_quota(self, usage):
+        # 'sessions': 'fake' for the same reason Home.cfg carries it (D6): this cfg replaces
+        # Home's through load_cfg, and acct-a names no config_dir, so the real process table
+        # would put the operator's own sessions in the Load column.
         cfg = {'worker_pool': {'accounts': [{'name': 'acct-a', 'role': 'local', 'cap': 3}],
-                               'quota_command': 'true {account}'}}
+                               'quota_command': 'true {account}', 'sessions': 'fake'}}
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf), \
              mock.patch('asf.workers._product', return_value=self.product), \

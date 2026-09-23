@@ -27,6 +27,11 @@ The session ledger is ``~/.ASF/state/<product>/sessions.jsonl``, append-only: a 
 (``started`` + ``pid``) opens a run of its job, later lines for the same job update that run
 (``ended``, ``end_reason``, ``correction``, ``harvested``); :mod:`asf.workers.lifecycle` folds
 them per run and :func:`load_sessions` hands out each job's latest.
+
+An account's cap is the machine's, not one product's: :meth:`Pool.from_config` sums load over
+every product's registry (:func:`asf.workers.lifecycle.live_all`) and over the sessions
+:mod:`asf.workers.observe` sees on our accounts that no registry knows — foreign ones included —
+counting each seat once (F-0076 S-8154).
 """
 import datetime
 import json
@@ -36,6 +41,7 @@ import re
 from asf import env
 from asf import capacity as capacity_mod
 from asf.workers import lifecycle
+from asf.workers import observe
 from asf.workers import quota as quota_mod
 
 DEFAULT_RESERVE = capacity_mod.DEFAULT_RESERVE  # re-export: existing importers keep working
@@ -187,7 +193,12 @@ def live_sessions(product):
 
 class Pool:
     """Accounts + their current load + the guard. ``live`` is the list of live session records
-    (each with ``account``, ``model``); :meth:`take` adds one as a wave launches."""
+    (each with ``account``, ``model``); :meth:`take` adds one as a wave launches.
+
+    Built by :meth:`from_config`, ``live`` spans every product's registry and the observed
+    sessions no registry knows, each seat once; ``unreadable`` is why the session table could not
+    be read, and ``''`` when it could. A hand-built pool is readable and its ``live`` is one
+    product's list."""
 
     def __init__(self, accounts, quota_source=None, guards=None, reserve=None, live=(),
                  unreadable=''):
@@ -200,21 +211,36 @@ class Pool:
         self._usage = {}
 
     @classmethod
-    def from_config(cls, cfg, product, quota_source=None):
-        """Load is summed over every product's registry, not this one's: an account's cap is the
-        machine's, and a session under product ``b`` spends the same seat as one under ``a``
-        (F-0076 S-8154). ``product`` stays the wave's own, and is what the running check falls
-        back to for a registry run carrying no ``product``.
+    def from_config(cls, cfg, product, quota_source=None, session_source=None):
+        """Load is summed over every product's registry, not this one's, plus the sessions on the
+        machine that no registry knows: an account's cap is the machine's, so a session under
+        product ``b`` spends the same seat as one under ``a``, and a foreign session on one of our
+        accounts spends a seat too (F-0076 S-8154). ``product`` stays the wave's own, and is what
+        the running check falls back to for a registry run carrying no ``product``.
 
-        The other half of the spec's rule — observed sessions no registry knows, foreign ones
-        included — waits on ``asf.workers.observe`` (T-9451), which is in no branch of this
-        checkout. Until it lands the pool counts registered runs only, which is exactly the
-        fallback the spec names for an unreadable session table.
+        Each seat is counted once. An observed session is *extra* only when it is attributed to a
+        pool account and neither its pid nor its ``ASF_SESSION`` belongs to a registered run — so
+        a run and its own process are one seat, and a run whose process ``ps`` has not shown yet
+        still holds its seat. An extra carries ``model: None``: it counts toward ``cap``, and
+        falls out of the per-model ``caps`` ceiling, because its model is not known.
+
+        When the session table cannot be read, ``unreadable`` carries the reason and ``live`` is
+        the registered runs alone — the spec's D10 fallback, which the wave prints once.
         """
-        return cls(accounts_from_config(cfg),
+        accounts = accounts_from_config(cfg)
+        registered = lifecycle.live_all(os.path.join(env.ASF_HOME, 'state'))
+        observed, why = observe.read(cfg, accounts, source=session_source)
+        pids = {r.get('pid') for r in registered} - {None}
+        sessions = {r.get('session') for r in registered} - {None}
+        extra = [o for o in observed
+                 if o.account is not None and o.pid not in pids and o.session not in sessions]
+        live = registered + [{'account': o.account, 'model': None, 'product': o.product,
+                              'job': o.job, 'session': o.session, 'pid': o.pid, 'owner': o.owner}
+                             for o in extra]
+        return cls(accounts,
                    quota_source=quota_source or quota_mod.source_from_config(cfg),
                    guards=quota_mod.guards_from_config(cfg), reserve=reserve_from_config(cfg),
-                   live=lifecycle.live_all(os.path.join(env.ASF_HOME, 'state')))
+                   live=live, unreadable=why)
 
     def usage(self, account):
         if account.name not in self._usage:

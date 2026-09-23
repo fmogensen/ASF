@@ -5,8 +5,14 @@ reserve. Prints one ``launched`` or ``waits`` line per row considered:
     waits    spec-f-0031  F-0031  — reserved for S1
 
 ``BUG → FIX`` rows go first (S1 before the rest), then the feeder's own order. A row whose job
-already has a live session waits with ``already running``; once ``n`` launched, the remaining
-rows wait with ``wave full``.
+already has a live session *of this product* waits with ``already running``: the check is on
+``(product, job)``, so ``spec-f-0001`` live under product ``b`` never blocks ``a``'s own
+(F-0076 D5). Once ``n`` launched, the remaining rows wait with ``wave full``.
+
+The pool's load still spans every product and the machine's own sessions. When that session
+table could not be read, the wave prints the degraded-count line once, before the first row::
+
+    pool: sessions unreadable (<why>) — counting registered sessions only
 """
 from asf.workers import pool as pool_mod
 from asf.workers import spawn as spawn_mod
