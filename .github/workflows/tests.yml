@@ -26,11 +26,10 @@ jobs:
           python -m pipx install --python "$(which python)" .
       - name: asf --version
         run: asf --version
-      # TODO: drop continue-on-error once the remaining conventions cards land (the evidence
-      # provider is B-0020) — the modules they own still carry the first product's literals, and
-      # a red required step on every PR until then would be noise, not a signal.
       - name: check conventions
         run: bash tools/check_conventions.sh
+      - name: check generic
+        run: bash tools/check_generic.sh
       - name: plugin is generated from the CLI
         run: asf plugin check
       # B-0068: one test module per process, min(cpu_count, 8) at a time — the same modules

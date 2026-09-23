@@ -1,13 +1,17 @@
 # Forbidden-convention patterns for tools/check_conventions.sh.
 #
 # One extended regex (grep -E) per line; blank lines and lines starting with `#` are ignored.
-# A match in any `asf/**/*.py` outside the two documented exceptions (asf/conventions.py and
-# asf/metrics/import_sessions.py) fails the build: the code carries a convention that belongs in
-# the product yaml. See the rule "Code carries no product convention".
+# A match in any `asf/**/*.py` outside the three documented exceptions (asf/conventions.py,
+# asf/metrics/import_sessions.py and asf/hooks.py) fails the build: the code carries a convention
+# that belongs in the product yaml. See the rule "Code carries no product convention".
 #
 # Unlike tools/forbidden-names.txt these are not names — check_generic.sh cannot see them. Each
 # line below is a path, prefix, file name or id that one product happens to use and another does
 # not; the generic form of each is a field of asf.conventions.Conventions.
+#
+# The path-shaped defaults themselves (`docs/specs`, `worker/`, `{reviews_dir}/{n}-{slug}.md`,
+# …) are not listed here: tools/check_conventions.sh generates a pattern for each of them from
+# asf.conventions at run time, so this file never has to be kept in step with that module.
 
 # Branch prefixes → conventions.branch_prefixes (+ `legacy` for retired ones).
 cloud/
@@ -31,3 +35,14 @@ session-results\.jsonl
 \.claude-workers
 \.claude/
 /tmp/
+
+# Workflow and job names → conventions.ci_workflow / ci_dev_job / deploy_workflow
+# (product yaml: ci.workflow, ci.dev_job, deploy_sha.workflow).
+deploy-prod\.yml
+\bci\.yml\b
+deploy-dev
+
+# The first product's migration sources → conventions.decisions_file / reports_dir /
+# report_pattern.
+hotfix-.*-report
+ci-diag-

@@ -2,9 +2,10 @@
 
 One dataclass, one documented default per field. This module is the **only** place in the
 package where such a default may appear as a literal: `tools/check_conventions.sh` fails the
-build when one shows up anywhere else under ``asf/`` (the pre-asf log adapter,
-``asf.metrics.import_sessions``, is the second and last exception — its literals describe a
-foreign file format, not this factory's conventions).
+build when one shows up anywhere else under ``asf/``, with two more exceptions — the pre-asf log
+adapter, ``asf.metrics.import_sessions``, whose literals describe a foreign file format, and
+``asf.hooks``, which writes the worker runtime's own settings file — neither describes this
+factory's own conventions.
 
 The product yaml carries the overrides::
 

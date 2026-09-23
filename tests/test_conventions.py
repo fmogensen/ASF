@@ -1,7 +1,9 @@
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 
 from asf import conventions as conv_mod
@@ -174,8 +176,52 @@ class CheckConventionsScriptTests(unittest.TestCase):
         patterns = [p for p in patterns if p]
         for want in ('cloud/', 'worktree-m-', 'docs/superpowers', r'\.sdd-input', r'goals\.txt',
                      'feature-matrix', r'session-results\.jsonl', r'\.claude-workers', '/tmp/',
-                     'refs/heads/hb'):
+                     'refs/heads/hb', r'deploy-prod\.yml', r'\bci\.yml\b', 'deploy-dev',
+                     'hotfix-.*-report'):
             self.assertIn(want, patterns)
+
+    def test_the_merged_patterns_include_the_generated_ones(self):
+        lines = self.script('--print-patterns').stdout.splitlines()
+        for pattern in conv_mod.forbidden_patterns():
+            self.assertIn(pattern, lines)
+        self.assertIn("['\"]" + re.escape('### Task') + '\\b', lines)
+
+    def test_only_the_three_adapters_are_excluded(self):
+        with open(os.path.join(REPO_ROOT, 'tools', 'check_conventions.sh'), encoding='utf-8') as f:
+            text = f.read()
+        block = re.search(r'excludes=\((.*?)\)', text, re.S).group(1)
+        entries = re.findall(r'"([^"]+)"', block)
+        self.assertEqual(len(entries), 3, entries)
+        for name in ('evidence.py', 'match.py', 'ingest.py', 'stale.py'):
+            self.assertNotIn(name, block)
+
+    def test_a_copied_default_fails_the_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shutil.copytree(os.path.join(REPO_ROOT, 'tools'), os.path.join(tmp, 'tools'))
+            asf_dir = os.path.join(tmp, 'asf')
+            os.makedirs(asf_dir)
+            shutil.copy(os.path.join(REPO_ROOT, 'asf', '__init__.py'), asf_dir)
+            shutil.copy(os.path.join(REPO_ROOT, 'asf', 'conventions.py'), asf_dir)
+            with open(os.path.join(asf_dir, 'x.py'), 'w', encoding='utf-8') as f:
+                f.write("SPECS = 'docs/specs'\n")
+            subprocess.run(['git', 'init', '-q'], cwd=tmp, check=True)
+            subprocess.run(['git', 'add', '-A'], cwd=tmp, check=True)
+            r = subprocess.run(['bash', os.path.join(tmp, 'tools', 'check_conventions.sh')],
+                               cwd=tmp, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn('asf/x.py:1', r.stdout)
+
+    def test_a_missing_generator_is_exit_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = os.path.join(tmp, 'python3')
+            with open(stub, 'w', encoding='utf-8') as f:
+                f.write('#!/bin/sh\nexit 1\n')
+            os.chmod(stub, 0o755)
+            env = dict(os.environ, PATH=tmp + os.pathsep + os.environ.get('PATH', ''))
+            r = subprocess.run(['bash', os.path.join(REPO_ROOT, 'tools', 'check_conventions.sh')],
+                               cwd=REPO_ROOT, capture_output=True, text=True, env=env)
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+            self.assertIn('could not read the defaults', r.stderr)
 
     def test_the_conventions_module_itself_is_exempt(self):
         # the defaults are literals by definition; the check must not see its own source
