@@ -86,8 +86,33 @@ def _strip_prefix(title):
     return STRIP_PREFIX.sub('', title).strip()
 
 
+def _glob_re(glob):
+    """A path glob as a regex: ``**`` crosses ``/``, ``*`` and ``?`` do not; a trailing ``/`` is a directory."""
+    if glob.endswith('/'):
+        glob += '**'
+    out, i = [], 0
+    while i < len(glob):
+        if glob.startswith('**/', i):
+            out.append('(?:.*/)?')
+            i += 3
+        elif glob.startswith('**', i):
+            out.append('.*')
+            i += 2
+        elif glob[i] == '*':
+            out.append('[^/]*')
+            i += 1
+        elif glob[i] == '?':
+            out.append('[^/]')
+            i += 1
+        else:
+            out.append(re.escape(glob[i]))
+            i += 1
+    return re.compile(''.join(out) + r'\Z')
+
+
 def _is_customer(paths, non_customer_hint, changed_files):
-    hit = [f for f in changed_files if any(f.startswith(p) for p in paths)]
+    regexes = [_glob_re(p) for p in paths]
+    hit = [f for f in changed_files if any(r.match(f) for r in regexes)]
     if not hit:
         return False
     non_test = [f for f in hit if not re.search(r'\.(test|spec)\.(ts|tsx|mjs)$|/e2e/|/__tests__/|\.md$', f)]
@@ -116,7 +141,7 @@ def render(root, product):
     out.append("| What | Since | PR |")
     out.append("|---|---|---|")
 
-    paths = (product.customer_paths or {}).get('customer_visible') or []
+    paths = product.customer_paths or []
     rows = []
     if prod_sha:
         log = _sh(['git', 'log', '--format=%H %s', f'{prod_sha}~80..{prod_sha}'], cwd=repo_dir)
