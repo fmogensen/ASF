@@ -189,12 +189,14 @@ class Pool:
     """Accounts + their current load + the guard. ``live`` is the list of live session records
     (each with ``account``, ``model``); :meth:`take` adds one as a wave launches."""
 
-    def __init__(self, accounts, quota_source=None, guards=None, reserve=None, live=()):
+    def __init__(self, accounts, quota_source=None, guards=None, reserve=None, live=(),
+                 unreadable=''):
         self.accounts = list(accounts)
         self.quota = quota_source or quota_mod.NoQuotaSource()
         self.guards = guards or quota_mod.guards_from_config({})
         self.reserve = dict(DEFAULT_RESERVE if reserve is None else reserve)
         self.live = [dict(s) for s in live]
+        self.unreadable = unreadable
         self._usage = {}
 
     @classmethod
@@ -258,5 +260,6 @@ class Pool:
             return cooling[0], ''
         return None, (REASON_COOLDOWN if held else REASON_NO_QUOTA)
 
-    def take(self, account, model, job=''):
-        self.live.append({'job': job, 'account': account.name, 'model': model})
+    def take(self, account, model, job='', product=None):
+        self.live.append({'job': job, 'account': account.name, 'model': model,
+                          'product': product})

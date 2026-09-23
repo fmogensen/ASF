@@ -30,12 +30,14 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
     pool = pool or pool_mod.Pool.from_config(cfg, product)
     spawn_fn = spawn_fn or spawn_mod.spawn
     s1 = pool_mod.s1_open(rows)
-    running = {s.get('job') for s in pool.live}
+    running = {(s.get('product') or product.name, s.get('job')) for s in pool.live}
     launched, waits = [], []
+    if getattr(pool, 'unreadable', ''):
+        out(f'pool: sessions unreadable ({pool.unreadable}) — counting registered sessions only')
     for row in order(rows):
         if len(launched) >= n:
             reason = 'wave full'
-        elif row.job in running:
+        elif (product.name, row.job) in running:
             reason = 'already running'
         else:
             acct, reason = pool.pick_account(row.kind, row.model, is_fix=row.is_fix,
@@ -46,8 +48,8 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
                 except spawn_mod.SpawnError as e:
                     reason = str(e) if str(e).startswith('NEEDS OPERATOR') else f'spawn failed: {e}'
                 else:
-                    pool.take(acct, rec.get('model'), row.job)
-                    running.add(row.job)
+                    pool.take(acct, rec.get('model'), row.job, product=product.name)
+                    running.add((product.name, row.job))
                     launched.append((row, rec))
                     out(f"launched {row.job:<24} {row.item:<10} → {acct.name} "
                         f"({rec.get('model')}) pid {rec.get('pid')}")

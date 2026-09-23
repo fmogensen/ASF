@@ -83,7 +83,7 @@ class Home(unittest.TestCase):
                                               'job_grants': [self.grant],
                                               'stage_limits': {'silent_min': 30}})
         self.cfg = {'worker_pool': {'accounts': [{'name': 'acct-a', 'role': 'local', 'cap': 2}],
-                                    'models': {'Opus': 'opus'}}}
+                                    'models': {'Opus': 'opus'}, 'sessions': 'fake'}}
         # asf.hooks.ensure_git_hooks is Task 8353's (F-0075) and is not yet in this checkout;
         # a test that cares about the push-gate check overrides this with its own
         # mock.patch.object(hooks_mod, 'ensure_git_hooks', ..., create=True) around its call.
