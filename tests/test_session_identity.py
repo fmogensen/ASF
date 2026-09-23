@@ -1,7 +1,7 @@
 """asf — session identity (F-0076): the id, the registry line, the environment, the log and the
-commit trailer. This module grows with each Task of the plan; this Task (T-9451) adds
-``ObserveTest`` (and the earlier Task's ``SessionIdTest``, ``LaunchIdentityTest``,
-``CommitTrailerTest``)."""
+commit trailer. This module grows with each Task of the plan; T-9450 added ``SessionIdTest``,
+``LaunchIdentityTest`` and ``CommitTrailerTest``, T-9451 added ``ObserveTest``, and T-0048 adds
+``PoolAcrossProductsTest``."""
 import json
 import os
 import shutil
@@ -16,11 +16,13 @@ from asf.workers import githooks
 from asf.workers import lifecycle
 from asf.workers import observe
 from asf.workers import pool as pool_mod
+from asf.workers import quota as quota_mod
 from asf.workers import runtime as runtime_mod
 from asf.workers import spawn as spawn_mod
 from asf.workers import stall as stall_mod
+from asf.workers import wave as wave_mod
 
-from tests.test_workers import Home, s1_row
+from tests.test_workers import Home, feature_row, s1_row
 
 
 def _git(args, cwd, env=None):
@@ -300,6 +302,71 @@ class ObserveTest(unittest.TestCase):
             observed, why = observe.read({}, [])
         self.assertEqual(observed, [])
         self.assertNotEqual(why, '')
+
+
+class PoolAcrossProductsTest(Home):
+    """S-8154: an account's cap is the machine's, so load is summed over every product's
+    registry and over the observed sessions no registry knows, foreign ones included, counting
+    each seat once; the wave's ``already running`` check is per product.
+    """
+
+    def other(self):
+        """Product ``b``, sharing this test's ``ASF_HOME``."""
+        return env.Product('b', {'repo_dir': self.repo, 'main': 'main',
+                                 'job_grants': [self.grant]})
+
+    def register(self, product, job, account='acct-a', **fields):
+        pool_mod.append_session(product, dict({'job': job, 'account': account,
+                                               'product': product.name, 'started': '2026-09-23',
+                                               'pid': 4242}, **fields))
+
+    def test_other_products_sessions_count(self):
+        self.register(self.other(), 'spec-f-0002')
+        p = pool_mod.Pool.from_config(self.cfg, self.product)
+        self.assertEqual(p.load(self.acct()), 1)
+
+    def test_just_launched_counts_before_ps_sees_it(self):
+        # No process ever existed at this pid: the registry line alone is the seat it holds.
+        self.register(self.product, 'spec-f-0001', pid=999999)
+        p = pool_mod.Pool.from_config(self.cfg, self.product)
+        self.assertEqual(p.load(self.acct()), 1)
+
+    def test_an_ended_run_frees_its_seat(self):
+        other = self.other()
+        self.register(other, 'spec-f-0002')
+        pool_mod.update_session(other, 'spec-f-0002', ended='2026-09-23', end_reason='finished')
+        p = pool_mod.Pool.from_config(self.cfg, self.product)
+        self.assertEqual(p.load(self.acct()), 0)
+
+    def test_same_job_name_in_two_products(self):
+        """``spec-f-0001`` live under ``b`` never blocks ``a``'s own (D5/D12)."""
+        self.register(self.other(), 'spec-f-0001')
+        pool = pool_mod.Pool.from_config(self.cfg, self.product,
+                                         quota_source=quota_mod.FakeQuotaSource({}))
+        lines = []
+        rt = runtime_mod.FakeRuntime([{'running': True}] * 10)
+        launched, waits = wave_mod.wave(self.product, [feature_row('spec-f-0001')], 5, pool=pool,
+                                        runtime=rt, cfg=self.cfg, out=lines.append)
+        self.assertEqual([r.job for r, _ in launched], ['spec-f-0001'])
+        self.assertEqual(waits, [])
+
+    def test_the_same_job_in_this_product_still_waits(self):
+        self.register(self.product, 'spec-f-0001')
+        pool = pool_mod.Pool.from_config(self.cfg, self.product,
+                                         quota_source=quota_mod.FakeQuotaSource({}))
+        launched, waits = wave_mod.wave(self.product, [feature_row('spec-f-0001')], 5, pool=pool,
+                                        runtime=runtime_mod.FakeRuntime([{'running': True}]),
+                                        cfg=self.cfg, out=lambda s: None)
+        self.assertEqual(launched, [])
+        self.assertEqual([(r.job, why) for r, why in waits], [('spec-f-0001', 'already running')])
+
+    def test_take_records_the_product(self):
+        pool = pool_mod.Pool([self.acct()], quota_source=quota_mod.FakeQuotaSource({}))
+        pool.take(self.acct(), 'opus', 'spec-f-0001', product='b')
+        self.assertEqual(pool.live[-1]['product'], 'b')
+
+    def test_a_hand_built_pool_is_readable(self):
+        self.assertEqual(pool_mod.Pool([self.acct()]).unreadable, '')
 
 
 if __name__ == '__main__':

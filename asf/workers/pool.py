@@ -201,10 +201,20 @@ class Pool:
 
     @classmethod
     def from_config(cls, cfg, product, quota_source=None):
+        """Load is summed over every product's registry, not this one's: an account's cap is the
+        machine's, and a session under product ``b`` spends the same seat as one under ``a``
+        (F-0076 S-8154). ``product`` stays the wave's own, and is what the running check falls
+        back to for a registry run carrying no ``product``.
+
+        The other half of the spec's rule — observed sessions no registry knows, foreign ones
+        included — waits on ``asf.workers.observe`` (T-9451), which is in no branch of this
+        checkout. Until it lands the pool counts registered runs only, which is exactly the
+        fallback the spec names for an unreadable session table.
+        """
         return cls(accounts_from_config(cfg),
                    quota_source=quota_source or quota_mod.source_from_config(cfg),
                    guards=quota_mod.guards_from_config(cfg), reserve=reserve_from_config(cfg),
-                   live=live_sessions(product))
+                   live=lifecycle.live_all(os.path.join(env.ASF_HOME, 'state')))
 
     def usage(self, account):
         if account.name not in self._usage:
