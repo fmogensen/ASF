@@ -29,14 +29,19 @@ STREAM_FOLDERS = ('groom', 'releases', 'metrics/ci', 'metrics/sessions', 'metric
                   'metrics/events', 'metrics/daily')
 
 PRE_COMMIT = """#!/bin/sh
-# The record's pre-commit hook, written by `asf init`: a commit that fails `asf check` is refused.
-# The marker makes a hook already running return at once instead of nesting (B-0073).
-if [ -n "$ASF_HOOK_RUNNING" ]; then
+# The record's pre-commit hook, written by `asf init`: a commit that fails `asf check` on the
+# files it touches is refused — a commit made by `asf` itself included (B-0084).
+# The marker makes a hook already running in THIS record return at once instead of nesting
+# (B-0073); it names the record, so one inherited from another repo's hook run bypasses nothing.
+top="$(git rev-parse --show-toplevel)" || exit 1
+if [ "$ASF_HOOK_RUNNING" = "$top" ]; then
     exit 0
 fi
-export ASF_HOOK_RUNNING=1
-cd "$(git rev-parse --show-toplevel)" || exit 1
-exec asf check
+export ASF_HOOK_RUNNING="$top"
+cd "$top" || exit 1
+staged="$(git diff --cached --name-only --diff-filter=ACMR)"
+[ -n "$staged" ] || exit 0
+echo "$staged" | tr '\\n' '\\0' | xargs -0 asf check
 """
 
 README = """# The record

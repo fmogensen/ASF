@@ -65,6 +65,11 @@ def build_parser():
     p_inbox.add_argument('--parent')
     p_inbox.add_argument('--product')
 
+    p_set = sub.add_parser('set', help='write typed fields of a card through the parser')
+    p_set.add_argument('id')
+    p_set.add_argument('assignments', nargs='+', metavar='FIELD=VALUE')
+    p_set.add_argument('--product')
+
     p_check = sub.add_parser('check', help='validate the backlog')
     p_check.add_argument('paths', nargs='*')
     p_check.add_argument('--product')
@@ -248,6 +253,9 @@ def _main(argv=None):
     if args.command == 'inbox':
         from asf.groom.inbox import cmd_inbox
         return cmd_inbox(args, resolve_record(args, announce=_announce_stderr))
+    if args.command == 'set':
+        from asf.record.setfield import cmd_set
+        return cmd_set(args, resolve_record(args, announce=_announce_stderr))
     if args.command == 'check':
         from asf.record.check import cmd_check
         return cmd_check(args, resolve_record(args))

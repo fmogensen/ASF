@@ -210,6 +210,68 @@ class NewSetFieldsTests(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
 
 
+class SetCommandTests(unittest.TestCase):
+    """B-0084: a typed field is written through the parser, so an unwritable value is refused."""
+    def setUp(self):
+        self.root = make_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        self.bug = write_item(self.root, 'B-0001', 'bug', 'Broken', parent='E-0001',
+                              typed_lines=('severity: S2',))
+
+    def read(self):
+        with open(self.bug, encoding='utf-8') as f:
+            return f.read()
+
+    def test_set_writes_a_typed_field_through_the_parser(self):
+        r = run(['set', 'B-0001', 'rank=5', 'links.spec=docs/specs/x.md'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        meta, _ = frontmatter.parse(self.read())
+        self.assertEqual(meta['rank'], 5)
+        self.assertEqual(meta['links'], {'spec': 'docs/specs/x.md'})
+        self.assertEqual(meta['severity'], 'S2')
+
+    def test_set_refuses_a_value_that_does_not_round_trip(self):
+        before = self.read()
+        r = run(['set', 'B-0001', 'decided=first line\nsecond line'], self.root)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn('decided', r.stderr)
+        self.assertEqual(self.read(), before)
+
+    def test_set_refuses_a_field_the_type_does_not_have(self):
+        before = self.read()
+        r = run(['set', 'B-0001', 'scope=x'], self.root)
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(self.read(), before)
+
+
+class RecordPreCommitHookTests(unittest.TestCase):
+    """B-0084: a commit into the record runs ``asf check`` on what it touches, even when a
+    marker leaked in from another repo's hook run."""
+    def test_a_leaked_hook_marker_does_not_bypass_the_hook(self):
+        from asf.init import PRE_COMMIT
+        root = make_repo()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        bindir = tempfile.mkdtemp(prefix='asf_bin_')
+        self.addCleanup(shutil.rmtree, bindir, ignore_errors=True)
+        shim = os.path.join(bindir, 'asf')
+        with open(shim, 'w') as f:
+            f.write(f'#!/bin/sh\nexec {sys.executable} -m asf.cli "$@"\n')
+        os.chmod(shim, 0o755)
+        hook = os.path.join(root, 'hook.sh')
+        with open(hook, 'w') as f:
+            f.write(PRE_COMMIT)
+        env = hermetic.build()
+        env['PATH'] = bindir + os.pathsep + env['PATH']
+        env['ASF_HOOK_RUNNING'] = '1'      # left over from some other repo's hook run
+        subprocess.run(['git', 'init', '-q'], cwd=root, env=env, check=True)
+        write_item(root, 'B-0001', 'bug', 'Broken',
+                   typed_lines=('severity: S2', 'decided: [unclosed'))
+        subprocess.run(['git', 'add', '-A'], cwd=root, env=env, check=True)
+        r = subprocess.run(['sh', hook], cwd=root, env=env, capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
 class CheckCommandTests(unittest.TestCase):
     def setUp(self):
         self.root = make_repo()
