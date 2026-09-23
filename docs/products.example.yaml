@@ -46,14 +46,14 @@ conventions:
   # F-0031: globs whose match makes a landed branch's merge class merge_amendable_set (needs a
   # person, see approvals: below) rather than merge_routine_pr. The factory's own rules.
   amendable_paths: [rules/*, docs/CONSTITUTION.md]
-  # asf.metrics: the parity matrix file read for Story status. Leave out and the product has no
-  # such thing — nothing looks for it.
+  # asf.evidence.discover: the parity matrix file read for Story status. Leave out and the
+  # product has no such thing — nothing looks for it.
   matrix_path: docs/matrix.md
-  # asf.tick.migrate: a decisions file mined for D-rows. Leave out and the product has no such
-  # thing — nothing looks for it.
+  # asf.evidence.migrate_sources: a decisions file mined for D-rows. Leave out and the product
+  # has no such thing — nothing looks for it.
   decisions_file: docs/decisions.md
-  # asf.tick.migrate: a directory of hotfix/diagnostic reports adopted as backlog items. Leave
-  # out and the product has no such thing — nothing looks for it.
+  # asf.evidence.migrate_sources: a directory of hotfix/diagnostic reports adopted as backlog
+  # items. Leave out and the product has no such thing — nothing looks for it.
   reports_dir: docs/reports
   # a regex over a file name in reports_dir; unset matches every .md. Leave out and the product
   # has no such thing — nothing looks for it.
