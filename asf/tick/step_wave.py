@@ -1,5 +1,6 @@
 """asf.tick.step_wave — the tick's ``wave`` step: what the feeder says to start, launched.
 
+0. ``approvals.raise_holds`` — the open holds said aloud, and the items they park (§2.4);
 1. the index from the record clone (the tick's own, made once per tick — :class:`Context`);
 2. ``inflight``: the sessions in ``~/.ASF/state/<product>/sessions.jsonl`` with no ``ended``; and
    ``busy``, the items whose pushed branch waits for harvest — no slot, but no second session;
@@ -9,7 +10,8 @@
    repo's origin — whether it is pushed and its last commit, two ``git`` calls at most;
 5. one ``workers.wave`` over every briefed row, so the pool's S1 reserve sees them all; it prints
    the ``launched`` / ``waits`` lines (``reserved for S1`` among them). A row the feeder holds
-   back (``WAITS ON …``, no slot) prints its own ``waits`` line here.
+   back (``WAITS ON …``, no slot) prints its own ``waits`` line here, as does one an approval
+   class holds.
 
 Each launch appends a ``launch`` event (item, job, model, brief kind) to ``metrics/events``.
 """
@@ -17,7 +19,7 @@ import os
 import re
 import subprocess
 
-from asf import env
+from asf import approvals, env
 from asf.groom import policy as groom_policy
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
@@ -136,6 +138,7 @@ def run(ctx, out=print):
     from asf.feeder import rows as feeder_rows
     from asf.views import index_reader
     product = ctx.product
+    held = approvals.raise_holds(ctx, out)
     items, _generated = index_reader.load(ctx.record_root())
     running = inflight(product)
     gstate = groom_state(product, ctx.record_root()) if groom_policy.groom_auto(product) else None
@@ -146,6 +149,11 @@ def run(ctx, out=print):
     for row in planned:
         if not row.launches:
             out(f"waits    {'-':<24} {row.item_id:<10} — {row.action}")
+            continue
+        if row.item_id in held:                 # §2.4: a held item waits for a person, not a slot
+            cls, level = held[row.item_id]
+            job = job_name(row.brief_kind, row.item_id)
+            out(f'waits    {job:<24} {row.item_id:<10} — held {cls} ({level})')
             continue
         brief = _build(product, row, items, running,
                        repo_facts=repo_facts(product, row.branch))

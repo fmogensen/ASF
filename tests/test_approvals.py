@@ -3,19 +3,26 @@ ledger — ``CatalogueTest`` and ``MatrixTest`` are the plan's A1, ``LedgerTest`
 behind D9/D14. Task 2: ``HookTest``, the unit half of A2 (the end-to-end block is §3's, run by
 path with the session's identity removed — PD7). Task 4: ``CliTest`` and ``DoctorTest`` are A5,
 the operator's side — ``asf approvals``, ``list``, ``resolve``, and the doctor's ``approvals`` row.
+Task 5: ``TickRaiseTest``, A3, on the tick's own harness — the raise, the parking and the
+once-only events.
 """
 import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+import types
 import unittest
 from unittest import mock
 
 from asf import approvals, cli, doctor, env, hooks
 from asf.env import Product
+from asf.feeder import rows as feeder_rows
+from asf.tick import step_wave, tick
+from tests.test_tick import TickTestCase, _git
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -485,6 +492,116 @@ class DoctorTest(unittest.TestCase):
         product = _product_yaml('approvals:\n  touch_production: maybe\n')
         rows = [('approvals', True) + approvals.check_doctor({}, product)]
         self.assertTrue(doctor.is_red(rows))
+
+
+#: A3's line, asserted verbatim: the class, the item and the command that clears it, in one line
+#: a person can read and paste.
+NEEDS_OPERATOR_RE = re.compile(
+    r'^NEEDS OPERATOR: held (\S+) on ([A-Z]-\d{4}) — .* — '
+    r'asf approvals resolve \2/\1 granted\|done\|dropped$')
+
+_BRIEF = types.SimpleNamespace(kind='task', model='Opus', text='brief\n')
+
+
+class TickRaiseTest(TickTestCase):
+    """A3 (Task 5) — on the tick's own harness: one line per held item, the held item parked,
+    and one ``held``/``hold-resolved`` event over a hold's life however many ticks run."""
+
+    @classmethod
+    def build_repos(cls, tmp):
+        super().build_repos(tmp)
+        seed = os.path.join(tmp, 'seed')
+        with open(os.path.join(seed, 'index.json'), 'w') as f:
+            json.dump({'generated': '', 'items': {}}, f)
+        _git(['add', '-A'], seed)
+        _git(['commit', '-q', '-m', 'index'], seed)
+        _git(['push', '-q', 'origin', 'HEAD:main'], seed)
+
+    def setUp(self):
+        super().setUp()
+        self.product = env.load_product('sample')
+        self.lines = []
+
+    def hold(self, item, cls, level, detail='git push origin HEAD:main'):
+        approvals.refuse(self.product, item, cls, level, f'code-{item}', 'Bash', detail)
+
+    def raise_holds(self, ctx=None):
+        """One tick's raise; the lines it printed land in ``self.lines``."""
+        ctx = ctx or tick.Context(self.product)
+        return approvals.raise_holds(ctx, self.lines.append), ctx
+
+    def events(self, ctx, kind):
+        d = os.path.join(ctx.record_root(), 'metrics', 'events')
+        out = []
+        for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+            with open(os.path.join(d, name)) as f:
+                out += [json.loads(ln) for ln in f if ln.strip()]
+        return [e for e in out if e['kind'] == kind]
+
+    def test_one_needs_operator_line_per_human_now_hold(self):
+        self.hold('F-0031', 'touch_production', 'human-now')
+        self.hold('B-0002', 'touch_legal', 'human-now', detail='LICENSE')
+        self.hold('T-0003', 'new_epic', 'human-now', detail='epics/E-0002.md')
+        approvals.resolve(self.product, 'T-0003/new_epic', 'dropped')
+
+        held, _ = self.raise_holds()
+        raised = [ln for ln in self.lines if ln.startswith('NEEDS OPERATOR')]
+        self.assertEqual(len(raised), 2, self.lines)
+        self.assertEqual([NEEDS_OPERATOR_RE.match(ln).groups() for ln in raised],
+                         [('touch_production', 'F-0031'), ('touch_legal', 'B-0002')])
+        self.assertNotIn('T-0003', '\n'.join(self.lines))
+        self.assertEqual(held, {'F-0031': ('touch_production', 'human-now'),
+                                'B-0002': ('touch_legal', 'human-now')})
+
+    def test_groom_holds_are_one_summary_line(self):
+        for item in ('F-0031', 'B-0002', 'T-0003'):
+            self.hold(item, 'merge_routine_pr', 'groom', detail='routine')
+        self.raise_holds()
+        self.assertEqual(self.lines, ['approvals: 3 held for groom — asf approvals list'])
+
+    def test_held_item_is_not_relaunched(self):
+        self.hold('B-0001', 'touch_production', 'human-now')
+        rows = [
+            feeder_rows.Row(0, 'BUG → FIX', 'B-0001', '', 'would launch fix-bug-b-0001 (Opus)',
+                            'fix-bug', 'fix/B-0001', 'S1 open'),
+            feeder_rows.Row(1, 'PLAN → CODE', 'T-0002', 'F-0001', 'would launch task-t-0002 (Opus)',
+                            'task', 'task/T-0002', 'next'),
+        ]
+        waved = []
+
+        def wave(product, worker_rows, n, brief_fn=None, out=print):
+            waved.extend(r.item for r in worker_rows)
+            return [(worker_rows[0], {'model': 'opus'})], []
+
+        with mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **kw: rows), \
+                mock.patch.object(step_wave, '_build', lambda *a, **kw: _BRIEF), \
+                mock.patch.object(step_wave, '_wave', wave):
+            step_wave.run(tick.Context(self.product), out=self.lines.append)
+
+        self.assertIn('waits    fix-bug-b-0001           B-0001     — held touch_production'
+                      ' (human-now)', self.lines)
+        self.assertEqual(waved, ['T-0002'])          # the other row still launches
+
+    def test_events_are_written_once(self):
+        self.hold('F-0031', 'touch_production', 'human-now')
+        ctx = tick.Context(self.product)
+        self.raise_holds(ctx)
+        self.raise_holds(ctx)
+        held = self.events(ctx, 'held')
+        self.assertEqual(len(held), 1, held)
+        self.assertEqual((held[0]['hold'], held[0]['item'], held[0]['class'], held[0]['level'],
+                          held[0]['count']),
+                         ('F-0031/touch_production', 'F-0031', 'touch_production', 'human-now', 1))
+        self.assertEqual(self.events(ctx, 'hold-resolved'), [])
+
+        approvals.resolve(self.product, 'F-0031/touch_production', 'granted')
+        self.raise_holds(ctx)
+        closed = self.events(ctx, 'hold-resolved')
+        self.assertEqual(len(closed), 1, closed)
+        self.assertEqual(closed[0]['resolution'], 'granted')
+        self.raise_holds(ctx)
+        self.assertEqual(len(self.events(ctx, 'hold-resolved')), 1)
+        self.assertEqual(len(self.events(ctx, 'held')), 1)
 
 
 if __name__ == '__main__':

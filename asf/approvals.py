@@ -483,6 +483,53 @@ def _enforce(stdin_text, environ, out, product):
     return 2
 
 
+# ---- the tick's raise and the parking (§2.4) ----------------------------------
+
+def raise_holds(ctx, out):
+    """The ``wave`` step's first act: say what is held, record each hold once, and answer with
+    ``{item: (class, level)}`` — the items a launching row must not be started on.
+
+    One ``NEEDS OPERATOR`` line per open ``human-now`` hold, oldest first, and one summary line
+    however many ``groom`` holds are open: a person reads the first, the groom session the
+    second. The ``announced`` and ``closed`` markers live in the ledger beside the refusals
+    (§4), so the ``held`` and ``hold-resolved`` events are written once over a hold's life
+    however many ticks see it — the fold's ``first`` never moves, so one marker is one
+    announcement, and a repeat refusal bumps ``count`` without raising a second event.
+    """
+    product = ctx.product
+    open_ = open_holds(product)                      # oldest first
+
+    for e in open_:
+        if e['level'] == 'human-now':
+            out(f"NEEDS OPERATOR: held {e['class']} on {e['item']} — {e['detail']} —"
+                f" asf approvals resolve {e['item']}/{e['class']} granted|done|dropped")
+    groom = sum(1 for e in open_ if e['level'] == 'groom')
+    if groom:
+        out(f'approvals: {groom} held for groom — asf approvals list')
+
+    for e in open_:
+        if e['announced']:
+            continue
+        hold = f"{e['item']}/{e['class']}"
+        ctx.event('held', hold=hold, item=e['item'], level=e['level'], count=e['count'],
+                  **{'class': e['class']})           # PD9: `class` is not a keyword argument
+        append(product, {'event': 'announced', 'hold': hold, 'ts': _now_iso()})
+    for hold, e in _fold(product).items():
+        if e['open'] or not e['resolution'] or not e['announced'] or e['closed']:
+            continue
+        ctx.event('hold-resolved', hold=hold, item=e['item'], resolution=e['resolution'],
+                  **{'class': e['class']})
+        append(product, {'event': 'closed', 'hold': hold, 'ts': _now_iso()})
+
+    order = {c.name: i for i, c in enumerate(CLASSES)}
+    held = {}
+    for e in open_:                                  # first in catalogue order wins the item
+        rank = order.get(e['class'], len(order))
+        if e['item'] not in held or rank < held[e['item']][0]:
+            held[e['item']] = (rank, e['class'], e['level'])
+    return {item: (cls, level) for item, (_, cls, level) in held.items()}
+
+
 # ---- the operator's side — `asf approvals` and the doctor row (§2.5) -----------
 
 #: The built-in recognisers that are code, not a glob or a pattern in the two tables above —
