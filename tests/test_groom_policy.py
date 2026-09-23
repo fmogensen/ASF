@@ -375,7 +375,7 @@ class ApprovalBoundTests(GroomAutoTestCase):
     def test_epic_inbox_card_is_barred_and_not_open(self):
         self.write_product(approvals={'groom': 'auto', 'new_epic': 'human-now'})
         with open(os.path.join(self.root, 'inbox', 'goal.md'), 'w', encoding='utf-8') as f:
-            f.write('# A new goal for the year\ntype: epic\nSomething ambitious.\n')
+            f.write('# A new goal for the year\n\n## Features\n- Something ambitious\n- Another swing\n')
 
         r = self.run_groom()
         self.assertEqual(r.returncode, 0, r.stderr)
