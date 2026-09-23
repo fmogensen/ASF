@@ -156,6 +156,12 @@ def build_parser():
     p_sessions = sub.add_parser('sessions', help='the SESSIONS table')
     p_sessions.add_argument('--product')
 
+    p_tokens = sub.add_parser('tokens', help='the TOKENS table: input tokens per session, before and after a day')
+    p_tokens.add_argument('--product')
+    p_tokens.add_argument('--split', metavar='DAY', help='the day the change landed (default: today); counts as after')
+    p_tokens.add_argument('--days', type=int, default=14, help='days each side of the split (default: 14)')
+    p_tokens.add_argument('--json', action='store_true')
+
     p_status = sub.add_parser('status', help='the FACTORY STATUS table')
     p_status.add_argument('--product')
 
@@ -306,8 +312,8 @@ def _main(argv=None):
     if args.command == 'tick':
         from asf.tick.tick import cmd_tick
         return cmd_tick(args)
-    if args.command in ('roadmap', 'backlog', 'parity', 'prod', 'sessions', 'status'):
-        view_root = resolve_record(args)
+    if args.command in ('roadmap', 'backlog', 'parity', 'prod', 'sessions', 'status', 'tokens'):
+        view_root = resolve_record(args, announce=_announce_stderr if getattr(args, 'json', False) else print)
         if args.command == 'roadmap':
             from asf.views.roadmap import cmd_roadmap
             return cmd_roadmap(args, view_root)
@@ -323,6 +329,9 @@ def _main(argv=None):
         if args.command == 'sessions':
             from asf.views.sessions import cmd_sessions
             return cmd_sessions(args, view_root)
+        if args.command == 'tokens':
+            from asf.views.tokens import cmd_tokens
+            return cmd_tokens(args, view_root)
         if args.command == 'status':
             from asf.views.status import cmd_status
             return cmd_status(args, view_root)
