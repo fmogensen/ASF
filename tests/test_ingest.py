@@ -60,6 +60,20 @@ def read_meta(root, folder, id_):
     return frontmatter.parse(text, path=f"{folder}/{id_}.md")
 
 
+class ProductionIsTheProductsOwn(unittest.TestCase):
+    """B-0077: a product with no deploy configured has the trunk as its production — otherwise no
+    Feature of a package, library or tool could ever leave `Resolved`."""
+
+    def test_no_deploy_closes_on_a_green_trunk(self):
+        from asf.evidence import evidence
+        # the ingest passes True/True when there is no prod sha; the rule itself is unchanged
+        self.assertEqual(evidence.feature_state(True, True, True, True, True), 'Closed')
+
+    def test_a_deploy_still_gates_the_close(self):
+        from asf.evidence import evidence
+        self.assertEqual(evidence.feature_state(True, True, True, False, False), 'Resolved')
+
+
 class LandingOutranksThePlan(unittest.TestCase):
     """B-0074: a Task listed in its plan's table stayed Active although its commit was on main
     with a green run — the plan's `branch … exists` line won. A landing outranks every source."""

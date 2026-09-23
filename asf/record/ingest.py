@@ -372,11 +372,24 @@ def cmd_ingest(args, root):
         all_closed = bool(child_ids) and all(s == 'Closed' for s in child_states)
         all_merged_in_prod = all_prs_checked = False
         if all_closed:
-            all_merged_in_prod = all(
-                task_ev.get(cid) and evidence.ancestor_of(task_ev[cid].get('merged_sha'), ev.get('prod_sha'))
-                for cid in child_ids)
-            all_prs_checked = all(
-                task_ev.get(cid) and task_ev[cid].get('pr') in ev['checked'] for cid in child_ids)
+            # What "in production" means is the product's own (B-0077). A service configures
+            # `deploy_sha`, and a Feature closes when its Tasks' merges are in that deploy and
+            # the operator ticked them. A package, library or tool configures none — its trunk
+            # IS production, and its Tasks already closed on a commit there with CI green
+            # (D-0047), so there is nothing further to wait for. Without this, no Feature of
+            # such a product could ever leave `Resolved`.
+            if ev.get('prod_sha'):
+                all_merged_in_prod = all(
+                    task_ev.get(cid) and evidence.ancestor_of(task_ev[cid].get('merged_sha'),
+                                                              ev.get('prod_sha'))
+                    for cid in child_ids)
+                all_prs_checked = all(
+                    task_ev.get(cid) and task_ev[cid].get('pr') in ev['checked'] for cid in child_ids)
+            else:
+                all_merged_in_prod = all_prs_checked = True
+        # the board's ladder still says `landed`, not `on-prod`, for a product that deploys
+        # nothing — "on prod" names a deployment, and there is none to name
+        on_prod_for_stage = all_merged_in_prod and bool(ev.get('prod_sha'))
 
         spec_review = fev.get('spec_review')
         plan_review = fev.get('plan_review')
@@ -391,7 +404,7 @@ def cmd_ingest(args, root):
                     'review': spec_review[:2] if spec_review else None}
         plan_dict = {'exists': bool(fev.get('plan')), 'approved': plan_approved,
                     'review': plan_review[:2] if plan_review else None}
-        stage_val[iid] = evidence.feature_stage(spec_dict, plan_dict, child_states, all_merged_in_prod)
+        stage_val[iid] = evidence.feature_stage(spec_dict, plan_dict, child_states, on_prod_for_stage)
 
         lines = []
         if fev.get('spec_on_main'):
