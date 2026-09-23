@@ -6,6 +6,11 @@ Everything is per-test and disposable: its own ``ASF_HOME``, its own ``HOME`` (s
 subcommand to the real CLI. Nothing here loads a job on the machine running the tests, and no
 two tests can collide over a shared path.
 
+Each script run costs seconds (a score of `python3` starts, `asf doctor` twice), so a test that
+only reads what one run left behind does not run it again: the dry-run and the applied states
+are each reached once per class (:class:`SharedFixture`) and every test starts from a copy of
+that snapshot. No test waits on a clock — gate 3's deadline is 0 s, checked after its one look.
+
 The gate (item (a)) also runs `asf doctor`, whose result depends on which CLIs are logged in on
 the machine running the tests; tests that are not about the gate pass `--force`, and the gate's
 own tests drive `asf shadow-diff --ref` against fixture trees.
@@ -95,10 +100,11 @@ def _build_repos(root):
 REPOS = Template(_build_repos, prefix='asf-cutover-')
 
 
-class CutoverFixtureTest(unittest.TestCase):
-    def setUp(self):
-        self.tmp = REPOS.fresh()
-        self.addCleanup(shutil.rmtree, self.tmp, True)
+class CutoverFixture:
+    """The fixture operator dir and the knobs over it; no tests of its own."""
+
+    def build(self, tmp):
+        self.tmp = tmp
         self.home = os.path.join(self.tmp, 'home')
         self.asf_home = os.path.join(self.tmp, 'ASF')
         self.stub_dir = os.path.join(self.tmp, 'stub')
@@ -155,7 +161,10 @@ class CutoverFixtureTest(unittest.TestCase):
                     '  interval_s: 600\n'
                     + scheduler_extra +
                     'cutover:\n'
-                    '  job_timeout_s: 1\n'
+                    # gate 3 checks once before it looks at the clock: the fake launchd runs
+                    # the job inside `bootstrap`, so 0 s is never short, and a job that never
+                    # runs is refused at once instead of after a `sleep 3` under a 1 s deadline
+                    '  job_timeout_s: 0\n'
                     'operator:\n'
                     f'  tick_file: {self.tick_file}\n'
                     f'  plugin_dir: {self.plugin_dir}\n'
@@ -239,15 +248,30 @@ class CutoverFixtureTest(unittest.TestCase):
     def agents_dir(self):
         return os.path.join(self.home, 'Library', 'LaunchAgents')
 
-    # ---- the gates ----------------------------------------------------------------------------
+    def _manifest_rows(self):
+        with open(self.marker_path()) as f:
+            date = f.read().strip()
+        path = os.path.join(self.asf_home, 'state', 'sample', 'retired', date, 'manifest.tsv')
+        if not os.path.exists(path):
+            return []
+        with open(path) as f:
+            return [line.rstrip('\n').split('\t') for line in f if line.strip()]
 
-    def test_gate_table_is_printed_in_dry_run(self):
-        result = self.cutover(['sample', '--force'])
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('gate · result · line', result.stdout)
-        self.assertIn('1 referenced-dirs · pass ·', result.stdout)
-        self.assertIn('2 manifest · pass ·', result.stdout)
-        self.assertIn('3 installed-job-runs · skip ·', result.stdout)
+    def _write_tree(self, root, table_text):
+        os.makedirs(os.path.join(root, 'tables'), exist_ok=True)
+        with open(os.path.join(root, 'index.json'), 'w') as f:
+            json.dump({'items': []}, f)
+        for name in ('roadmap', 'backlog', 'parity', 'prod', 'sessions', 'status'):
+            with open(os.path.join(root, 'tables', f'{name}.md'), 'w') as f:
+                f.write(f'stamp line\n{table_text}\n')
+
+
+class CutoverFixtureTest(CutoverFixture, unittest.TestCase):
+    """A fresh fixture per test: the tests that change it before the script runs."""
+
+    def setUp(self):
+        self.build(REPOS.fresh())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
 
     def test_gate_1_refuses_a_dir_a_loaded_job_still_references(self):
         script = os.path.join(self.legacy_a, 'old-tool.py')
@@ -310,53 +334,6 @@ class CutoverFixtureTest(unittest.TestCase):
         self.assertFalse(os.path.exists(
             os.path.join(self.agents_dir(), 'asf.sample.record.plist')))
 
-    # ---- the acceptance case (B-0014) ----------------------------------------------------------
-
-    def test_apply_produces_a_factory_that_commits_tick_state(self):
-        result = self.cutover(['sample', '--force', '--apply'])
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('completed a run, the record\'s origin has it', result.stdout)
-
-        subject = subprocess.run(['git', '-C', self.origin_dir, 'log', '-1', '--format=%s'],
-                                 capture_output=True, text=True, check=True).stdout.strip()
-        self.assertTrue(subject.startswith('tick: state'), subject)
-        self.assertTrue(os.path.exists(self.marker_path()))
-
-    def _manifest_rows(self):
-        with open(self.marker_path()) as f:
-            date = f.read().strip()
-        path = os.path.join(self.asf_home, 'state', 'sample', 'retired', date, 'manifest.tsv')
-        if not os.path.exists(path):
-            return []
-        with open(path) as f:
-            return [line.rstrip('\n').split('\t') for line in f if line.strip()]
-
-    def test_cutover_installs_the_declared_clocks(self):
-        result = self.cutover(['sample', '--force', '--apply'])
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        for label in ('asf.sample.record', 'asf.sample.dispatch', 'asf.sample.daily'):
-            self.assertTrue(os.path.isfile(os.path.join(self.agents_dir(), f'{label}.plist')),
-                            f'{label} not installed:\n{result.stdout}')
-        installs = [row for row in self._manifest_rows() if row[0] == 'scheduler_install']
-        self.assertEqual(sorted(row[3] for row in installs),
-                         sorted(['asf.sample.record', 'asf.sample.dispatch', 'asf.sample.daily']))
-
-    def test_the_installed_job_is_runnable(self):
-        """B-0014 (b): absolute interpreter, a working directory, PYTHONPATH and log paths."""
-        import plistlib
-        import sys
-        self.cutover(['sample', '--force', '--apply'])
-        with open(os.path.join(self.agents_dir(), 'asf.sample.record.plist'), 'rb') as f:
-            data = plistlib.load(f)
-        self.assertEqual(data['ProgramArguments'][0], sys.executable)
-        self.assertTrue(os.path.isdir(data['WorkingDirectory']))
-        self.assertIn('PYTHONPATH', data['EnvironmentVariables'])
-        self.assertIn('PATH', data['EnvironmentVariables'])
-        self.assertIn('HOME', data['EnvironmentVariables'])
-        self.assertTrue(data['StandardOutPath'].endswith('tick-sample-record.log'))
-        self.assertTrue(data['StandardErrorPath'].endswith('tick-sample-record.log'))
-        self.assertEqual(data['StartInterval'], 300)
-
     def test_cutover_skips_an_unowned_clock(self):
         self.set_manifest(RECORD_ONLY_MANIFEST, 0)
         result = self.cutover(['sample', '--force', '--apply'])
@@ -379,35 +356,6 @@ class CutoverFixtureTest(unittest.TestCase):
         self.assertFalse(os.path.isdir(self.agents_dir()))
         self.assertTrue(os.path.isdir(self.legacy_a))
 
-    # ---- dry-run ---------------------------------------------------------------------------
-
-    def test_dry_run_changes_nothing(self):
-        result = self.cutover(['sample', '--force'])
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('== CUTOVER sample (dry-run)', result.stdout)
-        self.assertIn('would update', result.stdout + result.stderr)
-        self.assertIn('would install asf.sample.record', result.stdout)
-        # nothing touched: no marker, no retired dir, tick/plugin files untouched
-        self.assertFalse(os.path.exists(self.marker_path()))
-        with open(self.tick_file) as f:
-            self.assertNotIn('ASF:CUTOVER', f.read())
-        self.assertTrue(os.path.isdir(self.legacy_a))
-        self.assertTrue(os.path.isdir(self.legacy_b))
-        self.assertFalse(os.path.isdir(self.agents_dir()))
-
-    def test_dry_run_refuses_without_force_when_shadow_diff_unavailable(self):
-        result = self.cutover(['sample'])
-        self.assertEqual(result.returncode, 1)
-        self.assertIn('refusing', result.stdout + result.stderr)
-
-    def _write_tree(self, root, table_text):
-        os.makedirs(os.path.join(root, 'tables'), exist_ok=True)
-        with open(os.path.join(root, 'index.json'), 'w') as f:
-            json.dump({'items': []}, f)
-        for name in ('roadmap', 'backlog', 'parity', 'prod', 'sessions', 'status'):
-            with open(os.path.join(root, 'tables', f'{name}.md'), 'w') as f:
-                f.write(f'stamp line\n{table_text}\n')
-
     def test_ref_is_forwarded_to_shadow_diff(self):
         shadow = os.path.join(self.asf_home, 'state', 'sample', 'shadow')
         ref = os.path.join(self.tmp, 'ref')
@@ -427,14 +375,137 @@ class CutoverFixtureTest(unittest.TestCase):
         self.assertIn('DIFFERENT', result.stdout)
         self.assertIn('refusing', result.stdout + result.stderr)
 
+    def test_rollback_without_prior_cutover_refuses(self):
+        result = self.rollback(['sample', '--apply'])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('nothing to roll back', result.stdout + result.stderr)
+
+
+class SharedFixture(CutoverFixture):
+    """One fixture per class, taken to its starting state once (:meth:`prepare`, which runs the
+    scripts) and snapshotted; every test then starts from a copy of that snapshot put back at the
+    same absolute path — the paths the scripts wrote into plists, the config and the manifest
+    stay true — instead of running the scripts again to get there. A test may change the fixture
+    as it likes: the next one gets the snapshot back."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        fx = cls.__new__(cls)
+        fx.build(REPOS.fresh())
+        cls.addClassCleanup(shutil.rmtree, fx.tmp, True)
+        fx.prepare()
+        snapshot = tempfile.mkdtemp(prefix='asf-cutover-snapshot-')
+        cls.addClassCleanup(shutil.rmtree, snapshot, True)
+        os.rmdir(snapshot)
+        shutil.copytree(fx.tmp, snapshot, symlinks=True)
+        cls.snapshot = snapshot
+        cls.fixture = dict(vars(fx))
+
+    def setUp(self):
+        self.__dict__.update(self.fixture)
+        shutil.rmtree(self.tmp)
+        shutil.copytree(self.snapshot, self.tmp, symlinks=True)
+
+    def prepare(self):
+        raise NotImplementedError
+
+
+class DryRunTest(SharedFixture, unittest.TestCase):
+    """The untouched fixture, dry-run once with ``--force`` and once without."""
+
+    def prepare(self):
+        self.forced = self.cutover(['sample', '--force'])
+        self.bare = self.cutover(['sample'])
+
+    def test_gate_table_is_printed_in_dry_run(self):
+        result = self.forced
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('gate · result · line', result.stdout)
+        self.assertIn('1 referenced-dirs · pass ·', result.stdout)
+        self.assertIn('2 manifest · pass ·', result.stdout)
+        self.assertIn('3 installed-job-runs · skip ·', result.stdout)
+
+    def test_dry_run_changes_nothing(self):
+        result = self.forced
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('== CUTOVER sample (dry-run)', result.stdout)
+        self.assertIn('would update', result.stdout + result.stderr)
+        self.assertIn('would install asf.sample.record', result.stdout)
+        # nothing touched: no marker, no retired dir, tick/plugin files untouched
+        self.assertFalse(os.path.exists(self.marker_path()))
+        with open(self.tick_file) as f:
+            self.assertNotIn('ASF:CUTOVER', f.read())
+        self.assertTrue(os.path.isdir(self.legacy_a))
+        self.assertTrue(os.path.isdir(self.legacy_b))
+        self.assertFalse(os.path.isdir(self.agents_dir()))
+
+    def test_dry_run_refuses_without_force_when_shadow_diff_unavailable(self):
+        result = self.bare
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('refusing', result.stdout + result.stderr)
+
     def test_missing_ref_says_so(self):
-        result = self.cutover(['sample'])
+        result = self.bare
         self.assertIn('--ref', result.stdout + result.stderr)
 
-    # ---- apply -------------------------------------------------------------------------------
+
+class AppliedTest(SharedFixture, unittest.TestCase):
+    """The fixture cut over once (``--force --apply``), with an old job under
+    ``scheduler.launchd_label`` for the cutover to boot out and a rollback to put back."""
+
+    def prepare(self):
+        import plistlib
+        agents = self.agents_dir()
+        os.makedirs(agents, exist_ok=True)
+        self.old_plist = os.path.join(agents, 'old.factory.tick.plist')
+        with open(self.old_plist, 'wb') as f:
+            plistlib.dump({'Label': 'old.factory.tick',
+                           'ProgramArguments': ['/bin/bash', '/somewhere/else/run.sh']}, f)
+        self.write_config('  launchd_label: old.factory.tick\n')
+        with open(self.tick_file) as f:
+            self.original_tick = f.read()
+        with open(os.path.join(self.plugin_dir, 'board.md')) as f:
+            self.original_plugin = f.read()
+        self.applied = self.cutover(['sample', '--force', '--apply'])
+
+    def test_apply_produces_a_factory_that_commits_tick_state(self):
+        result = self.applied
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('completed a run, the record\'s origin has it', result.stdout)
+
+        subject = subprocess.run(['git', '-C', self.origin_dir, 'log', '-1', '--format=%s'],
+                                 capture_output=True, text=True, check=True).stdout.strip()
+        self.assertTrue(subject.startswith('tick: state'), subject)
+        self.assertTrue(os.path.exists(self.marker_path()))
+
+    def test_cutover_installs_the_declared_clocks(self):
+        result = self.applied
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for label in ('asf.sample.record', 'asf.sample.dispatch', 'asf.sample.daily'):
+            self.assertTrue(os.path.isfile(os.path.join(self.agents_dir(), f'{label}.plist')),
+                            f'{label} not installed:\n{result.stdout}')
+        installs = [row for row in self._manifest_rows() if row[0] == 'scheduler_install']
+        self.assertEqual(sorted(row[3] for row in installs),
+                         sorted(['asf.sample.record', 'asf.sample.dispatch', 'asf.sample.daily']))
+
+    def test_the_installed_job_is_runnable(self):
+        """B-0014 (b): absolute interpreter, a working directory, PYTHONPATH and log paths."""
+        import plistlib
+        import sys
+        with open(os.path.join(self.agents_dir(), 'asf.sample.record.plist'), 'rb') as f:
+            data = plistlib.load(f)
+        self.assertEqual(data['ProgramArguments'][0], sys.executable)
+        self.assertTrue(os.path.isdir(data['WorkingDirectory']))
+        self.assertIn('PYTHONPATH', data['EnvironmentVariables'])
+        self.assertIn('PATH', data['EnvironmentVariables'])
+        self.assertIn('HOME', data['EnvironmentVariables'])
+        self.assertTrue(data['StandardOutPath'].endswith('tick-sample-record.log'))
+        self.assertTrue(data['StandardErrorPath'].endswith('tick-sample-record.log'))
+        self.assertEqual(data['StartInterval'], 300)
 
     def test_apply_rewrites_tick_file_and_plugin_skills(self):
-        result = self.cutover(['sample', '--force', '--apply'])
+        result = self.applied
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
         with open(self.tick_file) as f:
@@ -451,7 +522,7 @@ class CutoverFixtureTest(unittest.TestCase):
         self.assertTrue(os.path.exists(self.marker_path()))
 
     def test_apply_moves_legacy_dirs_under_retired(self):
-        result = self.cutover(['sample', '--force', '--apply'])
+        result = self.applied
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         with open(self.marker_path()) as f:
             date = f.read().strip()
@@ -463,7 +534,6 @@ class CutoverFixtureTest(unittest.TestCase):
         self.assertTrue(os.path.isdir(os.path.join(retired, name_b)))
 
     def test_apply_records_a_cutover_event(self):
-        self.cutover(['sample', '--force', '--apply'])
         events_dir = os.path.join(self.backlog_dir, 'metrics', 'events')
         self.assertTrue(os.path.isdir(events_dir))
         files = os.listdir(events_dir)
@@ -475,7 +545,7 @@ class CutoverFixtureTest(unittest.TestCase):
         self.assertEqual(events[0]['product'], 'sample')
 
     def test_apply_is_idempotent(self):
-        first = self.cutover(['sample', '--force', '--apply'])
+        first = self.applied
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         with open(self.tick_file) as f:
             tick_after_first = f.read()
@@ -488,18 +558,8 @@ class CutoverFixtureTest(unittest.TestCase):
 
     # ---- rollback ------------------------------------------------------------------------------
 
-    def test_rollback_without_prior_cutover_refuses(self):
-        result = self.rollback(['sample', '--apply'])
-        self.assertEqual(result.returncode, 1)
-        self.assertIn('nothing to roll back', result.stdout + result.stderr)
-
     def test_rollback_restores_everything(self):
-        with open(self.tick_file) as f:
-            original_tick = f.read()
-        with open(os.path.join(self.plugin_dir, 'board.md')) as f:
-            original_plugin = f.read()
-
-        apply_result = self.cutover(['sample', '--force', '--apply'])
+        apply_result = self.applied
         self.assertEqual(apply_result.returncode, 0, apply_result.stdout + apply_result.stderr)
 
         rollback_result = self.rollback(['sample', '--apply'])
@@ -507,16 +567,15 @@ class CutoverFixtureTest(unittest.TestCase):
                          rollback_result.stdout + rollback_result.stderr)
 
         with open(self.tick_file) as f:
-            self.assertEqual(f.read(), original_tick)
+            self.assertEqual(f.read(), self.original_tick)
         with open(os.path.join(self.plugin_dir, 'board.md')) as f:
-            self.assertEqual(f.read(), original_plugin)
+            self.assertEqual(f.read(), self.original_plugin)
         self.assertTrue(os.path.isdir(self.legacy_a))
         self.assertTrue(os.path.isfile(os.path.join(self.legacy_a, 'old-tool.py')))
         self.assertTrue(os.path.isdir(self.legacy_b))
         self.assertFalse(os.path.exists(self.marker_path()))
 
     def test_rollback_removes_the_jobs_cutover_installed(self):
-        self.cutover(['sample', '--force', '--apply'])
         for label in ('asf.sample.record', 'asf.sample.dispatch',
                       'asf.sample.daily'):
             self.assertTrue(os.path.isfile(os.path.join(self.agents_dir(), f'{label}.plist')))
@@ -531,27 +590,17 @@ class CutoverFixtureTest(unittest.TestCase):
             self.assertIn('asf.sample.record', f.read())
 
     def test_rollback_reloads_the_job_cutover_booted_out(self):
-        import plistlib
-        agents = self.agents_dir()
-        os.makedirs(agents, exist_ok=True)
-        old_plist = os.path.join(agents, 'old.factory.tick.plist')
-        with open(old_plist, 'wb') as f:
-            plistlib.dump({'Label': 'old.factory.tick',
-                           'ProgramArguments': ['/bin/bash', '/somewhere/else/run.sh']}, f)
-        self.write_config('  launchd_label: old.factory.tick\n')
-
-        result = self.cutover(['sample', '--force', '--apply'])
+        result = self.applied
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertFalse(os.path.exists(old_plist), 'the old job should have been retired')
+        self.assertFalse(os.path.exists(self.old_plist), 'the old job should have been retired')
 
         rb = self.rollback(['sample', '--apply'])
         self.assertEqual(rb.returncode, 0, rb.stdout + rb.stderr)
-        self.assertTrue(os.path.exists(old_plist), 'rollback must put the old job back')
+        self.assertTrue(os.path.exists(self.old_plist), 'rollback must put the old job back')
         with open(os.path.join(self.statedir, 'bootstrapped.txt')) as f:
             self.assertIn('old.factory.tick.plist', f.read())
 
     def test_rollback_dry_run_changes_nothing(self):
-        self.cutover(['sample', '--force', '--apply'])
         with open(self.tick_file) as f:
             tick_after_cutover = f.read()
 
@@ -563,7 +612,7 @@ class CutoverFixtureTest(unittest.TestCase):
         self.assertTrue(os.path.exists(self.marker_path()))
 
     def test_cutover_then_rollback_then_cutover_again(self):
-        r1 = self.cutover(['sample', '--force', '--apply'])
+        r1 = self.applied
         self.assertEqual(r1.returncode, 0, r1.stdout + r1.stderr)
         r2 = self.rollback(['sample', '--apply'])
         self.assertEqual(r2.returncode, 0, r2.stdout + r2.stderr)
