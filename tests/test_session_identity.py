@@ -12,7 +12,9 @@ from unittest import mock
 
 from asf import env
 from asf import hermetic
+from asf.harvest import harvest
 from asf.workers import githooks
+from asf.workers import health as health_mod
 from asf.workers import lifecycle
 from asf.workers import observe
 from asf.workers import pool as pool_mod
@@ -458,6 +460,55 @@ class PoolAcrossProductsTest(Home):
         wave_mod.wave(self.product, [feature_row('spec-f-0001')], 0, pool=pool, cfg=self.cfg,
                       out=lines.append)
         self.assertEqual([l for l in lines if l.startswith('pool: sessions unreadable')], [])
+
+
+class AliveIsIdentityTest(Home):
+    """F-0076 D11/T-9453: a run is alive only while its own session still sits at its pid;
+    a foreign session, or another asf session, that lands on a reused pid is never that run."""
+
+    def test_reused_pid_is_dead(self):
+        pool_mod.append_session(self.product, {
+            'job': 'j1', 'item': 'B-0001', 'pid': 4242, 'account': 'acct-a',
+            'session': 'sample/j1@20260922T100000Z', 'started': '2026-09-22T10:00:00Z'})
+        fake = observe.FakeSource([{'pid': 4242, 'ppid': 1,
+                                    'env': {'ASF_SESSION': 'sample/j2@20260922T110000Z'}}])
+        found = health_mod.health(self.product, session_source=fake, out=lambda s: None)
+        self.assertIn(('j1', 'ended', lifecycle.DEAD_PID), found)
+        self.assertEqual(pool_mod.load_sessions(self.product)['j1']['end_reason'],
+                         lifecycle.DEAD_PID)
+
+    def test_reused_pid_by_a_foreign_session_is_not_stalled(self):
+        pool_mod.append_session(self.product, {
+            'job': 'j2', 'item': 'B-0001', 'pid': 4242, 'account': 'acct-a',
+            'session': 'sample/j2@20260922T100000Z', 'started': '2026-09-22T10:00:00Z'})
+        fake = observe.FakeSource([{'pid': 4242, 'ppid': 1, 'env': {}}])  # foreign, no ASF_SESSION
+        found = stall_mod.stall(self.product, session_source=fake, out=lambda s: None)
+        self.assertEqual(found, [('j2', 'DEAD', None)])
+
+    def test_legacy_run_without_session_uses_the_pid(self):
+        # a run recorded before this change carries no 'session' of its own: read_lines derives
+        # one on the fly for every launch line under a product's state dir (T-9450), so a truly
+        # session-less run is exercised here the way alive_for actually sees one — a raw dict.
+        fake = observe.FakeSource([{'pid': 4343, 'ppid': 1, 'env': {}}])
+        alive = health_mod.alive_for(self.product, [{'job': 'j3', 'pid': 4343}],
+                                     session_source=fake)
+        self.assertTrue(alive(4343))
+
+    def test_foreign_sessions_are_never_judged(self):
+        fake = observe.FakeSource([{'pid': 9001, 'ppid': 1, 'env': {}},
+                                   {'pid': 9002, 'ppid': 1, 'env': {}}])
+        lines = []
+        found = health_mod.health(self.product, session_source=fake, out=lines.append)
+        self.assertEqual(found, [])
+        self.assertEqual(lines, ['health: clean'])
+        self.assertEqual(stall_mod.stall(self.product, session_source=fake, out=lambda s: None), [])
+
+    def test_reap_hold_uses_identity(self):
+        record = {'job': 'j4', 'pid': 4242, 'session': 'sample/j4@20260922T100000Z',
+                  'ended': '2026-09-22T10:05:00Z', 'end_reason': lifecycle.FINISHED}
+        fake = observe.FakeSource([{'pid': 4242, 'ppid': 1,
+                                    'env': {'ASF_SESSION': 'sample/j5@20260922T110000Z'}}])
+        self.assertIsNone(harvest.reap_hold(record, session_source=fake))
 
 
 if __name__ == '__main__':

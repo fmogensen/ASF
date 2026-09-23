@@ -73,13 +73,16 @@ def classify(session, now, silent_min, alive):
     return 'STALL' if (now - mtime) / 60 > silent_min else None
 
 
-def stall(product, now=None, alive=health_mod.pid_alive, out=print):
+def stall(product, now=None, alive=None, session_source=None, out=print):
     """Returns ``[(job, STALL|DEAD, minutes silent)]``, acked ones left out."""
     now = time.time() if now is None else now
     limit = silent_minutes(product)
     acks = load_acks(product)
+    live = pool_mod.live_sessions(product)
+    if alive is None:
+        alive = health_mod.alive_for(product, live, session_source)
     found = []
-    for s in pool_mod.live_sessions(product):
+    for s in live:
         state = classify(s, now, limit, alive)
         if state is None or (s['job'], None) in acks or (s['job'], state) in acks:
             continue

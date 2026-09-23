@@ -55,13 +55,17 @@ def pid_alive(pid):
     return True
 
 
-def live_rows(product, alive=pid_alive):
+def live_rows(product, alive=None, session_source=None):
     """(working, dead): the registry's sessions with no ``ended``, split on whether the pid lives."""
     if product is None:
         return [], []
+    from asf.workers import health as health_mod
     from asf.workers import pool as pool_mod
+    live = pool_mod.live_sessions(product)
+    if alive is None:
+        alive = health_mod.alive_for(product, live, session_source)
     working, dead = [], []
-    for s in pool_mod.live_sessions(product):
+    for s in live:
         (working if alive(s.get('pid')) else dead).append(s)
     return working, dead
 
@@ -76,7 +80,7 @@ def _table(rows, columns, header):
     return out
 
 
-def render(root, product=None, alive=pid_alive):
+def render(root, product=None, alive=None):
     ended = _ended_rows(root)
     working, dead = live_rows(product, alive)
     out = [f"**SESSIONS** — {len(working)} working · {len(dead)} dead · {len(ended)} ended", ""]

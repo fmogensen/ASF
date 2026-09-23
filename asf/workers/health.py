@@ -47,6 +47,7 @@ empty>)``.
 import os
 import subprocess
 
+from asf.workers import observe
 from asf.workers import pool as pool_mod
 from asf.workers import report as report_mod
 from asf.workers import runtime as runtime_mod
@@ -72,6 +73,17 @@ def pid_alive(pid):
     except (OSError, ValueError):
         return False
     return True
+
+
+def alive_for(product, runs, session_source=None):
+    """``callable(pid) -> bool`` (F-0076 D11): a run is alive only while an observed session
+    still sits at its pid carrying that run's own ``session`` id — falls back to
+    :func:`pid_alive` when observation is unreadable (D10)."""
+    cfg = spawn_mod.load_cfg()
+    observed, why = observe.read(cfg, pool_mod.accounts_from_config(cfg), source=session_source)
+    if why:
+        return pid_alive
+    return observe.identity_alive(observed, runs)
 
 
 def _git(args, cwd):
@@ -247,7 +259,7 @@ def prune_branches(product, registry, fix=False):
     return found
 
 
-def health(product, fix=False, alive=pid_alive, out=print):
+def health(product, fix=False, alive=None, session_source=None, out=print):
     """Returns a list of ``(job, what, detail)`` transitions/findings. Every judgement is
     :mod:`asf.workers.lifecycle`'s: :func:`~asf.workers.lifecycle.judge` for the ``ended`` line,
     :func:`~asf.workers.lifecycle.reap_verdict` for the worktrees; this function gathers the
@@ -255,6 +267,8 @@ def health(product, fix=False, alive=pid_alive, out=print):
     found = []
     registry = pool_mod.sessions_path(product)
     sessions = pool_mod.load_sessions(product)
+    if alive is None:
+        alive = alive_for(product, sessions.values(), session_source)
     for job, s in sessions.items():
         if s.get('ended'):
             # a `dead pid` judgement is revisited: the result may have landed after the check,

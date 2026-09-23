@@ -11,6 +11,7 @@ from unittest import mock
 from asf import env
 from asf.views import capacity as capacity_view
 from asf.views import prod, sessions, status
+from asf.workers import observe
 from asf.workers import pool as pool_mod
 
 INDEX = {'generated': '', 'items': {
@@ -34,6 +35,15 @@ class ViewsTestCase(unittest.TestCase):
             json.dump(INDEX, f)
         self.product = env.Product('p', {'repo_dir': self.tmp, 'main': 'trunk',
                                          'ci': {'provider': 'none'}, 'deploy_sha': 'none'})
+
+        # the test runner's own pid, as a legacy (no ASF_SESSION) session — the real process
+        # table never carries it, since this process is not the runtime binary a real source
+        # would match (F-0076 D4)
+        patcher = mock.patch('asf.workers.observe.source_from_config',
+                             return_value=observe.FakeSource([{'pid': os.getpid(), 'ppid': 1,
+                                                                'env': {}}]))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _restore(self):
         env.ASF_HOME = self._home

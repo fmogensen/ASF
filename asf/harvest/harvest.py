@@ -54,8 +54,8 @@ import tempfile
 
 from asf import approvals, env, hermetic
 from asf.conventions import Conventions
+from asf.workers import health as health_mod
 from asf.workers import lifecycle
-from asf.workers.health import pid_alive
 from asf.workers.pool import now_iso
 
 #: The conventions a caller with no Product reads: trunk `main`, code branches `worker/`, no
@@ -196,21 +196,27 @@ def mark_harvested(state_dir, job, sha):
         f.write(json.dumps({'job': job, 'harvested': sha}, sort_keys=True) + '\n')
 
 
-def reap_hold(record):
+def reap_hold(record, alive=None, session_source=None):
     """Why a job's worktree may not be reaped, or None. Both must hold: the job's own record
-    carries a finished line (``ended``), and the process id in it is dead (B-0010)."""
+    carries a finished line (``ended``), and the process id in it is dead — identity, not just
+    the pid (B-0010, F-0076 D7/D11)."""
     if not record or not record.get('ended'):
         return 'no finished line in its record'
+    if alive is None:
+        alive = health_mod.alive_for(None, [record], session_source)
     pid = record.get('pid')
-    if pid_alive(pid):
+    if alive(pid):
         return f'pid {pid} is still alive'
     return None
 
 
-def reap(repo, state_dir, job, branch, sha=None):
+def reap(repo, state_dir, job, branch, sha=None, alive=None, session_source=None):
     """Remove the job's worktree, branch and registry row — but only once :func:`reap_hold`
     clears it; otherwise print one hold line and touch nothing. True when reaped."""
-    why = reap_hold(read_sessions(state_dir).get(job))
+    sessions = read_sessions(state_dir)
+    if alive is None:
+        alive = health_mod.alive_for(None, sessions.values(), session_source)
+    why = reap_hold(sessions.get(job), alive=alive, session_source=session_source)
     if why:
         hold(job, f'not reaped: {why}')
         return False
@@ -450,7 +456,8 @@ def pr_create_line(repo, tmp, branch, trunk='main'):
 
 # ---------------------------------------------------------------- per-branch --
 
-def harvest_branch(repo, state_dir, is_record, job, branch, dry_run, conv=None):
+def harvest_branch(repo, state_dir, is_record, job, branch, dry_run, conv=None, alive=None,
+                   session_source=None):
     conv = conv or DEFAULTS
     trunk = conv.main
     for _attempt in (1, 2):
@@ -503,7 +510,7 @@ def harvest_branch(repo, state_dir, is_record, job, branch, dry_run, conv=None):
                     return hold(job, 'push branch failed')
                 print(pr_create_line(repo, tmp, branch, trunk))
 
-            reap(repo, state_dir, job, branch, sha)
+            reap(repo, state_dir, job, branch, sha, alive=alive, session_source=session_source)
             print(f'HARVEST OK {job} {sha}')
             return 'ok'
         finally:
@@ -535,12 +542,15 @@ def is_record_repo(repo):
     return os.path.isfile(os.path.join(repo, 'index.json'))
 
 
-def run_harvest(repo, state_dir, dry_run, conv=None):
+def run_harvest(repo, state_dir, dry_run, conv=None, session_source=None):
     conv = conv or DEFAULTS
     repo = os.path.abspath(repo)
     state_dir = os.path.abspath(state_dir)
     is_record = is_record_repo(repo)
     sessions = read_sessions(state_dir)
+    # one alive callable, one `ps` read, for every job this run judges (F-0076 D7) — not one
+    # per job
+    alive = health_mod.alive_for(None, sessions.values(), session_source)
     sh(['git', 'fetch', '-q', 'origin', conv.main], cwd=repo)
     eligible = []
     for branch in worker_branches(repo, conv):
@@ -553,11 +563,12 @@ def run_harvest(repo, state_dir, dry_run, conv=None):
             continue
         eligible.append((job, branch))
     for job, branch in cap_to_tick(eligible, print, conv):
-        why = reap_hold(sessions.get(job))
+        why = reap_hold(sessions.get(job), alive=alive, session_source=session_source)
         if why:  # never land what cannot then be reaped: a live job still owns its worktree
             hold(job, f'not reaped: {why}')
             continue
-        harvest_branch(repo, state_dir, is_record, job, branch, dry_run, conv)
+        harvest_branch(repo, state_dir, is_record, job, branch, dry_run, conv, alive=alive,
+                       session_source=session_source)
     return 0
 
 

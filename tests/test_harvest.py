@@ -15,6 +15,7 @@ from asf import env
 from asf.conventions import Conventions
 from asf.harvest import harvest
 from asf.workers import lifecycle
+from asf.workers import observe
 from asf.init import ITEM_FOLDERS, STREAM_FOLDERS
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_harvest` does not
@@ -427,19 +428,24 @@ class HarvestTests(unittest.TestCase):
         index_and_commit(wt, 'live1: add E-0006')
         write_session(self.state_dir, 'live1', branch, pid=live)
 
-        rc, out = run_harvest(self.repo, self.state_dir)
-        self.assertEqual(rc, 0)
-        self.assertEqual(out.count('HARVEST HOLD live1'), 1, out)
-        self.assertNotIn('HARVEST OK', out)
-        self.worktree_survives('live1', branch)
+        # the test runner's own pid, at a session-less (legacy) run: observed alive only when a
+        # source reports it (F-0076 D4/D11) — the real process table never does, since this
+        # process is not the runtime binary a real source would match
+        fake_source = observe.FakeSource([{'pid': live, 'ppid': 1, 'env': {}}])
+        with mock.patch('asf.workers.observe.source_from_config', return_value=fake_source):
+            rc, out = run_harvest(self.repo, self.state_dir)
+            self.assertEqual(rc, 0)
+            self.assertEqual(out.count('HARVEST HOLD live1'), 1, out)
+            self.assertNotIn('HARVEST OK', out)
+            self.worktree_survives('live1', branch)
 
-        branch, wt = add_job_worktree(self.repo, self.state_dir, 'open1')
-        write_session(self.state_dir, 'open1', branch, ended=False, pid=dead_pid())
-        buf = io.StringIO()
-        with redirect_stdout(buf):
-            harvest.reap(self.repo, self.state_dir, 'open1', branch)
-        self.assertEqual(buf.getvalue().count('HARVEST HOLD open1'), 1, buf.getvalue())
-        self.worktree_survives('open1', branch)
+            branch, wt = add_job_worktree(self.repo, self.state_dir, 'open1')
+            write_session(self.state_dir, 'open1', branch, ended=False, pid=dead_pid())
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                harvest.reap(self.repo, self.state_dir, 'open1', branch)
+            self.assertEqual(buf.getvalue().count('HARVEST HOLD open1'), 1, buf.getvalue())
+            self.worktree_survives('open1', branch)
 
 
 # ---- the product repo: remote lane branches, sessions keyed by branch --------------------------
