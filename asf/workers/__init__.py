@@ -1,8 +1,10 @@
-"""asf.workers — the worker pool as code: spawn, launch wave, health, stall, quota, reserve-id.
+"""asf.workers — the worker pool as code: spawn, launch wave, health, stall, quota, reserve-id,
+sessions.
 
-``register(sub)`` adds ``asf workers spawn|wave|health|stall|quota|reserve-id --product X``; each
-leaf sets ``func`` so the caller dispatches with ``args.func(args)``.
+``register(sub)`` adds ``asf workers spawn|wave|health|stall|quota|reserve-id|sessions --product
+X``; each leaf sets ``func`` so the caller dispatches with ``args.func(args)``.
 """
+import json
 import sys
 
 
@@ -100,9 +102,42 @@ def cmd_quota(args):
     return 0
 
 
+def cmd_sessions(args):
+    """``asf workers sessions [--json]`` (F-0076 S-8156): every session
+    :mod:`asf.workers.observe` sees on this machine, in pid order, and whose it is. Unreadable
+    observation is ``sessions: unreadable — <why>`` on stderr and exit 2, never a table."""
+    from asf.workers import observe, pool, spawn
+    product = _product(args)
+    cfg = spawn.load_cfg()
+    accounts = pool.accounts_from_config(cfg)
+    source = observe.source_from_config(cfg)
+    observed, why = observe.read(cfg, accounts, source=source)
+    if why:
+        print(f'sessions: unreadable — {why}', file=sys.stderr)
+        return 2
+    observed = sorted(observed, key=lambda o: o.pid)
+    if getattr(args, 'json', False):
+        print(json.dumps([{'pid': o.pid, 'account': o.account, 'owner': o.owner,
+                           'session': o.session} for o in observed]))
+        return 0
+    for o in observed:
+        account = o.account if o.account is not None else '—'
+        session = o.session if o.session is not None else '—'
+        if o.account is None:
+            session += ' (unattributed)'
+        print(f'{o.pid}  {account}   {o.owner}   {session}')
+    p = pool.Pool.from_config(cfg, product, session_source=source)
+    for a in p.accounts:
+        load = p.load(a)
+        foreign = sum(1 for s in p.live
+                     if s.get('account') == a.name and s.get('owner') == 'foreign')
+        print(f'load: {a.name} {load}/{a.cap} (asf {load - foreign}, foreign {foreign})')
+    return 0
+
+
 def register(sub):
     from asf.env import add_product_arg
-    p = sub.add_parser('workers', help='the worker pool: spawn, wave, health, stall, quota')
+    p = sub.add_parser('workers', help='the worker pool: spawn, wave, health, stall, quota, sessions')
     wsub = p.add_subparsers(dest='workers_command', required=True)
 
     s = wsub.add_parser('spawn', help='launch one feeder row now')
@@ -135,4 +170,9 @@ def register(sub):
     add_product_arg(ri)
     ri.add_argument('--job', required=True, help='the job id the range is reserved for')
     ri.set_defaults(func=cmd_reserve_id)
+
+    se = wsub.add_parser('sessions', help='every agent session on this machine, and whose it is')
+    add_product_arg(se)
+    se.add_argument('--json', action='store_true')
+    se.set_defaults(func=cmd_sessions)
     return p

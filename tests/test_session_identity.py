@@ -1,11 +1,12 @@
 """asf — session identity (F-0076): the id, the registry line, the environment, the log and the
 commit trailer. This module grows with each Task of the plan; T-9450 added ``SessionIdTest``,
-``LaunchIdentityTest`` and ``CommitTrailerTest``, T-9451 added ``ObserveTest``, and T-0048 adds
-``PoolAcrossProductsTest``."""
+``LaunchIdentityTest`` and ``CommitTrailerTest``, T-9451 added ``ObserveTest``, T-0048 added
+``PoolAcrossProductsTest``, and T-0050 adds ``VisibilityTest`` and ``HistoryTest``."""
 import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -13,6 +14,8 @@ from unittest import mock
 from asf import env
 from asf import hermetic
 from asf.harvest import harvest
+from asf.metrics import metrics
+from asf.views import sessions as sessions_view
 from asf.workers import githooks
 from asf.workers import health as health_mod
 from asf.workers import lifecycle
@@ -25,6 +28,8 @@ from asf.workers import stall as stall_mod
 from asf.workers import wave as wave_mod
 
 from tests.test_workers import Home, feature_row, s1_row
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _git(args, cwd, env=None):
@@ -509,6 +514,83 @@ class AliveIsIdentityTest(Home):
         fake = observe.FakeSource([{'pid': 4242, 'ppid': 1,
                                     'env': {'ASF_SESSION': 'sample/j5@20260922T110000Z'}}])
         self.assertIsNone(harvest.reap_hold(record, session_source=fake))
+
+
+class VisibilityTest(Home):
+    """S-8156: ``asf workers sessions [--json]`` prints every observed session and whose it is;
+    ``asf sessions`` gains an **Other** group for sessions on a pool account that are not this
+    product's own."""
+
+    def _cli_home(self):
+        os.makedirs(os.path.join(env.ASF_HOME, 'products'), exist_ok=True)
+        with open(os.path.join(env.ASF_HOME, 'config.yaml'), 'w', encoding='utf-8') as f:
+            f.write('worker_pool:\n  accounts:\n    - name: acct-a\n      cap: 3\n'
+                    '      config_dir: /cfg/acct-a\n')
+        with open(os.path.join(env.ASF_HOME, 'products', 'a.yaml'), 'w', encoding='utf-8') as f:
+            f.write(f'product: a\nrepo_dir: {self.repo}\nmain: main\n')
+
+    def _run_cli(self, argv, ps_table):
+        self._cli_home()
+        bindir = fake_ps(self.tmp, ps_table)
+        cli_env = hermetic.build(worktree=PROJECT_ROOT)
+        cli_env['ASF_HOME'] = env.ASF_HOME
+        cli_env['PATH'] = bindir + os.pathsep + cli_env.get('PATH', '')
+        return subprocess.run([sys.executable, '-m', 'asf.cli'] + argv, env=cli_env,
+                              capture_output=True, text=True, timeout=30)
+
+    def _table(self):
+        return ('  4242     1 /usr/bin/claude ASF_SESSION=a/spec-f-0076@20260922T101500Z '
+                'CLAUDE_CONFIG_DIR=/cfg/acct-a\n'
+                '  5150     1 /usr/bin/claude CLAUDE_CONFIG_DIR=/cfg/acct-a\n')
+
+    def test_workers_sessions_cli(self):
+        result = self._run_cli(['workers', 'sessions', '--product', 'a'], self._table())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('4242', result.stdout)
+        self.assertIn('asf', result.stdout)
+        self.assertIn('5150', result.stdout)
+        self.assertIn('foreign', result.stdout)
+        self.assertIn('load: acct-a', result.stdout)
+
+    def test_workers_sessions_json(self):
+        result = self._run_cli(['workers', 'sessions', '--product', 'a', '--json'], self._table())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('load:', result.stdout)
+        rows = json.loads(result.stdout)
+        self.assertEqual(sorted(r['pid'] for r in rows), [4242, 5150])
+        for r in rows:
+            self.assertEqual(set(r), {'pid', 'account', 'owner', 'session'})
+
+    def test_view_other_group(self):
+        own_sid = lifecycle.session_id('sample', 'spec-f-0001', '2026-09-23T09:00:00Z')
+        other_sid = lifecycle.session_id('other', 'spec-f-0002', '2026-09-23T10:00:00Z')
+        cfg = {'worker_pool': {'accounts': [{'name': 'acct-a', 'cap': 5,
+                                             'config_dir': '/cfg/acct-a'}], 'sessions': 'fake'}}
+        source = observe.FakeSource([
+            {'pid': 6000, 'ppid': 1, 'env': {'CLAUDE_CONFIG_DIR': '/cfg/acct-a',
+                                             'ASF_SESSION': own_sid}},
+            {'pid': 7001, 'ppid': 1, 'env': {'CLAUDE_CONFIG_DIR': '/cfg/acct-a',
+                                             'ASF_SESSION': other_sid}},
+            {'pid': 8001, 'ppid': 1, 'env': {'CLAUDE_CONFIG_DIR': '/cfg/acct-a'}},
+        ])
+        text = sessions_view.render(os.path.join(self.tmp, 'record'), self.product, cfg=cfg,
+                                    session_source=source)
+        self.assertIn('**Other**', text)
+        self.assertIn(other_sid, text)
+        self.assertIn('7001', text)
+        self.assertIn('8001', text)
+        self.assertIn('foreign', text)
+        self.assertNotIn(own_sid, text)
+
+
+class HistoryTest(unittest.TestCase):
+    """S-8157: the ``sessions`` metrics event carries the session id."""
+
+    def test_event_carries_session(self):
+        sid = 'p/j@20260923T100000Z'
+        ev = metrics.session_event({'job': 'j', 'session': sid, 'started': '2026-09-23T10:00:00Z',
+                                    'ended': '2026-09-23T10:05:00Z'}, None)
+        self.assertEqual(ev['session'], sid)
 
 
 if __name__ == '__main__':

@@ -122,7 +122,7 @@ SCHEMAS = {
         'kind': (('str',), MATCH), 'item': (('str', 'null'), MATCH), 'item_reason': (('str', 'null'), None),
         'branch': (('str', 'null'), None), 'result': (('str',), REQ), 'reason': (('str', 'null'), None),
         'round': (('int', 'null'), MATCH), 'pushes': (('int', 'null'), None), 'minutes': (('num', 'null'), None),
-        'usd': (('num', 'null'), None),
+        'usd': (('num', 'null'), None), 'session': (('str', 'null'), None),
     },
     'ticks': {
         'ts': (('str',), TS), 'tick': (('int',), REQ), 'duration_s': (('num', 'null'), None),
@@ -798,7 +798,8 @@ def session_event(record, result, items=None):
           'branch': record.get('branch') or None,
           'result': str(record.get('end_reason') or ('running' if not record.get('ended') else 'unknown')),
           'reason': reason,
-          'minutes': minutes, 'usd': usd if isinstance(usd, (int, float)) else None}
+          'minutes': minutes, 'usd': usd if isinstance(usd, (int, float)) else None,
+          'session': record.get('session')}
     item = record.get('item')
     if item and ID_RE.match(str(item)) and (not items or item in items):
         ev['item'] = item

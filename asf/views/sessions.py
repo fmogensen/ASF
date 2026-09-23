@@ -1,10 +1,12 @@
 """asf.views.sessions — the ``SESSIONS`` table (``asf sessions``).
 
-Three groups:
+Four groups:
 
 * **Working** — a session in the workers' registry (``~/.ASF/state/<product>/sessions.jsonl``) with
   no ``ended`` whose pid is still alive;
 * **Dead** — the same, but its pid is gone (the tick's ``health`` step will reconcile it);
+* **Other** — an observed session (:mod:`asf.workers.observe`) on one of the pool's accounts that
+  is not this product's own — another product's, or a foreign one (F-0076 S-8156);
 * **Ended** — ``metrics/sessions/<day>.jsonl`` in the record for yesterday and today (written by
   ``asf metrics backfill``).
 """
@@ -80,10 +82,48 @@ def _table(rows, columns, header):
     return out
 
 
-def render(root, product=None, alive=None):
+OTHER_COLUMNS = ('Session', 'Account', 'Owner', 'Pid')
+
+
+def _other_rows(observed, product):
+    """The observed sessions on a pool account that are not ``product``'s own — another
+    product's, or a foreign one (F-0076 D8/S-8156)."""
+    name = getattr(product, 'name', None)
+    return [o for o in observed if o.account is not None and (o.owner == 'foreign' or o.product != name)]
+
+
+def _other_table(rows):
+    out = [f"| {' | '.join(OTHER_COLUMNS)} |", '|' + '---|' * len(OTHER_COLUMNS)]
+    for o in rows:
+        cells = (o.session or '—', o.account or '—', o.owner or '—', o.pid)
+        out.append("| " + " | ".join(str(c) for c in cells) + " |")
+    return out
+
+
+def render(root, product=None, alive=None, cfg=None, session_source=None):
+    """``cfg`` (default: :func:`asf.workers.spawn.load_cfg`) drives one observation read, used
+    both for the **Other** group and, when ``alive`` is not given, for the working/dead split
+    (F-0076 D11: a run is alive only while its own session still holds its pid). An explicit
+    ``alive`` (a test's, or the pid rule) is used as given."""
+    from asf.workers import spawn as spawn_mod, pool as pool_mod, observe
+    if cfg is None:
+        cfg = spawn_mod.load_cfg()
+    accounts = pool_mod.accounts_from_config(cfg)
+    observed, why = observe.read(cfg, accounts, source=session_source)
+    if alive is not None:
+        effective_alive = alive
+    elif why:
+        effective_alive = pid_alive
+    else:
+        runs = list(pool_mod.load_sessions(product).values()) if product is not None else []
+        effective_alive = observe.identity_alive(observed, runs)
+
     ended = _ended_rows(root)
-    working, dead = live_rows(product, alive)
-    out = [f"**SESSIONS** — {len(working)} working · {len(dead)} dead · {len(ended)} ended", ""]
+    working, dead = live_rows(product, effective_alive)
+    other = [] if why else _other_rows(observed, product)
+    other_label = f'unreadable ({why})' if why else f'{len(other)} other'
+    out = [f"**SESSIONS** — {len(working)} working · {len(dead)} dead · {len(ended)} ended · "
+          f"{other_label}", ""]
     header = ('Job', 'Item', 'Kind', 'Account', 'Model', 'Branch', 'Started')
     for name, rows in (('Working', working), ('Dead', dead)):
         if not rows:
@@ -93,6 +133,17 @@ def render(root, product=None, alive=None):
         out.append(f"**{name}**")
         out.append("")
         out.extend(_table(rows, LIVE_COLUMNS, header))
+        out.append("")
+    if why:
+        out.append(f"Other: unreadable ({why})")
+        out.append("")
+    elif not other:
+        out.append("Other: none")
+        out.append("")
+    else:
+        out.append("**Other**")
+        out.append("")
+        out.extend(_other_table(other))
         out.append("")
     if not ended:
         out.append("Ended: none")
