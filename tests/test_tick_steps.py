@@ -377,7 +377,9 @@ class WaveStepTests(StepsTestCase):
         with open(os.path.join(groom_dir, '2026-09-22.md'), 'w') as f:
             f.write('- [ ] F-0001 x — undecided 3d → answer: ____\n'
                     '- [ ] F-0002 y — undecided 4d → answer: ____\n')
-        self.session(job='groom-2026-09-22', item='F-0001', kind='groom', account='acct-a')
+        self.session(job='groom-2026-09-22', item='F-0001', kind='groom', account='acct-a',
+                     pid=DEAD_PID, started='t1')
+        self.session(job='groom-2026-09-22', ended='t2', end_reason='finished')  # not a 2nd attempt
         state = step_wave.groom_state(self.product, root)
         self.assertEqual(state['date'], '2026-09-22')
         self.assertEqual(state['open'], ['F-0001', 'F-0002'])

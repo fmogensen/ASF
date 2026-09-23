@@ -87,14 +87,30 @@ def groom_state(product, root):
                                          product)
     pairs = groom_policy.open_questions('\n'.join(sections['open']))
     job = f'groom-{date}'
+    # sessions, not ledger lines: a run's end and harvest lines are no second attempt
     attempts = sum(1 for rec in lifecycle.read_lines(pool_mod.sessions_path(product))
-                   if rec.get('job') == job)
+                   if rec.get('job') == job and lifecycle.is_launch(rec))
+    open_ids = [iid for iid, _line in pairs]
     return {'date': date, 'file': path,
             'answers': os.path.join(env.state_dir(product), 'groom', f'{date}.answers'),
-            'open': [iid for iid, _line in pairs], 'lines': [line for _iid, line in pairs],
+            'open': open_ids, 'lines': [line for _iid, line in pairs],
             'oldest': next((iid for iid, _l in pairs if not iid.startswith('inbox:')),
                            pairs[0][0] if pairs else None),
-            'attempts': attempts}
+            'attempts': attempts,
+            'new': _not_yet_put(product, job, open_ids) if attempts else list(open_ids)}
+
+
+def _not_yet_put(product, job, open_ids):
+    """The open questions the day's last adjudicate session was not given — asked since its
+    brief was written. Its brief (``briefs/<job>.md``, rewritten per launch) lists the lines it
+    was handed; no brief to read, and none counts as new."""
+    path = os.path.join(env.state_dir(product), 'briefs', f'{job}.md')
+    try:
+        with open(path, encoding='utf-8') as f:
+            given = {iid for iid, _l in groom_policy.open_questions(f.read())}
+    except OSError:
+        return []
+    return [iid for iid in open_ids if iid not in given]
 
 
 def plan_inputs(product, root):

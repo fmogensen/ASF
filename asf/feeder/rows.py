@@ -22,8 +22,9 @@ The row kinds::
     PLAN → CODE            a New Task of an approved plan — unless its ``writes:`` overlaps a
                            running Task's, then ``WAITS ON <task>`` (the footprint gate)
     RESHAPE → PLAN         a Task the groom's split answer marked: hold it, reshape it
-    GROOM → ADJUDICATE     one adjudicate session per groom day, for every open question the
-                           groom policy pass did not answer (F-0085 §2.5) — gated on
+    GROOM → ADJUDICATE     an adjudicate session per groom day, for every open question the
+                           groom policy pass did not answer (F-0085 §2.5), and another for
+                           questions asked since the last was briefed — gated on
                            ``approvals.groom: auto``, given only when the caller passes a
                            ``groom_state``
 
@@ -378,8 +379,10 @@ KIND_ORDER = {STALEMATE: 0, CONFLICT: 1, STALE: 2, GROOM_ADJUDICATE: 2, RESHAPE:
 
 
 def groom_row(index, product, busy, groom_state, inflight):
-    """At most one GROOM → ADJUDICATE row (§2.5): one adjudicate session per groom day, for
-    every question the policy pass did not answer. ``groom_state`` is the one fact this module
+    """At most one GROOM → ADJUDICATE row (§2.5): an adjudicate session per groom day, for
+    every question the policy pass did not answer — and, once the day had one, another only for
+    questions its brief did not carry (``groom_state['new']``), up to
+    ``groom.adjudicate_per_day``. ``groom_state`` is the one fact this module
     cannot derive from ``index.json`` (P5) — the caller (:mod:`asf.tick.step_wave`) builds it
     from the record clone's newest ``groom/<date>.md`` (:func:`asf.groom.policy.open_questions`)
     and the ledger's ``groom-<date>`` attempts. No ``groom_state``, the gate off, no open
@@ -393,7 +396,13 @@ def groom_row(index, product, busy, groom_state, inflight):
     date = groom_state.get('date')
     if any(s.get('job') == f'groom-{date}' for s in inflight or ()):
         return None
-    if (groom_state.get('attempts') or 0) >= groom_policy.adjudicate_attempts(product):
+    attempts = groom_state.get('attempts') or 0
+    new = groom_state.get('new')
+    if new is None:  # a caller that does not say which questions are new: the attempt cap alone
+        if attempts >= groom_policy.adjudicate_attempts(product):
+            return None
+    elif attempts and not (new and attempts < groom_policy.adjudicate_per_day(product)):
+        # the day already had its session: another only for questions asked since, up to the cap
         return None
     items = items_of(index)
     oldest = groom_state.get('oldest') or open_ids[0]

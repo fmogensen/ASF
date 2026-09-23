@@ -106,9 +106,14 @@ def cmd_inbox(args, root):
     return 0
 
 
-def process_inbox(root, canonical, date, default_bug_parent=None, intake_dir=None):
+def process_inbox(root, canonical, date, default_bug_parent=None, intake_dir=None, asked=None):
     """Turn every <intake_dir>/*.md into a card (moved to <intake_dir>/done/) or leave one
     `## Question` in place. Returns the list of newly minted ids, in filename order.
+
+    A card that already carries a question is read again, without it, every run: one edited
+    since (a `signature:` line, an `## Acceptance` list added) is typed, or asked its new
+    question; one that still reads the same is left untouched, so re-running changes nothing.
+    `asked`, when given, collects the file names that got a question on this run.
 
     `default_bug_parent` is the item a Bug with no explicit `parent:` line is filed under; when
     None (no such convention configured), a Bug always asks for its parent explicitly.
@@ -128,16 +133,19 @@ def process_inbox(root, canonical, date, default_bug_parent=None, intake_dir=Non
             continue
         with open(path, encoding='utf-8') as f:
             text = f.read()
-        if '\n## Question' in text or text.startswith('## Question'):
-            continue  # already asked: the groom puts it to the adjudicator (question_lines)
+        body, prior = _split_question(text) if _has_question(text) else (text, '')
 
-        card = parse_inbox_file(text)
+        card = parse_inbox_file(body)
         result = derive(card, canonical, default_bug_parent=default_bug_parent)
 
         if isinstance(result, Question):
-            new_text = text.rstrip('\n') + f"\n\n## Question\n{result.text}\n"
+            if prior and ' '.join(result.text.split()) == prior:
+                continue  # asked, and the card still reads the same: the groom puts it to the adjudicator
+            new_text = body.rstrip('\n') + f"\n\n## Question\n{result.text}\n"
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(new_text)
+            if asked is not None:
+                asked.append(name)
             continue
 
         type_, rule, parent = result.type, result.rule, result.parent
@@ -172,18 +180,28 @@ TOKEN_PREFIX = 'inbox:'
 QUESTION_HEADING = '## Question'
 
 
+def _has_question(text):
+    return any(l.strip() == QUESTION_HEADING for l in text.split('\n'))
+
+
 def _split_question(text):
-    """``(card text without its ## Question block, the question)``."""
+    """``(card text without its question, the question)``. The question is the heading and the
+    one paragraph under it; whatever the operator wrote below that — an update, an
+    ``## Acceptance`` list — stays in the card."""
     lines = text.split('\n')
     start = next((i for i, l in enumerate(lines) if l.strip() == QUESTION_HEADING), None)
     if start is None:
         return text, ''
     end = start + 1
-    while end < len(lines) and not lines[end].startswith('## '):
+    while end < len(lines) and not lines[end].strip():
         end += 1
-    question = ' '.join(l.strip() for l in lines[start + 1:end] if l.strip())
-    rest = lines[:start] + lines[end:]
-    return '\n'.join(rest).rstrip('\n') + '\n', question
+    q_start = end
+    while end < len(lines) and lines[end].strip() and not lines[end].startswith('## '):
+        end += 1
+    question = ' '.join(l.strip() for l in lines[q_start:end])
+    head = '\n'.join(lines[:start]).rstrip('\n')
+    tail = '\n'.join(lines[end:]).strip('\n')
+    return (head + ('\n\n' + tail if tail else '')).rstrip('\n') + '\n', question
 
 
 def question_lines(root, intake_dir=None):

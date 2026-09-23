@@ -169,6 +169,8 @@ def run_record_step(product, fresh=False, ctx=None):
         from asf.tick import step_daily
         if step_daily.apply_pending_answers(product, ctx.record_root(), event=ctx.event):
             do_index(ctx.record_root())  # the decided cards' rows on this very tick
+        # new and edited inbox cards typed, new questions into today's groom file: every tick
+        step_daily.groom_every_tick(product, ctx.record_root(), event=ctx.event)
     except (subprocess.CalledProcessError, env.ConfigError) as e:
         detail = (getattr(e, 'stderr', None) or str(e)).strip()
         print(f"tick: record failed ({detail})")

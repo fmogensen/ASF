@@ -62,6 +62,14 @@ def _newest_applied(product):
     return done[-1] if done else None
 
 
+def _same_file(a, b):
+    try:
+        with open(a, 'rb') as fa, open(b, 'rb') as fb:
+            return fa.read() == fb.read()
+    except OSError:
+        return False
+
+
 def carry_staged_answers(product, out=print):
     """An ended groom session's ``<date>.answers`` left in its worktree (its sandbox refused the
     state dir, groom-2026-09-22) is moved to the state dir, where the tick reads it. A live
@@ -84,8 +92,8 @@ def carry_staged_answers(product, out=print):
         if not _ANSWERS_FILE_RE.match(os.path.basename(staged)) or not os.path.isfile(staged):
             continue
         target = os.path.join(d, f'{date}.answers')
-        if os.path.exists(target) or os.path.exists(target + '.done'):
-            continue
+        if os.path.exists(target) or _same_file(staged, target + '.done'):
+            continue  # a later session of the same day stages answers the applied file lacks
         os.makedirs(d, exist_ok=True)
         os.replace(staged, target)
         out(f'groom: carried {staged} to the state dir')
@@ -122,6 +130,25 @@ def apply_pending_answers(product, root, event=None, out=print):
             break
         n += 1
     return n
+
+
+def groom_every_tick(product, root, event=None, out=print):
+    """The groom's intake and policy pass on every tick, not once a day: new and edited inbox
+    cards are typed or asked, and the lines new since the last pass go into today's
+    ``groom/<date>.md`` beside what it already holds (``cmd_groom`` ``incremental``). Only under
+    ``approvals.groom: auto``; stale, file-bugs and the rollup stay the daily's. Says one line
+    when it changed something, none when it did not. Returns the exit code."""
+    from asf.groom import policy
+    from asf.groom.groom import cmd_groom
+    if not policy.groom_auto(product):
+        return 0
+    epic = (product.conventions or {}).get('default_bug_epic')
+    rc, last = run_part(lambda: cmd_groom(_ns(date=None, apply=False, product=product.name,
+                                              default_bug_epic=epic, answers_file=None,
+                                              event=event, incremental=True), root))
+    if rc or last:
+        out(f"groom: tick {'FAILED' if rc else 'ok'}" + (f' — {last}' if last else ''))
+    return rc
 
 
 def parts(product, root, event=None):

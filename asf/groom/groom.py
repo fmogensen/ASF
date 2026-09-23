@@ -615,6 +615,57 @@ def render_groom_file(date, sections):
 
 ANSWERS_FILE_RE = re.compile(r'^(\d{4}-\d{2}-\d{2})\.answers$')
 
+#: A groom line's item token: an id, or ``inbox:<file>``.
+_LINE_TOKEN_RE = re.compile(r'^- \[[ xX]\]\s+(\S+)')
+#: An open ``inbox:<file>`` line — settled once its card has left the intake dir.
+_OPEN_INBOX_LINE_RE = re.compile(r'^(- \[ \]\s+inbox:(?P<name>\S+)\s.*→\s*answer:\s*____)$')
+SETTLED_SUFFIX = ' (settled: the card left the inbox)'
+
+
+def merge_groom_text(existing, sections, intake_path=None):
+    """Today's groom file with ``sections``' new lines added in place — the every-tick pass.
+    A line is new when its section holds no line for the same item yet; nothing already in the
+    file is dropped or rewritten, save one thing: an open ``inbox:<file>`` line whose card has
+    left ``intake_path`` (typed, or closed) is marked settled, so no adjudicator is sent to rule
+    on a card that is gone. Returns ``(text, lines added)``; merging the same sections twice
+    changes nothing."""
+    lines = existing.rstrip('\n').split('\n')
+    if intake_path is not None:
+        for i, line in enumerate(lines):
+            m = _OPEN_INBOX_LINE_RE.match(line)
+            if m and not os.path.isfile(os.path.join(intake_path, m.group('name'))):
+                lines[i] = line + SETTLED_SUFFIX
+    added = 0
+    for title, key in GROOM_SECTIONS + [INBOX_QUESTIONS]:
+        header = f'## {title}'
+        start = next((i for i, l in enumerate(lines) if l.strip() == header), None)
+        end = len(lines)
+        if start is not None:
+            end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith('## ')),
+                       len(lines))
+        have = {m.group(1) for l in (lines[start + 1:end] if start is not None else ())
+                for m in [_LINE_TOKEN_RE.match(l)] if m}
+        new = []
+        for line in sections.get(key) or []:
+            m = _LINE_TOKEN_RE.match(line)
+            token = m.group(1) if m else line
+            if token not in have:
+                have.add(token)
+                new.append(line)
+        if not new:
+            continue
+        added += len(new)
+        if start is None:
+            lines += ['', header, ''] + new
+            continue
+        body = [i for i in range(start + 1, end) if lines[i].strip()]
+        if len(body) == 1 and lines[body[0]].strip() == '(none)':
+            lines[body[0]:body[0] + 1] = new
+        else:
+            at = (body[-1] + 1) if body else start + 1
+            lines[at:at] = new
+    return '\n'.join(lines) + '\n', added
+
 
 def cmd_groom(args, root):
     date = args.date or datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
@@ -662,8 +713,10 @@ def cmd_groom(args, root):
     default_bug_parent = getattr(args, 'default_bug_epic', None)
     if default_bug_parent is None and product is not None:
         default_bug_parent = product.conventions.get('default_bug_epic')
+    incremental = getattr(args, 'incremental', False)
+    asked = []
     created_ids = process_inbox(root, canonical, date, default_bug_parent=default_bug_parent,
-                                intake_dir=intake_dir)
+                                intake_dir=intake_dir, asked=asked)
 
     derived = compute_derived(canonical)
     from asf.tick.step_wave import capacity as lane_capacity  # inside: asf.groom stays out of asf.tick
@@ -699,8 +752,11 @@ def cmd_groom(args, root):
 
     text = render_groom_file(date, sections)
     groom_dir = os.path.join(root, 'groom')
-    os.makedirs(groom_dir, exist_ok=True)
     groom_path = os.path.join(groom_dir, f"{date}.md")
+    if incremental:
+        return _write_incremental(root, date, groom_path, text, sections, auto, created_ids,
+                                  asked, intake_dir, canonical, event)
+    os.makedirs(groom_dir, exist_ok=True)
     with open(groom_path, 'w', encoding='utf-8') as f:
         f.write(text)
 
@@ -711,7 +767,7 @@ def cmd_groom(args, root):
         derived = compute_derived(canonical)
         cap = policy.adjudicate_attempts(product)
         attempts = sum(1 for rec in lifecycle.read_lines(pool.sessions_path(product))
-                       if rec.get('job') == f'groom-{date}')
+                       if rec.get('job') == f'groom-{date}' and lifecycle.is_launch(rec))
         write_digest(root, date, canonical, text,
                      [answers_text] if answers_text is not None else [], attempts, cap)
 
@@ -725,4 +781,38 @@ def cmd_groom(args, root):
         print(f"groom {date}: applied {applied}, inbox {len(created_ids)} card(s) — {counts}")
     if event:
         event('groom_open', count=open_count, barred=barred_count)
+    return rc
+
+
+def _write_incremental(root, date, groom_path, text, sections, auto, created_ids, asked,
+                       intake_dir, canonical, event):
+    """The every-tick groom (``incremental``): today's file gains the lines that are new since
+    the last pass (:func:`merge_groom_text`) instead of being written afresh — the questions and
+    answers it already carries stay. No file yet today: it is written whole, but only when
+    intake changed something (the daily writes it otherwise). The rule answers among the new
+    lines are applied; the digest stays the daily's."""
+    existing = None
+    if os.path.isfile(groom_path):
+        with open(groom_path, encoding='utf-8') as f:
+            existing = f.read()
+    if existing is None:
+        if not (created_ids or asked):
+            return 0
+        merged, added = text, len(policy.open_questions(text))
+    else:
+        merged, added = merge_groom_text(
+            existing, sections, os.path.join(root, intake_dir or inbox_mod.DEFAULT_INTAKE_DIR))
+    by_rule = 0
+    if merged != existing:
+        os.makedirs(os.path.dirname(groom_path), exist_ok=True)
+        with open(groom_path, 'w', encoding='utf-8') as f:
+            f.write(merged)
+        if auto:
+            by_rule = apply_groom_answers(root, canonical, groom_path, date, event=event,
+                                          sections=_line_sections(merged), intake_dir=intake_dir)
+    if merged == existing and not created_ids and not asked:
+        return 0
+    rc = do_index(root)
+    print(f"groom {date} (tick): inbox {len(created_ids)} card(s), asked {len(asked)}, "
+          f"added {added} line(s), by rule {by_rule}, open {len(policy.open_questions(merged))}")
     return rc

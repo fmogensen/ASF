@@ -15,6 +15,7 @@ import re
 DUPLICATE_OVERLAP = 0.95
 RECURRING_BUG_COUNT = 2
 ADJUDICATE_ATTEMPTS = 2
+ADJUDICATE_PER_DAY = 6
 
 #: A ``- [ ] <id> <title> — <why> → answer: ____`` line — a question no rule and no session has
 #: yet answered (PD4). A barred line's slot reads ``____ (barred: …)`` instead, so it never
@@ -69,6 +70,15 @@ def adjudicate_attempts(product):
     the remaining questions go to the operator instead."""
     v = _groom_config(product).get('adjudicate_attempts')
     return v if isinstance(v, int) and v > 0 else ADJUDICATE_ATTEMPTS
+
+
+def adjudicate_per_day(product):
+    """``groom.adjudicate_per_day`` (default :data:`ADJUDICATE_PER_DAY`): adjudicate sessions a
+    groom date may have in all, counting the ones launched for questions asked after the last
+    session was briefed — the every-tick intake adds questions all day."""
+    v = _groom_config(product).get('adjudicate_per_day')
+    return v if isinstance(v, int) and v > 0 else max(ADJUDICATE_PER_DAY,
+                                                      adjudicate_attempts(product))
 
 
 def policy_on(product, name):

@@ -166,6 +166,7 @@ groom:
   duplicate_overlap: 0.95      # close_exact_duplicate: title overlap at or above this
   recurring_bug_count: 2       # decide_recurring_bug: auto-filed Bug seen this many times
   adjudicate_attempts: 2       # D8: groom sessions per groom date before the operator is asked
+  adjudicate_per_day: 6        # sessions per groom date in all, counting those for questions asked since the last
   policies:                    # a policy named here with `off` never runs
     close_exact_duplicate: on
 
