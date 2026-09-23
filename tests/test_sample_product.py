@@ -470,6 +470,8 @@ class FinishedWithoutPushIsCorrected(FailurePathsBase):
             f.write(GREEN_COUNT + '# ' + 'AKIA' + 'A' * 16 + '\n')  # B-0094: the redaction gate refuses the factory's commit
         cls.t2 = cls.tick()                                   # health: not pushed → held; wave: correct
         cls.wt2 = cls.sessions()['correct-b-0001']['worktree']
+        with open(os.path.join(cls.wt2, 'src', 'count.py'), 'w') as f:   # the correction removes the line the gate refused
+            f.write(GREEN_COUNT)
         cls.session_commits(cls.wt2, 'tests/test_empty.py', RED_TEST.replace('count("")', 'count("")'),
                             'fix(B-0001): return 0 on empty, with test_empty')
         cls.session_pushes(cls.wt2)
