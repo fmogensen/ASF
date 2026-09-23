@@ -40,6 +40,30 @@ def kinds(rs):
     return [(r.kind, r.item_id) for r in rs]
 
 
+class DeclaredOrderIsADependency(unittest.TestCase):
+    """B-0076: a sequential plan says so with `after:`; without it tasks stay footprint-parallel."""
+
+    def items(self, first='New'):
+        return {'F-0001': {'id': 'F-0001', 'type': 'feature', 'stage': 'building 0/2',
+                           'state': 'Active', 'children': ['T-0001', 'T-0002']},
+                'T-0001': {'id': 'T-0001', 'type': 'task', 'parent': 'F-0001', 'rank': 1,
+                           'state': first, 'writes': ['a.py']},
+                'T-0002': {'id': 'T-0002', 'type': 'task', 'parent': 'F-0001', 'rank': 2,
+                           'state': 'New', 'writes': ['b.py'], 'after': ['T-0001']}}
+
+    def rows_for(self, items):
+        return {r.item_id: r for r in rows.task_rows(items, product(), items['F-0001'], set(), [])}
+
+    def test_a_task_waits_for_the_one_it_declares_after(self):
+        by = self.rows_for(self.items())
+        self.assertEqual(by['T-0001'].action, 'would launch')
+        self.assertEqual(by['T-0002'].action, 'WAITS ON T-0001')
+
+    def test_it_runs_once_that_one_landed(self):
+        by = self.rows_for(self.items(first='Closed'))
+        self.assertEqual(by['T-0002'].action, 'would launch')
+
+
 class FootprintHoldersAreLiveRuns(unittest.TestCase):
     """B-0076: only a live run (or one awaiting harvest) holds its files."""
 

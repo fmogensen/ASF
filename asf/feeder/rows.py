@@ -333,7 +333,18 @@ def task_rows(items, product, feature, busy, running):
     out = []
     tasks = [t for t in ix.feature_tasks(items, feature)
              if t.get('state', 'New') == 'New' and t['id'] not in busy and not t.get('blocked')]
+    landed = {t['id'] for t in ix.feature_tasks(items, feature) if t.get('state') in DONE_STATES}
     for t in sorted(tasks, key=lambda v: (ix.rank(v), v['id'])):
+        # `after: [T-nnnn]` is a declared dependency: Task N builds on what Task N-1 landed, and
+        # a coder started before it finds the surface missing and writes nothing (B-0076).
+        # Footprint-disjoint tasks still run in parallel — a plan says so by leaving `after:` off.
+        pending = [a for a in (t.get('after') or []) if a not in landed]
+        if pending:
+            out.append(Row(tier=2, kind=PLAN_CODE, item_id=t['id'], feature_id=feature['id'],
+                           action=f"WAITS ON {pending[0]}", brief_kind='task',
+                           branch=branch_for(product, 'code', t['id']),
+                           reason=f"after: {pending[0]} has not landed", waits_on=pending[0]))
+            continue
         if t.get('reshape'):
             out.append(Row(tier=2, kind=PLAN_CODE, item_id=t['id'], feature_id=feature['id'],
                            action='WAITS ON reshape', brief_kind='task',
