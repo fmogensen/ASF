@@ -758,5 +758,22 @@ class FileBugsTest(FileBugsIntegrationTests):
                       ' in products/<p>.yaml', printed)
 
 
+
+class GroomGateTest(unittest.TestCase):
+    """F-0085's switch lives in ``approvals:`` but is not a class: it must not make the matrix,
+    the hook or the doctor refuse the whole product."""
+
+    def test_groom_auto_is_not_an_unknown_class(self):
+        p = env.Product('p', {'approvals': {'groom': 'auto', 'file_bug': 'auto'}})
+        m = approvals.matrix(p)
+        self.assertNotIn('groom', m)
+        self.assertEqual(m['file_bug'], ('auto', 'yaml'))
+
+    def test_any_other_unknown_key_still_refuses(self):
+        p = env.Product('p', {'approvals': {'groom': 'auto', 'nonsense': 'auto'}})
+        with self.assertRaises(env.ConfigError):
+            approvals.matrix(p)
+
+
 if __name__ == '__main__':
     unittest.main()

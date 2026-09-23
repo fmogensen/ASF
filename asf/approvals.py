@@ -101,12 +101,17 @@ def _now_iso():
 
 # ---- the matrix and the signals ---------------------------------------------
 
+# Keys of ``approvals:`` that are switches, not classes: ``groom: auto`` turns on F-0085's groom
+# (asf.groom.policy.groom_auto). The matrix skips them; an unknown one is still an error.
+GATES = ('groom',)
+
+
 def matrix(product):
     """``{class: (level, 'yaml'|'default')}`` for every class in :data:`CLASSES`.
 
     Raises :class:`env.ConfigError` naming every key of ``product.approvals`` that is not a
     catalogue class, and every mapped level that is not in :data:`LEVELS`."""
-    raw = dict(product.approvals or {})
+    raw = {k: v for k, v in (product.approvals or {}).items() if k not in GATES}
     unknown = sorted(k for k in raw if k not in CLASSES_BY_NAME)
     bad_levels = sorted(
         f'{k}={v!r}' for k, v in raw.items() if k in CLASSES_BY_NAME and v not in LEVELS)
