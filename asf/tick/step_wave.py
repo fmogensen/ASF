@@ -139,7 +139,8 @@ def worker_row(row, brief, items):
     return pool_mod.Row(job_name(brief.kind, row.item_id, key=key), row.item_id, state=state,
                         action=action, title=item.get('title', ''), model=brief.model,
                         kind=brief.kind, severity=item.get('severity'),
-                        feature=row.feature_id or None, branch=row.branch or None)
+                        feature=row.feature_id or None, branch=row.branch or None,
+                        add_dirs=getattr(brief, 'add_dirs', None) or ())
 
 
 def run(ctx, out=print):

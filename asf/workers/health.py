@@ -198,7 +198,8 @@ def publish_gap(product, run, ev, reason, alive=pid_alive):
     if not ok:
         return reason, ev, line
     ev = lifecycle.gather(product, run, alive=alive, worktree=wt)
-    return lifecycle.judge(run, ev), ev, line
+    landing = lifecycle.lands(run, pool_mod.sessions_path(product))
+    return lifecycle.judge(run, ev, landing=landing), ev, line
 
 
 def _lane_branches(product):
@@ -276,7 +277,7 @@ def health(product, fix=False, alive=None, session_source=None, out=print):
             if s.get('end_reason') == lifecycle.DEAD_PID and not s.get('harvested'):
                 ev = lifecycle.gather(product, s, alive=alive)
                 if ev.result is not None:
-                    reason = lifecycle.judge(s, ev)
+                    reason = lifecycle.judge(s, ev, landing=lifecycle.lands(s, registry))
                     reason, ev, line = publish_gap(product, s, ev, reason, alive)
                     if line:
                         found.append((job, 'published', line))
@@ -286,7 +287,7 @@ def health(product, fix=False, alive=None, session_source=None, out=print):
                     found.append((job, 're-judged', reason))
             continue
         ev = lifecycle.gather(product, s, alive=alive)
-        reason = lifecycle.judge(s, ev)
+        reason = lifecycle.judge(s, ev, landing=lifecycle.lands(s, registry))
         if reason is None:
             continue
         reason, ev, line = publish_gap(product, s, ev, reason, alive)  # B-0056

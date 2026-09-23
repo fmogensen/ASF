@@ -288,6 +288,11 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
                                 size=int(wp.get('id_range_size', DEFAULT_ID_SIZE)))
     brief_path = write_brief(product, row.job, brief_for(row, brief_text))
     add_dirs = [os.path.expanduser(d) for d in (product._get('job_grants') or [])]
+    for d in getattr(row, 'add_dirs', None) or ():  # the row's own grants are the factory's dirs
+        d = os.path.expanduser(d)
+        os.makedirs(d, exist_ok=True)
+        if d not in add_dirs:
+            add_dirs.append(d)
     started = pool_mod.now_iso()
     sid = lifecycle.session_id(product.name, row.job, started)
     hooks_dir = githooks.ensure(product)

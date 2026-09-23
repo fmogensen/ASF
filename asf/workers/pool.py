@@ -101,7 +101,7 @@ class Row:
     """One feeder row: something to launch. ``is_fix`` = a ``BUG → FIX`` row."""
 
     def __init__(self, job, item, state='', action='', title='', model='', kind=None,
-                 severity=None, feature=None, lane=None, branch=None, test=None):
+                 severity=None, feature=None, lane=None, branch=None, test=None, add_dirs=()):
         self.job = job
         self.item = item
         self.state = state
@@ -114,6 +114,9 @@ class Row:
         self.lane = lane
         self.branch = branch
         self.test = test
+        #: directories this row's session may use outside its worktree, beside the product's
+        #: ``job_grants`` (the brief's ``add_dirs`` — a groom row's answers directory, PD7)
+        self.add_dirs = list(add_dirs or ())
 
     @property
     def is_fix(self):

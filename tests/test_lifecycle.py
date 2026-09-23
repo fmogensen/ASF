@@ -184,6 +184,44 @@ class JudgementInvariants(unittest.TestCase):
         self.assertEqual(lc.judge(self.RUN, landed_ev), lc.FINISHED)
 
 
+class NoLandingRunInvariants(unittest.TestCase):
+    """A groom (adjudicate) session rules into an answers file and is told "the repository is not
+    your work": its branch never carries a commit. Judged like a lane it always failed — `not
+    pushed` over its staged answers file, or `empty branch` — and was sent a correction that told
+    it to commit what its brief forbids (groom-2026-09-22 → correct-f-0080)."""
+    GROOM = {'job': 'groom-2026-09-22', 'kind': 'groom', 'branch': 'groom/2026-09-22',
+             'item': 'F-0080', 'pid': 1, 'started': 't'}
+
+    def test_a_groom_run_is_judged_on_its_result_alone(self):
+        dirty = lc.Evidence(result=OK, remote_sha='s', uncommitted=1, has_commits=False,
+                            worktree=True)
+        empty = lc.Evidence(result=OK, remote_sha='s', head_on_remote=True, in_trunk=True,
+                            has_commits=False, worktree=True)
+        for ev in (dirty, empty, lc.Evidence(result=OK)):
+            self.assertEqual(lc.judge(self.GROOM, ev), lc.FINISHED)
+        self.assertEqual(lc.judge(self.GROOM, lc.Evidence(result=ERR)), 'failed')
+
+    def test_a_groom_report_saying_pushed_no_is_not_unpushed_work(self):
+        rec = dict(OK, result='REPORT\nitem: F-0080\nkind: groom\nstatus: done\n'
+                              'pushed: no — a ruling is not a commit\n')
+        self.assertEqual(lc.judge(self.GROOM, lc.Evidence(result=rec)), lc.FINISHED)
+
+    def test_a_run_sent_back_on_a_groom_branch_lands_nothing_either(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        path = os.path.join(d, 'sessions.jsonl')
+        corr = {'job': 'correct-f-0080', 'kind': 'correct', 'branch': 'groom/2026-09-22',
+                'item': 'F-0080', 'pid': 2, 'started': 't2'}
+        with open(path, 'w') as f:
+            for rec in (self.GROOM, {'job': self.GROOM['job'], 'ended': 't1'}, corr):
+                f.write(json.dumps(rec) + '\n')
+        self.assertFalse(lc.lands(corr, path))
+        self.assertTrue(lc.lands({'job': 'coder-t-1', 'kind': 'coder', 'branch': 'worker/T-1'},
+                                 path))
+        ev = lc.Evidence(result=OK, remote_sha='s', uncommitted=1, has_commits=False, worktree=True)
+        self.assertEqual(lc.derive(corr, ev, path=path).name, lc.PUSHED)
+
+
 class StateMachineInvariants(unittest.TestCase):
     def test_every_state_but_reaped_has_a_successor_and_all_successors_are_states(self):
         self.assertEqual(set(lc.TRANSITIONS), set(lc.STATES))

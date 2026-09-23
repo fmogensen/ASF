@@ -361,6 +361,27 @@ class TestSpawn(Home):
         self.assertEqual((s['pid'], s['account'], s['kind'], s['model'], s['item']),
                          (4242, 'acct-a', 'fix-bug', 'opus', 'B-0001'))
 
+    def test_a_row_grants_its_own_directories_and_they_exist(self):
+        # the groom brief grants the answers file's directory (PD7), but spawn passed only the
+        # product's job_grants: the adjudicate session could not write its answers, and staged
+        # them in its worktree instead (groom-2026-09-22)
+        answers_dir = os.path.join(env.ASF_HOME, 'state', 'sample', 'groom')
+        row = s1_row()
+        row.add_dirs = [answers_dir, self.grant]
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 4243}])
+        spawn_mod.spawn(self.product, row, self.acct(), 'b\n', runtime=rt, cfg=self.cfg)
+        job, _brief = rt.calls[0]
+        self.assertEqual(job.add_dirs, [self.grant, answers_dir])
+        self.assertTrue(os.path.isdir(answers_dir))
+
+    def test_the_wave_row_carries_the_briefs_grants(self):
+        from types import SimpleNamespace
+        from asf.tick import step_wave
+        frow = SimpleNamespace(kind='GROOM → ADJUDICATE', item_id='F-0001', feature_id='F-0001',
+                               branch='groom/2026-01-01', groom_date='2026-01-01')
+        brief = SimpleNamespace(kind='groom', model='opus', add_dirs=['/x/groom'])
+        self.assertEqual(step_wave.worker_row(frow, brief, {}).add_dirs, ['/x/groom'])
+
     def test_b0046_correct_row_spawns_on_the_held_branch_rebased_onto_main(self):
         def commit(cwd, name, text, msg):
             with open(os.path.join(cwd, name), 'w') as f:

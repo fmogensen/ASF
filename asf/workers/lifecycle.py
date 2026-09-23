@@ -438,7 +438,27 @@ def push_gap(ev):
     return f'not pushed: {ev.uncommitted} uncommitted file(s), {ev.unpushed} unpushed commit(s)'
 
 
-def judge(run, ev):
+#: Kinds whose work is not a branch: a groom (adjudicate) session rules into the state dir's
+#: answers file and is told the repository is not its work, so it never commits.
+NO_LANDING_KINDS = ('groom',)
+
+
+def lands(run, path=None):
+    """False for a run whose work is not its branch: a :data:`NO_LANDING_KINDS` run, or any run
+    sent back on a branch such a run was launched on (a correction takes the branch, not the
+    kind). Such a run is judged on its result alone, never held for an unpushed or empty
+    branch."""
+    if (run or {}).get('kind') in NO_LANDING_KINDS:
+        return False
+    branch = (run or {}).get('branch')
+    if path and branch:
+        for rs in runs(path).values():
+            if any(r.get('branch') == branch and r.get('kind') in NO_LANDING_KINDS for r in rs):
+                return False
+    return True
+
+
+def judge(run, ev, landing=None):
     """The ``end_reason`` health records for a run whose session is over, or None while it runs.
     A result that says ok is ``finished`` only when the branch is pushed; a run with no branch
     (nothing to push) is judged on the result alone. A pushed branch never committed to
@@ -447,12 +467,18 @@ def judge(run, ev):
     land — read ``finished`` it would sit ``eligible`` forever, blocking every task waiting on the
     item's footprint (B-0076), so it is ``failed: empty branch: nothing to land`` instead, and
     D-0048's loop sends it back to the same session to commit its work or say why there is none."""
+    if landing is None:
+        landing = lands(run)
     if ev.result is None:
         return None if ev.alive else DEAD_PID
     if not runtime_mod.result_ok(ev.result):
         sig = runtime_mod.failure_reason(ev.result)
-        return f'failed: {sig}' if sig else 'failed'
-    if run.get('branch'):
+        # a run that lands nothing may say `pushed: no` truthfully: that is not unpushed work
+        if not (not landing and sig == runtime_mod.report.UNPUSHED
+                and not ev.result.get('is_error')
+                and ev.result.get('subtype', 'success') == 'success'):
+            return f'failed: {sig}' if sig else 'failed'
+    if run.get('branch') and landing:
         if not ev.pushed:
             return f'failed: {push_gap(ev)}'
         if not ev.has_commits:
@@ -477,7 +503,7 @@ def derive(run, ev, cap=ROUND_CAP, path=None):
         if reason == FINISHED:
             return State(PUSHED, FINISHED, rounds)
         return State(ENDED, reason, rounds)
-    reason = judge(run, ev)
+    reason = judge(run, ev, landing=lands(run, path))
     if reason is None:
         return State(RUNNING if ev.has_commits else LAUNCHED)
     if reason == FINISHED:
