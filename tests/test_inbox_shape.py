@@ -431,5 +431,68 @@ class IntakeTest(unittest.TestCase):
             shutil.rmtree(asf_home, ignore_errors=True)
 
 
+class InboxCommandTest(unittest.TestCase):
+    """`asf inbox` through the CLI: one untyped card into the record's intake directory. It
+    mints nothing and runs no groom."""
+
+    def setUp(self):
+        self.root = make_record()
+        seed(self.root)
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _item_folders(self):
+        return {f: sorted(os.listdir(os.path.join(self.root, f))) for f in ITEM_FOLDERS}
+
+    def test_writes_an_untyped_card(self):
+        before = self._item_folders()
+        r = run(['inbox', '--title', 'Billing invoices', '--parent', 'E-0001'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), os.path.join('inbox', 'billing-invoices.md'))
+        with open(os.path.join(self.root, 'inbox', 'billing-invoices.md'), encoding='utf-8') as f:
+            text = f.read()
+        self.assertTrue(text.startswith('# Billing invoices\nparent: E-0001\n'))
+        self.assertEqual(before, self._item_folders())
+
+    def test_body_file_is_copied_verbatim(self):
+        body_path = os.path.join(self.root, 'body.md')
+        with open(body_path, 'w', encoding='utf-8') as f:
+            f.write('signature: checkout-pay\n\nCustomers cannot pay.\n')
+        r = run(['inbox', '--title', 'Checkout is broken', '--body-file', body_path], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(os.path.join(self.root, 'inbox', 'checkout-is-broken.md'), encoding='utf-8') as f:
+            text = f.read()
+        self.assertIn('signature: checkout-pay\n', text)
+        self.assertIn('Customers cannot pay.\n', text)
+
+    def test_name_collision(self):
+        r1 = run(['inbox', '--title', 'Billing invoices'], self.root)
+        self.assertEqual(r1.returncode, 0, r1.stderr)
+        r2 = run(['inbox', '--title', 'Billing invoices'], self.root)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        names = sorted(n for n in os.listdir(os.path.join(self.root, 'inbox')) if n.endswith('.md'))
+        self.assertEqual(names, ['billing-invoices-2.md', 'billing-invoices.md'])
+
+    def test_no_type_flag(self):
+        r = run(['inbox', '--title', 'T', '--type', 'feature'], self.root)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('unrecognized arguments', r.stderr)
+        self.assertEqual([n for n in os.listdir(os.path.join(self.root, 'inbox')) if n.endswith('.md')], [])
+
+    def test_inbox_then_groom(self):
+        before = set(os.listdir(os.path.join(self.root, 'features')))
+        r1 = run(['inbox', '--title', 'Billing invoices', '--parent', 'E-0001'], self.root)
+        self.assertEqual(r1.returncode, 0, r1.stderr)
+        r2 = run(['groom'], self.root)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        after = set(os.listdir(os.path.join(self.root, 'features')))
+        new = sorted(n for n in after - before if n.endswith('.md'))
+        self.assertEqual(len(new), 1)
+        with open(os.path.join(self.root, 'features', new[0]), encoding='utf-8') as f:
+            meta, _body = frontmatter.parse(f.read())
+        self.assertEqual(meta['parent'], 'E-0001')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -26,6 +26,7 @@ BUG = ('---\nid: B-0001\ntype: bug\ntitle: the bug\nparent: E-0001\nseverity: S1
 #: from an empty cwd, leaves that cwd empty.
 COMMANDS = [
     (['new', 'bug', '--title', 'a bug from nowhere', '--parent', 'E-0001', '--severity', 'S2'], 'record'),
+    (['inbox', '--title', 'a card from nowhere'], 'record'),
     (['check'], 'record'),
     (['index'], 'record'),
     (['ingest'], 'record'),

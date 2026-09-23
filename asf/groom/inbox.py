@@ -9,6 +9,21 @@ from asf.conventions import DEFAULT_INTAKE_DIR
 INBOX_KV_RE = re.compile(r'^(type|parent|signature|severity|writes|stories):\s*(.+?)\s*$', re.IGNORECASE)
 
 
+def _intake_dir(args):
+    """The intake directory `asf inbox` files into: the product's convention, else the
+    documented default when there is no product config to read (a test, or the command run from
+    inside a record checkout on its own).
+
+    `process_inbox` takes its own `intake_dir` from its caller instead — `cmd_groom` already
+    holds the Product — so this resolution lives here, where `args` is the only thing on hand.
+    """
+    from asf import env
+    try:
+        return env.load_product(getattr(args, 'product', None)).conventions.intake_dir
+    except (env.ConfigError, OSError):
+        return DEFAULT_INTAKE_DIR
+
+
 def _lift_section(lines, heading):
     """Pull a `## <heading>` block out of `lines`, returning (items, remaining_lines)."""
     start = None
@@ -64,6 +79,31 @@ def parse_inbox_file(text):
     acceptance, body_lines = _lift_section(body_lines, 'Acceptance')
     description = '\n'.join(body_lines).strip()
     return Card(title, headers, description, features, acceptance)
+
+
+def cmd_inbox(args, root):
+    """``asf inbox --title T [--body-file F] [--parent ID]``: one untyped card into the
+    record's intake directory. Mints nothing and runs no groom (D10)."""
+    d = os.path.join(root, _intake_dir(args))
+    os.makedirs(d, exist_ok=True)
+    slug = re.sub(r'[^a-z0-9]+', '-', args.title.lower()).strip('-') or 'card'
+    name = f"{slug}.md"
+    n = 2
+    while os.path.exists(os.path.join(d, name)):
+        name = f"{slug}-{n}.md"
+        n += 1
+    text = f"# {args.title}\n"
+    if args.parent:
+        text += f"parent: {args.parent}\n"
+    text += "\n"
+    if args.body_file:
+        with open(args.body_file, encoding='utf-8') as f:
+            text += f.read()
+    path = os.path.join(d, name)
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(text)
+    print(os.path.relpath(path, root))
+    return 0
 
 
 def process_inbox(root, canonical, date, default_bug_parent=None, intake_dir=None):

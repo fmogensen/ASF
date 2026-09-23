@@ -58,6 +58,13 @@ def build_parser():
     from asf.record.new import add_arguments as add_new_bug_arguments
     add_new_bug_arguments(p_new)
 
+    p_inbox = sub.add_parser(
+        'inbox', help="file an untyped card into the record's intake dir (the groom types it)")
+    p_inbox.add_argument('--title', required=True)
+    p_inbox.add_argument('--body-file')
+    p_inbox.add_argument('--parent')
+    p_inbox.add_argument('--product')
+
     p_check = sub.add_parser('check', help='validate the backlog')
     p_check.add_argument('paths', nargs='*')
     p_check.add_argument('--product')
@@ -235,6 +242,9 @@ def _main(argv=None):
     if args.command == 'new':
         from asf.record.new import cmd_new
         return cmd_new(args, resolve_record(args, announce=_announce_stderr))
+    if args.command == 'inbox':
+        from asf.groom.inbox import cmd_inbox
+        return cmd_inbox(args, resolve_record(args, announce=_announce_stderr))
     if args.command == 'check':
         from asf.record.check import cmd_check
         return cmd_check(args, resolve_record(args))
