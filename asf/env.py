@@ -224,7 +224,7 @@ PRODUCT_FIELDS = {
     'app_host': _STR, 'conventions': _MAP, 'ci': None, 'deploy_sha': None,
     'customer_paths': _LIST, 'stage_limits': _MAP, 'size_classes': _MAP, 'approvals': _MAP,
     'approval_signals': _MAP, 'steps': _MAP, 'job_grants': _LIST, 'groom': _MAP,
-    'capacity': _MAP, 'clocks': _MAP,
+    'capacity': _MAP, 'clocks': _MAP, 'token_caps': _MAP,
 }
 # `ci:` is a map (or the bare word `none`, a product without CI); these are its keys.
 CI_FIELDS = {
