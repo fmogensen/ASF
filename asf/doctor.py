@@ -27,7 +27,7 @@ import shutil
 import subprocess
 import time
 
-from asf import approvals, env, hooks, schema, scheduler
+from asf import approvals, drift, env, hooks, schema, scheduler
 from asf.workers import pool
 
 _SKIP_DIRS = {'.git', 'node_modules', '__pycache__', 'dist', 'build', '.next', 'vendor', 'venv',
@@ -221,6 +221,17 @@ def check_redaction_hooks(product):
     if problems:
         return False, '; '.join(problems) + f' — asf hooks install --product {product.name}'
     return True, f'pre-commit, pre-push in {len(repos)} repos'
+
+
+def check_drift(product, installed=None):
+    """(ok, detail) — the running install against the trunk's head (B-0086); red when behind.
+    Not the factory's source, or an install whose commit cannot be told: ok, and says so."""
+    d = drift.check(product, installed=installed)
+    if d is None:
+        return True, 'not the factory source (nothing to compare)'
+    if d.is_behind:
+        return False, drift.line(d) + ('' if not d.package_changed else f' — asf upgrade ({d.old} → {d.new})')
+    return True, drift.line(d)
 
 
 # ---- the capacity row --------------------------------------------------------
@@ -445,6 +456,8 @@ def run(product_name):
     rows.append(('approvals', True, ok, detail))
     ok, detail = check_redaction_hooks(product)
     rows.append(('redaction-hooks', True, ok, detail))
+    ok, detail = check_drift(product)
+    rows.append(('drift', True, ok, detail))
     for ok, detail in check_capacity(cfg, product):
         rows.append(('capacity', False, ok, detail))
     return rows

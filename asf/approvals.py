@@ -102,8 +102,10 @@ def _now_iso():
 # ---- the matrix and the signals ---------------------------------------------
 
 # Keys of ``approvals:`` that are switches, not classes: ``groom: auto`` turns on F-0085's groom
-# (asf.groom.policy.groom_auto). The matrix skips them; an unknown one is still an error.
-GATES = ('groom',)
+# (asf.groom.policy.groom_auto); ``upgrade: auto`` lets the tick run ``asf upgrade`` itself when
+# the trunk's package is ahead of the install (asf.drift). The matrix skips them; an unknown one
+# is still an error.
+GATES = ('groom', 'upgrade')
 
 
 def matrix(product):

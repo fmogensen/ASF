@@ -279,6 +279,9 @@ def _run_locked(args, product, fresh, rows, chosen):
 
 
 def _run_steps(args, product, ctx, rows, chosen):
+    from asf import drift, upgrade
+    drift.report(product, autonomy=str((product.approvals or {}).get('upgrade', '')).lower(),
+                 upgrade=lambda: upgrade.cmd_upgrade(_ns(skip_pipx=False)))
     rc = 0
     ran = []
     resolved = None
