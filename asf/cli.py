@@ -126,6 +126,8 @@ def build_parser():
     register_import_sessions(sub)
     from asf.approvals import register as register_approvals
     register_approvals(sub)
+    from asf.redact import register as register_redact
+    register_redact(sub)
 
     p_roadmap = sub.add_parser('roadmap', help='the ROADMAP table: one row per Epic')
     p_roadmap.add_argument('--product')
