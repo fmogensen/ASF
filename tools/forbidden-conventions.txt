@@ -45,10 +45,10 @@ deploy-dev
 # The first product's migration sources → conventions.decisions_file / reports_dir /
 # report_pattern. These name a report's *location*, which those three fields carry.
 #
-# `ci-diag-` is deliberately not a pattern here. The spec's own non-goal keeps the hotfix report
-# *shape* — "only their locations move to conventions; the parsers stay as they are" — and
-# `asf.tick.migrate.hotfix_bug_fields` reads the `ci-diag` prefix to pick a severity, not a file.
-# No conventions field in this card carries that marker, so the pattern would condemn a parser
-# with no legal fix and sit red for good. Making that parser generic needs a field nobody has
-# specified yet.
+# The trailing hyphen in `ci-diag-` is load-bearing, and it is what keeps this pattern clear of
+# the non-goal. `ci-diag-` only matches a report *file name* — the thing `report_pattern` (a
+# regex over a name in `reports_dir`) carries. The severity parser in
+# `asf.tick.migrate.hotfix_bug_fields` tests the bare prefix `'ci-diag'`, with no hyphen after
+# it, so it does not match and stays as the non-goal says it should.
 hotfix-.*-report
+ci-diag-

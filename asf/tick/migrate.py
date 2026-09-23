@@ -298,7 +298,7 @@ def find_decision_rows(text):
 def hotfix_bug_fields(name, text):
     """(severity, found_in, signature) from a hotfix/ci-diag report's name and text.
 
-    The filename convention is the more reliable signal — a `ci-diag-*` report can describe a
+    The filename convention is the more reliable signal — a CI-diagnostic report can describe a
     prod-facing symptom in its body while still being a CI diagnostic, not a prod incident —
     so it's checked before scanning the body text for "prod ... red/incident/down".
     """

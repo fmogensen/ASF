@@ -177,8 +177,16 @@ class CheckConventionsScriptTests(unittest.TestCase):
         for want in ('cloud/', 'worktree-m-', 'docs/superpowers', r'\.sdd-input', r'goals\.txt',
                      'feature-matrix', r'session-results\.jsonl', r'\.claude-workers', '/tmp/',
                      'refs/heads/hb', r'deploy-prod\.yml', r'\bci\.yml\b', 'deploy-dev',
-                     'hotfix-.*-report'):
+                     'hotfix-.*-report', 'ci-diag-'):
             self.assertIn(want, patterns)
+
+    def test_the_ci_diag_pattern_spares_the_severity_parser(self):
+        # the trailing hyphen is what keeps the pattern on report *names*: the non-goal keeps
+        # hotfix_bug_fields as it is, and its bare `'ci-diag'` prefix test must not match
+        with open(os.path.join(REPO_ROOT, 'asf', 'tick', 'migrate.py'), encoding='utf-8') as f:
+            source = f.read()
+        self.assertIn("startswith('ci-diag')", source)
+        self.assertNotRegex(source, 'ci-diag-')
 
     def test_the_merged_patterns_include_the_generated_ones(self):
         lines = self.script('--print-patterns').stdout.splitlines()
