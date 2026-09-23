@@ -23,6 +23,7 @@ runs a command step — then renders the six tables (:mod:`asf.views`) into ``<s
 so ``asf shadow-diff`` has something to compare against the pre-``asf`` tools' output.
 """
 import argparse
+import contextlib
 import datetime
 import json
 import os
@@ -55,6 +56,17 @@ def ci_workflow(product):
     return ci.get('workflow') or DEFAULT_CI_WORKFLOW
 
 
+@contextlib.contextmanager
+def timed(part, out=None):
+    """``[record:<part>] N.Ns`` once the part is done (or has raised): each part of the record
+    step says what it cost, so the next regression names itself in the tick log."""
+    start = time.monotonic()
+    try:
+        yield
+    finally:
+        (out or print)(f"[record:{part}] {time.monotonic() - start:.1f}s", flush=True)
+
+
 def run_step0(root, product, fresh=False):
     """metrics backfill → ingest → plan-tasks → file-bugs → rollup → index, against ``root``. Returns nothing;
     prints what each step printed, same as running the commands one at a time would.
@@ -75,21 +87,28 @@ def run_step0(root, product, fresh=False):
     from asf.tick.file_bugs import cmd_file_bugs
 
     if ci_provider(product) != 'none':
-        cmd_backfill(_ns(days=1, sessions=None, log=None, workflow=ci_workflow(product),
-                         launch_dir=None, product=product.name), root)
-    cmd_ingest(_ns(fresh=fresh, product=product.name), root)
+        with timed('backfill'):
+            cmd_backfill(_ns(days=1, sessions=None, log=None, workflow=ci_workflow(product),
+                             launch_dir=None, product=product.name), root)
+    with timed('ingest'):
+        cmd_ingest(_ns(fresh=fresh, product=product.name), root)
     if product.repo_dir:  # B-0060: a landed plan's Tasks become cards, once
         from asf.evidence import evidence
         from asf.record.plan_tasks import mint_plan_tasks
-        mint_plan_tasks(root, product, evidence.load(product=product))
+        with timed('plan-tasks'):
+            mint_plan_tasks(root, product, evidence.load(product=product))
         # open Tasks minted before the minter wrote order: the plan's order lands as `after:`
         from asf.record import plan_order
-        plan_order.backfill(root, plan_order.trunk_reader(product))
+        with timed('plan-order'):
+            plan_order.backfill(root, plan_order.trunk_reader(product))
     default_bug_epic = product.conventions.get('default_bug_epic')
-    cmd_file_bugs(_ns(default_bug_epic=default_bug_epic,
-                      file_bug_level=approvals.level_of(product, 'file_bug')), root)
-    cmd_rollup(_ns(day=None, no_releases=False, product=product.name), root)
-    do_index(root)
+    with timed('file-bugs'):
+        cmd_file_bugs(_ns(default_bug_epic=default_bug_epic,
+                          file_bug_level=approvals.level_of(product, 'file_bug')), root)
+    with timed('rollup'):
+        cmd_rollup(_ns(day=None, no_releases=False, product=product.name), root)
+    with timed('index'):
+        do_index(root)
 
 
 def render_tables(root, product):
@@ -168,12 +187,16 @@ def run_record_step(product, fresh=False, ctx=None):
     alone = ctx is None
     ctx = ctx or Context(product, fresh=fresh)
     try:
-        run_step0(ctx.record_root(), product, fresh=fresh)
+        with timed('clone'):
+            root = ctx.record_root()
+        run_step0(root, product, fresh=fresh)
         from asf.tick import step_daily
-        if step_daily.apply_pending_answers(product, ctx.record_root(), event=ctx.event):
-            do_index(ctx.record_root())  # the decided cards' rows on this very tick
+        with timed('answers'):
+            if step_daily.apply_pending_answers(product, root, event=ctx.event):
+                do_index(root)  # the decided cards' rows on this very tick
         # new and edited inbox cards typed, new questions into today's groom file: every tick
-        step_daily.groom_every_tick(product, ctx.record_root(), event=ctx.event)
+        with timed('groom'):
+            step_daily.groom_every_tick(product, root, event=ctx.event)
     except (subprocess.CalledProcessError, env.ConfigError) as e:
         detail = (getattr(e, 'stderr', None) or str(e)).strip()
         print(f"tick: record failed ({detail})")

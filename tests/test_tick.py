@@ -31,11 +31,11 @@ def _args(**kw):
     return argparse.Namespace(**base)
 
 
-TIMING_RE = re.compile(r'^(\[step:[a-z]+\]|tick: total) \d+\.\ds$')
+TIMING_RE = re.compile(r'^(\[(?:step|record):[a-z-]+\]|tick: total) \d+\.\ds$')
 
 
 def untimed(out):
-    """``out`` without the per-step timing lines and the tick's total."""
+    """``out`` without the per-step and per-record-part timing lines and the tick's total."""
     return ''.join(l for l in out.splitlines(True) if not TIMING_RE.match(l.rstrip('\n')))
 
 
@@ -584,7 +584,7 @@ class StepTimingTests(TickTestCase):
         rc, out = self.run_tick(steps='record,health')
         self.assertEqual(rc, 0)
         lines = out.splitlines()
-        timings = [l for l in lines if TIMING_RE.match(l)]
+        timings = [l for l in lines if TIMING_RE.match(l) and not l.startswith('[record:')]
         self.assertEqual([l.split(' ')[0] for l in timings], ['[step:record]', '[step:health]', 'tick:'])
         self.assertLess(lines.index(timings[0]), lines.index('[command:health] 1'))
         self.assertLess(lines.index('[command:health] 1'), lines.index(timings[1]))
@@ -659,6 +659,31 @@ class Step0Tests(unittest.TestCase):
     def test_no_ci_no_backfill(self):
         self.assertEqual(self.step0(env.Product('p', {'ci': {'provider': 'none'}})), [])
         self.assertEqual(self.step0(env.Product('p', {'ci': 'none'})), [])
+
+    def test_each_part_prints_its_seconds(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.step0(env.Product('p', {}))
+        lines = out.getvalue().splitlines()
+        self.assertEqual([ln.split()[0] for ln in lines],
+                         ['[record:backfill]', '[record:ingest]', '[record:file-bugs]',
+                          '[record:rollup]', '[record:index]'])
+        self.assertTrue(all(TIMING_RE.match(ln) for ln in lines), lines)
+
+    def test_a_part_that_raises_still_prints_its_seconds(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(RuntimeError):
+            with tick.timed('ingest'):
+                raise RuntimeError('boom')
+        self.assertRegex(out.getvalue(), r'^\[record:ingest\] \d+\.\ds\n$')
+
+
+class RecordStepTimingTests(TickTestCase):
+    def test_the_record_step_times_the_clone_answers_and_groom(self):
+        rc, out = self.run_tick(steps='record')
+        self.assertEqual(rc, 0)
+        parts = [ln.split()[0] for ln in out.splitlines() if ln.startswith('[record:')]
+        self.assertEqual(parts, ['[record:clone]', '[record:answers]', '[record:groom]'])
 
 
 if __name__ == '__main__':

@@ -176,6 +176,10 @@ def scan_text(rec):
     return '\n'.join(parts)
 
 
+MENTION_ID_RE = re.compile(r'[A-Z]-[0-9]{4}')
+MENTION_TOKEN_RE = re.compile(r'(?<![A-Za-z0-9])[A-Z]-[0-9]{4}(?![A-Za-z0-9])')
+
+
 def mention_re(iid):
     return re.compile(r'(?<![A-Za-z0-9])' + re.escape(iid) + r'(?![A-Za-z0-9])')
 
@@ -197,15 +201,23 @@ def compute_derived(canonical):
         children_map[iid].sort(key=lambda cid: sort_key(canonical, cid))
 
     texts = {iid: scan_text(rec) for iid, rec in canonical.items()}
+    # one scan per text, not one regex per (id, text) pair: the pairwise search was quadratic
+    # in the item count and was most of the record step's time. For an id of the ``X-0000``
+    # shape the token set is exact (such tokens cannot overlap, so findall sees every one);
+    # any other id keeps its own regex.
+    tokens = {oid: set(MENTION_TOKEN_RE.findall(text)) for oid, text in texts.items()}
     derived = {}
     for iid in canonical:
         children = children_map.get(iid, [])
         excluded = set(children) | {iid}
-        regex = mention_re(iid)
-        backlinks = [
-            oid for oid in canonical
-            if oid not in excluded and regex.search(texts[oid])
-        ]
+        if isinstance(iid, str) and MENTION_ID_RE.fullmatch(iid):
+            backlinks = [oid for oid in canonical if oid not in excluded and iid in tokens[oid]]
+        else:
+            regex = mention_re(iid)
+            backlinks = [
+                oid for oid in canonical
+                if oid not in excluded and regex.search(texts[oid])
+            ]
         backlinks.sort(key=lambda bid: sort_key(canonical, bid))
         derived[iid] = {'children': children, 'backlinks': backlinks}
     return derived
