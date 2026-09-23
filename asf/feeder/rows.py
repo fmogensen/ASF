@@ -50,6 +50,8 @@ STARVED_PLAN = 'STARVED → PLAN'
 PLAN_CODE = 'PLAN → CODE'
 RESHAPE = 'RESHAPE → PLAN'
 GROOM_ADJUDICATE = 'GROOM → ADJUDICATE'
+ON_TRUNK = 'ON TRUNK'
+PARKED = 'PARKED'
 
 LAUNCH = 'would launch'
 DONE_STATES = ('Resolved', 'Closed')
@@ -136,6 +138,22 @@ def attempt_limit(product):
 
 
 # ---- per-item predicates ----------------------------------------------------
+
+def landed_ids(items, landed_shas=None):
+    """Ids that count as landed: the record's Resolved/Closed, plus every id the trunk names.
+
+    The two disagree when a Task's work reached the trunk under a sibling's commit, or when the
+    ingest has not caught up with a harvest. `after:` must not hold a successor behind a
+    predecessor whose work is *already there* — a coder launched into that gap finds the surface
+    present and writes nothing (B-0076, F-0095).
+
+    The fold runs over *all* items, not ``ix.feature_tasks``, so an ``after:`` naming a Task of
+    another Feature is answerable at all. No ``landed_shas`` (the fact is absent): the record's
+    set alone, exactly as before.
+    """
+    done = {i for i, v in items.items() if v.get('state') in DONE_STATES}
+    return done | set(landed_shas or {})
+
 
 def is_open(item):
     return item.get('state', 'New') not in DONE_STATES
@@ -239,6 +257,11 @@ def correction_rows(items, product, busy, corrections):
         tier = {'S1': 0, 'S2': 1}.get(item.get('severity'), 2)
         kind = 'fix' if item['type'] == 'bug' else 'task'
         branch = c.get('branch') or branch_for(product, kind, iid)
+        if c.get('parked'):  # a Task that wrote nothing twice waits for a person, not a session
+            out.append(Row(tier=tier, kind=FIX_CORRECT, item_id=iid, feature_id=fid,
+                           action=f'{PARKED} {c.get("reason") or c["kind"]}', brief_kind='correct',
+                           branch=branch, reason=c.get('reason') or 'parked', waits_on='operator'))
+            continue
         if rounds >= CORRECTION_ROUNDS:
             out.append(Row(tier=tier, kind=STALEMATE, item_id=iid, feature_id=fid, action=LAUNCH,
                            brief_kind='adjudicate', branch=branch,
@@ -286,7 +309,7 @@ def running_footprints(items, busy):
     return out
 
 
-def feature_rows(items, product, busy, running):
+def feature_rows(items, product, busy, running, landed_shas=None):
     """Every Feature's rows, in Feature order (rank, then id). ``running`` grows as PLAN → CODE
     rows are handed out, so two ready Tasks sharing a file never both launch."""
     out = []
@@ -320,16 +343,26 @@ def feature_rows(items, product, busy, running):
                            reason=f"{stage}, no session" if word != 'spec-approved'
                            else 'spec approved, no plan'))
         elif word in ('plan-approved', 'building'):
-            out.extend(task_rows(items, product, f, busy, running))
+            out.extend(task_rows(items, product, f, busy, running, landed_shas))
     return out
 
 
-def task_rows(items, product, feature, busy, running):
+def task_rows(items, product, feature, busy, running, landed_shas=None):
     out = []
     tasks = [t for t in ix.feature_tasks(items, feature)
              if t.get('state', 'New') == 'New' and t['id'] not in busy and not t.get('blocked')]
-    landed = {t['id'] for t in ix.feature_tasks(items, feature) if t.get('state') in DONE_STATES}
+    landed = landed_ids(items, landed_shas)
+    on_trunk = landed_shas or {}
     for t in sorted(tasks, key=lambda v: (ix.rank(v), v['id'])):
+        if t['id'] in on_trunk:  # already on main: a coder would find the surface there and write nothing
+            sha, subject = on_trunk[t['id']]
+            out.append(Row(tier=2, kind=PLAN_CODE, item_id=t['id'], feature_id=feature['id'],
+                           action=f'{ON_TRUNK} {sha[:12]}', brief_kind='task',
+                           branch=branch_for(product, 'code', t['id']),
+                           reason=f'already on main: {sha[:12]} "{subject}" — the card is still '
+                                  f'{t.get("state", "New")}, the record has not caught up',
+                           waits_on='trunk'))
+            continue
         # `after: [T-nnnn]` is a declared dependency: Task N builds on what Task N-1 landed, and
         # a coder started before it finds the surface missing and writes nothing (B-0076).
         # Footprint-disjoint tasks still run in parallel — a plan says so by leaving `after:` off.
@@ -418,16 +451,19 @@ def groom_row(index, product, busy, groom_state, inflight):
               open_questions=tuple(groom_state.get('lines') or ()))
 
 
-def hold_unlanded(rows, items):
+def hold_unlanded(rows, items, landed_shas=None):
     """B-0080: ``after:`` holds every row kind, not only PLAN → CODE. An item whose predecessor
     has not landed is not in dispute, it is waiting: a launching row for it (code, correct,
     adjudicate, rebase, close) becomes ``WAITS ON <id>`` — no session, no round. The groom row
     speaks for a day's questions, not for the item it names, so it is left alone."""
-    landed = {i for i, v in items.items() if v.get('state') in DONE_STATES}
+    landed = landed_ids(items, landed_shas)
     out, said = [], set()
     for r in rows:
         pending = [a for a in (items.get(r.item_id) or {}).get('after') or [] if a not in landed]
-        if pending and r.kind != GROOM_ADJUDICATE and (r.launches or r.waits_on):
+        # ON TRUNK / PARKED are already non-launching answers with their own waits_on: rewriting
+        # them into WAITS ON would hide the row the gate exists to print
+        keeps = r.kind == GROOM_ADJUDICATE or r.action.startswith((ON_TRUNK, PARKED))
+        if pending and not keeps and (r.launches or r.waits_on):
             if r.item_id in said:  # a Task with a correction also has its PLAN → CODE row: once
                 continue
             said.add(r.item_id)
@@ -438,7 +474,7 @@ def hold_unlanded(rows, items):
 
 
 def candidates(index, product, inflight, attempts=None, corrections=None, busy=None,
-              groom_state=None):
+              groom_state=None, landed_shas=None):
     """Every row the index supports right now, uncut by capacity, in emit order: tier, then the
     Feature's rank and id, then within a Feature the stalemate, branch housekeeping, new work.
     ``busy``: item ids held by something that is not a session and takes no slot — a pushed
@@ -457,8 +493,8 @@ def candidates(index, product, inflight, attempts=None, corrections=None, busy=N
     gr = groom_row(index, product, busy, groom_state, inflight)
     if gr is not None:
         rows.append(gr)
-    rows += feature_rows(items, product, busy, running)
-    rows = hold_unlanded(rows, items)
+    rows += feature_rows(items, product, busy, running, landed_shas)
+    rows = hold_unlanded(rows, items, landed_shas)
 
     def key(pair):
         seq, r = pair
@@ -470,9 +506,9 @@ def candidates(index, product, inflight, attempts=None, corrections=None, busy=N
 
 
 def plan_rows(index, product, inflight, capacity, attempts=None, corrections=None, busy=None,
-              groom_state=None):
+              groom_state=None, landed_shas=None):
     """The rows the tick emits: tiered, S1 first, cut to ``capacity`` less what is in flight."""
     from asf.feeder import tiers
     return tiers.select(candidates(index, product, inflight, attempts, corrections, busy=busy,
-                                   groom_state=groom_state),
+                                   groom_state=groom_state, landed_shas=landed_shas),
                         inflight, capacity)

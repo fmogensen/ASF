@@ -458,6 +458,126 @@ class AttemptOrderTest(unittest.TestCase):
         self.assertEqual(out, [])
 
 
+class AlreadyOnTrunkTests(unittest.TestCase):
+    """F-0095 §3.2: a New Task the trunk already names is not launched into an empty branch."""
+
+    SHA = 'abc123def4567'
+    LANDED = {'T-0017': (SHA, 'feat(T-0017): the meter')}
+
+    def index(self, state='New'):
+        return {'items': {
+            'F-0001': {'id': 'F-0001', 'type': 'feature', 'stage': 'plan-approved', 'decided': True,
+                       'state': 'Active', 'children': ['T-0017']},
+            'T-0017': {'id': 'T-0017', 'type': 'task', 'parent': 'F-0001', 'rank': 1,
+                       'state': state, 'writes': ['a.py']}}}
+
+    def rows_of(self, landed=None, state='New'):
+        return rows.candidates(self.index(state), product(), [], landed_shas=landed)
+
+    def test_the_row_is_on_trunk_and_launches_nothing(self):
+        (row,) = self.rows_of(self.LANDED)
+        self.assertEqual(row.action, 'ON TRUNK abc123def456')
+        self.assertFalse(row.launches)
+        self.assertEqual(row.waits_on, 'trunk')
+        for part in ('abc123def456', 'feat(T-0017): the meter', 'New'):
+            self.assertIn(part, row.reason)
+
+    def test_with_no_fact_the_same_index_launches_it(self):
+        (row,) = self.rows_of(None)
+        self.assertEqual(row.action, rows.LAUNCH)
+
+    def test_an_active_or_closed_task_named_by_the_trunk_mints_no_extra_row(self):
+        for state in ('Active', 'Closed'):
+            with self.subTest(state=state):
+                self.assertEqual(self.rows_of(self.LANDED, state), [])
+
+    def test_select_keeps_the_row_and_spends_no_slot(self):
+        before = tiers.free_slots([], 2)
+        out = rows.plan_rows(self.index(), product(), [], 2, landed_shas=self.LANDED)
+        self.assertEqual([r.action for r in out], ['ON TRUNK abc123def456'])
+        self.assertEqual(tiers.free_slots([], 2), before)
+
+
+class AfterCountsTheTrunkTests(unittest.TestCase):
+    """F-0095 §3.3: `after:` counts a predecessor the trunk names, in both gates."""
+
+    def items(self, other_feature=False):
+        items = {'F-0001': {'id': 'F-0001', 'type': 'feature', 'stage': 'building 0/1',
+                            'decided': True, 'state': 'Active', 'children': ['T-0002']},
+                 'T-0002': {'id': 'T-0002', 'type': 'task', 'parent': 'F-0001', 'rank': 2,
+                            'state': 'New', 'after': ['T-0001'], 'writes': ['b.py']},
+                 'T-0001': {'id': 'T-0001', 'type': 'task', 'parent': 'F-0001', 'rank': 1,
+                            'state': 'New'}}
+        if other_feature:
+            items['F-0001']['children'] = ['T-0001', 'T-0002']
+            items['F-0002'] = {'id': 'F-0002', 'type': 'feature', 'stage': 'plan-approved',
+                               'decided': True, 'state': 'Active', 'children': []}
+            items['T-0001'].update(parent='F-0002', state='Closed')
+            items['F-0001']['children'] = ['T-0002']
+        return {'items': items}
+
+    TRUNK = {'T-0001': ('a' * 12, 'feat(T-0001): x')}
+
+    def action_of(self, item_id, landed, corrections=None, index=None):
+        out = [r for r in rows.candidates(index or self.items(), product(), [], corrections=corrections,
+                                          landed_shas=landed) if r.item_id == item_id]
+        return [r.action for r in out]
+
+    def test_a_predecessor_the_trunk_names_lets_the_successor_launch(self):
+        self.assertEqual(self.action_of('T-0002', self.TRUNK), ['would launch'])
+
+    def test_with_no_fact_it_still_waits(self):
+        self.assertEqual(self.action_of('T-0002', None), ['WAITS ON T-0001'])
+
+    def test_hold_unlanded_lets_correction_and_adjudicate_rows_through(self):
+        for rounds in (1, 3):
+            with self.subTest(rounds=rounds):
+                corr = {'T-0002': {'kind': 'gate', 'text': 'FAIL: x', 'rounds': rounds}}
+                self.assertEqual(self.action_of('T-0002', None, corr), ['WAITS ON T-0001'])
+                got = self.action_of('T-0002', self.TRUNK, corr)
+                self.assertIn('would launch', got)
+                self.assertFalse([a for a in got if a.startswith('WAITS ON')])
+
+    def test_an_after_naming_a_task_of_another_feature_no_longer_waits_for_ever(self):
+        self.assertEqual(self.action_of('T-0002', None, index=self.items(other_feature=True)),
+                         ['would launch'])
+
+    def test_landed_ids_is_the_record_union_the_trunk(self):
+        items = {'T-1': {'state': 'Closed'}, 'T-2': {'state': 'New'}, 'T-3': {'state': 'New'}}
+        self.assertEqual(rows.landed_ids(items), {'T-1'})
+        self.assertEqual(rows.landed_ids(items, {'T-2': ('s', 'x')}), {'T-1', 'T-2'})
+        self.assertEqual(rows.landed_ids(items, {}), {'T-1'})
+
+
+class ParkedCorrectionTests(unittest.TestCase):
+    """F-0095 §3.5 (feeder third): a parked correction launches nothing, at any round count."""
+
+    def corr(self, rounds):
+        return {'B-0001': {'kind': 'empty', 'text': 'nothing to land', 'rounds': rounds, 'parked': True,
+                           'reason': 'ended empty 2 times: asf unpark B-0001'}}
+
+    def test_the_row_is_parked_and_neither_correct_nor_adjudicate(self):
+        for rounds in (0, 1, 3):
+            with self.subTest(rounds=rounds):
+                out = rows.plan_rows(s1_bugs('B-0001'), product(), [], 1, attempts={'B-0001': 1},
+                                     corrections=self.corr(rounds))
+                self.assertEqual(len(out), 1)
+                row = out[0]
+                self.assertTrue(row.action.startswith('PARKED '))
+                self.assertFalse(row.launches)
+                self.assertEqual(row.waits_on, 'operator')
+                self.assertNotEqual(row.kind, rows.STALEMATE)
+                self.assertIn('asf unpark', row.reason)
+
+    def test_a_parked_task_behind_an_unlanded_after_keeps_its_parked_row(self):
+        index = {'items': {
+            'T-0001': {'id': 'T-0001', 'type': 'task', 'state': 'New'},
+            'T-0002': {'id': 'T-0002', 'type': 'task', 'state': 'New', 'after': ['T-0001']}}}
+        corr = {'T-0002': dict(self.corr(0)['B-0001'])}
+        out = rows.candidates(index, product(), [], corrections=corr)
+        self.assertEqual([r.action.split(' ')[0] for r in out], ['PARKED'])
+
+
 class CorrectionRowTest(unittest.TestCase):
     """B-0032: a held branch goes back to its session as a FIX → CORRECT row."""
 
