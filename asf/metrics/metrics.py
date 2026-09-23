@@ -668,10 +668,16 @@ def release_items(items, new_sha, old_sha, repo=None, product=None):
     return found
 
 
-def render_release(day, new_sha, old_sha, deployed_at, items, found):
-    out = [f"# Release {day} · {new_sha[:7]}", '',
-           f"Deployed sha `{new_sha}` (deploy finished {deployed_at or 'unknown'})."
-           + (f" Everything merged since `{old_sha[:7]}`." if old_sha else ''), '']
+def render_release(day, new_sha, old_sha, deployed_at, items, found, tag=None):
+    if tag is None:
+        out = [f"# Release {day} · {new_sha[:7]}", '',
+               f"Deployed sha `{new_sha}` (deploy finished {deployed_at or 'unknown'})."
+               + (f" Everything merged since `{old_sha[:7]}`." if old_sha else ''), '']
+    else:
+        out = [f"# Release {day} · {new_sha[:7]}", '',
+               f"Trunk sha `{new_sha}` — the product deploys nothing, so its trunk is production (B-0077)."
+               + (f" Everything landed since `{old_sha[:7]}`." if old_sha else ''), '',
+               f"Tag `{tag}`.", '']
     if not found:
         out += ['No item reached prod in this release.']
         return '\n'.join(out) + '\n'
@@ -681,7 +687,7 @@ def render_release(day, new_sha, old_sha, deployed_at, items, found):
             continue
         out += [f"## {title}", '']
         for i in ids:
-            prs = ', '.join(f"#{n}" for n, _t in found[i])
+            prs = ', '.join(f"#{n}" if isinstance(n, int) else f"`{n[:7]}`" for n, _t in found[i])
             out.append(f"- [{i}](../{items[i]['folder']}/{i}.md) {items[i].get('title', '')} — {prs}")
             tries = [t for _n, t in found[i] if t]
             if tries:
@@ -690,8 +696,119 @@ def render_release(day, new_sha, old_sha, deployed_at, items, found):
     return '\n'.join(out).rstrip('\n') + '\n'
 
 
+#: Any record id a commit message can name (`task(T-0050): …`, `fix(B-0077)`).
+COMMIT_ID_RE = re.compile(r'\b[A-Z]-\d{4}\b')
+#: The line of a product's `conventions.version_file` that names its version.
+VERSION_RE = re.compile(r"""(?im)^\s*[_"']*version[_"']*\s*[=:]\s*["']([^"']+)["']""")
+#: The tag a release gets when `v<version>` is unreadable or already names an older release.
+RELEASE_TAG = 'release-{day}-{sha7}'
+
+
+def _git(repo, *args):
+    """stdout of a git command in `repo`, or None when it fails."""
+    r = subprocess.run(['git', '-C', repo, *args], capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def trunk_product(product):
+    """The Product when its trunk IS production — no deploy configured (B-0077): a package, a
+    library, a tool. None for a product that deploys (its releases follow the deploy) or when no
+    product resolves."""
+    try:
+        p = _resolve_product(product)
+    except env.ConfigError:
+        return None
+    return None if p.conventions.get('deploy_workflow') or not p.repo_dir else p
+
+
+def trunk_sha(product):
+    """The newest trunk sha that is production: the newest green CI run on the trunk (D-0047), or
+    the trunk's head when the product runs no CI. None when neither reads."""
+    from asf.evidence import evidence
+    if evidence.ci_provider(product):
+        green = evidence.ci_green_runs(product)
+        return green[0] if green else None
+    return _git(product.repo_dir, 'rev-parse', '--verify', '-q', f'origin/{product.main}^{{commit}}')
+
+
+def commit_items(repo, items, new_sha, old_sha):
+    """{item id: [(sha, None), …]}: the items the trunk's commits in old_sha..new_sha name."""
+    rng = f'{old_sha}..{new_sha}' if old_sha else new_sha
+    log = _git(repo, 'log', '--format=%H%x1f%B%x1e', rng)
+    found = {}
+    for entry in (log or '').split('\x1e'):
+        sha, _sep, msg = entry.strip().partition('\x1f')
+        for iid in dict.fromkeys(COMMIT_ID_RE.findall(msg)):
+            if iid in items and (sha, None) not in found.get(iid, []):
+                found.setdefault(iid, []).append((sha, None))
+    return found
+
+
+def product_version(repo, sha, product):
+    """The version `conventions.version_file` declares at `sha`, or None."""
+    path = product.conventions.get('version_file')
+    text = _git(repo, 'show', f'{sha}:{path}') if path else None
+    m = VERSION_RE.search(text or '')
+    return m.group(1) if m else None
+
+
+def cut_tag(repo, day, sha, product):
+    """Tag `sha` as a release and push the tag: `v<version>` (D-0045's install pin) when that tag
+    is free, else `release-<day>-<sha7>`. A tag already on `sha` is reused. The tag name, or None
+    when none could be created and pushed (nothing is left behind locally then)."""
+    version = product_version(repo, sha, product)
+    names = ([f'v{version}'] if version else []) + [RELEASE_TAG.format(day=day, sha7=sha[:7])]
+    for name in names:
+        at = _git(repo, 'rev-parse', '--verify', '-q', f'refs/tags/{name}^{{commit}}')
+        if at == sha:
+            return name
+        if at:
+            continue
+        if _git(repo, 'tag', '-a', name, sha, '-m', f'Release {day} · {sha[:7]}') is None:
+            return None
+        if _git(repo, 'push', '-q', 'origin', f'refs/tags/{name}') is None:
+            _git(repo, 'tag', '-d', name)
+            return None
+        return name
+    return None
+
+
+def write_trunk_release(root, day, items, product):
+    """A release of a product whose trunk is production: at most one a day, none older than the
+    newest, and only when a commit naming an item landed since the last one. Tags the sha, then
+    writes releases/<day>-<sha7>.md. Returns the path written, or None."""
+    repo = product.repo_dir
+    rdir = os.path.join(root, 'releases')
+    prev = sorted(os.path.basename(p) for p in glob.glob(os.path.join(rdir, '*-*.md')))
+    if prev and prev[-1][:10] >= day:
+        return None
+    new = trunk_sha(product)
+    if not new or _git(repo, 'cat-file', '-e', f'{new}^{{commit}}') is None:
+        return None
+    old = None
+    if prev:
+        m = re.search(r'-([0-9a-f]{7,40})\.md$', prev[-1])
+        old = m and _git(repo, 'rev-parse', '--verify', '-q', f'{m.group(1)}^{{commit}}')
+        if old == new or (old and old.startswith(new[:7])):
+            return None
+    found = commit_items(repo, items, new, old)
+    if not found:
+        return None     # nothing landed that the record knows: a release of nothing is noise
+    tag = cut_tag(repo, day, new, product)
+    if not tag:
+        print(f"release: could not tag {new[:7]} in {repo}; retrying next rollup", file=sys.stderr)
+        return None
+    path = os.path.join(rdir, f"{day}-{new[:7]}.md")
+    write_if_changed(path, render_release(day, new, old, None, items, found, tag=tag))
+    return path
+
+
 def write_release(root, day, items, repo=None, repo_slug=None, product=None):
-    """T14: one releases/<day>-<sha7>.md per new prod deploy. Returns the path written, or None."""
+    """T14: one releases/<day>-<sha7>.md per new prod deploy. Returns the path written, or None.
+    A product that deploys nothing releases its trunk instead (:func:`write_trunk_release`)."""
+    trunk = trunk_product(product) if repo is None else None
+    if trunk is not None:
+        return write_trunk_release(root, day, items, trunk)
     if not any((it.get('links') or {}).get('prs') for it in items.values()):
         return None     # nothing to attribute yet: a "nothing reached prod" file would hide the real one later
     runs = [r for r in deploy_runs(repo_slug, product) if r.get('conclusion') == 'success' and r.get('headSha')]

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import types
@@ -488,6 +489,72 @@ class Releases(Base):
             self.assertIn('release: releases/2026-09-21-bbbbbbb.md', out)
             _rc, out, _ = run_cli(self.root, 'rollup', DAY)
             self.assertIn('release: none new', out)
+
+
+def _git(cwd, *args):
+    return subprocess.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@example.com',
+                           '-c', 'core.hooksPath=/dev/null', *args],
+                          cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
+class TrunkReleases(Base):
+    """A product that deploys nothing ships its green trunk (B-0077): the rollup cuts the release
+    itself — the note in the record and a tag on the product repo (D-0045's `v<version>`)."""
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.mkdtemp(prefix='trunk_release_')
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.origin = os.path.join(self.tmp, 'origin.git')
+        self.repo = os.path.join(self.tmp, 'work')
+        _git(self.tmp, 'init', '-q', '--bare', '-b', 'main', self.origin)
+        _git(self.tmp, 'clone', '-q', self.origin, self.repo)
+        os.makedirs(os.path.join(self.repo, 'pkg'))
+        self.commit('pkg/__init__.py', '__version__ = "0.1.0"\n', 'init: the package')
+        self.commit('pkg/a.py', 'a = 1\n', 'task(T-0001): plan door copy')
+        self.product = env.Product('trunky', {
+            'repo_dir': self.repo, 'repo_slug': 'x/y', 'main': 'main', 'ci': 'none',
+            'conventions': {'version_file': 'pkg/__init__.py'}})
+
+    def commit(self, path, text, msg):
+        with open(os.path.join(self.repo, path), 'w') as f:
+            f.write(text)
+        _git(self.repo, 'add', path)
+        _git(self.repo, 'commit', '-q', '-m', msg)
+        _git(self.repo, 'push', '-q', 'origin', 'HEAD:main')
+        return _git(self.repo, 'rev-parse', 'HEAD')
+
+    def release(self, day=DAY):
+        return metrics.write_release(self.root, day, self.items, product=self.product)
+
+    def origin_tags(self):
+        out = _git(self.origin, 'for-each-ref', '--format=%(refname:short) %(*objectname)', 'refs/tags')
+        return dict(line.split() for line in out.splitlines())
+
+    def test_a_product_without_a_deploy_cuts_a_tagged_release_of_its_trunk(self):
+        head = _git(self.repo, 'rev-parse', 'HEAD')
+        path = self.release()
+        self.assertEqual(os.path.basename(path or ''), f'{DAY}-{head[:7]}.md')
+        text = self.read(f'releases/{DAY}-{head[:7]}.md')
+        self.assertIn('- [T-0001](../tasks/T-0001.md) Plan door copy', text)
+        self.assertIn('Tag `v0.1.0`', text)
+        self.assertEqual(self.origin_tags(), {'v0.1.0': head})     # pushed, at the released sha
+
+    def test_one_release_a_day_and_none_while_nothing_new_landed(self):
+        self.assertIsNotNone(self.release())
+        self.commit('pkg/b.py', 'b = 1\n', 'fix(B-0001): banner')
+        self.assertIsNone(self.release())                           # the same day: no second cut
+        self.assertEqual(len(os.listdir(os.path.join(self.root, 'releases'))), 1)
+
+    def test_a_taken_version_tag_falls_back_to_the_release_name(self):
+        self.release()
+        head = self.commit('pkg/b.py', 'b = 1\n', 'fix(B-0001): banner')
+        path = self.release('2026-09-22')
+        text = self.read(os.path.relpath(path, self.root))
+        self.assertIn('- [B-0001](../bugs/B-0001.md) Banner shows', text)
+        self.assertNotIn('T-0001', text)                            # already in the first release
+        self.assertEqual(self.origin_tags()[f'release-2026-09-22-{head[:7]}'], head)
+        self.assertIsNone(self.release('2026-09-23'))               # nothing landed since
 
 
 LOG = """23:50 MERGE: batch A → main abc1234

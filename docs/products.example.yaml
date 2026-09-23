@@ -58,6 +58,10 @@ conventions:
   # a regex over a file name in reports_dir; unset matches every .md. Leave out and the product
   # has no such thing — nothing looks for it.
   report_pattern: "hotfix-.*\\.md"
+  # asf.metrics release: a product with no deploy_sha ships its green trunk (B-0077); the rollup
+  # tags it once a day when an item landed — `v<version>` read from this file (D-0045's install
+  # pin) while that tag is free, else `release-<day>-<sha7>` — and writes releases/<day>-<sha7>.md.
+  version_file: src/sample/__init__.py
   # asf.groom.inbox: where a dropped .md becomes a card. Leave out and the product has no such
   # thing — nothing looks for it.
   intake_dir: inbox
