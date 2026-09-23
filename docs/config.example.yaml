@@ -23,6 +23,9 @@ worker_pool:
       share: 0.5
     - name: acct-b
       share: 0.5
+  # sessions: process           # process | command | fake — how the pool observes running sessions
+  # sessions_command: bin/sessions   # prints one JSON object per session: {"pid", "ppid", "env"}
+  # session_match: '^(\S*/)?claude(\s|$)'   # default: the runtime binary as argv[0]
 
 # quota band (percent of each window, not a fraction). An account at or above `cooldown` in any
 # window takes one job at a time; at or above `stop` it takes none. Running sessions are never

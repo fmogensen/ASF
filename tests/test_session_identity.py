@@ -1,17 +1,20 @@
 """asf — session identity (F-0076): the id, the registry line, the environment, the log and the
-commit trailer. This module grows with each Task of the plan; this Task (T-9450) adds
-``SessionIdTest``, ``LaunchIdentityTest`` and ``CommitTrailerTest`` only."""
+commit trailer. This module grows with each Task of the plan; this Task (T-9451) adds
+``ObserveTest`` (and the earlier Task's ``SessionIdTest``, ``LaunchIdentityTest``,
+``CommitTrailerTest``)."""
 import json
 import os
 import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from asf import env
 from asf import hermetic
 from asf.workers import githooks
 from asf.workers import lifecycle
+from asf.workers import observe
 from asf.workers import pool as pool_mod
 from asf.workers import runtime as runtime_mod
 from asf.workers import spawn as spawn_mod
@@ -22,6 +25,27 @@ from tests.test_workers import Home, s1_row
 
 def _git(args, cwd, env=None):
     return subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True, env=env)
+
+
+def fake_ps(directory, table=None):
+    """Install a ``ps`` stub into ``<directory>/bin`` (put it first on ``PATH``): with ``table``
+    given (the fixed text ``ps axeww -o pid=,ppid=,command=`` would print), it prints exactly
+    that and exits 0; with none, it exits 1 (F-0076 D10, an unreadable process table). The
+    ``fake_launchctl`` pattern (``tests/test_scheduler.py:63``)."""
+    bindir = os.path.join(directory, 'bin')
+    os.makedirs(bindir, exist_ok=True)
+    stub = os.path.join(bindir, 'ps')
+    if table is None:
+        body = '#!/bin/sh\nexit 1\n'
+    else:
+        data = os.path.join(bindir, 'ps-table.txt')
+        with open(data, 'w', encoding='utf-8') as f:
+            f.write(table)
+        body = f'#!/bin/sh\ncat "{data}"\n'
+    with open(stub, 'w', encoding='utf-8') as f:
+        f.write(body)
+    os.chmod(stub, 0o755)
+    return bindir
 
 
 class SessionIdTest(unittest.TestCase):
@@ -217,6 +241,65 @@ class CommitTrailerTest(Home):
         trailer = _git(['log', '-1', '--format=%(trailers:key=ASF-Session,valueonly)'],
                        wt).stdout.strip()
         self.assertEqual(trailer, '')
+
+
+class ObserveTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='asf-observe-')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _path(self, bindir):
+        return bindir + os.pathsep + os.environ.get('PATH', '')
+
+    def test_sessions_and_their_children(self):
+        table = ('  100     1 /usr/bin/claude -p --permission-mode acceptEdits\n'
+                 '  101   100 -bash\n'
+                 '  102   101 /usr/bin/claude -p --permission-mode acceptEdits\n')
+        bindir = fake_ps(self.tmp, table)
+        with mock.patch.dict(os.environ, {'PATH': self._path(bindir)}):
+            observed, why = observe.read({}, [])
+        self.assertEqual(why, '')
+        self.assertEqual([o.pid for o in observed], [100])
+
+    def test_owner_and_account(self):
+        cfg = {'worker_pool': {'accounts': [{'name': 'acct-a', 'config_dir': '/cfg/acct-a'}]}}
+        accounts = pool_mod.accounts_from_config(cfg)
+        table = ('  100     1 /usr/bin/claude ASF_SESSION=a/j@20260922T101500Z '
+                 'CLAUDE_CONFIG_DIR=/cfg/acct-a\n'
+                 '  200     1 /usr/bin/claude CLAUDE_CONFIG_DIR=/cfg/acct-a\n'
+                 '  300     1 /usr/bin/claude CLAUDE_CONFIG_DIR=/cfg/unknown\n')
+        bindir = fake_ps(self.tmp, table)
+        with mock.patch.dict(os.environ, {'PATH': self._path(bindir)}):
+            observed, why = observe.read(cfg, accounts)
+        self.assertEqual(why, '')
+        by_pid = {o.pid: o for o in observed}
+        self.assertEqual((by_pid[100].owner, by_pid[100].account, by_pid[100].product),
+                         ('asf', 'acct-a', 'a'))
+        self.assertEqual((by_pid[200].owner, by_pid[200].account), ('foreign', 'acct-a'))
+        self.assertIsNone(by_pid[300].account)
+
+    def test_command_source(self):
+        script = os.path.join(self.tmp, 'sessions-cmd')
+        with open(script, 'w', encoding='utf-8') as f:
+            f.write('#!/bin/sh\n'
+                    'echo \'{"pid": 100, "ppid": 1, "env": '
+                    '{"ASF_SESSION": "a/j@20260922T101500Z"}}\'\n'
+                    'echo \'{"pid": 200, "ppid": 1, "env": {}}\'\n')
+        os.chmod(script, 0o755)
+        cfg = {'worker_pool': {'sessions': 'command', 'sessions_command': script}}
+        observed, why = observe.read(cfg, [])
+        self.assertEqual(why, '')
+        by_pid = {o.pid: o for o in observed}
+        self.assertEqual(sorted(by_pid), [100, 200])
+        self.assertEqual(by_pid[100].owner, 'asf')
+        self.assertEqual(by_pid[200].owner, 'foreign')
+
+    def test_unreadable(self):
+        bindir = fake_ps(self.tmp, None)
+        with mock.patch.dict(os.environ, {'PATH': self._path(bindir)}):
+            observed, why = observe.read({}, [])
+        self.assertEqual(observed, [])
+        self.assertNotEqual(why, '')
 
 
 if __name__ == '__main__':
