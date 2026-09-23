@@ -27,7 +27,7 @@ def select(candidates, inflight, capacity):
     """The emitted rows, in order. ``candidates`` is :func:`asf.feeder.rows.candidates`' list."""
     ordered = sorted(candidates, key=tier_of)  # stable: keeps the Feature order within a tier
     free = free_slots(inflight, capacity)
-    s1_waiting = any(r.tier == TIER_S1 for r in ordered)
+    s1_waiting = any(r.tier == TIER_S1 and r.launches for r in ordered)
     out = []
     for r in ordered:
         if r.tier == TIER_REST and s1_waiting:

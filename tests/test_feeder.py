@@ -64,6 +64,55 @@ class DeclaredOrderIsADependency(unittest.TestCase):
         self.assertEqual(by['T-0002'].action, 'would launch')
 
 
+class NoRowLaunchesBehindAnUnlandedPredecessor(unittest.TestCase):
+    """B-0080: `after:` held the PLAN → CODE row only; a held branch's correction and adjudicate
+    rows launched anyway (on Opus) for an item that was not in dispute, only waiting."""
+
+    def index(self, first='New'):
+        return {'items': {
+            'F-0001': {'id': 'F-0001', 'type': 'feature', 'stage': 'building 0/2', 'decided': True,
+                       'state': 'Active', 'children': ['T-0001', 'T-0002', 'B-0009']},
+            'T-0001': {'id': 'T-0001', 'type': 'task', 'parent': 'F-0001', 'rank': 1,
+                       'state': first},
+            'T-0002': {'id': 'T-0002', 'type': 'task', 'parent': 'F-0001', 'rank': 2,
+                       'state': 'New', 'after': ['T-0001']},
+            'B-0009': {'id': 'B-0009', 'type': 'bug', 'parent': 'F-0001', 'severity': 'S1',
+                       'decided': True, 'state': 'New', 'after': ['T-0001']}}}
+
+    def rows_of(self, item_id, first='New', rounds=None, attempts=None):
+        corr = ({i: {'kind': 'gate', 'text': 'FAIL: x', 'rounds': rounds}
+                 for i in ('T-0002', 'B-0009')} if rounds is not None else None)
+        return [r for r in rows.candidates(self.index(first), product(), [], attempts=attempts,
+                                           corrections=corr) if r.item_id == item_id]
+
+    CASES = (dict(), dict(rounds=1), dict(rounds=3), dict(attempts={'B-0009': 3}))
+
+    def test_every_row_kind_is_held_and_says_so_once(self):
+        for kw in self.CASES:
+            for iid in ('T-0002', 'B-0009'):
+                with self.subTest(item=iid, **kw):
+                    rs = self.rows_of(iid, **kw)
+                    self.assertEqual([(r.action, r.waits_on) for r in rs],
+                                     [('WAITS ON T-0001', 'T-0001')])
+
+    def test_property_no_row_launches_for_an_unlanded_predecessor(self):
+        for first in ('New', 'Active'):
+            for kw in self.CASES:
+                for iid in ('T-0002', 'B-0009'):
+                    with self.subTest(first=first, item=iid, **kw):
+                        self.assertFalse(any(r.launches for r in self.rows_of(iid, first, **kw)))
+
+    def test_a_held_s1_row_does_not_stop_the_features(self):
+        out = rows.plan_rows(self.index(), product(), [], 3)
+        self.assertIn(('PLAN → CODE', 'T-0001', True), [(r.kind, r.item_id, r.launches) for r in out])
+
+    def test_once_the_predecessor_landed_the_rows_launch(self):
+        for kw in (dict(rounds=1), dict(rounds=3)):
+            with self.subTest(**kw):
+                rs = self.rows_of('T-0002', first='Closed', **kw)
+                self.assertTrue(rs and all(r.launches for r in rs))
+
+
 class FootprintHoldersAreLiveRuns(unittest.TestCase):
     """B-0076: only a live run (or one awaiting harvest) holds its files."""
 

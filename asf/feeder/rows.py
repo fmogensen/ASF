@@ -409,6 +409,25 @@ def groom_row(index, product, busy, groom_state, inflight):
               open_questions=tuple(groom_state.get('lines') or ()))
 
 
+def hold_unlanded(rows, items):
+    """B-0080: ``after:`` holds every row kind, not only PLAN → CODE. An item whose predecessor
+    has not landed is not in dispute, it is waiting: a launching row for it (code, correct,
+    adjudicate, rebase, close) becomes ``WAITS ON <id>`` — no session, no round. The groom row
+    speaks for a day's questions, not for the item it names, so it is left alone."""
+    landed = {i for i, v in items.items() if v.get('state') in DONE_STATES}
+    out, said = [], set()
+    for r in rows:
+        pending = [a for a in (items.get(r.item_id) or {}).get('after') or [] if a not in landed]
+        if pending and r.kind != GROOM_ADJUDICATE and (r.launches or r.waits_on):
+            if r.item_id in said:  # a Task with a correction also has its PLAN → CODE row: once
+                continue
+            said.add(r.item_id)
+            r = dataclasses.replace(r, action=f"WAITS ON {pending[0]}", waits_on=pending[0],
+                                    reason=f"after: {pending[0]} has not landed")
+        out.append(r)
+    return out
+
+
 def candidates(index, product, inflight, attempts=None, corrections=None, busy=None,
               groom_state=None):
     """Every row the index supports right now, uncut by capacity, in emit order: tier, then the
@@ -430,6 +449,7 @@ def candidates(index, product, inflight, attempts=None, corrections=None, busy=N
     if gr is not None:
         rows.append(gr)
     rows += feature_rows(items, product, busy, running)
+    rows = hold_unlanded(rows, items)
 
     def key(pair):
         seq, r = pair
