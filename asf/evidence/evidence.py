@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """evidence.py — the evidence pass's raw material.
 
-`discover()` is one call that gathers everything `tools/backlog.py ingest` needs to compute the
+`discover()` is one call that gathers everything the ingest pass needs to compute the
 machine block of every item: what specs/plans/tasks exist in the product repo, what PRs and CI
 runs say about them, and where the parity matrix stands. It also carries a handful of pure
 functions that turn that evidence into the states README.md's "State — typed intent, derived
@@ -337,7 +337,7 @@ VALID_STATUS = {"done", "doing", "todo"}
 
 
 def parse_rows(text):
-    """(rows, broken) from `docs/research/feature-matrix.md`'s "All requirements" table."""
+    """(rows, broken) from the parity matrix (`conventions.matrix_path`) "All requirements" table."""
     rows = []
     for line in text.splitlines():
         if line.startswith("| F-"):
