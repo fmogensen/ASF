@@ -746,6 +746,7 @@ def id_evidence(product, branches, prs, commits=None, green=None):
     """
     main_ref = f"origin/{product.main}"
     out = {}
+    on_main = None  # one rev-list of main, made the first time a merged PR asks
 
     def rec(iid):
         return out.setdefault(iid, {"branches": [], "open_prs": [], "commit": None,
@@ -770,8 +771,11 @@ def id_evidence(product, branches, prs, commits=None, green=None):
         for iid in ids:
             if state == "OPEN":
                 rec(iid)["open_prs"].append(p["number"])
-            elif (sha and not (out.get(iid) or {}).get("commit")
-                  and ancestor_of(sha, main_ref, product=product)):
+            elif sha and not (out.get(iid) or {}).get("commit"):
+                if on_main is None:
+                    on_main = ancestry(product, [main_ref])
+                if not on_main(sha):
+                    continue
                 r = rec(iid)
                 r["commit"], r["pr"] = sha, p["number"]
 
@@ -781,12 +785,15 @@ def id_evidence(product, branches, prs, commits=None, green=None):
         return out
     green = ci_green_runs(product) if green is None else green
     covered = {}
+    under_green = None  # one rev-list over every green run's sha, made on first use
     for r in out.values():
         c = r["commit"]
         if not c:
             continue
         if c not in covered:
-            covered[c] = any(ancestor_of(c, g, product=product) for g in green)
+            if under_green is None:
+                under_green = ancestry(product, list(green))
+            covered[c] = under_green(c)
         r["green"] = covered[c]
     return out
 
@@ -885,6 +892,31 @@ def migrate_sources(product=None, design_spec_name=None):
         "hotfix_texts": hotfix_texts,
         "open_branches": open_branches,
     }
+
+
+FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+
+def ancestry(product, bases):
+    """``sha -> bool``: is ``sha`` an ancestor of (or equal to) any of ``bases``, as
+    :func:`ancestor_of` answers it — from one ``rev-list`` over every base, read once, instead of
+    one ``merge-base`` fork per question (a hundred-odd a tick: most of ``ingest``'s time). When
+    a base cannot be resolved, or a sha is not spelled in full, it asks :func:`ancestor_of`."""
+    bases = [b for b in bases if b]
+    reach = None
+    if bases:
+        r = subprocess.run(["git", "-C", product.repo_dir, "rev-list", *bases, "--"],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            reach = set(r.stdout.split())
+
+    def check(sha):
+        if not sha or not bases:
+            return False
+        if reach is not None and FULL_SHA_RE.fullmatch(sha):
+            return sha in reach
+        return any(ancestor_of(sha, b, product=product) for b in bases)
+    return check
 
 
 def ancestor_of(sha, base, product=None):

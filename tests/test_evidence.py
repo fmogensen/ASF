@@ -499,6 +499,39 @@ class DiscoverIdEvidenceTests(unittest.TestCase):
         self.assertTrue(cache.startswith(env.ASF_HOME), cache)
 
 
+class AncestryTests(unittest.TestCase):
+    """``ancestry`` answers every question ``ancestor_of`` answers, from one rev-list."""
+
+    def setUp(self):
+        self.r = ProductRepo()
+        self.addCleanup(self.r.close)
+        self.p = self.r.product()
+        self.shas = git(self.r.repo, "rev-list", "origin/main").split()
+
+    def test_one_rev_list_agrees_with_merge_base_for_every_pair(self):
+        missing = "f" * 40
+        for bases in ([self.shas[0]], [self.shas[2]], [self.shas[1], self.shas[3]], ["origin/main"]):
+            check = evidence.ancestry(self.p, bases)
+            for sha in self.shas + [missing, ""]:
+                self.assertEqual(check(sha),
+                                 any(evidence.ancestor_of(sha, b, product=self.p) for b in bases),
+                                 (sha, bases))
+
+    def test_one_git_call_whatever_the_questions(self):
+        real = subprocess.run
+        with mock.patch.object(evidence.subprocess, "run", side_effect=real) as run:
+            check = evidence.ancestry(self.p, ["origin/main"])
+            [check(s) for s in self.shas * 5]
+        self.assertEqual(run.call_count, 1)
+
+    def test_an_unknown_base_or_a_short_sha_asks_merge_base(self):
+        check = evidence.ancestry(self.p, ["no-such-ref", self.shas[0]])
+        self.assertTrue(check(self.shas[-1]))  # falls back: the unknown base answers False
+        check = evidence.ancestry(self.p, ["origin/main"])
+        self.assertTrue(check(self.shas[-1][:10]))
+        self.assertFalse(evidence.ancestry(self.p, [])(self.shas[0]))
+
+
 class DocLaneCommitTests(unittest.TestCase):
     """B-0059: the landing of eight specs — one commit, `spec(F-0031, F-0075, …)` — closed four
     Features as "commit names it, CI green". A spec, plan, review or ruling commit names its item
