@@ -356,6 +356,19 @@ class PreambleTest(unittest.TestCase):
         writing = preamble_mod.build(product(), r, index(), [], REPO_FACTS)
         self.assertIn('Review file to write: `docs/reviews/5-f-0002.md` (round 5)', writing)
 
+    def test_the_document_dirs_come_from_the_object(self):
+        p = product(conventions={'specs_dir': 'specs', 'plans_dir': 'plans',
+                                  'reviews_dir': 'reviews'})
+        text = preamble_mod.build(p, ROWS['coder'], index(), [], REPO_FACTS)
+        self.assertIn('Specs live in `specs`, plans in `plans`, reviews in `reviews`.', text)
+
+    def test_no_product_means_the_defaults(self):
+        self.assertFalse(hasattr(preamble_mod, 'DEFAULT_SPECS_DIR'))
+        conv = preamble_mod.conventions(None)
+        self.assertEqual(conv.specs_dir, 'docs/specs')
+        self.assertEqual(conv.plans_dir, 'docs/plans')
+        self.assertEqual(conv.reviews_dir, 'docs/reviews')
+
 
 class PlaceholderTest(unittest.TestCase):
     def context(self, kind='coder'):

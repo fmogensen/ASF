@@ -210,12 +210,9 @@ def context(product, row, kind, facts):
         'spec_path': facts['spec_path'],
         'plan_path': facts['plan_path'],
         'review_path': facts['review_path'],
-        'specs_dir': preamble_mod.conventions(product).get('specs_dir')
-        or preamble_mod.DEFAULT_SPECS_DIR,
-        'plans_dir': preamble_mod.conventions(product).get('plans_dir')
-        or preamble_mod.DEFAULT_PLANS_DIR,
-        'reviews_dir': preamble_mod.conventions(product).get('reviews_dir')
-        or preamble_mod.DEFAULT_REVIEWS_DIR,
+        'specs_dir': preamble_mod.conventions(product).specs_dir,
+        'plans_dir': preamble_mod.conventions(product).plans_dir,
+        'reviews_dir': preamble_mod.conventions(product).reviews_dir,
         'round': facts['round'],
         'next_round': facts['next_round'],
         'head': facts['head'] or preamble_mod.UNKNOWN,

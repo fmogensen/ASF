@@ -22,16 +22,13 @@ import importlib
 import os
 import re
 
+from asf.conventions import Conventions
 from asf.feeder import rows as feeder_rows
 from asf.record import frontmatter
 from asf.record.core import parse_sections
 from asf.views import index_reader as ix
 
 DEFAULT_MAX_LINES = 120
-DEFAULT_SPECS_DIR = 'docs/specs'
-DEFAULT_PLANS_DIR = 'docs/plans'
-DEFAULT_REVIEWS_DIR = 'docs/reviews'
-DEFAULT_REVIEW_PATTERN = '{reviews_dir}/{n}-{slug}.md'
 UNKNOWN = '(not known here)'
 NONE = '(none)'
 
@@ -56,7 +53,7 @@ TEST_RE = re.compile(r'(?:^|[\s`(\[])([\w./-]*test[\w./-]*\.\w+(?:::[\w.:-]+)?|'
 # ---- product conventions -----------------------------------------------------
 
 def conventions(product):
-    return (getattr(product, 'conventions', None) or {}) if product is not None else {}
+    return product.conventions if product is not None else Conventions()
 
 
 def max_lines(product):
@@ -73,18 +70,12 @@ def rules_block(product, main='main'):
 
 def review_path_for(product, slug, n):
     """Where round ``n`` of a review lives — ``conventions.review_pattern``, ``{n}``/``{slug}``."""
-    conv = conventions(product)
-    pattern = conv.get('review_pattern') or DEFAULT_REVIEW_PATTERN
-    reviews_dir = conv.get('reviews_dir') or DEFAULT_REVIEWS_DIR
-    return (str(pattern).replace('{reviews_dir}', reviews_dir)
-            .replace('{n}', str(n)).replace('{slug}', slug))
+    return conventions(product).review_path(slug, n)
 
 
 def doc_path_for(product, key, slug):
     """A spec/plan path the record does not carry yet: ``<dir>/<slug>.md``."""
-    conv = conventions(product)
-    d = conv.get(f'{key}s_dir') or (DEFAULT_SPECS_DIR if key == 'spec' else DEFAULT_PLANS_DIR)
-    return f'{d}/{slug}.md'
+    return f'{conventions(product).doc_dir(key)}/{slug}.md'
 
 
 # ---- the card on disk --------------------------------------------------------
@@ -370,9 +361,9 @@ def state_lines(product, facts):
 def convention_lines(product):
     conv = conventions(product)
     prefixes = conv.get('branch_prefixes') or {}
-    out = [f"Specs live in `{conv.get('specs_dir') or DEFAULT_SPECS_DIR}`, plans in "
-           f"`{conv.get('plans_dir') or DEFAULT_PLANS_DIR}`, reviews in "
-           f"`{conv.get('reviews_dir') or DEFAULT_REVIEWS_DIR}`."]
+    out = [f"Specs live in `{conv.specs_dir}`, plans in "
+           f"`{conv.plans_dir}`, reviews in "
+           f"`{conv.reviews_dir}`."]
     if prefixes:
         out.append('Branch prefixes: '
                    + ', '.join(f'{k} → `{v}`' for k, v in sorted(prefixes.items())) + '.')
