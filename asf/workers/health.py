@@ -184,22 +184,30 @@ def publish_gap(product, run, ev, reason, alive=pid_alive):
     """B-0056: a run judged ``failed: not pushed`` with a clean tree and commits origin lacks —
     a rebase the factory started or the session finished, or work committed and never pushed —
     is published by the factory (:func:`asf.workers.lifecycle.publish`), then judged again.
-    Uncommitted files stay a hold: the factory never commits for a session. Returns
+    Uncommitted files of an ok run are committed first (:func:`asf.workers.lifecycle.commit_leftovers`,
+    B-0094); a commit the repo's hooks refuse stays a hold. Returns
     ``(reason, evidence, line)``; ``line`` is None when nothing was attempted."""
     wt, branch = run.get('worktree'), run.get('branch')
     result_ok = reason == lifecycle.FINISHED or (reason or '').startswith(UNPUSHED_REASON_PREFIXES)
-    if not result_ok or ev.uncommitted or not branch:
+    if not result_ok or not branch:
         return reason, ev, None
     if not wt or not os.path.isdir(wt):
         return reason, ev, None
+    lines = []
+    if ev.uncommitted:
+        ok, line = lifecycle.commit_leftovers(wt, branch)  # B-0094
+        if not ok:
+            return reason, ev, line
+        lines.append(line)
+        ev = lifecycle.gather(product, run, alive=alive, worktree=wt)
     if not (ev.unpushed or (ev.remote_sha and not ev.head_on_remote)):
-        return reason, ev, None
+        return reason, ev, '; '.join(lines) or None
     ok, line = lifecycle.publish(wt, branch, ev.remote_sha, main=product.main)
     if not ok:
-        return reason, ev, line
+        return reason, ev, '; '.join(lines + [line])
     ev = lifecycle.gather(product, run, alive=alive, worktree=wt)
     landing = lifecycle.lands(run, pool_mod.sessions_path(product))
-    return lifecycle.judge(run, ev, landing=landing), ev, line
+    return lifecycle.judge(run, ev, landing=landing), ev, '; '.join(lines + [line])
 
 
 def _lane_branches(product):

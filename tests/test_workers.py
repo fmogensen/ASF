@@ -549,6 +549,14 @@ class TestSpawn(Home):
         wt = rec['worktree']
         with open(os.path.join(wt, 'work.txt'), 'w') as f:
             f.write('half done\n')
+        # B-0094: the factory commits a finished run's leftovers; only a commit the repo's hooks
+        # refuse stays a hold
+        hooks = os.path.join(self.tmp, 'refusing-hooks')
+        os.makedirs(hooks)
+        with open(os.path.join(hooks, 'pre-commit'), 'w') as f:
+            f.write('#!/bin/sh\necho refused >&2\nexit 1\n')
+        os.chmod(os.path.join(hooks, 'pre-commit'), 0o755)
+        git('config', 'core.hooksPath', hooks, cwd=self.repo)
         found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
         self.assertIn(('fix-bug-b-0001', 'ended',
                        'failed: not pushed: 1 uncommitted file(s), 0 unpushed commit(s)'), found)
@@ -987,7 +995,9 @@ class TestHealth(Home):
         self.assertIn('fix/B-0005', branches)
         self.assertIn('fix/B-0003', branches)
 
-    def test_b0056_uncommitted_work_is_never_published(self):
+    def test_b0094_uncommitted_work_of_an_ok_run_is_committed_and_published_by_the_factory(self):
+        # 19% of sessions ended `failed: not pushed: N uncommitted file(s)`: the work was done and
+        # lost to a missing commit. The factory commits it, signed off, and publishes it.
         rec = self.spawn('dirty', {'ok': True})
         wt = rec['worktree']
         self.commit(wt, 'fix')
@@ -995,10 +1005,20 @@ class TestHealth(Home):
         with open(os.path.join(wt, 'loose'), 'w') as f:
             f.write('loose')
         found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
-        end_reason = pool_mod.load_sessions(self.product)['dirty']['end_reason']
-        self.assertEqual(end_reason, 'failed: not pushed: 1 uncommitted file(s), 0 unpushed commit(s)')
-        self.assertFalse(any(w == 'published' for _j, w, _d in found), found)
-        self.assertTrue(os.path.isdir(wt))
+        self.assertEqual(pool_mod.load_sessions(self.product)['dirty']['end_reason'], 'finished')
+        self.assertTrue(any(w == 'published' for _j, w, _d in found), found)
+        self.assertEqual(git('status', '--porcelain', cwd=wt), '')
+        self.assertEqual(git('ls-remote', '--heads', 'origin', rec['branch'], cwd=wt).split()[0],
+                         git('rev-parse', 'HEAD', cwd=wt))
+        self.assertIn('Signed-off-by:', git('log', '-1', '--format=%B', cwd=wt))
+
+    def test_b0094_a_failed_run_is_never_committed_for(self):
+        rec = self.spawn('broken', {'ok': False})
+        wt = rec['worktree']
+        with open(os.path.join(wt, 'loose'), 'w') as f:
+            f.write('loose')
+        health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
+        self.assertEqual(git('status', '--porcelain', cwd=wt), '?? loose')
 
     def test_orphan_worktree(self):
         path = os.path.join(spawn_mod.worktrees_dir(self.product), 'stray')

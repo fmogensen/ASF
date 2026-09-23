@@ -368,6 +368,24 @@ def unpushed_commits(wt, remote_sha, main='main'):
     return len([ln for ln in p.stdout.splitlines() if ln.startswith('+')])
 
 
+def commit_leftovers(wt, branch):
+    """Commit, signed off, whatever a finished session left uncommitted in its worktree (B-0094).
+
+    19% of sessions ended ``failed: not pushed: N uncommitted file(s)``: the work was done and the
+    session exited before committing it, and each one cost a correction session. The factory
+    commits it on the session's behalf, so :func:`publish` can then put it on origin. Only a run
+    whose result said ok comes here. The repo's own commit hooks still run (the redaction gate
+    among them): a refusal is returned, and the files stay a hold. ``(ok, line)``."""
+    if _git(['add', '-A'], wt).returncode != 0:
+        return False, f'commit {branch} refused: git add failed'
+    p = _git(['commit', '-q', '-s', '-m', f'wip({branch}): the session ended with this uncommitted — '
+              'committed by the factory (B-0094)'], wt)
+    if p.returncode != 0:
+        why = [ln for ln in (p.stderr or p.stdout).splitlines() if ln.strip()]
+        return False, f'commit {branch} refused: {why[-1].strip() if why else "commit failed"}'
+    return True, f'committed the session\'s leftovers on {branch}'
+
+
 def publish(wt, branch, remote_sha='', main='main'):
     """Push the worktree's HEAD to ``origin/<branch>`` as the factory (B-0056).
 
