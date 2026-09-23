@@ -21,6 +21,12 @@ conventions:
 ci:
   provider: none
   test_command: python3 -m unittest discover -s tests
+capacity:
+  sessions: 1
+  batch:
+    per_run: 2
+    parallel: 1
+    runners: 1
 deploy_sha: none
 approvals:
   spend_money: human-now

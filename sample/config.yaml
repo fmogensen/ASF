@@ -1,10 +1,17 @@
 # config.yaml the sample product runs under: the fake worker runtime (no agent, no network, no
-# account), one launch slot so a second row waits. @SAMPLE@ is the copied sample/ directory.
+# account), one launch slot (capacity.total.sessions) so a second row waits. @SAMPLE@ is the
+# copied sample/ directory. feeder.capacity is kept alongside capacity.total.sessions (both name
+# one slot) because `asf next`'s default does not yet read the resolver on this branch — F-0079
+# Task 3 (T-0005) has not landed — so removing it would silently widen the sample's cut to
+# DEFAULT_SESSIONS (4) and break test_next_shows_the_bug_in_flight_and_a_feature_waiting.
 default_product: sample
 scheduler:
   kind: none
 feeder:
   capacity: 1
+capacity:
+  total:
+    sessions: 1
 worker_pool:
   backend: fake
   models:                 # brief labels → the fake runtime's model ids (an unmapped label is refused)

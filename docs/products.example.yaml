@@ -58,6 +58,16 @@ ci:
     - self-hosted
     - linux
 
+# capacity: this product's share of the factory. Each is a ceiling, capped in turn by
+# config.yaml's capacity.total and by what worker_pool.accounts can host.
+capacity:
+  sessions: 3         # concurrent worker sessions for this product
+  ci: 2               # concurrent CI runs for this product
+  batch:              # the shape the product's own merge-queue script is told to run
+    per_run: 8        # batches per run
+    parallel: 2       # batches in flight at once
+    runners: 4        # runner slots one run may claim
+
 # how a deployed sha is discovered, for the evidence pass and release notes.
 deploy_sha:
   provider: github-deployments   # github-deployments | fly | vercel | script

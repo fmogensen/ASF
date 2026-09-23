@@ -32,6 +32,20 @@ quota_guards:
   stop:     {five_h: 95, seven_d: 95, seven_d_model: 95}
   cooldown: {five_h: 90, seven_d: 90, seven_d_model: 90}
 
+# capacity: the ceilings the factory runs under. Every number is "at most this many at once".
+# A key left out means "no opinion" — the next fallback applies (see docs/specs/f-0079.md).
+# feeder.capacity and worker_pool.reserve_for_s1 are still read, but this block is their new home.
+capacity:
+  total:              # across every product under ~/.ASF/products/
+    sessions: 6       # concurrent worker sessions
+    ci: 4             # concurrent CI runs
+  per_product:        # the default for a product whose own file declares none
+    sessions: 2
+    ci: 1
+  reserve_for_s1:     # the lane reserve, moved from worker_pool.reserve_for_s1
+    local: 1
+    cloud: 1
+
 # paths: everything under ~/.ASF the tools read/write. state is per product
 # (~/.ASF/state/<product>/); logs are shared.
 paths:
