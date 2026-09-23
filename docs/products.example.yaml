@@ -46,11 +46,30 @@ conventions:
   # F-0031: globs whose match makes a landed branch's merge class merge_amendable_set (needs a
   # person, see approvals: below) rather than merge_routine_pr. The factory's own rules.
   amendable_paths: [rules/*, docs/CONSTITUTION.md]
+  # asf.metrics: the parity matrix file read for Story status. Leave out and the product has no
+  # such thing — nothing looks for it.
+  matrix_path: docs/matrix.md
+  # asf.tick.migrate: a decisions file mined for D-rows. Leave out and the product has no such
+  # thing — nothing looks for it.
+  decisions_file: docs/decisions.md
+  # asf.tick.migrate: a directory of hotfix/diagnostic reports adopted as backlog items. Leave
+  # out and the product has no such thing — nothing looks for it.
+  reports_dir: docs/reports
+  # a regex over a file name in reports_dir; unset matches every .md. Leave out and the product
+  # has no such thing — nothing looks for it.
+  report_pattern: "hotfix-.*\\.md"
+  # asf.groom.inbox: where a dropped .md becomes a card. Leave out and the product has no such
+  # thing — nothing looks for it.
+  intake_dir: inbox
 
 # CI: which provider runs checks, which workflow file, budgets and runner labels.
 ci:
   provider: gh-actions   # gh-actions | other
+  # read as conventions.ci_workflow — the workflow whose runs on the trunk are the green
+  # evidence.
   workflow: ci.yml
+  # read as conventions.ci_dev_job — the job in that workflow whose success marks the dev sha.
+  dev_job: test
   budgets:
     minutes_per_day: 500
   runner_org: acme
@@ -71,6 +90,7 @@ capacity:
 # how a deployed sha is discovered, for the evidence pass and release notes.
 deploy_sha:
   provider: github-deployments   # github-deployments | fly | vercel | script
+  # read as conventions.deploy_workflow — the workflow whose newest success marks the prod sha.
   workflow: deploy-prod.yml
   # only when provider: script
   # script: tools/deploy-sha.sh

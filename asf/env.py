@@ -229,7 +229,7 @@ PRODUCT_FIELDS = {
 # `ci:` is a map (or the bare word `none`, a product without CI); these are its keys.
 CI_FIELDS = {
     'provider': _STR, 'workflow': _STR, 'test_command': _STR, 'budgets': _MAP,
-    'runner_org': _STR, 'labels': _LIST,
+    'runner_org': _STR, 'labels': _LIST, 'dev_job': _STR,
 }
 # `capacity:` is a map: this product's session/CI ceilings and its batch shape.
 CAPACITY_FIELDS = {'sessions': _STR, 'ci': _STR, 'batch': _MAP}
@@ -329,11 +329,13 @@ class Product:
     def conventions(self):
         """The product's :class:`asf.conventions.Conventions`, defaults filled in.
 
-        Built from the yaml's ``conventions:`` block, plus three values that live at the top
+        Built from the yaml's ``conventions:`` block, plus six values that live at the top
         level of a product file because more than the conventions read them: ``main``,
-        ``stage_limits`` and ``ci.test_command`` (the gate harvest runs). A ``conventions:``
-        key of the same name wins. Still answers ``.get()``/``[]``, so the callers that read it
-        as a mapping — and an operator's extra keys — keep working."""
+        ``stage_limits``, ``ci.test_command`` (the gate harvest runs), ``ci.workflow`` and
+        ``ci.dev_job`` (``ci_workflow``/``ci_dev_job``), and ``deploy_sha.workflow``
+        (``deploy_workflow``). A ``conventions:`` key of the same name wins. Still answers
+        ``.get()``/``[]``, so the callers that read it as a mapping — and an operator's extra
+        keys — keep working."""
         if self._conventions is None:
             data = dict(self._get('conventions') or {})
             data.setdefault('main', self._get('main') or 'main')
@@ -344,6 +346,13 @@ class Product:
             test_command = ci.get('test_command') if isinstance(ci, dict) else None
             if test_command:
                 data.setdefault('test_command', test_command)
+            if isinstance(ci, dict):
+                for src, dst in (('workflow', 'ci_workflow'), ('dev_job', 'ci_dev_job')):
+                    if ci.get(src):
+                        data.setdefault(dst, ci[src])
+            deploy = self._get('deploy_sha')
+            if isinstance(deploy, dict) and deploy.get('workflow'):
+                data.setdefault('deploy_workflow', deploy['workflow'])
             self._conventions = Conventions.from_mapping(data)
         return self._conventions
 
