@@ -565,6 +565,99 @@ def retire_candidates(product_name, declared_labels, cfg=None):
             if job['label'].startswith(prefix) and job['label'] not in declared]
 
 
+# ---- the installed job read back as the clock it was rendered from -----------------------
+#
+# A job installed before its clock lived in the product file (T-0043) left the two disagreeing:
+# ``status`` said "declares no clocks" over a job firing every ten minutes. The file stays the
+# source: status names every installed job no clock declares, with the entry that would, and
+# ``install`` adopts those entries into the file before it renders — so what it installs and
+# what the file says are the same clocks.
+
+
+def clock_of_plist(label, data, product_name, cfg=None):
+    """The :class:`Clock` a job definition was rendered from, or None when it is not one of
+    :func:`render`'s (no ``tick``, no interval, a name no clock can carry)."""
+    prefix = f'{label_prefix(cfg)}.{product_name}.'
+    name = label[len(prefix):] if label.startswith(prefix) else ''
+    argv = list((data or {}).get('ProgramArguments') or [])
+    if not CLOCK_NAME_RE.match(name) or 'tick' not in argv:
+        return None
+    rest = argv[argv.index('tick') + 1:]
+    shadow = '--shadow' in rest
+    if shadow:
+        steps = []
+    elif '--daily' in rest:
+        steps = [DAILY_STEP]
+    elif '--steps' in rest and rest.index('--steps') + 1 < len(rest):
+        steps = [x for x in rest[rest.index('--steps') + 1].split(',') if x]
+    else:
+        return None
+    cal, every = data.get('StartCalendarInterval'), data.get('StartInterval')
+    if isinstance(cal, dict) and 'Hour' in cal and 'Minute' in cal:
+        return Clock(name, steps, shadow, None, {'Hour': int(cal['Hour']),
+                                                'Minute': int(cal['Minute'])})
+    if isinstance(every, int) and every > 0:
+        return Clock(name, steps, shadow, every, None)
+    return None
+
+
+def installed_clocks(product_name, cfg=None):
+    """``[(label, Clock | None)]`` for every loaded job under ``<prefix>.<product>.``."""
+    cfg = env.load_config() if cfg is None else cfg
+    prefix = f'{label_prefix(cfg)}.{product_name}.'
+    out = []
+    for job in loaded_jobs(cfg=cfg):
+        if job['label'].startswith(prefix):
+            data = _read_plist(job['plist']) if job['plist'] else None
+            out.append((job['label'], clock_of_plist(job['label'], data, product_name, cfg)))
+    return out
+
+
+def clocks_yaml(clock_list):
+    """A ``clocks:`` block declaring ``clock_list`` — the product file's own syntax."""
+    lines = ['clocks:']
+    for c in clock_list:
+        lines.append(f'  {c.name}:')
+        lines.append('    shadow: true' if c.shadow else f"    steps: [{', '.join(c.steps)}]")
+        lines.append(f"    at: \"{c.calendar['Hour']:02d}:{c.calendar['Minute']:02d}\""
+                     if c.calendar else f'    every: {_format_duration(c.interval_s)}')
+    return '\n'.join(lines) + '\n'
+
+
+def _undeclared(product_name, declared_names, cfg):
+    """The installed jobs of this product no declared clock renders: ``[(label, Clock|None)]``."""
+    declared = {label_for(product_name, n, cfg) for n in declared_names}
+    return [(label, c) for label, c in installed_clocks(product_name, cfg)
+            if label not in declared]
+
+
+def _undeclared_lines(product_name, undeclared):
+    lines = [f'scheduler: {label} is installed but not a clock in products/{product_name}.yaml'
+             + ('' if c else ' (not a job this adapter renders)') for label, c in undeclared]
+    adoptable = [c for _label, c in undeclared if c]
+    if adoptable:
+        lines.append(f'scheduler: declare it in products/{product_name}.yaml '
+                     f'(`asf scheduler install` does):')
+        lines.append(clocks_yaml(adoptable).rstrip('\n'))
+    return lines
+
+
+def adopt(product_name, undeclared):
+    """Append the ``clocks:`` block for the installed jobs to a product file that has none —
+    appended, so every byte above it stays as the operator wrote it. Returns the lines to print."""
+    adoptable = [(label, c) for label, c in undeclared if c]
+    if not adoptable:
+        return []
+    path = env.product_path(product_name)
+    with open(path, encoding='utf-8') as f:
+        text = f.read()
+    with open(path, 'a', encoding='utf-8') as f:
+        f.write(('' if not text or text.endswith('\n') else '\n')
+                + clocks_yaml([c for _label, c in adoptable]))
+    return [f'scheduler: declared clock {c.name} in products/{product_name}.yaml from the '
+            f'installed {label}' for label, c in adoptable]
+
+
 # ---- the CLI ----------------------------------------------------------------
 
 
@@ -618,10 +711,28 @@ def cmd_scheduler(args, root=None):
         return 0 if info.get('loaded') else 1
 
     product = env.load_product(product_name)
+    undeclared = []
+    if not product._get('clocks') and kind(cfg) == 'launchd':
+        undeclared = _undeclared(product_name, (), cfg)
+        if undeclared and command == 'status':
+            infos = [dict(status(label), label=label) for label, _c in undeclared]
+            if args.json:
+                print(_json.dumps(infos, indent=2, sort_keys=True, default=str))
+            else:
+                for line in [_status_line(i) for i in infos] + _undeclared_lines(product_name,
+                                                                               undeclared):
+                    print(line)
+            return 1
+        if undeclared and command == 'install':
+            for line in adopt(product_name, undeclared):
+                print(line)
+            product = env.load_product(product_name)
     try:
         clock_list = clocks(product)
     except SchedulerError as e:
         print(str(e))
+        for line in _undeclared_lines(product_name, undeclared):
+            print(line)
         return 2
 
     if args.clock:
@@ -655,13 +766,17 @@ def cmd_scheduler(args, root=None):
             info = status(label_for(product_name, c.name, cfg))
             info['clock'] = c.name
             infos.append(info)
+        extra = [] if args.clock or kind(cfg) != 'launchd' else \
+            _undeclared(product_name, [c.name for c in clock_list], cfg)
         if args.json:
             print(_json.dumps(infos[0] if args.clock else infos, indent=2, sort_keys=True,
                               default=str))
         else:
             for info in infos:
                 print(_status_line(info))
-        return 1 if any(not i.get('loaded') for i in infos) else 0
+            for line in _undeclared_lines(product_name, extra):
+                print(line)
+        return 1 if extra or any(not i.get('loaded') for i in infos) else 0
 
     # install
     job_kind = kind(cfg)

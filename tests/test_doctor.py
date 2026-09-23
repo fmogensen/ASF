@@ -5,6 +5,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from asf import doctor, env, hooks
 
@@ -86,9 +87,23 @@ class TestCheckScheduler(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn('gh-actions', detail)
 
-    def test_launchd_without_label_is_red(self):
+    def test_launchd_without_label_is_ok(self):
         ok, detail = doctor.check_scheduler({'scheduler': {'kind': 'launchd'}})
-        self.assertFalse(ok)
+        self.assertTrue(ok)
+        self.assertIn('SCHEDULER', detail)
+
+    def test_a_retired_pre_asf_job_is_not_red(self):
+        cfg = {'scheduler': {'kind': 'launchd', 'launchd_label': 'com.example.old-cron'}}
+        with mock.patch.object(doctor, '_run', return_value=(False, 'Could not find service')):
+            ok, detail = doctor.check_scheduler(cfg)
+        self.assertTrue(ok)
+        self.assertIn('retired', detail)
+
+    def test_a_still_loaded_pre_asf_job_says_retire_it(self):
+        cfg = {'scheduler': {'kind': 'launchd', 'launchd_label': 'com.example.old-cron'}}
+        with mock.patch.object(doctor, '_run', return_value=(True, '')):
+            ok, detail = doctor.check_scheduler(cfg)
+        self.assertIn('retire it', detail)
 
 
 class TestOneFactoryCheck(unittest.TestCase):

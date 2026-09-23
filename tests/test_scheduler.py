@@ -425,5 +425,82 @@ class CliTest(SchedulerTestCase):
         self.assertIn('last-exit=0', result.stdout)
 
 
+class InstalledButUndeclaredTest(SchedulerTestCase):
+    """A job the adapter installed before its clock lived in the product file (T-0043) left
+    ``status`` saying "declares no clocks" over a job firing every ten minutes. The job and the
+    file must never disagree: status reports the installed job and the exact clock that declares
+    it, and ``install`` adopts it into the file (appended — nothing above it is touched)."""
+
+    LABEL = 'asf.sample.record-health-wave-prs-harvest'
+    STEPS = ['record', 'health', 'wave', 'prs', 'harvest']
+    BLOCK = ('clocks:\n  record-health-wave-prs-harvest:\n'
+             '    steps: [record, health, wave, prs, harvest]\n    every: 10m\n')
+
+    def install_old_job(self, label=None, steps=None, interval=600):
+        label = label or self.LABEL
+        path = scheduler.plist_path(label)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        argv = [sys.executable, '-m', 'asf.cli', 'tick', '--product', 'sample',
+                '--steps', ','.join(steps or self.STEPS)]
+        with open(path, 'wb') as f:
+            plistlib.dump({'Label': label, 'ProgramArguments': argv,
+                           'StartInterval': interval}, f)
+        fake_print(self.statedir, label, read_fixture('launchctl-print.txt'))
+        return path
+
+    def product_text(self):
+        with open(os.path.join(self.asf_home, 'products', 'sample.yaml'), encoding='utf-8') as f:
+            return f.read()
+
+    def _run(self, args):
+        return CliTest._run(self, args)
+
+    def test_the_clock_is_read_back_off_the_installed_plist(self):
+        self.install_old_job()
+        fake_loaded(self.statedir, [self.LABEL, 'asf.other.record'])
+        found = scheduler.installed_clocks('sample')
+        self.assertEqual([(label, c) for label, c in found],
+                         [(self.LABEL, Clock('record-health-wave-prs-harvest', self.STEPS,
+                                             False, 600, None))])
+        self.assertEqual(scheduler.clocks_yaml([c for _l, c in found]), self.BLOCK)
+
+    def test_status_reports_the_installed_job_and_the_clock_that_declares_it(self):
+        self.install_old_job()
+        fake_loaded(self.statedir, [self.LABEL])
+        result = self._run(['status', '--product', 'sample'])
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertNotIn('declares no clocks', result.stdout)
+        self.assertIn(f'{self.LABEL}  state=', result.stdout)
+        self.assertIn(f'{self.LABEL} is installed but not a clock in products/sample.yaml',
+                      result.stdout)
+        self.assertIn(self.BLOCK, result.stdout)
+
+    def test_status_names_an_installed_job_beside_the_declared_clocks(self):
+        self.write_product('  record:\n    steps: [record]\n    every: 5m\n')
+        fake_print(self.statedir, 'asf.sample.record', read_fixture('launchctl-print.txt'))
+        self.install_old_job()
+        fake_loaded(self.statedir, ['asf.sample.record', self.LABEL])
+        result = self._run(['status', '--product', 'sample'])
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('asf.sample.record  state=', result.stdout)
+        self.assertIn(f'{self.LABEL} is installed but not a clock in products/sample.yaml',
+                      result.stdout)
+
+    def test_install_adopts_the_installed_job_into_the_product_file(self):
+        before = self.product_text()
+        self.install_old_job()
+        fake_loaded(self.statedir, [self.LABEL])
+        result = self._run(['install', '--product', 'sample'])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.product_text(), before + self.BLOCK)
+        self.assertIn(f'scheduler: declared clock record-health-wave-prs-harvest in '
+                      f'products/sample.yaml from the installed {self.LABEL}', result.stdout)
+        self.assertIn(f'scheduler: bootstrapped {self.LABEL}', result.stdout)
+        self.assertNotIn('retired', result.stdout)
+        env_product = env.load_product('sample')
+        self.assertEqual([scheduler.label_for('sample', c.name) for c in
+                          scheduler.clocks(env_product)], [self.LABEL])
+
+
 if __name__ == '__main__':
     unittest.main()

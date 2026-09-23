@@ -96,15 +96,21 @@ def check_backlog(product):
 
 
 def check_scheduler(cfg):
+    from asf.scheduler import CUTOVER_TOOL
     sched = cfg.get('scheduler') or {}
     kind = sched.get('kind') or sched.get('provider') or 'launchd'
     if kind != 'launchd':
         return True, f'scheduler kind {kind!r} (not launchd; launchctl check skipped)'
+    # `launchd_label` names the PRE-ASF job the cutover script retires, not an ASF job: once it
+    # is gone the cutover is done, and the jobs ASF runs are checked under SCHEDULER
+    # (:func:`scheduler_rows`). Red here meant "the job we retired on purpose is retired".
     label = sched.get('launchd_label')
     if not label:
-        return False, 'scheduler.launchd_label not set in config.yaml'
-    ok, detail = _run(['launchctl', 'list', label])
-    return ok, (label if ok else f'{label} not in `launchctl list` ({detail or "not found"})')
+        return True, 'no pre-ASF job declared; ASF jobs are checked under SCHEDULER'
+    loaded, _ = _run(['launchctl', 'list', label])
+    if loaded:
+        return True, f'pre-ASF job {label} still loaded — retire it with {CUTOVER_TOOL}'
+    return True, f'pre-ASF job {label} retired; ASF jobs are checked under SCHEDULER'
 
 
 # name -> (required, probe argv); required tools missing/failing are red, optional ones are skip
