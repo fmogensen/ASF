@@ -508,6 +508,8 @@ def cmd_groom(args, root):
     spoken_for = 0
     barred_count = 0
     if auto:
+        if applied or created_ids:
+            do_index(root)  # suppression reads the index: it must see what was just decided
         index, _generated = index_reader.load(root)
         inflight = lifecycle.inflight(pool.sessions_path(product))
         sections, spoken_for = policy.suppress(sections, index, inflight, product)

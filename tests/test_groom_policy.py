@@ -433,6 +433,24 @@ class SuppressionTests(GroomAutoTestCase):
         self.assertNotIn('controller:', text)
         self.assertEqual(policy.open_questions(text), [])
 
+    def test_a_feature_decided_by_this_runs_answers_is_spoken_for_too(self):
+        # the suppression read index.json from before the answers were applied: 52 Features the
+        # adjudicator had just decided were asked again under "no Stories", and a second Opus
+        # session was queued to answer them `yes` a second time
+        self.write_product(approvals={'groom': 'auto'})
+        write_item(self.root, 'F-0001', 'feature', 'Lonely feature', parent='E-0009',
+                   typed_lines=['decided: false'])
+        run(['index'], self.root)
+        with open(os.path.join(self.root, 'groom', '2026-09-01.md'), 'w', encoding='utf-8') as f:
+            f.write('# Groom 2026-09-01\n\n## Features without Stories\n\n'
+                    '- [ ] F-0001 Lonely feature — no Stories → answer: yes\n')
+        r = self.run_groom(['--apply'])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(os.path.join(self.root, 'groom', today() + '.md')) as f:
+            text = f.read()
+        self.assertIn('(spoken for: CARD → SPEC)', text)
+        self.assertEqual(policy.open_questions(text), [])
+
     def test_an_item_held_by_a_live_session_is_spoken_for(self):
         self.write_product(approvals={'groom': 'auto'})
         write_item(self.root, 'F-0003', 'feature', 'Stale idea', parent='E-0009',
