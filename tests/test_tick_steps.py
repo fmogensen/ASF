@@ -5,6 +5,7 @@ for the record (``TickTestCase``) and a bare origin + clone for the product repo
 """
 import json
 import os
+import subprocess
 import types
 import unittest
 from unittest import mock
@@ -140,6 +141,23 @@ class OrderedTickTests(StepsTestCase):
         self.assertEqual(line['product'], 'sample')
         # the line keeps the ticks stream's schema: the scorecard reads it without a KeyError
         metrics.scorecard_rows([], [], [line])
+
+    def test_b0083_a_failed_record_step_stops_the_tick_and_launches_nothing(self):
+        boom = subprocess.CalledProcessError(
+            1, ['asf', 'check'], stderr='tasks/T-0042.md:4: continuation line in frontmatter (rule: typed-field)\n')
+        later = [mock.patch.object(m, 'run', return_value=0)
+                 for m in (step_health, step_wave, step_prs, step_harvest, step_daily)]
+        mocks = [p.start() for p in later]
+        for p in later:
+            self.addCleanup(p.stop)
+        with mock.patch.object(tick, 'run_step0', side_effect=boom):
+            rc, out = self.run_tick()
+        self.assertNotEqual(rc, 0)
+        for m in mocks:
+            m.assert_not_called()
+        self.assertNotIn('[command:batch]', out)
+        self.assertIn('RECORD STALE — tasks/T-0042.md:4: continuation line in frontmatter (rule: typed-field)', out)
+        self.assertLess(out.index('RECORD STALE'), out.index('IN FLIGHT'))
 
     def test_daily_stamped_only_when_it_passed(self):
         with mock.patch.object(step_daily, 'run', side_effect=RuntimeError('daily parts failed: rollup')):

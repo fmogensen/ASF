@@ -123,6 +123,7 @@ class Context:
         self.product = product
         self.fresh = fresh
         self._record = None
+        self.stale_reason = None  # set when the record step failed: the index is not this tick's
         self.counts = {'launches': 0, 'merges': 0, 'stalls': 0, 'refusals': 0, 'relaunches': 0}
 
     @property
@@ -171,6 +172,7 @@ def run_record_step(product, fresh=False, ctx=None):
     except (subprocess.CalledProcessError, env.ConfigError) as e:
         detail = (getattr(e, 'stderr', None) or str(e)).strip()
         print(f"tick: record failed ({detail})")
+        ctx.stale_reason = _first_line(detail)
         return 1
     return commit_and_push(ctx) if alone else 0
 
@@ -307,8 +309,15 @@ def _run_steps(args, product, ctx, rows, chosen):
         if step == 'daily' and step_rc == 0:
             steps.write_daily_stamp(product)
         rc = rc or (1 if step_rc else 0)
+        if step == 'record' and step_rc:
+            # B-0083: a failed record leaves the last good index in place; every later step would
+            # act on a stale board with full confidence, so none of them runs
+            print(f"tick: record failed — {ctx.stale_reason or 'see above'}; nothing else ran")
+            break
     if ran:
         rc = finish(ctx, ran) or rc
+    if ctx.stale_reason:
+        print(f"RECORD STALE — {ctx.stale_reason}\n")
     summary.run(ctx, chosen)
     return rc
 
@@ -338,6 +347,11 @@ def _asf_step(step):
     return importlib.import_module(f'asf.tick.step_{step}').run
 
 
+def _first_line(text):
+    lines = (text or '').strip().splitlines()
+    return lines[0].strip() if lines else ''
+
+
 def run_asf_step(step, ctx):
     """Run one ``asf`` step; any failure is one ``[step:<name>] FAILED`` line and rc 1 — never
     an exception out of the tick."""
@@ -345,7 +359,9 @@ def run_asf_step(step, ctx):
         return _asf_step(step)(ctx) or 0
     except Exception as e:  # noqa: BLE001 — one step's failure never stops the rest
         detail = (getattr(e, 'stderr', None) or str(e) or type(e).__name__).strip()
-        print(f"[step:{step}] FAILED {detail.splitlines()[0] if detail else type(e).__name__}")
+        print(f"[step:{step}] FAILED {_first_line(detail) or type(e).__name__}")
+        if step == 'record':
+            ctx.stale_reason = _first_line(detail) or type(e).__name__
         return 1
 
 
