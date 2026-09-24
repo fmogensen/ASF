@@ -915,6 +915,9 @@ class KindModelGrantTest(unittest.TestCase):
         for sev in ('S2', 'S3'):
             self.assertEqual(build_mod.model_for(p, 'fix-bug', self.BUG(sev)), 'light', sev)
         self.assertEqual(build_mod.model_for(p, 'fix-bug', self.BUG('S1')), 'heavy')
+        for kind in ('close', 'rebase'):
+            for sev in ('S1', 'S2', 'S3'):
+                self.assertEqual(build_mod.model_for(p, kind, self.BUG(sev)), 'cheap', kind)
 
     def test_adjudicate_runs_light_unless_the_item_is_s1(self):
         # operator policy 2026-09-27: 41% of a product's repair sessions were adjudicate, on

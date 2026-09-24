@@ -57,8 +57,10 @@ MODEL_CLASSES = ('S1', 'S2', 'S3', 'task', 'story', 'feature', 'epic')
 #: a class the kind does not name (and for a brief with no item). Judgement over a small change
 #: (the review, correction and adjudication of an S2/S3 Bug or of a Task) runs light; an S1 Bug,
 #: a spec, a plan and a Feature-level review run heavy. Adjudicate runs light for every class but
-#: S1 (operator policy 2026-09-27: 41% of a product's repair sessions were adjudicate, on heavy). ``conventions.models.<kind>`` overrides a
-#: row, as one label or as a map of this shape (:func:`model_for`).
+#: S1 (operator policy 2026-09-27: 41% of a product's repair sessions were adjudicate, on heavy).
+#: A rebase, a close and the groom's clerical pass run cheap — no judgement, a right answer.
+#: ``conventions.models.<kind>`` overrides a row, as one label or as a map of this shape
+#: (:func:`model_for`).
 MODEL_TABLE = {
     'spec':       {'default': HEAVY},
     'spec-amend': {'default': HEAVY},
