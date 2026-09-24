@@ -4,7 +4,7 @@ Backlog item: F-0002 — Per-customer rate limits on the public API
 Item: F-0002 — Per-customer rate limits on the public API (feature, state Active, stage spec-review r4)
 Feature: F-0001 — Checkout survives a failed payment provider
 Epic: E-0001 — The storefront holds together under a bad day
-Why this session exists: GROOM → ADJUDICATE — 2 groom questions no rule answers, oldest F-0002 (undecided 21d)
+Why this session exists: GROOM → CLERK — 3 intake cards no rule typed
 Branch: `groom/2026-09-22` (exists: no)
 Head: abc1234 record the provider outcome
 Spec: not in the record — its place is `docs/specs/f-0002.md`
@@ -39,24 +39,28 @@ left out: the retry itself, F-0001 owns it
 - Anything a human must decide or run: `NEEDS OPERATOR: <what> — <the command or the answer>`.
 - Every commit subject names the item: `task(F-0002): <what>`. Harvest holds a branch whose commits do not name it; the id inside the branch name does not count.
 
-## Your job: rule on the groom questions, and only those
+## Your job: type the intake cards, and only those
 
 The groom file `groom/2026-09-22.md` is the day's list of `- [ ] <id> <title> — <why> → answer: ____`
-lines a policy could not answer. The open questions it still carries, exactly as listed there:
+lines a policy could not answer. The open questions it still carries for you — each an
+`inbox:<file>` line, a card intake could not type — exactly as listed there:
 
-- [ ] F-0002 Per-customer rate limits on the public API — no Stories → answer: ____
-- [ ] B-0001 Checkout returns 500 when the payment provider times out — duplicate of B-0002? → answer: ____
+- [ ] inbox:a.md Rate limit card — feature or bug? → answer: ____
+- [ ] inbox:b.md Checkout 500 card — which parent? → answer: ____
+- [ ] inbox:c.md Typo card — worth a card? → answer: ____
 
 FOR EACH ONE, one of two outcomes — never "noted", never a question back:
-- an answer in the grammar: `yes`, `no`, `rank <n>`, `parent <id>`, `S1`, `S2`, `S3`, or
-  `unblock <id>`, each with one sentence of why;
+- for an `inbox:<file>` line — a card intake could not type, its question after the `—` — read
+  the card in the intake directory and answer with what settles it: `feature`, `bug <the
+  failing test or error line>`, `parent <id>`, `S1`/`S2`/`S3` (several joined by `; `), or `no`
+  to close the card unminted;
 - or, when the question is not yours to answer, the literal `NEEDS OPERATOR: <the question> —
   <your recommendation>`.
 
 FOUR THINGS ARE NEVER YOURS: licence, money, security, and anything that changes what the customer
 sees. Those go to `NEEDS OPERATOR`, matching every other kind's rail.
 
-Write every answer, and nothing else, to the answers file `~/.ASF/state/sample/groom/2026-09-22.answers` — one line per
+Write every answer, and nothing else, to the answers file `~/.ASF/state/sample/groom/2026-09-22.clerk.answers` — one line per
 question, in the groom file's own grammar, `adjudicator:` in place of `controller:`:
 
     - [ ] <id> <title> — <why> → answer: adjudicator: <word>
@@ -66,7 +70,7 @@ product's repository, not the record. The next tick reads the answers file and a
 that is the only path an answer reaches a card by.
 
 Final message: how many questions you answered, how many you sent to `NEEDS OPERATOR`, and the
-path `~/.ASF/state/sample/groom/2026-09-22.answers` you wrote them to.
+path `~/.ASF/state/sample/groom/2026-09-22.clerk.answers` you wrote them to.
 
 ## The heartbeat, the marker, and the report
 
@@ -99,7 +103,7 @@ Finish with this, and nothing after it:
 ```
 REPORT
 item: F-0002
-kind: groom
+kind: groom-clerk
 status: done | partial | blocked
 branch: groom/2026-09-22
 pushed: yes <the sha origin/groom/2026-09-22 now points at> | rebased <sha> — the factory publishes | no — <why>

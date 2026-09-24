@@ -282,13 +282,23 @@ def write_brief(product, job, text):
     return path
 
 
+#: A label with no entry of its own falls back to this one. ``cheap`` is new in F-0093 and a pool
+#: configured before it has no entry; falling back to ``light`` keeps that pool running at the
+#: price it already paid, where refusing would stop the factory over a saving.
+MODEL_FALLBACK = {'cheap': 'light'}
+
+
 def model_arg(model, cfg=None):
-    """``worker_pool.models: {Opus: <id>}`` maps a row's model label. A label with no entry is
-    refused — the literal label is not a model id the runtime knows, and the session dies at once."""
+    """``worker_pool.models: {heavy: <id>, light: <id>, cheap: <id>}`` maps a row's model label.
+    A label with no entry falls back per :data:`MODEL_FALLBACK`; a label with neither is refused —
+    the literal label is not a model id the runtime knows, and the session dies at once."""
     if not model:
         return None
     table = (((cfg or {}).get('worker_pool') or {}).get('models')) or {}
     if model not in table:
+        alt = MODEL_FALLBACK.get(model)
+        if alt and alt in table:
+            return table[alt]
         raise SpawnError(f'NEEDS OPERATOR: worker_pool.models has no entry for {model} '
                          '— add it to config.yaml')
     return table[model]

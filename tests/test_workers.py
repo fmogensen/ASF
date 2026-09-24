@@ -263,6 +263,26 @@ class TestQuota(unittest.TestCase):
                           .read(pool_mod.Account('a')))
 
 
+class ModelFallbackTests(unittest.TestCase):
+    def cfg(self, **models):
+        return {'worker_pool': {'models': models}}
+
+    def test_cheap_uses_its_own_entry(self):
+        self.assertEqual(spawn_mod.model_arg('cheap', self.cfg(light='l', cheap='c')), 'c')
+
+    def test_cheap_falls_back_to_light(self):
+        self.assertEqual(spawn_mod.model_arg('cheap', self.cfg(heavy='h', light='l')), 'l')
+
+    def test_cheap_with_neither_is_refused(self):
+        with self.assertRaises(spawn_mod.SpawnError) as cm:
+            spawn_mod.model_arg('cheap', self.cfg(heavy='h'))
+        self.assertIn('no entry for cheap', str(cm.exception))
+
+    def test_other_labels_do_not_fall_back(self):
+        with self.assertRaises(spawn_mod.SpawnError):
+            spawn_mod.model_arg('heavy', self.cfg(light='l'))
+
+
 class TestRows(unittest.TestCase):
     def test_parse_feeder_rows(self):
         with open(os.path.join(FIXTURES, 'rows.txt'), encoding='utf-8') as f:

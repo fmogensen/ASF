@@ -38,20 +38,23 @@ from asf.workers.stall import CORRECTION_HEAD
 
 TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
 
-#: The operator's two model labels. ``asf.workers`` maps them onto real model names, so no
-#: vendor's model id is ever written down here.
+#: The operator's three model labels. ``asf.workers`` maps them onto real model names, so no
+#: vendor's model id is ever written down here. ``CHEAP`` is the bookkeeping tier: a rebase, a
+#: close, the groom's clerical pass — work with a right answer that no judgement reaches.
 HEAVY = 'heavy'
 LIGHT = 'light'
+CHEAP = 'cheap'
 
-KINDS = ('spec', 'plan', 'coder', 'review', 'fixer', 'rebase', 'close', 'adjudicate', 'fix-bug',
-         'correct', 'groom', 'reshape')
+KINDS = ('spec', 'spec-amend', 'plan', 'coder', 'review', 'fixer', 'rebase', 'close',
+         'adjudicate', 'fix-bug', 'correct', 'groom', 'groom-clerk', 'reshape')
 KIND_ALIASES = {'task': 'coder', 'code': 'coder', 'fix': 'fixer', 'bug': 'fix-bug',
                 'fix_bug': 'fix-bug'}
-DEFAULT_MODELS = {'spec': HEAVY, 'plan': HEAVY, 'adjudicate': HEAVY, 'review': HEAVY,
-                  'coder': LIGHT, 'fixer': LIGHT, 'rebase': LIGHT, 'close': LIGHT,
-                  'fix-bug': LIGHT, 'correct': LIGHT, 'groom': HEAVY, 'reshape': HEAVY}
+DEFAULT_MODELS = {'spec': HEAVY, 'spec-amend': HEAVY, 'plan': HEAVY, 'adjudicate': HEAVY,
+                  'review': HEAVY, 'coder': LIGHT, 'fixer': LIGHT, 'fix-bug': LIGHT,
+                  'correct': LIGHT, 'groom': HEAVY, 'reshape': HEAVY,
+                  'rebase': CHEAP, 'close': CHEAP, 'groom-clerk': CHEAP}
 #: The kinds that may mint new cards (Stories, Tasks, Decisions) and so need an id range.
-ID_RANGE_KINDS = ('spec', 'plan', 'adjudicate', 'fix-bug', 'groom', 'reshape')
+ID_RANGE_KINDS = ('spec', 'spec-amend', 'plan', 'adjudicate', 'fix-bug', 'groom', 'reshape')
 
 #: The typed fields a brief states about its card, and so the ones whose change makes a brief
 #: stale (F-0090 D4). ``state``, ``evidence``, ``stage_since`` and ``updated`` are not here: they
@@ -172,13 +175,13 @@ def add_dirs_for(product, row=None, kind=None):
     """``job_grants`` from the product yaml — the directories a session may read outside its
     worktree, expanded but not checked (the runtime is what fails on a missing one).
 
-    A ``groom`` row also grants the directories of ``groom_file`` and ``answers_file`` (PD7): the
+    A ``groom`` or ``groom-clerk`` row also grants the directories of ``groom_file`` and ``answers_file`` (PD7): the
     session reads the one and writes the other, and neither sits inside its worktree."""
     grants = []
     if product is not None:
         raw = product._get('job_grants') if hasattr(product, '_get') else None
         grants = [os.path.expanduser(str(d)) for d in (raw or [])]
-    if kind == 'groom' and row is not None:
+    if kind in ('groom', 'groom-clerk') and row is not None:
         dirs = [os.path.dirname(os.path.expanduser(getattr(row, attr, '') or ''))
                 for attr in ('groom_file', 'answers_file') if getattr(row, attr, '')]
         groom_file = getattr(row, 'groom_file', '') or ''
