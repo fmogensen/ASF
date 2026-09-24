@@ -270,5 +270,162 @@ class RuleTests(Home):
                          (None, None, 0, 'no runtime session id recorded'))
 
 
+TABLE = '\n'.join([
+    '| check | result | evidence |',
+    '| --- | --- | --- |',
+    '| scope: the diff stays inside `writes:` | pass | docs/specs/f-0039.md only |',
+    '| every Step of the Task is implemented | fail | step 3 → nothing \\| step 4 → partial |',
+    "| acceptance tests byte-identical to the plan's | pass | tests/test_x.py:12 |",
+    '| those tests were run and are green | pass | `OK` |',
+    '| the Gate commands are green | pass | `OK` |',
+    '| no secret value printed, no background process, no skipped check | pass | the diff |'])
+
+C1 = ('C1 docs/specs/f-0039.md:117 — §2.4 names no parser for the C list;\n'
+      '  name it or drop the claim.')
+C2 = 'C2 asf/workers/continuation.py:40 — the round is N, never N+1.'
+C3 = '- **C3** tests/test_x.py:9 — assert the branch, not a literal.'
+I1 = 'I1 rename `foo` to `bar` in §2.3.'
+I2 = 'I2 add a line on the cap to §2.4.'
+MISSED = 'the retry loop was in round 1\'s diff and was not flagged.'
+
+REVIEW = f'''# Review of F-0039 — round 1
+
+{TABLE}
+
+verdict: changes requested
+
+{C1}
+{C2}
+{C3}
+
+{I1}
+{I2}
+
+### Missed in round 1
+
+- {MISSED}
+'''
+
+
+class PromptTests(RuleTests):
+    """§3.3 — the findings, parsed and sent, and never to an adjudicator."""
+
+    def prompt(self, text=REVIEW, correction='', kind='spec', round_n=1, product=None):
+        row = self.row(kind, correction=correction)
+        run = self.make()
+        path = self.product.conventions.review_path('f-0039', round_n)
+        return continuation.prompt(product or self.product, run, row, round_n, path, text)
+
+    def test_findings_over_the_templates_own_shape(self):
+        f = continuation.findings(REVIEW)
+        self.assertEqual(f['verdict'], 'CHANGES REQUESTED')
+        self.assertEqual(f['table'], TABLE)
+        self.assertEqual(len(f['table'].splitlines()), 8)
+        self.assertIn('\\|', f['table'])
+        self.assertEqual(f['criticals'], [C1, C2, C3])
+        self.assertEqual(f['improvements'], [I1, I2])
+        self.assertEqual(f['missed'], [f'- {MISSED}'])
+
+    def test_a_c_is_kept_whole(self):
+        self.assertIn('name it or drop the claim.', continuation.findings(REVIEW)['criticals'][0])
+
+    def test_a_missed_i_is_an_i_and_is_missed(self):
+        text = REVIEW.replace(f'- {MISSED}', 'I3 asf/z.py:1 — visible in round 1.')
+        f = continuation.findings(text)
+        self.assertEqual(f['improvements'], [I1, I2, 'I3 asf/z.py:1 — visible in round 1.'])
+        self.assertEqual(f['missed'], ['I3 asf/z.py:1 — visible in round 1.'])
+
+    def test_a_verdict_and_no_table(self):
+        f = continuation.findings(f'verdict: approved\n\n{I1}\n')
+        self.assertEqual((f['verdict'], f['table'], f['criticals'], f['improvements'], f['missed']),
+                         ('APPROVED', '', [], [I1], []))
+
+    def test_a_table_and_no_verdict_falls_back_to_the_parsers_word(self):
+        self.assertEqual(continuation.findings(f'{TABLE}\n\n{C2}\n')['verdict'], '')
+        self.assertEqual(continuation.findings(f'{TABLE}\n\nThe writer should REVISE §2.\n\n{C2}\n')
+                         ['verdict'], 'REVISE')
+
+    def test_a_table_is_the_contiguous_block_only(self):
+        text = f'notes\n\n{TABLE}\n\n| stray | row after a blank |\n'
+        self.assertEqual(continuation.findings(text)['table'], TABLE)
+
+    def test_empty(self):
+        self.assertEqual(continuation.findings(''), {
+            'verdict': '', 'table': '', 'criticals': [], 'improvements': [], 'missed': []})
+
+    def test_the_prompt_carries_the_findings_and_names_where_it_is(self):
+        text = self.prompt()
+        path = self.product.conventions.review_path('f-0039', 1)
+        self.assertTrue(text.startswith('CORRECTION — round 1 of the review of F-0039 is in. '
+                                        'verdict: changes requested\n'))
+        self.assertIn('your own branch `spec/F-0039`', text)
+        self.assertIn('rebased onto origin/main', text)
+        self.assertIn('Do not re-read what you wrote', text)
+        self.assertIn(f'Review: {path}', text)
+        self.assertIn(TABLE, text)
+        for c in (C1, C2, C3, I1, I2, MISSED):
+            self.assertIn(c, text)
+        self.assertLess(text.index(TABLE), text.index(C1))
+        self.assertLess(text.index(C3), text.index(I1))
+        for word in ('Fix every C exactly', "apply the I's you agree with", 'never widen',
+                     'acceptance tests and the Gate', '`git commit -s`', 'push `spec/F-0039`',
+                     'typed REPORT, one line per C'):
+            self.assertIn(word, text)
+
+    def test_the_prompt_is_never_a_brief(self):
+        from asf.briefs.build import TAIL
+        text = self.prompt()
+        self.assertNotIn('Backlog item:', text)
+        self.assertNotIn('Standing rules', text)
+        self.assertNotIn(TAIL.strip().splitlines()[0], text)
+        self.assertNotIn('NEEDS OPERATOR', text)
+
+    def test_a_correct_row_with_no_review_file_sends_the_harvests_correction(self):
+        from asf.workers.stall import CORRECTION_HEAD
+        text = self.prompt(text='', correction='gate red:\nFAILED tests.test_x\n', kind='correct',
+                           round_n=0)
+        self.assertIn(CORRECTION_HEAD.strip('\n') + '\ngate red:\nFAILED tests.test_x', text)
+        self.assertIn('your own branch `spec/F-0039`', text)
+        self.assertIn('Fix every C exactly', text)
+        self.assertNotIn('Review:', text)
+        self.assertNotIn('Backlog item:', text)
+
+    def test_the_cap_trims_the_i_list_before_the_c_list(self):
+        full = self.prompt()
+        room = len(full.splitlines())
+        for cap in (room - 2, room - 4, 1):
+            product = env.Product('sample', {'repo_dir': self.repo, 'main': 'main',
+                                             'conventions': {'preamble_max_lines': cap}})
+            text = self.prompt(product=product)
+            self.assertIn(TABLE, text)
+            for c in (C1, C2, C3):
+                self.assertIn(c, text)
+            self.assertLess(len(text), len(full))
+            self.assertIn('more I not sent', text)
+            self.assertIn('Fix every C exactly', text)
+            # what is kept of the I list is its head, never a later item without an earlier one
+            self.assertFalse(I2 in text and I1 not in text)
+        self.assertNotIn(I1, text)
+        self.assertNotIn(I2, text)
+
+    def test_under_the_cap_nothing_is_trimmed(self):
+        self.assertNotIn('more I not sent', self.prompt())
+
+    def test_target_refuses_by_kind(self):
+        for kind in ('adjudicate', 'review', 'fix-bug', 'task'):
+            self.assertEqual(self.target(self.row(kind)),
+                             (None, None, 0, f'kind {kind} never continues'))
+
+    def test_target_on_a_feature_at_card_has_no_review_round(self):
+        self.assertEqual(self.target(self.row('spec'), stage='card'),
+                         (None, None, 0, 'no review round'))
+
+    def test_target_at_round_two_is_round_two(self):
+        _, sid, rnd, path = self.target(self.row('spec'), stage='spec-review r2')
+        self.assertEqual((sid, rnd), ('rs-1', 2))
+        self.assertEqual(path, self.product.conventions.review_path('f-0039', 2))
+        self.assertNotEqual(path, self.product.conventions.review_path('f-0039', 3))
+
+
 if __name__ == '__main__':
     unittest.main()

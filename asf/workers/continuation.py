@@ -29,11 +29,14 @@ import re
 import subprocess
 import time
 
+from asf.briefs import preamble as preamble_mod
 from asf.feeder import rows as feeder_rows
+from asf.harvest import pr_hygiene
 from asf.views import index_reader
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 from asf.workers import spawn as spawn_mod
+from asf.workers.stall import CORRECTION_HEAD
 
 #: Row kinds that may answer a branch by continuing its session. Everything else launches.
 ANSWERING = ('correct', 'spec', 'plan')
@@ -41,6 +44,11 @@ ANSWERING = ('correct', 'spec', 'plan')
 NEVER = ('adjudicate', 'review', 'groom', 'reshape', 'rebase', 'close', 'fix-bug', 'task')
 
 DEFAULT_HEARTBEAT_MIN = 6
+
+_ITEM_RE = re.compile(r'^\s*(?:[-*]\s+)?\**([CI])(\d+)\b')
+_HEADING_RE = re.compile(r'^\s{0,3}#{1,6}\s')
+_MISSED_RE = re.compile(r'^\s{0,3}#{1,6}\s*missed\s+in\s+round\b', re.I)
+_CHECK_HEADER_RE = re.compile(r'^\s*\|\s*check\s*\|', re.I)
 
 _DURATION_RE = re.compile(r'^\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*$')
 _UNIT_MIN = {'s': 1 / 60, 'm': 1, '': 1, 'h': 60, 'd': 1440}
@@ -149,3 +157,136 @@ def target(product, row, root, runs=None, now=None, repo=None, cfg=None):
     if not sid:
         return None, None, 0, why
     return run, sid, rnd, review_path
+
+
+# ---- the findings, and the message that carries them (§2.4) -------------------
+
+def _table(lines):
+    """The contiguous block of ``|`` lines under the check header, verbatim — a reviewer's own
+    evidence column is the finding, and re-rendering it would lose the ``\\|`` the template
+    asks for. No check header → the first block of two or more ``|`` lines; none → ``''``."""
+    def block(start):
+        end = start
+        while end < len(lines) and lines[end].lstrip().startswith('|'):
+            end += 1
+        return lines[start:end]
+    for i, line in enumerate(lines):
+        if _CHECK_HEADER_RE.match(line):
+            return '\n'.join(l.rstrip() for l in block(i))
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith('|') and (i == 0 or not lines[i - 1].lstrip().startswith('|')):
+            b = block(i)
+            if len(b) >= 2:
+                return '\n'.join(l.rstrip() for l in b)
+    return ''
+
+
+def _items(lines):
+    """Every ``C``/``I`` item as ``(letter, whole text, line number)``. An item runs from its
+    marker through the lines that continue it — indented, or plain prose — and stops at the next
+    item, a heading, a table row, a ``verdict:`` line, or a blank line not followed by an
+    indented one: half of a C is not actionable."""
+    out = []
+    i = 0
+    while i < len(lines):
+        m = _ITEM_RE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        start, body = i, [lines[i].rstrip()]
+        i += 1
+        while i < len(lines):
+            line = lines[i]
+            if not line.strip():
+                nxt = lines[i + 1] if i + 1 < len(lines) else ''
+                if nxt[:1] in (' ', '\t') and nxt.strip() and not _ITEM_RE.match(nxt):
+                    body.append('')
+                    i += 1
+                    continue
+                break
+            if (_ITEM_RE.match(line) or _HEADING_RE.match(line) or line.lstrip().startswith('|')
+                    or pr_hygiene.VERDICT_LINE.search(line)):
+                break
+            body.append(line.rstrip())
+            i += 1
+        out.append((m.group(1), '\n'.join(body), start))
+    return out
+
+
+def findings(text):
+    """A review file → ``{'verdict', 'table', 'criticals', 'improvements', 'missed'}``.
+    ``verdict`` is :func:`harvest.pr_hygiene.parse_verdict`'s (P8, the one parser); ``table`` is
+    the contiguous block of ``|`` lines under the check header, verbatim; ``criticals`` and
+    ``improvements`` are the ``C``/``I`` items in file order, each kept whole. ``missed`` is the
+    ``### Missed in round N`` section's items — the ``I`` items among them are in
+    ``improvements`` too (the template records a missed finding as an I) — or, when the section
+    labels none, its non-empty lines."""
+    text = text or ''
+    lines = text.splitlines()
+    items = _items(lines)
+    missed = []
+    at = next((i for i, l in enumerate(lines) if _MISSED_RE.match(l)), None)
+    if at is not None:
+        end = next((i for i in range(at + 1, len(lines)) if _HEADING_RE.match(lines[i])),
+                   len(lines))
+        missed = [t for _, t, n in items if at < n < end]
+        if not missed:
+            missed = [l.strip() for l in lines[at + 1:end] if l.strip()]
+    return {'verdict': pr_hygiene.parse_verdict(text),
+            'table': _table(lines),
+            'criticals': [t for k, t, _ in items if k == 'C'],
+            'improvements': [t for k, t, _ in items if k == 'I'],
+            'missed': missed}
+
+
+def prompt(product, run, row, round_n, review_path, text):
+    """The continuation message. Never a brief: the session holds the card, the spec, the plan
+    and its own diff already, so it carries the findings and the instruction — no preamble, no
+    rules, no tail. ``text`` is the review file (``''`` when the branch carries none — a
+    ``correct`` row then sends the harvest's ``row.correction`` under
+    :data:`stall.CORRECTION_HEAD`, the red gate's own output being the finding). The whole
+    message is capped at ``conventions.preamble_max_lines``: the table and the C list stay whole,
+    the I list is trimmed from its end."""
+    branch = (run or {}).get('branch') or row.branch
+    item = row.item_id
+    main = getattr(product, 'main', None) or 'main'
+    f = findings(text) if text else None
+    if f:
+        head = (f'CORRECTION — round {round_n} of the review of {item} is in. '
+                f'verdict: {f["verdict"].lower() or "not stated"}')
+        closing_report = 'what it asked, where it is now closed'
+        body = [f'Review: {review_path}'] if review_path else []
+        if f['table']:
+            body.append(f['table'])
+        criticals = f['criticals']
+        improvements = f['improvements'] + [m for m in f['missed'] if m not in f['improvements']]
+    else:
+        head = f'CORRECTION — {item} was held and is back with you.'
+        closing_report = 'what failed, where it is now closed'
+        correction = (getattr(row, 'correction', '') or '').rstrip()
+        body = [(CORRECTION_HEAD + correction).strip('\n')] if correction else []
+        criticals, improvements = [], []
+    intro = (f'This is your own session, your own worktree and your own branch `{branch}`, '
+             f'rebased onto origin/{main} before this message. Do not re-read what you wrote; '
+             f'read the findings.')
+    closing = ("Fix every C exactly as it specifies; apply the I's you agree with; never widen "
+               "the scope — a change the review did not ask for buys another round. Re-run the "
+               f"acceptance tests and the Gate. Commit with `git commit -s`, push `{branch}`, and "
+               f"finish with the typed REPORT, one line per C: {closing_report}.")
+
+    def render(kept):
+        parts = [head, intro, *body]
+        if criticals:
+            parts.append('\n'.join(criticals))
+        if kept:
+            parts.append('\n'.join(improvements[:kept]))
+        if kept < len(improvements):
+            parts.append(f'({len(improvements) - kept} more I not sent — the review file has them.)')
+        parts.append(closing)
+        return '\n\n'.join(parts) + '\n'
+
+    cap = preamble_mod.max_lines(product)
+    kept = len(improvements)
+    while kept and len(render(kept).splitlines()) > cap:
+        kept -= 1
+    return render(kept)
