@@ -3,6 +3,7 @@ import json
 import os
 import re
 
+from asf.conventions import DEFAULT_SPECS_DIR
 from asf.groom import shape
 from asf.init import ITEM_FOLDERS as LAYOUT_FOLDERS, STREAM_FOLDERS
 from asf.record import frontmatter
@@ -17,7 +18,7 @@ BULLET_RE = re.compile(r'(?m)^- \S')
 
 LANDED_SHA_RE = re.compile(r'[0-9a-fA-F]{7,40}')
 RESIDUE_RULE = 'rule: no-rule'
-SPEC_CLOSING = 'docs/specs/f-0080.md'
+SPEC_CLOSING = DEFAULT_SPECS_DIR + '/f-0080.md'  # the spec this pass points at, by the default layout
 
 # A Feature normally requires a parent Epic, but `migrate` may leave one parentless when the
 # adopted source names no Epic for it and it carries no Story of its own to infer one from. Set
