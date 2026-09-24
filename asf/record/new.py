@@ -15,7 +15,8 @@ from asf.schema import SCHEMA_VERSION
 SEVERITIES = ('S1', 'S2', 'S3')
 
 # Typed fields `--set` may write, beyond the ones that have their own flag.
-_COMMON_SET = ('rank', 'decided', 'blockedBy', 'links', 'priority', 'area', 'legacy_id')
+_COMMON_SET = ('rank', 'decided', 'blockedBy', 'links', 'priority', 'area', 'legacy_id',
+               'enriched')
 SETTABLE = {t: set(_COMMON_SET) for t in TYPES}
 SETTABLE['rule'] |= {'scope', 'enforced', 'reason', 'check'}
 SETTABLE['decision'] |= {'decided_by', 'date'}

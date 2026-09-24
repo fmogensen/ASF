@@ -12,6 +12,7 @@ from collections import namedtuple
 
 from asf.conventions import DEFAULT_ANSWER_OVERLAP
 from asf.idea.answered import Answered, answer_from_record
+from asf.record import core, frontmatter, setfield
 from asf.record.core import ID_RE
 from asf.record.publish import publish
 
@@ -123,3 +124,90 @@ def write_applied(tree_path, stamp, applied, report_rel):
         json.dump(data, f, indent=2)
         f.write('\n')
     return data
+
+
+# ---- the other writer --------------------------------------------------------
+
+EMPTY_ITEM_RE = re.compile(r'^\s*-\s*\[ \]\s*$')
+
+
+def _lines_of(content):
+    return content.strip('\n').split('\n') if content.strip('\n') else []
+
+
+def _section_index(sections, heading):
+    return next((i for i, (h, _) in enumerate(sections) if h.strip() == heading), None)
+
+
+def _enriched_body(body, node, date):
+    """``body`` with the node's description, acceptance and assumptions written in and one
+    History line; every other section is carried over untouched."""
+    preamble, sections = core.parse_sections(body)
+    touched = {}
+
+    i = _section_index(sections, '## Description')
+    if node.description:
+        lines = _lines_of(sections[i][1]) if i is not None else []
+        lines += ([''] if lines else []) + node.description.split('\n')
+        touched['## Description'] = lines
+    i = _section_index(sections, '## Acceptance')
+    if node.acceptance:
+        lines = [l for l in (_lines_of(sections[i][1]) if i is not None else [])
+                 if not EMPTY_ITEM_RE.match(l)]
+        touched['## Acceptance'] = lines + [f'- [ ] {item}' for item in node.acceptance]
+    i = _section_index(sections, '## Assumptions')
+    if node.assumptions:
+        lines = _lines_of(sections[i][1]) if i is not None else []
+        touched['## Assumptions'] = lines + [f'- {item}' for item in node.assumptions]
+    i = _section_index(sections, '## History')
+    history = _lines_of(sections[i][1]) if i is not None else []
+    counts = f'+{len(node.acceptance)} acceptance, +{len(node.assumptions)} assumption(s)'
+    touched['## History'] = history + [f'- {date}: enriched (idea) — {counts}']
+
+    for heading, lines in touched.items():
+        i = _section_index(sections, heading)
+        if i is not None:
+            sections[i][1] = core.section_content(lines, i == len(sections) - 1)
+        elif heading == '## Assumptions':   # a new section sits immediately above ## Acceptance
+            at = _section_index(sections, '## Acceptance')
+            at = len(sections) if at is None else at
+            sections.insert(at, [heading, core.section_content(lines, False)])
+        else:
+            if sections and not sections[-1][1].endswith('\n\n'):
+                sections[-1][1] += '\n'
+            sections.append([heading, core.section_content(lines, True)])
+    return core.render_sections(preamble, sections)
+
+
+def enrich_card(root, canonical, item_id, node, date):
+    """Write one node's worth of substance into the Feature card ``item_id`` (``asf idea
+    --enrich``). Returns None on success, else the reason the card is untouched: the write goes
+    through the ``asf set`` round trip (render, re-parse, compare) and a card that does not come
+    back as what was asked is left exactly as it was."""
+    rec = canonical.get(item_id)
+    if rec is None:
+        return f'no item {item_id!r}'
+    if rec['meta'].get('type') != 'feature':
+        return f"{item_id} is a {rec['meta'].get('type')}, and only a Feature is enriched"
+    body = rec['body']
+    if not rec['text'].endswith(body):
+        return f"{rec['relpath']} does not split into a header and a body; it is unchanged"
+    new_body = _enriched_body(body, node, date)
+    original = rec['text']
+    staged = dict(rec, text=original[:len(original) - len(body)] + new_body)
+    err = setfield.set_typed(staged, {'enriched': date})
+    if err:
+        return err
+    try:
+        with open(rec['path'], encoding='utf-8') as f:
+            written = f.read()
+        _meta, written_body = frontmatter.parse(written, path=rec['relpath'])
+    except (OSError, frontmatter.FrontmatterError):
+        written_body = None
+    if written_body != new_body:
+        with open(rec['path'], 'w', encoding='utf-8') as f:
+            f.write(original)
+        return f"{rec['relpath']} does not round-trip through the parser; it is unchanged"
+    rec['text'] = written
+    rec['body'] = written_body
+    return None

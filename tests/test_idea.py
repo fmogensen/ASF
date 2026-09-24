@@ -1,8 +1,16 @@
+import contextlib
 import glob
+import io
 import json
 import os
 import shutil
+import tempfile
 import unittest
+from unittest import mock
+
+from asf import cli, env
+from asf.record.core import parse_sections, today
+from asf.workers import runtime as runtime_mod
 
 from asf.idea.answered import Answered, answer_from_record
 from asf.idea.tree import Node, TreeError, parse_tree
@@ -292,6 +300,204 @@ class ApplyTreeTest(unittest.TestCase):
         r = self.apply('--force')
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(len(self.inbox()), 8)
+
+
+class SessionWritesTheTree(runtime_mod.FakeRuntime):
+    """The fake session: it reads its brief for the tree path it is told to write and writes
+    ``text`` there (or nothing, when ``text`` is None)."""
+
+    def __init__(self, text):
+        super().__init__([{'ok': True, 'result': 'wrote the tree'}])
+        self.text = text
+
+    def run(self, job, wait=False):
+        result = super().run(job, wait=wait)
+        if self.text is not None:
+            with open(self.calls[-1][1].split('THE ONE FILE YOU WRITE IS `')[1].split('`')[0],
+                      'w', encoding='utf-8') as f:
+                f.write(self.text)
+        return result
+
+
+class FrontDoorTest(unittest.TestCase):
+    """``asf idea "<text>"`` in-process, with ``worker_pool: {backend: fake}`` in the config."""
+
+    def setUp(self):
+        self.root = make_repo()
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix='idea_home_'))
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        seed(self.root)
+        home, self._home, self._cwd = os.path.join(self.tmp, 'home'), env.ASF_HOME, os.getcwd()
+        os.makedirs(os.path.join(home, 'products'))
+        env.ASF_HOME = home
+        self.addCleanup(setattr, env, 'ASF_HOME', self._home)
+        self.addCleanup(os.chdir, self._cwd)
+        with open(os.path.join(home, 'config.yaml'), 'w', encoding='utf-8') as f:
+            f.write('default_product: sample\nscheduler:\n  kind: none\nworker_pool:\n  backend: fake\n')
+        with open(os.path.join(home, 'products', 'sample.yaml'), 'w', encoding='utf-8') as f:
+            f.write(f'product: sample\nrepo_dir: {self.tmp}\nbacklog_dir: {self.root}\nmain: main\n'
+                    'ci:\n  provider: none\nsteps:\n  batch: off\n  daily: off\n')
+        os.chdir(self.root)
+        patch = mock.patch.dict(os.environ)
+        patch.start()
+        self.addCleanup(patch.stop)
+        os.environ.pop('ASF_PRODUCT', None)
+
+    def door(self, text, *extra, tree_text=TREE):
+        fake = SessionWritesTheTree(tree_text)
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(runtime_mod, 'from_config', return_value=fake), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = cli.main(['idea', text, *extra])
+        return rc, out.getvalue(), err.getvalue(), fake
+
+    def inbox(self):
+        return sorted(n for n in os.listdir(os.path.join(self.root, 'inbox')) if n.endswith('.md'))
+
+    def test_one_session_is_run_with_the_idea_brief(self):
+        rc, _out, _err, fake = self.door('Bill customers for usage')
+        self.assertEqual(len(fake.calls), 1)
+        job, brief = fake.calls[0]
+        self.assertEqual(job.name[:5], 'idea-')
+        self.assertEqual(job.model, 'heavy')
+        self.assertIn('Bill customers for usage', '\n'.join(brief.split('\n')[:3]))
+        self.assertIn(job.name[len('idea-'):] + '.tree.md', brief)
+        self.assertIn('never ask — propose', brief)
+        self.assertIn(os.path.realpath(self.root), job.add_dirs)
+        self.assertEqual(rc, 0)
+
+    def test_the_tree_the_session_wrote_is_applied(self):
+        rc, out, err, _fake = self.door('Bill customers for usage')
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(len(self.inbox()), 4)
+        self.assertTrue(out.rstrip().splitlines()[-1].startswith('next: asf groom'))
+
+    def test_a_tree_that_does_not_parse_writes_nothing(self):
+        rc, _out, err, _fake = self.door('Bill customers for usage', tree_text='not a tree')
+        self.assertEqual(rc, 2)
+        self.assertIn('the tree opens with # The ask', err)
+        self.assertEqual(self.inbox(), [])
+
+    def test_a_session_that_wrote_no_tree_is_exit_2(self):
+        rc, _out, err, _fake = self.door('Bill customers for usage', tree_text=None)
+        self.assertEqual(rc, 2)
+        self.assertIn('no tree at', err)
+        self.assertEqual(self.inbox(), [])
+
+    def test_no_interrogate_runs_no_session(self):
+        tree = os.path.join(self.tmp, 'given.tree.md')
+        with open(tree, 'w', encoding='utf-8') as f:
+            f.write(TREE)
+        rc, _out, err, fake = self.door('Bill customers for usage', '--no-interrogate',
+                                        '--tree', tree)
+        self.assertEqual((rc, fake.calls), (0, []), err)
+        self.assertEqual(len(self.inbox()), 4)
+
+
+ENRICH_TREE = """# The ask
+Make the approval classes specable.
+
+---
+
+## Feature F1: Approval classes for the meter
+
+Approvals are grouped in classes; a class carries the rule that says who may approve what.
+
+### Assumptions
+- a class is named by its rule, not by a number
+
+### Acceptance
+- [ ] `python3 -m unittest tests.test_approvals -v` is green
+- [ ] an unknown class is refused
+"""
+
+
+class EnrichTest(unittest.TestCase):
+    def setUp(self):
+        self.root = make_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        seed(self.root)
+        self.card = os.path.join(self.root, 'features', 'F-0002.md')
+        write_item(self.root, 'F-0002', 'feature', 'Metering', parent='E-0001',
+                   body=THIN_BODY)
+        self.tree = os.path.join(self.root, 'enrich.tree.md')
+        self.write_tree(ENRICH_TREE)
+
+    def write_tree(self, text):
+        with open(self.tree, 'w', encoding='utf-8') as f:
+            f.write(text)
+
+    def enrich(self, item='F-0002'):
+        return run(['idea', '--enrich', item, '--tree', self.tree, '--no-interrogate'], self.root)
+
+    def card_text(self):
+        with open(self.card, encoding='utf-8') as f:
+            return f.read()
+
+    def test_a_thin_card_gains_acceptance_and_assumptions(self):
+        r = self.enrich()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        text = self.card_text()
+        _pre, sections = parse_sections(text.split('\n---\n', 1)[1])
+        by_heading = {h: c for h, c in sections}
+        self.assertEqual(by_heading['## Acceptance'].strip('\n').split('\n'),
+                         ['- [ ] `python3 -m unittest tests.test_approvals -v` is green',
+                          '- [ ] an unknown class is refused'])
+        self.assertLess([h for h, _ in sections].index('## Assumptions'),
+                        [h for h, _ in sections].index('## Acceptance'))
+        self.assertIn('- a class is named by its rule, not by a number', by_heading['## Assumptions'])
+        self.assertTrue(by_heading['## Description'].rstrip().endswith(
+            'a class carries the rule that says who may approve what.'))
+        self.assertTrue(by_heading['## Description'].startswith('\nMetering, counted.'))
+        self.assertIn(f'enriched: {today()}', text.split('\n---\n')[0])
+        self.assertTrue(by_heading['## History'].rstrip().endswith(
+            f'- {today()}: enriched (idea) — +2 acceptance, +1 assumption(s)'))
+        self.assertIn('enriched F-0002', r.stdout)
+
+    def test_the_card_still_parses(self):
+        run(['index'], self.root)
+
+        def about_the_card():   # the fixture record fails `asf check` on its own; the card's lines
+            return [l for l in run(['check'], self.root).stdout.splitlines() if 'F-0002' in l]
+        checked = about_the_card()
+        self.assertEqual(self.enrich().returncode, 0)
+        self.assertEqual(about_the_card(), checked)
+        self.assertFalse([l for l in checked if 'parse' in l or 'typed' in l], checked)
+        before = self.card_text()
+        self.assertEqual(run(['index'], self.root).returncode, 0)
+
+        def stable(text):
+            _pre, sections = parse_sections(text)
+            return [(h, c) for h, c in sections if h not in ('## Children', '## Backlinks')]
+        self.assertEqual(stable(self.card_text()), stable(before))
+
+    def test_a_multi_node_tree_is_refused(self):
+        before = self.card_text()
+        self.write_tree(TREE)
+        r = self.enrich()
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('--enrich takes one node', r.stderr)
+        self.assertEqual(self.card_text(), before)
+
+    def test_an_unknown_id_is_refused(self):
+        r = self.enrich('F-0099')
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('no item', r.stderr)
+
+    def test_only_a_feature_is_enriched(self):
+        r = self.enrich('E-0001')
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('only a Feature', r.stderr)
+
+    def test_apply_takes_enrich_too(self):
+        r = run(['idea', 'apply', '--tree', self.tree, '--enrich', 'F-0002'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('enriched: ', self.card_text())
+
+
+THIN_BODY = ("## Description\nMetering, counted.\n\n## Acceptance\n- [ ] \n\n## Non-goals\n\n"
+             "## History\n- 2026-09-01: created\n\n## Children\n\n## Backlinks\n")
 
 
 if __name__ == '__main__':

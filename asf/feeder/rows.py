@@ -113,6 +113,8 @@ class Row:
     groom_file: str = ''
     answers_file: str = ''
     open_questions: tuple = ()
+    #: an ``idea`` row only (F-0023): the one file its session writes, ``asf idea apply``'s input
+    tree_file: str = ''
 
     @property
     def launches(self):
@@ -156,6 +158,13 @@ def _conventions(product):
 def branch_for(product, kind, item_id):
     """``<prefix><id>`` — the product's prefix for ``kind`` (:meth:`Conventions.branch`, B-0067)."""
     return _conventions(product).branch(kind, item_id)
+
+
+def tree_file_for(product, item_id):
+    """``<state_dir>/idea/<id>.tree.md`` — the one file an ``idea`` session writes for a card."""
+    import os
+    from asf import env
+    return os.path.join(env.state_dir(product), 'idea', f'{item_id}.tree.md')
 
 
 def stalemate_round(product):

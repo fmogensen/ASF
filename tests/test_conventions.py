@@ -68,6 +68,17 @@ class FromMappingTests(unittest.TestCase):
         self.assertEqual(Conventions.from_mapping({'harvest_gate': 'per-branch'}).harvest_gate,
                          'per-branch')
 
+    def test_the_idea_block_names_the_answer_overlap(self):
+        """``idea: {answer_overlap: 0.6}`` is how a product yaml spells the title overlap at
+        which the record answers an idea's node (F-0023); the default is 0.8, and a key under
+        the block nobody reads is kept, not rejected."""
+        self.assertEqual(Conventions().answer_overlap, 0.8)
+        c = Conventions.from_mapping({'idea': {'answer_overlap': 0.6, 'later': 'x'},
+                                      'harvest': {'gate': 'per-branch'}})
+        self.assertEqual((c.answer_overlap, c.harvest_gate), (0.6, 'per-branch'))
+        self.assertEqual(c.extra, {'idea': {'later': 'x'}})
+        self.assertEqual(Conventions.from_mapping({'idea': {}}), Conventions())
+
     def test_an_unknown_key_is_kept_not_rejected(self):
         c = Conventions.from_mapping({'slack_channel': '#asf', 'specs_dir': 'specs'})
         self.assertEqual(c.extra, {'slack_channel': '#asf'})

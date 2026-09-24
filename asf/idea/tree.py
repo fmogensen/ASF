@@ -75,8 +75,12 @@ def _parse_node(start, lines, header_no, match):
                 acceptance, assumptions)
 
 
-def parse_tree(text):
-    """The text of a tree file → ``Tree(ask, nodes)``, or a :class:`TreeError`."""
+def parse_tree(text, enrich=False):
+    """The text of a tree file → ``Tree(ask, nodes)``, or a :class:`TreeError`.
+
+    ``enrich`` reads the tree ``asf idea --enrich`` takes: one node rooted on a card the record
+    already holds, so nothing above it needs to be in the file — the header grammar, unique
+    keys and the ban on questions still hold, the shape rules do not."""
     blocks = _blocks(text)
     first = _first_content(*blocks[0])
     if not first or not ASK_RE.match(first[1]):
@@ -96,7 +100,9 @@ def parse_tree(text):
         kind, key, parent_key = match.group(1), match.group(2), match.group(3)
         if key in seen:
             raise TreeError(f"line {line_no}: key {key} is already used at line {header_lines[key]}")
-        if kind == 'Epic':
+        if enrich and parent_key is None:
+            pass
+        elif kind == 'Epic':
             if parent_key:
                 raise TreeError(f"line {line_no}: an Epic hangs under nothing — a Feature hangs "
                                 f"under an Epic")
@@ -110,7 +116,7 @@ def parse_tree(text):
                 raise TreeError(f"line {line_no}: {_ARTICLE[kind]} hangs under "
                                 f"{_ARTICLE[PARENT_TYPE[kind]]}")
         node = _parse_node(start, lines, line_no, match)
-        if kind == 'Story' and not node.acceptance:
+        if kind == 'Story' and not node.acceptance and not enrich:
             raise TreeError(f"line {line_no}: a Story is {SIZE['story']} — {key} has no "
                             f"acceptance item")
         seen[key] = node
@@ -118,7 +124,7 @@ def parse_tree(text):
         nodes.append(node)
 
     for node in nodes:
-        if node.type != 'Epic':
+        if node.type != 'Epic' or enrich:
             continue
         spans = sum(1 for n in nodes if n.type == 'Feature' and n.parent_key == node.key)
         if spans < 2:

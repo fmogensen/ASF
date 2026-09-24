@@ -114,6 +114,12 @@ ROWS['reshape'] = row('RESHAPE → PLAN', 'T-0050', 'reshape', 'plan/T-0050',
                       'groom: split asf/feeder | asf/harvest', feature_id='F-0001')
 
 
+ROWS['idea'] = dataclasses.replace(
+    row('CARD → ENRICH', 'F-0002', 'idea', 'enrich/F-0002',
+        'thin card: no acceptance list to spec from', feature_id='F-0002'),
+    tree_file='~/.ASF/state/sample/idea/F-0002.tree.md')
+
+
 def forbidden_regex():
     pats = []
     with open(PATTERNS_FILE, encoding='utf-8') as f:
@@ -589,6 +595,27 @@ class KindModelGrantTest(unittest.TestCase):
     def test_a_groom_brief_grants_the_intake_directory_its_inbox_lines_name(self):
         brief = briefs.build(product(), ROWS['groom'], index(), [], REPO_FACTS)
         self.assertIn('inbox', brief.add_dirs)
+
+
+class RefineBriefTest(unittest.TestCase):
+    """F-0023: the idea brief, and the refine line a brief carries for a document already in the
+    record."""
+
+    def test_the_idea_template_renders(self):
+        tree = '/tmp/asf-state/idea/F-0002.tree.md'
+        idea_row = dataclasses.replace(
+            row('CARD → ENRICH', 'F-0002', 'idea', 'enrich/F-0002',
+                'thin card: no acceptance list to spec from', feature_id='F-0002'),
+            tree_file=tree)
+        brief = briefs.build(product(), idea_row, index(), [], REPO_FACTS)
+        self.assertEqual(brief.kind, 'idea')
+        self.assertEqual(brief.model, 'heavy')
+        self.assertFalse(build_mod.id_ranges_needed('idea'))
+        self.assertFalse(brief.id_ranges_needed)
+        self.assertIn(tree, brief.text)
+        self.assertIn('## <Epic|Feature|Story> <key> [under <key>]: <title>', brief.text)
+        self.assertIn('never ask — propose', brief.text)
+        self.assertIn(os.path.dirname(tree), brief.add_dirs)
 
 
 class GenericTest(unittest.TestCase):

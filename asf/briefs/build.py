@@ -44,12 +44,13 @@ HEAVY = 'heavy'
 LIGHT = 'light'
 
 KINDS = ('spec', 'plan', 'coder', 'review', 'fixer', 'rebase', 'close', 'adjudicate', 'fix-bug',
-         'correct', 'groom', 'reshape')
+         'correct', 'groom', 'reshape', 'idea')
 KIND_ALIASES = {'task': 'coder', 'code': 'coder', 'fix': 'fixer', 'bug': 'fix-bug',
                 'fix_bug': 'fix-bug'}
 DEFAULT_MODELS = {'spec': HEAVY, 'plan': HEAVY, 'adjudicate': HEAVY, 'review': HEAVY,
                   'coder': LIGHT, 'fixer': LIGHT, 'rebase': LIGHT, 'close': LIGHT,
-                  'fix-bug': LIGHT, 'correct': LIGHT, 'groom': HEAVY, 'reshape': HEAVY}
+                  'fix-bug': LIGHT, 'correct': LIGHT, 'groom': HEAVY, 'reshape': HEAVY,
+                  'idea': HEAVY}
 #: The kinds that may mint new cards (Stories, Tasks, Decisions) and so need an id range.
 ID_RANGE_KINDS = ('spec', 'plan', 'adjudicate', 'fix-bug', 'groom', 'reshape')
 
@@ -173,7 +174,8 @@ def add_dirs_for(product, row=None, kind=None):
     worktree, expanded but not checked (the runtime is what fails on a missing one).
 
     A ``groom`` row also grants the directories of ``groom_file`` and ``answers_file`` (PD7): the
-    session reads the one and writes the other, and neither sits inside its worktree."""
+    session reads the one and writes the other, and neither sits inside its worktree. An ``idea``
+    row grants the directory of its ``tree_file`` the same way: the one file it writes."""
     grants = []
     if product is not None:
         raw = product._get('job_grants') if hasattr(product, '_get') else None
@@ -188,6 +190,10 @@ def add_dirs_for(product, row=None, kind=None):
         for d in dirs:
             if d and d not in grants:
                 grants.append(d)
+    if kind == 'idea' and row is not None and getattr(row, 'tree_file', ''):
+        tree_dir = os.path.dirname(os.path.expanduser(row.tree_file))
+        if tree_dir not in grants:
+            grants.append(tree_dir)
     return grants
 
 
@@ -278,6 +284,7 @@ def context(product, row, kind, facts):
                    'and why)').strip(),
         'groom_file': getattr(row, 'groom_file', '') or '—',
         'answers_file': getattr(row, 'answers_file', '') or '—',
+        'tree_path': getattr(row, 'tree_file', '') or '—',
         'open_questions': '\n'.join(getattr(row, 'open_questions', ()) or ()) or '(none)',
     }
 

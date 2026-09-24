@@ -159,15 +159,17 @@ def build_parser():
     p_migrate.add_argument('--fresh', action='store_true', help="bypass evidence's cache")
     p_migrate.add_argument('--product')
 
-    p_idea = sub.add_parser('idea', help='an idea tree -> intake cards (the groom types them)')
-    idea_sub = p_idea.add_subparsers(dest='idea_command', required=True)
-    p_idea_apply = idea_sub.add_parser(
-        'apply', help='file a tree the interrogator wrote as intake cards; no model call')
-    p_idea_apply.add_argument('--tree', required=True, help='the tree file to apply')
-    p_idea_apply.add_argument('--force', action='store_true',
-                              help='apply a tree that was already applied')
-    p_idea_apply.add_argument('--product')
-    p_idea_apply.add_argument('--json', action='store_true', help='print the .applied JSON')
+    p_idea = sub.add_parser(
+        'idea', help='interrogate an idea into intake cards (or `apply` a tree already written)')
+    p_idea.add_argument('text', nargs='?', help='the ask; or the word `apply` to file a tree')
+    p_idea.add_argument('--enrich', metavar='ID',
+                        help='enrich this thin Feature card from a one-node tree, do not file cards')
+    p_idea.add_argument('--tree', help='the tree file (`apply`: required; default: in the state dir)')
+    p_idea.add_argument('--no-interrogate', action='store_true',
+                        help='run no session: apply the tree at --tree as it stands')
+    p_idea.add_argument('--force', action='store_true', help='apply a tree that was already applied')
+    p_idea.add_argument('--product')
+    p_idea.add_argument('--json', action='store_true', help='print the .applied JSON')
 
     p_groom = sub.add_parser('groom', help='inbox -> cards, then write groom/<date>.md')
     p_groom.add_argument('--date', help='defaults to today (UTC)')

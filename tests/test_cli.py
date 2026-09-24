@@ -42,6 +42,19 @@ class RefusedProductFileTests(unittest.TestCase):
             self.assertIn('asf init --product sample', lines[0])
 
 
+class SubcommandListTests(unittest.TestCase):
+    def test_idea_takes_the_ask_or_apply(self):
+        parser = cli.build_parser()
+        args = parser.parse_args(['idea', 'apply', '--tree', 't.md', '--force'])
+        self.assertEqual((args.command, args.text, args.tree, args.force),
+                         ('idea', 'apply', 't.md', True))
+        args = parser.parse_args(['idea', 'Bill customers', '--no-interrogate'])
+        self.assertEqual((args.text, args.no_interrogate, args.enrich),
+                         ('Bill customers', True, None))
+        args = parser.parse_args(['idea', '--enrich', 'F-0002', '--tree', 't.md'])
+        self.assertEqual((args.text, args.enrich), (None, 'F-0002'))
+
+
 class CapacityCommandTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix='cli_test_')
