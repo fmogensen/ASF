@@ -31,6 +31,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 from asf import env
+from asf import tokens
 from asf.conventions import DEFAULT_CHANGELOG_FILE, DEFAULT_RELEASE_INSTALL, Conventions
 from asf.record import frontmatter
 from asf.record import match
@@ -126,6 +127,8 @@ SCHEMAS = {
         'round': (('int', 'null'), MATCH), 'pushes': (('int', 'null'), None), 'minutes': (('num', 'null'), None),
         'usd': (('num', 'null'), None), 'session': (('str', 'null'), None),
         'in_tokens': (('int', 'null'), None), 'turns': (('int', 'null'), None),
+        'tokens_input': (('int', 'null'), None), 'tokens_output': (('int', 'null'), None),
+        'tokens_cache_read': (('int', 'null'), None), 'tokens_cache_write': (('int', 'null'), None),
     },
     'ticks': {
         'ts': (('str',), TS), 'tick': (('int',), REQ), 'duration_s': (('num', 'null'), None),
@@ -355,16 +358,31 @@ def feature_of(items, iid):
     return None
 
 
+def _no_tokens():
+    return {d: None for d in tokens.DIMENSIONS}
+
+
+def _add_tokens(into, by_dim):
+    """Add each dimension of `by_dim` into `into` where it is a number; a None adds nothing (D4)."""
+    for d in tokens.DIMENSIONS:
+        n = by_dim.get(d)
+        if isinstance(n, int) and not isinstance(n, bool):
+            into[d] = n if into[d] is None else into[d] + n
+
+
 def compute_costs(ci, sessions):
-    """{item id or None: {sessions, fix_rounds, runner_min (float), usd (float|None)}} from event lists.
+    """{item id or None: {sessions, fix_rounds, runner_min (float), usd (float|None), tokens}} from event lists;
+    `tokens` is {dimension: int|None}, each dimension summed on its own and never across dimensions.
     A CI run's minutes split evenly over the items it names; an event with no item is filed under None."""
-    costs = collections.defaultdict(lambda: {'sessions': 0, 'fix_rounds': 0, 'runner_min': 0.0, 'usd': None})
+    costs = collections.defaultdict(lambda: {'sessions': 0, 'fix_rounds': 0, 'runner_min': 0.0, 'usd': None,
+                                             'tokens': _no_tokens()})
     for s in sessions:
         c = costs[s.get('item')]
         c['sessions'] += 1
         c['fix_rounds'] += 1 if s.get('kind') == 'fix' else 0
         if s.get('usd') is not None:
             c['usd'] = (c['usd'] or 0.0) + s['usd']
+        _add_tokens(c['tokens'], {d: s.get(f'tokens_{d}') for d in tokens.DIMENSIONS})
     for r in ci:
         ids = r.get('items') or [None]
         for i in ids:
@@ -373,7 +391,7 @@ def compute_costs(ci, sessions):
 
 
 def subtree_cost(items, costs, iid):
-    total = {'sessions': 0, 'fix_rounds': 0, 'runner_min': 0.0, 'usd': None}
+    total = {'sessions': 0, 'fix_rounds': 0, 'runner_min': 0.0, 'usd': None, 'tokens': _no_tokens()}
     for i in [iid] + descendants(items, iid):
         c = costs.get(i)
         if not c:
@@ -383,6 +401,7 @@ def subtree_cost(items, costs, iid):
         total['runner_min'] += c['runner_min']
         if c['usd'] is not None:
             total['usd'] = (total['usd'] or 0.0) + c['usd']
+        _add_tokens(total['tokens'], c['tokens'])
     return total
 
 
@@ -493,6 +512,12 @@ def scorecard_rows(ci, sessions, ticks, conv=None, events=()):
     relaunch = sum(t['relaunches'] for t in ticks)
     rows.append(('agents', f"{launches} launches in {len(ticks)} ticks, {relaunch} relaunches",
                  f"{merges} PRs merged → {round(launches / max(1, merges), 1)} launches per merged PR"))
+    tok = _no_tokens()
+    for s in sessions:
+        _add_tokens(tok, {d: s.get(f'tokens_{d}') for d in tokens.DIMENSIONS})
+    capped = sum(1 for s in sessions if s.get('result') == 'failed: token cap')
+    rows.append(('tokens', ' · '.join(f"{label} {fmt_tokens(tok[d])}" for label, d in TOKEN_LABELS),
+                 f"{len(sessions)} sessions, {capped} capped"))
     spec = collections.defaultdict(int)
     for s in sessions:
         if s['kind'] == 'review' and ('spec' in s['task'] or 'spec' in (s.get('branch') or '')):
@@ -520,9 +545,28 @@ def fmt_usd(v):
     return '—' if v is None else f"{v:.2f}"
 
 
+#: (label, dimension) — the four token dimensions, itemised and never summed.
+TOKEN_LABELS = (('in', 'input'), ('out', 'output'), ('cache rd', 'cache_read'), ('cache wr', 'cache_write'))
+
+
+def fmt_tokens(n):
+    if n is None:
+        return '—'
+    if n >= 1_000_000:
+        return f"{n / 1e6:.1f} M"
+    if n >= 1_000:
+        return f"{n / 1e3:.1f} k"
+    return str(n)
+
+
+def _token_cells(by_dim):
+    return ' | '.join(fmt_tokens(by_dim[d]) for d in tokens.DIMENSIONS)
+
+
 def cost_table(items, ci7, sessions7):
     costs = compute_costs(ci7, sessions7)
-    lines = ['| Feature | Title | Sessions | Fix rounds | Runner-min | USD |', '|---|---|--:|--:|--:|--:|']
+    lines = ['| Feature | Title | Sessions | Fix rounds | Runner-min | USD | In | Out | Cache rd | Cache wr |',
+             '|---|---|--:|--:|--:|--:|--:|--:|--:|--:|']
     rows = []
     for fid in sorted(i for i, it in items.items() if it.get('type') == 'feature'):
         c = subtree_cost(items, costs, fid)
@@ -530,9 +574,9 @@ def cost_table(items, ci7, sessions7):
             rows.append((fid, items[fid].get('title', ''), c))
     rows.sort(key=lambda r: (-(r[2]['usd'] or 0), -r[2]['sessions'], r[0]))
     for fid, title, c in rows:
-        lines.append(f"| {fid} | {esc(title)} | {c['sessions']} | {c['fix_rounds']} | {round(c['runner_min'])} | {fmt_usd(c['usd'])} |")
-    in_feature = {'sessions': 0, 'fix_rounds': 0, 'runner_min': 0.0, 'usd': None}
-    other = dict(in_feature)
+        lines.append(f"| {fid} | {esc(title)} | {c['sessions']} | {c['fix_rounds']} | {round(c['runner_min'])} | {fmt_usd(c['usd'])} | {_token_cells(c['tokens'])} |")
+    in_feature = {'sessions': 0, 'fix_rounds': 0, 'runner_min': 0.0, 'usd': None, 'tokens': _no_tokens()}
+    other = dict(in_feature, tokens=_no_tokens())
     feature_ids = {fid for fid, _t, _c in rows}
     for key, c in costs.items():
         owner = feature_of(items, key) if key else None
@@ -541,11 +585,15 @@ def cost_table(items, ci7, sessions7):
             target[k] += c[k]
         if c['usd'] is not None:
             target['usd'] = (target['usd'] or 0.0) + c['usd']
+        _add_tokens(target['tokens'], c['tokens'])
     if other['sessions'] or other['runner_min'] or other['usd'] is not None:
-        lines.append(f"| (no Feature) | unattributed or outside a Feature | {other['sessions']} | {other['fix_rounds']} | {round(other['runner_min'])} | {fmt_usd(other['usd'])} |")
+        lines.append(f"| (no Feature) | unattributed or outside a Feature | {other['sessions']} | {other['fix_rounds']} | {round(other['runner_min'])} | {fmt_usd(other['usd'])} | {_token_cells(other['tokens'])} |")
     tot_usd = None if in_feature['usd'] is None and other['usd'] is None else (in_feature['usd'] or 0) + (other['usd'] or 0)
+    tot_tokens = _no_tokens()
+    _add_tokens(tot_tokens, in_feature['tokens'])
+    _add_tokens(tot_tokens, other['tokens'])
     lines.append(f"| **All** | | {in_feature['sessions'] + other['sessions']} | {in_feature['fix_rounds'] + other['fix_rounds']} "
-                 f"| {round(in_feature['runner_min'] + other['runner_min'])} | {fmt_usd(tot_usd)} |")
+                 f"| {round(in_feature['runner_min'] + other['runner_min'])} | {fmt_usd(tot_usd)} | {_token_cells(tot_tokens)} |")
     return lines
 
 
@@ -560,7 +608,8 @@ def render_daily(root, day, items, conv=None):
     for m, v, n in scorecard_rows(ci, sessions, ticks, conv, read_stream(root, 'events', week)):
         out.append(f"| {esc(m)} | {esc(v)} | {esc(n)} |".replace('|  |', '| |'))
     out += ['', f"## Cost per Feature (7 days)", '', f"{week[0]} … {week[-1]}; a Feature's row sums its Tasks, Stories and Bugs; "
-            "a CI run's minutes are split over the items it names.", '']
+            "a CI run's minutes are split over the items it names; "
+            "tokens are four separate numbers and are never added together.", '']
     out += cost_table(items, read_stream(root, 'ci', week), read_stream(root, 'sessions', week))
     return '\n'.join(out) + '\n'
 
@@ -593,6 +642,7 @@ def write_costs(root, items, all_ci, all_sessions, now=None):
         if c:
             new_cost = {'sessions': c['sessions'], 'fix_rounds': c['fix_rounds'],
                         'runner_min': int(round(c['runner_min'])), 'usd': None if c['usd'] is None else round(c['usd'], 2)}
+            new_cost.update({f'tokens_{d}': n for d, n in c['tokens'].items() if n is not None})
         sub = subtree_cost(items, costs, iid) if it.get('type') == 'epic' else None
         new_spend = None if not sub or sub['usd'] is None else round(sub['usd'], 2)
         if sub is not None:
@@ -1235,22 +1285,6 @@ def job_log_path(product_name, job):
     return os.path.join(env.log_dir(), 'jobs', str(product_name), f'{job}.jsonl')
 
 
-def _result_line(path):
-    """The job log's last line when it is the session's result record, else None."""
-    if not path or not os.path.isfile(path):
-        return None
-    last = None
-    with open(path, encoding='utf-8', errors='replace') as f:
-        for line in f:
-            if line.strip():
-                last = line
-    try:
-        rec = json.loads(last) if last else None
-    except json.JSONDecodeError:
-        return None
-    return rec if isinstance(rec, dict) and rec.get('type') == 'result' else None
-
-
 def session_kind(record):
     """The stream's `kind` for a session record: its row kind, else derived from the job name."""
     kind = RECORD_KINDS.get(str(record.get('kind') or '').lower())
@@ -1272,10 +1306,10 @@ def in_tokens(result):
     return int(sum(got)) if got else None
 
 
-def session_event(record, result, items=None):
+def session_event(record, result, items=None, by_dim=None):
     """One `sessions` event from a registry record (+ its log's result line, if any).
     `minutes` prefers the log's own duration, else the registry's started→ended clock; `usd` is
-    the log's cost. An event whose item is not in the index is left to the matcher."""
+    the log's cost; the four token dimensions come from `by_dim`, else from the result. An event whose item is not in the index is left to the matcher."""
     ended = parse_ts(record.get('ended')) or parse_ts(record.get('started'))
     if ended is None:
         return None
@@ -1287,6 +1321,8 @@ def session_event(record, result, items=None):
         if start is not None and start <= ended:
             minutes = round((ended - start).total_seconds() / 60, 1)
     usd = (result or {}).get('total_cost_usd')
+    if by_dim is None:
+        by_dim = tokens.of_result(result)
     turns = (result or {}).get('num_turns')
     # The record may be public: a session line carries the account's INDEX in the pool, never its
     # name, and only the first line of the session's report, capped (B-0023). The registry under
@@ -1302,6 +1338,7 @@ def session_event(record, result, items=None):
           'minutes': minutes, 'usd': usd if isinstance(usd, (int, float)) else None,
           'session': record.get('session'), 'in_tokens': in_tokens(result),
           'turns': turns if isinstance(turns, int) and not isinstance(turns, bool) else None}
+    ev.update({f'tokens_{d}': by_dim.get(d) for d in tokens.DIMENSIONS})
     item = record.get('item')
     if item and ID_RE.match(str(item)) and (not items or item in items):
         ev['item'] = item
@@ -1357,7 +1394,9 @@ def sessions_from_registry(product, since_day=None, items=None, state_path=None,
         rec = records[job]
         if not rec.get('ended'):
             continue
-        ev = session_event(rec, _result_line(logs.get(job) or rec.get('log')), items)
+        log = logs.get(job) or rec.get('log')
+        m = tokens.meter(log) if log else tokens.Meter()
+        ev = session_event(rec, m.result, items, by_dim=m.by_dim)
         if ev is None or (since_day and ev['ts'][:10] < since_day):
             continue
         out.append(ev)

@@ -300,19 +300,20 @@ generated: 2026-09-21 — from metrics/ci (3), metrics/sessions (4), metrics/tic
 | red signature | 1× | e2e: Run playwright tests |
 | batches | 1 cut, 1 refused | refused on: apps/web/x.ts ×1 |
 | agents | 6 launches in 2 ticks, 1 relaunches | 3 PRs merged → 2.0 launches per merged PR |
+| tokens | in — · out — · cache rd — · cache wr — | 4 sessions, 0 capped |
 | spec quality | 1 specs reviewed, 0 in round 1 | mean 2.0 rounds, median 2 |
 | bandwidth | cux 5h/7d: accta 12/21 %, acctb 5/6 % | 2 runners seen, 40 runner-minutes |
 
 ## Cost per Feature (7 days)
 
-2026-09-15 … 2026-09-21; a Feature's row sums its Tasks, Stories and Bugs; a CI run's minutes are split over the items it names.
+2026-09-15 … 2026-09-21; a Feature's row sums its Tasks, Stories and Bugs; a CI run's minutes are split over the items it names; tokens are four separate numbers and are never added together.
 
-| Feature | Title | Sessions | Fix rounds | Runner-min | USD |
-|---|---|--:|--:|--:|--:|
-| F-0001 | Free plan | 3 | 1 | 20 | 3.75 |
-| F-0002 | Other feature | 0 | 0 | 10 | — |
-| (no Feature) | unattributed or outside a Feature | 1 | 0 | 10 | — |
-| **All** | | 4 | 1 | 40 | 3.75 |
+| Feature | Title | Sessions | Fix rounds | Runner-min | USD | In | Out | Cache rd | Cache wr |
+|---|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| F-0001 | Free plan | 3 | 1 | 20 | 3.75 | — | — | — | — |
+| F-0002 | Other feature | 0 | 0 | 10 | — | — | — | — | — |
+| (no Feature) | unattributed or outside a Feature | 1 | 0 | 10 | — | — | — | — | — |
+| **All** | | 4 | 1 | 40 | 3.75 | — | — | — | — |
 """
 
 
@@ -1078,3 +1079,133 @@ class Backfill(Base):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+TOKEN_KEYS = ('tokens_input', 'tokens_output', 'tokens_cache_read', 'tokens_cache_write')
+
+
+def tok_session(item, **dims):
+    ev = {'ts': f'{DAY}T09:00:00Z', 'task': 't', 'account': 'a1', 'kind': 'code', 'result': 'finished', 'item': item}
+    ev.update({f'tokens_{d}': n for d, n in dims.items()})
+    return ev
+
+
+class SessionTokensTest(Base):
+    def registry_events(self, result_record, extra_lines=()):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        home = os.path.join(d, 'asf-home2')
+        _state, logs = Backfill.write_registry(self, home)
+        with open(os.path.join(logs, 'fix-free-plan-t3-r1.jsonl'), 'w') as f:
+            for rec in (*extra_lines, result_record):
+                f.write(json.dumps(rec) + '\n')
+        with mock.patch.object(env, 'ASF_HOME', home):
+            return metrics.sessions_from_registry(env.Product('sample', {}), since_day='2026-09-20', items=self.items)
+
+    def test_every_session_line_carries_four_dimensions(self):
+        [ev] = self.registry_events({'type': 'result', 'result': 'fixed', 'total_cost_usd': 0.42,
+                                     'usage': {'input_tokens': 10, 'output_tokens': 20,
+                                               'cache_read_input_tokens': 300, 'cache_creation_input_tokens': 40}})
+        self.assertEqual([ev[k] for k in TOKEN_KEYS], [10, 20, 300, 40])
+        metrics.validate('sessions', ev, self.items)
+
+    def test_a_session_with_no_usage_carries_four_nulls(self):
+        [ev] = self.registry_events({'type': 'result', 'result': 'fixed', 'total_cost_usd': 0.42})
+        self.assertEqual([ev[k] for k in TOKEN_KEYS], [None] * 4)
+        self.assertEqual(ev['usd'], 0.42)
+
+    def test_a_capped_session_has_tokens_and_no_money(self):
+        from asf import tokens
+        capped = tokens.cap_result('code', 'output', 1100, 1000,
+                                   {'input': 5, 'output': 1100, 'cache_read': None, 'cache_write': 7}, None)
+        [ev] = self.registry_events(capped)
+        self.assertIsNone(ev['usd'])
+        self.assertEqual([ev[k] for k in TOKEN_KEYS], [5, 1100, None, 7])
+        self.assertTrue(ev['reason'].startswith('token cap:'), ev['reason'])
+
+    def test_the_event_has_no_total(self):
+        [ev] = self.registry_events({'type': 'result', 'usage': {'input_tokens': 1}})
+        self.assertFalse([k for k in ev if re.search(r'^tokens$|total_tokens|tokens_total', k)])
+        with self.assertRaises(metrics.SchemaError):
+            metrics.validate('sessions', dict(ev, tokens=1), self.items)
+
+    def test_an_old_line_still_reads(self):
+        old = {'ts': f'{DAY}T09:00:00Z', 'task': 't', 'account': 'a1', 'kind': 'code', 'result': 'finished',
+               'item': 'T-0001', 'usd': 1.0}
+        path = os.path.join(self.root, 'metrics', 'sessions', f'{DAY}.jsonl')
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            f.write(json.dumps(old) + '\n')
+        evs = metrics.read_stream(self.root, 'sessions', [DAY])
+        self.assertEqual(len(evs), 1)
+        c = metrics.compute_costs([], evs)['T-0001']
+        self.assertEqual(c['tokens'], {'input': None, 'output': None, 'cache_read': None, 'cache_write': None})
+
+
+class ScorecardTokensTest(Base):
+    def costs_table(self, sessions):
+        return metrics.cost_table(self.items, [], sessions)
+
+    def test_cost_table_shows_four_columns_beside_usd(self):
+        lines = self.costs_table([
+            dict(tok_session('T-0001', input=1500, output=20, cache_read=2_500_000, cache_write=7), usd=1.0),
+            dict(tok_session('T-0002', input=500, output=5, cache_read=500_000, cache_write=3), usd=2.0)])
+        self.assertTrue(lines[0].endswith('| USD | In | Out | Cache rd | Cache wr |'))
+        row = next(l for l in lines if l.startswith('| F-0001'))
+        self.assertTrue(row.endswith('| 3.00 | 2.0 k | 25 | 3.0 M | 10 |'), row)
+
+    def test_a_dimension_no_session_carried_is_a_dash(self):
+        lines = self.costs_table([tok_session('T-0001', input=42)])
+        row = next(l for l in lines if l.startswith('| F-0001'))
+        self.assertTrue(row.endswith('| 42 | — | — | — |'), row)
+
+    def test_the_all_row_never_adds_across_dimensions(self):
+        lines = self.costs_table([tok_session('T-0001', input=1000, output=2000, cache_read=3000, cache_write=4000),
+                                  tok_session(None, input=1000, output=2000, cache_read=3000, cache_write=4000)])
+        row = next(l for l in lines if l.startswith('| **All**'))
+        self.assertTrue(row.endswith('| 2.0 k | 4.0 k | 6.0 k | 8.0 k |'), row)
+        self.assertNotIn('20.0 k', row)
+
+    def test_the_waste_table_itemises_the_day(self):
+        sessions = [tok_session('T-0001', input=1000, output=2000, cache_read=3000, cache_write=4000),
+                    dict(tok_session('T-0002', input=1), result='failed: token cap')]
+        rows = {r[0]: r for r in metrics.scorecard_rows([], sessions, [])}
+        self.assertEqual(rows['tokens'][1], 'in 1.0 k · out 2.0 k · cache rd 3.0 k · cache wr 4.0 k')
+        self.assertEqual(rows['tokens'][2], '2 sessions, 1 capped')
+
+    def test_the_rendered_scorecard_has_no_total(self):
+        fixture_streams(self)
+        md = metrics.render_daily(self.root, DAY, self.items)
+        self.assertIsNone(re.search(r'total tokens|tokens total', md, re.I))
+
+
+class CostBlockTokensTest(Base):
+    NOW = dt.datetime(2026, 9, 21, 12, 0, 0, tzinfo=dt.timezone.utc)
+
+    def card(self, iid):
+        path = os.path.join(self.root, 'tasks', f'{iid}.md')
+        meta, _body = frontmatter.parse(self.read(f'tasks/{iid}.md'), path=path)
+        return meta
+
+    def test_cost_block_carries_the_four_keys(self):
+        sessions = [tok_session('T-0001', input=1, output=2, cache_read=3, cache_write=4)]
+        metrics.write_costs(self.root, self.items, [], sessions, now=self.NOW)
+        cost = self.card('T-0001')['cost']
+        self.assertEqual((cost['tokens_input'], cost['tokens_output'], cost['tokens_cache_read'],
+                          cost['tokens_cache_write']), (1, 2, 3, 4))
+        self.assertIn('usd', cost)
+        self.assertFalse([v for v in cost.values() if isinstance(v, dict)])
+
+    def test_a_null_dimension_is_omitted_not_zero(self):
+        metrics.write_costs(self.root, self.items, [], [tok_session('T-0001', output=9)], now=self.NOW)
+        cost = self.card('T-0001')['cost']
+        self.assertEqual(cost['tokens_output'], 9)
+        for k in ('tokens_input', 'tokens_cache_read', 'tokens_cache_write'):
+            self.assertNotIn(k, cost)
+
+    def test_an_epic_subtree_adds_per_dimension(self):
+        costs = metrics.compute_costs([], [tok_session('T-0001', input=1, output=10),
+                                           tok_session('B-0001', input=2, cache_read=5)])
+        e = metrics.subtree_cost(self.items, costs, 'E-0001')
+        self.assertEqual(e['tokens'], {'input': 3, 'output': 10, 'cache_read': 5, 'cache_write': None})
+        self.assertIsNone(e['usd'])
