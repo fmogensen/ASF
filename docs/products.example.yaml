@@ -56,6 +56,7 @@ conventions:
   #   branches_per_tick: 12
   #   gate_timeout_s: 600
   # prs_per_tick: 6
+  # land_window_days: 7    # the window `asf status`'s Features row measures time-to-land over
   # the heading a plan uses to mark one task's section (default "### Task"; not read by the
   # current tools).
   task_heading: "## Task"

@@ -1,6 +1,7 @@
 """asf.views — sessions (the live registry), status (every row filled or naming its key), prod
 (no deploy), against a temp ASF_HOME and a tiny record. No network: every row that would call
 ``gh`` is either unconfigured here or stubbed."""
+import datetime as dt
 import json
 import os
 import shutil
@@ -10,6 +11,7 @@ from unittest import mock
 
 from asf import env
 from asf.views import capacity as capacity_view
+from asf.views import index_reader as ix
 from asf.views import prod, sessions, status
 from asf.workers import observe
 from asf.workers import pool as pool_mod
@@ -306,6 +308,26 @@ class StatusRow(ViewsTestCase):
         product = env.Product('p', {'capacity': {'sessions': 3}})
         cfg = {'capacity': {'total': {'sessions': 6}}}
         self.assertEqual(status.capacity_cell(cfg, product), 'sessions 0/3 (operator total 6)')
+
+
+class SpanTests(unittest.TestCase):
+    def test_span_buckets(self):
+        self.assertEqual(ix.span(0), '0m')
+        self.assertEqual(ix.span(59), '0m')
+        self.assertEqual(ix.span(60), '1m')
+        self.assertEqual(ix.span(3599), '59m')
+        self.assertEqual(ix.span(3600), '1h')
+        self.assertEqual(ix.span(172799), '47h')
+        self.assertEqual(ix.span(172800), '2d')
+        self.assertEqual(ix.span(-5), '0m')
+
+    def test_age_agrees_with_span_over_a_known_timestamp(self):
+        now = dt.datetime.now(dt.timezone.utc)
+        ts = (now - dt.timedelta(days=3)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        self.assertEqual(ix.age(ts), ix.span((now - ix.parse_ts(ts)).total_seconds()))
+
+    def test_age_of_none_is_the_unparseable_dash(self):
+        self.assertEqual(ix.age(None), '—')
 
 
 class ProdViewTests(ViewsTestCase):
