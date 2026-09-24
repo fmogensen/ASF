@@ -50,6 +50,44 @@ class BuildInvariants(unittest.TestCase):
             if base.get('GIT_CONFIG_COUNT'):
                 self.assertEqual(pairs[0], ('user.name', 'x'))
 
+    def test_the_callers_hooks_path_never_reaches_a_child(self):
+        # B-0114: a worker session runs under its own core.hooksPath (F-0076) in GIT_CONFIG_*, and
+        # git applies that to every repo, not just the session's — a gate or a suite that inherits
+        # it reads the caller's hooks in a repo the child created itself.
+        for base in bases():
+            caller = dict(base)
+            hermetic._git_config(caller, [('core.hooksPath', '/callers/.ASF/state/p/githooks')])
+            env = hermetic.build(caller, trunk='trunk')
+            keys = [k.lower() for k, _ in hermetic.git_config_pairs(env)]
+            self.assertNotIn('core.hookspath', keys, base)
+            self.assertIn('init.defaultbranch', keys, base)
+            if base.get('GIT_CONFIG_COUNT'):  # the base's own pairs are kept, and stay in order
+                self.assertEqual(hermetic.git_config_pairs(env)[0], ('user.name', 'x'), base)
+
+    def test_a_caller_that_asks_for_a_hooks_path_still_gets_one(self):
+        # the session spawner passes its own through git_config= — stripping the *inherited* one
+        # must not take that with it (asf.workers.runtime.build_env, F-0076)
+        caller = hermetic._git_config({'PATH': '/bin'}, [('core.hooksPath', '/inherited')])
+        env = hermetic.build(caller, git_config=[('core.hooksPath', '/mine')])
+        self.assertEqual([p for p in hermetic.git_config_pairs(env) if p[0] == 'core.hooksPath'],
+                         [('core.hooksPath', '/mine')])
+
+    def test_stripping_leaves_the_remaining_pairs_contiguous(self):
+        # git reads KEY_0..KEY_<count-1>; a hole where the dropped pair was loses every pair after
+        env = {'PATH': '/bin'}
+        hermetic._git_config(env, [('user.name', 'x'), ('core.hooksPath', '/h'),
+                                   ('user.email', 'e')])
+        hermetic.strip_git_config(env)
+        self.assertEqual(hermetic.git_config_pairs(env),
+                         [('user.name', 'x'), ('user.email', 'e')])
+        self.assertEqual(env['GIT_CONFIG_COUNT'], '2')
+        self.assertNotIn('GIT_CONFIG_KEY_2', env)
+
+    def test_stripping_a_base_that_carries_no_git_config_adds_none(self):
+        env = {'PATH': '/bin'}
+        hermetic.strip_git_config(env)
+        self.assertEqual(env, {'PATH': '/bin'})
+
     def test_the_worktree_is_first_on_pythonpath_then_the_running_package_then_the_base(self):
         for base in bases():
             env = hermetic.build(base, worktree='/wt')

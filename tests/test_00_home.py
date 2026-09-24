@@ -25,6 +25,10 @@ def hermetic_home():
     env.ASF_HOME = chosen
     for var in hermetic.CALLER_IDENTITY:
         os.environ.pop(var, None)
+    # B-0114: a session that runs the suite carries its own core.hooksPath in GIT_CONFIG_*, and
+    # git applies it to every repo — so a fixture repo the suite just created reports the
+    # operator's real hook dir and `asf hooks install` calls those hooks foreign.
+    hermetic.strip_git_config(os.environ)
     # the host-pressure guard reads a quiet host: a loaded machine must not hold the suite's launches
     os.environ['ASF_HOST_READING'] = '0 1 0'
     return chosen
@@ -38,6 +42,21 @@ class HomeIsHermetic(unittest.TestCase):
         from asf import env
         self.assertNotEqual(os.path.realpath(env.ASF_HOME), os.path.realpath(os.path.expanduser('~/.ASF')))
         self.assertEqual(os.environ.get('ASF_HOME'), env.ASF_HOME)  # subprocesses inherit it
+
+    def test_the_suite_never_inherits_the_callers_git_hooks_path(self):
+        # B-0114: git applies GIT_CONFIG_* core.hooksPath to every repo, so the caller session's
+        # own hook dir would answer `git rev-parse --git-path hooks` in a fresh fixture repo
+        import subprocess
+        from asf import hermetic
+        keys = [k.strip().lower() for k, _ in hermetic.git_config_pairs(os.environ)]
+        self.assertNotIn('core.hookspath', keys)
+        # and the effect of it: a repo made here answers with its own hooks dir, not the caller's
+        with tempfile.TemporaryDirectory() as repo:
+            subprocess.run(['git', 'init', '-q', repo], check=True)
+            hooks = subprocess.run(['git', '-C', repo, 'rev-parse', '--git-path', 'hooks'],
+                                   capture_output=True, text=True, check=True).stdout.strip()
+            hooks = hooks if os.path.isabs(hooks) else os.path.join(repo, hooks)
+            self.assertTrue(os.path.realpath(hooks).startswith(os.path.realpath(repo)), hooks)
 
     def test_the_suite_never_inherits_the_callers_identity(self):
         # B-0055: CI's hermetic step exports ASF_PRODUCT the way the tick does; a test that runs a
