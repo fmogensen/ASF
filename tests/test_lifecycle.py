@@ -595,5 +595,70 @@ class UnpushedAfterARebaseTest(unittest.TestCase):
         self.assertEqual(lc.unpushed_commits(self.repo, '', 'main'), 1)
 
 
+class OutcomeClassTests(unittest.TestCase):
+    """T-0201, §2.1: one owner for what a session's end means."""
+
+    def test_finished(self):
+        self.assertEqual(lc.outcome_class('finished'), lc.FINISHED)
+
+    def test_dead_pid(self):
+        self.assertEqual(lc.outcome_class('dead pid'), 'dead pid')
+
+    def test_a_push_gap(self):
+        ev = lc.Evidence(result=OK, uncommitted=2, unpushed=1)
+        self.assertEqual(lc.outcome_class(f'failed: {lc.push_gap(ev)}'), 'not pushed')
+
+    def test_push_gap_still_spells_the_same_bytes(self):
+        ev = lc.Evidence(result=OK, uncommitted=2, unpushed=1)
+        self.assertEqual(lc.push_gap(ev), 'not pushed: 2 uncommitted file(s), 1 unpushed commit(s)')
+
+    def test_empty_branch(self):
+        self.assertEqual(lc.outcome_class(f'failed: {lc.EMPTY_BRANCH}'), 'empty branch')
+
+    def test_a_cli_signature(self):
+        self.assertEqual(lc.outcome_class('failed: quota'), 'quota')
+
+    def test_unpushed_work(self):
+        self.assertEqual(lc.outcome_class('failed: unpushed work'), 'unpushed work')
+
+    def test_pushed_after_stop(self):
+        self.assertEqual(lc.outcome_class(f'failed: {lc.PUSHED_AFTER_STOP}'), 'pushed after stop')
+
+    def test_an_unnamed_failure_is_other(self):
+        self.assertEqual(lc.outcome_class('failed: something nobody named'), lc.OTHER)
+
+    def test_a_bare_failed_is_other(self):
+        self.assertEqual(lc.outcome_class('failed'), lc.OTHER)
+
+    def test_lines_that_describe_no_outcome(self):
+        for line in ('running', 'unknown', '', None):
+            with self.subTest(line=line):
+                self.assertIsNone(lc.outcome_class(line))
+
+    def test_pd7_stopped_is_an_operators_decision_not_a_class(self):
+        self.assertIsNone(lc.outcome_class(lc.STOPPED))
+        self.assertNotIn(lc.STOPPED, lc.OUTCOME_CLASSES)
+
+    def test_whitespace_and_case(self):
+        self.assertEqual(lc.outcome_class('  FAILED: Quota  '), 'quota')
+
+    def test_every_string_judge_can_return_classes_to_a_member(self):
+        ev = lc.Evidence(result=OK, uncommitted=3, unpushed=0)
+        names = [name for name, _ in lc.runtime_mod.FAILURE_SIGNATURES]
+        reasons = [lc.push_gap(ev), lc.EMPTY_BRANCH, lc.runtime_mod.report.UNPUSHED, *names]
+        strings = {lc.FINISHED, lc.DEAD_PID, 'failed'} | {f'failed: {r}' for r in reasons}
+        for s in sorted(strings):
+            with self.subTest(end_reason=s):
+                self.assertIn(lc.outcome_class(s), lc.OUTCOME_CLASSES)
+
+    def test_the_failing_classes_are_all_but_finished(self):
+        self.assertEqual(set(lc.FAILING_CLASSES), set(lc.OUTCOME_CLASSES) - {lc.FINISHED})
+
+    def test_the_vocabulary_is_the_specs_in_the_specs_order(self):
+        self.assertEqual(lc.OUTCOME_CLASSES, (
+            'finished', 'not pushed', 'empty branch', 'dead pid', 'pushed after stop',
+            'unpushed work', 'unknown model', 'auth', 'quota', 'permission', 'other'))
+
+
 if __name__ == '__main__':
     unittest.main()

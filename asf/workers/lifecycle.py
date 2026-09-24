@@ -90,6 +90,19 @@ DEAD_PID = 'dead pid'
 STOPPED = 'stopped'
 PUSHED_AFTER_STOP = 'pushed after stop'
 EMPTY_BRANCH = 'empty branch: nothing to land'
+#: The prefix of a ``push_gap`` line: work done and not on origin (B-0051). One owner for the
+#: string the classifier matches on.
+NOT_PUSHED = 'not pushed'
+#: A failure whose signature this module does not name.
+OTHER = 'other'
+
+#: Every class a session's ``end_reason`` falls into. ``finished`` is the only one that is not a
+#: failure; ``other`` is a failure whose signature this module does not name. Composed from the
+#: constants that write the strings, so a rename follows.
+OUTCOME_CLASSES = (FINISHED, NOT_PUSHED, EMPTY_BRANCH.split(':')[0], DEAD_PID, PUSHED_AFTER_STOP,
+                   runtime_mod.report.UNPUSHED, *(name for name, _ in runtime_mod.FAILURE_SIGNATURES),
+                   OTHER)
+FAILING_CLASSES = tuple(c for c in OUTCOME_CLASSES if c != FINISHED)
 
 
 # ---- the session id -------------------------------------------------------------
@@ -554,7 +567,28 @@ class State:
 
 def push_gap(ev):
     """The reason a result that says ok is not ``finished``: what is not on origin (B-0051)."""
-    return f'not pushed: {ev.uncommitted} uncommitted file(s), {ev.unpushed} unpushed commit(s)'
+    return f'{NOT_PUSHED}: {ev.uncommitted} uncommitted file(s), {ev.unpushed} unpushed commit(s)'
+
+
+def outcome_class(result):
+    """The class of an ``end_reason`` (the ``sessions`` stream's ``result``), or None when the
+    line describes no outcome — ``running``, ``unknown``, ``stopped`` (an operator's decision,
+    not the factory's outcome), empty. Pure: no clock, no io."""
+    text = (result or '').strip().lower()
+    if text in ('', 'running', 'unknown', STOPPED):
+        return None
+    if text == FINISHED:
+        return FINISHED
+    if text == DEAD_PID:
+        return DEAD_PID
+    if text == 'failed':
+        return OTHER
+    if text.startswith('failed: '):
+        text = text[len('failed: '):].strip()
+    for prefix in (NOT_PUSHED, OUTCOME_CLASSES[2]):
+        if text.startswith(prefix):
+            return prefix
+    return text if text in OUTCOME_CLASSES[3:-1] else OTHER
 
 
 #: Kinds whose work is not a branch: a groom (adjudicate) session rules into the state dir's
