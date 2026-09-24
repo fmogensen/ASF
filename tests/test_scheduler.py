@@ -280,6 +280,16 @@ class RenderTest(SchedulerTestCase):
         self.assertNotIn('StartInterval', job['plist'])
         self.assertEqual(job['plist']['ProgramArguments'][-2:], ['--steps', 'daily'])
 
+    def test_daily_calendar_job_does_not_run_at_load(self):
+        """B-0115: a timed (calendar) clock only ever fires at its declared time — RunAtLoad
+        would also fire it the moment install loads the job, hours outside that window."""
+        job = scheduler.render('sample', self.DAILY)
+        self.assertNotIn('RunAtLoad', job['plist'])
+
+    def test_interval_job_still_runs_at_load(self):
+        job = scheduler.render('sample', self.RECORD)
+        self.assertTrue(job['plist']['RunAtLoad'])
+
     def test_daily_job_runs_the_daily_step_only(self):
         # a bare `--daily` means "every step, and daily even if it ran today": the daily job then
         # ran record/wave/harvest beside the interval job, on the same record clone

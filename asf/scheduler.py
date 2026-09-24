@@ -363,11 +363,13 @@ def render(product, clock, cfg=None):
             'EnvironmentVariables': env_vars,
             'StandardOutPath': log,
             'StandardErrorPath': log,
-            'RunAtLoad': True,
         }
         if clock.calendar:
+            # a timed clock fires only at its declared time — RunAtLoad would also run it the
+            # moment install loads the job, hours outside that window (B-0115)
             plist['StartCalendarInterval'] = dict(clock.calendar)
         else:
+            plist['RunAtLoad'] = True
             plist['StartInterval'] = int(clock.interval_s)
         job['plist'] = plist
         job['path'] = plist_path(label)
