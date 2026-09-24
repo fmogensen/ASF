@@ -306,6 +306,21 @@ class ProductValidation(unittest.TestCase):
             """))
         self.assertIn((3, 'capacity.batch', "must be a map, not 'TODO'"), problems)
 
+    def test_an_improve_block_validates_and_an_unknown_key_under_it_is_reported(self):
+        well_formed = _dedent("""
+            repo_slug: a/b
+            improve:
+              thresholds:
+                non_landing_sessions: 0.30
+              epic: E-0001
+              window_days: null
+              premium_models: [claude-opus-5]
+            """)
+        self.assertEqual(env.validate_product_text(well_formed), [])
+        problems = env.validate_product_text(well_formed + '\n  made_up_key: 1\n')
+        self.assertEqual(problems, [(8, 'improve.made_up_key', 'is not a field of the product file')])
+        self.assertEqual(env.Product('p', env.loads(well_formed)).improve['epic'], 'E-0001')
+
 
 def _dedent(text):
     lines = [l for l in text.splitlines() if l.strip() != '']
