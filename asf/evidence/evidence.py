@@ -809,6 +809,13 @@ def docs_only(paths, dirs):
     return bool(paths) and all(any(p.startswith(d) for d in dirs) for p in paths)
 
 
+#: The lane kinds whose merged PR is a document landing, never the Feature's code landing
+#: (B-0114). Read by :func:`lane_kind` here and by
+#: :func:`asf.harvest.lane.squash_subject`, which writes the subject this file then recognises —
+#: the two must name the same kinds, so they name them once.
+DOC_LANE_KINDS = ("spec", "plan")
+
+
 def lane_kind(branch, prefixes):
     """"spec" / "plan" when `branch` is a document-lane branch (the product's spec/plan
     prefix), else None."""
@@ -816,7 +823,7 @@ def lane_kind(branch, prefixes):
     for pre in ("refs/heads/", "origin/"):
         if b.startswith(pre):
             b = b[len(pre):]
-    for kind in ("spec", "plan"):
+    for kind in DOC_LANE_KINDS:
         pre = prefixes.get(kind)
         if pre and b.lower().startswith(pre.lower()):
             return kind

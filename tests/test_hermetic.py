@@ -3,6 +3,7 @@ tests": B-0033, B-0038, B-0043, B-0047). The harvest gate, a worker session and 
 subprocesses all go through :func:`asf.hermetic.build`; these tests pin what it strips, what it
 pins and what it puts first — under every base environment a generator can throw at it."""
 import itertools
+import json
 import os
 import random
 import shutil
@@ -205,6 +206,35 @@ class OneBuilderTests(unittest.TestCase):
         self.assertIn('env -i', wf)
         self.assertIn('ASF_PRODUCT=asf', wf)
         self.assertIn('init.defaultBranch master', wf)
+
+    def test_both_of_the_suites_entry_points_are_hermetic(self):
+        # The suite has two guards — tests/__init__.py for `python -m unittest tests.<mod>` and
+        # `discover -t .`, tests/test_00_home.py for `discover -s tests` — and every leak they
+        # exist for was once fixed in one of them only: the operator's home (B-0043), the
+        # caller's identity (B-0055), the caller's core.hooksPath (B-0114). Both are proved here
+        # from a child carrying all three, so neither twin can be left behind again.
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        base = dict(os.environ, PYTHONPATH=root, ASF_PRODUCT='live-product',
+                    ASF_JOB='someone-elses-job', ASF_SESSION='s1', BACKLOG_ID_RANGE='S:1-2')
+        base.pop('ASF_TESTS_HOME', None)  # else the home below is the caller's choice, not a temp
+        base.pop('ASF_HOME', None)
+        hermetic.strip_git_config(base)  # start clean, then plant exactly the pair under test
+        hermetic._git_config(base, [('core.hooksPath', '/callers/githooks')])
+        probe = ('import os, json;'
+                 'from asf import env, hermetic;'
+                 'print(json.dumps({'
+                 '"git": [k.lower() for k, _ in hermetic.git_config_pairs(os.environ)],'
+                 '"identity": [v for v in hermetic.CALLER_IDENTITY if v in os.environ],'
+                 '"home": env.ASF_HOME}))')
+        for entry in ('import tests', 'import tests.test_00_home'):
+            out = subprocess.run(['python3', '-c', f'{entry}; {probe}'], cwd=root, env=base,
+                                 capture_output=True, text=True)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            got = json.loads(out.stdout.splitlines()[-1])
+            self.assertNotIn('core.hookspath', got['git'], entry)
+            self.assertEqual(got['identity'], [], entry)
+            self.assertNotEqual(os.path.realpath(got['home']),
+                                os.path.realpath(os.path.expanduser('~/.ASF')), entry)
 
 
 if __name__ == '__main__':

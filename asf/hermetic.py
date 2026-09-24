@@ -12,7 +12,8 @@ those rules live.
 Always: no git-hook variable, no caller identity (:data:`CALLER_IDENTITY`), none of the config
 keys a child never inherits (:data:`GIT_CONFIG_NOT_INHERITED` — the caller session's own
 ``core.hooksPath``), and git's ``init.defaultBranch`` pinned to the trunk through
-``GIT_CONFIG_*`` (a child never learns the branch name from the host). Then what the caller asks for: ``worktree`` first on ``PYTHONPATH``
+``GIT_CONFIG_*`` (a child never learns the branch name from the host). Then what the caller
+asks for: ``worktree`` first on ``PYTHONPATH``
 (then the package that is running, then whatever the base had), ``identity`` for a worker (its
 own ``ASF_PRODUCT``/``ASF_JOB``/``ASF_SESSION``/``BACKLOG_ID_RANGE`` — set, not inherited),
 ``home`` to point ``HOME`` somewhere else (a test's temp home; a worker account's own).
@@ -40,6 +41,9 @@ GIT_HOOK = ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE')
 #: (:func:`asf.workers.githooks.ensure`, F-0076), and it binds *every* repo the child touches,
 #: not just the session's: a gate or a suite that inherits it sees the caller's hooks in a
 #: fixture repo it just created (B-0114). A caller that means to set one passes ``git_config``.
+#: This is the ``GIT_CONFIG_COUNT``/``KEY_n`` channel only — git also honours
+#: ``GIT_CONFIG_PARAMETERS`` (what ``git -c`` exports to its own descendants) and
+#: ``GIT_CONFIG_GLOBAL``; nothing in ASF spawns a child through either today.
 GIT_CONFIG_NOT_INHERITED = ('core.hookspath',)
 
 #: ``GIT_CONFIG_KEY_3``/``GIT_CONFIG_VALUE_3`` — one entry of git's environment config.
@@ -83,7 +87,9 @@ def git_config_pairs(env):
 def strip_git_config(env, keys=GIT_CONFIG_NOT_INHERITED):
     """Removes every ``GIT_CONFIG_*`` entry of ``env`` whose key is in ``keys``, and rewrites what
     is left as a contiguous run — git reads ``KEY_0``…``KEY_<count-1>`` and a hole loses the rest.
-    Keys compare lowercased, the way git compares a section and a key. Mutates and returns
+    Keys compare lowercased, the way git compares a section and a key; no entry here has a
+    subsection, which git would compare case-sensitively instead. A base that carried a count
+    keeps one even when every pair went, which git reads the same as none. Mutates and returns
     ``env``."""
     drop = {k.strip().lower() for k in keys}
     kept = [(k, v) for k, v in git_config_pairs(env) if k.strip().lower() not in drop]

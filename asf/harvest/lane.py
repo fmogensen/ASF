@@ -1306,10 +1306,10 @@ def squash_subject(lane, f, number):
     (#743)`` — and the evidence reads that commit as the Feature's code landing. A spec/plan lane
     names its kind instead, the shape its own commits carry (``plan(F-0047): … (#743)``): its
     branch's newest subject when that is already a document lane's, else prefixed with it."""
+    from asf.evidence.evidence import DOC_LANE_KINDS, DOC_LANE_SUBJECT
     kind = f.get('kind')
-    if kind not in ('spec', 'plan'):
+    if kind not in DOC_LANE_KINDS:
         return None
-    from asf.evidence.evidence import DOC_LANE_SUBJECT
     branch = f['branch']
     head = next((s.strip() for s in _subjects(lane.repo, lane.trunk, branch) if s.strip()), '')
     if not DOC_LANE_SUBJECT.match(head):
