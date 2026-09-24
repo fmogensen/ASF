@@ -82,6 +82,34 @@ def parse_inbox_file(text):
     return Card(title, headers, description, features, acceptance)
 
 
+def title_signature(title):
+    """The signature an operator's ``type: bug`` card gets when it names none: its title,
+    whitespace folded — a Bug is keyed on its signature, and a title is the one line it has."""
+    return ' '.join(str(title or '').split()) or 'untitled defect'
+
+
+def declared(card):
+    """An explicit ``type:`` line decides the minted type (I13); the shape rule only fills what is
+    missing. A ``type: bug`` card with no ``signature:`` gets one from its title
+    (:func:`title_signature`), so it is minted a Bug — never read by its shape as a Feature. Any
+    other declared type the shape does not reach stays a question (``shape._typed``), never the
+    other type."""
+    t = (card.headers.get('type') or '').strip().lower()
+    if t == 'bug' and not card.headers.get('signature') and not card.headers.get('writes'):
+        return card._replace(headers=dict(card.headers, signature=title_signature(card.title)))
+    return card
+
+
+def scrub_title(card, root=None):
+    """The card's title passed through the redaction filter before it is minted: a protected name
+    or a secret in it becomes a neutral token, never copied into the record (and from there into
+    other cards' derived Backlinks)."""
+    from asf import redact
+    pats = redact.default_patterns(root)
+    title = redact.scrub(card.title, pats) if pats else card.title
+    return card if title == card.title else card._replace(title=title)
+
+
 def cmd_inbox(args, root):
     """``asf inbox --title T [--body-file F] [--parent ID]``: one untyped card into the
     record's intake directory. Mints nothing and runs no groom (D10)."""
@@ -137,7 +165,7 @@ def process_inbox(root, canonical, date, default_bug_parent=None, intake_dir=Non
             text = f.read()
         body, prior = _split_question(text) if _has_question(text) else (text, '')
 
-        card = parse_inbox_file(body)
+        card = declared(scrub_title(parse_inbox_file(body), root))
         result = derive(card, canonical, default_bug_parent=default_bug_parent)
 
         if isinstance(result, Question):
@@ -223,7 +251,7 @@ def question_lines(root, intake_dir=None):
         body, question = _split_question(text)
         if not question:
             continue
-        title = ' '.join(parse_inbox_file(body).title.split())
+        title = ' '.join(scrub_title(parse_inbox_file(body), root).title.split())
         out.append(f"- [ ] {TOKEN_PREFIX}{name} {title} — {question} → answer: ____")
     return out
 

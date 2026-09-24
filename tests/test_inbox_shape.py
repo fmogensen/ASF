@@ -362,6 +362,41 @@ class IntakeTest(unittest.TestCase):
         self.assertIn('created (inbox) — shape: signature → bug', text)
         self.assertEqual(os.listdir(os.path.join(self.root, 'inbox')), ['done'])
 
+    def test_i13_an_explicit_type_bug_without_a_signature_is_minted_a_bug(self):
+        """I13 (intake-silently-ignores-an-explicit-type-line): `type: bug` decides the type — the
+        signature comes from the title, and the card is never minted as a Feature."""
+        with open(os.path.join(self.root, 'inbox', 'urgent.md'), 'w', encoding='utf-8') as f:
+            f.write("# Billing   plans page is down\ntype: bug\nparent: E-0001\nseverity: S1\n\n"
+                    "Nothing loads.\n")
+        r = run(['groom'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(sorted(os.listdir(os.path.join(self.root, 'features'))), ['F-0001.md'])
+        with open(os.path.join(self.root, 'bugs', 'B-0001.md'), encoding='utf-8') as f:
+            meta, _body = frontmatter.parse(f.read(), path='bugs/B-0001.md')
+        self.assertEqual((meta['type'], meta['severity']), ('bug', 'S1'))
+        self.assertEqual(meta['signature'], 'Billing plans page is down')
+
+    def test_i13_the_declared_type_is_the_minted_type_or_a_question(self):
+        from asf.groom import inbox
+        canonical = seeded_canonical()
+        cases = {  # (header lines) -> the declared type
+            ('type: bug',): 'bug',
+            ('type: bug', 'signature: test_pay'): 'bug',
+            ('type: feature', 'parent: E-0001'): 'feature',
+            ('type: task', 'writes: src/a.py', 'parent: F-0001'): 'task',
+            ('type: task',): 'task',               # no writes: — asked, never a Feature
+            ('type: epic', 'parent: E-0001'): 'epic',
+        }
+        for lines, want in cases.items():
+            with self.subTest(lines=lines):
+                c = inbox.declared(inbox.parse_inbox_file(
+                    '# Billing checkout\n' + '\n'.join(lines) + '\n\nText.\n'))
+                result = shape.derive(c, canonical, default_bug_parent='E-0001')
+                if isinstance(result, shape.Question):
+                    self.assertIn(f'type: {want}', result.text)
+                else:
+                    self.assertEqual(result.type, want)
+
     def test_story_card_keeps_its_acceptance_list(self):
         with open(os.path.join(self.root, 'inbox', 'thing.md'), 'w', encoding='utf-8') as f:
             f.write("# Add plan tiers\nparent: F-0001\n\n## Acceptance\n- [ ] python3 -m unittest tests.x\n"
