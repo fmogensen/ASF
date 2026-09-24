@@ -19,6 +19,22 @@ the branch is what lands. The states, and what each one rests on::
 Only ``reaped`` is terminal: every other state has a successor (:data:`TRANSITIONS`), so no
 branch can sit still forever.
 
+Beside this branch lifecycle — what lands — sits the **session state** (:data:`SESSION_STATES`,
+F-0098): what a reader prints about the run's own session, five words wide::
+
+    working              the pid answers
+    ended-awaiting-tick  the session is over (its result, or its pid gone) but health has not
+                         yet written the ``ended`` line — the result is known before the tick is
+    finished             health recorded ``ended``, ``end_reason: finished``
+    failed               health recorded ``ended``, a named failure
+    dead                 the process is gone with no end-of-run record and nothing pushed, or the
+                         operator stopped it
+
+One function classifies a run into one of these (:func:`classify`), pure, from the run and its
+evidence; :func:`state_of` is the impure entry point that gathers the evidence and calls it. No
+other module derives a session state (:func:`holds_seat`, :func:`seats` answer the seat question
+the same way) — see ``tests/test_lifecycle.py::OneClassifierTest``.
+
 **The registry** (``sessions.jsonl``) is append-only. A line carrying ``started`` and ``pid`` is
 a launch and opens a new run of its job; every other line for that job updates its *latest* run
 (:func:`fold`). A run's terminal fields never fold into the next run (B-0041) — the boundary is
@@ -26,10 +42,10 @@ the launch line, not a set of nulls the launcher has to remember to write.
 
 **Evidence** is gathered, never remembered: the log's last-run result (:func:`asf.workers.runtime
 .read_result`), the pid, and git — ``origin/<branch>``, the worktree's tree and HEAD
-(:func:`gather` → :class:`Evidence`). The state is derived from the run and the evidence
-(:func:`derive`); nothing stores it a second time. The one recorded transition is health's
-``ended`` line (the timestamp and the reason at the time), so the feeder, the pool and spawn
-can ask "is it live" without git (:func:`is_live`).
+(:func:`gather` → :class:`Evidence`). The branch state is derived from the run and the evidence
+(:func:`derive`, itself re-expressed over :func:`classify`); nothing stores it a second time. The
+one recorded transition is health's ``ended`` line (the timestamp and the reason at the time), so
+the feeder, the pool and spawn can ask "is it live" without git (:func:`is_live`).
 
 Every other module asks this one:
 
@@ -40,7 +56,8 @@ Every other module asks this one:
 * the feeder, the wave, the pool and capacity — :func:`occupies` (live on the ledger AND the pid
   answers: a dead run is no load even before health records its end), :func:`inflight`,
   :func:`attempts`, :func:`corrections`;
-* the PR step — :func:`finished`.
+* the PR step — :func:`finished`;
+* every reader of a session's own state — :func:`state_of` and :func:`classify` (F-0098).
 """
 import dataclasses
 import json
@@ -89,6 +106,7 @@ RUN_FIELDS = ('ended', 'end_reason', 'rc', 'corrected', 'operator_flagged', 'har
               'resumed', 'continued')
 
 FINISHED = 'finished'
+#: read, never written: ledgers on disk carry this on runs health judged before F-0098
 DEAD_PID = 'dead pid'
 STOPPED = 'stopped'
 PUSHED_AFTER_STOP = 'pushed after stop'
@@ -117,6 +135,34 @@ OUTCOME_CLASSES = (FINISHED, NOT_PUSHED, EMPTY_BRANCH.split(':')[0], DEAD_PID, P
                    runtime_mod.report.UNPUSHED, *(name for name, _ in runtime_mod.FAILURE_SIGNATURES),
                    HOOK_REFUSED, NETWORK_ERROR, OTHER)
 FAILING_CLASSES = tuple(c for c in OUTCOME_CLASSES if c != FINISHED)
+
+# ---- the session states (§2.1) ---------------------------------------------------
+
+WORKING = 'working'
+ENDED_AWAITING_TICK = 'ended-awaiting-tick'
+FAILED = 'failed'
+DEAD = 'dead'
+#: FINISHED ('finished') is reused: it is already the end_reason health writes.
+SESSION_STATES = (WORKING, ENDED_AWAITING_TICK, FINISHED, FAILED, DEAD)
+
+PUSHED_NO_REPORT = 'pushed, no report'
+NO_RECORD = 'no end-of-run record, nothing pushed'
+STOPPED_BY_OPERATOR = 'stopped by the operator'
+DEAD_REASONS = (NO_RECORD, STOPPED_BY_OPERATOR)
+
+#: ``(state, table heading, count word)`` for the three live groups, in the order every view
+#: prints them (P11): one tuple, so `views.sessions` and `views.status` cannot word it two ways.
+LIVE_GROUPS = ((WORKING, 'Working', 'working'),
+              (ENDED_AWAITING_TICK, 'Ended, awaiting tick', 'ended (awaiting tick)'),
+              (DEAD, 'Dead', 'dead'))
+
+
+def is_dead_reason(reason):
+    """True for the two spellings a ``dead``-with-no-record ``end_reason`` carries: the retired
+    :data:`DEAD_PID` and the honest text this module writes now (P8) — the one place both are
+    accepted, so a reader matching on either is honest about ledgers written before and after
+    F-0098."""
+    return reason in (DEAD_PID, f'{DEAD}: {NO_RECORD}')
 
 
 # ---- the session id -------------------------------------------------------------
@@ -908,6 +954,93 @@ def judge(run, ev, landing=None):
     return FINISHED
 
 
+# ---- the session classifier (§2.1-§2.3) ------------------------------------------
+
+@dataclasses.dataclass
+class Status:
+    """One session's state, as every reader prints it. ``name`` is one of :data:`SESSION_STATES`;
+    ``result`` is what the run came to (``finished`` | ``failed: …`` | :data:`PUSHED_NO_REPORT`),
+    ``reason`` is why for ``failed`` and ``dead``, ``source`` is what decided it (``'ledger'`` |
+    ``'report'`` | ``'branch'`` | ``'pid'``)."""
+    name: str
+    result: str = ''
+    reason: str = ''
+    source: str = ''
+
+    @property
+    def label(self):
+        """What every view prints. One place, so the six readers cannot word it six ways.
+
+        A ``failed`` status' ``reason`` is the ledger's own ``end_reason`` (:func:`judge` already
+        spells it ``'failed: …'``), so the label is that text verbatim — prefixing it again would
+        print ``failed: failed: …``."""
+        if self.name == ENDED_AWAITING_TICK:
+            return f'ended, awaiting tick ({self.result})'
+        if self.name == FAILED:
+            return self.reason
+        if self.name == DEAD:
+            return f'dead: {self.reason}'
+        return self.name
+
+
+def classify(run, ev, path=None):
+    """One run and its evidence to one :class:`Status` (§2.1). Pure: no git, no clock, no file —
+    ``judge`` and ``lands`` are the only calls, and ``path`` is passed through to ``lands`` exactly
+    as :func:`derive` passes it today."""
+    if run.get('ended'):
+        reason = run.get('end_reason') or DEAD_PID
+        if reason == FINISHED:
+            return Status(FINISHED, result=FINISHED, source='ledger')
+        if reason == STOPPED:
+            return Status(DEAD, result=STOPPED, reason=STOPPED_BY_OPERATOR, source='ledger')
+        if is_dead_reason(reason):
+            if ev.result is not None:
+                return Status(ENDED_AWAITING_TICK, result=judge(run, ev, landing=lands(run, path)),
+                              source='report')
+            return Status(DEAD, reason=NO_RECORD, source='ledger')
+        return Status(FAILED, reason=reason, result=reason, source='ledger')
+    if ev.alive:
+        return Status(WORKING, source='pid')
+    if ev.result is not None:
+        return Status(ENDED_AWAITING_TICK, result=judge(run, ev, landing=lands(run, path)),
+                      source='report')
+    if ev.remote_sha and ev.has_commits:
+        return Status(ENDED_AWAITING_TICK, result=PUSHED_NO_REPORT, source='branch')
+    return Status(DEAD, reason=NO_RECORD, source='pid')
+
+
+def state_of(product, run, alive=None, path=None, gather_fn=None):
+    """The one impure entry point (§2.2's evidence ladder): gathers no more evidence than the
+    answer needs, then :func:`classify`. A recorded run that is not a recorded death classifies
+    against ``Evidence()`` and reads nothing; a recorded death reads the log's result line alone;
+    a run with no ``ended`` whose pid answers classifies against ``Evidence(alive=True)``; only a
+    run with no ``ended`` whose process is gone calls :func:`gather`. ``gather_fn`` exists for a
+    test that asserts git is never reached otherwise."""
+    run = run or {}
+    alive = alive or pid_alive
+    if run.get('ended'):
+        reason = run.get('end_reason') or DEAD_PID
+        ev = Evidence(result=result_of(run)) if is_dead_reason(reason) else Evidence()
+        return classify(run, ev, path=path)
+    if alive(run.get('pid')):
+        return classify(run, Evidence(alive=True), path=path)
+    return classify(run, (gather_fn or gather)(product, run, alive=alive), path=path)
+
+
+def holds_seat(status):
+    """The one definition of a taken slot: the classifier's ``working``, and nothing else.
+    ``status`` may be a :class:`Status` or its bare ``name`` string."""
+    name = status.name if isinstance(status, Status) else status
+    return name == WORKING
+
+
+def seats(rows):
+    """The rows of an inflight list that hold a seat (:func:`holds_seat`). A row carrying no
+    ``state`` counts as one (§1.4): a hand-written ``--inflight`` row is a live guess, and the
+    conservative reading does not over-launch."""
+    return sum(1 for r in rows if 'state' not in r or holds_seat(r['state']))
+
+
 def derive(run, ev, cap=ROUND_CAP, path=None):
     """The state of ``run`` given its evidence. Pure: no git, no clock."""
     if landed(run):
@@ -920,17 +1053,12 @@ def derive(run, ev, cap=ROUND_CAP, path=None):
         return State(HELD, corr.get('text', ''), rounds)
     if (run.get('correction') or {}).get('text'):
         return State(CORRECTED, run['correction'].get('text', ''), rounds)
-    if run.get('ended'):
-        reason = run.get('end_reason') or DEAD_PID
-        if reason == FINISHED:
-            return State(PUSHED, FINISHED, rounds)
-        return State(ENDED, reason, rounds)
-    reason = judge(run, ev, landing=lands(run, path))
-    if reason is None:
+    status = classify(run, ev, path=path)
+    if status.name == WORKING:
         return State(RUNNING if ev.has_commits else LAUNCHED)
-    if reason == FINISHED:
+    if status.result == FINISHED:
         return State(PUSHED, FINISHED, rounds)
-    return State(ENDED, reason, rounds)
+    return State(ENDED, status.result or status.reason, rounds)
 
 
 # ---- stop: the one place that stops a run (B-0069) ------------------------------------

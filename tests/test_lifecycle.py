@@ -10,6 +10,8 @@ Classes and the Bugs behind them:
   landed → reaped, every transition reachable, none terminal but reaped, a launch refused only
   on a live worktree, reap on landed or empty.
 """
+import ast
+import glob
 import itertools
 import json
 import os
@@ -285,6 +287,193 @@ class StateMachineInvariants(unittest.TestCase):
         self.assertEqual(lc.inflight(path), [{'item': 'B-0001', 'kind': None, 'account': None,
                                               'job': 'correct-b-0001', 'started': 't4'}])
         self.assertEqual(lc.attempts(path), {'B-0001': 2})
+
+
+class SessionStateInvariants(unittest.TestCase):
+    """§2.1-§2.2's classifier, over hand-built runs and Evidence — no git, no clock (F-0098)."""
+
+    RUN = {'job': 'fix-bug-b-0080', 'branch': 'fix/B-0080', 'item': 'B-0080', 'pid': 1,
+           'started': 't'}
+
+    def test_a_result_that_says_ok_on_a_pushed_branch_is_ended_awaiting_tick_not_dead(self):
+        # the four sessions of 2026-09-23: no `ended`, pid gone, a result that says ok, pushed
+        ev = lc.Evidence(result=OK, alive=False, remote_sha='s', head_on_remote=True,
+                         has_commits=True)
+        status = lc.classify(self.RUN, ev)
+        self.assertEqual(status.name, lc.ENDED_AWAITING_TICK)
+        self.assertEqual(status.result, lc.FINISHED)
+        self.assertNotEqual(status.name, lc.DEAD)
+
+    def test_a_result_that_says_ok_but_unpushed_gives_the_same_text_health_writes_later(self):
+        ev = lc.Evidence(result=OK, alive=False, remote_sha='s', has_commits=True, unpushed=2)
+        status = lc.classify(self.RUN, ev)
+        self.assertEqual(status.name, lc.ENDED_AWAITING_TICK)
+        self.assertEqual(status.result, lc.judge(self.RUN, ev))
+        self.assertEqual(status.result,
+                         'failed: not pushed: 0 uncommitted file(s), 2 unpushed commit(s)')
+
+    def test_no_result_but_a_pushed_branch_with_commits_is_pushed_no_report(self):
+        ev = lc.Evidence(result=None, alive=False, remote_sha='s', has_commits=True)
+        status = lc.classify(self.RUN, ev)
+        self.assertEqual((status.name, status.result, status.source),
+                         (lc.ENDED_AWAITING_TICK, lc.PUSHED_NO_REPORT, 'branch'))
+
+    def test_no_result_and_nothing_on_origin_is_dead_no_record(self):
+        ev = lc.Evidence(result=None, alive=False, remote_sha='')
+        status = lc.classify(self.RUN, ev)
+        self.assertEqual((status.name, status.reason), (lc.DEAD, lc.NO_RECORD))
+
+    def test_b0076_a_pushed_branch_never_committed_to_is_dead_not_ended_awaiting_tick(self):
+        ev = lc.Evidence(result=None, alive=False, remote_sha='s', has_commits=False)
+        status = lc.classify(self.RUN, ev)
+        self.assertEqual(status.name, lc.DEAD)
+
+    def test_a_recorded_end_reads_the_ledger(self):
+        finished = dict(self.RUN, ended='t2', end_reason='finished')
+        self.assertEqual(lc.classify(finished, lc.Evidence()).name, lc.FINISHED)
+        stopped = dict(self.RUN, ended='t2', end_reason='stopped')
+        status = lc.classify(stopped, lc.Evidence())
+        self.assertEqual(status.name, lc.DEAD)
+        self.assertEqual(status.label, 'dead: stopped by the operator')
+        failed = dict(self.RUN, ended='t2', end_reason='failed: quota')
+        status = lc.classify(failed, lc.Evidence())
+        self.assertEqual(status.name, lc.FAILED)
+        self.assertEqual(status.label, 'failed: quota')
+
+    def test_a_retired_dead_pid_line_is_dead_and_a_later_result_is_re_judged(self):
+        # B-0028: the result may land after the check; both the retired and the honest text answer
+        dead_pid = dict(self.RUN, ended='t2', end_reason=lc.DEAD_PID)
+        self.assertEqual(lc.classify(dead_pid, lc.Evidence()).name, lc.DEAD)
+        self.assertEqual(lc.classify(dead_pid, lc.Evidence()).reason, lc.NO_RECORD)
+        ev = lc.Evidence(result=OK, remote_sha='s', head_on_remote=True, has_commits=True)
+        status = lc.classify(dead_pid, ev)
+        self.assertEqual(status.name, lc.ENDED_AWAITING_TICK)
+        self.assertEqual(status.result, lc.judge(dead_pid, ev))
+        honest = dict(self.RUN, ended='t2', end_reason=f'{lc.DEAD}: {lc.NO_RECORD}')
+        self.assertEqual(lc.classify(honest, lc.Evidence()).name, lc.DEAD)
+        self.assertEqual(lc.classify(honest, ev).name, lc.ENDED_AWAITING_TICK)
+
+    def test_classify_returns_a_named_state_over_generated_runs_and_evidence(self):
+        for seed in range(100):
+            rng = random.Random(seed)
+            lines, _ = generate(rng)
+            for run in (r for rs in lc.fold(lines).values() for r in rs):
+                for ev in evidences():
+                    status = lc.classify(run, ev)
+                    self.assertIn(status.name, lc.SESSION_STATES, (seed, run, ev))
+
+    def test_holds_seat_is_true_for_working_and_false_for_the_rest(self):
+        self.assertTrue(lc.holds_seat(lc.Status(lc.WORKING)))
+        for name in (lc.ENDED_AWAITING_TICK, lc.FINISHED, lc.FAILED, lc.DEAD):
+            self.assertFalse(lc.holds_seat(lc.Status(name)), name)
+        # a row may carry its state as a bare name string too
+        self.assertTrue(lc.holds_seat(lc.WORKING))
+        self.assertFalse(lc.holds_seat(lc.DEAD))
+
+    def test_seats_counts_a_row_with_no_state_as_holding_one(self):
+        rows = [{'state': lc.Status(lc.WORKING)}, {'state': lc.Status(lc.DEAD)}, {}]
+        self.assertEqual(lc.seats(rows), 2)
+
+    def test_state_of_gathers_no_git_for_a_recorded_run_or_a_live_one(self):
+        def raises(*a, **k):
+            raise AssertionError('gather must not be called')
+        recorded = dict(self.RUN, ended='t2', end_reason='finished')
+        self.assertEqual(lc.state_of(None, recorded, gather_fn=raises).name, lc.FINISHED)
+        self.assertEqual(lc.state_of(None, self.RUN, alive=lambda pid: True,
+                                     gather_fn=raises).name, lc.WORKING)
+
+    def test_state_of_reads_the_logs_result_line_for_a_recorded_death(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        log = os.path.join(d, 'log.jsonl')
+        with open(log, 'w') as f:
+            f.write(json.dumps(OK) + '\n')
+        dead_pid = dict(self.RUN, log=log, ended='t2', end_reason=lc.DEAD_PID)
+
+        def raises(*a, **k):
+            raise AssertionError('gather must not be called')
+        status = lc.state_of(None, dead_pid, gather_fn=raises)
+        self.assertEqual(status.name, lc.ENDED_AWAITING_TICK)
+
+    def test_state_of_calls_gather_only_once_the_process_is_gone(self):
+        called = []
+
+        def fake_gather(product, run, alive=None):
+            called.append(run['job'])
+            return lc.Evidence(remote_sha='s', has_commits=True)
+        status = lc.state_of(None, self.RUN, alive=lambda pid: False, gather_fn=fake_gather)
+        self.assertEqual(called, [self.RUN['job']])
+        self.assertEqual(status.name, lc.ENDED_AWAITING_TICK)
+
+
+class OneClassifierTest(unittest.TestCase):
+    """§2.7: no module but ``lifecycle`` derives a session state. ``NOT_YET`` names the readers
+    this plan has not converted yet — Task 2 removes its two, Task 3 its three, Task 4 the last
+    four and asserts ``NOT_YET == ()``, the moment this becomes the fence §3.6 asks for."""
+
+    #: Task 2 empties the first two, Task 3 the next three, Task 4 the next four. The last one,
+    #: `widen_footprint.py`, is a reader F-0098's plan does not name and no Task's `writes:`
+    #: covers (T-0087's REPORT: `needs writes:`) — it stays exempt until a Task claims it.
+    NOT_YET = (
+        'asf/capacity.py',
+        'asf/feeder/tiers.py',
+        'asf/views/sessions.py',
+        'asf/views/status.py',
+        'asf/tick/summary.py',
+        'asf/workers/stall.py',
+        'asf/workers/health.py',
+        'asf/tick/step_health.py',
+        'asf/harvest/harvest.py',
+        'asf/tick/widen_footprint.py',
+    )
+
+    #: exactly the words §2.7 names. ``finished``/``failed`` are ordinary English words used all
+    #: over the tree for unrelated outcomes (rule checks, lane status) and were never the defect
+    #: this spec fixes — a bare literal is fine there, so only these four are guarded.
+    STATE_WORDS = (lc.DEAD, lc.DEAD_PID, lc.WORKING, lc.ENDED_AWAITING_TICK)
+
+    #: the three table headings named as the one allowed exception (P11) — kept verbatim even
+    #: though title-casing already keeps them clear of :data:`STATE_WORDS`.
+    ALLOWED = {('asf/views/sessions.py', 'Working'),
+              ('asf/views/sessions.py', 'Ended, awaiting tick'),
+              ('asf/views/sessions.py', 'Dead')}
+
+    @staticmethod
+    def _reads_end_reason(node):
+        if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
+            return node.slice.value == 'end_reason'
+        if isinstance(node, ast.Attribute):
+            return node.attr == 'end_reason'
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == 'get' and node.args
+                and isinstance(node.args[0], ast.Constant)):
+            return node.args[0].value == 'end_reason'
+        return False
+
+    def _violations(self, relpath, tree):
+        out = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if node.value in self.STATE_WORDS and (relpath, node.value) not in self.ALLOWED:
+                    out.append(f'{relpath}:{node.lineno}: {node.value!r} as a literal')
+            elif isinstance(node, ast.Compare):
+                sides = [node.left, *node.comparators]
+                if (any(isinstance(op, (ast.Eq, ast.NotEq, ast.In, ast.NotIn)) for op in node.ops)
+                        and any(self._reads_end_reason(s) for s in sides)):
+                    out.append(f'{relpath}:{node.lineno}: a direct end_reason comparison')
+        return out
+
+    def test_no_module_but_lifecycle_derives_a_state_word(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        violations = []
+        for path in sorted(glob.glob(os.path.join(root, 'asf', '**', '*.py'), recursive=True)):
+            relpath = os.path.relpath(path, root).replace(os.sep, '/')
+            if relpath == 'asf/workers/lifecycle.py' or relpath in self.NOT_YET:
+                continue
+            with open(path, encoding='utf-8') as f:
+                tree = ast.parse(f.read(), filename=path)
+            violations += self._violations(relpath, tree)
+        self.assertEqual(violations, [])
 
 
 class HoldInvariants(unittest.TestCase):
