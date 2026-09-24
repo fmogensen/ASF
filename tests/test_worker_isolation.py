@@ -92,7 +92,11 @@ class IsolatedSession(Home):
             'BACKLOG_ID_RANGE', 'PWD', 'SHLVL', 'OLDPWD', '_', '__CF_USER_TEXT_ENCODING'}
         self.assertEqual(extra, set(), seen)
         # nothing seeded, nothing copied: only ASF's own identity-only .gitconfig
-        self.assertEqual(os.listdir(seen['HOME']), ['.gitconfig'])
+        # beside it, at most the link to the factory's installed CLI (hotfix cd1adb0)
+        self.assertEqual(sorted(set(os.listdir(seen['HOME'])) - {'.local'}), ['.gitconfig'])
+        if os.path.lexists(os.path.join(seen['HOME'], '.local')):
+            self.assertTrue(os.path.islink(os.path.join(seen['HOME'], '.local', 'bin', 'asf')))
+            self.assertEqual(os.listdir(os.path.join(seen['HOME'], '.local', 'bin')), ['asf'])
         with open(os.path.join(seen['HOME'], '.gitconfig'), encoding='utf-8') as f:
             self.assertEqual(f.read(), runtime_mod.GITCONFIG_MARK + '\n[user]\n\tname = op\n')
 

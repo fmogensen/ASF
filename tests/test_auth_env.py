@@ -118,7 +118,11 @@ class AuthEnvSession(IsolatedSession):
         self.assertIn('username=x-access-token\n', p.stdout)
         self.assertIn(f'password={GH}\n', p.stdout)
         # nothing written to the home: its only file is ASF's identity-only .gitconfig
-        self.assertEqual(os.listdir(seen['HOME']), ['.gitconfig'])
+        # beside it, at most the link to the factory's installed CLI (hotfix cd1adb0)
+        self.assertEqual(sorted(set(os.listdir(seen['HOME'])) - {'.local'}), ['.gitconfig'])
+        if os.path.lexists(os.path.join(seen['HOME'], '.local')):
+            self.assertTrue(os.path.islink(os.path.join(seen['HOME'], '.local', 'bin', 'asf')))
+            self.assertEqual(os.listdir(os.path.join(seen['HOME'], '.local', 'bin')), ['asf'])
 
     def test_no_gh_token_no_credential_config(self):
         _rec, seen = self.spawn(self.account(CLAUDE_CODE_OAUTH_TOKEN=self.token_file))
