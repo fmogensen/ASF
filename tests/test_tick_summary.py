@@ -213,3 +213,17 @@ class FailureTests(SummaryTestCase):
             summary.run(_ctx(self.product), None, out=lines.append, now=NOW)
         self.assertEqual(len(lines), 1, lines)
         self.assertTrue(lines[0].startswith('tick: summary not rendered ('), lines[0])
+
+
+class TickDigestTests(SummaryTestCase):
+    def test_digest_says_what_the_tick_did(self):
+        ctx = _ctx(self.product)
+        ctx.counts = {'launches': 2, 'merges': 1, 'stalls': 0, 'refusals': 0, 'relaunches': 1}
+        ran = [{'step': 'record', 'ok': True, 'seconds': 3.2},
+               {'step': 'harvest', 'ok': False, 'seconds': 1.0}]
+        lines = []
+        summary.run(ctx, None, out=lines.append, now=NOW, alive=lambda pid: True, ran=ran)
+        text = '\n'.join(lines)
+        self.assertIn('TICK — record ok, harvest FAILED', text)
+        self.assertIn('launches 2, merges 1, relaunches 1', text)
+        self.assertNotIn('stalls', text)

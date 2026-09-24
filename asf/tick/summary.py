@@ -167,9 +167,17 @@ def render(inflight, done, titles_by_item, since, now, first):
     return '\n'.join(lines)
 
 
+def digest(ran, counts):
+    """What this tick did, in two lines: each step and whether it ran ok, then the non-zero
+    counters (launches, merges, stalls, refusals, relaunches)."""
+    steps_line = ', '.join(f"{r['step']} {'ok' if r.get('ok') else 'FAILED'}" for r in ran)
+    did = ', '.join(f'{name} {n}' for name, n in (counts or {}).items() if n)
+    return [f"TICK — {steps_line or 'no step ran'}", did or 'nothing launched, merged or stalled']
+
+
 # ---- the entry point ------------------------------------------------------------------
 
-def run(ctx, chosen, out=print, now=None, alive=pid_alive):
+def run(ctx, chosen, out=print, now=None, alive=pid_alive, ran=None):
     now = now or pool.now_iso()
     try:
         product = ctx.product
@@ -179,6 +187,8 @@ def run(ctx, chosen, out=print, now=None, alive=pid_alive):
         inflight = inflight_rows(product, alive)
         done = done_rows(product, since, now)
         out(render(inflight, done, titles(product), since, now, stamp is None))
+        if ran is not None:
+            out('\n' + '\n'.join(digest(ran, getattr(ctx, 'counts', None))))
         write_stamp(product, clock_name, now)
     except Exception as e:  # noqa: BLE001
         first_line = str(e).strip().splitlines()[0] if str(e).strip() else ''

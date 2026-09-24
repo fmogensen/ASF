@@ -597,8 +597,9 @@ class SummaryTests(TickTestCase):
         lines = untimed(out).rstrip('\n').split('\n')
         self.assertEqual(lines[0], f'tick: state committed and pushed ({self.record_path()})')
         self.assertEqual(lines[1:3], ['', 'IN FLIGHT — none'])
-        self.assertTrue(lines[-1].startswith('DONE since '), lines[-1])
-        self.assertTrue(lines[-1].endswith('— none (first tick on this clock)'), lines[-1])
+        self.assertEqual(lines[-2:], ['TICK — record ok', 'nothing launched, merged or stalled'])
+        self.assertTrue(lines[-4].startswith('DONE since '), lines[-4])
+        self.assertTrue(lines[-4].endswith('— none (first tick on this clock)'), lines[-4])
         self.assertTrue(os.path.exists(summary.stamp_path(env.load_product('sample'), 'record')))
 
     def test_a_tick_with_every_step_off_still_prints_the_tables(self):

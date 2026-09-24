@@ -439,7 +439,7 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
     print(total_line(time.monotonic() - started))
     if ctx.stale_reason:
         print(f"RECORD STALE — {ctx.stale_reason}\n")
-    summary.run(ctx, chosen)
+    summary.run(ctx, chosen, ran=ran)
     return rc
 
 
