@@ -111,6 +111,14 @@ def run_command(step, command, timeout, emit=print, cwd=None, extra_env=None):
     ``timeout`` (its whole process group is killed). ``extra_env``, when given, is laid over the
     tick's own environment for the child process (the capacity overlay)."""
     prefix = f'[command:{step}] '
+    # a loaded host starts no new command step either — the same guard the wave launches under
+    # (asf.workers.host, config.yaml host_guards): a product's own script (a batch, a merge
+    # queue) running its suites beside the sessions is load the guard exists for
+    from asf.workers import host as host_mod
+    held, why, _reading = host_mod.pressure(env.load_config())
+    if held:
+        emit(f'{prefix}held: {why} — not started this tick')
+        return 0
     argv = [os.path.expanduser(a) for a in shlex.split(command)]
     popen_env = {**os.environ, **extra_env} if extra_env else None
     try:

@@ -839,3 +839,24 @@ class RecordStepTimingTests(TickTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CommandStepHostPressure(unittest.TestCase):
+    """A command step is not started while the host is over its guard; a quiet host runs it."""
+
+    def test_loaded_host_skips_the_command(self):
+        from asf.tick import steps
+        lines = []
+        with mock.patch.dict(os.environ, {'ASF_HOST_READING': '99 10 50'}):
+            rc = steps.run_command('batch', "sh -c 'echo ran'", 5, emit=lines.append)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(lines), 1)
+        self.assertIn('[command:batch] held: host pressure', lines[0])
+        self.assertNotIn('ran', lines[0])
+
+    def test_quiet_host_runs_the_command(self):
+        from asf.tick import steps
+        lines = []
+        with mock.patch.dict(os.environ, {'ASF_HOST_READING': '0 10 0'}):
+            rc = steps.run_command('batch', "sh -c 'echo ran'", 5, emit=lines.append)
+        self.assertEqual((rc, lines), (0, ['[command:batch] ran']))
