@@ -127,10 +127,15 @@ DEFAULT_WORKTREE_SETUP = None
 LANE_KEYS = {'review': 'lane_review', 'stale_after': 'lane_stale_after'}
 
 #: The conventions whose value is a map. A value of any other shape — a string the reader kept,
-#: a scalar written by hand — is read as the default (:meth:`Conventions.map_of`) and reported
-#: (:meth:`Conventions.shape_findings`, the doctor's ``conventions`` row); a reader never raises
-#: on it (a ``models: light`` string once failed every launch for forty minutes).
-MAP_CONVENTIONS = ('models', 'branch_prefixes')
+#: a scalar written by hand — is read as the default (:meth:`Conventions.map_of`) so no reader
+#: raises on it (a ``models: light`` string once failed every launch for forty minutes), and it
+#: fails loud: :meth:`Conventions.shape_findings` names it, and the doctor's ``conventions`` row
+#: is red with the key and the line.
+MAP_CONVENTIONS = ('models', 'branch_prefixes', 'harvest')
+#: The conventions that take one word or a map of those words per landing class (``default:``
+#: for the rest). Any other value — ``'{docs: wait}'`` quoted into a string — is never a silent
+#: default: it is a red doctor finding.
+WORD_OR_MAP_CONVENTIONS = {'landing_checks_missing': ('wait', 'local-gate')}
 
 DURATION_RE = re.compile(r'^(\d+)([smhd])$')
 DURATION_UNITS = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}
@@ -319,6 +324,11 @@ class Conventions:
         kwargs = {}
         misshapen = {key: data.pop(key) for key in MAP_CONVENTIONS
                      if data.get(key) is not None and not isinstance(data.get(key), dict)}
+        for key, words in WORD_OR_MAP_CONVENTIONS.items():
+            value = data.get(key)
+            values = value.values() if isinstance(value, dict) else [value]
+            if value is not None and any(str(v).strip().lower() not in words for v in values):
+                misshapen[key] = value
         harvest = data.pop('harvest', None)
         if isinstance(harvest, dict):  # ``harvest: {gate, branches_per_tick}`` → the two fields
             rest = {}
@@ -364,9 +374,15 @@ class Conventions:
 
     def shape_findings(self):
         """``[(key, problem)]`` for every map-valued convention the product wrote in another
-        shape — read as its default, and shown by the doctor."""
-        return [(key, f'must be a map, not {value!r} — read as the default')
-                for key, value in sorted(getattr(self, '_misshapen', {}).items())]
+        shape (:data:`MAP_CONVENTIONS`, :data:`WORD_OR_MAP_CONVENTIONS`) — the doctor's red
+        ``conventions`` row."""
+        out = []
+        for key, value in sorted(getattr(self, '_misshapen', {}).items()):
+            words = WORD_OR_MAP_CONVENTIONS.get(key)
+            want = (f"one of {', '.join(words)} or a map of them per landing class" if words
+                    else 'a map')
+            out.append((key, f'must be {want}, not {value!r}'))
+        return out
 
     # ---- the lane ------------------------------------------------------------
 

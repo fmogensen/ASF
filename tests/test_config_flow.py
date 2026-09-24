@@ -71,6 +71,35 @@ class FlowStyle(unittest.TestCase):
         self.assertEqual(p.conventions.prefix('code'), env.Product('x', {}).conventions.prefix('code'))
         self.assertTrue(p.conventions.shape_findings())
 
+    def test_bad_shape_fails_loud(self):
+        """A map-valued key given as anything but a map — `landing_checks_missing: '{docs: wait}'`
+        quoted into a string once silently became local-gate — is a RED doctor row naming the key
+        and its line; the runtime reader still never raises on it."""
+        from asf import doctor
+        from asf.harvest import harvest
+        text = ("product: sample\nmain: main\nconventions:\n  specs_dir: docs/specs\n"
+                "  landing_checks_missing: '{docs: wait}'\n  models: light\n")
+        with tempfile.TemporaryDirectory() as home:
+            os.makedirs(os.path.join(home, 'products'))
+            with open(os.path.join(home, 'products', 'sample.yaml'), 'w') as f:
+                f.write(text)
+            with mock.patch.object(env, 'ASF_HOME', home):
+                p = env.load_product('sample')
+                rows = doctor.check_convention_shapes(p)
+        details = [d for _ok, d in rows]
+        self.assertEqual(len(rows), 2, details)
+        self.assertTrue(any('products/sample.yaml:5: conventions.landing_checks_missing' in d
+                            for d in details), details)
+        self.assertTrue(any('products/sample.yaml:6: conventions.models must be a map' in d
+                            for d in details), details)
+        self.assertTrue(doctor.is_red([('conventions', True, ok, d) for ok, d in rows]))
+        harvest.missing_policy(p.conventions, 'docs')  # never raises
+        # the words and a map of them are sound
+        for good in ('wait', 'local-gate', '{docs: wait, code: local-gate}'):
+            conv = env.Product('x', env.loads(
+                f'conventions:\n  landing_checks_missing: {good}\n')).conventions
+            self.assertEqual(conv.shape_findings(), [], good)
+
     def test_the_config_loads_a_flow_map_as_a_map(self):
         with tempfile.TemporaryDirectory() as home:
             with open(os.path.join(home, 'config.yaml'), 'w') as f:

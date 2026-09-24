@@ -469,6 +469,30 @@ def validate_product_text(text):
     return sorted(problems)
 
 
+def key_line(path, dotted):
+    """The 1-based line of ``dotted`` (``conventions.models``) in the yaml file at ``path``, or 0
+    when the file or the key is not there."""
+    try:
+        with open(path, encoding='utf-8') as f:
+            text = f.read()
+    except OSError:
+        return 0
+    want = dotted.split('.')
+    stack = []  # [(indent, key)]
+    for n, raw in enumerate(text.splitlines(), 1):
+        line = _strip_comment(raw).rstrip()
+        m = _match_key(line.strip()) if line.strip() and not line.strip().startswith('- ') else None
+        if not m:
+            continue
+        indent = len(line) - len(line.lstrip(' '))
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        stack.append((indent, m[0]))
+        if [k for _i, k in stack] == want:
+            return n
+    return 0
+
+
 def format_problems(problems):
     return '; '.join(
         f"line {ln}: '{key}' {why}" if ln else f"'{key}' {why}" if key else why

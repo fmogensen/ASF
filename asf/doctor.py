@@ -456,12 +456,18 @@ def check_capacity(cfg, product):
 
 
 def check_convention_shapes(product):
-    """[(ok, detail)] — one finding per map-valued convention the product file wrote in another
-    shape (``conventions.models: light``): the factory reads it as the default and keeps
-    running, and this row says so."""
+    """[(ok, detail)] — one RED finding per map-valued convention the product file wrote in
+    another shape (``conventions.models: light``, ``landing_checks_missing: '{docs: wait}'``),
+    naming the key and its line in the product file. The readers never raise on it; this row is
+    what keeps it from being a silent fallback."""
     conv = getattr(product, 'conventions', None)
     findings = conv.shape_findings() if conv is not None and hasattr(conv, 'shape_findings') else []
-    return [(False, f'conventions.{key} {why}') for key, why in findings]
+    out = []
+    for key, why in findings:
+        line = env.key_line(env.product_path(product.name), f'conventions.{key}')
+        where = f'products/{product.name}.yaml:{line}: ' if line else ''
+        out.append((False, f'{where}conventions.{key} {why}'))
+    return out
 
 
 def check_models(cfg):
@@ -669,7 +675,7 @@ def run(product_name):
     for ok, detail in check_models(cfg):
         rows.append(('models', False, ok, detail))
     for ok, detail in check_convention_shapes(product):
-        rows.append(('conventions', False, ok, detail))
+        rows.append(('conventions', True, ok, detail))
     for ok, detail in check_token_caps(cfg, product):
         rows.append(('token-caps', False, ok, detail))
     return rows
