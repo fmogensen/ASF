@@ -259,6 +259,31 @@ def kind_of(row):
         return ''
 
 
+def member_facts(product, items, item_id):
+    """``(id, type, title, writes, acceptance, fix)`` for one card of a delivery, its sections read
+    off the card file and clipped by :func:`section_lines`."""
+    member = items.get(item_id) or {}
+    sections = card_sections(product, member)
+    return (item_id, member.get('type') or '?', member.get('title') or '—',
+            list(member.get('writes') or []),
+            section_lines(sections, 'acceptance'), section_lines(sections, 'fix'))
+
+
+def member_lines(members):
+    """One block per card of a delivery: title, ``writes:``, ``## Acceptance``, and a Bug's
+    ``## Fix``."""
+    out = []
+    for n, (mid, mtype, title, writes, acceptance, fix) in enumerate(members):
+        out += ([''] if n else []) + [
+            f"#### {mid} — {title} ({mtype})",
+            f"writes: {', '.join(writes) if writes else '(none declared)'}"]
+        if acceptance:
+            out += ['acceptance:'] + acceptance
+        if fix:
+            out += ['fix:'] + fix
+    return out
+
+
 def collect(product, row, index, inflight=None, repo_facts=None):
     """Every fact the preamble and the kind templates draw on, as one flat dict."""
     items = feeder_rows.items_of(index) if index else {}
@@ -281,6 +306,7 @@ def collect(product, row, index, inflight=None, repo_facts=None):
     read_round = rnd or 1
     review_path = review_path_for(product, slug,
                                   read_round if kind in ANSWER_KINDS else rnd + 1 if rnd else 1)
+    delivers = [str(i) for i in item.get('delivers') or []]
     return {
         'kind': kind,
         'items': items,
@@ -298,6 +324,8 @@ def collect(product, row, index, inflight=None, repo_facts=None):
         'plan_lines': _line_count(repo_facts, plan_path),
         'writes': list(item.get('writes') or []),
         'merged': list(item.get('merged') or []),
+        'delivers': delivers,
+        'members': [member_facts(product, items, i) for i in delivers],
         'tests': named_tests(sections, item, repo_facts),
         'stories': stories_of(items, feature),
         'round': read_round,
@@ -344,7 +372,7 @@ class Section:
         return True
 
 
-TRIM_ORDER = ('description', 'acceptance', 'last_report')
+TRIM_ORDER = ('description', 'acceptance', 'members', 'last_report')
 
 
 def fit(sections, limit):
@@ -412,6 +440,9 @@ def state_lines(product, facts):
     if facts.get('merged'):
         out.append(f"Also delivers: {', '.join(facts['merged'])} — their sections of "
                    f"{facts['plan_path']}, acceptance byte-identical")
+    if facts.get('delivers'):
+        out.append(f"Delivery: {len(facts['delivers'])} items, in this order — "
+                   f"{', '.join(facts['delivers'])}")
     if facts['stories'] and kind in STORY_KINDS:
         out.append(f"Stories of the Feature: {'; '.join(facts['stories'])}")
     busy = [f"{s.get('item', '?')} ({s.get('kind', '?')}, {s.get('age', '?')})"
@@ -450,6 +481,8 @@ def build(product, row, index, inflight=None, repo_facts=None, facts=None):
                 trimmable=True, marker=marker),
         Section('acceptance', '### Acceptance',
                 section_lines(facts['sections'], 'acceptance'), trimmable=True, marker=marker),
+        Section('members', '### The items of this delivery', member_lines(facts['members']),
+                trimmable=True, marker=marker),
         Section('links', '### Links the card names',
                 section_lines(facts['sections'], 'links', limit_chars=600)),
         Section('last_report', '### The last report for this item',

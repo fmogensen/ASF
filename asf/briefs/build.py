@@ -44,12 +44,13 @@ HEAVY = 'heavy'
 LIGHT = 'light'
 
 KINDS = ('spec', 'plan', 'coder', 'review', 'fixer', 'rebase', 'close', 'adjudicate', 'fix-bug',
-         'correct', 'groom', 'reshape')
+         'correct', 'groom', 'reshape', 'delivery-plan', 'delivery-code')
 KIND_ALIASES = {'task': 'coder', 'code': 'coder', 'fix': 'fixer', 'bug': 'fix-bug',
                 'fix_bug': 'fix-bug'}
 DEFAULT_MODELS = {'spec': HEAVY, 'plan': HEAVY, 'adjudicate': HEAVY, 'review': HEAVY,
                   'coder': LIGHT, 'fixer': LIGHT, 'rebase': LIGHT, 'close': LIGHT,
-                  'fix-bug': LIGHT, 'correct': LIGHT, 'groom': HEAVY, 'reshape': HEAVY}
+                  'fix-bug': LIGHT, 'correct': LIGHT, 'groom': HEAVY, 'reshape': HEAVY,
+                  'delivery-plan': HEAVY, 'delivery-code': LIGHT}
 #: The kinds that may mint new cards (Stories, Tasks, Decisions) and so need an id range.
 ID_RANGE_KINDS = ('spec', 'plan', 'adjudicate', 'fix-bug', 'groom', 'reshape')
 
@@ -205,15 +206,8 @@ def _digest_value(value):
     return str(value)
 
 
-def card_digest(product, item_id, index):
-    """sha256, first 16 hex: what a brief states about this card — ``DIGEST_FIELDS``,
-    ``links.spec``, ``links.plan``, the Feature's Story ids, and the card's Description /
-    Acceptance / Fix / Links text (:func:`asf.briefs.preamble.card_sections`).
-
-    ``## History`` and the machine block are not read: filing a ruling or ingesting a push must
-    not stale every brief (D4). An absent key renders empty, so a card that gains a field changes
-    the digest and a card that never had one does not."""
-    items = feeder_rows.items_of(index) if index else {}
+def _digest_lines(product, item_id, items):
+    """The lines one card contributes to a digest — see :func:`card_digest`."""
     item = items.get(item_id) or {}
     links = item.get('links') or {}
     lines = [f'{key}={_digest_value(item.get(key))}' for key in DIGEST_FIELDS]
@@ -223,6 +217,24 @@ def card_digest(product, item_id, index):
     sections = preamble_mod.card_sections(product, item)
     for name in DIGEST_SECTIONS:
         lines.append(f'## {name}\n{sections.get(name) or ""}')
+    return lines
+
+
+def card_digest(product, item_id, index):
+    """sha256, first 16 hex: what a brief states about this card — ``DIGEST_FIELDS``,
+    ``links.spec``, ``links.plan``, the Feature's Story ids, and the card's Description /
+    Acceptance / Fix / Links text (:func:`asf.briefs.preamble.card_sections`). A card carrying
+    ``delivers:`` folds in each member's own lines, so a member's acceptance changing stales the
+    delivery's brief.
+
+    ``## History`` and the machine block are not read: filing a ruling or ingesting a push must
+    not stale every brief (D4). An absent key renders empty, so a card that gains a field changes
+    the digest and a card that never had one does not."""
+    items = feeder_rows.items_of(index) if index else {}
+    lines = _digest_lines(product, item_id, items)
+    for member in (items.get(item_id) or {}).get('delivers') or []:
+        if member != item_id:
+            lines += [f'member {member}'] + _digest_lines(product, member, items)
     return hashlib.sha256('\n'.join(lines).encode('utf-8')).hexdigest()[:16]
 
 
@@ -269,6 +281,8 @@ def context(product, row, kind, facts):
         'head': facts['head'] or preamble_mod.UNKNOWN,
         'writes': ', '.join(facts['writes']) if facts['writes'] else '(none declared)',
         'tests': ', '.join(facts['tests']) if facts['tests'] else '(name the test you add)',
+        'delivers': ', '.join(facts['delivers']) or '(none)',
+        'delivery_count': len(facts['delivers']),
         'stories': '; '.join(facts['stories']) if facts['stories'] else '(none yet)',
         'description': (sections.get('description') or item.get('title') or '—').strip(),
         'acceptance': (sections.get('acceptance') or '—').strip(),

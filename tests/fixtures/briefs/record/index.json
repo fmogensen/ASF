@@ -3,10 +3,12 @@
   "items": {
     "B-0001": {
       "backlinks": [
-        "F-0001"
+        "F-0001",
+        "F-0003"
       ],
       "children": [],
       "decided": true,
+      "delivered_by": "F-0003",
       "folder": "bugs",
       "id": "B-0001",
       "parent": "F-0001",
@@ -21,7 +23,8 @@
       "backlinks": [],
       "children": [
         "F-0001",
-        "F-0002"
+        "F-0002",
+        "F-0003"
       ],
       "decided": true,
       "folder": "epics",
@@ -75,11 +78,43 @@
       "type": "feature",
       "updated": "2026-01-01T06:00:00Z"
     },
+    "F-0003": {
+      "backlinks": [
+        "S-0001",
+        "B-0001"
+      ],
+      "children": [],
+      "decided": true,
+      "delivers": [
+        "F-0003",
+        "B-0001",
+        "S-0001"
+      ],
+      "folder": "features",
+      "id": "F-0003",
+      "parent": "E-0001",
+      "priority": "want",
+      "rank": 3,
+      "stage": "card",
+      "stage_since": "2026-01-01T11:00:00Z",
+      "state": "Active",
+      "title": "Checkout says so when a payment is pending",
+      "type": "feature",
+      "updated": "2026-01-01T11:00:00Z",
+      "writes": [
+        "app/checkout/pay.py",
+        "app/checkout/retry.py",
+        "tests/test_checkout.py"
+      ]
+    },
     "S-0001": {
-      "backlinks": [],
+      "backlinks": [
+        "F-0003"
+      ],
       "children": [
         "T-0001"
       ],
+      "delivered_by": "F-0003",
       "folder": "stories",
       "id": "S-0001",
       "parent": "F-0001",
