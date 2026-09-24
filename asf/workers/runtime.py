@@ -31,7 +31,8 @@ class Job:
 
     def __init__(self, product, name, cwd, brief_path, model, account=None, add_dirs=(),
                  permission_mode=DEFAULT_PERMISSION_MODE, env=None, log_path=None,
-                 settings_file=None, hooks_dir=None, resume=None, passthrough=()):
+                 settings_file=None, hooks_dir=None, resume=None, passthrough=(),
+                 product_auth_env=None):
         self.product = product
         self.name = name
         self.cwd = cwd
@@ -42,6 +43,10 @@ class Job:
         self.permission_mode = permission_mode
         self.env = dict(env or {})
         self.log_path = log_path
+        # the product's own auth_env (products/<name>.yaml conventions.auth_env, expanded
+        # {VARIABLE: file}): merged over the account's at build_env time, the product's value
+        # winning — GitHub access is per product, not per account (asf.env.product_auth_env)
+        self.product_auth_env = dict(product_auth_env or {})
         # the worker's permission rules (allow list + the deny rules, e.g. never push to the main
         # branch); ``worker_pool.settings_file`` in config — a session without it runs unfenced
         self.settings_file = settings_file
@@ -259,13 +264,19 @@ def auth_env_howto(var, path):
     return f'write the value of {var} into {path} and chmod 600 {path}'
 
 
-def auth_env_values(acct):
-    """``{VARIABLE: value}`` for an account's ``auth_env``: each file's content, stripped. A
-    missing, unreadable or empty file raises :class:`AuthEnvError` naming the file and how to
-    create it — never a value. ``{}`` for an account without ``auth_env`` (or no account)."""
+def auth_env_values(acct, product_auth_env=None):
+    """``{VARIABLE: value}``: an account's ``auth_env`` merged with ``product_auth_env`` (a
+    product's ``conventions.auth_env``, :func:`asf.env.product_auth_env`) — the product's file
+    wins for a variable both name, since GitHub access is per product (different products can
+    live under different GitHub owners) while the runtime login stays per account. Each file's
+    content is read stripped. A missing, unreadable or empty file raises :class:`AuthEnvError`
+    naming the file and how to create it — never a value. ``{}`` when neither names any."""
     out = {}
     name = getattr(acct, 'name', '?')
-    for var, path in (getattr(acct, 'auth_env', None) or {}).items():
+    product_auth_env = product_auth_env or {}
+    merged = dict(getattr(acct, 'auth_env', None) or {})
+    merged.update(product_auth_env)
+    for var, path in merged.items():
         path = os.path.expanduser(path)
         why = None
         try:
@@ -279,7 +290,8 @@ def auth_env_values(acct):
             why = f'cannot be read ({type(e).__name__})'
         if why:
             howto = auth_env_howto(var, path)
-            raise AuthEnvError(f'NEEDS OPERATOR: worker account {name}: auth_env {var} file {path} '
+            source = "product's conventions.auth_env" if var in product_auth_env else f'worker account {name}'
+            raise AuthEnvError(f'NEEDS OPERATOR: {source}: auth_env {var} file {path} '
                                f'{why} — {howto}', clear=howto)
         out[var] = value
     return out
@@ -310,8 +322,9 @@ def build_env(job, base=None):
     no caller identity, no hook variable, no token the tick happened to carry — plus the
     session's own HOME (:func:`session_home`), the account's config dir as
     ``CLAUDE_CONFIG_DIR``, and the job's own identity (``ASF_PRODUCT``, ``ASF_JOB``,
-    ``ASF_SESSION``, ``BACKLOG_ID_RANGE``, …), and the account's ``auth_env`` values
-    (:func:`auth_env_values` — raises :class:`AuthEnvError` when a file is missing), with git's
+    ``ASF_SESSION``, ``BACKLOG_ID_RANGE``, …), and the account's ``auth_env`` values merged with
+    the job's ``product_auth_env`` (the product's own wins for a shared variable —
+    :func:`auth_env_values` — raises :class:`AuthEnvError` when a file is missing), with git's
     HTTPS credential for the code host taken from ``GH_TOKEN`` when it is one of them
     (:func:`git_credential_config`). When the job has a ``hooks_dir``,
     ``core.hooksPath`` is set to it, so every commit the session makes picks up its
@@ -320,7 +333,7 @@ def build_env(job, base=None):
     acct = job.account
     identity = {'ASF_PRODUCT': job.product, 'ASF_JOB': job.name}
     identity.update(job.env)
-    auth = auth_env_values(acct)
+    auth = auth_env_values(acct, job.product_auth_env)
     git_config = [('core.hooksPath', job.hooks_dir)] if job.hooks_dir else []
     git_config += git_credential_config(auth)
     out = hermetic.build(base, home=session_home(acct), identity=identity, pythonpath=False,

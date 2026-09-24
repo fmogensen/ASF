@@ -213,10 +213,16 @@ def _path_list_problem(value):
     return None
 
 
+#: A bare variable name (``auth_env``, ``worker_pool.accounts[].auth_env`` in ``asf.env``): a
+#: leading letter/underscore, then letters, digits or underscores — what a shell accepts on the
+#: left of ``export``.
+_VAR_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+
+
 def validate_mapping(data):
     """The shaped keys of a ``conventions:`` mapping checked: ``[(dotted key, problem)]``, empty
-    when they are well-formed. Only ``doc_paths``, ``shared_paths``, ``lane`` and
-    ``worktree_setup`` are checked — every other key is kept verbatim (see the module doc), so a
+    when they are well-formed. Only ``doc_paths``, ``shared_paths``, ``lane``, ``worktree_setup``
+    and ``auth_env`` are checked — every other key is kept verbatim (see the module doc), so a
     product file written for a newer ``asf`` still loads."""
     problems = []
     if not isinstance(data, dict):
@@ -229,6 +235,17 @@ def validate_mapping(data):
     setup = data.get('worktree_setup')
     if setup is not None and (isinstance(setup, (dict, list, bool)) or not str(setup).strip()):
         problems.append(('worktree_setup', f'must be a command string, not {setup!r}'))
+    auth = data.get('auth_env')
+    if auth is not None:
+        if not isinstance(auth, dict):
+            problems.append(('auth_env', f'must map variable names to files, not {auth!r}'))
+        else:
+            for name, path in auth.items():
+                if not isinstance(name, str) or not _VAR_RE.match(name):
+                    problems.append(('auth_env',
+                                     f'must map variable names to files, and {name!r} is not one'))
+                elif not isinstance(path, str) or not path.strip():
+                    problems.append(('auth_env', f'{name} must name a file, not {path!r}'))
     lane = data.get('lane')
     if lane is None:
         return problems

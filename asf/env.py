@@ -378,6 +378,20 @@ def account_auth_env(acct):
     return {str(k): os.path.expanduser(str(v)) for k, v in auth.items()} if isinstance(auth, dict) else {}
 
 
+def product_auth_env(product):
+    """A product's ``conventions.auth_env``: ``{VARIABLE: expanded file path}`` — GitHub access
+    is per product (a product can live under a GitHub owner none of its account's other products
+    share), so a spawn merges this over the account's own ``auth_env``, the product's file
+    winning for a variable both name (:func:`asf.workers.runtime.auth_env_values`). ``{}`` when
+    the product declares none, or ``product`` is None. It lives under ``conventions:`` (not a
+    top-level key) so a v0.1.2 reader — which keeps unknown ``conventions`` keys but rejects an
+    unknown top-level one — tolerates a product file that sets it (R23)."""
+    if product is None:
+        return {}
+    auth = product.conventions.get('auth_env') if hasattr(product, 'conventions') else None
+    return {str(k): os.path.expanduser(str(v)) for k, v in auth.items()} if isinstance(auth, dict) else {}
+
+
 def default_product_name():
     """``$ASF_PRODUCT`` first, else ``config.yaml``'s ``default_product``."""
     if os.environ.get('ASF_PRODUCT'):

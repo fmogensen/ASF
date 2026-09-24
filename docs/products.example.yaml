@@ -124,6 +124,13 @@ conventions:
     stale_after: 2d
   # a command run in every fresh worker worktree before its session starts (default: none).
   # worktree_setup: make deps
+  # GitHub access is per product, not per account: a fine-grained token covers one GitHub owner,
+  # and this product may live under a different owner than an account's other products. VARIABLE:
+  # file — read at every launch, merged over the account's own worker_pool.accounts[].auth_env,
+  # this product's value winning for a variable both set; a missing file refuses the launch
+  # (NEEDS OPERATOR), the same as an account's own (see guide/operating.md, Safety).
+  # auth_env:
+  #   GH_TOKEN: ~/.ASF/secrets/sample.gh
 
 # CI: which provider runs checks, which workflow file, budgets and runner labels.
 ci:

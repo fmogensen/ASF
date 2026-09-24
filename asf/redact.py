@@ -10,7 +10,8 @@ leak it is reporting.
 :func:`patterns` merges three kinds of pattern: operator names (the worker pool's account names,
 an optional private list, and a repo's own tracked ``tools/forbidden-names.txt``), built-in
 secret shapes, the literal value of every environment variable that looks like a secret, and the
-value in every worker account's ``auth_env`` file (:func:`auth_env_secrets`). No
+value in every worker account's and every product's ``auth_env`` file
+(:func:`auth_env_secrets`). No
 config, no private list and no repo list is an empty pattern set, not an error — the scanner
 still runs, it simply has nothing of that kind to look for.
 
@@ -171,21 +172,44 @@ def patterns(repo=None, cfg=None, environ=None, extra=()):
     return pats
 
 
+def _read_secret(path):
+    try:
+        with open(path, encoding='utf-8') as f:
+            return f.read().strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
 def auth_env_secrets(cfg):
-    """``[(VARIABLE, value)]`` for every worker account's ``auth_env`` file that can be read —
-    whatever the variable is called, the value is a credential. An unreadable file is skipped
-    here (the launch refuses it; the scanner still runs)."""
+    """``[(VARIABLE, value)]`` for every worker account's ``auth_env`` file, and every
+    configured product's ``conventions.auth_env`` file (GitHub access is per product, not per
+    account), that can be read — whatever the variable is called, the value is a credential. An
+    unreadable file is skipped here (the launch refuses it; the scanner still runs)."""
     out = []
     for account in ((cfg or {}).get('worker_pool') or {}).get('accounts') or []:
         for var_name, path in env.account_auth_env(account if isinstance(account, dict) else {}).items():
-            try:
-                with open(path, encoding='utf-8') as f:
-                    value = f.read().strip()
-            except (OSError, UnicodeDecodeError):
-                continue
-            if len(value) >= 8:
+            value = _read_secret(path)
+            if value and len(value) >= 8:
+                out.append((var_name, value))
+    for name in _all_product_names():
+        try:
+            product = env.load_product(name)
+        except env.ConfigError:
+            continue
+        for var_name, path in env.product_auth_env(product).items():
+            value = _read_secret(path)
+            if value and len(value) >= 8:
                 out.append((var_name, value))
     return out
+
+
+def _all_product_names():
+    """Every ``products/<name>.yaml`` under ``ASF_HOME`` — a malformed one is skipped by its
+    caller, not raised here (the scanner still runs with whatever it can read)."""
+    d = os.path.join(env.ASF_HOME, 'products')
+    if not os.path.isdir(d):
+        return []
+    return sorted(f[:-5] for f in os.listdir(d) if f.endswith('.yaml'))
 
 
 # ---- scanning ------------------------------------------------------------------

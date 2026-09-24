@@ -25,8 +25,9 @@ A tenth row, **worker env** (:func:`check_worker_env`), is red when a worker ses
 what it should not: an account with ``isolate_home: false`` (the operator's HOME and every login
 in it), a ``worker_pool.env_passthrough`` name that looks like a credential, or an isolated
 account with no ``auth_env`` for the runtime's login variable (an isolated HOME finds no login).
-**worker secrets** (:func:`check_worker_secrets`) lists each ``auth_env`` file's presence, by
-variable name only, red when one is missing (its launches are refused). An eleventh,
+**worker secrets** (:func:`check_worker_secrets`) lists each ``auth_env`` file's presence —
+every account's and the product's own ``conventions.auth_env`` — by variable name only, red when
+one is missing (its launches are refused). An eleventh,
 **clock code** (:func:`check_clock_code`, informational), names the snapshot sha the clock last
 ticked from when the package runs from a checkout (:mod:`asf.snapshot`).
 
@@ -226,10 +227,11 @@ def check_worker_env(cfg):
                   + ('; '.join(notes) if notes else 'no worker accounts'))
 
 
-def check_worker_secrets(cfg):
-    """(ok, detail) — the ``worker secrets`` row: each account's ``auth_env`` files, by variable
-    name and presence only (a value is never read into the table). Red when one is missing or
-    empty: that account's launches are refused until it exists."""
+def check_worker_secrets(cfg, product=None):
+    """(ok, detail) — the ``worker secrets`` row: each account's ``auth_env`` files, and
+    ``product``'s own ``conventions.auth_env`` files (labelled ``product:<name>:<VAR>``), by
+    variable name and presence only (a value is never read into the table). Red when one is
+    missing or empty: that account's, or the product's, launches are refused until it exists."""
     present, missing = [], []
     for acct in pool.accounts_from_config(cfg):
         for var, path in sorted(acct.auth_env.items()):
@@ -238,6 +240,13 @@ def check_worker_secrets(cfg):
             except OSError:
                 ok = False
             (present if ok else missing).append(f'{acct.name}:{var}' + ('' if ok else f' ({path})'))
+    for var, path in sorted(env.product_auth_env(product).items()):
+        try:
+            ok = os.path.isfile(path) and os.path.getsize(path) > 0
+        except OSError:
+            ok = False
+        (present if ok else missing).append(f'product:{product.name}:{var}'
+                                            + ('' if ok else f' ({path})'))
     if missing:
         return False, 'missing: ' + ', '.join(missing) + (
             f"; present: {', '.join(present)}" if present else '')
@@ -680,7 +689,7 @@ def run(product_name):
     rows.append(('approvals-hook', True, ok, detail))
     ok, detail = check_worker_env(cfg)
     rows.append(('worker env', True, ok, detail))
-    ok, detail = check_worker_secrets(cfg)
+    ok, detail = check_worker_secrets(cfg, product)
     rows.append(('worker secrets', True, ok, detail))
     ok, detail = check_clock_code(product)
     rows.append(('clock code', False, ok, detail))

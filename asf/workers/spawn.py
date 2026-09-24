@@ -335,9 +335,11 @@ def run_worktree_setup(product, job, worktree, account=None, passthrough=(),
     if not command:
         return None
     runtime_mod.seed_home(account)
+    product_auth_env = env.product_auth_env(product)
     job_env = runtime_mod.build_env(runtime_mod.Job(product.name, job, worktree, None, None,
-                                                    account=account, passthrough=passthrough))
-    secrets = runtime_mod.auth_env_values(account)
+                                                    account=account, passthrough=passthrough,
+                                                    product_auth_env=product_auth_env))
+    secrets = runtime_mod.auth_env_values(account, product_auth_env)
     log = setup_log_path(product, job)
     started = time.monotonic()
     why = None
@@ -374,8 +376,9 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
     wp = cfg.get('worker_pool') or {}
     passthrough = env.env_passthrough(cfg)
     runtime = runtime or runtime_mod.from_config(cfg)
+    product_auth_env = env.product_auth_env(product)
     try:  # the account's credential files, read before anything is made: a refusal leaves nothing
-        runtime_mod.auth_env_values(account)
+        runtime_mod.auth_env_values(account, product_auth_env)
     except runtime_mod.AuthEnvError as e:
         raise SpawnError(str(e), clear=e.clear) from None
     model = model_arg(row.model, cfg)
@@ -406,7 +409,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
                           or runtime_mod.DEFAULT_PERMISSION_MODE,
                           env={'BACKLOG_ID_RANGE': id_range, 'ASF_SESSION': sid},
                           settings_file=settings_file(wp), hooks_dir=hooks_dir,
-                          passthrough=passthrough)
+                          passthrough=passthrough, product_auth_env=product_auth_env)
     result = runtime.run(job)
     record = {'job': row.job, 'item': row.item, 'feature': row.feature, 'kind': row.kind,
               'account': account.name if account else None, 'model': job.model,

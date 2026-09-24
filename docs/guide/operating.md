@@ -296,6 +296,23 @@ worker_pool:
         GH_TOKEN: ~/.ASF/secrets/acct-a.gh                     # git push over HTTPS, and gh
 ```
 
+The runtime token is per account — one `CLAUDE_CODE_OAUTH_TOKEN` covers every product that
+account works on. GitHub access is per **product**: products can live under different GitHub
+owners, and a fine-grained token covers one owner only, so the same account's `GH_TOKEN` can't
+serve two products under different owners. A product names its own GitHub token under its own
+`products/<name>.yaml`, in `conventions.auth_env`:
+
+```yaml
+conventions:
+  auth_env:
+    GH_TOKEN: ~/.ASF/secrets/<product>.gh   # this product's own owner
+```
+
+At every launch, the worker environment is the account's `auth_env` merged with the product's —
+the product's value wins for a variable both name. Put under `conventions:` (not a top-level
+key), an older `asf` — which keeps unknown `conventions` keys but rejects an unknown top-level
+one — still loads the file (rollback rule R23).
+
 Create the files once per account:
 
 ```sh
@@ -312,9 +329,12 @@ pbpaste > ~/.ASF/secrets/acct-a.gh && chmod 600 ~/.ASF/secrets/acct-a.gh
 What ASF does with them:
 
 - Each file's content (whitespace stripped) becomes that variable in **that account's sessions
-  only** — and in its `worktree_setup` command. Never in the tick, never in another account's.
+  only** — and in its `worktree_setup` command — merged with the product's own `auth_env`, the
+  product's value winning for a variable both name. Never in the tick, never in another
+  account's, never in another product's.
 - A missing, unreadable or empty file refuses the launch with `NEEDS OPERATOR`, naming the file and
-  how to create it. Nothing is made first: no worktree, no ledger line.
+  how to create it — the same rule for an account's file and a product's. Nothing is made first: no
+  worktree, no ledger line.
 - With `GH_TOKEN`, git in the session gets, through `GIT_CONFIG_*` variables, an HTTPS credential
   helper for `https://github.com` that echoes the token from the session's own environment, after
   resetting every other helper for that host (the system keychain helper included). The token is
@@ -322,11 +342,12 @@ What ASF does with them:
   used.
 - Values are never logged: the session record and the brief hold none, and a `worktree_setup`
   command's output is written to its log with each value replaced by `[redacted:<VARIABLE>]`. The
-  redaction gate (`asf redact`, the pre-commit and pre-push hooks) searches for every account's
-  `auth_env` value, whatever the variable is called.
+  redaction gate (`asf redact`, the pre-commit and pre-push hooks) searches for every account's and
+  every product's `auth_env` value, whatever the variable is called.
 - `asf doctor`: the `worker env` row is red when an isolated account has no `auth_env` for the
   runtime's login variable (it names `claude setup-token`); the `worker secrets` row lists each
-  file's presence by variable name only, red when one is missing.
+  account's and the product's own `auth_env` file's presence by variable name only (a product's
+  labelled `product:<name>:<VAR>`), red when one is missing.
 
 `tools/smoke_isolated_session.sh <product> [account]` launches one real session this way and checks
 it authenticates, works and pushes.

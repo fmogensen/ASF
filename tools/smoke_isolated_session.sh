@@ -4,7 +4,8 @@
 # Launches ONE real worker session for <product> the way a tick launches one — the configured
 # runtime binary, the account's config dir, the worker environment (allow-list +
 # worker_pool.env_passthrough), the account's ISOLATED HOME seeded from its home_seed, and its
-# credentials from auth_env files (never HOME or the keychain) — and checks that it:
+# credentials from auth_env files, the account's merged with the product's own — never HOME or
+# the keychain — and checks that it:
 #
 #   0. has an auth_env file for the runtime's login (CLAUDE_CODE_OAUTH_TOKEN) and, for the push,
 #      GH_TOKEN — created once per account:
@@ -16,6 +17,11 @@
 #      and in config.yaml, under the account:
 #        auth_env: {CLAUDE_CODE_OAUTH_TOKEN: ~/.ASF/secrets/<account>.token,
 #                   GH_TOKEN: ~/.ASF/secrets/<account>.gh}
+#      GitHub access is per product, not per account — a product under a different GitHub owner
+#      names its own token under products/<product>.yaml conventions.auth_env, which wins over
+#      the account's GH_TOKEN for that product's sessions:
+#        conventions:
+#          auth_env: {GH_TOKEN: ~/.ASF/secrets/<product>.gh}
 #   1. runs with HOME = the account's own home (never the operator's) and no variable outside
 #      the allow-list, auth_env and git's own config;
 #   2. authenticates (the runtime's result is not an auth failure);
@@ -112,16 +118,24 @@ if home:
     print(f'smoke: the home holds {len(seeded)} file(s): ' + ', '.join(seeded[:20])
           + (' …' if len(seeded) > 20 else ''))
 
-# ---- the account's credentials, by name only (auth_env) --------------------------------------
-print('smoke: auth_env ' + (', '.join(f'{k}={v}' for k, v in sorted(acct.auth_env.items()))
-                            or '(none)'))
-check('auth_env has the runtime login', any(v in acct.auth_env for v in runtime.RUNTIME_AUTH_VARS),
+# ---- the account's credentials merged with the product's, by name only (auth_env) -------------
+# GitHub access is per product (a product can live under a GitHub owner none of the account's
+# other products share): the launch — and this smoke — use the account's auth_env merged with
+# products/<product>.yaml's own conventions.auth_env, the product's file winning for a shared var.
+product_auth_env = env.product_auth_env(product)
+merged_auth_env = dict(acct.auth_env, **product_auth_env)
+print('smoke: auth_env (account) ' + (', '.join(f'{k}={v}' for k, v in sorted(acct.auth_env.items()))
+                                      or '(none)'))
+print('smoke: auth_env (product) ' + (', '.join(f'{k}={v}' for k, v in sorted(product_auth_env.items()))
+                                      or '(none)'))
+check('auth_env has the runtime login', any(v in merged_auth_env for v in runtime.RUNTIME_AUTH_VARS),
       f'add auth_env: {{{runtime.RUNTIME_AUTH_VARS[0]}: ~/.ASF/secrets/{acct.name}.token}} '
       f'(`{runtime.RUNTIME_TOKEN_COMMAND}`)')
-check('auth_env has the push token', runtime.GIT_TOKEN_VAR in acct.auth_env,
-      f'add auth_env: {{{runtime.GIT_TOKEN_VAR}: ~/.ASF/secrets/{acct.name}.gh}}')
+check('auth_env has the push token', runtime.GIT_TOKEN_VAR in merged_auth_env,
+      f'add auth_env: {{{runtime.GIT_TOKEN_VAR}: ~/.ASF/secrets/{acct.name}.gh}} (account) or '
+      f'products/{product.name}.yaml conventions.auth_env (product, for a different GitHub owner)')
 try:
-    secrets = runtime.auth_env_values(acct)
+    secrets = runtime.auth_env_values(acct, product_auth_env)
 except runtime.AuthEnvError as e:
     print(f'smoke: {e}', file=sys.stderr)
     sys.exit(2)
@@ -154,7 +168,7 @@ job = runtime.Job(product.name, f'smoke-{stamp}', wt, brief, model, account=acct
                   add_dirs=[], permission_mode=wp.get('permission_mode') or runtime.DEFAULT_PERMISSION_MODE,
                   env={'ASF_SESSION': f'{product.name}/smoke-{stamp}@{stamp}'}, log_path=log,
                   settings_file=spawn.settings_file(wp), hooks_dir=githooks.ensure(product),
-                  passthrough=env.env_passthrough(cfg))
+                  passthrough=env.env_passthrough(cfg), product_auth_env=product_auth_env)
 
 # ---- the environment the session gets --------------------------------------------------------
 job_env = runtime.build_env(job)
