@@ -82,6 +82,29 @@ def render_skill(name, help_text):
             f'{body}\n\n{COMMAND.format(name=name)}\n')
 
 
+#: The operator's console rules (B-0090): before this, they lived only in whatever an operator
+#: happened to paste into their own memory — the plugin shipped no hook that carried them.
+#: Paraphrased from docs/CONSTITUTION.md §5 ("never send a human to do an agent's job") and
+#: R-0113 ("delegate long work and keep the controller responsive"), the single console-facing
+#: statement of both. No apostrophes or quotes: it is embedded in a single-quoted shell command.
+CONSOLE_RULES = (
+    'ASF console rules: this session is the operator orchestrator. Delegate long or uncertain '
+    'work instead of doing it inline, and never block on a running task; background work keeps '
+    'the line moving. Act on a decision you can justify instead of asking permission for it. '
+    'Park only what truly needs a person, and let the rest continue.'
+)
+
+
+def render_hooks_json():
+    """``plugin/hooks/hooks.json`` — a Claude Code plugin hooks file, auto-loaded by every
+    console that installs the plugin. One ``SessionStart`` hook prints :data:`CONSOLE_RULES` to
+    stdout, which Claude Code folds into that session's context (B-0090)."""
+    command = f"printf '%s\\n' '{CONSOLE_RULES}'"
+    return json.dumps({
+        'hooks': {'SessionStart': [{'hooks': [{'type': 'command', 'command': command}]}]},
+    }, indent=2, ensure_ascii=False) + '\n'
+
+
 def render_plugin_json():
     return json.dumps({
         'name': 'asf',
@@ -108,6 +131,7 @@ def expected_files(plugin_dir=PLUGIN_DIR):
     files = {os.path.join(plugin_dir, 'skills', n, 'SKILL.md'): render_skill(n, helps[n])
              for n in skill_names()}
     files[os.path.join(plugin_dir, '.claude-plugin', 'plugin.json')] = render_plugin_json()
+    files[os.path.join(plugin_dir, 'hooks', 'hooks.json')] = render_hooks_json()
     root = os.path.dirname(plugin_dir)
     files[os.path.join(root, '.claude-plugin', 'marketplace.json')] = render_marketplace_json()
     return files

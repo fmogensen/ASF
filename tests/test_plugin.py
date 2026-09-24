@@ -95,6 +95,21 @@ class PluginTests(unittest.TestCase):
                 for pat in patterns:
                     self.assertIsNone(pat.search(text), pat.pattern)
 
+    def test_b0090_plugin_ships_a_hook_for_the_console_rules(self):
+        # B-0090: the operator's console rules lived in assistant memory only — the plugin
+        # shipped no hooks. `asf plugin build` now generates plugin/hooks/hooks.json with a
+        # SessionStart hook, so every console that installs the plugin gets them in code.
+        import json
+        path = os.path.join(REPO_ROOT, 'plugin', 'hooks', 'hooks.json')
+        self.assertTrue(os.path.isfile(path), 'plugin/hooks/hooks.json is missing — run `asf plugin build`')
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+        session_start = data['hooks']['SessionStart']
+        commands = [h['command'] for group in session_start for h in group['hooks']]
+        self.assertTrue(any('delegate' in c.lower() for c in commands),
+                        'no SessionStart hook prints the console rules')
+        self.assertEqual(plugin_build.diff(), [], 'run `asf plugin build`')
+
     def test_plugin_json(self):
         import json
         with open(os.path.join(REPO_ROOT, 'plugin', '.claude-plugin', 'plugin.json'),

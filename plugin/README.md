@@ -20,6 +20,10 @@ fails when the tree drifts. Never edit `skills/*/SKILL.md` by hand.
 Every skill passes its arguments through (`/asf:status --product <p>`); without `--product` the
 CLI uses `$ASF_PRODUCT`, else `default_product` in `~/.ASF/config.yaml`.
 
+`hooks/hooks.json` (generated, like the skills) carries a `SessionStart` hook that prints the
+operator's console rules into every session that installs this plugin, so they ship in code
+instead of living only in an operator's own memory (B-0090).
+
 ## Install
 
 The repository is its own marketplace (`.claude-plugin/marketplace.json` at the root):
