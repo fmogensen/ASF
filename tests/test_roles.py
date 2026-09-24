@@ -25,17 +25,17 @@ REPO_ROOT = os.path.dirname(HERE)
 PATTERNS_FILE = os.path.join(REPO_ROOT, 'tools', 'forbidden-names.txt')
 
 PURPOSES = {
-    'writer': 'the document is the requirement, executable without asking anyone anything',
-    'reviewer': 'one finding per acceptance criterion, each with the evidence for it',
-    'coder': 'implement the plan inside the declared boundary, and nothing beside it',
-    'fixer': 'close the binding list exactly as it is written, and widen nothing',
-    'diagnostician': 'build the red loop first; a hypothesis carries its prediction',
-    'harvester': 'what landed, what did not, and the one line that says why',
-    'interrogator': 'rule on the open question and record what closed it',
-    'prober': 'the state of what is running, reported as it is, absence reported as absence',
-    'security': 'attack the guarantee before a user does',
-    'documenter': 'the surface a reader meets, kept true to the code under it',
-    'locator': 'exact file:line locations with a short excerpt, never a whole file',
+    'asf-writer': 'the document is the requirement, executable without asking anyone anything',
+    'asf-reviewer': 'one finding per acceptance criterion, each with the evidence for it',
+    'asf-coder': 'implement the plan inside the declared boundary, and nothing beside it',
+    'asf-fixer': 'close the binding list exactly as it is written, and widen nothing',
+    'asf-diagnostician': 'build the red loop first; a hypothesis carries its prediction',
+    'asf-harvester': 'what landed, what did not, and the one line that says why',
+    'asf-interrogator': 'rule on the open question and record what closed it',
+    'asf-prober': 'the state of what is running, reported as it is, absence reported as absence',
+    'asf-security': 'attack the guarantee before a user does',
+    'asf-documenter': 'the surface a reader meets, kept true to the code under it',
+    'asf-locator': 'exact file:line locations with a short excerpt, never a whole file',
 }
 
 VALID = """---
@@ -166,7 +166,7 @@ class ShapeTests(unittest.TestCase):
                 self.assertNotIn('REPORT', role.sections['Output'].split('\n'))
 
     def test_the_sha_is_over_the_body_only(self):
-        role = roles.load('coder')
+        role = roles.load('asf-coder')
         self.assertEqual(role.sha, hashlib.sha256(role.text.encode('utf-8')).hexdigest()[:12])
         self.assertEqual(len(role.sha), 12)
         with open(role.path, encoding='utf-8') as f:
@@ -372,7 +372,8 @@ class BindingTests(unittest.TestCase):
                     self.assertNotIn(name, roles.UNBOUND)
                 else:
                     self.assertTrue(roles.UNBOUND.get(name, '').strip())
-        self.assertEqual(set(roles.UNBOUND), {'prober', 'security', 'documenter', 'locator'})
+        self.assertEqual(set(roles.UNBOUND),
+                         {'asf-prober', 'asf-security', 'asf-documenter', 'asf-locator'})
         self.assertEqual(set(roles.load_all()), bound | set(roles.UNBOUND))
 
     def test_the_bindings_keep_the_labels_of_today(self):
@@ -387,14 +388,48 @@ class BindingTests(unittest.TestCase):
                 self.assertEqual(len(labels), 1)
 
     def test_for_kind_reads_the_table_and_refuses_the_unknown(self):
-        self.assertEqual(roles.for_kind('review'), 'reviewer')
-        self.assertEqual(roles.for_kind('adjudicate'), 'interrogator')
+        self.assertEqual(roles.for_kind('review'), 'asf-reviewer')
+        self.assertEqual(roles.for_kind('adjudicate'), 'asf-interrogator')
         with self.assertRaises(roles.RoleError):
             roles.for_kind('preflight')
 
     def test_load_refuses_a_role_with_no_file(self):
         with self.assertRaises(roles.RoleError):
             roles.load('standards')
+
+
+class AliasTests(unittest.TestCase):
+    """A bare pre-rename name (``coder``) is an alias for its ``asf-`` file, for every shipped
+    role — the rename must not break a caller still holding the old name."""
+
+    def test_every_shipped_role_has_a_bare_alias(self):
+        loaded = roles.load_all()
+        self.assertEqual(set(roles.ALIASES.values()), set(loaded))
+        for old, new in roles.ALIASES.items():
+            with self.subTest(old=old):
+                self.assertEqual(new, roles.ROLE_PREFIX + old)
+
+    def test_load_of_the_bare_name_is_load_of_the_prefixed_one(self):
+        for old, new in roles.ALIASES.items():
+            with self.subTest(old=old):
+                self.assertEqual(roles.load(old), roles.load(new))
+
+    def test_alias_note_names_the_old_and_the_new(self):
+        self.assertEqual(roles.alias_note('coder'), "role 'coder' is now 'asf-coder'")
+        self.assertIsNone(roles.alias_note('asf-coder'))
+        self.assertIsNone(roles.alias_note('no-such-role'))
+
+    def test_every_file_stem_starts_with_the_prefix(self):
+        for name in roles.load_all():
+            with self.subTest(role=name):
+                self.assertTrue(name.startswith(roles.ROLE_PREFIX), name)
+
+    def test_every_binding_points_at_an_existing_file(self):
+        loaded = roles.load_all()
+        for kind, name in roles.BINDINGS.items():
+            with self.subTest(kind=kind):
+                self.assertIn(name, loaded)
+                self.assertTrue(name.startswith(roles.ROLE_PREFIX))
 
 
 if __name__ == '__main__':

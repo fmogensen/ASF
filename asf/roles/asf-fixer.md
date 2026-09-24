@@ -1,5 +1,5 @@
 ---
-name: fixer
+name: asf-fixer
 purpose: close the binding list exactly as it is written, and widen nothing
 ---
 

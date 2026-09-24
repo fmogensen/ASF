@@ -1,5 +1,5 @@
 ---
-name: diagnostician
+name: asf-diagnostician
 purpose: build the red loop first; a hypothesis carries its prediction
 ---
 

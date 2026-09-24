@@ -1,5 +1,5 @@
 ---
-name: reviewer
+name: asf-reviewer
 purpose: one finding per acceptance criterion, each with the evidence for it
 ---
 

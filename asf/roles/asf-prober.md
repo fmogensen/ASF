@@ -1,5 +1,5 @@
 ---
-name: prober
+name: asf-prober
 purpose: the state of what is running, reported as it is, absence reported as absence
 ---
 

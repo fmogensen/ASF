@@ -1,5 +1,5 @@
 ---
-name: documenter
+name: asf-documenter
 purpose: the surface a reader meets, kept true to the code under it
 ---
 

@@ -1,5 +1,5 @@
 ---
-name: interrogator
+name: asf-interrogator
 purpose: rule on the open question and record what closed it
 ---
 

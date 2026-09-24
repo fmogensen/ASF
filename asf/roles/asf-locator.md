@@ -1,5 +1,5 @@
 ---
-name: locator
+name: asf-locator
 purpose: exact file:line locations with a short excerpt, never a whole file
 ---
 

@@ -1,5 +1,5 @@
 ---
-name: writer
+name: asf-writer
 purpose: the document is the requirement, executable without asking anyone anything
 ---
 

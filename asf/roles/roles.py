@@ -44,19 +44,36 @@ FORBIDDEN = ('model', 'backend', 'effort', 'tools')
 
 #: Every brief kind → the role it runs under. Read twice: by the brief, and by the tests that
 #: hold it equal to ``asf.briefs.build.KINDS``.
-BINDINGS = {'spec': 'writer', 'plan': 'writer', 'reshape': 'writer',
-            'review': 'reviewer', 'coder': 'coder',
-            'fixer': 'fixer', 'correct': 'fixer', 'rebase': 'fixer',
-            'fix-bug': 'diagnostician', 'close': 'harvester',
-            'groom': 'interrogator', 'adjudicate': 'interrogator'}
+BINDINGS = {'spec': 'asf-writer', 'plan': 'asf-writer', 'reshape': 'asf-writer',
+            'review': 'asf-reviewer', 'coder': 'asf-coder',
+            'fixer': 'asf-fixer', 'correct': 'asf-fixer', 'rebase': 'asf-fixer',
+            'fix-bug': 'asf-diagnostician', 'close': 'asf-harvester',
+            'groom': 'asf-interrogator', 'adjudicate': 'asf-interrogator'}
 
 #: Every role no kind binds, with the reason none does.
-UNBOUND = {'prober': 'no phase yet — the production probe is a view, not a session',
-           'security': 'no phase yet — the panel it belongs to is not in this epic',
-           'documenter': 'no phase yet — the docs surface has no lane of its own',
-           'locator': 'no launch path yet — the runtime pipes one brief and picks one model '
-                      '(F-0029 D2); a restricted-tool sub-agent needs a launch mechanism this '
-                      'factory does not have, so the role ships and binds to nothing'}
+UNBOUND = {'asf-prober': 'no phase yet — the production probe is a view, not a session',
+           'asf-security': 'no phase yet — the panel it belongs to is not in this epic',
+           'asf-documenter': 'no phase yet — the docs surface has no lane of its own',
+           'asf-locator': 'no launch path yet — the runtime pipes one brief and picks one '
+                          'model (F-0029 D2); a restricted-tool sub-agent needs a launch '
+                          'mechanism this factory does not have, so the role ships and binds '
+                          'to nothing'}
+
+#: The prefix every role name now carries, and the alias every bare pre-prefix name resolves
+#: through — :func:`load` accepts the old name (``for_kind`` never took one: its argument is a
+#: brief kind, not a role, and ``BINDINGS`` already returns the ``asf-`` name) so a caller
+#: written against the names of before this rename keeps working; ``doctor`` reads
+#: :func:`alias_note` to say so instead of resolving it silently.
+ROLE_PREFIX = 'asf-'
+ALIASES = {name[len(ROLE_PREFIX):]: name for name in set(BINDINGS.values()) | set(UNBOUND)}
+
+
+def alias_note(name):
+    """``"role '<old>' is now '<new>'"`` when ``name`` is a bare pre-rename alias, else ``None`` —
+    what ``doctor`` prints when a product config still names a role the old way."""
+    new = ALIASES.get(name)
+    return None if new is None else f"role '{name}' is now '{new}'"
+
 
 _HEADING = re.compile(r'^## +(.*?)\s*$')
 _FENCE = re.compile(r'^\s*(?:```|~~~)')
@@ -145,8 +162,10 @@ def _read(path):
 
 
 def load(name):
-    """The role called ``name``, from ``roles_dir()/<name>.md``. RoleError when there is no such
-    file or its frontmatter cannot be read."""
+    """The role called ``name``, from ``roles_dir()/<name>.md``. A bare pre-rename name (e.g.
+    ``coder``) resolves through :data:`ALIASES` to its ``asf-`` file. RoleError when there is no
+    such file or its frontmatter cannot be read."""
+    name = ALIASES.get(name, name)
     if not name or os.path.basename(name) != name:
         raise RoleError(f'no role called {name!r}')
     path = os.path.join(roles_dir(), name + '.md')
