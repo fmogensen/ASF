@@ -313,6 +313,8 @@ effective matrix and what recognises each class):
 | `merge_amendable_set` | landing a branch that touches `conventions.amendable_paths` | human-now |
 | `merge_routine_pr` | landing any other finished branch | auto |
 | `file_bug` | filing or bumping a Bug | auto |
+| `decide_feature` | the groom deciding an undecided Feature under a live Epic, by rule | human-now |
+| `decide_bug` | the groom deciding an undecided Bug under a live Epic, by rule | human-now |
 
 Where they bind: the approvals hook (a Claude Code `PreToolUse` hook in every worker account)
 refuses a factory session's tool call whose class is not `auto` — only inside a factory session,
@@ -346,6 +348,30 @@ Two more keys under `approvals:` are switches, not classes, and both are **off u
   the status table's Groom row reads `— (not configured: approvals.groom)`.
 - `upgrade: auto` lets the tick run `asf upgrade` itself when the trunk's package is ahead of the
   install (only for ASF's own repo as a product).
+
+### The groom's policies
+
+With `groom: auto`, the groom answers an undecided card by code over facts before anyone is asked.
+The policies run in this order, and a card's first answer is its only one, so a close always wins
+over a decide:
+
+| policy | answers | when |
+| --- | --- | --- |
+| `unblock_on_closed` | unblock | the card's blocker is Closed |
+| `close_exact_duplicate` | close | a same-type, same-parent card's title overlaps by `groom.duplicate_overlap` |
+| `close_superseded` | close, `superseded by <id>` | a decided card names it in `links.supersedes`, or shares its `legacy_id` |
+| `decide_on_approved_doc` | decide | a Feature's spec or plan is approved on the trunk (`spec-approved`, `plan-approved`, `building`) |
+| `decide_or_close_ci_red` | decide, or close `green since <sha>` | a `CI red: <job>: <step>` Bug: the job's latest trunk run failed within `groom.ci_red_days` (default 7), or passed since the Bug was filed |
+| `decide_recurring_bug` | decide | an auto-filed Bug seen `groom.recurring_bug_count` times |
+| `decide_by_approval` | decide | `decide_feature: auto` (resp. `decide_bug: auto`) and the Feature (Bug) sits under an open, decided Epic |
+| `close_on_starvation` | close | undecided longer than `stage_limits.undecided_close` |
+
+The CI facts are the trunk runs in the record's `metrics/ci` stream. The bound holds over every
+policy and over the adjudicate session: a card whose title reads as money, security, production,
+customer data or legal (or an Epic, for `new_epic`) is answered by nobody but you unless that class
+is `auto`, and its line reads `____ (barred: approvals.<class>)`. An auto-filed Bug is exempt from
+the title recognisers — its fix is still held by the hook. `groom.policies.<name>: off` turns one
+policy off. What no policy answers stays an open question, for the adjudicate session or for you.
 
 ## Rule cards
 

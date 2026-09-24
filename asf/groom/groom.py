@@ -26,7 +26,9 @@ from asf.workers import lifecycle, pool
 ANSWER_LINE_RE = re.compile(r'^- \[[ xX]\]\s+(?P<id>[A-Z]-\d{4})\b.*→\s*answer:\s*(?P<answer>.*)$')
 INBOX_ANSWER_RE = re.compile(r'^- \[[ xX]\]\s+inbox:(?P<name>\S+)\s.*→\s*answer:\s*(?P<answer>.*)$')
 ANSWER_YES = re.compile(r'^yes$', re.IGNORECASE)
-ANSWER_NO = re.compile(r'^(no|close)$', re.IGNORECASE)
+#: ``no``/``close``, optionally ``: <reason>`` — a rule that closes a card names why
+#: (``no: superseded by F-0001``), and the reason becomes the card's ``removed:`` text.
+ANSWER_NO = re.compile(r'^(no|close)(?::\s*(?P<why>\S.*))?$', re.IGNORECASE)
 ANSWER_LANDED = re.compile(r'^landed\s+([0-9a-f]{7,40})$', re.IGNORECASE)
 ANSWER_OPEN = re.compile(r'^open$', re.IGNORECASE)
 ANSWER_RANK = re.compile(r'^rank\s+(\d+)$', re.IGNORECASE)
@@ -43,8 +45,9 @@ ADJUDICATOR_PREFIX = re.compile(r'^adjudicator:\s*', re.IGNORECASE)
 #: PD3 — the applier's side of the policy names §2.2 defines. ``policy.POLICIES`` (a later Task)
 #: must name exactly these; kept here, not in ``asf.groom.policy``, because that module is
 #: imported by ``asf.feeder.rows`` and must not import this one back.
-POLICY_NAMES = ('unblock_on_closed', 'close_exact_duplicate', 'decide_recurring_bug',
-                'close_on_starvation')
+POLICY_NAMES = ('unblock_on_closed', 'close_exact_duplicate', 'close_superseded',
+                'decide_on_approved_doc', 'decide_or_close_ci_red', 'decide_recurring_bug',
+                'decide_by_approval', 'close_on_starvation')
 
 
 def _previous_groom_file(root, date):
@@ -65,8 +68,10 @@ def _parse_answer(answer):
         return None, None
     if ANSWER_YES.match(a):
         return 'decided', True
-    if ANSWER_NO.match(a):
-        return 'removed', None  # caller fills in the reason text
+    m = ANSWER_NO.match(a)
+    if m:
+        # the caller dates the reason text; a bare `no` is only the date
+        return 'removed', (m.group('why').strip() if m.group('why') else None)
     if ANSWER_OPEN.match(a):
         return 'reconciled', None  # caller fills in the date
     m = ANSWER_LANDED.match(a)
@@ -312,7 +317,7 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None, 
             continue
 
         if field == 'removed':
-            value = f"groom {date}"
+            value = f"{value} (groom {date})" if value else f"groom {date}"
         elif field == 'reconciled':
             value = date
 
@@ -572,18 +577,47 @@ def _line_sections(text):
     return out
 
 
-#: PD3 checked against §2.2's own order — a test asserts these equal ``[n for n, _s, _f in
-#: policy.POLICIES]``.
-_POLICY_BY_SECTION = {section: (name, fn) for name, section, fn in policy.POLICIES}
+#: The sections some decision policy reads — a card's one decision answer is rendered on each of
+#: its open lines in these.
+_DECISION_KEYS = frozenset(key for name, keys, _fn in policy.POLICIES
+                           if name not in policy.PER_LINE_POLICIES for key in keys)
+
+
+def decide_card(item_id, keys, canonical, derived, product, ctx):
+    """``(policy name, Answer)`` of the first decision policy, in ``policy.POLICIES`` order,
+    that reads one of ``keys`` (the sections the card has an open line in), is on for the
+    product, and answers the card; ``None`` when none does."""
+    item = canonical[item_id]
+    for name, sections, fn in policy.POLICIES:
+        if name in policy.PER_LINE_POLICIES or not keys.intersection(sections):
+            continue
+        if not policy.policy_on(product, name):
+            continue
+        ans = fn(item_id, item, canonical, derived, ctx)
+        if ans is not None:
+            return name, ans
+    return None
 
 
 def run_policy_pass(sections, canonical, derived, product, ctx):
     """§2.2 steps 3-4's rendering half: every remaining ``→ answer: ____`` line either gets
-    barred (§2.8, PD4) or tried against its section's policy — never both. A barred line is
-    rewritten ``____ (barred: approvals.<key>)``; an answered line, ``controller: <policy>
-    <word>``. Returns ``(sections, barred_count)``; the actual field writes come from applying
-    the rendered file through :func:`apply_groom_answers` (D3), so this function only rewrites
-    text."""
+    barred (§2.8, PD4) or tried against the policies — never both. A barred line is rewritten
+    ``____ (barred: approvals.<key>)``; an answered line, ``controller: <policy> <word>``.
+
+    ``unblock_on_closed`` answers its own lines one by one. Every other policy is a decision:
+    a card gets one (:func:`decide_card`, over all the sections it has an open line in), and
+    that one answer goes on each of its open lines in a decision section, so no card is closed
+    on one line and decided on another. Returns ``(sections, barred_count)``; the actual field
+    writes come from applying the rendered file through :func:`apply_groom_answers` (D3), so
+    this function only rewrites text."""
+    probe = policy.Answer('yes', 'decided', True, '')
+    open_keys = {}
+    for key, lines in sections.items():
+        for line in lines:
+            m = policy.OPEN_QUESTION_RE.match(line)
+            if m and m.group('id') in canonical:
+                open_keys.setdefault(m.group('id'), set()).add(key)
+    decisions = {}
     out = {}
     barred_count = 0
     for key, lines in sections.items():
@@ -594,24 +628,52 @@ def run_policy_pass(sections, canonical, derived, product, ctx):
             if m is None or item is None:
                 new_lines.append(line)
                 continue
-            probe = policy.Answer('yes', 'decided', True, '')
+            iid = m.group('id')
             bar = policy.barred(probe, item, product)
             if bar:
                 new_lines.append(re.sub(r'____$', f'____ (barred: approvals.{bar})', line))
                 barred_count += 1
                 continue
-            entry = _POLICY_BY_SECTION.get(key)
-            if entry is None or not policy.policy_on(product, entry[0]):
+            answer = None
+            for name, keys, fn in policy.POLICIES:
+                if (name in policy.PER_LINE_POLICIES and key in keys
+                        and policy.policy_on(product, name)):
+                    ans = fn(iid, item, canonical, derived, ctx)
+                    answer = (name, ans) if ans is not None else None
+                    break
+            else:
+                if key in _DECISION_KEYS:
+                    if iid not in decisions:
+                        decisions[iid] = decide_card(iid, open_keys.get(iid, set()), canonical,
+                                                     derived, product, ctx)
+                    answer = decisions[iid]
+            if answer is None:
                 new_lines.append(line)
                 continue
-            name, fn = entry
-            ans = fn(m.group('id'), item, canonical, derived, ctx)
-            if ans is None:
-                new_lines.append(line)
-                continue
+            name, ans = answer
             new_lines.append(re.sub(r'____$', f'controller: {name} {ans.word}', line))
         out[key] = new_lines
     return out, barred_count
+
+
+def trunk_ci_runs(root, product):
+    """The trunk's finished CI runs off the record's ``metrics/ci`` stream — the runs the
+    metrics import gathers from the CI provider and the Bug filer reads — oldest first, as
+    ``policy.Ctx.ci_runs`` wants them: ``{'ts', 'sha', 'jobs': {name: conclusion}}``. A run on
+    any branch but ``main`` is left out; a job listed twice in one run keeps its last
+    conclusion."""
+    from asf.tick.file_bugs import DEFAULTS, _jsonl_lines
+    conv = product.conventions if product is not None else DEFAULTS
+    runs = []
+    for run in _jsonl_lines(os.path.join(root, 'metrics', 'ci', '*.jsonl')):
+        ts = parse_iso(run.get('ts'))
+        if ts is None or not conv.is_trunk(run.get('branch') or ''):
+            continue
+        jobs = {j.get('name'): j.get('conclusion') for j in run.get('jobs') or []
+                if isinstance(j, dict) and j.get('name')}
+        runs.append({'ts': ts, 'sha': run.get('sha') or '', 'jobs': jobs})
+    runs.sort(key=lambda r: r['ts'])
+    return tuple(runs)
 
 
 def _ledger_items(product):
@@ -779,7 +841,11 @@ def cmd_groom(args, root):
                          recurring_bug_count=policy.recurring_bug_count(product),
                          undecided_close=stale.load_limits(product).get(
                              'undecided_close', policy.DEFAULT_UNDECIDED_CLOSE),
-                         ledger_items=_ledger_items(product))
+                         ledger_items=_ledger_items(product),
+                         ci_red_days=policy.ci_red_days(product),
+                         ci_runs=trunk_ci_runs(root, product),
+                         approvals=dict((product.approvals if product is not None else None)
+                                        or {}))
         sections, barred_count = run_policy_pass(sections, canonical, derived, product, ctx)
 
     text = render_groom_file(date, sections)

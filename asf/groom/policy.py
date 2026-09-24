@@ -1,5 +1,10 @@
 """asf.groom.policy — rules as code (F-0085/D-0049): the ``approvals.groom`` gate, the open-
-question grammar, the four policies, and the approval bound.
+question grammar, the policies, and the approval bound.
+
+An undecided card moves by code over facts: every policy reads only the record and the facts
+:class:`Ctx` hands it (the date, the thresholds, the trunk's CI runs, the approval levels), so
+the same record and the same facts always give the same answer. What no policy answers stays an
+open question for the operator or the adjudicate session, exactly as before.
 
 Module-level imports stay stdlib and :mod:`asf.env` only, so :mod:`asf.feeder.rows` may import
 this module without an import cycle — :mod:`asf.groom.groom` (the applier's side) imports this
@@ -16,6 +21,9 @@ DUPLICATE_OVERLAP = 0.95
 RECURRING_BUG_COUNT = 2
 ADJUDICATE_ATTEMPTS = 2
 ADJUDICATE_PER_DAY = 6
+#: ``decide_or_close_ci_red``: a trunk failure older than this is not taken as the job being red
+#: now — no answer, rather than an answer off a stale fact.
+CI_RED_DAYS = 7
 
 #: A ``- [ ] <id> <title> — <why> → answer: ____`` line — a question no rule and no session has
 #: yet answered (PD4). A barred line's slot reads ``____ (barred: …)`` instead, so it never
@@ -63,6 +71,13 @@ def recurring_bug_count(product):
     """``groom.recurring_bug_count`` (default 2): ``decide_recurring_bug``'s threshold."""
     v = _groom_config(product).get('recurring_bug_count')
     return v if isinstance(v, int) else RECURRING_BUG_COUNT
+
+
+def ci_red_days(product):
+    """``groom.ci_red_days`` (default :data:`CI_RED_DAYS`): how recent a trunk failure of a
+    job must be for ``decide_or_close_ci_red`` to take the job as red."""
+    v = _groom_config(product).get('ci_red_days')
+    return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else CI_RED_DAYS
 
 
 def adjudicate_attempts(product):
@@ -113,13 +128,21 @@ class Ctx:
     ``now``, the three ``groom:`` thresholds already resolved for the product, the
     ``stage_limits.undecided_close`` duration, and the ledger's item set — every id that has
     ever had a session run on it, so ``close_on_starvation`` never answers a card a session is
-    (or was) already working."""
+    (or was) already working.
+
+    ``ci_runs`` is the trunk's finished CI runs, oldest first, each ``{'ts': datetime, 'sha':
+    str, 'jobs': {job name: conclusion}}`` (:func:`asf.groom.groom.trunk_ci_runs` reads them off
+    the record's ``metrics/ci`` stream); ``approvals`` is the product's raw ``approvals:`` map,
+    which ``decide_by_approval`` reads for its two classes."""
     date: str
     now: object
     duplicate_overlap: float = DUPLICATE_OVERLAP
     recurring_bug_count: int = RECURRING_BUG_COUNT
     undecided_close: str = DEFAULT_UNDECIDED_CLOSE
     ledger_items: frozenset = frozenset()
+    ci_red_days: int = CI_RED_DAYS
+    ci_runs: tuple = ()
+    approvals: dict = dataclasses.field(default_factory=dict)
 
 
 def _named_in_blockedby(item_id, canonical):
@@ -224,23 +247,236 @@ def close_on_starvation(item_id, rec, canonical, derived, ctx):
                   f'undecided {format_age(age)}, starvation policy')
 
 
-#: PD3, §2.2's order — ``(name, section key, policy)``. ``name`` must equal
-#: ``asf.groom.groom.POLICY_NAMES`` in the same order (a test asserts it); kept as plain strings
-#: rather than an import of that module, which would be the cycle this module's docstring rules
-#: out.
+def _undecided(rec):
+    """True for a card still waiting on a decision: open, ``decided != true``, not removed and
+    not moved to another record."""
+    from asf.record import frontmatter
+    from asf.record.core import is_open
+    if not is_open(rec):
+        return False
+    typed, _machine = frontmatter.split_machine(rec['meta'])
+    return (typed.get('decided') is not True and not typed.get('removed')
+            and not typed.get('moved_to'))
+
+
+def _live_decided(rec):
+    """True for a card that stands as decided: ``decided: true``, not removed, not moved."""
+    from asf.record import frontmatter
+    typed, _machine = frontmatter.split_machine(rec['meta'])
+    return (typed.get('decided') is True and not typed.get('removed')
+            and not typed.get('moved_to'))
+
+
+def _as_list(v):
+    if v is None:
+        return []
+    return list(v) if isinstance(v, (list, tuple)) else [v]
+
+
+def superseded_by(item_id, rec, canonical):
+    """The id of the decided card that supersedes ``item_id`` — one naming it in its
+    ``links.supersedes``, else one of the same type sharing its ``legacy_id`` — or ``None``.
+    Lowest id first, so the answer never depends on dict order. (A Story and a Feature carry the
+    same legacy id when one was split off the other; that is a lineage, not a duplicate.)"""
+    from asf.record import frontmatter
+    typed, _machine = frontmatter.split_machine(rec['meta'])
+    legacy = typed.get('legacy_id')
+    named = shared = None
+    for oid, orec in sorted(canonical.items()):
+        if oid == item_id or not _live_decided(orec):
+            continue
+        otyped, _omachine = frontmatter.split_machine(orec['meta'])
+        if named is None and item_id in _as_list((otyped.get('links') or {}).get('supersedes')):
+            named = oid
+        if (shared is None and legacy and otyped.get('legacy_id') == legacy
+                and otyped.get('type') == typed.get('type')):
+            shared = oid
+    return named or shared
+
+
+def close_superseded(item_id, rec, canonical, derived, ctx):
+    """An undecided card that a decided card names in ``links.supersedes``, or that shares a
+    ``legacy_id`` with a decided card, is closed as superseded by it."""
+    if not _undecided(rec):
+        return None
+    oid = superseded_by(item_id, rec, canonical)
+    if oid is None:
+        return None
+    reason = f'superseded by {oid}'
+    return Answer(f'no: {reason}', 'removed', f'{reason} (groom {ctx.date})', reason)
+
+
+#: The derived stages that say a Feature's spec or plan is approved on the trunk.
+_APPROVED_DOC_STAGES = ('spec-approved', 'plan-approved')
+
+
+def decide_on_approved_doc(item_id, rec, canonical, derived, ctx):
+    """An undecided Feature whose derived stage says its spec or plan is approved on the trunk
+    (``spec-approved``, ``plan-approved`` or ``building…``) is decided: the approval already
+    happened on the trunk, the missing ``decided: true`` is only bookkeeping."""
+    from asf.record import frontmatter
+    typed, machine = frontmatter.split_machine(rec['meta'])
+    if typed.get('type') != 'feature' or not _undecided(rec):
+        return None
+    stage = str(machine.get('stage') or '')
+    if stage not in _APPROVED_DOC_STAGES and not stage.startswith('building'):
+        return None
+    return Answer('yes', 'decided', True, f'spec or plan approved on trunk ({stage})')
+
+
+def ci_red_job(typed):
+    """The CI job an auto-filed "CI red" Bug names, or ``None``. The Bug filer
+    (:func:`asf.tick.file_bugs.ci_signatures`) keys such a Bug on ``<job>: <failed step>`` and
+    titles it ``CI red: <signature>``; any other Bug names no job."""
+    from asf.tick.file_bugs import CI_RED_TITLE
+    sig = typed.get('signature')
+    if typed.get('type') != 'bug' or not isinstance(sig, str) or ': ' not in sig:
+        return None
+    if not str(typed.get('title') or '').startswith(CI_RED_TITLE):
+        return None
+    return sig.split(': ', 1)[0].strip() or None
+
+
+def _filed_at(typed, machine):
+    """When the Bug was last filed: the later of the start (UTC) of its ``last_filed`` day and
+    its ``stage_since`` — a green run earlier on the day it was filed is not "since"."""
+    import datetime
+    from asf.tick.stale import parse_iso
+    lf = typed.get('last_filed')
+    if isinstance(lf, datetime.date) and not isinstance(lf, datetime.datetime):
+        lf = lf.isoformat()
+    day = (parse_iso(f'{lf}T00:00:00Z')
+           if isinstance(lf, str) and re.match(r'^\d{4}-\d{2}-\d{2}$', lf) else None)
+    since = parse_iso(machine.get('stage_since'))
+    known = [t for t in (day, since) if t is not None]
+    return max(known) if known else None
+
+
+def decide_or_close_ci_red(item_id, rec, canonical, derived, ctx):
+    """An auto-filed Bug saying a named CI job is red, judged by that job's trunk runs
+    (``ctx.ci_runs``): its latest trunk run failed within ``ctx.ci_red_days`` → decided; its
+    latest trunk run passed after the Bug was last filed → closed, green since the first run of
+    that green streak. No trunk run of the job, or only a stale failure → no answer."""
+    import datetime
+    from asf.record import frontmatter
+    typed, machine = frontmatter.split_machine(rec['meta'])
+    job = ci_red_job(typed)
+    if job is None or not _undecided(rec):
+        return None
+    runs = [r for r in ctx.ci_runs
+            if r.get('ts') is not None and (r.get('jobs') or {}).get(job) in ('success', 'failure')]
+    if not runs:
+        return None
+    latest = runs[-1]
+    if latest['jobs'][job] == 'failure':
+        if ctx.now - latest['ts'] > datetime.timedelta(days=ctx.ci_red_days):
+            return None
+        return Answer('yes', 'decided', True,
+                      f"{job} failed on the trunk at {str(latest.get('sha') or '')[:9]}")
+    filed = _filed_at(typed, machine)
+    if filed is None or latest['ts'] < filed:
+        return None
+    first = len(runs) - 1
+    while first > 0 and runs[first - 1]['jobs'][job] == 'success':
+        first -= 1
+    reason = f"green since {str(runs[first].get('sha') or '')[:9]}"
+    return Answer(f'no: {reason}', 'removed', f'{reason} (groom {ctx.date})', f'{job} {reason}')
+
+
+#: ``decide_by_approval``'s two approval classes, by the card type each one covers.
+DECIDE_CLASSES = {'feature': 'decide_feature', 'bug': 'decide_bug'}
+
+
+def decide_by_approval(item_id, rec, canonical, derived, ctx):
+    """``approvals.decide_feature: auto`` (resp. ``decide_bug``): an undecided, unsuperseded
+    Feature (resp. Bug) under a live Epic — open and decided — is decided. The approval bound
+    (:data:`BARRED`) holds a card that reads as money, security, production, customer data or
+    legal back for the operator before any policy is asked."""
+    from asf.record import frontmatter
+    from asf.record.core import is_open
+    typed, _machine = frontmatter.split_machine(rec['meta'])
+    cls = DECIDE_CLASSES.get(typed.get('type'))
+    if cls is None or str((ctx.approvals or {}).get(cls, '')).lower() != 'auto':
+        return None
+    if not _undecided(rec) or superseded_by(item_id, rec, canonical) is not None:
+        return None
+    epic = canonical.get(typed.get('parent'))
+    if epic is None or not is_open(epic) or not _live_decided(epic):
+        return None
+    if frontmatter.split_machine(epic['meta'])[0].get('type') != 'epic':
+        return None
+    return Answer('yes', 'decided', True, f"approvals.{cls}: auto, Epic {typed.get('parent')} is live")
+
+
+#: The groom sections whose lines ask for a card's decision.
+DECISION_SECTIONS = ('inbox', 'undecided3', 'no_stories', 'dupes', 'undecided14', 'auto_bugs')
+
+#: PD3 — ``(name, section keys, policy)``. ``name`` must equal ``asf.groom.groom.POLICY_NAMES``
+#: in the same order (a test asserts it); kept as plain strings rather than an import of that
+#: module, which would be the cycle this module's docstring rules out. The section keys are the
+#: groom sections whose lines the policy may answer. A card can sit in several sections:
+#: :func:`asf.groom.groom.run_policy_pass` asks the decision policies (all but
+#: :data:`PER_LINE_POLICIES`) in this order, and the first answer is the card's one answer on
+#: every line of it — a close (duplicate, superseded, CI green) always wins over a decide, and no
+#: card is both decided and closed in one pass.
 POLICIES = (
-    ('unblock_on_closed', 'blocked_closed', unblock_on_closed),
-    ('close_exact_duplicate', 'dupes', close_exact_duplicate),
-    ('decide_recurring_bug', 'auto_bugs', decide_recurring_bug),
-    ('close_on_starvation', 'undecided14', close_on_starvation),
+    ('unblock_on_closed', ('blocked_closed',), unblock_on_closed),
+    ('close_exact_duplicate', ('dupes',), close_exact_duplicate),
+    ('close_superseded', DECISION_SECTIONS, close_superseded),
+    ('decide_on_approved_doc', DECISION_SECTIONS, decide_on_approved_doc),
+    ('decide_or_close_ci_red', DECISION_SECTIONS, decide_or_close_ci_red),
+    ('decide_recurring_bug', ('auto_bugs',), decide_recurring_bug),
+    ('decide_by_approval', DECISION_SECTIONS, decide_by_approval),
+    ('close_on_starvation', ('undecided14',), close_on_starvation),
 )
 
+#: Policies answered line by line rather than once per card: an unblock is not a decision.
+PER_LINE_POLICIES = ('unblock_on_closed',)
 
-#: §2.8's one-row table, kept as data so F-0031 extends it without touching this module. Each
-#: entry: the ``approvals.<key>`` consulted, and a predicate over ``(answer, typed)`` that is
-#: true when ``answer`` would cross it.
+
+#: The card recognisers of the approval bound: a card whose title reads as one of these classes
+#: is the operator's to decide unless the product maps that class to ``auto``. Matched
+#: case-insensitively against the title only — a body mentions everything. An auto-filed Bug
+#: (one with a ``signature``) is exempt: it is a fault the factory filed under ``file_bug``, and
+#: every action its fix takes is still held by the approvals hook when it is taken.
+CARD_CLASS_WORDS = {
+    'spend_money': re.compile(
+        r'\b(stripe|billing|invoices?|payments?|payouts?|pay|paying|paid|pricing|prices?|'
+        r'subscriptions?|spend|spending|purchases?|refunds?|unit cost|virtual card|'
+        r'credit card|sale|sales)\b', re.IGNORECASE),
+    'touch_security': re.compile(
+        r'\b(secrets?|credentials?|passwords?|tokens?|api keys?|sso|scim|oauth|'
+        r'authenticat\w*|authori[sz]\w*|encrypt\w*|vulnerabilit\w*|security|permissions?|'
+        r'2fa|mfa)\b', re.IGNORECASE),
+    'touch_production': re.compile(r'\b(prod|production|go[- ]live|dns)\b', re.IGNORECASE),
+    'touch_customer_data': re.compile(
+        r'\b(customer data|customer records?|personal data|user data|pii|data exports?|'
+        r'account deletion|delete (?:my|an?|the) account|lawful basis|cross-tenant)\b',
+        re.IGNORECASE),
+    'touch_legal': re.compile(
+        r'\b(licen[cs]es?|legal|terms|privacy|gdpr|dpa|compliance|cookies?|consent|'
+        r'certificat\w*|notices?)\b', re.IGNORECASE),
+}
+
+
+def card_crosses(cls, typed):
+    """True when a card (its typed fields) reads as action class ``cls`` —
+    :data:`CARD_CLASS_WORDS` over its title."""
+    words = CARD_CLASS_WORDS.get(cls)
+    if words is None or typed.get('signature'):
+        return False
+    return bool(words.search(str(typed.get('title') or '')))
+
+
+#: §2.8's table, kept as data so F-0031 extends it without touching this module. Each entry: the
+#: ``approvals.<key>`` consulted, and a predicate over ``(answer, typed)`` that is true when
+#: ``answer`` would cross it. A ``yes`` on an Epic opens it (``new_epic``); a ``yes`` on a card
+#: that reads as money, security, production, customer data or legal commits the factory to it.
 BARRED = (
     ('new_epic', lambda answer, typed: answer.word == 'yes' and typed.get('type') == 'epic'),
+) + tuple(
+    (cls, lambda answer, typed, _cls=cls: answer.word == 'yes' and card_crosses(_cls, typed))
+    for cls in CARD_CLASS_WORDS
 )
 
 

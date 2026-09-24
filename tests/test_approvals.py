@@ -51,7 +51,7 @@ class CatalogueTest(unittest.TestCase):
                 self.assertIn(level, approvals.LEVELS, path)
 
     def test_every_class_has_a_read_point_and_a_known_default(self):
-        known_readers = {'hook', 'harvest', 'file_bugs'}
+        known_readers = {'hook', 'harvest', 'file_bugs', 'groom'}
         for c in approvals.CLASSES:
             self.assertIn(c.default, approvals.LEVELS, c.name)
             self.assertTrue(c.read_by, c.name)
@@ -353,7 +353,7 @@ EMPTY_SET = 'conventions:\n  amendable_paths: []\n'
 
 class CliTest(unittest.TestCase):
     """§3 A5's first half, through ``cli.main`` so the subparser in ``asf/cli.py`` is covered
-    too: ``asf approvals`` prints nine rows with their level and their ``from``, ``list`` shows
+    too: ``asf approvals`` prints one row per class with their level and their ``from``, ``list`` shows
     the open holds, ``resolve`` of a hold that is not open exits 2."""
 
     HOLD = 'F-0031/touch_production'
@@ -397,7 +397,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(rc, 0, out + err)
         rows = self.rows(out)
         self.assertEqual(set(rows), {c.name for c in approvals.CLASSES})
-        self.assertEqual(len(rows), 9)
+        self.assertEqual(len(rows), len(approvals.CLASSES))
         self.assertEqual(rows['touch_production'].split()[1:3], ['human-now', 'yaml'])
         self.assertEqual(rows['merge_routine_pr'].split()[1:3], ['auto', 'default'])
         self.assertEqual(rows['file_bug'].split()[1:3], ['auto', 'default'])

@@ -44,6 +44,8 @@ approvals:
   merge_amendable_set: human-now
   merge_routine_pr: auto
   file_bug: auto
+  decide_feature: human-now
+  decide_bug: human-now
 steps:
   batch: off
   daily: off

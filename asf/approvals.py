@@ -69,6 +69,12 @@ CLASSES = (
     ActionClass(
         'file_bug', 'filing or bumping a Bug',
         'auto', ('hook', 'file_bugs')),
+    ActionClass(
+        'decide_feature', 'deciding an undecided Feature under a live Epic, by rule',
+        'human-now', ('groom',)),
+    ActionClass(
+        'decide_bug', 'deciding an undecided Bug under a live Epic, by rule',
+        'human-now', ('groom',)),
 )
 
 CLASSES_BY_NAME = {c.name: c for c in CLASSES}
@@ -578,6 +584,8 @@ _CODE_RECOGNISERS = {
     'merge_amendable_set': ("the branch's changed files against conventions.amendable_paths",),
     'merge_routine_pr': ('every branch that is not merge_amendable_set',),
     'file_bug': ("the tick's bug filer",),
+    'decide_feature': ("the groom's decide_by_approval policy, over undecided Features",),
+    'decide_bug': ("the groom's decide_by_approval policy, over undecided Bugs",),
 }
 
 
@@ -633,7 +641,7 @@ def _table(rows):
 
 
 def format_matrix(product):
-    """The nine catalogue rows: ``class | level | from | read by | recognisers`` (§2.5)."""
+    """One row per catalogue class: ``class | level | from | read by | recognisers`` (§2.5)."""
     levels = matrix(product)
     known = recognisers(product)
     rows = [_TABLE_HEADER]

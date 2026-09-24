@@ -199,6 +199,8 @@ approvals:
   merge_amendable_set: human-now
   merge_routine_pr: auto
   file_bug: auto
+  decide_feature: human-now   # auto: the groom decides an undecided Feature under a live Epic
+  decide_bug: human-now       # auto: the same for an undecided Bug
   # two switches, not classes, both off unless set:
   # groom: auto      # the groom's policy pass, adjudicate sessions and daily digest
   # upgrade: auto    # the tick runs `asf upgrade` itself (only for ASF's own repo as a product)

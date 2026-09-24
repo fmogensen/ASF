@@ -263,6 +263,332 @@ class PolicyTests(unittest.TestCase):
         self.assertIsNone(ans)
 
 
+def _run(ts, sha, **jobs):
+    """One trunk CI run as ``policy.Ctx.ci_runs`` holds it."""
+    return {'ts': datetime.datetime.fromisoformat(ts.replace('Z', '+00:00')), 'sha': sha,
+            'jobs': dict(jobs)}
+
+
+class FactPolicyTests(unittest.TestCase):
+    """The fact-driven policies — ``close_superseded``, ``decide_on_approved_doc``,
+    ``decide_or_close_ci_red``, ``decide_by_approval``: each one's answer, its miss and its
+    skip, called directly against real parsed records."""
+
+    NOW = datetime.datetime(2026, 9, 24, 12, 0, 0, tzinfo=UTC)
+
+    def setUp(self):
+        self.root = make_repo()
+        write_item(self.root, 'E-0009', 'epic', 'Factory', typed_lines=['decided: true'])
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _load(self):
+        by_id, _errors = load_items(self.root)
+        canonical, _dupes = canonicalize(by_id)
+        return canonical, compute_derived(canonical)
+
+    def _ctx(self, **kw):
+        kw.setdefault('date', '2026-09-24')
+        kw.setdefault('now', self.NOW)
+        return policy.Ctx(**kw)
+
+    def _ask(self, fn, iid, **ctx):
+        canonical, derived = self._load()
+        return fn(iid, canonical[iid], canonical, derived, self._ctx(**ctx))
+
+    # -- close_superseded ----------------------------------------------------------------------
+
+    def test_close_superseded_by_a_decided_card_naming_it(self):
+        write_item(self.root, 'F-0001', 'feature', 'Old shape', parent='E-0009',
+                  typed_lines=['decided: false'])
+        write_item(self.root, 'F-0002', 'feature', 'New shape', parent='E-0009',
+                  typed_lines=['decided: true', 'links:', '  supersedes: [F-0001]'])
+        ans = self._ask(policy.close_superseded, 'F-0001')
+        self.assertEqual(ans, policy.Answer('no: superseded by F-0002', 'removed',
+                                            'superseded by F-0002 (groom 2026-09-24)',
+                                            'superseded by F-0002'))
+
+    def test_close_superseded_by_a_decided_card_sharing_its_legacy_id(self):
+        write_item(self.root, 'S-0001', 'story', 'Old copy', parent='E-0009',
+                  typed_lines=['decided: false', 'legacy_id: F-ID-3'])
+        write_item(self.root, 'S-0002', 'story', 'Kept copy', parent='E-0009',
+                  typed_lines=['decided: true', 'legacy_id: F-ID-3'])
+        self.assertEqual(self._ask(policy.close_superseded, 'S-0001').why, 'superseded by S-0002')
+
+    def test_close_superseded_misses_when_the_naming_card_is_itself_undecided(self):
+        write_item(self.root, 'F-0001', 'feature', 'Old shape', parent='E-0009',
+                  typed_lines=['decided: false', 'legacy_id: x-1'])
+        write_item(self.root, 'F-0002', 'feature', 'New shape', parent='E-0009',
+                  typed_lines=['decided: false', 'legacy_id: x-1', 'links:', '  supersedes: [F-0001]'])
+        self.assertIsNone(self._ask(policy.close_superseded, 'F-0001'))
+
+    def test_close_superseded_misses_a_shared_legacy_id_across_types(self):
+        write_item(self.root, 'F-0001', 'feature', 'The whole shape', parent='E-0009',
+                  typed_lines=['decided: false', 'legacy_id: F-ID-3'])
+        write_item(self.root, 'S-0002', 'story', 'One part of it', parent='E-0009',
+                  typed_lines=['decided: true', 'legacy_id: F-ID-3'])
+        self.assertIsNone(self._ask(policy.close_superseded, 'F-0001'))
+
+    def test_close_superseded_skips_a_decided_card(self):
+        write_item(self.root, 'F-0001', 'feature', 'Old shape', parent='E-0009',
+                  typed_lines=['decided: true'])
+        write_item(self.root, 'F-0002', 'feature', 'New shape', parent='E-0009',
+                  typed_lines=['decided: true', 'links:', '  supersedes: [F-0001]'])
+        self.assertIsNone(self._ask(policy.close_superseded, 'F-0001'))
+
+    # -- decide_on_approved_doc ----------------------------------------------------------------
+
+    def _feature_at(self, stage, decided='false', type_='feature'):
+        write_item(self.root, 'F-0001' if type_ == 'feature' else 'B-0001', type_, 'A plan',
+                  parent='E-0009', typed_lines=[f'decided: {decided}'],
+                  machine_lines=['state: New', f'stage: {stage}',
+                                 'stage_since: 2026-09-24T00:00:00Z', 'updated: 2026-09-24T00:00:00Z'])
+
+    def test_decide_on_approved_doc_decides_a_plan_approved_feature(self):
+        self._feature_at('plan-approved')
+        self.assertEqual(self._ask(policy.decide_on_approved_doc, 'F-0001'),
+                         policy.Answer('yes', 'decided', True,
+                                       'spec or plan approved on trunk (plan-approved)'))
+
+    def test_decide_on_approved_doc_decides_spec_approved_and_building(self):
+        for stage in ('spec-approved', 'building 2/5'):
+            self._feature_at(stage)
+            self.assertEqual(self._ask(policy.decide_on_approved_doc, 'F-0001').word, 'yes', stage)
+
+    def test_decide_on_approved_doc_misses_a_plan_still_in_draft(self):
+        self._feature_at('plan-draft')
+        self.assertIsNone(self._ask(policy.decide_on_approved_doc, 'F-0001'))
+
+    def test_decide_on_approved_doc_skips_a_bug_and_a_decided_feature(self):
+        self._feature_at('plan-approved', decided='true')
+        self.assertIsNone(self._ask(policy.decide_on_approved_doc, 'F-0001'))
+        self._feature_at('plan-approved', type_='bug')
+        self.assertIsNone(self._ask(policy.decide_on_approved_doc, 'B-0001'))
+
+    # -- decide_or_close_ci_red ----------------------------------------------------------------
+
+    def _ci_bug(self, title='CI red: gate-tests: pnpm test', sig='gate-tests: pnpm test'):
+        write_item(self.root, 'B-0001', 'bug', title, parent='E-0009',
+                  typed_lines=['decided: false', f'signature: "{sig}"', 'count: 1',
+                               'last_filed: 2026-09-21'])
+
+    def test_ci_red_decides_when_the_jobs_latest_trunk_run_failed(self):
+        self._ci_bug()
+        runs = (_run('2026-09-20T10:00:00Z', 'aaaaaaaaaaaa', **{'gate-tests': 'success'}),
+                _run('2026-09-22T10:00:00Z', 'bbbbbbbbbbbb', **{'gate-tests': 'failure'}),
+                _run('2026-09-23T10:00:00Z', 'cccccccccccc', gate='success'))
+        ans = self._ask(policy.decide_or_close_ci_red, 'B-0001', ci_runs=runs)
+        self.assertEqual(ans, policy.Answer('yes', 'decided', True,
+                                            'gate-tests failed on the trunk at bbbbbbbbb'))
+
+    def test_ci_red_closes_when_the_job_went_green_after_the_bug_was_filed(self):
+        self._ci_bug()
+        runs = (_run('2026-09-21T08:00:00Z', 'aaaaaaaaaaaa', **{'gate-tests': 'failure'}),
+                _run('2026-09-21T12:00:00Z', 'bbbbbbbbbbbb', **{'gate-tests': 'success'}),
+                _run('2026-09-22T09:00:00Z', 'cccccccccccc', **{'gate-tests': 'cancelled'}),
+                _run('2026-09-22T10:00:00Z', 'dddddddddddd', **{'gate-tests': 'success'}))
+        ans = self._ask(policy.decide_or_close_ci_red, 'B-0001', ci_runs=runs)
+        self.assertEqual(ans, policy.Answer('no: green since bbbbbbbbb', 'removed',
+                                            'green since bbbbbbbbb (groom 2026-09-24)',
+                                            'gate-tests green since bbbbbbbbb'))
+
+    def test_ci_red_misses_a_failure_older_than_ci_red_days(self):
+        self._ci_bug()
+        runs = (_run('2026-09-10T10:00:00Z', 'aaaaaaaaaaaa', **{'gate-tests': 'failure'}),)
+        self.assertIsNone(self._ask(policy.decide_or_close_ci_red, 'B-0001', ci_runs=runs,
+                                    ci_red_days=7))
+        self.assertEqual(self._ask(policy.decide_or_close_ci_red, 'B-0001', ci_runs=runs,
+                                   ci_red_days=15).word, 'yes')
+
+    def test_ci_red_misses_a_green_run_from_before_the_bug_was_filed(self):
+        self._ci_bug()
+        runs = (_run('2026-09-20T10:00:00Z', 'aaaaaaaaaaaa', **{'gate-tests': 'success'}),)
+        self.assertIsNone(self._ask(policy.decide_or_close_ci_red, 'B-0001', ci_runs=runs))
+
+    def test_ci_red_misses_a_green_run_earlier_on_the_day_the_bug_was_filed(self):
+        write_item(self.root, 'B-0001', 'bug', 'CI red: gate-tests: pnpm test', parent='E-0009',
+                  typed_lines=['decided: false', 'signature: "gate-tests: pnpm test"', 'count: 1',
+                               'last_filed: 2026-09-21'],
+                  machine_lines=['state: New', 'stage_since: 2026-09-21T14:45:00Z',
+                                 'updated: 2026-09-21T14:45:00Z'])
+        runs = (_run('2026-09-21T12:00:00Z', 'aaaaaaaaaaaa', **{'gate-tests': 'success'}),)
+        self.assertIsNone(self._ask(policy.decide_or_close_ci_red, 'B-0001', ci_runs=runs))
+
+    def test_ci_red_skips_without_ci_facts_for_the_job(self):
+        self._ci_bug()
+        runs = (_run('2026-09-23T10:00:00Z', 'aaaaaaaaaaaa', gate='failure'),)
+        self.assertIsNone(self._ask(policy.decide_or_close_ci_red, 'B-0001', ci_runs=runs))
+        self.assertIsNone(self._ask(policy.decide_or_close_ci_red, 'B-0001', ci_runs=()))
+
+    def test_ci_red_skips_a_bug_that_names_no_ci_job(self):
+        self._ci_bug(title='Refused twice: a.py', sig='refusal: a.py')
+        runs = (_run('2026-09-23T10:00:00Z', 'aaaaaaaaaaaa', refusal='failure'),)
+        self.assertIsNone(self._ask(policy.decide_or_close_ci_red, 'B-0001', ci_runs=runs))
+
+    # -- decide_by_approval --------------------------------------------------------------------
+
+    def test_decide_by_approval_decides_under_auto(self):
+        write_item(self.root, 'F-0001', 'feature', 'Sidebar rows show unread counts',
+                  parent='E-0009', typed_lines=['decided: false'])
+        ans = self._ask(policy.decide_by_approval, 'F-0001', approvals={'decide_feature': 'auto'})
+        self.assertEqual(ans.word, 'yes')
+        self.assertEqual((ans.field, ans.value), ('decided', True))
+
+    def test_decide_by_approval_decides_a_bug_only_under_decide_bug(self):
+        write_item(self.root, 'B-0001', 'bug', 'Sidebar count is off by one', parent='E-0009',
+                  typed_lines=['decided: false'])
+        self.assertIsNone(self._ask(policy.decide_by_approval, 'B-0001',
+                                    approvals={'decide_feature': 'auto'}))
+        self.assertEqual(self._ask(policy.decide_by_approval, 'B-0001',
+                                   approvals={'decide_bug': 'auto'}).word, 'yes')
+
+    def test_decide_by_approval_is_off_under_human_now_and_by_default(self):
+        write_item(self.root, 'F-0001', 'feature', 'Sidebar rows show unread counts',
+                  parent='E-0009', typed_lines=['decided: false'])
+        self.assertIsNone(self._ask(policy.decide_by_approval, 'F-0001',
+                                    approvals={'decide_feature': 'human-now'}))
+        self.assertIsNone(self._ask(policy.decide_by_approval, 'F-0001'))
+
+    def test_decide_by_approval_misses_under_an_undecided_epic(self):
+        write_item(self.root, 'E-0010', 'epic', 'Maybe later', typed_lines=['decided: false'])
+        write_item(self.root, 'F-0001', 'feature', 'Sidebar rows show unread counts',
+                  parent='E-0010', typed_lines=['decided: false'])
+        self.assertIsNone(self._ask(policy.decide_by_approval, 'F-0001',
+                                    approvals={'decide_feature': 'auto'}))
+
+    def test_decide_by_approval_skips_a_superseded_card(self):
+        write_item(self.root, 'F-0001', 'feature', 'Old shape', parent='E-0009',
+                  typed_lines=['decided: false'])
+        write_item(self.root, 'F-0002', 'feature', 'New shape', parent='E-0009',
+                  typed_lines=['decided: true', 'links:', '  supersedes: [F-0001]'])
+        self.assertIsNone(self._ask(policy.decide_by_approval, 'F-0001',
+                                    approvals={'decide_feature': 'auto'}))
+
+
+class PolicyPassBoundTests(unittest.TestCase):
+    """``run_policy_pass`` in process: the bound holds a human-now class's card back from every
+    policy, a card gets one answer on all its lines, and a close's reason reaches the card."""
+
+    def setUp(self):
+        self.root = make_repo()
+        write_item(self.root, 'E-0009', 'epic', 'Factory', typed_lines=['decided: true'])
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _pass(self, sections, approvals, **ctx):
+        by_id, _errors = load_items(self.root)
+        canonical, _dupes = canonicalize(by_id)
+        ctx.setdefault('date', '2026-09-24')
+        ctx.setdefault('now', FactPolicyTests.NOW)
+        ctx.setdefault('approvals', approvals)
+        out, barred = groom.run_policy_pass(sections, canonical, compute_derived(canonical),
+                                            product(approvals), policy.Ctx(**ctx))
+        return out, barred, canonical
+
+    def _feature(self, iid, title, stage='plan-approved'):
+        write_item(self.root, iid, 'feature', title, parent='E-0009', typed_lines=['decided: false'],
+                  machine_lines=['state: New', f'stage: {stage}',
+                                 'stage_since: 2026-09-24T00:00:00Z', 'updated: 2026-09-24T00:00:00Z'])
+        return f'- [ ] {iid} {title} — no Stories → answer: ____'
+
+    def test_a_feature_under_a_human_now_class_is_not_auto_decided(self):
+        money = self._feature('F-0001', 'Stripe billing for teams')
+        security = self._feature('F-0002', 'Rotate the API keys nightly')
+        plain = self._feature('F-0003', 'Sidebar rows show unread counts')
+        out, barred, _c = self._pass({'no_stories': [money, security, plain]},
+                                     {'groom': 'auto', 'decide_feature': 'auto',
+                                      'spend_money': 'human-now'})
+        self.assertEqual(barred, 2)
+        self.assertTrue(out['no_stories'][0].endswith('____ (barred: approvals.spend_money)'))
+        self.assertTrue(out['no_stories'][1].endswith('____ (barred: approvals.touch_security)'))
+        self.assertTrue(out['no_stories'][2].endswith('controller: decide_on_approved_doc yes'))
+
+    def test_a_class_mapped_to_auto_lets_its_card_through(self):
+        money = self._feature('F-0001', 'Stripe billing for teams')
+        out, barred, _c = self._pass({'no_stories': [money]},
+                                     {'groom': 'auto', 'spend_money': 'auto'})
+        self.assertEqual(barred, 0)
+        self.assertTrue(out['no_stories'][0].endswith('controller: decide_on_approved_doc yes'))
+
+    def test_an_auto_filed_bug_is_exempt_from_the_title_recognisers(self):
+        write_item(self.root, 'B-0001', 'bug', 'CI red: deploy-prod: push', parent='E-0009',
+                  typed_lines=['decided: false', 'signature: "deploy-prod: push"', 'count: 2'])
+        line = '- [ ] B-0001 CI red: deploy-prod: push — auto-filed, count 2 → answer: ____'
+        out, barred, _c = self._pass({'auto_bugs': [line]}, {'groom': 'auto'})
+        self.assertEqual(barred, 0)
+        self.assertTrue(out['auto_bugs'][0].endswith('controller: decide_recurring_bug yes'))
+
+    def test_a_card_gets_one_answer_on_every_line_and_a_close_wins(self):
+        write_item(self.root, 'B-0001', 'bug', 'CI red: gate: lint', parent='E-0009',
+                  typed_lines=['decided: false', 'signature: "gate: lint"', 'count: 3',
+                               'last_filed: 2026-09-21'])
+        runs = (_run('2026-09-23T10:00:00Z', 'abcdef1234567', gate='success'),)
+        lines = {'dupes': ['- [ ] B-0001 CI red: gate: lint — near-duplicate of B-0000 (overlap 0.70) → answer: ____'],
+                 'auto_bugs': ['- [ ] B-0001 CI red: gate: lint — auto-filed, count 3 → answer: ____']}
+        out, _barred, canonical = self._pass(lines, {'groom': 'auto', 'decide_bug': 'auto'},
+                                             ci_runs=runs)
+        for key in ('dupes', 'auto_bugs'):
+            self.assertTrue(out[key][0].endswith(
+                'controller: decide_or_close_ci_red no: green since abcdef123'), out[key][0])
+
+        path = os.path.join(self.root, 'groom', '2026-09-24.md')
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(groom.render_groom_file('2026-09-24', out))
+        self.assertEqual(groom.apply_groom_answers(self.root, canonical, path, '2026-09-24'), 1)
+        with open(os.path.join(self.root, 'bugs', 'B-0001.md'), encoding='utf-8') as f:
+            meta, body = frontmatter.parse(f.read(), path='bugs/B-0001.md')
+        self.assertEqual(meta['removed'], 'green since abcdef123 (groom 2026-09-24)')
+        self.assertIn('groom: removed → green since abcdef123 (groom 2026-09-24) '
+                      '(controller, decide_or_close_ci_red)', body)
+
+    def test_a_policy_turned_off_is_not_asked(self):
+        plain = self._feature('F-0003', 'Sidebar rows show unread counts')
+        out, _barred, _c = self._pass(
+            {'no_stories': [plain]},
+            {'groom': 'auto'})
+        self.assertTrue(out['no_stories'][0].endswith('controller: decide_on_approved_doc yes'))
+        by_id, _errors = load_items(self.root)
+        canonical, _dupes = canonicalize(by_id)
+        p = Product('sample', {'approvals': {'groom': 'auto'},
+                               'groom': {'policies': {'decide_on_approved_doc': 'off'}}})
+        out2, _b = groom.run_policy_pass({'no_stories': [plain]}, canonical,
+                                         compute_derived(canonical), p,
+                                         policy.Ctx(date='2026-09-24', now=FactPolicyTests.NOW))
+        self.assertTrue(out2['no_stories'][0].endswith('→ answer: ____'))
+
+
+class TrunkCiRunsTests(unittest.TestCase):
+    """``trunk_ci_runs``: the record's ``metrics/ci`` stream, trunk only, oldest first."""
+
+    def test_reads_trunk_runs_oldest_first(self):
+        root = tempfile.mkdtemp(prefix='ci_runs_')
+        try:
+            os.makedirs(os.path.join(root, 'metrics', 'ci'))
+            rows = [
+                {'ts': '2026-09-22T10:00:00Z', 'branch': 'main', 'sha': 'b' * 40,
+                 'jobs': [{'name': 'gate', 'conclusion': 'success'}]},
+                {'ts': '2026-09-21T10:00:00Z', 'branch': 'main', 'sha': 'a' * 40,
+                 'jobs': [{'name': 'gate', 'conclusion': 'failure'}]},
+                {'ts': '2026-09-23T10:00:00Z', 'branch': 'cloud/x', 'sha': 'c' * 40,
+                 'jobs': [{'name': 'gate', 'conclusion': 'failure'}]},
+            ]
+            with open(os.path.join(root, 'metrics', 'ci', '2026-09-22.jsonl'), 'w') as f:
+                f.write('\n'.join(json.dumps(r) for r in rows) + '\n')
+            runs = groom.trunk_ci_runs(root, None)
+            self.assertEqual([r['sha'][0] for r in runs], ['a', 'b'])
+            self.assertEqual(runs[1]['jobs'], {'gate': 'success'})
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_parse_answer_carries_a_close_reason(self):
+        self.assertEqual(groom._parse_answer('no: superseded by F-0001'),
+                         ('removed', 'superseded by F-0001'))
+        self.assertEqual(groom._parse_answer('no'), ('removed', None))
+
+
 class GroomAutoTestCase(unittest.TestCase):
     """A :func:`make_repo` root plus a temp ``ASF_HOME`` with a ``sample`` product yaml pointed
     at it (``backlog_dir``), for ``cmd_groom`` runs that need ``approvals.groom: auto`` — the

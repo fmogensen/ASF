@@ -27,6 +27,9 @@ from asf.tick.migrate import truncate
 from asf.tick.stale import parse_iso
 
 CI_REFUSAL_WINDOW_H = 24
+#: A CI failure's Bug title opens with this, then its ``<job>: <failed step>`` signature — the
+#: groom's ``decide_or_close_ci_red`` reads the job back off it.
+CI_RED_TITLE = 'CI red: '
 
 #: The conventions a caller with no Product reads: the trunk is `main`, no batch lane, no
 #: default Bug Epic. The Epic a filed Bug is parented under is `conventions.default_bug_epic`;
@@ -81,7 +84,7 @@ def ci_signatures(root, now, conv=None):
         if d['count'] < 2:
             continue
         out[sig] = {
-            'title': truncate(f"CI red: {sig}", 120),
+            'title': truncate(f"{CI_RED_TITLE}{sig}", 120),
             'severity': 'S2' if d['main_or_batch'] else 'S3',
             'evidence': d['evidence'],
             'runs': sorted(r for r in d['runs'] if r is not None),
