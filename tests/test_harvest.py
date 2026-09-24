@@ -2131,6 +2131,141 @@ class ForeignRedTests(unittest.TestCase):
 PRODUCT_REPOS = Template(ProductHarvestTests.build, prefix='harvest_product_')
 
 
+class GateLedgerTests(unittest.TestCase):
+    """§2.2's ledger half: every landing gate — per-branch or combined — appends one timed, named
+    line to ``gates.jsonl``, and :func:`asf.metrics.metrics.gates_from_ledger` reads it back."""
+
+    def setUp(self):
+        self.base = PRODUCT_REPOS.fresh()  # built once, copied per test (B-0071)
+        self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
+        self.origin = os.path.join(self.base, 'origin.git')
+        self.repo = os.path.join(self.base, 'repo')
+        self.worker = os.path.join(self.base, 'worker')
+        self.state_dir = os.path.join(self.base, 'state')
+
+    def write(self, root, rel, text):
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+
+    def product(self, **conventions):
+        conventions.setdefault('test_command', PRODUCT_TEST)
+        return env.Product('sample', {'repo_dir': self.repo, 'main': 'main',
+                                      'conventions': conventions, 'steps': {'batch': 'off'}})
+
+    def push_lane(self, branch, commits):
+        sh(['git', 'checkout', '-q', '-B', branch, 'origin/main'], cwd=self.worker)
+        for subject, files in commits:
+            for rel, text in files.items():
+                self.write(self.worker, rel, text)
+            sh(['git', 'add', '-A'], cwd=self.worker)
+            sh(['git', 'commit', '-qm', subject], cwd=self.worker)
+        sh(['git', 'push', '-q', 'origin', branch], cwd=self.worker)
+
+    def session(self, job, item, branch, rc=0):
+        with open(os.path.join(self.state_dir, 'sessions.jsonl'), 'a', encoding='utf-8') as f:
+            f.write(json.dumps({'job': job, 'item': item, 'branch': branch, 'account': 'test',
+                                'pid': dead_pid(), 'started': '2026-09-21T00:00:00Z'}) + '\n')
+            f.write(json.dumps({'job': job, 'ended': '2026-09-21T00:05:00Z',
+                                'end_reason': 'finished' if rc == 0 else 'failed', 'rc': rc}) + '\n')
+
+    def harvest(self, product):
+        lines = []
+        results = harvest.run_product_harvest(product, self.state_dir, out=lines.append)
+        return results, lines
+
+    def record(self, branch):
+        return harvest.sessions_by_branch(self.state_dir).get(branch) or {}
+
+    def ledger(self):
+        path = os.path.join(self.state_dir, 'gates.jsonl')
+        if not os.path.isfile(path):
+            return []
+        with open(path, encoding='utf-8') as f:
+            return [json.loads(l) for l in f if l.strip()]
+
+    def lane(self, i, red=False):
+        item = f'B-{i:04d}'
+        branch = f'fix/{item}'
+        files = {f'f{i}.txt': f'{i}\n'}
+        if red:
+            files[f'checks/test_red{i}.py'] = RED_TEST.replace('test_red_gate', f'test_red_{i}')
+        self.push_lane(branch, [(f'fix({item}): change {i}', files)])
+        self.session(f'fix-bug-{item.lower()}', item, branch)
+        return branch
+
+    def test_a_per_branch_landing_appends_one_line_with_the_branch_the_sha_and_ok_true(self):
+        branch = self.lane(1)
+        results, _lines = self.harvest(self.product(harvest={'gate': 'per-branch'}))
+        self.assertEqual(results, {branch: 'landed'})
+        lines = self.ledger()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0]['branches'], [branch])
+        self.assertEqual(lines[0]['sha'], self.record(branch)['harvested'])
+        self.assertIs(lines[0]['ok'], True)
+        self.assertIsNone(lines[0]['line'])
+        self.assertIsInstance(lines[0]['seconds'], (int, float))
+        self.assertGreaterEqual(lines[0]['seconds'], 0)
+        self.assertIsInstance(lines[0]['at'], str)
+
+    def test_a_combined_gate_over_three_branches_appends_one_line_naming_all_three(self):
+        branches = [self.lane(i) for i in (1, 2, 3)]
+        results, _lines = self.harvest(self.product())
+        self.assertEqual(results, {b: 'landed' for b in branches})
+        lines = self.ledger()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(sorted(lines[0]['branches']), sorted(branches))
+        self.assertIs(lines[0]['ok'], True)
+        self.assertEqual(lines[0]['sha'], self.record(branches[0])['harvested'])
+
+    def test_a_red_combined_gate_that_bisects_appends_one_line_per_group_it_gated(self):
+        branches = [self.lane(i, red=(i == 3)) for i in (1, 2, 3, 4)]
+        results, _lines = self.harvest(self.product())
+        self.assertEqual(results, {'fix/B-0001': 'landed', 'fix/B-0002': 'landed',
+                                   'fix/B-0003': 'held', 'fix/B-0004': 'landed'})
+        lines = self.ledger()
+        # the full 4, then the bisection: [1,2] green, [3,4] red -> [3] red, [4] green
+        self.assertEqual(len(lines), 6, lines)
+        self.assertFalse(lines[0]['ok'])
+        self.assertEqual(sorted(lines[0]['branches']), sorted(branches))
+        solo_red = [l for l in lines if l['branches'] == ['fix/B-0003']]
+        self.assertEqual(len(solo_red), 1, lines)
+        self.assertFalse(solo_red[0]['ok'])
+        self.assertIn('test_red_3', solo_red[0]['line'])
+        solo_green = [l for l in lines if l['branches'] == ['fix/B-0004']]
+        self.assertEqual(len(solo_green), 1, lines)
+        self.assertTrue(solo_green[0]['ok'])
+        self.assertIsNone(solo_green[0]['line'])
+
+    def test_gate_groups_with_no_ledger_writes_nothing(self):
+        branch = self.lane(1)
+        holder = tempfile.mkdtemp(prefix='gate_groups_')
+        self.addCleanup(shutil.rmtree, holder, True)
+        tmp = os.path.join(holder, 'wt')
+        sh(['git', 'worktree', 'add', '-q', '--detach', tmp, 'origin/main'], cwd=self.repo)
+        self.addCleanup(sh, ['git', 'worktree', 'remove', '--force', tmp], self.repo)
+        conv = Conventions.from_mapping({'test_command': PRODUCT_TEST})
+        groups = harvest.gate_groups(tmp, 'main', [(branch, {})], conv, False,
+                                     lambda *a, **k: None, lambda *a, **k: None)
+        self.assertEqual(len(groups), 1)
+        self.assertTrue(groups[0][2])
+        self.assertEqual(self.ledger(), [])
+
+    def test_the_ledger_a_harvest_writes_is_read_back_into_a_valid_gates_event(self):
+        from asf.metrics import metrics
+        branch = self.lane(1)
+        self.harvest(self.product(harvest={'gate': 'per-branch'}))
+        product = env.Product('sample', {})
+        with mock.patch.object(env, 'state_dir', lambda p=None: self.state_dir):
+            evs = metrics.gates_from_ledger(product)
+        self.assertEqual(len(evs), 1)
+        ev = metrics.validate('gates', evs[0], {})
+        self.assertEqual(ev['branches'], [branch])
+        self.assertEqual(ev['conclusion'], 'success')
+        self.assertEqual(ev['sha'], self.record(branch)['harvested'])
+
+
 class RulesSourceMergeTests(unittest.TestCase):
     def test_source_line_union_merge(self):
         ours = 'source: "Ops 2026-09-20: standing authority; memory alpha"'
