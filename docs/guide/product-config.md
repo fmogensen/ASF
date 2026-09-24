@@ -339,7 +339,7 @@ command, `{account}` substituted, printing one JSON line with `five_h_pct`, `sev
 optionally `seven_d_model_pct`). Without it every account reads 0 % and is always free; an account
 whose command fails reads as `stop`.
 
-**Host guard** (`config.yaml`): a loaded host starts no new session.
+**Host guard** (`config.yaml`): a loaded host starts no new session and no landing gate.
 
 ```yaml
 host_guards:
@@ -353,6 +353,12 @@ pressure load 90/cores 12, swap 87%`, the step ends on `wave: held: …`, and a 
 event lands in `metrics/events`. Running sessions are never stopped. A value the host does not
 report (no swap reading, say) never holds. `ASF_HOST_READING="<load15> <cores> <swap_pct>"`
 stands in for the host — to see what the tick would do at a given load.
+
+The same guard holds the landing gate, which is the product's whole test suite on this host: over
+either threshold the harvest starts none, prints `harvest: held: host pressure … — no gate started
+this tick, retried next tick`, and each branch waits at `host-pressure` — unknown, never red, no
+correction and no round, re-gated next tick. A PR merging on its external CI's checks alone runs no
+suite here and is unaffected.
 
 A product whose code PRs its external CI gates (`landing: pull-request` with
 `conventions.landing_checks` named, or `landing_checks_missing` `wait` for code) gets one more

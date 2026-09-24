@@ -21,7 +21,7 @@ from unittest import mock
 from asf import env
 from asf.feeder import rows as feeder_rows
 from asf.harvest import harvest, lane
-from asf.workers import lifecycle
+from asf.workers import host, lifecycle
 
 NOW = 1_800_000_000.0
 HEAD, NEW = 'a' * 40, 'b' * 40
@@ -431,6 +431,30 @@ class LaneRepo(unittest.TestCase):
             run = lifecycle.by_branch(os.path.join(self.state_dir, 'sessions.jsonl'))[b]
             self.assertFalse(run.get('correction'))
         self.assertTrue(slow and slow.startswith('gate too slow: 1s vs gate_timeout_s'), slow)
+
+    def test_host_pressure_holds_the_gate_and_starts_no_suite(self):
+        """B-0109: the landing gate *is* a full test suite. On a host already at its guards it is
+        never started — the set waits (``host-pressure``), nobody is blamed, and the next tick on a
+        quiet host gates it and lands it. The incident was this suite beside a worker's own."""
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat(T-0001): a')
+        self.session('coder-t-0001', 'T-0001', 'worker/T-0001')
+        before = self.origin_main()
+        lines = []
+        with mock.patch.dict(os.environ, {host.READING_ENV: '90 12 87'}), \
+                mock.patch.object(harvest, 'product_gate',
+                                  side_effect=AssertionError('a suite started under pressure')):
+            results = harvest.run_product_harvest(self.product(), self.state_dir, out=lines.append)
+        self.assertEqual(results, {'worker/T-0001': 'waiting'}, lines)
+        self.assertEqual(self.origin_main(), before, 'nothing lands under host pressure')
+        self.assertTrue([ln for ln in lines if 'host pressure load 90/cores 12, swap 87%' in ln],
+                        lines)
+        run = lifecycle.by_branch(os.path.join(self.state_dir, 'sessions.jsonl'))['worker/T-0001']
+        self.assertEqual((run['lane']['state'], run['lane']['reason']),
+                         (lane.WAITING, lane.HOST_PRESSURE))
+        self.assertFalse(run.get('correction'))  # pressure is not a defect: no round, no blame
+        self.assertFalse(run.get('rounds'))
+        results = harvest.run_product_harvest(self.product(), self.state_dir, out=lines.append)
+        self.assertEqual(results, {'worker/T-0001': 'landed'}, lines)
 
     def test_gate_command_env_prefix(self):
         """§12: ``NAME=value`` tokens leading ``ci.test_command`` are the command's environment,

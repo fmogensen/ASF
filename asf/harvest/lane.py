@@ -38,7 +38,9 @@ Transitions (plan §2 plus the §9 overrides):
 - T6  GATE → WAITING_CI        required checks pending/absent under ``landing_checks_missing``
 - T7  WAITING_CI → GATE        re-decided every harvest
 - T8  GATE → WAITING           trunk red alone, no merge budget, deferred, a shared path, a gate
-                               timeout, an approval hold — never a correction, never a round
+                               timeout, an approval hold, host pressure (:func:`held_by_host`:
+                               the gate is a full suite and this host has no room for it, B-0109)
+                               — never a correction, never a round
 - T9  GATE → BACK              red alone on a green trunk, conflict, a lane refusal
 - T10 GATE → MERGING → MERGED  merged by the host (FF ``push_ff``; PR ``gh pr merge``)
 - T10q GATE → QUEUED → MERGED  a merge queue took it; queue-rejected → WAITING (R5)
@@ -61,6 +63,7 @@ from asf import approvals, env
 from asf.evidence import review as review_mod
 from asf.feeder import footprint, widen
 from asf.harvest import harvest as H
+from asf.workers import host as host_mod
 from asf.workers import lifecycle
 from asf.workers.pool import now_iso
 
@@ -117,6 +120,8 @@ MISSING_WAIT = 'wait'
 DEFAULT_LANDING_WAIT_MIN = 30
 REQUIRED_TTL_S = 3600
 REQUIRED_CACHE = 'landing-required-checks.json'
+#: The WAITING reason of a set the host-pressure guard would not start a gate for (B-0109).
+HOST_PRESSURE = 'host-pressure'
 #: Consecutive gate timeouts, and the file the status and doctor rows read (§12).
 GATE_SLOW = 'gate-slow.json'
 GATE_SLOW_AFTER = 2
@@ -809,7 +814,8 @@ def gate_pass(product, state_dir=None, items=None, out=print, dry_run=False, lan
               found=None):
     """The detached harvest's half (R2): every branch in GATE/WAITING/WAITING_CI at the head it
     was recorded at is prechecked (approval, the host's checks, the budget, shared paths) and
-    gated together (:func:`gate_set`). Returns ``{branch: outcome}``."""
+    gated together (:func:`gate_set`) — unless this host has no room for a suite at all
+    (:func:`held_by_host`). Returns ``{branch: outcome}``."""
     lane = lane or Lane(product, state_dir, out, dry_run, items)
     if found is None:
         H.sh(['git', 'fetch', '-q', '--prune', 'origin'], cwd=lane.repo)
@@ -821,10 +827,32 @@ def gate_pass(product, state_dir=None, items=None, out=print, dry_run=False, lan
                 and f['head'] == rec.get('head'):
             entries.append(f)
     entries = H.cap_to_tick(pr_order(entries, items), lane.out, lane.conv)
-    ready = precheck(lane, entries)
+    ready = held_by_host(lane, precheck(lane, entries))
     if ready:
         gate_set(lane, ready)
     return lane.results
+
+
+def held_by_host(lane, ready):
+    """B-0109: the gate is the product's whole test suite, and it is this host's. Under host
+    pressure (:mod:`asf.workers.host`, the same ``config.yaml host_guards`` the wave step reads)
+    it is not started at all: every entry that would run it waits (:data:`HOST_PRESSURE`) and is
+    re-gated next tick — unknown, never red, nobody blamed. The entries merging on their external
+    CI's checks alone (``how == 'ci'``) run no suite here, so they go on. The ones to gate."""
+    gating = [f for f in ready if f.get('how') != 'ci']
+    if not gating:
+        return ready
+    try:
+        cfg = env.load_config()
+    except (env.ConfigError, OSError, ValueError):  # a guard never stops a landing on its own
+        cfg = {}
+    held, why, _reading = host_mod.pressure(cfg)
+    if not held:
+        return ready
+    lane.out(f'harvest: held: {why} — no gate started this tick, retried next tick')
+    for f in gating:
+        wait(lane, f, HOST_PRESSURE)
+    return [f for f in ready if f.get('how') == 'ci']
 
 
 def pr_order(entries, items=None):
