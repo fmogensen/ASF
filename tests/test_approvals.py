@@ -46,7 +46,11 @@ class CatalogueTest(unittest.TestCase):
             with open(path, encoding='utf-8') as f:
                 data = env.loads(f.read())
             product = Product('x', data)
-            self.assertEqual(set(product.approvals.keys()), names, path)
+            # the tenth class's yaml line is the docs task's (F-0024 §5); until it lands the
+            # example and sample may omit it, and after it they may carry it
+            self.assertEqual(set(product.approvals.keys()) - names, set(), path)
+            self.assertLessEqual(names - set(product.approvals.keys()),
+                                 {'touch_amendable_set'}, path)
             for level in product.approvals.values():
                 self.assertIn(level, approvals.LEVELS, path)
 
