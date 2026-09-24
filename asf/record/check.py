@@ -15,6 +15,10 @@ from asf.record.core import (
 ACCEPTANCE_ITEM_RE = re.compile(r'(?m)^- \[[ x]\]\s+\S')
 BULLET_RE = re.compile(r'(?m)^- \S')
 
+LANDED_SHA_RE = re.compile(r'[0-9a-fA-F]{7,40}')
+RESIDUE_RULE = 'rule: no-rule'
+SPEC_CLOSING = 'docs/specs/f-0080.md'
+
 # A Feature normally requires a parent Epic, but `migrate` may leave one parentless when the
 # adopted source names no Epic for it and it carries no Story of its own to infer one from. Set
 # per product via a real expiry date once adopted; None means the exception never applies.
@@ -48,6 +52,50 @@ def check_deliveries(canonical, add, find_line):
                 add(rec, line, f"delivers references removed item {mid}")
             elif mid != lid and member['meta'].get('delivered_by') != lid:
                 add(rec, line, f"{mid} is in {lid}'s delivers: but does not carry delivered_by: {lid}")
+
+
+def residue_gaps(meta, evidence, canonical):
+    """The parenthetical of a residue finding: the item's type, and what its evidence lines and
+    the record do not carry — the reasons no closing rule had anything to read."""
+    type_ = meta.get('type')
+    iid = meta.get('id')
+    gaps = [f"type {type_}"]
+    if type_ == 'story':
+        listed = any(r['meta'].get('type') == 'task' and not r['meta'].get('removed')
+                     and iid in (r['meta'].get('stories') or []) for r in canonical.values())
+        if not listed:
+            gaps.append('no Task')
+        if not any(str(l).startswith('matrix status') for l in evidence):
+            gaps.append('no matrix row')
+    elif type_ in ('feature', 'epic'):
+        if not any(r['meta'].get('parent') == iid for r in canonical.values()):
+            gaps.append('no children')
+    parent = meta.get('parent')
+    if parent in canonical:
+        state = frontmatter.split_machine(canonical[parent]['meta'])[1].get('state', 'New')
+        gaps.append(f"parent {parent} is {state}")
+    return ', '.join(gaps)
+
+
+def check_residue(canonical, add, find_line):
+    """§2.7: an item whose last evidence line is `rule: no-rule` is one no closing rule sees —
+    a finding the day it is written; and a typed `landed:` must at least be shaped like a sha
+    (whether it is on the trunk is what `ingest` decides, `check` touches no git)."""
+    for rec in canonical.values():
+        meta = rec['meta']
+        typed, machine = frontmatter.split_machine(meta)
+        landed = typed.get('landed')
+        if landed not in (None, '') and not LANDED_SHA_RE.fullmatch(str(landed)):
+            add(rec, find_line(rec, 'landed'),
+                f"landed: {str(landed)!r} is not a 7-40 character hex sha; "
+                f"whether it is on the trunk is what `ingest` decides; see {SPEC_CLOSING} §2.5")
+        evidence = machine.get('evidence')
+        if typed.get('removed') or not isinstance(evidence, list) or not evidence \
+                or evidence[-1] != RESIDUE_RULE:
+            continue
+        add(rec, find_line(rec, 'evidence'),
+            f"no closing rule sees this item ({residue_gaps(meta, evidence, canonical)}) "
+            f"— it can never close; see {SPEC_CLOSING} §2.1")
 
 
 def cmd_check(args, root):
@@ -170,6 +218,7 @@ def cmd_check(args, root):
                     add(rec, line or 1, f"{h} section is stale (run `asf index`)")
 
     check_deliveries(canonical, add, find_line)
+    check_residue(canonical, add, find_line)
 
     # Size: an item whose History records a shape reading is held to that type's size (D6) —
     # an item never typed by shape (no `— shape:` line) is grandfathered and skipped.

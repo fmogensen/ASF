@@ -7,6 +7,8 @@ Every row is filled from what exists, or says which key would fill it —
 * **Prod** — how far ``main`` is ahead of the last successful ``ci.deploy_workflow`` run;
 * **Agents** — the workers' session registry, ``~/.ASF/state/<product>/sessions.jsonl``;
 * **Capacity** — the session and CI ceilings the resolver (``asf.capacity.resolve``) hands back;
+* **Record** — the record's counts from ``index.json``: open, Active, blocked, and the items no
+  closing rule sees (``rule: no-rule``, §2.7 of the closing spec; ``asf check`` names each);
 * **Ready to launch** — what ``asf next --json`` would print (the feeder over the record's
   ``index.json``, less the sessions in flight);
 * **Decisions** — the undecided cards (D6's one ranking) and the first few to decide;
@@ -141,6 +143,29 @@ def capacity_cell(cfg, product):
     return ', '.join(parts)
 
 
+def record_cell(root):
+    """``<n> open · <n> Active · <n> blocked · <n> no rule`` from ``index.json``'s live items —
+    ``no rule`` is an ``evidence:`` list whose last entry is ``rule: no-rule``, the residue."""
+    from asf.views import index_reader as ix
+    if not root or not os.path.exists(os.path.join(root, 'index.json')):
+        return not_configured('backlog_dir (no index.json)')
+    try:
+        items, _generated = ix.load(root)
+        live = [v for v in items.values() if isinstance(v, dict)]
+    except (OSError, ValueError, KeyError, AttributeError):
+        return not_configured('backlog_dir (index.json unreadable)')
+    opened = [v for v in live if v.get('state', 'New') != 'Closed']
+    active = sum(1 for v in opened if v.get('state') == 'Active')
+    blocked = sum(1 for v in opened if v.get('blocked') is True)
+    no_rule = sum(1 for v in live if _residue(v))
+    return f"{len(opened)} open · {active} Active · {blocked} blocked · {no_rule} no rule"
+
+
+def _residue(item):
+    evidence = item.get('evidence')
+    return isinstance(evidence, list) and bool(evidence) and evidence[-1] == 'rule: no-rule'
+
+
 def ready_cell(root, product):
     """``asf next --json``'s rows: how many would launch, and the first of them."""
     from asf.feeder import rows as feeder_rows
@@ -230,6 +255,7 @@ def render(root, product, cfg=None):
                        ('Prod', lambda: prod_cell(product)),
                        ('Agents', lambda: agents_cell(product)),
                        ('Capacity', lambda: capacity_cell(cfg, product)),
+                       ('Record', lambda: record_cell(root)),
                        ('Ready to launch', lambda: ready_cell(root, product)),
                        ('Decisions', lambda: decisions_cell(root, product)),
                        ('Quota 5h/7d', lambda: quota_cell(cfg)),

@@ -223,6 +223,50 @@ class DecisionsCellTests(ViewsTestCase):
         self.assertEqual(names[names.index('Ready to launch') + 1], 'Decisions')
 
 
+class RecordCellTests(ViewsTestCase):
+    def _index(self, extra):
+        items = dict(INDEX['items'])
+        items.update(extra)
+        with open(os.path.join(self.root, 'index.json'), 'w') as f:
+            json.dump({'generated': '', 'items': items}, f)
+
+    def rows(self):
+        text = status.render(self.root, self.product, cfg={'scheduler': {'kind': 'none'}})
+        return [ln.split(' | ')[0].lstrip('| ') for ln in text.splitlines() if ln.startswith('| ')], \
+            {ln.split(' | ')[0].lstrip('| '): ln.split(' | ', 1)[1].rstrip(' |')
+             for ln in text.splitlines() if ln.startswith('| ') and 'Metric' not in ln}
+
+    def test_a_healthy_record_says_zero_no_rule(self):
+        self.assertEqual(status.record_cell(self.root), '2 open · 0 Active · 0 blocked · 0 no rule')
+        self.assertEqual(self.rows()[1]['Record'], '2 open · 0 Active · 0 blocked · 0 no rule')
+
+    def test_a_shapeless_story_is_counted(self):
+        self._index({
+            'S-0001': {'id': 'S-0001', 'type': 'story', 'folder': 'stories', 'parent': 'F-0001',
+                       'state': 'Active', 'evidence': ['no evidence found (2026-09-23)', 'rule: no-rule']},
+            'S-0002': {'id': 'S-0002', 'type': 'story', 'folder': 'stories', 'parent': 'F-0001',
+                       'state': 'Closed', 'evidence': ['rule: landed']},
+            'S-0003': {'id': 'S-0003', 'type': 'story', 'folder': 'stories', 'parent': 'F-0001',
+                       'state': 'New', 'blocked': True, 'evidence': ['rule: no-rule', 'rule: planned']},
+            'S-0004': {'id': 'S-0004', 'type': 'story', 'folder': 'stories', 'parent': 'F-0001',
+                       'state': 'New', 'removed': 'groom 2026-09-01', 'evidence': ['rule: no-rule']},
+        })
+        self.assertEqual(status.record_cell(self.root), '4 open · 1 Active · 1 blocked · 1 no rule')
+
+    def test_no_index_or_an_unreadable_one_is_not_configured(self):
+        nowhere = os.path.join(self.tmp, 'nowhere')
+        self.assertEqual(status.record_cell(nowhere), '— (not configured: backlog_dir (no index.json))')
+        with open(os.path.join(self.root, 'index.json'), 'w') as f:
+            f.write('{not json')
+        self.assertEqual(status.record_cell(self.root),
+                         '— (not configured: backlog_dir (index.json unreadable))')
+        self.assertIn('Groom', self.rows()[1])
+
+    def test_the_row_sits_directly_above_ready_to_launch(self):
+        names, _ = self.rows()
+        self.assertEqual(names[names.index('Ready to launch') - 1], 'Record')
+
+
 class CapacityTable(ViewsTestCase):
     def test_one_row_per_product_with_the_bound_by_column(self):
         asf = env.Product('asf', {'capacity': {'sessions': 3}})

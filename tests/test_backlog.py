@@ -305,6 +305,63 @@ class CheckCommandTests(unittest.TestCase):
         r = run(['check'], self.root)
         self.assertEqual(r.returncode, 0, r.stdout)
 
+    def _residue_story(self, sid='S-0104', evidence=('no evidence found (2026-09-23)', 'rule: no-rule')):
+        machine = ['schema_version: 1', 'state: Active', 'stage_since: 2026-01-01T00:00:00Z',
+                   'evidence:'] + ['  - ' + line for line in evidence] + ['updated: 2026-01-01T00:00:00Z']
+        write_item(self.root, sid, 'story', 'Shapeless', parent='F-0001', machine_lines=tuple(machine))
+
+    def test_a_record_with_no_residue_produces_no_residue_finding(self):
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        write_item(self.root, 'F-0001', 'feature', 'Free plan', parent='E-0001')
+        self._residue_story(evidence=('commit 9f2ac41 names S-0104', 'rule: landed'))
+        run(['index'], self.root)
+        r = run(['check'], self.root)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertNotIn('no closing rule', r.stdout)
+
+    def test_one_finding_per_residue_item_names_the_type_the_gap_and_the_spec(self):
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        write_item(self.root, 'F-0001', 'feature', 'Free plan', parent='E-0001')
+        self._residue_story('S-0104')
+        self._residue_story('S-0105')
+        self._residue_story('S-0106', evidence=('no evidence found (2026-09-23)', 'rule: planned'))
+        run(['index'], self.root)
+        r = run(['check'], self.root)
+        self.assertEqual(r.returncode, 1)
+        found = [ln for ln in r.stdout.splitlines() if 'no closing rule sees this item' in ln]
+        self.assertEqual(len(found), 2, r.stdout)
+        self.assertTrue(found[0].startswith('stories/S-0104.md:'), found[0])
+        self.assertIn('(type story, no Task, no matrix row, parent F-0001 is New)', found[0])
+        self.assertIn('it can never close; see docs/specs/f-0080.md §2.1', found[0])
+        self.assertTrue(found[1].startswith('stories/S-0105.md:'), found[1])
+
+    def test_a_story_a_task_lists_is_not_told_it_has_no_task(self):
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        write_item(self.root, 'F-0001', 'feature', 'Free plan', parent='E-0001')
+        self._residue_story('S-0104')
+        write_item(self.root, 'T-0001', 'task', 'Do it', parent='F-0001',
+                   typed_lines=('stories: [S-0104]',))
+        run(['index'], self.root)
+        r = run(['check'], self.root)
+        self.assertIn('(type story, no matrix row, parent F-0001 is New)', r.stdout)
+
+    def test_landed_must_be_a_hex_sha(self):
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        write_item(self.root, 'F-0001', 'feature', 'Free plan', parent='E-0001',
+                   typed_lines=('landed: 9f2ac41',))
+        write_item(self.root, 'F-0002', 'feature', 'Other', parent='E-0001',
+                   typed_lines=('landed: not-a-sha',))
+        write_item(self.root, 'F-0003', 'feature', 'Short', parent='E-0001',
+                   typed_lines=('landed: 9f2a',))
+        run(['index'], self.root)
+        r = run(['check'], self.root)
+        lines = [ln for ln in r.stdout.splitlines() if 'landed:' in ln]
+        self.assertEqual(len(lines), 2, r.stdout)
+        self.assertTrue(any(ln.startswith('features/F-0002.md:') and "'not-a-sha'" in ln for ln in lines))
+        self.assertTrue(any(ln.startswith('features/F-0003.md:') for ln in lines))
+        self.assertIn('what `ingest` decides', lines[0])
+        self.assertFalse(any('F-0001.md' in ln for ln in lines))
+
     def test_parse_error_finding(self):
         path = os.path.join(self.root, 'epics', 'E-0001.md')
         with open(path, 'w', encoding='utf-8') as f:
