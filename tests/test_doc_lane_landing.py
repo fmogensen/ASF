@@ -188,6 +188,16 @@ class DocLaneMergeIsNotALanding(unittest.TestCase):
         p.publish()
         p.item("F-0026", "feature", parent="E-0001", stage="plan-approved", decided=False,
                typed_lines=["links:", "  plan: docs/plans/2026-09-03-m3-infra.md"])
+        # removed and moved-away cards, decided and linking a landed plan: never touched
+        p.item("F-0010", "feature", parent="E-0001", stage="plan-approved",
+               typed_lines=["moved_to: other:F-0049", 'removed: "moved"', "links:",
+                            "  plan: docs/plans/2026-09-03-m3-infra.md"])
+        p.item("F-0084", "feature", parent="E-0001", stage="plan-approved",
+               typed_lines=['removed: "superseded"', "links:",
+                            "  plan: docs/plans/2026-09-20-free-plan.md"])
+        p.item("F-0085", "feature", parent="E-0001", stage="plan-approved",
+               typed_lines=["moved_to: other:F-0050", "links:",
+                            "  plan: docs/plans/2026-09-21-fleet-ops.md"])
         p.item("T-0900", "task", parent="F-0090")
 
     def test_docs_only_commits_and_lane_prs_name_no_landing(self):
@@ -239,6 +249,18 @@ class DocLaneMergeIsNotALanding(unittest.TestCase):
                if r.feature_id == "F-0003"]
         self.assertNotIn(rows.STARVED_PLAN, [k for k, _i in got])
         self.assertEqual([k for k, _i in got], [rows.PLAN_CODE, rows.PLAN_CODE])
+
+    def test_removed_or_moved_features_mint_nothing_and_keep_their_machine_block(self):
+        before = {}
+        for fid in ("F-0010", "F-0084", "F-0085"):
+            with open(os.path.join(self.p.backlog, "features", f"{fid}.md")) as f:
+                before[fid] = f.read()
+        made = self.p.record_step(self.p.discover(self.prs))
+        parents = {self.p.meta(t, "task")["parent"] for t in made}
+        self.assertFalse(parents & {"F-0010", "F-0084", "F-0085"})
+        for fid, text in before.items():
+            with open(os.path.join(self.p.backlog, "features", f"{fid}.md")) as f:
+                self.assertEqual(f.read(), text, fid)
 
     def test_rerunning_the_record_step_is_a_no_op(self):
         ev = self.p.discover(self.prs)

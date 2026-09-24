@@ -20,7 +20,7 @@ from asf.evidence import evidence
 from asf.record.core import canonicalize, load_items, today
 from asf.record import plan_order
 from asf.record.ids import mint_id, write_new_item
-from asf.record.ingest import match_feature
+from asf.record.ingest import is_retired, match_feature
 
 #: A Feature the ingest already derived Resolved/Closed gets no fresh Task cards from its plan.
 DONE_STATES = ('Resolved', 'Closed')
@@ -71,7 +71,8 @@ def mint_plan_tasks(root, product, ev, out=print, read_ref=None):
         rec = canonical[fid]
         if rec['meta'].get('type') != 'feature':
             continue
-        if has_task_child(canonical, fid) or rec['meta'].get('state') in DONE_STATES:
+        if (has_task_child(canonical, fid) or rec['meta'].get('state') in DONE_STATES
+                or is_retired(rec['meta'])):
             continue
         # the plan is found the way the ingest finds it: links.plan, the lane's slug (B-0059),
         # or the plan the Feature's merged lane PR landed — a date-prefixed file name

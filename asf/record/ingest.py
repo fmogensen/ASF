@@ -29,6 +29,11 @@ MACHINE_KEY_ORDER = ['state', 'stage', 'stage_since', 'cost', 'evidence', 'block
 RULE_PREFIX = 'rule: '
 
 
+def is_retired(meta):
+    """A card with `removed:` or `moved_to:` wants no stage, no Tasks and no session."""
+    return bool((meta or {}).get('removed') or (meta or {}).get('moved_to'))
+
+
 def _path_only(ref):
     """Strip the "rev:" prefix off an evidence path: a typed `links.spec` is a bare repo path."""
     if not ref:
@@ -571,8 +576,14 @@ def cmd_ingest(args, root):
         settle(iid, 'bug', ev_obj, lines)
 
     # ---- Features: depend on their own children's derived state
+    retired = set()
     for iid, rec in canonical.items():
         if rec['meta'].get('type') != 'feature':
+            continue
+        if is_retired(rec['meta']):
+            # removed, or moved to another record: no stage is derived for it, and its machine
+            # block is left as it stands (the feeder skips it the same way)
+            retired.add(iid)
             continue
         slug, fev = match_feature(rec['meta'], ev)
         iev = _ids_of(iid, ev)
@@ -671,7 +682,7 @@ def cmd_ingest(args, root):
     # ---- write: state/stage/evidence/blocked, one write_machine + History append per changed item
     for iid, rec in canonical.items():
         type_ = rec['meta'].get('type')
-        if type_ not in EVIDENCE_TYPES:
+        if type_ not in EVIDENCE_TYPES or iid in retired:
             continue
         blocked_pair = evidence.blocked_of(rec['meta'].get('blockedBy'), new_state)
         c = closings[iid]
