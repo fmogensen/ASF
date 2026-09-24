@@ -237,13 +237,25 @@ def _classify_path(product, tool_name, path, cwd):
     return out
 
 
+_HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1[^\n]*\n.*?^[ \t]*\2[ \t]*$\n?", re.S | re.M)
+
+
+def _strip_heredocs(command):
+    """``command`` with every heredoc body removed (the ``<<EOF`` operator stays, its lines up to
+    the closing word go): a body is data written to a file or a pipe — a review quoting a push,
+    a doc with an apostrophe — never a command of the session's own."""
+    return _HEREDOC.sub(' \n', command)
+
+
 def _pushes_trunk(command, main):
     """True when one of the command's own ``git push`` invocations names the trunk as a refspec.
     Each simple command is split off the compound (``&&``, ``||``, ``;``, ``|``) and read with
     shlex, so ``main`` in a commit message, a fetch or a log range never counts."""
     import shlex
+    command = _strip_heredocs(command)
     if not re.search(r'\bgit\b.*\bpush\b', command):
         return False
+    command = command.replace('\n', ' ; ')  # a line is a command of its own
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
         lexer.whitespace_split = True

@@ -240,7 +240,15 @@ class HookTest(unittest.TestCase):
                  ('git log origin/main.. ; git push origin lane/x', False),
                  ('git push origin HEAD:main', True), ('git push origin main', True),
                  ('git -C /repo push origin HEAD:main', True),
-                 ('git push origin +feat:refs/heads/main', True)]
+                 ('git push origin +feat:refs/heads/main', True),
+                 # a heredoc body is text, not a command — a review that quotes a push, with
+                 # an apostrophe that leaves the body's quotes unbalanced, pushes nothing
+                 ("cat > docs/reviews/1-b-0087.md <<'EOF'\n# Review\nThe writer didn't run "
+                  "`git push origin main`; harvest lands it.\nEOF", False),
+                 ('cat > r.md <<EOF\ngit push origin main\nEOF\ngit push origin HEAD:lane/x', False),
+                 # a real push after a heredoc, or on its own line, still counts
+                 ("cat > r.md <<'EOF'\nnotes\nEOF\ngit push origin HEAD:main", True),
+                 ('git add -A\ngit push origin main', True)]
         for cmd, want in cases:
             with self.subTest(cmd=cmd):
                 self.assertEqual(_pushes_trunk(cmd, 'main'), want)
