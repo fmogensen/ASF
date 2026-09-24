@@ -1681,6 +1681,26 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertEqual(subject,
                          'plan(F-0001): docs: F-0001 — the plan, cut against head (#41)')
 
+    def test_a_gh_that_does_not_know_subject_still_lands_the_doc_lane(self):
+        """B-0114: --subject is what makes the trunk subject readable, but a gh too old for the
+        flag must degrade to a plain merge, not stall the lane — the evidence still reads a
+        document lane by its paths."""
+        calls = self.fake_gh([{'name': 'DCO', 'bucket': 'pass'}])
+        inner = harvest._gh.side_effect
+
+        def gh(args):
+            if args[:2] == ['pr', 'merge'] and '--subject' in args:
+                calls.append(list(args))
+                return 1, '', 'unknown flag: --subject\n'
+            return inner(args)
+        harvest._gh.side_effect = gh
+        self.push_plan()
+        self.assertEqual(self.harvest(self.pr_product())[0], {'plan/F-0001': 'landed'})
+        tried = self.merges(calls)
+        self.assertIn('--subject', tried[0])           # it asks for the subject first
+        self.assertNotIn('--subject', tried[1])        # then lands without it, same method
+        self.assertEqual(tried[0][5], tried[1][5])
+
     def test_no_checks_at_all_counts_as_green(self):
         calls = self.fake_gh(None)
         self.push_plan()

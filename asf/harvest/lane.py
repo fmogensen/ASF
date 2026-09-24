@@ -1298,6 +1298,18 @@ def push_set(lane, landing_set, sha, final=False):
     return 'ok'
 
 
+#: What a ``gh`` with no ``--subject`` says when it is handed one. Degrading to a merge without
+#: the subject beats stalling the lane: the evidence still reads a document lane by its paths.
+SUBJECT_UNKNOWN_RE = re.compile(r'unknown flag|unknown shorthand|flag provided but not defined|'
+                                r'unrecognized (?:flag|argument)', re.I)
+
+
+def _rejects_subject(err):
+    """True when ``gh`` failed because it does not know ``--subject``, not because the merge
+    itself was refused."""
+    return bool(SUBJECT_UNKNOWN_RE.search(err or '')) and '--subject' in (err or '')
+
+
 def squash_subject(lane, f, number):
     """The subject a document lane's squash merge writes on the trunk, or None for a code lane —
     whose subject is the host's to compose (B-0114).
@@ -1305,7 +1317,16 @@ def squash_subject(lane, f, number):
     Left to the host, a spec/plan PR lands under its PR title — ``F-0047 — the Stripe mirror
     (#743)`` — and the evidence reads that commit as the Feature's code landing. A spec/plan lane
     names its kind instead, the shape its own commits carry (``plan(F-0047): … (#743)``): its
-    branch's newest subject when that is already a document lane's, else prefixed with it."""
+    branch's newest subject when that is already a document lane's, else prefixed with it. The
+    newest, not the newest *conforming* one — a lane whose last commit is ``docs: address review``
+    lands as ``plan(F-0047): docs: address review (#743)``, which the evidence reads correctly
+    even though the lane's own better subject is further down.
+
+    Not every merge takes this: a merge queue composes its own subject
+    (:meth:`GhHost.merge` returns before this on ``--auto``), and ``--rebase`` writes no commit
+    of its own (:data:`SUBJECT_METHODS`). On a queue repo a document lane is recognised by its
+    paths instead (``asf.evidence.evidence.docs_only``), which holds as long as it touches only
+    documents."""
     from asf.evidence.evidence import DOC_LANE_KINDS, DOC_LANE_SUBJECT
     kind = f.get('kind')
     if kind not in DOC_LANE_KINDS:
@@ -1512,6 +1533,10 @@ class GitHubHost(Host):
             rc, _out, err = H._gh(args)
             if rc == 0:
                 return H.merged_sha(self.slug, pr) or f'PR #{pr}', method[2:]
+            if subject and _rejects_subject(err):  # a gh too old for --subject: merge without it
+                rc, _out, err = H._gh([a for a in args if a not in ('--subject', subject)])
+                if rc == 0:
+                    return H.merged_sha(self.slug, pr) or f'PR #{pr}', method[2:]
             if 'not allowed' not in (err or '').lower():
                 break
         return None, H.tail(err) or 'gh pr merge failed'
