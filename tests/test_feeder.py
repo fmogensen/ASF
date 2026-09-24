@@ -27,9 +27,25 @@ def product(**extra):
     return Product('sample', dict({'conventions': conv}, **extra))
 
 
-def fixture_index():
-    with open(os.path.join(FIXTURES, 'index.json'), encoding='utf-8') as f:
-        return json.load(f)
+def with_card_facts(index):
+    """The fixtures predate ``acceptance_items`` / ``description_words`` (F-0023): a Feature
+    without them is thin and would be enriched, not specced. Every fixture Feature is a full card
+    unless a test says otherwise."""
+    for item in index['items'].values():
+        if item.get('type') == 'feature':
+            item.setdefault('acceptance_items', 3)
+            item.setdefault('description_words', 80)
+    return index
+
+
+def fixture_index(name='index.json'):
+    with open(os.path.join(FIXTURES, name), encoding='utf-8') as f:
+        return with_card_facts(json.load(f))
+
+
+def write_fixture_index(directory, name='index.json'):
+    with open(os.path.join(directory, 'index.json'), 'w', encoding='utf-8') as f:
+        json.dump(fixture_index(name), f)
 
 
 def golden(name):
@@ -413,7 +429,8 @@ def ten_features_and_an_s1():
     for n in range(1, 11):
         fid = f"F-{n:04d}"
         items[fid] = {'id': fid, 'type': 'feature', 'title': f"Feature {n}", 'decided': True,
-                      'rank': 11 - n, 'stage': 'card', 'state': 'New'}
+                      'rank': 11 - n, 'stage': 'card', 'state': 'New',
+                      'acceptance_items': 3, 'description_words': 80}
     return {'items': items}
 
 
@@ -620,11 +637,63 @@ def undecided_features(*specs, decided=()):
     items = {}
     for fid, rank in specs:
         v = {'id': fid, 'type': 'feature', 'title': fid, 'state': 'New', 'stage': 'card',
-             'decided': fid in decided, 'stage_since': '2026-01-01T09:00:00Z'}
+             'decided': fid in decided, 'stage_since': '2026-01-01T09:00:00Z',
+             'acceptance_items': 3, 'description_words': 80}
         if rank is not None:
             v['rank'] = rank
         items[fid] = v
     return {'items': items}
+
+
+class EnrichRowTest(unittest.TestCase):
+    """F-0023: a thin card at stage ``card`` is interrogated before it is specced."""
+
+    def feature(self, **extra):
+        item = {'id': 'F-0002', 'type': 'feature', 'title': 'Metering', 'decided': True,
+                'state': 'New', 'stage': 'card', 'acceptance_items': 3, 'description_words': 80}
+        item.update(extra)
+        return {'items': {'F-0002': item}}
+
+    def rows_for(self, index, p=None, inflight=()):
+        return rows.candidates(index, p or product(), list(inflight))
+
+    def test_a_thin_card_gets_enrich_not_spec(self):
+        rs = self.rows_for(self.feature(acceptance_items=0))
+        self.assertEqual(kinds(rs), [(rows.CARD_ENRICH, 'F-0002')])
+        r = rs[0]
+        self.assertEqual((r.brief_kind, r.branch, r.reason, r.action),
+                         ('idea', 'enrich/F-0002', 'thin card: no acceptance list to spec from',
+                          rows.LAUNCH))
+        self.assertTrue(r.tree_file.endswith(os.path.join('idea', 'F-0002.tree.md')), r.tree_file)
+        self.assertFalse([x for x in rs if x.kind == rows.CARD_SPEC])
+
+    def test_a_full_card_still_gets_spec(self):
+        self.assertEqual(kinds(self.rows_for(self.feature())), [(rows.CARD_SPEC, 'F-0002')])
+
+    def test_a_short_description_is_thin(self):
+        rs = self.rows_for(self.feature(description_words=12))
+        self.assertEqual(kinds(rs), [(rows.CARD_ENRICH, 'F-0002')])
+
+    def test_a_card_the_index_has_no_counts_for_is_thin(self):
+        index = self.feature()
+        del index['items']['F-0002']['acceptance_items'], index['items']['F-0002']['description_words']
+        self.assertEqual(kinds(self.rows_for(index)), [(rows.CARD_ENRICH, 'F-0002')])
+
+    def test_an_enriched_card_is_never_enriched_twice(self):
+        rs = self.rows_for(self.feature(acceptance_items=0, enriched='2026-09-23'))
+        self.assertEqual(kinds(rs), [(rows.CARD_SPEC, 'F-0002')])
+
+    def test_the_thresholds_are_the_product_s(self):
+        index = self.feature(acceptance_items=2)
+        self.assertEqual(kinds(self.rows_for(index)), [(rows.CARD_SPEC, 'F-0002')])
+        p = product(conventions={'thin_card': {'acceptance_items': 3}})
+        self.assertEqual(kinds(self.rows_for(index, p)), [(rows.CARD_ENRICH, 'F-0002')])
+
+    def test_a_busy_or_blocked_feature_gets_no_enrich_row(self):
+        thin = self.feature(acceptance_items=0)
+        self.assertEqual(self.rows_for(thin, inflight=[{'item': 'F-0002'}]), [])
+        blocked = self.feature(acceptance_items=0, blocked=True)
+        self.assertEqual(self.rows_for(blocked), [])
 
 
 class UndecidedRowsTests(unittest.TestCase):
@@ -796,7 +865,7 @@ class TableTests(unittest.TestCase):
         self.assertEqual(set(data[0]), {'tier', 'kind', 'item_id', 'feature_id', 'action',
                                         'brief_kind', 'branch', 'reason', 'waits_on',
                                         'correction', 'review_round', 'groom_date', 'groom_file',
-                                        'answers_file', 'open_questions'})
+                                        'answers_file', 'open_questions', 'tree_file'})
 
 
 class CliTest(unittest.TestCase):
@@ -807,8 +876,11 @@ class CliTest(unittest.TestCase):
                 os.makedirs(os.path.join(home, 'state', 'sample'))
                 with open(os.path.join(home, 'state', 'sample', 'sessions.jsonl'), 'w') as f:
                     f.writelines(json.dumps(r) + '\n' for r in ledger)
+            backlog = os.path.join(home, 'backlog')
+            os.makedirs(backlog)
+            write_fixture_index(backlog)
             with open(os.path.join(home, 'products', 'sample.yaml'), 'w') as f:
-                f.write(f"product: sample\nbacklog_dir: {FIXTURES}\nconventions:\n"
+                f.write(f"product: sample\nbacklog_dir: {backlog}\nconventions:\n"
                         "  branch_prefixes:\n    spec: spec\n    plan: plan\n    task: task\n")
             inflight = os.path.join(home, 'inflight.json')
             with open(inflight, 'w') as f:
@@ -866,8 +938,7 @@ class NextAllTests(unittest.TestCase):
             backlog = os.path.join(home, 'backlog')
             os.makedirs(backlog)
             os.makedirs(os.path.join(home, 'products'))
-            shutil.copy(os.path.join(FIXTURES, 'index-undecided.json'),
-                        os.path.join(backlog, 'index.json'))
+            write_fixture_index(backlog, 'index-undecided.json')
             with open(os.path.join(home, 'products', 'sample.yaml'), 'w') as f:
                 f.write(f"product: sample\nbacklog_dir: {backlog}\nconventions:\n"
                         "  branch_prefixes:\n    spec: spec\n    plan: plan\n    task: task\n")

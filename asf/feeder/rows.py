@@ -18,6 +18,9 @@ The row kinds::
                            Bug with 3 sessions behind it and still open (not a fourth fix)
     CONFLICT → REBASE      an Active Task/Bug whose PR no longer merges, no session on it
     STALE → CLOSE          an Active Task/Bug whose PR was closed unmerged, branch left behind
+    CARD → ENRICH          a decided Feature card with no spec whose card is thin (F-0023: no
+                           acceptance list, or a description too short to spec from) and not yet
+                           enriched: an interrogation writes the missing substance first
     CARD → SPEC            a decided Feature card with no spec
     STARVED → SPEC         a spec in draft/review that no session is moving
     STARVED → PLAN         an approved spec with no plan, or a plan in draft/review, unmoved
@@ -54,6 +57,7 @@ FOOTPRINT = 'footprint'  # == asf.workers.lifecycle.FOOTPRINT: a correction wide
 STALEMATE = 'STALEMATE → ADJUDICATE'
 CONFLICT = 'CONFLICT → REBASE'
 STALE = 'STALE → CLOSE'
+CARD_ENRICH = 'CARD → ENRICH'
 CARD_SPEC = 'CARD → SPEC'
 STARVED_SPEC = 'STARVED → SPEC'
 STARVED_PLAN = 'STARVED → PLAN'
@@ -160,11 +164,19 @@ def branch_for(product, kind, item_id):
     return _conventions(product).branch(kind, item_id)
 
 
+def thin(item, conv):
+    """A card with too little to spec from (F-0023): fewer acceptance items, or fewer description
+    words, than the product's bars — both derived into ``index.json``, a missing one counted 0."""
+    return (item.get('acceptance_items', 0) < conv.thin_acceptance
+            or item.get('description_words', 0) < conv.thin_description_words)
+
+
 def tree_file_for(product, item_id):
     """``<state_dir>/idea/<id>.tree.md`` — the one file an ``idea`` session writes for a card."""
     import os
     from asf import env
-    return os.path.join(env.state_dir(product), 'idea', f'{item_id}.tree.md')
+    name = product.name if hasattr(product, 'name') else (product or env.default_product_name())
+    return os.path.join(env.ASF_HOME, 'state', name, 'idea', f'{item_id}.tree.md')
 
 
 def stalemate_round(product):
@@ -481,7 +493,12 @@ def feature_rows(items, product, busy, running, landed_shas=None, unlanded=None,
             continue
         word = stage.split(' ')[0]
         waits = (unlanded, open_branches)
-        if word == 'card':
+        if word == 'card' and thin(f, _conventions(product)) and not f.get('enriched'):
+            out.append(Row(tier=2, kind=CARD_ENRICH, item_id=fid, feature_id=fid, action=LAUNCH,
+                           brief_kind='idea', branch=branch_for(product, 'enrich', fid),
+                           reason='thin card: no acceptance list to spec from',
+                           tree_file=tree_file_for(product, fid)))
+        elif word == 'card':
             out.append(_doc_row(CARD_SPEC, fid, 'spec', product, 'decided card, no spec', *waits))
         elif word in ('spec-draft', 'spec-review'):
             carrier = spec_carrier(f)

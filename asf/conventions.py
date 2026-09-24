@@ -24,6 +24,9 @@ The product yaml carries the overrides::
         gate_timeout_s: 900       # default 600: a gate past it is killed and red (B-0072)
       idea:
         answer_overlap: 0.8       # the title overlap at which the record answers an idea's node
+      thin_card:
+        acceptance_items: 1       # a Feature card below either bar is interrogated before it is specced
+        description_words: 40
       amendable_paths: [rules/*, docs/CONSTITUTION.md]  # F-0031: a landed branch touching one
                                                           # of these globs is merge_amendable_set;
                                                           # unset = the defaults in asf/amendable.py,
@@ -104,8 +107,17 @@ DEFAULT_ANSWER_OVERLAP = 0.8
 #: The keys of the yaml's ``idea:`` block and the field each one is.
 IDEA_KEYS = {'answer_overlap': 'answer_overlap'}
 
+#: What makes a Feature card thin (F-0023): fewer acceptance items than this, or fewer description
+#: words. A thin card at stage ``card`` is interrogated (``CARD → ENRICH``) before it is specced.
+#: Spelt ``thin_card: {acceptance_items: …, description_words: …}`` in the yaml.
+DEFAULT_THIN_ACCEPTANCE = 1
+DEFAULT_THIN_DESCRIPTION_WORDS = 40
+#: The keys of the yaml's ``thin_card:`` block and the field each one is.
+THIN_CARD_KEYS = {'acceptance_items': 'thin_acceptance',
+                  'description_words': 'thin_description_words'}
+
 #: The nested yaml blocks, each read into flat fields: block name → its keys.
-_BLOCK_KEYS = {'harvest': HARVEST_KEYS, 'idea': IDEA_KEYS}
+_BLOCK_KEYS = {'harvest': HARVEST_KEYS, 'idea': IDEA_KEYS, 'thin_card': THIN_CARD_KEYS}
 
 DEFAULT_EVALS_DIR = 'evals'      # where a product keeps its evals (F-0024: part of the amendable set)
 DEFAULT_BRIEFS_DIR = None        # where a product keeps brief documents on its trunk
@@ -179,6 +191,9 @@ class Conventions:
     gate_timeout_s: int = DEFAULT_GATE_TIMEOUT_S
     #: The title-token overlap at which the record answers a node of an idea tree.
     answer_overlap: float = DEFAULT_ANSWER_OVERLAP
+    #: A Feature card with fewer acceptance items or description words than these is thin.
+    thin_acceptance: int = DEFAULT_THIN_ACCEPTANCE
+    thin_description_words: int = DEFAULT_THIN_DESCRIPTION_WORDS
     briefs_dir: str = DEFAULT_BRIEFS_DIR
     evals_dir: str = DEFAULT_EVALS_DIR
     matrix_path: str = DEFAULT_MATRIX_PATH

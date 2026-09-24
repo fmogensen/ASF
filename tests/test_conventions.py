@@ -79,6 +79,17 @@ class FromMappingTests(unittest.TestCase):
         self.assertEqual(c.extra, {'idea': {'later': 'x'}})
         self.assertEqual(Conventions.from_mapping({'idea': {}}), Conventions())
 
+    def test_the_thin_card_block_names_the_two_bars(self):
+        """``thin_card: {acceptance_items: 3, description_words: 20}`` is how a product yaml
+        spells what makes a Feature card thin (F-0023); the defaults are 1 and 40."""
+        c = Conventions()
+        self.assertEqual((c.thin_acceptance, c.thin_description_words), (1, 40))
+        c = Conventions.from_mapping({'thin_card': {'acceptance_items': 3, 'description_words': 20,
+                                                    'later': 'x'}})
+        self.assertEqual((c.thin_acceptance, c.thin_description_words), (3, 20))
+        self.assertEqual(c.extra, {'thin_card': {'later': 'x'}})
+        self.assertEqual(Conventions.from_mapping({'thin_card': {}}), Conventions())
+
     def test_an_unknown_key_is_kept_not_rejected(self):
         c = Conventions.from_mapping({'slack_channel': '#asf', 'specs_dir': 'specs'})
         self.assertEqual(c.extra, {'slack_channel': '#asf'})

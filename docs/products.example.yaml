@@ -60,6 +60,11 @@ conventions:
   # `asf idea apply` to count the record as having answered it (nothing is filed for that node).
   # idea:
   #   answer_overlap: 0.8
+  # a Feature card at stage `card` with fewer acceptance items, or fewer description words, than
+  # these is thin: the feeder launches an interrogation to enrich it before any spec is written.
+  # thin_card:
+  #   acceptance_items: 1
+  #   description_words: 40
   # the heading a plan uses to mark one task's section (default "### Task"; not read by the
   # current tools).
   task_heading: "## Task"

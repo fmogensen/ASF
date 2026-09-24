@@ -198,8 +198,25 @@ def sort_key(canonical, iid):
     return (order, iid)
 
 
+CHECKLIST_ITEM_RE = re.compile(r'^\s*-\s*\[[xX ]\]\s*\S')
+
+
+def section_facts(body):
+    """``(acceptance_items, description_words)`` of a card body: the checklist lines under
+    ``## Acceptance`` with text after the box, and the words under ``## Description``. What a
+    spec is written from, counted — a card with neither is thin (F-0023)."""
+    items = words = 0
+    for heading, content in parse_sections(body)[1]:
+        if heading.strip() == '## Acceptance':
+            items += sum(1 for line in content.split('\n') if CHECKLIST_ITEM_RE.match(line))
+        elif heading.strip() == '## Description':
+            words += len(content.split())
+    return items, words
+
+
 def compute_derived(canonical):
-    """Return {id: {'children': [ids], 'backlinks': [ids]}}."""
+    """Return {id: {'children': [ids], 'backlinks': [ids], 'acceptance_items': n,
+    'description_words': n}}."""
     children_map = {iid: [] for iid in canonical}
     for iid, rec in canonical.items():
         parent = rec['meta'].get('parent')
@@ -227,7 +244,9 @@ def compute_derived(canonical):
                 if oid not in excluded and regex.search(texts[oid])
             ]
         backlinks.sort(key=lambda bid: sort_key(canonical, bid))
-        derived[iid] = {'children': children, 'backlinks': backlinks}
+        items, words = section_facts(canonical[iid]['body'])
+        derived[iid] = {'children': children, 'backlinks': backlinks,
+                        'acceptance_items': items, 'description_words': words}
     return derived
 
 
@@ -279,6 +298,8 @@ def build_index_data(canonical, derived):
         entry['folder'] = rec['folder']
         entry['children'] = list(derived[iid]['children'])
         entry['backlinks'] = list(derived[iid]['backlinks'])
+        entry['acceptance_items'] = derived[iid]['acceptance_items']
+        entry['description_words'] = derived[iid]['description_words']
         items[iid] = entry
     return {'generated': now_iso(), 'items': items}
 

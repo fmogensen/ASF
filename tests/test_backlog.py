@@ -554,6 +554,22 @@ class IndexCommandTests(unittest.TestCase):
         self.assertIn('## Backlinks\n- [B-0001](../bugs/B-0001.md) Trial banner shows on Free',
                       feature_text)
 
+    def test_the_index_counts_what_a_spec_is_written_from(self):
+        """F-0023: ``acceptance_items`` (checklist lines with text after the box) and
+        ``description_words`` are derived into ``index.json`` — the feeder's thinness reads them."""
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        write_item(self.root, 'F-0001', 'feature', 'Free plan', parent='E-0001', body=(
+            "## Description\nOne two three four five.\n\n## Acceptance\n- [ ] first\n- [x] second\n"
+            "- [ ] \n\n## Non-goals\n\n## History\n- 2026-09-01: created\n\n## Children\n\n"
+            "## Backlinks\n"))
+        write_item(self.root, 'F-0002', 'feature', 'Bare', parent='E-0001')
+        run(['index'], self.root)
+        items = json.load(open(os.path.join(self.root, 'index.json'), encoding='utf-8'))['items']
+        self.assertEqual((items['F-0001']['acceptance_items'], items['F-0001']['description_words']),
+                         (2, 5))
+        self.assertEqual((items['F-0002']['acceptance_items'], items['F-0002']['description_words']),
+                         (0, 0))
+
     def test_index_is_idempotent(self):
         write_item(self.root, 'E-0001', 'epic', 'Factory')
         write_item(self.root, 'F-0001', 'feature', 'Free plan', parent='E-0001')
