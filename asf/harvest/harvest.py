@@ -62,6 +62,7 @@ session could never pass inside its footprint.
 """
 import argparse
 import dataclasses
+import datetime
 import json
 import os
 import re
@@ -219,6 +220,25 @@ def mark_harvested(state_dir, job, sha):
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
     with open(path, 'a', encoding='utf-8') as f:
         f.write(json.dumps({'job': job, 'harvested': sha}, sort_keys=True) + '\n')
+
+
+def record_gate(state_dir, branches, sha, ok, seconds, line):
+    """One appended ``gates.jsonl`` line: a landing gate ran, over ``branches``, at ``sha`` — the
+    same append-only file and directory :func:`mark_harvested` writes to. ``at`` is the moment
+    the gate **started**, ``seconds`` back from now. :func:`red_on_trunk` gates the trunk alone,
+    with no branches under it (PD6) — it is not one of the two places a landing gate runs, and
+    takes no line here. A write that fails is printed, never raised: a gate must not be lost
+    because its ledger could not be appended to, exactly as ``write_tick_line`` already reasons."""
+    path = os.path.join(state_dir, 'gates.jsonl')
+    at = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=seconds)
+    entry = {'at': at.strftime('%Y-%m-%dT%H:%M:%SZ'), 'seconds': seconds,
+             'branches': list(branches), 'sha': sha, 'ok': ok, 'line': line}
+    try:
+        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(entry, sort_keys=True) + '\n')
+    except OSError as e:
+        print(f'harvest: gate not recorded ({e})')
 
 
 def reap_hold(record, alive=None, session_source=None):
@@ -1096,12 +1116,14 @@ def land_ff(repo, state_dir, branch, record, item, conv, asf_repo, bug_root, dry
             ok, reason = rebase_and_resolve(tmp, trunk)
             if not ok:
                 return hold_with_correction(state_dir, branch, record, 'conflict', reason, out)
+            gate_started = time.monotonic()
             ok, line, files, _red = product_gate(tmp, gate_conv, asf_repo, out)
+            sha = sh(['git', 'rev-parse', 'HEAD'], cwd=tmp).stdout.strip()
+            record_gate(state_dir, [branch], sha, ok, time.monotonic() - gate_started, line)
             if not ok:
                 return hold_with_correction(state_dir, branch, record, 'gate', line, out,
                                             files, item_writes, touched, conv,
                                             read=gate_reader(repo, branch))
-            sha = sh(['git', 'rev-parse', 'HEAD'], cwd=tmp).stdout.strip()
             if dry_run:
                 out(f'DRY: would land {branch} → {sha}')
                 return 'dry'
@@ -1777,7 +1799,7 @@ def red_on_trunk(tmp, trunk, conv, asf_repo, out, modules):
 
 
 def gate_groups(tmp, trunk, entries, conv, asf_repo, hold, out, announce=False, only=None,
-                trunk_green=False):
+                trunk_green=False, ledger=None):
     """Gate ``entries`` as one combined head; on red, bisect (B-0040). Returns the green groups
     as ``[(entries, sha, full)]`` — each a set that was gated together, the head it was gated
     at, and whether that gate was the full one (False: only ``only``, the modules the full gate
@@ -1785,15 +1807,22 @@ def gate_groups(tmp, trunk, entries, conv, asf_repo, hold, out, announce=False, 
     red on its own is handed to ``hold`` with the gate's first failing line. When the full gate
     names its red modules and they are red on the trunk alone too, :class:`TrunkRed` is raised
     and nothing is bisected; when they are green there (``trunk_green``, carried down the
-    bisection), a branch red alone on them is held as its own red, never ``foreign``."""
+    bisection), a branch red alone on them is held as its own red, never ``foreign``. ``ledger``
+    (§2.2), when given, is called after every ``product_gate`` here with the stacked branches,
+    the head, ``ok``, the seconds spent and the first failing line — so a bisect's targeted
+    re-runs each write their own line too; ``None`` (every existing caller) writes nothing."""
     stacked = combined_head(tmp, trunk, entries, hold)
     if not stacked:
         return []
     if announce:
         out(f'harvest: {len(stacked)} branch(es), one gate')
+    started = time.monotonic()
     ok, line, files, red = product_gate(tmp, conv, asf_repo, out, only)
+    head = sh(['git', 'rev-parse', 'HEAD'], cwd=tmp).stdout.strip()
+    if ledger:
+        ledger([b for b, _record in stacked], head, ok, time.monotonic() - started, line)
     if ok:
-        return [(stacked, sh(['git', 'rev-parse', 'HEAD'], cwd=tmp).stdout.strip(), not only)]
+        return [(stacked, head, not only)]
     if not only and red:
         if red_on_trunk(tmp, trunk, conv, asf_repo, out, red):
             raise TrunkRed(red)
@@ -1805,27 +1834,30 @@ def gate_groups(tmp, trunk, entries, conv, asf_repo, hold, out, announce=False, 
     mid = len(stacked) // 2
     narrowed = red or only
     return (gate_groups(tmp, trunk, stacked[:mid], conv, asf_repo, hold, out, only=narrowed,
-                        trunk_green=trunk_green)
+                        trunk_green=trunk_green, ledger=ledger)
             + gate_groups(tmp, trunk, stacked[mid:], conv, asf_repo, hold, out, only=narrowed,
-                          trunk_green=trunk_green))
+                          trunk_green=trunk_green, ledger=ledger))
 
 
 #: Full gates one landing may spend: the first, and the confirmations after each bisection.
 CONFIRM_ROUNDS = 3
 
 
-def confirmed_group(tmp, trunk, entries, conv, asf_repo, hold, out, results):
+def confirmed_group(tmp, trunk, entries, conv, asf_repo, hold, out, results, ledger=None):
     """The one set of ``entries`` green under the *full* gate, as ``(entries, sha, deferred)``;
     ``entries`` and ``sha`` are None when no set was confirmed. A red gate bisects (targeted);
     the green candidates are stacked again and gated in full, so what lands has always passed
     the whole gate. Green apart but red together: holding them all only combined the same set
     again next tick, forever (a load-flaky module red in the combined gate alone) — so they
     land one at a time: the first in wave order goes on alone and the rest are ``deferred``,
-    for the caller to re-gate on top of it. :class:`TrunkRed` propagates."""
+    for the caller to re-gate on top of it. :class:`TrunkRed` propagates. ``ledger`` (§2.2) is
+    passed to every :func:`gate_groups` call of the confirmation loop; ``None`` (the PR lane's
+    own call) writes nothing."""
     candidates = list(entries)
     deferred = []
     for _round in range(CONFIRM_ROUNDS):
-        groups = gate_groups(tmp, trunk, candidates, conv, asf_repo, hold, out, announce=True)
+        groups = gate_groups(tmp, trunk, candidates, conv, asf_repo, hold, out, announce=True,
+                             ledger=ledger)
         if not groups:
             return None, None, deferred
         if len(groups) == 1 and groups[0][2]:
@@ -1859,17 +1891,20 @@ def land_combined(repo, state_dir, entries, conv, asf_repo, dry_run, out, items=
     touched = {branch: touched_files(repo, trunk, branch) for branch, _record in entries}
     docs = [e for e in entries if is_inert(conv, touched[e[0]])]
     code = [e for e in entries if e not in docs]
+    ledger = lambda branches, sha, ok, seconds, line: record_gate(state_dir, branches, sha, ok,
+                                                                  seconds, line)
     results = {}
     if docs:  # docs cannot turn a test red: they land on their own, behind the checks alone
         results.update(land_set(repo, state_dir, docs, conv, docs_only(conv), asf_repo, dry_run,
-                                out, items, touched))
+                                out, items, touched, ledger))
     if code:
         results.update(land_set(repo, state_dir, code, conv, conv, asf_repo, dry_run, out, items,
-                                touched))
+                                touched, ledger))
     return results
 
 
-def land_set(repo, state_dir, entries, conv, gate_conv, asf_repo, dry_run, out, items, touched):
+def land_set(repo, state_dir, entries, conv, gate_conv, asf_repo, dry_run, out, items, touched,
+            ledger=None):
     """:func:`land_combined` for one set of ``entries``, gated under ``gate_conv``. Branches
     deferred behind a green-alone landing are gated again on the new trunk while
     :func:`regate_now`, else held for the next tick — each round lands or holds one branch at
@@ -1888,7 +1923,7 @@ def land_set(repo, state_dir, entries, conv, gate_conv, asf_repo, dry_run, out, 
     pending = list(entries)
     while pending:
         deferred, go_on = land_group(repo, state_dir, pending, trunk, gate_conv, asf_repo,
-                                     dry_run, out, hold, results)
+                                     dry_run, out, hold, results, ledger)
         if not deferred:
             break
         if go_on and not dry_run and regate_now(started, gate_conv):
@@ -1903,7 +1938,8 @@ def land_set(repo, state_dir, entries, conv, gate_conv, asf_repo, dry_run, out, 
     return results
 
 
-def land_group(repo, state_dir, pending, trunk, gate_conv, asf_repo, dry_run, out, hold, results):
+def land_group(repo, state_dir, pending, trunk, gate_conv, asf_repo, dry_run, out, hold, results,
+               ledger=None):
     """Gate ``pending`` in one throwaway worktree and push the confirmed set; ``(deferred,
     go_on)`` — the entries deferred behind it (:func:`confirmed_group`), and whether they may be
     re-gated this tick (False when the trunk is red or a push failed)."""
@@ -1920,7 +1956,7 @@ def land_group(repo, state_dir, pending, trunk, gate_conv, asf_repo, dry_run, ou
                 return [], False
             try:
                 landing, sha, more = confirmed_group(tmp, trunk, pending, gate_conv, asf_repo,
-                                                     hold, out, results)
+                                                     hold, out, results, ledger)
             except TrunkRed as red:  # no branch's doing: hold nothing, gate again next tick
                 out(f'harvest: red on trunk too — {" ".join(red.modules)}')
                 return [], False
