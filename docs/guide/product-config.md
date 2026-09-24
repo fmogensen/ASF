@@ -255,7 +255,7 @@ A product's session ceiling is its own `capacity.sessions`, else `per_product.se
 then capped by `total.sessions` less what other products have in flight, then by its **fair
 share**. Every product draws on one worker pool. The pool's usable slots right now are, per
 account, its `cap` when free, 1 in cooldown, 0 at stop; with two or more products whose `wave` is
-ASF's and on a clock, each gets `ceil(usable / products)`. A product over its share keeps its
+ASF's and on a clock, each gets `ceil(usable × weight / Σ weights)`, where a product's `capacity.weight` (default 1) is the operator's priority: a product at weight 3 beside one at weight 1 gets three quarters of the pool. A product over its share keeps its
 running sessions — it just gets no new slot: `waits <job> <item> — fair share: n of u usable
 slots across k products`.
 

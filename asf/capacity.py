@@ -14,6 +14,7 @@ shape::
     capacity:
       sessions: 3
       ci: 2
+      weight: 3          # this product's share of the pool against the others' (default 1)
       batch: {per_run: 8, parallel: 2, runners: 4}
 
 This is the one module that reads those keys — no caller reads them raw.
@@ -180,16 +181,34 @@ def usable_slots(cfg, quota_source=None):
     return total
 
 
+def product_weight(product):
+    """The product's ``capacity.weight`` (an int >= 1), else 1: its share of the pool against the
+    other active products' weights — the operator's product-over-factory lever."""
+    v = _product_capacity(product).get('weight')
+    return v if isinstance(v, int) and v >= 1 else 1
+
+
+def _weight_of(name, product):
+    if name == product.name:
+        return product_weight(product)
+    try:
+        return product_weight(env.load_product(name))
+    except Exception:  # noqa: BLE001 — a broken sibling file weighs the default
+        return 1
+
+
 def fair_share(product, cfg, quota_source=None):
     """``(share, usable, active)``, or ``None`` when fewer than two products are active or the
-    pool has no accounts."""
+    pool has no accounts. The share is ``ceil(usable × weight / Σ weights)`` over the active
+    products (every weight 1 unless a product file sets ``capacity.weight``)."""
     active = active_products(product.name)
     if len(active) < 2:
         return None
     usable = usable_slots(cfg, quota_source)
     if usable is None:
         return None
-    return math.ceil(usable / len(active)), usable, len(active)
+    total = sum(_weight_of(n, product) for n in active)
+    return math.ceil(usable * product_weight(product) / total), usable, len(active)
 
 
 def batch_shape(product, cfg):

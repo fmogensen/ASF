@@ -232,7 +232,7 @@ CI_FIELDS = {
     'runner_org': _STR, 'labels': _LIST, 'dev_job': _STR,
 }
 # `capacity:` is a map: this product's session/CI ceilings and its batch shape.
-CAPACITY_FIELDS = {'sessions': _STR, 'ci': _STR, 'batch': _MAP}
+CAPACITY_FIELDS = {'sessions': _STR, 'ci': _STR, 'weight': _STR, 'batch': _MAP}
 # every product-file section whose own keys are checked, keyed by its own field table.
 NESTED_FIELDS = {'ci': CI_FIELDS, 'capacity': CAPACITY_FIELDS}
 

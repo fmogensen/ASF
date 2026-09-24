@@ -219,6 +219,13 @@ class FairShare(Home):
             self.assertEqual(r.fair_share_reason,
                              'fair share: 5 of 9 usable slots across 2 products')
 
+    def test_weights_split_the_pool_by_the_operators_priority(self):
+        self.write_product('asf', WAVE_PRODUCT.format(name='asf'))
+        self.write_product('web', WAVE_PRODUCT.format(name='web') + 'capacity:\n  weight: 3\n')
+        web = capacity.resolve(env.load_product('web'), pool_cfg(), quota_source=bands())
+        asf = capacity.resolve(env.load_product('asf'), pool_cfg(), quota_source=bands())
+        self.assertEqual((web.sessions, asf.sessions), (7, 3))   # ceil(9·3/4), ceil(9·1/4)
+
     def test_a_single_active_product_keeps_its_configured_ceiling(self):
         self.write_product('asf', WAVE_PRODUCT.format(name='asf'))
         self.write_product('web')  # no clock runs its wave: not competing for the pool
