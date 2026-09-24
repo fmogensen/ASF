@@ -42,7 +42,9 @@ worker_pool:
       config_dir: ~/.ASF/accounts/acct-b
       # caps:                              # optional per-model ceiling
       #   heavy: 1
-      # home: ~/.ASF/accounts/acct-b/home
+      # home: ~/.ASF/accounts/acct-b/home   # the session's HOME: a path, or `inherit` (the operator's own)
+      # home_seed: [~/.gitconfig]           # paths copied into the account's own home
+  # env_passthrough: [HTTPS_PROXY]         # variable names a worker session keeps from the tick's environment
   # quota_command: bin/quota {account}     # one JSON line: {"five_h_pct", "seven_d_pct",
   #                                        # "seven_d_model_pct"}; without it no band applies
   # settings_file: ~/.ASF/worker-settings.json   # runtime settings every session starts with

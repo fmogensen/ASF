@@ -466,6 +466,23 @@ def corrections(path):
     return out
 
 
+def occupancy(path, lanes=None, alive=None, result=None):
+    """The one answer to "is this item busy?" (the contract; W3 implements it). The feeder reads
+    this and nothing else.
+
+    Folds, from the registry at ``path`` read once: :func:`inflight`, :func:`awaiting_harvest`,
+    :func:`unlanded` and :func:`corrections`, plus ``lanes`` — the item ids the lane holds
+    (:func:`asf.harvest.lane.busy_items`: every open lane state except BACK). ``alive`` and
+    ``result`` are the probes :func:`occupies`/:func:`awaiting_harvest` take (tests pass fakes).
+
+    Returns ``{'busy': {item: why}, 'waiting_landing': {item: why}, 'corrections': {item:
+    {kind, text, at, rounds, branch}}}``: ``busy`` — a live run or a lane state holds the item
+    (no launch row); ``waiting_landing`` — pushed and waiting on the lane (a PUSHED → REVIEW or
+    → LAND row, never a new session); ``corrections`` — as :func:`corrections`, the feeder's
+    BACK rows. An item is in at most one of ``busy`` and ``waiting_landing``."""
+    raise NotImplementedError('lifecycle.occupancy: W3')
+
+
 #: A card in one of these states has no work left for a session (the feeder's ``DONE_STATES``).
 DONE_STATES = ('Resolved', 'Closed')
 

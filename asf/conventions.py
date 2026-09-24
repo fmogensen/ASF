@@ -26,6 +26,14 @@ The product yaml carries the overrides::
                                                           # of these globs is merge_amendable_set;
                                                           # unset = the defaults in asf/amendable.py,
                                                           # [] = opt out (the set is empty)
+      doc_paths: [README.md, docs/guide/*]   # more docs roots beside the specs/plans/reviews dirs
+      shared_paths: [uv.lock]                # lockfiles: no footprint overlap, one per merge
+      lane:
+        review:                   # which landing class needs an ASF review before the gate
+          docs: none              # none | required (default none)
+          code: required          # none | required (default required)
+        stale_after: 2d           # an open lane state older than this is stale (<n>s|m|h|d)
+      worktree_setup: make deps   # run in every fresh worker worktree (unset = nothing)
 
 Unknown keys are kept (in :attr:`Conventions.extra`) rather than rejected: a product yaml is
 written by an operator and may carry conventions a module older than it does not read yet, and
@@ -95,6 +103,32 @@ DEFAULT_GATE_TIMEOUT_S = 600
 HARVEST_KEYS = {'gate': 'harvest_gate', 'branches_per_tick': 'branches_per_tick',
                 'gate_timeout_s': 'gate_timeout_s'}
 
+#: Paths (globs) that count as documentation beside ``specs_dir``, ``plans_dir`` and
+#: ``reviews_dir``: a branch touching only docs roots is the ``docs`` landing class
+#: (:func:`asf.harvest.lane.landing_class`), and a trunk that moved only there does not re-gate.
+DEFAULT_DOC_PATHS = ()
+#: Paths (globs) many Tasks may touch without owning them — lockfiles. They are left out of
+#: footprint overlap in the feeder and serialised at merge in the lane (one per tick).
+DEFAULT_SHARED_PATHS = ()
+#: The two landing classes a lane branch falls in, and what a review policy may say of each.
+LANDING_CLASSES = ('docs', 'code')
+REVIEW_POLICIES = ('none', 'required')
+#: ``lane: {review: …}``: per landing class, whether an ASF review of the head must read
+#: approved before the gate (T3/T4 of the lane).
+DEFAULT_LANE_REVIEW = {'docs': 'none', 'code': 'required'}
+#: ``lane: {stale_after: …}``: an open lane state (not MERGED/STALE/REAPED) whose head has not
+#: moved and that no session holds for longer than this is STALE (T12), ``<n>s|m|h|d``.
+DEFAULT_LANE_STALE_AFTER = '2d'
+#: A shell command run in every fresh worker worktree before its session starts (dependency
+#: install, codegen). None → nothing runs.
+DEFAULT_WORKTREE_SETUP = None
+
+#: The keys of the yaml's ``lane:`` block and the field each one is.
+LANE_KEYS = {'review': 'lane_review', 'stale_after': 'lane_stale_after'}
+
+DURATION_RE = re.compile(r'^(\d+)([smhd])$')
+DURATION_UNITS = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}
+
 DEFAULT_EVALS_DIR = 'evals'      # where a product keeps its evals (F-0024: part of the amendable set)
 DEFAULT_BRIEFS_DIR = None        # where a product keeps brief documents on its trunk
 DEFAULT_MATRIX_PATH = None       # the parity matrix file, read for Story status
@@ -141,6 +175,69 @@ def forbidden_patterns():
     return patterns
 
 
+def duration_seconds(value):
+    """``<n>s|m|h|d`` → seconds; ValueError on anything else."""
+    m = DURATION_RE.match(str(value).strip())
+    if not m:
+        raise ValueError(f'not a duration (<n>s|m|h|d): {value!r}')
+    return int(m.group(1)) * DURATION_UNITS[m.group(2)]
+
+
+def _path_list_problem(value):
+    if not isinstance(value, list):
+        return f'must be a list of paths, not {value!r}'
+    bad = [v for v in value if not isinstance(v, str) or not v.strip()]
+    if bad:
+        return f'must be a list of paths, and {bad[0]!r} is not one'
+    return None
+
+
+def validate_mapping(data):
+    """The shaped keys of a ``conventions:`` mapping checked: ``[(dotted key, problem)]``, empty
+    when they are well-formed. Only ``doc_paths``, ``shared_paths``, ``lane`` and
+    ``worktree_setup`` are checked — every other key is kept verbatim (see the module doc), so a
+    product file written for a newer ``asf`` still loads."""
+    problems = []
+    if not isinstance(data, dict):
+        return problems
+    for key in ('doc_paths', 'shared_paths'):
+        if data.get(key) is not None:
+            why = _path_list_problem(data[key])
+            if why:
+                problems.append((key, why))
+    setup = data.get('worktree_setup')
+    if setup is not None and (isinstance(setup, (dict, list, bool)) or not str(setup).strip()):
+        problems.append(('worktree_setup', f'must be a command string, not {setup!r}'))
+    lane = data.get('lane')
+    if lane is None:
+        return problems
+    if not isinstance(lane, dict):
+        return problems + [('lane', f'must be a map (review, stale_after), not {lane!r}')]
+    for key in lane:
+        if key not in LANE_KEYS:
+            problems.append((f'lane.{key}', 'is not a lane key (review, stale_after)'))
+    review = lane.get('review')
+    if review is not None:
+        if not isinstance(review, dict):
+            problems.append(('lane.review', f'must be a map (docs, code), not {review!r}'))
+        else:
+            for cls, policy in review.items():
+                if cls not in LANDING_CLASSES:
+                    problems.append((f'lane.review.{cls}',
+                                     f"is not a landing class ({', '.join(LANDING_CLASSES)})"))
+                elif policy not in REVIEW_POLICIES:
+                    problems.append((f'lane.review.{cls}',
+                                     f"must be {' or '.join(REVIEW_POLICIES)}, not {policy!r}"))
+    stale = lane.get('stale_after')
+    if stale is not None:
+        try:
+            if duration_seconds(stale) <= 0:
+                problems.append(('lane.stale_after', f'must be longer than zero, not {stale!r}'))
+        except ValueError:
+            problems.append(('lane.stale_after', f'must be a duration <n>s|m|h|d, not {stale!r}'))
+    return problems
+
+
 @dataclass
 class Conventions:
     """One product's conventions. Build with :meth:`from_mapping`; read as an object
@@ -184,6 +281,17 @@ class Conventions:
     #: states (F-0024): unset (``None``) is the defaults in `asf/amendable.py`, a list is that
     #: list, and ``[]`` is an opt-out — the set is empty.
     amendable_paths: list = None
+    #: More docs roots (globs) beside the specs/plans/reviews dirs (:data:`DEFAULT_DOC_PATHS`).
+    doc_paths: list = field(default_factory=lambda: list(DEFAULT_DOC_PATHS))
+    #: Lockfile-like globs outside footprint overlap (:data:`DEFAULT_SHARED_PATHS`).
+    shared_paths: list = field(default_factory=lambda: list(DEFAULT_SHARED_PATHS))
+    #: ``lane.review``: ``{docs: none|required, code: none|required}``, merged over
+    #: :data:`DEFAULT_LANE_REVIEW` (a class the yaml leaves out keeps its default).
+    lane_review: dict = field(default_factory=lambda: dict(DEFAULT_LANE_REVIEW))
+    #: ``lane.stale_after``: ``<n>s|m|h|d`` (:data:`DEFAULT_LANE_STALE_AFTER`).
+    lane_stale_after: str = DEFAULT_LANE_STALE_AFTER
+    #: The command run in every fresh worker worktree (:data:`DEFAULT_WORKTREE_SETUP`).
+    worktree_setup: str = DEFAULT_WORKTREE_SETUP
     #: Everything the yaml carried that is not a field above, kept verbatim.
     extra: dict = field(default_factory=dict)
 
@@ -216,12 +324,39 @@ class Conventions:
                 data['harvest'] = rest
         elif harvest is not None:
             data['harvest'] = harvest
+        lane = data.pop('lane', None)
+        if isinstance(lane, dict):  # ``lane: {review, stale_after}`` → lane_review/lane_stale_after
+            rest = {}
+            for key, value in lane.items():
+                name = LANE_KEYS.get(key)
+                if name == 'lane_review' and isinstance(value, dict):
+                    kwargs[name] = {**DEFAULT_LANE_REVIEW, **value}
+                elif name and value is not None:
+                    kwargs[name] = value
+                elif not name:
+                    rest[key] = value
+            if rest:
+                data['lane'] = rest
+        elif lane is not None:
+            data['lane'] = lane
         for key in list(data):
             if key in known:
                 value = data.pop(key)
                 if value is not None:
                     kwargs[key] = value
         return cls(extra=data, **kwargs)
+
+    # ---- the lane ------------------------------------------------------------
+
+    def review_required(self, landing_class):
+        """True when ``lane.review`` says a branch of ``landing_class`` (``docs``/``code``) needs
+        an approved ASF review of its head before the gate."""
+        policy = self.lane_review.get(landing_class, DEFAULT_LANE_REVIEW.get(landing_class))
+        return policy == 'required'
+
+    def lane_stale_after_s(self):
+        """``lane.stale_after`` in seconds."""
+        return duration_seconds(self.lane_stale_after)
 
     # ---- branches ------------------------------------------------------------
 

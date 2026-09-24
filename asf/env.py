@@ -13,6 +13,7 @@ here.
 import os
 import re
 
+from asf import conventions as conventions_mod
 from asf.conventions import Conventions
 
 ASF_HOME = os.environ.get('ASF_HOME') or os.path.expanduser('~/.ASF')
@@ -197,8 +198,86 @@ def product_path(name):
 
 
 def load_config():
-    """``~/.ASF/config.yaml``: scheduler, worker pool, quota guards, defaults, paths."""
-    return load_file(config_path())
+    """``~/.ASF/config.yaml``: scheduler, worker pool, quota guards, defaults, paths.
+
+    The worker pool's environment keys (:func:`validate_worker_pool`) are checked on load: a
+    malformed one raises :class:`ConfigError` naming it, rather than a worker session starting
+    with an environment nobody asked for."""
+    cfg = load_file(config_path())
+    problems = validate_worker_pool(cfg)
+    if problems:
+        raise ConfigError(f"{config_path()}: {'; '.join(f'{k} {why}' for k, why in problems)}")
+    return cfg
+
+
+# ---- the worker pool's environment keys --------------------------------------
+
+#: ``worker_pool.accounts[].home: inherit`` — the session keeps the operator's own HOME (every
+#: CLI login on the machine). Any other value is a path; unset is the per-account home under
+#: the state directory, seeded from ``home_seed``.
+HOME_INHERIT = 'inherit'
+_VAR_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+
+
+def validate_worker_pool(cfg):
+    """``worker_pool.env_passthrough`` (a list of environment variable names) and each
+    account's ``home`` (a path, or ``inherit``) and ``home_seed`` (a list of paths) checked:
+    ``[(dotted key, problem)]``, empty when well-formed or absent."""
+    pool = (cfg or {}).get('worker_pool')
+    if not isinstance(pool, dict):
+        return []
+    problems = []
+    passthrough = pool.get('env_passthrough')
+    if passthrough is not None:
+        if not isinstance(passthrough, list):
+            problems.append(('worker_pool.env_passthrough',
+                             f'must be a list of variable names, not {passthrough!r}'))
+        else:
+            for name in passthrough:
+                if not isinstance(name, str) or not _VAR_RE.match(name):
+                    problems.append(('worker_pool.env_passthrough',
+                                     f'must be a list of variable names, and {name!r} is not one'))
+    for i, acct in enumerate(pool.get('accounts') or []):
+        if not isinstance(acct, dict):
+            continue
+        label = f"worker_pool.accounts[{acct.get('name') or i}]"
+        home = acct.get('home')
+        if home is not None and (not isinstance(home, str) or not home.strip()):
+            problems.append((label + '.home', f'must be a path or {HOME_INHERIT}, not {home!r}'))
+        seed = acct.get('home_seed')
+        if seed is not None:
+            if not isinstance(seed, list):
+                problems.append((label + '.home_seed', f'must be a list of paths, not {seed!r}'))
+            else:
+                for path in seed:
+                    if not isinstance(path, str) or not path.strip():
+                        problems.append((label + '.home_seed',
+                                         f'must be a list of paths, and {path!r} is not one'))
+            if home == HOME_INHERIT:
+                problems.append((label + '.home_seed', f'has nothing to seed under home: {HOME_INHERIT}'))
+    return problems
+
+
+def env_passthrough(cfg):
+    """``worker_pool.env_passthrough``: the variable names a worker session keeps from the
+    tick's environment beside the fixed allow-list. ``()`` when unset."""
+    pool = (cfg or {}).get('worker_pool') or {}
+    return tuple(pool.get('env_passthrough') or ())
+
+
+def account_home(acct):
+    """An account's (a ``worker_pool.accounts`` entry's) ``home``: :data:`HOME_INHERIT`, an
+    expanded path, or None — unset, the per-account home under the state directory."""
+    home = (acct or {}).get('home')
+    if home is None or home == HOME_INHERIT:
+        return home
+    return os.path.expanduser(str(home))
+
+
+def account_home_seed(acct):
+    """An account's ``home_seed``: the expanded paths copied into its per-account home. ``[]``
+    when unset."""
+    return [os.path.expanduser(str(p)) for p in (acct or {}).get('home_seed') or ()]
 
 
 def default_product_name():
@@ -269,7 +348,7 @@ def validate_product_text(text):
         if len(line) == len(line.lstrip(' ')):
             section = m[0]
             lines.setdefault(section, n)
-        elif section in NESTED_FIELDS:
+        elif section in NESTED_FIELDS or section == 'conventions':
             lines.setdefault(section + '.' + m[0], n)
     problems = []
 
@@ -285,6 +364,10 @@ def validate_product_text(text):
     for section, fields in NESTED_FIELDS.items():
         if isinstance(data.get(section), dict):
             check(fields, data[section], section + '.')
+    # `conventions:` keeps unknown keys (asf.conventions), but the shaped ones are checked
+    for key, why in conventions_mod.validate_mapping(data.get('conventions')):
+        dotted = 'conventions.' + key
+        problems.append((lines.get('conventions.' + key.split('.')[0], 0), dotted, why))
     return sorted(problems)
 
 

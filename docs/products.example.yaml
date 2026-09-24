@@ -109,6 +109,21 @@ conventions:
   # asf.groom.inbox: where a dropped .md becomes a card. Leave out and the product has no such
   # thing — nothing looks for it.
   intake_dir: inbox
+  # globs that are documentation beside specs_dir/plans_dir/reviews_dir: a branch touching only
+  # these lands as docs, and a trunk that moved only here does not re-gate (default []).
+  doc_paths: [README.md, docs/guide/*]
+  # globs many Tasks touch without owning (lockfiles): no footprint overlap, one per merge (default []).
+  shared_paths: [uv.lock]
+  # the PR lane: which landing class needs an approved ASF review before the gate (none |
+  # required; default docs: none, code: required), and how long an open lane state may sit
+  # unchanged and unheld before it is stale (<n>s|m|h|d, default 2d). Block maps only.
+  lane:
+    review:
+      docs: none
+      code: required
+    stale_after: 2d
+  # a command run in every fresh worker worktree before its session starts (default: none).
+  # worktree_setup: make deps
 
 # CI: which provider runs checks, which workflow file, budgets and runner labels.
 ci:

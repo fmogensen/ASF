@@ -62,18 +62,26 @@ def now_iso():
 # ---- accounts ---------------------------------------------------------------
 
 class Account:
-    def __init__(self, name, role='local', cap=1, caps=None, home=None, config_dir=None):
+    def __init__(self, name, role='local', cap=1, caps=None, home=None, config_dir=None,
+                 home_seed=(), inherit_home=False):
         self.name = name
         self.role = role or 'local'
         self.cap = int(cap if cap is not None else 1)
         self.caps = {str(k).lower(): int(v) for k, v in (caps or {}).items()}
         self.home = home
         self.config_dir = config_dir
+        #: ``home_seed``: the paths copied into the account's per-account home
+        self.home_seed = list(home_seed or ())
+        #: ``home: inherit`` — the session keeps the operator's HOME (``home`` is then None)
+        self.inherit_home = bool(inherit_home)
 
     @classmethod
     def from_dict(cls, d):
+        home = d.get('home')
+        inherit = home == env.HOME_INHERIT
         return cls(d['name'], role=d.get('role'), cap=d.get('cap', 1), caps=d.get('caps'),
-                   home=d.get('home'), config_dir=d.get('config_dir'))
+                   home=None if inherit else home, config_dir=d.get('config_dir'),
+                   home_seed=env.account_home_seed(d), inherit_home=inherit)
 
     def __repr__(self):
         return f'Account({self.name!r}, role={self.role!r}, cap={self.cap})'
