@@ -110,7 +110,7 @@ class PluginTests(unittest.TestCase):
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn(__version__, r.stdout)
-        self.assertIn('Autonomous Software Factory', r.stdout)
+        self.assertRegex(r.stdout, r'^asf \d+\.\d+\.\d+')
 
 
 if __name__ == '__main__':

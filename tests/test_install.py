@@ -147,7 +147,8 @@ class PackageTest(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
             cli.main(['--version'])
-        self.assertEqual(out.getvalue().strip(), f'ASF — Autonomous Software Factory {asf.__version__}')
+        self.assertEqual(out.getvalue().strip(), f'asf {cli.version_string()}')
+        self.assertTrue(cli.version_string().startswith(asf.__version__))
 
     def test_workflow_installs_and_runs_the_suite(self):
         with open(os.path.join(REPO, '.github', 'workflows', 'tests.yml')) as f:
@@ -744,6 +745,97 @@ class NoCheckoutPathsTest(unittest.TestCase):
             with open(os.path.join(REPO, 'asf', f'{mod}.py'), encoding='utf-8') as f:
                 text = f.read()
             self.assertNotRegex(text, r"\.ASF/tools|ASF_HOME, 'tools'|~/Code/", mod)
+
+
+class VersionStringTest(unittest.TestCase):
+    """``asf --version`` names the commit it was built from: a checkout's HEAD, else a pipx git
+    install's ``direct_url.json``, else the bare version."""
+
+    def test_a_checkout_names_its_own_head(self):
+        from asf import cli
+        head = _git(['rev-parse', '--short', 'HEAD'], REPO)
+        self.assertEqual(cli.version_string(), f'{asf.__version__} ({head})')
+
+    def _no_checkout(self):
+        failed = subprocess.CompletedProcess([], 128, '', 'not a git repository')
+        return mock.patch('asf.cli.subprocess.run', return_value=failed)
+
+    def test_a_pipx_git_install_names_the_direct_url_commit(self):
+        from asf import cli
+        dist = mock.Mock()
+        dist.read_text.return_value = json.dumps(
+            {'url': 'https://example.invalid/asf.git',
+             'vcs_info': {'vcs': 'git', 'commit_id': 'abcdef0123456789abcdef0123456789abcdef01'}})
+        with self._no_checkout(), mock.patch('importlib.metadata.distribution', return_value=dist):
+            self.assertEqual(cli.version_string(), f'{asf.__version__} (abcdef0)')
+        dist.read_text.assert_called_with('direct_url.json')
+
+    def test_neither_known_is_the_bare_version(self):
+        import importlib.metadata
+        from asf import cli
+        with self._no_checkout(), mock.patch('importlib.metadata.distribution',
+                                             side_effect=importlib.metadata.PackageNotFoundError):
+            self.assertEqual(cli.version_string(), asf.__version__)
+        dist = mock.Mock()
+        dist.read_text.return_value = json.dumps({'url': 'file:///x', 'dir_info': {'editable': True}})
+        with self._no_checkout(), mock.patch('importlib.metadata.distribution', return_value=dist):
+            self.assertEqual(cli.version_string(), asf.__version__)
+
+
+#: The one-product install script, as the suite runs it.
+INSTALL_SH = os.path.join(REPO, 'tools', 'install.sh')
+
+
+class InstallScriptTest(unittest.TestCase):
+    """``install.sh`` on a stubbed PATH: a failing hooks step (a foreign hook, exit 2) does not
+    abort the run — the scheduler install and the doctor still run, the failed step is named,
+    and the script exits non-zero."""
+
+    def _run(self, hooks_rc):
+        tmp = tempfile.mkdtemp(prefix='install_sh_')
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        bin_dir, home = os.path.join(tmp, 'bin'), os.path.join(tmp, 'home')
+        asf_home, log = os.path.join(home, '.ASF'), os.path.join(tmp, 'calls.log')
+        os.makedirs(bin_dir)
+        os.makedirs(os.path.join(asf_home, 'products'))
+        for rel in ('config.yaml', os.path.join('products', 'demo.yaml')):
+            open(os.path.join(asf_home, rel), 'w').close()
+        scripts = {
+            'pipx': '#!/bin/sh\nexit 0\n',
+            'asf': ('#!/bin/sh\n'
+                    f'echo "$*" >> "{log}"\n'
+                    'case "$1" in\n'
+                    '  --version) echo "asf 0.0.0 (stub)";;\n'
+                    f'  hooks) echo "NEEDS OPERATOR: pre-push is not asf\'s" >&2; exit {hooks_rc};;\n'
+                    'esac\n'
+                    'exit 0\n'),
+        }
+        for name, body in scripts.items():
+            path = os.path.join(bin_dir, name)
+            with open(path, 'w') as f:
+                f.write(body)
+            os.chmod(path, 0o755)
+        run_env = dict(os.environ, HOME=home, ASF_HOME=asf_home,
+                       PATH=bin_dir + os.pathsep + os.environ.get('PATH', ''))
+        r = subprocess.run(['bash', INSTALL_SH, 'demo', 'deadbeef'], capture_output=True,
+                           text=True, env=run_env, timeout=60)
+        with open(log) as f:
+            calls = [line.split()[0] for line in f if line.strip()]
+        return r, calls
+
+    def test_a_failed_hooks_step_still_runs_the_scheduler_and_the_doctor(self):
+        r, calls = self._run(hooks_rc=2)
+        self.assertEqual(calls, ['--version', 'hooks', 'scheduler', 'doctor'], r.stderr)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('install: FAILED step 3: asf hooks install --product demo (exit 2)', r.stderr)
+        self.assertNotIn('FAILED step 4', r.stderr)
+        self.assertIn('/plugin install asf@asf', r.stdout)
+
+    def test_every_step_green_exits_zero(self):
+        r, calls = self._run(hooks_rc=0)
+        self.assertEqual(calls, ['--version', 'hooks', 'scheduler', 'doctor'], r.stderr)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn('FAILED', r.stderr)
 
 
 if __name__ == '__main__':

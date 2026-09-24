@@ -499,7 +499,7 @@ def is_red(rows):
 
 
 def cmd_doctor(args, root):
-    from asf.cli import stamp
+    from asf.cli import stamp, version_string
     product_name = args.product or env.default_product_name()
     rows = run(product_name)
     print(format_table(product_name, rows))
@@ -514,10 +514,6 @@ def cmd_doctor(args, root):
         for line in check_clock_steps(env.load_product(product_name)):
             print(line)
 
-    repo = None
-    try:
-        repo = env.load_product(product_name).repo_dir
-    except env.ConfigError:
-        pass
-    print(stamp('doctor', repo))
+    # the doctor reports on asf's install, so its stamp names asf's version, not the product's HEAD
+    print(stamp('doctor', version=version_string()))
     return 1 if red else 0

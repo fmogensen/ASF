@@ -12,6 +12,10 @@
 # 3. installs the redaction hooks in the product's repos
 # 4. installs the product's clocks (the scheduler runs the pinned install, not a checkout)
 # 5. runs the doctor, and prints the two Claude Code lines that add the /asf:* plugin
+#
+# Steps 1-2 abort at once (nothing after them can work). Steps 3 and 4 never abort: a failure is
+# recorded, the rest still runs (the doctor included), each failed step gets a summary line, and
+# the exit status is non-zero when any step or the doctor failed.
 set -euo pipefail
 
 REPO_URL="${ASF_REPO_URL:-https://github.com/fmogensen/ASF.git}"
@@ -42,15 +46,19 @@ say "$("$BIN" --version)"
 [ -f "$ASF_HOME/config.yaml" ] || die "$ASF_HOME/config.yaml is missing — start from docs/config.example.yaml"
 [ -f "$ASF_HOME/products/$PRODUCT.yaml" ] || die "$ASF_HOME/products/$PRODUCT.yaml is missing — start from docs/products.example.yaml, then: $BIN init --product $PRODUCT"
 
-# 3. redaction hooks, 4. the product's clocks — both idempotent
-"$BIN" hooks install --product "$PRODUCT"
-"$BIN" scheduler install --product "$PRODUCT"
+# 3. redaction hooks, 4. the product's clocks — both idempotent; a failure is recorded, not fatal
+FAILED=()
+step() {  # step <label> <command...>: run it; on failure record "<label> (exit N)" and go on
+  local label="$1"; shift
+  local src=0
+  "$@" || src=$?
+  [ "$src" -eq 0 ] || FAILED+=("$label (exit $src)")
+}
+step "step 3: $BIN hooks install --product $PRODUCT" "$BIN" hooks install --product "$PRODUCT"
+step "step 4: $BIN scheduler install --product $PRODUCT" "$BIN" scheduler install --product "$PRODUCT"
 
-# 5. verify
-set +e
-ASF_TABLES=md "$BIN" doctor --product "$PRODUCT"
-rc=$?
-set -e
+# 5. verify — runs whatever steps 3 and 4 did
+step "step 5: $BIN doctor --product $PRODUCT" env ASF_TABLES=md "$BIN" doctor --product "$PRODUCT"
 cat <<EOF
 
 install: in the Claude Code session for $PRODUCT, add the plugin once:
@@ -58,4 +66,12 @@ install: in the Claude Code session for $PRODUCT, add the plugin once:
   /plugin install asf@asf
 install: and start that session with ASF_PRODUCT=$PRODUCT so /asf:* reads this product.
 EOF
-exit $rc
+if [ "${#FAILED[@]}" -eq 0 ]; then
+  say "done"
+  exit 0
+fi
+for f in "${FAILED[@]}"; do
+  printf 'install: FAILED %s\n' "$f" >&2
+done
+printf 'install: NEEDS OPERATOR: %d step(s) failed, the install is incomplete; fix them and re-run\n' "${#FAILED[@]}" >&2
+exit 1
