@@ -62,13 +62,14 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import time
 
-from asf import approvals, env, hermetic
+from asf import approvals, env, hermetic, redact
 from asf.conventions import Conventions
 from asf.feeder import footprint
 from asf.workers import health as health_mod
@@ -441,6 +442,55 @@ def run_gate(tmp, conv=None):
     return True, None, []
 
 
+# ----------------------------------------------------------------- redaction --
+
+def redaction_findings(repo, tmp, sha, state_dir, trunk=None):
+    """The formatted findings (D8 — never the matched text) of every commit ``sha`` would publish
+    that no ``origin`` ref holds, scanned in ``tmp`` with ``repo``'s own names list (F-0075). Each
+    finding is also one line of the product's refusal ledger, ``where='harvest'``, when
+    ``state_dir`` is that product's own. Empty when clean.
+
+    ``trunk``: a branch already on origin (:func:`land_ff`) is held by its own ``origin/<branch>``
+    ref, which would leave nothing unpublished — what a landing publishes is what the trunk lacks,
+    so the scan runs where ``origin/<trunk>`` is the only remote ref."""
+    pats = redact.patterns(repo)
+    if trunk is None:
+        findings = redact.scan_unpublished(tmp, sha, pats)
+    else:
+        findings = scan_beyond_trunk(repo, sha, trunk, pats)
+    if not findings:
+        return []
+    state_root, product = os.path.split(os.path.realpath(state_dir))
+    try:
+        redact.gate(findings, 'harvest',
+                    product=product if state_root == os.path.realpath(os.path.join(env.ASF_HOME, 'state')) else None)
+    except redact.Refused:
+        pass
+    return redact.format_findings(findings)
+
+
+def scan_beyond_trunk(repo, sha, trunk, pats):
+    """:func:`asf.redact.scan_unpublished` of ``sha`` in a scratch repository that borrows
+    ``repo``'s objects and knows one remote ref, ``origin/<trunk>``."""
+    common = sh(['git', 'rev-parse', '--git-common-dir'], cwd=repo).stdout.strip()
+    objects = os.path.join(os.path.abspath(os.path.join(repo, common)), 'objects')
+    tip = sh(['git', 'rev-parse', f'origin/{trunk}'], cwd=repo).stdout.strip()
+    scratch = tempfile.mkdtemp(prefix='harvest-scan-')
+    try:
+        sh(['git', 'init', '-q', scratch])
+        with open(os.path.join(scratch, '.git', 'objects', 'info', 'alternates'), 'w') as f:
+            f.write(objects + '\n')
+        sh(['git', 'update-ref', f'refs/remotes/origin/{trunk}', tip], cwd=scratch)
+        return redact.scan_unpublished(scratch, sha, pats)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def redaction_reason(lines):
+    """``redaction: <n> finding(s) — <first finding>``."""
+    return f'redaction: {len(lines)} finding(s) — {lines[0]}'
+
+
 # --------------------------------------------------------------------- push --
 
 def push_ff(repo, sha, trunk='main'):
@@ -511,6 +561,10 @@ def harvest_branch(repo, state_dir, is_record, job, branch, dry_run, conv=None, 
                     return hold(job, gate_reason)
 
             sha = sh(['git', 'rev-parse', 'HEAD'], cwd=tmp).stdout.strip()
+
+            found = redaction_findings(repo, tmp, sha, state_dir)
+            if found:
+                return hold(job, redaction_reason(found))
 
             if dry_run:
                 dest = trunk if is_record else f'origin/{branch}'
@@ -1049,6 +1103,10 @@ def land_ff(repo, state_dir, branch, record, item, conv, asf_repo, bug_root, dry
                 return hold_with_correction(state_dir, branch, record, 'gate', line, out,
                                             files, item_writes, touched, conv)
             sha = sh(['git', 'rev-parse', 'HEAD'], cwd=tmp).stdout.strip()
+            found = redaction_findings(repo, tmp, sha, state_dir, trunk)
+            if found:
+                return hold_with_correction(state_dir, branch, record, 'redaction',
+                                            '\n'.join(found), out)
             if dry_run:
                 out(f'DRY: would land {branch} → {sha}')
                 return 'dry'

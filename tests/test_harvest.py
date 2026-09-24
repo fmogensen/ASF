@@ -1804,6 +1804,161 @@ class ForeignRedTests(unittest.TestCase):
 PRODUCT_REPOS = Template(ProductHarvestTests.build, prefix='harvest_product_')
 
 
+class RedactionTests(unittest.TestCase):
+    """F-0075 §2.3: both push paths scan every unpublished commit after their own gate and
+    before their push. The operator's home is this test's own; the name and the token are built
+    from parts so this file's own tracked source passes the gate."""
+    NAME = 'zq' + 'operator' + 'x'
+    SECRET = 'AK' + 'IA' + 'ABCDEFGHIJKLMNOP'
+    LINE = f'reviewed by {NAME}\n'
+
+    write = ProductHarvestTests.write
+    product = ProductHarvestTests.product
+    push_lane = ProductHarvestTests.push_lane
+    session = ProductHarvestTests.session
+    harvest = ProductHarvestTests.harvest
+    origin_main = ProductHarvestTests.origin_main
+    origin_has = ProductHarvestTests.origin_has
+    record = ProductHarvestTests.record
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp(prefix='harvest_redact_home_')
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
+        with open(os.path.join(self.home, 'redact-names.txt'), 'w', encoding='utf-8') as f:
+            f.write(f'\\b{self.NAME}\\b\n')
+        patcher = mock.patch.object(env, 'ASF_HOME', self.home)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.base = PRODUCT_REPOS.fresh()
+        self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
+        self.origin = os.path.join(self.base, 'origin.git')
+        self.repo = os.path.join(self.base, 'repo')
+        self.worker = os.path.join(self.base, 'worker')
+        self.state_dir = os.path.join(self.home, 'state', 'sample')  # the product's own
+        os.makedirs(self.state_dir)
+
+    def ledger(self):
+        path = os.path.join(self.state_dir, 'redactions.jsonl')
+        if not os.path.isfile(path):
+            return []
+        with open(path, encoding='utf-8') as f:
+            return [json.loads(l) for l in f if l.strip()]
+
+    def test_a_record_branch_with_a_secret_is_held_and_the_trunk_is_unchanged(self):
+        base, origin, repo, state_dir = make_repo()
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        branch, wt = add_job_worktree(repo, state_dir, 'sec1')
+        write_epic(wt, 'E-0002', f'the key is {self.SECRET}')
+        index_and_commit(wt, 'sec1: add E-0002')
+        write_session(state_dir, 'sec1', branch)
+        before = sh(['git', 'rev-parse', 'main'], cwd=origin).stdout.strip()
+
+        rc, out = run_harvest(repo, state_dir)
+
+        self.assertEqual(rc, 0)
+        self.assertIn('HARVEST HOLD sec1 redaction: ', out)
+        self.assertIn(' finding(s) — ', out)
+        self.assertNotIn('HARVEST OK', out)
+        self.assertNotIn(self.SECRET, out)
+        self.assertEqual(sh(['git', 'rev-parse', 'main'], cwd=origin).stdout.strip(), before)
+        self.assertFalse(harvested(state_dir, 'sec1'))
+
+    def test_a_code_branch_with_an_operator_name_is_held_and_not_pushed(self):
+        job = 'code1'
+        branch, wt = add_job_worktree(self.repo, self.state_dir, job)
+        self.write(wt, 'notes.txt', self.LINE)
+        sh(['git', 'add', '-A'], cwd=wt)
+        sh(['git', 'commit', '-qm', 'code1: a note'], cwd=wt)
+        write_session(self.state_dir, job, branch)
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            harvest.run_harvest(self.repo, self.state_dir, False, Conventions.from_mapping({}))
+
+        self.assertIn(f'HARVEST HOLD {job} redaction: 1 finding(s) — notes.txt:1: name (', buf.getvalue())
+        self.assertNotIn(self.NAME, buf.getvalue())
+        self.assertFalse(self.origin_has(branch))
+        self.assertFalse(harvested(self.state_dir, job))
+        self.assertEqual([(l['where'], l['path'], l['kind']) for l in self.ledger()],
+                         [('harvest', 'notes.txt', 'name')])
+        self.assertNotIn(self.NAME, json.dumps(self.ledger()))
+
+    def test_a_code_branch_is_scanned_before_its_dry_run_line(self):
+        job = 'code2'
+        branch, wt = add_job_worktree(self.repo, self.state_dir, job)
+        self.write(wt, 'notes.txt', self.LINE)
+        sh(['git', 'add', '-A'], cwd=wt)
+        sh(['git', 'commit', '-qm', 'code2: a note'], cwd=wt)
+        write_session(self.state_dir, job, branch)
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            harvest.run_harvest(self.repo, self.state_dir, True, Conventions.from_mapping({}))
+
+        self.assertIn(f'HARVEST HOLD {job} redaction:', buf.getvalue())
+        self.assertNotIn('DRY:', buf.getvalue())
+
+    def test_land_ff_holds_a_branch_with_a_name_and_the_trunk_is_unchanged(self):
+        self.push_lane('fix/B-0001', [('fix(B-0001): the change', {'a.txt': self.LINE})])
+        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
+        before = self.origin_main()
+
+        results, lines = self.harvest(self.product(harvest_gate='per-branch'))
+
+        self.assertEqual(results, {'fix/B-0001': 'held'})
+        self.assertEqual(len(lines), 1, lines)
+        self.assertTrue(lines[-1].startswith('held fix/B-0001: a.txt:1: name ('), lines)
+        self.assertTrue(lines[-1].endswith(' — back to its session (round 1)'), lines)
+        self.assertEqual(self.origin_main(), before)
+        self.assertTrue(self.origin_has('fix/B-0001'))
+        self.assertEqual([(l['where'], l['path'], l['line']) for l in self.ledger()],
+                         [('harvest', 'a.txt', 1)])
+
+    def test_the_hold_hands_the_findings_back_as_the_correction(self):
+        self.push_lane('fix/B-0001', [('fix(B-0001): the change',
+                                       {'a.txt': self.LINE, 'b.txt': f'token {self.SECRET}\n'})])
+        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
+
+        self.harvest(self.product(harvest_gate='per-branch'))
+
+        correction = self.record('fix/B-0001')['correction']
+        self.assertEqual(correction['kind'], 'redaction')
+        lines = correction['text'].splitlines()
+        self.assertEqual(len(lines), 2, lines)
+        self.assertTrue(lines[0].startswith('a.txt:1: name ('), lines)
+        self.assertTrue(lines[1].startswith('b.txt:1: secret (rule:'), lines)
+        self.assertNotIn(self.NAME, json.dumps(correction))
+        self.assertNotIn(self.SECRET, json.dumps(correction))
+        self.assertEqual(self.record('fix/B-0001')['rounds'], 1)
+
+    def test_a_redaction_hold_at_the_round_cap_goes_to_adjudicate_like_any_hold(self):
+        self.push_lane('fix/B-0001', [('fix(B-0001): the change', {'a.txt': self.LINE})])
+        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
+        product = self.product(harvest_gate='per-branch')
+        for expected_round in (1, 2, 3):
+            _results, lines = self.harvest(product)
+            self.assertTrue(lines[-1].endswith(f'(round {expected_round})'), lines)
+            if expected_round < 3:
+                self.session(f'correct-b-0001-r{expected_round}', 'B-0001', 'fix/B-0001')
+
+        _results, lines = self.harvest(product)
+        self.assertTrue(lines[-1].endswith(' — adjudicate pending'), lines)
+        self.assertEqual(self.record('fix/B-0001')['rounds'], 3)
+        self.assertTrue(self.record('fix/B-0001')['correction'].get('at_cap'))
+        self.assertEqual(self.record('fix/B-0001')['correction']['kind'], 'redaction')
+
+    def test_a_clean_branch_lands_as_before(self):
+        self.push_lane('fix/B-0001', [('fix(B-0001): the change', {'a.txt': 'a\n'})])
+        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
+
+        results, lines = self.harvest(self.product(harvest_gate='per-branch'))
+
+        self.assertEqual(results, {'fix/B-0001': 'landed'})
+        self.assertTrue(lines[0].startswith('landed fix/B-0001 → '), lines)
+        self.assertFalse(self.origin_has('fix/B-0001'))
+        self.assertEqual(self.ledger(), [])
+
+
 class RulesSourceMergeTests(unittest.TestCase):
     def test_source_line_union_merge(self):
         ours = 'source: "Ops 2026-09-20: standing authority; memory alpha"'
