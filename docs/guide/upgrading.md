@@ -68,6 +68,22 @@ counts as in flight while its process lives and it has not yet written a success
 forward-only; to roll back, revert that commit and reinstall the older ref. A record newer than
 the package is never migrated down — `asf upgrade` says to install the newer `asf`.
 
+## Rolling back
+
+Roll back by running the installer with the older ref, as for an upgrade. The older ref must
+accept every key your product file carries, because a product file with an unknown top-level
+key is refused on load. Keys under `conventions:` and every `config.yaml` key are tolerated by
+older releases. The 0.1.3 keys (`doc_paths`, `shared_paths`, `lane`, `worktree_setup`,
+`env_passthrough`, `isolate_home`, `home_seed`) live there, so they need no edit on rollback.
+
+The rollback target for 0.1.3 is **not v0.1.2**. v0.1.2 refuses the top-level `feeder:` key,
+and the upgrade's first hour runs with `feeder.hold`. Roll back to the last trunk commit before
+0.1.3 that already reads `feeder.hold` (e284ee7 or later):
+
+```bash
+bash tools/install.sh <product> <that sha>
+```
+
 ## What is safe while sessions run
 
 | action | effect on running work |

@@ -212,17 +212,19 @@ def load_config():
 
 # ---- the worker pool's environment keys --------------------------------------
 
-#: ``worker_pool.accounts[].home: inherit`` — the session keeps the operator's own HOME (every
-#: CLI login on the machine). Any other value is a path; unset is the per-account home under
-#: the state directory, seeded from ``home_seed``.
-HOME_INHERIT = 'inherit'
+#: ``worker_pool.accounts[].isolate_home`` when the account leaves it out: a worker session gets
+#: a HOME of its own, never the operator's. ``isolate_home: false`` keeps the operator's HOME
+#: (every CLI login on the machine). A key of its own, not a value of ``home:``, so a v0.1.2
+#: binary — which reads ``home:`` as a path and ignores unknown account keys — rolls back
+#: cleanly.
+DEFAULT_ISOLATE_HOME = True
 _VAR_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 
 
 def validate_worker_pool(cfg):
     """``worker_pool.env_passthrough`` (a list of environment variable names) and each
-    account's ``home`` (a path, or ``inherit``) and ``home_seed`` (a list of paths) checked:
-    ``[(dotted key, problem)]``, empty when well-formed or absent."""
+    account's ``home`` (a path), ``isolate_home`` (true | false) and ``home_seed`` (a list of
+    paths) checked: ``[(dotted key, problem)]``, empty when well-formed or absent."""
     pool = (cfg or {}).get('worker_pool')
     if not isinstance(pool, dict):
         return []
@@ -243,7 +245,10 @@ def validate_worker_pool(cfg):
         label = f"worker_pool.accounts[{acct.get('name') or i}]"
         home = acct.get('home')
         if home is not None and (not isinstance(home, str) or not home.strip()):
-            problems.append((label + '.home', f'must be a path or {HOME_INHERIT}, not {home!r}'))
+            problems.append((label + '.home', f'must be a path, not {home!r}'))
+        isolate = acct.get('isolate_home')
+        if isolate is not None and not isinstance(isolate, bool):
+            problems.append((label + '.isolate_home', f'must be true or false, not {isolate!r}'))
         seed = acct.get('home_seed')
         if seed is not None:
             if not isinstance(seed, list):
@@ -253,8 +258,9 @@ def validate_worker_pool(cfg):
                     if not isinstance(path, str) or not path.strip():
                         problems.append((label + '.home_seed',
                                          f'must be a list of paths, and {path!r} is not one'))
-            if home == HOME_INHERIT:
-                problems.append((label + '.home_seed', f'has nothing to seed under home: {HOME_INHERIT}'))
+            if isolate is False and home is None:
+                problems.append((label + '.home_seed',
+                                 'has no home to seed: isolate_home is false and home is unset'))
     return problems
 
 
@@ -266,17 +272,21 @@ def env_passthrough(cfg):
 
 
 def account_home(acct):
-    """An account's (a ``worker_pool.accounts`` entry's) ``home``: :data:`HOME_INHERIT`, an
-    expanded path, or None — unset, the per-account home under the state directory."""
+    """An account's (a ``worker_pool.accounts`` entry's) ``home``: the expanded path, or None
+    when unset — the per-account home under the state directory when :func:`isolate_home`,
+    else the operator's own."""
     home = (acct or {}).get('home')
-    if home is None or home == HOME_INHERIT:
-        return home
-    return os.path.expanduser(str(home))
+    return os.path.expanduser(str(home)) if home is not None else None
+
+
+def isolate_home(acct):
+    """An account's ``isolate_home``, :data:`DEFAULT_ISOLATE_HOME` when unset."""
+    value = (acct or {}).get('isolate_home')
+    return DEFAULT_ISOLATE_HOME if value is None else bool(value)
 
 
 def account_home_seed(acct):
-    """An account's ``home_seed``: the expanded paths copied into its per-account home. ``[]``
-    when unset."""
+    """An account's ``home_seed``: the expanded paths copied into its home. ``[]`` when unset."""
     return [os.path.expanduser(str(p)) for p in (acct or {}).get('home_seed') or ()]
 
 

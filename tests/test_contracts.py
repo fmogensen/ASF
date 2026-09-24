@@ -114,7 +114,7 @@ worker_pool:
   env_passthrough: [HTTPS_PROXY, LANG_EXTRA]
   accounts:
     - name: acct-a
-      home: inherit
+      isolate_home: false
     - name: acct-b
       home: ~/acct-b-home
       home_seed: [~/.gitconfig]
@@ -129,29 +129,32 @@ class WorkerPoolKeys(unittest.TestCase):
         self.assertEqual(env.env_passthrough(cfg), ('HTTPS_PROXY', 'LANG_EXTRA'))
         self.assertEqual(env.env_passthrough({}), ())
         a, b, c = cfg['worker_pool']['accounts']
-        self.assertEqual(env.account_home(a), env.HOME_INHERIT)
+        self.assertIsNone(env.account_home(a))
         self.assertEqual(env.account_home(b), os.path.expanduser('~/acct-b-home'))
         self.assertIsNone(env.account_home(c))
+        self.assertEqual([env.isolate_home(x) for x in (a, b, c)], [False, True, True])
         self.assertEqual(env.account_home_seed(b), [os.path.expanduser('~/.gitconfig')])
         self.assertEqual(env.account_home_seed(c), [])
 
-    def test_accounts_carry_the_keys_and_inherit_is_never_a_path(self):
+    def test_accounts_carry_the_keys_and_home_stays_a_path(self):
         a, b, c = pool.accounts_from_config(env.loads(CONFIG))
-        self.assertTrue(a.inherit_home)
+        self.assertEqual([x.isolate_home for x in (a, b, c)], [False, True, True])
         self.assertIsNone(a.home)
+        self.assertEqual(b.home, '~/acct-b-home')   # as v0.1.2 reads it
         self.assertEqual(b.home_seed, [os.path.expanduser('~/.gitconfig')])
-        self.assertFalse(c.inherit_home)
         self.assertEqual(c.home_seed, [])
 
     def test_refused(self):
         cases = [
             ('  env_passthrough: HTTPS_PROXY\n', 'worker_pool.env_passthrough', 'list of variable names'),
             ('  env_passthrough: [NOT-A-VAR]\n', 'worker_pool.env_passthrough', "'NOT-A-VAR' is not one"),
-            ('  accounts:\n    - name: x\n      home: [a]\n', 'worker_pool.accounts[x].home', 'path or inherit'),
+            ('  accounts:\n    - name: x\n      home: [a]\n', 'worker_pool.accounts[x].home', 'must be a path'),
+            ('  accounts:\n    - name: x\n      isolate_home: sometimes\n',
+             'worker_pool.accounts[x].isolate_home', 'true or false'),
             ('  accounts:\n    - name: x\n      home_seed: ~/.gitconfig\n',
              'worker_pool.accounts[x].home_seed', 'list of paths'),
-            ('  accounts:\n    - name: x\n      home: inherit\n      home_seed: [a]\n',
-             'worker_pool.accounts[x].home_seed', 'nothing to seed'),
+            ('  accounts:\n    - name: x\n      isolate_home: false\n      home_seed: [a]\n',
+             'worker_pool.accounts[x].home_seed', 'no home to seed'),
         ]
         for text, key, words in cases:
             with self.subTest(key=key, words=words):
@@ -203,6 +206,18 @@ class StubsImport(unittest.TestCase):
         with mock.patch.object(invariants, 'INVARIANTS', [inv]):
             self.assertEqual(invariants.run({}), [f])
             self.assertEqual(invariants.run({}, scope='feeder'), [])
+
+    def test_record_stage(self):
+        from asf.record import stage
+        sigs = {'stage': ['root', 'writer', 'fn', 'args', 'kwargs'],
+                'validate': ['root', 'staged', 'product'],
+                'refuse': ['root', 'staged', 'findings'],
+                'run_writers': ['root', 'writers', 'product']}
+        for name, params in sigs.items():
+            self.assertEqual(list(inspect.signature(getattr(stage, name)).parameters), params, name)
+        s = stage.Staged('ingest', paths=('features/F-0001.md',), before={'features/F-0001.md': 'x'})
+        self.assertEqual(stage.RecordContext('/r', s).staged.writer, 'ingest')
+        self.assertIn('ingest', stage.WRITERS)
 
     def test_occupancy(self):
         from asf.workers import lifecycle
