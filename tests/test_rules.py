@@ -180,7 +180,8 @@ class RulesCheckTests(unittest.TestCase):
 
 
 class CheckFailureModeTests(unittest.TestCase):
-    """An unrunnable check is a violation of the check, not a pass."""
+    """A check that cannot say pass or violation is a check failure (``broken``): neither a
+    pass nor a violation of the rule. A missing script stays a violation (B-0021)."""
 
     def setUp(self):
         self.root = make_repo()
@@ -196,46 +197,67 @@ class CheckFailureModeTests(unittest.TestCase):
         reindex(self.root)
         return rules.load_rules(self.root)[0]
 
-    def test_timeout_is_reported_as_a_violation(self):
+    def test_timeout_is_a_check_failure_not_a_violation(self):
         rule = self._one_rule("#!/usr/bin/env bash\nsleep 30\n")
         old = rules.TIMEOUT
         rules.TIMEOUT = 1
         try:
-            lines = rules.run_check(self.root, rule)
+            lines, failures = rules.run_check(self.root, rule)
         finally:
             rules.TIMEOUT = old
-        self.assertEqual(len(lines), 1)
-        self.assertIn('check timed out after 1s', lines[0])
-        self.assertTrue(lines[0].startswith('R-0009 '))
+        self.assertEqual(lines, [])
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0]['kind'], 'timed out')
+        self.assertIn('check timed out after 1s', failures[0]['line'])
+        self.assertEqual(rules.failure_line(failures[0]), 'rule check timed out: R-0009')
+
+    def test_timeout_is_listed_under_broken_in_json_and_printed_as_a_check_failure(self):
+        self._one_rule("#!/usr/bin/env bash\nsleep 30\n")
+        env = dict(os.environ)
+        env['BACKLOG_ROOT'] = self.root
+        env['PYTHONPATH'] = PROJECT_ROOT + os.pathsep + env.get('PYTHONPATH', '')
+        code = ('import sys; from asf.rules import rules; rules.TIMEOUT = 1; '
+                'sys.exit(rules.main(sys.argv[1:]))')
+        proc = subprocess.run([sys.executable, '-c', code, 'check', '--json'], cwd=self.root,
+                              env=env, capture_output=True, text=True)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload['violations'], [])
+        self.assertEqual([b['rule'] for b in payload['broken']], ['R-0009'])
+        proc = subprocess.run([sys.executable, '-c', code, 'check'], cwd=self.root,
+                              env=env, capture_output=True, text=True)
+        self.assertIn('0 violations', proc.stdout)
+        self.assertIn('rule check timed out: R-0009', proc.stdout)
 
     def test_missing_script_is_a_violation(self):
         rule = self._one_rule(script=None)
         self.assertEqual(rules.run_check(self.root, rule),
-                         ['R-0009 check script missing tools/checks/r0009.sh'])
+                         (['R-0009 check script missing tools/checks/r0009.sh'], []))
 
-    def test_crash_is_a_violation_carrying_the_first_stderr_line(self):
+    def test_crash_is_a_check_failure_carrying_the_first_stderr_line(self):
         rule = self._one_rule("#!/usr/bin/env bash\necho boom >&2\nexit 2\n")
-        lines = rules.run_check(self.root, rule)
-        self.assertEqual(
-            lines, ['R-0009 check failed exit 2 tools/checks/r0009.sh boom'])
+        lines, failures = rules.run_check(self.root, rule)
+        self.assertEqual(lines, [])
+        self.assertEqual(failures, [{'rule': 'R-0009', 'kind': 'failed',
+                                     'line': 'R-0009 check failed exit 2 tools/checks/r0009.sh boom'}])
 
-    def test_exit_one_with_no_output_is_a_violation(self):
+    def test_exit_one_with_no_output_is_a_check_failure(self):
         rule = self._one_rule("#!/usr/bin/env bash\nexit 1\n")
-        lines = rules.run_check(self.root, rule)
+        lines, failures = rules.run_check(self.root, rule)
+        self.assertEqual(lines, [])
         self.assertEqual(
-            lines,
+            [f['line'] for f in failures],
             ['R-0009 check exited 1 with no violation line tools/checks/r0009.sh'])
 
     def test_violation_lines_are_prefixed_with_the_rule_id_when_missing(self):
         rule = self._one_rule("#!/usr/bin/env bash\necho 'main moved x y'\nexit 1\n")
         self.assertEqual(rules.run_check(self.root, rule),
-                         ['R-0009 main moved x y'])
+                         (['R-0009 main moved x y'], []))
 
     def test_one_line_per_violation(self):
         rule = self._one_rule(
             "#!/usr/bin/env bash\necho 'R-0009 a'\necho 'R-0009 b'\nexit 1\n")
         self.assertEqual(rules.run_check(self.root, rule),
-                         ['R-0009 a', 'R-0009 b'])
+                         (['R-0009 a', 'R-0009 b'], []))
 
     def test_a_card_with_neither_check_nor_enforced_false_is_a_violation(self):
         write_rule(self.root, 'R-0010', 'A rule nobody finished',
@@ -378,7 +400,7 @@ class LoadRulesTests(unittest.TestCase):
         reindex(self.root)
         loaded = rules.load_rules(self.root)
         started = time.monotonic()
-        self.assertEqual(rules.run_all(self.root, loaded), [])
+        self.assertEqual(rules.run_all(self.root, loaded), ([], []))
         self.assertLess(time.monotonic() - started, 6.0)
 
 

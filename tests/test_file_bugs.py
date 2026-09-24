@@ -371,3 +371,118 @@ class BranchSeverityTests(unittest.TestCase):
         conv = Conventions.from_mapping({'branch_prefixes': {'batch': 'merge-queue/'}})
         self.assertEqual(self.sig(conv), 'S2')
         self.assertEqual(self.sig(Conventions()), 'S3')   # no batch lane configured
+
+
+class RuleCheckFailureTests(unittest.TestCase):
+    """A rule check that times out is a check failure, not a violation: no product Bug, one
+    ``rule check timed out`` line per run, one factory-side line once it persists. A real
+    violation files a Bug with an Acceptance; a removed default Epic parents nothing."""
+
+    def setUp(self):
+        self.root = make_repo()
+        self.state = tempfile.mkdtemp(prefix='filebugs_state_')
+        write_item(self.root, 'E-0009', 'epic', 'Factory', typed_lines=['decided: true'])
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+        shutil.rmtree(self.state, ignore_errors=True)
+
+    def _file_bugs(self, epic='E-0009'):
+        import argparse
+        import contextlib
+        import io
+        args = argparse.Namespace(default_bug_epic=epic, file_bug_level='auto',
+                                  conventions=Conventions(), state_dir=self.state)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = file_bugs.cmd_file_bugs(args, self.root)
+        self.assertEqual(rc, 0)
+        return buf.getvalue()
+
+    def _bugs(self):
+        out = []
+        for n in sorted(os.listdir(os.path.join(self.root, 'bugs'))):
+            with open(os.path.join(self.root, 'bugs', n), encoding='utf-8') as f:
+                out.append(frontmatter.parse(f.read(), path=f'bugs/{n}'))
+        return out
+
+    def _slow_rule(self):
+        write_rule(self.root, 'R-0131', 'Docker stays off',
+                   typed_lines=['scope: tick', 'check: tools/checks/r0131.sh'])
+        write_check_script(self.root, 'r0131.sh', "#!/usr/bin/env bash\nsleep 30\n")
+
+    def _violated_rule(self):
+        write_rule(self.root, 'R-0001', 'Never merge red',
+                   typed_lines=['scope: merge', 'check: tools/checks/r0001.sh'])
+        write_check_script(self.root, 'r0001.sh',
+                           "#!/usr/bin/env bash\necho 'R-0001 merged red sha=abc1234'\nexit 1\n")
+
+    def _with_timeout(self, fn):
+        # the check runs in a subprocess (`asf.rules.rules`): shorten its timeout there
+        old = os.environ.get('ASF_RULE_CHECK_TIMEOUT')
+        os.environ['ASF_RULE_CHECK_TIMEOUT'] = '1'
+        try:
+            return fn()
+        finally:
+            if old is None:
+                os.environ.pop('ASF_RULE_CHECK_TIMEOUT', None)
+            else:
+                os.environ['ASF_RULE_CHECK_TIMEOUT'] = old
+
+    def test_a_timed_out_check_files_no_bug_and_says_so(self):
+        self._slow_rule()
+        run(['index'], self.root)
+        out = self._with_timeout(self._file_bugs)
+        self.assertEqual(self._bugs(), [])
+        self.assertIn('rule check timed out: R-0131', out)
+        self.assertIn('0 filed', out)
+
+    def test_a_check_that_keeps_timing_out_surfaces_once_as_a_factory_problem(self):
+        self._slow_rule()
+        run(['index'], self.root)
+        outs = [self._with_timeout(self._file_bugs)
+                for _ in range(file_bugs.CHECK_FAILURE_RUNS_TO_SURFACE + 1)]
+        needs = [o for o in outs if 'NEEDS OPERATOR: rule check timed out: R-0131' in o]
+        self.assertEqual(len(needs), 1)
+        self.assertEqual(self._bugs(), [])
+        from asf import doctor
+        ok, detail = doctor.check_rule_checks(
+            None, path=os.path.join(self.state, file_bugs.LEDGER_NAME))
+        self.assertFalse(ok)
+        self.assertIn('rule check timed out: R-0131', detail)
+
+    def test_a_violation_files_a_bug_whose_acceptance_names_the_check(self):
+        self._violated_rule()
+        run(['index'], self.root)
+        self._file_bugs()
+        bugs = self._bugs()
+        self.assertEqual(len(bugs), 1)
+        meta, body = bugs[0]
+        self.assertEqual(meta['signature'], 'R-0001: rule violated')
+        self.assertEqual(meta['parent'], 'E-0009')
+        acceptance = body.split('## Acceptance\n', 1)[1].split('\n## ', 1)[0]
+        self.assertNotEqual(acceptance.strip(), '- [ ]')
+        self.assertIn('R-0001', acceptance)
+        self.assertIn('bash tools/checks/r0001.sh', acceptance)
+
+    def test_a_removed_default_epic_parents_nothing_and_is_logged_once(self):
+        write_item(self.root, 'E-0009', 'epic', 'Factory',
+                   typed_lines=['decided: true', 'removed: "moved elsewhere"'])
+        self._violated_rule()
+        run(['index'], self.root)
+        first = self._file_bugs()
+        (meta, _body), = self._bugs()
+        self.assertNotIn('parent', meta)
+        self.assertIn('default_bug_epic E-0009 is removed', first)
+        second = self._file_bugs()
+        self.assertNotIn('default_bug_epic E-0009 is removed', second)
+
+    def test_a_closed_default_epic_parents_nothing(self):
+        write_item(self.root, 'E-0009', 'epic', 'Factory', typed_lines=['decided: true'],
+                   machine_lines=['state: Closed', 'stage_since: 2026-09-01T00:00:00Z',
+                                  'updated: 2026-09-01T00:00:00Z'])
+        self._violated_rule()
+        run(['index'], self.root)
+        self._file_bugs()
+        (meta, _body), = self._bugs()
+        self.assertNotIn('parent', meta)

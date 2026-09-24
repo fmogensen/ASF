@@ -475,11 +475,27 @@ def run(product_name):
     rows.append(('redaction-hooks', True, ok, detail))
     ok, detail = check_drift(product)
     rows.append(('drift', True, ok, detail))
+    ok, detail = check_rule_checks(product)
+    rows.append(('rule-checks', False, ok, detail))
     for ok, detail in check_capacity(cfg, product):
         rows.append(('capacity', False, ok, detail))
     for ok, detail in check_token_caps(cfg, product):
         rows.append(('token-caps', False, ok, detail))
     return rows
+
+
+def check_rule_checks(product, path=None):
+    """The rule checks that timed out or crashed on the last ``file-bugs`` run (the factory's
+    problem, never a product Bug): ``rule check timed out: R-nnnn`` per rule, from the ledger
+    ``asf.tick.file_bugs`` keeps in the product's state dir."""
+    from asf.tick import file_bugs
+    path = path or file_bugs.ledger_path(product)
+    checks = (file_bugs._read_ledger(path).get('checks') or {})
+    if not checks:
+        return True, 'every rule check ran to a pass or a violation on the last file-bugs run'
+    parts = [f"rule check {e.get('kind', 'failed')}: {rid} ({e.get('runs', 1)} runs since "
+             f"{e.get('since', '?')})" for rid, e in sorted(checks.items())]
+    return False, '; '.join(parts)
 
 
 def _tokens_m(n):

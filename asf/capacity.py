@@ -27,8 +27,17 @@ total; ``sessions_bound`` names whichever term won.
 **The CI law.** Symmetrical, and skipped entirely when neither ``capacity.ci`` nor
 ``capacity.total.ci`` is configured — no ``gh`` call. An unreadable or unconfigured count is
 ``None`` (unknown), and unknown never lowers a ceiling nor blocks a caller.
+
+**The fair share.** Every product draws on one worker pool, so a product's ceiling is also
+bounded by its share of what the pool can take *now*: ``usable`` is the sum over accounts of
+``0`` at stop, ``1`` in cooldown and ``cap`` when free (:mod:`asf.workers.quota`), and the share
+is ``ceil(usable / active)`` — ``active`` counting the products whose wave is asf's and on a
+clock (:func:`wave_active`), this one always among them. With one active product, or no pool
+accounts configured, there is no share. A product over its share keeps its running sessions; the
+feeder only stops handing it new slots (``free_slots`` never goes below zero).
 """
 import dataclasses
+import math
 import subprocess
 
 from asf import env
@@ -47,6 +56,18 @@ class Resolved:
     ci_inflight: object  # int | None
     batch: dict
     reserve: dict
+    ceiling: object = None      # int: the configured/total-bounded ceiling before the share
+    fair_share: object = None   # int | None: this product's share of the usable pool
+    usable: object = None       # int | None: the slots the pool can take now
+    active: int = 1             # products with an active wave, this one included
+
+    @property
+    def fair_share_reason(self):
+        """The wave's reason for a row the share holds back, ``''`` when no share applies."""
+        if self.fair_share is None:
+            return ''
+        return (f'fair share: {self.fair_share} of {self.usable} usable slots across '
+                f'{self.active} products')
 
 
 def _product_capacity(product):
@@ -108,6 +129,67 @@ def inflight_sessions_elsewhere(name):
     ``~/.ASF/products/`` (P7: the enumeration :func:`asf.schema._all_products` uses)."""
     from asf import schema
     return sum(inflight_sessions(other) for other in schema._all_products() if other != name)
+
+
+def wave_active(product):
+    """True when ``product``'s wave is asf's own and some clock in its ``clocks:`` runs it —
+    the product competes for the shared pool. A command-owned or ``off`` wave does not."""
+    from asf.tick import steps as tick_steps
+    (_step, owner, _cmd), = tick_steps.resolve(product, ['wave'])
+    if owner != 'asf':
+        return False
+    for entry in (product._get('clocks') or {}).values():
+        if not isinstance(entry, dict):
+            continue
+        steps = entry.get('steps')
+        if 'wave' in (steps if isinstance(steps, list) else [steps]):
+            return True
+    return False
+
+
+def active_products(name):
+    """The names of the products with an active wave, ``name`` always among them. A product file
+    that does not load is not counted."""
+    from asf import schema
+    out = {name}
+    for other in schema._all_products():
+        if other == name:
+            continue
+        try:
+            if wave_active(env.load_product(other)):
+                out.add(other)
+        except Exception:  # noqa: BLE001 — a broken sibling file must not stop this product
+            continue
+    return sorted(out)
+
+
+def usable_slots(cfg, quota_source=None):
+    """The slots the pool can take now: per account ``0`` at stop, ``1`` in cooldown, ``cap``
+    when free. ``None`` when no pool account is configured."""
+    from asf.workers import pool as pool_mod
+    from asf.workers import quota as quota_mod
+    accounts = pool_mod.accounts_from_config(cfg)
+    if not accounts:
+        return None
+    source = quota_source or quota_mod.source_from_config(cfg)
+    guards = quota_mod.guards_from_config(cfg)
+    total = 0
+    for a in accounts:
+        state, _why = quota_mod.band(source.read(a), guards)
+        total += a.cap if state == quota_mod.FREE else 1 if state == quota_mod.COOLDOWN else 0
+    return total
+
+
+def fair_share(product, cfg, quota_source=None):
+    """``(share, usable, active)``, or ``None`` when fewer than two products are active or the
+    pool has no accounts."""
+    active = active_products(product.name)
+    if len(active) < 2:
+        return None
+    usable = usable_slots(cfg, quota_source)
+    if usable is None:
+        return None
+    return math.ceil(usable / len(active)), usable, len(active)
 
 
 def batch_shape(product, cfg):
@@ -203,10 +285,11 @@ def ci_source(product, cfg):
     return _pick_ci_source(product, cfg)
 
 
-def resolve(product, cfg=None, ci_source=None):
+def resolve(product, cfg=None, ci_source=None, quota_source=None):
     """The one call every caller makes: a :class:`Resolved` snapshot of this product's ceilings,
     what is in flight, and what the S1 reserve holds. ``ci_source`` is what a test injects; left
-    unset, it is chosen the way :func:`ci_source` (the module function) chooses it."""
+    unset, it is chosen the way :func:`ci_source` (the module function) chooses it; likewise
+    ``quota_source`` for the fair share's band reads."""
     cfg = env.load_config() if cfg is None else cfg
 
     ceiling, sess_source = product_sessions(product, cfg)
@@ -218,6 +301,10 @@ def resolve(product, cfg=None, ci_source=None):
     else:
         sessions = max(0, ceiling)
         sessions_bound = sess_source
+    bounded = sessions
+    share = fair_share(product, cfg, quota_source)
+    if share is not None and share[0] < sessions:
+        sessions, sessions_bound = share[0], 'fair share'
 
     p_ci, p_ci_source = product_ci(product, cfg)
     t_ci = total_ci(cfg)
@@ -231,4 +318,8 @@ def resolve(product, cfg=None, ci_source=None):
 
     return Resolved(
         sessions=sessions, sessions_bound=sessions_bound, ci=ci, ci_bound=ci_bound,
-        ci_inflight=ci_inflight, batch=batch_shape(product, cfg), reserve=reserve(cfg))
+        ci_inflight=ci_inflight, batch=batch_shape(product, cfg), reserve=reserve(cfg),
+        ceiling=bounded,
+        fair_share=share[0] if share is not None and sessions_bound == 'fair share' else None,
+        usable=share[1] if share is not None else None,
+        active=share[2] if share is not None else 1)

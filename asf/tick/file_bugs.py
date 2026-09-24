@@ -4,7 +4,9 @@ The learning loop: three sources file or bump a Bug, keyed on the typed `signatu
 "same signature = same Bug" needs no id lookup table of its own:
   - metrics/ci: a `failed_step` seen >= 2 times in the last 24h
   - metrics/ticks: a file refused >= 2 times in the last 24h
-  - `asf rules check --json`: every current violation
+  - `asf rules check --json`: every current violation — never a `broken` check (timed out or
+    crashed): that is a check failure, printed as ``rule check timed out: R-nnnn`` and, once it
+    persists, surfaced once as a factory-side ``NEEDS OPERATOR`` line (``report_check_failures``)
 A signature already carrying today's date in its typed `last_filed` is left alone — this is
 what makes a second same-day run a no-op instead of double-counting a still-open problem.
 """
@@ -28,7 +30,8 @@ CI_REFUSAL_WINDOW_H = 24
 
 #: The conventions a caller with no Product reads: the trunk is `main`, no batch lane, no
 #: default Bug Epic. The Epic a filed Bug is parented under is `conventions.default_bug_epic`;
-#: a product that configures none leaves it unset, `_file_or_bump_bug` omits `parent`, and
+#: a product that configures none — or names a removed, closed or missing Epic (``usable_bug_epic``)
+#: — leaves it unset, `_file_or_bump_bug` omits `parent`, and
 #: `asf check` flags it for a human to fix once — the same "ask rather than guess" rule the
 #: groom's inbox intake follows. ``$ASF_DEFAULT_BUG_EPIC`` still overrides, for one run.
 DEFAULTS = Conventions()
@@ -82,6 +85,7 @@ def ci_signatures(root, now, conv=None):
             'severity': 'S2' if d['main_or_batch'] else 'S3',
             'evidence': d['evidence'],
             'runs': sorted(r for r in d['runs'] if r is not None),
+            'acceptance': [f"`{sig}` fails in no CI run for {CI_REFUSAL_WINDOW_H}h"],
         }
     return out
 
@@ -104,14 +108,17 @@ def refusal_signatures(root, now):
             continue
         sig = f"refusal: {file}"
         out[sig] = {'title': truncate(f"Refused twice: {file}", 120), 'severity': 'S3',
-                    'evidence': d['evidence'], 'runs': []}
+                    'evidence': d['evidence'], 'runs': [],
+                    'acceptance': [f"no tick refuses `{file}` for {CI_REFUSAL_WINDOW_H}h"]}
     return out
 
 
 _ASF_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-def rule_violation_signatures(root):
+def rule_check_results(root):
+    """``asf rules check --json`` over ``root``: ``{'violations': [...], 'broken': [...]}``, or
+    None when the run itself could not be read."""
     env_vars = dict(os.environ)
     env_vars['BACKLOG_ROOT'] = root
     env_vars['PYTHONPATH'] = _ASF_REPO_ROOT + os.pathsep + env_vars.get('PYTHONPATH', '')
@@ -121,32 +128,117 @@ def rule_violation_signatures(root):
             cwd=root, env=env_vars, capture_output=True, text=True, timeout=60,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return {}
+        return None
     if proc.returncode not in (0, 1):
-        return {}
+        return None
     try:
-        data = json.loads(proc.stdout)
+        return json.loads(proc.stdout)
     except json.JSONDecodeError:
+        return None
+
+
+def rule_violation_signatures(root, data=None):
+    """One signature per violated rule. Only ``violations`` count: a check that timed out or
+    crashed (``broken``) said nothing about the product and files no Bug here."""
+    if data is None:
+        data = rule_check_results(root)
+    if not data:
         return {}
 
     # One Bug per RULE, not per place: a Bug per violating location buries the few real problems
     # under noise. The signature is the rule id; every violating place is an evidence line, and
     # `places` carries how many there are this run.
-    titles = {}
+    rules_idx = {}
     try:
-        idx = json.load(open(os.path.join(root, 'index.json'), encoding='utf-8')).get('items', {})
-        titles = {k: v.get('title', '') for k, v in idx.items() if v.get('type') == 'rule'}
+        with open(os.path.join(root, 'index.json'), encoding='utf-8') as f:
+            idx = json.load(f).get('items', {})
+        rules_idx = {k: v for k, v in idx.items() if v.get('type') == 'rule'}
     except (OSError, json.JSONDecodeError):
         pass
     out = {}
     for v in data.get('violations') or []:
         rule, line = v.get('rule', ''), v.get('line', '')
+        card = rules_idx.get(rule) or {}
         sig = f"{rule}: rule violated"
-        d = out.setdefault(sig, {'title': truncate(f"{rule} violated: {titles.get(rule) or 'see the rule card'}", 120),
-                                 'severity': 'S2', 'evidence': [], 'runs': [], 'places': 0})
+        check = card.get('check')
+        acceptance = (f"`asf rules check` reports no violation of {rule}: its check "
+                      f"`bash {check}` exits 0" if check else
+                      f"`asf rules check` reports no violation of {rule}")
+        d = out.setdefault(sig, {'title': truncate(f"{rule} violated: {card.get('title') or 'see the rule card'}", 120),
+                                 'severity': 'S2', 'evidence': [], 'runs': [], 'places': 0,
+                                 'acceptance': [acceptance]})
         d['evidence'].append(line)
         d['places'] += 1
     return out
+
+
+#: A rule check that failed this many runs in a row is surfaced once as a factory-side problem.
+CHECK_FAILURE_RUNS_TO_SURFACE = 3
+LEDGER_NAME = 'rule-check-failures.json'
+
+
+def _read_ledger(path):
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_ledger(path, data):
+    if not path:
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def report_check_failures(failures, ledger, now_iso, out=print):
+    """A rule check that timed out or crashed is a *check failure*, never a product Bug: one
+    ``rule check timed out: R-nnnn`` line per run, and once the same rule's check has failed
+    ``CHECK_FAILURE_RUNS_TO_SURFACE`` runs in a row, one ``NEEDS OPERATOR`` line — the factory's
+    problem (the check, or its timeout) — printed once until the check runs clean again.
+    Mutates and returns ``ledger['checks']``."""
+    from asf.rules.rules import failure_line
+    prev = ledger.get('checks') or {}
+    checks = {}
+    for b in failures:
+        rid = b.get('rule', '')
+        entry = dict(prev.get(rid) or {'since': now_iso, 'runs': 0})
+        entry['runs'] = int(entry.get('runs') or 0) + 1
+        entry['kind'] = b.get('kind', 'failed')
+        entry['line'] = b.get('line', '')
+        entry['last'] = now_iso
+        checks[rid] = entry
+        out(failure_line(b))
+        if entry['runs'] >= CHECK_FAILURE_RUNS_TO_SURFACE and not entry.get('surfaced'):
+            entry['surfaced'] = now_iso
+            out(f"NEEDS OPERATOR: rule check {entry['kind']}: {rid} — {entry['runs']} runs in a row "
+                f"since {entry['since']} ({entry['line']}); a factory-side problem with the check, "
+                f"not a product Bug")
+    ledger['checks'] = checks
+    return checks
+
+
+def usable_bug_epic(canonical, epic_id):
+    """``(epic_id, None)`` when the Epic exists and is open, else ``(None, why)``: a filed Bug
+    is never parented under a removed, closed or missing Epic."""
+    if not epic_id:
+        return None, None
+    rec = canonical.get(epic_id)
+    if rec is None:
+        return None, f"default_bug_epic {epic_id} is not in the record"
+    typed, machine = frontmatter.split_machine(rec['meta'])
+    if typed.get('removed'):
+        return None, f"default_bug_epic {epic_id} is removed"
+    if machine.get('state') == 'Closed':
+        return None, f"default_bug_epic {epic_id} is closed"
+    return epic_id, None
 
 
 def _find_bug_by_signature(canonical, sig):
@@ -199,21 +291,38 @@ def _file_or_bump_bug(root, canonical, sig, info, date, default_bug_epic=None):
     body = '\n'.join(f"- {l}" for l in info['evidence'])
     new_id = mint_id(root, canonical, 'bug')
     write_new_item(root, canonical, 'bug', new_id, typed, body, date, 'file-bugs',
+                    acceptance=info.get('acceptance') or [f"`{sig}` is not seen again"],
                     shape=('signature', 'bug'))
     return 'filed'
+
+
+def _product(args):
+    from asf import env
+    try:
+        return env.load_product(getattr(args, 'product', None))
+    except (env.ConfigError, OSError):
+        return None
 
 
 def _conventions(args):
     """The product's conventions, or the defaults when there is no product config to read
     (a test, or `asf file-bugs` run against a checkout on its own)."""
-    from asf import env
     conv = getattr(args, 'conventions', None)
     if conv is not None:
         return conv
-    try:
-        return env.load_product(getattr(args, 'product', None)).conventions
-    except (env.ConfigError, OSError):
-        return DEFAULTS
+    product = _product(args)
+    return product.conventions if product is not None else DEFAULTS
+
+
+def ledger_path(product=None, state_dir=None):
+    """Where the run-over-run check-failure ledger lives: the operator's state dir for the
+    product (factory-side, never the product's record). None with no product to name it."""
+    if state_dir:
+        return os.path.join(state_dir, LEDGER_NAME)
+    if product is None:
+        return None
+    from asf import env
+    return os.path.join(env.state_dir(product), LEDGER_NAME)
 
 
 def cmd_file_bugs(args, root):
@@ -231,10 +340,29 @@ def cmd_file_bugs(args, root):
                         or os.environ.get('ASF_DEFAULT_BUG_EPIC')
                         or conv.default_bug_epic)
 
+    ledger_file = ledger_path(None if getattr(args, 'state_dir', None) else _product(args),
+                              getattr(args, 'state_dir', None))
+    ledger = _read_ledger(ledger_file)
+
+    epic, why = usable_bug_epic(canonical, default_bug_epic)
+    if why:
+        if ledger.get('unusable_bug_epic') != why:
+            print(f"file-bugs: {why} — Bugs are filed with no parent until "
+                  f"conventions.default_bug_epic names an open Epic")
+        ledger['unusable_bug_epic'] = why
+    else:
+        ledger.pop('unusable_bug_epic', None)
+    default_bug_epic = epic
+
+    rule_data = rule_check_results(root)
     signatures = {}
     signatures.update(ci_signatures(root, now, conv))
     signatures.update(refusal_signatures(root, now))
-    signatures.update(rule_violation_signatures(root))
+    signatures.update(rule_violation_signatures(root, rule_data))
+    if rule_data is not None:
+        report_check_failures(rule_data.get('broken') or [], ledger,
+                              now.strftime('%Y-%m-%dT%H:%M:%SZ'))
+    _write_ledger(ledger_file, ledger)
 
     level = getattr(args, 'file_bug_level', 'auto')
     if level != 'auto':

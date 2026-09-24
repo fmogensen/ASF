@@ -178,3 +178,96 @@ class Overlay(Home):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+WAVE_PRODUCT = '''product: {name}
+clocks:
+  tick:
+    steps: [record, wave]
+    every: 10m
+'''
+
+
+def pool_cfg(sessions=8):
+    """4 accounts × cap 4 and the operator's per-product default of ``sessions``."""
+    return {'capacity': {'per_product': {'sessions': sessions}},
+            'worker_pool': {'accounts': [{'name': n, 'cap': 4}
+                                         for n in ('acct-a', 'acct-b', 'acct-c', 'acct-d')]}}
+
+
+def bands():
+    """acct-a in cooldown (7-day 91 ≥ 90), acct-d at stop (7-day 96 ≥ 95), the other two free."""
+    from asf.workers import quota as quota_mod
+    return quota_mod.FakeQuotaSource({'acct-a': {'five_h_pct': 10, 'seven_d_pct': 91},
+                                      'acct-d': {'five_h_pct': 10, 'seven_d_pct': 96}})
+
+
+class FairShare(Home):
+    """Two products on one pool split what the pool can take now, not the configured ceiling."""
+
+    def test_usable_counts_cap_when_free_one_in_cooldown_none_at_stop(self):
+        self.assertEqual(capacity.usable_slots(pool_cfg(), bands()), 4 + 4 + 1 + 0)
+
+    def test_two_active_products_each_get_the_ceil_of_half_the_usable_pool(self):
+        self.write_product('asf', WAVE_PRODUCT.format(name='asf'))
+        self.write_product('web', WAVE_PRODUCT.format(name='web'))
+        for name in ('asf', 'web'):
+            r = capacity.resolve(env.load_product(name), pool_cfg(), quota_source=bands())
+            self.assertEqual(r.sessions, 5)
+            self.assertEqual(r.sessions_bound, 'fair share')
+            self.assertEqual(r.ceiling, 8)
+            self.assertEqual(r.fair_share_reason,
+                             'fair share: 5 of 9 usable slots across 2 products')
+
+    def test_a_single_active_product_keeps_its_configured_ceiling(self):
+        self.write_product('asf', WAVE_PRODUCT.format(name='asf'))
+        self.write_product('web')  # no clock runs its wave: not competing for the pool
+        r = capacity.resolve(env.load_product('asf'), pool_cfg(), quota_source=bands())
+        self.assertEqual((r.sessions, r.sessions_bound), (8, 'operator default'))
+        self.assertEqual(r.fair_share_reason, '')
+
+    def test_a_command_owned_wave_is_not_active(self):
+        self.write_product('asf', WAVE_PRODUCT.format(name='asf'))
+        self.write_product('bots', WAVE_PRODUCT.format(name='bots')
+                           + 'steps:\n  wave: bash wave.sh\n')
+        self.assertEqual(capacity.active_products('asf'), ['asf'])
+
+    def test_a_share_above_the_configured_ceiling_changes_nothing(self):
+        self.write_product('asf', WAVE_PRODUCT.format(name='asf'))
+        self.write_product('web', WAVE_PRODUCT.format(name='web'))
+        r = capacity.resolve(env.load_product('asf'), pool_cfg(sessions=3), quota_source=bands())
+        self.assertEqual((r.sessions, r.sessions_bound), (3, 'operator default'))
+
+    def test_over_its_share_a_product_launches_nothing_and_keeps_its_sessions(self):
+        from asf.feeder import tiers
+        self.write_product('asf', WAVE_PRODUCT.format(name='asf'))
+        self.write_product('web', WAVE_PRODUCT.format(name='web'))
+        for i in range(8):
+            self.launch('asf', f'task-t-{i}', account='acct-b' if i < 4 else 'acct-c')
+        r = capacity.resolve(env.load_product('asf'), pool_cfg(), quota_source=bands())
+        inflight = pool_mod.live_sessions('asf')
+        self.assertEqual(tiers.free_slots(inflight, r.sessions), 0)
+        self.assertEqual(capacity.inflight_sessions('asf'), 8)  # nothing ended, nothing killed
+
+    def test_the_wave_names_the_share_on_each_row_it_cut(self):
+        from types import SimpleNamespace as NS
+        from asf.tick import step_wave
+        self.write_product('asf', WAVE_PRODUCT.format(name='asf'))
+        self.write_product('web', WAVE_PRODUCT.format(name='web'))
+        r = capacity.resolve(env.load_product('asf'), pool_cfg(), quota_source=bands())
+        rows = [NS(item_id=f'T-{i}', kind='TASK → BUILD', brief_kind='task', launches=True)
+                for i in range(8)]
+        with mock.patch('asf.feeder.rows.plan_rows',
+                        side_effect=lambda items, p, running, cap, **kw: rows[:cap]):
+            held = step_wave.held_by_share({}, None, [], r, rows[:r.sessions], {})
+        self.assertEqual([h.item_id for h in held], ['T-5', 'T-6', 'T-7'])
+
+    def test_capacity_table_shows_the_effective_ceiling(self):
+        from asf.views import capacity as view
+        self.write_product('asf', WAVE_PRODUCT.format(name='asf'))
+        self.write_product('web', WAVE_PRODUCT.format(name='web'))
+        with mock.patch('asf.workers.quota.source_from_config', return_value=bands()):
+            text = view.render([env.load_product('asf')], pool_cfg())
+        line = [ln for ln in text.splitlines() if ln.startswith('asf ')][0]
+        self.assertIn(' 5 ', line)
+        self.assertIn('fair share of 9 usable / 2 products (configured 8)', line)

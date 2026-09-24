@@ -3,12 +3,14 @@
 
 Every `rules/R-nnnn.md` card carries either a `check:` script or an honest
 `enforced: false` + `reason:`. `rules.py check` runs every check script in
-parallel with a 10 s timeout each and prints one line per violation:
+parallel with a 10 s timeout each and prints one line per violation, then one
+``rule check timed out: R-nnnn`` / ``rule check failed: R-nnnn`` line per check that
+could say neither pass nor violation (``broken`` in ``--json``; never a violation):
 
     == RULES <n> checked, <v> violations, <u> unenforced
     R-0042 <what> <where> <since>
 
-Exit 1 when there are violations, 0 when there are none. `--verbose` adds the
+Exit 1 when there are violations or broken checks, 0 when there are none. `--verbose` adds the
 unenforced list with reasons; `--json` prints the machine form T10's Bug filer
 reads. python3 stdlib only, no third-party imports.
 
@@ -22,7 +24,15 @@ import os
 import subprocess
 import sys
 
-TIMEOUT = 10
+def _timeout():
+    """Seconds one check may run: ``$ASF_RULE_CHECK_TIMEOUT``, else 10."""
+    try:
+        return max(1, int(os.environ.get('ASF_RULE_CHECK_TIMEOUT') or 10))
+    except ValueError:
+        return 10
+
+
+TIMEOUT = _timeout()
 MAX_WORKERS = 8
 
 
@@ -104,19 +114,27 @@ def partition(rules):
 
 # ---------------------------------------------------------------- running --
 
-def run_check(root, rule):
-    """Run one rule's check script. Returns the list of violation lines.
+def broken(rid, kind, line):
+    """One check failure: the check could not say pass or violation (``kind`` is
+    ``timed out`` or ``failed``). It is the factory's problem, not the product's."""
+    return {'rule': rid, 'kind': kind, 'line': line}
 
-    A check that times out, that cannot be run, or that exits with anything
-    other than 0 or 1 is itself reported as a violation — an unrunnable check
-    is indistinguishable from an unenforced rule, and the point of this file
-    is that the gap stays visible.
+
+def run_check(root, rule):
+    """Run one rule's check script. Returns ``(violations, broken)``.
+
+    The check contract: exit 0 is a pass, exit 1 with one line per place is a violation. A
+    check that times out, that cannot be run, or that exits with anything else (or exits 1
+    with no line) said neither — it is a *check failure*, returned in ``broken``, never as
+    a violation of the rule: a slow or crashed check is not evidence the product broke the
+    rule. A card whose script is missing everywhere stays a violation (B-0021) — that is
+    the record pointing at nothing, which the product's record can fix.
     """
     rid = rule['id']
     script = rule.get('check')
     path = resolve_script(root, script)
     if path is None:
-        return [f"{rid} check script missing {script}"]
+        return [f"{rid} check script missing {script}"], []
 
     env = dict(os.environ)
     env['BACKLOG_ROOT'] = root
@@ -127,36 +145,43 @@ def run_check(root, rule):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
     except subprocess.TimeoutExpired:
-        return [f"{rid} check timed out after {TIMEOUT}s {script}"]
+        return [], [broken(rid, 'timed out', f"{rid} check timed out after {TIMEOUT}s {script}")]
     except OSError as e:
-        return [f"{rid} check could not run {script}: {e}"]
+        return [], [broken(rid, 'failed', f"{rid} check could not run {script}: {e}")]
 
     if proc.returncode == 0:
-        return []
+        return [], []
     if proc.returncode != 1:
         stderr_lines = [l for l in (proc.stderr or '').splitlines() if l.strip()]
         detail = stderr_lines[0].strip() if stderr_lines else ''
         line = f"{rid} check failed exit {proc.returncode} {script}"
-        return [f"{line} {detail}".rstrip()]
+        return [], [broken(rid, 'failed', f"{line} {detail}".rstrip())]
 
     lines = [l.rstrip() for l in (proc.stdout or '').splitlines() if l.strip()]
     if not lines:
-        return [f"{rid} check exited 1 with no violation line {script}"]
-    return [l if l.split(' ', 1)[0] == rid else f"{rid} {l}" for l in lines]
+        return [], [broken(rid, 'failed', f"{rid} check exited 1 with no violation line {script}")]
+    return [l if l.split(' ', 1)[0] == rid else f"{rid} {l}" for l in lines], []
 
 
 def run_all(root, enforced):
-    """Run every enforced rule's check in parallel; returns violation lines."""
+    """Run every enforced rule's check in parallel; returns ``(violations, broken)``."""
     if not enforced:
-        return []
+        return [], []
     workers = min(MAX_WORKERS, len(enforced))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         results = list(pool.map(lambda rule: run_check(root, rule), enforced))
-    violations = []
-    for lines in results:
+    violations, failures = [], []
+    for lines, fails in results:
         violations.extend(lines)
+        failures.extend(fails)
     violations.sort()
-    return violations
+    failures.sort(key=lambda b: b['rule'])
+    return violations, failures
+
+
+def failure_line(b):
+    """The one line a check failure prints as: ``rule check timed out: R-0042``."""
+    return f"rule check {b['kind']}: {b['rule']}"
 
 
 # ------------------------------------------------------------------ check --
@@ -173,7 +198,7 @@ def cmd_check(args, root):
         return 2
 
     enforced, unenforced, malformed = partition(rules)
-    violations = run_all(root, enforced)
+    violations, failures = run_all(root, enforced)
     for rule in malformed:
         violations.append(
             f"{rule['id']} rule card has neither check: nor enforced: false")
@@ -184,19 +209,23 @@ def cmd_check(args, root):
         payload = {
             'violations': [{'rule': rule_of(l), 'line': l} for l in violations],
             'unenforced': unenforced,
+            'broken': failures,
         }
         print(json.dumps(payload, indent=2, sort_keys=True))
-        return 1 if violations else 0
+        return 1 if violations or failures else 0
 
+    broken_part = f", {len(failures)} checks broken" if failures else ''
     print(f"== RULES {len(enforced)} checked, {len(violations)} violations, "
-          f"{len(unenforced)} unenforced")
+          f"{len(unenforced)} unenforced{broken_part}")
     for line in violations:
         print(line)
+    for b in failures:
+        print(f"{failure_line(b)} ({b['line']})")
     if args.verbose:
         print(f"-- unenforced ({len(unenforced)})")
         for u in unenforced:
             print(f"{u['rule']} {u['reason']}")
-    return 1 if violations else 0
+    return 1 if violations or failures else 0
 
 
 # -------------------------------------------------------------------- cli --

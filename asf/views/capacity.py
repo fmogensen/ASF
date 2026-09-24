@@ -3,7 +3,9 @@
 One row per product, each built from :func:`asf.capacity.resolve` — the resolver is the only
 reader of the raw ``capacity:`` keys (spec f-0079 §2.2); this module only formats what it
 returns. ``?`` marks an unknown count (an unconfigured ceiling, or an unreadable CI source);
-``free`` is ``max(0, ceiling - inflight)``, ``?`` when either side is unknown. The table is
+``sessions`` is the effective ceiling — bounded by the product's fair share of the usable pool when
+more than one product's wave is active (``bound by`` then names the share); ``free`` is
+``max(0, ceiling - inflight)``, ``?`` when either side is unknown. The table is
 script-generated (R-0109), never hand-typed.
 """
 import json
@@ -39,7 +41,7 @@ def _batch_cell(batch):
 def _row(product, cfg):
     r = capacity.resolve(product, cfg)
     inflight = capacity.inflight_sessions(product.name)
-    return {
+    row = {
         'product': product.name,
         'sessions': {'ceiling': r.sessions, 'inflight': inflight,
                      'free': _free(r.sessions, inflight), 'bound_by': r.sessions_bound},
@@ -47,6 +49,10 @@ def _row(product, cfg):
                'free': _free(r.ci, r.ci_inflight), 'bound_by': r.ci_bound},
         'batch': r.batch,
     }
+    if r.fair_share is not None:  # only when the share bounds the ceiling: the shape is stable
+        row['sessions'].update(configured=r.ceiling, fair_share=r.fair_share, usable=r.usable,
+                               active_products=r.active)
+    return row
 
 
 def _table(headers, rows):
@@ -68,7 +74,11 @@ def render(products, cfg):
     for p in products:
         row = _row(p, cfg)
         s, ci = row['sessions'], row['ci']
-        rows.append((row['product'], s['ceiling'], s['inflight'], _fmt(s['free']), s['bound_by'],
+        bound = s['bound_by']
+        if s.get('fair_share') is not None:
+            bound = (f"fair share of {s['usable']} usable / {s['active_products']} products "
+                     f"(configured {s['configured']})")
+        rows.append((row['product'], s['ceiling'], s['inflight'], _fmt(s['free']), bound,
                     _fmt(ci['ceiling']), _fmt(ci['inflight']), _fmt(ci['free']),
                     _batch_cell(row['batch'])))
     lines = [header, ''] + _table(HEADERS, rows)
