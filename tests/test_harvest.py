@@ -1170,6 +1170,10 @@ class ProductHarvestTests(unittest.TestCase):
         timings = [l for l in lines if l.startswith('gate: ')]
         self.assertEqual(len(timings), 7, lines)
         self.assertRegex(timings[0], r'^gate: 2 modules, \d+s, red: test_red3$')
+        with open(os.path.join(env.log_dir(), harvest.GATE_RED_LOG), encoding='utf-8') as f:
+            kept = f.read()  # why it was red, not only that it was
+        self.assertIn('gate red: test_red3 (only: test_red3)', kept)
+        self.assertIn('FAIL: test_red_3', kept)
         self.assertRegex(timings[1], r'^gate: 0 modules, \d+s, green$')  # not on the trunk
         self.assertRegex(timings[3], r'^gate: 1 modules, \d+s, red: test_red3$')  # [3,4]
         self.assertRegex(timings[-1], r'^gate: 1 modules, \d+s, green$')
@@ -1180,6 +1184,31 @@ class ProductHarvestTests(unittest.TestCase):
         sha = self.origin_main()
         for b in ('fix/B-0001', 'fix/B-0002', 'fix/B-0004'):
             self.assertEqual(self.record(b).get('harvested'), sha, b)
+
+    def test_a_branch_red_alone_on_a_test_it_never_wrote_is_its_own_red_not_foreign(self):
+        # the trunk is green on the red module and the branch alone turns it red: the red is the
+        # branch's even though the output names only a test file outside its diff. Called
+        # foreign, it was re-gated and re-bisected every tick and never handed back.
+        product = self.runner_product()
+        self.write(self.repo, 'value.txt', '1\n')
+        self.write(self.repo, 'checks/test_value.py',
+                   'import os, unittest\n\nclass V(unittest.TestCase):\n'
+                   '    def test_value(self):\n'
+                   '        with open(os.path.join(os.path.dirname(__file__), "..", "value.txt")) as f:\n'
+                   '            self.assertEqual(f.read(), "1\\n", "checks/test_value.py")\n')
+        sh(['git', 'add', '-A'], cwd=self.repo)
+        sh(['git', 'commit', '-qm', 'a value and its test'], cwd=self.repo)
+        sh(['git', 'push', '-q', 'origin', 'HEAD:main'], cwd=self.repo)
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        for i, files in ((1, {'f1.txt': '1\n'}), (2, {'value.txt': '2\n'})):
+            self.push_lane(f'fix/B-000{i}', [(f'fix(B-000{i}): change {i}', files)])
+            self.session(f'fix-bug-b-000{i}', f'B-000{i}', f'fix/B-000{i}')
+        results, lines = self.harvest(product)  # the red names checks/test_value.py alone
+        self.assertEqual(results, {'fix/B-0001': 'landed', 'fix/B-0002': 'held'}, lines)
+        self.assertFalse(any(l.startswith('foreign ') for l in lines), lines)
+        self.assertTrue(any(l.startswith('held fix/B-0002: ') and 'test_value' in l
+                            for l in lines), lines)
+        self.assertTrue((self.record('fix/B-0002').get('correction') or {}).get('text'), lines)
 
     def test_a_candidate_red_in_full_does_not_land(self):
         product = self.runner_product()

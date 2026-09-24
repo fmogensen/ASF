@@ -750,6 +750,31 @@ def red_modules(text):
     return tuple(dict.fromkeys(n for n in re.split(r'[\s,+]+', found.group(1)) if n))
 
 
+#: Where a red gate's output is kept (under ``logs/``): the harvest log's one timing line names
+#: the red modules, never why — a red nobody can read was bisected and re-gated blind.
+GATE_RED_LOG = 'harvest-gate-red.log'
+#: The lines of each red gate's output kept, and the size the file is rotated at.
+GATE_RED_TAIL = 300
+GATE_RED_MAX_BYTES = 4 << 20
+
+
+def keep_red_output(text, verdict, only=None):
+    """Append the tail of a red gate's output to ``logs/`` :data:`GATE_RED_LOG` under one header
+    line; the path, or None when it could not be written (a log is never a reason to fail)."""
+    try:
+        path = os.path.join(env.log_dir(), GATE_RED_LOG)
+        if os.path.exists(path) and os.path.getsize(path) > GATE_RED_MAX_BYTES:
+            os.replace(path, path + '.1')
+        lines = (text or '').rstrip().splitlines()[-GATE_RED_TAIL:]
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(f'===== {now_iso()} gate {verdict}'
+                    + (f' (only: {" ".join(only)})' if only else '') + '\n')
+            f.write('\n'.join(lines) + '\n')
+        return path
+    except OSError:
+        return None
+
+
 def product_gate(tmp, conv, asf_repo, out=None, only=None):
     """``(ok, first failing line, files, red modules)``: the product's test command, then — on
     asf's own repo — its generic and conventions checks. Each within ``harvest.gate_timeout_s``
@@ -784,7 +809,9 @@ def product_gate(tmp, conv, asf_repo, out=None, only=None):
             return False, timed_out_line(cmd, timeout), [], ()
         if rc != 0:
             red = red_modules(whole) if i == 0 and conv.test_command else ()
-            timed('red: ' + (' '.join(red) if red else os.path.basename(cmd[-1])))
+            verdict = 'red: ' + (' '.join(red) if red else os.path.basename(cmd[-1]))
+            keep_red_output(whole, verdict, only)
+            timed(verdict)
             return False, first_failing_line(whole), gate_files(whole), red  # P8: the whole output
     timed('green')
     return True, None, [], ()
@@ -956,7 +983,7 @@ def archive_superseded(repo, state_dir, branch, record, item, state, dry_run, ou
 
 
 def hold_with_correction(state_dir, branch, record, kind, text, out, files=(), item_writes=(),
-                         touched=(), conv=None):
+                         touched=(), conv=None, own=False):
     """Hold ``branch`` and hand it back to its session: :func:`asf.workers.lifecycle.hold` says
     what goes on the run (the failing output as ``correction``, the rounds over every session of
     the item, the cap the feeder switches an ADJUDICATE row on at) and what to print.
@@ -964,7 +991,12 @@ def hold_with_correction(state_dir, branch, record, kind, text, out, files=(), i
     A red gate is not the branch's when it names only files outside its footprint — the item's
     ``writes:``, or, with none (a spec or plan branch), the files the branch's diff actually
     ``touched`` — nor ever when that diff is :func:`is_inert` (docs no test runs): no
-    correction, no round, re-gated next tick."""
+    correction, no round, re-gated next tick.
+
+    ``own``: the red is this branch's whatever files it names — the branch was gated alone on a
+    trunk already green on those very modules. A test file the branch never wrote is red because
+    of code the branch did write; the footprint rule would call that foreign and re-gate (and
+    re-bisect) it every tick, never handing it back."""
     job = record.get('job') or branch
     if kind == 'gate' and text.startswith(TIMED_OUT):  # B-0082: a clock is not a defect — no round,
         out(f'{TIMED_OUT} {branch}: {text} — retried next tick')  # no correction, eligible again
@@ -974,7 +1006,7 @@ def hold_with_correction(state_dir, branch, record, kind, text, out, files=(), i
         out(f'foreign {branch}: gate red, its diff is docs only — re-gated next tick')
         return 'foreign'
     reach, what = (item_writes, 'writes') if item_writes else (touched, 'diff')
-    if kind == 'gate' and files and reach and footprint.overlaps(reach, files) is None:
+    if kind == 'gate' and not own and files and reach and footprint.overlaps(reach, files) is None:
         out(f'foreign {branch}: gate red outside its {what}: {files[0]} — re-gated next tick')
         return 'foreign'  # D8: not this item's red — no correction, no round
     fields, line = lifecycle.hold(sessions_path(state_dir), dict(record, branch=branch, job=job),
@@ -1062,14 +1094,16 @@ def red_on_trunk(tmp, trunk, conv, asf_repo, out, modules):
     return not product_gate(tmp, conv, asf_repo, out, only=modules)[0]
 
 
-def gate_groups(tmp, trunk, entries, conv, asf_repo, hold, out, announce=False, only=None):
+def gate_groups(tmp, trunk, entries, conv, asf_repo, hold, out, announce=False, only=None,
+                trunk_green=False):
     """Gate ``entries`` as one combined head; on red, bisect (B-0040). Returns the green groups
     as ``[(entries, sha, full)]`` — each a set that was gated together, the head it was gated
     at, and whether that gate was the full one (False: only ``only``, the modules the full gate
     found red, were re-run — a candidate the caller confirms in full before it lands). A branch
     red on its own is handed to ``hold`` with the gate's first failing line. When the full gate
     names its red modules and they are red on the trunk alone too, :class:`TrunkRed` is raised
-    and nothing is bisected."""
+    and nothing is bisected; when they are green there (``trunk_green``, carried down the
+    bisection), a branch red alone on them is held as its own red, never ``foreign``."""
     stacked = combined_head(tmp, trunk, entries, hold)
     if not stacked:
         return []
@@ -1078,16 +1112,20 @@ def gate_groups(tmp, trunk, entries, conv, asf_repo, hold, out, announce=False, 
     ok, line, files, red = product_gate(tmp, conv, asf_repo, out, only)
     if ok:
         return [(stacked, sh(['git', 'rev-parse', 'HEAD'], cwd=tmp).stdout.strip(), not only)]
-    if not only and red and red_on_trunk(tmp, trunk, conv, asf_repo, out, red):
-        raise TrunkRed(red)
+    if not only and red:
+        if red_on_trunk(tmp, trunk, conv, asf_repo, out, red):
+            raise TrunkRed(red)
+        trunk_green = True
     if len(stacked) == 1:
-        hold(stacked[0], 'gate', line, files)
+        hold(stacked[0], 'gate', line, files, own=trunk_green)
         return []
     out(f'harvest: bisecting {len(stacked)} branches')
     mid = len(stacked) // 2
     narrowed = red or only
-    return (gate_groups(tmp, trunk, stacked[:mid], conv, asf_repo, hold, out, only=narrowed)
-            + gate_groups(tmp, trunk, stacked[mid:], conv, asf_repo, hold, out, only=narrowed))
+    return (gate_groups(tmp, trunk, stacked[:mid], conv, asf_repo, hold, out, only=narrowed,
+                        trunk_green=trunk_green)
+            + gate_groups(tmp, trunk, stacked[mid:], conv, asf_repo, hold, out, only=narrowed,
+                          trunk_green=trunk_green))
 
 
 #: Full gates one landing may spend: the first, and the confirmations after each bisection.
@@ -1144,11 +1182,11 @@ def land_set(repo, state_dir, entries, conv, gate_conv, asf_repo, dry_run, out, 
     trunk = conv.main
     results = {}
 
-    def hold(entry, kind, text, files=()):
+    def hold(entry, kind, text, files=(), own=False):
         card = (items or {}).get(item_of(entry[0], entry[1])) or {}  # P7: no index, no footprint
         results[entry[0]] = hold_with_correction(state_dir, entry[0], entry[1], kind, text, out,
                                                  files, card.get('writes') or (),
-                                                 touched.get(entry[0]) or (), conv)
+                                                 touched.get(entry[0]) or (), conv, own=own)
 
     pending = list(entries)
     for _attempt in (1, 2):

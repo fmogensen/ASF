@@ -775,5 +775,21 @@ class GroomGateTest(unittest.TestCase):
             approvals.matrix(p)
 
 
+def load_tests(loader, standard_tests, pattern):
+    """Only the tests this module defines. ``HarvestTest`` and ``FileBugsTest`` borrow their
+    fixtures by subclassing ``ProductHarvestTests`` and ``FileBugsIntegrationTests``, and the
+    import binds those classes here too: left to the default loader, their 47 tests ran twice
+    more in this module (once as imported, once inherited) — the bulk of its runtime, and a
+    third exposure of every load-sensitive harvest test. Their own modules run them."""
+    suite = unittest.TestSuite()
+    for obj in list(globals().values()):
+        if not (isinstance(obj, type) and issubclass(obj, unittest.TestCase)
+                and obj.__module__ == __name__):
+            continue
+        own = {n for c in obj.__mro__ if c.__module__ == __name__ for n in vars(c)}
+        suite.addTests(obj(n) for n in loader.getTestCaseNames(obj) if n in own)
+    return suite
+
+
 if __name__ == '__main__':
     unittest.main()
