@@ -48,7 +48,8 @@ BINDINGS = {'spec': 'writer', 'plan': 'writer', 'reshape': 'writer',
             'review': 'reviewer', 'coder': 'coder',
             'fixer': 'fixer', 'correct': 'fixer', 'rebase': 'fixer',
             'fix-bug': 'diagnostician', 'close': 'harvester',
-            'groom': 'interrogator', 'adjudicate': 'interrogator'}
+            'groom': 'interrogator', 'adjudicate': 'interrogator',
+            'delivery-plan': 'writer', 'delivery-code': 'coder'}
 
 #: Every role no kind binds, with the reason none does.
 UNBOUND = {'prober': 'no phase yet — the production probe is a view, not a session',
