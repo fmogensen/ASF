@@ -14,6 +14,12 @@ HISTORY_LINE_RE = re.compile(
     r'\((?P<kind>controller|adjudicator), (?P<name>[^)]+)\)$')
 BARRED_KEY_RE = re.compile(r'barred:\s*approvals\.(\w+)\)')
 SPOKEN_FOR_LABEL_RE = re.compile(r'spoken for:\s*([^)]+)\)')
+SECTION_RE = re.compile(r'^## (.+)$')
+#: The groom file's sections that are groom housekeeping, not an operator's decision: a still
+#: open question there goes to **Housekeeping**, never **For you** (the For-you card, item 3).
+#: A barred line (a human-now approval, e.g. a new Epic) is **For you** from any section.
+HOUSEKEEPING_SECTIONS = ('Inbox cards to decide', 'Features without Stories',
+                         'Stories without Tasks after plan-approved', 'Inbox cards with a question')
 
 
 def _why(rest):
@@ -35,13 +41,18 @@ def _classify_groom_lines(text):
     into a card: ``[x] … (spoken for: …)``, ``____ (barred: approvals.<key>)``, and a still-bare
     ``____``. Each entry is ``(item_id, why)`` plus the label/key where one applies."""
     suppressed, barred, open_ = [], [], []
+    section = None
     for line in text.splitlines():
+        h = SECTION_RE.match(line)
+        if h:
+            section = h.group(1).strip()
+            continue
         m = ANSWER_LINE_RE.match(line)
         if not m:
             continue
         iid, why, answer = m.group('id'), _why(m.group('rest')), m.group('answer')
         if answer == '____':
-            open_.append((iid, why))
+            open_.append((iid, why, section))
         elif answer.startswith('____ (barred:'):
             km = BARRED_KEY_RE.search(answer)
             barred.append((iid, why, km.group(1) if km else ''))
@@ -97,25 +108,36 @@ def render_digest(root, date, canonical, groom_text, answers_done_texts, attempt
     spoken_for_lines = [f"- {iid} {why} — (spoken for: {label})" for iid, why, label in suppressed]
     for_you_lines = [f"NEEDS OPERATOR: {iid} — {why}; approvals.{key} is not auto."
                      for iid, why, key in barred]
+    housekeeping_lines = []
     if attempts < cap:
         spoken_for_lines += [f"- {iid} {why} — (spoken for: GROOM → ADJUDICATE)"
-                             for iid, why in open_]
+                             for iid, why, _section in open_]
     else:
-        for_you_lines += [f"NEEDS OPERATOR: {iid} — {why}" for iid, why in open_]
+        for iid, why, section in open_:
+            if section in HOUSEKEEPING_SECTIONS:
+                housekeeping_lines.append(f"- {iid} {why} ({section})")
+            else:
+                for_you_lines.append(f"NEEDS OPERATOR: {iid} — {why}")
     for t in answers_done_texts:
         for line in t.splitlines():
             s = line.strip()
             if s.startswith('NEEDS OPERATOR:'):
                 for_you_lines.append(s)
+    # a card open in two sections (undecided > 3 and > 14 days) is one action, asked once
+    for_you_lines = list(dict.fromkeys(for_you_lines))
 
     summary = (f"{len(rule_lines)} answered by rule · {len(adjudicator_lines)} ruled by the "
-              f"adjudicator · {len(spoken_for_lines)} spoken for · {len(for_you_lines)} for you")
+              f"adjudicator · {len(spoken_for_lines)} spoken for · {len(for_you_lines)} for you"
+              + (f" · {len(housekeeping_lines)} housekeeping" if housekeeping_lines else ''))
 
     blocks = [f"# Groom digest {date}", summary]
-    for title, lines in (('Answered by rule', rule_lines),
-                         (f'Ruled by the adjudicator (groom-{date})', adjudicator_lines),
-                         ('Spoken for', spoken_for_lines),
-                         ('For you', for_you_lines)):
+    sections = [('Answered by rule', rule_lines),
+                (f'Ruled by the adjudicator (groom-{date})', adjudicator_lines),
+                ('Spoken for', spoken_for_lines),
+                ('For you', for_you_lines)]
+    if housekeeping_lines:
+        sections.append(('Housekeeping', housekeeping_lines))
+    for title, lines in sections:
         blocks.append(f"## {title}\n" + ('\n'.join(lines) if lines else '(none)'))
     blocks.append(cli.stamp('groom', repo=root))
     return '\n\n'.join(blocks) + '\n'

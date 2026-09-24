@@ -45,7 +45,8 @@ ADJUDICATOR_PREFIX = re.compile(r'^adjudicator:\s*', re.IGNORECASE)
 #: PD3 — the applier's side of the policy names §2.2 defines. ``policy.POLICIES`` (a later Task)
 #: must name exactly these; kept here, not in ``asf.groom.policy``, because that module is
 #: imported by ``asf.feeder.rows`` and must not import this one back.
-POLICY_NAMES = ('unblock_on_closed', 'close_exact_duplicate', 'close_superseded',
+POLICY_NAMES = ('unblock_on_closed', 'close_duplicate_task', 'close_exact_duplicate',
+                'close_superseded',
                 'decide_on_approved_doc', 'decide_or_close_ci_red', 'decide_recurring_bug',
                 'decide_by_approval', 'close_on_starvation')
 
@@ -456,6 +457,11 @@ def groom_blocked_on_closed(canonical):
 
 
 def groom_near_duplicates(canonical):
+    """One line per near-duplicate title pair, naming the younger card. The threshold is raised
+    for templated titles (:func:`asf.groom.policy.near_duplicate_threshold`). A Task pair is
+    decided by rule, never asked: only the younger of two Tasks with one parent and one
+    footprint gets a line (``close_duplicate_task`` closes it); any other Task pair's flag is
+    dropped."""
     lines = []
     by_type = {}
     for iid, rec in canonical.items():
@@ -467,9 +473,13 @@ def groom_near_duplicates(canonical):
         for i in range(len(ids)):
             for j in range(i + 1, len(ids)):
                 a, b = ids[i], ids[j]
-                score = jaccard(tokenize(canonical[a]['meta'].get('title', '')),
-                                tokenize(canonical[b]['meta'].get('title', '')))
-                if score > 0.6 and (a, b) not in seen_pairs:
+                ta, tb = canonical[a]['meta'].get('title', ''), canonical[b]['meta'].get('title', '')
+                score = jaccard(tokenize(ta), tokenize(tb))
+                if score <= policy.near_duplicate_threshold(ta, tb):
+                    continue
+                if type_ == 'task' and policy.task_duplicate_of(b, canonical[b], canonical) != a:
+                    continue  # decided by rule: not the same parent and footprint — no flag
+                if (a, b) not in seen_pairs:
                     seen_pairs.add((a, b))
                     lines.append(_card_line(b, canonical[b]['meta'].get('title', ''),
                                             f"near-duplicate of {a} (overlap {score:.2f})"))
@@ -513,7 +523,9 @@ def _proposal_line(p):
 
 def groom_shape_sections(canonical, derived, capacity, area_depth, batch_max_globs):
     """The four F-0086 sections: merges, batches, splits, and split parts awaiting a `yes`."""
-    ready = shape.ready_tasks(canonical, derived)
+    # a Task the duplicate rule closes is no merge partner: it is going, not merging
+    ready = [t for t in shape.ready_tasks(canonical, derived)
+             if policy.task_duplicate_of(t.id, canonical[t.id], canonical) is None]
     declined = shape.declined_keys(canonical)
     merges = shape.merge_proposals(ready, declined)
     batches = shape.batch_proposals(ready, merges, capacity, batch_max_globs, declined)

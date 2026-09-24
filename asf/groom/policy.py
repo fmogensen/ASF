@@ -211,6 +211,68 @@ def close_exact_duplicate(item_id, rec, canonical, derived, ctx):
     return Answer('no', 'removed', f'groom {ctx.date}', f'duplicate of {oid} (overlap {score:.2f})')
 
 
+#: ``groom_near_duplicates``' title-overlap threshold, and the raised one for two titles cut
+#: from one template (a migrated plan's ``Parity: <row>`` Tasks share most of their words).
+NEAR_DUPLICATE_OVERLAP = 0.6
+TEMPLATED_OVERLAP = 0.9
+#: The separators a templated title puts after its fixed part (``Parity: <row>``).
+TEMPLATE_SEPARATORS = (':', ' — ', ' - ')
+
+
+def templated(title_a, title_b):
+    """True when two titles look cut from one template: the same text before a ``:``, `` — ``
+    or `` - `` — the fixed part of the template, the rest its varying slot."""
+    a, b = str(title_a or '').strip().lower(), str(title_b or '').strip().lower()
+    return any(sep in a and sep in b and a.split(sep, 1)[0].strip() == b.split(sep, 1)[0].strip()
+               for sep in TEMPLATE_SEPARATORS)
+
+
+def near_duplicate_threshold(title_a, title_b):
+    """The overlap at which two titles are near-duplicates: raised for templated titles."""
+    return TEMPLATED_OVERLAP if templated(title_a, title_b) else NEAR_DUPLICATE_OVERLAP
+
+
+def _footprint(typed):
+    return tuple(sorted(str(w) for w in (typed.get('writes') or ())))
+
+
+def task_duplicate_of(item_id, rec, canonical):
+    """The older open Task ``item_id`` (a Task) duplicates by rule, or ``None``: same ``parent``
+    and the same footprint (``writes:``), a near-duplicate title, and ``item_id`` — the younger,
+    higher id — still ``New`` with no branch. Deciding a near-duplicate Task by this rule is
+    closing the younger one; any other near-duplicate Task pair is no question at all."""
+    from asf.record import frontmatter
+    from asf.record.core import is_open, jaccard, tokenize
+    typed, machine = frontmatter.split_machine(rec['meta'])
+    if typed.get('type') != 'task' or machine.get('state', 'New') != 'New':
+        return None
+    if (typed.get('links') or {}).get('branches') or not typed.get('parent'):
+        return None
+    title = typed.get('title', '')
+    for oid, orec in sorted(canonical.items()):
+        if oid >= item_id or not is_open(orec):
+            continue
+        otyped, _m = frontmatter.split_machine(orec['meta'])
+        if (otyped.get('type') != 'task' or otyped.get('parent') != typed.get('parent')
+                or _footprint(otyped) != _footprint(typed)):
+            continue
+        otitle = otyped.get('title', '')
+        if jaccard(tokenize(title), tokenize(otitle)) > near_duplicate_threshold(title, otitle):
+            return oid
+    return None
+
+
+def close_duplicate_task(item_id, rec, canonical, derived, ctx):
+    """A near-duplicate Task is decided by rule: the younger of two open Tasks with the same
+    parent and footprint (:func:`task_duplicate_of`) is closed as a duplicate of the older."""
+    oid = task_duplicate_of(item_id, rec, canonical)
+    if oid is None or derived.get(item_id, {}).get('children') or \
+            _named_in_blockedby(item_id, canonical):
+        return None
+    reason = f'duplicate of {oid} (same parent and footprint)'
+    return Answer(f'no: {reason}', 'removed', f'{reason} (groom {ctx.date})', reason)
+
+
 def decide_recurring_bug(item_id, rec, canonical, derived, ctx):
     """The Bug has a ``signature`` and ``count >= ctx.recurring_bug_count``."""
     from asf.record import frontmatter
@@ -389,9 +451,8 @@ DECIDE_CLASSES = {'feature': 'decide_feature', 'bug': 'decide_bug'}
 
 def decide_by_approval(item_id, rec, canonical, derived, ctx):
     """``approvals.decide_feature: auto`` (resp. ``decide_bug``): an undecided, unsuperseded
-    Feature (resp. Bug) under a live Epic — open and decided — is decided. The approval bound
-    (:data:`BARRED`) holds a card that reads as money, security, production, customer data or
-    legal back for the operator before any policy is asked."""
+    Feature (resp. Bug) under a live Epic — open and decided — is decided. Deciding the card
+    crosses no approval class (:data:`BARRED`): the approvals hook guards the work it leads to."""
     from asf.record import frontmatter
     from asf.record.core import is_open
     typed, _machine = frontmatter.split_machine(rec['meta'])
@@ -421,6 +482,7 @@ DECISION_SECTIONS = ('inbox', 'undecided3', 'no_stories', 'dupes', 'undecided14'
 #: card is both decided and closed in one pass.
 POLICIES = (
     ('unblock_on_closed', ('blocked_closed',), unblock_on_closed),
+    ('close_duplicate_task', ('dupes',), close_duplicate_task),
     ('close_exact_duplicate', ('dupes',), close_exact_duplicate),
     ('close_superseded', DECISION_SECTIONS, close_superseded),
     ('decide_on_approved_doc', DECISION_SECTIONS, decide_on_approved_doc),
@@ -434,49 +496,14 @@ POLICIES = (
 PER_LINE_POLICIES = ('unblock_on_closed',)
 
 
-#: The card recognisers of the approval bound: a card whose title reads as one of these classes
-#: is the operator's to decide unless the product maps that class to ``auto``. Matched
-#: case-insensitively against the title only — a body mentions everything. An auto-filed Bug
-#: (one with a ``signature``) is exempt: it is a fault the factory filed under ``file_bug``, and
-#: every action its fix takes is still held by the approvals hook when it is taken.
-CARD_CLASS_WORDS = {
-    'spend_money': re.compile(
-        r'\b(stripe|billing|invoices?|payments?|payouts?|pay|paying|paid|pricing|prices?|'
-        r'subscriptions?|spend|spending|purchases?|refunds?|unit cost|virtual card|'
-        r'credit card|sale|sales)\b', re.IGNORECASE),
-    'touch_security': re.compile(
-        r'\b(secrets?|credentials?|passwords?|tokens?|api keys?|sso|scim|oauth|'
-        r'authenticat\w*|authori[sz]\w*|encrypt\w*|vulnerabilit\w*|security|permissions?|'
-        r'2fa|mfa)\b', re.IGNORECASE),
-    'touch_production': re.compile(r'\b(prod|production|go[- ]live|dns)\b', re.IGNORECASE),
-    'touch_customer_data': re.compile(
-        r'\b(customer data|customer records?|personal data|user data|pii|data exports?|'
-        r'account deletion|delete (?:my|an?|the) account|lawful basis|cross-tenant)\b',
-        re.IGNORECASE),
-    'touch_legal': re.compile(
-        r'\b(licen[cs]es?|legal|terms|privacy|gdpr|dpa|compliance|cookies?|consent|'
-        r'certificat\w*|notices?)\b', re.IGNORECASE),
-}
-
-
-def card_crosses(cls, typed):
-    """True when a card (its typed fields) reads as action class ``cls`` —
-    :data:`CARD_CLASS_WORDS` over its title."""
-    words = CARD_CLASS_WORDS.get(cls)
-    if words is None or typed.get('signature'):
-        return False
-    return bool(words.search(str(typed.get('title') or '')))
-
-
 #: §2.8's table, kept as data so F-0031 extends it without touching this module. Each entry: the
 #: ``approvals.<key>`` consulted, and a predicate over ``(answer, typed)`` that is true when
-#: ``answer`` would cross it. A ``yes`` on an Epic opens it (``new_epic``); a ``yes`` on a card
-#: that reads as money, security, production, customer data or legal commits the factory to it.
+#: ``answer`` would cross it. A ``yes`` on an Epic opens it (``new_epic``). Deciding any other
+#: card crosses no approval class: the class belongs to the actions the item's work will take,
+#: and the approvals hook judges each of those when the session takes it — a card's title read
+#: as money, security or legal barred a parity Story for nothing (the For-you card, item 2).
 BARRED = (
     ('new_epic', lambda answer, typed: answer.word == 'yes' and typed.get('type') == 'epic'),
-) + tuple(
-    (cls, lambda answer, typed, _cls=cls: answer.word == 'yes' and card_crosses(_cls, typed))
-    for cls in CARD_CLASS_WORDS
 )
 
 

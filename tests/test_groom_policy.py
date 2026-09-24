@@ -493,17 +493,18 @@ class PolicyPassBoundTests(unittest.TestCase):
                                  'stage_since: 2026-09-24T00:00:00Z', 'updated: 2026-09-24T00:00:00Z'])
         return f'- [ ] {iid} {title} — no Stories → answer: ____'
 
-    def test_a_feature_under_a_human_now_class_is_not_auto_decided(self):
+    def test_deciding_a_card_crosses_no_approval_class(self):
+        """The For-you card, item 2: a title that reads as money or security bars nothing — the
+        class belongs to the work's actions, which the approvals hook judges when taken."""
         money = self._feature('F-0001', 'Stripe billing for teams')
         security = self._feature('F-0002', 'Rotate the API keys nightly')
         plain = self._feature('F-0003', 'Sidebar rows show unread counts')
         out, barred, _c = self._pass({'no_stories': [money, security, plain]},
                                      {'groom': 'auto', 'decide_feature': 'auto',
                                       'spend_money': 'human-now'})
-        self.assertEqual(barred, 2)
-        self.assertTrue(out['no_stories'][0].endswith('____ (barred: approvals.spend_money)'))
-        self.assertTrue(out['no_stories'][1].endswith('____ (barred: approvals.touch_security)'))
-        self.assertTrue(out['no_stories'][2].endswith('controller: decide_on_approved_doc yes'))
+        self.assertEqual(barred, 0)
+        for line in out['no_stories']:
+            self.assertTrue(line.endswith('controller: decide_on_approved_doc yes'), line)
 
     def test_a_class_mapped_to_auto_lets_its_card_through(self):
         money = self._feature('F-0001', 'Stripe billing for teams')
