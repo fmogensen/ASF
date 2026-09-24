@@ -239,17 +239,23 @@ DAILY_LOCK_WAIT_S = 45 * 60
 LOCK_POLL_S = 10
 
 
+#: A clock of command steps only holds no product lock while its commands run; it takes the lock
+#: for its record parts, waiting up to this long for a running tick rather than skipping.
+RECORD_LOCK_WAIT_S = 10 * 60
+
+
 def lock_path(product):
     return os.path.join(env.state_dir(product), 'tick.lock')
 
 
-def acquire_lock(product, wait_s=0):
-    """The product's tick lock (an open file holding ``flock``), or ``None`` when another tick
-    of the product still holds it after ``wait_s``. Every job of one product shares the record
-    clone (``state/<product>/record``): two ticks at once raced its fetch and push
-    (``cannot lock ref 'refs/remotes/origin/main'``). The lock dies with its process."""
+def step_lock_path(product, step):
+    """A command step's own lock: the same script never overlaps itself, whichever clock runs it."""
+    return os.path.join(env.state_dir(product), f'tick-{step}.lock')
+
+
+def _flock(path, wait_s=0):
     import fcntl
-    f = open(lock_path(product), 'a')
+    f = open(path, 'a')
     deadline = time.monotonic() + wait_s
     while True:
         try:
@@ -260,6 +266,59 @@ def acquire_lock(product, wait_s=0):
                 f.close()
                 return None
             time.sleep(LOCK_POLL_S)
+
+
+def acquire_lock(product, wait_s=0):
+    """The product's tick lock (an open file holding ``flock``), or ``None`` when another tick
+    of the product still holds it after ``wait_s``. Every job of one product shares the record
+    clone (``state/<product>/record``): two ticks at once raced its fetch and push
+    (``cannot lock ref 'refs/remotes/origin/main'``). The lock dies with its process."""
+    return _flock(lock_path(product), wait_s)
+
+
+def acquire_step_lock(product, step):
+    """A command step's lock, or ``None`` when that step is already running (never waits)."""
+    return _flock(step_lock_path(product, step))
+
+
+class Locks:
+    """Which locks a tick holds. A clock with an ``asf`` step holds the product lock throughout
+    (``held``). A clock of command steps only (``held`` false) runs its commands outside it — a
+    legacy script can run for half an hour, and the product's main clock skipped on every run
+    meanwhile — and takes the product lock briefly, waiting, around each record part."""
+
+    def __init__(self, product, held):
+        self.product = product
+        self.held = held
+
+    @contextlib.contextmanager
+    def record(self, what, wait_s=None):
+        """Yields True while the record may be touched; False (and one line) when a running
+        tick still holds it after ``wait_s`` (default :data:`RECORD_LOCK_WAIT_S`)."""
+        if self.held:
+            yield True
+            return
+        lock = acquire_lock(self.product, RECORD_LOCK_WAIT_S if wait_s is None else wait_s)
+        if lock is None:
+            print(f"tick: another tick of {self.product.name} holds the record — {what} skipped")
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            lock.close()
+
+    @contextlib.contextmanager
+    def command(self, step):
+        """Yields True while ``step``'s own lock is held; False when that step is already running."""
+        lock = acquire_step_lock(self.product, step)
+        if lock is None:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            lock.close()
 
 
 def cmd_tick(args, root=None):
@@ -280,36 +339,46 @@ def cmd_tick(args, root=None):
         print(e)
         return 2
 
+    if not any(owner == 'asf' for _, owner, _ in rows):
+        return _run_locked(args, product, fresh, rows, chosen, Locks(product, held=False))
     wait_s = DAILY_LOCK_WAIT_S if any(r[0] == 'daily' for r in rows) else 0
     lock = acquire_lock(product, wait_s)
     if lock is None:
         print(f"tick: another tick of {product.name} is running — skipped")
         return 0
     try:
-        return _run_locked(args, product, fresh, rows, chosen)
+        return _run_locked(args, product, fresh, rows, chosen, Locks(product, held=True))
     finally:
         lock.close()
 
 
-def _run_locked(args, product, fresh, rows, chosen):
+def _run_locked(args, product, fresh, rows, chosen, locks=None):
+    locks = locks or Locks(product, held=True)
     ctx = Context(product, fresh=fresh)
     try:
-        return _run_steps(args, product, ctx, rows, chosen)
+        return _run_steps(args, product, ctx, rows, chosen, locks)
     except env.ConfigError as e:
         from asf.cli import needs_operator_line
         line = needs_operator_line(e, product.name)
         print(line)
-        try:
-            ctx.event('needs-operator', message=line)
-        except (subprocess.CalledProcessError, OSError, env.ConfigError):
-            pass
+        with locks.record('needs-operator event') as ok:
+            if ok:
+                try:
+                    ctx.event('needs-operator', message=line)
+                except (subprocess.CalledProcessError, OSError, env.ConfigError):
+                    pass
         return 2
 
 
-def _run_steps(args, product, ctx, rows, chosen):
+def _run_steps(args, product, ctx, rows, chosen, locks=None):
     from asf import drift, upgrade
-    drift.report(product, autonomy=str((product.approvals or {}).get('upgrade', '')).lower(),
-                 upgrade=lambda: upgrade.cmd_upgrade(_ns(skip_pipx=False)))
+    locks = locks or Locks(product, held=True)
+    # the version check can upgrade the install: never under a running tick, and never worth
+    # delaying a command clock for (the running tick prints it)
+    with locks.record('version check', wait_s=0) as ok:
+        if ok:
+            drift.report(product, autonomy=str((product.approvals or {}).get('upgrade', '')).lower(),
+                         upgrade=lambda: upgrade.cmd_upgrade(_ns(skip_pipx=False)))
     rc = 0
     ran = []
     resolved = None
@@ -332,9 +401,13 @@ def _run_steps(args, product, ctx, rows, chosen):
                 print(f"waits    batch — at ci capacity ({resolved.ci_inflight}/{resolved.ci})")
                 step_rc = 0
             else:
-                step_rc = steps.run_command(step, command, steps.command_timeout(),
-                                            cwd=product.repo_dir or None,
-                                            extra_env=capacity.env_overlay(resolved, product))
+                with locks.command(step) as free:
+                    if not free:
+                        print(f"tick: step {step} is already running — skipped")
+                        continue
+                    step_rc = steps.run_command(step, command, steps.command_timeout(),
+                                                cwd=product.repo_dir or None,
+                                                extra_env=capacity.env_overlay(resolved, product))
                 if step_rc:
                     print(f"tick: step {step} exited {step_rc}")
         ran.append({'step': step, 'ok': not step_rc, 'seconds': round(time.monotonic() - t0, 1)})
@@ -347,8 +420,10 @@ def _run_steps(args, product, ctx, rows, chosen):
             # act on a stale board with full confidence, so none of them runs
             print(f"tick: record failed — {ctx.stale_reason or 'see above'}; nothing else ran")
             break
-    if ran:
-        rc = finish(ctx, ran) or rc
+    if ran and ctx.has_record:
+        with locks.record('state commit') as ok:
+            if ok:
+                rc = finish(ctx, ran) or rc
     print(total_line(time.monotonic() - started))
     if ctx.stale_reason:
         print(f"RECORD STALE — {ctx.stale_reason}\n")

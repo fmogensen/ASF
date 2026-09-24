@@ -633,6 +633,77 @@ class TickLockTests(TickTestCase):
         self.assertNotIn('skipped', out)
 
 
+class CommandClockLockTests(TickTestCase):
+    """A clock of command steps only runs its commands outside the product lock, each under a
+    lock of its own: a legacy script running for half an hour no longer skips the product's
+    main clock, and never overlaps itself."""
+
+    product_yaml = "steps:\n  batch: python3 -c 'print(\"batch ran\")'\n"
+
+    def nested(self, inner, **kw):
+        """Run ``steps=inner`` as a second tick while the first one's command step runs."""
+        seen = {}
+        real = steps.run_command
+
+        def run_command(step, command, timeout, **k):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                seen['rc'] = tick.cmd_tick(_args(steps=inner))
+            seen['out'] = buf.getvalue()
+            return real(step, command, timeout, **k)
+        with mock.patch.object(steps, 'run_command', run_command):
+            rc, out = self.run_tick(**kw)
+        return rc, out, seen
+
+    def test_an_asf_tick_is_not_skipped_while_a_command_clock_runs(self):
+        rc, out, seen = self.nested('record', steps='batch')
+        self.assertEqual(rc, 0)
+        self.assertIn('[command:batch] batch ran', out)
+        self.assertNotIn('skipped', seen['out'])
+        self.assertEqual(seen['rc'], 0)
+        self.assertEqual(self.origin_commits(), 2)  # the inner tick pushed its state
+
+    def test_the_same_command_step_never_overlaps_itself(self):
+        rc, out, seen = self.nested('batch', steps='batch')
+        self.assertEqual(seen['rc'], 0)
+        self.assertIn('tick: step batch is already running — skipped', seen['out'])
+        self.assertNotIn('[command:batch]', seen['out'])
+        self.assertIn('[command:batch] batch ran', out)
+
+    def test_a_held_step_lock_skips_only_that_step(self):
+        held = tick.acquire_step_lock(env.load_product('sample'), 'batch')
+        self.addCleanup(held.close)
+        rc, out = self.run_tick(steps='batch')
+        self.assertEqual(rc, 0)
+        self.assertIn('tick: step batch is already running — skipped', out)
+        self.assertNotIn('[command:batch]', out)
+
+    def test_a_command_clock_runs_while_the_product_lock_is_held(self):
+        import fcntl
+        f = open(tick.lock_path(env.load_product('sample')), 'a')
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.addCleanup(f.close)
+        rc, out = self.run_tick(steps='batch')
+        self.assertEqual(rc, 0)
+        self.assertIn('[command:batch] batch ran', out)
+        self.assertNotIn('is running — skipped', out)
+
+    def test_two_asf_ticks_still_exclude_each_other(self):
+        seen = {}
+
+        def step0(root, product, fresh=False):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                seen['rc'] = tick.cmd_tick(_args(steps='record'))
+            seen['out'] = buf.getvalue()
+            return _fake_step0(root, product, fresh)
+        with mock.patch.object(tick, 'run_step0', step0):
+            rc, out = self.run_tick(steps='record')
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen, {'rc': 0, 'out': 'tick: another tick of sample is running — skipped\n'})
+        self.assertEqual(self.origin_commits(), 2)
+
+
 class Step0Tests(unittest.TestCase):
     """What step 0 hands the backfill: CI runs only, of the product's workflow; no launcher dir."""
 
