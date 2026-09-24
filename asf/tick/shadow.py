@@ -10,8 +10,9 @@ machine-owned content is resolved by ownership, any other conflict is aborted an
 stands. The live tick's clone is
 ``~/.ASF/state/<product>/record/``: it commits there and pushes (:func:`push`). The shadow tick's
 is ``…/shadow/``: it commits locally and never pushes, so it can be compared against the real
-tools without touching anything — see ``asf shadow-diff``. Neither ever touches the operator's own
-backlog checkout.
+tools without touching anything — see ``asf shadow-diff``. Neither writes the operator's own
+backlog checkout; after the live tick's push, :func:`sync_operator_checkout` only fast-forwards
+it to origin (clean and on the trunk, never a reset), because the read views read it.
 """
 import os
 import re
@@ -187,3 +188,40 @@ def _resolve_by_ownership(path):
     if do_index(path) != 0:
         return False
     return _sh(['git', 'add', '-A'], cwd=path, check=False).returncode == 0
+
+
+def sync_operator_checkout(product, out=print):
+    """Fast-forward the operator's record checkout (``backlog_dir``) to ``origin/<trunk>``.
+
+    The tick commits and pushes from its own clone; ``asf status``'s Decisions row, ``asf
+    backlog`` and ``asf next`` read ``backlog_dir``. Only a console command run there pulled it,
+    so answers the tick applied and pushed never showed: the checkout sat where the last console
+    command left it and the Decisions count froze. The same rule as the product checkout's
+    (``harvest.sync_checkout``, B-0042): only on the trunk with a clean tree, only ``--ff-only``;
+    anything else is left alone and named in one line. Silent when already current. True when
+    moved."""
+    repo = product.backlog_dir
+    if not repo or not os.path.isdir(os.path.join(repo, '.git')):
+        return False
+    if os.path.realpath(repo) == os.path.realpath(record_dir(product)):
+        return False
+    if _sh(['git', 'fetch', '-q', 'origin'], cwd=repo, check=False).returncode != 0:
+        return False
+    trunk = _default_branch(repo)
+    behind = _sh(['git', 'rev-list', '--count', f'HEAD..origin/{trunk}'], cwd=repo, check=False)
+    if behind.returncode != 0 or behind.stdout.strip() in ('', '0'):
+        return False
+    head = _sh(['git', 'symbolic-ref', '-q', '--short', 'HEAD'], cwd=repo, check=False).stdout.strip()
+    if head != trunk:
+        out(f'record: {repo} not fast-forwarded — on {head or "a detached HEAD"}, not {trunk}')
+        return False
+    if _sh(['git', 'status', '--porcelain', '--untracked-files=no'], cwd=repo,
+           check=False).stdout.strip():
+        out(f'record: {repo} not fast-forwarded — working tree has local changes')
+        return False
+    merge = _sh(['git', 'merge', '-q', '--ff-only', f'origin/{trunk}'], cwd=repo, check=False)
+    if merge.returncode != 0:
+        detail = (merge.stderr or merge.stdout).strip().splitlines()
+        out(f'record: {repo} not fast-forwarded — {detail[-1] if detail else "merge refused"}')
+        return False
+    return True

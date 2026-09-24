@@ -215,12 +215,16 @@ def commit_and_push(ctx):
     path = ctx.record_root()
     if not shadow.commit_local(path, f"tick: state {_stamp()}"):
         print(f"tick: no change ({path})")
-        return 0
-    if shadow.push(path, out=print):
+        rc = 0
+    elif shadow.push(path, out=print):
         print(f"tick: state committed and pushed ({path})")
-        return 0
-    print(f"tick: state committed, push refused — re-derived next run ({path})")
-    return 1
+        rc = 0
+    else:
+        print(f"tick: state committed, push refused — re-derived next run ({path})")
+        rc = 1
+    # the read views read the operator's checkout: bring it up to what origin now holds
+    shadow.sync_operator_checkout(ctx.product, out=print)
+    return rc
 
 
 def run_shadow(product, fresh=False):

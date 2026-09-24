@@ -1,7 +1,6 @@
 """asf.tick.tick — the live tick works in its own clone and pushes (B-0013); the step manifest."""
 import argparse
 import contextlib
-import hashlib
 import io
 import os
 import re
@@ -43,19 +42,6 @@ def steps_only(out):
     """A tick's stdout without the two summary blocks and the per-step timing lines — for the
     assertions whose subject is the step log (F-0078)."""
     return untimed(out.split('\n\nIN FLIGHT')[0] + '\n')
-
-
-def _tree_digest(path):
-    """Every file under ``path`` (the .git dir included), name and bytes, hashed."""
-    h = hashlib.sha256()
-    for dirpath, dirnames, filenames in os.walk(path):
-        dirnames.sort()
-        for name in sorted(filenames):
-            full = os.path.join(dirpath, name)
-            h.update(os.path.relpath(full, path).encode())
-            with open(full, 'rb') as f:
-                h.update(f.read())
-    return h.hexdigest()
 
 
 def _explode_in_the_wave():
@@ -369,11 +355,17 @@ class RecordStepTests(TickTestCase):
         for d in ('rebase-merge', 'rebase-apply'):
             self.assertFalse(os.path.isdir(os.path.join(path, '.git', d)), d)
 
-    def test_operator_checkout_is_untouched(self):
-        before = _tree_digest(self.operator)
+    def test_operator_checkout_is_only_fast_forwarded(self):
+        # the read views read the operator's checkout, so the tick brings it up to origin — by
+        # fast-forward alone: what it held before is an ancestor of what it holds after
+        before = _git(['rev-parse', 'HEAD'], self.operator).strip()
         self.run_tick(steps='record')
         self.run_tick(steps='record')
-        self.assertEqual(_tree_digest(self.operator), before)
+        after = _git(['rev-parse', 'HEAD'], self.operator).strip()
+        self.assertEqual(after, _git(['rev-parse', 'main'], self.origin).strip())
+        subprocess.run(['git', 'merge-base', '--is-ancestor', before, after], cwd=self.operator,
+                       check=True)
+        self.assertEqual(_git(['status', '--porcelain', '--untracked-files=no'], self.operator), '')
 
     def test_no_backlog_dir_is_reported_not_raised(self):
         with open(env.product_path('sample'), 'w') as f:
