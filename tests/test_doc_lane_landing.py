@@ -242,6 +242,22 @@ class DocLaneMergeIsNotALanding(unittest.TestCase):
         self.assertEqual(self.p.meta("F-0077")["stage"], "landed")
         self.assertEqual(self.p.meta("F-0090")["stage"], "landed")
 
+    def test_a_non_conforming_squash_subject_leaves_the_feature_launchable(self):
+        """B-0114's acceptance: F-0061's plan PR squash-merged under a subject in no lane form
+        at all — only its paths and its lane branch say it is a plan. The Feature stays
+        plan-approved, its minted Tasks are New, and the feeder offers a coder on each."""
+        made = self.p.record_step(self.p.discover(self.prs))
+        m = self.p.meta("F-0061")
+        self.assertEqual((m["state"], m["stage"]), ("Active", "plan-approved"))
+        tasks = sorted(t for t in made if self.p.meta(t, "task")["parent"] == "F-0061")
+        self.assertEqual([self.p.meta(t, "task")["state"] for t in tasks], ["New", "New"])
+        with open(os.path.join(self.p.backlog, "index.json")) as f:
+            index = json.load(f)
+        from asf.feeder import rows
+        got = [r for r in rows.candidates(index, self.p.product(), []) if r.feature_id == "F-0061"]
+        self.assertEqual(sorted((r.kind, r.item_id) for r in got),
+                         [(rows.PLAN_CODE, t) for t in tasks])
+
     def test_a_typed_links_plan_on_main_on_a_spec_off_the_trunk_lands_the_spec_first(self):
         ev = self.p.discover(self.prs)
         self.assertEqual(ev["features"]["avatar"]["plan"], None)  # the spec's slug has no plan

@@ -112,6 +112,8 @@ HOOK = 'hook'
 SUPERSEDED = 'superseded'
 #: The merge methods tried in order; a repo that refuses one is offered the next.
 MERGE_METHODS = ('--squash', '--merge', '--rebase')
+#: The methods that write a commit of their own, and so take a subject (``--rebase`` writes none).
+SUBJECT_METHODS = ('--squash', '--merge')
 #: ``gh pr checks`` buckets that make a PR red, and those that count as run and passed — a
 #: required check a path filter skipped (``skipping``) decided it is not needed: passed (§12).
 RED_BUCKETS = ('fail', 'cancel')
@@ -1296,6 +1298,26 @@ def push_set(lane, landing_set, sha, final=False):
     return 'ok'
 
 
+def squash_subject(lane, f, number):
+    """The subject a document lane's squash merge writes on the trunk, or None for a code lane —
+    whose subject is the host's to compose (B-0114).
+
+    Left to the host, a spec/plan PR lands under its PR title — ``F-0047 — the Stripe mirror
+    (#743)`` — and the evidence reads that commit as the Feature's code landing. A spec/plan lane
+    names its kind instead, the shape its own commits carry (``plan(F-0047): … (#743)``): its
+    branch's newest subject when that is already a document lane's, else prefixed with it."""
+    kind = f.get('kind')
+    if kind not in ('spec', 'plan'):
+        return None
+    from asf.evidence.evidence import DOC_LANE_SUBJECT
+    branch = f['branch']
+    head = next((s.strip() for s in _subjects(lane.repo, lane.trunk, branch) if s.strip()), '')
+    if not DOC_LANE_SUBJECT.match(head):
+        item = f.get('item') or lane.conv.strip_prefix(branch)
+        head = f'{kind}({item}): {head or branch}'
+    return f'{head} (#{number})'
+
+
 def merge_prs(lane, ready):
     """PR mode: merge every green PR the budget has room for — MERGING first (R3), then ``gh pr
     merge`` (or ``--auto`` into a merge queue: QUEUED)."""
@@ -1312,7 +1334,7 @@ def merge_prs(lane, ready):
             lane.results[b] = 'dry'
             continue
         lane.set(f, MERGING, f'PR #{number}', method='squash')
-        sha, how = host.merge(b, number)
+        sha, how = host.merge(b, number, subject=squash_subject(lane, f, number))
         if how == 'queue':
             host.in_queue += 1
             lane.out(f'queued {b}: PR #{number} added to the merge queue')
@@ -1354,9 +1376,10 @@ class Host:
         queued}`` — ``checks`` one of ``none|pending|passed|failed``."""
         raise NotImplementedError
 
-    def merge(self, branch, pr):
+    def merge(self, branch, pr, subject=None):
         """Land it: ``(sha, method)`` with ``method`` one of ``ff|squash|merge|rebase|queue``, or
-        a refusal ``(None, reason)``. The caller writes MERGING before calling."""
+        a refusal ``(None, reason)``. ``subject``: the squash subject to write, when the lane
+        names one (:func:`squash_subject`). The caller writes MERGING before calling."""
         raise NotImplementedError
 
 
@@ -1375,8 +1398,9 @@ class FastForwardHost(Host):
         return {'pr': None, 'state': 'MERGED' if merged else 'OPEN', 'head': head,
                 'checks': 'none', 'merged': merged, 'merge_sha': None, 'queued': False}
 
-    def merge(self, branch, pr, sha=None):
-        """``(pushed, not_ff)`` for the combined head ``sha`` (the lane's MERGING names it)."""
+    def merge(self, branch, pr, sha=None, subject=None):
+        """``(pushed, not_ff)`` for the combined head ``sha`` (the lane's MERGING names it); a
+        fast-forward writes no commit, so it has no subject to name."""
         repo, trunk = self.product.repo_dir, self.product.conventions.main
         pushed, not_ff = H.push_ff(repo, sha, trunk)
         if not pushed:
@@ -1476,14 +1500,16 @@ class GitHubHost(Host):
                 room, why = left, 'capacity.batch.parallel'
         return room, why
 
-    def merge(self, branch, pr):
+    def merge(self, branch, pr, subject=None):
         if self.has_queue():
             rc, _o, err = H._gh(['pr', 'merge', str(pr), '-R', self.slug, '--auto'])
             return (None, 'queue') if rc == 0 else (None, H.tail(err) or f'gh exited {rc}')
         err = ''
         for method in MERGE_METHODS:
-            rc, _out, err = H._gh(['pr', 'merge', str(pr), '-R', self.slug, method,
-                                   '--delete-branch'])
+            args = ['pr', 'merge', str(pr), '-R', self.slug, method, '--delete-branch']
+            if subject and method in SUBJECT_METHODS:
+                args += ['--subject', subject]
+            rc, _out, err = H._gh(args)
             if rc == 0:
                 return H.merged_sha(self.slug, pr) or f'PR #{pr}', method[2:]
             if 'not allowed' not in (err or '').lower():

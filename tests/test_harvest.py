@@ -14,6 +14,7 @@ RUNNER = os.path.join(REPO_ROOT, 'tools', 'run_tests.py')
 
 from asf import env
 from asf.conventions import Conventions
+from asf.evidence import evidence
 from asf.harvest import harvest, lane
 from asf.workers import host
 from asf.workers import lifecycle
@@ -1657,12 +1658,28 @@ class ProductHarvestTests(unittest.TestCase):
         results, lines = self.harvest(self.pr_product())
         self.assertEqual(results, {'plan/F-0001': 'landed'})
         self.assertEqual(self.merges(calls),
-                         [['pr', 'merge', '41', '-R', 'o/p', '--squash', '--delete-branch']])
+                         [['pr', 'merge', '41', '-R', 'o/p', '--squash', '--delete-branch',
+                           '--subject', 'plan(F-0001): the plan (#41)']])
         sha = self.origin_main()
         self.assertIn(f'landed plan/F-0001 → PR #41 {sha}', lines)
         self.assertEqual(self.record('plan/F-0001').get('harvested'), sha)
         self.assertNotEqual(self.record('plan/F-0001').get('harvest'), 'pr')
         self.assertEqual(self.harvest(self.pr_product())[0], {})  # harvested once
+
+    def test_native_landing_writes_the_doc_lane_squash_subject(self):
+        """B-0114: the host composes a squash subject from the PR title (`F-0001 — …`), which
+        the evidence reads as the Feature landing. A spec/plan lane names its kind at merge,
+        whatever the branch's own subjects say; a code lane keeps the host's subject."""
+        calls = self.fake_gh([{'name': 'DCO', 'bucket': 'pass'}])
+        self.push_lane('plan/F-0001', [('docs: F-0001 — the plan, cut against head',
+                                        {'docs/plans/f-0001.md': '# plan\n'})])
+        self.session('plan-f-0001', 'F-0001', 'plan/F-0001')
+        self.assertEqual(self.harvest(self.pr_product())[0], {'plan/F-0001': 'landed'})
+        merge = self.merges(calls)[0]
+        subject = merge[merge.index('--subject') + 1]
+        self.assertTrue(evidence.DOC_LANE_SUBJECT.match(subject), subject)
+        self.assertEqual(subject,
+                         'plan(F-0001): docs: F-0001 — the plan, cut against head (#41)')
 
     def test_no_checks_at_all_counts_as_green(self):
         calls = self.fake_gh(None)
