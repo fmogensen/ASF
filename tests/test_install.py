@@ -149,7 +149,7 @@ class PackageTest(unittest.TestCase):
         with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
             cli.main(['--version'])
         self.assertEqual(out.getvalue().strip(), f'asf {cli.version_string()}')
-        self.assertTrue(cli.version_string().startswith(asf.__version__))
+        self.assertRegex(cli.version_string(), r'^(v\d+\.\d+\.\d+(\+\d+)?|\d+\.\d+\.\d+)( \(\w+\))?$')
 
     def test_workflow_installs_and_runs_the_suite(self):
         with open(os.path.join(REPO, '.github', 'workflows', 'tests.yml')) as f:
@@ -787,17 +787,77 @@ class NoCheckoutPathsTest(unittest.TestCase):
 
 
 class VersionStringTest(unittest.TestCase):
-    """``asf --version`` names the commit it was built from: a checkout's HEAD, else a pipx git
-    install's ``direct_url.json``, else the bare version."""
+    """``asf --version`` names the release and the commit it was built from. The release: a git
+    install's requested tag, else a checkout's nearest release tag (``+N`` past it), else the static
+    ``__version__``. The commit: a checkout's HEAD, else ``direct_url.json``'s."""
 
     def test_a_checkout_names_its_own_head(self):
         from asf import cli
         head = _git(['rev-parse', '--short', 'HEAD'], REPO)
-        self.assertEqual(cli.version_string(), f'{asf.__version__} ({head})')
+        self.assertTrue(cli.version_string().endswith(f' ({head})'))
 
     def _no_checkout(self):
         failed = subprocess.CompletedProcess([], 128, '', 'not a git repository')
         return mock.patch('asf.cli.subprocess.run', return_value=failed)
+
+    def _dist(self, vcs_info):
+        dist = mock.Mock()
+        dist.read_text.return_value = json.dumps(
+            {'url': 'https://example.invalid/asf.git', 'vcs_info': {'vcs': 'git', **vcs_info}})
+        return mock.patch('importlib.metadata.distribution', return_value=dist)
+
+    def test_a_git_install_of_a_tag_is_that_release(self):
+        from asf import cli
+        with self._no_checkout(), self._dist({'requested_revision': 'v0.1.1',
+                                              'commit_id': '47bab2d' + '0' * 33}):
+            self.assertEqual(cli.version_string(), 'v0.1.1 (47bab2d)')
+
+    def test_a_git_install_of_a_sha_falls_to_the_static_version(self):
+        from asf import cli
+        sha = 'abcdef0123456789abcdef0123456789abcdef01'
+        with self._no_checkout(), self._dist({'requested_revision': sha, 'commit_id': sha}):
+            self.assertEqual(cli.version_string(), f'{asf.__version__} (abcdef0)')
+
+    def test_a_git_install_of_a_sha_in_a_checkout_falls_to_describe(self):
+        from asf import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            self._repo_with_tag(tmp, past=0)
+            sha = 'abcdef0123456789abcdef0123456789abcdef01'
+            direct = {'vcs_info': {'requested_revision': sha, 'commit_id': sha}}
+            self.assertEqual(cli._release(tmp, direct), 'v0.1.1')
+
+    def _repo_with_tag(self, tmp, past):
+        _git(['init', '-q', '-b', 'main'], tmp)
+        for i in range(past + 1):
+            _git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty',
+                  '-m', f'c{i}'], tmp)
+            if i == 0:
+                _git(['tag', 'v0.1.0'], tmp)
+                _git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q',
+                      '--allow-empty', '-m', 'release'], tmp)
+                _git(['tag', 'not-a-release'], tmp)
+                _git(['tag', 'v0.1.1'], tmp)
+
+    def test_a_checkout_at_a_tag_is_that_release(self):
+        from asf import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            self._repo_with_tag(tmp, past=0)
+            self.assertEqual(cli._release(tmp, {}), 'v0.1.1')
+
+    def test_a_checkout_past_a_tag_counts_the_commits(self):
+        from asf import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            self._repo_with_tag(tmp, past=3)
+            self.assertEqual(cli._release(tmp, {}), 'v0.1.1+3')
+
+    def test_a_checkout_without_a_release_tag_has_none(self):
+        from asf import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            _git(['init', '-q', '-b', 'main'], tmp)
+            _git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty',
+                  '-m', 'c'], tmp)
+            _git(['tag', 'release-2026-09-24-abc'], tmp)
+            self.assertIsNone(cli._release(tmp, {}))
 
     def test_a_pipx_git_install_names_the_direct_url_commit(self):
         from asf import cli

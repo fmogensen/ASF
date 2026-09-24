@@ -12,6 +12,7 @@ behind product config. The fuller command surface (``init``, ``roadmap``, ``back
 """
 import argparse
 import os
+import re
 import subprocess
 import sys
 
@@ -34,39 +35,73 @@ def _git_sha(cwd=None):
 #: The distribution name ``pyproject.toml`` installs the package under.
 DIST_NAME = 'asf-factory'
 
+#: A release tag, as ``metrics.next_tag`` cuts it: ``v<major>.<minor>.<patch>``.
+RELEASE_TAG = re.compile(r'v\d+\.\d+\.\d+')
 
-def _source_commit():
-    """The short commit this ``asf`` was built from, or ``None``: a checkout's own HEAD (the
-    package's parent must be the repo's top level, so an enclosing repo never answers), else a
-    pipx git install's ``direct_url.json`` (``vcs_info.commit_id``)."""
+
+def _checkout_root():
+    """The package's repo top level when it runs from a checkout, else ``None`` (the package's
+    parent must be the repo's top level, so an enclosing repo never answers)."""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    top = _checkout_git(root, 'rev-parse', '--show-toplevel')
+    return root if top and os.path.realpath(top) == os.path.realpath(root) else None
+
+
+def _checkout_git(root, *argv):
+    """``git -C root <argv>``'s stripped stdout, or ``None`` when it fails or prints nothing."""
     try:
-        top = subprocess.run(['git', '-C', root, 'rev-parse', '--show-toplevel'],
-                             capture_output=True, text=True, timeout=5)
-        if top.returncode == 0 and os.path.realpath(top.stdout.strip()) == os.path.realpath(root):
-            out = subprocess.run(['git', '-C', root, 'rev-parse', '--short', 'HEAD'],
-                                 capture_output=True, text=True, timeout=5)
-            if out.returncode == 0 and out.stdout.strip():
-                return out.stdout.strip()
+        out = subprocess.run(['git', '-C', root, *argv], capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.TimeoutExpired):
-        pass
+        return None
+    return (out.stdout.strip() or None) if out.returncode == 0 else None
+
+
+def _direct_url():
+    """The install's PEP 610 ``direct_url.json`` as a dict (``{}`` when there is none)."""
     try:
         import importlib.metadata
         import json
         raw = importlib.metadata.distribution(DIST_NAME).read_text('direct_url.json')
-        commit = (json.loads(raw or '{}').get('vcs_info') or {}).get('commit_id')
-        if commit:
-            return commit[:7]
-    except Exception:  # noqa: BLE001 — no distribution, no file, bad JSON: the bare version
-        pass
+        data = json.loads(raw or '{}')
+        return data if isinstance(data, dict) else {}
+    except Exception:  # noqa: BLE001 — no distribution, no file, bad JSON: nothing recorded
+        return {}
+
+
+def _release(root, direct_url):
+    """The release this ``asf`` is: a git install's requested tag (``v0.1.1``), else a checkout's
+    nearest release tag plus the commits past it (``v0.1.1+42``), else ``None``."""
+    requested = (direct_url.get('vcs_info') or {}).get('requested_revision') or ''
+    if isinstance(requested, str) and RELEASE_TAG.fullmatch(requested):
+        return requested
+    if root:
+        described = _checkout_git(root, 'describe', '--tags', '--match', 'v[0-9]*') or ''
+        m = re.fullmatch(r'(v\d+\.\d+\.\d+)(?:-(\d+)-g[0-9a-f]+)?', described)
+        if m:
+            return f'{m.group(1)}+{m.group(2)}' if m.group(2) not in (None, '0') else m.group(1)
     return None
 
 
+def _source_commit(root, direct_url):
+    """The short commit this ``asf`` was built from, or ``None``: a checkout's own HEAD, else a
+    pipx git install's ``direct_url.json`` (``vcs_info.commit_id``)."""
+    if root:
+        head = _checkout_git(root, 'rev-parse', '--short', 'HEAD')
+        if head:
+            return head
+    commit = (direct_url.get('vcs_info') or {}).get('commit_id')
+    return commit[:7] if isinstance(commit, str) and commit else None
+
+
 def version_string():
-    """``0.1.0 (ad1192d)`` — the package version and, when known, the commit it was built from;
-    the bare version otherwise. ``asf --version`` and the doctor's stamp both print it."""
-    commit = _source_commit()
-    return f'{__version__} ({commit})' if commit else __version__
+    """``v0.1.1 (47bab2d)`` — the release and, when known, the commit it was built from. The
+    release is a git install's requested tag, else a checkout's nearest release tag with ``+N``
+    commits past it, else the static ``__version__`` (never bumped: the tag is the version).
+    ``asf --version`` and the doctor's stamp both print it."""
+    root, direct_url = _checkout_root(), _direct_url()
+    version = _release(root, direct_url) or __version__
+    commit = _source_commit(root, direct_url)
+    return f'{version} ({commit})' if commit else version
 
 
 def stamp(command, repo=None, version=None):

@@ -11,10 +11,14 @@ nothing:
   the patch is that line's highest so far plus one.
 - Each release gets a GitHub Release and an entry at the top of [`CHANGELOG.md`](../../CHANGELOG.md)
   listing the Features landed and the Bugs fixed.
-- The tag is the version. The package's own version string is not rewritten per release, so `asf
-  --version` prints the line's base version and the commit you run, e.g. `asf 0.1.0 (a3480e0)`. To
-  tell which release that is, compare the sha with the tag:
-  `git ls-remote --tags <ASF repo> | grep a3480e0`.
+- The tag is the version. The package's own `__version__` is not rewritten per release; `asf
+  --version` prints the release you run and its commit instead:
+  - an install of a tag prints that tag, e.g. `asf v0.1.1 (47bab2d)`;
+  - a checkout prints its nearest release tag and the commits past it, e.g.
+    `asf v0.1.1+42 (20a8082)`;
+  - an install of a bare sha or of `main` prints the static base version, e.g.
+    `asf 0.1.0 (a3480e0)`. To tell which release that is, compare the sha with the tags:
+    `git ls-remote --tags <ASF repo> | grep a3480e0`.
 
 ## Upgrading
 
@@ -34,7 +38,7 @@ re-applies that product's hooks and clocks.
 Then check:
 
 ```bash
-asf --version                  # the commit you now run
+asf --version                  # the release and commit you now run
 asf upgrade --skip-pipx        # one row per product: record schema, package schema, action
 asf doctor --product <p>
 ```

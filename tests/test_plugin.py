@@ -5,7 +5,6 @@ import subprocess
 import unittest
 from unittest import mock
 
-from asf import __version__
 from asf.cli import build_parser
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -109,8 +108,9 @@ class PluginTests(unittest.TestCase):
         r = subprocess.run([os.path.join(REPO_ROOT, 'tools', 'asf'), '--version'], cwd='/',
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn(__version__, r.stdout)
-        self.assertRegex(r.stdout, r'^asf \d+\.\d+\.\d+')
+        from asf.cli import version_string
+        self.assertEqual(r.stdout.strip(), f'asf {version_string()}')
+        self.assertRegex(r.stdout, r'^asf (v\d+\.\d+\.\d+(\+\d+)?|\d+\.\d+\.\d+)')
 
 
 if __name__ == '__main__':
