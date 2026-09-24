@@ -455,6 +455,15 @@ def check_capacity(cfg, product):
     return findings
 
 
+def check_convention_shapes(product):
+    """[(ok, detail)] — one finding per map-valued convention the product file wrote in another
+    shape (``conventions.models: light``): the factory reads it as the default and keeps
+    running, and this row says so."""
+    conv = getattr(product, 'conventions', None)
+    findings = conv.shape_findings() if conv is not None and hasattr(conv, 'shape_findings') else []
+    return [(False, f'conventions.{key} {why}') for key, why in findings]
+
+
 def check_models(cfg):
     """[(ok, detail)] — the ``models`` doctor row (plan F-0093 P11): one finding when
     ``worker_pool.models`` has no ``cheap`` entry, none when it does. ``run()`` appends it as
@@ -659,6 +668,8 @@ def run(product_name):
         rows.append(('capacity', False, ok, detail))
     for ok, detail in check_models(cfg):
         rows.append(('models', False, ok, detail))
+    for ok, detail in check_convention_shapes(product):
+        rows.append(('conventions', False, ok, detail))
     for ok, detail in check_token_caps(cfg, product):
         rows.append(('token-caps', False, ok, detail))
     return rows

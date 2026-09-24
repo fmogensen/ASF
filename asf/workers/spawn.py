@@ -291,6 +291,8 @@ def model_arg(model, cfg=None):
     if not model:
         return None
     table = (((cfg or {}).get('worker_pool') or {}).get('models')) or {}
+    if not isinstance(table, dict):  # a misshapen value is no entry, never a TypeError
+        table = {}
     if model not in table:
         raise SpawnError(f'NEEDS OPERATOR: worker_pool.models has no entry for {model} '
                          '— add it to config.yaml')

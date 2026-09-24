@@ -424,7 +424,7 @@ def state_lines(product, facts):
 
 def convention_lines(product):
     conv = conventions(product)
-    prefixes = conv.get('branch_prefixes') or {}
+    prefixes = conv.map_of('branch_prefixes')
     out = [f"Specs live in `{conv.specs_dir}`, plans in "
            f"`{conv.plans_dir}`, reviews in "
            f"`{conv.reviews_dir}`."]

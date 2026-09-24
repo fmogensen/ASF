@@ -126,6 +126,12 @@ DEFAULT_WORKTREE_SETUP = None
 #: The keys of the yaml's ``lane:`` block and the field each one is.
 LANE_KEYS = {'review': 'lane_review', 'stale_after': 'lane_stale_after'}
 
+#: The conventions whose value is a map. A value of any other shape — a string the reader kept,
+#: a scalar written by hand — is read as the default (:meth:`Conventions.map_of`) and reported
+#: (:meth:`Conventions.shape_findings`, the doctor's ``conventions`` row); a reader never raises
+#: on it (a ``models: light`` string once failed every launch for forty minutes).
+MAP_CONVENTIONS = ('models', 'branch_prefixes')
+
 DURATION_RE = re.compile(r'^(\d+)([smhd])$')
 DURATION_UNITS = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}
 
@@ -311,6 +317,8 @@ class Conventions:
         data = dict(data or {})
         known = set(cls.field_names())
         kwargs = {}
+        misshapen = {key: data.pop(key) for key in MAP_CONVENTIONS
+                     if data.get(key) is not None and not isinstance(data.get(key), dict)}
         harvest = data.pop('harvest', None)
         if isinstance(harvest, dict):  # ``harvest: {gate, branches_per_tick}`` → the two fields
             rest = {}
@@ -344,7 +352,21 @@ class Conventions:
                 value = data.pop(key)
                 if value is not None:
                     kwargs[key] = value
-        return cls(extra=data, **kwargs)
+        conv = cls(extra=data, **kwargs)
+        conv._misshapen = misshapen
+        return conv
+
+    def map_of(self, key):
+        """A map-valued convention (:data:`MAP_CONVENTIONS`) as a dict: its value when it is a
+        map, else ``{}`` — the reader's defaults apply, never an exception."""
+        value = self.get(key)
+        return value if isinstance(value, dict) else {}
+
+    def shape_findings(self):
+        """``[(key, problem)]`` for every map-valued convention the product wrote in another
+        shape — read as its default, and shown by the doctor."""
+        return [(key, f'must be a map, not {value!r} — read as the default')
+                for key, value in sorted(getattr(self, '_misshapen', {}).items())]
 
     # ---- the lane ------------------------------------------------------------
 

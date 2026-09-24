@@ -164,7 +164,7 @@ def render(text, ctx):
 
 def model_for(product, kind):
     """``conventions.models.<kind>``, else the default label for that kind."""
-    table = (preamble_mod.conventions(product).get('models') or {})
+    table = preamble_mod.conventions(product).map_of('models')  # never a string's .get
     return table.get(kind) or DEFAULT_MODELS.get(kind, LIGHT)
 
 
