@@ -1,0 +1,6 @@
+# R21 live smoke, written by tools/smoke_isolated_session.sh on ALL PASS
+date: 2026-09-24T13:55:27Z
+account: a8b80346de47
+product: bb170201ef5d
+sha: d36303f70c406f55887b53fd9a4fa9624be25e05
+result: PASS
