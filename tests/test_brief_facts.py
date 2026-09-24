@@ -251,3 +251,13 @@ class PreambleIsCodeTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SubjectRuleTest(unittest.TestCase):
+    def test_each_kind_names_its_item_in_the_subject(self):
+        for kind, prefix in (('spec', 'spec'), ('plan', 'plan'), ('fix-bug', 'fix'), ('coder', 'task')):
+            row = Row(tier=2, kind='X', item_id='F-0007', feature_id='F-0007', action='launch',
+                      brief_kind=kind, branch='b', reason='r')
+            line = preamble_mod.subject_rule(row, {'id': 'F-0007'})
+            self.assertIn(f'`{prefix}(F-0007): <what>`', line)
+            self.assertIn('branch name does not count', line)

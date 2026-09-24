@@ -74,6 +74,19 @@ def rules_block(product, main='main'):
     return text.replace('{main}', main)
 
 
+#: The subject prefix per brief kind; any other kind commits as a task.
+SUBJECT_KIND = {'spec': 'spec', 'plan': 'plan', 'fix-bug': 'fix', 'fixer': 'fix', 'review': 'review'}
+
+
+def subject_rule(row, item):
+    """The commit-subject line every brief carries, whatever ``rules_tail`` says: harvest holds a
+    branch whose commits do not name the item, and an id inside the branch name does not count."""
+    kind = SUBJECT_KIND.get(getattr(row, 'brief_kind', None) or '', 'task')
+    iid = (item or {}).get('id') or getattr(row, 'item_id', None) or '<item>'
+    return (f"- Every commit subject names the item: `{kind}({iid}): <what>`. Harvest holds a "
+            f"branch whose commits do not name it; the id inside the branch name does not count.")
+
+
 def review_path_for(product, slug, n):
     """Where round ``n`` of a review lives — ``conventions.review_pattern``, ``{n}``/``{slug}``."""
     return conventions(product).review_path(slug, n)
@@ -442,6 +455,7 @@ def build(product, row, index, inflight=None, repo_facts=None, facts=None):
         Section('last_report', '### The last report for this item',
                 [l.rstrip() for l in str(facts['last_report']).splitlines() if l.strip()],
                 trimmable=True, marker='…truncated'),
-        Section('rules', '### Standing rules', rules_block(product, main).splitlines()),
+        Section('rules', '### Standing rules',
+                rules_block(product, main).splitlines() + [subject_rule(row, facts['item'])]),
     ]
     return '\n'.join(fit(sections, max_lines(product)))
