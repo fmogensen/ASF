@@ -2,6 +2,7 @@
 ``asf schema-migrate``, ``asf upgrade``, ``asf hooks install`` / ``asf hook``."""
 import argparse
 import contextlib
+import datetime
 import io
 import json
 import os
@@ -858,6 +859,44 @@ class VersionStringTest(unittest.TestCase):
                   '-m', 'c'], tmp)
             _git(['tag', 'release-2026-09-24-abc'], tmp)
             self.assertIsNone(cli._release(tmp, {}))
+
+    def test_the_latest_release_is_the_newest_version_tag_and_its_date(self):
+        from asf import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            self._repo_with_tag(tmp, past=2)
+            _git(['tag', 'v0.1.10'], tmp)                       # numeric, not lexical: 10 > 1
+            with mock.patch.object(cli, '_checkout_root', return_value=tmp):
+                tag, when = cli.latest_release()
+        self.assertEqual(tag, 'v0.1.10')
+        self.assertLess(abs((datetime.datetime.now(datetime.timezone.utc) - when).total_seconds()), 600)
+
+    def test_the_latest_release_of_a_git_install_is_its_remote_newest_tag(self):
+        from asf import cli
+        listed = subprocess.CompletedProcess([], 0, 'aa\trefs/tags/v0.1.2\nbb\trefs/tags/v0.1.10\n'
+                                                    'cc\trefs/tags/release-x\n', '')
+        with mock.patch.object(cli, '_checkout_root', return_value=None), self._dist({}), \
+                mock.patch('asf.cli.subprocess.run', return_value=listed):
+            self.assertEqual(cli.latest_release(), ('v0.1.10', None))
+        with mock.patch.object(cli, '_checkout_root', return_value=None), \
+                mock.patch.object(cli, '_direct_url', return_value={}):
+            self.assertIsNone(cli.latest_release())
+
+    def test_status_shows_the_running_version_and_the_latest_release(self):
+        from asf import cli
+        from asf.views import status
+        now = datetime.datetime(2026, 9, 24, 12, 0, tzinfo=datetime.timezone.utc)
+        with mock.patch.object(cli, 'version_string', return_value='v0.1.1+42 (abc1234)'), \
+                mock.patch.object(cli, 'latest_release',
+                                  return_value=('v0.1.2', now - datetime.timedelta(minutes=5))):
+            self.assertEqual(status.version_cell(now),
+                             'running v0.1.1+42 (abc1234) · latest release v0.1.2 (5m ago)')
+        with mock.patch.object(cli, 'version_string', return_value='v0.1.2 (abc1234)'), \
+                mock.patch.object(cli, 'latest_release', return_value=None):
+            self.assertEqual(status.version_cell(now), 'running v0.1.2 (abc1234) · latest release —')
+        with mock.patch.object(status, 'version_cell', return_value='running X'), \
+                mock.patch.object(status, 'runners_cell', return_value='r'):
+            table = status.render('/nonexistent', None, cfg={})
+        self.assertIn('| Version | running X |', table)
 
     def test_a_pipx_git_install_names_the_direct_url_commit(self):
         from asf import cli

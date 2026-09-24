@@ -565,6 +565,11 @@ class TrunkReleases(Base):
         self.product = env.Product('trunky', {
             'repo_dir': self.repo, 'repo_slug': 'x/y', 'main': 'main', 'ci': 'none',
             'conventions': {'version_file': 'pkg/__init__.py'}})
+        # the rollup's clock: each release() runs later than the last, past the default interval
+        self.now = metrics.now_utc()
+        clock = mock.patch.object(metrics, 'now_utc', side_effect=lambda: self.now)
+        clock.start()
+        self.addCleanup(clock.stop)
 
     def commit(self, path, text, msg):
         if _git(self.origin, 'for-each-ref', 'refs/heads/main'):
@@ -576,7 +581,8 @@ class TrunkReleases(Base):
         _git(self.repo, 'push', '-q', 'origin', 'HEAD:main')
         return _git(self.repo, 'rev-parse', 'HEAD')
 
-    def release(self, day=DAY):
+    def release(self, day=DAY, later=dt.timedelta(hours=2)):
+        self.now += later
         with contextlib.redirect_stdout(io.StringIO()):
             return metrics.write_release(self.root, day, self.items, product=self.product)
 
@@ -638,11 +644,44 @@ class TrunkReleases(Base):
         self.assertIn('Tag `v0.1.0`', text)
         self.assertEqual(self.origin_tags(), {'v0.1.0': head})     # pushed, at the released sha
 
-    def test_one_release_a_day_and_none_while_nothing_new_landed(self):
-        self.assertIsNotNone(self.release())
+    def test_none_within_the_interval_and_several_a_day_past_it(self):
+        first = self.release()
+        self.assertIsNotNone(first)
+        head = self.commit('pkg/b.py', 'b = 1\n', 'fix(B-0001): banner')
+        self.assertIsNone(self.release(later=dt.timedelta(minutes=30)))     # 30m after: too soon
+        self.assertIsNone(self.release(later=dt.timedelta(minutes=29)))     # 59m after: still too soon
+        second = self.release(later=dt.timedelta(minutes=2))                # 61m after, the same day
+        self.assertEqual(os.path.basename(second or ''), f'{DAY}-{head[:7]}.md')
+        self.assertIn('\nversion: v0.1.1\n', self.read(os.path.relpath(second, self.root)))
+        self.assertEqual(self.origin_tags()['v0.1.1'], head)
+        log = self.changelog()
+        self.assertLess(log.index(f'## v0.1.1 — {DAY}'), log.index(f'## v0.1.0 — {DAY}'))
+        # a third the same day: its notes start after the second, whatever the sha7s sort as
+        third = self.commit('pkg/c.py', 'c = 1\n', 'task(T-0002): sign-up form')
+        path = self.release()
+        text = self.read(os.path.relpath(path, self.root))
+        self.assertIn('\nversion: v0.1.2\n', text)
+        self.assertNotIn('B-0001', text)
+        self.assertEqual(self.origin_tags()['v0.1.2'], third)
+        self.assertEqual(len(os.listdir(os.path.join(self.root, 'releases'))), 3)
+        self.assertIsNone(self.release())                           # nothing landed since
+
+    def test_the_interval_is_a_convention(self):
+        self.product.conventions.extra['release_min_interval'] = '3h'
+        self.assertEqual(metrics.release_min_interval_s(self.product), 3 * 3600)
+        self.release()
         self.commit('pkg/b.py', 'b = 1\n', 'fix(B-0001): banner')
-        self.assertIsNone(self.release())                           # the same day: no second cut
-        self.assertEqual(len(os.listdir(os.path.join(self.root, 'releases'))), 1)
+        self.assertIsNone(self.release())                           # 2h < 3h
+        self.assertIsNotNone(self.release())
+        for value, seconds in ((None, 3600), ('15m', 900), ('30s', 30), ('1d', 86400), (5, 300),
+                               ('0m', 0), ('soon', 3600)):
+            self.product.conventions.extra['release_min_interval'] = value
+            self.assertEqual(metrics.release_min_interval_s(self.product), seconds, value)
+
+    def test_no_release_for_a_day_older_than_the_newest(self):
+        self.release()
+        self.commit('pkg/b.py', 'b = 1\n', 'fix(B-0001): banner')
+        self.assertIsNone(self.release('2026-09-20'))
 
     def test_the_next_release_is_the_next_patch(self):
         self.release()

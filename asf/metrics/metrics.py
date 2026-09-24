@@ -32,7 +32,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from asf import env
 from asf import tokens
-from asf.conventions import DEFAULT_CHANGELOG_FILE, DEFAULT_RELEASE_INSTALL, Conventions
+from asf.conventions import (DEFAULT_CHANGELOG_FILE, DEFAULT_RELEASE_INSTALL, DEFAULT_RELEASE_MIN_INTERVAL,
+                             Conventions)
 from asf.record import frontmatter
 from asf.record import match
 from asf.record.index import do_index
@@ -902,6 +903,9 @@ CHANGELOG_SUBJECT = 'docs(release): {tags} in {path}'
 CHANGELOG_SUBJECT_RE = re.compile(r'^docs\(release\): v\d+\.\d+\.\d+')
 #: The most item-less commits a version's notes list one by one.
 NOTES_MAX_COMMITS = 30
+#: `conventions.release_min_interval`: a count and a unit (none is minutes).
+INTERVAL_RE = re.compile(r'^(\d+)\s*([smhd]?)$')
+INTERVAL_UNITS = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}
 
 
 def _git(repo, *args):
@@ -1028,12 +1032,14 @@ def tags_at(repo, sha):
 
 
 def cut_tag(repo, name, sha, message):
-    """Tag `sha` as `name` (annotated, `message`) and push the tag. True when the tag is on `sha`;
-    nothing is left behind locally when it could not be pushed."""
+    """Tag `sha` as `name` (annotated, `message`, dated by the rollup's clock) and push the tag.
+    True when the tag is on `sha`; nothing is left behind locally when it could not be pushed."""
     at = _git(repo, 'rev-parse', '--verify', '-q', f'refs/tags/{name}^{{commit}}')
     if at:
         return at == sha
-    if _git(repo, 'tag', '-a', '--cleanup=whitespace', name, sha, '-m', message) is None:
+    dated = {**os.environ, 'GIT_COMMITTER_DATE': iso(now_utc())}
+    if subprocess.run(['git', '-C', repo, 'tag', '-a', '--cleanup=whitespace', name, sha, '-m', message],
+                      capture_output=True, text=True, env=dated).returncode != 0:
         return False
     if _git(repo, 'push', '-q', 'origin', f'refs/tags/{name}') is None:
         _git(repo, 'tag', '-d', name)
@@ -1122,7 +1128,41 @@ def publish_github_release(product, tag, notes):
 
 
 def _note_names(rdir):
-    return sorted(n for n in (os.listdir(rdir) if os.path.isdir(rdir) else []) if NOTE_NAME_RE.match(n))
+    """The release notes in `rdir`, oldest first: by day, then — several releases a day — by the
+    version the note carries (one without, a deploy's or a legacy one, first), then by name."""
+    def key(name):
+        try:
+            with open(os.path.join(rdir, name), encoding='utf-8') as f:
+                m = NOTE_VERSION_RE.search(f.read())
+        except OSError:
+            m = None
+        version = SEMVER_TAG_RE.match(m.group(1)) if m else None
+        return name[:10], tuple(int(g) for g in version.groups()) if version else (), name
+    return sorted((n for n in (os.listdir(rdir) if os.path.isdir(rdir) else []) if NOTE_NAME_RE.match(n)),
+                  key=key)
+
+
+def release_min_interval_s(product):
+    """The least time between two trunk releases, in seconds: `conventions.release_min_interval`
+    (`<n>s|m|h|d`, or a bare number of minutes), else :data:`DEFAULT_RELEASE_MIN_INTERVAL`. An
+    unreadable value is the default."""
+    for value in ((product.conventions.get('release_min_interval') if product else None),
+                  DEFAULT_RELEASE_MIN_INTERVAL):
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+            return int(value * 60)
+        m = INTERVAL_RE.match(str(value or '').strip())
+        if m:
+            return int(m.group(1)) * INTERVAL_UNITS[m.group(2) or 'm']
+    return 0
+
+
+def released_at(repo, sha):
+    """When the release at `sha` was cut: its version tag's date (else its legacy tag's), else
+    None."""
+    tag, legacy = tags_at(repo, sha)
+    name = tag or legacy
+    stamp = name and _git(repo, 'for-each-ref', '--format=%(creatordate:iso-strict)', f'refs/tags/{name}')
+    return parse_ts(stamp) if stamp else None
 
 
 def _note_sha(repo, name):
@@ -1247,8 +1287,9 @@ def sync_changelog(root, product):
 
 
 def write_trunk_release(root, day, items, product):
-    """A release of a product whose trunk is production: at most one a day, none older than the
-    newest, and only when a commit naming an item landed since the last one. Tags the sha
+    """A release of a product whose trunk is production: none sooner than
+    `conventions.release_min_interval` after the last one (several a day are fine), none for a
+    day older than the newest's, and only when a commit naming an item landed since the last one. Tags the sha
     `v<major>.<minor>.<patch>` — the roadmap's line, its next patch — and writes
     releases/<day>-<sha7>.md with the version's notes; then the GitHub Release and the changelog
     entry. Legacy releases are adopted first (:func:`migrate_releases`). Returns the path
@@ -1263,18 +1304,20 @@ def write_trunk_release(root, day, items, product):
 def _cut_trunk_release(root, day, items, product):
     repo = product.repo_dir
     rdir = os.path.join(root, 'releases')
-    prev = sorted(os.path.basename(p) for p in glob.glob(os.path.join(rdir, '*-*.md')))
-    if prev and prev[-1][:10] >= day:
+    prev = _note_names(rdir)
+    if prev and prev[-1][:10] > day:
         return None
     new = trunk_sha(product)
     if not new or _git(repo, 'cat-file', '-e', f'{new}^{{commit}}') is None:
         return None
     old = None
     if prev:
-        m = re.search(r'-([0-9a-f]{7,40})\.md$', prev[-1])
-        old = m and _git(repo, 'rev-parse', '--verify', '-q', f'{m.group(1)}^{{commit}}')
+        old = _note_sha(repo, prev[-1])
         if old == new or (old and old.startswith(new[:7])):
             return None
+        at = released_at(repo, old) if old else None
+        if at is not None and (now_utc() - at).total_seconds() < release_min_interval_s(product):
+            return None     # too soon after the last release: a rollup past the interval cuts it
     found = commit_items(repo, items, new, old)
     if not found:
         return None     # nothing landed that the record knows: a release of nothing is noise
@@ -1305,7 +1348,7 @@ def write_release(root, day, items, repo=None, repo_slug=None, product=None):
     rdir = os.path.join(root, 'releases')
     if glob.glob(os.path.join(rdir, f"*-{sha7}.md")):
         return None
-    prev = sorted(os.path.basename(p) for p in glob.glob(os.path.join(rdir, '*-*.md')))
+    prev = _note_names(rdir)
     old = None
     if prev:
         old = re.search(r'-([0-9a-f]{7,40})\.md$', prev[-1])

@@ -108,6 +108,9 @@ DEFAULT_DEPLOY_WORKFLOW = None   # the workflow whose newest success marks the p
 #: A product with no deploy (B-0077): the file in its repo the rollup files each version's
 #: release notes in, newest first. Read from the yaml's ``changelog_file:``.
 DEFAULT_CHANGELOG_FILE = 'CHANGELOG.md'
+#: A product with no deploy: the least time between two releases of its trunk (``<n>s|m|h|d``).
+#: The yaml's ``release_min_interval:`` overrides it.
+DEFAULT_RELEASE_MIN_INTERVAL = '60m'
 #: The "Upgrade" line of a version's release notes: ``{repo_slug}`` and ``{tag}`` substituted.
 #: The yaml's ``release_install:`` overrides it; an empty value leaves the line out.
 DEFAULT_RELEASE_INSTALL = 'pipx install --force "git+https://github.com/{repo_slug}.git@{tag}"'

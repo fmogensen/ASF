@@ -92,13 +92,16 @@ conventions:
   # has no such thing — nothing looks for it.
   report_pattern: "hotfix-.*\\.md"
   # asf.metrics release: a product with no deploy_sha ships its green trunk (B-0077); the rollup
-  # tags it once a day when an item landed, `v<major>.<minor>.<patch>`: major.minor is the
+  # tags it when an item landed and release_min_interval has passed since the last release,
+  # `v<major>.<minor>.<patch>`: major.minor is the
   # lowest-ranked open Epic whose title carries a version ("… 0.2 — …"), else this file's; the
   # patch is that line's highest plus one (`.0` opens a line). The tag IS the version — this
   # file is never rewritten. It writes releases/<day>-<sha7>.md (a `version:` line and the
   # `## Notes`), the tag's message, a GitHub Release and an entry in changelog_file. A legacy
   # `release-<day>-<sha7>` tag is adopted as the next patch at the same sha, and kept.
   version_file: src/sample/__init__.py
+  # the least time between two trunk releases, <n>s|m|h|d (default 60m); several a day are fine.
+  release_min_interval: 60m
   # the release notes file on the trunk, newest first (default CHANGELOG.md).
   changelog_file: CHANGELOG.md
   # the notes' Upgrade line; {repo_slug} and {tag} substituted; "" leaves it out.

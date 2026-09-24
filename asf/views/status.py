@@ -3,6 +3,7 @@
 Every row is filled from what exists, or says which key would fill it —
 ``— (not configured: <key>)`` — never a bare ``—``:
 
+* **Version** — the ``asf`` running (``asf --version``) and asf's newest release tag, with its age;
 * **Runners** — the CI provider's runner pool (``ci.runner_org``, read with ``gh``);
 * **Prod** — how far ``main`` is ahead of the last successful ``ci.deploy_workflow`` run;
 * **Agents** — the workers' session registry, ``~/.ASF/state/<product>/sessions.jsonl``;
@@ -245,13 +246,36 @@ def cron_cell(cfg, product):
     return '; '.join(parts)
 
 
+def _age(seconds):
+    seconds = max(int(seconds), 0)
+    if seconds >= 86400:
+        return f"{seconds // 86400}d ago"
+    if seconds >= 3600:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 60}m ago"
+
+
+def version_cell(now=None):
+    """``running <asf --version>`` · ``latest release <newest v* tag> (<age>)``."""
+    from asf.cli import latest_release, version_string
+    latest = latest_release()
+    if latest is None:
+        tail = "—"
+    else:
+        tag, when = latest
+        now = now or datetime.datetime.now(datetime.timezone.utc)
+        tail = f"{tag} ({_age((now - when).total_seconds())})" if when else tag
+    return f"running {version_string()} · latest release {tail}"
+
+
 def render(root, product, cfg=None):
     cfg = env.load_config() if cfg is None else cfg
     now = datetime.datetime.now().strftime('%H:%M')
     out = [f"**FACTORY STATUS {now}**", ""]
     out.append("| Metric | Now |")
     out.append("|---|---|")
-    for name, cell in (('Runners', lambda: runners_cell(product)),
+    for name, cell in (('Version', version_cell),
+                       ('Runners', lambda: runners_cell(product)),
                        ('Prod', lambda: prod_cell(product)),
                        ('Agents', lambda: agents_cell(product)),
                        ('Capacity', lambda: capacity_cell(cfg, product)),
