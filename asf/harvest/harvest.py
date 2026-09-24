@@ -458,10 +458,32 @@ def pr_create_line(repo, tmp, branch, trunk='main'):
 
 # ---------------------------------------------------------------- per-branch --
 
+def docs_only_move(tmp, since, until, branch_sha, conv):
+    """B-0110: True when everything ``origin/<trunk>`` gained between the sha a green gate last
+    ran against (``since``) and its current tip (``until``) is documentation
+    (:func:`asf.harvest.lane.landing_class`: ``specs_dir``/``plans_dir``/``reviews_dir``/
+    ``doc_paths``) and none of it is a path the branch itself touches (``since...branch_sha``).
+    A branch already gated green is not gated again for a trunk move that cannot have turned its
+    tests red."""
+    if since == until:
+        return True
+    moved = sh(['git', 'diff', '--name-only', since, until], cwd=tmp).stdout.splitlines()
+    moved = [l for l in moved if l.strip()]
+    if not moved:
+        return True
+    branch_files = sh(['git', 'diff', '--name-only', f'{since}...{branch_sha}'],
+                      cwd=tmp).stdout.splitlines()
+    if set(moved) & {l for l in branch_files if l.strip()}:
+        return False
+    from asf.harvest import lane as lane_mod  # local: lane imports this module (§ landing/external_ci)
+    return lane_mod.landing_class(conv, moved) == lane_mod.DOCS
+
+
 def harvest_branch(repo, state_dir, is_record, job, branch, dry_run, conv=None, alive=None,
                    session_source=None):
     conv = conv or DEFAULTS
     trunk = conv.main
+    gated_sha = None  # the trunk sha the last green gate here ran against (is_record only)
     for _attempt in (1, 2):
         holder = tempfile.mkdtemp(prefix=f'harvest-{job}-')
         tmp = os.path.join(holder, 'wt')
@@ -472,6 +494,9 @@ def harvest_branch(repo, state_dir, is_record, job, branch, dry_run, conv=None, 
                 return hold(job, f'worktree add failed: {tail(add.stderr)}')
 
             sh(['git', 'fetch', '-q', 'origin', trunk], cwd=tmp)
+            trunk_sha = sh(['git', 'rev-parse', f'origin/{trunk}'], cwd=tmp).stdout.strip()
+            skip_gate = bool(is_record and gated_sha
+                             and docs_only_move(tmp, gated_sha, trunk_sha, branch_sha, conv))
             ok, reason = rebase_and_resolve(tmp, trunk)
             if not ok:
                 return hold(job, reason)
@@ -486,9 +511,14 @@ def harvest_branch(repo, state_dir, is_record, job, branch, dry_run, conv=None, 
                                  'harvest: regenerate index.json'], cwd=tmp)
                     if commit.returncode != 0:
                         return hold(job, f'index regen commit failed: {tail(commit.stderr or commit.stdout)}')
-                gate_ok, gate_reason, _files = run_gate(tmp, conv)
-                if not gate_ok:
-                    return hold(job, gate_reason)
+                if skip_gate:
+                    print(f'harvest: {job} was green at its head, {trunk} moved on docs only — '
+                          f'not gated again')
+                else:
+                    gate_ok, gate_reason, _files = run_gate(tmp, conv)
+                    if not gate_ok:
+                        return hold(job, gate_reason)
+                    gated_sha = trunk_sha
 
             sha = sh(['git', 'rev-parse', 'HEAD'], cwd=tmp).stdout.strip()
 

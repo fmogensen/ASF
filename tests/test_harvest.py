@@ -387,6 +387,80 @@ class HarvestTests(unittest.TestCase):
                                 capture_output=True, text=True, env=gate_importable_env())
         self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
 
+    # -- B-0110: a green gate is not re-run for a trunk move that landed only docs ----------
+    def gated(self):
+        """Patch the gate to count its runs (the gate itself still runs)."""
+        return mock.patch.object(harvest, 'run_gate', wraps=harvest.run_gate)
+
+    def race_push(self, land):
+        """Patch ``push_ff`` so its first call lands ``land()``'s commit on origin/main first
+        (the trunk moves between the gate and the push, exactly once), then defers to the real
+        push — same shape as the B-0040 restack test above, one push_ff down."""
+        real_push = harvest.push_ff
+        moved = []
+
+        def push_then(repo, sha, trunk='main'):
+            if not moved:
+                moved.append(sha)
+                land()
+            return real_push(repo, sha, trunk)
+        return mock.patch.object(harvest, 'push_ff', side_effect=push_then)
+
+    def test_b0110_docs_only_trunk_move_lands_without_re_gating(self):
+        branch, wt = add_job_worktree(self.repo, self.state_dir, 't68')
+        write_epic(wt, 'E-0007', 'Green branch')
+        index_and_commit(wt, 't68: add E-0007')
+        write_session(self.state_dir, 't68', branch)
+
+        def land_docs_commit():
+            path = os.path.join(self.repo, 'docs', 'specs', 'b-9999.md')
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write('a spec, no code\n')
+            sh(['git', 'add', '-A'], cwd=self.repo)
+            sh(['git', 'commit', '-qm', 'spec(B-9999): a spec, no code'], cwd=self.repo)
+            sh(['git', 'push', '-q', 'origin', 'HEAD:main'], cwd=self.repo)
+
+        with self.race_push(land_docs_commit), self.gated() as gate:
+            rc, out = run_harvest(self.repo, self.state_dir)
+        self.assertEqual(rc, 0)
+        self.assertIn('HARVEST OK t68', out)
+        self.assertIn('moved on docs only — not gated again', out)
+        self.assertEqual(gate.call_count, 1, out)  # the green gate is not re-run
+
+        sh(['git', 'fetch', '-q', 'origin', 'main'], cwd=self.repo)
+        log = sh(['git', 'log', '--format=%s', 'origin/main'], cwd=self.repo).stdout
+        self.assertIn('t68: add E-0007', log)
+        self.assertIn('spec(B-9999): a spec, no code', log)
+        self.assertTrue(harvested(self.state_dir, 't68'))
+
+    def test_b0110_code_trunk_move_still_re_gates(self):
+        branch, wt = add_job_worktree(self.repo, self.state_dir, 't86')
+        write_epic(wt, 'E-0008', 'Green branch, code moves under it')
+        index_and_commit(wt, 't86: add E-0008')
+        write_session(self.state_dir, 't86', branch)
+
+        def land_code_commit():
+            path = os.path.join(self.repo, 'tools', 'other.txt')
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write('unrelated tool change\n')
+            sh(['git', 'add', '-A'], cwd=self.repo)
+            sh(['git', 'commit', '-qm', 'tools: unrelated change'], cwd=self.repo)
+            sh(['git', 'push', '-q', 'origin', 'HEAD:main'], cwd=self.repo)
+
+        with self.race_push(land_code_commit), self.gated() as gate:
+            rc, out = run_harvest(self.repo, self.state_dir)
+        self.assertEqual(rc, 0)
+        self.assertIn('HARVEST OK t86', out)
+        self.assertNotIn('not gated again', out)
+        self.assertEqual(gate.call_count, 2, out)  # code moved under it: re-gated
+
+        sh(['git', 'fetch', '-q', 'origin', 'main'], cwd=self.repo)
+        log = sh(['git', 'log', '--format=%s', 'origin/main'], cwd=self.repo).stdout
+        self.assertIn('t86: add E-0008', log)
+        self.assertIn('tools: unrelated change', log)
+        self.assertTrue(harvested(self.state_dir, 't86'))
+
     # -- dry-run reports without mutating anything ------------------------------------------
     def test_dry_run_prints_and_does_not_push(self):
         branch, wt = add_job_worktree(self.repo, self.state_dir, 'dry1')
