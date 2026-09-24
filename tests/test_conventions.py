@@ -136,7 +136,8 @@ class PathTests(unittest.TestCase):
 class ForbiddenPatternsTests(unittest.TestCase):
     def test_one_pattern_per_path_shaped_default(self):
         patterns = conv_mod.forbidden_patterns()
-        self.assertEqual(len(patterns), 9)
+        self.assertEqual(len(patterns), 10)
+        self.assertIn("['\"]" + re.escape(conv_mod.DEFAULT_RELEASE_INSTALL), patterns)
         self.assertIn("['\"]worker/", patterns)
         self.assertIn("['\"]docs/specs\\b", patterns)
         self.assertIn("['\"]" + re.escape('{reviews_dir}/{n}-{slug}.md') + '\\b', patterns)

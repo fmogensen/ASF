@@ -99,6 +99,12 @@ DEFAULT_REPORT_PATTERN = None    # regex over a file name in reports_dir; None â
 DEFAULT_CI_WORKFLOW = None       # the workflow whose runs on the trunk are the green evidence
 DEFAULT_CI_DEV_JOB = None        # the job in that workflow whose success marks the dev sha
 DEFAULT_DEPLOY_WORKFLOW = None   # the workflow whose newest success marks the prod sha
+#: A product with no deploy (B-0077): the file in its repo the rollup files each version's
+#: release notes in, newest first. Read from the yaml's ``changelog_file:``.
+DEFAULT_CHANGELOG_FILE = 'CHANGELOG.md'
+#: The "Upgrade" line of a version's release notes: ``{repo_slug}`` and ``{tag}`` substituted.
+#: The yaml's ``release_install:`` overrides it; an empty value leaves the line out.
+DEFAULT_RELEASE_INSTALL = 'pipx install --force "git+https://github.com/{repo_slug}.git@{tag}"'
 
 
 def _normalise_prefix(value):

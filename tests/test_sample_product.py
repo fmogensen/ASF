@@ -22,6 +22,7 @@ import tempfile
 import unittest
 
 from asf import env, hermetic, scheduler
+from asf.metrics import metrics
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_sample_product` does not
     from test_scheduler import fake_clis
@@ -378,8 +379,15 @@ class FailurePathsBase(unittest.TestCase):
         _git(['push', '-q', 'origin', branch], cwd=worktree)
         return branch
 
+    def origin_log(self):
+        """(sha, subject) of the trunk, newest first, without the rollup's own changelog commits
+        (a product with no deploy files each release's notes on its trunk)."""
+        out = _git(['log', '--format=%H %s', 'main'], cwd=self.repo_origin).splitlines()
+        return [tuple(ln.split(' ', 1)) for ln in out
+                if not metrics.CHANGELOG_SUBJECT_RE.match(ln.split(' ', 1)[1])]
+
     def origin_subjects(self):
-        return _git(['log', '--format=%s', 'main'], cwd=self.repo_origin).splitlines()
+        return [s for _sha, s in self.origin_log()]
 
     @staticmethod
     def find(lines, prefix):
@@ -440,7 +448,7 @@ class HeldThenCorrectedThenLanded(FailurePathsBase):
         landed = self.find(self.t4, 'landed bugfix/B-0001 → ')
         self.assertIsNotNone(landed, self.t4)
         sha = landed.split('→ ')[1].strip()
-        self.assertEqual(_git(['rev-parse', 'main'], cwd=self.repo_origin), sha)
+        self.assertEqual(self.origin_log()[0][0], sha)
         subjects = self.origin_subjects()
         self.assertEqual(subjects[:3], ['fix(B-0001): return 0 on empty', 'fix(B-0001): add test_empty',
                                         'docs: README moved the trunk'])

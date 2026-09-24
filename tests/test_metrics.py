@@ -547,7 +547,8 @@ def _git(cwd, *args):
 
 class TrunkReleases(Base):
     """A product that deploys nothing ships its green trunk (B-0077): the rollup cuts the release
-    itself — the note in the record and a tag on the product repo (D-0045's `v<version>`)."""
+    itself — the note in the record, a `v<major>.<minor>.<patch>` tag on the product repo, the
+    version's notes in its changelog."""
 
     def setUp(self):
         super().setUp()
@@ -565,6 +566,8 @@ class TrunkReleases(Base):
             'conventions': {'version_file': 'pkg/__init__.py'}})
 
     def commit(self, path, text, msg):
+        if _git(self.origin, 'for-each-ref', 'refs/heads/main'):
+            _git(self.repo, 'pull', '-q', '--rebase', 'origin', 'main')    # the rollup's changelog commits
         with open(os.path.join(self.repo, path), 'w') as f:
             f.write(text)
         _git(self.repo, 'add', path)
@@ -573,11 +576,56 @@ class TrunkReleases(Base):
         return _git(self.repo, 'rev-parse', 'HEAD')
 
     def release(self, day=DAY):
-        return metrics.write_release(self.root, day, self.items, product=self.product)
+        with contextlib.redirect_stdout(io.StringIO()):
+            return metrics.write_release(self.root, day, self.items, product=self.product)
 
     def origin_tags(self):
         out = _git(self.origin, 'for-each-ref', '--format=%(refname:short) %(*objectname)', 'refs/tags')
         return dict(line.split() for line in out.splitlines())
+
+    def changelog(self):
+        return _git(self.origin, 'show', 'main:CHANGELOG.md')
+
+    def set_epics(self, *epics):
+        """(id, title, state, rank) Epics in the index, in place of the fixture's one."""
+        for iid, title, state, rank in epics:
+            self.items[iid] = {'id': iid, 'type': 'epic', 'title': title, 'state': state, 'rank': rank,
+                               'folder': 'epics'}
+
+    def legacy_release(self, day, sha):
+        """A release as the rollup cut it before versions: a `release-*` tag and a note naming it."""
+        name = f'release-{day}-{sha[:7]}'
+        _git(self.repo, 'tag', '-a', name, sha, '-m', f'Release {day} · {sha[:7]}')
+        _git(self.repo, 'push', '-q', 'origin', f'refs/tags/{name}')
+        with open(os.path.join(self.root, 'releases', f'{day}-{sha[:7]}.md'), 'w') as f:
+            f.write(f'# Release {day} · {sha[:7]}\n\nTag `{name}`.\n')
+        return name
+
+    # ---- the rule -------------------------------------------------------------
+
+    def test_an_epic_title_carries_a_version_or_none(self):
+        self.assertEqual(metrics.epic_version('Product 0.1 — a working factory'), (0, 1))
+        self.assertEqual(metrics.epic_version('Thing 12.3: faster'), (12, 3))
+        self.assertIsNone(metrics.epic_version("Control plane — the factory's dashboard"))
+        self.assertIsNone(metrics.epic_version('v2 dashboard'))
+
+    def test_the_line_is_the_lowest_ranked_open_versioned_epic(self):
+        self.set_epics(('E-0001', 'Billing', 'Active', 0),                 # unversioned: skipped
+                       ('E-0002', 'Product 0.1 — a working factory', 'Closed', 1),
+                       ('E-0003', 'Product 0.3 — autonomous', 'New', 3),
+                       ('E-0004', 'Product 0.2 — self-improvement', 'Active', 2))
+        self.assertEqual(metrics.roadmap_line(self.items), (0, 2))
+        self.items['E-0004']['removed'] = 'not now'
+        self.assertEqual(metrics.roadmap_line(self.items), (0, 3))
+        self.assertIsNone(metrics.roadmap_line({'E-0001': self.items['E-0001']}))
+
+    def test_the_next_patch_and_the_first_release_of_a_line(self):
+        self.assertEqual(metrics.next_version(set(), (0, 1)), (0, 1, 0))
+        self.assertEqual(metrics.next_version({(0, 1, 0), (0, 1, 1)}, (0, 1)), (0, 1, 2))
+        self.assertEqual(metrics.next_version({(0, 1, 0), (0, 1, 7)}, (0, 2)), (0, 2, 0))
+        self.assertEqual(metrics.next_version({(0, 2, 0)}, (0, 1)), (0, 2, 1))     # never backwards
+
+    # ---- the release ----------------------------------------------------------
 
     def test_a_product_without_a_deploy_cuts_a_tagged_release_of_its_trunk(self):
         head = _git(self.repo, 'rev-parse', 'HEAD')
@@ -585,6 +633,7 @@ class TrunkReleases(Base):
         self.assertEqual(os.path.basename(path or ''), f'{DAY}-{head[:7]}.md')
         text = self.read(f'releases/{DAY}-{head[:7]}.md')
         self.assertIn('- [T-0001](../tasks/T-0001.md) Plan door copy', text)
+        self.assertIn('\nversion: v0.1.0\n', text)          # no versioned Epic: version_file's 0.1
         self.assertIn('Tag `v0.1.0`', text)
         self.assertEqual(self.origin_tags(), {'v0.1.0': head})     # pushed, at the released sha
 
@@ -594,15 +643,129 @@ class TrunkReleases(Base):
         self.assertIsNone(self.release())                           # the same day: no second cut
         self.assertEqual(len(os.listdir(os.path.join(self.root, 'releases'))), 1)
 
-    def test_a_taken_version_tag_falls_back_to_the_release_name(self):
+    def test_the_next_release_is_the_next_patch(self):
         self.release()
         head = self.commit('pkg/b.py', 'b = 1\n', 'fix(B-0001): banner')
         path = self.release('2026-09-22')
         text = self.read(os.path.relpath(path, self.root))
         self.assertIn('- [B-0001](../bugs/B-0001.md) Banner shows', text)
         self.assertNotIn('T-0001', text)                            # already in the first release
-        self.assertEqual(self.origin_tags()[f'release-2026-09-22-{head[:7]}'], head)
+        self.assertIn('\nversion: v0.1.1\n', text)
+        self.assertEqual(self.origin_tags()['v0.1.1'], head)
         self.assertIsNone(self.release('2026-09-23'))               # nothing landed since
+
+    def test_a_new_active_epic_rolls_the_minor_over(self):
+        self.set_epics(('E-0002', 'Product 0.1 — first', 'Active', 1), ('E-0003', 'Product 0.2 — next', 'New', 2))
+        self.release()
+        self.commit('pkg/b.py', 'b = 1\n', 'fix(B-0001): banner')
+        self.release('2026-09-22')
+        self.items['E-0002']['state'] = 'Closed'
+        head = self.commit('pkg/c.py', 'c = 1\n', 'task(T-0002): sign-up form')
+        self.release('2026-09-23')
+        self.assertEqual(self.origin_tags()['v0.2.0'], head)
+        self.assertIn('v0.1.1', self.origin_tags())
+
+    def test_release_notes_group_features_bugs_and_item_less_commits(self):
+        notes = metrics.render_notes(self.items, {'T-0001': [], 'S-0001': [], 'B-0001': [], 'E-0001': []},
+                                     ['hotfix(install): one installer'], 'install it @v1.2.3')
+        self.assertEqual(notes, '### Features landed\n\n- F-0001 Free plan\n\n'
+                                '### Bugs fixed\n\n- B-0001 Banner shows\n\n'
+                                '### Improvements and hotfixes\n\n- hotfix(install): one installer\n\n'
+                                '### Upgrade\n\n`install it @v1.2.3`\n')
+        many = metrics.render_notes(self.items, {}, [f'c{i}' for i in range(metrics.NOTES_MAX_COMMITS + 3)])
+        self.assertIn('- … and 3 more', many)
+
+    def test_the_notes_reach_the_note_the_tag_and_the_changelog(self):
+        self.commit('pkg/h.py', 'h = 1\n', 'hotfix(pkg): a quick one')
+        path = self.release()
+        text = self.read(os.path.relpath(path, self.root))
+        notes = metrics.notes_of(text)
+        self.assertIn('- F-0001 Free plan', notes)
+        self.assertIn('- hotfix(pkg): a quick one', notes)
+        self.assertIn('pipx install --force "git+https://github.com/x/y.git@v0.1.0"', notes)
+        self.assertIn('### Features landed', _git(self.origin, 'tag', '-l', '--format=%(contents)', 'v0.1.0'))
+        self.assertTrue(self.changelog().startswith('# Changelog'))
+        self.assertIn(f'## v0.1.0 — {DAY}\n\n{notes}', self.changelog() + '\n')
+
+    def test_the_changelog_is_newest_first_and_idempotent(self):
+        self.release()
+        self.commit('pkg/b.py', 'b = 1\n', 'fix(B-0001): banner')
+        self.release('2026-09-22')
+        log = self.changelog()
+        self.assertLess(log.index('## v0.1.1'), log.index('## v0.1.0'))
+        before = _git(self.origin, 'rev-parse', 'main')
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNone(metrics.sync_changelog(self.root, self.product))
+        self.assertEqual(_git(self.origin, 'rev-parse', 'main'), before)          # nothing to add
+        self.assertEqual(metrics.merge_changelog(log + '\n', {'v0.1.0': 'x'}), log + '\n')
+        merged = metrics.merge_changelog('# Log\n\n## v0.1.0 — d\n\nold\n', {'v0.1.2': '## v0.1.2 — e\n\nnew\n'})
+        self.assertEqual(merged, '# Log\n\n## v0.1.2 — e\n\nnew\n\n## v0.1.0 — d\n\nold\n')
+        # the changelog commit is not an improvement of the next release
+        subject = _git(self.origin, 'log', '-1', '--format=%s', 'main')
+        self.assertTrue(metrics.CHANGELOG_SUBJECT_RE.match(subject), subject)
+        self.assertEqual(metrics.improvement_commits(self.repo, self.items, 'origin/main', 'origin/main~1'), [])
+
+    # ---- the migration --------------------------------------------------------
+
+    def test_a_legacy_release_tag_is_adopted_as_the_next_patch_once(self):
+        first = _git(self.repo, 'rev-parse', 'HEAD')
+        _git(self.repo, 'tag', '-a', 'v0.1.0', first, '-m', 'Release')
+        _git(self.repo, 'push', '-q', 'origin', 'refs/tags/v0.1.0')
+        with open(os.path.join(self.root, 'releases', f'2026-09-20-{first[:7]}.md'), 'w') as f:
+            f.write(f'# Release 2026-09-20 · {first[:7]}\n\nTag `v0.1.0`.\n')
+        head = self.commit('pkg/b.py', 'b = 1\n', 'fix(B-0001): banner')
+        legacy = self.legacy_release(DAY, head)
+        with contextlib.redirect_stdout(io.StringIO()):
+            done = metrics.migrate_releases(self.root, self.items, self.product)
+        self.assertEqual([t for _p, t in done], ['v0.1.0', 'v0.1.1'])
+        tags = self.origin_tags()
+        self.assertEqual((tags['v0.1.1'], tags[legacy]), (head, head))         # the old tag is kept
+        text = self.read(f'releases/{DAY}-{head[:7]}.md')
+        self.assertIn('\nversion: v0.1.1\n', text)
+        self.assertIn(f'adopted from `{legacy}`', text)
+        self.assertIn('- B-0001 Banner shows', metrics.notes_of(text))
+        self.assertIn('\nversion: v0.1.0\n', self.read(f'releases/2026-09-20-{first[:7]}.md'))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(metrics.migrate_releases(self.root, self.items, self.product), [])   # idempotent
+        self.assertEqual(sorted(self.origin_tags()), sorted(['v0.1.0', 'v0.1.1', legacy]))
+        # the rollup runs it, then files both versions' notes, then cuts the next patch
+        nxt = self.commit('pkg/c.py', 'c = 1\n', 'task(T-0002): sign-up form')
+        self.release('2026-09-22')
+        self.assertEqual(self.origin_tags()['v0.1.2'], nxt)
+        log = self.changelog()
+        self.assertLess(log.index('## v0.1.2'), log.index('## v0.1.1'))
+        self.assertLess(log.index('## v0.1.1'), log.index('## v0.1.0'))
+
+    # ---- the GitHub Release ---------------------------------------------------
+
+    def test_a_github_release_is_skipped_quietly_without_gh(self):
+        hosted = env.Product('hosted', {'repo_dir': self.repo, 'repo_slug': 'x/y', 'main': 'main'})
+        err = io.StringIO()
+        with mock.patch.object(metrics.shutil, 'which', return_value=None), \
+                mock.patch.object(metrics, 'gh') as gh, contextlib.redirect_stderr(err):
+            self.assertFalse(metrics.publish_github_release(hosted, 'v0.1.0', 'notes'))
+        gh.assert_not_called()
+        self.assertIn('gh not found; no GitHub release for v0.1.0', err.getvalue())
+        with mock.patch.object(metrics, 'gh') as gh:                       # no hosted repo: not asked
+            self.assertFalse(metrics.publish_github_release(self.product, 'v0.1.0', 'notes'))
+        gh.assert_not_called()
+
+    def test_a_github_release_is_created_once_and_offline_is_logged(self):
+        hosted = env.Product('hosted', {'repo_dir': self.repo, 'repo_slug': 'x/y', 'main': 'main'})
+        calls = []
+
+        def fake_gh(args, *a, **kw):
+            calls.append(args[:2])
+            return None if args[1] == 'view' else ''
+        with mock.patch.object(metrics.shutil, 'which', return_value='/bin/gh'), \
+                mock.patch.object(metrics, 'gh', side_effect=fake_gh):
+            self.assertTrue(metrics.publish_github_release(hosted, 'v0.1.0', 'notes'))
+        self.assertEqual(calls, [['release', 'view'], ['release', 'create']])
+        err = io.StringIO()
+        with mock.patch.object(metrics.shutil, 'which', return_value='/bin/gh'), \
+                mock.patch.object(metrics, 'gh', return_value=None), contextlib.redirect_stderr(err):
+            self.assertFalse(metrics.publish_github_release(hosted, 'v0.1.0', 'notes'))
+        self.assertIn('no GitHub release for v0.1.0', err.getvalue())
 
 
 LOG = """23:50 MERGE: batch A → main abc1234

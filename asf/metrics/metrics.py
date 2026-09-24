@@ -24,12 +24,14 @@ import glob
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 from asf import env
-from asf.conventions import Conventions
+from asf.conventions import DEFAULT_CHANGELOG_FILE, DEFAULT_RELEASE_INSTALL, Conventions
 from asf.record import frontmatter
 from asf.record import match
 from asf.record.index import do_index
@@ -615,14 +617,21 @@ def write_costs(root, items, all_ci, all_sessions, now=None):
 
 # -------------------------------------------------------------- releases --
 
-def gh(args, timeout=120):
-    """`gh …` → stdout text, or None when it failed. The one place the rollup and the backfill call gh."""
-    env_vars = {**os.environ, 'PATH': '/opt/homebrew/bin:' + os.environ.get('PATH', '')}
+#: Where `gh` is looked for before the inherited PATH (a launchd job's PATH is minimal).
+GH_PATH_PREFIX = '/opt/homebrew/bin:'
+
+
+def gh(args, timeout=120, quiet=False):
+    """`gh …` → stdout text, or None when it failed (logged unless `quiet`). The one place the
+    rollup and the backfill call gh."""
+    env_vars = {**os.environ, 'PATH': GH_PATH_PREFIX + os.environ.get('PATH', '')}
     try:
         p = subprocess.run(['gh'] + list(args), capture_output=True, text=True, timeout=timeout, env=env_vars)
     except (OSError, subprocess.TimeoutExpired):
         return None
     if p.returncode != 0:
+        if quiet:
+            return None
         print(f"gh {' '.join(args[:2])} failed: {p.stderr.strip()[:200]}", file=sys.stderr)
         return None
     return p.stdout
@@ -717,18 +726,26 @@ def release_items(items, new_sha, old_sha, repo=None, product=None):
     return found
 
 
-def render_release(day, new_sha, old_sha, deployed_at, items, found, tag=None):
+def render_release(day, new_sha, old_sha, deployed_at, items, found, tag=None, adopted=None, notes=None):
+    """A release note. `tag` marks a trunk release (B-0077): the note then carries a `version:`
+    line (when the tag is a version), the tag, the legacy tag it adopted, and `notes` — the
+    human-readable release notes — under `## Notes`."""
     if tag is None:
         out = [f"# Release {day} · {new_sha[:7]}", '',
                f"Deployed sha `{new_sha}` (deploy finished {deployed_at or 'unknown'})."
                + (f" Everything merged since `{old_sha[:7]}`." if old_sha else ''), '']
     else:
-        out = [f"# Release {day} · {new_sha[:7]}", '',
-               f"Trunk sha `{new_sha}` — the product deploys nothing, so its trunk is production (B-0077)."
-               + (f" Everything landed since `{old_sha[:7]}`." if old_sha else ''), '',
-               f"Tag `{tag}`.", '']
+        out = [f"# Release {day} · {new_sha[:7]}", '']
+        if SEMVER_TAG_RE.match(tag):
+            out += [f"version: {tag}", '']
+        out += [f"Trunk sha `{new_sha}` — the product deploys nothing, so its trunk is production (B-0077)."
+                + (f" Everything landed since `{old_sha[:7]}`." if old_sha else ''), '',
+                f"Tag `{tag}`." if not adopted else
+                f"Tag `{tag}` — adopted from `{adopted}`, the same sha; that tag is kept.", '']
     if not found:
         out += ['No item reached prod in this release.']
+        if notes:
+            out += ['', '## Notes', '', notes.rstrip('\n')]
         return '\n'.join(out) + '\n'
     for type_, title in TYPE_TITLES:
         ids = [i for i in sorted(found) if items[i].get('type') == type_]
@@ -742,6 +759,8 @@ def render_release(day, new_sha, old_sha, deployed_at, items, found, tag=None):
             if tries:
                 out.append(f"  - Try it: {tries[0]}")
         out.append('')
+    if notes:
+        out += ['## Notes', '', notes.rstrip('\n')]
     return '\n'.join(out).rstrip('\n') + '\n'
 
 
@@ -749,8 +768,22 @@ def render_release(day, new_sha, old_sha, deployed_at, items, found, tag=None):
 COMMIT_ID_RE = re.compile(r'\b[A-Z]-\d{4}\b')
 #: The line of a product's `conventions.version_file` that names its version.
 VERSION_RE = re.compile(r"""(?im)^\s*[_"']*version[_"']*\s*[=:]\s*["']([^"']+)["']""")
-#: The tag a release gets when `v<version>` is unreadable or already names an older release.
-RELEASE_TAG = 'release-{day}-{sha7}'
+#: A trunk release's tag: `v<major>.<minor>.<patch>`. The tag is the version — the rollup never
+#: rewrites `version_file`, whose major.minor is only the fallback release line.
+SEMVER_TAG_RE = re.compile(r'^v(\d+)\.(\d+)\.(\d+)$')
+#: The major.minor a roadmap Epic's title carries ("… 0.2 — …"): the release line it ships.
+EPIC_VERSION_RE = re.compile(r'\b(\d+)\.(\d+)\b')
+#: The tag a trunk release got before releases were versioned; the rollup adopts it as a version.
+LEGACY_TAG_RE = re.compile(r'^release-\d{4}-\d\d-\d\d-[0-9a-f]{7,40}$')
+#: A release note's file name: releases/<day>-<sha7>.md.
+NOTE_NAME_RE = re.compile(r'^(\d{4}-\d\d-\d\d)-([0-9a-f]{7,40})\.md$')
+#: The `version:` line of a versioned release note.
+NOTE_VERSION_RE = re.compile(r'(?m)^version: (v\d+\.\d+\.\d+)$')
+#: The commit that files a version's notes in the product's changelog; never itself a note line.
+CHANGELOG_SUBJECT = 'docs(release): {tags} in {path}'
+CHANGELOG_SUBJECT_RE = re.compile(r'^docs\(release\): v\d+\.\d+\.\d+')
+#: The most item-less commits a version's notes list one by one.
+NOTES_MAX_COMMITS = 30
 
 
 def _git(repo, *args):
@@ -793,6 +826,21 @@ def commit_items(repo, items, new_sha, old_sha):
     return found
 
 
+def improvement_commits(repo, items, new_sha, old_sha):
+    """The subjects, oldest first, of the trunk's commits in old_sha..new_sha that name no item —
+    the hotfixes and improvements a release carries beside its cards."""
+    rng = f'{old_sha}..{new_sha}' if old_sha else new_sha
+    log = _git(repo, 'log', '--no-merges', '--reverse', '--format=%s%x1f%B%x1e', rng)
+    out = []
+    for entry in (log or '').split('\x1e'):
+        subject, _sep, msg = entry.strip().partition('\x1f')
+        if not subject or CHANGELOG_SUBJECT_RE.match(subject):
+            continue
+        if not any(i in items for i in COMMIT_ID_RE.findall(msg)):
+            out.append(subject)
+    return out
+
+
 def product_version(repo, sha, product):
     """The version `conventions.version_file` declares at `sha`, or None."""
     path = product.conventions.get('version_file')
@@ -801,31 +849,300 @@ def product_version(repo, sha, product):
     return m.group(1) if m else None
 
 
-def cut_tag(repo, day, sha, product):
-    """Tag `sha` as a release and push the tag: `v<version>` (D-0045's install pin) when that tag
-    is free, else `release-<day>-<sha7>`. A tag already on `sha` is reused. The tag name, or None
-    when none could be created and pushed (nothing is left behind locally then)."""
-    version = product_version(repo, sha, product)
-    names = ([f'v{version}'] if version else []) + [RELEASE_TAG.format(day=day, sha7=sha[:7])]
-    for name in names:
-        at = _git(repo, 'rev-parse', '--verify', '-q', f'refs/tags/{name}^{{commit}}')
-        if at == sha:
-            return name
-        if at:
+def epic_version(title):
+    """(major, minor) a title carries — "Product 0.2 — self-improvement" → (0, 2) — or None."""
+    m = EPIC_VERSION_RE.search(title or '')
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def roadmap_line(items):
+    """The (major, minor) the roadmap is shipping: the lowest-ranked open Epic whose title
+    carries a version. None when no open Epic carries one."""
+    def rank(it):
+        r = it.get('rank')
+        return (0, r) if isinstance(r, (int, float)) and not isinstance(r, bool) else (1, 0)
+    epics = [it for it in items.values()
+             if it.get('type') == 'epic' and not it.get('removed') and it.get('state', 'New') != 'Closed'
+             and epic_version(it.get('title'))]
+    if not epics:
+        return None
+    return epic_version(min(epics, key=lambda it: (rank(it), it.get('id', ''))).get('title'))
+
+
+def version_tags(repo):
+    """{(major, minor, patch)} of every `v<major>.<minor>.<patch>` tag in `repo`."""
+    out = set()
+    for name in (_git(repo, 'tag', '-l', 'v*') or '').split():
+        m = SEMVER_TAG_RE.match(name)
+        if m:
+            out.add(tuple(int(g) for g in m.groups()))
+    return out
+
+
+def next_version(tags, line):
+    """The version the next release takes: `line`'s highest patch plus one, or `<line>.0` for the
+    first release of a line. Never behind the newest tag: a line older than it (a reopened Epic)
+    continues the newest line instead."""
+    line = tuple(line)
+    if tags and max(tags)[:2] > line:
+        line = max(tags)[:2]
+    patches = [t[2] for t in tags if t[:2] == line]
+    return (*line, max(patches) + 1 if patches else 0)
+
+
+def next_tag(repo, sha, items, product):
+    """`v<major>.<minor>.<patch>` for a new release of `sha`: the roadmap's line (the active
+    versioned Epic), else `version_file`'s major.minor, else the newest tag's line."""
+    tags = version_tags(repo)
+    line = roadmap_line(items) or epic_version(product_version(repo, sha, product))
+    if line is None:
+        line = max(tags)[:2] if tags else (0, 1)
+    return 'v%d.%d.%d' % next_version(tags, line)
+
+
+def tags_at(repo, sha):
+    """(the highest version tag on `sha` or None, a legacy `release-*` tag on it or None)."""
+    names = (_git(repo, 'tag', '--points-at', sha) or '').split()
+    versions = sorted((tuple(int(g) for g in m.groups()), n)
+                      for n in names for m in [SEMVER_TAG_RE.match(n)] if m)
+    legacy = sorted(n for n in names if LEGACY_TAG_RE.match(n))
+    return (versions[-1][1] if versions else None), (legacy[0] if legacy else None)
+
+
+def cut_tag(repo, name, sha, message):
+    """Tag `sha` as `name` (annotated, `message`) and push the tag. True when the tag is on `sha`;
+    nothing is left behind locally when it could not be pushed."""
+    at = _git(repo, 'rev-parse', '--verify', '-q', f'refs/tags/{name}^{{commit}}')
+    if at:
+        return at == sha
+    if _git(repo, 'tag', '-a', '--cleanup=whitespace', name, sha, '-m', message) is None:
+        return False
+    if _git(repo, 'push', '-q', 'origin', f'refs/tags/{name}') is None:
+        _git(repo, 'tag', '-d', name)
+        return False
+    return True
+
+
+def install_line(product, tag):
+    """The command that installs the product pinned at `tag`: `conventions.release_install`
+    (`{repo_slug}` and `{tag}` substituted; empty turns the line off), else the default. None
+    when the product names no repo."""
+    template = product.conventions.get('release_install')
+    template = DEFAULT_RELEASE_INSTALL if template is None else template
+    slug = product.repo_slug
+    return template.format(repo_slug=slug, tag=tag) if template and slug else None
+
+
+def render_notes(items, found, improvements, install=None):
+    """A version's release notes, for a human: the Features it landed (a Task or Story counts
+    toward its Feature), the Bugs it fixed, the item-less commits one line each, and how to
+    upgrade to it."""
+    features = {}
+    for iid in found:
+        cur, seen = iid, set()
+        while cur and cur not in seen:
+            seen.add(cur)
+            it = items.get(cur) or {}
+            if it.get('type') == 'feature':
+                features[cur] = it.get('title', '')
+                break
+            if it.get('type') not in ('story', 'task'):
+                break
+            cur = it.get('parent')
+    bugs = {i: items[i].get('title', '') for i in found if (items.get(i) or {}).get('type') == 'bug'}
+    out = []
+    for heading, rows in (('Features landed', features), ('Bugs fixed', bugs)):
+        if rows:
+            out += [f'### {heading}', ''] + [f'- {i} {t}'.rstrip() for i, t in sorted(rows.items())] + ['']
+    if improvements:
+        shown = improvements[:NOTES_MAX_COMMITS]
+        out += ['### Improvements and hotfixes', ''] + [f'- {s}' for s in shown]
+        if len(improvements) > len(shown):
+            out.append(f'- … and {len(improvements) - len(shown)} more')
+        out.append('')
+    if not out:
+        out = ['Nothing but maintenance.', '']
+    if install:
+        out += ['### Upgrade', '', f'`{install}`', '']
+    return '\n'.join(out).rstrip('\n') + '\n'
+
+
+def notes_of(text):
+    """The `## Notes` section of a release note, or None."""
+    m = re.search(r'(?ms)^## Notes\n\n(.*?)(?=^## |\Z)', text or '')
+    return m.group(1).rstrip('\n') + '\n' if m and m.group(1).strip() else None
+
+
+def tag_message(tag, day, sha, notes):
+    return f'{tag} — release {day} · {sha[:7]}\n\n{notes}'
+
+
+def publish_github_release(product, tag, notes):
+    """A GitHub Release for `tag` with `notes`, when the product has a hosted repo and `gh` runs.
+    Skipped — logged, never raised — when `gh` is missing or offline: the tag and the record's note
+    stand without it. True when the release exists afterwards."""
+    ci = product.ci if isinstance(product.ci, dict) else {'provider': product.ci}
+    slug = product.repo_slug
+    if not slug or str(ci.get('provider') or '').strip().lower() == 'none':
+        return False
+    if not shutil.which('gh', path=GH_PATH_PREFIX + os.environ.get('PATH', '')):
+        print(f"release: gh not found; no GitHub release for {tag}", file=sys.stderr)
+        return False
+    if gh(['release', 'view', tag, '-R', slug, '--json', 'tagName'], quiet=True) is not None:
+        return True
+    with tempfile.NamedTemporaryFile('w', suffix='.md', delete=False, encoding='utf-8') as f:
+        f.write(notes)
+    try:
+        ok = gh(['release', 'create', tag, '-R', slug, '--title', tag, '--notes-file', f.name,
+                 '--verify-tag']) is not None
+    finally:
+        os.unlink(f.name)
+    if not ok:
+        print(f"release: no GitHub release for {tag} (gh offline or refused); the tag and the note stand",
+              file=sys.stderr)
+    return ok
+
+
+def _note_names(rdir):
+    return sorted(n for n in (os.listdir(rdir) if os.path.isdir(rdir) else []) if NOTE_NAME_RE.match(n))
+
+
+def _note_sha(repo, name):
+    m = NOTE_NAME_RE.match(name)
+    return (m and _git(repo, 'rev-parse', '--verify', '-q', f'{m.group(2)}^{{commit}}')) or None
+
+
+def migrate_releases(root, items, product):
+    """Give every trunk release note that predates versions its version (idempotent; the rollup
+    runs it): a note whose sha carries a `v…` tag takes it; one whose sha carries only a legacy
+    `release-<day>-<sha7>` tag adopts the next patch version at the same sha — the legacy tag is
+    kept and the note records the mapping. Each gets its release notes and a GitHub Release.
+    Returns [(note path, tag)] for the notes it rewrote."""
+    repo = product.repo_dir
+    rdir = os.path.join(root, 'releases')
+    names = _note_names(rdir)
+    done = []
+    for idx, name in enumerate(names):
+        path = os.path.join(rdir, name)
+        with open(path, encoding='utf-8') as f:
+            if NOTE_VERSION_RE.search(f.read()):
+                continue
+        sha = _note_sha(repo, name)
+        if not sha:
             continue
-        if _git(repo, 'tag', '-a', name, sha, '-m', f'Release {day} · {sha[:7]}') is None:
+        tag, legacy = tags_at(repo, sha)
+        if not tag and not legacy:
+            continue        # not a trunk release the rollup cut: nothing to adopt
+        day = name[:10]
+        old = _note_sha(repo, names[idx - 1]) if idx else None
+        found = commit_items(repo, items, sha, old)
+        new_tag = tag or next_tag(repo, sha, items, product)
+        notes = render_notes(items, found, improvement_commits(repo, items, sha, old),
+                             install_line(product, new_tag))
+        message = tag_message(new_tag, day, sha, notes) + f'\nAdopted from {legacy}, the same sha.\n'
+        if not tag and not cut_tag(repo, new_tag, sha, message):
+            print(f"release: could not tag {sha[:7]} as {new_tag}; retrying next rollup", file=sys.stderr)
+            break
+        write_if_changed(path, render_release(day, sha, old, None, items, found, tag=new_tag,
+                                              adopted=legacy, notes=notes))
+        publish_github_release(product, new_tag, notes)
+        print(f"release: {os.path.relpath(path, root)} is {new_tag}"
+              + (f" (adopted from {legacy})" if legacy else ''))
+        done.append((path, new_tag))
+    return done
+
+
+def merge_changelog(current, entries):
+    """`current` (a changelog's text) with every entry of {tag: text} it lacks, newest version
+    first. Entries already there — by their `## v…` heading — are kept as written; the text is
+    returned unchanged when nothing is missing."""
+    parts = re.split(r'(?m)^(?=## )', current or '')
+    preamble = '' if parts[0].startswith('## ') else parts[0]
+    have = {}
+    for b in (p for p in parts if p.startswith('## ')):
+        m = re.match(r'## (v\d+\.\d+\.\d+)\b', b)
+        have[m.group(1) if m else b] = b
+    missing = [t for t in entries if t not in have]
+    if not missing:
+        return current
+    have.update({t: entries[t] for t in missing})
+
+    def key(t):
+        m = SEMVER_TAG_RE.match(t)
+        return (1, tuple(int(g) for g in m.groups())) if m else (0, ())
+    preamble = preamble or '# Changelog\n\nOne entry per released version, newest first.\n'
+    body = ''.join(have[t].rstrip('\n') + '\n\n' for t in sorted(have, key=key, reverse=True))
+    return (preamble.rstrip('\n') + '\n\n' + body).rstrip('\n') + '\n'
+
+
+def _commit_file(repo, base, path, text, message):
+    """A commit on `base` that sets `path` to `text`, built in a scratch index: the checkout's
+    working tree and index are never touched. Its sha, or None."""
+    def run(args, env_vars=None, stdin=None):
+        r = subprocess.run(['git', '-C', repo, *args], capture_output=True, text=True, input=stdin,
+                           env=env_vars)
+        return r.stdout.strip() if r.returncode == 0 else None
+    with tempfile.TemporaryDirectory(prefix='changelog_') as tmp:
+        scratch = {**os.environ, 'GIT_INDEX_FILE': os.path.join(tmp, 'index')}
+        blob = run(['hash-object', '-w', '--stdin'], stdin=text)
+        if not blob or run(['read-tree', base], scratch) is None:
             return None
-        if _git(repo, 'push', '-q', 'origin', f'refs/tags/{name}') is None:
-            _git(repo, 'tag', '-d', name)
+        if run(['update-index', '--add', '--cacheinfo', f'100644,{blob},{path}'], scratch) is None:
             return None
-        return name
-    return None
+        tree = run(['write-tree'], scratch)
+        return (tree and run(['commit-tree', tree, '-p', base, '-m', message])) or None
+
+
+def sync_changelog(root, product):
+    """Every versioned release note's `## Notes` in the product's changelog
+    (`conventions.changelog_file`) on the trunk, newest first: one commit on the remote trunk,
+    pushed without force, when an entry is missing. Idempotent; a push the trunk moved under is
+    retried by the next rollup. Returns the new commit's sha, or None."""
+    repo = product.repo_dir
+    rdir = os.path.join(root, 'releases')
+    entries = {}
+    for name in _note_names(rdir):
+        with open(os.path.join(rdir, name), encoding='utf-8') as f:
+            text = f.read()
+        m, notes = NOTE_VERSION_RE.search(text), notes_of(text)
+        if m and notes:
+            entries[m.group(1)] = f'## {m.group(1)} — {name[:10]}\n\n{notes}'
+    if not entries:
+        return None
+    path = product.conventions.get('changelog_file') or DEFAULT_CHANGELOG_FILE
+    _git(repo, 'fetch', '-q', 'origin', product.main)
+    base = _git(repo, 'rev-parse', '--verify', '-q', f'origin/{product.main}^{{commit}}')
+    if not base:
+        return None
+    current = _git(repo, 'show', f'{base}:{path}')
+    current = current + '\n' if current else ''
+    text = merge_changelog(current, entries)
+    if text == current:
+        return None
+    added = [t for t in entries if not re.search(rf'(?m)^## {re.escape(t)}\b', current)]
+    sha = _commit_file(repo, base, path, text, CHANGELOG_SUBJECT.format(tags=', '.join(added), path=path))
+    if not sha or _git(repo, 'push', '-q', 'origin', f'{sha}:refs/heads/{product.main}') is None:
+        print(f"release: could not push {path} to {product.main}; retrying next rollup", file=sys.stderr)
+        return None
+    print(f"release: {', '.join(added)} in {path}")
+    return sha
 
 
 def write_trunk_release(root, day, items, product):
     """A release of a product whose trunk is production: at most one a day, none older than the
-    newest, and only when a commit naming an item landed since the last one. Tags the sha, then
-    writes releases/<day>-<sha7>.md. Returns the path written, or None."""
+    newest, and only when a commit naming an item landed since the last one. Tags the sha
+    `v<major>.<minor>.<patch>` — the roadmap's line, its next patch — and writes
+    releases/<day>-<sha7>.md with the version's notes; then the GitHub Release and the changelog
+    entry. Legacy releases are adopted first (:func:`migrate_releases`). Returns the path
+    written, or None."""
+    _git(product.repo_dir, 'fetch', '-q', '--tags', 'origin')     # tags another machine cut
+    migrate_releases(root, items, product)
+    path = _cut_trunk_release(root, day, items, product)
+    sync_changelog(root, product)
+    return path
+
+
+def _cut_trunk_release(root, day, items, product):
     repo = product.repo_dir
     rdir = os.path.join(root, 'releases')
     prev = sorted(os.path.basename(p) for p in glob.glob(os.path.join(rdir, '*-*.md')))
@@ -843,12 +1160,14 @@ def write_trunk_release(root, day, items, product):
     found = commit_items(repo, items, new, old)
     if not found:
         return None     # nothing landed that the record knows: a release of nothing is noise
-    tag = cut_tag(repo, day, new, product)
-    if not tag:
-        print(f"release: could not tag {new[:7]} in {repo}; retrying next rollup", file=sys.stderr)
+    tag = tags_at(repo, new)[0] or next_tag(repo, new, items, product)
+    notes = render_notes(items, found, improvement_commits(repo, items, new, old), install_line(product, tag))
+    if not cut_tag(repo, tag, new, tag_message(tag, day, new, notes)):
+        print(f"release: could not tag {new[:7]} as {tag} in {repo}; retrying next rollup", file=sys.stderr)
         return None
     path = os.path.join(rdir, f"{day}-{new[:7]}.md")
-    write_if_changed(path, render_release(day, new, old, None, items, found, tag=tag))
+    write_if_changed(path, render_release(day, new, old, None, items, found, tag=tag, notes=notes))
+    publish_github_release(product, tag, notes)
     return path
 
 
