@@ -2,6 +2,22 @@
 
 One entry per released version, newest first.
 
+## v0.1.3 — 2026-09-24
+
+### Features landed
+
+- F-0100 The savings pass: the tick proposes the next cheapest win from its own numbers
+
+### Improvements and hotfixes
+
+- hotfix(metrics,status): trunk releases every release_min_interval, and status shows the version
+- hotfix(feeder): an open code PR gets its review from the branch, not the ledger; feeder.hold
+- hotfix(check): a residue (no closing rule sees the item) warns, it never refuses a commit
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.3"`
+
 ## v0.1.2 — 2026-09-24
 
 ### Features landed
