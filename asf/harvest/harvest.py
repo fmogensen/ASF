@@ -560,6 +560,13 @@ def is_record_repo(repo):
     return os.path.isfile(os.path.join(repo, 'index.json'))
 
 
+def is_tracked(repo, path):
+    """True when git tracks ``path`` in ``repo``. A record's ``index.json`` is committed; a stray,
+    untracked one in a product checkout (an index run with the wrong cwd) must not turn the
+    product's harvest into the record's — every lane branch then went unseen."""
+    return sh(['git', 'ls-files', '--error-unmatch', path], cwd=repo).returncode == 0
+
+
 def run_harvest(repo, state_dir, dry_run, conv=None, session_source=None):
     conv = conv or DEFAULTS
     repo = os.path.abspath(repo)
@@ -1061,6 +1068,121 @@ def land_ff(repo, state_dir, branch, record, item, conv, asf_repo, bug_root, dry
     return 'held'
 
 
+# ------------------------------------------------------- the PR lane, native --
+#
+# In ``pull-request`` landing the ``prs`` step opens a PR for every finished branch; a product's
+# merge queue (its ``batch`` step) merged them. A spec or plan branch carries nothing a merge
+# queue knows how to judge — and nothing but a merge ever makes its document "on main", which is
+# what approves it — so a docs-only spec/plan branch is merged by harvest itself: its PR's checks
+# green (none at all counts as green), ``gh pr merge --squash --delete-branch`` (the repo's other
+# allowed method when squash is refused), the session marked ``harvested``. Pending checks wait
+# for the next tick; red checks hold the branch and send it back to its session.
+
+#: The merge methods tried in order; a repo that refuses one is offered the next.
+MERGE_METHODS = ('--squash', '--merge', '--rebase')
+#: ``gh pr checks`` buckets that make a PR red.
+RED_BUCKETS = ('fail', 'cancel')
+
+
+def _gh(args):
+    """Run ``gh`` with ``args``; ``(rc, stdout, stderr)``. Never in the product checkout (a
+    ``--delete-branch`` there would switch its branch) — every call names ``-R <slug>``."""
+    p = subprocess.run(['gh', *args], capture_output=True, text=True, env=clean_env())
+    return p.returncode, p.stdout, p.stderr
+
+
+def docs_dirs(conv):
+    """The product's document directories a spec or plan branch may write: specs, plans, reviews."""
+    return tuple(str(v).strip('/') for v in (conv.get(k) for k in
+                                             ('specs_dir', 'plans_dir', 'reviews_dir')) if v)
+
+
+def is_docs_branch(conv, branch, files):
+    """True for a ``spec``/``plan`` branch whose every changed path is under :func:`docs_dirs`."""
+    dirs = docs_dirs(conv)
+    return (conv.branch_kind(branch) in ('spec', 'plan') and bool(files) and bool(dirs)
+            and all(any(f.startswith(d + '/') for d in dirs) for f in files))
+
+
+def open_pr(slug, branch):
+    """The number of the open PR whose head is ``branch``, or None."""
+    rc, stdout, _err = _gh(['pr', 'list', '-R', slug, '--head', branch, '--state', 'open',
+                            '--json', 'number'])
+    try:
+        prs = json.loads(stdout or '[]') if rc == 0 else []
+    except json.JSONDecodeError:
+        prs = []
+    return prs[0].get('number') if prs else None
+
+
+def pr_checks(slug, number):
+    """``('green'|'pending'|'red'|'unknown', detail)`` for PR ``number``'s checks. No checks at all
+    is green; any failed or cancelled one is red; else any not finished is pending."""
+    rc, stdout, err = _gh(['pr', 'checks', str(number), '-R', slug, '--json', 'name,bucket'])
+    if 'no checks reported' in f'{stdout}\n{err}':
+        return 'green', 'no checks'
+    try:
+        checks = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError):
+        return 'unknown', tail(err) or f'gh pr checks exited {rc}'
+    red = [c.get('name') or '?' for c in checks if c.get('bucket') in RED_BUCKETS]
+    if red:
+        return 'red', ', '.join(red)
+    pending = [c.get('name') or '?' for c in checks if c.get('bucket') == 'pending']
+    if pending:
+        return 'pending', ', '.join(pending)
+    return 'green', f'{len(checks)} check(s)'
+
+
+def merge_pr(slug, number):
+    """``(ok, detail)``: merge PR ``number``, squash first, deleting its branch."""
+    err = ''
+    for method in MERGE_METHODS:
+        rc, _out, err = _gh(['pr', 'merge', str(number), '-R', slug, method, '--delete-branch'])
+        if rc == 0:
+            return True, method
+        if 'not allowed' not in (err or '').lower():
+            break
+    return False, tail(err) or 'gh pr merge failed'
+
+
+def merged_sha(slug, number):
+    rc, stdout, _err = _gh(['pr', 'view', str(number), '-R', slug, '--json', 'mergeCommit',
+                            '-q', '.mergeCommit.oid'])
+    return stdout.strip() if rc == 0 else ''
+
+
+def land_pr(repo, state_dir, branch, record, slug, trunk, dry_run, out):
+    """Merge ``branch``'s PR when its checks are green; see the section note above."""
+    job = record.get('job') or branch
+    number = open_pr(slug, branch)
+    if number is None:
+        out(f'waiting {branch}: no open PR yet')
+        return 'waiting'
+    state, detail = pr_checks(slug, number)
+    if state == 'pending':
+        out(f'waiting {branch}: PR #{number} checks pending — {detail}')
+        return 'waiting'
+    if state == 'unknown':
+        out(f'waiting {branch}: PR #{number} checks unreadable — {detail}')
+        return 'waiting'
+    if state == 'red':
+        return hold_with_correction(state_dir, branch, record, 'gate',
+                                    f'PR #{number} checks red: {detail}', out)
+    if dry_run:
+        out(f'DRY: would merge {branch} (PR #{number})')
+        return 'dry'
+    ok, how = merge_pr(slug, number)
+    if not ok:
+        out(f'held {branch}: PR #{number} merge refused — {how}')
+        return 'held'
+    sha = merged_sha(slug, number) or f'PR #{number}'
+    mark_session(state_dir, job, harvested=sha, correction=None)
+    sh(['git', 'fetch', '-q', '--prune', 'origin'], cwd=repo)
+    out(f'landed {branch} → PR #{number} {sha}')
+    return 'landed'
+
+
 # ------------------------------------------------------------- one gate --
 
 def combined_head(tmp, trunk, entries, hold):
@@ -1277,7 +1399,7 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
     superseded by its card being Closed or Resolved (B-0057). Returns ``{branch: outcome}``."""
     conv = product.conventions
     repo = os.path.abspath(product.repo_dir)
-    if is_record_repo(repo):  # the record's own gate and index regeneration, as before
+    if is_record_repo(repo) and is_tracked(repo, 'index.json'):  # the record's own gate
         run_harvest(repo, state_dir or env.state_dir(product), dry_run, conv)
         return {}
     state_dir = os.path.abspath(state_dir or env.state_dir(product))
@@ -1291,10 +1413,21 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
     results = {}
     eligible = []
     on_origin = remote_branches(repo, conv, known=sessions)
+    slug = None
+    if mode == LANDING_PR:
+        from asf.tick.step_prs import repo_slug
+        slug = repo_slug(product)
+
+    def native(branch):  # a PR harvest merges itself: a docs-only spec/plan branch, on a PR host
+        return bool(slug) and is_docs_branch(conv, branch, touched_files(repo, trunk, branch))
     for branch in on_origin:
         record = sessions.get(branch)
-        if record is None or lifecycle.is_live(record) or record.get('harvest') == 'pr':
+        if record is None or lifecycle.is_live(record):
             continue
+        if record.get('harvest') == 'pr':  # handed to the PR lane — unless harvest merges it
+            if not native(branch):
+                continue
+            record = dict(record, harvest=None)
         ahead = sh(['git', 'rev-list', '--count', f'origin/{trunk}..origin/{branch}'],
                    cwd=repo).stdout.strip()
         if ahead in ('', '0'):
@@ -1345,6 +1478,9 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
                                  'harvest', detail)
             out(f'held {branch}: {cls} ({level}) — {detail}')
             results[branch] = 'held'
+            continue
+        if mode == LANDING_PR and native(branch):
+            results[branch] = land_pr(repo, state_dir, branch, record, slug, trunk, dry_run, out)
             continue
         if mode == LANDING_PR:
             if not dry_run:
