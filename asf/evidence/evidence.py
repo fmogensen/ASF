@@ -653,6 +653,7 @@ def discover(product=None, checked_file=None):
                     checked.add(int(m.group(1)))
 
     main_sha = sh(f"git rev-parse {main_ref}", product=product)
+    commits = main_commits(product)
 
     return {
         "features": features,
@@ -663,7 +664,8 @@ def discover(product=None, checked_file=None):
         "main_sha": main_sha or None,
         "merged": merged,
         "branches": sorted(branches),
-        "ids": id_evidence(product, branches, prs),
+        "ids": id_evidence(product, branches, prs, commits=commits),
+        "lane_docs": lane_docs(product, prs, commits=commits),
         "ci": ci_provider(product),
     }
 
@@ -677,7 +679,7 @@ BRANCH_ID_TOKEN = re.compile(r"\b([EFSTBDR])-(\d{4})\b", re.IGNORECASE)
 #: A commit of the document lanes — a spec, a plan, a review, a ruling — names its item because
 #: that is the lane's subject convention, not because the item's work landed (B-0059: the
 #: landing of eight specs closed four Features).
-DOC_LANE_SUBJECT = re.compile(r"^(spec|plan|review|adjudicate)\(")
+DOC_LANE_SUBJECT = re.compile(r"^(spec|plan|review|adjudicate)\(|^docs\((spec|plan|review)\)")
 
 
 def id_tokens(text, rx=ID_TOKEN):
@@ -724,16 +726,105 @@ def record_since(product):
 
 
 def main_commits(product):
-    """[(sha, subject)] on origin/<main> since the record's first commit, newest first."""
+    """[(sha, subject, [path, ...])] on origin/<main> since the record's first commit, newest
+    first. A merge commit's paths are its diff against its first parent — what it brought in."""
     since = record_since(product)
-    cmd = f"git log --format=%H%x09%s origin/{product.main}"
+    cmd = (f"git log --format=%x00%H%x09%s --name-only --diff-merges=first-parent "
+           f"origin/{product.main}")
     if since:
         cmd += f" --since={since}"
+    return _parse_name_log(sh(cmd, product=product))
+
+
+def _parse_name_log(text):
+    """``--format=%x00%H%x09%s --name-only`` output → [(sha, subject, [path, ...])]."""
     out = []
-    for line in sh(cmd, product=product).splitlines():
-        sha, _, subject = line.partition("\t")
-        if sha:
-            out.append((sha, subject))
+    for chunk in (text or "").split("\0"):
+        lines = chunk.strip("\n").splitlines()
+        if not lines:
+            continue
+        sha, _, subject = lines[0].partition("\t")
+        if sha.strip():
+            out.append((sha.strip(), subject, [ln.strip() for ln in lines[1:] if ln.strip()]))
+    return out
+
+
+def commit_paths(product, shas):
+    """{sha: [path, ...]} for commits the log did not already give — one `git show` for all."""
+    shas = sorted({s for s in shas if s and FULL_SHA_RE.fullmatch(s)})
+    if not shas:
+        return {}
+    text = sh("git show --format=%x00%H%x09%s --name-only --diff-merges=first-parent "
+              + " ".join(shas), product=product)
+    return {sha: paths for sha, _subject, paths in _parse_name_log(text)}
+
+
+def doc_dirs(product):
+    """The directories a document lane writes: ``specs_dir``, ``plans_dir``, ``reviews_dir``."""
+    conv = product.conventions if product is not None else Conventions()
+    return tuple(str(d).strip("/") + "/" for d in (conv.specs_dir, conv.plans_dir, conv.reviews_dir)
+                 if d)
+
+
+def docs_only(paths, dirs):
+    """True when every path a commit touched is a spec, plan or review document. A commit whose
+    paths are unknown (none read) is not judged docs-only — it stays landing evidence."""
+    paths = [p for p in paths or () if p]
+    return bool(paths) and all(any(p.startswith(d) for d in dirs) for p in paths)
+
+
+def lane_kind(branch, prefixes):
+    """"spec" / "plan" when `branch` is a document-lane branch (the product's spec/plan
+    prefix), else None."""
+    b = (branch or "").strip()
+    for pre in ("refs/heads/", "origin/"):
+        if b.startswith(pre):
+            b = b[len(pre):]
+    for kind in ("spec", "plan"):
+        pre = prefixes.get(kind)
+        if pre and b.lower().startswith(pre.lower()):
+            return kind
+    return None
+
+
+def _commit_rows(commits):
+    """(sha, subject, [path]) rows, from (sha, subject) and (sha, subject, paths) rows alike."""
+    for c in commits or ():
+        yield c[0], c[1], (list(c[2]) if len(c) > 2 and c[2] is not None else [])
+
+
+def lane_docs(product, prs, commits=None, paths_of=None):
+    """{ID: {"spec": [path], "plan": [path], "prs": [n]}} — the documents each merged spec/plan
+    lane PR brought onto the trunk, keyed by the id its head branch (else its title) names.
+
+    A lane PR can land a date-prefixed plan (`2026-09-20-free-plan.md`) for `F-0019`: the file
+    name does not carry the id — the lane branch (`<plan prefix>F-0019`) does."""
+    prefixes = branch_prefixes(product)
+    conv = product.conventions
+    dirs = {"spec": str(conv.specs_dir).strip("/") + "/",
+            "plan": str(conv.plans_dir).strip("/") + "/"}
+    known = {sha: paths for sha, _s, paths in _commit_rows(commits)}
+    lanes = []
+    for p in prs or []:
+        kind = lane_kind(p.get("headRefName"), prefixes)
+        sha = (p.get("mergeCommit") or {}).get("oid") if p.get("state") == "MERGED" else None
+        if not kind or not sha:
+            continue
+        ids = id_tokens(p.get("headRefName"), BRANCH_ID_TOKEN) or id_tokens(p.get("title") or "")
+        if ids:
+            lanes.append((p, sha, ids))
+    missing = [sha for _p, sha, _i in lanes if sha not in known]
+    if missing:
+        known.update((paths_of or (lambda s: commit_paths(product, s)))(missing))
+    out = {}
+    for p, sha, ids in sorted(lanes, key=lambda t: t[0].get("number") or 0):
+        for iid in ids:
+            rec = out.setdefault(iid, {"spec": [], "plan": [], "prs": []})
+            rec["prs"].append(p.get("number"))
+            for path in known.get(sha) or []:
+                for kind, d in dirs.items():
+                    if path.startswith(d) and path.endswith(".md") and path not in rec[kind]:
+                        rec[kind].append(path)
     return out
 
 
@@ -758,12 +849,21 @@ def id_evidence(product, branches, prs, commits=None, green=None):
         for iid in id_tokens(b, BRANCH_ID_TOKEN):
             rec(iid)["branches"].append(b)
     commits = main_commits(product) if commits is None else commits
-    for sha, subject in commits:  # newest first: the first commit seen per id is the newest
-        if DOC_LANE_SUBJECT.match(subject or ""):
+    dirs = doc_dirs(product)
+    prefixes = branch_prefixes(product)
+    known = {}
+    # A Feature is never landed by its spec or plan: a commit whose diff is only documents under
+    # specs_dir/plans_dir/reviews_dir, or a merged spec/plan lane PR, names its item because
+    # that is the lane's convention — whatever the subject says (`docs(plan): F-0047 — …`,
+    # `plan(OPS-1): the F-0037 plan`). The paths and the lane branch decide, not the subject.
+    for sha, subject, paths in _commit_rows(commits):  # newest first: first seen is newest
+        known[sha] = paths
+        if DOC_LANE_SUBJECT.match(subject or "") or docs_only(paths, dirs):
             continue
         for iid in id_tokens(subject):
             r = rec(iid)
             r["commit"] = r["commit"] or sha
+    merged_prs = []
     for p in sorted(prs, key=lambda p: p.get("number") or 0):
         ids = id_tokens(f"{p.get('title') or ''}\n{p.get('body') or ''}")
         state = p.get("state")
@@ -771,13 +871,23 @@ def id_evidence(product, branches, prs, commits=None, green=None):
         for iid in ids:
             if state == "OPEN":
                 rec(iid)["open_prs"].append(p["number"])
-            elif sha and not (out.get(iid) or {}).get("commit"):
-                if on_main is None:
-                    on_main = ancestry(product, [main_ref])
-                if not on_main(sha):
-                    continue
-                r = rec(iid)
-                r["commit"], r["pr"] = sha, p["number"]
+        if sha and ids and not lane_kind(p.get("headRefName"), prefixes):
+            merged_prs.append((p, sha, ids))
+    unknown = [sha for _p, sha, _ids in merged_prs if sha not in known]
+    if unknown:
+        known.update(commit_paths(product, unknown))
+    for p, sha, ids in merged_prs:
+        if docs_only(known.get(sha), dirs):
+            continue
+        for iid in ids:
+            if (out.get(iid) or {}).get("commit"):
+                continue
+            if on_main is None:
+                on_main = ancestry(product, [main_ref])
+            if not on_main(sha):
+                continue
+            r = rec(iid)
+            r["commit"], r["pr"] = sha, p["number"]
 
     if ci_provider(product) is None:
         for r in out.values():

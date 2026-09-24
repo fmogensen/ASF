@@ -314,12 +314,44 @@ def eligible(run):
     return finished(run) and not landed(run) and run.get('harvest') != 'pr'
 
 
+#: ``harvested:`` values that are not a landing: harvest archived the run, nothing reached the trunk
+NOT_A_LANDING = ('superseded',)
+
+
+def landed_earlier(path, run):
+    """The sha an earlier run on ``run``'s branch was harvested at — its lane's work is already on
+    the trunk (a squash-merged lane PR included: the native landing marks the run at merge) — or
+    None. A later session on that branch that writes nothing has nothing to land, and is not sent
+    back to push work the trunk already holds."""
+    branch, started = (run or {}).get('branch'), (run or {}).get('started') or ''
+    if not path or not branch:
+        return None
+    for rs in runs(path).values():
+        for r in rs:
+            sha = r.get('harvested')
+            if (r.get('branch') == branch and sha and sha not in NOT_A_LANDING
+                    and (r.get('started') or '') < started):
+                return sha
+    return None
+
+
+def empty_on_a_landed_lane(path, run):
+    """The harvested sha when ``run`` ended ``failed: empty branch`` on a branch an earlier run
+    already landed; else None."""
+    if (run or {}).get('end_reason') != f'failed: {EMPTY_BRANCH}' or landed(run):
+        return None
+    return landed_earlier(path, run)
+
+
 def pending_correction(run, path=None):
     """The correction on ``run`` still waiting for its session: none of the item's runs started
     at or after it (health and harvest write corrections before the wave launches, so a run of
-    the same second is the answer). ``None`` when there is none or it has been answered."""
+    the same second is the answer). ``None`` when there is none or it has been answered — or when
+    it is an empty-branch correction on a branch whose work an earlier run already landed."""
     corr = (run or {}).get('correction') or {}
     if not corr.get('text'):
+        return None
+    if path is not None and empty_on_a_landed_lane(path, run):
         return None
     at = corr.get('at') or ''
     if path is not None:

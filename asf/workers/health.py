@@ -297,6 +297,16 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
             s.pop('correction', None)
             found.append((job, 'released', f'{s.get("item")} is {closed}: no correction'))
         if s.get('ended'):
+            landed_sha = lifecycle.empty_on_a_landed_lane(registry, s)
+            if landed_sha:
+                # an empty run on a branch an earlier run already landed (a squash-merged lane
+                # PR): its work is on the trunk — landed, with no correction left to answer
+                pool_mod.update_session(product, job, harvested=landed_sha, correction=None)
+                s.update(harvested=landed_sha)
+                s.pop('correction', None)
+                found.append((job, 'landed', f'its branch landed at {landed_sha[:9]}: '
+                                             'nothing to push'))
+                continue
             if s.get('end_reason') == lifecycle.STOPPED and not s.get('correction'):
                 ev = lifecycle.gather(product, s, alive=alive)
                 if lifecycle.pushed_after_stop(s, ev):
@@ -339,6 +349,11 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
                                           lifecycle.unpushed_text(reason), now)
             pool_mod.update_session(product, job, **fields)
             found.append((job, 'held', line.split(': ', 1)[1]))
+        elif reason == f'failed: {lifecycle.EMPTY_BRANCH}' and lifecycle.landed_earlier(registry, s):
+            landed_sha = lifecycle.landed_earlier(registry, s)
+            pool_mod.update_session(product, job, harvested=landed_sha)
+            s.update(harvested=landed_sha)
+            found.append((job, 'landed', f'its branch landed at {landed_sha[:9]}: nothing to push'))
         elif reason == f'failed: {lifecycle.EMPTY_BRANCH}':
             # a pushed branch with nothing on it: the same loop, sent back to commit real work
             # or say why there is none (B-0076)

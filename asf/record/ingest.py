@@ -44,9 +44,81 @@ def _feature_branches(fev):
     return out
 
 
+DOC_FIELDS = {'spec': ('spec', 'spec_branch', 'spec_on_main', 'spec_review'),
+              'plan': ('plan', 'plan_branch', 'plan_on_main', 'plan_review', 'tasks')}
+
+
+def _doc_rank(f, kind):
+    """How far a document of `kind` got in `f`: on the trunk 2, on a branch 1, none 0."""
+    if not f:
+        return 0
+    return 2 if f.get(f'{kind}_on_main') else 1 if (f.get(kind) or f.get(f'{kind}_branch')) else 0
+
+
+def _merge_docs(primary, others):
+    """`primary` with its spec and its plan each taken from whichever candidate got that document
+    furthest — a Feature matched by its legacy alias to an old spec still reads the plan its own
+    lane landed (`f-0047.md`, or a date-prefixed plan its lane branch carried)."""
+    out = dict(primary)
+    for kind, keys in DOC_FIELDS.items():
+        best = primary
+        for f in others:
+            if _doc_rank(f, kind) > _doc_rank(best, kind):
+                best = f
+        if best is not primary:
+            for k in keys:
+                out[k] = best.get(k) if k != 'tasks' else (best.get(k) or {})
+    prs = list(primary.get('prs') or [])
+    for f in others:
+        prs += [p for p in f.get('prs') or [] if p not in prs]
+    out['prs'] = prs
+    return out
+
+
+def _own_candidates(iid, ev):
+    """[(slug, feature_evidence)] the Feature's own id reaches: the lane's slug (`f-0047`, or
+    `F-0047` off a live `plan-F-0047` branch), and every document its merged spec/plan lane PR
+    landed, whatever the file is called."""
+    features = ev.get('features') or {}
+    out = []
+    if not iid:
+        return out
+    for slug in dict.fromkeys((iid.lower(), iid.upper(), iid)):
+        if slug in features:
+            out.append((slug, features[slug]))
+    lane = (ev.get('lane_docs') or {}).get(iid.upper()) or {}
+    for kind in ('spec', 'plan'):
+        for path in lane.get(kind) or []:
+            for slug, f in features.items():
+                if _path_only(f.get(kind)) == path and (slug, f) not in out:
+                    out.append((slug, f))
+    return out
+
+
 def match_feature(meta, ev):
-    """(slug, feature_evidence) by links.spec/plan path, then legacy_id, then branches, then PRs."""
+    """(slug, feature_evidence) by links.spec/plan path, then legacy_id, then branches, then PRs,
+    then the Feature's own id (its lane's slug, its merged lane PR's documents). The spec and the
+    plan are each read from whichever match carries it furthest (:func:`_merge_docs`)."""
     typed, _machine = frontmatter.split_machine(meta)
+    slug, f = _match_feature(typed, meta, ev)
+    # the typed intent first: a `links.plan` names the plan, whatever `links.spec` matched
+    plan_link = (typed.get('links') or {}).get('plan')
+    typed_plan = [(s, x) for s, x in (ev.get('features') or {}).items()
+                  if plan_link and _path_only(x.get('plan')) == plan_link]
+    own = []
+    for s, x in typed_plan + _own_candidates(str(typed.get('id') or meta.get('id') or ''), ev):
+        if s != slug and s not in [o[0] for o in own]:
+            own.append((s, x))
+    if not own:
+        return slug, f
+    if f is None:
+        slug, f = own[0]
+        own = own[1:]
+    return slug, _merge_docs(f, [x for _s, x in own])
+
+
+def _match_feature(typed, meta, ev):
+    """The first match by links, legacy id, branches, PRs, then the lane's slug."""
     links = typed.get('links') or {}
     features = ev['features']
 

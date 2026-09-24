@@ -20,6 +20,10 @@ from asf.evidence import evidence
 from asf.record.core import canonicalize, load_items, today
 from asf.record import plan_order
 from asf.record.ids import mint_id, write_new_item
+from asf.record.ingest import match_feature
+
+#: A Feature the ingest already derived Resolved/Closed gets no fresh Task cards from its plan.
+DONE_STATES = ('Resolved', 'Closed')
 
 STORIES_LINE_RE = re.compile(r'^\s*stories\s*:\s*(.+)$', re.IGNORECASE | re.MULTILINE)
 STORY_ID_RE = re.compile(r'\bS-\d{4}\b')
@@ -45,6 +49,16 @@ def plan_ref(fev):
     return ref if ref and fev.get('plan_on_main') else None
 
 
+def own_lane_plan(fid, ref, ev):
+    """True when the plan at `ref` is the Feature's own lane document: named after its id
+    (`f-0047.md`), or landed by a merged spec/plan lane PR whose branch names it."""
+    path = ref.split(':', 1)[1] if ':' in ref else ref
+    name = path.rsplit('/', 1)[-1]
+    if evidence.doc_slug(name).lower() == fid.lower():
+        return True
+    return path in (((ev or {}).get('lane_docs') or {}).get(fid.upper()) or {}).get('plan', [])
+
+
 def mint_plan_tasks(root, product, ev, out=print, read_ref=None):
     """Mint the Task cards of every landed plan that has none yet. Returns the new ids."""
     from asf.tick.migrate import plan_task_records, writes_lines
@@ -57,8 +71,19 @@ def mint_plan_tasks(root, product, ev, out=print, read_ref=None):
         rec = canonical[fid]
         if rec['meta'].get('type') != 'feature':
             continue
-        ref = plan_ref(features.get(fid.lower()))  # the lane's slug is the id (B-0059)
-        if not ref or has_task_child(canonical, fid):
+        if has_task_child(canonical, fid) or rec['meta'].get('state') in DONE_STATES:
+            continue
+        # the plan is found the way the ingest finds it: links.plan, the lane's slug (B-0059),
+        # or the plan the Feature's merged lane PR landed — a date-prefixed file name
+        # (`2026-09-20-free-plan.md`) does not carry the id, its lane branch does
+        _slug, fev = match_feature(rec['meta'], {**(ev or {}), 'features': features})
+        ref = plan_ref(fev)
+        if not ref:
+            continue
+        # a plan the lane landed for this very id mints at once (B-0059/B-0060); a plan reached
+        # through a typed link or a legacy match mints only for a decided card — a migrated
+        # record links dozens of old milestone plans, and those are not work the operator ordered
+        if rec['meta'].get('decided') is not True and not own_lane_plan(fid, ref, ev):
             continue
         text = read_ref(ref)
         if not text:

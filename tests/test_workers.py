@@ -25,6 +25,7 @@ from asf.workers import spawn as spawn_mod
 from asf.workers import stall as stall_mod
 from asf.workers import wave as wave_mod
 from asf.workers import cmd_quota, register
+from asf.feeder import rows
 from asf.tick.step_wave import corrections as step_wave_corrections
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_workers` does not
@@ -904,6 +905,53 @@ class TestHealth(Home):
         s = pool_mod.load_sessions(self.product)['empty']
         self.assertEqual(s['rounds'], 1)
         self.assertFalse(lifecycle.eligible(s))  # never sits `awaiting harvest` with nothing to land
+
+    def _lane_landed_then_relaunched(self):
+        """Run one on a lane branch, squash-merged by the native PR lane (marked harvested at
+        merge), then a second session on the same branch that writes nothing and pushes."""
+        rec = self.spawn('plan-f-0079', {'ok': True, 'pid': 91})
+        self.commit(rec['worktree'])
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
+        health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        pool_mod.update_session(self.product, 'plan-f-0079', harvested='6' * 40, correction=None)
+        time.sleep(1.1)  # the relaunch's `started` must sort after the first run's
+        git('push', '-q', 'origin', '--delete', rec['branch'], cwd=rec['worktree'])
+        shutil.rmtree(rec['worktree'])
+        git('worktree', 'prune', cwd=self.repo)
+        git('branch', '-D', rec['branch'], cwd=self.repo)
+        again = self.spawn('plan-f-0079', {'ok': True, 'pid': 92})
+        git('push', '-q', 'origin', again['branch'], cwd=again['worktree'])
+        return again
+
+    def test_an_empty_run_on_a_lane_already_landed_is_landed_not_sent_back(self):
+        # PR #740 squash-merged cloud/plan-F-0079; a later session on the branch found the plan
+        # on the trunk and wrote nothing. It is landed — no correction, no FIX → CORRECT row
+        self._lane_landed_then_relaunched()
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertFalse([f for f in found if f[1] == 'held'], found)
+        self.assertIn('landed', [w for j, w, d in found if j == 'plan-f-0079'])
+        s = pool_mod.load_sessions(self.product)['plan-f-0079']
+        self.assertEqual(s['harvested'], '6' * 40)
+        self.assertEqual(lifecycle.corrections(pool_mod.sessions_path(self.product)), {})
+
+    def test_a_correction_already_written_on_a_landed_lane_is_neutralised_next_tick(self):
+        self._lane_landed_then_relaunched()
+        path = pool_mod.sessions_path(self.product)
+        # what the unfixed health wrote at 06:49:33Z
+        pool_mod.update_session(self.product, 'plan-f-0079', ended='2099-01-01T00:00:00Z',
+                                end_reason='failed: ' + lifecycle.EMPTY_BRANCH, rounds=1,
+                                correction={'kind': 'unpushed', 'at': '2099-01-01T00:00:00Z',
+                                            'text': lifecycle.empty_branch_text()})
+        # derived at once: no pending correction, so no FIX → CORRECT row
+        self.assertEqual(lifecycle.corrections(path), {})
+        items = {'F-0001': {'id': 'F-0001', 'type': 'feature', 'state': 'Active', 'decided': True}}
+        got, _ids = rows.correction_rows(items, self.product, set(), lifecycle.corrections(path))
+        self.assertEqual(got, [])
+        # and the next health pass records it landed, the correction dropped
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn('landed', [w for j, w, d in found if j == 'plan-f-0079'])
+        s = pool_mod.load_sessions(self.product)['plan-f-0079']
+        self.assertEqual((s['harvested'], s.get('correction')), ('6' * 40, None))
 
     def test_reap_only_when_pushed(self):
         rec = self.spawn('done', {'ok': True, 'pid': 11})
