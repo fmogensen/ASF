@@ -385,10 +385,9 @@ doctor's `redaction-hooks` row accepts any hook file that contains `asf redact -
 asf.redact`. A hook file already there that is not ASF's is never edited; the installer stops with
 `NEEDS OPERATOR: <path> is not asf's — add the line: …`.
 
-Known issue: that stop comes before `asf hooks install` writes the approvals hook into the worker
-accounts' settings, so while a foreign git hook is in the way, worker sessions run **without the
-approvals hook**. Add the line and rerun `asf hooks install --product <p>` before the first tick.
-A fix is in progress.
+The foreign hook does not stop the rest: `asf hooks install` still writes the approvals hook into
+every worker account and every git hook it can, then reports the foreign one and exits 2. doctor's
+approvals-hook row is RED while any worker account lacks the approvals hook.
 
 When a repo sets `core.hooksPath` to a tracked directory (a fresh record's `.githooks/`, for
 example), the hooks ASF writes there are ordinary files in the working tree. **Commit and push

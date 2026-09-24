@@ -42,7 +42,7 @@ what it means and the one command that clears it; then the common stalls that pr
 | --- | --- | --- |
 | `NEEDS OPERATOR: asf is not on PATH — pipx install asf-factory` | `asf hooks install` cannot resolve `asf` | rerun the installer (it puts `asf` on `PATH`) |
 | `NEEDS OPERATOR: <dir> is not a git repo — asf hooks install cannot place its hooks there` | `repo_dir` or `backlog_dir` is wrong | fix the path, then `asf hooks install --product <p>` |
-| `NEEDS OPERATOR: <hook> is not asf's — add the line: "<asf>" redact --pre-commit\|--pre-push --product <p>` | a hook ASF did not write is in the way. Until it is fixed, `asf hooks install` also skips the worker accounts' approvals hook (a known issue) | add the line to that hook — see [below](#the-redaction-hooks) — then rerun `asf hooks install --product <p>` |
+| `NEEDS OPERATOR: <hook> is not asf's — add the line: "<asf>" redact --pre-commit\|--pre-push --product <p>` | a hook ASF did not write is in the way. | add the line to that hook — see [below](#the-redaction-hooks) — then rerun `asf hooks install --product <p>` |
 | `NEEDS OPERATOR: product <p> has no repo_dir …` | a rule card declares a Claude Code hook but there is no product repo to put it in | set `repo_dir` |
 
 ### Approvals
