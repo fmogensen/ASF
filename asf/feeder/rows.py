@@ -433,6 +433,15 @@ def task_rows(items, product, feature, busy, running, landed_shas=None):
                            reason='groom split part, unconfirmed', waits_on='confirm'))
             continue
         writes = t.get('writes') or []
+        if not writes:
+            # a coder with no declared footprint can neither be checked against the others nor
+            # know what it may touch: it reports blocked and the slot is spent (first customer)
+            out.append(Row(tier=2, kind=PLAN_CODE, item_id=t['id'], feature_id=feature['id'],
+                           action='WAITS ON writes', brief_kind='task',
+                           branch=branch_for(product, 'code', t['id']),
+                           reason='no writes: declared: the plan must name the files this Task '
+                                  'writes before a coder can start', waits_on='writes'))
+            continue
         other = footprint.first_conflict(writes, running)
         if other:
             out.append(Row(tier=2, kind=PLAN_CODE, item_id=t['id'], feature_id=feature['id'],
@@ -444,9 +453,8 @@ def task_rows(items, product, feature, busy, running, landed_shas=None):
         # default), the one prefix harvest scans for code; `task/` was a lane nobody harvested
         out.append(Row(tier=2, kind=PLAN_CODE, item_id=t['id'], feature_id=feature['id'],
                        action=LAUNCH, brief_kind='task', branch=branch_for(product, 'code', t['id']),
-                       reason='plan approved, footprint free' if writes else 'plan approved, no writes: declared'))
-        if writes:
-            running.append((t['id'], list(writes)))
+                       reason='plan approved, footprint free'))
+        running.append((t['id'], list(writes)))
     return out
 
 

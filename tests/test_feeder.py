@@ -73,9 +73,9 @@ class NoRowLaunchesBehindAnUnlandedPredecessor(unittest.TestCase):
             'F-0001': {'id': 'F-0001', 'type': 'feature', 'stage': 'building 0/2', 'decided': True,
                        'state': 'Active', 'children': ['T-0001', 'T-0002', 'B-0009']},
             'T-0001': {'id': 'T-0001', 'type': 'task', 'parent': 'F-0001', 'rank': 1,
-                       'state': first},
+                       'state': first, 'writes': ['a.py']},
             'T-0002': {'id': 'T-0002', 'type': 'task', 'parent': 'F-0001', 'rank': 2,
-                       'state': 'New', 'after': ['T-0001']},
+                       'state': 'New', 'after': ['T-0001'], 'writes': ['b.py']},
             'B-0009': {'id': 'B-0009', 'type': 'bug', 'parent': 'F-0001', 'severity': 'S1',
                        'decided': True, 'state': 'New', 'after': ['T-0001']}}}
 
@@ -858,3 +858,20 @@ class CliTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ATaskWithNoWritesIsNotLaunched(unittest.TestCase):
+    def test_no_writes_waits_instead_of_launching(self):
+        from asf.feeder import rows as rows_mod
+        items = {
+            'F-0001': {'id': 'F-0001', 'type': 'feature', 'state': 'Active', 'stage': 'plan-approved',
+                       'children': ['T-0001', 'T-0002']},
+            'T-0001': {'id': 'T-0001', 'type': 'task', 'parent': 'F-0001', 'rank': 1, 'state': 'New'},
+            'T-0002': {'id': 'T-0002', 'type': 'task', 'parent': 'F-0001', 'rank': 2, 'state': 'New',
+                       'writes': ['x.py']},
+        }
+        out = rows_mod.task_rows(items, None, items['F-0001'], set(), [])
+        by_id = {r.item_id: r for r in out}
+        self.assertEqual(by_id['T-0001'].action, 'WAITS ON writes')
+        self.assertIn('no writes: declared', by_id['T-0001'].reason)
+        self.assertEqual(by_id['T-0002'].action, rows_mod.LAUNCH)
