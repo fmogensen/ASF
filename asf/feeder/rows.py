@@ -350,9 +350,7 @@ def correction_rows(items, product, busy, corrections):
                            action=LAUNCH, brief_kind='spec', branch=branch, reason=c['text']))
             continue
         if c.get('kind') == REVIEW_WANTED:  # a PR no one has reviewed at its head: no round
-            # S1 first, then a Bug's fix (with S2): a fix waits on its review before anything
-            out.append(Row(tier=min(tier, 1) if item['type'] == 'bug' else tier,
-                           kind=PUSHED_REVIEW, item_id=iid, feature_id=fid,
+            out.append(Row(tier=review_tier(item), kind=PUSHED_REVIEW, item_id=iid, feature_id=fid,
                            action=LAUNCH, brief_kind='review', branch=branch,
                            review_round=int(c.get('round') or 1),
                            reason=f"PR has no review of its head: round {c.get('round') or 1}"))
@@ -377,6 +375,43 @@ def correction_rows(items, product, busy, corrections):
                            brief_kind='correct', branch=branch, correction=c['text'],
                            reason=f"harvest held it ({c.get('kind')}), round {rounds}: back to a session"))
     return out, ids
+
+
+def review_tier(item):
+    """A review row's tier: S1 first, then a Bug's fix (with S2) — a fix waits on its review
+    before anything else — then the item's own tier."""
+    tier = {'S1': 0, 'S2': 1}.get(item.get('severity'), 2)
+    return min(tier, 1) if item.get('type') == 'bug' else tier
+
+
+def pr_rows(items, product, busy, pr_heads):
+    """One row per open code-lane PR whose item is known and open, no session holds and no
+    correction speaks for (``busy``): PUSHED → REVIEW when its head has no review verdict
+    (:func:`asf.harvest.harvest.pr_heads` — the branch decides, whatever the ledger holds), a
+    ``WAITS ON landing`` row when the head is approved or already on the trunk. A head whose
+    review asks for changes gets none here: harvest sends it back as FIX → CORRECT."""
+    out = []
+    for iid, h in sorted((pr_heads or {}).items()):
+        item = items.get(iid)
+        if not item or not is_open(item) or iid in busy or item.get('blocked'):
+            continue
+        if item.get('type') not in ('task', 'bug'):
+            continue
+        f = feature_of(items, item)
+        fid, state, branch = (f['id'] if f else ''), h.get('state'), h.get('branch') or ''
+        number = h.get('number')
+        if state == 'review':
+            rnd = int(h.get('round') or 1)
+            out.append(Row(tier=review_tier(item), kind=PUSHED_REVIEW, item_id=iid,
+                           feature_id=fid, action=LAUNCH, brief_kind='review', branch=branch,
+                           review_round=rnd,
+                           reason=f"PR #{number} has no review of its head: round {rnd} "
+                                  f"({h.get('why') or 'no verdict'})"))
+        elif state in ('approved', 'on-trunk'):
+            out.append(Row(tier=review_tier(item), kind=PUSHED_LAND, item_id=iid,
+                           feature_id=fid, action=f"{WAITS_LANDING}: PR #{number}",
+                           brief_kind='review', branch=branch, reason=h.get('why') or state))
+    return out
 
 
 def branch_rows(items, product, busy):
@@ -689,9 +724,28 @@ def hold_unlanded(rows, items, landed_shas=None):
     return out
 
 
+#: the rows ``feeder.hold`` holds, per class it names: new work only — a review, a correction,
+#: an adjudicate, the groom and landing are never held
+HELD_KINDS = {'features': (CARD_SPEC, STARVED_SPEC, STARVED_PLAN, PLAN_CODE),
+              'bugs': (BUG_FIX,)}
+HOLD = 'WAITS ON hold'
+
+
+def hold_classes(rows, product):
+    """``feeder.hold`` (:attr:`asf.env.Product.feeder_hold`): each launching row of a held
+    class becomes ``WAITS ON hold: <class>`` — no session, no slot, still shown."""
+    held = getattr(product, 'feeder_hold', None) or ()
+    kinds = {k: cls for cls in sorted(held) for k in HELD_KINDS.get(cls, ())}
+    if not kinds:
+        return rows
+    return [dataclasses.replace(r, action=f'{HOLD}: {kinds[r.kind]}', waits_on='hold',
+                                reason=f'feeder.hold: {kinds[r.kind]}')
+            if r.kind in kinds and r.launches else r for r in rows]
+
+
 def candidates(index, product, inflight, attempts=None, corrections=None, busy=None,
               groom_state=None, landed_shas=None, decision_limit=None, unlanded=None,
-              open_branches=None):
+              open_branches=None, pr_heads=None):
     """Every row the index supports right now, uncut by capacity, in emit order: tier, then the
     Feature's order (:func:`feature_order`: Epic rank, Feature rank, id), then within a Feature the stalemate, branch housekeeping, new work.
     ``busy``: item ids held by something that is not a session and takes no slot — a pushed
@@ -700,14 +754,19 @@ def candidates(index, product, inflight, attempts=None, corrections=None, busy=N
     already Resolved/Closed is never ``busy``: its work is on the trunk whatever the ledger says
     (an unclosed run held a landed Task's ``writes:`` against its siblings for ever).
     ``decision_limit``: how many UNDECIDED → DECIDE rows (``None``: ``decision_rows``; ``0``: all).
-    ``unlanded`` / ``open_branches``: a document's pushed, not-yet-landed work (:func:`feature_rows`)."""
+    ``unlanded`` / ``open_branches``: a document's pushed, not-yet-landed work (:func:`feature_rows`).
+    ``pr_heads``: the open code-lane PRs by item (:func:`pr_rows`) — such an item gets no BUG →
+    FIX or PLAN → CODE row: its work is already in a PR, which is reviewed or landed instead."""
     items = items_of(index)
-    busy = inflight_ids(inflight) | {i for i in busy or () if is_open(items.get(i) or {})}
+    live = inflight_ids(inflight)
+    busy = live | {i for i in busy or () if is_open(items.get(i) or {})}
     limit = stalemate_round(product)
     stalled = {f['id'] for f in ix.of_type(items, 'feature') if review_round(f)[1] >= limit}
     running = running_footprints(items, busy)
     corrected, spoken = correction_rows(items, product, busy, corrections)
-    rows = corrected + bug_rows(items, product, busy | spoken, attempts)
+    in_pr = {i for i in pr_heads or {} if is_open(items.get(i) or {})}
+    rows = corrected + pr_rows(items, product, live | spoken, pr_heads)
+    rows += bug_rows(items, product, busy | spoken | in_pr, attempts)
     rows += [r for r in branch_rows(items, product, busy) if r.feature_id not in stalled]
     gr = groom_row(index, product, busy, groom_state, inflight)
     if gr is not None:
@@ -715,10 +774,11 @@ def candidates(index, product, inflight, attempts=None, corrections=None, busy=N
     # a Task a correction row speaks for gets no PLAN → CODE row too: one session per branch
     tasks_spoken = {i for i in spoken if (items.get(i) or {}).get('type') == 'task'
                     or (corrections or {}).get(i, {}).get('kind') in (LAND_SPEC, LANDING_GATE)}
-    rows += feature_rows(items, product, busy | tasks_spoken, running, landed_shas, unlanded,
-                         open_branches)
+    rows += feature_rows(items, product, busy | tasks_spoken | in_pr, running, landed_shas,
+                         unlanded, open_branches)
     rows += undecided_rows(items, product, busy, decision_limit)
     rows = hold_unlanded(rows, items, landed_shas)
+    rows = hold_classes(rows, product)
 
     def key(pair):
         seq, r = pair
@@ -737,11 +797,11 @@ def candidates(index, product, inflight, attempts=None, corrections=None, busy=N
 
 def plan_rows(index, product, inflight, capacity, attempts=None, corrections=None, busy=None,
               groom_state=None, landed_shas=None, decision_limit=None, unlanded=None,
-              open_branches=None):
+              open_branches=None, pr_heads=None):
     """The rows the tick emits: tiered, S1 first, cut to ``capacity`` less what is in flight."""
     from asf.feeder import tiers
     return tiers.select(candidates(index, product, inflight, attempts, corrections, busy=busy,
                                    groom_state=groom_state, landed_shas=landed_shas,
                                    decision_limit=decision_limit, unlanded=unlanded,
-                                   open_branches=open_branches),
+                                   open_branches=open_branches, pr_heads=pr_heads),
                         inflight, capacity)

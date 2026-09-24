@@ -281,6 +281,52 @@ class RowsTest(unittest.TestCase):
         self.assertEqual(kinds(rows.candidates(self.index['items'], self.p, [])), kinds(self.cand()))
 
 
+class FeederHoldTest(unittest.TestCase):
+    """``feeder.hold``: a held class's new-work rows wait on the hold; everything else runs."""
+
+    def idx(self):
+        return {'items': {
+            'F-0001': {'id': 'F-0001', 'type': 'feature', 'decided': True, 'state': 'Active',
+                       'rank': 1, 'stage': 'building 0/2', 'children': ['T-0001', 'T-0002']},
+            'F-0002': {'id': 'F-0002', 'type': 'feature', 'decided': True, 'state': 'New',
+                       'rank': 2, 'stage': 'card'},
+            'T-0001': {'id': 'T-0001', 'type': 'task', 'parent': 'F-0001', 'state': 'New',
+                       'writes': ['src/one.py']},
+            'T-0002': {'id': 'T-0002', 'type': 'task', 'parent': 'F-0001', 'state': 'Active',
+                       'writes': ['src/two.py']},
+            'B-0001': {'id': 'B-0001', 'type': 'bug', 'state': 'New', 'severity': 'S2',
+                       'decided': True}}}
+
+    CORRECTIONS = {'T-0002': {'kind': 'unpushed', 'text': 'push it', 'rounds': 1}}
+
+    def launching(self, p):
+        rs = rows.candidates(self.idx(), p, [], corrections=self.CORRECTIONS)
+        return {(r.kind, r.item_id): r.action for r in rs}
+
+    def test_the_default_holds_nothing(self):
+        self.assertEqual(product().feeder_hold, frozenset())
+        acts = self.launching(product())
+        self.assertEqual(acts[(rows.PLAN_CODE, 'T-0001')], rows.LAUNCH)
+        self.assertEqual(acts[(rows.CARD_SPEC, 'F-0002')], rows.LAUNCH)
+
+    def test_features_held_waits_their_new_work_and_nothing_else(self):
+        acts = self.launching(product(feeder={'hold': ['features']}))
+        self.assertEqual(acts[(rows.PLAN_CODE, 'T-0001')], 'WAITS ON hold: features')
+        self.assertEqual(acts[(rows.CARD_SPEC, 'F-0002')], 'WAITS ON hold: features')
+        self.assertEqual(acts[(rows.BUG_FIX, 'B-0001')], rows.LAUNCH)
+        self.assertEqual(acts[(rows.FIX_CORRECT, 'T-0002')], rows.LAUNCH)
+
+    def test_bugs_held_waits_the_fix(self):
+        acts = self.launching(product(feeder={'hold': ['bugs']}))
+        self.assertEqual(acts[(rows.BUG_FIX, 'B-0001')], 'WAITS ON hold: bugs')
+        self.assertEqual(acts[(rows.PLAN_CODE, 'T-0001')], rows.LAUNCH)
+
+    def test_the_product_file_declares_it(self):
+        self.assertEqual(env.validate_product_text('feeder:\n  hold: [features]\n'), [])
+        self.assertTrue(env.validate_product_text('feeder:\n  hold: features\n'))
+        self.assertTrue(env.validate_product_text('feeder:\n  other: 1\n'))
+
+
 class ReshapeRowsTest(unittest.TestCase):
     """T-0053 / S-7904: the feeder holds a reshape-marked Task and launches one reshape session;
     an unconfirmed split part waits too. Both holds are on the Task, never the Feature (D10)."""

@@ -1693,6 +1693,59 @@ class ProductHarvestTests(unittest.TestCase):
         tiers = {r.item_id: r.tier for r in rows}
         self.assertEqual(tiers, {'B-0001': 0, 'B-0003': 1, 'T-0002': 2})
 
+    # ---- the feeder reads the open PRs, not the ledger ------------------------------------
+
+    OPEN_PR = [{'number': 41, 'headRefName': 'fix/B-0001', 'state': 'OPEN'},
+               {'number': 40, 'headRefName': 'spec/F-0001', 'state': 'OPEN'},
+               {'number': 39, 'headRefName': 'fix/B-0009', 'state': 'MERGED'}]
+    NEW_BUG = {'B-0001': {'id': 'B-0001', 'type': 'bug', 'state': 'New', 'severity': 'S1',
+                          'decided': True}}
+
+    def plan_now(self, items):
+        """The feeder's rows as the wave plans them: the ledger's facts, and the open PRs'."""
+        from asf.feeder import rows as feeder_rows
+        path = harvest.sessions_path(self.state_dir)
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        heads = harvest.pr_heads(self.repo, self.pr_product().conventions, 'main', self.OPEN_PR,
+                                 lifecycle.by_branch(path))
+        return feeder_rows.candidates(items, self.pr_product(), lifecycle.inflight(path),
+                                      corrections=lifecycle.corrections(path),
+                                      busy=lifecycle.awaiting_harvest(path), pr_heads=heads)
+
+    def test_a_pre_existing_pr_with_no_ledger_mark_gets_a_review_row(self):
+        """A PR opened before any review request existed — no harvest mark, no correction, no
+        session at all — still gets its review, S1 first; the Bug gets no second fix."""
+        from asf.feeder import rows as feeder_rows
+        self.push_lane('fix/B-0001', [('fix(B-0001): the change', {'src/a.py': 'a = 1\n'})])
+        rows = self.plan_now(self.NEW_BUG)
+        self.assertEqual([(r.kind, r.item_id, r.branch, r.review_round, r.tier, r.launches)
+                          for r in rows],
+                         [(feeder_rows.PUSHED_REVIEW, 'B-0001', 'fix/B-0001', 1, 0, True)])
+
+    def test_a_bug_whose_finished_fix_has_an_open_pr_gets_a_review_not_a_fix(self):
+        from asf.feeder import rows as feeder_rows
+        self.push_fix()  # its fix-bug run finished and pushed; nothing harvested it yet
+        rows = self.plan_now(self.NEW_BUG)
+        self.assertNotIn(feeder_rows.BUG_FIX, [r.kind for r in rows])
+        self.assertEqual([(r.kind, r.item_id) for r in rows],
+                         [(feeder_rows.PUSHED_REVIEW, 'B-0001')])
+
+    def test_a_pr_approved_at_its_head_waits_to_land(self):
+        from asf.feeder import rows as feeder_rows
+        self.push_fix(['approved'])
+        rows = self.plan_now(self.NEW_BUG)
+        self.assertEqual([(r.kind, r.launches) for r in rows], [(feeder_rows.PUSHED_LAND, False)])
+        self.assertTrue(rows[0].action.startswith(feeder_rows.WAITS_LANDING))
+
+    def test_a_review_older_than_the_head_wants_the_next_round(self):
+        self.push_fix(['approved'])
+        sh(['git', 'checkout', '-q', 'fix/B-0001'], cwd=self.worker)
+        self.write(self.worker, 'src/a.py', 'a = 2\n')
+        sh(['git', 'commit', '-qam', 'fix(B-0001): after the review'], cwd=self.worker)
+        sh(['git', 'push', '-q', 'origin', 'fix/B-0001'], cwd=self.worker)
+        rows = self.plan_now(self.NEW_BUG)
+        self.assertEqual([(r.item_id, r.review_round) for r in rows], [('B-0001', 2)])
+
     def test_code_branch_whose_newest_review_requests_changes_goes_back_as_a_correction(self):
         from asf.feeder import rows as feeder_rows
         calls = self.fake_gh([])

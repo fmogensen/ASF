@@ -1223,6 +1223,48 @@ def review_is_current(repo, conv, branch, path):
     return not [f for f in after if not f.startswith(reviews)]
 
 
+#: what an open lane PR's head is waiting for (:func:`pr_heads`)
+HEAD_WANTS_REVIEW, HEAD_APPROVED, HEAD_CHANGES, HEAD_ON_TRUNK = (
+    'review', 'approved', 'changes', 'on-trunk')
+
+
+def pr_heads(repo, conv, trunk, prs, runs_by_branch=None):
+    """``{item: {branch, number, state, round, why}}`` — one entry per open PR on a code lane
+    branch (not a spec/plan/legacy one) whose item is known: the run's ``item``, else the id in
+    the branch name. ``state`` is :data:`HEAD_ON_TRUNK` when the head is already on
+    ``origin/<trunk>``, :data:`HEAD_APPROVED` / :data:`HEAD_CHANGES` when the newest review
+    reviewed the head, else :data:`HEAD_WANTS_REVIEW` — read from the branch alone, never the
+    session ledger, so a PR opened before any request was written still gets its review.
+    ``prs``: the host's PR list (``headRefName``, ``number``, ``state``) as cached."""
+    out = {}
+    for pr in sorted(prs or (), key=lambda p: -int((p or {}).get('number') or 0)):
+        if not isinstance(pr, dict) or str(pr.get('state') or 'OPEN').upper() != 'OPEN':
+            continue
+        branch = pr.get('headRefName') or ''
+        if conv.branch_kind(branch) in (None, 'spec', 'plan', 'legacy') or branch == trunk:
+            continue
+        item = item_of(branch, (runs_by_branch or {}).get(branch))
+        if not item or item in out:  # the newest PR speaks for its item
+            continue
+        verdict, path = review_verdict(repo, conv, branch, item)
+        current = bool(path) and review_is_current(repo, conv, branch, path)
+        if sh(['git', 'merge-base', '--is-ancestor', f'origin/{branch}', f'origin/{trunk}'],
+              cwd=repo).returncode == 0:
+            state, why = HEAD_ON_TRUNK, 'its head is already on the trunk'
+        elif current and verdict == 'approved':
+            state, why = HEAD_APPROVED, f'{path} approved its head'
+        elif current and verdict.startswith('changes'):
+            state, why = HEAD_CHANGES, f'{path} reads {verdict}'
+        else:
+            state = HEAD_WANTS_REVIEW
+            why = ('no ASF review yet' if not path else
+                   f'{path} predates the head' if not current else
+                   f'{path} reads {verdict or "no verdict"}')
+        out[item] = {'branch': branch, 'number': pr.get('number'), 'state': state,
+                     'round': review_round(conv, item, path) + 1, 'why': why}
+    return out
+
+
 def request_review(repo, state_dir, branch, record, conv, number, path, verdict, dry_run, out):
     """Ask for a ``review`` session on ``branch`` — a PR with no review of its head (none at all,
     only a stale round, or one with no verdict). In pull-request landing nothing else raises one:

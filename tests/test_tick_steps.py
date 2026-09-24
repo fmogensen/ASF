@@ -335,7 +335,7 @@ class WaveStepTests(StepsTestCase):
         seen = {}
 
         def plan(index, product, inflight, capacity, attempts=None, corrections=None, busy=None,
-                groom_state=None, unlanded=None, open_branches=None):
+                groom_state=None, unlanded=None, open_branches=None, pr_heads=None):
             seen.update(capacity=capacity, inflight=[s['item'] for s in inflight], ids=sorted(index))
             return self.rows
         ctx = self.ctx()
@@ -447,7 +447,7 @@ class WaveStep(StepsTestCase):
         seen = {}
 
         def plan(index, product, inflight, capacity, attempts=None, corrections=None, busy=None,
-                groom_state=None, unlanded=None, open_branches=None):
+                groom_state=None, unlanded=None, open_branches=None, pr_heads=None):
             seen['capacity'] = capacity
             return []
 
@@ -464,7 +464,7 @@ class WaveStep(StepsTestCase):
         seen = {}
 
         def plan(index, product, inflight, capacity, attempts=None, corrections=None, busy=None,
-                groom_state=None, unlanded=None, open_branches=None):
+                groom_state=None, unlanded=None, open_branches=None, pr_heads=None):
             seen['capacity'] = capacity
             return []
 

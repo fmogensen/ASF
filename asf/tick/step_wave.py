@@ -61,19 +61,40 @@ def unlanded(product):
     return lifecycle.unlanded(pool_mod.sessions_path(product))
 
 
-def open_pr_branches(product):
-    """The head branches of the PRs the evidence cache last saw open — read as cached, never
-    refreshed here (the wave asks no forge). No cache, or an unreadable one: none."""
+def _open_prs(product):
+    """The PRs the evidence cache last saw open — read as cached, never refreshed here (the wave
+    asks no forge). No cache, or an unreadable one: none."""
     from asf.evidence import evidence as evidence_mod
     try:
         with open(evidence_mod._cache_file('prs.json', product), encoding='utf-8') as f:
             prs = json.load(f)
     except (OSError, ValueError, TypeError):
-        return set()
+        return []
     if not isinstance(prs, list):
-        return set()
-    return {p.get('headRefName') for p in prs
-            if isinstance(p, dict) and p.get('headRefName') and p.get('state') == 'OPEN'}
+        return []
+    return [p for p in prs
+            if isinstance(p, dict) and p.get('headRefName') and p.get('state') == 'OPEN']
+
+
+def open_pr_branches(product):
+    """The head branches of the PRs the evidence cache last saw open (:func:`_open_prs`)."""
+    return {p['headRefName'] for p in _open_prs(product)}
+
+
+def pr_heads(product):
+    """``{item: {branch, number, state, round, why}}`` — the open code-lane PRs of a product that
+    lands through pull requests, and what each head waits for
+    (:func:`asf.harvest.harvest.pr_heads`): read off the branches, not the ledger, so a PR that
+    predates any review request still gets its PUSHED → REVIEW row. Other landings: none."""
+    from asf.harvest import harvest
+    repo = product.repo_dir
+    if not repo or not os.path.isdir(repo) or harvest.landing(product) != harvest.LANDING_PR:
+        return {}
+    prs = _open_prs(product)
+    if not prs:
+        return {}
+    return harvest.pr_heads(repo, product.conventions, product.conventions.main, prs,
+                            lifecycle.by_branch(pool_mod.sessions_path(product)))
 
 
 def corrections(product):
@@ -168,6 +189,7 @@ def plan_inputs(product, root):
     return {'attempts': attempts(product), 'corrections': corrections(product),
             'busy': awaiting_harvest(product),
             'unlanded': unlanded(product), 'open_branches': open_pr_branches(product),
+            'pr_heads': pr_heads(product),
             'groom_state': groom_state(product, root) if groom_policy.groom_auto(product) else None}
 
 

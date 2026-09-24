@@ -102,7 +102,10 @@ trunk, by `conventions.landing`:
     With no such review — none yet, or only a round older than the head — harvest asks for one:
     the feeder launches a `PUSHED → REVIEW` session on the PR's branch (S1 first, then Bug
     fixes, within capacity, one per branch, no correction round spent), which writes the next
-    round's file there. `verdict: changes requested` sends the branch back to its writer as
+    round's file there. The feeder reads this off the open PRs and their branches, not off the
+    session ledger, so a PR opened before any request was written gets its review too; and an
+    item with an open code PR gets no second `BUG → FIX` or `PLAN → CODE` session — its PR is
+    reviewed, or waits to land (`WAITS ON landing`) once its head is approved. `verdict: changes requested` sends the branch back to its writer as
     `FIX → CORRECT`; its next push asks for the next round. A **spec or plan branch that only changes files under `specs_dir`,
     `plans_dir` and `reviews_dir` needs no review**: merging it is what approves its document;
   - its checks are green (no checks at all counts as green);
@@ -340,6 +343,19 @@ S1 reserve: while an S1 Bug is open, each lane keeps `reserve_for_s1` slots for 
 
 `asf capacity --product <p>` (or `--all`, `/asf:capacity`) prints the resolved numbers and which
 term bounds each.
+
+### Holding a class of new work
+
+```yaml
+feeder:
+  hold: [features]    # or [bugs], or both; empty (the default) holds nothing
+```
+
+`feeder.hold` stops the feeder starting new work of a class while everything already in motion
+carries on. With `features` held, the `CARD → SPEC`, `STARVED → SPEC`, `STARVED → PLAN` and
+`PLAN → CODE` rows still show, as `WAITS ON hold: features`, and launch nothing; with `bugs`,
+`BUG → FIX` waits the same way. Reviews, corrections (`FIX → CORRECT`), adjudicate and groom
+sessions and landing are never held.
 
 ## Approvals
 

@@ -224,7 +224,7 @@ PRODUCT_FIELDS = {
     'app_host': _STR, 'conventions': _MAP, 'ci': None, 'deploy_sha': None,
     'customer_paths': _LIST, 'stage_limits': _MAP, 'size_classes': _MAP, 'approvals': _MAP,
     'approval_signals': _MAP, 'steps': _MAP, 'job_grants': _LIST, 'groom': _MAP,
-    'capacity': _MAP, 'clocks': _MAP, 'token_caps': _MAP,
+    'capacity': _MAP, 'clocks': _MAP, 'token_caps': _MAP, 'feeder': _MAP,
 }
 # `ci:` is a map (or the bare word `none`, a product without CI); these are its keys.
 CI_FIELDS = {
@@ -233,8 +233,12 @@ CI_FIELDS = {
 }
 # `capacity:` is a map: this product's session/CI ceilings and its batch shape.
 CAPACITY_FIELDS = {'sessions': _STR, 'ci': _STR, 'weight': _STR, 'batch': _MAP}
+# `feeder:` is a map: ``hold`` lists the work classes the feeder starts no session for.
+FEEDER_FIELDS = {'hold': _LIST}
+#: what ``feeder.hold`` may name (:attr:`Product.feeder_hold`)
+FEEDER_HOLDS = ('features', 'bugs')
 # every product-file section whose own keys are checked, keyed by its own field table.
-NESTED_FIELDS = {'ci': CI_FIELDS, 'capacity': CAPACITY_FIELDS}
+NESTED_FIELDS = {'ci': CI_FIELDS, 'capacity': CAPACITY_FIELDS, 'feeder': FEEDER_FIELDS}
 
 
 def _shape_ok(value, shape):
@@ -319,6 +323,17 @@ class Product:
     @property
     def main(self):
         return self._get('main', 'main')
+
+    @property
+    def feeder_hold(self):
+        """``feeder.hold``: the work classes (:data:`FEEDER_HOLDS`) whose new sessions the
+        feeder holds — their rows wait on ``hold: <class>``. Empty unless set."""
+        feeder = self._get('feeder')
+        hold = feeder.get('hold') if isinstance(feeder, dict) else None
+        if isinstance(hold, str):
+            hold = [hold]
+        return frozenset(str(h).strip().lower() for h in hold or ()
+                         if str(h).strip().lower() in FEEDER_HOLDS)
 
     @property
     def backlog_dir(self):
