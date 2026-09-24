@@ -219,10 +219,15 @@ def _triage_facts(product, root, index):
 def plan_inputs(product, root, index=None):
     """The ledger's and the record's facts ``plan_rows`` takes beside the index — one place, so
     the tick, ``asf next`` and the status cell plan the same rows. ``index`` is the loaded
-    ``index.json``, read from ``root`` when the caller has none."""
+    ``index.json``, read from ``root`` when the caller has none — and read through the same
+    ``after:`` overlay the wave applies, because ``after`` is a ``DIGEST_FIELDS`` name: a digest
+    taken off un-overlaid items differs from the one the tick recorded at launch, and ``asf next``
+    and the status cell would call stale every Task whose order the plan derives (D3)."""
     if index is None:
         from asf.views import index_reader
         index = index_reader.load(root)[0] if os.path.isfile(os.path.join(root, 'index.json')) else {}
+        if index and product.repo_dir:
+            index = plan_order.overlay(index, plan_order.trunk_reader(product))
     return {'attempts': attempts(product), 'corrections': corrections(product),
             'busy': awaiting_harvest(product),
             'unlanded': unlanded(product), 'open_branches': open_pr_branches(product),
@@ -320,7 +325,8 @@ def run(ctx, out=print):
             continue
         if row.brief_kind == 'adjudicate' and getattr(row, 'between', ()):
             (la, ta), (lb, tb) = row.between
-            common = f' · both touch {row.common}' if row.common else ' · no file in common'
+            pair = getattr(row, 'common', '')
+            common = f' · both touch {pair}' if pair else ' · no file in common'
             job = job_name(row.brief_kind, row.item_id)
             out(f'adjudicate {job:<24} {row.item_id:<10} — {la}: {ta[:60]} ↔ {lb}: {tb[:60]}{common}')
         brief = _build(product, row, items, running,
