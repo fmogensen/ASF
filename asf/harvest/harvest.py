@@ -75,6 +75,7 @@ import time
 from asf import approvals, env, hermetic
 from asf.conventions import Conventions
 from asf.feeder import footprint, widen
+from asf.feeder.rows import LANDING_GATE
 from asf.workers import health as health_mod
 from asf.workers import lifecycle
 from asf.workers.pool import now_iso
@@ -1130,7 +1131,9 @@ def land_ff(repo, state_dir, branch, record, item, conv, asf_repo, bug_root, dry
 # lands every one of them itself — no product merge-queue script is needed (a ``batch`` step, if
 # set, still runs; a PR it merged is simply found merged and its session closed). A PR merges
 # when the approvals matrix allows it (checked before this lane), its checks are green (none at
-# all counts as green) and — for anything but a docs-only spec/plan branch, whose merge is what
+# all counts as green), the product's own gate is green on its head rebased onto the trunk (or,
+# under ``landing_checks_missing: wait``, its required checks ran and passed — see "what green
+# means" below) and — for anything but a docs-only spec/plan branch, whose merge is what
 # approves its document — the newest ASF review of its item on the branch reads
 # ``verdict: approved``. Then ``gh pr merge --squash --delete-branch`` (the repo's next allowed
 # method when squash is refused), or ``--auto`` when the trunk has a GitHub merge queue, and the
@@ -1212,6 +1215,7 @@ class PrLane:
         self.merged = 0
         self.in_queue = sum(1 for p in self.open.values() if p.get('autoMergeRequest'))
         self._queue = None
+        self._required = None
 
     def has_queue(self):
         """True when ``trunk`` has a GitHub merge queue (merges go in with ``--auto``)."""
@@ -1232,6 +1236,28 @@ class PrLane:
         if not prs:
             return None
         return prs[0].get('number'), ((prs[0].get('mergeCommit') or {}).get('oid') or '')
+
+    def required_checks(self, conv, state_dir):
+        """The checks that must have run and passed on a PR: ``conventions.landing_checks``,
+        else the trunk's branch protection (:func:`protected_checks`, cached)."""
+        named = conv.get('landing_checks')
+        if named:
+            return (str(named),) if isinstance(named, str) else tuple(str(n) for n in named)
+        if self._required is None:
+            self._required = protected_checks(self.slug, self.trunk, state_dir)
+        return self._required
+
+    def slots(self):
+        """``(n, why)``: how many more PRs may be merged (or queued) this tick, and the setting
+        that caps it; ``(None, None)`` when nothing does."""
+        room, why = None, None
+        if self.per_run is not None:
+            room, why = max(0, self.per_run - self.merged), 'capacity.batch.per_run'
+        if self.parallel is not None and self.has_queue():
+            left = max(0, self.parallel - self.in_queue)
+            if room is None or left < room:
+                room, why = left, 'capacity.batch.parallel'
+        return room, why
 
     def budget_left(self):
         """``None`` when a merge may go in now, else why not."""
@@ -1254,22 +1280,23 @@ def pr_order(entries, items=None):
 
 
 def pr_checks(slug, number):
-    """``('green'|'pending'|'red'|'unknown', detail)`` for PR ``number``'s checks. No checks at all
-    is green; any failed or cancelled one is red; else any not finished is pending."""
+    """``('green'|'pending'|'red'|'unknown', detail, checks)`` for PR ``number``'s checks —
+    ``checks`` the ``gh pr checks`` list (``[{name, bucket}]``). No checks at all is green; any
+    failed or cancelled one is red; else any not finished is pending."""
     rc, stdout, err = _gh(['pr', 'checks', str(number), '-R', slug, '--json', 'name,bucket'])
     if 'no checks reported' in f'{stdout}\n{err}':
-        return 'green', 'no checks'
+        return 'green', 'no checks', []
     try:
-        checks = json.loads(stdout)
+        checks = [c for c in json.loads(stdout) if isinstance(c, dict)]
     except (json.JSONDecodeError, TypeError):
-        return 'unknown', tail(err) or f'gh pr checks exited {rc}'
+        return 'unknown', tail(err) or f'gh pr checks exited {rc}', []
     red = [c.get('name') or '?' for c in checks if c.get('bucket') in RED_BUCKETS]
     if red:
-        return 'red', ', '.join(red)
+        return 'red', ', '.join(red), checks
     pending = [c.get('name') or '?' for c in checks if c.get('bucket') == 'pending']
     if pending:
-        return 'pending', ', '.join(pending)
-    return 'green', f'{len(checks)} check(s)'
+        return 'pending', ', '.join(pending), checks
+    return 'green', f'{len(checks)} check(s)', checks
 
 
 def merge_pr(slug, number):
@@ -1290,9 +1317,137 @@ def merged_sha(slug, number):
     return stdout.strip() if rc == 0 else ''
 
 
-def land_pr(repo, state_dir, branch, record, lane, conv, docs, dry_run, out):
-    """Land ``branch``'s PR through ``lane`` (a :class:`PrLane`); see the section note above.
-    ``docs``: a docs-only spec/plan branch, which needs no review."""
+# -- what "green" means before a native merge ------------------------------------------------
+#
+# A PR's checks being green is not the trunk staying green: a product's CI is often
+# path-filtered, so on a docs-only PR its gate job never runs and "green" is some trivial check
+# alone. So no PR is merged on its checks alone. Every one the checks allow is gated locally —
+# its head rebased onto the trunk, under the same :func:`product_gate` fast-forward landing runs
+# (the product's test command, and asf's own checks on asf's repo) — every mergeable PR of the
+# tick stacked into one combined head and gated once, bisecting on red, under the product's
+# harvest lock (:func:`try_lock`), so one gate runs at a time. Only a green head is merged.
+#
+# The *required* checks — ``conventions.landing_checks: [job names]``, else the trunk's branch
+# protection (``gh api``, cached for :data:`REQUIRED_TTL_S`) — must have run and passed; one
+# that did not run (path-filtered: absent, or ``skipping``) is not green. What harvest does then
+# is ``conventions.landing_checks_missing`` — one value, or a map per landing class
+# (``{docs: local-gate, code: wait}``):
+#
+# * ``local-gate`` (the default): the local gate stands in for it — it runs for every PR anyway.
+# * ``wait``: CI is the gate, not this machine (a product whose gate is too heavy to run here).
+#   A PR whose required checks all ran and passed merges without a local gate; one missing a
+#   required check waits for it — never for ever: a required check with no run after
+#   ``conventions.landing_checks_wait_min`` minutes (default 30) on the same head will never
+#   come (path-filtered), and the PR is gated locally instead. With no required check declared
+#   there is nothing to wait for: the local gate.
+
+#: ``conventions.landing_checks_missing`` values.
+MISSING_LOCAL_GATE = 'local-gate'
+MISSING_WAIT = 'wait'
+#: Minutes a ``wait`` waits for a required check that never got a run, before gating locally.
+DEFAULT_LANDING_WAIT_MIN = 30
+#: Seconds the trunk's branch-protection required checks are cached for.
+REQUIRED_TTL_S = 3600
+#: State files (in the product's state dir): the protection cache, and when each PR head was
+#: first seen missing a required check.
+REQUIRED_CACHE = 'landing-required-checks.json'
+MISSING_SINCE = 'landing-missing-since.json'
+#: ``gh pr checks`` buckets that count as a check having run and passed.
+PASS_BUCKETS = ('pass',)
+
+
+def landing_class(docs):
+    """A PR's landing class for per-class settings: ``docs`` or ``code``."""
+    return 'docs' if docs else 'code'
+
+
+def missing_policy(conv, cls):
+    """``conventions.landing_checks_missing`` for landing class ``cls``: a single value, or a map
+    per class (``{docs: …, code: …}``, ``default:`` for the rest); anything else is local-gate."""
+    value = conv.get('landing_checks_missing')
+    if isinstance(value, dict):
+        value = value.get(cls, value.get('default'))
+    return MISSING_WAIT if str(value or '').strip().lower() == MISSING_WAIT else MISSING_LOCAL_GATE
+
+
+def landing_wait_s(conv):
+    try:
+        return max(0.0, float(conv.get('landing_checks_wait_min', DEFAULT_LANDING_WAIT_MIN))) * 60
+    except (TypeError, ValueError):
+        return DEFAULT_LANDING_WAIT_MIN * 60.0
+
+
+def _read_state(state_dir, name):
+    try:
+        with open(os.path.join(state_dir, name), encoding='utf-8') as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_state(state_dir, name, data):
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        path = os.path.join(state_dir, name)
+        with open(path + '.tmp', 'w', encoding='utf-8') as f:
+            json.dump(data, f, sort_keys=True)
+        os.replace(path + '.tmp', path)
+    except OSError:
+        pass  # a cache is never a reason to fail
+
+
+def protected_checks(slug, trunk, state_dir, now=None):
+    """The status checks the trunk's branch protection requires, cached in ``state_dir`` for
+    :data:`REQUIRED_TTL_S`; ``()`` when it requires none or cannot be read."""
+    now = time.time() if now is None else now
+    key = f'{slug}@{trunk}'
+    cache = _read_state(state_dir, REQUIRED_CACHE)
+    hit = cache.get(key)
+    if isinstance(hit, dict) and now - float(hit.get('at') or 0) < REQUIRED_TTL_S:
+        return tuple(hit.get('checks') or ())
+    data = _gh_json(['api', f'repos/{slug}/branches/{trunk}/protection/required_status_checks'],
+                    {})
+    names = []
+    if isinstance(data, dict):
+        names = [str(c) for c in data.get('contexts') or []]
+        names += [str(c.get('context')) for c in data.get('checks') or []
+                  if isinstance(c, dict) and c.get('context')]
+    names = list(dict.fromkeys(names))
+    cache[key] = {'at': now, 'checks': names}
+    _write_state(state_dir, REQUIRED_CACHE, cache)
+    return tuple(names)
+
+
+def missing_since(state_dir, branch, head, now, write=True):
+    """When ``branch`` at ``head`` was first seen missing a required check (epoch seconds) — now,
+    the first time, and again whenever its head moves (a new push gets a fresh wait)."""
+    data = _read_state(state_dir, MISSING_SINCE)
+    seen = data.get(branch)
+    if isinstance(seen, dict) and seen.get('head') == head:
+        return float(seen.get('since') or now)
+    if write:
+        data[branch] = {'head': head, 'since': now}
+        _write_state(state_dir, MISSING_SINCE, data)
+    return now
+
+
+def forget_missing(state_dir, branch):
+    data = _read_state(state_dir, MISSING_SINCE)
+    if data.pop(branch, None) is not None:
+        _write_state(state_dir, MISSING_SINCE, data)
+
+
+#: What :func:`land_pr` hands on for a PR its checks allow: gate it locally, or merge it on CI.
+READY_GATE = 'gate'
+READY_CI = 'ci'
+
+
+def land_pr(repo, state_dir, branch, record, lane, conv, docs, dry_run, out, now=None):
+    """The first half of landing ``branch``'s PR through ``lane`` (a :class:`PrLane`); see the
+    section notes above. ``docs``: a docs-only spec/plan branch, which needs no review. Returns
+    an outcome (``landed``, ``waiting``, ``held``, …), or ``(READY_GATE|READY_CI, number)`` for
+    a PR :func:`land_ready` merges — after a local gate, or on its required checks alone."""
     job = record.get('job') or branch
     slug = lane.slug
     pr = lane.open.get(branch)
@@ -1319,7 +1474,7 @@ def land_pr(repo, state_dir, branch, record, lane, conv, docs, dry_run, out):
             why = f'{path} reads {verdict or "no verdict"}' if path else 'no ASF review yet'
             out(f'waiting {branch}: PR #{number} not approved — {why}')
             return 'waiting'
-    state, detail = pr_checks(slug, number)
+    state, detail, checks = pr_checks(slug, number)
     if state == 'pending':
         out(f'waiting {branch}: PR #{number} checks pending — {detail}')
         return 'waiting'
@@ -1332,13 +1487,142 @@ def land_pr(repo, state_dir, branch, record, lane, conv, docs, dry_run, out):
             return 'dry'
         return hold_with_correction(state_dir, branch, record, 'gate',
                                     f'PR #{number} checks red: {detail}', out)
+    if missing_policy(conv, landing_class(docs)) == MISSING_LOCAL_GATE:
+        return READY_GATE, number
+    required = lane.required_checks(conv, state_dir)
+    if not required:  # nothing CI is trusted with: the local gate
+        return READY_GATE, number
+    passed = {c.get('name') for c in checks if c.get('bucket') in PASS_BUCKETS}
+    missing = [name for name in required if name not in passed]
+    if not missing:
+        return READY_CI, number
+    now = time.time() if now is None else now
+    head = sh(['git', 'rev-parse', f'origin/{branch}'], cwd=repo).stdout.strip()
+    waited = now - missing_since(state_dir, branch, head, now, write=not dry_run)
+    limit = landing_wait_s(conv)
+    if waited < limit:
+        out(f'waiting {branch}: PR #{number} required check(s) not run — '
+            f'{", ".join(missing)} (landing_checks_missing: wait, '
+            f'{int(waited // 60)}/{int(limit // 60)} min)')
+        return 'waiting'
+    out(f'harvest: {branch}: PR #{number} required check(s) never ran in {int(limit // 60)} min '
+        f'— {", ".join(missing)}: gating locally')
+    return READY_GATE, number
+
+
+def land_ready(repo, state_dir, ready, lane, conv, asf_repo, dry_run, out, items=None):
+    """The second half: merge every PR of ``ready`` (``[(branch, record, number, how, docs)]``,
+    in wave order) the tick's merge budget has room for. Those ``how == READY_GATE`` are gated
+    first, all together on one combined head (:func:`gate_prs`); only the green are merged.
+    ``{branch: outcome}``."""
+    results = {}
+    room, why = lane.slots()
+    if room is not None and len(ready) > room:
+        for branch, _record, number, _how, _docs in ready[room:]:
+            out(f'waiting {branch}: PR #{number} green — no merge room this tick ({why})')
+            results[branch] = 'waiting'
+        ready = ready[:room]
+    if not ready:
+        return results
+    if dry_run:
+        for branch, _record, number, how, _docs in ready:
+            gate = 'gate locally and ' if how == READY_GATE else ''
+            out(f'DRY: would {gate}merge {branch} (PR #{number})')
+            results[branch] = 'dry'
+        return results
+    to_gate = [(b, r) for b, r, _n, how, _d in ready if how == READY_GATE]
+    docs = {b for b, _r, _n, _h, d in ready if d}
+    green = gate_prs(repo, state_dir, to_gate, conv, asf_repo, out, items, results, docs) \
+        if to_gate else set()
+    for branch, record, number, how, _docs in ready:
+        if how == READY_GATE and branch not in green:
+            continue
+        results[branch] = merge_ready(state_dir, branch, record, lane, number, out)
+    return results
+
+
+def gate_prs(repo, state_dir, entries, conv, asf_repo, out, items, results, docs=()):
+    """Gate ``entries`` (``[(branch, record)]``) as one combined head on the trunk, bisecting on
+    red (:func:`confirmed_group`); returns the branches confirmed green. A branch red on its own
+    is sent back (:func:`send_back`) — once the trunk alone is seen green, so no PR pays for a
+    red trunk. Every other outcome goes into ``results``."""
+    trunk = conv.main
+    held = []
+
+    def hold(entry, kind, text, files=(), own=False):
+        held.append((entry, kind, text, files))
+
+    holder = tempfile.mkdtemp(prefix='harvest-')
+    tmp = os.path.join(holder, 'wt')
+    try:
+        add = sh(['git', 'worktree', 'add', '--detach', tmp, f'origin/{trunk}'], cwd=repo)
+        if add.returncode != 0:
+            for branch, _record in entries:
+                out(f'held {branch}: worktree add failed: {tail(add.stderr)}')
+                results[branch] = 'held'
+            return set()
+        try:
+            landing_set, _sha, deferred = confirmed_group(tmp, trunk, entries, conv, asf_repo,
+                                                          hold, out, results)
+        except TrunkRed as red:
+            for branch, _record in entries:
+                out(f'waiting {branch}: {trunk} is red alone — {" ".join(red.modules)}')
+                results[branch] = 'waiting'
+            return set()
+        for branch, _record in deferred:
+            out(f'waiting {branch}: green alone, one merges ahead of it — gated on the new '
+                f'{trunk} next tick')
+            results[branch] = 'waiting'
+        trunk_red = None
+        for entry, kind, text, files in held:
+            if kind == 'gate' and not text.startswith(TIMED_OUT):
+                if trunk_red is None:  # once a tick, and only when something is red
+                    sh(['git', 'checkout', '-q', '--detach', f'origin/{trunk}'], cwd=tmp)
+                    trunk_red = not product_gate(tmp, conv, asf_repo, out)[0]
+                if trunk_red:
+                    out(f'waiting {entry[0]}: gate red, and {trunk} is red alone too — '
+                        f'gated again next tick')
+                    results[entry[0]] = 'waiting'
+                    continue
+            results[entry[0]] = send_back(repo, state_dir, entry, kind, text, files, conv, out,
+                                          items, entry[0] in docs)
+        return {branch for branch, _record in (landing_set or [])}
+    finally:
+        sh(['git', 'worktree', 'remove', '--force', tmp], cwd=repo)
+
+
+def send_back(repo, state_dir, entry, kind, text, files, conv, out, items, docs):
+    """Hand a PR the local gate refused back to a session. A code PR: its session, like a red
+    fast-forward gate (the red is its own — the trunk alone was green). A docs-only spec/plan
+    PR: a :data:`LANDING_GATE` correction, which the feeder turns into a STARVED → SPEC/PLAN
+    session on that branch, naming the failing gate line."""
+    branch, record = entry
+    if not docs or (kind == 'gate' and text.startswith(TIMED_OUT)):
+        card = (items or {}).get(item_of(branch, record)) or {}
+        return hold_with_correction(state_dir, branch, record, kind, text, out, files,
+                                    card.get('writes') or (),
+                                    touched_files(repo, conv.main, branch), conv, own=True,
+                                    read=gate_reader(repo, branch))
+    job = record.get('job') or branch
+    doc = conv.branch_kind(branch) or 'document'
+    what = 'does not rebase cleanly onto' if kind == 'conflict' else 'turns the gate red on'
+    note = (f'the {doc} {what} {conv.main} — {text}. Change the {doc} so the product gate '
+            f'passes on {conv.main}; nothing is merged until it does')
+    fields, line = lifecycle.hold(sessions_path(state_dir), dict(record, branch=branch, job=job),
+                                  LANDING_GATE, note, now_iso())
+    mark_session(state_dir, job, **fields)
+    out(line)
+    return 'held'
+
+
+def merge_ready(state_dir, branch, record, lane, number, out):
+    """Merge PR ``number`` (``--auto`` into a merge queue), and mark the session harvested."""
+    job = record.get('job') or branch
+    slug = lane.slug
     spent = lane.budget_left()
     if spent:
         out(f'waiting {branch}: PR #{number} green — {spent}')
         return 'waiting'
-    if dry_run:
-        out(f'DRY: would merge {branch} (PR #{number})')
-        return 'dry'
     if lane.has_queue():
         rc, _o, err = _gh(['pr', 'merge', str(number), '-R', slug, '--auto'])
         if rc != 0:
@@ -1353,6 +1637,7 @@ def land_pr(repo, state_dir, branch, record, lane, conv, docs, dry_run, out):
         out(f'held {branch}: PR #{number} merge refused — {how}')
         return 'held'
     lane.merged += 1
+    forget_missing(state_dir, branch)
     sha = merged_sha(slug, number) or f'PR #{number}'
     mark_session(state_dir, job, harvested=sha, correction=None)
     out(f'landed {branch} → PR #{number} {sha}')
@@ -1670,6 +1955,7 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
                 results[branch] = closed
     to_land = []
     lane = None
+    ready = []  # PRs its checks allow, merged after one local gate over them all
     for branch, record in cap_to_tick(pr_order(eligible, items) if slug else eligible, out, conv):
         item = item_of(branch, record)
         if has_adjudicate_commit(repo, trunk, branch):
@@ -1697,8 +1983,11 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
         if slug:
             lane = lane or PrLane(product, slug, trunk)
             docs = is_docs_branch(conv, branch, touched_files(repo, trunk, branch))
-            results[branch] = land_pr(repo, state_dir, branch, record, lane, conv, docs,
-                                      dry_run, out)
+            verdict = land_pr(repo, state_dir, branch, record, lane, conv, docs, dry_run, out)
+            if isinstance(verdict, tuple):  # its checks allow it: the local gate, or CI's
+                ready.append((branch, record, verdict[1], verdict[0], docs))
+            else:
+                results[branch] = verdict
             continue
         if mode == LANDING_PR:
             if not dry_run:
@@ -1714,6 +2003,11 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
                                       item_writes=((items or {}).get(item) or {}).get('writes') or ())
         else:
             to_land.append((branch, record))
+    if ready:
+        if asf_repo is None:
+            asf_repo = is_asf_repo(repo)
+        results.update(land_ready(repo, state_dir, ready, lane, conv, asf_repo, dry_run, out,
+                                  items=items))
     if to_land:  # B-0040: one gate over the combined head, bisecting on red
         results.update(land_combined(repo, state_dir, to_land, conv, asf_repo, dry_run, out,
                                      items=items))

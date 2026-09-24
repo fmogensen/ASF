@@ -63,6 +63,10 @@ PUSHED_LAND = 'PUSHED → LAND'
 APPROVED_LAND = 'APPROVED → LAND'
 #: the correction kind :mod:`asf.tick.land_spec` writes when the branch cannot land as it stands
 LAND_SPEC = 'land-spec'
+#: the correction kind harvest writes when a docs-only spec/plan PR turns the product's gate red
+#: on the trunk (:func:`asf.harvest.harvest.send_back`): a STARVED → SPEC/PLAN session changes
+#: the document on its own branch, with the failing gate line in its brief
+LANDING_GATE = 'landing-gate'
 WAITS_LANDING = 'WAITS ON landing'
 PLAN_CODE = 'PLAN → CODE'
 RESHAPE = 'RESHAPE → PLAN'
@@ -338,6 +342,14 @@ def correction_rows(items, product, busy, corrections):
         if c.get('kind') == LAND_SPEC:  # an approved spec that cannot land as it stands
             out.append(Row(tier=tier, kind=STARVED_SPEC, item_id=iid, feature_id=fid or iid,
                            action=LAUNCH, brief_kind='spec', branch=branch, reason=c['text']))
+            continue
+        doc = product.conventions.branch_kind(branch) if c.get('kind') == LANDING_GATE else None
+        if doc in ('spec', 'plan') and rounds < CORRECTION_ROUNDS:  # a document the gate refused
+            out.append(Row(tier=tier, kind=STARVED_SPEC if doc == 'spec' else STARVED_PLAN,
+                           item_id=iid, feature_id=fid or iid, action=LAUNCH, brief_kind=doc,
+                           branch=branch, correction=c['text'],
+                           reason=f"harvest held it ({c['kind']}), round {rounds}: the {doc} "
+                                  f"turns the gate red on the trunk"))
             continue
         if c.get('kind') == FOOTPRINT and c.get('verdict') != 'widen':
             out.append(footprint_row(item, product, c, tier, fid, branch))
@@ -688,7 +700,7 @@ def candidates(index, product, inflight, attempts=None, corrections=None, busy=N
         rows.append(gr)
     # a Task a correction row speaks for gets no PLAN → CODE row too: one session per branch
     tasks_spoken = {i for i in spoken if (items.get(i) or {}).get('type') == 'task'
-                    or (corrections or {}).get(i, {}).get('kind') == LAND_SPEC}
+                    or (corrections or {}).get(i, {}).get('kind') in (LAND_SPEC, LANDING_GATE)}
     rows += feature_rows(items, product, busy | tasks_spoken, running, landed_shas, unlanded,
                          open_branches)
     rows += undecided_rows(items, product, busy, decision_limit)

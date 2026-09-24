@@ -283,9 +283,10 @@ def context(product, row, kind, facts):
 
 
 def correction_text(row, kind):
-    """A ``correct`` brief ends with the failure the harvest recorded, under stall's head."""
+    """A ``correct`` brief — or a spec/plan brief a refused landing sent back — ends with the
+    failure the harvest recorded, under stall's head."""
     text = getattr(row, 'correction', '') or ''
-    return CORRECTION_HEAD + text.rstrip() if kind == 'correct' and text else ''
+    return CORRECTION_HEAD + text.rstrip() if kind in ('correct', 'spec', 'plan') and text else ''
 
 
 def build(product, row, index, inflight=None, repo_facts=None):

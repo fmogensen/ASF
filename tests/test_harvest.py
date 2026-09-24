@@ -1451,17 +1451,22 @@ class ProductHarvestTests(unittest.TestCase):
         data.update(extra)
         return env.Product('sample', data)
 
-    def fake_gh(self, checks, number=41, queue=False, auto=False):
+    def fake_gh(self, checks, number=41, queue=False, auto=False, required=None):
         """A ``gh`` answering ``checks`` (a ``gh pr checks --json`` list, or ``None``: no checks
         reported) for the one open PR ``number``, on the worker's current branch; a merge lands
         that branch on origin's main as the host would. ``queue``: the trunk has a merge queue;
-        ``auto``: the PR is already in it. Returns the list the calls are recorded in."""
+        ``auto``: the PR is already in it; ``required``: the checks the trunk's branch protection
+        requires (None: no protection). Returns the list the calls are recorded in."""
         calls = []
         state = {'merged': None}
 
         def gh(args):
             calls.append(list(args))
             head = sh(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], cwd=self.worker).stdout.strip()
+            if args[:1] == ['api'] and args[1].endswith('/required_status_checks'):
+                if required is None:
+                    return 1, '', 'gh: Branch not protected (HTTP 404)\n'
+                return 0, json.dumps({'contexts': list(required), 'checks': []}), ''
             if args[:2] == ['pr', 'list'] and 'merged' in args:
                 return 0, json.dumps([{'number': number, 'mergeCommit': {'oid': state['merged']}}]
                                      if state['merged'] else []), ''
@@ -1650,7 +1655,7 @@ class ProductHarvestTests(unittest.TestCase):
         results, lines = self.harvest(self.pr_product())
         self.assertEqual(results, {'fix/B-0001': 'queued'})
         self.assertEqual(self.merges(calls), [['pr', 'merge', '41', '-R', 'o/p', '--auto']])
-        self.assertEqual(lines, ['queued fix/B-0001: PR #41 added to the merge queue'])
+        self.assertEqual(lines[-1], 'queued fix/B-0001: PR #41 added to the merge queue')
         self.assertFalse(self.record('fix/B-0001').get('harvested'))
         # in the queue: the next tick does not enqueue it again
         calls = self.fake_gh([], queue=True, auto=True)
@@ -1728,6 +1733,165 @@ class ProductHarvestTests(unittest.TestCase):
                    ('worker/hotfix-T-0003', {})]
         self.assertEqual([b for b, _ in harvest.pr_order(entries, items)],
                          ['worker/hotfix-T-0003', 'fix/B-0002', 'fix/B-0001', 'worker/F-0009'])
+
+    # ---- the PR lane, native: green checks are not a green trunk ----------------------------
+
+    #: A trunk-only rule, as a product's CI runs it on the trunk alone: no plan may cite a name
+    #: the product does not know.
+    TRUNK_RULE = ("import glob, unittest\n\nclass Rule(unittest.TestCase):\n"
+                  "    def test_plans_cite_known_names(self):\n"
+                  "        for p in glob.glob('docs/plans/*.md'):\n"
+                  "            self.assertNotIn('unknown-name', open(p).read(), p)\n")
+
+    def add_trunk_rule(self):
+        sh(['git', 'checkout', '-q', '-B', 'rule', 'origin/main'], cwd=self.worker)
+        self.write(self.worker, 'checks/test_rule.py', self.TRUNK_RULE)
+        sh(['git', 'add', '-A'], cwd=self.worker)
+        sh(['git', 'commit', '-qm', 'the trunk rule'], cwd=self.worker)
+        sh(['git', 'push', '-q', 'origin', 'HEAD:main'], cwd=self.worker)
+
+    def pr_conv(self, **extra):
+        conv = {'test_command': PRODUCT_TEST, 'landing': 'pull-request',
+                'specs_dir': 'docs/specs', 'plans_dir': 'docs/plans', 'reviews_dir': '.in/reviews'}
+        conv.update(extra)
+        return self.pr_product(conventions=conv)
+
+    def test_a_docs_pr_green_on_a_trivial_check_but_red_on_the_local_gate_is_sent_back(self):
+        calls = self.fake_gh([{'name': 'DCO', 'bucket': 'pass'}])
+        self.add_trunk_rule()
+        before = self.origin_main()
+        self.push_plan({'docs/plans/f-0001.md': '# plan\ncites unknown-name\n'})
+        results, lines = self.harvest(self.pr_product())
+        self.assertEqual(results, {'plan/F-0001': 'held'}, lines)
+        self.assertEqual(self.merges(calls), [])
+        self.assertEqual(self.origin_main(), before)
+        rec = self.record('plan/F-0001')
+        self.assertEqual(rec['correction']['kind'], 'landing-gate')
+        self.assertIn('the plan turns the gate red on main', rec['correction']['text'])
+        self.assertIn('test_plans_cite_known_names', rec['correction']['text'])
+        self.assertFalse(rec.get('harvested'))
+        # the feeder hands it to a STARVED → PLAN session on that branch, the gate line in its brief
+        from asf.feeder import rows as feeder_rows
+        items = {'F-0001': {'id': 'F-0001', 'type': 'feature', 'state': 'Active'}}
+        corrections = lifecycle.corrections(harvest.sessions_path(self.state_dir))
+        rows, spoken = feeder_rows.correction_rows(items, self.pr_product(), set(), corrections)
+        self.assertEqual([(r.kind, r.brief_kind, r.branch) for r in rows],
+                         [(feeder_rows.STARVED_PLAN, 'plan', 'plan/F-0001')])
+        self.assertIn('test_plans_cite_known_names', rows[0].correction)
+        import importlib
+        brief_build = importlib.import_module('asf.briefs.build')
+        self.assertIn('test_plans_cite_known_names', brief_build.correction_text(rows[0], 'plan'))
+
+    def test_a_docs_pr_green_on_the_local_gate_is_merged(self):
+        calls = self.fake_gh([{'name': 'DCO', 'bucket': 'pass'}])
+        self.add_trunk_rule()
+        self.push_plan({'docs/plans/f-0001.md': '# plan\ncites known names only\n'})
+        results, lines = self.harvest(self.pr_product())
+        self.assertEqual(results, {'plan/F-0001': 'landed'}, lines)
+        self.assertIn('harvest: 1 branch(es), one gate', lines)
+        self.assertEqual(len(self.merges(calls)), 1)
+
+    def test_a_red_trunk_is_no_prs_fault_it_waits(self):
+        self.fake_gh([])
+        self.push_plan()
+        results, lines = self.harvest(self.pr_conv(
+            test_command=f'{sys.executable} -c "import sys; sys.exit(1)"'))
+        self.assertEqual(results, {'plan/F-0001': 'waiting'}, lines)
+        self.assertIn('waiting plan/F-0001: gate red, and main is red alone too — gated again '
+                      'next tick', lines)
+        self.assertFalse(self.record('plan/F-0001').get('correction'))
+
+    def test_a_code_pr_follows_the_same_rule(self):
+        calls = self.fake_gh([{'name': 'ci', 'bucket': 'pass'}])
+        self.push_fix(['approved'], extra={'checks/test_fx.py': RED_TEST})
+        results, lines = self.harvest(self.pr_product())
+        self.assertEqual(results, {'fix/B-0001': 'held'}, lines)
+        self.assertEqual(self.merges(calls), [])
+        rec = self.record('fix/B-0001')
+        self.assertEqual(rec['correction']['kind'], 'gate')
+        self.assertEqual(rec['rounds'], 1)
+
+    def test_a_required_check_missing_under_wait_waits(self):
+        calls = self.fake_gh([{'name': 'DCO', 'bucket': 'pass'}])
+        self.push_fix(['approved'])
+        product = self.pr_conv(landing_checks=['build'], landing_checks_missing='wait')
+        results, lines = self.harvest(product)
+        self.assertEqual(results, {'fix/B-0001': 'waiting'})
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith('waiting fix/B-0001: PR #41 required check(s) not '
+                                            'run — build (landing_checks_missing: wait, 0/30 min'),
+                        lines)
+        self.assertEqual(self.merges(calls), [])
+        self.assertEqual(self.harvest(product)[0], {'fix/B-0001': 'waiting'})  # still inside 30
+
+    def test_a_required_check_that_never_comes_falls_back_to_the_local_gate(self):
+        calls = self.fake_gh([{'name': 'DCO', 'bucket': 'pass'}])
+        self.push_fix(['approved'])
+        product = self.pr_conv(landing_checks=['build'], landing_checks_missing='wait',
+                               landing_checks_wait_min=0)
+        results, lines = self.harvest(product)
+        self.assertEqual(results, {'fix/B-0001': 'landed'}, lines)
+        self.assertIn('harvest: fix/B-0001: PR #41 required check(s) never ran in 0 min — build: '
+                      'gating locally', lines)
+        self.assertIn('harvest: 1 branch(es), one gate', lines)
+        self.assertEqual(len(self.merges(calls)), 1)
+
+    def test_under_wait_a_passed_required_check_merges_without_a_local_gate(self):
+        calls = self.fake_gh([{'name': 'build', 'bucket': 'pass'}], required=['build'])
+        self.push_fix(['approved'], extra={'checks/test_fx.py': RED_TEST})  # CI is the gate
+        results, lines = self.harvest(self.pr_conv(landing_checks_missing='wait'))
+        self.assertEqual(results, {'fix/B-0001': 'landed'}, lines)
+        self.assertFalse([l for l in lines if 'one gate' in l], lines)
+        self.assertEqual(len(self.merges(calls)), 1)
+
+    def test_landing_checks_missing_per_class(self):
+        """``{docs: local-gate, code: wait}``: path-filtered CI never runs its gate on a docs PR,
+        so that one is gated locally; a code PR waits for CI."""
+        policy = {'docs': 'local-gate', 'code': 'wait'}
+        calls = self.fake_gh([{'name': 'DCO', 'bucket': 'pass'}], required=['build'])
+        self.push_plan()
+        results, lines = self.harvest(self.pr_conv(landing_checks_missing=policy))
+        self.assertEqual(results, {'plan/F-0001': 'landed'}, lines)
+        self.assertEqual(len(self.merges(calls)), 1)
+        calls = self.fake_gh([{'name': 'DCO', 'bucket': 'pass'}], required=['build'])
+        self.push_fix(['approved'])
+        results, lines = self.harvest(self.pr_conv(landing_checks_missing=policy))
+        self.assertEqual(results, {'fix/B-0001': 'waiting'}, lines)
+        self.assertEqual(self.merges(calls), [])
+
+    def test_branch_protection_is_read_once_and_cached(self):
+        calls = self.fake_gh([{'name': 'DCO', 'bucket': 'pass'}], required=['build'])
+        self.push_fix(['approved'])
+        product = self.pr_conv(landing_checks_missing='wait')
+        self.harvest(product)
+        self.harvest(product)
+        self.assertEqual(len([c for c in calls if c[0] == 'api' and 'protection' in c[1]]), 1)
+
+    def test_missing_policy_reads_one_value_or_a_map(self):
+        conv = Conventions.from_mapping
+        self.assertEqual(harvest.missing_policy(conv({}), 'docs'), 'local-gate')
+        self.assertEqual(harvest.missing_policy(conv({'landing_checks_missing': 'wait'}), 'docs'),
+                         'wait')
+        both = conv({'landing_checks_missing': {'docs': 'local-gate', 'code': 'wait'}})
+        self.assertEqual(harvest.missing_policy(both, 'docs'), 'local-gate')
+        self.assertEqual(harvest.missing_policy(both, 'code'), 'wait')
+        self.assertEqual(harvest.missing_policy(conv({'landing_checks_missing': 'bogus'}), 'code'),
+                         'local-gate')
+
+    def test_every_mergeable_pr_is_gated_once_together(self):
+        """One local gate per tick over all the PRs ready to merge, never one each."""
+        lane = mock.Mock(slots=mock.Mock(return_value=(None, None)))
+        ready = [('plan/F-0001', {}, 41, harvest.READY_GATE, True),
+                 ('fix/B-0001', {}, 42, harvest.READY_GATE, False),
+                 ('fix/B-0002', {}, 43, harvest.READY_CI, False)]
+        with mock.patch.object(harvest, 'gate_prs', return_value={'plan/F-0001'}) as gate, \
+                mock.patch.object(harvest, 'merge_ready', return_value='landed') as merge:
+            results = harvest.land_ready(self.repo, self.state_dir, ready, lane,
+                                         Conventions(), False, False, lambda _l: None)
+        gate.assert_called_once()
+        self.assertEqual(gate.call_args[0][2], [('plan/F-0001', {}), ('fix/B-0001', {})])
+        self.assertEqual([c[0][1] for c in merge.call_args_list], ['plan/F-0001', 'fix/B-0002'])
+        self.assertEqual(results, {'plan/F-0001': 'landed', 'fix/B-0002': 'landed'})
 
     def test_a_docs_branch_already_handed_to_the_pr_lane_is_merged(self):
         """A docs branch an earlier harvest marked ``harvest: pr`` is not stranded there."""

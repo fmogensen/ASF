@@ -100,7 +100,8 @@ trunk, by `conventions.landing`:
     `review_pattern` file with the highest round, `{slug}` being the item id in lower case — has a
     `verdict: approved` line. A **spec or plan branch that only changes files under `specs_dir`,
     `plans_dir` and `reviews_dir` needs no review**: merging it is what approves its document;
-  - its checks are green (no checks at all counts as green).
+  - its checks are green (no checks at all counts as green);
+  - **the trunk stays green** — see *Green checks are not a green trunk* below.
 
   Then `gh pr merge --squash --delete-branch` (then `--merge`, then `--rebase` if the repo refuses
   one), or `--auto` when the trunk has a GitHub merge queue. Hotfix and S1 branches go first;
@@ -112,6 +113,52 @@ trunk, by `conventions.landing`:
 
 Unset, `landing` is derived from `steps.batch`: `off` or unset means `fast-forward`; a command
 means `pull-request`. Set `landing: pull-request` to get PRs without a `batch` step.
+
+#### Green checks are not a green trunk
+
+A product's CI is often path-filtered: its main gate job does not run on a docs-only PR, so a
+spec or plan PR is "green" on a trivial check alone (a sign-off check, say) — and a rule that
+runs only on the trunk can then reject what the document cites, turning the trunk red for every
+branch after it. So harvest never merges a PR on its checks alone:
+
+- **The local gate.** Every PR the rules above allow is gated on this machine first, the way
+  fast-forward landing gates a branch: its head rebased onto `origin/<main>`, then the product's
+  gate (`test_command`, and on asf's own repo its own checks). All the PRs mergeable in one
+  harvest are stacked into **one** combined head and gated **once**, bisecting on red; the gate
+  runs under the product's harvest lock, so never two at a time. Only a green head is merged.
+  A red one goes back: a code PR to its session (a correction, as a red fast-forward gate); a
+  docs-only spec or plan PR as a `STARVED → SPEC` / `STARVED → PLAN` session on its branch,
+  whose brief ends with the failing gate line. When the trunk alone is red too, no PR is blamed:
+  they wait for the next harvest.
+- **Required checks.** The checks named in `conventions.landing_checks: [job names]` — else the
+  ones the trunk's branch protection requires (read with `gh api`, cached for an hour) — must
+  have *run* and passed. One that did not run (path-filtered: absent, or skipped) is not green.
+  What harvest does then is `conventions.landing_checks_missing`:
+
+  | value | meaning |
+  | --- | --- |
+  | `local-gate` (default) | the local gate stands in for it — it runs for every PR anyway |
+  | `wait` | CI is the gate, not this machine: a PR whose required checks all ran and passed merges without a local gate; one missing a required check waits for it |
+
+  It takes one value, or a map per landing class — `docs` (a docs-only spec/plan PR) and `code`
+  (everything else), with `default:` for an unnamed class:
+
+  ```yaml
+  conventions:
+    landing_checks: [build]
+    landing_checks_missing: {docs: local-gate, code: wait}
+    landing_checks_wait_min: 30
+  ```
+
+  A `wait` never waits for ever: a required check with no run on the same PR head after
+  `landing_checks_wait_min` minutes (default 30) will not come — path filters never queue it —
+  and the PR is gated locally instead. With no required check declared there is nothing to wait
+  for, and the local gate runs.
+
+**A product whose gate is heavy** — minutes long, gigabytes of memory, a whole monorepo build —
+should set `landing_checks_missing: {docs: local-gate, code: wait}` (or plain `wait`) and name
+its CI gate job in `landing_checks`: code PRs then merge on CI's run of that job, and only what
+CI never gates (a docs PR its path filters skip) is gated here, one combined gate per harvest.
 
 ### What approves a spec or a plan
 
