@@ -206,6 +206,8 @@ class HookTest(unittest.TestCase):
             ('touch_security', 'Write',
              {'file_path': os.path.join(self.repo, hooks.RUNTIME_SETTINGS_GLOBS[0])}, None),
             ('touch_security', 'Bash', {'command': 'git commit --no-verify -m wip'}, None),
+            ('touch_security', 'Bash', {'command': 'git config core.hooksPath /dev/null'}, None),
+            ('touch_security', 'Bash', {'command': 'git config --unset core.hooksPath'}, None),
             ('touch_legal', 'Edit', {'file_path': os.path.join(self.repo, 'LICENSE')}, None),
             ('new_epic', 'Write',
              {'file_path': os.path.join(record, 'epics', 'E-0002.md')}, record),
@@ -219,6 +221,13 @@ class HookTest(unittest.TestCase):
                 self.assertIn(f'REFUSED {cls} (human-now) on {self.ITEM} — ', out)
                 self.assertIn(
                     f'asf approvals resolve {self.ITEM}/{cls} granted|done|dropped', out)
+
+    def test_reading_the_hooks_path_is_not_touching_security(self):
+        self.write_product(self.ALL_HUMAN_NOW)
+        for cmd in ('git config core.hooksPath', 'git config core.hooksPath; ls .githooks',
+                    'git config --get core.hooksPath && ls .git/hooks'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.call('Bash', {'command': cmd}), (0, ''))
 
     def test_signals_extend_a_class(self):
         target = {'file_path': os.path.join(self.repo, 'data', 'customers', 'list.csv')}

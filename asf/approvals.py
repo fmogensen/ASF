@@ -88,7 +88,10 @@ _PATH_GLOBS = {
 #: instead, since it needs the product's own `main` and `deploy_sha.workflow`.
 _COMMAND_PATTERNS = {
     'touch_security': (
-        r'\bgh\s+secret\b', r'\bgh\s+auth\b', r'\bgit\s+config\s+core\.hooksPath\b', r'--no-verify\b',
+        r'\bgh\s+secret\b', r'\bgh\s+auth\b',
+        # setting or unsetting the hooks path, not reading it (`git config core.hooksPath` prints it)
+        r'\bgit\s+config\s+(?:--(?:global|local|system|worktree|replace-all|add)\s+)*core\.hooksPath\s+[^\s;&|)]',
+        r'\bgit\s+config\s+(?:--\S+\s+)*--unset(?:-all)?\s+core\.hooksPath\b', r'--no-verify\b',
     ),
     'new_epic': (r'\basf\s+new\s+epic\b',),
     'file_bug': (r'\basf\s+new\s+bug\b',),
