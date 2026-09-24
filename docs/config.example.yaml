@@ -16,6 +16,7 @@ scheduler:
   # label_prefix: asf              # jobs are labelled <label_prefix>.<product>.<clock>
   # launchd_label: old.job.label   # a pre-ASF job the doctor reports until it is retired
   # legacy_labels: [old.job.*]     # pre-ASF jobs listed in the doctor's SCHEDULER section
+  # legacy_cron: /opt/old/tick      # a pre-ASF crontab line (substring); doctor is red while present
 
 # legacy_paths: directories of pre-ASF tools, for the doctor's one-factory check and cutover.
 # legacy_paths: [~/old-factory/bin]

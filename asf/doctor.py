@@ -18,6 +18,13 @@ configures — read-only, unlike ``asf hooks install`` (:func:`asf.hooks.ensure_
 writes the ones it finds missing; red names each missing or foreign one and the command that
 installs it.
 
+A ninth row, **approvals-hook** (:func:`check_approvals_hook`), is red when a worker account's
+sessions would run without the built-in ``approvals`` hook — no guard on human-now actions.
+
+The **scheduler** row is red while a pre-ASF job the operator config names
+(``scheduler.launchd_label``, ``scheduler.legacy_cron``) is still loaded or in the crontab: two
+factories would be ticking one product.
+
 A product with no PR host — ``ci: {provider: none}`` — needs no ``repo_slug`` and no ``gh``.
 
 Exit 1 if any required row is red; optional rows that are unavailable print ``skip``, not red.
@@ -95,22 +102,75 @@ def check_backlog(product):
     return ok, (d if ok else f'{d}: {detail or "not a git repo"}')
 
 
-def check_scheduler(cfg):
+def _legacy_cron_entries(sched):
+    """``scheduler.legacy_cron``: the fixed strings that pick out a pre-ASF crontab line (one
+    string or a list), exactly as the operator wrote them — nothing product-specific in code."""
+    raw = sched.get('legacy_cron') or []
+    raw = [raw] if isinstance(raw, str) else list(raw)
+    return [str(e).strip() for e in raw if str(e).strip()]
+
+
+def check_scheduler(cfg, run=None):
+    """(ok, detail) — no pre-ASF job the operator config names is still live beside ASF's own
+    jobs: two factories ticking one product is the failure this row exists for. Only what config
+    names is probed — ``scheduler.launchd_label`` (``launchctl list <label>``) and
+    ``scheduler.legacy_cron`` (lines of ``crontab -l`` containing an entry) — and a live one is
+    RED with the command that retires it, per its scheduler kind: ``launchctl bootout`` for the
+    label, a ``crontab`` rewrite for the cron line. ASF's own jobs are checked under SCHEDULER."""
     from asf.scheduler import CUTOVER_TOOL
+    run = run or _run
     sched = cfg.get('scheduler') or {}
     kind = sched.get('kind') or sched.get('provider') or 'launchd'
-    if kind != 'launchd':
-        return True, f'scheduler kind {kind!r} (not launchd; launchctl check skipped)'
-    # `launchd_label` names the PRE-ASF job the cutover script retires, not an ASF job: once it
-    # is gone the cutover is done, and the jobs ASF runs are checked under SCHEDULER
-    # (:func:`scheduler_rows`). Red here meant "the job we retired on purpose is retired".
     label = sched.get('launchd_label')
-    if not label:
-        return True, 'no pre-ASF job declared; ASF jobs are checked under SCHEDULER'
-    loaded, _ = _run(['launchctl', 'list', label])
-    if loaded:
-        return True, f'pre-ASF job {label} still loaded — retire it with {CUTOVER_TOOL}'
-    return True, f'pre-ASF job {label} retired; ASF jobs are checked under SCHEDULER'
+    cron_entries = _legacy_cron_entries(sched)
+    live, retired = [], []
+    if label:
+        loaded, _ = run(['launchctl', 'list', label])
+        if loaded:
+            live.append(f'pre-ASF launchd job {label} still loaded — retire it: '
+                        f'launchctl bootout gui/$(id -u)/{label} (or {CUTOVER_TOOL})')
+        else:
+            retired.append(f'pre-ASF job {label} retired')
+    if cron_entries:
+        try:
+            p = subprocess.run(['crontab', '-l'], capture_output=True, text=True, timeout=10)
+            lines = p.stdout.splitlines() if p.returncode == 0 else []
+        except (OSError, subprocess.TimeoutExpired):
+            lines = []
+        active = [ln for ln in lines if ln.strip() and not ln.lstrip().startswith('#')]
+        for entry in cron_entries:
+            if any(entry in ln for ln in active):
+                live.append(f'pre-ASF cron entry {entry!r} still in the crontab — retire it: '
+                            f"crontab -l | grep -vF '{entry}' | crontab -")
+            else:
+                retired.append(f'pre-ASF cron entry {entry!r} retired')
+    if live:
+        return False, '; '.join(live)
+    if retired:
+        return True, '; '.join(retired) + '; ASF jobs are checked under SCHEDULER'
+    if kind != 'launchd':
+        return True, f'scheduler kind {kind!r}: no pre-ASF job declared; ASF jobs are checked under SCHEDULER'
+    return True, 'no pre-ASF job declared; ASF jobs are checked under SCHEDULER'
+
+
+def check_approvals_hook(cfg, product):
+    """(ok, detail) — every worker account's sessions carry the built-in ``approvals`` hook (the
+    guard that refuses human-now actions), in the account's own settings or the product repo's
+    own project settings. Red names each account without it and the command that writes
+    it. No worker accounts, or the ``fake`` runtime (no agent session at all): nothing to guard.
+    Every other backend runs Claude Code sessions, so it is checked."""
+    accounts = pool.accounts_from_config(cfg)
+    if not accounts:
+        return True, 'no worker accounts configured (nothing to guard)'
+    backend = str(((cfg or {}).get('worker_pool') or {}).get('backend') or 'claude-code')
+    if backend.replace('-', '_') == 'fake':
+        return True, 'worker_pool.backend fake runs no agent session (nothing to guard)'
+    missing = hooks.approvals_missing(accounts, product.repo_dir)
+    if missing:
+        names = ', '.join(a.name for a in missing)
+        return False, (f'approvals hook missing for worker account(s) {names} — '
+                       f'asf hooks install --product {product.name}')
+    return True, f'approvals hook in {len(accounts)} worker accounts'
 
 
 # name -> (required, probe argv); required tools missing/failing are red, optional ones are skip
@@ -473,6 +533,8 @@ def run(product_name):
     rows.append(('approvals', True, ok, detail))
     ok, detail = check_redaction_hooks(product)
     rows.append(('redaction-hooks', True, ok, detail))
+    ok, detail = check_approvals_hook(cfg, product)
+    rows.append(('approvals-hook', True, ok, detail))
     ok, detail = check_drift(product)
     rows.append(('drift', True, ok, detail))
     ok, detail = check_rule_checks(product)

@@ -104,6 +104,7 @@ class TestCheckScheduler(unittest.TestCase):
         with mock.patch.object(doctor, '_run', return_value=(True, '')):
             ok, detail = doctor.check_scheduler(cfg)
         self.assertIn('retire it', detail)
+        self.assertFalse(ok)
 
 
 class TestCheckClockSteps(unittest.TestCase):
@@ -264,6 +265,128 @@ class RedactionHooksTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn('pre-push', detail)
         self.assertIn('foreign', detail)
+
+
+class ForeignGitHookStillGuardsTests(unittest.TestCase):
+    """A product repo with its own git hook: ``asf hooks install`` writes every hook it can —
+    the worker approvals hook above all — and only then refuses with NEEDS OPERATOR, non-zero.
+    The doctor's ``approvals-hook`` row is red while a worker account has no approvals hook."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='doctor_approvals_hook_')
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.repo = os.path.join(self.tmp, 'repo')
+        subprocess.run(['git', 'init', '-q', self.repo], check=True)
+        self.product = env.Product('sample', {'repo_dir': self.repo})
+        self.acct = os.path.join(self.tmp, 'acct')
+        self.cfg = {'worker_pool': {'accounts': [{'name': 'w1', 'config_dir': self.acct}]}}
+        self.which = lambda name: '/opt/bin/asf'
+
+    def _foreign_pre_push(self):
+        path = os.path.join(self.repo, '.git', 'hooks', 'pre-push')
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            f.write('#!/bin/sh\necho the product own hook\n')
+        return path
+
+    def test_foreign_pre_push_still_writes_the_approvals_hook_then_needs_operator(self):
+        foreign = self._foreign_pre_push()
+        rc, msg = hooks.install(self.product, rules_dir=os.path.join(self.tmp, 'none'),
+                                which=self.which, cfg=self.cfg)
+        self.assertEqual(rc, 2, msg)
+        self.assertIn(f'NEEDS OPERATOR: {foreign} is not asf', msg)
+        self.assertIn('approvals in 1 worker accounts', msg)
+        import json
+        with open(os.path.join(self.acct, 'settings.json')) as f:
+            pre = json.load(f)['hooks']['PreToolUse']
+        self.assertEqual(pre[0]['hooks'][0]['command'], '/opt/bin/asf hook approvals')
+        # the missing git hook beside the foreign one is still written; the foreign one untouched
+        self.assertTrue(os.path.isfile(os.path.join(self.repo, '.git', 'hooks', 'pre-commit')))
+        with open(foreign) as f:
+            self.assertIn('the product own hook', f.read())
+        ok, detail = doctor.check_approvals_hook(self.cfg, self.product)
+        self.assertTrue(ok, detail)
+
+    def test_doctor_is_red_when_the_approvals_hook_is_missing(self):
+        ok, detail = doctor.check_approvals_hook(self.cfg, self.product)
+        self.assertFalse(ok)
+        self.assertIn('w1', detail)
+        self.assertIn('asf hooks install --product sample', detail)
+        with mock.patch.object(doctor, 'check_config',
+                               return_value=(True, '', self.cfg, self.product)), \
+                mock.patch.object(doctor, 'check_cli_sessions', return_value=[]), \
+                mock.patch.object(doctor, 'check_drift', return_value=(True, '')):
+            rows = doctor.run('sample')
+        row = [r for r in rows if r[0] == 'approvals-hook'][0]
+        self.assertTrue(row[1])
+        self.assertFalse(row[2])
+        self.assertTrue(doctor.is_red(rows))
+
+    def test_the_hook_in_the_product_repo_settings_counts(self):
+        import json
+        path = os.path.join(self.repo, '.claude', 'settings.json')
+        os.makedirs(os.path.dirname(path))
+        with open(path, 'w') as f:
+            json.dump(hooks.merge({}, [('PreToolUse', 'approvals')], '/opt/bin/asf', None), f)
+        ok, detail = doctor.check_approvals_hook(self.cfg, self.product)
+        self.assertTrue(ok, detail)
+
+    def test_no_accounts_or_fake_backend_is_not_red(self):
+        self.assertTrue(doctor.check_approvals_hook({}, self.product)[0])
+        cfg = {'worker_pool': dict(self.cfg['worker_pool'], backend='fake')}
+        self.assertTrue(doctor.check_approvals_hook(cfg, self.product)[0])
+
+
+class LegacySchedulerJobTests(unittest.TestCase):
+    """The scheduler row is red while a pre-ASF job the config names is still live: a fake
+    ``launchctl`` / ``crontab`` on PATH stands in for the machine's."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='doctor_legacy_sched_')
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.bindir = os.path.join(self.tmp, 'bin')
+        os.makedirs(self.bindir)
+        patcher = mock.patch.dict(os.environ, {'PATH': self.bindir + os.pathsep + os.environ['PATH']})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _stub(self, name, body):
+        path = os.path.join(self.bindir, name)
+        with open(path, 'w') as f:
+            f.write('#!/bin/sh\n' + body)
+        os.chmod(path, 0o755)
+
+    def test_a_loaded_legacy_launchd_label_is_red_with_bootout(self):
+        self._stub('launchctl', '[ "$1" = list ] && [ "$2" = old.job ] && exit 0\nexit 113\n')
+        ok, detail = doctor.check_scheduler({'scheduler': {'kind': 'launchd', 'launchd_label': 'old.job'}})
+        self.assertFalse(ok)
+        self.assertIn('launchctl bootout gui/$(id -u)/old.job', detail)
+        ok, detail = doctor.check_scheduler({'scheduler': {'kind': 'launchd', 'launchd_label': 'gone.job'}})
+        self.assertTrue(ok, detail)
+
+    def test_a_present_legacy_cron_entry_is_red_with_crontab_removal(self):
+        self._stub('crontab', 'printf "# old-tick commented\\n*/5 * * * * /opt/old/old-tick run\\n"\n')
+        cfg = {'scheduler': {'kind': 'cron', 'legacy_cron': '/opt/old/old-tick'}}
+        ok, detail = doctor.check_scheduler(cfg)
+        self.assertFalse(ok)
+        self.assertIn("crontab -l | grep -vF '/opt/old/old-tick' | crontab -", detail)
+        ok, detail = doctor.check_scheduler({'scheduler': {'kind': 'cron', 'legacy_cron': ['old-tick']}})
+        self.assertFalse(ok)  # the commented line alone would not count; the live one does
+        ok, detail = doctor.check_scheduler({'scheduler': {'kind': 'cron', 'legacy_cron': ['nothere']}})
+        self.assertTrue(ok, detail)
+        self.assertIn('retired', detail)
+
+    def test_a_red_scheduler_row_makes_doctor_red(self):
+        self._stub('launchctl', 'exit 0\n')
+        cfg = {'scheduler': {'kind': 'launchd', 'launchd_label': 'old.job'}}
+        product = env.Product('sample', {})
+        with mock.patch.object(doctor, 'check_config', return_value=(True, '', cfg, product)), \
+                mock.patch.object(doctor, 'check_cli_sessions', return_value=[]), \
+                mock.patch.object(doctor, 'check_drift', return_value=(True, '')):
+            rows = doctor.run('sample')
+        row = [r for r in rows if r[0] == 'scheduler'][0]
+        self.assertFalse(row[2])
+        self.assertTrue(doctor.is_red(rows))
 
 
 class TestNoPrHost(unittest.TestCase):

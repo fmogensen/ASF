@@ -18,7 +18,8 @@ puts a ``pre-commit`` and a ``pre-push`` into ``git rev-parse --git-path hooks``
 ``exec``s ``asf redact --pre-commit|--pre-push --product <p>``. A hook file already there and
 already asf's is left alone; one already there and not asf's is left untouched too, and turns the
 whole call into a ``NEEDS OPERATOR`` refusal (D10) — no hook file asf did not write is ever
-edited or overwritten.
+edited or overwritten. That refusal is reported only after every other hook — the approvals hook
+above all — has been written: one refusal never skips the others.
 
 ``asf hook <name>`` runs a hook built into ``asf`` when :data:`BUILTIN` names it (``approvals``,
 :func:`asf.approvals.run_hook`), else ``tools/checks/<name>.sh`` (the record's, then the cwd's)
@@ -95,27 +96,28 @@ def ensure_git_hooks(product, which=shutil.which):
     repos = [r for r in (product.repo_dir, product.backlog_dir) if r]
     if not repos:
         return True, 'no repo_dir or backlog_dir configured'
-    foreign = None
+    refusals = []
     for repo in repos:
         hooks_dir = git_hooks_dir(repo)
         if hooks_dir is None:
-            return False, f'NEEDS OPERATOR: {repo} is not a git repo — asf hooks install cannot place its hooks there'
+            refusals.append(f'NEEDS OPERATOR: {repo} is not a git repo — asf hooks install '
+                            'cannot place its hooks there')
+            continue  # one refusal never skips the other repo's hooks
         for name in GIT_HOOK_NAMES:
             path = os.path.join(hooks_dir, name)
             if os.path.isfile(path):
                 with open(path, encoding='utf-8') as f:
                     text = f.read()
-                if not is_git_hook_ours(text, name) and foreign is None:
-                    foreign = (path, name)
+                if not is_git_hook_ours(text, name):
+                    refusals.append(f'NEEDS OPERATOR: {path} is not asf\'s — add the line: '
+                                    f'"{asf_path}" redact --{name} --product {product.name}')
                 continue
             os.makedirs(hooks_dir, exist_ok=True)
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(_git_hook_body(name, asf_path, product.name))
             os.chmod(path, 0o755)
-    if foreign:
-        path, name = foreign
-        return False, (f'NEEDS OPERATOR: {path} is not asf\'s — add the line: '
-                       f'"{asf_path}" redact --{name} --product {product.name}')
+    if refusals:
+        return False, '\n'.join(refusals)
     return True, f'pre-commit, pre-push in {len(repos)} repos'
 
 
@@ -202,31 +204,61 @@ def _write_merged(path, hooks, asf_path, product):
 def install(product, rules_dir=RULES_DIR, which=shutil.which, cfg=None):
     """Returns ``(rc, message)``. Rule hooks go to the product repo's own settings when any rule
     declares one (PD5); the approvals hook always goes into every worker account's settings
-    (§2.3), product-less, regardless. :func:`ensure_git_hooks` runs first — no session or
-    operator is left with Claude Code hooks but no push gate — and its result is folded into the
-    returned message; a foreign git hook turns the whole call into rc 2 (§2.4)."""
+    (§2.3), product-less, regardless; :func:`ensure_git_hooks` writes every missing git hook.
+
+    Every hook that *can* be written is written before anything is refused: a foreign git hook
+    or a missing ``repo_dir`` must never leave worker sessions without the approvals hook (the
+    guard that refuses human-now actions). Each refusal is then one ``NEEDS OPERATOR`` line after
+    the summary, and rc is 2 (§2.4)."""
     rule_hooks = declared_hooks(rules_dir)
     asf_path = which('asf')
     if not asf_path:
         return 2, 'NEEDS OPERATOR: asf is not on PATH — pipx install asf-factory'
     asf_path = os.path.abspath(asf_path)
-
-    git_ok, git_detail = ensure_git_hooks(product, which=which)
-    if not git_ok:
-        return 2, git_detail
-
-    if rule_hooks and not product.repo_dir:
-        return 2, f'NEEDS OPERATOR: product {product.name} has no repo_dir — set it in products/{product.name}.yaml'
-    repo_settings = os.path.join(product.repo_dir or '(no repo_dir)', '.claude', 'settings.json')
-    if rule_hooks:
-        _write_merged(repo_settings, rule_hooks, asf_path, product.name)
+    refusals = []
 
     accounts = pool.accounts_from_config(cfg or env.load_config())
     for account in accounts:
         _write_merged(account_settings_path(account), [('PreToolUse', 'approvals')], asf_path, None)
 
-    return 0, (f'hooks: {len(rule_hooks)} rule hooks in {repo_settings}; '
+    git_ok, git_detail = ensure_git_hooks(product, which=which)
+    if not git_ok:
+        refusals.append(git_detail)
+        git_detail = 'git hooks: NEEDS OPERATOR (below)'
+
+    repo_settings = os.path.join(product.repo_dir or '(no repo_dir)', '.claude', 'settings.json')
+    written = 0
+    if rule_hooks and not product.repo_dir:
+        refusals.append(f'NEEDS OPERATOR: product {product.name} has no repo_dir — '
+                        f'set it in products/{product.name}.yaml')
+    elif rule_hooks:
+        _write_merged(repo_settings, rule_hooks, asf_path, product.name)
+        written = len(rule_hooks)
+
+    summary = (f'hooks: {written} rule hooks in {repo_settings}; '
                f'approvals in {len(accounts)} worker accounts; {git_detail}')
+    if refusals:
+        return 2, '\n'.join([summary] + refusals)
+    return 0, summary
+
+
+def approvals_missing(accounts, repo_dir=None):
+    """The worker accounts whose sessions would run with no ``approvals`` PreToolUse hook: its
+    command is in neither the account's own settings file (:func:`account_settings_path`) nor,
+    when ``repo_dir`` is set, the product repo's ``.claude/settings.json``. Read-only — the
+    doctor's ``approvals-hook`` row; an unreadable file counts as one without the hook."""
+    def has(path):
+        try:
+            with open(path, encoding='utf-8') as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return False
+        groups = ((data if isinstance(data, dict) else {}).get('hooks') or {}).get('PreToolUse') or []
+        return any(_is_ours(h.get('command'), 'approvals', None)
+                   for g in groups if isinstance(g, dict)
+                   for h in (g.get('hooks') or []) if isinstance(h, dict))
+    in_repo = bool(repo_dir) and has(os.path.join(repo_dir, '.claude', 'settings.json'))
+    return [a for a in accounts if not in_repo and not has(account_settings_path(a))]
 
 
 def cmd_hooks(args):
