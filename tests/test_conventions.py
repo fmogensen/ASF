@@ -264,5 +264,19 @@ class ModuleConstantsTests(unittest.TestCase):
         self.assertEqual(conv_mod.DEFAULT_GATE_TIMEOUT_S, c.gate_timeout_s)
 
 
+class AmendableFieldsTests(unittest.TestCase):
+    def test_evals_dir_defaults_to_evals(self):
+        self.assertEqual(Conventions().evals_dir, 'evals')
+        self.assertEqual(Conventions.from_mapping({'evals_dir': 'qa'}).evals_dir, 'qa')
+
+    def test_amendable_paths_has_three_states(self):
+        self.assertIsNone(Conventions().amendable_paths)
+        self.assertIsNone(Conventions.from_mapping({}).amendable_paths)
+        self.assertIsNone(Conventions.from_mapping({'amendable_paths': None}).amendable_paths)
+        got = Conventions.from_mapping({'amendable_paths': ['a/*']}).amendable_paths
+        self.assertEqual(got, ['a/*'])
+        self.assertEqual(Conventions.from_mapping({'amendable_paths': []}).amendable_paths, [])
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -23,7 +23,9 @@ The product yaml carries the overrides::
         branches_per_tick: 3
         gate_timeout_s: 900       # default 600: a gate past it is killed and red (B-0072)
       amendable_paths: [rules/*, docs/CONSTITUTION.md]  # F-0031: a landed branch touching one
-                                                          # of these globs is merge_amendable_set
+                                                          # of these globs is merge_amendable_set;
+                                                          # unset = the defaults in asf/amendable.py,
+                                                          # [] = opt out (the set is empty)
 
 Unknown keys are kept (in :attr:`Conventions.extra`) rather than rejected: a product yaml is
 written by an operator and may carry conventions a module older than it does not read yet, and
@@ -90,6 +92,7 @@ DEFAULT_GATE_TIMEOUT_S = 600
 HARVEST_KEYS = {'gate': 'harvest_gate', 'branches_per_tick': 'branches_per_tick',
                 'gate_timeout_s': 'gate_timeout_s'}
 
+DEFAULT_EVALS_DIR = 'evals'      # where a product keeps its evals (F-0024: part of the amendable set)
 DEFAULT_BRIEFS_DIR = None        # where a product keeps brief documents on its trunk
 DEFAULT_MATRIX_PATH = None       # the parity matrix file, read for Story status
 DEFAULT_DESIGN_SPEC_NAME = None  # the one spec `asf migrate` reads as the design spec
@@ -158,6 +161,7 @@ class Conventions:
     branches_per_tick: int = DEFAULT_BRANCHES_PER_TICK
     gate_timeout_s: int = DEFAULT_GATE_TIMEOUT_S
     briefs_dir: str = DEFAULT_BRIEFS_DIR
+    evals_dir: str = DEFAULT_EVALS_DIR
     matrix_path: str = DEFAULT_MATRIX_PATH
     design_spec_name: str = DEFAULT_DESIGN_SPEC_NAME
     decisions_file: str = DEFAULT_DECISIONS_FILE
@@ -168,9 +172,10 @@ class Conventions:
     deploy_workflow: str = DEFAULT_DEPLOY_WORKFLOW
     stage_limits: dict = field(default_factory=dict)
     #: Globs (F-0031 §2.1) whose match makes a landed branch's merge class
-    #: `merge_amendable_set` rather than `merge_routine_pr` — the factory's own rules. Empty by
-    #: default: no branch is treated specially until an operator names one.
-    amendable_paths: list = field(default_factory=list)
+    #: `merge_amendable_set` rather than `merge_routine_pr` — the factory's own rules. Three
+    #: states (F-0024): unset (``None``) is the defaults in `asf/amendable.py`, a list is that
+    #: list, and ``[]`` is an opt-out — the set is empty.
+    amendable_paths: list = None
     #: Everything the yaml carried that is not a field above, kept verbatim.
     extra: dict = field(default_factory=dict)
 

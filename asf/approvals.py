@@ -25,7 +25,7 @@ import os
 import re
 import sys
 
-from asf import env, hooks
+from asf import amendable, env, hooks
 
 LEVELS = ('auto', 'groom', 'human-now')
 
@@ -78,8 +78,8 @@ CLASSES_BY_NAME = {c.name: c for c in CLASSES}
 #: carries `hooks.RUNTIME_SETTINGS_GLOBS` — the runtime adapter names its own path.
 _PATH_GLOBS = {
     'touch_security': (
-        '.env', '.env.*', '*.pem', '*.key', 'id_rsa*', 'id_ed25519*', '.githooks/*',
-    ),
+        '.env', '.env.*', '*.pem', '*.key', 'id_rsa*', 'id_ed25519*',
+    ) + hooks.GIT_HOOK_GLOBS,
     'touch_legal': ('LICENSE*', 'LICENCE*', 'COPYING*', 'NOTICE*', 'TERMS*', 'PRIVACY*'),
 }
 
@@ -266,9 +266,9 @@ def classify(product, tool_name, tool_input, cwd):
 def merge_class(product, files):
     """``(class, first matched file or None)`` — ``merge_amendable_set`` when any of ``files``
     (repo-relative, as :func:`asf.harvest.harvest.touched_files` returns them) matches
-    ``conventions.amendable_paths`` (the §2.1 glob rule, :func:`_match_glob`), else
+    ``amendable.paths(product)`` (the §2.1 glob rule, :func:`_match_glob`), else
     ``merge_routine_pr`` with no matched file."""
-    globs = list(product.conventions.amendable_paths or [])
+    globs = list(amendable.paths(product))
     for f in files:
         if any(_match_glob(g, f) for g in globs):
             return 'merge_amendable_set', f
@@ -728,7 +728,7 @@ def check_doctor(cfg, product):
     if blind:
         notes.append(f'held but unrecognisable — add approval_signals: {", ".join(blind)}')
 
-    if levels['merge_amendable_set'][0] != 'auto' and not product.conventions.amendable_paths:
+    if levels['merge_amendable_set'][0] != 'auto' and not amendable.paths(product):
         notes.append('merge_amendable_set is held but conventions.amendable_paths is empty —'
                      ' no branch can ever match it')
 

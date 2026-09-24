@@ -43,6 +43,16 @@ RULES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 #: exemption for the runtime settings path, so the path lives here, not in `asf/approvals.py`.
 RUNTIME_SETTINGS_GLOBS = ('.claude/settings.json', '.claude/settings.local.json')
 
+#: Where a product keeps its check scripts — the convention of `check_script`, named once for
+#: the amendable set (F-0024 §2.1) as well.
+CHECKS_DIR = 'tools/checks'
+
+#: The git hooks a product versions in its repo — the redaction gate's convention (F-0075).
+GIT_HOOK_GLOBS = ('.githooks/*',)
+
+#: The runtime's own role-agent files, project-level — the runtime adapter's convention.
+RUNTIME_AGENT_GLOBS = ('.claude/agents/*.md',)
+
 #: The hooks built into ``asf`` — ``{name: the events it answers}`` — run by :func:`cmd_hook`
 #: instead of a check script (F-0031 §2.3). A built-in name shadows a script of the same name.
 BUILTIN = {'approvals': ('PreToolUse',)}
@@ -281,7 +291,7 @@ def check_script(name, product_name=None, cwd=None):
             pass
     roots.append(cwd or os.getcwd())
     for root in roots:
-        path = os.path.join(root, 'tools', 'checks', f'{name}.sh')
+        path = os.path.join(root, *CHECKS_DIR.split('/'), f'{name}.sh')
         if os.path.isfile(path):
             return path
     return None

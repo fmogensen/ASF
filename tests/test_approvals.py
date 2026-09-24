@@ -348,6 +348,7 @@ def _product_yaml(extra=''):
 
 ALL_MAPPED = 'approvals:\n' + ''.join(f'  {c.name}: {c.default}\n' for c in approvals.CLASSES)
 AMENDABLE = 'conventions:\n  amendable_paths: [rules/*]\n'
+EMPTY_SET = 'conventions:\n  amendable_paths: []\n'
 
 
 class CliTest(unittest.TestCase):
@@ -515,8 +516,11 @@ class DoctorTest(unittest.TestCase):
             f'{len(approvals.CLASSES)} classes mapped, every held class has a recogniser')
 
     def test_an_empty_amendable_set_under_a_held_merge_class_is_named(self):
-        _ok, detail = self.check(ALL_MAPPED)
+        _ok, detail = self.check(ALL_MAPPED + EMPTY_SET)
         self.assertIn('amendable_paths is empty', detail)
+        # unset is the defaults in asf/amendable.py — a non-empty set, so the note is silent
+        _ok, detail = self.check(ALL_MAPPED)
+        self.assertNotIn('amendable_paths', detail)
         _ok, detail = self.check(ALL_MAPPED + AMENDABLE)
         self.assertNotIn('amendable_paths', detail)
         # auto: the class is never read, so an empty set says nothing
@@ -801,6 +805,28 @@ def load_tests(loader, standard_tests, pattern):
         own = {n for c in obj.__mro__ if c.__module__ == __name__ for n in vars(c)}
         suite.addTests(obj(n) for n in loader.getTestCaseNames(obj) if n in own)
     return suite
+
+
+class MergeClassDefaultSetTests(unittest.TestCase):
+    """`merge_class` reads `amendable.paths(product)` — the default set when the field is unset
+    (F-0024 §2.1), the named list when there is one, nothing when it is `[]`."""
+
+    def merge(self, extra, files):
+        return approvals.merge_class(_product_yaml(extra), files)
+
+    def test_an_unset_field_holds_a_branch_touching_the_default_set(self):
+        self.assertEqual(self.merge('', ['docs/x.md', 'rules/R-0042.md']),
+                         ('merge_amendable_set', 'rules/R-0042.md'))
+        self.assertEqual(self.merge('', ['.githooks/pre-commit'])[0], 'merge_amendable_set')
+
+    def test_an_unset_field_lets_a_routine_branch_land(self):
+        self.assertEqual(self.merge('', ['asf/cli.py']), ('merge_routine_pr', None))
+
+    def test_a_named_list_replaces_the_defaults(self):
+        self.assertEqual(self.merge(AMENDABLE, ['.githooks/pre-commit']), ('merge_routine_pr', None))
+
+    def test_an_empty_list_opts_out(self):
+        self.assertEqual(self.merge(EMPTY_SET, ['rules/R-0042.md']), ('merge_routine_pr', None))
 
 
 if __name__ == '__main__':
