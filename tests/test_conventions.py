@@ -282,6 +282,10 @@ class ModuleConstantsTests(unittest.TestCase):
         self.assertEqual(conv_mod.DEFAULT_SAVINGS, c.savings)
         self.assertEqual((conv_mod.DEFAULT_README, conv_mod.DEFAULT_README_FACTS),
                          (c.readme, c.readme_facts))
+        self.assertEqual(conv_mod.DEFAULT_OUTCOME_SHARE_PCT, c.outcome_share_pct)
+        self.assertEqual(conv_mod.DEFAULT_OUTCOME_MIN_SESSIONS, c.outcome_min_sessions)
+        self.assertEqual(conv_mod.DEFAULT_REPEAT_FAILURE_N, c.repeat_failure_n)
+        self.assertEqual(conv_mod.DEFAULT_IDLE_WAVE_TICKS, c.idle_wave_ticks)
 
 
 class AmendableFieldsTests(unittest.TestCase):
@@ -325,6 +329,24 @@ class SavingsDefaultsTests(unittest.TestCase):
         for key, default in conv_mod.DEFAULT_SAVINGS.items():
             if key != 'gate_minutes_max':
                 self.assertEqual(conv_mod.savings_for(c, key), default)
+
+
+class SelfBugThresholdTests(unittest.TestCase):
+    def test_the_defaults_are_ten_twenty_two_six(self):
+        c = Conventions()
+        self.assertEqual((c.outcome_share_pct, c.outcome_min_sessions,
+                          c.repeat_failure_n, c.idle_wave_ticks), (10, 20, 2, 6))
+
+    def test_a_product_overrides_two_and_the_other_two_keep_their_defaults(self):
+        c = Conventions.from_mapping({'outcome_share_pct': 25, 'idle_wave_ticks': 3})
+        self.assertEqual((c.outcome_share_pct, c.idle_wave_ticks), (25, 3))
+        self.assertEqual((c.outcome_min_sessions, c.repeat_failure_n), (20, 2))
+        self.assertEqual(c.extra, {})
+
+    def test_get_reads_as_the_attribute_does(self):
+        c = Conventions()
+        self.assertEqual(c.get('repeat_failure_n'), c.repeat_failure_n)
+        self.assertEqual(c['idle_wave_ticks'], c.idle_wave_ticks)
 
 
 if __name__ == '__main__':
