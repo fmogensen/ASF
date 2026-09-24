@@ -201,6 +201,12 @@ def build_parser():
     p_harvest.add_argument('--product')
     p_harvest.add_argument('--dry-run', action='store_true')
 
+    p_refine = sub.add_parser(
+        'refine-check', help='is any spec/plan branch a rewrite of the document on the trunk?')
+    p_refine.add_argument('--product')
+    p_refine.add_argument('--branch', help='check this one branch, not every spec/plan lane')
+    p_refine.add_argument('--json', action='store_true')
+
     p_pr_hygiene = sub.add_parser('pr-hygiene', help='sort open PRs into land/fix lanes')
     p_pr_hygiene.add_argument('--product')
 
@@ -423,6 +429,9 @@ def _main(argv=None):
         if args.product:
             harvest_args += ['--product', args.product]
         return harvest_main(harvest_args)
+    if args.command == 'refine-check':
+        from asf.harvest.refine import cmd_refine_check
+        return cmd_refine_check(args)
     if args.command == 'pr-hygiene':
         from asf.harvest.pr_hygiene import main as pr_hygiene_main
         pr_hygiene_args = ['--product', args.product] if args.product else []

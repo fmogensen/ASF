@@ -58,3 +58,37 @@ def verdict(before, after, ratio=DEFAULT_REWRITE_RATIO, path='the document', tru
             f"{deleted} of {len(old)} lines of {path} on {trunk} are deleted "
             f"({round(100 * deleted / len(old))} %) — that is a regeneration, not a refinement")
     return None
+
+
+def cmd_refine_check(args):
+    """``asf refine-check [--product P] [--branch B] [--json]``: :func:`asf.harvest.harvest.
+    refine_refusal` over every spec/plan lane branch on the product repo's origin — the refs the
+    checkout already has; nothing is fetched, so the rule runner's clock is not spent on the
+    network. One line per rewriting branch, exit 1 when there is one, silence and exit 0 when
+    there is none."""
+    import json
+
+    from asf import env
+    from asf.harvest import harvest
+
+    product = env.load_product(getattr(args, 'product', None))
+    conv, repo = product.conventions, product.repo_dir
+    if not repo:
+        print(f'refine-check: product {product.name} has no repo_dir — nothing to check')
+        return 0
+    branches = [args.branch] if getattr(args, 'branch', None) else harvest.remote_branches(repo, conv)
+    found = []
+    for branch in branches:
+        if conv.branch_kind(branch) not in ('spec', 'plan'):
+            continue
+        item = harvest.item_of(branch, None)
+        refusal = harvest.refine_refusal(repo, conv.main, branch, item, conv)
+        if refusal:
+            found.append({'branch': branch, 'document': harvest.deliverable_of(conv, branch, item),
+                          'kind': refusal[0], 'text': refusal[1]})
+    if getattr(args, 'json', False):
+        print(json.dumps(found, indent=2))
+    else:
+        for f in found:
+            print(f"{f['branch']} {f['document']}: {f['text']}")
+    return 1 if found else 0

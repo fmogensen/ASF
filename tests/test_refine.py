@@ -1,8 +1,15 @@
 """asf.harvest.refine: the verdict on a document that was regenerated instead of refined, and
 the harvest that holds such a spec/plan branch and hands it back as a correction (F-0023)."""
+import contextlib
+import json
+import io
+import os
+import stat
+import subprocess
+import sys
 import unittest
 
-from asf import briefs
+from asf import briefs, cli, env
 from asf.conventions import Conventions
 from asf.feeder import rows
 from asf.harvest import refine
@@ -202,6 +209,88 @@ class RewriteBounceTest(unittest.TestCase):
         held = self.held(lines)
         self.assertIn('merge commit on a lane branch', held[0])
         self.assertEqual(self.record('spec/F-0001')['correction']['kind'], 'merge')
+
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+class RefineCheckCommandTest(unittest.TestCase):
+    """``asf refine-check``: the verdict as a periodic check, over the branches the product's
+    checkout already has as remote-tracking refs."""
+    setUp = test_harvest.ProductHarvestTests.setUp
+    write = test_harvest.ProductHarvestTests.write
+    push_lane = test_harvest.ProductHarvestTests.push_lane
+    push_main = test_harvest.ProductHarvestTests.push_main
+
+    def prepare(self, *lanes):
+        """main carries the spec; each of ``lanes`` is (branch, text) pushed as a session would."""
+        self.push_main('spec(F-0001): the spec', {SPEC: document()})
+        for branch, text in lanes:
+            item = branch.split('/')[1]
+            self.push_lane(branch, [(f'spec({item}): the change', {f'docs/specs/{item.lower()}.md': text})])
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        home = os.path.join(self.base, 'home')
+        os.makedirs(os.path.join(home, 'products'))
+        with open(os.path.join(home, 'products', 'sample.yaml'), 'w', encoding='utf-8') as f:
+            f.write(f'product: sample\nrepo_dir: {self.repo}\nbacklog_dir: {self.base}\nmain: main\n'
+                    'ci:\n  provider: none\nsteps:\n  batch: off\n  daily: off\n')
+        self.home = home
+        old = env.ASF_HOME
+        env.ASF_HOME = home
+        self.addCleanup(setattr, env, 'ASF_HOME', old)
+
+    def check(self, *extra):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = cli.main(['refine-check', '--product', 'sample', *extra])
+        return rc, out.getvalue()
+
+    def test_it_names_every_rewriting_branch_and_exits_1(self):
+        self.prepare(('spec/F-0001', '# Spec\n\na\nb\n'),
+                     ('spec/F-0002', '# A different feature\n\n## Only heading\n'))
+        rc, out = self.check()
+        self.assertEqual(rc, 1, out)
+        lines = out.strip().splitlines()
+        self.assertEqual(len(lines), 1, out)
+        self.assertTrue(lines[0].startswith(f'spec/F-0001 {SPEC}: '), lines)
+        self.assertIn('anchor(s) the document on main carries are gone', lines[0])
+
+    def test_json_names_the_branch_and_the_document(self):
+        self.prepare(('spec/F-0001', '# Spec\n\na\nb\n'))
+        rc, out = self.check('--json')
+        self.assertEqual(rc, 1)
+        found = json.loads(out)
+        self.assertEqual([(f['branch'], f['document'], f['kind']) for f in found],
+                         [('spec/F-0001', SPEC, 'rewrite')])
+
+    def test_clean_lanes_exit_0(self):
+        self.prepare(('spec/F-0001', document() + '\n## Appendix\n\nmore\n'),
+                     ('spec/F-0002', '# A first draft\n'))
+        self.assertEqual(self.check(), (0, ''))
+
+    def test_one_branch_can_be_named(self):
+        self.prepare(('spec/F-0001', '# Spec\n\na\nb\n'))
+        self.assertEqual(self.check('--branch', 'spec/F-0009'), (0, ''))
+        self.assertEqual(self.check('--branch', 'spec/F-0001')[0], 1)
+
+    def test_the_shipped_rule_script_runs_it(self):
+        self.prepare(('spec/F-0001', '# Spec\n\na\nb\n'))
+        shim = os.path.join(self.base, 'bin')
+        os.makedirs(shim)
+        with open(os.path.join(shim, 'asf'), 'w', encoding='utf-8') as f:
+            f.write(f'#!/bin/sh\nexec {sys.executable} -m asf.cli "$@"\n')
+        os.chmod(os.path.join(shim, 'asf'), stat.S_IRWXU)
+        environ = dict(os.environ, ASF_HOME=self.home, ASF_PRODUCT='sample', PYTHONPATH=REPO_ROOT,
+                       PATH=shim + os.pathsep + os.environ['PATH'])
+        r = subprocess.run(['bash', os.path.join(REPO_ROOT, 'rules', 'refine-not-rewrite.sh')],
+                           env=environ, capture_output=True, text=True, cwd=self.base)
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertTrue(r.stdout.startswith(f'spec/F-0001 {SPEC}: '), r.stdout)
+        self.assertEqual(len(r.stdout.strip().splitlines()), 1)
+        environ.pop('ASF_PRODUCT')
+        r = subprocess.run(['bash', os.path.join(REPO_ROOT, 'rules', 'refine-not-rewrite.sh')],
+                           env=environ, capture_output=True, text=True, cwd=self.base)
+        self.assertNotEqual(r.returncode, 0)   # no product named: the script refuses, never guesses
 
 
 if __name__ == '__main__':

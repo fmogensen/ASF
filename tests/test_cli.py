@@ -54,6 +54,12 @@ class SubcommandListTests(unittest.TestCase):
         args = parser.parse_args(['idea', '--enrich', 'F-0002', '--tree', 't.md'])
         self.assertEqual((args.text, args.enrich), (None, 'F-0002'))
 
+    def test_refine_check_takes_a_product_a_branch_and_json(self):
+        args = cli.build_parser().parse_args(
+            ['refine-check', '--product', 'sample', '--branch', 'spec/F-0001', '--json'])
+        self.assertEqual((args.command, args.product, args.branch, args.json),
+                         ('refine-check', 'sample', 'spec/F-0001', True))
+
 
 class CapacityCommandTests(unittest.TestCase):
     def setUp(self):
