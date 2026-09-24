@@ -96,9 +96,29 @@ class TaskOrderTests(unittest.TestCase):
         order = plan_order.task_order(text)
         self.assertFalse(order[1] and order[2], order)
 
-    def test_card_ids_in_an_after_line_are_not_read_as_task_numbers(self):
+    def test_card_ids_in_an_after_line_pass_through_not_as_task_numbers(self):
         self.assertEqual(plan_order.task_order('### Task 1: a\n\n### Task 2: b\nafter: [T-0001]\n'),
-                         {1: [], 2: []})
+                         {1: [], 2: ['T-0001']})
+
+    def test_a_feature_id_on_the_after_line_is_kept(self):
+        self.assertEqual(plan_order.task_order('### Task 1: a\nafter: F-0091\n'), {1: ['F-0091']})
+
+    def test_a_task_number_and_a_card_id_on_one_line_are_both_kept(self):
+        self.assertEqual(plan_order.task_order('### Task 1: a\n\n### Task 2: b\nafter: Task 1, F-0091\n'),
+                         {1: [], 2: [1, 'F-0091']})
+
+    def test_a_card_id_in_dependency_prose_is_kept_beside_after_none(self):
+        text = ('### Task 1: a\n\n### Task 2: b\nafter: none\n\nThe part that waits: '
+                '**F-0091 must land first**. It also depends on B-0012.\n')
+        self.assertEqual(plan_order.task_order(text), {1: [], 2: ['B-0012', 'F-0091']})
+
+    def test_a_card_id_quoted_in_code_is_not_a_dependency(self):
+        text = '### Task 1: a\nafter: none\n\nthe row reads `WAITS ON T-0029`, `depends on B-0031`.\n'
+        self.assertEqual(plan_order.task_order(text), {1: []})
+
+    def test_a_plan_task_id_naming_its_own_numbering_is_that_task(self):
+        text = '### Task 14650: a\n\n### Task 14651: b\nafter: [T-14650]\n'
+        self.assertEqual(plan_order.task_order(text), {14650: [], 14651: [14650]})
 
 
 class RecordCase(unittest.TestCase):
@@ -157,6 +177,24 @@ class BackfillTests(RecordCase):
         self.assertEqual(self.lines, ['plan-order: T-0012: after: [T-0010, T-0011] (from docs/plans/f-0001.md)'])
         self.assertEqual(self.backfill(), {})  # idempotent
 
+    def test_an_open_card_gains_the_feature_its_plan_waits_on(self):
+        # minted when the parser dropped card ids: `after: none` on the card, F-0091 in the plan
+        write_item(self.root, 'F-0091', 'feature', 'The prerequisite', parent='E-0001')
+        text = WAVES_PLAN.replace('writes: c.py\n', 'writes: c.py\nafter: Task 1, F-0091\n')
+        written = plan_order.backfill(self.root, lambda path: text, out=self.lines.append)
+        self.assertEqual(written, {'T-0012': ['T-0010', 'F-0091']})
+        text = WAVES_PLAN.replace('writes: d.py\nafter: Task 1', 'writes: d.py\nafter: none\n\n'
+                                  '**F-0091 must land first**.')
+        written = plan_order.backfill(self.root, lambda path: text, out=self.lines.append)
+        self.assertEqual(written, {'T-0013': ['F-0091']})  # it had `after: []`: only the card id
+        self.assertEqual(read(self.root, 'task', 'T-0013')[0]['after'], ['F-0091'])
+        self.assertEqual(plan_order.backfill(self.root, lambda path: text, out=self.lines.append), {})
+
+    def test_a_card_id_the_record_does_not_hold_is_not_written(self):
+        text = WAVES_PLAN.replace('writes: d.py\nafter: Task 1', 'writes: d.py\nafter: F-0999')
+        self.assertEqual(plan_order.backfill(self.root, lambda path: text, out=self.lines.append),
+                         {'T-0012': ['T-0010', 'T-0011']})
+
     def test_an_unreadable_plan_writes_nothing(self):
         self.assertEqual(plan_order.backfill(self.root, lambda path: None, out=self.lines.append), {})
 
@@ -201,3 +239,24 @@ class GuardTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+    def test_a_feature_in_after_holds_the_row_until_it_is_done(self):
+        items = dict(self.ITEMS, **{'F-0091': {'id': 'F-0091', 'type': 'feature', 'title': 'p',
+                                                'state': 'Active', 'stage': 'plan-approved'}})
+        plan = TABLE_PLAN.replace('writes: b.py\n', 'writes: b.py\nafter: F-0091\n')
+        items = dict(items, **{'T-0001': dict(items['T-0001'], state='Closed')})
+        held = plan_order.overlay(items, lambda path: plan)
+        self.assertEqual(held['T-0002']['after'], ['F-0091'])
+        rows = feeder_rows.hold_unlanded(feeder_rows.task_rows(held, None, held['F-0001'], set(), []), held)
+        row = {r.item_id: r for r in rows}['T-0002']
+        self.assertEqual((row.action, row.reason), ('WAITS ON F-0091', 'after: F-0091 has not landed'))
+        self.assertFalse(row.launches)
+        done = dict(held, **{'F-0091': dict(held['F-0091'], state='Closed', stage='landed')})
+        rows = feeder_rows.hold_unlanded(feeder_rows.task_rows(done, None, done['F-0001'], set(), []), done)
+        self.assertTrue({r.item_id: r for r in rows}['T-0002'].launches)
+
+    def test_overlay_adds_a_plan_card_id_to_a_card_that_has_after(self):
+        items = dict(self.ITEMS, **{'F-0091': {'id': 'F-0091', 'type': 'feature', 'state': 'Active'},
+                                    'T-0002': dict(self.ITEMS['T-0002'], after=[])})
+        plan = TABLE_PLAN.replace('writes: b.py\n', 'writes: b.py\nafter: Task 1, F-0091\n')
+        self.assertEqual(plan_order.overlay(items, lambda path: plan)['T-0002']['after'], ['F-0091'])

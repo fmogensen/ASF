@@ -9,7 +9,9 @@ nothing. This module reads the order and turns it into card ids:
 
 - a Task's own statement wins (its ``after:`` line, then its prose, then its table row);
 - otherwise a Task in wave N runs after every Task of wave N-1;
-- a plan that states no order at all leaves its Tasks unordered (parallel), as before.
+- a plan that states no order at all leaves its Tasks unordered (parallel), as before;
+- a card id the section names (``after: F-0091``, ``F-0091 must land first``) is kept as-is,
+  beside the Task numbers: the wave holds the Task until that card is in a done state.
 
 Three callers: the minter (new cards), :func:`backfill` (open cards minted before this, run by the
 tick's record step, idempotent, written through the parser), and :func:`overlay` (the wave's
@@ -28,6 +30,14 @@ INDEPENDENT_RE = re.compile(r'\b(?:independent\s+of|depends\s+on\s+(?:nothing|ne
 NONE_RE = re.compile(r'^\s*(?:none|nothing|-+|—|–|\[\s*\])?\s*(?:#.*)?$', re.IGNORECASE)
 WAVE_ORDER_RE = re.compile(r'^.*\bwave\s+order\b[^:\n]*:\s*(.+)$', re.IGNORECASE | re.MULTILINE)
 ARROW_RE = re.compile(r'→|->|⟶|=>')
+CARD_ID_RE = re.compile(r'\b[A-Z]-\d{4,}\b')
+_MARK = r'[\s*_`\[(]*'
+_IDS = r'([A-Z]-\d{4,}(?:[\s*_`\])]*(?:,|and|&|\+)[\s*_`\[(]*[A-Z]-\d{4,})*)'
+CARD_DEPENDS_RE = re.compile(r'\b(?:runs\s+after|starts\s+after|comes\s+after|lands\s+after|'
+                             r'depends\s+on|builds\s+on)' + _MARK + _IDS, re.IGNORECASE)
+CODE_RE = re.compile(r'```.*?```|`[^`\n]*`', re.DOTALL)  # a quoted row or golden is not prose
+CARD_FIRST_RE = re.compile(_IDS + r'[\s*_`\])]*(?:must|has\s+to|needs\s+to|to)?\s*lands?\s+first\b',
+                           re.IGNORECASE)
 
 
 def _nums(text):
@@ -39,15 +49,32 @@ def _nums(text):
     return [int(n) for n in dict.fromkeys(out)]
 
 
-def _explicit(body):
-    """The predecessors a Task's own section states: a list (maybe empty), or None if silent."""
+def _card_ids(body):
+    """The card ids (``F-0091``, ``T-0012``…) a Task's section names as prerequisites: on its
+    ``after:`` line, or in its dependency prose (``depends on F-0091``, ``F-0091 must land
+    first``) outside code spans — a ``WAITS ON T-0029`` a test expects is not a dependency. They are not plan Task numbers: they pass through as-is, and the wave holds the
+    Task until each is in a done state (:func:`asf.feeder.rows.hold_unlanded`)."""
+    out = []
     m = AFTER_LINE_RE.search(body or '')
-    if m and not re.search(r'\b[A-Z]-\d', m.group(1)):  # card ids are not plan Task numbers
-        value = m.group(1)
-        nums = _nums(value) or [int(n) for n in re.findall(r'\b\d+\b', value.split('#')[0])]
+    if m:
+        out += CARD_ID_RE.findall(m.group(1).split('#')[0])
+    prose = CODE_RE.sub(' ', body or '')
+    for rx in (CARD_DEPENDS_RE, CARD_FIRST_RE):
+        for dm in rx.finditer(prose):
+            out += CARD_ID_RE.findall(dm.group(1))
+    return list(dict.fromkeys(out))
+
+
+def _explicit(body):
+    """The plan-Task predecessors a Task's own section states: a list (maybe empty), or None if
+    silent. Card ids are read by :func:`_card_ids`, never as Task numbers."""
+    m = AFTER_LINE_RE.search(body or '')
+    if m:
+        value = CARD_ID_RE.sub(' ', m.group(1).split('#')[0])
+        nums = _nums(value) or [int(n) for n in re.findall(r'\b\d+\b', value)]
         if nums:
             return nums
-        if NONE_RE.match(value):
+        if NONE_RE.match(value) or CARD_ID_RE.search(m.group(1)):
             return []
     deps = []
     for dm in DEPENDS_RE.finditer(body or ''):
@@ -106,7 +133,8 @@ def _wave_order(plan_text):
 
 
 def task_order(plan_text):
-    """{task number: [predecessor task numbers]} for every ``### Task N:`` of the plan."""
+    """{task number: [predecessors]} for every ``### Task N:`` of the plan: plan Task numbers
+    (ints), then the card ids the section names (strings, e.g. ``'F-0091'``)."""
     from asf.tick.migrate import plan_task_records
     records = plan_task_records(plan_text or '')
     nums = []
@@ -132,6 +160,16 @@ def task_order(plan_text):
             preds = sorted(k for k, v in waves.items() if w and v == w - 1)
         # an edge that would close a cycle is dropped: a cycle waits for ever, and says nothing
         out[n] = [p for p in preds if p in known and p != n and not _reaches(out, p, n)]
+    for n in nums:
+        for c in _card_ids(bodies[n]):
+            # ``T-14650`` in a plan whose Tasks are numbered 14650… is that plan Task, not a card
+            digits = c.split('-', 1)[1]
+            if c.startswith('T-') and str(int(digits)) == digits and int(digits) in known:
+                c = int(digits)
+                if c == n or _reaches(out, c, n):
+                    continue
+            if c not in out[n]:
+                out[n].append(c)
     return out
 
 
@@ -144,7 +182,7 @@ def _reaches(graph, start, goal):
             return True
         if k not in seen:
             seen.add(k)
-            stack.extend(graph.get(k, ()))
+            stack.extend(p for p in graph.get(k, ()) if isinstance(p, int))
     return False
 
 
@@ -166,17 +204,41 @@ def task_ids(records, cards):
     return out
 
 
-def derived_after(plan_text, cards):
-    """{card id: [predecessor card ids]} for the cards of one plan (``cards``: {id: meta})."""
+def derived_after(plan_text, cards, known=None):
+    """{card id: [predecessor card ids]} for the cards of one plan (``cards``: {id: meta}).
+    Plan Task numbers resolve to their cards; a card id the plan names passes through as-is,
+    unless it is the card itself or its own parent (that would wait for ever), or ``known`` (the
+    ids the record holds) is given and does not hold it."""
     from asf.tick.migrate import plan_task_records
     records = plan_task_records(plan_text or '')
     ids = task_ids(records, cards)
     out = {}
     for n, preds in task_order(plan_text).items():
         cid = ids.get(n)
-        if cid:
-            out[cid] = [ids[p] for p in preds if p in ids]
+        if not cid:
+            continue
+        parent = (cards.get(cid) or {}).get('parent')
+        after = []
+        for p in preds:
+            if isinstance(p, int):
+                p = ids.get(p)
+            elif p in (cid, parent) or (known is not None and p not in known):
+                p = None
+            if p and p not in after:
+                after.append(p)
+        out[cid] = after
     return out
+
+
+def _missing(order, cards, cid, meta):
+    """What to write on ``cid``: the whole derived order if it carries no ``after:``; else only the
+    card ids from outside the plan it lacks (a card minted when the parser dropped them)."""
+    preds = order.get(cid) or []
+    if 'after' not in meta:
+        return preds
+    have = meta.get('after') or []
+    extra = [p for p in preds if p not in cards and p not in have]
+    return list(have) + extra if extra else []
 
 
 def trunk_reader(product):
@@ -194,8 +256,9 @@ def _plan_cards(items, plan_path):
 
 
 def backfill(root, read_plan, out=print, only=None):
-    """Write ``after:`` onto every open Task card of a plan that has none. Idempotent: a card that
-    already carries ``after:`` (even ``[]``) is left alone. ``read_plan(path)`` → text or None.
+    """Write ``after:`` onto every open Task card of a plan that has none, and add to an open card
+    that has one the card ids its plan names that it lacks (``after: F-0091``: cards minted when
+    the parser dropped them). Idempotent: nothing else on an existing ``after:`` is touched. ``read_plan(path)`` → text or None.
     Writes go through :func:`asf.record.setfield.set_typed` (the parser round-trip).
     Returns {card id: [after ids]} for the cards written."""
     from asf.record.core import canonicalize, load_items
@@ -210,16 +273,16 @@ def backfill(root, read_plan, out=print, only=None):
     written = {}
     for path in plans:
         cards = _plan_cards(metas, path)
-        todo = [i for i, m in cards.items() if 'after' not in m and m.get('state', 'New') not in DONE_STATES
+        todo = [i for i, m in cards.items() if m.get('state', 'New') not in DONE_STATES
                 and (only is None or i in only)]
         if not todo:
             continue
         text = read_plan(path)
         if not text:
             continue
-        order = derived_after(text, cards)
+        order = derived_after(text, cards, known=set(metas))
         for cid in sorted(todo):
-            preds = order.get(cid)
+            preds = _missing(order, cards, cid, cards[cid])
             if not preds:
                 continue
             err = set_typed(canonical[cid], {'after': preds})
@@ -232,14 +295,13 @@ def backfill(root, read_plan, out=print, only=None):
 
 
 def overlay(items, read_plan):
-    """The wave's guard: ``items`` with a derived ``after:`` on every open Task that lacks one.
-    Never writes; a plan that cannot be read changes nothing. Returns a new dict."""
+    """The wave's guard: ``items`` with a derived ``after:`` on every open Task that lacks one, and
+    the plan's card ids added to one that has one without them. Never writes; a plan that cannot be read changes nothing. Returns a new dict."""
     from asf.feeder.rows import DONE_STATES
     plans = {}
     for i, m in items.items():
         path = (m.get('links') or {}).get('plan')
-        if (m.get('type') == 'task' and path and 'after' not in m
-                and m.get('state', 'New') not in DONE_STATES):
+        if m.get('type') == 'task' and path and m.get('state', 'New') not in DONE_STATES:
             plans.setdefault(path, []).append(i)
     if not plans:
         return items
@@ -251,8 +313,10 @@ def overlay(items, read_plan):
             text = None
         if not text:
             continue
-        order = derived_after(text, _plan_cards(items, path))
+        cards = _plan_cards(items, path)
+        order = derived_after(text, cards, known=set(items))
         for i in ids:
-            if order.get(i):
-                items[i] = dict(items[i], after=order[i])
+            preds = _missing(order, cards, i, items[i])
+            if preds:
+                items[i] = dict(items[i], after=preds)
     return items
