@@ -36,14 +36,28 @@ is ``ceil(usable / active)`` — ``active`` counting the products whose wave is 
 clock (:func:`wave_active`), this one always among them. With one active product, or no pool
 accounts configured, there is no share. A product over its share keeps its running sessions; the
 feeder only stops handing it new slots (``free_slots`` never goes below zero).
+
+**Borrowing.** The share is work-conserving: what another active product leaves idle is lent
+to this one. Each wave records its product's *demand* (:func:`write_demand`: its sessions in
+flight and the launching rows it would start given room) in ``state/<name>/demand.json``; a
+partner's *claim* is ``min(its share, its in-flight now + its wanted rows)``, and the rest of its
+share is borrowable. A partner with no fresh record (older than :data:`DEMAND_FRESH_S`, or none)
+claims its whole share — nothing is lent on a guess. A partner that wakes records its demand on
+its next wave, its claim rises, and the borrower's share falls back: the borrower keeps its
+running sessions and gets no new slot until the lender has its own.
 """
 import dataclasses
+import datetime
+import json
 import math
+import os
 import subprocess
 
 from asf import env
 
 DEFAULT_SESSIONS = 4
+DEMAND_FRESH_S = 30 * 60   # a partner's demand record older than this lends nothing
+DEMAND_FILE = 'demand.json'
 DEFAULT_RESERVE = {'local': 1, 'cloud': 1}
 CI_TIMEOUT_S = 30
 
@@ -61,14 +75,16 @@ class Resolved:
     fair_share: object = None   # int | None: this product's share of the usable pool
     usable: object = None       # int | None: the slots the pool can take now
     active: int = 1             # products with an active wave, this one included
+    borrowed: int = 0           # of fair_share: the slots lent by idle partners
 
     @property
     def fair_share_reason(self):
         """The wave's reason for a row the share holds back, ``''`` when no share applies."""
         if self.fair_share is None:
             return ''
+        lent = f', {self.borrowed} borrowed from idle products' if self.borrowed else ''
         return (f'fair share: {self.fair_share} of {self.usable} usable slots across '
-                f'{self.active} products')
+                f'{self.active} products{lent}')
 
 
 def _product_capacity(product):
@@ -197,10 +213,61 @@ def _weight_of(name, product):
         return 1
 
 
+def _demand_path(name):
+    return os.path.join(env.state_dir(name), DEMAND_FILE)
+
+
+def _now():
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def write_demand(name, inflight, wanted):
+    """Record ``name``'s demand on the pool: ``inflight`` sessions and ``wanted`` launching rows
+    it would start given room. Written by every wave; read by the partners' :func:`fair_share`.
+    A write that fails is ignored — a missing record lends nothing."""
+    rec = {'at': _now().strftime('%Y-%m-%dT%H:%M:%SZ'), 'inflight': int(inflight),
+           'wanted': int(wanted)}
+    path = _demand_path(name)
+    try:
+        tmp = path + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(rec, f, sort_keys=True)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def read_demand(name, now=None):
+    """``name``'s ``wanted`` rows from its fresh demand record, else ``None`` (none, unreadable,
+    or older than :data:`DEMAND_FRESH_S`)."""
+    try:
+        with open(_demand_path(name), encoding='utf-8') as f:
+            rec = json.load(f)
+        at = datetime.datetime.strptime(rec['at'], '%Y-%m-%dT%H:%M:%SZ').replace(
+            tzinfo=datetime.timezone.utc)
+        wanted = int(rec['wanted'])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if ((now or _now()) - at).total_seconds() > DEMAND_FRESH_S:
+        return None
+    return max(0, wanted)
+
+
+def claim(name, share):
+    """The slots of its ``share`` a partner holds or wants now: ``min(share, in flight + wanted)``,
+    its whole share when its demand is unknown."""
+    wanted = read_demand(name)
+    if wanted is None:
+        return share
+    return min(share, inflight_sessions(name) + wanted)
+
+
 def fair_share(product, cfg, quota_source=None):
-    """``(share, usable, active)``, or ``None`` when fewer than two products are active or the
-    pool has no accounts. The share is ``ceil(usable × weight / Σ weights)`` over the active
-    products (every weight 1 unless a product file sets ``capacity.weight``)."""
+    """``(share, usable, active, borrowed)``, or ``None`` when fewer than two products are active
+    or the pool has no accounts. The base share is ``ceil(usable × weight / Σ weights)`` over the
+    active products (every weight 1 unless a product file sets ``capacity.weight``); ``borrowed``
+    is what the partners' shares hold beyond their :func:`claim`, added to it, and the whole never
+    exceeds ``usable``."""
     active = active_products(product.name)
     if len(active) < 2:
         return None
@@ -208,7 +275,15 @@ def fair_share(product, cfg, quota_source=None):
     if usable is None:
         return None
     total = sum(_weight_of(n, product) for n in active)
-    return math.ceil(usable * product_weight(product) / total), usable, len(active)
+    share = math.ceil(usable * product_weight(product) / total)
+    idle = 0
+    for other in active:
+        if other == product.name:
+            continue
+        theirs = math.ceil(usable * _weight_of(other, product) / total)
+        idle += max(0, theirs - claim(other, theirs))
+    borrowed = max(0, min(share + idle, usable) - share)
+    return share + borrowed, usable, len(active), borrowed
 
 
 def batch_shape(product, cfg):
@@ -341,4 +416,5 @@ def resolve(product, cfg=None, ci_source=None, quota_source=None):
         ceiling=bounded,
         fair_share=share[0] if share is not None and sessions_bound == 'fair share' else None,
         usable=share[1] if share is not None else None,
-        active=share[2] if share is not None else 1)
+        active=share[2] if share is not None else 1,
+        borrowed=share[3] if share is not None and sessions_bound == 'fair share' else 0)

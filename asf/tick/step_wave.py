@@ -11,8 +11,10 @@
 3. ``feeder.plan_rows(index, product, inflight, capacity)`` — ``capacity`` is the resolver's
    ceiling (``asf.capacity.resolve``, spec §2.2's session law, bounded by the product's fair
    share of the usable pool); the feeder still takes this product's in-flight sessions off it
-   itself (P5). Each launching row the fair share cut prints ``waits … — fair share: <n> of
-   <usable> usable slots across <k> products``;
+   itself (P5). A row on an item a hold parks is planned but takes no slot (it waits for a
+   person). Each launching row the fair share cut prints ``waits … — fair share: <n> of
+   <usable> usable slots across <k> products``; the wave records this product's demand
+   (:func:`asf.capacity.write_demand`) so an idle partner's share can be lent to it;
 4. per launching row, a brief (``asf.briefs.build``) with the facts of its branch on the product
    repo's origin — whether it is pushed and its last commit, two ``git`` calls at most;
 5. one ``workers.wave`` over every briefed row, so the pool's S1 reserve sees them all; it prints
@@ -231,18 +233,27 @@ def plan_inputs(product, root, index=None):
         triage = _triage_facts(product, root, index)
     return {'attempts': attempts(product), 'occupancy': occupancy(product),
             'groom_state': groom_state(product, root) if groom_policy.groom_auto(product) else None,
+            'held': set(approvals.parked(product)),
             **triage}
 
 
-def held_by_share(items, product, running, resolved, planned, inputs):
+def held_by_share(items, product, running, resolved, planned, inputs, wider=None):
     """The launching rows the fair share cut: planned at the ceiling the share lowered, and not
-    in ``planned``. Empty when no share bounds this product."""
+    in ``planned``. Empty when no share bounds this product. ``wider``: that plan, when the
+    caller already made it."""
     from asf.feeder import rows as feeder_rows
     if not resolved.fair_share_reason or resolved.ceiling is None:
         return []
     seen = {(r.item_id, r.kind) for r in planned}
-    wider = feeder_rows.plan_rows(items, product, running, resolved.ceiling, **inputs)
+    if wider is None:
+        wider = feeder_rows.plan_rows(items, product, running, resolved.ceiling, **inputs)
     return [r for r in wider if r.launches and (r.item_id, r.kind) not in seen]
+
+
+def wanted(rows, held=()):
+    """The launching rows a plan would start given room — a parked item's row is not one."""
+    held = set(held or ())
+    return sum(1 for r in rows if r.launches and r.item_id not in held)
 
 
 def _git(repo, args):
@@ -316,7 +327,10 @@ def run(ctx, out=print):
     planned = feeder_rows.plan_rows(items, product, running, r.sessions, **inputs)
     from asf import invariants  # the feeder check point: a violating row is dropped, logged
     planned = invariants.feeder_gate(product, planned, items, out=out)
-    for row in held_by_share(items, product, running, r, planned, inputs):
+    wider = (feeder_rows.plan_rows(items, product, running, r.ceiling, **inputs)
+             if r.ceiling is not None and r.ceiling != r.sessions else planned)
+    capacity_mod.write_demand(product.name, len(running), wanted(wider, inputs.get('held')))
+    for row in held_by_share(items, product, running, r, planned, inputs, wider=wider):
         job = job_name(row.brief_kind, row.item_id)
         out(f'waits    {job:<24} {row.item_id:<10} — {r.fair_share_reason}')
     host_held, host_why, reading = host_hold(planned)
@@ -352,6 +366,7 @@ def run(ctx, out=print):
         kinds[wrow.job] = brief.kind
     ctx.event('capacity', sessions=r.sessions, sessions_inflight=len(running),
               sessions_bound_by=r.sessions_bound, fair_share=r.fair_share, usable=r.usable,
+              borrowed=r.borrowed,
               active_products=r.active, ci=r.ci, ci_inflight=r.ci_inflight,
               ci_bound_by=r.ci_bound)
     if host_held:

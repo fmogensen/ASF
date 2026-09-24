@@ -798,10 +798,11 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
 
 
 def plan_rows(index, product, inflight, capacity, attempts=None, occupancy=None,
-              groom_state=None, landed_shas=None, decision_limit=None):
-    """The rows the tick emits: tiered, S1 first, cut to ``capacity`` less what is in flight."""
+              groom_state=None, landed_shas=None, decision_limit=None, held=None):
+    """The rows the tick emits: tiered, S1 first, cut to ``capacity`` less what is in flight.
+    ``held``: the item ids an approval hold parks — shown, but given no slot."""
     from asf.feeder import tiers
     return tiers.select(candidates(index, product, inflight, attempts, occupancy=occupancy,
                                    groom_state=groom_state, landed_shas=landed_shas,
                                    decision_limit=decision_limit),
-                        inflight, capacity)
+                        inflight, capacity, held=held)

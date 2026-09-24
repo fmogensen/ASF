@@ -711,6 +711,14 @@ def raise_holds(ctx, out):
                   **{'class': e['class']})
         append(product, {'event': 'closed', 'hold': hold, 'ts': _now_iso()})
 
+    return parked(product, open_)
+
+
+def parked(product, open_=None):
+    """``{item: (class, level)}`` — the items an open hold parks: a launching row on one waits
+    for a person, not a slot (:func:`asf.feeder.tiers.select` gives it none). Read-only, so
+    ``asf next`` and the status cell plan with the same holds the tick's wave does."""
+    open_ = open_holds(product) if open_ is None else open_
     order = {c.name: i for i, c in enumerate(CLASSES)}
     held = {}
     for e in open_:                                  # first in catalogue order wins the item

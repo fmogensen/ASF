@@ -176,9 +176,6 @@ class Overlay(Home):
             {'per_run': 8, 'parallel': 2, 'runners': 4})
 
 
-if __name__ == '__main__':
-    unittest.main()
-
 
 WAVE_PRODUCT = '''product: {name}
 clocks:
@@ -278,3 +275,103 @@ class FairShare(Home):
         line = [ln for ln in text.splitlines() if ln.startswith('asf ')][0]
         self.assertIn(' 5 ', line)
         self.assertIn('fair share of 9 usable / 2 products (configured 8)', line)
+
+
+def two_free_pool_cfg():
+    """The 20:16 pool: five accounts of cap 4, three stopped by their quota guards, and the
+    operator's per-product default of 8."""
+    return {'capacity': {'per_product': {'sessions': 8}},
+            'worker_pool': {'accounts': [{'name': n, 'cap': 4}
+                                         for n in ('acct-a', 'acct-b', 'acct-c', 'acct-d',
+                                                   'acct-e')]}}
+
+
+def three_stopped():
+    from asf.workers import quota as quota_mod
+    return quota_mod.FakeQuotaSource({n: {'five_h_pct': 10, 'seven_d_pct': 96}
+                                      for n in ('acct-c', 'acct-d', 'acct-e')})
+
+
+class IdlePoolLaunches(Home):
+    """The 20:16 wave: two products, two usable accounts of cap 4, nothing live, two sessions
+    finished and awaiting harvest, two rows parked by an approval hold — and nothing launched,
+    every free row told ``fair share: 4 of 8``. An idle pool launches up to the share, and a
+    product whose partner is idle borrows the partner's idle share."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_product('asf', WAVE_PRODUCT.format(name='asf'))
+        self.write_product('bots', WAVE_PRODUCT.format(name='bots'))
+
+    def rows(self):
+        from asf.feeder import rows as R
+        def row(tier, iid, kind):
+            return R.Row(tier=tier, kind=kind, item_id=iid, feature_id='', action=R.LAUNCH,
+                         brief_kind='task', branch='', reason='')
+        return [row(1, 'B-0087', 'BUG → CORRECT'), row(1, 'B-0101', 'BUG → CORRECT'),
+                row(2, 'B-0102', 'GROOM → ADJUDICATE'), row(2, 'T-0118', 'TASK → CORRECT'),
+                row(2, 'T-0185', 'TASK → BUILD'), row(2, 'T-0075', 'TASK → BUILD'),
+                row(2, 'T-0107', 'TASK → BUILD')]
+
+    def finished_awaiting_harvest(self):
+        """Two ledger rows with no ``ended`` whose pids are gone: finished, not in flight."""
+        from asf.workers import lifecycle
+        for job in ('correct-b-0099', 'coder-t-0087'):
+            pool_mod.append_session('asf', {'job': job, 'item': job[-6:].upper(),
+                                            'started': pool_mod.now_iso(), 'pid': 999999})
+        return lifecycle.inflight(pool_mod.sessions_path('asf'), alive=lambda pid: False)
+
+    def test_parked_rows_take_no_slot_so_an_idle_pool_launches_its_share(self):
+        from asf.feeder import tiers
+        running = self.finished_awaiting_harvest()
+        self.assertEqual(running, [])
+        r = capacity.resolve(env.load_product('asf'), two_free_pool_cfg(),
+                             quota_source=three_stopped())
+        self.assertEqual((r.sessions, r.usable, r.active), (4, 8, 2))
+        out = tiers.select(self.rows(), running, r.sessions, held={'B-0087', 'B-0101'})
+        launching = [x.item_id for x in out if x.launches and x.item_id not in ('B-0087', 'B-0101')]
+        self.assertEqual(launching, ['B-0102', 'T-0118', 'T-0185', 'T-0075'])
+        self.assertEqual([x.item_id for x in out[:2]], ['B-0087', 'B-0101'])  # still said
+
+    def test_a_parked_s1_does_not_hold_the_features_back(self):
+        from asf.feeder import rows as R
+        from asf.feeder import tiers
+        s1 = R.Row(tier=0, kind='BUG → FIX', item_id='B-0001', feature_id='', action=R.LAUNCH,
+                   brief_kind='fix-bug', branch='', reason='')
+        out = tiers.select([s1] + self.rows()[2:], [], 2, held={'B-0001'})
+        self.assertEqual([x.item_id for x in out], ['B-0001', 'B-0102', 'T-0118'])
+
+    def test_an_idle_partner_lends_its_whole_share(self):
+        capacity.write_demand('bots', 0, 0)
+        r = capacity.resolve(env.load_product('asf'), two_free_pool_cfg(),
+                             quota_source=three_stopped())
+        self.assertEqual((r.sessions, r.sessions_bound), (8, 'operator default'))
+
+    def test_a_partner_lends_only_what_it_does_not_want(self):
+        capacity.write_demand('bots', 0, 3)
+        r = capacity.resolve(env.load_product('asf'), two_free_pool_cfg(),
+                             quota_source=three_stopped())
+        self.assertEqual((r.sessions, r.borrowed), (5, 1))
+        self.assertEqual(r.fair_share_reason, 'fair share: 5 of 8 usable slots across 2 '
+                                              'products, 1 borrowed from idle products')
+
+    def test_a_busy_partner_lends_nothing(self):
+        for i in range(4):
+            self.launch('bots', f'task-t-{i}', account='acct-a')
+        capacity.write_demand('bots', 4, 0)
+        r = capacity.resolve(env.load_product('asf'), two_free_pool_cfg(),
+                             quota_source=three_stopped())
+        self.assertEqual((r.sessions, r.borrowed), (4, 0))
+
+    def test_a_stale_demand_record_lends_nothing(self):
+        capacity.write_demand('bots', 0, 0)
+        later = capacity._now() + __import__('datetime').timedelta(
+            seconds=capacity.DEMAND_FRESH_S + 60)
+        with mock.patch.object(capacity, '_now', return_value=later):
+            r = capacity.resolve(env.load_product('asf'), two_free_pool_cfg(),
+                                 quota_source=three_stopped())
+        self.assertEqual((r.sessions, r.borrowed), (4, 0))
+
+
+if __name__ == '__main__':
+    unittest.main()

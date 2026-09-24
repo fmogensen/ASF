@@ -8,6 +8,10 @@ An S1 row is always emitted first — with no free slot it still shows, waiting 
 S1 row is emitted (an S1 Bug no session holds), no tier-2 row is: Features wait until the
 incident has a session. A ``WAITS ON`` row launches nothing and costs no slot; it is shown for
 the Tasks the cut reached.
+
+A launching row on an item an approval hold parks (``held``, :func:`asf.approvals.parked`) is
+emitted — the wave says it waits for a person — but costs no slot and holds no tier back: it
+cannot start whatever the capacity, so a slot given to it is a slot no session gets.
 """
 from asf.feeder import rows as R
 
@@ -23,15 +27,20 @@ def free_slots(inflight, capacity):
     return max(int(capacity) - len(inflight or []), 0)
 
 
-def select(candidates, inflight, capacity):
-    """The emitted rows, in order. ``candidates`` is :func:`asf.feeder.rows.candidates`' list."""
+def select(candidates, inflight, capacity, held=()):
+    """The emitted rows, in order. ``candidates`` is :func:`asf.feeder.rows.candidates`' list;
+    ``held`` the item ids a hold parks (their launching rows take no slot)."""
+    held = set(held or ())
     ordered = sorted(candidates, key=tier_of)  # stable: keeps the Feature order within a tier
     free = free_slots(inflight, capacity)
-    s1_waiting = any(r.tier == TIER_S1 and r.launches for r in ordered)
+    s1_waiting = any(r.tier == TIER_S1 and r.launches and r.item_id not in held for r in ordered)
     out = []
     for r in ordered:
         if r.tier == TIER_REST and s1_waiting:
             break
+        if r.launches and r.item_id in held:
+            out.append(r)
+            continue
         if not r.launches:
             if free > 0:
                 out.append(r)
