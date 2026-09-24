@@ -32,7 +32,7 @@ validation run (not a Task, §Validation).
 | PD6 | The record write path | `stage.run_writers(root, [('backfill', apply.write_record), ('ingest', …), ('index', …)])`, then `publish.publish_changes` with the one commit subject of spec §9. The record invariants run over backfill's own change; a refused card is printed, the rest commits (spec E18). |
 | PD7 | Approval holds are per plan digest | A hold id is `backfill-<digest>/<class>`, so one grant covers exactly one reviewed table (spec §5). |
 | PD8 | No LLM anywhere | Nothing in `asf/backfill/` imports `asf.workers.runtime` or spawns a session; spec A12 asserts it. The grouped residue table is the fallback. |
-| PD9 | The hit-rate targets | The fixture targets (spec §8.2) are hard acceptance in Task 11. The real-history targets — merged mapping at least the rate the adopter's plan-file+heading prototype reached (baseline 4.6 %), open PRs decided at least 58 of 150, residue at most about 30 groups, no harmful action — are checked once by the adopter's own `--dry-run`, and their numbers stay out of this repo. |
+| PD9 | The hit-rate targets | The fixture targets (spec §8.2) are hard acceptance in Task 11. The real-history targets — merged mapping ≥ 11.3 % and open mapping ≥ 55.3 % with no slug_aliases (the adopter's prototype), residue at most about 30 groups, no harmful action — are checked once by the adopter's own `--dry-run`, and their numbers stay out of this repo. |
 
 ---
 

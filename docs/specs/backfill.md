@@ -440,8 +440,8 @@ Measured by `asf backfill --dry-run --json` (the summary's `mapped`, `open` and 
 
 | Target | Fixture | First adopter's real history (validation) |
 | --- | --- | --- |
-| merged PRs mapped | 100 % of the tracked families | ≥ the rate the adopter's plan-file+heading prototype reached on the same history, plus the K1/K2/K3 hits (baseline of the first rules: 4.6 %) |
-| open PRs decided (closed, adopted or skipped) | 100 % of the tracked families | ≥ 58 of 150 (the first rules), expected well above it |
+| merged PRs mapped | 100 % of the tracked families | ≥ 11.3 % with no `slug_aliases` configured (the adopter's prototype: K1–K3 plus K3b; the first rules reached 4.6 %); higher once aliases are set |
+| open PRs mapped | 100 % of the tracked families | ≥ 55.3 % with no `slug_aliases` configured (the prototype; the first rules reached 36 %) |
 | residue size | exactly the fixture's residue groups | ≤ about 30 groups |
 | harmful actions | none | no history Feature restored on documents alone; no unmapped PR with unique product work closed |
 
