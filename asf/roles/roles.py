@@ -49,7 +49,8 @@ BINDINGS = {'spec': 'asf-writer', 'plan': 'asf-writer', 'reshape': 'asf-writer',
             'review': 'asf-reviewer', 'coder': 'asf-coder',
             'fixer': 'asf-fixer', 'correct': 'asf-fixer', 'rebase': 'asf-fixer',
             'fix-bug': 'asf-diagnostician', 'close': 'asf-harvester',
-            'groom': 'asf-interrogator', 'adjudicate': 'asf-interrogator'}
+            'groom': 'asf-interrogator', 'adjudicate': 'asf-interrogator',
+            'delivery-plan': 'asf-writer', 'delivery-code': 'asf-coder'}
 
 #: Every role no kind binds, with the reason none does.
 UNBOUND = {'asf-prober': 'no phase yet — the production probe is a view, not a session',
