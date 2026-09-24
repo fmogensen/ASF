@@ -361,6 +361,26 @@ class WaveStepTests(StepsTestCase):
         self.assertNotIn('account', launch_ev)
         self.assertEqual(ctx.counts['launches'], 1)
 
+    def test_host_pressure_holds_every_launch_and_says_why(self):
+        # 2026-09-24: load 99 and swap near full; the tick must start nothing more on that host
+        self.session(job='task-t-0001', item='T-0001', kind='task', account='acct-b',
+                     pid=os.getpid())
+        ctx = self.ctx()
+        with mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **kw: self.rows), \
+                mock.patch.dict(os.environ, {'ASF_HOST_READING': '90 12 87'}):
+            step_wave.run(ctx, out=self.lines.append)
+        self.assertEqual(self.built, [])       # no brief built, no session started
+        self.assertEqual(self.waved, [])
+        self.assertEqual(ctx.counts['launches'], 0)
+        self.assertIn('wave: held: host pressure load 90/cores 12, swap 87% — no new session '
+                      'this tick; running sessions go on', self.lines)
+        self.assertTrue(any(ln.startswith('waits    fix-bug-b-0001') and
+                            ln.endswith('— held: host pressure load 90/cores 12, swap 87%')
+                            for ln in self.lines), self.lines)
+        evs = [e for e in self.events(ctx) if e['kind'] == 'host_pressure']
+        self.assertEqual(len(evs), 1)
+        self.assertEqual((evs[0]['load15'], evs[0]['cores'], evs[0]['swap_pct']), (90.0, 12, 87.0))
+
     def test_the_wave_plans_over_the_plans_order(self):
         # defence in depth: the wave overlays the plan's order before the feeder sees the index
         seen = {}

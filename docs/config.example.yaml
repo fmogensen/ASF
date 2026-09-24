@@ -65,6 +65,15 @@ quota_guards:
     seven_d: 90
     seven_d_model: 90
 
+# host guard: the tick starts no new session while this host is loaded — the 15-minute load
+# average at or over `load_per_core` × cores, or swap in use at or over `swap_pct` percent. The
+# wave then prints `waits <job> <item> — held: host pressure load <n>/cores <c>, swap <p>%` per row
+# and `wave: held: …`. Running sessions are never stopped. Defaults when the key is absent: 2.0 and
+# 85. A value of 0 turns that guard off.
+host_guards:
+  load_per_core: 2.0
+  swap_pct: 85
+
 # capacity: the ceilings the factory runs under. Every number is "at most this many at once".
 # A key left out means "no opinion" — the next fallback applies (see docs/guide/product-config.md).
 # feeder.capacity and worker_pool.reserve_for_s1 are still read, but this block is their new home.

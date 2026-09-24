@@ -1462,6 +1462,17 @@ def missing_policy(conv, cls):
     return MISSING_WAIT if str(value or '').strip().lower() == MISSING_WAIT else MISSING_LOCAL_GATE
 
 
+def external_ci(product):
+    """True when the product's code PRs are gated by its external CI, read off the config alone
+    (no forge call): it lands through pull requests, and it names its CI gate job
+    (``conventions.landing_checks``) or lets CI be the gate for code PRs
+    (``landing_checks_missing`` ``wait`` for the ``code`` class)."""
+    conv = product.conventions
+    if landing(product) != LANDING_PR:
+        return False
+    return bool(conv.get('landing_checks')) or missing_policy(conv, 'code') == MISSING_WAIT
+
+
 def landing_wait_s(conv):
     try:
         return max(0.0, float(conv.get('landing_checks_wait_min', DEFAULT_LANDING_WAIT_MIN))) * 60

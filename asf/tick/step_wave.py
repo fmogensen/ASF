@@ -16,6 +16,11 @@
    back (``WAITS ON …``, no slot) prints its own ``waits`` line here, as does one an approval
    class holds.
 
+Before any brief is built, the host-pressure guard (:mod:`asf.workers.host`, ``config.yaml
+host_guards``): a host at or over its load or swap guard starts no session this tick — each
+launching row prints ``waits … — held: host pressure load <n>/cores <c>, swap <p>%`` and the step
+ends on ``wave: held: …``. Sessions already running are never touched.
+
 Each launch appends a ``launch`` event (item, job, model, brief kind) to ``metrics/events``.
 """
 import importlib
@@ -29,6 +34,7 @@ from asf import approvals, env
 from asf import capacity as capacity_mod
 from asf.groom import policy as groom_policy
 from asf.record import plan_order
+from asf.workers import host as host_mod
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 
@@ -309,6 +315,9 @@ def run(ctx, out=print):
     for row in held_by_share(items, product, running, r, planned, inputs):
         job = job_name(row.brief_kind, row.item_id)
         out(f'waits    {job:<24} {row.item_id:<10} — {r.fair_share_reason}')
+    host_held, host_why, reading = False, '', {}
+    if any(row.launches for row in planned):
+        host_held, host_why, reading = host_mod.pressure(env.load_config())
     worker_rows, texts, kinds = [], {}, {}
     for row in planned:
         cause = getattr(row, 'cause', '')
@@ -322,6 +331,10 @@ def run(ctx, out=print):
             cls, level = held[row.item_id]
             job = job_name(row.brief_kind, row.item_id)
             out(f'waits    {job:<24} {row.item_id:<10} — held {cls} ({level})')
+            continue
+        if host_held:                           # a loaded host takes no new session this tick
+            job = job_name(row.brief_kind, row.item_id)
+            out(f'waits    {job:<24} {row.item_id:<10} — held: {host_why}')
             continue
         if row.brief_kind == 'adjudicate' and getattr(row, 'between', ()):
             (la, ta), (lb, tb) = row.between
@@ -339,6 +352,11 @@ def run(ctx, out=print):
               sessions_bound_by=r.sessions_bound, fair_share=r.fair_share, usable=r.usable,
               active_products=r.active, ci=r.ci, ci_inflight=r.ci_inflight,
               ci_bound_by=r.ci_bound)
+    if host_held:
+        ctx.event('host_pressure', load15=reading.get('load15'), cores=reading.get('cores'),
+                  swap_pct=reading.get('swap_pct'))
+        out(f'wave: held: {host_why} — no new session this tick; running sessions go on')
+        return 0
     if not worker_rows:
         out('wave: nothing to launch')
         return 0

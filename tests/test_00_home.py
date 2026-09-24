@@ -19,6 +19,8 @@ def hermetic_home():
     env.ASF_HOME = chosen
     for var in hermetic.CALLER_IDENTITY:
         os.environ.pop(var, None)
+    # the host-pressure guard reads a quiet host: a loaded machine must not hold the suite's launches
+    os.environ['ASF_HOST_READING'] = '0 1 0'
     return chosen
 
 
