@@ -666,13 +666,37 @@ def item_of(branch, record):
     return m.group(1).upper() if m else None
 
 
+def id_token(item):
+    """The pattern for ``item`` as a token of a commit subject."""
+    return re.compile(r'(?<![\w-])' + re.escape(item) + r'(?![\w])', re.I)
+
+
+def branch_subjects(repo, trunk, branch):
+    """The non-merge commit subjects on ``origin/<branch>`` not on ``origin/<trunk>``."""
+    return sh(['git', 'log', '--no-merges', '--format=%s',
+               f'origin/{trunk}..origin/{branch}'], cwd=repo).stdout.splitlines()
+
+
+def commits_name_items(repo, trunk, branch, ids):
+    """True when every commit subject on ``origin/<branch>`` not on ``origin/<trunk>`` names at
+    least one of ``ids`` as a token — a delivery's branch carries a commit per member."""
+    subjects = branch_subjects(repo, trunk, branch)
+    tokens = [id_token(i) for i in ids]
+    return bool(subjects) and all(any(t.search(s) for t in tokens) for s in subjects)
+
+
 def commits_name_item(repo, trunk, branch, item):
     """True when every commit subject on ``origin/<branch>`` not on ``origin/<trunk>`` names
     ``item`` as a token."""
-    subjects = sh(['git', 'log', '--no-merges', '--format=%s',
-                   f'origin/{trunk}..origin/{branch}'], cwd=repo).stdout.splitlines()
-    token = re.compile(r'(?<![\w-])' + re.escape(item) + r'(?![\w])', re.I)
-    return bool(subjects) and all(token.search(s) for s in subjects)
+    return commits_name_items(repo, trunk, branch, [item])
+
+
+def members_named(repo, trunk, branch, ids):
+    """``(named, missing)`` — the ids of ``ids`` that some commit subject on ``origin/<branch>``
+    names, and those none does, each in the order given."""
+    subjects = branch_subjects(repo, trunk, branch)
+    named = [i for i in ids if any(id_token(i).search(s) for s in subjects)]
+    return named, [i for i in ids if i not in named]
 
 
 ADJUDICATE_SUBJECT_RE = re.compile(r'^adjudicate\(')
@@ -824,19 +848,22 @@ def merge_commits(repo, trunk, branch):
     return [l for l in r.stdout.splitlines() if l.strip()]
 
 
-def lane_refusal(repo, trunk, branch, item):
+def lane_refusal(repo, trunk, branch, item, members=()):
     """``(kind, text)`` for a branch harvest refuses before any gate, or None. A lane branch is
     straight commits on the trunk: a merge commit on it (B-0056 — a session merging its own
     stale remote or the trunk, because no push it may make publishes a rebase) and a commit not
     naming the item are each a correction back to the session, never a silent hold. The
-    factory publishes the rewritten branch (:func:`asf.workers.lifecycle.publish`)."""
+    factory publishes the rewritten branch (:func:`asf.workers.lifecycle.publish`). A delivery's
+    commit may name any of its ``members`` instead; a member no commit names is not a refusal."""
     merges = merge_commits(repo, trunk, branch)
     if merges:
         return 'merge', (f'merge commit on a lane branch: {merges[0]} — a lane branch is straight '
                          f'commits on origin/{trunk}: rebase onto it, never merge origin/{branch} '
                          f'or origin/{trunk} into it; the factory publishes the rebased branch')
-    if not item or not commits_name_item(repo, trunk, branch, item):
-        return 'naming', (f'commits do not name {item or "an item id"}: every commit subject on '
+    ids = ([item] if item else []) + [m for m in members if m != item]
+    if not item or not commits_name_items(repo, trunk, branch, ids):
+        names = f'{item} or one of {", ".join(members)}' if members else item or 'an item id'
+        return 'naming', (f'commits do not name {names}: every commit subject on '
                           f'the branch names its item — reword them; the factory publishes the '
                           f'rewritten branch')
     return None
@@ -1016,8 +1043,32 @@ def hold_with_correction(state_dir, branch, record, kind, text, out, files=(), i
     return 'held'
 
 
+def delivery_members(items, item):
+    """The ids the card ``item`` delivers (its ``delivers:`` list), else ``()``."""
+    return tuple(((items or {}).get(item) or {}).get('delivers') or ())
+
+
+def item_footprint(items, item):
+    """The globs the branch of ``item`` may touch: its card's ``writes:``, plus every member's
+    when it leads a delivery — the union the foreign-red rule measures a delivery against."""
+    out = []
+    for i in (item, *delivery_members(items, item)):
+        out.extend(g for g in ((items or {}).get(i) or {}).get('writes') or () if g not in out)
+    return out
+
+
+def delivery_note(repo, trunk, branch, members):
+    """``: delivered <ids> — no commit for <ids>`` for a delivery branch — the ids some commit
+    named, and those none did — else ``''``. Read while ``origin/<branch>`` still exists."""
+    if not members:
+        return ''
+    named, missing = members_named(repo, trunk, branch, members)
+    note = f': delivered {", ".join(named) or "nothing"}'
+    return note + (f' — no commit for {", ".join(missing)}' if missing else '')
+
+
 def land_ff(repo, state_dir, branch, record, item, conv, asf_repo, bug_root, dry_run, out,
-            item_writes=()):
+            item_writes=(), note=''):
     trunk = conv.main
     job = record.get('job') or branch
     touched = touched_files(repo, trunk, branch)
@@ -1053,7 +1104,7 @@ def land_ff(repo, state_dir, branch, record, item, conv, asf_repo, bug_root, dry
                 return 'held'
             mark_session(state_dir, job, harvested=sha, correction=None)
             sh(['git', 'push', '-q', 'origin', '--delete', branch], cwd=repo)
-            out(f'landed {branch} → {sha}')
+            out(f'landed {branch} → {sha}{note}')
             return 'landed'
         finally:
             sh(['git', 'worktree', 'remove', '--force', tmp], cwd=repo)
@@ -1159,7 +1210,8 @@ def confirmed_group(tmp, trunk, entries, conv, asf_repo, hold, out, results):
     return None
 
 
-def land_combined(repo, state_dir, entries, conv, asf_repo, dry_run, out, items=None):
+def land_combined(repo, state_dir, entries, conv, asf_repo, dry_run, out, items=None,
+                  notes=None):
     """Land every entry of ``entries`` (``[(branch, record)]``) behind one gate on the combined
     head, bisecting on red; ``{branch: outcome}``. The head is pushed fast-forward as the
     trunk's new tip and every branch in it is marked harvested at that sha, then deleted."""
@@ -1170,22 +1222,24 @@ def land_combined(repo, state_dir, entries, conv, asf_repo, dry_run, out, items=
     results = {}
     if docs:  # docs cannot turn a test red: they land on their own, behind the checks alone
         results.update(land_set(repo, state_dir, docs, conv, docs_only(conv), asf_repo, dry_run,
-                                out, items, touched))
+                                out, items, touched, notes))
     if code:
         results.update(land_set(repo, state_dir, code, conv, conv, asf_repo, dry_run, out, items,
-                                touched))
+                                touched, notes))
     return results
 
 
-def land_set(repo, state_dir, entries, conv, gate_conv, asf_repo, dry_run, out, items, touched):
+def land_set(repo, state_dir, entries, conv, gate_conv, asf_repo, dry_run, out, items, touched,
+             notes=None):
     """:func:`land_combined` for one set of ``entries``, gated under ``gate_conv``."""
     trunk = conv.main
     results = {}
 
     def hold(entry, kind, text, files=(), own=False):
-        card = (items or {}).get(item_of(entry[0], entry[1])) or {}  # P7: no index, no footprint
+        # P7: no index, no footprint
         results[entry[0]] = hold_with_correction(state_dir, entry[0], entry[1], kind, text, out,
-                                                 files, card.get('writes') or (),
+                                                 files,
+                                                 item_footprint(items, item_of(entry[0], entry[1])),
                                                  touched.get(entry[0]) or (), conv, own=own)
 
     pending = list(entries)
@@ -1231,7 +1285,7 @@ def land_set(repo, state_dir, entries, conv, gate_conv, asf_repo, dry_run, out, 
             for branch, record in landing:
                 mark_session(state_dir, record.get('job') or branch, harvested=sha, correction=None)
                 sh(['git', 'push', '-q', 'origin', '--delete', branch], cwd=repo)
-                out(f'landed {branch} → {sha}')
+                out(f'landed {branch} → {sha}{(notes or {}).get(branch, "")}')
                 results[branch] = 'landed'
             return results
         finally:
@@ -1326,13 +1380,15 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
             if closed:
                 results[branch] = closed
     to_land = []
+    notes = {}
     for branch, record in cap_to_tick(eligible, out, conv):
         item = item_of(branch, record)
+        members = delivery_members(items, item)
         if has_adjudicate_commit(repo, trunk, branch):
             out(f'held {branch}: ruling belongs in the record')
             results[branch] = 'held'
             continue
-        refusal = lane_refusal(repo, trunk, branch, item)
+        refusal = lane_refusal(repo, trunk, branch, item, members)
         if refusal:
             results[branch] = hold_with_correction(state_dir, branch, record, *refusal, out)
             continue
@@ -1354,15 +1410,17 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
             continue
         if asf_repo is None:
             asf_repo = is_asf_repo(repo)
+        note = delivery_note(repo, trunk, branch, members)  # the branch is deleted once landed
         if str(conv.harvest_gate).strip().lower() == GATE_PER_BRANCH:
             results[branch] = land_ff(repo, state_dir, branch, record, item, conv, asf_repo,
                                       bug_root, dry_run, out,
-                                      item_writes=((items or {}).get(item) or {}).get('writes') or ())
+                                      item_writes=item_footprint(items, item), note=note)
         else:
+            notes[branch] = note
             to_land.append((branch, record))
     if to_land:  # B-0040: one gate over the combined head, bisecting on red
         results.update(land_combined(repo, state_dir, to_land, conv, asf_repo, dry_run, out,
-                                     items=items))
+                                     items=items, notes=notes))
     if any(r == 'landed' for r in results.values()):
         sync_checkout(repo, trunk, out)
     return results

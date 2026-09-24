@@ -1418,6 +1418,111 @@ class ForeignRedTests(unittest.TestCase):
 PRODUCT_REPOS = Template(ProductHarvestTests.build, prefix='harvest_product_')
 
 
+class DeliveryLaneTest(unittest.TestCase):
+    """A delivery's branch (F-0102): a lead whose ``delivers:`` names its members, one commit per
+    member — accepted; a member no commit names is reported on the landing line, not refused."""
+    BRANCH = 'worker/F-0097'
+    LEAD = 'F-0097'
+
+    def setUp(self):
+        self.base = PRODUCT_REPOS.fresh()
+        self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
+        self.origin = os.path.join(self.base, 'origin.git')
+        self.repo = os.path.join(self.base, 'repo')
+        self.worker = os.path.join(self.base, 'worker')
+        self.state_dir = os.path.join(self.base, 'state')
+
+    write = ProductHarvestTests.write
+    product = ProductHarvestTests.product
+    push_lane = ProductHarvestTests.push_lane
+    session = ProductHarvestTests.session
+    record = ProductHarvestTests.record
+    origin_has = ProductHarvestTests.origin_has
+
+    def items(self, *members):
+        return {self.LEAD: {'delivers': list(members)}}
+
+    def refusal(self, commits, members):
+        self.push_lane(self.BRANCH, commits)
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        return harvest.lane_refusal(self.repo, 'main', self.BRANCH, self.LEAD, members)
+
+    def land(self, commits, members, **conventions):
+        self.push_lane(self.BRANCH, commits)
+        self.session('coder-f-0097', self.LEAD, self.BRANCH)
+        lines = []
+        results = harvest.run_product_harvest(self.product(**conventions), self.state_dir,
+                                              out=lines.append, items=self.items(*members))
+        return results, [l for l in lines if l.startswith(('landed', 'held'))]
+
+    def test_commits_naming_different_members_are_accepted(self):
+        self.assertIsNone(self.refusal([('feat(F-0097): the feature', {'a.txt': 'a\n'}),
+                                        ('fix(B-0034): the bug', {'b.txt': 'b\n'})],
+                                       ('F-0097', 'B-0034')))
+
+    def test_a_commit_naming_no_member_is_refused(self):
+        kind, text = self.refusal([('feat(F-0097): the feature', {'a.txt': 'a\n'}),
+                                   ('fix(B-0034): the bug', {'b.txt': 'b\n'}),
+                                   ('fix(B-0099): not a member', {'c.txt': 'c\n'})],
+                                  ('F-0097', 'B-0034'))
+        self.assertEqual(kind, 'naming')
+        self.assertIn('commits do not name F-0097 or one of F-0097, B-0034', text)
+
+    def test_a_missing_member_is_reported_not_refused(self):
+        commits = [('feat(F-0097): the feature', {'a.txt': 'a\n'}),
+                   ('fix(B-0034): the bug', {'b.txt': 'b\n'})]
+        members = ('F-0097', 'B-0034', 'S-0055')
+        self.assertIsNone(self.refusal(commits, members))
+        self.assertEqual(harvest.members_named(self.repo, 'main', self.BRANCH, members),
+                         (['F-0097', 'B-0034'], ['S-0055']))
+
+    def missing_member_lands(self, gate):
+        results, lines = self.land([('feat(F-0097): the feature', {'a.txt': 'a\n'}),
+                                    ('fix(B-0034): the bug', {'b.txt': 'b\n'})],
+                                   ('F-0097', 'B-0034', 'S-0055'), harvest_gate=gate)
+        self.assertEqual(results, {self.BRANCH: 'landed'})
+        sha = sh(['git', 'rev-parse', 'main'], cwd=self.origin).stdout.strip()
+        self.assertEqual(lines, [f'landed {self.BRANCH} → {sha}: delivered F-0097, B-0034 '
+                                 '— no commit for S-0055'])
+
+    def test_the_landing_line_names_the_missing_member_combined(self):
+        self.missing_member_lands('combined')
+
+    def test_the_landing_line_names_the_missing_member_per_branch(self):
+        self.missing_member_lands('per-branch')
+
+    def test_a_delivery_with_every_member_named_lands_with_no_missing_clause(self):
+        results, lines = self.land([('feat(F-0097): the feature', {'a.txt': 'a\n'}),
+                                    ('fix(B-0034): the bug', {'b.txt': 'b\n'})],
+                                   ('F-0097', 'B-0034'))
+        self.assertEqual(results, {self.BRANCH: 'landed'})
+        self.assertTrue(lines[0].endswith(': delivered F-0097, B-0034'), lines)
+
+    def test_merge_commit_still_refused(self):
+        self.push_lane(self.BRANCH, [('feat(F-0097): the feature', {'a.txt': 'a\n'})])
+        sh(['git', 'checkout', '-q', 'main'], cwd=self.worker)
+        self.write(self.worker, 'm.txt', 'm\n')
+        sh(['git', 'add', '-A'], cwd=self.worker)
+        sh(['git', 'commit', '-qm', 'trunk moves'], cwd=self.worker)
+        sh(['git', 'push', '-q', 'origin', 'main'], cwd=self.worker)
+        sh(['git', 'checkout', '-q', self.BRANCH], cwd=self.worker)
+        sh(['git', 'merge', '-q', '--no-edit', 'main', '-m', 'fix(B-0034): merge main'],
+           cwd=self.worker)
+        sh(['git', 'push', '-q', 'origin', self.BRANCH], cwd=self.worker)
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        kind, text = harvest.lane_refusal(self.repo, 'main', self.BRANCH, self.LEAD,
+                                          ('F-0097', 'B-0034'))
+        self.assertEqual(kind, 'merge')
+        self.assertIn('merge commit on a lane branch', text)
+
+    def test_item_footprint_is_the_union_of_the_lead_and_its_members(self):
+        items = {'F-0097': {'delivers': ['F-0097', 'B-0034'], 'writes': ['a/**']},
+                 'B-0034': {'writes': ['a/**', 'b.py']}, 'B-0001': {'writes': ['z']}}
+        self.assertEqual(harvest.item_footprint(items, 'F-0097'), ['a/**', 'b.py'])
+        self.assertEqual(harvest.item_footprint(items, 'B-0001'), ['z'])
+        self.assertEqual(harvest.item_footprint(None, 'B-0001'), [])
+
+
 class RulesSourceMergeTests(unittest.TestCase):
     def test_source_line_union_merge(self):
         ours = 'source: "Ops 2026-09-20: standing authority; memory alpha"'
