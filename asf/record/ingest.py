@@ -241,6 +241,12 @@ def _ids_of(iid, ev):
     return (ev.get('ids') or {}).get(iid) or {}
 
 
+def _own_ids(iid, ev):
+    """An id token naming `iid` in a branch or an open PR: evidence of its own that it is moving."""
+    iev = _ids_of(iid, ev)
+    return bool(iev.get('branches') or iev.get('open_prs'))
+
+
 def _merged_in_prod(child_ids, task_ev, ev):
     """Every child Task's merge is an ancestor of the deploy. False for a Task the plan does not
     list: nothing says where its merge is."""
@@ -440,7 +446,8 @@ def cmd_ingest(args, root):
         states = [new_state[cid] for cid in task_ids]
         all_closed = bool(states) and all(s == closing.CLOSED for s in states)
         ev_obj = closing.Ev(children=tuple(states), matrix_status=(sev or {}).get('status') or '',
-                            child_evidence=any(derived[cid].own for cid in task_ids),
+                            child_evidence=any(derived[cid].own for cid in task_ids)
+                            or (sev is None and _own_ids(iid, ev)),
                             in_prod=all_closed and _in_prod(task_ids, task_ev, ev))
         if sev is None:
             _st, id_lines = match_ids(iid, ev)

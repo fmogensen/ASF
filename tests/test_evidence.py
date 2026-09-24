@@ -446,7 +446,7 @@ class IdTokenTests(unittest.TestCase):
     def test_id_state_ladder(self):
         self.assertEqual(evidence.id_state("B-0001", None), (None, []))
         self.assertEqual(evidence.id_state("B-0003", {"branches": ["fix/B-0003"]}),
-                         ("Active", ["branch fix/B-0003"]))
+                         ("Active", ["branch fix/B-0003", "rule: fixer"]))
         self.assertEqual(evidence.id_state("S-0004", {"open_prs": [4], "branches": []})[0], "Active")
         self.assertEqual(evidence.id_state("B-0001", {"commit": "abcdef123", "green": False}),
                          ("Resolved", ["commit abcdef1 names B-0001"]))
@@ -575,8 +575,8 @@ class IngestIdEvidenceTests(unittest.TestCase):
         self.assertEqual(m["B-0003"]["state"], "Active")
         self.assertEqual(m["S-0004"]["state"], "Active")
         self.assertIn(f"commit {self.r.b0001[:7]} names B-0001", m["B-0001"]["evidence"])
-        self.assertEqual(m["B-0003"]["evidence"], ["branch fix/B-0003"])
-        self.assertEqual(m["S-0004"]["evidence"], ["PR #4 OPEN"])
+        self.assertEqual(m["B-0003"]["evidence"], ["branch fix/B-0003", "rule: fixer"])
+        self.assertEqual(m["S-0004"]["evidence"], ["PR #4 OPEN", "rule: task-active"])
 
     def test_resolved_until_ci_is_green(self):
         self.r.ingest(self.r.discover(self.r.product(), green=[]))
@@ -606,7 +606,7 @@ class IngestIdEvidenceTests(unittest.TestCase):
         m = self.states()
         self.assertEqual([m[i]["state"] for i in ("B-0001", "T-0002", "B-0003", "S-0004")],
                          ["Closed", "Closed", "Active", "Active"])
-        self.assertEqual(m["B-0003"]["evidence"], ["branch cloud/B-0003"])
+        self.assertEqual(m["B-0003"]["evidence"], ["branch cloud/B-0003", "rule: fixer"])
 
     def test_default_prefixes_find_a_spec_branch(self):
         self.r.close()
@@ -633,7 +633,7 @@ class IngestIdEvidenceTests(unittest.TestCase):
         self.r.ingest(self.r.discover(self.r.product(), prs=prs))
         m = self.r.meta("B-0003", "bug")
         self.assertEqual(m["state"], "Resolved")
-        self.assertEqual(m["evidence"], [f"fix merged ({self.r.head[:9]})"])
+        self.assertEqual(m["evidence"], [f"fix merged ({self.r.head[:9]})", "rule: fixed"])
 
 
 class MatchPrefixesTests(unittest.TestCase):
