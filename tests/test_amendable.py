@@ -240,8 +240,8 @@ class PolicyTests(TickTestCase):
     ``human-now`` for ``touch_amendable_set`` (F-0024's own message), the hook refuses even when
     the rest of the matrix is invalid or the hold has been marked ``granted`` straight in the
     ledger, ``resolve(…, 'granted')`` itself raises, ``resolve(…, 'proposed')`` closes the hold,
-    and ``raise_holds`` names the open hold without parking the item — a ``touch_security`` hold
-    in the same ledger still parks its own."""
+    and ``raise_holds`` names the open hold without parking the item — nor does a
+    ``touch_security`` hold in the same ledger park its own (a hook refusal never parks)."""
 
     ITEM = 'F-0024'
     JOB = 'code-F-0024'
@@ -330,7 +330,8 @@ class PolicyTests(TickTestCase):
             l.startswith(f'NEEDS OPERATOR: held touch_amendable_set on {self.ITEM}')
             for l in lines), lines)
         self.assertNotIn(self.ITEM, held)          # non-parking: the wave still launches on it
-        self.assertEqual(held, {'B-0002': ('touch_security', 'human-now')})
+        # a hook refusal parks nothing either: the session was told to finish another way
+        self.assertEqual(held, {})
 
 
 if __name__ == '__main__':

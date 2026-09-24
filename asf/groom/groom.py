@@ -35,6 +35,8 @@ ANSWER_RANK = re.compile(r'^rank\s+(\d+)$', re.IGNORECASE)
 ANSWER_PARENT = re.compile(r'^parent\s+(\S+)$', re.IGNORECASE)
 ANSWER_SEVERITY = re.compile(r'^(S[123])$', re.IGNORECASE)
 ANSWER_UNBLOCK = re.compile(r'^unblock\s+([A-Z]-\d{4})$', re.IGNORECASE)
+#: ``reshape: <how>`` — the card is held and reshaped (a Task's RESHAPE → PLAN row reads it).
+ANSWER_RESHAPE = re.compile(r'^reshape:\s*(?P<how>\S.*)$', re.IGNORECASE)
 #: A shape proposal's line (F-0086 D6): the verb after the id says what `yes` does.
 PROPOSAL_RE = re.compile(
     r'^- \[[ xX]\]\s+(?P<id>[A-Z]-\d{4})\s+(?P<verb>merge|batch|split)\s+(?P<rest>.*?)\s+—')
@@ -111,6 +113,9 @@ def _parse_answer(answer):
     m = ANSWER_UNBLOCK.match(a)
     if m:
         return 'unblock', m.group(1)
+    m = ANSWER_RESHAPE.match(a)
+    if m:
+        return 'reshape', m.group('how').strip()
     return None, None
 
 
@@ -323,7 +328,7 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None, 
                 _skipped(iid, raw_answer, 'left for the operator'
                          if word.upper().startswith('NEEDS OPERATOR') else
                          'not an answer the grammar knows (yes, no, open, rank <n>, parent <id>, '
-                         'S1/S2/S3, unblock <id>, landed <sha>)')
+                         'S1/S2/S3, unblock <id>, landed <sha>, reshape: <how>)')
             continue
 
         typed, _machine = frontmatter.split_machine(rec['meta'])
@@ -572,6 +577,33 @@ def groom_auto_bugs_section(canonical):
     return lines
 
 
+def groom_refused_section(canonical, product):
+    """One question per open card the approvals hook refused one class on the first run and
+    on :data:`asf.approvals.ESCALATE_RELAUNCHES` relaunches in a row
+    (:func:`asf.approvals.escalations`): the groom's adjudicator drops, reshapes or closes it.
+    It is never the operator's, save for money, credentials or an irreversible action — and
+    even then the item blocks no other work. A card already marked for reshape is not asked."""
+    from asf import approvals  # local: the groom reads the ledger only here
+    if product is None:
+        return []
+    lines = []
+    for iid, (cls, runs) in sorted(approvals.escalations(product).items()):
+        rec = canonical.get(iid)
+        if rec is None or not is_open(rec):
+            continue
+        typed, machine = frontmatter.split_machine(rec['meta'])
+        if (typed.get('state') or machine.get('state')) == 'Closed' or typed.get('reshape'):
+            continue
+        c = approvals.CLASSES_BY_NAME[cls]
+        who = ('money, credentials or an irreversible action: NEEDS OPERATOR is open to you'
+               if c.operator else 'not a question for the operator')
+        why = (f"{policy.REFUSED_MARK} {cls} on {runs} runs in a row ({c.why}) — drop it"
+               f" (`no: <why>`), reshape it (`reshape: <how>`) or close it (`close: <why>`);"
+               f" {who}")
+        lines.append(_card_line(iid, typed.get('title', ''), why))
+    return lines
+
+
 GROOM_SECTIONS = [
     ('Inbox cards to decide', 'inbox'),
     ('Undecided, asked nowhere else', 'undecided_new'),
@@ -641,8 +673,12 @@ def build_groom_sections(canonical, derived, date, capacity=DEFAULT_CAPACITY,
 #: Rendered only when it has lines: the inbox cards intake asked a question of (their lines
 #: carry an ``inbox:<file>`` token, not an id — :func:`asf.groom.inbox.question_lines`).
 INBOX_QUESTIONS = ('Inbox cards with a question', 'inbox_questions')
+#: Rendered only when it has lines: the cards the approvals hook keeps refusing
+#: (:func:`groom_refused_section`) — the adjudicator's to drop, reshape or close.
+REFUSED_QUESTIONS = ('Refused on repeat relaunches', 'refused')
+EXTRA_SECTIONS = [INBOX_QUESTIONS, REFUSED_QUESTIONS]
 
-_SECTION_BY_TITLE = {title: key for title, key in GROOM_SECTIONS + [INBOX_QUESTIONS]}
+_SECTION_BY_TITLE = {title: key for title, key in GROOM_SECTIONS + EXTRA_SECTIONS}
 _HEADER_RE = re.compile(r'^## (.+)$')
 _LINE_ID_RE = re.compile(r'^- \[[ xX]\]\s+([A-Z]-\d{4})\b')
 
@@ -782,10 +818,10 @@ def render_groom_file(date, sections):
         else:
             out.append("(none)\n")
         out.append('')
-    title, key = INBOX_QUESTIONS
-    if sections.get(key):
-        out.append(f"## {title}\n")
-        out.append('\n'.join(sections[key]) + '\n')
+    for title, key in EXTRA_SECTIONS:
+        if sections.get(key):
+            out.append(f"## {title}\n")
+            out.append('\n'.join(sections[key]) + '\n')
     return '\n'.join(out).rstrip('\n') + '\n'
 
 
@@ -815,7 +851,7 @@ def merge_groom_text(existing, sections, intake_path=None):
             if m and not os.path.isfile(os.path.join(intake_path, m.group('name'))):
                 lines[i] = line + SETTLED_SUFFIX
     added = 0
-    for title, key in GROOM_SECTIONS + [INBOX_QUESTIONS]:
+    for title, key in GROOM_SECTIONS + EXTRA_SECTIONS:
         header = f'## {title}'
         start = next((i for i, l in enumerate(lines) if l.strip() == header), None)
         end = len(lines)
@@ -915,6 +951,7 @@ def cmd_groom(args, root):
         batch_max_globs=conv.batch_max_globs if conv else DEFAULT_BATCH_MAX_GLOBS,
         since=conv.get('id_in_subject_since') if conv else None)
     sections[INBOX_QUESTIONS[1]] = inbox_mod.question_lines(root, intake_dir)
+    sections[REFUSED_QUESTIONS[1]] = groom_refused_section(canonical, product)
 
     auto = policy.groom_auto(product)
     by_rule = 0

@@ -140,8 +140,10 @@ rules on the item instead of a fourth attempt, and any further hold says `— ad
 
 Other holds you will see:
 
-- `held <branch>: <class> (<level>) — <file>` — an approval class stops the landing; resolve it
-  with `asf approvals resolve` ([product-config.md](product-config.md#approvals)).
+- `held <branch>: <class> (<level>) — <file>` — a `merge_*` approval class stops the landing;
+  resolve it with `asf approvals resolve` ([product-config.md](product-config.md#approvals)).
+  A session's own refused action (a trunk push, a git-hook edit) holds nothing: the item is
+  relaunched with the refusal in its brief, and a repeat goes to the groom's adjudicator.
 - `parked <branch>: ended empty 2 times …` — a Task whose sessions wrote nothing twice. Check
   whether its work is already on the trunk, then close the Task, reshape its plan, or release it:
   `asf unpark <item> --why "<reason>" --product <p>`.

@@ -49,8 +49,9 @@ what it means and the one command that clears it; then the common stalls that pr
 
 | line | meaning | fix |
 | --- | --- | --- |
-| `NEEDS OPERATOR: held <class> on <item> — <detail> — asf approvals resolve <item>/<class> granted\|done\|dropped` | a `human-now` action was refused; the item is parked; printed every tick until resolved | `asf approvals resolve <item>/<class> granted` (or `done`, `dropped`) |
-| `NEEDS OPERATOR: <item> <class> — asf approvals resolve …` | the same, in a session's own output | the same |
+| `REFUSED <class> (<level>) on <item> — … You may not do this: …` | the approvals hook refused a session's action and told it what to do instead; the item is not parked | nothing — the relaunch's brief names the refusal (`REFUSED LAST RUN`) |
+| `approvals: <n> refused action(s) on <m> item(s) recorded — none parks its item` | the audit trail of those refusals | nothing; `asf approvals list` shows them. An item refused the same class on 2 relaunches in a row goes to the groom's adjudicator |
+| `NEEDS OPERATOR: held <class> on <item> — <detail> — asf approvals resolve <item>/<class> granted\|done\|dropped` | the harvest held a branch on a `merge_*` class; the item is parked; printed every tick until resolved | `asf approvals resolve <item>/<class> granted` (or `done`, `dropped`) |
 | `[NEEDS OPERATOR: ]held file_bug on <signature> — widen approvals: file_bug …` | Bug filing is not `auto`, so found Bugs are only listed | set `approvals.file_bug: auto`, or file them yourself |
 
 ### Workers and the pool
@@ -111,7 +112,7 @@ they end or as other products go quiet. To change the split, lower another produ
 `capacity.sessions` or add pool accounts; `asf capacity --all` shows each product's bound.
 
 **Other waits in the wave.** `pool full` (every account at its `cap`), `reserved for S1` (a slot kept
-for an S1 Bug), `held <class> (<level>)` (an approval hold — resolve it), `WAITS ON <item>` (an
+for an S1 Bug), `held <class> (<level>)` (a harvest `merge_*` hold — resolve it; a session's refused action never parks), `WAITS ON <item>` (an
 `after:` predecessor or a running Task writing the same files), `waits batch — at ci capacity (n/m)`
 (the merge queue waits for CI runs to finish).
 

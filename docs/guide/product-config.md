@@ -390,8 +390,10 @@ The approval matrix maps every action class to a level:
 | level | effect |
 | --- | --- |
 | `auto` | the factory acts |
-| `groom` | refused; the item waits for the next groom |
-| `human-now` | refused; every tick prints a `NEEDS OPERATOR: held …` line until a person resolves it |
+| `groom` | refused, and the session is told to finish another way |
+| `human-now` | refused, and the session is told to finish another way |
+
+A refusal never parks the item and never asks you anything — see below.
 
 The classes, and their defaults when `approvals:` does not name them (`asf approvals` prints the
 effective matrix and what recognises each class):
@@ -423,8 +425,26 @@ approval_signals:
     commands: ['\bpsql\b.*\bprod\b']
 ```
 
-A refused action becomes a **hold** on `<item>/<class>`, and the item is parked — the wave will not
-start it (`waits <job> <item> — held <class> (<level>)`). To release it:
+What refused means. The hook blocks the call and tells the session plainly that it may not do
+it, why, and what to do instead — `pushing to the trunk and deploying are the harvest's job … push
+your own branch`, `the repo's git hooks are not yours to edit …` — and that it is not a question
+for a person. Nothing is auto-granted: what the matrix refuses is exactly what it refused before.
+
+- The refusal is recorded as a **hold** on `<item>/<class>`, for the audit trail only. It does
+  **not** park the item: the wave launches or relaunches it as normal, and a relaunch's brief
+  opens with `REFUSED LAST RUN`, naming what was refused and why, so the session does not repeat
+  it. The tick prints one line, `approvals: <n> refused action(s) on <m> item(s) recorded — none
+  parks its item`.
+- An item refused the same class on its first run and on **2 relaunches in a row** becomes a
+  question for the groom's adjudicator (`## Refused on repeat relaunches` in the groom file,
+  with `approvals.groom: auto`), not for you. The adjudicator drops it (`no: <why>`), closes it
+  (`close: <why>`) or has it reshaped (`reshape: <how>`). Only money, credentials or an action
+  that cannot be undone (`spend_money`, `touch_security`, `touch_customer_data`) may go to `NEEDS
+  OPERATOR` — and even then the item blocks no other work.
+
+Only the harvest's two `merge_*` classes still park an item: the branch waits to land, the tick
+prints `NEEDS OPERATOR: held <class> on <item> …` and the wave says `waits <job> <item> — held
+<class> (<level>)`. Holds are listed and resolved with:
 
 ```bash
 asf approvals list --product <p>                             # the open holds
@@ -433,7 +453,8 @@ asf approvals resolve <item>/<class> done --product <p>      # you did it by han
 asf approvals resolve <item>/<class> dropped --product <p>   # it will not happen
 ```
 
-`granted` stands for that item and class from then on.
+`granted` stands for that item and class from then on — the one way to widen a single item
+without widening the matrix.
 
 Two more keys under `approvals:` are switches, not classes, and both are **off unless set**:
 
@@ -514,7 +535,7 @@ example), the hooks ASF writes there are ordinary files in the working tree. **C
 them**: every clone and worktree — each worker's included — reads its own copy of that
 directory, so an uncommitted hook exists only in your checkout. Commit them yourself: a worker
 session that writes `.githooks/*` is refused as `touch_security` (a built-in path, `human-now` by
-default), and its item is held until you run `asf approvals resolve <item>/touch_security …`.
+default) and told the repo's git hooks are not its to edit; it finishes without them.
 
 To add ASF's line to a hook you already have, run it first and stop on failure — do not `exec` it,
 or the rest of your hook never runs:

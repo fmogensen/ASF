@@ -93,9 +93,15 @@ class GroomOnOriginReachesThePlainTick(StepsTestCase):
         self.assertEqual(state['open'], ['F-1111'])
         self.assertTrue(all('E-0001' not in line for line in state['lines']))
 
-    def test_a_card_on_an_open_approval_hold_stays_with_the_operator(self):
+    def test_a_card_the_hook_refused_goes_to_the_adjudicator(self):
         approvals.refuse(self.product, 'F-1111', 'spend_money', 'human-now', 'task-t-0001',
                          'Bash', 'raise a paid tier')
+        state = step_wave.groom_state(self.product, self.ctx().record_root())
+        self.assertEqual(state['open'], ['F-1111'])
+
+    def test_a_card_on_an_open_harvest_hold_stays_with_the_operator(self):
+        approvals.refuse(self.product, 'F-1111', 'merge_amendable_set', 'human-now',
+                         'task-t-0001', 'harvest', 'rules/r1.md')
         state = step_wave.groom_state(self.product, self.ctx().record_root())
         self.assertEqual(state['open'], [])
         self.assertEqual([r for r in feeder_rows.candidates(
@@ -103,7 +109,8 @@ class GroomOnOriginReachesThePlainTick(StepsTestCase):
             if r.kind == feeder_rows.GROOM_ADJUDICATE], [])
 
     def test_a_granted_hold_gives_the_question_back(self):
-        hold = approvals.refuse(self.product, 'F-1111', 'spend_money', 'human-now', 'j', 'Bash', 'x')
+        hold = approvals.refuse(self.product, 'F-1111', 'merge_amendable_set', 'human-now', 'j',
+                                'harvest', 'x')
         approvals.resolve(self.product, hold, 'granted')
         state = step_wave.groom_state(self.product, self.ctx().record_root())
         self.assertEqual(state['open'], ['F-1111'])

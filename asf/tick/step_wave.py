@@ -1,6 +1,8 @@
 """asf.tick.step_wave — the tick's ``wave`` step: what the feeder says to start, launched.
 
-0. ``approvals.raise_holds`` — the open holds said aloud, and the items they park (§2.4);
+0. ``approvals.raise_holds`` — the open holds said aloud, and the items they park (§2.4): a
+   harvest merge hold parks its item; a refusal from the hook never does — the item relaunches
+   and its brief names the refusal (:func:`asf.approvals.refusal_text`);
 1. the index from the record clone (the tick's own, made once per tick — :class:`Context`);
 2. the lane pass (:func:`asf.harvest.lane.lane_pass`, R2): every lane branch moved as far as its
    facts carry it — a finished branch's PR opened or adopted, its review asked for, a merge seen
@@ -147,8 +149,10 @@ def groom_state(product, root):
 def _operator_owned(product, items):
     """The item ids whose question no adjudicate session may rule (§2.8): an answer that would
     cross an action class the product does not map to ``auto`` (:func:`asf.groom.policy.barred`
-    — a new Epic), or a card holding an open approval hold (money, production, security,
-    customer data, legal …) at a level other than ``auto``. Those stay with the operator."""
+    — a new Epic), or a card holding an open harvest hold (a merge class) at a level other than
+    ``auto``. Those stay with the operator. A refusal from the hook
+    (:func:`asf.approvals.session_refusal`) keeps nothing from the adjudicator: it rules on the
+    card, and only money, credentials or an irreversible action may go to NEEDS OPERATOR."""
     probe = groom_policy.Answer('yes', 'decided', True, '')
     owned = {iid for iid, item in items.items()
              if groom_policy.barred(probe, {'meta': item}, product)}
@@ -160,7 +164,7 @@ def _operator_owned(product, items):
         cls = h.get('class')
         level = (approvals.level_of(product, cls) if cls in approvals.CLASSES_BY_NAME
                  else h.get('level'))
-        if level != 'auto':
+        if level != 'auto' and not approvals.session_refusal(cls):
             owned.add(h.get('item'))
     return owned
 
@@ -343,7 +347,7 @@ def run(ctx, out=print):
         if not row.launches:
             out(f"waits    {'-':<24} {row.item_id:<10} — {row.action}")
             continue
-        if row.item_id in held:                 # §2.4: a held item waits for a person, not a slot
+        if row.item_id in held:                 # §2.4: a harvest merge hold parks its item
             cls, level = held[row.item_id]
             job = job_name(row.brief_kind, row.item_id)
             out(f'waits    {job:<24} {row.item_id:<10} — held {cls} ({level})')

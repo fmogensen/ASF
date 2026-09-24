@@ -347,6 +347,20 @@ def correction_text(row, kind):
     return CORRECTION_HEAD + text.rstrip() if kind in ('correct', 'spec', 'plan') and text else ''
 
 
+def refusal_section(product, item_id):
+    """A relaunch's brief names what the approvals hook refused the item's last run, and why,
+    so the session does not repeat it (:func:`asf.approvals.refusal_text`) — ``''`` when
+    nothing was refused, when there is no product, or when the ledger cannot be read."""
+    if product is None or not item_id or item_id == 'none':
+        return ''
+    from asf import approvals  # local: approvals imports the workers, which import briefs
+    try:
+        text = approvals.refusal_text(product, item_id)
+    except (OSError, ValueError, KeyError):   # a brief is never lost to the audit ledger
+        return ''
+    return '\n\n' + text if text else ''
+
+
 def build(product, row, index, inflight=None, repo_facts=None):
     """The brief for one feeder row."""
     kind = normalize_kind(getattr(row, 'brief_kind', '') or getattr(row, 'kind', ''))
@@ -355,7 +369,8 @@ def build(product, row, index, inflight=None, repo_facts=None):
     ctx = context(product, row, kind, facts)
     parts = [item_line(row, facts['item']),
              preamble_mod.build(product, row, index, inflight, repo_facts, facts=facts),
-             render(load_template(kind), ctx).rstrip() + correction_text(row, kind),
+             render(load_template(kind), ctx).rstrip() + correction_text(row, kind)
+             + refusal_section(product, ctx['item_id']),
              render(TAIL, ctx)]
     return Brief(kind=kind, item_id=ctx['item_id'], text='\n\n'.join(p.strip() for p in parts) + '\n',
                  model=model_for(product, kind, facts['item']), add_dirs=add_dirs_for(product, row, kind),

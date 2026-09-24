@@ -55,6 +55,9 @@ FOR EACH ONE, one of two outcomes — never "noted", never a question back:
   the card in the intake directory and answer with what settles it: `feature`, `bug <the
   failing test or error line>`, `parent <id>`, `S1`/`S2`/`S3` (several joined by `; `), or `no`
   to close the card unminted;
+- for a `refused on repeat:` line — a card the approvals hook refused the same action on run
+  after run — decide what becomes of it: `no: <why>` to drop it, `close: <why>` to close it, or
+  `reshape: <how>` to have its plan reshaped so the work needs no refused action;
 - or, when the question is not yours to answer, the literal `NEEDS OPERATOR: <the question> —
   <your recommendation>`.
 

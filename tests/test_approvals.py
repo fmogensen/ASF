@@ -230,8 +230,11 @@ class HookTest(unittest.TestCase):
                 rc, out = self.call(tool_name, tool_input, cwd=cwd)
                 self.assertEqual(rc, 2, out)
                 self.assertIn(f'REFUSED {cls} (human-now) on {self.ITEM} — ', out)
-                self.assertIn(
-                    f'asf approvals resolve {self.ITEM}/{cls} granted|done|dropped', out)
+                # the session is told it may not, and what instead — never to ask a person
+                self.assertIn('  You may not do this: ', out)
+                self.assertIn('Instead: ', out)
+                self.assertNotIn('NEEDS OPERATOR:', out)
+                self.assertNotIn('asf approvals resolve', out)
 
     def test_the_trunk_is_pushed_only_by_a_push_refspec(self):
         from asf.approvals import _pushes_trunk
@@ -627,20 +630,29 @@ class TickRaiseTest(TickTestCase):
                 out += [json.loads(ln) for ln in f if ln.strip()]
         return [e for e in out if e['kind'] == kind]
 
-    def test_one_needs_operator_line_per_human_now_hold(self):
-        self.hold('F-0031', 'touch_production', 'human-now')
-        self.hold('B-0002', 'touch_legal', 'human-now', detail='LICENSE')
-        self.hold('T-0003', 'new_epic', 'human-now', detail='epics/E-0002.md')
-        approvals.resolve(self.product, 'T-0003/new_epic', 'dropped')
+    def test_one_needs_operator_line_per_human_now_harvest_hold(self):
+        self.hold('F-0031', 'merge_amendable_set', 'human-now', detail='rules/r1.md')
+        self.hold('B-0002', 'merge_amendable_set', 'human-now', detail='rules/r2.md')
+        self.hold('T-0003', 'merge_amendable_set', 'human-now', detail='rules/r3.md')
+        approvals.resolve(self.product, 'T-0003/merge_amendable_set', 'dropped')
 
         held, _ = self.raise_holds()
         raised = [ln for ln in self.lines if ln.startswith('NEEDS OPERATOR')]
         self.assertEqual(len(raised), 2, self.lines)
         self.assertEqual([NEEDS_OPERATOR_RE.match(ln).groups() for ln in raised],
-                         [('touch_production', 'F-0031'), ('touch_legal', 'B-0002')])
+                         [('merge_amendable_set', 'F-0031'), ('merge_amendable_set', 'B-0002')])
         self.assertNotIn('T-0003', '\n'.join(self.lines))
-        self.assertEqual(held, {'F-0031': ('touch_production', 'human-now'),
-                                'B-0002': ('touch_legal', 'human-now')})
+        self.assertEqual(held, {'F-0031': ('merge_amendable_set', 'human-now'),
+                                'B-0002': ('merge_amendable_set', 'human-now')})
+
+    def test_a_hook_refusal_asks_no_one_and_parks_nothing(self):
+        self.hold('F-0031', 'touch_production', 'human-now')
+        self.hold('B-0002', 'touch_legal', 'human-now', detail='LICENSE')
+        held, _ = self.raise_holds()
+        self.assertEqual([ln for ln in self.lines if 'NEEDS OPERATOR' in ln], [])
+        self.assertEqual(self.lines, ['approvals: 2 refused action(s) on 2 item(s) recorded —'
+                                      ' none parks its item; asf approvals list'])
+        self.assertEqual(held, {})
 
     def test_groom_holds_are_one_summary_line(self):
         for item in ('F-0031', 'B-0002', 'T-0003'):
@@ -648,7 +660,7 @@ class TickRaiseTest(TickTestCase):
         self.raise_holds()
         self.assertEqual(self.lines, ['approvals: 3 held for groom — asf approvals list'])
 
-    def test_held_item_is_not_relaunched(self):
+    def test_a_refused_item_is_relaunched(self):
         self.hold('B-0001', 'touch_production', 'human-now')
         rows = [
             feeder_rows.Row(0, 'BUG → FIX', 'B-0001', '', 'would launch fix-bug-b-0001 (Opus)',
@@ -667,7 +679,29 @@ class TickRaiseTest(TickTestCase):
                 mock.patch.object(step_wave, '_wave', wave):
             step_wave.run(tick.Context(self.product), out=self.lines.append)
 
-        self.assertIn('waits    fix-bug-b-0001           B-0001     — held touch_production'
+        self.assertFalse([ln for ln in self.lines if '— held touch_production' in ln], self.lines)
+        self.assertEqual(waved, ['B-0001', 'T-0002'])   # the refusal parks nothing
+
+    def test_a_harvest_held_item_is_not_relaunched(self):
+        self.hold('B-0001', 'merge_amendable_set', 'human-now', detail='rules/r1.md')
+        rows = [
+            feeder_rows.Row(0, 'BUG → FIX', 'B-0001', '', 'would launch fix-bug-b-0001 (Opus)',
+                            'fix-bug', 'fix/B-0001', 'S1 open'),
+            feeder_rows.Row(1, 'PLAN → CODE', 'T-0002', 'F-0001', 'would launch task-t-0002 (Opus)',
+                            'task', 'task/T-0002', 'next'),
+        ]
+        waved = []
+
+        def wave(product, worker_rows, n, brief_fn=None, out=print):
+            waved.extend(r.item for r in worker_rows)
+            return [(worker_rows[0], {'model': 'opus'})], []
+
+        with mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **kw: rows), \
+                mock.patch.object(step_wave, '_build', lambda *a, **kw: _BRIEF), \
+                mock.patch.object(step_wave, '_wave', wave):
+            step_wave.run(tick.Context(self.product), out=self.lines.append)
+
+        self.assertIn('waits    fix-bug-b-0001           B-0001     — held merge_amendable_set'
                       ' (human-now)', self.lines)
         self.assertEqual(waved, ['T-0002'])          # the other row still launches
 

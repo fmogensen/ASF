@@ -11,7 +11,11 @@ of every hold and its resolution, in ``~/.ASF/state/<product>/approvals.jsonl`` 
 :func:`run_hook` is the ``PreToolUse`` hook itself — ``asf hook approvals``, dispatched by
 :mod:`asf.hooks` — which refuses a factory session's tool call whose class is not ``auto`` and
 records the hold. It governs only a session (``ASF_JOB`` in the environment, D4), never edits to
-the operator's own config (:func:`operator_config_target`, D8), and fails closed (D7).
+the operator's own config (:func:`operator_config_target`, D8), and fails closed (D7). A refusal
+tells the session it may not, and what to do instead; it asks no person and parks nothing — the
+wave relaunches the item with the refusal in its brief (:func:`refusal_text`), and an item
+refused one class on repeat relaunches becomes a question for the groom's adjudicator
+(:func:`escalations`). Only the harvest's merge classes park an item (:func:`parked`).
 
 :func:`cmd_approvals` is the operator's side of the same matrix — ``asf approvals`` prints it,
 ``asf approvals list`` the open holds, ``asf approvals resolve`` closes one — and
@@ -39,44 +43,76 @@ class ActionClass:
     default: str          # one of LEVELS
     read_by: tuple        # ('hook',) | ('harvest',) | ('hook', 'file_bugs') ...
     levels: tuple = LEVELS  # the levels a product yaml may map this class to
-    parks: bool = True      # an open hold on it stops the wave launching the item
+    # An open hold on it stops the wave launching the item. Only the harvest's merge classes
+    # park (the branch waits to land either way); a refusal from the hook never parks an item —
+    # the session is told to finish another way and the next brief names the refusal.
+    parks: bool = False
     grantable: bool = True  # `granted` releases it
+    why: str = ''           # the refusal's "you may not": why this is not a session's to do
+    instead: str = ''       # what the session does instead
+    # money, credentials or an action that cannot be undone: the only classes the adjudicator
+    # may answer NEEDS OPERATOR on when an item keeps being refused for one
+    operator: bool = False
 
 
 CLASSES = (
     ActionClass(
         'spend_money', 'buying, subscribing, raising a paid tier or a spend limit',
-        'human-now', ('hook',)),
+        'human-now', ('hook',),
+        why='spending money is never a session\'s to do',
+        instead='finish with what is already paid for, and name the paid step under'
+                ' `left out:` in your report',
+        operator=True),
     ActionClass(
         'touch_production', 'deploying, pushing to the trunk',
-        'human-now', ('hook',)),
+        'human-now', ('hook',),
+        why='pushing to the trunk and deploying are the harvest\'s job, not a session\'s',
+        instead='push your own branch (`git push origin <your branch>`) and end there — the'
+                ' harvest lands and deploys it'),
     ActionClass(
         'touch_security',
         "secrets, credentials, the runtime's hook and permission settings, the repo's git hooks",
-        'human-now', ('hook',)),
+        'human-now', ('hook',),
+        why="secrets, credentials, the runtime's hook and permission settings and the repo's"
+            ' git hooks are not yours to edit, and `--no-verify` is not yours to use',
+        instead='fix what the hook or check flags in your own change, or leave the change out'
+                ' and name it under `left out:`',
+        operator=True),
     ActionClass(
         'touch_customer_data', 'reading or changing customer records, exports, production databases',
-        'human-now', ('hook',)),
+        'human-now', ('hook',),
+        why='customer records, exports and production databases are not yours to read or'
+            ' change',
+        instead='work against fixtures or test data',
+        operator=True),
     ActionClass(
         'touch_legal', 'licences, notices, terms, privacy texts',
-        'human-now', ('hook',)),
+        'human-now', ('hook',),
+        why='licence, notice, terms and privacy texts are not yours to change',
+        instead='leave them as they are and name the change you would have made under'
+                ' `left out:`'),
     ActionClass(
         'touch_amendable_set',
         "a session writing the factory's own rules — rule cards, checks, hooks, role agents,"
         ' briefs, evals',
-        'human-now', ('hook',), levels=('human-now',), parks=False, grantable=False),
+        'human-now', ('hook',), levels=('human-now',), grantable=False),
     ActionClass(
         'new_epic', 'opening a new Epic',
-        'human-now', ('hook',)),
+        'human-now', ('hook',),
+        why='opening an Epic is the groom\'s decision, not a session\'s',
+        instead='file the idea with `asf inbox --title "<the idea>"` and finish the work in'
+                ' hand'),
     ActionClass(
         'merge_amendable_set', "landing a branch that touches the factory's own rules",
-        'human-now', ('harvest',)),
+        'human-now', ('harvest',), parks=True),
     ActionClass(
         'merge_routine_pr', 'landing any other finished branch',
-        'auto', ('harvest',)),
+        'auto', ('harvest',), parks=True),
     ActionClass(
         'file_bug', 'filing or bumping a Bug',
-        'auto', ('hook', 'file_bugs')),
+        'auto', ('hook', 'file_bugs'),
+        why='filing a Bug is the bug filer\'s and the groom\'s job, not a session\'s',
+        instead='name the defect under `left out:` in your report'),
     ActionClass(
         'decide_feature', 'deciding an undecided Feature under a live Epic, by rule',
         'human-now', ('groom',)),
@@ -592,15 +628,22 @@ def _amendable_refusal_lines(item, relpath, kind):
 
 
 def _refusal_lines(item, cls, level, detail):
-    """The four lines of §2.3 step 7. ``products/<p>.yaml`` is literal: the session is told where
-    authority lives, not which file to go and edit (D8)."""
+    """What a session sees when the hook refuses it an action of ``cls``: that it may not, why,
+    and what to do instead. Never a question for a person — the hold is recorded for the audit
+    trail, nothing waits on it, and the item's next brief names it (:func:`refusal_text`).
+    ``products/<p>.yaml`` is literal: the session is told where authority lives, not which file
+    to go and edit (D8)."""
+    c = CLASSES_BY_NAME.get(cls)
+    why = (c.why if c and c.why else f"{c.covers if c else cls} is not a session's to do")
+    instead = (c.instead if c and c.instead
+               else 'leave it out and name it under `left out:` in your report')
     return [
         f'REFUSED {cls} ({level}) on {item} — {detail}',
-        '  This action needs a person (approvals: in products/<p>.yaml). Do not retry it or work'
-        ' around it.',
-        f'  Print: NEEDS OPERATOR: {item} {cls} — asf approvals resolve {item}/{cls}'
-        ' granted|done|dropped',
-        '  and carry on with every part of the job that does not depend on it.',
+        f'  You may not do this: {why} (approvals: in products/<p>.yaml).',
+        f'  Do not retry it or work around it. Instead: {instead}.',
+        '  This is not a question for a person: do not print NEEDS OPERATOR for it. Finish'
+        ' every part of the job another way; the refusal is recorded and your next brief'
+        ' names it.',
     ]
 
 
@@ -675,27 +718,42 @@ def _enforce(stdin_text, environ, out, product):
 
 # ---- the tick's raise and the parking (§2.4) ----------------------------------
 
+def session_refusal(cls):
+    """A class the hook refuses a session and tells it why: it never parks and asks no one —
+    every hook class but ``touch_amendable_set``, whose refusal is a proposal (F-0024)."""
+    c = CLASSES_BY_NAME.get(cls)
+    return bool(c and 'hook' in c.read_by and c.name != 'touch_amendable_set')
+
+
 def raise_holds(ctx, out):
     """The ``wave`` step's first act: say what is held, record each hold once, and answer with
     ``{item: (class, level)}`` — the items a launching row must not be started on.
 
-    One ``NEEDS OPERATOR`` line per open ``human-now`` hold, oldest first, and one summary line
-    however many ``groom`` holds are open: a person reads the first, the groom session the
-    second. The ``announced`` and ``closed`` markers live in the ledger beside the refusals
-    (§4), so the ``held`` and ``hold-resolved`` events are written once over a hold's life
-    however many ticks see it — the fold's ``first`` never moves, so one marker is one
-    announcement, and a repeat refusal bumps ``count`` without raising a second event.
+    A refusal the hook told a session about (:func:`session_refusal`) is no one's question: it
+    is counted in one line and parks nothing — the wave relaunches the item, its brief names
+    the refusal, and a repeat goes to the groom's adjudicator (:func:`escalations`). One ``NEEDS
+    OPERATOR`` line per other open ``human-now`` hold (the harvest's merge classes, a proposal
+    to the amendable set), oldest first, and one summary line however many ``groom`` holds are
+    open. The ``announced`` and ``closed`` markers live in the ledger beside the refusals (§4),
+    so the ``held`` and ``hold-resolved`` events are written once over a hold's life however
+    many ticks see it — the fold's ``first`` never moves, so one marker is one announcement,
+    and a repeat refusal bumps ``count`` without raising a second event.
     """
     product = ctx.product
     open_ = open_holds(product)                      # oldest first
 
+    refused = [e for e in open_ if session_refusal(e['class'])]
     for e in open_:
-        if e['level'] == 'human-now':
+        if e['level'] == 'human-now' and not session_refusal(e['class']):
             out(f"NEEDS OPERATOR: held {e['class']} on {e['item']} — {e['detail']} —"
                 f" asf approvals resolve {e['item']}/{e['class']} granted|done|dropped")
-    groom = sum(1 for e in open_ if e['level'] == 'groom')
+    groom = sum(1 for e in open_ if e['level'] == 'groom' and not session_refusal(e['class']))
     if groom:
         out(f'approvals: {groom} held for groom — asf approvals list')
+    if refused:
+        items = len({e['item'] for e in refused})
+        out(f'approvals: {len(refused)} refused action(s) on {items} item(s) recorded — none'
+            ' parks its item; asf approvals list')
 
     for e in open_:
         if e['announced']:
@@ -716,7 +774,8 @@ def raise_holds(ctx, out):
 
 def parked(product, open_=None):
     """``{item: (class, level)}`` — the items an open hold parks: a launching row on one waits
-    for a person, not a slot (:func:`asf.feeder.tiers.select` gives it none). Read-only, so
+    for a person, not a slot (:func:`asf.feeder.tiers.select` gives it none). Only a class with
+    ``parks`` (the harvest's merge classes) parks; a hook refusal never does. Read-only, so
     ``asf next`` and the status cell plan with the same holds the tick's wave does."""
     open_ = open_holds(product) if open_ is None else open_
     order = {c.name: i for i, c in enumerate(CLASSES)}
@@ -729,6 +788,101 @@ def parked(product, open_=None):
         if e['item'] not in held or rank < held[e['item']][0]:
             held[e['item']] = (rank, e['class'], e['level'])
     return {item: (cls, level) for item, (_, cls, level) in held.items()}
+
+
+# ---- a refusal on the next run: the relaunch brief and the escalation ----------
+
+#: An item refused for one class on this many relaunches in a row (each briefed with the
+#: refusal, each refused again) goes to the groom's adjudicator as a question.
+ESCALATE_RELAUNCHES = 2
+
+
+def _refused_runs(product, item=None):
+    """``{item: [(run, {class: [refused record]})]}`` — every run of each item (of ``item``
+    alone when given) off the session ledger, oldest first, with the hook refusals recorded
+    during it. A refusal belongs to the latest run of its job that started at or before it."""
+    from asf.workers import lifecycle, pool  # local: pool reads this module's product paths
+    name = product.name if isinstance(product, env.Product) else product
+    if not name or not os.path.isfile(os.path.join(env.ASF_HOME, 'state', name,
+                                                   'approvals.jsonl')):
+        return {}                                   # read-only: no state dir made to find out
+    try:
+        recs = [r for r in read(product) if r.get('event') == 'refused'
+                and session_refusal(r.get('class')) and (item is None or r.get('item') == item)]
+    except OSError:
+        return {}
+    items = {r.get('item') for r in recs if r.get('item')}
+    if not items:
+        return {}
+    try:
+        all_runs = lifecycle.runs(pool.sessions_path(product))
+    except OSError:
+        return {}
+    by_item = {}
+    for rs in all_runs.values():
+        for run in rs:
+            if run.get('item') in items and run.get('started'):
+                by_item.setdefault(run['item'], []).append(run)
+    out = {}
+    for iid, rs in by_item.items():
+        rs.sort(key=lambda r: r['started'])
+        slots = [(run, {}) for run in rs]
+        for rec in recs:
+            if rec.get('item') != iid:
+                continue
+            ts = rec.get('ts') or ''
+            at = None
+            for i, (run, _) in enumerate(slots):
+                if run.get('job') == rec.get('job') and run['started'] <= ts:
+                    at = i
+            if at is not None:
+                slots[at][1].setdefault(rec['class'], []).append(rec)
+        out[iid] = slots
+    return out
+
+
+def refusal_text(product, item):
+    """The relaunch brief's paragraph: what the hook refused ``item``'s latest run and why, so
+    the next session does not repeat it — ``''`` when that run was refused nothing (or ``item``
+    has no run). Read before the new run is recorded, the latest run is the one before it."""
+    slots = _refused_runs(product, item).get(item) or []
+    if not slots or not slots[-1][1]:
+        return ''
+    lines = ['REFUSED LAST RUN — the approvals hook refused the previous session on this item'
+             ' these actions. They are not yours to do; doing them again ends in the same'
+             ' refusal, so finish the work another way:']
+    for cls in sorted(slots[-1][1], key=lambda n: [c.name for c in CLASSES].index(n)):
+        c = CLASSES_BY_NAME[cls]
+        details = sorted({(r.get('detail') or '').strip() for r in slots[-1][1][cls]} - {''})
+        what = '; '.join(f'`{d}`' for d in details[:3]) or cls
+        why = c.why or f"{c.covers} is not a session's to do"
+        instead = c.instead or 'leave it out and name it under `left out:`'
+        lines.append(f'- {cls}: {what} — {why}. Instead: {instead}.')
+    lines.append('None of this is a question for a person: do not print NEEDS OPERATOR for it.')
+    return '\n'.join(lines)
+
+
+def escalations(product):
+    """``{item: (class, runs)}`` — each item whose latest ``runs`` runs were all refused
+    ``class``, the first of them plus :data:`ESCALATE_RELAUNCHES` relaunches or more: a question
+    for the groom's adjudicator (drop, reshape or close), never the operator's. The class first
+    in catalogue order wins an item refused for two."""
+    out = {}
+    order = [c.name for c in CLASSES]
+    for iid, slots in _refused_runs(product).items():
+        best = None
+        for cls in {k for _, refused in slots for k in refused}:
+            n = 0
+            for _run, refused in reversed(slots):
+                if cls not in refused:
+                    break
+                n += 1
+            if n >= ESCALATE_RELAUNCHES + 1 and (
+                    best is None or order.index(cls) < order.index(best[0])):
+                best = (cls, n)
+        if best:
+            out[iid] = best
+    return out
 
 
 # ---- the operator's side — `asf approvals` and the doctor row (§2.5) -----------

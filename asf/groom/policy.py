@@ -33,6 +33,11 @@ OPEN_QUESTION_RE = re.compile(
 
 #: An open question's line, split so :func:`suppress` can keep the ``<id> <title> — <why>``
 #: text and only replace the answer slot.
+#: The why of a groom line asking the adjudicator about an item the approvals hook keeps
+#: refusing (:func:`asf.groom.groom.groom_refused_section`). No relaunch speaks for it: the
+#: relaunch is what keeps being refused, so :func:`suppress` leaves the line open.
+REFUSED_MARK = 'refused on repeat:'
+
 _SUPPRESSABLE_RE = re.compile(r'^- \[ \]\s+(?P<id>[A-Z]-\d{4})\s+(?P<body>.*?)\s*→\s*answer:\s*____$')
 
 
@@ -545,7 +550,7 @@ def suppress(sections, index, inflight, product):
     for key, lines in sections.items():
         new_lines = []
         for line in lines:
-            m = _SUPPRESSABLE_RE.match(line)
+            m = None if REFUSED_MARK in line else _SUPPRESSABLE_RE.match(line)
             label = (spoken.get(m.group('id')) or held.get(m.group('id'))) if m else None
             if m and label:
                 new_lines.append(f"- [x] {m.group('id')} {m.group('body')} → answer: "
