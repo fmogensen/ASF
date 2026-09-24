@@ -450,7 +450,7 @@ class LaunchAndReapInvariants(unittest.TestCase):
 
     def test_a_launch_is_refused_only_on_a_live_worktree(self):
         # B-0025 / B-0051: an ended run's worktree is reused; an orphan is refused
-        self.assertEqual(lc.may_launch(self.path, 'fix-b-0001', self.wt), (False, f'worktree already exists: {self.wt}'))
+        self.assertEqual(lc.may_launch(self.path, 'fix-b-0001', self.wt), (False, f'worktree already exists: {self.wt} — no run recorded it'))
         self.write({'job': 'fix-b-0001', 'pid': 1, 'started': 't1', 'worktree': self.wt})
         self.assertFalse(lc.may_launch(self.path, 'fix-b-0001', self.wt)[0])
         self.write({'job': 'fix-b-0001', 'ended': 't2', 'end_reason': 'failed: not pushed: 3 uncommitted file(s), 0 unpushed commit(s)'})
@@ -461,6 +461,49 @@ class LaunchAndReapInvariants(unittest.TestCase):
         # …and while it runs, nobody else does — by worktree, not by directory name
         self.assertFalse(lc.may_launch(self.path, 'fix-b-0001', self.wt)[0])
         self.assertTrue(lc.may_launch(self.path, 'other', os.path.join(self.d, 'wt', 'other'))[0])
+
+    def _other_case(self, p):
+        """``p`` spelled with the case of its home segment swapped, as ``~/.ASF`` vs ``~/.asf``."""
+        head, tail = os.path.split(self.d)
+        return os.path.join(head, tail.swapcase()) + p[len(self.d):]
+
+    def test_an_ended_runs_worktree_under_a_differently_cased_home_is_reused(self):
+        other = self._other_case(self.wt)
+        if not os.path.exists(other):
+            self.skipTest('case-sensitive filesystem: the two spellings are two directories')
+        dead = lambda pid: False
+        # the coder run recorded the worktree as ~/.ASF/…, ended unpushed; the correction ran
+        # in it under another job name, and its pid is gone
+        self.write({'job': 'coder-t-0133', 'pid': 1, 'started': 't1', 'worktree': self.wt},
+                   {'job': 'coder-t-0133', 'ended': 't2', 'end_reason': 'failed: unpushed work'},
+                   {'job': 'correct-t-0133', 'pid': 2, 'started': 't3', 'worktree': self.wt})
+        self.assertEqual(lc.path_key(other), lc.path_key(self.wt))
+        self.assertEqual(lc.may_launch(self.path, 'correct-t-0133', other, alive=dead), (True, ''))
+        self.assertEqual(lc.may_launch(self.path, 'coder-t-0133', other, alive=dead), (True, ''))
+
+    def test_a_live_run_in_a_differently_cased_worktree_refuses_every_other_job(self):
+        other = self._other_case(self.wt)
+        if not os.path.exists(other):
+            self.skipTest('case-sensitive filesystem: the two spellings are two directories')
+        alive = lambda pid: True
+        self.write({'job': 'coder-t-0133', 'pid': 1, 'started': 't1', 'worktree': self.wt},
+                   {'job': 'coder-t-0133', 'ended': 't2', 'end_reason': 'failed: unpushed work'},
+                   {'job': 'correct-t-0133', 'pid': 2, 'started': 't3', 'worktree': self.wt})
+        # before: by realpath the ~/.asf spelling missed the correction's record and fell back to
+        # coder-t-0133's ended run — a second session into a live worktree
+        what, why = lc.launch_verdict(self.path, 'coder-t-0133', other, alive=alive)
+        self.assertEqual(what, lc.BUSY)
+        self.assertIn('held by live run correct-t-0133 (pid 2)', why)
+
+    def test_an_orphan_is_refused_under_either_spelling(self):
+        self.write({'job': 'somebody-else', 'pid': 1, 'started': 't1',
+                    'worktree': os.path.join(self.d, 'wt', 'elsewhere')})
+        for p in {self.wt, self._other_case(self.wt)}:
+            if not os.path.exists(p):
+                continue
+            what, why = lc.launch_verdict(self.path, 'fix-b-0001', p)
+            self.assertEqual(what, lc.ORPHAN)
+            self.assertIn('no run recorded it', why)
 
     def test_reap_on_landed_or_empty_and_only_then(self):
         dead = lambda pid: False

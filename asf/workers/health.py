@@ -368,7 +368,7 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
         path = os.path.join(wdir, name)
         if not os.path.isdir(path):
             continue
-        s = owners.get(os.path.realpath(path)) or sessions.get(name)
+        s = owners.get(lifecycle.path_key(path)) or sessions.get(name)
         ev = lifecycle.gather(product, s or {}, alive=alive, worktree=path)
         if s is None and not ev.remote_sha:
             # an orphan carries no branch on its record: read the one checked out

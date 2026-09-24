@@ -75,7 +75,7 @@ def carry_staged_answers(product, out=print):
             continue
         date = job.rsplit('groom-', 1)[-1]
         wt = run.get('worktree') or ''
-        if lifecycle.is_live(owners.get(os.path.realpath(wt)) or {}):
+        if lifecycle.is_live(owners.get(lifecycle.path_key(wt)) or {}):
             continue  # a session sent back into the same worktree is still at work there
         staged = os.path.join(wt, f'{date}.answers')
         if not _ANSWERS_FILE_RE.match(os.path.basename(staged)) or not os.path.isfile(staged):

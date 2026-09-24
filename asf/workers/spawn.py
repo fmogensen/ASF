@@ -39,7 +39,15 @@ DEFAULT_ID_SIZE = 50
 
 
 class SpawnError(Exception):
-    pass
+    """A launch refused. ``clear`` is the one command that clears it, when there is one."""
+
+    def __init__(self, msg, clear=''):
+        super().__init__(msg)
+        self.clear = clear
+
+
+class WorktreeBusy(SpawnError):
+    """The worktree is held by a live run: the item is already at work — a wait, not a fault."""
 
 
 def _git(args, cwd):
@@ -168,10 +176,18 @@ def make_worktree(product, job, branch):
     path = os.path.join(worktrees_dir(product), job)
     _git(['fetch', '-q', 'origin', product.main], repo)
     held = _holding_worktree(repo, branch)
+    if held and lifecycle.path_key(held) == lifecycle.path_key(path):
+        held = path  # one directory, spelled ~/.ASF by git and ~/.asf by us (or the reverse)
     for candidate in dict.fromkeys(p for p in (path, held) if p and os.path.exists(p)):
-        ok, why = lifecycle.may_launch(registry, job, candidate)
-        if not ok:
-            raise SpawnError(why)
+        what, why = lifecycle.launch_verdict(registry, job, candidate)
+        if what == lifecycle.BUSY:
+            raise WorktreeBusy(why)
+        if what:
+            raise SpawnError(why, clear=f'git -C {repo} worktree remove --force {candidate}'
+                                        f'  # after checking nothing in it is wanted')
+        if candidate == path and _worktree_branch(candidate) not in (branch, 'HEAD', ''):
+            # another branch checked out (a detached or mid-rebase tree is left for the session)
+            _checkout_branch(candidate, branch, product.main)
         if candidate == path or _worktree_branch(candidate) == branch:
             _rebase_onto_trunk(candidate, branch, product.main)
             return candidate
@@ -215,6 +231,24 @@ def _rebase_onto_trunk(path, branch, main):
                           text=True).stdout.strip()
     if head and head != remote_sha:
         lifecycle.publish(path, branch, remote_sha, main=main)
+
+
+def _checkout_branch(path, branch, main):
+    """An ended run's worktree reused for ``branch`` when it has another one checked out: the
+    branch as it stands locally, else origin's, else a fresh one off the trunk. A checkout the
+    tree refuses (uncommitted work in the way) refuses the launch with what to do."""
+    if _local_branch_exists(path, branch):
+        args = ['checkout', '-q', branch]
+    elif _branch_exists_on_origin(path, branch):
+        subprocess.run(['git', 'fetch', '-q', 'origin', branch], cwd=path, capture_output=True)
+        args = ['checkout', '-q', '-B', branch, f'origin/{branch}']
+    else:
+        args = ['checkout', '-q', '-b', branch, f'origin/{main}']
+    p = subprocess.run(['git', *args], cwd=path, capture_output=True, text=True)
+    if p.returncode != 0:
+        raise SpawnError(f'worktree {path} holds {_worktree_branch(path)} and will not check out '
+                         f'{branch}: {p.stderr.strip()}',
+                         clear=f'git -C {path} status  # commit or discard, then relaunch')
 
 
 def _local_branch_exists(repo, branch):

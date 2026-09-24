@@ -222,14 +222,41 @@ def by_branch(path):
     return out
 
 
+def _case_insensitive(path):
+    """Whether the filesystem holding ``path`` (its nearest existing ancestor with a letter in
+    its name) ignores case: the same entry answers under its name with the case swapped."""
+    p = path
+    while True:
+        parent = os.path.dirname(p)
+        if os.path.exists(p) and p.swapcase() != p:
+            break
+        if parent == p:
+            return False
+        p = parent
+    try:
+        return os.path.samefile(p, p.swapcase())
+    except OSError:
+        return False
+
+
+def path_key(path):
+    """The identity of a filesystem path: its realpath, case-folded where the filesystem ignores
+    case. ``os.path.realpath`` does not normalise case on macOS, so ``~/.ASF/…`` and ``~/.asf/…``
+    — one directory there — were two keys, and a worktree recorded under one spelling was not
+    found under the other."""
+    rp = os.path.realpath(path)
+    return rp.casefold() if _case_insensitive(rp) else rp
+
+
 def by_worktree(path):
-    """``{worktree path: the latest run in it}`` — a worktree belongs to the run that recorded it
-    last, whatever the directory is named (a correction reuses an ended job's worktree)."""
+    """``{worktree path key: the latest run in it}`` — a worktree belongs to the run that recorded
+    it last, whatever the directory is named (a correction reuses an ended job's worktree). The
+    keys are :func:`path_key`: look up with ``path_key(p)``, never a bare realpath."""
     out = {}
     for rs in runs(path).values():
         for r in rs:
             if r.get('worktree'):
-                out[os.path.realpath(r["worktree"])] = r
+                out[path_key(r["worktree"])] = r
     return out
 
 
@@ -849,18 +876,33 @@ def empty_branch_text():
 
 # ---- what spawn and health ask ---------------------------------------------------
 
+ORPHAN = 'orphan'
+BUSY = 'busy'
+
+
+def launch_verdict(path, job, worktree_path, alive=None):
+    """``(what, why)`` for launching ``job`` into ``worktree_path``: ``what`` is ``''`` (go: no
+    worktree, or an ended / dead-pid run's worktree, which is reused), :data:`BUSY` (a live run
+    holds it) or :data:`ORPHAN` (no run recorded it). The owner is found by path identity
+    (:func:`path_key`), so a worktree recorded as ``~/.ASF/…`` is the one spawn names
+    ``~/.asf/…`` on a case-insensitive filesystem."""
+    if not os.path.exists(worktree_path):
+        return '', ''
+    run = by_worktree(path).get(path_key(worktree_path)) or latest(path).get(job)
+    if run is None:
+        return ORPHAN, f'worktree already exists: {worktree_path} — no run recorded it'
+    if occupies(run, alive):  # a dead pid's worktree is reused like an ended run's
+        return BUSY, (f'worktree already exists: {worktree_path} — held by live run '
+                      f'{run.get("job")} (pid {run.get("pid")})')
+    return '', ''
+
+
 def may_launch(path, job, worktree_path, alive=None):
     """``(ok, why)``: a worktree at ``worktree_path`` blocks a launch only while the run that
     owns it is live; an ended run's worktree is reused, a worktree no run recorded is refused
-    (an orphan is for the operator, not for a session to inherit)."""
-    if not os.path.exists(worktree_path):
-        return True, ''
-    run = by_worktree(path).get(os.path.realpath(worktree_path)) or latest(path).get(job)
-    if run is None:
-        return False, f'worktree already exists: {worktree_path}'
-    if occupies(run, alive):  # a dead pid's worktree is reused like an ended run's
-        return False, f'worktree already exists: {worktree_path}'
-    return True, ''
+    (an orphan is for the operator, not for a session to inherit). See :func:`launch_verdict`."""
+    what, why = launch_verdict(path, job, worktree_path, alive)
+    return not what, why
 
 
 def reap_verdict(run, ev, main, alive):

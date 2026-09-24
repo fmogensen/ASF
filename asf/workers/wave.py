@@ -14,6 +14,10 @@ table could not be read, the wave prints the degraded-count line once, before th
 
     pool: sessions unreadable (<why>) — counting registered sessions only
 """
+import json
+import os
+
+from asf import env
 from asf.workers import pool as pool_mod
 from asf.workers import spawn as spawn_mod
 
@@ -23,6 +27,52 @@ def default_brief(row):
     if row.feature:
         lines.append(f'Feature: {row.feature}')
     return '\n'.join(lines) + '\n'
+
+
+class Failures:
+    """The spawn failures of past waves, per job, in ``<state>/spawn-failures.json``: a spawn
+    that fails the same way tick after tick is not news. The first failure prints as it is; the
+    second identical one prints once as ``NEEDS OPERATOR`` with the one command that clears it;
+    after that the row waits silently until the failure changes or the spawn succeeds. A state
+    dir that cannot be read or written only loses the memory — every failure prints."""
+
+    def __init__(self, product):
+        try:
+            self.path = os.path.join(env.state_dir(product), 'spawn-failures.json')
+            with open(self.path, encoding='utf-8') as f:
+                self.seen = json.load(f)
+        except (OSError, ValueError, TypeError, AttributeError):
+            self.seen = {}
+            self.path = getattr(self, 'path', None)
+        if not isinstance(self.seen, dict):
+            self.seen = {}
+
+    def _save(self):
+        if not self.path:
+            return
+        try:
+            with open(self.path, 'w', encoding='utf-8') as f:
+                json.dump(self.seen, f, sort_keys=True, indent=1)
+        except OSError:
+            pass
+
+    def note(self, job, reason, clear=''):
+        """The line to print for ``job`` failing with ``reason`` — or None to print nothing."""
+        prev = self.seen.get(job) or {}
+        count = prev.get('count', 0) + 1 if prev.get('reason') == reason else 1
+        self.seen[job] = {'reason': reason, 'count': count}
+        self._save()
+        if count == 1 or reason.startswith('NEEDS OPERATOR'):
+            return reason
+        if count == 2:
+            gap = reason.split('spawn failed: ', 1)[-1]
+            fix = clear or f'asf sessions  # then clear what holds {job}'
+            return f'NEEDS OPERATOR: {job} fails to spawn each tick: {gap} — {fix}'
+        return None
+
+    def clear(self, job):
+        if self.seen.pop(job, None) is not None:
+            self._save()
 
 
 def order(rows):
@@ -38,6 +88,7 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
     s1 = pool_mod.s1_open(rows)
     running = {(s.get('product') or product.name, s.get('job')) for s in pool.live}
     launched, waits = [], []
+    failures = Failures(product)
     if getattr(pool, 'unreadable', ''):
         out(f'pool: sessions unreadable ({pool.unreadable}) — counting registered sessions only')
     for row in order(rows):
@@ -51,9 +102,16 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
             if acct is not None:
                 try:
                     rec = spawn_fn(product, row, acct, brief_fn(row), runtime=runtime, cfg=cfg)
+                except spawn_mod.WorktreeBusy as e:
+                    reason = f'already running: {e}'  # a live run holds the item: a wait
                 except spawn_mod.SpawnError as e:
                     reason = str(e) if str(e).startswith('NEEDS OPERATOR') else f'spawn failed: {e}'
+                    reason = failures.note(row.job, reason, getattr(e, 'clear', ''))
+                    if reason is None:  # reported already, nothing changed: say nothing
+                        waits.append((row, f'spawn failed: {e}'))
+                        continue
                 else:
+                    failures.clear(row.job)
                     pool.take(acct, rec.get('model'), row.job, product=product.name)
                     running.add((product.name, row.job))
                     launched.append((row, rec))

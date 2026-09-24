@@ -737,6 +737,34 @@ class TestWave(Home):
                                         cfg=self.cfg, out=lines.append)
         return launched, waits, lines
 
+    def test_a_repeated_spawn_failure_reports_once_as_needs_operator(self):
+        acct = pool_mod.Account('acct-a', role='local', cap=3)
+        orphan = os.path.join(spawn_mod.worktrees_dir(self.product), 'spec-9')
+        os.makedirs(orphan)  # a worktree no run recorded: refused, tick after tick
+        outs = [self.run_wave([feature_row('spec-9')], 5, [acct])[2] for _ in range(4)]
+        self.assertIn('— spawn failed: worktree already exists', outs[0][0])
+        self.assertIn('NEEDS OPERATOR: spec-9 fails to spawn each tick', outs[1][0])
+        self.assertIn(f'worktree remove --force {orphan}', outs[1][0])
+        self.assertEqual(outs[2], [])   # nothing changed: nothing more to say
+        self.assertEqual(outs[3], [])
+        # the obstacle goes: the row launches and the memory of it is cleared
+        shutil.rmtree(orphan)
+        launched, _, lines = self.run_wave([feature_row('spec-9')], 5, [acct])
+        self.assertEqual([r.job for r, _ in launched], ['spec-9'])
+        self.assertTrue(lines[0].startswith('launched spec-9'))
+
+    def test_a_worktree_held_by_a_live_run_is_a_wait_not_a_failure(self):
+        acct = pool_mod.Account('acct-a', role='local', cap=3)
+        wt = os.path.join(spawn_mod.worktrees_dir(self.product), 'spec-9')
+        os.makedirs(wt)
+        pool_mod.append_session(self.product, {'job': 'correct-9', 'pid': os.getpid(),
+                                               'started': 't', 'worktree': wt})
+        for _ in range(3):
+            _, waits, lines = self.run_wave([feature_row('spec-9')], 5, [acct])
+            self.assertIn('already running: worktree already exists', waits[0][1])
+            self.assertIn('held by live run correct-9', lines[0])
+            self.assertNotIn('NEEDS OPERATOR', lines[0])
+
     def test_pool_full_of_features_an_s1_arrives_and_launches(self):
         acct = pool_mod.Account('acct-a', role='local', cap=3)
         live = [{'job': f'spec-{i}', 'account': 'acct-a'} for i in range(2)]
