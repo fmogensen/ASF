@@ -221,7 +221,34 @@ def seed_home(acct, operator_home=None):
             _copy_file(src, dst)
     if os.path.realpath(home) != os.path.realpath(operator_home):
         write_identity_gitconfig(home, operator_home)
+        link_factory_cli(home, operator_home)
     return home, missing
+
+
+#: Where the installer puts the ``asf`` entry point, relative to a HOME — the path a product's own
+#: git hooks and scripts name as ``$HOME/.local/bin/asf``.
+CLI_REL = os.path.join('.local', 'bin', 'asf')
+
+
+def link_factory_cli(home, operator_home):
+    """``<home>/.local/bin/asf`` → the operator's installed ``asf``, so a session under an isolated
+    HOME reaches the factory's CLI where hooks and scripts expect it (a product's pre-push that runs
+    ``$HOME/.local/bin/asf`` refused every push without it). Nothing when there is no installed
+    CLI to point at; a stale link is replaced."""
+    target = os.path.join(operator_home, CLI_REL)
+    if not os.path.exists(target):
+        found = shutil.which('asf')
+        if not found:
+            return None
+        target = found
+    link = os.path.join(home, CLI_REL)
+    if os.path.realpath(link) == os.path.realpath(target) and os.path.lexists(link):
+        return link
+    os.makedirs(os.path.dirname(link), exist_ok=True)
+    if os.path.lexists(link):
+        os.remove(link)
+    os.symlink(os.path.realpath(target), link)
+    return link
 
 
 # ---- the account's credentials (auth_env) -----------------------------------------------------

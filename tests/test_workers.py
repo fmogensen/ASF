@@ -1354,3 +1354,28 @@ class TestReserveIdCli(Home):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class FactoryCliInSessionHome(unittest.TestCase):
+    """A session under an isolated HOME finds the factory's CLI at $HOME/.local/bin/asf, where a
+    product's own git hooks call it."""
+
+    def test_isolated_home_links_the_operators_asf(self):
+        import tempfile
+        from asf.workers import runtime as rt
+        with tempfile.TemporaryDirectory() as d:
+            op = os.path.join(d, 'op')
+            cli = os.path.join(op, '.local', 'bin', 'asf')
+            os.makedirs(os.path.dirname(cli))
+            with open(cli, 'w') as f:
+                f.write('#!/bin/sh\n')
+            home = os.path.join(d, 'homes', 'a')
+            os.makedirs(home)
+            link = rt.link_factory_cli(home, op)
+            self.assertEqual(os.path.realpath(link), os.path.realpath(cli))
+            self.assertEqual(link, os.path.join(home, '.local', 'bin', 'asf'))
+            # idempotent, and a stale link is replaced
+            os.remove(link)
+            os.symlink('/nowhere', link)
+            rt.link_factory_cli(home, op)
+            self.assertEqual(os.path.realpath(link), os.path.realpath(cli))
