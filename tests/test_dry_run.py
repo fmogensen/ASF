@@ -129,3 +129,59 @@ class DryRunHostPressure(unittest.TestCase):
         lines = self.wave_lines('0 1 0')
         self.assertTrue(any(l.startswith('would launch fix-bug-b-0001') for l in lines), lines)
         self.assertFalse([l for l in lines if l.startswith('wave: held')], lines)
+
+
+class CopyState(unittest.TestCase):
+    """The throwaway copy leaves out the worker worktrees (full product checkouts, tens of GB) and
+    never follows a symlink out of the state dir; a copy that fails leaves no temp dir behind."""
+
+    def setUp(self):
+        from asf import env
+        self.env = env
+        self.real = tempfile.mkdtemp(prefix='asf-state-')
+        os.makedirs(os.path.join(self.real, 'record'))
+        with open(os.path.join(self.real, 'record', 'index.json'), 'w') as f:
+            f.write('{}')
+        wt = os.path.join(self.real, 'worktrees', 'coder-t-0001')
+        os.makedirs(wt)
+        with open(os.path.join(wt, 'big.bin'), 'w') as f:
+            f.write('x' * 1000)
+        self.outside = tempfile.mkdtemp(prefix='asf-outside-')
+        with open(os.path.join(self.outside, 'huge.bin'), 'w') as f:
+            f.write('y' * 1000)
+        os.symlink(self.outside, os.path.join(self.real, 'linked'))
+        self.patch = mock.patch.object(env, 'state_dir', lambda product: self.real)
+        self.patch.start()
+
+    def tearDown(self):
+        import shutil
+        self.patch.stop()
+        shutil.rmtree(self.real, ignore_errors=True)
+        shutil.rmtree(self.outside, ignore_errors=True)
+
+    def test_worktrees_left_out_symlinks_kept_as_links(self):
+        import shutil
+        from asf.tick import dry_run
+        tmp, copy = dry_run._copy_state(types.SimpleNamespace(name='p'))
+        try:
+            self.assertTrue(os.path.isfile(os.path.join(copy, 'record', 'index.json')))
+            self.assertEqual(os.listdir(os.path.join(copy, 'worktrees')), [])
+            self.assertTrue(os.path.islink(os.path.join(copy, 'linked')))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_failed_copy_leaves_no_temp_dir(self):
+        from asf.tick import dry_run
+        made = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def spy(*a, **k):
+            d = real_mkdtemp(*a, **k)
+            made.append(d)
+            return d
+        with mock.patch.object(dry_run.tempfile, 'mkdtemp', spy), \
+                mock.patch.object(dry_run.shutil, 'copytree', side_effect=OSError(28, 'No space')):
+            with self.assertRaises(OSError):
+                dry_run._copy_state(types.SimpleNamespace(name='p'))
+        self.assertTrue(made)
+        self.assertFalse(os.path.exists(made[0]))

@@ -3,7 +3,7 @@
 Runs record, the lane pass, wave planning and the harvest's gate decisions the way a real tick
 would — record → lane pass → wave planning → prs (folded into the lane pass, T2) → harvest, all
 in this process, never spawning the harvest as the detached background process a live tick does
-(:mod:`asf.tick.step_harvest`) — against a **throwaway copy** of the product's whole state
+(:mod:`asf.tick.step_harvest`) — against a **throwaway copy** of the product's state
 directory (:func:`asf.env.state_dir`, the tick's own record clone included, since it lives at
 ``state/<product>/record``). Every write a step makes lands on that copy; the real state
 directory is never opened for writing, which is what makes it safe to run against a live
@@ -47,13 +47,28 @@ import tempfile
 from asf import env
 
 
+#: Left out of the copy: the worker worktrees are full product checkouts (tens of GB, with
+#: symlinked dependency trees) that no dry-run step reads; the copy gets an empty dir in their
+#: place, so nothing it runs can reach a live session's checkout either.
+_NOT_COPIED = ('worktrees',)
+
+
 def _copy_state(product):
-    """A throwaway copy of ``product``'s whole state directory, under a fresh temp dir. Returns
-    ``(tmp, copy_path)``; the caller removes ``tmp`` when done. Never mutates ``real``."""
+    """A throwaway copy of ``product``'s state directory, under a fresh temp dir — all of it but
+    :data:`_NOT_COPIED`, symlinks copied as links, never followed. Returns ``(tmp, copy_path)``;
+    the caller removes ``tmp`` when done, and a copy that fails removes it here. Never mutates
+    ``real``."""
     real = env.state_dir(product)  # makes it if missing; read-only below, never written to
     tmp = tempfile.mkdtemp(prefix='asf-dry-run-')
     copy_path = os.path.join(tmp, 'state')
-    shutil.copytree(real, copy_path)
+    try:
+        shutil.copytree(real, copy_path, symlinks=True,
+                        ignore=shutil.ignore_patterns(*_NOT_COPIED))
+        for name in _NOT_COPIED:
+            os.makedirs(os.path.join(copy_path, name), exist_ok=True)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
     return tmp, copy_path
 
 
