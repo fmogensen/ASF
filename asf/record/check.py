@@ -21,6 +21,35 @@ BULLET_RE = re.compile(r'(?m)^- \S')
 FEATURE_NO_PARENT_UNTIL = None
 
 
+def check_deliveries(canonical, add, find_line):
+    """A delivery is a lead's `delivers:` list; each member points back with `delivered_by:`."""
+    claimed = {}  # member id -> the lead that first listed it
+    for lid, rec in canonical.items():
+        for mid in rec['meta'].get('delivers') or []:
+            claimed.setdefault(mid, lid)
+    for lid, rec in canonical.items():
+        meta = rec['meta']
+        delivers = meta.get('delivers')
+        if not delivers:
+            continue
+        line = find_line(rec, 'delivers')
+        if meta.get('delivered_by'):
+            add(rec, line, f"{lid}: carries both delivers: and delivered_by: — a card leads or is led, not both")
+        if delivers[0] != lid:
+            add(rec, line, f"{lid}: delivers[0] is {delivers[0]}, not the lead itself")
+        for mid in delivers:
+            if claimed[mid] != lid:
+                add(rec, line, f"{mid} is in two delivers: lists ({claimed[mid]} and {lid})")
+                continue
+            member = canonical.get(mid)
+            if member is None:
+                add(rec, line, f"delivers references missing item {mid}")
+            elif member['meta'].get('removed'):
+                add(rec, line, f"delivers references removed item {mid}")
+            elif mid != lid and member['meta'].get('delivered_by') != lid:
+                add(rec, line, f"{mid} is in {lid}'s delivers: but does not carry delivered_by: {lid}")
+
+
 def cmd_check(args, root):
     paths = args.paths or None
     restrict = None
@@ -135,6 +164,8 @@ def cmd_check(args, root):
                             line = i + 1
                             break
                     add(rec, line or 1, f"{h} section is stale (run `asf index`)")
+
+    check_deliveries(canonical, add, find_line)
 
     # Size: an item whose History records a shape reading is held to that type's size (D6) —
     # an item never typed by shape (no `— shape:` line) is grandfathered and skipped.

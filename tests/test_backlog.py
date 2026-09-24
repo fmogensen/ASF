@@ -539,5 +539,62 @@ class BugSeverityTests(unittest.TestCase):
         self.assertNotIn('without severity', r.stdout)
 
 
+class DeliveryFieldTests(unittest.TestCase):
+    """`asf check` validates `delivers:` (on the lead) and `delivered_by:` (on each member)."""
+
+    def setUp(self):
+        self.root = make_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+
+    def feature(self, id_, *lines):
+        write_item(self.root, id_, 'feature', id_, parent='E-0001', typed_lines=lines)
+
+    def check(self):
+        run(['index'], self.root)
+        r = run(['check'], self.root)
+        return [l for l in r.stdout.splitlines() if 'deliver' in l]
+
+    def test_a_well_formed_delivery_is_clean(self):
+        self.feature('F-0001', 'delivers: [F-0001, F-0002]')
+        self.feature('F-0002', 'delivered_by: F-0001')
+        self.assertEqual(self.check(), [])
+
+    def test_member_must_point_back(self):
+        self.feature('F-0001', 'delivers: [F-0001, F-0002]')
+        self.feature('F-0002')
+        lines = self.check()
+        self.assertEqual(len(lines), 1)
+        self.assertIn('F-0002', lines[0])
+        self.assertIn('delivered_by', lines[0])
+
+    def test_no_item_in_two_deliveries(self):
+        self.feature('F-0001', 'delivers: [F-0001, F-0003]')
+        self.feature('F-0002', 'delivers: [F-0002, F-0003]')
+        self.feature('F-0003', 'delivered_by: F-0001')
+        lines = self.check()
+        self.assertEqual(len(lines), 1)
+        self.assertIn('two delivers: lists', lines[0])
+
+    def test_both_fields_on_one_card(self):
+        self.feature('F-0001', 'delivers: [F-0001]', 'delivered_by: F-0002')
+        self.feature('F-0002')
+        lines = self.check()
+        self.assertEqual(len(lines), 1)
+        self.assertIn('both delivers: and delivered_by:', lines[0])
+
+    def test_lead_must_be_first(self):
+        self.feature('F-0001', 'delivers: [F-0002, F-0001]')
+        self.feature('F-0002', 'delivered_by: F-0001')
+        self.assertTrue(any('not the lead itself' in l for l in self.check()))
+
+    def test_member_must_exist_and_not_be_removed(self):
+        self.feature('F-0001', 'delivers: [F-0001, F-0002, F-0009]')
+        self.feature('F-0002', 'delivered_by: F-0001', 'removed: 2026-01-02')
+        lines = self.check()
+        self.assertTrue(any('missing item F-0009' in l for l in lines))
+        self.assertTrue(any('removed item F-0002' in l for l in lines))
+
+
 if __name__ == '__main__':
     unittest.main()
