@@ -6,7 +6,10 @@ twelve million input tokens and ninety-six tool calls for one phase, nearly all 
 reading its way to the card, the spec, the plan and the branch state that the tick had in hand
 before it launched anything. So the preamble is generated, never searched for: the card and its
 parents, the documents and their sizes, the footprint, the tests, the last report, the branch,
-the conventions and the standing rules, as text, at the top of every brief.
+the conventions and the standing rules, as text, at the top of every brief — including, for each
+file the item may write, its top-level functions and classes with their line ranges (the "Where
+to look" section, :func:`outline_lines`), so a session opens the ten lines it needs rather than
+the whole file.
 
 Two rules keep it honest:
 
@@ -153,7 +156,7 @@ STORY_KINDS = ('spec', 'plan', 'review', 'adjudicate')
 #: the one function that fills them, and ``tests.test_brief_facts.ContractTests`` holds the two
 #: equal — the drift between what a caller fills and what the preamble reads is the defect that
 #: left every brief printing ``(not known here)``.
-REPO_FACT_KEYS = ('head', 'branch_exists', 'files', 'tests', 'last_report')
+REPO_FACT_KEYS = ('head', 'branch_exists', 'files', 'tests', 'last_report', 'outlines')
 
 
 def _strip_rev(value):
@@ -299,6 +302,7 @@ def collect(product, row, index, inflight=None, repo_facts=None):
         'spec_lines': _line_count(repo_facts, spec_path),
         'plan_lines': _line_count(repo_facts, plan_path),
         'writes': list(item.get('writes') or []),
+        'outlines': dict((repo_facts or {}).get('outlines') or {}),
         'merged': list(item.get('merged') or []),
         'tests': named_tests(sections, item, repo_facts),
         'stories': stories_of(items, feature),
@@ -346,7 +350,13 @@ class Section:
         return True
 
 
-TRIM_ORDER = ('description', 'acceptance', 'last_report')
+TRIM_ORDER = ('description', 'acceptance', 'last_report', 'where')
+
+#: Whether a role reaches a worker session as a launchable sub-agent today — it does not
+#: (``asf.roles.roles`` renders a role into the brief's text; nothing here spawns one as a
+#: separate, tool-restricted session). :func:`outline_lines` reads this so its closing line never
+#: promises a sub-agent no session can actually reach.
+LOCATOR_AVAILABLE = False
 
 
 def fit(sections, limit):
@@ -422,6 +432,34 @@ def state_lines(product, facts):
     return out
 
 
+def _outline_range(start, end):
+    return str(start) if start == end else f'{start}-{end}'
+
+
+def outline_lines(facts):
+    """The "Where to look" body: for each of the item's ``writes`` that exists on the trunk
+    (:func:`asf.briefs.facts.outlines_of`), its line count and its top-level functions/classes
+    with their line ranges — at most :data:`asf.briefs.facts.OUTLINE_LIMIT` per file, in the order
+    ``writes:`` names them. ``[]`` when nothing in ``writes`` was found on the trunk: no heading
+    is printed over an empty list (b110 — a trace once printed a whole file where a pointer would
+    have done; an empty section is the same mistake in reverse, a heading over nothing)."""
+    outlines = facts.get('outlines') or {}
+    out = []
+    seen = set()
+    for path in facts.get('writes') or []:
+        info = outlines.get(path)
+        if info is None or path in seen:
+            continue
+        seen.add(path)
+        out.append(f"`{path}` ({info['lines']} lines)")
+        for name, kind, start, end in info.get('defs') or []:
+            out.append(f'- {name} ({kind}) L{_outline_range(start, end)}')
+    if out:
+        out.append('Use the locator agent to find anything else before opening whole files.'
+                   if LOCATOR_AVAILABLE else 'Read only these line ranges first.')
+    return out
+
+
 def convention_lines(product):
     conv = conventions(product)
     prefixes = conv.map_of('branch_prefixes')
@@ -454,6 +492,8 @@ def build(product, row, index, inflight=None, repo_facts=None, facts=None):
                 section_lines(facts['sections'], 'acceptance'), trimmable=True, marker=marker),
         Section('links', '### Links the card names',
                 section_lines(facts['sections'], 'links', limit_chars=600)),
+        Section('where', '### Where to look', outline_lines(facts),
+                trimmable=True, marker='…truncated'),
         Section('last_report', '### The last report for this item',
                 [l.rstrip() for l in str(facts['last_report']).splitlines() if l.strip()],
                 trimmable=True, marker='…truncated'),

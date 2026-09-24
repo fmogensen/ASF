@@ -1,4 +1,4 @@
-"""asf.roles: the ten role files, the nine refusals over them, and the one binding table.
+"""asf.roles: the role files, the nine refusals over them, and the one binding table.
 
 Every shipped file is read the way a session would meet it — frontmatter of exactly ``name`` and
 ``purpose``, five sections in order, doctrine a bullet per incident — and each refusal is produced
@@ -35,6 +35,7 @@ PURPOSES = {
     'prober': 'the state of what is running, reported as it is, absence reported as absence',
     'security': 'attack the guarantee before a user does',
     'documenter': 'the surface a reader meets, kept true to the code under it',
+    'locator': 'exact file:line locations with a short excerpt, never a whole file',
 }
 
 VALID = """---
@@ -346,7 +347,7 @@ class GenericTests(unittest.TestCase):
 class BindingTests(unittest.TestCase):
     """Ten files, every kind bound, every role accounted for."""
 
-    def test_the_ten_roles_of_the_spec_ship(self):
+    def test_the_roles_of_the_spec_ship(self):
         self.assertEqual(set(roles.load_all()), set(PURPOSES))
 
     def test_every_purpose_is_the_specs_verbatim(self):
@@ -371,7 +372,7 @@ class BindingTests(unittest.TestCase):
                     self.assertNotIn(name, roles.UNBOUND)
                 else:
                     self.assertTrue(roles.UNBOUND.get(name, '').strip())
-        self.assertEqual(set(roles.UNBOUND), {'prober', 'security', 'documenter'})
+        self.assertEqual(set(roles.UNBOUND), {'prober', 'security', 'documenter', 'locator'})
         self.assertEqual(set(roles.load_all()), bound | set(roles.UNBOUND))
 
     def test_the_bindings_keep_the_labels_of_today(self):

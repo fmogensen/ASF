@@ -25,6 +25,14 @@ or failed, and never inside the provider client itself.
 ### Acceptance
 - [ ] `tests/test_checkout.py::test_attempt_row_per_try` passes.
 
+### Where to look
+`app/checkout/attempts.py` (41 lines)
+- record_attempt (def) L10-18
+- AttemptStore (class) L20-41
+`tests/test_checkout.py` (12 lines)
+- test_attempt_row_per_try (def) L3-12
+Read only these line ranges first.
+
 ### The last report for this item
 REPORT
 status: partial

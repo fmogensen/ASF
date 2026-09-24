@@ -15,6 +15,7 @@ Two rules:
   are all normal. A fact that cannot be read is left empty and the preamble prints its
   ``(not known here)`` marker; it is never guessed.
 """
+import ast
 import os
 import re
 import subprocess
@@ -30,6 +31,20 @@ TEST_LIMIT = 6
 FIELD_CAP = 200
 REPORT_FIELDS = ('status', 'pushed', 'tests', 'left out', 'ruling')
 TEST_NAME_RE = re.compile(r'^test_|_test\.|\.test\.|\.spec\.')
+#: The most top-level functions/classes the "Where to look" section names per file
+#: (asf.briefs.preamble.outline_lines) — a file with more just reads longer under the same line.
+OUTLINE_LIMIT = 15
+#: A line-anchored, best-effort match for a function/class declaration in a language ``ast``
+#: does not cover. One group each; the first that matches wins. Deliberately shallow — a name and
+#: its declaration line is a pointer to grep from, not a parse.
+_OUTLINE_RE = (
+    re.compile(r'^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s+([A-Za-z_$][\w$]*)'),
+    re.compile(r'^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)'),
+    re.compile(r'^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)'),           # Go
+    re.compile(r'^\s*(?:pub(?:\([^)]*\))?\s+)?fn\s+([A-Za-z_]\w*)'),     # Rust
+    re.compile(r'^\s*(?:pub(?:\([^)]*\))?\s+)?struct\s+([A-Za-z_]\w*)'),  # Rust
+    re.compile(r'^\s*(?:[\w.]+\s+)?function\s+([A-Za-z_]\w*)\s*\('),     # shell / bash
+)
 
 
 def _git(repo, args, stdin=None):
@@ -75,6 +90,66 @@ def head_of(repo, branch, main):
 
 def _lines_of(blob):
     return blob.count(b'\n') + (1 if blob and not blob.endswith(b'\n') else 0)
+
+
+def _python_outline(text):
+    """Top-level ``(name, 'class'|'def', start, end)`` of one Python file, via ``ast`` — a file
+    that does not parse (a syntax error, a partial checkout) yields ``[]``, never a raised error
+    that would refuse the whole brief over one unreadable file."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError, RecursionError):
+        return []
+    out = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            out.append((node.name, 'def', node.lineno, getattr(node, 'end_lineno', node.lineno)))
+        elif isinstance(node, ast.ClassDef):
+            out.append((node.name, 'class', node.lineno, getattr(node, 'end_lineno', node.lineno)))
+    return out[:OUTLINE_LIMIT]
+
+
+def _regex_outline(text):
+    """The same shape as :func:`_python_outline`, for anything ``ast`` does not read: one pass
+    over the text, :data:`_OUTLINE_RE` tried top to bottom, first match wins. The range is the
+    declaration line alone — a regex has no reach to a body's end, only a parser does."""
+    out = []
+    for i, line in enumerate(text.splitlines(), start=1):
+        for pat in _OUTLINE_RE:
+            m = pat.match(line)
+            if m:
+                out.append((m.group(1), 'def', i, i))
+                break
+    return out[:OUTLINE_LIMIT]
+
+
+def file_outline(text, path):
+    """Top-level functions/classes of ``text`` (the file at ``path``, its trunk content): Python
+    read with ``ast``, anything else with the best-effort regex, ``[]`` when neither finds
+    anything — the caller then prints the file's line count alone."""
+    return _python_outline(text) if path.endswith('.py') else _regex_outline(text)
+
+
+def outlines_of(repo, rev, tree, writes):
+    """``{path: {'lines': N, 'defs': [(name, kind, start, end), ...]}}`` for every literal path
+    in ``writes`` that ``rev``'s tree (``tree``, the checkout's file list) carries and whose blob
+    decodes as UTF-8 — a glob, a path missing from the tree, or a binary file is left out, never
+    guessed at. ``defs`` is capped at :data:`OUTLINE_LIMIT`; a file no reader finds anything in
+    still gets an entry, with ``defs: []``, so its line count is still printed."""
+    tree_set = set(tree or ())
+    out = {}
+    for path in dict.fromkeys(writes or ()):  # de-dup, first-seen order (unused: dict is by path)
+        if not path or any(c in path for c in '*?[') or path not in tree_set:
+            continue
+        blob = _git(repo, ['cat-file', '-p', f'{rev}:{path}'])
+        if blob is None:
+            continue
+        try:
+            text = blob.decode('utf-8')
+        except UnicodeDecodeError:
+            continue
+        out[path] = {'lines': _lines_of(blob), 'defs': file_outline(text, path)}
+    return out
 
 
 def line_counts(repo, rev, paths):
@@ -137,8 +212,9 @@ def last_report(product, item_id):
 
 
 def repo_facts(product, row, index, inflight=None):
-    """The five keys of :data:`asf.briefs.preamble.REPO_FACT_KEYS`, always all five."""
-    facts = {'head': '', 'branch_exists': False, 'files': {}, 'tests': [], 'last_report': ''}
+    """The six keys of :data:`asf.briefs.preamble.REPO_FACT_KEYS`, always all six."""
+    facts = {'head': '', 'branch_exists': False, 'files': {}, 'tests': [], 'last_report': '',
+             'outlines': {}}
     plain = preamble.collect(product, row, index, inflight)
     repo = getattr(product, 'repo_dir', None)
     if repo and os.path.isdir(repo):
@@ -150,6 +226,7 @@ def repo_facts(product, row, index, inflight=None):
             wanted = preamble.wanted_paths(dict(plain, tests=plain['tests'] + facts['tests']),
                                            product=product)
             facts['files'] = line_counts(repo, rev, wanted)
+            facts['outlines'] = outlines_of(repo, rev, tree, plain['writes'])
     try:
         facts['last_report'] = last_report(product, getattr(row, 'item_id', ''))
     except (OSError, ValueError):

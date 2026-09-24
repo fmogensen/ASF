@@ -348,4 +348,23 @@ Until then, also:
   `human-now` ([approvals](product-config.md#approvals)).
 - Scope each `auth_env` token to the least it needs (one repo, push and PRs only).
 
+## Token economy
+
+Discovery — a session reading its way to what the runner already knew — is most of what a run
+costs. Two things in this factory push back on that:
+
+- **The preamble's "Where to look" section.** Every brief already carries the card, the state and
+  the footprint generated, never searched for (`asf.briefs.preamble`); it also carries, for each
+  file the item's `writes:` names that exists on the trunk, that file's top-level functions and
+  classes with their line ranges — computed from the checkout, not from the session opening the
+  file itself. It is capped and trimmed like the rest of the preamble, so it is never why a brief
+  goes over budget.
+- **Roles** (`asf/roles/*.md`, `asf roles`) carry a session's identity and doctrine, separately
+  from the model and access an operator configures for it. One of them, `locator`, is a read-only
+  finder — file:line locations with a short excerpt, never a whole file — but it ships unbound
+  (`asf roles` lists it with its reason): nothing in this factory yet launches a role as a
+  separate, tool-restricted sub-agent a worker session can call. Until that launch path exists,
+  the preamble's closing line under "Where to look" says to read only the line ranges it names,
+  not to reach for a locator that is not there.
+
 The planned [connectors](connectors.md) replace this with default-deny scoping per service.

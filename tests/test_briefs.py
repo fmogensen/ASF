@@ -22,6 +22,7 @@ import unittest
 from unittest import mock
 
 from asf import briefs
+from asf.briefs import facts as facts_mod
 from asf.briefs import preamble as preamble_mod
 from asf.env import Product
 from asf.feeder.rows import Row
@@ -52,6 +53,12 @@ REPO_FACTS = {
               'docs/plans/checkout-resilience.md': 188},
     'tests': [],
     'last_report': 'REPORT\nstatus: partial\nleft out: the retry itself, F-0001 owns it',
+    'outlines': {
+        'app/checkout/attempts.py': {'lines': 41, 'defs': [
+            ('record_attempt', 'def', 10, 18), ('AttemptStore', 'class', 20, 41)]},
+        'tests/test_checkout.py': {'lines': 12, 'defs': [
+            ('test_attempt_row_per_try', 'def', 3, 12)]},
+    },
 }
 
 
@@ -427,6 +434,95 @@ class PreambleTest(unittest.TestCase):
         self.assertEqual(conv.specs_dir, 'docs/specs')
         self.assertEqual(conv.plans_dir, 'docs/plans')
         self.assertEqual(conv.reviews_dir, 'docs/reviews')
+
+
+class WhereToLookTests(unittest.TestCase):
+    """The code-computed section: one entry per ``writes:`` path the trunk carries, its top-level
+    functions/classes with their line ranges, capped and trimmable like every other section."""
+
+    def test_each_write_the_trunk_carries_lists_its_outline(self):
+        text = preamble_mod.build(product(), ROWS['coder'], index(), [], REPO_FACTS)
+        self.assertIn('### Where to look', text)
+        self.assertIn('`app/checkout/attempts.py` (41 lines)', text)
+        self.assertIn('- record_attempt (def) L10-18', text)
+        self.assertIn('- AttemptStore (class) L20-41', text)
+        self.assertIn('`tests/test_checkout.py` (12 lines)', text)
+        self.assertIn('- test_attempt_row_per_try (def) L3-12', text)
+
+    def test_the_closing_line_matches_whether_the_locator_is_reachable(self):
+        text = preamble_mod.build(product(), ROWS['coder'], index(), [], REPO_FACTS)
+        self.assertFalse(preamble_mod.LOCATOR_AVAILABLE)
+        self.assertIn('Read only these line ranges first.', text)
+        self.assertNotIn('Use the locator agent', text)
+        with mock.patch.object(preamble_mod, 'LOCATOR_AVAILABLE', True):
+            text = preamble_mod.build(product(), ROWS['coder'], index(), [], REPO_FACTS)
+        self.assertIn('Use the locator agent to find anything else before opening whole files.',
+                      text)
+
+    def test_a_write_with_no_outline_prints_only_its_line_count(self):
+        facts_ = dict(REPO_FACTS, outlines={
+            'app/checkout/attempts.py': {'lines': 9, 'defs': []}})
+        lines = preamble_mod.outline_lines(preamble_mod.collect(
+            product(), ROWS['coder'], index(), [], facts_))
+        self.assertEqual(lines[0], '`app/checkout/attempts.py` (9 lines)')
+        self.assertEqual(lines[1], 'Read only these line ranges first.')
+
+    def test_a_write_the_trunk_does_not_carry_is_left_out(self):
+        lines = preamble_mod.outline_lines(preamble_mod.collect(
+            product(), ROWS['coder'], index(), [], dict(REPO_FACTS, outlines={})))
+        self.assertEqual(lines, [])
+
+    def test_no_section_at_all_when_nothing_was_found(self):
+        text = preamble_mod.build(product(), ROWS['coder'], index(), [],
+                                  dict(REPO_FACTS, outlines={}))
+        self.assertNotIn('### Where to look', text)
+
+    def test_where_is_the_most_protected_trimmable_section(self):
+        # it is the last name in TRIM_ORDER, so `fit` empties every earlier trimmable section —
+        # last_report included — before it loses a single line of its own.
+        self.assertEqual(preamble_mod.TRIM_ORDER,
+                         ('description', 'acceptance', 'last_report', 'where'))
+        sections = [
+            preamble_mod.Section('kept', '', ['id']),
+            preamble_mod.Section('last_report', '### LR', ['l1', 'l2', 'l3'],
+                                 trimmable=True, marker='TL'),
+            preamble_mod.Section('where', '### W', ['w1', 'w2', 'w3'],
+                                 trimmable=True, marker='TW'),
+        ]
+        out = '\n'.join(preamble_mod.fit(sections, limit=9))
+        self.assertIn('TL', out)
+        for gone in ('l1', 'l2', 'l3'):
+            self.assertNotIn(gone, out)
+        for kept in ('w1', 'w2', 'w3'):
+            self.assertIn(kept, out)
+        self.assertNotIn('TW', out)   # untouched: never even truncated
+
+    def test_the_cap_can_still_reach_it_once_earlier_sections_are_gone(self):
+        sections = [
+            preamble_mod.Section('kept', '', ['id']),
+            preamble_mod.Section('last_report', '### LR', ['l1'], trimmable=True, marker='TL'),
+            preamble_mod.Section('where', '### W', ['w1', 'w2'], trimmable=True, marker='TW'),
+        ]
+        out = '\n'.join(preamble_mod.fit(sections, limit=4))
+        self.assertNotIn('l1', out)
+        self.assertIn('TW', out)
+        self.assertIn('id', out)   # the untrimmable section never loses a line
+
+    def test_the_file_outline_reader(self):
+        py = 'def a():\n    pass\n\n\nclass B:\n    def m(self):\n        pass\n'
+        self.assertEqual(facts_mod.file_outline(py, 'x.py'),
+                         [('a', 'def', 1, 2), ('B', 'class', 5, 7)])
+        js = 'export function greet(name) {\n  return name;\n}\n\nclass Greeter {\n}\n'
+        out = facts_mod.file_outline(js, 'x.js')
+        self.assertEqual([n for n, *_ in out], ['greet', 'Greeter'])
+        self.assertEqual(facts_mod.file_outline('plain text, no code shapes\n', 'x.txt'), [])
+
+    def test_unparsable_python_yields_no_outline_not_an_error(self):
+        self.assertEqual(facts_mod.file_outline('def a(:\n', 'x.py'), [])
+
+    def test_the_outline_is_capped(self):
+        py = '\n'.join(f'def f{i}():\n    pass' for i in range(30))
+        self.assertEqual(len(facts_mod.file_outline(py, 'x.py')), facts_mod.OUTLINE_LIMIT)
 
 
 class PlaceholderTest(unittest.TestCase):

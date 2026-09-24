@@ -53,7 +53,10 @@ BINDINGS = {'spec': 'writer', 'plan': 'writer', 'reshape': 'writer',
 #: Every role no kind binds, with the reason none does.
 UNBOUND = {'prober': 'no phase yet — the production probe is a view, not a session',
            'security': 'no phase yet — the panel it belongs to is not in this epic',
-           'documenter': 'no phase yet — the docs surface has no lane of its own'}
+           'documenter': 'no phase yet — the docs surface has no lane of its own',
+           'locator': 'no launch path yet — the runtime pipes one brief and picks one model '
+                      '(F-0029 D2); a restricted-tool sub-agent needs a launch mechanism this '
+                      'factory does not have, so the role ships and binds to nothing'}
 
 _HEADING = re.compile(r'^## +(.*?)\s*$')
 _FENCE = re.compile(r'^\s*(?:```|~~~)')
