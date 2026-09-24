@@ -189,6 +189,37 @@ class TestOneFactoryCheck(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn('old-tool.py', detail)
 
+    def _factory_source(self, d, name):
+        legacy = os.path.join(d, 'legacy')
+        os.makedirs(legacy)
+        open(os.path.join(legacy, 'frontmatter.py'), 'w').close()
+        repo = os.path.join(d, 'repo')
+        os.makedirs(os.path.join(repo, 'asf'))
+        open(os.path.join(repo, 'asf', 'frontmatter.py'), 'w').close()
+        with open(os.path.join(repo, 'pyproject.toml'), 'w') as f:
+            f.write(f'[project]\nname = "{name}"\n')
+        return {'legacy_paths': [legacy]}, env.Product('asf', {'repo_dir': repo})
+
+    def test_installed_factorys_source_repo_is_skipped(self):
+        # asf runs from its install, not the checkout: the product whose repo is the source of
+        # the installed distribution is the factory itself, not a second copy of it
+        with tempfile.TemporaryDirectory() as d:
+            cfg, product = self._factory_source(d, 'asf-factory')
+            with mock.patch.object(doctor, 'package_root', return_value=os.path.join(d, 'site')), \
+                    mock.patch.object(doctor, 'installed_dist_names', return_value={'asf-factory'}):
+                ok, detail = doctor.check_one_factory(cfg, product)
+            self.assertTrue(ok, detail)
+            self.assertIn('it is the factory itself', detail)
+
+    def test_other_projects_copy_is_still_red(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg, product = self._factory_source(d, 'someone-elses-app')
+            with mock.patch.object(doctor, 'package_root', return_value=os.path.join(d, 'site')), \
+                    mock.patch.object(doctor, 'installed_dist_names', return_value={'asf-factory'}):
+                ok, detail = doctor.check_one_factory(cfg, product)
+            self.assertFalse(ok)
+            self.assertIn('frontmatter.py', detail)
+
     def test_red_when_duplicated_on_path(self):
         with tempfile.TemporaryDirectory() as d:
             legacy = os.path.join(d, 'legacy')

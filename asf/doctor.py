@@ -74,9 +74,37 @@ def package_root():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def installed_dist_names():
+    """The distribution name(s) the running ``asf`` package was installed as — empty when it
+    runs from a bare checkout, never installed."""
+    try:
+        from importlib import metadata
+        return set(metadata.packages_distributions().get(__package__ or 'asf', ()))
+    except Exception:  # noqa: BLE001 — no metadata is no install, not a failure
+        return set()
+
+
+def _project_name(repo_dir):
+    """``[project] name`` of ``repo_dir``'s pyproject.toml, or None."""
+    try:
+        import tomllib
+        with open(os.path.join(repo_dir, 'pyproject.toml'), 'rb') as f:
+            return (tomllib.load(f).get('project') or {}).get('name')
+    except (OSError, ValueError, ImportError):
+        return None
+
+
 def is_factory_repo(product):
-    """True when the product's repo is the ASF package's own checkout (real paths compared)."""
-    return bool(product.repo_dir) and os.path.realpath(product.repo_dir) == os.path.realpath(package_root())
+    """True when the product's repo is the ASF package's own source: the checkout it runs from
+    (real paths compared), or — since the clocks run the installed package, never the checkout —
+    the repo whose pyproject names the distribution the running package was installed as."""
+    repo = product.repo_dir
+    if not repo:
+        return False
+    if os.path.realpath(repo) == os.path.realpath(package_root()):
+        return True
+    name = _project_name(repo)
+    return bool(name) and name in installed_dist_names()
 
 
 def check_config(product_name):
