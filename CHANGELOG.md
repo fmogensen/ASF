@@ -2,6 +2,23 @@
 
 One entry per released version, newest first.
 
+## v0.1.7 — 2026-09-24
+
+### Bugs fixed
+
+- B-0094 19% of sessions end 'not pushed': finished work is lost to a missing commit or push
+
+### In progress
+
+- F-0024 Self-amendment policy: the factory proposes, humans approve and merge
+- F-0091 asf improve: the self-improvement pass is a tick step, not something someone remembers to ask for
+- F-0097 asf status says nothing about Bugs and Features: add a Bugs row and a Features row
+- F-0100 The savings pass: the tick proposes the next cheapest win from its own numbers
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.7"`
+
 ## v0.1.6 — 2026-09-24
 
 ### Features landed
