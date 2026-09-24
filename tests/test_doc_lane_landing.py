@@ -149,6 +149,12 @@ class DocLaneMergeIsNotALanding(unittest.TestCase):
         p.commit("docs(plan): AVATAR-1 implementation plan — 6 tasks (#747)",
                  {"docs/plans/2026-09-20-avatar-system.md": "# AVATAR-1 — avatars\n\n" + PLAN},
                  "f3")
+        # the specs those plans were cut from, on the trunk: a plan is approved only on an
+        # approved spec (F-0003's spec is still on its lane branch, and stays a spec row)
+        p.commit("docs(spec): three specs", {"docs/specs/f-0019.md": "# F-0019 — free\n",
+                                             "docs/specs/f-0037.md": "# F-0037 — ops\n",
+                                             "docs/specs/f-0061.md": "# F-0061 — status\n"},
+                 "specs")
         # real work: a Task's code, and a Feature named by a code commit
         p.commit("feat(reader): the reader for T-0900 (#750)", {"src/reader.ts": "x"}, "t900")
         p.commit("fix: wire F-0077 through (#751)", {"src/wire.ts": "x", "docs/plans/x.md": "y"},
@@ -227,7 +233,8 @@ class DocLaneMergeIsNotALanding(unittest.TestCase):
         # both date-prefixed plans — one through its lane PR, one through links.plan — mint
         self.assertEqual({f: len(t) for f, t in parents.items()},
                          {"F-0003": 2, "F-0019": 2, "F-0037": 2, "F-0047": 2, "F-0061": 2})
-        self.assertEqual(self.p.meta("F-0026")["stage"], "plan-approved")
+        # its old plan landed, but no spec is anywhere: a card, not plan-approved
+        self.assertEqual(self.p.meta("F-0026")["stage"], "card")
         self.assertEqual(self.p.meta(parents["F-0019"][0], "task")["links"],
                          {"plan": "docs/plans/2026-09-20-free-plan.md"})
         # real work still lands
@@ -235,20 +242,22 @@ class DocLaneMergeIsNotALanding(unittest.TestCase):
         self.assertEqual(self.p.meta("F-0077")["stage"], "landed")
         self.assertEqual(self.p.meta("F-0090")["stage"], "landed")
 
-    def test_a_typed_links_plan_on_main_is_plan_approved_and_no_plan_row_starves(self):
+    def test_a_typed_links_plan_on_main_on_a_spec_off_the_trunk_lands_the_spec_first(self):
         ev = self.p.discover(self.prs)
         self.assertEqual(ev["features"]["avatar"]["plan"], None)  # the spec's slug has no plan
         self.p.record_step(ev)
         m = self.p.meta("F-0003")
-        self.assertEqual((m["state"], m["stage"]), ("Active", "plan-approved"))
+        # the plan is on the trunk, the spec only on its lane branch: no coder starts on it
+        self.assertEqual((m["state"], m["stage"]), ("Active", "spec-draft"))
         self.assertIn("plan on origin/main", m["evidence"])
+        self.assertIn("spec on cloud/spec-avatar", m["evidence"])
         with open(os.path.join(self.p.backlog, "index.json")) as f:
             index = json.load(f)
         from asf.feeder import rows
-        got = [(r.kind, r.item_id) for r in rows.candidates(index, self.p.product(), [])
-               if r.feature_id == "F-0003"]
-        self.assertNotIn(rows.STARVED_PLAN, [k for k, _i in got])
-        self.assertEqual([k for k, _i in got], [rows.PLAN_CODE, rows.PLAN_CODE])
+        got = [r for r in rows.candidates(index, self.p.product(), []) if r.feature_id == "F-0003"]
+        self.assertEqual([(r.kind, r.branch) for r in got],
+                         [(rows.STARVED_SPEC, "cloud/spec-avatar")])
+        self.assertIn("land the existing spec", got[0].reason)
 
     def test_removed_or_moved_features_mint_nothing_and_keep_their_machine_block(self):
         before = {}

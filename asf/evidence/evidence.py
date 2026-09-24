@@ -171,6 +171,20 @@ def list_tree(rev, path, product=None):
     return read_trees([f"{rev}:{path}"], product=product)[f"{rev}:{path}"]
 
 
+def doc_carriers(path, branches, product):
+    """Where a typed document path lives: ``(on_trunk, [remote branches carrying it])``, one
+    ``cat-file`` process for the lot. A migrated card's ``links.spec`` can name a spec that sits
+    on a pre-lane branch with no PR — the lane's own discovery never looks there, and a Feature
+    whose spec is nowhere on the trunk must not read as approved."""
+    if not path or product is None:
+        return False, []
+    main_ref = f"origin/{product.main}"
+    others = sorted(b for b in branches or () if b != product.main)
+    refs = [f"{main_ref}:{path}"] + [f"origin/{b}:{path}" for b in others]
+    found = resolve(refs, product=product)
+    return bool(found.get(refs[0])), [b for b in others if found.get(f"origin/{b}:{path}")]
+
+
 # ---- inputs ---------------------------------------------------------------------------------
 def remote_branches(product=None):
     product = product or env.load_product()
@@ -1098,7 +1112,12 @@ def feature_stage(spec, plan, tasks, on_prod):
     closed = sum(1 for t in tasks if t == "Closed")
     if total and closed == total:
         return "on-prod" if on_prod else "landed"
-    if total and (closed or any(t == "Active" for t in tasks)):
+    started = bool(total) and bool(closed or any(t == "Active" for t in tasks))
+    if not spec["approved"] and (plan["approved"] or started):
+        # a plan landed, or Tasks run, on a spec the trunk never got (a migrated record's spec
+        # can still sit on a pre-lane branch): no coder starts until the spec is approved
+        return _spec_stage(spec) or "card"
+    if started:
         return f"building {closed}/{total}"
     if plan["approved"]:
         return "plan-approved"
@@ -1108,11 +1127,16 @@ def feature_stage(spec, plan, tasks, on_prod):
         return "plan-draft"
     if spec["approved"]:
         return "spec-approved"
-    if spec["exists"]:
-        if spec["review"] and spec["review"][1] != "APPROVED":
-            return f"spec-review r{spec['review'][0]}"
-        return "spec-draft"
-    return "card"
+    return _spec_stage(spec) or "card"
+
+
+def _spec_stage(spec):
+    """``spec-review rN`` / ``spec-draft`` for a spec that exists unapproved, else ''."""
+    if not spec["exists"]:
+        return ""
+    if spec["review"] and spec["review"][1] != "APPROVED":
+        return f"spec-review r{spec['review'][0]}"
+    return "spec-draft"
 
 
 def bug_state(has_fixer_evidence, merged_sha, merged_in_prod):

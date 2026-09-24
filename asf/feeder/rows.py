@@ -74,6 +74,9 @@ ATTEMPT_LIMIT = 3
 DECISION_ROWS = 5  #: `conventions.decision_rows` — rows minted, and ids named in the wave's line
 REVIEW_RE = re.compile(r'^(spec|plan)-review r(\d+)')
 CLOSED_PR_RE = re.compile(r'\bPR #\d+ CLOSED\b')
+#: ingest's line for a spec that sits on a branch, not the trunk (``spec on <branch>[ (review …)]``)
+SPEC_ON_BRANCH_RE = re.compile(r'^spec on (?!origin/)(\S+)')
+PLAN_ON_TRUNK = 'plan on origin/main'
 CONFLICTING = 'CONFLICTING'
 
 
@@ -388,10 +391,19 @@ def _waiting_doc(fid, doc, product, unlanded, open_branches):
     return ''
 
 
-def _doc_row(kind, fid, doc, product, reason, unlanded, open_branches):
+def spec_carrier(feature):
+    """The branch ``feature``'s spec sits on when it is not on the trunk, from ingest's line."""
+    for line in feature.get('evidence') or []:
+        m = SPEC_ON_BRANCH_RE.match(str(line))
+        if m:
+            return m.group(1)
+    return ''
+
+
+def _doc_row(kind, fid, doc, product, reason, unlanded, open_branches, branch=None):
     """The launching row for ``fid``'s ``doc`` — or, when that document's work is pushed and
     waiting to land, a PUSHED → LAND row that launches nothing."""
-    branch = branch_for(product, doc, fid)
+    branch = branch or branch_for(product, doc, fid)
     waiting = _waiting_doc(fid, doc, product, unlanded, open_branches)
     if waiting:
         return Row(tier=2, kind=PUSHED_LAND, item_id=fid, feature_id=fid,
@@ -428,8 +440,17 @@ def feature_rows(items, product, busy, running, landed_shas=None, unlanded=None,
         if word == 'card':
             out.append(_doc_row(CARD_SPEC, fid, 'spec', product, 'decided card, no spec', *waits))
         elif word in ('spec-draft', 'spec-review'):
-            out.append(_doc_row(STARVED_SPEC, fid, 'spec', product, f"{stage}, no session",
-                                *waits))
+            carrier = spec_carrier(f)
+            if carrier and PLAN_ON_TRUNK in (f.get('evidence') or []):
+                # the plan landed on a spec the trunk never got: that spec is landed as it
+                # stands, on its own branch — not written again, and no coder starts before it
+                out.append(_doc_row(STARVED_SPEC, fid, 'spec', product,
+                                    f"{stage}: the plan is on the trunk but the spec is still on "
+                                    f"{carrier} — land the existing spec from that branch, "
+                                    f"don't rewrite it", *waits, branch=carrier))
+            else:
+                out.append(_doc_row(STARVED_SPEC, fid, 'spec', product, f"{stage}, no session",
+                                    *waits))
         elif word in ('spec-approved', 'plan-draft', 'plan-review'):
             out.append(_doc_row(STARVED_PLAN, fid, 'plan', product,
                                 f"{stage}, no session" if word != 'spec-approved'

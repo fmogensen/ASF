@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import os
 import shutil
 import tempfile
@@ -814,6 +815,104 @@ class IngestDerivesNothing(unittest.TestCase):
 
     def test_the_walk_would_see_one(self):
         self.assertEqual(self.called("evidence.task_state(True, None, None, None)"), ['task_state'])
+
+
+class NoCoderBeforeTheSpecLands(unittest.TestCase):
+    """A plan on the trunk is not a plan-approved Feature while its spec is not approved: on a
+    migrated record the spec can still sit on a pre-lane branch, and a coder launched against it
+    finds no spec on the trunk. The Feature stays on the spec ladder, with a row that lands the
+    spec from the branch it is on (or writes one when there is none), and no PLAN → CODE row."""
+
+    SPEC_TRUNK = 'origin/main:docs/specs/f-0001.md'
+    PLAN_TRUNK = 'origin/main:docs/plans/f-0001.md'
+
+    def setUp(self):
+        self.root = make_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        write(self.root, 'F-0001', 'feature', 'Widgets', 'features', typed_lines=['decided: true'])
+        write(self.root, 'T-0001', 'task', 'Build the widget', 'tasks', parent='F-0001',
+              typed_lines=['writes: [src/widget.py]'])
+
+    def fev(self, **kw):
+        out = {'alias': None, 'spec': None, 'spec_branch': None, 'spec_on_main': False,
+               'spec_review': None, 'plan': self.PLAN_TRUNK, 'plan_branch': None,
+               'plan_on_main': True, 'plan_review': None, 'tasks': {}, 'prs': []}
+        out.update(kw)
+        return out
+
+    def rows_after(self, fev):
+        from asf.env import Product
+        from asf.feeder import rows
+        with mock.patch.object(ingest.evidence, 'load',
+                               return_value=dict(EMPTY_EV, features={'f-0001': fev})):
+            self.assertEqual(ingest.cmd_ingest(types.SimpleNamespace(fresh=False), self.root), 0)
+        meta, _b = read_meta(self.root, 'features', 'F-0001')
+        with open(os.path.join(self.root, 'index.json'), encoding='utf-8') as f:
+            index = json.load(f)
+        return meta, rows.candidates(index, Product('sample', {}), [])
+
+    def test_plan_on_trunk_and_spec_only_on_a_branch_gets_a_spec_row_not_code_rows(self):
+        from asf.feeder import rows
+        meta, out = self.rows_after(self.fev(
+            spec='origin/spec/F-0001:docs/specs/f-0001.md', spec_branch='spec/F-0001'))
+        self.assertEqual(meta['stage'], 'spec-draft')
+        self.assertIn('spec on spec/F-0001', meta['evidence'])
+        self.assertEqual([(r.kind, r.item_id) for r in out], [(rows.STARVED_SPEC, 'F-0001')])
+        self.assertEqual(out[0].branch, 'spec/F-0001')
+        self.assertIn("land the existing spec", out[0].reason)
+        self.assertIn("don't rewrite it", out[0].reason)
+
+    def test_a_spec_on_a_pre_lane_branch_is_landed_from_that_branch(self):
+        from asf.feeder import rows
+        meta, out = self.rows_after(self.fev(spec='origin/old/widgets:docs/specs/widgets.md'))
+        self.assertEqual(meta['stage'], 'spec-draft')
+        self.assertEqual([(r.kind, r.branch) for r in out], [(rows.STARVED_SPEC, 'old/widgets')])
+
+    def test_plan_on_trunk_and_no_spec_anywhere_is_a_card(self):
+        from asf.feeder import rows
+        meta, out = self.rows_after(self.fev())
+        self.assertEqual(meta['stage'], 'card')
+        self.assertEqual([(r.kind, r.item_id) for r in out], [(rows.CARD_SPEC, 'F-0001')])
+
+    def test_plan_and_spec_both_on_trunk_get_code_rows(self):
+        from asf.feeder import rows
+        meta, out = self.rows_after(self.fev(spec=self.SPEC_TRUNK, spec_on_main=True))
+        self.assertEqual(meta['stage'], 'plan-approved')
+        self.assertEqual([(r.kind, r.item_id) for r in out], [(rows.PLAN_CODE, 'T-0001')])
+
+    def test_an_approved_spec_review_gets_code_rows(self):
+        from asf.feeder import rows
+        meta, out = self.rows_after(self.fev(
+            spec='origin/spec/F-0001:docs/specs/f-0001.md', spec_branch='spec/F-0001',
+            spec_review=(1, 'APPROVED', 'f-0001-spec-review-r1.md')))
+        self.assertEqual(meta['stage'], 'plan-approved')
+        self.assertEqual([(r.kind, r.item_id) for r in out], [(rows.PLAN_CODE, 'T-0001')])
+
+    def test_running_tasks_on_an_unlanded_spec_start_no_more_coders(self):
+        evidence = ingest.evidence
+        spec = {'exists': True, 'approved': False, 'review': None}
+        plan = {'exists': True, 'approved': True, 'review': None}
+        self.assertEqual(evidence.feature_stage(spec, plan, ['Active', 'New'], False), 'spec-draft')
+        self.assertEqual(evidence.feature_stage(dict(spec, approved=True), plan,
+                                                ['Active', 'New'], False), 'building 0/2')
+        self.assertEqual(evidence.feature_stage(spec, plan, ['Closed'], False), 'landed')
+
+    def test_a_linked_spec_is_found_on_the_trunk_or_on_a_remote_branch(self):
+        meta = {'id': 'F-0001', 'type': 'feature', 'links': {'spec': 'docs/design/widgets.md'}}
+        fev = self.fev()
+        product = types.SimpleNamespace(main='main')
+        ev = dict(EMPTY_EV, branches=['main', 'old/widgets'])
+        with mock.patch.object(ingest.evidence, 'resolve',
+                               side_effect=lambda refs, product=None: {
+                                   r: ('abc' if r.startswith('origin/old/widgets:') else None)
+                                   for r in refs}):
+            self.assertEqual(ingest._spec_home(meta, fev, ev, product), (False, 'old/widgets'))
+        with mock.patch.object(ingest.evidence, 'resolve',
+                               side_effect=lambda refs, product=None: {
+                                   r: ('abc' if r.startswith('origin/main:') else None)
+                                   for r in refs}):
+            self.assertEqual(ingest._spec_home(meta, fev, ev, product), (True, ''))
+        self.assertEqual(ingest._spec_home(meta, fev, ev, None), (False, ''))
 
 
 if __name__ == '__main__':
