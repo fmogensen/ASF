@@ -1341,25 +1341,36 @@ class ProductHarvestTests(unittest.TestCase):
         data.update(extra)
         return env.Product('sample', data)
 
-    def fake_gh(self, checks, number=41):
+    def fake_gh(self, checks, number=41, queue=False, auto=False):
         """A ``gh`` answering ``checks`` (a ``gh pr checks --json`` list, or ``None``: no checks
-        reported) for the one open PR ``number``; a merge lands its branch on origin's main as
-        the host would. Returns the list the calls are recorded in."""
+        reported) for the one open PR ``number``, on the worker's current branch; a merge lands
+        that branch on origin's main as the host would. ``queue``: the trunk has a merge queue;
+        ``auto``: the PR is already in it. Returns the list the calls are recorded in."""
         calls = []
         state = {'merged': None}
 
         def gh(args):
             calls.append(list(args))
+            head = sh(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], cwd=self.worker).stdout.strip()
+            if args[:2] == ['pr', 'list'] and 'merged' in args:
+                return 0, json.dumps([{'number': number, 'mergeCommit': {'oid': state['merged']}}]
+                                     if state['merged'] else []), ''
             if args[:2] == ['pr', 'list']:
-                return 0, json.dumps([] if state['merged'] else [{'number': number}]), ''
+                return 0, json.dumps([] if state['merged'] else [
+                    {'number': number, 'headRefName': head,
+                     'autoMergeRequest': {'enabledAt': 'x'} if auto else None}]), ''
+            if args[:2] == ['api', 'graphql']:
+                return 0, json.dumps({'data': {'repository': {
+                    'mergeQueue': {'id': 'MQ'} if queue else None}}}), ''
             if args[:2] == ['pr', 'checks']:
                 if checks is None:
                     return 1, '', "no checks reported on the 'x' branch\n"
                 return (1 if any(c['bucket'] != 'pass' for c in checks) else 0), json.dumps(checks), ''
+            if args[:2] == ['pr', 'merge'] and '--auto' in args:
+                return 0, '', ''
             if args[:2] == ['pr', 'merge']:
-                branch = sh(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], cwd=self.worker).stdout.strip()
-                sh(['git', 'push', '-q', 'origin', f'{branch}:main'], cwd=self.worker)
-                sh(['git', 'push', '-q', 'origin', '--delete', branch], cwd=self.worker)
+                sh(['git', 'push', '-q', 'origin', f'{head}:main'], cwd=self.worker)
+                sh(['git', 'push', '-q', 'origin', '--delete', head], cwd=self.worker)
                 state['merged'] = self.origin_main()
                 return 0, '', ''
             if args[:2] == ['pr', 'view']:
@@ -1447,27 +1458,166 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertEqual(lines, ['held plan/F-0001: merge_routine_pr (human-now) — routine'])
         self.assertEqual(self.merges(calls), [])
         from asf import approvals
-        self.assertEqual([h['class'] for h in approvals.open_holds(product)], ['merge_routine_pr'])
+        self.assertEqual([h['class'] for h in approvals.open_holds(product)
+                          if h['item'] == 'F-0001'], ['merge_routine_pr'])
         out = []
         approvals.raise_holds(mock.Mock(product=product), out.append)
         self.assertTrue(any(l.startswith('NEEDS OPERATOR: held merge_routine_pr on F-0001')
                             for l in out), out)
 
-    def test_a_plan_branch_touching_code_stays_in_the_pr_lane(self):
+    def test_a_plan_branch_touching_code_needs_a_review_like_code(self):
         calls = self.fake_gh([])
         self.push_plan({'docs/plans/f-0001.md': '# plan\n', 'src/app.py': 'x = 1\n'})
         results, lines = self.harvest(self.pr_product())
+        self.assertEqual(results, {'plan/F-0001': 'waiting'})
+        self.assertEqual(lines, ['waiting plan/F-0001: PR #41 not approved — no ASF review yet'])
+        self.assertEqual(self.merges(calls), [])
+
+    def test_no_pr_host_keeps_the_old_pr_lane(self):
+        self.push_plan()
+        product = self.pr_product(repo_slug=None)
+        with mock.patch.object(harvest, '_gh') as gh:
+            results, lines = self.harvest(product)
         self.assertEqual(results, {'plan/F-0001': 'pr'})
         self.assertEqual(lines, ['pr-lane plan/F-0001'])
-        self.assertEqual(calls, [])
-        self.assertEqual(self.record('plan/F-0001').get('harvest'), 'pr')
+        gh.assert_not_called()
 
-    def test_a_code_branch_stays_in_the_pr_lane(self):
-        calls = self.fake_gh([])
-        self.push_lane('fix/B-0001', [('fix(B-0001): the change', {'docs/plans/x.md': 'a\n'})])
+    # ---- the PR lane, native: a code branch needs the ASF review's approval --------------
+
+    REVIEW = ('| check | result | evidence |\n| --- | --- | --- |\n| scope | pass | a.txt |\n\n'
+              'verdict: {v}\n')
+
+    def push_fix(self, verdicts=(), extra=None):
+        """``fix/B-0001`` with a change and one review file per verdict (round 1, 2, …)."""
+        files = {'src/a.py': 'a = 1\n'}
+        files.update({f'.in/reviews/{n}-b-0001.md': self.REVIEW.format(v=v)
+                      for n, v in enumerate(verdicts, 1)})
+        files.update(extra or {})
+        self.push_lane('fix/B-0001', [('fix(B-0001): the change', files)])
         self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
-        self.assertEqual(self.harvest(self.pr_product())[0], {'fix/B-0001': 'pr'})
-        self.assertEqual(calls, [])
+
+    def test_code_branch_without_a_review_waits(self):
+        calls = self.fake_gh([{'name': 'ci', 'bucket': 'pass'}])
+        self.push_fix()
+        results, lines = self.harvest(self.pr_product())
+        self.assertEqual(results, {'fix/B-0001': 'waiting'})
+        self.assertEqual(lines, ['waiting fix/B-0001: PR #41 not approved — no ASF review yet'])
+        self.assertEqual(self.merges(calls), [])
+        self.assertNotEqual(self.record('fix/B-0001').get('harvest'), 'pr')
+
+    def test_code_branch_whose_newest_review_requests_changes_waits(self):
+        calls = self.fake_gh([])
+        self.push_fix(['approved', 'changes requested'])
+        results, lines = self.harvest(self.pr_product())
+        self.assertEqual(results, {'fix/B-0001': 'waiting'})
+        self.assertEqual(lines, ['waiting fix/B-0001: PR #41 not approved — '
+                                 '.in/reviews/2-b-0001.md reads changes requested'])
+        self.assertEqual(self.merges(calls), [])
+
+    def test_code_branch_approved_and_green_is_merged(self):
+        calls = self.fake_gh([{'name': 'ci', 'bucket': 'pass'}])
+        self.push_fix(['changes requested', 'approved'])
+        results, lines = self.harvest(self.pr_product())
+        self.assertEqual(results, {'fix/B-0001': 'landed'})
+        self.assertEqual(self.merges(calls),
+                         [['pr', 'merge', '41', '-R', 'o/p', '--squash', '--delete-branch']])
+        sha = self.origin_main()
+        self.assertIn(f'landed fix/B-0001 → PR #41 {sha}', lines)
+        self.assertEqual(self.record('fix/B-0001').get('harvested'), sha)
+
+    def test_code_branch_approved_but_red_goes_back_to_its_session(self):
+        calls = self.fake_gh([{'name': 'ci', 'bucket': 'fail'}])
+        self.push_fix(['approved'])
+        results, lines = self.harvest(self.pr_product())
+        self.assertEqual(results, {'fix/B-0001': 'held'})
+        self.assertEqual(lines, ['held fix/B-0001: PR #41 checks red: ci — back to its session (round 1)'])
+        self.assertEqual(self.merges(calls), [])
+        self.assertEqual(self.record('fix/B-0001')['correction']['kind'], 'gate')
+
+    def test_merge_queue_enqueues_with_auto_once(self):
+        calls = self.fake_gh([], queue=True)
+        self.push_fix(['approved'])
+        results, lines = self.harvest(self.pr_product())
+        self.assertEqual(results, {'fix/B-0001': 'queued'})
+        self.assertEqual(self.merges(calls), [['pr', 'merge', '41', '-R', 'o/p', '--auto']])
+        self.assertEqual(lines, ['queued fix/B-0001: PR #41 added to the merge queue'])
+        self.assertFalse(self.record('fix/B-0001').get('harvested'))
+        # in the queue: the next tick does not enqueue it again
+        calls = self.fake_gh([], queue=True, auto=True)
+        results, lines = self.harvest(self.pr_product())
+        self.assertEqual(results, {'fix/B-0001': 'queued'})
+        self.assertEqual(self.merges(calls), [])
+
+    def test_merge_queue_respects_capacity_parallel(self):
+        calls = self.fake_gh([], queue=True)
+        self.push_fix(['approved'])
+        product = self.pr_product(capacity={'batch': {'parallel': 0}})
+        results, lines = self.harvest(product)
+        self.assertEqual(results, {'fix/B-0001': 'waiting'})
+        self.assertEqual(self.merges(calls), [])
+        self.assertIn('capacity.batch.parallel', lines[-1])
+
+    def test_capacity_per_run_caps_merges_per_tick(self):
+        calls = self.fake_gh([])
+        self.push_fix(['approved'])
+        results, lines = self.harvest(self.pr_product(capacity={'batch': {'per_run': 0}}))
+        self.assertEqual(results, {'fix/B-0001': 'waiting'})
+        self.assertEqual(self.merges(calls), [])
+        self.assertIn('capacity.batch.per_run', lines[-1])
+
+    def test_code_branch_human_now_is_held_for_the_operator(self):
+        calls = self.fake_gh([])
+        product = self.pr_product(approvals={'merge_routine_pr': 'human-now'})
+        os.makedirs(env.state_dir(product), exist_ok=True)
+        self.push_fix(['approved'])
+        results, lines = self.harvest(product)
+        self.assertEqual(results, {'fix/B-0001': 'held'})
+        self.assertEqual(lines, ['held fix/B-0001: merge_routine_pr (human-now) — routine'])
+        self.assertEqual(self.merges(calls), [])
+        out = []
+        from asf import approvals
+        approvals.raise_holds(mock.Mock(product=product), out.append)
+        self.assertTrue(any(l.startswith('NEEDS OPERATOR: held merge_routine_pr on B-0001')
+                            for l in out), out)
+
+    def test_a_pr_merged_elsewhere_closes_its_session(self):
+        """Merged by the product's batch step or a person: the PR is no longer open, the branch
+        is still on origin — the session is closed at the merge commit."""
+        calls = []
+
+        def gh(args):
+            calls.append(list(args))
+            if args[:2] == ['pr', 'list'] and 'merged' in args:
+                return 0, json.dumps([{'number': 41, 'mergeCommit': {'oid': 'abc123'}}]), ''
+            return 0, '[]', ''
+        patcher = mock.patch.object(harvest, '_gh', side_effect=gh)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.push_fix()
+        results, lines = self.harvest(self.pr_product())
+        self.assertEqual(results, {'fix/B-0001': 'landed'})
+        self.assertIn('landed fix/B-0001 → PR #41 abc123 (merged)', lines)
+        self.assertEqual(self.record('fix/B-0001').get('harvested'), 'abc123')
+        self.assertEqual(self.merges(calls), [])
+
+    def test_a_dry_run_writes_no_hold(self):
+        self.fake_gh([{'name': 'ci', 'bucket': 'fail'}])
+        self.push_lane('fix/B-0002', [('the change, unnamed', {'src/b.py': 'b = 1\n'})])
+        self.session('fix-bug-b-0002', 'B-0002', 'fix/B-0002')
+        self.push_fix(['approved'])
+        lines = []
+        results = harvest.run_product_harvest(self.pr_product(), self.state_dir, dry_run=True,
+                                              out=lines.append)
+        self.assertEqual(results, {'fix/B-0001': 'dry', 'fix/B-0002': 'dry'})
+        self.assertFalse(self.record('fix/B-0001').get('correction'))
+        self.assertFalse(self.record('fix/B-0002').get('correction'))
+
+    def test_pr_order_puts_hotfix_then_s1_first(self):
+        items = {'B-0001': {'severity': 'S2'}, 'B-0002': {'severity': 'S1'}}
+        entries = [('worker/F-0009', {}), ('fix/B-0001', {}), ('fix/B-0002', {}),
+                   ('worker/hotfix-T-0003', {})]
+        self.assertEqual([b for b, _ in harvest.pr_order(entries, items)],
+                         ['worker/hotfix-T-0003', 'fix/B-0002', 'fix/B-0001', 'worker/F-0009'])
 
     def test_a_docs_branch_already_handed_to_the_pr_lane_is_merged(self):
         """A docs branch an earlier harvest marked ``harvest: pr`` is not stranded there."""

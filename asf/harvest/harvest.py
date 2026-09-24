@@ -1070,13 +1070,17 @@ def land_ff(repo, state_dir, branch, record, item, conv, asf_repo, bug_root, dry
 
 # ------------------------------------------------------- the PR lane, native --
 #
-# In ``pull-request`` landing the ``prs`` step opens a PR for every finished branch; a product's
-# merge queue (its ``batch`` step) merged them. A spec or plan branch carries nothing a merge
-# queue knows how to judge — and nothing but a merge ever makes its document "on main", which is
-# what approves it — so a docs-only spec/plan branch is merged by harvest itself: its PR's checks
-# green (none at all counts as green), ``gh pr merge --squash --delete-branch`` (the repo's other
-# allowed method when squash is refused), the session marked ``harvested``. Pending checks wait
-# for the next tick; red checks hold the branch and send it back to its session.
+# In ``pull-request`` landing the ``prs`` step opens a PR for every finished branch, and harvest
+# lands every one of them itself — no product merge-queue script is needed (a ``batch`` step, if
+# set, still runs; a PR it merged is simply found merged and its session closed). A PR merges
+# when the approvals matrix allows it (checked before this lane), its checks are green (none at
+# all counts as green) and — for anything but a docs-only spec/plan branch, whose merge is what
+# approves its document — the newest ASF review of its item on the branch reads
+# ``verdict: approved``. Then ``gh pr merge --squash --delete-branch`` (the repo's next allowed
+# method when squash is refused), or ``--auto`` when the trunk has a GitHub merge queue, and the
+# session is marked ``harvested``. No review, or pending checks: wait for the next tick. Red
+# checks: hold the branch and send it back to its session. Hotfix and S1 branches go first; at
+# most ``capacity.batch.per_run`` merges a tick and ``parallel`` PRs in the merge queue at once.
 
 #: The merge methods tried in order; a repo that refuses one is offered the next.
 MERGE_METHODS = ('--squash', '--merge', '--rebase')
@@ -1104,15 +1108,93 @@ def is_docs_branch(conv, branch, files):
             and all(any(f.startswith(d + '/') for d in dirs) for f in files))
 
 
-def open_pr(slug, branch):
-    """The number of the open PR whose head is ``branch``, or None."""
-    rc, stdout, _err = _gh(['pr', 'list', '-R', slug, '--head', branch, '--state', 'open',
-                            '--json', 'number'])
+def _gh_json(args, default):
+    rc, stdout, _err = _gh(args)
     try:
-        prs = json.loads(stdout or '[]') if rc == 0 else []
+        return json.loads(stdout) if rc == 0 and stdout.strip() else default
     except json.JSONDecodeError:
-        prs = []
-    return prs[0].get('number') if prs else None
+        return default
+
+
+VERDICT_LINE_RE = re.compile(r'^[\s*#>|-]*verdict\s*:\s*(.+?)\s*\|?\s*$', re.I | re.M)
+
+
+def review_verdict(repo, conv, branch, item):
+    """``(verdict, path)`` of the newest ASF review of ``item`` on ``origin/<branch>`` — the
+    ``review_pattern`` file with the highest round, its ``verdict:`` line lower-cased — or
+    ``('', None)`` when the branch carries none."""
+    if not item:
+        return '', None
+    rx = re.compile(re.escape(str(conv.review_pattern))
+                    .replace(re.escape('{reviews_dir}'), re.escape(conv.reviews_dir.strip('/')))
+                    .replace(re.escape('{slug}'), re.escape(item.lower()))
+                    .replace(re.escape('{n}'), r'(?P<n>\d+)'))
+    names = sh(['git', 'ls-tree', '-r', '--name-only', f'origin/{branch}', '--',
+                conv.reviews_dir], cwd=repo).stdout.splitlines()
+    rounds = sorted((int(m.group('n')), n) for n in names for m in [rx.fullmatch(n)] if m)
+    if not rounds:
+        return '', None
+    path = rounds[-1][1]
+    text = sh(['git', 'show', f'origin/{branch}:{path}'], cwd=repo).stdout
+    m = VERDICT_LINE_RE.search(text)
+    return (m.group(1).strip().strip('`*').lower() if m else ''), path
+
+
+class PrLane:
+    """One harvest's view of the product's PR host: its open PRs (one ``gh pr list``), whether
+    the trunk has a merge queue, and the tick's merge budget (``capacity.batch``)."""
+
+    def __init__(self, product, slug, trunk):
+        from asf import capacity
+        self.slug, self.trunk = slug, trunk
+        prs = _gh_json(['pr', 'list', '-R', slug, '--state', 'open', '--limit', '500', '--json',
+                        'number,headRefName,autoMergeRequest'], [])
+        self.open = {p.get('headRefName'): p for p in prs if isinstance(p, dict)}
+        shape = capacity.batch_shape(product, None)
+        self.per_run = shape.get('per_run')
+        self.parallel = shape.get('parallel')
+        self.merged = 0
+        self.in_queue = sum(1 for p in self.open.values() if p.get('autoMergeRequest'))
+        self._queue = None
+
+    def has_queue(self):
+        """True when ``trunk`` has a GitHub merge queue (merges go in with ``--auto``)."""
+        if self._queue is None:
+            owner, _, name = self.slug.partition('/')
+            q = ('query($o:String!,$n:String!,$b:String!){repository(owner:$o,name:$n)'
+                 '{mergeQueue(branch:$b){id}}}')
+            data = _gh_json(['api', 'graphql', '-f', f'query={q}', '-F', f'o={owner}',
+                             '-F', f'n={name}', '-F', f'b={self.trunk}'], {})
+            self._queue = bool((((data or {}).get('data') or {}).get('repository') or {})
+                               .get('mergeQueue'))
+        return self._queue
+
+    def merged_pr(self, branch):
+        """``(number, sha)`` of a merged PR whose head is ``branch``, or None."""
+        prs = _gh_json(['pr', 'list', '-R', self.slug, '--head', branch, '--state', 'merged',
+                        '--json', 'number,mergeCommit'], [])
+        if not prs:
+            return None
+        return prs[0].get('number'), ((prs[0].get('mergeCommit') or {}).get('oid') or '')
+
+    def budget_left(self):
+        """``None`` when a merge may go in now, else why not."""
+        if self.per_run is not None and self.merged >= self.per_run:
+            return f'{self.merged} merged this tick (capacity.batch.per_run)'
+        if self.has_queue() and self.parallel is not None and self.in_queue >= self.parallel:
+            return f'{self.in_queue} in the merge queue (capacity.batch.parallel)'
+        return None
+
+
+def pr_order(entries, items=None):
+    """``entries`` (``[(branch, record)]``) hotfix first, then S1, S2, the rest — stable."""
+    def rank(entry):
+        branch, record = entry
+        if 'hotfix' in branch.lower():
+            return 0
+        card = (items or {}).get(item_of(branch, record) or '') or {}
+        return {'S1': 1, 'S2': 2}.get(card.get('severity'), 3)
+    return sorted(entries, key=rank)
 
 
 def pr_checks(slug, number):
@@ -1152,13 +1234,35 @@ def merged_sha(slug, number):
     return stdout.strip() if rc == 0 else ''
 
 
-def land_pr(repo, state_dir, branch, record, slug, trunk, dry_run, out):
-    """Merge ``branch``'s PR when its checks are green; see the section note above."""
+def land_pr(repo, state_dir, branch, record, lane, conv, docs, dry_run, out):
+    """Land ``branch``'s PR through ``lane`` (a :class:`PrLane`); see the section note above.
+    ``docs``: a docs-only spec/plan branch, which needs no review."""
     job = record.get('job') or branch
-    number = open_pr(slug, branch)
-    if number is None:
+    slug = lane.slug
+    pr = lane.open.get(branch)
+    if pr is None:
+        merged = lane.merged_pr(branch)
+        if merged:  # merged by the queue, the product's batch step or a person
+            number, sha = merged
+            sha = sha or f'PR #{number}'
+            if dry_run:
+                out(f'DRY: would mark {branch} landed — PR #{number} merged')
+                return 'dry'
+            mark_session(state_dir, job, harvested=sha, correction=None)
+            out(f'landed {branch} → PR #{number} {sha} (merged)')
+            return 'landed'
         out(f'waiting {branch}: no open PR yet')
         return 'waiting'
+    number = pr.get('number')
+    if pr.get('autoMergeRequest'):
+        out(f'queued {branch}: PR #{number} in the merge queue')
+        return 'queued'
+    if not docs:
+        verdict, path = review_verdict(repo, conv, branch, item_of(branch, record))
+        if verdict != 'approved':
+            why = f'{path} reads {verdict or "no verdict"}' if path else 'no ASF review yet'
+            out(f'waiting {branch}: PR #{number} not approved — {why}')
+            return 'waiting'
     state, detail = pr_checks(slug, number)
     if state == 'pending':
         out(f'waiting {branch}: PR #{number} checks pending — {detail}')
@@ -1167,18 +1271,34 @@ def land_pr(repo, state_dir, branch, record, slug, trunk, dry_run, out):
         out(f'waiting {branch}: PR #{number} checks unreadable — {detail}')
         return 'waiting'
     if state == 'red':
+        if dry_run:
+            out(f'DRY: would hold {branch}: PR #{number} checks red: {detail}')
+            return 'dry'
         return hold_with_correction(state_dir, branch, record, 'gate',
                                     f'PR #{number} checks red: {detail}', out)
+    spent = lane.budget_left()
+    if spent:
+        out(f'waiting {branch}: PR #{number} green — {spent}')
+        return 'waiting'
     if dry_run:
         out(f'DRY: would merge {branch} (PR #{number})')
         return 'dry'
+    if lane.has_queue():
+        rc, _o, err = _gh(['pr', 'merge', str(number), '-R', slug, '--auto'])
+        if rc != 0:
+            out(f'held {branch}: PR #{number} merge queue refused — {tail(err) or rc}')
+            return 'held'
+        lane.merged += 1
+        lane.in_queue += 1
+        out(f'queued {branch}: PR #{number} added to the merge queue')
+        return 'queued'
     ok, how = merge_pr(slug, number)
     if not ok:
         out(f'held {branch}: PR #{number} merge refused — {how}')
         return 'held'
+    lane.merged += 1
     sha = merged_sha(slug, number) or f'PR #{number}'
     mark_session(state_dir, job, harvested=sha, correction=None)
-    sh(['git', 'fetch', '-q', '--prune', 'origin'], cwd=repo)
     out(f'landed {branch} → PR #{number} {sha}')
     return 'landed'
 
@@ -1414,18 +1534,15 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
     eligible = []
     on_origin = remote_branches(repo, conv, known=sessions)
     slug = None
-    if mode == LANDING_PR:
+    if mode == LANDING_PR:  # on a PR host, harvest lands the PRs itself (the native PR lane)
         from asf.tick.step_prs import repo_slug
         slug = repo_slug(product)
-
-    def native(branch):  # a PR harvest merges itself: a docs-only spec/plan branch, on a PR host
-        return bool(slug) and is_docs_branch(conv, branch, touched_files(repo, trunk, branch))
     for branch in on_origin:
         record = sessions.get(branch)
         if record is None or lifecycle.is_live(record):
             continue
-        if record.get('harvest') == 'pr':  # handed to the PR lane — unless harvest merges it
-            if not native(branch):
+        if record.get('harvest') == 'pr':  # handed to the PR lane — which is harvest's own now
+            if not slug:
                 continue
             record = dict(record, harvest=None)
         ahead = sh(['git', 'rev-list', '--count', f'origin/{trunk}..origin/{branch}'],
@@ -1459,7 +1576,8 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
             if closed:
                 results[branch] = closed
     to_land = []
-    for branch, record in cap_to_tick(eligible, out, conv):
+    lane = None
+    for branch, record in cap_to_tick(pr_order(eligible, items) if slug else eligible, out, conv):
         item = item_of(branch, record)
         if has_adjudicate_commit(repo, trunk, branch):
             out(f'held {branch}: ruling belongs in the record')
@@ -1467,6 +1585,10 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
             continue
         refusal = lane_refusal(repo, trunk, branch, item)
         if refusal:
+            if dry_run:  # a dry run writes nothing — not even a hold
+                out(f'DRY: would hold {branch}: {refusal[1]}')
+                results[branch] = 'dry'
+                continue
             results[branch] = hold_with_correction(state_dir, branch, record, *refusal, out)
             continue
         cls, matched_file = approvals.merge_class(product, touched_files(repo, trunk, branch))
@@ -1479,8 +1601,11 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
             out(f'held {branch}: {cls} ({level}) — {detail}')
             results[branch] = 'held'
             continue
-        if mode == LANDING_PR and native(branch):
-            results[branch] = land_pr(repo, state_dir, branch, record, slug, trunk, dry_run, out)
+        if slug:
+            lane = lane or PrLane(product, slug, trunk)
+            docs = is_docs_branch(conv, branch, touched_files(repo, trunk, branch))
+            results[branch] = land_pr(repo, state_dir, branch, record, lane, conv, docs,
+                                      dry_run, out)
             continue
         if mode == LANDING_PR:
             if not dry_run:
@@ -1500,6 +1625,8 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
         results.update(land_combined(repo, state_dir, to_land, conv, asf_repo, dry_run, out,
                                      items=items))
     if any(r == 'landed' for r in results.values()):
+        if slug:
+            sh(['git', 'fetch', '-q', '--prune', 'origin'], cwd=repo)
         sync_checkout(repo, trunk, out)
     return results
 
