@@ -110,6 +110,10 @@ def groom_state(product, root):
     sections, _n = groom_policy.suppress({'open': text.splitlines()}, items, inflight(product),
                                          product)
     pairs = groom_policy.open_questions('\n'.join(sections['open']))
+    # the approval bound, applied again here: a file written without the policy pass (by hand,
+    # or before the gate was on) still carries questions the operator owns
+    owned = _operator_owned(product, items)
+    pairs = [(iid, line) for iid, line in pairs if iid not in owned]
     job = f'groom-{date}'
     # sessions, not ledger lines: a run's end and harvest lines are no second attempt
     attempts = sum(1 for rec in lifecycle.read_lines(pool_mod.sessions_path(product))
@@ -122,6 +126,27 @@ def groom_state(product, root):
                            pairs[0][0] if pairs else None),
             'attempts': attempts,
             'new': _not_yet_put(product, job, open_ids) if attempts else list(open_ids)}
+
+
+def _operator_owned(product, items):
+    """The item ids whose question no adjudicate session may rule (§2.8): an answer that would
+    cross an action class the product does not map to ``auto`` (:func:`asf.groom.policy.barred`
+    — a new Epic), or a card holding an open approval hold (money, production, security,
+    customer data, legal …) at a level other than ``auto``. Those stay with the operator."""
+    probe = groom_policy.Answer('yes', 'decided', True, '')
+    owned = {iid for iid, item in items.items()
+             if groom_policy.barred(probe, {'meta': item}, product)}
+    try:
+        holds = approvals.open_holds(product)
+    except (OSError, ValueError):
+        holds = []
+    for h in holds:
+        cls = h.get('class')
+        level = (approvals.level_of(product, cls) if cls in approvals.CLASSES_BY_NAME
+                 else h.get('level'))
+        if level != 'auto':
+            owned.add(h.get('item'))
+    return owned
 
 
 def _not_yet_put(product, job, open_ids):

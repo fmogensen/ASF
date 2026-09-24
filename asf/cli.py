@@ -162,7 +162,7 @@ def build_parser():
     p_groom = sub.add_parser('groom', help='inbox -> cards, then write groom/<date>.md')
     p_groom.add_argument('--date', help='defaults to today (UTC)')
     p_groom.add_argument('--apply', action='store_true',
-                         help="apply the previous groom file's answers first")
+                         help="apply the previous and today's groom file's answers first")
     p_groom.add_argument('--product')
     p_groom.add_argument('--default-bug-epic', help='the Epic an inbox Bug with no parent: line is filed under')
 
@@ -322,6 +322,23 @@ def line_buffered(*streams):
             pass
 
 
+def _utc_today():
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
+
+
+def _published(cmd, args, record, message):
+    """Run a console command that writes the record, then commit and push what it wrote
+    (:func:`asf.record.publish.publish_changes`): the tick's clone resets to origin, so an edit
+    left in the operator's checkout never reaches it. The tick calls these commands on its own
+    clone directly, never through here, so its state commit stays its own."""
+    from asf.record import publish
+    before = publish.snapshot(record)
+    rc = cmd(args, record)
+    publish.publish_changes(record, before, message)
+    return rc
+
+
 def main(argv=None):
     from asf import env, tables
     line_buffered(sys.stdout, sys.stderr)  # before BoxStream wraps stdout, which passes lines on
@@ -348,7 +365,8 @@ def _main(argv=None):
         return cmd_inbox(args, resolve_record(args, announce=_announce_stderr))
     if args.command == 'set':
         from asf.record.setfield import cmd_set
-        return cmd_set(args, resolve_record(args, announce=_announce_stderr))
+        return _published(cmd_set, args, resolve_record(args, announce=_announce_stderr),
+                          f"record: set {args.id}")
     if args.command == 'check':
         from asf.record.check import cmd_check
         return cmd_check(args, resolve_record(args))
@@ -363,7 +381,8 @@ def _main(argv=None):
         return cmd_migrate(args, resolve_record(args))
     if args.command == 'groom':
         from asf.groom.groom import cmd_groom
-        return cmd_groom(args, resolve_record(args))
+        return _published(cmd_groom, args, resolve_record(args),
+                          f"groom: {args.date or _utc_today()}" + (' --apply' if args.apply else ''))
     if args.command == 'stale':
         from asf.tick.stale import cmd_stale
         return cmd_stale(args, resolve_record(args, announce=_announce_stderr))  # stdout: the table / --json

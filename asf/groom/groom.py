@@ -712,12 +712,17 @@ def cmd_groom(args, root):
 
     applied = 0
     if args.apply:
-        prev = _previous_groom_file(root, date)
-        if prev:
+        # the previous day's file, then today's own: an answer the operator wrote into today's
+        # file is applied now, not a day late (applying is idempotent, so a rule answer already
+        # applied changes nothing)
+        today = os.path.join(root, 'groom', f'{date}.md')
+        for prev in (_previous_groom_file(root, date), today if os.path.isfile(today) else None):
+            if not prev:
+                continue
             with open(prev, encoding='utf-8') as f:
                 prev_sections = _line_sections(f.read())
-            applied = apply_groom_answers(root, canonical, prev, date, event=event,
-                                          sections=prev_sections, intake_dir=intake_dir)
+            applied += apply_groom_answers(root, canonical, prev, date, event=event,
+                                           sections=prev_sections, intake_dir=intake_dir)
 
     answers_file = getattr(args, 'answers_file', None)
     answers_text = None

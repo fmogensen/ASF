@@ -593,6 +593,11 @@ def candidates(index, product, inflight, attempts=None, corrections=None, busy=N
         f = items.get(r.feature_id) or {}
         if r.tier < 2:
             return (r.tier, 0, '', 0, seq)
+        if r.kind == GROOM_ADJUDICATE:
+            # one session decides the whole day's questions for every Feature: it goes before
+            # the Feature work, not at the rank of whichever card happens to be the oldest (an
+            # unranked inbox card put it behind every launch, and the cut never reached it)
+            return (r.tier, -1, '', 0, seq)
         return (r.tier, ix.rank(f), r.feature_id or '~', KIND_ORDER.get(r.kind, 4), seq)
     return [r for _seq, r in sorted(enumerate(rows), key=key)]
 
