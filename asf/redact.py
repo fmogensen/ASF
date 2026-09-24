@@ -9,7 +9,8 @@ leak it is reporting.
 
 :func:`patterns` merges three kinds of pattern: operator names (the worker pool's account names,
 an optional private list, and a repo's own tracked ``tools/forbidden-names.txt``), built-in
-secret shapes, and the literal value of every environment variable that looks like a secret. No
+secret shapes, the literal value of every environment variable that looks like a secret, and the
+value in every worker account's ``auth_env`` file (:func:`auth_env_secrets`). No
 config, no private list and no repo list is an empty pattern set, not an error — the scanner
 still runs, it simply has nothing of that kind to look for.
 
@@ -163,7 +164,28 @@ def patterns(repo=None, cfg=None, environ=None, extra=()):
             pats.append(Pattern('secret', f'env:{var_name}',
                                  re.compile(re.escape(value), re.IGNORECASE)))
 
+    for var_name, value in auth_env_secrets(cfg):
+        pats.append(Pattern('secret', f'auth_env:{var_name}',
+                             re.compile(re.escape(value), re.IGNORECASE)))
+
     return pats
+
+
+def auth_env_secrets(cfg):
+    """``[(VARIABLE, value)]`` for every worker account's ``auth_env`` file that can be read —
+    whatever the variable is called, the value is a credential. An unreadable file is skipped
+    here (the launch refuses it; the scanner still runs)."""
+    out = []
+    for account in ((cfg or {}).get('worker_pool') or {}).get('accounts') or []:
+        for var_name, path in env.account_auth_env(account if isinstance(account, dict) else {}).items():
+            try:
+                with open(path, encoding='utf-8') as f:
+                    value = f.read().strip()
+            except (OSError, UnicodeDecodeError):
+                continue
+            if len(value) >= 8:
+                out.append((var_name, value))
+    return out
 
 
 # ---- scanning ------------------------------------------------------------------

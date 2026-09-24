@@ -3,11 +3,21 @@
 #
 # Launches ONE real worker session for <product> the way a tick launches one — the configured
 # runtime binary, the account's config dir, the worker environment (allow-list +
-# worker_pool.env_passthrough) and the account's ISOLATED HOME seeded from its home_seed — and
-# checks that it:
+# worker_pool.env_passthrough), the account's ISOLATED HOME seeded from its home_seed, and its
+# credentials from auth_env files (never HOME or the keychain) — and checks that it:
 #
+#   0. has an auth_env file for the runtime's login (CLAUDE_CODE_OAUTH_TOKEN) and, for the push,
+#      GH_TOKEN — created once per account:
+#        mkdir -p ~/.ASF/secrets && chmod 700 ~/.ASF/secrets
+#        claude setup-token        # authorize as that account; save what it prints:
+#        pbpaste > ~/.ASF/secrets/<account>.token && chmod 600 ~/.ASF/secrets/<account>.token
+#        # a fine-grained GitHub token, the product repo only, Contents + Pull requests read/write:
+#        pbpaste > ~/.ASF/secrets/<account>.gh && chmod 600 ~/.ASF/secrets/<account>.gh
+#      and in config.yaml, under the account:
+#        auth_env: {CLAUDE_CODE_OAUTH_TOKEN: ~/.ASF/secrets/<account>.token,
+#                   GH_TOKEN: ~/.ASF/secrets/<account>.gh}
 #   1. runs with HOME = the account's own home (never the operator's) and no variable outside
-#      the allow-list;
+#      the allow-list, auth_env and git's own config;
 #   2. authenticates (the runtime's result is not an auth failure);
 #   3. runs one harmless command (`git rev-parse --short HEAD`, echoed back in its report);
 #   4. commits and pushes a throwaway branch `asf-smoke/<stamp>` to the product's origin.
@@ -28,7 +38,7 @@ args=()
 for a in "$@"; do
   case "$a" in
     --keep) keep=1 ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,31p' "$0"; exit 0 ;;
     *) args+=("$a") ;;
   esac
 done
@@ -100,6 +110,20 @@ if home:
     print(f'smoke: the home holds {len(seeded)} file(s): ' + ', '.join(seeded[:20])
           + (' …' if len(seeded) > 20 else ''))
 
+# ---- the account's credentials, by name only (auth_env) --------------------------------------
+print('smoke: auth_env ' + (', '.join(f'{k}={v}' for k, v in sorted(acct.auth_env.items()))
+                            or '(none)'))
+check('auth_env has the runtime login', any(v in acct.auth_env for v in runtime.RUNTIME_AUTH_VARS),
+      f'add auth_env: {{{runtime.RUNTIME_AUTH_VARS[0]}: ~/.ASF/secrets/{acct.name}.token}} '
+      f'(`{runtime.RUNTIME_TOKEN_COMMAND}`)')
+check('auth_env has the push token', runtime.GIT_TOKEN_VAR in acct.auth_env,
+      f'add auth_env: {{{runtime.GIT_TOKEN_VAR}: ~/.ASF/secrets/{acct.name}.gh}}')
+try:
+    secrets = runtime.auth_env_values(acct)
+except runtime.AuthEnvError as e:
+    print(f'smoke: {e}', file=sys.stderr)
+    sys.exit(2)
+
 # ---- a throwaway worktree off the trunk -------------------------------------------------------
 wt_root = os.path.join(env.state_dir(product), 'smoke')
 os.makedirs(wt_root, exist_ok=True)
@@ -132,18 +156,23 @@ job = runtime.Job(product.name, f'smoke-{stamp}', wt, brief, model, account=acct
 
 # ---- the environment the session gets --------------------------------------------------------
 job_env = runtime.build_env(job)
-allowed = set(hermetic.WORKER_ALLOW) | set(job.passthrough) | {
+allowed = set(hermetic.WORKER_ALLOW) | set(job.passthrough) | set(secrets) | {
     'HOME', 'CLAUDE_CONFIG_DIR', 'ASF_PRODUCT', 'ASF_JOB', 'ASF_SESSION'}
 stray = sorted(k for k in job_env if k not in allowed and not k.startswith(('LC_', 'GIT_CONFIG_')))
 check('environment is the allow-list', not stray, ', '.join(stray))
 check('HOME is not the operator\'s', job_env.get('HOME') != os.path.expanduser('~'), job_env.get('HOME', ''))
+helpers = git(['config', '--get-all', f'credential.{runtime.GIT_TOKEN_HOST}.helper'], wt,
+              env=job_env).stdout.splitlines()
+check('git pushes with GH_TOKEN, not a keychain',
+      runtime.GIT_TOKEN_VAR not in secrets or helpers[-1:] == [runtime.GIT_CREDENTIAL_HELPER],
+      f'credential helpers for {runtime.GIT_TOKEN_HOST}: {len(helpers)}')
 
 # ---- one real session ------------------------------------------------------------------------
 rt = runtime.from_config(cfg)
 started = time.monotonic()
 result = rt.run(job, wait=True)
 print(f'smoke: session exited {result.returncode} after {time.monotonic() - started:.0f}s; log {log}')
-text = result.text or ''
+text = runtime.mask(result.text or '', secrets)
 check('authenticates', result.reason != 'auth' and bool(runtime.init_line(log)),
       result.reason or ('no init line in the log' if not runtime.init_line(log) else ''))
 check('session succeeded', bool(result.ok), (result.reason or text[-200:]).strip())

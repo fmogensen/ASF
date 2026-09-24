@@ -23,9 +23,10 @@ scheduler:
 
 # worker pool: the accounts a spawn can use. An account's `cap` is its concurrent sessions across
 # every product on this machine; `role` is its lane (local | cloud); `config_dir` is the runtime's
-# isolated config dir for that account. `home`, when set, is the session's HOME as well — without
-# it a session inherits every CLI login on this machine. A launch is always tagged with the
-# product it runs for, so cost per product is a sum.
+# isolated config dir for that account. A session runs in a HOME of its own (never the
+# operator's), so it finds no login there: `auth_env` hands it its credentials explicitly, each
+# variable read from a file at spawn (see guide/operating.md, Safety). A launch is always tagged
+# with the product it runs for, so cost per product is a sum.
 worker_pool:
   backend: claude-code   # claude-code | fake
   models:                # the two model labels a brief uses, mapped to model ids — an unmapped
@@ -36,6 +37,10 @@ worker_pool:
       role: local
       cap: 2
       config_dir: ~/.ASF/accounts/acct-a
+      # auth_env:                          # VARIABLE: file — its content is that variable in this
+      #                                    # account's sessions only; a missing file refuses the launch
+      #   CLAUDE_CODE_OAUTH_TOKEN: ~/.ASF/secrets/acct-a.token   # `claude setup-token`, once
+      #   GH_TOKEN: ~/.ASF/secrets/acct-a.gh                     # git push over HTTPS + gh
     - name: acct-b
       role: local
       cap: 2

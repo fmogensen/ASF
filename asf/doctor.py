@@ -23,7 +23,10 @@ sessions would run without the built-in ``approvals`` hook — no guard on human
 
 A tenth row, **worker env** (:func:`check_worker_env`), is red when a worker session could see
 what it should not: an account with ``isolate_home: false`` (the operator's HOME and every login
-in it), or a ``worker_pool.env_passthrough`` name that looks like a credential. An eleventh,
+in it), a ``worker_pool.env_passthrough`` name that looks like a credential, or an isolated
+account with no ``auth_env`` for the runtime's login variable (an isolated HOME finds no login).
+**worker secrets** (:func:`check_worker_secrets`) lists each ``auth_env`` file's presence, by
+variable name only, red when one is missing (its launches are refused). An eleventh,
 **clock code** (:func:`check_clock_code`, informational), names the snapshot sha the clock last
 ticked from when the package runs from a checkout (:mod:`asf.snapshot`).
 
@@ -179,21 +182,36 @@ def check_approvals_hook(cfg, product):
     return True, f'approvals hook in {len(accounts)} worker accounts'
 
 
+def _backend_is_fake(cfg):
+    backend = str(((cfg or {}).get('worker_pool') or {}).get('backend') or 'claude-code')
+    return backend.replace('-', '_') == 'fake'
+
+
 def check_worker_env(cfg):
     """(ok, detail) — the ``worker env`` row: what a worker session inherits. Red when an account
     runs on the operator's own HOME (``isolate_home: false``: every login on the machine is the
-    session's, and a ``home:`` path is then the operator's word, not the factory's), or when a
+    session's, and a ``home:`` path is then the operator's word, not the factory's), when a
     ``worker_pool.env_passthrough`` name looks like a credential
-    (:func:`asf.hermetic.looks_like_credential` — a token handed to every session). Ok names
-    each account's home and any ``home_seed`` path that does not exist."""
+    (:func:`asf.hermetic.looks_like_credential` — a token handed to every session), or when an
+    isolated account's ``auth_env`` sets none of the runtime's login variables
+    (:data:`asf.workers.runtime.RUNTIME_AUTH_VARS`): its HOME holds no login and, on macOS, the
+    runtime's own sits in the keychain the isolated HOME cannot find — every session fails "Not
+    logged in". Ok names each account's home and any ``home_seed`` path that does not exist."""
     from asf import hermetic
     from asf.workers import runtime
     problems, notes = [], []
+    fake = _backend_is_fake(cfg)
     for acct in pool.accounts_from_config(cfg):
         if not acct.isolate_home:
             problems.append(f'account {acct.name} has isolate_home: false'
                             + ('' if acct.home else " (the operator's HOME)"))
             continue
+        if not fake and not any(v in acct.auth_env for v in runtime.RUNTIME_AUTH_VARS):
+            var = runtime.RUNTIME_AUTH_VARS[0]
+            problems.append(f'account {acct.name} is isolated but has no auth_env {var} (its '
+                            f'sessions cannot log in) — run `{runtime.RUNTIME_TOKEN_COMMAND}` as '
+                            f'that account, save the token to ~/.ASF/secrets/{acct.name}.token '
+                            f'and set auth_env: {{{var}: ~/.ASF/secrets/{acct.name}.token}}')
         home = runtime.session_home(acct)
         missing = [p for p in acct.home_seed if not os.path.exists(p)]
         notes.append(f'{acct.name}: {home}' + (f" (home_seed missing: {', '.join(missing)})"
@@ -206,6 +224,24 @@ def check_worker_env(cfg):
     passthrough = ', '.join(env.env_passthrough(cfg)) or 'none'
     return True, (f'allow-list + passthrough ({passthrough}); '
                   + ('; '.join(notes) if notes else 'no worker accounts'))
+
+
+def check_worker_secrets(cfg):
+    """(ok, detail) — the ``worker secrets`` row: each account's ``auth_env`` files, by variable
+    name and presence only (a value is never read into the table). Red when one is missing or
+    empty: that account's launches are refused until it exists."""
+    present, missing = [], []
+    for acct in pool.accounts_from_config(cfg):
+        for var, path in sorted(acct.auth_env.items()):
+            try:
+                ok = os.path.isfile(path) and os.path.getsize(path) > 0
+            except OSError:
+                ok = False
+            (present if ok else missing).append(f'{acct.name}:{var}' + ('' if ok else f' ({path})'))
+    if missing:
+        return False, 'missing: ' + ', '.join(missing) + (
+            f"; present: {', '.join(present)}" if present else '')
+    return True, ('present: ' + ', '.join(present)) if present else 'no auth_env files configured'
 
 
 def check_clock_code(product):
@@ -611,6 +647,8 @@ def run(product_name):
     rows.append(('approvals-hook', True, ok, detail))
     ok, detail = check_worker_env(cfg)
     rows.append(('worker env', True, ok, detail))
+    ok, detail = check_worker_secrets(cfg)
+    rows.append(('worker secrets', True, ok, detail))
     ok, detail = check_clock_code(product)
     rows.append(('clock code', False, ok, detail))
     ok, detail = check_drift(product)

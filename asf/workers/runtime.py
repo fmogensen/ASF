@@ -145,6 +145,48 @@ def _copy_file(src, dst):
         raise
 
 
+#: The first line of the minimal ``.gitconfig`` :func:`seed_home` writes into an isolated home
+#: that got none from ``home_seed``: the file is ASF's, rewritten at every launch.
+GITCONFIG_MARK = '# written by asf: the session identity only (user.name/user.email)'
+
+
+def operator_git_identity(operator_home=None):
+    """``(user.name, user.email)`` from the operator's global git config (either may be '')."""
+    environ = dict(os.environ)
+    if operator_home:
+        environ['HOME'] = operator_home
+    out = []
+    for key in ('user.name', 'user.email'):
+        try:
+            p = subprocess.run(['git', 'config', '--global', '--get', key], capture_output=True,
+                               text=True, env=environ, timeout=10)
+            out.append(p.stdout.strip() if p.returncode == 0 else '')
+        except (OSError, subprocess.SubprocessError):
+            out.append('')
+    return tuple(out)
+
+
+def write_identity_gitconfig(home, operator_home=None):
+    """Give an isolated ``home`` a ``.gitconfig`` holding only the operator's ``user.name`` and
+    ``user.email`` — nothing else from the operator's config (no credential helper, no
+    include). A ``.gitconfig`` that ``home_seed`` put there is left alone; ASF's own is
+    rewritten. Returns the path written, or None."""
+    path = os.path.join(home, '.gitconfig')
+    if os.path.exists(path):
+        with open(path, encoding='utf-8', errors='replace') as f:
+            if f.readline().rstrip('\n') != GITCONFIG_MARK:
+                return None
+    name, email = operator_git_identity(operator_home)
+    lines = [GITCONFIG_MARK, '[user]']
+    lines += [f'\tname = {name}'] if name else []
+    lines += [f'\temail = {email}'] if email else []
+    fd, tmp = tempfile.mkstemp(prefix='.gitconfig-', dir=home)
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines) + '\n')
+    os.replace(tmp, path)
+    return path
+
+
 def seed_home(acct, operator_home=None):
     """Create the account's :func:`session_home` and copy each ``home_seed`` path into it —
     re-copied at every launch, so a refreshed login or an edited config file reaches the next
@@ -172,7 +214,94 @@ def seed_home(acct, operator_home=None):
                         _copy_file(path, os.path.join(dst, os.path.relpath(path, src)))
         else:
             _copy_file(src, dst)
+    if os.path.realpath(home) != os.path.realpath(operator_home):
+        write_identity_gitconfig(home, operator_home)
     return home, missing
+
+
+# ---- the account's credentials (auth_env) -----------------------------------------------------
+
+#: The variables the runtime authenticates from, first the one ``auth_env`` should set: a session
+#: in an isolated HOME finds no login (on macOS the runtime's OAuth credential sits in the login
+#: keychain, found through the operator's HOME), so it must be handed one explicitly.
+RUNTIME_AUTH_VARS = ('CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY')
+
+#: The runtime's one-time command that prints a long-lived token for ``CLAUDE_CODE_OAUTH_TOKEN``.
+RUNTIME_TOKEN_COMMAND = 'claude setup-token'
+
+#: The code host's token variable: when an account's ``auth_env`` sets it, git in the session
+#: pushes over HTTPS with it (:func:`git_credential_config`), and ``gh`` reads it as is.
+GIT_TOKEN_VAR = 'GH_TOKEN'
+GIT_TOKEN_HOST = 'https://github.com'
+
+#: The credential helper git runs for :data:`GIT_TOKEN_HOST`: it echoes the token from the
+#: session's own environment — the token is never written to a file, a config or a remote URL.
+GIT_CREDENTIAL_HELPER = ('!f() { test "$1" = get || return 0; echo username=x-access-token; '
+                         'echo "password=$' + GIT_TOKEN_VAR + '"; }; f')
+
+
+class AuthEnvError(Exception):
+    """An account's ``auth_env`` file cannot be read: the launch is refused (NEEDS OPERATOR)."""
+
+    def __init__(self, msg, clear=''):
+        super().__init__(msg)
+        self.clear = clear
+
+
+def auth_env_howto(var, path):
+    """The one-time step that creates ``path`` for ``var`` — never a value."""
+    if var == 'CLAUDE_CODE_OAUTH_TOKEN':
+        return (f'run `{RUNTIME_TOKEN_COMMAND}`, authorize as the account, then save the token '
+                f'it prints: pbpaste > {path} && chmod 600 {path}')
+    if var == GIT_TOKEN_VAR:
+        return ('create a fine-grained token (the product repo only; Contents and Pull requests '
+                f'read/write) and save it: pbpaste > {path} && chmod 600 {path}')
+    return f'write the value of {var} into {path} and chmod 600 {path}'
+
+
+def auth_env_values(acct):
+    """``{VARIABLE: value}`` for an account's ``auth_env``: each file's content, stripped. A
+    missing, unreadable or empty file raises :class:`AuthEnvError` naming the file and how to
+    create it — never a value. ``{}`` for an account without ``auth_env`` (or no account)."""
+    out = {}
+    name = getattr(acct, 'name', '?')
+    for var, path in (getattr(acct, 'auth_env', None) or {}).items():
+        path = os.path.expanduser(path)
+        why = None
+        try:
+            with open(path, encoding='utf-8') as f:
+                value = f.read().strip()
+            if not value:
+                why = 'is empty'
+        except FileNotFoundError:
+            why = 'does not exist'
+        except (OSError, UnicodeDecodeError) as e:
+            why = f'cannot be read ({type(e).__name__})'
+        if why:
+            howto = auth_env_howto(var, path)
+            raise AuthEnvError(f'NEEDS OPERATOR: worker account {name}: auth_env {var} file {path} '
+                               f'{why} — {howto}', clear=howto)
+        out[var] = value
+    return out
+
+
+def git_credential_config(auth):
+    """The ``(key, value)`` git config pairs a session gets when ``auth`` carries
+    :data:`GIT_TOKEN_VAR`: the helper list for :data:`GIT_TOKEN_HOST` reset (no keychain, no
+    helper from any gitconfig) and then :data:`GIT_CREDENTIAL_HELPER`. ``[]`` otherwise."""
+    if not (auth or {}).get(GIT_TOKEN_VAR):
+        return []
+    key = f'credential.{GIT_TOKEN_HOST}.helper'
+    return [(key, ''), (key, GIT_CREDENTIAL_HELPER)]
+
+
+def mask(text, values):
+    """``text`` with every secret value in ``values`` (``{VARIABLE: value}``) replaced by
+    ``[redacted:VARIABLE]`` — for anything ASF writes that a session's command produced."""
+    for var, value in (values or {}).items():
+        if value:
+            text = text.replace(value, f'[redacted:{var}]')
+    return text
 
 
 def build_env(job, base=None):
@@ -181,18 +310,24 @@ def build_env(job, base=None):
     no caller identity, no hook variable, no token the tick happened to carry — plus the
     session's own HOME (:func:`session_home`), the account's config dir as
     ``CLAUDE_CONFIG_DIR``, and the job's own identity (``ASF_PRODUCT``, ``ASF_JOB``,
-    ``ASF_SESSION``, ``BACKLOG_ID_RANGE``, …). When the job has a ``hooks_dir``,
+    ``ASF_SESSION``, ``BACKLOG_ID_RANGE``, …), and the account's ``auth_env`` values
+    (:func:`auth_env_values` — raises :class:`AuthEnvError` when a file is missing), with git's
+    HTTPS credential for the code host taken from ``GH_TOKEN`` when it is one of them
+    (:func:`git_credential_config`). When the job has a ``hooks_dir``,
     ``core.hooksPath`` is set to it, so every commit the session makes picks up its
     ``ASF-Session`` trailer hook (F-0076). No PYTHONPATH: a session runs the product's code,
     not this package."""
     acct = job.account
     identity = {'ASF_PRODUCT': job.product, 'ASF_JOB': job.name}
     identity.update(job.env)
+    auth = auth_env_values(acct)
     git_config = [('core.hooksPath', job.hooks_dir)] if job.hooks_dir else []
+    git_config += git_credential_config(auth)
     out = hermetic.build(base, home=session_home(acct), identity=identity, pythonpath=False,
                          git_config=git_config, mode='worker', passthrough=job.passthrough)
     if acct is not None and getattr(acct, 'config_dir', None):
         out['CLAUDE_CONFIG_DIR'] = os.path.expanduser(acct.config_dir)
+    out.update(auth)
     return out
 
 

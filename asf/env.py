@@ -223,8 +223,8 @@ _VAR_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 
 def validate_worker_pool(cfg):
     """``worker_pool.env_passthrough`` (a list of environment variable names) and each
-    account's ``home`` (a path), ``isolate_home`` (true | false) and ``home_seed`` (a list of
-    paths) checked: ``[(dotted key, problem)]``, empty when well-formed or absent."""
+    account's ``home`` (a path), ``isolate_home`` (true | false), ``home_seed`` (a list of
+    paths) and ``auth_env`` (``{VARIABLE: file}``) checked: ``[(dotted key, problem)]``, empty when well-formed or absent."""
     pool = (cfg or {}).get('worker_pool')
     if not isinstance(pool, dict):
         return []
@@ -261,6 +261,19 @@ def validate_worker_pool(cfg):
             if isolate is False and home is None:
                 problems.append((label + '.home_seed',
                                  'has no home to seed: isolate_home is false and home is unset'))
+        auth = acct.get('auth_env')
+        if auth is not None:
+            if not isinstance(auth, dict):
+                problems.append((label + '.auth_env',
+                                 f'must map variable names to files, not {auth!r}'))
+            else:
+                for name, path in auth.items():
+                    if not isinstance(name, str) or not _VAR_RE.match(name):
+                        problems.append((label + '.auth_env',
+                                         f'must map variable names to files, and {name!r} is not one'))
+                    elif not isinstance(path, str) or not path.strip():
+                        problems.append((label + '.auth_env',
+                                         f'{name} must name a file, not {path!r}'))
     return problems
 
 
@@ -288,6 +301,14 @@ def isolate_home(acct):
 def account_home_seed(acct):
     """An account's ``home_seed``: the expanded paths copied into its home. ``[]`` when unset."""
     return [os.path.expanduser(str(p)) for p in (acct or {}).get('home_seed') or ()]
+
+
+def account_auth_env(acct):
+    """An account's ``auth_env``: ``{VARIABLE: expanded file path}`` — each file's content
+    (stripped) is that variable in the account's sessions, and nowhere else. ``{}`` when unset.
+    The mapping names files, never values: a secret never sits in config.yaml."""
+    auth = (acct or {}).get('auth_env') or {}
+    return {str(k): os.path.expanduser(str(v)) for k, v in auth.items()} if isinstance(auth, dict) else {}
 
 
 def default_product_name():

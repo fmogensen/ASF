@@ -335,17 +335,25 @@ def run_worktree_setup(product, job, worktree, account=None, passthrough=(),
     runtime_mod.seed_home(account)
     job_env = runtime_mod.build_env(runtime_mod.Job(product.name, job, worktree, None, None,
                                                     account=account, passthrough=passthrough))
+    secrets = runtime_mod.auth_env_values(account)
     log = setup_log_path(product, job)
     started = time.monotonic()
     why = None
     try:
-        with open(log, 'wb') as out:
-            p = subprocess.run(command, shell=True, cwd=worktree, env=job_env, stdin=subprocess.DEVNULL,
-                               stdout=out, stderr=subprocess.PIPE, timeout=timeout)
-            out.write(p.stderr or b'')
+        try:
+            p = subprocess.run(command, shell=True, cwd=worktree, env=job_env,
+                               stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout)
+            stdout, stderr = p.stdout or b'', p.stderr or b''
+        except subprocess.TimeoutExpired as e:
+            p, stdout, stderr = None, e.stdout or b'', e.stderr or b''
+        # the log never carries an auth_env value, whatever the command printed
+        stderr_text = runtime_mod.mask(stderr.decode('utf-8', 'replace'), secrets)
+        with open(log, 'w', encoding='utf-8') as out:
+            out.write(runtime_mod.mask(stdout.decode('utf-8', 'replace'), secrets) + stderr_text)
+        if p is None:
+            raise subprocess.TimeoutExpired(command, timeout)
         if p.returncode != 0:
-            lines = [l for l in (p.stderr or b'').decode('utf-8', 'replace').splitlines()
-                     if l.strip()]
+            lines = [l for l in stderr_text.splitlines() if l.strip()]
             why = f'exit {p.returncode}' + (f': {lines[0].strip()}' if lines else '')
     except subprocess.TimeoutExpired:
         why = f'timed out after {timeout}s'
@@ -364,6 +372,10 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
     wp = cfg.get('worker_pool') or {}
     passthrough = env.env_passthrough(cfg)
     runtime = runtime or runtime_mod.from_config(cfg)
+    try:  # the account's credential files, read before anything is made: a refusal leaves nothing
+        runtime_mod.auth_env_values(account)
+    except runtime_mod.AuthEnvError as e:
+        raise SpawnError(str(e), clear=e.clear) from None
     model = model_arg(row.model, cfg)
     branch = branch_for(product, row)
     own_path = os.path.join(worktrees_dir(product), row.job)

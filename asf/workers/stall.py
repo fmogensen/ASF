@@ -223,7 +223,11 @@ def correct_once(product, session, error_text, runtime):
     # here stopped health, harvest and the operator's tables for as long as a model session takes
     # — one tick sat inside four serial adjudications for an hour. The run is in the registry
     # with its pid; the next tick judges it exactly as it judges every other run.
-    result = runtime.run(job)
+    try:
+        result = runtime.run(job)
+    except runtime_mod.AuthEnvError as e:  # the account's credential file is gone: no retry
+        print(f"correction of {session['job']} not launched: {e}")
+        return False
     pool_mod.update_session(product, session['job'], corrected=1)
     session['corrected'] = 1
     retry = {

@@ -273,23 +273,79 @@ else.)
 
 ## Safety: what a worker session can reach
 
-A worker session is launched with **the tick's whole environment**: ASF removes only git-hook and
-caller-identity variables, and adds the job's own (`ASF_PRODUCT`, `ASF_JOB`, …) and the account's
-`CLAUDE_CONFIG_DIR`. It keeps your `HOME` unless the account sets `home:`, so it also has every
-CLI login that lives under `HOME` or in your keychain — code host, cloud, hosting, database,
-payments.
+A worker session starts from **an allow-list, not the tick's environment**: `PATH`, `LANG`,
+`LC_*`, `TERM`, `TMPDIR`, `USER`, `SHELL`, the names you list in `worker_pool.env_passthrough`, and
+the job's own variables (`ASF_PRODUCT`, `ASF_JOB`, …, the account's `CLAUDE_CONFIG_DIR`). A secret
+exported in the shell that ran the tick does not reach it. Its `HOME` is its account's own
+(`~/.ASF/state/homes/<account>`), holding only what `home_seed` lists and a `.gitconfig` with your
+`user.name` and `user.email` — none of your CLI logins. `isolate_home: false` gives a session your
+`HOME` back; `asf doctor`'s `worker env` row is red while any account does.
 
-So a tick you run by hand from your shell passes that shell's exported secrets and all your logins
-to every session it launches — including, say, a payments CLI whose active context is live. A
-scheduled tick passes the smaller environment of its job, but still your `HOME`.
+### Credentials: `auth_env`
 
-What limits this today:
+A HOME of its own has no login in it, and on macOS the runtime's own login sits in your login
+keychain, which a session finds through your `HOME` — so an isolated session fails with "Not
+logged in", and a `git push` over HTTPS finds no credential either. Each account gets its
+credentials explicitly, as environment variables read from files at every launch:
 
-- Give each account in `worker_pool.accounts` its own `home:` directory, holding only the logins a
-  worker should have ([config.example.yaml](../config.example.yaml)).
+```yaml
+worker_pool:
+  accounts:
+    - name: acct-a
+      auth_env:
+        CLAUDE_CODE_OAUTH_TOKEN: ~/.ASF/secrets/acct-a.token   # the runtime's login
+        GH_TOKEN: ~/.ASF/secrets/acct-a.gh                     # git push over HTTPS, and gh
+```
+
+Create the files once per account:
+
+```sh
+mkdir -p ~/.ASF/secrets && chmod 700 ~/.ASF/secrets
+# the runtime's long-lived token: authorize as that account in the browser it opens,
+# then copy the token it prints
+claude setup-token
+pbpaste > ~/.ASF/secrets/acct-a.token && chmod 600 ~/.ASF/secrets/acct-a.token
+# a fine-grained GitHub token: https://github.com/settings/personal-access-tokens/new —
+# repository access: the product repo only; permissions: Contents and Pull requests read/write
+pbpaste > ~/.ASF/secrets/acct-a.gh && chmod 600 ~/.ASF/secrets/acct-a.gh
+```
+
+What ASF does with them:
+
+- Each file's content (whitespace stripped) becomes that variable in **that account's sessions
+  only** — and in its `worktree_setup` command. Never in the tick, never in another account's.
+- A missing, unreadable or empty file refuses the launch with `NEEDS OPERATOR`, naming the file and
+  how to create it. Nothing is made first: no worktree, no ledger line.
+- With `GH_TOKEN`, git in the session gets, through `GIT_CONFIG_*` variables, an HTTPS credential
+  helper for `https://github.com` that echoes the token from the session's own environment, after
+  resetting every other helper for that host (the system keychain helper included). The token is
+  never written to a file, a config or a remote URL. Nothing else from your `~/.gitconfig` is
+  used.
+- Values are never logged: the session record and the brief hold none, and a `worktree_setup`
+  command's output is written to its log with each value replaced by `[redacted:<VARIABLE>]`. The
+  redaction gate (`asf redact`, the pre-commit and pre-push hooks) searches for every account's
+  `auth_env` value, whatever the variable is called.
+- `asf doctor`: the `worker env` row is red when an isolated account has no `auth_env` for the
+  runtime's login variable (it names `claude setup-token`); the `worker secrets` row lists each
+  file's presence by variable name only, red when one is missing.
+
+`tools/smoke_isolated_session.sh <product> [account]` launches one real session this way and checks
+it authenticates, works and pushes.
+
+### What this is, and what it is not
+
+HOME and environment isolation under **your own OS user** stops *accidental* credential use: a
+session no longer inherits your shell's secrets or your CLI logins, and a tool that looks for a
+login under `HOME` finds none. It is **not a hard boundary**. The session runs as you, so a process
+in it can still read your keychain or any file you can read by its absolute path. A hard boundary
+needs each worker account to run as a separate OS user (its own keychain, its own file
+permissions); that is future work.
+
+Until then, also:
+
 - Keep the CLIs a worker can reach on test-mode or non-production contexts.
 - Map what must never happen unattended with `approval_signals` (commands and paths) at
   `human-now` ([approvals](product-config.md#approvals)).
-- Run ticks from the scheduler, not from a shell with secrets exported.
+- Scope each `auth_env` token to the least it needs (one repo, push and PRs only).
 
-The planned [connectors](connectors.md) replace this with default-deny scoping.
+The planned [connectors](connectors.md) replace this with default-deny scoping per service.

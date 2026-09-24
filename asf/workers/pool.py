@@ -63,7 +63,7 @@ def now_iso():
 
 class Account:
     def __init__(self, name, role='local', cap=1, caps=None, home=None, config_dir=None,
-                 home_seed=(), isolate_home=env.DEFAULT_ISOLATE_HOME):
+                 home_seed=(), isolate_home=env.DEFAULT_ISOLATE_HOME, auth_env=None):
         self.name = name
         self.role = role or 'local'
         self.cap = int(cap if cap is not None else 1)
@@ -74,12 +74,16 @@ class Account:
         self.home_seed = list(home_seed or ())
         #: ``isolate_home``: a HOME of the session's own (default), or the operator's (false)
         self.isolate_home = bool(isolate_home)
+        #: ``auth_env``: ``{VARIABLE: file}`` — each file's content is that variable in this
+        #: account's sessions (:func:`asf.workers.runtime.auth_env_values`)
+        self.auth_env = dict(auth_env or {})
 
     @classmethod
     def from_dict(cls, d):
         return cls(d['name'], role=d.get('role'), cap=d.get('cap', 1), caps=d.get('caps'),
                    home=d.get('home'), config_dir=d.get('config_dir'),
-                   home_seed=env.account_home_seed(d), isolate_home=env.isolate_home(d))
+                   home_seed=env.account_home_seed(d), isolate_home=env.isolate_home(d),
+                   auth_env=env.account_auth_env(d))
 
     def __repr__(self):
         return f'Account({self.name!r}, role={self.role!r}, cap={self.cap})'

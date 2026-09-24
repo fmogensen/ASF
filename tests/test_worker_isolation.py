@@ -91,7 +91,10 @@ class IsolatedSession(Home):
             'PATH', 'LANG', 'TERM', 'TMPDIR', 'USER', 'SHELL', 'HOME', 'CLAUDE_CONFIG_DIR',
             'BACKLOG_ID_RANGE', 'PWD', 'SHLVL', 'OLDPWD', '_', '__CF_USER_TEXT_ENCODING'}
         self.assertEqual(extra, set(), seen)
-        self.assertEqual(os.listdir(seen['HOME']), [])   # nothing seeded, nothing copied
+        # nothing seeded, nothing copied: only ASF's own identity-only .gitconfig
+        self.assertEqual(os.listdir(seen['HOME']), ['.gitconfig'])
+        with open(os.path.join(seen['HOME'], '.gitconfig'), encoding='utf-8') as f:
+            self.assertEqual(f.read(), runtime_mod.GITCONFIG_MARK + '\n[user]\n\tname = op\n')
 
     def test_passthrough_names_reach_the_session(self):
         acct = pool_mod.Account('acct-a', config_dir='/cfg/acct-a')
@@ -159,10 +162,13 @@ class WorktreeSetup(IsolatedSession):
 class WorkerEnvDoctorRow(unittest.TestCase):
     def cfg(self, passthrough=(), **acct):
         return {'worker_pool': {'env_passthrough': list(passthrough),
-                                'accounts': [dict({'name': 'acct-a'}, **acct)]}}
+                                'accounts': [dict({'name': 'acct-a', 'auth_env': {
+                                    'CLAUDE_CODE_OAUTH_TOKEN': '/secrets/acct-a.token'}}, **acct)]}}
 
     def test_green_with_isolated_homes_and_a_harmless_passthrough(self):
-        ok, detail = doctor.check_worker_env(self.cfg(['HTTPS_PROXY', 'SSH_AUTH_SOCK', 'LANG_X']))
+        ok, detail = doctor.check_worker_env(self.cfg(
+            ['HTTPS_PROXY', 'SSH_AUTH_SOCK', 'LANG_X'],
+            auth_env={'CLAUDE_CODE_OAUTH_TOKEN': '/secrets/acct-a.token'}))
         self.assertTrue(ok, detail)
         self.assertIn('acct-a:', detail)
 
@@ -206,6 +212,7 @@ def _doctor_rows():
                 mock.patch.object(doctor, 'check_redaction_hooks', return_value=(True, '')), \
                 mock.patch.object(doctor, 'check_approvals_hook', return_value=(True, '')), \
                 mock.patch.object(doctor, 'check_drift', return_value=(True, '')), \
+                mock.patch.object(doctor, 'check_worker_secrets', return_value=(True, '')), \
                 mock.patch.object(doctor, 'check_clock_code', return_value=(True, '')):
             return doctor.run('sample')
     finally:
