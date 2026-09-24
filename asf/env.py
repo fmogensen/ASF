@@ -415,7 +415,7 @@ PRODUCT_FIELDS = {
     'app_host': _STR, 'conventions': _MAP, 'ci': None, 'deploy_sha': None,
     'customer_paths': _LIST, 'stage_limits': _MAP, 'size_classes': _MAP, 'approvals': _MAP,
     'approval_signals': _MAP, 'steps': _MAP, 'job_grants': _LIST, 'groom': _MAP,
-    'capacity': _MAP, 'clocks': _MAP, 'token_caps': _MAP, 'feeder': _MAP,
+    'capacity': _MAP, 'clocks': _MAP, 'token_caps': _MAP, 'feeder': _MAP, 'improve': _MAP,
 }
 # `ci:` is a map (or the bare word `none`, a product without CI); these are its keys.
 # `deploy_workflow` is a read-only alias of the documented `deploy_sha.workflow`: the status
@@ -431,8 +431,12 @@ CAPACITY_FIELDS = {'sessions': _STR, 'ci': _STR, 'weight': _STR, 'batch': _MAP}
 FEEDER_FIELDS = {'hold': _LIST}
 #: what ``feeder.hold`` may name (:attr:`Product.feeder_hold`)
 FEEDER_HOLDS = ('features', 'bugs')
+# `improve:` is a map: the improve pass's threshold overrides, its Epic, its window and its premium models.
+IMPROVE_FIELDS = {'thresholds': _MAP, 'epic': _STR, 'window_days': None, 'premium_models': _LIST}
 # every product-file section whose own keys are checked, keyed by its own field table.
-NESTED_FIELDS = {'ci': CI_FIELDS, 'capacity': CAPACITY_FIELDS, 'feeder': FEEDER_FIELDS}
+NESTED_FIELDS = {
+    'ci': CI_FIELDS, 'capacity': CAPACITY_FIELDS, 'feeder': FEEDER_FIELDS, 'improve': IMPROVE_FIELDS,
+}
 
 
 def _shape_ok(value, shape):
@@ -636,6 +640,12 @@ class Product:
         product sets none — every reader of it (:mod:`asf.groom.policy`) then falls back to the
         documented default for the key it wants."""
         return self._get('groom', {})
+
+    @property
+    def improve(self):
+        """The ``improve:`` block: threshold overrides, ``epic``, ``window_days``,
+        ``premium_models`` (:mod:`asf.improve.classes` fills the defaults). ``{}`` when unset."""
+        return self._get('improve', {})
 
     def branch_prefix(self, kind):
         """The prefix *without* its separator (``worker``), for the callers that compose

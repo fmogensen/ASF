@@ -97,13 +97,13 @@ edit on rollback.
 The rollback target for the fix package is **not its own preceding minor release (v0.1.2)**:
 that release refuses the top-level `feeder:` key, and the package's rollout runs with
 `feeder.hold` for its first hour. Roll back instead to **the newest tag on `main` from before
-the package merged** — as of this revision, `v0.1.5`. Every tag from v0.1.3 on already reads
+the package merged** — as of this revision, `v0.1.6`. Every tag from v0.1.3 on already reads
 `feeder.hold` (`e284ee7`, on `main` since before v0.1.3), so that tag is always a safe target;
 recompute which one is newest at rollback time, the same way the release version itself is
 computed (`major.minor`'s patch is the line's highest tag so far):
 
 ```bash
-bash tools/install.sh <product> v0.1.5     # or the newest tag that predates the package's merge
+bash tools/install.sh <product> v0.1.6     # or the newest tag that predates the package's merge
 ```
 
 ## What is safe while sessions run

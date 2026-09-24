@@ -973,17 +973,24 @@ def red_on_trunk(tmp, trunk, conv, asf_repo, out, modules=None):
 
 
 def gate_groups(tmp, trunk, entries, conv, asf_repo, hold, out, announce=False, only=None,
-                trunk_green=False):
+                trunk_green=False, ledger=None):
     """Gate ``entries`` as one combined head; on red, bisect (B-0040). The green groups as
-    ``[(entries, sha, full)]``. A timeout raises :class:`GateTimeout` — never bisected (§12)."""
+    ``[(entries, sha, full)]``. A timeout raises :class:`GateTimeout` — never bisected (§12).
+    ``ledger`` (§2.2), when given, is called after every gate here with the stacked branches,
+    the head, ``ok``, the seconds spent and the first failing line — a bisect's targeted re-runs
+    each write their own line; ``None`` writes nothing."""
     stacked = combined_head(tmp, trunk, entries, hold)
     if not stacked:
         return []
     if announce:
         out(f'harvest: {len(stacked)} branch(es), one gate')
+    started = time.monotonic()
     ok, line, files, red = H.product_gate(tmp, conv, asf_repo, out, only)
+    head = H.sh(['git', 'rev-parse', 'HEAD'], cwd=tmp).stdout.strip()
+    if ledger:
+        ledger([f['branch'] for f in stacked], head, ok, time.monotonic() - started, line)
     if ok:
-        return [(stacked, H.sh(['git', 'rev-parse', 'HEAD'], cwd=tmp).stdout.strip(), not only)]
+        return [(stacked, head, not only)]
     if line.startswith(H.TIMED_OUT):
         raise GateTimeout(line)
     if not only and red:
@@ -997,18 +1004,19 @@ def gate_groups(tmp, trunk, entries, conv, asf_repo, hold, out, announce=False, 
     mid = len(stacked) // 2
     narrowed = red or only
     return (gate_groups(tmp, trunk, stacked[:mid], conv, asf_repo, hold, out, only=narrowed,
-                        trunk_green=trunk_green)
+                        trunk_green=trunk_green, ledger=ledger)
             + gate_groups(tmp, trunk, stacked[mid:], conv, asf_repo, hold, out, only=narrowed,
-                          trunk_green=trunk_green))
+                          trunk_green=trunk_green, ledger=ledger))
 
 
-def confirmed_group(tmp, trunk, entries, conv, asf_repo, hold, out, announce=True):
+def confirmed_group(tmp, trunk, entries, conv, asf_repo, hold, out, announce=True, ledger=None):
     """The one set of ``entries`` green under the *full* gate, as ``(entries, sha, deferred,
-    unconfirmed)``; green apart but red together lands the first alone and defers the rest."""
+    unconfirmed)``; green apart but red together lands the first alone and defers the rest.
+    ``ledger`` (§2.2) is passed to every :func:`gate_groups` call."""
     candidates, deferred = list(entries), []
     for _round in range(CONFIRM_ROUNDS):
         groups = gate_groups(tmp, trunk, candidates, conv, asf_repo, hold, out,
-                             announce=announce)
+                             announce=announce, ledger=ledger)
         if not groups:
             return None, None, deferred, []
         if len(groups) == 1 and groups[0][2]:
@@ -1129,6 +1137,10 @@ def gate_one_set(lane, group, to_merge):
     announce = str(conv.harvest_gate).strip().lower() != H.GATE_PER_BRANCH
     started = time.monotonic()
     pending, restacked = list(group), False
+
+    def ledger(branches, sha, ok, seconds, line):  # §2.2: every landing gate, one gates.jsonl line
+        H.record_gate(lane.state_dir, branches, sha, ok, seconds, line)
+
     for _attempt in range(len(group) + 2):
         if not pending:
             return
@@ -1152,7 +1164,7 @@ def gate_one_set(lane, group, to_merge):
                 return
             try:
                 landing_set, sha, deferred, unconfirmed = confirmed_group(
-                    tmp, trunk, pending, conv, asf_repo, hold, out, announce)
+                    tmp, trunk, pending, conv, asf_repo, hold, out, announce, ledger)
                 trunk_red = None
                 for f, kind, text, files, own in held:
                     if not own:

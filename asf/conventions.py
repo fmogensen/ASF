@@ -99,6 +99,9 @@ DEFAULT_BRANCHES_PER_TICK = 12
 #: pre-commit hook hung the tick, and every tick after it). The tick's clock, by default.
 DEFAULT_GATE_TIMEOUT_S = 600
 
+#: The window `asf status`'s Features row measures time-to-land over.
+DEFAULT_LAND_WINDOW_DAYS = 7
+
 #: The keys of the yaml's ``harvest:`` block and the field each one is.
 HARVEST_KEYS = {'gate': 'harvest_gate', 'branches_per_tick': 'branches_per_tick',
                 'gate_timeout_s': 'gate_timeout_s'}
@@ -296,6 +299,7 @@ class Conventions:
     #: The most paths whose line counts a brief's preamble measures (F-0022).
     preamble_max_files: int = DEFAULT_PREAMBLE_MAX_FILES
     prs_per_tick: int = DEFAULT_PRS_PER_TICK
+    land_window_days: int = DEFAULT_LAND_WINDOW_DAYS
     area_depth: int = DEFAULT_AREA_DEPTH
     batch_max_globs: int = DEFAULT_BATCH_MAX_GLOBS
     #: The most paths one footprint widening may add (:mod:`asf.feeder.widen`).

@@ -29,7 +29,7 @@ from asf import amendable, env, hooks
 
 LEVELS = ('auto', 'groom', 'human-now')
 
-RESOLUTIONS = ('granted', 'done', 'dropped')
+RESOLUTIONS = ('granted', 'done', 'dropped', 'proposed')
 
 
 @dataclasses.dataclass(frozen=True)
@@ -38,6 +38,9 @@ class ActionClass:
     covers: str          # one line, printed by `asf approvals`
     default: str          # one of LEVELS
     read_by: tuple        # ('hook',) | ('harvest',) | ('hook', 'file_bugs') ...
+    levels: tuple = LEVELS  # the levels a product yaml may map this class to
+    parks: bool = True      # an open hold on it stops the wave launching the item
+    grantable: bool = True  # `granted` releases it
 
 
 CLASSES = (
@@ -57,6 +60,11 @@ CLASSES = (
     ActionClass(
         'touch_legal', 'licences, notices, terms, privacy texts',
         'human-now', ('hook',)),
+    ActionClass(
+        'touch_amendable_set',
+        "a session writing the factory's own rules — rule cards, checks, hooks, role agents,"
+        ' briefs, evals',
+        'human-now', ('hook',), levels=('human-now',), parks=False, grantable=False),
     ActionClass(
         'new_epic', 'opening a new Epic',
         'human-now', ('hook',)),
@@ -101,6 +109,9 @@ _COMMAND_PATTERNS = {
     ),
     'new_epic': (r'\basf\s+new\s+epic\b',),
     'file_bug': (r'\basf\s+new\s+bug\b',),
+    'touch_amendable_set': (
+        r'\basf\s+new\s+rule\b', r'\basf\s+set\s+R-\d{4}\b', r'\basf\s+hooks\s+install\b',
+    ),
 }
 
 
@@ -133,6 +144,13 @@ def matrix(product):
         if bad_levels:
             problems.append(f'level(s) not in {LEVELS}: ' + ', '.join(bad_levels))
         raise env.ConfigError('approvals: ' + '; '.join(problems))
+    for k, v in raw.items():
+        c = CLASSES_BY_NAME[k]
+        if v not in c.levels:
+            own = '(' + ', '.join(repr(l) for l in c.levels) + ')'
+            raise env.ConfigError(
+                f'approvals: {k}={v!r} is not a level this class takes {own} — no session'
+                ' edits the amendable set (F-0024)')
     return {
         c.name: (raw[c.name], 'yaml') if c.name in raw else (c.default, 'default')
         for c in CLASSES
@@ -373,12 +391,15 @@ def read(product):
     return out
 
 
-def refuse(product, item, cls, level, job, tool, detail):
-    """Appends a ``refused`` line (§4) and returns its hold id, ``<item>/<class>``."""
+def refuse(product, item, cls, level, job, tool, detail, **extra):
+    """Appends a ``refused`` line (§4) and returns its hold id, ``<item>/<class>``.
+
+    ``extra`` rides the same line — ``kind`` and ``patch`` for a refused write to the amendable
+    set (§2.3), nothing for every other class."""
     hold = f'{item}/{cls}'
     append(product, {
         'event': 'refused', 'hold': hold, 'item': item, 'class': cls, 'level': level,
-        'job': job, 'tool': tool, 'detail': detail, 'ts': _now_iso(),
+        'job': job, 'tool': tool, 'detail': detail, 'ts': _now_iso(), **extra,
     })
     return hold
 
@@ -386,6 +407,11 @@ def refuse(product, item, cls, level, job, tool, detail):
 def resolve(product, hold, resolution):
     if resolution not in RESOLUTIONS:
         raise ValueError(f'resolution must be one of {RESOLUTIONS}, not {resolution!r}')
+    if resolution == 'granted':
+        c = CLASSES_BY_NAME.get(hold.split('/', 1)[-1])
+        if c and not c.grantable:
+            raise ValueError(
+                f'{c.name} is not grantable — no session edits the amendable set (F-0024)')
     append(product, {'event': 'resolved', 'hold': hold, 'resolution': resolution, 'ts': _now_iso()})
 
 
@@ -503,6 +529,56 @@ def operator_config_target(tool_name, tool_input):
     return None
 
 
+#: The 8 KB captured-patch ceiling of §2.3 — the ledger is machine-local, but it is still a file.
+_PATCH_LIMIT = 8 * 1024
+
+
+def _edit_diff(old, new):
+    """One ``Edit``/``MultiEdit`` edit as a two-hunk diff — what was there, then what replaces
+    it — the shape ``asf propose`` later reads out of the ledger (§2.4)."""
+    old, new = old or '', new or ''
+    removed = '\n'.join(f'-{line}' for line in old.splitlines())
+    added = '\n'.join(f'+{line}' for line in new.splitlines())
+    return '\n'.join(part for part in (removed, added) if part)
+
+
+def _intended_change(tool_name, tool_input):
+    """The call's own payload — what §2.3's captured ``patch`` holds — truncated to 8 KB:
+    ``content`` for ``Write``, ``old_string``/``new_string`` as a two-hunk diff for
+    ``Edit``/``MultiEdit``, ``new_source`` for ``NotebookEdit``, the command text for ``Bash``."""
+    tool_input = tool_input or {}
+    if tool_name == 'Write':
+        text = tool_input.get('content') or ''
+    elif tool_name == 'Edit':
+        text = _edit_diff(tool_input.get('old_string'), tool_input.get('new_string'))
+    elif tool_name == 'MultiEdit':
+        text = '\n'.join(
+            _edit_diff(e.get('old_string'), e.get('new_string'))
+            for e in tool_input.get('edits') or [])
+    elif tool_name == 'NotebookEdit':
+        text = tool_input.get('new_source') or ''
+    elif tool_name == 'Bash':
+        text = tool_input.get('command') or ''
+    else:
+        text = ''
+    return text[:_PATCH_LIMIT]
+
+
+def _amendable_refusal_lines(item, relpath, kind):
+    """§2.3's five lines, byte for byte — what a session sees when it tries to write the
+    amendable set. The other nine classes keep :func:`_refusal_lines`."""
+    return [
+        f'REFUSED touch_amendable_set (human-now) on {item} — {relpath} '
+        f'({kind.name}: {kind.why})',
+        '  No session edits the amendable set. The factory proposes; a person approves and'
+        ' merges.',
+        f'  Propose it: asf propose --from-hold {item}/touch_amendable_set --why "<one line>"',
+        f'  Then print: NEEDS OPERATOR: {item} touch_amendable_set — <the proposal card asf'
+        ' propose names>',
+        '  and carry on with every part of the job that does not depend on it.',
+    ]
+
+
 def _refusal_lines(item, cls, level, detail):
     """The four lines of §2.3 step 7. ``products/<p>.yaml`` is literal: the session is told where
     authority lives, not which file to go and edit (D8)."""
@@ -544,6 +620,16 @@ def _enforce(stdin_text, environ, out, product):
         return 2
 
     prod = env.load_product(product or environ.get('ASF_PRODUCT'))
+    item = item_of_job(prod, job)
+
+    hit = amendable.write_target(prod, tool_name, tool_input, cwd)   # §2.3 D7: before the matrix
+    if hit:
+        relpath, kind = hit
+        refuse(prod, item, 'touch_amendable_set', 'human-now', job, tool_name, relpath,
+               kind=kind.name, patch=_intended_change(tool_name, tool_input))
+        print('\n'.join(_amendable_refusal_lines(item, relpath, kind)), file=out)
+        return 2
+
     matched = classify(prod, tool_name, tool_input, cwd)
     if not matched:
         return 0
@@ -554,13 +640,13 @@ def _enforce(stdin_text, environ, out, product):
     except env.ConfigError as e:
         invalid, levels = str(e), None               # every matched class is human-now (D7)
 
-    item = item_of_job(prod, job)
     refused = []
     for cls, detail in matched:                      # catalogue order
         level = 'human-now' if levels is None else levels[cls]
         if level == 'auto':
             continue
-        if is_granted(prod, f'{item}/{cls}'):
+        c = CLASSES_BY_NAME[cls]
+        if c.grantable and is_granted(prod, f'{item}/{cls}'):
             continue
         refuse(prod, item, cls, level, job, tool_name, detail)
         refused.append((cls, level, detail))
@@ -616,6 +702,9 @@ def raise_holds(ctx, out):
     order = {c.name: i for i, c in enumerate(CLASSES)}
     held = {}
     for e in open_:                                  # first in catalogue order wins the item
+        c = CLASSES_BY_NAME.get(e['class'])
+        if c and not c.parks:                         # named but the wave still launches on it
+            continue
         rank = order.get(e['class'], len(order))
         if e['item'] not in held or rank < held[e['item']][0]:
             held[e['item']] = (rank, e['class'], e['level'])
@@ -633,6 +722,7 @@ _CODE_RECOGNISERS = {
         'Bash: gh workflow run the deploy_sha.workflow, when one is set',
     ),
     'new_epic': ('Write of an epics/*.md that does not exist yet, in a record repo',),
+    'touch_amendable_set': ('the amendable set — asf approvals names it',),
     'merge_amendable_set': ("the branch's changed files against conventions.amendable_paths",),
     'merge_routine_pr': ('every branch that is not merge_amendable_set',),
     'file_bug': ("the tick's bug filer",),
@@ -733,7 +823,11 @@ def cmd_approvals(args):
         if hold not in {h['hold'] for h in open_holds(name)}:
             print(f'{hold} is not an open hold — asf approvals list', file=sys.stderr)
             return 2
-        resolve(name, hold, resolution)
+        try:
+            resolve(name, hold, resolution)
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            return 2
         print(f'resolved {hold} as {resolution}')
         return 0
 

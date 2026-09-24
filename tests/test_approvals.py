@@ -46,7 +46,11 @@ class CatalogueTest(unittest.TestCase):
             with open(path, encoding='utf-8') as f:
                 data = env.loads(f.read())
             product = Product('x', data)
-            self.assertEqual(set(product.approvals.keys()), names, path)
+            # the tenth class's yaml line is the docs task's (F-0024 §5); until it lands the
+            # example and sample may omit it, and after it they may carry it
+            self.assertEqual(set(product.approvals.keys()) - names, set(), path)
+            self.assertLessEqual(names - set(product.approvals.keys()),
+                                 {'touch_amendable_set'}, path)
             for level in product.approvals.values():
                 self.assertIn(level, approvals.LEVELS, path)
 
@@ -139,7 +143,10 @@ class HookTest(unittest.TestCase):
     ITEM = 'F-0031'
     JOB = 'code-F-0031'
     ALL_HUMAN_NOW = 'approvals:\n' + ''.join(f'  {c.name}: human-now\n' for c in approvals.CLASSES)
-    ALL_AUTO = 'approvals:\n' + ''.join(f'  {c.name}: auto\n' for c in approvals.CLASSES)
+    # `touch_amendable_set` is unwidenable (§2.2): `auto` is not one of its own `levels`, so it
+    # is left unmapped here and takes its catalogue default, `human-now`.
+    ALL_AUTO = 'approvals:\n' + ''.join(
+        f'  {c.name}: auto\n' for c in approvals.CLASSES if 'auto' in c.levels)
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -197,7 +204,11 @@ class HookTest(unittest.TestCase):
         return root
 
     def test_each_builtin_recogniser_refuses_under_human_now(self):
-        self.write_product('deploy_sha:\n  workflow: deploy.yml\n' + self.ALL_HUMAN_NOW)
+        # `amendable_paths: []` opts every one of these paths out of the amendable set (F-0024),
+        # which would otherwise intercept `.env`/the runtime settings file/etc before `classify`
+        # ever sees them (§2.3, D7) — this loop is about each *other* class's own recogniser.
+        self.write_product('deploy_sha:\n  workflow: deploy.yml\n'
+                            'conventions:\n  amendable_paths: []\n' + self.ALL_HUMAN_NOW)
         record = self.record_repo()
         cases = [
             ('touch_production', 'Bash', {'command': 'git push origin HEAD:main'}, None),

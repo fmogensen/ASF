@@ -1,0 +1,6 @@
+{"type": "assistant", "session_id": "s1"}
+{"type": "result", "subtype": "success", "session_id": "s1", "total_cost_usd": 0.5}
+{"type": "result", "subtype": "success", "session_id": "s1", "total_cost_usd": 1.0}
+{"type": "result", "subtype": "success", "session_id": "s2", "total_cost_usd": 0.4}
+{"type": "result", "subtype": "success", "session_id": "s2", "total_cost_usd": 0.8}
+{"type": "result", "subtype": "success", "session_id": "s2"}

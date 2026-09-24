@@ -18,6 +18,7 @@ conventions checks, each within ``harvest.gate_timeout_s`` (B-0072). Landing on 
 fast-forward only: ``git push --force*`` is never used. Python 3 stdlib only.
 """
 import argparse
+import datetime
 import json
 import os
 import re
@@ -174,6 +175,25 @@ def mark_harvested(state_dir, job, sha):
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
     with open(path, 'a', encoding='utf-8') as f:
         f.write(json.dumps({'job': job, 'harvested': sha}, sort_keys=True) + '\n')
+
+
+def record_gate(state_dir, branches, sha, ok, seconds, line):
+    """One appended ``gates.jsonl`` line: a landing gate ran, over ``branches``, at ``sha`` — the
+    same append-only file and directory :func:`mark_harvested` writes to. ``at`` is the moment
+    the gate **started**, ``seconds`` back from now. :func:`red_on_trunk` gates the trunk alone,
+    with no branches under it (PD6) — it is not one of the two places a landing gate runs, and
+    takes no line here. A write that fails is printed, never raised: a gate must not be lost
+    because its ledger could not be appended to, exactly as ``write_tick_line`` already reasons."""
+    path = os.path.join(state_dir, 'gates.jsonl')
+    at = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=seconds)
+    entry = {'at': at.strftime('%Y-%m-%dT%H:%M:%SZ'), 'seconds': seconds,
+             'branches': list(branches), 'sha': sha, 'ok': ok, 'line': line}
+    try:
+        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(entry, sort_keys=True) + '\n')
+    except OSError as e:
+        print(f'harvest: gate not recorded ({e})')
 
 
 def reap_hold(record, alive=None, session_source=None):

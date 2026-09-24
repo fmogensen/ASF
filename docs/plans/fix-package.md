@@ -41,7 +41,7 @@ Nothing in the code or the record was changed to write this.
   context (`docs/guide/operating.md` "Safety"). No card owns the fix.
 
 ### What the package delivers (release: the next patch after the newest tag at merge time —
-v0.1.6 as of this revision, main having since tagged v0.1.3 through v0.1.5; see §6)
+v0.1.7 as of this revision, main having since tagged v0.1.3 through v0.1.6; see §6)
 
 1. One PR-lane state machine in a new `asf/harvest/lane.py` with its own append-only ledger
    (`lanes.jsonl`). Both landing modes use it, with a single gate and a single review reader
@@ -449,8 +449,8 @@ title carries a version. That is **E-0001 "ASF 0.1 — a working factory"** (ran
 the line is 0.1 and the release is **the next patch after the newest `v0.1.x` tag on `main` at
 merge time** — the same "highest so far plus one" rule `asf upgrade` documents
 (`docs/guide/upgrading.md`). The plan was written against `565fee1` (v0.1.2); `main` has since
-cut v0.1.3, v0.1.4 and v0.1.5 with unrelated hotfixes, so as of this revision the package release
-is **v0.1.6**. A later hotfix before the merge moves this by the same rule — never hand-set. A
+cut v0.1.3 through v0.1.6 with unrelated hotfixes, so as of this revision the package release
+is **v0.1.7**. A later hotfix before the merge moves this by the same rule — never hand-set. A
 `v0.2.0-rc` is not possible for two reasons:
 
 - `SEMVER_TAG_RE` (`^v(\d+)\.(\d+)\.(\d+)$`) has no pre-release form.
@@ -466,7 +466,7 @@ is one sha.
 ### Rollout (the customer upgrades once)
 
 1. Pause the product's clock: `asf` scheduler off (the doctor shows it).
-2. Run `bash tools/install.sh <product> <the release tag — v0.1.6 as of this revision>`. It is
+2. Run `bash tools/install.sh <product> <the release tag — v0.1.7 as of this revision>`. It is
    pinned and idempotent.
 3. Run `asf doctor`. The new `worker env` row must be green: the account homes are created and
    seeded by the installer's step 3.
@@ -475,7 +475,7 @@ is one sha.
 5. Resume the clock. The first real tick writes the `lanes.jsonl` bootstrap.
 
 **Rollback:** `install.sh <product> <tag>` with the newest tag on `main` from before the package
-merged — as of this revision, `v0.1.5`. Not the package's own preceding minor release (v0.1.2): that release
+merged — as of this revision, `v0.1.6`. Not the package's own preceding minor release (v0.1.2): that release
 refuses the top-level `feeder:` key, and the upgrade's first hour runs with `feeder.hold`. Every
 tag from v0.1.3 on already reads `feeder.hold` (`e284ee7`, in `main` since before v0.1.3), so the
 newest pre-package tag is always a safe rollback target — recompute it the same way the release

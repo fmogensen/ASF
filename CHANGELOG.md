@@ -2,6 +2,24 @@
 
 One entry per released version, newest first.
 
+## v0.1.6 — 2026-09-24
+
+### Features landed
+
+- F-0093 Model routing is argued from minutes-per-landing, and the pool gets a cheap tier
+
+### Bugs fixed
+
+- B-0094 19% of sessions end 'not pushed': finished work is lost to a missing commit or push
+
+### Improvements and hotfixes
+
+- hotfix(tick): hold new launches under host pressure; briefs keep full suites for CI
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.6"`
+
 ## v0.1.5 — 2026-09-24
 
 ### Features landed

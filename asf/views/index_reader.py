@@ -80,13 +80,16 @@ def local_stamp(ts, fmt='%H:%M %d %b'):
     return t.astimezone().strftime(fmt) if t else '?'
 
 
+def span(seconds):
+    """A duration in the tables' buckets: 25m, 5h, 3d. Negative is clamped to 0."""
+    s = max(seconds, 0)
+    return f"{int(s // 60)}m" if s < 3600 else f"{int(s // 3600)}h" if s < 172800 else f"{int(s // 86400)}d"
+
+
 def age(ts):
     """``stage_since`` as a short age: 25m, 5h, 3d."""
     t = parse_ts(ts)
-    if not t:
-        return '—'
-    s = max((dt.datetime.now(dt.timezone.utc) - t).total_seconds(), 0)
-    return f"{int(s // 60)}m" if s < 3600 else f"{int(s // 3600)}h" if s < 172800 else f"{int(s // 86400)}d"
+    return span((dt.datetime.now(dt.timezone.utc) - t).total_seconds()) if t else '—'
 
 
 def usd(items):
