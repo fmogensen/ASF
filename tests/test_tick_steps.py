@@ -22,6 +22,7 @@ from asf.groom import answers
 from asf.tick import shadow, step_daily, step_groom, step_harvest, step_health, step_prs, step_wave, steps, tick
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
+from asf.workers import report
 from asf.workers import runtime as runtime_mod
 from tests.test_tick import TickTestCase, _git, steps_only
 
@@ -260,9 +261,8 @@ class HealthStepTests(StepsTestCase):
         with open(log, 'w') as f:
             f.write(json.dumps({'type': 'system', 'subtype': 'init'}) + '\n')
             f.write(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
-                                'result': 'REPORT\nitem: B-0001\nkind: adjudicate\nstatus: done\n'
-                                          'branch: fix/B-0001\npushed: yes abc\ncommits: none\ntests: none\n'
-                                          'left out: none\nruling: no open finding; the fix stands\n```\n'}) + '\n')
+                                'result': report.render('adjudicate',
+                                                        ruling='no open finding; the fix stands')}) + '\n')
         self.session(job='adjudicate-b-0001', item='B-0001', kind='adjudicate', pid=DEAD_PID, log=log,
                      started='2026-09-22T10:00:00Z', ended='2026-09-22T10:30:00Z', end_reason='finished')
         filed = step_health.file_rulings(ctx, out=self.lines.append)
