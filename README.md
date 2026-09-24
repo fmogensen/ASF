@@ -22,8 +22,9 @@ cp docs/products.example.yaml ~/.ASF/products/<product>.yaml   # fill in repo_di
 curl -fsSL https://raw.githubusercontent.com/fmogensen/ASF/main/tools/install.sh | bash -s -- <product> [sha|tag]
 ```
 
-The installer pins the factory as `asf-live`, installs the product's redaction hooks and clocks, and ends with
-`asf-live doctor`. In that product's Claude Code session: `/plugin marketplace add fmogensen/ASF`, then
+The installer pins the factory as `asf`, installs the product's redaction hooks and clocks, and ends with
+`asf doctor`. On a machine that also has a dev install (`pipx install -e .`), set `ASF_SUFFIX=-live` and it
+installs beside it as `asf-live`. In that product's Claude Code session: `/plugin marketplace add fmogensen/ASF`, then
 `/plugin install asf@asf`, with `ASF_PRODUCT=<product>` set. Rerun the installer with a new ref to upgrade.
 
 Not "ASF" the Apache Software Foundation.

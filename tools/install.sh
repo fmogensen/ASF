@@ -4,7 +4,10 @@
 #   bash tools/install.sh <product> [ref]          # ref: a sha or tag; default: origin main's head
 #   curl -fsSL https://raw.githubusercontent.com/fmogensen/ASF/main/tools/install.sh | bash -s -- <product> [ref]
 #
-# 1. installs the factory as `asf-live` with pipx, pinned to <ref> (reinstalls when the ref moves)
+# ASF_SUFFIX=-live: only on a machine that also holds a dev install (`pipx install -e <checkout>` is
+# `asf`); the pinned install then lives beside it as `asf-live`. Everyone else gets plain `asf`.
+#
+# 1. installs the factory as `asf` with pipx, pinned to <ref> (reinstalls when the ref moves)
 # 2. checks ~/.ASF/config.yaml and ~/.ASF/products/<product>.yaml exist (the operator's config)
 # 3. installs the redaction hooks in the product's repos
 # 4. installs the product's clocks (the scheduler runs the pinned asf-live, not a checkout)
@@ -15,7 +18,8 @@ REPO_URL="${ASF_REPO_URL:-https://github.com/fmogensen/ASF.git}"
 PRODUCT="${1:?usage: install.sh <product> [ref]}"
 REF="${2:-}"
 ASF_HOME="${ASF_HOME:-$HOME/.ASF}"
-BIN="asf-live"
+SUFFIX="${ASF_SUFFIX:-}"
+BIN="asf${SUFFIX}"
 
 say() { printf 'install: %s\n' "$*"; }
 die() { printf 'install: NEEDS OPERATOR: %s\n' "$*" >&2; exit 2; }
@@ -30,7 +34,7 @@ fi
 say "product $PRODUCT, ref ${REF:0:12} from $REPO_URL"
 
 # 1. the pinned install — pipx keeps it in its own venv; --force moves it to the new ref
-pipx install --force --suffix=-live "git+${REPO_URL}@${REF}" >/dev/null
+pipx install --force ${SUFFIX:+--suffix="$SUFFIX"} "git+${REPO_URL}@${REF}" >/dev/null
 export PATH="$HOME/.local/bin:$PATH"
 command -v "$BIN" >/dev/null 2>&1 || die "$BIN is not on PATH after pipx install — run: pipx ensurepath"
 say "$("$BIN" --version)"
