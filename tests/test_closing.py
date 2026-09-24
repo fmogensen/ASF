@@ -117,5 +117,50 @@ class TotalityTests(unittest.TestCase):
         self.assertEqual(dataclasses.asdict(Ev())['commit'], '')
 
 
+class PredatesTests(unittest.TestCase):
+    """§2.5's four clauses, and the marker line the groom reads (P13)."""
+    SINCE = '2026-09-21'
+
+    def item(self, **kw):
+        return {'id': 'F-0031', 'state': 'New', 'created': '2026-09-11', **kw}
+
+    def test_created_before_the_marker_and_named_by_nothing_predates(self):
+        self.assertTrue(c.predates(self.item(), Ev(), self.SINCE))
+
+    def test_unset_marker_is_never(self):
+        self.assertFalse(c.predates(self.item(), Ev(), None))
+        self.assertFalse(c.predates(self.item(), Ev(), ''))
+
+    def test_created_on_or_after_the_marker_does_not(self):
+        self.assertFalse(c.predates(self.item(created='2026-09-21'), Ev(), self.SINCE))
+        self.assertFalse(c.predates(self.item(created='2026-09-30'), Ev(), self.SINCE))
+
+    def test_stage_since_stands_in_for_created(self):
+        item = {'state': 'New', 'stage_since': '2026-09-01T00:00:00Z'}
+        self.assertTrue(c.predates(item, Ev(), self.SINCE))
+        self.assertFalse(c.predates({'state': 'New'}, Ev(), self.SINCE))
+
+    def test_a_commit_a_pr_or_a_branch_does_not(self):
+        for ev in (Ev(commit='abc1234'), Ev(merged_sha='abc1234'), Ev(branch='worker/x'),
+                   Ev(pr_state='OPEN'), Ev(open_prs=(3,))):
+            self.assertFalse(c.predates(self.item(), ev, self.SINCE), ev)
+
+    def test_closed_does_not(self):
+        self.assertFalse(c.predates(self.item(state='Closed'), Ev(), self.SINCE))
+
+    def test_any_typed_answer_does_not(self):
+        for key, value in (('landed', '9f2ac41'), ('reconciled', '2026-09-22'),
+                           ('removed', 'groom 2026-09-22')):
+            self.assertFalse(c.predates(self.item(**{key: value}), Ev(), self.SINCE), key)
+
+    def test_marked_reads_the_line_and_stops_at_an_answer(self):
+        line = c.PREDATES_LINE % '2026-09-11'
+        self.assertTrue(c.predates_marked({'evidence': ['x', line, 'rule: y']}))
+        self.assertFalse(c.predates_marked({'evidence': ['x']}))
+        self.assertFalse(c.predates_marked({}))
+        self.assertFalse(c.predates_marked({'evidence': [line], 'reconciled': '2026-09-22'}))
+        self.assertFalse(c.predates_marked({'evidence': [line], 'landed': 1234567}))
+
+
 if __name__ == '__main__':
     unittest.main()

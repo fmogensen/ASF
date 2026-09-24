@@ -119,6 +119,14 @@ class AnswerParsingTests(unittest.TestCase):
     def test_unblock(self):
         self.assertEqual(groom._parse_answer('unblock S-0140'), ('unblock', 'S-0140'))
 
+    def test_landed_and_open(self):
+        self.assertEqual(groom._parse_answer('landed 9f2ac41'), ('landed', '9f2ac41'))
+        self.assertEqual(groom._parse_answer('landed 9F2AC41'), ('landed', '9f2ac41'))
+        self.assertEqual(groom._parse_answer('open'), ('reconciled', None))
+        self.assertEqual(groom._parse_answer('landed'), (None, None))
+        self.assertEqual(groom._parse_answer('landed 9f2a'), (None, None))
+        self.assertEqual(groom._parse_answer('landed nothex1'), (None, None))
+
     def test_blank_and_placeholder(self):
         self.assertEqual(groom._parse_answer(''), (None, None))
         self.assertEqual(groom._parse_answer('____'), (None, None))

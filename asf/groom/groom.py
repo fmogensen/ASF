@@ -17,6 +17,7 @@ from asf.groom import inbox as inbox_mod
 from asf.groom.inbox import process_inbox
 from asf.capacity import DEFAULT_SESSIONS as DEFAULT_CAPACITY
 from asf.conventions import DEFAULT_AREA_DEPTH, DEFAULT_BATCH_MAX_GLOBS
+from asf.evidence import closing
 from asf.groom import shape
 from asf.groom.shape import SHAPE_LINE_RE
 from asf.views import index_reader
@@ -26,6 +27,8 @@ ANSWER_LINE_RE = re.compile(r'^- \[[ xX]\]\s+(?P<id>[A-Z]-\d{4})\b.*→\s*answer
 INBOX_ANSWER_RE = re.compile(r'^- \[[ xX]\]\s+inbox:(?P<name>\S+)\s.*→\s*answer:\s*(?P<answer>.*)$')
 ANSWER_YES = re.compile(r'^yes$', re.IGNORECASE)
 ANSWER_NO = re.compile(r'^(no|close)$', re.IGNORECASE)
+ANSWER_LANDED = re.compile(r'^landed\s+([0-9a-f]{7,40})$', re.IGNORECASE)
+ANSWER_OPEN = re.compile(r'^open$', re.IGNORECASE)
 ANSWER_RANK = re.compile(r'^rank\s+(\d+)$', re.IGNORECASE)
 ANSWER_PARENT = re.compile(r'^parent\s+(\S+)$', re.IGNORECASE)
 ANSWER_SEVERITY = re.compile(r'^(S[123])$', re.IGNORECASE)
@@ -64,6 +67,11 @@ def _parse_answer(answer):
         return 'decided', True
     if ANSWER_NO.match(a):
         return 'removed', None  # caller fills in the reason text
+    if ANSWER_OPEN.match(a):
+        return 'reconciled', None  # caller fills in the date
+    m = ANSWER_LANDED.match(a)
+    if m:
+        return 'landed', m.group(1).lower()
     m = ANSWER_RANK.match(a)
     if m:
         return 'rank', int(m.group(1))
@@ -305,8 +313,10 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None, 
 
         if field == 'removed':
             value = f"groom {date}"
+        elif field == 'reconciled':
+            value = date
 
-        if typed.get(field) == value:
+        if str(typed.get(field)) == str(value) and typed.get(field) is not None:
             continue  # already applied
 
         frontmatter.write_typed(rec['path'], {field: value})
@@ -415,6 +425,19 @@ def groom_stories_without_tasks(canonical, derived):
     return lines
 
 
+def groom_predates_section(canonical, since):
+    """One line per item `ingest` marked as older than the id convention, in `created` order.
+    Unset `since` asks nothing (§1.4)."""
+    if not since:
+        return []
+    marked = [(closing.created_of(rec['meta']), iid, rec) for iid, rec in canonical.items()
+              if is_open(rec) and closing.predates_marked(rec['meta'])]
+    return [_card_line(iid, rec['meta'].get('title', ''),
+                       f"created {created}, before the id convention ({str(since)[:10]}); "
+                       f"no commit, PR or branch names it")
+            for created, iid, rec in sorted(marked)]
+
+
 def groom_blocked_on_closed(canonical):
     lines = []
     for iid, rec in sorted(_open_items(canonical).items()):
@@ -466,6 +489,7 @@ GROOM_SECTIONS = [
     ('Undecided > 3 days', 'undecided3'),
     ('Features without Stories', 'no_stories'),
     ('Stories without Tasks after plan-approved', 'no_tasks'),
+    ('Landed before the id convention', 'predates'),
     ('Merges proposed', 'merge'),
     ('Batches proposed', 'batch'),
     ('Splits proposed', 'split'),
@@ -503,7 +527,8 @@ def groom_shape_sections(canonical, derived, capacity, area_depth, batch_max_glo
 
 
 def build_groom_sections(canonical, derived, date, capacity=DEFAULT_CAPACITY,
-                         area_depth=DEFAULT_AREA_DEPTH, batch_max_globs=DEFAULT_BATCH_MAX_GLOBS):
+                         area_depth=DEFAULT_AREA_DEPTH, batch_max_globs=DEFAULT_BATCH_MAX_GLOBS,
+                         since=None):
     now = datetime.datetime.now(datetime.timezone.utc)
     origin_ids = inbox_origin_ids(canonical)
     return {
@@ -512,6 +537,7 @@ def build_groom_sections(canonical, derived, date, capacity=DEFAULT_CAPACITY,
         'undecided3': groom_undecided_section(canonical, now, 3, exclude=origin_ids),
         'no_stories': groom_features_without_stories(canonical, derived),
         'no_tasks': groom_stories_without_tasks(canonical, derived),
+        'predates': groom_predates_section(canonical, since),
         'blocked_closed': groom_blocked_on_closed(canonical),
         'dupes': groom_near_duplicates(canonical),
         'undecided14': groom_undecided_section(canonical, now, 14, exclude=origin_ids),
@@ -728,7 +754,8 @@ def cmd_groom(args, root):
     sections = build_groom_sections(
         canonical, derived, date, capacity=lane_slots,
         area_depth=conv.area_depth if conv else DEFAULT_AREA_DEPTH,
-        batch_max_globs=conv.batch_max_globs if conv else DEFAULT_BATCH_MAX_GLOBS)
+        batch_max_globs=conv.batch_max_globs if conv else DEFAULT_BATCH_MAX_GLOBS,
+        since=conv.get('id_in_subject_since') if conv else None)
     sections[INBOX_QUESTIONS[1]] = inbox_mod.question_lines(root, intake_dir)
 
     auto = policy.groom_auto(product)

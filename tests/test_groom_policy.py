@@ -839,5 +839,90 @@ class DigestWiringTests(GroomAutoTestCase):
         self.assertFalse(os.path.isfile(os.path.join(self.root, 'groom', '2026-09-22-digest.md')))
 
 
+class PredatesSectionTests(GroomAutoTestCase):
+    """§3.4: one question for work that predates the id convention, and the answer is evidence."""
+    MARK = 'evidence: [predates the id convention (created 2026-09-10), "rule: planned"]'
+
+    def write_product(self, since='2026-09-21', **kw):
+        super().write_product(**kw)
+        if since:
+            with open(os.path.join(self.asf_home, 'products', 'sample.yaml'), 'a',
+                      encoding='utf-8') as f:
+                f.write(f'conventions:\n  id_in_subject_since: {since}\n')
+
+    def old_feature(self, iid='F-0031', marked=True, extra=()):
+        write_item(self.root, iid, 'feature', 'Old work', parent='E-0009',
+                   typed_lines=['decided: true', 'created: 2026-09-10', *extra],
+                   machine_lines=['state: New', 'stage_since: 2026-09-10T00:00:00Z',
+                                  'updated: 2026-09-10T00:00:00Z', *([self.MARK] if marked else [])])
+        run(['index'], self.root)
+
+    def groom_text(self, extra=()):
+        r = self.run_groom(list(extra))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(os.path.join(self.root, 'groom', today() + '.md')) as f:
+            return f.read()
+
+    def test_unset_marker_asks_nothing(self):
+        self.write_product(since=None)
+        self.old_feature()
+        text = self.groom_text()
+        self.assertNotIn('before the id convention (', text)
+
+    def test_a_marked_item_gets_exactly_one_line(self):
+        self.write_product()
+        self.old_feature()
+        text = self.groom_text()
+        self.assertEqual(text.count('- [ ] F-0031 Old work — created 2026-09-10, before the id '
+                                    'convention (2026-09-21); no commit, PR or branch names it '
+                                    '→ answer: ____'), 1)
+        self.assertIn('## Landed before the id convention', text)
+
+    def test_unmarked_and_answered_items_get_none(self):
+        self.write_product()
+        self.old_feature(marked=False)
+        self.assertNotIn('created 2026-09-10, before', self.groom_text())
+
+    def test_the_line_is_gone_after_each_answer(self):
+        for answer in ('landed 9f2ac41', 'open', 'no'):
+            self.write_product()
+            self.old_feature(extra=({'landed 9f2ac41': ['landed: 9f2ac41'], 'open':
+                                     ['reconciled: 2026-09-22'], 'no': ['removed: groom 2026-09-22']}[answer]))
+            self.assertNotIn('created 2026-09-10, before', self.groom_text(), answer)
+
+    def test_a_spoken_for_item_is_marked_not_asked(self):
+        self.write_product(approvals={'groom': 'auto'})
+        self.old_feature()
+        text = self.groom_text()
+        self.assertIn('(spoken for: CARD → SPEC)', text)
+        self.assertEqual(policy.open_questions(text), [])
+
+    def test_answers_write_typed_evidence_history_and_event(self):
+        for answer, field, value in (('landed 9f2ac41', 'landed', '9f2ac41'),
+                                     ('open', 'reconciled', '2026-09-22'),
+                                     ('no', 'removed', 'groom 2026-09-22')):
+            self.write_product()
+            self.old_feature()
+            with open(os.path.join(self.root, 'groom', '2026-09-21.md'), 'w', encoding='utf-8') as f:
+                f.write('# Groom 2026-09-21\n\n## Landed before the id convention\n\n'
+                        '- [ ] F-0031 Old work — created 2026-09-10, before the id convention '
+                        f'(2026-09-21); no commit, PR or branch names it → answer: {answer}\n')
+            r = self.run_groom(['--date', '2026-09-22', '--apply'])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            path = os.path.join(self.root, 'features', 'F-0031.md')
+            with open(path) as f:
+                snapshot = f.read()
+            meta, body = frontmatter.parse(snapshot, path='features/F-0031.md')
+            self.assertEqual(meta[field], value)
+            self.assertEqual(body.count(f'groom: {field} → '), 1, answer)
+            self.assertEqual(meta['state'], 'New')     # evidence, never a state
+            r2 = self.run_groom(['--date', '2026-09-22', '--apply'])
+            self.assertIn('applied 0', r2.stdout)
+            with open(path) as f:
+                self.assertEqual(f.read(), snapshot)
+            os.remove(path)
+            os.remove(os.path.join(self.root, 'groom', '2026-09-21.md'))
+
+
 if __name__ == '__main__':
     unittest.main()

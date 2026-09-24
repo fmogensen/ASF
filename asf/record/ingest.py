@@ -457,6 +457,8 @@ def cmd_ingest(args, root):
     derived = {}      # iid -> _Derived, what descent reads
     stage_val = {}
     task_ev = {}
+    evs = {}          # iid -> the Ev its closing was chosen from, what `predates` reads
+    since = product.conventions.get('id_in_subject_since') if product is not None else None
 
     def settle(iid, type_, ev_obj, lines, sha=''):
         """The one place a state is chosen: `closing.state_of`, held by `closing.sticky`."""
@@ -464,6 +466,7 @@ def cmd_ingest(args, root):
         raw = closing.state_of(type_, ev_obj, old)
         final = closing.sticky(old, dataclasses.replace(raw, lines=tuple(lines)))
         closings[iid] = final
+        evs[iid] = ev_obj
         new_state[iid] = final.state
         derived[iid] = _Derived(raw, sha or ev_obj.commit or ev_obj.merged_sha, _own_evidence(ev_obj))
         return final
@@ -688,6 +691,9 @@ def cmd_ingest(args, root):
         c = closings[iid]
         # an Epic carries no evidence of its own: only a rule that derived something is worth a line
         lines = None if type_ == 'epic' and c.rule == 'typed' else list(c.lines) + [RULE_PREFIX + c.rule]
+        if lines is not None and closing.predates(dict(rec['meta'], state=new_state[iid]),
+                                                  evs[iid], since):
+            lines.insert(len(lines) - 1, closing.PREDATES_LINE % closing.created_of(rec['meta']))
         _typed, machine = frontmatter.split_machine(rec['meta'])
         ordered, history = _ingest_fields(machine, new_state[iid], stage_val.get(iid), lines,
                                           blocked_pair, now)

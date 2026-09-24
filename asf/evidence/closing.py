@@ -157,3 +157,46 @@ def sticky(old, closing):
                                    lines=closing.lines + (f"held Closed; {closing.rule} would say "
                                                           f"{closing.state}",))
     return closing
+
+
+#: The evidence line `ingest` writes when an item predates the id-in-subject marker (P13) — one
+#: constant, the same contract `rule:` already is; the groom selects on this prefix and no other.
+PREDATES_LINE = 'predates the id convention (created %s)'
+_PREDATES_PREFIX = PREDATES_LINE.split('%s')[0]
+_TYPED_ANSWERS = ('landed', 'reconciled', 'removed')   #: the three answers to the one question
+
+
+def _typed(item, key):
+    value = item.get(key)
+    return value is not None and value != ''
+
+
+def _answered(item):
+    return any(_typed(item, k) for k in _TYPED_ANSWERS)
+
+
+def created_of(item):
+    """The date an item is measured against the marker: `created`, else `stage_since`."""
+    return str(item.get('created') or item.get('stage_since') or '')[:10]
+
+
+def predates(item, ev, since):
+    """§2.5: the item is older than the marker, nothing names it, it is not Closed, and no answer
+    is typed. `since` unset is always false — the timid default (§1.4). Pure."""
+    if not since:
+        return False
+    created = created_of(item)
+    if not created or created >= str(since)[:10]:
+        return False
+    if ev.commit or ev.merged_sha or ev.branch or ev.pr_state or ev.open_prs:
+        return False
+    return item.get('state') != CLOSED and not _answered(item)
+
+
+def predates_marked(item):
+    """The record-side reader of `predates`: `ingest` wrote the marker line and no answer has
+    been typed since. `item` is an item's meta."""
+    if _answered(item):
+        return False
+    lines = item.get('evidence') or []
+    return any(isinstance(l, str) and l.startswith(_PREDATES_PREFIX) for l in lines)
