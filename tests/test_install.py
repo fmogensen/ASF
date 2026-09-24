@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -402,32 +403,69 @@ class SchemaTest(HomeCase):
         with self.assertRaises(env.ConfigError):
             schema.migrate_dir(clone)
 
+    # The ledger in the tick's own shape: a launch line (job, started, pid), a finish line keyed
+    # by ``job`` with ``ended``, a correction line with no pid.
+    def launch(self, job, pid, **kw):
+        return dict({'job': job, 'started': '2026-09-24T10:00:00Z', 'pid': pid,
+                     'product': 'sample'}, **kw)
+
+    def dead_pid(self):
+        p = subprocess.Popen([sys.executable, '-c', 'pass'])
+        p.wait()
+        return p.pid
+
     def test_inflight_session_refuses(self):
-        self.sessions([{'id': 'a', 'started': 't0'}, {'id': 'b', 'started': 't0'},
-                       {'id': 'b', 'ended': 't1'}])
+        self.sessions([self.launch('a', os.getpid()), self.launch('b', os.getpid()),
+                       {'job': 'b', 'ended': '2026-09-24T10:05:00Z', 'end_reason': 'finished'}])
         rc, msg = schema.migrate_product(self.product)
         self.assertEqual(rc, 1)
         self.assertIn('1 session(s) in flight (a)', msg)
         self.assertIn('--drain', msg)
         self.assertFalse(os.path.isdir(os.path.join(env.ASF_HOME, 'state', 'sample', 'record')))
 
-    def test_drain_waits_for_the_session_to_end(self):
-        self.sessions([{'id': 'a', 'started': 't0'}])
+    def test_a_job_keyed_ended_line_closes_the_run(self):
+        self.sessions([self.launch('a', os.getpid()),
+                       {'job': 'a', 'ended': '2026-09-24T10:05:00Z', 'end_reason': 'finished'}])
+        self.assertEqual(schema.sessions_in_flight('sample'), [])
+
+    def test_a_correction_line_with_no_pid_is_not_a_session(self):
+        self.sessions([{'job': 'a', 'correction': {'text': 'fix it', 'at': 't'}},
+                       {'job': 'b', 'corrected': True}])
+        self.assertEqual(schema.sessions_in_flight('sample'), [])
+
+    def test_a_dead_pid_is_not_in_flight(self):
+        self.sessions([self.launch('a', self.dead_pid())])
+        self.assertEqual(schema.sessions_in_flight('sample'), [])
+
+    def test_an_ok_result_in_the_job_log_is_not_in_flight(self):
+        log = os.path.join(self.tmp, 'a.jsonl')
+        self.write(log, json.dumps({'type': 'system', 'subtype': 'init'}) + '\n'
+                   + json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
+                                 'result': 'done'}) + '\n')
+        self.sessions([self.launch('a', os.getpid(), log=log)])
+        self.assertEqual(schema.sessions_in_flight('sample'), [])
+
+    def test_a_live_pid_is_in_flight_and_the_drain_waits(self):
+        self.sessions([self.launch('a', os.getpid()), self.launch('b', self.dead_pid()),
+                       {'job': 'c', 'correction': {'text': 'x', 'at': 't'}}])
+        self.assertEqual(schema.sessions_in_flight('sample'), ['a'])
         polls = []
 
         def sleep(s):
             polls.append(s)
-            self.sessions([{'id': 'a', 'started': 't0'}, {'id': 'a', 'ended': 't1'}])
+            if len(polls) == 2:
+                self.sessions([self.launch('a', os.getpid()),
+                               {'job': 'a', 'ended': '2026-09-24T10:05:00Z'}])
 
         with mock.patch.object(schema, 'SCHEMA_VERSION', 2), \
                 mock.patch.dict(schema.MIGRATIONS, {2: lambda d: None}):
             rc, msg = schema.migrate_product(self.product, drain=True, sleep=sleep)
         self.assertEqual(rc, 0, msg)
-        self.assertEqual(polls, [schema.DRAIN_POLL_S])
+        self.assertEqual(polls, [schema.DRAIN_POLL_S] * 2)
         self.assertEqual(self.origin_log()[0], 'migrate: schema 1 → 2')
 
     def test_drain_gives_up_at_the_timeout(self):
-        self.sessions([{'started': 't0'}])
+        self.sessions([self.launch('a', os.getpid())])
         t = [0]
 
         def sleep(s):
@@ -437,6 +475,7 @@ class SchemaTest(HomeCase):
                                          clock=lambda: t[0])
         self.assertEqual(rc, 1)
         self.assertIn('gave up after 60s', msg)
+        self.assertIn('still in flight: a', msg)
 
     def test_cmd_updates_the_config_stamp(self):
         self.write(env.config_path(), 'default_product: sample\nschema_version: 0\n')

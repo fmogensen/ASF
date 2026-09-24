@@ -140,32 +140,26 @@ def require(product):
 
 # ---- sessions in flight -----------------------------------------------------
 
-def sessions_in_flight(product_name):
-    """Sessions in ``state/<p>/sessions.jsonl`` with no ``ended``. A line with an ``id`` is closed
-    by any later line for the same id that carries ``ended``; a line without an id stands alone."""
+def sessions_in_flight(product_name, alive=None):
+    """The job names of the runs in ``state/<p>/sessions.jsonl`` still in flight — read through
+    the registry's own fold (:mod:`asf.workers.lifecycle`, by job, per run), never a parser of its
+    own: the tick closes a run with a line keyed by ``job``, and a correction line carries no pid.
+    Only a job's latest run counts — every later line folds into it, so an earlier run of the
+    same job never sees its ``ended``.
+
+    A run is in flight only while it holds a seat (:func:`lifecycle.occupies`: no ``ended`` line
+    and a pid that still answers) and its job log has no ok result yet — a dead pid, or a
+    session whose result says success, is finished whatever health has not yet written."""
+    from asf.workers import lifecycle, runtime
     path = os.path.join(env.ASF_HOME, 'state', product_name, 'sessions.jsonl')
-    if not os.path.isfile(path):
-        return []
-    open_by_id, anon = {}, []
-    with open(path, encoding='utf-8') as f:
-        for n, line in enumerate(f, 1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            sid = rec.get('id') or rec.get('session')
-            ended = bool(rec.get('ended'))
-            if sid is None:
-                if not ended:
-                    anon.append(f'line {n}')
-            elif ended:
-                open_by_id.pop(sid, None)
-            else:
-                open_by_id[sid] = True
-    return sorted(str(s) for s in open_by_id) + anon
+    busy = []
+    for job, run in lifecycle.latest(path).items():
+        if not lifecycle.occupies(run, alive):
+            continue
+        if runtime.result_ok(runtime.read_result(run.get('log'))):
+            continue
+        busy.append(str(job))
+    return sorted(busy)
 
 
 # ---- the migration ----------------------------------------------------------
