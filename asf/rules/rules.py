@@ -25,11 +25,13 @@ import subprocess
 import sys
 
 def _timeout():
-    """Seconds one check may run: ``$ASF_RULE_CHECK_TIMEOUT``, else 10."""
+    """Seconds one check may run: ``$ASF_RULE_CHECK_TIMEOUT``, else 60. Checks run in parallel beside
+    the worker sessions: at 10 s, one ran 13 s on a machine at load 30 and hid a real violation
+    behind a timeout."""
     try:
-        return max(1, int(os.environ.get('ASF_RULE_CHECK_TIMEOUT') or 10))
+        return max(1, int(os.environ.get('ASF_RULE_CHECK_TIMEOUT') or 60))
     except ValueError:
-        return 10
+        return 60
 
 
 TIMEOUT = _timeout()
