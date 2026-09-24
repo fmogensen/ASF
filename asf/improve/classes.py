@@ -2,7 +2,7 @@
 
 A class is a name, a default threshold, a measurement over :func:`asf.improve.measure.table`, and
 one sentence with the number in it. A product overrides any default under ``improve:`` in its yaml
-(``improve: {thresholds: {non_landing_sessions: 0.30}, epic: E-0001, window_days: null,
+(``improve: {thresholds: {non_landing_sessions: 0.30}, epic: <id>, window_days: null,
 premium_models: [...]}``); a key it leaves out falls back to the default in this module.
 
 :func:`evaluate` returns one record per class — over threshold or not, so the page can print the
