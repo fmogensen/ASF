@@ -29,7 +29,7 @@ from asf.workers import lifecycle, report, runtime
 TEST_LIMIT = 6
 #: The longest a field of the last report may run, in characters, its label included.
 FIELD_CAP = 200
-REPORT_FIELDS = ('status', 'pushed', 'tests', 'left out', 'ruling')
+REPORT_FIELDS = ('status', 'pushed', 'tests', 'left_out', 'ruling')
 TEST_NAME_RE = re.compile(r'^test_|_test\.|\.test\.|\.spec\.')
 #: The most top-level functions/classes the "Where to look" section names per file
 #: (asf.briefs.preamble.outline_lines) — a file with more just reads longer under the same line.
@@ -192,11 +192,18 @@ def _cap(label, value):
     return line if len(line) <= FIELD_CAP else line[:FIELD_CAP - 1].rstrip() + '…'
 
 
+def _item(value):
+    """One list item as a line: a string as is, an object as its own values."""
+    if isinstance(value, dict):
+        return ' '.join(str(v) for v in value.values())
+    return str(value)
+
+
 def last_report(product, item_id):
     """The newest ended session's typed report on the item, else ``''``.
 
     ``<job> ended <ts> — <end_reason>`` and the five fields worth carrying, each capped — never
-    the transcript above the REPORT block. A log that is gone leaves the one ledger line."""
+    the transcript above the report. A log that is gone leaves the one ledger line."""
     if not item_id:
         return ''
     path = os.path.join(env.state_dir(product), 'sessions.jsonl')
@@ -206,8 +213,16 @@ def last_report(product, item_id):
     run = max(ended, key=lambda r: str(r.get('ended')))
     lines = [f"{run.get('job', '?')} ended {run.get('ended')} — {run.get('end_reason') or '?'}"]
     result = runtime.read_result(run.get('log'))
-    fields = report.parse((result or {}).get('result'))
-    lines += [_cap(key, fields[key]) for key in REPORT_FIELDS if fields.get(key)]
+    try:
+        fields = report.typed((result or {}).get('result'), None)
+    except report.ReportError:
+        return '\n'.join(lines)
+    for key in REPORT_FIELDS:
+        value = fields.get(key)
+        if isinstance(value, list):
+            value = ' '.join(_item(v) for v in value)
+        if value:
+            lines.append(_cap(key, value))
     return '\n'.join(lines)
 
 

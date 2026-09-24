@@ -1,152 +1,264 @@
-"""asf.workers.report — a session's typed REPORT read back, and the one failure it declares at
-the source: ``pushed: no`` (F-0087, class "worker behaviour": B-0024, B-0052)."""
+"""asf.workers.report — the typed report: its schema, its reader, its renderer, its contract
+(F-0025), and the one failure it declares at the source, ``pushed: no`` (F-0087, B-0024, B-0052)."""
+import json
 import unittest
 
-RULED = """REPORT
-item: B-0001
-kind: adjudicate
-status: done
-branch: fix/B-0001
-pushed: yes abc1234
-commits: none
-tests: none
-left out: none
-ruling: the hold was an add/add conflict, not a finding; the fix stands
-  and the reviewer's point about the retry is overruled
-```
-"""
-
+from asf.briefs.build import KINDS
 from asf.workers import report
 from asf.workers import runtime as runtime_mod
 
-DONE = """I fixed it.
-
-REPORT
-item: B-0001
-kind: fix-bug
-status: done
-branch: fix/B-0001
-pushed: yes 1a2b3c4
-commits: 1a2b3c4 fix(B-0001): return 0 on empty
-tests: python3 -m unittest — OK
-left out: none
-"""
-
-WAITING = """I'll stop here and wait for the background test-suite task to finish; I'll continue
-with the commit and push once it reports back.
-
-REPORT
-item: B-0001
-kind: fix-bug
-status: partial
-branch: fix/B-0001
-pushed: no — the suite is still running in the background
-commits: none
-tests: python3 -m unittest (background)
-left out: the push
-"""
 
 
-class ParseTests(unittest.TestCase):
-    def test_reads_every_field_of_the_last_block(self):
-        rep = report.parse('REPORT\nitem: X\n\n' + DONE)
-        self.assertEqual(rep['item'], 'B-0001')
-        self.assertEqual(rep['status'], 'done')
-        self.assertEqual(rep['pushed'], 'yes 1a2b3c4')
-        self.assertEqual(rep['left out'], 'none')
-        self.assertEqual(report.parse('no report here'), {})
-
-    def test_a_multi_line_field_and_a_fence_end(self):
-        text = 'REPORT\nitem: T-0001\ncommits: aaa one\nbbb two\ntests: ok\n```\nnot: a field\n'
-        rep = report.parse(text)
-        self.assertEqual(rep['commits'], 'aaa one\nbbb two')
-        self.assertNotIn('not', rep)
+def block(**over):
+    """A fenced spec report, with ``over`` laid on a good one."""
+    obj = json.loads(report.render('spec').split('\n', 1)[1].rsplit('\n```', 1)[0])
+    obj.update(over)
+    return '```json asf-report\n' + json.dumps(obj) + '\n```\n'
 
 
-class FailureAtTheSourceTests(unittest.TestCase):
-    def test_pushed_no_is_unpushed_work(self):
-        self.assertEqual(report.failure(WAITING), report.UNPUSHED)
-        self.assertIsNone(report.failure(DONE))
-        self.assertIsNone(report.failure('done'))   # the fake runtime's results carry no REPORT
-        self.assertIsNone(report.failure('REPORT\nitem: B-0001\nstatus: done\n'))  # declares nothing
-
-    def test_the_runtime_marks_such_a_result_failed(self):
-        rec = {'type': 'result', 'subtype': 'success', 'is_error': False, 'result': WAITING}
-        self.assertEqual(runtime_mod.failure_reason(rec), report.UNPUSHED)
-        self.assertFalse(runtime_mod.result_ok(rec))
-        ok = {'type': 'result', 'subtype': 'success', 'is_error': False, 'result': DONE}
-        self.assertIsNone(runtime_mod.failure_reason(ok))
-        self.assertTrue(runtime_mod.result_ok(ok))
+def rec(text):
+    return {'type': 'result', 'subtype': 'success', 'is_error': False, 'result': text}
 
 
-if __name__ == '__main__':
-    unittest.main()
+class SchemaTest(unittest.TestCase):
+    def test_every_brief_kind_has_a_schema(self):
+        self.assertEqual(sorted(report.KIND_FIELDS), sorted(KINDS))
+        for kind in KINDS:
+            self.assertTrue(report.schema(kind), kind)
+
+    def test_every_field_declares_types_a_default_and_a_line(self):
+        for kind in KINDS:
+            for name, spec in report.schema(kind).items():
+                with self.subTest(kind=kind, field=name):
+                    types, _default, line = spec
+                    self.assertTrue(line)
+                    self.assertTrue(types)
+                    named = [t in report._CHECK for t in types]
+                    self.assertTrue(all(named) or not any(named), types)
+
+    def test_a_kind_field_never_shadows_a_common_one(self):
+        for kind in KINDS:
+            self.assertEqual(set(report.KIND_FIELDS[kind]) & set(report.COMMON), set(), kind)
+
+    def test_an_unknown_kind_refuses(self):
+        with self.assertRaises(report.ReportError):
+            report.schema('preflight')
 
 
-class RulingTests(unittest.TestCase):
-    def test_b0064_the_ruling_paragraph_is_read_off_the_report(self):
-        from asf.workers import report
-        self.assertEqual(report.ruling(RULED),
-                         "the hold was an add/add conflict, not a finding; the fix stands\n"
-                         "and the reviewer's point about the retry is overruled")
-        self.assertEqual(report.ruling('REPORT\nitem: B-0001\npushed: yes\n'), '')
+class ParseTest(unittest.TestCase):
+    def test_the_block_is_read_out_of_the_final_message(self):
+        text = 'I wrote the spec.\n\nREPORT\nitem: X\n\n' + block(item='F-0001')
+        self.assertEqual(report.typed(text, 'spec')['item'], 'F-0001')
+
+    def test_the_last_block_wins(self):
+        text = block(item='F-0001') + '\nthen I corrected it\n' + block(item='F-0002')
+        self.assertEqual(report.typed(text, 'spec')['item'], 'F-0002')
+
+    def test_a_longer_fence_closes_on_a_run_at_least_as_long(self):
+        body = json.dumps(json.loads(block()[len('```json asf-report\n'):-5]))
+        text = '````json asf-report\n' + body + '\n```\nstill inside\n````\n'
+        self.assertEqual(report.fence(text), body + '\n```\nstill inside')
+
+    def test_a_block_that_never_closes_is_no_block(self):
+        self.assertIn('asf-report', report.check('spec', block()[:-5]))
+
+    def test_no_block_is_a_named_failure(self):
+        self.assertIn('asf-report', report.check('spec', 'I did the thing.'))
+        self.assertIn('asf-report', report.check('spec', None))
+
+    def test_broken_json_is_a_named_failure(self):
+        msg = report.check('spec', '```json asf-report\n{"item":\n```\n')
+        self.assertIn('not JSON', msg)
+        self.assertIn('Expecting value', msg)
+
+    def test_an_array_is_not_an_object(self):
+        self.assertIn('not an object', report.check('spec', '```json asf-report\n[]\n```\n'))
+
+    def test_an_unknown_key_is_refused(self):
+        self.assertEqual(report.check('spec', block(plan='x')), 'unknown key(s) plan')
+
+    def test_a_kindless_read_allows_unknown_keys_and_checks_only_the_common_ones(self):
+        self.assertEqual(report.typed(block(plan='x'), None)['plan'], 'x')
+        with self.assertRaises(report.ReportError):
+            report.typed(block(status='finished'), None)
+
+    def test_a_missing_required_key_is_refused(self):
+        obj = json.loads(block()[len('```json asf-report\n'):-5])
+        del obj['pushed']
+        text = '```json asf-report\n' + json.dumps(obj) + '\n```\n'
+        self.assertIn("'pushed'", report.check('spec', text))
+
+    def test_a_bad_enum_is_refused(self):
+        msg = report.check('spec', block(status='finished'))
+        self.assertIn('done, partial, blocked', msg)
+        self.assertIn("'finished'", msg)
+
+    def test_a_bad_type_is_refused(self):
+        self.assertIn("'commits' must be list", report.check('spec', block(commits='none')))
+        self.assertIn("'round' must be int", report.check('review', report.render('review', round=True)))
+
+    def test_the_three_cross_field_rules(self):
+        cases = (
+            (dict(pushed='yes', sha=None), "'sha'"),
+            (dict(pushed='rebased', sha=''), "'sha'"),
+            (dict(pushed='no', why=None), "'why'"),
+            (dict(status='blocked', needs_operator=[], left_out=[]), 'needs_operator'),
+        )
+        for over, named in cases:
+            with self.subTest(over=over):
+                self.assertIn(named, report.check('spec', block(**over)))
+        good = (dict(pushed='yes', sha='abc1234'), dict(pushed='rebased', sha='abc1234'),
+                dict(pushed='no', sha=None, why='the suite is still running'),
+                dict(status='blocked', needs_operator=['X — answer']),
+                dict(status='blocked', left_out=['the whole thing — no access']))
+        for over in good:
+            with self.subTest(over=over):
+                self.assertIsNone(report.check('spec', block(**over)))
+
+    def test_an_adjudicate_ruling_may_not_be_empty(self):
+        self.assertIn("'ruling'", report.check('adjudicate', report.render('adjudicate', ruling='  ')))
+
+    def test_a_good_report_of_every_kind_parses(self):
+        for kind in KINDS:
+            with self.subTest(kind=kind):
+                report.typed(report.render(kind), kind)
+                self.assertIsNone(report.check(kind, report.render(kind)))
+
+
+class RenderTest(unittest.TestCase):
+    def test_render_round_trips_through_typed(self):
+        for kind in KINDS:
+            with self.subTest(kind=kind):
+                self.assertEqual(report.typed(report.render(kind, item='F-0025'), kind)['item'],
+                                 'F-0025')
+
+    def test_render_refuses_a_field_the_kind_does_not_have(self):
+        with self.assertRaises(report.ReportError):
+            report.render('close', stories=[])
+
+    def test_render_fills_every_required_field(self):
+        for kind in KINDS:
+            obj = report.typed(report.render(kind), kind)
+            required = {n for n, (_t, d, _l) in report.schema(kind).items() if d is report.REQ}
+            self.assertLessEqual(required, set(obj), kind)
+
+    def test_render_of_a_non_pushing_or_blocked_report_is_still_valid(self):
+        for over in (dict(pushed='no'), dict(status='blocked'), dict(status='partial', pushed='no')):
+            self.assertIsNone(report.check('coder', report.render('coder', **over)), over)
+
+
+class ContractTest(unittest.TestCase):
+    def test_the_contract_names_every_field_of_the_kind(self):
+        for kind in KINDS:
+            text = report.contract(kind)
+            for name, (_types, _default, line) in report.schema(kind).items():
+                with self.subTest(kind=kind, field=name):
+                    self.assertIn(f'"{name}"', text)
+                    self.assertIn(line, text)
+
+    def test_the_contract_is_the_shape_it_asks_for(self):
+        for kind in KINDS:
+            with self.subTest(kind=kind):
+                shape = json.loads(report.fence(report.contract(kind)))
+                given = json.loads(report.fence(report.render(kind)))
+                filled = {k: given[k] if isinstance(v, str) else v for k, v in shape.items()}
+                text = '```json asf-report\n' + json.dumps(filled) + '\n```\n'
+                self.assertEqual(list(shape), list(report.schema(kind)))
+                self.assertIsNone(report.check(kind, text))
+
+    def test_the_common_fields_come_first_in_every_kind(self):
+        heads = set()
+        for kind in KINDS:
+            lines = report.contract(kind).split('```json asf-report\n', 1)[1].splitlines()
+            heads.add('\n'.join(lines[:1 + len(report.COMMON)]))
+        self.assertEqual(len(heads), 1)
+
+
+class ReadersTest(unittest.TestCase):
+    """The card's second acceptance, stated as a contradiction: the JSON wins over the prose."""
+
+    def test_the_json_wins_over_the_prose(self):
+        text = ('REPORT\nitem: B-0001\nstatus: partial\npushed: no — waiting for the suite\n\n'
+                + report.render('fix-bug', pushed='yes', sha='abc1234'))
+        self.assertIsNone(report.failure(text))
+        self.assertTrue(runtime_mod.result_ok(rec(text)))
+
+    def test_and_the_other_way_round(self):
+        text = ('REPORT\nitem: B-0001\nstatus: done\npushed: yes abc1234\n\n'
+                + report.render('fix-bug', pushed='no', why='the suite is still running'))
+        self.assertEqual(report.failure(text), report.UNPUSHED)
+        self.assertEqual(runtime_mod.failure_reason(rec(text)), report.UNPUSHED)
+        self.assertFalse(runtime_mod.result_ok(rec(text)))
+
+    def test_the_ruling_is_read_off_the_json(self):
+        text = ('REPORT\nitem: B-0001\nruling: the prose says this\n\n'
+                + report.render('adjudicate', ruling='  the typed one  '))
+        self.assertEqual(report.ruling(text), 'the typed one')
+        self.assertEqual(report.ruling('REPORT\nruling: prose only\n'), '')
         self.assertEqual(report.ruling('no report at all'), '')
 
+    def test_the_prose_reader_is_gone(self):
+        for name in ('parse', 'unpushed', 'NO_RE'):
+            self.assertFalse(hasattr(report, name), name)
 
-class RulingFieldsTests(unittest.TestCase):
-    """F-0090 D10: the ruling's mechanism is three typed fields, read off the last REPORT."""
+    def test_a_malformed_report_is_not_a_failure_reason(self):
+        for text in ('I did the thing.', '```json asf-report\n{"item":\n```\n'):
+            self.assertIsNone(report.failure(text))
+            self.assertTrue(runtime_mod.result_ok(rec(text)))
 
-    def report(self, *lines):
-        return 'REPORT\nitem: T-0009\nkind: adjudicate\nstatus: done\n' + '\n'.join(lines) + '\n```\n'
+    def test_summary_is_one_line(self):
+        done = report.summary(report.typed(report.render('coder'), 'coder'))
+        unpushed = report.summary(report.typed(
+            report.render('coder', status='partial', pushed='no', why='the suite\nis still running'),
+            'coder'))
+        blocked = report.summary(report.typed(
+            report.render('coder', status='blocked', pushed='no', needs_operator=['X — answer']),
+            'coder'))
+        self.assertEqual(done, 'done')
+        self.assertEqual(unpushed, 'partial — the suite is still running')
+        self.assertEqual(blocked, 'blocked — needs operator: X — answer')
+        for line in (done, unpushed, blocked):
+            self.assertNotIn('\n', line)
 
-    def test_the_three_fields_are_read(self):
-        text = self.report('ruling: it waits', 'blocked_on: T-0025',
-                           'writes: asf/a.py tests/test_a.py  docs/**', 'superseded_by: T-0030')
+
+class RulingFieldsTest(unittest.TestCase):
+    """F-0090 D10 (PD5): the ruling's mechanism is three fields of the adjudicate report."""
+
+    NONE = {'blocked_on': None, 'writes': None, 'superseded_by': None}
+
+    def test_the_three_fields_are_read_off_the_object(self):
+        text = report.render('adjudicate', ruling='it waits', blocked_on='T-0025',
+                             writes=['asf/a.py', 'tests/test_a.py', 'docs/**'],
+                             superseded_by='T-0030')
         self.assertEqual(report.ruling_fields(text),
                          {'blocked_on': 'T-0025', 'writes': ['asf/a.py', 'tests/test_a.py', 'docs/**'],
                           'superseded_by': 'T-0030'})
 
-    def test_none_and_dashes_and_absent_are_all_no_claim(self):
-        none = {'blocked_on': None, 'writes': None, 'superseded_by': None}
+    def test_an_absent_field_is_none(self):
+        self.assertEqual(report.ruling_fields(report.render('adjudicate', ruling='nothing')), self.NONE)
+        self.assertEqual(report.ruling_fields('no report at all'), self.NONE)
+        self.assertEqual(report.ruling_fields(report.render('coder')), self.NONE)
+
+    def test_none_and_empty_are_no_claim(self):
         for value in ('none', 'None', 'n/a', '-', '—', ''):
             with self.subTest(value=value):
-                text = self.report(f'blocked_on: {value}', f'writes: {value}', f'superseded_by: {value}')
-                self.assertEqual(report.ruling_fields(text), none)
-        self.assertEqual(report.ruling_fields(self.report('ruling: nothing')), none)
-        self.assertEqual(report.ruling_fields('no report at all'), none)
+                text = report.render('adjudicate', ruling='r', blocked_on=value,
+                                     writes=[value], superseded_by=value)
+                self.assertEqual(report.ruling_fields(text), self.NONE)
+        self.assertEqual(report.ruling_fields(report.render('adjudicate', ruling='r', writes=[])),
+                         self.NONE)
 
-    def test_a_note_after_the_last_field_is_no_claim_of_an_id_field(self):
-        """a product's B-1377 (2026-09-26): the ruling ended ``superseded_by: none`` and then a
-        ``NEEDS OPERATOR: …`` paragraph. The run-on value read ``none\\nNEEDS OPERATOR: …`` — a
-        superseded claim — so the lane refused the ruling and the loop guard parked the item.
-        ``blocked_on`` and ``superseded_by`` name one item: their first line is the claim."""
-        text = self.report('ruling: overruled', 'blocked_on: none', 'writes: a.md',
-                           'superseded_by: none',
-                           "NEEDS OPERATOR: PR #829's `gate` checks are red from a cancelled run")
-        self.assertEqual(report.ruling_fields(text),
-                         {'blocked_on': None, 'writes': ['a.md'], 'superseded_by': None})
-        text = self.report('ruling: it waits', 'superseded_by: T-0030', 'the newer Task covers it')
-        self.assertEqual(report.ruling_fields(text)['superseded_by'], 'T-0030')
-
-    def test_a_field_outside_the_last_report_block_is_ignored(self):
-        earlier = 'REPORT\nitem: T-0009\nblocked_on: T-0001\n\nlater text\nREPORT\nitem: T-0009\n'
-        self.assertIsNone(report.ruling_fields(earlier)['blocked_on'])
-        before_any = 'blocked_on: T-0001\n' + self.report('blocked_on: none')
-        self.assertIsNone(report.ruling_fields(before_any)['blocked_on'])
-
-    def test_the_ruling_paragraph_is_untouched_by_the_fields(self):
-        text = self.report('ruling: it waits for T-0025', 'blocked_on: T-0025')
-        self.assertEqual(report.ruling(text), 'it waits for T-0025')
-
+    def test_a_field_the_prose_names_is_not_read(self):
+        text = 'REPORT\nblocked_on: T-0001\n\n' + report.render('adjudicate', ruling='r')
+        self.assertIsNone(report.ruling_fields(text)['blocked_on'])
 
     def test_a_report_quoting_a_cli_error_is_not_that_failure(self):
-        text = ('REPORT\nitem: F-0001\nstatus: done\npushed: yes\n'
-                'left out: tools/x.sh - permission denied in this session\n')
-        rec = {'type': 'result', 'subtype': 'success', 'is_error': False, 'result': text}
-        self.assertIsNone(runtime_mod.failure_reason(rec))
-        self.assertTrue(runtime_mod.result_ok(rec))
-        bare = dict(rec, result='Error: permission denied')
-        self.assertEqual(runtime_mod.failure_reason(bare), 'permission')
+        text = ('the tool said: permission denied in this session\n\n'
+                + report.render('coder', left_out=['tools/x.sh - permission denied in this session']))
+        self.assertIsNone(runtime_mod.failure_reason(rec(text)))
+        self.assertTrue(runtime_mod.result_ok(rec(text)))
+        self.assertEqual(runtime_mod.failure_reason(rec('Error: permission denied')), 'permission')
+
 
 if __name__ == '__main__':
     unittest.main()

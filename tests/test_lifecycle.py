@@ -23,6 +23,7 @@ import unittest
 from unittest import mock
 
 from asf.workers import lifecycle as lc
+from asf.workers import report
 
 OK = {'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'done'}
 ERR = {'type': 'result', 'subtype': 'error', 'is_error': True, 'result': 'boom'}
@@ -347,8 +348,7 @@ class NoLandingRunInvariants(unittest.TestCase):
         self.assertEqual(lc.judge(self.GROOM, lc.Evidence(result=ERR)), 'failed')
 
     def test_a_groom_report_saying_pushed_no_is_not_unpushed_work(self):
-        rec = dict(OK, result='REPORT\nitem: F-0080\nkind: groom\nstatus: done\n'
-                              'pushed: no — a ruling is not a commit\n')
+        rec = dict(OK, result=report.render('groom', pushed='no', why='a ruling is not a commit'))
         self.assertEqual(lc.judge(self.GROOM, lc.Evidence(result=rec)), lc.FINISHED)
 
     def test_a_run_sent_back_on_a_groom_branch_lands_nothing_either(self):

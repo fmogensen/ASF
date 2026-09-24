@@ -21,6 +21,7 @@ from asf.workers import health as health_mod
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 from asf.workers import quota as quota_mod
+from asf.workers import report
 from asf.workers import runtime as runtime_mod
 from asf.workers import spawn as spawn_mod
 from asf.workers import stall as stall_mod
@@ -1253,7 +1254,9 @@ class TestHealth(Home):
         text = ('I stopped to wait for the background test run.\n\n'
                 'REPORT\nitem: F-0001\nkind: coder\nstatus: partial\nbranch: b\n'
                 'pushed: no — the suite is still running in the background\n'
-                'commits: none\ntests: python3 -m unittest (background)\nleft out: the push\n')
+                'commits: none\ntests: python3 -m unittest (background)\nleft out: the push\n\n'
+                + report.render('coder', status='partial', pushed='no',
+                                why='the suite is still running in the background'))
         self.spawn('waiting', {'ok': True, 'result': text, 'pid': 61})
         found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
         self.assertIn(('waiting', 'ended', 'failed: unpushed work'), found)
