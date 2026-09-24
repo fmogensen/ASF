@@ -56,6 +56,10 @@ conventions:
   #   branches_per_tick: 12
   #   gate_timeout_s: 600
   # prs_per_tick: 6
+  # the share of a proposed node's title an open item of the same type must already carry for
+  # `asf idea apply` to count the record as having answered it (nothing is filed for that node).
+  # idea:
+  #   answer_overlap: 0.8
   # the heading a plan uses to mark one task's section (default "### Task"; not read by the
   # current tools).
   task_heading: "## Task"

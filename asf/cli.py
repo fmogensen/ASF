@@ -159,6 +159,16 @@ def build_parser():
     p_migrate.add_argument('--fresh', action='store_true', help="bypass evidence's cache")
     p_migrate.add_argument('--product')
 
+    p_idea = sub.add_parser('idea', help='an idea tree -> intake cards (the groom types them)')
+    idea_sub = p_idea.add_subparsers(dest='idea_command', required=True)
+    p_idea_apply = idea_sub.add_parser(
+        'apply', help='file a tree the interrogator wrote as intake cards; no model call')
+    p_idea_apply.add_argument('--tree', required=True, help='the tree file to apply')
+    p_idea_apply.add_argument('--force', action='store_true',
+                              help='apply a tree that was already applied')
+    p_idea_apply.add_argument('--product')
+    p_idea_apply.add_argument('--json', action='store_true', help='print the .applied JSON')
+
     p_groom = sub.add_parser('groom', help='inbox -> cards, then write groom/<date>.md')
     p_groom.add_argument('--date', help='defaults to today (UTC)')
     p_groom.add_argument('--apply', action='store_true',
@@ -363,6 +373,9 @@ def _main(argv=None):
     if args.command == 'inbox':
         from asf.groom.inbox import cmd_inbox
         return cmd_inbox(args, resolve_record(args, announce=_announce_stderr))
+    if args.command == 'idea':
+        from asf.idea.cli import cmd_idea
+        return cmd_idea(args, resolve_record(args, announce=_announce_stderr))
     if args.command == 'set':
         from asf.record.setfield import cmd_set
         return _published(cmd_set, args, resolve_record(args, announce=_announce_stderr),

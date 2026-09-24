@@ -22,6 +22,8 @@ The product yaml carries the overrides::
         gate: per-branch          # default combined: one gate per tick (B-0040)
         branches_per_tick: 3
         gate_timeout_s: 900       # default 600: a gate past it is killed and red (B-0072)
+      idea:
+        answer_overlap: 0.8       # the title overlap at which the record answers an idea's node
       amendable_paths: [rules/*, docs/CONSTITUTION.md]  # F-0031: a landed branch touching one
                                                           # of these globs is merge_amendable_set;
                                                           # unset = the defaults in asf/amendable.py,
@@ -95,6 +97,16 @@ DEFAULT_GATE_TIMEOUT_S = 600
 HARVEST_KEYS = {'gate': 'harvest_gate', 'branches_per_tick': 'branches_per_tick',
                 'gate_timeout_s': 'gate_timeout_s'}
 
+#: The share of a proposed node's title tokens an open item of the same type must already carry
+#: for the record to answer it (F-0023): ``asf idea apply`` files nothing for a node the record
+#: answers. Spelt ``idea: {answer_overlap: …}`` in the yaml.
+DEFAULT_ANSWER_OVERLAP = 0.8
+#: The keys of the yaml's ``idea:`` block and the field each one is.
+IDEA_KEYS = {'answer_overlap': 'answer_overlap'}
+
+#: The nested yaml blocks, each read into flat fields: block name → its keys.
+_BLOCK_KEYS = {'harvest': HARVEST_KEYS, 'idea': IDEA_KEYS}
+
 DEFAULT_EVALS_DIR = 'evals'      # where a product keeps its evals (F-0024: part of the amendable set)
 DEFAULT_BRIEFS_DIR = None        # where a product keeps brief documents on its trunk
 DEFAULT_MATRIX_PATH = None       # the parity matrix file, read for Story status
@@ -165,6 +177,8 @@ class Conventions:
     harvest_gate: str = DEFAULT_HARVEST_GATE
     branches_per_tick: int = DEFAULT_BRANCHES_PER_TICK
     gate_timeout_s: int = DEFAULT_GATE_TIMEOUT_S
+    #: The title-token overlap at which the record answers a node of an idea tree.
+    answer_overlap: float = DEFAULT_ANSWER_OVERLAP
     briefs_dir: str = DEFAULT_BRIEFS_DIR
     evals_dir: str = DEFAULT_EVALS_DIR
     matrix_path: str = DEFAULT_MATRIX_PATH
@@ -200,19 +214,20 @@ class Conventions:
         data = dict(data or {})
         known = set(cls.field_names())
         kwargs = {}
-        harvest = data.pop('harvest', None)
-        if isinstance(harvest, dict):  # ``harvest: {gate, branches_per_tick}`` → the two fields
-            rest = {}
-            for key, value in harvest.items():
-                name = HARVEST_KEYS.get(key)
-                if name and value is not None:
-                    kwargs[name] = value
-                elif not name:
-                    rest[key] = value
-            if rest:
-                data['harvest'] = rest
-        elif harvest is not None:
-            data['harvest'] = harvest
+        for block, keys in _BLOCK_KEYS.items():
+            nested = data.pop(block, None)
+            if isinstance(nested, dict):  # ``harvest: {gate, …}`` → the flat fields
+                rest = {}
+                for key, value in nested.items():
+                    name = keys.get(key)
+                    if name and value is not None:
+                        kwargs[name] = value
+                    elif not name:
+                        rest[key] = value
+                if rest:
+                    data[block] = rest
+            elif nested is not None:
+                data[block] = nested
         for key in list(data):
             if key in known:
                 value = data.pop(key)
