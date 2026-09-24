@@ -29,7 +29,7 @@ class Job:
 
     def __init__(self, product, name, cwd, brief_path, model, account=None, add_dirs=(),
                  permission_mode=DEFAULT_PERMISSION_MODE, env=None, log_path=None,
-                 settings_file=None, hooks_dir=None):
+                 settings_file=None, hooks_dir=None, resume=None):
         self.product = product
         self.name = name
         self.cwd = cwd
@@ -46,6 +46,8 @@ class Job:
         # the per-product git hook dir (asf.workers.githooks.ensure) — set as core.hooksPath so
         # every commit the session makes carries its ASF-Session trailer (F-0076)
         self.hooks_dir = hooks_dir
+        # the runtime's own session id to continue (``runtime_session``), or None for a fresh run
+        self.resume = resume
 
     @property
     def session(self):
@@ -77,6 +79,8 @@ def job_log_path(product_name, job_name):
 def build_command(job, binary=DEFAULT_BINARY):
     """The headless command line — a pure function of the job (golden-tested)."""
     cmd = [binary, '-p', '--permission-mode', job.permission_mode]
+    if job.resume:
+        cmd += ['--resume', job.resume]
     for d in job.add_dirs:
         cmd += ['--add-dir', d]
     if job.model:
@@ -151,6 +155,32 @@ def read_result(log_path):
     return result
 
 
+def init_line(log_path):
+    """The last run's ``system``/``init`` record, or None — the same scan :func:`read_result`
+    makes, rewinding at every ``init``."""
+    if not log_path or not os.path.exists(log_path):
+        return None
+    init = None
+    with open(log_path, encoding='utf-8', errors='replace') as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(rec, dict) and rec.get('type') == 'system' and rec.get('subtype') == 'init':
+                init = rec
+    return init
+
+
+def runtime_session(log_path):
+    """The runtime's own session id for the log's last run: :func:`init_line`'s ``session_id``,
+    else ''. This is the id a continuation resumes; ``ASF_SESSION`` is ours and names a
+    launch (F-0076, D1), not a conversation."""
+    return str((init_line(log_path) or {}).get('session_id') or '')
+
+
 # the CLI's own error texts, which it reports with ``subtype: success``
 FAILURE_SIGNATURES = (
     ('unknown model', re.compile(r'issue with the selected model|model .* (?:not found|does not exist)', re.I)),
@@ -193,6 +223,11 @@ class Runtime:
     def run(self, job, wait=False):
         raise NotImplementedError
 
+    def continue_run(self, job):
+        """Continue ``job.resume``'s conversation with the text at ``job.brief_path`` on stdin.
+        ``None`` from a runtime that cannot — the caller falls back."""
+        return None
+
 
 class ClaudeCodeRuntime(Runtime):
     name = 'claude_code'
@@ -203,7 +238,8 @@ class ClaudeCodeRuntime(Runtime):
     def run(self, job, wait=False):
         log_path = job.log_path or job_log_path(job.product, job.name)
         with open(job.brief_path, 'rb') as brief, open(log_path, 'ab') as log:
-            line = _session_line(job)
+            # a continued run is the writer's session: a second ``asf`` line would claim otherwise
+            line = None if job.resume else _session_line(job)
             if line is not None:
                 log.write((line + '\n').encode('utf-8'))
                 log.flush()
@@ -221,6 +257,19 @@ class ClaudeCodeRuntime(Runtime):
                       text=(rec or {}).get('result', ''), log_path=log_path,
                       reason=failure_reason(rec))
 
+    def continue_run(self, job, wait=False):
+        """:meth:`run` with ``job.resume`` set. None when the spawn raises, or (``wait=True``)
+        when the process exits non-zero having written no ``init`` line."""
+        log_path = job.log_path or job_log_path(job.product, job.name)
+        had = init_line(log_path)
+        try:
+            result = self.run(job, wait=wait)
+        except Exception:
+            return None
+        if wait and result.returncode and init_line(log_path) in (None, had):
+            return None
+        return result
+
 
 class FakeRuntime(Runtime):
     """Replays scripted results in order: each is a dict ``{"ok": bool, "result": str,
@@ -235,19 +284,36 @@ class FakeRuntime(Runtime):
         self.script = list(script or [])
         self.calls = []
         self._next_pid = 90000
+        self._runs = {}
 
     def run(self, job, wait=False):
         with open(job.brief_path, encoding='utf-8') as f:
             self.calls.append((job, f.read()))
+        return self._replay(job)
+
+    def continue_run(self, job):
+        """Replays the next scripted step, appending a second ``init``+``result`` pair to the
+        same log; a step carrying ``{"decline": true}`` is a runtime that cannot: None."""
+        with open(job.brief_path, encoding='utf-8') as f:
+            text = f.read()
+        if self.script and self.script[0].get('decline'):
+            self.script.pop(0)
+            return None
+        self.calls.append((job, text))
+        return self._replay(job)
+
+    def _replay(self, job):
         step = self.script.pop(0) if self.script else {'ok': True, 'result': 'done'}
         self._next_pid += 1
         pid = step.get('pid', self._next_pid)
         log_path = job.log_path or job_log_path(job.product, job.name)
         with open(log_path, 'a', encoding='utf-8') as log:
-            line = _session_line(job)
+            line = None if job.resume else _session_line(job)
             if line is not None:
                 log.write(line + '\n')
-            log.write(json.dumps({'type': 'system', 'subtype': 'init', 'model': job.model}) + '\n')
+            n = self._runs[job.name] = self._runs.get(job.name, 0) + 1
+            log.write(json.dumps({'type': 'system', 'subtype': 'init', 'model': job.model,
+                                  'session_id': f'fake:{job.name}:{n}'}) + '\n')
             if step.get('running'):
                 return Result(pid=pid, log_path=log_path)
             ok = bool(step.get('ok', True))

@@ -326,7 +326,8 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
         if line:
             found.append((job, 'published', line))
         now = pool_mod.now_iso()
-        pool_mod.update_session(product, job, ended=now, end_reason=reason)
+        pool_mod.update_session(product, job, ended=now, end_reason=reason,
+                                runtime_session=runtime_mod.runtime_session(s.get('log')) or None)
         s.update(ended=now, end_reason=reason)
         found.append((job, 'ended', reason))
         if closed:
