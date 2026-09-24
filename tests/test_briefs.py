@@ -116,6 +116,10 @@ def _groom_row():
     return r
 
 
+ROWS['delivery-plan'] = row('DELIVERY → PLAN', 'F-0003', 'delivery-plan', 'plan/F-0003',
+                            '3 items in one delivery, no plan', feature_id='F-0003')
+ROWS['delivery-code'] = row('DELIVERY → CODE', 'F-0003', 'delivery-code', 'worker/F-0003',
+                            'delivery plan approved, footprint free', feature_id='F-0003')
 ROWS['groom'] = _groom_row()
 ROWS['reshape'] = row('RESHAPE → PLAN', 'T-0050', 'reshape', 'plan/T-0050',
                       'groom: split asf/feeder | asf/harvest', feature_id='F-0001')
@@ -521,7 +525,7 @@ class WhereToLookTests(unittest.TestCase):
         # it is the last name in TRIM_ORDER, so `fit` empties every earlier trimmable section —
         # last_report included — before it loses a single line of its own.
         self.assertEqual(preamble_mod.TRIM_ORDER,
-                         ('description', 'acceptance', 'last_report', 'where'))
+                         ('description', 'acceptance', 'members', 'last_report', 'where'))
         sections = [
             preamble_mod.Section('kept', '', ['id']),
             preamble_mod.Section('last_report', '### LR', ['l1', 'l2', 'l3'],
@@ -563,6 +567,54 @@ class WhereToLookTests(unittest.TestCase):
     def test_the_outline_is_capped(self):
         py = '\n'.join(f'def f{i}():\n    pass' for i in range(30))
         self.assertEqual(len(facts_mod.file_outline(py, 'x.py')), facts_mod.OUTLINE_LIMIT)
+
+
+class DeliveryBriefTest(unittest.TestCase):
+    """F-0102: the two brief kinds of a delivery, and the digest that folds its members."""
+
+    def brief(self, kind):
+        return briefs.build(product(), ROWS[kind], index(), [], REPO_FACTS)
+
+    def test_delivery_plan_brief_renders(self):
+        b = self.brief('delivery-plan')
+        self.assertIn('## Your job: write the delivery plan for F-0003 — 3 items in one branch',
+                      b.text)
+        self.assertIn('in this order — F-0003, B-0001, S-0001', b.text)
+        self.assertEqual(b.text.count('#### '), 3)
+        self.assertIn('### The items of this delivery', b.text)
+        self.assertIn('test_pending_page_says_so', b.text)
+        self.assertIn('test_timeout_is_pending_not_500', b.text)
+        self.assertIn('test_timeout_retries_fallback', b.text)
+        self.assertIn('Delivery: 3 items, in this order — F-0003, B-0001, S-0001', b.text)
+        self.assertEqual(build_mod.placeholders(b.text), [])
+        self.assertEqual(b.model, 'heavy')
+
+    def test_delivery_code_brief_renders(self):
+        b = self.brief('delivery-code')
+        self.assertIn('ONE COMMIT PER ITEM', b.text)
+        self.assertIn('app/checkout/pay.py, app/checkout/retry.py, tests/test_checkout.py', b.text)
+        self.assertIn('docs/plans/f-0003.md', b.text)
+        self.assertEqual(b.model, 'light')
+
+    def test_neither_kind_needs_an_id_range(self):
+        self.assertFalse(build_mod.id_ranges_needed('delivery-plan'))
+        self.assertFalse(build_mod.id_ranges_needed('delivery-code'))
+
+    def test_a_card_without_delivers_gets_no_members_section(self):
+        self.assertNotIn('The items of this delivery', self.brief('coder').text)
+
+    def test_a_members_acceptance_stales_the_delivery_digest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            record = os.path.join(tmp, 'record')
+            shutil.copytree(RECORD, record)
+            prod = product(backlog_dir=record)
+            before = build_mod.card_digest(prod, 'F-0003', index())
+            path = os.path.join(record, 'stories', 'S-0001.md')
+            with open(path, encoding='utf-8') as f:
+                text = f.read()
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(text.replace('test_timeout_retries_fallback', 'test_something_else'))
+            self.assertNotEqual(build_mod.card_digest(prod, 'F-0003', index()), before)
 
 
 class PlaceholderTest(unittest.TestCase):
