@@ -616,6 +616,91 @@ class NoS1S2BugIsInvisible(unittest.TestCase):
         self.assertIn((rows.CARD_SPEC, 'F-0001', True), [(r.kind, r.item_id, r.launches) for r in out])
 
 
+class CapOverEveryLaunchingKindTest(unittest.TestCase):
+    """F-0080 §2.6 / §3.6: one adjudicate row at the limit, silence above it, for every kind."""
+
+    def feature(self, **over):
+        f = {'id': 'F-0001', 'type': 'feature', 'title': 'F', 'decided': True, 'rank': 1,
+             'stage': 'card', 'state': 'New'}
+        f.update(over)
+        return {'items': {'F-0001': f}}
+
+    def task_index(self, **over):
+        t = {'id': 'T-0001', 'type': 'task', 'parent': 'F-0001', 'state': 'New', 'writes': ['a.py']}
+        t.update(over)
+        return {'items': {
+            'F-0001': {'id': 'F-0001', 'type': 'feature', 'decided': True, 'rank': 1,
+                       'state': 'Active', 'stage': 'plan-approved', 'children': ['T-0001']},
+            'T-0001': t}}
+
+    def cases(self):
+        return [
+            (rows.CARD_SPEC, self.feature(), 'F-0001'),
+            (rows.STARVED_SPEC, self.feature(stage='spec-draft'), 'F-0001'),
+            (rows.STARVED_PLAN, self.feature(stage='spec-approved'), 'F-0001'),
+            (rows.PLAN_CODE, self.task_index(), 'T-0001'),
+            (rows.CONFLICT, self.task_index(state='Active', mergeable='CONFLICTING'), 'T-0001'),
+            (rows.STALE, self.task_index(state='Active', evidence=['PR #5 CLOSED']), 'T-0001'),
+        ]
+
+    def of(self, idx, kind, iid, n, prod=None):
+        out = rows.candidates(idx, prod or product(), [], attempts={iid: n})
+        return [r for r in out if r.item_id == iid and r.kind in (kind, rows.STALEMATE)]
+
+    def test_each_kind_launches_below_the_limit(self):
+        for kind, idx, iid in self.cases():
+            with self.subTest(kind=kind):
+                got = self.of(idx, kind, iid, 2)
+                self.assertEqual([(r.kind, r.launches) for r in got], [(kind, True)])
+
+    def test_each_kind_is_one_adjudicate_row_at_the_limit(self):
+        for kind, idx, iid in self.cases():
+            with self.subTest(kind=kind):
+                got = self.of(idx, kind, iid, 3)
+                self.assertEqual([(r.kind, r.brief_kind, r.launches) for r in got],
+                                 [(rows.STALEMATE, 'adjudicate', True)])
+                self.assertIn(kind, got[0].reason)
+
+    def test_each_kind_is_silent_above_the_limit(self):
+        for kind, idx, iid in self.cases():
+            with self.subTest(kind=kind):
+                self.assertEqual(self.of(idx, kind, iid, 4), [])
+
+    def test_the_limit_is_conventions_attempt_limit(self):
+        p = product(conventions={'attempt_limit': 1})
+        got = self.of(self.feature(), rows.CARD_SPEC, 'F-0001', 1, p)
+        self.assertEqual([r.kind for r in got], [rows.STALEMATE])
+
+    def test_the_adjudicate_row_keeps_its_branch_and_place(self):
+        plain = self.of(self.feature(), rows.CARD_SPEC, 'F-0001', 0)[0]
+        capped = self.of(self.feature(), rows.CARD_SPEC, 'F-0001', 3)[0]
+        self.assertEqual((capped.branch, capped.tier, capped.feature_id),
+                         (plain.branch, plain.tier, plain.feature_id))
+
+    def test_a_waits_on_row_is_never_capped(self):
+        idx = self.task_index(after=['T-0000'])
+        idx['items']['T-0000'] = {'id': 'T-0000', 'type': 'task', 'parent': 'F-0001',
+                                  'state': 'New', 'writes': ['z.py']}
+        for n in (3, 4):
+            with self.subTest(attempts=n):
+                out = [r for r in rows.candidates(idx, product(), [], attempts={'T-0001': n})
+                       if r.item_id == 'T-0001']
+                self.assertEqual([(r.kind, r.action) for r in out],
+                                 [(rows.PLAN_CODE, 'WAITS ON T-0000')])
+
+    def test_a_closed_item_whose_evidence_went_quiet_stays_closed_and_unemitted(self):
+        """`sticky`, end to end: the rule falls back to New, Closed is held, no row of any kind."""
+        from asf.evidence import closing
+        held = closing.sticky('Closed', closing.Closing('New', 'planned'))
+        self.assertEqual(held.state, 'Closed')
+        idx = self.task_index(state=held.state, evidence=[])
+        idx['items']['F-0001']['state'] = 'Closed'
+        for attempts in ({}, {'T-0001': 3}, {'T-0001': 4}):
+            with self.subTest(attempts=attempts):
+                out = rows.candidates(idx, product(), [], attempts=attempts)
+                self.assertEqual([r for r in out if r.item_id in ('T-0001', 'F-0001')], [])
+
+
 class AlreadyOnTrunkTests(unittest.TestCase):
     """F-0095 §3.2: a New Task the trunk already names is not launched into an empty branch."""
 
