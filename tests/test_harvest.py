@@ -1253,6 +1253,85 @@ class ProductHarvestTests(unittest.TestCase):
             rec = self.record(b)
             self.assertFalse(rec.get('rounds') or rec.get('correction'), rec)
 
+    # -- green alone, red together: they land one at a time, never held all ---------------
+    def red_first_full_gate(self):
+        """``product_gate`` whose first *full* gate is red on ``test_fx`` (a module that only
+        times out under the combined gate's load); every other run is the real gate."""
+        real = harvest.product_gate
+        fulls = []
+
+        def gate(tmp, conv, asf_repo, out=None, only=None):
+            if not only:
+                fulls.append(1)
+                if len(fulls) == 1:
+                    return False, 'ERROR: setUpClass (checks.test_fx.Fx)', [], ('test_fx',)
+            return real(tmp, conv, asf_repo, out, only)
+        return mock.patch.object(harvest, 'product_gate', side_effect=gate)
+
+    @staticmethod
+    def green_alone_holds(lines):
+        return [l for l in lines if l.startswith('held ') and 'green alone' in l]
+
+    def test_green_alone_red_together_lands_the_first_and_regates_the_rest(self):
+        product = self.runner_product()
+        branches = self.lanes(3)
+        with self.red_first_full_gate():
+            results, lines = self.harvest(product)
+        self.assertEqual(results, {b: 'landed' for b in branches}, lines)
+        self.assertEqual(self.green_alone_holds(lines), [], lines)
+        self.assertIn('harvest: 3 branches green alone, red together — landing fix/B-0001 '
+                      'first, the rest re-gate on top of it', lines)
+        self.assertIn('harvest: re-gating 2 branch(es) on the new main', lines)
+        first = self.record('fix/B-0001').get('harvested')
+        rest = {self.record(b).get('harvested') for b in branches[1:]}
+        self.assertEqual(rest, {self.origin_main()})
+        self.assertNotEqual(first, self.origin_main())  # the first landed on its own, ahead
+        log = sh(['git', 'log', '--format=%s', 'main'], cwd=self.origin).stdout.splitlines()
+        self.assertEqual(log[:3], [f'fix(B-{i:04d}): change {i}' for i in (3, 2, 1)])
+
+    def test_green_alone_with_no_time_left_lands_the_first_and_the_rest_next_tick(self):
+        product = self.runner_product()
+        branches = self.lanes(3)
+        with self.red_first_full_gate(), mock.patch.object(harvest, 'regate_now',
+                                                           return_value=False):
+            results, lines = self.harvest(product)
+        self.assertEqual(results, {'fix/B-0001': 'landed', 'fix/B-0002': 'held',
+                                   'fix/B-0003': 'held'}, lines)
+        self.assertFalse(any('red with the others' in l for l in lines), lines)
+        for b in branches[1:]:
+            self.assertIn(f'held {b}: green alone, one landed ahead of it — re-gated on the new '
+                          f'main next tick', lines)
+            rec = self.record(b)
+            self.assertFalse(rec.get('rounds') or rec.get('correction'), rec)  # no round spent
+        # the next tick gates the rest on top of the first — no green-alone hold again
+        results, lines = self.harvest(product)
+        self.assertEqual(results, {'fix/B-0002': 'landed', 'fix/B-0003': 'landed'}, lines)
+        self.assertEqual(self.green_alone_holds(lines), [], lines)
+
+    def test_a_truly_incompatible_branch_goes_red_alone_on_the_new_main(self):
+        product = self.runner_product()
+        self.write(self.repo, 'checks/test_all.py',
+                   'import os, unittest\n\nclass A(unittest.TestCase):\n'
+                   '    def test_not_all_three(self):\n'
+                   '        root = os.path.join(os.path.dirname(__file__), "..")\n'
+                   '        self.assertFalse(all(os.path.exists(os.path.join(root, f"f{i}.txt"))'
+                   ' for i in (1, 2, 3)), "f1+f2+f3 together")\n')
+        sh(['git', 'add', '-A'], cwd=self.repo)
+        sh(['git', 'commit', '-qm', 'no three at once'], cwd=self.repo)
+        sh(['git', 'push', '-q', 'origin', 'HEAD:main'], cwd=self.repo)
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        self.lanes(3)
+        results, lines = self.harvest(product)
+        # {1,2,3} red, each half green → 1 lands; {2,3} on it red, each green → 2 lands; 3 alone
+        # on the new main is red: back to its session, the normal way
+        self.assertEqual(results, {'fix/B-0001': 'landed', 'fix/B-0002': 'landed',
+                                   'fix/B-0003': 'held'}, lines)
+        self.assertEqual(self.green_alone_holds(lines), [], lines)
+        held = [l for l in lines if l.startswith('held fix/B-0003: ')]
+        self.assertEqual(len(held), 1, lines)
+        self.assertTrue(held[0].endswith(' — back to its session (round 1)'), held)
+        self.assertEqual(self.record('fix/B-0003')['correction']['kind'], 'gate')
+
     # -- a docs-only branch cannot turn a test red ---------------------------------------
     def plan_lane(self):
         self.push_lane('plan/F-0001', [('plan(F-0001): the tasks',

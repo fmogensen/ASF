@@ -33,6 +33,11 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CUTOVER = os.path.join(PROJECT_ROOT, 'tools', 'cutover.sh')
 ROLLBACK = os.path.join(PROJECT_ROOT, 'tools', 'rollback.sh')
 
+#: A guard against a hung script, not a speed bound: a run costs ~1 s alone, but in harvest's
+#: combined gate on a loaded machine (8 shards, load ~30) two runs passed 120 s and the module
+#: went red — a timeout, not a defect — which bisected every set it was in to "green alone".
+SCRIPT_TIMEOUT_S = 1800
+
 # The stub `asf`: `tick --manifest` comes from files the test controls, everything else is the
 # real CLI. `asf tick --manifest` is another job's command; this is how it is stubbed.
 ASF_STUB = r"""#!/bin/sh
@@ -225,7 +230,7 @@ class CutoverFixture:
         fake_loaded(self.statedir, [label])
         return path
 
-    def run_script(self, script, args, timeout=120):
+    def run_script(self, script, args, timeout=SCRIPT_TIMEOUT_S):
         env = dict(os.environ)
         env['ASF_HOME'] = self.asf_home
         env['HOME'] = self.home

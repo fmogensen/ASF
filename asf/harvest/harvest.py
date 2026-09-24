@@ -45,6 +45,10 @@ When the test command names its red modules (a ``red: a, b`` line, as asf's own 
 prints), the halves re-run only those modules (``ASF_GATE_MODULES``) and the set kept is gated
 in full once more before it is pushed; when those modules are red on the trunk alone too, no
 branch is blamed or held — ``harvest: red on trunk too — <modules>`` — and the next tick retries.
+When every branch of a red set is green alone, they land one at a time: the first in wave order
+(S1 first, then oldest) goes on alone and the rest re-gate on top of it — this tick while under
+one gate timeout has passed, else the next — so a pair truly at odds goes red alone on the new
+trunk and back to its session, and no set is held whole to be combined again forever.
 
 A branch whose diff is Markdown under the document trees only (:func:`is_inert` — a spec or plan
 branch) cannot turn a test red: it is gated by the checks alone, in a set of its own that lands
@@ -1375,37 +1379,47 @@ CONFIRM_ROUNDS = 3
 
 
 def confirmed_group(tmp, trunk, entries, conv, asf_repo, hold, out, results):
-    """The one set of ``entries`` green under the *full* gate, as ``(entries, sha)``, or None.
-    A red gate bisects (targeted); the green candidates are stacked again and gated in full, so
-    what lands has always passed the whole gate. Green apart but red together: the first
-    candidate goes on alone and the rest wait for the next tick. :class:`TrunkRed` propagates."""
+    """The one set of ``entries`` green under the *full* gate, as ``(entries, sha, deferred)``;
+    ``entries`` and ``sha`` are None when no set was confirmed. A red gate bisects (targeted);
+    the green candidates are stacked again and gated in full, so what lands has always passed
+    the whole gate. Green apart but red together: holding them all only combined the same set
+    again next tick, forever (a load-flaky module red in the combined gate alone) — so they
+    land one at a time: the first in wave order goes on alone and the rest are ``deferred``,
+    for the caller to re-gate on top of it. :class:`TrunkRed` propagates."""
     candidates = list(entries)
+    deferred = []
     for _round in range(CONFIRM_ROUNDS):
         groups = gate_groups(tmp, trunk, candidates, conv, asf_repo, hold, out, announce=True)
         if not groups:
-            return None
+            return None, None, deferred
         if len(groups) == 1 and groups[0][2]:
-            return groups[0][0], groups[0][1]
+            return groups[0][0], groups[0][1], deferred
         union = [e for group, _sha, _full in groups for e in group]
-        if len(union) == len(candidates):  # nothing held: green apart, red together
-            first = groups[0][0]
-            for branch, _record in union:
-                if not any(branch == b for b, _r in first):
-                    out(f'held {branch}: green alone, red with the others — next tick')
-                    results[branch] = 'held'
-            union = first
+        if len(union) == len(candidates) and len(union) > 1:  # nothing held: green apart
+            out(f'harvest: {len(union)} branches green alone, red together — '
+                f'landing {union[0][0]} first, the rest re-gate on top of it')
+            deferred = union[1:] + deferred
+            union = union[:1]
         candidates = union
     for branch, _record in candidates:
         out(f'held {branch}: green on the red modules, not confirmed in full — next tick')
         results[branch] = 'held'
-    return None
+    return None, None, deferred
+
+
+def regate_now(started, conv):
+    """True when the branches deferred behind a landing still have time to be re-gated this
+    tick: less than one gate timeout has gone by since the set's first gate began."""
+    return time.monotonic() - started < gate_timeout(conv)
 
 
 def land_combined(repo, state_dir, entries, conv, asf_repo, dry_run, out, items=None):
     """Land every entry of ``entries`` (``[(branch, record)]``) behind one gate on the combined
     head, bisecting on red; ``{branch: outcome}``. The head is pushed fast-forward as the
-    trunk's new tip and every branch in it is marked harvested at that sha, then deleted."""
+    trunk's new tip and every branch in it is marked harvested at that sha, then deleted. The
+    set is taken in wave order (:func:`pr_order`: S1 first, then oldest)."""
     trunk = conv.main
+    entries = pr_order(entries, items)
     touched = {branch: touched_files(repo, trunk, branch) for branch, _record in entries}
     docs = [e for e in entries if is_inert(conv, touched[e[0]])]
     code = [e for e in entries if e not in docs]
@@ -1420,7 +1434,10 @@ def land_combined(repo, state_dir, entries, conv, asf_repo, dry_run, out, items=
 
 
 def land_set(repo, state_dir, entries, conv, gate_conv, asf_repo, dry_run, out, items, touched):
-    """:func:`land_combined` for one set of ``entries``, gated under ``gate_conv``."""
+    """:func:`land_combined` for one set of ``entries``, gated under ``gate_conv``. Branches
+    deferred behind a green-alone landing are gated again on the new trunk while
+    :func:`regate_now`, else held for the next tick — each round lands or holds one branch at
+    least, so the set shrinks and none waits twice on the same combination."""
     trunk = conv.main
     results = {}
 
@@ -1430,31 +1447,54 @@ def land_set(repo, state_dir, entries, conv, gate_conv, asf_repo, dry_run, out, 
                                                  files, card.get('writes') or (),
                                                  touched.get(entry[0]) or (), conv, own=own)
 
+    started = time.monotonic()
     pending = list(entries)
+    while pending:
+        deferred, go_on = land_group(repo, state_dir, pending, trunk, gate_conv, asf_repo,
+                                     dry_run, out, hold, results)
+        if not deferred:
+            break
+        if go_on and not dry_run and regate_now(started, gate_conv):
+            out(f'harvest: re-gating {len(deferred)} branch(es) on the new {trunk}')
+            pending = deferred
+            continue
+        for branch, _record in deferred:
+            out(f'held {branch}: green alone, one landed ahead of it — re-gated on the new '
+                f'{trunk} next tick')
+            results[branch] = 'held'
+        break
+    return results
+
+
+def land_group(repo, state_dir, pending, trunk, gate_conv, asf_repo, dry_run, out, hold, results):
+    """Gate ``pending`` in one throwaway worktree and push the confirmed set; ``(deferred,
+    go_on)`` — the entries deferred behind it (:func:`confirmed_group`), and whether they may be
+    re-gated this tick (False when the trunk is red or a push failed)."""
+    deferred = []
     for _attempt in (1, 2):
         holder = tempfile.mkdtemp(prefix='harvest-')
         tmp = os.path.join(holder, 'wt')
         try:
             add = sh(['git', 'worktree', 'add', '--detach', tmp, f'origin/{trunk}'], cwd=repo)
             if add.returncode != 0:
-                for branch, _record in pending:
+                for branch, _record in pending + deferred:
                     out(f'held {branch}: worktree add failed: {tail(add.stderr)}')
                     results[branch] = 'held'
-                return results
+                return [], False
             try:
-                group = confirmed_group(tmp, trunk, pending, gate_conv, asf_repo, hold, out,
-                                        results)
+                landing, sha, more = confirmed_group(tmp, trunk, pending, gate_conv, asf_repo,
+                                                     hold, out, results)
             except TrunkRed as red:  # no branch's doing: hold nothing, gate again next tick
                 out(f'harvest: red on trunk too — {" ".join(red.modules)}')
-                return results
-            if group is None:
-                return results
-            landing, sha = group
+                return [], False
+            deferred = more + deferred
+            if landing is None:
+                return deferred, True
             if dry_run:
                 for branch, _record in landing:
                     out(f'DRY: would land {branch} → {sha}')
                     results[branch] = 'dry'
-                return results
+                return deferred, False
             pushed, not_ff = push_ff(repo, sha, trunk)
             if not_ff:
                 pending = landing  # the trunk moved under us — stack and gate again, once
@@ -1463,25 +1503,25 @@ def land_set(repo, state_dir, entries, conv, gate_conv, asf_repo, dry_run, out, 
                 for branch, _record in landing:
                     out(f'held {branch}: push to {trunk} refused')
                     results[branch] = 'held'
-                return results
+                return deferred, False
             sh(['git', 'fetch', '-q', 'origin', trunk], cwd=repo)
             if sh(['git', 'merge-base', '--is-ancestor', sha, f'origin/{trunk}'], cwd=repo).returncode != 0:
                 for branch, _record in landing:
                     out(f'held {branch}: {sha} is not on origin/{trunk} after the push')
                     results[branch] = 'held'
-                return results
+                return deferred, False
             for branch, record in landing:
                 mark_session(state_dir, record.get('job') or branch, harvested=sha, correction=None)
                 sh(['git', 'push', '-q', 'origin', '--delete', branch], cwd=repo)
                 out(f'landed {branch} → {sha}')
                 results[branch] = 'landed'
-            return results
+            return deferred, True
         finally:
             sh(['git', 'worktree', 'remove', '--force', tmp], cwd=repo)
     for branch, _record in pending:
         out(f'held {branch}: {trunk} moved again on retry')
         results[branch] = 'held'
-    return results
+    return deferred, False
 
 
 def sync_checkout(repo, trunk, out=print):
