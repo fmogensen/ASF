@@ -16,8 +16,10 @@ repo_dir: ~/Code/acme/sample
 # the branch releases deploy from.
 main: main
 
-# where this product's record (the backlog) lives — a directory with epics/ features/ stories/
-# tasks/ bugs/ decisions/ rules/ inbox/ groom/ releases/ metrics/ index.json.
+# your checkout of this product's record (the backlog) — a git repo with an origin, holding
+# epics/ features/ stories/ tasks/ bugs/ decisions/ rules/ inbox/ groom/ releases/ metrics/
+# index.json. The tick never writes it: it works in its own clone (~/.ASF/state/<name>/record/)
+# and pushes to origin, so `git pull` here before reading the tables.
 backlog_dir: ~/Code/acme/sample-backlog
 
 # conventions: every path/naming choice the record and tick tools need, so no tool hardcodes a
@@ -27,15 +29,35 @@ conventions:
   plans_dir: docs/plans
   reviews_dir: docs/reviews
   briefs_dir: docs/briefs
+  # the branch each job kind pushes: code (a Task), fix (a Bug), spec, plan, groom. Any other key
+  # (task, batch here) only adds a prefix the prs step and harvest recognise; `legacy: [..]`
+  # names old prefixes that are recognised and never minted.
   branch_prefixes:
+    code: worker
+    fix: fix
     spec: spec
     plan: plan
     task: task
     batch: batch
     groom: groom               # the groom session's throwaway branch
-  # the filename pattern a review lives at, {n} is the review round number.
+  # the filename pattern a review lives at, {n} is the review round number. A spec or plan is
+  # approved when its newest review says APPROVED, or when the document is on main.
   review_pattern: "docs/reviews/{n}-{slug}.md"
-  # the heading a plan uses to mark one task's section, read by asf.tick.migrate's plan parser.
+  # how a finished branch reaches the trunk: fast-forward (harvest gates it with ci.test_command
+  # and pushes it to main) | pull-request (the prs step opens a PR; on a PR host harvest merges
+  # it once approvals allow, checks are green and — for code — the newest ASF review of its item
+  # reads `verdict: approved`; a docs-only spec/plan PR needs no review).
+  # Unset: fast-forward when steps.batch is off or unset, else pull-request.
+  # landing: fast-forward
+  # harvest: one gate over every eligible branch (combined, bisecting on red) or per-branch; the
+  # most branches one run gates; seconds before a gate is killed and counted red.
+  # harvest:
+  #   gate: combined
+  #   branches_per_tick: 12
+  #   gate_timeout_s: 600
+  # prs_per_tick: 6
+  # the heading a plan uses to mark one task's section (default "### Task"; not read by the
+  # current tools).
   task_heading: "## Task"
   # asf.tick.migrate: the one spec file (if any) excluded from the "every other main spec"
   # decision-row scan because it's already read separately as the product's design spec.
@@ -84,7 +106,9 @@ conventions:
 
 # CI: which provider runs checks, which workflow file, budgets and runner labels.
 ci:
-  provider: gh-actions   # gh-actions | other
+  provider: gh-actions   # gh-actions | other | none (no PR host: no repo_slug, no gh)
+  # the gate: the command a branch must pass before harvest lands it (none: no test gate).
+  test_command: make test
   # read as conventions.ci_workflow — the workflow whose runs on the trunk are the green
   # evidence.
   workflow: ci.yml
@@ -102,9 +126,9 @@ ci:
 capacity:
   sessions: 3         # concurrent worker sessions for this product
   ci: 2               # concurrent CI runs for this product
-  batch:              # the shape the product's own merge-queue script is told to run
-    per_run: 8        # batches per run
-    parallel: 2       # batches in flight at once
+  batch:              # passed to a batch step as ASF_CAPACITY_*; harvest's PR merges obey it too
+    per_run: 8        # batches per run (harvest: PR merges per run)
+    parallel: 2       # batches in flight at once (harvest: PRs in a GitHub merge queue)
     runners: 4        # runner slots one run may claim
 
 # token_caps: runaway ceilings on one run's tokens, per dimension, never summed. `default` applies
@@ -174,6 +198,9 @@ approvals:
   merge_amendable_set: human-now
   merge_routine_pr: auto
   file_bug: auto
+  # two switches, not classes, both off unless set:
+  # groom: auto      # the groom's policy pass, adjudicate sessions and daily digest
+  # upgrade: auto    # the tick runs `asf upgrade` itself (only for ASF's own repo as a product)
 
 # approval_signals: product-specific recognisers added to a class's built-ins (never removed) —
 # a class not in asf.approvals.CLASSES, or a key other than paths/commands, is a config error.
@@ -185,7 +212,7 @@ approvals:
 #     commands: ['\bpsql\b.*\bprod\b']
 
 # F-0085/D-0049: the four policies' thresholds. A policy whose key is absent uses the default
-# shown.
+# shown. Read only when approvals.groom is auto.
 groom:
   duplicate_overlap: 0.95      # close_exact_duplicate: title overlap at or above this
   recurring_bug_count: 2       # decide_recurring_bug: auto-filed Bug seen this many times
@@ -193,6 +220,16 @@ groom:
   adjudicate_per_day: 6        # sessions per groom date in all, counting those for questions asked since the last
   policies:                    # a policy named here with `off` never runs
     close_exact_duplicate: on
+
+# steps: who owns each tick step (record, health, wave, prs, harvest, batch, daily).
+#   asf        the default for every step ASF implements
+#   <command>  run by the tick in repo_dir, with ASF_PRODUCT and ASF_CAPACITY_* in its environment
+#   off        skipped (another job runs it)
+# batch (an optional merge-queue script of the product's own) has no ASF implementation and must
+# be declared; declaring it as a command makes the default landing pull-request.
+steps:
+  batch: off
+  # batch: "bash tools/merge-queue.sh"
 
 # clocks: each entry is one job labelled <prefix>.<product>.<name>.
 # Every entry needs steps: [..] or shadow: true,

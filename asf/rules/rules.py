@@ -3,7 +3,8 @@
 
 Every `rules/R-nnnn.md` card carries either a `check:` script or an honest
 `enforced: false` + `reason:`. `rules.py check` runs every check script in
-parallel with a 10 s timeout each and prints one line per violation, then one
+parallel with a timeout each (``$ASF_RULE_CHECK_TIMEOUT``, default 60 s) and prints
+one line per violation, then one
 ``rule check timed out: R-nnnn`` / ``rule check failed: R-nnnn`` line per check that
 could say neither pass nor violation (``broken`` in ``--json``; never a violation):
 

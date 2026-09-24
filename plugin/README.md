@@ -13,6 +13,7 @@ fails when the tree drifts. Never edit `skills/*/SKILL.md` by hand.
 | `/asf:parity` | the PARITY table: one row per Story |
 | `/asf:prod` | the PROD table: deploy state and what just shipped |
 | `/asf:sessions` | the SESSIONS table |
+| `/asf:capacity` | the CAPACITY table: sessions and CI runs per product |
 | `/asf:doctor` | is this product's install sound — one table |
 | `/asf:groom` | the groom: inbox → cards, the operator's questions, `--apply` with the answers |
 

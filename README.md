@@ -26,4 +26,9 @@ The installer pins the factory as `asf`, installs the product's redaction hooks 
 `asf doctor`. In that product's Claude Code session: `/plugin marketplace add fmogensen/ASF`, then
 `/plugin install asf@asf`, with `ASF_PRODUCT=<product>` set. Rerun the installer with a new ref to upgrade.
 
+The operator's guide is [`docs/guide/`](docs/guide/): [getting started](docs/guide/getting-started.md),
+[the product file](docs/guide/product-config.md), [the daily loop](docs/guide/operating.md),
+[upgrading](docs/guide/upgrading.md), [troubleshooting](docs/guide/troubleshooting.md) and the
+planned [connectors](docs/guide/connectors.md).
+
 Not "ASF" the Apache Software Foundation.

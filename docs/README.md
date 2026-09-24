@@ -2,8 +2,16 @@
 
 Three surfaces, one audience each: the root README makes the argument (evaluator); `plugin/skills` give the
 procedure (operator); `docs/` holds the specification (contributor). A mechanism is specified in exactly one
-place; the other two link to it.
+place; the other two link to it. The one exception is `guide/`: the operator's end-to-end guide, which
+describes what the code does today and links to the rest.
 
+- [`guide/`](guide/) — the operator's guide: putting a product on ASF and running it day to day
+  - [Getting started](guide/getting-started.md) — prerequisites, the config files, the installer, the plugin, the first doctor
+  - [The product file](guide/product-config.md) — the product yaml key by key: landing, steps and clocks, capacity, approvals, rule cards, redaction hooks
+  - [Operating](guide/operating.md) — the tick, the `/asf:*` tables, holds, `workers health --fix`, the groom and the inbox
+  - [Upgrading](guide/upgrading.md) — releases, reinstalling at a tag, schema migrations, what is safe mid-run
+  - [Troubleshooting](guide/troubleshooting.md) — every `NEEDS OPERATOR` line, and the common stalls
+  - [Connectors](guide/connectors.md) — planned, not yet available
 - `specs/` — the design specs, one per release
 - [`decisions/`](decisions/) — ADRs
   - [0001 — the 2026-08 prototype is prior art, not a base](decisions/0001-prior-art-not-base.md)

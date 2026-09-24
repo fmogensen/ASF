@@ -1,42 +1,71 @@
 # ~/.ASF/config.yaml — the operator's shared configuration. Copy this file there and edit.
 # One file, not per product: the scheduler, the worker pool and quota guards are shared; a
 # product's own conventions live in ~/.ASF/products/<name>.yaml (see docs/products.example.yaml).
+# The operator's guide: docs/guide/.
 
-# Which product `asf <command>` targets when --product is not given.
+# Which product `asf <command>` targets when --product is not given and $ASF_PRODUCT is unset.
 default_product: sample
 
-# scheduler: cron | launchd | systemd | gh-actions | claude-routines
-# what runs, and when, is not here — it's each product's own clocks: block
+# scheduler.kind: launchd (the default: `asf scheduler install` writes and loads one job per
+# clock) | cron (the lines are printed for `crontab -e`, and the install exits 3) | anything
+# else (no adapter: the command each job must run is printed). `provider` is read as a synonym.
+# What runs, and when, is not here — it's each product's own clocks: block
 # (products/<name>.yaml, see docs/products.example.yaml).
 scheduler:
-  provider: cron
-  # the one job every provider's adapter installs
-  job: asf tick
+  kind: launchd
+  # label_prefix: asf              # jobs are labelled <label_prefix>.<product>.<clock>
+  # launchd_label: old.job.label   # a pre-ASF job the doctor reports until it is retired
+  # legacy_labels: [old.job.*]     # pre-ASF jobs listed in the doctor's SCHEDULER section
 
-# worker pool: the accounts or API keys a spawn can use, and how much of the pool each product
-# gets. A launch is always tagged with the product it runs for, so cost per product is a sum
-# and a product can be given a floor/ceiling share.
+# legacy_paths: directories of pre-ASF tools, for the doctor's one-factory check and cutover.
+# legacy_paths: [~/old-factory/bin]
+
+# worker pool: the accounts a spawn can use. An account's `cap` is its concurrent sessions across
+# every product on this machine; `role` is its lane (local | cloud); `config_dir` is the runtime's
+# isolated config dir for that account. `home`, when set, is the session's HOME as well — without
+# it a session inherits every CLI login on this machine. A launch is always tagged with the
+# product it runs for, so cost per product is a sum.
 worker_pool:
-  backend: claude-code   # claude-code | api-key
+  backend: claude-code   # claude-code | fake
+  models:                # the two model labels a brief uses, mapped to model ids — an unmapped
+    heavy: heavy-model-id   # label refuses the launch
+    light: light-model-id
   accounts:
     - name: acct-a
-      share: 0.5
+      role: local
+      cap: 2
+      config_dir: ~/.ASF/accounts/acct-a
     - name: acct-b
-      share: 0.5
+      role: local
+      cap: 2
+      config_dir: ~/.ASF/accounts/acct-b
+      # caps:                              # optional per-model ceiling
+      #   heavy: 1
+      # home: ~/.ASF/accounts/acct-b/home
+  # quota_command: bin/quota {account}     # one JSON line: {"five_h_pct", "seven_d_pct",
+  #                                        # "seven_d_model_pct"}; without it no band applies
+  # settings_file: ~/.ASF/worker-settings.json   # runtime settings every session starts with
   # sessions: process           # process | command | fake — how the pool observes running sessions
   # sessions_command: bin/sessions   # prints one JSON object per session: {"pid", "ppid", "env"}
   # session_match: '^(\S*/)?claude(\s|$)'   # default: the runtime binary as argv[0]
 
 # quota band (percent of each window, not a fraction). An account at or above `cooldown` in any
 # window takes one job at a time; at or above `stop` it takes none. Running sessions are never
-# stopped — the band gates new launches only. The older `worker_pool.quota_guard: {max_5h, max_7d}`
-# is still read, as the `stop` for those two windows.
+# stopped — the band gates new launches only. The bands read worker_pool.quota_command. The older
+# `worker_pool.quota_guard: {max_5h, max_7d}` is still read, as the `stop` for those two windows.
+# Block maps only: the config reader does not parse inline {a: 1} maps.
 quota_guards:
-  stop:     {five_h: 95, seven_d: 95, seven_d_model: 95}
-  cooldown: {five_h: 90, seven_d: 90, seven_d_model: 90}
+  stop:
+    five_h: 95
+    seven_d: 95
+    seven_d_model: 95
+  cooldown:
+    five_h: 90
+    seven_d: 90
+    seven_d_model: 90
 
 # capacity: the ceilings the factory runs under. Every number is "at most this many at once".
-# A key left out means "no opinion" — the next fallback applies (see docs/specs/f-0079.md).
+# A key left out means "no opinion" — the next fallback applies (see docs/guide/product-config.md).
 # feeder.capacity and worker_pool.reserve_for_s1 are still read, but this block is their new home.
 capacity:
   total:              # across every product under ~/.ASF/products/
@@ -49,9 +78,14 @@ capacity:
     local: 1
     cloud: 1
 
-# paths: everything under ~/.ASF the tools read/write. state is per product
-# (~/.ASF/state/<product>/); logs are shared.
-paths:
-  home: ~/.ASF
-  state_dir: ~/.ASF/state
-  log_dir: ~/.ASF/logs
+# tick: a command step (a product's `steps: {<step>: "<command>"}`) is killed after this many
+# seconds and exits 124 (default 900).
+# tick:
+#   step_timeout_s: 900
+
+# factory: the identity the tick's state commits are authored as (default "ASF <asf@localhost>").
+# factory:
+#   git_identity: "ASF <asf@localhost>"
+
+# Everything ASF reads and writes lives under ~/.ASF: products/, state/<product>/ (the session
+# ledger, the worktrees, the tick's record clone), logs/. Set $ASF_HOME to move all of it.
