@@ -1,5 +1,4 @@
 """asf.record.check — validate the backlog (``asf check``)."""
-import fnmatch
 import json
 import os
 import re
@@ -10,6 +9,7 @@ from asf.record import frontmatter
 from asf.record.core import (
     BARE_DECISION_RE, FOLDER_TO_TYPE, ID_RE, NO_PARENT_TYPES, PARENT_TYPES, build_index_data,
     canonicalize, compute_derived, expected_body, is_open, load_items, parse_sections, today,
+    writes_intersect,
 )
 
 ACCEPTANCE_ITEM_RE = re.compile(r'(?m)^- \[[ x]\]\s+\S')
@@ -245,7 +245,7 @@ def cmd_check(args, root):
             t1, t2 = active_tasks[i], active_tasks[j]
             for g1 in t1['meta']['writes']:
                 for g2 in t2['meta']['writes']:
-                    if g1 == g2 or fnmatch.fnmatch(g1, g2) or fnmatch.fnmatch(g2, g1):
+                    if writes_intersect(g1, g2):
                         add(t1, find_line(t1, 'writes'),
                             f"writes: {g1!r} intersects Active task {t2['meta'].get('id')}'s {g2!r}")
 

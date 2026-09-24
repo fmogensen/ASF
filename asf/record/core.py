@@ -5,6 +5,7 @@ Split out of the original monolithic ``backlog.py`` so ``new``/``check``/``index
 share one definition of an item without importing each other's command modules.
 """
 import datetime
+import fnmatch
 import json
 import os
 import re
@@ -109,6 +110,13 @@ def canonicalize(by_id):
             dupes.append(iid)
         canonical[iid] = records[0]
     return canonical, dupes
+
+
+def writes_intersect(a, b):
+    """True when two ``writes:`` globs name a common path by ``asf check``'s test: equal, or
+    either matching the other. The one definition — ``asf check`` refuses two Active Tasks whose
+    ``writes:`` intersect by it, and the feeder's footprint gate and the widening rule build on it."""
+    return a == b or fnmatch.fnmatch(a, b) or fnmatch.fnmatch(b, a)
 
 
 def is_open(rec):

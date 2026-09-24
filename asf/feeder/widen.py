@@ -16,8 +16,9 @@ Two facts name the missing paths, and neither is a judgement:
 :func:`decide` is the rule ``widen_footprint``. The paths are added to the Task's ``writes:`` and
 the same run goes back as a correction only when all hold: at most ``conventions.widen_max_files``
 paths, none under an approvals-protected glob (those go to their approval class), none
-overlapping a running Task's ``writes:`` (the Task waits on it), and no earlier widening of this
-Task. A second widening, or too many paths, is a RESHAPE of the Task. Pure functions over plain
+overlapping an open Task's ``writes:`` — every Task Active in the record or with a run in play,
+by ``asf check``'s own intersection test, and the paths an earlier widening of the same pass
+added (the Task waits on that owner) — and no earlier widening of this Task. A second widening, or too many paths, is a RESHAPE of the Task. Pure functions over plain
 values — no filesystem, no git.
 """
 import dataclasses
@@ -27,6 +28,7 @@ import re
 
 from asf.conventions import DEFAULT_WIDEN_MAX_FILES
 from asf.feeder import footprint
+from asf.record.core import writes_intersect
 
 WIDEN = 'widen'
 RESHAPE = 'reshape'
@@ -38,6 +40,10 @@ MAX_FILES = DEFAULT_WIDEN_MAX_FILES
 
 #: The History line a widening files on the Task (the fact names where the paths came from).
 HISTORY = 'footprint widened: +{paths} ({fact})'
+#: The History line that undoes a widening whose paths intersect an open Task's ``writes:``.
+REVERTED = 'footprint widening reverted: overlaps {owner}'
+#: A widening's History line, read back: the paths it added.
+WIDENED_RE = re.compile(r'footprint widened: \+(.+?) \(')
 #: The reshape reason (the RESHAPE row's reason, and the card's ``reshape:`` value).
 RESHAPE_REASON = 'footprint: needs {paths}'
 
@@ -193,7 +199,8 @@ def decide(task_id, paths, limit=MAX_FILES, protected=None, running=(), widened_
     """The ``widen_footprint`` verdict for ``task_id`` needing ``paths`` outside its ``writes:``.
 
     ``protected``: ``{path: (class, level)}`` — the paths under an approvals-protected glob whose
-    class is not granted. ``running``: ``[(task_id, writes)]`` of the Tasks in play.
+    class is not granted. ``running``: ``[(task_id, writes)]`` of the open Tasks — Active in the
+    record or with a run in play — and the widenings already made this pass.
     ``widened_before``: how many times this Task was already widened."""
     paths = tuple(dict.fromkeys(p for p in paths or () if p))
     if widened_before or len(paths) > limit:
@@ -207,3 +214,27 @@ def decide(task_id, paths, limit=MAX_FILES, protected=None, running=(), widened_
     if other:
         return Verdict(WAITS, paths, other)
     return Verdict(WIDEN, paths)
+
+
+# ---- a widening that overlaps: undone ------------------------------------------
+
+def widened_paths(body):
+    """Every path a ``footprint widened: +…`` History line in ``body`` added, first-seen order."""
+    out = []
+    for m in WIDENED_RE.finditer(body or ''):
+        for p in m.group(1).split():
+            if p not in out:
+                out.append(p)
+    return out
+
+
+def overlapping_widenings(writes, widened, others):
+    """``(owner, [paths])``: the paths of ``writes`` a widening added (``widened``) that intersect
+    an open Task's ``writes:`` by ``asf check``'s test — the first such owner of ``others``
+    (``[(task_id, writes)]``) — else None. A plan-declared path is never named."""
+    for owner, other in others:
+        hit = [w for w in writes if w in widened
+               and any(writes_intersect(w, o) for o in other)]
+        if hit:
+            return owner, hit
+    return None

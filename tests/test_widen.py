@@ -6,16 +6,20 @@ the harvest gate (the branch red alone in test files outside ``writes:``). The r
 health step applies it (:mod:`asf.tick.widen_footprint`) and the feeder's correction rows read
 its verdict.
 """
+import contextlib
+import io
 import json
 import os
 import shutil
 import tempfile
+import types
 import unittest
 
 from asf import approvals, briefs
 from asf.feeder import rows as feeder_rows
 from asf.feeder import widen
 from asf.harvest import harvest
+from asf.record.check import cmd_check
 from asf.record.index import do_index
 from asf.tick import widen_footprint
 from asf.views import index_reader
@@ -81,6 +85,18 @@ class DecideTests(unittest.TestCase):
         self.assertEqual((v.kind, v.detail, v.level), (widen.APPROVAL, 'touch_legal', 'human-now'))
         v = widen.decide('T-1', ['lib/a.py'], running=[('T-2', ['lib/*.py']), ('T-1', ['lib/a.py'])])
         self.assertEqual((v.kind, v.detail), (widen.WAITS, 'T-2'))
+
+    def test_a_widening_overlaps_by_asf_checks_own_test(self):
+        from asf.record.core import writes_intersect
+        self.assertTrue(writes_intersect('lib/*.py', 'lib/a.py'))
+        self.assertEqual(widen.overlapping_widenings(['a.py', 'lib/a.py'], ['lib/a.py'],
+                                                     [('T-2', ['lib/*.py'])]),
+                         ('T-2', ['lib/a.py']))
+        self.assertIsNone(widen.overlapping_widenings(['a.py', 'lib/a.py'], ['a.py'],
+                                                      [('T-2', ['lib/*.py'])]))
+        self.assertEqual(widen.widened_paths('- x footprint widened: +a.py b/c.py (report: x)\n'
+                                             '- y footprint widened: +d.py (gate)\n'),
+                         ['a.py', 'b/c.py', 'd.py'])
 
 
 class WidenStepTests(StepsTestCase):
@@ -208,6 +224,85 @@ class WidenStepTests(StepsTestCase):
         rows = self.rows()
         self.assertEqual([(r.action, r.waits_on, r.launches) for r in rows],
                          [('WAITS ON T-0002', 'T-0002', False)])
+
+    def active(self, iid, writes, history=''):
+        """A Task Active in the record (no session), its History carrying ``history``."""
+        with open(os.path.join(self.root, 'tasks', f'{iid}.md'), 'w') as f:
+            f.write(TASK.format(id=iid, writes=writes)
+                    .replace('\n---\n## Description', '\n# ---- machine ----\nstate: Active\n'
+                             '---\n## Description', 1)
+                    .replace('- made\n', '- made\n' + history))
+        _git(['add', '-A'], self.root)
+        _git(['commit', '-q', '-m', f'{iid}'], self.root)
+
+    def card_text(self, iid):
+        with open(os.path.join(self.root, 'tasks', f'{iid}.md')) as f:
+            return f.read()
+
+    def check(self):
+        """``asf check``'s findings on the record."""
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cmd_check(types.SimpleNamespace(paths=None), self.root)
+        return buf.getvalue()
+
+    def test_a_path_an_active_task_writes_waits_though_no_session_runs_it(self):
+        self.active('T-0002', 'lib/shared.py')
+        self.finished('coder-t-0001', 'lib/shared.py')
+        _held, verdicts = self.tick()
+        self.assertEqual(verdicts, {'coder-t-0001': widen.WAITS}, self.lines)
+        self.assertEqual(self.writes(), ['src/a.py', 'tests/test_a.py'])
+        self.assertEqual([(r.action, r.waits_on, r.launches) for r in self.rows()],
+                         [('WAITS ON T-0002', 'T-0002', False)])
+
+    def test_two_widenings_in_one_pass_on_one_path_only_the_first_widens(self):
+        self.card('T-0003', 'src/c.py')
+        _git(['add', '-A'], self.root)
+        _git(['commit', '-q', '-m', 'T-0003'], self.root)
+        self.finished('coder-t-0001', 'lib/x.py')
+        log = os.path.join(self.tmp, 'coder-t-0003.jsonl')
+        with open(log, 'w') as f:
+            f.write(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
+                                'result': REPORT.replace('T-0001', 'T-0003').format(
+                                    left='see needs', needs='lib/x.py')}) + '\n')
+        self.session(job='coder-t-0003', item='T-0003', kind='coder', branch='worker/T-0003',
+                     pid=999999, log=log, started='2026-09-24T08:00:00Z')
+        self.session(job='coder-t-0003', ended='2026-09-24T08:30:00Z', end_reason='finished')
+        _held, verdicts = self.tick()
+        self.assertEqual(verdicts, {'coder-t-0001': widen.WIDEN, 'coder-t-0003': widen.WAITS},
+                         self.lines)
+        items = self.items()
+        self.assertIn('lib/x.py', items['T-0001']['writes'])
+        self.assertNotIn('lib/x.py', items['T-0003']['writes'])
+
+    def test_a_widened_overlap_in_the_record_is_reverted_and_waits_on_the_owner(self):
+        self.active('T-0002', 'lib/shared.py')
+        self.active('T-0001', 'src/a.py, tests/test_a.py, lib/shared.py',
+                    '- 2026-09-24 08:40 footprint widened: +lib/shared.py (report: needs writes)\n')
+        self.assertIn("intersects Active task", self.check())
+        before = _git(['rev-list', '--count', 'HEAD'], self.root).strip()
+        self.tick()
+        self.assertEqual(self.writes(), ['src/a.py', 'tests/test_a.py'])
+        self.assertEqual(self.items()['T-0001']['after'], ['T-0002'])
+        self.assertIn('footprint widening reverted: overlaps T-0002', self.card_text('T-0001'))
+        self.assertEqual(int(_git(['rev-list', '--count', 'HEAD'], self.root)), int(before) + 1)
+        self.assertEqual(_git(['show', '--name-only', '--format=', 'HEAD'], self.root).split(),
+                         ['tasks/T-0001.md'])
+        self.assertNotIn('intersects Active task', self.check())
+        self.assertIn('lib/shared.py', self.items()['T-0002']['writes'])  # the owner untouched
+        # repaired once: the next pass changes nothing
+        self.tick()
+        self.assertEqual(int(_git(['rev-list', '--count', 'HEAD'], self.root)), int(before) + 1)
+
+    def test_a_plan_declared_overlap_is_never_reverted(self):
+        self.active('T-0002', 'lib/shared.py')
+        self.active('T-0001', 'src/a.py, tests/test_a.py, lib/shared.py',
+                    '- 2026-09-24 08:40 footprint widened: +tests/test_a.py (report: needs writes)\n')
+        head = _git(['rev-parse', 'HEAD'], self.root)
+        self.tick()
+        self.assertEqual(self.writes(), ['src/a.py', 'tests/test_a.py', 'lib/shared.py'])
+        self.assertNotIn('reverted', self.card_text('T-0001'))
+        self.assertEqual(_git(['rev-parse', 'HEAD'], self.root), head)
 
     def test_a_second_widening_is_a_reshape(self):
         self.finished('coder-t-0001', 'tests/test_b.py')

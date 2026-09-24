@@ -22,7 +22,12 @@ Run by the ``health`` step, after health has ended the sessions and before the w
    * ``approval``: a path under an approvals-protected glob — a hold of that class is refused into
      the approvals ledger (``asf approvals resolve <item>/<class> granted`` lets the widening go
      on next tick);
-   * ``waits``: a path overlaps a running Task's ``writes:`` — re-decided every tick until it is free.
+   * ``waits``: a path overlaps an open Task's ``writes:`` (Active in the record, or a run in
+     play — ``asf check``'s intersection), or a path a widening earlier in the same pass added —
+     re-decided every tick until it is free.
+3. :func:`revert_overlaps` — a widening already in the record whose paths intersect an open
+   Task's ``writes:`` is undone: those paths leave ``writes:``, the Task gets ``after: <owner>``
+   and a History line ``footprint widening reverted: overlaps <owner>``, one commit.
 """
 import os
 import subprocess
@@ -124,6 +129,23 @@ def running(product, items):
     return feeder_rows.running_footprints(items or {}, busy)
 
 
+def open_footprints(product, items):
+    """``[(task_id, writes)]`` of every open Task a widening must not overlap: the Tasks in play
+    (:func:`running`) first, then every Task ``Active`` in the record or with a correction pending
+    — ``asf check`` refuses two Active Tasks whose ``writes:`` intersect, running or not."""
+    path = pool_mod.sessions_path(product)
+    out = running(product, items)
+    seen = {t for t, _w in out}
+    pending = set(lifecycle.corrections(path))
+    for iid, t in sorted((items or {}).items()):
+        if iid in seen or t.get('type') != 'task' or not t.get('writes') \
+                or lifecycle.closed_state(items, iid):
+            continue
+        if t.get('state') == 'Active' or iid in pending:
+            out.append((iid, list(t['writes'])))
+    return out
+
+
 def correction_text(writes, paths, fact, tests, before):
     """The correction a widened run is relaunched with: the new ``writes:``, what was added and
     why, the failing tests, then the failure it was held with."""
@@ -176,6 +198,16 @@ def _reindex(root):
     return None
 
 
+def widenings(ctx, path, item_id):
+    """How many widenings of ``item_id`` stand: its widened runs, less the widenings the record
+    says were reverted (a reverted widening is re-decided, not counted toward a reshape)."""
+    n = lifecycle.widenings(path, item_id)
+    if n:
+        rec = _card(ctx.record_root(), item_id)
+        n -= (rec.get('text') or '').count(widen.REVERTED.split('{')[0]) if rec else 0
+    return max(n, 0)
+
+
 def apply(ctx, items, out=print):
     """The rule's verdict on every pending ``footprint`` correction; ``{job: verdict}``."""
     product = ctx.product
@@ -202,10 +234,10 @@ def apply(ctx, items, out=print):
             done[job] = widen.WIDEN
             continue
         if in_play is None:
-            in_play = running(product, items)
+            in_play = open_footprints(product, items)
         v = widen.decide(item_id, needs, widen.max_files(product),
                          protected_paths(product, item_id, needs), in_play,
-                         lifecycle.widenings(path, item_id))
+                         widenings(ctx, path, item_id))
         if v.kind == widen.WIDEN:
             wider = writes + list(v.paths)
             note = widen.HISTORY.format(paths=' '.join(v.paths), fact=fact)
@@ -214,6 +246,7 @@ def apply(ctx, items, out=print):
                 out(f'widen {job}: {item_id} unchanged — {err}')
                 continue
             reindex = True
+            in_play.append((item_id, list(v.paths)))  # a later widening this pass waits on it
             text = correction_text(wider, v.paths, fact, corr.get('tests') or (), corr.get('text'))
             pool_mod.update_session(product, job, widened=list(v.paths),
                                     correction=dict(corr, verdict=v.kind, text=text))
@@ -253,8 +286,67 @@ def apply(ctx, items, out=print):
     return done
 
 
+def revert_overlaps(ctx, items, out=print):
+    """Undo every widening whose paths intersect another open Task's ``writes:`` (the state
+    ``asf check`` refuses): only the paths a ``footprint widened: +…`` History line added are
+    removed, never a plan-declared one; the Task gets ``after: <owner>`` and one History line
+    ``footprint widening reverted: overlaps <owner>``, committed alone. A pending correction of
+    it waits on the owner again, and the reverted widening is not counted (:func:`widenings`), so
+    the rule re-decides once the owner is done. ``items`` is updated in place. Returns ``{task: owner}``."""
+    product = ctx.product
+    root = ctx.record_root()
+    path = pool_mod.sessions_path(product)
+    stamp = pool_mod.now_iso()[:16].replace('T', ' ')
+    done = {}
+    in_play = open_footprints(product, items)
+    for iid, writes in list(in_play):
+        rec = _card(root, iid)
+        if rec is None:
+            continue
+        widened = widen.widened_paths(rec.get('text'))
+        if not widened:
+            continue
+        others = [(t, w) for t, w in in_play if t != iid]
+        hit = widen.overlapping_widenings(list(rec['meta'].get('writes') or ()), widened, others)
+        if not hit:
+            continue
+        owner, paths = hit
+        kept = [w for w in rec['meta'].get('writes') or () if w not in paths]
+        after = list(rec['meta'].get('after') or ())
+        owner_after = ((items or {}).get(owner) or {}).get('after') or ()
+        if owner not in after and iid not in owner_after:  # never a cycle of after:
+            after.append(owner)
+        updates = {'writes': kept}
+        if after != list(rec['meta'].get('after') or ()):
+            updates['after'] = after
+        err = write_card(root, iid, updates, stamp, widen.REVERTED.format(owner=owner))
+        if err:
+            out(f'widen: {iid} not reverted — {err}')
+            continue
+        done[iid] = owner
+        in_play[:] = [(t, kept if t == iid else w) for t, w in in_play]
+        if items is not None and iid in items:
+            items[iid] = dict(items[iid], **updates)
+        for job, run in sorted(lifecycle.latest(path).items()):
+            if run.get('item') != iid:
+                continue
+            corr = lifecycle.pending_correction(run, path)
+            if corr and corr.get('kind') == lifecycle.FOOTPRINT:
+                pool_mod.update_session(product, job, correction=dict(
+                    corr, verdict=widen.WAITS, detail=owner))
+        ctx.event('reverted', item=iid, text=f'-{" ".join(paths)} overlaps {owner}')
+        out(f'reverted {iid}: writes: -{" ".join(paths)} overlaps {owner} — after: {owner}')
+    if done:
+        err = _reindex(root)
+        if err:
+            out(f'widen: index not re-derived — {err}')
+    return done
+
+
 def run(ctx, out=print, items=None):
-    """Both halves, in order: the REPORT facts, then the rule."""
+    """Both halves, in order: the REPORT facts, then the rule — and last, the repair of any
+    widening already in the record that overlaps an open Task."""
     held = report_facts(ctx, items, out=out)
     verdicts = apply(ctx, items, out=out)
+    revert_overlaps(ctx, items, out=out)
     return held, verdicts

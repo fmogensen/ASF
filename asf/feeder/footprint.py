@@ -5,7 +5,7 @@ any glob of one matches any glob of the other, in either direction (the same tes
 applies to two Active Tasks), or when one names a directory (``dir/``) the other sits under.
 Pure functions over plain lists — no filesystem.
 """
-import fnmatch
+from asf.record.core import writes_intersect
 
 WILDCARDS = '*?['
 
@@ -19,7 +19,7 @@ def _literal_head(glob):
 
 
 def globs_overlap(a, b):
-    if a == b or fnmatch.fnmatchcase(a, b) or fnmatch.fnmatchcase(b, a):
+    if writes_intersect(a, b):  # asf check's own test, then the gate's wider reach
         return True
     ha, hb = _literal_head(a), _literal_head(b)
     # a bare directory (`apps/web/`) covers everything beneath it
