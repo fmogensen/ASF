@@ -6,9 +6,11 @@ product, a path, a vendor or an account is a lookup through this module instead.
 
 The reader below is an 80-line YAML subset, like ``asf.record.frontmatter``'s: no PyYAML, no
 third-party module — python3 stdlib only. It understands nested maps by indentation, ``- item``
-block lists, inline ``[a, b, c]`` lists, bare/quoted string scalars, ints, floats, bools and
-``#`` comments. Anything outside that subset is a bug in the config file, not a feature to add
-here.
+block lists, inline (flow-style) ``[a, b, c]`` lists and ``{a: 1, b: [x, y]}`` maps, nested
+either way, bare/quoted string scalars, ints, floats, bools and ``#`` comments. A flow value it
+cannot read — unbalanced, or a map entry with no ``key:`` — raises :class:`ConfigError` naming
+the key and the line; it is never loaded as a string. Anything else outside that subset is a bug
+in the config file, not a feature to add here.
 """
 import os
 import re
@@ -47,7 +49,78 @@ def _split_inline_list(token):
     inner = token.strip()[1:-1].strip()
     if not inner:
         return []
-    return [_scalar(p) for p in _split_top_commas(inner)]
+    return [_flow(p) for p in _split_top_commas(inner)]
+
+
+def _balanced(token):
+    """True when every ``[``/``{`` outside quotes in ``token`` is closed, in order."""
+    stack, quote = [], None
+    for ch in token:
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in ('"', "'"):
+            quote = ch
+        elif ch in '[{':
+            stack.append(ch)
+        elif ch in ']}':
+            if not stack or {'[': ']', '{': '}'}[stack.pop()] != ch:
+                return False
+    return not stack and quote is None
+
+
+def _flow(token):
+    """One flow-style value: ``[…]`` a list, ``{…}`` a map (each nested either way), else a
+    scalar. Raises ``ValueError`` for a map entry that is not ``key: value``."""
+    token = token.strip()
+    if token.startswith('[') and token.endswith(']'):
+        return _split_inline_list(token)
+    if token.startswith('{') and token.endswith('}'):
+        out = {}
+        inner = token[1:-1].strip()
+        for part in (_split_top_commas(inner) if inner else []):
+            m = _match_key(part) or (_match_key(part + ' ') if part.endswith(':') else None)
+            if not m:
+                raise ValueError(f'{part!r} is not a `key: value` entry')
+            out[m[0]] = _flow(m[1]) if m[1].strip() else None
+        return out
+    return _scalar(token)
+
+
+def _value(rest, key, lineno):
+    """The value after ``key:`` on line ``lineno``: a flow list or map parsed, a scalar read —
+    and a flow value that is unbalanced or malformed refused with the key and the line, never
+    loaded as a string (a guard reading ``quota_guards: {…}`` as text crashed on it)."""
+    if rest[:1] not in ('[', '{'):
+        return _scalar(rest)
+    if not _balanced(rest):
+        raise ConfigError(f"line {lineno}: {key}: an unbalanced flow-style value {rest!r} — "
+                          f"close it, or write it as a block")
+    if _closes_at(rest) != len(rest) - 1:
+        return _scalar(rest)  # `{reviews_dir}/{n}-{slug}.md`: a template, not one flow value
+    try:
+        return _flow(rest)
+    except ValueError as e:
+        raise ConfigError(f"line {lineno}: {key}: a flow-style map it cannot read ({e}) — "
+                          f"write it as a block") from None
+
+
+def _closes_at(token):
+    """The index of the bracket that closes ``token``'s opening one (quotes respected)."""
+    depth, quote = 0, None
+    for i, ch in enumerate(token):
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in ('"', "'"):
+            quote = ch
+        elif ch in '[{':
+            depth += 1
+        elif ch in ']}':
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
 
 
 def _split_top_commas(s):
@@ -106,12 +179,12 @@ def _match_key(content):
 def loads(text):
     """Parse the YAML subset into nested dict/list/scalar data."""
     lines = []
-    for raw in text.splitlines():
+    for n, raw in enumerate(text.splitlines(), start=1):
         line = _strip_comment(raw).rstrip()
         if line.strip() == '':
             continue
         indent = len(line) - len(line.lstrip(' '))
-        lines.append((indent, line.strip()))
+        lines.append((indent, line.strip(), n))
     root = {}
     _parse_block(lines, 0, len(lines), 0, root)
     return root
@@ -120,7 +193,7 @@ def loads(text):
 def _parse_block(lines, start, end, indent, target):
     i = start
     while i < end:
-        cur_indent, content = lines[i]
+        cur_indent, content, lineno = lines[i]
         if cur_indent != indent:
             raise ConfigError(f"unexpected indent: {content!r}")
         if content.startswith('- '):
@@ -142,10 +215,8 @@ def _parse_block(lines, start, end, indent, target):
                 target[key] = sub
             else:
                 target[key] = None
-        elif rest.startswith('[') and rest.endswith(']'):
-            target[key] = _split_inline_list(rest)
         else:
-            target[key] = _scalar(rest)
+            target[key] = _value(rest, key, lineno)
         i = block_end
     return i
 
@@ -154,7 +225,7 @@ def _parse_list(lines, start, end, indent):
     items = []
     i = start
     while i < end:
-        cur_indent, content = lines[i]
+        cur_indent, content, lineno = lines[i]
         if cur_indent != indent or not content.startswith('- '):
             raise ConfigError(f"expected list item: {content!r}")
         rest = content[2:].strip()
@@ -162,20 +233,16 @@ def _parse_list(lines, start, end, indent):
         block_end = j
         while block_end < end and lines[block_end][0] > indent:
             block_end += 1
-        m = _match_key(rest) if rest else None
+        m = _match_key(rest) if rest and rest[:1] not in ('[', '{') else None
         if m and (m[1] != '' or block_end > j):
             sub = {}
             if m[1] != '':
-                sub[m[0]] = _scalar(m[1]) if not (
-                    m[1].startswith('[') and m[1].endswith(']')
-                ) else _split_inline_list(m[1])
+                sub[m[0]] = _value(m[1], m[0], lineno)
             if block_end > j:
                 _parse_block(lines, j, block_end, lines[j][0], sub)
             items.append(sub)
-        elif rest.startswith('[') and rest.endswith(']'):
-            items.append(_split_inline_list(rest))
         else:
-            items.append(_scalar(rest))
+            items.append(_value(rest, '-', lineno))
         i = block_end
     return items
 
