@@ -22,6 +22,9 @@ The row kinds::
     PLAN → CODE            a New Task of an approved plan — unless its ``writes:`` overlaps a
                            running Task's, then ``WAITS ON <task>`` (the footprint gate)
     RESHAPE → PLAN         a Task the groom's split answer marked: hold it, reshape it
+    UNDECIDED → DECIDE     an open Feature, or an open S1/S2 Bug, whose ``decided`` is not true: the
+                           card a free slot is waiting for. Launches nothing, costs no slot, and is
+                           cut to ``conventions.decision_rows``
     GROOM → ADJUDICATE     an adjudicate session per groom day, for every open question the
                            groom policy pass did not answer (F-0085 §2.5), and another for
                            questions asked since the last was briefed — gated on
@@ -50,6 +53,8 @@ STARVED_PLAN = 'STARVED → PLAN'
 PLAN_CODE = 'PLAN → CODE'
 RESHAPE = 'RESHAPE → PLAN'
 GROOM_ADJUDICATE = 'GROOM → ADJUDICATE'
+UNDECIDED = 'UNDECIDED → DECIDE'
+NEEDS_DECISION = 'NEEDS DECISION'
 ON_TRUNK = 'ON TRUNK'
 PARKED = 'PARKED'
 
@@ -57,6 +62,7 @@ LAUNCH = 'would launch'
 DONE_STATES = ('Resolved', 'Closed')
 STALEMATE_ROUND = 4
 ATTEMPT_LIMIT = 3
+DECISION_ROWS = 5  #: `conventions.decision_rows` — rows minted, and ids named in the wave's line
 REVIEW_RE = re.compile(r'^(spec|plan)-review r(\d+)')
 CLOSED_PR_RE = re.compile(r'\bPR #\d+ CLOSED\b')
 CONFLICTING = 'CONFLICTING'
@@ -135,6 +141,12 @@ def attempt_limit(product):
     """``conventions.attempt_limit`` (default 3): fix sessions a Bug gets before it is adjudicated."""
     v = _conventions(product).get('attempt_limit')
     return v if isinstance(v, int) and v > 0 else ATTEMPT_LIMIT
+
+
+def decision_rows(product):
+    """``conventions.decision_rows`` (default 5): how many undecided cards get a row (D6)."""
+    v = _conventions(product).get('decision_rows')
+    return v if isinstance(v, int) and v >= 0 else DECISION_ROWS
 
 
 # ---- per-item predicates ----------------------------------------------------
@@ -408,6 +420,44 @@ def task_rows(items, product, feature, busy, running, landed_shas=None):
     return out
 
 
+def undecided_rows(items, product, busy, limit=None):
+    """A non-launching row per open card the feeder would start work from if it were decided:
+    an open Feature, or an open S1/S2 Bug (D4). Ranked — an undecided S1 first, then the
+    roadmap's own order (``ix.rank``, then id) — and cut to ``limit`` (``None``: the product's
+    ``decision_rows``; ``0``: every one, ``asf next --all``).
+
+    The row launches nothing and costs no slot (P2); it is the sentence "this card is what a free
+    slot is waiting for", in the one table that says what the tick would start. A ``blocked:``
+    card gets none — it is the accounting's ``blocked`` bucket, one card, one answer.
+    """
+    roots = []
+    for v in items.values():
+        if v['type'] == 'feature':
+            tier = 2
+        elif v['type'] == 'bug' and v.get('severity') in ('S1', 'S2'):
+            tier = 0 if v['severity'] == 'S1' else 1
+        else:
+            continue
+        if v.get('decided') is True or not is_open(v) or v['id'] in busy or v.get('blocked'):
+            continue
+        roots.append((tier, ix.rank(v), v['id'], v))
+    roots.sort(key=lambda t: t[:3])
+    cap = decision_rows(product) if limit is None else limit
+    if cap:
+        roots = roots[:cap]
+    out = []
+    for tier, _rank, _id, v in roots:
+        is_bug = v['type'] == 'bug'
+        f = feature_of(items, v)
+        out.append(Row(tier=tier, kind=UNDECIDED, item_id=v['id'], feature_id=f['id'] if f else '',
+                       action=NEEDS_DECISION, brief_kind='fix-bug' if is_bug else 'spec',
+                       branch=branch_for(product, 'fix' if is_bug else 'spec', v['id']),
+                       reason=f"undecided {ix.age(v.get('stage_since'))} — "
+                              f"{BUG_FIX if is_bug else CARD_SPEC} waits for decided: true",
+                       waits_on='decision'))
+    return out
+
+
 KIND_ORDER = {STALEMATE: 0, CONFLICT: 1, STALE: 2, GROOM_ADJUDICATE: 2, RESHAPE: 3}
 
 
@@ -460,9 +510,9 @@ def hold_unlanded(rows, items, landed_shas=None):
     out, said = [], set()
     for r in rows:
         pending = [a for a in (items.get(r.item_id) or {}).get('after') or [] if a not in landed]
-        # ON TRUNK / PARKED are already non-launching answers with their own waits_on: rewriting
-        # them into WAITS ON would hide the row the gate exists to print
-        keeps = r.kind == GROOM_ADJUDICATE or r.action.startswith((ON_TRUNK, PARKED))
+        # ON TRUNK / PARKED / NEEDS DECISION are already non-launching answers with their own
+        # waits_on: rewriting them into WAITS ON would hide the row the gate exists to print
+        keeps = r.kind == GROOM_ADJUDICATE or r.action.startswith((ON_TRUNK, PARKED, NEEDS_DECISION))
         if pending and not keeps and (r.launches or r.waits_on):
             if r.item_id in said:  # a Task with a correction also has its PLAN → CODE row: once
                 continue
@@ -474,14 +524,15 @@ def hold_unlanded(rows, items, landed_shas=None):
 
 
 def candidates(index, product, inflight, attempts=None, corrections=None, busy=None,
-              groom_state=None, landed_shas=None):
+              groom_state=None, landed_shas=None, decision_limit=None):
     """Every row the index supports right now, uncut by capacity, in emit order: tier, then the
     Feature's rank and id, then within a Feature the stalemate, branch housekeeping, new work.
     ``busy``: item ids held by something that is not a session and takes no slot — a pushed
     branch waiting for harvest (:func:`asf.workers.lifecycle.awaiting_harvest`). ``groom_state``:
     §2.5's fact for the GROOM → ADJUDICATE row; a caller that passes none gets none. A card
     already Resolved/Closed is never ``busy``: its work is on the trunk whatever the ledger says
-    (an unclosed run held a landed Task's ``writes:`` against its siblings for ever)."""
+    (an unclosed run held a landed Task's ``writes:`` against its siblings for ever).
+    ``decision_limit``: how many UNDECIDED → DECIDE rows (``None``: ``decision_rows``; ``0``: all)."""
     items = items_of(index)
     busy = inflight_ids(inflight) | {i for i in busy or () if is_open(items.get(i) or {})}
     limit = stalemate_round(product)
@@ -494,6 +545,7 @@ def candidates(index, product, inflight, attempts=None, corrections=None, busy=N
     if gr is not None:
         rows.append(gr)
     rows += feature_rows(items, product, busy, running, landed_shas)
+    rows += undecided_rows(items, product, busy, decision_limit)
     rows = hold_unlanded(rows, items, landed_shas)
 
     def key(pair):
@@ -506,9 +558,10 @@ def candidates(index, product, inflight, attempts=None, corrections=None, busy=N
 
 
 def plan_rows(index, product, inflight, capacity, attempts=None, corrections=None, busy=None,
-              groom_state=None, landed_shas=None):
+              groom_state=None, landed_shas=None, decision_limit=None):
     """The rows the tick emits: tiered, S1 first, cut to ``capacity`` less what is in flight."""
     from asf.feeder import tiers
     return tiers.select(candidates(index, product, inflight, attempts, corrections, busy=busy,
-                                   groom_state=groom_state, landed_shas=landed_shas),
+                                   groom_state=groom_state, landed_shas=landed_shas,
+                                   decision_limit=decision_limit),
                         inflight, capacity)

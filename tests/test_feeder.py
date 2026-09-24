@@ -189,9 +189,8 @@ class RowsTest(unittest.TestCase):
         r = [r for r in self.cand() if r.item_id == 'F-0001'][0]
         self.assertEqual((r.kind, r.brief_kind, r.branch), ('CARD → SPEC', 'spec', 'spec/F-0001'))
 
-    def test_undecided_and_removed_cards_emit_nothing(self):
+    def test_removed_cards_emit_nothing(self):
         ids = {r.item_id for r in self.cand()}
-        self.assertNotIn('F-0006', ids)
         self.assertNotIn('F-0008', ids)
 
     def test_two_tasks_sharing_a_file_one_waits(self):
@@ -615,6 +614,110 @@ class CorrectionRowTest(unittest.TestCase):
         self.assertEqual(out, [])
 
 
+def undecided_features(*specs, decided=()):
+    """Open Features, ``(id, rank)`` each; ``decided`` is True only for the ids named."""
+    items = {}
+    for fid, rank in specs:
+        v = {'id': fid, 'type': 'feature', 'title': fid, 'state': 'New', 'stage': 'card',
+             'decided': fid in decided, 'stage_since': '2026-01-01T09:00:00Z'}
+        if rank is not None:
+            v['rank'] = rank
+        items[fid] = v
+    return {'items': items}
+
+
+class UndecidedRowsTests(unittest.TestCase):
+    """F-0096 §3.1: the undecided card's ranked, non-launching row, and the one cap."""
+
+    def setUp(self):
+        self.index = undecided_features(('F-0001', 3), ('F-0002', 1), ('F-0003', None),
+                                        ('F-0004', 2), ('F-0005', 5), ('F-0006', 4),
+                                        decided=('F-0005',))
+
+    def cand(self, index=None, p=None, **kw):
+        return rows.candidates(index or self.index, p or product(), [], **kw)
+
+    def decision(self, rs):
+        return [r for r in rs if r.kind == rows.UNDECIDED]
+
+    def test_one_card_spec_and_five_decision_rows(self):
+        rs = self.cand()
+        self.assertEqual(kinds([r for r in rs if r.kind == rows.CARD_SPEC]),
+                         [('CARD → SPEC', 'F-0005')])
+        dec = self.decision(rs)
+        self.assertEqual(len(dec), 5)
+        for r in dec:
+            self.assertEqual(r.action, 'NEEDS DECISION')
+            self.assertFalse(r.launches)
+            self.assertEqual((r.waits_on, r.brief_kind), ('decision', 'spec'))
+            self.assertRegex(r.reason, r'^undecided \d+[mhd] — CARD → SPEC waits for decided: true$')
+        self.assertEqual(dec[0].branch, 'spec/F-0002')
+
+    def test_the_shared_fixture_undecided_card_gets_only_its_decision_row(self):
+        rs = [r for r in self.cand(fixture_index()) if r.item_id == 'F-0006']
+        self.assertEqual(kinds(rs), [(rows.UNDECIDED, 'F-0006')])
+
+    def test_ranked_with_the_unranked_one_last(self):
+        self.assertEqual([r.item_id for r in self.decision(self.cand())],
+                         ['F-0002', 'F-0004', 'F-0001', 'F-0006', 'F-0003'])
+
+    def test_an_undecided_s1_is_tier_0_and_an_s2_tier_1(self):
+        idx = undecided_features(('F-0001', 1))
+        for bid, sev in (('B-0001', 'S1'), ('B-0002', 'S2'), ('B-0003', 'S3')):
+            idx['items'][bid] = {'id': bid, 'type': 'bug', 'title': bid, 'severity': sev,
+                                 'decided': False, 'state': 'New', 'parent': 'F-0001'}
+        dec = self.decision(self.cand(idx))
+        self.assertEqual([(r.item_id, r.tier) for r in dec],
+                         [('B-0001', 0), ('B-0002', 1), ('F-0001', 2)])
+        self.assertEqual((dec[0].brief_kind, dec[0].branch, dec[0].feature_id),
+                         ('fix-bug', 'fix/B-0001', 'F-0001'))
+        self.assertIn('BUG → FIX waits for decided: true', dec[0].reason)
+
+    def test_a_blocked_undecided_feature_gets_no_row(self):
+        self.index['items']['F-0002']['blocked'] = 'waiting on the vendor'
+        self.assertNotIn('F-0002', [r.item_id for r in self.decision(self.cand())])
+
+    def test_decided_closed_and_task_cards_are_absent(self):
+        idx = self.index
+        idx['items']['F-0001']['state'] = 'Closed'
+        idx['items']['T-0001'] = {'id': 'T-0001', 'type': 'task', 'title': 't', 'state': 'New',
+                                  'decided': False, 'parent': 'F-0002'}
+        ids = [r.item_id for r in self.decision(self.cand(idx))]
+        self.assertEqual(ids, ['F-0002', 'F-0004', 'F-0006', 'F-0003'])
+
+    def test_a_card_a_session_holds_gets_no_row(self):
+        rs = rows.candidates(self.index, product(), [{'item': 'F-0002'}])
+        self.assertNotIn('F-0002', [r.item_id for r in self.decision(rs)])
+
+    def test_the_one_cap_and_the_way_past_it(self):
+        p = product(conventions={'decision_rows': 2})
+        self.assertEqual(rows.decision_rows(p), 2)
+        self.assertEqual([r.item_id for r in self.decision(self.cand(p=p))], ['F-0002', 'F-0004'])
+        self.assertEqual(len(self.decision(self.cand(p=p, decision_limit=0))), 5)
+        self.assertEqual(len(self.decision(rows.plan_rows(self.index, p, [], 4, decision_limit=0))), 5)
+        self.assertEqual(rows.decision_rows(product()), rows.DECISION_ROWS)
+        self.assertEqual(rows.decision_rows(None), 5)
+
+    def test_a_bad_cap_falls_back_to_the_default(self):
+        for bad in (-1, 'many', None, 2.5):
+            self.assertEqual(rows.decision_rows(product(conventions={'decision_rows': bad})), 5)
+        self.assertEqual(rows.decision_rows(product(conventions={'decision_rows': 0})), 0)
+
+    def test_the_rows_spend_no_slot(self):
+        inflight = [{'item': 'X-1'}]
+        before = tiers.free_slots(inflight, 3)
+        out = rows.plan_rows(self.index, product(), inflight, 3)
+        self.assertEqual(len(self.decision(out)), 5)
+        self.assertEqual(sum(1 for r in out if r.launches), 1)
+        self.assertEqual(tiers.free_slots(inflight, 3), before)
+
+    def test_an_unlanded_after_leaves_the_decision_row_alone(self):
+        idx = copy.deepcopy(self.index)
+        idx['items']['F-0002']['after'] = ['T-9999']
+        r = [r for r in self.cand(idx) if r.item_id == 'F-0002'][0]
+        self.assertEqual((r.kind, r.action, r.waits_on), (rows.UNDECIDED, 'NEEDS DECISION', 'decision'))
+
+
 class TiersTest(unittest.TestCase):
     """F-0071 acceptance 1: the S1 lane."""
 
@@ -674,7 +777,7 @@ class IncidentsTest(unittest.TestCase):
         self.assertFalse(got[0].starved)
 
 
-class RenderTest(unittest.TestCase):
+class TableTests(unittest.TestCase):
     def test_golden_s1_unheld(self):
         out = render.table(rows.plan_rows(fixture_index(), product(), [], 10))
         self.assertEqual(out, golden('next-s1-unheld.md'))
@@ -729,7 +832,7 @@ class CliTest(unittest.TestCase):
     def test_next_json(self):
         rc, out = self.run_next(['next', '--product', 'sample', '--capacity', '10', '--json'])
         self.assertEqual(rc, 0)
-        self.assertEqual([d['item_id'] for d in json.loads(out)], ['B-0001', 'B-0002'])
+        self.assertEqual([d['item_id'] for d in json.loads(out)], ['B-0001', 'B-0004', 'B-0002'])
 
     def test_next_holds_a_branch_awaiting_harvest_busy_as_the_tick_does(self):
         ledger = [{'job': 'fix-bug-b-0001', 'item': 'B-0001', 'branch': 'fix/B-0001', 'pid': 1,
@@ -740,7 +843,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         ids = [d['item_id'] for d in json.loads(out)]
         self.assertNotIn('B-0001', ids)
-        self.assertEqual(ids[0], 'B-0002')
+        self.assertEqual(ids[:2], ['B-0004', 'B-0002'])
 
 
     def test_next_reads_the_live_sessions_off_the_ledger_as_the_tick_does(self):
