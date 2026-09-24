@@ -130,7 +130,7 @@ class TestRuntime(unittest.TestCase):
         # the builder (asf.hermetic) pins git's default branch for every child of ASF
         self.assertEqual({k: v for k, v in e.items() if not k.startswith('GIT_CONFIG_')},
                          {'PATH': '/bin', 'HOME': '/homes/a', 'CLAUDE_CONFIG_DIR': '/cfg/a',
-                          'ASF_PRODUCT': 'sample', 'ASF_JOB': 'j1',
+                          'ASF_PRODUCT': 'sample', 'ASF_JOB': 'j1', 'ASF_HOME': env.ASF_HOME,
                           'BACKLOG_ID_RANGE': 'S:5000-5049'})
         self.assertEqual((e['GIT_CONFIG_KEY_0'], e['GIT_CONFIG_VALUE_0']), ('init.defaultBranch', 'main'))
 

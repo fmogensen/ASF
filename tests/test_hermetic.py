@@ -10,6 +10,8 @@ import subprocess
 import tempfile
 import unittest
 
+from asf import env as env_mod
+
 from asf import hermetic
 from asf.harvest import harvest
 from asf.workers import pool as pool_mod
@@ -138,11 +140,20 @@ class OneBuilderTests(unittest.TestCase):
         self.assertEqual(env, dict(hermetic.build(base, home='/homes/a', pythonpath=False,
                                                   mode='worker'),
                                    CLAUDE_CONFIG_DIR='/cfg/a', ASF_PRODUCT='sample', ASF_JOB='j1',
-                                   BACKLOG_ID_RANGE='S:5000-5049'))
+                                   BACKLOG_ID_RANGE='S:5000-5049', ASF_HOME=env_mod.ASF_HOME))
         # what a session inherits from the tick never reaches it: its identity is its own
         self.assertEqual(env['ASF_JOB'], 'j1')
         self.assertNotIn('GIT_DIR', env)
         self.assertNotIn('FAKE_SECRET', env)
+
+    def test_an_isolated_session_finds_the_factorys_own_home(self):
+        # the session's HOME is its own, so ~/.ASF there is empty: without ASF_HOME the approvals
+        # hook reads <session home>/.ASF/products/<p>.yaml, finds nothing, and refuses every tool
+        acct = pool_mod.Account('acct-a', home='/homes/a', config_dir='/cfg/a')
+        job = runtime_mod.Job('sample', 'j1', '/wt', '/b.md', 'opus', account=acct)
+        env = runtime_mod.build_env(job, base={'PATH': '/bin', 'HOME': '/me'})
+        self.assertEqual(env['HOME'], '/homes/a')
+        self.assertEqual(env['ASF_HOME'], env_mod.ASF_HOME)
 
     def test_the_suite_runs_hermetic_too(self):
         # B-0043: the suite's home is never the operator's; the CI matrix runs it under env -i

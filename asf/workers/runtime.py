@@ -19,7 +19,7 @@ import shutil
 import subprocess
 import tempfile
 
-from asf import detach, hermetic
+from asf import detach, env, hermetic
 from asf.workers import report
 
 DEFAULT_BINARY = 'claude'
@@ -331,7 +331,10 @@ def build_env(job, base=None):
     ``ASF-Session`` trailer hook (F-0076). No PYTHONPATH: a session runs the product's code,
     not this package."""
     acct = job.account
-    identity = {'ASF_PRODUCT': job.product, 'ASF_JOB': job.name}
+    # ASF_HOME rides along: the session's HOME is its own, so ``~/.ASF`` there is empty, and the
+    # approvals hook (``asf hook approvals``) run inside the session must read the factory's
+    # real config and product files, not look for them under the session's home.
+    identity = {'ASF_PRODUCT': job.product, 'ASF_JOB': job.name, 'ASF_HOME': env.ASF_HOME}
     identity.update(job.env)
     auth = auth_env_values(acct, job.product_auth_env)
     git_config = [('core.hooksPath', job.hooks_dir)] if job.hooks_dir else []
