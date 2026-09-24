@@ -58,6 +58,10 @@ def _tree_digest(path):
     return h.hexdigest()
 
 
+def _explode_in_the_wave():
+    raise ValueError('the wave broke')
+
+
 def _fake_step0(root, product, fresh=False):
     """Stands in for the real metrics/ingest/rollup pass (it needs CI and session evidence): the
     one derived-state file a rollup would write, with fixed content so a re-run changes nothing."""
@@ -641,6 +645,22 @@ class StepTimingTests(TickTestCase):
         self.assertLess(lines.index(timings[0]), lines.index('[command:health] 1'))
         self.assertLess(lines.index('[command:health] 1'), lines.index(timings[1]))
         self.assertLess(lines.index(timings[2]), lines.index('IN FLIGHT — none'))
+
+    def test_failed_step_logs_traceback(self):
+        """§12: a step that raises is one ``FAILED`` line and then its full traceback in the
+        tick log — the line names the step, the traceback the code that broke."""
+        from asf.tick import step_wave
+
+        def wave(ctx):
+            return _explode_in_the_wave()
+        with mock.patch.object(step_wave, 'run', wave):
+            rc, out = self.run_tick(steps='record,wave')
+        self.assertEqual(rc, 1)
+        self.assertIn('[step:wave] FAILED the wave broke', out)
+        tail = out[out.index('[step:wave] FAILED'):]
+        self.assertIn('Traceback (most recent call last):', tail)
+        self.assertIn('_explode_in_the_wave', tail)
+        self.assertIn('ValueError: the wave broke', tail)
 
     def test_the_line_shape(self):
         self.assertEqual(tick.step_timing_line('wave', 3.14159), '[step:wave] 3.1s')

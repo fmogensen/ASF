@@ -83,6 +83,7 @@ def run_step0(root, product, fresh=False):
 
     from asf import approvals
     from asf.metrics.metrics import cmd_backfill, cmd_rollup
+    from asf.record import stage
     from asf.record.ingest import cmd_ingest
     from asf.tick.file_bugs import cmd_file_bugs
 
@@ -100,11 +101,13 @@ def run_step0(root, product, fresh=False):
         # open Tasks minted before the minter wrote order: the plan's order lands as `after:`
         from asf.record import plan_order
         with timed('plan-order'):
-            plan_order.backfill(root, plan_order.trunk_reader(product))
+            stage.guarded(root, 'plan-order', plan_order.backfill,
+                          (plan_order.trunk_reader(product),), product=product)
     default_bug_epic = product.conventions.get('default_bug_epic')
     with timed('file-bugs'):
-        cmd_file_bugs(_ns(default_bug_epic=default_bug_epic,
-                          file_bug_level=approvals.level_of(product, 'file_bug')), root)
+        bug_args = _ns(default_bug_epic=default_bug_epic,
+                       file_bug_level=approvals.level_of(product, 'file_bug'))
+        stage.guarded(root, 'file-bugs', lambda r: cmd_file_bugs(bug_args, r), product=product)
     with timed('rollup'):
         cmd_rollup(_ns(day=None, no_releases=False, product=product.name), root)
     with timed('index'):
@@ -386,6 +389,8 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
         t0 = time.monotonic()
         if owner == 'asf':
             step_rc = run_asf_step(step, ctx)
+            if step == 'harvest':
+                lane_check(ctx)  # report only: never the step's rc, never an abort
         else:
             if resolved is None:
                 resolved = capacity.resolve(product)
@@ -442,12 +447,40 @@ def finish(ctx, ran):
     steps already ran)."""
     if not ctx.has_record:
         return 0
+    file_invariant_bugs(ctx)
     write_tick_line(ctx, ran)
     try:
         return commit_and_push(ctx)
     except (subprocess.CalledProcessError, OSError, env.ConfigError) as e:
         print(f"tick: state not committed ({(getattr(e, 'stderr', None) or str(e)).strip()})")
         return 1
+
+
+def file_invariant_bugs(ctx):
+    """The record check point's last half (R9): every write a staged writer was refused on this
+    tick (:func:`asf.record.stage.drain` — the offending paths were already put back, the rest
+    stands) becomes one Bug per ``(invariant, path)`` in the record clone, committed with the
+    tick. Printed, never raised: an invariant never aborts a tick."""
+    from asf.record import stage
+    findings = stage.drain()
+    if not findings:
+        return {}
+    try:
+        from asf import approvals
+        from asf.tick import file_bugs
+        product = ctx.product
+        return file_bugs.file_invariant_bugs(
+            ctx.record_root(), findings, level=approvals.level_of(product, 'file_bug'),
+            default_bug_epic=product.conventions.get('default_bug_epic'))
+    except Exception as e:  # noqa: BLE001 — a Bug not filed is refiled next time it recurs
+        print(f"tick: invariant Bugs not filed ({type(e).__name__}: {e})")
+        return {}
+
+
+def lane_check(ctx):
+    """The lane check point, after harvest: the ``lane`` invariants reported, I9 an event."""
+    from asf import invariants
+    return invariants.lane_report(ctx.product, event=lambda kind, **f: ctx.event(kind, **f))
 
 
 def _asf_step(step):
@@ -470,8 +503,11 @@ def run_asf_step(step, ctx):
     try:
         return _asf_step(step)(ctx) or 0
     except Exception as e:  # noqa: BLE001 — one step's failure never stops the rest
+        import traceback
         detail = (getattr(e, 'stderr', None) or str(e) or type(e).__name__).strip()
         print(f"[step:{step}] FAILED {_first_line(detail) or type(e).__name__}")
+        # the tick log carries the whole traceback: the one line names the step, this the line
+        print(traceback.format_exc().rstrip(), flush=True)
         if step == 'record':
             ctx.stale_reason = _first_line(detail) or type(e).__name__
         return 1

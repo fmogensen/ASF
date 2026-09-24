@@ -126,7 +126,8 @@ class OrderedTickTests(StepsTestCase):
         self.assertEqual(ran, ['health', 'groom', 'wave', 'prs', 'harvest', 'daily'])
         lines = steps_only(out).splitlines()
         self.assertEqual(lines[0], '[step:health] FAILED health blew up')
-        self.assertEqual(lines[1], '[command:batch] batch ran')
+        self.assertEqual(lines[1], 'Traceback (most recent call last):')  # §12: the whole of it
+        self.assertIn('[command:batch] batch ran', lines)
         self.assertEqual(lines[-1], f'tick: state committed and pushed ({self.record_path()})')
         self.assertEqual(clone.call_count, 1)  # one record clone per tick, however many steps
 
@@ -360,6 +361,18 @@ class WaveStepTests(StepsTestCase):
         # the record is public: an event never carries an account name (B-0023)
         self.assertNotIn('account', launch_ev)
         self.assertEqual(ctx.counts['launches'], 1)
+
+    def test_r9_the_feeder_check_point_drops_a_violating_row_before_the_wave(self):
+        from asf import invariants
+        live = self.rows[0]
+        rows = [live, feeder_rows.Row(0, 'BUG → FIX', 'B-0002', '', 'would launch fix-b-0002',
+                                      'fix-bug', 'fix/B-0001', 'a second session on one branch')]
+        with mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **kw: rows), \
+                mock.patch.object(invariants, 'lane_records', return_value={}):
+            step_wave.run(self.ctx(), out=self.lines.append)
+        self.assertEqual([r[0][0][1] for r in self.waved], ['B-0001'])
+        self.assertIn('INVARIANT I4: BUG → FIX B-0002 @fix/B-0001 — a second launching row on '
+                      'fix/B-0001 (first: BUG → FIX B-0001 @fix/B-0001)', self.lines)
 
     def test_the_wave_plans_over_the_plans_order(self):
         # defence in depth: the wave overlays the plan's order before the feeder sees the index

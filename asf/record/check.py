@@ -335,3 +335,58 @@ def cmd_check(args, root):
     for path, line, msg in sorted(warnings, key=lambda w: (w[0], w[1])):
         print(f"{path}:{line}: warning: {msg}")
     return 1 if findings else 0
+
+
+def _product_of(args):
+    from asf import env
+    try:
+        return env.load_product(getattr(args, 'product', None))
+    except Exception:  # noqa: BLE001 — a record checked on its own has no product to read
+        return None
+
+
+def _planned_rows(product, root):
+    """The rows the tick's wave would plan now (:func:`asf.tick.step_wave.run`'s inputs),
+    read-only — nothing launched, nothing written."""
+    from asf import capacity as capacity_mod
+    from asf.feeder import rows as feeder_rows
+    from asf.tick import step_wave
+    from asf.views import index_reader
+    items, _generated = index_reader.load(root)
+    running = step_wave.inflight(product)
+    rows = feeder_rows.plan_rows(items, product, running, capacity_mod.resolve(product).sessions,
+                                 **step_wave.plan_inputs(product, root))
+    return rows, items
+
+
+def invariant_findings(root, product=None, deep=False, out=print, ingest=None):
+    """Every invariant, read-only, against the record at ``root`` and the product's state
+    directory: the record audit (:func:`asf.invariants.record_audit`), the feeder over the rows
+    the wave would plan, the lane report, and with ``deep`` I6 on a copy of the record. Returns
+    ``[Finding]``; the I9 events are printed, never counted."""
+    from asf import invariants
+    findings = list(invariants.record_audit(root, product))
+    if product is not None:
+        planned = invariants._soft(lambda: _planned_rows(product, root), None)
+        if planned is not None:
+            rows, items = planned
+            ctx = invariants.feeder_context(product, rows, items)
+            findings += invariants.run(ctx, scope='feeder', out=out)
+        lane_ctx = invariants.lane_context(product)
+        findings += invariants.run(lane_ctx, scope='lane', out=out)
+        for ev in invariants.i9_events(lane_ctx):
+            out(f"EVENT I9: {ev['message']}")
+    if deep:
+        findings += invariants.check_i6(root, ingest=ingest)
+    return findings
+
+
+def cmd_check_invariants(args, root):
+    """``asf check --invariants [--deep]``: one ``INVARIANT <id>: <subject> — <why>`` line per
+    violation; exit 1 when there is any. Never writes the record or the state directory."""
+    findings = invariant_findings(root, _product_of(args), deep=getattr(args, 'deep', False))
+    for f in findings:
+        where = f" ({', '.join(f.paths)})" if f.paths else ''
+        print(f'INVARIANT {f.invariant}: {f.subject} — {f.message}{where}')
+    print(f"invariants: {len(findings)} violation(s)")
+    return 1 if findings else 0

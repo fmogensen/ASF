@@ -245,6 +245,8 @@ def run(ctx, out=print):
     r = capacity_mod.resolve(product)
     inputs = plan_inputs(product, ctx.record_root())
     planned = feeder_rows.plan_rows(items, product, running, r.sessions, **inputs)
+    from asf import invariants  # the feeder check point: a violating row is dropped, logged
+    planned = invariants.feeder_gate(product, planned, items, out=out)
     for row in held_by_share(items, product, running, r, planned, inputs):
         job = job_name(row.brief_kind, row.item_id)
         out(f'waits    {job:<24} {row.item_id:<10} — {r.fair_share_reason}')

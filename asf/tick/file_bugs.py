@@ -299,6 +299,58 @@ def _file_or_bump_bug(root, canonical, sig, info, date, default_bug_epic=None):
     return 'filed'
 
 
+#: An invariant refusal's signature: one Bug per ``(invariant, path)`` (R9).
+INVARIANT_SIG = 'invariant {invariant}: {path}'
+
+
+def invariant_signatures(findings):
+    """One signature per ``(invariant, path)`` of the record findings a staged writer was refused
+    on (:func:`asf.record.stage.drain`); every finding on it is an evidence line."""
+    out = {}
+    for f in findings or ():
+        for path in (f.paths or (f.subject,)):
+            sig = INVARIANT_SIG.format(invariant=f.invariant, path=path)
+            d = out.setdefault(sig, {
+                'title': truncate(f"Invariant {f.invariant} refused a write to {path}", 120),
+                'severity': 'S3', 'evidence': [], 'runs': [],
+                'acceptance': [f"no writer is refused on {f.invariant} at `{path}` for "
+                               f"{CI_REFUSAL_WINDOW_H}h"]})
+            line = f"{f.subject}: {f.message}"
+            if line not in d['evidence']:
+                d['evidence'].append(line)
+    return out
+
+
+def file_invariant_bugs(root, findings, level='auto', default_bug_epic=None, out=print):
+    """File (or bump, once a day) one Bug per ``(invariant, path)`` the record step refused —
+    the write was put back and the rest committed; the Bug says what was refused and why.
+    Returns ``{signature: outcome}``; under a ``file_bug`` level other than ``auto`` nothing is
+    written and each signature is printed as held."""
+    signatures = invariant_signatures(findings)
+    if not signatures:
+        return {}
+    if level != 'auto':
+        prefix = 'NEEDS OPERATOR: ' if level == 'human-now' else ''
+        for sig in sorted(signatures):
+            out(f'{prefix}held file_bug on {sig} — widen approvals: file_bug in products/<p>.yaml')
+        return {sig: 'held' for sig in signatures}
+    by_id, _errors = load_items(root)
+    canonical, _dupes = canonicalize(by_id)
+    epic, _why = usable_bug_epic(canonical, default_bug_epic)
+    outcomes = {}
+    for sig in sorted(signatures):
+        outcomes[sig] = _file_or_bump_bug(root, canonical, sig, signatures[sig], today(),
+                                          default_bug_epic=epic)
+        if outcomes[sig] == 'filed':
+            by_id, _errors = load_items(root)
+            canonical, _dupes = canonicalize(by_id)
+    if any(o in ('filed', 'bumped') for o in outcomes.values()):
+        do_index(root)
+    out(f"file-bugs: invariants — {sum(o == 'filed' for o in outcomes.values())} filed, "
+        f"{sum(o == 'bumped' for o in outcomes.values())} bumped")
+    return outcomes
+
+
 def _product(args):
     from asf import env
     try:

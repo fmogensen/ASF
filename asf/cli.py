@@ -178,6 +178,10 @@ def build_parser():
     p_check = sub.add_parser('check', help='validate the backlog')
     p_check.add_argument('paths', nargs='*')
     p_check.add_argument('--product')
+    p_check.add_argument('--invariants', action='store_true',
+                         help='run the invariants read-only (record, feeder, lane) instead')
+    p_check.add_argument('--deep', action='store_true',
+                         help='with --invariants: also I6 (re-derive a copy; slow, daily)')
 
     p_index = sub.add_parser('index', help='rewrite Children/Backlinks and index.json')
     p_index.add_argument('--product')
@@ -400,7 +404,9 @@ def _main(argv=None):
         return _published(cmd_set, args, resolve_record(args, announce=_announce_stderr),
                           f"record: set {args.id}")
     if args.command == 'check':
-        from asf.record.check import cmd_check
+        from asf.record.check import cmd_check, cmd_check_invariants
+        if getattr(args, 'invariants', False) or getattr(args, 'deep', False):
+            return cmd_check_invariants(args, resolve_record(args))
         return cmd_check(args, resolve_record(args))
     if args.command == 'index':
         from asf.record.index import cmd_index
