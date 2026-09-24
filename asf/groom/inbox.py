@@ -9,6 +9,10 @@ from asf.conventions import DEFAULT_INTAKE_DIR
 
 INBOX_KV_RE = re.compile(r'^(type|parent|signature|severity|writes|stories):\s*(.+?)\s*$', re.IGNORECASE)
 
+#: A header line intake does not (yet) read a key for — `after:` on a Task, say. Shaped like a
+#: header, so it does not end the header block (B-0111): it is skipped, not read as body.
+_UNKNOWN_HEADER_RE = re.compile(r'^[A-Za-z][\w-]*:\s*.*$')
+
 
 def _intake_dir(args):
     """The intake directory `asf inbox` files into: the product's convention, else the
@@ -67,11 +71,15 @@ def parse_inbox_file(text):
         if not s:
             continue
         m = INBOX_KV_RE.match(s)
-        if not m:
-            body_start = i
-            break
-        headers[m.group(1).lower()] = m.group(2).strip()
-        body_start = i + 1
+        if m:
+            headers[m.group(1).lower()] = m.group(2).strip()
+            body_start = i + 1
+            continue
+        if _UNKNOWN_HEADER_RE.match(s):
+            body_start = i + 1
+            continue
+        body_start = i
+        break
     else:
         body_start = len(rest)
 

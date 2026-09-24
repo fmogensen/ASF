@@ -397,6 +397,18 @@ class IntakeTest(unittest.TestCase):
                 else:
                     self.assertEqual(result.type, want)
 
+    def test_b_0111_an_unknown_header_key_does_not_drop_the_headers_after_it(self):
+        """B-0111: `after:` is a real header (task plans use it), just not one intake reads. A
+        header line intake does not know about must not end the header block — `signature:` and
+        `severity:` after it are still read, and the card is still typed a Bug, not a Feature."""
+        from asf.groom import inbox
+        text = ("# Checkout fails\nparent: E-0001\nafter: T-0001\n"
+                "signature: test_checkout::test_pay\nseverity: S1\n\nCustomers cannot pay.\n")
+        c = inbox.parse_inbox_file(text)
+        self.assertEqual(c.headers.get('signature'), 'test_checkout::test_pay')
+        self.assertEqual(c.headers.get('severity'), 'S1')
+        self.assertEqual(c.description, 'Customers cannot pay.')
+
     def test_story_card_keeps_its_acceptance_list(self):
         with open(os.path.join(self.root, 'inbox', 'thing.md'), 'w', encoding='utf-8') as f:
             f.write("# Add plan tiers\nparent: F-0001\n\n## Acceptance\n- [ ] python3 -m unittest tests.x\n"
