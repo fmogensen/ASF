@@ -93,8 +93,9 @@ def render_digest(root, date, canonical, groom_text, answers_done_texts, attempt
     one); each of its own ``NEEDS OPERATOR:`` lines (the brief's fourth answer class) passes
     through to **For you** verbatim. ``attempts``/``cap`` are the groom day's own adjudicate
     attempts and ``groom.adjudicate_attempts`` (PD6): under the cap, a still-open question is
-    listed under **Spoken for** as queued for the adjudicate session; at or past it, it moves to
-    **For you** as a ``NEEDS OPERATOR`` line instead."""
+    listed under **Spoken for** as queued for the adjudicate session; at or past it, it stays **Spoken for**,
+    queued for the next day's session — never **For you**, which holds only a barred line (an
+    approval-matrix class) and the session's own ``NEEDS OPERATOR`` answers."""
     from asf import cli
 
     answers_done_texts = list(answers_done_texts or ())
@@ -113,11 +114,13 @@ def render_digest(root, date, canonical, groom_text, answers_done_texts, attempt
         spoken_for_lines += [f"- {iid} {why} — (spoken for: GROOM → ADJUDICATE)"
                              for iid, why, _section in open_]
     else:
+        # past the day's adjudicate cap a question is not parked on the operator: the next groom
+        # asks it again and the next day's adjudicate session rules on it (B-0087, 2026-09-24)
         for iid, why, section in open_:
             if section in HOUSEKEEPING_SECTIONS:
                 housekeeping_lines.append(f"- {iid} {why} ({section})")
             else:
-                for_you_lines.append(f"NEEDS OPERATOR: {iid} — {why}")
+                spoken_for_lines.append(f"- {iid} {why} — (spoken for: the next GROOM → ADJUDICATE)")
     for t in answers_done_texts:
         for line in t.splitlines():
             s = line.strip()

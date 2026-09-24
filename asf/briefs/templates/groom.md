@@ -7,7 +7,8 @@ lines a policy could not answer. The open questions it still carries, exactly as
 
 FOR EACH ONE, one of two outcomes — never "noted", never a question back:
 - an answer in the grammar: `yes`, `no`, `rank <n>`, `parent <id>`, `S1`, `S2`, `S3`, or
-  `unblock <id>`, each with one sentence of why;
+  `unblock <id>`, each followed by ` — ` and one sentence of why. A card awaiting a decision
+  gets `yes` or `no`; on a Bug, `S1`/`S2`/`S3` decides it at that severity;
 - for an `inbox:<file>` line — a card intake could not type, its question after the `—` — read
   the card in the intake directory and answer with what settles it: `feature`, `bug <the
   failing test or error line>`, `parent <id>`, `S1`/`S2`/`S3` (several joined by `; `), or `no`
@@ -15,8 +16,10 @@ FOR EACH ONE, one of two outcomes — never "noted", never a question back:
 - or, when the question is not yours to answer, the literal `NEEDS OPERATOR: <the question> —
   <your recommendation>`.
 
-FOUR THINGS ARE NEVER YOURS: licence, money, security, and anything that changes what the customer
-sees. Those go to `NEEDS OPERATOR`, matching every other kind's rail.
+EVERY QUESTION IS YOURS TO DECIDE — scope, rank, priority, a release or a launch included — save
+three: an answer that spends money, touches credentials, or takes an action that cannot be undone
+(the approval matrix's own classes). Only those go to `NEEDS OPERATOR`; anything else sent there
+is a question parked on the operator, which is a defect.
 
 Write every answer, and nothing else, to the answers file `{answers_file}` — one line per
 question, in the groom file's own grammar, `adjudicator:` in place of `controller:`:

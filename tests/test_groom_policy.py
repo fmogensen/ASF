@@ -1104,7 +1104,7 @@ class DigestTests(unittest.TestCase):
         self.assertIn('- F-0012 no Stories — (spoken for: CARD → SPEC)', text)
         self.assertIn('- F-0020 undecided 4d — (spoken for: GROOM → ADJUDICATE)', text)
 
-    def test_for_you_holds_barred_over_cap_open_and_answers_file_needs_operator(self):
+    def test_for_you_holds_barred_and_answers_file_needs_operator_never_over_cap_open(self):
         groom_text = ("# Groom 2026-09-22\n\n## Inbox cards to decide\n\n"
                      "- [ ] E-0004 New goal — reads as a new Epic → answer: "
                      "____ (barred: approvals.new_epic)\n\n"
@@ -1113,9 +1113,10 @@ class DigestTests(unittest.TestCase):
         answers_done = "NEEDS OPERATOR: F-0030 rewrite the billing page — touches money\n"
         text = digest.render_digest(self.root, '2026-09-22', self._load(), groom_text,
                                     [answers_done], attempts=2, cap=2)
-        self.assertIn('0 answered by rule · 0 ruled by the adjudicator · 0 spoken for · 3 for you', text)
+        self.assertIn('0 answered by rule · 0 ruled by the adjudicator · 1 spoken for · 2 for you', text)
         self.assertIn('NEEDS OPERATOR: E-0004 — reads as a new Epic; approvals.new_epic is not auto.', text)
-        self.assertIn('NEEDS OPERATOR: F-0020 — undecided 4d', text)
+        self.assertNotIn('NEEDS OPERATOR: F-0020', text)
+        self.assertIn('- F-0020 undecided 4d — (spoken for: the next GROOM → ADJUDICATE)', text)
         self.assertIn('NEEDS OPERATOR: F-0030 rewrite the billing page — touches money', text)
 
     def test_open_question_under_the_cap_stays_spoken_for(self):

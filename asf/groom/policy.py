@@ -470,7 +470,7 @@ def decide_by_approval(item_id, rec, canonical, derived, ctx):
 
 
 #: The groom sections whose lines ask for a card's decision.
-DECISION_SECTIONS = ('inbox', 'undecided3', 'no_stories', 'dupes', 'undecided14', 'auto_bugs')
+DECISION_SECTIONS = ('inbox', 'undecided_new', 'undecided3', 'no_stories', 'dupes', 'undecided14', 'auto_bugs')
 
 #: PD3 — ``(name, section keys, policy)``. ``name`` must equal ``asf.groom.groom.POLICY_NAMES``
 #: in the same order (a test asserts it); kept as plain strings rather than an import of that

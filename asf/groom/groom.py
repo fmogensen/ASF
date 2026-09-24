@@ -62,9 +62,29 @@ def _previous_groom_file(root, date):
     return os.path.join(d, f"{sorted(dates)[-1]}.md")
 
 
-def _parse_answer(answer):
-    """(field, value) for one groom answer word, or (None, None) when it's blank or unrecognized."""
+#: The one sentence of why an answer may carry after its word (``yes — one session, one gate``)
+#: — the adjudicate brief asks for it, and an operator writes it too.
+_WHY_SPLIT_RE = re.compile(r'\s+(?:—|–|--)\s*')
+
+
+def split_why(answer):
+    """``(word, why)``: the answer word before its first ``—`` (or ``–``/``--``), and the
+    sentence after it (``''`` when there is none)."""
+    parts = _WHY_SPLIT_RE.split(answer.strip(), maxsplit=1)
+    return parts[0].strip(), (parts[1].strip() if len(parts) > 1 else '')
+
+
+def unanswered(answer):
+    """True for an answer slot nobody has filled: blank, ``____`` (barred or not), or a line
+    spoken for by the factory."""
     a = answer.strip()
+    return not a or a.startswith('____') or a.startswith('(spoken for')
+
+
+def _parse_answer(answer):
+    """(field, value) for one groom answer word, or (None, None) when it's blank or unrecognized.
+    A trailing ``— <why>`` is not part of the word; on a ``no`` it is the reason."""
+    a, why = split_why(answer)
     if not a or a == '____':
         return None, None
     if ANSWER_YES.match(a):
@@ -72,7 +92,8 @@ def _parse_answer(answer):
     m = ANSWER_NO.match(a)
     if m:
         # the caller dates the reason text; a bare `no` is only the date
-        return 'removed', (m.group('why').strip() if m.group('why') else None)
+        reason = m.group('why').strip() if m.group('why') else (why or None)
+        return 'removed', reason
     if ANSWER_OPEN.match(a):
         return 'reconciled', None  # caller fills in the date
     m = ANSWER_LANDED.match(a)
@@ -189,8 +210,9 @@ def merge_tasks(canonical, verb, ids, date, who, derived=None, emit=None):
 
 def apply_proposal(root, canonical, verb, ids, areas, answer, date, who, derived=None, emit=None):
     """One proposal line's answer: `yes` reshapes (merge/batch/split), `no`/`close` declines and
-    suppresses, anything else changes nothing. Returns the number of cards written."""
-    a = answer.strip()
+    suppresses, anything else changes nothing and is named as skipped. A trailing `— <why>` is
+    not part of the answer. Returns the number of cards written."""
+    a, _why = split_why(answer)
     if ANSWER_YES.match(a):
         if verb in ('merge', 'batch'):
             return merge_tasks(canonical, verb, ids, date, who, derived=derived, emit=emit)
@@ -221,7 +243,15 @@ def apply_proposal(root, canonical, verb, ids, areas, answer, date, who, derived
                 emit(tid, 'reshape_declined', key)
             n += 1
         return n
+    if not unanswered(answer):
+        _skipped(ids[0], answer, f'{verb} takes yes or no')
     return 0
+
+
+def _skipped(iid, answer, why):
+    """One line naming an answered groom line that changed nothing, and why."""
+    a = answer.strip()
+    print(f"groom: {iid} answer '{a[:60]}{'…' if len(a) > 60 else ''}' skipped — {why}")
 
 
 def _parse_proposal(m):
@@ -288,9 +318,26 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None, 
 
         field, value = _parse_answer(raw_answer)
         if field is None:
+            if not unanswered(raw_answer):
+                word = split_why(raw_answer)[0]
+                _skipped(iid, raw_answer, 'left for the operator'
+                         if word.upper().startswith('NEEDS OPERATOR') else
+                         'not an answer the grammar knows (yes, no, open, rank <n>, parent <id>, '
+                         'S1/S2/S3, unblock <id>, landed <sha>)')
             continue
 
         typed, _machine = frontmatter.split_machine(rec['meta'])
+        section = (sections or {}).get(iid, '')
+        if (field == 'severity' and section in policy.DECISION_SECTIONS
+                and typed.get('type') == 'bug' and typed.get('decided') is not True
+                and not typed.get('removed')):
+            # a severity ruled on a Bug asked for its decision is the decision: it is a real Bug
+            # at that severity — otherwise the card stays undecided with its severity set
+            _write_card(rec, {'decided': True}, f"- {date} groom: decided → true {who}")
+            applied += 1
+            if event:
+                event('groom_answer', item=iid, section=section, field='decided', value='true',
+                      by=by)
 
         if field == 'unblock':
             blocked_by = typed.get('blockedBy') or []
@@ -390,6 +437,32 @@ def groom_undecided_section(canonical, now, days, exclude=()):
         age = (now - since).total_seconds()
         if age > threshold:
             lines.append(_card_line(iid, typed.get('title', ''), f"undecided {format_age(age)}"))
+    return lines
+
+
+#: The sections whose question is "decide this card" — a card with a line in one is asked.
+_ASKS_DECISION = ('inbox', 'undecided3', 'undecided14', 'auto_bugs')
+
+
+def groom_undecided_rest_section(canonical, sections):
+    """Every open, undecided card (Decisions and Rules aside) that no section in
+    :data:`_ASKS_DECISION` already asks about — one filed by a rule or ``asf new`` yesterday,
+    say, which is neither an inbox card, nor auto-filed, nor three days old. Without it such a
+    card is asked of nobody — no rule, no adjudicator, no operator — while ``asf status`` counts
+    it undecided (B-0087, 2026-09-24)."""
+    asked = {m.group(1) for key in _ASKS_DECISION for line in sections.get(key) or ()
+             for m in [_LINE_ID_RE.match(line)] if m}
+    lines = []
+    for iid, rec in sorted(_open_items(canonical, ('decision', 'rule')).items()):
+        if iid in asked:
+            continue
+        typed, machine = frontmatter.split_machine(rec['meta'])
+        if typed.get('decided') is True or typed.get('removed') or typed.get('moved_to'):
+            continue
+        since = parse_iso(machine.get('stage_since'))
+        age = (f"undecided {format_age((datetime.datetime.now(datetime.timezone.utc) - since).total_seconds())}"
+               if since is not None else 'undecided')
+        lines.append(_card_line(iid, typed.get('title', ''), age))
     return lines
 
 
@@ -501,6 +574,7 @@ def groom_auto_bugs_section(canonical):
 
 GROOM_SECTIONS = [
     ('Inbox cards to decide', 'inbox'),
+    ('Undecided, asked nowhere else', 'undecided_new'),
     ('Undecided > 3 days', 'undecided3'),
     ('Features without Stories', 'no_stories'),
     ('Stories without Tasks after plan-approved', 'no_tasks'),
@@ -548,7 +622,7 @@ def build_groom_sections(canonical, derived, date, capacity=DEFAULT_CAPACITY,
                          since=None):
     now = datetime.datetime.now(datetime.timezone.utc)
     origin_ids = inbox_origin_ids(canonical)
-    return {
+    sections = {
         **groom_shape_sections(canonical, derived, capacity, area_depth, batch_max_globs),
         'inbox': groom_inbox_section(canonical, origin_ids),
         'undecided3': groom_undecided_section(canonical, now, 3, exclude=origin_ids),
@@ -560,6 +634,8 @@ def build_groom_sections(canonical, derived, date, capacity=DEFAULT_CAPACITY,
         'undecided14': groom_undecided_section(canonical, now, 14, exclude=origin_ids),
         'auto_bugs': groom_auto_bugs_section(canonical),
     }
+    sections['undecided_new'] = groom_undecided_rest_section(canonical, sections)
+    return sections
 
 
 #: Rendered only when it has lines: the inbox cards intake asked a question of (their lines
