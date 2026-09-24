@@ -40,8 +40,14 @@ from asf.workers.stall import CORRECTION_HEAD
 
 TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
 
-KINDS = ('spec', 'plan', 'coder', 'review', 'fixer', 'rebase', 'close', 'adjudicate', 'fix-bug',
-         'correct', 'groom', 'reshape', 'spec-plan', 'direct', 'delivery-plan', 'delivery-code')
+#: The operator's model labels. ``asf.workers`` maps them onto real model names, so no
+#: vendor's model id is ever written down here. ``CHEAP`` is the bookkeeping tier: a rebase, a
+#: close, the groom's clerical pass — work with a right answer that no judgement reaches.
+CHEAP = 'cheap'
+
+KINDS = ('spec', 'spec-amend', 'plan', 'coder', 'review', 'fixer', 'rebase', 'close', 'adjudicate',
+         'fix-bug', 'correct', 'groom', 'groom-clerk', 'reshape', 'spec-plan', 'direct',
+         'delivery-plan', 'delivery-code')
 KIND_ALIASES = {'task': 'coder', 'code': 'coder', 'fix': 'fixer', 'bug': 'fix-bug',
                 'fix_bug': 'fix-bug', 'spec_plan': 'spec-plan'}
 #: The class of an item, for picking its model within a kind: a Bug's severity, else its type.
@@ -55,10 +61,12 @@ MODEL_CLASSES = ('S1', 'S2', 'S3', 'task', 'story', 'feature', 'epic')
 #: row, as one label or as a map of this shape (:func:`model_for`).
 MODEL_TABLE = {
     'spec':       {'default': HEAVY},
+    'spec-amend': {'default': HEAVY},
     'plan':       {'default': HEAVY},
     'spec-plan':  {'default': HEAVY},
     'direct':     {'default': HEAVY},
     'groom':      {'default': HEAVY},
+    'groom-clerk': {'default': CHEAP},
     'reshape':    {'default': HEAVY},
     'review':     {'default': HEAVY, 'S1': HEAVY, 'S2': LIGHT, 'S3': LIGHT, 'task': LIGHT},
     'adjudicate': {'default': LIGHT, 'S1': HEAVY, 'S2': LIGHT, 'S3': LIGHT, 'task': LIGHT},
@@ -66,15 +74,16 @@ MODEL_TABLE = {
     'fix-bug':    {'default': LIGHT, 'S1': HEAVY, 'S2': LIGHT, 'S3': LIGHT},
     'coder':      {'default': LIGHT},
     'fixer':      {'default': LIGHT},
-    'rebase':     {'default': LIGHT},
-    'close':      {'default': LIGHT},
+    'rebase':     {'default': CHEAP},
+    'close':      {'default': CHEAP},
     'delivery-plan': {'default': HEAVY},
     'delivery-code': {'default': LIGHT},
 }
 #: The label per kind for a brief with no item — what ``model_for(product, kind)`` returns.
 DEFAULT_MODELS = {kind: row['default'] for kind, row in MODEL_TABLE.items()}
 #: The kinds that may mint new cards (Stories, Tasks, Decisions) and so need an id range.
-ID_RANGE_KINDS = ('spec', 'plan', 'adjudicate', 'fix-bug', 'groom', 'reshape', 'spec-plan')
+ID_RANGE_KINDS = ('spec', 'spec-amend', 'plan', 'adjudicate', 'fix-bug', 'groom', 'reshape',
+                  'spec-plan')
 
 #: The typed fields a brief states about its card, and so the ones whose change makes a brief
 #: stale (F-0090 D4). ``state``, ``evidence``, ``stage_since`` and ``updated`` are not here: they
@@ -232,13 +241,13 @@ def add_dirs_for(product, row=None, kind=None):
     """``job_grants`` from the product yaml — the directories a session may read outside its
     worktree, expanded but not checked (the runtime is what fails on a missing one).
 
-    A ``groom`` row also grants the directories of ``groom_file`` and ``answers_file`` (PD7): the
+    A ``groom`` or ``groom-clerk`` row also grants the directories of ``groom_file`` and ``answers_file`` (PD7): the
     session reads the one and writes the other, and neither sits inside its worktree."""
     grants = []
     if product is not None:
         raw = product._get('job_grants') if hasattr(product, '_get') else None
         grants = [os.path.expanduser(str(d)) for d in (raw or [])]
-    if kind == 'groom' and row is not None:
+    if kind in ('groom', 'groom-clerk') and row is not None:
         dirs = [os.path.dirname(os.path.expanduser(getattr(row, attr, '') or ''))
                 for attr in ('groom_file', 'answers_file') if getattr(row, attr, '')]
         groom_file = getattr(row, 'groom_file', '') or ''
