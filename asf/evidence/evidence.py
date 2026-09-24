@@ -1105,18 +1105,25 @@ def feature_state(spec_on_main, plan_approved, all_tasks_closed, all_merged_in_p
 def feature_stage(spec, plan, tasks, on_prod):
     """The finer `card → ... → on-prod` ladder that drives the board.
 
-    `spec`/`plan` are {"exists": bool, "review": (round, verdict)|None, "approved": bool}.
-    `tasks` is a list of per-task state strings ("New"/"Active"/"Closed").
+    `spec`/`plan` are {"exists": bool, "review": (round, verdict)|None, "approved": bool};
+    `spec` may say "on_trunk" (default: its "approved"). `tasks` is a list of per-task state
+    strings ("New"/"Active"/"Closed").
+
+    Coders read the spec from the trunk, so a Feature is plan-approved or building only on a
+    spec ON the trunk: a plan landed, or Tasks run, on a spec that is not there (a migrated
+    record's spec can still sit on a lane or pre-lane branch) stays on the spec ladder —
+    spec-approved (an approved review: it waits to be landed), else spec-review/spec-draft, else
+    card.
     """
     total = len(tasks)
     closed = sum(1 for t in tasks if t == "Closed")
     if total and closed == total:
         return "on-prod" if on_prod else "landed"
     started = bool(total) and bool(closed or any(t == "Active" for t in tasks))
-    if not spec["approved"] and (plan["approved"] or started):
-        # a plan landed, or Tasks run, on a spec the trunk never got (a migrated record's spec
-        # can still sit on a pre-lane branch): no coder starts until the spec is approved
-        return _spec_stage(spec) or "card"
+    if not spec.get("on_trunk", spec["approved"]) and (plan["approved"] or started):
+        # a plan landed, or Tasks run, on a spec the trunk never got: no coder starts until
+        # the spec is on the trunk
+        return "spec-approved" if spec["approved"] else _spec_stage(spec) or "card"
     if started:
         return f"building {closed}/{total}"
     if plan["approved"]:

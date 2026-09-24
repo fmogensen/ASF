@@ -58,6 +58,11 @@ CARD_SPEC = 'CARD → SPEC'
 STARVED_SPEC = 'STARVED → SPEC'
 STARVED_PLAN = 'STARVED → PLAN'
 PUSHED_LAND = 'PUSHED → LAND'
+#: an approved spec that sits on a branch, not the trunk: the tick's ``prs`` step adopts the
+#: branch (:mod:`asf.tick.land_spec`) and the docs lane lands it — a row that launches nothing
+APPROVED_LAND = 'APPROVED → LAND'
+#: the correction kind :mod:`asf.tick.land_spec` writes when the branch cannot land as it stands
+LAND_SPEC = 'land-spec'
 WAITS_LANDING = 'WAITS ON landing'
 PLAN_CODE = 'PLAN → CODE'
 RESHAPE = 'RESHAPE → PLAN'
@@ -330,6 +335,10 @@ def correction_rows(items, product, busy, corrections):
                            action=f'{PARKED} {c.get("reason") or c["kind"]}', brief_kind='correct',
                            branch=branch, reason=c.get('reason') or 'parked', waits_on='operator'))
             continue
+        if c.get('kind') == LAND_SPEC:  # an approved spec that cannot land as it stands
+            out.append(Row(tier=tier, kind=STARVED_SPEC, item_id=iid, feature_id=fid or iid,
+                           action=LAUNCH, brief_kind='spec', branch=branch, reason=c['text']))
+            continue
         if c.get('kind') == FOOTPRINT and c.get('verdict') != 'widen':
             out.append(footprint_row(item, product, c, tier, fid, branch))
             continue
@@ -380,13 +389,13 @@ def running_footprints(items, busy):
     return out
 
 
-def _waiting_doc(fid, doc, product, unlanded, open_branches):
+def _waiting_doc(fid, doc, product, unlanded, open_branches, branch=None):
     """Why ``fid``'s ``doc`` (spec | plan) is not starved though no session holds it — its run
     finished and its work waits to land, or its branch has a PR open — else ''."""
     why = ((unlanded or {}).get(fid) or {}).get(doc)
     if why:
         return f"{doc} {why}"
-    if branch_for(product, doc, fid) in (open_branches or ()):
+    if (branch or branch_for(product, doc, fid)) in (open_branches or ()):
         return f"{doc} pushed, PR open, waiting to land"
     return ''
 
@@ -404,7 +413,7 @@ def _doc_row(kind, fid, doc, product, reason, unlanded, open_branches, branch=No
     """The launching row for ``fid``'s ``doc`` — or, when that document's work is pushed and
     waiting to land, a PUSHED → LAND row that launches nothing."""
     branch = branch or branch_for(product, doc, fid)
-    waiting = _waiting_doc(fid, doc, product, unlanded, open_branches)
+    waiting = _waiting_doc(fid, doc, product, unlanded, open_branches, branch)
     if waiting:
         return Row(tier=2, kind=PUSHED_LAND, item_id=fid, feature_id=fid,
                    action=f"{WAITS_LANDING}: {waiting}", brief_kind=doc, branch=branch,
@@ -451,6 +460,8 @@ def feature_rows(items, product, busy, running, landed_shas=None, unlanded=None,
             else:
                 out.append(_doc_row(STARVED_SPEC, fid, 'spec', product, f"{stage}, no session",
                                     *waits))
+        elif word == 'spec-approved' and spec_carrier(f):
+            out.append(land_spec_row(f, product, *waits))
         elif word in ('spec-approved', 'plan-draft', 'plan-review'):
             out.append(_doc_row(STARVED_PLAN, fid, 'plan', product,
                                 f"{stage}, no session" if word != 'spec-approved'
@@ -458,6 +469,26 @@ def feature_rows(items, product, busy, running, landed_shas=None, unlanded=None,
         elif word in ('plan-approved', 'building'):
             out.extend(task_rows(items, product, f, busy, running, landed_shas))
     return out
+
+
+def land_spec_row(feature, product, unlanded, open_branches):
+    """An approved spec on a branch, not the trunk: coders read the spec from the trunk, so it is
+    landed first — as written, never rewritten. Pushed and waiting (a PR open, a run the docs
+    lane has not merged yet): PUSHED → LAND; else APPROVED → LAND, which launches nothing — the
+    ``prs`` step adopts the branch (:mod:`asf.tick.land_spec`) and opens its PR, and the docs
+    lane merges it once green. A branch that cannot land as it stands comes back as a
+    STARVED → SPEC session through its ``land-spec`` correction (:func:`correction_rows`)."""
+    fid, carrier = feature['id'], spec_carrier(feature)
+    waiting = _waiting_doc(fid, 'spec', product, unlanded, open_branches, carrier)
+    if waiting:
+        return Row(tier=2, kind=PUSHED_LAND, item_id=fid, feature_id=fid,
+                   action=f"{WAITS_LANDING}: {waiting}", brief_kind='spec', branch=carrier,
+                   reason=waiting)
+    return Row(tier=2, kind=APPROVED_LAND, item_id=fid, feature_id=fid,
+               action=f"{WAITS_LANDING}: spec approved on {carrier}", brief_kind='spec',
+               branch=carrier, waits_on='landing',
+               reason=f"spec approved on {carrier}, not on the trunk: the prs step opens its PR "
+                      f"and the docs lane lands it — no coder starts before it is on the trunk")
 
 
 def task_rows(items, product, feature, busy, running, landed_shas=None):
@@ -656,7 +687,8 @@ def candidates(index, product, inflight, attempts=None, corrections=None, busy=N
     if gr is not None:
         rows.append(gr)
     # a Task a correction row speaks for gets no PLAN → CODE row too: one session per branch
-    tasks_spoken = {i for i in spoken if (items.get(i) or {}).get('type') == 'task'}
+    tasks_spoken = {i for i in spoken if (items.get(i) or {}).get('type') == 'task'
+                    or (corrections or {}).get(i, {}).get('kind') == LAND_SPEC}
     rows += feature_rows(items, product, busy | tasks_spoken, running, landed_shas, unlanded,
                          open_branches)
     rows += undecided_rows(items, product, busy, decision_limit)

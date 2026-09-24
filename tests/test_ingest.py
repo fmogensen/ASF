@@ -880,21 +880,55 @@ class NoCoderBeforeTheSpecLands(unittest.TestCase):
         self.assertEqual(meta['stage'], 'plan-approved')
         self.assertEqual([(r.kind, r.item_id) for r in out], [(rows.PLAN_CODE, 'T-0001')])
 
-    def test_an_approved_spec_review_gets_code_rows(self):
+    def test_an_approved_spec_review_off_the_trunk_is_landed_not_coded(self):
         from asf.feeder import rows
         meta, out = self.rows_after(self.fev(
             spec='origin/spec/F-0001:docs/specs/f-0001.md', spec_branch='spec/F-0001',
             spec_review=(1, 'APPROVED', 'f-0001-spec-review-r1.md')))
-        self.assertEqual(meta['stage'], 'plan-approved')
-        self.assertEqual([(r.kind, r.item_id) for r in out], [(rows.PLAN_CODE, 'T-0001')])
+        self.assertEqual(meta['stage'], 'spec-approved')
+        self.assertEqual([(r.kind, r.branch, r.launches) for r in out],
+                         [(rows.APPROVED_LAND, 'spec/F-0001', False)])
 
-    def test_running_tasks_on_an_unlanded_spec_start_no_more_coders(self):
+    def test_an_approved_spec_waiting_on_its_open_pr_is_pushed_and_waiting(self):
+        from asf.env import Product
+        from asf.feeder import rows
+        self.rows_after(self.fev(
+            spec='origin/spec/F-0001:docs/specs/f-0001.md', spec_branch='spec/F-0001',
+            spec_review=(1, 'APPROVED', 'f-0001-spec-review-r1.md')))
+        with open(os.path.join(self.root, 'index.json'), encoding='utf-8') as f:
+            index = json.load(f)
+        out = rows.candidates(index, Product('sample', {}), [], open_branches={'spec/F-0001'})
+        self.assertEqual([(r.kind, r.launches) for r in out], [(rows.PUSHED_LAND, False)])
+
+    def test_an_approved_spec_that_cannot_land_as_is_gets_a_spec_session(self):
+        from asf.env import Product
+        from asf.feeder import rows
+        self.rows_after(self.fev(
+            spec='origin/spec/F-0001:docs/specs/f-0001.md', spec_branch='spec/F-0001',
+            spec_review=(1, 'APPROVED', 'f-0001-spec-review-r1.md')))
+        with open(os.path.join(self.root, 'index.json'), encoding='utf-8') as f:
+            index = json.load(f)
+        text = "Land the existing approved spec — don't rewrite it."
+        corr = {'F-0001': {'kind': rows.LAND_SPEC, 'text': text, 'rounds': 0,
+                           'branch': 'spec/F-0001'}}
+        out = rows.candidates(index, Product('sample', {}), [], corrections=corr)
+        self.assertEqual([(r.kind, r.branch, r.brief_kind, r.launches) for r in out],
+                         [(rows.STARVED_SPEC, 'spec/F-0001', 'spec', True)])
+        self.assertEqual(out[0].reason, text)
+
+    def test_a_spec_on_the_trunk_is_what_lets_tasks_run(self):
         evidence = ingest.evidence
-        spec = {'exists': True, 'approved': False, 'review': None}
+        spec = {'exists': True, 'approved': False, 'review': None, 'on_trunk': False}
         plan = {'exists': True, 'approved': True, 'review': None}
         self.assertEqual(evidence.feature_stage(spec, plan, ['Active', 'New'], False), 'spec-draft')
-        self.assertEqual(evidence.feature_stage(dict(spec, approved=True), plan,
-                                                ['Active', 'New'], False), 'building 0/2')
+        approved = dict(spec, approved=True)
+        self.assertEqual(evidence.feature_stage(approved, plan, ['Active', 'New'], False),
+                         'spec-approved')
+        self.assertEqual(evidence.feature_stage(approved, plan, [], False), 'spec-approved')
+        on_trunk = dict(approved, on_trunk=True)
+        self.assertEqual(evidence.feature_stage(on_trunk, plan, ['Active', 'New'], False),
+                         'building 0/2')
+        self.assertEqual(evidence.feature_stage(on_trunk, plan, [], False), 'plan-approved')
         self.assertEqual(evidence.feature_stage(spec, plan, ['Closed'], False), 'landed')
 
     def test_a_linked_spec_is_found_on_the_trunk_or_on_a_remote_branch(self):

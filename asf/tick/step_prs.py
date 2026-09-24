@@ -178,7 +178,10 @@ def pr_create_argv(product, slug, branch, title, body):
 def run(ctx, out=print):
     from asf.harvest.harvest import LANDING_FF, landing
     from asf.views import index_reader
+    from asf.tick import land_spec
     product = ctx.product
+    if product.repo_dir:  # an approved spec off the trunk is adopted before anything is opened
+        land_spec.adopt(product, index_reader.load(ctx.record_root())[0], out=out)
     if landing(product) == LANDING_FF:
         out('prs: landing is fast-forward — harvest lands the branches')
         _hygiene(product)

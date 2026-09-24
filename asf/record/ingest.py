@@ -689,6 +689,7 @@ def cmd_ingest(args, root):
             lines = id_lines
         else:
             spec_dict = {'exists': bool(fev.get('spec') or spec_carrier), 'approved': spec_approved,
+                         'on_trunk': spec_on_main,
                          'review': spec_review[:2] if spec_review else None}
             plan_dict = {'exists': bool(fev.get('plan')), 'approved': plan_approved,
                          'review': plan_review[:2] if plan_review else None}
