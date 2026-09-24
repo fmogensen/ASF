@@ -1209,3 +1209,54 @@ class CostBlockTokensTest(Base):
         e = metrics.subtree_cost(self.items, costs, 'E-0001')
         self.assertEqual(e['tokens'], {'input': 3, 'output': 10, 'cache_read': 5, 'cache_write': None})
         self.assertIsNone(e['usd'])
+
+
+def _landed(state='Closed', hour=12, **kw):
+    return dict({'state': state, 'stage_since': f'{DAY}T{hour:02d}:00:00Z'}, **kw)
+
+
+def _sess(item, hour=8, usd=None, result='finished'):
+    ev = {'ts': f'{DAY}T{hour:02d}:00:00Z', 'task': 't', 'account': 'a1', 'kind': 'code', 'result': result, 'item': item}
+    if usd is not None:
+        ev['usd'] = usd
+    return ev
+
+
+class DeliveredVsSingleTest(Base):
+    def delivery(self):
+        items = {'F-0100': _landed(delivers=['F-0100', 'B-0100', 'B-0101']),
+                 'B-0100': _landed(delivered_by='F-0100'), 'B-0101': _landed(delivered_by='F-0100'),
+                 'T-0100': _landed(), 'T-0101': _landed()}
+        sessions = [_sess('F-0100', usd=1.5), _sess('F-0100', usd=1.5)]
+        sessions += [_sess(i) for i in ('T-0100', 'T-0101') for _ in range(3)]
+        return items, sessions
+
+    def test_table_divides_a_delivery_over_its_items(self):
+        rows = metrics.delivered_vs_single(*self.delivery(), DAY)
+        d, s = rows['delivered'], rows['single']
+        self.assertEqual((d['landed'], d['sessions'], round(d['sessions_per_item'], 2), d['usd'], d['usd_per_item']),
+                         (3, 2, 0.67, 3.0, 1.0))
+        self.assertEqual((s['landed'], s['sessions'], s['sessions_per_item'], s['usd']), (2, 6, 3.0, None))
+        md = '\n'.join(metrics.delivered_table(rows))
+        self.assertIn('| delivered | 3 | 2 | 0.67 | 3.00 | 1.00 |', md)
+        self.assertIn('| single | 2 | 6 | 3.00 | — |', md)
+
+    def test_hours_to_land_uses_stage_since(self):
+        items = {'F-0100': _landed(hour=12, delivers=['F-0100', 'B-0100']),
+                 'B-0100': _landed(hour=12, delivered_by='F-0100')}
+        rows = metrics.delivered_vs_single(items, [_sess('F-0100', hour=8)], DAY)
+        self.assertEqual(rows['delivered']['median_hours'], 4.0)
+        self.assertIn('| 4.0 |', '\n'.join(metrics.delivered_table(rows)))
+
+    def test_failed_share(self):
+        items = {'T-0100': _landed()}
+        sessions = [_sess('T-0100', result='failed: gate red')] + [_sess('T-0100') for _ in range(3)]
+        rows = metrics.delivered_vs_single(items, sessions, DAY)
+        self.assertIn('25 %', '\n'.join(metrics.delivered_table(rows)))
+
+    def test_section_absent_when_nothing_landed(self):
+        self.assertNotIn('## Delivered vs single', metrics.render_daily(self.root, DAY, self.items))
+        rows = metrics.delivered_vs_single({'T-0100': _landed()}, [], DAY)
+        self.assertEqual(rows['single']['landed'], 1)
+        self.assertIsNone(rows['single']['median_hours'])
+        self.assertIsNone(rows['delivered']['median_hours'])

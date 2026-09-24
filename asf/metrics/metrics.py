@@ -597,6 +597,70 @@ def cost_table(items, ci7, sessions7):
     return lines
 
 
+def _median(xs):
+    xs = sorted(xs)
+    if not xs:
+        return None
+    mid = len(xs) // 2
+    return xs[mid] if len(xs) % 2 else (xs[mid - 1] + xs[mid]) / 2
+
+
+def delivered_vs_single(items, sessions, day, days=7):
+    """{'delivered': row, 'single': row} over the items that landed (`Closed`/`Resolved`, `stage_since` in the
+    `days` ending at `day`). An item's owner is its lead when it carries `delivered_by:`, itself otherwise; a
+    card carrying `delivers:` is in the delivered group. An owner's sessions and USD are divided over the
+    landed items it delivered (D15). A row is {landed, sessions, sessions_per_item, usd, usd_per_item,
+    median_hours, failed_share}, each None where no event supports it."""
+    window = set(days_back(day, days))
+    landed = {}
+    for iid, it in items.items():
+        if it.get('removed') or it.get('state') not in ('Closed', 'Resolved'):
+            continue
+        since = parse_ts(it.get('stage_since'))
+        if since is None or since.astimezone(dt.timezone.utc).strftime('%Y-%m-%d') not in window:
+            continue
+        landed[iid] = (it.get('delivered_by') or iid, bool(it.get('delivered_by') or it.get('delivers')), since)
+    by_owner = collections.defaultdict(list)
+    for s in sessions:
+        by_owner[s.get('item')].append(s)
+    rows = {}
+    for group, delivered in (('delivered', True), ('single', False)):
+        mine = {i: v for i, v in landed.items() if v[1] == delivered}
+        owners = {v[0] for v in mine.values()}
+        evs = [e for o in owners for e in by_owner.get(o, [])]
+        usds = [e['usd'] for e in evs if e.get('usd') is not None]
+        hours = []
+        for iid, (owner, _d, since) in mine.items():
+            starts = [t for t in (parse_ts(e.get('ts')) for e in by_owner.get(owner, [])) if t]
+            if starts and since >= min(starts):
+                hours.append((since - min(starts)).total_seconds() / 3600)
+        n = len(mine)
+        rows[group] = {
+            'landed': n,
+            'sessions': len(evs) if n else None,
+            'sessions_per_item': len(evs) / n if n else None,
+            'usd': sum(usds) if usds else None,
+            'usd_per_item': sum(usds) / n if usds else None,
+            'median_hours': _median(hours),
+            'failed_share': sum(1 for e in evs if str(e.get('result') or '').startswith('failed')) / len(evs) if evs else None,
+        }
+    return rows
+
+
+def delivered_table(rows):
+    def num(v, fmt):
+        return '—' if v is None else format(v, fmt)
+    lines = ['| Group | Landed | Sessions | Sessions/item | USD | USD/item | Median h to land | Failed sessions |',
+             '|---|--:|--:|--:|--:|--:|--:|--:|']
+    for group in ('delivered', 'single'):
+        r = rows[group]
+        cells = [group, str(r['landed']), num(r['sessions'], 'd'), num(r['sessions_per_item'], '.2f'),
+                 num(r['usd'], '.2f'), num(r['usd_per_item'], '.2f'), num(r['median_hours'], '.1f'),
+                 '—' if r['failed_share'] is None else f"{round(r['failed_share'] * 100)} %"]
+        lines.append('| ' + ' | '.join(esc(c) for c in cells) + ' |')
+    return lines
+
+
 def render_daily(root, day, items, conv=None):
     ci = read_stream(root, 'ci', [day])
     sessions = read_stream(root, 'sessions', [day])
@@ -610,7 +674,11 @@ def render_daily(root, day, items, conv=None):
     out += ['', f"## Cost per Feature (7 days)", '', f"{week[0]} … {week[-1]}; a Feature's row sums its Tasks, Stories and Bugs; "
             "a CI run's minutes are split over the items it names; "
             "tokens are four separate numbers and are never added together.", '']
-    out += cost_table(items, read_stream(root, 'ci', week), read_stream(root, 'sessions', week))
+    week_sessions = read_stream(root, 'sessions', week)
+    out += cost_table(items, read_stream(root, 'ci', week), week_sessions)
+    rows = delivered_vs_single(items, week_sessions, day)
+    if rows['delivered']['landed'] or rows['single']['landed']:
+        out += ['', '## Delivered vs single (7 days)', ''] + delivered_table(rows)
     return '\n'.join(out) + '\n'
 
 
