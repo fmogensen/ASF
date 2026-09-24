@@ -10,6 +10,9 @@ conventions:
   plans_dir: plans
   reviews_dir: reviews
   review_pattern: reviews/{slug}-r{n}.md
+  lane:
+    review:
+      code: none          # the sample lands a Task on its gate alone, no review session
   intake_dir: cards
   default_bug_epic: E-0001
   branch_prefixes:

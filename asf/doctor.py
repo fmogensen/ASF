@@ -698,7 +698,20 @@ def run(product_name):
         rows.append(('conventions', True, ok, detail))
     for ok, detail in check_token_caps(cfg, product):
         rows.append(('token-caps', False, ok, detail))
+    slow = check_gate_speed(product)
+    if slow:
+        rows.append(('gate', False, False, slow))
     return rows
+
+
+def check_gate_speed(product):
+    """The ``gate too slow: <n>s vs gate_timeout_s`` line after two gate timeouts in a row
+    (:func:`asf.harvest.lane.gate_slow_line`, §12), else None — no row while the gate keeps time."""
+    from asf.harvest import lane
+    try:
+        return lane.gate_slow_line(product)
+    except (OSError, ValueError):
+        return None
 
 
 def check_rule_checks(product, path=None):

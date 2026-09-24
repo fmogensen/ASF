@@ -159,3 +159,46 @@ def newest(product, branch, item):
     text = _git(repo, 'show', f'{ref}:{path}') or ''
     verdict, head = read(text, legacy)
     return n, verdict, head
+
+
+def verdict_text(text):
+    """The first verdict line's own words, lower-cased (``changes requested``), or '' — what a
+    lane line quotes back to the writer."""
+    m = VERDICT_LINE_RE.search((text or '')[:READ_CHARS])
+    return m.group('v').strip().strip('`*_ ').lower() if m else ''
+
+
+def review_at(repo, conv, ref, item):
+    """The newest review of ``item`` at ``ref`` (``origin/<branch>``) in ``repo``, for the lane:
+    ``{round, verdict, text, head, path}`` — or None. The same reading as :func:`newest`."""
+    if not item or not repo:
+        return None
+    listed = _git(repo, 'ls-tree', '-r', '--name-only', ref, '--', _dir_of(conv))
+    if listed is None:
+        return None
+    slug = str(item).lower()
+    hit = pick(conv, listed.splitlines(), slug, (slug, f'spec-{slug}', f'plan-{slug}',
+                                                  f'{slug}-spec', f'{slug}-plan'))
+    if hit is None:
+        return None
+    n, path, legacy = hit
+    body = _git(repo, 'show', f'{ref}:{path}') or ''
+    verdict, head = read(body, legacy)
+    return {'round': n, 'verdict': verdict, 'text': verdict_text(body) or (verdict or ''),
+            'head': head, 'path': path}
+
+
+def is_current(repo, conv, ref, review, head):
+    """True when ``review`` (from :func:`review_at`) reviewed ``head``, the tip of ``ref``: the
+    head its ``head:`` line names, or — a review naming none, as a review session commits it on
+    the branch it reviews — nothing outside the reviews directory changed after it."""
+    if not review:
+        return False
+    if review.get('head'):
+        return bool(head) and head.lower().startswith(review['head'])
+    last = (_git(repo, 'log', '-1', '--format=%H', ref, '--', review['path']) or '').strip()
+    if not last:
+        return False
+    after = (_git(repo, 'diff', '--name-only', last, ref) or '').split()
+    reviews = _dir_of(conv) + '/'
+    return not [f for f in after if not f.startswith(reviews)]

@@ -1,10 +1,10 @@
 """asf.tick.step_harvest — the tick's ``harvest`` step: land the finished lane branches.
 
-Runs after ``prs`` and before ``batch``. Every ``origin/<prefix>*`` branch of the product repo
-whose session ended green and whose commits all name its item is landed by the product's
-``landing`` convention (:func:`asf.harvest.harvest.run_product_harvest`): fast-forwarded onto
-the trunk behind the gate, or — with a merge queue — left to the PR the ``prs`` step opened. A
-red gate holds the branch and hands it back to its session.
+Runs after ``prs`` and before ``batch``. Every lane branch the in-process lane pass brought to
+GATE (:mod:`asf.harvest.lane`) is gated and landed by the product's ``landing`` convention
+(:func:`asf.harvest.harvest.run_product_harvest` with ``lane_pass=False``, R2): the combined head
+fast-forwarded onto the trunk, or its PR merged. A red gate holds the branch and hands it back to
+its session; a red trunk, a timeout or a spent budget only waits.
 
 The gate is a test run that can take many minutes, and the tick runs on a clock that never
 overlaps itself: a tick that waited on it launched nothing until it ended. So the harvest runs on
@@ -99,7 +99,10 @@ def background(product, items_file=None, out=print):
             except (OSError, ValueError):
                 items = None
         try:
-            if not harvest.run_product_harvest(product, state_dir, out=emit, items=items):
+            # R2: the tick ran the lane's feeder-visible pass before the wave; this detached
+            # run decides only the gate's outcomes
+            if not harvest.run_product_harvest(product, state_dir, out=emit, items=items,
+                                               lane_pass=False):
                 emit('harvest: none to land')
         except Exception as e:  # noqa: BLE001 — named in the status, never a silent death
             emit(f'harvest: FAILED {(str(e) or type(e).__name__).strip().splitlines()[0]}')
@@ -140,6 +143,8 @@ def run(ctx, out=print, spawn=None):
         return 0
     lock.close()
     report_last(product, out)
+    from asf.tick import step_wave  # R2: the lane pass is in-process — here when no wave ran it
+    step_wave.lane_pass(ctx, out)
     items_file = None
     items = harvest.record_items(ctx.record_root()) if ctx.has_record else None
     if items is not None:

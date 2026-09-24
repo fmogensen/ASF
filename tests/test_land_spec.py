@@ -1,9 +1,10 @@
 """An approved spec that is not on the trunk is landed as written before any coder starts.
 
-The ``prs`` step adopts the spec's branch (:mod:`asf.tick.land_spec`): a documents-only lane
-branch that merges cleanly becomes a finished run the docs lane lands, with no session; one that
-cannot land as it stands carries a ``land-spec`` correction, which the feeder hands to a
-STARVED → SPEC session told to land the existing spec, not rewrite it."""
+The lane pass adopts the spec's branch (:mod:`asf.tick.land_spec` through
+:meth:`asf.harvest.lane.Lane.adopt`): a documents-only lane branch that merges cleanly becomes a
+finished run the lane holds PUSHED and lands, with no session; one that cannot land as it stands
+is BACK with a ``landing-gate`` correction, which the feeder hands to a STARVED → SPEC session
+told to land the existing spec, not rewrite it."""
 import os
 import shutil
 import subprocess
@@ -80,10 +81,11 @@ class LandTheApprovedSpec(unittest.TestCase):
         # the run now speaks for the branch: the next tick adopts nothing again
         self.assertEqual(land_spec.adopt(self.product, self.items(self.lane),
                                          out=lambda *_a: None), [])
+        self.assertEqual(run['lane']['state'], 'PUSHED')
         # and the feeder reads it as pushed and waiting, no session
-        unlanded = lifecycle.unlanded(pool_mod.sessions_path(self.product))
+        occupancy = lifecycle.occupancy(pool_mod.sessions_path(self.product))
         (row,) = rows.feature_rows(self.items(self.lane), self.product, set(), [],
-                                   unlanded=unlanded)
+                                   occupancy=occupancy)
         self.assertEqual((row.kind, row.launches), (rows.PUSHED_LAND, False))
 
     def test_a_conflicting_branch_goes_to_a_session_that_lands_it_unrewritten(self):
@@ -95,13 +97,13 @@ class LandTheApprovedSpec(unittest.TestCase):
         self.assertIn("conflicts", done[2])
         path = pool_mod.sessions_path(self.product)
         corr = lifecycle.corrections(path)
-        self.assertEqual(corr["F-0001"]["kind"], rows.LAND_SPEC)
-        self.assertFalse(lifecycle.eligible(self.runs()[self.lane]))
+        self.assertEqual(corr["F-0001"]["kind"], rows.LANDING_GATE)
+        self.assertEqual(self.runs()[self.lane]["lane"]["state"], "BACK")
         (row,) = rows.candidates({"items": self.items(self.lane)}, self.product, [],
-                                 corrections=corr)
+                                 occupancy=lifecycle.occupancy(path))
         self.assertEqual((row.kind, row.branch, row.launches),
                          (rows.STARVED_SPEC, self.lane, True))
-        self.assertIn("don't rewrite it", row.reason)
+        self.assertIn("don't rewrite it", row.correction)
 
     def test_a_spec_on_a_pre_lane_branch_is_landed_by_a_session_on_the_lane_branch(self):
         self.push_branch("old/widgets", {"docs/specs/widgets.md": "# widgets\n"},

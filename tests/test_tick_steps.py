@@ -322,7 +322,8 @@ class WaveStepTests(StepsTestCase):
                                n, [brief_fn(r) for r in rows]))
             out(f'launched {rows[0].job:<24} {rows[0].item:<10} → acct-a (opus) pid 1')
             return [(rows[0], {'account': 'acct-a', 'model': 'opus', 'pid': 1})], []
-        for name, fn in (('_build', build), ('_wave', wave)):
+        # the lane pass has tests of its own (below, and tests/test_lane.py): not these rows'
+        for name, fn in (('_build', build), ('_wave', wave), ('lane_pass', lambda ctx, out: {})):
             p = mock.patch.object(step_wave, name, fn)
             p.start()
             self.addCleanup(p.stop)
@@ -334,8 +335,8 @@ class WaveStepTests(StepsTestCase):
         self.write_config('feeder:\n  capacity: 3\n')
         seen = {}
 
-        def plan(index, product, inflight, capacity, attempts=None, corrections=None, busy=None,
-                groom_state=None, unlanded=None, open_branches=None, pr_heads=None):
+        def plan(index, product, inflight, capacity, attempts=None, occupancy=None,
+                 groom_state=None):
             seen.update(capacity=capacity, inflight=[s['item'] for s in inflight], ids=sorted(index))
             return self.rows
         ctx = self.ctx()
@@ -430,6 +431,31 @@ class WaveStepTests(StepsTestCase):
         self.assertEqual(self.waved, [])
 
 
+class LanePassBeforeTheWave(StepsTestCase):
+    """R2: the lane's feeder-visible transitions run in-process, before the wave plans — once a
+    tick — and the rows the wave plans read the states that pass wrote."""
+
+    def test_r2_the_lane_pass_runs_before_the_wave_plans_and_once(self):
+        from asf.harvest import lane
+        order = []
+        real = lane.lane_pass
+
+        def lane_pass(*a, **kw):
+            order.append('lane')
+            return real(*a, **kw)
+
+        def plan(*a, **kw):
+            order.append('plan')
+            return []
+        ctx = self.ctx()
+        with mock.patch.object(lane, 'lane_pass', lane_pass), \
+                mock.patch.object(feeder_rows, 'plan_rows', plan):
+            step_wave.run(ctx, out=self.lines.append)
+            step_prs.run(ctx, out=self.lines.append)
+        self.assertEqual(order, ['lane', 'plan'])
+        self.assertTrue(ctx.lane_passed)
+
+
 class WaveStep(StepsTestCase):
     """T-0005: the wave step's cut comes from ``asf.capacity.resolve``, and one ``capacity``
     event is written every tick, bound or not."""
@@ -446,8 +472,8 @@ class WaveStep(StepsTestCase):
     def test_capacity_comes_from_the_resolver(self):
         seen = {}
 
-        def plan(index, product, inflight, capacity, attempts=None, corrections=None, busy=None,
-                groom_state=None, unlanded=None, open_branches=None, pr_heads=None):
+        def plan(index, product, inflight, capacity, attempts=None, occupancy=None,
+                 groom_state=None):
             seen['capacity'] = capacity
             return []
 
@@ -463,8 +489,8 @@ class WaveStep(StepsTestCase):
         self.write_config('capacity:\n  total:\n    sessions: 1\n')
         seen = {}
 
-        def plan(index, product, inflight, capacity, attempts=None, corrections=None, busy=None,
-                groom_state=None, unlanded=None, open_branches=None, pr_heads=None):
+        def plan(index, product, inflight, capacity, attempts=None, occupancy=None,
+                 groom_state=None):
             seen['capacity'] = capacity
             return []
 
@@ -491,37 +517,44 @@ class WaveStep(StepsTestCase):
 # ---- prs --------------------------------------------------------------------------
 
 class PrsStepTests(StepsTestCase):
-    """A ``pull-request`` landing: the PR is the mechanism, so the step opens one per finished
-    branch. (``batch: off`` alone would land by fast-forward — see the last two tests.)"""
+    """A ``pull-request`` landing: the PR is the mechanism, and opening it is the lane's T2
+    (:mod:`asf.harvest.lane`) — the pass runs in-process before the wave, or here when the wave
+    did not run it. (``batch: off`` alone would land by fast-forward — see the last two tests.)"""
     product_extra = ('steps:\n  batch: off\nconventions:\n  landing: pull-request\n'
                      '  branch_prefixes:\n    code: worker/\n    fix-bug: fix/\n')
 
     def setUp(self):
         super().setUp()
-        self.gh_calls, self.open_prs, self.hygiene = [], set(), []
+        self.gh_calls, self.open_prs = [], {}
 
         def gh(args):
             self.gh_calls.append(args)
             if args[:2] == ['pr', 'list']:
-                head = args[args.index('--head') + 1]
-                return 0, json.dumps([{'number': 7}] if head in self.open_prs else []), ''
-            return 0, f'https://example.invalid/pr/{len(self.gh_calls)}\n', ''
-        for name, fn in (('_gh', gh), ('_hygiene', lambda product: self.hygiene.append(product.name))):
-            p = mock.patch.object(step_prs, name, fn)
-            p.start()
-            self.addCleanup(p.stop)
+                return 0, json.dumps([{'number': n, 'headRefName': b, 'state': 'OPEN'}
+                                      for b, n in self.open_prs.items()]), ''
+            if args[:2] == ['pr', 'create']:
+                return 0, f'https://example.invalid/o/r/pull/{len(self.gh_calls)}\n', ''
+            return 1, '', f'unexpected gh {args}'
+        p = mock.patch.object(harvest_mod, '_gh', gh)
+        p.start()
+        self.addCleanup(p.stop)
 
     def finished(self, job, branch, item='B-0001', started='2026-09-21T10:00:00Z', **kw):
-        self.session(job=job, item=item, branch=branch, started=started)
+        self.session(job=job, item=item, branch=branch, started=started, pid=None)
         self.session(job=job, ended='2026-09-21T11:00:00Z', end_reason=kw.get('reason', 'finished'))
 
     def creates(self):
         return [c for c in self.gh_calls if c[:2] == ['pr', 'create']]
 
+    def lane_of(self, branch):
+        from asf.workers import lifecycle
+        return (lifecycle.by_branch(pool_mod.sessions_path(self.product)).get(branch) or {}) \
+            .get('lane') or {}
+
     def test_opens_a_pr_with_item_title_and_acceptance(self):
         self.push_branch('fix/B-0001')
         self.finished('fix-bug-b-0001', 'fix/B-0001')
-        step_prs.run(self.ctx(), out=self.lines.append)
+        self.assertEqual(step_prs.run(self.ctx(), out=self.lines.append), 0)
         (argv,) = self.creates()
         self.assertEqual(argv[:8], ['pr', 'create', '-R', 'x/y', '--base', 'main', '--head', 'fix/B-0001'])
         self.assertEqual(argv[argv.index('--title') + 1], 'B-0001 — the first bug')
@@ -529,55 +562,66 @@ class PrsStepTests(StepsTestCase):
         self.assertIn('Card: [B-0001](', body)
         self.assertIn('bugs/B-0001.md', body)
         self.assertIn('- [ ] the named test passes\n- [ ] no regression\n', body)
-        self.assertEqual(self.hygiene, ['sample'])
-        self.assertEqual(self.lines[-1], 'prs: opened https://example.invalid/pr/2 — B-0001 — the first bug')
+        self.assertIn('prs: opened PR #2 for fix/B-0001', self.lines)
+        self.assertEqual(self.lane_of('fix/B-0001')['pr'], 2)
+        # the pass ran once this tick: the step does not run it again
+        ctx = self.ctx()
+        ctx.lane_passed = True
+        self.lines.clear()
+        step_prs.run(ctx, out=self.lines.append)
+        self.assertEqual(self.lines, ['prs: the lane pass ran before the wave — PRs opened there'])
 
-    def test_skips_unpushed_failed_open_and_foreign_branches(self):
-        self.push_branch('worker/has-pr')
+    def test_an_open_pr_is_adopted_and_foreign_or_live_branches_are_left(self):
+        self.push_branch('worker/B-0003')
         self.push_branch('other/x')
-        self.push_branch('worker/failed')
-        self.open_prs.add('worker/has-pr')
-        self.finished('a', 'worker/has-pr')
+        self.open_prs['worker/B-0003'] = 7
+        self.finished('a', 'worker/B-0003', item='B-0003')
         self.finished('b', 'other/x')
-        self.finished('c', 'worker/never-pushed')
-        self.finished('d', 'worker/failed', reason='failed')
-        self.session(job='e', item='B-0001', branch='fix/B-0001')  # still running
+        self.session(job='e', item='B-0001', branch='fix/B-0001', pid=os.getpid(),
+                     started='2026-09-21T10:00:00Z')  # still running, nothing pushed
         step_prs.run(self.ctx(), out=self.lines.append)
         self.assertEqual(self.creates(), [])
-        self.assertEqual(self.lines, ['prs: none to open'])
-        self.assertEqual(self.hygiene, ['sample'])
+        self.assertEqual(self.lane_of('worker/B-0003')['pr'], 7)
+        self.assertNotEqual(self.lane_of('other/x').get('state'), 'PR_OPEN')  # no PR of its own
+        self.assertEqual(self.lane_of('fix/B-0001'), {})
+
+    def test_b0079_a_failed_runs_pushed_work_gets_its_pr_too(self):
+        self.push_branch('worker/B-0004')
+        self.finished('d', 'worker/B-0004', item='B-0004', reason='failed')
+        step_prs.run(self.ctx(), out=self.lines.append)
+        self.assertEqual([c[c.index('--head') + 1] for c in self.creates()], ['worker/B-0004'])
 
     def test_cap_per_tick(self):
         self.write_product(f'repo_dir: {self.repo}\n{self.product_extra}  prs_per_tick: 1\n')
         self.product = env.load_product('sample')
-        self.push_branch('worker/one')
-        self.push_branch('worker/two')
-        self.finished('one', 'worker/one', started='2026-09-21T09:00:00Z')
-        self.finished('two', 'worker/two', started='2026-09-21T10:00:00Z')
+        self.push_branch('worker/B-0005')
+        self.push_branch('worker/B-0006')
+        self.finished('one', 'worker/B-0005', item='B-0005', started='2026-09-21T09:00:00Z')
+        self.finished('two', 'worker/B-0006', item='B-0006', started='2026-09-21T10:00:00Z')
         step_prs.run(self.ctx(), out=self.lines.append)
-        self.assertEqual([c[c.index('--head') + 1] for c in self.creates()], ['worker/one'])
+        self.assertEqual([c[c.index('--head') + 1] for c in self.creates()], ['worker/B-0005'])
         self.assertIn('prs: cap 1 reached — the rest next tick', self.lines)
+        self.assertEqual(self.lane_of('worker/B-0006')['state'], 'PUSHED')
 
-    def test_gh_refusal_fails_the_step_after_hygiene(self):
-        self.push_branch('worker/one')
-        self.finished('one', 'worker/one')
-        with mock.patch.object(step_prs, '_gh', lambda args: (0, '[]', '') if args[1] == 'list'
+    def test_a_gh_refusal_is_one_line_and_the_branch_stays_pushed(self):
+        self.push_branch('worker/B-0005')
+        self.finished('one', 'worker/B-0005', item='B-0005')
+        with mock.patch.object(harvest_mod, '_gh', lambda args: (0, '[]', '') if args[1] == 'list'
                                else (1, '', 'no permission\nmore')):
-            with self.assertRaises(RuntimeError):
-                step_prs.run(self.ctx(), out=self.lines.append)
-        self.assertEqual(self.lines, ['prs: worker/one not opened — no permission'])
-        self.assertEqual(self.hygiene, ['sample'])
+            self.assertEqual(step_prs.run(self.ctx(), out=self.lines.append), 0)
+        self.assertIn('prs: worker/B-0005 not opened — no permission', self.lines)
+        self.assertEqual(self.lane_of('worker/B-0005')['state'], 'PUSHED')
+        self.assertEqual(self.lane_of('worker/B-0005')['reason'], 'PR not opened: no permission')
 
-    def test_no_pr_host_is_one_line_no_gh_no_hygiene(self):
+    def test_no_pr_host_is_one_line_and_no_gh(self):
         with open(env.product_path('sample'), 'w') as f:  # no repo_slug; origin is a local path
             f.write(f'backlog_dir: {self.operator}\nrepo_dir: {self.repo}\n{self.product_extra}')
         self.product = env.load_product('sample')
-        self.push_branch('worker/one')
-        self.finished('one', 'worker/one')
+        self.push_branch('worker/B-0005')
+        self.finished('one', 'worker/B-0005', item='B-0005')
         self.assertEqual(step_prs.run(self.ctx(), out=self.lines.append), 0)
-        self.assertEqual(self.lines, ['prs: no PR host (no repo_slug, origin is not a hosted repo) — '
-                                      '1 finished branch(es) left as they are'])
-        self.assertEqual((self.gh_calls, self.hygiene), ([], []))
+        self.assertIn('pr-lane worker/B-0005', self.lines)
+        self.assertEqual(self.gh_calls, [])
 
     def test_slug_comes_from_a_hosted_origin_when_the_yaml_has_none(self):
         _git(['remote', 'set-url', 'origin', 'git@example.com:owner/name.git'], self.repo)
@@ -593,20 +637,20 @@ class PrsStepTests(StepsTestCase):
 
     def test_fast_forward_landing_opens_nothing(self):
         """B-0029: ``asf`` lands by fast-forward (``batch: off``, no ``landing``) — a PR is never
-        the mechanism there, so the step opens none, says so once, runs hygiene and exits 0."""
+        the mechanism there: the branch is its own PR, and no ``gh`` is asked."""
         self.write_product(f'repo_dir: {self.repo}\nsteps:\n  batch: off\n'
                            'conventions:\n  branch_prefixes:\n    fix-bug: fix/\n')
         self.product = env.load_product('sample')
         self.push_branch('fix/B-0001')
         self.finished('fix-bug-b-0001', 'fix/B-0001')
         self.assertEqual(step_prs.run(self.ctx(), out=self.lines.append), 0)
-        self.assertEqual(self.creates(), [])
-        self.assertEqual(self.lines, ['prs: landing is fast-forward — harvest lands the branches'])
-        self.assertEqual(self.hygiene, ['sample'])
+        self.assertEqual(self.gh_calls, [])
+        self.assertIn('prs: landing is fast-forward — the branch is its own PR', self.lines)
+        self.assertEqual(self.lane_of('fix/B-0001')['pr'], None)
 
     def test_harvested_and_at_trunk_branches_are_not_candidates(self):
         """B-0029: a session already ``harvested`` has landed; a pushed branch with no commits
-        past the trunk has nothing to open. Neither reaches ``gh``, and the step does not fail."""
+        past the trunk has nothing to open — the lane marks it landed instead."""
         self.push_branch('fix/B-0001')
         self.finished('fix-bug-b-0001', 'fix/B-0001')
         self.session(job='fix-bug-b-0001', harvested='abc123')
@@ -614,15 +658,17 @@ class PrsStepTests(StepsTestCase):
         self.finished('fix-bug-b-0002', 'fix/B-0002', item='B-0002')
         self.assertEqual(step_prs.run(self.ctx(), out=self.lines.append), 0)
         self.assertEqual(self.creates(), [])
-        self.assertEqual(self.lines, ['prs: fix/B-0002 at trunk — nothing to open', 'prs: none to open'])
-        self.assertEqual(self.hygiene, ['sample'])
+        self.assertEqual(self.lane_of('fix/B-0002')['state'], 'MERGED')
 
 
 # ---- harvest ----------------------------------------------------------------------
 
 class HarvestStepTests(StepsTestCase):
     """``batch: off`` → the lane lands by fast-forward, after ``prs`` — in a harvest of its own
-    that the tick starts and never waits on."""
+    that the tick starts and never waits on. (A Task lands on its gate alone here: no review
+    session stands before it.)"""
+
+    product_extra = 'steps:\n  batch: off\nconventions:\n  lane:\n    review:\n      code: none\n'
 
     def setUp(self):
         super().setUp()
@@ -695,7 +741,7 @@ class HarvestStepTests(StepsTestCase):
 
     def test_the_tick_after_a_red_gate_reports_the_hold_and_nothing_lands(self):
         self.write_product(f'repo_dir: {self.repo}\n{self.product_extra}'
-                           'conventions:\n  test_command: "python3 -c \'raise SystemExit(\\"FAILED red\\")\'"\n')
+                           '  test_command: "test ! -e fix_B-0001"\n')  # red on the branch alone
         self.product = env.load_product('sample')
         self.finished_branch()
         before = self.origin_main()

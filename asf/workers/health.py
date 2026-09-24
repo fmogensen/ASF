@@ -46,6 +46,7 @@ empty>)``.
 """
 import json
 import os
+import re
 import subprocess
 
 from asf.workers import observe
@@ -215,6 +216,25 @@ def publish_gap(product, run, ev, reason, alive=pid_alive):
     return lifecycle.judge(run, ev, landing=landing), ev, '; '.join(lines + [line])
 
 
+def push_retry(ev, reason, line):
+    """``(class, detail)`` when an unpushed run's push failed on the network or was refused by
+    the repo's hook — read off its REPORT's ``pushed:`` line and the factory's own publish line
+    — else None (:func:`asf.workers.lifecycle.push_failure`)."""
+    if not (reason or '').startswith(UNPUSHED_REASON_PREFIXES):
+        return None
+    said = report_mod.parse(str((ev.result or {}).get('result') or '')).get('pushed') or ''
+    if not report_mod.NO_RE.match(said):
+        said = ''
+    m = re.search(r'\bpublish \S+ refused: (.*)', line or '')  # the factory's own push
+    published = m.group(1) if m else ''
+    for text in (published, said):
+        cls = lifecycle.push_failure(text)
+        if cls:
+            detail = ' '.join(f'{said} {line or ""}'.split()) or text
+            return cls, detail[:600]
+    return None
+
+
 def _lane_branches(product):
     """Every local branch under a lane prefix of the product's checkout, with the worktree that
     holds it (or None)."""
@@ -335,6 +355,12 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
         reason, ev, line = publish_gap(product, s, ev, reason, alive)  # B-0056
         if line:
             found.append((job, 'published', line))
+        retry = push_retry(ev, reason, line)
+        if retry and retry[0] == lifecycle.NETWORK_ERROR:  # B-0097: a blip — retried, no round
+            found.append((job, 'retry', f'{retry[0]}: {retry[1]} — published again next pass'))
+            continue
+        if retry:  # the repo's own pre-push hook refused it: its output, no round spent
+            reason = f'failed: {retry[0]}: {retry[1]}'
         now = pool_mod.now_iso()
         pool_mod.update_session(product, job, ended=now, end_reason=reason,
                                 runtime_session=runtime_mod.runtime_session(s.get('log')) or None)
@@ -342,7 +368,13 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
         found.append((job, 'ended', reason))
         if closed:
             continue  # nothing to send back: the worktree is reaped below when it is empty
-        if reason.startswith(UNPUSHED_REASON_PREFIXES):
+        if retry:
+            text = (f'the push was refused by the repo\'s own hook — {retry[1]} — fix what it '
+                    f'names, commit, and push again')
+            pool_mod.update_session(product, job, correction={
+                'kind': lifecycle.HOOK_REFUSED, 'text': text, 'at': now})
+            found.append((job, 'held', f'{s.get("branch") or job}: {text} (no round spent)'))
+        elif reason.startswith(UNPUSHED_REASON_PREFIXES):
             # the run's own work is the correction's input: the next session on the branch
             # commits and pushes it, or says why not (B-0051, B-0052)
             fields, line = lifecycle.hold(registry, s, lifecycle.UNPUSHED,

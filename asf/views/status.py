@@ -194,7 +194,8 @@ def decisions_cell(root, product):
         return not_configured('backlog_dir (no index.json)')
     items, _generated = ix.load(root)
     held = feeder_rows.inflight_ids(inflight(product)) | {
-        i for i in plan_inputs(product, root)['busy'] or () if feeder_rows.is_open(items.get(i) or {})}
+        i for i in feeder_rows.occupied(plan_inputs(product, root)['occupancy'])
+        if feeder_rows.is_open(items.get(i) or {})}
     rows = feeder_rows.undecided_rows(items, product, held, limit=0)
     if not rows:
         return "0"
@@ -268,6 +269,12 @@ def version_cell(now=None):
     return f"running {version_string()} · latest release {tail}"
 
 
+def gate_cell(product):
+    """``gate too slow: …`` after two gate timeouts in a row (§12), else None (no row)."""
+    from asf.harvest import lane
+    return lane.gate_slow_line(product)
+
+
 def render(root, product, cfg=None):
     cfg = env.load_config() if cfg is None else cfg
     now = datetime.datetime.now().strftime('%H:%M')
@@ -284,11 +291,14 @@ def render(root, product, cfg=None):
                        ('Decisions', lambda: decisions_cell(root, product)),
                        ('Quota 5h/7d', lambda: quota_cell(cfg)),
                        ('Cron', lambda: cron_cell(cfg, product)),
-                       ('Groom', lambda: groom_cell(root, product))):
+                       ('Groom', lambda: groom_cell(root, product)),
+                       ('Gate', lambda: gate_cell(product))):
         try:
             text = cell()
         except Exception as e:  # noqa: BLE001 — one unreadable row never loses the table
             text = f"? ({type(e).__name__}: {e})"
+        if text is None:  # a row that only speaks up when something is wrong
+            continue
         out.append(f"| {name} | {text} |")
     return "\n".join(out) + "\n"
 

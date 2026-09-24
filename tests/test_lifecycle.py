@@ -700,7 +700,8 @@ class OutcomeClassTests(unittest.TestCase):
     def test_the_vocabulary_is_the_specs_in_the_specs_order(self):
         self.assertEqual(lc.OUTCOME_CLASSES, (
             'finished', 'not pushed', 'empty branch', 'dead pid', 'pushed after stop',
-            'unpushed work', 'unknown model', 'auth', 'quota', 'permission', 'other'))
+            'unpushed work', 'unknown model', 'auth', 'quota', 'permission', 'hook refused',
+            'network error', 'other'))
 
 
 if __name__ == '__main__':

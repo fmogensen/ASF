@@ -4,7 +4,12 @@ A footprint is a list of path globs (``apps/web/**``, ``docs/x.md``). Two footpr
 any glob of one matches any glob of the other, in either direction (the same test ``asf check``
 applies to two Active Tasks), or when one names a directory (``dir/``) the other sits under.
 Pure functions over plain lists — no filesystem.
+
+``conventions.shared_paths`` (lockfiles) are no one's footprint: a glob under one never makes two
+Tasks overlap here; the lane serialises them at merge instead (one per tick).
 """
+import fnmatch
+
 from asf.record.core import writes_intersect
 
 WILDCARDS = '*?['
@@ -30,21 +35,32 @@ def globs_overlap(a, b):
     return ha != a and hb != b and (ha.startswith(hb) or hb.startswith(ha))
 
 
-def overlaps(writes_a, writes_b):
-    """The first (glob_a, glob_b) pair that overlaps, or None."""
+def is_shared(glob, shared):
+    """True when ``glob`` names a ``shared_paths`` path (either matches the other)."""
+    return any(fnmatch.fnmatch(glob, s) or fnmatch.fnmatch(s, glob) for s in shared or ())
+
+
+def overlaps(writes_a, writes_b, shared=()):
+    """The first (glob_a, glob_b) pair that overlaps, or None. A glob naming a ``shared`` path
+    (``conventions.shared_paths``) overlaps nothing."""
     for a in writes_a or []:
+        if shared and is_shared(a, shared):
+            continue
         for b in writes_b or []:
+            if shared and is_shared(b, shared):
+                continue
             if globs_overlap(a, b):
                 return a, b
     return None
 
 
-def first_conflict(writes, running):
+def first_conflict(writes, running, shared=()):
     """The id of the first running Task whose footprint overlaps ``writes``, or None.
 
-    ``running`` is an ordered list of ``(task_id, writes)``.
+    ``running`` is an ordered list of ``(task_id, writes)``; ``shared``: the product's
+    ``shared_paths``, left out of the overlap.
     """
     for tid, other in running:
-        if overlaps(writes, other):
+        if overlaps(writes, other, shared):
             return tid
     return None

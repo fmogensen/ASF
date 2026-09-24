@@ -109,7 +109,8 @@ def cmd_next(args, root=None):
     show_all = getattr(args, 'all', False)
     rows = R.plan_rows(items, product, inflight, capacity, **inputs,
                        decision_limit=0 if show_all else None)
-    hidden = 0 if show_all else _hidden_undecided(items, product, inflight, inputs.get('busy'))
+    hidden = 0 if show_all else _hidden_undecided(items, product, inflight,
+                                                  R.occupied(inputs.get('occupancy')))
     if getattr(args, 'json', False):
         print(rows_json(rows), end='')
     else:

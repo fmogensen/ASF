@@ -18,7 +18,7 @@ import unittest
 from asf import approvals, briefs
 from asf.feeder import rows as feeder_rows
 from asf.feeder import widen
-from asf.harvest import harvest
+from asf.harvest import harvest, lane
 from asf.record.check import cmd_check
 from asf.record.index import do_index
 from asf.tick import widen_footprint
@@ -27,6 +27,10 @@ from asf.workers import lifecycle, report
 from asf.workers import pool as pool_mod
 from tests.test_tick import _git
 from tests.test_tick_steps import StepsTestCase
+try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.x` does not
+    from occfixture import occ
+except ImportError:  # pragma: no cover - import shape only
+    from tests.occfixture import occ
 
 TASK = ('---\nid: {id}\ntype: task\ntitle: task {id}\nparent: F-0001\ndecided: true\n'
         'writes: [{writes}]\n---\n## Description\nx\n\n## Acceptance\n- [ ] it works\n\n'
@@ -153,7 +157,7 @@ class WidenStepTests(StepsTestCase):
         items = self.items()
         return [r for r in feeder_rows.candidates(items, self.product,
                                                   lifecycle.inflight(path, alive=lambda _p: False),
-                                                  corrections=lifecycle.corrections(path))
+                                                  occupancy=occ(corrections=lifecycle.corrections(path)))
                 if r.item_id == 'T-0001']
 
     def writes(self):
@@ -328,7 +332,7 @@ class HarvestWidenTests(unittest.TestCase):
         self.lines = []
 
     def hold(self, sources, own=False):
-        return harvest.hold_with_correction(
+        return lane.hold_with_correction(
             self.state, 'worker/T-0080', self.record, 'gate', 'FAIL: test_other', self.lines.append,
             ['tests/test_other.py'], ['src/a.py'], ['src/a.py'], own=own,
             read=lambda p: sources.get(p))

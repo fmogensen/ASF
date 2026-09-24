@@ -1,0 +1,590 @@
+"""The PR lane as one state machine (:mod:`asf.harvest.lane`).
+
+The pure table first: one :func:`lane.next_state` test per transition of the package plan's §2
+(T1–T14) and per §9 addition (R4 head moved, R5 the merge queue, R6 a reopened PR, R3/R8 the
+MERGING intent) — no git, no ``gh``. Then the pieces that carry the machine: the lane state on
+the run line (R1), the in-process pass that stops at GATE and the detached gate pass that
+decides only the gate's outcomes (R2), the docs branch the gate refuses routed to a
+STARVED → SPEC/PLAN correction (R7), the docs-only trunk move that is not gated again (R25), a
+gate timeout that is unknown, never red (§12), the feeder reading the lane through the one
+occupancy answer (R16), and the ``NAME=value`` prefix of a test command (§12).
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest import mock
+
+from asf import env
+from asf.feeder import rows as feeder_rows
+from asf.harvest import harvest, lane
+from asf.workers import lifecycle
+
+NOW = 1_800_000_000.0
+HEAD, NEW = 'a' * 40, 'b' * 40
+
+
+def facts(**kw):
+    """A finished, pushed code branch ahead of the trunk, fast-forward, no review wanted."""
+    f = {'branch': 'worker/T-0001', 'item': 'T-0001', 'head': HEAD, 'ended': True,
+         'landed': False, 'live': False, 'ahead': 1, 'mode': 'ff', 'host': True, 'now': NOW,
+         'stale_after': 2 * 86400, 'review_required': False}
+    f.update(kw)
+    return f
+
+
+def rec(state, **kw):
+    r = {'state': state, 'head': HEAD, 'pr': None, 'at': '2027-01-15T08:00:00Z', 'reason': ''}
+    r.update(kw)
+    return r
+
+
+APPROVED = {'round': 1, 'verdict': 'approved', 'text': 'approved', 'path': 'r/t-0001-r1.md',
+            'current': True}
+CHANGES = dict(APPROVED, verdict='changes', text='changes requested')
+
+
+class Transitions(unittest.TestCase):
+    """One test per row of the §2 table (T1–T14)."""
+
+    def test_t1_a_finished_run_ahead_of_the_trunk_is_pushed(self):
+        self.assertEqual(lane.next_state(None, facts())[0], lane.PUSHED)
+        self.assertEqual(lane.next_state(None, facts(ended=False))[0], None)  # still running
+        self.assertEqual(lane.next_state(None, facts(ahead=0))[0], None)      # nothing to land
+        self.assertEqual(lane.next_state(None, facts(landed=True))[0], None)
+
+    def test_t1_a_run_owing_a_correction_is_back_not_pushed(self):
+        state, reason = lane.next_state(None, facts(correction={'kind': 'gate', 'text': 'x'}))
+        self.assertEqual((state, reason), (lane.BACK, 'kind=gate'))
+
+    def test_t2_fast_forward_the_branch_is_its_own_pr(self):
+        state, reason = lane.next_state(rec(lane.PUSHED), facts())
+        self.assertEqual(state, lane.PR_OPEN)
+        self.assertIn('its own PR', reason)
+
+    def test_t2_pull_request_adopts_an_open_pr_or_opens_one(self):
+        f = facts(mode='pr', pr={'number': 7, 'state': 'OPEN', 'head': HEAD})
+        self.assertEqual(lane.next_state(rec(lane.PUSHED), f), (lane.PR_OPEN, 'PR #7'))
+        self.assertEqual(lane.next_state(rec(lane.PUSHED), facts(mode='pr')),
+                         (lane.PR_OPEN, 'open a PR'))
+
+    def test_t2_adoption_a_branch_no_run_holds(self):
+        self.assertEqual(lane.next_state(None, facts(adopt=True)), (lane.PUSHED, 'adopted'))
+
+    def test_t3_a_required_review_is_a_state_not_a_correction(self):
+        state, reason = lane.next_state(rec(lane.PR_OPEN), facts(review_required=True))
+        self.assertEqual(state, lane.REVIEW)
+        self.assertEqual(reason, 'round 1 wanted: no ASF review yet')
+        stale = dict(APPROVED, current=False)
+        self.assertEqual(lane.next_state(rec(lane.PR_OPEN), facts(review_required=True,
+                                                                   review=stale))[1],
+                         'round 2 wanted: r/t-0001-r1.md predates the head')
+
+    def test_t4_an_approved_review_of_the_head_or_no_policy_is_the_gate(self):
+        self.assertEqual(lane.next_state(rec(lane.REVIEW), facts(review_required=True,
+                                                                  review=APPROVED))[0], lane.GATE)
+        self.assertEqual(lane.next_state(rec(lane.PR_OPEN), facts())[0], lane.GATE)
+
+    def test_t5_changes_on_the_head_go_back(self):
+        self.assertEqual(lane.next_state(rec(lane.REVIEW), facts(review_required=True,
+                                                                  review=CHANGES)),
+                         (lane.BACK, 'kind=review'))
+
+    def test_t6_t7_t8_the_gate_states_are_the_gates_to_decide(self):
+        for s in (lane.GATE, lane.WAITING_CI, lane.WAITING):
+            with self.subTest(state=s):
+                self.assertEqual(lane.next_state(rec(s, reason='r'), facts())[0], s)
+
+    def test_t9_a_lane_refusal_goes_back(self):
+        f = facts(refusal=('naming', 'commits do not name T-0001'))
+        self.assertEqual(lane.next_state(rec(lane.PUSHED), f), (lane.BACK, 'kind=naming'))
+
+    def test_t10_merging_then_the_host_says_merged_is_merged(self):
+        f = facts(mode='pr', pr={'number': 7, 'state': 'MERGED', 'head': HEAD, 'merge_sha': NEW})
+        self.assertEqual(lane.next_state(rec(lane.MERGING, method='squash'), f),
+                         (lane.MERGED, 'method=squash'))
+
+    def test_t11_found_merged_outside_the_lane(self):
+        f = facts(mode='pr', pr={'number': 7, 'state': 'MERGED', 'head': HEAD, 'merge_sha': NEW})
+        for s in (lane.PR_OPEN, lane.REVIEW, lane.GATE, lane.WAITING):
+            with self.subTest(state=s):
+                self.assertEqual(lane.next_state(rec(s), f), (lane.MERGED, 'method=external'))
+        self.assertEqual(lane.next_state(rec(lane.GATE), facts(on_trunk=True)),
+                         (lane.MERGED, 'method=on-trunk'))
+
+    def test_t11_an_old_merged_pr_does_not_close_new_work(self):
+        f = facts(mode='pr', pr={'number': 3, 'state': 'MERGED', 'head': 'c' * 40})
+        self.assertNotEqual(lane.next_state(rec(lane.GATE), f)[0], lane.MERGED)
+
+    def test_t12_stale_closed_pr_gone_branch_superseded_item_unmoved(self):
+        closed = facts(mode='pr', pr={'number': 7, 'state': 'CLOSED', 'head': HEAD})
+        self.assertEqual(lane.next_state(rec(lane.REVIEW), closed)[0], lane.STALE)
+        self.assertEqual(lane.next_state(rec(lane.GATE), facts(head=None)),
+                         (lane.STALE, 'branch gone'))
+        self.assertEqual(lane.next_state(rec(lane.GATE), facts(closed='Closed'))[0], lane.STALE)
+        old = rec(lane.PUSHED, at='2020-01-01T00:00:00Z')
+        self.assertEqual(lane.next_state(old, facts(mode='pr'))[0], lane.STALE)
+
+    def test_t13_back_is_left_when_the_correction_is_answered(self):
+        self.assertEqual(lane.next_state(rec(lane.BACK), facts(correction={'kind': 'gate'}))[0],
+                         lane.BACK)
+        self.assertEqual(lane.next_state(rec(lane.BACK), facts()), (lane.PUSHED,
+                                                                    'correction answered'))
+        self.assertEqual(lane.next_state(rec(lane.BACK), facts(head=NEW))[0], lane.PUSHED)
+
+    def test_t14_reaped_and_merged_are_terminal(self):
+        for s in (lane.REAPED, lane.MERGED):
+            with self.subTest(state=s):
+                self.assertEqual(lane.next_state(rec(s), facts(head=NEW))[0], s)
+
+    def test_a_live_session_holds_the_branch(self):
+        self.assertEqual(lane.next_state(rec(lane.REVIEW, reason='x'), facts(live=True, head=NEW)),
+                         (lane.REVIEW, 'x'))
+
+    def test_every_state_is_a_lane_state(self):
+        for s in lane.LANE_STATES:
+            self.assertIn(lane.next_state(rec(s), facts())[0], lane.LANE_STATES + (None,))
+
+
+class Overrides(unittest.TestCase):
+    """§9's additions, each an R-line of §10."""
+
+    def test_r4_a_moved_head_in_any_open_state_is_pushed_again(self):
+        for s in lane.OPEN_STATES:
+            with self.subTest(state=s):
+                state, reason = lane.next_state(rec(s), facts(head=NEW))
+                self.assertEqual(state, lane.PUSHED)
+                self.assertIn('head moved', reason)
+
+    def test_r4_review_currency_follows_the_head(self):
+        """A review approved at the old head is history: after the move the branch is reviewed
+        again (T3), never gated on the old verdict."""
+        f = facts(head=NEW, review_required=True, review=dict(APPROVED, current=False))
+        pushed = lane.next_state(rec(lane.GATE), f)
+        self.assertEqual(pushed[0], lane.PUSHED)
+        opened = lane.next_state(rec(lane.PUSHED, head=NEW), f)
+        self.assertEqual(lane.next_state(rec(opened[0], head=NEW), f)[0], lane.REVIEW)
+
+    def test_r5_queued_merged_is_ours_rejected_waits(self):
+        merged = facts(mode='pr', pr={'number': 7, 'state': 'MERGED', 'head': HEAD})
+        self.assertEqual(lane.next_state(rec(lane.QUEUED), merged), (lane.MERGED, 'method=queue'))
+        rejected = facts(mode='pr', pr={'number': 7, 'state': 'OPEN', 'queued': False})
+        self.assertEqual(lane.next_state(rec(lane.QUEUED), rejected),
+                         (lane.WAITING, 'queue-rejected'))
+        still = facts(mode='pr', pr={'number': 7, 'state': 'OPEN', 'queued': True})
+        self.assertEqual(lane.next_state(rec(lane.QUEUED, reason='q'), still), (lane.QUEUED, 'q'))
+
+    def test_r5_in_queue_counts_toward_the_merge_budget(self):
+        product = env.Product('p', {'repo_slug': 'o/p', 'conventions': {'landing': 'pull-request'},
+                                    'capacity': {'batch': {'parallel': 2}}})
+        host = lane.GitHubHost(product)
+        host._queue = True
+        host.in_queue = 2
+        self.assertEqual(host.slots(), (0, 'capacity.batch.parallel'))
+
+    def test_r6_a_reopened_pr_leaves_stale(self):
+        f = facts(mode='pr', pr={'number': 7, 'state': 'OPEN', 'head': HEAD})
+        self.assertEqual(lane.next_state(rec(lane.STALE), f), (lane.PR_OPEN, 'PR #7 reopened'))
+        self.assertEqual(lane.next_state(rec(lane.STALE), dict(f, closed='removed'))[0],
+                         lane.STALE)
+
+    def test_r3_merging_intent_is_ours(self):
+        """A merge seen after the lane wrote MERGING is the lane's own, never ``external``."""
+        f = facts(mode='pr', pr={'number': 7, 'state': 'MERGED', 'head': HEAD, 'merge_sha': NEW})
+        self.assertEqual(lane.next_state(rec(lane.MERGING, method='squash'), f)[1],
+                         'method=squash')
+        self.assertEqual(lane.next_state(rec(lane.GATE), f)[1], 'method=external')
+
+    def test_r8_a_crash_after_the_push_is_closed_at_the_pushed_sha(self):
+        """Fast-forward: MERGING names the sha it pushes; the next pass finds it on the trunk."""
+        self.assertEqual(lane.next_state(rec(lane.MERGING, sha=NEW, method='ff'),
+                                         facts(merging_landed=True)), (lane.MERGED, 'method=ff'))
+
+    def test_r8_a_crash_before_the_merge_is_gated_again(self):
+        self.assertEqual(lane.next_state(rec(lane.MERGING), facts())[0], lane.GATE)
+        # …but not while the harvest that wrote it still holds the gate
+        self.assertEqual(lane.next_state(rec(lane.MERGING, reason='m'),
+                                         facts(harvest_running=True)), (lane.MERGING, 'm'))
+
+
+class LandingClass(unittest.TestCase):
+    def product(self, **conv):
+        base = {'specs_dir': 'specs', 'plans_dir': 'plans', 'reviews_dir': 'reviews'}
+        base.update(conv)
+        return env.Product('p', {'conventions': base})
+
+    def test_docs_roots_and_doc_paths(self):
+        p = self.product(doc_paths=['README', 'docs/guide/*'])
+        self.assertEqual(lane.landing_class(p, ['specs/f.md', 'reviews/x.md']), lane.DOCS)
+        self.assertEqual(lane.landing_class(p, ['README', 'docs/guide/a.md']), lane.DOCS)
+        self.assertEqual(lane.landing_class(p, ['specs/f.md', 'src/a.py']), lane.CODE)
+        self.assertEqual(lane.landing_class(p, []), lane.CODE)
+        self.assertEqual(lane.landing_class(self.product(), ['README']), lane.CODE)
+
+    def test_r25_a_docs_only_trunk_move_does_not_regate_a_green_branch(self):
+        p = self.product()
+        prev = rec(lane.WAITING, green={'head': HEAD, 'trunk': 'c' * 40})
+        self.assertTrue(lane.skip_regate(prev, HEAD, ['specs/f-0002.md'], p))
+        self.assertTrue(lane.skip_regate(prev, HEAD, [], p))
+        self.assertFalse(lane.skip_regate(prev, HEAD, ['src/a.py'], p))
+        self.assertFalse(lane.skip_regate(prev, NEW, ['specs/f-0002.md'], p))
+        self.assertFalse(lane.skip_regate(rec(lane.WAITING), HEAD, [], p))
+        self.assertFalse(lane.skip_regate(prev, HEAD, None, p))
+
+
+# ---- the machine on a real repo ----------------------------------------------------------
+
+GREEN = ('import unittest\n\n\nclass T(unittest.TestCase):\n'
+         '    def test_ok(self):\n        self.assertTrue(True)\n')
+SLOW = ('import time\nimport unittest\n\n\nclass T(unittest.TestCase):\n'
+        '    def test_slow(self):\n        time.sleep(30)\n')
+GATE_TEST = ('import os\nimport unittest\n\n\nclass Docs(unittest.TestCase):\n'
+             '    def test_no_retired_name(self):\n'
+             '        for d in ("plans", "specs"):\n'
+             '            for n in os.listdir(d) if os.path.isdir(d) else ():\n'
+             '                with open(os.path.join(d, n)) as f:\n'
+             '                    self.assertNotIn("retired_name", f.read())\n')
+
+
+def sh(cmd, cwd=None, env_=None):
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
+                          env=dict(harvest.clean_env(), **(env_ or {})))
+
+
+class LaneRepo(unittest.TestCase):
+    """A bare origin, the product's checkout, and a worker clone that pushes lane branches."""
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp(prefix='lane_')
+        self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
+        self.origin = os.path.join(self.base, 'origin.git')
+        self.repo = os.path.join(self.base, 'repo')
+        self.worker = os.path.join(self.base, 'worker')
+        self.state_dir = os.path.join(self.base, 'state')
+        os.makedirs(self.state_dir)
+        ident = {'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@t', 'GIT_COMMITTER_NAME': 't',
+                 'GIT_COMMITTER_EMAIL': 't@t'}
+        self.ident = ident
+        sh(['git', 'init', '-q', '--bare', '-b', 'main', self.origin])
+        sh(['git', 'clone', '-q', self.origin, self.repo])
+        self.write(self.repo, 'checks/test_fx.py', GREEN)
+        self.write(self.repo, 'checks/test_docs.py', GATE_TEST)
+        sh(['git', 'add', '-A'], cwd=self.repo)
+        sh(['git', 'commit', '-qm', 'init'], cwd=self.repo, env_=ident)
+        sh(['git', 'push', '-q', 'origin', 'HEAD:main'], cwd=self.repo)
+        sh(['git', 'clone', '-q', self.origin, self.worker])
+
+    def write(self, root, rel, text):
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+
+    def product(self, **conventions):
+        conv = {'test_command': f'{sys.executable} -m unittest discover -s checks -p test_*.py',
+                'specs_dir': 'specs', 'plans_dir': 'plans', 'reviews_dir': 'reviews',
+                'lane': {'review': {'code': 'none'}},
+                'branch_prefixes': {'code': 'worker/', 'plan': 'plan/', 'spec': 'spec/'}}
+        conv.update(conventions)
+        return env.Product('sample', {'repo_dir': self.repo, 'main': 'main',
+                                      'conventions': conv, 'steps': {'batch': 'off'}})
+
+    def push_lane(self, branch, files, subject):
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        sh(['git', 'checkout', '-q', '-B', branch, 'origin/main'], cwd=self.worker)
+        for rel, text in files.items():
+            self.write(self.worker, rel, text)
+        sh(['git', 'add', '-A'], cwd=self.worker)
+        sh(['git', 'commit', '-qm', subject], cwd=self.worker, env_=self.ident)
+        sh(['git', 'push', '-q', '-f', 'origin', branch], cwd=self.worker)
+
+    def push_main(self, files, subject):
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        sh(['git', 'checkout', '-q', '-B', 'tmp-main', 'origin/main'], cwd=self.worker)
+        for rel, text in files.items():
+            self.write(self.worker, rel, text)
+        sh(['git', 'add', '-A'], cwd=self.worker)
+        sh(['git', 'commit', '-qm', subject], cwd=self.worker, env_=self.ident)
+        sh(['git', 'push', '-q', 'origin', 'tmp-main:main'], cwd=self.worker)
+
+    def session(self, job, item, branch, kind='coder'):
+        p = subprocess.Popen(['true'])
+        p.wait()
+        with open(os.path.join(self.state_dir, 'sessions.jsonl'), 'a', encoding='utf-8') as f:
+            f.write(json.dumps({'job': job, 'item': item, 'branch': branch, 'kind': kind,
+                                'pid': p.pid, 'started': '2026-09-21T00:00:00Z'}) + '\n')
+            f.write(json.dumps({'job': job, 'ended': '2026-09-21T00:05:00Z',
+                                'end_reason': 'finished', 'rc': 0}) + '\n')
+
+    def lane_of(self, branch):
+        return (lifecycle.by_branch(os.path.join(self.state_dir, 'sessions.jsonl'))
+                .get(branch) or {}).get('lane') or {}
+
+    def origin_main(self):
+        return sh(['git', 'rev-parse', 'main'], cwd=self.origin).stdout.strip()
+
+    def test_r1_lane_state_lives_on_the_run_line(self):
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat(T-0001): a')
+        self.session('coder-t-0001', 'T-0001', 'worker/T-0001')
+        lines = []
+        lane.lane_pass(self.product(), self.state_dir, out=lines.append)
+        rec_ = self.lane_of('worker/T-0001')
+        self.assertEqual(rec_['state'], lane.GATE)
+        self.assertEqual(rec_['head'], sh(['git', 'rev-parse', 'worker/T-0001'],
+                                          cwd=self.origin).stdout.strip())
+        self.assertEqual([n for n in os.listdir(self.state_dir) if n.endswith('.jsonl')],
+                         ['sessions.jsonl'])  # no lanes.jsonl, no ledger of its own
+        with open(os.path.join(self.state_dir, 'sessions.jsonl'), encoding='utf-8') as f:
+            written = [json.loads(ln) for ln in f if '"lane"' in ln]
+        self.assertTrue(written and all(ln['job'] == 'coder-t-0001' for ln in written))
+
+    def test_r2_the_in_process_pass_stops_at_the_gate_and_the_gate_pass_lands(self):
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat(T-0001): a')
+        self.session('coder-t-0001', 'T-0001', 'worker/T-0001')
+        before = self.origin_main()
+        lane.lane_pass(self.product(), self.state_dir, out=lambda *_: None)
+        self.assertEqual(self.origin_main(), before, 'the in-process pass never gates')
+        # a fresh finished branch the pass has not seen yet: the detached gate never moves it
+        self.push_lane('worker/T-0002', {'b.txt': 'b\n'}, 'feat(T-0002): b')
+        self.session('coder-t-0002', 'T-0002', 'worker/T-0002')
+        results = harvest.run_product_harvest(self.product(), self.state_dir,
+                                              out=lambda *_: None, lane_pass=False)
+        self.assertEqual(results, {'worker/T-0001': 'landed'})
+        self.assertEqual(self.lane_of('worker/T-0001')['state'], lane.MERGED)
+        self.assertEqual(self.lane_of('worker/T-0002'), {})
+
+    def test_r7_a_docs_branch_the_gate_refuses_goes_back_to_a_starved_plan_session(self):
+        self.push_lane('plan/F-0001', {'plans/f-0001.md': 'uses retired_name\n'},
+                       'plan(F-0001): the plan')
+        self.session('plan-f-0001', 'F-0001', 'plan/F-0001', kind='plan')
+        before = self.origin_main()
+        lines = []
+        results = harvest.run_product_harvest(self.product(), self.state_dir, out=lines.append)
+        self.assertEqual(results, {'plan/F-0001': 'held'}, lines)
+        self.assertEqual(self.origin_main(), before, 'a docs branch the gate refuses never lands')
+        path = os.path.join(self.state_dir, 'sessions.jsonl')
+        occ = lifecycle.occupancy(path)
+        self.assertEqual(occ['corrections']['F-0001']['kind'], lane.LANDING_GATE)
+        items = {'F-0001': {'id': 'F-0001', 'type': 'feature', 'decided': True,
+                            'state': 'Active', 'stage': 'plan-draft'}}
+        (row,) = [r for r in feeder_rows.candidates(items, self.product(), [], occupancy=occ)
+                  if r.item_id == 'F-0001']
+        self.assertEqual((row.kind, row.brief_kind, row.branch, row.launches),
+                         (feeder_rows.STARVED_PLAN, 'plan', 'plan/F-0001', True))
+        self.assertIn('retired_name', row.correction + '\n'.join(lines) or '')
+
+    def test_red_trunk_waits_never_a_round(self):
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat(T-0001): a')
+        self.session('coder-t-0001', 'T-0001', 'worker/T-0001')
+        self.push_main({'checks/test_red.py': GREEN.replace('True)', 'False)')}, 'red trunk')
+        results = harvest.run_product_harvest(self.product(), self.state_dir,
+                                              out=lambda *_: None)
+        self.assertEqual(results, {'worker/T-0001': 'waiting'})
+        run = lifecycle.by_branch(os.path.join(self.state_dir, 'sessions.jsonl'))['worker/T-0001']
+        self.assertEqual((run['lane']['state'], run['lane']['reason']), (lane.WAITING, 'trunk-red'))
+        self.assertFalse(run.get('correction'))
+        self.assertFalse(run.get('rounds'))
+
+    def test_gate_timeout_is_unknown_not_red(self):
+        """§12: a gate that runs out of time bisects nothing and blames no one: the set waits
+        (``gate-timeout``) and is retried; the second timeout in a row leaves one ``gate too
+        slow`` line for the status and doctor rows."""
+        product = self.product(harvest={'gate_timeout_s': 1})
+        for n in (1, 2):
+            self.push_lane(f'worker/T-000{n}', {f'checks/test_slow{n}.py': SLOW},
+                           f'feat(T-000{n}): slow')
+            self.session(f'coder-t-000{n}', f'T-000{n}', f'worker/T-000{n}')
+        lines = []
+        with mock.patch.object(env, 'state_dir', lambda *_a, **_k: self.state_dir):
+            for tick in (1, 2):
+                results = harvest.run_product_harvest(product, self.state_dir, out=lines.append)
+                self.assertEqual(results, {'worker/T-0001': 'waiting', 'worker/T-0002': 'waiting'})
+            slow = lane.gate_slow_line(product)
+            from asf import doctor
+            from asf.views import status
+            self.assertEqual(doctor.check_gate_speed(product), slow)
+            self.assertEqual(status.gate_cell(product), slow)
+        self.assertFalse([ln for ln in lines if 'bisecting' in ln], lines)
+        for b in ('worker/T-0001', 'worker/T-0002'):
+            rec_ = self.lane_of(b)
+            self.assertEqual((rec_['state'], rec_['reason'], rec_['timeouts']),
+                             (lane.WAITING, 'gate-timeout', 2))
+            run = lifecycle.by_branch(os.path.join(self.state_dir, 'sessions.jsonl'))[b]
+            self.assertFalse(run.get('correction'))
+        self.assertTrue(slow and slow.startswith('gate too slow: 1s vs gate_timeout_s'), slow)
+
+    def test_gate_command_env_prefix(self):
+        """§12: ``NAME=value`` tokens leading ``ci.test_command`` are the command's environment,
+        not a program to run."""
+        self.assertEqual(harvest.command_env(['A=1', 'B_2=x y', 'python3', 'C=3']),
+                         (['python3', 'C=3'], {'A': '1', 'B_2': 'x y'}))
+        probe = ('import os, unittest\n\n\nclass E(unittest.TestCase):\n'
+                 '    def test_env(self):\n'
+                 '        self.assertEqual(os.environ.get("LANE_PROBE"), "on")\n')
+        self.push_lane('worker/T-0001', {'checks/test_probe.py': probe}, 'feat(T-0001): probe')
+        self.session('coder-t-0001', 'T-0001', 'worker/T-0001')
+        cmd = f'LANE_PROBE=on {sys.executable} -m unittest discover -s checks -p test_*.py'
+        results = harvest.run_product_harvest(self.product(test_command=cmd), self.state_dir,
+                                              out=lambda *_: None)
+        self.assertEqual(results, {'worker/T-0001': 'landed'})
+
+
+class Occupancy(unittest.TestCase):
+    """R16: the lane and the feeder are one stream — the feeder reads the lane's states through
+    the one occupancy answer, and the rows follow them."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix='occ_')
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.path = os.path.join(self.dir, 'sessions.jsonl')
+
+    def line(self, **rec_):
+        with open(self.path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(rec_) + '\n')
+
+    def run_(self, job, item, branch, state, **lane_kw):
+        self.line(job=job, item=item, branch=branch, kind='coder', pid=None,
+                  started='2026-09-21T00:00:00Z', ended='2026-09-21T00:05:00Z',
+                  end_reason='finished', lane=dict(rec(state), item=item, **lane_kw))
+
+    def test_r16_the_feeder_reads_the_lane(self):
+        self.run_('coder-t-0001', 'T-0001', 'worker/T-0001', lane.REVIEW, round=2, pr=7)
+        self.run_('coder-t-0002', 'T-0002', 'worker/T-0002', lane.GATE)
+        self.run_('coder-t-0003', 'T-0003', 'worker/T-0003', lane.MERGED)
+        occ = lifecycle.occupancy(self.path)
+        self.assertEqual(set(occ['waiting_landing']), {'T-0001', 'T-0002'})
+        self.assertEqual(occ['review']['T-0001']['round'], 2)
+        self.assertEqual(occ['landing']['T-0002']['state'], lane.GATE)
+        feature = {'id': 'F-0001', 'type': 'feature', 'decided': True, 'state': 'Active',
+                   'stage': 'plan-approved'}
+        items = {'F-0001': feature}
+        for n in (1, 2, 3):
+            items[f'T-000{n}'] = {'id': f'T-000{n}', 'type': 'task', 'state': 'Active',
+                                  'parent': 'F-0001', 'writes': [f'src/{n}.py']}
+        product = env.Product('p', {'conventions': {}})
+        got = [(r.kind, r.item_id, r.launches, r.review_round)
+               for r in feeder_rows.candidates(items, product, [], occupancy=occ)
+               if r.item_id.startswith('T-')]
+        self.assertEqual(got, [(feeder_rows.PUSHED_REVIEW, 'T-0001', True, 2),
+                               (feeder_rows.PUSHED_LAND, 'T-0002', False, 0)])
+
+    def test_a_live_run_is_busy_and_never_waiting(self):
+        self.line(job='coder-t-0001', item='T-0001', branch='worker/T-0001', kind='coder',
+                  pid=os.getpid(), started='2026-09-21T00:00:00Z')
+        occ = lifecycle.occupancy(self.path, alive=lambda pid: True)
+        self.assertIn('T-0001', occ['busy'])
+        self.assertNotIn('T-0001', occ['waiting_landing'])
+
+    def test_back_is_the_corrections(self):
+        self.run_('coder-t-0001', 'T-0001', 'worker/T-0001', lane.BACK)
+        self.line(job='coder-t-0001', correction={'kind': 'gate', 'text': 'red', 'at': 'x'},
+                  rounds=1)
+        occ = lifecycle.occupancy(self.path)
+        self.assertNotIn('T-0001', occ['waiting_landing'])
+        self.assertEqual(occ['corrections']['T-0001']['kind'], 'gate')
+
+    def test_a_pre_lane_finished_run_waits_to_land(self):
+        self.line(job='spec-f-0001', item='F-0001', branch='spec/F-0001', kind='spec', pid=None,
+                  started='2026-09-21T00:00:00Z', ended='2026-09-21T00:05:00Z',
+                  end_reason='finished')
+        occ = lifecycle.occupancy(self.path)
+        self.assertEqual(occ['docs']['F-0001']['spec'], lifecycle.PUSHED_WAIT)
+        self.assertIn('spec/F-0001', occ['branches'])
+
+
+class FeederAndOutcomes(unittest.TestCase):
+    """The feeder half of the stream (R16): footprint, outcome classes, the DONE table."""
+
+    def test_shared_paths_are_no_footprint_overlap(self):
+        from asf.feeder import footprint
+        running = [('T-0001', ['src/a.py', 'uv.lock'])]
+        self.assertEqual(footprint.first_conflict(['uv.lock', 'src/b.py'], running), 'T-0001')
+        self.assertIsNone(footprint.first_conflict(['uv.lock', 'src/b.py'], running,
+                                                   shared=['uv.lock']))
+        self.assertEqual(footprint.first_conflict(['src/a.py'], running, shared=['uv.lock']),
+                         'T-0001')
+        product = env.Product('p', {'conventions': {'shared_paths': ['uv.lock']}})
+        items = {'F-0001': {'id': 'F-0001', 'type': 'feature', 'decided': True,
+                            'state': 'Active', 'stage': 'plan-approved',
+                            'children': ['T-0001', 'T-0002']},
+                 'T-0001': {'id': 'T-0001', 'type': 'task', 'state': 'Active',
+                            'parent': 'F-0001', 'writes': ['src/a.py', 'uv.lock']},
+                 'T-0002': {'id': 'T-0002', 'type': 'task', 'state': 'New', 'parent': 'F-0001',
+                            'writes': ['src/b.py', 'uv.lock']}}
+        inflight = [{'item': 'T-0001', 'kind': 'task', 'job': 'task-t-0001'}]
+        (row,) = [r for r in feeder_rows.candidates(items, product, inflight)
+                  if r.item_id == 'T-0002']
+        self.assertTrue(row.launches, row.action)
+
+    def test_hook_refusal_and_network_error_are_classes_of_their_own(self):
+        self.assertEqual(lifecycle.outcome_class('failed: hook refused: pre-push: red'),
+                         lifecycle.HOOK_REFUSED)
+        self.assertEqual(lifecycle.outcome_class('failed: network error: early EOF'),
+                         lifecycle.NETWORK_ERROR)
+        self.assertEqual(lifecycle.push_failure('fatal: unable to access: Could not resolve host'),
+                         lifecycle.NETWORK_ERROR)
+        self.assertEqual(lifecycle.push_failure('error: failed to push some refs (pre-push hook '
+                                                'declined)'), lifecycle.HOOK_REFUSED)
+        self.assertIsNone(lifecycle.push_failure('the script does not push'))
+
+    def test_b0097_a_network_blip_is_retried_and_a_hook_refusal_carries_its_output(self):
+        from asf.workers import health
+        ev = lifecycle.Evidence(result={'result': 'REPORT\npushed: no — the push was refused: '
+                                                  'pre-push: the trunk is red\n'})
+        cls, detail = health.push_retry(ev, 'failed: unpushed work', None)
+        self.assertEqual(cls, lifecycle.HOOK_REFUSED)
+        self.assertIn('the trunk is red', detail)
+        net = health.push_retry(lifecycle.Evidence(result={'result': 'done'}), 'failed: not pushed: 1',
+                                'publish w/x refused: fatal: unable to access: Connection reset')
+        self.assertEqual(net[0], lifecycle.NETWORK_ERROR)
+        self.assertIsNone(health.push_retry(ev, 'finished', None))
+        # a commit its own hook refused is still a hold (B-0094), not a push class
+        self.assertIsNone(health.push_retry(lifecycle.Evidence(result={'result': 'x'}),
+                                            'failed: not pushed: 1', 'commit w/x refused: refused'))
+
+    def test_the_done_table_credits_only_a_run_with_its_own_commits(self):
+        from asf.tick import summary
+        own = {'job': 'a', 'ended': 'x', 'end_reason': 'finished', 'harvested': 'abc1234'}
+        empty = dict(own, end_reason='failed: empty branch: nothing to land')
+        adopted = dict(own, adopted=True)
+        archived = dict(own, harvested='superseded')
+        self.assertTrue(summary.credits_landing(own))
+        for run in (empty, adopted, archived):
+            with self.subTest(run=run):
+                self.assertFalse(summary.credits_landing(run))
+        text = summary.render([], [own, empty], {}, 's', 'n', False)
+        self.assertEqual(text.count('landed abc1234'), 1)
+
+
+class SkippedRequiredCheck(unittest.TestCase):
+    def test_skipped_required_check_counts_as_passed(self):
+        """§12: a required check a path filter skipped decided it is not needed — passed; one
+        that never appears still waits (then the local gate)."""
+        product = env.Product('p', {'repo_slug': 'o/p', 'conventions': {
+            'landing': 'pull-request', 'landing_checks': ['ci', 'docs'],
+            'landing_checks_missing': 'wait'}})
+        tmp = tempfile.mkdtemp(prefix='skip_')
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        runner = lane.Lane.__new__(lane.Lane)
+        runner.product, runner.conv, runner.out, runner.dry_run = product, product.conventions, \
+            (lambda *_: None), False
+        runner.results, runner.now, runner.state_dir = {}, NOW, tmp
+        host = lane.GitHubHost(product, None)
+        host.lane = runner
+        f = {'branch': 'worker/T-0001', 'prev': rec(lane.GATE, pr=7), 'class': lane.CODE,
+             'head': HEAD}
+        checks = [{'name': 'ci', 'bucket': 'pass'}, {'name': 'docs', 'bucket': 'skipping'}]
+        with mock.patch.object(harvest, '_gh', return_value=(0, json.dumps(checks), '')):
+            self.assertEqual(host.check_gate(f, 7, ['src/a.py']), 'ci')
+        with mock.patch.object(harvest, '_gh', return_value=(0, json.dumps(checks[:1]), '')), \
+                mock.patch.object(lane.Lane, 'set', lambda self, f, s, r, result=None, **kw:
+                                  runner.results.update({f['branch']: (s, r)})):
+            self.assertIsNone(host.check_gate(f, 7, ['src/a.py']))
+        self.assertEqual(runner.results['worker/T-0001'][0], lane.WAITING_CI)
+
+
+if __name__ == '__main__':
+    unittest.main()

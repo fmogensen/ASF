@@ -76,7 +76,7 @@ class FlowStyle(unittest.TestCase):
         quoted into a string once silently became local-gate — is a RED doctor row naming the key
         and its line; the runtime reader still never raises on it."""
         from asf import doctor
-        from asf.harvest import harvest
+        from asf.harvest import lane
         text = ("product: sample\nmain: main\nconventions:\n  specs_dir: docs/specs\n"
                 "  landing_checks_missing: '{docs: wait}'\n  models: light\n")
         with tempfile.TemporaryDirectory() as home:
@@ -93,7 +93,7 @@ class FlowStyle(unittest.TestCase):
         self.assertTrue(any('products/sample.yaml:6: conventions.models must be a map' in d
                             for d in details), details)
         self.assertTrue(doctor.is_red([('conventions', True, ok, d) for ok, d in rows]))
-        harvest.missing_policy(p.conventions, 'docs')  # never raises
+        lane.missing_policy(p.conventions, 'docs')  # never raises
         # the words and a map of them are sound
         for good in ('wait', 'local-gate', '{docs: wait, code: local-gate}'):
             conv = env.Product('x', env.loads(

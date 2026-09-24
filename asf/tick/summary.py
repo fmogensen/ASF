@@ -121,7 +121,18 @@ def _block(title, columns, records, suffix=''):
     return lines
 
 
-IN_FLIGHT_COLUMNS = ('job', 'item', 'kind', 'feature', 'account', 'model', 'status', 'since', 'what')
+def credits_landing(run):
+    """True when the DONE table may say a run ``landed``: it was harvested at a real sha AND it
+    ended ``finished`` — which health writes only for a pushed branch with commits of its own
+    (:func:`asf.workers.lifecycle.judge`). A run that wrote nothing (an empty end marked landed
+    because an earlier run's work was on the trunk, a synthetic adoption, an archive) is not
+    credited with someone else's sha."""
+    sha = (run or {}).get('harvested')
+    return (bool(sha) and sha not in lifecycle.NOT_A_LANDING and lifecycle.finished(run)
+            and not run.get('adopted'))
+
+
+IN_FLIGHT_COLUMNS =('job', 'item', 'kind', 'feature', 'account', 'model', 'status', 'since', 'what')
 DONE_COLUMNS = ('job', 'item', 'kind', 'result', 'took', 'what')
 
 
@@ -136,7 +147,7 @@ def render(inflight, done, titles_by_item, since, now, first):
     done_records = []
     for r in done:
         result = r.get('end_reason')
-        if lifecycle.landed(r):
+        if credits_landing(r):
             result = f"{result}, landed {r['harvested'][:7]}"
         done_records.append({
             'job': r.get('job'), 'item': r.get('item'), 'kind': r.get('kind'),

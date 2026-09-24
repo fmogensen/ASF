@@ -45,6 +45,7 @@ Every other module asks this one:
 import dataclasses
 import json
 import os
+import re
 import signal
 import subprocess
 import time
@@ -95,13 +96,22 @@ EMPTY_BRANCH = 'empty branch: nothing to land'
 NOT_PUSHED = 'not pushed'
 #: A failure whose signature this module does not name.
 OTHER = 'other'
+#: A push the repo's own pre-push hook refused, and one the network dropped (B-0097): each a
+#: class of its own, retried with no round spent — the session's work is not at fault.
+HOOK_REFUSED = 'hook refused'
+NETWORK_ERROR = 'network error'
+RETRY_CLASSES = (HOOK_REFUSED, NETWORK_ERROR)
+NETWORK_RE = re.compile(r'could not resolve host|connection (?:reset|refused|timed out|closed)|'
+                        r'network is unreachable|unable to access|operation timed out|early eof|'
+                        r'remote end hung up|ssl_error|gnutls', re.I)
+HOOK_RE = re.compile(r'\bhook\b|pre-push|refused|declined', re.I)
 
 #: Every class a session's ``end_reason`` falls into. ``finished`` is the only one that is not a
 #: failure; ``other`` is a failure whose signature this module does not name. Composed from the
 #: constants that write the strings, so a rename follows.
 OUTCOME_CLASSES = (FINISHED, NOT_PUSHED, EMPTY_BRANCH.split(':')[0], DEAD_PID, PUSHED_AFTER_STOP,
                    runtime_mod.report.UNPUSHED, *(name for name, _ in runtime_mod.FAILURE_SIGNATURES),
-                   OTHER)
+                   HOOK_REFUSED, NETWORK_ERROR, OTHER)
 FAILING_CLASSES = tuple(c for c in OUTCOME_CLASSES if c != FINISHED)
 
 
@@ -479,8 +489,55 @@ def occupancy(path, lanes=None, alive=None, result=None):
     {kind, text, at, rounds, branch}}}``: ``busy`` — a live run or a lane state holds the item
     (no launch row); ``waiting_landing`` — pushed and waiting on the lane (a PUSHED → REVIEW or
     → LAND row, never a new session); ``corrections`` — as :func:`corrections`, the feeder's
-    BACK rows. An item is in at most one of ``busy`` and ``waiting_landing``."""
-    raise NotImplementedError('lifecycle.occupancy: W3')
+    BACK rows. An item is in at most one of ``busy`` and ``waiting_landing``.
+
+    Beside those, for the feeder's rows: ``lanes`` (``{branch: lane record + item, kind}`` of
+    every branch whose lane state holds it), ``review`` (``{item: {branch, round, pr}}`` — lane
+    REVIEW: a PUSHED → REVIEW row), ``landing`` (``{item: {branch, state, pr, why}}`` — the other
+    lane states: a PUSHED → LAND row), ``branches`` (``{branch: why}`` of every waiting branch)
+    and ``docs`` (``{item: {kind: why}}``: a spec or plan pushed and waiting is not starved).
+
+    ``lanes`` (the argument): ``{branch: record}`` to use instead of the run lines' own."""
+    from asf.harvest import lane as lane_mod  # the lane's states, no cycle at import
+    by = by_branch(path)
+    live_items = {s['item']: f"session {s['job']} running" for s in inflight(path, alive)
+                  if s.get('item')}
+    out = {'busy': dict(live_items), 'waiting_landing': {}, 'corrections': corrections(path),
+           'lanes': {}, 'review': {}, 'landing': {}, 'branches': {}, 'docs': {}}
+    for branch, run in by.items():
+        item, kind = run.get('item'), run.get('kind')
+        rec = (lanes or {}).get(branch) if lanes is not None else run.get('lane')
+        if not item or item in live_items:
+            continue
+        why = None
+        if rec and rec.get('state'):
+            state = rec['state']
+            if state not in lane_mod.BUSY_STATES or landed(run) and state != lane_mod.MERGING:
+                continue
+            out['lanes'][branch] = dict(rec, item=item, kind=kind)
+            pr = f" PR #{rec['pr']}" if rec.get('pr') else ''
+            why = f"lane {state}{pr}: {rec.get('reason') or ''}".rstrip(': ')
+            if state == lane_mod.REVIEW:
+                out['review'][item] = {'branch': branch, 'round': int(rec.get('round') or 1),
+                                       'pr': rec.get('pr'), 'why': rec.get('reason') or ''}
+            else:
+                out['landing'][item] = {'branch': branch, 'state': state, 'pr': rec.get('pr'),
+                                        'why': why}
+        elif landed(run) or pending_correction(run, path):
+            continue
+        elif run.get('harvest') == 'pr':
+            why = PR_WAIT
+        elif eligible(run):
+            why = PUSHED_WAIT
+        elif is_live(run) and finished_unrecorded(run, alive, result):
+            why = FINISHED_WAIT
+        if not why:
+            continue
+        out['waiting_landing'].setdefault(item, why)
+        out['branches'][branch] = why
+        if kind:
+            out['docs'].setdefault(item, {})[kind] = why
+    return out
 
 
 #: A card in one of these states has no work left for a session (the feeder's ``DONE_STATES``).
@@ -661,10 +718,21 @@ def outcome_class(result):
         return OTHER
     if text.startswith('failed: '):
         text = text[len('failed: '):].strip()
-    for prefix in (NOT_PUSHED, OUTCOME_CLASSES[2]):
+    for prefix in (NOT_PUSHED, OUTCOME_CLASSES[2], HOOK_REFUSED, NETWORK_ERROR):
         if text.startswith(prefix):
             return prefix
     return text if text in OUTCOME_CLASSES[3:-1] else OTHER
+
+
+def push_failure(text):
+    """The retry class of a push's failure text — :data:`NETWORK_ERROR` for a transport error,
+    :data:`HOOK_REFUSED` for a refusal by the repo's hook — or None for anything else."""
+    text = text or ''
+    if NETWORK_RE.search(text):
+        return NETWORK_ERROR
+    if HOOK_RE.search(text):
+        return HOOK_REFUSED
+    return None
 
 
 #: Kinds whose work is not a branch: a groom (adjudicate) session rules into the state dir's

@@ -6,6 +6,10 @@ import unittest
 
 from asf.env import Product
 from asf.feeder import idle, rows, tiers
+try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.x` does not
+    from occfixture import occ
+except ImportError:  # pragma: no cover - import shape only
+    from tests.occfixture import occ
 
 CAPACITY = 2
 SESSION = {'item': 'T-0030', 'kind': 'task', 'account': 'w1', 'age': '12m', 'job': 'task-t-0030'}
@@ -57,7 +61,7 @@ def held():
 def account(items, candidates=None, busy=(), **kw):
     prod = product()
     if candidates is None:
-        candidates = rows.candidates({'items': items}, prod, [SESSION], busy=busy)
+        candidates = rows.candidates({'items': items}, prod, [SESSION], occupancy=occ(busy=busy))
     selected = tiers.select(candidates, [SESSION], CAPACITY)
     kw.setdefault('held', held())
     return idle.account(items, prod, candidates, selected, [SESSION], set(busy), CAPACITY, **kw), candidates

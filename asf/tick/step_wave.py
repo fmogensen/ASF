@@ -2,8 +2,12 @@
 
 0. ``approvals.raise_holds`` — the open holds said aloud, and the items they park (§2.4);
 1. the index from the record clone (the tick's own, made once per tick — :class:`Context`);
-2. ``inflight``: the sessions in ``~/.ASF/state/<product>/sessions.jsonl`` with no ``ended``; and
-   ``busy``, the items whose pushed branch waits for harvest — no slot, but no second session;
+2. the lane pass (:func:`asf.harvest.lane.lane_pass`, R2): every lane branch moved as far as its
+   facts carry it — a finished branch's PR opened or adopted, its review asked for, a merge seen
+   — before the feeder reads the lane; then ``inflight`` (the sessions in
+   ``~/.ASF/state/<product>/sessions.jsonl`` with no ``ended``) and the one occupancy answer
+   (:func:`asf.workers.lifecycle.occupancy`): what a live run holds, what waits to land, the
+   lane's states and the pending corrections;
 3. ``feeder.plan_rows(index, product, inflight, capacity)`` — ``capacity`` is the resolver's
    ceiling (``asf.capacity.resolve``, spec §2.2's session law, bounded by the product's fair
    share of the usable pool); the feeder still takes this product's in-flight sessions off it
@@ -18,7 +22,6 @@
 
 Each launch appends a ``launch`` event (item, job, model, brief kind) to ``metrics/events``.
 """
-import json
 import os
 import re
 import subprocess
@@ -50,57 +53,39 @@ def attempts(product):
     return lifecycle.attempts(pool_mod.sessions_path(product))
 
 
-def awaiting_harvest(product):
-    """Items whose pushed branch waits for harvest: busy, but holding no slot
-    (:func:`asf.workers.lifecycle.awaiting_harvest`)."""
-    return lifecycle.awaiting_harvest(pool_mod.sessions_path(product))
-
-
-def unlanded(product):
-    """``{item: {kind: why}}`` — work pushed and waiting to land (:func:`asf.workers.lifecycle.unlanded`)."""
-    return lifecycle.unlanded(pool_mod.sessions_path(product))
-
-
-def _open_prs(product):
-    """The PRs the evidence cache last saw open — read as cached, never refreshed here (the wave
-    asks no forge). No cache, or an unreadable one: none."""
-    from asf.evidence import evidence as evidence_mod
-    try:
-        with open(evidence_mod._cache_file('prs.json', product), encoding='utf-8') as f:
-            prs = json.load(f)
-    except (OSError, ValueError, TypeError):
-        return []
-    if not isinstance(prs, list):
-        return []
-    return [p for p in prs
-            if isinstance(p, dict) and p.get('headRefName') and p.get('state') == 'OPEN']
-
-
-def open_pr_branches(product):
-    """The head branches of the PRs the evidence cache last saw open (:func:`_open_prs`)."""
-    return {p['headRefName'] for p in _open_prs(product)}
-
-
-def pr_heads(product):
-    """``{item: {branch, number, state, round, why}}`` — the open code-lane PRs of a product that
-    lands through pull requests, and what each head waits for
-    (:func:`asf.harvest.harvest.pr_heads`): read off the branches, not the ledger, so a PR that
-    predates any review request still gets its PUSHED → REVIEW row. Other landings: none."""
-    from asf.harvest import harvest
-    repo = product.repo_dir
-    if not repo or not os.path.isdir(repo) or harvest.landing(product) != harvest.LANDING_PR:
-        return {}
-    prs = _open_prs(product)
-    if not prs:
-        return {}
-    return harvest.pr_heads(repo, product.conventions, product.conventions.main, prs,
-                            lifecycle.by_branch(pool_mod.sessions_path(product)))
+def occupancy(product):
+    """The one answer to "is this item busy?" (:func:`asf.workers.lifecycle.occupancy`): live
+    runs, work waiting to land, the lane's states (off the run lines), pending corrections."""
+    return lifecycle.occupancy(pool_mod.sessions_path(product))
 
 
 def corrections(product):
     """``{item: {kind, text, at, rounds}}`` — the newest correction still waiting for its session
-    (:func:`asf.workers.lifecycle.corrections`)."""
+    (:func:`asf.workers.lifecycle.corrections`; also ``occupancy(product)['corrections']``)."""
     return lifecycle.corrections(pool_mod.sessions_path(product))
+
+
+def lane_pass(ctx, out=print):
+    """R2: the lane's feeder-visible transitions, in-process, before the wave reads the lane —
+    once per tick (the ``prs`` step skips it when the wave ran it). A failure is one line: the
+    wave still plans off the lane as it stood."""
+    from asf.harvest import harvest, lane
+    from asf.tick import land_spec
+    from asf.views import index_reader
+    product = ctx.product
+    if not product.repo_dir or getattr(ctx, 'lane_passed', False):
+        return {}
+    ctx.lane_passed = True
+    try:
+        root = ctx.record_root()
+        if os.path.isfile(os.path.join(root, 'index.json')):  # an approved spec off the trunk
+            land_spec.adopt(product, index_reader.load(root)[0], out=out)
+        results, _found = lane.lane_pass(product, items=harvest.record_items(root), out=out,
+                                          root=root)
+        return results
+    except Exception as e:  # noqa: BLE001 — the wave must still run
+        out(f'lane: pass failed — {(str(e) or type(e).__name__).splitlines()[0]}')
+        return {}
 
 
 def _newest_groom_file(root):
@@ -186,10 +171,7 @@ def _not_yet_put(product, job, open_ids):
 def plan_inputs(product, root):
     """The ledger's and the record's facts ``plan_rows`` takes beside the index — one place, so
     the tick, ``asf next`` and the status cell plan the same rows."""
-    return {'attempts': attempts(product), 'corrections': corrections(product),
-            'busy': awaiting_harvest(product),
-            'unlanded': unlanded(product), 'open_branches': open_pr_branches(product),
-            'pr_heads': pr_heads(product),
+    return {'attempts': attempts(product), 'occupancy': occupancy(product),
             'groom_state': groom_state(product, root) if groom_policy.groom_auto(product) else None}
 
 
@@ -255,6 +237,7 @@ def run(ctx, out=print):
     from asf.views import index_reader
     product = ctx.product
     held = approvals.raise_holds(ctx, out)
+    lane_pass(ctx, out)
     items, _generated = index_reader.load(ctx.record_root())
     if product.repo_dir:  # defence in depth: a Task whose card lacks `after:` waits on its plan's order
         items = plan_order.overlay(items, plan_order.trunk_reader(product))

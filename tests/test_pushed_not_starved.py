@@ -15,6 +15,10 @@ import unittest
 from asf.env import Product
 from asf.feeder import rows
 from asf.workers import lifecycle
+try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.x` does not
+    from occfixture import occ
+except ImportError:  # pragma: no cover - import shape only
+    from tests.occfixture import occ
 
 
 def gone_pid():
@@ -58,10 +62,10 @@ class Registry(unittest.TestCase):
                      'log': self.log('plan-f-0001', result)}, **extra)
 
     def feeder_rows(self, open_branches=None):
+        occupancy = lifecycle.occupancy(self.path)
+        occupancy['branches'].update(occ(open_branches=open_branches)['branches'])
         return rows.candidates(index(), product(), lifecycle.inflight(self.path),
-                               busy=lifecycle.awaiting_harvest(self.path),
-                               unlanded=lifecycle.unlanded(self.path),
-                               open_branches=open_branches)
+                               occupancy=occupancy)
 
 
 OK = {'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'done'}

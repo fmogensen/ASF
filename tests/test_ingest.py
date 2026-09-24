@@ -13,6 +13,10 @@ from asf.record import frontmatter
 from asf.record import ingest
 from asf.record.core import today
 from asf.record.index import do_index
+try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.x` does not
+    from occfixture import occ
+except ImportError:  # pragma: no cover - import shape only
+    from tests.occfixture import occ
 
 FOLDERS = ['epics', 'features', 'stories', 'tasks', 'bugs', 'decisions', 'rules']
 
@@ -897,7 +901,8 @@ class NoCoderBeforeTheSpecLands(unittest.TestCase):
             spec_review=(1, 'APPROVED', 'f-0001-spec-review-r1.md')))
         with open(os.path.join(self.root, 'index.json'), encoding='utf-8') as f:
             index = json.load(f)
-        out = rows.candidates(index, Product('sample', {}), [], open_branches={'spec/F-0001'})
+        out = rows.candidates(index, Product('sample', {}), [],
+                              occupancy=occ(open_branches={'spec/F-0001'}))
         self.assertEqual([(r.kind, r.launches) for r in out], [(rows.PUSHED_LAND, False)])
 
     def test_an_approved_spec_that_cannot_land_as_is_gets_a_spec_session(self):
@@ -909,12 +914,12 @@ class NoCoderBeforeTheSpecLands(unittest.TestCase):
         with open(os.path.join(self.root, 'index.json'), encoding='utf-8') as f:
             index = json.load(f)
         text = "Land the existing approved spec — don't rewrite it."
-        corr = {'F-0001': {'kind': rows.LAND_SPEC, 'text': text, 'rounds': 0,
+        corr = {'F-0001': {'kind': rows.LANDING_GATE, 'text': text, 'rounds': 0,
                            'branch': 'spec/F-0001'}}
-        out = rows.candidates(index, Product('sample', {}), [], corrections=corr)
+        out = rows.candidates(index, Product('sample', {}), [], occupancy=occ(corrections=corr))
         self.assertEqual([(r.kind, r.branch, r.brief_kind, r.launches) for r in out],
                          [(rows.STARVED_SPEC, 'spec/F-0001', 'spec', True)])
-        self.assertEqual(out[0].reason, text)
+        self.assertEqual(out[0].correction, text)
 
     def test_a_spec_on_the_trunk_is_what_lets_tasks_run(self):
         evidence = ingest.evidence

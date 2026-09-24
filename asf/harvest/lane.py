@@ -1,56 +1,68 @@
-"""asf.harvest.lane — the PR lane as one state machine (the contract; W1 implements it).
+"""asf.harvest.lane — the PR lane as one state machine.
 
 A lane branch's life — pushed, a PR (or, fast-forward, the branch as its own PR), a review, the
-gate, merged or back — is one state per branch, moved only here. Harvest shrinks to: fetch,
-list the lane branches, :func:`advance` each, then one :func:`gate_set` over every branch in
-GATE. Every other module reads the lane through :func:`state`, :func:`busy_items` and
-:func:`snapshot`; none writes it.
+gate, merged or back — is one state per branch, moved only here. Both landing modes run the same
+machine; only the :class:`Host` differs (:class:`FastForwardHost` pushes the trunk,
+:class:`GitHubHost` merges a PR). Every other module reads the lane through :func:`state`,
+:func:`busy_items` and :func:`snapshot` (or :func:`asf.workers.lifecycle.occupancy`, which folds
+the same run lines); none writes it.
 
 **Where the state lives.** On the run line in ``state/<product>/sessions.jsonl``, never a ledger
-of its own: a transition is ``mark_session(job, lane={state, head, pr, at, reason})`` on the run
-that owns the branch, and :func:`asf.workers.lifecycle.by_branch` gives "the last run naming a
-branch owns it". Adopting a branch or PR no run made writes a synthetic run (as
-``land_spec.adopt`` does today). A v0.1.2 binary reading the same file ignores the extra
-``lane`` field, so rollback needs no migration. Transitions that finish a run still write
-``harvested:`` / ``correction:`` on it through ``lifecycle.hold`` and ``mark_session``.
+of its own: a transition is ``mark_session(job, lane={state, head, pr, at, reason, …})`` on the
+run that owns the branch (:func:`asf.workers.lifecycle.by_branch`: the last run naming a branch
+owns it). Adopting a branch or PR no run made writes a synthetic run. A v0.1.2 binary reading
+the same file ignores the ``lane`` field. Transitions that finish a run still write
+``harvested:`` / ``correction:`` on it (:func:`asf.workers.lifecycle.hold`).
 
-**When it runs.** The transitions the feeder reads (PUSHED, PR_OPEN, REVIEW, BACK, STALE, and a
-moved head) are computed in-process in the tick, before the wave. Only the GATE outcomes
-(MERGED, BACK, WAITING, WAITING_CI, QUEUED) are decided in the detached harvest. Before any
-external merge the lane writes the intent ``MERGING pr=<n>``; a later T11 (found merged) with a
-prior MERGING is our own merge, not a foreign one.
+**When it runs.** :func:`lane_pass` — the transitions the feeder reads (PUSHED, PR_OPEN, REVIEW,
+BACK, STALE, a moved head, a merge seen) — runs in-process in the tick before the wave. Only the
+gate's outcomes (MERGED, QUEUED, BACK, WAITING, WAITING_CI) are decided in the detached harvest
+(:func:`gate_pass`). Before any external merge the lane writes ``MERGING`` (with the PR number, or
+the sha a fast-forward pushes); a later merge seen with that MERGING before it is our own, and a
+tick that died between the merge and its ledger line is closed at the merge's own sha (R3, R8).
 
-**Facts.** :func:`facts` gathers everything once per tick — one ``gh pr list --state all``, one
-``git ls-remote``, the run per branch, the newest review per head
-(:func:`asf.evidence.review.newest`) and the gate cache — and every transition is a pure
-function of them (:func:`next_state`), unit-tested with no git and no ``gh``.
+**Facts.** :func:`facts` gathers everything once per pass — one ``gh pr list --state all`` (PR
+mode), one ``git ls-remote``, the run per branch, the newest review per head
+(:mod:`asf.evidence.review`) — and every transition is a pure function of them
+(:func:`next_state`), unit-tested with no git and no ``gh``.
 
 Transitions (plan §2 plus the §9 overrides):
 
-- T1  (run) → PUSHED          the run ended ``finished`` and ``origin/<branch>`` is its head
-- T2  PUSHED → PR_OPEN         a PR was opened or one already exists (adoption); FF: at once, pr=None
+- T1  (run) → PUSHED          the run ended and ``origin/<branch>`` is ahead of the trunk; a
+                               branch or PR no run holds is adopted the same way (T2 adoption)
+- T2  PUSHED → PR_OPEN         a PR was opened or one already exists; FF: at once, pr=None
 - T3  PR_OPEN → REVIEW         ``conventions.lane.review`` requires a review for the landing
-                               class and no review round reviewed this head (a state, no round)
-- T4  REVIEW → GATE            the current review reads approved, or the policy is ``none``
-- T5  REVIEW → BACK            the current review reads changes (``kind=review``, rounds+1)
-- T6  GATE → WAITING_CI        required checks pending/absent under ``landing_checks_missing: wait``
-- T7  WAITING_CI → GATE        checks passed (``via=ci``) or the wait expired (``via=local``)
-- T8  GATE → WAITING           trunk red alone, no merge budget, deferred, or a shared path
-                               already in this tick's set — never a correction, never a round
-- T9  GATE → BACK              red alone on a green trunk, conflict, footprint ``reshape``, or a
-                               pre-push hook refusal (``kind=gate|conflict|footprint|hook``)
+                               class (a state, no round is spent)
+- T4  REVIEW → GATE            the review of the current head reads approved (or policy none)
+- T5  REVIEW → BACK            the review of the current head reads changes (rounds+1)
+- T6  GATE → WAITING_CI        required checks pending/absent under ``landing_checks_missing``
+- T7  WAITING_CI → GATE        re-decided every harvest
+- T8  GATE → WAITING           trunk red alone, no merge budget, deferred, a shared path, a gate
+                               timeout, an approval hold — never a correction, never a round
+- T9  GATE → BACK              red alone on a green trunk, conflict, a lane refusal
 - T10 GATE → MERGING → MERGED  merged by the host (FF ``push_ff``; PR ``gh pr merge``)
-- T10q GATE → QUEUED → MERGED  a merge queue took it; a queue rejection → BACK or WAITING;
-                               QUEUED counts toward the in-queue budget
-- T11 any open → MERGED        found merged outside the lane, or already on the trunk
-                               (``method=external|on-trunk``; ours when a MERGING precedes it)
-- T12 any open → STALE         PR closed unmerged, branch gone, item closed/superseded, or
-                               unchanged and unheld past ``conventions.lane.stale_after``
-- T12r STALE → PR_OPEN         the PR was reopened
+- T10q GATE → QUEUED → MERGED  a merge queue took it; queue-rejected → WAITING (R5)
+- T11 any open → MERGED        found merged (the PR, the pushed sha, or the diff on the trunk)
+- T12 any open → STALE         PR closed unmerged, branch gone, item superseded, PUSHED unmoved
+                               past ``lane.stale_after``
+- T12r STALE → PR_OPEN         the PR was reopened (R6)
 - T13 BACK → PUSHED            the correcting session finished with a new head
-- Th  any open, head moved     → PUSHED(new head)
-- T14 MERGED/STALE → REAPED    the worktree was removed (health writes it)
+- Th  any open, head moved     → PUSHED(new head) (R4)
 """
+import datetime
+import fnmatch
+import json
+import os
+import re
+import tempfile
+import time
+
+from asf import approvals, env
+from asf.evidence import review as review_mod
+from asf.feeder import footprint, widen
+from asf.harvest import harvest as H
+from asf.workers import lifecycle
+from asf.workers.pool import now_iso
 
 PUSHED = 'PUSHED'
 PR_OPEN = 'PR_OPEN'
@@ -76,90 +88,1201 @@ OPEN_STATES = tuple(s for s in LANE_STATES if s not in TERMINAL_STATES)
 #: The states in which the branch's item is busy for the feeder (no launch row): every open
 #: state except BACK, which is the feeder's to correct.
 BUSY_STATES = tuple(s for s in OPEN_STATES if s != BACK)
+#: The states the gate (the detached harvest) decides; the in-process pass leaves them be.
+GATE_STATES = (GATE, WAITING, WAITING_CI)
 
 #: The two landing classes (:func:`landing_class`).
 DOCS = 'docs'
 CODE = 'code'
 
-
-def facts(product):
-    """Gather the tick's lane facts once: one ``gh pr list --state all`` (none in FF mode), one
-    ``git ls-remote``, :func:`asf.workers.lifecycle.by_branch`, the newest review per branch head
-    (:func:`asf.evidence.review.newest`) and the gate cache.
-
-    Returns a mapping ``{branch: BranchFacts}`` over every lane branch (a branch under the
-    product's prefixes, or one an open PR names). Each branch's facts carry at least ``head``
-    (the remote sha or None), ``item``, ``run`` (the owning run's folded record, or None),
-    ``pr`` (the host's view, or None), ``review`` (``(round, verdict, head)`` or None),
-    ``landing_class``, ``on_trunk`` and ``now``. Read-only: no git write, no ``gh`` write."""
-    raise NotImplementedError('lane.facts: W1')
-
-
-def next_state(prev, facts):
-    """The pure transition: ``prev`` is the branch's last lane record (``{state, head, pr, at,
-    reason}``, or None for a branch with none yet) and ``facts`` that branch's facts from
-    :func:`facts`. Returns ``(state, reason)`` — ``state`` one of :data:`LANE_STATES`, equal to
-    ``prev['state']`` when nothing moves. No I/O, no clock beyond ``facts['now']``."""
-    raise NotImplementedError('lane.next_state: W1')
-
-
-def advance(product, branch, facts):
-    """Decide ``branch``'s next state from its facts (:func:`next_state`) and, when it moved,
-    write it: ``mark_session(job, lane={state, head, pr, at, reason})`` on the owning run (a
-    synthetic run for an adopted branch), plus ``lifecycle.hold`` for BACK and ``harvested=``
-    for MERGED. Performs the transition's side effect (open a PR via the host) where the table
-    names one. Returns the lane record written, or None when the state did not change. The only
-    writer of a lane state."""
-    raise NotImplementedError('lane.advance: W1')
-
-
-def state(product, branch):
-    """``branch``'s current lane record (``{state, head, pr, at, reason}``) from the run that
-    owns it, or None when no run carries one. Read-only."""
-    raise NotImplementedError('lane.state: W1')
+LANDING_FF = 'fast-forward'
+LANDING_PR = 'pull-request'
+ITEM_ID_RE = re.compile(r'\b([A-Za-z]+-\d{4})\b')
+ADJUDICATE_SUBJECT_RE = re.compile(r'^adjudicate\(')
+#: the correction kind a docs branch the product gate refuses goes back with: the feeder turns it
+#: into a STARVED → SPEC/PLAN session on that branch (R7)
+LANDING_GATE = 'landing-gate'
+#: the correction kind of a push the repo's pre-push hook refused (T9 ``kind=hook``)
+HOOK = 'hook'
+SUPERSEDED = 'superseded'
+#: The merge methods tried in order; a repo that refuses one is offered the next.
+MERGE_METHODS = ('--squash', '--merge', '--rebase')
+#: ``gh pr checks`` buckets that make a PR red, and those that count as run and passed — a
+#: required check a path filter skipped (``skipping``) decided it is not needed: passed (§12).
+RED_BUCKETS = ('fail', 'cancel')
+PASS_BUCKETS = ('pass', 'skipping')
+#: ``conventions.landing_checks_missing`` values.
+MISSING_LOCAL_GATE = 'local-gate'
+MISSING_WAIT = 'wait'
+DEFAULT_LANDING_WAIT_MIN = 30
+REQUIRED_TTL_S = 3600
+REQUIRED_CACHE = 'landing-required-checks.json'
+#: Consecutive gate timeouts, and the file the status and doctor rows read (§12).
+GATE_SLOW = 'gate-slow.json'
+GATE_SLOW_AFTER = 2
+#: Full gates one landing may spend: the first, and the confirmations after each bisection.
+CONFIRM_ROUNDS = 3
+#: how many transitions one branch may take in one pass
+MAX_STEPS = 8
+BRIEF_KIND = {'spec': 'spec', 'plan': 'plan', 'fix': 'fix-bug'}
 
 
-def busy_items(product):
-    """The item ids whose branch is in one of :data:`BUSY_STATES` — what
-    :func:`asf.workers.lifecycle.occupancy` folds in, so the feeder starts no second session
-    for an item the lane holds. Read-only."""
-    raise NotImplementedError('lane.busy_items: W1')
+# ---- small helpers ----------------------------------------------------------------------------
+
+def _conv(product):
+    return getattr(product, 'conventions', product)
 
 
-def snapshot(product):
-    """Every lane branch's current record, ``{branch: {state, head, pr, at, reason, item}}``,
-    for the views, ``asf tick --dry-run`` and the invariants (I8). Read-only."""
-    raise NotImplementedError('lane.snapshot: W1')
+def landing(product):
+    """``conventions.landing``, else ``fast-forward`` when ``steps.batch`` is off or unset, else
+    ``pull-request``."""
+    value = product.conventions.get('landing')
+    if value:
+        return str(value).strip().lower()
+    batch = (product._get('steps') or {}).get('batch')
+    if batch is None or batch is False or str(batch).strip().lower() == 'off':
+        return LANDING_FF
+    return LANDING_PR
 
 
-def gate_set(product, entries):
-    """The one gate, both landing modes. ``entries`` are the branches in GATE this tick (at most
-    one touching a ``conventions.shared_paths`` path; the rest WAITING ``shared-path``). Builds a
-    combined head, bisects on the red modules, confirms in full, checks the trunk once when
-    something is red, and merges the green through the product's :class:`Host`. A trunk that
-    moved only on docs roots (:func:`landing_class`) does not re-gate a green branch.
+def repo_slug(product):
+    """``repo_slug`` from the product yaml, else ``owner/name`` off the repo's origin url; None
+    when the origin is no hosted repo — there is no PR host."""
+    if product.repo_slug:
+        return product.repo_slug
+    if not product.repo_dir:
+        return None
+    from asf.init import slug_from_url
+    url = H.sh(['git', 'remote', 'get-url', 'origin'], cwd=product.repo_dir).stdout.strip()
+    return slug_from_url(url)
 
-    Returns ``[(branch, state, reason)]``, one per entry, ``state`` one of MERGED, QUEUED, BACK,
-    WAITING or WAITING_CI; :func:`advance` records them. ``harvest_gate: per-branch`` is a set of
-    size one."""
-    raise NotImplementedError('lane.gate_set: W1')
+
+def item_of(branch, record):
+    """The branch's item id: the session's ``item``, else the id token in the branch name."""
+    item = (record or {}).get('item')
+    if item:
+        return str(item)
+    m = ITEM_ID_RE.search(branch.rsplit('/', 1)[-1]) or ITEM_ID_RE.search(branch)
+    return m.group(1).upper() if m else None
+
+
+def _parse_at(stamp):
+    try:
+        return datetime.datetime.strptime(stamp, '%Y-%m-%dT%H:%M:%SZ').replace(
+            tzinfo=datetime.timezone.utc).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _glob_hit(pattern, path):
+    pattern = str(pattern).strip()
+    if not pattern:
+        return False
+    if pattern.endswith('/'):
+        return path.startswith(pattern)
+    return fnmatch.fnmatch(path, pattern) or path.startswith(pattern.rstrip('/') + '/')
 
 
 def landing_class(product, files):
     """:data:`DOCS` when every path in ``files`` lies under a docs root — ``specs_dir``,
     ``plans_dir``, ``reviews_dir`` or a ``conventions.doc_paths`` glob — else :data:`CODE`. The
-    one rule for docs vs code (replaces ``is_docs_branch``, ``is_inert``, ``docs_only``)."""
-    raise NotImplementedError('lane.landing_class: W1')
+    one rule for docs vs code."""
+    conv = _conv(product)
+    roots = [str(conv.get(k)).strip('/') + '/' for k in ('specs_dir', 'plans_dir', 'reviews_dir')
+             if conv.get(k)]
+    globs = list(conv.get('doc_paths') or ())
+    files = [f for f in files or () if f]
+    if files and all(any(f.startswith(r) for r in roots) or any(_glob_hit(g, f) for g in globs)
+                     for f in files):
+        return DOCS
+    return CODE
 
 
-# ---- the host ---------------------------------------------------------------
+def shared_hits(conv, files):
+    """The files among ``files`` under a ``conventions.shared_paths`` glob."""
+    globs = list(conv.get('shared_paths') or ())
+    return [f for f in files or () if any(_glob_hit(g, f) for g in globs)]
+
+
+# ---- git facts about one branch (moved from harvest) --------------------------------------------
+
+def touched_files(repo, trunk, branch):
+    """The files ``origin/<branch>`` changed since it left the trunk."""
+    r = H.sh(['git', 'diff', '--name-only', f'origin/{trunk}...origin/{branch}'], cwd=repo)
+    return [l for l in r.stdout.splitlines() if l.strip()]
+
+
+def _subjects(repo, trunk, branch):
+    return H.sh(['git', 'log', '--no-merges', '--format=%s', f'origin/{trunk}..origin/{branch}'],
+                cwd=repo).stdout.splitlines()
+
+
+def commits_name_item(repo, trunk, branch, item):
+    """True when every commit subject on ``origin/<branch>`` not on ``origin/<trunk>`` names
+    ``item`` as a token."""
+    subjects = _subjects(repo, trunk, branch)
+    token = re.compile(r'(?<![\w-])' + re.escape(item) + r'(?![\w])', re.I)
+    return bool(subjects) and all(token.search(s) for s in subjects)
+
+
+def has_adjudicate_commit(repo, trunk, branch):
+    """True when a commit on the branch opens with ``adjudicate(`` — a ruling committed to the
+    product repo instead of the record (B-0054)."""
+    return any(ADJUDICATE_SUBJECT_RE.match(s) for s in _subjects(repo, trunk, branch))
+
+
+def merge_commits(repo, trunk, branch):
+    r = H.sh(['git', 'log', '--merges', '--format=%h %s', f'origin/{trunk}..origin/{branch}'],
+             cwd=repo)
+    return [l for l in r.stdout.splitlines() if l.strip()]
+
+
+def lane_refusal(repo, trunk, branch, item):
+    """``(kind, text)`` for a branch the lane refuses before any gate, or None: a merge commit
+    on it (B-0056), or a commit not naming the item — each a correction back to its session."""
+    merges = merge_commits(repo, trunk, branch)
+    if merges:
+        return 'merge', (f'merge commit on a lane branch: {merges[0]} — a lane branch is straight '
+                         f'commits on origin/{trunk}: rebase onto it, never merge origin/{branch} '
+                         f'or origin/{trunk} into it; the factory publishes the rebased branch')
+    if not item or not commits_name_item(repo, trunk, branch, item):
+        return 'naming', (f'commits do not name {item or "an item id"}: every commit subject on '
+                          f'the branch names its item — reword them; the factory publishes the '
+                          f'rewritten branch')
+    return None
+
+
+def deliverable_of(conv, branch, item):
+    kind = conv.branch_kind(branch)
+    if kind in ('spec', 'plan') and item:
+        return f'{conv.doc_dir(kind)}/{item.lower()}.md'
+    return None
+
+
+def already_on_trunk(repo, trunk, branch, conv, item):
+    """``(landed, extras)`` — B-0057: every file the branch touched is identical on the trunk; or,
+    for a spec/plan branch, its one deliverable is (``extras`` names what else it carried)."""
+    files = touched_files(repo, trunk, branch)
+    same = [f for f in files
+            if H.sh(['git', 'diff', '--quiet', f'origin/{trunk}', f'origin/{branch}', '--', f],
+                    cwd=repo).returncode == 0]
+    deliverable = deliverable_of(conv, branch, item)
+    if deliverable and deliverable in same:
+        return True, [f for f in files if f not in same]
+    if len(same) == len(files):
+        return True, []
+    return False, []
+
+
+def superseded_by(items, item):
+    """The state that supersedes a branch, or None: a removed card (B-0065) or a Bug the record
+    holds Closed/Resolved (B-0057)."""
+    card = (items or {}).get(item or '') or {}
+    if card.get('removed'):
+        return 'removed'
+    if card.get('type') == 'bug' and card.get('state') in ('Closed', 'Resolved'):
+        return card['state']
+    return None
+
+
+def archive_commit(repo, branch, message):
+    """One empty ``[skip ci]`` commit over ``origin/<branch>`` (B-0066); its sha, or ''."""
+    tip = H.sh(['git', 'rev-parse', f'origin/{branch}'], cwd=repo).stdout.strip()
+    if not tip:
+        return ''
+    made = H.sh(['git', 'commit-tree', f'{tip}^{{tree}}', '-p', tip, '-m', message], cwd=repo)
+    return made.stdout.strip() if made.returncode == 0 else ''
+
+
+def gate_reader(repo, branch):
+    def read(path):
+        r = H.sh(['git', 'show', f'origin/{branch}:{path}'], cwd=repo)
+        return r.stdout if r.returncode == 0 else None
+    return read
+
+
+def widen_candidates(files, item_writes, touched=(), read=None, own=False):
+    """``(needs, tests, exercised)`` — the gate's facts for ``widen_footprint``
+    (:mod:`asf.feeder.widen`), read off the files a red gate named."""
+    named = [f for f in files or () if read is None or read(f) is not None]
+    stems = {}
+    for f in named:
+        if widen.is_test_path(f):
+            stems[f] = widen.import_stems((read(f) if read else '') or '', f)
+    exercised = [t for t, s in stems.items() if touched and widen.imported(s, touched)]
+    tests = list(stems) if own else exercised
+    reached = [f for f in named if f not in stems
+               and widen.imported([s for t in tests for s in stems[t]], [f])]
+    needs = widen.outside(tests + reached, item_writes) if item_writes else []
+    return needs, tests, exercised
+
+
+def hold_with_correction(state_dir, branch, record, kind, text, out, files=(), item_writes=(),
+                         touched=(), conv=None, own=False, read=None):
+    """Hold ``branch`` and hand it back to its session (:func:`asf.workers.lifecycle.hold`).
+    ``'held'`` — or ``'foreign'`` for a red naming only files outside its footprint (no round),
+    or ``'timed-out'`` for a gate that ran out of time (no round). ``own``: the red is this
+    branch's whatever files it names (gated on a trunk green alone)."""
+    job = record.get('job') or branch
+    if kind == 'gate' and text.startswith(H.TIMED_OUT):  # B-0082: a clock is not a defect
+        out(f'{H.TIMED_OUT} {branch}: {text} — retried next tick')
+        return 'timed-out'
+    if kind == 'gate' and touched and landing_class(conv or H.DEFAULTS, touched) == DOCS \
+            and not own and not footprint.overlaps(touched, files):
+        out(f'foreign {branch}: gate red, its diff is docs only — re-gated next tick')
+        return 'foreign'
+    item_writes = widen.norm_writes(item_writes)
+    reach, what = (item_writes, 'writes') if item_writes else (touched, 'diff')
+    needs, tests, exercised = (widen_candidates(files, item_writes, touched, read, own)
+                               if kind == 'gate' and files else ([], [], []))
+    if kind == 'gate' and not own and not exercised and files and reach \
+            and footprint.overlaps(reach, files) is None:
+        out(f'foreign {branch}: gate red outside its {what}: {files[0]} — re-gated next tick')
+        return 'foreign'
+    if needs:
+        fact = f'gate: {", ".join(tests) or files[0]} red alone, trunk green'
+        fields, line = lifecycle.footprint_hold(
+            dict(record, branch=branch, job=job), needs, fact,
+            f'{text}\nfootprint: the red is outside writes: — needs {" ".join(needs)}',
+            now_iso(), tests=tests)
+        H.mark_session(state_dir, job, **fields)
+        out(line)
+        return 'held'
+    fields, line = lifecycle.hold(H.sessions_path(state_dir), dict(record, branch=branch, job=job),
+                                  kind, text, now_iso())
+    H.mark_session(state_dir, job, **fields)
+    out(line)
+    return 'held'
+
+
+# ---- the pure transition ----------------------------------------------------------------------
+
+def review_reason(facts):
+    """``(round wanted, why)`` for a head no review approved yet."""
+    rv = facts.get('review') or {}
+    if not rv:
+        return 1, 'no ASF review yet'
+    nxt = int(rv.get('round') or 0) + 1
+    if not rv.get('current'):
+        return nxt, f"{rv.get('path')} predates the head"
+    return nxt, f"{rv.get('path')} reads {rv.get('text') or 'no verdict'}"
+
+
+def next_state(prev, facts):
+    """The pure transition: ``prev`` is the branch's last lane record (``{state, head, pr, at,
+    reason}``, or None for a branch with none yet) and ``facts`` that branch's facts from
+    :func:`facts`. Returns ``(state, reason)`` — ``state`` one of :data:`LANE_STATES` (None: the
+    lane does not hold the branch), equal to ``prev['state']`` when nothing moves. No I/O, no
+    clock beyond ``facts['now']``."""
+    f = facts or {}
+    rec = prev or {}
+    s = rec.get('state')
+    keep = (s, rec.get('reason', ''))
+    head = f.get('head')
+    pr = f.get('pr') or {}
+    n = pr.get('number')
+    if s == REAPED:
+        return keep
+    # T11 — merged by the host; ours when MERGING/QUEUED came first (R3)
+    if pr.get('state') == 'MERGED' and s != MERGED and (
+            not head or pr.get('head') in (None, '', head) or s in (MERGING, QUEUED)):
+        if s in (MERGING, QUEUED):
+            return MERGED, 'method=' + ('queue' if s == QUEUED else rec.get('method') or 'squash')
+        return MERGED, 'method=external'
+    if s == MERGED:
+        return keep
+    if f.get('live'):
+        return keep
+    if s == MERGING and f.get('merging_landed'):  # R8: the push reached the trunk, the line did not
+        return MERGED, 'method=' + (rec.get('method') or 'ff')
+    closed = f.get('closed')
+    if s == STALE:
+        if not closed and pr.get('state') == 'OPEN' and head:
+            return PR_OPEN, f'PR #{n} reopened'  # R6
+        return keep
+    if f.get('on_trunk') and (s is not None or f.get('ended')):
+        return MERGED, 'method=on-trunk'
+    if closed and (s is not None or f.get('ended')):
+        return STALE, f'{f.get("item")} is {closed} in the record'
+    if not head:
+        if f.get('gone_merged'):
+            return MERGED, 'method=on-trunk'
+        return (None, '') if s is None else (STALE, 'branch gone')
+    if pr.get('state') == 'CLOSED' and pr.get('head') in (None, '', head) \
+            and (s is not None or f.get('ended')):
+        return STALE, f'PR #{n} closed unmerged'
+    # R4 — a moved head: whatever reviewed or gated the old one is history
+    if s in OPEN_STATES and rec.get('head') and head != rec['head']:
+        return PUSHED, f"head moved {rec['head'][:7]} → {head[:7]}"
+    corr = f.get('correction')
+    if s is None or s == BACK:
+        if corr:
+            return keep if s == BACK else (BACK, f"kind={corr.get('kind') or 'correction'}")
+        if s == BACK:
+            return PUSHED, 'correction answered'
+        if not f.get('ended') or f.get('landed') or not f.get('ahead'):
+            return None, ''
+        return PUSHED, 'adopted' if f.get('adopt') else 'finished'
+    if s == PUSHED:
+        at = _parse_at(rec.get('at'))
+        if at is not None and f.get('now') and f.get('stale_after') \
+                and f['now'] - at > f['stale_after']:
+            return STALE, 'unmoved in PUSHED past lane.stale_after'
+        if f.get('refusal'):
+            return BACK, f"kind={f['refusal'][0]}"
+        if f.get('mode') != 'pr':
+            return PR_OPEN, 'fast-forward: the branch is its own PR'
+        if not f.get('host'):
+            return PR_OPEN, 'no PR host: the product lands it'
+        if pr.get('state') == 'OPEN':
+            return PR_OPEN, f'PR #{n}'
+        return PR_OPEN, 'open a PR'
+    if s == PR_OPEN and f.get('mode') == 'pr' and not f.get('host'):
+        return keep
+    if s in (PR_OPEN, REVIEW):  # T3/T4/T5: a review of the head already there counts at once
+        rv = f.get('review') or {}
+        if not f.get('review_required'):
+            return GATE, 'review: none'
+        if rv.get('current') and rv.get('verdict') == review_mod.APPROVED:
+            return GATE, f"{rv.get('path')} approved its head"
+        if rv.get('current') and rv.get('verdict') == review_mod.CHANGES:
+            return BACK, 'kind=review'
+        rnd, why = review_reason(f)
+        reason = f'round {rnd} wanted: {why}'
+        return (REVIEW, reason) if s != REVIEW or reason != rec.get('reason') else keep
+    if s == MERGING:
+        return keep if f.get('harvest_running') else (GATE, 'no merge seen after MERGING: gated again')
+    if s == QUEUED:
+        if pr.get('state') == 'OPEN' and not pr.get('queued'):
+            return WAITING, 'queue-rejected'
+        return keep
+    return keep
+
+
+def skip_regate(prev, head, moved, product):
+    """R25: True when ``prev`` (a WAITING/GATE record) was gated green at ``head`` and the trunk
+    has since moved only on docs roots — ``moved`` the files the trunk changed since then (None:
+    unknown). A green branch is not gated again for a docs-only trunk move."""
+    green = (prev or {}).get('green') or {}
+    if not green or green.get('head') != head or moved is None:
+        return False
+    return not moved or landing_class(product, moved) == DOCS
+
+
+# ---- the lane: one pass's context --------------------------------------------------------------
+
+class Lane:
+    """One pass over a product's lane branches: the product, its state dir, the host, the
+    record's items, and where lines go. Read and written through :meth:`gather` and
+    :meth:`advance`."""
+
+    def __init__(self, product, state_dir=None, out=print, dry_run=False, items=None,
+                 root=None, now=None):
+        self.product = product
+        self.conv = product.conventions
+        self.repo = os.path.abspath(product.repo_dir) if product.repo_dir else None
+        self.state_dir = os.path.abspath(state_dir or env.state_dir(product))
+        self.path = H.sessions_path(self.state_dir)
+        self.out = out
+        self.dry_run = dry_run
+        self.items = items
+        self.root = root
+        self.now = now
+        self.trunk = self.conv.main
+        self.mode = 'pr' if landing(product) == LANDING_PR else 'ff'
+        self.slug = repo_slug(product) if self.mode == 'pr' else None
+        self.host = GitHubHost(product, self) if self.slug else FastForwardHost(product, self)
+        self.results = {}
+        self.opened = 0
+
+    # ---- facts --------------------------------------------------------------------------
+
+    def remote_heads(self):
+        """``{branch: sha}`` of every head on origin — the pass's one ``git ls-remote``."""
+        out = {}
+        r = H.sh(['git', 'ls-remote', '--heads', 'origin'], cwd=self.repo)
+        for line in r.stdout.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[1].startswith('refs/heads/'):
+                out[parts[1][len('refs/heads/'):]] = parts[0]
+        return out
+
+    def is_ancestor(self, a, b):
+        return bool(a) and H.sh(['git', 'merge-base', '--is-ancestor', a, b],
+                                cwd=self.repo).returncode == 0
+
+    def gather(self, prs=True):
+        """``{branch: facts}`` for every lane branch; ``prs``: read the host's PR list (the
+        in-process pass), else take the PR number off the lane record (the gate pass)."""
+        conv, trunk = self.conv, self.trunk
+        runs = lifecycle.by_branch(self.path)
+        heads = self.remote_heads()
+        self.trunk_sha = heads.get(trunk) or H.sh(['git', 'rev-parse', f'origin/{trunk}'],
+                                                 cwd=self.repo).stdout.strip()
+        pr_map = self.host.prs() if prs else {}
+        running = H.try_lock_held(self.state_dir)
+        names = {b for b in heads if conv.branch_kind(b) and b != trunk}
+        names |= {b for b, r in runs.items() if b != trunk and b and (
+            b in heads or lifecycle.eligible(r) or (r.get('lane') or {}).get('state') in OPEN_STATES)}
+        names |= {b for b, p in pr_map.items() if conv.branch_kind(b) and p.get('state') == 'OPEN'}
+        out = {}
+        for b in sorted(names):
+            f = self.branch_facts(b, runs.get(b), heads.get(b), pr_map.get(b), prs, running)
+            if f is not None:
+                out[b] = f
+        return out
+
+    def branch_facts(self, b, run, head, pr, prs, running):
+        conv, trunk, repo = self.conv, self.trunk, self.repo
+        rec = (run or {}).get('lane') or {}
+        item = item_of(b, run)
+        if not prs and rec.get('pr'):
+            pr = {'number': rec['pr'], 'state': 'OPEN'}
+        f = {'branch': b, 'item': item, 'kind': conv.branch_kind(b), 'head': head, 'run': run,
+             'prev': rec or None, 'live': lifecycle.is_live(run) if run else False,
+             'ended': bool(run and run.get('ended')), 'landed': lifecycle.landed(run),
+             'correction': lifecycle.pending_correction(run, self.path) if run else None,
+             'pr': pr, 'mode': self.mode, 'host': self.mode != 'pr' or bool(self.slug),
+             'now': self.now or time.time(), 'stale_after': conv.lane_stale_after_s(),
+             'harvest_running': running, 'trunk': self.trunk_sha}
+        if run is None:  # adoption: a lane branch, or an open PR, no run holds (T2)
+            card = (self.items or {}).get(item or '') or {}
+            open_pr = (pr or {}).get('state') == 'OPEN'
+            if not head or not item or (not open_pr and (not card or card.get('removed') or
+                                                         card.get('state') in ('Resolved', 'Closed'))):
+                return None
+            f.update(adopt=True, ended=True)
+        if f['landed'] or f['live'] and not (pr or {}).get('state') == 'MERGED':
+            return f
+        if rec.get('state') == MERGING and rec.get('sha'):
+            f['merging_landed'] = self.is_ancestor(rec['sha'], f'origin/{trunk}')
+        if not head:
+            if rec.get('head'):
+                f['gone_merged'] = self.is_ancestor(rec['head'], f'origin/{trunk}')
+            elif not rec and lifecycle.eligible(run):
+                f['gone_merged'] = True
+            return f
+        ahead = H.sh(['git', 'rev-list', '--count', f'origin/{trunk}..origin/{b}'],
+                     cwd=repo).stdout.strip()
+        f['ahead'] = int(ahead) if ahead.isdigit() else 0
+        if f['ahead'] == 0:
+            f['on_trunk'] = lifecycle.finished(run) or bool(rec)
+            return f
+        done, extras = already_on_trunk(repo, trunk, b, conv, item)
+        f['on_trunk'], f['extras'] = done, extras
+        if done:
+            return f
+        f['closed'] = superseded_by(self.items, item)
+        f['files'] = touched_files(repo, trunk, b)
+        f['class'] = landing_class(self.product, f['files'])
+        f['review_required'] = conv.review_required(f['class'])
+        if rec.get('state') in (None, PUSHED, BACK):
+            f['refusal'] = lane_refusal(repo, trunk, b, item)
+        if f['review_required'] and rec.get('state') in (None, PUSHED, BACK, PR_OPEN, REVIEW):
+            rv = review_mod.review_at(repo, conv, f'origin/{b}', item)
+            if rv:
+                rv['current'] = review_mod.is_current(repo, conv, f'origin/{b}', rv, head)
+            f['review'] = rv
+        return f
+
+    # ---- writing ------------------------------------------------------------------------
+
+    def record(self, f, state, reason, **extra):
+        pr = (f.get('pr') or {}).get('number') or (f.get('prev') or {}).get('pr')
+        rec = {'state': state, 'head': f.get('head'), 'pr': pr, 'at': now_iso(),
+               'reason': reason, 'item': f.get('item')}
+        rec.update({k: v for k, v in extra.items() if v is not None})
+        return rec
+
+    def write(self, f, rec, job=None, **fields):
+        """Put ``rec`` on the run that owns the branch (a synthetic run for an adopted one)."""
+        if self.dry_run:
+            return
+        run = f.get('run')
+        if run is None:
+            stamp = now_iso()
+            job = job or f"adopt-{(f.get('item') or f['branch']).lower()}".replace('/', '-')
+            kind = BRIEF_KIND.get(f.get('kind'), 'coder')
+            run = {'job': job, 'item': f.get('item'), 'branch': f['branch'], 'kind': kind,
+                   'started': stamp, 'pid': None, 'ended': stamp,
+                   'end_reason': lifecycle.FINISHED, 'adopted': True}
+            if kind in ('spec', 'plan'):
+                run['feature'] = f.get('item')
+            with open(self.path, 'a', encoding='utf-8') as fh:
+                fh.write(json.dumps(dict(run, lane=rec, **fields), sort_keys=True) + '\n')
+            f['run'] = run
+            return
+        H.mark_session(self.state_dir, run.get('job') or f['branch'], lane=rec, **fields)
+
+    def set(self, f, state, reason, result=None, **extra):
+        """Record one transition of ``f``'s branch; ``result`` goes in :attr:`results`."""
+        rec = self.record(f, state, reason, **extra)
+        was = (f.get('prev') or {}).get('state')
+        if self.dry_run:
+            self.out(f"lane: DRY {f['branch']} {was or '-'} → {state} ({reason})")
+        else:
+            self.write(f, rec)
+            self.out(f"lane: {f['branch']} {was or '-'} → {state} ({reason})")
+        f['prev'] = rec
+        if result:
+            self.results[f['branch']] = result
+        return rec
+
+    # ---- the in-process pass ------------------------------------------------------------
+
+    def advance(self, f):
+        """Move ``f``'s branch as far as its facts carry it this pass, performing each
+        transition's side effect; the last record written, or None when nothing moved."""
+        moved = None
+        for _ in range(MAX_STEPS):
+            prev = f.get('prev')
+            state, reason = next_state(prev, f)
+            if state is None or (prev and state == prev.get('state')
+                                 and reason == prev.get('reason')):
+                break
+            if prev and state == prev.get('state') and state != REVIEW:
+                break
+            rec = self.enter(f, state, reason)
+            if rec is None:
+                break
+            moved = rec
+            if state in GATE_STATES or state in TERMINAL_STATES or state == BACK:
+                break
+        return moved
+
+    def enter(self, f, state, reason):
+        b, item = f['branch'], f.get('item')
+        prev = f.get('prev') or {}
+        pr = f.get('pr') or {}
+        if state == MERGED:
+            return self.enter_merged(f, reason)
+        if state == STALE:
+            closed = f.get('closed')
+            if closed and f.get('head') and self.repo:
+                return self.archive(f, closed)
+            self.out(f'stale {b}: {reason}')
+            return self.set(f, STALE, reason, result='stale')
+        if state == PR_OPEN and reason == 'open a PR':
+            if self.dry_run:
+                self.out(f'DRY: would open a PR for {b}')
+                return self.set(f, PR_OPEN, reason, result='dry')
+            from asf.tick import step_prs
+            cap = step_prs.prs_per_tick(self.product)
+            if self.opened >= cap:
+                if self.opened == cap:
+                    self.out(f'prs: cap {cap} reached — the rest next tick')
+                    self.opened += 1
+                return None
+            self.opened += 1
+            number, why = self.host.open(b, item)
+            if not number:
+                self.out(f'prs: {b} not opened — {why}')
+                if prev.get('state') != PUSHED or prev.get('reason') != f'PR not opened: {why}':
+                    self.set(f, PUSHED, f'PR not opened: {why}')
+                return None
+            f['pr'] = {'number': number, 'state': 'OPEN', 'head': f.get('head')}
+            self.out(f'prs: opened PR #{number} for {b}')
+            return self.set(f, PR_OPEN, f'PR #{number}')
+        if state == PR_OPEN and reason.startswith('no PR host'):
+            self.out(f'pr-lane {b}')
+            return self.set(f, PR_OPEN, reason, result='pr')
+        if state == REVIEW:
+            rnd, why = review_reason(f)
+            what = f"PR #{pr['number']}" if pr.get('number') else 'the head'
+            self.out(f'waiting {b}: {what} not approved — {why}: review round {rnd} asked for')
+            return self.set(f, REVIEW, reason, result='waiting', round=rnd)
+        if state == BACK:
+            return self.enter_back(f, reason)
+        return self.set(f, state, reason)
+
+    def enter_merged(self, f, reason):
+        b, prev, pr = f['branch'], f.get('prev') or {}, f.get('pr') or {}
+        method = reason.split('=', 1)[-1]
+        if pr.get('state') == 'MERGED':
+            sha = pr.get('merge_sha') or f"PR #{pr.get('number')}"
+            line = f"landed {b} → PR #{pr.get('number')} {sha} (merged)"
+        elif prev.get('state') == MERGING and prev.get('sha') and f.get('merging_landed'):
+            sha = prev['sha']
+            line = f'landed {b} → {sha} (the push reached {self.trunk})'
+        else:
+            sha = self.trunk_sha
+            extras = f.get('extras') or []
+            note = f'; not its deliverable, dropped with the branch: {", ".join(extras)}' \
+                if extras else ''
+            line = f'landed {b}: already on {self.trunk} at {sha[:7]}{note}'
+        if self.dry_run:
+            self.out(f'DRY: would mark {b} landed — {line}')
+            self.results[b] = 'dry'
+            return None
+        rec = self.record(f, MERGED, reason, sha=sha, method=method)
+        self.write(f, rec, harvested=sha, correction=None)
+        f['prev'] = rec
+        if f.get('head') and method in ('on-trunk', 'ff'):
+            H.sh(['git', 'push', '-q', 'origin', '--delete', b], cwd=self.repo)
+        self.out(line)
+        self.results[b] = 'landed'
+        return rec
+
+    def archive(self, f, closed):
+        b, item = f['branch'], f.get('item')
+        if self.dry_run:
+            self.out(f'DRY: would archive {b} — {item} is {closed}')
+            self.results[b] = 'dry'
+            return None
+        sha = archive_commit(self.repo, b, f'archive({item}): {b} — {item} is {closed} in the '
+                                           f'record; superseded, kept for reference [skip ci]')
+        keep = H.sh(['git', 'push', '-q', 'origin', f'{sha}:refs/heads/archive/{b}'],
+                    cwd=self.repo) if sha else None
+        if not sha or keep.returncode != 0:
+            self.out(f'held {b}: archive could not be made')
+            self.results[b] = 'held'
+            return None
+        rec = self.record(f, STALE, f'{item} is {closed} in the record')
+        self.write(f, rec, harvested=SUPERSEDED, correction=None)
+        f['prev'] = rec
+        H.sh(['git', 'push', '-q', 'origin', '--delete', b], cwd=self.repo)
+        self.out(f'superseded {b}: {item} is {closed} in the record — archived as archive/{b}')
+        self.results[b] = SUPERSEDED
+        return rec
+
+    def enter_back(self, f, reason):
+        """BACK: a refusal or a review's changes go back to a session (a hold); a pending
+        correction is already that."""
+        b = f['branch']
+        kind = reason.split('=', 1)[-1]
+        if f.get('correction'):
+            return self.set(f, BACK, reason)
+        if kind == 'review':
+            rv = f.get('review') or {}
+            text = f"{rv.get('path')} reads {rv.get('text')}: answer its C list on {b}"
+        elif f.get('refusal'):
+            kind, text = f['refusal']
+        else:
+            return self.set(f, BACK, reason)
+        if self.dry_run:
+            self.out(f'DRY: would hold {b}: {text}')
+            self.results[b] = 'dry'
+            return None
+        if f.get('run') is None:
+            self.write(f, self.record(f, PUSHED, 'adopted'))
+        rec = self.set(f, BACK, reason)
+        self.results[b] = hold_with_correction(self.state_dir, b, f['run'], kind, text, self.out)
+        f['correction'] = {'kind': kind, 'text': text}
+        return rec
+
+    def adopt(self, branch, item, kind, correction=None, job=None):
+        """Adopt ``branch`` (no run holds it) as the lane's: a synthetic run, PUSHED — or, with
+        ``correction`` (``{kind, text}``), BACK with it, for a session to answer. The run."""
+        head = self.remote_heads().get(branch)
+        f = {'branch': branch, 'item': item, 'kind': kind, 'head': head, 'run': None,
+             'prev': None, 'pr': None}
+        if correction:
+            rec = self.record(f, BACK, f"kind={correction['kind']}")
+            self.write(f, rec, job=job, correction=dict(correction, at=self.now or now_iso()),
+                       end_reason=f"held: {correction['kind']}")
+        else:
+            self.write(f, self.record(f, PUSHED, 'adopted'), job=job)
+        return f.get('run')
+
+
+# ---- the passes -------------------------------------------------------------------------------
+
+def lane_pass(product, state_dir=None, items=None, out=print, dry_run=False, root=None,
+              lane=None):
+    """The in-process pass (R2): fetch, gather the facts once, and advance every lane branch as
+    far as its facts carry it — up to GATE. The gate itself is :func:`gate_pass`'s. Returns
+    ``({branch: outcome}, facts)``."""
+    lane = lane or Lane(product, state_dir, out, dry_run, items, root)
+    if not lane.repo:
+        return {}, {}
+    H.sh(['git', 'fetch', '-q', '--prune', 'origin'], cwd=lane.repo)
+    found = lane.gather(prs=True)
+    for b in sorted(found):
+        lane.advance(found[b])
+    return lane.results, found
+
+
+def gate_pass(product, state_dir=None, items=None, out=print, dry_run=False, lane=None,
+              found=None):
+    """The detached harvest's half (R2): every branch in GATE/WAITING/WAITING_CI at the head it
+    was recorded at is prechecked (approval, the host's checks, the budget, shared paths) and
+    gated together (:func:`gate_set`). Returns ``{branch: outcome}``."""
+    lane = lane or Lane(product, state_dir, out, dry_run, items)
+    if found is None:
+        H.sh(['git', 'fetch', '-q', '--prune', 'origin'], cwd=lane.repo)
+        found = lane.gather(prs=False)
+    entries = []
+    for b, f in sorted(found.items()):
+        rec = f.get('prev') or {}
+        if rec.get('state') in GATE_STATES and not f.get('live') and f.get('head') \
+                and f['head'] == rec.get('head'):
+            entries.append(f)
+    entries = H.cap_to_tick(pr_order(entries, items), lane.out, lane.conv)
+    ready = precheck(lane, entries)
+    if ready:
+        gate_set(lane, ready)
+    return lane.results
+
+
+def pr_order(entries, items=None):
+    """``entries`` hotfix first, then S1, S2, the rest — stable."""
+    def rank(f):
+        if 'hotfix' in f['branch'].lower():
+            return 0
+        card = (items or {}).get(f.get('item') or '') or {}
+        return {'S1': 1, 'S2': 2}.get(card.get('severity'), 3)
+    return sorted(entries, key=rank)
+
+
+def missing_policy(conv, cls):
+    """``conventions.landing_checks_missing`` for landing class ``cls``: one value or a map."""
+    value = conv.get('landing_checks_missing')
+    if isinstance(value, dict):
+        value = value.get(cls, value.get('default'))
+    return MISSING_WAIT if str(value or '').strip().lower() == MISSING_WAIT else MISSING_LOCAL_GATE
+
+
+def landing_wait_s(conv):
+    try:
+        return max(0.0, float(conv.get('landing_checks_wait_min', DEFAULT_LANDING_WAIT_MIN))) * 60
+    except (TypeError, ValueError):
+        return DEFAULT_LANDING_WAIT_MIN * 60.0
+
+
+def trunk_moved_files(lane, since):
+    """The files the trunk changed since ``since`` (a sha), or None when unknown."""
+    if not since:
+        return None
+    r = H.sh(['git', 'diff', '--name-only', since, f'origin/{lane.trunk}'], cwd=lane.repo)
+    return [l for l in r.stdout.splitlines() if l.strip()] if r.returncode == 0 else None
+
+
+def precheck(lane, entries):
+    """Each entry's pre-gate answer: an approval hold, the host's checks, a shared path taken —
+    WAITING/WAITING_CI/BACK now — else it goes to the gate (``f['how'] = 'gate'``) or merges on
+    its checks alone (``'ci'``; R25's docs-only trunk move counts as that). The ready ones."""
+    product, conv, out = lane.product, lane.conv, lane.out
+    ready, shared_taken = [], None
+    for f in entries:
+        b, rec = f['branch'], f.get('prev') or {}
+        if has_adjudicate_commit(lane.repo, lane.trunk, b):
+            out(f'held {b}: ruling belongs in the record')
+            wait(lane, f, 'ruling belongs in the record', 'held')
+            continue
+        files = f.get('files') or touched_files(lane.repo, lane.trunk, b)
+        cls, matched = approvals.merge_class(product, files)
+        level = approvals.level_of(product, cls)
+        if level != 'auto' and not approvals.is_granted(product, f"{f.get('item')}/{cls}"):
+            detail = matched or 'routine'
+            if not lane.dry_run:
+                approvals.refuse(product, f.get('item'), cls, level,
+                                 (f.get('run') or {}).get('job') or b, 'harvest', detail)
+            out(f'held {b}: {cls} ({level}) — {detail}')
+            wait(lane, f, f'approval {cls} ({level})', 'held')
+            continue
+        f['how'] = 'gate'
+        number = rec.get('pr')
+        if isinstance(lane.host, GitHubHost) and number:
+            how = lane.host.check_gate(f, number, files)
+            if how is None:
+                continue
+            f['how'] = how
+        if f['how'] == 'gate' and skip_regate(rec, f['head'],
+                                              trunk_moved_files(lane, (rec.get('green') or {})
+                                                                .get('trunk')), product):
+            out(f'harvest: {b} was green at its head, {lane.trunk} moved on docs only — '
+                f'not gated again')
+            f['how'] = 'ci'
+        hits = shared_hits(conv, files)
+        if hits:
+            if shared_taken:
+                out(f'waiting {b}: touches {hits[0]}, a shared path {shared_taken} already '
+                    f'takes this tick')
+                wait(lane, f, 'shared-path')
+                continue
+            shared_taken = b
+        ready.append(f)
+    return ready
+
+
+def wait(lane, f, reason, result='waiting', state=WAITING, **extra):
+    """Record a gate outcome that is no one's fault: WAITING (or WAITING_CI) with ``reason``."""
+    rec = f.get('prev') or {}
+    if rec.get('state') == state and rec.get('reason') == reason and not extra:
+        lane.results[f['branch']] = result
+        return rec
+    keep = {k: rec.get(k) for k in ('green', 'since', 'timeouts') if rec.get(k) is not None}
+    keep.update(extra)
+    return lane.set(f, state, reason, result=result, **keep)
+
+
+# ---- the one gate -----------------------------------------------------------------------------
+
+class TrunkRed(Exception):
+    """The modules a combined head is red on are red on the trunk alone too."""
+
+    def __init__(self, modules):
+        super().__init__(' '.join(modules))
+        self.modules = tuple(modules)
+
+
+class GateTimeout(Exception):
+    """The gate ran out of time: unknown, never red (§12) — nothing is bisected or blamed."""
+
+    def __init__(self, line):
+        super().__init__(line)
+        self.line = line
+
+
+def combined_head(tmp, trunk, entries, hold):
+    """Reset the throwaway worktree to ``origin/<trunk>`` and replay each entry's branch on top;
+    the entries that applied (one that conflicts goes to ``hold``)."""
+    H.sh(['git', 'checkout', '-q', '--detach', f'origin/{trunk}'], cwd=tmp)
+    stacked = []
+    for f in entries:
+        head = H.sh(['git', 'rev-parse', 'HEAD'], cwd=tmp).stdout.strip()
+        ok, reason = H.rebase_and_resolve(tmp, trunk, onto=head, tip=f"origin/{f['branch']}")
+        if ok:
+            stacked.append(f)
+        else:
+            hold(f, 'conflict', reason)
+    return stacked
+
+
+def red_on_trunk(tmp, trunk, conv, asf_repo, out, modules=None):
+    """True when the trunk alone is red (on ``modules`` only, when given)."""
+    H.sh(['git', 'checkout', '-q', '--detach', f'origin/{trunk}'], cwd=tmp)
+    ok, line, _files, _red = H.product_gate(tmp, conv, asf_repo, out, only=modules)
+    if not ok and line.startswith(H.TIMED_OUT):
+        raise GateTimeout(line)
+    return not ok
+
+
+def gate_groups(tmp, trunk, entries, conv, asf_repo, hold, out, announce=False, only=None,
+                trunk_green=False):
+    """Gate ``entries`` as one combined head; on red, bisect (B-0040). The green groups as
+    ``[(entries, sha, full)]``. A timeout raises :class:`GateTimeout` — never bisected (§12)."""
+    stacked = combined_head(tmp, trunk, entries, hold)
+    if not stacked:
+        return []
+    if announce:
+        out(f'harvest: {len(stacked)} branch(es), one gate')
+    ok, line, files, red = H.product_gate(tmp, conv, asf_repo, out, only)
+    if ok:
+        return [(stacked, H.sh(['git', 'rev-parse', 'HEAD'], cwd=tmp).stdout.strip(), not only)]
+    if line.startswith(H.TIMED_OUT):
+        raise GateTimeout(line)
+    if not only and red:
+        if red_on_trunk(tmp, trunk, conv, asf_repo, out, red):
+            raise TrunkRed(red)
+        trunk_green = True
+    if len(stacked) == 1:
+        hold(stacked[0], 'gate', line, files, own=trunk_green)
+        return []
+    out(f'harvest: bisecting {len(stacked)} branches')
+    mid = len(stacked) // 2
+    narrowed = red or only
+    return (gate_groups(tmp, trunk, stacked[:mid], conv, asf_repo, hold, out, only=narrowed,
+                        trunk_green=trunk_green)
+            + gate_groups(tmp, trunk, stacked[mid:], conv, asf_repo, hold, out, only=narrowed,
+                          trunk_green=trunk_green))
+
+
+def confirmed_group(tmp, trunk, entries, conv, asf_repo, hold, out, announce=True):
+    """The one set of ``entries`` green under the *full* gate, as ``(entries, sha, deferred,
+    unconfirmed)``; green apart but red together lands the first alone and defers the rest."""
+    candidates, deferred = list(entries), []
+    for _round in range(CONFIRM_ROUNDS):
+        groups = gate_groups(tmp, trunk, candidates, conv, asf_repo, hold, out,
+                             announce=announce)
+        if not groups:
+            return None, None, deferred, []
+        if len(groups) == 1 and groups[0][2]:
+            return groups[0][0], groups[0][1], deferred, []
+        union = [e for group, _sha, _full in groups for e in group]
+        if len(union) == len(candidates) and len(union) > 1:
+            out(f"harvest: {len(union)} branches green alone, red together — landing "
+                f"{union[0]['branch']} first, the rest re-gate on top of it")
+            deferred = union[1:] + deferred
+            union = union[:1]
+        candidates = union
+    return None, None, deferred, candidates
+
+
+def send_back(lane, f, kind, text, files):
+    """Hand a branch the gate refused (the trunk alone green) back to a session. Code: its
+    session, a round (:func:`hold_with_correction`). Docs: a :data:`LANDING_GATE` correction,
+    which the feeder turns into a STARVED → SPEC/PLAN session on that branch (R7)."""
+    b, run = f['branch'], f.get('run') or {}
+    if f.get('class') == DOCS and kind in ('gate', 'conflict'):
+        doc = lane.conv.branch_kind(b) or 'document'
+        what = 'does not rebase cleanly onto' if kind == 'conflict' else 'turns the gate red on'
+        note = (f'the {doc} {what} {lane.trunk} — {text}. Change the {doc} so the product gate '
+                f'passes on {lane.trunk}; nothing is merged until it does')
+        lane.set(f, BACK, f'kind={LANDING_GATE}')
+        job = run.get('job') or b
+        fields, line = lifecycle.hold(lane.path, dict(run, branch=b, job=job), LANDING_GATE, note,
+                                      now_iso())
+        H.mark_session(lane.state_dir, job, **fields)
+        lane.out(line)
+        lane.results[b] = 'held'
+        return 'held'
+    card = (lane.items or {}).get(f.get('item')) or {}
+    lane.set(f, BACK, f'kind={kind}')
+    res = hold_with_correction(lane.state_dir, b, run, kind, text, lane.out, files,
+                               card.get('writes') or (), f.get('files') or (), lane.conv,
+                               own=True, read=gate_reader(lane.repo, b))
+    if res != 'held':  # foreign / timed-out: no one's fault after all
+        wait(lane, f, res)
+    lane.results[b] = res
+    return res
+
+
+def note_timeout(lane, entries, line):
+    """§12: a gate timeout is unknown, never red. The set waits (``gate-timeout``), is retried
+    next tick, and from the second timeout in a row one ``gate too slow`` line is kept for the
+    status and doctor rows. Never a correction, never a bisection."""
+    n = 1 + max([int((f.get('prev') or {}).get('timeouts') or 0) for f in entries
+                 if (f.get('prev') or {}).get('reason') == 'gate-timeout'] + [0])
+    lane.out(f'harvest: {line} — the set waits, retried next tick (timeout {n} in a row)')
+    for f in entries:
+        wait(lane, f, 'gate-timeout', timeouts=n)
+    if not lane.dry_run:
+        path = os.path.join(lane.state_dir, GATE_SLOW)
+        try:
+            if n >= GATE_SLOW_AFTER:
+                with open(path, 'w', encoding='utf-8') as fh:
+                    json.dump({'timeouts': n, 'gate_timeout_s': H.gate_timeout(lane.conv),
+                               'at': now_iso()}, fh)
+        except OSError:
+            pass
+
+
+def gate_slow_line(product):
+    """``gate too slow: <n>s vs gate_timeout_s`` when the gate timed out twice in a row and has
+    not been green since, else None — for the status and doctor rows."""
+    try:
+        with open(os.path.join(env.state_dir(product), GATE_SLOW), encoding='utf-8') as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if int(data.get('timeouts') or 0) < GATE_SLOW_AFTER:
+        return None
+    return (f"gate too slow: {data.get('gate_timeout_s')}s vs gate_timeout_s — timed out "
+            f"{data.get('timeouts')} times in a row; raise harvest.gate_timeout_s or trim the gate")
+
+
+def gate_ok(lane):
+    try:
+        os.remove(os.path.join(lane.state_dir, GATE_SLOW))
+    except OSError:
+        pass
+
+
+def gate_set(product, entries):
+    """The one gate, both landing modes. ``entries`` are the branches in GATE this pass (their
+    facts; ``f['how'] == 'ci'`` merges on its checks alone). Docs and code are gated as two
+    sets; each builds a combined head, bisects on the red modules, confirms in full, checks the
+    trunk alone once when something is red (red there: WAITING ``trunk-red``, no one blamed),
+    and merges the green through the product's :class:`Host`, writing MERGING first.
+    ``product`` is a :class:`Lane` (or a Product: a default one is made). Returns
+    ``[(branch, state, reason)]``."""
+    lane = product if isinstance(product, Lane) else Lane(product)
+    to_merge = [f for f in entries if f.get('how') == 'ci']
+    gated = [f for f in entries if f.get('how') != 'ci']
+    for cls in (DOCS, CODE):
+        group = [f for f in gated if (f.get('class') or landing_class(lane.product, f.get('files')
+                                                                       or ())) == cls]
+        if not group:
+            continue
+        if str(lane.conv.harvest_gate).strip().lower() == H.GATE_PER_BRANCH:
+            for f in group:
+                gate_one_set(lane, [f], to_merge)
+        else:
+            gate_one_set(lane, group, to_merge)
+    if to_merge and not isinstance(lane.host, FastForwardHost):
+        merge_prs(lane, to_merge)
+    return [(f['branch'], (f.get('prev') or {}).get('state'), (f.get('prev') or {}).get('reason'))
+            for f in entries]
+
+
+def gate_one_set(lane, group, to_merge):
+    """Gate one set (FF: and push it; PR: queue its green for :func:`merge_prs`). A conflict is
+    sent back at once; a branch red alone is sent back only once the trunk alone is seen green
+    (checked once, and only when the bisection did not already show it)."""
+    conv, trunk, out = lane.conv, lane.trunk, lane.out
+    asf_repo = H.is_asf_repo(lane.repo)
+    announce = str(conv.harvest_gate).strip().lower() != H.GATE_PER_BRANCH
+    started = time.monotonic()
+    pending, restacked = list(group), False
+    for _attempt in range(len(group) + 2):
+        if not pending:
+            return
+        held = []
+
+        def hold(f, kind, text, files=(), own=False):
+            if kind == 'conflict':
+                send_back(lane, f, kind, text, files)
+            else:
+                held.append((f, kind, text, files, own))
+
+        holder = tempfile.mkdtemp(prefix='harvest-')
+        tmp = os.path.join(holder, 'wt')
+        try:
+            add = H.sh(['git', 'worktree', 'add', '--detach', tmp, f'origin/{trunk}'],
+                       cwd=lane.repo)
+            if add.returncode != 0:
+                for f in pending:
+                    out(f"held {f['branch']}: worktree add failed: {H.tail(add.stderr)}")
+                    lane.results[f['branch']] = 'held'
+                return
+            try:
+                landing_set, sha, deferred, unconfirmed = confirmed_group(
+                    tmp, trunk, pending, conv, asf_repo, hold, out, announce)
+                trunk_red = None
+                for f, kind, text, files, own in held:
+                    if not own:
+                        if trunk_red is None:
+                            trunk_red = red_on_trunk(tmp, trunk, conv, asf_repo, out)
+                        if trunk_red:
+                            out(f"waiting {f['branch']}: gate red, and {trunk} is red alone too"
+                                f" — gated again next tick")
+                            wait(lane, f, 'trunk-red')
+                            continue
+                    send_back(lane, f, kind, text, files)
+            except TrunkRed as red:
+                out(f"harvest: red on trunk too — {' '.join(red.modules)}")
+                for f in pending:
+                    wait(lane, f, 'trunk-red')
+                return
+            except GateTimeout as t:
+                note_timeout(lane, pending, t.line)
+                return
+            gate_ok(lane)
+            for f in unconfirmed:
+                out(f"held {f['branch']}: green on the red modules, not confirmed in full — "
+                    f"next tick")
+                wait(lane, f, 'unconfirmed', 'held')
+            if landing_set is not None:
+                for f in landing_set:
+                    f['green'] = {'head': f['head'], 'trunk': lane.trunk_sha}
+                if not isinstance(lane.host, FastForwardHost):
+                    to_merge.extend(landing_set)
+                    for f in deferred:
+                        defer(lane, f)
+                    return
+                pushed = push_set(lane, landing_set, sha, final=restacked)
+                if pushed == 'moved':  # the trunk moved under the push: stack and gate again, once
+                    restacked = True
+                    pending = landing_set + deferred
+                    continue
+                if pushed != 'ok':
+                    for f in deferred:
+                        defer(lane, f)
+                    return
+            if deferred and regate(lane, started):
+                out(f'harvest: re-gating {len(deferred)} branch(es) on the new {trunk}')
+                pending = deferred
+                continue
+            for f in deferred:
+                defer(lane, f)
+            return
+        finally:
+            H.sh(['git', 'worktree', 'remove', '--force', tmp], cwd=lane.repo)
+
+
+def regate(lane, started):
+    return not lane.dry_run and time.monotonic() - started < H.gate_timeout(lane.conv)
+
+
+def defer(lane, f):
+    if isinstance(lane.host, FastForwardHost):
+        lane.out(f"held {f['branch']}: green alone, one landed ahead of it — re-gated on the new "
+                 f"{lane.trunk} next tick")
+        wait(lane, f, 'deferred', 'held')
+        return
+    lane.out(f"waiting {f['branch']}: green alone, one merges ahead of it — gated on the new "
+             f"{lane.trunk} next tick")
+    wait(lane, f, 'deferred')
+
+
+def push_set(lane, landing_set, sha, final=False):
+    """FF: MERGING (the sha) on every branch of the set, one push of the combined head, then
+    MERGED at that sha. ``'ok'``; ``'moved'`` when the trunk moved under the push (the caller
+    restacks once; ``final``: it already did); ``'refused'``."""
+    if lane.dry_run:
+        for f in landing_set:
+            lane.out(f"DRY: would land {f['branch']} → {sha}")
+            lane.results[f['branch']] = 'dry'
+        return 'ok'
+    for f in landing_set:
+        lane.set(f, MERGING, f'push {sha[:12]}', sha=sha, method='ff')
+    pushed, not_ff = lane.host.merge(landing_set[0]['branch'], None, sha)
+    if not pushed:
+        if not_ff and not final:
+            return 'moved'
+        why = f'{lane.trunk} moved again on retry' if not_ff else f'push to {lane.trunk} refused'
+        for f in landing_set:
+            lane.out(f"held {f['branch']}: {why}")
+            wait(lane, f, why, 'held')
+        return 'refused'
+    for f in landing_set:
+        rec = lane.record(f, MERGED, 'method=ff', sha=sha, method='ff')
+        lane.write(f, rec, harvested=sha, correction=None)
+        f['prev'] = rec
+        H.sh(['git', 'push', '-q', 'origin', '--delete', f['branch']], cwd=lane.repo)
+        lane.out(f"landed {f['branch']} → {sha}")
+        lane.results[f['branch']] = 'landed'
+    return 'ok'
+
+
+def merge_prs(lane, ready):
+    """PR mode: merge every green PR the budget has room for — MERGING first (R3), then ``gh pr
+    merge`` (or ``--auto`` into a merge queue: QUEUED)."""
+    host = lane.host
+    room, why = host.slots()
+    for i, f in enumerate(ready):
+        b, number = f['branch'], (f.get('prev') or {}).get('pr')
+        if room is not None and i >= room:
+            lane.out(f'waiting {b}: PR #{number} green — no merge room this tick ({why})')
+            wait(lane, f, 'budget', green=f.get('green'))
+            continue
+        if lane.dry_run:
+            lane.out(f'DRY: would merge {b} (PR #{number})')
+            lane.results[b] = 'dry'
+            continue
+        lane.set(f, MERGING, f'PR #{number}', method='squash')
+        sha, how = host.merge(b, number)
+        if how == 'queue':
+            host.in_queue += 1
+            lane.out(f'queued {b}: PR #{number} added to the merge queue')
+            lane.set(f, QUEUED, f'PR #{number} in the merge queue', result='queued')
+            continue
+        if not sha:
+            lane.out(f'held {b}: PR #{number} merge refused — {how}')
+            wait(lane, f, f'merge refused: {how}', 'held', green=f.get('green'))
+            continue
+        host.merged += 1
+        rec = lane.record(f, MERGED, f'method={how}', sha=sha, method=how)
+        lane.write(f, rec, harvested=sha, correction=None)
+        f['prev'] = rec
+        lane.out(f'landed {b} → PR #{number} {sha}')
+        lane.results[b] = 'landed'
+
+
+# ---- the hosts --------------------------------------------------------------------------------
 
 class Host:
     """Where a lane branch lands. :func:`host` picks the adapter from the product's ``landing``;
     the state machine is the same for both."""
 
-    def __init__(self, product):
+    def __init__(self, product, lane=None):
         self.product = product
+        self.lane = lane
+
+    def prs(self):
+        """``{branch: pr}`` — the host's PRs (none without a PR host)."""
+        return {}
 
     def open(self, branch):
         """Open the branch's PR, or adopt the open one already naming it. Returns the PR number,
@@ -178,34 +1301,274 @@ class Host:
 
 
 class FastForwardHost(Host):
-    """``landing: fast-forward``: no PR host. ``open`` → None; ``status`` → no checks, merged
-    when the head is on ``origin/<trunk>``; ``merge`` → ``push_ff``, method ``ff``."""
+    """``landing: fast-forward``: no PR host. ``open`` → None; ``status`` → merged when the head
+    is on ``origin/<trunk>``; ``merge`` → ``push_ff`` of the gated head, method ``ff``."""
 
-    def open(self, branch):
-        raise NotImplementedError('lane.FastForwardHost.open: W1')
+    def open(self, branch, item=None):
+        return None, 'fast-forward: no PR'
 
     def status(self, branch):
-        raise NotImplementedError('lane.FastForwardHost.status: W1')
+        repo, trunk = self.product.repo_dir, self.product.conventions.main
+        head = H.sh(['git', 'rev-parse', f'origin/{branch}'], cwd=repo).stdout.strip()
+        merged = bool(head) and H.sh(['git', 'merge-base', '--is-ancestor', head,
+                                      f'origin/{trunk}'], cwd=repo).returncode == 0
+        return {'pr': None, 'state': 'MERGED' if merged else 'OPEN', 'head': head,
+                'checks': 'none', 'merged': merged, 'merge_sha': None, 'queued': False}
 
-    def merge(self, branch, pr):
-        raise NotImplementedError('lane.FastForwardHost.merge: W1')
+    def merge(self, branch, pr, sha=None):
+        """``(pushed, not_ff)`` for the combined head ``sha`` (the lane's MERGING names it)."""
+        repo, trunk = self.product.repo_dir, self.product.conventions.main
+        pushed, not_ff = H.push_ff(repo, sha, trunk)
+        if not pushed:
+            return False, not_ff
+        H.sh(['git', 'fetch', '-q', 'origin', trunk], cwd=repo)
+        on = H.sh(['git', 'merge-base', '--is-ancestor', sha, f'origin/{trunk}'], cwd=repo)
+        return on.returncode == 0, False
 
 
 class GitHubHost(Host):
-    """``landing: pull-request`` on GitHub: ``gh pr create`` / adopt; ``gh pr view`` and the
-    checks; ``gh pr merge`` (squash first) or ``--auto`` into a merge queue (QUEUED)."""
+    """``landing: pull-request`` on GitHub: ``gh pr create`` / adopt; ``gh pr checks``; ``gh pr
+    merge`` (squash first) or ``--auto`` into a merge queue (QUEUED)."""
 
-    def open(self, branch):
-        raise NotImplementedError('lane.GitHubHost.open: W1')
+    def __init__(self, product, lane=None):
+        super().__init__(product, lane)
+        from asf import capacity
+        self.slug = lane.slug if lane else repo_slug(product)
+        self.trunk = product.conventions.main
+        shape = capacity.batch_shape(product, None)
+        self.per_run, self.parallel = shape.get('per_run'), shape.get('parallel')
+        self.merged = 0
+        self.in_queue = 0
+        self._queue = None
+        self._required = None
+
+    def prs(self):
+        """One ``gh pr list --state all``: ``{branch: pr}``, an open PR first, else the newest."""
+        data = H.gh_json(['pr', 'list', '-R', self.slug, '--state', 'all', '--limit', '500',
+                          '--json', 'number,headRefName,headRefOid,state,mergeCommit,'
+                                    'autoMergeRequest'], [])
+        out = {}
+        for p in sorted((p for p in data if isinstance(p, dict)),
+                        key=lambda p: (p.get('state') == 'OPEN', int(p.get('number') or 0))):
+            out[p.get('headRefName')] = {
+                'number': p.get('number'), 'state': str(p.get('state') or 'OPEN').upper(),
+                'head': p.get('headRefOid') or None,
+                'merge_sha': (p.get('mergeCommit') or {}).get('oid') or None,
+                'queued': bool(p.get('autoMergeRequest'))}
+        if self.lane is not None:
+            self.in_queue = sum(1 for r in lifecycle.by_branch(self.lane.path).values()
+                                if (r.get('lane') or {}).get('state') == QUEUED)
+        return out
+
+    def open(self, branch, item=None):
+        from asf.tick import step_prs
+        items = (self.lane.items if self.lane else None) or {}
+        root = self.lane.root if self.lane else None
+        title, body = step_prs.title_and_body(item or '', items.get(item or '') or {}, root, branch)
+        rc, stdout, err = H._gh(['pr', 'create', '-R', self.slug, '--base', self.trunk,
+                                 '--head', branch, '--title', title, '--body', body])
+        m = re.search(r'/pull/(\d+)', f'{stdout}\n{err}')
+        if m and (rc == 0 or 'already exists' in err):
+            return int(m.group(1)), ''
+        return None, ((err or stdout).strip().splitlines() or [f'gh exited {rc}'])[0]
 
     def status(self, branch):
-        raise NotImplementedError('lane.GitHubHost.status: W1')
+        p = H.gh_json(['pr', 'view', branch, '-R', self.slug, '--json',
+                       'number,state,headRefOid,mergeCommit,autoMergeRequest'], {})
+        state, _detail, _checks = pr_checks(self.slug, p.get('number')) if p else ('none', '', [])
+        return {'pr': p.get('number'), 'state': p.get('state'), 'head': p.get('headRefOid'),
+                'checks': {'green': 'passed', 'red': 'failed'}.get(state, state),
+                'merged': p.get('state') == 'MERGED',
+                'merge_sha': (p.get('mergeCommit') or {}).get('oid'),
+                'queued': bool(p.get('autoMergeRequest'))}
+
+    def has_queue(self):
+        if self._queue is None:
+            owner, _, name = self.slug.partition('/')
+            q = ('query($o:String!,$n:String!,$b:String!){repository(owner:$o,name:$n)'
+                 '{mergeQueue(branch:$b){id}}}')
+            data = H.gh_json(['api', 'graphql', '-f', f'query={q}', '-F', f'o={owner}',
+                              '-F', f'n={name}', '-F', f'b={self.trunk}'], {})
+            self._queue = bool((((data or {}).get('data') or {}).get('repository') or {})
+                               .get('mergeQueue'))
+        return self._queue
+
+    def required_checks(self, state_dir):
+        named = self.product.conventions.get('landing_checks')
+        if named:
+            return (str(named),) if isinstance(named, str) else tuple(str(n) for n in named)
+        if self._required is None:
+            self._required = protected_checks(self.slug, self.trunk, state_dir)
+        return self._required
+
+    def slots(self):
+        """``(n, why)``: how many more PRs may be merged (or queued) this pass; QUEUED counts
+        toward the in-queue budget (R5)."""
+        room, why = None, None
+        if self.per_run is not None:
+            room, why = max(0, self.per_run - self.merged), 'capacity.batch.per_run'
+        if self.parallel is not None and self.has_queue():
+            left = max(0, self.parallel - self.in_queue)
+            if room is None or left < room:
+                room, why = left, 'capacity.batch.parallel'
+        return room, why
 
     def merge(self, branch, pr):
-        raise NotImplementedError('lane.GitHubHost.merge: W1')
+        if self.has_queue():
+            rc, _o, err = H._gh(['pr', 'merge', str(pr), '-R', self.slug, '--auto'])
+            return (None, 'queue') if rc == 0 else (None, H.tail(err) or f'gh exited {rc}')
+        err = ''
+        for method in MERGE_METHODS:
+            rc, _out, err = H._gh(['pr', 'merge', str(pr), '-R', self.slug, method,
+                                   '--delete-branch'])
+            if rc == 0:
+                return H.merged_sha(self.slug, pr) or f'PR #{pr}', method[2:]
+            if 'not allowed' not in (err or '').lower():
+                break
+        return None, H.tail(err) or 'gh pr merge failed'
+
+    def check_gate(self, f, number, files):
+        """The PR's checks before the gate: ``'gate'`` (gate it locally), ``'ci'`` (its required
+        checks passed under ``wait``), or None when it waits or went back."""
+        lane, b, rec = self.lane, f['branch'], f.get('prev') or {}
+        state, detail, checks = pr_checks(self.slug, number)
+        if state == 'pending':
+            lane.out(f'waiting {b}: PR #{number} checks pending — {detail}')
+            wait(lane, f, f'checks pending: {detail}', state=WAITING_CI)
+            return None
+        if state == 'unknown':
+            lane.out(f'waiting {b}: PR #{number} checks unreadable — {detail}')
+            wait(lane, f, 'checks unreadable')
+            return None
+        if state == 'red':
+            if lane.dry_run:
+                lane.out(f'DRY: would hold {b}: PR #{number} checks red: {detail}')
+                lane.results[b] = 'dry'
+                return None
+            send_back(lane, f, 'gate', f'PR #{number} checks red: {detail}', ())
+            return None
+        cls = f.get('class') or landing_class(self.product, files)
+        if missing_policy(self.product.conventions, cls) == MISSING_LOCAL_GATE:
+            return 'gate'
+        required = self.required_checks(lane.state_dir)
+        if not required:
+            return 'gate'
+        passed = {c.get('name') for c in checks if c.get('bucket') in PASS_BUCKETS}
+        missing = [name for name in required if name not in passed]
+        if not missing:
+            return 'ci'
+        now = lane.now or time.time()
+        since = rec.get('since') if rec.get('state') == WAITING_CI and rec.get('since') else now
+        waited, limit = now - float(since), landing_wait_s(self.product.conventions)
+        if waited < limit:
+            lane.out(f'waiting {b}: PR #{number} required check(s) not run — {", ".join(missing)} '
+                     f'(landing_checks_missing: wait, {int(waited // 60)}/{int(limit // 60)} min)')
+            wait(lane, f, f'required checks missing: {", ".join(missing)}', state=WAITING_CI,
+                 since=since)
+            return None
+        lane.out(f'harvest: {b}: PR #{number} required check(s) never ran in {int(limit // 60)} '
+                 f'min — {", ".join(missing)}: gating locally')
+        return 'gate'
+
+
+def pr_checks(slug, number):
+    """``('green'|'pending'|'red'|'unknown', detail, checks)`` for PR ``number``'s checks. No
+    checks at all is green; any failed or cancelled one is red; else any not finished pending."""
+    rc, stdout, err = H._gh(['pr', 'checks', str(number), '-R', slug, '--json', 'name,bucket'])
+    if 'no checks reported' in f'{stdout}\n{err}':
+        return 'green', 'no checks', []
+    try:
+        checks = [c for c in json.loads(stdout) if isinstance(c, dict)]
+    except (json.JSONDecodeError, TypeError):
+        return 'unknown', H.tail(err) or f'gh pr checks exited {rc}', []
+    red = [c.get('name') or '?' for c in checks if c.get('bucket') in RED_BUCKETS]
+    if red:
+        return 'red', ', '.join(red), checks
+    pending = [c.get('name') or '?' for c in checks if c.get('bucket') == 'pending']
+    if pending:
+        return 'pending', ', '.join(pending), checks
+    return 'green', f'{len(checks)} check(s)', checks
+
+
+def protected_checks(slug, trunk, state_dir, now=None):
+    """The trunk's branch-protection required checks, cached in ``state_dir`` for an hour."""
+    now = time.time() if now is None else now
+    key = f'{slug}@{trunk}'
+    path = os.path.join(state_dir, REQUIRED_CACHE)
+    try:
+        with open(path, encoding='utf-8') as fh:
+            cache = json.load(fh)
+        cache = cache if isinstance(cache, dict) else {}
+    except (OSError, ValueError):
+        cache = {}
+    hit = cache.get(key)
+    if isinstance(hit, dict) and now - float(hit.get('at') or 0) < REQUIRED_TTL_S:
+        return tuple(hit.get('checks') or ())
+    data = H.gh_json(['api', f'repos/{slug}/branches/{trunk}/protection/required_status_checks'],
+                     {})
+    names = []
+    if isinstance(data, dict):
+        names = [str(c) for c in data.get('contexts') or []]
+        names += [str(c.get('context')) for c in data.get('checks') or []
+                  if isinstance(c, dict) and c.get('context')]
+    names = list(dict.fromkeys(names))
+    cache[key] = {'at': now, 'checks': names}
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        with open(path + '.tmp', 'w', encoding='utf-8') as fh:
+            json.dump(cache, fh, sort_keys=True)
+        os.replace(path + '.tmp', path)
+    except OSError:
+        pass
+    return tuple(names)
 
 
 def host(product):
     """The :class:`Host` for the product's ``landing``: :class:`GitHubHost` for
-    ``pull-request``, else :class:`FastForwardHost`."""
-    raise NotImplementedError('lane.host: W1')
+    ``pull-request`` with a PR host, else :class:`FastForwardHost`."""
+    return Lane(product).host
+
+
+# ---- the read side ----------------------------------------------------------------------------
+
+def facts(product):
+    """Gather the pass's lane facts once (:meth:`Lane.gather`): ``{branch: facts}`` over every
+    lane branch — ``head``, ``item``, ``run``, ``pr``, ``review``, ``class``, ``on_trunk``,
+    ``now`` and the rest :func:`next_state` reads. Read-only: no git write, no ``gh`` write."""
+    return Lane(product).gather(prs=True)
+
+
+def advance(product, branch, facts):
+    """Decide ``branch``'s next state from its facts (:func:`next_state`) and, when it moved,
+    write it on the owning run, performing the transition's side effect. Returns the lane record
+    written, or None when the state did not change. The only writer of a lane state."""
+    lane = product if isinstance(product, Lane) else Lane(product)
+    return lane.advance(facts.get(branch) if branch in (facts or {}) else facts)
+
+
+def snapshot(product):
+    """Every lane branch's current record, ``{branch: {state, head, pr, at, reason, item}}``.
+    Read-only."""
+    return snapshot_at(env.state_dir(product))
+
+
+def snapshot_at(state_dir):
+    """:func:`snapshot` of the registry under ``state_dir``."""
+    path = H.sessions_path(state_dir)
+    out = {}
+    for b, run in lifecycle.by_branch(path).items():
+        rec = run.get('lane')
+        if rec:
+            out[b] = dict(rec, item=rec.get('item') or run.get('item'), job=run.get('job'))
+    return out
+
+
+def state(product, branch):
+    """``branch``'s current lane record, or None when no run carries one. Read-only."""
+    return snapshot(product).get(branch)
+
+
+def busy_items(product):
+    """The item ids whose branch is in one of :data:`BUSY_STATES`. Read-only."""
+    return {r['item'] for r in snapshot(product).values()
+            if r.get('item') and r.get('state') in BUSY_STATES}

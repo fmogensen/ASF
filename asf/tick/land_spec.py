@@ -3,18 +3,19 @@
 Coders read the spec from the trunk, so a Feature whose spec review is APPROVED but whose spec
 still sits on a branch stays ``spec-approved`` (:func:`asf.evidence.evidence.feature_stage`) and
 its feeder row is APPROVED → LAND, which launches nothing. This is what that row stands for: the
-``prs`` step, before it opens anything, adopts every such branch no run speaks for.
+lane pass (:func:`asf.tick.step_wave.lane_pass`), before it moves anything, adopts every such
+branch no run speaks for — through the lane (:meth:`asf.harvest.lane.Lane.adopt`).
 
 * The branch can land as it stands — a spec/plan lane branch whose diff is documents only and
-  that merges into the trunk cleanly: the ledger gets a finished run on it (no session, no pid),
-  so the ``prs`` step opens its PR and the docs lane merges it once green, like any finished
-  spec branch.
+  that merges into the trunk cleanly: the lane adopts it PUSHED on a synthetic run (no session,
+  no pid) and lands it like any finished spec branch.
 * Otherwise (it conflicts, it carries more than documents, or it is no lane branch at all): the
-  run carries a ``land-spec`` correction, and the feeder hands it to a STARVED → SPEC session
-  that lands the existing approved spec — never rewrites it — on the lane's own branch.
+  adopted run is BACK with a ``landing-gate`` correction, and the feeder hands it to a
+  STARVED → SPEC session that lands the existing approved spec — never rewrites it — on the
+  lane's own branch.
 
-A branch whose latest run is live, pushed and waiting, handed to the PR lane or still owes a
-correction is left alone: something already speaks for it.
+A branch whose latest run is live, pushed and waiting, held by an open lane state or still owes
+a correction is left alone: something already speaks for it.
 """
 import subprocess
 
@@ -46,7 +47,9 @@ def spoken_for(run, path):
     one handed to the PR lane, or a correction still owed."""
     if not run:
         return False
+    from asf.harvest import lane
     return bool(lifecycle.is_live(run) or lifecycle.eligible(run) or run.get('harvest') == 'pr'
+                or (run.get('lane') or {}).get('state') in lane.OPEN_STATES
                 or lifecycle.pending_correction(run, path))
 
 
@@ -58,18 +61,18 @@ def why_not_as_is(product, branch, item):
     """'' when ``origin/<branch>`` can land as it stands — a spec/plan lane branch, documents
     only, straight commits naming ``item`` (harvest's lane refusal), merging into the trunk
     without a conflict — else why not."""
-    from asf.harvest import harvest
+    from asf.harvest import lane
     conv, repo, trunk = product.conventions, product.repo_dir, product.main
     if _git(repo, ['rev-parse', '--verify', '-q', f'origin/{branch}']).returncode != 0:
         return f'{branch} is not on origin'
     if conv.branch_kind(branch) not in ('spec', 'plan'):
         return f'{branch} is no spec/plan lane branch'
-    files = harvest.touched_files(repo, trunk, branch)
+    files = lane.touched_files(repo, trunk, branch)
     if not files:
         return f'{branch} carries nothing past the trunk'
-    if not harvest.is_docs_branch(conv, branch, files):
+    if lane.landing_class(product, files) != lane.DOCS:
         return f'{branch} changes more than documents'
-    refusal = harvest.lane_refusal(repo, trunk, branch, item)
+    refusal = lane.lane_refusal(repo, trunk, branch, item)
     if refusal:
         return f'{branch} is refused by the lane ({refusal[0]})'
     merged = _git(repo, ['merge-tree', '--write-tree', f'origin/{trunk}', f'origin/{branch}'])
@@ -81,8 +84,10 @@ def why_not_as_is(product, branch, item):
 def adopt(product, items, now=None, out=print):
     """Adopt every approved spec branch :func:`wanted` names and no run speaks for; returns the
     ``[(feature id, branch, why-not-as-is)]`` it wrote a run for."""
+    from asf.harvest import lane as lane_mod
     if not product.repo_dir:
         return []
+    host = lane_mod.Lane(product, items=items, out=out, now=now)
     path = pool_mod.sessions_path(product)
     by_branch = lifecycle.by_branch(path)
     owed = lifecycle.corrections(path)
@@ -93,22 +98,18 @@ def adopt(product, items, now=None, out=print):
                 or spoken_for(by_branch.get(lane), path):
             continue
         why = why_not_as_is(product, carrier, fid)
-        stamp = now or pool_mod.now_iso()
-        run = {'job': f'{JOB_PREFIX}{fid}'.lower(), 'item': fid, 'feature': fid, 'kind': 'spec',
-               'started': stamp, 'pid': None, 'ended': stamp, 'adopted': True}
+        job = f'{JOB_PREFIX}{fid}'.lower()
         if not why:
-            pool_mod.append_session(product, dict(run, branch=carrier,
-                                                  end_reason=lifecycle.FINISHED))
-            out(f'land-spec: {fid} — approved spec on {carrier} handed to the docs lane')
+            host.adopt(carrier, fid, 'spec', job=job)
+            out(f'land-spec: {fid} — approved spec on {carrier} adopted by the lane')
         else:
             branch = carrier if product.conventions.branch_kind(carrier) == 'spec' else lane
             text = (f'The spec for {fid} is approved but not on the trunk: it is on {carrier}, '
                     f'and {why}. Land the existing approved spec on the trunk from {branch} — '
                     f'bring it over from {carrier} as written, resolve what stops it merging, '
                     f"and don't rewrite it.")
-            pool_mod.append_session(product, dict(
-                run, branch=branch, end_reason=f'held: {feeder_rows.LAND_SPEC}',
-                correction={'kind': feeder_rows.LAND_SPEC, 'text': text, 'at': stamp}))
+            host.adopt(branch, fid, 'spec', job=job,
+                       correction={'kind': feeder_rows.LANDING_GATE, 'text': text})
             out(f'land-spec: {fid} — approved spec on {carrier} cannot land as it stands '
                 f'({why}): a session lands it on {branch}')
         done.append((fid, carrier, why))

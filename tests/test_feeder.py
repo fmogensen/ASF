@@ -14,6 +14,10 @@ import unittest
 from asf import env
 from asf.env import Product
 from asf.feeder import footprint, register, render, rows, tiers
+try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.x` does not
+    from occfixture import occ
+except ImportError:  # pragma: no cover - import shape only
+    from tests.occfixture import occ
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIXTURES = os.path.join(HERE, 'fixtures', 'feeder')
@@ -84,7 +88,7 @@ class NoRowLaunchesBehindAnUnlandedPredecessor(unittest.TestCase):
         corr = ({i: {'kind': 'gate', 'text': 'FAIL: x', 'rounds': rounds}
                  for i in ('T-0002', 'B-0009')} if rounds is not None else None)
         return [r for r in rows.candidates(self.index(first), product(), [], attempts=attempts,
-                                           corrections=corr) if r.item_id == item_id]
+                                           occupancy=occ(corrections=corr)) if r.item_id == item_id]
 
     CASES = (dict(), dict(rounds=1), dict(rounds=3), dict(attempts={'B-0009': 3}))
 
@@ -143,7 +147,7 @@ class ADoneCardHoldsNoFootprint(unittest.TestCase):
 
     def action(self, state):
         by = {r.item_id: r for r in rows.candidates(self.index(state), product(), [],
-                                                    busy={'T-0001'})}
+                                                    occupancy=occ(busy={'T-0001'}))}
         return by['T-0002'].action
 
     def test_an_open_card_awaiting_harvest_holds_its_files(self):
@@ -300,7 +304,7 @@ class FeederHoldTest(unittest.TestCase):
     CORRECTIONS = {'T-0002': {'kind': 'unpushed', 'text': 'push it', 'rounds': 1}}
 
     def launching(self, p):
-        rs = rows.candidates(self.idx(), p, [], corrections=self.CORRECTIONS)
+        rs = rows.candidates(self.idx(), p, [], occupancy=occ(corrections=self.CORRECTIONS))
         return {(r.kind, r.item_id): r.action for r in rs}
 
     def test_the_default_holds_nothing(self):
@@ -565,7 +569,7 @@ class AfterCountsTheTrunkTests(unittest.TestCase):
     TRUNK = {'T-0001': ('a' * 12, 'feat(T-0001): x')}
 
     def action_of(self, item_id, landed, corrections=None, index=None):
-        out = [r for r in rows.candidates(index or self.items(), product(), [], corrections=corrections,
+        out = [r for r in rows.candidates(index or self.items(), product(), [], occupancy=occ(corrections=corrections),
                                           landed_shas=landed) if r.item_id == item_id]
         return [r.action for r in out]
 
@@ -606,7 +610,7 @@ class ParkedCorrectionTests(unittest.TestCase):
         for rounds in (0, 1, 3):
             with self.subTest(rounds=rounds):
                 out = rows.plan_rows(s1_bugs('B-0001'), product(), [], 1, attempts={'B-0001': 1},
-                                     corrections=self.corr(rounds))
+                                     occupancy=occ(corrections=self.corr(rounds)))
                 self.assertEqual(len(out), 1)
                 row = out[0]
                 self.assertTrue(row.action.startswith('PARKED '))
@@ -620,7 +624,7 @@ class ParkedCorrectionTests(unittest.TestCase):
             'T-0001': {'id': 'T-0001', 'type': 'task', 'state': 'New'},
             'T-0002': {'id': 'T-0002', 'type': 'task', 'state': 'New', 'after': ['T-0001']}}}
         corr = {'T-0002': dict(self.corr(0)['B-0001'])}
-        out = rows.candidates(index, product(), [], corrections=corr)
+        out = rows.candidates(index, product(), [], occupancy=occ(corrections=corr))
         self.assertEqual([r.action.split(' ')[0] for r in out], ['PARKED'])
 
 
@@ -632,7 +636,7 @@ class CorrectionRowTest(unittest.TestCase):
 
     def test_a_correction_yields_a_correct_row_in_the_items_tier(self):
         out = rows.plan_rows(s1_bugs('B-0001'), product(), [], 1, attempts={'B-0001': 1},
-                             corrections=self.corr(1))
+                             occupancy=occ(corrections=self.corr(1)))
         self.assertEqual(kinds(out), [('FIX → CORRECT', 'B-0001')])
         self.assertEqual((out[0].brief_kind, out[0].tier, out[0].branch, out[0].correction),
                          ('correct', 0, 'fix/B-0001', 'FAIL: test_x'))
@@ -640,7 +644,7 @@ class CorrectionRowTest(unittest.TestCase):
 
     def test_three_rounds_is_the_adjudicate_row(self):
         out = rows.plan_rows(s1_bugs('B-0001'), product(), [], 1, attempts={'B-0001': 1},
-                             corrections=self.corr(3))
+                             occupancy=occ(corrections=self.corr(3)))
         self.assertEqual([(r.kind, r.brief_kind) for r in out],
                          [('STALEMATE → ADJUDICATE', 'adjudicate')])
 
@@ -652,12 +656,12 @@ class CorrectionRowTest(unittest.TestCase):
         for rounds in (1, 3):
             with self.subTest(rounds=rounds):
                 out = rows.plan_rows(items, product(), [], 1, attempts={'B-0001': 1},
-                                     corrections=self.corr(rounds))
+                                     occupancy=occ(corrections=self.corr(rounds)))
                 self.assertEqual(out, [])
 
     def test_a_busy_item_gets_no_correct_row(self):
         out = rows.plan_rows(s1_bugs('B-0001'), product(), [{'item': 'B-0001'}], 1,
-                             corrections=self.corr(1))
+                             occupancy=occ(corrections=self.corr(1)))
         self.assertEqual(out, [])
 
 

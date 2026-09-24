@@ -300,7 +300,7 @@ def classify(product, tool_name, tool_input, cwd):
 
 def merge_class(product, files):
     """``(class, first matched file or None)`` — ``merge_amendable_set`` when any of ``files``
-    (repo-relative, as :func:`asf.harvest.harvest.touched_files` returns them) matches
+    (repo-relative, as :func:`asf.harvest.lane.touched_files` returns them) matches
     ``amendable.paths(product)`` (the §2.1 glob rule, :func:`_match_glob`), else
     ``merge_routine_pr`` with no matched file."""
     globs = list(amendable.paths(product))

@@ -14,7 +14,7 @@ RUNNER = os.path.join(REPO_ROOT, 'tools', 'run_tests.py')
 
 from asf import env
 from asf.conventions import Conventions
-from asf.harvest import harvest
+from asf.harvest import harvest, lane
 from asf.workers import lifecycle
 from asf.workers import observe
 from asf.init import ITEM_FOLDERS, STREAM_FOLDERS
@@ -498,6 +498,8 @@ class ProductHarvestTests(unittest.TestCase):
 
     def product(self, **conventions):
         conventions.setdefault('test_command', PRODUCT_TEST)
+        # the gate's own behaviour, a branch at a time: no review session stands before it
+        conventions.setdefault('lane', {'review': {'code': 'none'}})
         return env.Product('sample', {'repo_dir': self.repo, 'main': 'main',
                                       'conventions': conventions, 'steps': {'batch': 'off'}})
 
@@ -523,7 +525,8 @@ class ProductHarvestTests(unittest.TestCase):
         lines = []
         results = harvest.run_product_harvest(product, self.state_dir, bug_root=bug_root,
                                               out=lines.append)
-        return results, (lines if timings else [l for l in lines if not l.startswith('gate: ')])
+        return results, (lines if timings else [l for l in lines
+                                                if not l.startswith(('gate: ', 'lane: '))])
 
     def origin_main(self):
         return sh(['git', 'rev-parse', 'main'], cwd=self.origin).stdout.strip()
@@ -802,7 +805,7 @@ class ProductHarvestTests(unittest.TestCase):
             json.dump({'items': {'B-0001': {'id': 'B-0001', 'type': 'bug', 'state': 'Active',
                                             'removed': 'superseded: on main — operator ruling'}}}, f)
         items = harvest.record_items(root)
-        self.assertEqual(harvest.superseded_by(items, 'B-0001'), 'removed')
+        self.assertEqual(lane.superseded_by(items, 'B-0001'), 'removed')
         lines = []
         results = harvest.run_product_harvest(self.product(), self.state_dir, out=lines.append, items=items)
         self.assertEqual(results, {'fix/B-0001': 'superseded'})
@@ -920,17 +923,23 @@ class ProductHarvestTests(unittest.TestCase):
                 self.assertEqual(self.harvest(product)[1], [])
                 self.session(f'correct-b-0001-r{expected_round}', 'B-0001', 'fix/B-0001')
 
-        # capped: the round no longer climbs, and the message names the adjudicate row instead
+        # capped: the round no longer climbs, and the message names the adjudicate row instead.
+        # An unanswered correction owns the branch (BACK) — the adjudicate row's session runs
+        # first, and it is that attempt the gate holds
+        self.assertEqual(self.harvest(product)[1], [])
+        self.session('adjudicate-b-0001', 'B-0001', 'fix/B-0001')
         _results, lines = self.harvest(product)
         self.assertTrue(lines[-1].startswith('held fix/B-0001: FAIL: test_red_gate'), lines)
         self.assertTrue(lines[-1].endswith(' — adjudicate pending'), lines)
-        self.assertEqual(self.record('fix/B-0001')['rounds'], 3)
+        path = harvest.sessions_path(self.state_dir)
+        self.assertEqual(lifecycle.rounds_of(path, 'B-0001'), 3)
         self.assertFalse(self.record('fix/B-0001').get('operator_flagged'))
 
         # a second hold at the cap: the adjudicate row's own attempt failed too
+        self.session('adjudicate-b-0001-r2', 'B-0001', 'fix/B-0001')
         _results, lines = self.harvest(product)
         self.assertTrue(lines[-1].endswith(' — adjudicate pending'), lines)
-        self.assertEqual(self.record('fix/B-0001')['rounds'], 3)
+        self.assertEqual(lifecycle.rounds_of(path, 'B-0001'), 3)
         self.assertEqual(self.record('fix/B-0001').get('operator_flagged'), 1)
 
     def test_pull_request_landing_never_pushes_main(self):
@@ -943,7 +952,8 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertEqual(self.origin_main(), before)
         self.assertTrue(self.origin_has('fix/B-0001'))
         rec = self.record('fix/B-0001')
-        self.assertEqual(rec.get('harvest'), 'pr')
+        self.assertEqual((rec['lane']['state'], rec['lane']['reason']),
+                         ('PR_OPEN', 'no PR host: the product lands it'))
         self.assertFalse(rec.get('harvested'))
         # marked once: the next tick does not announce it again
         self.assertEqual(self.harvest(self.product(landing='pull-request')), ({}, []))
@@ -1032,8 +1042,9 @@ class ProductHarvestTests(unittest.TestCase):
         before = self.origin_main()
         with self.gated() as gate:
             results, lines = self.harvest(self.product())
-        # all four (red) → [1,2] green, [3,4] red → [3] red, [4] green → 1+2+4 together, green
-        self.assertEqual(gate.call_count, 6, lines)
+        # all four (red) → [1,2] green, [3,4] red → [3] red, [4] green → 1+2+4 together, green;
+        # and the trunk alone, once, before [3] is blamed (T8: a red trunk is no branch's fault)
+        self.assertEqual(gate.call_count, 7, lines)
         sha = self.origin_main()
         self.assertNotEqual(sha, before)
         self.assertEqual(results, {'fix/B-0001': 'landed', 'fix/B-0002': 'landed',
@@ -1119,6 +1130,7 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertEqual(gate.call_count, 1)
         self.assertEqual(results, {b: 'dry' for b in branches})
         self.assertEqual(self.origin_main(), before)
+        lines = [l for l in lines if not l.startswith('lane: ')]  # the lane's own dry lines
         self.assertTrue(all(l.startswith('DRY: would land ') for l in lines[2:]), lines)
         for b in branches:
             self.assertTrue(self.origin_has(b))
@@ -1277,7 +1289,7 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertIn('harvest: red on trunk too — test_broken', lines)
         self.assertFalse(any(l.startswith(('held ', 'foreign ', 'harvest: bisecting')) for l in lines),
                          lines)
-        self.assertEqual(results, {})
+        self.assertEqual(results, {b: 'waiting' for b in branches})  # WAITING trunk-red
         self.assertEqual(self.origin_main(), before)
         for b in branches:
             self.assertTrue(self.origin_has(b), b)
@@ -1323,8 +1335,7 @@ class ProductHarvestTests(unittest.TestCase):
     def test_green_alone_with_no_time_left_lands_the_first_and_the_rest_next_tick(self):
         product = self.runner_product()
         branches = self.lanes(3)
-        with self.red_first_full_gate(), mock.patch.object(harvest, 'regate_now',
-                                                           return_value=False):
+        with self.red_first_full_gate(), mock.patch.object(lane, 'regate', return_value=False):
             results, lines = self.harvest(product)
         self.assertEqual(results, {'fix/B-0001': 'landed', 'fix/B-0002': 'held',
                                    'fix/B-0003': 'held'}, lines)
@@ -1376,17 +1387,22 @@ class ProductHarvestTests(unittest.TestCase):
         with self.gated() as gate:
             results, lines = self.harvest(self.product())
         self.assertEqual(results, {branch: 'landed', 'fix/B-0001': 'held'}, lines)
-        self.assertIsNone(gate.call_args_list[0].args[1].test_command)  # the docs ran no test
+        # the docs set is gated on its own — by the product gate (R7: the checks read documents)
+        self.assertEqual(gate.call_args_list[0].args[1].test_command, PRODUCT_TEST)
         self.assertTrue(self.record(branch).get('harvested'))
         self.assertFalse(self.record(branch).get('rounds'))
         self.assertTrue(self.record('fix/B-0001').get('correction'))
 
-    def test_a_docs_only_branch_is_never_held_on_a_red_test_command(self):
+    def test_r7_a_docs_branch_on_a_red_test_command_never_lands_unchecked(self):
+        """Fault 1: "docs cannot turn a test red" merged a plan the product gate refused. A docs
+        branch is gated like any other; a command red on the trunk alone too is no one's round."""
         branch = self.plan_lane()
         red = f'{sys.executable} -c "import sys; sys.exit(1)"'
+        before = self.origin_main()
         results, lines = self.harvest(self.product(test_command=red,
                                                    harvest={'gate': 'per-branch'}))
-        self.assertEqual(results, {branch: 'landed'}, lines)
+        self.assertEqual(results, {branch: 'waiting'}, lines)
+        self.assertEqual(self.origin_main(), before)
         self.assertFalse(self.record(branch).get('rounds'))
 
     # -- B-0072: a hanging gate is held, not waited for ----------------------------------
@@ -1404,10 +1420,11 @@ class ProductHarvestTests(unittest.TestCase):
         t0 = time.monotonic()
         results, lines = self.harvest(self.product(test_command=hang, harvest={'gate_timeout_s': 1}))
         self.assertLess(time.monotonic() - t0, 10)
-        self.assertEqual(results, {'fix/B-0001': 'timed-out'})
-        line = [l for l in lines if l.startswith('gate timed out ')][0]
-        self.assertTrue(line.startswith('gate timed out fix/B-0001: gate timed out after 1 s: '), line)
-        self.assertTrue(line.endswith(' — retried next tick'), line)
+        self.assertEqual(results, {'fix/B-0001': 'waiting'})
+        line = [l for l in lines if l.startswith('harvest: gate timed out ')][0]
+        self.assertTrue(line.startswith('harvest: gate timed out after 1 s: '), line)
+        self.assertIn('retried next tick', line)
+        self.assertEqual(self.record('fix/B-0001')['lane']['reason'], 'gate-timeout')
         self.assertEqual(self.origin_main(), before)
         time.sleep(2.5)  # the grandchild would have written its mark by now — its group was killed
         self.assertFalse(os.path.exists(mark))
@@ -1417,7 +1434,7 @@ class ProductHarvestTests(unittest.TestCase):
         hang = f'{sys.executable} -c "import time; time.sleep(30)"'
         for _ in range(2):  # twice over: a clock never climbs toward adjudication
             results, lines = self.harvest(self.product(test_command=hang, harvest={'gate_timeout_s': 1}))
-            self.assertEqual(results, {'fix/B-0001': 'timed-out'})
+            self.assertEqual(results, {'fix/B-0001': 'waiting'})
             rec = self.record('fix/B-0001')
             self.assertFalse(rec.get('rounds'))
             self.assertFalse((rec.get('correction') or {}).get('text'))
@@ -1470,6 +1487,13 @@ class ProductHarvestTests(unittest.TestCase):
             if args[:2] == ['pr', 'list'] and 'merged' in args:
                 return 0, json.dumps([{'number': number, 'mergeCommit': {'oid': state['merged']}}]
                                      if state['merged'] else []), ''
+            if args[:2] == ['pr', 'list'] and 'all' in args:  # the lane's one read of the host
+                if state['merged']:
+                    return 0, json.dumps([{'number': number, 'headRefName': head,
+                                           'state': 'MERGED', 'headRefOid': None,
+                                           'mergeCommit': {'oid': state['merged']}}]), ''
+                return 0, json.dumps([{'number': number, 'headRefName': head, 'state': 'OPEN',
+                                       'autoMergeRequest': {'enabledAt': 'x'} if auto else None}]), ''
             if args[:2] == ['pr', 'list']:
                 return 0, json.dumps([] if state['merged'] else [
                     {'number': number, 'headRefName': head,
@@ -1556,10 +1580,13 @@ class ProductHarvestTests(unittest.TestCase):
         self.push_plan()
         results, lines = self.harvest(self.pr_product())
         self.assertEqual(results, {'plan/F-0001': 'held'})
-        self.assertEqual(lines, ['held plan/F-0001: PR #41 checks red: DCO — back to its session (round 1)'])
+        self.assertEqual(lines, ['held plan/F-0001: the plan turns the gate red on main — PR #41 '
+                                 'checks red: DCO. Change the plan so the product gate passes on '
+                                 'main; nothing is merged until it does — back to its session '
+                                 '(round 1)'])
         self.assertEqual(self.merges(calls), [])
         rec = self.record('plan/F-0001')
-        self.assertEqual(rec['correction']['kind'], 'gate')
+        self.assertEqual(rec['correction']['kind'], lane.LANDING_GATE)
         self.assertEqual(rec['rounds'], 1)
         self.assertFalse(rec.get('harvested'))
 
@@ -1612,6 +1639,12 @@ class ProductHarvestTests(unittest.TestCase):
         self.push_lane('fix/B-0001', [('fix(B-0001): the change', files)])
         self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
 
+    def lane_rows_now(self, items):
+        from asf.feeder import rows as feeder_rows
+        occ = lifecycle.occupancy(harvest.sessions_path(self.state_dir))
+        return [r for r in feeder_rows.candidates(items, self.pr_product(), [], occupancy=occ)
+                if r.launches]
+
     def feeder_rows_now(self, items):
         from asf.feeder import rows as feeder_rows
         corrections = lifecycle.corrections(harvest.sessions_path(self.state_dir))
@@ -1631,9 +1664,10 @@ class ProductHarvestTests(unittest.TestCase):
                                  'review round 1 asked for'])
         self.assertEqual(self.merges(calls), [])
         rec = self.record('fix/B-0001')
-        self.assertEqual((rec['correction']['kind'], rec['correction']['round']), ('review-wanted', 1))
+        self.assertEqual((rec['lane']['state'], rec['lane']['round']), ('REVIEW', 1))
+        self.assertFalse(rec.get('correction'))
         self.assertFalse(rec.get('rounds'))
-        rows = self.feeder_rows_now(self.BUG)
+        rows = self.lane_rows_now(self.BUG)
         self.assertEqual([(r.kind, r.brief_kind, r.branch, r.review_round, r.tier) for r in rows],
                          [(feeder_rows.PUSHED_REVIEW, 'review', 'fix/B-0001', 1, 0)])
         # asked once: until a review session runs, the branch is the request's, not the gate's
@@ -1677,19 +1711,18 @@ class ProductHarvestTests(unittest.TestCase):
                                  '.in/reviews/1-b-0001.md predates the head: review round 2 '
                                  'asked for'])
         self.assertEqual(self.merges(calls), [])
-        self.assertEqual(self.record('fix/B-0001')['correction']['round'], 2)
+        self.assertEqual(self.record('fix/B-0001')['lane']['round'], 2)
 
     def test_s1_reviews_go_first(self):
         from asf.feeder import rows as feeder_rows
         product = self.pr_product()
-        corrections = {
-            'T-0002': {'kind': 'review-wanted', 'text': 'review it', 'round': 1, 'branch': 'worker/T-0002'},
-            'B-0001': {'kind': 'review-wanted', 'text': 'review it', 'round': 1, 'branch': 'fix/B-0001'},
-            'B-0003': {'kind': 'review-wanted', 'text': 'review it', 'round': 1, 'branch': 'fix/B-0003'}}
+        review = {'T-0002': {'round': 1, 'branch': 'worker/T-0002'},
+                  'B-0001': {'round': 1, 'branch': 'fix/B-0001'},
+                  'B-0003': {'round': 1, 'branch': 'fix/B-0003'}}
         items = {'T-0002': {'id': 'T-0002', 'type': 'task', 'state': 'Active'},
                  'B-0001': dict(self.BUG['B-0001']),
                  'B-0003': {'id': 'B-0003', 'type': 'bug', 'state': 'Active'}}
-        rows = feeder_rows.correction_rows(items, product, set(), corrections)[0]
+        rows = feeder_rows.lane_rows(items, product, set(), {'review': review})
         tiers = {r.item_id: r.tier for r in rows}
         self.assertEqual(tiers, {'B-0001': 0, 'B-0003': 1, 'T-0002': 2})
 
@@ -1702,15 +1735,14 @@ class ProductHarvestTests(unittest.TestCase):
                           'decided': True}}
 
     def plan_now(self, items):
-        """The feeder's rows as the wave plans them: the ledger's facts, and the open PRs'."""
+        """The feeder's rows as the wave plans them: the in-process lane pass first (it adopts a
+        PR no run holds, and reads each head's review), then the one occupancy answer."""
         from asf.feeder import rows as feeder_rows
         path = harvest.sessions_path(self.state_dir)
-        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
-        heads = harvest.pr_heads(self.repo, self.pr_product().conventions, 'main', self.OPEN_PR,
-                                 lifecycle.by_branch(path))
+        self.fake_gh([{'name': 'ci', 'bucket': 'pass'}])
+        lane.lane_pass(self.pr_product(), self.state_dir, items=items, out=lambda _l: None)
         return feeder_rows.candidates(items, self.pr_product(), lifecycle.inflight(path),
-                                      corrections=lifecycle.corrections(path),
-                                      busy=lifecycle.awaiting_harvest(path), pr_heads=heads)
+                                      occupancy=lifecycle.occupancy(path))
 
     def test_a_pre_existing_pr_with_no_ledger_mark_gets_a_review_row(self):
         """A PR opened before any review request existed — no harvest mark, no correction, no
@@ -1789,11 +1821,13 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertEqual(self.merges(calls), [['pr', 'merge', '41', '-R', 'o/p', '--auto']])
         self.assertEqual(lines[-1], 'queued fix/B-0001: PR #41 added to the merge queue')
         self.assertFalse(self.record('fix/B-0001').get('harvested'))
-        # in the queue: the next tick does not enqueue it again
+        self.assertEqual(self.record('fix/B-0001')['lane']['state'], 'QUEUED')
+        # in the queue: the next tick does not enqueue it again (QUEUED until the host merges it)
         calls = self.fake_gh([], queue=True, auto=True)
         results, lines = self.harvest(self.pr_product())
-        self.assertEqual(results, {'fix/B-0001': 'queued'})
+        self.assertEqual(results, {})
         self.assertEqual(self.merges(calls), [])
+        self.assertEqual(self.record('fix/B-0001')['lane']['state'], 'QUEUED')
 
     def test_merge_queue_respects_capacity_parallel(self):
         calls = self.fake_gh([], queue=True)
@@ -1834,8 +1868,9 @@ class ProductHarvestTests(unittest.TestCase):
 
         def gh(args):
             calls.append(list(args))
-            if args[:2] == ['pr', 'list'] and 'merged' in args:
-                return 0, json.dumps([{'number': 41, 'mergeCommit': {'oid': 'abc123'}}]), ''
+            if args[:2] == ['pr', 'list'] and 'all' in args:
+                return 0, json.dumps([{'number': 41, 'headRefName': 'fix/B-0001',
+                                       'state': 'MERGED', 'mergeCommit': {'oid': 'abc123'}}]), ''
             return 0, '[]', ''
         patcher = mock.patch.object(harvest, '_gh', side_effect=gh)
         patcher.start()
@@ -1863,7 +1898,8 @@ class ProductHarvestTests(unittest.TestCase):
         items = {'B-0001': {'severity': 'S2'}, 'B-0002': {'severity': 'S1'}}
         entries = [('worker/F-0009', {}), ('fix/B-0001', {}), ('fix/B-0002', {}),
                    ('worker/hotfix-T-0003', {})]
-        self.assertEqual([b for b, _ in harvest.pr_order(entries, items)],
+        entries = [{'branch': b, 'item': lane.item_of(b, r)} for b, r in entries]
+        self.assertEqual([f['branch'] for f in lane.pr_order(entries, items)],
                          ['worker/hotfix-T-0003', 'fix/B-0002', 'fix/B-0001', 'worker/F-0009'])
 
     # ---- the PR lane, native: green checks are not a green trunk ----------------------------
@@ -2001,35 +2037,35 @@ class ProductHarvestTests(unittest.TestCase):
 
     def test_missing_policy_reads_one_value_or_a_map(self):
         conv = Conventions.from_mapping
-        self.assertEqual(harvest.missing_policy(conv({}), 'docs'), 'local-gate')
-        self.assertEqual(harvest.missing_policy(conv({'landing_checks_missing': 'wait'}), 'docs'),
+        self.assertEqual(lane.missing_policy(conv({}), 'docs'), 'local-gate')
+        self.assertEqual(lane.missing_policy(conv({'landing_checks_missing': 'wait'}), 'docs'),
                          'wait')
         both = conv({'landing_checks_missing': {'docs': 'local-gate', 'code': 'wait'}})
-        self.assertEqual(harvest.missing_policy(both, 'docs'), 'local-gate')
-        self.assertEqual(harvest.missing_policy(both, 'code'), 'wait')
-        self.assertEqual(harvest.missing_policy(conv({'landing_checks_missing': 'bogus'}), 'code'),
+        self.assertEqual(lane.missing_policy(both, 'docs'), 'local-gate')
+        self.assertEqual(lane.missing_policy(both, 'code'), 'wait')
+        self.assertEqual(lane.missing_policy(conv({'landing_checks_missing': 'bogus'}), 'code'),
                          'local-gate')
 
     def test_every_mergeable_pr_is_gated_once_together(self):
-        """One local gate per tick over all the PRs ready to merge, never one each."""
-        lane = mock.Mock(slots=mock.Mock(return_value=(None, None)))
-        ready = [('plan/F-0001', {}, 41, harvest.READY_GATE, True),
-                 ('fix/B-0001', {}, 42, harvest.READY_GATE, False),
-                 ('fix/B-0002', {}, 43, harvest.READY_CI, False)]
-        with mock.patch.object(harvest, 'gate_prs', return_value={'plan/F-0001'}) as gate, \
-                mock.patch.object(harvest, 'merge_ready', return_value='landed') as merge:
-            results = harvest.land_ready(self.repo, self.state_dir, ready, lane,
-                                         Conventions(), False, False, lambda _l: None)
-        gate.assert_called_once()
-        self.assertEqual(gate.call_args[0][2], [('plan/F-0001', {}), ('fix/B-0001', {})])
-        self.assertEqual([c[0][1] for c in merge.call_args_list], ['plan/F-0001', 'fix/B-0002'])
-        self.assertEqual(results, {'plan/F-0001': 'landed', 'fix/B-0002': 'landed'})
+        """One local gate per landing class per pass over all the PRs ready to merge, never one
+        each; a PR whose required checks passed merges without one (``gate_set``)."""
+        ln = lane.Lane(self.pr_product(), self.state_dir, out=lambda _l: None)
+        entries = [{'branch': 'plan/F-0001', 'class': lane.DOCS, 'how': 'gate'},
+                   {'branch': 'fix/B-0001', 'class': lane.CODE, 'how': 'gate'},
+                   {'branch': 'fix/B-0003', 'class': lane.CODE, 'how': 'gate'},
+                   {'branch': 'fix/B-0002', 'class': lane.CODE, 'how': 'ci'}]
+        with mock.patch.object(lane, 'gate_one_set') as gate, \
+                mock.patch.object(lane, 'merge_prs') as merge:
+            lane.gate_set(ln, entries)
+        self.assertEqual([[f['branch'] for f in c.args[1]] for c in gate.call_args_list],
+                         [['plan/F-0001'], ['fix/B-0001', 'fix/B-0003']])
+        self.assertEqual([f['branch'] for f in merge.call_args.args[1]], ['fix/B-0002'])
 
     def test_a_docs_branch_already_handed_to_the_pr_lane_is_merged(self):
         """A docs branch an earlier harvest marked ``harvest: pr`` is not stranded there."""
         calls = self.fake_gh([])
         self.push_plan()
-        harvest.mark_session(self.state_dir, 'plan-f-0001', harvest='pr')
+        harvest.mark_session(self.state_dir, 'plan-f-0001', harvest='pr')  # a v0.1.2 ledger
         self.assertEqual(self.harvest(self.pr_product())[0], {'plan/F-0001': 'landed'})
         self.assertEqual(len(self.merges(calls)), 1)
 
@@ -2068,7 +2104,7 @@ class ForeignRedTests(unittest.TestCase):
         self.lines = []
 
     def hold(self, files, writes, kind='gate', text='FAILED (failures=1)'):
-        return harvest.hold_with_correction(self.state, 'worker/T-0080', self.record, kind, text,
+        return lane.hold_with_correction(self.state, 'worker/T-0080', self.record, kind, text,
                                             self.lines.append, files, writes)
 
     def registry(self):
@@ -2093,7 +2129,7 @@ class ForeignRedTests(unittest.TestCase):
         self.assertEqual(self.hold([], ['asf/harvest/harvest.py']), 'held')
 
     def hold_diff(self, files, touched):
-        return harvest.hold_with_correction(self.state, 'plan/F-0039', self.record, 'gate',
+        return lane.hold_with_correction(self.state, 'plan/F-0039', self.record, 'gate',
                                             'FAILED (failures=1)', self.lines.append, files, (),
                                             touched)
 
@@ -2104,7 +2140,7 @@ class ForeignRedTests(unittest.TestCase):
         self.assertEqual(self.hold_diff(['asf/mine.py'], ['asf/mine.py']), 'held')
 
     def test_a_docs_only_diff_is_never_held_for_a_red_test(self):
-        docs = ['docs/plans/f-0039.md', 'README.md']
+        docs = ['docs/plans/f-0039.md', 'docs/specs/f-0039.md']
         self.assertEqual(self.hold_diff([], docs), 'foreign')  # a bare verdict names no file
         self.assertEqual(self.hold_diff(['tests/test_stop.py'], docs), 'foreign')
         self.assertEqual(self.registry(), '')
@@ -2117,11 +2153,12 @@ class ForeignRedTests(unittest.TestCase):
 
     def test_what_counts_as_docs_only(self):
         conv = harvest.DEFAULTS
-        self.assertTrue(harvest.is_inert(conv, ['docs/plans/f-1.md', 'docs/reviews/1-x.md',
-                                                'README.md']))
+        self.assertEqual(lane.landing_class(conv, ['docs/plans/f-1.md', 'docs/reviews/1-x.md',
+                                                   'docs/specs/f-1.md']), lane.DOCS)
         for files in ([], ['docs/config.example.yaml'], ['asf/briefs/templates/plan.md'],
-                      ['plugin/skills/x/SKILL.md'], ['docs/plans/f-1.md', 'asf/x.py']):
-            self.assertFalse(harvest.is_inert(conv, files), files)
+                      ['plugin/skills/x/SKILL.md'], ['docs/plans/f-1.md', 'asf/x.py'],
+                      ['README.md']):
+            self.assertEqual(lane.landing_class(conv, files), lane.CODE, files)
 
     def test_only_a_gate_red_can_be_foreign(self):
         self.assertEqual(self.hold(['asf/other.py'], ['asf/harvest/harvest.py'], kind='conflict'),

@@ -195,14 +195,9 @@ class LaneCase(unittest.TestCase):
         return head, self.f.open_pr(branch, f'{item} — {title}')
 
     def ready_to_land(self, item, limit=4):
-        """Tick until ``item``'s branch waits only for its landing: reviewed in PR mode,
-        pushed by its coder in fast-forward mode."""
-        if self.landing == PR:
-            self.until(lambda: self.launches(item=item, kind='review'), limit,
-                       f'{item} is reviewed')
-        else:
-            self.until(lambda: self.launches(item=item, kind='coder'), limit,
-                       f'{item}\'s coder pushed')
+        """Tick until ``item``'s branch waits only for its landing: built and reviewed — one lane
+        for both modes (``lane.review.code: required`` reviews a fast-forward branch too)."""
+        self.until(lambda: self.launches(item=item, kind='review'), limit, f'{item} is reviewed')
 
 
 # ======================================================================================
@@ -255,14 +250,6 @@ class HappyPathPR(HappyPath, LaneCase):
 class HappyPathFF(HappyPath, LaneCase):
     landing = FF
 
-    # DEFECT (package plan §2 T3 and "one path for both landing modes"): fast-forward landing
-    # has no review stage — `land_combined` gates and pushes a code branch no review session
-    # ever read, whatever `conventions.lane.review.code` says; only the PR path (`land_pr` →
-    # `request_review`) asks for one.
-    @expected_failure
-    def test_r19_s1_card_to_merge_resolves_the_feature(self):
-        super().test_r19_s1_card_to_merge_resolves_the_feature()
-
 
 # ======================================================================================
 # Scenario 2 — a red trunk: the branch waits, it is never sent back
@@ -300,15 +287,6 @@ class RedTrunkPR(RedTrunk, LaneCase):
 
 class RedTrunkFF(RedTrunk, LaneCase):
     landing = FF
-
-    # DEFECT (T8: "the trunk alone is red → WAITING, never a correction"): fast-forward landing
-    # checks the trunk alone only when the gate names its red modules (`red_modules`, asf's own
-    # runner); a product's plain `unittest` names none, so `land_set` holds the branch with a
-    # `gate` correction and a round for the trunk's red. The PR path's `gate_prs` checks the
-    # trunk for every red and waits.
-    @expected_failure
-    def test_r19_s2_red_trunk_waits_then_lands(self):
-        super().test_r19_s2_red_trunk_waits_then_lands()
 
 
 # ======================================================================================
@@ -388,14 +366,6 @@ class PreexistingPRPR(PreexistingPR, LaneCase):
 class PreexistingPRFF(PreexistingPR, LaneCase):
     landing = FF
 
-    # DEFECT (package plan §2 T2 adoption; fault 9): under fast-forward landing nothing adopts
-    # a branch no run of the ledger holds — `step_wave.pr_heads` answers only for pull-request
-    # landing, and harvest skips a branch with no run — so no review is asked, nothing lands,
-    # and T-0001 (Active off its branch, no longer New) never gets a session: stuck for good.
-    @expected_failure
-    def test_r19_s5_open_pr_is_adopted_not_rebuilt(self):
-        super().test_r19_s5_open_pr_is_adopted_not_rebuilt()
-
 
 # ======================================================================================
 # R8 — a tick that dies between the external merge and its ledger write
@@ -444,23 +414,9 @@ class CrashAfterMerge:
 class CrashAfterMergePR(CrashAfterMerge, LaneCase):
     landing = PR
 
-    # DEFECT (R3/R8, T11): no merge intent is written before `gh pr merge`, and the recovery
-    # path is `close_merged` (the branch is gone after `--delete-branch`), which closes the run
-    # at the trunk's tip after the next tick's release commit — not at the merge sha.
-    @expected_failure
-    def test_r8_crash_between_merge_and_ledger_is_recoverable(self):
-        super().test_r8_crash_between_merge_and_ledger_is_recoverable()
-
 
 class CrashAfterMergeFF(CrashAfterMerge, LaneCase):
     landing = FF
-
-    # DEFECT (R8, T11): after a push onto the trunk with no ledger line, the branch is 0 ahead
-    # and `close_merged` closes the run at the trunk's tip (the next tick's release commit),
-    # not at the sha the landing pushed.
-    @expected_failure
-    def test_r8_crash_between_merge_and_ledger_is_recoverable(self):
-        super().test_r8_crash_between_merge_and_ledger_is_recoverable()
 
 
 # ======================================================================================
@@ -472,10 +428,6 @@ class HumanMergePR(LaneCase):
     stage = 'planned'
     start = 'ready'
 
-    # DEFECT (T11): a PR merged outside the lane is closed by `close_merged` / `land_already` at
-    # the trunk's tip, not at its merge sha; the lane never asks the host which commit merged
-    # it while the branch it left behind still reads as work on origin.
-    @expected_failure
     def test_r12_human_merge_is_landed_not_foreign(self):
         f = self.f
         self.until(lambda: f.prs('feature/T-0001'), 3, 'the PR is opened')
@@ -528,12 +480,6 @@ class DocsRedOnGatePR(DocsRedOnGate, LaneCase):
 
 class DocsRedOnGateFF(DocsRedOnGate, LaneCase):
     landing = FF
-
-    # DEFECT (fault 1): fast-forward landing gates a docs-only branch with `docs_only(conv)` —
-    # "docs cannot turn a test red" — so a plan the product's own gate refuses lands on the trunk.
-    @expected_failure
-    def test_r7_fault1_docs_pr_red_on_the_product_gate_never_merges(self):
-        super().test_r7_fault1_docs_pr_red_on_the_product_gate_never_merges()
 
 
 class OpenFixPR:
@@ -622,11 +568,6 @@ class RefusedPushFF(LaneCase):
     landing = FF
     stage = 'planned'
 
-    # DEFECT (T9: "a pre-push hook refused (with the hook's output)"): health judges the run
-    # `failed: unpushed work` and holds it with the generic "commit and push what you have"
-    # text; the REPORT's `pushed: no — <the hook's output>` never reaches the correction, so the
-    # next session pushes into the same refusal.
-    @expected_failure
     def test_fault8_refused_push_carries_the_hooks_output(self):
         f = self.f
         f.refuse_pushes('pre-push: the trunk is red (tests/test_trunk.py) — push refused')
