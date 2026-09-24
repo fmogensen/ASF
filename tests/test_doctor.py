@@ -789,6 +789,32 @@ class TestDoctorStamp(unittest.TestCase):
         self.assertNotIn('productsha', footer)
 
 
+class TestBriefSmoke(unittest.TestCase):
+    """§12: the doctor renders one brief of every kind for the product — a config smoke test.
+    A kind whose brief raises turns the row red, naming the kind and the error."""
+
+    def test_every_kind_renders_for_a_product(self):
+        from asf import briefs
+        ok, detail = doctor.check_briefs(env.Product('sample', {}))
+        self.assertTrue(ok, detail)
+        self.assertEqual(detail, f'{len(briefs.KINDS)} brief kinds render')
+
+    def test_a_kind_that_raises_is_red_with_its_kind_and_error(self):
+        import importlib
+        build_mod = importlib.import_module('asf.briefs.build')
+        real = build_mod.load_template
+
+        def broken(kind):
+            if kind == 'review':
+                raise KeyError('reviews_dir')
+            return real(kind)
+        with mock.patch.object(build_mod, 'load_template', broken):
+            ok, detail = doctor.check_briefs(env.Product('sample', {}))
+        self.assertFalse(ok)
+        self.assertEqual(detail, "review: KeyError: 'reviews_dir'")
+        self.assertTrue(doctor.is_red([('briefs', True, ok, detail)]))
+
+
 if __name__ == '__main__':
     unittest.main()
 

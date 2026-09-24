@@ -688,6 +688,8 @@ def run(product_name):
     rows.append(('drift', True, ok, detail))
     ok, detail = check_rule_checks(product)
     rows.append(('rule-checks', False, ok, detail))
+    ok, detail = check_briefs(product)
+    rows.append(('briefs', True, ok, detail))
     for ok, detail in check_capacity(cfg, product):
         rows.append(('capacity', False, ok, detail))
     for ok, detail in check_models(cfg):
@@ -712,6 +714,27 @@ def check_gate_speed(product):
         return lane.gate_slow_line(product)
     except (OSError, ValueError):
         return None
+
+
+def check_briefs(product, kinds=None):
+    """The config smoke test: one brief of every kind rendered for the product (a synthetic row,
+    no card, no git) — a product yaml, template or convention that breaks a brief is found here,
+    not by the first session of that kind. ``(True, 'N kinds render')``, or ``(False, '<kind>:
+    <error>; …')`` naming every kind that raised."""
+    from asf import briefs
+    from asf.feeder.rows import LAUNCH, Row
+    kinds = tuple(kinds or briefs.KINDS)
+    failed = []
+    for kind in kinds:
+        row = Row(tier=0, kind='DOCTOR → SMOKE', item_id='', feature_id='', action=LAUNCH,
+                  brief_kind=kind, branch='', reason='doctor: brief smoke test')
+        try:
+            briefs.build(product, row, {'items': {}}, [], None)
+        except Exception as e:  # noqa: BLE001 — every failure is the finding, by kind
+            failed.append(f'{kind}: {type(e).__name__}: {e}')
+    if failed:
+        return False, '; '.join(failed)
+    return True, f'{len(kinds)} brief kinds render'
 
 
 def check_rule_checks(product, path=None):
