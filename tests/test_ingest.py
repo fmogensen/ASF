@@ -475,7 +475,9 @@ class CmdIngestEndToEndTests(unittest.TestCase):
         self.assertEqual(idx1.split('"generated"')[1], idx2.split('"generated"')[1])
 
     def test_epic_with_no_children_and_no_upstream_change_is_untouched(self):
-        write(self.root, 'E-0009', 'epic', 'Factory', 'epics', typed_lines=['legacy_id: GOAL 9'])
+        write(self.root, 'E-0009', 'epic', 'Factory', 'epics', typed_lines=['legacy_id: GOAL 9'],
+              machine_lines=('schema_version: 1', 'state: New', 'stage_since: 2026-01-01T00:00:00Z',
+                             'updated: 2026-01-01T00:00:00Z'))
         before = open(os.path.join(self.root, 'epics', 'E-0009.md'), encoding='utf-8').read()
         self.run_ingest(EMPTY_EV)
         after = open(os.path.join(self.root, 'epics', 'E-0009.md'), encoding='utf-8').read()

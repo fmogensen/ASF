@@ -915,6 +915,48 @@ class NextAllTests(unittest.TestCase):
                          '— 2 more cards await a decision (asf next --all)')
 
 
+class EpicRankOrdersFeatures(unittest.TestCase):
+    """Rank orders only within a parent, so the feeder orders Features by (Epic rank, Feature
+    rank, id) — ranking an Epic first puts its whole subtree first; no Epic or no rank goes last.
+    Tasks follow their Feature (Epic, Feature, Task rank); S1 tiers stay first."""
+
+    def index(self):
+        items = {
+            'B-0001': {'id': 'B-0001', 'type': 'bug', 'title': 'Down', 'severity': 'S1',
+                       'decided': True, 'state': 'New'},
+            'E-0001': {'id': 'E-0001', 'type': 'epic', 'rank': 2, 'state': 'Active'},
+            'E-0002': {'id': 'E-0002', 'type': 'epic', 'rank': 1, 'state': 'Active'},
+            'E-0003': {'id': 'E-0003', 'type': 'epic', 'state': 'Active'},
+        }
+        feats = [('F-0001', 'E-0001', 1), ('F-0002', 'E-0002', 2), ('F-0003', 'E-0002', 1),
+                 ('F-0004', None, 1), ('F-0005', 'E-0003', 1), ('F-0006', 'E-0001', None)]
+        for fid, epic, rank in feats:
+            f = {'id': fid, 'type': 'feature', 'decided': True, 'stage': 'card', 'state': 'New'}
+            if epic:
+                f['parent'] = epic
+            if rank is not None:
+                f['rank'] = rank
+            items[fid] = f
+        # F-0003 is building: its Tasks come in Task-rank order, inside its Feature's place
+        items['F-0003'].update(stage='plan-approved', children=['T-0001', 'T-0002'])
+        items['T-0001'] = {'id': 'T-0001', 'type': 'task', 'parent': 'F-0003', 'rank': 2,
+                           'state': 'New', 'writes': ['a.py']}
+        items['T-0002'] = {'id': 'T-0002', 'type': 'task', 'parent': 'F-0003', 'rank': 1,
+                           'state': 'New', 'writes': ['b.py']}
+        return {'items': items}
+
+    ORDER = ['T-0002', 'T-0001', 'F-0002', 'F-0001', 'F-0006', 'F-0004', 'F-0005']
+
+    def test_feature_rows_follow_the_epic_rank(self):
+        out = rows.feature_rows(self.index()['items'], product(), set(), [])
+        self.assertEqual([r.item_id for r in out], self.ORDER)
+
+    def test_candidates_keep_s1_first_then_epic_order(self):
+        out = [r.item_id for r in rows.candidates(self.index(), product(), [])]
+        self.assertEqual(out[0], 'B-0001')
+        self.assertEqual([i for i in out if i[0] in 'FT'], self.ORDER)
+
+
 if __name__ == '__main__':
     unittest.main()
 

@@ -94,7 +94,7 @@ class Product:
             lines.append("decided: true")
         if parent:
             lines.append(f"parent: {parent}")
-        machine = [f"state: {state}"] + ([f"stage: {stage}"] if stage else []) + [
+        machine = ["schema_version: 1", f"state: {state}"] + ([f"stage: {stage}"] if stage else []) + [
             "stage_since: 2026-01-01T00:00:00Z", "updated: 2026-01-01T00:00:00Z"]
         lines += list(typed_lines) + ["# ---- machine ----"] + machine
         with open(os.path.join(self.backlog, FOLDER_OF[type_], f"{id_}.md"), "w") as f:

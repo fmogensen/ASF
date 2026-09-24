@@ -194,6 +194,26 @@ def feature_of(items, item):
     return None
 
 
+def epic_of(items, item):
+    """The Epic above an item (walking parents), or None."""
+    seen = set()
+    item = items.get(item.get('parent')) if item else None
+    while item and item['id'] not in seen:
+        seen.add(item['id'])
+        if item['type'] == 'epic':
+            return item
+        item = items.get(item.get('parent'))
+    return None
+
+
+def feature_order(items, feature):
+    """A Feature's place in the feeder: its Epic's rank, then its own rank, then its id — so a
+    product puts a whole Epic first by ranking the Epic. Rank orders only within a parent, so a
+    Feature's own rank alone would interleave Epics. No Epic, or an unranked one, sorts last."""
+    epic = epic_of(items, feature)
+    return (ix.rank(epic) if epic else ix.BIG, ix.rank(feature), feature['id'])
+
+
 def _task_feature(items, task):
     """A Task hangs under a Feature directly or via a Story; fall back to its ``feature:`` field."""
     f = feature_of(items, task)
@@ -353,7 +373,7 @@ def _doc_row(kind, fid, doc, product, reason, unlanded, open_branches):
 
 def feature_rows(items, product, busy, running, landed_shas=None, unlanded=None,
                  open_branches=None):
-    """Every Feature's rows, in Feature order (rank, then id). ``running`` grows as PLAN → CODE
+    """Every Feature's rows, in Feature order (:func:`feature_order`: Epic rank, rank, id). ``running`` grows as PLAN → CODE
     rows are handed out, so two ready Tasks sharing a file never both launch. ``unlanded``
     (:func:`asf.workers.lifecycle.unlanded`) and ``open_branches`` (branches with an open PR):
     a spec or plan whose work is pushed and waiting to land is not starved (PUSHED → LAND)."""
@@ -361,7 +381,7 @@ def feature_rows(items, product, busy, running, landed_shas=None, unlanded=None,
     limit = stalemate_round(product)
     feats = [f for f in ix.of_type(items, 'feature')
              if f.get('decided') is True and is_open(f) and not f.get('blocked')]
-    for f in sorted(feats, key=lambda v: (ix.rank(v), v['id'])):
+    for f in sorted(feats, key=lambda v: feature_order(items, v)):
         fid = f['id']
         stage = f.get('stage') or 'card'
         doc, rnd = review_round(f)
@@ -565,7 +585,7 @@ def candidates(index, product, inflight, attempts=None, corrections=None, busy=N
               groom_state=None, landed_shas=None, decision_limit=None, unlanded=None,
               open_branches=None):
     """Every row the index supports right now, uncut by capacity, in emit order: tier, then the
-    Feature's rank and id, then within a Feature the stalemate, branch housekeeping, new work.
+    Feature's order (:func:`feature_order`: Epic rank, Feature rank, id), then within a Feature the stalemate, branch housekeeping, new work.
     ``busy``: item ids held by something that is not a session and takes no slot — a pushed
     branch waiting for harvest (:func:`asf.workers.lifecycle.awaiting_harvest`). ``groom_state``:
     §2.5's fact for the GROOM → ADJUDICATE row; a caller that passes none gets none. A card
@@ -597,8 +617,9 @@ def candidates(index, product, inflight, attempts=None, corrections=None, busy=N
             # one session decides the whole day's questions for every Feature: it goes before
             # the Feature work, not at the rank of whichever card happens to be the oldest (an
             # unranked inbox card put it behind every launch, and the cut never reached it)
-            return (r.tier, -1, '', 0, seq)
-        return (r.tier, ix.rank(f), r.feature_id or '~', KIND_ORDER.get(r.kind, 4), seq)
+            return (r.tier, -1, -1, '', 0, seq)
+        order = feature_order(items, f) if f else (ix.BIG, ix.BIG, r.feature_id or '~')
+        return (r.tier, *order, KIND_ORDER.get(r.kind, 4), seq)
     return [r for _seq, r in sorted(enumerate(rows), key=key)]
 
 

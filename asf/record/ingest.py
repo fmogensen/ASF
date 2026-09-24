@@ -24,8 +24,10 @@ from asf.tick import stale
 
 EVIDENCE_TYPES = {'epic', 'feature', 'story', 'task', 'bug'}
 LANDING_CHILD_TYPES = {'story', 'task', 'bug'}
-MACHINE_KEY_ORDER = ['state', 'stage', 'stage_since', 'cost', 'evidence', 'blocked',
-                     'blocked_by_open', 'updated']
+# the keys ingest derives, in the order it writes them; any other machine key (schema_version,
+# spend_usd, ...) is someone else's and is carried through untouched — ingest never drops a key
+MACHINE_KEY_ORDER = ['schema_version', 'state', 'stage', 'stage_since', 'cost', 'evidence',
+                     'blocked', 'blocked_by_open', 'updated']
 RULE_PREFIX = 'rule: '
 
 
@@ -302,6 +304,7 @@ def _ingest_fields(machine, new_state, stage, ev_lines, blocked_pair, now):
 
     fields['updated'] = now
     ordered = {k: fields[k] for k in MACHINE_KEY_ORDER if k in fields}
+    ordered.update((k, v) for k, v in fields.items() if k not in ordered)
 
     history = []
     stamp = now[:16].replace('T', ' ')
@@ -428,6 +431,22 @@ def descend(canonical, new_state, closings, derived):
             grew = True
 
 
+def restamp(root):
+    """A migrated record (``index.json`` stamped by ``asf schema-migrate``) keeps every card at
+    that stamp: a card below it — stripped by an older ingest that dropped ``schema_version``
+    from the machine block — is brought back up here, so the operator never reruns the migration
+    by hand. A record with no ``index.json`` yet is stamped with this package's schema, as its
+    first index will be (:func:`asf.record.index.do_index`); an unstamped one is left for
+    ``schema-migrate``. Returns how many cards changed."""
+    from asf import schema
+    version = schema.record_version(root)
+    if version is None:
+        version = schema.SCHEMA_VERSION
+    if not version:
+        return 0
+    return schema.stamp_cards(root, version)
+
+
 def cmd_ingest(args, root):
     # the evidence is the record's product's (B-0050): the resolved --product, else the default
     # when one is configured (a record with no product configured reads evidence's own default)
@@ -439,6 +458,7 @@ def cmd_ingest(args, root):
             name = None
     product = env.load_product(name) if name else None
     ev = evidence.load(fresh=getattr(args, 'fresh', False), product=product)
+    restamp(root)
     by_id, parse_errors = load_items(root)
     if parse_errors:
         for f, line, why in parse_errors:
