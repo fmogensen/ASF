@@ -27,6 +27,12 @@ capacity:
     per_run: 2
     parallel: 1
     runners: 1
+token_caps:
+  default:
+    input: 8000000
+    output: 1000000
+    cache_read: 400000000
+    cache_write: 40000000
 deploy_sha: none
 approvals:
   spend_money: human-now

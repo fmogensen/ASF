@@ -633,3 +633,33 @@ class TestDoctorStamp(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TokenCaps(unittest.TestCase):
+    """`doctor.check_token_caps` — the doctor's `token-caps` row."""
+
+    @staticmethod
+    def _rows(block):
+        data = {} if block is None else {'token_caps': block}
+        findings = doctor.check_token_caps({}, env.Product('a', data))
+        return findings, [('token-caps', False, ok, d) for ok, d in findings]
+
+    def test_doctor_prints_the_resolved_caps(self):
+        findings, _ = self._rows(None)
+        self.assertEqual(len(findings), 1)
+        ok, detail = findings[0]
+        self.assertTrue(ok)
+        for text in ('in 8.0 M', 'out 1.0 M', 'cache rd 400.0 M', 'cache wr 40.0 M'):
+            self.assertIn(text, detail)
+
+    def test_doctor_names_a_bad_block(self):
+        findings, rows = self._rows({'default': {'bogus': 1}})
+        self.assertTrue(findings)
+        self.assertFalse(findings[0][0])
+        self.assertIn('bogus', findings[0][1])
+        self.assertFalse(doctor.is_red(rows))
+
+    def test_doctor_names_an_off_dimension(self):
+        findings, rows = self._rows({'spec': {'cache_read': 'off'}})
+        self.assertTrue(any(not ok and 'spec.cache_read' in d for ok, d in findings), findings)
+        self.assertFalse(doctor.is_red(rows))

@@ -21,7 +21,7 @@ import sys
 import tempfile
 import unittest
 
-from asf import env, hermetic, scheduler
+from asf import env, hermetic, scheduler, tokens
 from asf.metrics import metrics
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_sample_product` does not
@@ -260,6 +260,16 @@ class SampleProductTest(unittest.TestCase):
         folders = os.listdir(self.record())
         self.assertIn('cards', folders)
         self.assertNotIn('inbox', folders)
+
+
+class SampleTokenCapsTest(unittest.TestCase):
+    def test_sample_declares_token_caps(self):
+        with open(os.path.join(SAMPLE, 'product.yaml')) as f:
+            data = env.loads(f.read())
+        p = env.Product('sample', data)
+        tokens.caps(p)
+        self.assertEqual(set(tokens.cap_for(p, 'spec')), set(tokens.DIMENSIONS))
+        self.assertTrue(all(isinstance(v, int) for v in tokens.cap_for(p, 'spec').values()))
 
 
 class SampleClocksTest(unittest.TestCase):

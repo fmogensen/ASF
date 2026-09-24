@@ -278,6 +278,17 @@ class ProductValidation(unittest.TestCase):
             """))
         self.assertEqual(problems, [])
 
+    def test_token_caps_is_accepted(self):
+        problems = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            token_caps:
+              default:
+                input: 8000000
+              spec:
+                cache_read: off
+            """))
+        self.assertEqual(problems, [])
+
     def test_an_unknown_capacity_key_is_reported_with_its_line(self):
         problems = env.validate_product_text(_dedent("""
             repo_slug: a/b

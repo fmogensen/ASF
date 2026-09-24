@@ -27,7 +27,7 @@ import shutil
 import subprocess
 import time
 
-from asf import approvals, drift, env, hooks, schema, scheduler
+from asf import approvals, drift, env, hooks, schema, scheduler, tokens
 from asf.workers import pool
 
 _SKIP_DIRS = {'.git', 'node_modules', '__pycache__', 'dist', 'build', '.next', 'vendor', 'venv',
@@ -477,7 +477,35 @@ def run(product_name):
     rows.append(('drift', True, ok, detail))
     for ok, detail in check_capacity(cfg, product):
         rows.append(('capacity', False, ok, detail))
+    for ok, detail in check_token_caps(cfg, product):
+        rows.append(('token-caps', False, ok, detail))
     return rows
+
+
+def _tokens_m(n):
+    return 'off' if n is None else f'{n / 1_000_000:.1f} M'
+
+
+def check_token_caps(cfg, product):
+    """[(ok, detail)] — the ``token-caps`` doctor row's findings: the resolved default cap, or one
+    refusal per bad ``token_caps:`` entry, and one finding per dimension an operator set to
+    ``off`` (an uncapped dimension stays visible every run). ``run()`` appends each as
+    ``required=False``, so none of these turns doctor red. ``cfg`` is unused (PD12): the caps
+    come from the product alone."""
+    try:
+        table = tokens.caps(product)
+    except tokens.TokenCapError as e:
+        return [(False, f'token_caps: {why}') for why in str(e).split('; ')]
+    d = table['default']
+    kinds = sum(1 for k in table if k != 'default')
+    findings = [(True, f'default: in {_tokens_m(d["input"])} / out {_tokens_m(d["output"])} / '
+                       f'cache rd {_tokens_m(d["cache_read"])} / cache wr {_tokens_m(d["cache_write"])}; '
+                       f'{kinds} kind(s) overridden')]
+    for kind, row in (product._get('token_caps') or {}).items():
+        for dim, v in row.items():
+            if v == tokens.OFF:
+                findings.append((False, f'token_caps: {kind}.{dim} is off — uncapped'))
+    return findings
 
 
 def format_table(product_name, rows):

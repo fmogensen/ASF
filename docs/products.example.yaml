@@ -107,6 +107,18 @@ capacity:
     parallel: 2       # batches in flight at once
     runners: 4        # runner slots one run may claim
 
+# token_caps: runaway ceilings on one run's tokens, per dimension, never summed. `default` applies
+# to every job kind; a kind (spec, review, fix, code, plan, ...) narrows or widens single dimensions.
+# A cap is a whole number of tokens, or `off` for none. Leave the block out for the built-in caps.
+token_caps:
+  default:
+    input: 8000000
+    output: 1000000
+    cache_read: 400000000
+    cache_write: 40000000
+  # spec:
+  #   input: 4000000
+
 # how a deployed sha is discovered, for the evidence pass and release notes.
 deploy_sha:
   provider: github-deployments   # github-deployments | fly | vercel | script
