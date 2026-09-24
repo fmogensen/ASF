@@ -470,6 +470,24 @@ def check_convention_shapes(product):
     return out
 
 
+def model_table_lines(product):
+    """One line per brief kind: the model label each item class resolves to for this product —
+    the built-in kind × class table with ``conventions.models`` applied
+    (``review: heavy (S1 story feature epic) · light (S2 S3 task)``)."""
+    from asf.briefs.build import model_table
+    out = []
+    for kind, by_class in model_table(product).items():
+        labels = {}
+        for cls, label in by_class.items():
+            labels.setdefault(label, []).append(cls)
+        if len(labels) == 1:
+            out.append(f'{kind}: {next(iter(labels))}')
+        else:
+            out.append(f'{kind}: ' + ' · '.join(f"{label} ({' '.join(classes)})"
+                                                for label, classes in labels.items()))
+    return out
+
+
 def check_models(cfg):
     """[(ok, detail)] — the ``models`` doctor row (plan F-0093 P11): one finding when
     ``worker_pool.models`` has no ``cheap`` entry, none when it does. ``run()`` appends it as
@@ -674,6 +692,8 @@ def run(product_name):
         rows.append(('capacity', False, ok, detail))
     for ok, detail in check_models(cfg):
         rows.append(('models', False, ok, detail))
+    for detail in model_table_lines(product):
+        rows.append(('model table', False, True, detail))
     for ok, detail in check_convention_shapes(product):
         rows.append(('conventions', True, ok, detail))
     for ok, detail in check_token_caps(cfg, product):

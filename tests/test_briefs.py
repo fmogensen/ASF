@@ -561,6 +561,60 @@ class KindModelGrantTest(unittest.TestCase):
         for kind in ('coder', 'fixer', 'rebase', 'close', 'fix-bug'):
             self.assertEqual(build_mod.model_for(p, kind), 'light', kind)
 
+    BUG = staticmethod(lambda sev: {'type': 'bug', 'severity': sev})
+
+    def test_the_defaults_per_class(self):
+        p = product()
+        for kind in ('review', 'adjudicate', 'correct'):
+            for item in (self.BUG('S2'), self.BUG('S3'), {'type': 'task'}):
+                self.assertEqual(build_mod.model_for(p, kind, item), 'light', (kind, item))
+            self.assertEqual(build_mod.model_for(p, kind, self.BUG('S1')), 'heavy', kind)
+        self.assertEqual(build_mod.model_for(p, 'review', {'type': 'feature'}), 'heavy')
+        for kind in ('spec', 'plan'):
+            self.assertEqual(build_mod.model_for(p, kind, {'type': 'task'}), 'heavy', kind)
+        for kind in ('close', 'rebase', 'fix-bug'):
+            for sev in ('S2', 'S3'):
+                self.assertEqual(build_mod.model_for(p, kind, self.BUG(sev)), 'light', kind)
+        self.assertEqual(build_mod.model_for(p, 'fix-bug', self.BUG('S1')), 'heavy')
+
+    def test_a_string_override_covers_every_class(self):
+        p = product(conventions={'models': {'review': 'light', 'correct': 'heavy'}})
+        self.assertEqual(build_mod.model_for(p, 'review', {'type': 'feature'}), 'light')
+        self.assertEqual(build_mod.model_for(p, 'correct', self.BUG('S3')), 'heavy')
+        self.assertEqual(build_mod.model_for(p, 'review', self.BUG('S2'), ), 'light')
+
+    def test_a_map_override_resolves_by_class_then_default(self):
+        p = product(conventions={'models': {'review': {'S1': 'heavy', 'S2': 'light',
+                                                       'feature': 'heavy', 'default': 'light'},
+                                            'spec': {'task': 'light'}}})
+        self.assertEqual(build_mod.model_for(p, 'review', self.BUG('S1')), 'heavy')
+        self.assertEqual(build_mod.model_for(p, 'review', self.BUG('S2')), 'light')
+        self.assertEqual(build_mod.model_for(p, 'review', {'type': 'feature'}), 'heavy')
+        self.assertEqual(build_mod.model_for(p, 'review', {'type': 'story'}), 'light')
+        self.assertEqual(build_mod.model_for(p, 'review'), 'light')
+        # a map without default: a class it does not name keeps the built-in row
+        self.assertEqual(build_mod.model_for(p, 'spec', {'type': 'task'}), 'light')
+        self.assertEqual(build_mod.model_for(p, 'spec', {'type': 'feature'}), 'heavy')
+
+    def test_a_bad_shape_falls_back_with_a_doctor_finding(self):
+        from asf import doctor
+        for bad in (['heavy'], 3, {'S1': ['heavy']}, ''):
+            with self.subTest(bad=bad):
+                p = product(conventions={'models': {'review': bad}})
+                self.assertEqual(build_mod.model_for(p, 'review', self.BUG('S2')), 'light')
+                self.assertEqual(build_mod.model_for(p, 'review', self.BUG('S1')), 'heavy')
+                findings = p.conventions.shape_findings()
+                self.assertEqual([k for k, _w in findings], ['models.review'])
+                self.assertIn('a model label or a map of labels by class', findings[0][1])
+                self.assertFalse(all(ok for ok, _d in doctor.check_convention_shapes(p)))
+
+    def test_doctor_shows_the_resolved_table(self):
+        from asf import doctor
+        lines = doctor.model_table_lines(product(conventions={'models': {'close': 'heavy'}}))
+        self.assertIn('spec: heavy', lines)
+        self.assertIn('close: heavy', lines)
+        self.assertIn('review: heavy (S1 story feature epic) · light (S2 S3 task)', lines)
+
     def test_the_product_can_override_a_label(self):
         p = product(conventions={'models': {'review': 'light'}})
         self.assertEqual(build_mod.model_for(p, 'review'), 'light')

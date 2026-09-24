@@ -137,6 +137,16 @@ MAP_CONVENTIONS = ('models', 'branch_prefixes', 'harvest')
 #: default: it is a red doctor finding.
 WORD_OR_MAP_CONVENTIONS = {'landing_checks_missing': ('wait', 'local-gate')}
 
+
+
+def model_value_ok(value):
+    """``conventions.models.<kind>`` is one label, or a map of labels by class
+    (``{S1: heavy, S2: light, feature: heavy, default: light}``); anything else is misshapen."""
+    if isinstance(value, dict):
+        return all(isinstance(v, str) and v.strip() for v in value.values())
+    return isinstance(value, str) and bool(value.strip())
+
+
 DURATION_RE = re.compile(r'^(\d+)([smhd])$')
 DURATION_UNITS = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}
 
@@ -329,6 +339,11 @@ class Conventions:
             values = value.values() if isinstance(value, dict) else [value]
             if value is not None and any(str(v).strip().lower() not in words for v in values):
                 misshapen[key] = value
+        models = data.get('models')
+        for kind, value in (models.items() if isinstance(models, dict) else ()):
+            # ``models.<kind>``: a label, or a map of labels by class (asf.briefs.build)
+            if not model_value_ok(value):
+                misshapen[f'models.{kind}'] = value
         harvest = data.pop('harvest', None)
         if isinstance(harvest, dict):  # ``harvest: {gate, branches_per_tick}`` → the two fields
             rest = {}
@@ -380,6 +395,7 @@ class Conventions:
         for key, value in sorted(getattr(self, '_misshapen', {}).items()):
             words = WORD_OR_MAP_CONVENTIONS.get(key)
             want = (f"one of {', '.join(words)} or a map of them per landing class" if words
+                    else 'a model label or a map of labels by class' if key.startswith('models.')
                     else 'a map')
             out.append((key, f'must be {want}, not {value!r}'))
         return out

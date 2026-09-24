@@ -29,6 +29,7 @@ import json
 import os
 import string
 
+from asf import conventions as conventions_mod
 from asf import env
 from asf.briefs import facts as facts_mod
 from asf.briefs import preamble as preamble_mod
@@ -47,9 +48,30 @@ KINDS = ('spec', 'plan', 'coder', 'review', 'fixer', 'rebase', 'close', 'adjudic
          'correct', 'groom', 'reshape')
 KIND_ALIASES = {'task': 'coder', 'code': 'coder', 'fix': 'fixer', 'bug': 'fix-bug',
                 'fix_bug': 'fix-bug'}
-DEFAULT_MODELS = {'spec': HEAVY, 'plan': HEAVY, 'adjudicate': HEAVY, 'review': HEAVY,
-                  'coder': LIGHT, 'fixer': LIGHT, 'rebase': LIGHT, 'close': LIGHT,
-                  'fix-bug': LIGHT, 'correct': LIGHT, 'groom': HEAVY, 'reshape': HEAVY}
+#: The class of an item, for picking its model within a kind: a Bug's severity, else its type.
+MODEL_CLASSES = ('S1', 'S2', 'S3', 'task', 'story', 'feature', 'epic')
+#: The built-in model per brief kind AND item class — the one place the defaults live, so the
+#: saving is a code default, not a setting someone has to remember. ``default`` is the label for
+#: a class the kind does not name (and for a brief with no item). Judgement over a small change
+#: (the review, correction and adjudication of an S2/S3 Bug or of a Task) runs light; an S1 Bug,
+#: a spec, a plan and a Feature-level review run heavy. ``conventions.models.<kind>`` overrides a
+#: row, as one label or as a map of this shape (:func:`model_for`).
+MODEL_TABLE = {
+    'spec':       {'default': HEAVY},
+    'plan':       {'default': HEAVY},
+    'groom':      {'default': HEAVY},
+    'reshape':    {'default': HEAVY},
+    'review':     {'default': HEAVY, 'S1': HEAVY, 'S2': LIGHT, 'S3': LIGHT, 'task': LIGHT},
+    'adjudicate': {'default': HEAVY, 'S1': HEAVY, 'S2': LIGHT, 'S3': LIGHT, 'task': LIGHT},
+    'correct':    {'default': LIGHT, 'S1': HEAVY, 'S2': LIGHT, 'S3': LIGHT, 'task': LIGHT},
+    'fix-bug':    {'default': LIGHT, 'S1': HEAVY, 'S2': LIGHT, 'S3': LIGHT},
+    'coder':      {'default': LIGHT},
+    'fixer':      {'default': LIGHT},
+    'rebase':     {'default': LIGHT},
+    'close':      {'default': LIGHT},
+}
+#: The label per kind for a brief with no item — what ``model_for(product, kind)`` returns.
+DEFAULT_MODELS = {kind: row['default'] for kind, row in MODEL_TABLE.items()}
 #: The kinds that may mint new cards (Stories, Tasks, Decisions) and so need an id range.
 ID_RANGE_KINDS = ('spec', 'plan', 'adjudicate', 'fix-bug', 'groom', 'reshape')
 
@@ -162,10 +184,46 @@ def render(text, ctx):
 
 # ---- model and grants --------------------------------------------------------
 
-def model_for(product, kind):
-    """``conventions.models.<kind>``, else the default label for that kind."""
-    table = preamble_mod.conventions(product).map_of('models')  # never a string's .get
-    return table.get(kind) or DEFAULT_MODELS.get(kind, LIGHT)
+def item_class(item):
+    """The model class of an index item: a Bug's severity (``S1``..``S3``), else its type
+    (``task``/``story``/``feature``/``epic``); ``default`` when the item says neither."""
+    item = item if isinstance(item, dict) else {}
+    kind = str(item.get('type') or '').strip().lower()
+    if kind == 'bug':
+        sev = str(item.get('severity') or '').strip().upper()
+        return sev if sev in MODEL_CLASSES else 'default'
+    return kind if kind in MODEL_CLASSES else 'default'
+
+
+def _pick(row, cls):
+    return row.get(cls) or row.get('default')
+
+
+def model_for(product, kind, item=None):
+    """The model label for a ``kind`` brief about ``item`` (an index item, or None).
+
+    ``conventions.models.<kind>`` wins: one label for every class, or a map by class whose
+    ``default:`` covers the classes it does not name. A class it covers neither way — and a
+    value of any other shape, which doctor reports — falls to :data:`MODEL_TABLE`."""
+    cls = item_class(item)
+    builtin = MODEL_TABLE.get(kind, {'default': LIGHT})
+    override = preamble_mod.conventions(product).map_of('models').get(kind)
+    if not conventions_mod.model_value_ok(override):
+        override = None
+    if isinstance(override, str):
+        return override.strip()
+    return (override and _pick(override, cls)) or _pick(builtin, cls)
+
+
+def model_table(product):
+    """``{kind: {class: label}}`` — every kind × class resolved for this product (doctor)."""
+    return {kind: {cls: model_for(product, kind, _class_item(cls))
+                   for cls in MODEL_CLASSES}
+            for kind in MODEL_TABLE}
+
+
+def _class_item(cls):
+    return {'type': 'bug', 'severity': cls} if cls.startswith('S') else {'type': cls}
 
 
 def add_dirs_for(product, row=None, kind=None):
@@ -300,7 +358,7 @@ def build(product, row, index, inflight=None, repo_facts=None):
              render(load_template(kind), ctx).rstrip() + correction_text(row, kind),
              render(TAIL, ctx)]
     return Brief(kind=kind, item_id=ctx['item_id'], text='\n\n'.join(p.strip() for p in parts) + '\n',
-                 model=model_for(product, kind), add_dirs=add_dirs_for(product, row, kind),
+                 model=model_for(product, kind, facts['item']), add_dirs=add_dirs_for(product, row, kind),
                  id_ranges_needed=id_ranges_needed(kind),
                  card_digest=card_digest(product, ctx['item_id'], index))
 
