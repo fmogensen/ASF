@@ -24,6 +24,10 @@ The product yaml carries the overrides::
         gate_timeout_s: 900       # default 600: a gate past it is killed and red (B-0072)
       amendable_paths: [rules/*, docs/CONSTITUTION.md]  # F-0031: a landed branch touching one
                                                           # of these globs is merge_amendable_set
+      outcome_share_pct: 10       # a failing outcome class over this share of 24 h files a Bug
+      outcome_min_sessions: 20    # no rate below this many ended sessions in the window
+      repeat_failure_n: 2         # the same item, the same class, this many times → a Bug
+      idle_wave_ticks: 6          # consecutive idle waves with New Tasks → a Bug
 
 Unknown keys are kept (in :attr:`Conventions.extra`) rather than rejected: a product yaml is
 written by an operator and may carry conventions a module older than it does not read yet, and
@@ -72,6 +76,18 @@ DEFAULT_PRS_PER_TICK = 6
 DEFAULT_AREA_DEPTH = 2
 #: The most globs a Task may write and still count as small enough to batch (F-0086 D3).
 DEFAULT_BATCH_MAX_GLOBS = 2
+#: The share of the last 24 h's ended sessions (in percent) one failing outcome class may take
+#: before the tick files a Bug for it (F-0103). Compared unrounded, strictly over.
+DEFAULT_OUTCOME_SHARE_PCT = 10
+#: The fewest ended sessions the 24 h window must hold before any outcome rate is read: a share
+#: of three sessions is noise, not a rate (F-0103).
+DEFAULT_OUTCOME_MIN_SESSIONS = 20
+#: How many times the same item may end in the same failing class inside the window before the
+#: tick files a Bug for the repeat (F-0103).
+DEFAULT_REPEAT_FAILURE_N = 2
+#: How many consecutive ticks may launch nothing while New Tasks exist before the tick files a
+#: Bug for the stalled wave (F-0103).
+DEFAULT_IDLE_WAVE_TICKS = 6
 #: How harvest gates a tick's eligible branches (B-0040): ``combined`` — every branch rebased in
 #: turn onto one throwaway head, one gate, one fast-forward push, bisecting on red — or
 #: ``per-branch``, one gate and one push per landing. Spelt ``harvest: {gate: …}`` in the yaml.
@@ -154,6 +170,10 @@ class Conventions:
     prs_per_tick: int = DEFAULT_PRS_PER_TICK
     area_depth: int = DEFAULT_AREA_DEPTH
     batch_max_globs: int = DEFAULT_BATCH_MAX_GLOBS
+    outcome_share_pct: int = DEFAULT_OUTCOME_SHARE_PCT
+    outcome_min_sessions: int = DEFAULT_OUTCOME_MIN_SESSIONS
+    repeat_failure_n: int = DEFAULT_REPEAT_FAILURE_N
+    idle_wave_ticks: int = DEFAULT_IDLE_WAVE_TICKS
     harvest_gate: str = DEFAULT_HARVEST_GATE
     branches_per_tick: int = DEFAULT_BRANCHES_PER_TICK
     gate_timeout_s: int = DEFAULT_GATE_TIMEOUT_S
