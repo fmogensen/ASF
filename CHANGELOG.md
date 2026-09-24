@@ -1,0 +1,197 @@
+# Changelog
+
+One entry per released version, newest first.
+
+## v0.1.1 — 2026-09-24
+
+### Features landed
+
+- F-0002 P0b — the card-evaluation pass for multi-product wording
+- F-0013 P3 wave 5 — the feeder and the tick
+- F-0014 P3 wave 6 — the CLI and the plugin
+- F-0022 The preamble: every brief opens with facts the runner already knows
+- F-0023 The grill: a request is interrogated before it is spent on
+- F-0024 Self-amendment policy: the factory proposes, humans approve and merge
+- F-0025 Typed envelopes: every job ends with a machine-readable report beside its prose
+- F-0028 Prompt budget: four token dimensions itemised, never summed, with a cap per job
+- F-0031 The approval matrix as code
+- F-0039 Same-session correction: review findings go back to the writer's own session; a fixer only for a dead one
+- F-0073 Everything enters through the inbox; the type is derived from the card's shape
+- F-0080 Closing is derived and total: a definition of done per type, reconciliation for work that predates it, nothing re-emitted
+- F-0082 Quota: a cooldown band before the stop — one new job per account from 90 %, none from 95 %
+- F-0086 The groom proposes merges, splits and batches of Stories — shape decides delivery speed
+- F-0090 Adjudication is the last resort: the cheap causes are ruled out before Opus is spent
+- F-0091 asf improve: the self-improvement pass is a tick step, not something someone remembers to ask for
+- F-0095 The wave relaunches coders on Tasks that end 'empty branch: nothing to land'
+- F-0098 'dead' sessions are nearly always finished ones not yet recorded: say 'ended, awaiting tick', free the slot at once
+- F-0099 Groom every tick: intake, policy pass and questions run on each tick, not once a day
+- F-0101 Corrections of mechanical failures run on Opus: 25% of all spend goes to correct/adjudicate/groom sessions
+
+### Bugs fixed
+
+- B-0025 A session that ended with nothing committed leaves a worktree that blocks every relaunch
+- B-0069 Killing a session's process does not stop the run: the client dies, the work keeps pushing
+- B-0080 after: holds the coder row only — correction and adjudicate launch anyway, on Opus
+- B-0082 A timed-out gate is counted as a failed round and sends the item to Opus
+- B-0083 A failed record step does not stop the tick: the wave acts on a stale board
+- B-0084 A typed field is written by hand, so an unparseable card is only caught a tick later
+- B-0086 The factory runs an installed copy of itself and never notices the trunk has moved
+- B-0089 A new S1/S2 Bug waits up to 24h for the daily groom before BUG → FIX can take it
+- B-0091 asf new / asf inbox never commit or push: a card filed from the console never reaches the tick
+- B-0095 The PROD view crashes on a product whose `customer_paths` is the documented list
+
+### Improvements and hotfixes
+
+- fix(asf): a groom session can write its answers, and is judged on its result, not a branch
+- fix(asf): the tick applies an adjudicator's answers when it first sees them
+- fix(asf): an older day's groom answers never land on top of a newer day's
+- fix(asf): an inbox card intake cannot type is put to the adjudicator, not left for a hand edit
+- fix(asf): the groom's suppression sees the answers it just applied
+- hotfix(groom): intake and the policy pass run every tick, edited cards are read again, and new questions get a same-day adjudicator
+- hotfix(order): a plan's stated order reaches its Task cards as after:
+- hotfix(tick): the gate never blocks the wave, output is line-buffered, steps are timed, sessions are detached
+- hotfix(record): backlinks from one token scan per item, and each record part timed
+- hotfix(record): evidence reads ancestry from one rev-list, not a merge-base fork per question
+- hotfix(harvest): bisect on the red modules only, confirm in full, skip a trunk red
+- hotfix(harvest): a docs-only branch is never held for a red test, and the diff is the footprint when writes are absent
+- hotfix(tests): test_cutover reaches each script state once per class, and gate 3 never sleeps
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.1"`
+
+## v0.1.0 — 2026-09-23
+
+### Features landed
+
+- F-0002 P0b — the card-evaluation pass for multi-product wording
+- F-0009 P3 wave 1 — the record
+- F-0011 P3 wave 3 — metrics
+- F-0012 P3 wave 4 — rules
+- F-0031 The approval matrix as code
+- F-0071 S1 lane: critical factory bugs pre-empt Feature work — tiers, reserved capacity, no ladder, a clock
+- F-0073 Everything enters through the inbox; the type is derived from the card's shape
+- F-0074 Generic by construction: no product convention in code, proven by a second product in CI
+- F-0075 Redaction is a gate on every write path: operator names and secrets never reach a record or a public repo
+- F-0076 Session identity: every asf worker is distinguishable from every other, and from sessions that are not asf's
+- F-0078 The tick ends with two tables: in flight, and done since the last tick
+- F-0079 Capacity is configuration: session workers and CI, per product and per operator
+- F-0082 Quota: a cooldown band before the stop — one new job per account from 90 %, none from 95 %
+- F-0083 Scheduler clocks are configuration: each job group on its own interval, per product
+- F-0085 The groom answers itself (D-0049): rules as code, an adjudicate session for the rest, a digest to the operator
+- F-0086 The groom proposes merges, splits and batches of Stories — shape decides delivery speed
+- F-0087 Failure-class invariants: one property test per class of the first 53 Bugs, and the whole-loop dogfood tick in CI
+- F-0089 No run ends unlanded: the end-of-run check happens inside the session, not in the next one
+
+### Bugs fixed
+
+- B-0001 `asf init` does not exist, so a new record has to be laid down by hand
+- B-0002 `asf new` cannot type the fields a card needs, so every card must be rewritten after minting
+- B-0003 The operator's product file for this product does not match the schema the config reader reads
+- B-0004 Nothing carries a schema version, although the ruling requires it from 0.1
+- B-0005 `check` does not validate the record's layout, only its items
+- B-0006 There is no command that shows the record: no status, roadmap, backlog, doctor or tick
+- B-0007 Minting in a worktree needs an id range the tool gives no way to allocate
+- B-0008 A tick that staged everything in a shared checkout committed in-progress worker content
+- B-0009 A hand harvest reaped a worktree before its fast-forward had succeeded
+- B-0010 A harvest reaped a worktree whose job was still running
+- B-0011 Tests run under the pre-commit hook inherit the git environment and operate on the real repository
+- B-0012 A fixture test reads the job's id range from the environment and fails in any ranged worktree
+- B-0013 The live tick writes into the operator checkout and never commits or pushes
+- B-0015 `asf new bug` mints no severity, signature or found_in, and `check` does not miss them
+- B-0019 Health reaps a live job whose branch has no commits yet (reads "no commits" as "merged")
+- B-0020 Evidence is blind to any product but the first: branch prefixes hardcoded, id tokens in commits ignored
+- B-0021 Core rules have no check scripts in the ASF repo (142 unenforced)
+- B-0023 Launch events write operator account names into the (public) record
+- B-0024 An unmapped model label launches a session that dies at once, and the result reads as success
+- B-0025 A session that ended with nothing committed leaves a worktree that blocks every relaunch
+- B-0026 Tier ordering by id lets already-attempted Bugs starve newer ones; no attempt limit
+- B-0027 Nothing lands a lane branch on a product without a merge queue: harvest reads the wrong repo, prefix and key, and is not a step
+- B-0028 A corrected or late-finishing session stays 'dead pid'; harvest never lands its branch
+- B-0029 prs step offers landed branches to gh and fails every tick; it ignores the landing convention
+- B-0030 A record push refused because origin moved is discarded; the tick's appended events are lost
+- B-0031 Harvest gates every eligible branch in one tick; a tick runs 25 minutes and CI races the landings — cap the branches per tick (interim)
+- B-0032 A red harvest gate or a rebase conflict files a Bug or holds silently — it must go back to the branch's session with the failing output (D-0048, part a)
+- B-0033 The harvest gate inherits the tick's ASF_PRODUCT; ASF's own suite reads the live product and goes red
+- B-0036 A landing never reaches the checkout the scheduler runs; the factory keeps running the code from before its own fix
+- B-0038 CI main red: harvest fixture depends on the host's init.defaultBranch
+- B-0039 Corrections resume the same runtime session (--resume) instead of relaunching cold (D-0048, part b)
+- B-0040 Harvest gates once per tick on the combined head, bisecting on red (replaces the interim cap)
+- B-0041 A relaunched job inherits the previous run's ended/failed fields; health skips it, the feeder re-emits it, harvest never lands it
+- B-0042 The scheduler's checkout is fast-forwarded only after a lane landing; a fix pushed any other way leaves the factory on old code
+- B-0043 The test suite reads the operator's live ~/.ASF; the harvest gate goes red on any operator config change
+- B-0044 A record rebase conflicts on machine-owned content when a hand commit touched the same card; the tick's push is still refused
+- B-0045 A refused product file crashes every command and the tick with a traceback instead of one NEEDS OPERATOR line
+- B-0046 A correction row cannot spawn: spawn creates a new branch, but the held branch already exists
+- B-0047 asf plugin check resolves the plugin directory from the package, not the checkout; CI is red on a plain install
+- B-0048 An adjudicate row cannot spawn on a held branch, and rounds climb past the cap — held branches loop forever
+- B-0049 Health never reaps a landed branch's worktree: harvest rebased the tip and deleted the remote branch, so 'pushed' fails forever
+- B-0050 Record commands use the cwd as the record: /asf:groom from a product repo grooms nothing and writes groom/ into the product repo
+- B-0051 A session that ends 'finished' without pushing blocks its item forever: health says finished, harvest sees nothing, spawn refuses the worktree
+- B-0052 Sessions background the test suite and return before it ends — no commit, no push; the brief must forbid it
+- B-0053 CI runs on every worker-branch push: red notifications for in-progress work and wasted minutes; the gate is harvest's
+- B-0054 Adjudicate sessions commit invented rulings to the code repo, never close the row, and every push re-fires the stale branch workflow
+- B-0055 CI red on main since 8c25fa7: the hermetic step exports ASF_PRODUCT into a suite whose home has no such product
+- B-0056 A session whose branch is already on origin merges its stale remote: nothing in the factory publishes a rebased lane branch, and no session may force
+- B-0057 A lane branch whose content is already on the trunk, or whose item is closed, is held for ever: harvest counts commits, not content
+- B-0058 A blocked Bug still gets its FIX row and a blocked item its CORRECT or ADJUDICATE row: the feeder reads blocked for Features only
+- B-0059 A spec landing commit resolves the Feature it names, and a spec on main reads spec-draft: the evidence does not know the lane's own conventions
+- B-0060 A landed plan never becomes Task cards: the Feature sits at plan-approved with nothing for the feeder to launch
+- B-0061 A branch whose run ended other than finished is never landed by content nor archived: harvest reads the run's verdict before the content
+- B-0062 A session that died twice asks the operator every tick instead of being held: the one dead end in the lane that is not a correction
+- B-0063 Stale local lane branches pile up in the scheduler's checkout: health deletes a branch only with its worktree
+- B-0064 The adjudicate brief still asks the session to mint a Decision id and commit a ruling file; the ruling has no home a session can reach
+- B-0065 A card the groom removed keeps its branch on origin for ever: harvest reads only live cards, so superseded never fires
+- B-0066 Archiving a superseded branch fires its stale workflow: the archive push re-runs the pre-B-0053 tests.yml and mails a red run
+- B-0067 A coder's branch is task/<id> but harvest scans the conventions' prefixes only: finished Task branches are never landed
+- B-0068 The suite runs serially: 324 s per gate on ten idle cores — shard the test modules across processes
+- B-0071 test_cutover builds an installation per test: 172 s of a 318 s suite in one module — build each module's fixture once
+- B-0072 The harvest gate has no timeout: one branch whose test recurses through the pre-commit hook hangs the tick, and every tick after it
+- B-0073 A test that commits triggers the pre-commit hook, which runs the suite, which commits: the gate recurses and the lane stops
+- B-0074 A landed Task stays Active: its plan's 'branch exists' line outranks the commit that landed it
+- B-0075 Workers still background the test suite and end without pushing; prose cannot stop it
+- B-0076 A finished run with an empty branch blocks every task that waits on it — for ever
+- B-0077 A product with no deploy can never close a Feature: Closed demands a prod sha that does not exist
+- B-0078 A Feature that lands by a commit stops at Resolved: ingest drops the state it just derived
+- B-0079 A branch ahead of the trunk whose run failed is orphaned: harvest never looks at it again
+- B-0081 The redaction scanner reads GIT_CONFIG_KEY_0 as a secret and flags ordinary text
+- B-0085 A tick step waits on a model session, so health and harvest stop for its whole duration
+- B-0086 The factory runs an installed copy of itself and never notices the trunk has moved
+
+### Improvements and hotfixes
+
+- ASF — Autonomous Software Factory: license, README, docs layout
+- asf: package skeleton + env.py (operator config reader)
+- asf.record: frontmatter, match, and the item database (new/check/index/ingest)
+- asf.evidence + asf.rules: git/gh derived state and the rule-check runner
+- asf.metrics: streams, rollup, releases, cost
+- asf.harvest: land worker branches, PR hygiene
+- asf.tick + asf.groom + asf.cli: migrate, stale, file-bugs, groom, and the CLI
+- tools/check_generic.sh: fail the build on a forbidden name
+- docs: config.example.yaml and products.example.yaml
+- fix check_generic.sh false positives: platform names, self-referential test
+- docs(research): prior art — the 2026-08 prototype (five parts) + ADR 0001
+- asf(cutover): doctor, tools/cutover.sh + rollback.sh — the P4/P4b cutover kit
+- asf(shadow): tick --shadow, shadow-diff, and the six asf views
+- cutover: --ref for the shadow-diff gate; test quoted YAML keys
+- docs(research): jev decision model — a cheap judge between code and sessions
+- asf(tick): stateless clone; deterministic bug ids
+- asf(tick): ensure_clone + push — a clone that commits as the factory identity and pushes
+- asf(new): bug takes --severity/--signature/--found-in; check flags a bug without severity
+- asf(plugin): the /asf:* skills over the asf CLI, plus tools/asf wrapper
+- asf(cli): wire tick --steps/--manifest/--daily and new bug --severity; step owners are asf | command | off (no legacy vocabulary); docs: the constitution
+- asf(scheduler): a job definition that can actually run
+- asf(doctor): a scheduler section — is the factory running, not just installed
+- asf(cutover): three gates, a split clock, and a rollback that reaches the jobs
+- asf(package): pyproject (asf-factory, stdlib only, version 0.1.0 from asf/__init__), CI installs with pipx and runs the suite
+- asf(feeder): footprint — the writes: overlap gate, glob-aware
+- asf(feeder): rows and tiers — BUG → FIX S1 lane, stalemate gate, footprint waits
+- asf(feeder): render, incident clock, asf next register(); golden tests
+- asf(workers): runtime (claude_code + fake) and quota source/guards
+- asf(workers): pool pick rule, S1 reserve, spawn and launch wave
+- asf(workers): health reap rule, stall check, correct_once hook
+- … and 39 more
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.0"`
