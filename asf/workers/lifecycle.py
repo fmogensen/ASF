@@ -650,9 +650,10 @@ def outcome_class(result):
     return text if text in OUTCOME_CLASSES[3:-1] else OTHER
 
 
-#: Kinds whose work is not a branch: a groom (adjudicate) session rules into the state dir's
-#: answers file and is told the repository is not its work, so it never commits.
-NO_LANDING_KINDS = ('groom',)
+#: Kinds whose work is not a branch: a groom (adjudicate) session, or a groom-clerk half of one,
+#: rules into the state dir's answers file and is told the repository is not its work, so it
+#: never commits.
+NO_LANDING_KINDS = ('groom', 'groom-clerk')
 
 
 def lands(run, path=None):

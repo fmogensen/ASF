@@ -20,6 +20,7 @@ from asf.metrics import metrics
 from asf.metrics import metrics as metrics_mod
 from asf.groom import answers
 from asf.tick import shadow, step_daily, step_groom, step_harvest, step_health, step_prs, step_wave, steps, tick
+from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 from asf.workers import runtime as runtime_mod
 from tests.test_tick import TickTestCase, _git, steps_only
@@ -1169,6 +1170,25 @@ class AnswersOwnershipTests(StepsTestCase):
             self.run_tick(steps='groom')
         self.assertFalse(os.path.exists(path))
         self.assertIn(path, applied)
+
+
+class CarryClerkAnswersTests(StepsTestCase):
+    """P8: a groom-clerk run's work is the state dir's answers file, not a branch — like the
+    judgement groom session, it is never held for an unpushed or empty branch (lifecycle.py's
+    ``NO_LANDING_KINDS``, the guard :func:`carry_staged_answers` reads to know which ended runs
+    may hold a staged answers file worth carrying)."""
+
+    def test_no_landing_kinds_includes_the_clerk(self):
+        self.assertIn('groom-clerk', lifecycle.NO_LANDING_KINDS)
+
+    def test_a_groom_clerk_run_is_not_expected_to_land(self):
+        self.session(job='groom-clerk-2026-01-01', kind='groom-clerk', item='F-0001',
+                     pid=999999, started='t1', worktree='/tmp/wt-clerk',
+                     branch='groom-clerk/2026-01-01')
+        self.session(job='groom-clerk-2026-01-01', ended='t2', end_reason='finished')
+        registry = pool_mod.sessions_path(self.product)
+        run = lifecycle.latest(registry)['groom-clerk-2026-01-01']
+        self.assertFalse(lifecycle.lands(run))
 
 
 if __name__ == '__main__':
