@@ -756,6 +756,22 @@ class CommandClockLockTests(TickTestCase):
         self.assertEqual(self.origin_commits(), 2)
 
 
+class TickLineTests(unittest.TestCase):
+    """What `tick_line` writes survives `metrics append ticks`: no unknown key, no missing one."""
+
+    def test_the_line_is_a_valid_ticks_event(self):
+        from asf.metrics import metrics
+        ctx = tick.Context(env.Product('sample', {}))
+        ran = [{'step': 'record', 'ok': True, 'seconds': 1.5}, {'step': 'wave', 'ok': False, 'seconds': 2.0}]
+        line = tick.tick_line(ctx, ran)
+        self.assertEqual(set(line) - set(metrics.SCHEMAS['ticks']), set())
+        required = {k for k, (_kinds, default) in metrics.SCHEMAS['ticks'].items() if default is metrics.REQ}
+        self.assertEqual(required - set(line), set())
+        ev = metrics.validate('ticks', line, {})
+        self.assertEqual(ev['steps'], ran)
+        self.assertEqual(ev['product'], 'sample')
+
+
 class Step0Tests(unittest.TestCase):
     """What step 0 hands the backfill: CI runs only, of the product's workflow; no launcher dir."""
 

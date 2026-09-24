@@ -38,7 +38,7 @@ from asf.record import frontmatter
 from asf.record import match
 from asf.record.index import do_index
 
-STREAMS = ('ci', 'sessions', 'ticks')
+STREAMS = ('ci', 'sessions', 'ticks', 'landings', 'gates')
 KINDS = ('spec', 'review', 'fix', 'code', 'plan', 'preflight', 'probe', 'rebase', 'relaunch', 'launch',
          'tick', 'other')
 KIND_PREFIXES = (
@@ -136,6 +136,25 @@ SCHEMAS = {
         'launches': (('int',), REQ), 'merges': (('int',), REQ), 'stalls': (('int',), REQ),
         'refusals': (('int',), REQ), 'relaunches': (('int',), REQ), 'quota': (('dict',), {}),
         'refused_files': (('dict',), {}),
+        'steps': (('list',), []), 'product': (('str', 'null'), None),
+    },
+    'landings': {
+        'ts': (('str',), REQ),                 # the trunk commit's committer date, UTC
+        'job': (('str',), REQ),                # the run that landed
+        'sha': (('str',), REQ),                # the sha it landed at
+        'branch': (('str', 'null'), None),     # the lane branch — the join key
+        'kind': (('str',), MATCH),             # session_kind(record): spec | plan | code | fix | …
+        'item': (('str', 'null'), MATCH),      # the card it landed for
+        'item_reason': (('str', 'null'), None),
+    },
+    'gates': {
+        'ts': (('str',), REQ),                    # when the gate started
+        'seconds': (('num',), REQ),
+        'branches': (('list',), REQ),
+        'sha': (('str', 'null'), None),
+        'conclusion': (('str',), REQ),            # 'success' | 'failure'
+        'signature': (('str', 'null'), None),     # the first failing line, truncated to 120
+        'items': (('list', 'null'), None),
     },
 }
 JOB_SCHEMA = {'name': (('str',), REQ), 'conclusion': (('str',), REQ), 'runner': (('str', 'null'), None),
@@ -224,6 +243,23 @@ def validate(stream, obj, items, now=None):
             ev['item'] = pick_item(items, ids) if ids else None
             ev['item_reason'] = (None if len(ids) <= 1 and ids else why if not ids
                                  else f"ambiguous: {', '.join(ids)}")
+    elif stream == 'landings':
+        if ev['kind'] is MATCH:
+            ev['kind'] = derive_kind(ev['job'])
+        if ev['kind'] not in KINDS:
+            raise SchemaError(f"landings: 'kind' must be one of {', '.join(KINDS)}, got {ev['kind']!r}")
+        if ev['item'] is MATCH:
+            ids, why = match.match_event(items, task=ev['job'], branch=ev['branch'])
+            ev['item'] = pick_item(items, ids) if ids else None
+            ev['item_reason'] = (None if len(ids) <= 1 and ids else why if not ids
+                                 else f"ambiguous: {', '.join(ids)}")
+    elif stream == 'gates':
+        if ev['conclusion'] not in ('success', 'failure'):
+            raise SchemaError(f"gates: 'conclusion' must be success or failure, got {ev['conclusion']!r}")
+        if ev['seconds'] < 0:
+            raise SchemaError("gates: 'seconds' must be >= 0")
+        if not all(isinstance(b, str) for b in ev['branches']):
+            raise SchemaError("gates: every entry of 'branches' must be a string")
     else:
         for k in ('launches', 'merges', 'stalls', 'refusals', 'relaunches'):
             if ev[k] < 0:
@@ -234,7 +270,7 @@ def validate(stream, obj, items, now=None):
         for f, n in ev['refused_files'].items():
             if not _CHECK['int'](n):
                 raise SchemaError(f"ticks: refused_files[{f!r}] must be an integer")
-    if stream != 'ticks':
+    if stream in ('ci', 'sessions', 'landings'):
         ids = ev['items'] if stream == 'ci' else ([ev['item']] if ev['item'] else [])
         for i in ids or []:
             if not isinstance(i, str) or not ID_RE.match(i):
@@ -267,6 +303,10 @@ def natural_key(stream, ev):
         return (ev['run'], ev['attempt'])
     if stream == 'sessions':
         return (ev['task'], ev['ts'])
+    if stream == 'landings':
+        return (ev['job'], ev['sha'])
+    if stream == 'gates':
+        return (ev['ts'], tuple(ev['branches']))
     return (ev['tick'],)
 
 
@@ -1514,6 +1554,61 @@ def sessions_from_registry(product, since_day=None, items=None, state_path=None,
     return out
 
 
+def landings_from_registry(product, items=None, known=(), state_path=None, repo=None):
+    """``(events, unconfirmed)``: one `landings` event per registry run carrying a `harvested` sha
+    that is not superseded and whose ``(job, sha)`` is not in `known`. `ts` is the commit's
+    committer date in `repo` (default the product's repo); a sha that repo does not have is
+    counted as unconfirmed, never dated by guess."""
+    from asf.harvest import harvest
+    from asf.workers import lifecycle
+    from asf.workers import pool as pool_mod
+
+    path = state_path or (pool_mod.sessions_path(product) if product is not None else None)
+    repo = repo or (product.repo_dir if isinstance(product, env.Product) else None)
+    out, unconfirmed = [], 0
+    for job, job_runs in sorted(lifecycle.runs(path).items()):
+        for rec in job_runs:
+            sha = rec.get('harvested')
+            if not sha or sha == harvest.SUPERSEDED or (job, sha) in known:
+                continue
+            when = parse_ts(_git(repo, 'show', '-s', '--format=%cI', sha) or '') if repo else None
+            if when is None:
+                unconfirmed += 1
+                continue
+            ev = {'ts': iso(when), 'job': job, 'sha': sha, 'branch': rec.get('branch') or None,
+                  'kind': session_kind(dict(rec, job=job))}
+            item = rec.get('item')
+            if item and ID_RE.match(str(item)) and (not items or item in items):
+                ev['item'] = item
+            out.append(ev)
+    return out, unconfirmed
+
+
+def gates_from_ledger(product, known=()):
+    """One `gates` event per line of the gate ledger ``<state dir>/gates.jsonl`` whose natural key
+    is not in `known`. A missing ledger is no lines."""
+    path = os.path.join(env.state_dir(product), 'gates.jsonl')
+    out = []
+    if not os.path.isfile(path):
+        return out
+    with open(path, encoding='utf-8') as f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(rec, dict) or not isinstance(rec.get('branches'), list):
+                continue
+            signature = rec.get('line')
+            ev = {'ts': rec.get('at'), 'seconds': rec.get('seconds'), 'branches': rec['branches'],
+                  'sha': rec.get('sha'), 'conclusion': 'success' if rec.get('ok') else 'failure',
+                  'signature': None if signature is None else str(signature)[:120]}
+            if not isinstance(ev['ts'], str) or (ev['ts'], tuple(map(str, ev['branches']))) in known:
+                continue
+            out.append(ev)
+    return out
+
+
 def mins(a, b):
     try:
         return max(0, int((parse_ts(b) - parse_ts(a)).total_seconds() // 60))
@@ -1603,6 +1698,17 @@ def cmd_backfill(args, root):
             put('ci', ev)
         for ev in sessions_from_registry(product, since_day=since, items=items):
             put('sessions', ev)
+        for stream in ('landings', 'gates'):
+            os.makedirs(os.path.join(root, 'metrics', stream), exist_ok=True)
+        known = {natural_key('landings', e) for e in read_stream(root, 'landings')}
+        landings, unconfirmed = landings_from_registry(product, items=items, known=known)
+        for ev in landings:
+            put('landings', ev)
+        known = {natural_key('gates', e) for e in read_stream(root, 'gates')}
+        for ev in gates_from_ledger(product, known=known):
+            put('gates', ev)
+        if unconfirmed:
+            counts['landings unconfirmed'] = unconfirmed
     for k in sorted(counts):
         print(f"{k}: {counts[k]}")
     return 0
