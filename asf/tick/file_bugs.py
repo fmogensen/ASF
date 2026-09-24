@@ -386,6 +386,10 @@ def cmd_file_bugs(args, root):
         for f, line, why in parse_errors:
             print(f"{f}:{line}: {why}", file=sys.stderr)
         return 1
+    # the rule check reads index.json: a card removed, moved or deleted since the last index must
+    # not still run its check and file a Bug, so the index is rebuilt from the cards first
+    do_index(root)
+    by_id, _errors = load_items(root)
     canonical, _dupes = canonicalize(by_id)
     now = datetime.datetime.now(datetime.timezone.utc)
     date = today()

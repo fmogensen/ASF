@@ -465,6 +465,24 @@ class RuleCheckFailureTests(unittest.TestCase):
         self.assertIn('R-0001', acceptance)
         self.assertIn('bash tools/checks/r0001.sh', acceptance)
 
+    def test_a_rule_retired_since_the_last_index_files_no_bug(self):
+        self._violated_rule()
+        run(['index'], self.root)
+        card = os.path.join(self.root, 'rules', 'R-0001.md')
+        with open(card, encoding='utf-8') as f:
+            text = f.read()
+        with open(card, 'w', encoding='utf-8') as f:
+            f.write(text.replace('# ---- machine ----', 'removed: retired\n# ---- machine ----', 1))
+        self._file_bugs()
+        self.assertEqual(self._bugs(), [])
+
+    def test_a_rule_card_deleted_since_the_last_index_files_no_bug(self):
+        self._violated_rule()
+        run(['index'], self.root)
+        os.remove(os.path.join(self.root, 'rules', 'R-0001.md'))
+        self._file_bugs()
+        self.assertEqual(self._bugs(), [])
+
     def test_a_removed_default_epic_parents_nothing_and_is_logged_once(self):
         write_item(self.root, 'E-0009', 'epic', 'Factory',
                    typed_lines=['decided: true', 'removed: "moved elsewhere"'])
