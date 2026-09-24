@@ -2,6 +2,16 @@
 
 One entry per released version, newest first.
 
+## v0.1.5 — 2026-09-24
+
+### Features landed
+
+- F-0090 Adjudication is the last resort: the cheap causes are ruled out before Opus is spent
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.5"`
+
 ## v0.1.4 — 2026-09-24
 
 ### Features landed
