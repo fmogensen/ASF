@@ -404,9 +404,12 @@ PRODUCT_FIELDS = {
     'capacity': _MAP, 'clocks': _MAP, 'token_caps': _MAP, 'feeder': _MAP,
 }
 # `ci:` is a map (or the bare word `none`, a product without CI); these are its keys.
+# `deploy_workflow` is a read-only alias of the documented `deploy_sha.workflow`: the status
+# Prod row once named it, so a file that followed that hint loads (and is read) rather than
+# refusing every product load.
 CI_FIELDS = {
     'provider': _STR, 'workflow': _STR, 'test_command': _STR, 'budgets': _MAP,
-    'runner_org': _STR, 'labels': _LIST, 'dev_job': _STR,
+    'runner_org': _STR, 'labels': _LIST, 'dev_job': _STR, 'deploy_workflow': _STR,
 }
 # `capacity:` is a map: this product's session/CI ceilings and its batch shape.
 CAPACITY_FIELDS = {'sessions': _STR, 'ci': _STR, 'weight': _STR, 'batch': _MAP}
@@ -553,7 +556,8 @@ class Product:
         level of a product file because more than the conventions read them: ``main``,
         ``stage_limits``, ``ci.test_command`` (the gate harvest runs), ``ci.workflow`` and
         ``ci.dev_job`` (``ci_workflow``/``ci_dev_job``), and ``deploy_sha.workflow``
-        (``deploy_workflow``). A ``conventions:`` key of the same name wins. Still answers
+        (``deploy_workflow``; ``ci.deploy_workflow`` is its read-only alias, read last). A
+        ``conventions:`` key of the same name wins. Still answers
         ``.get()``/``[]``, so the callers that read it as a mapping — and an operator's extra
         keys — keep working."""
         if self._conventions is None:
@@ -573,6 +577,8 @@ class Product:
             deploy = self._get('deploy_sha')
             if isinstance(deploy, dict) and deploy.get('workflow'):
                 data.setdefault('deploy_workflow', deploy['workflow'])
+            if isinstance(ci, dict) and ci.get('deploy_workflow'):  # the read-only alias
+                data.setdefault('deploy_workflow', ci['deploy_workflow'])
             self._conventions = Conventions.from_mapping(data)
         return self._conventions
 

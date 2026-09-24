@@ -5,7 +5,7 @@ Every row is filled from what exists, or says which key would fill it —
 
 * **Version** — the ``asf`` running (``asf --version``) and asf's newest release tag, with its age;
 * **Runners** — the CI provider's runner pool (``ci.runner_org``, read with ``gh``);
-* **Prod** — how far ``main`` is ahead of the last successful ``ci.deploy_workflow`` run;
+* **Prod** — how far ``main`` is ahead of the last successful ``deploy_sha.workflow`` run;
 * **Agents** — the workers' session registry, ``~/.ASF/state/<product>/sessions.jsonl``;
 * **Capacity** — the session and CI ceilings the resolver (``asf.capacity.resolve``) hands back;
 * **Record** — the record's counts from ``index.json``: open, Active, blocked, and the items no
@@ -33,7 +33,7 @@ def not_configured(key):
 _DIGEST_FILE_RE = re.compile(r'^(\d{4}-\d{2}-\d{2})-digest\.md$')
 _DIGEST_SUMMARY_RE = re.compile(
     r'^(?P<rule>\d+) answered by rule · (?P<adjudicator>\d+) ruled by the adjudicator · '
-    r'(?P<spoken>\d+) spoken for · (?P<for_you>\d+) for you$')
+    r'(?P<spoken>\d+) spoken for · (?P<for_you>\d+) for you(?: · \d+ housekeeping)?$')
 
 
 def groom_cell(root, product):
@@ -89,10 +89,16 @@ def runners_cell(product):
     return f"{on} online, {busy} busy, {on - busy} idle" + (f", {off} offline" if off else "")
 
 
+#: The one documented key the Prod row reads: the deploy workflow whose newest success is prod.
+#: ``conventions.deploy_workflow`` and ``ci.deploy_workflow`` are read-only aliases of it
+#: (:attr:`asf.env.Product.conventions` folds all three into ``deploy_workflow``).
+DEPLOY_WORKFLOW_KEY = 'deploy_sha.workflow'
+
+
 def prod_cell(product):
-    workflow = _ci(product).get('deploy_workflow')
+    workflow = product.conventions.get('deploy_workflow')
     if not workflow:
-        return not_configured('ci.deploy_workflow')
+        return not_configured(DEPLOY_WORKFLOW_KEY)
     if not product.repo_slug or not product.repo_dir:
         return not_configured('repo_slug')
     out_j = _sh(['gh', 'run', 'list', '-R', product.repo_slug, '--workflow', workflow,

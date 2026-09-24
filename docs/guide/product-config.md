@@ -19,7 +19,7 @@ the doctor's `capacity` row names the two old capacity keys.
 
 | old | new | notes |
 | --- | --- | --- |
-| `ci.deploy_workflow` | `deploy_sha.workflow` | refused under `ci:`; see the Prod row note in [operating.md](operating.md#asfstatus--factory-status) |
+| `ci.deploy_workflow` | `deploy_sha.workflow` | read as an alias, last; see the Prod row note in [operating.md](operating.md#asfstatus--factory-status) |
 | `conventions.harvest_gate`, `.branches_per_tick`, `.gate_timeout_s` | `conventions.harvest:` → `gate`, `branches_per_tick`, `gate_timeout_s` | both spellings are read |
 | `conventions.test_command` | `ci.test_command` | both are read; the `conventions:` one wins |
 | `conventions.ci_workflow`, `.ci_dev_job`, `.deploy_workflow` | `ci.workflow`, `ci.dev_job`, `deploy_sha.workflow` | both are read; the `conventions:` one wins |

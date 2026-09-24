@@ -47,11 +47,10 @@ configured: <key>)`.
 | Cron | the scheduler's view of this product's jobs |
 | Groom | the latest digest's counts (only with `approvals.groom: auto`) |
 
-**Prod always reads `— (not configured: ci.deploy_workflow)` today.** The row reads
-`ci.deploy_workflow`, but the product file refuses that key under `ci:` (it is not one of `ci`'s
-fields), so no config can fill it. The deploy workflow belongs in `deploy_sha.workflow`, which the
-evidence pass (the prod sha behind a Feature's `on-prod`) already reads; the pending fix is for
-the Prod row to read it too.
+**Prod reads `deploy_sha.workflow`**: the deploy workflow whose newest successful run is prod,
+the same key the evidence pass reads for a Feature's `on-prod`. `conventions.deploy_workflow` and
+`ci.deploy_workflow` are read as aliases of it, so a file written for the old hint still loads;
+write new files with `deploy_sha.workflow`.
 
 To keep the table in front of you, type `/loop 5m /asf:status` in each product's Claude Code
 session: it reprints the status every five minutes until you stop it.

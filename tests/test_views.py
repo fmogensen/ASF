@@ -115,12 +115,60 @@ class StatusViewTests(ViewsTestCase):
     def test_unconfigured_rows_name_their_key_never_a_bare_dash(self):
         rows = self.rows({'scheduler': {'kind': 'none'}})
         self.assertEqual(rows['Runners'], '— (not configured: ci.provider (none))')
-        self.assertEqual(rows['Prod'], '— (not configured: ci.deploy_workflow)')
+        self.assertEqual(rows['Prod'], '— (not configured: deploy_sha.workflow)')
         self.assertEqual(rows['Quota 5h/7d'], '— (not configured: worker_pool.quota_command)')
         self.assertEqual(rows['Cron'], '— (not configured: scheduler.kind (none has no status adapter))')
         self.assertEqual(rows['Groom'], '— (not configured: approvals.groom)')
         for name, cell in rows.items():
             self.assertFalse(cell.strip() == '—', name)
+
+    #: A value for every key a ``not configured: <key>`` hint names — product-file keys as the
+    #: product file writes them, operator-config keys as ``config.yaml`` does.
+    HINT_VALUES = {
+        'approvals.groom': ('product', 'approvals:\n  groom: auto\n'),
+        'ci.provider': ('product', 'ci:\n  provider: github\n'),
+        'ci.runner_org': ('product', 'ci:\n  runner_org: example\n'),
+        'deploy_sha.workflow': ('product', 'deploy_sha:\n  workflow: deploy.yml\n'),
+        'repo_slug': ('product', 'repo_slug: example/sample\n'),
+        'backlog_dir': ('product', 'backlog_dir: /tmp/sample-record\n'),
+        'capacity': ('product', 'capacity:\n  sessions: 2\n'),
+        'worker_pool.quota_command': ('config', 'worker_pool:\n  quota_command: quota --json\n'),
+        'worker_pool.accounts': ('config', 'worker_pool:\n  accounts:\n    - name: a\n'),
+        'scheduler.kind': ('config', 'scheduler:\n  kind: launchd\n'),
+    }
+
+    def test_every_not_configured_hint_names_a_loadable_key(self):
+        """A hint the operator follows must load: every key a status or doctor ``not configured:
+        <key>`` names, set in the file it belongs to, passes that file's checks (``ci.deploy_workflow``
+        once told the operator to write a key the product file refuses)."""
+        import re
+        from asf import doctor
+        keys = set()
+        for mod in (status, doctor):
+            with open(mod.__file__, encoding='utf-8') as f:
+                src = f.read()
+            keys |= {m.split(' ')[0] for m in re.findall(r"not_configured\(f?'([^']+)'\)", src)}
+            keys |= {m for m in re.findall(r'not configured: ([a-z_.]+)', src)}
+        keys.add(status.DEPLOY_WORKFLOW_KEY)
+        self.assertEqual(keys - set(self.HINT_VALUES), set(), 'a hint with no value to try')
+        for key in sorted(keys):
+            where, text = self.HINT_VALUES[key]
+            if where == 'product':
+                problems = env.validate_product_text(f'product: sample\n{text}')
+                self.assertEqual(problems, [], key)
+            else:
+                self.assertEqual(env.validate_worker_pool(env.loads(text)), [], key)
+                self.assertIsInstance(env.loads(text), dict, key)
+
+    def test_the_prod_row_reads_the_documented_key_and_its_aliases(self):
+        for data in ({'deploy_sha': {'workflow': 'deploy.yml'}},
+                     {'conventions': {'deploy_workflow': 'deploy.yml'}},
+                     {'ci': {'deploy_workflow': 'deploy.yml'}}):
+            product = env.Product('p', dict(data, repo_slug='x/y', repo_dir=self.tmp))
+            with mock.patch.object(status, '_sh', return_value='') as sh:
+                cell = status.prod_cell(product)
+            self.assertEqual(cell, '? (no successful deploy.yml run readable)', data)
+            self.assertIn('deploy.yml', sh.call_args[0][0])
 
     def test_groom_row_reads_the_newest_digest(self):
         product = env.Product('p', {'repo_dir': self.tmp, 'main': 'trunk', 'ci': {'provider': 'none'},

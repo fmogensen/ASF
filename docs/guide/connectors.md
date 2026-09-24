@@ -12,10 +12,8 @@ database — and the factory talks to one or more LLM runner accounts. Today:
 
 - the doctor checks a fixed list of vendor CLIs, and only whether each is logged in;
 - what a product *uses* a service for (CI, deploy, database) is not data anywhere, so the status
-  rows need hand-set keys (`ci.runner_org` for Runners; the Prod row reads `ci.deploy_workflow`,
-  a key the product file refuses under `ci:`, so today it always reads "not configured" — a fix
-  to read `deploy_sha.workflow` is pending) and the approval matrix cannot tell a deploy from a
-  read;
+  rows need hand-set keys (`ci.runner_org` for Runners; `deploy_sha.workflow` for Prod) and the
+  approval matrix cannot tell a deploy from a read;
 - worker accounts are configured by hand in `worker_pool.accounts`.
 
 ## The design
