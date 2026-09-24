@@ -222,6 +222,18 @@ class HookTest(unittest.TestCase):
                 self.assertIn(
                     f'asf approvals resolve {self.ITEM}/{cls} granted|done|dropped', out)
 
+    def test_the_trunk_is_pushed_only_by_a_push_refspec(self):
+        from asf.approvals import _pushes_trunk
+        cases = [('git commit -m "not on main" && git push origin HEAD:lane/x', False),
+                 ('git fetch origin main && git push -u origin HEAD:worker/T-1', False),
+                 ('git log origin/main.. ; git push origin lane/x', False),
+                 ('git push origin HEAD:main', True), ('git push origin main', True),
+                 ('git -C /repo push origin HEAD:main', True),
+                 ('git push origin +feat:refs/heads/main', True)]
+        for cmd, want in cases:
+            with self.subTest(cmd=cmd):
+                self.assertEqual(_pushes_trunk(cmd, 'main'), want)
+
     def test_reading_the_hooks_path_is_not_touching_security(self):
         self.write_product(self.ALL_HUMAN_NOW)
         for cmd in ('git config core.hooksPath', 'git config core.hooksPath; ls .githooks',

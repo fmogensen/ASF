@@ -220,11 +220,40 @@ def _classify_path(product, tool_name, path, cwd):
 
 
 def _pushes_trunk(command, main):
-    if not re.search(r'\bgit\s+push\b', command):
+    """True when one of the command's own ``git push`` invocations names the trunk as a refspec.
+    Each simple command is split off the compound (``&&``, ``||``, ``;``, ``|``) and read with
+    shlex, so ``main`` in a commit message, a fetch or a log range never counts."""
+    import shlex
+    if not re.search(r'\bgit\b.*\bpush\b', command):
         return False
-    escaped = re.escape(main)
-    forms = rf'(?:^|\s)(?:HEAD:{escaped}|refs/heads/{escaped}|[^\s:]+:{escaped}|{escaped})(?=\s|$)'
-    return bool(re.search(forms, command))
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:  # unbalanced quotes: fall back to refusing, the safe side
+        return True
+    trunk = {main, f'refs/heads/{main}'}
+    out = [[]]
+    for t in tokens:
+        if t in ('&&', '||', ';', '|', '&', ';;'):
+            out.append([])
+        else:
+            out[-1].append(t)
+    for argv in out:
+        # skip `git -C dir` style globals before the verb
+        if len(argv) < 2 or argv[0] != 'git':
+            continue
+        i = 1
+        while i < len(argv) and argv[i].startswith('-'):
+            i += 2 if argv[i] in ('-C', '-c') else 1
+        if i >= len(argv) or argv[i] != 'push':
+            continue
+        refspecs = [a for a in argv[i + 1:] if not a.startswith('-')][1:]  # drop the remote
+        for ref in refspecs:
+            dst = ref.lstrip('+').rsplit(':', 1)[-1]
+            if dst in trunk:
+                return True
+    return False
 
 
 def _runs_deploy_workflow(command, product):
