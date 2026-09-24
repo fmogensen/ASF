@@ -50,7 +50,9 @@ ONLY_VAR = 'ASF_GATE_MODULES'
 
 RAN_RE = re.compile(r'^Ran (\d+) tests? in ([\d.]+)s', re.M)
 VERDICT_RE = re.compile(r'^(OK|FAILED)(?: \((.*)\))?\s*$', re.M)
-COUNT_RE = re.compile(r'(\w+)=(\d+)')
+#: One ``name=n`` of a verdict line. unittest's two-word names come first: read as ``\w+``,
+#: ``expected failures=8`` counted as ``failures`` and turned a green run red.
+COUNT_RE = re.compile(r'(expected failures|unexpected successes|\w+)=(\d+)')
 TEST_DEF_RE = re.compile(r'^\s+(?:async )?def test_', re.M)
 
 
@@ -130,7 +132,7 @@ def summary(results, seconds, shards):
             red.append(module)
             if verdict is None:
                 counts['errors'] = counts.get('errors', 0) + 1
-    failed = bool(red) or any(k in counts for k in ('failures', 'errors', 'unexpectedSuccesses'))
+    failed = bool(red) or any(k in counts for k in ('failures', 'errors', 'unexpected successes'))
     lines = [f'Ran {tests} tests in {seconds:.3f}s ({len(results)} module(s), {shards} at a time)', '']
     detail = ', '.join(f'{k}={v}' for k, v in sorted(counts.items()))
     if failed:

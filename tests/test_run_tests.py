@@ -177,6 +177,17 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(runner.parse(own + inner), (7, 0.1, 'FAILED', {'failures': 1}))
         self.assertEqual(runner.parse('Traceback\nRuntimeError: boom\n'), (0, 0.0, None, {}))
 
+    def test_expected_failures_are_green_and_unexpected_successes_are_red(self):
+        runner = load_runner()
+        green = 'Ran 3 tests in 1.000s\n\nOK (expected failures=2, skipped=1)\n'
+        self.assertEqual(runner.parse(green),
+                         (3, 1.0, 'OK', {'expected failures': 2, 'skipped': 1}))
+        self.assertTrue(runner.summary([('test_x', 0, green)], 1.0, 1).splitlines()[-1]
+                        .startswith('OK (expected failures=2'))
+        red = 'Ran 1 test in 1.000s\n\nFAILED (unexpected successes=1)\n'
+        self.assertIn('FAILED', runner.summary([('test_y', 1, red)], 1.0, 1))
+        self.assertEqual(runner.parse(red)[3], {'unexpected successes': 1})
+
 
 class CommandLineTests(unittest.TestCase):
     def test_list_prints_the_plan_and_shards_is_capped(self):
