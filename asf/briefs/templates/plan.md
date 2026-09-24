@@ -4,7 +4,7 @@ Binding: the approved spec `{spec_path}`. Read it in full first — every sectio
 acceptance test. The plan adds no scope the spec does not carry; where the spec is wrong, say so
 in the plan's decisions block rather than quietly widening it.
 
-DELIVERABLE: `{plan_path}` on branch `{branch}`, cut from `origin/{main}`. Create only that file.
+{refine}DELIVERABLE: `{plan_path}` on branch `{branch}`, cut from `origin/{main}`. Create only that file.
 
 TASK LINES (binding, machine-read — the record turns every `### Task N:` heading into a Task card
 and the feeder launches coders from them). Directly under each heading, before anything else,

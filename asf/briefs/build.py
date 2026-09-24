@@ -284,6 +284,7 @@ def context(product, row, kind, facts):
                    'and why)').strip(),
         'groom_file': getattr(row, 'groom_file', '') or '—',
         'answers_file': getattr(row, 'answers_file', '') or '—',
+        'refine': (preamble_mod.refine_line(facts) + '\n\n') if preamble_mod.refine_line(facts) else '',
         'tree_path': getattr(row, 'tree_file', '') or '—',
         'open_questions': '\n'.join(getattr(row, 'open_questions', ()) or ()) or '(none)',
     }

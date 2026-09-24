@@ -397,12 +397,27 @@ def identity_lines(row, facts):
     return out
 
 
+def refine_line(facts):
+    """The line a spec or plan brief carries when its document is already in the record (F-0023):
+    the writer amends it, and says what a refusal at the harvest will look for. ``''`` for every
+    other kind and for a document the record does not hold yet."""
+    kind = facts.get('kind') or ''
+    if kind not in ('spec', 'plan') or not facts.get(f'{kind}_recorded'):
+        return ''
+    return (f"Refine, do not regenerate: `{facts[f'{kind}_path']}` is in the record. Your diff "
+            f"amends it — every `##` heading and every S-/T- id it carries survives unless this "
+            f"card says it is wrong. A branch that drops one, or deletes more than half of it, is "
+            f"held at the harvest and comes back to you as a correction before a reviewer reads it.")
+
+
 def state_lines(product, facts):
     kind = facts.get('kind') or ''
     out = [f"Branch: `{facts['branch'] or '—'}` (exists: {_flag(facts['branch_exists'])})",
            f"Head: {facts['head'] or UNKNOWN}",
            _doc_line('Spec', facts['spec_path'], facts['spec_lines'], facts['spec_recorded']),
            _doc_line('Plan', facts['plan_path'], facts['plan_lines'], facts['plan_recorded'])]
+    if refine_line(facts):
+        out.append(refine_line(facts))
     if kind in REVIEW_KINDS:
         verb, n = ('to answer', facts['round']) if kind in ANSWER_KINDS \
             else ('to write', facts['next_round'])

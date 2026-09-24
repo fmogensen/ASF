@@ -617,6 +617,39 @@ class RefineBriefTest(unittest.TestCase):
         self.assertIn('never ask — propose', brief.text)
         self.assertIn(os.path.dirname(tree), brief.add_dirs)
 
+    def brief(self, kind, recorded=True):
+        idx = index()
+        if not recorded:
+            idx['items']['F-0001'].pop('links', None)
+        return briefs.build(product(), ROWS[kind], idx, [], REPO_FACTS).text
+
+    def test_a_spec_brief_for_a_recorded_spec_says_refine(self):
+        text = self.brief('spec')
+        self.assertIn('Refine, do not regenerate: `docs/specs/checkout-resilience.md` is in the '
+                      'record.', text)
+        self.assertIn('S-/T- id it carries survives', text)
+        # once in the preamble's state lines, once above the DELIVERABLE paragraph
+        self.assertEqual(text.count('Refine, do not regenerate'), 2)
+        self.assertLess(text.rindex('Refine, do not regenerate'), text.index('DELIVERABLE:'))
+        self.assertLess(text.index('Refine, do not regenerate'), text.index('## Your job'))
+
+    def test_a_spec_brief_for_a_card_does_not(self):
+        text = self.brief('spec', recorded=False)
+        self.assertNotIn('Refine, do not regenerate', text)
+        self.assertNotIn('{refine}', text)
+        self.assertIn('\n\nDELIVERABLE: `docs/specs/', text)   # the template reads as it did
+
+    def test_a_plan_brief_for_a_recorded_plan_says_refine(self):
+        text = self.brief('plan')
+        self.assertIn('Refine, do not regenerate: `docs/plans/checkout-resilience.md` is in the '
+                      'record.', text)
+        self.assertLess(text.rindex('Refine, do not regenerate'), text.index('DELIVERABLE:'))
+        self.assertNotIn('Refine, do not regenerate', self.brief('plan', recorded=False))
+
+    def test_a_coder_brief_never_does(self):
+        for kind in ('coder', 'review', 'fixer', 'correct', 'idea'):
+            self.assertNotIn('Refine, do not regenerate', self.brief(kind), kind)
+
 
 class GenericTest(unittest.TestCase):
     def test_no_template_carries_a_forbidden_name(self):

@@ -4,7 +4,7 @@ The card above is the scope — read it as the requirement; everything else is c
 source. Write the spec and nothing else: no plan, no code, no branch but this one. When it is
 written and pushed, the tick sends it to the reviewer.
 
-DELIVERABLE: `{spec_path}` on branch `{branch}`, cut from `origin/{main}` — or, when `{branch}` is
+{refine}DELIVERABLE: `{spec_path}` on branch `{branch}`, cut from `origin/{main}` — or, when `{branch}` is
 already on origin (`exists:` above), on that branch as it stands in your worktree: never recut it,
 never merge its remote into it. Create only that file.
 
