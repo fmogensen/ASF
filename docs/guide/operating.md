@@ -198,8 +198,11 @@ asf inbox --title "Export to CSV" --body-file notes.md --product <p>   # optiona
 
 It writes `<intake_dir>/<slug>.md` in your record checkout, prints its path, and commits and pushes
 it. You can also drop a `.md` file into the intake folder and push it. The body may carry
-`type:`, `parent:`, `severity:`, `writes:` or `stories:` lines; the type is derived from the
-card's shape when it does not say.
+`parent:`, `severity:`, `signature:`, `writes:` or `stories:` lines. The type is always derived
+from the card's shape, and a `type:` line is not read: a card becomes a **Bug** when it carries a
+`signature:` line (a defect with a signature), a **Task** when it names `writes:`, an **Epic** when it lists
+Features, a **Story** under a Feature `parent:`, otherwise a **Feature**. To file a Bug, give it a `signature:` and a
+`severity:`.
 
 **The groom** types new and edited inbox cards into cards (the file moves to
 `<intake_dir>/done/`) and turns anything it cannot decide into a question in `groom/<date>.md` of
