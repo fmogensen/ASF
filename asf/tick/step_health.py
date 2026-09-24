@@ -141,11 +141,24 @@ def file_rulings(ctx, out=print):
     return done
 
 
+def widen_footprints(ctx, items, out=print):
+    """``widen_footprint`` (:mod:`asf.tick.widen_footprint`): a finished run whose REPORT, or
+    whose red gate, names paths outside its Task's ``writes:`` gets the rule's verdict before the
+    wave plans. A failure here is one line; the sessions' health stands."""
+    from asf.tick import widen_footprint
+    try:
+        return widen_footprint.run(ctx, out=out, items=items)
+    except Exception as e:  # noqa: BLE001 — the rule must never take the health step down
+        out(f'widen: skipped — {type(e).__name__}: {e}')
+        return None
+
+
 def run(ctx, out=print, runtime_fn=_runtime):
     product = ctx.product
     items = health_mod.record_items(product)
     found = health_mod.health(product, fix=True, out=out, items=items)
     file_rulings(ctx, out=out)  # B-0064
+    widen_footprints(ctx, items, out=out)
     stalled = stall_mod.stall(product, out=out)
     ctx.counts['stalls'] += len(stalled)
     sessions = pool_mod.load_sessions(product)

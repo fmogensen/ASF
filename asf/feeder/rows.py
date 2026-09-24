@@ -10,7 +10,9 @@ The row kinds::
 
     BUG → FIX              an open, decided S1/S2 Bug with no session (the S1 lane)
     FIX → CORRECT          an item whose branch the harvest held (red gate, conflict) fewer than
-                           3 times: back to a session with the failing output
+                           3 times: back to a session with the failing output. A ``footprint``
+                           hold (paths outside ``writes:``, :mod:`asf.feeder.widen`) waits on
+                           the rule until it widened the Task, else is RESHAPE → PLAN
     STALEMATE → ADJUDICATE a Feature at spec-/plan-review round >= 4: adjudicate, and nothing
                            else for that Feature (another review round will not converge); or a
                            Bug with 3 sessions behind it and still open (not a fourth fix)
@@ -48,6 +50,7 @@ from asf.views import index_reader as ix
 BUG_FIX = 'BUG → FIX'
 FIX_CORRECT = 'FIX → CORRECT'
 CORRECTION_ROUNDS = 3  # == asf.workers.lifecycle.ROUND_CAP (the feeder imports no git module)
+FOOTPRINT = 'footprint'  # == asf.workers.lifecycle.FOOTPRINT: a correction widen_footprint answers
 STALEMATE = 'STALEMATE → ADJUDICATE'
 CONFLICT = 'CONFLICT → REBASE'
 STALE = 'STALE → CLOSE'
@@ -277,6 +280,30 @@ def bug_rows(items, product, busy, attempts=None):
     return out
 
 
+def footprint_row(item, product, c, tier, fid, branch):
+    """The row a ``footprint`` correction (:mod:`asf.feeder.widen`) stands for until the rule
+    has widened the Task — a widened one is an ordinary FIX → CORRECT row, on the wider
+    ``writes:``. A reshape verdict is the RESHAPE row (the card's ``reshape:`` says why); a path
+    under an approvals-protected glob waits on its approval; a path a running Task writes waits
+    on that Task; an undecided one waits on the rule (the tick's health step decides it)."""
+    iid, verdict, detail = item['id'], c.get('verdict'), c.get('detail') or ''
+    if verdict == 'reshape':
+        return Row(tier=tier, kind=RESHAPE, item_id=iid, feature_id=fid, action=LAUNCH,
+                   brief_kind='reshape', branch=branch_for(product, 'plan', iid),
+                   reason=item.get('reshape') or detail
+                   or f"footprint: needs {' '.join(c.get('needs') or ())}")
+    if verdict == 'approval':
+        action, waits, why = f'WAITS ON approval {detail}', 'approval', \
+            f'footprint needs a path under {detail}: approvals decide'
+    elif verdict == 'waits':
+        action, waits, why = f'WAITS ON {detail}', detail, f'footprint widening overlaps {detail}'
+    else:
+        action, waits, why = 'WAITS ON widen_footprint', 'widen', \
+            f"footprint needs {' '.join(c.get('needs') or ())}: the rule decides next tick"
+    return Row(tier=tier, kind=FIX_CORRECT, item_id=iid, feature_id=fid, action=action,
+               brief_kind='correct', branch=branch, reason=why, waits_on=waits)
+
+
 def correction_rows(items, product, busy, corrections):
     """``corrections`` is ``{item: {kind, text, rounds, at, branch}}`` — a branch the harvest held
     (the row runs on that branch when it is given). Fewer
@@ -299,6 +326,9 @@ def correction_rows(items, product, busy, corrections):
             out.append(Row(tier=tier, kind=FIX_CORRECT, item_id=iid, feature_id=fid,
                            action=f'{PARKED} {c.get("reason") or c["kind"]}', brief_kind='correct',
                            branch=branch, reason=c.get('reason') or 'parked', waits_on='operator'))
+            continue
+        if c.get('kind') == FOOTPRINT and c.get('verdict') != 'widen':
+            out.append(footprint_row(item, product, c, tier, fid, branch))
             continue
         if rounds >= CORRECTION_ROUNDS:
             out.append(Row(tier=tier, kind=STALEMATE, item_id=iid, feature_id=fid, action=LAUNCH,
@@ -604,7 +634,10 @@ def candidates(index, product, inflight, attempts=None, corrections=None, busy=N
     gr = groom_row(index, product, busy, groom_state, inflight)
     if gr is not None:
         rows.append(gr)
-    rows += feature_rows(items, product, busy, running, landed_shas, unlanded, open_branches)
+    # a Task a correction row speaks for gets no PLAN → CODE row too: one session per branch
+    tasks_spoken = {i for i in spoken if (items.get(i) or {}).get('type') == 'task'}
+    rows += feature_rows(items, product, busy | tasks_spoken, running, landed_shas, unlanded,
+                         open_branches)
     rows += undecided_rows(items, product, busy, decision_limit)
     rows = hold_unlanded(rows, items, landed_shas)
 

@@ -69,6 +69,9 @@ conventions:
   # and the most globs a Task may write and still be batched. Both shown at their defaults.
   # area_depth: 2
   # batch_max_globs: 2
+  # asf.feeder.widen: the most paths one footprint widening adds to a Task's writes: — more is a
+  # reshape of the Task. Shown at its default.
+  # widen_max_files: 5
   # asf.briefs.preamble: the lines the preamble may run to, and the most documents and tests whose
   # line counts it measures per launch. Both shown at their defaults.
   # preamble_max_lines: 120

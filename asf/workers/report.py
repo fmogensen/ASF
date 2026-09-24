@@ -11,6 +11,7 @@ Every brief ends with the same block (:data:`asf.briefs.build.TAIL`)::
     commits: <sha> <subject> (one per line, or none)
     tests: <what you ran — and its last line>
     left out: <what and why, or none>
+    needs writes: <repo paths outside writes: that must change too, or none>
 
 :func:`parse` reads it off a result's text (the last ``REPORT`` block wins). :func:`failure`
 names the one failure the report itself declares: ``pushed: no`` — the session says its work
@@ -21,10 +22,10 @@ nothing; the evidence rule still applies.
 """
 import re
 
-FIELDS = ('item', 'kind', 'status', 'branch', 'pushed', 'commits', 'tests', 'left out', 'ruling',
-          'blocked_on', 'writes', 'superseded_by')
+FIELDS = ('item', 'kind', 'status', 'branch', 'pushed', 'commits', 'tests', 'left out',
+          'needs writes', 'ruling', 'blocked_on', 'writes', 'superseded_by')
 HEAD_RE = re.compile(r'^\s*REPORT\s*$', re.M)
-FIELD_RE = re.compile(r'^(?P<key>item|kind|status|branch|pushed|commits|tests|left out|ruling|blocked_on|writes|superseded_by)\s*:\s*(?P<value>.*)$', re.I)
+FIELD_RE = re.compile(r'^(?P<key>item|kind|status|branch|pushed|commits|tests|left out|needs writes|ruling|blocked_on|writes|superseded_by)\s*:\s*(?P<value>.*)$', re.I)
 NO_RE = re.compile(r'^\s*(no|none|not pushed|unpushed)\b', re.I)
 NONE_RE = re.compile(r'^(none|n/a|-|—)$', re.I)
 UNPUSHED = 'unpushed work'
@@ -44,7 +45,7 @@ def parse(text):
             break
         m = FIELD_RE.match(line.strip())
         if m:
-            key = m.group('key').lower()
+            key = ' '.join(m.group('key').lower().split())
             out[key] = m.group('value').strip()
         elif key and line.strip():
             out[key] = (out[key] + '\n' + line.strip()).strip()
@@ -86,3 +87,30 @@ def failure(text):
     if unpushed(rep):
         return UNPUSHED
     return None
+
+
+#: The statuses a session reports when its Task is not whole: only these may claim more footprint.
+UNFINISHED = ('partial', 'blocked')
+#: A line that opens a section of its own inside a field's run-on value: ``Assumptions:``.
+SECTION_RE = re.compile(r'^[A-Z][\w ]{0,40}:\s*$', re.M)
+
+
+def footprint_claim(text):
+    """``(source, tokens)`` — the paths outside ``writes:`` the last REPORT says must change:
+    its ``needs writes:`` field when it carries one (``none`` is a claim of none), else — for a
+    ``partial`` or ``blocked`` report only — the path-like tokens of ``left out:``. ``source`` is
+    ``'needs writes'`` | ``'left out'`` | None; the tokens are raw (the caller resolves them
+    against the repo, :func:`asf.feeder.widen.resolve`, and drops those already in ``writes:``)."""
+    from asf.feeder import widen
+    rep = parse(text)
+    if 'needs writes' in rep:
+        value = _claim(rep.get('needs writes'))
+        # the field is a path list by contract: every token stands, extension or not (LICENSE)
+        tokens = [t.strip('`\'",;') for t in (value or '').split()]
+        return 'needs writes', [t for t in dict.fromkeys(tokens) if t and not NONE_RE.match(t)]
+    status = (rep.get('status') or '').strip().lower().split(' ')[0]
+    left = _claim(rep.get('left out'))
+    if status in UNFINISHED and left:
+        left = SECTION_RE.split(left, maxsplit=1)[0]  # a new heading (`Assumptions:`) ends it
+        return 'left out', widen.path_tokens(left)
+    return None, []

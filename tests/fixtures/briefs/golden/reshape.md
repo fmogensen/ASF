@@ -44,6 +44,9 @@ DELIVERABLE, on branch `plan/T-0050` cut from `origin/main`:
 - T-0050's section of the plan replaced by one section per part, each with Files, Steps, Gate
   and Acceptance (the spec's fenced tests, byte-identical);
 - T-0050 marked `removed: split into <ids>`.
+When the reason is `footprint: needs <paths>`, the factory found T-0050's `writes:` too narrow
+(its coder, or its gate, named those paths as ones it must change): cut it so every part's
+`writes:` holds the files its acceptance needs, those paths among them.
 If a part cannot pass its own acceptance without another part, say so and leave T-0050 whole:
 `NEEDS OPERATOR: T-0050 does not split along <area> — answer no on the split line`.
 
@@ -87,6 +90,7 @@ pushed: yes <the sha origin/plan/T-0050 now points at> | rebased <sha> — the f
 commits: <sha> <subject> (one per line, or none)
 tests: <what you ran — and its last line>
 left out: <what and why, or none>
+needs writes: <coder/correct only — repo paths outside writes: that must change too, space-separated, or none>
 ruling: <adjudicate only — one paragraph: what was disputed, what now holds, what changes; else omit>
 blocked_on: <adjudicate only — the id this item must wait for, or none>
 writes: <adjudicate only — the corrected footprint, space-separated globs, or none>

@@ -10,6 +10,9 @@ DELIVERABLE, on branch `{branch}` cut from `origin/{main}`:
 - {item_id}'s section of the plan replaced by one section per part, each with Files, Steps, Gate
   and Acceptance (the spec's fenced tests, byte-identical);
 - {item_id} marked `removed: split into <ids>`.
+When the reason is `footprint: needs <paths>`, the factory found {item_id}'s `writes:` too narrow
+(its coder, or its gate, named those paths as ones it must change): cut it so every part's
+`writes:` holds the files its acceptance needs, those paths among them.
 If a part cannot pass its own acceptance without another part, say so and leave {item_id} whole:
 `NEEDS OPERATOR: {item_id} does not split along <area> — answer no on the split line`.
 

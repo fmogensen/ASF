@@ -11,6 +11,11 @@ touching one, take the plan's stated expectation for it, record the assumption i
 carry on. The footprint is what lets other sessions run beside you; widening it silently collides
 with work you cannot see.
 
+When the Task cannot be whole without such a file — a sibling test suite your change turns red, a
+constant that belongs in another module — name every one, as a full repo path, on the REPORT's
+`needs writes:` line and report `status: partial`. The factory widens `writes:` by those paths
+and sends this run back to you; that line is how the footprint grows, never a question to a person.
+
 BEFORE THE PUSH: the Task's Gate commands, and its acceptance tests byte-identical from the plan
 and passing. Paste the last line of each in the report. A test you changed to make it pass is a
 failed Task, not a passed one.

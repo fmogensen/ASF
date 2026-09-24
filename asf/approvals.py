@@ -281,6 +281,29 @@ def merge_class(product, files):
     return 'merge_routine_pr', None
 
 
+def path_class(product, relpath):
+    """``(class, level)`` of the first class in catalogue order whose path globs match
+    ``relpath`` and whose level is not ``auto`` — the built-in recognisers, the runtime settings
+    files, the product's ``approval_signals`` paths, and the amendable set
+    (``merge_amendable_set``) — or None: the path is not approvals-protected."""
+    try:
+        sig = signals(product)
+    except env.ConfigError:
+        sig = {}
+    for c in CLASSES:
+        globs = list(_PATH_GLOBS.get(c.name, ()))
+        if c.name == 'touch_security':
+            globs += list(hooks.RUNTIME_SETTINGS_GLOBS)
+        if c.name == 'merge_amendable_set':
+            globs += list(amendable.paths(product))
+        globs += sig.get(c.name, {}).get('paths', [])
+        if any(_match_glob(g, relpath) for g in globs):
+            level = level_of(product, c.name)
+            if level != 'auto':
+                return c.name, level
+    return None
+
+
 def level_of(product, cls):
     """``matrix(product)[cls]``'s level; an invalid matrix makes it ``human-now`` (D7) rather
     than raise, since a harvest or a bug filer that cannot read the matrix must still fail

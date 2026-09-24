@@ -44,6 +44,9 @@ left out: the retry itself, F-0001 owns it
 
 The harvest gate held `fix/B-0001` and sent it back to you: your worktree is already on `fix/B-0001`, and the rebase onto `origin/main` was started for you — if `git status` shows a conflict it is still in place: resolve it (or, if the rebase finished cleanly, carry on), fix what the failure below names (a conflict is resolved so both sides survive), run the full suite, and push the same branch — never a new one, never a merge of `origin/fix/B-0001` or `origin/main` into it, never a force. A push refused as non-fast-forward is the rebase you were handed: stop there and report `pushed: rebased <sha> — the factory publishes`. Change nothing the failure does not ask for; paste the suite's last line in the report.
 
+THE BOUNDARY IS `writes:` — (none declared)
+When the failure below says the footprint was widened, the paths it added are inside that list now: change them as the failure asks. A file still outside it that must change goes, as a full repo path, on the REPORT's `needs writes:` line with `status: partial` — never edited, never a question to a person.
+
 CORRECTION: the step failed with:
 FAIL: test_red_gate
 
@@ -85,6 +88,7 @@ pushed: yes <the sha origin/fix/B-0001 now points at> | rebased <sha> — the fa
 commits: <sha> <subject> (one per line, or none)
 tests: <what you ran — and its last line>
 left out: <what and why, or none>
+needs writes: <coder/correct only — repo paths outside writes: that must change too, space-separated, or none>
 ruling: <adjudicate only — one paragraph: what was disputed, what now holds, what changes; else omit>
 blocked_on: <adjudicate only — the id this item must wait for, or none>
 writes: <adjudicate only — the corrected footprint, space-separated globs, or none>

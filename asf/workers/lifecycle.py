@@ -811,6 +811,31 @@ def hold(path, run, kind, text, now, empty_cap=EMPTY_CAP):
     return fields, f'held {branch}: {text} — back to its session (round {rounds})'
 
 
+#: A correction kind of its own: the branch needs paths outside its Task's ``writes:`` — the
+#: ``widen_footprint`` rule (:mod:`asf.feeder.widen`) answers it, never a plain round.
+FOOTPRINT = 'footprint'
+
+
+def footprint_hold(run, paths, fact, text, now, tests=()):
+    """``(fields, line)``: hold ``run``'s branch because it needs ``paths`` outside its Task's
+    ``writes:`` — ``fact`` names where that came from (the REPORT, the gate). No round is spent:
+    the session did its own part; the footprint was the plan's. The rule decides next (its
+    ``verdict`` is written on the same correction once it has)."""
+    branch = run.get('branch') or run.get('job')
+    fields = {'correction': {'kind': FOOTPRINT, 'text': text, 'at': now, 'needs': list(paths),
+                             'fact': fact, 'tests': list(tests)}}
+    return fields, (f'held {branch}: footprint needs {" ".join(paths)} ({fact}) — '
+                    f'widen_footprint decides')
+
+
+def widenings(path, item):
+    """How many times ``item``'s footprint was already widened: its runs that carry ``widened``
+    (the paths the rule added, written beside the correction and never overwritten by one)."""
+    if not item:
+        return 0
+    return sum(1 for r in item_runs(path, item) if r.get('widened'))
+
+
 def unpushed_text(reason):
     """The correction a run judged ``failed: not pushed: …`` hands its next session."""
     gap = reason.split('failed: ', 1)[-1]

@@ -1210,6 +1210,37 @@ class ProductHarvestTests(unittest.TestCase):
                             for l in lines), lines)
         self.assertTrue((self.record('fix/B-0002').get('correction') or {}).get('text'), lines)
 
+    def test_red_alone_in_a_test_outside_writes_that_imports_a_changed_file_goes_to_widening(self):
+        # main is green; the Task's branch changes checks/value.py (its writes:) and the sibling
+        # test that imports it goes red. Not foreign, not a round its session cannot pass inside
+        # its footprint: held for widen_footprint, the test named as the path it needs.
+        product = self.runner_product()
+        self.write(self.repo, 'checks/value.py', 'VALUE = 1\n')
+        self.write(self.repo, 'checks/test_value.py',
+                   'import unittest\nfrom checks.value import VALUE\n\nclass V(unittest.TestCase):\n'
+                   '    def test_value(self):\n'
+                   '        self.assertEqual(VALUE, 1, "checks/test_value.py")\n')
+        sh(['git', 'add', '-A'], cwd=self.repo)
+        sh(['git', 'commit', '-qm', 'a value and its test'], cwd=self.repo)
+        sh(['git', 'push', '-q', 'origin', 'HEAD:main'], cwd=self.repo)
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        # a length of its own: a same-size, same-second source reuses the trunk check's .pyc
+        self.push_lane('worker/T-0001', [('task(T-0001): the value is 2',
+                                          {'checks/value.py': 'VALUE = 2  # the new value\n'})])
+        self.session('coder-t-0001', 'T-0001', 'worker/T-0001')
+        items = {'T-0001': {'id': 'T-0001', 'type': 'task', 'state': 'Active',
+                            'writes': ['checks/value.py']}}
+        lines = []
+        results = harvest.run_product_harvest(product, self.state_dir, out=lines.append,
+                                              items=items)
+        self.assertEqual(results, {'worker/T-0001': 'held'}, lines)
+        self.assertFalse(any(l.startswith('foreign ') for l in lines), lines)
+        self.assertIn('held worker/T-0001: footprint needs checks/test_value.py', '\n'.join(lines))
+        rec = self.record('worker/T-0001')
+        self.assertEqual((rec['correction']['kind'], rec['correction']['needs']),
+                         ('footprint', ['checks/test_value.py']))
+        self.assertFalse(rec.get('rounds'), rec)  # the footprint was the plan's: no round spent
+
     def test_a_candidate_red_in_full_does_not_land(self):
         product = self.runner_product()
         self.lanes(2, red=(2,))

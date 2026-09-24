@@ -74,6 +74,9 @@ DEFAULT_PRS_PER_TICK = 6
 DEFAULT_AREA_DEPTH = 2
 #: The most globs a Task may write and still count as small enough to batch (F-0086 D3).
 DEFAULT_BATCH_MAX_GLOBS = 2
+#: The most paths the ``widen_footprint`` rule adds to a Task's ``writes:`` in one widening; more
+#: is a reshape of the Task, not a wider one (:mod:`asf.feeder.widen`).
+DEFAULT_WIDEN_MAX_FILES = 5
 #: How harvest gates a tick's eligible branches (B-0040): ``combined`` — every branch rebased in
 #: turn onto one throwaway head, one gate, one fast-forward push, bisecting on red — or
 #: ``per-branch``, one gate and one push per landing. Spelt ``harvest: {gate: …}`` in the yaml.
@@ -157,6 +160,8 @@ class Conventions:
     prs_per_tick: int = DEFAULT_PRS_PER_TICK
     area_depth: int = DEFAULT_AREA_DEPTH
     batch_max_globs: int = DEFAULT_BATCH_MAX_GLOBS
+    #: The most paths one footprint widening may add (:mod:`asf.feeder.widen`).
+    widen_max_files: int = DEFAULT_WIDEN_MAX_FILES
     harvest_gate: str = DEFAULT_HARVEST_GATE
     branches_per_tick: int = DEFAULT_BRANCHES_PER_TICK
     gate_timeout_s: int = DEFAULT_GATE_TIMEOUT_S

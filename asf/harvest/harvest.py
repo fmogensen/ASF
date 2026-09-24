@@ -54,7 +54,11 @@ A branch whose diff is Markdown under the document trees only (:func:`is_inert` 
 branch) cannot turn a test red: it is gated by the checks alone, in a set of its own that lands
 whatever the code branches' gate says, and a red gate never sends its session a round. A red
 naming only files outside a branch's footprint — its item's ``writes:``, else its diff — is
-``foreign``: no correction, re-gated next tick.
+``foreign``: no correction, re-gated next tick — unless a red test imports a file the branch
+changed, or the branch is red alone on a trunk green on those modules: that red is the branch's.
+When it sits in files outside the Task's ``writes:`` (a sibling suite the change turned red), the
+branch is held for ``widen_footprint`` (:mod:`asf.feeder.widen`), not sent back for a round its
+session could never pass inside its footprint.
 """
 import argparse
 import dataclasses
@@ -70,7 +74,7 @@ import time
 
 from asf import approvals, env, hermetic
 from asf.conventions import Conventions
-from asf.feeder import footprint
+from asf.feeder import footprint, widen
 from asf.workers import health as health_mod
 from asf.workers import lifecycle
 from asf.workers.pool import now_iso
@@ -993,8 +997,41 @@ def archive_superseded(repo, state_dir, branch, record, item, state, dry_run, ou
     return SUPERSEDED
 
 
+def widen_candidates(files, item_writes, touched=(), read=None, own=False):
+    """``(needs, tests, exercised)`` — the gate's facts for ``widen_footprint``
+    (:mod:`asf.feeder.widen`), read off the files a red gate named.
+
+    ``exercised``: the failing test files that import a file the branch changed (``touched``) —
+    whatever footprint they sit in, that red is the branch's own. ``tests``: the failing test
+    files that are the branch's — every one when ``own`` (red alone on a trunk green on those
+    modules), else the exercised ones. ``needs``: of those, the ones outside ``item_writes``,
+    plus every other file the output names outside ``item_writes`` that such a test imports (a
+    module the fix must reach). ``read(path)``: the file's text on the branch, or None when it
+    is not there — a path the tree does not hold is never a need. No ``read``: no imports are
+    known, and every named file is taken to exist."""
+    named = [f for f in files or () if read is None or read(f) is not None]
+    stems = {}
+    for f in named:
+        if widen.is_test_path(f):
+            stems[f] = widen.import_stems((read(f) if read else '') or '', f)
+    exercised = [t for t, s in stems.items() if touched and widen.imported(s, touched)]
+    tests = list(stems) if own else exercised
+    reached = [f for f in named if f not in stems
+               and widen.imported([s for t in tests for s in stems[t]], [f])]
+    needs = widen.outside(tests + reached, item_writes) if item_writes else []
+    return needs, tests, exercised
+
+
+def gate_reader(repo, branch):
+    """``read(path)`` over ``origin/<branch>``'s tree in ``repo`` — the text, or None."""
+    def read(path):
+        r = sh(['git', 'show', f'origin/{branch}:{path}'], cwd=repo)
+        return r.stdout if r.returncode == 0 else None
+    return read
+
+
 def hold_with_correction(state_dir, branch, record, kind, text, out, files=(), item_writes=(),
-                         touched=(), conv=None, own=False):
+                         touched=(), conv=None, own=False, read=None):
     """Hold ``branch`` and hand it back to its session: :func:`asf.workers.lifecycle.hold` says
     what goes on the run (the failing output as ``correction``, the rounds over every session of
     the item, the cap the feeder switches an ADJUDICATE row on at) and what to print.
@@ -1016,10 +1053,24 @@ def hold_with_correction(state_dir, branch, record, kind, text, out, files=(), i
             and not footprint.overlaps(touched, files):
         out(f'foreign {branch}: gate red, its diff is docs only — re-gated next tick')
         return 'foreign'
+    item_writes = widen.norm_writes(item_writes)
     reach, what = (item_writes, 'writes') if item_writes else (touched, 'diff')
-    if kind == 'gate' and not own and files and reach and footprint.overlaps(reach, files) is None:
+    needs, tests, exercised = (widen_candidates(files, item_writes, touched, read, own)
+                               if kind == 'gate' and files else ([], [], []))
+    # a red test that imports a file the branch changed is the branch's red, wherever it sits
+    if kind == 'gate' and not own and not exercised and files and reach \
+            and footprint.overlaps(reach, files) is None:
         out(f'foreign {branch}: gate red outside its {what}: {files[0]} — re-gated next tick')
         return 'foreign'  # D8: not this item's red — no correction, no round
+    if needs:  # the branch's red, in files its Task may not write: widen_footprint's to answer
+        fact = f'gate: {", ".join(tests) or files[0]} red alone, trunk green'
+        fields, line = lifecycle.footprint_hold(
+            dict(record, branch=branch, job=job), needs, fact,
+            f'{text}\nfootprint: the red is outside writes: — needs {" ".join(needs)}',
+            now_iso(), tests=tests)
+        mark_session(state_dir, job, **fields)
+        out(line)
+        return 'held'
     fields, line = lifecycle.hold(sessions_path(state_dir), dict(record, branch=branch, job=job),
                                   kind, text, now_iso())
     mark_session(state_dir, job, **fields)
@@ -1047,7 +1098,8 @@ def land_ff(repo, state_dir, branch, record, item, conv, asf_repo, bug_root, dry
             ok, line, files, _red = product_gate(tmp, gate_conv, asf_repo, out)
             if not ok:
                 return hold_with_correction(state_dir, branch, record, 'gate', line, out,
-                                            files, item_writes, touched, conv)
+                                            files, item_writes, touched, conv,
+                                            read=gate_reader(repo, branch))
             sha = sh(['git', 'rev-parse', 'HEAD'], cwd=tmp).stdout.strip()
             if dry_run:
                 out(f'DRY: would land {branch} → {sha}')
@@ -1445,7 +1497,8 @@ def land_set(repo, state_dir, entries, conv, gate_conv, asf_repo, dry_run, out, 
         card = (items or {}).get(item_of(entry[0], entry[1])) or {}  # P7: no index, no footprint
         results[entry[0]] = hold_with_correction(state_dir, entry[0], entry[1], kind, text, out,
                                                  files, card.get('writes') or (),
-                                                 touched.get(entry[0]) or (), conv, own=own)
+                                                 touched.get(entry[0]) or (), conv, own=own,
+                                                 read=gate_reader(repo, entry[0]))
 
     started = time.monotonic()
     pending = list(entries)
