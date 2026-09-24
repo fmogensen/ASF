@@ -446,7 +446,7 @@ class IdTokenTests(unittest.TestCase):
     def test_id_state_ladder(self):
         self.assertEqual(evidence.id_state("B-0001", None), (None, []))
         self.assertEqual(evidence.id_state("B-0003", {"branches": ["fix/B-0003"]}),
-                         ("Active", ["branch fix/B-0003", "rule: fixer"]))
+                         ("Active", ["branch fix/B-0003"]))
         self.assertEqual(evidence.id_state("S-0004", {"open_prs": [4], "branches": []})[0], "Active")
         self.assertEqual(evidence.id_state("B-0001", {"commit": "abcdef123", "green": False}),
                          ("Resolved", ["commit abcdef1 names B-0001"]))
