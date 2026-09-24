@@ -495,14 +495,19 @@ class AppliedTest(SharedFixture, unittest.TestCase):
                          sorted(['asf.sample.record', 'asf.sample.dispatch', 'asf.sample.daily']))
 
     def test_the_installed_job_is_runnable(self):
-        """B-0014 (b): absolute interpreter, a working directory, PYTHONPATH and log paths."""
+        """B-0014 (b): absolute interpreter, a working directory, PYTHONPATH (or, from a checkout,
+        the snapshot launcher that sets it) and log paths."""
         import plistlib
         import sys
         with open(os.path.join(self.agents_dir(), 'asf.sample.record.plist'), 'rb') as f:
             data = plistlib.load(f)
         self.assertEqual(data['ProgramArguments'][0], sys.executable)
         self.assertTrue(os.path.isdir(data['WorkingDirectory']))
-        self.assertIn('PYTHONPATH', data['EnvironmentVariables'])
+        launcher = data['ProgramArguments'][1]
+        if launcher.endswith('launch.py'):
+            self.assertTrue(os.path.isfile(launcher), launcher)
+        else:
+            self.assertIn('PYTHONPATH', data['EnvironmentVariables'])
         self.assertIn('PATH', data['EnvironmentVariables'])
         self.assertIn('HOME', data['EnvironmentVariables'])
         self.assertTrue(data['StandardOutPath'].endswith('tick-sample-record.log'))

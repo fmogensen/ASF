@@ -14,8 +14,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
-from asf import env, scheduler
+from asf import env, scheduler, snapshot
 from asf.scheduler import Clock
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures')
@@ -173,9 +174,51 @@ class RenderTest(SchedulerTestCase):
     DISPATCH = Clock('dispatch', ['health', 'wave', 'prs', 'batch'], False, 300, None)
     DAILY = Clock('daily', ['daily'], False, None, {'Hour': 6, 'Minute': 50})
 
+    def test_launchd_golden_from_a_checkout_runs_the_snapshot_launcher(self):
+        """The clock never imports from a moving checkout: it runs the launcher copied into the
+        state dir, which ticks from a snapshot of HEAD (the card: the factory's own clock
+        imports from the live dev checkout)."""
+        root = self._checkout()
+        with mock.patch.object(scheduler, 'repo_root', return_value=root):
+            job = scheduler.render('sample', self.RECORD)
+        code = os.path.join(self.asf_home, 'state', 'sample', 'code')
+        launcher = os.path.join(code, 'launch.py')
+        self.assertEqual(job['launcher'], launcher)
+        self.assertEqual(job['plist']['ProgramArguments'], [
+            sys.executable, launcher, '--repo', root, '--code-dir', code, '--',
+            '-m', 'asf.cli', 'tick', '--product', 'sample', '--steps', 'record'])
+        self.assertEqual(job['plist']['WorkingDirectory'], code)
+        self.assertNotIn('PYTHONPATH', job['plist']['EnvironmentVariables'])
+        self.assertEqual(job['plist']['EnvironmentVariables']['ASF_HOME'], self.asf_home)
+        # read back as the same clock
+        self.assertEqual(scheduler.clock_of_plist('asf.sample.record', job['plist'], 'sample'),
+                         self.RECORD)
+        # install copies the launcher (the module, byte for byte) and makes the cwd
+        scheduler.install(job)
+        with open(launcher, encoding='utf-8') as f, open(snapshot.__file__, encoding='utf-8') as g:
+            self.assertEqual(f.read(), g.read())
+
+    def test_cron_line_from_a_checkout_runs_the_snapshot_launcher(self):
+        root = self._checkout()
+        with mock.patch.object(scheduler, 'repo_root', return_value=root), \
+                mock.patch.object(scheduler, 'kind', return_value='cron'):
+            job = scheduler.render('sample', self.RECORD)
+        code = os.path.join(self.asf_home, 'state', 'sample', 'code')
+        self.assertIn(f'cd {code} && ', job['line'])
+        self.assertIn(f"launch.py --repo {root} --code-dir {code} -- -m asf.cli tick", job['line'])
+        self.assertNotIn('PYTHONPATH', job['line'])
+
+    def _checkout(self):
+        root = os.path.join(self.tmp, 'checkout')
+        os.makedirs(os.path.join(root, '.git'))
+        return root
+
     def test_launchd_golden(self):
-        job = scheduler.render('sample', self.RECORD)
-        root = scheduler.repo_root()
+        """An installed package (no ``.git``) does not move under the clock: it ticks in place."""
+        root = os.path.join(self.tmp, 'site-packages')
+        os.makedirs(os.path.join(root, 'asf'))
+        with mock.patch.object(scheduler, 'repo_root', return_value=root):
+            job = scheduler.render('sample', self.RECORD)
         self.assertEqual(job['kind'], 'launchd')
         self.assertEqual(job['label'], 'asf.sample.record')
         self.assertEqual(job['path'],
@@ -202,13 +245,20 @@ class RenderTest(SchedulerTestCase):
 
     def test_the_interpreter_is_absolute_and_the_package_importable(self):
         """B-0014 (b): a bare `python3` with no PYTHONPATH is a job that cannot run."""
-        job = scheduler.render('sample', self.RECORD)
+        with mock.patch.object(scheduler, 'snapshot_repo', return_value=None):
+            job = scheduler.render('sample', self.RECORD)
         argv = job['plist']['ProgramArguments']
         self.assertTrue(os.path.isabs(argv[0]), argv[0])
         self.assertNotEqual(argv[0], 'python3')
         self.assertTrue(os.path.isdir(job['plist']['WorkingDirectory']))
         self.assertTrue(os.path.isfile(
             os.path.join(job['plist']['EnvironmentVariables']['PYTHONPATH'], 'asf', 'cli.py')))
+        # from a checkout: the launcher's directory exists once installed, and it is runnable
+        with mock.patch.object(scheduler, 'snapshot_repo', return_value=scheduler.repo_root()):
+            job = scheduler.render('sample', self.RECORD)
+        scheduler.install(job)
+        self.assertTrue(os.path.isdir(job['plist']['WorkingDirectory']))
+        self.assertTrue(os.path.isfile(job['plist']['ProgramArguments'][1]))
 
     def test_path_keeps_only_absolute_entries(self):
         os.environ['PATH'] = os.pathsep.join([self.bindir, '.', '', 'relative/bin', '/usr/bin'])

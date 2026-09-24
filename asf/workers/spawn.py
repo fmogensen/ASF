@@ -9,7 +9,9 @@
    ``Product.repo_dir`` — an ended run's worktree on that branch, or a branch already on origin
    (a held branch sent back for another round, ``correct`` or ``adjudicate`` alike), is reused
    instead, rebased onto ``origin/<main>``; only a live run's worktree refuses
-   (:func:`make_worktree`);
+   (:func:`make_worktree`); a *fresh* worktree then runs the product's
+   ``conventions.worktree_setup`` under the session's own environment
+   (:func:`run_worktree_setup`) — a failure refuses the launch and removes the worktree;
 2. an id range reserved for the job in ``~/.ASF/state/<product>/id-ranges.tsv`` and handed to
    the session as ``BACKLOG_ID_RANGE`` (so parallel writers never mint the same id — see
    ``asf.record.ids``);
@@ -25,6 +27,7 @@
 import os
 import re
 import subprocess
+import time
 
 from asf import env
 from asf import hooks
@@ -308,14 +311,67 @@ def settings_file(wp):
     return path
 
 
+#: How long ``conventions.worktree_setup`` may run in a fresh worktree before the launch is
+#: refused.
+WORKTREE_SETUP_TIMEOUT_S = 900
+
+
+def setup_log_path(product, job):
+    return os.path.join(briefs_dir(product), f'{job}.setup.log')
+
+
+def run_worktree_setup(product, job, worktree, account=None, passthrough=(),
+                       timeout=WORKTREE_SETUP_TIMEOUT_S):
+    """Run the product's ``conventions.worktree_setup`` (a shell command) in the fresh
+    ``worktree``, under the environment the session itself will have
+    (:func:`asf.workers.runtime.build_env`, worker mode: the allow-list, the account's HOME).
+    Its output goes to ``briefs/<job>.setup.log``. Returns the seconds it took, or None when the
+    product declares no command. A failure or a timeout removes the worktree — a fresh one
+    without its setup is never handed over, nor reused as if it had one — and raises
+    :class:`SpawnError` naming the command and its first line of error output."""
+    command = getattr(product.conventions, 'worktree_setup', None)
+    if not command:
+        return None
+    runtime_mod.seed_home(account)
+    job_env = runtime_mod.build_env(runtime_mod.Job(product.name, job, worktree, None, None,
+                                                    account=account, passthrough=passthrough))
+    log = setup_log_path(product, job)
+    started = time.monotonic()
+    why = None
+    try:
+        with open(log, 'wb') as out:
+            p = subprocess.run(command, shell=True, cwd=worktree, env=job_env, stdin=subprocess.DEVNULL,
+                               stdout=out, stderr=subprocess.PIPE, timeout=timeout)
+            out.write(p.stderr or b'')
+        if p.returncode != 0:
+            lines = [l for l in (p.stderr or b'').decode('utf-8', 'replace').splitlines()
+                     if l.strip()]
+            why = f'exit {p.returncode}' + (f': {lines[0].strip()}' if lines else '')
+    except subprocess.TimeoutExpired:
+        why = f'timed out after {timeout}s'
+    if why is None:
+        return round(time.monotonic() - started, 1)
+    subprocess.run(['git', 'worktree', 'remove', '--force', worktree], cwd=product.repo_dir,
+                   capture_output=True)
+    raise SpawnError(f'worktree_setup `{command}` failed in {worktree} ({why}) — log: {log}',
+                     clear=f'fix `{command}` (conventions.worktree_setup in '
+                           f'products/{product.name}.yaml), then relaunch')
+
+
 def spawn(product, row, account, brief_text, runtime=None, cfg=None):
     """Launch one row on ``account``. Returns the session record written to the ledger."""
     cfg = load_cfg() if cfg is None else cfg
     wp = cfg.get('worker_pool') or {}
+    passthrough = env.env_passthrough(cfg)
     runtime = runtime or runtime_mod.from_config(cfg)
     model = model_arg(row.model, cfg)
     branch = branch_for(product, row)
+    own_path = os.path.join(worktrees_dir(product), row.job)
+    fresh = not os.path.exists(own_path)
     worktree = make_worktree(product, row.job, branch)
+    setup_s = None
+    if fresh and worktree == own_path:  # a new worktree, not an ended run's reused one
+        setup_s = run_worktree_setup(product, row.job, worktree, account, passthrough)
     id_range = reserve_id_range(product, row.job,
                                 prefixes=wp.get('id_range_prefixes') or DEFAULT_ID_PREFIXES,
                                 start=int(wp.get('id_range_start', DEFAULT_ID_START)),
@@ -335,7 +391,8 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
                           permission_mode=wp.get('permission_mode')
                           or runtime_mod.DEFAULT_PERMISSION_MODE,
                           env={'BACKLOG_ID_RANGE': id_range, 'ASF_SESSION': sid},
-                          settings_file=settings_file(wp), hooks_dir=hooks_dir)
+                          settings_file=settings_file(wp), hooks_dir=hooks_dir,
+                          passthrough=passthrough)
     result = runtime.run(job)
     record = {'job': row.job, 'item': row.item, 'feature': row.feature, 'kind': row.kind,
               'account': account.name if account else None, 'model': job.model,
@@ -343,6 +400,8 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
               'started': started, 'log': result.log_path, 'brief': brief_path,
               'id_range': id_range, 'runtime': runtime.name, 'session': sid,
               'product': product.name}
+    if setup_s is not None:
+        record['setup_s'] = setup_s
     # a launch line is a new run: the fold opens a run at every launch line, so the previous
     # run's terminal fields never reach this one (B-0041 — see asf.workers.lifecycle)
     pool_mod.append_session(product, record)

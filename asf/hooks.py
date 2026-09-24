@@ -91,6 +91,16 @@ def is_git_hook_ours(text, name):
     return bool(re.search(rf'''asf['" .]*redact\s+--{re.escape(name)}\b''', text or ''))
 
 
+def init_hook_upgrade(text, name):
+    """The text an ``asf init``-written hook file should now have, when ``text`` is one written
+    by an older ``asf init`` (its :data:`asf.init.INIT_MARKER`) that lacks the redaction gate —
+    ASF's own file, so it is brought up to date rather than called foreign. None otherwise."""
+    from asf import init  # local: init imports this module
+    if init.INIT_MARKER not in (text or '') or is_git_hook_ours(text, name):
+        return None
+    return {'pre-commit': init.PRE_COMMIT, 'pre-push': init.PRE_PUSH}.get(name)
+
+
 def ensure_git_hooks(product, which=shutil.which):
     """Returns ``(ok, detail)`` (D10, §2.4). Writes the redaction gate's ``pre-commit`` and
     ``pre-push`` into :func:`git_hooks_dir` of each of ``product.repo_dir`` and
@@ -118,6 +128,12 @@ def ensure_git_hooks(product, which=shutil.which):
             if os.path.isfile(path):
                 with open(path, encoding='utf-8') as f:
                     text = f.read()
+                upgrade = init_hook_upgrade(text, name)
+                if upgrade is not None:  # ASF's own record hook, from before it carried the gate
+                    with open(path, 'w', encoding='utf-8') as f:
+                        f.write(upgrade)
+                    os.chmod(path, 0o755)
+                    continue
                 if not is_git_hook_ours(text, name):
                     refusals.append(f'NEEDS OPERATOR: {path} is not asf\'s — add the line: '
                                     f'"{asf_path}" redact --{name} --product {product.name}')
@@ -191,10 +207,13 @@ def merge(settings, hooks, asf_path, product):
 def account_settings_path(account, home=None):
     """The runtime's *user* settings file an account's sessions read (PD4): ``CLAUDE_CONFIG_DIR``
     replaces the ``~/.claude`` directory itself, so a ``config_dir`` account's file sits directly
-    under it; otherwise it is the account's own ``home``, else ``home`` or the operator's."""
+    under it; otherwise it is under the HOME its sessions run under
+    (:func:`asf.workers.runtime.session_home` — its ``home:`` or its isolated one), else
+    ``home`` or the operator's."""
     if account.config_dir:
         return os.path.join(os.path.expanduser(account.config_dir), 'settings.json')
-    base = account.home or home or os.path.expanduser('~')
+    from asf.workers import runtime  # local: runtime is the session's side, hooks the install's
+    base = runtime.session_home(account) or home or os.path.expanduser('~')
     return os.path.join(os.path.expanduser(base), '.claude', 'settings.json')
 
 

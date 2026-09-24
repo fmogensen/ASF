@@ -15,6 +15,13 @@ branch name from the host). Then what the caller asks for: ``worktree`` first on
 (then the package that is running, then whatever the base had), ``identity`` for a worker (its
 own ``ASF_PRODUCT``/``ASF_JOB``/``ASF_SESSION``/``BACKLOG_ID_RANGE`` — set, not inherited),
 ``home`` to point ``HOME`` somewhere else (a test's temp home; a worker account's own).
+
+Two modes. ``gate`` (the default — the harvest gate, the suite) starts from the whole base
+environment and removes what is listed above: a product's tests may need the machine's tools.
+``worker`` (a worker session and its worktree setup command) starts from nothing and keeps only
+:data:`WORKER_ALLOW` (plus any ``LC_*``) and the names ``worker_pool.env_passthrough`` lists: an
+operator's token, cloud credential or agent socket in the tick's environment never reaches a
+session unless the operator names it.
 """
 import os
 
@@ -27,6 +34,18 @@ CALLER_IDENTITY = ('ASF_PRODUCT', 'ASF_JOB', 'ASF_SESSION', 'BACKLOG_ID_RANGE')
 GIT_HOOK = ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE')
 
 DEFAULT_TRUNK = 'main'
+
+#: What a worker session keeps from the base environment (``mode='worker'``): the few names a
+#: shell and a toolchain need to run at all. Everything else must be named in
+#: ``worker_pool.env_passthrough``. ``HOME`` is not here: a worker's HOME is its account's own
+#: (:func:`asf.workers.runtime.session_home`), and the operator's only under
+#: ``isolate_home: false``.
+WORKER_ALLOW = ('PATH', 'LANG', 'TERM', 'TMPDIR', 'USER', 'SHELL')
+
+#: Also kept in worker mode: every variable with this prefix (``LC_ALL``, ``LC_CTYPE``, …).
+WORKER_ALLOW_PREFIX = 'LC_'
+
+MODES = ('gate', 'worker')
 
 
 def package_parent():
@@ -50,8 +69,19 @@ def _git_config(env, pairs):
     return env
 
 
+def worker_base(base=None, passthrough=(), keep_home=False):
+    """The allow-listed part of ``base`` (default the process's own environment): the names in
+    :data:`WORKER_ALLOW`, every ``LC_*``, the ``passthrough`` names, and ``HOME`` only when
+    ``keep_home``. Nothing else survives — no deny-list to fall behind."""
+    base = os.environ if base is None else base
+    keep = set(WORKER_ALLOW) | set(passthrough or ())
+    if keep_home:
+        keep.add('HOME')
+    return {k: v for k, v in base.items() if k in keep or k.startswith(WORKER_ALLOW_PREFIX)}
+
+
 def build(base=None, worktree=None, identity=None, home=None, trunk=DEFAULT_TRUNK,
-          pythonpath=True, git_config=()):
+          pythonpath=True, git_config=(), mode='gate', passthrough=()):
     """The environment for a child of ASF.
 
     ``base``: the environment to start from (default the process's own). ``worktree``: a
@@ -60,8 +90,15 @@ def build(base=None, worktree=None, identity=None, home=None, trunk=DEFAULT_TRUN
     are gone. ``home``: ``HOME`` for the child. ``trunk``: the branch name pinned as
     ``init.defaultBranch``. ``pythonpath=False`` leaves ``PYTHONPATH`` as the base had it.
     ``git_config``: more ``(key, value)`` pairs appended after ``init.defaultBranch`` (a
-    session's ``core.hooksPath``, F-0076)."""
-    env = dict(os.environ if base is None else base)
+    session's ``core.hooksPath``, F-0076). ``mode``: ``gate`` (the base minus the rules above)
+    or ``worker`` (the allow-list, :func:`worker_base`, with ``passthrough`` — and the base's
+    ``HOME`` only when no ``home`` is given)."""
+    if mode not in MODES:
+        raise ValueError(f'hermetic.build: mode {mode!r} is not one of {MODES}')
+    if mode == 'worker':
+        env = worker_base(base, passthrough, keep_home=not home)
+    else:
+        env = dict(os.environ if base is None else base)
     for var in GIT_HOOK + CALLER_IDENTITY:
         env.pop(var, None)
     _git_config(env, [('init.defaultBranch', trunk or DEFAULT_TRUNK), *git_config])
@@ -76,3 +113,25 @@ def build(base=None, worktree=None, identity=None, home=None, trunk=DEFAULT_TRUN
         if value is not None:
             env[key] = str(value)
     return env
+
+
+#: The words that make a variable name look like a credential (``worker_pool.env_passthrough``
+#: is checked against them by ``asf doctor``'s ``worker env`` row): a name any ``_``-separated
+#: part of which is one of these, or contains one of the longer ones.
+CREDENTIAL_PARTS = ('KEY', 'PAT', 'PASS', 'AUTH', 'COOKIE', 'SESSION')
+CREDENTIAL_WORDS = ('TOKEN', 'SECRET', 'PASSWORD', 'PASSWD', 'PASSPHRASE', 'CREDENTIAL',
+                    'APIKEY', 'PRIVATE')
+
+#: Names that match a credential word but carry none: a path or a socket, not a secret.
+NOT_CREDENTIALS = ('SSH_AUTH_SOCK',)
+
+
+def looks_like_credential(name):
+    """True when the variable ``name`` reads as a secret (``GH_TOKEN``, ``AWS_SECRET_ACCESS_KEY``,
+    ``NPM_AUTH``, ``DB_PASSWORD``, ``OPENAI_API_KEY``) — a name, never a value, is judged."""
+    upper = str(name or '').upper()
+    if not upper or upper in NOT_CREDENTIALS:
+        return False
+    parts = [p for p in upper.split('_') if p]
+    return (any(p in CREDENTIAL_PARTS for p in parts)
+            or any(w in p for p in parts for w in CREDENTIAL_WORDS))

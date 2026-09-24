@@ -167,15 +167,18 @@ def _realpath(path):
 
 def _account_for(env_vars, accounts, tick_home):
     """D7, in account order: an account with a ``config_dir`` matches on
-    ``CLAUDE_CONFIG_DIR``; one with a ``home`` and no ``config_dir`` matches on ``HOME`` against
-    it; one with neither matches on ``HOME`` against the tick's own, and only when the session
+    ``CLAUDE_CONFIG_DIR``; one with no ``config_dir`` matches on ``HOME`` against the home its
+    sessions run under (:func:`asf.workers.runtime.session_home`: its ``home:``, or its isolated
+    one); one on the operator's HOME (``isolate_home: false``, no ``home:``) matches on ``HOME``
+    against the tick's own, and only when the session
     sets no ``CLAUDE_CONFIG_DIR`` at all. Every comparison is realpath'd on both sides (D11).
     ``None`` when nothing matches."""
     config_dir_rp = _realpath(env_vars.get('CLAUDE_CONFIG_DIR'))
     home_rp = _realpath(env_vars.get('HOME'))
     for acct in accounts:
         acct_config_dir = getattr(acct, 'config_dir', None)
-        acct_home = getattr(acct, 'home', None)
+        # the HOME its sessions run under: its ``home:``, its isolated one, or the operator's
+        acct_home = runtime_mod.session_home(acct) if hasattr(acct, 'name') else None
         if acct_config_dir:
             if config_dir_rp is not None and config_dir_rp == _realpath(acct_config_dir):
                 return acct.name

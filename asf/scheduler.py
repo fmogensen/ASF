@@ -15,6 +15,11 @@ the running interpreter and the installed package, and never written by hand:
   different under the scheduler than it does in a shell), ``HOME`` is the current home.
 * stdout and stderr go to ``<ASF_HOME>/logs/tick-<product>-<clock>.log``, so a job that fails
   leaves a trace the doctor can read back.
+* When the package runs from a git checkout (a development checkout, the self-hosting
+  product), the job never imports from it: it runs the launcher :mod:`asf.snapshot`, copied to
+  ``<ASF_HOME>/state/<product>/code/launch.py`` at install, which ticks from an immutable
+  worktree of the checkout's HEAD sha (``code/<sha>``). ``WorkingDirectory`` is that code dir
+  and the launcher sets ``PYTHONPATH`` to the snapshot.
 
 The ``kind`` comes from ``config.yaml``'s ``scheduler.kind`` (default ``launchd``). ``launchd``
 is implemented end to end; ``cron`` renders the crontab line for an operator to install; any
@@ -37,6 +42,7 @@ import sys
 from collections import namedtuple
 
 from asf import env
+from asf import snapshot
 
 # this repo's own cutover script (relative to the ASF checkout) — named once, here, not per mention
 CUTOVER_TOOL = os.path.join('tools', 'cutover.sh')
@@ -119,6 +125,64 @@ def _absolute_path_entries():
             seen.add(d)
             out.append(d)
     return os.pathsep.join(out)
+
+
+# ---- the snapshot the clock runs from ---------------------------------------
+
+
+def snapshot_repo(root=None):
+    """The checkout the clock must snapshot — the package's own root when it is a git working
+    tree (a development checkout that moves under the clock) — else None: an installed package
+    does not change while a tick imports it."""
+    root = root or repo_root()
+    if not snapshot.is_checkout(root):
+        return None
+    # run from a snapshot itself (a tick installing its own clock): snapshot the checkout it
+    # was made from, or the clock would stay on this sha for ever
+    return snapshot.source_checkout(root) or root
+
+
+def code_dir(product_name):
+    """``<ASF_HOME>/state/<product>/code``: the launcher and the snapshots."""
+    return os.path.join(env.ASF_HOME, 'state', product_name, 'code')
+
+
+def launcher_path(product_name):
+    return os.path.join(code_dir(product_name), snapshot.LAUNCHER)
+
+
+def write_launcher(product_name):
+    """Copy :mod:`asf.snapshot` to :func:`launcher_path` (only when it differs) — the clock
+    runs the copy, so not even the launcher is read from the moving checkout."""
+    with open(snapshot.__file__, encoding='utf-8') as f:
+        text = f.read()
+    path = launcher_path(product_name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        with open(path, encoding='utf-8') as f:
+            if f.read() == text:
+                return path
+    except OSError:
+        pass
+    tmp = f'{path}.tmp-{os.getpid()}'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write(text)
+    os.replace(tmp, path)
+    return path
+
+
+def clock_code(product_name):
+    """``{snapshot, sha, at, head}`` for the doctor: whether the clock runs from a snapshot, the
+    sha it last ran (``None`` before its first tick), when, and the checkout's HEAD now."""
+    repo = snapshot_repo()
+    if repo is None:
+        return {'snapshot': False, 'root': repo_root()}
+    sha, at = snapshot.current(code_dir(product_name))
+    try:
+        head = snapshot.head_sha(repo)
+    except snapshot.SnapshotError:
+        head = None
+    return {'snapshot': True, 'root': repo, 'sha': sha, 'at': at, 'head': head}
 
 
 def tick_argv(product_name, clock):
@@ -270,9 +334,22 @@ def render(product, clock, cfg=None):
     log = log_path(name, clock.name)
     root = repo_root()
     job_kind = kind(cfg)
+    snap_repo = snapshot_repo(root)
+    env_vars = {'PATH': _absolute_path_entries(), 'HOME': os.path.expanduser('~'),
+                'PYTHONPATH': root, 'ASF_HOME': env.ASF_HOME}
+    launcher = None
+    if snap_repo is not None:
+        # the tick runs from a snapshot of the checkout's HEAD, never the checkout itself
+        launcher = launcher_path(name)
+        cwd = code_dir(name)
+        argv = [sys.executable, launcher, '--repo', snap_repo, '--code-dir', cwd, '--'] + argv[1:]
+        root = cwd
+        del env_vars['PYTHONPATH']
 
     job = {'kind': job_kind, 'label': label, 'log': log, 'argv': argv, 'product': name,
            'clock': clock.name, 'steps': clock.steps}
+    if launcher:
+        job['launcher'] = launcher
     if clock.interval_s is not None:
         job['every_s'] = clock.interval_s
     else:
@@ -283,12 +360,7 @@ def render(product, clock, cfg=None):
             'Label': label,
             'ProgramArguments': argv,
             'WorkingDirectory': root,
-            'EnvironmentVariables': {
-                'PATH': _absolute_path_entries(),
-                'HOME': os.path.expanduser('~'),
-                'PYTHONPATH': root,
-                'ASF_HOME': env.ASF_HOME,
-            },
+            'EnvironmentVariables': env_vars,
             'StandardOutPath': log,
             'StandardErrorPath': log,
             'RunAtLoad': True,
@@ -309,7 +381,7 @@ def render(product, clock, cfg=None):
                 f"as a cron schedule — install a job running `{' '.join(argv)}` "
                 f"{_clock_when(clock)} and log it to {log}")
             return job
-        envs = f"PATH={_absolute_path_entries()} PYTHONPATH={root} ASF_HOME={env.ASF_HOME}"
+        envs = ' '.join(f'{k}={v}' for k, v in env_vars.items() if k != 'HOME')
         command = ' '.join(argv)
         job['line'] = f"{schedule} cd {root} && {envs} {command} >> {log} 2>&1"
         return job
@@ -355,6 +427,8 @@ def install(job):
     machine can install them for the operator.
     """
     job_kind = job.get('kind')
+    if job.get('launcher'):
+        write_launcher(job['product'])
     if job_kind == 'cron':
         return [f"cron: add this line to the operator's crontab (`crontab -e`):", job['line'],
                 f"NEEDS OPERATOR: install the cron line above — crontab -e"]

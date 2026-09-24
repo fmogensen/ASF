@@ -673,6 +673,38 @@ class GitHookTests(unittest.TestCase):
         # the pre-commit hook, which was not in the way, is still written
         self.assertTrue(os.path.isfile(os.path.join(repo, '.git', 'hooks', 'pre-commit')))
 
+    def test_an_asf_init_record_hook_is_asfs_own_and_a_new_product_starts_green(self):
+        """The card: asf init writes a pre-commit that doctor then calls foreign."""
+        from asf import doctor, init
+        record = self._repo('record')
+        init.lay_down(record)
+        product = self._product(backlog_dir=record)
+        ok, detail = hooks.ensure_git_hooks(product, which=self.which)
+        self.assertTrue(ok, detail)
+        ok, detail = doctor.check_redaction_hooks(product)
+        self.assertTrue(ok, detail)
+        with open(os.path.join(record, '.githooks', 'pre-commit')) as f:
+            self.assertEqual(f.read(), init.PRE_COMMIT)   # left as asf init wrote it
+
+    def test_an_older_asf_init_hook_is_brought_up_to_date_not_called_foreign(self):
+        from asf import doctor, init
+        record = self._repo('record')
+        init.lay_down(record)
+        old = init.PRE_COMMIT.split('# the redaction gate')[0].replace(' || exit 1', '')
+        path = os.path.join(record, '.githooks', 'pre-commit')
+        with open(path, 'w') as f:
+            f.write(old)
+        product = self._product(backlog_dir=record)
+        ok, detail = doctor.check_redaction_hooks(product)
+        self.assertFalse(ok)
+        self.assertIn("asf init's, from before it ran the redaction gate", detail)
+        self.assertNotIn('foreign', detail)
+        ok, detail = hooks.ensure_git_hooks(product, which=self.which)
+        self.assertTrue(ok, detail)
+        with open(path) as f:
+            self.assertEqual(f.read(), init.PRE_COMMIT)
+        self.assertTrue(doctor.check_redaction_hooks(product)[0])
+
     def _clone_with_installed_hooks(self):
         origin = self._repo('origin', bare=True)
         repo = os.path.join(self.tmp, 'clone')

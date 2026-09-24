@@ -41,8 +41,21 @@ export ASF_HOOK_RUNNING="$top"
 cd "$top" || exit 1
 staged="$(git diff --cached --name-only --diff-filter=ACMR)"
 [ -n "$staged" ] || exit 0
-echo "$staged" | tr '\\n' '\\0' | xargs -0 asf check
+echo "$staged" | tr '\\n' '\\0' | xargs -0 asf check || exit 1
+# the redaction gate (F-0075): what `asf hooks install` checks for, so doctor calls this ours
+exec asf redact --pre-commit
 """
+
+#: The record's pre-push hook, written with :data:`PRE_COMMIT`: the redaction gate over what is
+#: pushed, so a new record starts with both gate hooks in place (doctor's redaction-hooks row).
+PRE_PUSH = """#!/bin/sh
+# The record's pre-push hook, written by `asf init`: the redaction gate (F-0075).
+exec asf redact --pre-push
+"""
+
+#: The line that marks a hook file as one `asf init` wrote — ASF's own, rewritten by
+#: `asf hooks install` when an older `asf init` wrote it without the redaction gate.
+INIT_MARKER = 'written by `asf init`'
 
 README = """# The record
 
@@ -233,6 +246,7 @@ def lay_down(backlog, intake_dir=None):
         put(os.path.join(folder, '.gitkeep'), '')
     put('README.md', README)
     put(os.path.join('.githooks', 'pre-commit'), PRE_COMMIT, 0o755)
+    put(os.path.join('.githooks', 'pre-push'), PRE_PUSH, 0o755)
     put('index.json', json.dumps({'items': {}, 'schema_version': schema.SCHEMA_VERSION},
                                  indent=2, sort_keys=True) + '\n')
     if _git(['rev-parse', '--is-inside-work-tree'], backlog) != 'true':

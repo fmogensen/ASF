@@ -21,6 +21,12 @@ installs it.
 A ninth row, **approvals-hook** (:func:`check_approvals_hook`), is red when a worker account's
 sessions would run without the built-in ``approvals`` hook — no guard on human-now actions.
 
+A tenth row, **worker env** (:func:`check_worker_env`), is red when a worker session could see
+what it should not: an account with ``isolate_home: false`` (the operator's HOME and every login
+in it), or a ``worker_pool.env_passthrough`` name that looks like a credential. An eleventh,
+**clock code** (:func:`check_clock_code`, informational), names the snapshot sha the clock last
+ticked from when the package runs from a checkout (:mod:`asf.snapshot`).
+
 The **scheduler** row is red while a pre-ASF job the operator config names
 (``scheduler.launchd_label``, ``scheduler.legacy_cron``) is still loaded or in the crontab: two
 factories would be ticking one product.
@@ -173,6 +179,54 @@ def check_approvals_hook(cfg, product):
     return True, f'approvals hook in {len(accounts)} worker accounts'
 
 
+def check_worker_env(cfg):
+    """(ok, detail) — the ``worker env`` row: what a worker session inherits. Red when an account
+    runs on the operator's own HOME (``isolate_home: false``: every login on the machine is the
+    session's, and a ``home:`` path is then the operator's word, not the factory's), or when a
+    ``worker_pool.env_passthrough`` name looks like a credential
+    (:func:`asf.hermetic.looks_like_credential` — a token handed to every session). Ok names
+    each account's home and any ``home_seed`` path that does not exist."""
+    from asf import hermetic
+    from asf.workers import runtime
+    problems, notes = [], []
+    for acct in pool.accounts_from_config(cfg):
+        if not acct.isolate_home:
+            problems.append(f'account {acct.name} has isolate_home: false'
+                            + ('' if acct.home else " (the operator's HOME)"))
+            continue
+        home = runtime.session_home(acct)
+        missing = [p for p in acct.home_seed if not os.path.exists(p)]
+        notes.append(f'{acct.name}: {home}' + (f" (home_seed missing: {', '.join(missing)})"
+                                               if missing else ''))
+    creds = [n for n in env.env_passthrough(cfg) if hermetic.looks_like_credential(n)]
+    if creds:
+        problems.append(f"env_passthrough hands a credential to every session: {', '.join(creds)}")
+    if problems:
+        return False, '; '.join(problems) + ' — config.yaml worker_pool'
+    passthrough = ', '.join(env.env_passthrough(cfg)) or 'none'
+    return True, (f'allow-list + passthrough ({passthrough}); '
+                  + ('; '.join(notes) if notes else 'no worker accounts'))
+
+
+def check_clock_code(product):
+    """(ok, detail) — the code the product's clock runs: the snapshot sha it last ticked from
+    and the checkout's HEAD (the next tick takes that), or the installed package's root."""
+    info = scheduler.clock_code(product.name)
+    if not info.get('snapshot'):
+        return True, f"installed package {info.get('root')}"
+    sha, head = info.get('sha'), info.get('head')
+    if not sha:
+        return True, f"snapshot of {info['root']}: no tick has run from one yet (HEAD {(head or '?')[:12]})"
+    detail = f"snapshot {sha[:12]} ({format_age(_age_s_since(info.get('at')))} ago)"
+    if head and head != sha:
+        detail += f'; checkout HEAD {head[:12]} (the next tick takes it)'
+    return True, detail
+
+
+def _age_s_since(at):
+    return None if at is None else max(0.0, time.time() - at)
+
+
 # name -> (required, probe argv); required tools missing/failing are red, optional ones are skip
 _CLI_TOOLS = [
     ('git', True, ['git', '--version']),
@@ -276,7 +330,9 @@ def check_redaction_hooks(product):
                 continue
             with open(path, encoding='utf-8') as f:
                 text = f.read()
-            if not hooks.is_git_hook_ours(text, name):
+            if hooks.init_hook_upgrade(text, name) is not None:
+                problems.append(f'{path} is asf init\'s, from before it ran the redaction gate')
+            elif not hooks.is_git_hook_ours(text, name):
                 problems.append(f'{path} foreign')
     if problems:
         return False, '; '.join(problems) + f' — asf hooks install --product {product.name}'
@@ -553,6 +609,10 @@ def run(product_name):
     rows.append(('redaction-hooks', True, ok, detail))
     ok, detail = check_approvals_hook(cfg, product)
     rows.append(('approvals-hook', True, ok, detail))
+    ok, detail = check_worker_env(cfg)
+    rows.append(('worker env', True, ok, detail))
+    ok, detail = check_clock_code(product)
+    rows.append(('clock code', False, ok, detail))
     ok, detail = check_drift(product)
     rows.append(('drift', True, ok, detail))
     ok, detail = check_rule_checks(product)

@@ -217,7 +217,8 @@ def correct_once(product, session, error_text, runtime):
         retry_env['BACKLOG_ID_RANGE'] = session['id_range']
     job = runtime_mod.Job(product.name, retry_job, session.get('worktree'), path,
                           session.get('model'), account=_account(session),
-                          env=retry_env, hooks_dir=hooks_dir)
+                          env=retry_env, hooks_dir=hooks_dir,
+                          passthrough=env.env_passthrough(_cfg()))
     # launched, not waited on (B-0085): this runs inside the tick's health step, and waiting
     # here stopped health, harvest and the operator's tables for as long as a model session takes
     # — one tick sat inside four serial adjudications for an hour. The run is in the registry

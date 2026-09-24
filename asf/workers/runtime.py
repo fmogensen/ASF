@@ -15,7 +15,9 @@
 import json
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 
 from asf import detach, hermetic
 from asf.workers import report
@@ -29,7 +31,7 @@ class Job:
 
     def __init__(self, product, name, cwd, brief_path, model, account=None, add_dirs=(),
                  permission_mode=DEFAULT_PERMISSION_MODE, env=None, log_path=None,
-                 settings_file=None, hooks_dir=None, resume=None):
+                 settings_file=None, hooks_dir=None, resume=None, passthrough=()):
         self.product = product
         self.name = name
         self.cwd = cwd
@@ -48,6 +50,9 @@ class Job:
         self.hooks_dir = hooks_dir
         # the runtime's own session id to continue (``runtime_session``), or None for a fresh run
         self.resume = resume
+        # ``worker_pool.env_passthrough``: the names the session keeps from the tick's
+        # environment beyond the allow-list (asf.hermetic.WORKER_ALLOW)
+        self.passthrough = tuple(passthrough or ())
 
     @property
     def session(self):
@@ -91,21 +96,101 @@ def build_command(job, binary=DEFAULT_BINARY):
     return cmd
 
 
+# ---- the session's HOME --------------------------------------------------------------------
+
+def homes_dir():
+    """``<ASF_HOME>/state/homes``: one directory per worker account (never a product's name)."""
+    from asf import env
+    return os.path.join(env.ASF_HOME, 'state', 'homes')
+
+
+def session_home(acct):
+    """The HOME a session of ``acct`` runs under: its ``home:`` path when it names one; else,
+    under ``isolate_home`` (the default), its own directory under :func:`homes_dir`; else None —
+    ``isolate_home: false`` with no ``home:``, the operator's own HOME. An account-less job
+    (a dry run, a test) is None too."""
+    if acct is None:
+        return None
+    home = getattr(acct, 'home', None)
+    if home:
+        return os.path.expanduser(str(home))
+    if getattr(acct, 'isolate_home', True):
+        return os.path.join(homes_dir(), acct.name)
+    return None
+
+
+def _seed_target(home, src, operator_home):
+    """Where ``src`` lands in ``home``: at its path relative to the operator's home when it sits
+    under it (``~/.config/gh`` → ``<home>/.config/gh``), else under its own name."""
+    src = os.path.abspath(src)
+    for base in dict.fromkeys((operator_home, os.path.realpath(operator_home))):
+        base = base.rstrip(os.sep)
+        if src.startswith(base + os.sep):
+            return os.path.join(home, os.path.relpath(src, base))
+    return os.path.join(home, os.path.basename(src.rstrip(os.sep)))
+
+
+def _copy_file(src, dst):
+    """``src`` (symlinks followed) onto ``dst`` atomically: a session already running under the
+    home never reads a half-written file."""
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix='.seed-', dir=os.path.dirname(dst))
+    os.close(fd)
+    try:
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dst)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+
+
+def seed_home(acct, operator_home=None):
+    """Create the account's :func:`session_home` and copy each ``home_seed`` path into it —
+    re-copied at every launch, so a refreshed login or an edited config file reaches the next
+    session. Nothing but the listed paths ever enters the home. Returns ``(home, missing)``:
+    the home (None when the session keeps the operator's) and the seed paths that do not exist."""
+    home = session_home(acct)
+    if home is None:
+        return None, []
+    os.makedirs(home, mode=0o700, exist_ok=True)
+    operator_home = operator_home or os.path.expanduser('~')
+    missing = []
+    for src in getattr(acct, 'home_seed', None) or ():
+        src = os.path.expanduser(src)
+        if not os.path.exists(src):
+            missing.append(src)
+            continue
+        dst = _seed_target(home, src, operator_home)
+        if os.path.realpath(dst) == os.path.realpath(src):
+            continue
+        if os.path.isdir(src):
+            for root, _dirs, files in os.walk(src, followlinks=True):
+                for name in files:
+                    path = os.path.join(root, name)
+                    if os.path.exists(path):
+                        _copy_file(path, os.path.join(dst, os.path.relpath(path, src)))
+        else:
+            _copy_file(src, dst)
+    return home, missing
+
+
 def build_env(job, base=None):
-    """The job's environment: :func:`asf.hermetic.build` over ``base`` (default ``os.environ``)
-    — no caller identity inherited from the tick, no git-hook variable — plus the account's
-    isolated home/config dir and the job's own identity (``ASF_PRODUCT``, ``ASF_JOB``,
+    """The job's environment: :func:`asf.hermetic.build` in ``worker`` mode over ``base``
+    (default ``os.environ``) — only the allow-list and the job's ``passthrough`` names survive;
+    no caller identity, no hook variable, no token the tick happened to carry — plus the
+    session's own HOME (:func:`session_home`), the account's config dir as
+    ``CLAUDE_CONFIG_DIR``, and the job's own identity (``ASF_PRODUCT``, ``ASF_JOB``,
     ``ASF_SESSION``, ``BACKLOG_ID_RANGE``, …). When the job has a ``hooks_dir``,
-    ``core.hooksPath`` is set to it, so every ``git`` the session runs picks up its
-    ``ASF-Session`` trailer hook (F-0076). PYTHONPATH is left as the base has it: a session runs
-    the product's code, not this package."""
+    ``core.hooksPath`` is set to it, so every commit the session makes picks up its
+    ``ASF-Session`` trailer hook (F-0076). No PYTHONPATH: a session runs the product's code,
+    not this package."""
     acct = job.account
-    home = getattr(acct, 'home', None) if acct is not None else None
     identity = {'ASF_PRODUCT': job.product, 'ASF_JOB': job.name}
     identity.update(job.env)
     git_config = [('core.hooksPath', job.hooks_dir)] if job.hooks_dir else []
-    out = hermetic.build(base, home=home, identity=identity, pythonpath=False,
-                         git_config=git_config)
+    out = hermetic.build(base, home=session_home(acct), identity=identity, pythonpath=False,
+                         git_config=git_config, mode='worker', passthrough=job.passthrough)
     if acct is not None and getattr(acct, 'config_dir', None):
         out['CLAUDE_CONFIG_DIR'] = os.path.expanduser(acct.config_dir)
     return out
@@ -237,6 +322,7 @@ class ClaudeCodeRuntime(Runtime):
 
     def run(self, job, wait=False):
         log_path = job.log_path or job_log_path(job.product, job.name)
+        seed_home(job.account)
         with open(job.brief_path, 'rb') as brief, open(log_path, 'ab') as log:
             # a continued run is the writer's session: a second ``asf`` line would claim otherwise
             line = None if job.resume else _session_line(job)

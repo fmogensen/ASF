@@ -39,7 +39,7 @@ def installed_commit():
     except (metadata.PackageNotFoundError, ValueError, OSError):
         pass
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if os.path.isdir(os.path.join(root, '.git')):
+    if os.path.exists(os.path.join(root, '.git')):  # a linked worktree (a clock snapshot) too
         try:
             return _git(root, 'rev-parse', 'HEAD')
         except (subprocess.SubprocessError, OSError):

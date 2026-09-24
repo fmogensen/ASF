@@ -86,6 +86,42 @@ class BuildInvariants(unittest.TestCase):
         self.assertEqual(head, 'main')
 
 
+class WorkerModeTests(unittest.TestCase):
+    """``mode='worker'``: an allow-list, not the base minus a deny-list (W6)."""
+
+    BASE = {'PATH': '/bin', 'HOME': '/me', 'LANG': 'en_US.UTF-8', 'LC_ALL': 'C', 'TERM': 'xterm',
+            'TMPDIR': '/tmp/x', 'USER': 'op', 'SHELL': '/bin/zsh', 'FAKE_SECRET': 'x',
+            'GH_TOKEN': 'ghp_x', 'HTTPS_PROXY': 'http://p', 'PYTHONPATH': '/pp',
+            'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'http.extraheader',
+            'GIT_CONFIG_VALUE_0': 'AUTHORIZATION: x', **LEAKS}
+
+    def test_only_the_allow_list_survives(self):
+        env = hermetic.build(self.BASE, home='/homes/a', pythonpath=False, mode='worker')
+        kept = {k for k in env if not k.startswith('GIT_CONFIG_')}
+        self.assertEqual(kept, {'PATH', 'HOME', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'USER', 'SHELL'})
+        self.assertEqual(env['HOME'], '/homes/a')
+        # the base's own git config (an auth header) is gone; only the pinned branch remains
+        self.assertEqual((env['GIT_CONFIG_COUNT'], env['GIT_CONFIG_KEY_0']),
+                         ('1', 'init.defaultBranch'))
+
+    def test_passthrough_names_are_kept_and_home_stays_without_one_of_its_own(self):
+        env = hermetic.build(self.BASE, pythonpath=False, mode='worker',
+                             passthrough=('HTTPS_PROXY', 'NOT_SET'))
+        self.assertEqual(env['HTTPS_PROXY'], 'http://p')
+        self.assertNotIn('NOT_SET', env)
+        self.assertEqual(env['HOME'], '/me')           # isolate_home: false
+        self.assertNotIn('GH_TOKEN', env)
+
+    def test_gate_mode_is_unchanged(self):
+        env = hermetic.build(self.BASE)
+        self.assertEqual(env['FAKE_SECRET'], 'x')
+        self.assertEqual(env['HOME'], '/me')
+
+    def test_an_unknown_mode_is_refused(self):
+        with self.assertRaises(ValueError):
+            hermetic.build(self.BASE, mode='other')
+
+
 class OneBuilderTests(unittest.TestCase):
     """The gate and the worker session are the builder, not their own copies of its rules."""
 
@@ -97,14 +133,16 @@ class OneBuilderTests(unittest.TestCase):
         acct = pool_mod.Account('acct-a', home='/homes/a', config_dir='/cfg/a')
         job = runtime_mod.Job('sample', 'j1', '/wt', '/b.md', 'opus', account=acct,
                               env={'BACKLOG_ID_RANGE': 'S:5000-5049'})
-        base = dict(LEAKS, PATH='/bin', HOME='/me')
+        base = dict(LEAKS, PATH='/bin', HOME='/me', FAKE_SECRET='x')
         env = runtime_mod.build_env(job, base=base)
-        self.assertEqual(env, dict(hermetic.build(base, home='/homes/a', pythonpath=False),
+        self.assertEqual(env, dict(hermetic.build(base, home='/homes/a', pythonpath=False,
+                                                  mode='worker'),
                                    CLAUDE_CONFIG_DIR='/cfg/a', ASF_PRODUCT='sample', ASF_JOB='j1',
                                    BACKLOG_ID_RANGE='S:5000-5049'))
         # what a session inherits from the tick never reaches it: its identity is its own
         self.assertEqual(env['ASF_JOB'], 'j1')
         self.assertNotIn('GIT_DIR', env)
+        self.assertNotIn('FAKE_SECRET', env)
 
     def test_the_suite_runs_hermetic_too(self):
         # B-0043: the suite's home is never the operator's; the CI matrix runs it under env -i
