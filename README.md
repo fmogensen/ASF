@@ -12,4 +12,18 @@ and judge. Multi-product from day one. The factory builds itself through the sam
 - Operator configuration lives in `~/.ASF/` — one file per product; nothing product-specific lives in this repo.
 - License: Apache-2.0.
 
+## Install
+
+Needs macOS or Linux, `git`, `gh`, `pipx` and Claude Code. Per product, once:
+
+```bash
+cp docs/config.example.yaml ~/.ASF/config.yaml                 # first product only; fill in accounts
+cp docs/products.example.yaml ~/.ASF/products/<product>.yaml   # fill in repo_dir, backlog_dir
+curl -fsSL https://raw.githubusercontent.com/fmogensen/ASF/main/tools/install.sh | bash -s -- <product> [sha|tag]
+```
+
+The installer pins the factory as `asf-live`, installs the product's redaction hooks and clocks, and ends with
+`asf-live doctor`. In that product's Claude Code session: `/plugin marketplace add fmogensen/ASF`, then
+`/plugin install asf@asf`, with `ASF_PRODUCT=<product>` set. Rerun the installer with a new ref to upgrade.
+
 Not "ASF" the Apache Software Foundation.

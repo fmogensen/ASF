@@ -90,7 +90,8 @@ class PluginTests(unittest.TestCase):
                 self.assertEqual(frontmatter_keys(text), {'name', 'description', 'allowed-tools'})
                 self.assertIn(f'name: {name}\n', text)
                 self.assertIn('allowed-tools: Bash', text)
-                self.assertIn(f'asf {name} $ARGUMENTS', text)
+                self.assertIn(f'"$ASF_BIN" {name} $ARGUMENTS', text)
+                self.assertIn('command -v asf-live', text)
                 self.assertTrue(name in commands or name in PENDING_VIEWS)
                 for pat in patterns:
                     self.assertIsNone(pat.search(text), pat.pattern)

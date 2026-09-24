@@ -53,8 +53,11 @@ PREAMBLE = ("Print the output below **verbatim** in a fenced code block{stop}. T
 # ASF_TABLES=box: the output is captured through a pipe, yet read in a console (asf.tables).
 # `|| true`: a RED exit code is the table's verdict, not a failure — Claude Code refuses to show
 # the output of a `!` command that exits non-zero.
-COMMAND = ('!`PATH="$HOME/.local/bin:$PATH"; if command -v asf >/dev/null 2>&1; then ASF_TABLES=box asf {name} '
-           '$ARGUMENTS 2>&1 || true; else echo "asf is not installed: pipx install -e <ASF checkout>"; fi`')
+# `asf-live` first: INSTALL_TOOL installs a pinned release under that name; `asf` is a dev checkout.
+INSTALL_TOOL = os.path.join('tools', 'install' + '.sh')
+COMMAND = ('!`PATH="$HOME/.local/bin:$PATH"; ASF_BIN=$(command -v asf-live || command -v asf); '
+           'if [ -n "$ASF_BIN" ]; then ASF_TABLES=box "$ASF_BIN" {name} '
+           '$ARGUMENTS 2>&1 || true; else echo "asf is not installed: bash ' + INSTALL_TOOL + ' <product>"; fi`')
 
 
 def command_help():
