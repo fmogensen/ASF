@@ -32,7 +32,7 @@ REPORT = ('done my part\n\nREPORT\nitem: T-0001\nkind: coder\nstatus: partial\n'
           'tests: ok\nleft out: {left}\nneeds writes: {needs}\n```\n')
 REPO_FILES = ('src/a.py', 'tests/test_a.py', 'tests/test_b.py', 'tests/test_c.py',
               'lib/shared.py', 'lib/x.py', 'lib/y.py', 'lib/z.py', 'LICENSE',
-              'web/app/(app)/bots/[id]/thread-actions.test.ts')
+              'web/app/items/[id]/sibling.test.ts')
 
 
 class ReportClaimTests(unittest.TestCase):
@@ -49,10 +49,10 @@ class ReportClaimTests(unittest.TestCase):
 
     def test_left_out_of_a_partial_report_names_its_paths(self):
         text = REPORT.replace('needs writes: {needs}\n', '').format(
-            left='- `thread-actions.test.ts` is outside the footprint, so I left it.\n'
-                 '- `web/lib/respond.ts` should carry the constant.\n\nAssumptions:\n- `x/y.ts` used')
+            left='- `sibling.test.ts` is outside the footprint, so I left it.\n'
+                 '- `web/lib/shared.ts` should carry the constant.\n\nAssumptions:\n- `x/y.ts` used')
         self.assertEqual(report.footprint_claim(text),
-                         ('left out', ['thread-actions.test.ts', 'web/lib/respond.ts']))
+                         ('left out', ['sibling.test.ts', 'web/lib/shared.ts']))
 
     def test_a_done_report_claims_nothing_from_left_out(self):
         text = REPORT.replace('needs writes: {needs}\n', '').replace('partial', 'done').format(
@@ -61,14 +61,14 @@ class ReportClaimTests(unittest.TestCase):
 
     def test_tokens_resolve_to_the_one_tracked_path_they_name(self):
         tracked = set(REPO_FILES) | {'other/lib/x.py'}
-        self.assertEqual(widen.resolve(['thread-actions.test.ts', 'lib/x.py', 'x.py', 'nope.py'],
+        self.assertEqual(widen.resolve(['sibling.test.ts', 'lib/x.py', 'x.py', 'nope.py'],
                                        tracked),
-                         ['web/app/(app)/bots/[id]/thread-actions.test.ts', 'lib/x.py'])
+                         ['web/app/items/[id]/sibling.test.ts', 'lib/x.py'])
 
     def test_a_route_segment_is_text_not_a_character_class(self):
-        writes = ['web/app/(app)/bots/[id]/actions.ts web/lib/send.ts']  # one entry, two paths
-        self.assertTrue(widen.covered('web/app/(app)/bots/[id]/actions.ts', writes))
-        self.assertTrue(widen.covered('web/lib/send.ts', writes))
+        writes = ['web/app/items/[id]/actions.ts web/lib/other.ts']  # one entry, two paths
+        self.assertTrue(widen.covered('web/app/items/[id]/actions.ts', writes))
+        self.assertTrue(widen.covered('web/lib/other.ts', writes))
         self.assertFalse(widen.covered('web/app/(app)/bots/i/actions.ts', writes))
 
 
@@ -250,10 +250,10 @@ class HarvestWidenTests(unittest.TestCase):
         self.assertEqual(self.hold({'tests/test_other.py': 'import os\n'}), 'foreign')
 
     def test_js_imports_resolve_relative_and_aliased(self):
-        stems = widen.import_stems("import { send } from '../lib/send'\nimport x from '@/lib/y'\n",
+        stems = widen.import_stems("import { other } from '../lib/other'\nimport x from '@/lib/y'\n",
                                    'web/app/x.test.ts')
-        self.assertEqual(widen.imported(stems, ['web/lib/send.ts', 'web/lib/y.tsx', 'web/z.ts']),
-                         ['web/lib/send.ts', 'web/lib/y.tsx'])
+        self.assertEqual(widen.imported(stems, ['web/lib/other.ts', 'web/lib/y.tsx', 'web/z.ts']),
+                         ['web/lib/other.ts', 'web/lib/y.tsx'])
 
 
 if __name__ == '__main__':

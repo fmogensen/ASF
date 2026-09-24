@@ -110,7 +110,7 @@ def path_tokens(text):
 
 def resolve(tokens, tracked):
     """Each token as the one tracked repo path it names: itself when tracked, else the single
-    tracked path it is the tail of (``thread-actions.test.ts`` → ``apps/…/thread-actions.test.ts``).
+    tracked path it is the tail of (``sibling.test.ts`` → ``apps/…/sibling.test.ts``).
     A token that names no tracked path, or more than one, is dropped: no guess. With no
     ``tracked`` list (no repo to read), tokens that look like repo paths (a ``/`` in them) stand."""
     out = []
