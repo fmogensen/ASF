@@ -107,10 +107,12 @@ def prod_cell(product):
 
 def agents_cell(product):
     from asf.views import sessions
-    working, dead = sessions.live_rows(product)
-    if not working and not dead and not os.path.exists(_sessions_path(product)):
+    working, finished, dead = sessions.live_groups(product)
+    if not working and not finished and not dead and not os.path.exists(_sessions_path(product)):
         return "0 (no session registry yet — nothing launched)"
-    return f"{len(working)} working" + (f", {len(dead)} dead" if dead else "")
+    return (f"{len(working)} working"
+            + (f", {len(finished)} finished (awaiting harvest)" if finished else "")
+            + (f", {len(dead)} dead" if dead else ""))
 
 
 def _sessions_path(product):

@@ -71,6 +71,30 @@ class SessionsViewTests(ViewsTestCase):
         self.assertIn('| gone |', dead)
         self.assertNotIn('done', working + dead)
 
+    def test_an_exited_pid_with_a_success_result_is_finished_not_dead(self):
+        logs = os.path.join(self.tmp, 'logs')
+        os.makedirs(logs)
+        for name, rec in (('ok', {'type': 'result', 'subtype': 'success', 'is_error': False,
+                                  'result': 'done'}), ('none', None)):
+            with open(os.path.join(logs, name), 'w') as f:
+                f.write(json.dumps({'type': 'system', 'subtype': 'init'}) + '\n')
+                if rec:
+                    f.write(json.dumps(rec) + '\n')
+        self.launch('alive', 101)
+        self.launch('finished', 202, log=os.path.join(logs, 'ok'))
+        self.launch('gone', 303, log=os.path.join(logs, 'none'))
+        alive = lambda pid: pid == 101  # noqa: E731
+        text = sessions.render(self.root, self.product, alive=alive)
+        self.assertIn('1 working · 1 finished (awaiting harvest) · 1 dead', text)
+        finished = text[text.index('**Finished**'):text.index('**Dead**')]
+        dead = text[text.index('**Dead**'):]
+        self.assertIn('| finished |', finished)
+        self.assertIn('| gone |', dead)
+        self.assertNotIn('| finished |', dead)
+        with mock.patch('asf.workers.health.alive_for', return_value=alive):
+            self.assertEqual(status.agents_cell(self.product),
+                             '1 working, 1 finished (awaiting harvest), 1 dead')
+
     def test_no_registry_is_none_not_an_error(self):
         text = sessions.render(self.root, self.product)
         self.assertIn('Working: none', text)

@@ -18,6 +18,7 @@
 
 Each launch appends a ``launch`` event (item, job, model, brief kind) to ``metrics/events``.
 """
+import json
 import os
 import re
 import subprocess
@@ -53,6 +54,26 @@ def awaiting_harvest(product):
     """Items whose pushed branch waits for harvest: busy, but holding no slot
     (:func:`asf.workers.lifecycle.awaiting_harvest`)."""
     return lifecycle.awaiting_harvest(pool_mod.sessions_path(product))
+
+
+def unlanded(product):
+    """``{item: {kind: why}}`` — work pushed and waiting to land (:func:`asf.workers.lifecycle.unlanded`)."""
+    return lifecycle.unlanded(pool_mod.sessions_path(product))
+
+
+def open_pr_branches(product):
+    """The head branches of the PRs the evidence cache last saw open — read as cached, never
+    refreshed here (the wave asks no forge). No cache, or an unreadable one: none."""
+    from asf.evidence import evidence as evidence_mod
+    try:
+        with open(evidence_mod._cache_file('prs.json', product), encoding='utf-8') as f:
+            prs = json.load(f)
+    except (OSError, ValueError, TypeError):
+        return set()
+    if not isinstance(prs, list):
+        return set()
+    return {p.get('headRefName') for p in prs
+            if isinstance(p, dict) and p.get('headRefName') and p.get('state') == 'OPEN'}
 
 
 def corrections(product):
@@ -121,6 +142,7 @@ def plan_inputs(product, root):
     the tick, ``asf next`` and the status cell plan the same rows."""
     return {'attempts': attempts(product), 'corrections': corrections(product),
             'busy': awaiting_harvest(product),
+            'unlanded': unlanded(product), 'open_branches': open_pr_branches(product),
             'groom_state': groom_state(product, root) if groom_policy.groom_auto(product) else None}
 
 

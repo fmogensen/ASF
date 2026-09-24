@@ -270,6 +270,22 @@ def occupies(run, alive=None):
     return bool((alive or pid_alive)(run.get('pid')))
 
 
+def result_of(run):
+    """The run's log's last-run result line (:func:`asf.workers.runtime.read_result`), or None."""
+    return runtime_mod.read_result((run or {}).get('log'))
+
+
+def finished_unrecorded(run, alive=None, result=None):
+    """Live on the ledger, its pid gone, and its log's last run closed on a success result: the
+    session finished and exited normally, and health has not written its ``ended`` line yet. It
+    holds no seat (:func:`occupies`), but it is not dead either — its work waits for health and
+    harvest, not for another session. Only a pid that vanished *without* a result is dead.
+    ``result``: ``callable(run) -> result line`` (default :func:`result_of`)."""
+    if not is_live(run) or (alive or pid_alive)(run.get('pid')):
+        return False
+    return runtime_mod.result_ok((result or result_of)(run))
+
+
 def finished(run):
     """Ended ``finished`` — which health writes only for a result that says ok on a branch that
     is pushed (:func:`judge`), so this alone means "pushed"."""
@@ -309,15 +325,47 @@ def inflight(path, alive=None):
             for job, r in latest(path).items() if occupies(r, alive)]
 
 
-def awaiting_harvest(path):
+def awaiting_harvest(path, alive=None, result=None):
     """The items whose branch is ``pushed`` — its latest run finished, not landed, no correction
     pending — and so waits for harvest, not for another session. The feeder holds them busy
     (B-0025's loop: a finished branch was relaunched every tick until harvest got to it, each
-    relaunch a live run that then hid the finished one from harvest)."""
+    relaunch a live run that then hid the finished one from harvest). A run that finished and
+    exited before health recorded its end (:func:`finished_unrecorded`) waits the same way: its
+    pid is gone, but its session is done, not missing."""
     out = set()
     for run in by_branch(path).values():
-        if run.get('item') and eligible(run) and not pending_correction(run, path):
+        if not run.get('item') or pending_correction(run, path):
+            continue
+        if eligible(run) or finished_unrecorded(run, alive, result):
             out.add(run['item'])
+    return out
+
+
+PUSHED_WAIT = 'pushed, waiting to land'
+PR_WAIT = 'pushed, PR open, waiting to land'
+FINISHED_WAIT = 'finished, awaiting harvest'
+
+
+def unlanded(path, alive=None, result=None):
+    """``{item: {kind: why}}`` — every item whose latest run on a branch left work that has not
+    landed and is not waiting for a session: finished and pushed (harvest's to gate), handed to
+    the PR lane (``harvest: pr`` — a PR open, the merge is the landing), or finished before health
+    recorded it. A pending correction is a session's to answer, so it is not listed. The feeder
+    reads it per document: a spec or plan pushed and waiting to land is not starved."""
+    out = {}
+    for run in by_branch(path).values():
+        item, kind = run.get('item'), run.get('kind')
+        if not item or not kind or landed(run) or pending_correction(run, path):
+            continue
+        if run.get('harvest') == 'pr':
+            why = PR_WAIT
+        elif eligible(run):
+            why = PUSHED_WAIT
+        elif finished_unrecorded(run, alive, result):
+            why = FINISHED_WAIT
+        else:
+            continue
+        out.setdefault(item, {})[kind] = why
     return out
 
 

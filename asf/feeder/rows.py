@@ -19,6 +19,10 @@ The row kinds::
     CARD → SPEC            a decided Feature card with no spec
     STARVED → SPEC         a spec in draft/review that no session is moving
     STARVED → PLAN         an approved spec with no plan, or a plan in draft/review, unmoved
+    PUSHED → LAND          what would have been CARD → SPEC / STARVED → SPEC / STARVED → PLAN,
+                           but that document's branch holds work not yet landed — a finished run
+                           awaiting harvest, a PR open on it: ``WAITS ON landing``, no session
+                           (a second session on the branch would redo, or overwrite, the first)
     PLAN → CODE            a New Task of an approved plan — unless its ``writes:`` overlaps a
                            running Task's, then ``WAITS ON <task>`` (the footprint gate)
     RESHAPE → PLAN         a Task the groom's split answer marked: hold it, reshape it
@@ -50,6 +54,8 @@ STALE = 'STALE → CLOSE'
 CARD_SPEC = 'CARD → SPEC'
 STARVED_SPEC = 'STARVED → SPEC'
 STARVED_PLAN = 'STARVED → PLAN'
+PUSHED_LAND = 'PUSHED → LAND'
+WAITS_LANDING = 'WAITS ON landing'
 PLAN_CODE = 'PLAN → CODE'
 RESHAPE = 'RESHAPE → PLAN'
 GROOM_ADJUDICATE = 'GROOM → ADJUDICATE'
@@ -321,9 +327,36 @@ def running_footprints(items, busy):
     return out
 
 
-def feature_rows(items, product, busy, running, landed_shas=None):
+def _waiting_doc(fid, doc, product, unlanded, open_branches):
+    """Why ``fid``'s ``doc`` (spec | plan) is not starved though no session holds it — its run
+    finished and its work waits to land, or its branch has a PR open — else ''."""
+    why = ((unlanded or {}).get(fid) or {}).get(doc)
+    if why:
+        return f"{doc} {why}"
+    if branch_for(product, doc, fid) in (open_branches or ()):
+        return f"{doc} pushed, PR open, waiting to land"
+    return ''
+
+
+def _doc_row(kind, fid, doc, product, reason, unlanded, open_branches):
+    """The launching row for ``fid``'s ``doc`` — or, when that document's work is pushed and
+    waiting to land, a PUSHED → LAND row that launches nothing."""
+    branch = branch_for(product, doc, fid)
+    waiting = _waiting_doc(fid, doc, product, unlanded, open_branches)
+    if waiting:
+        return Row(tier=2, kind=PUSHED_LAND, item_id=fid, feature_id=fid,
+                   action=f"{WAITS_LANDING}: {waiting}", brief_kind=doc, branch=branch,
+                   reason=waiting)
+    return Row(tier=2, kind=kind, item_id=fid, feature_id=fid, action=LAUNCH, brief_kind=doc,
+               branch=branch, reason=reason)
+
+
+def feature_rows(items, product, busy, running, landed_shas=None, unlanded=None,
+                 open_branches=None):
     """Every Feature's rows, in Feature order (rank, then id). ``running`` grows as PLAN → CODE
-    rows are handed out, so two ready Tasks sharing a file never both launch."""
+    rows are handed out, so two ready Tasks sharing a file never both launch. ``unlanded``
+    (:func:`asf.workers.lifecycle.unlanded`) and ``open_branches`` (branches with an open PR):
+    a spec or plan whose work is pushed and waiting to land is not starved (PUSHED → LAND)."""
     out = []
     limit = stalemate_round(product)
     feats = [f for f in ix.of_type(items, 'feature')
@@ -341,19 +374,16 @@ def feature_rows(items, product, busy, running, landed_shas=None):
         if fid in busy:
             continue
         word = stage.split(' ')[0]
+        waits = (unlanded, open_branches)
         if word == 'card':
-            out.append(Row(tier=2, kind=CARD_SPEC, item_id=fid, feature_id=fid, action=LAUNCH,
-                           brief_kind='spec', branch=branch_for(product, 'spec', fid),
-                           reason='decided card, no spec'))
+            out.append(_doc_row(CARD_SPEC, fid, 'spec', product, 'decided card, no spec', *waits))
         elif word in ('spec-draft', 'spec-review'):
-            out.append(Row(tier=2, kind=STARVED_SPEC, item_id=fid, feature_id=fid, action=LAUNCH,
-                           brief_kind='spec', branch=branch_for(product, 'spec', fid),
-                           reason=f"{stage}, no session"))
+            out.append(_doc_row(STARVED_SPEC, fid, 'spec', product, f"{stage}, no session",
+                                *waits))
         elif word in ('spec-approved', 'plan-draft', 'plan-review'):
-            out.append(Row(tier=2, kind=STARVED_PLAN, item_id=fid, feature_id=fid, action=LAUNCH,
-                           brief_kind='plan', branch=branch_for(product, 'plan', fid),
-                           reason=f"{stage}, no session" if word != 'spec-approved'
-                           else 'spec approved, no plan'))
+            out.append(_doc_row(STARVED_PLAN, fid, 'plan', product,
+                                f"{stage}, no session" if word != 'spec-approved'
+                                else 'spec approved, no plan', *waits))
         elif word in ('plan-approved', 'building'):
             out.extend(task_rows(items, product, f, busy, running, landed_shas))
     return out
@@ -524,7 +554,8 @@ def hold_unlanded(rows, items, landed_shas=None):
 
 
 def candidates(index, product, inflight, attempts=None, corrections=None, busy=None,
-              groom_state=None, landed_shas=None, decision_limit=None):
+              groom_state=None, landed_shas=None, decision_limit=None, unlanded=None,
+              open_branches=None):
     """Every row the index supports right now, uncut by capacity, in emit order: tier, then the
     Feature's rank and id, then within a Feature the stalemate, branch housekeeping, new work.
     ``busy``: item ids held by something that is not a session and takes no slot — a pushed
@@ -532,7 +563,8 @@ def candidates(index, product, inflight, attempts=None, corrections=None, busy=N
     §2.5's fact for the GROOM → ADJUDICATE row; a caller that passes none gets none. A card
     already Resolved/Closed is never ``busy``: its work is on the trunk whatever the ledger says
     (an unclosed run held a landed Task's ``writes:`` against its siblings for ever).
-    ``decision_limit``: how many UNDECIDED → DECIDE rows (``None``: ``decision_rows``; ``0``: all)."""
+    ``decision_limit``: how many UNDECIDED → DECIDE rows (``None``: ``decision_rows``; ``0``: all).
+    ``unlanded`` / ``open_branches``: a document's pushed, not-yet-landed work (:func:`feature_rows`)."""
     items = items_of(index)
     busy = inflight_ids(inflight) | {i for i in busy or () if is_open(items.get(i) or {})}
     limit = stalemate_round(product)
@@ -544,7 +576,7 @@ def candidates(index, product, inflight, attempts=None, corrections=None, busy=N
     gr = groom_row(index, product, busy, groom_state, inflight)
     if gr is not None:
         rows.append(gr)
-    rows += feature_rows(items, product, busy, running, landed_shas)
+    rows += feature_rows(items, product, busy, running, landed_shas, unlanded, open_branches)
     rows += undecided_rows(items, product, busy, decision_limit)
     rows = hold_unlanded(rows, items, landed_shas)
 
@@ -558,10 +590,12 @@ def candidates(index, product, inflight, attempts=None, corrections=None, busy=N
 
 
 def plan_rows(index, product, inflight, capacity, attempts=None, corrections=None, busy=None,
-              groom_state=None, landed_shas=None, decision_limit=None):
+              groom_state=None, landed_shas=None, decision_limit=None, unlanded=None,
+              open_branches=None):
     """The rows the tick emits: tiered, S1 first, cut to ``capacity`` less what is in flight."""
     from asf.feeder import tiers
     return tiers.select(candidates(index, product, inflight, attempts, corrections, busy=busy,
                                    groom_state=groom_state, landed_shas=landed_shas,
-                                   decision_limit=decision_limit),
+                                   decision_limit=decision_limit, unlanded=unlanded,
+                                   open_branches=open_branches),
                         inflight, capacity)

@@ -57,18 +57,34 @@ def pid_alive(pid):
     return True
 
 
-def live_rows(product, alive=None, session_source=None):
-    """(working, dead): the registry's sessions with no ``ended``, split on whether the pid lives."""
+def live_groups(product, alive=None, session_source=None, result=None):
+    """(working, finished, dead): the registry's sessions with no ``ended``, split on whether the
+    pid lives and, when it does not, on whether the run left a success result. A pid that exited
+    after a success result is **finished** (awaiting health and harvest), not dead
+    (:func:`asf.workers.lifecycle.finished_unrecorded`); only a pid gone without one is dead.
+    Neither holds a seat. ``result``: ``callable(run) -> result line`` (a test's)."""
     if product is None:
-        return [], []
+        return [], [], []
     from asf.workers import health as health_mod
+    from asf.workers import lifecycle
     from asf.workers import pool as pool_mod
     live = pool_mod.live_sessions(product)
     if alive is None:
         alive = health_mod.alive_for(product, live, session_source)
-    working, dead = [], []
+    working, finished, dead = [], [], []
     for s in live:
-        (working if alive(s.get('pid')) else dead).append(s)
+        if alive(s.get('pid')):
+            working.append(s)
+        elif lifecycle.finished_unrecorded(s, alive, result):
+            finished.append(s)
+        else:
+            dead.append(s)
+    return working, finished, dead
+
+
+def live_rows(product, alive=None, session_source=None, result=None):
+    """(working, dead) — :func:`live_groups` without the finished runs, which are neither."""
+    working, _finished, dead = live_groups(product, alive, session_source, result)
     return working, dead
 
 
@@ -119,13 +135,16 @@ def render(root, product=None, alive=None, cfg=None, session_source=None):
         effective_alive = observe.identity_alive(observed, runs)
 
     ended = _ended_rows(root)
-    working, dead = live_rows(product, effective_alive)
+    working, finished, dead = live_groups(product, effective_alive)
     other = [] if why else _other_rows(observed, product)
     other_label = f'unreadable ({why})' if why else f'{len(other)} other'
-    out = [f"**SESSIONS** — {len(working)} working · {len(dead)} dead · {len(ended)} ended · "
-          f"{other_label}", ""]
+    out = [f"**SESSIONS** — {len(working)} working · "
+           + (f"{len(finished)} finished (awaiting harvest) · " if finished else "")
+           + f"{len(dead)} dead · {len(ended)} ended · {other_label}", ""]
     header = ('Job', 'Item', 'Kind', 'Account', 'Model', 'Branch', 'Started')
-    for name, rows in (('Working', working), ('Dead', dead)):
+    groups = (('Working', working),) + ((('Finished', finished),) if finished else ()) \
+        + (('Dead', dead),)
+    for name, rows in groups:
         if not rows:
             out.append(f"{name}: none")
             out.append("")
