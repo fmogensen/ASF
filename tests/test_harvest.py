@@ -15,6 +15,7 @@ RUNNER = os.path.join(REPO_ROOT, 'tools', 'run_tests.py')
 from asf import env
 from asf.conventions import Conventions
 from asf.harvest import harvest, lane
+from asf.workers import host
 from asf.workers import lifecycle
 from asf.workers import observe
 from asf.init import ITEM_FOLDERS, STREAM_FOLDERS
@@ -1520,6 +1521,48 @@ class ProductHarvestTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         return calls
 
+    def fake_gh_prs(self, prs, required=None):
+        """A ``gh`` answering for several open PRs at once: ``prs`` maps a branch to its
+        ``(number, checks)``. :meth:`fake_gh` keys its one PR off the worker's current branch and
+        so cannot hold two; this one keys off the branch names. A merge lands that branch on
+        origin's main as the host would. Returns the list the calls are recorded in."""
+        calls, merged = [], {}
+        by_number = {str(n): (b, checks) for b, (n, checks) in prs.items()}
+
+        def gh(args):
+            calls.append(list(args))
+            if args[:1] == ['api'] and args[1].endswith('/required_status_checks'):
+                if required is None:
+                    return 1, '', 'gh: Branch not protected (HTTP 404)\n'
+                return 0, json.dumps({'contexts': list(required), 'checks': []}), ''
+            if args[:2] == ['api', 'graphql']:
+                return 0, json.dumps({'data': {'repository': {'mergeQueue': None}}}), ''
+            if args[:2] == ['pr', 'list']:
+                return 0, json.dumps([
+                    {'number': n, 'headRefName': b, 'state': 'MERGED' if b in merged else 'OPEN',
+                     'headRefOid': None, 'autoMergeRequest': None,
+                     'mergeCommit': {'oid': merged[b]} if b in merged else None}
+                    for b, (n, _checks) in prs.items()]), ''
+            if args[:2] == ['pr', 'checks']:
+                checks = by_number.get(str(args[2]), (None, []))[1]
+                return (1 if any(c['bucket'] != 'pass' for c in checks) else 0,
+                        json.dumps(checks), '')
+            if args[:2] == ['pr', 'merge']:
+                b = by_number[str(args[2])][0]
+                sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+                sh(['git', 'push', '-q', 'origin', f'origin/{b}:main'], cwd=self.worker)
+                sh(['git', 'push', '-q', 'origin', '--delete', b], cwd=self.worker)
+                merged[b] = self.origin_main()
+                return 0, '', ''
+            if args[:2] == ['pr', 'view']:
+                b = by_number.get(str(args[2]), (None, []))[0]
+                return 0, (merged.get(b) or '') + '\n', ''
+            return 1, '', f'unexpected gh {args}'
+        patcher = mock.patch.object(harvest, '_gh', side_effect=gh)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return calls
+
     def push_plan(self, files=None):
         self.push_lane('plan/F-0001', [('plan(F-0001): the plan',
                                         files or {'docs/plans/f-0001.md': '# plan\n'})])
@@ -2060,6 +2103,27 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertEqual([[f['branch'] for f in c.args[1]] for c in gate.call_args_list],
                          [['plan/F-0001'], ['fix/B-0001', 'fix/B-0003']])
         self.assertEqual([f['branch'] for f in merge.call_args.args[1]], ['fix/B-0002'])
+
+    def test_host_pressure_holds_the_local_gate_and_lets_the_ci_prs_through(self):
+        """B-0109: under host pressure no local suite is started — but a PR merging on its own
+        CI's checks alone (``how == 'ci'``) runs none here, so it goes on. Holding those too
+        would strand every external-CI PR behind a loaded host, for a suite it never runs."""
+        calls = self.fake_gh_prs({'plan/F-0001': (41, [{'name': 'ci', 'bucket': 'pass'}]),
+                                  'fix/B-0001': (42, [{'name': 'ci', 'bucket': 'pass'}])})
+        self.push_plan()
+        self.push_fix(['approved'])
+        product = self.pr_conv(landing_checks=['ci'],
+                               landing_checks_missing={'docs': 'wait', 'code': 'local-gate'})
+        with mock.patch.dict(os.environ, {host.READING_ENV: '90 12 87'}), \
+                mock.patch.object(harvest, 'product_gate',
+                                  side_effect=AssertionError('a suite started under pressure')):
+            results, lines = self.harvest(product)
+        self.assertEqual(results, {'plan/F-0001': 'landed', 'fix/B-0001': 'waiting'}, lines)
+        self.assertEqual([c[:3] for c in self.merges(calls)], [['pr', 'merge', '41']])
+        rec = self.record('fix/B-0001')
+        self.assertEqual((rec['lane']['state'], rec['lane']['reason']),
+                         (lane.WAITING, lane.HOST_PRESSURE))
+        self.assertFalse(rec.get('correction'))  # pressure is not a defect: no round, no blame
 
     def test_a_docs_branch_already_handed_to_the_pr_lane_is_merged(self):
         """A docs branch an earlier harvest marked ``harvest: pr`` is not stranded there."""

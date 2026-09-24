@@ -844,7 +844,7 @@ def held_by_host(lane, ready):
         return ready
     try:
         cfg = env.load_config()
-    except (env.ConfigError, OSError, ValueError):  # a guard never stops a landing on its own
+    except (env.ConfigError, OSError, ValueError):  # unreadable: the default guards, not none
         cfg = {}
     held, why, _reading = host_mod.pressure(cfg)
     if not held:
