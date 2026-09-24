@@ -1,23 +1,32 @@
 """asf.record.ingest — the evidence pass (``asf ingest``).
 
-Matches every Feature/Story/Task/Bug/Epic to what ``asf.evidence`` found in the product repo,
-derives its machine block, writes it with ``frontmatter.write_machine`` (the only function
-allowed to touch the machine block), and appends one ``## History`` line per state or stage
-change. Decisions and Rules have no lifecycle, so ingest never touches them.
+Matches every Feature/Story/Task/Bug/Epic to what ``asf.evidence`` found in the product repo and
+hands that evidence to ``asf.evidence.closing``, which alone chooses the state and names the rule
+that chose it (``rule: <name>`` is the last ``evidence:`` line of every item). It then writes the
+machine block with ``frontmatter.write_machine`` (the only function allowed to touch the machine
+block) and appends one ``## History`` line per state or stage change. The pass runs
+``tasks → stories → bugs → features → descent → epics → write``; descent is what lets a landed
+Feature close the children beneath it that have no evidence of their own. Ingest derives no state
+of its own: ``tests.test_ingest.IngestDerivesNothing`` keeps a sixth state choice out of this
+module. Decisions and Rules have no lifecycle, so ingest never touches them.
 """
+import collections
+import dataclasses
 import re
 import sys
 
 from asf import env
-from asf.evidence import evidence
+from asf.evidence import closing, evidence
 from asf.record import frontmatter
 from asf.record.core import canonicalize, load_items, now_iso, parse_sections, render_sections, section_content, today
 from asf.record.index import do_index
+from asf.tick import stale
 
 EVIDENCE_TYPES = {'epic', 'feature', 'story', 'task', 'bug'}
 LANDING_CHILD_TYPES = {'story', 'task', 'bug'}
 MACHINE_KEY_ORDER = ['state', 'stage', 'stage_since', 'cost', 'evidence', 'blocked',
                      'blocked_by_open', 'updated']
+RULE_PREFIX = 'rule: '
 
 
 def _path_only(ref):
@@ -129,7 +138,7 @@ def match_story(meta, ev):
 
 
 def match_bug(meta, ev):
-    """{'has_fixer': bool, 'merged_sha': str|None} from links.branches/links.prs, or None."""
+    """{'has_fixer', 'merged_sha', 'branches', 'open_prs'} from links.branches/links.prs, or None."""
     typed, _machine = frontmatter.split_machine(meta)
     links = typed.get('links') or {}
     prs = set(links.get('prs') or [])
@@ -141,9 +150,11 @@ def match_bug(meta, ev):
     for pr in prs:
         if pr in ev['merged']:
             merged_sha = ev['merged'][pr]
-    if branches & set(ev.get('branches') or []):
+    live = sorted(branches & set(ev.get('branches') or []))
+    if live:
         has_fixer = True
-    return {'has_fixer': has_fixer, 'merged_sha': merged_sha}
+    return {'has_fixer': has_fixer, 'merged_sha': merged_sha, 'branches': live,
+            'open_prs': sorted(pr for pr in prs if pr not in ev['merged'])}
 
 
 def match_ids(iid, ev):
@@ -172,6 +183,14 @@ def append_history_lines(body, new_lines):
             content = section_content(_section_lines(content) + list(new_lines), is_last)
         out_sections.append([heading, content])
     return render_sections(preamble, out_sections)
+
+
+def _phrase(ev_lines):
+    """The History parenthesis: the rule that decided, then the lines that show why."""
+    if not ev_lines:
+        return 'derived'
+    rules = [l for l in ev_lines if l.startswith(RULE_PREFIX)]
+    return '; '.join(rules[-1:] + [l for l in ev_lines if not l.startswith(RULE_PREFIX)])
 
 
 def _ingest_fields(machine, new_state, stage, ev_lines, blocked_pair, now):
@@ -210,12 +229,120 @@ def _ingest_fields(machine, new_state, stage, ev_lines, blocked_pair, now):
     history = []
     stamp = now[:16].replace('T', ' ')
     if new_state != old_state:
-        phrase = '; '.join(ev_lines) if ev_lines else 'derived'
+        phrase = _phrase(ev_lines)
         history.append(f"- {stamp} ingest: state {old_state} → {new_state} ({phrase})")
     if stage is not None and stage != old_stage:
-        phrase = '; '.join(ev_lines) if ev_lines else 'derived'
+        phrase = _phrase(ev_lines)
         history.append(f"- {stamp} ingest: stage {old_stage or 'card'} → {stage} ({phrase})")
     return ordered, history
+
+
+def _ids_of(iid, ev):
+    return (ev.get('ids') or {}).get(iid) or {}
+
+
+def _merged_in_prod(child_ids, task_ev, ev):
+    """Every child Task's merge is an ancestor of the deploy. False for a Task the plan does not
+    list: nothing says where its merge is."""
+    return bool(child_ids) and all(
+        task_ev.get(cid) and evidence.ancestor_of(task_ev[cid].get('merged_sha'), ev.get('prod_sha'))
+        for cid in child_ids)
+
+
+def _in_prod(child_ids, task_ev, ev, merged=None):
+    """What "in production" means is the product's own (B-0077). A service configures
+    `deploy_sha`, and its work is in production when every child's merge is in that deploy and the
+    operator ticked its PR. A package, library or tool configures none — its trunk IS production,
+    and its Tasks already closed on a commit there with CI green (D-0047), so there is nothing
+    further to wait for. Without this, no Feature of such a product could ever leave `Resolved`.
+    `merged` hands back a `_merged_in_prod` the caller already has."""
+    if not ev.get('prod_sha'):
+        return True
+    if merged is None:
+        merged = _merged_in_prod(child_ids, task_ev, ev)
+    return bool(merged) and all(
+        task_ev.get(cid) and task_ev[cid].get('pr') in (ev.get('checked') or ()) for cid in child_ids)
+
+
+def _landing_sha(child_ids, task_ev, ev):
+    """The newest commit or merge that landed one of `child_ids`, for the line that names it."""
+    for cid in reversed(child_ids):
+        sha = _ids_of(cid, ev).get('commit') or (task_ev.get(cid) or {}).get('merged_sha')
+        if sha:
+            return sha
+    return ''
+
+
+def _green_after(ev, product):
+    """`sha -> bool`: CI on main is green at or after `sha`. True for a product with no CI; the
+    green runs are read once, the first time a merge asks."""
+    if not ev.get('ci'):
+        return lambda sha: True
+    reach = []
+
+    def check(sha):
+        if not reach:
+            runs = evidence.ci_green_runs(product) if product is not None else []
+            reach.append(evidence.ancestry(product, runs) if runs else (lambda _sha: False))
+        return reach[0](sha)
+    return check
+
+
+def _seconds_since(stamp, now):
+    """Seconds from a card's date or ISO stamp to `now`; 0 when it cannot be read, which is the
+    timid answer for a quiet period (not quiet yet)."""
+    text = str(stamp or '')
+    then = stale.parse_iso(text) or (stale.parse_iso(text[:10] + 'T00:00:00Z') if len(text) >= 10 else None)
+    at = stale.parse_iso(now)
+    return max((at - then).total_seconds(), 0.0) if then and at else 0.0
+
+
+def _own_evidence(ev_obj):
+    return bool(ev_obj.commit or ev_obj.merged_sha or ev_obj.branch or ev_obj.pr_state
+                or ev_obj.open_prs)
+
+
+@dataclasses.dataclass
+class _Derived:
+    """What descent needs to know about an item after its own rule spoke."""
+    raw: closing.Closing      #: `state_of`'s answer, before `sticky`
+    sha: str = ''             #: the commit that landed it, for the line that names it
+    own: bool = False         #: it carries a branch, a PR or a commit of its own
+
+
+def descend(canonical, new_state, closings, derived):
+    """A Feature that closed closes the children beneath it that have no evidence of their own.
+
+    A child is evidence-free when its rule was `no-rule`, or its state is New with no branch, no
+    PR and no commit naming it. A child with any evidence of its own — an Active state, an open
+    PR, a branch — keeps the state its own rule gave it: descent may not overrule evidence, only
+    reach where there is none. One level at a time, to a fixed point (Feature → Story → Task): an
+    item descent closed passes it on. A Bug is never descended onto — its own `quiet` rule is what
+    says the defect is gone. Rewrites `new_state` and `closings` in place."""
+    reached = {iid for iid, c in closings.items()
+               if c.state == closing.CLOSED and canonical[iid]['meta'].get('type') == 'feature'}
+    sha = {iid: derived[iid].sha for iid in reached}
+    grew = True
+    while grew:
+        grew = False
+        for iid, rec in canonical.items():
+            type_ = rec['meta'].get('type')
+            parent = rec['meta'].get('parent')
+            if iid in reached or parent not in reached or type_ not in ('story', 'task') \
+                    or iid not in derived:
+                continue
+            d = derived[iid]
+            if not (d.raw.rule == closing.NO_RULE or (d.raw.state == closing.NEW and not d.own)):
+                continue
+            hit = closing.state_of(type_, closing.Ev(parent_closed=True))
+            named = f"{parent} Closed" + (f" (commit {sha[parent][:7]})" if sha.get(parent) else '')
+            kept = [l for l in closings[iid].lines
+                    if not l.startswith(('no evidence found', 'held Closed'))]
+            closings[iid] = dataclasses.replace(hit, lines=tuple(kept + [named]))
+            new_state[iid] = closings[iid].state
+            reached.add(iid)
+            sha[iid] = sha.get(parent, '')
+            grew = True
 
 
 def cmd_ingest(args, root):
@@ -227,8 +354,8 @@ def cmd_ingest(args, root):
             name = env.default_product_name()
         except env.ConfigError:
             name = None
-    ev = evidence.load(fresh=getattr(args, 'fresh', False),
-                       product=env.load_product(name) if name else None)
+    product = env.load_product(name) if name else None
+    ev = evidence.load(fresh=getattr(args, 'fresh', False), product=product)
     by_id, parse_errors = load_items(root)
     if parse_errors:
         for f, line, why in parse_errors:
@@ -243,9 +370,20 @@ def cmd_ingest(args, root):
     for iid, rec in canonical.items():
         new_state[iid] = frontmatter.split_machine(rec['meta'])[1].get('state', 'New')
 
-    ev_lines = {}
+    closings = {}     # iid -> the Closing that gets written: state, rule, evidence lines
+    derived = {}      # iid -> _Derived, what descent reads
     stage_val = {}
     task_ev = {}
+
+    def settle(iid, type_, ev_obj, lines, sha=''):
+        """The one place a state is chosen: `closing.state_of`, held by `closing.sticky`."""
+        old = new_state[iid]
+        raw = closing.state_of(type_, ev_obj, old)
+        final = closing.sticky(old, dataclasses.replace(raw, lines=tuple(lines)))
+        closings[iid] = final
+        new_state[iid] = final.state
+        derived[iid] = _Derived(raw, sha or ev_obj.commit or ev_obj.merged_sha, _own_evidence(ev_obj))
+        return final
 
     # ---- Tasks: no dependency on any other item's derived state
     for iid, rec in canonical.items():
@@ -253,152 +391,154 @@ def cmd_ingest(args, root):
             continue
         slug, tid, tev = match_task(rec['meta'], ev)
         task_ev[iid] = tev
-        # A commit on the trunk (with a green run where there is CI) is the strongest evidence
-        # there is, for every type — a plan's task table says what was intended, never what
-        # landed, and must not outrank the landing (B-0074). The plan's line stays as context.
-        landed_state, landed_lines = match_ids(iid, ev)
-        if landed_state in ('Resolved', 'Closed'):
-            new_state[iid] = landed_state
-            ev_lines[iid] = landed_lines + ([f"in plan {slug} ({tid})"] if tev is not None else [])
-            continue
-        if tev is None:
-            if landed_state:
-                new_state[iid] = landed_state
-            ev_lines[iid] = landed_lines or [f"no evidence found ({date})"]
-            continue
-        new_state[iid] = evidence.task_state(True, tev.get('branch'), tev.get('pr_state'),
-                                             tev.get('merged_sha'))
-        lines = []
-        if tev.get('merged_sha'):
-            lines.append(f"PR #{tev.get('pr')} merged ({tev['merged_sha'][:9]})")
+        iev = _ids_of(iid, ev)
+        commit = iev.get('commit') or ''
+        merged = (tev or {}).get('merged_sha') or ''
+        _st, id_lines = match_ids(iid, ev)
+        if tev is not None:
+            branch, pr_state = tev.get('branch') or '', tev.get('pr_state') or ''
+        else:  # nothing matched it by document: the id tokens naming it are what is left
+            branch = (iev.get('branches') or [''])[0]
+            pr_state = 'OPEN' if iev.get('open_prs') else ''
+        if commit:
+            # A commit on the trunk (with a green run where there is CI) is the strongest evidence
+            # there is, for every type — a plan's task table says what was intended, never what
+            # landed, and must not outrank the landing (B-0074). The rule order says so now:
+            # `landed-green`/`landed` are read before `in-flight`; the plan's line stays as context.
+            lines = id_lines + ([f"in plan {slug} ({tid})"] if tev is not None else [])
+        elif tev is None:
+            lines = id_lines or [f"no evidence found ({date})"]
+        elif tev.get('merged_sha'):
+            lines = [f"PR #{tev.get('pr')} merged ({tev['merged_sha'][:9]})"]
         elif tev.get('branch') and tev.get('pr'):
-            lines.append(f"branch {tev['branch']}, PR #{tev['pr']} {tev.get('pr_state')}")
+            lines = [f"branch {tev['branch']}, PR #{tev['pr']} {tev.get('pr_state')}"]
         elif tev.get('branch'):
-            lines.append(f"branch {tev['branch']} exists")
+            lines = [f"branch {tev['branch']} exists"]
         elif tev.get('pr'):
-            lines.append(f"PR #{tev['pr']} {tev.get('pr_state')}")
+            lines = [f"PR #{tev['pr']} {tev.get('pr_state')}"]
         else:
-            lines.append(f"in plan {slug} ({tid}), no branch yet")
-        ev_lines[iid] = lines
+            lines = [f"in plan {slug} ({tid}), no branch yet"]
+        # a merged PR is its own green: a plan's Task never waited on CI to close
+        green = bool(iev.get('green')) if commit else bool(merged)
+        settle(iid, 'task', closing.Ev(commit=commit, green=green, merged_sha=merged,
+                                       branch=branch, pr_state=pr_state,
+                                       open_prs=tuple(iev.get('open_prs') or ())), lines)
 
-    # ---- Stories: depend on whether a Task lists them while Active
-    story_any_active = {}
+    # ---- Stories: their Tasks are the ones whose `stories:` name them (a removed Task covers nothing)
+    story_tasks = collections.defaultdict(list)
     for iid, rec in canonical.items():
-        if rec['meta'].get('type') != 'task' or new_state.get(iid) != 'Active':
+        if rec['meta'].get('type') != 'task' or rec['meta'].get('removed'):
             continue
         for sid in rec['meta'].get('stories') or []:
-            story_any_active[sid] = True
+            story_tasks[sid].append(iid)
 
     for iid, rec in canonical.items():
         if rec['meta'].get('type') != 'story':
             continue
         legacy, sev = match_story(rec['meta'], ev)
+        task_ids = story_tasks.get(iid, [])
+        states = [new_state[cid] for cid in task_ids]
+        all_closed = bool(states) and all(s == closing.CLOSED for s in states)
+        ev_obj = closing.Ev(children=tuple(states), matrix_status=(sev or {}).get('status') or '',
+                            child_evidence=any(derived[cid].own for cid in task_ids),
+                            in_prod=all_closed and _in_prod(task_ids, task_ev, ev))
         if sev is None:
-            state, lines = match_ids(iid, ev)
-            if state:
-                new_state[iid] = state
-            ev_lines[iid] = lines or [f"no evidence found ({date})"]
-            continue
-        any_active = story_any_active.get(iid, False)
-        new_state[iid] = evidence.story_state(any_active, sev['status'])
-        lines = [f"matrix status {sev['status']} ({legacy})"]
-        if any_active:
-            lines.append("a Task lists it, Active")
-        ev_lines[iid] = lines
+            _st, id_lines = match_ids(iid, ev)
+            lines = id_lines or [f"no evidence found ({date})"]
+        else:
+            lines = [f"matrix status {sev['status']} ({legacy})"]
+            if closing.ACTIVE in states:
+                lines.append("a Task lists it, Active")
+        settle(iid, 'story', ev_obj, lines)
 
     # ---- Bugs: independent of other items
+    green_after = None
     for iid, rec in canonical.items():
         if rec['meta'].get('type') != 'bug':
             continue
+        typed, machine = frontmatter.split_machine(rec['meta'])
         bev = match_bug(rec['meta'], ev)
-        if bev is None or not (bev['has_fixer'] or bev['merged_sha']):
+        iev = _ids_of(iid, ev)
+        linked = bev is not None and bool(bev['has_fixer'] or bev['merged_sha'])
+        if linked:
+            merged_sha = bev['merged_sha'] or ''
+            if merged_sha and green_after is None:
+                green_after = _green_after(ev, product)
+            ev_obj = closing.Ev(merged_sha=merged_sha, green=bool(merged_sha) and green_after(merged_sha),
+                                branch=(bev['branches'] or [''])[0], open_prs=tuple(bev['open_prs']))
+        else:
             # no link, or links that show nothing: the item's own id is the evidence left
-            state, lines = match_ids(iid, ev)
-            if state:
-                new_state[iid] = state
-            elif bev is not None:
-                new_state[iid] = evidence.bug_state(False, None, False)
-            ev_lines[iid] = lines or [f"no evidence found ({date})"]
-            continue
-        merged_in_prod = bool(bev['merged_sha']) and evidence.ancestor_of(bev['merged_sha'], ev.get('prod_sha'))
-        new_state[iid] = evidence.bug_state(bev['has_fixer'], bev['merged_sha'], merged_in_prod)
-        lines = []
-        if bev['merged_sha']:
-            note = ' -- pending 3-day quiet' if merged_in_prod else ''
-            lines.append(f"fix merged ({bev['merged_sha'][:9]}){note}")
-        elif bev['has_fixer']:
-            lines.append('fixer branch/PR open')
-        ev_lines[iid] = lines or [f"no evidence found ({date})"]
+            commit = iev.get('commit') or ''
+            ev_obj = closing.Ev(commit=commit, green=bool(commit and iev.get('green')),
+                                branch=(iev.get('branches') or [''])[0],
+                                open_prs=tuple(iev.get('open_prs') or ()))
+            _st, id_lines = match_ids(iid, ev)
+            lines = id_lines or [f"no evidence found ({date})"]
+        ev_obj.signature = typed.get('signature') or ''
+        if ev_obj.signature:
+            # P6: `last_filed` is the last day the signature was seen; a hand-filed Bug that was
+            # never bumped is quiet from the day it was written
+            seen = typed.get('last_filed') or typed.get('created') or machine.get('stage_since')
+            ev_obj.quiet_for = _seconds_since(seen, now)
+            ev_obj.quiet_limit = float(stale.limit_seconds(
+                stale.load_limits(product).get('bug_quiet') or closing.BUG_QUIET_DEFAULT))
+        if linked and bev['merged_sha']:
+            in_prod = evidence.ancestor_of(bev['merged_sha'], ev.get('prod_sha'))
+            quiet = closing.state_of('bug', ev_obj, new_state[iid]).state == closing.CLOSED
+            lines = [f"fix merged ({bev['merged_sha'][:9]})"
+                     + (' -- pending 3-day quiet' if in_prod and not quiet else '')]
+        elif linked:
+            lines = ['fixer branch/PR open']
+        settle(iid, 'bug', ev_obj, lines)
 
-    # ---- Features: depend on their own Task children's derived state
+    # ---- Features: depend on their own children's derived state
     for iid, rec in canonical.items():
         if rec['meta'].get('type') != 'feature':
             continue
         slug, fev = match_feature(rec['meta'], ev)
+        iev = _ids_of(iid, ev)
+        commit = iev.get('commit') or ''
+        green = bool(commit and iev.get('green'))
+        _st, id_lines = match_ids(iid, ev)
         if fev is None:
-            # no spec/plan/legacy match: its children and its own id tokens are what is left.
-            # All of its Stories/Tasks/Bugs Closed, or a commit on main naming it → landed.
-            kids = [new_state.get(cid) for cid, crec in canonical.items()
-                    if crec['meta'].get('parent') == iid
-                    and crec['meta'].get('type') in LANDING_CHILD_TYPES]
-            kids_closed = bool(kids) and all(s == 'Closed' for s in kids)
-            state, lines = match_ids(iid, ev)
-            named = bool(((ev.get('ids') or {}).get(iid) or {}).get('commit'))
-            if kids_closed or named:
-                # …and it is Closed, not merely Resolved, when the product deploys nothing
-                # (B-0078): the trunk IS production there (B-0077), so children Closed or a
-                # green commit naming it is the whole of the evidence. A product that
-                # configures `deploy_sha` still waits for the deploy and the operator's tick.
-                closed = bool(kids_closed) or state == 'Closed'
-                new_state[iid] = 'Resolved' if ev.get('prod_sha') or not closed else 'Closed'
+            # no spec/plan/legacy match: its children and its own id tokens are what is left
+            kid_ids = [cid for cid, crec in canonical.items()
+                       if crec['meta'].get('parent') == iid
+                       and crec['meta'].get('type') in LANDING_CHILD_TYPES]
+            kids = [new_state[cid] for cid in kid_ids]
+            kids_closed = bool(kids) and all(s == closing.CLOSED for s in kids)
+            # …and it is Closed, not merely Resolved, when the product deploys nothing (B-0078):
+            # the trunk IS production there (B-0077), so children Closed or a green commit naming
+            # it is the whole of the evidence. A product that configures `deploy_sha` still waits
+            # for the deploy and the operator's tick.
+            in_prod = (kids_closed or (not kids and bool(commit))) and _in_prod(kid_ids, task_ev, ev)
+            c = settle(iid, 'feature', closing.Ev(children=tuple(kids), commit=commit, green=green,
+                                                  in_prod=in_prod), [], sha=commit)
+            if c.state in (closing.RESOLVED, closing.CLOSED):
                 stage_val[iid] = 'landed'
-                lines = (lines if named else []) + (
+                lines = (id_lines if commit else []) + (
                     [f"{len(kids)}/{len(kids)} children Closed"] if kids_closed else [])
-                ev_lines[iid] = lines
-                continue
-            # a Feature nothing in the product repo knows yet IS a card — an empty stage would
-            # make a decided card invisible to the CARD → SPEC feeder row that reads this stage.
-            ev_lines[iid] = lines or [f"no evidence found ({date})"]
-            new_state[iid] = state or 'New'
-            stage_val[iid] = 'card'
+            else:
+                # a Feature nothing in the product repo knows yet IS a card — an empty stage would
+                # make a decided card invisible to the CARD → SPEC feeder row that reads this stage.
+                stage_val[iid] = 'card'
+                lines = id_lines or [f"no evidence found ({date})"]
+            closings[iid] = dataclasses.replace(c, lines=c.lines + tuple(lines))
             continue
         child_ids = [cid for cid, crec in canonical.items()
-                    if crec['meta'].get('type') == 'task' and crec['meta'].get('parent') == iid
-                    and not crec['meta'].get('removed')]
+                     if crec['meta'].get('type') == 'task' and crec['meta'].get('parent') == iid
+                     and not crec['meta'].get('removed')]
         child_states = [new_state[cid] for cid in child_ids]
-        if not child_ids and ((ev.get('ids') or {}).get(iid) or {}).get('commit'):
-            # no Tasks to judge by, and a code commit on main names it: landed, as for a
-            # Feature the documents never matched (a document-lane commit never counts, B-0059)
-            # …and it closes on that commit when the product deploys nothing, exactly as a Bug
-            # does (B-0078): for such a product the trunk IS production (B-0077), so the state
-            # `match_ids` derived — `Closed` once CI is green there — is the state. A product
-            # that configures `deploy_sha` still waits for the deploy and the operator's tick.
-            _state, lines = match_ids(iid, ev)
-            new_state[iid] = 'Resolved' if ev.get('prod_sha') else (_state or 'Resolved')
-            stage_val[iid] = 'landed'
-            ev_lines[iid] = lines
-            continue
-        all_closed = bool(child_ids) and all(s == 'Closed' for s in child_states)
-        all_merged_in_prod = all_prs_checked = False
+        all_closed = bool(child_ids) and all(s == closing.CLOSED for s in child_states)
+        merged_in_prod = in_prod = False
         if all_closed:
-            # What "in production" means is the product's own (B-0077). A service configures
-            # `deploy_sha`, and a Feature closes when its Tasks' merges are in that deploy and
-            # the operator ticked them. A package, library or tool configures none — its trunk
-            # IS production, and its Tasks already closed on a commit there with CI green
-            # (D-0047), so there is nothing further to wait for. Without this, no Feature of
-            # such a product could ever leave `Resolved`.
-            if ev.get('prod_sha'):
-                all_merged_in_prod = all(
-                    task_ev.get(cid) and evidence.ancestor_of(task_ev[cid].get('merged_sha'),
-                                                              ev.get('prod_sha'))
-                    for cid in child_ids)
-                all_prs_checked = all(
-                    task_ev.get(cid) and task_ev[cid].get('pr') in ev['checked'] for cid in child_ids)
-            else:
-                all_merged_in_prod = all_prs_checked = True
+            merged_in_prod = _merged_in_prod(child_ids, task_ev, ev)
+            in_prod = _in_prod(child_ids, task_ev, ev, merged=merged_in_prod)
+        elif not child_ids and commit:
+            in_prod = _in_prod(child_ids, task_ev, ev)
         # the board's ladder still says `landed`, not `on-prod`, for a product that deploys
         # nothing — "on prod" names a deployment, and there is none to name
-        on_prod_for_stage = all_merged_in_prod and bool(ev.get('prod_sha'))
+        on_prod_for_stage = bool(merged_in_prod) and bool(ev.get('prod_sha'))
 
         spec_review = fev.get('spec_review')
         plan_review = fev.get('plan_review')
@@ -407,36 +547,47 @@ def cmd_ingest(args, root):
         # "spec-draft" sent the feeder back to write the same spec again
         spec_approved = bool(spec_review and spec_review[1] == 'APPROVED') or bool(fev.get('spec_on_main'))
         plan_approved = bool(plan_review and plan_review[1] == 'APPROVED') or bool(fev.get('plan_on_main'))
-        new_state[iid] = evidence.feature_state(bool(fev.get('spec_on_main')), plan_approved,
-                                                all_closed, all_merged_in_prod, all_prs_checked)
-        spec_dict = {'exists': bool(fev.get('spec')), 'approved': spec_approved,
-                    'review': spec_review[:2] if spec_review else None}
-        plan_dict = {'exists': bool(fev.get('plan')), 'approved': plan_approved,
-                    'review': plan_review[:2] if plan_review else None}
-        stage_val[iid] = evidence.feature_stage(spec_dict, plan_dict, child_states, on_prod_for_stage)
+        ev_obj = closing.Ev(children=tuple(child_states), commit=commit, green=green, in_prod=in_prod,
+                            spec_on_main=bool(fev.get('spec_on_main')), plan_approved=plan_approved)
+        if not child_ids and commit:
+            # no Tasks to judge by, and a code commit on main names it: landed, as for a Feature
+            # the documents never matched (a document-lane commit never counts, B-0059)
+            stage_val[iid] = 'landed'
+            lines = id_lines
+        else:
+            spec_dict = {'exists': bool(fev.get('spec')), 'approved': spec_approved,
+                         'review': spec_review[:2] if spec_review else None}
+            plan_dict = {'exists': bool(fev.get('plan')), 'approved': plan_approved,
+                         'review': plan_review[:2] if plan_review else None}
+            stage_val[iid] = evidence.feature_stage(spec_dict, plan_dict, child_states, on_prod_for_stage)
+            lines = []
+            if fev.get('spec_on_main'):
+                lines.append('spec on origin/main')
+            elif fev.get('spec_branch'):
+                r = f" (review r{spec_review[0]} {spec_review[1]})" if spec_review else ''
+                lines.append(f"spec on {fev['spec_branch']}{r}")
+            if fev.get('plan_on_main'):
+                lines.append('plan on origin/main')
+            elif fev.get('plan_branch'):
+                r = f" (review r{plan_review[0]} {plan_review[1]})" if plan_review else ''
+                lines.append(f"plan on {fev['plan_branch']}{r}")
+            if child_ids:
+                lines.append(f"{sum(1 for s in child_states if s == 'Closed')}/{len(child_ids)} tasks Closed")
+            lines = lines or [f"no evidence found ({date})"]
+        settle(iid, 'feature', ev_obj, lines, sha=commit or _landing_sha(child_ids, task_ev, ev))
 
-        lines = []
-        if fev.get('spec_on_main'):
-            lines.append('spec on origin/main')
-        elif fev.get('spec_branch'):
-            r = f" (review r{spec_review[0]} {spec_review[1]})" if spec_review else ''
-            lines.append(f"spec on {fev['spec_branch']}{r}")
-        if fev.get('plan_on_main'):
-            lines.append('plan on origin/main')
-        elif fev.get('plan_branch'):
-            r = f" (review r{plan_review[0]} {plan_review[1]})" if plan_review else ''
-            lines.append(f"plan on {fev['plan_branch']}{r}")
-        if child_ids:
-            lines.append(f"{sum(1 for s in child_states if s == 'Closed')}/{len(child_ids)} tasks Closed")
-        ev_lines[iid] = lines or [f"no evidence found ({date})"]
+    # ---- Descent: a Feature that closed closes the children beneath it that nothing else names
+    descend(canonical, new_state, closings, derived)
 
     # ---- Epics: purely a function of their children's derived state; no product-repo evidence
     for iid, rec in canonical.items():
         if rec['meta'].get('type') != 'epic':
             continue
-        child_ids = [cid for cid, crec in canonical.items() if crec['meta'].get('parent') == iid]
-        child_states = [new_state[cid] for cid in child_ids if cid in new_state]
-        new_state[iid] = evidence.epic_state(child_states, bool(rec['meta'].get('closed')))
+        states = [new_state[cid] for cid, crec in canonical.items()
+                  if crec['meta'].get('parent') == iid and cid in new_state
+                  and crec['meta'].get('type') in EVIDENCE_TYPES]
+        settle(iid, 'epic', closing.Ev(children=tuple(states),
+                                       typed_closed=bool(rec['meta'].get('closed'))), [])
 
     # ---- write: state/stage/evidence/blocked, one write_machine + History append per changed item
     for iid, rec in canonical.items():
@@ -444,7 +595,9 @@ def cmd_ingest(args, root):
         if type_ not in EVIDENCE_TYPES:
             continue
         blocked_pair = evidence.blocked_of(rec['meta'].get('blockedBy'), new_state)
-        lines = ev_lines.get(iid) if type_ != 'epic' else None
+        c = closings[iid]
+        # an Epic carries no evidence of its own: only a rule that derived something is worth a line
+        lines = None if type_ == 'epic' and c.rule == 'typed' else list(c.lines) + [RULE_PREFIX + c.rule]
         _typed, machine = frontmatter.split_machine(rec['meta'])
         ordered, history = _ingest_fields(machine, new_state[iid], stage_val.get(iid), lines,
                                           blocked_pair, now)

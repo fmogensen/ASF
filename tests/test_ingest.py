@@ -10,6 +10,7 @@ from unittest import mock
 from asf.record import check
 from asf.record import frontmatter
 from asf.record import ingest
+from asf.record.core import today
 from asf.record.index import do_index
 
 FOLDERS = ['epics', 'features', 'stories', 'tasks', 'bugs', 'decisions', 'rules']
@@ -372,7 +373,8 @@ class CmdIngestEndToEndTests(unittest.TestCase):
         self.assertEqual(self.run_ingest(ev), 0)
         meta, _body = read_meta(self.root, 'tasks', 'T-0002')
         self.assertEqual(meta['state'], 'Active')
-        self.assertEqual(meta['evidence'], ['branch worker/T-0002-wire'])
+        # the rule that decided is always the last line (§2.3)
+        self.assertEqual(meta['evidence'], ['branch worker/T-0002-wire', 'rule: in-flight'])
 
     def test_a_landing_outranks_a_legacy_plan_match(self):
         # B-0074 (was: `id_token_never_overrides_a_legacy_match`): the plan's task table says what
@@ -398,8 +400,9 @@ class CmdIngestEndToEndTests(unittest.TestCase):
         write(self.root, 'F-0001', 'feature', 'Free plan', 'features', parent='E-0001')
         self.assertEqual(self.run_ingest(EMPTY_EV), 0)
         meta, _body = read_meta(self.root, 'features', 'F-0001')
-        self.assertEqual(len(meta['evidence']), 1)
+        self.assertEqual(len(meta['evidence']), 2)
         self.assertIn('no evidence found', meta['evidence'][0])
+        self.assertEqual(meta['evidence'][-1], 'rule: card')
         self.assertEqual(meta['state'], 'New')
 
     def test_feature_matches_by_legacy_id_and_goes_active(self):
@@ -606,6 +609,209 @@ class RemovedTaskTests(unittest.TestCase):
         with contextlib.redirect_stdout(buf):
             check.cmd_check(types.SimpleNamespace(paths=None), self.root)
         self.assertIn('S-0001 has no Task listing it in stories:', buf.getvalue())
+
+
+def landed_ids(iid, sha, green=True):
+    return {iid: {'branches': [], 'open_prs': [], 'commit': sha, 'pr': None, 'green': green}}
+
+
+def matched_feature(**over):
+    fev = {'alias': None, 'spec': 'origin/main:docs/specs/f-0001.md', 'spec_branch': None,
+           'spec_on_main': True, 'spec_review': None, 'plan': None, 'plan_branch': None,
+           'plan_on_main': False, 'plan_review': None, 'tasks': {}, 'prs': []}
+    fev.update(over)
+    return {'f-0001': fev}
+
+
+class IngestTestCase(unittest.TestCase):
+    def setUp(self):
+        self.root = make_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+
+    def run_ingest(self, ev):
+        with mock.patch.object(ingest.evidence, 'load', return_value=ev):
+            return ingest.cmd_ingest(types.SimpleNamespace(fresh=False), self.root)
+
+    def meta(self, folder, iid):
+        return read_meta(self.root, folder, iid)[0]
+
+    def snapshot(self):
+        out = {}
+        for f in FOLDERS:
+            d = os.path.join(self.root, f)
+            for name in sorted(os.listdir(d)):
+                with open(os.path.join(d, name), encoding='utf-8') as fh:
+                    out[name] = fh.read()
+        return out
+
+
+class DescentTests(IngestTestCase):
+    """§2.4: a Feature that closed closes the children beneath it that have no evidence of their
+    own — and only those."""
+
+    def tree(self):
+        write(self.root, 'E-0001', 'epic', 'Factory', 'epics')
+        write(self.root, 'F-0001', 'feature', 'Free plan', 'features', parent='E-0001')
+        write(self.root, 'S-0001', 'story', 'No Task at all', 'stories', parent='F-0001')
+        write(self.root, 'S-0002', 'story', 'A Task is under way', 'stories', parent='F-0001')
+        write(self.root, 'T-0001', 'task', 'Under the childless Story', 'tasks', parent='S-0001')
+        write(self.root, 'T-0002', 'task', 'Under way', 'tasks', parent='S-0002',
+              typed_lines=['stories: [S-0002]'])
+        write(self.root, 'B-0001', 'bug', 'A defect under it', 'bugs', parent='F-0001')
+
+    def evidence(self, feature_green=True):
+        return dict(EMPTY_EV, ci=True, features=matched_feature(),
+                    ids={**landed_ids('F-0001', 'b' * 40, green=feature_green),
+                         'T-0002': {'branches': ['worker/T-0002-x'], 'open_prs': [], 'commit': None,
+                                    'pr': None, 'green': False}})
+
+    def test_a_closed_feature_closes_the_story_with_no_task_and_names_itself_and_its_sha(self):
+        self.tree()
+        self.assertEqual(self.run_ingest(self.evidence()), 0)
+        self.assertEqual(self.meta('features', 'F-0001')['state'], 'Closed')
+        story = self.meta('stories', 'S-0001')
+        self.assertEqual(story['state'], 'Closed')
+        self.assertEqual(story['evidence'][-1], 'rule: parent-closed')
+        self.assertIn('F-0001 Closed (commit ' + 'b' * 7 + ')', story['evidence'])
+
+    def test_a_story_whose_task_is_active_does_not_move(self):
+        self.tree()
+        self.run_ingest(self.evidence())
+        story = self.meta('stories', 'S-0002')
+        self.assertEqual(story['state'], 'Active')
+        self.assertEqual(story['evidence'][-1], 'rule: task-active')
+        self.assertEqual(self.meta('tasks', 'T-0002')['state'], 'Active')
+
+    def test_a_task_under_the_childless_story_closes_too(self):
+        self.tree()
+        self.run_ingest(self.evidence())
+        task = self.meta('tasks', 'T-0001')
+        self.assertEqual(task['state'], 'Closed')
+        self.assertEqual(task['evidence'][-1], 'rule: parent-closed')
+        self.assertIn('S-0001 Closed (commit ' + 'b' * 7 + ')', task['evidence'])
+
+    def test_a_bug_under_the_closed_feature_stays_open(self):
+        self.tree()
+        self.run_ingest(self.evidence())
+        self.assertEqual(self.meta('bugs', 'B-0001')['state'], 'New')
+
+    def test_descent_writes_nothing_when_the_feature_is_merely_resolved(self):
+        self.tree()
+        self.run_ingest(self.evidence(feature_green=False))
+        self.assertEqual(self.meta('features', 'F-0001')['state'], 'Resolved')
+        self.assertEqual(self.meta('stories', 'S-0001')['state'], 'New')
+        self.assertEqual(self.meta('tasks', 'T-0001')['state'], 'New')
+
+    def test_a_second_ingest_over_the_same_evidence_writes_nothing(self):
+        self.tree()
+        self.run_ingest(self.evidence())
+        before = self.snapshot()
+        self.run_ingest(self.evidence())
+        self.assertEqual(self.snapshot(), before)
+
+    def test_the_epic_closes_once_every_child_has(self):
+        write(self.root, 'E-0001', 'epic', 'Factory', 'epics')
+        write(self.root, 'F-0001', 'feature', 'Free plan', 'features', parent='E-0001')
+        self.run_ingest(dict(EMPTY_EV, ci=True, features=matched_feature(),
+                             ids=landed_ids('F-0001', 'b' * 40)))
+        epic = self.meta('epics', 'E-0001')
+        self.assertEqual(epic['state'], 'Closed')
+        self.assertEqual(epic['evidence'], ['rule: children-closed'])
+
+
+class RuleLineTests(IngestTestCase):
+    """§2.3: the rule that decided is the last `evidence:` entry, and History quotes it."""
+
+    def test_a_closed_task_ends_with_its_rule_and_history_quotes_it(self):
+        write(self.root, 'T-0001', 'task', 'Wire it', 'tasks')
+        self.run_ingest(dict(EMPTY_EV, ci=True, ids=landed_ids('T-0001', 'abcdef0123')))
+        meta, body = read_meta(self.root, 'tasks', 'T-0001')
+        self.assertEqual(meta['state'], 'Closed')
+        self.assertEqual(meta['evidence'], ['commit abcdef0 names T-0001',
+                                            'CI green on main at or after it', 'rule: landed-green'])
+        self.assertIn('ingest: state New → Closed (rule: landed-green; commit abcdef0 names T-0001; '
+                      'CI green on main at or after it)', body)
+
+    def test_every_derived_item_ends_with_a_rule_line(self):
+        write(self.root, 'F-0001', 'feature', 'Free plan', 'features')
+        write(self.root, 'S-0001', 'story', 'A story', 'stories', parent='F-0001')
+        write(self.root, 'T-0001', 'task', 'A task', 'tasks', parent='F-0001')
+        write(self.root, 'B-0001', 'bug', 'A bug', 'bugs')
+        self.run_ingest(EMPTY_EV)
+        for folder, iid, rule in (('features', 'F-0001', 'card'), ('stories', 'S-0001', 'no-rule'),
+                                  ('tasks', 'T-0001', 'planned'), ('bugs', 'B-0001', 'filed')):
+            self.assertEqual(self.meta(folder, iid)['evidence'][-1], 'rule: ' + rule, iid)
+
+    def test_a_shapeless_story_is_named_residue_and_keeps_its_state(self):
+        write(self.root, 'S-0001', 'story', 'Nothing sees it', 'stories',
+              machine_lines=('state: Active', 'stage_since: 2026-01-01T00:00:00Z',
+                             'updated: 2026-01-01T00:00:00Z'))
+        self.run_ingest(EMPTY_EV)
+        story = self.meta('stories', 'S-0001')
+        self.assertEqual(story['state'], 'Active')
+        self.assertEqual(story['evidence'][-1], 'rule: no-rule')
+
+    def test_a_closed_item_stays_closed_when_its_evidence_goes(self):
+        write(self.root, 'T-0001', 'task', 'Wire it', 'tasks',
+              machine_lines=('state: Closed', 'stage_since: 2026-01-01T00:00:00Z',
+                             'updated: 2026-01-01T00:00:00Z'))
+        self.run_ingest(EMPTY_EV)
+        task = self.meta('tasks', 'T-0001')
+        self.assertEqual(task['state'], 'Closed')
+        self.assertEqual(task['evidence'][-2:], ['held Closed; planned would say New',
+                                                 'rule: closed-terminal'])
+
+    def test_a_story_whose_tasks_all_landed_closes(self):
+        write(self.root, 'F-0001', 'feature', 'Free plan', 'features')
+        write(self.root, 'S-0001', 'story', 'A story', 'stories', parent='F-0001')
+        write(self.root, 'T-0001', 'task', 'A task', 'tasks', parent='F-0001',
+              typed_lines=['stories: [S-0001]'])
+        self.run_ingest(dict(EMPTY_EV, ci=True, ids=landed_ids('T-0001', 'abcdef0123')))
+        story = self.meta('stories', 'S-0001')
+        self.assertEqual((story['state'], story['evidence'][-1]), ('Closed', 'rule: tasks-closed'))
+
+
+class BugQuietTests(IngestTestCase):
+    """§1.4: a Bug closes on green CI once its signature has been unseen past `bug_quiet`."""
+
+    def bug(self, *typed):
+        write(self.root, 'B-0001', 'bug', 'A defect', 'bugs',
+              typed_lines=['links:', '  prs: [701]', *typed])
+        return dict(EMPTY_EV, merged={701: 'deadbeef' * 5})
+
+    def test_a_merged_fix_with_a_quiet_signature_closes(self):
+        self.run_ingest(self.bug('signature: ci:red', 'last_filed: 2020-01-01'))
+        bug = self.meta('bugs', 'B-0001')
+        self.assertEqual((bug['state'], bug['evidence'][-1]), ('Closed', 'rule: quiet'))
+
+    def test_a_signature_seen_inside_the_limit_stays_resolved(self):
+        self.run_ingest(self.bug('signature: ci:red', 'last_filed: ' + today()))
+        bug = self.meta('bugs', 'B-0001')
+        self.assertEqual((bug['state'], bug['evidence'][-1]), ('Resolved', 'rule: fixed'))
+
+    def test_a_bug_with_no_signature_closes_on_green_alone(self):
+        self.run_ingest(self.bug())
+        self.assertEqual(self.meta('bugs', 'B-0001')['state'], 'Closed')
+
+
+class IngestDerivesNothing(unittest.TestCase):
+    """§3.2: `asf.evidence.closing` chooses every state. A `task_state`-style call growing back
+    into ingest is a sixth definition of done, and this is what stops it."""
+
+    STATE_CHOICES = {'task_state', 'story_state', 'feature_state', 'bug_state', 'epic_state'}
+
+    def called(self, source):
+        import ast
+        return sorted(n.func.attr for n in ast.walk(ast.parse(source))
+                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                      and n.func.attr in self.STATE_CHOICES)
+
+    def test_ingest_calls_no_evidence_state_function(self):
+        with open(ingest.__file__, encoding='utf-8') as f:
+            self.assertEqual(self.called(f.read()), [])
+
+    def test_the_walk_would_see_one(self):
+        self.assertEqual(self.called("evidence.task_state(True, None, None, None)"), ['task_state'])
 
 
 if __name__ == '__main__':
