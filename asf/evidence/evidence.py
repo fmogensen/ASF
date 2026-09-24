@@ -8,15 +8,21 @@ functions that turn that evidence into the states README.md's "State — typed i
 state" table defines, so they can be unit-tested without touching git or gh.
 
 Most of the object-store plumbing below (`_batch`, `resolve`, `read_blobs`, `parse_tree`,
-`read_trees`, `remote_branches`, `pr_list`, `verdict_of`, `newest_review`, `rx_review`,
-`plan_tasks`, `consumes_edges`, their regexes and directory constants, and the `sh` helper
-`pr_list` depends on) is lifted from the first product's pre-asf board, parity and tick-table
-scripts, which already solve "discover everything the board needs" in two `git cat-file --batch`
-passes over the product repo. `parse_rows` (the parity-matrix table parser) is lifted from the
-same. The prod/dev deploy-sha lookups follow the same shape: the newest successful run of
-`conventions.deploy_workflow` for `prod_sha`, the newest run of `conventions.ci_workflow` on the
-trunk whose `conventions.ci_dev_job` succeeded for `dev_sha` — both `None` when the product names
-no such workflow.
+`read_trees`, `remote_branches`, `pr_list`, `plan_tasks`, `consumes_edges`, their regexes and
+directory constants, and the `sh` helper `pr_list` depends on) is lifted from the first
+product's pre-asf board, parity and tick-table scripts, which already solve "discover everything
+the board needs" in two `git cat-file --batch` passes over the product repo. `parse_rows` (the
+parity-matrix table parser) is lifted from the same. Reviews are read through the one review
+reader, :mod:`asf.evidence.review`. The prod/dev deploy-sha lookups follow the same shape: the
+newest successful run of `conventions.deploy_workflow` for `prod_sha`, the newest run of
+`conventions.ci_workflow` on the trunk whose `conventions.ci_dev_job` succeeded for `dev_sha` —
+both `None` when the product names no such workflow.
+
+**Landing is the merge fact.** An item whose lane branch merged is landed by the run line that
+says so — ``harvested: <sha>`` or a ``lane`` record in state ``MERGED`` in the product's
+``sessions.jsonl`` (:func:`merge_facts`) — never by a commit subject or by the branch head's
+ancestry, so a squash merge (whose sha no branch commit is an ancestor of) lands its item. A
+document lane's merge (a spec or plan branch) lands its document, never its item (I10).
 
 Read-only against the product repo (see the resolved `Product.repo_dir`): never commit, checkout
 or fetch anything there but `git fetch --prune origin`. Python 3 stdlib only.
@@ -31,6 +37,7 @@ import time
 
 from asf import env
 from asf.conventions import Conventions
+from asf.evidence import review
 
 # An evidence-file path, not per-product config — no obvious Product field for it.
 # TODO(config): no Product field for this yet.
@@ -222,7 +229,6 @@ def pr_list(product=None):
 
 # ---- slugs, verdicts, rounds ----------------------------------------------------------------
 DATE_PREFIX = re.compile(r"^(\d{4})-(\d{2})-(\d{2})-")
-VERDICT_RE = re.compile(r"APPROVED|CHANGES REQUESTED|BOUNCE|REVISE", re.IGNORECASE)
 H1_ALIAS = re.compile(r"^#\s+([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*)\s*[—–-]")
 
 
@@ -233,29 +239,39 @@ def doc_slug(name):
     return base[m.end():] if m else base
 
 
-def verdict_of(blob):
+#: The verdict strings the evidence carries (``spec_review``/``plan_review``/a Task's
+#: ``review``), from the one reader's verdicts (:mod:`asf.evidence.review`).
+VERDICT_WORDS = {review.APPROVED: "APPROVED", review.CHANGES: "CHANGES REQUESTED"}
+
+
+def verdict_of(blob, legacy=True):
+    """A review's verdict as the evidence spells it (``APPROVED`` / ``CHANGES REQUESTED`` / ``""``),
+    read by the one reader: :func:`asf.evidence.review.verdict_of` — its own ``verdict:`` line —
+    and, for a legacy ``<slug>-review-r<n>.md`` file, its first verdict word."""
     if not blob:
         return ""
-    m = VERDICT_RE.search(blob[:20000].decode("utf-8", "replace"))
-    return m.group(0).upper() if m else ""
+    v = review.legacy_verdict_of(blob) if legacy else review.verdict_of(blob)
+    return VERDICT_WORDS.get(v, "")
 
 
-def newest_review(names, patterns):
-    """(filename, round) of the highest-numbered review file matching any pattern."""
-    best, best_n = None, -1
-    for n in names:
-        for rx in patterns:
-            m = rx.fullmatch(n)
-            if m:
-                r = int(m.group("r"))
-                if r > best_n:
-                    best, best_n = n, r
-                break
-    return best, best_n
-
-
-def rx_review(*prefixes):
-    return [re.compile(p + r"-review-r(?P<r>\d+)\.md") for p in prefixes]
+def pick_review(conv, reviews_dir, names, slugs, legacy_prefixes, trunk=None):
+    """``(file name, round, legacy)`` of the newest review among ``names`` (a reviews-dir tree:
+    ``{name: blob sha}``) for any of ``slugs`` — the one contract, ``conventions.review_pattern``
+    (:func:`asf.evidence.review.pick`), with the legacy ``<prefix>-review-r<n>.md`` form as the
+    fallback — or ``(None, -1, False)``. A file the trunk holds with the same blob (``trunk``:
+    the trunk's reviews tree) is an earlier document's review carried along, not this one's."""
+    rdir = str(reviews_dir).strip("/")
+    paths = [f"{rdir}/{n}" for n, sha in (names or {}).items()
+             if not (trunk and trunk.get(n) == sha)]
+    best = None
+    for slug in dict.fromkeys(s for s in slugs if s):
+        hit = review.pick(conv, paths, slug, legacy_prefixes)
+        if hit and (best is None or (hit[0], not hit[2]) > (best[0], not best[2])):
+            best = hit
+    if best is None:
+        return None, -1, False
+    n, path, legacy = best
+    return path[len(rdir) + 1:], n, legacy
 
 
 TASK_HEAD = re.compile(r"^#{2,4}\s+(?:Task\s+|T(?=\d))(\d+[a-z]?)\b(?P<rest>[^\n]*)",
@@ -426,7 +442,8 @@ def discover(product=None, checked_file=None):
     main_trees = read_trees(tree_paths, product=product)
     main_plans = main_trees[f"{main_ref}:{plans_dir}"]
     main_specs = main_trees[f"{main_ref}:{specs_dir}"]
-    main_reviews = set(main_trees[f"{main_ref}:{reviews_dir}"])
+    main_review_tree = dict(main_trees[f"{main_ref}:{reviews_dir}"])
+    main_reviews = set(main_review_tree)
     main_briefs = main_trees.get(f"{main_ref}:{briefs_dir}", {}) if briefs_dir else {}
 
     # ---- discovery: spec/plan branches, plans and specs already on main
@@ -498,10 +515,14 @@ def discover(product=None, checked_file=None):
             if not branch:
                 continue
             names = trees.get(f"origin/{branch}:{reviews_dir}", {})
-            pats = rx_review(re.escape(f"{kind}-{slug}"), re.escape(slug), re.escape(f"{slug}-{kind}"))
-            f, r = newest_review(names, pats)
+            # the one reader's contract (`review_pattern`, the item's slug), the legacy
+            # `<kind>-<slug>-review-r<n>.md` forms as the fallback; a review the trunk already
+            # holds is the earlier document's (the spec's, carried on the plan branch)
+            f, r, legacy = pick_review(conv, reviews_dir, names, [slug],
+                                       (f"{kind}-{slug}", slug, f"{slug}-{kind}"),
+                                       trunk=main_review_tree)
             if f:
-                wanted.setdefault(slug, {})[kind] = (f, r, names[f])
+                wanted.setdefault(slug, {})[kind] = (f, r, names[f], legacy)
 
     blobs = read_blobs(list(plan_req.values()) + list(spec_req.values()) +
                        [v[2] for d in wanted.values() for v in d.values()], product=product)
@@ -581,9 +602,9 @@ def discover(product=None, checked_file=None):
                 continue
             names = task_trees.get(f"origin/{row['branch']}:{reviews_dir}", {})
             ids = row["cand"] + [row["branch"].split("/", 1)[-1]]
-            pats = [p for i in ids for p in rx_review(re.escape(i), re.escape(f"hotfix-{i}"), re.escape(f"review-{i}"))]
-            f, r = newest_review(names, pats)
-            row["review"] = (r, None, f) if f else None
+            f, r, legacy = pick_review(conv, reviews_dir, names, ids,
+                                       [p for i in ids for p in (i, f"hotfix-{i}", f"review-{i}")])
+            row["review"] = (r, legacy, f) if f else None
             if f:
                 task_blob_req.append(names[f])
     task_blobs = read_blobs(task_blob_req, product=product)
@@ -591,9 +612,9 @@ def discover(product=None, checked_file=None):
         for row in rows:
             rev = row.pop("review", None)
             if rev:
-                r, _v, f = rev
+                r, legacy, f = rev
                 names = task_trees.get(f"origin/{row['branch']}:{reviews_dir}", {})
-                row["review"] = (r, verdict_of(task_blobs.get(names.get(f))))
+                row["review"] = (r, verdict_of(task_blobs.get(names.get(f)), legacy=legacy))
             else:
                 row["review"] = None
 
@@ -605,8 +626,8 @@ def discover(product=None, checked_file=None):
             hit = wanted.get(slug, {}).get(kind)
             if not hit:
                 return None
-            f, r, sha = hit
-            return (r, verdict_of(blobs.get(sha)), f)
+            f, r, sha, legacy = hit
+            return (r, verdict_of(blobs.get(sha), legacy=legacy), f)
 
         own_branches = {b for b in (it["spec_branch"], it["plan_branch"]) if b}
         seen_pr, pr_numbers = set(), []
@@ -668,6 +689,7 @@ def discover(product=None, checked_file=None):
 
     main_sha = sh(f"git rev-parse {main_ref}", product=product)
     commits = main_commits(product)
+    merges = merge_facts(product)
 
     return {
         "features": features,
@@ -678,8 +700,8 @@ def discover(product=None, checked_file=None):
         "main_sha": main_sha or None,
         "merged": merged,
         "branches": sorted(branches),
-        "ids": id_evidence(product, branches, prs, commits=commits),
-        "lane_docs": lane_docs(product, prs, commits=commits),
+        "ids": id_evidence(product, branches, prs, commits=commits, merges=merges),
+        "lane_docs": lane_docs(product, prs, commits=commits, merges=merges),
         "ci": ci_provider(product),
     }
 
@@ -801,15 +823,68 @@ def lane_kind(branch, prefixes):
     return None
 
 
+MERGED_STATE = "MERGED"
+SHA_RE = re.compile(r"[0-9a-f]{7,40}")
+
+
+def _merge_sha(run):
+    """The sha a run's lane merged at, or None: its ``lane`` record in state ``MERGED`` (the
+    merge's ``sha``), else its ``harvested:`` value — a full or short commit sha, never
+    ``superseded`` (archived, nothing landed) nor a ``PR #n`` placeholder."""
+    lane = run.get("lane") if isinstance(run.get("lane"), dict) else {}
+    if lane.get("state") == MERGED_STATE:
+        for key in ("sha", "merge_sha"):
+            v = str(lane.get(key) or "")
+            if SHA_RE.fullmatch(v):
+                return v
+    v = str(run.get("harvested") or "")
+    return v if SHA_RE.fullmatch(v) else None
+
+
+def merge_facts(product, path=None):
+    """``{"code": {item: {sha, branch, pr}}, "docs": {item: [{kind, sha, branch, files}]}}`` —
+    the lane's merge facts off the product's run lines (``sessions.jsonl``): every run whose
+    branch merged (:func:`_merge_sha`), newest merge per item. A spec/plan lane branch
+    (:func:`lane_kind`) is a document's merge and goes under ``docs``; any other lands its item.
+    Read-only; ``{}`` halves when the product has no ledger."""
+    out = {"code": {}, "docs": {}}
+    if product is None:
+        return out
+    from asf.workers import lifecycle
+    if path is None:
+        try:
+            path = os.path.join(env.state_dir(product), "sessions.jsonl")
+        except Exception:
+            return out
+    prefixes = branch_prefixes(product)
+    for rs in lifecycle.runs(path).values():
+        for run in rs:
+            sha, branch = _merge_sha(run), run.get("branch") or ""
+            item = str(run.get("item") or "").upper()
+            if not sha or not item:
+                continue
+            lane = run.get("lane") if isinstance(run.get("lane"), dict) else {}
+            kind = lane_kind(branch, prefixes)
+            if kind:
+                out["docs"].setdefault(item, []).append(
+                    {"kind": kind, "sha": sha, "branch": branch,
+                     "files": list(lane.get("files") or ())})
+            else:
+                out["code"][item] = {"sha": sha, "branch": branch, "pr": lane.get("pr")}
+    return out
+
+
 def _commit_rows(commits):
     """(sha, subject, [path]) rows, from (sha, subject) and (sha, subject, paths) rows alike."""
     for c in commits or ():
         yield c[0], c[1], (list(c[2]) if len(c) > 2 and c[2] is not None else [])
 
 
-def lane_docs(product, prs, commits=None, paths_of=None):
+def lane_docs(product, prs, commits=None, paths_of=None, merges=None):
     """{ID: {"spec": [path], "plan": [path], "prs": [n]}} — the documents each merged spec/plan
-    lane PR brought onto the trunk, keyed by the id its head branch (else its title) names.
+    lane PR brought onto the trunk, keyed by the id its head branch (else its title) names — and
+    the documents each spec/plan lane run the ledger records as merged brought (``merges``: the
+    ``docs`` half of :func:`merge_facts`; a fast-forward landing has no PR at all).
 
     A lane PR can land a date-prefixed plan (`2026-09-20-free-plan.md`) for `F-0019`: the file
     name does not carry the id — the lane branch (`<plan prefix>F-0019`) does."""
@@ -827,7 +902,10 @@ def lane_docs(product, prs, commits=None, paths_of=None):
         ids = id_tokens(p.get("headRefName"), BRANCH_ID_TOKEN) or id_tokens(p.get("title") or "")
         if ids:
             lanes.append((p, sha, ids))
+    runs = [(iid, f) for iid, facts in sorted(((merges or {}).get("docs") or {}).items())
+            for f in facts]
     missing = [sha for _p, sha, _i in lanes if sha not in known]
+    missing += [f["sha"] for _i, f in runs if not f.get("files") and f["sha"] not in known]
     if missing:
         known.update((paths_of or (lambda s: commit_paths(product, s)))(missing))
     out = {}
@@ -839,15 +917,24 @@ def lane_docs(product, prs, commits=None, paths_of=None):
                 for kind, d in dirs.items():
                     if path.startswith(d) and path.endswith(".md") and path not in rec[kind]:
                         rec[kind].append(path)
+    for iid, f in runs:
+        rec = out.setdefault(iid, {"spec": [], "plan": [], "prs": []})
+        for path in f.get("files") or known.get(f["sha"]) or []:
+            for kind, d in dirs.items():
+                if path.startswith(d) and path.endswith(".md") and path not in rec[kind]:
+                    rec[kind].append(path)
     return out
 
 
-def id_evidence(product, branches, prs, commits=None, green=None):
+def id_evidence(product, branches, prs, commits=None, green=None, merges=None):
     """{id: {branches, open_prs, commit, green}} — every id a branch, PR or commit on main names.
 
-    `commit` is the newest commit on main naming the id (a merged PR naming it in its title or
-    body counts through its merge commit); `green` says a CI run on main passed at or after it,
-    and is true outright for a product with no CI provider.
+    `commit` is first the lane's merge fact for the id (``merges``, the ``code`` half of
+    :func:`merge_facts`: the run line's merge sha — a squash merge included, whatever its subject
+    says and whatever its ancestry); else the newest commit on main naming the id (a direct
+    trunk commit, a merged PR naming it in its title or body through its merge commit). `green`
+    says a CI run on main passed at or after it, and is true outright for a product with no CI
+    provider.
     """
     main_ref = f"origin/{product.main}"
     out = {}
@@ -862,6 +949,10 @@ def id_evidence(product, branches, prs, commits=None, green=None):
             continue
         for iid in id_tokens(b, BRANCH_ID_TOKEN):
             rec(iid)["branches"].append(b)
+    for iid, fact in sorted(((merges or {}).get("code") or {}).items()):
+        r = rec(iid)
+        r["commit"], r["merge"] = fact["sha"], fact.get("branch") or ""
+        r["pr"] = fact.get("pr")
     commits = main_commits(product) if commits is None else commits
     dirs = doc_dirs(product)
     prefixes = branch_prefixes(product)
@@ -931,7 +1022,8 @@ def id_state(iid, iev, has_ci=True):
     if not iev:
         return None, []
     if iev.get("commit"):
-        line = f"commit {iev['commit'][:7]} names {iid}"
+        line = (f"merge {iev['commit'][:7]} of {iev['merge']} lands {iid}" if iev.get("merge")
+                else f"commit {iev['commit'][:7]} names {iid}")
         if iev.get("pr"):
             line += f" (PR #{iev['pr']})"
         if iev.get("green"):

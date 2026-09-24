@@ -294,6 +294,79 @@ class DocLaneMergeIsNotALanding(unittest.TestCase):
         self.assertEqual(self.p.meta("F-0019")["stage"], "plan-approved")
 
 
+def run_line(job, item, branch, **fields):
+    """A launch line and, when ``fields`` are given, the line that marks it (harvested, lane)."""
+    lines = [{"job": job, "item": item, "branch": branch, "pid": 1, "product": "sample",
+              "started": "2026-09-24T06:00:00Z"}]
+    if fields:
+        lines.append(dict(fields, job=job))
+    return lines
+
+
+class LandedIsTheMergeFact(unittest.TestCase):
+    """The merge fact on the run line lands an item — never a commit subject, never the branch
+    head's ancestry. A squash merge's sha is no descendant of the branch head and its subject
+    names nothing, yet its Task lands; a spec/plan lane's merge lands its document, never its
+    Feature (I10); and a date-prefixed plan a fast-forward plan lane landed (no PR at all) mints
+    its Tasks (F-0123)."""
+
+    def setUp(self):
+        self.p = Product()
+        self.addCleanup(self.p.close)
+        self.home = os.path.join(self.p.tmp, "asf-home")
+        patcher = mock.patch.object(env, "ASF_HOME", self.home)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        p = self.p
+        p.commit("docs(spec): the spec", {"docs/specs/f-0200.md": "# F-0200 — reader\n"}, "spec")
+        # the fast-forward plan lane's tip: a date-prefixed plan, a subject that names nothing
+        p.commit("the plan", {"docs/plans/2026-09-24-reader-plan.md": "# Reader plan\n\n" + PLAN},
+                 "plan")
+        # the squash merge of the Task's PR: its subject names no item
+        p.commit("Reader (#12)", {"src/reader.ts": "x"}, "squash")
+        p.publish()
+        p.item("E-0001", "epic")
+        p.item("F-0200", "feature", parent="E-0001")
+
+    def ledger(self, *runs):
+        path = os.path.join(self.home, "state", "sample", "sessions.jsonl")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            for lines in runs:
+                for line in lines:
+                    f.write(json.dumps(line) + "\n")
+
+    def test_a_squash_merge_on_the_run_line_lands_its_task(self):
+        s = self.p.sha
+        self.p.item("T-0901", "task", parent="F-0200")
+        self.p.item("T-0902", "task", parent="F-0200")
+        self.ledger(run_line("coder-t-0901", "T-0901", "cloud/t-0901", harvested=s["squash"]),
+                    run_line("coder-t-0902", "T-0902", "cloud/t-0902",
+                             lane={"state": "MERGED", "sha": s["squash"], "pr": 12}),
+                    run_line("coder-t-0903", "T-0903", "cloud/t-0903", harvested="superseded"))
+        ev = self.p.discover([])
+        self.assertEqual(ev["ids"]["T-0901"]["commit"], s["squash"])
+        self.assertEqual((ev["ids"]["T-0902"]["commit"], ev["ids"]["T-0902"]["pr"]),
+                         (s["squash"], 12))
+        self.assertNotIn("T-0903", ev["ids"])  # archived: nothing landed
+        self.p.record_step(ev)
+        self.assertEqual(self.p.meta("T-0901", "task")["state"], "Closed")
+        self.assertIn(f"merge {s['squash'][:7]} of cloud/t-0901 lands T-0901",
+                      self.p.meta("T-0901", "task")["evidence"])
+
+    def test_a_plan_lane_merge_lands_the_plan_not_the_feature_and_mints_its_tasks(self):
+        s = self.p.sha
+        self.ledger(run_line("plan-f-0200", "F-0200", "cloud/plan-F-0200", harvested=s["plan"]))
+        ev = self.p.discover([])
+        self.assertIsNone((ev["ids"].get("F-0200") or {}).get("commit"))
+        self.assertEqual(ev["lane_docs"]["F-0200"]["plan"], ["docs/plans/2026-09-24-reader-plan.md"])
+        made = self.p.record_step(ev)
+        self.assertEqual(len(made), 2)
+        self.assertEqual({self.p.meta(t, "task")["parent"] for t in made}, {"F-0200"})
+        m = self.p.meta("F-0200")
+        self.assertEqual((m["state"], m["stage"]), ("Active", "plan-approved"))
+
+
 class DocsOnlyTests(unittest.TestCase):
     DIRS = ("docs/specs/", "docs/plans/", "docs/reviews/")
 
