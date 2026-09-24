@@ -395,6 +395,92 @@ def write_machine(path, machine):
         f.write(new_text)
 
 
+#: The machine keys a writer may drop: each is re-derived by every ingest (invariant I1). Any
+#: other machine key — ``schema_version``, ``cost``, ``spend_usd``, one a later version adds — is
+#: carried through by every writer, byte for byte.
+DERIVABLE_KEYS = ('stage', 'evidence', 'blocked', 'blocked_by_open')
+
+
+def _split_header(path, text):
+    lines = text.split('\n')
+    if not lines or lines[0] != '---':
+        raise FrontmatterError(path, 1, "file must start with '---'")
+    end = next((i for i in range(1, len(lines)) if lines[i] == '---'), None)
+    if end is None:
+        raise FrontmatterError(path, len(lines), "missing closing '---'")
+    marker = next((i for i in range(1, end) if lines[i].lstrip().startswith(MARKER)), None)
+    return lines, end, marker
+
+
+def _machine_entries(block):
+    """``[(key or None, [raw line, …])]``: one entry per machine key with its continuation lines
+    (a ``- item`` list, a nested map); a line that opens no key (a comment) is its own entry."""
+    out = []
+    for line in block:
+        m = _KEY_RE.match(line)
+        if m:
+            out.append((m.group(1), [line]))
+        elif out and line[:1] in (' ', '\t') and out[-1][0] is not None:
+            out[-1][1].append(line)
+        else:
+            out.append((None, [line]))
+    return out
+
+
+def merge_machine(path, updates, drop=(), order=()):
+    """Merge ``updates`` into the machine block of an item file in place — never rebuild it.
+
+    Typed lines and the marker are copied through byte-identical. Every machine key already in
+    the block keeps its own lines, byte for byte, unless ``updates`` gives it a different value
+    (then that key alone is re-rendered where it stands) or ``drop`` names it. A key ``updates``
+    adds goes before the first existing key that ``order`` places after it, else at the end.
+    ``drop`` may name only :data:`DERIVABLE_KEYS` (I1: a writer never strips another key); any
+    other raises ``ValueError``. Returns True when the file changed."""
+    stray = [k for k in drop if k not in DERIVABLE_KEYS]
+    if stray:
+        raise ValueError(f"merge_machine may drop only derivable keys, not {', '.join(stray)}")
+    with open(path, 'r', encoding='utf-8') as f:
+        text = f.read()
+    lines, end, marker = _split_header(path, text)
+    meta, _body = parse(text, path=path)
+    if marker is None:
+        head, block = lines[1:end] + [MARKER], []
+    else:
+        head, block = lines[1:marker + 1], lines[marker + 1:end]
+    rank = {k: i for i, k in enumerate(order)}
+    entries = []
+    for key, raw in _machine_entries(block):
+        if key is not None and key in drop:
+            continue
+        if key is not None and key in updates:
+            value = updates[key]
+            if not (key in meta and meta[key] == value and type(meta[key]) is type(value)):
+                style = 'block' if key in _LIST_BLOCK_KEYS and isinstance(value, list) else 'inline'
+                raw = _format_entry(key, value, style).split('\n')
+        entries.append((key, raw))
+    present = {k for k, _raw in entries if k is not None}
+    for key, value in updates.items():
+        if key in present:
+            continue
+        style = 'block' if key in _LIST_BLOCK_KEYS and isinstance(value, list) else 'inline'
+        new = (key, _format_entry(key, value, style).split('\n'))
+        at = len(entries)
+        if key in rank:
+            for i, (k, _raw) in enumerate(entries):
+                if k is not None and rank.get(k, len(rank)) > rank[key]:
+                    at = i
+                    break
+        entries.insert(at, new)
+        present.add(key)
+    machine_lines = [l for _k, raw in entries for l in raw]
+    new_text = '\n'.join(['---'] + head + machine_lines + lines[end:])
+    if new_text == text:
+        return False
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(new_text)
+    return True
+
+
 def write_typed(path, updates):
     """Rewrite specific TYPED (pre-machine) fields of an item file in place.
 

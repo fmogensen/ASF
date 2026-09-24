@@ -4,7 +4,8 @@ import os
 import sys
 
 from asf.record import frontmatter
-from asf.record.core import build_index_data, canonicalize, compute_derived, expected_body, load_items, render_index_json
+from asf.record.core import (build_index_data, canonicalize, compute_derived, expected_body, load_items,
+                             render_index_json, title_scrub)
 from asf.schema import SCHEMA_VERSION
 
 
@@ -16,9 +17,10 @@ def do_index(root):
         return 1
     canonical, _dupes = canonicalize(by_id)
     derived = compute_derived(canonical)
+    scrub = title_scrub(root)  # a protected name in one title is never copied into another card
 
     for iid, rec in canonical.items():
-        new_body = expected_body(rec, canonical, derived)
+        new_body = expected_body(rec, canonical, derived, scrub)
         if new_body != rec['body']:
             new_text = frontmatter.render(rec['meta'], new_body)
             with open(rec['path'], 'w', encoding='utf-8') as f:

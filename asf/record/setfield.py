@@ -8,7 +8,7 @@ import sys
 import tempfile
 
 from asf.record import frontmatter
-from asf.record.core import canonicalize, load_items
+from asf.record.core import canonicalize, load_items, record_root
 from asf.record.new import _parse_sets
 
 
@@ -41,7 +41,7 @@ def cmd_set(args, root):
     return 0
 
 
-def set_typed(rec, updates):
+def set_typed(rec, updates, writer='set'):
     """Write ``updates`` (typed fields) onto the card ``rec`` (a ``load_items`` record) through the
     parser: rendered on a scratch copy, parsed back, written only when every field round-trips.
     Returns None on success, else the reason the card is unchanged."""
@@ -64,7 +64,23 @@ def set_typed(rec, updates):
                         f"(it reads back as {meta.get(key)!r}); {rec['relpath']} is unchanged")
     finally:
         os.unlink(scratch)
-    with open(rec['path'], 'w', encoding='utf-8') as f:
-        f.write(new_text)
+    root = record_root(rec)
+    if root is None:  # a card outside any record layout: nothing to validate it against
+        _write(None, rec['path'], new_text)
+    else:
+        # one writer through the stage (R14): an invariant it breaks (I3: an Active Task's
+        # writes: now intersecting another's) refuses the write before anyone commits it
+        from asf.record import stage
+        _r, _staged, findings = stage.guarded(root, writer, _write, (rec['path'], new_text),
+                                              only=[rec['relpath']])
+        if findings:
+            return (f"{', '.join(updates)} refused — "
+                    + '; '.join(f'{f.invariant}: {f.message}' for f in findings)
+                    + f"; {rec['relpath']} is unchanged")
     rec['text'] = new_text
     return None
+
+
+def _write(_root, path, text):
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(text)

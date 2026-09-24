@@ -60,7 +60,17 @@ def own_lane_plan(fid, ref, ev):
 
 
 def mint_plan_tasks(root, product, ev, out=print, read_ref=None):
-    """Mint the Task cards of every landed plan that has none yet. Returns the new ids."""
+    """Mint the Task cards of every landed plan that has none yet. Returns the new ids. One
+    writer through the record stage (R14): a card an invariant refuses is not written, the rest
+    are."""
+    from asf.record import stage
+    made, staged, _findings = stage.guarded(root, 'plan-tasks', _mint, (product, ev, out, read_ref),
+                                            product=product, out=out)
+    refused = set(staged.refused)
+    return [i for i in made if not any(p.endswith(f"/{i}.md") for p in refused)]
+
+
+def _mint(root, product, ev, out=print, read_ref=None):
     from asf.tick.migrate import plan_task_records, writes_lines
     read_ref = read_ref or (lambda ref: evidence.read_ref(ref, product=product))
     by_id, _errors = load_items(root)

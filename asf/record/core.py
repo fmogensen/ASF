@@ -231,31 +231,65 @@ def compute_derived(canonical):
     return derived
 
 
-def children_lines(canonical, ids):
+def _plain(title):
+    return title
+
+
+def is_retired(meta):
+    """A card with ``removed:`` or ``moved_to:``: no stage, no Tasks, no session — and no derived
+    Children or Backlinks sections."""
+    return bool((meta or {}).get('removed') or (meta or {}).get('moved_to'))
+
+
+def record_root(rec):
+    """The record root a loaded card lives under (its path less its record-relative path)."""
+    path, rel = rec.get('path') or '', rec.get('relpath') or ''
+    return path[:-len(rel)].rstrip(os.sep) if rel and path.endswith(rel) else None
+
+
+def title_scrub(root=None):
+    """``title -> text``: a title as derived text may carry it — every protected name and secret
+    the redaction gate refuses replaced by a neutral token (:func:`asf.redact.scrub`)."""
+    from asf import redact
+    pats = redact.default_patterns(root)
+    if not pats:
+        return _plain
+    return lambda title: redact.scrub(title, pats)
+
+
+def children_lines(canonical, ids, scrub=_plain):
     lines = []
     for cid in ids:
         crec = canonical[cid]
-        title = crec['meta'].get('title', '')
+        title = scrub(crec['meta'].get('title', ''))
         _typed, machine = frontmatter.split_machine(crec['meta'])
         state = machine.get('state', 'New')
         lines.append(f"- [{cid}]({rel_link(crec['folder'], cid)}) {title} — {state}")
     return lines
 
 
-def backlinks_lines(canonical, ids):
+def backlinks_lines(canonical, ids, scrub=_plain):
     lines = []
     for bid in ids:
         brec = canonical[bid]
-        title = brec['meta'].get('title', '')
+        title = scrub(brec['meta'].get('title', ''))
         lines.append(f"- [{bid}]({rel_link(brec['folder'], bid)}) {title}")
     return lines
 
 
-def expected_body(rec, canonical, derived):
+def expected_body(rec, canonical, derived, scrub=None):
+    """The card's body with its derived sections (``## Children``, ``## Backlinks``) as the
+    record derives them: every title passed through the redaction scrub (``scrub``, else
+    :func:`title_scrub` for the card's record), and both sections empty on a removed or moved
+    card."""
     iid = rec['meta'].get('id')
     d = derived.get(iid, {'children': [], 'backlinks': []})
-    clines = children_lines(canonical, d['children'])
-    blines = backlinks_lines(canonical, d['backlinks'])
+    if is_retired(rec['meta']):
+        d = {'children': [], 'backlinks': []}
+    if scrub is None:
+        scrub = title_scrub(record_root(rec))
+    clines = children_lines(canonical, d['children'], scrub)
+    blines = backlinks_lines(canonical, d['backlinks'], scrub)
     preamble, sections = parse_sections(rec['body'])
     new_sections = []
     n = len(sections)

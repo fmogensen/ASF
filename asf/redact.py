@@ -203,6 +203,53 @@ def scan_text(path, text, pats):
     return _scan_numbered_lines(path, enumerate(text.splitlines(), start=1), pats)
 
 
+#: What a protected name or a secret becomes in text ASF derives (Backlinks, Children, an intake
+#: title): neutral, and matched by no pattern.
+SCRUB_TOKEN = '[redacted]'
+
+
+def scrub(text, pats, token=SCRUB_TOKEN):
+    """``text`` with every match of every pattern replaced by ``token`` — derived text passes a
+    title through this before it is written, so a protected name in one card is never copied into
+    another (the redaction gate would then refuse pushes nobody made)."""
+    out = str(text or '')
+    for pat in pats or ():
+        out = pat.regex.sub(token, out)
+    return out
+
+
+_DEFAULT_CACHE = {}
+
+
+def default_patterns(repo=None):
+    """:func:`patterns` for the operator's config (and ``repo``'s own list), cached while the
+    config, the private list, the repo list and the environment are unchanged — derived text is
+    rendered card by card, and reading the config per card would be most of the index's time.
+    An unreadable config is no patterns of that kind, never an error: the scrub never blocks a
+    write."""
+    def mtime(path):
+        try:
+            return os.stat(path).st_mtime_ns
+        except OSError:
+            return None
+    key = (env.ASF_HOME, repo, mtime(env.config_path()),
+           mtime(os.path.join(env.ASF_HOME, 'redact-names.txt')),
+           mtime(os.path.join(repo, 'tools', 'forbidden-names.txt')) if repo else None,
+           hash(frozenset(os.environ.items())))
+    if key not in _DEFAULT_CACHE:
+        try:
+            cfg = env.load_config()
+        except Exception:  # a malformed config is the doctor's to report, not the index's
+            cfg = {}
+        try:
+            pats = patterns(repo=repo, cfg=cfg)
+        except Exception:
+            pats = []
+        _DEFAULT_CACHE.clear()
+        _DEFAULT_CACHE[key] = pats
+    return _DEFAULT_CACHE[key]
+
+
 _DIFFGIT_RE = re.compile(r'^diff --git a/.* b/(.*)$')
 _HUNK_RE = re.compile(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@')
 

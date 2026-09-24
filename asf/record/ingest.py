@@ -18,6 +18,7 @@ import sys
 from asf import env
 from asf.evidence import closing, evidence
 from asf.record import frontmatter
+from asf.record.core import is_retired as core_is_retired
 from asf.record.core import canonicalize, load_items, now_iso, parse_sections, render_sections, section_content, today
 from asf.record.index import do_index
 from asf.tick import stale
@@ -33,7 +34,7 @@ RULE_PREFIX = 'rule: '
 
 def is_retired(meta):
     """A card with `removed:` or `moved_to:` wants no stage, no Tasks and no session."""
-    return bool((meta or {}).get('removed') or (meta or {}).get('moved_to'))
+    return core_is_retired(meta)
 
 
 def _path_only(ref):
@@ -99,6 +100,10 @@ def _own_candidates(iid, ev):
             for slug, f in features.items():
                 if _path_only(f.get(kind)) == path and (slug, f) not in out:
                     out.append((slug, f))
+    # a document whose own header names the id (`# F-0019 — Free plan`), whatever its file name
+    for slug, f in features.items():
+        if str(f.get('alias') or '').upper() == iid.upper() and (slug, f) not in out:
+            out.append((slug, f))
     return out
 
 
@@ -317,6 +322,17 @@ def _ingest_fields(machine, new_state, stage, ev_lines, blocked_pair, now):
     return ordered, history
 
 
+def write_fields(path, machine, ordered):
+    """Merge ingest's fields into the card's machine block (I1): only the keys whose value
+    changed are re-rendered, only the derivable keys ingest no longer derives are dropped, and
+    every other key — ``schema_version``, ``cost``, one a later version adds — keeps its line
+    byte for byte. The block is never rebuilt."""
+    updates = {k: v for k, v in ordered.items() if k not in machine or machine[k] != v
+               or type(machine[k]) is not type(v)}
+    drop = [k for k in machine if k not in ordered]
+    return frontmatter.merge_machine(path, updates, drop=drop, order=MACHINE_KEY_ORDER)
+
+
 def _ids_of(iid, ev):
     return (ev.get('ids') or {}).get(iid) or {}
 
@@ -477,6 +493,19 @@ def cmd_ingest(args, root):
             name = None
     product = env.load_product(name) if name else None
     ev = evidence.load(fresh=getattr(args, 'fresh', False), product=product)
+    # one writer through the stage (R14): what an invariant refuses is put back, the rest stands
+    from asf.record import stage
+    rc, staged, _findings = stage.guarded(root, 'ingest', ingest_into, (ev, product),
+                                          product=product)
+    if staged.refused:
+        do_index(root)  # the derived sections and index.json over the cards that stood
+    return rc
+
+
+def ingest_into(root, ev, product=None):
+    """The ingest pass over ``root`` with the evidence ``ev``: restamp, derive, merge every
+    changed machine block, re-index. Returns the exit code. A writer of the record: run it
+    through :func:`asf.record.stage.guarded` (as :func:`cmd_ingest` does)."""
     restamp(root)
     by_id, parse_errors = load_items(root)
     if parse_errors:
@@ -740,7 +769,7 @@ def cmd_ingest(args, root):
                                           blocked_pair, now)
         if ordered is None:
             continue
-        frontmatter.write_machine(rec['path'], ordered)
+        write_fields(rec['path'], machine, ordered)
         if history:
             with open(rec['path'], encoding='utf-8') as f:
                 text = f.read()

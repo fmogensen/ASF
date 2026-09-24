@@ -196,7 +196,10 @@ class StubsImport(unittest.TestCase):
 
     def test_invariants(self):
         from asf import invariants
-        self.assertEqual(invariants.INVARIANTS, [])
+        ids = [inv.id for inv in invariants.INVARIANTS]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertTrue(all(inv.scope in invariants.SCOPES for inv in invariants.INVARIANTS))
+        # a record check reads a staged change; a context without one has nothing to judge
         self.assertEqual(invariants.run({}), [])
         self.assertEqual(invariants.run({}, scope='record'), [])
         with self.assertRaises(ValueError):

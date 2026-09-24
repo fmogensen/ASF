@@ -175,7 +175,9 @@ def write_card(root, item_id, updates, stamp, note):
     rec = _card(root, item_id)
     if rec is None:
         return f'no card for {item_id} in the record'
-    err = set_typed(rec, updates)
+    # validated before the commit below (I3 through the record stage): a widening that would
+    # leave two Active Tasks' writes: intersecting is refused, the card unchanged
+    err = set_typed(rec, updates, writer='widen')
     if err:
         return err
     with open(rec['path'], encoding='utf-8') as f:

@@ -91,8 +91,9 @@ def stamp_cards(record_dir, version):
             _typed, machine = frontmatter.split_machine(rec['meta'])
             if int(machine.get('schema_version') or 0) >= version:
                 continue
-            machine.pop('schema_version', None)
-            frontmatter.write_machine(rec['path'], {'schema_version': version, **machine})
+            # merged, never rebuilt (I1): every other machine line stays byte for byte
+            frontmatter.merge_machine(rec['path'], {'schema_version': version},
+                                      order=('schema_version',) + tuple(machine))
             changed += 1
     return changed
 
