@@ -490,6 +490,130 @@ class WaveStep(StepsTestCase):
 
 # ---- prs --------------------------------------------------------------------------
 
+class AdjudicateLineTests(StepsTestCase):
+    """F-0090 §2.5: the tick says why an adjudicate row was raised, and what a cheap cause did."""
+
+    def setUp(self):
+        super().setUp()
+        self.launched = []
+
+        def build(product, row, index, inflight, repo_facts=None):
+            return _brief(row.brief_kind, row.item_id)
+
+        def wave(product, rows, n, brief_fn=None, out=print):
+            self.launched += [r.job for r in rows]
+            return [(r, {'model': 'opus'}) for r in rows], []
+        for name, fn in (('_build', build), ('_wave', wave)):
+            p = mock.patch.object(step_wave, name, fn)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def row(self, action, brief_kind, **extra):
+        # what the feeder's Row carries once triage has landed; a stand-in keeps this file green
+        # on either side of it
+        fields = dict(tier=1, kind='STALEMATE → ADJUDICATE', item_id='T-0027', feature_id='',
+                      action=action, brief_kind=brief_kind, branch='', reason='', waits_on='',
+                      cause='', between=(), common='', launches=action.startswith('LAUNCH'))
+        return types.SimpleNamespace(**dict(fields, **extra))
+
+    def run_wave(self, rows):
+        ctx = self.ctx()
+        with mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **kw: rows):
+            step_wave.run(ctx, out=self.lines.append)
+        return ctx
+
+    def adjudicate_lines(self):
+        return [ln for ln in self.lines if ln.startswith('adjudicate ')]
+
+    def test_an_adjudicate_row_prints_one_line_naming_both_rounds_and_the_common_file(self):
+        row = self.row('LAUNCH', 'adjudicate', between=(('r2 gate', 'tests failed: ' + 'x' * 80),
+                                                        ('r3 review', 'the parser drops a line')),
+                       common='asf/feeder/rows.py')
+        self.run_wave([row])
+        said = self.adjudicate_lines()
+        self.assertEqual(len(said), 1)
+        self.assertNotIn('\n', said[0])
+        self.assertEqual(said[0], f'adjudicate {"adjudicate-t-0027":<24} {"T-0027":<10} — r2 gate: '
+                                  'tests failed: ' + 'x' * 46 + ' ↔ r3 review: the parser drops a line'
+                                  ' · both touch asf/feeder/rows.py')
+        self.assertEqual(self.launched, ['adjudicate-t-0027'])
+
+    def test_two_rounds_with_no_file_in_common_say_so(self):
+        row = self.row('LAUNCH', 'adjudicate', between=(('r1 gate', 'a'), ('r2 gate', 'b')))
+        self.run_wave([row])
+        said = self.adjudicate_lines()
+        self.assertEqual(len(said), 1)
+        self.assertTrue(said[0].endswith('r1 gate: a ↔ r2 gate: b · no file in common'))
+
+    def test_a_row_with_no_pair_prints_no_adjudicate_line(self):
+        self.run_wave([self.row('LAUNCH', 'adjudicate')])
+        self.assertEqual(self.adjudicate_lines(), [])
+
+    def test_a_held_cause_prints_the_triage_line_logs_the_event_and_launches_nothing(self):
+        reason = 'after: T-0001 has not landed — waiting, not disputed'
+        row = self.row('WAITS ON T-0001', '', cause='predecessor', reason=reason, waits_on='T-0001')
+        ctx = self.run_wave([row])
+        self.assertEqual(self.lines[0], f'triage   T-0027     — predecessor: {reason}')
+        self.assertIn('waits    -                        T-0027     — WAITS ON T-0001', self.lines)
+        self.assertEqual(self.adjudicate_lines(), [])
+        self.assertEqual(self.launched, [])
+        triage = [e for e in self.events(ctx) if e['kind'] == 'triage']
+        self.assertEqual(len(triage), 1)
+        self.assertEqual((triage[0]['item'], triage[0]['cause'], triage[0]['action']),
+                         ('T-0027', 'predecessor', 'WAITS ON T-0001'))
+        self.assertEqual(ctx.counts['launches'], 0)
+
+    def test_a_rerun_cause_launches_its_kind(self):
+        row = self.row('LAUNCH', 'task', kind='PLAN → CODE', cause='stale-brief',
+                       reason="the brief predates the card's last change — rebuilt, not disputed")
+        self.run_wave([row])
+        self.assertTrue(self.lines[0].startswith('triage   T-0027     — stale-brief: '))
+        self.assertEqual(self.launched, ['task-t-0027'])
+
+
+class StaleBriefsTests(StepsTestCase):
+    """F-0090 D4/D5: a run is stale when the card it was briefed from has changed since."""
+
+    def stale(self):
+        return step_wave.stale_briefs(self.product, self.ctx().record_root(), INDEX)
+
+    def digest(self):
+        import importlib
+        build_mod = importlib.import_module('asf.briefs.build')  # `asf.briefs.build` is the function
+        return build_mod.card_digest(self.product, 'B-0001', INDEX)
+
+    def run_rec(self, started, **rec):
+        self.session(job='fix-bug-b-0001', item='B-0001', kind='fix-bug', pid=1, started=started,
+                     **rec)
+
+    def test_a_run_whose_digest_no_longer_matches_is_stale_and_re_runs_its_own_kind(self):
+        self.run_rec('t1', card_digest='0' * 16, ended='t2')
+        self.assertEqual(self.stale(), {'B-0001': 'fix-bug'})
+
+    def test_a_run_whose_digest_matches_is_not_stale(self):
+        self.run_rec('t1', card_digest=self.digest(), ended='t2')
+        self.assertEqual(self.stale(), {})
+
+    def test_a_run_with_no_digest_claims_nothing(self):
+        self.run_rec('t1', ended='t2')
+        self.assertEqual(self.stale(), {})
+
+    def test_a_run_still_going_is_not_stale(self):
+        self.run_rec('t1', card_digest='0' * 16)
+        self.assertEqual(self.stale(), {})
+
+    def test_only_the_latest_ended_run_counts(self):
+        self.run_rec('t1', card_digest='0' * 16, ended='t2')
+        self.run_rec('t3', card_digest=self.digest(), ended='t4')
+        self.assertEqual(self.stale(), {})
+
+    def test_worker_row_carries_the_digest_onto_the_pool_row(self):
+        row = feeder_rows.Row(0, 'BUG → FIX', 'B-0001', '', 'LAUNCH', 'fix-bug', 'fix/B-0001', '')
+        brief = types.SimpleNamespace(kind='fix-bug', model='Opus', add_dirs=[],
+                                      card_digest='abcd' * 4)
+        self.assertEqual(step_wave.worker_row(row, brief, INDEX['items']).card_digest, 'abcd' * 4)
+
+
 class PrsStepTests(StepsTestCase):
     """A ``pull-request`` landing: the PR is the mechanism, so the step opens one per finished
     branch. (``batch: off`` alone would land by fast-forward — see the last two tests.)"""

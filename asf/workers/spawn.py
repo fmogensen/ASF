@@ -342,7 +342,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
               'pid': result.pid, 'pgid': result.pid, 'worktree': worktree, 'branch': branch,
               'started': started, 'log': result.log_path, 'brief': brief_path,
               'id_range': id_range, 'runtime': runtime.name, 'session': sid,
-              'product': product.name}
+              'product': product.name, 'card_digest': getattr(row, 'card_digest', '') or ''}
     # a launch line is a new run: the fold opens a run at every launch line, so the previous
     # run's terminal fields never reach this one (B-0041 — see asf.workers.lifecycle)
     pool_mod.append_session(product, record)

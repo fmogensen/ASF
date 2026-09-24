@@ -18,6 +18,8 @@
 
 Each launch appends a ``launch`` event (item, job, model, brief kind) to ``metrics/events``.
 """
+import importlib
+import inspect
 import json
 import os
 import re
@@ -183,14 +185,50 @@ def _not_yet_put(product, job, open_ids):
     return [iid for iid in open_ids if iid not in given]
 
 
-def plan_inputs(product, root):
+def stale_briefs(product, root, index):
+    """``{item: the brief kind to re-run}`` — the latest *ended* run of each item whose recorded
+    ``card_digest`` differs from :func:`asf.briefs.build.card_digest` computed now (F-0090 D5:
+    the kind is that run's own). A run with no ``card_digest`` — every run launched before the
+    field existed — claims nothing and is never stale (D4)."""
+    digest = importlib.import_module('asf.briefs.build').card_digest
+    latest = {}
+    for rs in lifecycle.runs(pool_mod.sessions_path(product)).values():
+        for run in rs:
+            if run.get('item') and run.get('ended'):
+                held = latest.get(run['item'])
+                if held is None or (run.get('started') or '') >= (held.get('started') or ''):
+                    latest[run['item']] = run
+    return {item: run.get('kind') for item, run in latest.items()
+            if run.get('card_digest') and run.get('kind')
+            and run['card_digest'] != digest(product, item, index)}
+
+
+def _triage_facts(product, root, index):
+    """``stale_briefs`` and ``rounds`` for ``plan_rows`` — but only for a feeder that takes them
+    (F-0090 Task 1) and a ledger that can say them (Task 2): until both have landed the keys are
+    left out rather than break every planner."""
+    from asf.feeder import rows as feeder_rows
+    takes = inspect.signature(feeder_rows.plan_rows).parameters
+    round_log = getattr(lifecycle, 'round_log', None)
+    if 'stale_briefs' not in takes or 'rounds' not in takes or round_log is None:
+        return {}
+    return {'stale_briefs': stale_briefs(product, root, index),
+            'rounds': round_log(pool_mod.sessions_path(product))}
+
+
+def plan_inputs(product, root, index=None):
     """The ledger's and the record's facts ``plan_rows`` takes beside the index — one place, so
-    the tick, ``asf next`` and the status cell plan the same rows."""
+    the tick, ``asf next`` and the status cell plan the same rows. ``index`` is the loaded
+    ``index.json``, read from ``root`` when the caller has none."""
+    if index is None:
+        from asf.views import index_reader
+        index = index_reader.load(root)[0] if os.path.isfile(os.path.join(root, 'index.json')) else {}
     return {'attempts': attempts(product), 'corrections': corrections(product),
             'busy': awaiting_harvest(product),
             'unlanded': unlanded(product), 'open_branches': open_pr_branches(product),
             'pr_heads': pr_heads(product),
-            'groom_state': groom_state(product, root) if groom_policy.groom_auto(product) else None}
+            'groom_state': groom_state(product, root) if groom_policy.groom_auto(product) else None,
+            **_triage_facts(product, root, index)}
 
 
 def held_by_share(items, product, running, resolved, planned, inputs):
@@ -247,7 +285,8 @@ def worker_row(row, brief, items):
                         action=action, title=item.get('title', ''), model=brief.model,
                         kind=brief.kind, severity=item.get('severity'),
                         feature=row.feature_id or None, branch=row.branch or None,
-                        add_dirs=getattr(brief, 'add_dirs', None) or ())
+                        add_dirs=getattr(brief, 'add_dirs', None) or (),
+                        card_digest=getattr(brief, 'card_digest', '') or '')
 
 
 def run(ctx, out=print):
@@ -260,13 +299,17 @@ def run(ctx, out=print):
         items = plan_order.overlay(items, plan_order.trunk_reader(product))
     running = inflight(product)
     r = capacity_mod.resolve(product)
-    inputs = plan_inputs(product, ctx.record_root())
+    inputs = plan_inputs(product, ctx.record_root(), items)
     planned = feeder_rows.plan_rows(items, product, running, r.sessions, **inputs)
     for row in held_by_share(items, product, running, r, planned, inputs):
         job = job_name(row.brief_kind, row.item_id)
         out(f'waits    {job:<24} {row.item_id:<10} — {r.fair_share_reason}')
     worker_rows, texts, kinds = [], {}, {}
     for row in planned:
+        cause = getattr(row, 'cause', '')
+        if cause:                               # §2.5: a cheap cause is said, held or re-run
+            ctx.event('triage', item=row.item_id, cause=cause, row=row.kind, action=row.action)
+            out(f'triage   {row.item_id:<10} — {cause}: {row.reason}')
         if not row.launches:
             out(f"waits    {'-':<24} {row.item_id:<10} — {row.action}")
             continue
@@ -275,6 +318,11 @@ def run(ctx, out=print):
             job = job_name(row.brief_kind, row.item_id)
             out(f'waits    {job:<24} {row.item_id:<10} — held {cls} ({level})')
             continue
+        if row.brief_kind == 'adjudicate' and getattr(row, 'between', ()):
+            (la, ta), (lb, tb) = row.between
+            common = f' · both touch {row.common}' if row.common else ' · no file in common'
+            job = job_name(row.brief_kind, row.item_id)
+            out(f'adjudicate {job:<24} {row.item_id:<10} — {la}: {ta[:60]} ↔ {lb}: {tb[:60]}{common}')
         brief = _build(product, row, items, running,
                        repo_facts=repo_facts(product, row.branch))
         wrow = worker_row(row, brief, items)
