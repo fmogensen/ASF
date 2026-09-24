@@ -246,6 +246,21 @@ class FileBugsIntegrationTests(unittest.TestCase):
         self.assertEqual(meta['count'], 1)
         self.assertEqual(meta['links']['runs'], [100, 101])
 
+    def test_the_filed_bug_states_what_is_wrong_and_carries_a_real_acceptance(self):
+        # B-0101: the Description opens with a statement of the defect (not a bare evidence
+        # list) and the Acceptance is a real, checkable line, never the empty `- [ ]`.
+        r = run(['file-bugs', '--default-bug-epic', 'E-0009'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        name = [n for n in os.listdir(os.path.join(self.root, 'bugs')) if n.endswith('.md')][0]
+        with open(os.path.join(self.root, 'bugs', name)) as f:
+            meta, body = frontmatter.parse(f.read(), path=f'bugs/{name}')
+        description = body.split('## Description\n', 1)[1].split('\n## ', 1)[0].strip()
+        self.assertFalse(description.startswith('- '), description)
+        self.assertIn(meta['title'], description.splitlines()[0])
+        self.assertIn('run 100', description)
+        acceptance = body.split('## Acceptance\n', 1)[1].split('\n## ', 1)[0]
+        self.assertNotEqual(acceptance.strip(), '- [ ]')
+
     def test_an_s1_s2_bug_is_filed_decided_so_bug_fix_need_not_wait_for_the_groom(self):
         # B-0089: the severity is the decision for an S1/S2 — no 24h wait for the daily groom.
         r = run(['file-bugs', '--default-bug-epic', 'E-0009'], self.root)

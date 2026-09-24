@@ -291,7 +291,8 @@ def _file_or_bump_bug(root, canonical, sig, info, date, default_bug_epic=None):
         typed['places'] = info['places']
     if info['runs']:
         typed['links'] = {'runs': sorted(info['runs'])}
-    body = '\n'.join(f"- {l}" for l in info['evidence'])
+    # B-0101: open with what is wrong, then the evidence — never a bare list of lines
+    body = info['title'] + '\n\nEvidence:\n' + '\n'.join(f"- {l}" for l in info['evidence'])
     new_id = mint_id(root, canonical, 'bug')
     write_new_item(root, canonical, 'bug', new_id, typed, body, date, 'file-bugs',
                     acceptance=info.get('acceptance') or [f"`{sig}` is not seen again"],
