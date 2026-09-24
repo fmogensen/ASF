@@ -37,7 +37,9 @@ class Template:
         """A copy of the template at ``dest`` (an existing, empty directory — or a new temp
         directory when None), its git configs pointing at the copy. Returns ``dest``."""
         root = self._ensure()
-        dest = dest or tempfile.mkdtemp(prefix=self.prefix)
+        if dest is None:  # ours: removed at exit, like the template (a caller's dir is its own)
+            dest = tempfile.mkdtemp(prefix=self.prefix)
+            atexit.register(shutil.rmtree, dest, True)
         for name in os.listdir(root):
             src = os.path.join(root, name)
             dst = os.path.join(dest, name)

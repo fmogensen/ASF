@@ -4,7 +4,9 @@ every subprocess a test starts) and `asf.env.ASF_HOME` (the constant the package
 tests patch per case) point at it. ASF_TESTS_HOME names a directory to use instead. The caller's
 identity (`asf.hermetic.CALLER_IDENTITY`: the tick's ASF_PRODUCT, a session's job and mint range)
 is dropped the same way (B-0055): a test that needs a product names one."""
+import atexit
 import os
+import shutil
 import tempfile
 import unittest
 
@@ -13,7 +15,11 @@ def hermetic_home():
     chosen = os.environ.get('ASF_TESTS_HOME')
     if not chosen:
         current = os.environ.get('ASF_HOME', '')
-        chosen = current if current.startswith(tempfile.gettempdir()) else tempfile.mkdtemp(prefix='asf-tests-home-')
+        if current.startswith(tempfile.gettempdir()):
+            chosen = current
+        else:
+            chosen = tempfile.mkdtemp(prefix='asf-tests-home-')
+            atexit.register(shutil.rmtree, chosen, True)  # never left in $TMPDIR
     os.environ['ASF_HOME'] = chosen
     from asf import env, hermetic
     env.ASF_HOME = chosen
