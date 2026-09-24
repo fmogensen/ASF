@@ -67,6 +67,10 @@ LAND_SPEC = 'land-spec'
 #: on the trunk (:func:`asf.harvest.harvest.send_back`): a STARVED → SPEC/PLAN session changes
 #: the document on its own branch, with the failing gate line in its brief
 LANDING_GATE = 'landing-gate'
+#: the request harvest writes on a PR-lane code branch with no review of its head
+#: (:func:`asf.harvest.harvest.request_review`): no round is spent, a review session is launched
+REVIEW_WANTED = 'review-wanted'
+PUSHED_REVIEW = 'PUSHED → REVIEW'
 WAITS_LANDING = 'WAITS ON landing'
 PLAN_CODE = 'PLAN → CODE'
 RESHAPE = 'RESHAPE → PLAN'
@@ -101,6 +105,8 @@ class Row:
     reason: str
     waits_on: str = ''
     correction: str = ''
+    #: a PUSHED → REVIEW row only: the round the reviewer writes
+    review_round: int = 0
     #: the GROOM → ADJUDICATE row only (§2.5, PD8): the groom day, the record clone's groom
     #: file and the state dir's answers file, and the open questions' own lines (for the brief).
     groom_date: str = ''
@@ -342,6 +348,14 @@ def correction_rows(items, product, busy, corrections):
         if c.get('kind') == LAND_SPEC:  # an approved spec that cannot land as it stands
             out.append(Row(tier=tier, kind=STARVED_SPEC, item_id=iid, feature_id=fid or iid,
                            action=LAUNCH, brief_kind='spec', branch=branch, reason=c['text']))
+            continue
+        if c.get('kind') == REVIEW_WANTED:  # a PR no one has reviewed at its head: no round
+            # S1 first, then a Bug's fix (with S2): a fix waits on its review before anything
+            out.append(Row(tier=min(tier, 1) if item['type'] == 'bug' else tier,
+                           kind=PUSHED_REVIEW, item_id=iid, feature_id=fid,
+                           action=LAUNCH, brief_kind='review', branch=branch,
+                           review_round=int(c.get('round') or 1),
+                           reason=f"PR has no review of its head: round {c.get('round') or 1}"))
             continue
         doc = product.conventions.branch_kind(branch) if c.get('kind') == LANDING_GATE else None
         if doc in ('spec', 'plan') and rounds < CORRECTION_ROUNDS:  # a document the gate refused

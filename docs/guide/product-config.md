@@ -98,7 +98,12 @@ trunk, by `conventions.landing`:
   - the approval matrix allows the landing (`merge_routine_pr`, or `merge_amendable_set`);
   - for a code, fix or task branch: the newest ASF review of its item on the branch — the
     `review_pattern` file with the highest round, `{slug}` being the item id in lower case — has a
-    `verdict: approved` line. A **spec or plan branch that only changes files under `specs_dir`,
+    `verdict: approved` line, written after the branch's last change outside `reviews_dir`.
+    With no such review — none yet, or only a round older than the head — harvest asks for one:
+    the feeder launches a `PUSHED → REVIEW` session on the PR's branch (S1 first, then Bug
+    fixes, within capacity, one per branch, no correction round spent), which writes the next
+    round's file there. `verdict: changes requested` sends the branch back to its writer as
+    `FIX → CORRECT`; its next push asks for the next round. A **spec or plan branch that only changes files under `specs_dir`,
     `plans_dir` and `reviews_dir` needs no review**: merging it is what approves its document;
   - its checks are green (no checks at all counts as green);
   - **the trunk stays green** — see *Green checks are not a green trunk* below.
@@ -106,7 +111,7 @@ trunk, by `conventions.landing`:
   Then `gh pr merge --squash --delete-branch` (then `--merge`, then `--rebase` if the repo refuses
   one), or `--auto` when the trunk has a GitHub merge queue. Hotfix and S1 branches go first;
   `capacity.batch.per_run` caps the merges per harvest and `capacity.batch.parallel` the PRs in the
-  merge queue at once. No review, or pending checks: `waiting <branch>: …` until the next tick. Red
+  merge queue at once. A review asked for, or pending checks: `waiting <branch>: …` until the next tick. Red
   checks: the branch is held and sent back to its session. A PR someone else merged — a `batch`
   step, a person — is found merged and its session closed. A product with no PR host only gets the
   `pr-lane <branch>` mark and needs a person or its own `batch` step to merge.

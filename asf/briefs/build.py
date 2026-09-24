@@ -18,8 +18,8 @@ A template is plain markdown with ``{placeholders}``; every name in it must be a
 context :func:`context` builds, so a typo in a template is a test failure rather than a brief
 that ships with ``{spec_path}`` printed literally at a session.
 
-The kinds are the feeder's row kinds plus the two the harvest loop raises (``review``,
-``fixer``); ``KIND_ALIASES`` maps a row's ``brief_kind`` onto a template name (the feeder emits
+The kinds are the feeder's row kinds (``review`` among them: the PUSHED → REVIEW row a PR-lane
+harvest asks for) plus ``fixer``; ``KIND_ALIASES`` maps a row's ``brief_kind`` onto a template name (the feeder emits
 ``task`` for PLAN → CODE, whose template is ``coder``).
 """
 import argparse

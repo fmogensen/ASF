@@ -1585,7 +1585,8 @@ class ProductHarvestTests(unittest.TestCase):
         self.push_plan({'docs/plans/f-0001.md': '# plan\n', 'src/app.py': 'x = 1\n'})
         results, lines = self.harvest(self.pr_product())
         self.assertEqual(results, {'plan/F-0001': 'waiting'})
-        self.assertEqual(lines, ['waiting plan/F-0001: PR #41 not approved — no ASF review yet'])
+        self.assertEqual(lines, ['waiting plan/F-0001: PR #41 not approved — no ASF review yet: '
+                                 'review round 1 asked for'])
         self.assertEqual(self.merges(calls), [])
 
     def test_no_pr_host_keeps_the_old_pr_lane(self):
@@ -1611,23 +1612,101 @@ class ProductHarvestTests(unittest.TestCase):
         self.push_lane('fix/B-0001', [('fix(B-0001): the change', files)])
         self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
 
-    def test_code_branch_without_a_review_waits(self):
+    def feeder_rows_now(self, items):
+        from asf.feeder import rows as feeder_rows
+        corrections = lifecycle.corrections(harvest.sessions_path(self.state_dir))
+        return feeder_rows.correction_rows(items, self.pr_product(), set(), corrections)[0]
+
+    BUG = {'B-0001': {'id': 'B-0001', 'type': 'bug', 'state': 'Active', 'severity': 'S1'}}
+
+    def test_code_branch_without_a_review_asks_for_one(self):
+        """In pull-request landing nothing else launches a review: harvest asks for one, and the
+        feeder launches it on the PR's branch — no round spent."""
+        from asf.feeder import rows as feeder_rows
         calls = self.fake_gh([{'name': 'ci', 'bucket': 'pass'}])
         self.push_fix()
         results, lines = self.harvest(self.pr_product())
         self.assertEqual(results, {'fix/B-0001': 'waiting'})
-        self.assertEqual(lines, ['waiting fix/B-0001: PR #41 not approved — no ASF review yet'])
+        self.assertEqual(lines, ['waiting fix/B-0001: PR #41 not approved — no ASF review yet: '
+                                 'review round 1 asked for'])
         self.assertEqual(self.merges(calls), [])
-        self.assertNotEqual(self.record('fix/B-0001').get('harvest'), 'pr')
+        rec = self.record('fix/B-0001')
+        self.assertEqual((rec['correction']['kind'], rec['correction']['round']), ('review-wanted', 1))
+        self.assertFalse(rec.get('rounds'))
+        rows = self.feeder_rows_now(self.BUG)
+        self.assertEqual([(r.kind, r.brief_kind, r.branch, r.review_round, r.tier) for r in rows],
+                         [(feeder_rows.PUSHED_REVIEW, 'review', 'fix/B-0001', 1, 0)])
+        # asked once: until a review session runs, the branch is the request's, not the gate's
+        self.assertEqual(self.harvest(self.pr_product())[0], {})
+        # the brief points the reviewer at round 1's file on that branch
+        from asf.briefs import preamble
+        facts = preamble.collect(self.pr_product(), rows[0], {'items': self.BUG})
+        self.assertEqual(facts['review_path'], '.in/reviews/1-b-0001.md')
 
-    def test_code_branch_whose_newest_review_requests_changes_waits(self):
+    def test_the_asked_review_approves_and_the_next_harvest_merges(self):
+        calls = self.fake_gh([{'name': 'ci', 'bucket': 'pass'}])
+        self.push_fix()
+        self.assertEqual(self.harvest(self.pr_product())[0], {'fix/B-0001': 'waiting'})
+        # the review session: its verdict file lands on the branch
+        sh(['git', 'checkout', '-q', 'fix/B-0001'], cwd=self.worker)
+        self.write(self.worker, '.in/reviews/1-b-0001.md', self.REVIEW.format(v='approved'))
+        sh(['git', 'add', '-A'], cwd=self.worker)
+        sh(['git', 'commit', '-qm', 'review(B-0001): round 1'], cwd=self.worker)
+        sh(['git', 'push', '-q', 'origin', 'fix/B-0001'], cwd=self.worker)
+        from asf.workers.pool import now_iso
+        with open(os.path.join(self.state_dir, 'sessions.jsonl'), 'a', encoding='utf-8') as f:
+            f.write(json.dumps({'job': 'review-b-0001', 'item': 'B-0001', 'branch': 'fix/B-0001',
+                                'account': 'test', 'pid': dead_pid(), 'started': now_iso()}) + '\n')
+            f.write(json.dumps({'job': 'review-b-0001', 'ended': now_iso(),
+                                'end_reason': 'finished', 'rc': 0}) + '\n')
+        results, lines = self.harvest(self.pr_product())
+        self.assertEqual(results, {'fix/B-0001': 'landed'}, lines)
+        self.assertIn('harvest: 1 branch(es), one gate', lines)
+        self.assertEqual(len(self.merges(calls)), 1)
+
+    def test_a_review_older_than_the_head_asks_for_the_next_round(self):
         calls = self.fake_gh([])
-        self.push_fix(['approved', 'changes requested'])
+        self.push_fix(['approved'])
+        sh(['git', 'checkout', '-q', 'fix/B-0001'], cwd=self.worker)
+        self.write(self.worker, 'src/a.py', 'a = 2\n')
+        sh(['git', 'commit', '-qam', 'fix(B-0001): after the review'], cwd=self.worker)
+        sh(['git', 'push', '-q', 'origin', 'fix/B-0001'], cwd=self.worker)
         results, lines = self.harvest(self.pr_product())
         self.assertEqual(results, {'fix/B-0001': 'waiting'})
         self.assertEqual(lines, ['waiting fix/B-0001: PR #41 not approved — '
-                                 '.in/reviews/2-b-0001.md reads changes requested'])
+                                 '.in/reviews/1-b-0001.md predates the head: review round 2 '
+                                 'asked for'])
         self.assertEqual(self.merges(calls), [])
+        self.assertEqual(self.record('fix/B-0001')['correction']['round'], 2)
+
+    def test_s1_reviews_go_first(self):
+        from asf.feeder import rows as feeder_rows
+        product = self.pr_product()
+        corrections = {
+            'T-0002': {'kind': 'review-wanted', 'text': 'review it', 'round': 1, 'branch': 'worker/T-0002'},
+            'B-0001': {'kind': 'review-wanted', 'text': 'review it', 'round': 1, 'branch': 'fix/B-0001'},
+            'B-0003': {'kind': 'review-wanted', 'text': 'review it', 'round': 1, 'branch': 'fix/B-0003'}}
+        items = {'T-0002': {'id': 'T-0002', 'type': 'task', 'state': 'Active'},
+                 'B-0001': dict(self.BUG['B-0001']),
+                 'B-0003': {'id': 'B-0003', 'type': 'bug', 'state': 'Active'}}
+        rows = feeder_rows.correction_rows(items, product, set(), corrections)[0]
+        tiers = {r.item_id: r.tier for r in rows}
+        self.assertEqual(tiers, {'B-0001': 0, 'B-0003': 1, 'T-0002': 2})
+
+    def test_code_branch_whose_newest_review_requests_changes_goes_back_as_a_correction(self):
+        from asf.feeder import rows as feeder_rows
+        calls = self.fake_gh([])
+        self.push_fix(['approved', 'changes requested'])
+        results, lines = self.harvest(self.pr_product())
+        self.assertEqual(results, {'fix/B-0001': 'held'})
+        self.assertEqual(lines, ['held fix/B-0001: .in/reviews/2-b-0001.md reads changes '
+                                 'requested: answer its C list on fix/B-0001 — back to its '
+                                 'session (round 1)'])
+        self.assertEqual(self.merges(calls), [])
+        rows = self.feeder_rows_now(self.BUG)
+        self.assertEqual([(r.kind, r.brief_kind, r.branch) for r in rows],
+                         [(feeder_rows.FIX_CORRECT, 'correct', 'fix/B-0001')])
+        self.assertIn('reads changes requested', rows[0].correction)
 
     def test_code_branch_approved_and_green_is_merged(self):
         calls = self.fake_gh([{'name': 'ci', 'bucket': 'pass'}])

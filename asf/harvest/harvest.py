@@ -75,7 +75,7 @@ import time
 from asf import approvals, env, hermetic
 from asf.conventions import Conventions
 from asf.feeder import footprint, widen
-from asf.feeder.rows import LANDING_GATE
+from asf.feeder.rows import LANDING_GATE, REVIEW_WANTED
 from asf.workers import health as health_mod
 from asf.workers import lifecycle
 from asf.workers.pool import now_iso
@@ -1199,6 +1199,56 @@ def review_verdict(repo, conv, branch, item):
     return (m.group(1).strip().strip('`*').lower() if m else ''), path
 
 
+def review_round(conv, item, path):
+    """The round number in review file ``path`` of ``item``; 0 when it is none."""
+    if not item or not path:
+        return 0
+    rx = re.compile(re.escape(str(conv.review_pattern))
+                    .replace(re.escape('{reviews_dir}'), re.escape(conv.reviews_dir.strip('/')))
+                    .replace(re.escape('{slug}'), re.escape(item.lower()))
+                    .replace(re.escape('{n}'), r'(?P<n>\d+)'))
+    m = rx.fullmatch(path)
+    return int(m.group('n')) if m else 0
+
+
+def review_is_current(repo, conv, branch, path):
+    """True when review file ``path`` on ``origin/<branch>`` reviewed the branch's head: nothing
+    outside ``reviews_dir`` changed on the branch after the commit that last wrote it."""
+    last = sh(['git', 'log', '-1', '--format=%H', f'origin/{branch}', '--', path],
+              cwd=repo).stdout.strip()
+    if not last:
+        return False
+    after = sh(['git', 'diff', '--name-only', last, f'origin/{branch}'], cwd=repo).stdout.split()
+    reviews = conv.reviews_dir.strip('/') + '/'
+    return not [f for f in after if not f.startswith(reviews)]
+
+
+def request_review(repo, state_dir, branch, record, conv, number, path, verdict, dry_run, out):
+    """Ask for a ``review`` session on ``branch`` — a PR with no review of its head (none at all,
+    only a stale round, or one with no verdict). In pull-request landing nothing else raises one:
+    harvest writes a :data:`REVIEW_WANTED` request on the run (no round spent), and the feeder
+    turns it into a PUSHED → REVIEW row on that branch, S1 first, within capacity, one per
+    branch. The reviewer's verdict file lands on the branch; the next harvest reads it."""
+    item = item_of(branch, record)
+    rnd = review_round(conv, item, path) + 1
+    if not path:
+        why = 'no ASF review yet'
+    elif not review_is_current(repo, conv, branch, path):
+        why = f'{path} predates the head'
+    else:
+        why = f'{path} reads {verdict or "no verdict"}'
+    if dry_run:
+        out(f'DRY: would ask for a review of {branch}: PR #{number} — {why}')
+        return 'dry'
+    job = record.get('job') or branch
+    text = (f'review {branch} (PR #{number}) at its head, round {rnd}: {why}. Write the review '
+            f'file on {branch}; harvest merges it on `verdict: approved`')
+    mark_session(state_dir, job, correction={'kind': REVIEW_WANTED, 'text': text, 'at': now_iso(),
+                                             'round': rnd})
+    out(f'waiting {branch}: PR #{number} not approved — {why}: review round {rnd} asked for')
+    return 'waiting'
+
+
 class PrLane:
     """One harvest's view of the product's PR host: its open PRs (one ``gh pr list``), whether
     the trunk has a merge queue, and the tick's merge budget (``capacity.batch``)."""
@@ -1470,10 +1520,17 @@ def land_pr(repo, state_dir, branch, record, lane, conv, docs, dry_run, out, now
         return 'queued'
     if not docs:
         verdict, path = review_verdict(repo, conv, branch, item_of(branch, record))
-        if verdict != 'approved':
-            why = f'{path} reads {verdict or "no verdict"}' if path else 'no ASF review yet'
-            out(f'waiting {branch}: PR #{number} not approved — {why}')
-            return 'waiting'
+        current = bool(path) and review_is_current(repo, conv, branch, path)
+        if current and verdict.startswith('changes'):  # the reviewer's C list, to the writer
+            if dry_run:
+                out(f'DRY: would hold {branch}: PR #{number} — {path} reads {verdict}')
+                return 'dry'
+            return hold_with_correction(state_dir, branch, record, 'review',
+                                        f'{path} reads {verdict}: answer its C list on {branch}',
+                                        out)
+        if not current or verdict != 'approved':
+            return request_review(repo, state_dir, branch, record, conv, number, path, verdict,
+                                  dry_run, out)
     state, detail, checks = pr_checks(slug, number)
     if state == 'pending':
         out(f'waiting {branch}: PR #{number} checks pending — {detail}')

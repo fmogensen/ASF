@@ -275,6 +275,8 @@ def collect(product, row, index, inflight=None, repo_facts=None):
     spec_path = _strip_rev(links.get('spec')) or doc_path_for(product, 'spec', slug)
     plan_path = _strip_rev(links.get('plan')) or doc_path_for(product, 'plan', slug)
     rnd = feeder_rows.review_round(feature or item)[1]
+    if getattr(row, 'review_round', 0):  # a PR's review: the round harvest asked for
+        rnd = int(row.review_round) - 1
     kind = kind_of(row)
     # a reviewer writes the NEXT round's file; a fixer and an adjudicator answer the one that is
     # already on the branch — pointing either at the other's file is how a round gets lost
