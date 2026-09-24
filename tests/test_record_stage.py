@@ -252,6 +252,17 @@ class I3NeverIntersectingWrites(StageTestCase):
             'footprint widened: +src/d.py (test)'))
         self.assertNotEqual(self.git('rev-parse', 'HEAD'), head)
 
+    def test_i3_a_derived_state_change_is_never_refused(self):
+        # ingest moves a New Task to Active (its branch exists): the state is a fact, the
+        # footprint was not written — refusing it would put the card back on every tick
+        rel = write(self.root, 'T-0003', 'task', parent='F-0001', typed=('writes: [src/a.py]',))
+
+        def derive(root):
+            frontmatter.merge_machine(os.path.join(root, rel), {'state': 'Active'})
+
+        self.assertEqual(stage.guarded(self.root, 'ingest', derive)[2], [])
+        self.assertEqual(frontmatter.split_machine(meta(self.root, rel))[1]['state'], 'Active')
+
     def test_i3_an_intersection_already_in_the_record_is_not_this_writers(self):
         write(self.root, 'T-0003', 'task', parent='F-0001', typed=('writes: [src/a.py]',),
               machine=('schema_version: 1', 'state: Active'))

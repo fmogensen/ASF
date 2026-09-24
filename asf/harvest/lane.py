@@ -548,8 +548,11 @@ class Lane:
         if run is None:  # adoption: a lane branch, or an open PR, no run holds (T2)
             card = (self.items or {}).get(item or '') or {}
             open_pr = (pr or {}).get('state') == 'OPEN'
-            if not head or not item or (not open_pr and (not card or card.get('removed') or
-                                                         card.get('state') in ('Resolved', 'Closed'))):
+            # a branch whose name only looks like an id (`…-retro-2026-09-19` → RETRO-2026) is
+            # nobody's lane: with no card no session can answer a hold, so it sits in BACK
+            unknown = self.items is not None and not card
+            if not head or not item or unknown or (not open_pr and (
+                    not card or card.get('removed') or card.get('state') in ('Resolved', 'Closed'))):
                 return None
             f.update(adopt=True, ended=True)
         if f['landed'] or f['live'] and not (pr or {}).get('state') == 'MERGED':

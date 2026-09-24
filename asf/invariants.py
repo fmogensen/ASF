@@ -203,6 +203,10 @@ def _active_writes(metas):
             and m.get('writes')}
 
 
+def _writes_of(meta):
+    return sorted(str(w) for w in (meta.get('writes') or ()))
+
+
 def _intersecting(metas):
     from asf.record.core import writes_intersect
     tasks = sorted(_active_writes(metas).items())
@@ -218,12 +222,21 @@ def check_i3(ctx):
     """I3 — never write intersecting ``writes:``: no two Active Tasks' ``writes:`` intersect by
     ``asf check``'s own test (``core.writes_intersect``). A pair this writer's change created is
     refused at the card(s) of the pair it wrote — the widen pass, ``asf set`` and the plan minter
-    are refused before their commit, not after it."""
+    are refused before their commit, not after it.
+
+    Only a card whose ``writes:`` this writer wrote (changed, or a new card) is judged: a
+    derived state change is a fact, never a footprint write. Ingest moving a Task to Active
+    because its branch exists would otherwise be put back on every tick — the record lying
+    about the branch, one refusal per tick, forever."""
     changed_ids = {}
     for path in _card_paths(ctx.staged):
         _at, after = _after(ctx, path)
-        if after and after.get('id'):
-            changed_ids[after['id']] = path
+        if not after or not after.get('id'):
+            continue
+        _bt, before = _before(ctx, path)
+        if before and _writes_of(before) == _writes_of(after):
+            continue
+        changed_ids[after['id']] = path
     if not changed_ids or not any(m.get('type') == 'task' for p in changed_ids.values()
                                   for m in [_after(ctx, p)[1]]):
         return []

@@ -341,6 +341,22 @@ class LaneRepo(unittest.TestCase):
             written = [json.loads(ln) for ln in f if '"lane"' in ln]
         self.assertTrue(written and all(ln['job'] == 'coder-t-0001' for ln in written))
 
+    def test_an_open_pr_whose_item_is_no_card_is_never_adopted(self):
+        # `worker/retro-2026-09-19` only looks like an id (RETRO-2026): with no card, no session
+        # could answer a hold, so adopting it would park it in BACK for good
+        self.push_lane('worker/retro-2026-09-19', {'r.txt': 'r\n'}, 'notes')
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat(T-0001): a')
+        items = {'T-0001': {'id': 'T-0001', 'type': 'task', 'state': 'Active'}}
+        ln = lane.Lane(self.product(), self.state_dir, out=lambda *_: None, items=items)
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        heads = ln.remote_heads()
+        ln.trunk_sha = heads['main']
+        pr = {'number': 7, 'state': 'OPEN'}
+        self.assertIsNone(ln.branch_facts('worker/retro-2026-09-19', None,
+                                          heads['worker/retro-2026-09-19'], pr, True, False))
+        f = ln.branch_facts('worker/T-0001', None, heads['worker/T-0001'], pr, True, False)
+        self.assertTrue(f['adopt'])
+
     def test_r2_the_in_process_pass_stops_at_the_gate_and_the_gate_pass_lands(self):
         self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat(T-0001): a')
         self.session('coder-t-0001', 'T-0001', 'worker/T-0001')
