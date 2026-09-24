@@ -2,13 +2,21 @@
 
 The review checklist of `fix-package.md` §10 (R1–R26), checked by code (§11).
 `tools/package_gate.py` reads this table. Every R-line must appear exactly once, with one of
-three statuses:
+five statuses:
 
 - **test**: every test named must exist and pass in the gate's run.
 - **pending**: owned by a stream that has not landed yet. The line is a gap until every test
   named passes. The stream then marks it `test`, renaming the ids here if its names differ.
-- **n/a**: a process or live step that no suite test can witness. The reason is required, and
-  the line names no test.
+- **check**: a property of the branch's own git history, checked by the gate (`ancestor:<sha>`:
+  the branch contains it; `merged-not-rebased:<cut>`: no commit of `origin/main` since the cut
+  sits on the branch's first-parent chain, so main came in through merges only).
+- **pending-live**: a live step no suite can witness. The line is a gap until its recorded
+  result exists. For R21 that is `docs/plans/fix-package-smoke.txt`, which
+  `tools/smoke_isolated_session.sh` writes only when every check passes (date, account
+  fingerprint, the ASF sha it ran, `result: PASS`) and which is committed. A sha this branch
+  does not contain does not count. The reason is required, and the line names no test.
+- **n/a**: out of scope, so there is nothing to witness. The reason is required, and the line
+  names no test.
 
 Test ids are `path::Class::test`. The tag waits for `python3 tools/package_gate.py` to exit 0.
 
@@ -28,13 +36,13 @@ Test ids are `path::Class::test`. The tag waits for `python3 tools/package_gate.
 | R12 | test | `tests/test_invariants.py::R12I9IsAnEvent::test_r12_a_human_merge_is_an_event_not_a_violation`, `tests/test_invariants.py::R12I9IsAnEvent::test_r12_the_lane_report_logs_the_event_and_returns_no_finding`, `tests/test_e2e_lane.py::HumanMergePR::test_r12_human_merge_is_landed_not_foreign` | W4 (the event), W5 harness (the human merge lands) |
 | R13 | test | `tests/test_invariants.py::R13TestsOnlyInvariants::test_r13_i6_i12_i13_are_never_tick_checks`, `tests/test_invariants.py::R13TestsOnlyInvariants::test_r13_i6_deep_only_rederives_a_copy_and_names_a_non_idempotent_field`, `tests/test_invariants.py::R13TestsOnlyInvariants::test_r13_i13_an_explicit_type_decides_the_minted_type`, `tests/test_metrics.py::ReleaseHonesty::test_i12_release_notes_list_only_resolved_or_closed_as_landed`, `tests/test_metrics.py::ReleaseHonesty::test_i12_the_check_names_an_open_item_listed_as_landed` | W4 |
 | R14 | test | `tests/test_contracts.py::StubsImport::test_record_stage`, `tests/test_record_stage.py::Stage::test_r14_stage_captures_one_writers_paths_and_their_content_before_it`, `tests/test_record_stage.py::Stage::test_r14_one_writer_refused_the_other_writers_output_stands`, `tests/test_record_stage.py::Stage::test_r14_guarded_prints_and_keeps_the_finding_for_the_bug_filer`, `tests/test_record_stage.py::Stage::test_r14_a_created_path_refused_is_removed` | W0 contract, W2 |
-| R15 | n/a |  | process: `integration/fix-package` was cut from 74497d9, which contains e284ee7 (`git merge-base --is-ancestor e284ee7 74497d9`) |
+| R15 | check | `ancestor:e284ee7` | the branch was cut from 74497d9, which contains e284ee7 |
 | R16 | test | `tests/test_lane.py::Occupancy::test_r16_the_feeder_reads_the_lane` | W1 and W3 built as one lane stream: the feeder reads the lane |
 | R17 | test | `tests/test_contracts.py::ConventionKeysParse::test_the_keys_from_yaml`, `tests/test_contracts.py::ConventionKeysDefault::test_the_defaults`, `tests/test_contracts.py::WorkerPoolKeys::test_parse_and_defaults` | W0 |
-| R18 | n/a |  | process: main is merged into `integration/fix-package`, never rebased onto it |
+| R18 | check | `merged-not-rebased:74497d9` | main is merged into `integration/fix-package`, never rebased onto it |
 | R19 | test | `tests/test_e2e_lane.py::HappyPathPR::test_r19_s1_card_to_merge_resolves_the_feature`, `tests/test_e2e_lane.py::HappyPathFF::test_r19_s1_card_to_merge_resolves_the_feature`, `tests/test_e2e_lane.py::RedTrunkPR::test_r19_s2_red_trunk_waits_then_lands`, `tests/test_e2e_lane.py::RedTrunkFF::test_r19_s2_red_trunk_waits_then_lands`, `tests/test_e2e_lane.py::SquashMergePR::test_r19_s4_landed_task_closes_open_sibling_keeps_feature_open`, `tests/test_e2e_lane.py::SquashMergeFF::test_r19_s4_landed_task_closes_open_sibling_keeps_feature_open`, `tests/test_e2e_lane.py::PreexistingPRPR::test_r19_s5_open_pr_is_adopted_not_rebuilt`, `tests/test_e2e_lane.py::PreexistingPRFF::test_r19_s5_open_pr_is_adopted_not_rebuilt` | W5 harness, both landing modes |
 | R20 | test | `tests/test_lifecycle.py::LaunchAndReapInvariants::test_an_ended_runs_worktree_under_a_differently_cased_home_is_reused`, `tests/test_lifecycle.py::LaunchAndReapInvariants::test_a_live_run_in_a_differently_cased_worktree_refuses_every_other_job`, `tests/test_invariants.py::I7OneSessionPerBranchAndWorktree::test_i7_the_worktree_key_is_the_case_folded_path` | case-insensitive paths. The other blind spots are covered elsewhere: load timeouts by a suite run under CPU load before the tag, real gh semantics by R21's live smoke, hand-made yaml and foreign hooks by the existing unit tests |
-| R21 | n/a |  | live: `tools/smoke_isolated_session.sh` runs one real worker session with the isolated HOME before the tag. A suite has no account |
+| R21 | pending-live |  | live: `tools/smoke_isolated_session.sh <product> [account]` runs one real worker session with the isolated HOME, and on PASS writes `docs/plans/fix-package-smoke.txt`. A suite has no account. The gate fails until that record is committed |
 | R22 | test | `tests/test_snapshot.py::SnapshotTickTest::test_r22_a_tick_started_while_the_checkout_is_rewritten_imports_one_consistent_tree`, `tests/test_snapshot.py::SnapshotTickTest::test_r22_ticks_during_a_rewrite_loop_all_import_head` | W6 |
 | R23 | test | `tests/test_contracts.py::WorkerPoolKeys::test_accounts_carry_the_keys_and_home_stays_a_path` | W0: `home` stays a path as v0.1.2 reads it, and `isolate_home` is a key v0.1.2 ignores |
 | R24 | test | `tests/test_feeder.py::FeederHoldTest::test_features_held_waits_their_new_work_and_nothing_else`, `tests/test_feeder.py::FeederHoldTest::test_bugs_held_waits_the_fix` | e284ee7: `feeder.hold` |

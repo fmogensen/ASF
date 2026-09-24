@@ -27,7 +27,9 @@
 # at the end (pass --keep to leave both for a look). One session, the light model, a few cents.
 #
 # Exit 0 when every check passes, 1 when one fails (each check prints PASS/FAIL), 2 on a usage or
-# config error. Run it by hand; it is never part of the suite.
+# config error. Run it by hand; it is never part of the suite. On ALL PASS it writes R21's record,
+# docs/plans/fix-package-smoke.txt (date, account and product fingerprints, the ASF sha it ran,
+# result: PASS; $SMOKE_RECORD overrides the path): commit it, and tools/package_gate.py counts it.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,7 +40,7 @@ args=()
 for a in "$@"; do
   case "$a" in
     --keep) keep=1 ;;
-    -h|--help) sed -n '2,31p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
     *) args+=("$a") ;;
   esac
 done
@@ -47,7 +49,7 @@ if [ "${#args[@]}" -lt 1 ]; then
   exit 2
 fi
 
-SMOKE_PRODUCT="${args[0]}" SMOKE_ACCOUNT="${args[1]:-}" SMOKE_KEEP="$keep" \
+SMOKE_PRODUCT="${args[0]}" SMOKE_ACCOUNT="${args[1]:-}" SMOKE_KEEP="$keep" SMOKE_ROOT="$ROOT" \
   PYTHONPATH="$ROOT" exec python3 - <<'PY'
 import json
 import os
@@ -193,5 +195,20 @@ else:
     git(['worktree', 'remove', '--force', wt], repo)
     git(['branch', '-D', branch], repo)
 print('smoke: ' + ('ALL PASS' if not failed else f"FAILED: {', '.join(failed)}"))
+if not failed:
+    # R21's recorded result, which tools/package_gate.py reads (commit it). Names are
+    # fingerprints: an account or product name is refused by the public repo's redaction gate.
+    import hashlib
+    asf_root = os.environ['SMOKE_ROOT']
+    sha = git(['rev-parse', 'HEAD'], asf_root).stdout.strip()
+    record = os.environ.get('SMOKE_RECORD') or os.path.join(asf_root, 'docs', 'plans',
+                                                              'fix-package-smoke.txt')
+    fp = lambda s: hashlib.sha256(s.encode()).hexdigest()[:12]  # noqa: E731
+    with open(record, 'w', encoding='utf-8') as f:
+        f.write('# R21 live smoke, written by tools/smoke_isolated_session.sh on ALL PASS\n'
+                f"date: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
+                f'account: {fp(acct.name)}\nproduct: {fp(product_name)}\nsha: {sha}\n'
+                'result: PASS\n')
+    print(f'smoke: recorded {record} (sha {sha[:12]}) — commit it for the package gate')
 sys.exit(1 if failed else 0)
 PY
