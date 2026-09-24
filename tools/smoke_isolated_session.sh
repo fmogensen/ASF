@@ -59,6 +59,7 @@ SMOKE_PRODUCT="${args[0]}" SMOKE_ACCOUNT="${args[1]:-}" SMOKE_KEEP="$keep" SMOKE
   PYTHONPATH="$ROOT" exec python3 - <<'PY'
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -173,7 +174,7 @@ job = runtime.Job(product.name, f'smoke-{stamp}', wt, brief, model, account=acct
 # ---- the environment the session gets --------------------------------------------------------
 job_env = runtime.build_env(job)
 allowed = set(hermetic.WORKER_ALLOW) | set(job.passthrough) | set(secrets) | {
-    'HOME', 'CLAUDE_CONFIG_DIR', 'ASF_PRODUCT', 'ASF_JOB', 'ASF_SESSION'}
+    'HOME', 'CLAUDE_CONFIG_DIR', 'ASF_PRODUCT', 'ASF_JOB', 'ASF_SESSION', 'ASF_HOME'}
 stray = sorted(k for k in job_env if k not in allowed and not k.startswith(('LC_', 'GIT_CONFIG_')))
 check('environment is the allow-list', not stray, ', '.join(stray))
 check('HOME is not the operator\'s', job_env.get('HOME') != os.path.expanduser('~'), job_env.get('HOME', ''))
@@ -182,6 +183,18 @@ helpers = git(['config', '--get-all', f'credential.{runtime.GIT_TOKEN_HOST}.help
 check('git pushes with GH_TOKEN, not a keychain',
       runtime.GIT_TOKEN_VAR not in secrets or helpers[-1:] == [runtime.GIT_CREDENTIAL_HELPER],
       f'credential helpers for {runtime.GIT_TOKEN_HOST}: {len(helpers)}')
+
+# the approvals hook runs inside every session, in this environment: under an isolated HOME it
+# must still find the factory's own config and product file, or it refuses every tool call —
+# checked here directly, since the session below only meets it when the account's settings
+# already carry the hook
+probe = subprocess.run([shutil.which('asf') or 'asf', 'hook', 'approvals'], env=job_env, cwd=wt,
+                       input=json.dumps({'tool_name': 'Bash', 'hook_event_name': 'PreToolUse',
+                                         'tool_input': {'command': 'echo probe'}}),
+                       capture_output=True, text=True, timeout=60)
+refused = 'refused' in (probe.stdout + probe.stderr) or probe.returncode == 2
+check('the approvals hook allows a harmless call in the session env', not refused,
+      (probe.stdout + probe.stderr).strip()[-200:])
 
 # ---- one real session ------------------------------------------------------------------------
 rt = runtime.from_config(cfg)
