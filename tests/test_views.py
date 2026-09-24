@@ -180,6 +180,49 @@ class StatusViewTests(ViewsTestCase):
                          '— (not configured: backlog_dir (no index.json))')
 
 
+class DecisionsCellTests(ViewsTestCase):
+    def _index(self, n, decided=False):
+        items = dict(INDEX['items'])
+        del items['F-0001']
+        for i in range(1, n + 1):
+            fid = f'F-{i:04d}'
+            items[fid] = {'id': fid, 'type': 'feature', 'title': 't', 'folder': 'features',
+                          'parent': 'E-0001', 'state': 'New', 'decided': decided, 'rank': i}
+        with open(os.path.join(self.root, 'index.json'), 'w') as f:
+            json.dump({'generated': '', 'items': items}, f)
+
+    def rows(self, cfg=None):
+        text = status.render(self.root, self.product, cfg=cfg or {'scheduler': {'kind': 'none'}})
+        return [ln.split(' | ')[0].lstrip('| ') for ln in text.splitlines() if ln.startswith('| ')], \
+            {ln.split(' | ')[0].lstrip('| '): ln.split(' | ', 1)[1].rstrip(' |')
+             for ln in text.splitlines() if ln.startswith('| ') and 'Metric' not in ln}
+
+    def test_the_count_and_the_first_ids(self):
+        self._index(73)
+        self.assertEqual(status.decisions_cell(self.root, self.product),
+                         '73 undecided — next: F-0001, F-0002, F-0003, F-0004, F-0005')
+        self.assertEqual(self.rows()[1]['Decisions'],
+                         '73 undecided — next: F-0001, F-0002, F-0003, F-0004, F-0005')
+
+    def test_every_card_decided_is_zero(self):
+        self._index(3, decided=True)
+        self.assertEqual(status.decisions_cell(self.root, self.product), '0')
+
+    def test_no_index_names_the_backlog(self):
+        self.assertEqual(status.decisions_cell(os.path.join(self.tmp, 'nowhere'), self.product),
+                         status.ready_cell(os.path.join(self.tmp, 'nowhere'), self.product))
+
+    def test_a_raising_cell_leaves_the_table(self):
+        with mock.patch.object(status, 'decisions_cell', side_effect=ValueError('boom')):
+            names, rows = self.rows()
+        self.assertEqual(rows['Decisions'], '? (ValueError: boom)')
+        self.assertIn('Groom', rows)
+
+    def test_the_row_sits_directly_after_ready_to_launch(self):
+        names, _ = self.rows()
+        self.assertEqual(names[names.index('Ready to launch') + 1], 'Decisions')
+
+
 class CapacityTable(ViewsTestCase):
     def test_one_row_per_product_with_the_bound_by_column(self):
         asf = env.Product('asf', {'capacity': {'sessions': 3}})

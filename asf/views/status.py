@@ -9,6 +9,7 @@ Every row is filled from what exists, or says which key would fill it —
 * **Capacity** — the session and CI ceilings the resolver (``asf.capacity.resolve``) hands back;
 * **Ready to launch** — what ``asf next --json`` would print (the feeder over the record's
   ``index.json``, less the sessions in flight);
+* **Decisions** — the undecided cards (D6's one ranking) and the first few to decide;
 * **Quota 5h/7d** — each account through the quota source (``worker_pool.quota_command``), the
   cell naming the band when it is not ``free``;
 * **Cron** — the scheduler adapter's ``status()`` of this product's loaded jobs.
@@ -157,6 +158,24 @@ def ready_cell(root, product):
     return f"{len(launching)} — first: {first.kind} {first.item_id}"
 
 
+def decisions_cell(root, product):
+    """The decision debt: how many open cards wait for ``decided: true``, and the ids to spend it
+    on first — the same ranking (``undecided_rows``) and the same ``busy`` the wave plans with."""
+    from asf.feeder import rows as feeder_rows
+    from asf.tick.step_wave import inflight, plan_inputs
+    from asf.views import index_reader as ix
+    if not root or not os.path.exists(os.path.join(root, 'index.json')):
+        return not_configured('backlog_dir (no index.json)')
+    items, _generated = ix.load(root)
+    held = feeder_rows.inflight_ids(inflight(product)) | {
+        i for i in plan_inputs(product, root)['busy'] or () if feeder_rows.is_open(items.get(i) or {})}
+    rows = feeder_rows.undecided_rows(items, product, held, limit=0)
+    if not rows:
+        return "0"
+    shown = ', '.join(r.item_id for r in rows[:feeder_rows.decision_rows(product)])
+    return f"{len(rows)} undecided — next: {shown}" if shown else f"{len(rows)} undecided"
+
+
 def quota_cell(cfg):
     from asf.workers import pool as pool_mod
     from asf.workers import quota as quota_mod
@@ -212,6 +231,7 @@ def render(root, product, cfg=None):
                        ('Agents', lambda: agents_cell(product)),
                        ('Capacity', lambda: capacity_cell(cfg, product)),
                        ('Ready to launch', lambda: ready_cell(root, product)),
+                       ('Decisions', lambda: decisions_cell(root, product)),
                        ('Quota 5h/7d', lambda: quota_cell(cfg)),
                        ('Cron', lambda: cron_cell(cfg, product)),
                        ('Groom', lambda: groom_cell(root, product))):
