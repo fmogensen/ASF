@@ -22,6 +22,7 @@ The product yaml carries the overrides::
         gate: per-branch          # default combined: one gate per tick (B-0040)
         branches_per_tick: 3
         gate_timeout_s: 900       # default 600: a gate past it is killed and red (B-0072)
+        rewrite_ratio: 0.5        # default 0.5: a spec/plan branch deleting this share of the trunk's lines is held
       idea:
         answer_overlap: 0.8       # the title overlap at which the record answers an idea's node
       thin_card:
@@ -96,9 +97,13 @@ DEFAULT_BRANCHES_PER_TICK = 12
 #: pre-commit hook hung the tick, and every tick after it). The tick's clock, by default.
 DEFAULT_GATE_TIMEOUT_S = 600
 
+#: The share of a document's trunk lines a spec or plan branch may delete before harvest holds it
+#: as a regeneration, not a refinement (F-0023 D9). Spelt ``harvest: {rewrite_ratio: …}``.
+DEFAULT_REWRITE_RATIO = 0.5
+
 #: The keys of the yaml's ``harvest:`` block and the field each one is.
 HARVEST_KEYS = {'gate': 'harvest_gate', 'branches_per_tick': 'branches_per_tick',
-                'gate_timeout_s': 'gate_timeout_s'}
+                'gate_timeout_s': 'gate_timeout_s', 'rewrite_ratio': 'rewrite_ratio'}
 
 #: The share of a proposed node's title tokens an open item of the same type must already carry
 #: for the record to answer it (F-0023): ``asf idea apply`` files nothing for a node the record
@@ -189,6 +194,8 @@ class Conventions:
     harvest_gate: str = DEFAULT_HARVEST_GATE
     branches_per_tick: int = DEFAULT_BRANCHES_PER_TICK
     gate_timeout_s: int = DEFAULT_GATE_TIMEOUT_S
+    #: The share of the trunk document's lines a spec/plan branch may delete (:mod:`asf.harvest.refine`).
+    rewrite_ratio: float = DEFAULT_REWRITE_RATIO
     #: The title-token overlap at which the record answers a node of an idea tree.
     answer_overlap: float = DEFAULT_ANSWER_OVERLAP
     #: A Feature card with fewer acceptance items or description words than these is thin.

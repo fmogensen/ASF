@@ -55,6 +55,8 @@ conventions:
   #   gate: combined
   #   branches_per_tick: 12
   #   gate_timeout_s: 600
+  #   rewrite_ratio: 0.5   # a spec or plan branch that deletes this share of the document on the
+  #                        # trunk (or drops one of its headings or S-/T- ids) is held, not landed
   # prs_per_tick: 6
   # the share of a proposed node's title an open item of the same type must already carry for
   # `asf idea apply` to count the record as having answered it (nothing is filed for that node).

@@ -76,6 +76,7 @@ from asf import approvals, env, hermetic
 from asf.conventions import Conventions
 from asf.feeder import footprint, widen
 from asf.feeder.rows import LANDING_GATE, REVIEW_WANTED
+from asf.harvest import refine
 from asf.workers import health as health_mod
 from asf.workers import lifecycle
 from asf.workers.pool import now_iso
@@ -856,6 +857,27 @@ def lane_refusal(repo, trunk, branch, item):
                           f'the branch names its item — reword them; the factory publishes the '
                           f'rewritten branch')
     return None
+
+
+def refine_refusal(repo, trunk, branch, item, conv):
+    """A spec/plan lane branch that regenerates the document already on the trunk, instead of
+    refining it (F-0023): ``(kind, text)`` for the same hold-and-correct loop as
+    :func:`lane_refusal`. None for every other lane and for a document the trunk does not have —
+    a first draft is never bounced, and what a coder may rewrite is the plan's business."""
+    path = deliverable_of(conv, branch, item)
+    if not path:
+        return None
+    before = sh(['git', 'show', f'origin/{trunk}:{path}'], cwd=repo)
+    if before.returncode != 0:
+        return None
+    after = sh(['git', 'show', f'origin/{branch}:{path}'], cwd=repo)
+    if after.returncode != 0:
+        return None
+    try:
+        ratio = float(conv.rewrite_ratio)
+    except (TypeError, ValueError):
+        ratio = refine.DEFAULT_REWRITE_RATIO
+    return refine.verdict(before.stdout, after.stdout, ratio, path=path, trunk=trunk)
 
 
 def touched_files(repo, trunk, branch):
@@ -2019,7 +2041,8 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
             out(f'held {branch}: ruling belongs in the record')
             results[branch] = 'held'
             continue
-        refusal = lane_refusal(repo, trunk, branch, item)
+        refusal = (lane_refusal(repo, trunk, branch, item)
+                   or refine_refusal(repo, trunk, branch, item, conv))
         if refusal:
             if dry_run:  # a dry run writes nothing — not even a hold
                 out(f'DRY: would hold {branch}: {refusal[1]}')

@@ -79,6 +79,14 @@ class FromMappingTests(unittest.TestCase):
         self.assertEqual(c.extra, {'idea': {'later': 'x'}})
         self.assertEqual(Conventions.from_mapping({'idea': {}}), Conventions())
 
+    def test_the_harvest_block_names_the_rewrite_ratio(self):
+        """``harvest: {rewrite_ratio: 0.9}`` (F-0023 D9): the share of the trunk document's lines a
+        spec or plan branch may delete before it is held as a regeneration; the default is 0.5."""
+        self.assertEqual(Conventions().rewrite_ratio, 0.5)
+        c = Conventions.from_mapping({'harvest': {'rewrite_ratio': 0.9, 'gate': 'per-branch'}})
+        self.assertEqual((c.rewrite_ratio, c.harvest_gate), (0.9, 'per-branch'))
+        self.assertEqual(c.extra, {})
+
     def test_the_thin_card_block_names_the_two_bars(self):
         """``thin_card: {acceptance_items: 3, description_words: 20}`` is how a product yaml
         spells what makes a Feature card thin (F-0023); the defaults are 1 and 40."""
