@@ -472,7 +472,19 @@ PRS = {601: {'merged': True, 'merge_commit_sha': '1' * 40, 'body': 'Adds it\n\nT
        623: {'merged': True, 'merge_commit_sha': '2' * 40, 'body': 'no try line', 'title': 'y'}}
 
 
+def resolve_all(items):
+    """Every Feature, Story, Task and Bug Resolved: a release that lists them as landed is
+    honest only then (I12)."""
+    for it in items.values():
+        if it.get('type') in ('feature', 'story', 'task', 'bug'):
+            it['state'] = 'Resolved'
+
+
 class Releases(Base):
+    def setUp(self):
+        super().setUp()
+        resolve_all(self.items)
+
     def run_release(self, anc, deploys=DEPLOYS, prs=PRS):
         with mock.patch.object(metrics, 'deploy_runs', return_value=deploys), \
                 mock.patch.object(metrics, 'pr_info', side_effect=lambda n, *a, **kw: prs.get(n)), \
@@ -553,6 +565,7 @@ class TrunkReleases(Base):
 
     def setUp(self):
         super().setUp()
+        resolve_all(self.items)
         self.tmp = tempfile.mkdtemp(prefix='trunk_release_')
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.origin = os.path.join(self.tmp, 'origin.git')
@@ -1114,6 +1127,39 @@ class Backfill(Base):
         self.assertEqual((batch['batch'], batch['cancelled_minutes'], batch['items'], batch['item_reason']),
                          ('worktree-m-batch-20260921-0006', 3, None, 'batch run without a PR list'))
         self.assertFalse(batch['superseded'])           # no later run on that branch
+
+
+class ReleaseHonesty(Base):
+    """I12 (a test, never a tick check — R13): release notes list as landed only items whose
+    derived state is Resolved or Closed. v0.1.2's changelog listed a plan-approved Feature and
+    two with most of their Tasks open as landed, because a merged PR linking the item counted."""
+
+    def test_i12_release_notes_list_only_resolved_or_closed_as_landed(self):
+        from asf import invariants
+        # a Task landed and merged, its Feature still open (1 of 2 Tasks); a Bug fixed
+        self.items['T-0001']['state'] = 'Closed'
+        self.items['B-0001']['state'] = 'Resolved'
+        found = {'T-0001': [], 'B-0001': []}
+        notes = metrics.render_notes(self.items, found, [])
+        self.assertEqual(invariants.check_i12(notes, self.items), [])
+        landed = notes[:notes.index('### In progress')]
+        self.assertNotIn('F-0001', landed)
+        self.assertIn('- F-0001 Free plan', notes[notes.index('### In progress'):])
+        self.assertIn('### Bugs fixed\n\n- B-0001 Banner shows', notes)
+
+        note = metrics.render_release(DAY, 'b' * 40, None, None, self.items,
+                                      {'F-0001': [(601, None)], 'T-0001': [(623, None)]})
+        self.assertEqual(invariants.check_i12(note, self.items), [])
+        self.assertIn('## Tasks\n\n- [T-0001]', note)
+        self.assertIn('## In progress\n\n- [F-0001]', note)
+
+    def test_i12_the_check_names_an_open_item_listed_as_landed(self):
+        from asf import invariants
+        dishonest = '### Features landed\n\n- F-0001 Free plan\n\n### In progress\n\n- F-0002 x\n'
+        findings = invariants.check_i12(dishonest, self.items)
+        self.assertEqual([(f.invariant, f.subject) for f in findings], [('I12', 'F-0001')])
+        self.items['F-0001']['state'] = 'Resolved'
+        self.assertEqual(invariants.check_i12(dishonest, self.items), [])
 
 
 if __name__ == '__main__':

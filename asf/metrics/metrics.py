@@ -866,8 +866,11 @@ def render_release(day, new_sha, old_sha, deployed_at, items, found, tag=None, a
         if notes:
             out += ['', '## Notes', '', notes.rstrip('\n')]
         return '\n'.join(out) + '\n'
-    for type_, title in TYPE_TITLES:
-        ids = [i for i in sorted(found) if items[i].get('type') == type_]
+    groups = [(title, [i for i in sorted(found) if items[i].get('type') == type_
+                       and is_landed(items[i])]) for type_, title in TYPE_TITLES]
+    # I12: what the release moved but did not land is progress, never listed as landed
+    groups.append(('In progress', [i for i in sorted(found) if not is_landed(items[i])]))
+    for title, ids in groups:
         if not ids:
             continue
         out += [f"## {title}", '']
@@ -1057,10 +1060,22 @@ def install_line(product, tag):
     return template.format(repo_slug=slug, tag=tag) if template and slug else None
 
 
+#: The derived states in which an item has landed: only these are listed as landed (I12).
+LANDED_STATES = ('Resolved', 'Closed')
+
+
+def is_landed(item):
+    """I12: an item is listed as landed only when its derived state is Resolved or Closed — a
+    merged PR that links it is progress, not a landing (v0.1.2 listed a plan-approved Feature
+    and two with most of their Tasks open as landed)."""
+    return (item or {}).get('state') in LANDED_STATES
+
+
 def render_notes(items, found, improvements, install=None):
     """A version's release notes, for a human: the Features it landed (a Task or Story counts
     toward its Feature), the Bugs it fixed, the item-less commits one line each, and how to
-    upgrade to it."""
+    upgrade to it. A Feature or Bug the release moved but that is not Resolved or Closed is
+    listed under **In progress**, never as landed (I12)."""
     features = {}
     for iid in found:
         cur, seen = iid, set()
@@ -1074,8 +1089,12 @@ def render_notes(items, found, improvements, install=None):
                 break
             cur = it.get('parent')
     bugs = {i: items[i].get('title', '') for i in found if (items.get(i) or {}).get('type') == 'bug'}
+    progress = {i: t for i, t in {**features, **bugs}.items() if not is_landed(items.get(i))}
+    features = {i: t for i, t in features.items() if i not in progress}
+    bugs = {i: t for i, t in bugs.items() if i not in progress}
     out = []
-    for heading, rows in (('Features landed', features), ('Bugs fixed', bugs)):
+    for heading, rows in (('Features landed', features), ('Bugs fixed', bugs),
+                          ('In progress', progress)):
         if rows:
             out += [f'### {heading}', ''] + [f'- {i} {t}'.rstrip() for i, t in sorted(rows.items())] + ['']
     if improvements:
