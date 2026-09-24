@@ -126,5 +126,14 @@ class RulingFieldsTests(unittest.TestCase):
         self.assertEqual(report.ruling(text), 'it waits for T-0025')
 
 
+    def test_a_report_quoting_a_cli_error_is_not_that_failure(self):
+        text = ('REPORT\nitem: F-0001\nstatus: done\npushed: yes\n'
+                'left out: tools/x.sh - permission denied in this session\n')
+        rec = {'type': 'result', 'subtype': 'success', 'is_error': False, 'result': text}
+        self.assertIsNone(runtime_mod.failure_reason(rec))
+        self.assertTrue(runtime_mod.result_ok(rec))
+        bare = dict(rec, result='Error: permission denied')
+        self.assertEqual(runtime_mod.failure_reason(bare), 'permission')
+
 if __name__ == '__main__':
     unittest.main()
