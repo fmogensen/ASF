@@ -33,11 +33,13 @@ can ask "is it live" without git (:func:`is_live`).
 
 Every other module asks this one:
 
-* spawn — :func:`may_launch`: refuse only a live run's worktree; an ended run's worktree and
-  branch are reused (B-0025, B-0046, B-0048, B-0051);
+* spawn — :func:`may_launch`: refuse only a live run's worktree; an ended (or dead-pid) run's
+  worktree and branch are reused (B-0025, B-0046, B-0048, B-0051);
 * health — :func:`judge` (what ``ended`` line to write) and :func:`reap_verdict`;
 * harvest — :func:`eligible` (pushed, not landed) and :func:`by_branch`;
-* the feeder and the wave — :func:`inflight`, :func:`attempts`, :func:`corrections`;
+* the feeder, the wave, the pool and capacity — :func:`occupies` (live on the ledger AND the pid
+  answers: a dead run is no load even before health records its end), :func:`inflight`,
+  :func:`attempts`, :func:`corrections`;
 * the PR step — :func:`finished`.
 """
 import dataclasses
@@ -179,10 +181,10 @@ def latest(path):
     return {job: rs[-1] for job, rs in runs(path).items()}
 
 
-def live_all(state_root):
-    """Every live run under every product's registry (``state_root/*/sessions.jsonl``), each
-    carrying its ``product`` and ``session`` (:func:`read_lines`) — what the pool sums load over
-    across products (F-0076)."""
+def live_all(state_root, alive=None):
+    """Every run that holds a seat (:func:`occupies`) under every product's registry
+    (``state_root/*/sessions.jsonl``), each carrying its ``product`` and ``session``
+    (:func:`read_lines`) — what the pool sums load over across products (F-0076)."""
     out = []
     if not state_root or not os.path.isdir(state_root):
         return out
@@ -190,7 +192,7 @@ def live_all(state_root):
         path = os.path.join(state_root, name, 'sessions.jsonl')
         if not os.path.isfile(path):
             continue
-        out += [r for r in latest(path).values() if is_live(r)]
+        out += [r for r in latest(path).values() if occupies(r, alive)]
     return out
 
 
@@ -237,6 +239,36 @@ def is_live(run):
     return bool(run) and not run.get('ended')
 
 
+def pid_alive(pid):
+    """The pid answers a signal 0 (a pid we may not signal is someone's, so alive)."""
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+    return True
+
+
+def occupies(run, alive=None):
+    """The run holds a seat: live on the ledger (:func:`is_live`) AND its pid still answers.
+
+    ``ended`` is written by health, and a tick that does not run health (a product with
+    ``steps.health: off``, or a tick between two health passes) never writes it — a session
+    that died there stayed "live" on the ledger for ever, counting as its account's load, as
+    the product's in-flight session, and as the one job a cooling account may carry, so every
+    other row waited on ``quota cooldown`` until an operator ran health by hand. A dead pid is
+    no load, whatever the ledger has recorded yet: this is what the pool, the feeder's
+    in-flight list and the capacity count all ask. A run with no pid recorded holds nothing."""
+    if not is_live(run):
+        return False
+    return bool((alive or pid_alive)(run.get('pid')))
+
+
 def finished(run):
     """Ended ``finished`` — which health writes only for a result that says ok on a branch that
     is pushed (:func:`judge`), so this alone means "pushed"."""
@@ -269,11 +301,11 @@ def pending_correction(run, path=None):
     return corr
 
 
-def inflight(path):
-    """The feeder's ``inflight`` list: one dict per live run."""
+def inflight(path, alive=None):
+    """The feeder's ``inflight`` list: one dict per run that holds a seat (:func:`occupies`)."""
     return [{'item': r.get('item'), 'kind': r.get('kind'), 'account': r.get('account'),
              'job': job, 'started': r.get('started')}
-            for job, r in latest(path).items() if is_live(r)]
+            for job, r in latest(path).items() if occupies(r, alive)]
 
 
 def awaiting_harvest(path):
@@ -311,6 +343,23 @@ def corrections(path):
         run, corr = max(held, key=lambda rc: rc[1].get('at') or '')
         out[item] = dict(corr, rounds=rounds_of(path, item), branch=run.get('branch'))
     return out
+
+
+#: A card in one of these states has no work left for a session (the feeder's ``DONE_STATES``).
+DONE_STATES = ('Resolved', 'Closed')
+
+
+def closed_state(items, item):
+    """Why ``item``'s card wants no more sessions — ``'removed'`` or its done state — or None.
+    ``items`` is the record's index (``{id: card}``, removed cards included); None, or an item
+    the index does not hold, is never closed (unknown ≠ done). A run of a closed item is ended and
+    reaped, never held or sent back to its session: there is nothing for the session to do."""
+    card = (items or {}).get(item or '') or {}
+    if card.get('removed'):
+        return 'removed'
+    if card.get('state') in DONE_STATES:
+        return card['state']
+    return None
 
 
 # ---- evidence -------------------------------------------------------------------
@@ -415,7 +464,6 @@ def publish(wt, branch, remote_sha='', main='main'):
 def gather(product, run, alive=None, worktree=None):
     """The :class:`Evidence` for ``run`` — git in its worktree (``run['worktree']`` unless given),
     ``origin/<branch>`` from the product repo's remote, the log through the runtime."""
-    from asf.workers.health import pid_alive
     alive = alive or pid_alive
     ev = Evidence(result=runtime_mod.read_result(run.get('log')), alive=alive(run.get('pid')))
     wt = worktree or run.get('worktree')
@@ -661,7 +709,7 @@ def empty_branch_text():
 
 # ---- what spawn and health ask ---------------------------------------------------
 
-def may_launch(path, job, worktree_path):
+def may_launch(path, job, worktree_path, alive=None):
     """``(ok, why)``: a worktree at ``worktree_path`` blocks a launch only while the run that
     owns it is live; an ended run's worktree is reused, a worktree no run recorded is refused
     (an orphan is for the operator, not for a session to inherit)."""
@@ -670,7 +718,7 @@ def may_launch(path, job, worktree_path):
     run = by_worktree(path).get(os.path.realpath(worktree_path)) or latest(path).get(job)
     if run is None:
         return False, f'worktree already exists: {worktree_path}'
-    if is_live(run):
+    if occupies(run, alive):  # a dead pid's worktree is reused like an ended run's
         return False, f'worktree already exists: {worktree_path}'
     return True, ''
 

@@ -336,7 +336,7 @@ class PoolAcrossProductsTest(Home):
     def register(self, product, job, account='acct-a', **fields):
         pool_mod.append_session(product, dict({'job': job, 'account': account,
                                                'product': product.name, 'started': '2026-09-23',
-                                               'pid': 4242}, **fields))
+                                               'pid': os.getpid()}, **fields))
 
     def cfg_with_config_dir(self, cap=1):
         """``self.cfg``, but acct-a carries the ``config_dir`` an observed session names: D7's
@@ -351,8 +351,9 @@ class PoolAcrossProductsTest(Home):
         self.assertEqual(p.load(self.acct()), 1)
 
     def test_just_launched_counts_before_ps_sees_it(self):
-        # No process ever existed at this pid: the registry line alone is the seat it holds.
-        self.register(self.product, 'spec-f-0001', pid=999999)
+        # ps has not shown the process yet (the fake table is empty): the registry line and a
+        # pid that answers are the seat it holds.
+        self.register(self.product, 'spec-f-0001')
         p = pool_mod.Pool.from_config(self.cfg, self.product)
         self.assertEqual(p.load(self.acct()), 1)
 
@@ -444,8 +445,8 @@ class PoolAcrossProductsTest(Home):
     def test_unreadable_prints_and_counts_registry(self):
         """D10: the table cannot be read → the wave says so once, and load is the registered runs
         across products. The factory degrades, it does not stop."""
-        self.register(self.product, 'spec-f-0001', pid=5150)
-        self.register(self.other(), 'spec-f-0002', pid=5151)
+        self.register(self.product, 'spec-f-0001')
+        self.register(self.other(), 'spec-f-0002')
         p = pool_mod.Pool.from_config(self.cfg, self.product,
                                       quota_source=quota_mod.FakeQuotaSource({}),
                                       session_source=RaisingSource('ps: not found'))

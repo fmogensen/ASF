@@ -465,7 +465,8 @@ class SuppressionTests(GroomAutoTestCase):
         os.makedirs(os.path.dirname(sessions_path), exist_ok=True)
         with open(sessions_path, 'w', encoding='utf-8') as f:
             f.write(json.dumps({'job': 'spec-F-0003', 'item': 'F-0003', 'kind': 'spec',
-                               'account': 'a', 'started': '2026-09-22T00:00:00Z'}) + '\n')
+                               'account': 'a', 'started': '2026-09-22T00:00:00Z',
+                               'pid': os.getpid()}) + '\n')
 
         r = self.run_groom()
         self.assertEqual(r.returncode, 0, r.stderr)

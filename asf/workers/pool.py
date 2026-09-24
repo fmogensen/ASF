@@ -231,8 +231,15 @@ class Pool:
         the registered runs alone — the spec's D10 fallback, which the wave prints once.
         """
         accounts = accounts_from_config(cfg)
-        registered = lifecycle.live_all(os.path.join(env.ASF_HOME, 'state'))
         observed, why = observe.read(cfg, accounts, source=session_source)
+        seen_pids = {o.pid for o in observed} - {None}
+        seen_sessions = {o.session for o in observed} - {None}
+        # a run holds a seat while its pid answers, or while ps shows its process — a dead run
+        # with no ``ended`` line yet is no load (:func:`asf.workers.lifecycle.occupies`)
+        registered = [r for r in lifecycle.live_all(os.path.join(env.ASF_HOME, 'state'),
+                                                    alive=lambda _pid: True)
+                      if lifecycle.pid_alive(r.get('pid')) or r.get('pid') in seen_pids
+                      or (r.get('session') is not None and r.get('session') in seen_sessions)]
         pids = {r.get('pid') for r in registered} - {None}
         sessions = {r.get('session') for r in registered} - {None}
         extra = [o for o in observed

@@ -108,6 +108,22 @@ class DoneTests(SummaryTestCase):
         self.assertIn('  41m  ', row)
         self.assertTrue(row.endswith('  a bug'), row)
 
+    def test_an_ended_or_reaped_run_is_done_never_in_flight(self):
+        # seen live: an empty-branch end then a reap — the run is DONE, never IN FLIGHT
+        self.launch('fix-bug-b-0002', item='B-0002', kind='fix-bug', started='2026-09-22T11:00:00Z')
+        pool_mod.update_session(self.product, 'fix-bug-b-0002', ended='2026-09-22T11:16:00Z',
+                                end_reason='failed: empty branch: nothing to land')
+        text = self.render(alive=lambda pid: True)       # even while the pid still answers
+        self.assertIn('IN FLIGHT — none', text)
+        self.assertIn('DONE since 2026-09-21T12:00:00Z — 1 session', text)
+        row = [ln for ln in text.split('\n') if ln.startswith('fix-bug-b-0002')]
+        self.assertEqual(len(row), 1, text)
+        self.assertIn('failed: empty branch: nothing to land', row[0])
+        # reaped: health removed the worktree; the next tick lists it nowhere
+        text = self.render(alive=lambda pid: False)
+        self.assertIn('IN FLIGHT — none', text)
+        self.assertNotIn('fix-bug-b-0002', text)
+
     def test_failed_and_dead_results_are_the_ledgers_words(self):
         self.launch('a', started='2026-09-22T11:00:00Z')
         self.launch('b', started='2026-09-22T11:00:00Z')

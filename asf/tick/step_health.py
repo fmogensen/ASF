@@ -63,12 +63,16 @@ def dead_jobs(found, stalled):
     return list(dict.fromkeys(jobs))
 
 
-def handle_dead(ctx, session, runtime_fn=_runtime, out=print):
-    """``corrected`` | ``operator`` | ``flagged`` (already raised) for one dead session."""
+def handle_dead(ctx, session, runtime_fn=_runtime, out=print, items=None):
+    """``corrected`` | ``operator`` | ``flagged`` (already raised) | ``closed`` for one dead
+    session. ``items`` is the record's index: a dead run of a removed or done item is only ended
+    (health did that) — no cold retry, no hold, nothing sent back to a session."""
     product = ctx.product
     job = session['job']
     if session.get('operator_flagged'):
         return 'flagged'
+    if lifecycle.closed_state(items, session.get('item')):
+        return 'closed'
     # a correction is never corrected again (B-0085): its own failure is what holds the item, and
     # the round is counted there. Without this the tick would correct the correction for ever.
     is_correction = str(job).endswith('-correction')
@@ -139,7 +143,8 @@ def file_rulings(ctx, out=print):
 
 def run(ctx, out=print, runtime_fn=_runtime):
     product = ctx.product
-    found = health_mod.health(product, fix=True, out=out)
+    items = health_mod.record_items(product)
+    found = health_mod.health(product, fix=True, out=out, items=items)
     file_rulings(ctx, out=out)  # B-0064
     stalled = stall_mod.stall(product, out=out)
     ctx.counts['stalls'] += len(stalled)
@@ -147,12 +152,13 @@ def run(ctx, out=print, runtime_fn=_runtime):
     for job in dead_jobs(found, stalled):
         session = sessions.get(job)
         if session is not None:
-            handle_dead(ctx, dict(session, job=job), runtime_fn=runtime_fn, out=out)
-    hold_failed_corrections(ctx, sessions, out=out)
+            handle_dead(ctx, dict(session, job=job), runtime_fn=runtime_fn, out=out,
+                        items=items)
+    hold_failed_corrections(ctx, sessions, out=out, items=items)
     return 0
 
 
-def hold_failed_corrections(ctx, sessions, out=print):
+def hold_failed_corrections(ctx, sessions, out=print, items=None):
     """A correction that has ended without finishing holds the run it was correcting (B-0085).
 
     The hold used to happen in the same pass that launched the correction, because that pass
@@ -169,6 +175,8 @@ def hold_failed_corrections(ctx, sessions, out=print):
         original = sessions.get(job[:-len('-correction')])
         if original is None or lifecycle.pending_correction(original, path):
             continue
+        if lifecycle.closed_state(items, original.get('item')):
+            continue  # a removed or done item's run is never held
         original_job = job[:-len('-correction')]
         fields, line = lifecycle.hold(path, dict(original, job=original_job), 'died',
                                       died_text(run_rec), pool_mod.now_iso())

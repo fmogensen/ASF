@@ -487,7 +487,7 @@ class TestSpawn(Home):
         self.assertFalse(spawn_mod.release_id_range(self.product, 'j1'))
 
     def test_existing_worktree_refuses(self):
-        rt = runtime_mod.FakeRuntime([{'running': True}])
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': os.getpid()}])
         spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b', runtime=rt, cfg=self.cfg)
         with self.assertRaises(spawn_mod.SpawnError):
             spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b', runtime=rt, cfg=self.cfg)
@@ -534,7 +534,7 @@ class TestSpawn(Home):
         git('merge-base', '--is-ancestor', 'origin/main', 'HEAD', cwd=wt)
 
     def test_b0025_live_sessions_worktree_still_refuses(self):
-        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 50}])
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': os.getpid()}])
         row = feature_row('again')
         spawn_mod.spawn(self.product, row, self.acct(), 'b', runtime=rt, cfg=self.cfg)
         with self.assertRaises(spawn_mod.SpawnError):
@@ -572,12 +572,13 @@ class TestSpawn(Home):
                                              'action': 'CORRECT', 'model': 'Opus', 'kind': 'correct',
                                              'branch': rec['branch']}))
         rec2 = spawn_mod.spawn(self.product, row, self.acct(), 'b',
-                               runtime=runtime_mod.FakeRuntime([{'running': True, 'pid': 42}]), cfg=self.cfg)
+                               runtime=runtime_mod.FakeRuntime([{'running': True, 'pid': os.getpid()}]), cfg=self.cfg)
         self.assertEqual(os.path.realpath(rec2['worktree']), os.path.realpath(wt))
         self.assertTrue(os.path.exists(os.path.join(wt, 'work.txt')))
         self.assertEqual(git('rev-parse', '--abbrev-ref', 'HEAD', cwd=wt), rec['branch'])
         self.assertEqual(step_wave_corrections(self.product), {})  # answered
-        found = health_mod.health(self.product, fix=True, alive=lambda pid: pid == 42, out=lambda s: None)
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: pid == os.getpid(),
+                                  out=lambda s: None)
         self.assertTrue(os.path.isdir(wt))
         self.assertFalse([f for f in found if f[1] in ('reaped', 'reapable')], found)
         # a third session on the same branch while the correction is live: refused

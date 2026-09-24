@@ -44,6 +44,7 @@ listed with why. A reap also releases the job's ``BACKLOG_ID_RANGE`` reservation
 nothing can mint against it once the worktree is gone, and prints ``reaped <job> (<what landed, or
 empty>)``.
 """
+import json
 import os
 import subprocess
 
@@ -61,18 +62,22 @@ from asf.workers import spawn as spawn_mod
 UNPUSHED_REASON_PREFIXES = ('failed: not pushed', f'failed: {report_mod.UNPUSHED}')
 
 
-def pid_alive(pid):
-    if not pid:
-        return False
+pid_alive = lifecycle.pid_alive
+
+
+def record_items(product):
+    """``{id: card}`` from the product's record clone's ``index.json`` — removed cards included,
+    since a removed card is exactly what :func:`asf.workers.lifecycle.closed_state` must see — or
+    None when there is no index to read."""
+    from asf.tick import shadow
+    path = os.path.join(shadow.record_dir(product), 'index.json')
     try:
-        os.kill(int(pid), 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except (OSError, ValueError):
-        return False
-    return True
+        with open(path, encoding='utf-8') as f:
+            index = json.load(f)
+    except (OSError, ValueError, TypeError):
+        return None
+    raw = index.get('items') if isinstance(index.get('items'), dict) else index
+    return {k: v for k, v in raw.items() if isinstance(v, dict)} if isinstance(raw, dict) else None
 
 
 def alive_for(product, runs, session_source=None):
@@ -268,17 +273,29 @@ def prune_branches(product, registry, fix=False):
     return found
 
 
-def health(product, fix=False, alive=None, session_source=None, out=print):
+def health(product, fix=False, alive=None, session_source=None, out=print, items=None):
     """Returns a list of ``(job, what, detail)`` transitions/findings. Every judgement is
     :mod:`asf.workers.lifecycle`'s: :func:`~asf.workers.lifecycle.judge` for the ``ended`` line,
     :func:`~asf.workers.lifecycle.reap_verdict` for the worktrees; this function gathers the
-    evidence, writes the one recorded transition and prints."""
+    evidence, writes the one recorded transition and prints.
+
+    ``items`` is the record's index (``{id: card}``, removed cards included; default: the
+    product's record clone). A run whose item is removed or done is ended and reaped, never held:
+    no correction is written on it, and one still pending is dropped (``released``) — a session
+    sent back to a card nobody wants work on has nothing to do, and its row only waits."""
     found = []
     registry = pool_mod.sessions_path(product)
     sessions = pool_mod.load_sessions(product)
+    if items is None:
+        items = record_items(product)
     if alive is None:
         alive = alive_for(product, sessions.values(), session_source)
     for job, s in sessions.items():
+        closed = lifecycle.closed_state(items, s.get('item'))
+        if closed and s.get('ended') and lifecycle.pending_correction(s, registry):
+            pool_mod.update_session(product, job, correction=None)
+            s.pop('correction', None)
+            found.append((job, 'released', f'{s.get("item")} is {closed}: no correction'))
         if s.get('ended'):
             if s.get('end_reason') == lifecycle.STOPPED and not s.get('correction'):
                 ev = lifecycle.gather(product, s, alive=alive)
@@ -312,6 +329,8 @@ def health(product, fix=False, alive=None, session_source=None, out=print):
         pool_mod.update_session(product, job, ended=now, end_reason=reason)
         s.update(ended=now, end_reason=reason)
         found.append((job, 'ended', reason))
+        if closed:
+            continue  # nothing to send back: the worktree is reaped below when it is empty
         if reason.startswith(UNPUSHED_REASON_PREFIXES):
             # the run's own work is the correction's input: the next session on the branch
             # commits and pushes it, or says why not (B-0051, B-0052)

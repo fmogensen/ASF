@@ -326,7 +326,8 @@ class WaveStepTests(StepsTestCase):
             self.addCleanup(p.stop)
 
     def test_rows_briefed_launched_and_logged(self):
-        self.session(job='task-t-0001', item='T-0001', kind='task', account='acct-b')
+        self.session(job='task-t-0001', item='T-0001', kind='task', account='acct-b',
+                     pid=os.getpid())
         self.session(job='old', item='T-0009', kind='task', ended='2026-01-01T00:00:00Z')
         self.write_config('feeder:\n  capacity: 3\n')
         seen = {}

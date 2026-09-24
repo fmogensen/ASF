@@ -278,7 +278,8 @@ class StateMachineInvariants(unittest.TestCase):
         self.assertEqual(lc.corrections(path)['B-0001']['rounds'], 1)
         self.assertEqual(lc.corrections(path)['B-0001']['branch'], 'b')
         with open(path, 'a') as f:
-            f.write(json.dumps({'job': 'correct-b-0001', 'pid': 2, 'started': 't4', 'item': 'B-0001', 'branch': 'b'}) + '\n')
+            f.write(json.dumps({'job': 'correct-b-0001', 'pid': os.getpid(), 'started': 't4',
+                                'item': 'B-0001', 'branch': 'b'}) + '\n')
         self.assertEqual(lc.derive(run, lc.Evidence(), path=path).name, lc.CORRECTED)
         self.assertEqual(lc.corrections(path), {})
         self.assertEqual(lc.inflight(path), [{'item': 'B-0001', 'kind': None, 'account': None,
@@ -456,7 +457,7 @@ class LaunchAndReapInvariants(unittest.TestCase):
         self.assertEqual(lc.may_launch(self.path, 'fix-b-0001', self.wt), (True, ''))
         # another job may take over the ended run's worktree (a correction on the same branch)
         self.assertEqual(lc.may_launch(self.path, 'correct-b-0001', self.wt), (True, ''))
-        self.write({'job': 'correct-b-0001', 'pid': 2, 'started': 't3', 'worktree': self.wt})
+        self.write({'job': 'correct-b-0001', 'pid': os.getpid(), 'started': 't3', 'worktree': self.wt})
         # …and while it runs, nobody else does — by worktree, not by directory name
         self.assertFalse(lc.may_launch(self.path, 'fix-b-0001', self.wt)[0])
         self.assertTrue(lc.may_launch(self.path, 'other', os.path.join(self.d, 'wt', 'other'))[0])
