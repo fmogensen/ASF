@@ -46,6 +46,23 @@ asf doctor --product <p>
 `asf upgrade` without `--skip-pipx` also runs `pipx upgrade asf-factory`. A pinned install keeps
 the spec it was installed with, so move a pin with the installer, not with `asf upgrade`.
 
+### The fix package's rollout (once, per product)
+
+The PR-lane fix package (`docs/plans/fix-package.md`) adds a dry-run rehearsal step so an
+in-flight PR or branch is never surprised by the new lane machine:
+
+1. Pause the product's clock (the doctor shows it).
+2. `bash tools/install.sh <product> <tag>` — pinned and idempotent.
+3. `asf doctor --product <p>` — the new `worker env` row must be green.
+4. `asf check --invariants --product <p>`, then `asf tick --product <p> --dry-run`.
+5. Resume the clock. The first real tick writes the `lanes.jsonl` bootstrap.
+
+`asf tick --dry-run` runs the same record derivation, lane pass, wave planning and harvest
+decisions a real tick would, against a throwaway copy of the product's state directory — it
+never writes the real ledger, never opens or merges a PR, and never launches a session. Read its
+lane table before resuming the clock: every branch and PR the lane already knows about must show
+a state, and no line should read `INVARIANT`.
+
 ## Schema migrations
 
 The record carries a schema version (`index.json`'s `schema_version`). When a release raises it,
@@ -73,15 +90,20 @@ the package is never migrated down — `asf upgrade` says to install the newer `
 Roll back by running the installer with the older ref, as for an upgrade. The older ref must
 accept every key your product file carries, because a product file with an unknown top-level
 key is refused on load. Keys under `conventions:` and every `config.yaml` key are tolerated by
-older releases. The 0.1.3 keys (`doc_paths`, `shared_paths`, `lane`, `worktree_setup`,
-`env_passthrough`, `isolate_home`, `home_seed`) live there, so they need no edit on rollback.
+older releases. The fix package's own keys (`doc_paths`, `shared_paths`, `lane`,
+`worktree_setup`, `env_passthrough`, `isolate_home`, `home_seed`) live there, so they need no
+edit on rollback.
 
-The rollback target for 0.1.3 is **not v0.1.2**. v0.1.2 refuses the top-level `feeder:` key,
-and the upgrade's first hour runs with `feeder.hold`. Roll back to the last trunk commit before
-0.1.3 that already reads `feeder.hold` (e284ee7 or later):
+The rollback target for the fix package is **not its own preceding minor release (v0.1.2)**:
+that release refuses the top-level `feeder:` key, and the package's rollout runs with
+`feeder.hold` for its first hour. Roll back instead to **the newest tag on `main` from before
+the package merged** — as of this revision, `v0.1.5`. Every tag from v0.1.3 on already reads
+`feeder.hold` (`e284ee7`, on `main` since before v0.1.3), so that tag is always a safe target;
+recompute which one is newest at rollback time, the same way the release version itself is
+computed (`major.minor`'s patch is the line's highest tag so far):
 
 ```bash
-bash tools/install.sh <product> <that sha>
+bash tools/install.sh <product> v0.1.5     # or the newest tag that predates the package's merge
 ```
 
 ## What is safe while sessions run

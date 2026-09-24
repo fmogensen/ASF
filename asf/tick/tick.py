@@ -21,6 +21,12 @@ and the ones that ended since the last tick on this clock (:mod:`asf.tick.summar
 ``--shadow`` runs step 0 against a shadow clone instead — never pushes, commits locally, never
 runs a command step — then renders the six tables (:mod:`asf.views`) into ``<shadow>/tables/*.md``
 so ``asf shadow-diff`` has something to compare against the pre-``asf`` tools' output.
+
+``--dry-run`` runs record, the lane pass, wave planning and the harvest gate the way a real tick
+would, against a throwaway copy of the whole state directory (:mod:`asf.tick.dry_run`) — never
+pushes, opens or merges a PR, or launches a session; the real state directory is never opened for
+writing. Prints every lane state, the rows it would launch and any ``INVARIANT`` line (plan §6
+rollout).
 """
 import argparse
 import contextlib
@@ -324,6 +330,10 @@ def cmd_tick(args, root=None):
     if getattr(args, 'shadow', False):
         return run_shadow(product, fresh=fresh)  # record only, never a command step
 
+    if getattr(args, 'dry_run', False):
+        from asf.tick import dry_run
+        return dry_run.run(product, fresh=fresh)  # a throwaway copy; never pushes, never launches
+
     try:
         chosen = steps.parse_steps(args.steps) if getattr(args, 'steps', None) else None
         rows = steps.resolve(product, chosen)
@@ -543,6 +553,10 @@ def register(subparsers):
     p.add_argument('--product')
     p.add_argument('--shadow', action='store_true',
                    help='run record against a shadow clone, never pushed, never a command step')
+    p.add_argument('--dry-run', action='store_true',
+                   help='record, the lane pass, wave planning and the harvest gate, against a '
+                        'throwaway copy of the state directory — never pushes, opens or merges a '
+                        'PR, or launches a session (plan §6 rollout)')
     p.add_argument('--fresh', action='store_true', help="bypass evidence's cache")
     p.add_argument('--steps', help=f"comma list, a subset of {','.join(steps.STEPS)} (default: all)")
     p.add_argument('--manifest', action='store_true', help='print step / owner / command and exit')
