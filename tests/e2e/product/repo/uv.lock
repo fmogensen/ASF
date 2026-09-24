@@ -1,0 +1,2 @@
+# a shared lockfile: every Task that adds a dependency touches it (conventions.shared_paths)
+version = 1

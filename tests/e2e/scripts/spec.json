@@ -1,0 +1,7 @@
+{
+ "writes": {
+  "{spec_path}": "# {item} — Count lines too\n\n## Decisions\n\n| choice | against | why |\n| --- | --- | --- |\n| a separate `count_lines` | a flag on `count` | the word count keeps its signature |\n\n## The design\n\n`src/lines.py` holds `count_lines(text)`: the number of lines, a last line without a newline\nincluded.\n\n## Acceptance tests\n\n```\npython3 -m unittest tests.test_lines\n```\n\n## Records\n\nNone.\n\n## Stories\n\n- S: Lines end on a newline — acceptance: tests/test_lines.py::test_last_line\n"
+ },
+ "commit": "spec({item}): count lines too",
+ "summary": "spec written and pushed"
+}

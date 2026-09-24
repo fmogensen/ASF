@@ -1,0 +1,22 @@
+# config.yaml the end-to-end lane harness runs under. The worker backend is replaced in-process
+# by the harness's ScriptedRuntime (tests/e2e/session.py); `fake` here only keeps anything that
+# reads this file outside a harness tick away from a real agent. `sessions: fake` observes no
+# process on the machine: the pool counts the registered sessions only.
+default_product: sample
+scheduler:
+  kind: none
+feeder:
+  capacity: 2
+capacity:
+  total:
+    sessions: 2
+worker_pool:
+  backend: fake
+  sessions: fake
+  models:
+    heavy: e2e-heavy
+    light: e2e-light
+  accounts:
+    - name: worker-1
+      role: local
+      cap: 4

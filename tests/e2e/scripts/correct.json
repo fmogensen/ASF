@@ -1,0 +1,7 @@
+{
+ "writes": {
+  "{w0}": "def count_lines(text):\n    \"\"\"The number of lines in ``text``, a last line without a newline included.\"\"\"\n    return len(text.splitlines())\n"
+ },
+ "commit": "fix({item}): answer the correction",
+ "summary": "the correction is pushed"
+}

@@ -1,0 +1,7 @@
+{
+ "writes": {
+  "{plan_path}": "# {item} — Count lines too: the plan\n\nSpec: specs/{item_lower}.md\n\n### Task 1: count_lines\nstories: S-0001\nwrites: src/lines.py, tests/test_lines.py\nafter: none\n\n**Files:** src/lines.py, tests/test_lines.py\n\n**Steps:** write `count_lines`; test a text whose last line has no newline.\n\n**Gate:** `python3 -m unittest discover -s tests`\n\n**Acceptance:** `python3 -m unittest tests.test_lines`\n\ncoverage: 1/1 stories; uncovered: none\n"
+ },
+ "commit": "plan({item}): count lines too",
+ "summary": "plan written and pushed"
+}

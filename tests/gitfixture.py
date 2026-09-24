@@ -86,3 +86,24 @@ def _rewrite_paths(dest, mapping):
             if new != text:
                 with open(full, 'w', encoding='utf-8') as f:
                     f.write(new)
+
+
+def publish(tree, origin, name='fixture', email='fixture@example.com', trunk='main',
+            message='fixture'):
+    """``tree`` (a directory of files) becomes a git repo whose ``trunk`` is pushed to a new bare
+    ``origin`` — the checkout keeps ``origin`` as its remote, with ``origin/HEAD`` set, the way a
+    clone has it. Unlike :class:`Template` it installs no ``core.hooksPath``: the end-to-end
+    harness (``tests/e2e``) runs the factory's own hook install against the checkout."""
+    def git(*args, cwd):
+        subprocess.run(['git', *args], cwd=cwd, check=True, capture_output=True, text=True)
+    os.makedirs(os.path.dirname(origin), exist_ok=True)
+    git('init', '-q', '--bare', '-b', trunk, origin, cwd=os.path.dirname(origin))
+    git('init', '-q', '-b', trunk, cwd=tree)
+    git('config', 'user.email', email, cwd=tree)
+    git('config', 'user.name', name, cwd=tree)
+    git('add', '-A', cwd=tree)
+    git('commit', '-q', '-m', message, cwd=tree)
+    git('remote', 'add', 'origin', origin, cwd=tree)
+    git('push', '-q', '-u', 'origin', trunk, cwd=tree)
+    git('remote', 'set-head', 'origin', trunk, cwd=tree)
+    return tree

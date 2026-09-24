@@ -1,0 +1,486 @@
+#!/usr/bin/env python3
+"""A fake ``gh`` for the end-to-end lane harness: a PR host over one JSON state file.
+
+The harness copies this file into a temp ``bin/`` that is first on ``PATH`` and writes
+``gh-state.json`` beside it; every call reads and writes that file under a lock, and is logged to
+``gh-calls.jsonl`` beside it (argv, exit code) so a test can count what the factory asked for.
+
+The PRs are real: a PR's head is whatever ``refs/heads/<branch>`` of the bare origin holds, and a
+merge performs the merge on the bare origin — ``--squash`` writes one new commit on the trunk
+(its sha is not a descendant of the branch head), ``--merge`` a two-parent commit, ``--rebase``
+the branch's commits replayed. Supported:
+
+* ``pr create -R <slug> --base <b> --head <branch> --title <t> --body <b>``
+* ``pr list -R <slug> [--head <b>] [--base <b>] [--state open|closed|merged|all] [--limit n]
+  [--json fields] [-q expr]``
+* ``pr view <n|branch> -R <slug> [--json fields] [-q expr]``
+* ``pr checks <n> -R <slug> --json name,bucket``
+* ``pr merge <n> -R <slug> (--squash|--merge|--rebase|--auto) [--delete-branch]``
+* ``pr close <n> -R <slug> [--delete-branch]``, ``pr comment``/``pr edit`` (accepted, logged)
+* ``api graphql`` (the trunk's ``mergeQueue``), ``api repos/<slug>/branches/<b>/protection/
+  required_status_checks``, ``api repos/<slug>/pulls[?...]``, ``api repos/<slug>/pulls/<n>``
+  (and ``-X PATCH ... -f state=closed``), ``api .../comments``
+* ``run list`` (no runs), ``auth status``
+
+and the harness's own verbs, which move the forge the way a person or CI would:
+
+* ``e2e checks <n> <name> <bucket>`` — set one check on a PR (``pass``, ``fail``, ``pending``)
+* ``e2e default-checks <name>=<bucket> ...`` — the checks every new PR starts with
+* ``e2e queue on|off`` — the trunk's merge queue; ``e2e queue run`` merges every queued PR
+* ``e2e methods squash,merge,rebase`` — the merge methods the repo allows
+* ``e2e required <name> ...`` — the trunk's branch-protection required checks
+* ``e2e squash-subject '<text with {number} and {title}>'`` — the subject a squash writes (the
+  host's default is the PR title and number; a person may edit it)
+
+Anything else exits 1 with ``fake gh: unsupported``.
+"""
+import datetime
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+STATE = os.path.join(HERE, 'gh-state.json')
+CALLS = os.path.join(HERE, 'gh-calls.jsonl')
+LOCK = os.path.join(HERE, 'gh-state.lock')
+
+PR_FIELDS = ('number', 'title', 'body', 'state', 'headRefName', 'baseRefName', 'mergedAt',
+             'mergeCommit', 'autoMergeRequest', 'reviewDecision', 'headRefOid', 'isDraft',
+             'url', 'createdAt', 'updatedAt', 'mergeable', 'closedAt')
+
+
+class Refusal(Exception):
+    def __init__(self, text, rc=1):
+        super().__init__(text)
+        self.rc = rc
+
+
+def now():
+    return datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def load():
+    with open(STATE, encoding='utf-8') as f:
+        return json.load(f)
+
+
+def save(state):
+    tmp = STATE + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(state, f, indent=1, sort_keys=True)
+    os.replace(tmp, STATE)
+
+
+def git(state, *args, env=None, check=True):
+    p = subprocess.run(['git', '--git-dir', state['origin'], *args], capture_output=True,
+                       text=True, env=env)
+    if check and p.returncode != 0:
+        raise Refusal(f'git {" ".join(args)}: {p.stderr.strip()}')
+    return p
+
+
+def ref_sha(state, branch):
+    p = git(state, 'rev-parse', '--verify', '-q', f'refs/heads/{branch}', check=False)
+    return p.stdout.strip() if p.returncode == 0 else ''
+
+
+def opt(argv, *names, default=None):
+    for i, a in enumerate(argv):
+        for n in names:
+            if a == n and i + 1 < len(argv):
+                return argv[i + 1]
+            if a.startswith(n + '='):
+                return a[len(n) + 1:]
+    return default
+
+
+def positional(argv):
+    """The first argument that is neither a flag nor a flag's value."""
+    takes = {'-R', '--repo', '--json', '-q', '--jq', '--state', '--limit', '-L', '--head', '-H',
+             '--base', '-B', '--title', '-t', '--body', '-b', '--search', '-S', '-f', '-F',
+             '--field', '--raw-field', '-X', '--method', '--workflow', '-w', '--branch'}
+    skip = False
+    for a in argv:
+        if skip:
+            skip = False
+            continue
+        if a in takes:
+            skip = True
+            continue
+        if a.startswith('-'):
+            continue
+        return a
+    return None
+
+
+def jq(value, expr):
+    """The tiny subset of jq the factory uses: ``.a.b``, ``.[].a``, ``.[0].a``."""
+    expr = (expr or '').strip()
+    if expr in ('', '.'):
+        return value
+    parts = re.findall(r'\.\[\d*\]|\.[A-Za-z_][\w]*', expr)
+    out = value
+    for part in parts:
+        if part == '.[]':
+            return [jq(v, expr[expr.index(part) + len(part):]) for v in (out or [])]
+        if part.startswith('.['):
+            out = (out or [None])[int(part[2:-1])]
+        else:
+            out = (out or {}).get(part[1:]) if isinstance(out, dict) else None
+    return out
+
+
+def emit(value, argv):
+    expr = opt(argv, '-q', '--jq')
+    if expr is not None:
+        value = jq(value, expr)
+        if isinstance(value, list):
+            for v in value:
+                print(v if not isinstance(v, (dict, list)) else json.dumps(v))
+            return
+        if value is None:
+            print('')
+            return
+        print(value if not isinstance(value, (dict, list)) else json.dumps(value))
+        return
+    print(json.dumps(value))
+
+
+def mergeable(state, pr):
+    if pr['state'] != 'OPEN':
+        return 'UNKNOWN'
+    head, base = ref_sha(state, pr['headRefName']), ref_sha(state, pr['baseRefName'])
+    if not head or not base:
+        return 'UNKNOWN'
+    p = git(state, 'merge-tree', '--write-tree', base, head, check=False)
+    return 'MERGEABLE' if p.returncode == 0 else 'CONFLICTING'
+
+
+def view(state, pr, fields=None):
+    """The PR as ``gh --json`` shows it; the fields read off the origin (the head, whether it
+    merges) are computed only when asked for — a list of every PR asks for neither."""
+    full = dict(pr)
+    if fields is None or 'headRefOid' in fields:
+        live = ref_sha(state, pr['headRefName']) if pr['state'] == 'OPEN' else ''
+        full['headRefOid'] = live or pr.get('headRefOid') or ''
+    full['url'] = f"https://example.invalid/{state['slug']}/pull/{pr['number']}"
+    if fields is None or 'mergeable' in fields:
+        full['mergeable'] = mergeable(state, pr)
+    full.setdefault('reviewDecision', '')
+    if fields is None:
+        return full
+    return {f: full.get(f) for f in fields}
+
+
+def find(state, key):
+    for pr in state['prs']:
+        if str(pr['number']) == str(key).lstrip('#'):
+            return pr
+    opened = [p for p in state['prs'] if p['headRefName'] == key]
+    opened.sort(key=lambda p: (p['state'] != 'OPEN', -p['number']))
+    if opened:
+        return opened[0]
+    raise Refusal(f'no pull requests found for {key}')
+
+
+def json_fields(argv):
+    raw = opt(argv, '--json')
+    return [f for f in raw.split(',') if f] if raw else None
+
+
+def author_env():
+    env = dict(os.environ)
+    env.setdefault('GIT_AUTHOR_NAME', 'forge')
+    env.setdefault('GIT_AUTHOR_EMAIL', 'forge@example.com')
+    env.setdefault('GIT_COMMITTER_NAME', 'forge')
+    env.setdefault('GIT_COMMITTER_EMAIL', 'forge@example.com')
+    return env
+
+
+# ---- merging -------------------------------------------------------------------------------
+
+def do_merge(state, pr, method, delete_branch):
+    if pr['state'] != 'OPEN':
+        raise Refusal(f"Pull request #{pr['number']} is not open")
+    if method not in state.get('methods', ['squash', 'merge', 'rebase']):
+        raise Refusal(f'{method} merges are not allowed on this repository')
+    base_ref, head_ref = pr['baseRefName'], pr['headRefName']
+    base, head = ref_sha(state, base_ref), ref_sha(state, head_ref)
+    if not head:
+        raise Refusal(f'the head branch {head_ref} is gone')
+    env = author_env()
+    subject = (state.get('squash_subject') or '{title} (#{number})').format(
+        title=pr['title'], number=pr['number'])
+    if method == 'rebase':
+        commits = git(state, 'rev-list', '--reverse', f'{base}..{head}').stdout.split()
+        tip = base
+        for c in commits:
+            parent = git(state, 'rev-parse', f'{c}^').stdout.strip()
+            tree = git(state, 'merge-tree', '--write-tree', f'--merge-base={parent}', tip, c,
+                       check=False)
+            if tree.returncode != 0:
+                raise Refusal(f"Pull request #{pr['number']} is not mergeable: conflicts")
+            msg = git(state, 'log', '-1', '--format=%B', c).stdout
+            tip = git(state, 'commit-tree', tree.stdout.split()[0], '-p', tip, '-m', msg,
+                      env=env).stdout.strip()
+        sha = tip
+    else:
+        tree = git(state, 'merge-tree', '--write-tree', base, head, check=False)
+        if tree.returncode != 0:
+            raise Refusal(f"Pull request #{pr['number']} is not mergeable: the merge commit "
+                          f"cannot be cleanly created")
+        parents = ['-p', base] + (['-p', head] if method == 'merge' else [])
+        body = pr.get('body') or ''
+        msg = subject + ('\n\n' + body if method == 'squash' and body else '')
+        if method == 'merge':
+            msg = f"Merge pull request #{pr['number']} from {head_ref}\n\n{pr['title']}"
+        sha = git(state, 'commit-tree', tree.stdout.split()[0], *parents, '-m', msg,
+                  env=env).stdout.strip()
+    git(state, 'update-ref', f'refs/heads/{base_ref}', sha, base)
+    if delete_branch:
+        git(state, 'update-ref', '-d', f'refs/heads/{head_ref}', check=False)
+    stamp = now()
+    pr.update(state='MERGED', mergedAt=stamp, closedAt=stamp, updatedAt=stamp,
+              mergeCommit={'oid': sha}, autoMergeRequest=None, headRefOid=head,
+              mergeMethod=method)
+    return sha
+
+
+def run_queue(state):
+    merged = []
+    for number in list(state.get('queue') or []):
+        pr = find(state, number)
+        try:
+            merged.append((number, do_merge(state, pr, 'squash', True)))
+        except Refusal as e:
+            pr['autoMergeRequest'] = None
+            pr.setdefault('events', []).append({'at': now(), 'queue': f'removed: {e}'})
+        state['queue'].remove(number)
+    return merged
+
+
+# ---- verbs ---------------------------------------------------------------------------------
+
+def pr_create(state, argv):
+    head, base = opt(argv, '--head', '-H'), opt(argv, '--base', '-B') or state.get('trunk', 'main')
+    if not head:
+        raise Refusal('--head is required in this fake')
+    if not ref_sha(state, head):
+        raise Refusal(f'pull request create failed: head branch {head} does not exist')
+    for pr in state['prs']:
+        if pr['headRefName'] == head and pr['state'] == 'OPEN':
+            raise Refusal(f'a pull request for branch "{head}" into branch "{base}" already exists:\n'
+                          f"https://example.invalid/{state['slug']}/pull/{pr['number']}")
+    number = state['next']
+    state['next'] += 1
+    stamp = now()
+    pr = {'number': number, 'title': opt(argv, '--title', '-t') or head,
+          'body': opt(argv, '--body', '-b') or '', 'state': 'OPEN', 'headRefName': head,
+          'baseRefName': base, 'createdAt': stamp, 'updatedAt': stamp, 'mergedAt': None,
+          'closedAt': None, 'mergeCommit': None, 'autoMergeRequest': None, 'isDraft': False,
+          'reviewDecision': '', 'headRefOid': ref_sha(state, head),
+          'checks': [dict(c) for c in state.get('default_checks') or []]}
+    state['prs'].append(pr)
+    print(f"https://example.invalid/{state['slug']}/pull/{number}")
+
+
+def pr_list(state, argv):
+    want = (opt(argv, '--state', '-s') or 'open').lower()
+    head, base = opt(argv, '--head', '-H'), opt(argv, '--base', '-B')
+    limit = int(opt(argv, '--limit', '-L') or 30)
+    out = []
+    for pr in sorted(state['prs'], key=lambda p: -p['number']):
+        s = pr['state']
+        if want == 'open' and s != 'OPEN':
+            continue
+        if want == 'merged' and s != 'MERGED':
+            continue
+        if want == 'closed' and s not in ('CLOSED', 'MERGED'):
+            continue
+        if head and pr['headRefName'] != head:
+            continue
+        if base and pr['baseRefName'] != base:
+            continue
+        out.append(view(state, pr, json_fields(argv) or ['number', 'title', 'headRefName']))
+    emit(out[:limit], argv)
+
+
+def pr_view(state, argv):
+    pr = find(state, positional(argv))
+    emit(view(state, pr, json_fields(argv)), argv)
+
+
+def pr_checks(state, argv):
+    pr = find(state, positional(argv))
+    checks = pr.get('checks') or []
+    if not checks:
+        raise Refusal(f"no checks reported on the '{pr['headRefName']}' branch")
+    fields = json_fields(argv) or ['name', 'bucket']
+    emit([{f: c.get(f) for f in fields} for c in checks], argv)
+
+
+def pr_merge(state, argv):
+    pr = find(state, positional(argv))
+    delete = '--delete-branch' in argv or '-d' in argv
+    if '--auto' in argv:
+        pending = any(c.get('bucket') == 'pending' for c in pr.get('checks') or [])
+        if state.get('merge_queue') or pending:
+            pr['autoMergeRequest'] = {'enabledAt': now(), 'mergeMethod': 'SQUASH'}
+            if state.get('merge_queue'):
+                state.setdefault('queue', []).append(pr['number'])
+            return
+    method = next((m[2:] for m in ('--squash', '--merge', '--rebase') if m in argv), None)
+    if method is None:
+        method = 'squash' if '--auto' in argv else None
+    if method is None:
+        raise Refusal('--merge, --rebase, or --squash required when not running interactively')
+    if state.get('merge_queue') and '--admin' not in argv:
+        raise Refusal('the base branch requires the merge queue: use --auto')
+    do_merge(state, pr, method, delete)
+
+
+def pr_close(state, argv):
+    pr = find(state, positional(argv))
+    if pr['state'] != 'OPEN':
+        raise Refusal(f"Pull request #{pr['number']} is already closed")
+    stamp = now()
+    pr.update(state='CLOSED', closedAt=stamp, updatedAt=stamp, autoMergeRequest=None)
+    if '--delete-branch' in argv or '-d' in argv:
+        git(state, 'update-ref', '-d', f"refs/heads/{pr['headRefName']}", check=False)
+
+
+def rest_pull(state, pr):
+    v = view(state, pr)
+    return {'number': pr['number'], 'title': pr['title'], 'body': pr['body'],
+            'state': 'open' if pr['state'] == 'OPEN' else 'closed', 'draft': False,
+            'merged': pr['state'] == 'MERGED',
+            'head': {'ref': pr['headRefName'], 'sha': v['headRefOid']},
+            'base': {'ref': pr['baseRefName']}, 'created_at': pr['createdAt'],
+            'updated_at': pr['updatedAt'],
+            'mergeable_state': {'MERGEABLE': 'clean', 'CONFLICTING': 'dirty'}.get(
+                v['mergeable'], 'unknown')}
+
+
+def api(state, argv):
+    path = positional(argv) or ''
+    fields = {}
+    for i, a in enumerate(argv):
+        if a in ('-f', '-F', '--field', '--raw-field') and i + 1 < len(argv):
+            k, _, v = argv[i + 1].partition('=')
+            fields[k] = v
+    if path == 'graphql':
+        if 'mergeQueue' in fields.get('query', ''):
+            q = {'id': 'MQ_1'} if state.get('merge_queue') else None
+            emit({'data': {'repository': {'mergeQueue': q}}}, argv)
+            return
+        raise Refusal('fake gh: unsupported graphql query')
+    path = path.lstrip('/')
+    if re.fullmatch(r'repos/[^/]+/[^/]+/branches/[^/]+/protection/required_status_checks', path):
+        names = state.get('required') or []
+        if not names:
+            raise Refusal('gh: Branch not protected (HTTP 404)')
+        emit({'contexts': names, 'checks': [{'context': n} for n in names]}, argv)
+        return
+    m = re.fullmatch(r'repos/[^/]+/[^/]+/pulls(?:\?(.*))?', path)
+    if m:
+        want = dict(kv.partition('=')[::2] for kv in (m.group(1) or '').split('&') if kv)
+        s = want.get('state', 'open')
+        prs = [p for p in sorted(state['prs'], key=lambda p: p['number'])
+               if s == 'all' or (s == 'open') == (p['state'] == 'OPEN')]
+        emit([rest_pull(state, p) for p in prs], argv)
+        return
+    m = re.fullmatch(r'repos/[^/]+/[^/]+/pulls/(\d+)', path)
+    if m:
+        pr = find(state, m.group(1))
+        if (opt(argv, '-X', '--method') or '').upper() == 'PATCH' and fields.get('state') == 'closed':
+            pr_close(state, [m.group(1)])
+        emit(rest_pull(state, pr), argv)
+        return
+    if re.fullmatch(r'repos/[^/]+/[^/]+/issues/\d+/comments', path):
+        emit({'id': 1, 'body': fields.get('body', '')}, argv)
+        return
+    raise Refusal(f'fake gh: unsupported api path {path}')
+
+
+def e2e(state, argv):
+    verb = argv[0] if argv else ''
+    if verb == 'checks':
+        pr = find(state, argv[1])
+        checks = [c for c in pr.get('checks') or [] if c.get('name') != argv[2]]
+        pr['checks'] = checks + [{'name': argv[2], 'bucket': argv[3]}]
+        return
+    if verb == 'default-checks':
+        state['default_checks'] = [{'name': a.split('=')[0], 'bucket': a.split('=')[1]}
+                                   for a in argv[1:]]
+        return
+    if verb == 'queue':
+        if argv[1] == 'run':
+            for number, sha in run_queue(state):
+                print(f'{number} {sha}')
+            return
+        state['merge_queue'] = argv[1] == 'on'
+        return
+    if verb == 'methods':
+        state['methods'] = [m for m in argv[1].split(',') if m]
+        return
+    if verb == 'required':
+        state['required'] = list(argv[1:])
+        return
+    if verb == 'squash-subject':
+        state['squash_subject'] = argv[1]
+        return
+    raise Refusal(f'fake gh: unsupported e2e verb {verb}')
+
+
+def dispatch(state, argv):
+    head = argv[:2]
+    if head == ['pr', 'create']:
+        return pr_create(state, argv[2:])
+    if head == ['pr', 'list']:
+        return pr_list(state, argv[2:])
+    if head == ['pr', 'view']:
+        return pr_view(state, argv[2:])
+    if head == ['pr', 'checks']:
+        return pr_checks(state, argv[2:])
+    if head == ['pr', 'merge']:
+        return pr_merge(state, argv[2:])
+    if head == ['pr', 'close']:
+        return pr_close(state, argv[2:])
+    if head in (['pr', 'comment'], ['pr', 'edit'], ['pr', 'ready']):
+        return None
+    if argv[:1] == ['api']:
+        return api(state, argv[1:])
+    if head == ['run', 'list']:
+        print('[]')
+        return None
+    if head == ['auth', 'status']:
+        print('Logged in to example.invalid as e2e (fake)')
+        return None
+    if argv[:1] == ['e2e']:
+        return e2e(state, argv[1:])
+    raise Refusal(f'fake gh: unsupported: {" ".join(argv[:3])}')
+
+
+def main(argv):
+    with open(LOCK, 'a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state = load()
+        rc, err = 0, ''
+        try:
+            dispatch(state, argv)
+            save(state)
+        except Refusal as e:
+            rc, err = e.rc, str(e)
+            save(state)
+        with open(CALLS, 'a', encoding='utf-8') as f:
+            f.write(json.dumps({'argv': argv, 'rc': rc, 'at': now()}) + '\n')
+    if err:
+        print(err, file=sys.stderr)
+    return rc
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

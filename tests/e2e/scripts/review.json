@@ -1,0 +1,7 @@
+{
+ "writes": {
+  "{review_path}": "# Review of {item} — round {round}\n\n| check | result | evidence |\n| --- | --- | --- |\n| scope: the diff stays inside `writes:` | pass | the two files of the Task |\n| every Step of the Task is implemented | pass | count_lines |\n| acceptance tests byte-identical to the plan's | pass | tests/test_lines.py:1 |\n| those tests were run and are green | pass | OK |\n| the Gate commands are green | pass | OK |\n| no secret value printed, no background process, no skipped check | pass | the diff |\n\nverdict: approved\n"
+ },
+ "commit": "review({item}): round {round} approved",
+ "summary": "verdict: approved"
+}

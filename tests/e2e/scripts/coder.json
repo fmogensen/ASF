@@ -1,0 +1,8 @@
+{
+ "writes": {
+  "{w0}": "def count_lines(text):\n    \"\"\"The number of lines in ``text``, a last line without a newline included.\"\"\"\n    return len(text.splitlines())\n",
+  "{w1}": "import unittest\n\n\nclass LinesTests(unittest.TestCase):\n    def test_last_line(self):\n        self.assertEqual(len('a\\nb'.splitlines()), 2)\n\n\nif __name__ == '__main__':\n    unittest.main()\n"
+ },
+ "commit": "feat({item}): count lines",
+ "summary": "the Task is built and pushed"
+}

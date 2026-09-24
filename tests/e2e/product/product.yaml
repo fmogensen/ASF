@@ -1,0 +1,54 @@
+# products/sample.yaml for the end-to-end lane harness (tests/e2e/factory.py): a product that
+# lands through pull requests on a PR host (the fake `gh`, tests/e2e/fakes/gh). The harness fills
+# @REPO@, @RECORD@ and @LANDING@ (pull-request | fast-forward) in a temp copy.
+product: sample
+repo_dir: @REPO@
+backlog_dir: @RECORD@
+repo_slug: example/sample
+main: main
+conventions:
+  landing: @LANDING@
+  specs_dir: specs
+  plans_dir: plans
+  reviews_dir: reviews
+  review_pattern: reviews/{slug}-r{n}.md
+  doc_paths: [README]
+  shared_paths: [uv.lock]
+  lane:
+    review:
+      docs: none
+      code: required
+  default_bug_epic: E-0001
+  branch_prefixes:
+    code: feature/
+    task: feature/
+    fix: bugfix/
+    spec: spec/
+    plan: plan/
+ci:
+  provider: none
+  test_command: python3 -m unittest discover -s tests
+capacity:
+  sessions: 2
+  batch:
+    per_run: 4
+    parallel: 2
+    runners: 1
+deploy_sha: none
+approvals:
+  spend_money: human-now
+  touch_production: human-now
+  touch_security: human-now
+  touch_customer_data: human-now
+  touch_legal: human-now
+  new_epic: human-now
+  merge_amendable_set: human-now
+  merge_routine_pr: auto
+  file_bug: auto
+  decide_feature: human-now
+  decide_bug: human-now
+steps:
+  groom: off
+  batch: off
+  daily: off
+job_grants: []
