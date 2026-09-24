@@ -802,11 +802,11 @@ class Step0Tests(unittest.TestCase):
 
 
 class RecordStepTimingTests(TickTestCase):
-    def test_the_record_step_times_the_clone_answers_and_groom(self):
+    def test_the_record_step_times_the_clone_only(self):
         rc, out = self.run_tick(steps='record')
         self.assertEqual(rc, 0)
         parts = [ln.split()[0] for ln in out.splitlines() if ln.startswith('[record:')]
-        self.assertEqual(parts, ['[record:clone]', '[record:answers]', '[record:groom]'])
+        self.assertEqual(parts, ['[record:clone]'])
 
 
 if __name__ == '__main__':
