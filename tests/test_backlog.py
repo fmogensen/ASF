@@ -327,8 +327,9 @@ class CheckCommandTests(unittest.TestCase):
         self._residue_story('S-0106', evidence=('no evidence found (2026-09-23)', 'rule: planned'))
         run(['index'], self.root)
         r = run(['check'], self.root)
-        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.returncode, 0, r.stdout)   # a residue warns; it never refuses a commit
         found = [ln for ln in r.stdout.splitlines() if 'no closing rule sees this item' in ln]
+        self.assertTrue(all(': warning: ' in ln for ln in found), found)
         self.assertEqual(len(found), 2, r.stdout)
         self.assertTrue(found[0].startswith('stories/S-0104.md:'), found[0])
         self.assertIn('(type story, no Task, no matrix row, parent F-0001 is New)', found[0])

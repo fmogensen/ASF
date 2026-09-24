@@ -78,7 +78,7 @@ def residue_gaps(meta, evidence, canonical):
     return ', '.join(gaps)
 
 
-def check_residue(canonical, add, find_line):
+def check_residue(canonical, add, find_line, warn=None):
     """§2.7: an item whose last evidence line is `rule: no-rule` is one no closing rule sees —
     a finding the day it is written; and a typed `landed:` must at least be shaped like a sha
     (whether it is on the trunk is what `ingest` decides, `check` touches no git)."""
@@ -94,7 +94,9 @@ def check_residue(canonical, add, find_line):
         if typed.get('removed') or not isinstance(evidence, list) or not evidence \
                 or evidence[-1] != RESIDUE_RULE:
             continue
-        add(rec, find_line(rec, 'evidence'),
+        # a residue is a groom/status finding, not a record error: an open item under a New
+        # parent is a legitimate backlog state, and a commit gate on it refuses every commit
+        (warn or add)(rec, find_line(rec, 'evidence'),
             f"no closing rule sees this item ({residue_gaps(meta, evidence, canonical)}) "
             f"— it can never close; see {SPEC_CLOSING} §2.1")
 
@@ -121,6 +123,12 @@ def cmd_check(args, root):
     def add(rec_or_path, line, msg):
         relpath = rec_or_path if isinstance(rec_or_path, str) else rec_or_path['relpath']
         findings.append((relpath, line, msg))
+
+    warnings = []  # printed, never failing the check
+
+    def warn(rec_or_path, line, msg):
+        relpath = rec_or_path if isinstance(rec_or_path, str) else rec_or_path['relpath']
+        warnings.append((relpath, line, msg))
 
     for f, line, why in parse_errors:
         findings.append((f, line, why))
@@ -219,7 +227,7 @@ def cmd_check(args, root):
                     add(rec, line or 1, f"{h} section is stale (run `asf index`)")
 
     check_deliveries(canonical, add, find_line)
-    check_residue(canonical, add, find_line)
+    check_residue(canonical, add, find_line, warn)
 
     # Size: an item whose History records a shape reading is held to that type's size (D6) —
     # an item never typed by shape (no `— shape:` line) is grandfathered and skipped.
@@ -319,7 +327,11 @@ def cmd_check(args, root):
         findings = [f for f in findings
                     if f[0] in restrict or f[0] == 'index.json' or f[0] in layout_folders]
 
+    if restrict is not None:
+        warnings = [w for w in warnings if w[0] in restrict]
     findings.sort(key=lambda f: (f[0], f[1]))
     for path, line, msg in findings:
         print(f"{path}:{line}: {msg}")
+    for path, line, msg in sorted(warnings, key=lambda w: (w[0], w[1])):
+        print(f"{path}:{line}: warning: {msg}")
     return 1 if findings else 0
