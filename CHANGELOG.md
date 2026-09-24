@@ -2,6 +2,84 @@
 
 One entry per released version, newest first.
 
+## v0.1.2 — 2026-09-24
+
+### Features landed
+
+- F-0002 P0b — the card-evaluation pass for multi-product wording
+- F-0024 Self-amendment policy: the factory proposes, humans approve and merge
+- F-0025 Typed envelopes: every job ends with a machine-readable report beside its prose
+- F-0026 The writes boundary holds a branch; it never silently reverts
+- F-0028 Prompt budget: four token dimensions itemised, never summed, with a cap per job
+- F-0029 Roles: one file per role, five sections, model and access from config
+- F-0030 The README carries the argument, the mental model and the manual on one page
+- F-0033 Dogfood end to end in CI
+- F-0035 Thin controller: every read loop moves to the tick, and a rule flags scriptable chores
+- F-0038 A factory-only CI class: a push touching only factory code runs lint and the factory tests
+- F-0039 Same-session correction: review findings go back to the writer's own session; a fixer only for a dead one
+- F-0040 Story-to-test gate: a Task's pull request must tick an acceptance line with the test that proves it
+- F-0041 Small-Task trains: size class from the footprint, one train per lane, one CI run and one review per train
+- F-0043 CI waste targets on the scorecard, and a week over target files a Bug
+- F-0044 The retro's first line: features on production per week, and cost per feature
+- F-0046 The conflicts pass: supersession enforced, same-subject rule and decision pairs into the groom
+- F-0053 Reviews return checks: every review ends in a machine-readable check table the tick reads
+- F-0078 The tick ends with two tables: in flight, and done since the last tick
+- F-0080 Closing is derived and total: a definition of done per type, reconciliation for work that predates it, nothing re-emitted
+- F-0085 The groom answers itself (D-0049): rules as code, an adjudicate session for the rest, a digest to the operator
+- F-0090 Adjudication is the last resort: the cheap causes are ruled out before Opus is spent
+- F-0091 asf improve: the self-improvement pass is a tick step, not something someone remembers to ask for
+- F-0093 Model routing is argued from minutes-per-landing, and the pool gets a cheap tier
+- F-0095 The wave relaunches coders on Tasks that end 'empty branch: nothing to land'
+- F-0096 The wave runs dry: 73 undecided cards and nothing moves them toward a spec
+- F-0097 asf status says nothing about Bugs and Features: add a Bugs row and a Features row
+- F-0099 Groom every tick: intake, policy pass and questions run on each tick, not once a day
+- F-0100 The savings pass: the tick proposes the next cheapest win from its own numbers
+- F-0101 Corrections of mechanical failures run on Opus: 25% of all spend goes to correct/adjudicate/groom sessions
+- F-0102 Deliveries: one plan, one agent, one gate for several small Features and Bug fixes across the backlog
+- F-0103 The tick files Bugs from its own session outcomes and a stalled wave
+
+### Bugs fixed
+
+- B-0094 19% of sessions end 'not pushed': finished work is lost to a missing commit or push
+
+### Improvements and hotfixes
+
+- hotfix(install): one generic installer from a pinned git ref; skills run the pinned asf-live
+- hotfix(install): the command is plain asf; ASF_SUFFIX=-live only beside a dev install
+- hotfix(install): drop the -live name — one asf per machine, the pinned release
+- hotfix(release): semantic versions from the roadmap, with release notes
+- hotfix(rules): a rule card carrying removed: or moved_to: is retired — its check no longer runs
+- hotfix(tick): a command-only clock runs its commands outside the product lock
+- hotfix(install): steps 3-4 never abort the install; --version and the doctor stamp name asf's commit
+- fix(harvest): a branch red alone on a green trunk is its own red, not foreign; keep the red output
+- hotfix(workers): a session that wrote its REPORT is not failed by a CLI error text its prose quotes
+- capacity: bound each product's session ceiling by its fair share of the usable pool
+- fix(file-bugs): a rule check that times out is a check failure, not a violation
+- workers: a dead or ended run holds no seat; a removed or done item's run is never held
+- hotfix(rules): a rule check may run 60 s by default, not 10
+- hotfix(approvals): reading core.hooksPath is not touching security; setting or unsetting it is
+- hotfix(harvest): a docs-only spec/plan branch in the PR lane is merged by harvest itself
+- hotfix(schema): the drain reads the registry's own fold, not a parser of its own
+- hotfix(feeder): pushed spec/plan work is not starved; a finished run is not dead
+- hotfix(harvest): harvest lands every PR-lane PR itself, no product merge-queue glue
+- hotfix(briefs): every brief states the commit-subject rule harvest enforces
+- docs(guide): the operator's guide — getting started, the product file, the daily loop, upgrading, troubleshooting, connectors (planned)
+- docs(guide): corrections from the first customer review
+- hotfix(hooks,doctor): a foreign git hook never skips the approvals hook; a live pre-ASF job turns doctor red
+- docs(guide): the hooks install no longer skips the approvals hook on a foreign git hook
+- hotfix(check): a decision id inside fenced code is quoted code, not a bare reference
+- hotfix(feeder): a Task with no writes: waits instead of launching a coder that can only block
+- hotfix(record): a merged spec/plan is spec/plan-approved, never the Feature's landing
+- hotfix(record): a removed or moved Feature gets no derived stage and no Tasks from its plan
+- hotfix(harvest): green alone, red together lands one at a time, never held whole
+- hotfix(version): asf --version names the release it runs, not the static base version
+- hotfix(capacity): capacity.weight splits the pool by the operator's priority
+- … and 14 more
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.2"`
+
 ## v0.1.1 — 2026-09-24
 
 ### Features landed
