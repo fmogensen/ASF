@@ -388,6 +388,13 @@ class CheckCommandTests(unittest.TestCase):
         r = run(['check'], self.root)
         self.assertIn('bare decision reference', r.stdout)
 
+    def test_decision_reference_inside_fenced_code_is_not_a_finding(self):
+        write_item(self.root, 'E-0001', 'epic', 'Factory',
+                   body="## Description\n```ts\ndescribe('setup mode (D287 b)', () => {})\n```\n"
+                        "\n## Children\n\n## Backlinks\n")
+        r = run(['check'], self.root)
+        self.assertNotIn('bare decision reference', r.stdout)
+
     def test_bracketed_decision_reference_is_clean(self):
         write_item(self.root, 'D-0171', 'decision', 'A ruling')
         write_item(self.root, 'E-0001', 'epic', 'Factory',

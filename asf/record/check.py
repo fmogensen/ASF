@@ -106,7 +106,13 @@ def cmd_check(args, root):
         body_lines = rec['body'].split('\n')
         header_offset = len(rec['text'].split('\n')) - len(body_lines)
         current_heading = None
+        in_fence = False
         for i, l in enumerate(body_lines):
+            if l.lstrip().startswith(('```', '~~~')):
+                in_fence = not in_fence  # a fenced block is quoted code (a test, a log), not prose
+                continue
+            if in_fence:
+                continue
             if l.startswith('## '):
                 current_heading = l.strip()
             if current_heading in ('## Children', '## Backlinks'):
