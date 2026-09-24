@@ -357,6 +357,15 @@ class LoadRulesTests(unittest.TestCase):
         loaded = rules.load_rules(self.root)
         self.assertEqual([r['id'] for r in loaded], ['R-0001'])
 
+    def test_removed_or_moved_rules_are_not_loaded(self):
+        write_rule(self.root, 'R-0001', 'Live', typed_lines=['check: tools/checks/r1.sh'])
+        write_rule(self.root, 'R-0002', 'Moved', typed_lines=[
+            'check: tools/checks/r2.sh', 'moved_to: other:R-0002', 'removed: moved'])
+        write_rule(self.root, 'R-0003', 'Removed', typed_lines=[
+            'check: tools/checks/r3.sh', 'removed: retired'])
+        reindex(self.root)
+        self.assertEqual([r['id'] for r in rules.load_rules(self.root)], ['R-0001'])
+
     def test_checks_run_in_parallel(self):
         """Ten one-second checks finish well inside a serial ten seconds."""
         import time
