@@ -393,6 +393,14 @@ class TestSpawn(Home):
         self.assertEqual((s['pid'], s['account'], s['kind'], s['model'], s['item']),
                          (4242, 'acct-a', 'fix-bug', 'opus', 'B-0001'))
 
+    def test_the_ledger_line_keeps_the_card_digest_the_brief_was_built_from(self):
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 4242}])
+        row = s1_row()
+        row.card_digest = 'abcd1234abcd1234'
+        spawn_mod.spawn(self.product, row, self.acct(), 'fix the bug\n', runtime=rt, cfg=self.cfg)
+        self.assertEqual(pool_mod.load_sessions(self.product)['fix-b-0001']['card_digest'],
+                         'abcd1234abcd1234')
+
     def test_a_row_grants_its_own_directories_and_they_exist(self):
         # the groom brief grants the answers file's directory (PD7), but spawn passed only the
         # product's job_grants: the adjudicate session could not write its answers, and staged

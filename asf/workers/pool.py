@@ -46,7 +46,7 @@ from asf.workers import quota as quota_mod
 
 DEFAULT_RESERVE = capacity_mod.DEFAULT_RESERVE  # re-export: existing importers keep working
 SESSION_FIELDS = ('job', 'item', 'feature', 'kind', 'account', 'model', 'pid', 'worktree',
-                  'branch', 'started')
+                  'branch', 'started', 'card_digest')
 
 REASON_RESERVED = 'reserved for S1'
 REASON_FULL = 'pool full'
@@ -111,7 +111,8 @@ class Row:
     """One feeder row: something to launch. ``is_fix`` = a ``BUG → FIX`` row."""
 
     def __init__(self, job, item, state='', action='', title='', model='', kind=None,
-                 severity=None, feature=None, lane=None, branch=None, test=None, add_dirs=()):
+                 severity=None, feature=None, lane=None, branch=None, test=None, add_dirs=(),
+                 card_digest=''):
         self.job = job
         self.item = item
         self.state = state
@@ -127,6 +128,9 @@ class Row:
         #: directories this row's session may use outside its worktree, beside the product's
         #: ``job_grants`` (the brief's ``add_dirs`` — a groom row's answers directory, PD7)
         self.add_dirs = list(add_dirs or ())
+        #: :func:`asf.briefs.build.card_digest` of the card as this row's brief stated it — what
+        #: the ledger keeps so a later card change can be told from a dispute (F-0090 D4)
+        self.card_digest = card_digest or ''
 
     @property
     def is_fix(self):

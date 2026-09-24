@@ -735,9 +735,10 @@ def push_failure(text):
     return None
 
 
-#: Kinds whose work is not a branch: a groom (adjudicate) session rules into the state dir's
-#: answers file and is told the repository is not its work, so it never commits.
-NO_LANDING_KINDS = ('groom',)
+#: Kinds whose work is not a branch: a groom (adjudicate) session, or a groom-clerk half of one,
+#: rules into the state dir's answers file and is told the repository is not its work, so it
+#: never commits.
+NO_LANDING_KINDS = ('groom', 'groom-clerk')
 
 
 def lands(run, path=None):

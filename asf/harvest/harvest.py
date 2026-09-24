@@ -593,6 +593,13 @@ def landing(product):
     from asf.harvest import lane
     return lane.landing(product)
 
+
+def external_ci(product):
+    """True when the product's code PRs are gated by its external CI
+    (:func:`asf.harvest.lane.external_ci`) — read off the config alone, no forge call."""
+    from asf.harvest import lane
+    return lane.external_ci(product)
+
 def sessions_by_branch(state_dir):
     """``{branch: the latest run on it}`` — :func:`asf.workers.lifecycle.by_branch`: a job
     relaunched on another branch starts a fresh run; the old branch keeps the one it had."""

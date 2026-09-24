@@ -339,6 +339,26 @@ command, `{account}` substituted, printing one JSON line with `five_h_pct`, `sev
 optionally `seven_d_model_pct`). Without it every account reads 0 % and is always free; an account
 whose command fails reads as `stop`.
 
+**Host guard** (`config.yaml`): a loaded host starts no new session.
+
+```yaml
+host_guards:
+  load_per_core: 2.0   # the 15-minute load average over the core count
+  swap_pct: 85         # swap in use, percent
+```
+
+At or over either (the defaults when the key is absent; 0 turns one off), the tick's wave step
+builds no brief and starts nothing: each launching row prints `waits <job> <item> — held: host
+pressure load 90/cores 12, swap 87%`, the step ends on `wave: held: …`, and a `host_pressure`
+event lands in `metrics/events`. Running sessions are never stopped. A value the host does not
+report (no swap reading, say) never holds. `ASF_HOST_READING="<load15> <cores> <swap_pct>"`
+stands in for the host — to see what the tick would do at a given load.
+
+A product whose code PRs its external CI gates (`landing: pull-request` with
+`conventions.landing_checks` named, or `landing_checks_missing` `wait` for code) gets one more
+standing rule in every brief: run only the targeted checks locally and push — the full suite is
+that CI's, and a PR merges only once it is green. Any other product's own gate is unchanged.
+
 S1 reserve: while an S1 Bug is open, each lane keeps `reserve_for_s1` slots for `BUG → FIX` rows.
 
 `asf capacity --product <p>` (or `--all`, `/asf:capacity`) prints the resolved numbers and which

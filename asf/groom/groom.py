@@ -713,7 +713,10 @@ def render_groom_file(date, sections):
     return '\n'.join(out).rstrip('\n') + '\n'
 
 
-ANSWERS_FILE_RE = re.compile(r'^(\d{4}-\d{2}-\d{2})\.answers$')
+#: A groom day's answers file: ``<date>.answers`` from the judgement session, or
+#: ``<date>.<half>.answers`` from a same-day half's session (the clerk's half is ``clerk``) —
+#: one regex, in one place, matched by every reader.
+ANSWERS_FILE_RE = re.compile(r'^(?P<date>\d{4}-\d{2}-\d{2})(?:\.(?P<half>[a-z]+))?\.answers$')
 
 #: A groom line's item token: an id, or ``inbox:<file>``.
 _LINE_TOKEN_RE = re.compile(r'^- \[[ xX]\]\s+(\S+)')
@@ -802,7 +805,7 @@ def cmd_groom(args, root):
     answers_text = None
     if answers_file and os.path.isfile(answers_file):
         m = ANSWERS_FILE_RE.match(os.path.basename(answers_file))
-        adj_date = m.group(1) if m else date
+        adj_date = m.group('date') if m else date
         adj_groom_path = os.path.join(root, 'groom', f'{adj_date}.md')
         adj_sections = {}
         if os.path.isfile(adj_groom_path):

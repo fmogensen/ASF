@@ -20,8 +20,15 @@
    back (``WAITS ON …``, no slot) prints its own ``waits`` line here, as does one an approval
    class holds.
 
+Before any brief is built, the host-pressure guard (:mod:`asf.workers.host`, ``config.yaml
+host_guards``): a host at or over its load or swap guard starts no session this tick — each
+launching row prints ``waits … — held: host pressure load <n>/cores <c>, swap <p>%`` and the step
+ends on ``wave: held: …``. Sessions already running are never touched.
+
 Each launch appends a ``launch`` event (item, job, model, brief kind) to ``metrics/events``.
 """
+import importlib
+import inspect
 import os
 import re
 import subprocess
@@ -30,6 +37,7 @@ from asf import approvals, env
 from asf import capacity as capacity_mod
 from asf.groom import policy as groom_policy
 from asf.record import plan_order
+from asf.workers import host as host_mod
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 
@@ -168,11 +176,62 @@ def _not_yet_put(product, job, open_ids):
     return [iid for iid in open_ids if iid not in given]
 
 
-def plan_inputs(product, root):
+def stale_briefs(product, root, index):
+    """``{item: the brief kind to re-run}`` — the latest *ended* run of each item whose recorded
+    ``card_digest`` differs from :func:`asf.briefs.build.card_digest` computed now (F-0090 D5:
+    the kind is that run's own). A run with no ``card_digest`` — every run launched before the
+    field existed — claims nothing and is never stale (D4)."""
+    digest = importlib.import_module('asf.briefs.build').card_digest
+    latest = {}
+    for rs in lifecycle.runs(pool_mod.sessions_path(product)).values():
+        for run in rs:
+            if run.get('item') and run.get('ended'):
+                held = latest.get(run['item'])
+                if held is None or (run.get('started') or '') >= (held.get('started') or ''):
+                    latest[run['item']] = run
+    return {item: run.get('kind') for item, run in latest.items()
+            if run.get('card_digest') and run.get('kind')
+            and run['card_digest'] != digest(product, item, index)}
+
+
+def _triage_facts(product, root, index):
+    """``stale_briefs`` and ``rounds`` for ``plan_rows`` — but only for a feeder that takes them
+    (F-0090 Task 1) and a ledger that can say them (Task 2): until both have landed the keys are
+    left out rather than break every planner."""
+    if not _triage_wanted():
+        return {}
+    return {'stale_briefs': stale_briefs(product, root, index),
+            'rounds': lifecycle.round_log(pool_mod.sessions_path(product))}
+
+
+def _triage_wanted():
+    """Both halves of F-0090's triage are in: the feeder takes ``stale_briefs`` and ``rounds``,
+    and the ledger can say the rounds."""
+    from asf.feeder import rows as feeder_rows
+    takes = inspect.signature(feeder_rows.plan_rows).parameters
+    return ('stale_briefs' in takes and 'rounds' in takes
+            and getattr(lifecycle, 'round_log', None) is not None)
+
+
+def plan_inputs(product, root, index=None):
     """The ledger's and the record's facts ``plan_rows`` takes beside the index — one place, so
-    the tick, ``asf next`` and the status cell plan the same rows."""
+    the tick, ``asf next`` and the status cell plan the same rows. ``index`` is the loaded
+    ``index.json``, read from ``root`` when the caller has none — and read through the same
+    ``after:`` overlay the wave applies, because ``after`` is a ``DIGEST_FIELDS`` name: a digest
+    taken off un-overlaid items differs from the one the tick recorded at launch, and ``asf next``
+    and the status cell would call stale every Task whose order the plan derives (D3)."""
+    triage = {}
+    if _triage_wanted():
+        if index is None:
+            from asf.views import index_reader
+            index = (index_reader.load(root)[0]
+                     if os.path.isfile(os.path.join(root, 'index.json')) else {})
+            if index and product.repo_dir:
+                index = plan_order.overlay(index, plan_order.trunk_reader(product))
+        triage = _triage_facts(product, root, index)
     return {'attempts': attempts(product), 'occupancy': occupancy(product),
-            'groom_state': groom_state(product, root) if groom_policy.groom_auto(product) else None}
+            'groom_state': groom_state(product, root) if groom_policy.groom_auto(product) else None,
+            **triage}
 
 
 def held_by_share(items, product, running, resolved, planned, inputs):
@@ -229,7 +288,17 @@ def worker_row(row, brief, items):
                         action=action, title=item.get('title', ''), model=brief.model,
                         kind=brief.kind, severity=item.get('severity'),
                         feature=row.feature_id or None, branch=row.branch or None,
-                        add_dirs=getattr(brief, 'add_dirs', None) or ())
+                        add_dirs=getattr(brief, 'add_dirs', None) or (),
+                        card_digest=getattr(brief, 'card_digest', '') or '')
+
+
+def host_hold(planned):
+    """``(held, why, reading)`` of the host-pressure guard (:func:`asf.workers.host.pressure`,
+    ``config.yaml host_guards``) — read only when a row would launch; the tick and ``asf tick
+    --dry-run`` hold on the same answer."""
+    if not any(row.launches for row in planned):
+        return False, '', {}
+    return host_mod.pressure(env.load_config())
 
 
 def run(ctx, out=print):
@@ -243,15 +312,20 @@ def run(ctx, out=print):
         items = plan_order.overlay(items, plan_order.trunk_reader(product))
     running = inflight(product)
     r = capacity_mod.resolve(product)
-    inputs = plan_inputs(product, ctx.record_root())
+    inputs = plan_inputs(product, ctx.record_root(), items)
     planned = feeder_rows.plan_rows(items, product, running, r.sessions, **inputs)
     from asf import invariants  # the feeder check point: a violating row is dropped, logged
     planned = invariants.feeder_gate(product, planned, items, out=out)
     for row in held_by_share(items, product, running, r, planned, inputs):
         job = job_name(row.brief_kind, row.item_id)
         out(f'waits    {job:<24} {row.item_id:<10} — {r.fair_share_reason}')
+    host_held, host_why, reading = host_hold(planned)
     worker_rows, texts, kinds = [], {}, {}
     for row in planned:
+        cause = getattr(row, 'cause', '')
+        if cause:                               # §2.5: a cheap cause is said, held or re-run
+            ctx.event('triage', item=row.item_id, cause=cause, row=row.kind, action=row.action)
+            out(f'triage   {row.item_id:<10} — {cause}: {row.reason}')
         if not row.launches:
             out(f"waits    {'-':<24} {row.item_id:<10} — {row.action}")
             continue
@@ -260,6 +334,16 @@ def run(ctx, out=print):
             job = job_name(row.brief_kind, row.item_id)
             out(f'waits    {job:<24} {row.item_id:<10} — held {cls} ({level})')
             continue
+        if host_held:                           # a loaded host takes no new session this tick
+            job = job_name(row.brief_kind, row.item_id)
+            out(f'waits    {job:<24} {row.item_id:<10} — held: {host_why}')
+            continue
+        if row.brief_kind == 'adjudicate' and getattr(row, 'between', ()):
+            (la, ta), (lb, tb) = row.between
+            pair = getattr(row, 'common', '')
+            common = f' · both touch {pair}' if pair else ' · no file in common'
+            job = job_name(row.brief_kind, row.item_id)
+            out(f'adjudicate {job:<24} {row.item_id:<10} — {la}: {ta[:60]} ↔ {lb}: {tb[:60]}{common}')
         brief = _build(product, row, items, running,
                        repo_facts=repo_facts(product, row.branch))
         wrow = worker_row(row, brief, items)
@@ -270,6 +354,11 @@ def run(ctx, out=print):
               sessions_bound_by=r.sessions_bound, fair_share=r.fair_share, usable=r.usable,
               active_products=r.active, ci=r.ci, ci_inflight=r.ci_inflight,
               ci_bound_by=r.ci_bound)
+    if host_held:
+        ctx.event('host_pressure', load15=reading.get('load15'), cores=reading.get('cores'),
+                  swap_pct=reading.get('swap_pct'))
+        out(f'wave: held: {host_why} — no new session this tick; running sessions go on')
+        return 0
     if not worker_rows:
         out('wave: nothing to launch')
         return 0

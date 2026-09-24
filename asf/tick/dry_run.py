@@ -30,7 +30,9 @@ Prints, in order:
   …`` per open code branch or PR (:class:`asf.harvest.lane.Lane`);
 * ``== wave`` — one line per row the feeder would launch (``would launch``) or hold (``waits``),
   and any ``INVARIANT …`` line the feeder check point logs
-  (:func:`asf.invariants.feeder_gate`) — dropped rows never launch here either;
+  (:func:`asf.invariants.feeder_gate`) — dropped rows never launch here either; under host
+  pressure (:func:`asf.tick.step_wave.host_hold`) every launching row is a ``waits … — held:
+  host pressure …`` line and the section ends on ``wave: held: …``, as a live tick's would;
 * ``== harvest`` — the gate's own lines: any ``held``/``waiting``/``landed`` outcome the real
   gate would reach for a branch the lane pass brought to GATE.
 
@@ -113,13 +115,18 @@ def _wave_rows(product, root, out):
     if not planned:
         out('(nothing planned)')
         return planned
+    host_held, host_why, _reading = step_wave.host_hold(planned)
     for row in planned:
         key = getattr(row, step_wave.KIND_JOB_KEY.get(row.brief_kind, ''), None)
         job = step_wave.job_name(row.brief_kind, row.item_id, key=key)
-        if row.launches:
+        if row.launches and host_held:
+            out(f'waits        {job:<24} {row.item_id:<10} — held: {host_why}')
+        elif row.launches:
             out(f'would launch {job:<24} {row.item_id:<10} {row.action}')
         else:
             out(f'waits        {job:<24} {row.item_id:<10} — {row.action}')
+    if host_held:
+        out(f'wave: held: {host_why} — no new session this tick; running sessions go on')
     return planned
 
 

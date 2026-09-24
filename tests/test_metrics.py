@@ -156,6 +156,14 @@ class Schema(Base):
         self.bad('ticks', {'tick': 1, 'launches': 0}, "missing required key 'merges'")
         self.bad('ticks', {'tick': 1, 'launches': 0, 'merges': 0, 'stalls': 0, 'refusals': 0, 'relaunches': 0,
                            'quota': {'accta': {'h5': 1}}}, 'quota')
+        tick = {'tick': 1, 'launches': 0, 'merges': 0, 'stalls': 0, 'refusals': 0, 'relaunches': 0}
+        self.bad('ticks', dict(tick, steps='wave'), "'steps' must be list")
+        self.bad('ticks', dict(tick, product=3), "'product' must be str|null")
+        ev = metrics.validate('ticks', dict(tick, steps=[{'step': 'wave', 'ok': True, 'seconds': 1.0}],
+                                            product='sample'), self.items)
+        self.assertEqual((ev['product'], ev['steps'][0]['step']), ('sample', 'wave'))
+        self.assertEqual((metrics.validate('ticks', tick, self.items)['steps'],
+                          metrics.validate('ticks', tick, self.items)['product']), ([], None))
 
     def test_ts_must_be_utc_iso(self):
         self.bad('ci', ci_event(1, ts='2026-09-21 10:00'), "'ts' must be a UTC ISO timestamp")
@@ -1173,6 +1181,136 @@ def tok_session(item, **dims):
     ev = {'ts': f'{DAY}T09:00:00Z', 'task': 't', 'account': 'a1', 'kind': 'code', 'result': 'finished', 'item': item}
     ev.update({f'tokens_{d}': n for d, n in dims.items()})
     return ev
+
+
+class LandingStreamTests(Base):
+    """`landings`: one event per harvested run, dated by the trunk commit (F-0100 §2.1)."""
+
+    def landing(self, **kw):
+        return dict({'ts': f'{DAY}T05:00:00Z', 'job': 'code-t-0001', 'sha': 'a' * 40,
+                     'branch': 'worker/T-0001', 'kind': 'code'}, **kw)
+
+    def make_product_repo(self):
+        """A repo with two commits of known committer dates → (repo, [sha1, sha2])."""
+        repo = tempfile.mkdtemp(prefix='landings_repo_')
+        self.addCleanup(shutil.rmtree, repo, True)
+        shas = []
+        for n, day in enumerate(('2026-09-20T10:00:00+00:00', '2026-09-21T06:48:03+02:00')):
+            env_ = dict(os.environ, GIT_COMMITTER_DATE=day, GIT_AUTHOR_DATE=day,
+                        GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@e.x', GIT_COMMITTER_NAME='t',
+                        GIT_COMMITTER_EMAIL='t@e.x')
+            if n == 0:
+                subprocess.run(['git', '-C', repo, 'init', '-q'], check=True)
+            subprocess.run(['git', '-C', repo, 'commit', '-q', '--allow-empty', '-m', f'c{n}'],
+                           check=True, env=env_)
+            shas.append(subprocess.run(['git', '-C', repo, 'rev-parse', 'HEAD'], capture_output=True,
+                                       text=True, check=True).stdout.strip())
+        return repo, shas
+
+    def registry(self, lines):
+        path = os.path.join(tempfile.mkdtemp(prefix='landings_reg_'), 'sessions.jsonl')
+        self.addCleanup(shutil.rmtree, os.path.dirname(path), True)
+        with open(path, 'w', encoding='utf-8') as f:
+            for rec in lines:
+                f.write(json.dumps(rec) + '\n')
+        return path
+
+    def test_schema_accepts_a_landing_and_refuses_the_rest(self):
+        ev = metrics.validate('landings', self.landing(), self.items)
+        self.assertEqual((ev['kind'], ev['branch'], ev['item']), ('code', 'worker/T-0001', 'T-0001'))
+        for bad, needle in ((dict(wat=1), 'unknown key(s) wat'), (dict(kind='nope'), "'kind' must be one of")):
+            with self.assertRaises(metrics.SchemaError) as cm:
+                metrics.validate('landings', self.landing(**bad), self.items)
+            self.assertIn(needle, str(cm.exception))
+        with self.assertRaises(metrics.SchemaError) as cm:
+            metrics.validate('landings', {k: v for k, v in self.landing().items() if k != 'ts'}, self.items)
+        self.assertIn("missing required key 'ts'", str(cm.exception))
+        with self.assertRaises(metrics.SchemaError):
+            metrics.validate('landings', self.landing(item='T-9999'), self.items)
+
+    def test_kind_falls_back_to_the_job_name(self):
+        ev = self.landing()
+        del ev['kind']
+        ev['job'] = 'spec-f-0100'
+        self.assertEqual(metrics.validate('landings', ev, self.items)['kind'], 'spec')
+
+    def test_a_second_import_of_the_same_job_and_sha_exists(self):
+        self.assertEqual(self.put('landings', self.landing())[0], 'appended')
+        self.assertEqual(self.put('landings', self.landing(branch='other'))[0], 'exists')
+        self.assertEqual(self.put('landings', self.landing(job='code-t-0002'))[0], 'appended')
+
+    def test_the_registry_reader(self):
+        repo, (old, new) = self.make_product_repo()
+        path = self.registry([
+            {'job': 'code-t-0001', 'started': '2026-09-20T09:00:00Z', 'pid': 1, 'kind': 'task',
+             'branch': 'worker/T-0001', 'item': 'T-0001'},
+            {'job': 'code-t-0001', 'harvested': old},
+            {'job': 'spec-f-0001', 'started': '2026-09-21T05:00:00Z', 'pid': 2, 'branch': 'spec/F-0001'},
+            {'job': 'spec-f-0001', 'harvested': new},
+            {'job': 'fix-t-0002', 'started': '2026-09-21T05:00:00Z', 'pid': 3, 'harvested': 'superseded'},
+            {'job': 'code-t-0003', 'started': '2026-09-21T05:00:00Z', 'pid': 4, 'harvested': 'f' * 40},
+            {'job': 'code-t-0004', 'started': '2026-09-21T05:00:00Z', 'pid': 5},
+        ])
+        evs, unconfirmed = metrics.landings_from_registry(env.Product('sample', {}), items=self.items,
+                                                          state_path=path, repo=repo)
+        self.assertEqual(unconfirmed, 1)               # the sha the repo does not have
+        self.assertEqual([(e['job'], e['sha'], e['ts'], e['kind']) for e in evs],
+                         [('code-t-0001', old, '2026-09-20T10:00:00Z', 'code'),
+                          ('spec-f-0001', new, '2026-09-21T04:48:03Z', 'spec')])
+        self.assertEqual((evs[0]['branch'], evs[0]['item']), ('worker/T-0001', 'T-0001'))
+        for ev in evs:
+            metrics.validate('landings', ev, self.items)
+        again, _n = metrics.landings_from_registry(env.Product('sample', {}), items=self.items,
+                                                   known={('code-t-0001', old)}, state_path=path, repo=repo)
+        self.assertEqual([e['job'] for e in again], ['spec-f-0001'])
+
+
+class GateStreamTests(Base):
+    """`gates`: one event per landing gate, read from the ledger (F-0100 §2.2)."""
+
+    def gate(self, **kw):
+        return dict({'ts': f'{DAY}T06:41:12Z', 'seconds': 412.7, 'branches': ['spec/F-0100', 'worker/T-0078'],
+                     'conclusion': 'failure', 'signature': 'FAILED (failures=1)'}, **kw)
+
+    def test_round_trips_a_green_and_a_red_line(self):
+        red = metrics.validate('gates', self.gate(sha='9f3c1ab'), self.items)
+        green = metrics.validate('gates', self.gate(conclusion='success', signature=None), self.items)
+        self.assertEqual((red['conclusion'], red['sha'], red['items']), ('failure', '9f3c1ab', None))
+        self.assertEqual((green['conclusion'], green['signature']), ('success', None))
+        self.assertEqual(self.put('gates', self.gate())[0], 'appended')
+        self.assertEqual(metrics.read_stream(self.root, 'gates')[0]['branches'], ['spec/F-0100', 'worker/T-0078'])
+
+    def test_refusals(self):
+        for bad, needle in ((dict(conclusion='red'), 'success or failure'), (dict(seconds=-1), 'seconds'),
+                            (dict(branches=['a', 3]), 'branches'), (dict(wat=1), 'unknown key(s) wat')):
+            with self.assertRaises(metrics.SchemaError) as cm:
+                metrics.validate('gates', self.gate(**bad), self.items)
+            self.assertIn(needle, str(cm.exception))
+
+    def test_natural_key_is_the_start_and_the_branches(self):
+        self.assertEqual(self.put('gates', self.gate())[0], 'appended')
+        self.assertEqual(self.put('gates', self.gate(seconds=1))[0], 'exists')
+        self.assertEqual(self.put('gates', self.gate(branches=['worker/T-0078']))[0], 'appended')
+
+    def test_ledger_reader_truncates_and_skips_known(self):
+        home = tempfile.mkdtemp(prefix='gates_home_')
+        self.addCleanup(shutil.rmtree, home, True)
+        product = env.Product('sample', {})
+        with mock.patch.object(env, 'ASF_HOME', home):
+            self.assertEqual(metrics.gates_from_ledger(product), [])       # no ledger, no error
+            with open(os.path.join(env.state_dir(product), 'gates.jsonl'), 'w', encoding='utf-8') as f:
+                f.write(json.dumps({'at': f'{DAY}T06:41:12Z', 'seconds': 412.7, 'branches': ['a', 'b'],
+                                    'sha': '9f3c', 'ok': False, 'line': 'x' * 300}) + '\n')
+                f.write('not json\n')
+                f.write(json.dumps({'at': f'{DAY}T07:00:00Z', 'seconds': 3, 'branches': ['c'],
+                                    'sha': '1a2b', 'ok': True, 'line': None}) + '\n')
+            evs = metrics.gates_from_ledger(product)
+            self.assertEqual([e['conclusion'] for e in evs], ['failure', 'success'])
+            self.assertEqual(len(evs[0]['signature']), 120)
+            for ev in evs:
+                metrics.validate('gates', ev, self.items)
+            known = {metrics.natural_key('gates', evs[0])}
+            self.assertEqual([e['branches'] for e in metrics.gates_from_ledger(product, known=known)], [['c']])
 
 
 class SessionTokensTest(Base):

@@ -369,6 +369,24 @@ class PreambleTest(unittest.TestCase):
         self.assertIn('never force-push', rules)
         self.assertIn('`trunk`', rules)
 
+    def test_external_ci_keeps_the_full_suite_off_this_host(self):
+        # a product whose PRs are gated by its external CI: the worker runs the targeted checks
+        # only, pushes, and lets that CI run the full suite (host pressure, 2026-09-24)
+        p = product(conventions={'landing': 'pull-request', 'landing_checks': ['build'],
+                                 'landing_checks_missing': {'docs': 'local-gate', 'code': 'wait'},
+                                 'rules_tail': 'ONE RULE: push to {main} and nothing else.'})
+        text = preamble_mod.build(p, ROWS['coder'], index(), [], REPO_FACTS)
+        self.assertIn('run only the targeted checks for what you changed', text)
+        self.assertIn('external CI', text)
+        self.assertIn('never skipped', text)
+
+    def test_no_external_ci_leaves_the_local_gate_as_it_is(self):
+        for conv in ({}, {'landing': 'pull-request'},          # PRs, but nothing declared as CI
+                     {'landing': 'fast-forward', 'landing_checks': ['build']}):
+            text = preamble_mod.build(product(conventions=conv), ROWS['coder'], index(), [],
+                                      REPO_FACTS)
+            self.assertNotIn('external CI', text, conv)
+
     def test_the_operator_can_replace_the_rules(self):
         p = product(conventions={'rules_tail': 'ONE RULE: push to {main} and nothing else.'})
         text = preamble_mod.build(p, ROWS['coder'], index(), [], REPO_FACTS)

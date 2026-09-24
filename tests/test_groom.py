@@ -1,3 +1,4 @@
+import argparse
 import os
 import shutil
 import subprocess
@@ -6,6 +7,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from asf import env
 from asf.record import frontmatter
 from asf.record.core import canonicalize, load_items, today, tokenize
 from asf.groom import groom
@@ -296,6 +298,60 @@ class GroomApplyIntegrationTests(unittest.TestCase):
         with open(os.path.join(self.root, 'features', 'F-0001.md')) as f:
             text = f.read()
         self.assertIn('(controller, starvation policy)', text)
+
+
+class TwoAnswersFilesTests(unittest.TestCase):
+    """§2.4.1: ``ANSWERS_FILE_RE`` matches a day's judgement file and its clerk half by name —
+    not a malformed neighbor — and each applies through ``cmd_groom``'s ``answers_file`` on its
+    own call, every answer landing on its card (groom.py:704, groom.py:792)."""
+
+    def setUp(self):
+        self.root = make_repo()
+        write_item(self.root, 'E-0009', 'epic', 'Factory', typed_lines=['decided: true'])
+        write_item(self.root, 'F-0001', 'feature', 'Some idea', parent='E-0009',
+                  typed_lines=['decided: false'])
+        write_item(self.root, 'F-0002', 'feature', 'Another idea', parent='E-0009',
+                  typed_lines=['decided: false'])
+        run(['index'], self.root)
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def apply(self, path):
+        args = argparse.Namespace(date=None, apply=False, product=None, default_bug_epic=None,
+                                  answers_file=path, event=None)
+        with mock.patch.object(env, 'load_product', side_effect=env.ConfigError('none')):
+            return groom.cmd_groom(args, self.root)
+
+    def test_the_regex_matches_both_names_and_not_a_malformed_one(self):
+        judgement = groom.ANSWERS_FILE_RE.match('2026-09-20.answers')
+        clerk = groom.ANSWERS_FILE_RE.match('2026-09-20.clerk.answers')
+        self.assertEqual(judgement.group('date'), '2026-09-20')
+        self.assertIsNone(judgement.group('half'))
+        self.assertEqual(clerk.group('date'), '2026-09-20')
+        self.assertEqual(clerk.group('half'), 'clerk')
+        self.assertIsNone(groom.ANSWERS_FILE_RE.match('2026-09-20.answers.bak'))
+        self.assertIsNone(groom.ANSWERS_FILE_RE.match('2026-09-20.answers.done'))
+
+    def test_both_files_apply_and_every_answer_lands_on_its_card(self):
+        judgement = os.path.join(self.root, 'groom', '2026-09-20.answers')
+        clerk = os.path.join(self.root, 'groom', '2026-09-20.clerk.answers')
+        with open(judgement, 'w', encoding='utf-8') as f:
+            f.write('- [ ] F-0001 Some idea — undecided 4d → answer: yes\n')
+        with open(clerk, 'w', encoding='utf-8') as f:
+            f.write('- [ ] F-0002 Another idea — undecided 4d → answer: yes\n')
+
+        self.assertEqual(self.apply(judgement), 0)
+        self.assertEqual(self.apply(clerk), 0)
+
+        self.assertFalse(os.path.exists(judgement))
+        self.assertFalse(os.path.exists(clerk))
+        self.assertTrue(os.path.exists(judgement + '.done'))
+        self.assertTrue(os.path.exists(clerk + '.done'))
+        with open(os.path.join(self.root, 'features', 'F-0001.md')) as f:
+            self.assertIn('decided: true', f.read())
+        with open(os.path.join(self.root, 'features', 'F-0002.md')) as f:
+            self.assertIn('decided: true', f.read())
 
 
 class GroomSectionCoverageTests(unittest.TestCase):

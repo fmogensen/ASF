@@ -26,7 +26,7 @@ from asf.conventions import (DEFAULT_BRANCH_PREFIXES, DEFAULT_INTAKE_DIR, DEFAUL
 
 ITEM_FOLDERS = ('epics', 'features', 'stories', 'tasks', 'bugs', 'decisions', 'rules')
 STREAM_FOLDERS = ('groom', 'releases', 'metrics/ci', 'metrics/sessions', 'metrics/ticks',
-                  'metrics/events', 'metrics/daily')
+                  'metrics/events', 'metrics/daily', 'metrics/landings', 'metrics/gates')
 
 PRE_COMMIT = """#!/bin/sh
 # The record's pre-commit hook, written by `asf init`: a commit that fails `asf check` on the

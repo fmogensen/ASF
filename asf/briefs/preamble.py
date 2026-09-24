@@ -90,6 +90,24 @@ def subject_rule(row, item):
             f"branch whose commits do not name it; the id inside the branch name does not count.")
 
 
+#: Carried by every brief of a product whose PRs its external CI gates (whatever ``rules_tail``
+#: says): the full suite is that CI's, not this host's — a host running a worker's full suite
+#: beside another is the load the tick's host guard holds launches for.
+EXTERNAL_CI_RULE = ("- Locally, run only the targeted checks for what you changed, then push: this "
+                    "product's external CI runs the full suite on the pull request, and it "
+                    "merges only once that CI is green — the gate is never skipped, just run "
+                    "off this host.")
+
+
+def ci_rules(product):
+    """``[EXTERNAL_CI_RULE]`` when the product's PRs are gated by external CI
+    (:func:`asf.harvest.harvest.external_ci`), else ``[]`` — its own process stands unchanged."""
+    if product is None:
+        return []
+    from asf.harvest import harvest
+    return [EXTERNAL_CI_RULE] if harvest.external_ci(product) else []
+
+
 def review_path_for(product, slug, n):
     """Where round ``n`` of a review lives — ``conventions.review_pattern``, ``{n}``/``{slug}``."""
     return conventions(product).review_path(slug, n)
@@ -498,6 +516,7 @@ def build(product, row, index, inflight=None, repo_facts=None, facts=None):
                 [l.rstrip() for l in str(facts['last_report']).splitlines() if l.strip()],
                 trimmable=True, marker='…truncated'),
         Section('rules', '### Standing rules',
-                rules_block(product, main).splitlines() + [subject_rule(row, facts['item'])]),
+                rules_block(product, main).splitlines() + [subject_rule(row, facts['item'])]
+                + ci_rules(product)),
     ]
     return '\n'.join(fit(sections, max_lines(product)))

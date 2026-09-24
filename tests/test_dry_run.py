@@ -11,6 +11,10 @@ the same thing (idempotence).
 """
 import hashlib
 import os
+import tempfile
+import types
+import unittest
+from unittest import mock
 
 from tests.test_e2e_lane import PR, FF, LaneCase
 
@@ -83,3 +87,45 @@ class DryRunReadyPR(DryRun, LaneCase):
 
 class DryRunReadyFF(DryRun, LaneCase):
     landing = FF
+
+
+class DryRunHostPressure(unittest.TestCase):
+    """Under host pressure the dry run's wave says what a live tick would: every launching row
+    waits, held by the host guard, and the section ends on ``wave: held: …`` — nothing launched."""
+
+    def wave_lines(self, reading):
+        from asf import capacity as capacity_mod
+        from asf import invariants
+        from asf.feeder import rows as feeder_rows
+        from asf.tick import dry_run, step_wave
+        from asf.views import index_reader
+        row = feeder_rows.Row(0, 'BUG → FIX', 'B-0001', '', 'would launch fix-bug-b-0001',
+                              'fix-bug', 'fix/B-0001', '')
+        product = types.SimpleNamespace(name='sample', repo_dir='')
+        root = tempfile.mkdtemp(prefix='asf-dry-wave-')
+        open(os.path.join(root, 'index.json'), 'w').close()
+        lines = []
+        with mock.patch.object(index_reader, 'load', return_value=({}, None)), \
+                mock.patch.object(step_wave, 'inflight', return_value={}), \
+                mock.patch.object(capacity_mod, 'resolve',
+                                  return_value=types.SimpleNamespace(sessions=2)), \
+                mock.patch.object(step_wave, 'plan_inputs', return_value={}), \
+                mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **kw: [row]), \
+                mock.patch.object(invariants, 'feeder_gate', lambda p, rows, *a, **kw: rows), \
+                mock.patch.dict(os.environ, {'ASF_HOST_READING': reading}):
+            dry_run._wave_rows(product, root, lines.append)
+        return lines
+
+    def test_a_loaded_host_holds_every_launch(self):
+        lines = self.wave_lines('90 12 87')
+        self.assertFalse([l for l in lines if l.startswith('would launch')], lines)
+        self.assertTrue(any(l.startswith('waits        fix-bug-b-0001') and
+                            l.endswith('— held: host pressure load 90/cores 12, swap 87%')
+                            for l in lines), lines)
+        self.assertEqual(lines[-1], 'wave: held: host pressure load 90/cores 12, swap 87% — '
+                                    'no new session this tick; running sessions go on')
+
+    def test_a_quiet_host_would_launch(self):
+        lines = self.wave_lines('0 1 0')
+        self.assertTrue(any(l.startswith('would launch fix-bug-b-0001') for l in lines), lines)
+        self.assertFalse([l for l in lines if l.startswith('wave: held')], lines)
