@@ -363,6 +363,19 @@ def check_capacity(cfg, product):
     return findings
 
 
+def check_models(cfg):
+    """[(ok, detail)] — the ``models`` doctor row (plan F-0093 P11): one finding when
+    ``worker_pool.models`` has no ``cheap`` entry, none when it does. ``run()`` appends it as
+    ``required=False``, so it prints ``skip`` and never turns doctor red. Reads the dict only.
+    """
+    models = (cfg.get('worker_pool') or {}).get('models') or {}
+    if 'cheap' in models:
+        return []
+    return [(False, "worker_pool.models has no `cheap` entry — rebase, close and the groom's "
+                    "clerical pass fall back to `light`. Map it to your pool's smallest model "
+                    "to take the saving F-0093 measures.")]
+
+
 # ---- the scheduler section --------------------------------------------------
 #
 # The six rows above answer "is the install sound". They cannot answer "is the factory running",
@@ -541,6 +554,8 @@ def run(product_name):
     rows.append(('rule-checks', False, ok, detail))
     for ok, detail in check_capacity(cfg, product):
         rows.append(('capacity', False, ok, detail))
+    for ok, detail in check_models(cfg):
+        rows.append(('models', False, ok, detail))
     for ok, detail in check_token_caps(cfg, product):
         rows.append(('token-caps', False, ok, detail))
     return rows

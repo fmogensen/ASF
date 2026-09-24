@@ -482,6 +482,32 @@ class Capacity(unittest.TestCase):
         self.assertTrue(findings[0][0])
 
 
+class CheapTierAdviceTests(unittest.TestCase):
+    """`doctor.check_models` — the `models` row naming an unmapped `cheap` (plan F-0093 Task 2)."""
+
+    @staticmethod
+    def _rows(cfg):
+        findings = doctor.check_models(cfg)
+        return findings, [('models', False, ok, d) for ok, d in findings]
+
+    def test_an_unmapped_cheap_is_named_and_never_red(self):
+        findings, rows = self._rows({'worker_pool': {'models': {'heavy': 'h', 'light': 'l'}}})
+        self.assertEqual(len(findings), 1)
+        for word in ('cheap', 'rebase', 'close', 'light'):
+            self.assertIn(word, findings[0][1])
+        self.assertFalse(doctor.is_red(rows))
+
+    def test_a_mapped_cheap_has_no_row(self):
+        findings, _ = self._rows({'worker_pool': {'models': {'heavy': 'h', 'cheap': 'c'}}})
+        self.assertEqual(findings, [])
+
+    def test_no_worker_pool_block_still_prints_the_advice(self):
+        findings, rows = self._rows({})
+        self.assertEqual(len(findings), 1)
+        self.assertIn('cheap', findings[0][1])
+        self.assertFalse(doctor.is_red(rows))
+
+
 class TestFormatAndExit(unittest.TestCase):
     def test_is_red_true_only_for_required_failures(self):
         rows = [('config', True, True, 'ok'), ('cli:aws', False, False, 'no creds'),
