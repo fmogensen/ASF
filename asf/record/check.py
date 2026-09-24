@@ -149,6 +149,10 @@ def cmd_check(args, root):
             # quoted evidence (commit subjects, log lines) is not prose: skip `code spans` and "quoted text"
             scan_l = re.sub(r'`[^`]*`|"[^"]*"', '', l)
             for m in BARE_DECISION_RE.finditer(scan_l):
+                # only a number the record has a D-card for is a link gone bare; any other D<n> is
+                # the product's own register (a plan citing its docs), which ASF itself mints
+                if f'D-{int(m.group(0)[1:]):04d}' not in canonical:
+                    continue
                 add(rec, header_offset + i + 1,
                     f"bare decision reference {m.group(0)!r}; write it as [[D-nnnn]]")
         # Children/Backlinks staleness

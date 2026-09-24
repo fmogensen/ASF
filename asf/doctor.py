@@ -456,6 +456,11 @@ def scheduler_rows(cfg, product, jobs=None):
         return rows
 
     jobs = scheduler.loaded_jobs(cfg=cfg) if jobs is None else jobs
+    # only this product's clocks: another product's red job is that product's doctor row, and a
+    # product's install must not fail on a clock it does not own
+    own = f'asf.{product.name}.'
+    jobs = [j for j in jobs if not str(j.get('label', '')).startswith('asf.')
+            or str(j.get('label', '')).startswith(own)]
     if not jobs:
         rows.append((RED, '(none)', 'no factory job is loaded — nothing ticks this product'))
     for job in sorted(jobs, key=lambda j: j['label']):

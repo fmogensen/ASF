@@ -652,6 +652,15 @@ class TestSchedulerSection(unittest.TestCase):
         self.assertIn('log: tick: state committed', rows[0][2])
         self.assertFalse(doctor.scheduler_is_red(rows))
 
+    def test_another_products_clock_is_not_this_products_row(self):
+        self.install_plist('asf.other.tick', ['python3', '-m', 'asf.cli'],
+                           interval=600, age_s=3600)
+        fake_loaded(self.statedir, ['asf.other.tick'])
+        fake_print(self.statedir, 'asf.other.tick',
+                   read_fixture('launchctl-print-never-exited.txt'))
+        rows = doctor.scheduler_rows(self.cfg(), self.product)
+        self.assertNotIn('asf.other.tick', [r[1] for r in rows])
+
     def test_a_job_that_never_exited_past_two_intervals_is_red(self):
         """B-0014 (b): the job was installed, launchd holds it, and it has never once run."""
         self.install_plist('asf.sample.dispatch', ['python3', '-m', 'asf.cli'],

@@ -383,6 +383,7 @@ class CheckCommandTests(unittest.TestCase):
         self.assertIn('stories references missing item', r.stdout)
 
     def test_bare_decision_reference_finding(self):
+        write_item(self.root, 'D-0171', 'decision', 'A ruling')
         write_item(self.root, 'E-0001', 'epic', 'Factory',
                    body="## Description\nSee D171 for context.\n\n## Children\n\n## Backlinks\n")
         r = run(['check'], self.root)
@@ -392,6 +393,12 @@ class CheckCommandTests(unittest.TestCase):
         write_item(self.root, 'E-0001', 'epic', 'Factory',
                    body="## Description\n```ts\ndescribe('setup mode (D287 b)', () => {})\n```\n"
                         "\n## Children\n\n## Backlinks\n")
+        r = run(['check'], self.root)
+        self.assertNotIn('bare decision reference', r.stdout)
+
+    def test_a_d_number_the_record_has_no_card_for_is_the_products_own_register(self):
+        write_item(self.root, 'E-0001', 'epic', 'Factory',
+                   body="## Description\nPer D905 in the product's decisions.\n\n## Children\n\n## Backlinks\n")
         r = run(['check'], self.root)
         self.assertNotIn('bare decision reference', r.stdout)
 
