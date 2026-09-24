@@ -24,7 +24,7 @@ from unittest import mock
 from asf import approvals, cli, doctor, env, hooks
 from asf.env import Product
 from asf.feeder import rows as feeder_rows
-from asf.tick import file_bugs, step_daily, step_wave, tick
+from asf.tick import file_bugs, step_wave, tick
 from tests.test_file_bugs import FileBugsIntegrationTests
 from tests.test_harvest import ProductHarvestTests
 from tests.test_tick import TickTestCase, _git
@@ -753,12 +753,15 @@ class FileBugsTest(FileBugsIntegrationTests):
         self.assertIn('NEEDS OPERATOR: held file_bug on gate: flaky —'
                       ' widen approvals: file_bug in products/<p>.yaml', printed)
 
-    def test_daily_file_bugs_part_reads_the_level_too(self):
+    def test_record_step_file_bugs_reads_the_level_too(self):
+        # the daily no longer files bugs (F-0099); the record step does, with the product's level
         product = Product('sample', {'approvals': {'file_bug': 'groom'}})
-        thunks = dict(step_daily.parts(product, self.root))
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            rc = thunks['file-bugs']()
+            rc = file_bugs.cmd_file_bugs(
+                types.SimpleNamespace(default_bug_epic='E-0009',
+                                      file_bug_level=approvals.level_of(product, 'file_bug')),
+                self.root)
         self.assertEqual(rc, 0)
         self.assertEqual(self.bugs(), [])
         printed = out.getvalue()
