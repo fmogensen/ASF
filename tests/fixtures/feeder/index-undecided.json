@@ -1,0 +1,129 @@
+{
+  "generated": "2026-01-01T10:00:00Z",
+  "items": {
+    "E-0001": {
+      "backlinks": [],
+      "children": [
+        "F-0001",
+        "F-0002",
+        "F-0003",
+        "F-0004",
+        "F-0005",
+        "F-0006",
+        "F-0007",
+        "F-0008"
+      ],
+      "decided": true,
+      "id": "E-0001",
+      "rank": 1,
+      "stage_since": "2026-01-01T10:00:00Z",
+      "state": "New",
+      "title": "Sample epic",
+      "type": "epic"
+    },
+    "F-0001": {
+      "backlinks": [],
+      "children": [],
+      "decided": false,
+      "id": "F-0001",
+      "parent": "E-0001",
+      "rank": 1,
+      "stage": "card",
+      "stage_since": "2026-01-01T09:00:00Z",
+      "state": "New",
+      "title": "Undecided card 1",
+      "type": "feature"
+    },
+    "F-0002": {
+      "backlinks": [],
+      "children": [],
+      "decided": false,
+      "id": "F-0002",
+      "parent": "E-0001",
+      "rank": 2,
+      "stage": "card",
+      "stage_since": "2026-01-01T09:00:00Z",
+      "state": "New",
+      "title": "Undecided card 2",
+      "type": "feature"
+    },
+    "F-0003": {
+      "backlinks": [],
+      "children": [],
+      "decided": false,
+      "id": "F-0003",
+      "parent": "E-0001",
+      "rank": 3,
+      "stage": "card",
+      "stage_since": "2026-01-01T09:00:00Z",
+      "state": "New",
+      "title": "Undecided card 3",
+      "type": "feature"
+    },
+    "F-0004": {
+      "backlinks": [],
+      "children": [],
+      "decided": false,
+      "id": "F-0004",
+      "parent": "E-0001",
+      "rank": 4,
+      "stage": "card",
+      "stage_since": "2026-01-01T09:00:00Z",
+      "state": "New",
+      "title": "Undecided card 4",
+      "type": "feature"
+    },
+    "F-0005": {
+      "backlinks": [],
+      "children": [],
+      "decided": false,
+      "id": "F-0005",
+      "parent": "E-0001",
+      "rank": 5,
+      "stage": "card",
+      "stage_since": "2026-01-01T09:00:00Z",
+      "state": "New",
+      "title": "Undecided card 5",
+      "type": "feature"
+    },
+    "F-0006": {
+      "backlinks": [],
+      "children": [],
+      "decided": false,
+      "id": "F-0006",
+      "parent": "E-0001",
+      "rank": 6,
+      "stage": "card",
+      "stage_since": "2026-01-01T09:00:00Z",
+      "state": "New",
+      "title": "Undecided card 6",
+      "type": "feature"
+    },
+    "F-0007": {
+      "backlinks": [],
+      "children": [],
+      "decided": false,
+      "id": "F-0007",
+      "parent": "E-0001",
+      "rank": 7,
+      "stage": "card",
+      "stage_since": "2026-01-01T09:00:00Z",
+      "state": "New",
+      "title": "Undecided card 7",
+      "type": "feature"
+    },
+    "F-0008": {
+      "backlinks": [],
+      "children": [],
+      "decided": false,
+      "id": "F-0008",
+      "parent": "E-0001",
+      "rank": 8,
+      "stage": "card",
+      "stage_since": "2026-01-01T09:00:00Z",
+      "state": "New",
+      "title": "Undecided card 8",
+      "type": "feature"
+    }
+  }
+}

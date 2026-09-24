@@ -7,6 +7,7 @@ import datetime as dt
 import io
 import json
 import os
+import shutil
 import tempfile
 import unittest
 
@@ -854,6 +855,64 @@ class CliTest(unittest.TestCase):
                                 ledger=ledger)
         self.assertEqual(rc, 0)
         self.assertNotIn('B-0001', [d['item_id'] for d in json.loads(out)])
+
+
+class NextAllTests(unittest.TestCase):
+    """F-0096 §2.4: the footer for what the cap hid, and ``asf next --all``."""
+    FOOTER = '— 3 more cards await a decision (asf next --all)'
+
+    def run_next(self, *flags):
+        with tempfile.TemporaryDirectory() as home:
+            backlog = os.path.join(home, 'backlog')
+            os.makedirs(backlog)
+            os.makedirs(os.path.join(home, 'products'))
+            shutil.copy(os.path.join(FIXTURES, 'index-undecided.json'),
+                        os.path.join(backlog, 'index.json'))
+            with open(os.path.join(home, 'products', 'sample.yaml'), 'w') as f:
+                f.write(f"product: sample\nbacklog_dir: {backlog}\nconventions:\n"
+                        "  branch_prefixes:\n    spec: spec\n    plan: plan\n    task: task\n")
+            p = argparse.ArgumentParser()
+            register(p.add_subparsers(dest='command'))
+            args = p.parse_args(['next', '--product', 'sample', '--capacity', '10', *flags])
+            old, env.ASF_HOME = env.ASF_HOME, home
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf):
+                    rc = args.func(args)
+            finally:
+                env.ASF_HOME = old
+        self.assertEqual(rc, 0)
+        return buf.getvalue()
+
+    def test_the_cap_shows_five_decision_rows_and_the_footer(self):
+        out = self.run_next()
+        self.assertEqual(out.count('NEEDS DECISION'), 5)
+        self.assertIn('| 2 | UNDECIDED → DECIDE | F-0005 |', out)
+        self.assertNotIn('F-0006', out)
+        self.assertIn('**NEXT** — 5 rows · 0 would launch', out)
+        self.assertEqual(out.splitlines()[-1], self.FOOTER)
+
+    def test_all_prints_every_undecided_card_and_no_footer(self):
+        out = self.run_next('--all')
+        self.assertEqual(out.count('NEEDS DECISION'), 8)
+        self.assertIn('| F-0008 |', out)
+        self.assertNotIn('await a decision', out)
+        self.assertIn('**NEXT** — 8 rows · 0 would launch', out)
+
+    def test_json_carries_the_rows_the_table_showed_footer_or_not(self):
+        for flags, ids in (((), ['F-000%d' % i for i in range(1, 6)]),
+                           (('--all',), ['F-000%d' % i for i in range(1, 9)])):
+            with self.subTest(flags=flags):
+                data = json.loads(self.run_next('--json', *flags))
+                self.assertEqual([d['item_id'] for d in data], ids)
+                table = self.run_next(*flags)
+                self.assertEqual(table.count('NEEDS DECISION'), len(data))
+
+    def test_the_footer_is_absent_when_the_cap_hid_nothing(self):
+        out = render.table(rows.plan_rows(fixture_index(), product(), [], 10), hidden=0)
+        self.assertNotIn('await a decision', out)
+        self.assertEqual(render.table([], hidden=2).splitlines()[-1],
+                         '— 2 more cards await a decision (asf next --all)')
 
 
 if __name__ == '__main__':

@@ -1,7 +1,9 @@
 """asf.feeder.render — the NEXT rows table, the incident clock, and ``asf next``.
 
 ``incidents()`` is data only (the status view prints ``INCIDENTS`` first from it); ``table()``
-prints the rows table with the columns tier · row · item · feature · action.
+prints the rows table with the columns tier · row · item · feature · action, and — when the
+decision-row cap hid undecided cards — a last line naming how many (``asf next --all`` prints
+them all). ``cmd_next`` is ``asf next``.
 """
 import collections
 import json
@@ -59,8 +61,9 @@ def action_cell(row):
     return row.action
 
 
-def table(rows, header=None):
-    """The rows table — markdown, like every other ``asf`` view."""
+def table(rows, header=None, hidden=0):
+    """The rows table — markdown, like every other ``asf`` view. ``hidden``: the undecided cards
+    the decision-row cap left out; the footer is a line of the table, not a row."""
     out = [header or f"**NEXT** — {len(rows)} rows · "
                      f"{sum(1 for r in rows if r.launches)} would launch"]
     out.append('')
@@ -71,6 +74,9 @@ def table(rows, header=None):
                                      (str(r.tier), r.kind, r.item_id, r.feature_id, action_cell(r))) + ' |')
     if not rows:
         out.append('| — | nothing to start | — | — | — |')
+    if hidden > 0:
+        out.append('')
+        out.append(f"— {hidden} more cards await a decision (asf next --all)")
     return '\n'.join(out) + '\n'
 
 
@@ -99,12 +105,25 @@ def cmd_next(args, root=None):
     inflight_path = getattr(args, 'inflight', None)
     inflight = load_inflight(inflight_path) if inflight_path else step_wave.inflight(product)
     capacity = args.capacity if args.capacity is not None else _default_capacity(product)
-    rows = R.plan_rows(items, product, inflight, capacity, **step_wave.plan_inputs(product, root))
+    inputs = step_wave.plan_inputs(product, root)
+    show_all = getattr(args, 'all', False)
+    rows = R.plan_rows(items, product, inflight, capacity, **inputs,
+                       decision_limit=0 if show_all else None)
+    hidden = 0 if show_all else _hidden_undecided(items, product, inflight, inputs.get('busy'))
     if getattr(args, 'json', False):
         print(rows_json(rows), end='')
     else:
-        print(table(rows), end='')
+        print(table(rows, hidden=hidden), end='')
     return 0
+
+
+def _hidden_undecided(items, product, inflight, busy):
+    """How many undecided cards the ``decision_rows`` cap left out — the difference between the
+    uncut list and the capped one, both from :func:`asf.feeder.rows.undecided_rows`."""
+    items = R.items_of(items)
+    held = R.inflight_ids(inflight) | {i for i in busy or () if R.is_open(items.get(i) or {})}
+    return (len(R.undecided_rows(items, product, held, limit=0))
+            - len(R.undecided_rows(items, product, held)))
 
 
 def _default_capacity(product):
@@ -114,11 +133,12 @@ def _default_capacity(product):
 
 
 def register(sub):
-    """``asf next --product <p> [--capacity n] [--inflight <json>] [--json]``."""
+    """``asf next --product <p> [--capacity n] [--inflight <json>] [--all] [--json]``."""
     p = sub.add_parser('next', help='the NEXT table: what the tick would start, S1 first')
     env.add_product_arg(p)
     p.add_argument('--capacity', type=int, default=None, help='session slots (default: asf.capacity.resolve)')
     p.add_argument('--inflight', default=None, help='JSON file: the running sessions [{item, kind, account, age}] (default: the session ledger)')
+    p.add_argument('--all', action='store_true', help='every undecided card, not just the decision_rows cap')
     p.add_argument('--json', action='store_true', help='print the rows as JSON')
     p.set_defaults(func=cmd_next)
     return p
