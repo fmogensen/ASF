@@ -12,8 +12,10 @@ database — and the factory talks to one or more LLM runner accounts. Today:
 
 - the doctor checks a fixed list of vendor CLIs, and only whether each is logged in;
 - what a product *uses* a service for (CI, deploy, database) is not data anywhere, so the status
-  rows need hand-set keys (`ci.runner_org`, `deploy_sha.workflow`) and the approval matrix cannot
-  tell a deploy from a read;
+  rows need hand-set keys (`ci.runner_org` for Runners; the Prod row reads `ci.deploy_workflow`,
+  a key the product file refuses under `ci:`, so today it always reads "not configured" — a fix
+  to read `deploy_sha.workflow` is pending) and the approval matrix cannot tell a deploy from a
+  read;
 - worker accounts are configured by hand in `worker_pool.accounts`.
 
 ## The design
@@ -68,9 +70,12 @@ Planned pieces:
 
 - **Service logins**: log in to each CLI yourself; `asf doctor` shows `git` and `gh` (required) and
   a few common cloud and hosting CLIs (optional).
-- **Deploy and CI facts**: `ci:` and `deploy_sha:` in the product file.
+- **Deploy and CI facts**: `ci:` and `deploy_sha:` in the product file. `deploy_sha.workflow`
+  feeds the evidence pass; the status table's Prod row cannot be filled yet (see
+  [operating.md](operating.md#asfstatus--factory-status)).
 - **Guarding production actions**: `approval_signals:` in the product file adds your own
   `paths` and `commands` recognisers to a class.
 - **Worker accounts**: `worker_pool.accounts` in `config.yaml`. Give each account a `config_dir`,
   and a `home` if its sessions must not share your CLI logins: a session's `HOME` is only
   isolated when the account sets `home`; otherwise it inherits every CLI login on this machine.
+  See [Safety](operating.md#safety-what-a-worker-session-can-reach).

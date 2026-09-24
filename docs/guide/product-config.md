@@ -8,7 +8,29 @@ machine-wide settings live in `~/.ASF/config.yaml` ([`docs/config.example.yaml`]
 The file is YAML, but read by a small built-in reader: nested block maps, `- item` lists, inline
 `[a, b]` lists, scalars and `#` comments. **No inline maps**: `{a: 1}` is read as the string
 `"{a: 1}"`, not a map — always write a map as an indented block. No anchors, no multi-line
-strings.
+strings. A key's shape is checked: `customer_paths` must be a list (`- apps/web/**` lines, or
+`[apps/web/**]`), never a single string.
+
+### Old keys, and where they went
+
+A file written for an earlier release, or copied from an older product, may carry these. The
+product file refuses an unknown key; the operator config keeps reading its deprecated ones, and
+the doctor's `capacity` row names the two old capacity keys.
+
+| old | new | notes |
+| --- | --- | --- |
+| `ci.deploy_workflow` | `deploy_sha.workflow` | refused under `ci:`; see the Prod row note in [operating.md](operating.md#asfstatus--factory-status) |
+| `conventions.harvest_gate`, `.branches_per_tick`, `.gate_timeout_s` | `conventions.harvest:` → `gate`, `branches_per_tick`, `gate_timeout_s` | both spellings are read |
+| `conventions.test_command` | `ci.test_command` | both are read; the `conventions:` one wins |
+| `conventions.ci_workflow`, `.ci_dev_job`, `.deploy_workflow` | `ci.workflow`, `ci.dev_job`, `deploy_sha.workflow` | both are read; the `conventions:` one wins |
+| `conventions.task_heading` | — | not read; the evidence pass finds a plan's tasks by `## Task N` to `#### Task N` (or `T1`) headings |
+| a clock running `asf tick --daily` | a clock with `steps: [daily]` | an installed job of the old form still reads back as the daily clock |
+| `scheduler.interval_s` (config) | the product's `clocks:` | no longer read; the doctor flags it |
+| `scheduler.provider` (config) | `scheduler.kind` | still read as a synonym |
+| `feeder.capacity` (config) | `capacity.per_product.sessions` | still read |
+| `worker_pool.reserve_for_s1` (config) | `capacity.reserve_for_s1` | still read |
+| `worker_pool.quota_guard: {max_5h, max_7d}` (fractions) | `quota_guards.stop` (percent) | still read, as the stop for those windows; so is a flat `quota_guards: five_h: 95` |
+| `worker_pool.accounts[].share` | `worker_pool.accounts[].cap` | `share` is not read |
 
 ## Repos and directories
 
@@ -47,7 +69,7 @@ The ones that matter most:
 | key | default | meaning |
 | --- | --- | --- |
 | `specs_dir`, `plans_dir`, `reviews_dir` | `docs/specs`, `docs/plans`, `docs/reviews` | where spec, plan and review documents live in the product repo |
-| `review_pattern` | `{reviews_dir}/{n}-{slug}.md` | a review file's name; `{n}` is the round |
+| `review_pattern` | `{reviews_dir}/{n}-{slug}.md` | a **code** review's file name (`{slug}` is the item id in lower case, `{n}` the round), read when harvest merges a PR. Spec and plan reviews use a fixed name — see below |
 | `branch_prefixes` | `code: worker/`, `fix: fix/`, `spec: spec/`, `plan: plan/` | the branch each job kind pushes (`groom` too); `legacy: [..]` names old prefixes that are recognised, never minted |
 | `intake_dir` | `inbox` | where `asf inbox` drops a card for the groom |
 | `default_bug_epic` | none | the Epic a filed Bug is parented under; unset, the groom asks |
@@ -98,9 +120,20 @@ plan) counts as approved when either:
 
 - the document is on `origin/<main>` — landing it is its approval (in fast-forward mode harvest's
   gate is the review); or
-- the newest review file for it — in `reviews_dir` on the branch that carries the document, matched
-  by `review_pattern` — carries the verdict `APPROVED` (the first of `APPROVED`, `CHANGES
-  REQUESTED`, `BOUNCE`, `REVISE` in its text).
+- the newest review file for it on the branch that carries the document carries the verdict
+  `APPROVED` — the first of `APPROVED`, `CHANGES REQUESTED`, `BOUNCE`, `REVISE` anywhere in its
+  text.
+
+The review file for a spec or plan has a **fixed name**, whatever `review_pattern` says: in
+`reviews_dir` on the document's branch, `<slug>-review-r<n>.md` (also accepted:
+`spec-<slug>-review-r<n>.md`, `<slug>-spec-review-r<n>.md`, and the same with `plan`), `<n>` being
+the round. `<slug>` is the branch name after its `spec`/`plan` prefix, matched case-sensitively —
+the review on `spec/F-0042` is `docs/reviews/F-0042-review-r1.md`. (For a document the evidence
+finds only on `main`, the slug is its file name without the leading `YYYY-MM-DD-` and `.md`; but
+a document on `main` is approved already.) A spec review saved under the default `review_pattern`
+(`docs/reviews/1-F-0042.md`) is never read, and never approves.
+
+`review_pattern` and a `verdict: approved` line apply only to code PRs (above).
 
 In pull-request mode, a spec or plan waits in its PR until harvest merges it. Meanwhile the NEXT
 table shows it as `PUSHED → LAND` / `WAITS ON landing`, so no second session is started on it.
@@ -121,8 +154,10 @@ steps:
 
 `asf tick --product <p> --manifest` prints the resolved table (step · owner · command). A step with
 no owner — `batch` is the one ASF has no implementation for — is a refusal: the tick exits 2 before
-running anything (`tick: step batch has no owner — declare it under steps …`). Declare it, even as
-`off`.
+running anything (`tick: step batch has no owner — declare it under steps …`). The check covers
+the steps a run includes: a full `asf tick` with no `--steps`, or a clock whose `steps:` names
+`batch` (`asf scheduler` refuses that clock). A product whose clocks never name `batch` is never
+refused — but a hand-run `asf tick --product <p>` is. Declaring `batch: off` avoids both.
 
 A **command step**:
 
@@ -321,7 +356,9 @@ Rules live in the record's `rules/` folder as `R-nnnn` cards. Each carries a `ch
 A rule card with `removed:` or `moved_to:` is **retired**: `asf rules check` skips it and its check
 no longer binds the record. On any other card, `removed:` retires it the same way: the tables and
 the wave leave it out, nothing is started on it, and a session whose item is removed is ended and
-its worktree reaped rather than sent back. (`moved_to:` retires rule cards only.)
+its worktree reaped rather than sent back. `moved_to:` retires rule cards only; on any other card
+write `removed: <reason>` — the recipe is
+[clearing a card](operating.md#clearing-a-card-that-does-not-belong).
 
 Checks run in parallel, each with a timeout: `$ASF_RULE_CHECK_TIMEOUT` seconds, default 60. A check
 that times out, crashes or exits anything but 0/1 is a **check failure**, never a violation: it
@@ -347,6 +384,18 @@ doctor's `redaction-hooks` row accepts any hook file that contains `asf redact -
 `--pre-push`) in any spelling — a quoted path to `asf`, a bare `asf` on `PATH`, or `python3 -m
 asf.redact`. A hook file already there that is not ASF's is never edited; the installer stops with
 `NEEDS OPERATOR: <path> is not asf's — add the line: …`.
+
+Known issue: that stop comes before `asf hooks install` writes the approvals hook into the worker
+accounts' settings, so while a foreign git hook is in the way, worker sessions run **without the
+approvals hook**. Add the line and rerun `asf hooks install --product <p>` before the first tick.
+A fix is in progress.
+
+When a repo sets `core.hooksPath` to a tracked directory (a fresh record's `.githooks/`, for
+example), the hooks ASF writes there are ordinary files in the working tree. **Commit and push
+them**: every clone and worktree — each worker's included — reads its own copy of that
+directory, so an uncommitted hook exists only in your checkout. Commit them yourself: a worker
+session that writes `.githooks/*` is refused as `touch_security` (a built-in path, `human-now` by
+default), and its item is held until you run `asf approvals resolve <item>/touch_security …`.
 
 To add ASF's line to a hook you already have, run it first and stop on failure — do not `exec` it,
 or the rest of your hook never runs:

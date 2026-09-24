@@ -29,7 +29,7 @@ cp docs/products.example.yaml ~/.ASF/products/<product>.yaml   # once per produc
 | --- | --- |
 | `default_product` | the product `asf` targets when no `--product` and no `$ASF_PRODUCT` is given |
 | `scheduler.kind` | `launchd` (default; installed end to end) or `cron` (ASF prints the lines, you add them) |
-| `worker_pool.accounts` | one entry per worker account: `name`, `cap` (concurrent sessions), `config_dir` |
+| `worker_pool.accounts` | one entry per worker account: `name`, `cap` (concurrent sessions), `config_dir`, and `home` — the session's `HOME`; without it a session inherits every CLI login you have (see [Safety](operating.md#safety-what-a-worker-session-can-reach)) |
 | `worker_pool.models` | the two model labels ASF uses, `heavy` and `light`, mapped to real model ids |
 | `worker_pool.quota_command` | optional: prints an account's usage windows; without it the quota bands never apply |
 | `capacity` | totals across products, and the per-product default |
@@ -77,7 +77,8 @@ Steps 1–2 abort at once. Steps 3–5 never abort: each failure is recorded, th
 | --- | --- |
 | `install: product <p>, ref <sha12> from <url>` | what is being installed |
 | `install: asf 0.1.0 (<sha>)` | the install landed; the sha is the commit you are running |
-| `install: NEEDS OPERATOR: …` then exit 2 | step 1 or 2 could not run — the line says what to install or copy |
+| `install: NEEDS OPERATOR: …` then exit 2 | a precondition is missing — pipx or git not installed, `asf` not on `PATH` after the install, a config file missing, or `main`'s head came back empty; the line says what to do |
+| the installer stops with no `install:` line after it, exit non-zero | a command failed under `set -e` and the script ended with that command's own exit code: `pipx install` failed (its own error is printed above), or `git ls-remote` could not reach the repo while resolving `main`. Fix what that command printed and rerun |
 | `install: FAILED step N: <command> (exit K)` | that step failed; run the command yourself to see why |
 | `install: NEEDS OPERATOR: N step(s) failed …` then exit 1 | fix each `FAILED` line and run the installer again — it is idempotent |
 | `install: done` | every step and the doctor passed |
@@ -128,7 +129,7 @@ One table, then a `SCHEDULER` section. Each row is `ok`, `RED` (required and fai
 | --- | --- |
 | `config` | both files parse; `repo_dir`, `backlog_dir` (and `repo_slug` with a PR host) are set |
 | `repo`, `backlog` | each is a directory and a git work tree |
-| `scheduler` | a pre-ASF launchd job named by `scheduler.launchd_label`, if any, is retired |
+| `scheduler` | **always `ok`** — it only reports, in its detail, whether a pre-ASF launchd job named by `scheduler.launchd_label` is still loaded (`… still loaded — retire it with tools/cutover.sh`). An old job still running does not turn it red; read the detail. ASF's own jobs are checked in the `SCHEDULER` section below |
 | `cli:<tool>` | `git` and `gh` are required (`gh` only with a PR host); the rest are optional |
 | `one-factory` | no copy of an old tool from `legacy_paths:` is on `PATH` or in the product repo |
 | `approvals` | the approval matrix loads; notes classes left to their default or unrecognisable |

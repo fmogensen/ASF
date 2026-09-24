@@ -59,13 +59,10 @@ asf schema-migrate --product <p> --drain     # or --all for every product
 
 It migrates the tick's record clone, one commit per step (`migrate: schema a → b`), pushes it, and
 sets `schema_version` in `config.yaml`. Without `--drain` it refuses while sessions are in flight;
-with it, it waits for them (`--drain-timeout`, default 3600 s) and then migrates. Migrations are
+with it, it waits for them (`--drain-timeout`, default 3600 s) and then migrates. A session
+counts as in flight while its process lives and it has not yet written a success result. Migrations are
 forward-only; to roll back, revert that commit and reinstall the older ref. A record newer than
 the package is never migrated down — `asf upgrade` says to install the newer `asf`.
-
-Known issue: the in-flight count reads the session ledger by session id, and the lines that end a
-session do not carry that id — so a product that has ever run a session is reported busy, and
-`--drain` waits out its timeout. See [troubleshooting.md](troubleshooting.md#common-stalls).
 
 ## What is safe while sessions run
 

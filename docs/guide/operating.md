@@ -16,13 +16,13 @@ each step without running anything.
 
 | step | what it does | typical lines |
 | --- | --- | --- |
-| `record` | in the tick's own clone of the record: CI backfill, derive state from git and CI evidence (`ingest`), mint Tasks from landed plans, file Bugs, roll up metrics and releases, rebuild `index.json`, apply groom answers, groom the inbox | `[record:<part>] 0.8s`, `file-bugs: 0 filed …` |
+| `record` | in the tick's own clone of the record: CI backfill, derive state from git and CI evidence (`ingest`), mint Tasks from landed plans, file Bugs, roll up metrics and releases, rebuild `index.json`; with `approvals.groom: auto` also apply the adjudicator's answers and groom the inbox | `[record:<part>] 0.8s`, `file-bugs: 0 filed …` |
 | `health` | reconcile the session ledger with what runs: end finished or dead sessions, hold unpushed work, reap worktrees, look for stalls | `ended`, `held`, `reaped`, `stall: none` |
 | `wave` | say the open holds, then launch what the feeder says — the NEXT table, cut to capacity | `launched <job> <item> → <account> (<model>) pid n`, `waits …` |
 | `prs` | pull-request landing: open a PR per finished branch, then PR hygiene | `prs: opened …`, `prs: landing is fast-forward …` |
 | `harvest` | land finished branches, fast-forward or by merging their PRs (in the background) | `harvest: started in the background`, `landed <branch> → <sha>`, `waiting …`, `held <branch>: …` |
 | `batch` | your own merge-queue script, if declared | `[command:batch] …` |
-| `daily` | once a day: groom with yesterday's answers, stale items, Bugs, yesterday's rollup and release | `daily: <part> ok` |
+| `daily` | once a day: `groom --apply` (the previous groom file's answers, the inbox, today's questions), stale items, Bugs, yesterday's rollup and release | `daily: <part> ok` |
 
 Each step ends with `[step:<name>] <seconds>s`; the tick ends with `tick: state committed and
 pushed`, `tick: total …`, then a summary: **IN FLIGHT** (the sessions running now) and **DONE
@@ -39,7 +39,7 @@ configured: <key>)`.
 | row | reads |
 | --- | --- |
 | Runners | the CI runner pool (`ci.runner_org`) |
-| Prod | how far `main` is ahead of the last successful deploy (`deploy_sha.workflow`) |
+| Prod | how far `main` is ahead of the last successful deploy — see the note below |
 | Agents | `n working`, then `f finished (awaiting harvest)` and `m dead` when there are any |
 | Capacity | `sessions used/ceiling (bound by …)`, and CI when configured |
 | Ready to launch | how many rows the NEXT table would launch, and the first |
@@ -47,12 +47,23 @@ configured: <key>)`.
 | Cron | the scheduler's view of this product's jobs |
 | Groom | the latest digest's counts (only with `approvals.groom: auto`) |
 
+**Prod always reads `— (not configured: ci.deploy_workflow)` today.** The row reads
+`ci.deploy_workflow`, but the product file refuses that key under `ci:` (it is not one of `ci`'s
+fields), so no config can fill it. The deploy workflow belongs in `deploy_sha.workflow`, which the
+evidence pass (the prod sha behind a Feature's `on-prod`) already reads; the pending fix is for
+the Prod row to read it too.
+
+To keep the table in front of you, type `/loop 5m /asf:status` in each product's Claude Code
+session: it reprints the status every five minutes until you stop it.
+
 ### `/asf:next` — NEXT
 
 What the tick would start now, S1 first: `Tier | Row | Item | Feature | Action`.
 
 - **Tier** 0 is an open S1 Bug, 1 an S2 Bug, 2 everything else by Feature rank. While an S1 Bug has
-  no session, no tier-2 row is shown: Features wait for the incident.
+  no session, no tier-2 row is shown: Features wait for the incident. If that Bug does not belong
+  to this product, retire it rather than wait — see
+  [clearing a card](#clearing-a-card-that-does-not-belong).
 - **Row** is `STATE → ACTION`: `BUG → FIX`, `FIX → CORRECT` (a held branch back to a session),
   `STALEMATE → ADJUDICATE`, `CARD → SPEC`, `STARVED → SPEC`/`PLAN`, `PLAN → CODE`, `CONFLICT →
   REBASE`, `STALE → CLOSE`, `RESHAPE → PLAN`, `UNDECIDED → DECIDE`, `GROOM → ADJUDICATE`, and
@@ -137,6 +148,14 @@ Other holds you will see:
   `asf unpark <item> --why "<reason>" --product <p>`.
 - `held <branch>: ruling belongs in the record` — an adjudicate ruling was committed to the product
   repo instead of reported.
+- `held <branch>: commits do not name <ITEM>: every commit subject on the branch names its item …`
+  — harvest lands a branch only when every commit subject names the item as a token; an id that
+  appears only in the branch name does not count. Every brief states the rule as
+  `<kind>(<ITEM>): <what>` — `spec(F-0042): …`, `plan(F-0042): …`, `fix(B-0007): …`,
+  `task(T-0101): …` — and the session is sent back to reword its commits. Commit to a lane branch
+  by hand the same way.
+- `held <branch>: merge commit on a lane branch …` — a lane branch must be straight commits on the
+  trunk; the session is sent back to rebase.
 
 A held branch is not a failed step. Nothing is lost: the worktree and branch stay until the item
 lands or is closed.
@@ -182,20 +201,92 @@ it. You can also drop a `.md` file into the intake folder and push it. The body 
 `type:`, `parent:`, `severity:`, `writes:` or `stories:` lines; the type is derived from the
 card's shape when it does not say.
 
-**The groom** runs in every tick's record step: new and edited inbox cards are typed into cards
-(the file moves to `<intake_dir>/done/`), and anything it cannot decide becomes a question in
-`groom/<date>.md` of the record:
+**The groom** types new and edited inbox cards into cards (the file moves to
+`<intake_dir>/done/`) and turns anything it cannot decide into a question in `groom/<date>.md` of
+the record:
 
 ```
 - [ ] F-0042 … → answer: ____
 ```
 
-Answer with `/asf:groom`: it prints the groom, shows each open question with a recommended answer,
-takes yours (`yes`, `no`, `rank 2`, `parent E-0003`, `S1`, `duplicate of B-0007`, or `all as
-recommended`), writes them into the `answer:` slots and runs `asf groom --apply`. Or edit the file
-in your checkout, push it, and the next tick applies the answers. A card becomes buildable only
-when its answer makes it `decided: true` — that is what `NEEDS DECISION` rows wait for.
+When it runs:
+
+- **Once a day, always**: the `daily` step runs `asf groom --apply` in the tick's clone. `--apply`
+  applies the answers in the newest groom file dated **before today** (only that one), then grooms
+  the inbox and writes today's file. The clone is reset to `origin` first, so it sees your answers
+  only if they were committed and pushed.
+- **Every tick, only with `approvals.groom: auto`**: the record step grooms the inbox, adds new
+  questions to today's file, and applies the adjudicate session's answers (a
+  `~/.ASF/state/<p>/groom/<date>.answers` file). Without `groom: auto`, neither happens between
+  dailies.
+
+Answering, step by step:
+
+1. Pull your record checkout (`backlog_dir`).
+2. `/asf:groom` (or `asf groom --product <p>`) runs the groom **in your checkout**: it writes
+   today's file there, shows each open question with a recommended answer, takes yours (`yes`,
+   `no`, `rank 2`, `parent E-0003`, `S1`, `duplicate of B-0007`, or `all as recommended`) and
+   writes them into the `answer:` slots. It then runs `asf groom --apply`, which applies the
+   *previous* day's file in your checkout — not the one you just answered.
+3. **Commit and push the checkout.** Neither `asf groom` nor the skill commits or pushes, and the
+   tick never reads your checkout.
+4. The next day's `daily` step applies those answers in its clone and pushes the result. A card
+   becomes buildable only when its answer makes it `decided: true` — that is what `NEEDS
+   DECISION` rows wait for.
+
+Answer a day's file before the next day's daily runs: after that, `--apply` reads a newer file.
 
 With `approvals.groom: auto` the groom also answers what its policies can (exact duplicates,
 recurring Bugs), sends the rest to an adjudicate session, and writes a daily digest; only what is
 left comes to you as `NEEDS OPERATOR` lines.
+
+**The daily stamp.** The `daily` step runs at most once a day, remembered in
+`~/.ASF/state/<p>/daily.stamp` as the **local** date. A stamp written today by something other
+than the daily clock — a hand-run `asf tick --daily`, a copied state directory — makes the
+scheduled daily print `tick: step daily already ran today`. Delete the file to clear it, or force
+a run: `asf tick --product <p> --steps daily --daily`.
+
+## Your checkout drifts from the tick's clone
+
+Only `asf inbox` and `asf new` commit and push what they write. `asf groom`, `asf groom --apply`,
+`asf set` and your own edits change your checkout and stop there — the tick, working in its clone
+from `origin`, never sees them. Commit and push after each, and pull before you edit: the tick
+pushes a `tick: state` commit every run, so an unpulled checkout is always behind.
+
+## Clearing a card that does not belong
+
+A card that is not this product's work — a Bug filed against the wrong product, a Feature nobody
+wants — is retired with `removed:`, never deleted:
+
+1. Pull your record checkout.
+2. In the card's typed block (above the `# ---- machine ----` line), add
+   `removed: <why, in a few words>`. `asf set` cannot write this field; edit the file.
+3. Run `asf index` in the checkout, then commit and push the card and `index.json`.
+
+On the next tick the card leaves the tables and the wave: nothing is started on it, and a session
+already on it is ended and its worktree reaped rather than sent back. An S1 Bug retired this way
+releases the tier-2 freeze. (`moved_to:` retires rule cards only; use `removed:` for everything
+else.)
+
+## Safety: what a worker session can reach
+
+A worker session is launched with **the tick's whole environment**: ASF removes only git-hook and
+caller-identity variables, and adds the job's own (`ASF_PRODUCT`, `ASF_JOB`, …) and the account's
+`CLAUDE_CONFIG_DIR`. It keeps your `HOME` unless the account sets `home:`, so it also has every
+CLI login that lives under `HOME` or in your keychain — code host, cloud, hosting, database,
+payments.
+
+So a tick you run by hand from your shell passes that shell's exported secrets and all your logins
+to every session it launches — including, say, a payments CLI whose active context is live. A
+scheduled tick passes the smaller environment of its job, but still your `HOME`.
+
+What limits this today:
+
+- Give each account in `worker_pool.accounts` its own `home:` directory, holding only the logins a
+  worker should have ([config.example.yaml](../config.example.yaml)).
+- Keep the CLIs a worker can reach on test-mode or non-production contexts.
+- Map what must never happen unattended with `approval_signals` (commands and paths) at
+  `human-now` ([approvals](product-config.md#approvals)).
+- Run ticks from the scheduler, not from a shell with secrets exported.
+
+The planned [connectors](connectors.md) replace this with default-deny scoping.

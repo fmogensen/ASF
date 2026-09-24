@@ -42,7 +42,7 @@ what it means and the one command that clears it; then the common stalls that pr
 | --- | --- | --- |
 | `NEEDS OPERATOR: asf is not on PATH — pipx install asf-factory` | `asf hooks install` cannot resolve `asf` | rerun the installer (it puts `asf` on `PATH`) |
 | `NEEDS OPERATOR: <dir> is not a git repo — asf hooks install cannot place its hooks there` | `repo_dir` or `backlog_dir` is wrong | fix the path, then `asf hooks install --product <p>` |
-| `NEEDS OPERATOR: <hook> is not asf's — add the line: "<asf>" redact --pre-commit\|--pre-push --product <p>` | a hook ASF did not write is in the way | add the line to that hook — see [below](#the-redaction-hooks) |
+| `NEEDS OPERATOR: <hook> is not asf's — add the line: "<asf>" redact --pre-commit\|--pre-push --product <p>` | a hook ASF did not write is in the way. Until it is fixed, `asf hooks install` also skips the worker accounts' approvals hook (a known issue) | add the line to that hook — see [below](#the-redaction-hooks) — then rerun `asf hooks install --product <p>` |
 | `NEEDS OPERATOR: product <p> has no repo_dir …` | a rule card declares a Claude Code hook but there is no product repo to put it in | set `repo_dir` |
 
 ### Approvals
@@ -140,15 +140,30 @@ merges a docs-only plan branch itself once its PR's checks are green; look for i
 **A step has no owner.** `tick: step <s> has no owner — declare it under steps in products/<p>.yaml`
 and exit 2: typically `batch`. Add `batch: off` (or its command) under `steps:`.
 
-**`asf schema-migrate` says sessions are in flight when none run.** A known issue: it counts any
-session the ledger ever recorded (see [upgrading.md](upgrading.md#schema-migrations)). Check
-`asf sessions --product <p>` shows none working before you rely on its refusal.
+**A branch is held with `commits do not name <ITEM>`.** Every commit subject on a lane branch must
+name its item — `plan(F-0042): …`; the id in the branch name does not count. The session is sent
+back to reword them; see [holds](operating.md#holds-and-back-to-its-session).
+
+**Answers in the groom have no effect.** They were not committed and pushed, or they were written
+into a day's file after the next day's daily already ran — see
+[the groom](operating.md#the-groom-and-the-inbox).
 
 ## Retiring a pre-ASF scheduler
 
 If the product was run by earlier scripts on their own scheduler, those jobs keep running until
-the product's owner retires them — ASF never removes a job it did not install. Declare them in
-`config.yaml` so the doctor can see them:
+the product's owner retires them — ASF never removes a job it did not install, and the doctor's
+`scheduler` row stays `ok` while one runs.
+
+Find them first — ASF only knows the jobs you name:
+
+```bash
+launchctl list | grep -v com.apple   # loaded launchd jobs; look for the old factory's labels
+crontab -l                          # cron lines
+asf scheduler list                  # ASF's own jobs plus scheduler.legacy_labels, with the
+                                    # paths each job's arguments point at
+```
+
+Then declare them in `config.yaml` so the doctor can see them:
 
 ```yaml
 scheduler:
@@ -166,7 +181,20 @@ What the doctor then reports:
 - `one-factory RED` when a tool named like one in `legacy_paths` is on `PATH` or inside the product
   repo — two factories running the same product.
 
-To retire them: `tools/cutover.sh <product>` prints what it would do (dry run); `--apply` boots out
-the old job, installs ASF's clocks, moves the old directories aside and records everything in
-`~/.ASF/state/<product>/retired/<date>/manifest.tsv`; `tools/rollback.sh <product> --apply` undoes
-it. Or retire them by hand (`launchctl bootout`, `crontab -e`) and rerun `asf doctor`.
+To retire them: `tools/cutover.sh <product> [--ref DIR] [--force] [--dry-run|--apply]`. It is a dry
+run by default (the gate table and every step it would take); `--apply` boots out the job named by
+`scheduler.launchd_label`, installs ASF's clocks, moves the `legacy_paths` directories aside and
+records everything in `~/.ASF/state/<product>/retired/<date>/manifest.tsv`. It runs from an ASF
+checkout (it is not part of the pipx install). Its gates:
+
+| gate | refuses when | exit |
+| --- | --- | --- |
+| clocks | the product's `clocks:` do not render | 3 |
+| 1 referenced dirs | a `legacy_paths` directory is still used by a loaded job other than the one being retired | 3 |
+| 2 manifest complete | `asf tick --product <p> --manifest` has a step with no owner | 3 |
+| (a) doctor and shadow-diff | `asf doctor` or `asf shadow-diff --ref DIR` is not clean (without `--ref` there is nothing to compare). `--force` overrides this gate only | 1 |
+| 3 the job runs | the installed record job does not complete a run with exit 0 and a `tick: state` commit (or a no-change line) — the run is rolled back | 4 |
+
+`--force` never bypasses gates 1–3. A product already cut over exits 0 and changes nothing.
+`tools/rollback.sh <product> --apply` undoes a cutover from its manifest. Or retire the old jobs by
+hand (`launchctl bootout gui/$(id -u)/<label>`, `crontab -e`) and rerun `asf doctor`.
