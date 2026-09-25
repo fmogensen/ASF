@@ -1543,18 +1543,24 @@ class ProductHarvestTests(unittest.TestCase):
         data.update(extra)
         return env.Product('sample', data)
 
-    def fake_gh(self, checks, number=41, queue=False, auto=False, required=None):
+    def fake_gh(self, checks, number=41, queue=False, auto=False, required=None, trunk=None):
         """A ``gh`` answering ``checks`` (a ``gh pr checks --json`` list, or ``None``: no checks
         reported) for the one open PR ``number``, on the worker's current branch; a merge lands
         that branch on origin's main as the host would. ``queue``: the trunk has a merge queue;
         ``auto``: the PR is already in it; ``required``: the checks the trunk's branch protection
-        requires (None: no protection). Returns the list the calls are recorded in."""
+        requires (None: no protection); ``trunk``: ``{check: conclusion}`` every trunk commit's
+        completed check runs read as (None: the check-runs read fails, as a host without them).
+        Returns the list the calls are recorded in."""
         calls = []
         state = {'merged': None}
 
         def gh(args):
             calls.append(list(args))
             head = sh(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], cwd=self.worker).stdout.strip()
+            if args[:1] == ['api'] and '/check-runs' in args[1] and trunk is not None:
+                return 0, json.dumps({'check_runs': [
+                    {'name': n, 'status': 'completed', 'conclusion': c,
+                     'completed_at': '2026-09-25T00:00:00Z'} for n, c in trunk.items()]}), ''
             if args[:1] == ['api'] and args[1].endswith('/required_status_checks'):
                 if required is None:
                     return 1, '', 'gh: Branch not protected (HTTP 404)\n'
@@ -2220,6 +2226,87 @@ class ProductHarvestTests(unittest.TestCase):
         checks = json.loads(out)
         self.assertEqual(lane.not_required_red(checks, ('gate',)), ['gate-tests'])
         self.assertEqual(lane.not_required_red(checks, ()), [])
+
+    # ---- a red trunk: never the PR's fault, never landed on -----------------------------
+
+    def push_trunk(self, rel='teach.txt', text='x\n'):
+        """A commit straight on origin's main — the one the trunk's CI turned red on."""
+        sh(['git', 'pull', '-q', '--ff-only', 'origin', 'main'], cwd=self.repo)
+        self.write(self.repo, rel, text)
+        sh(['git', 'add', '-A'], cwd=self.repo)
+        sh(['git', 'commit', '-qm', 'feat: on the trunk'], cwd=self.repo)
+        sh(['git', 'push', '-q', 'origin', 'HEAD:main'], cwd=self.repo)
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)  # a branch pushed next starts here
+        return self.origin_main()
+
+    def test_a_pr_red_on_a_check_the_trunk_is_red_on_too_waits_and_is_not_sent_back(self):
+        """B-1372: the trunk's latest completed ``gate`` run failed; the PR's ``gate`` is red on
+        that same failure. Not its fault: WAITING ``trunk-red``, no round, nothing merged."""
+        calls = self.fake_gh([{'name': 'gate', 'bucket': 'fail'}], trunk={'gate': 'failure'})
+        self.push_fix(['approved'])
+        results, lines = self.harvest(self.pr_conv(landing_checks=['gate']))
+        self.assertEqual(results, {'fix/B-0001': 'waiting'}, lines)
+        self.assertIn('waiting fix/B-0001: PR #41 checks red: gate — red on main too, not its '
+                      'fault; it lands once main is green', lines)
+        self.assertEqual(self.merges(calls), [])
+        rec = self.record('fix/B-0001')
+        self.assertFalse(rec.get('correction'))
+        self.assertEqual((rec['lane']['state'], rec['lane']['reason']),
+                         ('WAITING', 'trunk-red: gate'))
+
+    def test_a_pr_red_on_a_check_the_trunk_is_green_on_is_still_sent_back(self):
+        calls = self.fake_gh([{'name': 'gate', 'bucket': 'fail'}],
+                             trunk={'gate': 'success', 'lint': 'failure'})
+        self.push_fix(['approved'])
+        results, lines = self.harvest(self.pr_conv(landing_checks=['gate']))
+        self.assertEqual(results, {'fix/B-0001': 'held'}, lines)
+        self.assertEqual(self.record('fix/B-0001')['correction']['kind'], 'gate')
+        self.assertEqual(self.merges(calls), [])
+
+    def test_a_green_pr_does_not_land_on_a_trunk_red_it_does_not_fix(self):
+        """The PR's ``gate`` went green on a base from before the trunk turned red — that green
+        proves nothing about the red. It waits, and lands once the trunk is green again."""
+        self.push_fix(['approved'])
+        self.push_trunk()
+        calls = self.fake_gh([{'name': 'gate', 'bucket': 'pass'}], trunk={'gate': 'failure'})
+        results, lines = self.harvest(self.pr_conv(landing_checks=['gate']))
+        self.assertEqual(results, {'fix/B-0001': 'waiting'}, lines)
+        self.assertIn('waiting fix/B-0001: main is red on gate and PR #41 does not turn it green '
+                      'on top of that red — it lands once main is green', lines)
+        self.assertEqual(self.merges(calls), [])
+        self.assertFalse(self.record('fix/B-0001').get('correction'))
+
+    def test_a_pr_that_turns_the_red_trunk_check_green_lands(self):
+        """The fix for the red: branched off the red trunk, its ``gate`` passes — it lands."""
+        self.push_trunk()
+        self.push_fix(['approved'])
+        calls = self.fake_gh([{'name': 'gate', 'bucket': 'pass'}], trunk={'gate': 'failure'})
+        results, lines = self.harvest(self.pr_conv(landing_checks=['gate']))
+        self.assertEqual(results, {'fix/B-0001': 'landed'}, lines)
+        self.assertIn('harvest: fix/B-0001: PR #41 turns gate green on top of the red main — it '
+                      'may land', lines)
+        self.assertEqual(len(self.merges(calls)), 1)
+
+    def test_trunk_red_judges_the_latest_completed_run(self):
+        """A check still running on the trunk's head is judged by its run one commit back; a
+        check green on the head is green whatever came before; an unreadable host is not red."""
+        older = self.push_trunk('a.txt')
+        newest = self.push_trunk('b.txt')
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        runs = {newest: [{'name': 'gate', 'status': 'in_progress', 'conclusion': None},
+                         {'name': 'lint', 'status': 'completed', 'conclusion': 'success'}],
+                older: [{'name': 'gate', 'status': 'completed', 'conclusion': 'failure'},
+                        {'name': 'lint', 'status': 'completed', 'conclusion': 'failure'}]}
+
+        def gh(args):
+            sha = args[1].split('/commits/')[1].split('/')[0]
+            return 0, json.dumps({'check_runs': runs.get(sha, [])}), ''
+        host_ = lane.Lane(self.pr_conv(), self.state_dir).host
+        with mock.patch.object(harvest, '_gh', side_effect=gh):
+            self.assertEqual(host_.trunk_red(['gate', 'lint', 'docs']), {'gate': older})
+        with mock.patch.object(harvest, '_gh', return_value=(1, '', 'HTTP 404')):
+            self.assertEqual(lane.Lane(self.pr_conv(), self.state_dir).host.trunk_red(['gate']),
+                             {})
 
     def test_missing_policy_reads_one_value_or_a_map(self):
         conv = Conventions.from_mapping

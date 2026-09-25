@@ -37,7 +37,9 @@ Transitions (plan §2 plus the §9 overrides):
 - T5  REVIEW → BACK            the review of the current head reads changes (rounds+1)
 - T6  GATE → WAITING_CI        required checks pending/absent under ``landing_checks_missing``
 - T7  WAITING_CI → GATE        re-decided every harvest
-- T8  GATE → WAITING           trunk red alone, no merge budget, deferred, a shared path, a gate
+- T8  GATE → WAITING           trunk red alone (or a required check red on the trunk's latest
+                               completed run that the PR does not turn green on top of that
+                               red), no merge budget, deferred, a shared path, a gate
                                timeout, an approval hold, host pressure (:func:`held_by_host`:
                                the gate is a full suite and this host has no room for it, B-0109)
                                — never a correction, never a round
@@ -114,6 +116,10 @@ MERGE_METHODS = ('--squash', '--merge', '--rebase')
 #: required check a path filter skipped (``skipping``) decided it is not needed: passed (§12).
 RED_BUCKETS = ('fail', 'cancel')
 PASS_BUCKETS = ('pass', 'skipping')
+#: A trunk check run that ended in one of these is red (:meth:`GitHubHost.trunk_red`).
+TRUNK_RED_CONCLUSIONS = ('failure', 'cancelled', 'timed_out', 'startup_failure')
+#: How many trunk commits, newest first, are read for a check's latest completed run.
+TRUNK_RED_DEPTH = 5
 #: ``conventions.landing_checks_missing`` values.
 MISSING_LOCAL_GATE = 'local-gate'
 MISSING_WAIT = 'wait'
@@ -1395,6 +1401,7 @@ class GitHubHost(Host):
         self.in_queue = 0
         self._queue = None
         self._required = None
+        self._trunk_runs = {}  # sha -> that commit's check runs (None: unreadable), one pass
 
     def prs(self):
         """One ``gh pr list --state all``: ``{branch: pr}``, an open PR first, else the newest."""
@@ -1502,18 +1509,39 @@ class GitHubHost(Host):
             wait(lane, f, 'checks unreadable')
             return None
         if state == 'red':
+            red = [c.get('name') or '?' for c in checks if c.get('bucket') in RED_BUCKETS
+                   and (not required or c.get('name') in required)]
+            on_trunk = self.trunk_red(red)
+            if red and all(n in on_trunk for n in red):
+                lane.out(f'waiting {b}: PR #{number} checks red: {detail} — red on {self.trunk} '
+                         f'too, not its fault; it lands once {self.trunk} is green')
+                wait(lane, f, f'trunk-red: {", ".join(red)}')
+                return None
             if lane.dry_run:
                 lane.out(f'DRY: would hold {b}: PR #{number} checks red: {detail}')
                 lane.results[b] = 'dry'
                 return None
             send_back(lane, f, 'gate', f'PR #{number} checks red: {detail}', ())
             return None
+        passed = {c.get('name') for c in checks if c.get('bucket') in PASS_BUCKETS}
+        on_trunk = self.trunk_red(required or [c.get('name') for c in checks if c.get('name')])
+        if on_trunk:
+            tip = f.get('head') or f'origin/{b}'
+            unfixed = [n for n, sha in on_trunk.items()
+                       if n not in passed or not lane.is_ancestor(sha, tip)]
+            if unfixed:
+                lane.out(f'waiting {b}: {self.trunk} is red on {", ".join(unfixed)} and PR '
+                         f'#{number} does not turn it green on top of that red — it lands once '
+                         f'{self.trunk} is green')
+                wait(lane, f, f'trunk-red: {", ".join(unfixed)}')
+                return None
+            lane.out(f'harvest: {b}: PR #{number} turns {", ".join(on_trunk)} green on top of '
+                     f'the red {self.trunk} — it may land')
         cls = f.get('class') or landing_class(self.product, files)
         if missing_policy(self.product.conventions, cls) == MISSING_LOCAL_GATE:
             return 'gate'
         if not required:
             return 'gate'
-        passed = {c.get('name') for c in checks if c.get('bucket') in PASS_BUCKETS}
         missing = [name for name in required if name not in passed]
         if not missing:
             return 'ci'
@@ -1529,6 +1557,44 @@ class GitHubHost(Host):
         lane.out(f'harvest: {b}: PR #{number} required check(s) never ran in {int(limit // 60)} '
                  f'min — {", ".join(missing)}: gating locally')
         return 'gate'
+
+
+    def trunk_red(self, names):
+        """``{name: sha}`` — each of ``names`` whose latest *completed* run on the trunk failed,
+        was cancelled or timed out, with the commit that run judged. The trunk's first-parent
+        history is walked newest first (at most :data:`TRUNK_RED_DEPTH` commits) until every
+        name has a completed run; a check still running on the newest commit is judged by the
+        one before. Unreadable (no ``gh``, no access) reads as not red — the PR's own checks and
+        the gate still judge it, as before."""
+        want = [n for n in dict.fromkeys(names or ()) if n]
+        repo = getattr(self.lane, 'repo', None)
+        if not want or not repo:
+            return {}
+        log = H.sh(['git', 'rev-list', '--first-parent', '-n', str(TRUNK_RED_DEPTH),
+                    f'origin/{self.trunk}'], cwd=repo)
+        red, left = {}, set(want)
+        for sha in log.stdout.split() if log.returncode == 0 else ():
+            if sha not in self._trunk_runs:
+                data = H.gh_json(['api', f'repos/{self.slug}/commits/{sha}/check-runs'
+                                         f'?per_page=100'], None)
+                runs = data.get('check_runs') if isinstance(data, dict) else None
+                self._trunk_runs[sha] = [r for r in runs if isinstance(r, dict)] \
+                    if isinstance(runs, list) else None
+            runs = self._trunk_runs[sha]
+            if runs is None:
+                break
+            for name in sorted(left):
+                done = [r for r in runs if r.get('name') == name
+                        and r.get('status') == 'completed']
+                if not done:
+                    continue
+                left.discard(name)
+                last = max(done, key=lambda r: str(r.get('completed_at') or ''))
+                if last.get('conclusion') in TRUNK_RED_CONCLUSIONS:
+                    red[name] = sha
+            if not left:
+                break
+        return {n: red[n] for n in want if n in red}
 
 
 def pr_checks(slug, number, required=()):

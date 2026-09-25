@@ -54,11 +54,15 @@ def _jsonl_lines(pattern):
 
 
 def ci_signatures(root, now, conv=None):
-    """CI failures seen twice in the window. A failure on the trunk or on a merge-batch branch
+    """CI failures seen twice in the window — or once, when it is the trunk's latest run of that
+    job: the trunk is red *now*, and the lane holds every PR red on the same check until it is
+    green (:meth:`asf.harvest.lane.GitHubHost.check_gate`), so the Bug for it cannot wait for a
+    second failure. A failure on the trunk or on a merge-batch branch
     (`conventions.branch_prefixes`) is one severity worse: it blocks everyone, not one branch."""
     conv = conv or DEFAULTS
     cutoff = now - datetime.timedelta(hours=CI_REFUSAL_WINDOW_H)
     raw = {}
+    trunk_latest = {}  # job name -> (ts, failed step or None) of the trunk's newest run of it
     for run in _jsonl_lines(os.path.join(root, 'metrics', 'ci', '*.jsonl')):
         ts = parse_iso(run.get('ts'))
         if ts is None or ts < cutoff:
@@ -67,9 +71,12 @@ def ci_signatures(root, now, conv=None):
         main_or_batch = conv.is_trunk(branch) or conv.branch_kind(branch) == 'batch'
         for job in run.get('jobs') or []:
             failed_step = job.get('failed_step')
+            job_name = job.get('name', '')
+            if conv.is_trunk(branch) and (job_name not in trunk_latest
+                                          or ts >= trunk_latest[job_name][0]):
+                trunk_latest[job_name] = (ts, failed_step or None)
             if not failed_step:
                 continue
-            job_name = job.get('name', '')
             sig = f"{job_name}: {failed_step}"
             d = raw.setdefault(sig, {'count': 0, 'runs': set(), 'evidence': [], 'main_or_batch': False})
             d['count'] += 1
@@ -80,8 +87,9 @@ def ci_signatures(root, now, conv=None):
                 f"{run.get('ts')}: {job_name} — {failed_step}")
 
     out = {}
+    red_now = {f"{name}: {step}" for name, (_ts, step) in trunk_latest.items() if step}
     for sig, d in raw.items():
-        if d['count'] < 2:
+        if d['count'] < 2 and sig not in red_now:
             continue
         out[sig] = {
             'title': truncate(f"{CI_RED_TITLE}{sig}", 120),

@@ -110,11 +110,33 @@ class CiSignatureCollectionTests(unittest.TestCase):
 
     def test_below_threshold_is_not_a_signature(self):
         write_ci_line(self.root, '2026-09-21', {
-            'run': 1, 'sha': 'a', 'branch': 'main', 'ts': iso(self.now),
+            'run': 1, 'sha': 'a', 'branch': 'cloud/my-feature', 'ts': iso(self.now),
             'jobs': [{'name': 'gate', 'failed_step': 'boom', 'conclusion': 'failure'}],
         })
         sigs = file_bugs.ci_signatures(self.root, self.now)
         self.assertEqual(sigs, {})
+
+    def test_one_failure_that_is_the_trunks_latest_run_is_a_signature(self):
+        """The trunk is red now: the lane holds every PR red on that check until it is green,
+        so its Bug is filed at once — never after a second red."""
+        write_ci_line(self.root, '2026-09-21', {
+            'run': 1, 'sha': 'a', 'branch': 'main', 'ts': iso(self.now),
+            'jobs': [{'name': 'gate', 'failed_step': 'boom', 'conclusion': 'failure'}],
+        })
+        sigs = file_bugs.ci_signatures(self.root, self.now)
+        self.assertEqual(list(sigs), ['gate: boom'])
+        self.assertEqual(sigs['gate: boom']['severity'], 'S2')
+
+    def test_one_trunk_failure_already_green_again_is_not_a_signature(self):
+        write_ci_line(self.root, '2026-09-21', {
+            'run': 1, 'sha': 'a', 'branch': 'main', 'ts': iso(self.now - datetime.timedelta(hours=2)),
+            'jobs': [{'name': 'gate', 'failed_step': 'boom', 'conclusion': 'failure'}],
+        })
+        write_ci_line(self.root, '2026-09-21', {
+            'run': 2, 'sha': 'b', 'branch': 'main', 'ts': iso(self.now - datetime.timedelta(hours=1)),
+            'jobs': [{'name': 'gate', 'conclusion': 'success'}],
+        })
+        self.assertEqual(file_bugs.ci_signatures(self.root, self.now), {})
 
     def test_two_occurrences_in_24h_on_main_is_s2(self):
         for i, ts in enumerate([self.now - datetime.timedelta(hours=1),
@@ -140,11 +162,12 @@ class CiSignatureCollectionTests(unittest.TestCase):
 
     def test_outside_the_24h_window_does_not_count(self):
         write_ci_line(self.root, '2026-09-20', {
-            'run': 1, 'sha': 'a', 'branch': 'main', 'ts': iso(self.now - datetime.timedelta(hours=1)),
+            'run': 1, 'sha': 'a', 'branch': 'cloud/my-feature', 'ts': iso(self.now - datetime.timedelta(hours=1)),
             'jobs': [{'name': 'gate', 'failed_step': 'boom', 'conclusion': 'failure'}],
         })
         write_ci_line(self.root, '2026-09-19', {
-            'run': 2, 'sha': 'a', 'branch': 'main', 'ts': iso(self.now - datetime.timedelta(hours=30)),
+            'run': 2, 'sha': 'a', 'branch': 'cloud/my-feature',
+            'ts': iso(self.now - datetime.timedelta(hours=30)),
             'jobs': [{'name': 'gate', 'failed_step': 'boom', 'conclusion': 'failure'}],
         })
         sigs = file_bugs.ci_signatures(self.root, self.now)
