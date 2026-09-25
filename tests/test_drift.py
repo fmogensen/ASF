@@ -79,6 +79,18 @@ class TickPrintsTheDriftLine(DriftTestCase):
         upgrade.assert_called_once()
         self.assertTrue(any(ln.startswith('tick: ran asf upgrade') for ln in lines), lines)
 
+    def test_it_installs_the_head_it_read_and_the_steps_wait_for_the_next_tick(self):
+        upgrade = mock.Mock(return_value=0)
+        lines = self.run_tick('auto', upgrade)
+        self.assertEqual(upgrade.call_args[0][0].ref, self.head)
+        self.assertIn('tick: the install was upgraded under this tick; its steps run on the next tick',
+                      lines)
+
+    def test_a_deferred_upgrade_does_not_claim_it_ran(self):
+        lines = self.run_tick('auto', mock.Mock(return_value=drift.DEFERRED))
+        self.assertFalse(any(ln.startswith('tick: ran asf upgrade') for ln in lines), lines)
+        self.assertFalse(any('upgraded under this tick' in ln for ln in lines), lines)
+
     def test_no_line_of_drift_when_the_install_is_the_trunk(self):
         out = io.StringIO()
         with mock.patch.object(drift, 'installed_commit', return_value=self.head), \

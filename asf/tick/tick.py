@@ -385,10 +385,21 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
     locks = locks or Locks(product, held=True)
     # the version check can upgrade the install: never under a running tick, and never worth
     # delaying a command clock for (the running tick prints it)
+    upgraded = []
+
+    def run_upgrade(head):
+        upgraded.append(upgrade.cmd_upgrade(_ns(skip_pipx=False, ref=head)))
+        return upgraded[-1]
+
     with locks.record('version check', wait_s=0) as ok:
         if ok:
             drift.report(product, autonomy=str((product.approvals or {}).get('upgrade', '')).lower(),
-                         upgrade=lambda: upgrade.cmd_upgrade(_ns(skip_pipx=False)))
+                         upgrade=run_upgrade)
+    if upgraded and upgraded[-1] == 0:
+        # this process still runs the old package over a replaced install: a later lazy import
+        # would load the new one half-way through the tick, so the steps wait for the next tick
+        print('tick: the install was upgraded under this tick; its steps run on the next tick')
+        return 0
     rc = 0
     ran = []
     resolved = None

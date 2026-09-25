@@ -489,29 +489,109 @@ class SchemaTest(HomeCase):
 
 # ---- 4. asf upgrade, asf hooks install, asf hook ----------------------------
 
-class UpgradeTest(HomeCase):
-    def test_the_command(self):
-        self.assertEqual(upgrade.upgrade_command(), ['pipx', 'upgrade', 'asf-factory'])
+class FakeRun:
+    """``subprocess.run`` for the upgrade: answers by the command's first words."""
+    HEAD = 'a' * 40
 
-    def test_runs_pipx_then_prints_the_table(self):
+    def __init__(self, ticks='', ci='[]', installed=None, pipx_rc=0):
+        self.calls = []
+        self.answers = {
+            ('pipx', 'list'): json.dumps({'venvs': {'asf-factory': {'metadata': {'main_package': {
+                'package_or_url': 'git+https://github.com/o/r.git@1234567'}}}}}),
+            ('git', 'ls-remote'): f'{self.HEAD}\trefs/heads/main\n',
+            ('pgrep', '-f'): ticks,
+            ('gh', 'run'): ci,
+            ('pipx', 'environment'): '/venvs\n',
+            ('/venvs/asf-factory/bin/python', '-c'): (installed or self.HEAD) + '\n',
+            ('launchctl', 'list'): 'PID\tStatus\tLabel\n',
+        }
+        self.pipx_rc = pipx_rc
+
+    def __call__(self, cmd, **kw):
+        self.calls.append(cmd)
+        if cmd[:2] == ['pipx', 'install']:
+            return mock.Mock(returncode=self.pipx_rc, stdout='')
+        return mock.Mock(returncode=0, stdout=self.answers.get(tuple(cmd[:2]), ''))
+
+    def installs(self):
+        return [c for c in self.calls if c[:2] == ['pipx', 'install']]
+
+
+class UpgradeTest(HomeCase):
+    def run_upgrade(self, run, ref=None):
+        return _quiet(upgrade.cmd_upgrade, argparse.Namespace(skip_pipx=False, ref=ref), run=run)
+
+    def test_the_command_reinstalls_the_pin_at_a_named_commit(self):
+        self.assertEqual(upgrade.upgrade_command('https://github.com/o/r.git', 'abc'),
+                         ['pipx', 'install', '--force', 'git+https://github.com/o/r.git@abc'])
+
+    def test_runs_pipx_at_mains_head_then_prints_the_table(self):
         good, old = os.path.join(self.tmp, 'good'), os.path.join(self.tmp, 'old')
         self.write(os.path.join(good, 'index.json'), '{"items": {}, "schema_version": 1}')
         self.write(os.path.join(old, 'index.json'), '{"items": {}}')
         self.write(env.product_path('alpha'), f'backlog_dir: {good}\n')
         self.write(env.product_path('beta'), f'backlog_dir: {old}\n')
-        run = mock.Mock(return_value=mock.Mock(returncode=0))
-        rc, out, _err = _quiet(upgrade.cmd_upgrade, argparse.Namespace(skip_pipx=False), run=run)
+        run = FakeRun()
+        rc, out, _err = self.run_upgrade(run)
         self.assertEqual(rc, 0)
-        run.assert_called_once_with(['pipx', 'upgrade', 'asf-factory'])
+        self.assertEqual(run.installs(), [['pipx', 'install', '--force',
+                                           f'git+https://github.com/o/r.git@{FakeRun.HEAD}']])
+        self.assertIn(f'upgrade: installed {FakeRun.HEAD[:7]}', out)
         self.assertIn('| product | record schema | package | action |', out)
         self.assertIn('| alpha | 1 | 1 | none |', out)
         self.assertIn('| beta | 0 | 1 | asf schema-migrate --product beta |', out)
 
+    def test_the_tick_installs_the_head_drift_read(self):
+        run = FakeRun(installed='b' * 40)
+        rc, _out, _err = self.run_upgrade(run, ref='b' * 40)
+        self.assertEqual(rc, 0)
+        self.assertEqual(run.installs()[0][-1], f'git+https://github.com/o/r.git@{"b" * 40}')
+
+    def test_another_running_tick_defers_it(self):
+        run = FakeRun(ticks='4242\n')
+        rc, out, _err = self.run_upgrade(run)
+        self.assertEqual(rc, upgrade.DEFERRED)
+        self.assertEqual(run.installs(), [])
+        self.assertIn('upgrade: deferred to the next tick', out)
+        self.assertIn('4242', out)
+
+    def test_its_own_tick_does_not_defer_it(self):
+        run = FakeRun(ticks=f'{os.getpid()}\n')
+        rc, _out, _err = self.run_upgrade(run)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(run.installs()), 1)
+
+    def test_a_red_head_is_not_installed(self):
+        run = FakeRun(ci='[{"conclusion": "success"}, {"conclusion": "failure"}]')
+        rc, out, _err = self.run_upgrade(run)
+        self.assertEqual(rc, upgrade.DEFERRED)
+        self.assertEqual(run.installs(), [])
+        self.assertIn('remote CI is red', out)
+
+    def test_an_install_that_did_not_move_fails(self):
+        run = FakeRun(installed='c' * 40)
+        rc, out, _err = self.run_upgrade(run)
+        self.assertEqual(rc, 1)
+        self.assertIn('upgrade: FAILED', out)
+        self.assertNotIn('| product |', out)
+
     def test_a_failed_pipx_stops(self):
-        run = mock.Mock(return_value=mock.Mock(returncode=1))
-        rc, out, _err = _quiet(upgrade.cmd_upgrade, argparse.Namespace(skip_pipx=False), run=run)
+        rc, out, _err = self.run_upgrade(FakeRun(pipx_rc=1))
         self.assertEqual(rc, 1)
         self.assertNotIn('| product |', out)
+
+    def test_an_unloaded_clock_is_reloaded_and_a_loaded_one_left_alone(self):
+        agents = os.path.join(self.tmp, 'LaunchAgents')
+        for label in ('asf.alpha.tick', 'asf.alpha.daily', 'asf.beta.tick'):
+            self.write(os.path.join(agents, f'{label}.plist'), '')
+        self.write(env.config_path(), '')
+        run = FakeRun()
+        run.answers[('launchctl', 'list')] = '-\t0\tasf.alpha.daily\n'
+        with mock.patch('asf.scheduler.launch_agents_dir', return_value=agents), \
+                mock.patch('asf.scheduler.bootstrap', return_value=(True, '')) as boot:
+            lines = upgrade.reload_clocks(['alpha'], run=run)
+        boot.assert_called_once_with(os.path.join(agents, 'asf.alpha.tick.plist'))
+        self.assertEqual(lines, ['upgrade: reloaded clock asf.alpha.tick'])
 
 
 class HooksTest(HomeCase):

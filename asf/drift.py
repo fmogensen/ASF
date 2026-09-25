@@ -17,6 +17,8 @@ from importlib import metadata
 from asf import __version__
 
 PACKAGE_NAME = 'asf-factory'
+#: ``asf.upgrade.DEFERRED``: the upgrade waits for the next tick
+DEFERRED = 75
 #: A trunk change under these paths changes what an install runs.
 PACKAGE_PATHS = ('asf/', 'pyproject.toml')
 
@@ -126,7 +128,7 @@ def line(d):
 
 def report(product, out=print, autonomy='human-now', upgrade=None):
     """Print :func:`line` and, when the trunk changed the package, ``UPGRADE AVAILABLE``; under
-    ``autonomy == 'auto'`` run ``upgrade()`` (``asf upgrade``) and say so. Returns the :class:`Drift`
+    ``autonomy == 'auto'`` run ``upgrade(head)`` (``asf upgrade --ref <head>``) and say so. Returns the :class:`Drift`
     (``None`` for a product that is not the factory)."""
     try:
         d = check(product)
@@ -139,7 +141,8 @@ def report(product, out=print, autonomy='human-now', upgrade=None):
     if d.is_behind and d.package_changed:
         out(f'UPGRADE AVAILABLE {d.old} → {d.new}')
         if autonomy == 'auto' and upgrade is not None:
-            rc = upgrade()
-            out(f'tick: ran asf upgrade ({d.old} → {d.new}), exit {rc}'
-                + ('; the next tick runs the new one' if not rc else ''))
+            rc = upgrade(d.head)
+            if rc != DEFERRED:  # a deferred upgrade said why itself and is due again next tick
+                out(f'tick: ran asf upgrade ({d.old} → {d.new}), exit {rc}'
+                    + ('; the next tick runs the new one' if not rc else ''))
     return d
