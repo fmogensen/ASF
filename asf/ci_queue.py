@@ -36,6 +36,20 @@ queued-or-running ``push`` run on the trunk per workflow, one line per cancel. A
 progress finishes. The lane's in-process pass calls it every tick for a queued product. An entry nobody
 asked about for :data:`STALE_S` leaves the line.
 
+**Trunk starvation relief.** The host's own queue is first in, first out: a trunk run pushed
+after PR runs already sit there waits behind all of them, and the start queue above cannot
+reorder runs the host already holds. :func:`relieve_trunk` (every tick, from the lane's pass):
+when the newest trunk ``push`` run of the trunk workflow has been queued longer than
+``ci.queue.trunk_wait_min`` (default 20) minutes, it cancels runs queued *ahead* of it (created
+earlier, not yet started — an in-progress run always finishes), lowest priority first — PR runs
+of ordinary items, then of customer-facing Features, then batch runs; newest first within each —
+until the free runners plus what the cancelled runs would have taken cover the trunk run's
+expected jobs in every class. An S1 or hotfix run is never cancelled. Each cancel is remembered
+in the queue file (``relief``) and, once the trunk run has started, re-run (``gh run rerun``)
+through this queue at its original priority. One line per cancel and per re-run, naming the trunk
+sha and its wait. ``mode: dry-run`` (or a dry-run pass) prints what it would do, writes nothing.
+Every wait is UTC-aware now minus the host's UTC ``createdAt``, never local time.
+
 **Every hold is one line**: ``ci queue: T-0341 waits — heavy 0 free, needs 3 (S2, 4th in line)``.
 
 **Configuration** (``ci.queue`` in the product file)::
@@ -44,6 +58,7 @@ asked about for :data:`STALE_S` leaves the line.
       queue:
         mode: on          # on (default with a ci.pool) | dry-run | off
         history: 10       # runs of each workflow measured
+        trunk_wait_min: 20  # a queued trunk run waiting longer gets runs ahead of it cancelled
         workflows: {pr: checks.yml, trunk: checks.yml, batch: batch.yml}  # default ci.workflow
 
 A product without ``ci.pool`` (or with ``mode: off``) is not queued: every start goes as it did
@@ -56,6 +71,7 @@ import datetime
 import json
 import math
 import os
+import re
 import statistics
 import subprocess
 
@@ -64,7 +80,11 @@ from asf import ci_pool, env
 QUEUE_FILE = 'ci-queue.json'
 KINDS = ('pr', 'trunk', 'batch', 'deploy')
 MODES = ('on', 'dry-run', 'off')
+FIELDS = ('mode', 'history', 'workflows', 'trunk_wait_min')
 DEFAULT_HISTORY = 10
+DEFAULT_TRUNK_WAIT_MIN = 20
+#: a run the relief cancelled and could not re-run in this long is dropped from the file
+RELIEF_TTL_S = 24 * 60 * 60
 #: an entry not asked about again in this long has left the line (its caller moved on)
 STALE_S = 30 * 60
 #: a run admitted this recently still holds its runners: its jobs queue before a runner is busy
@@ -84,11 +104,21 @@ def _iso(t):
 
 
 def _parse(stamp):
-    try:
-        return datetime.datetime.strptime(stamp, '%Y-%m-%dT%H:%M:%SZ').replace(
-            tzinfo=datetime.timezone.utc)
-    except (TypeError, ValueError):
+    """A host or queue-file stamp as a UTC-aware time: ``2026-09-25T19:04:00Z`` (the host's
+    ``createdAt``), fractions and ``+hh:mm`` offsets too; a stamp with no zone is UTC. Never read
+    as local time — a wait is always aware-now minus aware-stamp."""
+    if not isinstance(stamp, str) or not stamp.strip():
         return None
+    s = stamp.strip()
+    if s[-1:] in ('Z', 'z'):
+        s = s[:-1] + '+00:00'
+    try:
+        t = datetime.datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=datetime.timezone.utc)
+    return t.astimezone(datetime.timezone.utc)
 
 
 def _age(stamp, now):
@@ -123,6 +153,13 @@ def history(product):
     return v if isinstance(v, int) and not isinstance(v, bool) and v >= 1 else DEFAULT_HISTORY
 
 
+def trunk_wait_min(product):
+    """``ci.queue.trunk_wait_min``: minutes a queued trunk run waits before relief (default 20)."""
+    v = _qcfg(product).get('trunk_wait_min')
+    ok = isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+    return v if ok else DEFAULT_TRUNK_WAIT_MIN
+
+
 def workflow_for(product, kind, default=None):
     """The workflow a ``kind`` of start triggers: ``ci.queue.workflows.<kind>``, else ``default``
     (a deploy passes its own), else ``ci.workflow``."""
@@ -139,14 +176,17 @@ def config_problems(ci):
         return []
     q = ci['queue']
     if not isinstance(q, dict):
-        return [('ci.queue', f'must be a map {{mode, history, workflows}}, not {q!r}')]
+        return [('ci.queue', f"must be a map {{{', '.join(FIELDS)}}}, not {q!r}")]
     out = []
     for k in q:
-        if k not in ('mode', 'history', 'workflows'):
-            out.append((f'ci.queue.{k}', 'is not a field of ci.queue (mode, history, workflows)'))
+        if k not in FIELDS:
+            out.append((f'ci.queue.{k}', f"is not a field of ci.queue ({', '.join(FIELDS)})"))
     if q.get('mode') is not None and str(q['mode']).strip().lower() not in MODES \
             and q['mode'] is not True and q['mode'] is not False:
         out.append(('ci.queue.mode', f"must be one of {', '.join(MODES)}, not {q['mode']!r}"))
+    w = q.get('trunk_wait_min')
+    if w is not None and (isinstance(w, bool) or not isinstance(w, (int, float)) or w <= 0):
+        out.append(('ci.queue.trunk_wait_min', f'must be a number of minutes > 0, not {w!r}'))
     h = q.get('history')
     if h is not None and (isinstance(h, bool) or not isinstance(h, int) or h < 1):
         out.append(('ci.queue.history', f'must be a whole number >= 1, not {h!r}'))
@@ -349,9 +389,10 @@ def load(name):
         data = {}
     if not isinstance(data, dict):
         data = {}
-    for k in ('entries', 'started', 'expect'):
-        if not isinstance(data.get(k), dict if k != 'started' else list):
-            data[k] = {} if k != 'started' else []
+    for k in ('entries', 'started', 'expect', 'relief'):
+        kind = list if k in ('started', 'relief') else dict
+        if not isinstance(data.get(k), kind):
+            data[k] = kind()
     return data
 
 
@@ -590,6 +631,162 @@ def cancel_superseded(product, source=None, out=print, dry_run=False):
             out(what)
             n += 1
     return n
+
+
+#: an item id in a branch name (``task/T-0341-…``)
+_ITEM_IN_BRANCH_RE = re.compile(r'\b[A-Z]-\d{4,}\b')
+_RUN_FIELDS = 'databaseId,status,event,headBranch,headSha,createdAt,startedAt'
+
+
+def _dur(seconds):
+    m = max(0, int(seconds // 60))
+    return f'{m // 60}h{m % 60:02d}m' if m >= 60 else f'{m}m'
+
+
+def _list_runs(src, product, workflow):
+    text = src._gh(['run', 'list', '-R', product.repo_slug, '--workflow', workflow, '--limit',
+                    '100', '--json', _RUN_FIELDS])
+    try:
+        return [r for r in json.loads(text or 'null') or () if isinstance(r, dict)]
+    except (TypeError, ValueError):
+        return None
+
+
+def _covered(need, free, freed):
+    return all(free.get(c, 0) + freed.get(c, 0) >= n for c, n in need.items())
+
+
+def _rerun_cancelled(q, src, product, trunk_run, dry_run, out, now):
+    """Re-run every run the relief cancelled, each through the queue at its original priority,
+    now that the trunk run has started. The number re-run."""
+    relief, keep, n = q.data['relief'], [], 0
+    trunk = getattr(product, 'main', None) or 'main'
+    for rec in sorted(relief, key=lambda r: (r.get('prio', OTHER), r.get('at') or '')):
+        rid = rec.get('id')
+        if not rid or _age(rec.get('at'), now) > RELIEF_TTL_S:
+            out(f"ci queue: dropped cancelled {rec.get('kind')} run {rid} ({rec.get('item')}) — "
+                f"not re-run within {RELIEF_TTL_S // 3600}h")
+            continue
+        d = q.admit(f'rerun:{rid}', rec.get('kind') or 'pr', item=rec.get('item'),
+                    prio=rec.get('prio', OTHER), label=rec.get('label') or 'other',
+                    workflow=rec.get('workflow'))
+        if not d.admitted or d.line:        # held (or a dry-run mode hold): next tick asks again
+            keep.append(rec)
+            continue
+        began = _parse((trunk_run or {}).get('startedAt')) or now
+        waited = _dur((began - (_parse(rec.get('trunk_created')) or began)).total_seconds())
+        what = (f"re-ran {rec.get('kind')} run {rid} ({rec.get('item')}, {rec.get('label')}) — "
+                f"{trunk} run {rec.get('trunk_id')} at {str(rec.get('trunk_sha') or '?')[:9]} "
+                f"started after waiting {waited}")
+        if dry_run:
+            out(f'ci queue: would have {what}')
+            keep.append(rec)
+            continue
+        if src._gh(['run', 'rerun', str(rid), '-R', product.repo_slug]) is None:
+            out(f"ci queue: re-run of cancelled {rec.get('kind')} run {rid} refused — "
+                f"tried again next tick")
+            keep.append(rec)
+            continue
+        out(f'ci queue: {what}')
+        n += 1
+    q.data['relief'] = keep
+    return n
+
+
+def relieve_trunk(product, items=None, source=None, out=print, dry_run=False, now=None):
+    """Trunk starvation relief (see the module doc): cancel queued runs ahead of a trunk run
+    queued past ``ci.queue.trunk_wait_min``, lowest priority first, until the free runners plus
+    the freed ones cover its expected jobs per class; re-run them once it has started.
+    ``(cancelled, re-run)``. Not a queued product: nothing, no ``gh`` call. Never raises."""
+    m = mode(product)
+    if m == 'off' or not product.repo_slug:
+        return 0, 0
+    dry_run = dry_run or m == 'dry-run'
+    now = (now or _now()).astimezone(datetime.timezone.utc)
+    src = source or GitHubSource(product)
+    q = Queue(product, source=src, now=now, out=out, write=not dry_run)
+    trunk = getattr(product, 'main', None) or 'main'
+    twf = workflow_for(product, 'trunk')
+    runs = _list_runs(src, product, twf) if twf else None
+    if runs is None:
+        return 0, 0
+    pushes = [r for r in runs if r.get('event') == 'push' and r.get('headBranch') == trunk]
+    pushes.sort(key=lambda r: (_parse(r.get('createdAt')) or now, int(r.get('databaseId') or 0)))
+    newest = pushes[-1] if pushes else None
+    queued = newest is not None and newest.get('status') in QUEUED_STATUSES
+    rerun = 0
+    if not queued:
+        if q.data['relief']:
+            rerun = _rerun_cancelled(q, src, product, newest, dry_run, out, now)
+            if q.write:
+                save(product.name, q.data)
+        return 0, rerun
+    created = _parse(newest.get('createdAt'))
+    if created is None:
+        return 0, 0
+    waited = (now - created).total_seconds()
+    if waited <= trunk_wait_min(product) * 60:
+        return 0, 0
+    need = q.needs(twf)
+    free = q.free()
+    if not need or free is None or _covered(need, free, {}):
+        return 0, 0     # nothing measured, runners unreadable, or the runners are there already
+    done = {rec.get('id') for rec in q.data['relief']}
+    pr_wf, batch_wf = workflow_for(product, 'pr'), workflow_for(product, 'batch')
+    cands = []
+    for wf in sorted({w for w in (pr_wf, batch_wf) if w}):
+        listed = runs if wf == twf else _list_runs(src, product, wf)
+        for r in listed or ():
+            rid, ev, branch = r.get('databaseId'), r.get('event'), r.get('headBranch') or ''
+            if (not rid or rid == newest.get('databaseId') or rid in done
+                    or r.get('status') not in QUEUED_STATUSES):
+                continue
+            rc = _parse(r.get('createdAt'))
+            if rc is None or rc >= created:     # queued behind the trunk run: not in its way
+                continue
+            if ev == 'pull_request' and wf == pr_wf:
+                kind = 'pr'
+            elif wf == batch_wf and ev != 'pull_request' and not (ev == 'push' and branch == trunk):
+                kind = 'batch'
+            else:
+                continue
+            hit = _ITEM_IN_BRANCH_RE.search(branch)
+            item = hit.group(0) if hit else None
+            prio, label = priority(item, items, branch, product=product)
+            if prio == S1:
+                continue                        # an S1 or hotfix run is never cancelled
+            if kind == 'batch':
+                group, label, item = 2, 'batch', 'batch'
+            else:
+                group = 0 if prio >= OTHER else 1
+            cands.append((group, -rc.timestamp(), -int(rid), r, kind, item or branch or kind,
+                          prio, label, wf))
+    cands.sort(key=lambda c: c[:3])
+    freed, n = {}, 0
+    sha = str(newest.get('headSha') or '?')[:9]
+    for _g, _t, _i, r, kind, item, prio, label, wf in cands:
+        if _covered(need, free, freed):
+            break
+        rid = r['databaseId']
+        what = (f"{kind} run {rid} ({item}, {label}) — {trunk} run {newest.get('databaseId')} at "
+                f"{sha} has waited {_dur(waited)} for runners")
+        if dry_run:
+            out(f'ci queue: would cancel queued {what}')
+        elif src._gh(['run', 'cancel', str(rid), '-R', product.repo_slug]) is None:
+            out(f'ci queue: cancel of queued {kind} run {rid} refused')
+            continue
+        else:
+            out(f'ci queue: cancelled queued {what}')
+            q.data['relief'].append({
+                'id': rid, 'kind': kind, 'item': item, 'prio': prio, 'label': label,
+                'workflow': wf, 'at': _iso(now), 'trunk_id': newest.get('databaseId'),
+                'trunk_sha': newest.get('headSha'), 'trunk_created': _iso(created)})
+            n += 1
+        for c, k in q.needs(wf).items():
+            freed[c] = freed.get(c, 0) + k
+    if q.write:
+        save(product.name, q.data)
+    return n, 0
 
 
 # ---- reading it -------------------------------------------------------------------------------

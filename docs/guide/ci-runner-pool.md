@@ -177,11 +177,25 @@ still queued behind a newer one is moot. Each tick the lane cancels those, per t
 keeping the newest queued-or-running run; a run already in progress finishes. One line per cancel:
 `ci queue: cancelled superseded main run 2 (checks.yml at bbbbbbbbb) — run 4 at ddddddddd judges it`.
 
+**Trunk starvation relief.** The host's own queue is first in, first out, and the start queue
+cannot reorder runs the host already holds: a trunk run pushed after PR runs waits behind all of
+them. Each tick, when the newest trunk `push` run has been queued longer than
+`ci.queue.trunk_wait_min` minutes (default 20; the wait is UTC now minus the host's UTC
+`createdAt`), the lane cancels runs queued *ahead* of it and not yet started — PR runs of ordinary
+items first, then of customer-facing Features, then batch runs, newest first within each — until
+the free runners plus what the cancelled runs would have taken cover the trunk run's expected jobs
+in every class. A run in progress, an S1 or a hotfix run is never cancelled. Each cancel is kept in
+the queue file and re-run (`gh run rerun`) through the queue at its original priority once the
+trunk run has started. One line each:
+`ci queue: cancelled queued pr run 101 (B-0008, S2) — main run 900 at fffffffff has waited 25m for runners`,
+`ci queue: re-ran pr run 101 (B-0008, S2) — main run 900 at fffffffff started after waiting 24m`.
+
 ```yaml
 ci:
   queue:
     mode: on        # on (the default with a ci.pool) | dry-run | off
     history: 10     # completed runs of each workflow measured
+    trunk_wait_min: 20   # minutes a queued trunk run waits before runs ahead of it are cancelled
     workflows: {pr: checks.yml, trunk: checks.yml, batch: batch.yml}   # default: ci.workflow
 ```
 
