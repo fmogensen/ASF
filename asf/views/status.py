@@ -3,6 +3,8 @@
 Every row is filled from what exists, or says which key would fill it —
 ``— (not configured: <key>)`` — never a bare ``—``:
 
+* **Stale** — B-0124: the record step's own health, or the index's age against twice the record
+  clock's period when that stamp itself has gone quiet; no row when the record is current;
 * **Version** — the ``asf`` running (``asf --version``) and asf's newest release tag, with its age;
 * **Runners** — the CI provider's runner pool (``ci.runner_org``, read with ``gh``);
 * **Prod** — how far ``main`` is ahead of the last successful ``deploy_sha.workflow`` run, and
@@ -164,6 +166,48 @@ def capacity_cell(cfg, product):
     if r.ci is not None:
         parts.append(f"ci {r.ci_inflight if r.ci_inflight is not None else '?'}/{r.ci}")
     return ', '.join(parts)
+
+
+#: The record clock's period when none is configured (``sample/product.yaml``'s own convention):
+#: the threshold for "snapshot older than two clock periods" falls back to this.
+DEFAULT_RECORD_CLOCK_S = 300
+
+
+def _record_period_s(product):
+    from asf import scheduler
+    try:
+        clocks = scheduler.clocks(product)
+    except scheduler.SchedulerError:
+        return DEFAULT_RECORD_CLOCK_S
+    return next((c.interval_s for c in clocks if 'record' in (c.steps or []) and c.interval_s),
+                DEFAULT_RECORD_CLOCK_S)
+
+
+def stale_cell(root, product):
+    """B-0124: the record step's own health first (:func:`asf.tick.record_health.line`) — the
+    one artifact that survives when the push that would carry a ``metrics/ticks`` line can't
+    reach origin, which is exactly when a failing record step needs to be readable. When that
+    stamp says the last tick landed (or none has run on this host), the fallback is the index's
+    own age against twice the record clock's period — the tick may not even be firing. ``None``
+    (no row) when neither says the table is stale."""
+    from asf.tick import record_health
+    from asf.views import index_reader as ix
+    line = record_health.line(product)
+    if line:
+        return line
+    if not root or not os.path.exists(os.path.join(root, 'index.json')):
+        return None
+    try:
+        _items, generated = ix.load(root)
+    except (OSError, ValueError, KeyError):
+        return None
+    when = ix.parse_ts(generated)
+    if when is None:
+        return None
+    age_s = (datetime.datetime.now(datetime.timezone.utc) - when).total_seconds()
+    if age_s <= 2 * _record_period_s(product):
+        return None
+    return f"STALE since {ix.local_stamp(generated, '%H:%M')} — no fresh record in {ix.span(age_s)}"
 
 
 def record_cell(root):
@@ -344,7 +388,8 @@ def render(root, product, cfg=None):
     out = [f"**FACTORY STATUS {now}**", ""]
     out.append("| Metric | Now |")
     out.append("|---|---|")
-    for name, cell in (('Version', version_cell),
+    for name, cell in (('Stale', lambda: stale_cell(root, product)),
+                       ('Version', version_cell),
                        ('Runners', lambda: runners_cell(product)),
                        ('Prod', lambda: prod_cell(product)),
                        ('Agents', lambda: agents_cell(product)),

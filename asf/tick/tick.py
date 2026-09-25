@@ -202,7 +202,7 @@ def run_record_step(product, fresh=False, ctx=None):
     except (subprocess.CalledProcessError, env.ConfigError) as e:
         detail = (getattr(e, 'stderr', None) or str(e)).strip()
         print(f"tick: record failed ({detail})")
-        ctx.stale_reason = _first_line(detail)
+        ctx.stale_reason = _reason(detail)
         return 1
     return commit_and_push(ctx) if alone else 0
 
@@ -446,6 +446,9 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
         if step == 'daily' and step_rc == 0:
             steps.write_daily_stamp(product)
         rc = rc or (1 if step_rc else 0)
+        if step == 'record':
+            from asf.tick import record_health
+            record_health.record(ctx.product, ok=not step_rc, reason=ctx.stale_reason)
         if step == 'record' and step_rc:
             # B-0083: a failed record leaves the last good index in place; every later step would
             # act on a stale board with full confidence, so none of them runs
@@ -530,6 +533,25 @@ def _first_line(text):
     return lines[0].strip() if lines else ''
 
 
+#: Substrings a git/network failure prints when the host has no route out at all — DNS down,
+#: cable unplugged, VPN dropped. B-0124: a tick that fails this way says "offline", not the raw
+#: git error, so the reason is legible on the status table and in the digest without cross
+#: referencing a tick log.
+_OFFLINE_MARKERS = (
+    'could not resolve host',
+    'temporary failure in name resolution',
+    'name or service not known',
+    'network is unreachable',
+    'no route to host',
+    'connection timed out',
+)
+
+
+def _reason(detail):
+    text = _first_line(detail)
+    return 'offline' if any(m in text.lower() for m in _OFFLINE_MARKERS) else text
+
+
 def run_asf_step(step, ctx):
     """Run one ``asf`` step; any failure is one ``[step:<name>] FAILED`` line and rc 1 — never
     an exception out of the tick."""
@@ -542,7 +564,7 @@ def run_asf_step(step, ctx):
         # the tick log carries the whole traceback: the one line names the step, this the line
         print(traceback.format_exc().rstrip(), flush=True)
         if step == 'record':
-            ctx.stale_reason = _first_line(detail) or type(e).__name__
+            ctx.stale_reason = _reason(detail) or type(e).__name__
         return 1
 
 

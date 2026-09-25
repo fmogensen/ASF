@@ -375,6 +375,51 @@ class RecordStepTests(TickTestCase):
         self.assertIn('tick: record failed', out)
 
 
+class RecordHealthStaleStatusTests(TickTestCase):
+    """B-0124: every tick fails at record while the host is offline — nothing pushes, so
+    ``metrics/ticks`` never carries a line about it (:mod:`asf.tick.record_health` is the local
+    stamp that survives instead), and ``asf status`` reads it back as a STALE row naming since
+    when, why (the raw git error reduced to "offline") and how many ticks running."""
+
+    def _offline_step0(self, root, product, fresh=False):
+        raise subprocess.CalledProcessError(
+            1, ['git', 'fetch'],
+            stderr="fatal: unable to access 'https://github.com/x/y.git/': "
+                   "Could not resolve host: github.com\n")
+
+    def test_a_failed_record_tick_makes_status_print_the_stale_row_with_since_time_and_count(self):
+        from asf.tick import record_health
+        from asf.views import index_reader as ix
+        from asf.views import status
+
+        stamps = iter(['2026-09-25T03:01:00Z', '2026-09-25T03:06:00Z'])
+        with mock.patch.object(tick, 'run_step0', self._offline_step0), \
+                mock.patch.object(record_health, '_stamp', lambda: next(stamps)):
+            rc1, out1 = self.run_tick(steps='record')
+            rc2, out2 = self.run_tick(steps='record')
+
+        self.assertEqual((rc1, rc2), (1, 1))
+        self.assertIn('RECORD STALE — offline', out1)
+        self.assertIn('RECORD STALE — offline', out2)
+
+        product = env.load_product('sample')
+        since = ix.local_stamp('2026-09-25T03:01:00Z', '%H:%M')
+        self.assertEqual(status.stale_cell(self.operator, product),
+                         f'STALE since {since} — record failed: offline (2 ticks)')
+
+    def test_a_landed_tick_after_the_streak_clears_the_row(self):
+        from asf.tick import record_health
+        from asf.views import status
+
+        with mock.patch.object(tick, 'run_step0', self._offline_step0):
+            self.run_tick(steps='record')
+        self.run_tick(steps='record')  # setUp's own _fake_step0: lands cleanly
+
+        product = env.load_product('sample')
+        self.assertIsNone(record_health.line(product))
+        self.assertIsNone(status.stale_cell(self.operator, product))
+
+
 class GroomStepOrderTests(TickTestCase):
     """The tick's third step: after ``health``, before ``wave``, in the tick's own record clone."""
 
