@@ -648,11 +648,12 @@ class TickRaiseTest(TickTestCase):
     def test_a_hook_refusal_asks_no_one_and_parks_nothing(self):
         self.hold('F-0031', 'touch_production', 'human-now')
         self.hold('B-0002', 'touch_legal', 'human-now', detail='LICENSE')
-        held, _ = self.raise_holds()
+        held, ctx = self.raise_holds()
         self.assertEqual([ln for ln in self.lines if 'NEEDS OPERATOR' in ln], [])
         self.assertEqual(self.lines, ['approvals: 2 refused action(s) on 2 item(s) recorded —'
                                       ' none parks its item; asf approvals list'])
         self.assertEqual(held, {})
+        self.assertEqual(ctx.counts['refusals'], 2)  # the tick digest's number
 
     def test_groom_holds_are_one_summary_line(self):
         for item in ('F-0031', 'B-0002', 'T-0003'):

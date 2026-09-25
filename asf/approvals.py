@@ -738,12 +738,15 @@ def raise_holds(ctx, out):
     open. The ``announced`` and ``closed`` markers live in the ledger beside the refusals (§4),
     so the ``held`` and ``hold-resolved`` events are written once over a hold's life however
     many ticks see it — the fold's ``first`` never moves, so one marker is one announcement,
-    and a repeat refusal bumps ``count`` without raising a second event.
+    and a repeat refusal bumps ``count`` without raising a second event. Every open hook refusal
+    also counts into ``ctx.counts['refusals']`` — the tick digest's number, not just its line.
     """
     product = ctx.product
     open_ = open_holds(product)                      # oldest first
 
     refused = [e for e in open_ if session_refusal(e['class'])]
+    if refused:
+        ctx.counts['refusals'] += len(refused)
     for e in open_:
         if e['level'] == 'human-now' and not session_refusal(e['class']):
             out(f"NEEDS OPERATOR: held {e['class']} on {e['item']} — {e['detail']} —"

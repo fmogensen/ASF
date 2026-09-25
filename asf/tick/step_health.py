@@ -86,6 +86,7 @@ def handle_dead(ctx, session, runtime_fn=_runtime, out=print, items=None):
             # launched, not finished (B-0085): the correction is running with its own registry
             # line, and the next tick judges it. Nothing waits for it here.
             out(f"DEAD  {job:<24} correction launched as {job}-correction")
+            ctx.counts['relaunches'] += 1
             return 'corrected'
     # B-0062: a session that died twice is held like a red gate — a correction on the run, a
     # round on the item, the ADJUDICATE row at the cap — never a question to the operator

@@ -27,7 +27,20 @@ each step without running anything.
 Each step ends with `[step:<name>] <seconds>s`; the tick ends with `tick: state committed and
 pushed`, `tick: total …`, then a summary: **IN FLIGHT** (the sessions running now) and **DONE
 since** the last tick on this clock (sessions that ended, with their result). A step that failed
-printed `[step:<name>] FAILED <why>`; a failed record step prints `RECORD STALE — <why>`.
+printed `[step:<name>] FAILED <why>`; a failed record step prints `RECORD STALE — <why>`. Last of
+all, a digest of what this tick did: `TICK — record ok, health ok, …` then the non-zero counters
+(`launches 2, merges 1, relaunches 1`), or `nothing launched, merged or stalled`.
+
+`asf watch --product <p>` tails that digest as it lands, tick after tick, without running one
+itself — read the console instead of a clock's log when a clock (not you) is the one ticking.
+
+## `asf watch`
+
+`asf watch --product <p>` prints each tick's digest as it is written to the ticks stream
+(`metrics/ticks/<day>.jsonl` in the tick's own clone), the same two lines the tick itself ends
+with. It never clones, fetches or runs anything — read-only, safe to leave open in a console the
+operator is not using for anything else, `ctrl-c` to stop. `--poll <seconds>` sets how often it
+checks for a new line (default 5s).
 
 ## The tables
 

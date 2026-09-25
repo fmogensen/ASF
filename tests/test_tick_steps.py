@@ -205,6 +205,7 @@ class HealthStepTests(StepsTestCase):
         self.assertEqual(len(fake.calls), 1)
         self.assertIn('CORRECTION: the step failed with:', fake.calls[0][1])
         self.assertEqual(self.events(ctx), [])
+        self.assertEqual(ctx.counts['relaunches'], 1)  # the tick digest's number
 
     def test_b0039_corrected_session_is_recorded_finished_as_its_own_job(self):
         self.dead_session()
@@ -890,9 +891,11 @@ class HarvestStepTests(StepsTestCase):
         self.assertEqual(_git(['log', '-1', '--format=%s', 'main'], self.repo_origin),
                          'work on fix/B-0001')
         self.lines.clear()
-        step_harvest.run(self.ctx(), out=self.lines.append, spawn=mock.Mock(return_value=4243))
+        ctx = self.ctx()
+        step_harvest.run(ctx, out=self.lines.append, spawn=mock.Mock(return_value=4243))
         self.assertTrue(self.lines[0].startswith('harvest: last run '), self.lines)
         self.assertIn(f'landed fix/B-0001 → {sha}', self.lines)
+        self.assertEqual(ctx.counts['merges'], 1)  # the tick digest's number, one tick late
         self.lines.clear()
         step_harvest.run(self.ctx(), out=self.lines.append, spawn=mock.Mock(return_value=4244))
         self.assertNotIn(f'landed fix/B-0001 → {sha}', self.lines)  # once

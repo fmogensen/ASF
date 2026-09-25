@@ -61,14 +61,18 @@ def write_status(product, rec):
     os.replace(tmp, path)
 
 
-def report_last(product, out):
-    """The last background run's lines, once: the first tick after it finished prints them."""
+def report_last(ctx, out):
+    """The last background run's lines, once: the first tick after it finished prints them, and
+    however many branches it landed count into ``ctx.counts['merges']`` — the tick that reports
+    them is the one the digest credits, since the landing itself ran on the harvest's own clock."""
+    product = ctx.product
     rec = read_status(product)
     if not rec.get('finished') or rec.get('reported'):
         return
     out(f"harvest: last run {rec.get('started', '?')} → {rec['finished']}")
     for line in rec.get('lines') or []:
         out(line)
+    ctx.counts['merges'] += rec.get('merges', 0)
     write_status(product, dict(rec, reported=True))
 
 
@@ -98,16 +102,21 @@ def background(product, items_file=None, out=print):
                     items = json.load(f)
             except (OSError, ValueError):
                 items = None
+        merges = 0
         try:
             # R2: the tick ran the lane's feeder-visible pass before the wave; this detached
             # run decides only the gate's outcomes
-            if not harvest.run_product_harvest(product, state_dir, out=emit, items=items,
-                                               lane_pass=False):
+            results = harvest.run_product_harvest(product, state_dir, out=emit, items=items,
+                                                  lane_pass=False)
+            if not results:
                 emit('harvest: none to land')
+            else:
+                merges = sum(1 for r in results.values() if r == 'landed')
         except Exception as e:  # noqa: BLE001 — named in the status, never a silent death
             emit(f'harvest: FAILED {(str(e) or type(e).__name__).strip().splitlines()[0]}')
             rc = 1
-        write_status(product, dict(rec, finished=_stamp(), lines=lines, reported=False))
+        write_status(product, dict(rec, finished=_stamp(), lines=lines, reported=False,
+                                   merges=merges))
     finally:
         lock.close()
     return rc
@@ -142,7 +151,7 @@ def run(ctx, out=print, spawn=None):
             f" — lands when it finishes, this tick does not wait")
         return 0
     lock.close()
-    report_last(product, out)
+    report_last(ctx, out)
     from asf.tick import step_wave  # R2: the lane pass is in-process — here when no wave ran it
     step_wave.lane_pass(ctx, out)
     items_file = None

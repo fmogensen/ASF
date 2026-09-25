@@ -233,6 +233,8 @@ def build_parser():
 
     from asf.tick.tick import register as register_tick
     register_tick(sub)
+    from asf.tick.watch import register as register_watch
+    register_watch(sub)
     from asf.init import register_commands as register_install
     register_install(sub)
     from asf.scheduler import register as register_scheduler
@@ -456,6 +458,9 @@ def _main(argv=None):
     if args.command == 'tick':
         from asf.tick.tick import cmd_tick
         return cmd_tick(args)
+    if args.command == 'watch':
+        from asf.tick.watch import cmd_watch
+        return cmd_watch(args)
     if args.command in ('roadmap', 'backlog', 'parity', 'prod', 'sessions', 'status', 'tokens'):
         view_root = resolve_record(args, announce=_announce_stderr if getattr(args, 'json', False) else print)
         if args.command == 'roadmap':
