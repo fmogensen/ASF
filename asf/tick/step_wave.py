@@ -34,7 +34,10 @@
 Before any brief is built, the host-pressure guard (:mod:`asf.workers.host`, ``config.yaml
 host_guards``): a host at or over its load or swap guard starts no session this tick — each
 launching row prints ``waits … — held: host pressure load <n>/cores <c>, swap <p>%`` and the step
-ends on ``wave: held: …``. Sessions already running are never touched.
+ends on ``wave: held: …``. Sessions already running are never touched. With the cloud lane on
+(:mod:`asf.workers.cloud`) the held host only holds the local lane: the step prints ``wave: local
+lane held: …`` and the wave sends what the cloud lane can take there; its seats are added to the
+feeder's ceiling.
 
 Each launch appends a ``launch`` event (item, job, model, brief kind) to ``metrics/events``.
 """
@@ -48,6 +51,7 @@ from asf import approvals, env
 from asf import capacity as capacity_mod
 from asf.groom import policy as groom_policy
 from asf.record import plan_order
+from asf.workers import cloud as cloud_mod
 from asf.workers import host as host_mod
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
@@ -375,6 +379,16 @@ def host_hold(planned):
     return host_mod.pressure(env.load_config())
 
 
+def cloud_settings(product):
+    """The cloud lane's settings (:func:`asf.workers.cloud.settings`); an unreadable config is
+    a lane that is off."""
+    try:
+        cfg = env.load_config()
+    except env.ConfigError:
+        cfg = {}
+    return cloud_mod.settings(cfg, product)
+
+
 def push_deferred(ctx, out=print):
     """The lane pass's ref pushes (branch deletes, archives), after the wave's launches: each
     push runs the product's pre-push hook, and no launch waits on one. A failure is one line."""
@@ -407,10 +421,14 @@ def launch(ctx, out=print):
         items = plan_order.overlay(items, plan_order.trunk_reader(product))
     running = inflight(product)
     r = capacity_mod.resolve(product)
+    # the cloud lane's seats beside the local ones: the feeder takes every in-flight run (cloud
+    # ones too) off the sum, so what is left is the free local seats plus the free cloud ones
+    cloud = cloud_settings(product)
+    extra = cloud.max_inflight if cloud.on else 0
     inputs = plan_inputs(product, ctx.record_root(), items)
     # the feeder check point: a violating row is dropped, logged, and its slot goes to the next
-    planned, dropped = gated_plan(items, product, running, r.sessions, inputs, out=out)
-    wider = (gated_plan(items, product, running, r.ceiling, inputs, out=lambda _l: None,
+    planned, dropped = gated_plan(items, product, running, r.sessions + extra, inputs, out=out)
+    wider = (gated_plan(items, product, running, r.ceiling + extra, inputs, out=lambda _l: None,
                         exclude=set(dropped))[0]
              if r.ceiling is not None and r.ceiling != r.sessions else planned)
     capacity_mod.write_demand(product.name, len(running), wanted(wider, inputs.get('held')))
@@ -420,6 +438,10 @@ def launch(ctx, out=print):
         job = job_name(row.brief_kind, row.item_id)
         out(f'waits    {job:<24} {row.item_id:<10} — {r.fair_share_reason}; {counted}')
     host_held, host_why, reading = host_hold(planned)
+    # a loaded host still starts cloud sessions: nothing of theirs runs here
+    local_hold = host_why if host_held and cloud.on else ''
+    if local_hold:
+        host_held = False
     worker_rows, texts, kinds = [], {}, {}
     for row in planned:
         cause = getattr(row, 'cause', '')
@@ -460,11 +482,16 @@ def launch(ctx, out=print):
                   swap_pct=reading.get('swap_pct'))
         out(f'wave: held: {host_why} — no new session this tick; running sessions go on')
         return 0
+    if local_hold:
+        ctx.event('host_pressure', load15=reading.get('load15'), cores=reading.get('cores'),
+                  swap_pct=reading.get('swap_pct'))
+        out(f'wave: local lane held: {local_hold} — the cloud lane takes what it can')
     if not worker_rows:
         out('wave: nothing to launch')
         return 0
     launched, _waits = _wave(product, worker_rows, len(worker_rows),
-                             brief_fn=lambda r: texts[r.job], out=out)
+                             brief_fn=lambda r: texts[r.job], out=out,
+                             **({'local_hold': local_hold} if local_hold else {}))
     for wrow, rec in launched:
         ctx.event('launch', item=wrow.item, job=wrow.job,
                   model=rec.get('model'), brief_kind=kinds[wrow.job])

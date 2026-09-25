@@ -52,6 +52,15 @@ def _row(product, cfg):
                'free': _free(r.ci, r.ci_inflight), 'bound_by': r.ci_bound},
         'batch': r.batch,
     }
+    from asf.workers import cloud
+    lane = cloud.settings(cfg, product)
+    if lane.enabled:  # only with the lane on: the shape is stable without it
+        n = cloud.inflight(product.name)
+        row['sessions']['inflight'] = inflight - n
+        row['sessions']['free'] = _free(r.sessions, inflight - n)
+        row['cloud'] = {'ceiling': lane.max_inflight, 'inflight': n,
+                        'free': _free(lane.max_inflight, n),
+                        'environment': lane.environment or None}
     if r.fair_share is not None:  # only when the share bounds the ceiling: the shape is stable
         row['sessions'].update(configured=r.ceiling, fair_share=r.fair_share, usable=r.usable,
                                active_products=r.active)
@@ -85,6 +94,14 @@ def render(products, cfg):
                     _fmt(ci['ceiling']), _fmt(ci['inflight']), _fmt(ci['free']),
                     ci['bound_by'] or '—', _batch_cell(row['batch'])))
     lines = [header, ''] + _table(HEADERS, rows)
+    clouds = [(p.name, _row(p, cfg).get('cloud')) for p in products]
+    clouds = [(name, c) for name, c in clouds if c]
+    if clouds:  # the cloud lane, beside the local seats above
+        lines.append('')
+        for name, c in clouds:
+            where = c['environment'] or 'default cloud environment'
+            lines.append(f"cloud lane: {name} {c['inflight']}/{c['ceiling']} in flight, "
+                         f"{c['free']} free ({where})")
     if dep:
         lines.append('')
         lines += [f'deprecated: {d}' for d in dep]

@@ -32,7 +32,7 @@ class Job:
     def __init__(self, product, name, cwd, brief_path, model, account=None, add_dirs=(),
                  permission_mode=DEFAULT_PERMISSION_MODE, env=None, log_path=None,
                  settings_file=None, hooks_dir=None, resume=None, passthrough=(),
-                 product_auth_env=None):
+                 product_auth_env=None, branch=None, base=None, setup=None):
         self.product = product
         self.name = name
         self.cwd = cwd
@@ -58,6 +58,11 @@ class Job:
         # ``worker_pool.env_passthrough``: the names the session keeps from the tick's
         # environment beyond the allow-list (asf.hermetic.WORKER_ALLOW)
         self.passthrough = tuple(passthrough or ())
+        # what a session that runs off this host must be told, not given (asf.workers.cloud):
+        # its branch, the trunk it starts from, and the product's worktree setup command
+        self.branch = branch
+        self.base = base
+        self.setup = setup
 
     @property
     def session(self):
@@ -67,8 +72,11 @@ class Job:
 class Result:
     """``ok`` is True/False once the session finished, None while it still runs (detached)."""
 
-    def __init__(self, ok=None, pid=None, returncode=None, text='', log_path=None, reason=None):
+    def __init__(self, ok=None, pid=None, returncode=None, text='', log_path=None, reason=None,
+                 extra=None):
         self.ok = ok
+        #: run fields a runtime adds to the session record (the cloud lane's session id and URL)
+        self.extra = dict(extra or {})
         self.reason = reason
         self.pid = pid
         self.returncode = returncode

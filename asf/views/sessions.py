@@ -40,6 +40,9 @@ def _ended_rows(root):
 
 
 def pid_alive(pid):
+    from asf.workers import cloudpid
+    if cloudpid.is_token(pid):  # a cloud run: its status file answers (asf.workers.cloudpid)
+        return cloudpid.alive(pid)
     try:
         pid = int(pid)
     except (TypeError, ValueError):

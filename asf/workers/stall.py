@@ -34,6 +34,7 @@ import time
 from asf import env
 from asf import tokens
 from asf.metrics import metrics as metrics_mod
+from asf.workers import cloudpid
 from asf.workers import githooks
 from asf.workers import health as health_mod
 from asf.workers import lifecycle
@@ -79,6 +80,8 @@ def classify(session, now, silent_min, alive):
         return None
     if not alive(session.get('pid')):
         return 'DEAD'
+    if cloudpid.is_token(session.get('pid')):
+        return None  # a cloud session's log is quiet by design: its time limit is the lane's
     try:
         mtime = os.path.getmtime(log)
     except (OSError, TypeError):
@@ -120,6 +123,10 @@ def stop_session(session, alive, grace_s=tokens.STOP_GRACE_S):
     is there after ``grace_s``. A run that is gone or not ours is not an error — the caller still
     writes its cap line."""
     pid = session.get('pid')
+    if cloudpid.is_token(pid):
+        from asf.workers import cloud
+        cloud.stop(session)
+        return
     try:
         _signal(pid, signal.SIGTERM)
         for _ in range(int(grace_s / STOP_POLL_S)):

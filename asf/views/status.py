@@ -154,7 +154,13 @@ def capacity_cell(cfg, product):
     r = capacity_mod.resolve(product, cfg)
     inflight = capacity_mod.inflight_sessions(product.name)
     total = capacity_mod.total_sessions(cfg)
+    from asf.workers import cloud
+    lane = cloud.capacity_clause(cfg, product)
+    if lane:  # the cloud lane's runs hold no local seat: each lane its own count
+        inflight -= cloud.inflight(product.name)
     parts = [f"sessions {inflight}/{r.sessions}" + (f" (operator total {total})" if total is not None else "")]
+    if lane:
+        parts.append(lane)
     if r.ci is not None:
         parts.append(f"ci {r.ci_inflight if r.ci_inflight is not None else '?'}/{r.ci}")
     return ', '.join(parts)

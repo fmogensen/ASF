@@ -116,6 +116,7 @@ def reserve_from_config(cfg):
 ROW_RE = re.compile(r'^(?P<state>\S+) → (?P<action>\S+) +(?P<item>\S+) +"(?P<title>.*)"'
                     r'(?P<mid>.*?)→ launch (?P<job>\S+) \((?P<model>[^)]+)\)\s*$')
 SEV_RE = re.compile(r'\((S[0-4])\)')
+CLOUD_OK_RE = re.compile(r'\bcloud-ok\b')
 ACTION_KIND = {'FIX': 'fix-bug', 'SPEC': 'spec', 'PLAN': 'plan', 'BUILD': 'task', 'TASK': 'task'}
 
 
@@ -124,7 +125,7 @@ class Row:
 
     def __init__(self, job, item, state='', action='', title='', model='', kind=None,
                  severity=None, feature=None, lane=None, branch=None, test=None, add_dirs=(),
-                 card_digest=''):
+                 card_digest='', cloud_ok=False):
         self.job = job
         self.item = item
         self.state = state
@@ -143,6 +144,8 @@ class Row:
         #: :func:`asf.briefs.build.card_digest` of the card as this row's brief stated it — what
         #: the ledger keeps so a later card change can be told from a dispute (F-0090 D4)
         self.card_digest = card_digest or ''
+        #: the row may run in the cloud lane (``cloud-ok``; :func:`asf.workers.cloud.eligible`)
+        self.cloud_ok = bool(cloud_ok)
 
     @property
     def is_fix(self):
@@ -157,7 +160,8 @@ class Row:
         return cls(d['job'], d.get('item', ''), state=d.get('state', ''),
                    action=d.get('action', ''), title=d.get('title', ''), model=d.get('model', ''),
                    kind=d.get('kind'), severity=d.get('severity'), feature=d.get('feature'),
-                   lane=d.get('lane'), branch=d.get('branch'), test=d.get('test'))
+                   lane=d.get('lane'), branch=d.get('branch'), test=d.get('test'),
+                   cloud_ok=d.get('cloud_ok') or d.get('cloud-ok'))
 
     def __repr__(self):
         return f'Row({self.state} → {self.action} {self.item} {self.job})'
@@ -178,7 +182,8 @@ def parse_row(line):
         return None
     sev = SEV_RE.search(m.group('mid'))
     return Row(m.group('job'), m.group('item'), state=m.group('state'), action=m.group('action'),
-               title=m.group('title'), model=m.group('model'), severity=sev.group(1) if sev else None)
+               title=m.group('title'), model=m.group('model'), severity=sev.group(1) if sev else None,
+               cloud_ok=bool(CLOUD_OK_RE.search(m.group('mid'))))
 
 
 def s1_open(rows):
@@ -323,12 +328,57 @@ class Pool:
                        f'+{committed:g}% committed, +{cost:g}% this launch)'), total
 
     def load(self, account, model=None):
+        """The account's seats on this host: its cloud-lane runs (``lane: cloud``) hold none —
+        they are counted against ``cloud.max_inflight`` (:meth:`cloud_load`)."""
         return sum(1 for s in self.live if s.get('account') == account.name
+                   and s.get('lane') != 'cloud'
                    and (model is None or model_key(s.get('model')) == model_key(model)))
 
     def lane_load(self, lane):
         names = {a.name for a in self.accounts if a.role == lane}
-        return sum(1 for s in self.live if s.get('account') in names)
+        return sum(1 for s in self.live if s.get('account') in names and s.get('lane') != 'cloud')
+
+    def cloud_load(self, account=None):
+        """Live cloud-lane runs — every account's, or ``account``'s."""
+        return sum(1 for s in self.live if s.get('lane') == 'cloud'
+                   and (account is None or s.get('account') == account.name))
+
+    def pick_cloud(self, kind, model, cloud_settings):
+        """``(Account, '')`` or ``(None, reason)`` for one cloud-lane launch
+        (:mod:`asf.workers.cloud`): under ``max_inflight``, among the lane's accounts, a free
+        account (fewest cloud runs, then name) before a cooling one at no cloud run; the quota
+        band and the 5h headroom apply as for a local launch — the session spends that account's
+        quota wherever it runs."""
+        from asf.workers import cloud as cloud_mod
+        s = cloud_settings
+        n = self.cloud_load()
+        if n >= s.max_inflight:
+            return None, f'cloud full — {n}/{s.max_inflight} in flight'
+        cands = cloud_mod.lane_accounts(self.accounts, s)
+        if not cands:
+            return None, 'cloud: no cloud-lane account'
+        free, cooling, over, stopped = [], [], [], []
+        for a in cands:
+            state, why = self.band(a)
+            if state not in (quota_mod.FREE, quota_mod.COOLDOWN):
+                stopped.append(f'{a.name} ({why})')
+                continue
+            fits, why, total = self.headroom(a, kind, model)
+            if not fits:
+                over.append((total, why))
+            elif state == quota_mod.FREE:
+                free.append(a)
+            elif self.cloud_load(a) == 0:
+                cooling.append(a)
+        if free:
+            return min(free, key=lambda a: (self.cloud_load(a), a.name)), ''
+        if cooling:
+            return min(cooling, key=lambda a: a.name), ''
+        if over:
+            return None, min(over)[1]
+        if stopped:
+            return None, 'cloud: accounts stopped: ' + ', '.join(stopped)
+        return None, REASON_COOLDOWN
 
     def lane_cap(self, lane):
         return sum(a.cap for a in self.accounts if a.role == lane)
@@ -408,10 +458,10 @@ class Pool:
                                                      for a in stopped)
         return why
 
-    def take(self, account, model, job='', product=None, kind=None):
-        """One launch of this wave on ``account``: a seat, and its full estimate committed
-        against the account's 5h headroom."""
+    def take(self, account, model, job='', product=None, kind=None, lane=None):
+        """One launch of this wave on ``account``: a seat (a cloud one for ``lane='cloud'``),
+        and its full estimate committed against the account's 5h headroom."""
         self.live.append({'job': job, 'account': account.name, 'model': model,
-                          'product': product, 'kind': kind, 'wave': True})
+                          'product': product, 'kind': kind, 'wave': True, 'lane': lane})
         self._committed[account.name] = (self._committed.get(account.name, 0.0)
                                          + self.costs.cost(kind, model))

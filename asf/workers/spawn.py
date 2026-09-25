@@ -417,8 +417,13 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
     own_path = os.path.join(worktrees_dir(product), row.job)
     fresh = not os.path.exists(own_path)
     worktree = make_worktree(product, row.job, branch, kind=row.kind)
+    cloud = getattr(runtime, 'lane', 'local') == 'cloud'
     setup_s = None
-    if fresh and worktree == own_path:  # a new worktree, not an ended run's reused one
+    if cloud:
+        # the session runs off this host (asf.workers.cloud): nothing is set up or built here,
+        # and the branch it checks out must be on origin — a fresh one is published first
+        _publish_fresh_branch(product, worktree, branch)
+    elif fresh and worktree == own_path:  # a new worktree, not an ended run's reused one
         setup_s = run_worktree_setup(product, row.job, worktree, account, passthrough)
     id_range = reserve_id_range(product, row.job,
                                 prefixes=wp.get('id_range_prefixes') or DEFAULT_ID_PREFIXES,
@@ -441,7 +446,9 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
                           env={**env.worker_env(cfg, product),
                                'BACKLOG_ID_RANGE': id_range, 'ASF_SESSION': sid},
                           settings_file=settings_file(wp), hooks_dir=hooks_dir,
-                          passthrough=passthrough, product_auth_env=product_auth_env)
+                          passthrough=passthrough, product_auth_env=product_auth_env,
+                          branch=branch, base=product.main,
+                          setup=getattr(product.conventions, 'worktree_setup', None))
     result = runtime.run(job)
     record = {'job': row.job, 'item': row.item, 'feature': row.feature, 'kind': row.kind,
               'account': account.name if account else None, 'model': job.model,
@@ -451,10 +458,22 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
               'product': product.name, 'card_digest': getattr(row, 'card_digest', '') or ''}
     if setup_s is not None:
         record['setup_s'] = setup_s
+    record.update({k: v for k, v in (getattr(result, 'extra', None) or {}).items() if v is not None})
     # a launch line is a new run: the fold opens a run at every launch line, so the previous
     # run's terminal fields never reach this one (B-0041 — see asf.workers.lifecycle)
     pool_mod.append_session(product, record)
     return record
+
+
+def _publish_fresh_branch(product, worktree, branch):
+    """A cloud session checks its branch out from origin: a branch origin does not hold yet is
+    pushed there by the factory (:func:`asf.workers.lifecycle.publish`, the product's own pre-push
+    hook included) before the launch. A refused push refuses the launch."""
+    if _branch_exists_on_origin(worktree, branch):
+        return
+    ok, line = lifecycle.publish(worktree, branch, '', main=product.main)
+    if not ok:
+        raise SpawnError(f'cloud lane: {line}')
 
 
 def load_cfg():

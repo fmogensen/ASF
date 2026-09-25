@@ -51,6 +51,7 @@ import subprocess
 import time
 
 from asf import env
+from asf.workers import cloudpid
 from asf.workers import headroom
 from asf.workers import runtime as runtime_mod
 
@@ -294,9 +295,12 @@ def is_live(run):
 
 
 def pid_alive(pid):
-    """The pid answers a signal 0 (a pid we may not signal is someone's, so alive)."""
+    """The pid answers a signal 0 (a pid we may not signal is someone's, so alive). A cloud run's
+    token (:mod:`asf.workers.cloudpid`) answers from the cloud status file instead."""
     if not pid:
         return False
+    if cloudpid.is_token(pid):
+        return cloudpid.alive(pid)
     try:
         os.kill(int(pid), 0)
     except ProcessLookupError:
@@ -943,6 +947,14 @@ def stop(path, run, grace=5.0, poll=0.1, alive=None, tip=None, sleep=time.sleep)
     go, then for ``grace`` seconds verify the log stays quiet and ``tip()`` (the branch tip on
     origin, when given) does not move. Only then is ``ended``/``end_reason: stopped`` recorded,
     with ``stop_tip`` so a later push by the stopped run is caught (:func:`pushed_after_stop`)."""
+    if cloudpid.is_token(run.get('pid')):  # no process here: the cloud lane stops it
+        from asf.workers import cloud  # local: cloud imports the runtime this module imports
+        ok, detail = cloud.stop(run)
+        line = {'job': run['job'], 'ended': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                'end_reason': STOPPED}
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(line, sort_keys=True) + '\n')
+        return ok, detail
     pgid = run.get('pgid') or run.get('pid')
     if not pgid:
         return False, 'no pid or pgid recorded'
