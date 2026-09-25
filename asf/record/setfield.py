@@ -2,7 +2,10 @@
 
 The typed block is a machine-read format; a hand edit that breaks it costs a tick. ``asf set <id>
 field=value…`` renders the change, parses the result back, and writes only when the card
-round-trips to exactly what was asked."""
+round-trips to exactly what was asked.
+
+A Task's list fields ``writes:`` and ``after:`` take three forms: ``writes=[a, b]`` replaces the
+list, ``writes+=a`` (or ``writes+=[a, b]``) adds what is not there yet, ``writes-=a`` removes."""
 import os
 import sys
 import tempfile
@@ -10,6 +13,55 @@ import tempfile
 from asf.record import frontmatter
 from asf.record.core import canonicalize, load_items, record_root
 from asf.record.new import _parse_sets
+
+#: The list-valued fields ``asf set`` writes with ``=`` / ``+=`` / ``-=``, per type.
+LIST_FIELDS = {'task': ('writes', 'after')}
+
+
+def _as_list(value):
+    if value is None or value == '':
+        return []
+    return [str(v) for v in value] if isinstance(value, list) else [str(value)]
+
+
+def parse_assignments(type_, pairs):
+    """``[(key, subkey|None, op, value)]`` off ``asf set``'s ``FIELD=VALUE`` pairs: ``op`` is
+    ``'='``, or ``'+'`` / ``'-'`` for a list field's add and remove forms. Raise ValueError."""
+    lists = LIST_FIELDS.get(type_, ())
+    out = []
+    for pair in pairs or []:
+        key, eq, raw = pair.partition('=')
+        op = '='
+        if key[-1:] in ('+', '-') and key[:-1] in lists:
+            key, op = key[:-1], key[-1]
+        if eq and key in lists:
+            value = _as_list(frontmatter._parse_value(raw))
+            if not value and op != '=':
+                raise ValueError(f"{key}{op}= wants a path or a [list], got {raw!r}")
+            out.append((key, None, op, value))
+            continue
+        if key[-1:] in ('+', '-'):
+            raise ValueError(f"{key}= — only a list field ({', '.join(lists) or 'none'} on a "
+                             f"{type_}) takes the add/remove forms")
+        try:
+            top, sub, value = _parse_sets(type_, [pair])[0]
+        except ValueError as e:
+            if not lists:
+                raise
+            raise ValueError(f"{e}; list fields: {', '.join(lists)} (=, +=, -=)") from None
+        out.append((top, sub, op, value))
+    return out
+
+
+def apply_list(current, op, value):
+    """``current`` with ``value`` put by ``op``: ``=`` replaces, ``+`` appends what is missing,
+    ``-`` drops what is named."""
+    have = _as_list(current)
+    if op == '+':
+        return have + [v for v in dict.fromkeys(value) if v not in have]
+    if op == '-':
+        return [v for v in have if v not in value]
+    return list(dict.fromkeys(value))
 
 
 def cmd_set(args, root):
@@ -20,13 +72,20 @@ def cmd_set(args, root):
         print(f"error: no item {args.id!r}", file=sys.stderr)
         return 2
     try:
-        sets = _parse_sets(rec['meta'].get('type'), args.assignments)
+        sets = parse_assignments(rec['meta'].get('type'), args.assignments)
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     updates = {}
-    for top, sub, value in sets:
-        if sub:
+    for top, sub, op, value in sets:
+        if top in LIST_FIELDS.get(rec['meta'].get('type'), ()):
+            base = updates[top] if top in updates else rec['meta'].get(top)
+            updates[top] = apply_list(base, op, value)
+            if top == 'writes' and not updates[top]:
+                print(f"error: a Task keeps a writes: footprint — {args.id} would have none",
+                      file=sys.stderr)
+                return 2
+        elif sub:
             links = dict(updates.get(top) or rec['meta'].get(top) or {})
             links[sub] = value
             updates[top] = links
@@ -37,7 +96,9 @@ def cmd_set(args, root):
     if err:
         print(f"error: {err}", file=sys.stderr)
         return 2
-    print(f"{args.id}: set {', '.join(updates)}")
+    lists = LIST_FIELDS.get(rec['meta'].get('type'), ())
+    print(f"{args.id}: set " + ', '.join(
+        f"{k}={' '.join(v)}" if k in lists else k for k, v in updates.items()))
     return 0
 
 

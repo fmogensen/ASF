@@ -248,6 +248,61 @@ class SetCommandTests(unittest.TestCase):
         self.assertEqual(self.read(), before)
 
 
+class SetListFieldTests(unittest.TestCase):
+    """A Task's writes: and after: are list fields of `asf set`: =, += and -= forms, through the
+    same parser and stage as every other field (T-0338: widening writes: was a hand edit)."""
+    def setUp(self):
+        self.root = make_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        write_item(self.root, 'F-0001', 'feature', 'Thing', parent='E-0001')
+        self.task = write_item(self.root, 'T-0001', 'task', 'Do', parent='F-0001',
+                               typed_lines=('writes: [src/a.py, src/b.py]',))
+        write_item(self.root, 'T-0002', 'task', 'Other', parent='F-0001',
+                   typed_lines=('writes: [lib/x.py]',))
+
+    def meta(self):
+        with open(self.task, encoding='utf-8') as f:
+            return frontmatter.parse(f.read())[0]
+
+    def test_writes_add_appends_only_what_is_missing(self):
+        r = run(['set', 'T-0001', 'writes+=[docs/p.md, src/a.py]'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.meta()['writes'], ['src/a.py', 'src/b.py', 'docs/p.md'])
+        self.assertIn('writes=src/a.py src/b.py docs/p.md', r.stdout)
+
+    def test_writes_remove_and_replace(self):
+        r = run(['set', 'T-0001', 'writes-=src/b.py'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.meta()['writes'], ['src/a.py'])
+        r = run(['set', 'T-0001', 'writes=[x.py, y.py]'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.meta()['writes'], ['x.py', 'y.py'])
+
+    def test_after_add_then_remove(self):
+        r = run(['set', 'T-0001', 'after+=T-0002'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.meta()['after'], ['T-0002'])
+        r = run(['set', 'T-0001', 'after-=T-0002', 'writes+=c.py'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.meta().get('after') or [], [])
+        self.assertIn('c.py', self.meta()['writes'])
+
+    def test_emptying_writes_is_refused(self):
+        with open(self.task, encoding='utf-8') as f:
+            before = f.read()
+        r = run(['set', 'T-0001', 'writes-=[src/a.py, src/b.py]'], self.root)
+        self.assertEqual(r.returncode, 2)
+        with open(self.task, encoding='utf-8') as f:
+            self.assertEqual(f.read(), before)
+
+    def test_add_form_on_a_scalar_field_is_refused(self):
+        r = run(['set', 'T-0001', 'rank+=3'], self.root)
+        self.assertEqual(r.returncode, 2)
+        r = run(['set', 'B-0001', 'writes+=x.py'], self.root)
+        self.assertEqual(r.returncode, 2)
+
+
 class RecordPreCommitHookTests(unittest.TestCase):
     """B-0084: a commit into the record runs ``asf check`` on what it touches, even when a
     marker leaked in from another repo's hook run."""
