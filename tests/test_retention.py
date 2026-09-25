@@ -216,3 +216,32 @@ class RetentionConventions(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class HostedDelete(unittest.TestCase):
+    """A hosted origin's refs are deleted through the host API — never a push that runs the
+    product's pre-push hook — and only while the tip is still the one judged."""
+
+    def _run(self, answers):
+        from asf.workers import retention
+        calls = []
+
+        def fake(args):
+            calls.append(args)
+            return answers.pop(0)
+        with mock.patch.object(retention.H, '_gh', side_effect=fake), \
+                mock.patch.object(retention.H, 'sh') as sh:
+            ok, why = retention.delete('/repo', 'hb/x', 'a' * 40, slug='o/r')
+            sh.assert_not_called()
+        return ok, why, calls
+
+    def test_deletes_through_the_api_when_the_tip_is_unchanged(self):
+        ok, why, calls = self._run([(0, 'a' * 40 + '\n', ''), (0, '', '')])
+        self.assertTrue(ok, why)
+        self.assertEqual(calls[1], ['api', '-X', 'DELETE', 'repos/o/r/git/refs/heads/hb/x'])
+
+    def test_a_moved_tip_is_kept(self):
+        ok, why, calls = self._run([(0, 'b' * 40 + '\n', '')])
+        self.assertFalse(ok)
+        self.assertIn('tip moved', why)
+        self.assertEqual(len(calls), 1)

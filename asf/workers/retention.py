@@ -202,8 +202,22 @@ def candidates(conv, heads, dates, now, prs, protected, flight, item_text):
     return due, kept
 
 
-def delete(repo, branch, sha):
-    """``git push origin --delete <branch>`` over a lease on ``sha``; ``(ok, why)``."""
+def delete(repo, branch, sha, slug=None):
+    """Delete ``branch`` on origin only while its tip is still ``sha``; ``(ok, why)``.
+
+    With a hosted origin (``slug``) the ref is deleted through the host's API: a delete carries
+    no content, and a ``git push --delete`` would run the product's own pre-push hook — one
+    product's hook ran a whole-tree lint per delete and refused every one (2026-09-25). Without
+    a host, ``git push origin --delete`` over a lease on ``sha``."""
+    if slug:
+        ref = f'repos/{slug}/git/refs/heads/{branch}'
+        rc, out, err = H._gh(['api', ref, '--jq', '.object.sha'])
+        if rc != 0:
+            return False, H.tail(err or out) or 'ref unreadable'
+        if out.strip() != sha:
+            return False, f'tip moved ({out.strip()[:9]} is not {sha[:9]}) — kept'
+        rc, out, err = H._gh(['api', '-X', 'DELETE', ref])
+        return rc == 0, '' if rc == 0 else (H.tail(err or out) or f'gh exit {rc}')
     r = H.sh(['git', 'push', '-q', f'--force-with-lease=refs/heads/{branch}:{sha}', 'origin',
               '--delete', branch], cwd=repo)
     return r.returncode == 0, H.tail(r.stderr or r.stdout) if r.returncode else ''
@@ -251,13 +265,19 @@ def sweep(product, fix=False, out=print, items=None, host=None, now=None):
     result['kept'] = kept
     blind = prs is None or protected is None
     cap = conv.retention('per_tick')
+    from asf.harvest.lane import repo_slug
+    slug = repo_slug(product)   # None for an unhosted origin: the git path below
     for b, sha, rule, days in due[:cap]:
         what = f'{b} ({rule}, {days}d old)'
         if not fix or blind:
             out(f'retention: would delete {what}')
             result['due'].append(b)
             continue
-        ok, why = delete(repo, b, sha)
+        ok, why = delete(repo, b, sha, slug=slug)
+        if not ok and len(result['failed']) >= 2 and not result['deleted']:
+            result['failed'].append(b)
+            out(f'retention: delete failed {what} — {why}; stopping this pass after 3 failures')
+            break
         if ok:
             out(f'retention: deleted {what}')
             result['deleted'].append(b)
