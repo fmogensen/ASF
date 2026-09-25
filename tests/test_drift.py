@@ -91,6 +91,26 @@ class TickPrintsTheDriftLine(DriftTestCase):
         self.assertFalse(any(ln.startswith('tick: ran asf upgrade') for ln in lines), lines)
         self.assertFalse(any('upgraded under this tick' in ln for ln in lines), lines)
 
+    def test_the_owner_tick_whose_upgrade_is_pending_runs_no_step_either(self):
+        from asf import upgrade
+
+        def deferred(args):
+            self.assertEqual(args.owner, 'p')
+            upgrade.write_pending(args.ref, args.owner)
+            return drift.DEFERRED
+        self.addCleanup(upgrade.clear_pending)
+        with mock.patch.object(tick, 'run_asf_step') as step:
+            out = io.StringIO()
+            self.product = env.Product('p', {'repo_dir': self.repo, 'main': 'main',
+                                             'ci': {'provider': 'none'}, 'approvals': {'upgrade': 'auto'}})
+            with self.behind(), contextlib.redirect_stdout(out), mock.patch('asf.tick.summary.run'), \
+                    mock.patch('asf.upgrade.cmd_upgrade', deferred):
+                rc = tick._run_steps(mock.Mock(), self.product, tick.Context(self.product),
+                                     [('harvest', 'asf', None)], None)
+        self.assertEqual(rc, 0)
+        step.assert_not_called()
+        self.assertIn(f'tick: waiting — upgrade to {self.head[:7]} pending', out.getvalue())
+
     def test_no_line_of_drift_when_the_install_is_the_trunk(self):
         out = io.StringIO()
         with mock.patch.object(drift, 'installed_commit', return_value=self.head), \
