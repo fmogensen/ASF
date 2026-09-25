@@ -352,10 +352,17 @@ def _message_without_trailers(repo, sha):
     return '\n'.join(lines)
 
 
-def scan_unpublished(repo, head, pats):
-    """Every commit reachable from ``head`` and from no ``refs/remotes/origin/*`` ref (D4), each
-    against its parent, plus its message with the trailer block removed."""
-    shas = [s for s in _run_git(repo, ['rev-list', head, '--not', '--remotes=origin']).stdout.split() if s]
+def _is_commit(repo, sha):
+    return _run_git(repo, ['cat-file', '-e', f'{sha}^{{commit}}']).returncode == 0
+
+
+def scan_unpublished(repo, head, pats, published=()):
+    """Every commit reachable from ``head`` and from no ``refs/remotes/origin/*`` ref (D4) — nor
+    from any sha of ``published`` (a pre-push line's remote sha: the remote already has it) —
+    each against its parent, plus its message with the trailer block removed."""
+    exclude = [s for s in published if s and set(s) != {'0'} and _is_commit(repo, s)]
+    shas = [s for s in _run_git(repo, ['rev-list', head, '--not', '--remotes=origin']
+                                + exclude).stdout.split() if s]
     findings = []
     for sha in shas:
         diff = _run_git(repo, ['show', '-U0', '--format=', sha]).stdout
@@ -420,18 +427,42 @@ def _repo_root(cwd):
     return out.stdout.strip()
 
 
+#: How long the pre-push refresh of origin's refs may take before the scan goes on without it.
+FETCH_TIMEOUT_S = 60
+
+
+def refresh_origin(repo, timeout=FETCH_TIMEOUT_S):
+    """``git fetch --no-tags origin``, quietly, so a worktree whose remote-tracking refs are stale
+    does not count commits origin already has as unpublished. No ``origin`` remote → nothing to
+    refresh. A failed or timed-out fetch prints one line and the scan uses the current view.
+    Returns True when the view was refreshed."""
+    if _run_git(repo, ['remote', 'get-url', 'origin']).returncode != 0:
+        return False
+    try:
+        out = subprocess.run(['git', 'fetch', '--quiet', '--no-tags', 'origin'], cwd=repo,
+                             capture_output=True, text=True, timeout=timeout,
+                             stdin=subprocess.DEVNULL)
+        ok = out.returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        ok = False
+    if not ok:
+        print('redact: could not fetch origin — its view may be stale; scanning against it',
+              file=sys.stderr)
+    return ok
+
+
 def _scan_pre_push_stdin(repo, pats, stdin):
     """``<local ref> <local sha> <remote ref> <remote sha>`` lines; a deletion (local sha all
-    zeros) is skipped."""
+    zeros) is skipped. Origin's refs are refreshed first, and each line's remote sha counts as
+    published — only commits origin does not have are scanned."""
+    lines = [line.split() for line in stdin]
+    lines = [p for p in lines if len(p) == 4 and set(p[1]) != {'0'}]
+    if not lines:
+        return []
+    refresh_origin(repo)
     findings = []
-    for line in stdin:
-        parts = line.split()
-        if len(parts) != 4:
-            continue
-        local_sha = parts[1]
-        if set(local_sha) == {'0'}:
-            continue
-        findings += scan_unpublished(repo, local_sha, pats)
+    for _local_ref, local_sha, _remote_ref, remote_sha in lines:
+        findings += scan_unpublished(repo, local_sha, pats, published=(remote_sha,))
     return findings
 
 

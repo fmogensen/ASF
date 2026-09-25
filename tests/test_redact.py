@@ -409,3 +409,95 @@ class EnvSecretEdges(unittest.TestCase):
         with mock.patch.dict(os.environ, {'GIT_CONFIG_KEY_0': 'init.defaultBranch'}):
             pats = redact.patterns(environ=os.environ)
         self.assertFalse([p for p in pats if p.source == 'env:GIT_CONFIG_KEY_0'])
+
+
+# ---- pre-push against a stale view of origin -------------------------------------
+
+_WORD = 'zorb' + 'lax'  # a protected name, built so this file never holds it whole
+
+
+def _build_stale_view(root):
+    """A bare ``origin``; ``other`` pushed a commit adding the protected name (already published);
+    ``worker`` pulled it, then its remote-tracking ref was put back to the seed — the stale view
+    of a worktree that never fetched the trunk tip it builds on."""
+    origin = os.path.join(root, 'origin.git')
+    _git(['init', '-q', '--bare', '-b', 'main', origin], root)
+    other, worker = os.path.join(root, 'other'), os.path.join(root, 'worker')
+    for path in (other, worker):
+        _git(['clone', '-q', origin, path], root)
+        _git(['config', 'user.email', 'a@example.com'], path)
+        _git(['config', 'user.name', 'a'], path)
+        _git(['checkout', '-q', '-B', 'main'], path)
+    _write(other, 'seed.txt', 'seed\n')
+    _commit(other, 'seed')
+    _git(['push', '-q', 'origin', 'main'], other)
+    seed = _rev_parse(other)
+    _write(other, os.path.join('plans', 'p.md'), f'a plan naming {_WORD}\n')
+    _commit(other, 'a published plan')
+    _git(['push', '-q', 'origin', 'main'], other)
+    _git(['pull', '-q', 'origin', 'main'], worker)
+    _git(['update-ref', 'refs/remotes/origin/main', seed], worker)
+    _write(root, 'names.txt', f'\\b{_WORD}\\b\n')
+
+
+_STALE = None
+
+
+def _stale_view():
+    global _STALE
+    if _STALE is None:
+        from tests.gitfixture import Template
+        _STALE = Template(_build_stale_view, prefix='redact_stale_')
+    return _STALE.fresh()
+
+
+class PrePushStaleViewTests(unittest.TestCase):
+    def setUp(self):
+        self.root = _stale_view()
+        self.worker = os.path.join(self.root, 'worker')
+        self.pats = redact.patterns(cfg={}, environ={},
+                                    extra=(os.path.join(self.root, 'names.txt'),))
+
+    def _push_line(self, remote_sha='0' * 40):
+        sha = _rev_parse(self.worker)
+        return [f'refs/heads/main {sha} refs/heads/feature {remote_sha}\n']
+
+    def test_a_commit_origin_already_has_is_not_reported_though_the_local_view_is_stale(self):
+        _write(self.worker, 'new.txt', 'a clean change\n')
+        _commit(self.worker, 'a clean change')
+        # the stale view alone counts the published plan as unpublished
+        self.assertTrue(redact.scan_unpublished(self.worker, 'HEAD', self.pats))
+
+        findings = redact._scan_pre_push_stdin(self.worker, self.pats, self._push_line())
+
+        self.assertEqual(findings, [])
+
+    def test_a_new_commit_adding_a_protected_name_is_still_refused(self):
+        _write(self.worker, 'new.txt', f'a fresh mention of {_WORD}\n')
+        _commit(self.worker, 'a new commit')
+
+        findings = redact._scan_pre_push_stdin(self.worker, self.pats, self._push_line())
+
+        self.assertEqual({f.path for f in findings}, {'new.txt'})
+
+    def test_a_failed_fetch_falls_back_to_the_current_view_and_the_remote_sha(self):
+        _git(['remote', 'set-url', 'origin', os.path.join(self.root, 'gone.git')], self.worker)
+        published = _rev_parse(self.worker)
+        _write(self.worker, 'new.txt', f'a fresh mention of {_WORD}\n')
+        _commit(self.worker, 'a new commit')
+
+        with mock.patch('sys.stderr') as err:
+            findings = redact._scan_pre_push_stdin(self.worker, self.pats,
+                                                   self._push_line(remote_sha=published))
+
+        self.assertIn('may be stale', ''.join(c.args[0] for c in err.write.call_args_list))
+        self.assertEqual({f.path for f in findings}, {'new.txt'})
+
+    def test_a_timed_out_fetch_does_not_crash(self):
+        with mock.patch.object(redact.subprocess, 'run',
+                               side_effect=subprocess.TimeoutExpired('git', 60)) as run, \
+                mock.patch.object(redact, '_run_git') as run_git, \
+                mock.patch('sys.stderr'):
+            run_git.return_value.returncode = 0
+            self.assertFalse(redact.refresh_origin(self.worker))
+        self.assertEqual(run.call_args.kwargs['timeout'], redact.FETCH_TIMEOUT_S)
