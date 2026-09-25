@@ -78,7 +78,7 @@ IN THIS ORDER:
 3. **The tests** — a test per Acceptance line, next to the code it covers. The product's test
    command is `(none set — run the tests you add)`.
 
-BEFORE THE PUSH: the product's test command and every test you added, passing. Paste the last line of each in the report. A test you changed to make
+BEFORE THE PUSH: every test you added and the ones covering the files you changed, passing. Paste the last line of each in the report. A test you changed to make
 it pass is a failed Feature, not a passed one. CI, the gate, the customer-content check and the
 merge are the lane's — you push, it lands.
 
