@@ -255,7 +255,7 @@ def sh(cmd, cwd=None, env_=None):
                           env=dict(harvest.clean_env(), **(env_ or {})))
 
 
-class LaneRepo(unittest.TestCase):
+class LaneFixture(unittest.TestCase):
     """A bare origin, the product's checkout, and a worker clone that pushes lane branches."""
 
     def setUp(self):
@@ -326,6 +326,10 @@ class LaneRepo(unittest.TestCase):
 
     def origin_main(self):
         return sh(['git', 'rev-parse', 'main'], cwd=self.origin).stdout.strip()
+
+
+class LaneRepo(LaneFixture):
+    """The lane over a real origin: state on the run line, the two passes, the gate's outcomes."""
 
     def test_r1_lane_state_lives_on_the_run_line(self):
         self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat(T-0001): a')
@@ -593,6 +597,120 @@ class Orphans(LaneRepo):
             self.assertEqual(sum(b.startswith('worker/old-') for b in self.heads()), 1)
             self.run_lane({})
         self.assertEqual(sum(b.startswith('worker/old-') for b in self.heads()), 0)
+
+
+HOOK = """#!/bin/sh
+# a product's pre-push hook: it lints the checkout it runs in, so a checkout off the trunk fails
+[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || { echo "lint: red tree" >&2; exit 1; }
+if [ -f "{marker}" ]; then
+  while read -r _l lsha _r _s; do
+    [ "$lsha" = 0000000000000000000000000000000000000000 ] && { echo "no deletes today" >&2; exit 1; }
+  done
+fi
+exit 0
+"""
+
+
+class RefPushes(LaneFixture):
+    """The lane's ref-only pushes (archive, branch delete) leave from a clean checkout detached
+    at origin/<trunk>, so the product's pre-push hook runs in full against the trunk's tree —
+    never against a product checkout a person left behind or edited. A refused one is loud: a
+    line in the tick's output and a row in status and doctor, and the delete is owed and retried."""
+
+    def setUp(self):
+        super().setUp()
+        self.marker = os.path.join(self.base, 'refuse-delete')
+        self.write(self.repo, '.githooks/pre-push', HOOK.replace('{marker}', self.marker))
+        os.chmod(os.path.join(self.repo, '.githooks/pre-push'), 0o755)
+        sh(['git', 'add', '-A'], cwd=self.repo)
+        sh(['git', 'commit', '-qm', 'hook'], cwd=self.repo, env_=self.ident)
+        sh(['git', 'push', '-q', 'origin', 'HEAD:main'], cwd=self.repo)
+        sh(['git', 'config', 'core.hooksPath', '.githooks'], cwd=self.repo)
+        # the product checkout: a local commit ahead, the trunk moved on, the hook edited by hand
+        self.write(self.repo, 'local.txt', 'mine\n')
+        sh(['git', 'add', '-A'], cwd=self.repo)
+        sh(['git', 'commit', '-qm', 'local work'], cwd=self.repo, env_=self.ident)
+        self.push_main({'moved.txt': 'm\n'}, 'trunk moved')
+        with open(os.path.join(self.repo, '.githooks/pre-push'), 'a', encoding='utf-8') as f:
+            f.write('exit 1\n')
+        self.checkout_head = sh(['git', 'rev-parse', 'HEAD'], cwd=self.repo).stdout.strip()
+        self.push_lane('worker/free-plan-t1', {'a.txt': 'a\n'}, 'feat: a')
+        self.items = {'T-0007': {'id': 'T-0007', 'type': 'task', 'state': 'Closed',
+                                 'legacy_id': 'FREE-1/T1', 'parent': 'F-0001'},
+                      'F-0001': {'id': 'F-0001', 'type': 'feature', 'state': 'Active',
+                                 'legacy_id': 'free-plan', 'children': ['T-0007']}}
+        self.prs = {'worker/free-plan-t1': {'number': 70, 'state': 'OPEN', 'title': 'a'}}
+
+    def run_lane(self):
+        lines = []
+        ln = lane.Lane(self.product(), self.state_dir, out=lines.append, items=self.items)
+        ln.host = FakePRHost(ln.product, ln, self.prs)
+        lane.lane_pass(ln.product, self.state_dir, items=self.items, lane=ln)
+        return ln, lines
+
+    def heads(self):
+        return sh(['git', 'for-each-ref', '--format=%(refname:short)', 'refs/heads'],
+                  cwd=self.origin).stdout.split()
+
+    def rows(self, product):
+        from asf import doctor
+        from asf.views import status
+        with mock.patch.object(env, 'state_dir', lambda *_a, **_k: self.state_dir):
+            return (lane.ref_push_line(product), doctor.check_ref_pushes(product),
+                    status.lane_push_cell(product))
+
+    def test_the_pushes_leave_from_a_clean_trunk_checkout_and_the_hook_passes_there(self):
+        # the product checkout's own hook refuses everything: the old route failed every push
+        refused = sh(['git', 'push', '-q', 'origin', ':refs/heads/worker/free-plan-t1'],
+                     cwd=self.repo)
+        self.assertNotEqual(refused.returncode, 0)
+        ln, lines = self.run_lane()
+        self.assertEqual([n for n, _ in ln.host.closed], [70])
+        self.assertNotIn('worker/free-plan-t1', self.heads())
+        self.assertIn('archive/worker/free-plan-t1', self.heads())
+        self.assertFalse([x for x in lines if 'ref push failed' in x], lines)
+        self.assertEqual(self.rows(ln.product), (None, None, None))
+        # the product checkout is untouched, and the disposable checkout is gone
+        self.assertEqual(sh(['git', 'rev-parse', 'HEAD'], cwd=self.repo).stdout.strip(),
+                         self.checkout_head)
+        self.assertEqual(len(sh(['git', 'worktree', 'list'], cwd=self.repo).stdout.splitlines()), 1)
+        self.assertEqual(os.listdir(os.path.join(self.state_dir, lane.REF_PUSH_DIR)), [])
+
+    def test_a_refused_delete_is_loud_owed_and_retried(self):
+        open(self.marker, 'w').close()
+        ln, lines = self.run_lane()
+        self.assertIn('archive/worker/free-plan-t1', self.heads())
+        self.assertIn('worker/free-plan-t1', self.heads())
+        failed = [x for x in lines if x.startswith('ref push failed: delete worker/free-plan-t1')]
+        self.assertTrue(failed and 'no deletes today' in failed[0], lines)
+        self.assertTrue([x for x in lines if '1 ref push(es) failed this pass' in x], lines)
+        rec_ = self.lane_of('worker/free-plan-t1')
+        self.assertEqual((rec_['state'], rec_['delete']), (lane.STALE, lane.DELETE_OWED))
+        line, doc, cell = self.rows(ln.product)
+        self.assertTrue(line and line.startswith('ref pushes failing: 1'), line)
+        self.assertIn('no deletes today', line)
+        self.assertEqual(doc, line)
+        self.assertEqual(cell, line)
+        os.remove(self.marker)  # the hook lets it through: the next pass pays the delete owed
+        ln, lines = self.run_lane()
+        self.assertNotIn('worker/free-plan-t1', self.heads())
+        self.assertIn('deleted worker/free-plan-t1 (a delete an earlier pass could not push)',
+                      lines)
+        self.assertNotIn('delete', self.lane_of('worker/free-plan-t1'))
+        self.assertEqual(self.rows(ln.product), (None, None, None))
+
+    def test_a_refused_archive_holds_the_branch_and_says_why(self):
+        self.push_main({'.githooks/pre-push': '#!/bin/sh\necho "claims: bad" >&2\nexit 1\n'},
+                       'a hook that refuses all')
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        ln, lines = self.run_lane()
+        self.assertEqual(ln.host.closed, [])
+        self.assertIn('worker/free-plan-t1', self.heads())
+        self.assertNotIn('archive/worker/free-plan-t1', self.heads())
+        self.assertIn('held worker/free-plan-t1: archive could not be pushed', lines)
+        self.assertTrue([x for x in lines if x.startswith('ref push failed: archive')
+                         and 'claims: bad' in x], lines)
+        self.assertTrue(self.rows(ln.product)[0])
 
 
 class Occupancy(unittest.TestCase):

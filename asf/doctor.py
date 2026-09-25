@@ -740,6 +740,9 @@ def run(product_name):
     slow = check_gate_speed(product)
     if slow:
         rows.append(('gate', False, False, slow))
+    refused = check_ref_pushes(product)
+    if refused:
+        rows.append(('lane pushes', False, False, refused))
     return rows
 
 
@@ -749,6 +752,16 @@ def check_gate_speed(product):
     from asf.harvest import lane
     try:
         return lane.gate_slow_line(product)
+    except (OSError, ValueError):
+        return None
+
+
+def check_ref_pushes(product):
+    """The ``ref pushes failing: …`` line when the last lane pass could not push an archive or a
+    branch delete (:func:`asf.harvest.lane.ref_push_line`), else None."""
+    from asf.harvest import lane
+    try:
+        return lane.ref_push_line(product)
     except (OSError, ValueError):
         return None
 

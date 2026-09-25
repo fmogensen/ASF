@@ -292,6 +292,13 @@ def gate_cell(product):
     return lane.gate_slow_line(product)
 
 
+def lane_push_cell(product):
+    """``ref pushes failing: …`` when the last lane pass could not push an archive or a branch
+    delete, else None (no row)."""
+    from asf.harvest import lane
+    return lane.ref_push_line(product)
+
+
 def render(root, product, cfg=None):
     cfg = env.load_config() if cfg is None else cfg
     now = datetime.datetime.now().strftime('%H:%M')
@@ -309,7 +316,8 @@ def render(root, product, cfg=None):
                        ('Quota 5h/7d', lambda: quota_cell(cfg)),
                        ('Cron', lambda: cron_cell(cfg, product)),
                        ('Groom', lambda: groom_cell(root, product)),
-                       ('Gate', lambda: gate_cell(product))):
+                       ('Gate', lambda: gate_cell(product)),
+                       ('Lane pushes', lambda: lane_push_cell(product))):
         try:
             text = cell()
         except Exception as e:  # noqa: BLE001 — one unreadable row never loses the table

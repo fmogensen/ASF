@@ -64,6 +64,7 @@ import fnmatch
 import json
 import os
 import re
+import shutil
 import tempfile
 import time
 
@@ -147,6 +148,18 @@ MAX_STEPS = 8
 #: for the next pass (each close is an archive push, a PR close and a branch delete)
 ORPHANS_PER_PASS = 25
 BRIEF_KIND = {'spec': 'spec', 'plan': 'plan', 'fix': 'fix-bug'}
+#: The lane's ref-only pushes (an archive, a branch delete) leave from a clean checkout detached at
+#: ``origin/<trunk>`` under the state dir, never the product's own checkout: a repo's pre-push hook
+#: lints whatever the pushing checkout holds, and a checkout behind or edited by a person refused
+#: every delete (2026-09-25: a checkout 6 ahead and 624 behind). The hook runs in full — only the
+#: tree it reads is the trunk's.
+REF_PUSH_DIR = 'ref-push'
+#: the last pass's failed ref pushes, for the status and doctor rows (:func:`ref_push_line`)
+REF_PUSH_FAILED = 'ref-push-failed.json'
+#: a lane record whose branch delete failed; the next pass tries it again (:meth:`Lane.advance`)
+DELETE_OWED = 'owed'
+#: a ref-push checkout older than this is a crashed pass's leftover, removed on the next
+REF_PUSH_LEFTOVER_S = 3600
 
 
 # ---- small helpers ----------------------------------------------------------------------------
@@ -522,6 +535,10 @@ class Lane:
         self.opened = 0
         self.orphans = {}
         self.orphans_taken = 0
+        self.ref_wt = None
+        self.ref_wt_error = None
+        self.ref_ok = 0
+        self.ref_failures = []
 
     # ---- facts --------------------------------------------------------------------------
 
@@ -747,6 +764,107 @@ class Lane:
         f['pick_up'] = True  # an open card this branch alone answers for: adopted (T2)
         return f
 
+    # ---- ref-only pushes ----------------------------------------------------------------
+
+    def ref_checkout(self):
+        """The clean checkout this pass's ref pushes leave from — detached at ``origin/<trunk>``
+        under ``<state>/ref-push/`` (:data:`REF_PUSH_DIR`), made on the first push and removed by
+        :meth:`finish_ref_pushes`. ``''`` when it could not be made (:attr:`ref_wt_error`)."""
+        if self.ref_wt is not None:
+            return self.ref_wt
+        holder = os.path.join(self.state_dir, REF_PUSH_DIR)
+        try:
+            os.makedirs(holder, exist_ok=True)
+            now = time.time()
+            for name in os.listdir(holder):  # a crashed pass's leftover
+                old = os.path.join(holder, name)
+                if now - os.path.getmtime(old) > REF_PUSH_LEFTOVER_S:
+                    H.sh(['git', 'worktree', 'remove', '--force', old], cwd=self.repo)
+                    shutil.rmtree(old, ignore_errors=True)
+            path = tempfile.mkdtemp(prefix='wt-', dir=holder)
+        except OSError as e:
+            self.ref_wt, self.ref_wt_error = '', f'no ref-push checkout: {e}'
+            return self.ref_wt
+        os.rmdir(path)
+        add = H.sh(['git', 'worktree', 'add', '-q', '--detach', path, f'origin/{self.trunk}'],
+                   cwd=self.repo)
+        if add.returncode != 0:
+            self.ref_wt = ''
+            self.ref_wt_error = (f'no checkout at origin/{self.trunk} to push from: '
+                                 f'{H.tail(add.stderr or add.stdout)}')
+        else:
+            self.ref_wt = path
+        return self.ref_wt
+
+    def ref_gone(self, branch):
+        """True when ``origin`` holds no ``branch`` — a delete already done counts as done."""
+        r = H.sh(['git', 'ls-remote', '--heads', 'origin', branch], cwd=self.repo)
+        return r.returncode == 0 and not r.stdout.strip()
+
+    def ref_push(self, refspec, what, lease=None, done=None):
+        """Push the one ref-only ``refspec`` (``<sha>:refs/heads/…`` or ``:refs/heads/…``) from
+        :meth:`ref_checkout`, over ``lease`` (``refs/heads/<b>:<sha>``) when given. A refusal is a
+        ``ref push failed`` line in the tick's output and a row in status and doctor
+        (:meth:`finish_ref_pushes`), never only a log line — unless ``done()`` says the push
+        was not needed after all (a delete of a branch already gone). True when it went."""
+        wt = self.ref_checkout()
+        if wt:
+            cmd = ['git', 'push', '-q'] + ([f'--force-with-lease={lease}'] if lease else [])
+            r = H.sh(cmd + ['origin', refspec], cwd=wt)
+            ok, why = r.returncode == 0, push_why(r.stderr or r.stdout)
+        else:
+            ok, why = False, self.ref_wt_error
+        if ok or (done is not None and done()):
+            self.ref_ok += 1
+            return True
+        self.ref_failures.append({'what': what, 'refspec': refspec, 'why': why, 'at': now_iso()})
+        self.out(f'ref push failed: {what} — {why}')
+        return False
+
+    def delete_branch(self, f):
+        """Delete ``f``'s branch on origin (over its head) after its terminal record was
+        written. A failed delete marks the record ``delete: owed`` and the next pass tries again;
+        a done one clears the mark. True when the branch is gone."""
+        b, head = f['branch'], f.get('head')
+        ok = self.ref_push(f':refs/heads/{b}', f'delete {b}',
+                           lease=f'refs/heads/{b}:{head}' if head else None,
+                           done=lambda: self.ref_gone(b))
+        rec = f.get('prev') or {}
+        owed = rec.get('delete') == DELETE_OWED
+        if rec and ok == owed:  # the mark changes: a new failure, or an owed delete done
+            rec = {k: v for k, v in rec.items() if k != 'delete'}
+            if not ok:
+                rec['delete'] = DELETE_OWED
+            self.write(f, rec)
+            f['prev'] = rec
+        if ok and owed:
+            self.out(f'deleted {b} (a delete an earlier pass could not push)')
+        return ok
+
+    def finish_ref_pushes(self):
+        """Remove the ref-push checkout and keep the pass's failures for the status and doctor
+        rows (:data:`REF_PUSH_FAILED`): written when any push failed, cleared when pushes went
+        and none failed. One summary line in the tick's output when any failed."""
+        if self.ref_wt:
+            H.sh(['git', 'worktree', 'remove', '--force', self.ref_wt], cwd=self.repo)
+            shutil.rmtree(self.ref_wt, ignore_errors=True)
+        self.ref_wt = self.ref_wt_error = None
+        if self.dry_run:
+            return
+        path = os.path.join(self.state_dir, REF_PUSH_FAILED)
+        try:
+            if self.ref_failures:
+                with open(path, 'w', encoding='utf-8') as fh:
+                    json.dump({'count': len(self.ref_failures), 'at': now_iso(),
+                               'failures': self.ref_failures[-10:]}, fh)
+            elif self.ref_ok and os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
+        if self.ref_failures:
+            self.out(f'lane: {len(self.ref_failures)} ref push(es) failed this pass — the '
+                     f'branches stay on origin and are tried again next pass')
+
     # ---- writing ------------------------------------------------------------------------
 
     def record(self, f, state, reason, **extra):
@@ -796,6 +914,10 @@ class Lane:
         """Move ``f``'s branch as far as its facts carry it this pass, performing each
         transition's side effect; the last record written, or None when nothing moved."""
         moved = None
+        prev = f.get('prev') or {}
+        if prev.get('delete') == DELETE_OWED and not self.dry_run and self.repo \
+                and f.get('head') and f['head'] == prev.get('head'):
+            self.delete_branch(f)
         for _ in range(MAX_STEPS):
             prev = f.get('prev')
             state, reason = next_state(prev, f)
@@ -883,9 +1005,9 @@ class Lane:
         if f.get('head') and method in ('on-trunk', 'ff'):
             self.close_pr(f, f'Closed by the factory lane: its change is already on '
                              f'{self.trunk} at {str(sha)[:7]}.')
-            H.sh(['git', 'push', '-q', 'origin', '--delete', b], cwd=self.repo)
+            self.delete_branch(f)
         elif f.get('head') and f.get('adopt') and method == 'external':
-            H.sh(['git', 'push', '-q', 'origin', '--delete', b], cwd=self.repo)  # merged, left behind
+            self.delete_branch(f)  # merged, left behind
         self.out(line)
         self.results[b] = 'landed'
         return rec
@@ -906,10 +1028,10 @@ class Lane:
         label = item or b.rsplit('/', 1)[-1]
         sha = archive_commit(self.repo, b, f'archive({label}): {b} — {why}; superseded, kept '
                                            f'for reference [skip ci]')
-        keep = H.sh(['git', 'push', '-q', 'origin', f'{sha}:refs/heads/archive/{b}'],
-                    cwd=self.repo) if sha else None
-        if not sha or keep.returncode != 0:
-            self.out(f'held {b}: archive could not be made')
+        keep = self.ref_push(f'{sha}:refs/heads/archive/{b}', f'archive {b}') if sha else False
+        if not keep:
+            self.out(f'held {b}: archive could not be '
+                     f'{"pushed" if sha else "made"}')
             self.results[b] = 'held'
             return None
         rec = self.record(f, STALE, why)
@@ -917,7 +1039,7 @@ class Lane:
         f['prev'] = rec
         self.close_pr(f, f'Closed by the factory lane: {why}. The branch is kept as '
                          f'`archive/{b}` ({sha[:7]}).')
-        H.sh(['git', 'push', '-q', 'origin', '--delete', b], cwd=self.repo)
+        self.delete_branch(f)
         self.out(f'superseded {b}: {why} — archived as archive/{b}')
         self.results[b] = SUPERSEDED
         return rec
@@ -973,9 +1095,12 @@ def lane_pass(product, state_dir=None, items=None, out=print, dry_run=False, roo
     if not lane.repo:
         return {}, {}
     H.sh(['git', 'fetch', '-q', '--prune', 'origin'], cwd=lane.repo)
-    found = lane.gather(prs=True)
-    for b in sorted(found):
-        lane.advance(found[b])
+    try:
+        found = lane.gather(prs=True)
+        for b in sorted(found):
+            lane.advance(found[b])
+    finally:
+        lane.finish_ref_pushes()
     return lane.results, found
 
 
@@ -998,7 +1123,10 @@ def gate_pass(product, state_dir=None, items=None, out=print, dry_run=False, lan
     entries = H.cap_to_tick(pr_order(entries, items), lane.out, lane.conv)
     ready = held_by_host(lane, precheck(lane, entries))
     if ready:
-        gate_set(lane, ready)
+        try:
+            gate_set(lane, ready)
+        finally:
+            lane.finish_ref_pushes()
     return lane.results
 
 
@@ -1292,6 +1420,29 @@ def gate_slow_line(product):
             f"{data.get('timeouts')} times in a row; raise harvest.gate_timeout_s or trim the gate")
 
 
+def push_why(text):
+    """What a refused push said, without git's framing lines (``To <url>``, ``error: failed
+    to push some refs``, hints): the hook's or the remote's own last words."""
+    keep = [ln.strip() for ln in (text or '').splitlines() if ln.strip() and not (
+        ln.startswith('To ') or ln.startswith('hint:')
+        or ln.startswith('error: failed to push some refs'))]
+    return ' / '.join(keep[-2:]) if keep else (H.tail(text) or 'refused')
+
+
+def ref_push_line(product):
+    """``ref pushes failing: …`` when the last lane pass could not push an archive or a
+    branch delete (:meth:`Lane.finish_ref_pushes`), else None — for the status and doctor
+    rows."""
+    try:
+        with open(os.path.join(env.state_dir(product), REF_PUSH_FAILED), encoding='utf-8') as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    last = (data.get('failures') or [{}])[-1]
+    return (f"ref pushes failing: {data.get('count')} at {data.get('at')} — "
+            f"{last.get('what')}: {last.get('why')}; the branches stay on origin until one goes")
+
+
 def gate_ok(lane):
     try:
         os.remove(os.path.join(lane.state_dir, GATE_SLOW))
@@ -1454,7 +1605,7 @@ def push_set(lane, landing_set, sha, final=False):
         rec = lane.record(f, MERGED, 'method=ff', sha=sha, method='ff')
         lane.write(f, rec, harvested=sha, correction=None)
         f['prev'] = rec
-        H.sh(['git', 'push', '-q', 'origin', '--delete', f['branch']], cwd=lane.repo)
+        lane.delete_branch(f)
         lane.out(f"landed {f['branch']} → {sha}")
         lane.results[f['branch']] = 'landed'
     return 'ok'
