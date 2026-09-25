@@ -365,7 +365,7 @@ class RunnerClass(Home):
         self.p = product(classed_pool())
         self.backend = FakeBackend(
             [runner('ci-1', 'heavy', 'provider-alpha'), runner('ci-2', 'heavy', 'provider-alpha',
-                                                             'class:heavy-slow'),
+                                                             'class-heavy-slow'),
              runner('ci-h1', 'heavy', 'provider-beta'), runner('ci-1b', 'light', 'provider-alpha')],
             [ro('self-hosted', 'heavy'), ro('self-hosted', 'light')])
 
@@ -380,10 +380,10 @@ class RunnerClass(Home):
 
     def test_reconcile_plans_the_class_label_and_drops_a_stale_one_dry_run(self):
         by = {s.runner: s for s in self.steps()}
-        self.assertEqual(by['ci-1'].add, ['class:heavy-fast'])
-        self.assertEqual(by['ci-2'].add, ['class:heavy-fast'])
-        self.assertEqual(by['ci-2'].remove, ['class:heavy-slow'])
-        self.assertEqual(by['ci-h1'].add, ['class:heavy-slow'])
+        self.assertEqual(by['ci-1'].add, ['class-heavy-fast'])
+        self.assertEqual(by['ci-2'].add, ['class-heavy-fast'])
+        self.assertEqual(by['ci-2'].remove, ['class-heavy-slow'])
+        self.assertEqual(by['ci-h1'].add, ['class-heavy-slow'])
         self.assertEqual((by['ci-1b'].add, by['ci-1b'].remove), ([], []))   # unclassed: untouched
         self.assertFalse(any(s.trial for s in by.values()))                 # a class is no new role
         self.assertEqual(self.backend.writes, [])
@@ -391,9 +391,9 @@ class RunnerClass(Home):
     def test_apply_writes_the_class_labels(self):
         self.assertEqual(ci_pool.apply(self.steps(), self.backend, self.p.name, out=lambda *_: None), 0)
         labels = {n: r.norm_labels() for n, r in self.backend._runners.items()}
-        self.assertIn('class:heavy-fast', labels['ci-2'])
-        self.assertNotIn('class:heavy-slow', labels['ci-2'])
-        self.assertIn('class:heavy-slow', labels['ci-h1'])
+        self.assertIn('class-heavy-fast', labels['ci-2'])
+        self.assertNotIn('class-heavy-slow', labels['ci-2'])
+        self.assertIn('class-heavy-slow', labels['ci-h1'])
         self.assertEqual([s.action for s in self.steps()], ['ok'] * 4)
 
     def test_doctor_counts_classes_and_warns_on_an_unclassed_runner(self):
@@ -402,7 +402,7 @@ class RunnerClass(Home):
         self.assertIn((False, False, 'class: ci-1b declares no class while others do — '
                                      'RUNNER_CLASS is empty on it'), rows)
         self.assertTrue(any(req and not ok and d.startswith("class label: ci-2 should carry "
-                                                            "'class:heavy-fast'")
+                                                            "'class-heavy-fast'")
                             for req, ok, d in rows), rows)
 
     def test_no_class_anywhere_adds_no_rows(self):
