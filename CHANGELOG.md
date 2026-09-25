@@ -2,6 +2,30 @@
 
 One entry per released version, newest first.
 
+## v0.1.15 — 2026-09-25
+
+### Features landed
+
+- F-0031 The approval matrix as code
+
+### Bugs fixed
+
+- B-0125 Approvals hook errors look like refusals: an intermittent crash refuses ordinary Bash
+- B-0127 Every asf worker runs the full suite that harvest's gate already runs: 6 sessions = 6 full suites on the host
+
+### Improvements and hotfixes
+
+- feat(ci-queue): trunk starvation relief — cancel queued runs ahead of a starved trunk run
+- fix(lane): a hosted origin's archive and delete refs go through the host API, never a push
+- fix(ci-queue): the queue view says view only; DRY RUN names the dry-run mode alone
+- fix(ci-queue): expected jobs are peak concurrency, trunk runs skip the ci ceiling, one in-flight count
+- fix(lane): only an origin that is a hosted repo takes the API path for ref archive and delete
+- fix(status): the Runners row counts busy per class from the queue's own live runner read
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.15"`
+
 ## v0.1.14 — 2026-09-25
 
 ### Features landed
