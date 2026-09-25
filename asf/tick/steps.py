@@ -15,9 +15,11 @@ its repo) has no ``asf`` implementation and must be declared.
 """
 import datetime
 import os
+import select
 import shlex
 import signal
 import subprocess
+import time
 
 from asf import env
 
@@ -107,9 +109,11 @@ def command_timeout():
 def run_command(step, command, timeout, emit=print, cwd=None, extra_env=None):
     """Run ``command`` (split shell-style, ``~`` expanded, no shell) in ``cwd`` — the product's
     ``repo_dir`` (B-0050: never the tick's own cwd) — and send each output line, stderr merged
-    in, to ``emit`` as ``[command:<step>] <line>``. Returns the exit code; 124 if it outlived
-    ``timeout`` (its whole process group is killed). ``extra_env``, when given, is laid over the
-    tick's own environment for the child process (the capacity overlay)."""
+    in, to ``emit`` as ``[command:<step>] <line>`` as the line is produced (B-0119: a step that
+    only logged at the end left the tick log empty for however long the step ran, so a live step
+    looked the same as a hung one). Returns the exit code; 124 if it outlived ``timeout`` (its
+    whole process group is killed). ``extra_env``, when given, is laid over the tick's own
+    environment for the child process (the capacity overlay)."""
     prefix = f'[command:{step}] '
     # a loaded host starts no new command step either — the same guard the wave launches under
     # (asf.workers.host, config.yaml host_guards): a product's own script (a batch, a merge
@@ -127,20 +131,33 @@ def run_command(step, command, timeout, emit=print, cwd=None, extra_env=None):
     except OSError as e:
         emit(f'{prefix}cannot start: {e}')
         return 127
-    try:
-        out, _ = proc.communicate(timeout=timeout)
-        rc = proc.returncode
-    except subprocess.TimeoutExpired:
+    deadline = time.monotonic() + timeout
+    timed_out = False
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            break
+        ready, _, _ = select.select([proc.stdout], [], [], remaining)
+        if not ready:
+            continue
+        line = proc.stdout.readline()
+        if line == '':
+            break  # EOF: the child closed its end
+        emit(prefix + line.rstrip('\n'))
+    if timed_out:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        out, _ = proc.communicate()
-        out = (out or '') + f'timeout after {timeout}s — killed\n'
-        rc = 124
-    for line in (out or '').splitlines():
-        emit(prefix + line)
-    return rc
+        for line in (proc.stdout.read() or '').splitlines():
+            emit(prefix + line)
+        emit(f'{prefix}timeout after {timeout}s — killed')
+        proc.stdout.close()
+        proc.wait()
+        return 124
+    proc.stdout.close()
+    return proc.wait()
 
 
 # ---- the daily stamp ----------------------------------------------------------

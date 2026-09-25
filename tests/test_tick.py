@@ -555,6 +555,18 @@ class LegacyStepTests(TickTestCase):
         rc = steps.run_command('health', "sh -c 'sleep 30 & sleep 30'", 1, emit=lines.append)
         self.assertEqual(rc, 124)
 
+    def test_b0119_output_is_emitted_as_the_command_runs_not_buffered_to_the_end(self):
+        """A long command step (a factory-cron.sh, a factory-batch.sh) wrote nothing to the tick
+        log until it exited: the whole point of a per-line log is to show a live step apart from
+        a hung one, and a step that logs only at the end shows neither while it runs."""
+        times = []
+        rc = steps.run_command(
+            'batch', "sh -c 'echo one; sleep 1; echo two'", 5,
+            emit=lambda line: times.append((time.monotonic(), line)))
+        self.assertEqual(rc, 0)
+        self.assertEqual([line for _, line in times], ['[command:batch] one', '[command:batch] two'])
+        self.assertGreater(times[1][0] - times[0][0], 0.5)
+
     def test_shadow_never_runs_a_command_step(self):
         marker = os.path.join(self.tmp, 'ran')
         self.write_product(f'steps:\n  health: touch {marker}\n')
