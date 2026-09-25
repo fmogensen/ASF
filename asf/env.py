@@ -351,6 +351,32 @@ def env_passthrough(cfg):
     return tuple(pool.get('env_passthrough') or ())
 
 
+#: Set in every local worker session unless the operator or the product says otherwise: a
+#: session shares the host with the others, so a test runner that sizes its pool to the core
+#: count saturates the machine and holds every product's wave on host pressure (2026-09-25:
+#: load 71 on 10 cores from one vitest run). CI never sees these; they are worker-only.
+DEFAULT_WORKER_ENV = {'VITEST_MAX_WORKERS': '2'}
+
+
+def worker_env(cfg, product=None):
+    """The fixed variables a worker session gets: :data:`DEFAULT_WORKER_ENV`, then
+    ``worker_pool.env`` from the operator config, then the product's ``conventions.worker_env``
+    (the later wins; a value of None or "" removes the variable). Values are strings."""
+    out = dict(DEFAULT_WORKER_ENV)
+    layers = [((cfg or {}).get('worker_pool') or {}).get('env') or {}]
+    conv = getattr(product, 'conventions', None) or {}
+    layers.append(conv.get('worker_env') or {})
+    for layer in layers:
+        if not isinstance(layer, dict):
+            continue
+        for k, v in layer.items():
+            if v is None or v == '':
+                out.pop(str(k), None)
+            else:
+                out[str(k)] = str(v)
+    return out
+
+
 def account_home(acct):
     """An account's (a ``worker_pool.accounts`` entry's) ``home``: the expanded path, or None
     when unset — the per-account home under the state directory when :func:`isolate_home`,

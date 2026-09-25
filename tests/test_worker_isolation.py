@@ -89,7 +89,8 @@ class IsolatedSession(Home):
         # only the allow-list, ASF's own variables and git's pinned config reach the session
         extra = {k for k in seen if not k.startswith(('ASF_', 'GIT_CONFIG_', 'LC_'))} - {
             'PATH', 'LANG', 'TERM', 'TMPDIR', 'USER', 'SHELL', 'HOME', 'CLAUDE_CONFIG_DIR',
-            'BACKLOG_ID_RANGE', 'PWD', 'SHLVL', 'OLDPWD', '_', '__CF_USER_TEXT_ENCODING'}
+            'BACKLOG_ID_RANGE', 'PWD', 'SHLVL', 'OLDPWD', '_', '__CF_USER_TEXT_ENCODING',
+            *env.DEFAULT_WORKER_ENV}   # the host-load caps every local worker gets
         self.assertEqual(extra, set(), seen)
         # nothing seeded, nothing copied: only ASF's own identity-only .gitconfig
         # beside it, at most the link to the factory's installed CLI (hotfix cd1adb0)
