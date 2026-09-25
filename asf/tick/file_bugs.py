@@ -9,6 +9,8 @@ The learning loop: four sources file or bump a Bug, keyed on the typed `signatur
     crashed): that is a check failure, printed as ``rule check timed out: R-nnnn`` and, once it
     persists, surfaced once as a factory-side ``NEEDS OPERATOR`` line (``report_check_failures``)
   - `asf check` over the record: one Bug per error CLASS (``record_error_signatures``)
+  - the CI logs of ``conventions.ci_workflow``: one counted Bug per flaky e2e test
+    (:mod:`asf.tick.flaky`, keyed and counted in ``state/<p>/flaky.json``)
 A signature already carrying today's date in its typed `last_filed` is left alone — this is
 what makes a second same-day run a no-op instead of double-counting a still-open problem.
 """
@@ -452,6 +454,35 @@ def ledger_path(product=None, state_dir=None):
     return os.path.join(env.state_dir(product), LEDGER_NAME)
 
 
+def _flaky_pass(args, root, canonical, conv, now, level, default_bug_epic):
+    """The flaky-e2e pass (:mod:`asf.tick.flaky`): only for a named product whose CI is read —
+    a caller that hands its own ``conventions`` (a test, a checkout on its own) has no CI host,
+    unless it hands a ``flaky_source`` too. Never fails the rest of file-bugs."""
+    from asf.tick import flaky
+    source = getattr(args, 'flaky_source', None)
+    product = None
+    if source is None:
+        if getattr(args, 'conventions', None) is not None:
+            return {}
+        product = _product(args)
+        if product is None or not getattr(product, 'repo_slug', None):
+            return {}
+        ci = product.ci if isinstance(product.ci, dict) else {'provider': product.ci}
+        if str(ci.get('provider') or '').strip().lower() == 'none':
+            return {}
+
+    def reload():
+        by_id, _errors = load_items(root)
+        return canonicalize(by_id)[0]
+    try:
+        return flaky.run_pass(root, canonical, product, conv, now, level=level,
+                              default_bug_epic=default_bug_epic, source=source,
+                              path=getattr(args, 'flaky_state', None), reload=reload)
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        print(f"file-bugs: flaky pass failed: {e}", file=sys.stderr)
+        return {}
+
+
 def cmd_file_bugs(args, root):
     by_id, parse_errors = load_items(root)
     if parse_errors:
@@ -497,11 +528,15 @@ def cmd_file_bugs(args, root):
     _write_ledger(ledger_file, ledger)
 
     level = getattr(args, 'file_bug_level', 'auto')
+    flaky_out = _flaky_pass(args, root, canonical, conv, now, level, default_bug_epic)
     if level != 'auto':
         prefix = 'NEEDS OPERATOR: ' if level == 'human-now' else ''
         for sig in sorted(signatures):
             print(f'{prefix}held file_bug on {sig} — widen approvals: file_bug in products/<p>.yaml')
         return 0
+    if any(o == 'filed' for o in flaky_out.values()):
+        by_id, _errors = load_items(root)
+        canonical, _dupes = canonicalize(by_id)
 
     filed = bumped = skipped = 0
     for sig in sorted(signatures):
@@ -514,7 +549,7 @@ def cmd_file_bugs(args, root):
         else:
             skipped += 1
 
-    if filed or bumped:
+    if filed or bumped or any(o in ('filed', 'updated') for o in flaky_out.values()):
         do_index(root)
     print(f"file-bugs: {filed} filed, {bumped} bumped, {skipped} unchanged")
     return 0
