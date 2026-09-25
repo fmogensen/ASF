@@ -45,6 +45,7 @@ rest, dev and the named targets after it. The tick prints them (:func:`tick`); `
 """
 import datetime
 import json
+import os
 import subprocess
 
 DEFAULT_INPUT = 'sha'
@@ -298,6 +299,66 @@ def _vercel_deployed(cfg, sh):
     return None, None
 
 
+RECORDS_FILE = 'deploys.json'
+
+
+def _records_path(product):
+    from asf import env as env_mod
+    name = getattr(product, 'name', None)
+    return os.path.join(env_mod.state_dir(name), RECORDS_FILE) if name else None
+
+
+def _load_records(product):
+    path = _records_path(product)
+    try:
+        with open(path, encoding='utf-8') as f:
+            got = json.load(f)
+    except (TypeError, OSError, ValueError):
+        return {}
+    return got if isinstance(got, dict) else {}
+
+
+def record(product, env, sha, by='hand', now=None):
+    """Keep ``sha`` as ``env``'s deployed sha in ``state/<product>/deploys.json`` — the sha
+    source for a target whose provider names none (a CLI deploy carries no commit sha).
+    ``by`` is ``hand`` (``asf deploy record``: written after the deploy) or ``asf`` (the tick's
+    own dispatch: written before the deploy it starts). Returns the record, None when the
+    product has no state home."""
+    path = _records_path(product)
+    if not path:
+        return None
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    recs = _load_records(product)
+    recs[env] = {'sha': sha, 'at': now.strftime('%Y-%m-%dT%H:%M:%SZ'), 'by': by}
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(recs, f, indent=1, sort_keys=True)
+    os.replace(tmp, path)
+    return recs[env]
+
+
+def recorded_sha(product, env, deployed_at=None):
+    """``env``'s recorded sha when it can be the deployment the provider shows (created at
+    ``deployed_at``, epoch ms or ISO): a hand record written at or after it, an ``asf`` dispatch
+    written at or before it — else None. With no deployment time, any record stands."""
+    rec = _load_records(product).get(env)
+    if not isinstance(rec, dict) or not rec.get('sha'):
+        return None
+    if deployed_at is None:
+        return rec['sha']
+    try:
+        at = datetime.datetime.fromisoformat(str(rec.get('at')).replace('Z', '+00:00'))
+        if isinstance(deployed_at, (int, float)):
+            dep = datetime.datetime.fromtimestamp(deployed_at / 1000, tz=datetime.timezone.utc)
+        else:
+            dep = datetime.datetime.fromisoformat(str(deployed_at).replace('Z', '+00:00'))
+    except (ValueError, OverflowError, OSError):
+        return None
+    slack = datetime.timedelta(minutes=2)  # the provider's clock against ours
+    ok = at >= dep - slack if rec.get('by') != 'asf' else at <= dep + slack
+    return rec['sha'] if ok else None
+
+
 def _ahead(product, base, sha, sh):
     """True when ``sha`` descends from ``base`` (or there is no base yet)."""
     return base is None or sh(['git', '-C', product.repo_dir, 'merge-base', '--is-ancestor',
@@ -382,6 +443,8 @@ def facts(product, sh=_sh, now=None, env='prod', _ci=None):
             f['error'] = f"{env}'s deployed sha unreadable (vercel ls)"
             return _done(f)
         f['deployed'], f['age'] = got[0], _age(got[1], now)
+        if not f['deployed'] and got[1] is not None:  # a CLI deploy: no commit sha on it
+            f['deployed'] = recorded_sha(product, env, got[1])
     else:
         last = next((r for r in runs if r.get('conclusion') == 'success'), {})
         f['deployed'], f['age'] = last.get('headSha'), _age(last.get('updatedAt'), now)
@@ -417,7 +480,13 @@ def facts(product, sh=_sh, now=None, env='prod', _ci=None):
 
 
 def _s(sha):
-    return f'`{(sha or "?")[:9]}`'
+    """A sha as the line prints it; never a bare ``?`` or ``None`` inside a sentence."""
+    return f'`{sha[:9]}`' if sha else 'sha unknown'
+
+
+def _n(count, rel=''):
+    """``N [relevant ]commits``, or ``an unknown number of …`` when the count did not read."""
+    return f"{count if count is not None else 'an unknown number of'} {rel}commits"
 
 
 def _head(env):
@@ -428,12 +497,19 @@ def _lag(product, f, env):
     """How far ``env`` is behind the trunk: the named targets say the relevant count (the
     commits touching their ``paths``) and their mode; dev and prod keep their plain count."""
     trunk, age = product.main, (f"deployed {f['age']} ago" if f['age'] else None)
+    if not f['deployed']:  # no sha: nothing to count behind — say so, never "None commits"
+        extra = [age, f"mode {f.get('mode')}" if is_target(env) else None]
+        tail = '; '.join(x for x in extra if x)
+        return (f"{env} sha unknown — how far behind {trunk} is unknown"
+                + (f" ({tail})" if tail else '')
+                + (f"; `asf deploy record {env} <sha>` names it" if is_target(env) else ''))
     if not is_target(env):
-        return (f"{trunk} is {f['behind']} commits ahead of {env} {_s(f['deployed'])}"
+        return (f"{trunk} is {_n(f['behind'])} ahead of {env} {_s(f['deployed'])}"
                 + (f" ({age})" if age else ''))
     rel = 'relevant ' if f['paths'] else ''
-    extra = [f"{f['behind']} in all" if f['paths'] else None, age, f"mode {f.get('mode')}"]
-    return (f"{env} {_s(f['deployed'])} is {f['relevant']} {rel}commits behind {trunk}"
+    extra = [f"{f['behind']} in all" if f['paths'] and f['behind'] is not None else None, age,
+             f"mode {f.get('mode')}"]
+    return (f"{env} {_s(f['deployed'])} is {_n(f['relevant'], rel)} behind {trunk}"
             f" ({'; '.join(x for x in extra if x)})")
 
 
@@ -446,7 +522,9 @@ def _manual(product, f, env):
                 f" ({k}.mode: {f.get('mode')})")
     rel = 'relevant ' if f['paths'] else ''
     how = f'a hand dispatch of {wf}' if wf else f'a hand deploy — no {k}.workflow to dispatch'
-    return (f"MANUAL: {env} is {f['relevant']} {rel}commits behind — waits on {how}; green"
+    lag = (f"is {_n(f['relevant'], rel)} behind" if f['deployed']
+           else 'runs an unknown sha')
+    return (f"MANUAL: {env} {lag} — waits on {how}; green"
             f" {_s(f['candidate'])} is the newest candidate ({k}.mode: {f.get('mode')})")
 
 
@@ -581,4 +659,40 @@ def tick(product, out=print, sh=_sh):
                 f" `{f['candidate'][:9]}` failed; the next tick tries again")
             continue
         sent[e] = f['candidate']
+        try:  # the sha source for a target whose provider names none
+            record(product, e, f['candidate'], by='asf')
+        except OSError:
+            pass
     return sent
+
+
+def cmd_record(args, sh=_sh, out=print):
+    """``asf deploy record <target> <sha>``: the deployer names the sha it just deployed, for a
+    target whose provider records none (a CLI deploy). The sha is resolved in the product repo
+    when it can be; the record stands until a newer deployment shows up without one."""
+    from asf import env as env_mod
+    product = env_mod.load_product(args.product)
+    if args.target not in names(product):
+        out(f"deploy record: {args.target!r} is not a deploy target of {product.name}"
+            f" ({', '.join(names(product))})")
+        return 2
+    sha = args.sha
+    if getattr(product, 'repo_dir', None):
+        sha = sh(['git', '-C', product.repo_dir, 'rev-parse', '--verify', '--quiet',
+                  f'{args.sha}^{{commit}}']) or sha
+    rec = record(product, args.target, sha, by='hand')
+    out(f"deploy record: {args.target} runs `{sha[:9]}` (recorded {rec['at']})")
+    return 0
+
+
+def register(subparsers):
+    from asf import env as env_mod
+    p = subparsers.add_parser('deploy', help='deploy targets: record what a hand deploy shipped')
+    sub = p.add_subparsers(dest='deploy_command', required=True)
+    r = sub.add_parser('record', help="record the sha a target now runs (when its provider "
+                                      "names none, e.g. a CLI deploy)")
+    r.add_argument('target', help='dev, prod or a deploy_sha.targets name')
+    r.add_argument('sha', help='the commit deployed (any rev the product repo resolves)')
+    env_mod.add_product_arg(r)
+    r.set_defaults(run=cmd_record)
+    return p
