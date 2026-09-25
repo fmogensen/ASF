@@ -823,3 +823,19 @@ class GateBeforePush(unittest.TestCase):
             self.assertEqual(build.gate_before_push(object()), build.GATE_LOCAL)
         self.assertEqual(build.gate_before_push(None), build.GATE_LOCAL)
         self.assertIn('never here', build.GATE_REMOTE)
+
+
+class DocLaneSubjectRule(unittest.TestCase):
+    """B-0104: a document-lane brief states the commit subject the lane enforces, in the form
+    the evidence pass reads (DOC_LANE_SUBJECT)."""
+
+    def test_spec_and_plan_briefs_name_their_subject_form(self):
+        from asf.evidence.evidence import DOC_LANE_SUBJECT
+        for kind in ('spec', 'plan'):
+            with self.subTest(kind=kind):
+                path = os.path.join(os.path.dirname(build_mod.__file__), 'templates', f'{kind}.md')
+                with open(path, encoding='utf-8') as f:
+                    text = f.read()
+                form = f'{kind}({{item_id}}): <what>'
+                self.assertIn(form, text)
+                self.assertTrue(DOC_LANE_SUBJECT.match(form.replace('{item_id}', 'F-0007')))
