@@ -899,6 +899,11 @@ class NoCheckoutPathsTest(unittest.TestCase):
             self.assertNotRegex(text, r"\.ASF/tools|ASF_HOME, 'tools'|~/Code/", mod)
 
 
+def cli_release(described):
+    from asf import cli
+    return cli._described_release(described)
+
+
 class VersionStringTest(unittest.TestCase):
     """``asf --version`` names the release and the commit it was built from. The release: a git
     install's requested tag, else a checkout's nearest release tag (``+N`` past it), else the static
@@ -928,8 +933,38 @@ class VersionStringTest(unittest.TestCase):
     def test_a_git_install_of_a_sha_falls_to_the_static_version(self):
         from asf import cli
         sha = 'abcdef0123456789abcdef0123456789abcdef01'
-        with self._no_checkout(), self._dist({'requested_revision': sha, 'commit_id': sha}):
+        with self._no_checkout(), self._dist({'requested_revision': sha, 'commit_id': sha}), \
+                mock.patch('asf.cli._build_describe', return_value=''):
             self.assertEqual(cli.version_string(), f'{asf.__version__} (abcdef0)')
+
+    def test_a_git_install_of_a_sha_reads_the_describe_its_build_stamped(self):
+        """``install.sh`` pins a sha, so ``asf status`` said ``running 0.1.0 (205123f)`` for
+        v0.1.9-4-g205123f: the build's stamp is the release."""
+        from asf import cli
+        sha = '205123fb967285035c2106194884aece17071cb0'
+        with self._no_checkout(), self._dist({'requested_revision': '205123f', 'commit_id': sha}):
+            for described, want in (('v0.1.9-4-g205123f', 'v0.1.9+4 (205123f)'),
+                                    ('v0.1.9', 'v0.1.9 (205123f)')):
+                with self.subTest(described=described), \
+                        mock.patch('asf.cli._build_describe', return_value=described):
+                    self.assertEqual(cli.version_string(), want)
+
+    def test_the_build_stamps_git_describe_into_the_package_it_builds(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('asf_setup', os.path.join(REPO, 'setup.py'))
+        setup_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(setup_mod)     # not __main__: no setuptools, no setup()
+        with tempfile.TemporaryDirectory() as tmp:
+            src, lib = os.path.join(tmp, 'src'), os.path.join(tmp, 'lib')
+            os.makedirs(src)
+            self._repo_with_tag(src, past=2)
+            path = setup_mod.stamp(src, lib)
+            self.assertEqual(path, os.path.join(lib, 'asf', '_build.py'))
+            ns = {}
+            with open(path, encoding='utf-8') as f:
+                exec(f.read(), ns)
+            self.assertEqual(cli_release(ns['DESCRIBE']), 'v0.1.1+2')
+            self.assertEqual(os.listdir(src), ['.git'])     # the checkout is never written
 
     def test_a_git_install_of_a_sha_in_a_checkout_falls_to_describe(self):
         from asf import cli

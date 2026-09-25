@@ -68,18 +68,40 @@ def _direct_url():
         return {}
 
 
+def _described_release(described):
+    """``v0.1.1`` / ``v0.1.1+42`` off a ``git describe --tags`` line, else ``None``."""
+    m = re.fullmatch(r'(v\d+\.\d+\.\d+)(?:-(\d+)-g[0-9a-f]+)?', (described or '').strip())
+    if m:
+        return f'{m.group(1)}+{m.group(2)}' if m.group(2) not in (None, '0') else m.group(1)
+    return None
+
+
+def _build_describe():
+    """The ``git describe`` the build stamped into the package (``setup.py`` writes
+    ``asf/_build.py`` into the wheel, never the checkout), or ``''`` — a checkout or an older
+    build carries none."""
+    try:
+        from asf import _build
+    except ImportError:
+        return ''
+    described = getattr(_build, 'DESCRIBE', '')
+    return described if isinstance(described, str) else ''
+
+
 def _release(root, direct_url):
     """The release this ``asf`` is: a git install's requested tag (``v0.1.1``), else a checkout's
-    nearest release tag plus the commits past it (``v0.1.1+42``), else ``None``."""
+    nearest release tag plus the commits past it (``v0.1.1+42``), else the same read off the
+    ``git describe`` the build stamped (a git install of a sha: ``install.sh`` pins one), else
+    ``None``."""
     requested = (direct_url.get('vcs_info') or {}).get('requested_revision') or ''
     if isinstance(requested, str) and RELEASE_TAG.fullmatch(requested):
         return requested
     if root:
-        described = _checkout_git(root, 'describe', '--tags', '--match', 'v[0-9]*') or ''
-        m = re.fullmatch(r'(v\d+\.\d+\.\d+)(?:-(\d+)-g[0-9a-f]+)?', described)
-        if m:
-            return f'{m.group(1)}+{m.group(2)}' if m.group(2) not in (None, '0') else m.group(1)
-    return None
+        found = _described_release(
+            _checkout_git(root, 'describe', '--tags', '--match', 'v[0-9]*'))
+        if found:
+            return found
+    return _described_release(_build_describe())
 
 
 def _source_commit(root, direct_url):
@@ -96,7 +118,8 @@ def _source_commit(root, direct_url):
 def version_string():
     """``v0.1.1 (47bab2d)`` — the release and, when known, the commit it was built from. The
     release is a git install's requested tag, else a checkout's nearest release tag with ``+N``
-    commits past it, else the static ``__version__`` (never bumped: the tag is the version).
+    commits past it, else the build's stamped ``git describe`` read the same way, else the
+    static ``__version__`` (never bumped: the tag is the version).
     ``asf --version`` and the doctor's stamp both print it."""
     root, direct_url = _checkout_root(), _direct_url()
     version = _release(root, direct_url) or __version__
