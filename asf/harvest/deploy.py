@@ -598,8 +598,15 @@ def states(product, sh=_sh):
 
 
 def view_line(product, env, f):
-    """The read-only line for one environment's facts."""
-    return _read_only(decide(product, f, env))
+    """The read-only line for one environment's facts. A candidate the tick would refuse for
+    customer content (:func:`marker_refusal`) reads as that refusal, never as "the next tick
+    dispatches" — a view promised a deploy for an hour that the tick kept refusing."""
+    go, text = decide(product, f, env)
+    if go:
+        marked = marker_refusal(product, f['candidate'], env)
+        if marked:
+            return marked
+    return _read_only((go, text))
 
 
 def lines(product, sh=_sh):
@@ -612,7 +619,7 @@ def line(product, sh=_sh):
     """The read-only prod ``deploy:`` line, or None when prod does not apply."""
     if not env_applies(product, 'prod'):
         return None
-    return _read_only(decide(product, facts(product, sh=sh, env='prod'), 'prod'))
+    return view_line(product, 'prod', facts(product, sh=sh, env='prod'))
 
 
 def dispatch_argv(product, sha, env='prod'):
