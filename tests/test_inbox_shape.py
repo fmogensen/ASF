@@ -424,6 +424,16 @@ class IntakeTest(unittest.TestCase):
             c.description,
             'Note: this is body text right after headers, no blank line.\nMore body.')
 
+    def test_b_0111_round_2_c1_a_trailing_unread_header_with_nothing_after_it_is_still_dropped(self):
+        """B-0111 round 2 C1: `after:` as the *last* header line, with no further confirmed
+        header following it to confirm it — the only case round 1's fix missed. It must still
+        be dropped from the description, exactly as when a confirmed header follows it."""
+        from asf.groom import inbox
+        text = "# Checkout fails\nparent: E-0001\nafter: T-0001\nThe plan needs this to land first.\n"
+        c = inbox.parse_inbox_file(text)
+        self.assertEqual(c.headers, {'parent': 'E-0001'})
+        self.assertEqual(c.description, 'The plan needs this to land first.')
+
     def test_story_card_keeps_its_acceptance_list(self):
         with open(os.path.join(self.root, 'inbox', 'thing.md'), 'w', encoding='utf-8') as f:
             f.write("# Add plan tiers\nparent: F-0001\n\n## Acceptance\n- [ ] python3 -m unittest tests.x\n"

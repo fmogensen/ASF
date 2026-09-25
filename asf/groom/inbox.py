@@ -9,9 +9,13 @@ from asf.conventions import DEFAULT_INTAKE_DIR
 
 INBOX_KV_RE = re.compile(r'^(type|parent|signature|severity|writes|stories):\s*(.+?)\s*$', re.IGNORECASE)
 
-#: A header line intake does not (yet) read a key for — `after:` on a Task, say. Shaped like a
-#: header, so it does not end the header block (B-0111): it is skipped, not read as body.
-_UNKNOWN_HEADER_RE = re.compile(r'^[A-Za-z][\w-]*:\s*.*$')
+#: Header keys intake does not (yet) read a value for — `after:` on a Task, say. Named here, not
+#: matched by shape alone (B-0111 C1): a body line that merely *looks* header-shaped (`Note: …`,
+#: a URL) is not one of these, so it is never mistaken for a header, no matter where it sits. A
+#: line naming one of these keys always is a header, so it is never mistaken for body either,
+#: even as the last line before body confirms nothing further (B-0111 round 2 C1).
+_UNREAD_HEADER_KEYS = ('after',)
+_UNKNOWN_HEADER_RE = re.compile(r'^(' + '|'.join(_UNREAD_HEADER_KEYS) + r'):\s*.*$', re.IGNORECASE)
 
 
 def _intake_dir(args):
@@ -64,11 +68,12 @@ def parse_inbox_file(text):
     title = re.sub(r'^#+\s*', '', lines[idx].strip()) if idx < len(lines) else ''
     rest = lines[idx + 1:] if idx < len(lines) else []
 
-    # An unknown-header-shaped line (`after:`, say) is only ever a header if a later line
-    # in the same run turns out to be one intake does read — that is the only way to tell
-    # it apart from a body's first line that merely happens to look like `word: value`
-    # (B-0111 C1). `body_start` only ever advances on a confirmed (`INBOX_KV_RE`) match;
-    # unknown-shaped lines are skipped over provisionally, without moving it themselves.
+    # A line naming a key intake reads (`INBOX_KV_RE`) or one it merely knows of but does not
+    # read (`_UNKNOWN_HEADER_RE`, `after:` and the like) is a header either way, so `body_start`
+    # advances past both — that is what keeps a real header from leaking into the body no
+    # matter where it sits, first or last (B-0111 round 2 C1). Neither regex matches shape
+    # alone (`^word:`), so a body's first line that merely looks header-shaped (`Note: …`, a
+    # URL) is never mistaken for one and stops the block instead (B-0111 C1).
     headers = {}
     body_start = 0
     for i, l in enumerate(rest):
@@ -81,6 +86,7 @@ def parse_inbox_file(text):
             body_start = i + 1
             continue
         if _UNKNOWN_HEADER_RE.match(s):
+            body_start = i + 1
             continue
         break
 
