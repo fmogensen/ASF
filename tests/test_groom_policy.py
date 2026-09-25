@@ -1119,6 +1119,20 @@ class DigestTests(unittest.TestCase):
         self.assertIn('- F-0020 undecided 4d — (spoken for: the next GROOM → ADJUDICATE)', text)
         self.assertIn('NEEDS OPERATOR: F-0030 rewrite the billing page — touches money', text)
 
+    def test_needs_operator_escalation_is_not_also_spoken_for(self):
+        # the adjudicator ruled on F-0030 — it decided the question is not its to answer, and
+        # said so with a NEEDS OPERATOR line. That is a ruling, not a still-open question: the
+        # same card must not also queue back onto Spoken for as if nobody had looked at it yet
+        # (B-0092), and the 'for you' count must not be inflated by counting it under both.
+        groom_text = ("# Groom 2026-09-22\n\n## Undecided > 3 days\n\n"
+                     "- [ ] F-0030 rewrite the billing page — undecided 4d → answer: ____\n")
+        answers_done = "NEEDS OPERATOR: F-0030 rewrite the billing page — touches money\n"
+        text = digest.render_digest(self.root, '2026-09-22', self._load(), groom_text,
+                                    [answers_done], attempts=2, cap=2)
+        self.assertIn('0 answered by rule · 0 ruled by the adjudicator · 0 spoken for · 1 for you', text)
+        self.assertNotIn('F-0030', text[text.index('## Spoken for'):text.index('## For you')])
+        self.assertIn('NEEDS OPERATOR: F-0030 rewrite the billing page — touches money', text)
+
     def test_open_question_under_the_cap_stays_spoken_for(self):
         groom_text = ("# Groom 2026-09-22\n\n## Undecided > 3 days\n\n"
                      "- [ ] F-0020 Another idea — undecided 4d → answer: ____\n")

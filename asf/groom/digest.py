@@ -15,6 +15,9 @@ HISTORY_LINE_RE = re.compile(
 BARRED_KEY_RE = re.compile(r'barred:\s*approvals\.(\w+)\)')
 SPOKEN_FOR_LABEL_RE = re.compile(r'spoken for:\s*([^)]+)\)')
 SECTION_RE = re.compile(r'^## (.+)$')
+#: A session's freestanding escalation (the brief's fourth answer class), naming the card it
+#: rules is not its to answer — a ruling, not a still-open question (B-0092).
+NEEDS_OPERATOR_ID_RE = re.compile(r'^NEEDS OPERATOR:\s*(?P<id>[A-Z]-\d{4})\b')
 #: The groom file's sections that are groom housekeeping, not an operator's decision: a still
 #: open question there goes to **Housekeeping**, never **For you** (the For-you card, item 3).
 #: A barred line (a human-now approval, e.g. a new Epic) is **For you** from any section.
@@ -95,7 +98,9 @@ def render_digest(root, date, canonical, groom_text, answers_done_texts, attempt
     attempts and ``groom.adjudicate_attempts`` (PD6): under the cap, a still-open question is
     listed under **Spoken for** as queued for the adjudicate session; at or past it, it stays **Spoken for**,
     queued for the next day's session — never **For you**, which holds only a barred line (an
-    approval-matrix class) and the session's own ``NEEDS OPERATOR`` answers."""
+    approval-matrix class) and the session's own ``NEEDS OPERATOR`` answers. A card a
+    ``NEEDS OPERATOR`` line names is left out of **Spoken for**: the session already ruled that
+    question is the operator's, so it is not also queued back to the next one (B-0092)."""
     from asf import cli
 
     answers_done_texts = list(answers_done_texts or ())
@@ -106,6 +111,13 @@ def render_digest(root, date, canonical, groom_text, answers_done_texts, attempt
         canonical, date, _why_map(groom_text), adjudicator_why)
 
     suppressed, barred, open_ = _classify_groom_lines(groom_text)
+    # a card a session already named in a NEEDS OPERATOR line has been ruled on — not answered,
+    # but decided that only the operator may answer it. It stays open in the record (nothing
+    # written it), but it must not also queue back onto Spoken for as if nobody had looked
+    # (B-0092): one card, one line, never both For you and Spoken for.
+    needs_operator_ids = {m.group('id') for t in answers_done_texts for line in t.splitlines()
+                          for m in [NEEDS_OPERATOR_ID_RE.match(line.strip())] if m}
+    open_ = [(iid, why, section) for iid, why, section in open_ if iid not in needs_operator_ids]
     spoken_for_lines = [f"- {iid} {why} — (spoken for: {label})" for iid, why, label in suppressed]
     for_you_lines = [f"NEEDS OPERATOR: {iid} — {why}; approvals.{key} is not auto."
                      for iid, why, key in barred]
