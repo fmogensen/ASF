@@ -751,7 +751,21 @@ def run(product_name):
     refused = check_ref_pushes(product)
     if refused:
         rows.append(('lane pushes', False, False, refused))
+    branches = check_branches(product)
+    if branches:
+        rows.append(('branches', False, branches[0], branches[1]))
     return rows
+
+
+def check_branches(product):
+    """``(ok, 'unowned branches: N (prefixes …)')`` — origin's heads no configured pattern owns,
+    as the last retention pass counted them (:func:`asf.workers.retention.doctor_line`), else
+    None before one ran."""
+    from asf.workers import retention
+    try:
+        return retention.doctor_line(product)
+    except (OSError, ValueError):
+        return None
 
 
 def check_ci_pool(product):

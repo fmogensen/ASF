@@ -170,7 +170,20 @@ def run(ctx, out=print, runtime_fn=_runtime):
                         items=items)
     hold_failed_corrections(ctx, sessions, out=out, items=items)
     ci_trials(ctx, out=out)
+    branch_retention(ctx, items, out=out)
     return 0
+
+
+def branch_retention(ctx, items, out=print):
+    """Origin's expired ``archive/*`` and retired-prefix heads deleted, at most ``per_tick`` a
+    tick, and the unowned heads counted for the doctor (:mod:`asf.workers.retention`). Printed,
+    never raised: a sweep never stops a tick."""
+    from asf.workers import retention
+    try:
+        return retention.sweep(ctx.product, fix=True, out=out, items=items)
+    except Exception as e:  # noqa: BLE001 — the next tick sweeps again
+        out(f'retention: skipped — {type(e).__name__}: {e}')
+        return None
 
 
 def ci_trials(ctx, out=print):
