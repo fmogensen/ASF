@@ -107,6 +107,9 @@ GATE_STATES = (GATE, WAITING, WAITING_CI)
 DOCS = 'docs'
 CODE = 'code'
 
+#: the WAITING reason of a green branch whose trunk run the CI start queue holds (asf.ci_queue)
+CI_QUEUE = 'ci queue'
+
 LANDING_FF = 'fast-forward'
 LANDING_PR = 'pull-request'
 ITEM_ID_RE = re.compile(r'\b([A-Za-z]+-\d{4})\b')
@@ -576,6 +579,8 @@ class Lane:
         #: after its launches: ``(kind, facts, why)`` queued here, run by :func:`push_deferred`
         self.defer_pushes = False
         self.deferred = []
+        #: the CI start queue (:mod:`asf.ci_queue`) for this pass, read once when first asked
+        self.ci_queue = None
 
     # ---- facts --------------------------------------------------------------------------
 
@@ -944,6 +949,18 @@ class Lane:
             self.out(f'lane: {len(self.ref_failures)} ref push(es) failed this pass — the '
                      f'branches stay on origin and are tried again next pass')
 
+    def ci_admits(self, f, kind):
+        """True when the CI start queue lets the run this transition starts go now: ``pr`` (a
+        PR opened, whose host run starts on it) or ``trunk`` (a merge or push onto the trunk). A
+        product that is not queued always goes. A hold prints the queue's one line."""
+        from asf import ci_queue
+        if self.ci_queue is None:
+            self.ci_queue = ci_queue.Queue(self.product, out=self.out)
+        b = f['branch']
+        return ci_queue.admit(self.product, f'{kind}:{b}', kind, item=f.get('item') or b,
+                              items=self.items, branch=b, files=f.get('files') or (),
+                              queue=self.ci_queue).admitted
+
     # ---- writing ------------------------------------------------------------------------
 
     def record(self, f, state, reason, **extra):
@@ -1041,6 +1058,8 @@ class Lane:
                     self.out(f'prs: cap {cap} reached — the rest next tick')
                     self.opened += 1
                 return None
+            if not self.ci_admits(f, 'pr'):
+                return None  # the branch stays PUSHED; the next pass asks the queue again
             self.opened += 1
             number, why = self.host.open(b, item)
             if not number:
@@ -1187,6 +1206,8 @@ def lane_pass(product, state_dir=None, items=None, out=print, dry_run=False, roo
             lane.advance(found[b])
     finally:
         lane.finish_ref_pushes()
+    from asf import ci_queue  # a queued trunk run a newer one supersedes holds runners for nothing
+    ci_queue.cancel_superseded(product, out=lane.out, dry_run=lane.dry_run)
     return lane.results, found
 
 
@@ -1713,6 +1734,10 @@ def push_set(lane, landing_set, sha, final=False):
             lane.out(f"DRY: would land {f['branch']} → {sha}")
             lane.results[f['branch']] = 'dry'
         return 'ok'
+    if not lane.ci_admits(landing_set[0], 'trunk'):
+        for f in landing_set:
+            wait(lane, f, CI_QUEUE, 'held')
+        return 'held'
     for f in landing_set:
         lane.set(f, MERGING, f'push {sha[:12]}', sha=sha, method='ff')
     pushed, not_ff = lane.host.merge(landing_set[0]['branch'], None, sha)
@@ -1802,6 +1827,9 @@ def merge_prs(lane, ready):
         if lane.dry_run:
             lane.out(f'DRY: would merge {b} (PR #{number})')
             lane.results[b] = 'dry'
+            continue
+        if not lane.ci_admits(f, 'trunk'):
+            wait(lane, f, CI_QUEUE, green=f.get('green'))
             continue
         lane.set(f, MERGING, f'PR #{number}', method='squash')
         sha, how = host.merge(b, number, subject=squash_subject(lane, f, number))
