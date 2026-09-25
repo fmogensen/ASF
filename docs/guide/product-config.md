@@ -70,7 +70,7 @@ The ones that matter most:
 | --- | --- | --- |
 | `specs_dir`, `plans_dir`, `reviews_dir` | `docs/specs`, `docs/plans`, `docs/reviews` | where spec, plan and review documents live in the product repo |
 | `review_pattern` | `{reviews_dir}/{n}-{slug}.md` | a **code** review's file name (`{slug}` is the item id in lower case, `{n}` the round), read when harvest merges a PR. Spec and plan reviews use a fixed name — see below |
-| `branch_prefixes` | `code: worker/`, `fix: fix/`, `spec: spec/`, `plan: plan/` | the branch each job kind pushes (`groom` too); `legacy: [..]` names old prefixes that are recognised, never minted |
+| `branch_prefixes` | `code: worker/`, `fix: fix/`, `spec: spec/`, `plan: plan/`, `direct: cloud/direct-` | the branch each job kind pushes (`groom` too; `direct` is a `lane: direct` Feature's one branch); `legacy: [..]` names old prefixes that are recognised, never minted |
 | `intake_dir` | `inbox` | where `asf inbox` drops a card for the groom |
 | `default_bug_epic` | none | the Epic a filed Bug is parented under; unset, the groom asks |
 | `amendable_paths` | `[]` | globs that make a landing `merge_amendable_set` (see approvals) |
@@ -78,6 +78,7 @@ The ones that matter most:
 | `harvest:` → `gate`, `branches_per_tick`, `gate_timeout_s` | `combined`, 12, 600 | how harvest gates: one gate over all eligible branches (bisecting on red) or `per-branch`; how many per run; seconds before a gate is killed and counted red |
 | `prs_per_tick` | 6 | PRs the `prs` step opens per tick |
 | `models:` → `<kind>: heavy\|light` | per kind | which of the two model labels a job kind runs on |
+| `review:` → `skip_under_lines` | 80 | a Task of a `size: s` Feature whose diff changes fewer lines lands on CI and the gate alone, no review session (0: always review) |
 
 `ci.test_command` (under `ci:`, not `conventions:`) is the gate: the command a branch must pass
 before it lands. Without one there is no test gate.

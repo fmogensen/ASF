@@ -19,6 +19,13 @@ _COMMON_SET = ('rank', 'decided', 'blockedBy', 'links', 'priority', 'area', 'leg
 SETTABLE = {t: set(_COMMON_SET) for t in TYPES}
 SETTABLE['rule'] |= {'scope', 'enforced', 'reason', 'check'}
 SETTABLE['decision'] |= {'decided_by', 'date'}
+#: A Feature's build route (:mod:`asf.feeder.rows`): ``lane: direct`` is one session end to end
+#: (DIRECT → BUILD), else the full pipeline; ``size: s`` on the full lane merges spec and plan
+#: into one session and lets its small Tasks skip the review; ``ab_pair`` names the experiment
+#: pair the scorecard compares it in (``asf scorecard --by-lane``).
+SETTABLE['feature'] |= {'lane', 'size', 'ab_pair'}
+#: The values a word-valued settable field takes; any other is refused before the card is touched.
+FIELD_WORDS = {'lane': ('direct', 'full'), 'size': ('s', 'm', 'l')}
 
 
 def _parse_sets(type_, pairs):
@@ -32,7 +39,11 @@ def _parse_sets(type_, pairs):
         if top not in SETTABLE[type_] or (dot and top != 'links'):
             raise ValueError(f"{type_} has no settable field {key!r} "
                              f"(one of {', '.join(sorted(SETTABLE[type_]))})")
-        out.append((top, sub if dot else None, frontmatter._parse_value(raw)))
+        value = frontmatter._parse_value(raw)
+        words = FIELD_WORDS.get(top)
+        if words and value not in (None, '') and str(value) not in words:
+            raise ValueError(f"{key}={raw!r} — one of {', '.join(words)}")
+        out.append((top, sub if dot else None, value))
     return out
 
 
