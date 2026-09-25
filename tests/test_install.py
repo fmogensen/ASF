@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import unittest
 from unittest import mock
@@ -600,6 +601,80 @@ class UpgradeTest(HomeCase):
             lines = upgrade.reload_clocks(['alpha'], run=run)
         boot.assert_called_once_with(os.path.join(agents, 'asf.alpha.tick.plist'))
         self.assertEqual(lines, ['upgrade: reloaded clock asf.alpha.tick'])
+
+
+class PendingUpgradeTest(HomeCase):
+    """A deferred upgrade marks itself pending, so the other ticks stop starting and a gap comes."""
+    SHA = 'b' * 40
+
+    def run_upgrade(self, run, owner='factory'):
+        return _quiet(upgrade.cmd_upgrade,
+                      argparse.Namespace(skip_pipx=False, ref=self.SHA, owner=owner), run=run)
+
+    def test_a_deferral_writes_the_marker(self):
+        rc, out, _err = self.run_upgrade(FakeRun(ticks='4242\n'))
+        self.assertEqual(rc, upgrade.DEFERRED)
+        data = upgrade.read_pending()
+        self.assertEqual((data['sha'], data['owner']), (self.SHA, 'factory'))
+        self.assertLess(abs(data['at'] - time.time()), 60)
+        self.assertIn(f'upgrade: pending {self.SHA[:7]}', out)
+
+    def test_a_manual_deferral_writes_none(self):
+        self.run_upgrade(FakeRun(ticks='4242\n'), owner=None)
+        self.assertIsNone(upgrade.read_pending())
+
+    def test_a_later_deferral_keeps_the_first_timestamp(self):
+        upgrade.write_pending('c' * 40, 'factory', now=1000.0)
+        upgrade.write_pending(self.SHA, 'factory', now=5000.0)
+        self.assertEqual(upgrade.read_pending()['at'], 1000.0)
+        self.assertEqual(upgrade.read_pending()['sha'], self.SHA)
+
+    def test_other_products_ticks_wait_and_the_owners_go_on(self):
+        upgrade.write_pending(self.SHA, 'factory')
+        lines = []
+        self.assertTrue(upgrade.waiting('other', out=lines.append, installed='c' * 40))
+        self.assertEqual(lines, [f'tick: waiting — upgrade to {self.SHA[:7]} pending'])
+        self.assertFalse(upgrade.waiting('factory', out=lines.append, installed='c' * 40))
+
+    def test_a_waiting_tick_starts_no_step(self):
+        upgrade.write_pending(self.SHA, 'factory')
+        product = env.Product('other', {'repo_dir': self.tmp, 'main': 'main', 'ci': {'provider': 'none'}})
+        from asf.tick import tick
+        with mock.patch('asf.env.load_product', return_value=product), \
+                mock.patch('asf.tick.steps.resolve', return_value=[('harvest', 'asf', None)]), \
+                mock.patch('asf.tick.steps.check_owned'), \
+                mock.patch('asf.drift.installed_commit', return_value='c' * 40), \
+                mock.patch.object(tick, 'acquire_lock') as lock, \
+                mock.patch.object(tick, '_run_locked') as ran:
+            rc, out, _err = _quiet(tick.cmd_tick, argparse.Namespace(product='other', steps=None))
+        self.assertEqual(rc, 0)
+        self.assertIn('tick: waiting — upgrade to', out)
+        lock.assert_not_called()
+        ran.assert_not_called()
+
+    def test_the_upgrade_clears_the_marker(self):
+        upgrade.write_pending(self.SHA, 'factory')
+        rc, _out, _err = self.run_upgrade(FakeRun(installed=self.SHA))
+        self.assertEqual(rc, 0)
+        self.assertIsNone(upgrade.read_pending())
+        self.assertFalse(os.path.exists(upgrade.pending_path()))
+
+    def test_the_upgrading_tick_does_not_count_itself(self):
+        upgrade.write_pending(self.SHA, 'factory')
+        rc, _out, _err = self.run_upgrade(FakeRun(ticks=f'{os.getpid()}\n{os.getppid()}\n',
+                                                  installed=self.SHA))
+        self.assertEqual(rc, 0)
+        self.assertIsNone(upgrade.read_pending())
+
+    def test_a_stale_marker_is_ignored_and_removed(self):
+        upgrade.write_pending(self.SHA, 'factory', now=time.time() - upgrade.PENDING_TTL_S - 1)
+        self.assertFalse(upgrade.waiting('other', out=lambda _l: None, installed='c' * 40))
+        self.assertFalse(os.path.exists(upgrade.pending_path()))
+
+    def test_a_marker_whose_sha_is_installed_is_ignored_and_removed(self):
+        upgrade.write_pending(self.SHA, 'factory')
+        self.assertFalse(upgrade.waiting('other', out=lambda _l: None, installed=self.SHA))
+        self.assertFalse(os.path.exists(upgrade.pending_path()))
 
 
 class HooksTest(HomeCase):

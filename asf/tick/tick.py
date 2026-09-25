@@ -349,6 +349,10 @@ def cmd_tick(args, root=None):
         print(e)
         return 2
 
+    from asf import upgrade
+    if upgrade.waiting(product.name):
+        return 0  # a pending upgrade needs a gap between ticks: this one does not start
+
     if not any(owner == 'asf' for _, owner, _ in rows):
         return _run_locked(args, product, fresh, rows, chosen, Locks(product, held=False))
     wait_s = DAILY_LOCK_WAIT_S if any(r[0] == 'daily' for r in rows) else 0
@@ -388,7 +392,7 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
     upgraded = []
 
     def run_upgrade(head):
-        upgraded.append(upgrade.cmd_upgrade(_ns(skip_pipx=False, ref=head)))
+        upgraded.append(upgrade.cmd_upgrade(_ns(skip_pipx=False, ref=head, owner=product.name)))
         return upgraded[-1]
 
     with locks.record('version check', wait_s=0) as ok:
@@ -399,6 +403,10 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
         # this process still runs the old package over a replaced install: a later lazy import
         # would load the new one half-way through the tick, so the steps wait for the next tick
         print('tick: the install was upgraded under this tick; its steps run on the next tick')
+        return 0
+    if upgraded and upgraded[-1] == drift.DEFERRED and upgrade.read_pending():
+        # the owner's steps would hold the gap open too: it retries at its next start
+        print(f'tick: waiting — upgrade to {upgrade.read_pending()["sha"][:7]} pending')
         return 0
     rc = 0
     ran = []

@@ -7,12 +7,21 @@ commit instead: the head the tick's drift check read, or ``main``'s head for a m
 deferred while another tick runs (a reinstall under a running tick tore it: ImportError
 mid-tick), refused on a head whose remote CI is red, verified by the new install's own commit,
 and followed by reloading any product clock that is on disk but not loaded.
+
+A deferral alone never finds a gap: two products whose ticks run for minutes, launched every few
+minutes, always overlap. So a tick's deferred upgrade writes the *pending* marker
+(``state/upgrade-pending.json``: the sha, when, and the owning product); every other tick reads
+it at its start and exits without a step while it is fresh (:func:`waiting`), running ticks
+finish, and the owner's next tick finds the gap and installs, clearing the marker. A marker
+older than :data:`PENDING_TTL_S`, or whose sha is already installed, is removed and ignored —
+a stuck upgrade never stops the factory.
 """
 import glob
 import json
 import os
 import re
 import subprocess
+import time
 
 from asf import __version__, env, schema
 from asf.drift import DEFERRED  # noqa: F401 — the upgrade waits for the next tick (EX_TEMPFAIL)
@@ -22,6 +31,75 @@ DEFAULT_REPO_URL = 'https://github.com/fmogensen/ASF.git'
 #: a tick's command line: ``python -m asf.cli tick …`` (the clocks) or ``…/bin/asf tick …`` —
 #: anchored on the interpreter's argv, so a shell whose script merely mentions them does not match
 TICK_PATTERN = r'(-m asf\.cli|/asf) tick( |$)'
+#: a pending marker older than this is stale: removed and ignored
+PENDING_TTL_S = 30 * 60
+
+
+def pending_path():
+    return os.path.join(env.ASF_HOME, 'state', 'upgrade-pending.json')
+
+
+def read_pending():
+    try:
+        with open(pending_path(), encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) and data.get('sha') else None
+
+
+def write_pending(sha, owner, now=None):
+    """Mark the upgrade to ``sha`` pending, owned by product ``owner``. An existing marker keeps
+    its first timestamp (a newer head never extends the wait past :data:`PENDING_TTL_S`)."""
+    old = read_pending()
+    at = old.get('at') if old and isinstance(old.get('at'), (int, float)) else None
+    data = {'sha': sha, 'owner': owner, 'at': at if at is not None else (now or time.time())}
+    path = pending_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f'{path}.{os.getpid()}.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(data, f)
+    os.replace(tmp, path)
+    return data
+
+
+def clear_pending():
+    try:
+        os.remove(pending_path())
+    except OSError:
+        pass
+
+
+def _installed(sha, installed):
+    return bool(installed and sha and (installed.startswith(sha) or sha.startswith(installed)))
+
+
+def pending(now=None, installed=None):
+    """The fresh pending marker, or ``None``. A stale one (older than :data:`PENDING_TTL_S`, or
+    its sha already installed) is removed."""
+    data = read_pending()
+    if data is None:
+        return None
+    if installed is None:
+        from asf import drift
+        installed = drift.installed_commit()
+    at = data.get('at')
+    age = (now or time.time()) - at if isinstance(at, (int, float)) else None
+    if age is None or age > PENDING_TTL_S or age < -60 or _installed(data['sha'], installed):
+        clear_pending()
+        return None
+    return data
+
+
+def waiting(product_name, out=print, now=None, installed=None):
+    """True when this tick must not start: an upgrade owned by another product is pending, and
+    this tick's running would only keep the gap the upgrade needs from coming. The owner's ticks
+    go on — the owner retries the upgrade at its start."""
+    data = pending(now, installed)
+    if data is None or data.get('owner') == product_name:
+        return False
+    out(f'tick: waiting — upgrade to {data["sha"][:7]} pending')
+    return True
 
 
 def upgrade_command(url, ref):
@@ -118,14 +196,26 @@ def reload_clocks(names, run=subprocess.run):
     return lines
 
 
-def install(ref=None, run=subprocess.run, out=print):
+def install(ref=None, run=subprocess.run, out=print, owner=None):
     """Reinstall at ``ref`` (default: ``main``'s head). 0 installed and verified, DEFERRED when
-    it waits for the next tick, else non-zero."""
+    it waits for the next tick, else non-zero. A tick's upgrade (``owner``: its product) that
+    defers for other ticks marks itself pending, so the other ticks stop starting; any other
+    outcome clears the mark."""
     others = other_ticks(run)
     if others:
         out(f'upgrade: deferred to the next tick — another asf tick is running '
             f'(pid {", ".join(str(p) for p in others)})')
+        if owner and ref:
+            write_pending(ref, owner)
+            out(f'upgrade: pending {ref[:7]} — other ticks wait until it installs')
         return DEFERRED
+    rc = _install(ref, run, out)
+    if owner:
+        clear_pending()
+    return rc
+
+
+def _install(ref, run, out):
     url = repo_url(run)
     ref = ref or remote_head(url, run)
     if not ref:
@@ -188,7 +278,7 @@ def render(rows):
 
 def cmd_upgrade(args, run=subprocess.run):
     if not args.skip_pipx:
-        rc = install(getattr(args, 'ref', None), run=run)
+        rc = install(getattr(args, 'ref', None), run=run, owner=getattr(args, 'owner', None))
         if rc != 0:
             return rc
     print(f'upgrade: package {__version__}, schema {schema.SCHEMA_VERSION}')
