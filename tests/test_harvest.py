@@ -733,17 +733,32 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertEqual(results, {})
         self.assertEqual(self.origin_main(), before)
 
-    def test_commit_not_naming_the_item_holds(self):
+    def test_commit_not_naming_the_item_is_reworded_by_the_lane_and_lands(self):
+        self.push_lane('fix/B-0001', [('fix(B-0001): the change', {'a.txt': 'a\n'}),
+                                      ('tidy up', {'c.txt': 'c\n'})])
+        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
+        results, lines = self.harvest(self.product())
+        self.assertEqual(results, {'fix/B-0001': 'landed'})
+        self.assertIn('reworded 1 subjects on fix/B-0001 (naming) — no session', lines)
+        self.assertFalse(any(l.startswith('held ') for l in lines), lines)
+        subjects = sh(['git', 'log', '-2', '--format=%s', 'main'], cwd=self.origin).stdout
+        self.assertEqual(subjects.splitlines(), ['fix(B-0001): tidy up', 'fix(B-0001): the change'])
+        self.assertFalse(self.record('fix/B-0001').get('correction'))
+
+    def test_commit_not_naming_the_item_holds_with_no_round_when_the_reword_fails(self):
         self.push_lane('fix/B-0001', [('fix(B-0001): the change', {'a.txt': 'a\n'}),
                                       ('tidy up', {'c.txt': 'c\n'})])
         self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
         before = self.origin_main()
-        results, lines = self.harvest(self.product())
+        with mock.patch.object(lane, 'reword_branch', return_value=(None, 0)):
+            results, lines = self.harvest(self.product())
         self.assertEqual(results, {'fix/B-0001': 'held'})
-        self.assertEqual(len(lines), 1, lines)
-        self.assertTrue(lines[0].startswith('held fix/B-0001: commits do not name B-0001:'), lines)
-        self.assertTrue(lines[0].endswith(' — back to its session (round 1)'), lines)
+        held = [l for l in lines if l.startswith('held ')]
+        self.assertEqual(len(held), 1, lines)
+        self.assertTrue(held[0].startswith('held fix/B-0001: commits do not name B-0001:'), lines)
+        self.assertTrue(held[0].endswith(' — back to its session (naming, no round)'), lines)
         self.assertEqual(self.record('fix/B-0001')['correction']['kind'], 'naming')
+        self.assertFalse(self.record('fix/B-0001').get('rounds'))
         self.assertEqual(self.origin_main(), before)
         self.assertTrue(self.origin_has('fix/B-0001'))
         self.assertFalse(self.record('fix/B-0001').get('harvested'))

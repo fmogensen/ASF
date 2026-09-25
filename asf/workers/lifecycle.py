@@ -927,7 +927,7 @@ def derive(run, ev, cap=ROUND_CAP, path=None):
     corr = pending_correction(run, path)
     rounds = run.get('rounds') or 0
     if corr:
-        if corr.get('at_cap') or rounds >= cap:
+        if corr.get('kind') != NAMING and (corr.get('at_cap') or rounds >= cap):
             return State(ADJUDICATE, corr.get('text', ''), rounds)
         return State(HELD, corr.get('text', ''), rounds)
     if (run.get('correction') or {}).get('text'):
@@ -1027,6 +1027,9 @@ def pushed_after_stop(run, ev):
 UNPUSHED = 'unpushed'
 EMPTY = 'empty'        #: a correction kind of its own: `UNPUSHED` is work not on origin, this is no work
 EMPTY_CAP = 2          #: ends that wrote nothing before the item is parked (`conventions.empty_cap`)
+#: the lane's refusal of commits that do not name their item: a mechanical defect the lane
+#: rewords itself (asf.harvest.lane); a hold of it spends no round and never reaches adjudicate
+NAMING = 'naming'
 
 
 def empty_ends(path, item):
@@ -1056,6 +1059,9 @@ def hold(path, run, kind, text, now, empty_cap=EMPTY_CAP):
                                  'parked': True, 'reason': park_text(empty_ends(path, item))},
                   'operator_flagged': 1}
         return fields, f'parked {branch}: {fields["correction"]["reason"]}'
+    if kind == NAMING:  # the lane's reword failed: back to its session, no round spent
+        fields = {'correction': {'kind': kind, 'text': text, 'at': now}}
+        return fields, f'held {branch}: {text} — back to its session (naming, no round)'
     prev = max([rounds_of(path, item), run.get('rounds') or 0])
     if prev >= ROUND_CAP:
         at_cap_before = any((r.get('correction') or {}).get('at_cap') for r in item_runs(path, item))
