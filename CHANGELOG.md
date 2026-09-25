@@ -2,6 +2,36 @@
 
 One entry per released version, newest first.
 
+## v0.1.14 — 2026-09-25
+
+### Features landed
+
+- F-0078 The tick ends with two tables: in flight, and done since the last tick
+
+### Bugs fixed
+
+- B-0132 The record pre-commit refuses every commit on pre-existing errors in untouched files (asf set blocked)
+
+### Improvements and hotfixes
+
+- fix(host): the memory guard judges the kernel's memory pressure where the host reports it, not sticky swap
+- fix(redact): the pre-push scan refreshes origin first and trusts the remote sha
+- fix(upgrade): batch auto-upgrades — one install per upgrade.min_interval_min, urgent heads excepted
+- feat(ci-pool): runner class — a class:<name> label per pool runner, counted by doctor, grouped by capacity
+- fix(ci-pool): the runner class label is class-<name>
+- docs(ci-pool): the docstring names the class-<name> label
+- fix(status): the ci clause names the batch gate, not a breached cap
+- fix(deploy): a target with no provider sha says sha unknown; asf deploy record names it
+- fix(scorecard): a landed Feature whose landing commits prod runs counts as on prod
+- fix(scorecard): a children-resolved Feature is on prod by its descendants' newest landing commit
+- fix(deploy): a view shows the customer-content refusal, never 'the next tick dispatches'
+- feat(ci-queue): one CI start queue per product, admitted by free runners per class
+- fix(upgrade): the upgrade's owner keeps running its steps while the install waits for a gap
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.14"`
+
 ## v0.1.13 — 2026-09-25
 
 ### Bugs fixed
