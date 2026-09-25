@@ -405,9 +405,11 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
         print('tick: the install was upgraded under this tick; its steps run on the next tick')
         return 0
     if upgraded and upgraded[-1] == drift.DEFERRED and upgrade.read_pending():
-        # the owner's steps would hold the gap open too: it retries at its next start
-        print(f'tick: waiting — upgrade to {upgrade.read_pending()["sha"][:7]} pending')
-        return 0
+        # the owner keeps working: the other products' ticks no longer start, so the gap opens
+        # when this tick ends, and the owner's next start installs. Skipping the owner's steps
+        # starved its own product for as long as the slowest other tick ran (2026-09-25: 40 min).
+        print(f'tick: upgrade to {upgrade.read_pending()["sha"][:7]} pending — this tick runs;'
+              ' the install goes at the next start')
     if not any(s == 'daily' for s, _, _ in rows):
         # this tick's own clock doesn't carry daily (it isn't the daily clock) — catch it up
         # when its own clock's time has passed and it still hasn't succeeded today (B-0123)
