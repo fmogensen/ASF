@@ -433,7 +433,10 @@ FEEDER_FIELDS = {'hold': _LIST}
 #: what ``feeder.hold`` may name (:attr:`Product.feeder_hold`)
 FEEDER_HOLDS = ('features', 'bugs')
 # `improve:` is a map: the improve pass's threshold overrides, its Epic, its window and its premium models.
-IMPROVE_FIELDS = {'thresholds': _MAP, 'epic': _STR, 'window_days': None, 'premium_models': _LIST}
+IMPROVE_FIELDS = {'thresholds': _MAP, 'epic': _STR, 'window_days': None, 'premium_models': _LIST,
+                  # the value loop's settings (asf.scorecard.loop): thresholds, window_days,
+                  # verify_weeks, min_move, file_to, epic
+                  'scorecard': _MAP}
 # every product-file section whose own keys are checked, keyed by its own field table.
 NESTED_FIELDS = {
     'ci': CI_FIELDS, 'capacity': CAPACITY_FIELDS, 'feeder': FEEDER_FIELDS, 'improve': IMPROVE_FIELDS,
