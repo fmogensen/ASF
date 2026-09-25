@@ -85,6 +85,27 @@ deploy, a sha whose deploy already failed (never retried) and a red trunk each h
 and the line says which. The old `deploy_sha.auto: true` still reads as `prod.mode: auto`;
 `asf doctor`'s `deploy` row names it as deprecated and shows the modes it resolved.
 
+**Named deploy targets** sit beside dev and prod under `deploy_sha.targets` — a marketing site, a
+docs site, anything with its own deploy:
+
+```yaml
+deploy_sha:
+  targets:
+    site:
+      mode: manual              # auto | manual (the default) | ci (its own workflow deploys it)
+      workflow: site-deploy.yml # what auto dispatches; its newest success is the deployed sha
+      paths: [apps/site/**]     # behind only by trunk commits touching these
+      # source: vercel          # or read the deployed sha from Vercel (project, scope)
+```
+
+Each target gets its own `deploy <name>:` line in every tick, the Prod row and `asf prod`: the sha
+it runs, how many relevant commits it is behind (all of them without `paths`) and its mode. A
+manual target that is behind says so loudly — `MANUAL: site is 15 relevant commits behind — waits
+on a hand dispatch of site-deploy.yml`. The same holds apply: a running deploy, a failed sha and a
+red trunk. `asf prod`'s **ON PROD — check these** table lists, per target, the customer-visible PRs
+merged to the trunk but not yet on it (`NOT LIVE`), then the last ones it shipped — so a page
+merged but never deployed to the site shows up there, not as "no change".
+
 To keep the table in front of you, type `/loop 5m /asf:status` in each product's Claude Code
 session: it reprints the status every five minutes until you stop it.
 

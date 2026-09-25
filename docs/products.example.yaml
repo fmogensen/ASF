@@ -203,6 +203,21 @@ deploy_sha:
     # input: sha
     # from: ci                   # ci: the newest green ci.workflow run on the trunk (default)
     #                            # dev: the sha dev runs, once its own CI run is green (promote)
+  # named deploy targets beside dev and prod — a marketing site, docs, a second app. Each shows
+  # in every tick, `asf status` and `asf prod` with its deployed sha, how many relevant commits it
+  # is behind and its mode (manual: a loud "MANUAL: <target> is N relevant commits behind" line),
+  # and `asf prod`'s ON PROD table lists the customer-visible PRs merged but not yet on it. The
+  # holds above apply to every target.
+  # targets:
+  #   site:
+  #     mode: manual               # auto | manual (the default) | ci (its workflow deploys itself)
+  #     workflow: site-deploy.yml  # what auto dispatches; its newest success is the deployed sha
+  #     # input: sha
+  #     # from: ci                 # ci | dev, as prod's
+  #     paths: [apps/site/**]      # behind only by trunk commits touching these globs
+  #     # source: vercel           # read the deployed sha from Vercel instead of the workflow:
+  #     # project: my-site-prod    #   the newest READY production deployment's commit
+  #     # scope: my-team
   # deprecated: `auto: true` (read as prod.mode: auto; `asf doctor` names it), and a top-level
   # `workflow:` / `input:` (read as prod's).
   # only when provider: script

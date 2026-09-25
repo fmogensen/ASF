@@ -397,14 +397,17 @@ def full_suite_command(product, command):
 
 
 def _runs_deploy_workflow(command, product):
+    """True when ``command`` dispatches prod's deploy workflow or a named deploy target's
+    (``deploy_sha.targets.<name>.workflow`` — a site is production too)."""
     deploy = product.deploy_sha
-    workflow = None
+    workflows = []
     if isinstance(deploy, dict):
         prod_env = deploy.get('prod') if isinstance(deploy.get('prod'), dict) else {}
-        workflow = deploy.get('workflow') or prod_env.get('workflow')
-    if not workflow:
-        return False
-    return bool(re.search(rf'\bgh\s+workflow\s+run\b.*\b{re.escape(workflow)}\b', command))
+        workflows.append(deploy.get('workflow') or prod_env.get('workflow'))
+        targets = deploy.get('targets') if isinstance(deploy.get('targets'), dict) else {}
+        workflows += [t.get('workflow') for t in targets.values() if isinstance(t, dict)]
+    return any(re.search(rf'\bgh\s+workflow\s+run\b.*\b{re.escape(w)}\b', command)
+               for w in workflows if isinstance(w, str) and w)
 
 
 def _command_matches(cls_name, command, product, extra_patterns):

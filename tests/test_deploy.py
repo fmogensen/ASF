@@ -32,10 +32,11 @@ def _modes(dev=None, prod=None, **extra):
 
 class FakeSh:
     def __init__(self, deploys, ci, behind='5', ancestor=True, dispatch_ok=True, dev=None,
-                 jobs=None, by_commit=None):
+                 jobs=None, by_commit=None, site=None, relevant='2', vercel=None):
         self.deploys, self.ci, self.behind = deploys, ci, behind
         self.ancestor, self.dispatch_ok, self.calls = ancestor, dispatch_ok, []
         self.dev, self.jobs, self.by_commit = dev or [], jobs or {}, by_commit or {}
+        self.site, self.relevant, self.vercel = site or [], relevant, vercel
 
     def __call__(self, cmd, cwd=None, timeout=60):
         self.calls.append(cmd)
@@ -43,7 +44,8 @@ class FakeSh:
             wf = cmd[cmd.index('--workflow') + 1]
             if '--commit' in cmd:
                 return json.dumps(self.by_commit.get(cmd[cmd.index('--commit') + 1], []))
-            runs = {'deploy-prod.yml': self.deploys, 'deploy-dev.yml': self.dev}.get(wf, self.ci)
+            runs = {'deploy-prod.yml': self.deploys, 'deploy-dev.yml': self.dev,
+                    'site-deploy.yml': self.site}.get(wf, self.ci)
             return None if runs is None else json.dumps(runs)
         if cmd[:3] == ['gh', 'run', 'view']:
             return json.dumps({'jobs': self.jobs.get(int(cmd[3]), [])})
@@ -51,8 +53,10 @@ class FakeSh:
             return '' if self.dispatch_ok else None
         if 'rev-parse' in cmd:
             return MAIN
+        if cmd[:2] == ['vercel', 'ls']:
+            return self.vercel
         if 'rev-list' in cmd:
-            return self.behind
+            return self.relevant if '--' in cmd else self.behind
         if 'merge-base' in cmd:
             return '' if self.ancestor else None
         return ''
@@ -322,6 +326,114 @@ class PromoteDevToProd(unittest.TestCase):
         self.assertTrue(any(not ok and 'prod.from: dev' in d for ok, d in deploy.findings(p)))
 
 
+SITE = 'f' * 40
+
+
+def _site(mode='manual', **cfg):
+    """prod manual plus a named ``site`` target scoped to apps/site/**."""
+    p = _modes(prod='manual')
+    p.deploy_sha['targets'] = {'site': dict({'mode': mode, 'workflow': 'site-deploy.yml',
+                                             'paths': ['apps/site/**']}, **cfg)}
+    return p
+
+
+def _site_tick(product, sh):
+    lines = []
+    sent = deploy.tick(product, out=lines.append, sh=sh)
+    return sent, [ln for ln in lines if ln.startswith('deploy site: ')]
+
+
+class NamedTargets(unittest.TestCase):
+    """deploy_sha.targets: any number of targets beside dev and prod, under the same rules."""
+
+    def test_a_manual_target_says_how_many_relevant_commits_it_waits_on(self):
+        sh = FakeSh([_run(PROD)], [_run(GREEN)], site=[_run(SITE)], behind='237', relevant='15')
+        sent, lines = _site_tick(_site(), sh)
+        self.assertEqual(sent, {})
+        self.assertEqual(sh.dispatched(), [])
+        self.assertIn(f'site `{SITE[:9]}` is 15 relevant commits behind main (237 in all', lines[0])
+        self.assertIn('mode manual', lines[0])
+        self.assertIn('MANUAL: site is 15 relevant commits behind — waits on a hand dispatch of'
+                      ' site-deploy.yml', lines[0])
+        rel = [c for c in sh.calls if 'rev-list' in c and '--' in c]
+        self.assertEqual(rel[0][-1], ':(glob)apps/site/**')
+
+    def test_an_auto_target_dispatches_its_own_workflow(self):
+        sh = FakeSh([_run(PROD)], [_run(GREEN)], site=[_run(SITE)])
+        sent, lines = _site_tick(_site('auto', input='ref'), sh)
+        self.assertEqual(sent, {'site': GREEN})
+        self.assertEqual(sh.dispatched(), [['gh', 'workflow', 'run', 'site-deploy.yml', '-R', 'o/r',
+                                            '--ref', 'main', '-f', f'ref={GREEN}']])
+
+    def test_no_relevant_commit_means_nothing_to_deploy(self):
+        sh = FakeSh([_run(PROD)], [_run(GREEN)], site=[_run(SITE)], behind='9', relevant='0')
+        sent, lines = _site_tick(_site('auto'), sh)
+        self.assertEqual(sent, {})
+        self.assertIn('has every main commit touching apps/site/**', lines[0])
+
+    def test_the_same_holds_apply_running_failed_red(self):
+        running = FakeSh([_run(PROD)], [_run(GREEN)],
+                         site=[_run(GREEN, status='queued', conclusion=None, rid=4), _run(SITE)])
+        self.assertEqual(_site_tick(_site('auto'), running)[0], {})
+        failed = FakeSh([_run(PROD)], [_run(GREEN)],
+                        site=[_run(GREEN, conclusion='failure', rid=5), _run(SITE)])
+        sent, lines = _site_tick(_site('auto'), failed)
+        self.assertEqual(sent, {})
+        self.assertIn('FAILED (run 5)', lines[0])
+        red = FakeSh([_run(PROD)], [_run(RED, conclusion='failure')], site=[_run(SITE)])
+        sent, lines = _site_tick(_site('auto'), red)
+        self.assertEqual(sent, {})
+        self.assertIn('site waits on a green main', lines[0])
+
+    def test_a_vercel_target_reads_its_sha_and_waits_on_a_hand_deploy(self):
+        p = _site(workflow=None, source='vercel', project='site-prod', scope='team')
+        sh = FakeSh([_run(PROD)], [_run(GREEN)], relevant='3', vercel=json.dumps(
+            {'deployments': [{'state': 'ERROR', 'meta': {'githubCommitSha': RED}},
+                             {'state': 'READY', 'meta': {'githubCommitSha': SITE},
+                              'createdAt': 1789949910391}]}))
+        sent, lines = _site_tick(p, sh)
+        self.assertEqual(sent, {})
+        self.assertIn(f'site `{SITE[:9]}` is 3 relevant commits behind', lines[0])
+        self.assertIn('waits on a hand deploy — no deploy_sha.targets.site.workflow', lines[0])
+        self.assertIn(['vercel', 'ls', 'site-prod', '--prod', '--scope', 'team', '--json'],
+                      sh.calls)
+
+    def test_an_unreadable_vercel_sha_is_loud(self):
+        p = _site(workflow=None, source='vercel', project='site-prod')
+        sent, lines = _site_tick(p, FakeSh([_run(PROD)], [_run(GREEN)], vercel=None))
+        self.assertIn('site state unknown', lines[0])
+
+    def test_a_ci_target_is_observed(self):
+        sh = FakeSh([_run(PROD)], [_run(GREEN)], site=[_run(SITE)])
+        sent, lines = _site_tick(_site('ci'), sh)
+        self.assertEqual(sent, {})
+        self.assertIn('site-deploy.yml deploys site on its own (ASF observes)', lines[0])
+
+    def test_targets_follow_dev_and_prod_and_the_views_list_them(self):
+        p = _site()
+        p.deploy_sha['dev'] = {'mode': 'ci'}
+        sh = FakeSh([_run(PROD)], [_run(GREEN)], site=[_run(SITE)])
+        got = deploy.lines(p, sh=sh)
+        self.assertEqual([g.split(':')[0] for g in got], ['deploy dev', 'deploy', 'deploy site'])
+        self.assertEqual(deploy.names(p), ['dev', 'prod', 'site'])
+
+    def test_doctor_names_a_target_it_cannot_manage(self):
+        p = _site('auto', workflow=None)
+        found = deploy.findings(p)
+        self.assertTrue(any(not ok and 'deploy_sha.targets.site' in d for ok, d in found))
+        self.assertFalse(deploy.env_applies(p, 'site'))
+        ok = deploy.findings(_site())
+        self.assertTrue(any(k and 'site manual (site-deploy.yml, apps/site/**)' in d
+                            for k, d in ok))
+
+    def test_a_target_workflow_is_touch_production(self):
+        from asf import approvals
+        p = _site()
+        self.assertTrue(approvals._runs_deploy_workflow(
+            'gh workflow run site-deploy.yml -R o/r -f sha=x', p))
+        self.assertFalse(approvals._runs_deploy_workflow('gh workflow run ci.yml', p))
+
+
 class Validation(unittest.TestCase):
     def _problems(self, block):
         from asf import env
@@ -338,6 +450,16 @@ class Validation(unittest.TestCase):
         keys = [k for k, _ in got]
         self.assertEqual(sorted(keys), ['deploy_sha.dev.mode', 'deploy_sha.prod.from',
                                         'deploy_sha.prod.mode'])
+
+    def test_named_targets_load_and_a_bad_one_refuses(self):
+        self.assertEqual(self._problems(
+            '  targets:\n    site:\n      mode: manual\n      from: dev\n'
+            '      paths: [apps/site/**]\n'), [])
+        got = self._problems('  targets:\n    site:\n      mode: nightly\n      paths: x\n'
+                             '    prod:\n      mode: auto\n')
+        self.assertEqual(sorted(k for k, _ in got),
+                         ['deploy_sha.targets.prod', 'deploy_sha.targets.site.mode',
+                          'deploy_sha.targets.site.paths'])
 
     def test_the_prod_workflow_folds_into_the_deploy_workflow(self):
         from asf import env

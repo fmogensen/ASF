@@ -455,6 +455,8 @@ def _shape_ok(value, shape):
 #: is not shape-checked.
 DEPLOY_MODES = {'dev': ('auto', 'manual', 'ci'), 'prod': ('auto', 'manual')}
 DEPLOY_SOURCES = ('ci', 'dev')
+#: the modes a named target (``deploy_sha.targets.<name>.mode``) may take
+DEPLOY_TARGET_MODES = ('auto', 'manual', 'ci')
 
 
 def _deploy_problems(deploy):
@@ -480,6 +482,35 @@ def _deploy_problems(deploy):
     if src is not None and src not in DEPLOY_SOURCES:
         out.append(('deploy_sha.prod.from',
                     f"must be one of {' | '.join(DEPLOY_SOURCES)}, not {src!r}"))
+    return out + _target_problems(deploy.get('targets'))
+
+
+def _target_problems(targets):
+    """[(dotted key, problem)] for ``deploy_sha.targets`` — the named deploy targets beside dev
+    and prod (asf.harvest.deploy)."""
+    if targets is None:
+        return []
+    if not isinstance(targets, dict):
+        return [('deploy_sha.targets', f'must be {_MAP}, not {targets!r}')]
+    out = []
+    for name, block in targets.items():
+        k = f'deploy_sha.targets.{name}'
+        if name in DEPLOY_MODES:
+            out.append((k, f'{name} is not a target name — write deploy_sha.{name}'))
+            continue
+        if not isinstance(block, dict):
+            out.append((k, f'must be {_MAP}, not {block!r}'))
+            continue
+        if block.get('mode') is not None and block['mode'] not in DEPLOY_TARGET_MODES:
+            out.append((k + '.mode', f"must be one of {' | '.join(DEPLOY_TARGET_MODES)},"
+                                     f" not {block['mode']!r}"))
+        if block.get('from') is not None and block['from'] not in DEPLOY_SOURCES:
+            out.append((k + '.from', f"must be one of {' | '.join(DEPLOY_SOURCES)},"
+                                     f" not {block['from']!r}"))
+        globs = block.get('paths')
+        if globs is not None and not (isinstance(globs, list)
+                                      and all(isinstance(g, str) and g for g in globs)):
+            out.append((k + '.paths', f'must be {_LIST} of path globs, not {globs!r}'))
     return out
 
 

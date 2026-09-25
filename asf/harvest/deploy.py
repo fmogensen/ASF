@@ -26,9 +26,17 @@ not retried; the next green sha is), and it is green — a red trunk never deplo
 ``gh workflow run <workflow> -R <slug> --ref <trunk> -f <input>=<sha>`` (``input`` default
 ``sha``; ``none`` sends no input).
 
-Every outcome is one line per environment — ``deploy:`` for prod, ``deploy dev:`` for dev. The
-tick prints them (:func:`tick`); ``asf status`` / ``asf prod`` print the read-only half
-(:func:`lines`).
+**Named targets.** Beside dev and prod, ``deploy_sha.targets`` names any number of further deploy
+targets (a marketing site, docs, a second app), each ``{mode, workflow, input, from, paths,
+source}``: ``mode`` is ``auto`` | ``manual`` (the default) | ``ci`` (its own workflow deploys it on
+push; ASF observes), ``from`` is prod's (``ci`` | ``dev``), and ``paths`` (globs, ``apps/site/**``)
+make the target behind only by the trunk commits that touch them. Its deployed sha is the newest
+successful run of its ``workflow``, or, with ``source: vercel`` (``project``, ``scope``), the
+newest READY production deployment's commit. The rules above hold for every target.
+
+Every outcome is one line per environment — ``deploy:`` for prod, ``deploy <name>:`` for the
+rest, dev and the named targets after it. The tick prints them (:func:`tick`); ``asf status`` /
+``asf prod`` print the read-only half (:func:`lines`).
 """
 import datetime
 import json
@@ -36,9 +44,10 @@ import subprocess
 
 DEFAULT_INPUT = 'sha'
 ENVS = ('dev', 'prod')
-#: the modes each environment may take
+#: the modes each environment may take; a named target takes TARGET_MODES
 MODES = {'dev': ('auto', 'manual', 'ci'), 'prod': ('auto', 'manual')}
-#: where prod's candidate comes from
+TARGET_MODES = ('auto', 'manual', 'ci')
+#: where prod's (and a named target's) candidate comes from
 SOURCES = ('ci', 'dev')
 
 
@@ -63,9 +72,50 @@ def _cfg(product):
     return d if isinstance(d, dict) else {}
 
 
+def _targets(product):
+    t = _cfg(product).get('targets')
+    return t if isinstance(t, dict) else {}
+
+
+def target_names(product):
+    """The named targets under ``deploy_sha.targets``, in file order (``dev``/``prod`` are not
+    names a target may take)."""
+    return [n for n, c in _targets(product).items() if n not in ENVS and isinstance(c, dict)]
+
+
+def is_target(env):
+    """True for a named target (not ``dev`` or ``prod``)."""
+    return env not in ENVS
+
+
+def names(product):
+    """Every environment the deploy pass may reason about: dev, prod, then the named targets."""
+    return list(ENVS) + target_names(product)
+
+
+def key(env):
+    """The dotted config key of ``env``: ``deploy_sha.prod``, ``deploy_sha.targets.site``."""
+    return f'deploy_sha.{env}' if env in ENVS else f'deploy_sha.targets.{env}'
+
+
 def env_cfg(product, env):
-    d = _cfg(product).get(env)
+    d = _cfg(product).get(env) if env in ENVS else _targets(product).get(env)
     return d if isinstance(d, dict) else {}
+
+
+def paths(product, env):
+    """The target's ``paths`` globs ([] = every trunk commit counts)."""
+    v = env_cfg(product, env).get('paths')
+    if isinstance(v, str):
+        v = [v]
+    return [p for p in v if isinstance(p, str) and p] if isinstance(v, list) else []
+
+
+def reader(product, env):
+    """How a named target's deployed sha is read: ``vercel`` or ``workflow`` (its newest
+    successful run). dev and prod always read their workflow."""
+    return 'vercel' if is_target(env) and env_cfg(product, env).get('source') == 'vercel' \
+        else 'workflow'
 
 
 def _conv(product):
@@ -80,11 +130,11 @@ def legacy_auto(product):
 def mode(product, env='prod'):
     """``auto``, ``manual`` or ``ci`` for ``env``; None for a dev that is not managed."""
     m = env_cfg(product, env).get('mode')
-    if m in MODES.get(env, ()):
+    if m in MODES.get(env, TARGET_MODES):
         return m
     if env == 'prod':
         return 'auto' if legacy_auto(product) else 'manual'
-    return None
+    return 'manual' if is_target(env) else None
 
 
 def auto(product, env='prod'):
@@ -101,14 +151,15 @@ def workflow(product, env='prod'):
     if env == 'prod':
         return (_conv(product).get('deploy_workflow') or env_cfg(product, 'prod').get('workflow')
                 or _cfg(product).get('workflow'))
-    if mode(product, env) == 'ci':
+    if env == 'dev' and mode(product, env) == 'ci':
         return ci_workflow(product)
     return env_cfg(product, env).get('workflow')
 
 
-def source(product):
-    """Where prod's candidate comes from: ``ci`` (the newest green trunk sha) or ``dev``."""
-    v = env_cfg(product, 'prod').get('from')
+def source(product, env='prod'):
+    """Where prod's (or a named target's) candidate comes from: ``ci`` (the newest green trunk
+    sha) or ``dev``."""
+    v = env_cfg(product, env).get('from')
     return v if v in SOURCES else 'ci'
 
 
@@ -134,12 +185,15 @@ def env_applies(product, env):
         return False
     if env == 'dev':
         return mode(product, 'dev') is not None and bool(workflow(product, 'dev'))
+    if is_target(env):
+        return env in target_names(product) and bool(
+            workflow(product, env) or reader(product, env) == 'vercel')
     return bool(workflow(product, 'prod'))
 
 
 def applies(product):
     """True when any environment applies (:func:`env_applies`)."""
-    return any(env_applies(product, e) for e in ENVS)
+    return any(env_applies(product, e) for e in names(product))
 
 
 def findings(product):
@@ -161,17 +215,34 @@ def findings(product):
     if source(product) == 'dev' and not env_applies(product, 'dev'):
         out.append((False, 'deploy_sha.prod.from: dev, but dev is not managed'
                            ' (deploy_sha.dev.mode) — prod has no candidate'))
-    if workflow(product, 'prod') or dm:
+    targets = []
+    for t in target_names(product):
+        tm, wf, k = mode(product, t), workflow(product, t), key(t)
+        if not wf and reader(product, t) != 'vercel':
+            out.append((False, f'{k} names neither a workflow nor source: vercel — {t} is not'
+                               ' managed'))
+            continue
+        if tm in ('auto', 'ci') and not wf:
+            out.append((False, f'{k}.mode: {tm} names no {k}.workflow — nothing dispatches or'
+                               f' observes a run; {t} reads as manual'))
+        if source(product, t) == 'dev' and not env_applies(product, 'dev'):
+            out.append((False, f'{k}.from: dev, but dev is not managed — {t} has no candidate'))
+        scope = ', '.join(paths(product, t)) or 'every commit'
+        targets.append(f"{t} {tm} ({wf or 'no workflow'}, {scope})")
+    if workflow(product, 'prod') or dm or targets:
         prod = (f"prod {mode(product, 'prod')} ({workflow(product, 'prod')}, from "
                 f"{source(product)})" if workflow(product, 'prod') else 'prod not configured')
-        out.append((True, f"dev {dm or 'not managed'} · {prod}"))
+        out.append((True, ' · '.join([f"dev {dm or 'not managed'}", prod] + targets)))
     return out
 
 
 def _age(iso, now):
     try:
-        t = datetime.datetime.fromisoformat(iso.replace('Z', '+00:00'))
-    except (AttributeError, ValueError):
+        if isinstance(iso, (int, float)):  # epoch milliseconds (vercel's createdAt)
+            t = datetime.datetime.fromtimestamp(iso / 1000, tz=datetime.timezone.utc)
+        else:
+            t = datetime.datetime.fromisoformat(iso.replace('Z', '+00:00'))
+    except (AttributeError, ValueError, OverflowError, OSError):
         return None
     h = (now - t).total_seconds() / 3600
     return f'{h / 24:.1f}d' if h >= 48 else f'{h:.0f}h'
@@ -189,12 +260,37 @@ def _green(run):
     return run.get('status') == 'completed' and run.get('conclusion') == 'success'
 
 
-def _behind(product, base, sh):
+def pathspecs(globs):
+    """``paths`` globs as git pathspecs (``**`` crosses ``/``; a trailing ``/`` is a directory)."""
+    return [':(glob)' + (g + '**' if g.endswith('/') else g) for g in globs]
+
+
+def _behind(product, base, sh, globs=None):
+    """Trunk commits ``base`` lacks — only those touching ``globs`` when given."""
     if not base:
         return None
-    count = sh(['git', '-C', product.repo_dir, 'rev-list', '--count',
-                f'{base}..origin/{product.main}'])
+    argv = ['git', '-C', product.repo_dir, 'rev-list', '--count', f'{base}..origin/{product.main}']
+    if globs:
+        argv += ['--'] + pathspecs(globs)
+    count = sh(argv)
     return int(count) if count and count.isdigit() else None
+
+
+def _vercel_deployed(cfg, sh):
+    """(sha, createdAt ms) of the newest READY production deployment of ``cfg.project``, (None,
+    None) when there is none, or None when ``vercel ls`` cannot be read."""
+    out = sh(['vercel', 'ls', str(cfg.get('project') or ''), '--prod', '--scope',
+              str(cfg.get('scope') or ''), '--json'])
+    if out is None:
+        return None
+    parsed = _json(out, (dict, list))
+    if parsed is None:
+        return None
+    deps = parsed.get('deployments', []) if isinstance(parsed, dict) else parsed
+    for d in deps:
+        if isinstance(d, dict) and d.get('state') == 'READY':
+            return (d.get('meta') or {}).get('githubCommitSha'), d.get('createdAt')
+    return None, None
 
 
 def _ahead(product, base, sha, sh):
@@ -235,12 +331,22 @@ def _blank(product, env):
     return {'env': env, 'mode': mode(product, env), 'workflow': workflow(product, env),
             'ci': ci_workflow(product), 'deployed': None, 'prod': None, 'running': None,
             'failed': None, 'candidate': None, 'main': None, 'behind': None, 'age': None,
-            'error': None, 'why': None}
+            'error': None, 'why': None, 'paths': paths(product, env), 'relevant': None,
+            'reader': reader(product, env)}
 
 
 def _done(f):
     f['prod'] = f['deployed']  # the old name, kept for callers that read prod's facts
+    if f['relevant'] is None and not f['paths']:
+        f['relevant'] = f['behind']
     return f
+
+
+def _set_behind(product, f, sh):
+    f['behind'] = _behind(product, f['deployed'], sh)
+    if f['paths']:
+        f['relevant'] = (0 if f['behind'] == 0
+                         else _behind(product, f['deployed'], sh, f['paths']))
 
 
 def facts(product, sh=_sh, now=None, env='prod', _ci=None):
@@ -256,24 +362,33 @@ def facts(product, sh=_sh, now=None, env='prod', _ci=None):
         f['error'] = f"{f['ci']} runs on {trunk} unreadable (gh run list)"
         return _done(f)
     f['main'] = sh(['git', '-C', product.repo_dir, 'rev-parse', f'origin/{trunk}'])
-    if f['mode'] == 'ci':  # the product's CI deploys it; observe only
+    if env == 'dev' and f['mode'] == 'ci':  # the product's CI deploys it; observe only
         run = _dev_job_run(product, ci, sh) or {}
         f['deployed'], f['age'] = run.get('headSha'), _age(run.get('updatedAt'), now)
-        f['behind'] = _behind(product, f['deployed'], sh)
+        _set_behind(product, f, sh)
         return _done(f)
-    runs = _runs(product, f['workflow'], sh)
+    runs = _runs(product, f['workflow'], sh) if f['workflow'] else []
     if runs is None:
         f['error'] = f"{f['workflow']} runs unreadable (gh run list)"
         return _done(f)
-    last = next((r for r in runs if r.get('conclusion') == 'success'), {})
-    f['deployed'], f['age'] = last.get('headSha'), _age(last.get('updatedAt'), now)
+    if f['reader'] == 'vercel':
+        got = _vercel_deployed(env_cfg(product, env), sh)
+        if got is None:
+            f['error'] = f"{env}'s deployed sha unreadable (vercel ls)"
+            return _done(f)
+        f['deployed'], f['age'] = got[0], _age(got[1], now)
+    else:
+        last = next((r for r in runs if r.get('conclusion') == 'success'), {})
+        f['deployed'], f['age'] = last.get('headSha'), _age(last.get('updatedAt'), now)
     live = next((r for r in runs if r.get('status') != 'completed'), None)
     if live:
         f['running'] = (live.get('databaseId'), live.get('headSha'))
-    f['behind'] = _behind(product, f['deployed'], sh)
-    if env == 'prod' and source(product) == 'dev':
+    _set_behind(product, f, sh)
+    if f['mode'] == 'ci' or f['relevant'] == 0:  # observed only, or nothing relevant to deploy
+        return _done(f)
+    if env != 'dev' and source(product, env) == 'dev':
         if not env_applies(product, 'dev'):
-            f['why'] = 'deploy_sha.prod.from is dev, but dev is not managed (deploy_sha.dev.mode)'
+            f['why'] = f'{key(env)}.from is dev, but dev is not managed (deploy_sha.dev.mode)'
             return _done(f)
         dev = facts(product, sh=sh, now=now, env='dev', _ci=ci)
         if dev['error']:
@@ -304,6 +419,32 @@ def _head(env):
     return 'deploy:' if env == 'prod' else f'deploy {env}:'
 
 
+def _lag(product, f, env):
+    """How far ``env`` is behind the trunk: the named targets say the relevant count (the
+    commits touching their ``paths``) and their mode; dev and prod keep their plain count."""
+    trunk, age = product.main, (f"deployed {f['age']} ago" if f['age'] else None)
+    if not is_target(env):
+        return (f"{trunk} is {f['behind']} commits ahead of {env} {_s(f['deployed'])}"
+                + (f" ({age})" if age else ''))
+    rel = 'relevant ' if f['paths'] else ''
+    extra = [f"{f['behind']} in all" if f['paths'] else None, age, f"mode {f.get('mode')}"]
+    return (f"{env} {_s(f['deployed'])} is {f['relevant']} {rel}commits behind {trunk}"
+            f" ({'; '.join(x for x in extra if x)})")
+
+
+def _manual(product, f, env):
+    """The loud MANUAL clause: the sha waiting on a hand dispatch (a hand deploy, for a target
+    with no workflow)."""
+    wf, k = f['workflow'], key(env)
+    if not is_target(env):
+        return (f"MANUAL: green {_s(f['candidate'])} waits on a hand dispatch of {wf}"
+                f" ({k}.mode: {f.get('mode')})")
+    rel = 'relevant ' if f['paths'] else ''
+    how = f'a hand dispatch of {wf}' if wf else f'a hand deploy — no {k}.workflow to dispatch'
+    return (f"MANUAL: {env} is {f['relevant']} {rel}commits behind — waits on {how}; green"
+            f" {_s(f['candidate'])} is the newest candidate ({k}.mode: {f.get('mode')})")
+
+
 def decide(product, f, env=None):
     """``(dispatch, line)`` from :func:`facts`: whether to dispatch the candidate now, and the one
     line that says what the environment is doing or waiting on."""
@@ -312,14 +453,18 @@ def decide(product, f, env=None):
     if f['error']:
         return False, f"{head} {f['error']} — {env} state unknown"
     at_main = f['behind'] == 0 or bool(f['main'] and f['main'] == f['deployed'])
-    lag = (f"{trunk} is {f['behind']} commits ahead of {env} {_s(f['deployed'])}"
-           + (f" (deployed {f['age']} ago)" if f['age'] else ''))
+    lag = _lag(product, f, env)
     if f.get('mode') == 'ci':
         state = (f"no successful {env} deploy readable on {trunk}" if not f['deployed']
                  else f"{env} {_s(f['deployed'])} is {trunk}" if at_main else lag)
-        return False, f"{head} {f['ci']} deploys {env} on its own (ASF observes) — {state}"
+        who = f['ci'] if env == 'dev' else (wf or f['reader'])
+        return False, f"{head} {who} deploys {env} on its own (ASF observes) — {state}"
     if at_main:
         return False, f"{head} {env} {_s(f['deployed'])} is {trunk}"
+    if f['paths'] and f['relevant'] == 0:
+        return False, (f"{head} {env} {_s(f['deployed'])} has every {trunk} commit touching"
+                       f" {', '.join(f['paths'])} ({f['behind']} other commits since;"
+                       f" mode {f.get('mode')})")
     if f['running']:
         rid, sha = f['running']
         return False, f"{head} {wf} run {rid} for {_s(sha)} is queued or running — {lag}"
@@ -331,16 +476,15 @@ def decide(product, f, env=None):
     if f['failed']:
         return False, (f"{head} {wf} for {_s(f['candidate'])} FAILED (run {f['failed']}) — not"
                        f" retried; {lag}; the next green sha dispatches again")
-    if f.get('mode') != 'auto':
-        return False, (f"{head} {lag} — MANUAL: green {_s(f['candidate'])} waits on a hand"
-                       f" dispatch of {wf} (deploy_sha.{env}.mode: manual)")
+    if f.get('mode') != 'auto' or not wf:
+        return False, f"{head} {lag} — {_manual(product, f, env)}"
     return True, f"{head} {lag} — dispatching {wf} for green {_s(f['candidate'])}"
 
 
 def _each(product, sh):
-    """[(env, facts)] for every environment that applies, dev first; the trunk's CI runs are
-    read once and shared."""
-    envs = [e for e in ENVS if env_applies(product, e)]
+    """[(env, facts)] for every environment that applies — dev, prod, then the named targets;
+    the trunk's CI runs are read once and shared."""
+    envs = [e for e in names(product) if env_applies(product, e)]
     if not envs:
         return []
     ci = _runs(product, ci_workflow(product), sh, branch=product.main)
@@ -361,9 +505,21 @@ def _read_only(decision):
     return text.replace(' — dispatching ', ' — the next tick dispatches ', 1) if go else text
 
 
+def states(product, sh=_sh):
+    """[(env, facts)] for every environment that applies, read-only (``asf prod`` reads the
+    deployed sha of each target from here)."""
+    return _each(product, sh)
+
+
+def view_line(product, env, f):
+    """The read-only line for one environment's facts."""
+    return _read_only(decide(product, f, env))
+
+
 def lines(product, sh=_sh):
-    """The read-only lines (no dispatch), one per environment that applies, dev first."""
-    return [_read_only(decide(product, f, e)) for e, f in _each(product, sh)]
+    """The read-only lines (no dispatch), one per environment that applies: dev, prod, then the
+    named targets."""
+    return [view_line(product, e, f) for e, f in _each(product, sh)]
 
 
 def line(product, sh=_sh):
