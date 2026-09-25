@@ -93,23 +93,48 @@ def is_git_hook_ours(text, name):
 
 
 #: A record pre-commit line that runs ``asf check`` over the whole record — the invocation
-#: before ``--staged`` (group 1 ends at the ``check`` word, where the flag is inserted).
-WHOLE_RECORD_CHECK_RE = re.compile(r'''(?m)^(?!\s*#)(.*?\basf['"]?\s+check)\b(?![^\n]*--(?:staged|invariants)\b)''')
+#: before ``--staged``. Only a real command: ``asf`` (bare, or a path ending ``/asf``, quoted or
+#: not; ``exec`` before it allowed) as the line's first word, then the ``check`` word, then
+#: nothing but ``--product`` flags up to the line's end or its ``;`` / ``&&`` / ``||`` / ``|``.
+#: Never ``check-foo``, a quoted string (``echo "asf check"``), a comment, ``--deep`` /
+#: ``--invariants`` / ``--staged``, or explicit paths. Group ``head`` ends at ``check``, where
+#: the flag is inserted.
+WHOLE_RECORD_CHECK_RE = re.compile(
+    r"""(?m)^(?P<head>[ \t]*(?:exec[ \t]+)?"""
+    r"""(?:asf|"[^"\n]*/asf"|'[^'\n]*/asf'|[^\s"';&|#]*/asf)[ \t]+check)"""
+    r"""(?=(?:[ \t]+--product(?:=|[ \t]+)[^\s;&|]+)*[ \t]*(?:$|[;&|]))""")
+
+#: The check line an older ``asf init`` wrote into the record's pre-commit: the staged paths
+#: passed to ``asf check`` through ``xargs`` — a deleted card never checked, its absence never
+#: judged. :func:`init_hook_upgrade` swaps this one line for :data:`STAGED_CHECK_LINE`.
+OLD_INIT_CHECK_LINE = "echo \"$staged\" | tr '\\n' '\\0' | xargs -0 asf check || exit 1"
+STAGED_CHECK_LINE = 'asf check --staged || exit 1'
+
+
+def add_staged_flag(text):
+    """``text`` with ``--staged`` after each whole-record ``asf check`` line's ``check`` word (and
+    an older ``asf init``'s ``xargs`` check line swapped for :data:`STAGED_CHECK_LINE`) — every
+    other line and flag kept as it stands."""
+    lines = text.split('\n')
+    lines = [STAGED_CHECK_LINE if line.strip() == OLD_INIT_CHECK_LINE else line for line in lines]
+    return WHOLE_RECORD_CHECK_RE.sub(lambda m: m.group('head') + ' --staged', '\n'.join(lines))
 
 
 def init_hook_upgrade(text, name):
     """The text an ``asf init``-written hook file should now have, when ``text`` is one written
     by an older ``asf init`` (its :data:`asf.init.INIT_MARKER`) that lacks the redaction gate or
     the pre-commit's ``--staged`` check — ASF's own file, so it is brought up to date rather than
-    called foreign. None otherwise."""
+    called foreign: a missing gate gets the whole current hook; a gated one only its check line
+    edited (:func:`add_staged_flag`), so a line or flag the operator added stays. None otherwise."""
     from asf import init  # local: init imports this module
     text = text or ''
     if init.INIT_MARKER not in text:
         return None
-    if name == 'pre-commit' and text != init.PRE_COMMIT and WHOLE_RECORD_CHECK_RE.search(text):
-        return init.PRE_COMMIT
     if is_git_hook_ours(text, name):
-        return None
+        if name != 'pre-commit':
+            return None
+        new = add_staged_flag(text)
+        return None if new == text else new
     return {'pre-commit': init.PRE_COMMIT, 'pre-push': init.PRE_PUSH}.get(name)
 
 
@@ -120,7 +145,7 @@ def staged_check_upgrade(text, name):
     so a second run changes nothing."""
     if name != 'pre-commit' or not is_git_hook_ours(text, name):
         return None
-    new = WHOLE_RECORD_CHECK_RE.sub(lambda m: m.group(1) + ' --staged', text)
+    new = add_staged_flag(text)
     return None if new == text else new
 
 

@@ -15,33 +15,42 @@ def do_index(root):
         for f, line, why in parse_errors:
             print(f"{f}:{line}: {why}", file=sys.stderr)
         return 1
+    refresh(root, create_index=True)
+    return 0
+
+
+def refresh(root, scrub=None, only=None, index=True, create_index=False):
+    """Rewrite every card's Children/Backlinks and ``index.json`` to what the record derives —
+    :func:`do_index` for a record that may carry a card with a parse error: that card alone is
+    skipped (its index entry kept as it stands), never the refresh of every other. ``only`` (a
+    set of relpaths) limits the cards rewritten; ``index`` False leaves ``index.json`` alone, and
+    a record without one is given one only with ``create_index``. Returns the relpaths written."""
+    by_id, parse_errors = load_items(root)
     canonical, _dupes = canonicalize(by_id)
     derived = compute_derived(canonical)
-    scrub = title_scrub(root)  # a protected name in one title is never copied into another card
-
+    if scrub is None:
+        scrub = title_scrub(root)  # a protected name in one title is never copied into another card
+    written = []
     for iid, rec in canonical.items():
+        if only is not None and rec['relpath'] not in only:
+            continue
         new_body = expected_body(rec, canonical, derived, scrub)
         if new_body != rec['body']:
             new_text = frontmatter.render(rec['meta'], new_body)
             with open(rec['path'], 'w', encoding='utf-8') as f:
                 f.write(new_text)
-
-    write_index_json(root, canonical, derived)
-    return 0
-
-
-def refresh_index_json(root):
-    """Rewrite ``index.json`` alone (no card body) when it no longer matches the record — what
-    ``asf set`` runs after its write, so a field it changed never leaves the index stale for the
-    pre-commit check to refuse. A record with a parse error is left alone."""
-    by_id, parse_errors = load_items(root)
-    if parse_errors:
-        return
-    canonical, _dupes = canonicalize(by_id)
-    write_index_json(root, canonical, compute_derived(canonical))
+            written.append(rec['relpath'])
+    if index and (create_index or os.path.isfile(os.path.join(root, 'index.json'))):
+        broken = {f for f, _line, _why in parse_errors}
+        if write_index_json(root, canonical, derived, keep=broken):
+            written.append('index.json')
+    return written
 
 
-def write_index_json(root, canonical, derived):
+def write_index_json(root, canonical, derived, keep=()):
+    """Write ``index.json`` when its items differ from the record's; True when it was written.
+    An entry whose card is in ``keep`` (relpaths — the cards that fail to parse) is carried over
+    as it stands: the one card that cannot be read never takes the rest of the index with it."""
     data = build_index_data(canonical, derived)
     index_path = os.path.join(root, 'index.json')
     old_items = None
@@ -59,9 +68,21 @@ def write_index_json(root, canonical, derived):
             data['schema_version'] = old['schema_version']
         else:
             del data['schema_version']  # unstamped stays unstamped until `schema-migrate`
+        if keep and isinstance(old_items, dict):
+            for iid, entry in old_items.items():
+                if iid not in data['items'] and entry_relpath(iid, entry) in keep:
+                    data['items'][iid] = entry
     if old_items != data['items']:
         with open(index_path, 'w', encoding='utf-8') as f:
             f.write(render_index_json(data))
+        return True
+    return False
+
+
+def entry_relpath(iid, entry):
+    """The card an ``index.json`` entry was derived from, relative to the record."""
+    folder = (entry or {}).get('folder') if isinstance(entry, dict) else None
+    return f"{folder}/{iid}.md" if folder else None
 
 
 def cmd_index(args, root):

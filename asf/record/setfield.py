@@ -37,11 +37,6 @@ def cmd_set(args, root):
     if err:
         print(f"error: {err}", file=sys.stderr)
         return 2
-    if os.path.isfile(os.path.join(root, 'index.json')):
-        # the index mirrors every card's typed fields: refreshed here, so the commit that
-        # carries this change never trips "index.json is stale"
-        from asf.record.index import refresh_index_json
-        refresh_index_json(root)
     print(f"{args.id}: set {', '.join(updates)}")
     return 0
 

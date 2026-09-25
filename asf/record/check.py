@@ -2,18 +2,21 @@
 import json
 import os
 import re
-import subprocess
 import sys
+import tempfile
+from collections import Counter
 
 from asf.conventions import DEFAULT_SPECS_DIR
 from asf.groom import shape
 from asf.init import ITEM_FOLDERS as LAYOUT_FOLDERS, STREAM_FOLDERS
-from asf.record import frontmatter
+from asf.record import frontmatter, tree
 from asf.record.core import (
     BARE_DECISION_RE, FOLDER_TO_TYPE, ID_RE, NO_PARENT_TYPES, PARENT_TYPES, build_index_data,
-    canonicalize, compute_derived, expected_body, is_open, load_items, parse_sections, today,
-    writes_intersect,
+    canonicalize, compute_derived, expected_body, is_open, load_items, parse_sections,
+    title_scrub, today, writes_intersect,
 )
+from asf.record.index import entry_relpath
+from asf.redact import _run_git
 
 ACCEPTANCE_ITEM_RE = re.compile(r'(?m)^- \[[ x]\]\s+\S')
 BULLET_RE = re.compile(r'(?m)^- \S')
@@ -103,44 +106,75 @@ def check_residue(canonical, add, find_line, warn=None):
             f"— it can never close; see {SPEC_CLOSING} §2.1")
 
 
-def staged_paths(root):
-    """The paths the pending commit in the record checkout ``root`` touches, relative to
-    ``root`` — added, copied, modified, renamed or deleted. ``git diff --cached`` honours the
+def committing_repo(root):
+    """``(repo, prefix)`` for the commit a pre-commit hook judges: ``repo`` the top of the checkout
+    that is committing — the cwd's, where git runs its hook (``GIT_DIR`` / ``GIT_WORK_TREE``
+    honoured) — which may be another checkout of the record than ``root`` (a worktree, the
+    tick's clone); ``prefix`` where the record sits in it, as ``root`` sits in its own repo
+    (``''`` at the top). None when neither is a git checkout."""
+    top = _run_git(os.getcwd(), ['rev-parse', '--show-toplevel'])
+    if top.returncode != 0:
+        top = _run_git(root, ['rev-parse', '--show-toplevel'])
+        if top.returncode != 0:
+            return None
+    prefix = _run_git(root, ['rev-parse', '--show-prefix'])
+    return top.stdout.strip(), (prefix.stdout.strip() if prefix.returncode == 0 else '')
+
+
+def staged_paths(repo, prefix=''):
+    """The record paths (relative to the record at ``prefix``) the pending commit in ``repo``
+    touches — added, copied, modified, renamed or deleted. ``git diff --cached`` honours the
     ``GIT_INDEX_FILE`` a ``git commit --only -- <path>`` hands its hook, so a command that commits
-    one file sees that one file. None when ``root`` is not a git checkout."""
-    p = subprocess.run(['git', 'diff', '--cached', '--name-only', '--relative', '-z',
-                        '--diff-filter=ACMRD'], cwd=root, capture_output=True, text=True)
+    one file sees that one file. None when ``repo`` is not a git checkout."""
+    p = _run_git(repo, ['diff', '--cached', '--name-only', '-z', '--diff-filter=ACMRD', '--',
+                        prefix or '.'])
     if p.returncode != 0:
         return None
-    return {x for x in p.stdout.split('\0') if x}
+    return {x[len(prefix):] for x in p.stdout.split('\0') if x}
 
 
 def cmd_check(args, root):
+    if getattr(args, 'staged', False):
+        return cmd_check_staged(root)
     paths = args.paths or None
     restrict = None
     if paths:
         restrict = {os.path.relpath(os.path.abspath(p), root) for p in paths}
-    staged = None
-    if getattr(args, 'staged', False):
-        # the pre-commit mode: what the commit touches refuses it; an error in a file nobody
-        # staged is the record's standing debt, printed but never a reason to refuse this commit
-        staged = staged_paths(root)
-        if staged is None:
-            print('error: --staged needs the record to be a git checkout', file=sys.stderr)
-            return 2
-        if not staged:
-            return 0
+    findings, warnings, _index_wrong = record_findings(root)
+    if restrict is not None:
+        findings = [f for f in findings
+                    if f[0] in restrict or f[0] == 'index.json' or f[0] in LAYOUT]
+        warnings = [w for w in warnings if w[0] in restrict]
+    findings.sort(key=lambda f: (f[0], f[1]))
+    for path, line, msg in findings:
+        print(f"{path}:{line}: {msg}")
+    for path, line, msg in sorted(warnings, key=lambda w: (w[0], w[1])):
+        print(f"{path}:{line}: warning: {msg}")
+    return 1 if findings else 0
 
+
+# the layout the README names — item folders plus the stream folders `asf init` lays down;
+# a record missing one of these isn't a bad item, it's a tick waiting to fail on a missing dir
+LAYOUT = tuple(LAYOUT_FOLDERS) + tuple(STREAM_FOLDERS)
+INDEX_STALE = 'index.json is stale (run `asf index`)'
+
+
+def record_findings(root, scrub=None, layout=True):
+    """Every check over the record at ``root``: ``(findings, warnings, index_wrong)`` — findings
+    and warnings as ``(relpath, line, message)``; ``index_wrong`` the ``index.json`` entries that
+    differ from what the cards derive, one ``(id, expected, on disk)`` key each (a card that fails
+    to parse is its own finding, never a stale entry too). ``scrub`` is the title scrub the
+    derived sections are judged with (by default the record's own); ``layout`` False skips the
+    layout folders (a scratch copy of the record has only its cards)."""
     by_id, parse_errors = load_items(root)
     canonical, dupes = canonicalize(by_id)
     derived = compute_derived(canonical)
 
     findings = []  # (relpath, line, message)
+    if scrub is None:
+        scrub = title_scrub(root)
 
-    # the layout the README names — item folders plus the stream folders `asf init` lays down;
-    # a record missing one of these isn't a bad item, it's a tick waiting to fail on a missing dir
-    layout_folders = LAYOUT_FOLDERS + STREAM_FOLDERS
-    for folder in layout_folders:
+    for folder in LAYOUT if layout else ():
         if not os.path.isdir(os.path.join(root, folder)):
             findings.append((folder, 1, f"{folder}/ is missing (run `mkdir -p {folder}`)"))
 
@@ -237,7 +271,7 @@ def cmd_check(args, root):
                 add(rec, header_offset + i + 1,
                     f"bare decision reference {m.group(0)!r}; write it as [[D-nnnn]]")
         # Children/Backlinks staleness
-        exp_body = expected_body(rec, canonical, derived)
+        exp_body = expected_body(rec, canonical, derived, scrub)
         if exp_body != rec['body']:
             _p, exp_sections = parse_sections(exp_body)
             for (heading, content), (_h2, cur_content) in zip(exp_sections, sections):
@@ -332,7 +366,7 @@ def cmd_check(args, root):
                             f"writes: {g1!r} intersects Active task {t2['meta'].get('id')}'s {g2!r}")
 
     # index.json staleness
-    index_stale_by = set()  # relpaths of the cards whose index entry is out of date
+    index_wrong = set()  # (id, expected entry, entry on disk) for every entry out of date
     index_path = os.path.join(root, 'index.json')
     expected_index = build_index_data(canonical, derived)
     if not os.path.isfile(index_path):
@@ -345,56 +379,67 @@ def cmd_check(args, root):
                 on_disk = None
         exp_items = expected_index['items']
         cur_items = (on_disk or {}).get('items', {})
-        if on_disk is None or exp_items != cur_items:
-            findings.append(('index.json', 1, 'index.json is stale (run `asf index`)'))
-            # the cards whose entry differs: a staged one among them means this commit made
-            # (or kept) the index stale; none means the staleness was there before it
-            if not isinstance(cur_items, dict):
-                cur_items = {}
-            for iid in set(exp_items) | set(cur_items):
-                if exp_items.get(iid) == cur_items.get(iid):
-                    continue
-                if iid in canonical:
-                    index_stale_by.add(canonical[iid]['relpath'])
-                else:
-                    folder = (cur_items.get(iid) or {}).get('folder')
-                    if folder:
-                        index_stale_by.add(f"{folder}/{iid}.md")
-
-    if staged is not None:
-        return _report_staged(findings, warnings, staged, index_stale_by, layout_folders)
-
-    if restrict is not None:
-        findings = [f for f in findings
-                    if f[0] in restrict or f[0] == 'index.json' or f[0] in layout_folders]
-
-    if restrict is not None:
-        warnings = [w for w in warnings if w[0] in restrict]
-    findings.sort(key=lambda f: (f[0], f[1]))
-    for path, line, msg in findings:
-        print(f"{path}:{line}: {msg}")
-    for path, line, msg in sorted(warnings, key=lambda w: (w[0], w[1])):
-        print(f"{path}:{line}: warning: {msg}")
-    return 1 if findings else 0
+        if not isinstance(cur_items, dict):
+            cur_items = {}
+        broken = {f for f, _line, _why in parse_errors}
+        for iid in set(exp_items) | set(cur_items):
+            if exp_items.get(iid) == cur_items.get(iid):
+                continue
+            if iid not in exp_items and entry_relpath(iid, cur_items[iid]) in broken:
+                continue  # the card is unreadable: its parse error is the finding, not the index
+            index_wrong.add((iid, _key(exp_items.get(iid)), _key(cur_items.get(iid))))
+        if on_disk is None or index_wrong:
+            findings.append(('index.json', 1, INDEX_STALE))
+    return findings, warnings, index_wrong
 
 
-def _blocks(finding, staged, index_stale_by, layout_folders):
-    """Whether a finding refuses the commit that stages ``staged``: one in a staged file does,
-    and so does a stale index.json the staged change is part of (index.json staged, or a staged
-    card whose entry is out of date). A missing layout folder is the record's, never the commit's."""
-    path = finding[0]
-    if path in layout_folders:
-        return False
-    if path == 'index.json':
-        return 'index.json' in staged or bool(index_stale_by & staged)
-    return path in staged
+def _key(entry):
+    return json.dumps(entry, sort_keys=True)
 
 
-def _report_staged(findings, warnings, staged, index_stale_by, layout_folders):
-    blocking = sorted((f for f in findings if _blocks(f, staged, index_stale_by, layout_folders)),
-                      key=lambda f: (f[0], f[1]))
-    standing = sorted((f for f in findings if not _blocks(f, staged, index_stale_by, layout_folders)),
-                      key=lambda f: (f[0], f[1]))
+def cmd_check_staged(root):
+    """``asf check --staged``, the record pre-commit: the commit is judged by what it stages —
+    the cards as the index holds them (``git show :<path>``, never the working tree) against the
+    same check over ``HEAD``. An error the staged state has and ``HEAD`` has not refuses the
+    commit, wherever it sits: in a staged card, or in one the staged change breaks (a deleted
+    parent or ``blockedBy`` target, a stale Children/Backlinks, a new duplicate id, an Active
+    ``writes:`` overlap, an ``index.json`` entry gone stale). An error ``HEAD`` already carries
+    is the record's standing debt: printed as a warning, never a reason to refuse this commit."""
+    found = committing_repo(root)
+    if found is None:
+        print('error: --staged needs the record to be a git checkout', file=sys.stderr)
+        return 2
+    repo, prefix = found
+    staged = staged_paths(repo, prefix)
+    if staged is None:
+        print('error: --staged needs the record to be a git checkout', file=sys.stderr)
+        return 2
+    if not staged:
+        return 0
+    scrub = title_scrub(root)  # the record's own scrub: a scratch copy carries no name lists
+    with tempfile.TemporaryDirectory(prefix='asf-check-') as scratch:
+        head_dir = os.path.join(scratch, 'head')
+        staged_dir = os.path.join(scratch, 'staged')
+        tree.lay_out_head(repo, head_dir, tree.record_paths(prefix), scratch)
+        tree.lay_out(repo, staged_dir, tree.record_paths(prefix))
+        base = record_findings(os.path.join(head_dir, prefix), scrub, layout=False)
+        now = record_findings(os.path.join(staged_dir, prefix), scrub, layout=False)
+    return _report_staged(now, base, staged)
+
+
+def _report_staged(now, base, staged):
+    findings, warnings, index_wrong = now
+    base_findings, _base_warnings, base_index_wrong = base
+    standing_keys = Counter((path, msg) for path, _line, msg in base_findings)
+    blocking, standing = [], []
+    for f in sorted(findings, key=lambda f: (f[0], f[1])):
+        path, _line, msg = f
+        if msg == INDEX_STALE:
+            new = bool(index_wrong - base_index_wrong)  # an entry this commit made (or left) wrong
+        else:
+            new = standing_keys[(path, msg)] == 0  # lines move; the error, by file and text, not
+            standing_keys[(path, msg)] -= 1
+        (blocking if new else standing).append(f)
     for path, line, msg in blocking:
         print(f"{path}:{line}: {msg}")
     for path, line, msg in sorted((w for w in warnings if w[0] in staged),
@@ -403,7 +448,7 @@ def _report_staged(findings, warnings, staged, index_stale_by, layout_folders):
     for path, line, msg in standing:
         print(f"{path}:{line}: warning: {msg}")
     if standing:
-        print(f"{len(standing)} pre-existing errors in files not staged — not blocking")
+        print(f"{len(standing)} pre-existing errors already on HEAD — not blocking")
     return 1 if blocking else 0
 
 

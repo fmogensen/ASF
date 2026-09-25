@@ -319,9 +319,12 @@ def _parse_diff_added_lines(diff_text):
     return files
 
 
-def _run_git(repo, args, input_text=None):
+def _run_git(repo, args, input_text=None, git_env=None):
+    """``git <args>`` in ``repo``; ``git_env`` (``{name: value}``) is laid over the process's own
+    environment — ``GIT_INDEX_FILE`` for a command that must read or write a scratch index."""
     return subprocess.run(['git'] + args, cwd=repo, capture_output=True, text=True,
-                          input=input_text)
+                          input=input_text,
+                          env=dict(os.environ, **git_env) if git_env else None)
 
 
 def scan_staged(repo, pats):
