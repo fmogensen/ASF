@@ -132,6 +132,13 @@ conventions:
   # (NEEDS OPERATOR), the same as an account's own (see guide/operating.md, Safety).
   # auth_env:
   #   GH_TOKEN: ~/.ASF/secrets/sample.gh
+  # a product whose code PRs its external CI gates (landing: pull-request with landing_checks,
+  # or landing_checks_missing wait for code): regexes naming its own full-suite or full-gate
+  # commands. The approvals hook refuses a session a Bash simple command one matches (leading
+  # VAR=value dropped, heredoc bodies ignored) — the full suite is that CI's — and records it for
+  # audit only: no hold, nothing parked. Match the unscoped forms only, so a runner given paths
+  # (a targeted run) stays allowed. Ignored for any other product (default: none).
+  # full_suite_commands: ['^make test$', '^make check\b']
 
 # CI: which provider runs checks, which workflow file, budgets and runner labels.
 ci:

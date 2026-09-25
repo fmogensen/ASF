@@ -365,6 +365,24 @@ A product whose code PRs its external CI gates (`landing: pull-request` with
 standing rule in every brief: run only the targeted checks locally and push — the full suite is
 that CI's, and a PR merges only once it is green. Any other product's own gate is unchanged.
 
+That rule is enforced, not only written: the product names its own full-suite and full-gate
+commands in `conventions.full_suite_commands`, a list of regexes, and the approvals hook refuses a
+session any Bash simple command one of them matches (split on `&&`, `||`, `;`, `|` and lines,
+leading `VAR=value` dropped, heredoc bodies ignored), telling it to run only the targeted tests for
+what it changed. The refusal is written to `approvals.jsonl` as a `refused-full-suite` line for the
+audit trail only — no hold, nothing parked, the item keeps its slot. Match only the unscoped forms,
+so a runner given specific paths stays allowed:
+
+```yaml
+conventions:
+  full_suite_commands:
+    - '^make test$'          # bare: refused; `make test T=tests/test_x.py` is allowed
+    - '^make check\b'
+```
+
+A product without external CI ignores the key; a pattern that is not a regex is a red `doctor`
+finding.
+
 S1 reserve: while an S1 Bug is open, each lane keeps `reserve_for_s1` slots for `BUG → FIX` rows.
 
 `asf capacity --product <p>` (or `--all`, `/asf:capacity`) prints the resolved numbers and which

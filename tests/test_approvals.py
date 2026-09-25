@@ -256,6 +256,61 @@ class HookTest(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual(_pushes_trunk(cmd, 'main'), want)
 
+    # the example patterns a product names: its unscoped full-suite and full-gate forms only
+    FULL_SUITE = ("conventions:\n  landing: pull-request\n  landing_checks: [gate]\n"
+                  "  full_suite_commands:\n"
+                  "    - '^(npx |pnpm (exec )?)?turbo run test\\b'\n"
+                  "    - '^pnpm( -r| --recursive)? test\\s*$'\n"
+                  "    - '^pnpm gate\\b'\n"
+                  "    - 'm0-gate\\.sh'\n")
+
+    def test_an_external_ci_product_refuses_its_full_suite_without_a_hold(self):
+        self.write_product(self.FULL_SUITE)
+        for cmd in ('turbo run test', 'pnpm test', 'pnpm -r test', 'pnpm --recursive test',
+                    'pnpm gate', 'bash scripts/m0-gate.sh', 'npx turbo run test --concurrency=4',
+                    'cd /repo && CI=1 pnpm test', 'pnpm install\npnpm test 2>&1 | tail -40'):
+            with self.subTest(cmd=cmd):
+                rc, out = self.call('Bash', {'command': cmd})
+                self.assertEqual(rc, 2, out)
+                self.assertIn(approvals.FULL_SUITE_REFUSAL, out)
+                self.assertNotIn('NEEDS OPERATOR:', out)
+        # audit only: a refused-full-suite line per call, and no hold — nothing open, nothing
+        # parked, nothing in the relaunch brief
+        self.assertEqual({r['event'] for r in self.ledger()}, {'refused-full-suite'})
+        self.assertTrue(all('hold' not in r for r in self.ledger()))
+        self.assertEqual(approvals.open_holds('demo'), [])
+        self.assertEqual(approvals.parked('demo'), {})
+        self.assertEqual(approvals.refusal_text('demo', self.ITEM), '')
+
+    def test_a_targeted_run_is_allowed_on_an_external_ci_product(self):
+        self.write_product(self.FULL_SUITE)
+        for cmd in ('pnpm --filter @demo/db test -- src/repos/teach-recordings.test.ts',
+                    'pnpm -C packages/db test src/x.test.ts',
+                    'npx vitest run src/x.test.ts',
+                    'pnpm vitest run packages/db/src/x.test.ts',
+                    'pnpm -r test src/x.test.ts',
+                    "cat > notes.md <<'EOF'\nrun pnpm test and turbo run test in CI\nEOF",
+                    'git commit -m "CI runs turbo run test"'):
+            with self.subTest(cmd=cmd):
+                rc, out = self.call('Bash', {'command': cmd})
+                self.assertEqual(rc, 0, out)
+        self.assertNoLedger()
+
+    def test_a_product_without_external_ci_may_run_its_full_suite(self):
+        self.write_product(self.FULL_SUITE.replace(
+            'landing: pull-request', 'landing: fast-forward'))
+        for cmd in ('turbo run test', 'pnpm test', 'pnpm gate'):
+            with self.subTest(cmd=cmd):
+                rc, out = self.call('Bash', {'command': cmd})
+                self.assertEqual(rc, 0, out)
+        self.assertNoLedger()
+
+    def test_a_bad_full_suite_pattern_is_a_config_problem(self):
+        from asf import conventions
+        self.assertEqual(conventions.validate_mapping({'full_suite_commands': ['^ok$']}), [])
+        self.assertTrue(conventions.validate_mapping({'full_suite_commands': ['(']}))
+        self.assertTrue(conventions.validate_mapping({'full_suite_commands': 'pnpm test'}))
+
     def test_reading_the_hooks_path_is_not_touching_security(self):
         self.write_product(self.ALL_HUMAN_NOW)
         for cmd in ('git config core.hooksPath', 'git config core.hooksPath; ls .githooks',

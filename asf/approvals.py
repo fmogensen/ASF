@@ -283,29 +283,38 @@ def _strip_heredocs(command):
     return _HEREDOC.sub(' \n', command)
 
 
-def _pushes_trunk(command, main):
-    """True when one of the command's own ``git push`` invocations names the trunk as a refspec.
-    Each simple command is split off the compound (``&&``, ``||``, ``;``, ``|``) and read with
-    shlex, so ``main`` in a commit message, a fetch or a log range never counts."""
+_OPERATORS = ('&&', '||', ';', '|', '&', ';;')
+
+
+def _simple_commands(command):
+    """The simple commands of ``command`` as argv lists: heredoc bodies stripped, each line a
+    command of its own, the compound split on ``&&``, ``||``, ``;``, ``|`` and ``&``, each part
+    read with shlex. Raises ValueError on unbalanced quotes — the caller picks its safe side."""
     import shlex
-    command = _strip_heredocs(command)
-    if not re.search(r'\bgit\b.*\bpush\b', command):
-        return False
-    command = command.replace('\n', ' ; ')  # a line is a command of its own
-    try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
-        lexer.whitespace_split = True
-        tokens = list(lexer)
-    except ValueError:  # unbalanced quotes: fall back to refusing, the safe side
-        return True
-    trunk = {main, f'refs/heads/{main}'}
+    command = _strip_heredocs(command).replace('\n', ' ; ')  # a line is a command of its own
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
     out = [[]]
-    for t in tokens:
-        if t in ('&&', '||', ';', '|', '&', ';;'):
+    for t in lexer:
+        if t in _OPERATORS:
             out.append([])
         else:
             out[-1].append(t)
-    for argv in out:
+    return [argv for argv in out if argv]
+
+
+def _pushes_trunk(command, main):
+    """True when one of the command's own ``git push`` invocations names the trunk as a refspec.
+    Each simple command is split off the compound (:func:`_simple_commands`), so ``main`` in a
+    commit message, a fetch or a log range never counts."""
+    if not re.search(r'\bgit\b.*\bpush\b', _strip_heredocs(command)):
+        return False
+    try:
+        argvs = _simple_commands(command)
+    except ValueError:  # unbalanced quotes: fall back to refusing, the safe side
+        return True
+    trunk = {main, f'refs/heads/{main}'}
+    for argv in argvs:
         # skip `git -C dir` style globals before the verb
         if len(argv) < 2 or argv[0] != 'git':
             continue
@@ -320,6 +329,69 @@ def _pushes_trunk(command, main):
             if dst in trunk:
                 return True
     return False
+
+
+# ---- the full suite is remote CI's (external-CI products) ----------------------
+
+#: What a session is told when it starts the product's full suite locally.
+FULL_SUITE_REFUSAL = ('the full suite runs in remote CI for this product — run only the targeted'
+                      ' tests for what you changed (e.g. the test file(s) next to your change)')
+
+_ASSIGNMENT = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
+
+
+def _drop_redirections(argv):
+    """``argv`` without its redirections (``2>&1``, ``> out.log``, ``<in``): they say where the
+    output goes, not what runs."""
+    out, skip = [], False
+    for t in argv:
+        if skip:
+            skip = False
+            continue
+        if t and set(t) <= set('<>&'):
+            if out and out[-1].isdigit():
+                out.pop()                            # the fd of `2>&1`
+            skip = True
+            continue
+        out.append(t)
+    return out
+
+
+def full_suite_patterns(product):
+    """``conventions.full_suite_commands``: the product's own regexes for its full-suite or
+    full-gate commands, each matched against one simple command (leading ``VAR=value``
+    assignments dropped, argv joined by single spaces). Unset or misshapen → ``[]``."""
+    conv = getattr(product, 'conventions', None)
+    value = conv.get('full_suite_commands') if conv is not None else None
+    if not isinstance(value, list):
+        return []
+    return [p for p in value if isinstance(p, str) and p.strip()]
+
+
+def full_suite_command(product, command):
+    """The first simple command of ``command`` that one of the product's
+    ``full_suite_commands`` matches, or None. Heredoc bodies are data, never a run."""
+    patterns = full_suite_patterns(product)
+    if not patterns or not command:
+        return None
+    try:
+        argvs = [' '.join(_drop_redirections(a)) for a in _simple_commands(command)]
+    except ValueError:  # unbalanced quotes: read it line by line, operators as breaks
+        argvs = [part.strip() for part in re.split(r'&&|\|\||[;|&\n]', _strip_heredocs(command))]
+    for simple in argvs:
+        words = simple.split(' ')
+        while words and _ASSIGNMENT.match(words[0]):
+            words.pop(0)
+        simple = ' '.join(words).strip()
+        if not simple:
+            continue
+        for p in patterns:
+            try:
+                if re.search(p, simple):
+                    return simple
+            except re.error:
+                continue                             # the doctor names a bad pattern
+    return None
 
 
 def _runs_deploy_workflow(command, product):
@@ -648,6 +720,11 @@ def _refusal_lines(item, cls, level, detail):
     ]
 
 
+def _external_ci(product):
+    from asf.harvest import lane  # local: the lane imports this module
+    return lane.external_ci(product)
+
+
 def run_hook(stdin_text, environ, out=sys.stderr, product=None):
     """``asf hook approvals`` (§2.3): the rc the runtime reads — 0 lets the call through, 2 blocks
     it and feeds ``out`` back to the model.
@@ -685,6 +762,19 @@ def _enforce(stdin_text, environ, out, product):
                kind=kind.name, patch=_intended_change(tool_name, tool_input))
         print('\n'.join(_amendable_refusal_lines(item, relpath, kind)), file=out)
         return 2
+
+    if tool_name == 'Bash' and _external_ci(prod):
+        hit = full_suite_command(prod, (tool_input or {}).get('command') or '')
+        if hit:
+            # audit only: no `hold` key, so no open hold, nothing parked, nothing relaunched on
+            # it (a refusal never parks the item)
+            append(prod, {'event': 'refused-full-suite', 'item': item, 'job': job,
+                          'tool': tool_name, 'detail': hit[:120], 'ts': _now_iso()})
+            print(f'REFUSED full suite on {item} — {hit[:120]}', file=out)
+            print(f'  {FULL_SUITE_REFUSAL}.', file=out)
+            print('  This is not a question for a person: do not print NEEDS OPERATOR for it.',
+                  file=out)
+            return 2
 
     matched = classify(prod, tool_name, tool_input, cwd)
     if not matched:

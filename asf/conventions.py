@@ -224,9 +224,9 @@ _VAR_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 
 def validate_mapping(data):
     """The shaped keys of a ``conventions:`` mapping checked: ``[(dotted key, problem)]``, empty
-    when they are well-formed. Only ``doc_paths``, ``shared_paths``, ``lane``, ``worktree_setup``
-    and ``auth_env`` are checked — every other key is kept verbatim (see the module doc), so a
-    product file written for a newer ``asf`` still loads."""
+    when they are well-formed. Only ``doc_paths``, ``shared_paths``, ``lane``, ``worktree_setup``,
+    ``auth_env`` and ``full_suite_commands`` are checked — every other key is kept verbatim (see
+    the module doc), so a product file written for a newer ``asf`` still loads."""
     problems = []
     if not isinstance(data, dict):
         return problems
@@ -238,6 +238,20 @@ def validate_mapping(data):
     setup = data.get('worktree_setup')
     if setup is not None and (isinstance(setup, (dict, list, bool)) or not str(setup).strip()):
         problems.append(('worktree_setup', f'must be a command string, not {setup!r}'))
+    suite = data.get('full_suite_commands')
+    if suite is not None:
+        if not isinstance(suite, list):
+            problems.append(('full_suite_commands', f'must be a list of regexes, not {suite!r}'))
+        else:
+            for pattern in suite:
+                if not isinstance(pattern, str) or not pattern.strip():
+                    problems.append(('full_suite_commands',
+                                     f'must be a list of regexes, and {pattern!r} is not one'))
+                    continue
+                try:
+                    re.compile(pattern)
+                except re.error as e:
+                    problems.append(('full_suite_commands', f'{pattern!r} is not a regex ({e})'))
     auth = data.get('auth_env')
     if auth is not None:
         if not isinstance(auth, dict):
