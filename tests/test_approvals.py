@@ -21,7 +21,7 @@ import types
 import unittest
 from unittest import mock
 
-from asf import approvals, cli, doctor, env, hooks
+from asf import approvals, cli, console_perms, doctor, env, hooks
 from asf.env import Product
 from asf.feeder import rows as feeder_rows
 from asf.tick import file_bugs, step_wave, tick
@@ -695,6 +695,7 @@ class DoctorTest(unittest.TestCase):
                 mock.patch.object(doctor, 'check_scheduler', return_value=(True, '')), \
                 mock.patch.object(doctor, 'check_cli_sessions', return_value=[]), \
                 mock.patch.object(doctor, 'check_one_factory', return_value=(True, '')), \
+                mock.patch.object(console_perms, 'check_doctor', return_value=(True, '')), \
                 mock.patch.object(doctor, 'check_capacity', return_value=[]):
             rows = doctor.run('demo')
         # the claim is the order, not the tail: T-0025 appends `redaction-hooks` after these two

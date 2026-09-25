@@ -7,7 +7,7 @@ import time
 import unittest
 from unittest import mock
 
-from asf import doctor, env, hooks
+from asf import console_perms, doctor, env, hooks
 from tests.gitfixture import executable_asf
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_doctor` does not
@@ -369,6 +369,74 @@ class ForeignGitHookStillGuardsTests(unittest.TestCase):
         self.assertTrue(doctor.check_approvals_hook({}, self.product)[0])
         cfg = {'worker_pool': dict(self.cfg['worker_pool'], backend='fake')}
         self.assertTrue(doctor.check_approvals_hook(cfg, self.product)[0])
+
+
+class ConsolePermissionsDoctorTests(unittest.TestCase):
+    """B-0131: the operator console cannot run `asf` or the installer without a prompt while
+    neither its user-level settings nor the product repo's carries the console's own allow list.
+    The ``console permissions`` doctor row (:func:`asf.console_perms.check_doctor`) is red and
+    names, by name, each rule missing from both."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='doctor_console_perms_')
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.home = os.path.join(self.tmp, 'home')
+        self.repo = os.path.join(self.tmp, 'repo')
+        os.makedirs(self.repo)
+        self.product = env.Product('sample', {'repo_dir': self.repo, 'main': 'main'})
+
+    def write_settings(self, path, data):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            import json
+            json.dump(data, f)
+
+    def test_no_settings_file_is_red_and_names_every_rule(self):
+        ok, detail = console_perms.check_doctor(self.product, home=self.home)
+        self.assertFalse(ok)
+        for rule in console_perms.FIXED_ALLOW:
+            self.assertIn(rule, detail)
+        self.assertIn('Bash(git push --force* origin main)', detail)
+        self.assertIn('asf console-permissions install --product sample', detail)
+
+    def test_a_partial_list_names_only_what_is_missing(self):
+        path = os.path.join(self.home, '.claude', 'settings.json')
+        self.write_settings(path, {'permissions': {'allow': list(console_perms.FIXED_ALLOW)}})
+        ok, detail = console_perms.check_doctor(self.product, home=self.home)
+        self.assertFalse(ok)
+        for rule in console_perms.FIXED_ALLOW:
+            self.assertNotIn(rule, detail)
+        self.assertIn('Bash(git push --force* origin main)', detail)
+
+    def test_the_rules_split_across_user_and_repo_settings_both_count(self):
+        user_path = os.path.join(self.home, '.claude', 'settings.json')
+        repo_path = os.path.join(self.repo, '.claude', 'settings.json')
+        self.write_settings(user_path, {'permissions': {'allow': list(console_perms.FIXED_ALLOW)}})
+        self.write_settings(repo_path, console_perms.merge({}, self.product))
+        # the repo file alone already carries every rule the user file is missing
+        ok, detail = console_perms.check_doctor(self.product, home=self.home)
+        self.assertTrue(ok, detail)
+
+    def test_every_rule_present_is_green(self):
+        path = os.path.join(self.home, '.claude', 'settings.json')
+        self.write_settings(path, console_perms.merge({}, self.product))
+        ok, detail = console_perms.check_doctor(self.product, home=self.home)
+        self.assertTrue(ok, detail)
+        self.assertIn('settings file(s) checked, every rule present', detail)
+
+    def test_doctor_run_carries_the_row_and_turns_red(self):
+        cfg = {}
+        with mock.patch.object(doctor, 'check_config',
+                               return_value=(True, '', cfg, self.product)), \
+                mock.patch.object(doctor, 'check_cli_sessions', return_value=[]), \
+                mock.patch.object(doctor, 'check_drift', return_value=(True, '')), \
+                mock.patch.object(console_perms, 'settings_paths',
+                                  return_value=[os.path.join(self.home, '.claude', 'settings.json')]):
+            rows = doctor.run('sample')
+        row = [r for r in rows if r[0] == 'console permissions'][0]
+        self.assertTrue(row[1])
+        self.assertFalse(row[2])
+        self.assertTrue(doctor.is_red(rows))
 
 
 class LegacySchedulerJobTests(unittest.TestCase):
