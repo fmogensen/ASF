@@ -98,17 +98,23 @@ SECTION_RE = re.compile(r'^[A-Z][\w ]{0,40}:\s*$', re.M)
 def footprint_claim(text):
     """``(source, tokens)`` — the paths outside ``writes:`` the last REPORT says must change:
     its ``needs writes:`` field when it carries one (``none`` is a claim of none), else — for a
-    ``partial`` or ``blocked`` report only — the path-like tokens of ``left out:``. ``source`` is
+    ``partial`` or ``blocked`` report only — the path-like tokens of ``left out:``. A ``done``
+    report whose push went through claims nothing: only a Task not whole, or a refused push,
+    widens. ``source`` is
     ``'needs writes'`` | ``'left out'`` | None; the tokens are raw (the caller resolves them
     against the repo, :func:`asf.feeder.widen.resolve`, and drops those already in ``writes:``)."""
     from asf.feeder import widen
     rep = parse(text)
+    status = (rep.get('status') or '').strip().lower().split(' ')[0]
+    if status == 'done' and rep.get('pushed') and not unpushed(rep):
+        # T-0349: a Task done and on origin is whole — a path its report names (an advisory
+        # hook row, a note) is never a widening; it goes on to review
+        return None, []
     if 'needs writes' in rep:
         value = _claim(rep.get('needs writes'))
         # the field is a path list by contract: every token stands, extension or not (LICENSE)
         tokens = [t.strip('`\'",;') for t in (value or '').split()]
         return 'needs writes', [t for t in dict.fromkeys(tokens) if t and not NONE_RE.match(t)]
-    status = (rep.get('status') or '').strip().lower().split(' ')[0]
     left = _claim(rep.get('left out'))
     if status in UNFINISHED and left:
         left = SECTION_RE.split(left, maxsplit=1)[0]  # a new heading (`Assumptions:`) ends it

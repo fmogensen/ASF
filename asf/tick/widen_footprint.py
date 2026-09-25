@@ -8,6 +8,9 @@ Run by the ``health`` step, after health has ended the sessions and before the w
    names, is held with a ``footprint`` correction (:func:`asf.workers.lifecycle.footprint_hold`)
    — before harvest can land a Task its own session says is not whole. Harvest writes the same
    correction for the gate's fact (:func:`asf.harvest.harvest.widen_candidates`).
+   :func:`refusal_facts` does the same for a push the repo's hook refused whose refusal names
+   paths outside ``writes:`` (T-0338) — only a refused push, never advisory output of one that
+   went through (T-0349).
 2. :func:`apply` — every pending ``footprint`` correction gets the rule's verdict
    (:func:`asf.feeder.widen.decide`):
 
@@ -108,6 +111,60 @@ def report_facts(ctx, items, out=print, tracked_fn=tracked_paths):
         out(line)
         held.append(job)
     return held
+
+
+#: How much of a refusal the ``footprint widened`` line and History carry as its reason.
+REASON_MAX = 160
+
+
+def refusal_reason(text):
+    """The refusal's own words, one line, cut to :data:`REASON_MAX`: what the History and the
+    ``widened writes:`` line name as the reason."""
+    words = ' '.join(str(text or '').split())
+    for lead in ('the push was refused by the repo\'s own hook — ', 'no — ', 'no - '):
+        if words.startswith(lead):
+            words = words[len(lead):]
+    words = words.split(' — fix what it names')[0]
+    return words if len(words) <= REASON_MAX else words[:REASON_MAX - 1].rstrip() + '…'
+
+
+def refusal_facts(ctx, items, out=print, tracked_fn=tracked_paths):
+    """Turn every pending ``hook refused`` correction whose refusal names tracked paths outside
+    its Task's ``writes:`` into a ``footprint`` correction (T-0338): the push was refused (health
+    writes this class only for a run whose publish failed on the repo's hook,
+    :func:`asf.workers.health.push_retry`), the session rightly left the file alone, and a round
+    spent on it would only be refused again. The paths are parsed off the refusal and the
+    session's ``pushed:`` line, each resolved to the one tracked repo path it names
+    (:func:`asf.feeder.widen.resolve`) — no model reads it. :func:`apply` then widens, or waits on
+    the Task that writes them. Returns the jobs turned."""
+    product = ctx.product
+    path = pool_mod.sessions_path(product)
+    turned = []
+    for job, run in sorted(lifecycle.latest(path).items()):
+        if run.get('kind') not in CLAIM_KINDS or lifecycle.landed(run):
+            continue
+        corr = lifecycle.pending_correction(run, path)
+        if not corr or corr.get('kind') != lifecycle.HOOK_REFUSED or corr.get('footprint_read'):
+            continue
+        task = _task(items, run.get('item'))
+        if task is None:
+            continue
+        tokens = widen.path_tokens(corr.get('text'))
+        needs = widen.outside(widen.resolve(tokens, tracked_fn(product, run.get('branch'))),
+                              task.get('writes')) if tokens else []
+        if not needs:  # the hook names the session's own files: the plain correction stands
+            pool_mod.update_session(product, job, correction=dict(corr, footprint_read=1))
+            continue
+        fact = f'hook refused: {refusal_reason(corr.get("text"))}'
+        fields, line = lifecycle.footprint_hold(
+            run, needs, fact,
+            f'{corr.get("text")}\nfootprint: the refusal names {" ".join(needs)} outside writes:',
+            corr.get('at') or pool_mod.now_iso())
+        pool_mod.update_session(product, job, **fields)
+        ctx.event('held', job=job, item=run.get('item'), text=line)
+        out(line)
+        turned.append(job)
+    return turned
 
 
 def protected_paths(product, item_id, paths):
@@ -253,7 +310,8 @@ def apply(ctx, items, out=print):
             pool_mod.update_session(product, job, widened=list(v.paths),
                                     correction=dict(corr, verdict=v.kind, text=text))
             ctx.event('widened', job=job, item=item_id, text=' '.join(v.paths))
-            out(f'widened {item_id}: writes: +{" ".join(v.paths)} ({fact}) — {job} back as a correction')
+            out(f'widened writes: +{" ".join(v.paths)} — {fact} ({item_id}; {job} back as a '
+                f'correction, no round spent)')
         elif v.kind == widen.RESHAPE:
             note = f'reshape → {v.detail} ({fact})'
             err = write_card(ctx.record_root(), item_id, {'reshape': v.detail}, stamp, note)
@@ -348,7 +406,7 @@ def revert_overlaps(ctx, items, out=print):
 def run(ctx, out=print, items=None):
     """Both halves, in order: the REPORT facts, then the rule — and last, the repair of any
     widening already in the record that overlaps an open Task."""
-    held = report_facts(ctx, items, out=out)
+    held = report_facts(ctx, items, out=out) + refusal_facts(ctx, items, out=out)
     verdicts = apply(ctx, items, out=out)
     revert_overlaps(ctx, items, out=out)
     return held, verdicts

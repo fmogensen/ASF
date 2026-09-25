@@ -62,6 +62,12 @@ class ReportClaimTests(unittest.TestCase):
         self.assertEqual(report.footprint_claim(text),
                          ('left out', ['sibling.test.ts', 'web/lib/shared.ts']))
 
+    def test_a_done_and_pushed_report_claims_nothing_even_in_needs_writes(self):
+        text = REPORT.replace('partial', 'done').format(left='none', needs='lib/shared.py')
+        self.assertEqual(report.footprint_claim(text), (None, []))
+        refused = text.replace('pushed: yes abc', 'pushed: no — hook refused')
+        self.assertEqual(report.footprint_claim(refused), ('needs writes', ['lib/shared.py']))
+
     def test_a_done_report_claims_nothing_from_left_out(self):
         text = REPORT.replace('needs writes: {needs}\n', '').replace('partial', 'done').format(
             left='`tests/test_b.py` untouched')
@@ -103,7 +109,7 @@ class DecideTests(unittest.TestCase):
                          ['a.py', 'b/c.py', 'd.py'])
 
 
-class WidenStepTests(StepsTestCase):
+class WidenStepBase(StepsTestCase):
     """The health step's half: a record clone with two Tasks, a product repo that tracks the
     paths a REPORT may name, a finished coder run whose REPORT claims some of them."""
 
@@ -163,6 +169,12 @@ class WidenStepTests(StepsTestCase):
     def writes(self):
         return self.items()['T-0001']['writes']
 
+    def card_text(self, iid):
+        with open(os.path.join(self.root, 'tasks', f'{iid}.md')) as f:
+            return f.read()
+
+
+class WidenStepTests(WidenStepBase):
     def test_a_report_naming_two_paths_widens_writes_and_relaunches_as_a_correction(self):
         self.finished('coder-t-0001', 'tests/test_b.py lib/shared.py')
         _held, verdicts = self.tick()
@@ -238,10 +250,6 @@ class WidenStepTests(StepsTestCase):
                     .replace('- made\n', '- made\n' + history))
         _git(['add', '-A'], self.root)
         _git(['commit', '-q', '-m', f'{iid}'], self.root)
-
-    def card_text(self, iid):
-        with open(os.path.join(self.root, 'tasks', f'{iid}.md')) as f:
-            return f.read()
 
     def check(self):
         """``asf check``'s findings on the record."""
@@ -319,6 +327,87 @@ class WidenStepTests(StepsTestCase):
         self.assertEqual(items['T-0001']['reshape'], 'footprint: needs lib/x.py')
         self.assertNotIn('lib/x.py', items['T-0001']['writes'])
         self.assertEqual([r.kind for r in self.rows()], [feeder_rows.RESHAPE])
+
+
+class RefusalWidenTests(WidenStepBase):
+    """T-0338: a push the product's hook refused over a doc outside ``writes:`` widens the Task
+    and sends it back with no round spent. T-0349: advisory paths off a push that went through
+    never do."""
+
+    REFUSAL = ("no — pre-push docs-check hook fails: lib/shared.py:27 quotes src/a.py's "
+               "`pattern=` line verbatim, and the required change makes that quote stale. The "
+               "file is outside writes:, so it is not touched. publish worker/T-0001 refused: "
+               "error: failed to push some refs to 'https://github.com/o/r.git'")
+
+    def refused(self, job='coder-t-0001', text=REFUSAL):
+        self.session(job=job, item='T-0001', kind='coder', branch='worker/T-0001', pid=999999,
+                     started='2026-09-24T08:00:00Z')
+        self.session(job=job, ended='2026-09-24T08:30:00Z',
+                     end_reason=f'failed: {lifecycle.HOOK_REFUSED}: {text}')
+        self.session(job=job, correction={
+            'kind': lifecycle.HOOK_REFUSED, 'at': '2026-09-24T08:30:00Z',
+            'text': f"the push was refused by the repo's own hook — {text} — fix what it "
+                    f"names, commit, and push again"})
+
+    def rounds(self):
+        path = pool_mod.sessions_path(self.product)
+        return lifecycle.latest(path)['coder-t-0001'].get('rounds')
+
+    def test_a_refusal_naming_a_path_outside_writes_widens_and_resends_with_no_round(self):
+        self.refused()
+        _held, verdicts = self.tick()
+        self.assertEqual(verdicts, {'coder-t-0001': widen.WIDEN}, self.lines)
+        self.assertEqual(self.writes(), ['src/a.py', 'tests/test_a.py', 'lib/shared.py'])
+        self.assertIn('footprint widened: +lib/shared.py (hook refused: pre-push docs-check',
+                      self.card_text('T-0001'))
+        widened = [l for l in self.lines if l.startswith('widened writes:')]
+        self.assertEqual(len(widened), 1, self.lines)
+        self.assertTrue(widened[0].startswith(
+            'widened writes: +lib/shared.py — hook refused: pre-push docs-check hook fails'),
+            widened)
+        self.assertFalse(self.rounds())  # no round spent
+        rows = self.rows()
+        self.assertEqual([(r.kind, r.brief_kind, r.launches) for r in rows],
+                         [(feeder_rows.FIX_CORRECT, 'correct', True)], rows)
+        self.assertIn('writes: is now src/a.py tests/test_a.py lib/shared.py', rows[0].correction)
+        self.assertEqual(self.tick(), ([], {}))  # decided once
+
+    def test_a_refused_path_another_task_writes_waits_on_that_task(self):
+        self.session(job='coder-t-0002', item='T-0002', kind='coder', branch='worker/T-0002',
+                     pid=os.getpid(), started='2026-09-24T08:10:00Z')
+        self.refused()
+        _held, verdicts = self.tick()
+        self.assertEqual(verdicts, {'coder-t-0001': widen.WAITS}, self.lines)
+        self.assertEqual(self.writes(), ['src/a.py', 'tests/test_a.py'])
+        self.assertEqual([(r.action, r.waits_on, r.launches) for r in self.rows()],
+                         [('WAITS ON T-0002', 'T-0002', False)])
+
+    def test_a_refusal_naming_only_its_own_files_stays_a_plain_hook_correction(self):
+        self.refused(text='no — pre-push lint fails: src/a.py:3 unused import')
+        held, verdicts = self.tick()
+        self.assertEqual((held, verdicts), ([], {}), self.lines)
+        path = pool_mod.sessions_path(self.product)
+        corr = lifecycle.latest(path)['coder-t-0001']['correction']
+        self.assertEqual(corr['kind'], lifecycle.HOOK_REFUSED)
+        self.assertEqual(self.writes(), ['src/a.py', 'tests/test_a.py'])
+
+    def test_advisory_paths_off_a_push_that_went_through_never_widen(self):
+        # T-0349: done, pushed; an advisory "touched-vs-listed FAIL" row named paths
+        log = os.path.join(self.tmp, 'coder-t-0001.jsonl')
+        with open(log, 'w') as f:
+            f.write(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
+                                'result': REPORT.replace('status: partial', 'status: done')
+                                .format(left='none', needs='lib/shared.py tests/test_b.py')})
+                    + '\n')
+        self.session(job='coder-t-0001', item='T-0001', kind='coder', branch='worker/T-0001',
+                     pid=999999, log=log, started='2026-09-24T08:00:00Z')
+        self.session(job='coder-t-0001', ended='2026-09-24T08:30:00Z', end_reason='finished')
+        held, verdicts = self.tick()
+        self.assertEqual((held, verdicts), ([], {}), self.lines)
+        self.assertEqual(self.writes(), ['src/a.py', 'tests/test_a.py'])
+        path = pool_mod.sessions_path(self.product)
+        self.assertIsNone(lifecycle.pending_correction(lifecycle.latest(path)['coder-t-0001'],
+                                                       path))
 
 
 class HarvestWidenTests(unittest.TestCase):
