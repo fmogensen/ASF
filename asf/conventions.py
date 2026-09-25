@@ -37,6 +37,11 @@ The product yaml carries the overrides::
       merge: auto                 # auto | manual (default manual): under auto the lane merges
                                   # every open PR on the trunk whose required checks are green
                                   # and whose factory review approved it — no operator click
+      branch_retention:           # origin's heads nothing owns any more (asf.workers.retention)
+        archive_days: 14          # the lane's archive/<b> heads, deleted this many days on
+        legacy_prefixes: [hb/]    # heads under these prefixes (default none) …
+        legacy_days: 7            # … deleted once their tip is older than this
+        per_tick: 50              # the most deletes one pass makes
 
 Unknown keys are kept (in :attr:`Conventions.extra`) rather than rejected: a product yaml is
 written by an operator and may carry conventions a module older than it does not read yet, and
@@ -152,6 +157,16 @@ DEFAULT_FORBIDDEN_MARKERS = (
     r'<<\s*[A-Z][A-Z0-9_ ]*\s*>>',
 )
 
+#: ``branch_retention:`` — how long origin's heads nobody owns any more are kept
+#: (:mod:`asf.workers.retention`). ``archive_days``: the lane's ``archive/<b>`` heads (a superseded
+#: branch, kept for reference) go this many days after they were archived. ``legacy_prefixes``:
+#: heads under these prefixes — a retired worker system's, a hand-made one's — go once their tip
+#: is ``legacy_days`` old. ``per_tick``: the most deletes one pass makes. A head an open PR, an
+#: open record item or an in-flight session names is never deleted, nor the trunk, a protected
+#: branch or a release branch.
+DEFAULT_BRANCH_RETENTION = {'archive_days': 14, 'legacy_prefixes': [], 'legacy_days': 7,
+                            'per_tick': 50}
+
 #: The keys of the yaml's ``lane:`` block and the field each one is.
 LANE_KEYS = {'review': 'lane_review', 'stale_after': 'lane_stale_after'}
 
@@ -160,7 +175,7 @@ LANE_KEYS = {'review': 'lane_review', 'stale_after': 'lane_stale_after'}
 #: raises on it (a ``models: light`` string once failed every launch for forty minutes), and it
 #: fails loud: :meth:`Conventions.shape_findings` names it, and the doctor's ``conventions`` row
 #: is red with the key and the line.
-MAP_CONVENTIONS = ('models', 'branch_prefixes', 'harvest')
+MAP_CONVENTIONS = ('models', 'branch_prefixes', 'harvest', 'branch_retention')
 #: The conventions that take one word or a map of those words per landing class (``default:``
 #: for the rest). Any other value — ``'{docs: wait}'`` quoted into a string — is never a silent
 #: default: it is a red doctor finding.
@@ -317,6 +332,7 @@ def validate_mapping(data):
         elif cap is not None and (isinstance(cap, bool) or not isinstance(cap, int) or cap < 0):
             problems.append(('feeder.max_specs_in_flight',
                              f'must be a whole number >= 0, not {cap!r}'))
+    problems.extend(_retention_problems(data.get('branch_retention')))
     lane = data.get('lane')
     if lane is None:
         return problems
@@ -344,6 +360,25 @@ def validate_mapping(data):
                 problems.append(('lane.stale_after', f'must be longer than zero, not {stale!r}'))
         except ValueError:
             problems.append(('lane.stale_after', f'must be a duration <n>s|m|h|d, not {stale!r}'))
+    return problems
+
+
+def _retention_problems(value):
+    """``branch_retention:`` checked: ``[(dotted key, problem)]``."""
+    if not isinstance(value, dict):
+        return []  # absent, or misshapen: the latter is a shape finding (MAP_CONVENTIONS)
+    problems = []
+    for key, v in value.items():
+        where = f'branch_retention.{key}'
+        least = 0 if key == 'per_tick' else 1
+        if key not in DEFAULT_BRANCH_RETENTION:
+            problems.append((where, 'is not a retention key '
+                                    f"({', '.join(DEFAULT_BRANCH_RETENTION)})"))
+        elif key == 'legacy_prefixes':
+            if not isinstance(v, list) or any(not isinstance(p, str) or not p.strip() for p in v):
+                problems.append((where, f'must be a list of branch prefixes, not {v!r}'))
+        elif isinstance(v, bool) or not isinstance(v, int) or v < least:
+            problems.append((where, f'must be a whole number >= {least}, not {v!r}'))
     return problems
 
 
@@ -405,6 +440,8 @@ class Conventions:
     #: ``merge``: ``auto`` | ``manual`` (:data:`DEFAULT_MERGE`); any other value is a red doctor
     #: finding and reads as the default.
     merge: str = DEFAULT_MERGE
+    #: ``branch_retention``: merged over :data:`DEFAULT_BRANCH_RETENTION` (see there).
+    branch_retention: dict = field(default_factory=lambda: dict(DEFAULT_BRANCH_RETENTION))
     #: Everything the yaml carried that is not a field above, kept verbatim.
     extra: dict = field(default_factory=dict)
 
@@ -454,6 +491,10 @@ class Conventions:
                 data['harvest'] = rest
         elif harvest is not None:
             data['harvest'] = harvest
+        retention = data.pop('branch_retention', None)
+        if isinstance(retention, dict):
+            kwargs['branch_retention'] = {**DEFAULT_BRANCH_RETENTION,
+                                          **{k: v for k, v in retention.items() if v is not None}}
         lane = data.pop('lane', None)
         if isinstance(lane, dict):  # ``lane: {review, stale_after}`` → lane_review/lane_stale_after
             rest = {}
@@ -544,6 +585,23 @@ class Conventions:
             out.append(self.prefix(kind))
         out.extend(self.legacy_prefixes())
         return tuple(sorted(dict.fromkeys(out), key=lambda p: (-len(p), p)))
+
+    def retention(self, key):
+        """One ``branch_retention`` value (:data:`DEFAULT_BRANCH_RETENTION`); a malformed one
+        reads as its default — the doctor's ``conventions`` row names it."""
+        default = DEFAULT_BRANCH_RETENTION[key]
+        held = self.branch_retention if isinstance(self.branch_retention, dict) else {}
+        value = held.get(key)
+        if key == 'legacy_prefixes':
+            if isinstance(value, str):
+                value = [value]
+            if not isinstance(value, list):
+                return tuple(default)
+            return tuple(p.strip() for p in value if isinstance(p, str) and p.strip())
+        least = 0 if key == 'per_tick' else 1
+        if isinstance(value, bool) or not isinstance(value, int) or value < least:
+            return default
+        return value
 
     def branch_kind(self, branch):
         """Which kind a branch name belongs to (``'legacy'`` for a retired prefix), or None."""

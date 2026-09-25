@@ -75,7 +75,10 @@ def cmd_wave(args):
 
 def cmd_health(args):
     from asf.workers import health
-    health.health(_product(args), fix=args.fix)
+    from asf.workers import retention
+    product = _product(args)
+    health.health(product, fix=args.fix)
+    retention.sweep(product, fix=args.fix)  # without --fix: what would go
     return 0
 
 
