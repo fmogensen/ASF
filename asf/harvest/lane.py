@@ -1382,10 +1382,17 @@ class Lane:
         reworded (:func:`reword_branch`) and pushed from the ref checkout over a lease on the old
         tip, a pending naming correction is cleared, and the branch is PUSHED at its new head —
         the record, or None when it could not be (the caller holds it back to its session, as a
-        naming correction that spends no round)."""
+        naming correction that spends no round). A branch under no factory prefix is never
+        reworded: it goes back to its session."""
         b, item, old = f['branch'], f.get('item'), f.get('head')
         if (f.get('refusal') or (None,))[0] != lifecycle.NAMING or not item or not old \
                 or not self.repo:
+            return None
+        if not f.get('kind'):
+            # a branch under no factory prefix (the registry knows it, B-0067) is someone else's
+            # history: the lane never rewrites it — the naming goes back to its session
+            self.out(f'reword {b} (naming): under no factory prefix — the lane does not rewrite '
+                     f'it, back to its session')
             return None
         if self.dry_run:
             self.out(f'DRY: would reword the subjects on {b} (naming) — no session')

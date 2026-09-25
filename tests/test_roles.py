@@ -36,6 +36,8 @@ PURPOSES = {
     'asf-security': 'attack the guarantee before a user does',
     'asf-documenter': 'the surface a reader meets, kept true to the code under it',
     'asf-locator': 'exact file:line locations with a short excerpt, never a whole file',
+    'asf-builder': 'take one card from requirement to pushed code in a single session, no wider '
+                   'than the card',
 }
 
 VALID = """---
