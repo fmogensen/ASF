@@ -340,3 +340,17 @@ clocks:
   shadow:
     shadow: true
     every: 30m
+
+# Optional: the release-readiness gate (`asf release-readiness`, and the Release row of `asf status`
+# for the factory's own product). Every key is optional; the defaults are shown.
+# release:
+#   window_days: 7                 # stability and upgrade window
+#   max_hand_fixes: 0              # fix/hotfix/revert commits no factory session made, plus hand installs
+#   max_repair_per_feature: 3      # repair sessions per landed Feature over the window
+#   ci_runs: 10                    # the last N finished trunk runs must all be green
+#   min_upgrades: 3                # auto-upgrades in the window, none failed, torn or rolled back
+#   hand_types: [fix, hotfix, revert]
+#   readme_sections: [Install, Quick start, Configuration, Upgrade]
+#   ci_steps: {install_from_zero: install.sh, generic: check generic, second_product: sample product}
+#   requires: {install: [], upgrade: [], generic: [], docs: []}   # Features each criterion also needs landed
+#   blocking: []                   # Features that must be landed before a release

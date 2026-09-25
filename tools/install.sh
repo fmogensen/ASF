@@ -38,6 +38,10 @@ say "product $PRODUCT, ref ${REF:0:12} from $REPO_URL"
 
 # 1. the pinned install — pipx keeps it in its own venv; --force moves it to the new ref
 pipx install --force "git+${REPO_URL}@${REF}" >/dev/null
+# every run of this script is an install by hand (the tick's auto-upgrade runs pipx itself):
+# `asf release-readiness` counts these lines against the factory's stability
+mkdir -p "$ASF_HOME/logs" 2>/dev/null && \
+  printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PRODUCT" "$REF" >> "$ASF_HOME/logs/install.log" || true
 export PATH="$HOME/.local/bin:$PATH"
 command -v "$BIN" >/dev/null 2>&1 || die "$BIN is not on PATH after pipx install — run: pipx ensurepath"
 say "$("$BIN" --version)"
