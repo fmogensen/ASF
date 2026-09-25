@@ -43,6 +43,13 @@ def judge(reading, guards):
     """``(held, why)``; ``why`` reads ``host pressure load 90/cores 12, swap 87%``."""
     r = reading or {}
     load, cores, swap = r.get('load15'), r.get('cores'), r.get('swap_pct')
+    # macOS never gives swap back once used: 90 % swap with 69 % of memory free held every wave
+    # for hours (2026-09-25). Where the host reports memory pressure itself, that is the reading
+    # the memory guard judges; swap is only the fallback.
+    mem = r.get('mem_pct')
+    label = 'memory' if mem is not None else 'swap'
+    if mem is not None:
+        swap = mem
     over_load = (guards.get('load_per_core') is not None and load is not None and cores
                  and float(load) >= guards['load_per_core'] * cores)
     over_swap = (guards.get('swap_pct') is not None and swap is not None
@@ -53,7 +60,7 @@ def judge(reading, guards):
     if load is not None and cores:
         parts.append(f'load {float(load):.0f}/cores {cores}')
     if swap is not None:
-        parts.append(f'swap {float(swap):.0f}%')
+        parts.append(f'{label} {float(swap):.0f}%')
     return True, 'host pressure ' + ', '.join(parts)
 
 
@@ -90,7 +97,20 @@ class SystemProbe:
             load = os.getloadavg()[2]
         except (OSError, AttributeError):
             load = None
-        return {'load15': load, 'cores': os.cpu_count(), 'swap_pct': self._swap()}
+        return {'load15': load, 'cores': os.cpu_count(), 'swap_pct': self._swap(),
+                'mem_pct': self._memory()}
+
+    @staticmethod
+    def _memory():
+        """Memory in use as the kernel judges it, percent — macOS ``kern.memorystatus_level`` is
+        the free share the pressure system acts on; ``None`` elsewhere or when unreadable."""
+        try:
+            p = subprocess.run(['sysctl', '-n', 'kern.memorystatus_level'], capture_output=True,
+                               text=True, timeout=5)
+            level = int(p.stdout.strip()) if p.returncode == 0 else None
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            return None
+        return None if level is None or not 0 <= level <= 100 else 100 - level
 
     @staticmethod
     def _swap():
