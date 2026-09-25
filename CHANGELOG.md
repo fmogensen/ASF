@@ -2,6 +2,28 @@
 
 One entry per released version, newest first.
 
+## v0.1.11 — 2026-09-25
+
+### Bugs fixed
+
+- B-0094 19% of sessions end 'not pushed': finished work is lost to a missing commit or push
+- B-0111 Inbox intake drops headers after an unknown key; a Bug card became a Feature
+- B-0114 native landing: a merged spec/plan PR marks its Feature landed/Resolved, so no coder ever launches
+- B-0119 tick logs stay empty while steps run; a live tick looks the same as a hung one
+
+### Improvements and hotfixes
+
+- feat(deploy): deploy mode per environment — dev auto|manual|ci, prod auto|manual
+- fix(set): writes: and after: are settable list fields — =, += and -= forms
+- fix(check): the record pre-commit regenerates and stages the index.json a hand edit leaves stale
+- fix(deploy): a view's prod line says the next tick dispatches, never that it is dispatching
+- fix(lane): a hook refusal naming paths outside writes: widens the Task, no round spent
+- feat(feeder): finish before you start — Task rows first, new specs capped
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.11"`
+
 ## v0.1.10 — 2026-09-25
 
 ### In progress
