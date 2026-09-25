@@ -73,6 +73,9 @@ APPROVED_LAND = 'APPROVED → LAND'
 LANDING_GATE = 'landing-gate'
 PUSHED_REVIEW = 'PUSHED → REVIEW'
 WAITS_LANDING = 'WAITS ON landing'
+#: a correction already adjudicated at this same hold (B-0128): no session, no round, until the
+#: PR merges or closes, or a new push moves the head
+WAITS_MERGE = 'WAITS ON merge'
 PLAN_CODE = 'PLAN → CODE'
 RESHAPE = 'RESHAPE → PLAN'
 GROOM_ADJUDICATE = 'GROOM → ADJUDICATE'
@@ -408,6 +411,12 @@ def correction_rows(items, product, busy, corrections):
             out.append(footprint_row(item, product, c, tier, fid, branch))
             continue
         if rounds >= CORRECTION_ROUNDS:
+            if c.get('settled'):  # B-0128: already ruled at this hold — no second adjudicate
+                out.append(Row(tier=tier, kind=FIX_CORRECT, item_id=iid, feature_id=fid,
+                               action=WAITS_MERGE, brief_kind='correct', branch=branch,
+                               reason=f"adjudicated ({c.get('kind')}): waits on the PR to merge "
+                                      f"or close, or a new push", waits_on='merge'))
+                continue
             out.append(Row(tier=tier, kind=STALEMATE, item_id=iid, feature_id=fid, action=LAUNCH,
                            brief_kind='adjudicate', branch=branch,
                            reason=f"held {rounds} times ({c.get('kind')}): adjudicate, not another correction"))

@@ -685,6 +685,15 @@ class CorrectionRowTest(unittest.TestCase):
         self.assertEqual([(r.kind, r.brief_kind) for r in out],
                          [('STALEMATE → ADJUDICATE', 'adjudicate')])
 
+    def test_b0128_a_settled_correction_waits_on_merge_not_another_adjudicate(self):
+        corr = self.corr(3)
+        corr['B-0001']['settled'] = True
+        out = rows.plan_rows(s1_bugs('B-0001'), product(), [], 1, attempts={'B-0001': 1},
+                             occupancy=occ(corrections=corr))
+        self.assertEqual([r.kind for r in out], [rows.FIX_CORRECT])
+        self.assertFalse(out[0].launches)
+        self.assertTrue(out[0].action.startswith(rows.WAITS_MERGE), out[0].action)
+
     def test_b0058_a_blocked_item_gets_no_correct_or_adjudicate_row(self):
         # the controller blocked eleven held items on the Bug about their loop; the next tick
         # still launched an adjudicate session on one — correction rows skipped `blocked`

@@ -286,6 +286,30 @@ class StateMachineInvariants(unittest.TestCase):
                                               'job': 'correct-b-0001', 'started': 't4'}])
         self.assertEqual(lc.attempts(path), {'B-0001': 2})
 
+    def test_b0128_an_adjudicate_run_does_not_answer_the_correction(self):
+        """B-0128: an adjudicate session rules, it does not correct — the branch stays held (not
+        bounced BACK → PUSHED, restarting review) and the correction is marked ``settled`` once
+        the ruling is in, so the feeder asks for no second adjudicate session over the same hold."""
+        lines = [{'job': 'a', 'pid': 1, 'started': 't1', 'item': 'B-0001', 'branch': 'b',
+                  'ended': 't2', 'end_reason': 'finished'},
+                 {'job': 'a', 'rounds': 3, 'correction': {'kind': 'review', 'text': 'x', 'at': 't3'}}]
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        path = os.path.join(d, 's.jsonl')
+        with open(path, 'w') as f:
+            f.write('\n'.join(json.dumps(ln) for ln in lines) + '\n')
+        run = lc.latest(path)['a']
+        self.assertEqual(lc.derive(run, lc.Evidence(), path=path).name, lc.ADJUDICATE)
+        self.assertFalse(lc.corrections(path)['B-0001']['settled'])
+        with open(path, 'a') as f:
+            f.write(json.dumps({'job': 'adjudicate-b-0001', 'item': 'B-0001', 'branch': 'b',
+                                'kind': 'adjudicate', 'pid': os.getpid(), 'started': 't4',
+                                'ended': 't5', 'end_reason': 'finished'}) + '\n')
+        # still ADJUDICATE, not CORRECTED: the ruling did not touch the branch
+        self.assertEqual(lc.derive(run, lc.Evidence(), path=path).name, lc.ADJUDICATE)
+        self.assertEqual(lc.corrections(path)['B-0001']['rounds'], 3)
+        self.assertTrue(lc.corrections(path)['B-0001']['settled'])
+
 
 class HoldInvariants(unittest.TestCase):
     def setUp(self):
