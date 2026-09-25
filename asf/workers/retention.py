@@ -170,7 +170,7 @@ def candidates(conv, heads, dates, now, prs, protected, flight, item_text):
     archive_s = conv.retention('archive_days') * DAY_S
     legacy_s = conv.retention('legacy_days') * DAY_S
     legacy = conv.retention('legacy_prefixes')
-    active = {conv.prefix(k) for k in conv.branch_prefixes if k != 'legacy'}
+    active = {conv.prefix(k) for k in conv.kinds()}
     due, kept = [], []
     for b, sha in sorted(heads.items()):
         if b.startswith(ARCHIVE_PREFIX):

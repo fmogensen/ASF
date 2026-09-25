@@ -33,6 +33,9 @@ The product yaml carries the overrides::
           docs: none              # none | required (default none)
           code: required          # none | required (default required)
         stale_after: 2d           # an open lane state older than this is stale (<n>s|m|h|d)
+      review:
+        skip_under_lines: 80      # a size: s Feature's Task under this many changed lines lands
+                                  # on CI and the gate, no review session (0 = always review)
       worktree_setup: make deps   # run in every fresh worker worktree (unset = nothing)
       merge: auto                 # auto | manual (default manual): under auto the lane merges
                                   # every open PR on the trunk whose required checks are green
@@ -60,8 +63,15 @@ DEFAULT_BRANCH_PREFIXES = {
     'fix': 'fix/',
     'spec': 'spec/',
     'plan': 'plan/',
+    #: a ``lane: direct`` Feature's one branch — the whole Feature, code and tests, one PR
+    'direct': 'cloud/direct-',
     'legacy': [],
 }
+
+#: Kinds a product's branches fall in whether or not its ``branch_prefixes`` names them — ones
+#: added after products wrote their prefix maps (a product naming ``code:`` alone still has a
+#: direct lane, under the default prefix).
+RECOGNISED_KINDS = ('direct',)
 
 DEFAULT_SPECS_DIR = 'docs/specs'
 DEFAULT_PLANS_DIR = 'docs/plans'
@@ -166,6 +176,10 @@ DEFAULT_FORBIDDEN_MARKERS = (
 #: branch or a release branch.
 DEFAULT_BRANCH_RETENTION = {'archive_days': 14, 'legacy_prefixes': [], 'legacy_days': 7,
                             'per_tick': 50}
+
+#: ``review: {skip_under_lines: …}``: a Task of a ``size: s`` Feature whose diff adds and removes
+#: fewer lines than this lands on CI and the gate alone — no review session. 0 turns it off.
+DEFAULT_REVIEW_SKIP_UNDER_LINES = 80
 
 #: The keys of the yaml's ``lane:`` block and the field each one is.
 LANE_KEYS = {'review': 'lane_review', 'stale_after': 'lane_stale_after'}
@@ -547,6 +561,14 @@ class Conventions:
         policy = self.lane_review.get(landing_class, DEFAULT_LANE_REVIEW.get(landing_class))
         return policy == 'required'
 
+    def review_skip_under_lines(self):
+        """``review.skip_under_lines`` (:data:`DEFAULT_REVIEW_SKIP_UNDER_LINES`): below this many
+        changed lines a small Feature's Task needs no review. A malformed value is the default."""
+        value = self.map_of('review').get('skip_under_lines')
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return DEFAULT_REVIEW_SKIP_UNDER_LINES
+        return value
+
     def lane_stale_after_s(self):
         """``lane.stale_after`` in seconds."""
         return duration_seconds(self.lane_stale_after)
@@ -575,13 +597,17 @@ class Conventions:
             value = [value]
         return tuple(_normalise_prefix(v) for v in value)
 
+    def kinds(self):
+        """The branch kinds this product's branches fall in: every kind its ``branch_prefixes``
+        names, plus :data:`RECOGNISED_KINDS` whether it names them or not, sorted."""
+        named = set(self.branch_prefixes) if isinstance(self.branch_prefixes, dict) else set()
+        return tuple(sorted((named | set(RECOGNISED_KINDS)) - {'legacy'}))
+
     def all_prefixes(self):
         """Every prefix this product's branches can carry, longest first (so ``fix/`` wins over
         a hypothetical ``f/``). Deduplicated, order otherwise by kind name."""
         out = []
-        for kind in sorted(self.branch_prefixes):
-            if kind == 'legacy':
-                continue
+        for kind in self.kinds():
             out.append(self.prefix(kind))
         out.extend(self.legacy_prefixes())
         return tuple(sorted(dict.fromkeys(out), key=lambda p: (-len(p), p)))
@@ -607,9 +633,7 @@ class Conventions:
         """Which kind a branch name belongs to (``'legacy'`` for a retired prefix), or None."""
         branch = branch or ''
         best = None
-        for kind in sorted(self.branch_prefixes):
-            if kind == 'legacy':
-                continue
+        for kind in self.kinds():
             p = self.prefix(kind)
             if branch.startswith(p) and (best is None or len(p) > len(best[1])):
                 best = (kind, p)
