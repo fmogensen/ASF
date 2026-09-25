@@ -126,6 +126,22 @@ DEFAULT_LANE_STALE_AFTER = '2d'
 #: install, codegen). None → nothing runs.
 DEFAULT_WORKTREE_SETUP = None
 
+#: ``customer_content: {paths, forbidden_markers}`` — the pages a customer reads (a site's
+#: legal pages, its marketing copy) and the text that must never reach them
+#: (:mod:`asf.customer_content`). ``paths`` are globs; unset or empty, nothing is checked.
+#: ``forbidden_markers`` are Python regexes, one per line matched; unset, these defaults apply:
+#: a bracketed internal note (``[legal: …]``, ``[TODO: …]``), TODO/FIXME/XXX, lorem ipsum, and an
+#: unresolved template placeholder (``{{COMPANY_NAME}}``, ``[Insert date]``, ``<<NAME>>``).
+DEFAULT_CUSTOMER_CONTENT_PATHS = ()
+DEFAULT_FORBIDDEN_MARKERS = (
+    r'(?i)\[\s*(legal|todo|tbd|note|internal|lawyer|fixme)\s*:',
+    r'\b(TODO|FIXME|XXX)\b',
+    r'(?i)\blorem\s+ipsum\b',
+    r'\{\{\s*[A-Z][A-Z0-9_]*\s*\}\}',
+    r'(?i)\[\s*(insert|placeholder|tbd|your company|company name)\b[^\]]*\]',
+    r'<<\s*[A-Z][A-Z0-9_ ]*\s*>>',
+)
+
 #: The keys of the yaml's ``lane:`` block and the field each one is.
 LANE_KEYS = {'review': 'lane_review', 'stale_after': 'lane_stale_after'}
 
@@ -225,7 +241,7 @@ _VAR_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 def validate_mapping(data):
     """The shaped keys of a ``conventions:`` mapping checked: ``[(dotted key, problem)]``, empty
     when they are well-formed. Only ``doc_paths``, ``shared_paths``, ``lane``, ``worktree_setup``,
-    ``auth_env``, ``full_suite_commands`` and ``feeder`` are checked — every other key is kept
+    ``auth_env``, ``full_suite_commands``, ``customer_content`` and ``feeder`` are checked — every other key is kept
     verbatim (see the module doc), so a product file written for a newer ``asf`` still loads."""
     problems = []
     if not isinstance(data, dict):
@@ -263,6 +279,26 @@ def validate_mapping(data):
                                      f'must map variable names to files, and {name!r} is not one'))
                 elif not isinstance(path, str) or not path.strip():
                     problems.append(('auth_env', f'{name} must name a file, not {path!r}'))
+    cc = data.get('customer_content')
+    if cc is not None:
+        if not isinstance(cc, dict):
+            problems.append(('customer_content',
+                             f'must be a map (paths, forbidden_markers), not {cc!r}'))
+        else:
+            if cc.get('paths') is not None:
+                why = _path_list_problem(cc['paths'])
+                if why:
+                    problems.append(('customer_content.paths', why))
+            marks = cc.get('forbidden_markers')
+            if marks is not None and not isinstance(marks, list):
+                problems.append(('customer_content.forbidden_markers',
+                                 f'must be a list of regexes, not {marks!r}'))
+            for pattern in (marks if isinstance(marks, list) else ()):
+                try:
+                    re.compile(str(pattern))
+                except re.error as e:
+                    problems.append(('customer_content.forbidden_markers',
+                                     f'{pattern!r} is not a regex ({e})'))
     feeder = data.get('feeder')
     if feeder is not None:
         cap = feeder.get('max_specs_in_flight') if isinstance(feeder, dict) else None

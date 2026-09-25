@@ -34,6 +34,11 @@ make the target behind only by the trunk commits that touch them. Its deployed s
 successful run of its ``workflow``, or, with ``source: vercel`` (``project``, ``scope``), the
 newest READY production deployment's commit. The rules above hold for every target.
 
+**Customer content.** Before any dispatch the candidate's tree is scanned under
+``conventions.customer_content.paths`` (:func:`marker_refusal`): a forbidden marker there — an
+internal note, a TODO, a placeholder — refuses the dispatch with one loud line, every tick, until
+a trunk commit removes it.
+
 Every outcome is one line per environment — ``deploy:`` for prod, ``deploy <name>:`` for the
 rest, dev and the named targets after it. The tick prints them (:func:`tick`); ``asf status`` /
 ``asf prod`` print the read-only half (:func:`lines`).
@@ -538,6 +543,25 @@ def dispatch_argv(product, sha, env='prod'):
     return argv
 
 
+def marker_refusal(product, sha, env='prod', scan=None):
+    """The one loud line refusing a dispatch of ``sha`` to ``env`` when its tree carries a
+    forbidden marker under ``conventions.customer_content.paths`` (or cannot be read to tell),
+    else None (:func:`asf.customer_content.tree_hits`)."""
+    from asf import customer_content as cc
+    conv = _conv(product)
+    if not cc.paths(conv):
+        return None
+    hits = (scan or cc.tree_hits)(getattr(product, 'repo_dir', None), sha, conv)
+    if hits == []:
+        return None
+    s = f"`{(sha or '?')[:9]}`"
+    if hits is None:
+        return (f"{_head(env)} DISPATCH REFUSED — {s}'s tree could not be read to check"
+                f" customer_content.paths; not deployed to {env} unchecked")
+    return (f"{_head(env)} DISPATCH REFUSED — {s} would ship internal text on customer pages:"
+            f" {cc.describe(hits)}; nothing deploys to {env} until a trunk commit removes it")
+
+
 def tick(product, out=print, sh=_sh):
     """The tick's deploy pass: print one line per environment and, where :func:`decide` says so,
     dispatch its deploy workflow. A refused dispatch is one loud line, and the next tick tries
@@ -547,6 +571,10 @@ def tick(product, out=print, sh=_sh):
         go, text = decide(product, f, e)
         out(text)
         if not go:
+            continue
+        marked = marker_refusal(product, f['candidate'], e)
+        if marked:
+            out(marked)
             continue
         if sh(dispatch_argv(product, f['candidate'], e)) is None:
             out(f"{_head(e)} DISPATCH REFUSED — gh workflow run {workflow(product, e)} for"

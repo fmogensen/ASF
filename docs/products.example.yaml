@@ -115,6 +115,14 @@ conventions:
   doc_paths: [README.md, docs/guide/*]
   # globs many Tasks touch without owning (lockfiles): no footprint overlap, one per merge (default []).
   shared_paths: [uv.lock]
+  # pages a customer reads (asf/customer_content.py): a branch adding an internal note, TODO,
+  # lorem ipsum or unresolved placeholder under these globs is held (file:line), a deploy whose
+  # tree carries one is refused, and a review of such a diff owes a `read as the customer` row.
+  # forbidden_markers (regexes) replace the defaults when set. `asf doctor` names a product that
+  # deploys without this block.
+  # customer_content:
+  #   paths: [apps/site/app/legal/**, apps/site/content/**]
+  #   forbidden_markers: ['(?i)\[\s*legal\s*:']
   # the PR lane: which landing class needs an approved ASF review before the gate (none |
   # required; default docs: none, code: required), and how long an open lane state may sit
   # unchanged and unheld before it is stale (<n>s|m|h|d, default 2d). Block maps only.

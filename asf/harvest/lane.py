@@ -68,7 +68,7 @@ import shutil
 import tempfile
 import time
 
-from asf import approvals, env
+from asf import approvals, customer_content, env
 from asf.evidence import review as review_mod
 from asf.feeder import footprint, widen
 from asf.harvest import harvest as H
@@ -272,9 +272,11 @@ def merge_commits(repo, trunk, branch):
     return [l for l in r.stdout.splitlines() if l.strip()]
 
 
-def lane_refusal(repo, trunk, branch, item):
+def lane_refusal(repo, trunk, branch, item, conv=None):
     """``(kind, text)`` for a branch the lane refuses before any gate, or None: a merge commit
-    on it (B-0056), or a commit not naming the item — each a correction back to its session."""
+    on it (B-0056), a commit not naming the item, or a line it adds to customer content that
+    carries a forbidden marker (:func:`asf.customer_content.refusal`, ``file:line`` each) — each
+    a correction back to its session."""
     merges = merge_commits(repo, trunk, branch)
     if merges:
         return 'merge', (f'merge commit on a lane branch: {merges[0]} — a lane branch is straight '
@@ -284,6 +286,8 @@ def lane_refusal(repo, trunk, branch, item):
         return 'naming', (f'commits do not name {item or "an item id"}: every commit subject on '
                           f'the branch names its item — reword them; the factory publishes the '
                           f'rewritten branch')
+    if conv is not None:
+        return customer_content.refusal(repo, trunk, branch, conv)
     return None
 
 
@@ -645,7 +649,7 @@ class Lane:
         f['class'] = landing_class(self.product, f['files'])
         f['review_required'] = conv.review_required(f['class'])
         if rec.get('state') in (None, PUSHED, BACK):
-            f['refusal'] = lane_refusal(repo, trunk, b, item)
+            f['refusal'] = lane_refusal(repo, trunk, b, item, conv)
         if f['review_required'] and rec.get('state') in (None, PUSHED, BACK, PR_OPEN, REVIEW):
             rv = review_mod.review_at(repo, conv, f'origin/{b}', item)
             if rv:
@@ -1250,6 +1254,11 @@ def precheck(lane, entries):
         if has_adjudicate_commit(lane.repo, lane.trunk, b):
             out(f'held {b}: ruling belongs in the record')
             wait(lane, f, 'ruling belongs in the record', 'held')
+            continue
+        marked = customer_content.refusal(lane.repo, lane.trunk, b, conv)
+        if marked:  # the marker gate again at the gate: a branch past PUSHED before it existed
+            f['refusal'] = marked
+            lane.enter_back(f, f'kind={marked[0]}')
             continue
         files = f.get('files') or touched_files(lane.repo, lane.trunk, b)
         cls, matched = approvals.merge_class(product, files)

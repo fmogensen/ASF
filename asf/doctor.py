@@ -738,6 +738,9 @@ def run(product_name):
     from asf.harvest import deploy  # each environment's deploy mode, and a deprecated key
     for ok, detail in deploy.findings(product):
         rows.append(('deploy', False, ok, detail))
+    from asf import customer_content  # a product that deploys names its customer pages
+    for ok, detail in customer_content.findings(product):
+        rows.append(('customer content', False, ok, detail))
     for ok, detail in check_token_caps(cfg, product):
         rows.append(('token-caps', False, ok, detail))
     for required, ok, detail in check_ci_pool(product):
