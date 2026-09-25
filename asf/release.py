@@ -4,7 +4,7 @@ and printed met or unmet with its evidence. Nothing is written.
 
 1. **stability** — no hand hotfix in the last ``window_days``: commits on the trunk of a
    ``hand_types`` kind (``fix``, ``hotfix``, ``revert``) that carry no ``ASF-Session:`` trailer
-   (so no factory session made them), plus installs by hand: every ``tools/install.sh`` run
+   (so no factory session made them), plus installs by hand: every run of the install script (``install.sh``)
    (``logs/install.log``) and every break in the auto-upgrade chain the tick logs show (an
    upgrade that starts from a commit the previous upgrade did not install — something installed
    it in between, by hand).
@@ -203,7 +203,7 @@ def upgrade_facts(logs, dates, since):
 
 
 def install_log(log_dir, since):
-    """``tools/install.sh`` runs since ``since``: one ``<iso>\\t<product>\\t<ref>`` line each."""
+    """The install script's runs since ``since``: one ``<iso>\\t<product>\\t<ref>`` line each."""
     out = []
     try:
         with open(os.path.join(log_dir, 'install.log'), encoding='utf-8') as f:

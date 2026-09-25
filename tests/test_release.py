@@ -34,7 +34,7 @@ def good_facts(**over):
         'upgrade': {'upgrades': [{'to': 'a'}, {'to': 'b'}, {'to': 'c'}], 'failed': [], 'torn': [],
                     'rollbacks': [], 'chain_breaks': []},
         'ci_runs': [{'conclusion': 'success', 'headSha': 'x' * 40}] * 10,
-        'ci_steps': [('tests', 'bash tools/install.sh sample v0.1.0', 'success'),
+        'ci_steps': [('tests', 'bash install.sh sample v0.1.0', 'success'),
                      ('tests', 'check generic', 'success'),
                      ('tests', 'the sample product, end to end', 'success')],
         'docs': {'headings': ['Install', 'Quick start', 'Configuration', 'Upgrade'], 'tag': 'v0.1.0',
