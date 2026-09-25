@@ -19,8 +19,9 @@ from asf.drift import DEFERRED  # noqa: F401 — the upgrade waits for the next 
 
 PACKAGE_NAME = 'asf-factory'
 DEFAULT_REPO_URL = 'https://github.com/fmogensen/ASF.git'
-#: a tick's command line: ``python -m asf.cli tick …`` (the clocks) or ``…/bin/asf tick …``
-TICK_PATTERN = r'asf(\.cli)? tick( |$)'
+#: a tick's command line: ``python -m asf.cli tick …`` (the clocks) or ``…/bin/asf tick …`` —
+#: anchored on the interpreter's argv, so a shell whose script merely mentions them does not match
+TICK_PATTERN = r'(-m asf\.cli|/asf) tick( |$)'
 
 
 def upgrade_command(url, ref):

@@ -555,6 +555,13 @@ class UpgradeTest(HomeCase):
         self.assertIn('upgrade: deferred to the next tick', out)
         self.assertIn('4242', out)
 
+    def test_the_pattern_matches_ticks_not_shells_that_name_them(self):
+        import re
+        pat = re.compile(upgrade.TICK_PATTERN)
+        self.assertTrue(pat.search('/usr/bin/python3 -m asf.cli tick --product asf --steps record'))
+        self.assertTrue(pat.search('/usr/bin/python3 /Users/x/.local/bin/asf tick --product asf'))
+        self.assertFalse(pat.search('zsh -c until ! pgrep -f "asf.cli tick"; do sleep 5; done'))
+
     def test_its_own_tick_does_not_defer_it(self):
         run = FakeRun(ticks=f'{os.getpid()}\n')
         rc, _out, _err = self.run_upgrade(run)
