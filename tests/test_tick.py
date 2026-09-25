@@ -602,6 +602,48 @@ class LegacyStepTests(TickTestCase):
         self.assertFalse(os.path.exists(steps.stamp_path(env.load_product('sample'))))
 
 
+class DailyCatchUpTests(TickTestCase):
+    """B-0123: a daily that missed its own clock catches up on the next regular tick, once,
+    instead of waiting for tomorrow's daily clock to fire again."""
+
+    product_yaml = ('steps:\n  health: off\n  wave: off\n  prs: off\n  harvest: off\n  batch: off\n'
+                     'clocks:\n'
+                     '  record:\n'
+                     '    steps: [record]\n'
+                     '    every: 5m\n'
+                     '  dispatch:\n'
+                     '    steps: [health, wave, prs, harvest, batch]\n'
+                     '    every: 10m\n'
+                     '  daily:\n'
+                     '    steps: [daily]\n'
+                     '    at: "00:00"\n')  # always already past by the time a test runs
+
+    def test_a_failed_daily_catches_up_once_on_the_next_regular_tick(self):
+        from asf.tick import step_daily
+        with mock.patch.object(step_daily, 'run',
+                                side_effect=[RuntimeError('daily parts failed: rollup'), 0]):
+            rc, out = self.run_tick(steps='daily')  # the 06:00 (here: 00:00) clock's own tick
+            self.assertEqual(rc, 1)
+            self.assertFalse(os.path.exists(steps.stamp_path(env.load_product('sample'))))
+
+            rc, out = self.run_tick(steps='health,wave,prs,harvest,batch')  # the next dispatch tick
+            self.assertEqual(rc, 0)
+            self.assertIn('daily: catching up — 00:00 run has not succeeded today', out)
+            with open(steps.stamp_path(env.load_product('sample'))) as f:
+                self.assertEqual(f.read().strip(), steps._today())
+
+    def test_a_successful_daily_is_not_run_again_by_a_later_regular_tick(self):
+        from asf.tick import step_daily
+        with mock.patch.object(step_daily, 'run', return_value=0) as m:
+            rc, out = self.run_tick(steps='daily')
+            self.assertEqual(rc, 0)
+
+            rc, out = self.run_tick(steps='health,wave,prs,harvest,batch')
+            self.assertEqual(rc, 0)
+            self.assertNotIn('daily', out)
+        self.assertEqual(m.call_count, 1)
+
+
 class SummaryTests(TickTestCase):
     def test_every_tick_ends_with_the_two_tables(self):
         rc, out = self.run_tick(steps='record')

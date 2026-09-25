@@ -15,6 +15,7 @@ its repo) has no ``asf`` implementation and must be declared.
 """
 import datetime
 import os
+import re
 import select
 import shlex
 import signal
@@ -184,3 +185,44 @@ def daily_due(product, force=False, today=None):
 def write_daily_stamp(product, today=None):
     with open(stamp_path(product), 'w', encoding='utf-8') as f:
         f.write((today or _today()) + '\n')
+
+
+# ---- catching up a missed daily (B-0123) ---------------------------------------
+#
+# The daily clock (``clocks: {daily: {steps: [daily], at: "06:00"}}``) fires once a day; a tick
+# that misses its own window (the host was offline, the run failed before it stamped) is not
+# retried by that clock again until tomorrow. Every other clock's own tick — ``record``,
+# ``dispatch`` — never carries ``daily`` in its ``--steps`` at all, so nothing else even looks at
+# it. A regular tick run after the daily clock's own time, on a day the stamp is still stale,
+# runs it once as a catch-up instead of leaving it for tomorrow.
+
+_AT_RE = re.compile(r'^([01]?\d|2[0-3]):([0-5]\d)$')
+
+
+def _daily_clock_time(product):
+    """``(hour, minute)`` of the clock whose steps carry ``daily``, or None when no clock does
+    (a product with no ``clocks:`` block, or one that runs ``daily`` some other way)."""
+    for entry in (product._get('clocks') or {}).values():
+        if not isinstance(entry, dict):
+            continue
+        clock_steps = entry.get('steps')
+        clock_steps = clock_steps if isinstance(clock_steps, list) else ([clock_steps] if clock_steps else [])
+        m = _AT_RE.match(str(entry.get('at') or '').strip())
+        if m and 'daily' in clock_steps:
+            return int(m.group(1)), int(m.group(2))
+    return None
+
+
+def daily_catch_up_due(product, now=None):
+    """True when the daily clock's own time has passed today and today's run still has not
+    succeeded — this regular tick should run ``daily`` itself rather than wait for tomorrow."""
+    at = _daily_clock_time(product)
+    if at is None:
+        return False
+    now = now or datetime.datetime.now()
+    return (now.hour, now.minute) >= at and daily_due(product, today=now.date().isoformat())
+
+
+def daily_catch_up_message(product):
+    hour, minute = _daily_clock_time(product)
+    return f"daily: catching up — {hour:02d}:{minute:02d} run has not succeeded today"

@@ -413,6 +413,13 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
         # not start, and what runs ends — the owner's next start finds the gap.
         print(f'tick: upgrade to {upgrade.read_pending()["sha"][:7]} pending — this tick runs'
               ' without a new background harvest; the install goes at the next start')
+    if not any(s == 'daily' for s, _, _ in rows):
+        # this tick's own clock doesn't carry daily (it isn't the daily clock) — catch it up
+        # when its own clock's time has passed and it still hasn't succeeded today (B-0123)
+        d_step, d_owner, d_command = steps.resolve(product, ['daily'])[0]
+        if d_owner != 'off' and steps.daily_catch_up_due(product):
+            print(steps.daily_catch_up_message(product))
+            rows = list(rows) + [(d_step, d_owner, d_command)]
     rc = 0
     ran = []
     resolved = None
