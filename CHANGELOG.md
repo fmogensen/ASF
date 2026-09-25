@@ -2,6 +2,31 @@
 
 One entry per released version, newest first.
 
+## v0.1.16 — 2026-09-25
+
+### Bugs fixed
+
+- B-0067 A coder's branch is task/<id> but harvest scans the conventions' prefixes only: finished Task branches are never landed
+
+### Improvements and hotfixes
+
+- fix(hooks): a worker's commit-msg names its item — <kind>(<ID>): when the subject lacks the id
+- fix(lane): a naming refusal is reworded by the lane itself — no session, no round, never adjudicate
+- feat(lane): lane/size/ab_pair Feature fields, the direct branch lands without a review round
+- feat(feeder): DIRECT → BUILD for a direct Feature, CARD → SPEC+PLAN for a small one
+- feat(scorecard): asf scorecard --by-lane — direct vs full, pooled and per ab_pair
+- feat(lane): the direct brief's pre-push tests are targeted; the full suite is the landing gate's
+- fix(feeder): a Feature in a lane experiment (ab_pair) is never held by the finish-first cap
+- fix(feeder): a Feature in a lane experiment (ab_pair) is not starved by the capacity cut
+- feat(file-bugs): one counted Bug per flaky e2e test from the CI logs
+- fix(ci-queue): trunk and S1 starts reserve nothing; one stable median estimate
+- fix(deploy): the prod candidate is green on its required jobs, not the run-level conclusion
+- fix(tests): the git fixture's template copy skips lock files a background maintenance run creates
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.16"`
+
 ## v0.1.15 — 2026-09-25
 
 ### Features landed
