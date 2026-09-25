@@ -536,6 +536,59 @@ class Orphans(LaneRepo):
         self.assertIn('no card in the record claims it', ln.host.closed[0][1])
         self.assertNotIn('worker/factory-retro-2026-09-19', self.heads())
 
+    def test_an_unclaimed_legacy_branch_is_deleted_not_archived(self):
+        """Retention deletes archives after days anyway: a superseded branch under a legacy
+        prefix no card claims is deleted outright, with one line saying so."""
+        self.push_lane('worker/factory-retro-2026-09-19', {'r.txt': 'r\n'}, 'notes')
+        prs = {'worker/factory-retro-2026-09-19': {'number': 48, 'state': 'OPEN'}}
+        lines = []
+        product = self.product(branch_retention={'legacy_prefixes': ['worker/factory-']})
+        ln = lane.Lane(product, self.state_dir, out=lines.append, items={},
+                       now=time.time() + self.LATER)
+        ln.host = FakePRHost(product, ln, prs)
+        lane.lane_pass(product, self.state_dir, items={}, lane=ln)
+        self.assertEqual([n for n, _ in ln.host.closed], [48])
+        self.assertIn('deleted, not archived', ln.host.closed[0][1])
+        self.assertNotIn('worker/factory-retro-2026-09-19', self.heads())
+        self.assertNotIn('archive/worker/factory-retro-2026-09-19', self.heads())
+        said = [x for x in lines if x.startswith('superseded worker/factory-retro-2026-09-19')]
+        self.assertEqual(len(said), 1, lines)
+        self.assertIn('deleted, not archived (legacy prefix worker/factory-', said[0])
+        self.assertEqual(self.lane_of('worker/factory-retro-2026-09-19')['state'], lane.STALE)
+
+    def test_a_hosted_origin_archives_and_deletes_through_the_api_never_a_push(self):
+        self.push_lane('worker/factory-retro-2026-09-19', {'r.txt': 'r\n'}, 'notes')
+        b = 'worker/factory-retro-2026-09-19'
+        head = sh(['git', 'rev-parse', b], cwd=self.origin).stdout.strip()
+        calls = []
+
+        def fake(args):
+            calls.append(args)
+            if args[:3] == ['api', '-X', 'POST'] and args[3].endswith('/git/commits'):
+                return 0, 'c' * 40 + '\n', ''
+            if args[0] == 'api' and args[1] == f'repos/o/p/git/ref/heads/{b}':
+                return 0, head + '\n', ''
+            return 0, '', ''
+        lines = []
+        with mock.patch.object(lane, 'repo_slug', return_value='o/p'), \
+                mock.patch.object(harvest, '_gh', side_effect=fake):
+            ln = lane.Lane(self.product(), self.state_dir, out=lines.append, items={},
+                           now=time.time() + self.LATER)
+            ln.host = FakePRHost(ln.product, ln, {})
+            lane.lane_pass(ln.product, self.state_dir, items={}, lane=ln)
+        self.assertEqual(calls[1], ['api', '-X', 'POST', 'repos/o/p/git/refs', '-f',
+                                    f'ref=refs/heads/archive/{b}', '-f', 'sha=' + 'c' * 40])
+        self.assertIn('parents[]=' + head, calls[0])
+        self.assertEqual(calls[-1], ['api', '-X', 'DELETE', f'repos/o/p/git/refs/heads/{b}'])
+        self.assertIn(b, self.heads())  # nothing went by git: the fake host kept it
+        self.assertNotIn(f'archive/{b}', self.heads())
+        timed = [x for x in lines if x.startswith(f'lane: push {b} ')]
+        self.assertEqual(len(timed), 2, lines)
+        self.assertRegex(timed[0], r'\(archive, api\)$')
+        self.assertRegex(timed[1], r'\(delete, api\)$')
+        self.assertFalse(os.path.isdir(os.path.join(self.state_dir, lane.REF_PUSH_DIR))
+                         and os.listdir(os.path.join(self.state_dir, lane.REF_PUSH_DIR)))
+
     def test_an_open_card_it_alone_answers_for_is_picked_back_up(self):
         self.push_lane('worker/free-plan-t3', {'c.txt': 'c\n'}, 'feat: the door')
         items = {'T-0009': {'id': 'T-0009', 'type': 'task', 'state': 'Active',
@@ -895,6 +948,42 @@ class FeederAndOutcomes(unittest.TestCase):
                 self.assertFalse(summary.credits_landing(run))
         text = summary.render([], [own, empty], {}, 's', 'n', False)
         self.assertEqual(text.count('landed abc1234'), 1)
+
+
+class ApiRef(unittest.TestCase):
+    """A hosted origin's ref-only pushes are host API calls (no pre-push hook)."""
+
+    def run_(self, refspec, answers, lease=None):
+        calls = []
+
+        def fake(args):
+            calls.append(args)
+            return answers.pop(0)
+        with mock.patch.object(harvest, '_gh', side_effect=fake):
+            return lane.api_ref('o/r', refspec, lease) + (calls,)
+
+    def test_create_and_one_already_there_at_the_sha(self):
+        ok, why, calls = self.run_('a' * 40 + ':refs/heads/archive/x', [(0, '', '')])
+        self.assertTrue(ok, why)
+        self.assertEqual(calls, [['api', '-X', 'POST', 'repos/o/r/git/refs', '-f',
+                                  'ref=refs/heads/archive/x', '-f', 'sha=' + 'a' * 40]])
+        ok, why, _ = self.run_('a' * 40 + ':refs/heads/archive/x',
+                               [(1, '', 'Reference already exists'), (0, 'a' * 40 + '\n', '')])
+        self.assertTrue(ok, why)
+        ok, why, _ = self.run_('a' * 40 + ':refs/heads/archive/x',
+                               [(1, '', 'Reference already exists'), (0, 'b' * 40 + '\n', '')])
+        self.assertFalse(ok)
+        self.assertIn('already exists', why)
+
+    def test_delete_only_while_the_tip_is_the_judged_sha(self):
+        lease = 'refs/heads/x:' + 'a' * 40
+        ok, why, calls = self.run_(':refs/heads/x', [(0, 'a' * 40 + '\n', ''), (0, '', '')], lease)
+        self.assertTrue(ok, why)
+        self.assertEqual(calls[1], ['api', '-X', 'DELETE', 'repos/o/r/git/refs/heads/x'])
+        ok, why, calls = self.run_(':refs/heads/x', [(0, 'b' * 40 + '\n', '')], lease)
+        self.assertFalse(ok)
+        self.assertIn('tip moved', why)
+        self.assertEqual(len(calls), 1)
 
 
 class SkippedRequiredCheck(unittest.TestCase):
