@@ -457,6 +457,8 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
                                                 extra_env=capacity.env_overlay(resolved, product))
                 if step_rc:
                     print(f"tick: step {step} exited {step_rc}")
+                    if step == 'daily':
+                        steps.write_daily_failure(product, f"exited {step_rc}")
         ran.append({'step': step, 'ok': not step_rc, 'seconds': round(time.monotonic() - t0, 1)})
         print(step_timing_line(step, ran[-1]['seconds']))
         if step == 'daily' and step_rc == 0:
@@ -559,6 +561,8 @@ def run_asf_step(step, ctx):
         print(traceback.format_exc().rstrip(), flush=True)
         if step == 'record':
             ctx.stale_reason = _first_line(detail) or type(e).__name__
+        if step == 'daily':
+            steps.write_daily_failure(ctx.product, _first_line(detail) or type(e).__name__)
         return 1
 
 
