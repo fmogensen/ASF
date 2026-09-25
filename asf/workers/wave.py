@@ -4,6 +4,12 @@ reserve. Prints one ``launched`` or ``waits`` line per row considered:
     launched fix-b-0012   B-0012  → acct-a (opus) pid 4242
     waits    spec-f-0031  F-0031  — reserved for S1
 
+A launch goes to an account only while its 5h window has room for it — the reading, this wave's
+launches, an allowance for its running sessions and this launch's estimate stay under the guard
+(:meth:`asf.workers.pool.Pool.headroom`); a row that fits nowhere waits::
+
+    waits    spec-f-0031  F-0031  — quota: acct-a would exceed 65% (now 51%, +10% committed, +10% this launch)
+
 ``BUG → FIX`` rows go first (S1 before the rest), then the feeder's own order. A row whose job
 already has a live session *of this product* waits with ``already running``: the check is on
 ``(product, job)``, so ``spec-f-0001`` live under product ``b`` never blocks ``a``'s own
@@ -18,6 +24,7 @@ import json
 import os
 
 from asf import env
+from asf.workers import headroom as headroom_mod
 from asf.workers import pool as pool_mod
 from asf.workers import spawn as spawn_mod
 
@@ -83,6 +90,7 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
          spawn_fn=None):
     """Returns ``(launched, waits)``: lists of ``(row, record)`` and ``(row, reason)``."""
     cfg = spawn_mod.load_cfg() if cfg is None else cfg
+    sample = pool is None  # a tick's own pool: its readings are history (asf.workers.headroom)
     pool = pool or pool_mod.Pool.from_config(cfg, product)
     spawn_fn = spawn_fn or spawn_mod.spawn
     s1 = pool_mod.s1_open(rows)
@@ -112,7 +120,8 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
                         continue
                 else:
                     failures.clear(row.job)
-                    pool.take(acct, rec.get('model'), row.job, product=product.name)
+                    pool.take(acct, rec.get('model'), row.job, product=product.name,
+                              kind=row.kind)
                     running.add((product.name, row.job))
                     launched.append((row, rec))
                     out(f"launched {row.job:<24} {row.item:<10} → {acct.name} "
@@ -120,4 +129,6 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
                     continue
         waits.append((row, reason))
         out(f"waits    {row.job:<24} {row.item:<10} — {reason}")
+    if sample:
+        headroom_mod.record_samples(dict(pool._usage))
     return launched, waits

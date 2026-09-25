@@ -711,7 +711,7 @@ class OutcomeClassTests(unittest.TestCase):
         self.assertEqual(lc.outcome_class(f'failed: {lc.EMPTY_BRANCH}'), 'empty branch')
 
     def test_a_cli_signature(self):
-        self.assertEqual(lc.outcome_class('failed: quota'), 'quota')
+        self.assertEqual(lc.outcome_class('failed: quota-exhausted'), 'quota-exhausted')
 
     def test_unpushed_work(self):
         self.assertEqual(lc.outcome_class('failed: unpushed work'), 'unpushed work')
@@ -735,7 +735,7 @@ class OutcomeClassTests(unittest.TestCase):
         self.assertNotIn(lc.STOPPED, lc.OUTCOME_CLASSES)
 
     def test_whitespace_and_case(self):
-        self.assertEqual(lc.outcome_class('  FAILED: Quota  '), 'quota')
+        self.assertEqual(lc.outcome_class('  FAILED: Quota-Exhausted  '), 'quota-exhausted')
 
     def test_every_string_judge_can_return_classes_to_a_member(self):
         ev = lc.Evidence(result=OK, uncommitted=3, unpushed=0)
@@ -752,7 +752,7 @@ class OutcomeClassTests(unittest.TestCase):
     def test_the_vocabulary_is_the_specs_in_the_specs_order(self):
         self.assertEqual(lc.OUTCOME_CLASSES, (
             'finished', 'not pushed', 'empty branch', 'dead pid', 'pushed after stop',
-            'unpushed work', 'unknown model', 'auth', 'quota', 'permission', 'hook refused',
+            'unpushed work', 'unknown model', 'auth', 'quota-exhausted', 'permission', 'hook refused',
             'network error', 'other'))
 
 

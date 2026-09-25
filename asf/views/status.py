@@ -14,7 +14,9 @@ Every row is filled from what exists, or says which key would fill it —
   ``index.json``, less the sessions in flight);
 * **Decisions** — the undecided cards (D6's one ranking) and the first few to decide;
 * **Quota 5h/7d** — each account through the quota source (``worker_pool.quota_command``), the
-  cell naming the band when it is not ``free``;
+  cell naming the band when it is not ``free``, and a stopped account's reset (``— resets
+  15:20``): the one a session limit named (:mod:`asf.workers.headroom`), else the source's
+  ``five_h_resets_at`` when it prints one;
 * **Cron** — the scheduler adapter's ``status()`` of this product's loaded jobs.
 """
 import datetime
@@ -217,8 +219,10 @@ def quota_cell(cfg):
     accounts = pool_mod.accounts_from_config(cfg)
     if not accounts:
         return not_configured('worker_pool.accounts')
+    from asf.workers import headroom
     source = quota_mod.source_from_config(cfg)
     guards = quota_mod.guards_from_config(cfg)
+    limits = headroom.active_limits()
     parts = []
     for a in accounts:
         try:
@@ -228,10 +232,17 @@ def quota_cell(cfg):
         uu = u or {}
         five, seven = uu.get('five_h_pct'), uu.get('seven_d_pct')
         state, _why = quota_mod.band(u, guards)
+        until = (limits.get(a.name) or {}).get('until')
+        if until:
+            state = quota_mod.STOP  # a session limit stopped it, whatever the reading says
+        if not until and five is not None and float(five) >= guards['stop']['five_h']:
+            until = uu.get('five_h_resets_at')  # the source's own reset, for a full 5h window
         part = (f"{a.name} {five if five is not None else '?'}%/"
                 f"{seven if seven is not None else '?'}%")
         if state != quota_mod.FREE:
             part += f" {state}"
+        if state == quota_mod.STOP and headroom.parse_ts(until):
+            part += f" — resets {headroom.reset_label(until)}"
         parts.append(part)
     return ', '.join(parts)
 

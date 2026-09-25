@@ -49,6 +49,7 @@ import os
 import re
 import subprocess
 
+from asf.workers import headroom
 from asf.workers import observe
 from asf.workers import pool as pool_mod
 from asf.workers import report as report_mod
@@ -347,6 +348,8 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
                     pool_mod.update_session(product, job, end_reason=reason, rc=0 if ok else 1)
                     s.update(end_reason=reason, rc=0 if ok else 1)
                     found.append((job, 're-judged', reason))
+                    if lifecycle.quota_exhausted(s):
+                        found.append((job, 'quota', headroom.note_exhausted(product, s, ev.result)))
             continue
         ev = lifecycle.gather(product, s, alive=alive)
         reason = lifecycle.judge(s, ev, landing=lifecycle.lands(s, registry))
@@ -366,6 +369,11 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
                                 runtime_session=runtime_mod.runtime_session(s.get('log')) or None)
         s.update(ended=now, end_reason=reason)
         found.append((job, 'ended', reason))
+        if lifecycle.quota_exhausted(s):
+            # the account's window, not the work: its account stops until the reset, and the
+            # item relaunches — no hold, no round (asf.workers.headroom)
+            found.append((job, 'quota', headroom.note_exhausted(product, s, ev.result)))
+            continue
         if closed:
             continue  # nothing to send back: the worktree is reaped below when it is empty
         if retry:

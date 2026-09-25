@@ -186,6 +186,8 @@ def hold_failed_corrections(ctx, sessions, out=print, items=None):
             continue
         if run_rec.get('end_reason') == lifecycle.FINISHED or run_rec.get('harvested'):
             continue
+        if lifecycle.quota_exhausted(run_rec):
+            continue  # a spent window, not a failure: it relaunches, and holds nothing
         original = sessions.get(job[:-len('-correction')])
         if original is None or lifecycle.pending_correction(original, path):
             continue

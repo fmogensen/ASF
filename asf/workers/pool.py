@@ -20,6 +20,14 @@ some account held only by the cooldown → ``quota cooldown — one job at a tim
 wait. Every candidate at or above its stop, or unreadable →
 ``NEEDS OPERATOR: no account under quota — …`` as the row's reason, never an exception.
 
+The 5h window is a budget (:mod:`asf.workers.headroom`): a candidate takes the launch only while
+its ``five_h_pct`` + this wave's launches on it + an allowance for its running sessions + this
+launch's estimate stay under the 5h stop (:meth:`Pool.headroom`). When no candidate fits, the
+reason names the one closest to fitting: ``quota: <acct> would exceed 65% (now 51%, +10%
+committed, +10% this launch)``. An account a session limit stopped is ``stop`` until its reset;
+when that is all that stops the pool, the reason is ``quota: <acct> stopped until 15:20 (session
+limit)`` — a wait for a known reset, not a page.
+
 Reserved S1 capacity: while any S1 Bug is open, a lane's non-``BUG → FIX`` rows may use at most
 ``lane cap − reserve`` slots; the reserved slot only goes to a ``BUG → FIX`` row.
 
@@ -40,6 +48,7 @@ import re
 
 from asf import env
 from asf import capacity as capacity_mod
+from asf.workers import headroom as headroom_mod
 from asf.workers import lifecycle
 from asf.workers import observe
 from asf.workers import quota as quota_mod
@@ -218,14 +227,19 @@ class Pool:
     product's list."""
 
     def __init__(self, accounts, quota_source=None, guards=None, reserve=None, live=(),
-                 unreadable=''):
+                 unreadable='', costs=None, limits=None):
         self.accounts = list(accounts)
         self.quota = quota_source or quota_mod.NoQuotaSource()
         self.guards = guards or quota_mod.guards_from_config({})
         self.reserve = dict(DEFAULT_RESERVE if reserve is None else reserve)
         self.live = [dict(s) for s in live]
         self.unreadable = unreadable
+        #: the per-launch share of a 5h window (:class:`asf.workers.headroom.CostTable`)
+        self.costs = costs or headroom_mod.CostTable()
+        #: ``{account: {until, …}}`` — accounts a session limit stopped until their reset
+        self.limits = dict(limits or {})
         self._usage = {}
+        self._committed = {}
 
     @classmethod
     def from_config(cls, cfg, product, quota_source=None, session_source=None):
@@ -264,15 +278,46 @@ class Pool:
         return cls(accounts,
                    quota_source=quota_source or quota_mod.source_from_config(cfg),
                    guards=quota_mod.guards_from_config(cfg), reserve=reserve_from_config(cfg),
-                   live=live, unreadable=why)
+                   live=live, unreadable=why, costs=headroom_mod.table_from_config(cfg),
+                   limits=headroom_mod.active_limits())
 
     def usage(self, account):
         if account.name not in self._usage:
             self._usage[account.name] = self.quota.read(account)
         return self._usage[account.name]
 
+    def limit(self, account):
+        """The reset a session limit stopped ``account`` until (ISO), or None."""
+        rec = self.limits.get(account.name) or {}
+        until = headroom_mod.parse_ts(rec.get('until'))
+        return rec.get('until') if until is not None and until > headroom_mod.now_utc() else None
+
     def band(self, account):
+        until = self.limit(account)
+        if until:
+            return quota_mod.STOP, f'session limit until {headroom_mod.reset_label(until)}'
         return quota_mod.band(self.usage(account), self.guards)
+
+    def headroom(self, account, kind, model):
+        """``(fits, why, projected)``: whether one more ``(kind, model)`` launch keeps ``account`` under the
+        5h guard — ``five_h_pct`` now, plus this wave's launches on it at their full estimate,
+        plus the sessions already running on it at the table's allowance, plus this launch
+        (:mod:`asf.workers.headroom`). An account with no 5h reading is the band's to judge."""
+        u = self.usage(account) or {}
+        if u.get('five_h_pct') is None:
+            return True, '', 0.0
+        now = float(u['five_h_pct'])
+        running = sum(self.costs.cost(s.get('kind'), s.get('model')) for s in self.live
+                      if s.get('account') == account.name and not s.get('wave'))
+        committed = round(self._committed.get(account.name, 0.0)
+                          + running * self.costs.allowance, 1)
+        cost = self.costs.cost(kind, model)
+        guard = self.guards['stop']['five_h']
+        total = now + committed + cost
+        if total < guard:
+            return True, '', total
+        return False, (f'quota: {account.name} would exceed {guard:g}% (now {now:g}%, '
+                       f'+{committed:g}% committed, +{cost:g}% this launch)'), total
 
     def load(self, account, model=None):
         return sum(1 for s in self.live if s.get('account') == account.name
@@ -302,24 +347,43 @@ class Pool:
                     if self.lane_load(a.role) < self.lane_cap(a.role) - self.reserve.get(a.role, 0)]
             if not room:
                 return None, REASON_RESERVED
-        free, cooling, held = [], [], False
+        free, cooling, held, over, limited = [], [], False, [], []
         for a in room:
             state, _why = self.band(a)
-            if state == quota_mod.FREE:
+            if state == quota_mod.STOP and self.limit(a):
+                limited.append(a)
+                continue
+            if state not in (quota_mod.FREE, quota_mod.COOLDOWN):
+                continue
+            fits, why, total = self.headroom(a, kind, model)
+            if not fits:
+                over.append((total, why))
+            elif state == quota_mod.FREE:
                 free.append(a)
-            elif state == quota_mod.COOLDOWN:
-                if self.load(a) == 0:
-                    cooling.append(a)
-                else:
-                    held = True             # cooling and already carrying its one job
+            elif self.load(a) == 0:
+                cooling.append(a)
+            else:
+                held = True                 # cooling and already carrying its one job
         if free:
             free.sort(key=lambda a: (self.load(a), a.name))
             return free[0], ''
         if cooling:
             cooling.sort(key=lambda a: a.name)  # every one of them is at load 0
             return cooling[0], ''
-        return None, (REASON_COOLDOWN if held else REASON_NO_QUOTA)
+        if over:
+            return None, min(over)[1]       # the account closest to fitting
+        if held:
+            return None, REASON_COOLDOWN
+        if limited:
+            first = min(limited, key=lambda a: self.limit(a))
+            return None, (f'quota: {first.name} stopped until '
+                          f'{headroom_mod.reset_label(self.limit(first))} (session limit)')
+        return None, REASON_NO_QUOTA
 
-    def take(self, account, model, job='', product=None):
+    def take(self, account, model, job='', product=None, kind=None):
+        """One launch of this wave on ``account``: a seat, and its full estimate committed
+        against the account's 5h headroom."""
         self.live.append({'job': job, 'account': account.name, 'model': model,
-                          'product': product})
+                          'product': product, 'kind': kind, 'wave': True})
+        self._committed[account.name] = (self._committed.get(account.name, 0.0)
+                                         + self.costs.cost(kind, model))

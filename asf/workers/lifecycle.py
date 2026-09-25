@@ -51,6 +51,7 @@ import subprocess
 import time
 
 from asf import env
+from asf.workers import headroom
 from asf.workers import runtime as runtime_mod
 
 #: Corrections a held branch gets before the feeder switches to an ADJUDICATE row.
@@ -104,6 +105,8 @@ RETRY_CLASSES = (HOOK_REFUSED, NETWORK_ERROR)
 NETWORK_RE = re.compile(r'could not resolve host|connection (?:reset|refused|timed out|closed)|'
                         r'network is unreachable|unable to access|operation timed out|early eof|'
                         r'remote end hung up|ssl_error|gnutls', re.I)
+#: The end_reason of a run a spent window cut short (asf.workers.headroom).
+QUOTA_EXHAUSTED_REASON = f'failed: {headroom.QUOTA_EXHAUSTED}'
 HOOK_RE = re.compile(r'\bhook\b|pre-push|refused|declined', re.I)
 
 #: Every class a session's ``end_reason`` falls into. ``finished`` is the only one that is not a
@@ -394,7 +397,8 @@ def pending_correction(run, path=None):
     if path is not None:
         me = (run.get('job'), run.get('started'))
         later = [r for r in item_runs(path, run.get('item'))
-                 if (r.get('started') or '') >= at and (r.get('job'), r.get('started')) != me]
+                 if (r.get('started') or '') >= at and (r.get('job'), r.get('started')) != me
+                 and not quota_exhausted(r)]
         if later:
             return None
     return corr
@@ -451,12 +455,19 @@ def unlanded(path, alive=None, result=None):
     return out
 
 
+def quota_exhausted(run):
+    """The run ended on a spent window (:data:`asf.workers.headroom.QUOTA_EXHAUSTED`): the
+    account's fault, not the work's — no attempt, no round, no answer to a correction."""
+    return (run or {}).get('end_reason') == QUOTA_EXHAUSTED_REASON
+
+
 def attempts(path):
-    """``{item: runs the registry holds for it}`` — every launch, ended or not."""
+    """``{item: runs the registry holds for it}`` — every launch, ended or not, except a run
+    a spent window cut short (:func:`quota_exhausted`)."""
     out = {}
     for rs in runs(path).values():
         for r in rs:
-            if r.get('item'):
+            if r.get('item') and not quota_exhausted(r):
                 out[r['item']] = out.get(r['item'], 0) + 1
     return out
 

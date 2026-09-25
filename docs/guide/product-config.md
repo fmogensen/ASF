@@ -339,6 +339,28 @@ command, `{account}` substituted, printing one JSON line with `five_h_pct`, `sev
 optionally `seven_d_model_pct`). Without it every account reads 0 % and is always free; an account
 whose command fails reads as `stop`.
 
+**The 5h window as a budget.** Each launch carries an estimate of its share of the 5h window, per
+kind and model family: a fixed table while history is thin (Opus spec/plan 10 %, Opus review 6 %,
+any Sonnet 4 %), else the median `total_cost_usd` of that kind's recent runs over the dollars of a
+whole window. That dollar value is `quota_guards.five_h_usd` when set, else estimated from the
+wave's own `five_h_pct` readings (`~/.ASF/state/quota-samples.jsonl`) against what the account's
+runs spent between two readings. An account takes a launch only while its reading, plus this
+wave's launches on it, plus `running_allowance` (default 0.5) of each running session's estimate,
+plus the launch stays under `stop.five_h`; else the row goes to another account or waits with
+`quota: <acct> would exceed 65% (now 51%, +10% committed, +10% this launch)`.
+
+```yaml
+quota_guards:
+  five_h_usd: 40          # optional: the dollars of 100 % of a 5h window
+  running_allowance: 0.5  # optional: the share of its estimate a running session still holds
+```
+
+A session that ends on the CLI's session/usage-limit message is `failed: quota-exhausted`: no
+correction round, no hold, no attempt counted. Its account is stopped until the reset the message
+names (`~/.ASF/state/quota-limits.json`; an hour when it names none, and `asf status` shows
+`stop — resets 15:20`), and the item relaunches after the reset or on another account, in the
+worktree its partial work sits in.
+
 **Host guard** (`config.yaml`): a loaded host starts no new session and no landing gate.
 
 ```yaml

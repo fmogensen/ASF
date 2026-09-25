@@ -20,7 +20,7 @@ import subprocess
 import tempfile
 
 from asf import detach, env, hermetic
-from asf.workers import report
+from asf.workers import headroom, report
 
 DEFAULT_BINARY = 'claude'
 DEFAULT_PERMISSION_MODE = 'bypassPermissions'
@@ -448,7 +448,8 @@ def runtime_session(log_path):
 FAILURE_SIGNATURES = (
     ('unknown model', re.compile(r'issue with the selected model|model .* (?:not found|does not exist)', re.I)),
     ('auth', re.compile(r'invalid api key|please run /login|authentication[_ ]error|oauth token', re.I)),
-    ('quota', re.compile(r'usage limit reached|rate limit|quota (?:exceeded|exhausted)', re.I)),
+    # a spent window — the session limit, the usage limit, a rate limit (asf.workers.headroom)
+    (headroom.QUOTA_EXHAUSTED, headroom.LIMIT_RE),
     ('permission', re.compile(r'permission denied|not permitted to use', re.I)),
 )
 
