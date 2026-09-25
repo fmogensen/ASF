@@ -164,24 +164,28 @@ def capacity_cell(cfg, product):
     if lane:
         parts.append(lane)
     if r.ci is not None:
-        parts.append(ci_clause(r.ci_inflight, r.ci))
-    queued = ci_queue.status_clause(product)
-    if queued:  # the CI start queue: its depth and the head's hold line (no gh call)
+        parts.append(ci_clause(r.ci_inflight, r.ci, prs=ci_queue.mode(product) == 'on'))
+    # the CI start queue: its depth and the head's hold line (no gh call), a ceiling hold
+    # re-stated with this row's own count so the row never shows two
+    queued = ci_queue.status_clause(product, inflight=r.ci_inflight, ceiling=r.ci)
+    if queued:
         parts.append(queued)
     return ', '.join(parts)
 
 
-def ci_clause(inflight, gate):
+def ci_clause(inflight, gate, prs=False):
     """The CI clause of the Capacity row. ``capacity.ci`` is a *start gate*, not a ceiling on
-    every run: the tick holds its ``batch`` step while ``ci.workflow`` has that many runs in
-    flight. A product with a ``ci.pool`` also queues the lane's PRs and merges and the deploy
-    dispatch behind it (:mod:`asf.ci_queue`, whose clause follows this one); without one they
-    start runs regardless. The in-flight count is every ``ci.workflow`` run
-    (PR, trunk and batch alike), so an ``x/y`` fraction read as a breached cap; the clause names
-    the total and what the gate holds instead."""
-    n = inflight if inflight is not None else '?'
-    held = ' — batch waits' if isinstance(inflight, int) and inflight >= gate else ''
-    return f"ci {n} runs in flight (batch starts below {gate}{held})"
+    every run: the tick holds its ``batch`` step, and a product with a ``ci.pool`` its ordinary
+    PR starts too (:mod:`asf.ci_queue`, whose clause follows this one), while that many runs are
+    in flight; S1, hotfix, trunk and deploy starts are exempt. The count is
+    :func:`asf.capacity.ci_runs_in_flight` — every ``ci.workflow`` run not completed (PR, trunk
+    and batch alike), the same one the queue's hold names — so an ``x/y`` fraction read as a
+    breached cap; the clause names the total and what the gate holds instead."""
+    from asf import capacity as capacity_mod
+    what = 'batch and PR starts' if prs else 'batch starts'
+    held = (' — they wait' if prs else ' — batch waits') \
+        if isinstance(inflight, int) and inflight >= gate else ''
+    return f"ci {capacity_mod.ci_inflight_text(inflight)} ({what} below {gate}{held})"
 
 
 def record_cell(root):

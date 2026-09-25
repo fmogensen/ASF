@@ -240,9 +240,11 @@ harvest does not do. ASF runs it as a command step and passes the batch shape fr
 `capacity.batch` (`per_run`, `parallel`, `runners`) as the environment above — the same
 `per_run` and `parallel` also bound harvest's own merges. When a CI ceiling is configured and that
 many CI runs are already in flight, the tick does not start it: `waits    batch — at ci capacity
-(n/m)`. The ceiling gates only this step: a worker's PR push, a harvest merge onto the trunk and
-a deploy dispatch start their runs regardless, and every `ci.workflow` run counts as in flight —
-so the status row reads `ci 13 runs in flight (batch starts below 4 — batch waits)`. Declaring `batch` as a command also switches the default landing to `pull-request`.
+(n/m)`. Without a `ci.pool` the ceiling gates only this step: a worker's PR push, a harvest merge onto
+the trunk and a deploy dispatch start their runs regardless; with one, the CI start queue holds
+ordinary PR starts at it too, never S1, hotfix, trunk or deploy starts. Every `ci.workflow` run
+not completed counts as in flight — so the status row reads `ci 13 runs in flight (batch starts
+below 4 — batch waits)`. Declaring `batch` as a command also switches the default landing to `pull-request`.
 
 ### Clocks
 

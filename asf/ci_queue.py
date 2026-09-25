@@ -10,17 +10,23 @@ tick asks again. Its entry keeps its place in line (``since``) while it keeps as
 
 **Admission.** A run starts only while
 
-- the product's CI ceiling (``capacity.ci``, :func:`asf.capacity.product_ci` / ``total.ci``) has
-  room: runs in flight below it — the hard ceiling above the queue; and
+- for a batch or an ordinary PR start, the product's CI ceiling (``capacity.ci``,
+  :func:`asf.capacity.product_ci` / ``total.ci``) has room: runs in flight
+  (:func:`asf.capacity.ci_runs_in_flight`, the one count the status row shows too) below it. An
+  S1 or hotfix start, a trunk run and a deploy are exempt (:func:`ceiling_applies`): PR runs
+  in flight never hold the trunk every deploy waits on; and
 - for every runner class the run needs, the free runners are at least its expected jobs there,
   after what every entry ahead of it in line needs of that class is set aside.
 
-*Expected jobs per class* are measured: the last ``ci.queue.history`` (default 10) completed runs
-of the workflow that start triggers, their jobs grouped by the class of the runner each ran on
-(its ``ci.pool`` entry's ``class``, else its ``role``; a runner outside the pool, by its
-``class-<name>`` or role label), the median per run rounded up — capped at what the pool declares
-for that class, so a run bigger than the class can still start once the class is idle. The figure
-is cached in the queue file for :data:`EXPECT_TTL_S`. *Free runners* come from the runners API: an
+*Expected jobs per class* are measured (:func:`needs_from_history`): over the last
+``ci.queue.history`` (default 10) completed runs of the workflow that start triggers, per run and
+class the peak number of jobs running *at once* — each job that got a runner (``runner_name``
+set, conclusion not ``skipped``) counted over its ``started_at``..``completed_at``, so a skipped
+or conditional job never counts and sequential stages never add up — grouped by the class of the
+runner each ran on (its ``ci.pool`` entry's ``class``, else its ``role``; a runner outside the
+pool, by its ``class-<name>`` or role label); the p90 of that over the runs (nearest rank),
+capped at what the pool declares for that class, so a run bigger than the class can still start
+once the class is idle. The figure is cached in the queue file for :data:`EXPECT_TTL_S`. *Free runners* come from the runners API: an
 online runner that is not busy, counted at its ``slots``; runs this queue admitted in the last
 :data:`PICKUP_S` are subtracted too, because their jobs are queued on the host before any runner
 shows busy.
@@ -72,7 +78,6 @@ import json
 import math
 import os
 import re
-import statistics
 import subprocess
 
 from asf import ci_pool, env
@@ -91,6 +96,10 @@ STALE_S = 30 * 60
 PICKUP_S = 3 * 60
 #: how long a workflow's measured jobs per class are reused before they are read again
 EXPECT_TTL_S = 60 * 60
+#: the measure's version: a cached figure from another version is read again
+EXPECT_VERSION = 2
+#: the percentile of per-run peak concurrency a start expects to need
+NEEDS_PERCENTILE = 90
 GH_TIMEOUT_S = 30
 S1, TRUNK, FEATURE, OTHER = 0, 1, 2, 3
 
@@ -273,7 +282,8 @@ class Source:
         raise NotImplementedError
 
     def run_jobs(self, workflow, n):
-        """The last ``n`` completed runs of ``workflow``: ``[[{runner_name, labels}]]``."""
+        """The last ``n`` completed runs of ``workflow``: ``[[{runner_name, labels, conclusion,
+        started_at, completed_at}]]``."""
         raise NotImplementedError
 
     def inflight(self):
@@ -311,7 +321,8 @@ class GitHubSource(Source):
         out = []
         for run_id in ids:
             text = self._gh(['api', f'repos/{self.slug}/actions/runs/{run_id}/jobs?per_page=100',
-                             '--jq', '.jobs[] | {runner_name, labels}'])
+                             '--jq', '.jobs[] | {runner_name, labels, conclusion, started_at, '
+                             'completed_at}'])
             if text is None:
                 continue
             try:
@@ -321,20 +332,60 @@ class GitHubSource(Source):
         return out
 
     def inflight(self):
-        ci = self.product.ci if isinstance(self.product.ci, dict) else {}
-        if not ci.get('workflow') or not self.slug:
-            return None
-        text = self._gh(['run', 'list', '-R', self.slug, '--workflow', ci['workflow'], '--limit',
-                         '50', '--json', 'status', '--jq',
-                         '[.[] | select(.status != "completed")] | length'])
-        text = (text or '').strip()
-        return int(text) if text.isdigit() else None
+        from asf import capacity
+        return capacity.ci_runs_in_flight(self.product, run=self._run, timeout=GH_TIMEOUT_S)
+
+
+def _job_class(job, by_name, roles):
+    e = by_name.get(job.get('runner_name') or '')
+    if e:
+        return class_key(e)
+    return _label_key([l if isinstance(l, str) else (l or {}).get('name', '')
+                       for l in job.get('labels') or ()], roles)
+
+
+def peak_concurrent(jobs, by_name, roles):
+    """``{class: peak jobs running at once}`` for one run's ``jobs``. A job counts only when it
+    got a runner (``runner_name`` set) and did not end ``skipped``; it runs from ``started_at``
+    to ``completed_at`` (no ``completed_at``: to the end of the run; no ``started_at``: the whole
+    run). A job ending as another starts does not overlap it, so sequential stages count once."""
+    events = {}
+    for j in jobs or ():
+        if not isinstance(j, dict) or not j.get('runner_name') or j.get('conclusion') == 'skipped':
+            continue
+        key = _job_class(j, by_name, roles)
+        if key is None:
+            continue
+        start = _parse(j.get('started_at'))
+        end = _parse(j.get('completed_at')) if start is not None else None
+        lo = start.timestamp() if start is not None else float('-inf')
+        hi = end.timestamp() if end is not None else float('inf')
+        hi = max(hi, lo)
+        ev = events.setdefault(key, [])
+        ev.append((lo, 1))
+        ev.append((hi, 0))       # at an equal time an end (0) sorts before a start (1)
+    out = {}
+    for key, ev in events.items():
+        n = peak = 0
+        for _t, is_start in sorted(ev):
+            n += 1 if is_start else -1
+            peak = max(peak, n)
+        out[key] = peak
+    return out
+
+
+def _percentile(values, pct):
+    """Nearest-rank percentile of ``values`` (not empty)."""
+    v = sorted(values)
+    return v[max(0, math.ceil(pct / 100 * len(v)) - 1)]
 
 
 def needs_from_history(runs, pool):
-    """``{class: expected jobs}`` from ``runs`` (each a list of ``{runner_name, labels}``): per
-    class the median count per run, rounded up, capped at the class's declared slots. A job on a
-    runner outside every class (a hosted runner) needs nothing of the pool."""
+    """``{class: expected jobs}`` from ``runs`` (each a list of jobs ``{runner_name, labels,
+    conclusion, started_at, completed_at}``): per class the p90 (:data:`NEEDS_PERCENTILE`) over
+    the runs of each run's peak concurrent jobs (:func:`peak_concurrent`), capped at the class's
+    declared slots. A job on a runner outside every class (a hosted runner) needs nothing of the
+    pool."""
     if not runs:
         return {}
     by_name = {e.runner: e for e in pool}
@@ -342,19 +393,11 @@ def needs_from_history(runs, pool):
     cap = {}
     for e in pool:
         cap[class_key(e)] = cap.get(class_key(e), 0) + e.slots
-    counts = []
-    for jobs in runs:
-        c = {}
-        for j in jobs or ():
-            e = by_name.get(j.get('runner_name') or '')
-            key = class_key(e) if e else _label_key([l if isinstance(l, str) else l.get('name', '')
-                                                     for l in j.get('labels') or ()], roles)
-            if key in cap:
-                c[key] = c.get(key, 0) + 1
-        counts.append(c)
+    peaks = [{k: n for k, n in peak_concurrent(jobs, by_name, roles).items() if k in cap}
+             for jobs in runs]
     out = {}
-    for key in sorted({k for c in counts for k in c}):
-        n = math.ceil(statistics.median([c.get(key, 0) for c in counts]))
+    for key in sorted({k for c in peaks for k in c}):
+        n = _percentile([c.get(key, 0) for c in peaks], NEEDS_PERCENTILE)
         if n > 0:
             out[key] = min(n, cap[key])
     return out
@@ -433,12 +476,31 @@ class Decision:
     bypass: bool = False
 
 
-def decide(key, order, entries, needs_of, free, ceiling=None, inflight=None):
+def ceiling_applies(entry):
+    """Does ``capacity.ci`` hold this start? Only a batch or an ordinary PR start (below S1 and
+    trunk rank): an S1 or hotfix start, a trunk run and a deploy are exempt — PR runs in flight
+    must never hold the trunk run every deploy waits on. The exempt still need the runner fit."""
+    entry = entry or {}
+    return entry.get('kind') in ('pr', 'batch') and entry.get('prio', OTHER) > TRUNK
+
+
+def ceiling_reason(inflight, ceiling, admitted=0):
+    """The hold's reason at the ceiling, from the one in-flight count
+    (:func:`asf.capacity.ci_runs_in_flight`) — the status row renders it with the same count."""
+    from asf import capacity
+    extra = f' + {admitted} started this pass' if admitted else ''
+    return (f'at the ci ceiling ({capacity.ci_inflight_text(inflight)}{extra}; batch and PR '
+            f'starts below {ceiling})')
+
+
+def decide(key, order, entries, needs_of, free, ceiling=None, inflight=None, admitted=0):
     """Pure: may ``key`` start now? ``(ok, why)``. ``order`` is the line; ``needs_of(key)`` the
     entry's ``{class: jobs}``; ``free`` the free slots per class (None: unknown — no runner
-    check); ``ceiling``/``inflight`` the CI ceiling and runs in flight (None: no ceiling)."""
-    if ceiling is not None and inflight is not None and inflight >= ceiling:
-        return False, f'at the ci ceiling ({inflight}/{ceiling} runs in flight)'
+    check); ``ceiling``/``inflight`` the CI ceiling and runs in flight (None: no ceiling), which
+    hold only a start :func:`ceiling_applies` to; ``admitted`` runs this pass already started."""
+    if (ceiling is not None and inflight is not None and ceiling_applies(entries.get(key))
+            and inflight + admitted >= ceiling):
+        return False, ceiling_reason(inflight, ceiling, admitted)
     if free is None:
         return True, ''
     avail = dict(free)
@@ -512,13 +574,15 @@ class Queue:
         if not workflow:
             return {}
         cached = self.data['expect'].get(workflow)
-        if isinstance(cached, dict) and _age(cached.get('at'), self.now) <= EXPECT_TTL_S:
+        if (isinstance(cached, dict) and cached.get('v') == EXPECT_VERSION
+                and _age(cached.get('at'), self.now) <= EXPECT_TTL_S):
             return dict(cached.get('needs') or {})
         runs = self.source.run_jobs(workflow, history(self.product))
         if runs is None:
             return {}
         n = needs_from_history(runs, self.pool)
-        self.data['expect'][workflow] = {'at': _iso(self.now), 'needs': n, 'runs': len(runs)}
+        self.data['expect'][workflow] = {'at': _iso(self.now), 'needs': n, 'runs': len(runs),
+                                         'v': EXPECT_VERSION}
         return n
 
     def free(self):
@@ -546,10 +610,8 @@ class Queue:
         order = line_order(entries)
         needs = {k: self.needs(entries[k].get('workflow')) for k in order}
         self._read_host()
-        inflight = self._inflight
-        if inflight is not None:
-            inflight += self.admitted_here
-        ok, why = decide(key, order, entries, needs.get, self.free(), self.ceiling(), inflight)
+        ok, why = decide(key, order, entries, needs.get, self.free(), self.ceiling(),
+                         self._inflight, self.admitted_here)
         pos = order.index(key) + 1
         if ok:
             entries.pop(key, None)
@@ -559,6 +621,7 @@ class Queue:
         else:
             line = f"ci queue: {e['item']} waits — {why} ({label}, {_ordinal(pos)} in line)"
             e['why'] = line
+            e['at_ceiling'] = why.startswith('at the ci ceiling')
             if self.mode == 'dry-run':
                 self.out(line.replace('ci queue:', 'ci queue (dry-run):', 1)
                          .replace(' waits — ', ' would wait — ', 1))
@@ -791,10 +854,11 @@ def relieve_trunk(product, items=None, source=None, out=print, dry_run=False, no
 
 # ---- reading it -------------------------------------------------------------------------------
 
-def status_clause(product, now=None):
+def status_clause(product, now=None, inflight=None, ceiling=None):
     """The Capacity row's queue clause — ``ci queue 3, head T-0341 waits — …`` — from the file
     alone (no ``gh``); ``ci queue empty`` when nothing waits; None when the product is not
-    queued."""
+    queued. A head held at the ci ceiling is re-stated with ``inflight``/``ceiling`` — the row's
+    own count (:func:`asf.capacity.ci_runs_in_flight`) — so the row never shows two counts."""
     m = mode(product)
     if m == 'off':
         return None
@@ -805,6 +869,12 @@ def status_clause(product, now=None):
         return f'ci queue empty{tag}'
     head = entries[line_order(entries)[0]]
     why = str(head.get('why') or f"ci queue: {head.get('item')} waits").split('ci queue: ', 1)[-1]
+    if head.get('at_ceiling') and inflight is not None and ceiling is not None:
+        pos = f" ({head.get('label') or 'other'}, 1st in line)"
+        if inflight < ceiling or not ceiling_applies(head):
+            why = f"{head.get('item')} waits — the ci ceiling has room now, asked again next tick{pos}"
+        else:
+            why = f"{head.get('item')} waits — {ceiling_reason(inflight, ceiling)}{pos}"
     return f'ci queue {len(entries)}{tag}, head {why}'
 
 
@@ -832,9 +902,10 @@ def cmd_queue(args, source=None, out=print):
         return 0
     needs = {k: q.needs(entries[k].get('workflow')) for k in order}
     free, ceiling = q.free(), q.ceiling()
+    from asf import capacity
     out(f"free: {', '.join(f'{c} {n}' for c, n in sorted((free or {}).items())) or 'unknown'}"
-        + (f'; ceiling {q._inflight if q._inflight is not None else "?"}/{ceiling}'
-           if ceiling is not None else ''))
+        + (f'; {capacity.ci_inflight_text(q._inflight)} ({capacity.CI_INFLIGHT_WHAT}); '
+           f'batch and PR starts below {ceiling}' if ceiling is not None else ''))
     for i, k in enumerate(order, 1):
         e = entries[k]
         ok, why = decide(k, order, entries, needs.get, free, ceiling, q._inflight)

@@ -343,30 +343,49 @@ def env_overlay(resolved, product):
     return out
 
 
+#: what :func:`ci_runs_in_flight` counts, said wherever the count is shown
+CI_INFLIGHT_WHAT = 'runs of ci.workflow not completed (queued or running; PR, trunk and batch alike)'
+
+
+def ci_runs_in_flight(product, run=None, timeout=CI_TIMEOUT_S):
+    """The one count of a product's CI runs in flight, read by the status Capacity row, the
+    CAPACITY table, the tick's batch gate and the CI start queue alike: the runs of
+    ``ci.workflow`` among its 50 newest that are not ``completed`` — queued, waiting or in
+    progress, whatever their event (PR, trunk push, batch) — read with the product's own ``gh``
+    login (``auth_env``). None when unknown (no workflow or repo, a failed or unparsable ``gh``);
+    never raises (D8)."""
+    ci = product.ci if isinstance(getattr(product, 'ci', None), dict) else {}
+    workflow = ci.get('workflow')
+    repo_slug = getattr(product, 'repo_slug', None)
+    if not workflow or not repo_slug:
+        return None
+    from asf import ci_pool
+    try:
+        p = (run or subprocess.run)(
+            ['gh', 'run', 'list', '-R', repo_slug, '--workflow', workflow, '--limit', '50',
+             '--json', 'status', '--jq', '[.[] | select(.status != "completed")] | length'],
+            capture_output=True, text=True, timeout=timeout, env=ci_pool._gh_env(product))
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if p.returncode != 0:
+        return None
+    out = (p.stdout or '').strip()
+    return int(out) if out.isdigit() else None
+
+
+def ci_inflight_text(n):
+    """How every view writes :func:`ci_runs_in_flight`'s count: ``5 runs in flight``."""
+    return f"{n if n is not None else '?'} runs in flight"
+
+
 class CiRuns:
-    """Counts a product's non-completed GitHub Actions runs via ``gh run list``. Never raises
-    (D8): a non-zero exit, a timeout, an ``OSError`` or unparsable output all read as unknown."""
+    """Counts a product's CI runs in flight: :func:`ci_runs_in_flight`. Never raises (D8)."""
 
     def __init__(self, timeout=CI_TIMEOUT_S):
         self.timeout = timeout
 
     def read(self, product):
-        ci = product.ci if isinstance(product.ci, dict) else {}
-        workflow = ci.get('workflow')
-        repo_slug = product.repo_slug
-        if not workflow or not repo_slug:
-            return None
-        try:
-            p = subprocess.run(
-                ['gh', 'run', 'list', '-R', repo_slug, '--workflow', workflow, '--limit', '50',
-                 '--json', 'status', '--jq', '[.[] | select(.status != "completed")] | length'],
-                capture_output=True, text=True, timeout=self.timeout)
-        except (OSError, subprocess.TimeoutExpired):
-            return None
-        if p.returncode != 0:
-            return None
-        out = p.stdout.strip()
-        return int(out) if out.isdigit() else None
+        return ci_runs_in_flight(product, timeout=self.timeout)
 
 
 class NoCiRuns:
