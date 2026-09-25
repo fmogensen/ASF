@@ -296,6 +296,23 @@ class I10FeatureLandsOnlyOnClosedTasks(StageTestCase):
 
         self.assertEqual(stage.guarded(self.root, 'ingest', lands)[2], [])
 
+    def test_i10_a_task_opened_under_an_already_landed_feature_never_refuses_its_write(self):
+        """B-0120: a Feature already Resolved before this writer ran is not this writer's landing
+        to answer for — a new Task minted under it afterward (a follow-up, discovered post-
+        resolution) never refuses an unrelated write to the Feature's own card."""
+        f = write(self.root, 'F-0001', 'feature', machine=('schema_version: 1', 'state: Resolved',
+                                                            'stage: landed'))
+
+        def mints_and_touches(root):
+            write(root, 'T-0001', 'task', parent='F-0001')  # new, open, under the landed feature
+            with open(os.path.join(root, f), 'a', encoding='utf-8') as fh:
+                fh.write('\n')  # an unrelated write to the feature's own card (e.g. Children)
+
+        _r, _s, findings = stage.guarded(self.root, 'ingest', mints_and_touches,
+                                         out=lambda *_: None)
+        self.assertEqual(findings, [])
+        self.assertEqual(meta(self.root, f)['state'], 'Resolved')
+
 
 class I11DerivedTextIsScrubbed(StageTestCase):
     PATS = [redact.Pattern('name', 'test', __import__('re').compile(r'\bzorblax\b', 2))]

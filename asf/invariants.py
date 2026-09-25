@@ -262,7 +262,11 @@ def _landed(meta):
 
 def check_i10(ctx):
     """I10 — a Feature is Resolved (or landed) only when every Task under it is Closed; so a
-    merged docs PR, which closes no Task, never lands a Feature that has Tasks."""
+    merged docs PR, which closes no Task, never lands a Feature that has Tasks.
+
+    It guards the *landing* transition alone: a Feature already landed before this writer ran is
+    not this writer's landing to answer for, so a Task opened under it afterward — a follow-up
+    found post-resolution — never refuses an unrelated write to the Feature's own card (B-0120)."""
     out = []
     for path in _card_paths(ctx.staged):
         _at, after = _after(ctx, path)
@@ -273,8 +277,8 @@ def check_i10(ctx):
         if not open_now:
             continue
         _bt, before = _before(ctx, path)
-        if before and _landed(before) and _unclosed_tasks(_before_record(ctx), fid):
-            continue  # already so before this writer
+        if before and _landed(before):
+            continue  # already landed before this writer
         out.append(_finding('I10', fid, f"{_state(after)} with open Task(s) {', '.join(open_now)}",
                             path))
     return out
