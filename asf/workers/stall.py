@@ -219,7 +219,8 @@ def correct_once(product, session, error_text, runtime):
     started = pool_mod.now_iso()
     sid = lifecycle.session_id(product.name, retry_job, started)
     hooks_dir = githooks.ensure(product)
-    retry_env = {'ASF_SESSION': sid}
+    retry_env = {**githooks.item_env(getattr(product, 'conventions', None), session.get('item'),
+                                     session.get('branch')), 'ASF_SESSION': sid}
     if session.get('id_range'):
         retry_env['BACKLOG_ID_RANGE'] = session['id_range']
     job = runtime_mod.Job(product.name, retry_job, session.get('worktree'), path,

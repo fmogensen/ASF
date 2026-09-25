@@ -444,6 +444,8 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
                           permission_mode=wp.get('permission_mode')
                           or runtime_mod.DEFAULT_PERMISSION_MODE,
                           env={**env.worker_env(cfg, product),
+                               **githooks.item_env(getattr(product, 'conventions', None),
+                                                   row.item, branch),
                                'BACKLOG_ID_RANGE': id_range, 'ASF_SESSION': sid},
                           settings_file=settings_file(wp), hooks_dir=hooks_dir,
                           passthrough=passthrough, product_auth_env=product_auth_env,
