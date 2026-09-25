@@ -95,7 +95,7 @@ class TickPrintsTheDriftLine(DriftTestCase):
         self.assertFalse(any(ln.startswith('tick: ran asf upgrade') for ln in lines), lines)
         self.assertFalse(any('upgraded under this tick' in ln for ln in lines), lines)
 
-    def test_the_owner_tick_whose_upgrade_is_pending_runs_no_step_either(self):
+    def test_the_owner_tick_whose_upgrade_is_pending_still_runs_its_steps(self):
         from asf import upgrade
 
         def deferred(args):
@@ -111,9 +111,8 @@ class TickPrintsTheDriftLine(DriftTestCase):
                     mock.patch('asf.upgrade.cmd_upgrade', deferred):
                 rc = tick._run_steps(mock.Mock(), self.product, tick.Context(self.product),
                                      [('harvest', 'asf', None)], None)
-        self.assertEqual(rc, 0)
-        step.assert_not_called()
-        self.assertIn(f'tick: waiting — upgrade to {self.head[:7]} pending', out.getvalue())
+        step.assert_called()   # the owner keeps its product moving; others wait for the gap
+        self.assertIn(f'tick: upgrade to {self.head[:7]} pending — this tick runs', out.getvalue())
 
     def test_no_line_of_drift_when_the_install_is_the_trunk(self):
         out = io.StringIO()
