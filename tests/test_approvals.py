@@ -433,6 +433,32 @@ class HookTest(unittest.TestCase):
         self.assertEqual([(e['job'], e['detail']) for e in errors], [(self.JOB, 'boom')])
         self.assertEqual(approvals.open_holds('demo'), [])   # an error opens no hold
 
+    def test_a_message_less_exception_still_names_its_type(self):
+        """B-0125 review C3: `str(e)` of a bare `RuntimeError()` is empty, and an exception is
+        always truthy, so `e or type(e).__name__` told the session nothing at all. The
+        message-less internal failures are exactly the ones this card is about."""
+        with mock.patch.object(approvals, 'classify', side_effect=RuntimeError()):
+            rc, out = self.push()
+        self.assertEqual(rc, 2, out)
+        self.assertEqual(out, 'approvals hook error: RuntimeError; not a refusal — retry\n')
+        errors = [e for e in self.ledger() if e['event'] == 'hook-error']
+        self.assertEqual([e['detail'] for e in errors], ['RuntimeError'])  # line and log agree
+
+    def test_the_hook_error_log_rotates_rather_than_growing_without_bound(self):
+        """B-0125 review C4: the hook runs on every Bash/Write/Edit call of every session, so a
+        systematic break writes a traceback per call. One generation is kept, as the red gate's
+        log does (`harvest.keep_red_output`)."""
+        path = approvals.hook_error_log_path()
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('x' * (approvals.HOOK_ERROR_LOG_MAX_BYTES + 1))
+        with mock.patch.object(approvals, 'classify', side_effect=RuntimeError('boom')):
+            self.push()
+        with open(path, encoding='utf-8') as f:
+            self.assertIn('RuntimeError: boom', f.read())     # the live log is the new one
+        with open(path + '.1', encoding='utf-8') as f:
+            self.assertEqual(f.read(), 'x' * (approvals.HOOK_ERROR_LOG_MAX_BYTES + 1))
+        self.assertLess(os.path.getsize(path), approvals.HOOK_ERROR_LOG_MAX_BYTES)
+
     def test_install_writes_the_entry_into_every_worker_account(self):
         acct_a = os.path.join(self.tmp, 'accounts', 'a')
         acct_b = os.path.join(self.tmp, 'accounts', 'b')
