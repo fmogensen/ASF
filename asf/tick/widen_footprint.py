@@ -267,6 +267,23 @@ def widenings(ctx, path, item_id):
     return max(n, 0)
 
 
+#: ``apply``'s answer for a footprint correction it let go: a stale report claim, or a
+#: widening a person dropped — the run goes on as it is.
+DROPPED = 'dropped'
+
+
+def widen_subject(paths):
+    """What a widening's approval asks about: its path set, order-free."""
+    return 'widen writes: ' + ' '.join(sorted(set(paths)))
+
+
+def claims(run):
+    """Whether ``run``'s REPORT still claims footprint (:func:`asf.workers.report.footprint_claim`)."""
+    rec = runtime_mod.read_result(run.get('log'))
+    text = rec.get('result') if isinstance(rec, dict) else ''
+    return bool(report_mod.footprint_claim(text)[1])
+
+
 def apply(ctx, items, out=print):
     """The rule's verdict on every pending ``footprint`` correction; ``{job: verdict}``."""
     product = ctx.product
@@ -282,9 +299,19 @@ def apply(ctx, items, out=print):
         task = _task(items, item_id)
         if task is None:
             continue
+        fact = corr.get('fact') or 'report'
+        if fact.startswith('report:') and not claims(run):
+            # T-0349: the REPORT no longer claims a path (done and pushed: advisory output is
+            # never a widening) — the hold was a misread; it goes on to review
+            pool_mod.update_session(product, job, correction=None)
+            closed = approvals.withdraw(product, item_id, 'widen', 'widening withdrawn')
+            out(f'widen {job}: {item_id} claims no footprint (its session is done and pushed) — '
+                f'correction dropped, on to review' + (f'; closed {" ".join(closed)}' if closed
+                                                       else ''))
+            done[job] = DROPPED
+            continue
         writes = widen.norm_writes(task.get('writes'))
         needs = widen.outside(corr.get('needs'), writes)
-        fact = corr.get('fact') or 'report'
         if not needs:  # the record already carries every path: a plain correction on the wider footprint
             text = correction_text(writes, corr.get('needs') or (), fact, corr.get('tests') or (),
                                    corr.get('text'))
@@ -325,10 +352,20 @@ def apply(ctx, items, out=print):
             out(f'reshape {item_id}: {v.detail}')
         elif v.kind == widen.APPROVAL:
             hold = f'{item_id}/{v.detail}'
+            detail = f'widen writes: +{" ".join(v.paths)} ({fact})'
+            subject = widen_subject(v.paths)
+            if approvals.dropped(product, hold, subject, detail):
+                # a person dropped this very widening: never asked again; the Task goes on
+                # without it (to review) — a request for other paths is a new question
+                pool_mod.update_session(product, job, correction=None)
+                out(f'widen {job}: {hold} was dropped for +{" ".join(v.paths)} — not asked '
+                    f'again; {item_id} goes on without the widening')
+                done[job] = DROPPED
+                continue
             if not any(h['item'] == item_id and h['class'] == v.detail
                        for h in approvals.open_holds(product)):
-                approvals.refuse(product, item_id, v.detail, v.level, job, 'widen',
-                                 f'widen writes: +{" ".join(v.paths)} ({fact})')
+                approvals.ask(product, item_id, v.detail, v.level, job, 'widen', detail,
+                              subject=subject)
             pool_mod.update_session(product, job, correction=dict(corr, verdict=v.kind,
                                                                  detail=v.detail))
             out(f'held {item_id}: widening needs {v.detail} ({v.level}) — asf approvals resolve '

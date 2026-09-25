@@ -230,6 +230,63 @@ class WidenStepTests(WidenStepBase):
         self.assertEqual(self.tick()[1], {'coder-t-0001': widen.WIDEN})
         self.assertIn('LICENSE', self.writes())
 
+    def pending(self, job='coder-t-0001'):
+        path = pool_mod.sessions_path(self.product)
+        return lifecycle.pending_correction(lifecycle.latest(path)[job], path)
+
+    def test_a_dropped_widening_is_never_asked_again_and_the_task_moves_on(self):
+        self.finished('coder-t-0001', 'LICENSE')
+        self.assertEqual(self.tick()[1], {'coder-t-0001': widen.APPROVAL})
+        approvals.resolve(self.product, 'T-0001/touch_legal', 'dropped')
+        for _ in range(3):  # tick after tick: the drop stands
+            self.tick()
+            self.assertEqual(approvals.open_holds(self.product), [], self.lines)
+        entry = approvals.holds(self.product)['T-0001/touch_legal']
+        self.assertEqual((entry['count'], entry['resolution']), (1, 'dropped'))
+        self.assertIsNone(self.pending())  # no correction: the branch goes on to review
+        self.assertEqual(self.writes(), ['src/a.py', 'tests/test_a.py'])
+        self.assertTrue(any('not asked again' in l for l in self.lines), self.lines)
+
+    def test_a_dropped_widening_asks_again_for_a_different_path_set(self):
+        self.finished('coder-t-0001', 'LICENSE')
+        self.tick()
+        approvals.resolve(self.product, 'T-0001/touch_legal', 'dropped')
+        self.tick()
+        # a later correction session claims more: a new question
+        self.finished('correct-t-0001', 'LICENSE tests/test_b.py', kind='correct',
+                      started='2026-09-24T09:00:00Z')
+        self.tick()
+        self.assertEqual([h['hold'] for h in approvals.open_holds(self.product)],
+                         ['T-0001/touch_legal'], self.lines)
+        self.assertEqual(approvals.holds(self.product)['T-0001/touch_legal']['count'], 2)
+
+    def test_a_stale_report_claim_off_a_done_pushed_run_is_dropped_and_its_hold_closed(self):
+        # T-0349 live: a footprint correction written before the done-and-pushed rule, its
+        # approval hold dropped, re-asked each tick. The REPORT (done, pushed) claims nothing.
+        log = os.path.join(self.tmp, 'coder-t-0001.jsonl')
+        with open(log, 'w') as f:
+            f.write(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
+                                'result': REPORT.replace('status: partial', 'status: done')
+                                .format(left='none', needs='LICENSE')}) + '\n')
+        self.session(job='coder-t-0001', item='T-0001', kind='coder', branch='worker/T-0001',
+                     pid=999999, log=log, started='2026-09-24T08:00:00Z')
+        self.session(job='coder-t-0001', ended='2026-09-24T08:30:00Z', end_reason='finished')
+        fields, _line = lifecycle.footprint_hold(
+            {'branch': 'worker/T-0001'}, ['LICENSE'], 'report: needs writes', 'needs LICENSE',
+            '2026-09-24T08:31:00Z')
+        fields['correction'].update(verdict=widen.APPROVAL, detail='touch_legal')
+        self.session(job='coder-t-0001', footprint_read=1, **fields)
+        approvals.refuse(self.product, 'T-0001', 'touch_legal', 'human-now', 'coder-t-0001',
+                         'widen', 'widen writes: +LICENSE (report: needs writes)')
+        _held, verdicts = self.tick()
+        self.assertEqual(verdicts, {'coder-t-0001': widen_footprint.DROPPED}, self.lines)
+        self.assertIsNone(self.pending())
+        self.assertEqual(approvals.open_holds(self.product), [])
+        self.assertEqual(approvals.holds(self.product)['T-0001/touch_legal']['resolution'],
+                         'done')
+        self.assertEqual(self.tick(), ([], {}))  # nothing re-raised
+        self.assertEqual(approvals.open_holds(self.product), [])
+
     def test_a_path_a_running_task_writes_waits_on_that_task(self):
         self.session(job='coder-t-0002', item='T-0002', kind='coder', branch='worker/T-0002',
                      pid=os.getpid(), started='2026-09-24T08:10:00Z')
