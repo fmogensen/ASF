@@ -16,7 +16,8 @@ class DefaultsTests(unittest.TestCase):
     def test_every_documented_default_is_what_the_card_says(self):
         c = Conventions()
         self.assertEqual(c.branch_prefixes,
-                         {'code': 'worker/', 'fix': 'fix/', 'spec': 'spec/', 'plan': 'plan/', 'legacy': []})
+                         {'code': 'worker/', 'fix': 'fix/', 'spec': 'spec/', 'plan': 'plan/',
+                          'direct': 'cloud/direct-', 'legacy': []})
         self.assertEqual((c.specs_dir, c.plans_dir, c.reviews_dir),
                          ('docs/specs', 'docs/plans', 'docs/reviews'))
         self.assertEqual(c.review_pattern, '{reviews_dir}/{n}-{slug}.md')
@@ -137,7 +138,8 @@ class PathTests(unittest.TestCase):
 class ForbiddenPatternsTests(unittest.TestCase):
     def test_one_pattern_per_path_shaped_default(self):
         patterns = conv_mod.forbidden_patterns()
-        self.assertEqual(len(patterns), 10)
+        self.assertEqual(len(patterns), 11)
+        self.assertIn("['\"]" + re.escape('cloud/direct-'), patterns)
         self.assertIn("['\"]" + re.escape(conv_mod.DEFAULT_RELEASE_INSTALL), patterns)
         self.assertIn("['\"]worker/", patterns)
         self.assertIn("['\"]docs/specs\\b", patterns)

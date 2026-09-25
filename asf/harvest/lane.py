@@ -158,7 +158,7 @@ MAX_STEPS = 8
 #: how many orphans (run-less lane branches) one pass takes up — closes or adopts; the rest wait
 #: for the next pass (each close is an archive push, a PR close and a branch delete)
 ORPHANS_PER_PASS = 25
-BRIEF_KIND = {'spec': 'spec', 'plan': 'plan', 'fix': 'fix-bug'}
+BRIEF_KIND = {'spec': 'spec', 'plan': 'plan', 'fix': 'fix-bug', 'direct': 'direct'}
 #: The lane's ref-only pushes (an archive, a branch delete) leave from a clean checkout detached at
 #: ``origin/<trunk>`` under the state dir, never the product's own checkout: a repo's pre-push hook
 #: lints whatever the pushing checkout holds, and a checkout behind or edited by a person refused
@@ -267,6 +267,57 @@ def touched_files(repo, trunk, branch):
     """The files ``origin/<branch>`` changed since it left the trunk."""
     r = H.sh(['git', 'diff', '--name-only', f'origin/{trunk}...origin/{branch}'], cwd=repo)
     return [l for l in r.stdout.splitlines() if l.strip()]
+
+
+def changed_lines(repo, trunk, branch):
+    """Lines ``origin/<branch>`` adds plus removes since it left the trunk (a binary file counts
+    as none); None when git cannot say."""
+    r = H.sh(['git', 'diff', '--numstat', f'origin/{trunk}...origin/{branch}'], cwd=repo)
+    if r.returncode != 0:
+        return None
+    total = 0
+    for line in r.stdout.splitlines():
+        parts = line.split('\t')
+        total += sum(int(p) for p in parts[:2] if p.isdigit())
+    return total
+
+
+#: The branch kind of a ``lane: direct`` Feature (:data:`asf.conventions.DEFAULT_BRANCH_PREFIXES`)
+DIRECT = 'direct'
+
+
+def small_task(items, item):
+    """True when ``item`` is a Task of a ``size: s`` Feature on the full lane."""
+    card = (items or {}).get(item or '') or {}
+    if card.get('type') != 'task':
+        return False
+    from asf.feeder import rows as feeder_rows  # local: the feeder reads the lane's states
+    feature = feeder_rows._task_feature(items, card) or {}
+    return str(feature.get('size') or '').lower() == 's' and feature.get('lane') != DIRECT
+
+
+def review_waived(conv, kind, items, item, lines):
+    """Why a code branch needs no ASF review of its head, else '': a ``lane: direct`` Feature's
+    branch (one session, no review round — CI and the gate judge it), or a small Feature's Task
+    whose diff is under ``review.skip_under_lines``."""
+    if kind == DIRECT:
+        return 'direct lane: CI and the gate judge it, no review round'
+    limit = conv.review_skip_under_lines()
+    if limit and lines is not None and lines < limit and small_task(items, item):
+        return f'size s: {lines} changed lines < review.skip_under_lines {limit}'
+    return ''
+
+
+def first_commit_body(repo, trunk, branch):
+    """The body of the oldest commit ``origin/<branch>`` carries past the trunk — a direct
+    Feature's "what and how" note, which its PR description carries — or ''."""
+    r = H.sh(['git', 'log', '--reverse', '--no-merges', '--format=%H',
+              f'origin/{trunk}..origin/{branch}'], cwd=repo)
+    shas = r.stdout.split() if r.returncode == 0 else []
+    if not shas:
+        return ''
+    body = H.sh(['git', 'log', '-1', '--format=%b', shas[0]], cwd=repo)
+    return body.stdout.strip() if body.returncode == 0 else ''
 
 
 def _subjects(repo, trunk, branch):
@@ -614,7 +665,8 @@ def next_state(prev, facts):
     if s in (PR_OPEN, REVIEW):  # T3/T4/T5: a review of the head already there counts at once
         rv = f.get('review') or {}
         if not f.get('review_required'):
-            return GATE, 'review: none'
+            return GATE, f"review: none ({f['review_waived']})" if f.get('review_waived') \
+                else 'review: none'
         if rv.get('current') and rv.get('verdict') == review_mod.APPROVED \
                 and not incomplete(f):
             return GATE, f"{rv.get('path')} approved its head"
@@ -795,6 +847,11 @@ class Lane:
         # a PR no factory item made merges only on a factory review of its head, whatever the
         # class; and its commits name no item, so the lane's naming refusal is not its to answer
         f['review_required'] = f['foreign'] or conv.review_required(f['class'])
+        if f['review_required'] and not f['foreign'] and f['class'] == CODE:
+            lines = (changed_lines(repo, trunk, b) if f['kind'] != DIRECT
+                     and small_task(self.items, item) else None)
+            f['review_waived'] = review_waived(conv, f['kind'], self.items, item, lines)
+            f['review_required'] = not f['review_waived']
         if rec.get('state') in (None, PUSHED, BACK) and not f['foreign']:
             f['refusal'] = lane_refusal(repo, trunk, b, item, conv)
         f['customer'] = customer_content.touched(conv, f['files'])
@@ -821,7 +878,8 @@ class Lane:
         if item and item in items:
             return item
         from asf.record import match
-        want = ('feature',) if self.conv.branch_kind(b) in ('spec', 'plan') else ('task', 'bug')
+        want = ('feature',) if self.conv.branch_kind(b) in ('spec', 'plan', DIRECT) \
+            else ('task', 'bug')
         ids, _why = match.match_event(items, branch=b, pr=(pr or {}).get('number'),
                                       title=(pr or {}).get('title'),
                                       prefixes=match.branch_prefixes(self.product))
@@ -2179,6 +2237,10 @@ class GitHubHost(Host):
         items = (self.lane.items if self.lane else None) or {}
         root = self.lane.root if self.lane else None
         title, body = step_prs.title_and_body(item or '', items.get(item or '') or {}, root, branch)
+        if self.product.conventions.branch_kind(branch) == DIRECT:
+            note = first_commit_body(self.product.repo_dir, self.trunk, branch)
+            if note:  # the direct session's spec+plan note: the PR description carries it
+                body = f'{body}\n## What and how\n\n{note}\n'
         rc, stdout, err = H._gh(['pr', 'create', '-R', self.slug, '--base', self.trunk,
                                  '--head', branch, '--title', title, '--body', body])
         m = re.search(r'/pull/(\d+)', f'{stdout}\n{err}')

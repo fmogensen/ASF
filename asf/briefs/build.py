@@ -45,9 +45,9 @@ HEAVY = 'heavy'
 LIGHT = 'light'
 
 KINDS = ('spec', 'plan', 'coder', 'review', 'fixer', 'rebase', 'close', 'adjudicate', 'fix-bug',
-         'correct', 'groom', 'reshape')
+         'correct', 'groom', 'reshape', 'spec-plan', 'direct')
 KIND_ALIASES = {'task': 'coder', 'code': 'coder', 'fix': 'fixer', 'bug': 'fix-bug',
-                'fix_bug': 'fix-bug'}
+                'fix_bug': 'fix-bug', 'spec_plan': 'spec-plan'}
 #: The class of an item, for picking its model within a kind: a Bug's severity, else its type.
 MODEL_CLASSES = ('S1', 'S2', 'S3', 'task', 'story', 'feature', 'epic')
 #: The built-in model per brief kind AND item class — the one place the defaults live, so the
@@ -59,6 +59,8 @@ MODEL_CLASSES = ('S1', 'S2', 'S3', 'task', 'story', 'feature', 'epic')
 MODEL_TABLE = {
     'spec':       {'default': HEAVY},
     'plan':       {'default': HEAVY},
+    'spec-plan':  {'default': HEAVY},
+    'direct':     {'default': HEAVY},
     'groom':      {'default': HEAVY},
     'reshape':    {'default': HEAVY},
     'review':     {'default': HEAVY, 'S1': HEAVY, 'S2': LIGHT, 'S3': LIGHT, 'task': LIGHT},
@@ -73,7 +75,7 @@ MODEL_TABLE = {
 #: The label per kind for a brief with no item — what ``model_for(product, kind)`` returns.
 DEFAULT_MODELS = {kind: row['default'] for kind, row in MODEL_TABLE.items()}
 #: The kinds that may mint new cards (Stories, Tasks, Decisions) and so need an id range.
-ID_RANGE_KINDS = ('spec', 'plan', 'adjudicate', 'fix-bug', 'groom', 'reshape')
+ID_RANGE_KINDS = ('spec', 'plan', 'adjudicate', 'fix-bug', 'groom', 'reshape', 'spec-plan')
 
 #: The typed fields a brief states about its card, and so the ones whose change makes a brief
 #: stale (F-0090 D4). ``state``, ``evidence``, ``stage_since`` and ``updated`` are not here: they
@@ -308,12 +310,30 @@ GATE_REMOTE = ("BEFORE THE PUSH: the Task's acceptance tests, byte-identical fro
                "request, never here: do not run it.")
 
 
+#: The same two for a direct-lane Feature (``direct``): no plan, so no Task Gate — the product's
+#: test command and the session's own tests.
+DIRECT_GATE_LOCAL = ("BEFORE THE PUSH: the product's test command and every test you added, "
+                     "passing.")
+DIRECT_GATE_REMOTE = ("BEFORE THE PUSH: the tests you added and the ones covering the files you "
+                      "changed, run on those files only.\nThe full suite runs in remote CI on the "
+                      "pull request, never here: do not run it.")
+
+
+def _external_ci(product):
+    if product is None:
+        return False
+    from asf.harvest import harvest
+    return bool(harvest.external_ci(product))
+
+
 def gate_before_push(product):
     """:data:`GATE_REMOTE` when the product's PRs are gated by external CI, else :data:`GATE_LOCAL`."""
-    if product is None:
-        return GATE_LOCAL
-    from asf.harvest import harvest
-    return GATE_REMOTE if harvest.external_ci(product) else GATE_LOCAL
+    return GATE_REMOTE if _external_ci(product) else GATE_LOCAL
+
+
+def gate_before_push_direct(product):
+    """:data:`DIRECT_GATE_REMOTE` under external CI, else :data:`DIRECT_GATE_LOCAL`."""
+    return DIRECT_GATE_REMOTE if _external_ci(product) else DIRECT_GATE_LOCAL
 
 
 def context(product, row, kind, facts):
@@ -323,6 +343,9 @@ def context(product, row, kind, facts):
     return {
         'kind': kind,
         'gate_before_push': gate_before_push(product),
+        'gate_before_push_direct': gate_before_push_direct(product),
+        'test_command': preamble_mod.conventions(product).test_command
+        or '(none set — run the tests you add)',
         'row_kind': getattr(row, 'kind', '') or '',
         'reason': getattr(row, 'reason', '') or '—',
         'branch': facts['branch'] or '—',

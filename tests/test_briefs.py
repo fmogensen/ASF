@@ -119,6 +119,10 @@ def _groom_row():
 ROWS['groom'] = _groom_row()
 ROWS['reshape'] = row('RESHAPE → PLAN', 'T-0050', 'reshape', 'plan/T-0050',
                       'groom: split asf/feeder | asf/harvest', feature_id='F-0001')
+ROWS['spec-plan'] = row('CARD → SPEC+PLAN', 'F-0001', 'spec-plan', 'plan/F-0001',
+                        'decided card, size s: spec and plan in one session')
+ROWS['direct'] = row('DIRECT → BUILD', 'F-0001', 'direct', 'cloud/direct-F-0001',
+                     'lane: direct — one session builds the Feature end to end, one PR')
 
 
 def forbidden_regex():
