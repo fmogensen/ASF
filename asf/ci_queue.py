@@ -808,6 +808,14 @@ def status_clause(product, now=None):
     return f'ci queue {len(entries)}{tag}, head {why}'
 
 
+def header(name, m, waiting):
+    """The view's first line. The command never writes — that is ``view only``; ``DRY RUN`` is
+    kept for the queue's own ``dry-run`` mode (it says what would wait and holds nothing), so a
+    queue that holds starts (``on``) never reads as a dry run."""
+    what = 'mode DRY RUN — the queue holds nothing' if m == 'dry-run' else f'mode {m}'
+    return f'== CI QUEUE {name} ({what}, {waiting} waiting; view only — nothing written)'
+
+
 def cmd_queue(args, source=None, out=print):
     """``asf ci queue``: the line, in order, with each entry's decision now. Writes nothing."""
     product = env.load_product(args.product)
@@ -819,7 +827,7 @@ def cmd_queue(args, source=None, out=print):
     q = Queue(product, source=source, out=out, write=False)
     entries = q.data['entries']
     order = line_order(entries)
-    out(f'== CI QUEUE {product.name} ({m}, {len(order)} waiting, DRY RUN — nothing written)')
+    out(header(product.name, m, len(order)))
     if not order:
         return 0
     needs = {k: q.needs(entries[k].get('workflow')) for k in order}
