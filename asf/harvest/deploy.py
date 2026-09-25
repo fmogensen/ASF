@@ -354,16 +354,23 @@ def _unread(product, env):
     return _done(f)
 
 
+def _read_only(decision):
+    """A view's line never says a dispatch happens now: nothing is sent from a view; the tick
+    sends it."""
+    go, text = decision
+    return text.replace(' — dispatching ', ' — the next tick dispatches ', 1) if go else text
+
+
 def lines(product, sh=_sh):
     """The read-only lines (no dispatch), one per environment that applies, dev first."""
-    return [decide(product, f, e)[1] for e, f in _each(product, sh)]
+    return [_read_only(decide(product, f, e)) for e, f in _each(product, sh)]
 
 
 def line(product, sh=_sh):
     """The read-only prod ``deploy:`` line, or None when prod does not apply."""
     if not env_applies(product, 'prod'):
         return None
-    return decide(product, facts(product, sh=sh, env='prod'), 'prod')[1]
+    return _read_only(decide(product, facts(product, sh=sh, env='prod'), 'prod'))
 
 
 def dispatch_argv(product, sha, env='prod'):

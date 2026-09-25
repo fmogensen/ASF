@@ -84,6 +84,13 @@ class Dispatch(unittest.TestCase):
                                             '--ref', 'main', '-f', f'sha={GREEN}']])
         self.assertIn('dispatching deploy-prod.yml', lines[0])
 
+    def test_a_view_never_says_dispatching_it_says_the_next_tick_does(self):
+        sh = FakeSh([_run(PROD)], [_run(GREEN)])
+        text = deploy.line(_product(auto=True), sh=sh)
+        self.assertIn('the next tick dispatches deploy-prod.yml', text)
+        self.assertNotIn('— dispatching', text)
+        self.assertEqual(sh.dispatched(), [])
+
     def test_input_none_sends_no_field(self):
         sh = FakeSh([_run(PROD)], [_run(GREEN)])
         _tick(_product(auto=True, input='none'), sh)
