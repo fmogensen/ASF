@@ -479,6 +479,25 @@ def path_class(product, relpath):
     return None
 
 
+#: The classes decided at merge time — read by the harvest only.
+MERGE_CLASSES = tuple(c.name for c in CLASSES if c.read_by == ('harvest',))
+
+
+def merge_auto(product):
+    """True when the product runs ``conventions.merge: auto``."""
+    conv = getattr(product, 'conventions', None)
+    return bool(conv is not None and hasattr(conv, 'merge_auto') and conv.merge_auto())
+
+
+def merge_level(product, cls):
+    """The level the harvest holds a merge of class ``cls`` at: ``auto`` for every merge class
+    under ``conventions.merge: auto`` (the operator chose not to click merge; the green gate and
+    the factory review still judge the branch), else :func:`level_of`."""
+    if cls in MERGE_CLASSES and merge_auto(product):
+        return 'auto'
+    return level_of(product, cls)
+
+
 def level_of(product, cls):
     """``matrix(product)[cls]``'s level; an invalid matrix makes it ``human-now`` (D7) rather
     than raise, since a harvest or a bug filer that cannot read the matrix must still fail

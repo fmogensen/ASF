@@ -391,6 +391,26 @@ def refusal_section(product, item_id):
     return '\n\n' + text if text else ''
 
 
+#: A review of a PR no factory item made (``conventions.merge: auto``, :func:`asf.harvest.lane.
+#: pr_item`): what stands in for the card, the plan and the Gate the review table reads against.
+FOREIGN_REVIEW = (
+    "\n\nTHIS PR WAS OPENED OUTSIDE THE FACTORY — PR #{number} on `{branch}`: no card, no spec, "
+    "no plan.\nRead its description (`gh pr view {number}`) as the plan: the scope, Step and "
+    "acceptance rows judge the\ndiff against what the description says it does; the Gate row is "
+    "the PR's required checks (`gh pr checks {number}`).\nThe merge waits on your verdict: "
+    "commit `{review_path}` on `{branch}` and push it.")
+
+
+def foreign_review_text(kind, ctx):
+    """:data:`FOREIGN_REVIEW` for a review of a :func:`asf.harvest.lane.pr_item` id, else ''."""
+    from asf.harvest.lane import PR_ITEM_RE  # local: the lane imports the briefs
+    m = PR_ITEM_RE.match(str(ctx.get('item_id') or ''))
+    if kind != 'review' or not m:
+        return ''
+    return FOREIGN_REVIEW.format(number=int(m.group(1)), branch=ctx['branch'],
+                                 review_path=ctx['review_path'])
+
+
 def build(product, row, index, inflight=None, repo_facts=None):
     """The brief for one feeder row."""
     kind = normalize_kind(getattr(row, 'brief_kind', '') or getattr(row, 'kind', ''))
@@ -401,7 +421,7 @@ def build(product, row, index, inflight=None, repo_facts=None):
              preamble_mod.build(product, row, index, inflight, repo_facts, facts=facts),
              render(load_template(kind), ctx).rstrip() + correction_text(row, kind)
              + customer_section(product, kind, facts['branch'])
-             + refusal_section(product, ctx['item_id']),
+             + foreign_review_text(kind, ctx) + refusal_section(product, ctx['item_id']),
              render(TAIL, ctx)]
     return Brief(kind=kind, item_id=ctx['item_id'], text='\n\n'.join(p.strip() for p in parts) + '\n',
                  model=model_for(product, kind, facts['item']), add_dirs=add_dirs_for(product, row, kind),

@@ -34,6 +34,9 @@ The product yaml carries the overrides::
           code: required          # none | required (default required)
         stale_after: 2d           # an open lane state older than this is stale (<n>s|m|h|d)
       worktree_setup: make deps   # run in every fresh worker worktree (unset = nothing)
+      merge: auto                 # auto | manual (default manual): under auto the lane merges
+                                  # every open PR on the trunk whose required checks are green
+                                  # and whose factory review approved it — no operator click
 
 Unknown keys are kept (in :attr:`Conventions.extra`) rather than rejected: a product yaml is
 written by an operator and may carry conventions a module older than it does not read yet, and
@@ -125,6 +128,13 @@ DEFAULT_LANE_STALE_AFTER = '2d'
 #: A shell command run in every fresh worker worktree before its session starts (dependency
 #: install, codegen). None → nothing runs.
 DEFAULT_WORKTREE_SETUP = None
+#: ``conventions.merge``: who clicks merge on a green, reviewed PR — ``manual`` (the operator: the
+#: merge-time approval holds stay as the matrix sets them) or ``auto`` (the lane: those holds are
+#: ``auto`` for the product, and an open PR no factory item made gets a factory review first).
+MERGE_AUTO = 'auto'
+MERGE_MANUAL = 'manual'
+MERGE_MODES = (MERGE_AUTO, MERGE_MANUAL)
+DEFAULT_MERGE = MERGE_MANUAL
 
 #: ``customer_content: {paths, forbidden_markers}`` — the pages a customer reads (a site's
 #: legal pages, its marketing copy) and the text that must never reach them
@@ -392,6 +402,9 @@ class Conventions:
     lane_stale_after: str = DEFAULT_LANE_STALE_AFTER
     #: The command run in every fresh worker worktree (:data:`DEFAULT_WORKTREE_SETUP`).
     worktree_setup: str = DEFAULT_WORKTREE_SETUP
+    #: ``merge``: ``auto`` | ``manual`` (:data:`DEFAULT_MERGE`); any other value is a red doctor
+    #: finding and reads as the default.
+    merge: str = DEFAULT_MERGE
     #: Everything the yaml carried that is not a field above, kept verbatim.
     extra: dict = field(default_factory=dict)
 
@@ -418,6 +431,11 @@ class Conventions:
             values = value.values() if isinstance(value, dict) else [value]
             if value is not None and any(str(v).strip().lower() not in words for v in values):
                 misshapen[key] = value
+        merge = data.get('merge')
+        if merge is not None and str(merge).strip().lower() not in MERGE_MODES:
+            misshapen['merge'] = data.pop('merge')
+        elif merge is not None:
+            data['merge'] = str(merge).strip().lower()
         models = data.get('models')
         for kind, value in (models.items() if isinstance(models, dict) else ()):
             # ``models.<kind>``: a label, or a map of labels by class (asf.briefs.build)
@@ -474,6 +492,7 @@ class Conventions:
         for key, value in sorted(getattr(self, '_misshapen', {}).items()):
             words = WORD_OR_MAP_CONVENTIONS.get(key)
             want = (f"one of {', '.join(words)} or a map of them per landing class" if words
+                    else f"one of {', '.join(MERGE_MODES)}" if key == 'merge'
                     else 'a model label or a map of labels by class' if key.startswith('models.')
                     else 'a map')
             out.append((key, f'must be {want}, not {value!r}'))
@@ -490,6 +509,10 @@ class Conventions:
     def lane_stale_after_s(self):
         """``lane.stale_after`` in seconds."""
         return duration_seconds(self.lane_stale_after)
+
+    def merge_auto(self):
+        """True under ``merge: auto`` — the lane merges a green, reviewed PR itself."""
+        return str(self.merge or '').strip().lower() == MERGE_AUTO
 
     # ---- branches ------------------------------------------------------------
 
