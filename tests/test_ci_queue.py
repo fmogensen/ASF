@@ -39,8 +39,10 @@ class FakeGh:
     """``subprocess.run`` for ``gh``: runners, a workflow's run history, its jobs, runs in flight.
     Every argv is logged."""
 
-    def __init__(self, busy=(), offline=(), history=None, inflight=0):
+    def __init__(self, busy=(), offline=(), history=None, inflight=0, listed=None):
         self.busy, self.offline = set(busy), set(offline)
+        #: the completed runs ``gh run list`` names (default: every history run, a success)
+        self.listed = listed
         # three runs of ci.yml: heavy 3, 3, 2 jobs and one light job each
         self.history = history if history is not None else [
             [{'runner_name': 'h1'}, {'runner_name': 'h2'}, {'runner_name': 'h3'},
@@ -64,12 +66,14 @@ class FakeGh:
                            {'name': r['role'], 'type': 'custom'}]})
                 for i, r in enumerate(pool_data()))
         elif argv[:3] == ['gh', 'run', 'list'] and '--status' in argv:
-            out = json.dumps([{'databaseId': i} for i in range(len(self.history))])
+            out = json.dumps(self.listed if self.listed is not None else [
+                {'databaseId': i, 'conclusion': 'success', 'attempt': 1}
+                for i in range(1, len(self.history) + 1)])
         elif argv[:3] == ['gh', 'run', 'list']:
             out = str(self.inflight)
         elif argv[:2] == ['gh', 'api'] and any('/jobs' in a for a in argv):
             run_id = int(next(a for a in argv if '/jobs' in a).split('/runs/')[1].split('/')[0])
-            out = '\n'.join(json.dumps(j) for j in self.history[run_id])
+            out = '\n'.join(json.dumps(j) for j in self.history[run_id - 1])
         return subprocess.CompletedProcess(argv, 0, out, '')
 
 
@@ -184,13 +188,16 @@ class TestPeakConcurrency(Base):
         self.assertEqual(ci_queue.needs_from_history([staged_run()] * 4, pool),
                          {'heavy': 3, 'light': 1})
 
-    def test_p90_over_the_runs_capped_at_the_class(self):
+    def test_the_median_over_the_runs_capped_at_the_class(self):
         pool = self.pool()
-        # nine runs peaking at 2 heavy and one at 3: p90 (nearest rank) of ten is the 9th → 2
+        # three of ten runs peak at 3 heavy, seven at 2: p90 said 3, the median is 2
+        runs = [staged_run(stage2=2)] * 7 + [staged_run(stage2=3)] * 3
+        self.assertEqual(ci_queue.needs_from_history(runs, pool)['heavy'], 2)
+        # one outlier at 3 never lifts it
         runs = [staged_run(stage2=2)] * 9 + [staged_run(stage2=3)]
         self.assertEqual(ci_queue.needs_from_history(runs, pool)['heavy'], 2)
-        # three of ten at 3: the 9th of ten is 3
-        runs = [staged_run(stage2=2)] * 7 + [staged_run(stage2=3)] * 3
+        # an even split rounds up: 2 and 3 → 3
+        runs = [staged_run(stage2=2), staged_run(stage2=3)]
         self.assertEqual(ci_queue.needs_from_history(runs, pool)['heavy'], 3)
         # a stage wider than the class (3 heavy runners) is capped at the class
         self.assertEqual(ci_queue.needs_from_history([staged_run(stage2=8)], pool)['heavy'], 3)
@@ -204,8 +211,42 @@ class TestPeakConcurrency(Base):
         self.assertEqual(self.queue(p, gh).needs('ci.yml'), {'heavy': 3, 'light': 1})
         jq = next(a for c in gh.calls if any('/jobs' in x for x in c) for a in c
                   if a.startswith('.jobs'))
-        for field in ('runner_name', 'conclusion', 'started_at', 'completed_at'):
+        for field in ('runner_name', 'conclusion', 'started_at', 'completed_at', 'run_attempt'):
             self.assertIn(field, jq)
+
+    def test_the_estimate_ignores_cancelled_runs_and_superseded_attempts(self):
+        """A rerun's first attempt ran 3 heavy at once, its second 1: only the second counts, and
+        never the two overlapped. A cancelled run is not measured at all."""
+        p = product()
+        rerun = ([dict(job('h1', 0, 10), run_attempt=1), dict(job('h2', 0, 10), run_attempt=1),
+                  dict(job('h3', 0, 10), run_attempt=1)]
+                 + [dict(job('h1', 5, 8), run_attempt=2)])
+        one = [dict(job('h1', 0, 5), run_attempt=1)]
+        wide = [job(h, 0, 5) for h in ('h1', 'h2', 'h3')]
+        gh = FakeGh(history=[rerun, one, wide], listed=[
+            {'databaseId': 3, 'conclusion': 'cancelled', 'attempt': 1},   # 3 heavy: dropped
+            {'databaseId': 1, 'conclusion': 'failure', 'attempt': 2},
+            {'databaseId': 2, 'conclusion': 'success', 'attempt': 1}])
+        q = self.queue(p, gh)
+        self.assertEqual(q.needs('ci.yml'), {'heavy': 1})
+        ci_queue.save('p', q.data)
+        paths = [a for c in gh.calls for a in c if '/jobs' in a]
+        self.assertEqual(len(paths), 2)
+        self.assertIn('runs/1/attempts/2/jobs', paths[0])
+        self.assertTrue(all('runs/3/' not in a for a in paths))
+        # the same run ids after the TTL: the cached figure, no jobs read again
+        gh2 = FakeGh(history=[rerun, one, wide], listed=gh.listed)
+        q = self.queue(p, gh2, minutes=ci_queue.EXPECT_TTL_S // 60 + 1)
+        self.assertEqual(q.needs('ci.yml'), {'heavy': 1})
+        self.assertFalse([c for c in gh2.calls if any('/jobs' in a for a in c)])
+
+    def test_repeated_calls_in_a_pass_agree(self):
+        p = product()
+        q = self.queue(p, FakeGh())
+        first = q.needs('ci.yml')
+        q.source._run = FakeGh(history=[[job('h1')]] * 3)    # the host changed mid-pass
+        q.data['expect'].clear()
+        self.assertEqual(q.needs('ci.yml'), first)
 
 class TestAdmission(Base):
     def test_holds_until_the_class_has_the_runners_the_run_needs(self):
@@ -256,29 +297,31 @@ class TestPriority(Base):
         busy = FakeGh(busy={'h1', 'h2', 'h3'})
         self.admit(self.queue(p, busy), 'pr:old', 'B-0008')             # S2, oldest
         self.admit(self.queue(p, busy, minutes=1), 'pr:feat', 'T-0341')  # Feature
-        self.admit(self.queue(p, busy, minutes=2), 'trunk:t', 'T-0500', kind='trunk')  # trunk
-        self.admit(self.queue(p, busy, minutes=3), 'trunk:fix', 'B-0007', kind='trunk')  # S1
         self.admit(self.queue(p, busy, minutes=4), 'pr:new', 'T-0500')  # other, newest
         entries = ci_queue.load('p')['entries']
-        self.assertEqual(ci_queue.line_order(entries),
-                         ['trunk:fix', 'trunk:t', 'pr:feat', 'pr:old', 'pr:new'])
+        self.assertEqual(ci_queue.line_order(entries), ['pr:feat', 'pr:old', 'pr:new'])
         self.assertEqual(self.lines[-1], 'ci queue: T-0500 waits — heavy 0 free, needs 3, '
-                                         'light 0 free, needs 1 (Task, 5th in line)')
-        # runners come free: the S2 asks first, but the S1 ahead of it is owed them
+                                         'light 0 free, needs 1 (Task, 3rd in line)')
+        # runners come free: the S2 asks first, but the Feature ahead of it is owed them
         q = self.queue(p, FakeGh(), minutes=5)
         self.assertFalse(self.admit(q, 'pr:old', 'B-0008').admitted)
-        self.assertIn('(S2, 4th in line)', self.lines[-1])
-        self.assertTrue(self.admit(q, 'trunk:fix', 'B-0007', kind='trunk').admitted)
+        self.assertIn('(S2, 2nd in line)', self.lines[-1])
+        self.assertTrue(self.admit(q, 'pr:feat', 'T-0341').admitted)
 
-    def test_a_trunk_run_goes_before_pr_runs_queued_earlier(self):
+    def test_trunk_and_s1_starts_go_with_no_runner_free(self):
+        """The fit would fail (heavy 0 free, needs 3), yet a trunk run, an S1 and a hotfix PR go
+        at once: the host queues their jobs, and they reserve nothing up front."""
         p = product()
-        busy = FakeGh(busy={'h1', 'h2', 'h3'})
-        self.admit(self.queue(p, busy), 'pr:feat', 'T-0341')
-        self.admit(self.queue(p, busy, minutes=1), 'trunk:t', 'T-0500', kind='trunk')
-        self.assertIn('(trunk, 1st in line)', self.lines[-1])
-        q = self.queue(p, FakeGh(), minutes=2)
-        self.assertFalse(self.admit(q, 'pr:feat', 'T-0341').admitted)
+        busy = FakeGh(busy={'h1', 'h2', 'h3', 'l1'})
+        self.assertFalse(self.admit(self.queue(p, busy), 'pr:feat', 'T-0341').admitted)
+        q = self.queue(p, busy, minutes=1)
         self.assertTrue(self.admit(q, 'trunk:t', 'T-0500', kind='trunk').admitted)
+        self.assertTrue(self.admit(q, 'pr:fix', 'B-0007').admitted)
+        self.assertTrue(self.admit(q, 'pr:hotfix/x', 'T-0500', branch='hotfix/x').admitted)
+        self.assertTrue(self.admit(q, 'deploy:prod', 'deploy prod', kind='deploy').admitted)
+        self.assertEqual(list(ci_queue.load('p')['entries']), ['pr:feat'])
+        # the ordinary PR still waits on the fit
+        self.assertFalse(self.admit(q, 'pr:feat', 'T-0341').admitted)
 
 
 class TestSuperseded(Base):
@@ -506,7 +549,7 @@ class TestCeiling(Base):
         self.assertFalse(self.admit(q, 'batch', 'batch', kind='batch').admitted)  # 1 + 1 admitted
 
 
-    def test_s1_hotfix_trunk_and_deploy_starts_are_exempt_but_still_need_runners(self):
+    def test_s1_hotfix_trunk_and_deploy_starts_are_exempt_from_ceiling_and_fit(self):
         """PR runs fill the ceiling (4/4): a trunk run ranked right after the S1 still starts;
         a batch and an ordinary or Feature PR wait at the ceiling."""
         p = product(cap={'ci': 4})
@@ -523,12 +566,11 @@ class TestCeiling(Base):
         self.assertFalse(self.admit(q, 'pr:feat', 'T-0341').admitted)
         self.assertFalse(self.admit(q, 'batch', 'batch', kind='batch').admitted)
         self.assertTrue(all('at the ci ceiling' in l for l in self.lines))
-        # exempt from the ceiling, never from the runner fit
+        # exempt from the runner fit too: the host queues its jobs
         self.lines.clear()
         q = self.queue(p, FakeGh(inflight=4, busy={'h1', 'h2'}), minutes=50)
-        self.assertFalse(self.admit(q, 'trunk:t2', 'T-0500', kind='trunk').admitted)
-        self.assertEqual(self.lines, ['ci queue: T-0500 waits — heavy 1 free, needs 3 '
-                                      '(trunk, 1st in line)'])
+        self.assertTrue(self.admit(q, 'trunk:t2', 'T-0500', kind='trunk').admitted)
+        self.assertEqual(self.lines, [])
 
     def test_ceiling_applies_to_batch_and_ordinary_pr_starts_only(self):
         ok = ci_queue.ceiling_applies
@@ -623,9 +665,30 @@ class TestModes(Base):
         self.assertEqual(ci_queue.status_clause(p, now=self.t0), 'ci queue empty')
         busy = FakeGh(busy={'h1', 'h2', 'h3'})
         self.admit(self.queue(p, busy), 'pr:a', 'T-0500')
-        self.admit(self.queue(p, busy), 'pr:b', 'B-0007')
+        self.admit(self.queue(p, busy), 'pr:b', 'T-0341')
         self.assertEqual(ci_queue.status_clause(p, now=self.t0),
-                         'ci queue 2, head B-0007 waits — heavy 0 free, needs 3 (S1, 1st in line)')
+                         'ci queue 2, head T-0341 waits — heavy 0 free, needs 3 '
+                         '(Feature, 1st in line)')
+
+    def test_the_row_and_the_queue_line_read_one_estimate(self):
+        """The head was held when the estimate said 3; another start of the same tick measured
+        it again at 2: the row re-states the hold from the one cached estimate, never the
+        number frozen in the old line."""
+        p = product()
+        busy = FakeGh(busy={'h1', 'h2', 'h3'})
+        q = self.queue(p, busy)
+        self.assertFalse(self.admit(q, 'pr:a', 'T-0341').admitted)
+        self.assertIn('heavy 0 free, needs 3', self.lines[-1])
+        self.assertIn('heavy 0 free, needs 3', ci_queue.status_clause(p, now=self.t0))
+        data = ci_queue.load('p')
+        data['expect']['ci.yml']['needs'] = {'heavy': 2, 'light': 1}
+        ci_queue.save('p', data)
+        row = ci_queue.status_clause(p, now=self.t0)
+        self.assertIn('head T-0341 waits — heavy 0 free, needs 2 (Feature, 1st in line)', row)
+        q = self.queue(p, busy, minutes=1)
+        self.assertFalse(self.admit(q, 'pr:a', 'T-0341').admitted)
+        self.assertEqual(self.lines[-1].split(' — ', 1)[1].split(' (')[0],
+                         row.split(' — ', 1)[1].split(' (')[0])
 
     def test_config_problems(self):
         self.assertEqual(ci_queue.config_problems({'queue': {'mode': 'on', 'history': 5,
