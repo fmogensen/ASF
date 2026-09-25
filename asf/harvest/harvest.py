@@ -671,6 +671,17 @@ def external_ci(product):
     from asf.harvest import lane
     return lane.external_ci(product)
 
+
+def local_gate(product):
+    """True when the product lands fast-forward with a ``test_command`` set: harvest's own gate
+    (:func:`product_gate`) runs that full suite on the combined head before anything lands, and a
+    worker's own run of it before pushing (B-0127: 6 sessions, 6 full suites on the host) only
+    duplicates that — never true for a product :func:`external_ci` already covers."""
+    if product is None or external_ci(product):
+        return False
+    return landing(product) == LANDING_FF and bool(product.conventions.test_command)
+
+
 def sessions_by_branch(state_dir):
     """``{branch: the latest run on it}`` — :func:`asf.workers.lifecycle.by_branch`: a job
     relaunched on another branch starts a fresh run; the old branch keeps the one it had."""

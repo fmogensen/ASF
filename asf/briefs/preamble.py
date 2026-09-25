@@ -98,14 +98,29 @@ EXTERNAL_CI_RULE = ("- Locally, run only the targeted checks for what you change
                     "merges only once that CI is green — the gate is never skipped, just run "
                     "off this host.")
 
+#: Carried by every brief of a product that lands fast-forward, gated by harvest's own full-suite
+#: run over the combined head (whatever ``rules_tail`` says): a worker running that same suite
+#: again before pushing only duplicates the gate that is about to run anyway — B-0127, 6 sessions
+#: on the host meant 6 full suites, one from every worker, beside the one harvest ran at landing.
+LOCAL_GATE_RULE = ("- Locally, run only the targeted tests for the files you changed, then push: "
+                   "harvest's gate runs the full suite on the combined head before anything "
+                   "lands — nothing is skipped, it just runs once per landing, not once per "
+                   "session.")
+
 
 def ci_rules(product):
     """``[EXTERNAL_CI_RULE]`` when the product's PRs are gated by external CI
-    (:func:`asf.harvest.harvest.external_ci`), else ``[]`` — its own process stands unchanged."""
+    (:func:`asf.harvest.harvest.external_ci`); ``[LOCAL_GATE_RULE]`` when instead harvest's own
+    gate is the one that runs the full suite (:func:`asf.harvest.harvest.local_gate`); else ``[]``
+    — its own process stands unchanged."""
     if product is None:
         return []
     from asf.harvest import harvest
-    return [EXTERNAL_CI_RULE] if harvest.external_ci(product) else []
+    if harvest.external_ci(product):
+        return [EXTERNAL_CI_RULE]
+    if harvest.local_gate(product):
+        return [LOCAL_GATE_RULE]
+    return []
 
 
 def review_path_for(product, slug, n):
