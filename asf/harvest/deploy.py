@@ -15,9 +15,18 @@ deprecated), and the legacy top-level ``deploy_sha.workflow`` / ``input`` are pr
 
 The *candidate* of an environment:
 
-* dev — the newest completed ``ci.workflow`` run on the trunk that concluded ``success``;
+* dev — the newest completed ``ci.workflow`` run on the trunk that is green (below);
 * prod — the same (``prod.from: ci``, the default), or the sha dev runs (``prod.from: dev``,
   promote dev to prod) provided that sha's own ``ci.workflow`` run is green.
+
+*Green* is job-level when the environment names its required jobs, first found of:
+``deploy_sha.<env>.required_jobs_from: {file, var}`` (a shell assignment ``VAR="${VAR:-a b c}"``
+read from ``file`` at the run's own sha), ``deploy_sha.<env>.required_jobs: [..]``, then
+``conventions.landing_checks``. A completed run is green when every listed job's latest attempt
+concluded ``success`` — a job is named by its name up to the first space, so ``gate — the gate``
+is ``gate`` and ``p1-e2e-b`` is never ``p1-e2e``; any other job (an optional soak that timed out,
+a cancelled extra) never blocks. With no list at all, green is the run-level ``conclusion:
+success``. The ``deploy`` line names the rule that decided.
 
 The rules are the same for every environment: the candidate deploys only when it descends from
 the environment's deployed sha (the newest successful run of its ``workflow``), no run of that
@@ -202,13 +211,38 @@ def applies(product):
     return any(env_applies(product, e) for e in names(product))
 
 
-def findings(product):
+def _drift(product, sh):
+    """[(False, detail)] for each environment whose ``required_jobs_from`` (read at the trunk)
+    and ``required_jobs`` list name different jobs, or whose file cannot be read."""
+    out = []
+    for env in names(product):
+        spec = required_from(product, env)
+        static = _names(env_cfg(product, env).get('required_jobs'))
+        if not spec:
+            continue
+        got = _read_from(product, f'origin/{product.main}', spec, sh)
+        k = key(env)
+        if got is None:
+            out.append((False, f'{k}.required_jobs_from: {spec[1]} not readable in {spec[0]} on'
+                               f' {product.main}'))
+        elif static and set(got) != set(static):
+            only_f = sorted(set(got) - set(static))
+            only_l = sorted(set(static) - set(got))
+            out.append((False, f'{k}.required_jobs [{", ".join(static)}] drifts from {spec[1]}'
+                               f' in {spec[0]} [{", ".join(got)}] (only in the file:'
+                               f' {", ".join(only_f) or "none"}; only in the list:'
+                               f' {", ".join(only_l) or "none"}) — the file wins'))
+    return out
+
+
+def findings(product, sh=_sh):
     """[(ok, detail)] — the doctor's ``deploy`` row: the resolved modes, and every config the
     module reads differently from how it is written (a deprecated key, a dev without a
-    workflow, ``prod.from: dev`` with no managed dev)."""
+    workflow, ``prod.from: dev`` with no managed dev, a ``required_jobs`` list that drifts from
+    its ``required_jobs_from`` file)."""
     if not _cfg(product):
         return []
-    out = []
+    out = _drift(product, sh)
     pm = env_cfg(product, 'prod').get('mode')
     if 'auto' in _cfg(product):
         out.append((False, 'deploy_sha.auto is deprecated — write deploy_sha.prod.mode: '
@@ -383,21 +417,150 @@ def _dev_job_run(product, ci_runs, sh, limit=5):
     return None
 
 
-def _sha_green(product, sha, ci_runs, sh):
-    """True when ``sha`` has a green ``ci.workflow`` run (looked up by commit when it is older
-    than the trunk runs already read)."""
-    if any(r.get('headSha') == sha and _green(r) for r in ci_runs):
-        return True
+def _names(v):
+    if isinstance(v, str):
+        v = v.split()
+    return [str(n) for n in v if n] if isinstance(v, (list, tuple)) else []
+
+
+def required_list(product, env='prod'):
+    """The static required-job list of ``env``: ``required_jobs``, else
+    ``conventions.landing_checks`` ([] when neither is set)."""
+    return (_names(env_cfg(product, env).get('required_jobs'))
+            or _names(_conv(product).get('landing_checks')))
+
+
+def required_from(product, env='prod'):
+    """``(file, var)`` of ``deploy_sha.<env>.required_jobs_from``, or None."""
+    v = env_cfg(product, env).get('required_jobs_from')
+    if isinstance(v, dict) and v.get('file') and v.get('var'):
+        return str(v['file']), str(v['var'])
+    return None
+
+
+def parse_assignment(text, var):
+    """The words a shell file assigns to ``var`` — ``VAR="a b"``, ``VAR="${VAR:-a b}"``,
+    ``VAR=(a b)``, with an optional ``export``/``readonly``/``declare`` — or None."""
+    import re
+    import shlex
+    for line in (text or '').splitlines():
+        m = re.match(r'\s*(?:(?:export|readonly|declare(?:\s+-\w+)*)\s+)?'
+                     + re.escape(var) + r'=(.*)$', line)
+        if not m:
+            continue
+        rhs = m.group(1).strip()
+        if rhs.startswith('(') and ')' in rhs:
+            rhs = rhs[1:rhs.rindex(')')]
+        else:
+            try:
+                rhs = shlex.split(rhs, comments=True)[0] if rhs else ''
+            except (ValueError, IndexError):
+                return None
+            d = re.fullmatch(r'\$\{' + re.escape(var) + r':?[-=](.*)\}', rhs, re.S)
+            if d:
+                rhs = d.group(1)
+        return [w.strip('"\'') for w in rhs.split() if w.strip('"\'')]
+    return None
+
+
+def _read_from(product, sha, spec, sh):
+    """The required jobs ``spec`` (file, var) names at ``sha``, or None when unreadable."""
+    path, var = spec
+    text = sh(['git', '-C', product.repo_dir, 'show', f'{sha}:{path}'])
+    got = parse_assignment(text, var) if text else None
+    return got or None
+
+
+def required_jobs(product, env='prod', sha=None, sh=_sh):
+    """``(names, source)``: the jobs that make a ``ci.workflow`` run at ``sha`` deployable to
+    ``env`` and where they were read. ``required_jobs_from`` wins when it reads at ``sha``; else
+    the static list. ``([], None)`` means the run-level rule; ``(None, why)`` means a
+    ``required_jobs_from`` with no list behind it could not be read."""
+    spec = required_from(product, env)
+    if spec and sha:
+        got = _read_from(product, sha, spec, sh)
+        if got:
+            return got, f'{spec[1]} in {spec[0]}'
+    static = required_list(product, env)
+    if static:
+        return static, None
+    if spec:
+        return None, f'{spec[1]} unreadable in {spec[0]} at {_s(sha)}'
+    return [], None
+
+
+def job_key(name):
+    """A job's name as a required-job list names it: up to the first space (``gate — the
+    gate`` is ``gate``, a matrix leg ``gate (ubuntu)`` is ``gate``)."""
+    return str(name or '').split(' ', 1)[0]
+
+
+def _jobs_verdict(product, run, req, sh):
+    """``(green, rule)`` for one completed run under the required-jobs rule, reading the jobs of
+    its latest attempt (``gh run view --json jobs``); ``rule`` names what decided."""
+    names = ', '.join(req)
+    if run.get('conclusion') == 'success':  # a green run is green in every job
+        return True, f'green on required jobs [{names}]'
+    view = _json(sh(['gh', 'run', 'view', str(run.get('databaseId')), '-R', product.repo_slug,
+                     '--json', 'jobs']), dict)
+    if view is None:
+        return False, f"run {run.get('databaseId')} jobs unreadable (gh run view)"
+    jobs = [j for j in view.get('jobs') or [] if isinstance(j, dict)]
+    for name in req:
+        mine = [j for j in jobs if job_key(j.get('name')) == name]
+        if not mine or any(j.get('conclusion') != 'success' for j in mine):
+            return False, f'required job {name} not green'
+    other = [f"{job_key(j.get('name'))} {j.get('conclusion') or j.get('status') or 'unknown'}"
+             for j in jobs if job_key(j.get('name')) not in req
+             and j.get('conclusion') not in ('success', 'skipped', 'neutral')]
+    tail = f" ({', '.join(other)}, not required)" if other else ''
+    return True, f'green on required jobs [{names}]{tail}'
+
+
+def _pick(product, env, ci_runs, sh, limit=10):
+    """``(sha, rule)``: the newest green trunk ``ci.workflow`` run for ``env`` — job-level under
+    :func:`required_jobs`, run-level without — and the rule that decided (None: no pick)."""
+    if not required_from(product, env) and not required_list(product, env):
+        sha = next((r.get('headSha') for r in ci_runs if _green(r)), None)
+        return sha, ('green run (run-level conclusion success)' if sha else None)
+    done = [r for r in ci_runs if r.get('status') == 'completed']
+    for r in done[:limit]:
+        req, _src = required_jobs(product, env, r.get('headSha'), sh)
+        if not req:
+            continue
+        ok, rule = _jobs_verdict(product, r, req, sh)
+        if ok:
+            return r.get('headSha'), rule
+    return None, None
+
+
+def _required_label(product, env):
+    spec = required_from(product, env)
+    if spec:
+        return f' on required jobs ({spec[1]} in {spec[0]})'
+    req = required_list(product, env)
+    return f" on required jobs [{', '.join(req)}]" if req else ''
+
+
+def _sha_green(product, sha, ci_runs, sh, env='prod'):
+    """``(green, rule)``: whether ``sha`` has a green ``ci.workflow`` run for ``env`` (looked up
+    by commit when it is older than the trunk runs already read)."""
+    got = _pick(product, env, [r for r in ci_runs if r.get('headSha') == sha], sh)
+    if got[0]:
+        return True, got[1]
     runs = _json(sh(['gh', 'run', 'list', '-R', product.repo_slug, '--workflow',
-                     ci_workflow(product), '--commit', sha, '--json', 'status,conclusion'])) or []
-    return any(_green(r) for r in runs)
+                     ci_workflow(product), '--commit', sha, '--json',
+                     'databaseId,headSha,status,conclusion'])) or []
+    got = _pick(product, env, [dict(r, headSha=r.get('headSha') or sha) for r in runs], sh)
+    return bool(got[0]), got[1]
 
 
 def _blank(product, env):
     return {'env': env, 'mode': mode(product, env), 'workflow': workflow(product, env),
             'ci': ci_workflow(product), 'deployed': None, 'prod': None, 'running': None,
             'failed': None, 'candidate': None, 'main': None, 'behind': None, 'age': None, 'at': None,
-            'error': None, 'why': None, 'paths': paths(product, env), 'relevant': None,
+            'error': None, 'why': None, 'rule': None, 'required': _required_label(product, env),
+            'paths': paths(product, env), 'relevant': None,
             'reader': reader(product, env)}
 
 
@@ -469,13 +632,15 @@ def facts(product, sh=_sh, now=None, env='prod', _ci=None):
         if not pick:
             f['why'] = 'dev runs no readable sha yet'
             return _done(f)
-        if not _sha_green(product, pick, ci, sh):
-            f['why'] = f"dev's `{pick[:9]}` has no green {f['ci']} run"
+        ok, rule = _sha_green(product, pick, ci, sh, env)
+        if not ok:
+            f['why'] = (f"dev's `{pick[:9]}` has no {f['ci']} run green{f['required']}"
+                        if f['required'] else f"dev's `{pick[:9]}` has no green {f['ci']} run")
             return _done(f)
     else:
-        pick = next((r.get('headSha') for r in ci if _green(r)), None)
+        pick, rule = _pick(product, env, ci, sh)
     if pick and pick != f['deployed'] and _ahead(product, f['deployed'], pick, sh):
-        f['candidate'] = pick
+        f['candidate'], f['rule'] = pick, rule
         f['failed'] = next((r.get('databaseId') for r in runs if r.get('headSha') == pick
                             and r.get('status') == 'completed'
                             and r.get('conclusion') not in ('success', None)), None)
@@ -557,14 +722,17 @@ def decide(product, f, env=None):
     if not f['candidate']:
         if f.get('why'):
             return False, f"{head} {lag} — {f['why']}; {env} waits"
-        return False, (f"{head} {lag} — no green {f['ci']} run on {trunk} newer than {env};"
-                       f" {env} waits on a green {trunk}")
+        on = f.get('required') or ''
+        green = (f"no {f['ci']} run on {trunk} green{on}" if on
+                 else f"no green {f['ci']} run on {trunk}")
+        return False, f"{head} {lag} — {green} newer than {env}; {env} waits on a green {trunk}"
+    why = f"; {f['rule']}" if f.get('rule') else ''
     if f['failed']:
         return False, (f"{head} {wf} for {_s(f['candidate'])} FAILED (run {f['failed']}) — not"
                        f" retried; {lag}; the next green sha dispatches again")
     if f.get('mode') != 'auto' or not wf:
-        return False, f"{head} {lag} — {_manual(product, f, env)}"
-    return True, f"{head} {lag} — dispatching {wf} for green {_s(f['candidate'])}"
+        return False, f"{head} {lag} — {_manual(product, f, env)}{why}"
+    return True, f"{head} {lag} — dispatching {wf} for green {_s(f['candidate'])}{why}"
 
 
 def _each(product, sh):
