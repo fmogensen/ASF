@@ -1,6 +1,7 @@
 """asf.tick.step_daily — the tick's once-a-day step, in the record clone.
 
-``stale`` and ``rollup`` for yesterday with its releases, written into the record clone — the
+``stale``, ``rollup`` for yesterday with its releases, and the value loop (``scorecard``,
+:mod:`asf.scorecard.loop`), written into the record clone — the
 tick's one commit (:func:`asf.tick.tick.finish`) carries them with the rest of the tick. One line
 per part: ``daily: <part> ok|FAILED — <its last line>``. A part that fails does not stop the
 other; the step fails (and the day is not stamped) when any did. The groom is its own step
@@ -26,10 +27,13 @@ def parts(product, root, event=None):
     """``[(name, thunk)]`` in order; each thunk returns an exit code."""
     from asf.metrics.metrics import cmd_rollup
     from asf.tick.stale import cmd_stale
+    from asf.scorecard.loop import daily as scorecard_daily
     return [
         ('stale', lambda: cmd_stale(_ns(json=False), root)),
         ('rollup', lambda: cmd_rollup(_ns(day=yesterday(), no_releases=False,
                                           product=product.name), root)),
+        # the value loop: measure, snapshot, file a card per cause over threshold, verify landed ones
+        ('scorecard', lambda: scorecard_daily(product, root)),
     ]
 
 

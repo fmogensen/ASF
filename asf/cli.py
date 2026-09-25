@@ -304,6 +304,12 @@ def build_parser():
     p_status = sub.add_parser('status', help='the FACTORY STATUS table')
     p_status.add_argument('--product')
 
+    p_scorecard = sub.add_parser('scorecard', help='the SCORECARD: value shipped per week, its cost, '
+                                                    'where it went, and the causes the loop filed')
+    p_scorecard.add_argument('--product')
+    p_scorecard.add_argument('--weeks', type=int, default=4, help='ISO weeks to show (default: 4)')
+    p_scorecard.add_argument('--json', action='store_true')
+
     p_capacity = sub.add_parser('capacity', help='the CAPACITY table: sessions and CI runs per product')
     g_capacity = p_capacity.add_mutually_exclusive_group()
     g_capacity.add_argument('--product')
@@ -489,7 +495,7 @@ def _main(argv=None):
     if args.command == 'watch':
         from asf.tick.watch import cmd_watch
         return cmd_watch(args)
-    if args.command in ('roadmap', 'backlog', 'parity', 'prod', 'sessions', 'status', 'tokens'):
+    if args.command in ('roadmap', 'backlog', 'parity', 'prod', 'sessions', 'status', 'tokens', 'scorecard'):
         view_root = resolve_record(args, announce=_announce_stderr if getattr(args, 'json', False) else print)
         if args.command == 'roadmap':
             from asf.views.roadmap import cmd_roadmap
@@ -509,6 +515,9 @@ def _main(argv=None):
         if args.command == 'tokens':
             from asf.views.tokens import cmd_tokens
             return cmd_tokens(args, view_root)
+        if args.command == 'scorecard':
+            from asf.views.scorecard import cmd_scorecard
+            return cmd_scorecard(args, view_root)
         if args.command == 'status':
             from asf.views.status import cmd_status
             return cmd_status(args, view_root)
