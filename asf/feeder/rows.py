@@ -434,15 +434,23 @@ def lane_rows(items, product, busy, occupancy):
     occ = occupancy or {}
     held = [(iid, h, True) for iid, h in (occ.get('review') or {}).items()]
     held += [(iid, h, False) for iid, h in (occ.get('landing') or {}).items()]
+    from asf.harvest.lane import is_pr_item  # local: the lane imports the feeder
     for iid, h, review in sorted(held, key=lambda t: t[0]):
         item = items.get(iid)
-        if not item or not is_open(item) or iid in busy or item.get('blocked'):
+        foreign = not item and is_pr_item(iid)  # merge: auto — a PR no factory item made
+        if foreign:
+            if iid in busy:
+                continue
+            item = {'id': iid, 'type': 'task'}
+        elif not item or not is_open(item) or iid in busy or item.get('blocked'):
             continue
         if item.get('type') not in ('task', 'bug'):
             continue
-        f = feature_of(items, item)
+        f = None if foreign else feature_of(items, item)
         fid, branch, number = (f['id'] if f else ''), h.get('branch') or '', h.get('pr')
         what = f'PR #{number}' if number else branch
+        if foreign:
+            what += ' (opened outside the factory, no card)'
         if review:
             rnd = int(h.get('round') or 1)
             out.append(Row(tier=review_tier(item), kind=PUSHED_REVIEW, item_id=iid,

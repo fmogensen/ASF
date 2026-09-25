@@ -307,6 +307,13 @@ def lane_push_cell(product):
     return lane.ref_push_line(product)
 
 
+def merge_cell(product):
+    """``auto`` or ``manual`` — ``conventions.merge``: whether the lane merges a green, reviewed
+    PR itself or the operator clicks merge."""
+    conv = getattr(product, 'conventions', None)
+    return 'auto' if conv is not None and conv.merge_auto() else 'manual'
+
+
 def render(root, product, cfg=None):
     cfg = env.load_config() if cfg is None else cfg
     now = datetime.datetime.now().strftime('%H:%M')
@@ -317,6 +324,7 @@ def render(root, product, cfg=None):
                        ('Runners', lambda: runners_cell(product)),
                        ('Prod', lambda: prod_cell(product)),
                        ('Agents', lambda: agents_cell(product)),
+                       ('Merge', lambda: merge_cell(product)),
                        ('Capacity', lambda: capacity_cell(cfg, product)),
                        ('Record', lambda: record_cell(root)),
                        ('Ready to launch', lambda: ready_cell(root, product)),

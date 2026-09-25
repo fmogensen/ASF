@@ -110,6 +110,9 @@ CODE = 'code'
 LANDING_FF = 'fast-forward'
 LANDING_PR = 'pull-request'
 ITEM_ID_RE = re.compile(r'\b([A-Za-z]+-\d{4})\b')
+#: :func:`pr_item`'s ids — an open PR on the trunk no card claims, reviewed and merged under
+#: ``conventions.merge: auto``.
+PR_ITEM_RE = re.compile(r'^PR-(\d+)$')
 ADJUDICATE_SUBJECT_RE = re.compile(r'^adjudicate\(')
 #: the correction kind a docs branch the product gate refuses goes back with: the feeder turns it
 #: into a STARVED → SPEC/PLAN session on that branch (R7)
@@ -199,6 +202,17 @@ def item_of(branch, record):
         return str(item)
     m = ITEM_ID_RE.search(branch.rsplit('/', 1)[-1]) or ITEM_ID_RE.search(branch)
     return m.group(1).upper() if m else None
+
+
+def pr_item(number):
+    """The lane's id for an open PR no factory item made (``merge: auto``): ``PR-<n>`` — what
+    its review file is named after and what its synthetic run carries."""
+    return f'PR-{int(number):04d}'
+
+
+def is_pr_item(item):
+    """True for an id :func:`pr_item` minted."""
+    return bool(item) and bool(PR_ITEM_RE.match(str(item)))
 
 
 def _parse_at(stamp):
@@ -547,6 +561,9 @@ class Lane:
         self.mode = 'pr' if landing(product) == LANDING_PR else 'ff'
         self.slug = repo_slug(product) if self.mode == 'pr' else None
         self.host = GitHubHost(product, self) if self.slug else FastForwardHost(product, self)
+        #: ``conventions.merge: auto`` — the lane merges green, reviewed PRs itself, and takes up
+        #: the open PRs on the trunk no factory item made (:meth:`foreign_pr`)
+        self.auto = approvals.merge_auto(product)
         self.results = {}
         self.opened = 0
         self.orphans = {}
@@ -592,6 +609,9 @@ class Lane:
         names |= {b for b, r in runs.items() if b != trunk and b and (
             b in heads or lifecycle.eligible(r) or (r.get('lane') or {}).get('state') in OPEN_STATES)}
         names |= {b for b, p in pr_map.items() if conv.branch_kind(b) and p.get('state') == 'OPEN'}
+        if self.auto:  # every open PR on the trunk, whoever opened it (foreign_pr decides)
+            names |= {b for b, p in pr_map.items() if b and b != trunk
+                      and p.get('state') == 'OPEN' and p.get('base') in (None, trunk)}
         out = {}
         for b in sorted(names):
             f = self.branch_facts(b, runs.get(b), heads.get(b), pr_map.get(b), prs, running)
@@ -612,7 +632,11 @@ class Lane:
              'pr': pr, 'mode': self.mode, 'host': self.mode != 'pr' or bool(self.slug),
              'now': self.now or time.time(), 'stale_after': conv.lane_stale_after_s(),
              'harvest_running': running, 'trunk': self.trunk_sha}
-        if run is None and b in self.orphans:
+        foreign = self.foreign_pr(b, run, pr, item)
+        if foreign:  # an open PR a person or a product session opened: adopted for review (T2)
+            item = foreign
+            f.update(item=item, adopt=True, ended=True)
+        elif run is None and b in self.orphans:
             # an orphan: a lane branch no run holds — the pre-record lane's
             # `<prefix><plan>-t3`, a card's second branch — is closed or picked back up
             if self.orphans_taken >= ORPHANS_PER_PASS:
@@ -626,7 +650,8 @@ class Lane:
             if f is None or not f.pop('pick_up', False):
                 return f
             item = f['item']
-        if run is None:  # adoption: a lane branch, or an open PR, no run holds (T2)
+        f['foreign'] = is_pr_item(item)
+        if run is None and not foreign:  # adoption: a lane branch, or an open PR, no run holds (T2)
             card = (self.items or {}).get(item or '') or {}
             open_pr = (pr or {}).get('state') == 'OPEN'
             # a branch whose name only looks like an id (`…-retro-2026-09-19` → RETRO-2026) is
@@ -659,8 +684,10 @@ class Lane:
         f['closed'] = superseded_by(self.items, item)
         f['files'] = touched_files(repo, trunk, b)
         f['class'] = landing_class(self.product, f['files'])
-        f['review_required'] = conv.review_required(f['class'])
-        if rec.get('state') in (None, PUSHED, BACK):
+        # a PR no factory item made merges only on a factory review of its head, whatever the
+        # class; and its commits name no item, so the lane's naming refusal is not its to answer
+        f['review_required'] = f['foreign'] or conv.review_required(f['class'])
+        if rec.get('state') in (None, PUSHED, BACK) and not f['foreign']:
             f['refusal'] = lane_refusal(repo, trunk, b, item, conv)
         f['customer'] = customer_content.touched(conv, f['files'])
         # a customer page is never landed unread: its diff needs a review whatever its class
@@ -692,6 +719,22 @@ class Lane:
                                       prefixes=match.branch_prefixes(self.product))
         ids = [i for i in ids if (items.get(i) or {}).get('type') in want]
         return ids[0] if len(ids) == 1 else None
+
+    def foreign_pr(self, b, run, pr, item):
+        """Under ``conventions.merge: auto``, the :func:`pr_item` id of an open PR on the trunk
+        that no run holds and no card claims — one a person or the product's own session opened
+        — else None. The lane reviews it (a review session it launches) and merges it on green
+        like any lane branch; under ``manual`` it is never touched."""
+        pr = pr or {}
+        if not self.auto or run is not None or pr.get('state') != 'OPEN' or not pr.get('number'):
+            return None
+        if pr.get('base') not in (None, self.trunk):
+            return None
+        if (self.orphans.get(b) or {}).get('item') or (item and item in (self.items or {})):
+            return None  # a card claims it: the lane's own adoption (T2) or orphan rule
+        if self.items is None and self.conv.branch_kind(b):
+            return None  # no record to ask: a lane-prefixed branch stays the lane's own
+        return pr_item(pr['number'])
 
     def orphan_claims(self, runs, heads, pr_map):
         """``{branch: {item, owner}}`` of every orphan — a lane-prefixed head no run holds, with
@@ -1278,7 +1321,14 @@ def precheck(lane, entries):
             continue
         files = f.get('files') or touched_files(lane.repo, lane.trunk, b)
         cls, matched = approvals.merge_class(product, files)
-        level = approvals.level_of(product, cls)
+        level = approvals.merge_level(product, cls)
+        hold = f"{f.get('item')}/{cls}"
+        if getattr(lane, 'auto', False) and not lane.dry_run and any(
+                h.get('hold') == hold for h in approvals.open_holds(product)):
+            # merge: auto — a hold a manual pass left open is the lane's to close, not a
+            # NEEDS OPERATOR line that outlives the switch
+            approvals.resolve(product, hold, 'granted')
+            out(f'merge: auto — {hold} released')
         if level != 'auto' and not approvals.is_granted(product, f"{f.get('item')}/{cls}"):
             detail = matched or 'routine'
             if approvals.dropped(product, f"{f.get('item')}/{cls}", detail):
@@ -1725,6 +1775,19 @@ def squash_subject(lane, f, number):
     return f'{head} (#{number})'
 
 
+#: how many touched files the auto-merge line names before it counts the rest
+AUTO_MERGE_FILES = 8
+
+
+def auto_merge_line(f, number, sha):
+    """The one line ``merge: auto`` writes per merge, naming what the merge touched."""
+    files = list(f.get('files') or [])
+    shown = ', '.join(files[:AUTO_MERGE_FILES]) or 'no files'
+    more = f' (+{len(files) - AUTO_MERGE_FILES} more)' if len(files) > AUTO_MERGE_FILES else ''
+    return (f"merge: auto — merged PR #{number} ({f['branch']}, {f.get('item') or '—'}) at "
+            f"{str(sha)[:12]}; touched {len(files)} file(s): {shown}{more}")
+
+
 def merge_prs(lane, ready):
     """PR mode: merge every green PR the budget has room for — MERGING first (R3), then ``gh pr
     merge`` (or ``--auto`` into a merge queue: QUEUED)."""
@@ -1756,6 +1819,8 @@ def merge_prs(lane, ready):
         lane.write(f, rec, harvested=sha, correction=None)
         f['prev'] = rec
         lane.out(f'landed {b} → PR #{number} {sha}')
+        if getattr(lane, 'auto', False):
+            lane.out(auto_merge_line(f, number, sha))
         lane.results[b] = 'landed'
         cancelled = host.cancel_ci(b)
         if cancelled:
@@ -1851,7 +1916,7 @@ class GitHubHost(Host):
         """One ``gh pr list --state all``: ``{branch: pr}``, an open PR first, else the newest."""
         data = H.gh_json(['pr', 'list', '-R', self.slug, '--state', 'all', '--limit', '500',
                           '--json', 'number,headRefName,headRefOid,state,mergeCommit,'
-                                    'autoMergeRequest,title'], [])
+                                    'autoMergeRequest,title,baseRefName'], [])
         out = {}
         for p in sorted((p for p in data if isinstance(p, dict)),
                         key=lambda p: (p.get('state') == 'OPEN', int(p.get('number') or 0))):
@@ -1859,7 +1924,8 @@ class GitHubHost(Host):
                 'number': p.get('number'), 'state': str(p.get('state') or 'OPEN').upper(),
                 'head': p.get('headRefOid') or None,
                 'merge_sha': (p.get('mergeCommit') or {}).get('oid') or None,
-                'queued': bool(p.get('autoMergeRequest')), 'title': p.get('title') or ''}
+                'queued': bool(p.get('autoMergeRequest')), 'title': p.get('title') or '',
+                'base': p.get('baseRefName') or None}
         if self.lane is not None:
             self.in_queue = sum(1 for r in lifecycle.by_branch(self.lane.path).values()
                                 if (r.get('lane') or {}).get('state') == QUEUED)
