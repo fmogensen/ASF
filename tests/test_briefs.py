@@ -387,6 +387,24 @@ class PreambleTest(unittest.TestCase):
                                       REPO_FACTS)
             self.assertNotIn('external CI', text, conv)
 
+    def test_local_gate_product_gets_the_run_once_rule(self):
+        # B-0127: a product that lands fast-forward, gated by harvest's own full-suite run on
+        # the combined head, told every worker to run that same full suite again before pushing
+        # — 6 sessions meant 6 full suites on the host. The brief now says: targeted tests only,
+        # harvest's gate runs the full suite once, before anything lands.
+        p = product(conventions={'landing': 'fast-forward', 'test_command': 'python3 tools/run_tests.py'})
+        text = preamble_mod.build(p, ROWS['coder'], index(), [], REPO_FACTS)
+        self.assertIn('run only the targeted tests for the files you changed', text)
+        self.assertIn("harvest's gate", text)
+        self.assertIn('full suite', text)
+
+    def test_no_test_command_gets_no_local_gate_rule(self):
+        # fast-forward with nothing to gate: harvest runs no full suite, so nothing tells the
+        # worker one runs elsewhere.
+        p = product(conventions={'landing': 'fast-forward'})
+        text = preamble_mod.build(p, ROWS['coder'], index(), [], REPO_FACTS)
+        self.assertNotIn("harvest's gate", text)
+
     def test_the_operator_can_replace_the_rules(self):
         p = product(conventions={'rules_tail': 'ONE RULE: push to {main} and nothing else.'})
         text = preamble_mod.build(p, ROWS['coder'], index(), [], REPO_FACTS)
