@@ -148,12 +148,18 @@ product until the runners it will need are free:
 A push the CI host turns into a run on its own cannot be delayed once made, so the push (or the
 PR, or the merge) is what is held.
 
-**When a run starts.** Runs in flight must be below the CI ceiling (`capacity.ci`, above) — a hard
-ceiling over everything the queue admits. And, per runner class, the free runners (online, not
-busy, at their `slots`, from the runners API) must cover the run's **expected jobs**: the last
-`history` completed runs of the workflow that start triggers, their jobs grouped by the class of
-the runner each ran on (the `class`, else the `role`), the median per run rounded up and capped at
-what the pool has of that class. Everything ahead in line has its expected jobs set aside first, so
+**When a run starts.** A batch or an ordinary PR start needs runs in flight below the CI ceiling
+(`capacity.ci`, above). Runs in flight are one count, read by the queue and the status row alike:
+the runs of `ci.workflow` not completed — queued or running, PR, trunk and batch alike. An S1 or
+hotfix start, a trunk run and a deploy are exempt from the ceiling, so PR runs in flight never hold
+the trunk every deploy waits on. Every start, exempt or not, needs its runners: per runner class,
+the free runners (online, not busy, at their `slots`, from the runners API) must cover the run's
+**expected jobs** — over the last `history` completed runs of the workflow that start triggers,
+per run and class the peak number of jobs running at once (a job counts only if it got a runner and
+was not skipped, over its started..completed span, so skipped or conditional jobs never count and
+sequential stages never add up), grouped by the class of the runner each ran on (the `class`, else
+the `role`); the p90 of that over the runs, capped at what the pool has of that class. Everything
+ahead in line has its expected jobs set aside first, so
 a heavy run at the head is not starved by lighter ones behind it; a run only needing a class with
 room still goes. A run admitted in the last three minutes still holds its runners, since its jobs
 queue on the host before any runner shows busy.
@@ -167,10 +173,11 @@ PRs of customer-facing Features (the Feature says `customer_facing: true`, or th
 
 ```
 ci queue: T-0341 waits — heavy 0 free, needs 3 (S2, 4th in line)
-ci queue: T-0500 waits — at the ci ceiling (4/4 runs in flight) (trunk, 1st in line)
+ci queue: T-0500 waits — at the ci ceiling (4 runs in flight; batch and PR starts below 4) (Task, 2nd in line)
 ```
 
-and the status Capacity row ends with the depth and the head: `ci queue 3, head T-0341 waits — …`.
+and the status Capacity row ends with the depth and the head: `ci queue 3, head T-0341 waits — …`;
+a head held at the ceiling is re-stated there with the row's own in-flight count.
 
 **Superseded trunk runs.** A trunk run judges every commit below it, so an older trunk `push` run
 still queued behind a newer one is moot. Each tick the lane cancels those, per trunk workflow,
