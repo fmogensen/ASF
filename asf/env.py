@@ -416,6 +416,7 @@ PRODUCT_FIELDS = {
     'customer_paths': _LIST, 'stage_limits': _MAP, 'size_classes': _MAP, 'approvals': _MAP,
     'approval_signals': _MAP, 'steps': _MAP, 'job_grants': _LIST, 'groom': _MAP,
     'capacity': _MAP, 'clocks': _MAP, 'token_caps': _MAP, 'feeder': _MAP, 'improve': _MAP,
+    'release': _MAP,
 }
 # `ci:` is a map (or the bare word `none`, a product without CI); these are its keys.
 # `deploy_workflow` is a read-only alias of the documented `deploy_sha.workflow`: the status
@@ -437,9 +438,14 @@ IMPROVE_FIELDS = {'thresholds': _MAP, 'epic': _STR, 'window_days': None, 'premiu
                   # the value loop's settings (asf.scorecard.loop): thresholds, window_days,
                   # verify_weeks, min_move, file_to, epic
                   'scorecard': _MAP}
+# `release:` is a map: the release-readiness gate's thresholds (asf.release.DEFAULTS).
+RELEASE_FIELDS = {'window_days': None, 'max_hand_fixes': None, 'max_repair_per_feature': None,
+                  'ci_runs': None, 'min_upgrades': None, 'hand_types': _LIST,
+                  'readme_sections': _LIST, 'ci_steps': _MAP, 'requires': _MAP, 'blocking': _LIST}
 # every product-file section whose own keys are checked, keyed by its own field table.
 NESTED_FIELDS = {
     'ci': CI_FIELDS, 'capacity': CAPACITY_FIELDS, 'feeder': FEEDER_FIELDS, 'improve': IMPROVE_FIELDS,
+    'release': RELEASE_FIELDS,
 }
 
 
@@ -723,6 +729,12 @@ class Product:
         """The ``improve:`` block: threshold overrides, ``epic``, ``window_days``,
         ``premium_models`` (:mod:`asf.improve.classes` fills the defaults). ``{}`` when unset."""
         return self._get('improve', {})
+
+    @property
+    def release(self):
+        """The ``release:`` block: the release-readiness gate's thresholds and its ``blocking``
+        Features (:mod:`asf.release` fills the defaults). ``{}`` when unset."""
+        return self._get('release', {})
 
     def branch_prefix(self, kind):
         """The prefix *without* its separator (``worker``), for the callers that compose

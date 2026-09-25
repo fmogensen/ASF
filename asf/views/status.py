@@ -321,6 +321,17 @@ def value_cell(root, product):
     return cell(root, product)
 
 
+def release_cell(root, product):
+    """``Release``: the release-readiness verdict (:mod:`asf.release`; the full table is
+    ``asf release-readiness``) — only for the product whose repo is the factory's own source, or
+    one that sets a ``release:`` block."""
+    from asf.drift import is_factory_source
+    if not (getattr(product, 'release', None) or (product.repo_dir and is_factory_source(product.repo_dir))):
+        return None
+    from asf.release import cell
+    return cell(root, product)
+
+
 def render(root, product, cfg=None):
     cfg = env.load_config() if cfg is None else cfg
     now = datetime.datetime.now().strftime('%H:%M')
@@ -334,6 +345,7 @@ def render(root, product, cfg=None):
                        ('Merge', lambda: merge_cell(product)),
                        ('Capacity', lambda: capacity_cell(cfg, product)),
                        ('Value', lambda: value_cell(root, product)),
+                       ('Release', lambda: release_cell(root, product)),
                        ('Record', lambda: record_cell(root)),
                        ('Ready to launch', lambda: ready_cell(root, product)),
                        ('Decisions', lambda: decisions_cell(root, product)),
