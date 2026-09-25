@@ -177,7 +177,16 @@ class CommitTrailerTest(Home):
                'GIT_CONFIG_COUNT': '2', 'GIT_CONFIG_KEY_0': 'user.name',
                'GIT_CONFIG_VALUE_0': user, 'GIT_CONFIG_KEY_1': 'user.email',
                'GIT_CONFIG_VALUE_1': email}
-        return runtime_mod.build_env(job_obj, base=base)
+        out = runtime_mod.build_env(job_obj, base=base)
+        # build_env (hermetic.build, mode='worker') keeps only the allow-list plus the job's
+        # passthrough, so the GIT_CONFIG_* pair above never survives into ``out`` — a CI runner
+        # with no user.name/user.email and no gecos full name then fails ``git commit`` with
+        # "Author identity unknown" even though it passes on a dev machine that has one. Set the
+        # identity directly on the env the tests actually hand to ``git`` (the ``GIT_AUTHOR_*``
+        # pattern the other test files use — grep for GIT_AUTHOR).
+        out.update({'GIT_AUTHOR_NAME': user, 'GIT_AUTHOR_EMAIL': email,
+                   'GIT_COMMITTER_NAME': user, 'GIT_COMMITTER_EMAIL': email})
+        return out
 
     def _commit(self, wt, e, msg='x', extra_args=()):
         with open(os.path.join(wt, 'f.txt'), 'a', encoding='utf-8') as f:
