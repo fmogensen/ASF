@@ -287,6 +287,24 @@ class RecordErrorSignatureTests(unittest.TestCase):
         self.assertIn('record error: bare decision reference …; write it as [[D-nnnn]]', sigs)
         self.assertIn('record error: …: bug without severity', sigs)
 
+    def test_one_class_when_the_message_carries_a_possessive_before_a_specific(self):
+        # two `writes:` overlaps are the same defect, and the message's `T-0501's` possessive must
+        # not pair with the second glob's opening quote — one class, one Bug, whatever the globs
+        active = ['state: Active', 'stage_since: 2026-09-01T00:00:00Z',
+                  'updated: 2026-09-01T00:00:00Z']
+        for n, glob in ((500, 'asf/a.py'), (501, 'asf/a.py'),
+                        (502, 'docs/x.md'), (503, 'docs/x.md')):
+            write_item(self.root, f'T-{n:04d}', 'task', f'Task {n}', parent='F-0001',
+                       typed_lines=[f'writes: [{glob}]'], machine_lines=active)
+        run(['index'], self.root)
+        sigs = file_bugs.record_error_signatures(self.root)
+        self.assertEqual(list(sigs), ["record error: writes: … intersects Active task …'s …"], sigs)
+        sig = list(sigs)[0]
+        self.assertEqual(sigs[sig]['places'], 2)          # two overlaps, one Bug
+        evidence = '\n'.join(sigs[sig]['evidence'])
+        self.assertIn('tasks/T-0500.md', evidence)
+        self.assertIn('tasks/T-0502.md', evidence)
+
     def test_a_clean_record_files_nothing(self):
         write_item(self.root, 'T-0279', 'task', 'Task', parent='F-0001')
         run(['index'], self.root)
