@@ -2,6 +2,73 @@
 
 One entry per released version, newest first.
 
+## v0.1.8 — 2026-09-25
+
+### Features landed
+
+- F-0090 Adjudication is the last resort: the cheap causes are ruled out before Opus is spent
+
+### Bugs fixed
+
+- B-0001 `asf init` does not exist, so a new record has to be laid down by hand
+- B-0087 The console operator is never told what a tick did: no per-tick digest, no asf watch
+- B-0090 The operator's console rules live in assistant memory, not code: the plugin ships no hooks enforcing them
+- B-0094 19% of sessions end 'not pushed': finished work is lost to a missing commit or push
+- B-0099 A removed or moved rule card still runs its check and files S2 'rule violated' Bugs
+- B-0101 file-bugs mints Bugs with an empty Acceptance and no statement of what is wrong
+- B-0109 Full test suites run locally in parallel and exhaust the host (load 99, swap 95%)
+- B-0110 Harvest re-gates a green code branch when main moved only by docs commits
+- B-0115 scheduler install runs the daily clock at load, hours outside its declared time
+
+### In progress
+
+- B-0097 A network blip on push scores finished work as 'failed: not pushed' and costs a correction round
+- F-0001 P0a — the two repositories and the licence
+- F-0029 Roles: one file per role, five sections, model and access from config
+- F-0091 asf improve: the self-improvement pass is a tick step, not something someone remembers to ask for
+- F-0093 Model routing is argued from minutes-per-landing, and the pool gets a cheap tier
+- F-0100 The savings pass: the tick proposes the next cheapest win from its own numbers
+- F-0123 record: a date-prefixed plan file mints no Tasks after it lands
+- F-0125 Onboarding: adopt a product's in-flight PRs (asf adopt-pr + legacy review form) so native landing drains them
+
+### Improvements and hotfixes
+
+- contracts(fix-package): config keys and stub APIs for the lane, review, invariants, occupancy
+- contracts(fix-package): isolate_home replaces home: inherit; record stage/validate stub; rollback note
+- docs(fix-package): the package plan, review overrides and compliance checklist
+- fix(workers,scheduler): isolated worker env and HOME; the clock ticks from a snapshot
+- fix(workers,doctor): an isolated session gets its credentials from auth_env files, never HOME or the keychain
+- test(e2e): the PR-lane harness — in-process ticks over a fake PR host, both landing modes
+- fix(run_tests): expected failures are green, unexpected successes are red
+- fix(record): every writer staged and validated; ingest merges the machine block (R14, I1-I3, I10, I11)
+- fix(env): a flow-style map or list is parsed, or refused with its key and line
+- fix(groom): an explicit type: line decides the intake type (I13)
+- fix(conventions): a map-valued convention in another shape is its default plus a doctor finding
+- fix(doctor): a map-valued convention in another shape fails loud, with its key and line
+- fix(briefs): the session model by kind and item class, in code — S2/S3 and Task reviews run light
+- fix(invariants): the registry completed; three soft check points in the tick (R9-R13)
+- fix(doctor): one brief of every kind rendered as a config smoke test
+- fix(groom): For you holds only human-now approval actions
+- fix(status): the Prod row reads deploy_sha.workflow, its old names as aliases
+- fix(metrics): release notes list as landed only Resolved or Closed items (I12)
+- tools(package_gate): the review checklist verified by code (§11)
+- docs(fix-package): the lane stream's R-lines map to its landed tests
+- fix(invariants): I3 judges only a written writes:, and the lane adopts only a card's branch
+- tools(package_gate): R21 is pending-live until a recorded smoke; R15 and R18 checked by git
+- feat(auth_env): product-level GitHub tokens (conventions.auth_env)
+- feat(tick): asf tick --dry-run — the rollout's read-only rehearsal
+- task(R21): the live smoke — isolated session, auth_env, one push, ALL PASS
+- hotfix(dry-run): the state copy leaves out the worker worktrees and never follows a symlink
+- hotfix(doctor): one-factory knows the factory's own source repo when asf runs from its install
+- hotfix(workers): an isolated session carries the factory's ASF_HOME
+- fix(smoke): the live smoke runs the approvals hook in the session's own environment
+- fix(tests): the suite removes the temp homes and fixture copies it makes
+- … and 14 more
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.8"`
+
 ## v0.1.7 — 2026-09-24
 
 ### Bugs fixed
