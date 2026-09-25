@@ -61,11 +61,20 @@ def kinds(product):
 
 def paths(product):
     """Every glob of the set. `conventions.amendable_paths` when the product named one — an
-    empty list is a named one, and means the set is empty — else every kind's globs."""
+    empty list is a named one, and means the set is empty — else every kind's globs. A
+    `!glob` entry is an exclusion (:func:`excluded`), never a member."""
     named = _conventions(product).amendable_paths
     if named is not None:
-        return tuple(named)
+        return tuple(g for g in named if not str(g).startswith('!'))
     return tuple(g for kind in kinds(product) for g in kind.globs)
+
+
+def excluded(product):
+    """The `!glob` entries of `conventions.amendable_paths`, without the `!`: a path they match
+    is outside the set even when a member glob matches it — `docs/process/*` with
+    `!docs/process/evidence/*` protects the process rules, not every Task's evidence file."""
+    named = _conventions(product).amendable_paths or ()
+    return tuple(str(g)[1:] for g in named if str(g).startswith('!'))
 
 
 def source(product):
@@ -85,6 +94,8 @@ def kind_of(product, relpath):
 
 def _in_set(product, relpath):
     from asf import approvals
+    if any(approvals._match_glob(g, relpath) for g in excluded(product)):
+        return False
     return any(approvals._match_glob(g, relpath) for g in paths(product))
 
 
@@ -130,7 +141,11 @@ def _reach(a, b):
 def reaches(product, globs):
     """The first of `globs` (a Task's `writes:`) that overlaps the set — a glob intersection,
     not a file test: `rules/*` and `rules/R-0042.md` both reach `rules/*.md`."""
+    import fnmatch
+    out = excluded(product)
     for g in globs:
+        if any(fnmatch.fnmatch(g, x) for x in out):
+            continue
         if any(_reach(g, s) for s in paths(product)):
             return g
     return None
