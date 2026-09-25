@@ -10,7 +10,8 @@ incident has a session. A ``WAITS ON`` row launches nothing and costs no slot; i
 the Tasks the cut reached.
 
 A launching row on an item an approval hold parks (``held``, :func:`asf.approvals.parked` — a
-harvest merge hold; a refusal from the hook never parks) is
+harvest merge hold, or a refused write to the amendable set; any other refusal from the hook
+never parks) is
 emitted — the wave says it waits for a person — but costs no slot and holds no tier back: it
 cannot start whatever the capacity, so a slot given to it is a slot no session gets.
 """

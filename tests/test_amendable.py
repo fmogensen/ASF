@@ -258,8 +258,9 @@ class PolicyTests(TickTestCase):
     ``human-now`` for ``touch_amendable_set`` (F-0024's own message), the hook refuses even when
     the rest of the matrix is invalid or the hold has been marked ``granted`` straight in the
     ledger, ``resolve(…, 'granted')`` itself raises, ``resolve(…, 'proposed')`` closes the hold,
-    and ``raise_holds`` names the open hold without parking the item — nor does a
-    ``touch_security`` hold in the same ledger park its own (a hook refusal never parks)."""
+    and ``raise_holds`` names the open hold and parks the item (a relaunch only buys the same
+    refusal) — while a ``touch_security`` hold in the same ledger parks nothing (any other hook
+    refusal never parks)."""
 
     ITEM = 'F-0024'
     JOB = 'code-F-0024'
@@ -335,7 +336,7 @@ class PolicyTests(TickTestCase):
         self.assertNotIn(hold, [h['hold'] for h in approvals.open_holds('sample')])
         self.assertEqual(approvals.holds('sample')[hold]['resolution'], 'proposed')
 
-    def test_raise_holds_names_it_but_does_not_park_it(self):
+    def test_raise_holds_names_it_and_parks_it(self):
         self.write_product('')
         approvals.refuse('sample', self.ITEM, 'touch_amendable_set', 'human-now', self.JOB,
                           'Write', 'rules/R-0042.md', kind='rule_cards', patch='x')
@@ -347,9 +348,9 @@ class PolicyTests(TickTestCase):
         self.assertTrue(any(
             l.startswith(f'NEEDS OPERATOR: held touch_amendable_set on {self.ITEM}')
             for l in lines), lines)
-        self.assertNotIn(self.ITEM, held)          # non-parking: the wave still launches on it
-        # a hook refusal parks nothing either: the session was told to finish another way
-        self.assertEqual(held, {})
+        # parked: no session edits the amendable set, so a relaunch spends a slot on a refusal
+        # a touch_security refusal parks nothing: the session was told to finish another way
+        self.assertEqual(held, {self.ITEM: ('touch_amendable_set', 'human-now')})
 
 
 if __name__ == '__main__':

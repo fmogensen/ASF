@@ -1,8 +1,10 @@
 """asf.tick.step_wave — the tick's ``wave`` step: what the feeder says to start, launched.
 
 0. ``approvals.raise_holds`` — the open holds said aloud, and the items they park (§2.4): a
-   harvest merge hold parks its item; a refusal from the hook never does — the item relaunches
-   and its brief names the refusal (:func:`asf.approvals.refusal_text`);
+   harvest merge hold parks its item, and so does a refused write to the amendable set; any other
+   refusal from the hook never does — the item relaunches and its brief names the refusal
+   (:func:`asf.approvals.refusal_text`). A hold on an item the record calls Resolved/Closed is
+   closed ``done`` first (:func:`asf.approvals.close_landed`);
 1. the index from the record clone (the tick's own, made once per tick — :class:`Context`);
 2. the lane pass (:func:`asf.harvest.lane.lane_pass`, R2): every lane branch moved as far as its
    facts carry it — a finished branch's PR opened or adopted, its review asked for, a merge seen

@@ -710,6 +710,37 @@ class TickRaiseTest(TickTestCase):
         self.assertEqual(held, {})
         self.assertEqual(ctx.counts['refusals'], 2)  # the tick digest's number
 
+    def write_index(self, ctx, items):
+        with open(os.path.join(ctx.record_root(), 'index.json'), 'w') as f:
+            json.dump({'generated': '', 'items': items}, f)
+
+    def test_a_hold_on_a_landed_item_closes_itself_done(self):
+        """asf 2026-09-25: eight touch_amendable_set holds sat open on Bugs already Resolved or
+        Closed, each a NEEDS OPERATOR line every tick. The record says the work landed another
+        way: the tick closes the hold ``done`` itself."""
+        self.hold('B-0002', 'touch_amendable_set', 'human-now', detail='.githooks/pre-commit')
+        self.hold('B-0003', 'touch_amendable_set', 'human-now', detail='rules/r.md')
+        ctx = tick.Context(self.product)
+        self.write_index(ctx, {
+            'B-0002': {'id': 'B-0002', 'type': 'bug', 'state': 'Resolved'},
+            'B-0003': {'id': 'B-0003', 'type': 'bug', 'state': 'New'}})
+        held, _ = self.raise_holds(ctx)
+        raised = [ln for ln in self.lines if ln.startswith('NEEDS OPERATOR')]
+        self.assertEqual([NEEDS_OPERATOR_RE.match(ln).group(2) for ln in raised], ['B-0003'])
+        self.assertEqual(approvals.holds(self.product)['B-0002/touch_amendable_set']['resolution'],
+                         'done')
+        self.assertNotIn('B-0002', held)
+
+    def test_an_amendable_refusal_parks_its_open_item(self):
+        """No session edits the amendable set, so relaunching the item only buys the same
+        refusal and spends a slot (B-0104 at tier 1, ahead of every Feature): it waits for a
+        person, shown, costing no slot."""
+        self.hold('B-0003', 'touch_amendable_set', 'human-now', detail='rules/r.md')
+        ctx = tick.Context(self.product)
+        self.write_index(ctx, {'B-0003': {'id': 'B-0003', 'type': 'bug', 'state': 'New'}})
+        held, _ = self.raise_holds(ctx)
+        self.assertEqual(held, {'B-0003': ('touch_amendable_set', 'human-now')})
+
     def test_groom_holds_are_one_summary_line(self):
         for item in ('F-0031', 'B-0002', 'T-0003'):
             self.hold(item, 'merge_routine_pr', 'groom', detail='routine')

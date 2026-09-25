@@ -43,9 +43,11 @@ class ActionClass:
     default: str          # one of LEVELS
     read_by: tuple        # ('hook',) | ('harvest',) | ('hook', 'file_bugs') ...
     levels: tuple = LEVELS  # the levels a product yaml may map this class to
-    # An open hold on it stops the wave launching the item. Only the harvest's merge classes
-    # park (the branch waits to land either way); a refusal from the hook never parks an item —
-    # the session is told to finish another way and the next brief names the refusal.
+    # An open hold on it stops the wave launching the item. The harvest's merge classes park
+    # (the branch waits to land either way), and so does ``touch_amendable_set``: no session
+    # edits the amendable set, so a relaunch only buys the same refusal and spends a slot. Any
+    # other refusal from the hook never parks an item — the session is told to finish another
+    # way and the next brief names the refusal.
     parks: bool = False
     grantable: bool = True  # `granted` releases it
     why: str = ''           # the refusal's "you may not": why this is not a session's to do
@@ -95,7 +97,7 @@ CLASSES = (
         'touch_amendable_set',
         "a session writing the factory's own rules — rule cards, checks, hooks, role agents,"
         ' briefs, evals',
-        'human-now', ('hook',), levels=('human-now',), grantable=False),
+        'human-now', ('hook',), levels=('human-now',), grantable=False, parks=True),
     ActionClass(
         'new_epic', 'opening a new Epic',
         'human-now', ('hook',),
@@ -816,6 +818,37 @@ def session_refusal(cls):
     return bool(c and 'hook' in c.read_by and c.name != 'touch_amendable_set')
 
 
+def _record_items(ctx):
+    """The record's live items for ``ctx`` (``{}`` when its clone has no index)."""
+    try:
+        root = ctx.record_root()
+    except Exception:                                # no record, no fact: close nothing
+        return {}
+    if not isinstance(root, (str, os.PathLike)) or not os.path.isfile(
+            os.path.join(root, 'index.json')):
+        return {}
+    from asf.views import index_reader
+    return index_reader.load(root)[0]
+
+
+def close_landed(product, items, out=None):
+    """Close ``done`` every open hold whose item the record calls Resolved or Closed: the work
+    landed another way, and the hold is no one's question any more (asf 2026-09-25: eight
+    ``touch_amendable_set`` holds on landed Bugs raised NEEDS OPERATOR every tick). Returns the
+    holds closed."""
+    closed = []
+    for e in open_holds(product):
+        if (items.get(e['item']) or {}).get('state') in ('Resolved', 'Closed'):
+            hold = f"{e['item']}/{e['class']}"
+            append(product, {'event': 'resolved', 'hold': hold, 'resolution': 'done',
+                             'by': 'tick: item landed', 'ts': _now_iso()})
+            closed.append(hold)
+            if out:
+                out(f"approvals: {hold} closed done — {e['item']} is "
+                    f"{items[e['item']]['state']}")
+    return closed
+
+
 def raise_holds(ctx, out):
     """The ``wave`` step's first act: say what is held, record each hold once, and answer with
     ``{item: (class, level)}`` — the items a launching row must not be started on.
@@ -832,6 +865,7 @@ def raise_holds(ctx, out):
     also counts into ``ctx.counts['refusals']`` — the tick digest's number, not just its line.
     """
     product = ctx.product
+    close_landed(product, _record_items(ctx), out)
     open_ = open_holds(product)                      # oldest first
 
     refused = [e for e in open_ if session_refusal(e['class'])]
