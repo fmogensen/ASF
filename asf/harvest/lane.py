@@ -1429,7 +1429,9 @@ class GitHubHost(Host):
     def status(self, branch):
         p = H.gh_json(['pr', 'view', branch, '-R', self.slug, '--json',
                        'number,state,headRefOid,mergeCommit,autoMergeRequest'], {})
-        state, _detail, _checks = pr_checks(self.slug, p.get('number')) if p else ('none', '', [])
+        required = self.required_checks(self.lane.state_dir) if p and self.lane else ()
+        state, _detail, _checks = (pr_checks(self.slug, p.get('number'), required) if p
+                                   else ('none', '', []))
         return {'pr': p.get('number'), 'state': p.get('state'), 'head': p.get('headRefOid'),
                 'checks': {'green': 'passed', 'red': 'failed'}.get(state, state),
                 'merged': p.get('state') == 'MERGED',
@@ -1485,7 +1487,12 @@ class GitHubHost(Host):
         """The PR's checks before the gate: ``'gate'`` (gate it locally), ``'ci'`` (its required
         checks passed under ``wait``), or None when it waits or went back."""
         lane, b, rec = self.lane, f['branch'], f.get('prev') or {}
-        state, detail, checks = pr_checks(self.slug, number)
+        required = self.required_checks(lane.state_dir)
+        state, detail, checks = pr_checks(self.slug, number, required)
+        ignored = not_required_red(checks, required)
+        if ignored:
+            lane.out(f'harvest: {b}: PR #{number} check(s) red but not required — '
+                     f'{", ".join(ignored)} (informational)')
         if state == 'pending':
             lane.out(f'waiting {b}: PR #{number} checks pending — {detail}')
             wait(lane, f, f'checks pending: {detail}', state=WAITING_CI)
@@ -1504,7 +1511,6 @@ class GitHubHost(Host):
         cls = f.get('class') or landing_class(self.product, files)
         if missing_policy(self.product.conventions, cls) == MISSING_LOCAL_GATE:
             return 'gate'
-        required = self.required_checks(lane.state_dir)
         if not required:
             return 'gate'
         passed = {c.get('name') for c in checks if c.get('bucket') in PASS_BUCKETS}
@@ -1525,9 +1531,13 @@ class GitHubHost(Host):
         return 'gate'
 
 
-def pr_checks(slug, number):
+def pr_checks(slug, number, required=()):
     """``('green'|'pending'|'red'|'unknown', detail, checks)`` for PR ``number``'s checks. No
-    checks at all is green; any failed or cancelled one is red; else any not finished pending."""
+    checks at all is green. With ``required`` names (``landing_checks`` or branch protection) only
+    those judge: a failed or cancelled required one is red, else an unfinished required one is
+    pending — a red check the product does not require (a DCO bot, an advisory test job) never
+    turns the PR red. With none required, any failed or cancelled check is red, else any not
+    finished is pending. ``checks`` is always the full list."""
     rc, stdout, err = H._gh(['pr', 'checks', str(number), '-R', slug, '--json', 'name,bucket'])
     if 'no checks reported' in f'{stdout}\n{err}':
         return 'green', 'no checks', []
@@ -1535,13 +1545,23 @@ def pr_checks(slug, number):
         checks = [c for c in json.loads(stdout) if isinstance(c, dict)]
     except (json.JSONDecodeError, TypeError):
         return 'unknown', H.tail(err) or f'gh pr checks exited {rc}', []
-    red = [c.get('name') or '?' for c in checks if c.get('bucket') in RED_BUCKETS]
+    judged = [c for c in checks if c.get('name') in required] if required else checks
+    red = [c.get('name') or '?' for c in judged if c.get('bucket') in RED_BUCKETS]
     if red:
         return 'red', ', '.join(red), checks
-    pending = [c.get('name') or '?' for c in checks if c.get('bucket') == 'pending']
+    pending = [c.get('name') or '?' for c in judged if c.get('bucket') == 'pending']
     if pending:
         return 'pending', ', '.join(pending), checks
     return 'green', f'{len(checks)} check(s)', checks
+
+
+def not_required_red(checks, required):
+    """The names of ``checks`` that failed or were cancelled but are not ``required`` — told, never
+    acted on. Empty when nothing is required: then every red check already counts."""
+    if not required:
+        return []
+    return [c.get('name') or '?' for c in checks
+            if c.get('bucket') in RED_BUCKETS and c.get('name') not in required]
 
 
 def protected_checks(slug, trunk, state_dir, now=None):

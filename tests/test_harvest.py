@@ -2152,6 +2152,75 @@ class ProductHarvestTests(unittest.TestCase):
         self.harvest(product)
         self.assertEqual(len([c for c in calls if c[0] == 'api' and 'protection' in c[1]]), 1)
 
+    # ---- only required checks judge red/green -----------------------------------------
+
+    def test_a_red_check_that_is_not_required_does_not_send_a_docs_pr_back(self):
+        """The product requires ``gate``; ``gate-tests`` and DCO are red but advisory. The PR
+        is green on what the product requires: it lands, and the red ones are only told."""
+        calls = self.fake_gh([{'name': 'gate', 'bucket': 'pass'},
+                              {'name': 'gate-tests', 'bucket': 'fail'},
+                              {'name': 'DCO', 'bucket': 'fail'}])
+        self.push_plan()
+        results, lines = self.harvest(self.pr_conv(landing_checks=['gate']))
+        self.assertEqual(results, {'plan/F-0001': 'landed'}, lines)
+        self.assertIn('harvest: plan/F-0001: PR #41 check(s) red but not required — '
+                      'gate-tests, DCO (informational)', lines)
+        self.assertEqual(len(self.merges(calls)), 1)
+        self.assertFalse(self.record('plan/F-0001').get('correction'))
+
+    def test_branch_protection_required_checks_judge_too(self):
+        calls = self.fake_gh([{'name': 'gate', 'bucket': 'pass'},
+                              {'name': 'gate-tests', 'bucket': 'fail'}], required=['gate'])
+        self.push_fix(['approved'], extra={'checks/test_fx.py': RED_TEST})  # CI is the gate
+        results, lines = self.harvest(self.pr_conv(landing_checks_missing='wait'))
+        self.assertEqual(results, {'fix/B-0001': 'landed'}, lines)
+        self.assertFalse([l for l in lines if 'one gate' in l], lines)
+        self.assertEqual(len(self.merges(calls)), 1)
+
+    def test_a_red_required_check_still_sends_the_pr_back(self):
+        calls = self.fake_gh([{'name': 'gate', 'bucket': 'fail'},
+                              {'name': 'DCO', 'bucket': 'fail'}])
+        self.push_fix(['approved'])
+        results, lines = self.harvest(self.pr_conv(landing_checks=['gate']))
+        self.assertEqual(results, {'fix/B-0001': 'held'}, lines)
+        self.assertIn('held fix/B-0001: PR #41 checks red: gate — back to its session (round 1)',
+                      lines)
+        self.assertEqual(self.merges(calls), [])
+        self.assertEqual(self.record('fix/B-0001')['correction']['kind'], 'gate')
+
+    def test_a_pending_check_that_is_not_required_does_not_hold_the_pr(self):
+        calls = self.fake_gh([{'name': 'gate', 'bucket': 'pass'},
+                              {'name': 'gate-tests', 'bucket': 'pending'}])
+        self.push_plan()
+        results, lines = self.harvest(self.pr_conv(landing_checks=['gate']))
+        self.assertEqual(results, {'plan/F-0001': 'landed'}, lines)
+        self.assertEqual(len(self.merges(calls)), 1)
+
+    def test_with_no_required_checks_any_red_check_still_sends_the_pr_back(self):
+        """Today's behaviour, kept: no ``landing_checks`` and no branch protection (the 404) —
+        nothing names what matters, so every check judges and any red one sends the PR back."""
+        calls = self.fake_gh([{'name': 'ci', 'bucket': 'pass'}, {'name': 'DCO', 'bucket': 'fail'}])
+        self.push_fix(['approved'])
+        results, lines = self.harvest(self.pr_product())
+        self.assertEqual(results, {'fix/B-0001': 'held'}, lines)
+        self.assertIn('held fix/B-0001: PR #41 checks red: DCO — back to its session (round 1)',
+                      lines)
+        self.assertFalse([l for l in lines if 'informational' in l], lines)
+        self.assertEqual(self.merges(calls), [])
+
+    def test_pr_checks_judges_only_the_required_names(self):
+        out = json.dumps([{'name': 'gate', 'bucket': 'pass'},
+                          {'name': 'gate-tests', 'bucket': 'fail'},
+                          {'name': 'lint', 'bucket': 'pending'}])
+        with mock.patch.object(harvest, '_gh', return_value=(1, out, '')):
+            self.assertEqual(lane.pr_checks('o/p', 1, ('gate',))[:2], ('green', '3 check(s)'))
+            self.assertEqual(lane.pr_checks('o/p', 1, ('lint',))[:2], ('pending', 'lint'))
+            self.assertEqual(lane.pr_checks('o/p', 1, ('gate-tests',))[:2], ('red', 'gate-tests'))
+            self.assertEqual(lane.pr_checks('o/p', 1)[:2], ('red', 'gate-tests'))  # none named
+        checks = json.loads(out)
+        self.assertEqual(lane.not_required_red(checks, ('gate',)), ['gate-tests'])
+        self.assertEqual(lane.not_required_red(checks, ()), [])
+
     def test_missing_policy_reads_one_value_or_a_map(self):
         conv = Conventions.from_mapping
         self.assertEqual(lane.missing_policy(conv({}), 'docs'), 'local-gate')
