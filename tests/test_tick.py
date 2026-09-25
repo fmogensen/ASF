@@ -628,7 +628,7 @@ class DailyCatchUpTests(TickTestCase):
 
             rc, out = self.run_tick(steps='health,wave,prs,harvest,batch')  # the next dispatch tick
             self.assertEqual(rc, 0)
-            self.assertIn('daily: catching up — 00:00 run has not succeeded today', out)
+            self.assertIn('daily: catching up — 00:00 run failed: daily parts failed: rollup', out)
             with open(steps.stamp_path(env.load_product('sample'))) as f:
                 self.assertEqual(f.read().strip(), steps._today())
 

@@ -185,6 +185,32 @@ def daily_due(product, force=False, today=None):
 def write_daily_stamp(product, today=None):
     with open(stamp_path(product), 'w', encoding='utf-8') as f:
         f.write((today or _today()) + '\n')
+    clear_daily_failure(product)
+
+
+def failure_path(product):
+    return os.path.join(env.state_dir(product), 'daily.failure')
+
+
+def write_daily_failure(product, reason):
+    """Record why today's ``daily`` failed, for a later tick's catch-up message to name."""
+    with open(failure_path(product), 'w', encoding='utf-8') as f:
+        f.write((reason or '').strip() + '\n')
+
+
+def read_daily_failure(product):
+    try:
+        with open(failure_path(product), encoding='utf-8') as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
+def clear_daily_failure(product):
+    try:
+        os.remove(failure_path(product))
+    except OSError:
+        pass
 
 
 # ---- catching up a missed daily (B-0123) ---------------------------------------
@@ -225,4 +251,7 @@ def daily_catch_up_due(product, now=None):
 
 def daily_catch_up_message(product):
     hour, minute = _daily_clock_time(product)
+    reason = read_daily_failure(product)
+    if reason:
+        return f"daily: catching up — {hour:02d}:{minute:02d} run failed: {reason}"
     return f"daily: catching up — {hour:02d}:{minute:02d} run has not succeeded today"
