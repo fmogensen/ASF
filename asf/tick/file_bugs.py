@@ -193,8 +193,10 @@ RECORD_ERROR_SIG = 'record error: {klass}'
 RECORD_ERROR_PLACES = 10
 #: What makes two errors the same class: the message with its specifics — quoted text and item
 #: ids — taken out. The placeholder is never itself a bare `D<n>`, or the Bug's own title would
-#: be an instance of the error it reports.
-_QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+#: be an instance of the error it reports. An opening `'` may not follow a word character: a
+#: possessive (`T-0001's`) would otherwise pair with the *next* specific's opening quote and
+#: leave that specific in the class, splitting one defect into one class per specific (B-0132).
+_QUOTED_RE = re.compile(r"(?<![A-Za-z0-9])'[^']*'|\"[^\"]*\"")
 _ITEM_ID_RE = re.compile(r'\b[A-Z]-[0-9]{4}\b')
 
 
