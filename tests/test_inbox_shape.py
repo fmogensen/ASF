@@ -409,6 +409,21 @@ class IntakeTest(unittest.TestCase):
         self.assertEqual(c.headers.get('severity'), 'S1')
         self.assertEqual(c.description, 'Customers cannot pay.')
 
+    def test_b_0111_c1_a_body_line_shaped_like_a_header_right_after_the_header_block_is_kept(self):
+        """B-0111 C1: the same fixture shape as `test_bug_card_is_minted_with_its_signature_and_
+        shape_line` — a body starting right after the last header, no blank line — but with a
+        `word: value`-shaped first body line. It must be kept as body, not eaten as an unknown
+        header: it is never followed by a further header intake reads, so nothing confirms it
+        as one."""
+        from asf.groom import inbox
+        text = ("# Checkout is broken\nparent: E-0001\nsignature: test_pay\nseverity: S2\n"
+                "Note: this is body text right after headers, no blank line.\nMore body.\n")
+        c = inbox.parse_inbox_file(text)
+        self.assertEqual(c.headers.get('signature'), 'test_pay')
+        self.assertEqual(
+            c.description,
+            'Note: this is body text right after headers, no blank line.\nMore body.')
+
     def test_story_card_keeps_its_acceptance_list(self):
         with open(os.path.join(self.root, 'inbox', 'thing.md'), 'w', encoding='utf-8') as f:
             f.write("# Add plan tiers\nparent: F-0001\n\n## Acceptance\n- [ ] python3 -m unittest tests.x\n"

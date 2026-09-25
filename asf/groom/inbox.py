@@ -64,6 +64,11 @@ def parse_inbox_file(text):
     title = re.sub(r'^#+\s*', '', lines[idx].strip()) if idx < len(lines) else ''
     rest = lines[idx + 1:] if idx < len(lines) else []
 
+    # An unknown-header-shaped line (`after:`, say) is only ever a header if a later line
+    # in the same run turns out to be one intake does read — that is the only way to tell
+    # it apart from a body's first line that merely happens to look like `word: value`
+    # (B-0111 C1). `body_start` only ever advances on a confirmed (`INBOX_KV_RE`) match;
+    # unknown-shaped lines are skipped over provisionally, without moving it themselves.
     headers = {}
     body_start = 0
     for i, l in enumerate(rest):
@@ -76,12 +81,8 @@ def parse_inbox_file(text):
             body_start = i + 1
             continue
         if _UNKNOWN_HEADER_RE.match(s):
-            body_start = i + 1
             continue
-        body_start = i
         break
-    else:
-        body_start = len(rest)
 
     body_lines = rest[body_start:]
     features, body_lines = _lift_section(body_lines, 'Features')
