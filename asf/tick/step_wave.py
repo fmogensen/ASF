@@ -8,7 +8,10 @@
 1. the index from the record clone (the tick's own, made once per tick — :class:`Context`);
 2. the lane pass (:func:`asf.harvest.lane.lane_pass`, R2): every lane branch moved as far as its
    facts carry it — a finished branch's PR opened or adopted, its review asked for, a merge seen
-   — before the feeder reads the lane; then ``inflight`` (the sessions in
+   — before the feeder reads the lane. Its ref pushes (a landed branch's delete, a superseded
+   one's archive) run the product's pre-push hook, so they wait until after step 5's launches
+   (:func:`push_deferred`), each logged ``lane: push <branch> <s>s (<kind>)``; an archive's branch keeps its
+   state until its push, as a refused push leaves it; then ``inflight`` (the sessions in
    ``~/.ASF/state/<product>/sessions.jsonl`` with no ``ended``) and the one occupancy answer
    (:func:`asf.workers.lifecycle.occupancy`): what a live run holds, what waits to land, the
    lane's states and the pending corrections;
@@ -81,10 +84,11 @@ def corrections(product):
     return lifecycle.corrections(pool_mod.sessions_path(product))
 
 
-def lane_pass(ctx, out=print):
+def lane_pass(ctx, out=print, defer_pushes=False):
     """R2: the lane's feeder-visible transitions, in-process, before the wave reads the lane —
     once per tick (the ``prs`` step skips it when the wave ran it). A failure is one line: the
-    wave still plans off the lane as it stood."""
+    wave still plans off the lane as it stood. ``defer_pushes`` (the wave's own call): the pass's
+    ref pushes wait on ``ctx.lane`` for :func:`push_deferred`, after the launches."""
     from asf.harvest import harvest, lane
     from asf.tick import land_spec
     from asf.views import index_reader
@@ -96,8 +100,9 @@ def lane_pass(ctx, out=print):
         root = ctx.record_root()
         if os.path.isfile(os.path.join(root, 'index.json')):  # an approved spec off the trunk
             land_spec.adopt(product, index_reader.load(root)[0], out=out)
-        results, _found = lane.lane_pass(product, items=harvest.record_items(root), out=out,
-                                          root=root)
+        ctx.lane = lane.Lane(product, None, out, False, harvest.record_items(root), root)
+        results, _found = lane.lane_pass(product, out=out, lane=ctx.lane,
+                                          defer_pushes=defer_pushes)
         return results
     except Exception as e:  # noqa: BLE001 — the wave must still run
         out(f'lane: pass failed — {(str(e) or type(e).__name__).splitlines()[0]}')
@@ -370,12 +375,33 @@ def host_hold(planned):
     return host_mod.pressure(env.load_config())
 
 
+def push_deferred(ctx, out=print):
+    """The lane pass's ref pushes (branch deletes, archives), after the wave's launches: each
+    push runs the product's pre-push hook, and no launch waits on one. A failure is one line."""
+    from asf.harvest import lane
+    ln = getattr(ctx, 'lane', None)
+    if ln is None or not ln.deferred:
+        return
+    try:
+        lane.push_deferred(ln)
+    except Exception as e:  # noqa: BLE001 — the step's own outcome stands
+        out(f'lane: deferred pushes failed — {(str(e) or type(e).__name__).splitlines()[0]}')
+
+
 def run(ctx, out=print):
+    """The wave: plan and launch (:func:`launch`), then the lane pass's deferred pushes."""
+    try:
+        return launch(ctx, out)
+    finally:
+        push_deferred(ctx, out)
+
+
+def launch(ctx, out=print):
     from asf.feeder import rows as feeder_rows
     from asf.views import index_reader
     product = ctx.product
     held = approvals.raise_holds(ctx, out)
-    lane_pass(ctx, out)
+    lane_pass(ctx, out, defer_pushes=True)
     items, _generated = index_reader.load(ctx.record_root())
     if product.repo_dir:  # defence in depth: a Task whose card lacks `after:` waits on its plan's order
         items = plan_order.overlay(items, plan_order.trunk_reader(product))

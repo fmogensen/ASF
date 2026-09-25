@@ -713,6 +713,63 @@ class RefPushes(LaneFixture):
         self.assertTrue(self.rows(ln.product)[0])
 
 
+    def run_deferring(self):
+        lines = []
+        ln = lane.Lane(self.product(), self.state_dir, out=lines.append, items=self.items)
+        ln.host = FakePRHost(ln.product, ln, self.prs)
+        lane.lane_pass(ln.product, self.state_dir, items=self.items, lane=ln, defer_pushes=True)
+        return ln, lines
+
+    def test_a_deferring_pass_pushes_nothing_until_push_deferred_then_the_same(self):
+        # the wave's pass: no ref push (no pre-push hook) before the launches; after them the
+        # same archive, record, PR close and delete a pass that pushes at once makes
+        before = self.lane_of('worker/free-plan-t1')
+        ln, lines = self.run_deferring()
+        self.assertEqual([k for k, _f, _w in ln.deferred], ['archive'])
+        self.assertIn('worker/free-plan-t1', self.heads())
+        self.assertNotIn('archive/worker/free-plan-t1', self.heads())
+        self.assertEqual(ln.host.closed, [])
+        self.assertEqual(self.lane_of('worker/free-plan-t1'), before)
+        self.assertFalse([x for x in lines if x.startswith('lane: push ')], lines)
+        lane.push_deferred(ln)
+        self.assertEqual(ln.deferred, [])
+        self.assertEqual([n for n, _ in ln.host.closed], [70])
+        self.assertNotIn('worker/free-plan-t1', self.heads())
+        self.assertIn('archive/worker/free-plan-t1', self.heads())
+        self.assertEqual(self.lane_of('worker/free-plan-t1')['state'], lane.STALE)
+        timed = [x for x in lines if x.startswith('lane: push worker/free-plan-t1 ')]
+        self.assertEqual(len(timed), 2, lines)   # the archive, then the delete, each timed
+        for x, kind in zip(timed, ('archive', 'delete')):
+            self.assertRegex(x, rf'^lane: push worker/free-plan-t1 \d+\.\ds \({kind}\)$')
+        self.assertEqual(os.listdir(os.path.join(self.state_dir, lane.REF_PUSH_DIR)), [])
+
+    def test_a_deferred_archive_waits_when_a_session_was_launched_on_its_branch(self):
+        ln, lines = self.run_deferring()
+        with open(os.path.join(self.state_dir, 'sessions.jsonl'), 'a', encoding='utf-8') as f:
+            f.write(json.dumps({'job': 'fix-t-0007', 'item': 'T-0007', 'kind': 'coder',
+                                'branch': 'worker/free-plan-t1', 'pid': os.getpid(),
+                                'started': '2026-09-25T00:00:00Z'}) + '\n')
+        lane.push_deferred(ln)
+        self.assertIn('worker/free-plan-t1', self.heads())
+        self.assertNotIn('archive/worker/free-plan-t1', self.heads())
+        self.assertIn('lane: archive of worker/free-plan-t1 waits — a session was launched on '
+                      'it this tick', lines)
+
+    def test_a_deferred_delete_after_its_record_is_owed_when_refused(self):
+        # a delete queued behind its record keeps its semantics: refused → owed, retried
+        open(self.marker, 'w').close()
+        ln, lines = self.run_deferring()
+        lane.push_deferred(ln)
+        rec_ = self.lane_of('worker/free-plan-t1')
+        self.assertEqual((rec_['state'], rec_['delete']), (lane.STALE, lane.DELETE_OWED))
+        os.remove(self.marker)
+        ln, lines = self.run_deferring()
+        self.assertEqual([k for k, _f, _w in ln.deferred], ['delete'])
+        self.assertIn('worker/free-plan-t1', self.heads())
+        lane.push_deferred(ln)
+        self.assertNotIn('worker/free-plan-t1', self.heads())
+        self.assertNotIn('delete', self.lane_of('worker/free-plan-t1'))
+
 class Occupancy(unittest.TestCase):
     """R16: the lane and the feeder are one stream — the feeder reads the lane's states through
     the one occupancy answer, and the rows follow them."""

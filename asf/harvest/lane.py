@@ -539,6 +539,10 @@ class Lane:
         self.ref_wt_error = None
         self.ref_ok = 0
         self.ref_failures = []
+        #: the wave's pass defers its ref pushes (each runs the product's pre-push hook) until
+        #: after its launches: ``(kind, facts, why)`` queued here, run by :func:`push_deferred`
+        self.defer_pushes = False
+        self.deferred = []
 
     # ---- facts --------------------------------------------------------------------------
 
@@ -810,7 +814,10 @@ class Lane:
         wt = self.ref_checkout()
         if wt:
             cmd = ['git', 'push', '-q'] + ([f'--force-with-lease={lease}'] if lease else [])
+            started = time.monotonic()
             r = H.sh(cmd + ['origin', refspec], cwd=wt)
+            kind, _, branch = what.partition(' ')
+            self.out(f'lane: push {branch or kind} {time.monotonic() - started:.1f}s ({kind})')
             ok, why = r.returncode == 0, push_why(r.stderr or r.stdout)
         else:
             ok, why = False, self.ref_wt_error
@@ -840,6 +847,15 @@ class Lane:
         if ok and owed:
             self.out(f'deleted {b} (a delete an earlier pass could not push)')
         return ok
+
+    def push_or_defer(self, kind, f, why=None):
+        """A ref-push transition — ``delete`` (:meth:`delete_branch`, after its record) or
+        ``archive`` (:meth:`archive`, whose push decides the record) — now, or queued for
+        :func:`push_deferred` when this pass defers its pushes. None when queued."""
+        if self.defer_pushes:
+            self.deferred.append((kind, f, why))
+            return None
+        return self.archive(f, why) if kind == 'archive' else self.delete_branch(f)
 
     def finish_ref_pushes(self):
         """Remove the ref-push checkout and keep the pass's failures for the status and doctor
@@ -917,7 +933,7 @@ class Lane:
         prev = f.get('prev') or {}
         if prev.get('delete') == DELETE_OWED and not self.dry_run and self.repo \
                 and f.get('head') and f['head'] == prev.get('head'):
-            self.delete_branch(f)
+            self.push_or_defer('delete', f)
         for _ in range(MAX_STEPS):
             prev = f.get('prev')
             state, reason = next_state(prev, f)
@@ -944,6 +960,10 @@ class Lane:
             closed = f.get('closed')
             why = f.get('orphan') or (f'{item} is {closed} in the record' if closed else None)
             if why and f.get('head') and self.repo:
+                if self.defer_pushes and not self.dry_run:
+                    # the archive push decides the record: the whole transition waits for the
+                    # launches, and the branch keeps its state until then (as a refused push would)
+                    return self.push_or_defer('archive', f, why)
                 return self.archive(f, why)
             self.out(f'stale {b}: {reason}')
             return self.set(f, STALE, reason, result='stale')
@@ -1005,9 +1025,9 @@ class Lane:
         if f.get('head') and method in ('on-trunk', 'ff'):
             self.close_pr(f, f'Closed by the factory lane: its change is already on '
                              f'{self.trunk} at {str(sha)[:7]}.')
-            self.delete_branch(f)
+            self.push_or_defer('delete', f)
         elif f.get('head') and f.get('adopt') and method == 'external':
-            self.delete_branch(f)  # merged, left behind
+            self.push_or_defer('delete', f)  # merged, left behind
         self.out(line)
         self.results[b] = 'landed'
         return rec
@@ -1087,13 +1107,16 @@ class Lane:
 # ---- the passes -------------------------------------------------------------------------------
 
 def lane_pass(product, state_dir=None, items=None, out=print, dry_run=False, root=None,
-              lane=None):
+              lane=None, defer_pushes=False):
     """The in-process pass (R2): fetch, gather the facts once, and advance every lane branch as
     far as its facts carry it — up to GATE. The gate itself is :func:`gate_pass`'s. Returns
-    ``({branch: outcome}, facts)``."""
+    ``({branch: outcome}, facts)``. ``defer_pushes``: every ref push (a branch delete, an
+    archive with the transition it decides) is queued on ``lane`` for :func:`push_deferred`
+    instead — the wave's pass, so no launch waits on a product's pre-push hook."""
     lane = lane or Lane(product, state_dir, out, dry_run, items, root)
     if not lane.repo:
         return {}, {}
+    lane.defer_pushes = defer_pushes
     H.sh(['git', 'fetch', '-q', '--prune', 'origin'], cwd=lane.repo)
     try:
         found = lane.gather(prs=True)
@@ -1102,6 +1125,26 @@ def lane_pass(product, state_dir=None, items=None, out=print, dry_run=False, roo
     finally:
         lane.finish_ref_pushes()
     return lane.results, found
+
+
+def push_deferred(lane):
+    """The ref pushes a deferring :func:`lane_pass` queued, in its order, each as the pass
+    would have done it: an archive (then its record, PR close and delete), a delete after its
+    MERGED record (a failure marks it owed, as ever). An archive whose branch a session was
+    launched on since is left for the next pass, which sees the run. The ref-push checkout is
+    removed and the failures kept for status and doctor (:meth:`Lane.finish_ref_pushes`)."""
+    queued, lane.deferred, lane.defer_pushes = lane.deferred, [], False
+    if not queued:
+        return
+    try:
+        for kind, f, why in queued:
+            b = f['branch']
+            if kind == 'archive' and lifecycle.is_live(lifecycle.by_branch(lane.path).get(b)):
+                lane.out(f'lane: archive of {b} waits — a session was launched on it this tick')
+                continue
+            lane.push_or_defer(kind, f, why)
+    finally:
+        lane.finish_ref_pushes()
 
 
 def gate_pass(product, state_dir=None, items=None, out=print, dry_run=False, lane=None,

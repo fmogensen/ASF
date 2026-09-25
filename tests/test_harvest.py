@@ -885,7 +885,7 @@ class ProductHarvestTests(unittest.TestCase):
         lines = []
         results = harvest.run_product_harvest(self.product(), self.state_dir, out=lines.append, items=items)
         self.assertEqual(results, {'fix/B-0001': 'superseded'})
-        self.assertEqual(lines, ['superseded fix/B-0001: B-0001 is removed in the record — archived as archive/fix/B-0001'])
+        self.assertEqual([l for l in lines if not l.startswith('lane: push ')], ['superseded fix/B-0001: B-0001 is removed in the record — archived as archive/fix/B-0001'])
         self.assertTrue(self.origin_has('archive/fix/B-0001'))
 
     def test_b0067_a_branch_the_registry_knows_is_harvested_whatever_its_prefix(self):
@@ -908,7 +908,7 @@ class ProductHarvestTests(unittest.TestCase):
         lines = []
         results = harvest.run_product_harvest(self.product(), self.state_dir, out=lines.append, items=items)
         self.assertEqual(results, {'fix/B-0001': 'superseded'})
-        self.assertEqual(lines, ['superseded fix/B-0001: B-0001 is Closed in the record — archived as archive/fix/B-0001'])
+        self.assertEqual([l for l in lines if not l.startswith('lane: push ')], ['superseded fix/B-0001: B-0001 is Closed in the record — archived as archive/fix/B-0001'])
         self.assertEqual(self.origin_main(), before)
         self.assertFalse(self.origin_has('fix/B-0001'))
         self.assertTrue(self.origin_has('archive/fix/B-0001'))

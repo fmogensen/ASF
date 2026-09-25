@@ -326,7 +326,7 @@ class WaveStepTests(StepsTestCase):
             out(f'launched {rows[0].job:<24} {rows[0].item:<10} → acct-a (opus) pid 1')
             return [(rows[0], {'account': 'acct-a', 'model': 'opus', 'pid': 1})], []
         # the lane pass has tests of its own (below, and tests/test_lane.py): not these rows'
-        for name, fn in (('_build', build), ('_wave', wave), ('lane_pass', lambda ctx, out: {})):
+        for name, fn in (('_build', build), ('_wave', wave), ('lane_pass', lambda ctx, out, **_kw: {})):
             p = mock.patch.object(step_wave, name, fn)
             p.start()
             self.addCleanup(p.stop)
@@ -363,6 +363,53 @@ class WaveStepTests(StepsTestCase):
         # the record is public: an event never carries an account name (B-0023)
         self.assertNotIn('account', launch_ev)
         self.assertEqual(ctx.counts['launches'], 1)
+
+    def test_the_lane_pass_pushes_after_the_launches(self):
+        # a product's [step:wave] spent 786 s pushing lane refs (each through the product's pre-push
+        # hook) before any launch — the pass defers its pushes, and they go after the wave
+        order, deferred = [], []
+        ctx = self.ctx()
+
+        def lane_pass(ctx_, out, defer_pushes=False):
+            order.append(('lane', defer_pushes))
+            ctx_.lane = types.SimpleNamespace(deferred=['delete worker/x'])
+            return {}
+
+        def push_deferred(ln):
+            order.append('push')
+            deferred.extend(ln.deferred)
+        real_wave = step_wave._wave
+
+        def wave(*a, **kw):
+            order.append('launch')
+            return real_wave(*a, **kw)
+        from asf.harvest import lane
+        with mock.patch.object(step_wave, 'lane_pass', lane_pass), \
+                mock.patch.object(step_wave, '_wave', wave), \
+                mock.patch.object(lane, 'push_deferred', push_deferred), \
+                mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **k: self.rows):
+            step_wave.run(ctx, out=self.lines.append)
+        self.assertEqual(order, [('lane', True), 'launch', 'push'])
+        self.assertEqual(deferred, ['delete worker/x'])
+
+    def test_the_deferred_pushes_run_when_nothing_launches_and_when_the_plan_fails(self):
+        pushed = []
+        from asf.harvest import lane
+
+        def lane_pass(ctx_, out, defer_pushes=False):
+            ctx_.lane = types.SimpleNamespace(deferred=['delete worker/x'])
+            return {}
+
+        def boom(*a, **k):
+            raise RuntimeError('plan failed')
+        with mock.patch.object(step_wave, 'lane_pass', lane_pass), \
+                mock.patch.object(lane, 'push_deferred', lambda ln: pushed.append(ln.deferred)):
+            with mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **k: []):
+                step_wave.run(self.ctx(), out=self.lines.append)
+            with mock.patch.object(feeder_rows, 'plan_rows', boom), \
+                    self.assertRaises(RuntimeError):
+                step_wave.run(self.ctx(), out=self.lines.append)
+        self.assertEqual(pushed, [['delete worker/x'], ['delete worker/x']])
 
     def test_r9_the_feeder_check_point_drops_a_violating_row_before_the_wave(self):
         from asf import invariants
@@ -565,7 +612,7 @@ class AGatedRowGivesItsSlotBack(StepsTestCase):
         def wave(product, rows, n, brief_fn=None, out=print):
             self.launched += [r.job for r in rows]
             return [(r, {'model': 'opus'}) for r in rows], []
-        for name, fn in (('_build', build), ('_wave', wave), ('lane_pass', lambda ctx, out: {})):
+        for name, fn in (('_build', build), ('_wave', wave), ('lane_pass', lambda ctx, out, **_kw: {})):
             p = mock.patch.object(step_wave, name, fn)
             p.start()
             self.addCleanup(p.stop)
