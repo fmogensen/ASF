@@ -24,6 +24,7 @@ import json
 import os
 
 from asf import env
+from asf.workers import cloud as cloud_mod
 from asf.workers import headroom as headroom_mod
 from asf.workers import pool as pool_mod
 from asf.workers import spawn as spawn_mod
@@ -87,9 +88,15 @@ def order(rows):
 
 
 def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_brief, out=print,
-         spawn_fn=None):
-    """Returns ``(launched, waits)``: lists of ``(row, record)`` and ``(row, reason)``."""
+         spawn_fn=None, local_hold='', cloud_runtime=None):
+    """Returns ``(launched, waits)``: lists of ``(row, record)`` and ``(row, reason)``.
+
+    ``local_hold`` (host pressure's reason) keeps every row off the local lane. A row the local
+    lane cannot take goes to the cloud lane when it is on and the row is eligible
+    (:mod:`asf.workers.cloud`), launched by ``cloud_runtime`` (default: the configured one);
+    its line reads ``launched … → <acct> (<model>) cloud <session url>``."""
     cfg = spawn_mod.load_cfg() if cfg is None else cfg
+    cloud = cloud_mod.settings(cfg, product)
     sample = pool is None  # a tick's own pool: its readings are history (asf.workers.headroom)
     pool = pool or pool_mod.Pool.from_config(cfg, product)
     spawn_fn = spawn_fn or spawn_mod.spawn
@@ -105,11 +112,25 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
         elif (product.name, row.job) in running:
             reason = 'already running'
         else:
-            acct, reason = pool.pick_account(row.kind, row.model, is_fix=row.is_fix,
-                                              s1_is_open=s1, lane=row.lane)
+            lane = 'local'
+            if local_hold:
+                acct, reason = None, f'held: {local_hold}'
+            else:
+                acct, reason = pool.pick_account(
+                    row.kind, row.model, is_fix=row.is_fix, s1_is_open=s1,
+                    lane=row.lane or ('local' if cloud.on else None))
+            if acct is None and cloud.on and cloud_mod.eligible(row, cloud):
+                cacct, creason = pool.pick_cloud(row.kind, row.model, cloud)
+                if cacct is not None:
+                    acct, lane = cacct, 'cloud'
+                else:
+                    reason = f'{reason}; {creason}'
             if acct is not None:
+                rt = runtime
+                if lane == 'cloud':
+                    rt = cloud_runtime or cloud_mod.CloudRuntime(cloud)
                 try:
-                    rec = spawn_fn(product, row, acct, brief_fn(row), runtime=runtime, cfg=cfg)
+                    rec = spawn_fn(product, row, acct, brief_fn(row), runtime=rt, cfg=cfg)
                 except spawn_mod.WorktreeBusy as e:
                     reason = f'already running: {e}'  # a live run holds the item: a wait
                 except spawn_mod.SpawnError as e:
@@ -121,11 +142,13 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
                 else:
                     failures.clear(row.job)
                     pool.take(acct, rec.get('model'), row.job, product=product.name,
-                              kind=row.kind)
+                              kind=row.kind, lane=lane if lane == 'cloud' else None)
                     running.add((product.name, row.job))
                     launched.append((row, rec))
+                    where = (f"cloud {rec.get('cloud_url') or rec.get('cloud_session') or 'launching'}"
+                             if lane == 'cloud' else f"pid {rec.get('pid')}")
                     out(f"launched {row.job:<24} {row.item:<10} → {acct.name} "
-                        f"({rec.get('model')}) pid {rec.get('pid')}")
+                        f"({rec.get('model')}) {where}")
                     continue
         waits.append((row, reason))
         out(f"waits    {row.job:<24} {row.item:<10} — {reason}")

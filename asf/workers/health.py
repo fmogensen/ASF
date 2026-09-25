@@ -49,6 +49,7 @@ import os
 import re
 import subprocess
 
+from asf.workers import cloud
 from asf.workers import headroom
 from asf.workers import observe
 from asf.workers import pool as pool_mod
@@ -306,6 +307,12 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
     sent back to a card nobody wants work on has nothing to do, and its row only waits."""
     found = []
     registry = pool_mod.sessions_path(product)
+    if any(cloud.is_cloud(s) and not s.get('ended')
+           for s in pool_mod.load_sessions(product).values()):
+        try:  # the cloud lane's runs first: their state is what every check below reads
+            cloud.sync(product, out=out)
+        except Exception as e:  # noqa: BLE001 — a failed sync leaves the runs working
+            out(f'cloud: sync failed — {(str(e) or type(e).__name__).splitlines()[0]}')
     sessions = pool_mod.load_sessions(product)
     if items is None:
         items = record_items(product)

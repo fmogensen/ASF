@@ -25,6 +25,7 @@ import shlex
 import subprocess
 from collections import namedtuple
 
+from asf.workers import cloudpid
 from asf.workers import lifecycle
 from asf.workers import runtime as runtime_mod
 
@@ -228,6 +229,8 @@ def identity_alive(observed, runs):
             run_by_pid[pid] = run
 
     def alive(pid):
+        if cloudpid.is_token(pid):  # a cloud run is no process here: its status file answers
+            return cloudpid.alive(pid)
         run = run_by_pid.get(pid)
         o = by_pid.get(pid)
         if run is not None:

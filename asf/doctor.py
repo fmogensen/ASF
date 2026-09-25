@@ -745,6 +745,8 @@ def run(product_name):
         rows.append(('token-caps', False, ok, detail))
     for required, ok, detail in check_ci_pool(product):
         rows.append(('ci pool', required, ok, detail))
+    for required, ok, detail in check_cloud(cfg, product):
+        rows.append(('cloud lane', required, ok, detail))
     slow = check_gate_speed(product)
     if slow:
         rows.append(('gate', False, False, slow))
@@ -774,6 +776,14 @@ def check_ci_pool(product):
     provider-like labels in ``runs-on``, missing or offline runners. No rows without a pool."""
     from asf import ci_pool
     return ci_pool.doctor_rows(product)
+
+
+def check_cloud(cfg, product):
+    """[(required, ok, detail)] — the cloud lane (:func:`asf.workers.cloud.doctor_rows`): its
+    runtime, seats, environment id, accounts, the runtime CLI's cloud flags and the product's
+    GitHub origin. No rows while ``cloud.enabled`` is not set."""
+    from asf.workers import cloud
+    return cloud.doctor_rows(cfg, product)
 
 
 def check_gate_speed(product):

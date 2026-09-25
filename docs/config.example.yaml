@@ -83,6 +83,20 @@ host_guards:
   load_per_core: 2.0
   swap_pct: 85
 
+# cloud: the cloud lane (asf.workers.cloud). A row the local lane cannot take — no local seat, or
+# host pressure — runs as a Claude Code cloud session instead: it checks the branch out, builds,
+# tests, commits and pushes in the cloud, and harvest lands it as any branch. The session runs
+# under a cloud-lane account's login and spends that account's quota. A product file's own
+# `cloud:` overrides these keys one by one. `asf doctor` shows a `cloud lane` row set.
+cloud:
+  enabled: false
+  runtime: claude-cloud
+  # environment: ccpool_…     # a self-hosted environment; unset = the default cloud environment
+  max_inflight: 4              # cloud sessions at once (else worker_pool.caps.cloud_max_inflight)
+  rows: cloud-ok               # or `any`: which rows may go to the lane
+  # accounts: [acct-a]         # whose login launches them; unset = the role: cloud accounts
+  timeout_min: 240             # a session still working after this is told to stop, and ends dead
+
 # capacity: the ceilings the factory runs under. Every number is "at most this many at once".
 # A key left out means "no opinion" — the next fallback applies (see docs/guide/product-config.md).
 # feeder.capacity and worker_pool.reserve_for_s1 are still read, but this block is their new home.
