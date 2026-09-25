@@ -2429,12 +2429,14 @@ class GitHubHost(Host):
 
 
     def trunk_red(self, names):
-        """``{name: sha}`` — each of ``names`` whose latest *completed* run on the trunk failed,
-        was cancelled or timed out, with the commit that run judged. The trunk's first-parent
-        history is walked newest first (at most :data:`TRUNK_RED_DEPTH` commits) until every
-        name has a completed run; a check still running on the newest commit is judged by the
-        one before. Unreadable (no ``gh``, no access) reads as not red — the PR's own checks and
-        the gate still judge it, as before."""
+        """``{name: sha}`` — each of ``names`` with a completed run on the trunk that failed, was
+        cancelled or timed out, with the commit that run judged. The trunk's first-parent history
+        is walked newest first (at most :data:`TRUNK_RED_DEPTH` commits) until every name has a
+        completed run; a check still running on the newest commit is judged by the one before. A
+        sha with more than one completed run for a name (a rerun) is red if any of them is —
+        a retry that flipped a failure to green is flaky, not clean (B-0129), and the flip does
+        not erase the failure it needed to overturn. Unreadable (no ``gh``, no access) reads as
+        not red — the PR's own checks and the gate still judge it, as before."""
         want = [n for n in dict.fromkeys(names or ()) if n]
         repo = getattr(self.lane, 'repo', None)
         if not want or not repo:
@@ -2458,8 +2460,7 @@ class GitHubHost(Host):
                 if not done:
                     continue
                 left.discard(name)
-                last = max(done, key=lambda r: str(r.get('completed_at') or ''))
-                if last.get('conclusion') in TRUNK_RED_CONCLUSIONS:
+                if any(r.get('conclusion') in TRUNK_RED_CONCLUSIONS for r in done):
                     red[name] = sha
             if not left:
                 break
