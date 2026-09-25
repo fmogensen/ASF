@@ -922,6 +922,15 @@ class FinishBeforeYouStart(unittest.TestCase):
         self.assertTrue(by['F-0004'].launches)
         self.assertEqual(by['F-0003'].waits_on, 'finish')
 
+    def test_a_feature_in_a_lane_experiment_is_not_starved_by_the_cut(self):
+        # both arms of a pair sat behind every Task row and the capacity cut never reached
+        # them — exempt from the cap, yet never started
+        idx = finish_index(cards=4)
+        idx['items']['F-0004']['ab_pair'] = 'p1'
+        out = rows.plan_rows(idx, product(), [], 2)
+        self.assertIn('F-0004', [r.item_id for r in out if r.launches], kinds(out))
+        self.assertNotIn('F-0003', [r.item_id for r in out])
+
     def test_running_spec_and_plan_sessions_count_against_the_cap(self):
         running = [{'item': 'F-0050', 'kind': 'spec'}, {'item': 'T-0050', 'kind': 'coder'}]
         out = rows.plan_rows(finish_index(cards=3), product(), running, 10)

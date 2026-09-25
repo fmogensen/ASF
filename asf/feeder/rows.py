@@ -933,8 +933,15 @@ def finish_phase(items, row):
     (its spec, plan, adjudicate, landing, decision), which is 1. A product, 2026-09-25, over 7
     days: 36 Features plan-approved and idle, 13 in plan-draft, 3 building, 2 landed — the
     Feature order interleaved new documents with the Tasks of Features already planned, and
-    the cut spent the slots on the documents."""
-    return 1 if (items.get(row.item_id) or {}).get('type') == 'feature' else 0
+    the cut spent the slots on the documents.
+
+    A Feature in a lane experiment (``ab_pair``) is 0 too: both arms of a pair must start in
+    the same window, and behind every Task row the capacity cut never reached them — exempt
+    from the cap (:func:`finish_first`) yet still starved, the pair never started at all."""
+    item = items.get(row.item_id) or {}
+    if item.get('type') != 'feature':
+        return 0
+    return 0 if item.get('ab_pair') else 1
 
 
 def buildable_features(items, rows, held=()):
