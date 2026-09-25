@@ -2,6 +2,34 @@
 
 One entry per released version, newest first.
 
+## v0.1.10 — 2026-09-25
+
+### In progress
+
+- B-0104 briefs: spec/plan templates don't state the commit-subject rule harvest enforces
+- F-0023 The grill: a request is interrogated before it is spent on
+- F-0029 Roles: one file per role, five sections, model and access from config
+- F-0035 Thin controller: every read loop moves to the tick, and a rule flags scriptable chores
+- F-0099 Groom every tick: intake, policy pass and questions run on each tick, not once a day
+- F-0100 The savings pass: the tick proposes the next cheapest win from its own numbers
+
+### Improvements and hotfixes
+
+- fix(harvest): a merged PR cancels its CI runs still going; a pending remote run shows its age
+- fix(lane): an orphan lane branch is closed or picked back up, never left open
+- fix(lane): ref-only pushes leave from a clean trunk checkout; a refused one is loud and retried
+- fix(upgrade): reinstall the pin at the trunk head, so auto-upgrade actually upgrades
+- fix(deploy): the tick dispatches a green trunk to prod when deploy_sha.auto is on; otherwise prod says what it waits on
+- fix(version): a git install of a sha names its release from the describe its build stamped
+- fix(upgrade): the defer rule matches tick processes, not shells that mention a tick
+- fix(pool): a row waiting on seats at cap says so, never NEEDS OPERATOR
+- fix(upgrade): name the install script without its path, so check_conventions passes
+- fix(hooks): the pre-commit no longer runs the full suite on every worker commit
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.10"`
+
 ## v0.1.9 — 2026-09-25
 
 ### Features landed
