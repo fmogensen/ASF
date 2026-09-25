@@ -225,8 +225,8 @@ _VAR_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 def validate_mapping(data):
     """The shaped keys of a ``conventions:`` mapping checked: ``[(dotted key, problem)]``, empty
     when they are well-formed. Only ``doc_paths``, ``shared_paths``, ``lane``, ``worktree_setup``,
-    ``auth_env`` and ``full_suite_commands`` are checked — every other key is kept verbatim (see
-    the module doc), so a product file written for a newer ``asf`` still loads."""
+    ``auth_env``, ``full_suite_commands`` and ``feeder`` are checked — every other key is kept
+    verbatim (see the module doc), so a product file written for a newer ``asf`` still loads."""
     problems = []
     if not isinstance(data, dict):
         return problems
@@ -263,6 +263,14 @@ def validate_mapping(data):
                                      f'must map variable names to files, and {name!r} is not one'))
                 elif not isinstance(path, str) or not path.strip():
                     problems.append(('auth_env', f'{name} must name a file, not {path!r}'))
+    feeder = data.get('feeder')
+    if feeder is not None:
+        cap = feeder.get('max_specs_in_flight') if isinstance(feeder, dict) else None
+        if not isinstance(feeder, dict):
+            problems.append(('feeder', f'must be a map (max_specs_in_flight), not {feeder!r}'))
+        elif cap is not None and (isinstance(cap, bool) or not isinstance(cap, int) or cap < 0):
+            problems.append(('feeder.max_specs_in_flight',
+                             f'must be a whole number >= 0, not {cap!r}'))
     lane = data.get('lane')
     if lane is None:
         return problems

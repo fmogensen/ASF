@@ -840,9 +840,140 @@ class TiersTest(unittest.TestCase):
         # B-0067: a coder's branch is the code lane's prefix, the one harvest scans for code
         self.assertTrue(all(r.branch.startswith('worker/') for r in out if r.kind == 'PLAN → CODE'),
                         [r.branch for r in out])
-        self.assertEqual(kinds(out)[-3:], [('PLAN → CODE', 'T-0001'), ('PLAN → CODE', 'T-0002'),
-                                           ('PLAN → CODE', 'T-0003')])
+        # finish before you start: the planned Features' Task rows take the slots before any
+        # Feature's spec or plan does
+        self.assertEqual(kinds(out)[2:], [('CONFLICT → REBASE', 'T-0007'),
+                                          ('PLAN → CODE', 'T-0001'), ('PLAN → CODE', 'T-0002'),
+                                          ('PLAN → CODE', 'T-0003'), ('STALE → CLOSE', 'T-0006')])
         self.assertEqual([r.action for r in out if r.item_id == 'T-0002'], ['WAITS ON T-0001'])
+
+
+def finish_index(cards=4, build_stage='plan-approved', task_state='New'):
+    """A ranked Epic of ``cards`` decided Feature cards (F-0001 first) and, ranked last, F-0099:
+    planned, one Task (T-0099) ready to build — and an open S2 Bug."""
+    items = {'E-0001': {'id': 'E-0001', 'type': 'epic', 'rank': 1, 'state': 'New'}}
+    for n in range(1, cards + 1):
+        items[f'F-{n:04d}'] = {'id': f'F-{n:04d}', 'type': 'feature', 'parent': 'E-0001',
+                               'rank': n, 'stage': 'card', 'state': 'New', 'decided': True}
+    items['F-0099'] = {'id': 'F-0099', 'type': 'feature', 'parent': 'E-0001', 'rank': 99,
+                       'stage': build_stage, 'state': 'Active', 'decided': True,
+                       'children': ['T-0099']}
+    items['T-0099'] = {'id': 'T-0099', 'type': 'task', 'parent': 'F-0099', 'rank': 1,
+                       'state': task_state, 'writes': ['a.py']}
+    items['B-0001'] = {'id': 'B-0001', 'type': 'bug', 'parent': 'F-0001', 'severity': 'S2',
+                       'state': 'New', 'decided': True}
+    return {'items': items}
+
+
+class FinishBeforeYouStart(unittest.TestCase):
+    """asf-36, a product over 7 days: 36 Features plan-approved and idle, 13 plan-draft, 3
+    building, 2 landed. A planned Feature's Task rows go before any unbuilt Feature's spec or
+    plan, and new spec/plan sessions are capped while Tasks are ready to build."""
+
+    def test_a_planned_features_task_ranks_above_a_higher_ranked_cards_spec(self):
+        out = rows.candidates(finish_index(cards=1), product(), [])
+        self.assertEqual(kinds(out), [('BUG → FIX', 'B-0001'), ('PLAN → CODE', 'T-0099'),
+                                      ('CARD → SPEC', 'F-0001')])
+
+    def test_the_task_takes_the_slot_the_spec_had(self):
+        out = rows.plan_rows(finish_index(cards=1), product(), [], 2)
+        self.assertEqual([k for k in kinds(out)], [('BUG → FIX', 'B-0001'),
+                                                   ('PLAN → CODE', 'T-0099')])
+
+    def test_a_building_features_correction_and_review_rank_above_a_plan(self):
+        idx = finish_index(cards=1, build_stage='building 0/1', task_state='Active')
+        idx['items']['F-0001']['stage'] = 'plan-draft'
+        occupancy = {'corrections': {'T-0099': {'kind': 'gate', 'text': 'red', 'rounds': 1}}}
+        out = rows.candidates(idx, product(), [], occupancy=occupancy)
+        self.assertEqual(kinds(out)[1:], [('FIX → CORRECT', 'T-0099'),
+                                          ('STARVED → PLAN', 'F-0001')])
+        occupancy = {'review': {'T-0099': {'branch': 'worker/T-0099', 'round': 1}}}
+        out = rows.candidates(idx, product(), [], occupancy=occupancy)
+        self.assertEqual(kinds(out)[1:], [('PUSHED → REVIEW', 'T-0099'),
+                                          ('STARVED → PLAN', 'F-0001')])
+
+    def test_bug_fixes_keep_their_precedence(self):
+        idx = finish_index(cards=2)
+        idx['items']['B-0001']['severity'] = 'S1'
+        out = rows.plan_rows(idx, product(), [], 10)
+        self.assertEqual(kinds(out), [('BUG → FIX', 'B-0001')])  # S1 still holds tier 2 back
+        idx['items']['B-0001']['severity'] = 'S2'
+        out = rows.plan_rows(idx, product(), [], 10)
+        self.assertEqual(kinds(out)[0], ('BUG → FIX', 'B-0001'))
+
+    def test_new_specs_are_capped_while_tasks_wait_to_build(self):
+        out = rows.plan_rows(finish_index(cards=4), product(), [], 10)
+        by = {r.item_id: r for r in out}
+        self.assertEqual([r.item_id for r in out if r.launches],
+                         ['B-0001', 'T-0099', 'F-0001', 'F-0002'])
+        for fid in ('F-0003', 'F-0004'):
+            self.assertFalse(by[fid].launches)
+            self.assertEqual(by[fid].waits_on, 'finish')
+            self.assertEqual(by[fid].action,
+                             'WAITS ON finish: 0 spec/plan in flight + 2 this wave, cap 2 '
+                             '(feeder.max_specs_in_flight) while 1 planned Feature has Tasks '
+                             'to build: F-0099')
+
+    def test_running_spec_and_plan_sessions_count_against_the_cap(self):
+        running = [{'item': 'F-0050', 'kind': 'spec'}, {'item': 'T-0050', 'kind': 'coder'}]
+        out = rows.plan_rows(finish_index(cards=3), product(), running, 10)
+        self.assertEqual([r.item_id for r in out if r.kind == 'CARD → SPEC' and r.launches],
+                         ['F-0001'])
+        waits = [r for r in out if r.waits_on == 'finish']
+        self.assertEqual([r.item_id for r in waits], ['F-0002', 'F-0003'])
+        self.assertIn('1 spec/plan in flight + 1 this wave, cap 2', waits[0].action)
+        running = [{'item': 'F-0050', 'kind': 'spec'}, {'item': 'F-0051', 'kind': 'plan'}]
+        out = rows.plan_rows(finish_index(cards=3), product(), running, 10)
+        self.assertEqual([r.item_id for r in out if r.kind == 'CARD → SPEC' and r.launches], [])
+
+    def test_no_cap_without_a_planned_feature_ready_to_build(self):
+        for idx in (finish_index(cards=4, task_state='Resolved'),
+                    finish_index(cards=4, build_stage='plan-draft')):
+            out = rows.plan_rows(idx, product(), [], 10)
+            self.assertFalse([r for r in out if r.waits_on == 'finish'], kinds(out))
+        # a Task that cannot start (it waits on its predecessor) is not ready to build either
+        idx = finish_index(cards=4)
+        idx['items']['T-0099']['after'] = ['T-0098']
+        idx['items']['T-0098'] = {'id': 'T-0098', 'type': 'task', 'parent': 'F-0099',
+                                  'state': 'Active', 'writes': ['b.py']}
+        out = rows.plan_rows(idx, product(), [], 10)
+        self.assertFalse([r for r in out if r.waits_on == 'finish'], kinds(out))
+
+    def test_a_parked_task_is_not_ready_to_build(self):
+        out = rows.plan_rows(finish_index(cards=4), product(), [], 10, held={'T-0099'})
+        self.assertFalse([r for r in out if r.waits_on == 'finish'])
+
+    def test_the_cap_is_a_convention(self):
+        for cap, launched in ((0, []), (3, ['F-0001', 'F-0002', 'F-0003'])):
+            p = product(conventions={'feeder': {'max_specs_in_flight': cap}})
+            self.assertEqual(rows.max_specs_in_flight(p), cap)
+            out = rows.plan_rows(finish_index(cards=4), p, [], 10)
+            self.assertEqual([r.item_id for r in out if r.kind == 'CARD → SPEC' and r.launches],
+                             launched)
+        for bad in (-1, 'two', True, None):
+            p = product(conventions={'feeder': {'max_specs_in_flight': bad}})
+            self.assertEqual(rows.max_specs_in_flight(p), 2)
+        self.assertEqual(rows.max_specs_in_flight(product()), 2)
+
+    def test_a_refused_documents_correction_is_never_held_but_counts(self):
+        idx = finish_index(cards=3)
+        idx['items']['F-0003']['stage'] = 'spec-draft'
+        occupancy = {'corrections': {'F-0003': {'kind': rows.LANDING_GATE, 'text': 'gate red',
+                                                'rounds': 1, 'branch': 'spec/F-0003'}}}
+        out = rows.plan_rows(idx, product(), [], 10, occupancy=occupancy)
+        by = {r.item_id: r for r in out}
+        self.assertTrue(by['F-0003'].launches)
+        self.assertEqual(by['F-0003'].kind, 'STARVED → SPEC')
+        self.assertTrue(by['F-0001'].launches)
+        self.assertEqual(by['F-0002'].waits_on, 'finish')
+        self.assertIn('0 spec/plan in flight + 2 this wave', by['F-0002'].action)
+
+    def test_the_conventions_check_names_a_bad_cap(self):
+        from asf import conventions
+        self.assertEqual(conventions.validate_mapping({'feeder': {'max_specs_in_flight': 2}}), [])
+        self.assertEqual([k for k, _ in conventions.validate_mapping(
+            {'feeder': {'max_specs_in_flight': -1}})], ['feeder.max_specs_in_flight'])
+        self.assertEqual([k for k, _ in conventions.validate_mapping({'feeder': 3})], ['feeder'])
 
 
 class IncidentsTest(unittest.TestCase):

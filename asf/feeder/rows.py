@@ -40,7 +40,9 @@ The row kinds::
                            ``approvals.groom: auto``, given only when the caller passes a
                            ``groom_state``
 
-``candidates()`` lists every row; ``plan_rows()`` hands them to :mod:`asf.feeder.tiers` to order
+``candidates()`` lists every row — within tier 2, finish before you start: a Task's rows before
+any Feature's own (:func:`finish_phase`); ``plan_rows()`` caps new spec/plan sessions while
+planned Tasks wait (:func:`finish_first`) and hands the rows to :mod:`asf.feeder.tiers` to order
 and cut to capacity.
 """
 import dataclasses
@@ -84,6 +86,12 @@ DONE_STATES = ('Resolved', 'Closed')
 STALEMATE_ROUND = 4
 ATTEMPT_LIMIT = 3
 DECISION_ROWS = 5  #: `conventions.decision_rows` — rows minted, and ids named in the wave's line
+MAX_SPECS_IN_FLIGHT = 2  #: `conventions.feeder.max_specs_in_flight` (:func:`finish_first`)
+#: the stages of a Feature whose plan is approved and whose Tasks are the work
+BUILD_STAGES = ('plan-approved', 'building')
+#: the rows that start a new document: what the finish-first cap counts and holds
+NEW_DOC_KINDS = (CARD_SPEC, STARVED_SPEC, STARVED_PLAN)
+FINISH = 'WAITS ON finish'
 REVIEW_RE = re.compile(r'^(spec|plan)-review r(\d+)')
 CLOSED_PR_RE = re.compile(r'\bPR #\d+ CLOSED\b')
 #: ingest's line for a spec that sits on a branch, not the trunk (``spec on <branch>[ (review …)]``)
@@ -174,6 +182,15 @@ def attempt_limit(product):
     """``conventions.attempt_limit`` (default 3): fix sessions a Bug gets before it is adjudicated."""
     v = _conventions(product).get('attempt_limit')
     return v if isinstance(v, int) and v > 0 else ATTEMPT_LIMIT
+
+
+def max_specs_in_flight(product):
+    """``conventions.feeder.max_specs_in_flight`` (default 2): the most spec/plan sessions a
+    product runs at once while it has planned Features with Tasks ready to build
+    (:func:`finish_first`)."""
+    feeder = _conventions(product).get('feeder')
+    v = feeder.get('max_specs_in_flight') if isinstance(feeder, dict) else None
+    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else MAX_SPECS_IN_FLIGHT
 
 
 def decision_rows(product):
@@ -824,8 +841,65 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
             # unranked inbox card put it behind every launch, and the cut never reached it)
             return (r.tier, -1, -1, '', 0, seq)
         order = feature_order(items, f) if f else (ix.BIG, ix.BIG, r.feature_id or '~')
-        return (r.tier, *order, KIND_ORDER.get(r.kind, 4), seq)
+        return (r.tier, finish_phase(items, r), *order, KIND_ORDER.get(r.kind, 4), seq)
     return [r for _seq, r in sorted(enumerate(rows), key=key)]
+
+
+def finish_phase(items, row):
+    """Finish before you start (tier 2 only; a Bug's tier is its own): a row on a Task — its
+    coder, correction, review, rebase — is 0 and goes before every row on a Feature itself
+    (its spec, plan, adjudicate, landing, decision), which is 1. A product, 2026-09-25, over 7
+    days: 36 Features plan-approved and idle, 13 in plan-draft, 3 building, 2 landed — the
+    Feature order interleaved new documents with the Tasks of Features already planned, and
+    the cut spent the slots on the documents."""
+    return 1 if (items.get(row.item_id) or {}).get('type') == 'feature' else 0
+
+
+def buildable_features(items, rows, held=()):
+    """The Features planned but not built whose Tasks have a launching row — a coder,
+    correction or review a slot would start now (``held``: items an approval parks)."""
+    out = []
+    for r in rows:
+        item = items.get(r.item_id) or {}
+        if not r.launches or r.item_id in held or item.get('type') != 'task':
+            continue
+        f = items.get(r.feature_id) or {}
+        if (f.get('stage') or '').split(' ')[0] in BUILD_STAGES and r.feature_id not in out:
+            out.append(r.feature_id)
+    return out
+
+
+def finish_first(rows, items, product, inflight, held=()):
+    """``feeder.max_specs_in_flight`` (default 2): while a planned Feature has Tasks ready to
+    build (:func:`buildable_features`), new spec and plan sessions (:data:`NEW_DOC_KINDS`) are
+    capped — the ones already running count, and so does a correction of a document the lane
+    refused (never held itself) — and each launching row past the cap becomes ``WAITS ON
+    finish: …`` with the numbers. No buildable Feature: no cap, the documents are the only work
+    there is."""
+    held = set(held or ())
+    ready = buildable_features(items, rows, held)
+    if not ready:
+        return rows
+    cap = max_specs_in_flight(product)
+    running = sum(1 for s in inflight or () if s.get('kind') in ('spec', 'plan'))
+    # a correction of a document the lane refused is never held, but it is a document session
+    # this wave: it counts against the cap before any new one is admitted
+    admitted = sum(1 for r in rows if r.kind in NEW_DOC_KINDS and r.launches and r.correction
+                   and r.item_id not in held)
+    out = []
+    named = ', '.join(ready[:3]) + (f' +{len(ready) - 3}' if len(ready) > 3 else '')
+    for r in rows:
+        if r.kind in NEW_DOC_KINDS and r.launches and not r.correction and r.item_id not in held:
+            if running + admitted < cap:
+                admitted += 1
+            else:
+                why = (f"{running} spec/plan in flight + {admitted} this wave, cap {cap} "
+                       f"(feeder.max_specs_in_flight) while {len(ready)} planned Feature"
+                       f"{' has' if len(ready) == 1 else 's have'} Tasks to build: {named}")
+                r = dataclasses.replace(r, action=f'{FINISH}: {why}', waits_on='finish',
+                                        reason=f'finish before you start — {why}')
+        out.append(r)
+    return out
 
 
 def plan_rows(index, product, inflight, capacity, attempts=None, occupancy=None,
@@ -841,4 +915,5 @@ def plan_rows(index, product, inflight, capacity, attempts=None, occupancy=None,
     if exclude:
         from asf.invariants import row_key
         rows = [r for r in rows if not (r.launches and row_key(r) in exclude)]
+    rows = finish_first(rows, items_of(index), product, inflight, held)
     return tiers.select(rows, inflight, capacity, held=held)
