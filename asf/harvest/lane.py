@@ -926,8 +926,13 @@ class Lane:
         """The origin's ``owner/name`` when it is a hosted repo (:func:`repo_slug`), else None —
         read once a pass. Ref pushes go through its API then (:meth:`ref_push`)."""
         if getattr(self, '_ref_slug', None) is None:
-            self._ref_slug = getattr(self, 'slug', None) or (
-                repo_slug(self.product) if getattr(self, 'repo', None) else None) or ''
+            # only an origin that IS a hosted repo takes the API path: a configured PR slug beside
+            # a local-path origin (a fixture, a mirror) must still move the origin's own refs
+            from asf.init import slug_from_url
+            url = H.sh(['git', 'remote', 'get-url', 'origin'], cwd=self.repo).stdout.strip() \
+                if getattr(self, 'repo', None) else ''
+            hosted = slug_from_url(url)
+            self._ref_slug = (hosted and (getattr(self, 'slug', None) or hosted)) or ''
         return self._ref_slug or None
 
     def ref_gone(self, branch):
