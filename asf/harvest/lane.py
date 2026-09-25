@@ -352,6 +352,58 @@ def archive_commit(repo, branch, message):
     return made.stdout.strip() if made.returncode == 0 else ''
 
 
+def api_ref(slug, refspec, lease=None):
+    """Make one ref-only ``refspec`` on hosted ``slug`` through the host's API; ``(ok, why)``.
+    ``<sha>:refs/heads/<b>`` creates the ref at ``sha`` (one already there at ``sha`` is done);
+    ``:refs/heads/<b>`` deletes it — under ``lease`` (``refs/heads/<b>:<sha>``) only while its
+    tip is still ``sha``, as retention's hosted delete does."""
+    src, _, dst = refspec.partition(':')
+    ref = dst[len('refs/'):] if dst.startswith('refs/') else dst
+    read = ['api', f'repos/{slug}/git/ref/{ref}', '--jq', '.object.sha']
+    if not src:
+        if lease:
+            want = lease.rpartition(':')[2]
+            rc, out, err = H._gh(read)
+            if rc != 0:
+                return False, H.tail(err or out) or 'ref unreadable'
+            if out.strip() != want:
+                return False, f'tip moved ({out.strip()[:9]} is not {want[:9]}) — kept'
+        rc, out, err = H._gh(['api', '-X', 'DELETE', f'repos/{slug}/git/refs/{ref}'])
+        return rc == 0, '' if rc == 0 else (H.tail(err or out) or f'gh exit {rc}')
+    rc, out, err = H._gh(['api', '-X', 'POST', f'repos/{slug}/git/refs',
+                          '-f', f'ref=refs/{ref}', '-f', f'sha={src}'])
+    if rc == 0:
+        return True, ''
+    rc2, cur, _ = H._gh(read)
+    if rc2 == 0 and cur.strip() == src:
+        return True, ''
+    return False, H.tail(err or out) or f'gh exit {rc}'
+
+
+def api_archive_commit(slug, repo, tip, message):
+    """:func:`archive_commit` made on the host — ``tip``'s tree, ``tip`` its one parent — so the
+    archive ref is created there with no push; its sha, or ''."""
+    tree = H.sh(['git', 'rev-parse', f'{tip}^{{tree}}'], cwd=repo).stdout.strip()
+    if not tree:
+        return ''
+    rc, out, _err = H._gh(['api', '-X', 'POST', f'repos/{slug}/git/commits',
+                           '-f', f'message={message}', '-f', f'tree={tree}',
+                           '-f', f'parents[]={tip}', '--jq', '.sha'])
+    return out.strip() if rc == 0 else ''
+
+
+def api_archive_stands(slug, branch, sha, tip):
+    """True when ``archive/<branch>`` already stands on the host at ``sha``, or at an earlier
+    pass's archive commit over ``tip`` — an archive made before counts as made."""
+    rc, cur, _ = H._gh(['api', f'repos/{slug}/git/ref/heads/archive/{branch}',
+                        '--jq', '.object.sha'])
+    cur = cur.strip() if rc == 0 else ''
+    if not cur or cur == sha:
+        return bool(cur)
+    rc, parents, _ = H._gh(['api', f'repos/{slug}/git/commits/{cur}', '--jq', '.parents[].sha'])
+    return rc == 0 and tip in parents.split()
+
+
 def gate_reader(repo, branch):
     def read(path):
         r = H.sh(['git', 'show', f'origin/{branch}:{path}'], cwd=repo)
@@ -581,6 +633,8 @@ class Lane:
         self.deferred = []
         #: the CI start queue (:mod:`asf.ci_queue`) for this pass, read once when first asked
         self.ci_queue = None
+        #: the hosted origin's ``owner/name`` the ref pushes go through (:meth:`ref_host`)
+        self._ref_slug = None
 
     # ---- facts --------------------------------------------------------------------------
 
@@ -868,6 +922,14 @@ class Lane:
             self.ref_wt = path
         return self.ref_wt
 
+    def ref_host(self):
+        """The origin's ``owner/name`` when it is a hosted repo (:func:`repo_slug`), else None —
+        read once a pass. Ref pushes go through its API then (:meth:`ref_push`)."""
+        if getattr(self, '_ref_slug', None) is None:
+            self._ref_slug = getattr(self, 'slug', None) or (
+                repo_slug(self.product) if getattr(self, 'repo', None) else None) or ''
+        return self._ref_slug or None
+
     def ref_gone(self, branch):
         """True when ``origin`` holds no ``branch`` — a delete already done counts as done."""
         r = H.sh(['git', 'ls-remote', '--heads', 'origin', branch], cwd=self.repo)
@@ -878,9 +940,21 @@ class Lane:
         :meth:`ref_checkout`, over ``lease`` (``refs/heads/<b>:<sha>``) when given. A refusal is a
         ``ref push failed`` line in the tick's output and a row in status and doctor
         (:meth:`finish_ref_pushes`), never only a log line — unless ``done()`` says the push
-        was not needed after all (a delete of a branch already gone). True when it went."""
-        wt = self.ref_checkout()
-        if wt:
+        was not needed after all (a delete of a branch already gone). True when it went.
+
+        A hosted origin (:meth:`ref_host`) takes the ref through the host's API instead
+        (:func:`api_ref`): a ref carries no content, and each ``git push`` ran the product's
+        pre-push hook and took 8-11 s an archive, 2-3 s a delete — one wave step spent 277 s of
+        a five-minute tick on them (2026-09-25)."""
+        slug = self.ref_host()
+        wt = None if slug else self.ref_checkout()
+        if slug:
+            started = time.monotonic()
+            ok, why = api_ref(slug, refspec, lease)
+            kind, _, branch = what.partition(' ')
+            self.out(f'lane: push {branch or kind} {time.monotonic() - started:.1f}s '
+                     f'({kind}, api)')
+        elif wt:
             cmd = ['git', 'push', '-q'] + ([f'--force-with-lease={lease}'] if lease else [])
             started = time.monotonic()
             r = H.sh(cmd + ['origin', refspec], cwd=wt)
@@ -1127,10 +1201,20 @@ class Lane:
             self.out(f'DRY: would archive {b} — {why}')
             self.results[b] = 'dry'
             return None
+        legacy = self.unclaimed_legacy(b, item)
+        if legacy:
+            return self.drop_legacy(f, why, legacy)
         label = item or b.rsplit('/', 1)[-1]
-        sha = archive_commit(self.repo, b, f'archive({label}): {b} — {why}; superseded, kept '
-                                           f'for reference [skip ci]')
-        keep = self.ref_push(f'{sha}:refs/heads/archive/{b}', f'archive {b}') if sha else False
+        message = f'archive({label}): {b} — {why}; superseded, kept for reference [skip ci]'
+        slug = self.ref_host()
+        if slug:  # the archive commit is made on the host too: no push at all
+            tip = H.sh(['git', 'rev-parse', f'origin/{b}'], cwd=self.repo).stdout.strip()
+            sha = api_archive_commit(slug, self.repo, tip, message) if tip else ''
+            done = lambda: api_archive_stands(slug, b, sha, tip)  # noqa: E731
+        else:
+            sha, done = archive_commit(self.repo, b, message), None
+        keep = self.ref_push(f'{sha}:refs/heads/archive/{b}', f'archive {b}',
+                             done=done) if sha else False
         if not keep:
             self.out(f'held {b}: archive could not be '
                      f'{"pushed" if sha else "made"}')
@@ -1143,6 +1227,32 @@ class Lane:
                          f'`archive/{b}` ({sha[:7]}).')
         self.delete_branch(f)
         self.out(f'superseded {b}: {why} — archived as archive/{b}')
+        self.results[b] = SUPERSEDED
+        return rec
+
+    def unclaimed_legacy(self, b, item):
+        """The ``branch_retention.legacy_prefixes`` entry ``b`` sits under when no card claims
+        it (no card for its item in the record, or a removed one), else None. Such a branch is
+        not worth an archive: retention deletes archives after some days anyway."""
+        if self.items is None:
+            return None
+        prefix = next((p for p in self.conv.retention('legacy_prefixes') if b.startswith(p)),
+                      None)
+        card = self.items.get(item or '') or {}
+        return prefix if prefix and (not card or card.get('removed')) else None
+
+    def drop_legacy(self, f, why, prefix):
+        """A superseded branch under a legacy prefix no card claims: recorded, its PR closed,
+        and deleted outright — no archive."""
+        b = f['branch']
+        rec = self.record(f, STALE, why)
+        self.write(f, rec, harvested=SUPERSEDED, correction=None)
+        f['prev'] = rec
+        self.close_pr(f, f'Closed by the factory lane: {why}. A legacy branch no card claims — '
+                         f'deleted, not archived.')
+        self.delete_branch(f)
+        self.out(f'superseded {b}: {why} — deleted, not archived (legacy prefix {prefix}, no '
+                 f'card claims it)')
         self.results[b] = SUPERSEDED
         return rec
 
