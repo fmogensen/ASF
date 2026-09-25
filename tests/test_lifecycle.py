@@ -288,10 +288,21 @@ class StateMachineInvariants(unittest.TestCase):
                                               'job': 'correct-b-0001', 'started': 't4'}])
         self.assertEqual(lc.attempts(path), {'B-0001': 2})
 
+    def _ruling_log(self, d, text):
+        """A fake session log whose REPORT's ``ruling:`` field is ``text`` — what
+        ``settled_prs`` reads (:func:`asf.workers.report.ruling`)."""
+        log = os.path.join(d, 'ruling.jsonl')
+        rec = {'type': 'result', 'subtype': 'success', 'is_error': False,
+               'result': f'REPORT\nitem: B-0001\nstatus: done\nruling: {text}\n'}
+        with open(log, 'w') as f:
+            f.write(json.dumps(rec) + '\n')
+        return log
+
     def test_b0128_an_adjudicate_run_does_not_answer_the_correction(self):
         """B-0128: an adjudicate session rules, it does not correct — the branch stays held (not
         bounced BACK → PUSHED, restarting review) and the correction is marked ``settled`` once
-        the ruling is in, so the feeder asks for no second adjudicate session over the same hold."""
+        the ruling is in, so the feeder asks for no second adjudicate session over the same hold.
+        The ruling's PR numbers (``#773``, ``#775``) come back too, for the WAITS ON merge row."""
         lines = [{'job': 'a', 'pid': 1, 'started': 't1', 'item': 'B-0001', 'branch': 'b',
                   'ended': 't2', 'end_reason': 'finished'},
                  {'job': 'a', 'rounds': 3, 'correction': {'kind': 'review', 'text': 'x', 'at': 't3'}}]
@@ -303,14 +314,36 @@ class StateMachineInvariants(unittest.TestCase):
         run = lc.latest(path)['a']
         self.assertEqual(lc.derive(run, lc.Evidence(), path=path).name, lc.ADJUDICATE)
         self.assertFalse(lc.corrections(path)['B-0001']['settled'])
+        log = self._ruling_log(d, 'the work is done — waits on merge of #773, #775')
         with open(path, 'a') as f:
             f.write(json.dumps({'job': 'adjudicate-b-0001', 'item': 'B-0001', 'branch': 'b',
                                 'kind': 'adjudicate', 'pid': os.getpid(), 'started': 't4',
-                                'ended': 't5', 'end_reason': 'finished'}) + '\n')
+                                'ended': 't5', 'end_reason': 'finished', 'log': log}) + '\n')
         # still ADJUDICATE, not CORRECTED: the ruling did not touch the branch
         self.assertEqual(lc.derive(run, lc.Evidence(), path=path).name, lc.ADJUDICATE)
         self.assertEqual(lc.corrections(path)['B-0001']['rounds'], 3)
         self.assertTrue(lc.corrections(path)['B-0001']['settled'])
+        self.assertEqual(lc.corrections(path)['B-0001']['prs'], ['773', '775'])
+
+    def test_b0128_a_crashed_adjudicate_run_delivers_no_ruling_and_does_not_settle(self):
+        """B-0128 C1: ``settled`` must gate on :func:`lc.finished`, not the bare ``ended`` flag —
+        an adjudicate session that crashed, was stopped, or ran out of quota before it ruled ended
+        without a ``finished`` reason and delivered no ruling, so it must not settle the hold
+        forever."""
+        lines = [{'job': 'a', 'pid': 1, 'started': 't1', 'item': 'B-0001', 'branch': 'b',
+                  'ended': 't2', 'end_reason': 'finished'},
+                 {'job': 'a', 'rounds': 3, 'correction': {'kind': 'review', 'text': 'x', 'at': 't3'}}]
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        path = os.path.join(d, 's.jsonl')
+        with open(path, 'w') as f:
+            f.write('\n'.join(json.dumps(ln) for ln in lines) + '\n')
+        with open(path, 'a') as f:
+            f.write(json.dumps({'job': 'adjudicate-b-0001', 'item': 'B-0001', 'branch': 'b',
+                                'kind': 'adjudicate', 'pid': os.getpid(), 'started': 't4',
+                                'ended': 't5', 'end_reason': 'crashed'}) + '\n')
+        self.assertFalse(lc.corrections(path)['B-0001']['settled'])
+        self.assertEqual(lc.corrections(path)['B-0001']['prs'], [])
 
 
 class SessionStateInvariants(unittest.TestCase):
