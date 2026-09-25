@@ -5,7 +5,7 @@ A product declares the runners its CI jobs run on in ``ci.pool:`` of its product
     ci:
       pool:
         - {runner: ci-1,  box: box-1, provider: acme, size: 8c-16g, role: heavy, slots: 1}
-        - {runner: ci-1b, box: box-1, provider: acme, size: 8c-16g, role: light}
+        - {runner: ci-1b, box: box-1, provider: acme, size: 8c-16g, role: light, class: light-fast}
 
 ``runner`` is the CI host's runner name; ``box`` the machine it runs on; ``provider`` and
 ``size`` are inventory; ``role`` is the one routing label the runner answers to; ``slots`` (default
@@ -16,6 +16,15 @@ host are derived from it, never edited by hand.
 inventory and never appear in a job's ``runs-on``: a job that names a provider strands every
 box of another provider that could run it. A runner may carry one informational label,
 ``provider-<name>``, which no ``runs-on`` may ask for.
+
+**Runner class.** A runner may declare ``class: <name>`` (``heavy-fast``, ``heavy-slow``, …): a
+finer grain than the role, for a product's own scripts (a test split, a timeout) — never for
+routing. The CI host's API sets labels, not a runner's environment, so the class travels as one
+more derived label, ``class:<name>``. A product script reads ``$RUNNER_CLASS`` when the box's
+runner ``.env`` sets it, else the ``class:`` label of ``$RUNNER_NAME`` from the runners API.
+Reconcile keeps exactly the declared ``class:`` label on each runner (dry-run by default, like
+every label); the doctor counts runners per class and warns on a runner with no class while
+others have one; the capacity view groups the pool by class.
 
 Three readers:
 
@@ -42,7 +51,10 @@ import subprocess
 from asf import env
 
 PROVIDER_PREFIX = 'provider-'
-POOL_FIELDS = ('runner', 'box', 'provider', 'size', 'role', 'slots')
+CLASS_PREFIX = 'class:'
+#: the variable a product script reads the class from (else the ``class:`` label)
+CLASS_ENV = 'RUNNER_CLASS'
+POOL_FIELDS = ('runner', 'box', 'provider', 'size', 'role', 'slots', 'class')
 POOL_REQUIRED = ('runner', 'provider', 'role')
 #: labels a CI host puts on every self-hosted runner itself: never declared, never removed.
 DEFAULT_LABELS = frozenset({'self-hosted', 'linux', 'windows', 'macos',
@@ -66,10 +78,21 @@ class PoolEntry:
     box: str = ''
     size: str = ''
     slots: int = 1
+    #: ``class:`` in the product file; '' when the runner declares none
+    cls: str = ''
 
     @property
     def provider_label(self):
         return PROVIDER_PREFIX + _norm(self.provider)
+
+    @property
+    def class_label(self):
+        """``class:<name>``, or '' when the runner declares no class."""
+        return CLASS_PREFIX + self.cls if self.cls else ''
+
+    def labels(self):
+        """The labels ci.pool derives for this runner: role, provider, and class if any."""
+        return {l for l in (self.role, self.provider_label, self.class_label) if l}
 
 
 def _norm(label):
@@ -96,7 +119,7 @@ def pool_problems(ci):
         for k in POOL_REQUIRED:
             if entry.get(k) in (None, ''):
                 out.append((f'{key}.{k}', 'is required'))
-        for k in ('runner', 'box', 'provider', 'size', 'role'):
+        for k in ('runner', 'box', 'provider', 'size', 'role', 'class'):
             if isinstance(entry.get(k), (dict, list)):
                 out.append((f'{key}.{k}', f'must be a scalar, not {entry[k]!r}'))
         role = entry.get('role')
@@ -109,6 +132,9 @@ def pool_problems(ci):
                                            'runner can do (heavy, light), never its provider or OS'))
             elif isinstance(entry.get('provider'), str) and r == _norm(entry['provider']):
                 out.append((f'{key}.role', f'{role!r} is the provider — a role names a capability'))
+        cls = entry.get('class')
+        if isinstance(cls, str) and cls and not LABEL_RE.match(_norm(cls)):
+            out.append((f'{key}.class', f'must be one label (letters, digits, . _ -), not {cls!r}'))
         slots = entry.get('slots')
         if slots is not None and (isinstance(slots, bool) or not isinstance(slots, int) or slots < 1):
             out.append((f'{key}.slots', f'must be a whole number >= 1, not {slots!r}'))
@@ -131,7 +157,34 @@ def load_pool(product):
         out.append(PoolEntry(runner=str(entry['runner']), provider=str(entry.get('provider') or ''),
                              role=_norm(entry.get('role') or ''), box=str(entry.get('box') or ''),
                              size=str(entry.get('size') or ''),
-                             slots=slots if isinstance(slots, int) and slots >= 1 else 1))
+                             slots=slots if isinstance(slots, int) and slots >= 1 else 1,
+                             cls=_norm(entry.get('class') or '')))
+    return out
+
+
+def by_class(pool):
+    """``{class: [PoolEntry]}`` in name order, the unclassed under ``''`` last; ``{}`` when no
+    runner declares a class."""
+    if not any(e.cls for e in pool):
+        return {}
+    out = {}
+    for e in pool:
+        out.setdefault(e.cls, []).append(e)
+    return {k: out[k] for k in sorted(out, key=lambda k: (k == '', k))}
+
+
+def class_rows(pool):
+    """``[(ok, detail)]`` from the declared pool alone: each class's runner count, and one
+    warning per runner with no class while others have one. ``[]`` when no class is declared."""
+    groups = by_class(pool)
+    if not groups:
+        return []
+    counts = ', '.join(f"{k} {len(v)} runner{'s' if len(v) != 1 else ''}"
+                       for k, v in groups.items() if k)
+    out = [(True, f'classes: {counts}')]
+    for e in groups.get('', []):
+        out.append((False, f"class: {e.runner} declares no class while others do — "
+                           f"{CLASS_ENV} is empty on it"))
     return out
 
 
@@ -486,6 +539,11 @@ def drift(pool, runners, runs_on):
                 parts.append(f"carries another role {', '.join(other_roles)}")
             out.append((False, f"role: {e.runner} {' and '.join(parts)} "
                                f"(labels [{', '.join(sorted(have))}])"))
+        stray = sorted(l for l in have if l.startswith(CLASS_PREFIX) and l != e.class_label)
+        if (e.class_label and e.class_label not in have) or stray:
+            want = f"'{e.class_label}'" if e.class_label else 'no class label'
+            out.append((False, f"class label: {e.runner} should carry {want} "
+                               f"(labels [{', '.join(sorted(have))}]) — asf ci reconcile"))
 
     for r in runners:
         if r.name not in declared:
@@ -500,19 +558,21 @@ def drift(pool, runners, runs_on):
 
 def doctor_rows(product, backend=None):
     """``[(required, ok, detail)]`` for the doctor's ``ci pool`` rows; ``[]`` without a pool —
-    no CI host call at all then. A host that cannot be read is one unknown row."""
+    no CI host call at all then. A host that cannot be read is one unknown row. The class rows
+    (:func:`class_rows`) follow, advisory (not required)."""
     pool = load_pool(product)
     if not pool:
         return []
+    classes = [(False, ok, detail) for ok, detail in class_rows(pool)]  # no host call needed
     backend = backend or backend_for(product)
     if backend is None:
         return [(False, None, f"ci.pool: no runner backend for ci.provider "
-                              f"{(product.ci or {}).get('provider')!r} in this release")]
+                              f"{(product.ci or {}).get('provider')!r} in this release")] + classes
     try:
         runners, runs_on = backend.runners(), backend.runs_on()
     except BackendError as e:
-        return [(False, None, f'ci.pool: cannot read the CI host — {e}')]
-    return [(True, ok, detail) for ok, detail in drift(pool, runners, runs_on)]
+        return [(False, None, f'ci.pool: cannot read the CI host — {e}')] + classes
+    return [(True, ok, detail) for ok, detail in drift(pool, runners, runs_on)] + classes
 
 
 # ---- reconcile: the plan and its apply --------------------------------------------------------
@@ -549,7 +609,8 @@ class Step:
 def plan(pool, runners, runs_on, trials=None):
     """One :class:`Step` per declared runner, then one per undeclared one (left untouched).
 
-    The target is the host's own labels plus the role and ``provider-<name>``; every other label
+    The target is the host's own labels plus the role, ``provider-<name>`` and, when declared,
+    ``class:<name>``; every other label
     goes — unless a current self-hosted ``runs-on`` needs it on this runner (the job's labels are
     all on the runner once the adds are in), in which case it is ``blocked``."""
     trials = trials or {}
@@ -559,12 +620,12 @@ def plan(pool, runners, runs_on, trials=None):
     for e in pool:
         r = by_name.get(e.runner)
         if r is None:
-            out.append(Step(e.runner, [], sorted({e.role, e.provider_label}), [], [], [],
+            out.append(Step(e.runner, [], sorted(e.labels()), [], [], [],
                             note='missing on the CI host — register it', entry=e))
             continue
         have = r.norm_labels()
         keep = {l for l in have if is_default(l, r)}
-        target = keep | {e.role, e.provider_label}
+        target = keep | e.labels()
         add = sorted(target - have)
         after = have | set(add)
         remove, blocked = [], []
