@@ -183,6 +183,7 @@ def feature_rows(facts, only_landed=True):
         on_bugs = [agg[b] for b in bugs if b in agg and b not in ids]
         rows.append({
             'id': fid, 'title': f.get('title', ''), 'created': f.get('created'),
+            'lane': lane_of(f), 'ab_pair': f.get('ab_pair'),
             'landed': f.get('landed'), 'prod': f.get('prod'),
             'lead_days': days_between(f.get('created'), f.get('landed')),
             'prod_days': days_between(f.get('created'), f.get('prod')),
@@ -260,6 +261,101 @@ def headline(facts, days=7, rows=None):
     """The rolling ``days`` window ending at ``facts.as_of`` — the ``Value`` row of ``asf status``."""
     end = to_dt(facts.as_of) + datetime.timedelta(seconds=1)
     return window_row(facts, end - datetime.timedelta(days=days), end, rows)
+
+
+# ------------------------------------------------------------ lanes --
+
+#: The two build routes a Feature takes: ``lane: direct`` (one session end to end) or the full
+#: pipeline (spec → review → plan → Tasks → coder/review/correct → land).
+DIRECT, FULL = 'direct', 'full'
+LANES = (DIRECT, FULL)
+#: The per-Feature numbers a pair compares, in print order.
+PAIR_METRICS = ('lead_days', 'cost', 'sessions', 'repair_sessions', 'ci_min')
+
+
+def lane_of(feature):
+    """``direct`` for a ``lane: direct`` Feature, else ``full``."""
+    return DIRECT if str((feature or {}).get('lane') or '').strip().lower() == DIRECT else FULL
+
+
+def cost_of(row):
+    """A Feature's own spend plus the spend on the Bugs attributed to it — a lane that ships
+    cheaper but breaks more pays for it here."""
+    return round((row.get('usd') or 0.0) + (row.get('bug_usd') or 0.0), 2)
+
+
+def _mean(xs):
+    xs = [x for x in xs if x is not None]
+    return round(sum(xs) / len(xs), 2) if xs else None
+
+
+def by_lane(facts, start, end, rows=None):
+    """``{lane: {...}}`` over the Features landed in ``[start, end)``, per lane: how many, the
+    median lead time from card to landed, and per Feature the $ (own + its Bugs), the sessions,
+    the repair sessions and the CI minutes."""
+    rows = feature_rows(facts) if rows is None else rows
+    out = {}
+    for lane in LANES:
+        shipped = [r for r in rows if r['lane'] == lane and in_window(r['landed'], start, end)]
+        out[lane] = {
+            'lane': lane, 'landed': len(shipped), 'ids': [r['id'] for r in shipped],
+            'median_lead_days': median([r['lead_days'] for r in shipped]),
+            'usd_per_feature': _mean([cost_of(r) for r in shipped]),
+            'sessions_per_feature': _mean([r['sessions'] for r in shipped]),
+            'repair_per_feature': _mean([r['repair_sessions'] for r in shipped]),
+            'ci_min_per_feature': _mean([r['ci_min'] for r in shipped]),
+        }
+    return out
+
+
+def _pair_side(row):
+    if row is None:
+        return None
+    return {'id': row['id'], 'title': row['title'], 'landed': row['landed'],
+            'lead_days': row['lead_days'] if row['landed'] else None, 'cost': cost_of(row),
+            'sessions': row['sessions'], 'repair_sessions': row['repair_sessions'],
+            'ci_min': row['ci_min']}
+
+
+def pair_table(facts, rows=None):
+    """One entry per ``ab_pair`` name: its direct Feature and its full one (landed or not), each
+    with its numbers, and the delta (direct − full) of every number both have — so one outlier
+    Feature is read against its own partner, not pooled away. A pair that is not one direct and
+    one full keeps the first of each lane by id and says so in ``note``."""
+    rows = feature_rows(facts, only_landed=False) if rows is None else rows
+    groups = {}
+    for r in sorted(rows, key=lambda r: r['id']):
+        if r.get('ab_pair'):
+            groups.setdefault(r['ab_pair'], []).append(r)
+    out = []
+    for name in sorted(groups):
+        members = groups[name]
+        pick = {lane: next((r for r in members if r['lane'] == lane), None) for lane in LANES}
+        d, f = _pair_side(pick[DIRECT]), _pair_side(pick[FULL])
+        entry = {'pair': name, 'direct': d, 'full': f, 'delta': {}, 'note': ''}
+        if len(members) != 2 or d is None or f is None:
+            entry['note'] = (', '.join(f"{r['id']} {r['lane']}" for r in members)
+                             + ' — a pair is one direct and one full Feature')
+        if d and f:
+            entry['delta'] = {k: round(d[k] - f[k], 2) for k in PAIR_METRICS
+                              if d.get(k) is not None and f.get(k) is not None}
+        out.append(entry)
+    return out
+
+
+def lanes_line(lanes, days):
+    """``lanes 7 d: direct 2 landed, lead 1.5 d, $8.00/f, 2 sessions/f, 0 repair/f, 12 CI
+    min/f · full …`` — the daily rollup's one line."""
+    parts = []
+    for lane in LANES:
+        v = lanes[lane]
+        if not v['landed']:
+            parts.append(f"{lane} 0 landed")
+            continue
+        parts.append(f"{lane} {v['landed']} landed, lead {_days(v['median_lead_days'])}, "
+                     f"{_money(v['usd_per_feature'])}/f, {v['sessions_per_feature']:g} sessions/f, "
+                     f"{v['repair_per_feature']:g} repair/f, {v['ci_min_per_feature']:g} CI min/f")
+    return f"lanes {days} d: " + ' · '.join(parts)
 
 
 def _money(v):

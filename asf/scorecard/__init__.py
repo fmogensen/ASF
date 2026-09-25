@@ -6,4 +6,6 @@ cost and time go, file one card per cause over its threshold, verify the card mo
 * :mod:`asf.scorecard.score`    — per-Feature rows, weekly rows, the headline. Pure.
 * :mod:`asf.scorecard.diagnose` — the rankings and the causes over threshold. Pure.
 * :mod:`asf.scorecard.loop`     — snapshots, filing, verifying, the daily part and the command.
+* :mod:`asf.scorecard.pairs`    — the lane experiment's ``ab_pair`` pairs and their file overlap
+  (reads git: the doctor's and the status table's warning).
 """

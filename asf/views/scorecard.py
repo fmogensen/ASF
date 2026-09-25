@@ -1,5 +1,6 @@
-"""asf.views.scorecard — ``asf scorecard [--product p] [--weeks n] [--json]``, and the ``Value`` row
-of ``asf status``.
+"""asf.views.scorecard — ``asf scorecard [--product p] [--weeks n] [--json]``, ``asf scorecard
+--by-lane [--days n]`` (the lane experiment: direct vs full, pooled per lane and per
+``ab_pair``, with the pairs whose Features overlap), and the ``Value`` row of ``asf status``.
 
 The SCORECARD: the headline, one row per ISO week (``--weeks``, the current week first), one row
 per Feature landed in those weeks, where the last ``window_days`` went (by session kind, failure
@@ -112,8 +113,101 @@ def render(d):
     return '\n'.join(out) + '\n'
 
 
+def compute_lanes(root, product, days=None, facts=None, overlaps=None):
+    """``asf scorecard --by-lane``: per lane (direct / full) over the last ``days`` (default the
+    loop's ``window_days``), the pooled numbers; per ``ab_pair``, the two Features side by side
+    and their delta; and the pairs whose Features touch the same files."""
+    import datetime
+    from asf.scorecard import pairs
+    from asf.scorecard.facts import to_dt
+    cfg = loop.settings(product)
+    days = int(days or cfg['window_days'])
+    facts = facts or load(root, product)
+    end = to_dt(facts.as_of) + datetime.timedelta(seconds=1)
+    start = end - datetime.timedelta(days=days)
+    every = score.feature_rows(facts, only_landed=False)
+    if overlaps is None:
+        try:
+            overlaps = pairs.overlaps(product, facts.items)
+        except (OSError, ValueError):
+            overlaps = []
+    return {'product': product.name, 'as_of': facts.as_of, 'days': days,
+            'lanes': score.by_lane(facts, start, end, [r for r in every if r['landed']]),
+            'pairs': score.pair_table(facts, every),
+            'overlaps': [{'pair': n, 'features': list(f), 'files': s} for n, f, s in overlaps]}
+
+
+def _side_cell(side, key):
+    if not side:
+        return '—'
+    v = side.get(key)
+    if key == 'cost':
+        return _m(v)
+    if key == 'lead_days':
+        return '—' if v is None else f'{v:g} d'
+    return _n(v)
+
+
+def _delta_cell(v, key):
+    if v is None:
+        return '—'
+    sign = '+' if v > 0 else ('-' if v < 0 else '')
+    if key == 'cost':
+        return f'{sign}${abs(v):,.2f}'
+    return f'{sign}{abs(v):g}' + (' d' if key == 'lead_days' else '')
+
+
+PAIR_HEADS = {'lead_days': 'lead', 'cost': '$', 'sessions': 'sessions',
+              'repair_sessions': 'repair', 'ci_min': 'CI min'}
+
+
+def _who(side):
+    if not side:
+        return '—'
+    return side['id'] + ('' if side['landed'] else ' (open)')
+
+
+def render_lanes(d):
+    out = [f"**SCORECARD BY LANE {d['product']}** — {d['as_of']}, last {d['days']} d", '',
+           '| Lane | Landed | Median lead (card→landed) | $/feature (own + its bugs) '
+           '| Sessions/feature | Repair sessions/feature | CI min/feature |',
+           '|---|---|---|---|---|---|---|']
+    for lane in score.LANES:
+        v = d['lanes'][lane]
+        out.append(f"| {lane} | {v['landed']} | {_n(v['median_lead_days'])} d "
+                   f"| {_m(v['usd_per_feature'])} | {_n(v['sessions_per_feature'])} "
+                   f"| {_n(v['repair_per_feature'])} | {_n(v['ci_min_per_feature'])} |")
+    out += ['', '**Pairs** — each cell direct / full / Δ (direct − full); an open Feature has no '
+                'lead time yet', '']
+    if d['pairs']:
+        out += ['| Pair | Direct | Full | '
+                + ' | '.join(PAIR_HEADS[k] for k in score.PAIR_METRICS) + ' |',
+                '|---|---|---|' + '---|' * len(score.PAIR_METRICS)]
+        for p in d['pairs']:
+            dr, fu = p['direct'], p['full']
+            cells = [f"{_side_cell(dr, k)} / {_side_cell(fu, k)} / "
+                     f"{_delta_cell(p['delta'].get(k), k)}" for k in score.PAIR_METRICS]
+            out.append(f"| {p['pair']} | {_who(dr)} | {_who(fu)} | " + ' | '.join(cells) + ' |')
+        out += [f"- {p['pair']}: {p['note']}" for p in d['pairs'] if p['note']]
+    else:
+        out.append('none — `asf set F-x ab_pair=<name>` on one direct and one full Feature')
+    if d['overlaps']:
+        from asf.scorecard.pairs import overlap_lines
+        out += ['', '**Overlap warnings**', '']
+        out += [f'- {line}' for line in overlap_lines(
+            [(o['pair'], tuple(o['features']), o['files']) for o in d['overlaps']])]
+    return '\n'.join(out) + '\n'
+
+
 def cmd_scorecard(args, root):
     product = env.load_product(getattr(args, 'product', None))
+    if getattr(args, 'by_lane', False) is True:
+        d = compute_lanes(root, product, days=getattr(args, 'days', None))
+        if getattr(args, 'json', False):
+            print(json.dumps(d, indent=1, default=str))
+        else:
+            print(render_lanes(d), end='')
+        return 0
     d = compute(root, product, weeks=max(1, int(getattr(args, 'weeks', 4) or 4)))
     if getattr(args, 'json', False):
         print(json.dumps(d, indent=1, default=str))

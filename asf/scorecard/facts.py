@@ -205,7 +205,11 @@ def card(meta, body):
                 stage=meta.get('stage'), severity=meta.get('severity'),
                 removed=bool(meta.get('removed')), text=_description(body),
                 landing_shas=landing_shas(meta),
-                stories=[str(x) for x in stories] if isinstance(stories, list) else [])
+                stories=[str(x) for x in stories] if isinstance(stories, list) else [],
+                lane=str(meta.get('lane') or '').strip().lower() or None,
+                size=str(meta.get('size') or '').strip().lower() or None,
+                ab_pair=str(meta.get('ab_pair') or '').strip() or None,
+                links=meta.get('links') if isinstance(meta.get('links'), dict) else {})
 
 
 def _later(a, b):

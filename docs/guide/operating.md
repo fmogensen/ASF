@@ -320,6 +320,25 @@ Only `asf inbox` and `asf new` commit and push what they write. `asf groom`, `as
 from `origin`, never sees them. Commit and push after each, and pull before you edit: the tick
 pushes a `tick: state` commit every run, so an unpulled checkout is always behind.
 
+## The direct lane, small Features, and comparing them
+
+A Feature's route is a typed field:
+
+- `asf set F-x lane=direct` — one session builds it end to end on `cloud/direct-F-x`
+  (`branch_prefixes.direct`): the feeder's one row is `DIRECT → BUILD`, never a spec or plan
+  row. Its first commit's body is the "what and how" note the PR description carries; every
+  subject is `feat(F-x): …`. The lane lands it like any code PR — CI, the gate, the
+  customer-content check and auto-merge — without a review round, and the trunk commit naming
+  F-x marks the Feature landed. `lane=full` (or no field) is the full pipeline.
+- `asf set F-x size=s` — on the full lane, spec and plan are one session (`CARD → SPEC+PLAN`, one
+  document with Task lines), and a Task whose diff is under `review.skip_under_lines` (80) skips
+  the review session.
+- `asf set F-x ab_pair=<name>` on one direct and one full Feature makes them a pair.
+  `asf scorecard --by-lane [--days n]` prints per lane the Features landed, median lead time,
+  $ per Feature, sessions, repair sessions and CI minutes per Feature, then one row per pair with
+  the delta; the daily scorecard line carries the 7-day lane split. `asf doctor` (row `ab pairs`)
+  and `asf status` (row `A/B pairs`) warn when a pair's two Features touch the same files.
+
 ## Clearing a card that does not belong
 
 A card that is not this product's work — a Bug filed against the wrong product, a Feature nobody

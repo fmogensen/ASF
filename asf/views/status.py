@@ -354,6 +354,13 @@ def value_cell(root, product):
     return cell(root, product)
 
 
+def ab_pairs_cell(root, product):
+    """``A/B pairs``: only when the two Features of a lane-experiment pair touch the same files
+    (:func:`asf.scorecard.pairs.status_cell`) — the overlap spoils the comparison."""
+    from asf.scorecard import pairs
+    return pairs.status_cell(root, product)
+
+
 def release_cell(root, product):
     """``Release``: the release-readiness verdict (:mod:`asf.release`; the full table is
     ``asf release-readiness``) — only for the product whose repo is the factory's own source, or
@@ -378,6 +385,7 @@ def render(root, product, cfg=None):
                        ('Merge', lambda: merge_cell(product)),
                        ('Capacity', lambda: capacity_cell(cfg, product)),
                        ('Value', lambda: value_cell(root, product)),
+                       ('A/B pairs', lambda: ab_pairs_cell(root, product)),
                        ('Release', lambda: release_cell(root, product)),
                        ('Record', lambda: record_cell(root)),
                        ('Ready to launch', lambda: ready_cell(root, product)),

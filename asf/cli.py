@@ -308,6 +308,10 @@ def build_parser():
                                                     'where it went, and the causes the loop filed')
     p_scorecard.add_argument('--product')
     p_scorecard.add_argument('--weeks', type=int, default=4, help='ISO weeks to show (default: 4)')
+    p_scorecard.add_argument('--by-lane', action='store_true',
+                             help='direct vs full lane: pooled per lane, and per ab_pair')
+    p_scorecard.add_argument('--days', type=int, default=None,
+                             help='--by-lane window in days (default: the loop\'s window_days)')
     p_scorecard.add_argument('--json', action='store_true')
 
     p_release = sub.add_parser('release-readiness', help='the RELEASE READINESS gate: each criterion '
