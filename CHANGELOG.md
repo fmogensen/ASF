@@ -2,6 +2,38 @@
 
 One entry per released version, newest first.
 
+## v0.1.12 — 2026-09-25
+
+### Features landed
+
+- F-0145 asf status: value-shipped metric (Features landed/day, lead times)
+
+### Bugs fixed
+
+- B-0092 Groom digest says '55 for you' for items the adjudicator already ruled; removals are not surfaced
+- B-0094 19% of sessions end 'not pushed': finished work is lost to a missing commit or push
+- B-0120 Invariant I10 refused a write to features/F-0095.md
+
+### Improvements and hotfixes
+
+- feat(deploy): named deploy targets beside dev and prod — a site is tracked, flagged and deployable
+- fix(wave): launch first, then the lane pass's ref pushes; each push logs its duration
+- fix(publish): the factory rebases a clean worktree onto a remote that moved ahead, then pushes
+- feat(ci): ASF owns the CI runner pool — declared inventory, drift doctor, safe reconcile
+- fix(approvals): a hold dropped by a person is never re-asked for the same subject
+- fix(widen): a done-and-pushed run's stale footprint claim is dropped, not re-asked
+- feat(gate): customer-content marker gate — no internal note lands on or deploys to a customer page
+- feat(review): end-user review pass — a diff touching customer pages is read as the customer
+- feat(merge): conventions.merge auto|manual — the lane merges green, reviewed PRs itself
+- feat(scorecard): the facts and the numbers — per landed Feature and per week
+- feat(scorecard): diagnosis as code — rank where cost goes, name the causes over threshold
+- feat(scorecard): the loop — weekly snapshots, one card per cause, verify after landing
+- feat(scorecard): asf scorecard, the Value row in asf status, and the daily step runs the loop
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.12"`
+
 ## v0.1.11 — 2026-09-25
 
 ### Bugs fixed
