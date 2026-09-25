@@ -1,6 +1,8 @@
 """The prod deploy pass (asf.harvest.deploy): a green trunk ahead of prod is dispatched when the
 product opts in, and every other case is one loud ``deploy:`` line naming what prod waits on."""
+import datetime
 import json
+import os
 import types
 import unittest
 
@@ -397,6 +399,63 @@ class NamedTargets(unittest.TestCase):
         self.assertIn('waits on a hand deploy — no deploy_sha.targets.site.workflow', lines[0])
         self.assertIn(['vercel', 'ls', 'site-prod', '--prod', '--scope', 'team', '--json'],
                       sh.calls)
+
+    def _cli_deploy(self, created=1789949910391):
+        """A vercel target whose READY deployment carries no githubCommitSha (a CLI deploy)."""
+        p = _site(workflow=None, source='vercel', project='site-prod')
+        p.name = 'deploy-record-test'
+        path = deploy._records_path(p)
+        if os.path.exists(path):
+            os.remove(path)
+        sh = FakeSh([_run(PROD)], [_run(GREEN)], relevant='3', vercel=json.dumps(
+            {'deployments': [{'state': 'READY', 'meta': {}, 'createdAt': created}]}))
+        return p, sh
+
+    def test_a_cli_deploy_with_no_sha_says_sha_unknown_never_none(self):
+        p, sh = self._cli_deploy()
+        sent, lines = _site_tick(p, sh)
+        self.assertEqual(sent, {})
+        self.assertNotIn('None', lines[0])
+        self.assertNotIn('`?`', lines[0])
+        self.assertIn('site sha unknown — how far behind main is unknown', lines[0])
+        self.assertIn('MANUAL: site runs an unknown sha — waits on a hand deploy', lines[0])
+
+    def test_a_hand_record_names_the_sha_a_cli_deploy_lacks(self):
+        p, sh = self._cli_deploy(created=1789949910391)
+        after = datetime.datetime.fromtimestamp(1789949910391 / 1000 + 60, tz=datetime.timezone.utc)
+        deploy.record(p, 'site', SITE, by='hand', now=after)
+        _, lines = _site_tick(p, sh)
+        self.assertIn(f'site `{SITE[:9]}` is 3 relevant commits behind', lines[0])
+        # a record older than the deployment names some earlier deploy: not trusted
+        before = datetime.datetime.fromtimestamp(1789949910391 / 1000 - 3600,
+                                                 tz=datetime.timezone.utc)
+        deploy.record(p, 'site', SITE, by='hand', now=before)
+        self.assertIn('site sha unknown', _site_tick(p, sh)[1][0])
+        # an asf dispatch written before the deployment it started is that deployment
+        deploy.record(p, 'site', SITE, by='asf', now=before)
+        self.assertIn(f'site `{SITE[:9]}`', _site_tick(p, sh)[1][0])
+
+    def test_the_tick_records_what_it_dispatches(self):
+        p = _site('auto')
+        p.name = 'deploy-record-test'
+        sh = FakeSh([_run(PROD)], [_run(GREEN)], site=[_run(SITE)])
+        sent, _ = _site_tick(p, sh)
+        self.assertEqual(sent, {'site': GREEN})
+        self.assertEqual(deploy._load_records(p)['site']['sha'], GREEN)
+        self.assertEqual(deploy._load_records(p)['site']['by'], 'asf')
+
+    def test_asf_deploy_record_cli(self):
+        from unittest import mock
+        from asf import cli
+        p = _site(workflow=None, source='vercel')
+        p.name = 'deploy-record-cli'
+        with mock.patch('asf.env.load_product', return_value=p), \
+                mock.patch.object(deploy, '_sh', return_value=None):
+            args = cli.build_parser().parse_args(['deploy', 'record', 'site', SITE])
+            self.assertEqual(deploy.cmd_record(args, sh=lambda c: None, out=lambda s: None), 0)
+            self.assertEqual(deploy._load_records(p)['site']['sha'], SITE)
+            bad = cli.build_parser().parse_args(['deploy', 'record', 'nope', SITE])
+            self.assertEqual(deploy.cmd_record(bad, sh=lambda c: None, out=lambda s: None), 2)
 
     def test_an_unreadable_vercel_sha_is_loud(self):
         p = _site(workflow=None, source='vercel', project='site-prod')
