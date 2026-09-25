@@ -156,12 +156,23 @@ ci:
   labels:
     - self-hosted
     - linux
+  # pool: the self-hosted runners this product's jobs run on — the single source of truth for
+  # their labels (docs/guide/ci-runner-pool.md). `role` is the one routing label a runner answers
+  # to and names a capability (heavy, light, …); `provider` and `size` are inventory and never go
+  # in a job's runs-on. `slots` (default 1) is how many jobs the runner takes at once; the sum of
+  # every runner's slots is this product's CI ceiling unless capacity.ci below sets one.
+  # `asf doctor` reports drift against it; `asf ci reconcile` plans (and, with --apply, writes)
+  # exactly: the host's own labels + the role + `provider-<provider>`.
+  pool:
+    - {runner: ci-1,  box: box-1, provider: alpha, size: 8c-16g, role: heavy, slots: 1}
+    - {runner: ci-1b, box: box-1, provider: alpha, size: 8c-16g, role: light}
+    - {runner: ci-2,  box: box-2, provider: beta,  size: 8c-24g, role: heavy}
 
 # capacity: this product's share of the factory. Each is a ceiling, capped in turn by
 # config.yaml's capacity.total and by what worker_pool.accounts can host.
 capacity:
   sessions: 3         # concurrent worker sessions for this product
-  ci: 2               # concurrent CI runs for this product
+  ci: 2               # concurrent CI runs for this product; overrides the ci.pool slot sum
   weight: 1           # share of the worker pool against other active products (default 1); 3 = three times asf's
   batch:              # passed to a batch step as ASF_CAPACITY_*; harvest's PR merges obey it too
     per_run: 8        # batches per run (harvest: PR merges per run)

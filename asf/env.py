@@ -424,6 +424,7 @@ PRODUCT_FIELDS = {
 CI_FIELDS = {
     'provider': _STR, 'workflow': _STR, 'test_command': _STR, 'budgets': _MAP,
     'runner_org': _STR, 'labels': _LIST, 'dev_job': _STR, 'deploy_workflow': _STR,
+    'pool': _LIST,
 }
 # `capacity:` is a map: this product's session/CI ceilings and its batch shape.
 CAPACITY_FIELDS = {'sessions': _STR, 'ci': _STR, 'weight': _STR, 'batch': _MAP}
@@ -550,6 +551,9 @@ def validate_product_text(text):
             check(fields, data[section], section + '.')
     for dotted, why in _deploy_problems(data.get('deploy_sha')):
         problems.append((lines.get('deploy_sha', 0), dotted, why))
+    from asf import ci_pool  # `ci.pool`: every runner's fields, its role a capability (asf.ci_pool)
+    for dotted, why in ci_pool.pool_problems(data.get('ci')):
+        problems.append((lines.get('ci.pool', lines.get('ci', 0)), dotted, why))
     # `conventions:` keeps unknown keys (asf.conventions), but the shaped ones are checked
     for key, why in conventions_mod.validate_mapping(data.get('conventions')):
         dotted = 'conventions.' + key

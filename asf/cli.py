@@ -316,6 +316,8 @@ def build_parser():
 
     from asf import plugin_build
     plugin_build.register(sub)
+    from asf import ci_pool
+    ci_pool.register(sub)
 
     return p
 

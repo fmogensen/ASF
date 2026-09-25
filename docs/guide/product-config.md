@@ -314,8 +314,12 @@ ASF's and on a clock, each gets `ceil(usable × weight / Σ weights)`, where a p
 running sessions — it just gets no new slot: `waits <job> <item> — fair share: n of u usable
 slots across k products`.
 
-The CI ceiling is the smaller of the product's `ci` (or `per_product.ci`) and `total.ci`; with
-neither set there is none and no `gh` call is made.
+The CI ceiling is the smaller of the product's own ceiling and `total.ci`. The product's own is
+its `capacity.ci`, else the slots of its declared runner pool (`ci.pool`, the sum of every
+runner's `slots` — see [the CI runner pool](ci-runner-pool.md)), else `per_product.ci`; with none
+of them set there is none and no `gh` call is made. `asf capacity` names the source in its
+`ci from` column: `product`, `ci.pool: heavy 12, light 7`, `product (overrides ci.pool 19)`,
+`operator default` or `operator total`.
 
 **Quota bands** (`config.yaml`, percent of each usage window):
 

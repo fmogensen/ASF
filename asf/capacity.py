@@ -25,8 +25,9 @@ This is the one module that reads those keys — no caller reads them raw.
 inflight_sessions_elsewhere(product.name)))``, the second term only when the operator set a
 total; ``sessions_bound`` names whichever term won.
 
-**The CI law.** Symmetrical, and skipped entirely when neither ``capacity.ci`` nor
-``capacity.total.ci`` is configured — no ``gh`` call. An unreadable or unconfigured count is
+**The CI law.** Symmetrical, and skipped entirely when neither ``capacity.ci``, a declared
+``ci.pool`` nor ``capacity.total.ci`` is configured — no ``gh`` call. A declared pool sets the
+product's CI ceiling to the sum of its runners' slots; an explicit ``capacity.ci`` overrides it. An unreadable or unconfigured count is
 ``None`` (unknown), and unknown never lowers a ceiling nor blocks a caller.
 
 **The fair share.** Every product draws on one worker pool, so a product's ceiling is also
@@ -113,11 +114,18 @@ def product_sessions(product, cfg):
 
 
 def product_ci(product, cfg):
-    """A product's CI ceiling: its own file, else the operator default, else ``(None, None)`` —
-    no built-in default (unlike sessions, an unconfigured CI budget means no ceiling at all)."""
+    """A product's CI ceiling: its own ``capacity.ci``, else the slots of its declared runner
+    pool (``ci.pool``, :func:`asf.ci_pool.pool_ci` — the source names each role's slots), else
+    the operator default, else ``(None, None)`` — no built-in default (unlike sessions, an
+    unconfigured CI budget means no ceiling at all). An explicit ``capacity.ci`` beside a pool
+    wins, and its source says which pool figure it overrides."""
+    from asf import ci_pool
+    slots, pool_source = ci_pool.pool_ci(product)
     v = _product_capacity(product).get('ci')
     if isinstance(v, int) and v >= 0:
-        return v, 'product'
+        return v, ('product' if slots is None else f'product (overrides ci.pool {slots})')
+    if slots is not None:
+        return slots, pool_source
     v = (_operator_capacity(cfg).get('per_product') or {}).get('ci')
     if isinstance(v, int) and v >= 0:
         return v, 'operator default'

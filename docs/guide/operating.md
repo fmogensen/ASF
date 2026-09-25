@@ -169,12 +169,17 @@ children; it is `Closed` only when you type `closed: true` on it.
 
 One row per product (`--all` for every product): `sessions` (the effective ceiling), `in flight`,
 `free`, `bound by` (`product`, `operator default`, `operator total` or `fair share`), then the same
-for CI runs, and the batch shape. `?` is unknown — not configured, or unreadable.
+for CI runs, and the batch shape. `?` is unknown — not configured, or unreadable. `ci from` names where the CI
+ceiling came from — `capacity.ci`, the declared runner pool's slots, or the operator's defaults.
 
 ### `/asf:doctor`
 
 Is the install sound — see [getting-started.md](getting-started.md#5-the-first-asf-doctor). Run it
 after any config change.
+
+A product with a declared runner pool (`ci.pool`) also gets `ci pool` rows: stranded runners,
+`runs-on` sets no runner satisfies, role drift, provider labels in `runs-on`, and missing or
+offline runners. `asf ci reconcile` plans the fix. See [the CI runner pool](ci-runner-pool.md).
 
 `/asf:parity` (one row per Story) and `/asf:prod` (deploy state and what shipped) complete the set.
 
@@ -325,6 +330,14 @@ On the next tick the card leaves the tables and the wave: nothing is started on 
 already on it is ended and its worktree reaped rather than sent back. An S1 Bug retired this way
 releases the tier-2 freeze. (`moved_to:` retires rule cards only; use `removed:` for everything
 else.)
+
+## The CI runner pool
+
+A product whose CI runs on self-hosted runners declares them in `ci.pool` of its product file.
+The doctor's `ci pool` rows say when the host drifts from it; `asf ci reconcile --product <p>`
+prints the plan (runner, current labels, target labels, action) and `--apply` writes it, adds
+before removes. Jobs ask for a role (`heavy`, `light`), never a provider. The whole procedure,
+including moving an existing product over, is in [the CI runner pool](ci-runner-pool.md).
 
 ## Safety: what a worker session can reach
 

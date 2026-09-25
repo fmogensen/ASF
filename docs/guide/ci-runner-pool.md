@@ -1,0 +1,157 @@
+# The CI runner pool
+
+A product whose CI runs on self-hosted runners declares those runners once, in `ci.pool:` of its
+product file. From that list ASF reports drift (`asf doctor`), plans and applies the runners'
+labels (`asf ci reconcile`), puts a newly enabled runner on trial for one job, and derives the
+product's CI ceiling (`asf capacity`). Nobody edits a runner's labels by hand on the CI host.
+
+The first backend is GitHub Actions (runners and workflow files, through `gh api`); the planned
+`ci.provider: vm` reads the same pool (see [the end of this page](#and-ciprovider-vm)).
+
+## Routing labels name a capability, never a provider
+
+A job's `runs-on` asks for **what it needs**: `heavy`, `light` (later `gpu`, `docker`, …). It
+never asks for **who sells the machine** or **how big it is** — provider and size are inventory,
+kept in `ci.pool`, and nowhere else.
+
+Why: a `runs-on: [self-hosted, <provider>, heavy]` can only run on that provider's boxes. Add
+heavy boxes from a second provider and they sit idle, however deep the queue: the jobs ask for a
+label those boxes do not carry. That is exactly what happened on one fleet — several 8-core boxes
+idle for days while 170 jobs queued, because every job named the first provider, and the fix
+was hand edits that even put the first provider's name on the second provider's boxes so the jobs
+would take them. Nothing had reported it.
+
+So the rule, which the doctor enforces and the reconcile writes:
+
+- a runner carries **its host defaults** (`self-hosted`, OS, architecture), **its role**, and
+  optionally **`provider-<name>`** — informational only, for the operator reading the host;
+- a `runs-on` asks for `self-hosted` plus a role; a label that is not a declared role, or any
+  `provider-` label, in a `runs-on` is a drift row.
+
+The decision is recorded as [ADR 0002](../decisions/0002-ci-routing-labels-are-capabilities.md).
+
+## Declaring a pool
+
+```yaml
+ci:
+  provider: github-actions
+  runner_org: acme            # an organisation's runners; without it, the repo's own
+  pool:
+    - {runner: ci-1,   box: box-1, provider: alpha, size: 8c-16g, role: heavy, slots: 1}
+    - {runner: ci-1b,  box: box-1, provider: alpha, size: 8c-16g, role: light}
+    - {runner: ci-2,   box: box-2, provider: alpha, size: 16c-32g, role: heavy}
+    - {runner: ci-h1,  box: box-7, provider: beta,  size: 8c-24g, role: heavy}
+    - {runner: ci-l1,  box: box-8, provider: beta,  size: 6c-12g, role: light}
+```
+
+| key | required | what it is |
+|---|---|---|
+| `runner` | yes | the runner's name on the CI host |
+| `box` | no | the machine it runs on (two runners may share one box) |
+| `provider` | yes | who hosts the box; becomes the `provider-<provider>` label |
+| `size` | no | inventory only, free text |
+| `role` | yes | the one routing label: a capability, never the provider, an OS or a `provider-` label |
+| `slots` | no | jobs it takes at once (default 1) |
+
+Every product load validates it: unknown keys, a missing required key, a non-capability role, a
+`slots` below 1 and a runner declared twice all refuse the load, with the line.
+
+**Where it lives.** The pool is in the product file, not in the operator's `config.yaml`. The
+drift it is checked for is between the runners and *this product's* workflow files, and the CI
+ceiling it sets is this product's. Two products that share one organisation's runners each
+declare the runners they route to; the doctor of each names a runner the other declares as
+`undeclared`, which is informational.
+
+## The doctor's `ci pool` rows
+
+`asf doctor --product <p>` reads the host (read-only) when the product declares a pool — and makes
+no host call when it does not. One row per finding, or one `ok` row naming the slots per role:
+
+| row | what it means | fix |
+|---|---|---|
+| `stranded: <runner> is online but no job's runs-on matches its labels` | capacity nobody can use | `asf ci reconcile --apply` gives it its role; if the jobs still name a provider, migrate them (below) |
+| `unsatisfiable: <workflow>:<job> [labels] — no online runner carries all of it` | those jobs queue forever | ask for a role in `runs-on`, or bring the runner online |
+| `role: <runner> lacks its role '<role>'` / `carries another role` | host labels differ from the declaration | `asf ci reconcile --apply` |
+| `provider-like label in runs-on: <workflow> asks for '<label>'` | a job routes by provider (or by a label that is no declared role) | change the `runs-on` to a role |
+| `missing: <runner> … is declared but not registered` | the box lost its runner, or the name is wrong | re-register the runner, or fix `ci.pool` |
+| `offline: <runner> … — n <role> slot(s) lost` | the runner service is down | restart it on the box |
+| `undeclared: <runner> is registered but not in ci.pool` | a runner ASF does not manage | declare it, or remove it from the host |
+
+Jobs on hosted runners (no `self-hosted` in their `runs-on`) and a `runs-on` that is an
+expression ASF cannot resolve (`${{ matrix.os }}`) are not judged. `${{ vars.X || 'heavy' }}` is
+read as its default, `heavy`. A host that cannot be read is one `skip` row with the reason.
+
+## `asf ci reconcile`
+
+```
+asf ci reconcile --product <p>            # dry run: the plan, nothing written
+asf ci reconcile --product <p> --apply    # write it
+```
+
+The plan is one row per runner: `runner | current labels | target labels | action`. The target
+is the host's own labels plus the role plus `provider-<provider>`; anything else is removed.
+
+```
+runner  current labels                          target labels                                   action
+ci-1    linux, self-hosted, x64, alpha, heavy   linux, self-hosted, x64, heavy, provider-alpha   add provider-alpha; keep alpha — blocked until workflows migrate
+ci-h1   linux, self-hosted, x64, beta-heavy     linux, self-hosted, x64, heavy, provider-beta    add heavy, provider-beta; remove beta-heavy; trial: one heavy job
+```
+
+**Capacity is never lost on the way.**
+
+- Every runner's adds are written before any runner's removes.
+- A label a current `runs-on` still needs on that runner is not removed: the row says
+  `keep <label> — blocked until workflows migrate`, and the next reconcile after the migration
+  removes it.
+- A runner that is not in `ci.pool` is left untouched.
+
+**A trial of one job.** A runner that gains its role label (newly enabled for a role) is put on
+trial: the reconcile records it in `~/.ASF/state/<p>/ci-trials.json`. The tick's `health` step,
+and every later reconcile, look at the first job that runner ran since:
+
+- no job yet: it waits;
+- a job running: the role label is withdrawn until it ends, so no second job lands before the
+  verdict;
+- the job passed: the role label stays (it is put back if it was withdrawn), and the trial ends;
+- the job failed (`failure`, `timed_out`, `startup_failure`): the runner's labels go back to what
+  they were before the reconcile, and the next tick files a Bug
+  `ci trial failed: <runner> as <role>` (S2, the job linked). The next `--apply` starts a fresh
+  trial.
+
+A cancelled or skipped job does not count; the trial waits for the next one. Every verdict is
+appended to `~/.ASF/state/<p>/ci-trials.jsonl`. A dry run prints the verdicts but changes nothing.
+
+`--apply` changes labels on shared runners: it is an operator action, never run by the tick.
+
+## The pool sets `asf capacity`
+
+With a pool declared, the product's CI ceiling is the sum of every runner's `slots`, and
+`asf capacity` names it in `ci from`: `ci.pool: heavy 12, light 7`. An explicit `capacity.ci`
+overrides it and says so: `product (overrides ci.pool 19)` — useful while the ceiling counts
+workflow *runs* (each of which fans out into many jobs) rather than jobs. The order is:
+`capacity.ci`, then the pool, then the operator's `capacity.per_product.ci`, then capped by
+`capacity.total.ci`.
+
+## Moving an existing product over
+
+A product whose jobs route by provider today moves in three steps, each safe on its own:
+
+1. **Declare the pool and give every runner its role.** Write `ci.pool`, run
+   `asf ci reconcile --product <p>` and read the plan, then `--apply`. Runners gain their role and
+   `provider-` label; the old provider labels stay, `blocked until workflows migrate`, because
+   the jobs still ask for them. A runner that was stranded gains its role and goes on trial.
+2. **Change every `runs-on` to a role.** `[self-hosted, <provider>, heavy]` becomes
+   `[self-hosted, heavy]`; a job with no role (`[self-hosted, <provider>]`) gets one. Land it like
+   any other change. The doctor's `provider-like label` rows go away.
+3. **Remove the old labels.** Run the reconcile again: the provider labels are no longer needed
+   by any `runs-on`, so the plan now removes them. `--apply`. The doctor's `ci pool` row is `ok`.
+
+## And `ci.provider: vm`
+
+The planned external-CI provider runs jobs on connected machines with no CI host in between.
+It reads the same `ci.pool`: a runner's `role` is what a job asks for, `slots` is how many jobs
+the machine takes, and provider and size stay inventory. The drift checks and the reconcile sit
+behind a small backend interface (`asf.ci_pool.Backend`: list runners, read every job's
+`runs-on`, add and remove a label, list a runner's jobs); GitHub Actions is the first backend, and
+`vm` becomes the second. Until then a product with `ci.provider: vm` gets one `skip` row saying
+there is no backend for it.

@@ -169,7 +169,19 @@ def run(ctx, out=print, runtime_fn=_runtime):
             handle_dead(ctx, dict(session, job=job), runtime_fn=runtime_fn, out=out,
                         items=items)
     hold_failed_corrections(ctx, sessions, out=out, items=items)
+    ci_trials(ctx, out=out)
     return 0
+
+
+def ci_trials(ctx, out=print):
+    """A CI runner on trial (``asf ci reconcile --apply`` enabled it for a role): judge its
+    first job, keep or roll it back, and file the Bug of a rollback (:func:`asf.ci_pool.tick`).
+    Nothing on trial, no CI host call. Printed, never raised: a trial never stops a tick."""
+    from asf import ci_pool
+    try:
+        ci_pool.tick(ctx, out=out)
+    except Exception as e:  # noqa: BLE001 — the next tick judges it again
+        out(f"ci trial: not judged ({type(e).__name__}: {e})")
 
 
 def hold_failed_corrections(ctx, sessions, out=print, items=None):

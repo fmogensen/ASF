@@ -5,14 +5,17 @@ reader of the raw ``capacity:`` keys (spec f-0079 §2.2); this module only forma
 returns. ``?`` marks an unknown count (an unconfigured ceiling, or an unreadable CI source);
 ``sessions`` is the effective ceiling — bounded by the product's fair share of the usable pool when
 more than one product's wave is active (``bound by`` then names the share); ``free`` is
-``max(0, ceiling - inflight)``, ``?`` when either side is unknown. The table is
+``max(0, ceiling - inflight)``, ``?`` when either side is unknown. ``ci from`` names where the CI
+ceiling came from: ``product`` (``capacity.ci``), ``ci.pool: heavy 12, light 7`` (the declared
+runner pool's slots), ``product (overrides ci.pool 19)``, ``operator default`` or ``operator total``. The table is
 script-generated (R-0109), never hand-typed.
 """
 import json
 
 from asf import capacity, env
 
-HEADERS = ('product', 'sessions', 'in flight', 'free', 'bound by', 'ci', 'runs', 'free', 'batch')
+HEADERS = ('product', 'sessions', 'in flight', 'free', 'bound by', 'ci', 'runs', 'free', 'ci from',
+           'batch')
 
 
 def _fmt(n):
@@ -80,7 +83,7 @@ def render(products, cfg):
                      f"(configured {s['configured']})")
         rows.append((row['product'], s['ceiling'], s['inflight'], _fmt(s['free']), bound,
                     _fmt(ci['ceiling']), _fmt(ci['inflight']), _fmt(ci['free']),
-                    _batch_cell(row['batch'])))
+                    ci['bound_by'] or '—', _batch_cell(row['batch'])))
     lines = [header, ''] + _table(HEADERS, rows)
     if dep:
         lines.append('')

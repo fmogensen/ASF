@@ -740,6 +740,8 @@ def run(product_name):
         rows.append(('deploy', False, ok, detail))
     for ok, detail in check_token_caps(cfg, product):
         rows.append(('token-caps', False, ok, detail))
+    for required, ok, detail in check_ci_pool(product):
+        rows.append(('ci pool', required, ok, detail))
     slow = check_gate_speed(product)
     if slow:
         rows.append(('gate', False, False, slow))
@@ -747,6 +749,14 @@ def run(product_name):
     if refused:
         rows.append(('lane pushes', False, False, refused))
     return rows
+
+
+def check_ci_pool(product):
+    """[(required, ok, detail)] — the declared runner pool against the CI host, read-only
+    (:func:`asf.ci_pool.doctor_rows`): stranded runners, unsatisfiable ``runs-on``, role drift,
+    provider-like labels in ``runs-on``, missing or offline runners. No rows without a pool."""
+    from asf import ci_pool
+    return ci_pool.doctor_rows(product)
 
 
 def check_gate_speed(product):
