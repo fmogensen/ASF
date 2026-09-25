@@ -8,6 +8,7 @@ import os
 import random
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -227,7 +228,7 @@ class OneBuilderTests(unittest.TestCase):
                  '"identity": [v for v in hermetic.CALLER_IDENTITY if v in os.environ],'
                  '"home": env.ASF_HOME}))')
         for entry in ('import tests', 'import tests.test_00_home'):
-            out = subprocess.run(['python3', '-c', f'{entry}; {probe}'], cwd=root, env=base,
+            out = subprocess.run([sys.executable, '-c', f'{entry}; {probe}'], cwd=root, env=base,
                                  capture_output=True, text=True)
             self.assertEqual(out.returncode, 0, out.stderr)
             got = json.loads(out.stdout.splitlines()[-1])
@@ -241,7 +242,7 @@ class OneBuilderTests(unittest.TestCase):
         # is the mode that twin exists for: it loads the module top-level (the ids it prints are
         # `test_00_home.HomeIsHermetic…`, not `tests.test_00_home…`) and never runs the package.
         # HomeIsHermetic asserts the same three things, so running it here pins the other twin.
-        out = subprocess.run(['python3', '-m', 'unittest', 'discover', '-s', 'tests',
+        out = subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests',
                               '-p', 'test_00_home.py'], cwd=root, env=base,
                              capture_output=True, text=True)
         self.assertEqual(out.returncode, 0, out.stderr)

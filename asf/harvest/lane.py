@@ -1533,8 +1533,16 @@ class GitHubHost(Host):
             rc, _out, err = H._gh(args)
             if rc == 0:
                 return H.merged_sha(self.slug, pr) or f'PR #{pr}', method[2:]
-            if subject and _rejects_subject(err):  # a gh too old for --subject: merge without it
-                rc, _out, err = H._gh([a for a in args if a not in ('--subject', subject)])
+            if subject and method in SUBJECT_METHODS and _rejects_subject(err):
+                # a gh too old for --subject: merge without it, and say so. The trunk then
+                # carries whatever subject the host composes, and only the paths still read as a
+                # document lane (`docs_only`) — a degrade worth seeing in the log, not inferring.
+                # The flag and its value are the last two args, so they come off by position: a
+                # subject that happened to equal another arg would take that arg with it.
+                if self.lane is not None:
+                    self.lane.out(f'{branch}: merged without --subject — this gh does not know '
+                                  'the flag')
+                rc, _out, err = H._gh(args[:-2])
                 if rc == 0:
                     return H.merged_sha(self.slug, pr) or f'PR #{pr}', method[2:]
             if 'not allowed' not in (err or '').lower():
