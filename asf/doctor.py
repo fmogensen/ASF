@@ -753,6 +753,8 @@ def run(product_name):
     refused = check_ref_pushes(product)
     if refused:
         rows.append(('lane pushes', False, False, refused))
+    for ok, detail in check_ab_pairs(product):
+        rows.append(('ab pairs', False, ok, detail))
     branches = check_branches(product)
     if branches:
         rows.append(('branches', False, branches[0], branches[1]))
@@ -768,6 +770,17 @@ def check_branches(product):
         return retention.doctor_line(product)
     except (OSError, ValueError):
         return None
+
+
+def check_ab_pairs(product):
+    """[(ok, detail)] — the lane experiment's pairs (:func:`asf.scorecard.pairs.doctor_rows`): a
+    warning per pair whose two Features touch the same files, since the overlap spoils the
+    comparison. No rows while no card names an ``ab_pair``."""
+    from asf.scorecard import pairs
+    try:
+        return pairs.doctor_rows(product)
+    except (OSError, ValueError):
+        return []
 
 
 def check_ci_pool(product):
