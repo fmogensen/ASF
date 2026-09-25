@@ -347,5 +347,84 @@ class CapacityFromPool(Home):
         self.assertIn('ci.pool: heavy 3, light 1', text)
 
 
+def classed_pool():
+    return [
+        {'runner': 'ci-1', 'provider': 'alpha', 'role': 'heavy', 'slots': 2, 'class': 'heavy-fast'},
+        {'runner': 'ci-2', 'provider': 'alpha', 'role': 'heavy', 'class': 'heavy-fast'},
+        {'runner': 'ci-h1', 'provider': 'beta', 'role': 'heavy', 'class': 'heavy-slow'},
+        {'runner': 'ci-1b', 'provider': 'alpha', 'role': 'light'},
+    ]
+
+
+class RunnerClass(Home):
+    """``class:`` per runner: a derived ``class:<name>`` label, the doctor's counts and warning,
+    and the capacity view's grouping — against a fake CI host."""
+
+    def setUp(self):
+        super().setUp()
+        self.p = product(classed_pool())
+        self.backend = FakeBackend(
+            [runner('ci-1', 'heavy', 'provider-alpha'), runner('ci-2', 'heavy', 'provider-alpha',
+                                                             'class:heavy-slow'),
+             runner('ci-h1', 'heavy', 'provider-beta'), runner('ci-1b', 'light', 'provider-alpha')],
+            [ro('self-hosted', 'heavy'), ro('self-hosted', 'light')])
+
+    def steps(self):
+        return ci_pool.plan(ci_pool.load_pool(self.p), self.backend.runners(), self.backend.runs_on(),
+                            trials=ci_pool.load_trials(self.p.name))
+
+    def test_class_is_validated_as_one_label(self):
+        self.assertEqual(ci_pool.pool_problems({'pool': classed_pool()}), [])
+        bad = [{'runner': 'a', 'provider': 'x', 'role': 'heavy', 'class': 'heavy fast'}]
+        self.assertEqual([k for k, _w in ci_pool.pool_problems({'pool': bad})], ['ci.pool[0].class'])
+
+    def test_reconcile_plans_the_class_label_and_drops_a_stale_one_dry_run(self):
+        by = {s.runner: s for s in self.steps()}
+        self.assertEqual(by['ci-1'].add, ['class:heavy-fast'])
+        self.assertEqual(by['ci-2'].add, ['class:heavy-fast'])
+        self.assertEqual(by['ci-2'].remove, ['class:heavy-slow'])
+        self.assertEqual(by['ci-h1'].add, ['class:heavy-slow'])
+        self.assertEqual((by['ci-1b'].add, by['ci-1b'].remove), ([], []))   # unclassed: untouched
+        self.assertFalse(any(s.trial for s in by.values()))                 # a class is no new role
+        self.assertEqual(self.backend.writes, [])
+
+    def test_apply_writes_the_class_labels(self):
+        self.assertEqual(ci_pool.apply(self.steps(), self.backend, self.p.name, out=lambda *_: None), 0)
+        labels = {n: r.norm_labels() for n, r in self.backend._runners.items()}
+        self.assertIn('class:heavy-fast', labels['ci-2'])
+        self.assertNotIn('class:heavy-slow', labels['ci-2'])
+        self.assertIn('class:heavy-slow', labels['ci-h1'])
+        self.assertEqual([s.action for s in self.steps()], ['ok'] * 4)
+
+    def test_doctor_counts_classes_and_warns_on_an_unclassed_runner(self):
+        rows = ci_pool.doctor_rows(self.p, backend=self.backend)
+        self.assertIn((False, True, 'classes: heavy-fast 2 runners, heavy-slow 1 runner'), rows)
+        self.assertIn((False, False, 'class: ci-1b declares no class while others do — '
+                                     'RUNNER_CLASS is empty on it'), rows)
+        self.assertTrue(any(req and not ok and d.startswith("class label: ci-2 should carry "
+                                                            "'class:heavy-fast'")
+                            for req, ok, d in rows), rows)
+
+    def test_no_class_anywhere_adds_no_rows(self):
+        self.assertEqual(ci_pool.class_rows(ci_pool.load_pool(product())), [])
+
+    def test_the_capacity_view_groups_runners_by_class(self):
+        from unittest import mock
+        from asf.views import capacity as view
+
+        class Src:
+            def read(self, product):
+                return 0
+        r = capacity.resolve(self.p, {}, ci_source=Src())
+        with mock.patch.object(capacity, 'resolve', return_value=r), \
+                mock.patch.object(capacity, 'inflight_sessions', return_value=0):
+            text = view.render([self.p], {})
+            data = view.as_json([self.p], {})
+        self.assertIn('ci classes: p heavy-fast 2 runners/3 slots [ci-1, ci-2]; heavy-slow 1 runner/1 '
+                      'slots [ci-h1]; (no class) 1 runner/1 slots [ci-1b]', text)
+        self.assertEqual([g['class'] for g in data[0]['ci']['classes']],
+                         ['heavy-fast', 'heavy-slow', None])
+
+
 if __name__ == '__main__':
     unittest.main()

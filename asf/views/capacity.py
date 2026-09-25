@@ -7,7 +7,9 @@ returns. ``?`` marks an unknown count (an unconfigured ceiling, or an unreadable
 more than one product's wave is active (``bound by`` then names the share); ``free`` is
 ``max(0, ceiling - inflight)``, ``?`` when either side is unknown. ``ci from`` names where the CI
 ceiling came from: ``product`` (``capacity.ci``), ``ci.pool: heavy 12, light 7`` (the declared
-runner pool's slots), ``product (overrides ci.pool 19)``, ``operator default`` or ``operator total``. The table is
+runner pool's slots), ``product (overrides ci.pool 19)``, ``operator default`` or ``operator total``.
+When a pool runner declares a ``class:``, a ``ci classes:`` line per product groups the runners
+(count, slots, names) by class, the unclassed last. The table is
 script-generated (R-0109), never hand-typed.
 """
 import json
@@ -41,6 +43,14 @@ def _batch_cell(batch):
     return text or '—'
 
 
+def _classes(product):
+    """The declared runner pool grouped by ``class:`` (:func:`asf.ci_pool.by_class`), the
+    unclassed (``class: None``) last; ``[]`` when no runner declares a class."""
+    from asf import ci_pool
+    return [{'class': k or None, 'runners': [e.runner for e in v], 'slots': sum(e.slots for e in v)}
+            for k, v in ci_pool.by_class(ci_pool.load_pool(product)).items()]
+
+
 def _row(product, cfg):
     r = capacity.resolve(product, cfg)
     inflight = capacity.inflight_sessions(product.name)
@@ -52,6 +62,9 @@ def _row(product, cfg):
                'free': _free(r.ci, r.ci_inflight), 'bound_by': r.ci_bound},
         'batch': r.batch,
     }
+    classes = _classes(product)
+    if classes:  # only with a class declared: the shape is stable without it
+        row['ci']['classes'] = classes
     from asf.workers import cloud
     lane = cloud.settings(cfg, product)
     if lane.enabled:  # only with the lane on: the shape is stable without it
@@ -102,6 +115,15 @@ def render(products, cfg):
             where = f"{c['runtime']} on [{', '.join(c['runs_on'])}]"
             lines.append(f"cloud lane: {name} {c['inflight']}/{c['ceiling']} in flight, "
                          f"{c['free']} free ({where})")
+    pools = [(p.name, _classes(p)) for p in products]
+    pools = [(name, c) for name, c in pools if c]
+    if pools:  # the CI runner pool by class (ci.pool `class:`), the unclassed last
+        lines.append('')
+        for name, groups in pools:
+            parts = [f"{g['class'] or '(no class)'} {len(g['runners'])} runner"
+                     f"{'s' if len(g['runners']) != 1 else ''}/{g['slots']} slots "
+                     f"[{', '.join(g['runners'])}]" for g in groups]
+            lines.append(f"ci classes: {name} " + '; '.join(parts))
     if dep:
         lines.append('')
         lines += [f'deprecated: {d}' for d in dep]
