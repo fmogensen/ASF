@@ -137,6 +137,17 @@ def spawn_background(product, items_file=None):
                             stdin=null, stdout=log, stderr=subprocess.STDOUT)
 
 
+def deploy_pass(product, out=print):
+    """The prod deploy pass (:mod:`asf.harvest.deploy`): one ``deploy:`` line every tick, and the
+    dispatch of the deploy workflow for a green trunk when the product opts in. It runs before
+    the gate lock is looked at — a gate still running never holds prod back."""
+    from asf.harvest import deploy
+    try:
+        deploy.tick(product, out=out)
+    except Exception as e:  # noqa: BLE001 — a deploy fault is a loud line, never a failed harvest
+        out(f'deploy: FAILED {(str(e) or type(e).__name__).strip().splitlines()[0]}')
+
+
 def run(ctx, out=print, spawn=None):
     """The step: report the last background run, then start the next one unless one still
     holds the lock. Never waits on a gate."""
@@ -144,6 +155,7 @@ def run(ctx, out=print, spawn=None):
     if not product.repo_dir:
         out('harvest: no repo_dir — nothing to harvest')
         return 0
+    deploy_pass(product, out)
     lock = harvest.try_lock(os.path.abspath(env.state_dir(product)))
     if lock is None:
         rec = read_status(product)

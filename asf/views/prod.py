@@ -135,6 +135,10 @@ def render(root, product):
     out = [f"**Prod app** `{short(prod_sha)}` {_local(prod_ts)} · "
            f"**Dev app** `{short(dev_sha)}` {_local(dev_ts)} · "
            f"**Site** `{short(site_sha)}` {_local(site_ts)} · **{product.main}** `{main_sha}`"]
+    from asf.harvest import deploy  # what prod waits on, or that the tick deploys it
+    said = deploy.line(product) if deploy.applies(product) else None
+    if said:
+        out += ["", f"**{said}**"]
     out.append("")
     out.append("**ON PROD — check these**")
     out.append("")

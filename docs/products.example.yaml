@@ -185,6 +185,12 @@ deploy_sha:
   provider: github-deployments   # github-deployments | fly | vercel | script
   # read as conventions.deploy_workflow — the workflow whose newest success marks the prod sha.
   workflow: deploy-prod.yml
+  # auto: true — the tick's harvest step dispatches `workflow` for the newest green ci.workflow
+  # run on the trunk that prod lacks (asf.harvest.deploy); off, every tick and `asf status` say
+  # prod waits on a hand dispatch. input: the workflow_dispatch input carrying the sha (default
+  # sha; none sends no input).
+  # auto: true
+  # input: sha
   # only when provider: script
   # script: tools/deploy-sha.sh
 
