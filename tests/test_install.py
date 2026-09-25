@@ -1586,6 +1586,5 @@ class InstallScriptTest(unittest.TestCase):
                       'bootstrap: asf.demo.record-health-wave-prs-harvest', r.stderr)
         self.assertIn('/plugin install asf@asf', r.stdout)  # steps 5 and 6 still ran
 
-
 if __name__ == '__main__':
     unittest.main()
