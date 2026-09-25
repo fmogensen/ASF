@@ -294,10 +294,20 @@ def deliverable_of(conv, branch, item):
     return None
 
 
-def already_on_trunk(repo, trunk, branch, conv, item):
+def already_on_trunk(repo, trunk, branch, conv, item, strict=False):
     """``(landed, extras)`` — B-0057: every file the branch touched is identical on the trunk; or,
-    for a spec/plan branch, its one deliverable is (``extras`` names what else it carried)."""
-    files = touched_files(repo, trunk, branch)
+    for a spec/plan branch, its one deliverable is (``extras`` names what else it carried).
+    ``strict`` (an orphan, whose landing deletes it): only positive evidence lands it — a diff
+    git could not read, or one that touched nothing, is not "on the trunk"."""
+    if strict:
+        r = H.sh(['git', 'diff', '--name-only', f'origin/{trunk}...origin/{branch}'], cwd=repo)
+        if r.returncode != 0:
+            return False, []
+        files = [l for l in r.stdout.splitlines() if l.strip()]
+        if not files:
+            return False, []
+    else:
+        files = touched_files(repo, trunk, branch)
     r = H.sh(['git', 'diff', '--name-only', '--no-renames', f'origin/{trunk}',
               f'origin/{branch}', '--', *[f':(literal){f}' for f in files]],
              cwd=repo) if files else None
@@ -734,13 +744,21 @@ class Lane:
             return None
         if pr.get('state') == 'MERGED' and pr.get('head') in (None, '', head):
             return f  # T11: found merged (the host)
-        ahead = H.sh(['git', 'rev-list', '--count', f'origin/{self.trunk}..origin/{b}'],
-                     cwd=self.repo).stdout.strip()
-        f['ahead'] = int(ahead) if ahead.isdigit() else 0
+        # only positive evidence lands an orphan — its landing deletes the branch with no
+        # archive: a count git could not make (no origin/<b> fetched, a bad ref) is unknown,
+        # and unknown holds for the next pass
+        counted = H.sh(['git', 'rev-list', '--count', f'origin/{self.trunk}..origin/{b}'],
+                       cwd=self.repo)
+        ahead = counted.stdout.strip()
+        if counted.returncode != 0 or not ahead.isdigit():
+            self.out(f'lane: {b} held — cannot count it against origin/{self.trunk}: '
+                     f'{H.tail(counted.stderr or counted.stdout)}')
+            return None
+        f['ahead'] = int(ahead)
         if f['ahead'] == 0:
             f['on_trunk'] = True
             return f
-        done, extras = already_on_trunk(self.repo, self.trunk, b, self.conv, item)
+        done, extras = already_on_trunk(self.repo, self.trunk, b, self.conv, item, strict=True)
         if done:
             f['on_trunk'], f['extras'] = True, extras
             return f
@@ -802,8 +820,10 @@ class Lane:
 
     def ref_gone(self, branch):
         """True when ``origin`` holds no ``branch`` — a delete already done counts as done."""
-        r = H.sh(['git', 'ls-remote', '--heads', 'origin', branch], cwd=self.repo)
-        return r.returncode == 0 and not r.stdout.strip()
+        ref = f'refs/heads/{branch}'  # ls-remote tail-matches: `<b>` alone matches archive/<b>
+        r = H.sh(['git', 'ls-remote', 'origin', ref], cwd=self.repo)
+        return r.returncode == 0 and not any(
+            line.split('\t')[-1] == ref for line in r.stdout.splitlines())
 
     def ref_push(self, refspec, what, lease=None, done=None):
         """Push the one ref-only ``refspec`` (``<sha>:refs/heads/…`` or ``:refs/heads/…``) from

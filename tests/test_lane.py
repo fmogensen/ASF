@@ -589,6 +589,48 @@ class Orphans(LaneRepo):
         self.assertNotIn('worker/fact-t3', self.heads())
         self.assertEqual(self.lane_of('worker/fact-t3')['state'], lane.MERGED)
 
+    def failing(self, match):
+        """``lane.H.sh`` with every command whose argv holds all of ``match`` failing (rc 128)."""
+        real = lane.H.sh
+
+        def sh_(cmd, *a, **k):
+            if all(m in cmd for m in match):
+                return subprocess.CompletedProcess(cmd, 128, '', 'fatal: bad revision')
+            return real(cmd, *a, **k)
+        return mock.patch.object(lane.H, 'sh', side_effect=sh_)
+
+    def test_a_failed_ahead_count_holds_the_orphan_never_lands_it(self):
+        # data loss (review): a failed `rev-list --count` read as 0 ahead → MERGED, deleted
+        self.push_lane('worker/free-plan-t3', {'c.txt': 'c\n'}, 'feat: the door')
+        prs = {'worker/free-plan-t3': {'number': 723, 'state': 'OPEN'}}
+        with self.failing(['rev-list', '--count']):
+            ln = self.run_lane({}, prs)
+        self.assertEqual(ln.host.closed, [])
+        self.assertIn('worker/free-plan-t3', self.heads())
+        self.assertNotEqual(self.lane_of('worker/free-plan-t3').get('state'), lane.MERGED)
+
+    def test_a_failed_diff_holds_the_orphan_never_lands_it(self):
+        # data loss (review): no touched files (a failed diff) read as "all on the trunk"
+        self.push_lane('worker/free-plan-t3', {'c.txt': 'c\n'}, 'feat: the door')
+        prs = {'worker/free-plan-t3': {'number': 723, 'state': 'OPEN'}}
+        with self.failing(['diff', '--name-only']):
+            ln = self.run_lane({}, prs)
+        self.assertNotIn('already on main', ' '.join(c for _, c in ln.host.closed))
+        self.assertIn('worker/free-plan-t3', self.heads() + [
+            h[len('archive/'):] for h in self.heads() if h.startswith('archive/')])
+        self.assertNotEqual(self.lane_of('worker/free-plan-t3').get('state'), lane.MERGED)
+
+    def test_an_empty_orphan_diff_is_no_evidence_of_landing(self):
+        # commits that change nothing net: not "on the trunk" — archived, never deleted bare
+        self.push_lane('worker/free-plan-t3', {'c.txt': 'c\n'}, 'feat: the door')
+        sh(['git', 'rm', '-q', 'c.txt'], cwd=self.worker)
+        sh(['git', 'commit', '-qm', 'undo'], cwd=self.worker, env_=self.ident)
+        sh(['git', 'push', '-q', '-f', 'origin', 'worker/free-plan-t3'], cwd=self.worker)
+        prs = {'worker/free-plan-t3': {'number': 723, 'state': 'OPEN'}}
+        ln = self.run_lane({}, prs)
+        self.assertNotEqual(self.lane_of('worker/free-plan-t3').get('state'), lane.MERGED)
+        self.assertIn('archive/worker/free-plan-t3', self.heads())
+
     def test_one_pass_takes_up_a_bounded_number_of_orphans(self):
         for i in range(3):
             self.push_lane(f'worker/old-{i}', {f'o{i}.txt': 'o\n'}, 'old')
@@ -712,6 +754,15 @@ class RefPushes(LaneFixture):
                          and 'claims: bad' in x], lines)
         self.assertTrue(self.rows(ln.product)[0])
 
+
+    def test_ref_gone_reads_the_exact_branch_not_its_archive(self):
+        # review: `ls-remote --heads origin <b>` pattern-matches `archive/<b>` too
+        sh(['git', 'push', '-q', 'origin', 'worker/free-plan-t1:refs/heads/archive/worker/free-plan-t1',
+            ':refs/heads/worker/free-plan-t1'], cwd=self.worker)
+        sh(['git', 'fetch', '-q', '--prune', 'origin'], cwd=self.repo)
+        ln = lane.Lane(self.product(), self.state_dir, out=lambda *_: None, items=self.items)
+        self.assertTrue(ln.ref_gone('worker/free-plan-t1'))
+        self.assertFalse(ln.ref_gone('archive/worker/free-plan-t1'))
 
     def run_deferring(self):
         lines = []
