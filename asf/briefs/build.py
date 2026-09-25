@@ -298,12 +298,31 @@ def item_line(row, item):
     return f"Backlog item: none ({why})"
 
 
+#: What a coder runs before pushing. A product whose PRs its external CI gates runs the full gate
+#: there, never on this host (the approvals hook refuses its full-suite commands): the session runs
+#: the Task's acceptance tests, targeted, and leaves the Gate to CI.
+GATE_LOCAL = ("BEFORE THE PUSH: the Task's Gate commands, and its acceptance tests byte-identical "
+              "from the plan\nand passing.")
+GATE_REMOTE = ("BEFORE THE PUSH: the Task's acceptance tests, byte-identical from the plan and passing, "
+               "run on the\nfiles they cover only. The Task's Gate runs in remote CI on the pull "
+               "request, never here: do not run it.")
+
+
+def gate_before_push(product):
+    """:data:`GATE_REMOTE` when the product's PRs are gated by external CI, else :data:`GATE_LOCAL`."""
+    if product is None:
+        return GATE_LOCAL
+    from asf.harvest import harvest
+    return GATE_REMOTE if harvest.external_ci(product) else GATE_LOCAL
+
+
 def context(product, row, kind, facts):
     """Every name a template may use. One flat dict, so a missing key is a missing key."""
     item, feature, epic = facts['item'], facts['feature'], facts['epic']
     sections = facts['sections']
     return {
         'kind': kind,
+        'gate_before_push': gate_before_push(product),
         'row_kind': getattr(row, 'kind', '') or '',
         'reason': getattr(row, 'reason', '') or '—',
         'branch': facts['branch'] or '—',

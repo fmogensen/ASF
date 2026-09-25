@@ -808,3 +808,18 @@ class CliTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class GateBeforePush(unittest.TestCase):
+    """A coder on a product whose PRs external CI gates is told to leave the Gate to CI."""
+
+    def test_external_ci_product_gets_the_remote_line(self):
+        from unittest import mock
+        import importlib; build = importlib.import_module("asf.briefs.build")
+        from asf.harvest import harvest
+        with mock.patch.object(harvest, 'external_ci', return_value=True):
+            self.assertEqual(build.gate_before_push(object()), build.GATE_REMOTE)
+        with mock.patch.object(harvest, 'external_ci', return_value=False):
+            self.assertEqual(build.gate_before_push(object()), build.GATE_LOCAL)
+        self.assertEqual(build.gate_before_push(None), build.GATE_LOCAL)
+        self.assertIn('never here', build.GATE_REMOTE)

@@ -16,8 +16,7 @@ constant that belongs in another module — name every one, as a full repo path,
 `needs writes:` line and report `status: partial`. The factory widens `writes:` by those paths
 and sends this run back to you; that line is how the footprint grows, never a question to a person.
 
-BEFORE THE PUSH: the Task's Gate commands, and its acceptance tests byte-identical from the plan
-and passing. Paste the last line of each in the report. A test you changed to make it pass is a
+{gate_before_push} Paste the last line of each in the report. A test you changed to make it pass is a
 failed Task, not a passed one.
 
 Final message: the pushed sha, the files written, the gate lines, the assumptions recorded.
