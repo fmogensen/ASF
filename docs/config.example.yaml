@@ -126,5 +126,10 @@ capacity:
 # factory:
 #   git_identity: "ASF <asf@localhost>"
 
+# upgrade: after the tick's auto-upgrade installs, the next waits this many minutes so one
+# install carries several commits (default 30). A commit with an `Urgent: yes` trailer skips it.
+# upgrade:
+#   min_interval_min: 30
+
 # Everything ASF reads and writes lives under ~/.ASF: products/, state/<product>/ (the session
 # ledger, the worktrees, the tick's record clone), logs/. Set $ASF_HOME to move all of it.
