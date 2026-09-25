@@ -6,8 +6,9 @@ Sources, all facts the factory already writes:
   when it was carded, the ingest's ``stage … → landed`` / ``state … → Resolved`` line is when it
   landed, ``stage … → on-prod`` / ``state … → Closed`` is when it reached production (a product
   that deploys nothing is Closed the moment it lands) — and, beside it, what prod runs: a landed
-  Feature whose landing commits are all ancestors of the deployed prod sha (the Prod row's
-  source, :func:`prod_deployment`) is on prod from that deploy (:func:`attribute_prod`);
+  Feature whose landing commit — its own, else the newest of its Stories'/Tasks' — is an
+  ancestor of the deployed prod sha (the Prod row's source, :func:`prod_deployment`) is on prod
+  from that deploy (:func:`attribute_prod`); one with no traceable commit is a diagnostic line;
 * the record's metric streams: ``metrics/sessions`` (spend and tokens per session, matched to a
   card), ``metrics/ci`` (runner minutes and jobs, from the forge's CI API) and ``metrics/gates``
   (the local landing gate's seconds);
@@ -43,6 +44,7 @@ class Facts:
     runs: list                  # asf.improve.measure.Run, every ended registry run
     clutter: dict               # {'stale_prs': int|None, 'open_prs': int|None, 'branches': int|None}
     as_of: str = ''             # the reading's clock, ISO
+    diagnostics: list = dataclasses.field(default_factory=list)  # gaps in the reading, one line each
 
 
 # ----------------------------------------------------------------- time --
@@ -171,15 +173,24 @@ def _description(body):
 
 
 _LANDING_RE = re.compile(r'^(?:merge|commit) ([0-9a-f]{7,40}) (?:of .+ lands|names) ')
+#: a plan-matched Task's merged PR (``PR #7 merged (74df364ab)``), a Bug's fix (``fix merged (…)``)
+_MERGED_RE = re.compile(r'^(?:PR #\d+ |fix )merged \(([0-9a-f]{7,40})\)')
+_SHA_RE = re.compile(r'^[0-9a-f]{7,40}$')
+#: what the diagnostics say of a landed Feature no commit can be traced to
+UNTRACEABLE = 'landed without a traceable commit'
 
 
 def landing_shas(meta):
-    """The commits the ingest's evidence says landed this card (``merge <sha> of <branch> lands
-    <id>``, ``commit <sha> names <id>``)."""
+    """The commits the record says landed this card: a typed ``landed: <sha>``, and the ingest's
+    evidence (``merge <sha> of <branch> lands <id>``, ``commit <sha> names <id>``,
+    ``PR #<n> merged (<sha>)``, ``fix merged (<sha>)``)."""
     ev = meta.get('evidence')
     out = []
+    typed = str(meta.get('landed') or '').strip()
+    if _SHA_RE.match(typed):
+        out.append(typed)
     for line in ev if isinstance(ev, list) else []:
-        m = _LANDING_RE.match(str(line))
+        m = _LANDING_RE.match(str(line)) or _MERGED_RE.match(str(line))
         if m and m.group(1) not in out:
             out.append(m.group(1))
     return out
@@ -188,11 +199,13 @@ def landing_shas(meta):
 def card(meta, body):
     """One card's summary: its typed fields, its timeline, and its own text (for mentions)."""
     t = timeline(meta, body)
+    stories = meta.get('stories')
     return dict(t, id=meta.get('id'), type=meta.get('type'), parent=meta.get('parent'),
                 title=str(meta.get('title') or ''), state=meta.get('state'),
                 stage=meta.get('stage'), severity=meta.get('severity'),
                 removed=bool(meta.get('removed')), text=_description(body),
-                landing_shas=landing_shas(meta))
+                landing_shas=landing_shas(meta),
+                stories=[str(x) for x in stories] if isinstance(stories, list) else [])
 
 
 def _later(a, b):
@@ -202,39 +215,89 @@ def _later(a, b):
     return iso(max(da, db))
 
 
-def attribute_prod(items, prod_sha, prod_at, is_ancestor):
-    """Mark each landed Feature the record has not yet put on prod as on prod when every commit
-    that landed it — its own, else its live descendants' — is an ancestor of ``prod_sha`` (the
-    deployed sha the Prod row reads). Its ``prod`` stamp is then the later of its landing and
-    the deployment (``prod_at``). The record's own ``on-prod``/``Closed`` also waits on the
-    operator's tick; this is what production runs. Returns the ids it marked."""
-    if not prod_sha:
-        return []
+def _children(items):
+    """``{id: [child id, …]}`` — by ``parent``, and a Task under each Story its ``stories:`` name."""
     kids = {}
     for iid, it in items.items():
-        if it.get('parent'):
-            kids.setdefault(it['parent'], []).append(iid)
+        for p in [it.get('parent')] + list(it.get('stories') or ()):
+            if p and p in items and iid not in kids.get(p, ()):
+                kids.setdefault(p, []).append(iid)
+    return kids
+
+
+def _descendants(fid, items, kids):
+    """Every live Story/Task beneath ``fid``, nearest first."""
+    out, seen, queue = [], {fid}, list(kids.get(fid, ()))
+    while queue:
+        c = queue.pop(0)
+        if c in seen or items[c].get('removed'):
+            continue
+        seen.add(c)
+        out.append(c)
+        queue += kids.get(c, ())
+    return out
+
+
+def _newest(shas, is_ancestor):
+    """The newest of ``shas`` on the trunk: the one every other is an ancestor of. ``None`` when
+    history does not order them (then every one of them must be on prod)."""
+    for s in shas:
+        if all(o == s or is_ancestor(o, s) for o in shas):
+            return s
+    return None
+
+
+def landing_commits(fid, items, kids, naming=None):
+    """The commits that landed Feature ``fid``: its own landing sha when it has one; else its
+    live descendants' — each Story's/Task's own evidence sha, else the newest trunk commit whose
+    subject names it (``naming(id)``). ``[]`` when none can be traced."""
+    own = list(items[fid].get('landing_shas') or [])
+    if own:
+        return own
+    shas = []
+    for c in _descendants(fid, items, kids):
+        found = list(items[c].get('landing_shas') or [])
+        if not found and naming is not None:
+            sha = naming(c)
+            found = [sha] if sha else []
+        shas += [s for s in found if s not in shas]
+    return shas
+
+
+def attribute_prod(items, prod_sha, prod_at, is_ancestor, naming=None, untraced=None):
+    """Mark each landed Feature the record has not yet put on prod as on prod when the commit
+    that landed it (:func:`landing_commits` — its own, else the newest of its descendants') is an
+    ancestor of ``prod_sha`` (the deployed sha the Prod row reads). Its ``prod`` stamp is then the
+    later of its landing and the deployment (``prod_at``). The record's own ``on-prod``/``Closed``
+    also waits on the operator's tick; this is what production runs. A Feature no commit can be
+    traced to is appended to ``untraced`` (once), never silently dropped. Returns the ids marked."""
+    kids = _children(items)
     marked = []
     for fid, f in items.items():
         if f.get('type') != 'feature' or f.get('removed') or not f.get('landed') or f.get('prod'):
             continue
-        shas = list(f.get('landing_shas') or [])
+        shas = landing_commits(fid, items, kids, naming)
         if not shas:
-            stack, seen = list(kids.get(fid, ())), set()
-            while stack:
-                c = stack.pop()
-                if c in seen or items[c].get('removed'):
-                    continue
-                seen.add(c)
-                shas += items[c].get('landing_shas') or []
-                stack += kids.get(c, ())
-        if shas and all(is_ancestor(s, prod_sha) for s in shas):
+            if untraced is not None and fid not in untraced:
+                untraced.append(fid)
+            continue
+        if not prod_sha:
+            continue
+        newest = _newest(shas, is_ancestor) if len(shas) > 1 else shas[0]
+        f['landing_sha'] = newest
+        if (is_ancestor(newest, prod_sha) if newest else all(is_ancestor(s, prod_sha) for s in shas)):
             at = prod_at
             if isinstance(at, (int, float)):  # epoch milliseconds
                 at = iso(datetime.datetime.fromtimestamp(at / 1000, tz=datetime.timezone.utc))
             f['prod'] = _later(f['landed'], at) if at else f['landed']
             marked.append(fid)
     return marked
+
+
+def diagnostics(items, untraced):
+    """The scorecard's diagnostic lines: one per landed Feature no commit can be traced to."""
+    return [f"{fid} {UNTRACEABLE}" + (f" ({items[fid]['title'][:48]})" if items[fid].get('title') else '')
+            for fid in untraced]
 
 
 def prod_deployment(product):
@@ -261,6 +324,42 @@ def _git_ancestor(product):
         except (OSError, subprocess.TimeoutExpired):
             return False
     return check
+
+
+def _trunk_naming(product):
+    """``id -> sha``: the newest commit on the trunk (``origin/<main>``, else ``<main>``) whose
+    subject names the id — the same id token the evidence reads, a document-lane commit (a spec, a
+    plan, a review) excepted. The log is read once, on first use."""
+    import subprocess
+    from asf.evidence.evidence import DOC_LANE_SUBJECT, id_tokens
+    table = []
+
+    def read():
+        main = getattr(product, 'main', None) or 'main'
+        for ref in (f'origin/{main}', main):
+            try:
+                r = subprocess.run(['git', '-C', product.repo_dir, 'log', '--format=%H%x09%s', ref],
+                                   capture_output=True, text=True, timeout=60)
+            except (OSError, subprocess.TimeoutExpired):
+                return {}
+            if r.returncode == 0:
+                break
+        else:
+            return {}
+        out = {}
+        for line in r.stdout.splitlines():  # newest first: the first commit naming an id wins
+            sha, _, subject = line.partition('\t')
+            if not sha or DOC_LANE_SUBJECT.search(subject):
+                continue
+            for iid in id_tokens(subject):
+                out.setdefault(iid, sha)
+        return out
+
+    def naming(iid):
+        if not table:
+            table.append(read())
+        return table[0].get(iid)
+    return naming
 
 
 def ids_in(text):
@@ -337,12 +436,14 @@ def load(root, product=None, *, registry=True, forge=True, as_of=None):
         except Exception:  # noqa: BLE001 — the forge being down never loses the scorecard
             pass
     items = load_cards(root)
+    untraced = []
     if product is not None and getattr(product, 'repo_dir', None):
         sha, at = prod_deployment(product)
-        attribute_prod(items, sha, at, _git_ancestor(product))
+        attribute_prod(items, sha, at, _git_ancestor(product), naming=_trunk_naming(product),
+                       untraced=untraced)
     return Facts(items=items, sessions=_stream(root, 'sessions'), ci=_stream(root, 'ci'),
                  gates=_stream(root, 'gates'), runs=runs, clutter=clutter,
-                 as_of=as_of or now_iso())
+                 as_of=as_of or now_iso(), diagnostics=diagnostics(items, untraced))
 
 
 def state_file(product, name):

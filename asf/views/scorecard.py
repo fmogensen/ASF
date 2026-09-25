@@ -49,6 +49,7 @@ def compute(root, product, weeks=4, facts=None):
         'causes': [dict(c.__dict__, loop=state.get(c.key)) for c in causes],
         'loop': state,
         'snapshots': loop.snapshots(product)[-weeks:],
+        'diagnostics': list(facts.diagnostics),
     }
 
 
@@ -106,6 +107,8 @@ def render(d):
         out += ['', '**Verified**', '']
         for k, v in sorted(done.items()):
             out.append(f"- {k}: {v.get('card')} {v['verdict']} ({_n(v.get('before'))} → {_n(v.get('after'))})")
+    if d.get('diagnostics'):
+        out += ['', '**Diagnostics**', ''] + [f'- {line}' for line in d['diagnostics']]
     return '\n'.join(out) + '\n'
 
 

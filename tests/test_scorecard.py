@@ -466,6 +466,87 @@ class ProdAttributionTests(unittest.TestCase):
         self.assertEqual(f.items['F-0001']['prod'], '2026-09-25T17:13:25Z')
 
 
+def _git(repo, *args):
+    import subprocess
+    return subprocess.run(['git', '-C', repo, *args], capture_output=True, text=True, check=True,
+                          env=dict(os.environ, GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@e',
+                                   GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@e')).stdout.strip()
+
+
+class ChildrenResolvedProdTests(unittest.TestCase):
+    """A Feature landed by ``rule: children-resolved`` has no landing sha of its own: its landing
+    commit is the newest of its Stories'/Tasks' — their evidence sha, else a trunk commit whose
+    subject names them — and one with none is a diagnostic line, never silently dropped."""
+
+    LANDED = ['2026-09-20: created', '2026-09-24 01:21 ingest: stage building 1/1 → landed (x)']
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo, self.root = os.path.join(tmp.name, 'repo'), os.path.join(tmp.name, 'record')
+        os.makedirs(self.repo)
+        _git(self.repo, 'init', '-q', '-b', 'main')
+
+        def commit(msg):
+            _git(self.repo, 'commit', '-q', '--allow-empty', '-m', msg)
+            return _git(self.repo, 'rev-parse', 'HEAD')
+        commit('init')
+        self.t11 = commit('feat: part one (T-0011)')      # no sha in T-0011's evidence: named on the trunk
+        commit('plan(T-0011): a later document commit')   # a document lane never lands it
+        self.t12 = commit('feat: part two')               # T-0012's merged PR, by its evidence
+        self.f40 = commit('feat: whole (F-0040)')
+        self.prod = self.f40
+        self.t21 = commit('feat: after the deploy (T-0021)')
+
+        def ev(*lines):
+            return 'evidence:\n' + ''.join(f'  - "{line}"\n' for line in lines)
+        write(self.root, 'epics/E-0001.md', card_md('E-0001', 'epic', 'E', 'Active', 'card',
+                                                     ['2026-09-01: created'], parent='null'))
+        for fid, extra in (('F-0010', ev('1/1 children Closed', 'rule: children-resolved')),
+                           ('F-0020', ev('1/1 children Closed', 'rule: children-resolved')),
+                           ('F-0030', ev('1/1 children Closed', 'rule: children-resolved')),
+                           ('F-0040', ev(f'commit {self.f40[:7]} names F-0040', 'rule: landed'))):
+            write(self.root, f'features/{fid}.md', card_md(fid, 'feature', f'feature {fid}', 'Resolved',
+                                                           'landed', self.LANDED, extra=extra))
+        cards = (('S-0010', 'story', 'F-0010', ev('rule: tasks-resolved')),
+                 ('T-0011', 'task', 'F-0010', 'stories: [S-0010]\n' + ev('F-0010 Closed', 'rule: parent-closed')),
+                 ('T-0012', 'task', 'F-0010', 'stories: [S-0010]\n'
+                  + ev(f'PR #9 merged ({self.t12[:9]})', 'rule: landed')),
+                 ('T-0021', 'task', 'F-0020', ev('rule: parent-closed')),
+                 ('S-0030', 'story', 'F-0030', ev('rule: tasks-resolved')))
+        for iid, typ, parent, extra in cards:
+            write(self.root, f'{typ}s/{iid}.md', card_md(iid, typ, iid, 'Closed', 'landed', self.LANDED,
+                                                          parent=parent, extra=extra))
+
+    def load(self):
+        with mock.patch.object(facts, 'prod_deployment', return_value=(self.prod, '2026-09-25T17:13:25Z')):
+            return facts.load(self.root, Prod(repo_dir=self.repo), registry=False, forge=False,
+                              as_of='2026-09-25T20:00:00Z')
+
+    def test_the_landing_commit_comes_from_the_descendants(self):
+        f = self.load()
+        self.assertEqual(f.items['F-0010']['prod'], '2026-09-25T17:13:25Z')
+        self.assertEqual(f.items['F-0010']['landing_sha'], self.t12[:9])  # the newer of the two
+        self.assertEqual(f.items['F-0040']['prod'], '2026-09-25T17:13:25Z')   # its own sha
+        self.assertIsNone(f.items['F-0020']['prod'])  # its Task's commit came after the deploy
+        self.assertEqual(f.items['F-0020']['landing_sha'], self.t21)
+
+    def test_a_feature_with_no_traceable_commit_is_a_diagnostic_once(self):
+        f = self.load()
+        self.assertIsNone(f.items['F-0030']['prod'])
+        self.assertEqual(f.diagnostics, ['F-0030 landed without a traceable commit (feature F-0030)'])
+        from asf.views import scorecard as view
+        d = {'product': 'p', 'as_of': f.as_of, 'headline': score.headline(f), 'clutter': {},
+             'weeks': [], 'features': [], 'window_days': 14, 'causes': [], 'loop': {},
+             'rank': {'usd': 0, 'hours': 0, 'by_kind': [], 'by_failure': [], 'by_ci_job': [],
+                      'by_feature': []}, 'diagnostics': f.diagnostics}
+        self.assertEqual(view.render(d).count('F-0030 landed without a traceable commit'), 1)
+
+    def test_the_value_row_counts_them(self):
+        line = score.headline_line(score.headline(self.load()))
+        self.assertTrue(line.startswith('2 on prod / 4 landed'), line)
+
+
 class WiringTests(unittest.TestCase):
     def test_the_daily_step_runs_the_loop(self):
         from asf.tick import step_daily
