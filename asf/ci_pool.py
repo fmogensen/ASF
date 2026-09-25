@@ -51,7 +51,7 @@ import subprocess
 from asf import env
 
 PROVIDER_PREFIX = 'provider-'
-CLASS_PREFIX = 'class:'
+CLASS_PREFIX = 'class-'   # GitHub runner labels: letters, digits, '-', '_', '.' only
 #: the variable a product script reads the class from (else the ``class:`` label)
 CLASS_ENV = 'RUNNER_CLASS'
 POOL_FIELDS = ('runner', 'box', 'provider', 'size', 'role', 'slots', 'class')
