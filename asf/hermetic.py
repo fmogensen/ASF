@@ -31,7 +31,8 @@ import re
 #: The variables that name the caller — the tick's product, a session's job, its session id and
 #: mint range. None may reach a child that is not that caller: the gate is the branch's result, a
 #: worker's session its own.
-CALLER_IDENTITY = ('ASF_PRODUCT', 'ASF_JOB', 'ASF_SESSION', 'BACKLOG_ID_RANGE')
+CALLER_IDENTITY = ('ASF_PRODUCT', 'ASF_JOB', 'ASF_SESSION', 'BACKLOG_ID_RANGE', 'ASF_ITEM',
+                   'ASF_ITEM_KIND')
 
 #: What a git hook exports; a ``git`` child that inherits them ignores its ``cwd``.
 GIT_HOOK = ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE')

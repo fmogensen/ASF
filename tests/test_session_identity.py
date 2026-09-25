@@ -259,6 +259,49 @@ class CommitTrailerTest(Home):
         msg = _git(['log', '-1', '--format=%B'], wt, env=e).stdout
         self.assertIn('chained', msg)
 
+    def _subject(self, wt, e):
+        return _git(['log', '-1', '--format=%s'], wt, env=e).stdout.strip()
+
+    def test_commit_msg_prefixes_the_item_id(self):
+        job_obj = self._spawn_job(job='j6')
+        self.assertEqual(job_obj.env['ASF_ITEM'], 'B-0001')
+        kind = job_obj.env['ASF_ITEM_KIND']
+        self.assertIn(kind, ('task', 'fix', 'spec', 'plan', 'chore'))
+        wt = job_obj.cwd
+        e = self._env(job_obj)
+        for msg, want in (('tidy up', f'{kind}(B-0001): tidy up'),
+                          ('feat: the door', 'feat(B-0001): the door'),
+                          ('refactor!: drop it', 'refactor(B-0001)!: drop it'),
+                          ('fix(B-0001): named already', 'fix(B-0001): named already'),
+                          ('see b-0001 here', 'see b-0001 here')):
+            p = self._commit(wt, e, msg=msg)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(self._subject(wt, e), want)
+            self.assertEqual(githooks.name_subject(msg, 'B-0001', kind), want)
+        body = _git(['log', '-1', '--format=%B'], wt, env=e).stdout
+        self.assertIn('ASF-Session:', body)
+
+    def test_commit_msg_takes_the_id_from_the_job_name_without_asf_item(self):
+        job_obj = self._spawn_job(job='fix-bug-b-0001')
+        wt = job_obj.cwd
+        e = self._env(job_obj)
+        e.pop('ASF_ITEM')
+        e.pop('ASF_ITEM_KIND')
+        self.assertEqual(self._commit(wt, e, msg='plain').returncode, 0)
+        self.assertEqual(self._subject(wt, e), 'chore(B-0001): plain')
+
+    def test_commit_msg_never_blocks_and_leaves_a_non_worker_commit_alone(self):
+        job_obj = self._spawn_job(job='j7')
+        wt = job_obj.cwd
+        e = self._env(job_obj)
+        e.pop('ASF_JOB')
+        e.pop('ASF_ITEM')
+        self.assertEqual(self._commit(wt, e, msg='no job').returncode, 0)
+        self.assertEqual(self._subject(wt, e), 'no job')
+        e = self._env(job_obj)
+        e['ASF_ITEM'] = 'T-[0001'  # an id awk cannot use as a pattern: the commit still goes
+        self.assertEqual(self._commit(wt, e, msg='odd id').returncode, 0)
+
     def test_commit_outside_a_session_gets_nothing(self):
         job_obj = self._spawn_job(job='j5')
         wt = job_obj.cwd
