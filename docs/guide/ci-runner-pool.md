@@ -132,6 +132,65 @@ workflow *runs* (each of which fans out into many jobs) rather than jobs. The or
 `capacity.ci`, then the pool, then the operator's `capacity.per_product.ci`, then capped by
 `capacity.total.ci`.
 
+## The CI start queue
+
+A ceiling on runs in flight does not know that one run fans out into three heavy jobs and another
+into one light one. So with a pool declared, every CI run ASF itself starts waits in one queue per
+product until the runners it will need are free:
+
+| start | held how |
+| --- | --- |
+| the lane opening a PR (its `pull_request` run) | the PR is not opened; the branch stays `PUSHED` |
+| the lane merging a PR, or fast-forwarding the trunk (the trunk's `push` run) | the green branch waits (`WAITING`, reason `ci queue`) |
+| the tick's `batch` step | the step waits |
+| a deploy dispatch | not dispatched; the next tick asks again |
+
+A push the CI host turns into a run on its own cannot be delayed once made, so the push (or the
+PR, or the merge) is what is held.
+
+**When a run starts.** Runs in flight must be below the CI ceiling (`capacity.ci`, above) — a hard
+ceiling over everything the queue admits. And, per runner class, the free runners (online, not
+busy, at their `slots`, from the runners API) must cover the run's **expected jobs**: the last
+`history` completed runs of the workflow that start triggers, their jobs grouped by the class of
+the runner each ran on (the `class`, else the `role`), the median per run rounded up and capped at
+what the pool has of that class. Everything ahead in line has its expected jobs set aside first, so
+a heavy run at the head is not starved by lighter ones behind it; a run only needing a class with
+room still goes. A run admitted in the last three minutes still holds its runners, since its jobs
+queue on the host before any runner shows busy.
+
+**Order.** S1 and hotfix items first, then trunk runs (every deploy waits on a green trunk), then
+PRs of customer-facing Features (the Feature says `customer_facing: true`, or the branch touches
+`customer_paths`), then everything else; oldest first within each. An entry nobody asked about for
+30 minutes leaves the line.
+
+**Every hold is one line:**
+
+```
+ci queue: T-0341 waits — heavy 0 free, needs 3 (S2, 4th in line)
+ci queue: T-0500 waits — at the ci ceiling (4/4 runs in flight) (trunk, 1st in line)
+```
+
+and the status Capacity row ends with the depth and the head: `ci queue 3, head T-0341 waits — …`.
+
+**Superseded trunk runs.** A trunk run judges every commit below it, so an older trunk `push` run
+still queued behind a newer one is moot. Each tick the lane cancels those, per trunk workflow,
+keeping the newest queued-or-running run; a run already in progress finishes. One line per cancel:
+`ci queue: cancelled superseded main run 2 (checks.yml at bbbbbbbbb) — run 4 at ddddddddd judges it`.
+
+```yaml
+ci:
+  queue:
+    mode: on        # on (the default with a ci.pool) | dry-run | off
+    history: 10     # completed runs of each workflow measured
+    workflows: {pr: checks.yml, trunk: checks.yml, batch: batch.yml}   # default: ci.workflow
+```
+
+`mode: dry-run` decides every start and prints each hold as `ci queue (dry-run): … would wait`
+(and each cancel as `would cancel`) but starts everything and writes nothing — the way to watch it
+before trusting it. `asf ci queue --product <p>` prints the line with each entry's expected jobs
+and what would start now, writing nothing. A product with no `ci.pool`, or `mode: off`, is not
+queued: every start goes at once as before, and the queue makes no `gh` call.
+
 ## Moving an existing product over
 
 A product whose jobs route by provider today moves in three steps, each safe on its own:

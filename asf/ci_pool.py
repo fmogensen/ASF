@@ -902,11 +902,14 @@ def cmd_reconcile(args):
 
 
 def register(subparsers):
-    p = subparsers.add_parser('ci', help='the CI runner pool: reconcile the host with ci.pool')
+    p = subparsers.add_parser('ci', help='the CI runner pool: reconcile the host with ci.pool; '
+                                         'the CI start queue')
     sub = p.add_subparsers(dest='ci_command', required=True)
     r = sub.add_parser('reconcile', help='plan (default) or --apply the labels ci.pool declares')
     env.add_product_arg(r)
     r.add_argument('--apply', action='store_true',
                    help='write the labels (adds before removes); default is a dry-run plan')
     r.set_defaults(run=cmd_reconcile)
+    from asf import ci_queue
+    ci_queue.register(sub)
     return p

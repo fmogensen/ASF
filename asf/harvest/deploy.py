@@ -650,6 +650,16 @@ def marker_refusal(product, sha, env='prod', scan=None):
             f" {cc.describe(hits)}; nothing deploys to {env} until a trunk commit removes it")
 
 
+def queue_admits(product, env, sha, out=print, source=None):
+    """True when the CI start queue (:mod:`asf.ci_queue`) lets ``env``'s deploy dispatch start
+    now — always, for a product that is not queued. A hold is the queue's one line; the next tick
+    asks again."""
+    from asf import ci_queue
+    return ci_queue.admit(product, f'deploy:{env}', 'deploy', item=f'deploy {env} {sha[:9]}',
+                          workflow=ci_queue.workflow_for(product, 'deploy', workflow(product, env)),
+                          source=source, out=out).admitted
+
+
 def tick(product, out=print, sh=_sh):
     """The tick's deploy pass: print one line per environment and, where :func:`decide` says so,
     dispatch its deploy workflow. A refused dispatch is one loud line, and the next tick tries
@@ -663,6 +673,8 @@ def tick(product, out=print, sh=_sh):
         marked = marker_refusal(product, f['candidate'], e)
         if marked:
             out(marked)
+            continue
+        if not queue_admits(product, e, f['candidate'], out):
             continue
         if sh(dispatch_argv(product, f['candidate'], e)) is None:
             out(f"{_head(e)} DISPATCH REFUSED — gh workflow run {workflow(product, e)} for"

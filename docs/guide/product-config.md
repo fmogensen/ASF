@@ -323,6 +323,10 @@ of them set there is none and no `gh` call is made. `asf capacity` names the sou
 `ci from` column: `product`, `ci.pool: heavy 12, light 7`, `product (overrides ci.pool 19)`,
 `operator default` or `operator total`.
 
+With a runner pool declared, every CI run ASF starts also goes through the product's **CI start
+queue** (`ci.queue`), which starts a run only while each runner class it needs has enough free
+runners — see [the CI start queue](ci-runner-pool.md#the-ci-start-queue).
+
 **Quota bands** (`config.yaml`, percent of each usage window):
 
 ```yaml

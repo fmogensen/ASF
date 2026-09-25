@@ -152,7 +152,8 @@ def capacity_cell(cfg, product):
     cfg_cap = (cfg or {}).get('capacity')
     configured = (isinstance(prod_cap, dict) and prod_cap) or (isinstance(cfg_cap, dict) and cfg_cap) \
         or capacity_mod.deprecations(cfg)
-    if not configured:
+    from asf import ci_queue
+    if not configured and ci_queue.mode(product) == 'off':
         return not_configured('capacity')
     r = capacity_mod.resolve(product, cfg)
     inflight = capacity_mod.inflight_sessions(product.name)
@@ -166,14 +167,18 @@ def capacity_cell(cfg, product):
         parts.append(lane)
     if r.ci is not None:
         parts.append(ci_clause(r.ci_inflight, r.ci))
+    queued = ci_queue.status_clause(product)
+    if queued:  # the CI start queue: its depth and the head's hold line (no gh call)
+        parts.append(queued)
     return ', '.join(parts)
 
 
 def ci_clause(inflight, gate):
     """The CI clause of the Capacity row. ``capacity.ci`` is a *start gate*, not a ceiling on
     every run: the tick holds its ``batch`` step while ``ci.workflow`` has that many runs in
-    flight, and nothing else waits on it — a worker's PR push, a harvest merge onto the trunk and
-    a deploy dispatch all start runs regardless. The in-flight count is every ``ci.workflow`` run
+    flight. A product with a ``ci.pool`` also queues the lane's PRs and merges and the deploy
+    dispatch behind it (:mod:`asf.ci_queue`, whose clause follows this one); without one they
+    start runs regardless. The in-flight count is every ``ci.workflow`` run
     (PR, trunk and batch alike), so an ``x/y`` fraction read as a breached cap; the clause names
     the total and what the gate holds instead."""
     n = inflight if inflight is not None else '?'

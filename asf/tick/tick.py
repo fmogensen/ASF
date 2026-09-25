@@ -37,7 +37,7 @@ import subprocess
 import sys
 import time
 
-from asf import capacity, env
+from asf import capacity, ci_queue, env
 from asf.record.index import do_index
 from asf.tick import steps, summary
 
@@ -431,6 +431,10 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
                     and resolved.ci_inflight >= resolved.ci):
                 print(f"waits    batch — at ci capacity ({resolved.ci_inflight}/{resolved.ci})")
                 step_rc = 0
+            elif step == 'batch' and not ci_queue.admit(
+                    product, 'batch', 'batch', item='batch',
+                    inflight=resolved.ci_inflight).admitted:
+                step_rc = 0  # the hold's one line is printed by the queue
             else:
                 with locks.command(step) as free:
                     if not free:
