@@ -2419,6 +2419,24 @@ class ProductHarvestTests(unittest.TestCase):
             self.assertEqual(lane.Lane(self.pr_conv(), self.state_dir).host.trunk_red(['gate']),
                              {})
 
+    def test_trunk_red_flags_a_rerun_that_flipped_from_red_to_green(self):
+        """B-0129: a trunk run that failed and was rerun to green is flaky, not clean — the
+        retry that turned it green does not erase the failure it needed to overturn, so a PR
+        red on that same job still waits instead of being sent back."""
+        sha = self.push_trunk('a.txt')
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        runs = {sha: [{'name': 'gate', 'status': 'completed', 'conclusion': 'failure',
+                       'completed_at': '2026-09-25T00:42:00Z'},
+                      {'name': 'gate', 'status': 'completed', 'conclusion': 'success',
+                       'completed_at': '2026-09-25T07:46:00Z'}]}
+
+        def gh(args):
+            s = args[1].split('/commits/')[1].split('/')[0]
+            return 0, json.dumps({'check_runs': runs.get(s, [])}), ''
+        host_ = lane.Lane(self.pr_conv(), self.state_dir).host
+        with mock.patch.object(harvest, '_gh', side_effect=gh):
+            self.assertEqual(host_.trunk_red(['gate']), {'gate': sha})
+
     def test_missing_policy_reads_one_value_or_a_map(self):
         conv = Conventions.from_mapping
         self.assertEqual(lane.missing_policy(conv({}), 'docs'), 'local-gate')
