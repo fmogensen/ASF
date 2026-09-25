@@ -571,6 +571,7 @@ class Orphans(LaneRepo):
             return 0, '', ''
         lines = []
         with mock.patch.object(lane, 'repo_slug', return_value='o/p'), \
+                mock.patch('asf.init.slug_from_url', return_value='o/p'), \
                 mock.patch.object(harvest, '_gh', side_effect=fake):
             ln = lane.Lane(self.product(), self.state_dir, out=lines.append, items={},
                            now=time.time() + self.LATER)
