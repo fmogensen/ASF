@@ -111,7 +111,7 @@ def run_step0(root, product, fresh=False):
                           (plan_order.trunk_reader(product),), product=product)
     default_bug_epic = product.conventions.get('default_bug_epic')
     with timed('file-bugs'):
-        bug_args = _ns(default_bug_epic=default_bug_epic,
+        bug_args = _ns(default_bug_epic=default_bug_epic, product=product.name,
                        file_bug_level=approvals.level_of(product, 'file_bug'))
         stage.guarded(root, 'file-bugs', lambda r: cmd_file_bugs(bug_args, r), product=product)
     with timed('rollup'):
