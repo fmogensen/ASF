@@ -386,6 +386,12 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
             # the run's own work is the correction's input: the next session on the branch
             # commits and pushes it, or says why not (B-0051, B-0052)
             text = lifecycle.unpushed_text(reason)
+            if lifecycle.rebase_conflict(line):  # the factory's rebase conflicted: files named
+                text = lifecycle.rebase_conflict_text(s.get('branch') or job, line)
+                fields, line = lifecycle.rebase_conflict_hold(registry, s, text, now)
+                pool_mod.update_session(product, job, **fields)
+                found.append((job, 'held', line.split(': ', 1)[1]))
+                continue
             if lifecycle.stale_head(line):  # origin holds commits this head lacks: a rebase
                 text = lifecycle.stale_head_text(s.get('branch') or job, line)
             fields, line = lifecycle.hold(registry, s, lifecycle.UNPUSHED, text, now)

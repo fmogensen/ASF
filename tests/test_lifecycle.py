@@ -651,25 +651,40 @@ class UnpushedAfterARebaseTest(unittest.TestCase):
         self.sh(['push', '-q', 'origin', 'fix/B-9999'], other)
         return self.sh(['rev-parse', 'HEAD'], other)
 
+    def _remote(self):
+        return self.sh(['ls-remote', '--heads', 'origin', 'fix/B-9999'], self.repo).split()[0]
+
+    def _on_remote(self, sha):
+        return subprocess.run(['git', 'merge-base', '--is-ancestor', sha, self._remote()],
+                              cwd=self.repo).returncode == 0
+
     def test_a_stale_worktree_never_overwrites_newer_remote_commits(self):
         # 2026-09-25: a worktree at an older head published over a person's newer commit. The
-        # lease was the current remote head, so it held — and the newer commit was erased.
+        # factory now rebases onto the remote head first: the newer commit survives.
         self.sh(['reset', '-q', '--hard', self.fix_sha], self.repo)  # the stale worktree
         newer = self._push_from_elsewhere('newer-work')
+        ok, line = lc.publish(self.repo, 'fix/B-9999', newer, main='main')
+        self.assertTrue(ok, line)
+        self.assertIn('rebased onto origin/fix/B-9999 (+1 remote commits) and pushed', line)
+        self.assertTrue(self._on_remote(newer))
+
+    def test_a_stale_dirty_worktree_is_refused_and_never_rebased(self):
+        self.sh(['reset', '-q', '--hard', self.fix_sha], self.repo)
+        newer = self._push_from_elsewhere('newer-work')
+        with open(os.path.join(self.repo, 'dirty'), 'w') as f:
+            f.write('dirty')
         ok, line = lc.publish(self.repo, 'fix/B-9999', newer, main='main')
         self.assertFalse(ok, line)
         self.assertIn('would lose 1 commit', line)
         self.assertIn(newer[:9], line)
-        self.assertEqual(self.sh(['ls-remote', '--heads', 'origin', 'fix/B-9999'], self.repo).split()[0],
-                         newer)
+        self.assertEqual(self._remote(), newer)
 
     def test_a_stale_rebased_worktree_never_overwrites_newer_remote_commits(self):
         # rebased onto the trunk, and origin gained a commit the rebase never saw
         newer = self._push_from_elsewhere('newer-work')
         ok, line = lc.publish(self.repo, 'fix/B-9999', newer, main='main')
-        self.assertFalse(ok, line)
-        self.assertEqual(self.sh(['ls-remote', '--heads', 'origin', 'fix/B-9999'], self.repo).split()[0],
-                         newer)
+        self.assertTrue(ok, line)
+        self.assertTrue(self._on_remote(newer))
 
     def test_a_rebase_holding_copies_of_every_remote_commit_still_publishes(self):
         newer = self._push_from_elsewhere('newer-work')
@@ -688,6 +703,106 @@ class UnpushedAfterARebaseTest(unittest.TestCase):
 
     def test_a_branch_never_pushed_is_counted_against_the_trunk(self):
         self.assertEqual(lc.unpushed_commits(self.repo, '', 'main'), 1)
+
+
+def _build_ahead(root):
+    """A bare origin, a clone holding the lane branch ``lane/x`` at one commit (pushed), and a
+    second clone that pushed one more commit onto it — the clone is the stale worktree."""
+    def git(*args, cwd):
+        subprocess.run(['git', *args], cwd=cwd, check=True, capture_output=True, text=True)
+    origin, wt, other = (os.path.join(root, n) for n in ('origin.git', 'wt', 'other'))
+    git('init', '-q', '--bare', '-b', 'main', origin, cwd=root)
+    git('clone', '-q', origin, wt, cwd=root)
+    for k, v in (('user.name', 'T'), ('user.email', 't@example.com'), ('commit.gpgsign', 'false')):
+        git('config', k, v, cwd=wt)
+    for name in ('shared', 'mine'):
+        with open(os.path.join(wt, name), 'w') as f:
+            f.write('base\n')
+    git('add', '-A', cwd=wt)
+    git('commit', '-qm', 'seed', cwd=wt)
+    git('push', '-q', 'origin', 'HEAD:main', cwd=wt)
+    git('checkout', '-q', '-b', 'lane/x', cwd=wt)
+    git('push', '-q', 'origin', 'lane/x', cwd=wt)
+    git('clone', '-q', '-b', 'lane/x', origin, other, cwd=root)
+    for k, v in (('user.name', 'P'), ('user.email', 'p@example.com'), ('commit.gpgsign', 'false')):
+        git('config', k, v, cwd=other)
+    with open(os.path.join(other, 'shared'), 'w') as f:
+        f.write('theirs\n')
+    git('commit', '-qam', 'remote work', cwd=other)
+    git('push', '-q', 'origin', 'lane/x', cwd=other)
+
+
+try:
+    from tests.gitfixture import Template
+except ImportError:  # run from inside tests/
+    from gitfixture import Template
+
+AHEAD = Template(_build_ahead, prefix='lifecycle_ahead_')
+
+
+class FactoryRebaseTests(unittest.TestCase):
+    """The push guard found origin ahead: the factory rebases a clean worktree onto
+    ``origin/<branch>`` itself and pushes; a conflict is aborted and named, never a merge or a
+    force, and the first such hold spends no round."""
+
+    def setUp(self):
+        self.root = AHEAD.fresh()
+        self.wt = os.path.join(self.root, 'wt')
+
+    def git(self, *args):
+        return subprocess.run(['git', *args], cwd=self.wt, check=True, capture_output=True,
+                              text=True).stdout.strip()
+
+    def commit(self, name, text):
+        with open(os.path.join(self.wt, name), 'w') as f:
+            f.write(text)
+        self.git('commit', '-qam', f'edit {name}')
+        return self.git('rev-parse', 'HEAD')
+
+    def remote(self):
+        return self.git('ls-remote', '--heads', 'origin', 'lane/x').split()[0]
+
+    def test_a_clean_rebase_is_pushed_and_logged(self):
+        remote = self.remote()
+        self.commit('mine', 'my work\n')
+        ok, line = lc.publish(self.wt, 'lane/x', remote, main='main')
+        self.assertTrue(ok, line)
+        self.assertTrue(line.startswith('rebased onto origin/lane/x (+1 remote commits) and pushed'),
+                        line)
+        self.assertEqual(self.remote(), self.git('rev-parse', 'HEAD'))
+        self.assertEqual(self.git('rev-parse', 'HEAD~1'), remote)  # a fast-forward: no merge
+        self.assertEqual(self.git('rev-list', '--merges', '--count', 'HEAD'), '0')
+
+    def test_a_conflict_is_aborted_and_names_the_files(self):
+        remote = self.remote()
+        mine = self.commit('shared', 'mine\n')
+        ok, line = lc.publish(self.wt, 'lane/x', remote, main='main')
+        self.assertFalse(ok, line)
+        self.assertIn('rebase conflicts in: shared', line)
+        self.assertTrue(lc.rebase_conflict(line))
+        self.assertIsNone(lc.push_failure(line))
+        self.assertEqual(self.git('rev-parse', 'HEAD'), mine)  # aborted: as it was
+        self.assertEqual(self.git('status', '--porcelain'), '')
+        self.assertFalse(os.path.isdir(os.path.join(self.wt, '.git', 'rebase-merge')))
+        self.assertEqual(self.remote(), remote)
+        text = lc.rebase_conflict_text('lane/x', line)
+        self.assertIn('rebase conflicts in: shared', text)
+
+    def test_the_first_conflict_hold_spends_no_round_the_second_does(self):
+        path = os.path.join(self.root, 's.jsonl')
+        run = {'job': 'a', 'item': 'B-0001', 'branch': 'lane/x', 'pid': 1, 'started': 't1'}
+        with open(path, 'w') as f:
+            f.write(json.dumps(run) + '\n')
+        fields, line = lc.rebase_conflict_hold(path, run, 'rebase conflicts in: shared', 't2')
+        self.assertNotIn('rounds', fields)
+        self.assertEqual(fields['correction']['kind'], lc.REBASE_CONFLICT)
+        self.assertIn('no round spent', line)
+        again = {'job': 'b', 'item': 'B-0001', 'branch': 'lane/x', 'pid': 2, 'started': 't3'}
+        with open(path, 'a') as f:
+            f.write(json.dumps(dict(fields, job='a')) + '\n')
+            f.write(json.dumps(again) + '\n')
+        fields, line = lc.rebase_conflict_hold(path, again, 'rebase conflicts in: shared', 't4')
+        self.assertEqual(fields['rounds'], 1)
 
 
 class OutcomeClassTests(unittest.TestCase):

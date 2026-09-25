@@ -701,11 +701,15 @@ def publish(wt, branch, remote_sha='', main='main'):
     if not branch or branch == main:
         return False, f'publish refused: {branch or "no branch"} is not a lane branch'
     ref = f'refs/heads/{branch}'
+    rebased = ''
     if remote_sha:
         head = _git(['rev-parse', 'HEAD'], wt).stdout.strip()
         lost = lost_commits(wt, head, remote_sha, branch)
         if lost is None or lost:
-            return False, f'publish {branch} refused: {loss_refusal(branch, lost)}'
+            ok, fetched, rebased = rebase_onto_remote(wt, branch)
+            if not ok:
+                return False, f'publish {branch} refused: {rebased or loss_refusal(branch, lost)}'
+            remote_sha = fetched
     args = ['push', '-q', 'origin', f'HEAD:{ref}']
     if remote_sha:
         args.insert(2, f'--force-with-lease={ref}:{remote_sha}')
@@ -714,7 +718,56 @@ def publish(wt, branch, remote_sha='', main='main'):
         why = [ln for ln in (p.stderr or p.stdout).splitlines() if ln.strip()]
         return False, f'publish {branch} refused: {why[-1].strip() if why else "push failed"}'
     head = _git(['rev-parse', '--short', 'HEAD'], wt).stdout.strip()
+    if rebased:
+        return True, f'{rebased} and pushed: published {branch} at {head}'
     return True, f'published {branch} at {head}' + (' (rebased; lease held)' if remote_sha else '')
+
+
+#: The line a publish refused for a rebase onto the remote head that conflicted carries.
+REBASE_CONFLICT_RE = re.compile(r'\brebase conflicts in: ')
+
+
+def rebase_onto_remote(wt, branch):
+    """``(ok, remote_sha, line)``: rebase the worktree's clean HEAD onto a freshly fetched
+    ``origin/<branch>`` — the factory's own answer to a head that lacks commits origin holds.
+    Sessions sent back "rebase onto origin/…, then push" failed at it round after round, each
+    round an expensive session; the rebase is deterministic, so the factory does it. Never a
+    merge, never a force: the push that follows is a fast-forward of the fetched head.
+
+    ``ok`` with the fetched sha and ``rebased onto origin/<branch> (+N remote commits)``; a
+    conflict is aborted (the worktree is left as it was) and ``line`` is ``rebase conflicts in:
+    a, b``; a dirty tree or a failed fetch gives ``(False, '', '')`` — the caller keeps its own
+    refusal."""
+    st = _git(['status', '--porcelain'], wt)
+    if st.returncode != 0 or st.stdout.strip():
+        return False, '', ''
+    tracking = f'refs/remotes/origin/{branch}'
+    if _git(['fetch', '-q', 'origin', f'+refs/heads/{branch}:{tracking}'], wt).returncode != 0:
+        return False, '', ''
+    fetched = _git(['rev-parse', tracking], wt).stdout.strip()
+    if not fetched:
+        return False, '', ''
+    n = _count(_git(['rev-list', '--count', f'HEAD..{tracking}'], wt))
+    r = _git(['rebase', '-q', tracking], wt)
+    if r.returncode != 0:
+        files = _git(['diff', '--name-only', '--diff-filter=U'], wt).stdout.split()
+        _git(['rebase', '--abort'], wt)
+        return False, '', (f'rebase conflicts in: {", ".join(files)}' if files else '')
+    return True, fetched, f'rebased onto origin/{branch} (+{n} remote commits)'
+
+
+def rebase_conflict(text):
+    """True for a publish refused because the factory's rebase onto the remote head conflicted."""
+    return bool(REBASE_CONFLICT_RE.search(text or ''))
+
+
+def rebase_conflict_text(branch, line):
+    """The correction a run whose factory rebase onto ``origin/<branch>`` conflicted hands its
+    next session: the conflicting files, named."""
+    files = (line or '').split('rebase conflicts in: ', 1)[-1]
+    return (f'origin/{branch} holds commits this worktree lacks and the factory\'s rebase onto it '
+            f'conflicted — rebase conflicts in: {files}. Rebase onto origin/{branch}, resolve '
+            f'those files, and commit; never a force, never a merge')
 
 
 def gather(product, run, alive=None, worktree=None):
@@ -789,7 +842,7 @@ def push_failure(text):
     """The retry class of a push's failure text — :data:`NETWORK_ERROR` for a transport error,
     :data:`HOOK_REFUSED` for a refusal by the repo's hook — or None for anything else."""
     text = text or ''
-    if stale_head(text):  # the factory's own no-loss refusal: a rebase, never a retried push
+    if stale_head(text) or rebase_conflict(text):  # the factory's own refusal: never a retry
         return None
     if NETWORK_RE.search(text):
         return NETWORK_ERROR
@@ -1017,6 +1070,24 @@ def stale_head_text(branch, line):
     why = (line or '').split('refused: ', 1)[-1]
     return (f'origin/{branch} holds commits this worktree lacks: {why} — rebase onto '
             f'origin/{branch} so both sides survive; never a force, never a merge')
+
+
+#: A correction kind of its own: the factory's rebase onto the remote head conflicted.
+REBASE_CONFLICT = 'rebase conflict'
+
+
+def rebase_conflict_hold(path, run, text, now):
+    """``(fields, line)``: hold ``run``'s branch after the factory's rebase onto its remote head
+    conflicted. The first such hold on the item spends no round — the session did its part; the
+    remote moved under it. A repeat is an ordinary round (:func:`hold`)."""
+    item = run.get('item')
+    earlier = [r for r in item_runs(path, item) if r is not run
+               and (r.get('correction') or {}).get('kind') == REBASE_CONFLICT]
+    if earlier or not item:
+        return hold(path, run, REBASE_CONFLICT, text, now)
+    branch = run.get('branch') or run.get('job')
+    fields = {'correction': {'kind': REBASE_CONFLICT, 'text': text, 'at': now}}
+    return fields, f'held {branch}: {text} — back to its session (no round spent)'
 
 
 def unpushed_text(reason):
