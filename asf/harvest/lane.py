@@ -50,6 +50,12 @@ Transitions (plan §2 plus the §9 overrides):
 - T12 any open → STALE         PR closed unmerged, branch gone, item superseded, PUSHED unmoved
                                past ``lane.stale_after``
 - T12r STALE → PR_OPEN         the PR was reopened (R6)
+- T12o (orphan) → STALE        a lane branch no run holds (:meth:`Lane.orphan_facts`): its card
+                               done or removed, another branch answering for the card, no card
+                               at all, or too far behind to rebase — archived, its PR closed with
+                               a comment, the branch deleted; an open card it alone answers for
+                               is adopted instead (T2), and a landed one is MERGED (T11).
+                               :data:`ORPHANS_PER_PASS` bound one pass
 - T13 BACK → PUSHED            the correcting session finished with a new head
 - Th  any open, head moved     → PUSHED(new head) (R4)
 """
@@ -137,6 +143,9 @@ GATE_SLOW_AFTER = 2
 CONFIRM_ROUNDS = 3
 #: how many transitions one branch may take in one pass
 MAX_STEPS = 8
+#: how many orphans (run-less lane branches) one pass takes up — closes or adopts; the rest wait
+#: for the next pass (each close is an archive push, a PR close and a branch delete)
+ORPHANS_PER_PASS = 25
 BRIEF_KIND = {'spec': 'spec', 'plan': 'plan', 'fix': 'fix-bug'}
 
 
@@ -276,9 +285,11 @@ def already_on_trunk(repo, trunk, branch, conv, item):
     """``(landed, extras)`` — B-0057: every file the branch touched is identical on the trunk; or,
     for a spec/plan branch, its one deliverable is (``extras`` names what else it carried)."""
     files = touched_files(repo, trunk, branch)
-    same = [f for f in files
-            if H.sh(['git', 'diff', '--quiet', f'origin/{trunk}', f'origin/{branch}', '--', f],
-                    cwd=repo).returncode == 0]
+    r = H.sh(['git', 'diff', '--name-only', '--no-renames', f'origin/{trunk}',
+              f'origin/{branch}', '--', *[f':(literal){f}' for f in files]],
+             cwd=repo) if files else None
+    differ = set(r.stdout.splitlines()) if r is not None and r.returncode == 0 else set(files)
+    same = [f for f in files if f not in differ]
     deliverable = deliverable_of(conv, branch, item)
     if deliverable and deliverable in same:
         return True, [f for f in files if f not in same]
@@ -408,6 +419,8 @@ def next_state(prev, facts):
         return keep
     if s == MERGING and f.get('merging_landed'):  # R8: the push reached the trunk, the line did not
         return MERGED, 'method=' + (rec.get('method') or 'ff')
+    if s is None and f.get('orphan'):  # a run-less branch the lane closes (orphan_facts)
+        return STALE, f['orphan']
     closed = f.get('closed')
     if s == STALE:
         if not closed and pr.get('state') == 'OPEN' and head:
@@ -507,6 +520,8 @@ class Lane:
         self.host = GitHubHost(product, self) if self.slug else FastForwardHost(product, self)
         self.results = {}
         self.opened = 0
+        self.orphans = {}
+        self.orphans_taken = 0
 
     # ---- facts --------------------------------------------------------------------------
 
@@ -533,6 +548,8 @@ class Lane:
         self.trunk_sha = heads.get(trunk) or H.sh(['git', 'rev-parse', f'origin/{trunk}'],
                                                  cwd=self.repo).stdout.strip()
         pr_map = self.host.prs() if prs else {}
+        self.orphans = self.orphan_claims(runs, heads, pr_map) if prs else {}
+        self.orphans_taken = 0
         running = H.try_lock_held(self.state_dir)
         names = {b for b in heads if conv.branch_kind(b) and b != trunk}
         names |= {b for b, r in runs.items() if b != trunk and b and (
@@ -558,6 +575,20 @@ class Lane:
              'pr': pr, 'mode': self.mode, 'host': self.mode != 'pr' or bool(self.slug),
              'now': self.now or time.time(), 'stale_after': conv.lane_stale_after_s(),
              'harvest_running': running, 'trunk': self.trunk_sha}
+        if run is None and b in self.orphans:
+            # an orphan: a lane branch no run holds — the pre-record lane's
+            # `<prefix><plan>-t3`, a card's second branch — is closed or picked back up
+            if self.orphans_taken >= ORPHANS_PER_PASS:
+                if self.orphans_taken == ORPHANS_PER_PASS:
+                    self.out(f'orphans: {ORPHANS_PER_PASS} taken up this pass — the rest next pass')
+                    self.orphans_taken += 1
+                return None
+            f = self.orphan_facts(f, b, head, pr)
+            if f is not None:
+                self.orphans_taken += 1
+            if f is None or not f.pop('pick_up', False):
+                return f
+            item = f['item']
         if run is None:  # adoption: a lane branch, or an open PR, no run holds (T2)
             card = (self.items or {}).get(item or '') or {}
             open_pr = (pr or {}).get('state') == 'OPEN'
@@ -599,6 +630,121 @@ class Lane:
             if rv:
                 rv['current'] = review_mod.is_current(repo, conv, f'origin/{b}', rv, head)
             f['review'] = rv
+        return f
+
+    # ---- orphans --------------------------------------------------------------------------
+
+    def resolve_item(self, b, pr):
+        """The one open-or-done card a run-less branch belongs to, or None: the id token in its
+        name when that is a card, else :func:`asf.record.match.match_event` over the record
+        (``links.prs``, ``links.branches``, a ``legacy_id`` — the pre-record lane's
+        ``<plan>-t3`` names). A code branch takes a Task or Bug, a spec/plan branch a Feature;
+        more than one candidate is no answer."""
+        items = self.items or {}
+        item = item_of(b, None)
+        if item and item in items:
+            return item
+        from asf.record import match
+        want = ('feature',) if self.conv.branch_kind(b) in ('spec', 'plan') else ('task', 'bug')
+        ids, _why = match.match_event(items, branch=b, pr=(pr or {}).get('number'),
+                                      title=(pr or {}).get('title'),
+                                      prefixes=match.branch_prefixes(self.product))
+        ids = [i for i in ids if (items.get(i) or {}).get('type') in want]
+        return ids[0] if len(ids) == 1 else None
+
+    def orphan_claims(self, runs, heads, pr_map):
+        """``{branch: {item, owner}}`` of every orphan — a lane-prefixed head no run holds, with
+        a record to judge it by. ``owner``: the branch that answers for the card instead (a run
+        on it, else the orphan with the newest PR), or None when this one does."""
+        if self.items is None:
+            return {}
+        def lane_of(b):  # a Feature's spec and plan are two deliverables; code is one
+            kind = self.conv.branch_kind(b)
+            return kind if kind in ('spec', 'plan') else 'code'
+
+        claimed = {}
+        for b, r in runs.items():
+            if r.get('item') and b and b != self.trunk:
+                claimed.setdefault((str(r['item']), lane_of(b)), b)
+        found = {}
+        for b in heads:
+            if b == self.trunk or b in runs or not self.conv.branch_kind(b):
+                continue
+            found[b] = self.resolve_item(b, pr_map.get(b))
+        newest = {}
+        for b, item in sorted(found.items()):
+            n = int((pr_map.get(b) or {}).get('number') or 0) \
+                if (pr_map.get(b) or {}).get('state') == 'OPEN' else 0
+            key = (item, lane_of(b))
+            if item and (key not in newest or n > newest[key][0]):
+                newest[key] = (n, b)
+        out = {}
+        for b, item in found.items():
+            key = (item, lane_of(b))
+            owner = claimed.get(key) if item else None
+            if item and not owner and newest[key][1] != b:
+                owner = newest[key][1]
+            out[b] = {'item': item, 'owner': owner}
+        return out
+
+    def head_age_s(self, b):
+        """Seconds since ``origin/<b>``'s head was committed, or None."""
+        t = H.sh(['git', 'log', '-1', '--format=%ct', f'origin/{b}'], cwd=self.repo).stdout.strip()
+        return (self.now or time.time()) - int(t) if t.isdigit() else None
+
+    def merges_clean(self, b):
+        """Whether ``origin/<b>`` merges onto the trunk with no conflict."""
+        return H.sh(['git', 'merge-tree', '--write-tree', '--quiet', f'origin/{self.trunk}',
+                     f'origin/{b}'], cwd=self.repo).returncode == 0
+
+    def orphan_facts(self, f, b, head, pr):
+        """An orphan's facts: adopted like any run-less branch (T2) when its card is open and it
+        answers for it and can still land; else ``orphan`` names why the lane closes it —
+        landed (its PR merged, or its diff on the trunk), its card done or removed, another
+        branch answering for the card, no card at all, or too far behind to rebase — once it
+        has sat past ``lane.stale_after`` (a done or removed card, or a landing, at once). None:
+        leave it this pass."""
+        claim = self.orphans[b]
+        item, owner = claim['item'], claim['owner']
+        card = (self.items or {}).get(item or '') or {}
+        pr = pr or {}
+        f.update(item=item, adopt=True, ended=True)
+        if not head:
+            return None
+        if pr.get('state') == 'MERGED' and pr.get('head') in (None, '', head):
+            return f  # T11: found merged (the host)
+        ahead = H.sh(['git', 'rev-list', '--count', f'origin/{self.trunk}..origin/{b}'],
+                     cwd=self.repo).stdout.strip()
+        f['ahead'] = int(ahead) if ahead.isdigit() else 0
+        if f['ahead'] == 0:
+            f['on_trunk'] = True
+            return f
+        done, extras = already_on_trunk(self.repo, self.trunk, b, self.conv, item)
+        if done:
+            f['on_trunk'], f['extras'] = True, extras
+            return f
+        closed = superseded_by(self.items, item) or (
+            card.get('state') if card.get('state') in ('Resolved', 'Closed') else None)
+        if closed:
+            f['orphan'] = f'{item} is {closed} in the record'
+            return f
+        age = self.head_age_s(b)
+        stale = age is not None and age > f['stale_after']
+        if owner:
+            if stale:
+                f['orphan'] = f'{item} is answered by {owner}'
+            return f if stale else None
+        if not card:
+            if stale:
+                f['orphan'] = 'no card in the record claims it (no id, link or legacy_id)'
+            return f if stale else None
+        if stale and not self.merges_clean(b):
+            f['orphan'] = f'too far behind {self.trunk} to rebase; {item} goes back to the feeder'
+            return f
+        if stale and pr.get('state') == 'CLOSED':
+            f['orphan'] = f'PR #{pr.get("number")} closed unmerged'
+            return f
+        f['pick_up'] = True  # an open card this branch alone answers for: adopted (T2)
         return f
 
     # ---- writing ------------------------------------------------------------------------
@@ -674,8 +820,9 @@ class Lane:
             return self.enter_merged(f, reason)
         if state == STALE:
             closed = f.get('closed')
-            if closed and f.get('head') and self.repo:
-                return self.archive(f, closed)
+            why = f.get('orphan') or (f'{item} is {closed} in the record' if closed else None)
+            if why and f.get('head') and self.repo:
+                return self.archive(f, why)
             self.out(f'stale {b}: {reason}')
             return self.set(f, STALE, reason, result='stale')
         if state == PR_OPEN and reason == 'open a PR':
@@ -734,30 +881,44 @@ class Lane:
         self.write(f, rec, harvested=sha, correction=None)
         f['prev'] = rec
         if f.get('head') and method in ('on-trunk', 'ff'):
+            self.close_pr(f, f'Closed by the factory lane: its change is already on '
+                             f'{self.trunk} at {str(sha)[:7]}.')
             H.sh(['git', 'push', '-q', 'origin', '--delete', b], cwd=self.repo)
+        elif f.get('head') and f.get('adopt') and method == 'external':
+            H.sh(['git', 'push', '-q', 'origin', '--delete', b], cwd=self.repo)  # merged, left behind
         self.out(line)
         self.results[b] = 'landed'
         return rec
 
-    def archive(self, f, closed):
+    def close_pr(self, f, why):
+        """Close ``f``'s open PR with a comment saying ``why`` (PR mode only)."""
+        pr = f.get('pr') or {}
+        if pr.get('state') == 'OPEN' and pr.get('number'):
+            if self.host.close(pr['number'], why):
+                self.out(f"prs: closed PR #{pr['number']} — {why}")
+
+    def archive(self, f, why):
         b, item = f['branch'], f.get('item')
         if self.dry_run:
-            self.out(f'DRY: would archive {b} — {item} is {closed}')
+            self.out(f'DRY: would archive {b} — {why}')
             self.results[b] = 'dry'
             return None
-        sha = archive_commit(self.repo, b, f'archive({item}): {b} — {item} is {closed} in the '
-                                           f'record; superseded, kept for reference [skip ci]')
+        label = item or b.rsplit('/', 1)[-1]
+        sha = archive_commit(self.repo, b, f'archive({label}): {b} — {why}; superseded, kept '
+                                           f'for reference [skip ci]')
         keep = H.sh(['git', 'push', '-q', 'origin', f'{sha}:refs/heads/archive/{b}'],
                     cwd=self.repo) if sha else None
         if not sha or keep.returncode != 0:
             self.out(f'held {b}: archive could not be made')
             self.results[b] = 'held'
             return None
-        rec = self.record(f, STALE, f'{item} is {closed} in the record')
+        rec = self.record(f, STALE, why)
         self.write(f, rec, harvested=SUPERSEDED, correction=None)
         f['prev'] = rec
+        self.close_pr(f, f'Closed by the factory lane: {why}. The branch is kept as '
+                         f'`archive/{b}` ({sha[:7]}).')
         H.sh(['git', 'push', '-q', 'origin', '--delete', b], cwd=self.repo)
-        self.out(f'superseded {b}: {item} is {closed} in the record — archived as archive/{b}')
+        self.out(f'superseded {b}: {why} — archived as archive/{b}')
         self.results[b] = SUPERSEDED
         return rec
 
@@ -1402,6 +1563,10 @@ class Host:
         queued}`` — ``checks`` one of ``none|pending|passed|failed``."""
         raise NotImplementedError
 
+    def close(self, number, comment):
+        """Close PR ``number`` with ``comment``; True when it closed (no PR host: nothing)."""
+        return False
+
     def merge(self, branch, pr, subject=None):
         """Land it: ``(sha, method)`` with ``method`` one of ``ff|squash|merge|rebase|queue``, or
         a refusal ``(None, reason)``. ``subject``: the squash subject to write, when the lane
@@ -1462,7 +1627,7 @@ class GitHubHost(Host):
         """One ``gh pr list --state all``: ``{branch: pr}``, an open PR first, else the newest."""
         data = H.gh_json(['pr', 'list', '-R', self.slug, '--state', 'all', '--limit', '500',
                           '--json', 'number,headRefName,headRefOid,state,mergeCommit,'
-                                    'autoMergeRequest'], [])
+                                    'autoMergeRequest,title'], [])
         out = {}
         for p in sorted((p for p in data if isinstance(p, dict)),
                         key=lambda p: (p.get('state') == 'OPEN', int(p.get('number') or 0))):
@@ -1470,7 +1635,7 @@ class GitHubHost(Host):
                 'number': p.get('number'), 'state': str(p.get('state') or 'OPEN').upper(),
                 'head': p.get('headRefOid') or None,
                 'merge_sha': (p.get('mergeCommit') or {}).get('oid') or None,
-                'queued': bool(p.get('autoMergeRequest'))}
+                'queued': bool(p.get('autoMergeRequest')), 'title': p.get('title') or ''}
         if self.lane is not None:
             self.in_queue = sum(1 for r in lifecycle.by_branch(self.lane.path).values()
                                 if (r.get('lane') or {}).get('state') == QUEUED)
@@ -1487,6 +1652,11 @@ class GitHubHost(Host):
         if m and (rc == 0 or 'already exists' in err):
             return int(m.group(1)), ''
         return None, ((err or stdout).strip().splitlines() or [f'gh exited {rc}'])[0]
+
+    def close(self, number, comment):
+        rc, _stdout, _err = H._gh(['pr', 'close', str(number), '-R', self.slug,
+                                   '--comment', comment])
+        return rc == 0
 
     def status(self, branch):
         p = H.gh_json(['pr', 'view', branch, '-R', self.slug, '--json',

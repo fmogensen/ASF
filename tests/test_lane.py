@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -470,6 +471,128 @@ class LaneRepo(unittest.TestCase):
         results = harvest.run_product_harvest(self.product(test_command=cmd), self.state_dir,
                                               out=lambda *_: None)
         self.assertEqual(results, {'worker/T-0001': 'landed'})
+
+
+class FakePRHost(lane.FastForwardHost):
+    """Fast-forward underneath, with a PR list and a ``close`` that records what it said."""
+
+    def __init__(self, product, ln, prs):
+        super().__init__(product, ln)
+        self._prs, self.closed = prs, []
+
+    def prs(self):
+        return self._prs
+
+    def close(self, number, comment):
+        self.closed.append((number, comment))
+        return True
+
+
+class Orphans(LaneRepo):
+    """A lane branch no run holds — the pre-record lane's ``<prefix><plan>-t3``, a card's second
+    branch — is never left open for good: it lands, is closed with a comment and archived, or
+    is picked back up by the lane for its card."""
+
+    LATER = 3 * 86400  # past the default lane.stale_after (2d)
+
+    def run_lane(self, items, prs=None, later=True):
+        ln = lane.Lane(self.product(), self.state_dir, out=lambda *_: None, items=items,
+                       now=time.time() + (self.LATER if later else 0))
+        ln.host = FakePRHost(ln.product, ln, prs or {})
+        lane.lane_pass(ln.product, self.state_dir, items=items, lane=ln)
+        return ln
+
+    def heads(self):
+        return sh(['git', 'for-each-ref', '--format=%(refname:short)', 'refs/heads'],
+                  cwd=self.origin).stdout.split()
+
+    def test_a_done_card_closes_the_pr_with_a_comment_and_archives_the_branch(self):
+        self.push_lane('worker/free-plan-t1', {'a.txt': 'a\n'}, 'feat: a')
+        items = {'T-0007': {'id': 'T-0007', 'type': 'task', 'state': 'Closed',
+                            'legacy_id': 'FREE-1/T1', 'parent': 'F-0001'},
+                 'F-0001': {'id': 'F-0001', 'type': 'feature', 'state': 'Active',
+                            'legacy_id': 'free-plan', 'children': ['T-0007']}}
+        prs = {'worker/free-plan-t1': {'number': 70, 'state': 'OPEN', 'title': 'a'}}
+        ln = self.run_lane(items, prs, later=False)  # a done card needs no waiting
+        self.assertEqual([n for n, _ in ln.host.closed], [70])
+        self.assertIn('T-0007 is Closed in the record', ln.host.closed[0][1])
+        self.assertIn('archive/worker/free-plan-t1', ln.host.closed[0][1])
+        self.assertNotIn('worker/free-plan-t1', self.heads())
+        self.assertIn('archive/worker/free-plan-t1', self.heads())
+        self.assertEqual(self.lane_of('worker/free-plan-t1')['state'], lane.STALE)
+
+    def test_no_card_closes_once_past_stale_after_never_before(self):
+        self.push_lane('worker/factory-retro-2026-09-19', {'r.txt': 'r\n'}, 'notes')
+        prs = {'worker/factory-retro-2026-09-19': {'number': 48, 'state': 'OPEN'}}
+        ln = self.run_lane({}, prs, later=False)
+        self.assertEqual(ln.host.closed, [])
+        self.assertIn('worker/factory-retro-2026-09-19', self.heads())
+        ln = self.run_lane({}, prs)
+        self.assertEqual([n for n, _ in ln.host.closed], [48])
+        self.assertIn('no card in the record claims it', ln.host.closed[0][1])
+        self.assertNotIn('worker/factory-retro-2026-09-19', self.heads())
+
+    def test_an_open_card_it_alone_answers_for_is_picked_back_up(self):
+        self.push_lane('worker/free-plan-t3', {'c.txt': 'c\n'}, 'feat: the door')
+        items = {'T-0009': {'id': 'T-0009', 'type': 'task', 'state': 'Active',
+                            'legacy_id': 'FREE-1/T3', 'parent': 'F-0001'},
+                 'F-0001': {'id': 'F-0001', 'type': 'feature', 'state': 'Active',
+                            'legacy_id': 'free-plan', 'children': ['T-0009']}}
+        prs = {'worker/free-plan-t3': {'number': 723, 'state': 'OPEN'}}
+        ln = self.run_lane(items, prs, later=False)
+        self.assertEqual(ln.host.closed, [])
+        rec_ = self.lane_of('worker/free-plan-t3')
+        # adopted for its card; its pre-record commits name no item, so the lane hands it to a
+        # correction session (the feeder's FIX → CORRECT row) like any branch of its own
+        self.assertEqual((rec_['item'], rec_['state'], rec_['reason']),
+                         ('T-0009', lane.BACK, 'kind=naming'))
+        path = os.path.join(self.state_dir, 'sessions.jsonl')
+        self.assertEqual(lifecycle.by_branch(path)['worker/free-plan-t3']['item'], 'T-0009')
+        self.assertEqual(lifecycle.corrections(path)['T-0009']['branch'], 'worker/free-plan-t3')
+
+    def test_a_card_another_branch_answers_for_supersedes_the_orphan(self):
+        self.push_lane('worker/T-0009', {'c.txt': 'new\n'}, 'feat(T-0009): the door')
+        self.session('coder-t-0009', 'T-0009', 'worker/T-0009')
+        self.push_lane('worker/free-plan-t3', {'c.txt': 'old\n'}, 'feat: the door')
+        items = {'T-0009': {'id': 'T-0009', 'type': 'task', 'state': 'Active',
+                            'links': {'prs': [723]}}}
+        prs = {'worker/free-plan-t3': {'number': 723, 'state': 'OPEN'}}
+        ln = self.run_lane(items, prs)
+        self.assertEqual([n for n, _ in ln.host.closed], [723])
+        self.assertIn('T-0009 is answered by worker/T-0009', ln.host.closed[0][1])
+        self.assertIn('worker/T-0009', self.heads())
+
+    def test_too_far_behind_to_rebase_is_closed_and_its_card_goes_back_to_the_feeder(self):
+        self.push_lane('worker/free-plan-t3', {'c.txt': 'branch\n'}, 'feat: the door')
+        self.push_main({'c.txt': 'trunk\n'}, 'trunk moved')
+        items = {'T-0009': {'id': 'T-0009', 'type': 'task', 'state': 'Active',
+                            'links': {'branches': ['worker/free-plan-t3']}}}
+        prs = {'worker/free-plan-t3': {'number': 723, 'state': 'OPEN'}}
+        ln = self.run_lane(items, prs)
+        self.assertEqual([n for n, _ in ln.host.closed], [723])
+        self.assertIn('too far behind main to rebase', ln.host.closed[0][1])
+        occ = lifecycle.occupancy(os.path.join(self.state_dir, 'sessions.jsonl'), alive=lambda *_: False)
+        self.assertNotIn('T-0009', occ['busy'])
+        self.assertNotIn('T-0009', occ['waiting_landing'])
+
+    def test_a_diff_already_on_the_trunk_lands_and_closes_the_pr(self):
+        self.push_lane('worker/fact-t3', {'d.txt': 'd\n'}, 'feat: d')
+        self.push_main({'d.txt': 'd\n'}, 'd landed another way')
+        prs = {'worker/fact-t3': {'number': 566, 'state': 'OPEN'}}
+        ln = self.run_lane({}, prs, later=False)
+        self.assertEqual([n for n, _ in ln.host.closed], [566])
+        self.assertIn('already on main', ln.host.closed[0][1])
+        self.assertNotIn('worker/fact-t3', self.heads())
+        self.assertEqual(self.lane_of('worker/fact-t3')['state'], lane.MERGED)
+
+    def test_one_pass_takes_up_a_bounded_number_of_orphans(self):
+        for i in range(3):
+            self.push_lane(f'worker/old-{i}', {f'o{i}.txt': 'o\n'}, 'old')
+        with mock.patch.object(lane, 'ORPHANS_PER_PASS', 2):
+            self.run_lane({})
+            self.assertEqual(sum(b.startswith('worker/old-') for b in self.heads()), 1)
+            self.run_lane({})
+        self.assertEqual(sum(b.startswith('worker/old-') for b in self.heads()), 0)
 
 
 class Occupancy(unittest.TestCase):

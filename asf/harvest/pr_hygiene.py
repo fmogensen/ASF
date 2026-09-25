@@ -5,7 +5,8 @@ The classification this module once did on its own (dirty PRs, their review, "di
 the lane's now (:mod:`asf.harvest.lane`): a PR closed unmerged, a branch gone, a superseded item
 or a branch unmoved past ``conventions.lane.stale_after`` is STALE (T12), and a branch the gate
 could not rebase is BACK ``kind=conflict`` (T9) — both written on the run line by the lane, never
-decided here. This is the read-only view over them:
+decided here. A branch no run holds at all (an orphan) is the lane's to close or adopt
+(:meth:`asf.harvest.lane.Lane.orphan_facts`). This is the read-only view over them:
 
   STALE → CLOSE      <branch> (<item>) PR #<n> — <why>          the lane found it stale
   CONFLICT → REBASE  <branch> (<item>) PR #<n> — back to its session (conflict)
