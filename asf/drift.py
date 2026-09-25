@@ -12,6 +12,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from importlib import metadata
 
 from asf import __version__
@@ -141,6 +142,11 @@ def report(product, out=print, autonomy='human-now', upgrade=None):
     if d.is_behind and d.package_changed:
         out(f'UPGRADE AVAILABLE {d.old} → {d.new}')
         if autonomy == 'auto' and upgrade is not None:
+            from asf import upgrade as upgrading  # local: asf.upgrade imports this module
+            due = upgrading.batch_hold(product.repo_dir, d.installed, d.head)
+            if due is not None:
+                out(f'upgrade due at {time.strftime("%H:%M", time.localtime(due))} (batching)')
+                return d
             rc = upgrade(d.head)
             if rc != DEFERRED:  # a deferred upgrade said why itself and is due again next tick
                 out(f'tick: ran asf upgrade ({d.old} → {d.new}), exit {rc}'
