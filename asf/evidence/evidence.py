@@ -1263,9 +1263,11 @@ def epic_state(children_states, typed_closed):
 
 def blocked_of(blocked_by, state_by_id):
     """(blocked: bool, blocked_by_open: [...]) — every listed item not Closed, plus every human
-    string (a plain string not resolving to a known item id)."""
+    string (a plain string not resolving to a known item id). ``blocked_by`` may itself be a bare
+    string (``asf set X blockedBy=D-0001`` stores one value that way, not as a one-item list)."""
+    from asf.record.core import as_list
     open_blockers = []
-    for b in blocked_by or []:
+    for b in as_list(blocked_by):
         if b in state_by_id:
             if state_by_id[b] != "Closed":
                 open_blockers.append(b)

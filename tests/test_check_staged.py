@@ -216,6 +216,15 @@ class StagedCheckTests(unittest.TestCase):
         self.git(self.root, 'rm', '-q', 'decisions/D-0001.md')
         self.assert_refused('blockedBy references missing item D-0001')
 
+    def test_a_bare_string_blocked_by_names_a_missing_target(self):
+        # `asf set X blockedBy=D-0001` stores a single scalar, not a one-item list (B-0084); the
+        # missing-target check must not walk that string character by character.
+        feature = self.read('features/F-0001.md')
+        self.write('features/F-0001.md', feature.replace(
+            '# ---- machine ----', 'blockedBy: D-9999\n# ---- machine ----'))
+        self.git(self.root, 'add', 'features/F-0001.md')
+        self.assert_refused('blockedBy references missing item D-9999')
+
     def test_a_backlink_left_stale_on_an_unstaged_card_is_refused(self):
         feature = self.read('features/F-0001.md')
         self.write('features/F-0001.md', feature.replace(

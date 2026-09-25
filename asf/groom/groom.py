@@ -5,7 +5,7 @@ import re
 
 from asf import env
 from asf.record import frontmatter
-from asf.record.core import canonicalize, compute_derived, is_open, jaccard, load_items, tokenize
+from asf.record.core import as_list, canonicalize, compute_derived, is_open, jaccard, load_items, tokenize
 from asf.record.index import do_index
 from asf.record.ingest import append_history_lines
 from asf.tick import stale
@@ -345,7 +345,7 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None, 
                       by=by)
 
         if field == 'unblock':
-            blocked_by = typed.get('blockedBy') or []
+            blocked_by = as_list(typed.get('blockedBy'))
             if value not in blocked_by:
                 continue  # not there — no-op, keeps --apply idempotent
             remainder = [b for b in blocked_by if b != value]
@@ -525,7 +525,7 @@ def groom_predates_section(canonical, since):
 def groom_blocked_on_closed(canonical):
     lines = []
     for iid, rec in sorted(_open_items(canonical).items()):
-        for b in rec['meta'].get('blockedBy') or []:
+        for b in as_list(rec['meta'].get('blockedBy')):
             if isinstance(b, str) and b in canonical:
                 _t, bm = frontmatter.split_machine(canonical[b]['meta'])
                 if bm.get('state') == 'Closed':

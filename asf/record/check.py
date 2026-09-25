@@ -11,9 +11,9 @@ from asf.groom import shape
 from asf.init import ITEM_FOLDERS as LAYOUT_FOLDERS, STREAM_FOLDERS
 from asf.record import frontmatter, tree
 from asf.record.core import (
-    BARE_DECISION_RE, FOLDER_TO_TYPE, ID_RE, NO_PARENT_TYPES, PARENT_TYPES, build_index_data,
-    canonicalize, compute_derived, expected_body, is_open, load_items, parse_sections,
-    title_scrub, today, writes_intersect,
+    BARE_DECISION_RE, FOLDER_TO_TYPE, ID_RE, NO_PARENT_TYPES, PARENT_TYPES, as_list,
+    build_index_data, canonicalize, compute_derived, expected_body, is_open, load_items,
+    parse_sections, title_scrub, today, writes_intersect,
 )
 from asf.record.index import entry_relpath
 from asf.redact import _run_git
@@ -236,7 +236,7 @@ def record_findings(root, scrub=None, layout=True):
         if type_ == 'bug' and not meta.get('severity'):
             add(rec, find_line(rec, 'id'), f"{iid}: bug without severity")
         # blockedBy
-        for b in meta.get('blockedBy') or []:
+        for b in as_list(meta.get('blockedBy')):
             if isinstance(b, str) and ID_RE.match(b) and b not in canonical:
                 add(rec, find_line(rec, 'blockedBy'), f"blockedBy references missing item {b}")
         # stories: (Task)

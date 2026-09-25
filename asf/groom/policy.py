@@ -155,12 +155,12 @@ def _named_in_blockedby(item_id, canonical):
     item's] blockedBy" condition §2.2 gives both ``close_exact_duplicate`` and
     ``close_on_starvation``."""
     from asf.record import frontmatter
-    from asf.record.core import is_open
+    from asf.record.core import as_list, is_open
     for rec in canonical.values():
         if not is_open(rec):
             continue
         typed, _machine = frontmatter.split_machine(rec['meta'])
-        if item_id in (typed.get('blockedBy') or []):
+        if item_id in as_list(typed.get('blockedBy')):
             return True
     return False
 
@@ -169,8 +169,9 @@ def unblock_on_closed(item_id, rec, canonical, derived, ctx):
     """Always — the blocker's ``state`` is ``Closed``: the card's first ``blockedBy`` entry
     whose own record is ``Closed`` gets unblocked."""
     from asf.record import frontmatter
+    from asf.record.core import as_list
     typed, _machine = frontmatter.split_machine(rec['meta'])
-    for blocker in typed.get('blockedBy') or []:
+    for blocker in as_list(typed.get('blockedBy')):
         if not isinstance(blocker, str) or blocker not in canonical:
             continue
         _btyped, bmachine = frontmatter.split_machine(canonical[blocker]['meta'])

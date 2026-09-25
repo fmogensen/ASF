@@ -43,6 +43,19 @@ ID_RE = re.compile(r'^[A-Z]-\d{4}$')
 BARE_DECISION_RE = re.compile(r'(?<![A-Za-z]-)(?<!\w)D\d{1,3}\b')
 
 
+def as_list(value):
+    """Normalise a list-typed frontmatter field for reading: ``None`` -> ``[]``, a bare string
+    (``asf set`` stores a single value as a plain string, not a one-item list) -> ``[value]``,
+    anything already list-like -> unchanged. Every reader of ``blockedBy`` (and similarly-typed
+    fields) should go through this rather than ``value or []``, which walks a string character by
+    character instead of treating it as one item."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return value
+
+
 def now_iso():
     return datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
