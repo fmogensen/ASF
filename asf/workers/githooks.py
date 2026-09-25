@@ -8,8 +8,15 @@ chains to the product repo's own hook of the same name, found at hook time (not 
 spawn, since ``core.hooksPath`` can change without a respawn). A file is rewritten only when its
 content differs, so a session that runs ``ensure`` on every launch never touches a file it
 already wrote correctly. Nothing here is written into the product repo or its ``.git``.
+
+``commit-msg`` names the item: a worker session's commit whose subject lacks its item id as a
+token (:func:`names_item`) is reworded to :func:`name_subject`'s — ``<kind>(<ID>): …`` — before
+the product's own hook sees it, so the lane never refuses a branch for naming. The id is the
+job's ``ASF_ITEM`` (:func:`item_env`), else the first id token in ``ASF_JOB``; a commit with
+neither, or outside a worker session (no ``ASF_JOB``), is left alone. It never blocks.
 """
 import os
+import re
 
 from asf import env
 
@@ -40,6 +47,33 @@ if [ "$name" = "prepare-commit-msg" ] && [ -n "$ASF_SESSION" ]; then
         --trailer "ASF-Session: $ASF_SESSION" "$1"
 fi
 
+# a worker's commit names its item: a subject lacking the id gets <kind>(<ID>): — never a block
+if [ "$name" = "commit-msg" ] && [ -n "$ASF_JOB" ] && [ -f "$1" ]; then
+    item=$ASF_ITEM
+    if [ -z "$item" ]; then
+        item=$(printf '%s\n' "$ASF_JOB" | grep -oE '[A-Za-z]+-[0-9]{4,}' | head -n 1 \
+            | tr '[:lower:]' '[:upper:]')
+    fi
+    if [ -n "$item" ]; then
+        awk -v id="$item" -v kind="${ASF_ITEM_KIND:-chore}" '
+            done || /^[ \t]*$/ || /^#/ { print; next }
+            {
+                done = 1; s = $0
+                if (s ~ /^(fixup|squash|amend)! / || s ~ /^Merge /) { print s; next }
+                if (tolower(s) ~ ("(^|[^a-z0-9_-])" tolower(id) "([^a-z0-9_]|$)")) { print s; next }
+                if (match(s, /^[a-z]+!?: /)) {
+                    head = substr(s, 1, RLENGTH - 2); rest = substr(s, RLENGTH + 1); bang = ""
+                    if (substr(head, length(head)) == "!") {
+                        bang = "!"; head = substr(head, 1, length(head) - 1)
+                    }
+                    print head "(" id ")" bang ": " rest
+                } else {
+                    print kind "(" id "): " s
+                }
+            }' "$1" > "$1.asf-name" 2>/dev/null && mv "$1.asf-name" "$1" || rm -f "$1.asf-name"
+    fi
+fi
+
 own=$(env -u GIT_CONFIG_COUNT git config --get core.hooksPath 2>/dev/null)
 if [ -n "$own" ]; then
     case "$own" in
@@ -61,6 +95,42 @@ fi
 
 exit 0
 '''
+
+
+#: A lane branch kind → the commit kind its subjects open with (:func:`name_subject`).
+COMMIT_KIND = {'code': 'task', 'fix': 'fix', 'spec': 'spec', 'plan': 'plan'}
+
+#: A conventional subject with no scope: ``type: rest`` or ``type!: rest``.
+_CONVENTIONAL_RE = re.compile(r'^(?P<type>[a-z]+)(?P<bang>!?): (?P<rest>.*)$', re.S)
+
+
+def names_item(subject, item):
+    """True when ``subject`` carries ``item`` as a token (case-insensitive) — the lane's naming
+    rule, and the ``commit-msg`` hook's."""
+    return bool(item) and re.search(r'(?<![\w-])' + re.escape(item) + r'(?![\w])',
+                                    subject or '', re.I) is not None
+
+
+def name_subject(subject, item, kind=None):
+    """``subject`` naming ``item``: unchanged when it does, ``type(<ID>): rest`` for a
+    conventional ``type: rest``, else ``<kind>(<ID>): <subject>`` (``chore`` with no kind) — the
+    rewrite the ``commit-msg`` hook makes."""
+    if not item or names_item(subject, item):
+        return subject
+    m = _CONVENTIONAL_RE.match(subject or '')
+    if m:
+        return f"{m['type']}({item}){m['bang']}: {m['rest']}"
+    return f"{kind or 'chore'}({item}): {subject}"
+
+
+def item_env(conv, item, branch):
+    """``{ASF_ITEM, ASF_ITEM_KIND}`` for a session on ``branch`` for ``item`` — what the
+    ``commit-msg`` hook names each commit with; ``{}`` with no item."""
+    if not item:
+        return {}
+    of = getattr(conv, 'branch_kind', None)
+    kind = COMMIT_KIND.get(of(branch) if callable(of) and branch else None, 'chore')
+    return {'ASF_ITEM': str(item), 'ASF_ITEM_KIND': kind}
 
 
 def _write_if_changed(path, text):
