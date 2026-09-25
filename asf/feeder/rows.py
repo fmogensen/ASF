@@ -200,6 +200,34 @@ def landed_ids(items, landed_shas=None):
     return done | set(landed_shas or {})
 
 
+def absorbers(items):
+    """``{merged id: absorber id}`` off every live card's ``merged:`` list. A groom merge removes
+    the merged card, and the index reader drops a removed card, so an ``after:`` naming it would
+    name an id that never lands again."""
+    out = {}
+    for v in items.values():
+        for m in v.get('merged') or ():
+            if isinstance(m, str):
+                out.setdefault(m, v['id'])
+    return out
+
+
+def after_of(items, item, absorbed=None):
+    """``item``'s ``after:`` with each merged-away id read as the card that absorbed it (a chain
+    followed to its end); an absorber the item itself is dropped — it does not wait on its own
+    work."""
+    absorbed = absorbers(items) if absorbed is None else absorbed
+    out = []
+    for a in item.get('after') or ():
+        seen = {a}
+        while a in absorbed and absorbed[a] not in seen:
+            a = absorbed[a]
+            seen.add(a)
+        if a != item.get('id') and a not in out:
+            out.append(a)
+    return out
+
+
 def is_open(item):
     return item.get('state', 'New') not in DONE_STATES
 
@@ -552,6 +580,7 @@ def task_rows(items, product, feature, busy, running, landed_shas=None):
     tasks = [t for t in ix.feature_tasks(items, feature)
              if t.get('state', 'New') == 'New' and t['id'] not in busy and not t.get('blocked')]
     landed = landed_ids(items, landed_shas)
+    absorbed = absorbers(items)
     on_trunk = landed_shas or {}
     for t in sorted(tasks, key=lambda v: (ix.rank(v), v['id'])):
         if t['id'] in on_trunk:  # already on main: a coder would find the surface there and write nothing
@@ -566,7 +595,7 @@ def task_rows(items, product, feature, busy, running, landed_shas=None):
         # `after: [T-nnnn]` is a declared dependency: Task N builds on what Task N-1 landed, and
         # a coder started before it finds the surface missing and writes nothing (B-0076).
         # Footprint-disjoint tasks still run in parallel — a plan says so by leaving `after:` off.
-        pending = [a for a in (t.get('after') or []) if a not in landed]
+        pending = [a for a in after_of(items, t, absorbed) if a not in landed]
         if pending:
             out.append(Row(tier=2, kind=PLAN_CODE, item_id=t['id'], feature_id=feature['id'],
                            action=f"WAITS ON {pending[0]}", brief_kind='task',
@@ -704,9 +733,11 @@ def hold_unlanded(rows, items, landed_shas=None):
     adjudicate, rebase, close) becomes ``WAITS ON <id>`` — no session, no round. The groom row
     speaks for a day's questions, not for the item it names, so it is left alone."""
     landed = landed_ids(items, landed_shas)
+    absorbed = absorbers(items)
     out, said = [], set()
     for r in rows:
-        pending = [a for a in (items.get(r.item_id) or {}).get('after') or [] if a not in landed]
+        pending = [a for a in after_of(items, items.get(r.item_id) or {}, absorbed)
+                   if a not in landed]
         # ON TRUNK / PARKED / NEEDS DECISION are already non-launching answers with their own
         # waits_on: rewriting them into WAITS ON would hide the row the gate exists to print
         keeps = r.kind == GROOM_ADJUDICATE or r.action.startswith((ON_TRUNK, PARKED, NEEDS_DECISION))

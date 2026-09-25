@@ -69,6 +69,43 @@ class DeclaredOrderIsADependency(unittest.TestCase):
         self.assertEqual(by['T-0002'].action, 'would launch')
 
 
+class AnAfterOnAMergedTaskWaitsOnItsAbsorber(unittest.TestCase):
+    """A groom merge removes T-0002 into T-0001 (``merged: [T-0002]``); the index reader drops
+    the removed card, so an ``after: [T-0002]`` on T-0003 named an id that never lands again and
+    T-0003 waited on it for ever (asf 2026-09-25: T-0058, T-0096, T-0134, T-0163, T-0192)."""
+
+    def index(self, absorber='New'):
+        return {'items': {
+            'F-0001': {'id': 'F-0001', 'type': 'feature', 'stage': 'building 0/2', 'decided': True,
+                       'state': 'Active', 'children': ['T-0001', 'T-0003', 'T-0004']},
+            'T-0001': {'id': 'T-0001', 'type': 'task', 'parent': 'F-0001', 'rank': 1,
+                       'decided': True, 'state': absorber, 'writes': ['a.py'],
+                       'merged': ['T-0002']},
+            'T-0003': {'id': 'T-0003', 'type': 'task', 'parent': 'F-0001', 'rank': 3,
+                       'decided': True, 'state': 'New', 'writes': ['c.py'], 'after': ['T-0002']},
+            'T-0004': {'id': 'T-0004', 'type': 'task', 'parent': 'F-0001', 'rank': 4,
+                       'decided': True, 'state': 'New', 'writes': ['d.py'],
+                       'after': ['T-0001', 'T-0002']}}}
+
+    def by(self, idx):
+        return {r.item_id: r for r in rows.candidates(idx, product(), [])}
+
+    def test_it_waits_on_the_task_that_absorbed_it(self):
+        by = self.by(self.index())
+        self.assertEqual(by['T-0003'].action, 'WAITS ON T-0001')
+        self.assertEqual(by['T-0004'].action, 'WAITS ON T-0001')
+
+    def test_it_runs_once_the_absorber_landed(self):
+        by = self.by(self.index(absorber='Closed'))
+        self.assertEqual(by['T-0003'].action, 'would launch')
+        self.assertEqual(by['T-0004'].action, 'would launch')
+
+    def test_an_absorber_does_not_wait_on_what_it_absorbed(self):
+        idx = self.index()
+        idx['items']['T-0001']['after'] = ['T-0002']
+        self.assertEqual(self.by(idx)['T-0001'].action, 'would launch')
+
+
 class NoRowLaunchesBehindAnUnlandedPredecessor(unittest.TestCase):
     """B-0080: `after:` held the PLAN → CODE row only; a held branch's correction and adjudicate
     rows launched anyway (on Opus) for an item that was not in dispute, only waiting."""
