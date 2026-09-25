@@ -12,10 +12,12 @@
 # 3. installs the redaction hooks in the product's repos
 # 4. installs the product's clocks (the scheduler runs the pinned install, not a checkout)
 # 5. runs the doctor, and prints the two Claude Code lines that add the /asf:* plugin
+# 6. offers the console's own allow list (B-0131) — shown in full, never written here: the
+#    operator runs the install command themselves when ready
 #
-# Steps 1-2 abort at once (nothing after them can work). Steps 3 and 4 never abort: a failure is
-# recorded, the rest still runs (the doctor included), each failed step gets a summary line, and
-# the exit status is non-zero when any step or the doctor failed.
+# Steps 1-2 abort at once (nothing after them can work). Steps 3, 4 and 6 never abort: a failure
+# is recorded, the rest still runs (the doctor included), each failed step gets a summary line,
+# and the exit status is non-zero when any step or the doctor failed.
 set -euo pipefail
 
 REPO_URL="${ASF_REPO_URL:-https://github.com/fmogensen/ASF.git}"
@@ -63,6 +65,13 @@ step "step 4: $BIN scheduler install --product $PRODUCT" "$BIN" scheduler instal
 
 # 5. verify — runs whatever steps 3 and 4 did
 step "step 5: $BIN doctor --product $PRODUCT" env ASF_TABLES=md "$BIN" doctor --product "$PRODUCT"
+
+# 6. offer the console's own allow list — the operator confirms by running the install command
+#    themselves; nothing is written by this script
+echo
+step "step 6: $BIN console-permissions offer --product $PRODUCT" \
+  "$BIN" console-permissions offer --product "$PRODUCT"
+say "run one to write it: $BIN console-permissions install --product $PRODUCT --scope user|repo"
 cat <<EOF
 
 install: in the Claude Code session for $PRODUCT, add the plugin once:

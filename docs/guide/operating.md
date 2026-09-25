@@ -362,6 +362,36 @@ prints the plan (runner, current labels, target labels, action) and `--apply` wr
 before removes. Jobs ask for a role (`heavy`, `light`), never a provider. The whole procedure,
 including moving an existing product over, is in [the CI runner pool](ci-runner-pool.md).
 
+## Console permissions
+
+The operator's own console — the orchestrator session, not a worker account's — is a Claude Code
+session too, and under its default auto mode every one of the factory's own maintenance commands
+hits the safety classifier's prompt: `bash tools/install.sh`, `asf approvals resolve`, a
+`launchctl` pause/resume of a clock, a push of a lane branch, `git worktree` cleanup. An approval
+given in chat does not persist — the next session asks again — and the session cannot add its own
+allow rule (that is refused as self-modification). Left unfixed, fixes land on `main` and are
+never installed (B-0131).
+
+`tools/install.sh` ends by printing the allow list the console needs (`asf console-permissions
+offer --product <p>`) and telling you the command that writes it — it writes nothing itself:
+
+```
+allow  Bash(asf:*)
+allow  Bash(bash tools/install.sh:*)
+allow  Bash(launchctl bootout gui/*/asf.*)
+allow  Bash(launchctl bootstrap gui/*)
+allow  Bash(git worktree:*)
+allow  Bash(git push origin <prefix>*)      # one per lane branch prefix this product declares
+deny   Bash(git push --force* origin <main>)  # this product's own trunk, never a literal name
+```
+
+Run `asf console-permissions install --product <p> --scope user` to write it into your own
+user-level Claude Code settings (`~/.claude/settings.json`, every product's console), or
+`--scope repo` for the product repo's own `.claude/settings.json` — Claude Code reads rules from
+both, so either is enough. The merge is idempotent and keeps every unrelated key. `asf doctor`'s
+`console permissions` row is red while neither file carries every rule, and names the ones
+missing.
+
 ## Safety: what a worker session can reach
 
 A worker session starts from **an allow-list, not the tick's environment**: `PATH`, `LANG`,
