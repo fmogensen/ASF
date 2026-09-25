@@ -450,7 +450,10 @@ def merge_class(product, files):
     ``amendable.paths(product)`` (the §2.1 glob rule, :func:`_match_glob`), else
     ``merge_routine_pr`` with no matched file."""
     globs = list(amendable.paths(product))
+    out = amendable.excluded(product)
     for f in files:
+        if any(_match_glob(x, f) for x in out):
+            continue
         if any(_match_glob(g, f) for g in globs):
             return 'merge_amendable_set', f
     return 'merge_routine_pr', None
@@ -470,6 +473,8 @@ def path_class(product, relpath):
         if c.name == 'touch_security':
             globs += list(hooks.RUNTIME_SETTINGS_GLOBS)
         if c.name == 'merge_amendable_set':
+            if any(_match_glob(x, relpath) for x in amendable.excluded(product)):
+                continue
             globs += list(amendable.paths(product))
         globs += sig.get(c.name, {}).get('paths', [])
         if any(_match_glob(g, relpath) for g in globs):

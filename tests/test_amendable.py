@@ -122,6 +122,21 @@ class SetTests(unittest.TestCase):
         self.assertEqual(hit[1].name, 'listed')
         self.assertTrue(hit[1].why)
 
+    def test_a_bang_entry_excludes_a_subtree_from_the_set(self):
+        # process rules are protected; a Task's evidence file under them is not
+        from asf import approvals
+        p = product(amendable_paths=['docs/process/*', '!docs/process/evidence/*'])
+        self.assertNotIn('!docs/process/evidence/*', amendable.paths(p))
+        self.assertIsNone(amendable.write_target(
+            p, 'Write', {'file_path': 'docs/process/evidence/2026-09-21/t3.md'}, REPO_ROOT))
+        self.assertIsNotNone(amendable.write_target(
+            p, 'Write', {'file_path': 'docs/process/rules.md'}, REPO_ROOT))
+        self.assertEqual(approvals.merge_class(p, ['docs/process/evidence/a/b.md']),
+                         ('merge_routine_pr', None))
+        self.assertEqual(approvals.merge_class(p, ['docs/process/rules.md'])[0],
+                         'merge_amendable_set')
+        self.assertIsNone(amendable.reaches(p, ['docs/process/evidence/x/*']))
+
     def test_format_set_has_a_row_per_kind(self):
         rows = amendable.format_set(product())
         self.assertEqual(len(rows), 6)
