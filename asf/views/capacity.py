@@ -60,7 +60,7 @@ def _row(product, cfg):
         row['sessions']['free'] = _free(r.sessions, inflight - n)
         row['cloud'] = {'ceiling': lane.max_inflight, 'inflight': n,
                         'free': _free(lane.max_inflight, n),
-                        'environment': lane.environment or None}
+                        'runtime': lane.runtime, 'runs_on': list(lane.runs_on)}
     if r.fair_share is not None:  # only when the share bounds the ceiling: the shape is stable
         row['sessions'].update(configured=r.ceiling, fair_share=r.fair_share, usable=r.usable,
                                active_products=r.active)
@@ -99,7 +99,7 @@ def render(products, cfg):
     if clouds:  # the cloud lane, beside the local seats above
         lines.append('')
         for name, c in clouds:
-            where = c['environment'] or 'default cloud environment'
+            where = f"{c['runtime']} on [{', '.join(c['runs_on'])}]"
             lines.append(f"cloud lane: {name} {c['inflight']}/{c['ceiling']} in flight, "
                          f"{c['free']} free ({where})")
     if dep:

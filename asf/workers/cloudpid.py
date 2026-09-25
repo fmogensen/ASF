@@ -1,13 +1,15 @@
 """asf.workers.cloudpid — what stands in for a pid when a session runs in the cloud lane.
 
 A local session is a process on this host, and every reader of the ledger asks "is it alive?" of
-its pid. A cloud session (:mod:`asf.workers.cloud`) is no process here, so its run records
-``pid: cloud:<ASF session id>`` — a *token*. Every liveness check that meets a token answers from
-the cloud status file ``<ASF_HOME>/state/cloud-sessions.json``, which :func:`asf.workers.cloud.sync`
-writes each health pass: ``{token: {status, why, updated, …}}`` with ``status`` one of
-``working``, ``finished``, ``dead``. A token the file does not know yet is a launch the sync has
-not seen: working. This module imports nothing of the workers, so the ledger's lowest layer
-(:mod:`asf.workers.lifecycle`) can ask it without a cycle.
+its pid. A cloud session (:mod:`asf.workers.cloud`) is no process here, so its run records a
+*token*: ``pid: actions:<workflow run id>`` (``actions:<ASF session>`` until the run id is
+known). Runs of the refused ``claude-cloud`` runtime recorded ``cloud:<ASF session>``; those
+still read as tokens. Every liveness check that meets a token answers from the cloud status file
+``<ASF_HOME>/state/cloud-sessions.json``, which :func:`asf.workers.cloud.sync` writes each health
+pass: ``{token: {status, why, updated, …}}`` with ``status`` one of ``working``, ``finished``,
+``dead``. A token the file does not know yet is a launch the sync has not seen: working. This
+module imports nothing of the workers, so the ledger's lowest layer (:mod:`asf.workers.lifecycle`)
+can ask it without a cycle.
 """
 import json
 import os
@@ -15,20 +17,22 @@ import tempfile
 
 from asf import env
 
-PREFIX = 'cloud:'
+PREFIX = 'actions:'
+#: every token prefix a ledger may hold: the live one, and the refused runtime's
+PREFIXES = (PREFIX, 'cloud:')
 WORKING = 'working'
 FINISHED = 'finished'
 DEAD = 'dead'
 STATES = (WORKING, FINISHED, DEAD)
 
 
-def token(session):
-    """The pid-shaped token of the cloud run whose ASF session id is ``session``."""
-    return f'{PREFIX}{session}'
+def token(ref):
+    """The pid-shaped token of the cloud run ``ref`` (a workflow run id, or the ASF session)."""
+    return f'{PREFIX}{ref}'
 
 
 def is_token(pid):
-    return isinstance(pid, str) and pid.startswith(PREFIX)
+    return isinstance(pid, str) and pid.startswith(PREFIXES)
 
 
 def cache_path():

@@ -84,19 +84,24 @@ host_guards:
   swap_pct: 85
 
 # cloud: the cloud lane (asf.workers.cloud). A row the local lane cannot take — no local seat, or
-# host pressure — runs as a Claude Code cloud session instead: it checks the branch out, builds,
-# tests, commits and pushes in the cloud, and harvest lands it as any branch. The session runs
-# under a cloud-lane account's login and spends that account's quota. A product file's own
+# host pressure — runs off this host instead. Runtime `actions` (asf.workers.actions) dispatches
+# the product's asf-worker workflow on `runs_on`: the job checks the branch out, runs the session,
+# builds, tests, commits and pushes, and harvest lands it as any branch. `asf cloud install
+# --product <p>` writes the workflow into the product checkout (commit it to the default branch);
+# the repo secret `token_secret` holds the cloud-lane account's own token. A product file's own
 # `cloud:` overrides these keys one by one. `asf doctor` shows a `cloud lane` row set.
 #
 # The runtime `claude-cloud` is refused at config check: the runtime CLI cannot create a cloud
 # session non-interactively (`-p --cloud` is interactive only), so a lane on it could never launch.
 cloud:
   enabled: false
-  max_inflight: 4             # cloud sessions at once (else worker_pool.caps.cloud_max_inflight)
+  runtime: actions
+  runs_on: [ubuntu-latest]     # the job's labels, e.g. [self-hosted, linux]
+  token_secret: CLAUDE_CODE_OAUTH_TOKEN   # the repo secret the job authenticates with
+  max_inflight: 4              # cloud sessions at once (else worker_pool.caps.cloud_max_inflight)
   rows: cloud-ok               # or `any`: which rows may go to the lane
-  # accounts: [acct-a]         # whose login launches them; unset = the role: cloud accounts
-  timeout_min: 240             # a session still working after this is told to stop, and ends dead
+  # accounts: [acct-a]         # whose quota they spend; unset = the role: cloud accounts
+  timeout_min: 240             # a run still working after this is cancelled, and ends dead
 
 # capacity: the ceilings the factory runs under. Every number is "at most this many at once".
 # A key left out means "no opinion" — the next fallback applies (see docs/guide/product-config.md).
