@@ -694,6 +694,21 @@ class CorrectionRowTest(unittest.TestCase):
         self.assertFalse(out[0].launches)
         self.assertTrue(out[0].action.startswith(rows.WAITS_MERGE), out[0].action)
 
+    def test_b0128_a_settled_correction_names_the_prs_the_ruling_waits_on(self):
+        # the card's Want: `asf next` shows `WAITS ON merge: #773, #775`
+        corr = self.corr(3)
+        corr['B-0001'].update(settled=True, prs=['773', '775'])
+        out = rows.plan_rows(s1_bugs('B-0001'), product(), [], 1, attempts={'B-0001': 1},
+                             occupancy=occ(corrections=corr))
+        self.assertEqual(out[0].action, f'{rows.WAITS_MERGE}: #773, #775')
+
+    def test_b0128_a_settled_correction_with_no_pr_named_is_the_bare_action(self):
+        corr = self.corr(3)
+        corr['B-0001'].update(settled=True, prs=[])
+        out = rows.plan_rows(s1_bugs('B-0001'), product(), [], 1, attempts={'B-0001': 1},
+                             occupancy=occ(corrections=corr))
+        self.assertEqual(out[0].action, rows.WAITS_MERGE)
+
     def test_b0058_a_blocked_item_gets_no_correct_or_adjudicate_row(self):
         # the controller blocked eleven held items on the Bug about their loop; the next tick
         # still launched an adjudicate session on one — correction rows skipped `blocked`

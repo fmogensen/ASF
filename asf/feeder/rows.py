@@ -440,17 +440,12 @@ def correction_rows(items, product, busy, corrections):
         if c.get('kind') == FOOTPRINT and c.get('verdict') != 'widen':
             out.append(footprint_row(item, product, c, tier, fid, branch))
             continue
-        if rounds >= CORRECTION_ROUNDS:
-            if c.get('settled'):  # B-0128: already ruled at this hold — no second adjudicate
-                out.append(Row(tier=tier, kind=FIX_CORRECT, item_id=iid, feature_id=fid,
-                               action=WAITS_MERGE, brief_kind='correct', branch=branch,
-                               reason=f"adjudicated ({c.get('kind')}): waits on the PR to merge "
-                                      f"or close, or a new push", waits_on='merge'))
-                continue
         if rounds >= CORRECTION_ROUNDS and c.get('kind') != NAMING:
             if c.get('settled'):  # B-0128: already ruled at this hold — no second adjudicate
+                prs = c.get('prs') or ()
+                action = f"{WAITS_MERGE}: {', '.join(f'#{n}' for n in prs)}" if prs else WAITS_MERGE
                 out.append(Row(tier=tier, kind=FIX_CORRECT, item_id=iid, feature_id=fid,
-                               action=WAITS_MERGE, brief_kind='correct', branch=branch,
+                               action=action, brief_kind='correct', branch=branch,
                                reason=f"adjudicated ({c.get('kind')}): waits on the PR to merge "
                                       f"or close, or a new push", waits_on='merge'))
                 continue

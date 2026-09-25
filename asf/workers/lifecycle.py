@@ -414,12 +414,39 @@ def pending_correction(run, path=None):
     return corr
 
 
+def _settling_run(path, item, at):
+    """The adjudicate run that settled the correction raised ``at`` (B-0128) — the earliest
+    finished adjudicate run started at or after it — or None."""
+    candidates = sorted((r for r in item_runs(path, item)
+                          if r.get('kind') == 'adjudicate' and finished(r)
+                          and (r.get('started') or '') >= (at or '')),
+                         key=lambda r: r.get('started') or '')
+    return candidates[0] if candidates else None
+
+
 def settled(path, item, at):
-    """True when an adjudicate session has already ended over the correction raised ``at``
-    (B-0128): the ruling is in, and the feeder asks for no second one over the same hold."""
-    return any(r.get('kind') == 'adjudicate' and r.get('ended')
-               and (r.get('started') or '') >= (at or '')
-               for r in item_runs(path, item))
+    """True when an adjudicate session has already *finished* over the correction raised ``at``
+    (B-0128): the ruling is in, and the feeder asks for no second one over the same hold. A run
+    that crashed, was stopped, or ran out of quota (:func:`finished` is False for any of those)
+    delivered no ruling, so it does not settle the hold."""
+    return _settling_run(path, item, at) is not None
+
+
+#: a PR the ruling paragraph names, e.g. "waits on merge of #773" — B-0128's ``asf next`` line
+PR_RE = re.compile(r'#(\d+)')
+
+
+def settled_prs(path, item, at):
+    """The PR numbers (``'773'``, ...) the ruling that settled this hold names, in the order
+    they first appear, or ``[]`` when it settled on no ruling text or the ruling names none
+    (B-0128: ``asf next`` shows ``WAITS ON merge: #773, #775``)."""
+    run = _settling_run(path, item, at)
+    if not run:
+        return []
+    from asf.workers import report as report_mod
+    rec = result_of(run) or {}
+    text = report_mod.ruling(rec.get('result') if isinstance(rec, dict) else '')
+    return list(dict.fromkeys(PR_RE.findall(text)))
 
 
 def inflight(path, alive=None):
@@ -491,10 +518,11 @@ def attempts(path):
 
 
 def corrections(path):
-    """``{item: {kind, text, at, rounds, branch, settled}}``: the newest pending correction per
-    item, with the branch of the run it was written on (a held spec branch is corrected on
+    """``{item: {kind, text, at, rounds, branch, settled, prs}}``: the newest pending correction
+    per item, with the branch of the run it was written on (a held spec branch is corrected on
     ``spec/<id>``, not on the item's task prefix). ``settled`` (B-0128): an adjudicate session has
-    already ended over this same hold — the feeder shows a WAITS ON row, not another STALEMATE."""
+    already ended over this same hold — the feeder shows a WAITS ON row, not another STALEMATE.
+    ``prs`` (B-0128): the PR numbers that ruling names, for the same row to print."""
     out = {}
     for item in {r.get('item') for rs in runs(path).values() for r in rs if r.get('item')}:
         held = [(r, pending_correction(r, path)) for r in item_runs(path, item)]
@@ -503,7 +531,8 @@ def corrections(path):
             continue
         run, corr = max(held, key=lambda rc: rc[1].get('at') or '')
         out[item] = dict(corr, rounds=rounds_of(path, item), branch=run.get('branch'),
-                          settled=settled(path, item, corr.get('at')))
+                          settled=settled(path, item, corr.get('at')),
+                          prs=settled_prs(path, item, corr.get('at')))
     return out
 
 
