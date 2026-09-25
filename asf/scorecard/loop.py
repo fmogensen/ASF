@@ -40,6 +40,8 @@ MARKER = 'scorecard-cause:'
 SNAPSHOTS = 'scorecard.jsonl'
 CAUSES = 'scorecard-causes.json'
 QUEUE = 'scorecard-queue.jsonl'
+#: The daily line's lane split looks back this many days (the experiment's week).
+LANE_DAYS = 7
 
 
 # ------------------------------------------------------------ settings --
@@ -422,6 +424,9 @@ def daily(product, root, out=print, facts=None, factory=None):
     _write_json(state_path, state)
     drain(product, root, out=out)
     h = score.headline(facts)
+    # the lane experiment's one line (``asf scorecard --by-lane`` has the table and the pairs)
+    lanes = score.by_lane(facts, *diagnose.window(facts.as_of, LANE_DAYS))
     out(f"scorecard: {score.headline_line(h, facts.clutter)} · week {row['week']}: {row['landed']} landed"
-        f" · {len(found)} cause(s) over threshold, {len(filed)} filed, {len(verdicts)} verified")
+        f" · {len(found)} cause(s) over threshold, {len(filed)} filed, {len(verdicts)} verified"
+        f" · {score.lanes_line(lanes, LANE_DAYS)}")
     return 0
