@@ -549,6 +549,64 @@ class WaveStep(StepsTestCase):
         self.assertIsNone(evs[0]['ci_bound_by'])
 
 
+class AGatedRowGivesItsSlotBack(StepsTestCase):
+    """2026-09-25 (a product tick): a share of 7 with 1 session live launched 2 rows and held 10 on
+    ``fair share``. The cut gave 6 slots to groom/correction rows the feeder's invariant gate
+    then dropped (I4, I5): the slots went nowhere, and the waits line never said what it
+    counted. A row the gate drops takes no slot, and the waits line names what is in flight."""
+
+    def setUp(self):
+        super().setUp()
+        self.launched = []
+
+        def build(product, row, index, inflight, repo_facts=None):
+            return _brief(row.brief_kind, row.item_id)
+
+        def wave(product, rows, n, brief_fn=None, out=print):
+            self.launched += [r.job for r in rows]
+            return [(r, {'model': 'opus'}) for r in rows], []
+        for name, fn in (('_build', build), ('_wave', wave), ('lane_pass', lambda ctx, out: {})):
+            p = mock.patch.object(step_wave, name, fn)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def candidates(self):
+        R = feeder_rows
+        corr = [R.Row(2, R.FIX_CORRECT, f'F-00{n}', f'F-00{n}', R.LAUNCH, 'correct',
+                      f'cloud/spec-f-00{n}', 'correction pending') for n in (90, 92, 97)]
+        groom = [R.Row(2, R.GROOM_ADJUDICATE, 'F-0007', '', R.LAUNCH, 'adjudicate',
+                       'groom/2026-09-25', 'groom questions')]
+        specs = [R.Row(2, R.CARD_SPEC, f'F-01{n}', f'F-01{n}', R.LAUNCH, 'spec', '', 'card')
+                 for n in range(11, 23)]
+        return groom + corr + specs
+
+    def test_rows_the_gate_drops_take_no_slot(self):
+        from asf import invariants
+        self.session(job='spec-f-0108', item='F-0108', kind='spec', account='acct-a',
+                     pid=os.getpid(), started=pool_mod.now_iso())
+        resolved = capacity.Resolved(sessions=7, sessions_bound='fair share', ci=None,
+                                     ci_bound=None, ci_inflight=None, batch={}, reserve={},
+                                     ceiling=16, fair_share=7, usable=8, active=2, borrowed=1)
+
+        def gate(product, rows, items, out=print):
+            bad = [r for r in rows if r.launches and r.kind in (feeder_rows.FIX_CORRECT,
+                                                               feeder_rows.GROOM_ADJUDICATE)]
+            for r in bad:
+                out(f'INVARIANT I5: {invariants.row_key(r)} — not on the trunk')
+            return [r for r in rows if r not in bad]
+        with mock.patch.object(feeder_rows, 'candidates', lambda *a, **kw: self.candidates()), \
+                mock.patch.object(capacity, 'resolve', lambda *a, **kw: resolved), \
+                mock.patch.object(invariants, 'feeder_gate', gate):
+            step_wave.run(self.ctx(), out=self.lines.append)
+        # 7 of the share, 1 live: 6 launch, every one a row the gate keeps
+        self.assertEqual(self.launched, [f'spec-f-01{n}' for n in range(11, 17)])
+        share = [ln for ln in self.lines if 'fair share' in ln]
+        self.assertEqual([ln.split()[1] for ln in share], [f'spec-f-01{n}' for n in range(17, 23)])
+        self.assertIn('; in flight 1: spec-f-0108; this wave 6: spec-f-0111, ', share[0])
+        # a dropped row is said once, as the gate's own line — never as a fair-share wait
+        self.assertEqual(sum(1 for ln in self.lines if ln.startswith('INVARIANT')), 4)
+
+
 # ---- prs --------------------------------------------------------------------------
 
 class AdjudicateLineTests(StepsTestCase):

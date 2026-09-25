@@ -14,8 +14,10 @@
    ceiling (``asf.capacity.resolve``, spec §2.2's session law, bounded by the product's fair
    share of the usable pool); the feeder still takes this product's in-flight sessions off it
    itself (P5). A row on an item a hold parks is planned but takes no slot (it waits for a
-   person). Each launching row the fair share cut prints ``waits … — fair share: <n> of
-   <usable> usable slots across <k> products``; the wave records this product's demand
+   person). The feeder's invariant gate runs on the cut (:func:`gated_plan`): a row it drops
+   gives its slot to the next candidate. Each launching row the fair share cut prints ``waits …
+   — fair share: <n> of <usable> usable slots across <k> products; in flight <i>: <jobs>; this
+   wave <w>: <jobs>`` — what the share was spent on; the wave records this product's demand
    (:func:`asf.capacity.write_demand`) so an idle partner's share can be lent to it;
 4. per launching row, a brief (``asf.briefs.build``) with the facts of its branch on the product
    repo's origin — whether it is pushed and its last commit, two ``git`` calls at most;
@@ -254,6 +256,56 @@ def held_by_share(items, product, running, resolved, planned, inputs, wider=None
     return [r for r in wider if r.launches and (r.item_id, r.kind) not in seen]
 
 
+REPLANS = 8   # the gate's findings shrink the candidates each pass; this bounds a pathological loop
+
+
+def gated_plan(items, product, running, capacity, inputs, out=print, exclude=None):
+    """``(rows, exclude)``: the plan at ``capacity`` through the feeder's invariant gate
+    (:func:`asf.invariants.feeder_gate`), a dropped row's slot handed to the next candidate.
+
+    2026-09-25 (a product tick): the cut gave 4 of 6 free slots to rows the gate then dropped, and
+    those slots went nowhere — 2 launches under a share of 7. So a launching row the gate drops
+    is excluded (``plan_rows(exclude=…)``) and the plan made again, until the gate drops
+    nothing. ``exclude``: rows already dropped (grown in place, and returned). Each gate line is
+    said once however many passes it takes."""
+    from asf import invariants
+    from asf.feeder import rows as feeder_rows
+    exclude = set() if exclude is None else exclude
+    said = set()
+
+    def say(line):
+        if line not in said:
+            said.add(line)
+            out(line)
+    kept = []
+    for _ in range(REPLANS):
+        kw = dict(inputs, exclude=frozenset(exclude)) if exclude else inputs
+        planned = feeder_rows.plan_rows(items, product, running, capacity, **kw)
+        kept = invariants.feeder_gate(product, planned, items, out=say)
+        dropped = ({invariants.row_key(r) for r in planned if r.launches}
+                   - {invariants.row_key(r) for r in kept if r.launches})
+        if not dropped - exclude:
+            break
+        exclude |= dropped
+    return kept, exclude
+
+
+def row_job(row):
+    """The job a feeder row launches as (:func:`job_name`, its PD9 key when its kind has one)."""
+    attr = KIND_JOB_KEY.get(row.brief_kind)
+    return job_name(row.brief_kind, row.item_id, key=getattr(row, attr, None) if attr else None)
+
+
+def share_counted(running, planned, held=()):
+    """What the fair share counted against this product, for its waits line: ``in flight <n>:
+    <jobs>; this wave <m>: <jobs>`` — the live sessions and the rows this wave gives a slot."""
+    held = set(held or ())
+    live = [s.get('job') or s.get('item') or '?' for s in running or ()]
+    wave = [row_job(r) for r in planned if r.launches and r.item_id not in held]
+    return (f"in flight {len(live)}: {', '.join(live) or '-'}; "
+            f"this wave {len(wave)}: {', '.join(wave) or '-'}")
+
+
 def wanted(rows, held=()):
     """The launching rows a plan would start given room — a parked item's row is not one."""
     held = set(held or ())
@@ -328,15 +380,17 @@ def run(ctx, out=print):
     running = inflight(product)
     r = capacity_mod.resolve(product)
     inputs = plan_inputs(product, ctx.record_root(), items)
-    planned = feeder_rows.plan_rows(items, product, running, r.sessions, **inputs)
-    from asf import invariants  # the feeder check point: a violating row is dropped, logged
-    planned = invariants.feeder_gate(product, planned, items, out=out)
-    wider = (feeder_rows.plan_rows(items, product, running, r.ceiling, **inputs)
+    # the feeder check point: a violating row is dropped, logged, and its slot goes to the next
+    planned, dropped = gated_plan(items, product, running, r.sessions, inputs, out=out)
+    wider = (gated_plan(items, product, running, r.ceiling, inputs, out=lambda _l: None,
+                        exclude=set(dropped))[0]
              if r.ceiling is not None and r.ceiling != r.sessions else planned)
     capacity_mod.write_demand(product.name, len(running), wanted(wider, inputs.get('held')))
-    for row in held_by_share(items, product, running, r, planned, inputs, wider=wider):
+    share_held = held_by_share(items, product, running, r, planned, inputs, wider=wider)
+    counted = share_counted(running, planned, inputs.get('held')) if share_held else ''
+    for row in share_held:
         job = job_name(row.brief_kind, row.item_id)
-        out(f'waits    {job:<24} {row.item_id:<10} — {r.fair_share_reason}')
+        out(f'waits    {job:<24} {row.item_id:<10} — {r.fair_share_reason}; {counted}')
     host_held, host_why, reading = host_hold(planned)
     worker_rows, texts, kinds = [], {}, {}
     for row in planned:

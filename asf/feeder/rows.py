@@ -798,11 +798,16 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
 
 
 def plan_rows(index, product, inflight, capacity, attempts=None, occupancy=None,
-              groom_state=None, landed_shas=None, decision_limit=None, held=None):
+              groom_state=None, landed_shas=None, decision_limit=None, held=None, exclude=None):
     """The rows the tick emits: tiered, S1 first, cut to ``capacity`` less what is in flight.
-    ``held``: the item ids an approval hold parks — shown, but given no slot."""
+    ``held``: the item ids an approval hold parks — shown, but given no slot. ``exclude``: the
+    launching rows (:func:`asf.invariants.row_key`) the feeder's invariant gate dropped — they
+    are not candidates, so the cut hands their slots to the next rows."""
     from asf.feeder import tiers
-    return tiers.select(candidates(index, product, inflight, attempts, occupancy=occupancy,
-                                   groom_state=groom_state, landed_shas=landed_shas,
-                                   decision_limit=decision_limit),
-                        inflight, capacity, held=held)
+    rows = candidates(index, product, inflight, attempts, occupancy=occupancy,
+                      groom_state=groom_state, landed_shas=landed_shas,
+                      decision_limit=decision_limit)
+    if exclude:
+        from asf.invariants import row_key
+        rows = [r for r in rows if not (r.launches and row_key(r) in exclude)]
+    return tiers.select(rows, inflight, capacity, held=held)

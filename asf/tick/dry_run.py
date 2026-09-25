@@ -108,9 +108,7 @@ def _wave_rows(product, root, out):
     """Plans the wave's rows — the same call :func:`asf.tick.step_wave.run` makes — and prints
     them, never building a brief or handing any of them to :mod:`asf.workers.wave`. Applies the
     feeder's invariant check point (its own ``INVARIANT …`` lines) first, same as a live tick."""
-    from asf import invariants
     from asf import capacity as capacity_mod
-    from asf.feeder import rows as feeder_rows
     from asf.record import plan_order
     from asf.tick import step_wave
     from asf.views import index_reader
@@ -125,8 +123,8 @@ def _wave_rows(product, root, out):
     running = step_wave.inflight(product)
     resolved = capacity_mod.resolve(product)
     inputs = step_wave.plan_inputs(product, root)
-    planned = feeder_rows.plan_rows(wave_items, product, running, resolved.sessions, **inputs)
-    planned = invariants.feeder_gate(product, planned, wave_items, out=out)
+    planned, _dropped = step_wave.gated_plan(wave_items, product, running, resolved.sessions,
+                                             inputs, out=out)
     if not planned:
         out('(nothing planned)')
         return planned
