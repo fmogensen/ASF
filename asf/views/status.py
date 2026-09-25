@@ -170,8 +170,9 @@ def capacity_cell(cfg, product):
         parts.append(lane)
     if r.ci is not None:
         parts.append(ci_clause(r.ci_inflight, r.ci, prs=ci_queue.mode(product) == 'on'))
-    # the CI start queue: its depth and the head's hold line (no gh call), a ceiling hold
-    # re-stated with this row's own count so the row never shows two
+    # the CI start queue: its depth and the head's decision now, computed live by the function
+    # `asf ci queue` prints (one runner read, the cached estimate, this row's own in-flight
+    # count), in the current mode; the last tick's snapshot, dated, when the host is unreadable
     queued = ci_queue.status_clause(product, inflight=r.ci_inflight, ceiling=r.ci)
     if queued:
         parts.append(queued)

@@ -77,6 +77,13 @@ class FakeGh:
         return subprocess.CompletedProcess(argv, 0, out, '')
 
 
+class DeadGh:
+    """A ``gh`` that fails every call: the host is unreadable."""
+
+    def __call__(self, argv, **_kw):
+        return subprocess.CompletedProcess(argv, 1, '', 'unreachable')
+
+
 class NoGh:
     def __call__(self, argv, **_kw):
         raise AssertionError(f'gh called for an unqueued product: {argv}')
@@ -660,15 +667,68 @@ class TestModes(Base):
         self.assertIn('mode DRY RUN', heads['dry-run'])
         self.assertIn('view only', heads['dry-run'])
 
+    def src(self, p, gh):
+        return ci_queue.GitHubSource(p, run=gh)
+
     def test_status_names_the_depth_and_the_head(self):
         p = product()
-        self.assertEqual(ci_queue.status_clause(p, now=self.t0), 'ci queue empty')
         busy = FakeGh(busy={'h1', 'h2', 'h3'})
+        self.assertEqual(ci_queue.status_clause(p, now=self.t0, source=self.src(p, busy)),
+                         'ci queue empty')
         self.admit(self.queue(p, busy), 'pr:a', 'T-0500')
         self.admit(self.queue(p, busy), 'pr:b', 'T-0341')
-        self.assertEqual(ci_queue.status_clause(p, now=self.t0),
+        self.assertEqual(ci_queue.status_clause(p, now=self.t0, source=self.src(p, busy)),
                          'ci queue 2, head T-0341 waits — heavy 0 free, needs 3 '
                          '(Feature, 1st in line)')
+
+    def view(self, p, gh):
+        import types
+        from unittest import mock
+        lines = []
+        with mock.patch.object(env, 'load_product', return_value=p):
+            ci_queue.cmd_queue(types.SimpleNamespace(product='p'), source=self.src(p, gh),
+                               out=lines.append)
+        return lines
+
+    def test_the_row_and_the_view_agree_live_not_the_ticks_snapshot(self):
+        """The tick held the head at heavy 0 free; the runners have freed since. ``asf ci queue``
+        says it would start, and the row says the same — never the tick's stored hold."""
+        p = product()
+        self.t0 = ci_queue._now()
+        self.assertFalse(self.admit(self.queue(p, FakeGh(busy={'h1', 'h2', 'h3'})), 'pr:a',
+                                    'T-0341').admitted)
+        for gh, said in ((FakeGh(), 'would start'),
+                         (FakeGh(busy={'h1', 'h2'}), 'waits: heavy 1 free, needs 3')):
+            view = self.view(p, gh)
+            self.assertIn(f'1. T-0341 [pr, Feature, since', view[2])
+            self.assertTrue(view[2].endswith(said), view[2])
+            row = ci_queue.status_clause(p, source=self.src(p, gh))
+            self.assertEqual(row, f"ci queue 1, head T-0341 {said.replace('waits:', 'waits —')} "
+                                  f"(Feature, 1st in line)")
+            self.assertNotIn('as of tick', row)
+
+    def test_a_mode_change_shows_in_the_row_at_once(self):
+        """The tick ran in dry-run; the mode is back to on: the row drops ``(dry-run)`` now."""
+        self.t0 = ci_queue._now()
+        dry = product(queue={'mode': 'dry-run'})
+        self.admit(self.queue(product(), FakeGh(busy={'h1', 'h2', 'h3'})), 'pr:a', 'T-0500')
+        gh = FakeGh(busy={'h1', 'h2', 'h3'})
+        self.assertIn('ci queue 1 (dry-run), head T-0500 waits',
+                      ci_queue.status_clause(dry, source=self.src(dry, gh)))
+        on = product(queue={'mode': 'on'})
+        row = ci_queue.status_clause(on, source=self.src(on, gh))
+        self.assertTrue(row.startswith('ci queue 1, head T-0500 waits — heavy 0 free'), row)
+        self.assertNotIn('dry-run', row)
+
+    def test_an_unreadable_host_shows_the_snapshot_dated(self):
+        p = product()
+        self.t0 = ci_queue._now()
+        self.admit(self.queue(p, FakeGh(busy={'h1', 'h2', 'h3'})), 'pr:a', 'T-0341')
+        stamp = datetime.datetime.fromtimestamp(
+            os.path.getmtime(ci_queue._path('p'))).strftime('%H:%M')
+        self.assertEqual(ci_queue.status_clause(p, source=self.src(p, DeadGh())),
+                         f'ci queue 1 (as of tick {stamp}), head T-0341 waits — heavy 0 free, '
+                         f'needs 3 (Feature, 1st in line)')
 
     def test_the_row_and_the_queue_line_read_one_estimate(self):
         """The head was held when the estimate said 3; another start of the same tick measured
@@ -679,11 +739,15 @@ class TestModes(Base):
         q = self.queue(p, busy)
         self.assertFalse(self.admit(q, 'pr:a', 'T-0341').admitted)
         self.assertIn('heavy 0 free, needs 3', self.lines[-1])
-        self.assertIn('heavy 0 free, needs 3', ci_queue.status_clause(p, now=self.t0))
+        self.assertIn('heavy 0 free, needs 3',
+                      ci_queue.status_clause(p, now=self.t0, source=self.src(p, busy)))
         data = ci_queue.load('p')
         data['expect']['ci.yml']['needs'] = {'heavy': 2, 'light': 1}
         ci_queue.save('p', data)
-        row = ci_queue.status_clause(p, now=self.t0)
+        row = ci_queue.status_clause(p, now=self.t0, source=self.src(p, busy))
+        self.assertIn('head T-0341 waits — heavy 0 free, needs 2 (Feature, 1st in line)', row)
+        # the snapshot, when the host is unreadable, re-states the hold from the same estimate
+        row = ci_queue.status_clause(p, now=self.t0, source=self.src(p, DeadGh()))
         self.assertIn('head T-0341 waits — heavy 0 free, needs 2 (Feature, 1st in line)', row)
         q = self.queue(p, busy, minutes=1)
         self.assertFalse(self.admit(q, 'pr:a', 'T-0341').admitted)
