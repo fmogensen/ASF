@@ -15,6 +15,12 @@ it at its start and exits without a step while it is fresh (:func:`waiting`), ru
 finish, and the owner's next tick finds the gap and installs, clearing the marker. A marker
 older than :data:`PENDING_TTL_S`, or whose sha is already installed, is removed and ignored —
 a stuck upgrade never stops the factory.
+
+Every upgrade pauses every product's ticks, so the tick's upgrades are batched: after one
+installs (``state/upgrade-last.json``), no tick starts another until ``upgrade.min_interval_min``
+(``~/.ASF/config.yaml``, default :data:`DEFAULT_MIN_INTERVAL_MIN`) has passed — by then several
+commits have landed and one install carries them all. A head any of whose new commits carries
+an ``Urgent: yes`` trailer upgrades regardless (:func:`batch_hold`).
 """
 import glob
 import json
@@ -33,6 +39,8 @@ DEFAULT_REPO_URL = 'https://github.com/fmogensen/ASF.git'
 TICK_PATTERN = r'(-m asf\.cli|/asf) tick( |$)'
 #: a pending marker older than this is stale: removed and ignored
 PENDING_TTL_S = 30 * 60
+#: ``upgrade.min_interval_min`` when the operator config leaves it out
+DEFAULT_MIN_INTERVAL_MIN = 30
 
 
 def pending_path():
@@ -100,6 +108,67 @@ def waiting(product_name, out=print, now=None, installed=None):
         return False
     out(f'tick: waiting — upgrade to {data["sha"][:7]} pending')
     return True
+
+
+def last_path():
+    return os.path.join(env.ASF_HOME, 'state', 'upgrade-last.json')
+
+
+def read_last():
+    """``{'sha', 'at'}`` of the last install, or ``None`` when none is recorded."""
+    try:
+        with open(last_path(), encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) and isinstance(data.get('at'), (int, float)) else None
+
+
+def record_last(sha, now=None):
+    path = last_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f'{path}.{os.getpid()}.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump({'sha': sha or '', 'at': now or time.time()}, f)
+    os.replace(tmp, path)
+
+
+def min_interval_s(cfg=None):
+    """``upgrade.min_interval_min`` from the operator config, in seconds (default 30 minutes)."""
+    if cfg is None:
+        try:
+            cfg = env.load_config()
+        except Exception:  # noqa: BLE001 — a config problem leaves the default in force
+            cfg = {}
+    block = (cfg or {}).get('upgrade')
+    value = block.get('min_interval_min') if isinstance(block, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        value = DEFAULT_MIN_INTERVAL_MIN
+    return value * 60
+
+
+def urgent(repo, installed, head):
+    """True when a commit in ``installed..head`` carries an ``Urgent: yes`` trailer."""
+    if not (repo and installed and head):
+        return False
+    try:
+        p = subprocess.run(['git', '-C', repo, 'log', '--format=%(trailers:key=Urgent,valueonly)',
+                            f'{installed}..{head}'], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return p.returncode == 0 and any(ln.strip().lower() == 'yes' for ln in p.stdout.splitlines())
+
+
+def batch_hold(repo, installed, head, now=None, cfg=None):
+    """When the tick's upgrade to ``head`` waits for the batching interval: the epoch time it is
+    due, else ``None`` (no install recorded yet, the interval has passed, or the head is urgent)."""
+    last = read_last()
+    if last is None:
+        return None
+    due = last['at'] + min_interval_s(cfg)
+    if (now or time.time()) >= due or urgent(repo, installed, head):
+        return None
+    return due
 
 
 def upgrade_command(url, ref):
@@ -210,6 +279,8 @@ def install(ref=None, run=subprocess.run, out=print, owner=None):
             out(f'upgrade: pending {ref[:7]} — other ticks wait until it installs')
         return DEFERRED
     rc = _install(ref, run, out)
+    if rc == 0:
+        record_last(ref)
     if owner:
         clear_pending()
     return rc

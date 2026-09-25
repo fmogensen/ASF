@@ -33,6 +33,10 @@ class DriftTestCase(unittest.TestCase):
         self.head = self.commit('asf/cli.py', 'x = 2\n', 'a fix')
         self.product = env.Product('p', {'repo_dir': self.repo, 'main': 'main',
                                          'ci': {'provider': 'none'}})
+        from asf import upgrade
+        self.clear_last = lambda: os.path.exists(upgrade.last_path()) and os.remove(upgrade.last_path())
+        self.clear_last()
+        self.addCleanup(self.clear_last)
 
     def commit(self, path, text, message):
         with open(os.path.join(self.repo, path), 'w') as f:
@@ -122,6 +126,62 @@ class TickPrintsTheDriftLine(DriftTestCase):
     def test_a_product_that_is_not_the_factory_prints_nothing(self):
         other = env.Product('q', {'repo_dir': self.tmp, 'main': 'main', 'ci': {'provider': 'none'}})
         self.assertIsNone(drift.check(other, installed=self.installed))
+
+
+class UpgradesAreBatched(DriftTestCase):
+    """After an upgrade, the next waits ``upgrade.min_interval_min`` unless the head is urgent."""
+
+    run_tick = TickPrintsTheDriftLine.run_tick
+
+    def setUp(self):
+        super().setUp()
+        cfg = mock.patch('asf.env.load_config', return_value={'upgrade': {'min_interval_min': 30}})
+        cfg.start()
+        self.addCleanup(cfg.stop)
+
+    def test_the_first_upgrade_with_no_history_proceeds(self):
+        upgrade = mock.Mock(return_value=0)
+        lines = self.run_tick('auto', upgrade)
+        upgrade.assert_called_once()
+        self.assertFalse(any('(batching)' in ln for ln in lines), lines)
+
+    def test_the_interval_holds_a_non_urgent_upgrade(self):
+        import time
+        from asf import upgrade as upgrading
+        at = time.time() - 10 * 60
+        upgrading.record_last(self.installed, now=at)
+        upgrade = mock.Mock(return_value=0)
+        lines = self.run_tick('auto', upgrade)
+        upgrade.assert_not_called()
+        due = time.strftime('%H:%M', time.localtime(at + 30 * 60))
+        self.assertIn(f'upgrade due at {due} (batching)', lines)
+        self.assertFalse(any('upgraded under this tick' in ln for ln in lines), lines)
+
+    def test_the_interval_once_passed_lets_the_upgrade_run(self):
+        import time
+        from asf import upgrade as upgrading
+        upgrading.record_last(self.installed, now=time.time() - 31 * 60)
+        upgrade = mock.Mock(return_value=0)
+        self.run_tick('auto', upgrade)
+        upgrade.assert_called_once()
+
+    def test_an_urgent_trailer_bypasses_the_interval(self):
+        import time
+        from asf import upgrade as upgrading
+        upgrading.record_last(self.installed, now=time.time() - 60)
+        self.head = self.commit('asf/cli.py', 'x = 3\n', 'fix: the factory is down\n\nUrgent: yes')
+        upgrade = mock.Mock(return_value=0)
+        lines = self.run_tick('auto', upgrade)
+        upgrade.assert_called_once()
+        self.assertEqual(upgrade.call_args[0][0].ref, self.head)
+        self.assertFalse(any('(batching)' in ln for ln in lines), lines)
+
+    def test_a_successful_install_records_the_time(self):
+        from asf import upgrade as upgrading
+        with mock.patch.object(upgrading, 'other_ticks', return_value=[]), \
+                mock.patch.object(upgrading, '_install', return_value=0):
+            upgrading.install(self.head, out=lambda *_: None)
+        self.assertEqual(upgrading.read_last()['sha'], self.head)
 
 
 class DoctorRow(DriftTestCase):
