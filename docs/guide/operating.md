@@ -63,7 +63,27 @@ configured: <key>)`.
 **Prod reads `deploy_sha.workflow`**: the deploy workflow whose newest successful run is prod,
 the same key the evidence pass reads for a Feature's `on-prod`. `conventions.deploy_workflow` and
 `ci.deploy_workflow` are read as aliases of it, so a file written for the old hint still loads;
-write new files with `deploy_sha.workflow`.
+write new files with `deploy_sha.workflow` (or `deploy_sha.prod.workflow`).
+
+**Deploys are set per environment** with `deploy_sha.dev.mode` and `deploy_sha.prod.mode`:
+
+```yaml
+deploy_sha:
+  dev:
+    mode: ci            # auto | manual | ci — ci: the product's CI deploys dev, ASF observes
+  prod:
+    mode: auto          # auto | manual (the default)
+    workflow: deploy-prod.yml
+    # from: dev         # promote the sha dev runs, instead of the newest green trunk sha
+```
+
+`auto` has the tick dispatch the environment's `workflow` for its candidate — the newest green
+`ci.workflow` run on the trunk that the environment lacks (for prod with `from: dev`, the sha dev
+runs, once its own CI run is green). `manual` dispatches nothing, and the Prod row, `asf prod` and
+every tick name the green sha that waits on a hand dispatch. For every environment a running
+deploy, a sha whose deploy already failed (never retried) and a red trunk each hold the dispatch,
+and the line says which. The old `deploy_sha.auto: true` still reads as `prod.mode: auto`;
+`asf doctor`'s `deploy` row names it as deprecated and shows the modes it resolved.
 
 To keep the table in front of you, type `/loop 5m /asf:status` in each product's Claude Code
 session: it reprints the status every five minutes until you stop it.

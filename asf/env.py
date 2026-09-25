@@ -449,6 +449,40 @@ def _shape_ok(value, shape):
     return not isinstance(value, (dict, list))
 
 
+#: ``deploy_sha.<env>.mode`` — what the deploy pass (asf.harvest.deploy) does for each
+#: environment; ``deploy_sha.prod.from`` — where prod's candidate sha comes from. The rest of
+#: ``deploy_sha`` (its discovery rules: ``source``, ``rule``, ``branch``, other environments)
+#: is not shape-checked.
+DEPLOY_MODES = {'dev': ('auto', 'manual', 'ci'), 'prod': ('auto', 'manual')}
+DEPLOY_SOURCES = ('ci', 'dev')
+
+
+def _deploy_problems(deploy):
+    """[(dotted key, problem)] for a ``deploy_sha`` whose modes the deploy pass cannot read. A
+    typo here would silently mean ``manual`` (or an unmanaged dev), so it refuses the load."""
+    if not isinstance(deploy, dict):
+        return []
+    out = []
+    auto = deploy.get('auto')
+    if auto is not None and not isinstance(auto, bool):
+        out.append(('deploy_sha.auto', f'must be true or false, not {auto!r}'))
+    for env, modes in DEPLOY_MODES.items():
+        block = deploy.get(env)
+        if block is None:
+            continue
+        if not isinstance(block, dict):
+            out.append((f'deploy_sha.{env}', f'must be {_MAP}, not {block!r}'))
+            continue
+        if block.get('mode') is not None and block['mode'] not in modes:
+            out.append((f'deploy_sha.{env}.mode',
+                        f"must be one of {' | '.join(modes)}, not {block['mode']!r}"))
+    src = (deploy.get('prod') or {}).get('from') if isinstance(deploy.get('prod'), dict) else None
+    if src is not None and src not in DEPLOY_SOURCES:
+        out.append(('deploy_sha.prod.from',
+                    f"must be one of {' | '.join(DEPLOY_SOURCES)}, not {src!r}"))
+    return out
+
+
 def validate_product_text(text):
     """The product file checked against the declared field list: a sorted list of
     ``(line, key, problem)``, empty when the file is well-formed. ``key`` is dotted for a
@@ -483,6 +517,8 @@ def validate_product_text(text):
     for section, fields in NESTED_FIELDS.items():
         if isinstance(data.get(section), dict):
             check(fields, data[section], section + '.')
+    for dotted, why in _deploy_problems(data.get('deploy_sha')):
+        problems.append((lines.get('deploy_sha', 0), dotted, why))
     # `conventions:` keeps unknown keys (asf.conventions), but the shaped ones are checked
     for key, why in conventions_mod.validate_mapping(data.get('conventions')):
         dotted = 'conventions.' + key
@@ -595,6 +631,9 @@ class Product:
             deploy = self._get('deploy_sha')
             if isinstance(deploy, dict) and deploy.get('workflow'):
                 data.setdefault('deploy_workflow', deploy['workflow'])
+            prod_env = deploy.get('prod') if isinstance(deploy, dict) else None
+            if isinstance(prod_env, dict) and prod_env.get('workflow'):
+                data.setdefault('deploy_workflow', prod_env['workflow'])
             if isinstance(ci, dict) and ci.get('deploy_workflow'):  # the read-only alias
                 data.setdefault('deploy_workflow', ci['deploy_workflow'])
             self._conventions = Conventions.from_mapping(data)

@@ -398,7 +398,10 @@ def full_suite_command(product, command):
 
 def _runs_deploy_workflow(command, product):
     deploy = product.deploy_sha
-    workflow = deploy.get('workflow') if isinstance(deploy, dict) else None
+    workflow = None
+    if isinstance(deploy, dict):
+        prod_env = deploy.get('prod') if isinstance(deploy.get('prod'), dict) else {}
+        workflow = deploy.get('workflow') or prod_env.get('workflow')
     if not workflow:
         return False
     return bool(re.search(rf'\bgh\s+workflow\s+run\b.*\b{re.escape(workflow)}\b', command))

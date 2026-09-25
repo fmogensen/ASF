@@ -180,17 +180,31 @@ token_caps:
   # spec:
   #   input: 4000000
 
-# how a deployed sha is discovered, for the evidence pass and release notes.
+# how a deployed sha is discovered, for the evidence pass and release notes — and, per
+# environment, whether the tick deploys it (asf.harvest.deploy).
 deploy_sha:
   provider: github-deployments   # github-deployments | fly | vercel | script
-  # read as conventions.deploy_workflow — the workflow whose newest success marks the prod sha.
-  workflow: deploy-prod.yml
-  # auto: true — the tick's harvest step dispatches `workflow` for the newest green ci.workflow
-  # run on the trunk that prod lacks (asf.harvest.deploy); off, every tick and `asf status` say
-  # prod waits on a hand dispatch. input: the workflow_dispatch input carrying the sha (default
-  # sha; none sends no input).
-  # auto: true
-  # input: sha
+  # each environment's mode, and what every tick, `asf status` and `asf prod` say about it:
+  #   auto   — the tick dispatches `workflow` for the environment's candidate sha
+  #   manual — nothing dispatches; the views name the green sha waiting on a hand dispatch
+  #   ci     — (dev only) the product's CI deploys dev itself (ci.dev_job in ci.workflow);
+  #            ASF only observes which trunk sha dev runs
+  # The same rules hold for every environment: no dispatch while a run of its workflow is
+  # queued or running, a sha whose deploy failed is never retried (the next green one is), and
+  # a red trunk never deploys. A dev with no mode is not managed; prod's mode defaults to manual.
+  dev:
+    mode: ci                     # auto | manual | ci
+    # workflow: deploy-dev.yml   # auto/manual: the workflow_dispatch workflow deploying dev
+    # input: sha                 # the workflow_dispatch input carrying the sha (none: no input)
+  prod:
+    mode: manual                 # auto | manual
+    # read as conventions.deploy_workflow — the workflow whose newest success marks the prod sha
+    workflow: deploy-prod.yml
+    # input: sha
+    # from: ci                   # ci: the newest green ci.workflow run on the trunk (default)
+    #                            # dev: the sha dev runs, once its own CI run is green (promote)
+  # deprecated: `auto: true` (read as prod.mode: auto; `asf doctor` names it), and a top-level
+  # `workflow:` / `input:` (read as prod's).
   # only when provider: script
   # script: tools/deploy-sha.sh
 

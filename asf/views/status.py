@@ -6,8 +6,8 @@ Every row is filled from what exists, or says which key would fill it —
 * **Version** — the ``asf`` running (``asf --version``) and asf's newest release tag, with its age;
 * **Runners** — the CI provider's runner pool (``ci.runner_org``, read with ``gh``);
 * **Prod** — how far ``main`` is ahead of the last successful ``deploy_sha.workflow`` run, and
-  what prod waits on (:func:`asf.harvest.deploy.line`: a red trunk, a running or failed deploy,
-  ``deploy_sha.auto`` off);
+  what prod waits on (:func:`asf.harvest.deploy.lines`: a red trunk, a running or failed deploy,
+  a green sha waiting in ``manual`` mode), then each managed dev environment's own line;
 * **Agents** — the workers' session registry, ``~/.ASF/state/<product>/sessions.jsonl``;
 * **Capacity** — the session and CI ceilings the resolver (``asf.capacity.resolve``) hands back;
 * **Record** — the record's counts from ``index.json``: open, Active, blocked, and the items no
@@ -116,11 +116,13 @@ def prod_cell(product):
         return f"? (no successful {workflow} run readable)"
     behind = _sh(['git', '-C', product.repo_dir, 'rev-list', '--count',
                   f'{prod_sha}..origin/{product.main}']) or '?'
-    from asf.harvest import deploy  # what prod waits on, or that the tick deploys it
-    said = deploy.line(product) if deploy.applies(product) else None
-    if said and not said.startswith(f'deploy: {workflow} runs unreadable'):
-        return said.removeprefix('deploy: ')
-    return f"{product.main} is {behind} commits ahead of prod `{prod_sha[:9]}`"
+    from asf.harvest import deploy  # what each environment waits on, or that the tick deploys it
+    said = deploy.lines(product) if deploy.applies(product) else []
+    prod = next((s for s in said if s.startswith('deploy: ')), None)
+    if not prod or prod.startswith(f'deploy: {workflow} runs unreadable'):
+        prod = f"{product.main} is {behind} commits ahead of prod `{prod_sha[:9]}`"
+    return ' · '.join([prod.removeprefix('deploy: ')]
+                      + [s.removeprefix('deploy ') for s in said if not s.startswith('deploy: ')])
 
 
 def agents_cell(product):

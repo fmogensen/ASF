@@ -735,6 +735,9 @@ def run(product_name):
         rows.append(('model table', False, True, detail))
     for ok, detail in check_convention_shapes(product):
         rows.append(('conventions', True, ok, detail))
+    from asf.harvest import deploy  # each environment's deploy mode, and a deprecated key
+    for ok, detail in deploy.findings(product):
+        rows.append(('deploy', False, ok, detail))
     for ok, detail in check_token_caps(cfg, product):
         rows.append(('token-caps', False, ok, detail))
     slow = check_gate_speed(product)
