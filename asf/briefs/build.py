@@ -310,10 +310,10 @@ GATE_REMOTE = ("BEFORE THE PUSH: the Task's acceptance tests, byte-identical fro
                "request, never here: do not run it.")
 
 
-#: The same two for a direct-lane Feature (``direct``): no plan, so no Task Gate — the product's
-#: test command and the session's own tests.
-DIRECT_GATE_LOCAL = ("BEFORE THE PUSH: the product's test command and every test you added, "
-                     "passing.")
+#: The same two for a direct-lane Feature (``direct``): no plan, so no Task Gate — the session's
+#: own tests and the ones covering what it changed, targeted; the full suite is the landing gate's.
+DIRECT_GATE_LOCAL = ("BEFORE THE PUSH: every test you added and the ones covering the files you "
+                     "changed, passing.")
 DIRECT_GATE_REMOTE = ("BEFORE THE PUSH: the tests you added and the ones covering the files you "
                       "changed, run on those files only.\nThe full suite runs in remote CI on the "
                       "pull request, never here: do not run it.")
