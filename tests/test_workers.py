@@ -542,6 +542,47 @@ class TestSpawn(Home):
                          git('rev-parse', 'HEAD', cwd=wt))  # the takeover rebase, published
         git('merge-base', '--is-ancestor', 'origin/main', 'HEAD', cwd=wt)
 
+    def _ended_run_then_a_newer_remote_head(self, job):
+        """An ended run's worktree whose branch is on origin; a person then pushes a newer
+        commit on top from elsewhere. Returns ``(worktree, branch, newer)``."""
+        rec = spawn_mod.spawn(self.product, feature_row(job), self.acct(), 'b',
+                              runtime=runtime_mod.FakeRuntime([{'ok': True, 'pid': 40}]), cfg=self.cfg)
+        wt, branch = rec['worktree'], rec['branch']
+        for k, v in (('user.email', 'ci@example.com'), ('user.name', 'ci')):
+            git('config', k, v, cwd=wt)
+        with open(os.path.join(wt, 'mine'), 'w') as f:
+            f.write('mine')
+        git('add', 'mine', cwd=wt)
+        git('commit', '-q', '-m', 'round 4 of the review', cwd=wt)
+        git('push', '-q', 'origin', f'HEAD:refs/heads/{branch}', cwd=wt)
+        health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        person = os.path.join(self.tmp, 'person')
+        git('clone', '-q', '-b', branch, os.path.join(self.tmp, 'origin.git'), person, cwd=self.tmp)
+        with open(os.path.join(person, 'theirs'), 'w') as f:
+            f.write('theirs')
+        git('add', 'theirs', cwd=person)
+        git('-c', 'user.email=p@example.com', '-c', 'user.name=p', 'commit', '-q',
+            '-m', 'the answer to round 4, pushed by a person', cwd=person)
+        git('push', '-q', 'origin', branch, cwd=person)
+        return wt, branch, git('rev-parse', 'HEAD', cwd=person)
+
+    def test_a_stale_reused_worktree_is_fast_forwarded_never_published_over_origin(self):
+        # 2026-09-25: the takeover published the worktree's older head over a person's newer
+        # commit (the lease was the newer head, so it held)
+        wt, branch, newer = self._ended_run_then_a_newer_remote_head('stale-ff')
+        spawn_mod.make_worktree(self.product, 'stale-ff', branch)
+        self.assertEqual(git('ls-remote', '--heads', 'origin', branch, cwd=wt).split()[0], newer)
+        self.assertEqual(git('rev-parse', 'HEAD', cwd=wt), newer)
+
+    def test_a_review_starts_on_the_branchs_current_remote_head(self):
+        wt, branch, newer = self._ended_run_then_a_newer_remote_head('stale-review')
+        with open(os.path.join(wt, 'mine'), 'w') as f:
+            f.write('a stale local review commit, never pushed')
+        git('commit', '-q', '-am', 'stale round 5', cwd=wt)
+        spawn_mod.make_worktree(self.product, 'stale-review', branch, kind='review')
+        self.assertEqual(git('rev-parse', 'HEAD', cwd=wt), newer)
+        self.assertEqual(git('ls-remote', '--heads', 'origin', branch, cwd=wt).split()[0], newer)
+
     def test_b0025_live_sessions_worktree_still_refuses(self):
         rt = runtime_mod.FakeRuntime([{'running': True, 'pid': os.getpid()}])
         row = feature_row('again')

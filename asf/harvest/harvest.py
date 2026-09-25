@@ -434,10 +434,29 @@ def push_ff(repo, sha, trunk='main'):
     return push.returncode == 0, False
 
 
-def push_branch(repo, sha, branch):
-    sh(['git', 'fetch', '-q', 'origin', branch], cwd=repo)
-    push = sh(['git', 'push', '--force-with-lease', 'origin', f'{sha}:refs/heads/{branch}'], cwd=repo)
-    return push.returncode == 0
+def remote_head(repo, branch):
+    """``origin/<branch>``'s head as origin holds it now (``''`` when the branch is not there).
+    Read before any rebase or merge work, it is the lease :func:`push_branch` pushes against."""
+    ls = sh(['git', 'ls-remote', '--heads', 'origin', branch], cwd=repo)
+    return ls.stdout.split()[0] if ls.returncode == 0 and ls.stdout.strip() else ''
+
+
+def push_branch(repo, sha, branch, expected):
+    """Push ``sha`` to ``origin/<branch>`` over ``expected`` — the head read before any rebase
+    (:func:`remote_head`), never one a fetch just before the push supplied: a lease taken from
+    that fetch matches whatever origin holds, a plain force (2026-09-25: a stale local branch
+    erased a person's newer commit). The push is refused, before it is made, when ``sha`` lacks
+    a commit ``expected`` holds (:func:`asf.workers.lifecycle.lost_commits`), and by git when
+    origin moved since ``expected`` was read. ``(ok, reason)``."""
+    if expected:
+        lost = lifecycle.lost_commits(repo, sha, expected, branch)
+        if lost is None or lost:
+            return False, lifecycle.loss_refusal(branch, lost)
+    push = sh(['git', 'push', f'--force-with-lease=refs/heads/{branch}:{expected}', 'origin',
+               f'{sha}:refs/heads/{branch}'], cwd=repo)
+    if push.returncode != 0:
+        return False, f'push branch failed: {tail(push.stderr or push.stdout)}'
+    return True, None
 
 
 def repo_slug(repo):
@@ -489,6 +508,7 @@ def harvest_branch(repo, state_dir, is_record, job, branch, dry_run, conv=None, 
         tmp = os.path.join(holder, 'wt')
         try:
             branch_sha = sh(['git', 'rev-parse', branch], cwd=repo).stdout.strip()
+            expected = remote_head(repo, branch)  # before any rebase: the push's lease
             add = sh(['git', 'worktree', 'add', '--detach', tmp, branch_sha], cwd=repo)
             if add.returncode != 0:
                 return hold(job, f'worktree add failed: {tail(add.stderr)}')
@@ -538,8 +558,9 @@ def harvest_branch(repo, state_dir, is_record, job, branch, dry_run, conv=None, 
                 if landed.returncode != 0:
                     return hold(job, f'{sha} is not on origin/{trunk} after the push — nothing reaped')
             else:
-                if not push_branch(repo, sha, branch):
-                    return hold(job, 'push branch failed')
+                pushed, why = push_branch(repo, sha, branch, expected)
+                if not pushed:
+                    return hold(job, why)
                 print(pr_create_line(repo, tmp, branch, trunk))
 
             reap(repo, state_dir, job, branch, sha, alive=alive, session_source=session_source)

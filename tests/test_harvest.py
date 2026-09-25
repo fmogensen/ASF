@@ -2517,3 +2517,88 @@ class EveryBranchAheadIsOwned(unittest.TestCase):
 
     def test_no_record_at_all_is_not_gated(self):
         self.assertFalse(harvest.is_eligible(None))
+
+
+class StaleBranchPushTests(unittest.TestCase):
+    """2026-09-25: a factory push from a stale head erased a newer commit a person had pushed to
+    the lane branch. ``push_branch`` fetched first, so its lease matched whatever origin held —
+    a plain force. The expected head is read before any rebase, and no remote commit may be
+    lost."""
+
+    def setUp(self):
+        self.base = PRODUCT_REPOS.fresh()
+        self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
+        self.repo = os.path.join(self.base, 'repo')
+        self.worker = os.path.join(self.base, 'worker')
+        self.state_dir = os.path.join(self.base, 'state')
+        self.branch = 'fix/B-0001'
+        sh(['git', 'checkout', '-q', '-B', self.branch, 'origin/main'], cwd=self.worker)
+        self.commit(self.worker, 'a.txt', 'fix(B-0001): first')
+        sh(['git', 'push', '-q', 'origin', self.branch], cwd=self.worker)
+        # the product checkout holds the branch as it was then
+        sh(['git', 'fetch', '-q', 'origin', self.branch], cwd=self.repo)
+        sh(['git', 'branch', '-q', self.branch, f'origin/{self.branch}'], cwd=self.repo)
+        self.stale = self.rev(self.repo, self.branch)
+
+    def commit(self, root, rel, subject):
+        with open(os.path.join(root, rel), 'w', encoding='utf-8') as f:
+            f.write(subject + '\n')
+        sh(['git', 'add', '-A'], cwd=root)
+        sh(['git', 'commit', '-qm', subject], cwd=root)
+
+    def rev(self, root, ref):
+        return sh(['git', 'rev-parse', ref], cwd=root).stdout.strip()
+
+    def remote_head(self):
+        return sh(['git', 'ls-remote', '--heads', 'origin', self.branch],
+                  cwd=self.repo).stdout.split()[0]
+
+    def test_a_stale_local_branch_never_overwrites_the_newer_remote_head(self):
+        self.commit(self.worker, 'b.txt', 'fix(B-0001): newer, pushed by a person')
+        sh(['git', 'push', '-q', 'origin', self.branch], cwd=self.worker)
+        newer = self.rev(self.worker, 'HEAD')
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            try:
+                got = harvest.harvest_branch(self.repo, self.state_dir, False, 'fix-bug-b-0001',
+                                             self.branch, False, CONV)
+            except Exception:  # noqa: BLE001 — whatever it did after the push, origin decides
+                got = 'raised'
+        self.assertEqual(self.remote_head(), newer, buf.getvalue())
+        self.assertEqual(got, 'held', buf.getvalue())
+        self.assertIn('would lose', buf.getvalue())
+
+    def test_push_branch_refuses_a_head_missing_remote_commits(self):
+        self.commit(self.worker, 'b.txt', 'fix(B-0001): newer')
+        sh(['git', 'push', '-q', 'origin', self.branch], cwd=self.worker)
+        newer = self.rev(self.worker, 'HEAD')
+        ok, why = harvest.push_branch(self.repo, self.stale, self.branch, newer)
+        self.assertFalse(ok)
+        self.assertIn(newer[:9], why)
+        self.assertEqual(self.remote_head(), newer)
+
+    def test_push_branch_leases_on_the_sha_read_before_the_rebase(self):
+        # origin moved after the expected head was read: refused, even with every commit kept
+        self.commit(self.worker, 'b.txt', 'fix(B-0001): newer')
+        sh(['git', 'push', '-q', 'origin', self.branch], cwd=self.worker)
+        newer = self.rev(self.worker, 'HEAD')
+        self.commit(self.worker, 'c.txt', 'fix(B-0001): on top, not pushed')
+        on_top = self.rev(self.worker, 'HEAD')
+        sh(['git', 'fetch', '-q', self.worker, on_top], cwd=self.repo)
+        ok, _why = harvest.push_branch(self.repo, on_top, self.branch, self.stale)
+        self.assertFalse(ok)
+        self.assertEqual(self.remote_head(), newer)
+
+    def test_push_branch_publishes_a_rebase_that_keeps_every_remote_commit(self):
+        sh(['git', 'checkout', '-q', 'main'], cwd=self.worker)
+        self.commit(self.worker, 'trunk.txt', 'trunk moves')
+        sh(['git', 'push', '-q', 'origin', 'main'], cwd=self.worker)
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        wt = os.path.join(self.base, 'rebase-wt')
+        sh(['git', 'worktree', 'add', '-q', '--detach', wt, self.stale], cwd=self.repo)
+        git_identity(wt)
+        sh(['git', 'rebase', '-q', 'origin/main'], cwd=wt)
+        rebased = self.rev(wt, 'HEAD')
+        ok, why = harvest.push_branch(self.repo, rebased, self.branch, self.stale)
+        self.assertTrue(ok, why)
+        self.assertEqual(self.remote_head(), rebased)

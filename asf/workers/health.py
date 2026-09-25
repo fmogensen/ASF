@@ -377,8 +377,10 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
         elif reason.startswith(UNPUSHED_REASON_PREFIXES):
             # the run's own work is the correction's input: the next session on the branch
             # commits and pushes it, or says why not (B-0051, B-0052)
-            fields, line = lifecycle.hold(registry, s, lifecycle.UNPUSHED,
-                                          lifecycle.unpushed_text(reason), now)
+            text = lifecycle.unpushed_text(reason)
+            if lifecycle.stale_head(line):  # origin holds commits this head lacks: a rebase
+                text = lifecycle.stale_head_text(s.get('branch') or job, line)
+            fields, line = lifecycle.hold(registry, s, lifecycle.UNPUSHED, text, now)
             pool_mod.update_session(product, job, **fields)
             found.append((job, 'held', line.split(': ', 1)[1]))
         elif reason == f'failed: {lifecycle.EMPTY_BRANCH}' and lifecycle.landed_earlier(registry, s):

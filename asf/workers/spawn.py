@@ -154,7 +154,7 @@ def _branch_exists_on_origin(repo, branch):
     return bool(_git(['ls-remote', '--heads', 'origin', branch], repo).strip())
 
 
-def make_worktree(product, job, branch):
+def make_worktree(product, job, branch, kind=None):
     """The worktree a run starts in — :func:`asf.workers.lifecycle.may_launch` decides whether
     one that already exists may be taken over.
 
@@ -168,7 +168,11 @@ def make_worktree(product, job, branch):
 
     Before any of that, :func:`asf.hooks.ensure_git_hooks` confirms the product repo's push gate
     is in place — missing hooks are written, a foreign one refuses the whole launch (F-0075,
-    D10) — so no path below can reach ``git worktree add`` without it."""
+    D10) — so no path below can reach ``git worktree add`` without it.
+
+    A reused worktree first catches up with ``origin/<branch>`` (:func:`_catch_up`): a session
+    never starts on, and the factory never publishes, a head older than origin's. A ``review``
+    (``kind``) starts on the remote head itself — it has no commits of its own yet."""
     repo = product.repo_dir
     if not repo or not os.path.isdir(repo):
         raise SpawnError(f'product repo_dir missing: {repo!r}')
@@ -192,7 +196,7 @@ def make_worktree(product, job, branch):
             # another branch checked out (a detached or mid-rebase tree is left for the session)
             _checkout_branch(candidate, branch, product.main)
         if candidate == path or _worktree_branch(candidate) == branch:
-            _rebase_onto_trunk(candidate, branch, product.main)
+            _rebase_onto_trunk(candidate, branch, product.main, kind)
             return candidate
     if _branch_exists_on_origin(repo, branch):
         _git(['fetch', '-q', 'origin', branch], repo)
@@ -200,7 +204,7 @@ def make_worktree(product, job, branch):
             # a stale worktree of an ended run still holds the branch and is not reusable here
             _git(['worktree', 'remove', '--force', held], repo)
         _git(['worktree', 'add', '-q', '-B', branch, path, f'origin/{branch}'], repo)
-        _rebase_onto_trunk(path, branch, product.main)
+        _rebase_onto_trunk(path, branch, product.main, kind)
         return path
     if held:
         _git(['worktree', 'remove', '--force', held], repo)
@@ -217,7 +221,32 @@ def make_worktree(product, job, branch):
     return path
 
 
-def _rebase_onto_trunk(path, branch, main):
+def _catch_up(path, branch, remote_sha, kind=None):
+    """Bring a reused worktree up to ``origin/<branch>`` at ``remote_sha`` before anything is
+    rebased or published (2026-09-25: a review's worktree sat at an older head, the takeover
+    published it over a person's newer commit, and the review then judged and pushed on top of
+    the stale head). A review is reset to the remote head — it reviews what origin holds. Any
+    other kind: a head behind origin is fast-forwarded; a head that has diverged is rebased onto
+    origin's (a conflict is left in place for the session). True when the worktree now holds
+    every commit origin does."""
+    def git(*args):
+        return subprocess.run(['git', *args], cwd=path, capture_output=True, text=True)
+    git('fetch', '-q', 'origin', branch)
+    if git('cat-file', '-e', f'{remote_sha}^{{commit}}').returncode != 0:
+        return False
+    if kind == 'review':
+        return git('reset', '-q', '--hard', remote_sha).returncode == 0
+    if git('merge-base', '--is-ancestor', remote_sha, 'HEAD').returncode == 0:
+        return True
+    if git('merge-base', '--is-ancestor', 'HEAD', remote_sha).returncode == 0:
+        return git('merge', '-q', '--ff-only', remote_sha).returncode == 0
+    head = git('rev-parse', 'HEAD').stdout.strip()
+    if lifecycle.lost_commits(path, head, remote_sha, branch) == []:
+        return True  # origin's commits are here as rebased copies
+    return git('rebase', '-q', remote_sha).returncode == 0
+
+
+def _rebase_onto_trunk(path, branch, main, kind=None):
     """Rebase the worktree onto the fetched trunk. A conflict is left in place for the session.
     A rebase that completes and moves a branch already on origin is published by the factory at
     once (:func:`asf.workers.lifecycle.publish`, B-0056): the session then starts on a branch
@@ -226,6 +255,8 @@ def _rebase_onto_trunk(path, branch, main):
     ls = subprocess.run(['git', 'ls-remote', '--heads', 'origin', branch], cwd=path,
                         capture_output=True, text=True)
     remote_sha = ls.stdout.split()[0] if ls.returncode == 0 and ls.stdout.strip() else ''
+    if remote_sha and not _catch_up(path, branch, remote_sha, kind):
+        return  # behind origin and not caught up: never rebased or published from here
     r = subprocess.run(['git', 'rebase', '-q', f'origin/{main}'], cwd=path,
                        capture_output=True, text=True)
     if r.returncode != 0 or not remote_sha:
@@ -385,7 +416,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
     branch = branch_for(product, row)
     own_path = os.path.join(worktrees_dir(product), row.job)
     fresh = not os.path.exists(own_path)
-    worktree = make_worktree(product, row.job, branch)
+    worktree = make_worktree(product, row.job, branch, kind=row.kind)
     setup_s = None
     if fresh and worktree == own_path:  # a new worktree, not an ended run's reused one
         setup_s = run_worktree_setup(product, row.job, worktree, account, passthrough)

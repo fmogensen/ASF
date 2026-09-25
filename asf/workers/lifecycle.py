@@ -612,6 +612,48 @@ def unpushed_commits(wt, remote_sha, main='main'):
     return len([ln for ln in p.stdout.splitlines() if ln.startswith('+')])
 
 
+#: The line a push refused for a stale head carries: origin holds commits the new head lacks.
+STALE_HEAD_RE = re.compile(r'\bwould lose \d+ commit')
+
+
+def lost_commits(wt, new, remote_sha, branch=''):
+    """The short shas of the commits on ``remote_sha`` that pushing ``new`` over it would erase
+    (2026-09-25: a stale worktree's head published over a person's newer commit — the lease
+    guarded only against origin moving, never against the head lacking what origin held).
+
+    ``[]`` when ``remote_sha`` is an ancestor of ``new``, or when every commit it has that
+    ``new`` lacks has a patch-equivalent in ``new`` (a rebase's copies: ``git cherry``'s ``-``).
+    None when it cannot be told (the remote commit is not here even after a fetch of
+    ``branch``) — a caller refuses then, never pushes blind."""
+    if not remote_sha or not new:
+        return []
+    if _git(['cat-file', '-e', f'{remote_sha}^{{commit}}'], wt).returncode != 0 and branch:
+        _git(['fetch', '-q', 'origin', branch], wt)
+    if _git(['cat-file', '-e', f'{remote_sha}^{{commit}}'], wt).returncode != 0:
+        return None
+    if _git(['merge-base', '--is-ancestor', remote_sha, new], wt).returncode == 0:
+        return []
+    p = _git(['cherry', new, remote_sha], wt)
+    if p.returncode != 0:
+        return None
+    return [ln.split()[1][:9] for ln in p.stdout.splitlines() if ln.startswith('+')]
+
+
+def loss_refusal(branch, lost):
+    """The one-line reason a push that would erase ``lost`` (None: unknown) is refused."""
+    if lost is None:
+        return (f'cannot tell what origin/{branch} holds that this head lacks — '
+                f'fetch and rebase onto origin/{branch}, then push')
+    return (f'would lose {len(lost)} commit(s) on origin/{branch} ({", ".join(lost)}) — '
+            f'rebase onto origin/{branch}, then push')
+
+
+def stale_head(text):
+    """True for a push refused because the head lacks commits origin holds: the branch is held
+    for a rebase onto the remote head, never retried as a push."""
+    return bool(STALE_HEAD_RE.search(text or '')) or 'cannot tell what origin/' in (text or '')
+
+
 def commit_leftovers(wt, branch):
     """Commit, signed off, whatever a finished session left uncommitted in its worktree (B-0094).
 
@@ -641,10 +683,18 @@ def publish(wt, branch, remote_sha='', main='main'):
     the factory publishes, never the session: ``--force-with-lease=<branch>:<remote_sha>`` when
     the branch is on origin (origin moving since the evidence was gathered refuses the push —
     nothing is overwritten unseen), a plain push when it is not. The trunk is never a target.
+    A lease guards only against origin moving after ``remote_sha`` was read; a head that lacks
+    commits ``remote_sha`` holds (a stale worktree) is refused before any push
+    (:func:`lost_commits`), with the commits it would erase named.
     ``(ok, line)``."""
     if not branch or branch == main:
         return False, f'publish refused: {branch or "no branch"} is not a lane branch'
     ref = f'refs/heads/{branch}'
+    if remote_sha:
+        head = _git(['rev-parse', 'HEAD'], wt).stdout.strip()
+        lost = lost_commits(wt, head, remote_sha, branch)
+        if lost is None or lost:
+            return False, f'publish {branch} refused: {loss_refusal(branch, lost)}'
     args = ['push', '-q', 'origin', f'HEAD:{ref}']
     if remote_sha:
         args.insert(2, f'--force-with-lease={ref}:{remote_sha}')
@@ -728,6 +778,8 @@ def push_failure(text):
     """The retry class of a push's failure text — :data:`NETWORK_ERROR` for a transport error,
     :data:`HOOK_REFUSED` for a refusal by the repo's hook — or None for anything else."""
     text = text or ''
+    if stale_head(text):  # the factory's own no-loss refusal: a rebase, never a retried push
+        return None
     if NETWORK_RE.search(text):
         return NETWORK_ERROR
     if HOOK_RE.search(text):
@@ -947,6 +999,13 @@ def widenings(path, item):
     if not item:
         return 0
     return sum(1 for r in item_runs(path, item) if r.get('widened'))
+
+
+def stale_head_text(branch, line):
+    """The correction a run whose publish was refused for a stale head hands its next session."""
+    why = (line or '').split('refused: ', 1)[-1]
+    return (f'origin/{branch} holds commits this worktree lacks: {why} — rebase onto '
+            f'origin/{branch} so both sides survive; never a force, never a merge')
 
 
 def unpushed_text(reason):

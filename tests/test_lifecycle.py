@@ -634,6 +634,58 @@ class UnpushedAfterARebaseTest(unittest.TestCase):
         self.assertTrue(ok, line)
         self.assertEqual(line, 'published fix/B-9998 at ' + self.sh(['rev-parse', '--short', 'HEAD'], self.repo))
 
+    def _push_from_elsewhere(self, subject):
+        """A person pushes ``subject`` onto ``origin/fix/B-9999`` from another clone; this repo
+        never fetches it. Returns the new remote head."""
+        other = os.path.join(os.path.dirname(self.repo), 'person')
+        if not os.path.isdir(other):
+            self.sh(['clone', '-q', '-b', 'fix/B-9999',
+                     self.sh(['remote', 'get-url', 'origin'], self.repo), other],
+                    os.path.dirname(self.repo))
+            for k, v in (('user.name', 'Person'), ('user.email', 'p@example.com')):
+                self.sh(['config', k, v], other)
+        with open(os.path.join(other, subject), 'w') as f:
+            f.write(subject)
+        self.sh(['add', '-A'], other)
+        self.sh(['commit', '-qm', subject], other)
+        self.sh(['push', '-q', 'origin', 'fix/B-9999'], other)
+        return self.sh(['rev-parse', 'HEAD'], other)
+
+    def test_a_stale_worktree_never_overwrites_newer_remote_commits(self):
+        # 2026-09-25: a worktree at an older head published over a person's newer commit. The
+        # lease was the current remote head, so it held — and the newer commit was erased.
+        self.sh(['reset', '-q', '--hard', self.fix_sha], self.repo)  # the stale worktree
+        newer = self._push_from_elsewhere('newer-work')
+        ok, line = lc.publish(self.repo, 'fix/B-9999', newer, main='main')
+        self.assertFalse(ok, line)
+        self.assertIn('would lose 1 commit', line)
+        self.assertIn(newer[:9], line)
+        self.assertEqual(self.sh(['ls-remote', '--heads', 'origin', 'fix/B-9999'], self.repo).split()[0],
+                         newer)
+
+    def test_a_stale_rebased_worktree_never_overwrites_newer_remote_commits(self):
+        # rebased onto the trunk, and origin gained a commit the rebase never saw
+        newer = self._push_from_elsewhere('newer-work')
+        ok, line = lc.publish(self.repo, 'fix/B-9999', newer, main='main')
+        self.assertFalse(ok, line)
+        self.assertEqual(self.sh(['ls-remote', '--heads', 'origin', 'fix/B-9999'], self.repo).split()[0],
+                         newer)
+
+    def test_a_rebase_holding_copies_of_every_remote_commit_still_publishes(self):
+        newer = self._push_from_elsewhere('newer-work')
+        self.sh(['fetch', '-q', 'origin', 'fix/B-9999'], self.repo)
+        self.sh(['rebase', '-q', 'origin/fix/B-9999'], self.repo)
+        self.sh(['rebase', '-q', 'origin/main'], self.repo)
+        ok, line = lc.publish(self.repo, 'fix/B-9999', newer, main='main')
+        self.assertTrue(ok, line)
+
+    def test_a_stale_head_refusal_is_not_a_hook_refusal(self):
+        # never retried as a push: the branch is held for a rebase onto the remote head
+        line = ('publish fix/B-9999 refused: would lose 1 commit(s) on origin/fix/B-9999 '
+                '(abc123456) — rebase onto origin/fix/B-9999, then push')
+        self.assertIsNone(lc.push_failure(line))
+        self.assertTrue(lc.stale_head(line))
+
     def test_a_branch_never_pushed_is_counted_against_the_trunk(self):
         self.assertEqual(lc.unpushed_commits(self.repo, '', 'main'), 1)
 
