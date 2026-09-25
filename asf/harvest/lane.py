@@ -695,7 +695,12 @@ class Lane:
 
         claimed = {}
         for b, r in runs.items():
-            if r.get('item') and b and b != self.trunk:
+            # only a run still in play answers for its card: live, or its branch still on
+            # origin and its lane not over — an ended run whose lane is MERGED/STALE/REAPED, or
+            # whose branch is gone, claims nothing
+            state = (r.get('lane') or {}).get('state')
+            in_play = lifecycle.is_live(r) or (b in heads and state not in TERMINAL_STATES)
+            if r.get('item') and b and b != self.trunk and in_play:
                 claimed.setdefault((str(r['item']), lane_of(b)), b)
         found = {}
         for b in heads:

@@ -566,6 +566,28 @@ class Orphans(LaneRepo):
         self.assertIn('T-0009 is answered by worker/T-0009', ln.host.closed[0][1])
         self.assertIn('worker/T-0009', self.heads())
 
+    def test_a_run_that_is_over_answers_for_nothing(self):
+        # review: an ended run whose lane is MERGED/STALE/REAPED (its branch gone) still claimed
+        # the card, so the one branch left answering for it was closed as superseded
+        for state in (lane.MERGED, lane.STALE, lane.REAPED):
+            with self.subTest(state=state):
+                with open(os.path.join(self.state_dir, 'sessions.jsonl'), 'w',
+                          encoding='utf-8') as f:
+                    f.write(json.dumps({'job': 'coder-t-0009', 'item': 'T-0009',
+                                        'branch': 'worker/T-0009', 'kind': 'coder', 'pid': 1,
+                                        'started': '2026-09-21T00:00:00Z'}) + '\n')
+                    f.write(json.dumps({'job': 'coder-t-0009', 'ended': '2026-09-21T00:05:00Z',
+                                        'end_reason': 'finished', 'rc': 0}) + '\n')
+                    f.write(json.dumps({'job': 'coder-t-0009', 'lane': rec(state)}) + '\n')
+                items = {'T-0009': {'id': 'T-0009', 'type': 'task', 'state': 'Active',
+                                    'links': {'prs': [723]}}}
+                ln = lane.Lane(self.product(), self.state_dir, out=lambda *_: None, items=items)
+                claims = ln.orphan_claims(lifecycle.by_branch(
+                    os.path.join(self.state_dir, 'sessions.jsonl')),
+                    {'main': HEAD, 'worker/free-plan-t3': NEW},
+                    {'worker/free-plan-t3': {'number': 723, 'state': 'OPEN'}})
+                self.assertEqual(claims['worker/free-plan-t3'], {'item': 'T-0009', 'owner': None})
+
     def test_too_far_behind_to_rebase_is_closed_and_its_card_goes_back_to_the_feeder(self):
         self.push_lane('worker/free-plan-t3', {'c.txt': 'branch\n'}, 'feat: the door')
         self.push_main({'c.txt': 'trunk\n'}, 'trunk moved')
