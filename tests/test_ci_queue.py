@@ -446,6 +446,25 @@ class TestModes(Base):
                                       'needs 3 (Task, 1st in line)'])
         self.assertFalse(os.path.exists(os.path.join(self.tmp, 'state', 'p', ci_queue.QUEUE_FILE)))
 
+    def test_the_view_says_view_only_and_dry_run_only_for_mode_dry_run(self):
+        """``asf ci queue`` never writes; its header said DRY RUN under mode ``on`` too, and read
+        as a queue in dry-run. DRY RUN is now the mode's word alone."""
+        import types
+        from unittest import mock
+        heads = {}
+        for m in ('on', 'dry-run'):
+            p = product(queue={'mode': m})
+            lines = []
+            with mock.patch.object(env, 'load_product', return_value=p):
+                ci_queue.cmd_queue(types.SimpleNamespace(product='p'),
+                                   source=ci_queue.GitHubSource(p, run=FakeGh()), out=lines.append)
+            heads[m] = lines[0]
+        self.assertEqual(heads['on'], '== CI QUEUE p (mode on, 0 waiting; view only — nothing '
+                                      'written)')
+        self.assertNotIn('DRY RUN', heads['on'])
+        self.assertIn('mode DRY RUN', heads['dry-run'])
+        self.assertIn('view only', heads['dry-run'])
+
     def test_status_names_the_depth_and_the_head(self):
         p = product()
         self.assertEqual(ci_queue.status_clause(p, now=self.t0), 'ci queue empty')
