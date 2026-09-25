@@ -39,7 +39,8 @@ STOPWORDS = {
 }
 
 ID_RE = re.compile(r'^[A-Z]-\d{4}$')
-BARE_DECISION_RE = re.compile(r'(?<![-\w])D\d{1,3}\b')  # not PF-D18: a hyphen before D is another id
+# not PF-D18 (a letter-hyphen before D is another id's prefix); D607-D616 is still a range of two
+BARE_DECISION_RE = re.compile(r'(?<![A-Za-z]-)(?<!\w)D\d{1,3}\b')
 
 
 def now_iso():
