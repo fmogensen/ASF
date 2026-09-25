@@ -24,6 +24,11 @@ os.environ['ASF_HOST_READING'] = '0 1 0'
 from asf import hermetic  # after the ASF_HOME lines above: asf.env reads ASF_HOME at import
 
 hermetic.strip_git_config(os.environ)
+# The same leak through a hook's own variables: a suite run from a pre-commit / pre-push hook
+# inherits GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE, and every `git -C <fixture>` would then act on
+# the caller's repo — a fixture's hook (review-b-0111's /x/asf) written into a real checkout.
+for _var in hermetic.GIT_HOOK:
+    os.environ.pop(_var, None)
 # B-0055, the same miss in the other direction: the tick's ASF_PRODUCT and a session's job reach
 # this entry point too, and a test that runs a record command with no --product then resolves a
 # product the suite's temp home has never heard of. A test that needs a product names one.

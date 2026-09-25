@@ -109,3 +109,15 @@ def publish(tree, origin, name='fixture', email='fixture@example.com', trunk='ma
     git('push', '-q', '-u', 'origin', trunk, cwd=tree)
     git('remote', 'set-head', 'origin', trunk, cwd=tree)
     return tree
+
+
+def executable_asf(bin_dir):
+    """A do-nothing ``asf`` executable under ``bin_dir``, for a test that hands
+    ``asf.hooks.ensure_git_hooks`` / ``install`` a ``which`` result: a hook is never written
+    naming an ``asf`` that does not exist or is not executable (review-b-0111's ``/x/asf``)."""
+    os.makedirs(bin_dir, exist_ok=True)
+    path = os.path.join(bin_dir, 'asf')
+    with open(path, 'w') as f:
+        f.write('#!/bin/sh\nexit 0\n')
+    os.chmod(path, 0o755)
+    return path

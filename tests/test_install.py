@@ -16,6 +16,7 @@ from unittest import mock
 
 import asf
 from asf import conventions, env, hooks, init, schema, upgrade
+from tests.gitfixture import executable_asf
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -613,7 +614,8 @@ class HooksTest(HomeCase):
         _git(['init', '-q', self.repo])  # ensure_git_hooks (F-0075) needs a real git repo
         self.settings = os.path.join(self.repo, '.claude', 'settings.json')
         self.product = env.Product('sample', {'repo_dir': self.repo})
-        self.which = lambda name: '/opt/bin/asf'
+        self.asf = executable_asf(os.path.join(self.tmp, 'bin'))
+        self.which = lambda name: self.asf
         self.write(env.config_path(), '')  # an empty config.yaml: no real account is touched
 
     def read(self):
@@ -644,9 +646,9 @@ class HooksTest(HomeCase):
         self.assertEqual(first['permissions'], {'allow': ['Bash(ls)']})
         pre = first['hooks']['PreToolUse']
         self.assertEqual(pre[0], {'matcher': 'Bash', 'hooks': [{'type': 'command', 'command': 'other'}]})
-        self.assertEqual(pre[1]['hooks'][0]['command'], '/opt/bin/asf hook r0001 --product sample')
+        self.assertEqual(pre[1]['hooks'][0]['command'], f'{self.asf} hook r0001 --product sample')
         self.assertEqual(first['hooks']['Stop'][0]['hooks'][0]['command'],
-                         '/opt/bin/asf hook r0001 --product sample')
+                         f'{self.asf} hook r0001 --product sample')
         with open(self.settings, 'rb') as f:
             before = f.read()
         rc, msg = hooks.install(self.product, rules_dir=self.rules, which=self.which)
@@ -656,10 +658,11 @@ class HooksTest(HomeCase):
 
     def test_a_moved_asf_replaces_its_own_entry(self):
         hooks.install(self.product, rules_dir=self.rules, which=self.which)
-        hooks.install(self.product, rules_dir=self.rules, which=lambda n: '/new/bin/asf')
+        moved = executable_asf(os.path.join(self.tmp, 'new', 'bin'))
+        hooks.install(self.product, rules_dir=self.rules, which=lambda n: moved)
         stop = self.read()['hooks']['Stop']
         self.assertEqual(len(stop), 1)
-        self.assertEqual(stop[0]['hooks'], [{'type': 'command', 'command': '/new/bin/asf hook r0001 --product sample'}])
+        self.assertEqual(stop[0]['hooks'], [{'type': 'command', 'command': f'{moved} hook r0001 --product sample'}])
 
     def test_asf_not_on_path(self):
         rc, msg = hooks.install(self.product, rules_dir=self.rules, which=lambda n: None)
@@ -701,6 +704,43 @@ class GitHookTests(unittest.TestCase):
         if backlog_dir:
             data['backlog_dir'] = backlog_dir
         return env.Product(name, data)
+
+    def test_a_hook_is_never_written_naming_an_asf_that_is_not_there(self):
+        # review-b-0111: a fixture hook naming /x/asf reached a worker commit and refused it
+        repo = self._repo('repo')
+        product = self._product(repo_dir=repo)
+        hooks_dir = hooks.git_hooks_dir(repo)
+        missing = os.path.join(self.tmp, 'nowhere', 'asf')
+        plain = os.path.join(self.tmp, 'plain', 'asf')
+        os.makedirs(os.path.dirname(plain))
+        with open(plain, 'w') as f:
+            f.write('#!/bin/sh\n')
+        os.chmod(plain, 0o644)                     # there, but not executable
+        for bad in (missing, plain, os.path.dirname(plain)):
+            ok, detail = hooks.ensure_git_hooks(product, which=lambda _n, bad=bad: bad)
+            self.assertFalse(ok, bad)
+            self.assertIn(f'NEEDS OPERATOR: {bad} is not an executable asf', detail)
+            for name in hooks.GIT_HOOK_NAMES:
+                self.assertFalse(os.path.exists(os.path.join(hooks_dir, name)), (bad, name))
+            rc, msg = hooks.install(product, rules_dir=os.path.join(self.tmp, 'none'),
+                                    which=lambda _n, bad=bad: bad, cfg={})
+            self.assertEqual(rc, 2, msg)
+            self.assertFalse(os.path.exists(os.path.join(hooks_dir, 'pre-commit')), bad)
+
+    def test_a_git_dir_inherited_from_a_hook_never_redirects_the_write(self):
+        # a suite run from another repo's hook carries its GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE:
+        # the hooks go to the repo asked for, never the caller's
+        caller, repo = self._repo('caller'), self._repo('repo')
+        product = self._product(repo_dir=repo)
+        leaked = {'GIT_DIR': os.path.join(caller, '.git'), 'GIT_WORK_TREE': caller,
+                  'GIT_INDEX_FILE': os.path.join(caller, '.git', 'index')}
+        with mock.patch.dict(os.environ, leaked):
+            self.assertEqual(os.path.realpath(hooks.git_hooks_dir(repo)),
+                             os.path.realpath(os.path.join(repo, '.git', 'hooks')))
+            ok, detail = hooks.ensure_git_hooks(product, which=self.which)
+        self.assertTrue(ok, detail)
+        self.assertTrue(os.path.isfile(os.path.join(repo, '.git', 'hooks', 'pre-commit')))
+        self.assertFalse(os.path.exists(os.path.join(caller, '.git', 'hooks', 'pre-commit')))
 
     def test_install_writes_pre_commit_and_pre_push_in_repo_and_record(self):
         repo, record = self._repo('repo'), self._repo('record')

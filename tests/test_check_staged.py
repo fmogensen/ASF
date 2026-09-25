@@ -9,6 +9,7 @@ import unittest
 
 from asf import hermetic, hooks, init
 from asf.init import PRE_COMMIT, STREAM_FOLDERS
+from tests.gitfixture import executable_asf
 
 from tests.test_backlog import FOLDERS, REPO_ROOT, write_item
 
@@ -359,12 +360,13 @@ class StagedHookInstallTests(unittest.TestCase):
             name = 'p'
             repo_dir = None
             backlog_dir = tmp
-        ok, detail = hooks.ensure_git_hooks(P, which=lambda _n: '/x/asf')
+        asf = executable_asf(os.path.join(tmp, 'x'))  # a hook never names an asf that is not there
+        ok, detail = hooks.ensure_git_hooks(P, which=lambda _n: asf)
         self.assertTrue(ok, detail)
         with open(path) as f:
             once = f.read()
         self.assertIn('"/x/asf" check --staged --product p', once)
-        hooks.ensure_git_hooks(P, which=lambda _n: '/x/asf')
+        hooks.ensure_git_hooks(P, which=lambda _n: asf)
         with open(path) as f:
             self.assertEqual(f.read(), once)
 

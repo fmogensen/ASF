@@ -8,6 +8,7 @@ import unittest
 from unittest import mock
 
 from asf import doctor, env, hooks
+from tests.gitfixture import executable_asf
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_doctor` does not
     from test_scheduler import fake_clis, fake_launchctl, fake_loaded, fake_print, read_fixture
@@ -282,7 +283,8 @@ class RedactionHooksTests(unittest.TestCase):
         self.assertIn('missing', detail)
         self.assertIn('asf hooks install --product sample', detail)
 
-        ok, detail = hooks.ensure_git_hooks(self.product, which=lambda name: '/opt/bin/asf')
+        asf = executable_asf(os.path.join(self.tmp, 'bin'))
+        ok, detail = hooks.ensure_git_hooks(self.product, which=lambda name: asf)
         self.assertTrue(ok, detail)
 
         ok, detail = doctor.check_redaction_hooks(self.product)
@@ -311,7 +313,8 @@ class ForeignGitHookStillGuardsTests(unittest.TestCase):
         self.product = env.Product('sample', {'repo_dir': self.repo})
         self.acct = os.path.join(self.tmp, 'acct')
         self.cfg = {'worker_pool': {'accounts': [{'name': 'w1', 'config_dir': self.acct}]}}
-        self.which = lambda name: '/opt/bin/asf'
+        self.asf = executable_asf(os.path.join(self.tmp, 'bin'))
+        self.which = lambda name: self.asf
 
     def _foreign_pre_push(self):
         path = os.path.join(self.repo, '.git', 'hooks', 'pre-push')
@@ -330,7 +333,7 @@ class ForeignGitHookStillGuardsTests(unittest.TestCase):
         import json
         with open(os.path.join(self.acct, 'settings.json')) as f:
             pre = json.load(f)['hooks']['PreToolUse']
-        self.assertEqual(pre[0]['hooks'][0]['command'], '/opt/bin/asf hook approvals')
+        self.assertEqual(pre[0]['hooks'][0]['command'], f'{self.asf} hook approvals')
         # the missing git hook beside the foreign one is still written; the foreign one untouched
         self.assertTrue(os.path.isfile(os.path.join(self.repo, '.git', 'hooks', 'pre-commit')))
         with open(foreign) as f:

@@ -28,6 +28,7 @@ from asf.tick import file_bugs, step_wave, tick
 from tests.test_file_bugs import FileBugsIntegrationTests
 from tests.test_harvest import ProductHarvestTests
 from tests.test_tick import TickTestCase, _git
+from tests.gitfixture import executable_asf
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -403,12 +404,13 @@ class HookTest(unittest.TestCase):
             {'name': 'b', 'config_dir': acct_b},
         ]}}
         product = env.load_product('demo')
+        asf = executable_asf(os.path.join(self.tmp, 'bin'))
         rc, msg = hooks.install(product, rules_dir=os.path.join(self.tmp, 'none'),
-                                which=lambda n: '/opt/bin/asf', cfg=cfg)
+                                which=lambda n: asf, cfg=cfg)
         self.assertEqual(rc, 0, msg)
         self.assertIn('approvals in 2 worker accounts', msg)
 
-        entry = {'matcher': '*', 'hooks': [{'type': 'command', 'command': '/opt/bin/asf hook approvals'}]}
+        entry = {'matcher': '*', 'hooks': [{'type': 'command', 'command': f'{asf} hook approvals'}]}
         with open(settings_a) as f:
             data_a = json.load(f)
         self.assertEqual(data_a['permissions'], {'allow': ['Bash(ls)']})
@@ -421,7 +423,7 @@ class HookTest(unittest.TestCase):
         with open(settings_b, 'rb') as f:
             before_b = f.read()
         rc, msg = hooks.install(product, rules_dir=os.path.join(self.tmp, 'none'),
-                                which=lambda n: '/opt/bin/asf', cfg=cfg)
+                                which=lambda n: asf, cfg=cfg)
         self.assertEqual(rc, 0, msg)
         with open(settings_a, 'rb') as f:
             self.assertEqual(f.read(), before_a)

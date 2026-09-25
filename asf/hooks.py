@@ -70,8 +70,13 @@ def git_hooks_dir(repo):
     ``repo`` is not a directory, or not a git repo — a caller reports that, it never raises."""
     if not repo or not os.path.isdir(repo):
         return None
+    # a GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE inherited from a git hook (a suite run from a
+    # pre-push, a hook of the caller's own commit) names another repo than ``repo``: git would
+    # answer with *that* repo's hooks directory, and a hook meant for ``repo`` lands there
+    from asf import hermetic
+    clean = {k: v for k, v in os.environ.items() if k not in hermetic.GIT_HOOK}
     p = subprocess.run(['git', '-C', repo, 'rev-parse', '--git-path', 'hooks'],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, env=clean)
     if p.returncode != 0:
         return None
     out = p.stdout.strip()
@@ -149,6 +154,22 @@ def staged_check_upgrade(text, name):
     return None if new == text else new
 
 
+def runnable_asf(which=shutil.which):
+    """``(path, refusal)``: the absolute ``asf`` a hook or settings entry names, or the
+    ``NEEDS OPERATOR`` line when there is none to name — not on PATH, or the ``which`` result not
+    an executable file. A hook naming an ``asf`` that is not there refuses every commit or push
+    of whoever runs it (review-b-0111's "hook refused" on a test fixture's ``/x/asf``), so none
+    is ever written."""
+    asf_path = which('asf')
+    if not asf_path:
+        return None, 'NEEDS OPERATOR: asf is not on PATH — pipx install asf-factory'
+    asf_path = os.path.abspath(asf_path)
+    if not os.path.isfile(asf_path) or not os.access(asf_path, os.X_OK):
+        return None, (f'NEEDS OPERATOR: {asf_path} is not an executable asf — no hook is written '
+                      'naming it; pipx install asf-factory')
+    return asf_path, None
+
+
 def ensure_git_hooks(product, which=shutil.which):
     """Returns ``(ok, detail)`` (D10, §2.4). Writes the redaction gate's ``pre-commit`` and
     ``pre-push`` into :func:`git_hooks_dir` of each of ``product.repo_dir`` and
@@ -156,11 +177,11 @@ def ensure_git_hooks(product, which=shutil.which):
     (:func:`is_git_hook_ours`) is left alone — running this twice changes nothing. One already
     there and not asf's is left untouched too, and the call refuses with the ``NEEDS OPERATOR``
     line naming the one line the operator adds; every other missing hook in the same call is
-    still written."""
-    asf_path = which('asf')
-    if not asf_path:
-        return False, 'NEEDS OPERATOR: asf is not on PATH — pipx install asf-factory'
-    asf_path = os.path.abspath(asf_path)
+    still written. An ``asf`` that does not exist or is not executable (:func:`runnable_asf`)
+    refuses before any hook is touched."""
+    asf_path, refusal = runnable_asf(which)
+    if refusal:
+        return False, refusal
     repos = [r for r in (product.repo_dir, product.backlog_dir) if r]
     if not repos:
         return True, 'no repo_dir or backlog_dir configured'
@@ -288,10 +309,9 @@ def install(product, rules_dir=RULES_DIR, which=shutil.which, cfg=None):
     guard that refuses human-now actions). Each refusal is then one ``NEEDS OPERATOR`` line after
     the summary, and rc is 2 (§2.4)."""
     rule_hooks = declared_hooks(rules_dir)
-    asf_path = which('asf')
-    if not asf_path:
-        return 2, 'NEEDS OPERATOR: asf is not on PATH — pipx install asf-factory'
-    asf_path = os.path.abspath(asf_path)
+    asf_path, refusal = runnable_asf(which)
+    if refusal:
+        return 2, refusal
     refusals = []
 
     accounts = pool.accounts_from_config(cfg or env.load_config())
