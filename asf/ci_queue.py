@@ -954,17 +954,81 @@ def relieve_trunk(product, items=None, source=None, out=print, dry_run=False, no
 
 # ---- reading it -------------------------------------------------------------------------------
 
-def status_clause(product, now=None, inflight=None, ceiling=None):
-    """The Capacity row's queue clause — ``ci queue 3, head T-0341 waits — …`` — from the file
-    alone (no ``gh``); ``ci queue empty`` when nothing waits; None when the product is not
-    queued. A head held at the ci ceiling is re-stated with ``inflight``/``ceiling`` — the row's
-    own count (:func:`asf.capacity.ci_runs_in_flight`) — so the row never shows two counts."""
+@dataclasses.dataclass
+class LiveLine:
+    """The line as it stands now: what ``asf ci queue`` prints and the status row reads."""
+    mode: str
+    queue: 'Queue'
+    order: list
+    entries: dict
+    needs: dict
+    free: object = None
+    ceiling: object = None
+    inflight: object = None
+    #: ``[(key, ok, why)]`` in line order
+    decisions: list = dataclasses.field(default_factory=list)
+
+
+def live_line(product, source=None, inflight=None, now=None):
+    """Every entry's decision now, in line order, from one host read (the runners, and the runs
+    in flight when ``inflight`` is not handed in) and the one cached estimate per workflow.
+    Writes nothing. None when the product is not queued."""
+    q = Queue(product, source=source, now=now, out=lambda _line: None, inflight=inflight,
+              write=False)
+    if q.mode == 'off':
+        return None
+    entries = q.data['entries']
+    order = line_order(entries)
+    line = LiveLine(q.mode, q, order, entries, {})
+    if not order:
+        return line
+    line.needs = {k: q.needs(entries[k].get('workflow')) for k in order}
+    line.free, line.ceiling = q.free(), q.ceiling()
+    line.inflight = q._inflight
+    line.decisions = [(k, *decide(k, order, entries, line.needs.get, line.free, line.ceiling,
+                                  line.inflight)) for k in order]
+    return line
+
+
+def _tick_stamp(name):
+    """``HH:MM`` (local) of the queue file's last write — the tick that wrote the snapshot."""
+    try:
+        return datetime.datetime.fromtimestamp(os.path.getmtime(_path(name))).strftime('%H:%M')
+    except OSError:
+        return '?'
+
+
+def status_clause(product, now=None, inflight=None, ceiling=None, source=None):
+    """The Capacity row's queue clause — ``ci queue 3, head T-0341 waits — …`` — computed live by
+    :func:`live_line`, the function ``asf ci queue`` prints, in the current mode;
+    ``ci queue empty`` when nothing waits; None when the product is not queued. ``inflight`` is
+    the row's own count (:func:`asf.capacity.ci_runs_in_flight`), handed to the queue so the row
+    never shows two counts and reads it once. When the live read fails (the runners unreadable)
+    the tick's stored snapshot is shown instead, labelled ``as of tick HH:MM``."""
     m = mode(product)
     if m == 'off':
         return None
+    tag = ' (dry-run)' if m == 'dry-run' else ''
+    try:
+        line = live_line(product, source=source, inflight=inflight, now=now)
+    except Exception:  # noqa: BLE001 — an unreadable host falls back to the snapshot
+        line = None
+    if line is not None and (not line.order or line.free is not None):
+        if not line.order:
+            return f'ci queue empty{tag}'
+        key, ok, why = line.decisions[0]
+        head = line.entries[key]
+        pos = f" ({head.get('label') or 'other'}, 1st in line)"
+        said = 'would start' if ok else f'waits — {why}'
+        return f"ci queue {len(line.order)}{tag}, head {head.get('item')} {said}{pos}"
+    return _snapshot_clause(product, now, inflight, ceiling, tag)
+
+
+def _snapshot_clause(product, now, inflight, ceiling, tag):
+    """The clause from the file alone (no ``gh``): the last tick's hold lines."""
     data = prune(load(product.name), now or _now())
     entries = data['entries']
-    tag = ' (dry-run)' if m == 'dry-run' else ''
+    tag = f'{tag} (as of tick {_tick_stamp(product.name)})'
     if not entries:
         return f'ci queue empty{tag}'
     head = entries[line_order(entries)[0]]
@@ -1003,22 +1067,18 @@ def cmd_queue(args, source=None, out=print):
         out(f'ci queue: {product.name} is not queued (no ci.pool, or ci.queue.mode off) — '
             f'every CI start goes at once')
         return 0
-    q = Queue(product, source=source, out=out, write=False)
-    entries = q.data['entries']
-    order = line_order(entries)
-    out(header(product.name, m, len(order)))
-    if not order:
+    line = live_line(product, source=source)
+    out(header(product.name, m, len(line.order)))
+    if not line.order:
         return 0
-    needs = {k: q.needs(entries[k].get('workflow')) for k in order}
-    free, ceiling = q.free(), q.ceiling()
+    free, ceiling, entries = line.free, line.ceiling, line.entries
     from asf import capacity
     out(f"free: {', '.join(f'{c} {n}' for c, n in sorted((free or {}).items())) or 'unknown'}"
-        + (f'; {capacity.ci_inflight_text(q._inflight)} ({capacity.CI_INFLIGHT_WHAT}); '
+        + (f'; {capacity.ci_inflight_text(line.inflight)} ({capacity.CI_INFLIGHT_WHAT}); '
            f'batch and PR starts below {ceiling}' if ceiling is not None else ''))
-    for i, k in enumerate(order, 1):
+    for i, (k, ok, why) in enumerate(line.decisions, 1):
         e = entries[k]
-        ok, why = decide(k, order, entries, needs.get, free, ceiling, q._inflight)
-        need = ', '.join(f'{c} {n}' for c, n in sorted(needs[k].items())) or 'nothing measured'
+        need = ', '.join(f'{c} {n}' for c, n in sorted(line.needs[k].items())) or 'nothing measured'
         out(f"{i}. {e.get('item')} [{e.get('kind')}, {e.get('label')}, since {e.get('since')}] "
             f"needs {need} — {'would start' if ok else 'waits: ' + why}")
     return 0
