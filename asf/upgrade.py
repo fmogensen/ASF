@@ -1,7 +1,7 @@
 """asf.upgrade — ``asf upgrade``: reinstall the package at the trunk's head, then the schema check
 for every product, one table: product · record schema · package · action.
 
-The install is pinned (``tools/install.sh`` runs ``pipx install --force git+<url>@<sha>``), so
+The install is pinned (the install script runs ``pipx install --force git+<url>@<sha>``), so
 ``pipx upgrade`` reinstalls the same pin and changes nothing. The upgrade reinstalls at a named
 commit instead: the head the tick's drift check read, or ``main``'s head for a manual run. It is
 deferred while another tick runs (a reinstall under a running tick tore it: ImportError
@@ -139,7 +139,7 @@ def install(ref=None, run=subprocess.run, out=print):
     try:
         rc = run(cmd).returncode
     except OSError:
-        out('NEEDS OPERATOR: pipx is not on PATH — install pipx, then bash tools/install.sh <product>')
+        out('NEEDS OPERATOR: pipx is not on PATH — install pipx, then rerun the install script')
         return 2
     if rc != 0:
         return rc
