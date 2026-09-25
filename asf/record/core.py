@@ -39,7 +39,7 @@ STOPWORDS = {
 }
 
 ID_RE = re.compile(r'^[A-Z]-\d{4}$')
-BARE_DECISION_RE = re.compile(r'\bD\d{1,3}\b')
+BARE_DECISION_RE = re.compile(r'(?<![-\w])D\d{1,3}\b')  # not PF-D18: a hyphen before D is another id
 
 
 def now_iso():

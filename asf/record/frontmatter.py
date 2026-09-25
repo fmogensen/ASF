@@ -16,7 +16,7 @@ MARKER = "# ---- machine ----"
 _KEY_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*):(.*)$')
 _INT_RE = re.compile(r'^-?\d+$')
 _FLOAT_RE = re.compile(r'^-?\d+\.\d+$')
-_BARE_DECISION_RE = re.compile(r'\bD\d{1,3}\b')
+_BARE_DECISION_RE = re.compile(r'(?<![-\w])D\d{1,3}\b')
 
 
 class FrontmatterError(Exception):

@@ -447,6 +447,15 @@ class CheckCommandTests(unittest.TestCase):
         r = run(['check'], self.root)
         self.assertIn('bare decision reference', r.stdout)
 
+    def test_a_prefixed_id_like_pf_d18_is_not_a_decision_reference(self):
+        # review-finding ids (PF-D18) end in a D<n> the record may have a card for: the hyphen
+        # before the D makes it another id, not a bare decision reference
+        write_item(self.root, 'D-0018', 'decision', 'A ruling')
+        write_item(self.root, 'E-0001', 'epic', 'Factory',
+                   body="## Description\nFixes PF-D18 and PF-D18b from round 2.\n\n## Children\n\n## Backlinks\n")
+        r = run(['check'], self.root)
+        self.assertNotIn('bare decision reference', r.stdout)
+
     def test_decision_reference_inside_fenced_code_is_not_a_finding(self):
         write_item(self.root, 'E-0001', 'epic', 'Factory',
                    body="## Description\n```ts\ndescribe('setup mode (D287 b)', () => {})\n```\n"
