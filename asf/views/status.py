@@ -141,7 +141,8 @@ def _sessions_path(product):
 
 
 def capacity_cell(cfg, product):
-    """§2.5's row: ``sessions <inflight>/<ceiling> (operator total <n>), ci <inflight>/<ci>`` —
+    """§2.5's row: ``sessions <inflight>/<ceiling> (operator total <n>), ci <n> runs in flight
+    (batch starts below <ci>)`` (:func:`ci_clause`) —
     the clauses that do not resolve are dropped — or ``not_configured('capacity')`` when neither
     file carries a ``capacity:`` block and no deprecated key is in use."""
     from asf import capacity as capacity_mod
@@ -162,8 +163,20 @@ def capacity_cell(cfg, product):
     if lane:
         parts.append(lane)
     if r.ci is not None:
-        parts.append(f"ci {r.ci_inflight if r.ci_inflight is not None else '?'}/{r.ci}")
+        parts.append(ci_clause(r.ci_inflight, r.ci))
     return ', '.join(parts)
+
+
+def ci_clause(inflight, gate):
+    """The CI clause of the Capacity row. ``capacity.ci`` is a *start gate*, not a ceiling on
+    every run: the tick holds its ``batch`` step while ``ci.workflow`` has that many runs in
+    flight, and nothing else waits on it — a worker's PR push, a harvest merge onto the trunk and
+    a deploy dispatch all start runs regardless. The in-flight count is every ``ci.workflow`` run
+    (PR, trunk and batch alike), so an ``x/y`` fraction read as a breached cap; the clause names
+    the total and what the gate holds instead."""
+    n = inflight if inflight is not None else '?'
+    held = ' — batch waits' if isinstance(inflight, int) and inflight >= gate else ''
+    return f"ci {n} runs in flight (batch starts below {gate}{held})"
 
 
 def record_cell(root):
