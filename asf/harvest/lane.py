@@ -1256,9 +1256,14 @@ def precheck(lane, entries):
         level = approvals.level_of(product, cls)
         if level != 'auto' and not approvals.is_granted(product, f"{f.get('item')}/{cls}"):
             detail = matched or 'routine'
+            if approvals.dropped(product, f"{f.get('item')}/{cls}", detail):
+                # a person dropped this merge: it is not asked again, and never merges
+                out(f'held {b}: {cls} dropped — {detail} — not asked again')
+                wait(lane, f, f'approval {cls} dropped', 'held')
+                continue
             if not lane.dry_run:
-                approvals.refuse(product, f.get('item'), cls, level,
-                                 (f.get('run') or {}).get('job') or b, 'harvest', detail)
+                approvals.ask(product, f.get('item'), cls, level,
+                              (f.get('run') or {}).get('job') or b, 'harvest', detail)
             out(f'held {b}: {cls} ({level}) — {detail}')
             wait(lane, f, f'approval {cls} ({level})', 'held')
             continue

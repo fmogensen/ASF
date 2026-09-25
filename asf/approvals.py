@@ -555,13 +555,15 @@ def _fold(product):
         entry = entries.setdefault(hold, {
             'hold': hold, 'item': item, 'class': cls, 'level': None, 'detail': None,
             'first': None, 'last': None, 'count': 0, 'resolution': None,
-            'announced': None, 'closed': None, 'open': False,
+            'subject': None, 'tool': None, 'announced': None, 'closed': None, 'open': False,
         })
         event = rec.get('event')
         ts = rec.get('ts')
         if event == 'refused':
             entry['level'] = rec.get('level')
             entry['detail'] = rec.get('detail')
+            entry['subject'] = rec.get('subject') or rec.get('detail')
+            entry['tool'] = rec.get('tool')
             entry['first'] = entry['first'] or ts
             entry['last'] = ts
             entry['count'] += 1
@@ -589,6 +591,44 @@ def open_holds(product):
            for e in _fold(product).values() if e['open']]
     out.sort(key=lambda e: e['first'] or '')
     return out
+
+
+def dropped(product, hold, subject, detail=None):
+    """Whether ``hold`` was resolved ``dropped`` for this same ``subject``: its latest
+    ``resolved`` line says ``dropped`` and its last ``refused`` line asked about the same thing
+    (its ``subject``, else its ``detail`` — a line written before subjects were). ``detail``, when
+    given, also matches the last line's detail. A materially different request (a new subject)
+    is not dropped: it may be asked."""
+    e = _fold(product).get(hold)
+    if not e or e['open'] or e['resolution'] != 'dropped':
+        return False
+    return e['subject'] == subject or (detail is not None and e['detail'] == detail)
+
+
+def ask(product, item, cls, level, job, tool, detail, subject=None, **extra):
+    """Refuse ``<item>/<class>`` into the ledger as a question — unless a person already
+    answered this same question ``dropped`` (:func:`dropped`): a dropped hold is never re-asked
+    for the same item, class and subject. Returns the hold id when it was asked, None when the
+    drop stands (the caller moves the item on without the action)."""
+    subject = detail if subject is None else subject
+    hold = f'{item}/{cls}'
+    if dropped(product, hold, subject, detail):
+        return None
+    return refuse(product, item, cls, level, job, tool, detail, subject=subject, **extra)
+
+
+def withdraw(product, item, tool, why):
+    """Close ``done`` every open hold on ``item`` that ``tool`` asked: the request behind it is
+    gone (the reader that raised it no longer asks), so it is no one's question. Returns the
+    holds closed."""
+    closed = []
+    for e in open_holds(product):
+        if e['item'] == item and e.get('tool') == tool:
+            hold = f"{item}/{e['class']}"
+            append(product, {'event': 'resolved', 'hold': hold, 'resolution': 'done',
+                             'by': f'tick: {why}', 'ts': _now_iso()})
+            closed.append(hold)
+    return closed
 
 
 def is_granted(product, hold):

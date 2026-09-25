@@ -124,6 +124,30 @@ class LedgerTest(unittest.TestCase):
         self._refuse()
         self.assertEqual(approvals.holds(self.product)[hold]['count'], 2)
 
+    def test_a_dropped_hold_is_not_asked_again_for_the_same_subject(self):
+        ask = lambda subject: approvals.ask(  # noqa: E731
+            self.product, 'T-0001', 'touch_security', 'human-now', 'coder-t-0001', 'widen',
+            f'widen writes: +{subject}', subject=subject)
+        hold = ask('a b')
+        approvals.resolve(self.product, hold, 'dropped')
+        self.assertTrue(approvals.dropped(self.product, hold, 'a b'))
+        self.assertIsNone(ask('a b'))
+        self.assertEqual(approvals.open_holds(self.product), [])
+        # a materially different request is a new question
+        self.assertFalse(approvals.dropped(self.product, hold, 'a b c'))
+        self.assertEqual(ask('a b c'), hold)
+        self.assertEqual([h['hold'] for h in approvals.open_holds(self.product)], [hold])
+
+    def test_a_granted_or_done_hold_is_not_dropped(self):
+        hold = self._refuse()
+        approvals.resolve(self.product, hold, 'done')
+        self.assertFalse(approvals.dropped(self.product, hold, 'git push origin HEAD:main'))
+
+    def test_a_legacy_line_without_a_subject_matches_by_detail(self):
+        hold = self._refuse()
+        approvals.resolve(self.product, hold, 'dropped')
+        self.assertTrue(approvals.dropped(self.product, hold, 'x', 'git push origin HEAD:main'))
+
     def test_resolve_of_an_invalid_resolution_is_a_value_error(self):
         hold = self._refuse()
         with self.assertRaises(ValueError):
