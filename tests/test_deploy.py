@@ -537,5 +537,122 @@ class HarvestStep(unittest.TestCase):
         self.assertEqual(lines, ['deploy: FAILED boom'])
 
 
+class FileSh(FakeSh):
+    """FakeSh that also answers ``git show <sha>:<path>`` from ``files[(sha, path)]``."""
+    def __init__(self, *a, files=None, **kw):
+        super().__init__(*a, **kw)
+        self.files = files or {}
+
+    def __call__(self, cmd, cwd=None, timeout=60):
+        if 'show' in cmd and cmd[:1] == ['git']:
+            self.calls.append(cmd)
+            sha, _, path = cmd[-1].partition(':')
+            return self.files.get((sha, path))
+        return super().__call__(cmd, cwd, timeout)
+
+
+def _job(name, conclusion='success'):
+    return {'name': name, 'conclusion': conclusion, 'status': 'completed'}
+
+
+class RequiredJobs(unittest.TestCase):
+    """The candidate under ``required_jobs``: every listed job green; the rest never blocks."""
+    def _p(self, mode='auto', **prod_extra):
+        return _modes(prod=mode, prod_extra=prod_extra)
+
+    def test_an_optional_job_cancelled_is_still_a_candidate(self):
+        sh = FakeSh([_run(PROD)], [_run(GREEN, conclusion='cancelled', rid=5)],
+                    jobs={5: [_job('gate — the gate, without the suites'), _job('gate-tests'),
+                              _job('soak', 'cancelled')]})
+        lines = []
+        sent = deploy.tick(self._p(required_jobs=['gate', 'gate-tests']), out=lines.append, sh=sh)
+        self.assertEqual(sent, {'prod': GREEN})
+        self.assertIn('green on required jobs [gate, gate-tests] (soak cancelled, not required)',
+                      lines[0])
+
+    def test_a_required_job_failed_is_not_a_candidate(self):
+        sh = FakeSh([_run(PROD)], [_run(GREEN, conclusion='failure', rid=5)],
+                    jobs={5: [_job('gate'), _job('gate-tests', 'failure')]})
+        p = self._p(required_jobs=['gate', 'gate-tests'])
+        self.assertIsNone(deploy.facts(p, sh=sh)['candidate'])
+        self.assertIn('green on required jobs [gate, gate-tests]', deploy.line(p, sh=sh))
+        self.assertEqual(deploy.tick(p, out=[].append, sh=sh), {})
+
+    def test_no_list_keeps_the_run_level_rule(self):
+        sh = FakeSh([_run(PROD)], [_run(GREEN, conclusion='cancelled', rid=5)],
+                    jobs={5: [_job('gate'), _job('soak', 'cancelled')]})
+        p = self._p()
+        self.assertIsNone(deploy.facts(p, sh=sh)['candidate'])
+        self.assertFalse(any(c[:3] == ['gh', 'run', 'view'] for c in sh.calls))
+        green = FakeSh([_run(PROD)], [_run(GREEN)])
+        self.assertIn('run-level conclusion success', deploy.line(p, sh=green))
+
+    def test_landing_checks_is_the_fallback_list(self):
+        p = _modes(prod='auto', conv={'landing_checks': ['gate']})
+        sh = FakeSh([_run(PROD)], [_run(GREEN, conclusion='timed_out', rid=5)],
+                    jobs={5: [_job('gate'), _job('soak', 'timed_out')]})
+        self.assertEqual(deploy.facts(p, sh=sh)['candidate'], GREEN)
+
+    def test_a_job_is_named_up_to_the_first_space_never_by_prefix(self):
+        p = self._p(required_jobs=['p1-e2e'])
+        sh = FakeSh([_run(PROD)], [_run(GREEN, conclusion='failure', rid=5)],
+                    jobs={5: [_job('p1-e2e — the suite'), _job('p1-e2e-b', 'failure')]})
+        self.assertEqual(deploy.facts(p, sh=sh)['candidate'], GREEN)
+        sh = FakeSh([_run(PROD)], [_run(GREEN, conclusion='failure', rid=5)],
+                    jobs={5: [_job('p1-e2e', 'failure'), _job('p1-e2e-b')]})
+        self.assertIsNone(deploy.facts(p, sh=sh)['candidate'])
+
+    def test_a_required_job_missing_from_the_run_is_not_green(self):
+        p = self._p(required_jobs=['gate'])
+        sh = FakeSh([_run(PROD)], [_run(GREEN, conclusion='failure', rid=5)],
+                    jobs={5: [_job('gate-tests')]})
+        self.assertIsNone(deploy.facts(p, sh=sh)['candidate'])
+
+    def test_the_customer_content_check_still_refuses_first(self):
+        p = self._p(required_jobs=['gate'])
+        sh = FakeSh([_run(PROD)], [_run(GREEN, conclusion='cancelled', rid=5)],
+                    jobs={5: [_job('gate'), _job('soak', 'cancelled')]})
+        from unittest import mock
+        with mock.patch.object(deploy, 'marker_refusal', return_value='deploy: DISPATCH REFUSED'):
+            self.assertEqual(deploy.tick(p, out=[].append, sh=sh), {})
+        self.assertEqual(sh.dispatched(), [])
+
+
+class RequiredJobsFrom(unittest.TestCase):
+    SPEC = {'file': 'scripts/merge.sh', 'var': 'REQUIRED_CHECKS'}
+
+    def test_parse_assignment_shapes(self):
+        pa = deploy.parse_assignment
+        self.assertEqual(pa('X=1\nREQ="${REQ:-gate gate-tests}"\n', 'REQ'), ['gate', 'gate-tests'])
+        self.assertEqual(pa('export REQ="a b"', 'REQ'), ['a', 'b'])
+        self.assertEqual(pa("REQ=(a 'b')", 'REQ'), ['a', 'b'])
+        self.assertIsNone(pa('OTHER=1', 'REQ'))
+
+    def test_the_file_at_the_run_sha_names_the_jobs(self):
+        p = _modes(prod='auto', prod_extra={'required_jobs_from': self.SPEC})
+        files = {(GREEN, 'scripts/merge.sh'): 'REQUIRED_CHECKS="${REQUIRED_CHECKS:-gate}"\n'}
+        sh = FileSh([_run(PROD)], [_run(GREEN, conclusion='cancelled', rid=5)],
+                    jobs={5: [_job('gate'), _job('soak', 'cancelled')]}, files=files)
+        self.assertEqual(deploy.facts(p, sh=sh)['candidate'], GREEN)
+        files[(GREEN, 'scripts/merge.sh')] = 'REQUIRED_CHECKS="gate soak"\n'
+        self.assertIsNone(deploy.facts(p, sh=sh)['candidate'])
+
+    def test_an_unreadable_file_with_no_list_is_no_candidate(self):
+        p = _modes(prod='auto', prod_extra={'required_jobs_from': self.SPEC})
+        sh = FileSh([_run(PROD)], [_run(GREEN)])
+        self.assertIsNone(deploy.facts(p, sh=sh)['candidate'])
+
+    def test_doctor_warns_when_the_list_drifts_from_the_file(self):
+        p = _modes(prod='auto', prod_extra={'required_jobs_from': self.SPEC,
+                                            'required_jobs': ['gate']})
+        sh = FileSh([], [], files={('origin/main', 'scripts/merge.sh'):
+                                   'REQUIRED_CHECKS="gate gate-tests"'})
+        bad = [d for ok, d in deploy.findings(p, sh=sh) if not ok]
+        self.assertTrue(any('drifts from REQUIRED_CHECKS' in d and 'gate-tests' in d
+                            for d in bad), bad)
+        p.deploy_sha['prod']['required_jobs'] = ['gate-tests', 'gate']
+        self.assertFalse([d for ok, d in deploy.findings(p, sh=sh) if not ok])
+
+
 if __name__ == '__main__':
     unittest.main()
