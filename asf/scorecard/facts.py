@@ -5,7 +5,9 @@ Sources, all facts the factory already writes:
 * the record's cards: type, parent, state, and the History lines — a card's first dated line is
   when it was carded, the ingest's ``stage … → landed`` / ``state … → Resolved`` line is when it
   landed, ``stage … → on-prod`` / ``state … → Closed`` is when it reached production (a product
-  that deploys nothing is Closed the moment it lands);
+  that deploys nothing is Closed the moment it lands) — and, beside it, what prod runs: a landed
+  Feature whose landing commits are all ancestors of the deployed prod sha (the Prod row's
+  source, :func:`prod_deployment`) is on prod from that deploy (:func:`attribute_prod`);
 * the record's metric streams: ``metrics/sessions`` (spend and tokens per session, matched to a
   card), ``metrics/ci`` (runner minutes and jobs, from the forge's CI API) and ``metrics/gates``
   (the local landing gate's seconds);
@@ -168,13 +170,97 @@ def _description(body):
     return '\n'.join(out)
 
 
+_LANDING_RE = re.compile(r'^(?:merge|commit) ([0-9a-f]{7,40}) (?:of .+ lands|names) ')
+
+
+def landing_shas(meta):
+    """The commits the ingest's evidence says landed this card (``merge <sha> of <branch> lands
+    <id>``, ``commit <sha> names <id>``)."""
+    ev = meta.get('evidence')
+    out = []
+    for line in ev if isinstance(ev, list) else []:
+        m = _LANDING_RE.match(str(line))
+        if m and m.group(1) not in out:
+            out.append(m.group(1))
+    return out
+
+
 def card(meta, body):
     """One card's summary: its typed fields, its timeline, and its own text (for mentions)."""
     t = timeline(meta, body)
     return dict(t, id=meta.get('id'), type=meta.get('type'), parent=meta.get('parent'),
                 title=str(meta.get('title') or ''), state=meta.get('state'),
                 stage=meta.get('stage'), severity=meta.get('severity'),
-                removed=bool(meta.get('removed')), text=_description(body))
+                removed=bool(meta.get('removed')), text=_description(body),
+                landing_shas=landing_shas(meta))
+
+
+def _later(a, b):
+    da, db = to_dt(a), to_dt(b)
+    if da is None or db is None:
+        return a or b
+    return iso(max(da, db))
+
+
+def attribute_prod(items, prod_sha, prod_at, is_ancestor):
+    """Mark each landed Feature the record has not yet put on prod as on prod when every commit
+    that landed it — its own, else its live descendants' — is an ancestor of ``prod_sha`` (the
+    deployed sha the Prod row reads). Its ``prod`` stamp is then the later of its landing and
+    the deployment (``prod_at``). The record's own ``on-prod``/``Closed`` also waits on the
+    operator's tick; this is what production runs. Returns the ids it marked."""
+    if not prod_sha:
+        return []
+    kids = {}
+    for iid, it in items.items():
+        if it.get('parent'):
+            kids.setdefault(it['parent'], []).append(iid)
+    marked = []
+    for fid, f in items.items():
+        if f.get('type') != 'feature' or f.get('removed') or not f.get('landed') or f.get('prod'):
+            continue
+        shas = list(f.get('landing_shas') or [])
+        if not shas:
+            stack, seen = list(kids.get(fid, ())), set()
+            while stack:
+                c = stack.pop()
+                if c in seen or items[c].get('removed'):
+                    continue
+                seen.add(c)
+                shas += items[c].get('landing_shas') or []
+                stack += kids.get(c, ())
+        if shas and all(is_ancestor(s, prod_sha) for s in shas):
+            at = prod_at
+            if isinstance(at, (int, float)):  # epoch milliseconds
+                at = iso(datetime.datetime.fromtimestamp(at / 1000, tz=datetime.timezone.utc))
+            f['prod'] = _later(f['landed'], at) if at else f['landed']
+            marked.append(fid)
+    return marked
+
+
+def prod_deployment(product):
+    """``(sha, at)`` of what prod runs — the Prod row's own source
+    (:func:`asf.harvest.deploy.facts`) — or ``(None, None)`` when prod is not managed or does
+    not read."""
+    from asf.harvest import deploy
+    try:
+        if not deploy.env_applies(product, 'prod'):
+            return None, None
+        f = deploy.facts(product, env='prod')
+    except Exception:  # noqa: BLE001 — the forge being down never loses the scorecard
+        return None, None
+    return f.get('deployed'), f.get('at')
+
+
+def _git_ancestor(product):
+    import subprocess
+
+    def check(sha, base):
+        try:
+            return subprocess.run(['git', '-C', product.repo_dir, 'merge-base', '--is-ancestor',
+                                   sha, base], capture_output=True, timeout=30).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+    return check
 
 
 def ids_in(text):
@@ -250,7 +336,11 @@ def load(root, product=None, *, registry=True, forge=True, as_of=None):
             clutter = forge_clutter(product)
         except Exception:  # noqa: BLE001 — the forge being down never loses the scorecard
             pass
-    return Facts(items=load_cards(root), sessions=_stream(root, 'sessions'), ci=_stream(root, 'ci'),
+    items = load_cards(root)
+    if product is not None and getattr(product, 'repo_dir', None):
+        sha, at = prod_deployment(product)
+        attribute_prod(items, sha, at, _git_ancestor(product))
+    return Facts(items=items, sessions=_stream(root, 'sessions'), ci=_stream(root, 'ci'),
                  gates=_stream(root, 'gates'), runs=runs, clutter=clutter,
                  as_of=as_of or now_iso())
 

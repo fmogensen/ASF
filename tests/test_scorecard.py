@@ -407,6 +407,65 @@ class RecordTests(unittest.TestCase):
         self.assertIn('F-0001 one', text)
 
 
+class ProdAttributionTests(unittest.TestCase):
+    """A landed Feature is on prod when every commit that landed it is an ancestor of the sha
+    prod runs — the Prod row's own source — not only once the record says on-prod/Closed."""
+
+    def _items(self):
+        meta = lambda **kw: dict({'state': 'Resolved', 'stage': 'landed',  # noqa: E731
+                                  'stage_since': '2026-09-24T15:37:00Z'}, **kw)
+        return {
+            'F-0001': facts.card(meta(id='F-0001', type='feature', evidence=[
+                'merge c272091 of groom/x lands F-0001', 'CI green on main at or after it']), ''),
+            'F-0002': facts.card(meta(id='F-0002', type='feature', evidence=['2/2 tasks Closed'],
+                                      stage_since='2026-09-25T18:32:00Z'), ''),
+            'T-0001': facts.card(meta(id='T-0001', type='task', parent='F-0002', state='Closed',
+                                      evidence=['merge 74df364 of cloud/T-0001 lands T-0001 (PR #7)']), ''),
+            'T-0002': facts.card(meta(id='T-0002', type='task', parent='F-0002', state='Closed',
+                                      evidence=['merge 79240b1 of cloud/T-0002 lands T-0002']), ''),
+            'T-0003': facts.card(meta(id='T-0003', type='task', parent='F-0002', removed='merged',
+                                      evidence=['commit 1111111 names T-0003']), ''),
+        }
+
+    def test_landing_shas_read_from_the_evidence(self):
+        self.assertEqual(self._items()['F-0001']['landing_shas'], ['c272091'])
+        self.assertEqual(self._items()['T-0003']['landing_shas'], ['1111111'])
+
+    def test_ancestry_against_the_deployed_sha_decides(self):
+        items = self._items()
+        in_prod = {'c272091'}
+        marked = facts.attribute_prod(items, 'de8e980', '2026-09-25T17:13:25Z',
+                                      lambda s, base: base == 'de8e980' and s in in_prod)
+        self.assertEqual(marked, ['F-0001'])
+        self.assertEqual(items['F-0001']['prod'], '2026-09-25T17:13:25Z')  # the deploy, after landing
+        self.assertIsNone(items['F-0002']['prod'])  # its tasks merged after the deploy
+        items = self._items()
+        in_prod |= {'74df364', '79240b1'}  # the removed task's commit is not asked
+        facts.attribute_prod(items, 'de8e980', 1789949910391, lambda s, b: s in in_prod)
+        self.assertEqual(items['F-0002']['prod'], '2026-09-25T18:32:00Z')  # landed after the deploy stamp
+
+    def test_the_value_row_counts_it(self):
+        items = self._items()
+        facts.attribute_prod(items, 'de8e980', '2026-09-25T17:13:25Z', lambda s, b: s == 'c272091')
+        f = Facts(items=items, sessions=[], ci=[], gates=[], runs=[], clutter={},
+                  as_of='2026-09-25T20:35:00Z')
+        self.assertTrue(score.headline_line(score.headline(f)).startswith('1 on prod / 2 landed'))
+
+    def test_no_prod_sha_marks_nothing(self):
+        items = self._items()
+        self.assertEqual(facts.attribute_prod(items, None, None, lambda s, b: True), [])
+
+    def test_load_reads_the_prod_rows_source(self):
+        with tempfile.TemporaryDirectory() as root, \
+                mock.patch.object(facts, 'load_cards', return_value=self._items()), \
+                mock.patch.object(facts, 'prod_deployment',
+                                  return_value=('de8e980', '2026-09-25T17:13:25Z')) as pd, \
+                mock.patch.object(facts, '_git_ancestor', return_value=lambda s, b: s == 'c272091'):
+            f = facts.load(root, Prod(repo_dir=root), registry=False, forge=False)
+        pd.assert_called_once()
+        self.assertEqual(f.items['F-0001']['prod'], '2026-09-25T17:13:25Z')
+
+
 class WiringTests(unittest.TestCase):
     def test_the_daily_step_runs_the_loop(self):
         from asf.tick import step_daily

@@ -396,7 +396,7 @@ def _sha_green(product, sha, ci_runs, sh):
 def _blank(product, env):
     return {'env': env, 'mode': mode(product, env), 'workflow': workflow(product, env),
             'ci': ci_workflow(product), 'deployed': None, 'prod': None, 'running': None,
-            'failed': None, 'candidate': None, 'main': None, 'behind': None, 'age': None,
+            'failed': None, 'candidate': None, 'main': None, 'behind': None, 'age': None, 'at': None,
             'error': None, 'why': None, 'paths': paths(product, env), 'relevant': None,
             'reader': reader(product, env)}
 
@@ -430,7 +430,8 @@ def facts(product, sh=_sh, now=None, env='prod', _ci=None):
     f['main'] = sh(['git', '-C', product.repo_dir, 'rev-parse', f'origin/{trunk}'])
     if env == 'dev' and f['mode'] == 'ci':  # the product's CI deploys it; observe only
         run = _dev_job_run(product, ci, sh) or {}
-        f['deployed'], f['age'] = run.get('headSha'), _age(run.get('updatedAt'), now)
+        f['deployed'], f['at'] = run.get('headSha'), run.get('updatedAt')
+        f['age'] = _age(f['at'], now)
         _set_behind(product, f, sh)
         return _done(f)
     runs = _runs(product, f['workflow'], sh) if f['workflow'] else []
@@ -442,12 +443,14 @@ def facts(product, sh=_sh, now=None, env='prod', _ci=None):
         if got is None:
             f['error'] = f"{env}'s deployed sha unreadable (vercel ls)"
             return _done(f)
-        f['deployed'], f['age'] = got[0], _age(got[1], now)
+        f['deployed'], f['at'] = got[0], got[1]
+        f['age'] = _age(f['at'], now)
         if not f['deployed'] and got[1] is not None:  # a CLI deploy: no commit sha on it
             f['deployed'] = recorded_sha(product, env, got[1])
     else:
         last = next((r for r in runs if r.get('conclusion') == 'success'), {})
-        f['deployed'], f['age'] = last.get('headSha'), _age(last.get('updatedAt'), now)
+        f['deployed'], f['at'] = last.get('headSha'), last.get('updatedAt')
+        f['age'] = _age(f['at'], now)
     live = next((r for r in runs if r.get('status') != 'completed'), None)
     if live:
         f['running'] = (live.get('databaseId'), live.get('headSha'))
