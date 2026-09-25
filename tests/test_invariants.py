@@ -94,6 +94,27 @@ class R10I4OneLaunchPerBranchOfItsKind(unittest.TestCase):
                          [('I4', 'PLAN → CODE T-0001 @worker/T-0001')])
 
 
+    def test_r10_a_correction_on_another_branch_does_not_hold_the_groom_branch(self):
+        # 2026-09-25, a product tick: GROOM → ADJUDICATE F-0007 @groom/2026-09-25 was dropped every tick
+        # because F-0007 had a land-spec correction pending on cloud/spec-brand-alignment — a
+        # different branch. The occupancy fallback matched the item, not the branch.
+        rows = [Row(tier=2, kind='GROOM → ADJUDICATE', item_id='F-0007', feature_id='F-0007',
+                    action=LAUNCH, brief_kind='groom', branch='groom/2026-09-25',
+                    reason='26 groom questions no rule answers, oldest F-0007',
+                    groom_date='2026-09-25')]
+        occ = {'busy': {}, 'waiting_landing': {},
+               'corrections': {'F-0007': {'kind': 'land-spec', 'text': 'Land the spec',
+                                          'rounds': 1, 'branch': 'cloud/spec-brand-alignment'}}}
+        self.assertEqual(invariants.check_i4(feeder(rows, occupancy=occ)), [])
+
+    def test_r10_a_correction_on_the_same_branch_still_holds_it(self):
+        rows = [row('PLAN → CODE', 'T-0001', 'worker/T-0001')]
+        occ = {'busy': {}, 'waiting_landing': {},
+               'corrections': {'T-0001': {'kind': 'fix', 'rounds': 0, 'branch': 'worker/T-0001'}}}
+        self.assertEqual(ids(invariants.check_i4(feeder(rows, occupancy=occ))),
+                         [('I4', 'PLAN → CODE T-0001 @worker/T-0001')])
+
+
 class I5NoCodeWithoutTheSpecOnTheTrunk(unittest.TestCase):
     def test_i5_a_coder_row_whose_spec_is_on_a_branch_is_dropped(self):
         rows = [row('PLAN → CODE', 'T-0001', 'worker/T-0001', feature='F-0001'),
@@ -101,6 +122,23 @@ class I5NoCodeWithoutTheSpecOnTheTrunk(unittest.TestCase):
         docs = {'F-0001': {'spec': False, 'plan': True}, 'F-0002': {'spec': True, 'plan': None}}
         self.assertEqual(ids(invariants.check_i5(feeder(rows, docs_on_trunk=docs))),
                          [('I5', 'PLAN → CODE T-0001 @worker/T-0001')])
+
+    def test_i5_a_features_own_correction_on_its_spec_branch_is_not_a_code_row(self):
+        # 2026-09-25, a product tick: FIX → CORRECT F-0092/F-0097/F-0090 on their cloud/spec-* branches
+        # were dropped every tick — "spec not on the trunk" — though the correction exists to
+        # land that spec. The Feature's own row works its documents; only a Task's code needs them.
+        rows = [Row(tier=2, kind='FIX → CORRECT', item_id=f, feature_id=f, action=LAUNCH,
+                    brief_kind='correct', branch=b,
+                    reason='harvest held it (land-spec), round 0: back to a session',
+                    correction=f'The spec for {f} is approved but not on the trunk: land it.')
+                for f, b in (('F-0092', 'cloud/spec-tinkerer-mode'),
+                             ('F-0097', 'cloud/spec-voice-parity'),
+                             ('F-0090', 'cloud/spec-team-staffing'))]
+        rows.append(row('FIX → CORRECT', 'T-0009', 'worker/T-0009', brief='correct',
+                        feature='F-0092'))
+        docs = {f: {'spec': False, 'plan': False} for f in ('F-0092', 'F-0097', 'F-0090')}
+        self.assertEqual(ids(invariants.check_i5(feeder(rows, docs_on_trunk=docs))),
+                         [('I5', 'FIX → CORRECT T-0009 @worker/T-0009')])
 
     def test_i5_a_document_whose_place_is_unknown_is_not_judged(self):
         rows = [row('PLAN → CODE', 'T-0001', 'worker/T-0001', feature='F-0001'),

@@ -408,8 +408,16 @@ def _allowed_kinds(ctx, row):
         return LANE_LAUNCH_KINDS.get(state, ()), f'lane {state}'
     occ = ctx.occupancy or {}
     for key in ('corrections', 'busy', 'waiting_landing'):
-        if row.item_id in (occ.get(key) or {}):
-            return OCCUPANCY_LAUNCH_KINDS[key], f'occupancy {key}'
+        held = (occ.get(key) or {})
+        if row.item_id not in held:
+            continue
+        # an entry that names its branch holds that branch only: F-0007's land-spec correction
+        # on its spec branch never held the groom branch its GROOM → ADJUDICATE row launches on
+        # (2026-09-25, a product tick: dropped every tick, nothing ever resolving it)
+        where = held[row.item_id].get('branch') if isinstance(held[row.item_id], dict) else None
+        if where and row.branch and where != row.branch:
+            continue
+        return OCCUPANCY_LAUNCH_KINDS[key], f'occupancy {key}'
     return None, None
 
 
@@ -442,11 +450,16 @@ CODE_BRIEF_KINDS = ('task', 'coder', 'correct', 'fixer')
 def check_i5(ctx):
     """I5 — no code row without the spec (and the plan) on the trunk: a launching code row of a
     Feature's Task needs ``origin/<trunk>:<spec>`` (and ``<plan>``) to exist. A document whose
-    place is unknown is not judged."""
+    place is unknown is not judged.
+
+    The Feature's own row (``item_id == feature_id``) is not a Task's code row: its correction,
+    adjudication or review works the spec/plan lane's documents on their own branch — a
+    land-spec correction exists to put the spec on the trunk, so requiring it there first would
+    hold it forever (2026-09-25, a product tick: F-0090/F-0092/F-0097 dropped every tick)."""
     out = []
     for row in _launching(ctx):
         fid = getattr(row, 'feature_id', '') or ''
-        if not fid or row.brief_kind not in CODE_BRIEF_KINDS:
+        if not fid or row.brief_kind not in CODE_BRIEF_KINDS or row.item_id == fid:
             continue
         docs = (ctx.docs_on_trunk or {}).get(fid) or {}
         missing = [d for d in ('spec', 'plan') if docs.get(d) is False]
