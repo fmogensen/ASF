@@ -81,7 +81,7 @@ class Probes(unittest.TestCase):
 
     def test_the_system_probe_reads_something_and_never_raises(self):
         r = host.SystemProbe().read()
-        self.assertEqual(set(r), {'load15', 'cores', 'swap_pct'})
+        self.assertEqual(set(r), {'load15', 'cores', 'swap_pct', 'mem_pct'})
 
     def test_the_suite_runs_on_a_quiet_host(self):
         # hermetic: a loaded developer machine must not turn every launching test red
@@ -90,3 +90,21 @@ class Probes(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class MemoryPressureReading(unittest.TestCase):
+    """Where the host reports memory pressure, the memory guard judges it, not sticky swap."""
+
+    def test_memory_reading_replaces_swap_when_present(self):
+        g = {'load_per_core': 3.0, 'swap_pct': 85}
+        self.assertEqual(host.judge({'load15': 1, 'cores': 10, 'swap_pct': 90, 'mem_pct': 31}, g),
+                         (False, ''))
+        held, why = host.judge({'load15': 1, 'cores': 10, 'swap_pct': 10, 'mem_pct': 92}, g)
+        self.assertTrue(held)
+        self.assertIn('memory 92%', why)
+
+    def test_swap_still_judged_without_a_memory_reading(self):
+        held, why = host.judge({'load15': 1, 'cores': 10, 'swap_pct': 90},
+                               {'load_per_core': 3.0, 'swap_pct': 85})
+        self.assertTrue(held)
+        self.assertIn('swap 90%', why)
