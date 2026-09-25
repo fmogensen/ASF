@@ -155,7 +155,7 @@ class ScoreTests(unittest.TestCase):
 
     def test_the_headline_names_the_four_numbers(self):
         line = score.headline_line(score.headline(facts_fixture()), {'stale_prs': 3})
-        self.assertEqual(line, '1 on prod / 1 landed (7 d) · lead 2.4 d · $21.00/feature all-in · '
+        self.assertEqual(line, '1 on prod / 1 landed (7 d) · lead 2.4 d (task 1.4 d) · $21.00/feature all-in · '
                                '2 repair sessions/feature · 3 stale PRs')
 
     def test_a_week_that_landed_nothing_says_what_it_spent(self):
@@ -395,7 +395,7 @@ class RecordTests(unittest.TestCase):
         from asf.views import status
         with mock.patch.object(facts, 'now_iso', lambda: '2026-09-06T00:00:00Z'):
             self.assertEqual(status.value_cell(self.root, Prod()),
-                             '1 on prod / 1 landed (7 d) · lead 2.4 d · $4.00/feature all-in · '
+                             '1 on prod / 1 landed (7 d) · lead 2.4 d (task —) · $4.00/feature all-in · '
                              '0 repair sessions/feature')
             with mock.patch.object(env, 'load_product', lambda name=None: Prod()), \
                     mock.patch.object(facts, 'forge_clutter', lambda p: {}), \
