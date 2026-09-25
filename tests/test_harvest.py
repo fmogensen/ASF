@@ -1701,6 +1701,52 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertNotIn('--subject', tried[1])        # then lands without it, same method
         self.assertEqual(tried[0][5], tried[1][5])
 
+    def with_pr_runs(self, calls, runs):
+        """Wrap the installed ``gh`` fake so ``gh run list`` answers ``runs`` (None: the list
+        fails) and ``gh run cancel`` succeeds; both calls land in ``calls``."""
+        inner = harvest._gh.side_effect
+
+        def gh(args):
+            if args[:2] == ['run', 'list']:
+                calls.append(list(args))
+                return (1, '', 'HTTP 502\n') if runs is None else (0, json.dumps(runs), '')
+            if args[:2] == ['run', 'cancel']:
+                calls.append(list(args))
+                return 0, '', ''
+            return inner(args)
+        harvest._gh.side_effect = gh
+
+    def test_a_merged_pr_cancels_its_ci_runs_still_going(self):
+        """A PR lands on its required checks alone; the rest of its matrix still queued on the
+        runner pool is moot once it merged (the trunk run judges it again), so the lane cancels
+        the runs not yet completed — and only those, only for that branch's PR runs."""
+        calls = self.fake_gh([{'name': 'gate', 'bucket': 'pass'},
+                              {'name': 'e2e', 'bucket': 'pending'}], required=['gate'])
+        self.with_pr_runs(calls, [{'databaseId': 7, 'status': 'queued'},
+                                  {'databaseId': 8, 'status': 'in_progress'},
+                                  {'databaseId': 6, 'status': 'completed'}])
+        self.push_plan()
+        results, lines = self.harvest(self.pr_product())
+        self.assertEqual(results, {'plan/F-0001': 'landed'})
+        listed = [c for c in calls if c[:2] == ['run', 'list']]
+        self.assertEqual(len(listed), 1)
+        self.assertIn('plan/F-0001', listed[0])
+        self.assertIn('pull_request', listed[0])
+        self.assertEqual([c[2] for c in calls if c[:2] == ['run', 'cancel']], ['7', '8'])
+        self.assertIn('harvest: plan/F-0001: cancelled 2 CI run(s) of the merged PR #41 — the '
+                      'trunk run judges it now', lines)
+
+    def test_no_run_is_cancelled_before_the_merge_or_when_the_list_fails(self):
+        calls = self.fake_gh([{'name': 'gate', 'bucket': 'pending'}], required=['gate'])
+        self.with_pr_runs(calls, [{'databaseId': 7, 'status': 'queued'}])
+        self.push_plan()
+        self.assertEqual(self.harvest(self.pr_product())[0], {'plan/F-0001': 'waiting'})
+        self.assertEqual([c for c in calls if c[:1] == ['run']], [])  # waiting: CI still judges
+        calls = self.fake_gh([{'name': 'DCO', 'bucket': 'pass'}])
+        self.with_pr_runs(calls, None)
+        self.assertEqual(self.harvest(self.pr_product())[0], {'plan/F-0001': 'landed'})
+        self.assertEqual([c for c in calls if c[:2] == ['run', 'cancel']], [])
+
     def test_no_checks_at_all_counts_as_green(self):
         calls = self.fake_gh(None)
         self.push_plan()
@@ -1721,13 +1767,26 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertEqual(self.harvest(self.pr_product())[0], {'plan/F-0001': 'landed'})
         self.assertEqual([c[5] for c in self.merges(calls)], ['--squash', '--merge'])
 
+    def test_a_pending_remote_run_shows_its_age_across_ticks(self):
+        """A remote run queued behind a saturated runner pool is not a fresh wait every tick:
+        the lane keeps when the PR started waiting on it and names the minutes, without a
+        transition line or a record rewrite per tick."""
+        self.fake_gh([{'name': 'gate', 'bucket': 'pending'}], required=['gate'])
+        self.push_plan()
+        with mock.patch.object(lane.time, 'time', return_value=1_000_000.0):
+            self.assertEqual(self.harvest(self.pr_product())[0], {'plan/F-0001': 'waiting'})
+        with mock.patch.object(lane.time, 'time', return_value=1_000_000.0 + 63 * 60):
+            results, lines = self.harvest(self.pr_product())
+        self.assertEqual(results, {'plan/F-0001': 'waiting'})
+        self.assertEqual(lines, ['waiting plan/F-0001: PR #41 checks pending — gate (63 min)'])
+
     def test_docs_only_pending_checks_wait_for_the_next_tick(self):
         calls = self.fake_gh([{'name': 'DCO', 'bucket': 'pass'}, {'name': 'ci', 'bucket': 'pending'}])
         self.push_plan()
         before = self.origin_main()
         results, lines = self.harvest(self.pr_product())
         self.assertEqual(results, {'plan/F-0001': 'waiting'})
-        self.assertEqual(lines, ['waiting plan/F-0001: PR #41 checks pending — ci'])
+        self.assertEqual(lines, ['waiting plan/F-0001: PR #41 checks pending — ci (0 min)'])
         self.assertEqual(self.merges(calls), [])
         self.assertEqual(self.origin_main(), before)
         rec = self.record('plan/F-0001')

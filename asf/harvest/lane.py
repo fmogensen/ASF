@@ -958,7 +958,8 @@ def precheck(lane, entries):
 def wait(lane, f, reason, result='waiting', state=WAITING, **extra):
     """Record a gate outcome that is no one's fault: WAITING (or WAITING_CI) with ``reason``."""
     rec = f.get('prev') or {}
-    if rec.get('state') == state and rec.get('reason') == reason and not extra:
+    if (rec.get('state') == state and rec.get('reason') == reason
+            and all(rec.get(k) == v for k, v in extra.items())):
         lane.results[f['branch']] = result
         return rec
     keep = {k: rec.get(k) for k in ('green', 'since', 'timeouts') if rec.get(k) is not None}
@@ -1371,6 +1372,10 @@ def merge_prs(lane, ready):
         f['prev'] = rec
         lane.out(f'landed {b} → PR #{number} {sha}')
         lane.results[b] = 'landed'
+        cancelled = host.cancel_ci(b)
+        if cancelled:
+            lane.out(f'harvest: {b}: cancelled {cancelled} CI run(s) of the merged PR #{number} '
+                     f'— the trunk run judges it now')
 
 
 # ---- the hosts --------------------------------------------------------------------------------
@@ -1402,6 +1407,11 @@ class Host:
         a refusal ``(None, reason)``. ``subject``: the squash subject to write, when the lane
         names one (:func:`squash_subject`). The caller writes MERGING before calling."""
         raise NotImplementedError
+
+    def cancel_ci(self, branch):
+        """Cancel the CI runs a merged PR still has going; how many were cancelled. No PR host,
+        no runs: 0."""
+        return 0
 
 
 class FastForwardHost(Host):
@@ -1549,6 +1559,27 @@ class GitHubHost(Host):
                 break
         return None, H.tail(err) or 'gh pr merge failed'
 
+    def cancel_ci(self, branch):
+        """Cancel ``branch``'s ``pull_request`` CI runs that have not finished. Called once its PR
+        merged: the lane lands on the required checks alone, so the rest of the PR's matrix is
+        still queued or running on the runner pool, judging a head the trunk's own run now
+        judges again — moot work that holds runners the open PRs and the trunk are queued for.
+        Never raises: an unreadable list or a refused cancel counts as nothing cancelled."""
+        try:
+            runs = H.gh_json(['run', 'list', '-R', self.slug, '--branch', branch,
+                              '--event', 'pull_request', '--limit', '20',
+                              '--json', 'databaseId,status'], [])
+            n = 0
+            for r in runs if isinstance(runs, list) else ():
+                if not isinstance(r, dict) or r.get('status') == 'completed':
+                    continue
+                if r.get('databaseId') and H._gh(['run', 'cancel', str(r['databaseId']),
+                                                  '-R', self.slug])[0] == 0:
+                    n += 1
+            return n
+        except OSError:
+            return 0
+
     def check_gate(self, f, number, files):
         """The PR's checks before the gate: ``'gate'`` (gate it locally), ``'ci'`` (its required
         checks passed under ``wait``), or None when it waits or went back."""
@@ -1560,8 +1591,15 @@ class GitHubHost(Host):
             lane.out(f'harvest: {b}: PR #{number} check(s) red but not required — '
                      f'{", ".join(ignored)} (informational)')
         if state == 'pending':
-            lane.out(f'waiting {b}: PR #{number} checks pending — {detail}')
-            wait(lane, f, f'checks pending: {detail}', state=WAITING_CI)
+            # how long the PR has waited on a remote run, kept across ticks (``ci_since``, apart
+            # from the missing-check clock ``since``): a run queued behind a saturated runner pool
+            # shows its age in every tick's line instead of reading as a fresh wait each time
+            now = lane.now or time.time()
+            since = (rec.get('ci_since') if rec.get('state') == WAITING_CI and rec.get('ci_since')
+                     else now)
+            lane.out(f'waiting {b}: PR #{number} checks pending — {detail} '
+                     f'({int((now - float(since)) // 60)} min)')
+            wait(lane, f, f'checks pending: {detail}', state=WAITING_CI, ci_since=since)
             return None
         if state == 'unknown':
             lane.out(f'waiting {b}: PR #{number} checks unreadable — {detail}')
