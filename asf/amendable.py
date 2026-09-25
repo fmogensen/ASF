@@ -29,6 +29,11 @@ class Kind:
     globs: tuple   # repo-relative, the §P3 glob rule
 
 
+#: The kind of a path the product's own ``conventions.amendable_paths`` names but no built-in
+#: kind's globs cover (a process doc, say): still in the set, and a refusal names it this way.
+LISTED = Kind('listed', "named in the product's own conventions.amendable_paths", ())
+
+
 def _conventions(product):
     return getattr(product, 'conventions', None) or conv_mod.Conventions()
 
@@ -105,7 +110,7 @@ def write_target(product, tool_name, tool_input, cwd):
         if relpath == '..' or relpath.startswith('../') or os.path.isabs(relpath):
             continue
         if _in_set(product, relpath):
-            return relpath, kind_of(product, relpath)
+            return relpath, kind_of(product, relpath) or LISTED
     return None
 
 

@@ -104,6 +104,24 @@ class SetTests(unittest.TestCase):
         self.assertIsNone(amendable.write_target(
             p, 'Write', {'file_path': 'docs/specs/f-0024.md'}, REPO_ROOT))
 
+    def test_write_target_a_listed_path_outside_every_kind_still_has_a_kind(self):
+        # a product's own amendable_paths may name a path no built-in kind's globs cover
+        # (a process doc): the hit carries the "listed" kind, never None — a None kind
+        # crashed the approvals hook ("'NoneType' object has no attribute 'name'"), and the
+        # crash read as a refusal of whatever the session was doing
+        p = product(amendable_paths=['docs/process/*'])
+        # a read with its errors sent to /dev/null writes nothing
+        self.assertIsNone(amendable.write_target(
+            p, 'Bash', {'command': 'ls docs/process/README.md 2>/dev/null'}, REPO_ROOT))
+        self.assertIsNone(amendable.write_target(
+            p, 'Bash', {'command': 'grep x docs/process/README.md 2>&1'}, REPO_ROOT))
+        hit = amendable.write_target(
+            p, 'Bash', {'command': 'echo x > docs/process/README.md'}, REPO_ROOT)
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit[0], 'docs/process/README.md')
+        self.assertEqual(hit[1].name, 'listed')
+        self.assertTrue(hit[1].why)
+
     def test_format_set_has_a_row_per_kind(self):
         rows = amendable.format_set(product())
         self.assertEqual(len(rows), 6)

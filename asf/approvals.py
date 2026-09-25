@@ -531,8 +531,9 @@ def item_of_job(product, job):
 
 #: The Bash tokens that make a named path a *write* (§2.3 step 2). A command that names an
 #: operator-config path without one of these only reads it.
+#: ``>`` to /dev/null or onto another descriptor (``2>&1``) writes no file.
 _WRITING_TOKENS = (
-    r'>', r'\btee\b', r'\bsed\s+-i\b', r'\bperl\s+-i\b', r'\bcp\b', r'\bmv\b', r'\brm\b',
+    r'>(?!>?\s*(?:/dev/null\b|&\d))', r'\btee\b', r'\bsed\s+-i\b', r'\bperl\s+-i\b', r'\bcp\b', r'\bmv\b', r'\brm\b',
 )
 
 #: The words a shell command is split into when looking for a path in it.
