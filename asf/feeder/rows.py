@@ -55,6 +55,9 @@ from asf.views import index_reader as ix
 BUG_FIX = 'BUG → FIX'
 FIX_CORRECT = 'FIX → CORRECT'
 CORRECTION_ROUNDS = 3  # == asf.workers.lifecycle.ROUND_CAP (the feeder imports no git module)
+#: == asf.workers.lifecycle.NAMING: the lane rewords a naming refusal itself; one it could not
+#: goes back to a session as a correction and never to adjudicate, whatever the item's rounds
+NAMING = 'naming'
 FOOTPRINT = 'footprint'  # == asf.workers.lifecycle.FOOTPRINT: a correction widen_footprint answers
 STALEMATE = 'STALEMATE → ADJUDICATE'
 CONFLICT = 'CONFLICT → REBASE'
@@ -407,7 +410,7 @@ def correction_rows(items, product, busy, corrections):
         if c.get('kind') == FOOTPRINT and c.get('verdict') != 'widen':
             out.append(footprint_row(item, product, c, tier, fid, branch))
             continue
-        if rounds >= CORRECTION_ROUNDS:
+        if rounds >= CORRECTION_ROUNDS and c.get('kind') != NAMING:
             out.append(Row(tier=tier, kind=STALEMATE, item_id=iid, feature_id=fid, action=LAUNCH,
                            brief_kind='adjudicate', branch=branch,
                            reason=f"held {rounds} times ({c.get('kind')}): adjudicate, not another correction"))

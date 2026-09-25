@@ -57,6 +57,9 @@ Transitions (plan §2 plus the §9 overrides):
                                is adopted instead (T2), and a landed one is MERGED (T11).
                                :data:`ORPHANS_PER_PASS` bound one pass
 - T13 BACK → PUSHED            the correcting session finished with a new head
+- T13n PUSHED/BACK → PUSHED    a naming refusal: the lane rewords the subjects itself
+                               (:meth:`Lane.repair_naming`) — no session, no round; only a
+                               reword it cannot push goes back to the session (no round)
 - Th  any open, head moved     → PUSHED(new head) (R4)
 """
 import datetime
@@ -65,6 +68,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import time
 
@@ -72,6 +76,7 @@ from asf import approvals, customer_content, env
 from asf.evidence import review as review_mod
 from asf.feeder import footprint, widen
 from asf.harvest import harvest as H
+from asf.workers import githooks
 from asf.workers import host as host_mod
 from asf.workers import lifecycle
 from asf.workers.pool import now_iso
@@ -273,8 +278,51 @@ def commits_name_item(repo, trunk, branch, item):
     """True when every commit subject on ``origin/<branch>`` not on ``origin/<trunk>`` names
     ``item`` as a token."""
     subjects = _subjects(repo, trunk, branch)
-    token = re.compile(r'(?<![\w-])' + re.escape(item) + r'(?![\w])', re.I)
-    return bool(subjects) and all(token.search(s) for s in subjects)
+    return bool(subjects) and all(githooks.names_item(s, item) for s in subjects)
+
+
+#: the author and committer fields :func:`reword_branch` carries onto each rewritten commit
+_IDENT = (('GIT_AUTHOR_NAME', '%an'), ('GIT_AUTHOR_EMAIL', '%ae'), ('GIT_AUTHOR_DATE', '%ad'),
+          ('GIT_COMMITTER_NAME', '%cn'), ('GIT_COMMITTER_EMAIL', '%ce'),
+          ('GIT_COMMITTER_DATE', '%cd'))
+
+
+def reword_branch(repo, trunk, branch, item, kind=None):
+    """``(new_tip, n)``: ``origin/<branch>`` from its merge-base with ``origin/<trunk>`` onward,
+    each subject not naming ``item`` rewritten by :func:`asf.workers.githooks.name_subject` —
+    trees, authors, committers and dates identical, body untouched, no checkout and no hook run
+    (``git commit-tree``). ``(None, 0)`` when nothing needs a reword or a commit cannot be
+    rebuilt (a merge commit, a git error)."""
+    tip = H.sh(['git', 'rev-parse', '--verify', '-q', f'origin/{branch}'], cwd=repo).stdout.strip()
+    base = H.sh(['git', 'merge-base', f'origin/{trunk}', f'origin/{branch}'],
+                cwd=repo).stdout.strip()
+    if not tip or not base:
+        return None, 0
+    revs = H.sh(['git', 'rev-list', '--reverse', '--topo-order', f'{base}..{tip}'],
+                cwd=repo).stdout.split()
+    parent, n = base, 0
+    for sha in revs:
+        r = H.sh(['git', 'log', '-1', '--date=raw',
+                  '--format=' + '%x00'.join(f for _, f in _IDENT) + '%x00%T%x00%P', sha], cwd=repo)
+        fields = r.stdout.rstrip('\n').split('\x00')
+        if r.returncode != 0 or len(fields) != len(_IDENT) + 2 or len(fields[-1].split()) != 1:
+            return None, 0  # a merge commit, or no commit: the lane refuses it otherwise
+        raw = H.sh(['git', 'cat-file', 'commit', sha], cwd=repo).stdout
+        message = raw.split('\n\n', 1)[1] if '\n\n' in raw else ''
+        subject, nl, body = message.partition('\n')
+        named = githooks.name_subject(subject, item, kind)
+        if named == subject and fields[-1] == parent:
+            parent = sha
+            continue
+        n += named != subject
+        env = dict(os.environ, **{k: v for (k, _), v in zip(_IDENT, fields)})
+        made = subprocess.run(['git', 'commit-tree', fields[-2], '-p', parent],
+                              input=named + nl + body, cwd=repo, capture_output=True, text=True,
+                              env=H.clean_env(env))
+        parent = made.stdout.strip()
+        if made.returncode != 0 or not parent:
+            return None, 0
+    return (parent, n) if n else (None, 0)
 
 
 def has_adjudicate_commit(repo, trunk, branch):
@@ -300,9 +348,10 @@ def lane_refusal(repo, trunk, branch, item, conv=None):
                          f'commits on origin/{trunk}: rebase onto it, never merge origin/{branch} '
                          f'or origin/{trunk} into it; the factory publishes the rebased branch')
     if not item or not commits_name_item(repo, trunk, branch, item):
-        return 'naming', (f'commits do not name {item or "an item id"}: every commit subject on '
-                          f'the branch names its item — reword them; the factory publishes the '
-                          f'rewritten branch')
+        return lifecycle.NAMING, (
+            f'commits do not name {item or "an item id"}: every commit subject on the branch '
+            f'names its item — the lane could not reword them: reword them; the factory '
+            f'publishes the rewritten branch')
     if conv is not None:
         return customer_content.refusal(repo, trunk, branch, conv)
     return None
@@ -1093,9 +1142,18 @@ class Lane:
         if prev.get('delete') == DELETE_OWED and not self.dry_run and self.repo \
                 and f.get('head') and f['head'] == prev.get('head'):
             self.push_or_defer('delete', f)
+        # a branch already held for naming (a session pending, none running): reworded here
+        if prev.get('state') == BACK and not f.get('live') \
+                and (f.get('correction') or {}).get('kind') == lifecycle.NAMING:
+            moved = self.repair_naming(f) or moved
         for _ in range(MAX_STEPS):
             prev = f.get('prev')
             state, reason = next_state(prev, f)
+            if state == BACK and reason == f'kind={lifecycle.NAMING}':
+                rec = self.repair_naming(f)
+                if rec is not None:
+                    moved = rec
+                    continue
             if state is None or (prev and state == prev.get('state')
                                  and reason == prev.get('reason')):
                 break
@@ -1260,6 +1318,46 @@ class Lane:
                  f'card claims it)')
         self.results[b] = SUPERSEDED
         return rec
+
+    def repair_naming(self, f):
+        """A naming refusal, repaired by the lane with no session: the branch's subjects are
+        reworded (:func:`reword_branch`) and pushed from the ref checkout over a lease on the old
+        tip, a pending naming correction is cleared, and the branch is PUSHED at its new head —
+        the record, or None when it could not be (the caller holds it back to its session, as a
+        naming correction that spends no round)."""
+        b, item, old = f['branch'], f.get('item'), f.get('head')
+        if (f.get('refusal') or (None,))[0] != lifecycle.NAMING or not item or not old \
+                or not self.repo:
+            return None
+        if self.dry_run:
+            self.out(f'DRY: would reword the subjects on {b} (naming) — no session')
+            return None
+        kind = githooks.COMMIT_KIND.get(f.get('kind'), 'chore')
+        new, n = reword_branch(self.repo, self.trunk, b, item, kind)
+        wt = self.ref_checkout() if new else ''
+        if not new or not wt:
+            self.out(f'reword {b} (naming) failed: '
+                     f'{"no commit to reword" if not new else self.ref_wt_error} — back to its session')
+            return None
+        r = H.sh(['git', 'push', '-q', f'--force-with-lease=refs/heads/{b}:{old}', 'origin',
+                  f'{new}:refs/heads/{b}'], cwd=wt)
+        if r.returncode != 0:
+            self.out(f'reword {b} (naming) push refused: {push_why(r.stderr or r.stdout)} — '
+                     f'back to its session')
+            return None
+        H.sh(['git', 'update-ref', f'refs/remotes/origin/{b}', new], cwd=self.repo)
+        self.out(f'reworded {n} subjects on {b} (naming) — no session')
+        f['head'] = new
+        f['refusal'] = lane_refusal(self.repo, self.trunk, b, item, self.conv)
+        if f.get('review'):
+            f['review']['current'] = review_mod.is_current(self.repo, self.conv, f'origin/{b}',
+                                                           f['review'], new)
+        if f.get('correction') and (f['correction'].get('kind') == lifecycle.NAMING):
+            H.mark_session(self.state_dir, (f.get('run') or {}).get('job') or b, correction=None)
+            f['correction'] = None
+        if f.get('run') is None:
+            self.write(f, self.record(f, PUSHED, 'adopted'))
+        return self.set(f, PUSHED, f'reworded {n} subjects (naming)')
 
     def enter_back(self, f, reason):
         """BACK: a refusal or a review's changes go back to a session (a hold); a pending
