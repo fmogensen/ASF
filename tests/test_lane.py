@@ -600,13 +600,14 @@ class Orphans(LaneRepo):
         ln = self.run_lane(items, prs, later=False)
         self.assertEqual(ln.host.closed, [])
         rec_ = self.lane_of('worker/free-plan-t3')
-        # adopted for its card; its pre-record commits name no item, so the lane hands it to a
-        # correction session (the feeder's FIX → CORRECT row) like any branch of its own
-        self.assertEqual((rec_['item'], rec_['state'], rec_['reason']),
-                         ('T-0009', lane.BACK, 'kind=naming'))
+        # adopted for its card; its pre-record commits name no item, so the lane rewords them
+        # itself — no correction session — and moves it on
+        self.assertEqual((rec_['item'], rec_['state']), ('T-0009', lane.GATE))
         path = os.path.join(self.state_dir, 'sessions.jsonl')
         self.assertEqual(lifecycle.by_branch(path)['worker/free-plan-t3']['item'], 'T-0009')
-        self.assertEqual(lifecycle.corrections(path)['T-0009']['branch'], 'worker/free-plan-t3')
+        self.assertNotIn('T-0009', lifecycle.corrections(path))
+        self.assertEqual(sh(['git', 'log', '-1', '--format=%s', 'worker/free-plan-t3'],
+                            cwd=self.origin).stdout.strip(), 'feat(T-0009): the door')
 
     def test_a_card_another_branch_answers_for_supersedes_the_orphan(self):
         self.push_lane('worker/T-0009', {'c.txt': 'new\n'}, 'feat(T-0009): the door')
@@ -823,6 +824,120 @@ class RefPushes(LaneFixture):
         lane.push_deferred(ln)
         self.assertNotIn('worker/free-plan-t1', self.heads())
         self.assertNotIn('delete', self.lane_of('worker/free-plan-t1'))
+
+class NamingRepair(LaneFixture):
+    """A branch whose subjects do not name its item is reworded by the lane itself — no session,
+    no round, never a STALEMATE → ADJUDICATE row; a reword it cannot push goes back to the
+    writer's session as a correction that spends no round."""
+
+    B = 'worker/T-0001'
+    AUTHOR = {'GIT_AUTHOR_NAME': 'Ada', 'GIT_AUTHOR_EMAIL': 'ada@x',
+              'GIT_AUTHOR_DATE': '1700000000 +0200', 'GIT_COMMITTER_NAME': 'Cy',
+              'GIT_COMMITTER_EMAIL': 'cy@x', 'GIT_COMMITTER_DATE': '1700000100 +0200'}
+
+    def push_commits(self, commits):
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        sh(['git', 'checkout', '-q', '-B', self.B, 'origin/main'], cwd=self.worker)
+        for subject, files in commits:
+            for rel, text in files.items():
+                self.write(self.worker, rel, text)
+            sh(['git', 'add', '-A'], cwd=self.worker)
+            sh(['git', 'commit', '-qm', subject + '\n\nthe body stays'], cwd=self.worker,
+               env_=self.AUTHOR)
+        sh(['git', 'push', '-q', '-f', 'origin', self.B], cwd=self.worker)
+        return self.tip()
+
+    def tip(self):
+        return sh(['git', 'rev-parse', self.B], cwd=self.origin).stdout.strip()
+
+    def log(self, fmt, rev):
+        return sh(['git', 'log', f'--format={fmt}', f'main..{rev}'], cwd=self.origin).stdout
+
+    def sessions(self):
+        return os.path.join(self.state_dir, 'sessions.jsonl')
+
+    def test_the_lane_rewords_the_subjects_and_pushes_them_with_no_session(self):
+        old = self.push_commits([('feat(T-0001): the door', {'a.txt': 'a\n'}),
+                                 ('tidy up', {'b.txt': 'b\n'}),
+                                 ('fix: the hinge', {'c.txt': 'c\n'})])
+        self.session('coder-t-0001', 'T-0001', self.B)
+        lines = []
+        lane.lane_pass(self.product(), self.state_dir, out=lines.append)
+        self.assertIn(f'reworded 2 subjects on {self.B} (naming) — no session', lines)
+        new = self.tip()
+        self.assertNotEqual(new, old)
+        self.assertEqual(self.log('%s', new).splitlines(),
+                         ['fix(T-0001): the hinge', 'task(T-0001): tidy up',
+                          'feat(T-0001): the door'])
+        # trees, authors, committers and dates identical; the body untouched
+        self.assertEqual(self.log('%T %an %ae %ad %cn %ce %cd', new),
+                         self.log('%T %an %ae %ad %cn %ce %cd', old))
+        self.assertEqual(self.log('%b', new), self.log('%b', old))
+        rec_ = self.lane_of(self.B)
+        self.assertEqual((rec_['state'], rec_['head']), (lane.GATE, new))
+        self.assertEqual(lifecycle.corrections(self.sessions()), {})
+        self.assertFalse(any(l.startswith('held ') for l in lines), lines)
+
+    def test_the_push_goes_over_a_lease_on_the_old_tip(self):
+        self.push_commits([('tidy up', {'a.txt': 'a\n'})])
+        self.session('coder-t-0001', 'T-0001', self.B)
+        real = lane.reword_branch
+
+        def racing(*a, **kw):  # the writer pushes again between the read and the reword push
+            out = real(*a, **kw)
+            sh(['git', 'checkout', '-q', self.B], cwd=self.worker)
+            self.write(self.worker, 'z.txt', 'z\n')
+            sh(['git', 'add', '-A'], cwd=self.worker)
+            sh(['git', 'commit', '-qm', 'feat(T-0001): later'], cwd=self.worker, env_=self.ident)
+            sh(['git', 'push', '-q', 'origin', self.B], cwd=self.worker)
+            return out
+        lines = []
+        with mock.patch.object(lane, 'reword_branch', side_effect=racing):
+            lane.lane_pass(self.product(), self.state_dir, out=lines.append)
+        self.assertEqual(self.log('%s', self.B).splitlines()[0], 'feat(T-0001): later')
+        self.assertTrue(any(l.startswith(f'reword {self.B} (naming) push refused') for l in lines),
+                        lines)
+        held = [l for l in lines if l.startswith(f'held {self.B}: commits do not name T-0001')]
+        self.assertTrue(held and held[0].endswith('(naming, no round)'), lines)
+        corr = lifecycle.corrections(self.sessions())['T-0001']
+        self.assertEqual((corr['kind'], corr['rounds']), (lifecycle.NAMING, 0))
+        self.assertEqual(self.lane_of(self.B)['reason'], 'kind=naming')
+
+    def test_a_branch_already_held_for_naming_is_reworded_and_its_correction_cleared(self):
+        old = self.push_commits([('tidy up', {'a.txt': 'a\n'})])
+        self.session('coder-t-0001', 'T-0001', self.B)
+        with open(self.sessions(), 'a', encoding='utf-8') as f:
+            f.write(json.dumps({'job': 'coder-t-0001', 'rounds': 3,
+                                'lane': {'state': lane.BACK, 'head': old, 'pr': None,
+                                         'at': '2026-09-21T00:06:00Z', 'reason': 'kind=naming',
+                                         'item': 'T-0001'},
+                                'correction': {'kind': 'naming', 'text': 'commits do not name',
+                                               'at': '2026-09-21T00:06:00Z'}}) + '\n')
+        self.assertIn('T-0001', lifecycle.corrections(self.sessions()))
+        lines = []
+        lane.lane_pass(self.product(), self.state_dir, out=lines.append)
+        self.assertIn(f'reworded 1 subjects on {self.B} (naming) — no session', lines)
+        self.assertEqual(lifecycle.corrections(self.sessions()), {})
+        self.assertEqual(self.lane_of(self.B)['state'], lane.GATE)
+
+    def test_naming_never_reaches_adjudicate(self):
+        product = env.Product('p', {'conventions': {}})
+        items = {'T-0001': {'id': 'T-0001', 'type': 'task', 'state': 'Active'}}
+        c = {'kind': lifecycle.NAMING, 'text': 'commits do not name T-0001', 'rounds': 7,
+             'branch': self.B}
+        rows, _ids = feeder_rows.correction_rows(items, product, set(), {'T-0001': c})
+        self.assertEqual([r.kind for r in rows], [feeder_rows.FIX_CORRECT])
+        self.assertEqual(feeder_rows.NAMING, lifecycle.NAMING)
+        # the hold spends no round and is never at the cap, whatever the item's rounds
+        run = {'job': 'coder-t-0001', 'item': 'T-0001', 'branch': self.B, 'rounds': 9}
+        fields, line = lifecycle.hold(self.sessions(), run, lifecycle.NAMING, 'x', 'now')
+        self.assertNotIn('rounds', fields)
+        self.assertNotIn('at_cap', fields['correction'])
+        self.assertTrue(line.endswith('(naming, no round)'), line)
+        state = lifecycle.derive(dict(run, correction=fields['correction']),
+                                 lifecycle.Evidence())
+        self.assertEqual(state.name, lifecycle.HELD)
+
 
 class Occupancy(unittest.TestCase):
     """R16: the lane and the feeder are one stream — the feeder reads the lane's states through
