@@ -178,6 +178,9 @@ def build_parser():
     p_check = sub.add_parser('check', help='validate the backlog')
     p_check.add_argument('paths', nargs='*')
     p_check.add_argument('--product')
+    p_check.add_argument('--staged', action='store_true',
+                         help="the pre-commit mode: only errors in what the commit stages refuse "
+                              "it; the rest print as warnings")
     p_check.add_argument('--invariants', action='store_true',
                          help='run the invariants read-only (record, feeder, lane) instead')
     p_check.add_argument('--deep', action='store_true',

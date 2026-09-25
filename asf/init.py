@@ -30,7 +30,7 @@ STREAM_FOLDERS = ('groom', 'releases', 'metrics/ci', 'metrics/sessions', 'metric
 
 PRE_COMMIT = """#!/bin/sh
 # The record's pre-commit hook, written by `asf init`: a commit that fails `asf check` on the
-# files it touches is refused — a commit made by `asf` itself included (B-0084).
+# files it stages is refused — a commit made by `asf` itself included (B-0084).
 # The marker makes a hook already running in THIS record return at once instead of nesting
 # (B-0073); it names the record, so one inherited from another repo's hook run bypasses nothing.
 top="$(git rev-parse --show-toplevel)" || exit 1
@@ -39,9 +39,9 @@ if [ "$ASF_HOOK_RUNNING" = "$top" ]; then
 fi
 export ASF_HOOK_RUNNING="$top"
 cd "$top" || exit 1
-staged="$(git diff --cached --name-only --diff-filter=ACMR)"
-[ -n "$staged" ] || exit 0
-echo "$staged" | tr '\\n' '\\0' | xargs -0 asf check || exit 1
+# --staged: an error in a staged file refuses the commit; one in a file nobody touched is the
+# record's standing debt, printed as a warning, never a reason to refuse this commit
+asf check --staged || exit 1
 # the redaction gate (F-0075): what `asf hooks install` checks for, so doctor calls this ours
 exec asf redact --pre-commit
 """

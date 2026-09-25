@@ -26,6 +26,22 @@ def do_index(root):
             with open(rec['path'], 'w', encoding='utf-8') as f:
                 f.write(new_text)
 
+    write_index_json(root, canonical, derived)
+    return 0
+
+
+def refresh_index_json(root):
+    """Rewrite ``index.json`` alone (no card body) when it no longer matches the record — what
+    ``asf set`` runs after its write, so a field it changed never leaves the index stale for the
+    pre-commit check to refuse. A record with a parse error is left alone."""
+    by_id, parse_errors = load_items(root)
+    if parse_errors:
+        return
+    canonical, _dupes = canonicalize(by_id)
+    write_index_json(root, canonical, compute_derived(canonical))
+
+
+def write_index_json(root, canonical, derived):
     data = build_index_data(canonical, derived)
     index_path = os.path.join(root, 'index.json')
     old_items = None
@@ -46,7 +62,6 @@ def do_index(root):
     if old_items != data['items']:
         with open(index_path, 'w', encoding='utf-8') as f:
             f.write(render_index_json(data))
-    return 0
 
 
 def cmd_index(args, root):

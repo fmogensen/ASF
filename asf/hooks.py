@@ -18,7 +18,8 @@ puts a ``pre-commit`` and a ``pre-push`` into ``git rev-parse --git-path hooks``
 ``exec``s ``asf redact --pre-commit|--pre-push --product <p>``. A hook file already there and
 already asf's is left alone; one already there and not asf's is left untouched too, and turns the
 whole call into a ``NEEDS OPERATOR`` refusal (D10) — no hook file asf did not write is ever
-edited or overwritten. That refusal is reported only after every other hook — the approvals hook
+edited or overwritten — save one asf's record pre-commit that still runs ``asf check`` over the
+whole record, which gains ``--staged`` (:func:`staged_check_upgrade`). That refusal is reported only after every other hook — the approvals hook
 above all — has been written: one refusal never skips the others.
 
 ``asf hook <name>`` runs a hook built into ``asf`` when :data:`BUILTIN` names it (``approvals``,
@@ -91,14 +92,36 @@ def is_git_hook_ours(text, name):
     return bool(re.search(rf'''asf['" .]*redact\s+--{re.escape(name)}\b''', text or ''))
 
 
+#: A record pre-commit line that runs ``asf check`` over the whole record — the invocation
+#: before ``--staged`` (group 1 ends at the ``check`` word, where the flag is inserted).
+WHOLE_RECORD_CHECK_RE = re.compile(r'''(?m)^(?!\s*#)(.*?\basf['"]?\s+check)\b(?![^\n]*--(?:staged|invariants)\b)''')
+
+
 def init_hook_upgrade(text, name):
     """The text an ``asf init``-written hook file should now have, when ``text`` is one written
-    by an older ``asf init`` (its :data:`asf.init.INIT_MARKER`) that lacks the redaction gate —
-    ASF's own file, so it is brought up to date rather than called foreign. None otherwise."""
+    by an older ``asf init`` (its :data:`asf.init.INIT_MARKER`) that lacks the redaction gate or
+    the pre-commit's ``--staged`` check — ASF's own file, so it is brought up to date rather than
+    called foreign. None otherwise."""
     from asf import init  # local: init imports this module
-    if init.INIT_MARKER not in (text or '') or is_git_hook_ours(text, name):
+    text = text or ''
+    if init.INIT_MARKER not in text:
+        return None
+    if name == 'pre-commit' and text != init.PRE_COMMIT and WHOLE_RECORD_CHECK_RE.search(text):
+        return init.PRE_COMMIT
+    if is_git_hook_ours(text, name):
         return None
     return {'pre-commit': init.PRE_COMMIT, 'pre-push': init.PRE_PUSH}.get(name)
+
+
+def staged_check_upgrade(text, name):
+    """A record's pre-commit that is asf's (:func:`is_git_hook_ours`) but runs ``asf check``
+    over the whole record refuses every commit while any untouched card carries an error. The
+    text with ``--staged`` added to each such ``asf check`` line, or None when there is none —
+    so a second run changes nothing."""
+    if name != 'pre-commit' or not is_git_hook_ours(text, name):
+        return None
+    new = WHOLE_RECORD_CHECK_RE.sub(lambda m: m.group(1) + ' --staged', text)
+    return None if new == text else new
 
 
 def ensure_git_hooks(product, which=shutil.which):
@@ -128,8 +151,8 @@ def ensure_git_hooks(product, which=shutil.which):
             if os.path.isfile(path):
                 with open(path, encoding='utf-8') as f:
                     text = f.read()
-                upgrade = init_hook_upgrade(text, name)
-                if upgrade is not None:  # ASF's own record hook, from before it carried the gate
+                upgrade = init_hook_upgrade(text, name) or staged_check_upgrade(text, name)
+                if upgrade is not None:  # ASF's own record hook, from before the gate or --staged
                     with open(path, 'w', encoding='utf-8') as f:
                         f.write(upgrade)
                     os.chmod(path, 0o755)
