@@ -44,7 +44,10 @@ class Template:
             src = os.path.join(root, name)
             dst = os.path.join(dest, name)
             if os.path.isdir(src) and not os.path.islink(src):
-                shutil.copytree(src, dst, symlinks=True)
+                # a background ``git maintenance``/auto-gc lock can appear and vanish while the
+                # copy walks the tree (a CI run failed on objects/maintenance.lock): never copied
+                shutil.copytree(src, dst, symlinks=True,
+                                ignore=shutil.ignore_patterns('*.lock', 'gc.pid'))
             else:
                 shutil.copy2(src, dst, follow_symlinks=False)
         _rewrite_paths(dest, {root: dest, os.path.realpath(root): os.path.realpath(dest)})
