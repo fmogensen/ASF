@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 from asf import ci_queue, env
@@ -253,6 +254,162 @@ class TestSuperseded(Base):
         self.assertEqual(ci_queue.cancel_superseded(p, source=ci_queue.GitHubSource(p, run=run)),
                          0)
         self.assertEqual(ci_queue.cancel_superseded(product(pool=False), source=NoGh()), 0)
+
+
+class TestTrunkRelief(Base):
+    """A trunk run queued past ``trunk_wait_min`` behind PR and batch runs at a FIFO host."""
+    WF = {'pr': 'pr.yml', 'trunk': 'ci.yml', 'batch': 'batch.yml'}
+
+    def product(self, **q):
+        return product(queue=dict({'workflows': self.WF}, **q))
+
+    @staticmethod
+    def at(t):
+        return t.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    def runs(self, trunk_status='queued', trunk_created=None):
+        t = lambda m: self.at(self.t0 + datetime.timedelta(minutes=m))  # noqa: E731
+        trunk = {'databaseId': 900, 'status': trunk_status, 'event': 'push', 'headBranch': 'main',
+                 'headSha': 'f' * 40, 'createdAt': trunk_created or t(-25),
+                 'startedAt': t(-1) if trunk_status != 'queued' else None}
+        pr = lambda i, s, b, m: {'databaseId': i, 'status': s, 'event': 'pull_request',  # noqa
+                                  'headBranch': b, 'headSha': 'a' * 40, 'createdAt': t(m)}
+        return {
+            'ci.yml': [trunk],
+            'pr.yml': [pr(101, 'queued', 'bug/B-0008', -60),       # S2: cancelled first
+                       pr(102, 'queued', 'task/T-0341', -50),      # Feature: second
+                       pr(103, 'queued', 'bug/B-0007', -40),       # S1: never
+                       pr(104, 'queued', 'hotfix/db', -35),        # hotfix: never
+                       pr(105, 'in_progress', 'task/T-0500', -90),  # started: never
+                       pr(106, 'queued', 'task/T-0500', -5)],      # behind the trunk run
+            'batch.yml': [{'databaseId': 201, 'status': 'queued', 'event': 'workflow_dispatch',
+                           'headBranch': 'main', 'headSha': 'f' * 40, 'createdAt': t(-45)}],
+        }
+
+    def gh(self, runs, busy=('h1', 'h2', 'h3')):
+        gh = FakeGh(busy=busy)
+        base = gh.__call__
+
+        def run(argv, **kw):
+            if argv[:3] == ['gh', 'run', 'list'] and 'event' in argv[-1]:
+                gh.calls.append(argv)
+                wf = argv[argv.index('--workflow') + 1]
+                return subprocess.CompletedProcess(argv, 0, json.dumps(runs.get(wf, [])), '')
+            return base(argv, **kw)
+        return gh, run
+
+    def seed(self, now):
+        # measured jobs per class: the trunk run needs 3 heavy; a PR run 1, a batch run 2
+        stamp = self.at(now)
+        ci_queue.save('p', {'expect': {
+            'ci.yml': {'at': stamp, 'needs': {'heavy': 3}},
+            'pr.yml': {'at': stamp, 'needs': {'heavy': 1}},
+            'batch.yml': {'at': stamp, 'needs': {'heavy': 2}}}})
+
+    def relieve(self, p, run, minutes=0, now=None, **kw):
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        return ci_queue.relieve_trunk(
+            p, items=ITEMS, source=ci_queue.GitHubSource(p, run=run), out=self.lines.append,
+            now=now if now is not None else self.t0 + datetime.timedelta(minutes=minutes), **kw)
+
+    def cancels(self, gh, verb='cancel'):
+        return [c[3] for c in gh.calls if c[:3] == ['gh', 'run', verb]]
+
+    def test_waits_up_to_the_threshold_then_cancels_lowest_priority_queued_runs_first(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        gh, run = self.gh(self.runs(trunk_created=self.at(self.t0 - datetime.timedelta(minutes=19))))
+        self.assertEqual(self.relieve(p, run), (0, 0))
+        self.assertEqual(self.cancels(gh), [])
+        gh, run = self.gh(self.runs())
+        self.assertEqual(self.relieve(p, run), (3, 0))
+        # PR S2, then PR Feature, then batch (1 + 1 + 2 >= 3); never S1, hotfix, started or behind
+        self.assertEqual(self.cancels(gh), ['101', '102', '201'])
+        self.assertEqual(self.lines[0], 'ci queue: cancelled queued pr run 101 (B-0008, S2) — '
+                                        'main run 900 at fffffffff has waited 25m for runners')
+        self.assertEqual(len(self.lines), 3)
+        self.assertEqual([r['id'] for r in ci_queue.load('p')['relief']], [101, 102, 201])
+        # the next tick with the trunk still queued cancels nothing more: the runs are gone
+        gh, run = self.gh({k: [r for r in v if r['databaseId'] not in (101, 102, 201)]
+                           for k, v in self.runs().items()})
+        self.assertEqual(self.relieve(p, run, minutes=1), (0, 0))
+
+    def test_stops_once_free_plus_freed_covers_the_trunk_run(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        gh, run = self.gh(self.runs(), busy=('h1', 'h2'))   # 1 heavy free: two PR runs suffice
+        self.assertEqual(self.relieve(p, run), (2, 0))
+        self.assertEqual(self.cancels(gh), ['101', '102'])
+        gh, run = self.gh(self.runs(), busy=())              # runners free: nothing to do
+        self.assertEqual(self.relieve(p, run, minutes=1), (0, 0))
+        self.assertEqual(self.cancels(gh), [])
+
+    def test_cancelled_runs_are_rerun_through_the_queue_once_the_trunk_starts(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        gh, run = self.gh(self.runs())
+        self.relieve(p, run)
+        self.lines.clear()
+        # the trunk run starts: runners come free, the queue admits by priority and runners
+        gh, run = self.gh(self.runs(trunk_status='in_progress'), busy=())
+        self.assertEqual(self.relieve(p, run, minutes=2), (0, 2))
+        self.assertEqual(self.cancels(gh, 'rerun'), ['102', '101'])  # Feature, then S2
+        self.assertIn('ci queue: re-ran pr run 102 (T-0341, Feature) — main run 900 at '
+                      'fffffffff started after waiting 24m', self.lines)
+        self.assertIn('ci queue: batch waits — heavy 1 free, needs 2 (batch, 1st in line)', self.lines)
+        self.assertEqual([r['id'] for r in ci_queue.load('p')['relief']], [201])
+        gh, run = self.gh(self.runs(trunk_status='completed'), busy=())
+        self.assertEqual(self.relieve(p, run, minutes=10), (0, 1))
+        self.assertEqual(self.cancels(gh, 'rerun'), ['201'])
+        self.assertEqual(ci_queue.load('p')['relief'], [])
+
+    def test_dry_run_says_what_it_would_cancel_and_writes_nothing(self):
+        p = self.product(mode='dry-run')
+        gh, run = self.gh(self.runs())
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        before = ci_queue.load('p')
+        self.assertEqual(self.relieve(p, run), (0, 0))
+        self.assertEqual(self.cancels(gh), [])
+        self.assertEqual(len(self.lines), 3)
+        self.assertTrue(all(l.startswith('ci queue: would cancel queued ') for l in self.lines))
+        self.assertEqual(ci_queue.load('p'), before)
+        # a dry-run pass of a live queue writes nothing either
+        p = self.product()
+        self.lines.clear()
+        self.assertEqual(self.relieve(p, run, dry_run=True), (0, 0))
+        self.assertEqual(self.cancels(gh), [])
+        self.assertEqual(ci_queue.load('p'), before)
+
+    def test_the_wait_is_utc_whatever_the_local_zone(self):
+        old = os.environ.get('TZ')
+        os.environ['TZ'] = 'Pacific/Auckland'
+        time.tzset()
+        try:
+            p = self.product()
+            real = datetime.datetime.now(datetime.timezone.utc)
+            self.seed(real)
+            ago = lambda m: self.at(real - datetime.timedelta(minutes=m))  # noqa: E731
+            gh, run = self.gh(self.runs(trunk_created=ago(18)))
+            # the host's createdAt is UTC ('Z'): an 18-minute wait is under the 20-minute bar
+            self.assertEqual(ci_queue.relieve_trunk(
+                p, items=ITEMS, source=ci_queue.GitHubSource(p, run=run),
+                out=self.lines.append), (0, 0))
+            self.assertEqual(self.cancels(gh), [])
+            self.assertEqual(ci_queue._parse('2026-09-25T19:04:00Z'),
+                             datetime.datetime(2026, 9, 25, 19, 4, tzinfo=datetime.timezone.utc))
+        finally:
+            if old is None:
+                os.environ.pop('TZ', None)
+            else:
+                os.environ['TZ'] = old
+            time.tzset()
+
+    def test_no_pool_makes_no_gh_call(self):
+        self.assertEqual(ci_queue.relieve_trunk(product(pool=False), source=NoGh()), (0, 0))
 
 
 class TestCeiling(Base):

@@ -1208,6 +1208,8 @@ def lane_pass(product, state_dir=None, items=None, out=print, dry_run=False, roo
         lane.finish_ref_pushes()
     from asf import ci_queue  # a queued trunk run a newer one supersedes holds runners for nothing
     ci_queue.cancel_superseded(product, out=lane.out, dry_run=lane.dry_run)
+    # the host's queue is FIFO: a trunk run starved behind PR runs gets runs ahead of it cancelled
+    ci_queue.relieve_trunk(product, items=lane.items, out=lane.out, dry_run=lane.dry_run)
     return lane.results, found
 
 
