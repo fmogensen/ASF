@@ -62,7 +62,17 @@ from asf.workers import cloudpid
 from asf.workers import runtime as runtime_mod
 
 RUNTIME = 'claude-cloud'
-RUNTIMES = (RUNTIME,)
+#: the runtimes the lane launches with
+RUNTIMES = ()
+#: runtime -> why ASF refuses it at config check: a runtime that cannot launch is never enabled
+REFUSED = {
+    'claude-cloud': (
+        'the runtime CLI cannot create a cloud session non-interactively: `claude -p --cloud` '
+        'exits "Error: --cloud cannot be combined with --print. Starting a new cloud session '
+        'with --cloud is interactive only", `claude --bg --cloud` exits "--bg and --cloud are '
+        'different backends", and -p only messages an existing cloud session by id '
+        '(verified on 2.1.282)'),
+}
 ROWS_ANY = 'any'
 ROWS_CLOUD_OK = 'cloud-ok'
 DEFAULT_TIMEOUT_MIN = 240
@@ -94,6 +104,19 @@ class Settings:
     def on(self):
         """The lane can take a launch: enabled, a runtime it knows, and a seat to give."""
         return self.enabled and self.runtime in RUNTIMES and self.max_inflight > 0
+
+
+def config_problems(block):
+    """``[(dotted key, problem)]`` for a ``cloud:`` block (the operator's, or a product file's):
+    a refused runtime (:data:`REFUSED`) is a config error, so nobody enables a lane that cannot
+    launch. Called by :func:`asf.env.load_config` and the product-file check."""
+    if not isinstance(block, dict):
+        return [] if block is None else [('cloud', f'must be a map, not {block!r}')]
+    written = block.get('runtime')
+    rt = str(written or RUNTIME).replace('_', '-')
+    if rt in REFUSED and (written or block.get('enabled')):
+        return [('cloud.runtime', f'{rt} is refused: {REFUSED[rt]}')]
+    return []
 
 
 def _int(v, default):
@@ -517,9 +540,11 @@ def doctor_rows(cfg, product, run_cmd=None):
         return []
     run_cmd = run_cmd or subprocess.run
     rows = []
+    if s.runtime in REFUSED:
+        return [(True, False, f'cloud.runtime {s.runtime} is refused: {REFUSED[s.runtime]}')]
     if s.runtime not in RUNTIMES:
         rows.append((True, False, f'cloud.runtime {s.runtime!r} is not one ASF runs '
-                                  f'({", ".join(RUNTIMES)})'))
+                                  f'({", ".join(RUNTIMES) or "none in this release"})'))
     if s.max_inflight <= 0:
         rows.append((True, False, 'cloud.max_inflight is 0: the lane has no seat — set it '
                                   '(or worker_pool.caps.cloud_max_inflight)'))
