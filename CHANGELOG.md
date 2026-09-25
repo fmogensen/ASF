@@ -2,6 +2,29 @@
 
 One entry per released version, newest first.
 
+## v0.1.13 — 2026-09-25
+
+### Bugs fixed
+
+- B-0104 briefs: spec/plan templates don't state the commit-subject rule harvest enforces
+
+### Improvements and hotfixes
+
+- feat(release): asf release-readiness — the framework release as a computed gate
+- fix(workers): every local worker session gets host-load caps — VITEST_MAX_WORKERS=2 by default
+- feat(reaper): expire archive/* and retired-prefix heads on origin; doctor counts unowned heads
+- fix(release): name the install script without its path — the conventions check bans the literal
+- fix(upgrade): a deferred upgrade marks itself pending so other ticks stop starting and a gap comes
+- feat(cloud): a cloud lane — worker sessions run as Claude Code cloud sessions, off the host
+- fix(retention): hosted branch deletes go through the host API, never a push that runs product hooks
+- fix(cloud): refuse runtime claude-cloud at config check — it cannot launch
+- feat(cloud): runtime actions — worker sessions as CI jobs on the product's runners
+- feat(amendable): a !glob entry in amendable_paths excludes a subtree from the set
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.13"`
+
 ## v0.1.12 — 2026-09-25
 
 ### Features landed
