@@ -971,7 +971,11 @@ def finish_first(rows, items, product, inflight, held=()):
     out = []
     named = ', '.join(ready[:3]) + (f' +{len(ready) - 3}' if len(ready) > 3 else '')
     for r in rows:
-        if r.kind in NEW_DOC_KINDS and r.launches and not r.correction and r.item_id not in held:
+        # a Feature in a lane experiment (``ab_pair``) is never held by the cap: both arms of a
+        # pair must start in the same window, or the comparison measures the queue, not the lane
+        paired = (items.get(r.feature_id) or items.get(r.item_id) or {}).get('ab_pair')
+        if (r.kind in NEW_DOC_KINDS and r.launches and not r.correction and r.item_id not in held
+                and not paired):
             if running + admitted < cap:
                 admitted += 1
             else:

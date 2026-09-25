@@ -914,6 +914,14 @@ class FinishBeforeYouStart(unittest.TestCase):
                              '(feeder.max_specs_in_flight) while 1 planned Feature has Tasks '
                              'to build: F-0099')
 
+    def test_a_feature_in_a_lane_experiment_is_never_held_by_the_cap(self):
+        idx = finish_index(cards=4)
+        idx['items']['F-0004']['ab_pair'] = 'p1'
+        out = rows.plan_rows(idx, product(), [], 10)
+        by = {r.item_id: r for r in out}
+        self.assertTrue(by['F-0004'].launches)
+        self.assertEqual(by['F-0003'].waits_on, 'finish')
+
     def test_running_spec_and_plan_sessions_count_against_the_cap(self):
         running = [{'item': 'F-0050', 'kind': 'spec'}, {'item': 'T-0050', 'kind': 'coder'}]
         out = rows.plan_rows(finish_index(cards=3), product(), running, 10)
