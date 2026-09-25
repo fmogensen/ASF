@@ -24,7 +24,15 @@ the environment's deployed sha (the newest successful run of its ``workflow``), 
 workflow is queued or running, no deploy of that very sha has already failed (a failed sha is
 not retried; the next green sha is), and it is green — a red trunk never deploys. The dispatch is
 ``gh workflow run <workflow> -R <slug> --ref <trunk> -f <input>=<sha>`` (``input`` default
-``sha``; ``none`` sends no input).
+``sha``; ``none`` sends no input, so the workflow deploys the trunk tip: it is dispatched only when
+the candidate *is* ``origin/<trunk>``, and waits with a reason otherwise).
+
+**What a run deployed.** A dispatched run's ``headSha`` is the trunk tip at dispatch time, not the
+``-f sha=`` it deployed. Each dispatch is recorded in ``<state>/deploy-dispatches.json``
+(:data:`DISPATCHES`) and bound to the ``workflow_dispatch`` run that follows it, keyed by run id;
+the deployed, running and failed shas read that binding. A run ASF did not dispatch (a push, a hand
+dispatch) keeps its ``headSha``. A dispatch whose run is not listed yet counts as running, so it is
+never sent twice. Only the deploy workflow's runs on the trunk branch are read.
 
 **Named targets.** Beside dev and prod, ``deploy_sha.targets`` names any number of further deploy
 targets (a marketing site, docs, a second app), each ``{mode, workflow, input, from, paths,
@@ -40,6 +48,7 @@ rest, dev and the named targets after it. The tick prints them (:func:`tick`); `
 """
 import datetime
 import json
+import os
 import subprocess
 
 DEFAULT_INPUT = 'sha'
@@ -49,6 +58,14 @@ MODES = {'dev': ('auto', 'manual', 'ci'), 'prod': ('auto', 'manual')}
 TARGET_MODES = ('auto', 'manual', 'ci')
 #: where prod's (and a named target's) candidate comes from
 SOURCES = ('ci', 'dev')
+#: the dispatch ledger under the product's state dir: each dispatch's candidate, bound to its run
+DISPATCHES = 'deploy-dispatches.json'
+#: a dispatch whose run is not listed within this long is dropped as never started
+PENDING_S = 15 * 60
+#: a run created this long before its dispatch was recorded still binds to it (clock skew)
+SKEW_S = 60
+#: how long a dispatch (and its run binding) is kept
+KEEP_S = 30 * 86400
 
 
 def _sh(cmd, cwd=None, timeout=60):
@@ -253,7 +270,89 @@ def _runs(product, wf, sh, branch=None):
     if branch:
         argv += ['--branch', branch]
     return _json(sh(argv + ['--limit', '20', '--json',
-                            'databaseId,headSha,status,conclusion,updatedAt']))
+                            'databaseId,headSha,status,conclusion,updatedAt,event,createdAt']))
+
+
+# ---- the dispatch ledger ----------------------------------------------------------------------
+
+def _ledger_path(product):
+    """``<state>/deploy-dispatches.json`` for a real product, None for one without a state dir."""
+    from asf import env as env_mod
+    if not isinstance(product, env_mod.Product):
+        return None
+    return os.path.join(env_mod.state_dir(product), DISPATCHES)
+
+
+def _load(path):
+    try:
+        with open(path, encoding='utf-8') as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        data = None
+    return data if isinstance(data, dict) and isinstance(data.get('dispatches'), list) \
+        else {'dispatches': []}
+
+
+def _save(path, data):
+    tmp = f'{path}.{os.getpid()}.tmp'
+    try:
+        with open(tmp, 'w', encoding='utf-8') as fh:
+            json.dump(data, fh, indent=1)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _when(iso):
+    try:
+        return datetime.datetime.fromisoformat(str(iso).replace('Z', '+00:00')).timestamp()
+    except ValueError:
+        return None
+
+
+def record_dispatch(product, env, sha, now):
+    """Note that ``env``'s workflow was dispatched for ``sha`` at ``now``."""
+    path = _ledger_path(product)
+    if not path:
+        return
+    data = _load(path)
+    data['dispatches'] = [d for d in data['dispatches']
+                          if (_when(d.get('at')) or 0) > now.timestamp() - KEEP_S]
+    data['dispatches'].append({'env': env, 'workflow': workflow(product, env), 'sha': sha,
+                               'at': now.isoformat(), 'run': None})
+    _save(path, data)
+
+
+def _bind(product, env, runs, now):
+    """``(runs, pending)``: ``runs`` with each run ASF dispatched carrying the candidate it was
+    dispatched for as ``headSha``, and the sha of a dispatch whose run is not listed yet (None).
+    Each unbound dispatch binds to the oldest unbound ``workflow_dispatch`` run created after it."""
+    path = _ledger_path(product)
+    if not path:
+        return runs, None
+    data = _load(path)
+    wf = workflow(product, env)
+    mine = [d for d in data['dispatches'] if d.get('env') == env and d.get('workflow') == wf]
+    bound = {str(d['run']) for d in data['dispatches'] if d.get('run') is not None}
+    free = sorted((r for r in runs if r.get('event') == 'workflow_dispatch'
+                   and str(r.get('databaseId')) not in bound and _when(r.get('createdAt'))),
+                  key=lambda r: _when(r['createdAt']))
+    changed, pending = False, None
+    for d in sorted(mine, key=lambda d: _when(d.get('at')) or 0):
+        if d.get('run') is not None:
+            continue
+        at = _when(d.get('at')) or 0
+        run = next((r for r in free if _when(r['createdAt']) >= at - SKEW_S), None)
+        if run:
+            d['run'], changed = run.get('databaseId'), True
+            free.remove(run)
+        elif now.timestamp() - at < PENDING_S:
+            pending = d.get('sha')
+    if changed:
+        _save(path, data)
+    sha_of = {str(d['run']): d.get('sha') for d in mine if d.get('run') is not None}
+    return [dict(r, headSha=sha_of[str(r.get('databaseId'))])
+            if str(r.get('databaseId')) in sha_of else r for r in runs], pending
 
 
 def _green(run):
@@ -367,10 +466,14 @@ def facts(product, sh=_sh, now=None, env='prod', _ci=None):
         f['deployed'], f['age'] = run.get('headSha'), _age(run.get('updatedAt'), now)
         _set_behind(product, f, sh)
         return _done(f)
-    runs = _runs(product, f['workflow'], sh) if f['workflow'] else []
+    runs = _runs(product, f['workflow'], sh, branch=trunk) if f['workflow'] else []
     if runs is None:
         f['error'] = f"{f['workflow']} runs unreadable (gh run list)"
         return _done(f)
+    pending = None
+    if f['mode'] != 'ci' and input_name(product, env):
+        # a dispatched run's headSha is the trunk tip; what it deployed is the recorded candidate
+        runs, pending = _bind(product, env, runs, now)
     if f['reader'] == 'vercel':
         got = _vercel_deployed(env_cfg(product, env), sh)
         if got is None:
@@ -383,6 +486,8 @@ def facts(product, sh=_sh, now=None, env='prod', _ci=None):
     live = next((r for r in runs if r.get('status') != 'completed'), None)
     if live:
         f['running'] = (live.get('databaseId'), live.get('headSha'))
+    elif pending:
+        f['running'] = ('dispatched, not listed yet', pending)
     _set_behind(product, f, sh)
     if f['mode'] == 'ci' or f['relevant'] == 0:  # observed only, or nothing relevant to deploy
         return _done(f)
@@ -478,17 +583,21 @@ def decide(product, f, env=None):
                        f" retried; {lag}; the next green sha dispatches again")
     if f.get('mode') != 'auto' or not wf:
         return False, f"{head} {lag} — {_manual(product, f, env)}"
+    if not input_name(product, env) and f['candidate'] != f['main']:
+        return False, (f"{head} {lag} — {wf} takes no sha (input: none) and deploys the {trunk}"
+                       f" tip {_s(f['main'])}, not green {_s(f['candidate'])}; {env} waits until"
+                       f" the tip itself is green")
     return True, f"{head} {lag} — dispatching {wf} for green {_s(f['candidate'])}"
 
 
-def _each(product, sh):
+def _each(product, sh, now=None):
     """[(env, facts)] for every environment that applies — dev, prod, then the named targets;
     the trunk's CI runs are read once and shared."""
     envs = [e for e in names(product) if env_applies(product, e)]
     if not envs:
         return []
     ci = _runs(product, ci_workflow(product), sh, branch=product.main)
-    return [(e, facts(product, sh=sh, env=e, _ci=ci) if ci is not None else _unread(product, e))
+    return [(e, facts(product, sh=sh, now=now, env=e, _ci=ci) if ci is not None else _unread(product, e))
             for e in envs]
 
 
@@ -538,12 +647,12 @@ def dispatch_argv(product, sha, env='prod'):
     return argv
 
 
-def tick(product, out=print, sh=_sh):
+def tick(product, out=print, sh=_sh, now=None):
     """The tick's deploy pass: print one line per environment and, where :func:`decide` says so,
     dispatch its deploy workflow. A refused dispatch is one loud line, and the next tick tries
     again. Returns ``{env: dispatched sha}``, empty when nothing was dispatched."""
     sent = {}
-    for e, f in _each(product, sh):
+    for e, f in _each(product, sh, now=now):
         go, text = decide(product, f, e)
         out(text)
         if not go:
@@ -553,4 +662,7 @@ def tick(product, out=print, sh=_sh):
                 f" `{f['candidate'][:9]}` failed; the next tick tries again")
             continue
         sent[e] = f['candidate']
+        if input_name(product, e):
+            record_dispatch(product, e, f['candidate'],
+                            now or datetime.datetime.now(datetime.timezone.utc))
     return sent

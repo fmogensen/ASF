@@ -1,8 +1,13 @@
 """The prod deploy pass (asf.harvest.deploy): a green trunk ahead of prod is dispatched when the
 product opts in, and every other case is one loud ``deploy:`` line naming what prod waits on."""
+import datetime
 import json
+import os
+import shutil
+import tempfile
 import types
 import unittest
+from unittest import mock
 
 from asf.harvest import deploy
 
@@ -96,7 +101,7 @@ class Dispatch(unittest.TestCase):
         self.assertEqual(sh.dispatched(), [])
 
     def test_input_none_sends_no_field(self):
-        sh = FakeSh([_run(PROD)], [_run(GREEN)])
+        sh = FakeSh([_run(PROD)], [_run(MAIN)])
         _tick(_product(auto=True, input='none'), sh)
         self.assertNotIn('-f', sh.dispatched()[0])
 
@@ -170,6 +175,83 @@ class Dispatch(unittest.TestCase):
         self.assertEqual(sh.calls, [])
         self.assertIsNone(deploy.line(p, sh=sh))
         self.assertEqual(deploy.lines(p, sh=sh), [])
+
+
+def _dispatched_run(sha, rid, status='completed', conclusion='success',
+                    created='2026-09-25T10:00:30Z'):
+    """A run of the deploy workflow ASF dispatched: ``--ref main`` makes its headSha the trunk tip
+    at dispatch time (``sha``), whatever ``-f sha=`` said."""
+    return dict(_run(sha, status=status, conclusion=conclusion, rid=rid), event='workflow_dispatch',
+                createdAt=created)
+
+
+class DispatchLedger(unittest.TestCase):
+    """Review: a dispatch goes out as ``--ref <trunk> -f sha=<candidate>``, so a run's headSha is
+    the trunk tip, not what it deployed. The candidate is recorded per dispatch and read back."""
+
+    AT = datetime.datetime(2026, 9, 25, 10, 0, tzinfo=datetime.timezone.utc)
+
+    def setUp(self):
+        d = tempfile.mkdtemp(prefix='deploy_')
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        path = os.path.join(d, deploy.DISPATCHES)
+        p = mock.patch.object(deploy, '_ledger_path', lambda _product: path)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def dispatch_green(self):
+        sh = FakeSh([_run(PROD)], [_run(GREEN)])
+        sent = deploy.tick(_product(auto=True), out=[].append, sh=sh, now=self.AT)
+        self.assertEqual(sent, {'prod': GREEN})
+
+    def test_the_deployed_sha_is_the_dispatched_candidate_not_the_run_head(self):
+        self.dispatch_green()
+        sh = FakeSh([_dispatched_run(MAIN, 11), _run(PROD)], [_run(GREEN)])
+        f = deploy.facts(_product(auto=True), sh=sh, now=self.AT)
+        self.assertEqual(f['deployed'], GREEN)
+
+    def test_a_failed_candidate_is_never_retried(self):
+        self.dispatch_green()
+        sh = FakeSh([_dispatched_run(MAIN, 12, conclusion='failure'), _run(PROD)], [_run(GREEN)])
+        sent = deploy.tick(_product(auto=True), out=[].append, sh=sh, now=self.AT)
+        self.assertEqual(sent, {})
+        self.assertEqual(sh.dispatched(), [])
+        f = deploy.facts(_product(auto=True), sh=sh, now=self.AT)
+        self.assertEqual((f['candidate'], f['failed']), (GREEN, 12))
+
+    def test_a_running_deploy_names_the_candidate_it_deploys(self):
+        self.dispatch_green()
+        sh = FakeSh([_dispatched_run(MAIN, 13, status='in_progress', conclusion=None),
+                     _run(PROD)], [_run(GREEN)])
+        f = deploy.facts(_product(auto=True), sh=sh, now=self.AT)
+        self.assertEqual(f['running'], (13, GREEN))
+
+    def test_a_dispatch_whose_run_is_not_listed_yet_is_not_sent_twice(self):
+        self.dispatch_green()
+        sh = FakeSh([_run(PROD)], [_run(GREEN)])
+        sent = deploy.tick(_product(auto=True), out=[].append, sh=sh,
+                           now=self.AT + datetime.timedelta(minutes=1))
+        self.assertEqual(sent, {})
+        self.assertEqual(sh.dispatched(), [])
+
+    def test_input_none_dispatches_only_the_trunk_tip(self):
+        # with no sha input the workflow deploys the ref's tip, not the candidate
+        sh = FakeSh([_run(PROD)], [_run(GREEN)])
+        lines = []
+        sent = deploy.tick(_product(auto=True, input='none'), out=lines.append, sh=sh)
+        self.assertEqual(sent, {})
+        self.assertEqual(sh.dispatched(), [])
+        self.assertIn('input: none', lines[0])
+        sh = FakeSh([_run(PROD)], [_run(MAIN)])
+        sent = deploy.tick(_product(auto=True, input='none'), out=[].append, sh=sh)
+        self.assertEqual(sent, {'prod': MAIN})
+
+    def test_the_deploy_workflow_runs_are_read_on_the_trunk_only(self):
+        sh = FakeSh([_run(PROD)], [_run(GREEN)])
+        deploy.facts(_product(auto=True), sh=sh)
+        (argv,) = [c for c in sh.calls if c[:3] == ['gh', 'run', 'list']
+                   and 'deploy-prod.yml' in c]
+        self.assertEqual(argv[argv.index('--branch') + 1], 'main')
 
 
 class LegacyAlias(unittest.TestCase):
