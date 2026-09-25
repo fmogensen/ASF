@@ -331,6 +331,8 @@ def build_parser():
     ci_pool.register(sub)
     from asf.workers import actions
     actions.register(sub)
+    from asf.harvest import deploy
+    deploy.register(sub)
 
     return p
 

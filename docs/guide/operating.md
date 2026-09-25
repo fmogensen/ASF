@@ -106,6 +106,10 @@ red trunk. `asf prod`'s **ON PROD — check these** table lists, per target, the
 merged to the trunk but not yet on it (`NOT LIVE`), then the last ones it shipped — so a page
 merged but never deployed to the site shows up there, not as "no change".
 
+A deploy made from the provider's CLI carries no commit sha, so the line reads `site sha unknown`.
+The deployer names it once the deploy is done — `asf deploy record site <sha>` — and the line counts
+from it until a newer deployment appears without one. A deploy ASF dispatches records its own sha.
+
 To keep the table in front of you, type `/loop 5m /asf:status` in each product's Claude Code
 session: it reprints the status every five minutes until you stop it.
 
