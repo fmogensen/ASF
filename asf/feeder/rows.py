@@ -21,6 +21,12 @@ The row kinds::
     CONFLICT → REBASE      an Active Task/Bug whose PR no longer merges, no session on it
     STALE → CLOSE          an Active Task/Bug whose PR was closed unmerged, branch left behind
     CARD → SPEC            a decided Feature card with no spec
+    CARD → SPEC+PLAN       the same for a ``size: s`` Feature: one session writes the spec and the
+                           plan as one document (brief ``spec-plan``), no separate review round
+    DIRECT → BUILD         a decided ``lane: direct`` Feature with no Tasks: one session builds it
+                           end to end on ``conventions.branch_prefixes.direct`` (brief
+                           ``direct``) — never a spec or plan row; its branch lands like any code
+                           PR (PUSHED → REVIEW / LAND speak for it once pushed)
     STARVED → SPEC         a spec in draft/review that no session is moving
     STARVED → PLAN         an approved spec with no plan, or a plan in draft/review, unmoved
     PUSHED → REVIEW        a Task/Bug whose lane state is REVIEW: a review session on its branch
@@ -63,6 +69,13 @@ STALEMATE = 'STALEMATE → ADJUDICATE'
 CONFLICT = 'CONFLICT → REBASE'
 STALE = 'STALE → CLOSE'
 CARD_SPEC = 'CARD → SPEC'
+#: a small Feature's one document session (``size: s``, :func:`is_small`)
+SPEC_PLAN = 'CARD → SPEC+PLAN'
+#: a ``lane: direct`` Feature's one session (:func:`is_direct`)
+DIRECT_BUILD = 'DIRECT → BUILD'
+#: the brief kinds of those two rows, and the branch kind of the direct lane
+SPEC_PLAN_KIND = 'spec-plan'
+DIRECT = 'direct'
 STARVED_SPEC = 'STARVED → SPEC'
 STARVED_PLAN = 'STARVED → PLAN'
 PUSHED_LAND = 'PUSHED → LAND'
@@ -95,8 +108,11 @@ DECISION_ROWS = 5  #: `conventions.decision_rows` — rows minted, and ids named
 MAX_SPECS_IN_FLIGHT = 2  #: `conventions.feeder.max_specs_in_flight` (:func:`finish_first`)
 #: the stages of a Feature whose plan is approved and whose Tasks are the work
 BUILD_STAGES = ('plan-approved', 'building')
-#: the rows that start a new document: what the finish-first cap counts and holds
-NEW_DOC_KINDS = (CARD_SPEC, STARVED_SPEC, STARVED_PLAN)
+#: the rows that start a new document — or a whole direct Feature: what the finish-first cap
+#: counts and holds
+NEW_DOC_KINDS = (CARD_SPEC, STARVED_SPEC, STARVED_PLAN, SPEC_PLAN, DIRECT_BUILD)
+#: the session kinds (a run's brief kind) the finish-first cap counts as in flight
+NEW_DOC_SESSIONS = ('spec', 'plan', SPEC_PLAN_KIND, DIRECT)
 FINISH = 'WAITS ON finish'
 REVIEW_RE = re.compile(r'^(spec|plan)-review r(\d+)')
 CLOSED_PR_RE = re.compile(r'\bPR #\d+ CLOSED\b')
@@ -253,6 +269,17 @@ def after_of(items, item, absorbed=None):
 
 def is_open(item):
     return item.get('state', 'New') not in DONE_STATES
+
+
+def is_direct(feature):
+    """True for a ``lane: direct`` Feature — one session builds it end to end."""
+    return str((feature or {}).get('lane') or '').strip().lower() == DIRECT
+
+
+def is_small(feature):
+    """True for a ``size: s`` Feature on the full lane — spec and plan in one session."""
+    return (str((feature or {}).get('size') or '').strip().lower() == 's'
+            and not is_direct(feature))
 
 
 def review_round(item):
@@ -457,7 +484,9 @@ def lane_rows(items, product, busy, occupancy):
             item = {'id': iid, 'type': 'task'}
         elif not item or not is_open(item) or iid in busy or item.get('blocked'):
             continue
-        if item.get('type') not in ('task', 'bug'):
+        direct = (item.get('type') == 'feature'
+                  and _conventions(product).branch_kind(h.get('branch') or '') == DIRECT)
+        if item.get('type') not in ('task', 'bug') and not direct:
             continue
         f = None if foreign else feature_of(items, item)
         fid, branch, number = (f['id'] if f else ''), h.get('branch') or '', h.get('pr')
@@ -568,7 +597,14 @@ def feature_rows(items, product, busy, running, landed_shas=None, occupancy=None
             continue
         word = stage.split(' ')[0]
         waits = (occupancy,)
-        if word == 'card':
+        if is_direct(f) and word not in BUILD_STAGES:
+            row = direct_row(f, product, occupancy)
+            if row is not None:
+                out.append(row)
+            continue
+        if word == 'card' and is_small(f):
+            out.append(spec_plan_row(fid, product, occupancy))
+        elif word == 'card':
             out.append(_doc_row(CARD_SPEC, fid, 'spec', product, 'decided card, no spec', *waits))
         elif word in ('spec-draft', 'spec-review'):
             carrier = spec_carrier(f)
@@ -591,6 +627,38 @@ def feature_rows(items, product, busy, running, landed_shas=None, occupancy=None
         elif word in ('plan-approved', 'building'):
             out.extend(task_rows(items, product, f, busy, running, landed_shas))
     return out
+
+
+def direct_row(feature, product, occupancy):
+    """A ``lane: direct`` Feature's one row: DIRECT → BUILD, a session that builds it end to end
+    on ``<branch_prefixes.direct><id>``; once that branch is pushed, a PUSHED → LAND row that
+    waits on the lane — or None while the lane's REVIEW/landing state holds it
+    (:func:`lane_rows` speaks for it then)."""
+    fid, occ = feature['id'], occupancy or {}
+    branch = branch_for(product, DIRECT, fid)
+    if fid in (occ.get('review') or {}) or fid in (occ.get('landing') or {}):
+        return None
+    why = (occ.get('branches') or {}).get(branch) or (occ.get('waiting_landing') or {}).get(fid)
+    if why:
+        return Row(tier=2, kind=PUSHED_LAND, item_id=fid, feature_id=fid,
+                   action=f"{WAITS_LANDING}: {why}", brief_kind=DIRECT, branch=branch,
+                   reason=f"direct {why}")
+    return Row(tier=2, kind=DIRECT_BUILD, item_id=fid, feature_id=fid, action=LAUNCH,
+               brief_kind=DIRECT, branch=branch,
+               reason='lane: direct — one session builds the Feature end to end, one PR')
+
+
+def spec_plan_row(fid, product, occupancy):
+    """A ``size: s`` card's one document session: CARD → SPEC+PLAN on the plan branch (the
+    document it lands is the plan, with the spec beside it), or PUSHED → LAND while that branch
+    waits on the lane."""
+    row = _doc_row(SPEC_PLAN, fid, 'plan', product,
+                   'decided card, size s: spec and plan in one session', occupancy)
+    waiting = ((occupancy or {}).get('docs') or {}).get(fid, {}).get(SPEC_PLAN_KIND)
+    if row.launches and waiting:
+        return dataclasses.replace(row, kind=PUSHED_LAND, action=f"{WAITS_LANDING}: {waiting}",
+                                   brief_kind=SPEC_PLAN_KIND, reason=waiting)
+    return dataclasses.replace(row, brief_kind=SPEC_PLAN_KIND)
 
 
 def land_spec_row(feature, product, occupancy):
@@ -791,7 +859,8 @@ def hold_unlanded(rows, items, landed_shas=None):
 
 #: the rows ``feeder.hold`` holds, per class it names: new work only — a review, a correction,
 #: an adjudicate, the groom and landing are never held
-HELD_KINDS = {'features': (CARD_SPEC, STARVED_SPEC, STARVED_PLAN, PLAN_CODE),
+HELD_KINDS = {'features': (CARD_SPEC, STARVED_SPEC, STARVED_PLAN, PLAN_CODE, SPEC_PLAN,
+                          DIRECT_BUILD),
               'bugs': (BUG_FIX,)}
 HOLD = 'WAITS ON hold'
 
@@ -840,8 +909,10 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
     if gr is not None:
         rows.append(gr)
     # a Task a correction row speaks for gets no PLAN → CODE row too: one session per branch
+    # (and a direct Feature's correction is its one session: no DIRECT → BUILD beside it)
     tasks_spoken = {i for i in spoken if (items.get(i) or {}).get('type') == 'task'
-                    or corrections.get(i, {}).get('kind') == LANDING_GATE}
+                    or corrections.get(i, {}).get('kind') == LANDING_GATE
+                    or is_direct(items.get(i))}
     # a Feature's spec and plan wait to land one branch at a time: the document rows read that
     # per branch (:func:`_waiting_doc`), so one waiting document never holds the other
     docs_waiting = {i for i in waiting if (items.get(i) or {}).get('type') == 'feature'}
@@ -902,7 +973,7 @@ def finish_first(rows, items, product, inflight, held=()):
     if not ready:
         return rows
     cap = max_specs_in_flight(product)
-    running = sum(1 for s in inflight or () if s.get('kind') in ('spec', 'plan'))
+    running = sum(1 for s in inflight or () if s.get('kind') in NEW_DOC_SESSIONS)
     # a correction of a document the lane refused is never held, but it is a document session
     # this wave: it counts against the cap before any new one is admitted
     admitted = sum(1 for r in rows if r.kind in NEW_DOC_KINDS and r.launches and r.correction
