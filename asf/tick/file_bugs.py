@@ -1,12 +1,14 @@
-"""asf.tick.file_bugs — file/bump Bugs from ci, refusals and rule violations (``asf file-bugs``).
+"""asf.tick.file_bugs — file/bump Bugs from ci, refusals, rule violations and the record's own
+standing errors (``asf file-bugs``).
 
-The learning loop: three sources file or bump a Bug, keyed on the typed `signature` field so
+The learning loop: four sources file or bump a Bug, keyed on the typed `signature` field so
 "same signature = same Bug" needs no id lookup table of its own:
   - metrics/ci: a `failed_step` seen >= 2 times in the last 24h
   - metrics/ticks: a file refused >= 2 times in the last 24h
   - `asf rules check --json`: every current violation — never a `broken` check (timed out or
     crashed): that is a check failure, printed as ``rule check timed out: R-nnnn`` and, once it
     persists, surfaced once as a factory-side ``NEEDS OPERATOR`` line (``report_check_failures``)
+  - `asf check` over the record: one Bug per error CLASS (``record_error_signatures``)
 A signature already carrying today's date in its typed `last_filed` is left alone — this is
 what makes a second same-day run a no-op instead of double-counting a still-open problem.
 """
@@ -14,6 +16,7 @@ import datetime
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -180,6 +183,64 @@ def rule_violation_signatures(root, data=None):
                                  'acceptance': [acceptance]})
         d['evidence'].append(line)
         d['places'] += 1
+    return out
+
+
+#: A standing record error's signature: ``record error: <class>``.
+RECORD_ERROR_SIG = 'record error: {klass}'
+#: How many places a record-error Bug names before it says "and N more" — a Bug is a page, and a
+#: record with 300 cards missing a field would otherwise write its whole card list into one.
+RECORD_ERROR_PLACES = 10
+#: What makes two errors the same class: the message with its specifics — quoted text and item
+#: ids — taken out. The placeholder is never itself a bare `D<n>`, or the Bug's own title would
+#: be an instance of the error it reports.
+_QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+_ITEM_ID_RE = re.compile(r'\b[A-Z]-[0-9]{4}\b')
+
+
+def error_class(message):
+    """The class of a record error: its message with the specifics taken out, so ``bare decision
+    reference 'D1'`` in eight cards is one class, not eight."""
+    return ' '.join(_ITEM_ID_RE.sub('…', _QUOTED_RE.sub('…', message)).split())
+
+
+def record_error_signatures(root, findings=None, canonical=None):
+    """One signature per error CLASS `asf check` reports over the record, every card carrying it
+    an evidence line (B-0132). The record pre-commit judges only what a commit stages, so an
+    error in a card nobody touched no longer refuses anything — this is what keeps that standing
+    debt owned by a card of its own instead of printed as a warning for ever. The layout checks
+    are left out: a missing stream folder is `asf init`'s job, not a card's defect.
+
+    A card this tool filed itself (one carrying a typed ``signature``) is not the record's debt
+    and is skipped: a Bug filed with no parent because the product configures no usable
+    ``default_bug_epic`` is already reported once (``usable_bug_epic``), and filing a Bug about
+    it would make every run file a Bug about the Bug the last run filed."""
+    if findings is None:
+        from asf.record.check import record_findings
+        findings, _warnings, _index_wrong = record_findings(root, layout=False)
+    if canonical is None:
+        by_id, _errors = load_items(root)
+        canonical, _dupes = canonicalize(by_id)
+    filed_here = {rec['relpath'] for rec in canonical.values()
+                  if frontmatter.split_machine(rec['meta'])[0].get('signature')}
+    out = {}
+    for path, line, message in sorted(findings):
+        if path in filed_here:
+            continue
+        klass = error_class(message)
+        sig = RECORD_ERROR_SIG.format(klass=klass)
+        d = out.setdefault(sig, {
+            'title': truncate(f"Record error: {klass}", 120), 'severity': 'S3',
+            'evidence': [], 'runs': [], 'places': 0,
+            'acceptance': [f"`asf check` reports no `{klass}` error in the record"]})
+        d['places'] += 1
+        if len(d['evidence']) < RECORD_ERROR_PLACES:
+            # the message is quoted: an evidence line that carried the defect bare (a bare
+            # decision reference) would make this Bug an instance of its own error class
+            d['evidence'].append(f"`{path}:{line}: {message}`")
+    for d in out.values():
+        if d['places'] > len(d['evidence']):
+            d['evidence'].append(f"and {d['places'] - len(d['evidence'])} more")
     return out
 
 
@@ -427,6 +488,7 @@ def cmd_file_bugs(args, root):
     signatures.update(ci_signatures(root, now, conv))
     signatures.update(refusal_signatures(root, now))
     signatures.update(rule_violation_signatures(root, rule_data))
+    signatures.update(record_error_signatures(root, canonical=canonical))
     if rule_data is not None:
         report_check_failures(rule_data.get('broken') or [], ledger,
                               now.strftime('%Y-%m-%dT%H:%M:%SZ'))

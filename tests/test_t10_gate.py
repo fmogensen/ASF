@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from asf import hermetic
+from asf.schema import SCHEMA_VERSION
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(HERE)
@@ -49,7 +50,10 @@ def write_item(root, id_, type_, title, parent=None, typed_lines=(), machine_lin
     if machine_lines is None:
         machine_lines = ['state: New', 'stage_since: 2026-09-01T00:00:00Z',
                          'updated: 2026-09-01T00:00:00Z']
-    lines = [f"id: {id_}", f"type: {type_}", f"title: {title}"]
+    # every card carries the schema it was written under: without it the scenario's own cards are
+    # a record error, and `file-bugs` files a Bug for that class too (B-0132)
+    lines = [f"id: {id_}", f"type: {type_}", f"title: {title}",
+             f"schema_version: {SCHEMA_VERSION}"]
     if parent:
         lines.append(f"parent: {parent}")
     lines.extend(typed_lines)
@@ -180,12 +184,13 @@ class T10GateScenario(unittest.TestCase):
         overlap_lines = [l for l in check.stdout.splitlines() if 'intersects Active task' in l]
         self.assertEqual(len(overlap_lines), 1, check.stdout)
 
-        # one repeated signature -> one Bug filed under E-0009
-        self.assertIn('1 filed', file_bugs.stdout)
+        # one repeated signature -> one Bug; and one Bug per class of standing record error the
+        # `check` above printed — the uncovered Story and the writes: overlap (B-0132)
+        self.assertIn('3 filed', file_bugs.stdout)
         bug_files = [n for n in os.listdir(os.path.join(self.root, 'bugs')) if n.endswith('.md')]
-        # F-0003's inbox-report Bug is separate from the auto-filed CI Bug — two Bugs total,
-        # one from the inbox card and one from file-bugs
-        self.assertEqual(len(bug_files), 2, bug_files)
+        # F-0003's inbox-report Bug is separate from the auto-filed ones — four Bugs total,
+        # one from the inbox card and three from file-bugs
+        self.assertEqual(len(bug_files), 4, bug_files)
 
         # one inbox file -> one card, one answered groom file -> one applied answer
         self.assertIn('applied 1', groom.stdout)
