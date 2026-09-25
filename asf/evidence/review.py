@@ -170,7 +170,7 @@ def verdict_text(text):
 
 def review_at(repo, conv, ref, item):
     """The newest review of ``item`` at ``ref`` (``origin/<branch>``) in ``repo``, for the lane:
-    ``{round, verdict, text, head, path}`` — or None. The same reading as :func:`newest`."""
+    ``{round, verdict, text, head, path, body}`` — or None. The same reading as :func:`newest`."""
     if not item or not repo:
         return None
     listed = _git(repo, 'ls-tree', '-r', '--name-only', ref, '--', _dir_of(conv))
@@ -185,7 +185,7 @@ def review_at(repo, conv, ref, item):
     body = _git(repo, 'show', f'{ref}:{path}') or ''
     verdict, head = read(body, legacy)
     return {'round': n, 'verdict': verdict, 'text': verdict_text(body) or (verdict or ''),
-            'head': head, 'path': path}
+            'head': head, 'path': path, 'body': body[:READ_CHARS]}
 
 
 def is_current(repo, conv, ref, review, head):

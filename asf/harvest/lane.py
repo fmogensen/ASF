@@ -398,6 +398,14 @@ def hold_with_correction(state_dir, branch, record, kind, text, out, files=(), i
 
 # ---- the pure transition ----------------------------------------------------------------------
 
+def incomplete(facts):
+    """True when the head's approving review lacks the ``read as the customer`` check row its
+    diff owes — the diff touches ``customer_content.paths`` (:mod:`asf.customer_content`)."""
+    rv = facts.get('review') or {}
+    return bool(facts.get('customer')) and rv.get('verdict') == review_mod.APPROVED \
+        and not rv.get('customer_row')
+
+
 def review_reason(facts):
     """``(round wanted, why)`` for a head no review approved yet."""
     rv = facts.get('review') or {}
@@ -406,6 +414,9 @@ def review_reason(facts):
     nxt = int(rv.get('round') or 0) + 1
     if not rv.get('current'):
         return nxt, f"{rv.get('path')} predates the head"
+    if incomplete(facts):
+        return nxt, (f"{rv.get('path')} is incomplete: no `{customer_content.CHECK_ROW}` row"
+                     f" for the {len(facts['customer'])} customer page(s) the diff touches")
     return nxt, f"{rv.get('path')} reads {rv.get('text') or 'no verdict'}"
 
 
@@ -486,7 +497,8 @@ def next_state(prev, facts):
         rv = f.get('review') or {}
         if not f.get('review_required'):
             return GATE, 'review: none'
-        if rv.get('current') and rv.get('verdict') == review_mod.APPROVED:
+        if rv.get('current') and rv.get('verdict') == review_mod.APPROVED \
+                and not incomplete(f):
             return GATE, f"{rv.get('path')} approved its head"
         if rv.get('current') and rv.get('verdict') == review_mod.CHANGES:
             return BACK, 'kind=review'
@@ -650,10 +662,14 @@ class Lane:
         f['review_required'] = conv.review_required(f['class'])
         if rec.get('state') in (None, PUSHED, BACK):
             f['refusal'] = lane_refusal(repo, trunk, b, item, conv)
+        f['customer'] = customer_content.touched(conv, f['files'])
+        # a customer page is never landed unread: its diff needs a review whatever its class
+        f['review_required'] = f['review_required'] or bool(f['customer'])
         if f['review_required'] and rec.get('state') in (None, PUSHED, BACK, PR_OPEN, REVIEW):
             rv = review_mod.review_at(repo, conv, f'origin/{b}', item)
             if rv:
                 rv['current'] = review_mod.is_current(repo, conv, f'origin/{b}', rv, head)
+                rv['customer_row'] = customer_content.has_customer_row(rv.pop('body', ''))
             f['review'] = rv
         return f
 

@@ -366,6 +366,17 @@ def correction_text(row, kind):
     return CORRECTION_HEAD + text.rstrip() if kind in ('correct', 'spec', 'plan') and text else ''
 
 
+def customer_section(product, kind, branch):
+    """A review of a diff touching ``conventions.customer_content.paths`` carries the required
+    ``read as the customer`` section (:func:`asf.customer_content.review_brief_section`); the
+    lane holds a review without its check row as incomplete."""
+    if kind != 'review' or product is None or not branch:
+        return ''
+    from asf import customer_content
+    text = customer_content.review_brief_section(product, branch)
+    return '\n\n' + text if text else ''
+
+
 def refusal_section(product, item_id):
     """A relaunch's brief names what the approvals hook refused the item's last run, and why,
     so the session does not repeat it (:func:`asf.approvals.refusal_text`) — ``''`` when
@@ -389,6 +400,7 @@ def build(product, row, index, inflight=None, repo_facts=None):
     parts = [item_line(row, facts['item']),
              preamble_mod.build(product, row, index, inflight, repo_facts, facts=facts),
              render(load_template(kind), ctx).rstrip() + correction_text(row, kind)
+             + customer_section(product, kind, facts['branch'])
              + refusal_section(product, ctx['item_id']),
              render(TAIL, ctx)]
     return Brief(kind=kind, item_id=ctx['item_id'], text='\n\n'.join(p.strip() for p in parts) + '\n',

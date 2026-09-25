@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import types
 import unittest
@@ -15,6 +16,10 @@ from unittest import mock
 from asf import conventions as conv_mod
 from asf import customer_content as cc
 from asf.harvest import deploy, lane
+
+import asf.briefs.build  # noqa: E402,F401 — the module; the package exports a build() function
+
+brief_build = sys.modules['asf.briefs.build']
 
 CONV = {'customer_content': {'paths': ['site/legal/**', 'site/contact.md']},
         'ci_workflow': 'ci.yml'}
@@ -205,6 +210,62 @@ class Doctor(unittest.TestCase):
         p = types.SimpleNamespace(repo_slug='o/r', repo_dir='/repo', main='main',
                                   conventions={}, deploy_sha={})
         self.assertEqual(cc.findings(p), [])
+
+
+APPROVED = {'round': 1, 'verdict': 'approved', 'text': 'approved', 'path': 'r/t-0001-r1.md',
+            'current': True}
+ROW = ('| read as the customer: every touched page read in full | pass | terms, privacy: '
+       'none |')
+
+
+def _facts(**kw):
+    f = {'branch': 'worker/T-0001', 'item': 'T-0001', 'head': 'a' * 40, 'ended': True,
+         'landed': False, 'live': False, 'ahead': 1, 'mode': 'ff', 'host': True, 'now': 1.0,
+         'stale_after': 86400, 'review_required': True}
+    f.update(kw)
+    return f
+
+
+class EndUserReview(unittest.TestCase):
+    def rec(self, state):
+        return {'state': state, 'head': 'a' * 40, 'pr': None, 'at': '2027-01-15T08:00:00Z',
+                'reason': ''}
+
+    def test_an_approval_without_the_customer_row_goes_back_to_review(self):
+        f = _facts(customer=['site/legal/terms.md'], review=dict(APPROVED, customer_row=False))
+        state, reason = lane.next_state(self.rec(lane.REVIEW), f)
+        self.assertEqual(state, lane.REVIEW)
+        self.assertIn('round 2 wanted', reason)
+        self.assertIn('read as the customer', reason)
+
+    def test_an_approval_with_the_row_gates_and_a_diff_off_customer_pages_needs_none(self):
+        f = _facts(customer=['site/legal/terms.md'], review=dict(APPROVED, customer_row=True))
+        self.assertEqual(lane.next_state(self.rec(lane.REVIEW), f)[0], lane.GATE)
+        f = _facts(customer=[], review=dict(APPROVED, customer_row=False))
+        self.assertEqual(lane.next_state(self.rec(lane.REVIEW), f)[0], lane.GATE)
+
+    def test_the_row_is_read_from_the_check_table(self):
+        self.assertTrue(cc.has_customer_row(f'| check | result | evidence |\n| --- |\n{ROW}\n'))
+        self.assertTrue(cc.has_customer_row('| **Read as the customer** | `fail` | x |'))
+        self.assertFalse(cc.has_customer_row('I read it as the customer would. verdict: approved'))
+        self.assertFalse(cc.has_customer_row('| read as the customer | | |'))
+
+    def test_the_review_brief_carries_the_section_only_for_customer_pages(self):
+        product = types.SimpleNamespace(conventions=CONV, repo_dir='/repo', main='main')
+        with mock.patch.object(cc, 'branch_files',
+                               return_value=['site/legal/terms.md', 'app/main.py']):
+            text = brief_build.customer_section(product, 'review', 'worker/T-0001')
+            self.assertIn('## Required: read as the customer', text)
+            self.assertIn('`site/legal/terms.md`', text)
+            self.assertNotIn('app/main.py', text)
+            self.assertIn('| read as the customer', text)
+            self.assertEqual(brief_build.customer_section(product, 'coder', 'worker/T-0001'), '')
+        with mock.patch.object(cc, 'branch_files', return_value=['app/main.py']):
+            self.assertEqual(brief_build.customer_section(product, 'review', 'worker/T-0001'), '')
+
+    def test_a_customer_page_diff_requires_a_review_whatever_its_landing_class(self):
+        self.assertTrue(cc.touched(CONV, ['site/legal/privacy.md']))
+        self.assertEqual(cc.touched(CONV, ['docs/x.md']), [])
 
 
 if __name__ == '__main__':
