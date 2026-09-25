@@ -216,12 +216,16 @@ def window_row(facts, start, end, rows=None):
     ci_min = (sum(_num(r.get('minutes')) for r in facts.ci if in_window(r.get('ts'), start, end))
               + sum(_num(g.get('seconds')) / 60 for g in facts.gates if in_window(g.get('ts'), start, end)))
     dead = [r for r in facts.runs if is_dead(r) and in_window(r.ended, start, end)]
+    tasks = [t for t in facts.items.values()
+             if t.get('type') == 'task' and in_window(t.get('landed'), start, end)]
     n = len(shipped)
     return {
         'week': start.date().isoformat(), 'start': iso(start), 'end': iso(end),
         'landed': n, 'on_prod': len(on_prod),
         'median_lead_days': median([r['lead_days'] for r in shipped]),
         'median_prod_days': median([r['prod_days'] for r in on_prod]),
+        'tasks_landed': len(tasks),
+        'median_task_days': median([days_between(t.get('created'), t.get('landed')) for t in tasks]),
         'usd': round(usd, 2), 'sessions': len(sessions),
         'tokens': sum(tokens_of(s) for s in sessions), 'ci_min': round(ci_min, 1),
         'usd_per_feature': round(usd / n, 2) if n else None,
@@ -267,9 +271,10 @@ def _days(v):
 
 
 def headline_line(h, clutter=None):
-    """``3 on prod / 5 landed (7 d) · lead 2.1 d · $41.20/feature all-in · 3.4 repair sessions/feature``"""
+    """``3 on prod / 5 landed (7 d) · lead 2.1 d (task 0.4 d) · $41.20/feature all-in · 3.4 repair
+    sessions/feature``"""
     parts = [f"{h['on_prod']} on prod / {h['landed']} landed (7 d)",
-             f"lead {_days(h['median_lead_days'])}",
+             f"lead {_days(h['median_lead_days'])} (task {_days(h.get('median_task_days'))})",
              f"{_money(h['usd_per_feature'])}/feature all-in"
              if h['usd_per_feature'] is not None else f"{_money(h['usd'])} spent, nothing landed",
              f"{'—' if h['repair_per_feature'] is None else format(h['repair_per_feature'], 'g')} "
