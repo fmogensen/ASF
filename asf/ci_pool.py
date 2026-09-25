@@ -20,9 +20,9 @@ box of another provider that could run it. A runner may carry one informational 
 **Runner class.** A runner may declare ``class: <name>`` (``heavy-fast``, ``heavy-slow``, …): a
 finer grain than the role, for a product's own scripts (a test split, a timeout) — never for
 routing. The CI host's API sets labels, not a runner's environment, so the class travels as one
-more derived label, ``class:<name>``. A product script reads ``$RUNNER_CLASS`` when the box's
-runner ``.env`` sets it, else the ``class:`` label of ``$RUNNER_NAME`` from the runners API.
-Reconcile keeps exactly the declared ``class:`` label on each runner (dry-run by default, like
+more derived label, ``class-<name>``. A product script reads ``$RUNNER_CLASS`` when the box's
+runner ``.env`` sets it, else the ``class-`` label of ``$RUNNER_NAME`` from the runners API.
+Reconcile keeps exactly the declared ``class-`` label on each runner (dry-run by default, like
 every label); the doctor counts runners per class and warns on a runner with no class while
 others have one; the capacity view groups the pool by class.
 
