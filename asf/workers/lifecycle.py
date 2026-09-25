@@ -437,7 +437,13 @@ def pending_correction(run, path=None):
     """The correction on ``run`` still waiting for its session: none of the item's runs started
     at or after it (health and harvest write corrections before the wave launches, so a run of
     the same second is the answer). ``None`` when there is none or it has been answered — or when
-    it is an empty-branch correction on a branch whose work an earlier run already landed."""
+    it is an empty-branch correction on a branch whose work an earlier run already landed.
+
+    An ``adjudicate`` run never answers a correction (B-0128): it rules, it does not touch the
+    branch, so it must not read as "corrected" and bounce the lane's BACK back to PUSHED —
+    restarting review on a head nothing changed, which (the round cap never falling) walks
+    straight back to another STALEMATE → ADJUDICATE row. :func:`corrections`' ``settled`` is
+    the ruling's own answer: no more adjudicate rows over this same hold."""
     corr = (run or {}).get('correction') or {}
     if not corr.get('text'):
         return None
@@ -448,10 +454,18 @@ def pending_correction(run, path=None):
         me = (run.get('job'), run.get('started'))
         later = [r for r in item_runs(path, run.get('item'))
                  if (r.get('started') or '') >= at and (r.get('job'), r.get('started')) != me
-                 and not quota_exhausted(r)]
+                 and not quota_exhausted(r) and r.get('kind') != 'adjudicate']
         if later:
             return None
     return corr
+
+
+def settled(path, item, at):
+    """True when an adjudicate session has already ended over the correction raised ``at``
+    (B-0128): the ruling is in, and the feeder asks for no second one over the same hold."""
+    return any(r.get('kind') == 'adjudicate' and r.get('ended')
+               and (r.get('started') or '') >= (at or '')
+               for r in item_runs(path, item))
 
 
 def inflight(path, alive=None):
@@ -523,9 +537,10 @@ def attempts(path):
 
 
 def corrections(path):
-    """``{item: {kind, text, at, rounds, branch}}``: the newest pending correction per item, with
-    the branch of the run it was written on (a held spec branch is corrected on ``spec/<id>``,
-    not on the item's task prefix)."""
+    """``{item: {kind, text, at, rounds, branch, settled}}``: the newest pending correction per
+    item, with the branch of the run it was written on (a held spec branch is corrected on
+    ``spec/<id>``, not on the item's task prefix). ``settled`` (B-0128): an adjudicate session has
+    already ended over this same hold — the feeder shows a WAITS ON row, not another STALEMATE."""
     out = {}
     for item in {r.get('item') for rs in runs(path).values() for r in rs if r.get('item')}:
         held = [(r, pending_correction(r, path)) for r in item_runs(path, item)]
@@ -533,7 +548,8 @@ def corrections(path):
         if not held:
             continue
         run, corr = max(held, key=lambda rc: rc[1].get('at') or '')
-        out[item] = dict(corr, rounds=rounds_of(path, item), branch=run.get('branch'))
+        out[item] = dict(corr, rounds=rounds_of(path, item), branch=run.get('branch'),
+                          settled=settled(path, item, corr.get('at')))
     return out
 
 
