@@ -11,6 +11,7 @@ import unittest
 from asf.conventions import Conventions
 from asf.record import frontmatter
 from asf.record.core import today
+from asf.schema import SCHEMA_VERSION
 from asf.tick import file_bugs
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -41,7 +42,8 @@ def write_item(root, id_, type_, title, parent=None, typed_lines=(), machine_lin
     if machine_lines is None:
         machine_lines = ['state: New', 'stage_since: 2026-09-01T00:00:00Z',
                          'updated: 2026-09-01T00:00:00Z']
-    lines = [f"id: {id_}", f"type: {type_}", f"title: {title}"]
+    lines = [f"id: {id_}", f"type: {type_}", f"title: {title}",
+             f"schema_version: {SCHEMA_VERSION}"]
     if parent:
         lines.append(f"parent: {parent}")
     lines.extend(typed_lines)
@@ -67,7 +69,8 @@ def write_tick_line(root, day, obj):
 
 
 def write_rule(root, rid, title, typed_lines=()):
-    lines = [f"id: {rid}", 'type: rule', f"title: {title}"]
+    lines = [f"id: {rid}", 'type: rule', f"title: {title}",
+             f"schema_version: {SCHEMA_VERSION}"]
     lines.extend(typed_lines)
     lines.append('# ---- machine ----')
     lines.append('state: New')
@@ -237,6 +240,100 @@ class RuleViolationSignatureTests(unittest.TestCase):
         write_check_script(self.root, 'r0001.sh', "#!/usr/bin/env bash\nexit 0\n")
         run(['index'], self.root)
         self.assertEqual(file_bugs.rule_violation_signatures(self.root), {})
+
+
+BARE_REF_BODY = (
+    "## Description\nas decided in D1, the thing\n\n## Acceptance\n- [ ] \n\n## Non-goals\n\n"
+    "## History\n- 2026-09-01: created\n\n## Children\n\n## Backlinks\n"
+)
+
+
+class RecordErrorSignatureTests(unittest.TestCase):
+    """B-0132: the record pre-commit no longer refuses a commit over an error in a card nobody
+    touched, so the standing debt needs an owner — one Bug per error CLASS, never one per card."""
+
+    def setUp(self):
+        self.root = make_repo()
+        write_item(self.root, 'D-0001', 'decision', 'A decision')
+        write_item(self.root, 'E-0009', 'epic', 'Factory', typed_lines=['decided: true'])
+        write_item(self.root, 'F-0001', 'feature', 'A feature', parent='E-0009')
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_one_bug_per_error_class_not_one_per_card(self):
+        for n in (279, 331, 332):
+            write_item(self.root, f'T-{n:04d}', 'task', f'Task {n}', parent='F-0001',
+                       body=BARE_REF_BODY)
+        run(['index'], self.root)
+        sigs = file_bugs.record_error_signatures(self.root)
+        self.assertEqual(len(sigs), 1, sigs)
+        sig = list(sigs)[0]
+        self.assertEqual(sig, 'record error: bare decision reference …; write it as [[D-nnnn]]')
+        self.assertEqual(sigs[sig]['places'], 3)          # three cards, one Bug
+        self.assertEqual(sigs[sig]['severity'], 'S3')
+        self.assertIn('bare decision reference', sigs[sig]['title'])
+        evidence = '\n'.join(sigs[sig]['evidence'])
+        for n in (279, 331, 332):
+            self.assertIn(f'tasks/T-{n:04d}.md', evidence)
+        self.assertIn('asf check', sigs[sig]['acceptance'][0])
+
+    def test_two_error_classes_are_two_bugs(self):
+        write_item(self.root, 'T-0279', 'task', 'Task', parent='F-0001', body=BARE_REF_BODY)
+        write_item(self.root, 'B-0900', 'bug', 'No severity here', parent='F-0001')
+        run(['index'], self.root)
+        sigs = file_bugs.record_error_signatures(self.root)
+        self.assertEqual(len(sigs), 2, sigs)
+        self.assertIn('record error: bare decision reference …; write it as [[D-nnnn]]', sigs)
+        self.assertIn('record error: …: bug without severity', sigs)
+
+    def test_a_clean_record_files_nothing(self):
+        write_item(self.root, 'T-0279', 'task', 'Task', parent='F-0001')
+        run(['index'], self.root)
+        self.assertEqual(file_bugs.record_error_signatures(self.root), {})
+
+    def test_the_evidence_never_carries_the_defect_it_reports(self):
+        # a Bug whose body quotes `D1` bare would itself be a bare decision reference — the
+        # error class would then never be able to reach zero
+        write_item(self.root, 'T-0279', 'task', 'Task', parent='F-0001', body=BARE_REF_BODY)
+        run(['index'], self.root)
+        r = run(['file-bugs', '--default-bug-epic', 'E-0009'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        run(['index'], self.root)
+        check = run(['check'], self.root)
+        self.assertNotIn('bugs/', check.stdout)
+
+    def test_file_bugs_files_the_standing_record_error(self):
+        write_item(self.root, 'T-0279', 'task', 'Task', parent='F-0001', body=BARE_REF_BODY)
+        run(['index'], self.root)
+        r = run(['file-bugs', '--default-bug-epic', 'E-0009'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('1 filed', r.stdout)
+        filed = [n for n in os.listdir(os.path.join(self.root, 'bugs')) if n.endswith('.md')]
+        self.assertEqual(len(filed), 1, filed)
+        with open(os.path.join(self.root, 'bugs', filed[0])) as f:
+            meta, body = frontmatter.parse(f.read(), path=f'bugs/{filed[0]}')
+        self.assertEqual(meta['signature'],
+                         'record error: bare decision reference …; write it as [[D-nnnn]]')
+        self.assertEqual(meta['severity'], 'S3')
+        self.assertIn('tasks/T-0279.md', body)
+        # a second run the same day bumps nothing
+        again = run(['file-bugs', '--default-bug-epic', 'E-0009'], self.root)
+        self.assertIn('0 filed', again.stdout)
+
+    def test_the_bug_this_tool_filed_is_not_itself_an_error_class(self):
+        # with no usable Epic the filed Bug is unparented — a `check` finding a human fixes once,
+        # never a class for the next run to file a Bug about (or every run files one more)
+        write_item(self.root, 'T-0279', 'task', 'Task', parent='F-0001', body=BARE_REF_BODY)
+        run(['index'], self.root)
+        first = run(['file-bugs'], self.root)
+        self.assertIn('1 filed', first.stdout)
+        run(['index'], self.root)
+        sigs = file_bugs.record_error_signatures(self.root)
+        self.assertEqual(list(sigs),
+                         ['record error: bare decision reference …; write it as [[D-nnnn]]'])
+        second = run(['file-bugs'], self.root)
+        self.assertIn('0 filed', second.stdout)
 
 
 class FileBugsIntegrationTests(unittest.TestCase):
