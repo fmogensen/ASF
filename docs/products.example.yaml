@@ -180,7 +180,8 @@ ci:
 # config.yaml's capacity.total and by what worker_pool.accounts can host.
 capacity:
   sessions: 3         # concurrent worker sessions for this product
-  ci: 2               # concurrent CI runs for this product; overrides the ci.pool slot sum
+  ci: 2               # CI start gate: the batch step waits while this many ci.workflow runs are in
+                      # flight (PR and trunk runs start regardless); overrides the ci.pool slot sum
   weight: 1           # share of the worker pool against other active products (default 1); 3 = three times asf's
   batch:              # passed to a batch step as ASF_CAPACITY_*; harvest's PR merges obey it too
     per_run: 8        # batches per run (harvest: PR merges per run)

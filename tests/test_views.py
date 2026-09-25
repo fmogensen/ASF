@@ -357,6 +357,19 @@ class StatusRow(ViewsTestCase):
         cfg = {'capacity': {'total': {'sessions': 6}}}
         self.assertEqual(status.capacity_cell(cfg, product), 'sessions 0/3 (operator total 6)')
 
+    def test_ci_clause_names_the_batch_gate_not_a_breached_cap(self):
+        # capacity.ci gates only the batch step; every ci.workflow run counts in flight
+        from unittest import mock
+        from asf import capacity as capacity_mod
+        product = env.Product('p', {'capacity': {'sessions': 3, 'ci': 4}})
+        with mock.patch.object(capacity_mod, '_pick_ci_source') as pick:
+            pick.return_value.read.return_value = 13
+            cell = status.capacity_cell({}, product)
+        self.assertIn('ci 13 runs in flight (batch starts below 4 — batch waits)', cell)
+        self.assertNotIn('13/4', cell)
+        self.assertEqual(status.ci_clause(2, 4), 'ci 2 runs in flight (batch starts below 4)')
+        self.assertEqual(status.ci_clause(None, 4), 'ci ? runs in flight (batch starts below 4)')
+
 
 class SpanTests(unittest.TestCase):
     def test_span_buckets(self):
