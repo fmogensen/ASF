@@ -271,7 +271,8 @@ def load_config():
     malformed one raises :class:`ConfigError` naming it, rather than a worker session starting
     with an environment nobody asked for."""
     cfg = load_file(config_path())
-    problems = validate_worker_pool(cfg)
+    from asf.workers import cloud  # local: the cloud lane's module imports this one
+    problems = validate_worker_pool(cfg) + cloud.config_problems((cfg or {}).get('cloud'))
     if problems:
         raise ConfigError(f"{config_path()}: {'; '.join(f'{k} {why}' for k, why in problems)}")
     return cfg
@@ -442,7 +443,7 @@ PRODUCT_FIELDS = {
     'customer_paths': _LIST, 'stage_limits': _MAP, 'size_classes': _MAP, 'approvals': _MAP,
     'approval_signals': _MAP, 'steps': _MAP, 'job_grants': _LIST, 'groom': _MAP,
     'capacity': _MAP, 'clocks': _MAP, 'token_caps': _MAP, 'feeder': _MAP, 'improve': _MAP,
-    'release': _MAP,
+    'release': _MAP, 'cloud': _MAP,
 }
 # `ci:` is a map (or the bare word `none`, a product without CI); these are its keys.
 # `deploy_workflow` is a read-only alias of the documented `deploy_sha.workflow`: the status
@@ -584,6 +585,9 @@ def validate_product_text(text):
     for section, fields in NESTED_FIELDS.items():
         if isinstance(data.get(section), dict):
             check(fields, data[section], section + '.')
+    from asf.workers import cloud  # `cloud:`: a refused runtime refuses the file (asf.workers.cloud)
+    for dotted, why in cloud.config_problems(data.get('cloud')):
+        problems.append((lines.get('cloud', 0), dotted, why))
     for dotted, why in _deploy_problems(data.get('deploy_sha')):
         problems.append((lines.get('deploy_sha', 0), dotted, why))
     from asf import ci_pool  # `ci.pool`: every runner's fields, its role a capability (asf.ci_pool)

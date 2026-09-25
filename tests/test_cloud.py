@@ -24,8 +24,59 @@ try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_clo
 except ImportError:  # pragma: no cover - import shape only
     from tests.test_workers import Home, feature_row, git
 
-ON = {'enabled': True, 'runtime': 'claude-cloud', 'max_inflight': 2, 'rows': 'any',
+#: a runtime the lane takes, for the plumbing tests (placement, sync, doctor): claude-cloud is
+#: refused at config check, so the lane's own tests run under this stand-in
+TEST_RUNTIME = 'fake-cloud'
+ON = {'enabled': True, 'runtime': TEST_RUNTIME, 'max_inflight': 2, 'rows': 'any',
       'accounts': ['acct-c']}
+_RUNTIMES = cloud.RUNTIMES
+
+
+def setUpModule():
+    cloud.RUNTIMES = _RUNTIMES + (TEST_RUNTIME,)
+
+
+def tearDownModule():
+    cloud.RUNTIMES = _RUNTIMES
+
+
+class Refused(unittest.TestCase):
+    """claude-cloud cannot launch (`-p --cloud` is interactive only): the config check refuses it."""
+
+    def test_the_block_is_refused_with_the_reason(self):
+        (key, why), = cloud.config_problems({'enabled': True, 'runtime': 'claude-cloud'})
+        self.assertEqual(key, 'cloud.runtime')
+        self.assertIn('--cloud cannot be combined with --print. Starting a new cloud session '
+                      'with --cloud is interactive only', why)
+        self.assertIn('--bg and --cloud are different backends', why)
+        self.assertEqual(cloud.config_problems({'runtime': 'claude-cloud'})[0][0], 'cloud.runtime')
+        self.assertEqual(cloud.config_problems(None), [])
+        self.assertFalse(cloud.settings({'cloud': {'enabled': True, 'runtime': 'claude-cloud',
+                                                    'max_inflight': 2}}).on)
+
+    def test_load_config_refuses_it(self):
+        home = tempfile.mkdtemp()
+        with open(os.path.join(home, 'config.yaml'), 'w') as f:
+            f.write('cloud:\n  enabled: true\n  runtime: claude-cloud\n  max_inflight: 2\n')
+        old, env.ASF_HOME = env.ASF_HOME, home
+        try:
+            with self.assertRaises(env.ConfigError) as cm:
+                env.load_config()
+        finally:
+            env.ASF_HOME = old
+        self.assertIn('claude-cloud is refused', str(cm.exception))
+
+    def test_a_product_file_is_refused_too(self):
+        text = 'product: sample\ncloud:\n  enabled: true\n  runtime: claude-cloud\n'
+        (_ln, key, why), = env.validate_product_text(text)
+        self.assertEqual(key, 'cloud.runtime')
+        self.assertIn('interactive only', why)
+
+    def test_doctor_names_the_reason(self):
+        cfg = {'cloud': dict(ON, runtime='claude-cloud')}
+        (required, ok, detail), = cloud.doctor_rows(cfg, env.Product('sample', {}))
+        self.assertEqual((required, ok), (True, False))
+        self.assertIn('cloud.runtime claude-cloud is refused', detail)
 
 
 def job(**kw):
@@ -54,7 +105,7 @@ class Command(unittest.TestCase):
 
     def test_settings_fall_back_to_the_inherited_cap_and_the_product_overrides(self):
         cfg = {'cloud': {'enabled': False}, 'worker_pool': {'caps': {'cloud_max_inflight': 3}}}
-        product = env.Product('sample', {'cloud': {'enabled': True}})
+        product = env.Product('sample', {'cloud': {'enabled': True, 'runtime': TEST_RUNTIME}})
         s = cloud.settings(cfg, product)
         self.assertTrue(s.on)
         self.assertEqual((s.max_inflight, s.rows), (3, cloud.ROWS_CLOUD_OK))
