@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Installed via `git config core.hooksPath .githooks`. Runs the test suite, the generic-repo
-# check and the redaction gate before every commit; all three must be clean.
+# Installed via `git config core.hooksPath .githooks`. Runs the generic-repo
+# check and the redaction gate before every commit; both must be clean (the suite: see below).
 set -euo pipefail
 
 # A test's own commit, inside a checkout this hook is also active for, would otherwise run the
@@ -17,8 +17,14 @@ cd "$ROOT"
 # repository would then operate on this one instead.
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 
-echo "pre-commit: running tests..."
-python3 -m unittest discover -s tests
+# The suite is not run here: every worker commit ran it serially (324 s, one core each) and
+# four sessions at once held every product's wave on host pressure. The harvest gate
+# (conventions.test_command) and remote CI (.github/workflows/tests.yml) run it before a
+# change lands; ASF_PRECOMMIT_SUITE=1 runs it here too.
+if [ -n "${ASF_PRECOMMIT_SUITE:-}" ]; then
+    echo "pre-commit: running tests..."
+    python3 tools/run_tests.py
+fi
 
 echo "pre-commit: checking for forbidden names..."
 bash tools/check_generic.sh
