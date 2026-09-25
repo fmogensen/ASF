@@ -125,6 +125,26 @@ class TestMeasure(Base):
         q = self.queue(product(), gh)
         self.assertEqual(q.free(), {'heavy': 1, 'light': 2})
 
+    def test_the_status_runners_row_and_the_queue_free_agree_from_one_read(self):
+        from asf.views import status
+        gh = FakeGh(busy={'h1', 'h3'}, offline={'h2'})
+        p = product()
+        q = self.queue(p, gh)
+        row = status.runners_cell(p, source=ci_queue.GitHubSource(p, run=gh))
+        self.assertEqual(row, '4 online · heavy 2/2 busy · light 0/2 busy, 1 offline')
+        self.assertEqual(q.free(), {'heavy': 0, 'light': 2})
+        # every class: the row's online minus busy is the queue's free, never another source
+        for cls, n in q.free().items():
+            busy, online = row.split(f'{cls} ')[1].split(' busy')[0].split('/')
+            self.assertEqual(int(online) - int(busy), n)
+
+    def test_the_runners_row_is_a_plain_total_with_no_classes(self):
+        from asf import ci_pool
+        runners = [ci_pool.Runner('a', True, [], busy=True), ci_pool.Runner('b', True, []),
+                   ci_pool.Runner('c', False, [])]
+        self.assertEqual(ci_queue.runners_text(runners, []),
+                         '2 online, 1 busy, 1 idle, 1 offline')
+
 
 
 def job(runner, start=None, end=None, conclusion='success', labels=()):
