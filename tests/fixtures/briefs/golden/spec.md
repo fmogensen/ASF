@@ -61,6 +61,9 @@ DELIVERABLE: `docs/specs/checkout-resilience.md` on branch `spec/F-0001`, cut fr
 already on origin (`exists:` above), on that branch as it stands in your worktree: never recut it,
 never merge its remote into it. Create only that file.
 
+Every commit subject names the card — `spec(F-0001): <what>` — the lane refuses a branch whose
+subjects do not name F-0001 as a token (the branch name does not count).
+
 SHAPE, in this order:
 1. **Decisions** — what is in and what is out, every precondition the work depends on, and one
    row per choice you had to make (what was chosen, against what, why).

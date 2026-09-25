@@ -6,6 +6,9 @@ in the plan's decisions block rather than quietly widening it.
 
 DELIVERABLE: `{plan_path}` on branch `{branch}`, cut from `origin/{main}`. Create only that file.
 
+Every commit subject names the card — `plan({item_id}): <what>` — the lane refuses a branch whose
+subjects do not name {item_id} as a token (the branch name does not count).
+
 TASK LINES (binding, machine-read — the record turns every `### Task N:` heading into a Task card
 and the feeder launches coders from them). Directly under each heading, before anything else,
 exactly three lines:
