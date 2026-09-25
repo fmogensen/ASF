@@ -59,6 +59,7 @@ what it means and the one command that clears it; then the common stalls that pr
 | line | meaning | fix |
 | --- | --- | --- |
 | `NEEDS OPERATOR: no account under quota — wait for a window to reset, or add an account …` | every account is at or above its `stop` band, or its quota is unreadable | `asf workers quota --product <p>` shows which; wait, add an account, or fix `worker_pool.quota_command` |
+| `pool full — accounts at cap: a 4/4, b 4/4; the rest stopped: c (seven_d_pct 100 ≥ 95)` | the accounts under their quota are all at their seat cap; the others are past a stop | nothing — the row launches when a seat frees |
 | `NEEDS OPERATOR: worker_pool.models has no entry for <label> — add it to config.yaml` | a job's model label (`heavy` or `light`) is not mapped | add a `models:` block under `worker_pool:` with `heavy: <id>` and `light: <id>` |
 | `NEEDS OPERATOR: <what> — <command or answer>` in a session's report | a worker session hit something only a person can do (a credential, a decision) and carried on with the rest | do what it names; for a reshape, answer the split line in the groom |
 

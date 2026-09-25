@@ -131,7 +131,7 @@ class TestPlacement(unittest.TestCase):
         # a (51%) takes one spec (61%), b (30%) takes three (60%); the fifth fits nowhere
         self.assertEqual(sorted(got[:4]), ['a', 'b', 'b', 'b'])
         # the wait names the account closest to fitting: b at 30 + 30 + 10 = 70
-        self.assertEqual(got[4], 'quota: b would exceed 65% (now 30%, +30% committed, '
+        self.assertEqual(got[4], 'headroom: b would exceed 65% (now 30%, +30% committed, '
                                  '+10% this launch)')
 
     def test_running_sessions_hold_an_allowance(self):
@@ -142,7 +142,7 @@ class TestPlacement(unittest.TestCase):
         # 40 + 4 × 10 × 0.5 = 60; a spec more is 70 — over
         acct, why = p.pick_account('spec', 'Opus')
         self.assertIsNone(acct)
-        self.assertEqual(why, 'quota: a would exceed 65% (now 40%, +20% committed, '
+        self.assertEqual(why, 'headroom: a would exceed 65% (now 40%, +20% committed, '
                               '+10% this launch)')
         # a sonnet correction still fits: 64
         self.assertEqual(p.pick_account('correct', 'Sonnet')[0].name, 'a')
@@ -160,7 +160,7 @@ class TestPlacement(unittest.TestCase):
         self.assertIsNone(acct)
         # a quota wait, never a page: the reset is known
         self.assertNotIn('NEEDS OPERATOR', why)
-        self.assertTrue(why.startswith('quota: '), why)
+        self.assertTrue(why.startswith(('quota: ', 'headroom: ')), why)
 
     def test_a_past_limit_no_longer_stops(self):
         a = pool_mod.Account('a', cap=8)

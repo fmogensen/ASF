@@ -347,7 +347,7 @@ wave's own `five_h_pct` readings (`~/.ASF/state/quota-samples.jsonl`) against wh
 runs spent between two readings. An account takes a launch only while its reading, plus this
 wave's launches on it, plus `running_allowance` (default 0.5) of each running session's estimate,
 plus the launch stays under `stop.five_h`; else the row goes to another account or waits with
-`quota: <acct> would exceed 65% (now 51%, +10% committed, +10% this launch)`.
+`headroom: <acct> would exceed 65% (now 51%, +10% committed, +10% this launch)`.
 
 ```yaml
 quota_guards:

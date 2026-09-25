@@ -337,6 +337,28 @@ class TestPick(unittest.TestCase):
                       usage={'a': {'seven_d_pct': 99}, 'b': {'seven_d_pct': 92}})
         self.assertEqual(p.pick_account('spec', 'opus'), (None, pool_mod.REASON_COOLDOWN))
 
+    def test_seats_at_cap_beside_stopped_accounts_is_a_wait_not_a_page(self):
+        # a product's coder row, 2026-09-25: two accounts at 4/4 under their 5h guard, two stopped on the
+        # 7d window — the row waits for a seat, it does not page
+        acc = [pool_mod.Account(n, cap=4) for n in ('a', 'b', 'c', 'd')]
+        live = [{'account': n} for n in ('a', 'c') for _ in range(4)]
+        p = self.pool(acc, live=live,
+                      usage={'a': {'five_h_pct': 46, 'seven_d_pct': 38},
+                             'c': {'five_h_pct': 18, 'seven_d_pct': 1},
+                             'b': {'five_h_pct': 0, 'seven_d_pct': 100},
+                             'd': {'five_h_pct': 0, 'seven_d_pct': 99}})
+        acct, reason = p.pick_account('coder', 'sonnet')
+        self.assertIsNone(acct)
+        self.assertNotIn('NEEDS OPERATOR', reason)
+        self.assertEqual(reason, 'pool full — accounts at cap: a 4/4, c 4/4; the rest '
+                                 'stopped: b (seven_d_pct 100 ≥ 95), d (seven_d_pct 99 ≥ 95)')
+
+    def test_an_account_at_cap_and_stopped_still_pages(self):
+        a, b = pool_mod.Account('a', cap=1), pool_mod.Account('b', cap=1)
+        p = self.pool([a, b], live=[{'account': 'a'}],
+                      usage={'a': {'seven_d_pct': 99}, 'b': {'seven_d_pct': 99}})
+        self.assertEqual(p.pick_account('spec', 'opus'), (None, pool_mod.REASON_NO_QUOTA))
+
     def test_an_unreadable_account_is_stopped_not_cooling(self):
         a = pool_mod.Account('a', cap=3)
         p = self.pool([a], usage={'a': None})

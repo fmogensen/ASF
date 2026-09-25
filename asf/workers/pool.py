@@ -18,12 +18,15 @@ stopped account is never picked; the lowest load wins among free accounts (ties 
 among cooling accounts (eligible only at load 0) ties go to the name. Nothing launchable, but
 some account held only by the cooldown → ``quota cooldown — one job at a time``, an ordinary
 wait. Every candidate at or above its stop, or unreadable →
-``NEEDS OPERATOR: no account under quota — …`` as the row's reason, never an exception.
+``NEEDS OPERATOR: no account under quota — …`` as the row's reason, never an exception — but only
+when no account could take the row even with a free seat: while some account sits at its cap under
+its quota, the row waits for that seat (``pool full — accounts at cap: a 4/4, …; the rest stopped:
+…``), an ordinary wait.
 
 The 5h window is a budget (:mod:`asf.workers.headroom`): a candidate takes the launch only while
 its ``five_h_pct`` + this wave's launches on it + an allowance for its running sessions + this
 launch's estimate stay under the 5h stop (:meth:`Pool.headroom`). When no candidate fits, the
-reason names the one closest to fitting: ``quota: <acct> would exceed 65% (now 51%, +10%
+reason names the one closest to fitting: ``headroom: <acct> would exceed 65% (now 51%, +10%
 committed, +10% this launch)``. An account a session limit stopped is ``stop`` until its reset;
 when that is all that stops the pool, the reason is ``quota: <acct> stopped until 15:20 (session
 limit)`` — a wait for a known reset, not a page.
@@ -316,7 +319,7 @@ class Pool:
         total = now + committed + cost
         if total < guard:
             return True, '', total
-        return False, (f'quota: {account.name} would exceed {guard:g}% (now {now:g}%, '
+        return False, (f'headroom: {account.name} would exceed {guard:g}% (now {now:g}%, '
                        f'+{committed:g}% committed, +{cost:g}% this launch)'), total
 
     def load(self, account, model=None):
@@ -378,7 +381,32 @@ class Pool:
             first = min(limited, key=lambda a: self.limit(a))
             return None, (f'quota: {first.name} stopped until '
                           f'{headroom_mod.reset_label(self.limit(first))} (session limit)')
+        full = self.at_cap(cands, room, model)
+        if full:
+            return None, self.full_reason(full, room, model)
         return None, REASON_NO_QUOTA
+
+    def at_cap(self, cands, room, model):
+        """The candidates that are out of ``room`` only for their seats, not their quota: a row
+        that finds every account under its caps stopped still waits for one of these to free a
+        slot — an ordinary wait, not a page."""
+        names = {a.name for a in room}
+        return [a for a in cands if a.name not in names
+                and self.band(a)[0] in (quota_mod.FREE, quota_mod.COOLDOWN)]
+
+    def full_reason(self, full, stopped, model):
+        """``pool full — accounts at cap: a 4/4, b 4/4; the rest stopped: c (seven_d_pct 100 ≥
+        95)``: the seats the row waits on, and why the idle accounts cannot take it."""
+        def seats(a):
+            mcap = a.caps.get(model_key(model))
+            if mcap is not None and self.load(a, model) >= mcap and self.load(a) < a.cap:
+                return f'{a.name} {self.load(a, model)}/{mcap:g} {model_key(model)}'
+            return f'{a.name} {self.load(a)}/{a.cap}'
+        why = f'{REASON_FULL} — accounts at cap: ' + ', '.join(seats(a) for a in full)
+        if stopped:
+            why += '; the rest stopped: ' + ', '.join(f'{a.name} ({self.band(a)[1]})'
+                                                     for a in stopped)
+        return why
 
     def take(self, account, model, job='', product=None, kind=None):
         """One launch of this wave on ``account``: a seat, and its full estimate committed

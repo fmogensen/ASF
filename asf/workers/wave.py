@@ -8,7 +8,7 @@ A launch goes to an account only while its 5h window has room for it — the rea
 launches, an allowance for its running sessions and this launch's estimate stay under the guard
 (:meth:`asf.workers.pool.Pool.headroom`); a row that fits nowhere waits::
 
-    waits    spec-f-0031  F-0031  — quota: acct-a would exceed 65% (now 51%, +10% committed, +10% this launch)
+    waits    spec-f-0031  F-0031  — headroom: acct-a would exceed 65% (now 51%, +10% committed, +10% this launch)
 
 ``BUG → FIX`` rows go first (S1 before the rest), then the feeder's own order. A row whose job
 already has a live session *of this product* waits with ``already running``: the check is on
