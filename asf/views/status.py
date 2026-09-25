@@ -314,6 +314,13 @@ def merge_cell(product):
     return 'auto' if conv is not None and conv.merge_auto() else 'manual'
 
 
+def value_cell(root, product):
+    """``Value``: Features on prod and landed over 7 days, median lead time, $ per feature all-in,
+    repair sessions per feature (:mod:`asf.views.scorecard`; the full table is ``asf scorecard``)."""
+    from asf.views.scorecard import value_cell as cell
+    return cell(root, product)
+
+
 def render(root, product, cfg=None):
     cfg = env.load_config() if cfg is None else cfg
     now = datetime.datetime.now().strftime('%H:%M')
@@ -326,6 +333,7 @@ def render(root, product, cfg=None):
                        ('Agents', lambda: agents_cell(product)),
                        ('Merge', lambda: merge_cell(product)),
                        ('Capacity', lambda: capacity_cell(cfg, product)),
+                       ('Value', lambda: value_cell(root, product)),
                        ('Record', lambda: record_cell(root)),
                        ('Ready to launch', lambda: ready_cell(root, product)),
                        ('Decisions', lambda: decisions_cell(root, product)),
