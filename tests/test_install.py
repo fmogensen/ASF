@@ -17,7 +17,7 @@ import unittest
 from unittest import mock
 
 import asf
-from asf import conventions, env, hooks, init, schema, upgrade
+from asf import console_perms, conventions, env, hooks, init, schema, upgrade
 from tests.gitfixture import executable_asf
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -170,7 +170,8 @@ class PackageTest(unittest.TestCase):
                          (['schema-migrate', '--all', '--drain'], schema.cmd_schema_migrate),
                          (['upgrade'], upgrade.cmd_upgrade),
                          (['hooks', 'install', '--product', 'p'], hooks.cmd_hooks),
-                         (['hook', 'r0001'], hooks.cmd_hook)):
+                         (['hook', 'r0001'], hooks.cmd_hook),
+                         (['console-permissions', 'offer'], console_perms.cmd_console_permissions)):
             self.assertIs(p.parse_args(argv).run, fn)
 
 
@@ -754,6 +755,98 @@ class HooksTest(HomeCase):
         self.assertIsNone(hooks.check_script('../x', 'sample'))
 
 
+class ConsolePermissionsTest(HomeCase):
+    """B-0131: `asf console-permissions offer` shows exactly the documented allow/deny list, and
+    `install` writes it — idempotently, into the scope the operator picked — without touching
+    unrelated keys."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo = os.path.join(self.tmp, 'repo')
+        os.makedirs(self.repo)
+        self.write(env.product_path('sample'), f'repo_dir: {self.repo}\nmain: trunk\n')
+
+    def test_allow_rules_are_exactly_the_documented_ones(self):
+        product = env.load_product('sample')
+        # the five fixed rules from the card, verbatim, plus one push rule per lane branch
+        # prefix this product declares (never a literal branch name)
+        self.assertEqual(console_perms.allow_rules(product), (
+            'Bash(asf:*)',
+            'Bash(bash tools/install.sh:*)',
+            'Bash(launchctl bootout gui/*/asf.*)',
+            'Bash(launchctl bootstrap gui/*)',
+            'Bash(git worktree:*)',
+        ) + tuple(f'Bash(git push origin {p}*)' for p in product.conventions.all_prefixes()))
+        self.assertEqual(console_perms.deny_rules(product),
+                         ('Bash(git push --force* origin trunk)',))
+
+    def test_offer_prints_every_rule_and_writes_nothing(self):
+        product = env.load_product('sample')
+        text = console_perms.offer_text(product)
+        for rule in console_perms.allow_rules(product):
+            self.assertIn(rule, text)
+        for rule in console_perms.deny_rules(product):
+            self.assertIn(rule, text)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, 'home', '.claude', 'settings.json')))
+        self.assertFalse(os.path.exists(os.path.join(self.repo, '.claude', 'settings.json')))
+
+    def test_install_writes_the_user_scope_by_default_and_is_idempotent(self):
+        fake_home = os.path.join(self.tmp, 'fake-home')
+        os.makedirs(fake_home)
+        with mock.patch.dict(os.environ, {'HOME': fake_home}):
+            rc = console_perms.cmd_console_permissions(
+                argparse.Namespace(console_permissions_command='install', product='sample',
+                                   scope='user'))
+            self.assertEqual(rc, 0)
+            written = console_perms.settings_paths(env.load_product('sample'))[0]
+        self.assertEqual(written, os.path.join(fake_home, '.claude', 'settings.json'))
+        with open(written) as f:
+            data = json.load(f)
+        product = env.load_product('sample')
+        self.assertEqual(set(data['permissions']['allow']), set(console_perms.allow_rules(product)))
+        self.assertEqual(data['permissions']['deny'], list(console_perms.deny_rules(product)))
+        with open(written, 'rb') as f:
+            before = f.read()
+        with mock.patch.dict(os.environ, {'HOME': fake_home}):
+            rc = console_perms.cmd_console_permissions(
+                argparse.Namespace(console_permissions_command='install', product='sample',
+                                   scope='user'))
+        self.assertEqual(rc, 0)
+        with open(written, 'rb') as f:
+            self.assertEqual(f.read(), before)
+
+    def test_install_repo_scope_keeps_unrelated_keys(self):
+        settings = os.path.join(self.repo, '.claude', 'settings.json')
+        self.write(settings, json.dumps({'permissions': {'allow': ['Bash(ls)']}}))
+        rc = console_perms.cmd_console_permissions(
+            argparse.Namespace(console_permissions_command='install', product='sample', scope='repo'))
+        self.assertEqual(rc, 0)
+        with open(settings) as f:
+            data = json.load(f)
+        self.assertIn('Bash(ls)', data['permissions']['allow'])
+        for rule in console_perms.allow_rules(env.load_product('sample')):
+            self.assertIn(rule, data['permissions']['allow'])
+        before = data
+        rc = console_perms.cmd_console_permissions(
+            argparse.Namespace(console_permissions_command='install', product='sample', scope='repo'))
+        self.assertEqual(rc, 0)
+        with open(settings) as f:
+            self.assertEqual(json.load(f), before)
+
+    def test_repo_scope_without_a_repo_dir_is_a_needs_operator_refusal(self):
+        self.write(env.product_path('bare'), 'repo_slug: x/y\n')
+        rc = console_perms.cmd_console_permissions(
+            argparse.Namespace(console_permissions_command='install', product='bare', scope='repo'))
+        self.assertEqual(rc, 2)
+
+    def test_doctor_check_names_missing_rules_by_name(self):
+        product = env.load_product('sample')
+        ok, detail = console_perms.check_doctor(product, home=os.path.join(self.tmp, 'no-such-home'))
+        self.assertFalse(ok)
+        self.assertIn('Bash(asf:*)', detail)
+        self.assertIn('Bash(git push --force* origin trunk)', detail)
+
+
 class GitHookTests(unittest.TestCase):
     """T-0025 (F-0075 Task 8353, ``docs/plans/f-0075.md``): the git hooks ``asf hooks install``
     writes for ``asf redact``, and that an installed hook really refuses a commit or a push. See
@@ -1239,6 +1332,7 @@ class InstallScriptTest(unittest.TestCase):
                     'case "$1" in\n'
                     '  --version) echo "asf 0.0.0 (stub)";;\n'
                     f'  hooks) echo "NEEDS OPERATOR: pre-push is not asf\'s" >&2; exit {hooks_rc};;\n'
+                    '  console-permissions) echo "console-permissions: allow Bash(asf:*)";;\n'
                     'esac\n'
                     'exit 0\n'),
         }
@@ -1257,7 +1351,8 @@ class InstallScriptTest(unittest.TestCase):
 
     def test_a_failed_hooks_step_still_runs_the_scheduler_and_the_doctor(self):
         r, calls = self._run(hooks_rc=2)
-        self.assertEqual(calls, ['--version', 'hooks', 'scheduler', 'scheduler', 'doctor'], r.stderr)
+        self.assertEqual(calls, ['--version', 'hooks', 'scheduler', 'scheduler', 'doctor',
+                                 'console-permissions'], r.stderr)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn('install: FAILED step 3: asf hooks install --product demo (exit 2)', r.stderr)
         self.assertNotIn('FAILED step 4', r.stderr)
@@ -1265,7 +1360,8 @@ class InstallScriptTest(unittest.TestCase):
 
     def test_every_step_green_exits_zero(self):
         r, calls = self._run(hooks_rc=0)
-        self.assertEqual(calls, ['--version', 'hooks', 'scheduler', 'scheduler', 'doctor'], r.stderr)
+        self.assertEqual(calls, ['--version', 'hooks', 'scheduler', 'scheduler', 'doctor',
+                                 'console-permissions'], r.stderr)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn('FAILED', r.stderr)
 
@@ -1276,7 +1372,7 @@ class InstallScriptTest(unittest.TestCase):
         self.assertEqual(calls, ['--version', 'hooks',
                                  'scheduler', 'scheduler',   # install, then the failing status
                                  'scheduler', 'scheduler',   # the retried install, then status
-                                 'doctor'], r.stderr)
+                                 'doctor', 'console-permissions'], r.stderr)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn('FAILED', r.stderr)
         self.assertIn('retrying the bootstrap once', r.stdout + r.stderr)
@@ -1286,13 +1382,19 @@ class InstallScriptTest(unittest.TestCase):
         loudly, naming the missing label — not just a bare non-zero exit."""
         r, calls = self._run(status_results=[('1', self.NOT_LOADED)])
         self.assertEqual(calls, ['--version', 'hooks', 'scheduler', 'scheduler',
-                                 'scheduler', 'scheduler', 'doctor'], r.stderr)
+                                 'scheduler', 'scheduler', 'doctor', 'console-permissions'], r.stderr)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn('install: FAILED step 4: asf scheduler install --product demo (exit 1)',
                       r.stderr)
         self.assertIn('install: NEEDS OPERATOR: clock(s) still not loaded after retrying the '
                       'bootstrap: asf.demo.record-health-wave-prs-harvest', r.stderr)
-        self.assertIn('/plugin install asf@asf', r.stdout)  # step 5 still ran
+        self.assertIn('/plugin install asf@asf', r.stdout)  # step 6 still ran
+
+    def test_step_6_offers_the_console_permissions_and_writes_nothing(self):
+        r, calls = self._run(hooks_rc=0)
+        self.assertIn('console-permissions: allow Bash(asf:*)', r.stdout)
+        self.assertIn('run one to write it: asf console-permissions install --product demo '
+                      '--scope user|repo', r.stdout)
 
 
 if __name__ == '__main__':

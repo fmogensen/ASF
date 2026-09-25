@@ -198,12 +198,12 @@ class CheckConventionsScriptTests(unittest.TestCase):
             self.assertIn(pattern, lines)
         self.assertIn("['\"]" + re.escape('### Task') + '\\b', lines)
 
-    def test_only_the_three_adapters_are_excluded(self):
+    def test_only_the_four_adapters_are_excluded(self):
         with open(os.path.join(REPO_ROOT, 'tools', 'check_conventions.sh'), encoding='utf-8') as f:
             text = f.read()
         block = re.search(r'excludes=\((.*?)\)', text, re.S).group(1)
         entries = re.findall(r'"([^"]+)"', block)
-        self.assertEqual(len(entries), 3, entries)
+        self.assertEqual(len(entries), 4, entries)
         for name in ('evidence.py', 'match.py', 'ingest.py', 'stale.py'):
             self.assertNotIn(name, block)
 

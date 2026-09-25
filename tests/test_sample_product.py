@@ -87,6 +87,11 @@ class SampleProductTest(unittest.TestCase):
                                       PATH=cls._path_with_offline_gh(os.path.join(cls.tmp, 'bin'))),
                                  home=cls.tmp)
         cls.init = cls.asf('init', '--product', 'sample')
+        # B-0131: a real install ends with the operator writing the console's own allow list —
+        # this fixture stands in for that operator, so `doctor`'s console-permissions row is
+        # green the same way a real, fully-installed product's is
+        cls.console_permissions = cls.asf('console-permissions', 'install', '--product', 'sample',
+                                          '--scope', 'user')
         cls.before = cls.asf('next', '--product', 'sample', '--json')
         cls.tick = cls.asf('tick', '--product', 'sample')
 

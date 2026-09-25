@@ -31,6 +31,12 @@ one is missing (its launches are refused). An eleventh,
 **clock code** (:func:`check_clock_code`, informational), names the snapshot sha the clock last
 ticked from when the package runs from a checkout (:mod:`asf.snapshot`).
 
+A twelfth row, **console permissions** (:func:`asf.console_perms.check_doctor`, B-0131), is red
+when the operator's own console — not a worker account's — would still hit a permission prompt on
+``asf``, the installer, a ``launchctl`` pause/resume, a lane branch push or ``git worktree``
+cleanup: neither the operator's user-level runtime settings nor the product repo's carry every
+rule ``asf console-permissions offer`` shows.
+
 The **scheduler** row is red while a pre-ASF job the operator config names
 (``scheduler.launchd_label``, ``scheduler.legacy_cron``) is still loaded or in the crontab: two
 factories would be ticking one product.
@@ -727,6 +733,9 @@ def run(product_name):
     rows.append(('redaction-hooks', True, ok, detail))
     ok, detail = check_approvals_hook(cfg, product)
     rows.append(('approvals-hook', True, ok, detail))
+    from asf import console_perms
+    ok, detail = console_perms.check_doctor(product)
+    rows.append(('console permissions', True, ok, detail))
     ok, detail = check_worker_env(cfg)
     rows.append(('worker env', True, ok, detail))
     ok, detail = check_worker_secrets(cfg, product)
