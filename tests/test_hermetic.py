@@ -235,6 +235,16 @@ class OneBuilderTests(unittest.TestCase):
             self.assertEqual(got['identity'], [], entry)
             self.assertNotEqual(os.path.realpath(got['home']),
                                 os.path.realpath(os.path.expanduser('~/.ASF')), entry)
+        # Both entries above import tests/__init__.py first — Python cannot reach
+        # tests.test_00_home without it — so the package guard masks its twin's, and this loop
+        # alone stays green with tests/test_00_home.py's own strip deleted. `discover -s tests`
+        # is the mode that twin exists for: it loads the module top-level (the ids it prints are
+        # `test_00_home.HomeIsHermetic…`, not `tests.test_00_home…`) and never runs the package.
+        # HomeIsHermetic asserts the same three things, so running it here pins the other twin.
+        out = subprocess.run(['python3', '-m', 'unittest', 'discover', '-s', 'tests',
+                              '-p', 'test_00_home.py'], cwd=root, env=base,
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
 
 
 if __name__ == '__main__':
