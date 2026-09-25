@@ -801,6 +801,11 @@ def _external_ci(product):
 #: The hook's own log — the whole traceback of an internal failure, which never belongs in the
 #: session's transcript: the session gets :data:`HOOK_ERROR_LINE`, the operator gets this (B-0125).
 HOOK_ERROR_LOG = 'approvals-hook.log'
+#: The size that log is rotated to ``.1`` at. The hook runs on every ``Bash``, ``Write``,
+#: ``Edit``, ``MultiEdit`` and ``NotebookEdit`` call of every session, so a systematic break
+#: writes a traceback per tool call: uncapped, it fills the disk. Same cap and same single-
+#: generation rotation as the red gate's log (:data:`asf.harvest.harvest.GATE_RED_MAX_BYTES`).
+HOOK_ERROR_LOG_MAX_BYTES = 4 << 20
 
 #: What a session is told when the hook broke for its own reasons rather than refusing. Distinct
 #: from every refusal's wording on purpose: a session that reads a crash as a policy refusal
@@ -831,7 +836,10 @@ def record_hook_error(product, job, exc):
 
 
 def _log_traceback(job, exc):
-    with open(hook_error_log_path(), 'a', encoding='utf-8') as f:
+    path = hook_error_log_path()
+    if os.path.exists(path) and os.path.getsize(path) > HOOK_ERROR_LOG_MAX_BYTES:
+        os.replace(path, path + '.1')               # one generation kept, as the gate's log does
+    with open(path, 'a', encoding='utf-8') as f:
         f.write(f'--- {_now_iso()} job={job or "-"}\n')
         f.write(''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
 
@@ -851,7 +859,7 @@ def run_hook(stdin_text, environ, out=sys.stderr, product=None):
         return _enforce(stdin_text, environ, out, product)
     except Exception as e:                          # fail closed (D7), but never as a refusal
         record_hook_error(product or environ.get('ASF_PRODUCT'), environ['ASF_JOB'], e)
-        print(HOOK_ERROR_LINE.format(why=e or type(e).__name__), file=out)
+        print(HOOK_ERROR_LINE.format(why=str(e) or type(e).__name__), file=out)
         return 2
 
 
