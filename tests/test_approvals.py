@@ -409,11 +409,29 @@ class HookTest(unittest.TestCase):
 
         self.assertEqual(self.call('Bash', {'command': 'ls'}), (0, ''))
 
-    def test_classifier_exception_fails_closed(self):
+    def test_classifier_exception_is_an_error_not_a_refusal(self):
+        """B-0125: a crash inside the hook read as a deliberate refusal cost botsleon's B-1372
+        adjudicator a turn on a read-only ``ls``. It still fails closed (rc 2), but it says it is
+        the hook that broke and the call is worth retrying — never the refusal's wording."""
         with mock.patch.object(approvals, 'classify', side_effect=RuntimeError('boom')):
             rc, out = self.push()
-        self.assertEqual(rc, 2, out)
-        self.assertEqual(out, 'approvals hook failed: boom — refused\n')
+        self.assertEqual(rc, 2, out)                 # fail closed: an error is never an allow
+        self.assertEqual(out, 'approvals hook error: boom; not a refusal — retry\n')
+        self.assertNotIn('REFUSED', out)
+        self.assertNotIn('refused', out)
+
+    def test_hook_error_logs_its_traceback_and_records_it(self):
+        with mock.patch.object(approvals, 'classify', side_effect=RuntimeError('boom')):
+            self.push()
+        with open(approvals.hook_error_log_path(), encoding='utf-8') as f:
+            log = f.read()
+        self.assertIn('RuntimeError: boom', log)
+        self.assertIn('in _enforce', log)            # the traceback, not just the message
+        self.assertIn('classify(', log)
+        self.assertIn(self.JOB, log)
+        errors = [e for e in self.ledger() if e['event'] == 'hook-error']
+        self.assertEqual([(e['job'], e['detail']) for e in errors], [(self.JOB, 'boom')])
+        self.assertEqual(approvals.open_holds('demo'), [])   # an error opens no hold
 
     def test_install_writes_the_entry_into_every_worker_account(self):
         acct_a = os.path.join(self.tmp, 'accounts', 'a')
@@ -735,6 +753,25 @@ class TickRaiseTest(TickTestCase):
                                       ' none parks its item; asf approvals list'])
         self.assertEqual(held, {})
         self.assertEqual(ctx.counts['refusals'], 2)  # the tick digest's number
+
+    def test_repeated_hook_errors_surface_once_in_the_tick_log(self):
+        """B-0125: a hook erroring under load is invisible — each session sees one line and
+        retries. The tick says it once per job, and only once per run of errors."""
+        for _ in range(3):
+            approvals.record_hook_error(self.product, 'code-B-1372', RuntimeError('boom'))
+        approvals.record_hook_error(self.product, 'code-F-0031', RuntimeError('boom'))
+        self.raise_holds()
+        self.assertEqual(self.lines, ['approvals hook erroring: 3 times in code-B-1372'])
+
+        self.lines = []
+        self.raise_holds()                           # said once: a second tick repeats nothing
+        self.assertEqual(self.lines, [])
+
+        for _ in range(2):
+            approvals.record_hook_error(self.product, 'code-B-1372', RuntimeError('boom'))
+        self.lines = []
+        self.raise_holds()                           # a fresh run of errors is said again
+        self.assertEqual(self.lines, ['approvals hook erroring: 2 times in code-B-1372'])
 
     def write_index(self, ctx, items):
         with open(os.path.join(ctx.record_root(), 'index.json'), 'w') as f:

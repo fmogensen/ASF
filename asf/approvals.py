@@ -28,6 +28,7 @@ import json
 import os
 import re
 import sys
+import traceback
 
 from asf import amendable, env, hooks
 
@@ -797,18 +798,60 @@ def _external_ci(product):
     return lane.external_ci(product)
 
 
+#: The hook's own log — the whole traceback of an internal failure, which never belongs in the
+#: session's transcript: the session gets :data:`HOOK_ERROR_LINE`, the operator gets this (B-0125).
+HOOK_ERROR_LOG = 'approvals-hook.log'
+
+#: What a session is told when the hook broke for its own reasons rather than refusing. Distinct
+#: from every refusal's wording on purpose: a session that reads a crash as a policy refusal
+#: wastes its turn and records a false hold (B-0125). Still rc 2 — an error is never an allow.
+HOOK_ERROR_LINE = 'approvals hook error: {why}; not a refusal — retry'
+
+
+def hook_error_log_path():
+    return os.path.join(env.log_dir(), HOOK_ERROR_LOG)
+
+
+def record_hook_error(product, job, exc):
+    """Put one hook failure where the operator and the tick can see it: the traceback in the
+    hook's own log (:func:`hook_error_log_path`), one ``hook-error`` line in the ledger so
+    :func:`raise_hook_errors` can count it. Carries no ``hold`` key, so it opens no hold and
+    parks nothing — the hook broke, the session did nothing wrong.
+
+    Never raises: the failure being recorded is often the state directory itself, and a logger
+    that throws would turn one error into two."""
+    for write in (lambda: _log_traceback(job, exc),
+                  lambda: append(product, {'event': 'hook-error', 'job': job,
+                                           'detail': str(exc)[:200] or type(exc).__name__,
+                                           'error': type(exc).__name__, 'ts': _now_iso()})):
+        try:
+            write()
+        except Exception:                           # noqa: BLE001 — see the docstring
+            pass
+
+
+def _log_traceback(job, exc):
+    with open(hook_error_log_path(), 'a', encoding='utf-8') as f:
+        f.write(f'--- {_now_iso()} job={job or "-"}\n')
+        f.write(''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+
+
 def run_hook(stdin_text, environ, out=sys.stderr, product=None):
     """``asf hook approvals`` (§2.3): the rc the runtime reads — 0 lets the call through, 2 blocks
     it and feeds ``out`` back to the model.
 
-    ``product`` defaults to ``environ['ASF_PRODUCT']``. Every exception from the parse on refuses
-    (D7): a boundary that opens when it breaks is not one."""
-    if not (environ or {}).get('ASF_JOB'):
+    ``product`` defaults to ``environ['ASF_PRODUCT']``. Every exception from the parse on still
+    blocks the call (D7) — a boundary that opens when it breaks is not one — but says it is the
+    hook that broke, not the policy (:data:`HOOK_ERROR_LINE`, B-0125), and records itself for
+    the operator (:func:`record_hook_error`)."""
+    environ = environ or {}
+    if not environ.get('ASF_JOB'):
         return 0                                    # not a factory session (D4)
     try:
         return _enforce(stdin_text, environ, out, product)
-    except Exception as e:                          # fail closed (D7)
-        print(f'approvals hook failed: {e or type(e).__name__} — refused', file=out)
+    except Exception as e:                          # fail closed (D7), but never as a refusal
+        record_hook_error(product or environ.get('ASF_PRODUCT'), environ['ASF_JOB'], e)
+        print(HOOK_ERROR_LINE.format(why=e or type(e).__name__), file=out)
         return 2
 
 
@@ -901,6 +944,28 @@ def _record_items(ctx):
     return index_reader.load(root)[0]
 
 
+def raise_hook_errors(product, out):
+    """One ``approvals hook erroring: N times in <job>`` line per job whose hook has broken for
+    its own reasons more than once since the tick last said so (B-0125). A single error is the
+    session's own business — it was told to retry and did; a run of them is an operator's.
+
+    The count is marked announced in the ledger the way a hold's is (§4), so however many ticks
+    see the same run of errors, it is said once and only a fresh run is said again."""
+    counts = {}
+    for rec in read(product):
+        if rec.get('event') == 'hook-error':
+            job = rec.get('job') or '?'
+            counts[job] = counts.get(job, 0) + 1
+        elif rec.get('event') == 'hook-errors-announced':
+            counts.pop(rec.get('job') or '?', None)
+    for job, n in counts.items():
+        if n < 2:                                   # not yet a run: leave it counting
+            continue
+        out(f'approvals hook erroring: {n} times in {job}')
+        append(product, {'event': 'hook-errors-announced', 'job': job, 'count': n,
+                         'ts': _now_iso()})
+
+
 def close_landed(product, items, out=None):
     """Close ``done`` every open hold whose item the record calls Resolved or Closed: the work
     landed another way, and the hold is no one's question any more (asf 2026-09-25: eight
@@ -933,9 +998,12 @@ def raise_holds(ctx, out):
     many ticks see it — the fold's ``first`` never moves, so one marker is one announcement,
     and a repeat refusal bumps ``count`` without raising a second event. Every open hook refusal
     also counts into ``ctx.counts['refusals']`` — the tick digest's number, not just its line.
+    A hook that has been *erroring* rather than refusing says so too
+    (:func:`raise_hook_errors`) — that is a broken guard, not a held item.
     """
     product = ctx.product
     close_landed(product, _record_items(ctx), out)
+    raise_hook_errors(product, out)
     open_ = open_holds(product)                      # oldest first
 
     refused = [e for e in open_ if session_refusal(e['class'])]
