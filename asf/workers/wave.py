@@ -128,7 +128,7 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
             if acct is not None:
                 rt = runtime
                 if lane == 'cloud':
-                    rt = cloud_runtime or cloud_mod.CloudRuntime(cloud)
+                    rt = cloud_runtime or cloud_mod.lane_runtime(cloud, product)
                 try:
                     rec = spawn_fn(product, row, acct, brief_fn(row), runtime=rt, cfg=cfg)
                 except spawn_mod.WorktreeBusy as e:
@@ -145,8 +145,8 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
                               kind=row.kind, lane=lane if lane == 'cloud' else None)
                     running.add((product.name, row.job))
                     launched.append((row, rec))
-                    where = (f"cloud {rec.get('cloud_url') or rec.get('cloud_session') or 'launching'}"
-                             if lane == 'cloud' else f"pid {rec.get('pid')}")
+                    url = rec.get('cloud_url') or rec.get('actions_run_name') or 'dispatched'
+                    where = f'cloud {url}' if lane == 'cloud' else f"pid {rec.get('pid')}"
                     out(f"launched {row.job:<24} {row.item:<10} → {acct.name} "
                         f"({rec.get('model')}) {where}")
                     continue
