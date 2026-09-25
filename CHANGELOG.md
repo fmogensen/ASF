@@ -2,6 +2,37 @@
 
 One entry per released version, newest first.
 
+## v0.1.9 — 2026-09-25
+
+### Features landed
+
+- F-0076 Session identity: every asf worker is distinguishable from every other, and from sessions that are not asf's
+- F-0090 Adjudication is the last resort: the cheap causes are ruled out before Opus is spent
+
+### Bugs fixed
+
+- B-0055 CI red on main since 8c25fa7: the hermetic step exports ASF_PRODUCT into a suite whose home has no such product
+- B-0114 native landing: a merged spec/plan PR marks its Feature landed/Resolved, so no coder ever launches
+
+### In progress
+
+- F-0007 P1 — the 0.1 specification
+- F-0047 The factory's self-improvement loop: measure, diagnose, act, verify, revert, reflect
+- F-0061 Hooks as rule enforcement inside every worker session
+- F-0092 An item has a budget: three sessions or $10, then it stops and says why
+- F-0097 asf status says nothing about Bugs and Features: add a Bugs row and a Features row
+
+### Improvements and hotfixes
+
+- fix(harvest): a red trunk holds PR landing, never blames the PR
+- feat(approvals): an external-CI product's full suite is refused in the hook
+- fix(briefs): a coder on an external-CI product leaves the Gate to remote CI
+- fix(quota): the wave places launches by 5h headroom; a session limit is quota-exhausted, not a failure
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.9"`
+
 ## v0.1.8 — 2026-09-25
 
 ### Features landed
