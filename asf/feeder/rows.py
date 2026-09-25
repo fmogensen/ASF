@@ -448,6 +448,12 @@ def correction_rows(items, product, busy, corrections):
                                       f"or close, or a new push", waits_on='merge'))
                 continue
         if rounds >= CORRECTION_ROUNDS and c.get('kind') != NAMING:
+            if c.get('settled'):  # B-0128: already ruled at this hold — no second adjudicate
+                out.append(Row(tier=tier, kind=FIX_CORRECT, item_id=iid, feature_id=fid,
+                               action=WAITS_MERGE, brief_kind='correct', branch=branch,
+                               reason=f"adjudicated ({c.get('kind')}): waits on the PR to merge "
+                                      f"or close, or a new push", waits_on='merge'))
+                continue
             out.append(Row(tier=tier, kind=STALEMATE, item_id=iid, feature_id=fid, action=LAUNCH,
                            brief_kind='adjudicate', branch=branch,
                            reason=f"held {rounds} times ({c.get('kind')}): adjudicate, not another correction"))
