@@ -1323,8 +1323,8 @@ def squash_subject(lane, f, number):
     even though the lane's own better subject is further down.
 
     Not every merge takes this: a merge queue composes its own subject
-    (:meth:`GhHost.merge` returns before this on ``--auto``), and ``--rebase`` writes no commit
-    of its own (:data:`SUBJECT_METHODS`). On a queue repo a document lane is recognised by its
+    (:meth:`GitHubHost.merge` ignores it on ``--auto``, so it is computed here and dropped there),
+    and ``--rebase`` writes no commit of its own (:data:`SUBJECT_METHODS`). On a queue repo a document lane is recognised by its
     paths instead (``asf.evidence.evidence.docs_only``), which holds as long as it touches only
     documents."""
     from asf.evidence.evidence import DOC_LANE_KINDS, DOC_LANE_SUBJECT
