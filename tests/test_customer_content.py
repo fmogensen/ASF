@@ -176,6 +176,16 @@ class DeployRefusal(unittest.TestCase):
         self.assertIn('site/legal/terms.md:4', refused[0])
         scan.assert_called_with('/repo', self.GREEN, product.conventions)
 
+    def test_the_view_says_refused_not_the_next_tick_dispatches(self):
+        # the Prod row promised a deploy for an hour that every tick refused (2026-09-25)
+        product = self._product(CONV)
+        with mock.patch.object(cc, 'tree_hits', return_value=[('site/legal/terms.md', 4, '[legal:')]):
+            text = deploy.line(product, sh=self._sh())
+        self.assertIn('DISPATCH REFUSED', text)
+        self.assertNotIn('next tick dispatches', text)
+        with mock.patch.object(cc, 'tree_hits', return_value=[]):
+            self.assertIn('next tick dispatches', deploy.line(product, sh=self._sh()))
+
     def test_a_clean_tree_dispatches_and_an_unreadable_one_does_not(self):
         sent, _, runs, _ = self._tick(self._product(CONV), [])
         self.assertEqual(sent, {'prod': self.GREEN})
