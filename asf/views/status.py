@@ -4,7 +4,8 @@ Every row is filled from what exists, or says which key would fill it —
 ``— (not configured: <key>)`` — never a bare ``—``:
 
 * **Version** — the ``asf`` running (``asf --version``) and asf's newest release tag, with its age;
-* **Runners** — the CI provider's runner pool (``ci.runner_org``, read with ``gh``);
+* **Runners** — the CI provider's runner pool (``ci.runner_org``), busy per class of ``ci.pool``,
+  from the same live read and count as the CI queue's ``free`` (:mod:`asf.ci_queue`);
 * **Prod** — how far ``main`` is ahead of the last successful ``deploy_sha.workflow`` run, and
   what prod waits on (:func:`asf.harvest.deploy.lines`: a red trunk, a running or failed deploy,
   a green sha waiting in ``manual`` mode), then each managed dev environment's own line;
@@ -75,22 +76,26 @@ def _ci(product):
     return product.ci if isinstance(product.ci, dict) else {'provider': product.ci}
 
 
-def runners_cell(product):
+def runners_cell(product, source=None):
+    """The runner pool, read live once through the CI queue's own source
+    (:class:`asf.ci_queue.GitHubSource`, the product's ``gh`` login) and counted per class by
+    the same function the queue's ``free`` is (:func:`asf.ci_queue.runners_text`)."""
     ci = _ci(product)
     if str(ci.get('provider')).lower() == 'none':
         return not_configured('ci.provider (none)')
+    from asf import ci_pool, ci_queue
+    pool = ci_pool.load_pool(product)
     org = ci.get('runner_org')
-    if not org:
+    if not org and not pool:
         return not_configured('ci.runner_org')
-    out = _sh(['gh', 'api', f'/orgs/{org}/actions/runners', '--paginate', '-q',
-               '.runners[] | "\\(.status) \\(.busy)"'])
-    lines = [ln for ln in out.splitlines() if ln]
-    if not lines:
-        return f"? (no runners readable for {org})"
-    on = sum(1 for ln in lines if ln.startswith('online'))
-    busy = sum(1 for ln in lines if ln.startswith('online true'))
-    off = len(lines) - on
-    return f"{on} online, {busy} busy, {on - busy} idle" + (f", {off} offline" if off else "")
+    src = source or ci_queue.GitHubSource(product)
+    try:
+        runners = src.runners()
+    except ci_pool.BackendError:
+        runners = []
+    if not runners:
+        return f"? (no runners readable for {org or product.repo_slug})"
+    return ci_queue.runners_text(runners, pool)
 
 
 #: The one documented key the Prod row reads: the deploy workflow whose newest success is prod.

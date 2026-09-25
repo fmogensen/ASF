@@ -403,19 +403,47 @@ def needs_from_history(runs, pool):
     return out
 
 
-def free_by_class(runners, pool):
-    """``{class: free slots}`` for every class the pool declares: online, not busy runners."""
+def load_by_class(runners, pool):
+    """``{class: {'online': slots, 'busy': slots}}`` for every class the pool declares, from one
+    runner read. A busy runner holds all its slots. The one count :func:`free_by_class` (the
+    queue) and the status view's Runners row both read, so the two never disagree."""
     by_name = {e.runner: e for e in pool}
     roles = set(ci_pool.roles(pool))
-    out = {class_key(e): 0 for e in pool}
+    out = {class_key(e): {'online': 0, 'busy': 0} for e in pool}
     for r in runners:
-        if not r.online or r.busy:
+        if not r.online:
             continue
         e = by_name.get(r.name)
         key = class_key(e) if e else _label_key(r.labels, roles)
         if key in out:
-            out[key] += e.slots if e else 1
+            n = e.slots if e else 1
+            out[key]['online'] += n
+            if r.busy:
+                out[key]['busy'] += n
     return out
+
+
+def free_by_class(runners, pool):
+    """``{class: free slots}`` for every class the pool declares: online, not busy runners."""
+    return {c: v['online'] - v['busy'] for c, v in load_by_class(runners, pool).items()}
+
+
+def runners_text(runners, pool):
+    """The status view's Runners row from one runner read: ``19 online · heavy 12/12 busy ·
+    light 4/7 busy`` per class of the pool, a plain ``n online, n busy, n idle`` total when the
+    product declares no classes; ``, n offline`` when any are."""
+    on = [r for r in runners if r.online]
+    off = len(runners) - len(on)
+    tail = f", {off} offline" if off else ""
+    load = load_by_class(runners, pool)
+    if not load:
+        busy = sum(1 for r in on if r.busy)
+        return f"{len(on)} online, {busy} busy, {len(on) - busy} idle" + tail
+    total = sum(v['online'] for v in load.values())
+    total += sum(1 for r in on if r.name not in {e.runner for e in pool}
+                 and _label_key(r.labels, set(ci_pool.roles(pool))) not in load)
+    parts = [f"{c} {v['busy']}/{v['online']} busy" for c, v in sorted(load.items())]
+    return ' · '.join([f"{total} online", *parts]) + tail
 
 
 # ---- the queue file ---------------------------------------------------------------------------
