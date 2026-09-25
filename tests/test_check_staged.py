@@ -108,15 +108,40 @@ class StagedCheckTests(unittest.TestCase):
                            capture_output=True, text=True)
         self.assertNotEqual(c.returncode, 0, c.stdout + c.stderr)
 
-    def test_a_staged_change_that_leaves_the_index_stale_is_refused(self):
-        with open(os.path.join(self.root, 'features', 'F-0001.md')) as f:
-            text = f.read()
-        with open(os.path.join(self.root, 'features', 'F-0001.md'), 'w') as f:
-            f.write(text.replace('title: Free plan', 'title: Paid plan'))
+    def test_a_staged_change_that_leaves_the_index_stale_stages_the_derived_index(self):
+        # a retitled decision: no parent's Children, no Backlinks — only index.json derives it
+        text = self.read('decisions/D-0001.md')
+        self.write('decisions/D-0001.md', text.replace('title: A decision', 'title: Paid plan'))
+        self.git(self.root, 'add', 'decisions/D-0001.md')
+        r = self.asf('check', '--staged')
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertNotIn('index.json is stale', r.stdout)
+        self.assertIn('index.json: regenerated', r.stdout)
+        self.assertIn('Paid plan', self.git(self.root, 'show', ':index.json'))
+        self.assertIn('Paid plan', self.read('index.json'))   # the working tree follows
+
+    def test_a_hand_edit_commits_with_its_index_regenerated(self):
+        text = self.read('decisions/D-0001.md')
+        self.write('decisions/D-0001.md', text.replace('title: A decision', 'title: Paid plan'))
+        self.git(self.root, 'add', 'decisions/D-0001.md')
+        c = subprocess.run(['git', 'commit', '-qm', 'hand edit'], cwd=self.root, env=self.env,
+                           capture_output=True, text=True)
+        self.assertEqual(c.returncode, 0, c.stdout + c.stderr)
+        self.assertIn('Paid plan', self.git(self.root, 'show', 'HEAD:index.json'))
+        self.assertEqual(self.git(self.root, 'status', '--porcelain'), '')
+
+    def test_a_real_error_is_still_refused_after_the_index_is_regenerated(self):
+        text = self.read('features/F-0001.md')
+        self.write('features/F-0001.md', text.replace('title: Free plan', 'title: Paid plan')
+                   .replace('## Description\n', '## Description\nsee D1 here\n'))
         self.git(self.root, 'add', 'features/F-0001.md')
         r = self.asf('check', '--staged')
         self.assertEqual(r.returncode, 1, r.stdout)
-        self.assertIn('index.json:1: index.json is stale', r.stdout)
+        self.assertIn('features/F-0001.md', r.stdout)
+        self.assertNotIn('index.json is stale', r.stdout)
+        c = subprocess.run(['git', 'commit', '-qm', 'x'], cwd=self.root, env=self.env,
+                           capture_output=True, text=True)
+        self.assertNotEqual(c.returncode, 0, c.stdout + c.stderr)
 
     def test_the_standing_error_prints_as_a_warning_with_one_summary_line(self):
         write_item(self.root, 'F-0002', 'feature', 'Second', parent='E-0001')

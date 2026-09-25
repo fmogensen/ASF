@@ -403,8 +403,10 @@ def cmd_check_staged(root):
     same check over ``HEAD``. An error the staged state has and ``HEAD`` has not refuses the
     commit, wherever it sits: in a staged card, or in one the staged change breaks (a deleted
     parent or ``blockedBy`` target, a stale Children/Backlinks, a new duplicate id, an Active
-    ``writes:`` overlap, an ``index.json`` entry gone stale). An error ``HEAD`` already carries
-    is the record's standing debt: printed as a warning, never a reason to refuse this commit."""
+    ``writes:`` overlap). An ``index.json`` the staged change leaves stale is regenerated and
+    staged by the hook itself (:func:`stage_derived_index`), never a refusal. An error ``HEAD``
+    already carries is the record's standing debt: printed as a warning, never a reason to
+    refuse this commit."""
     found = committing_repo(root)
     if found is None:
         print('error: --staged needs the record to be a git checkout', file=sys.stderr)
@@ -424,7 +426,46 @@ def cmd_check_staged(root):
         tree.lay_out(repo, staged_dir, tree.record_paths(prefix))
         base = record_findings(os.path.join(head_dir, prefix), scrub, layout=False)
         now = record_findings(os.path.join(staged_dir, prefix), scrub, layout=False)
+        if now[2] - base[2]:  # the staged change leaves index.json stale: derive it, stage it
+            if stage_derived_index(repo, prefix, os.path.join(staged_dir, prefix)):
+                now = record_findings(os.path.join(staged_dir, prefix), scrub, layout=False)
     return _report_staged(now, base, staged)
+
+
+def stage_derived_index(repo, prefix, staged_root):
+    """Regenerate ``index.json`` from the staged cards laid out at ``staged_root`` and stage it
+    in the commit's index (the ``GIT_INDEX_FILE`` git hands its hook) — as ``asf set`` refreshes
+    the index it commits: a hand edit is never refused for the derivation its own change implies.
+    The working-tree ``index.json`` is rewritten too when it held what was staged (no unstaged
+    hand edit of its own to keep). Only ``index.json``: a card error still refuses. True when
+    the index was staged."""
+    from asf.record.index import refresh
+    rel = prefix + 'index.json'
+    staged_index = os.path.join(staged_root, 'index.json')
+    if not os.path.isfile(staged_index):
+        return False  # a record without a staged index is never given one here
+    with open(staged_index, 'rb') as f:
+        before = f.read()
+    if 'index.json' not in refresh(staged_root, only=set()):
+        return False
+    blob = _run_git(repo, ['hash-object', '-w', '--', staged_index])
+    if blob.returncode != 0:
+        return False
+    sha = blob.stdout.strip()
+    if _run_git(repo, ['update-index', '--add', '--cacheinfo',
+                       f'100644,{sha},{rel}']).returncode != 0:
+        return False
+    work = os.path.join(repo, rel)
+    try:
+        with open(work, 'rb') as f:
+            on_disk = f.read()
+    except OSError:
+        on_disk = None
+    if on_disk == before:
+        with open(staged_index, 'rb') as src, open(work, 'wb') as dst:
+            dst.write(src.read())
+    print(f'{rel}: regenerated from the staged cards and staged')
+    return True
 
 
 def _report_staged(now, base, staged):
