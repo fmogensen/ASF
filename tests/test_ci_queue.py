@@ -668,6 +668,140 @@ class TestTrunkJobStarvation(ReliefBase):
         self.assertNotIn('107', self.cancels(gh3))
 
 
+class TestTrunkEscalation(ReliefBase):
+    """A required trunk job queued past ``2 × trunk_wait_min``: the host does not hand a freed
+    runner to the oldest queued job (one product, 2026-09-26: after relief freed a heavy runner at 12:06Z
+    it went to a PR run's gate-tests queued 11:51Z, while main's gate-tests queued since 11:33Z
+    waited on), so the runs with their own queued jobs for the same runners are cancelled —
+    least sunk first, never S1 or hotfix, until main's queued required jobs fit by label."""
+
+    def product(self, **q):
+        data = {'repo_slug': 'o/r',
+                'ci': {'provider': 'github-actions', 'workflow': 'ci.yml', 'pool': pool_data(),
+                       'queue': dict({'workflows': self.WF}, **q)},
+                'deploy_sha': {'prod': {'required_jobs': ['gate', 'm6-e2e']}}}
+        return env.Product('p', data)
+
+    def jobs(self, m6_queued_min=45):
+        t = lambda m: self.at(self.t0 + datetime.timedelta(minutes=m))  # noqa: E731
+
+        def j(name, status, labels, runner=None, start=None, end=None, created=-30):
+            return {'name': name, 'status': status, 'labels': ['self-hosted', *labels],
+                    'runner_name': runner, 'created_at': t(created),
+                    'started_at': t(start) if start is not None else None,
+                    'completed_at': t(end) if end is not None else None}
+        return {
+            900: [j('gate', 'completed', ['heavy'], 'h1', -60, -48, -60),
+                  j('m6-e2e', 'queued', ['heavy'], created=-m6_queued_min)],
+            # newest; 20 heavy minutes done + 5 running on h1; its m3b-e2e queued for heavy
+            110: [j('gate', 'completed', ['heavy'], 'h1', -26, -6, -26),
+                  j('p1-e2e', 'in_progress', ['heavy'], 'h1', -5),
+                  j('m3b-e2e', 'queued', ['heavy'], created=-6)],
+            # 3 heavy minutes on h2 (plus a light job, not counted); its later jobs queued
+            111: [j('connector-drill', 'completed', ['light'], 'l1', -14, -4, -15),
+                  j('gate', 'in_progress', ['heavy'], 'h2', -3),
+                  j('m8-e2e', 'queued', ['heavy'], created=-15)],
+            # 10 heavy minutes on h3; its later jobs queued
+            112: [j('gate', 'in_progress', ['heavy'], 'h3', -10),
+                  j('m6-e2e', 'queued', ['heavy'], created=-10)],
+            # everything it runs is on a runner: nothing queued competes, never a candidate
+            113: [j('gate', 'in_progress', ['heavy'], 'h3', -1)],
+            # only a light job queued: it does not compete for main's heavy runner
+            114: [j('docs', 'queued', ['light'], created=-2)],
+            # S1: never, however little is sunk
+            103: [j('m6-e2e', 'queued', ['heavy'], created=-2)],
+        }
+
+    def runs(self, trunk_status='queued', trunk_created=None):
+        out = super().runs(trunk_status, trunk_created or self.at(self.t0 - datetime.timedelta(
+            minutes=60)))
+        t = lambda m: self.at(self.t0 + datetime.timedelta(minutes=m))  # noqa: E731
+        pr = lambda i, s, b, m: {'databaseId': i, 'status': s, 'event': 'pull_request',  # noqa
+                                 'headBranch': b, 'headSha': 'a' * 40, 'createdAt': t(m)}
+        # the host keeps a run `queued` while any job of it waits, even with jobs on runners
+        out['pr.yml'] = [pr(110, 'queued', 'task/T-0500', -5), pr(112, 'queued', 'bug/B-0008', -10),
+                         pr(111, 'queued', 'task/T-0341', -15), pr(113, 'in_progress',
+                                                                   'task/T-0500', -20),
+                         pr(114, 'queued', 'task/T-0500', -2), pr(103, 'queued', 'bug/B-0007', -2)]
+        out['batch.yml'] = []
+        return out
+
+    def test_escalation_cancels_the_least_sunk_competing_run_first(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        gh, run = self.gh(self.runs(), jobs=self.jobs())
+        self.assertEqual(self.relieve(p, run), (1, 0))
+        # 111 has 3 heavy minutes sunk (112: 10, 110: 25) and frees h2: m6-e2e fits, stop
+        self.assertEqual(self.cancels(gh), ['111'])
+        self.assertEqual(self.lines, [
+            "ci queue: cancelled in-progress pr run 111 (T-0341) — its queued heavy jobs compete "
+            "with main's m6-e2e queued 45m; sunk 3 min"])
+        rec = ci_queue.load('p')['relief']
+        self.assertEqual([r['id'] for r in rec], [111])
+        self.assertEqual(rec[0]['kind'], 'pr')
+
+    def test_below_the_escalation_bar_the_job_level_order_holds(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        gh, run = self.gh(self.runs(), jobs=self.jobs(m6_queued_min=30))
+        self.assertEqual(self.relieve(p, run), (2, 0))
+        # 30m: past trunk_wait_min (20), under 2 × 20 — newest first: 114, then 110 (frees h1)
+        self.assertEqual(self.cancels(gh), ['114', '110'])
+        self.assertTrue(all('cancelled queued pr run' in l for l in self.lines))
+
+    def test_the_escalation_bar_is_configurable(self):
+        p = self.product(trunk_escalate_min=60)
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        self.assertEqual(ci_queue.trunk_escalate_min(p), 60)
+        self.assertEqual(ci_queue.trunk_escalate_min(self.product(trunk_wait_min=15)), 30)
+        gh, run = self.gh(self.runs(), jobs=self.jobs())
+        self.relieve(p, run)
+        self.assertEqual(self.cancels(gh), ['114', '110'])     # 45m < 60m: not escalated
+        self.assertEqual(ci_queue.config_problems({'queue': {'trunk_escalate_min': 0}}),
+                         [('ci.queue.trunk_escalate_min', 'must be a number of minutes > 0, not 0')])
+        self.assertEqual(ci_queue.config_problems({'queue': {'trunk_escalate_min': 50}}), [])
+
+    def test_escalation_keeps_going_while_the_freed_runners_do_not_fit(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        jobs = self.jobs()
+        # main needs two heavy runners now: 111 (h2) alone is not enough, 112 (h3) is next
+        jobs[900].append(dict(jobs[900][1], name='gate'))
+        gh, run = self.gh(self.runs(), jobs=jobs)
+        self.assertEqual(self.relieve(p, run), (2, 0))
+        self.assertEqual(self.cancels(gh), ['111', '112'])
+        self.assertIn("sunk 10 min", self.lines[1])
+        self.assertNotIn('103', self.cancels(gh))        # S1
+        self.assertNotIn('113', self.cancels(gh))        # nothing queued
+        self.assertNotIn('114', self.cancels(gh))        # its queued job needs no heavy runner
+
+    def test_escalated_cancels_are_rerun_once_the_trunk_run_has_started(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        gh, run = self.gh(self.runs(), jobs=self.jobs())
+        self.relieve(p, run)
+        gh, run = self.gh(self.runs(trunk_status='in_progress'), busy=(), jobs=self.jobs())
+        self.assertEqual(self.relieve(p, run, minutes=2), (0, 1))
+        self.assertEqual(self.cancels(gh, 'rerun'), ['111'])
+        self.assertEqual(ci_queue.load('p')['relief'], [])
+
+    def test_dry_run_names_the_escalation_and_cancels_nothing(self):
+        p = self.product(mode='dry-run')
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        gh, run = self.gh(self.runs(), jobs=self.jobs())
+        self.assertEqual(self.relieve(p, run), (0, 0))
+        self.assertEqual(self.cancels(gh), [])
+        self.assertEqual(self.lines, [
+            "ci queue: would cancel in-progress pr run 111 (T-0341) — its queued heavy jobs "
+            "compete with main's m6-e2e queued 45m; sunk 3 min"])
+
+
 class TestCeiling(Base):
     def test_capacity_ci_is_the_batch_steps_ceiling(self):
         p = product(cap={'ci': 2})

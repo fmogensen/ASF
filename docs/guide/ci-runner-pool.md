@@ -212,12 +212,23 @@ trunk run has started. One line each:
 `ci queue: cancelled queued pr run 101 (B-0008, S2) — main run 900 at fffffffff has waited 25m for runners`,
 `ci queue: re-ran pr run 101 (B-0008, S2) — main run 900 at fffffffff started after waiting 24m`.
 
+**Escalation.** The host does not hand a freed runner to the oldest queued job: a runner the
+relief frees goes to whichever queued job it can serve, often a PR run's later job. So once a
+*required* trunk job has been queued longer than `ci.queue.trunk_escalate_min` minutes (default
+twice `trunk_wait_min`), the runs cancelled are those with a queued job that a runner able to take
+the trunk's starved jobs could serve — including runs with jobs on runners — least sunk first (the
+fewest minutes their jobs of the starved jobs' class have run, completed plus running), newest
+first among equals, never S1 or hotfix, until the idle runners plus the runners they held fit the
+trunk's queued required jobs by label. Re-runs follow as above. One line each:
+`ci queue: cancelled in-progress pr run 111 (T-0341) — its queued heavy jobs compete with main's m6-e2e queued 45m; sunk 3 min`.
+
 ```yaml
 ci:
   queue:
     mode: on        # on (the default with a ci.pool) | dry-run | off
     history: 10     # completed runs of each workflow measured
     trunk_wait_min: 20   # minutes a queued trunk run waits before runs ahead of it are cancelled
+    trunk_escalate_min: 40   # a required trunk job queued longer: competing runs with jobs on runners go too
     pr_wait_min: 45      # minutes an ordinary PR start waits before it starts on half its jobs
     workflows: {pr: checks.yml, trunk: checks.yml, batch: batch.yml}   # default: ci.workflow
     light_paths: ['docs/**', '*.md']   # a PR touching only these is sized as a light run
