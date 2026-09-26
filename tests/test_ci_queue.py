@@ -889,6 +889,140 @@ class TestTrunkEscalation(ReliefBase):
             "compete with main's m6-e2e queued 45m; sunk 3 min"])
 
 
+class TestS1PrRelief(ReliefBase):
+    """An open S1 fix PR's run is served like the trunk run (2026-09-26: one product's S1 fix, the one
+    prod was held on, had its heavy jobs queued behind ~20 feature-PR jobs while the relief acted
+    only for main): its required jobs queued past ``ci.queue.s1_wait_min`` get the PR/batch runs
+    in their way cancelled, lowest priority and newest first, never trunk, S1, hotfix, a run on
+    runners or a CI-changing PR; each is re-run once the S1 run's required jobs have started."""
+
+    def product(self, **q):
+        data = {'repo_slug': 'o/r',
+                'ci': {'provider': 'github-actions', 'workflow': 'ci.yml', 'pool': pool_data(),
+                       'queue': dict({'workflows': self.WF}, **q)},
+                'deploy_sha': {'prod': {'required_jobs': ['gate', 'm6-e2e']}}}
+        return env.Product('p', data)
+
+    def jobs(self, s1_queued_min=8, s1_status='queued'):
+        t = lambda m: self.at(self.t0 + datetime.timedelta(minutes=m))  # noqa: E731
+
+        def j(name, status, labels, runner=None, created=-10):
+            return {'name': name, 'status': status, 'labels': ['self-hosted', *labels],
+                    'runner_name': runner, 'created_at': t(created),
+                    'started_at': t(created) if runner else None}
+        return {
+            850: [j('gate', 'completed', ['heavy'], 'h1'),
+                  j('m6-e2e', s1_status, ['heavy'], 'h1' if s1_status != 'queued' else None,
+                    created=-s1_queued_min)],
+            # a Feature PR created after the S1 run: its gate holds h2, its m6-e2e waits
+            120: [j('gate', 'in_progress', ['heavy'], 'h2', -3),
+                  j('m6-e2e', 'queued', ['heavy'], created=-2)],
+            # an ordinary PR, newest, only queued jobs: it holds no runner
+            121: [j('gate', 'queued', ['heavy'], created=-1)],
+            # the CI-changing PR, the hotfix and the other S1 run: never, whatever they hold
+            123: [j('gate', 'in_progress', ['heavy'], 'h3', -1)],
+            104: [j('gate', 'in_progress', ['heavy'], 'h3', -1)],
+            103: [j('gate', 'in_progress', ['heavy'], 'h3', -1)],
+        }
+
+    def runs(self, trunk_status='in_progress', s1_status='queued', only=None):
+        t = lambda m: self.at(self.t0 + datetime.timedelta(minutes=m))  # noqa: E731
+        trunk = {'databaseId': 900, 'status': trunk_status, 'event': 'push', 'headBranch': 'main',
+                 'headSha': 'f' * 40, 'createdAt': t(-30), 'startedAt': t(-29)}
+        pr = lambda i, s, b, m: {'databaseId': i, 'status': s, 'event': 'pull_request',  # noqa
+                                 'headBranch': b, 'headSha': f'sha{i}', 'createdAt': t(m)}
+        prs = [pr(850, s1_status, 'fix-bug/fix-bug-b-0007', -10),   # the S1 fix, lower case
+               pr(120, 'queued', 'task/T-0341', -3),                # Feature, newer
+               pr(121, 'queued', 'task/T-0500', -1),                # ordinary, newest
+               pr(122, 'in_progress', 'task/T-0500', -4),           # on runners: never
+               pr(123, 'queued', 'task/T-0500', -0.5),              # changes CI config: never
+               pr(104, 'queued', 'hotfix/db', -2),                  # hotfix: never
+               pr(103, 'queued', 'bug/B-0007', -2)]                 # S1: never
+        if only is not None:
+            prs = [r for r in prs if r['databaseId'] in only]
+        return {'ci.yml': [trunk], 'pr.yml': prs, 'batch.yml': []}
+
+    def gh(self, runs, busy=('h1', 'h2', 'h3'), jobs=None, files=None):
+        return super().gh(runs, busy=busy, jobs=jobs,
+                          files={123: ['.github/workflows/ci.yml'], **(files or {})})
+
+    def test_s1_pr_relief_cancels_a_newer_feature_pr_run(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        gh, run = self.gh(self.runs(), jobs=self.jobs())
+        self.assertEqual(self.relieve(p, run), (2, 0))
+        # lowest priority first, newest first within it: 121 (holds nothing), then the Feature
+        # run 120, whose gate frees h2 — the S1 run's m6-e2e fits, stop
+        self.assertEqual(self.cancels(gh), ['121', '120'])
+        self.assertEqual(self.lines[-1],
+                         'ci queue: cancelled queued pr run 120 (T-0341, Feature) — created after '
+                         'S1 PR run 850 (B-0007) at sha850 but holds the heavy queue ahead of its '
+                         'queued m6-e2e (queued 8m)')
+        self.assertIn('relief: exempt task/T-0500 — changes CI config', self.lines)
+        rec = ci_queue.load('p')['relief']
+        self.assertEqual([r['id'] for r in rec], [121, 120])
+        self.assertEqual({r['for'] for r in rec}, {850})
+
+    def test_never_cancels_trunk_s1_hotfix_in_progress_or_ci_changing_runs(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        runs = self.runs(trunk_status='queued', only=(850, 122, 123, 104, 103))
+        # main's own run is queued too, but under trunk_wait_min: nothing for it, and never a
+        # candidate for the S1 run
+        runs['ci.yml'][0]['createdAt'] = self.at(self.t0 - datetime.timedelta(minutes=2))
+        gh, run = self.gh(runs, jobs=self.jobs())
+        self.assertEqual(self.relieve(p, run), (0, 0))
+        self.assertEqual(self.cancels(gh), [])
+
+    def test_under_s1_wait_min_nothing_is_cancelled_and_the_wait_is_configurable(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        self.assertEqual(ci_queue.s1_wait_min(p), 5)
+        gh, run = self.gh(self.runs(), jobs=self.jobs(s1_queued_min=4))
+        self.assertEqual(self.relieve(p, run), (0, 0))
+        gh2, run = self.gh(self.runs(), jobs=self.jobs())
+        self.assertEqual(self.relieve(self.product(s1_wait_min=10), run), (0, 0))
+        self.assertEqual(self.cancels(gh) + self.cancels(gh2), [])
+        self.assertEqual(ci_queue.config_problems({'queue': {'s1_wait_min': 0}}),
+                         [('ci.queue.s1_wait_min', 'must be a number of minutes > 0, not 0')])
+        self.assertEqual(ci_queue.config_problems({'queue': {'s1_wait_min': 3}}), [])
+
+    def test_cancelled_runs_are_rerun_once_the_s1_runs_required_jobs_have_started(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        gh, run = self.gh(self.runs(), jobs=self.jobs())
+        self.relieve(p, run)
+        # still queued a minute later: nothing re-run yet
+        gh, run = self.gh(self.runs(), jobs=self.jobs())
+        self.assertEqual(self.relieve(p, run, minutes=1)[1], 0)
+        self.assertEqual(self.cancels(gh, 'rerun'), [])
+        # its m6-e2e has a runner (the host still calls the run queued while other jobs wait)
+        gh, run = self.gh(self.runs(), busy=(), jobs=self.jobs(s1_status='in_progress'))
+        self.assertEqual(self.relieve(p, run, minutes=2), (0, 2))
+        self.assertEqual(sorted(self.cancels(gh, 'rerun')), ['120', '121'])
+        self.assertIn('started after waiting', self.lines[-1])
+        self.assertIn('S1 PR run 850', self.lines[-1])
+        self.assertEqual(ci_queue.load('p')['relief'], [])
+
+    def test_trunk_relief_records_wait_for_the_trunk_not_the_s1_run(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        ci_queue.save('p', dict(ci_queue.load('p'), relief=[
+            {'id': 777, 'kind': 'pr', 'item': 'T-0500', 'prio': 3, 'label': 'Task',
+             'workflow': 'pr.yml', 'at': self.at(self.t0), 'trunk_id': 900}]))
+        runs = self.runs(trunk_status='queued', only=(850,))
+        runs['ci.yml'][0]['createdAt'] = self.at(self.t0 - datetime.timedelta(minutes=2))
+        gh, run = self.gh(runs, busy=(), jobs=self.jobs(s1_status='in_progress'))
+        self.relieve(p, run, minutes=1)
+        self.assertEqual(self.cancels(gh, 'rerun'), [])       # main still queued: kept
+        self.assertEqual([r['id'] for r in ci_queue.load('p')['relief']], [777])
+
+
 class TestCeiling(Base):
     def test_capacity_ci_is_the_batch_steps_ceiling(self):
         p = product(cap={'ci': 2})

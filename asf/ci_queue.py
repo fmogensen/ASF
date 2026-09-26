@@ -114,6 +114,19 @@ jobs by label: ``cancelled in-progress pr run 111 (T-0341) — its queued heavy 
 main's m6-e2e queued 45m; sunk 3 min``. Re-runs follow as above.
 Every wait is UTC-aware now minus the host's UTC ``createdAt``, never local time.
 
+**S1 PR relief.** An open S1 (or hotfix) fix PR's run is served the way the trunk run is: the
+two outrank every other run, the trunk run first. When a required job of a queued S1 PR run
+(``deploy_sha.prod.required_jobs_from`` read at its head, else ``required_jobs``; every job when
+none is declared) has been queued past ``ci.queue.s1_wait_min`` (default 5) minutes, the job-level
+rule above runs for it — every queued PR/batch run in its way, lowest priority first, newest first
+within it, until its queued jobs fit the idle plus freed runners by label — and past twice
+``s1_wait_min`` the escalation. Never the trunk run, an S1 or hotfix run, a run the host reports
+``in_progress`` (below the escalation) or a CI-changing PR's run. Each cancel is remembered in
+``relief`` with ``for`` (the S1 run's id) and re-run once that run's required jobs have runners;
+a trunk relief record still waits for the trunk run. The line names it: ``cancelled queued pr
+run 120 (T-0341, Feature) — created after S1 PR run 850 (B-0007) at … but holds the heavy queue
+ahead of its queued m6-e2e (queued 8m)``.
+
 **Every hold is one line**: ``ci queue: T-0341 waits — heavy 0 free, needs 3 (S2, 4th in line)``.
 
 **CI-config exemption.** A run whose PR changed a file under ``.github/workflows/**`` or
@@ -133,6 +146,7 @@ cancel. The line says why: ``relief: exempt <branch> — changes CI config``.
         history: 10       # runs of each workflow measured
         trunk_wait_min: 20  # a queued trunk run waiting longer gets runs ahead of it cancelled
         trunk_escalate_min: 40  # a required trunk job queued longer: competing runs go too
+        s1_wait_min: 5    # an S1 PR run's required job queued longer gets relief like the trunk
         pr_wait_min: 45   # an ordinary PR start waiting longer starts on half its expected jobs
         workflows: {pr: checks.yml, trunk: checks.yml, batch: batch.yml}  # default ci.workflow
         light_paths: ['docs/**', '*.md']  # a PR touching only these is sized as a light run
@@ -161,7 +175,7 @@ QUEUE_FILE = 'ci-queue.json'
 KINDS = ('pr', 'trunk', 'batch', 'deploy')
 MODES = ('on', 'dry-run', 'off')
 FIELDS = ('mode', 'history', 'workflows', 'trunk_wait_min', 'trunk_escalate_min', 'pr_wait_min',
-          'light_paths', 'estimate', 'relief_exempt_paths')
+          'light_paths', 'estimate', 'relief_exempt_paths', 's1_wait_min')
 #: a run's type: ``light`` when its PR changed only light paths, else ``full``
 FULL, LIGHT = 'full', 'light'
 RUN_TYPES = (FULL, LIGHT)
@@ -173,6 +187,7 @@ DEFAULT_RELIEF_EXEMPT_PATHS = ('.github/workflows/**', '.github/actionlint.yaml'
 ESTIMATE_PERCENTILE = 90
 DEFAULT_HISTORY = 10
 DEFAULT_TRUNK_WAIT_MIN = 20
+DEFAULT_S1_WAIT_MIN = 5
 DEFAULT_PR_WAIT_MIN = 45
 #: a run the relief cancelled and could not re-run in this long is dropped from the file
 RELIEF_TTL_S = 24 * 60 * 60
@@ -287,6 +302,14 @@ def trunk_escalate_min(product):
     return v if ok else 2 * trunk_wait_min(product)
 
 
+def s1_wait_min(product):
+    """``ci.queue.s1_wait_min``: minutes a required job of a queued S1 (or hotfix) PR run waits
+    before relief serves it as it serves the trunk run (default 5); it escalates at twice it."""
+    v = _qcfg(product).get('s1_wait_min')
+    ok = isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+    return v if ok else DEFAULT_S1_WAIT_MIN
+
+
 def pr_wait_min(product):
     """``ci.queue.pr_wait_min``: minutes an ordinary PR start waits before the starvation guard
     admits it on half its expected jobs (default 45)."""
@@ -378,7 +401,7 @@ def config_problems(ci):
     if q.get('mode') is not None and str(q['mode']).strip().lower() not in MODES \
             and q['mode'] is not True and q['mode'] is not False:
         out.append(('ci.queue.mode', f"must be one of {', '.join(MODES)}, not {q['mode']!r}"))
-    for k in ('trunk_wait_min', 'trunk_escalate_min', 'pr_wait_min'):
+    for k in ('trunk_wait_min', 'trunk_escalate_min', 'pr_wait_min', 's1_wait_min'):
         w = q.get(k)
         if w is not None and (isinstance(w, bool) or not isinstance(w, (int, float)) or w <= 0):
             out.append((f'ci.queue.{k}', f'must be a number of minutes > 0, not {w!r}'))
@@ -1273,7 +1296,8 @@ def cancel_superseded(product, source=None, out=print, dry_run=False):
 
 
 #: an item id in a branch name (``task/T-0341-…``)
-_ITEM_IN_BRANCH_RE = re.compile(r'\b[A-Z]-\d{4,}\b')
+#: (either case: a lane branch is ``fix-bug/fix-bug-b-1382``)
+_ITEM_IN_BRANCH_RE = re.compile(r'\b[A-Za-z]-\d{4,}\b')
 _RUN_FIELDS = 'databaseId,status,event,headBranch,headSha,createdAt,startedAt'
 
 
@@ -1295,27 +1319,33 @@ def _covered(need, free, freed):
     return all(free.get(c, 0) + freed.get(c, 0) >= n for c, n in need.items())
 
 
-def _rerun_cancelled(q, src, product, trunk_run, dry_run, out, now):
-    """Re-run every run the relief cancelled, each through the queue at its original priority,
-    now that the trunk run has started. The number re-run."""
+def _rerun_cancelled(q, src, product, started, dry_run, out, now):
+    """Re-run every run the relief cancelled whose protected run has started — the trunk run,
+    or the S1 PR run it was cancelled for (``for``) — each through the queue at its original
+    priority. ``started(rec)`` is ``(the protected run, its name)`` once that run has started,
+    else None (the record is kept). The number re-run."""
     relief, keep, n = q.data['relief'], [], 0
-    trunk = getattr(product, 'main', None) or 'main'
     for rec in sorted(relief, key=lambda r: (r.get('prio', OTHER), r.get('at') or '')):
         rid = rec.get('id')
         if not rid or _age(rec.get('at'), now) > RELIEF_TTL_S:
             out(f"ci queue: dropped cancelled {rec.get('kind')} run {rid} ({rec.get('item')}) — "
                 f"not re-run within {RELIEF_TTL_S // 3600}h")
             continue
+        got = started(rec)
+        if got is None:                     # what it was cancelled for still waits
+            keep.append(rec)
+            continue
+        protected, who = got
         d = q.admit(f'rerun:{rid}', rec.get('kind') or 'pr', item=rec.get('item'),
                     prio=rec.get('prio', OTHER), label=rec.get('label') or 'other',
                     workflow=rec.get('workflow'))
         if not d.admitted or d.line:        # held (or a dry-run mode hold): next tick asks again
             keep.append(rec)
             continue
-        began = _parse((trunk_run or {}).get('startedAt')) or now
+        began = _parse((protected or {}).get('startedAt')) or now
         waited = _dur((began - (_parse(rec.get('trunk_created')) or began)).total_seconds())
         what = (f"re-ran {rec.get('kind')} run {rid} ({rec.get('item')}, {rec.get('label')}) — "
-                f"{trunk} run {rec.get('trunk_id')} at {str(rec.get('trunk_sha') or '?')[:9]} "
+                f"{who} run {rec.get('trunk_id')} at {str(rec.get('trunk_sha') or '?')[:9]} "
                 f"started after waiting {waited}")
         if dry_run:
             out(f'ci queue: would have {what}')
@@ -1330,6 +1360,13 @@ def _rerun_cancelled(q, src, product, trunk_run, dry_run, out, now):
         n += 1
     q.data['relief'] = keep
     return n
+
+
+def _item_of(branch):
+    """The item id a branch names (``task/T-0341-…``, ``fix-bug/fix-bug-b-1382``), upper case;
+    None when it names none."""
+    hit = _ITEM_IN_BRANCH_RE.search(branch or '')
+    return hit.group(0).upper() if hit else None
 
 
 def _job_labels(job):
@@ -1399,9 +1436,10 @@ def _sunk_s(jobs, classes, by_name, cls_of, now):
 
 
 def relieve_trunk(product, items=None, source=None, out=print, dry_run=False, now=None):
-    """Trunk starvation relief (see the module doc): cancel queued runs ahead of a trunk run
-    queued past ``ci.queue.trunk_wait_min``, lowest priority first, until the free runners plus
-    the freed ones cover its expected jobs per class; re-run them once it has started.
+    """Starvation relief (see the module doc) for the trunk run and, after it, every queued S1
+    or hotfix PR run: cancel queued runs ahead of a trunk run queued past
+    ``ci.queue.trunk_wait_min``, lowest priority first, until the free runners plus the freed
+    ones cover its expected jobs per class; re-run them once it has started.
     When a *required* job of the trunk run is itself queued past the wait, the runs in its way
     are every queued PR/batch run whatever its creation time (a run created after the trunk run
     still gets its later jobs queued, and runners, ahead of the trunk run's late jobs), and the
@@ -1409,6 +1447,8 @@ def relieve_trunk(product, items=None, source=None, out=print, dry_run=False, no
     each of those queued jobs. Past ``ci.queue.trunk_escalate_min`` the host's non-FIFO
     hand-out is assumed: the runs are those with a queued job a runner serving the trunk
     run's starved jobs could take (a host-``in_progress`` run included), least sunk first.
+    An S1 PR run gets the same job-level relief and escalation past ``ci.queue.s1_wait_min``
+    (escalation at twice it); its cancels are re-run once its required jobs have runners.
     ``(cancelled, re-run)``. Not a queued product: nothing, no ``gh`` call. Never raises."""
     m = mode(product)
     if m == 'off' or not product.repo_slug:
@@ -1422,54 +1462,120 @@ def relieve_trunk(product, items=None, source=None, out=print, dry_run=False, no
     runs = _list_runs(src, product, twf) if twf else None
     if runs is None:
         return 0, 0
+    lists = {twf: runs}
+
+    def listed(wf):
+        if wf not in lists:
+            lists[wf] = _list_runs(src, product, wf)
+        return lists[wf]
+
     pushes = [r for r in runs if r.get('event') == 'push' and r.get('headBranch') == trunk]
     pushes.sort(key=lambda r: (_parse(r.get('createdAt')) or now, int(r.get('databaseId') or 0)))
     newest = pushes[-1] if pushes else None
-    queued = newest is not None and newest.get('status') in QUEUED_STATUSES
-    rerun = 0
-    if not queued:
-        if q.data['relief']:
-            rerun = _rerun_cancelled(q, src, product, newest, dry_run, out, now)
-            if q.write:
-                save(product.name, q.data)
-        return 0, rerun
-    created = _parse(newest.get('createdAt'))
+    trunk_queued = newest is not None and newest.get('status') in QUEUED_STATUSES
+    pr_wf = workflow_for(product, 'pr')
+    pr_runs = {r.get('databaseId'): r for r in (listed(pr_wf) if pr_wf else None) or ()
+               if r.get('event') == 'pull_request'}
+    s1_runs = []
+    for r in pr_runs.values():
+        if r.get('status') not in QUEUED_STATUSES or _parse(r.get('createdAt')) is None:
+            continue
+        item = _item_of(r.get('headBranch'))
+        prio, label = priority(item, items, r.get('headBranch') or '', product=product)
+        if prio == S1:
+            s1_runs.append((r, item or label))
+    s1_runs.sort(key=lambda x: (_parse(x[0].get('createdAt')), int(x[0].get('databaseId') or 0)))
+    s1_seen = {}
+
+    def s1_started(rid):
+        """The S1 PR run once its required jobs are all on runners (or it left the queue)."""
+        if rid not in s1_seen:
+            r = pr_runs.get(rid)
+            if r is None or r.get('status') not in QUEUED_STATUSES:
+                s1_seen[rid] = r or {}
+            else:
+                jobs = src.live_jobs(rid)
+                req = _required_names(product, r.get('headSha'))
+                from asf.harvest import deploy
+                waiting = jobs is None or any(
+                    j.get('status') in QUEUED_STATUSES
+                    and (not req or deploy.job_key(j.get('name')) in req) for j in jobs)
+                s1_seen[rid] = None if waiting else r
+        return s1_seen[rid]
+
+    def started(rec):
+        if rec.get('for') is None:          # cancelled for the trunk run
+            return None if trunk_queued else (newest, trunk)
+        r = s1_started(rec['for'])
+        return None if r is None else (r, 'S1 PR')
+
+    rerun = _rerun_cancelled(q, src, product, started, dry_run, out, now) \
+        if q.data['relief'] else 0
+    n = 0
+    if trunk_queued:
+        n += _relieve_for(product, q, src, items, listed, now, newest, out, dry_run,
+                          owner=f"{trunk} run {newest.get('databaseId')}", possessive=trunk,
+                          wait_s=trunk_wait_min(product) * 60,
+                          escalate_s=trunk_escalate_min(product) * 60, run_level=True)
+    for r, item in s1_runs:
+        owner = f"S1 PR run {r.get('databaseId')} ({item})"
+        n += _relieve_for(product, q, src, items, listed, now, r, out, dry_run, owner=owner,
+                          possessive=owner, wait_s=s1_wait_min(product) * 60,
+                          escalate_s=2 * s1_wait_min(product) * 60, run_level=False,
+                          for_id=r.get('databaseId'))
+    if q.write:
+        save(product.name, q.data)
+    return n, rerun
+
+
+def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owner, possessive,
+                 wait_s, escalate_s, run_level, for_id=None):
+    """Relief for one protected run (the trunk run, or an S1 PR run): the runs in its way,
+    cancelled lowest priority first until its jobs are covered, each remembered in ``relief``
+    (with ``for``: the S1 PR run's id). ``run_level``: the run-level rule (runs created ahead
+    of it, sized by measured needs) applies when none of its required jobs is starved — the
+    trunk run only. The number cancelled."""
+    trunk = getattr(product, 'main', None) or 'main'
+    twf = workflow_for(product, 'trunk')
+    created = _parse(target.get('createdAt'))
     if created is None:
-        return 0, 0
+        return 0
     waited = (now - created).total_seconds()
-    wait_s = trunk_wait_min(product) * 60
     if waited <= wait_s:
-        return 0, 0
-    sha = str(newest.get('headSha') or '?')[:9]
-    # job level: a required job of the trunk run queued past the wait
-    starved = _starved_jobs(product, src.live_jobs(newest.get('databaseId')), created, now,
-                            wait_s, newest.get('headSha'))
+        return 0
+    sha = str(target.get('headSha') or '?')[:9]
+    tid = target.get('databaseId')
+    # job level: a required job of the protected run queued past the wait
+    starved = _starved_jobs(product, src.live_jobs(tid), created, now, wait_s,
+                            target.get('headSha'))
     need = free = None
     escalated = False
     if starved:
         q._read_host()
         if q._free is None:
-            return 0, 0                         # runners unreadable
+            return 0                            # runners unreadable
         held = {r.name: r.norm_labels() for r in q._runners}
         idle = [r.norm_labels() for r in q._runners if r.online and not r.busy]
         want = [_job_labels(j) for j, _w in starved]
         if _fits(want, idle):
-            return 0, 0                         # a runner is there for each of them already
+            return 0                            # a runner is there for each of them already
         cls_of = label_classes(q.pool, q._runners)
         by_name = {e.runner: e for e in q.pool}
         classes = sorted({_job_class(j, by_name, cls_of) or 'runner' for j, _w in starved})
         names = ', '.join(sorted({str(j.get('name') or '?') for j, _w in starved}))
         jwait = _dur(max(w for _j, w in starved))
-        escalated = max(w for _j, w in starved) > trunk_escalate_min(product) * 60
+        escalated = max(w for _j, w in starved) > escalate_s
         # the runners that could take one of the starved jobs: a queued job one of them serves
         # competes for them, whatever run it belongs to
         serving = [r.norm_labels() for r in q._runners
                    if r.online and any(w <= r.norm_labels() for w in want)]
+    elif not run_level:
+        return 0
     else:
         need = q.needs(twf)
         free = q.free()
         if not need or free is None or _covered(need, free, {}):
-            return 0, 0     # nothing measured, runners unreadable, or the runners are there already
+            return 0        # nothing measured, runners unreadable, or the runners are there already
     done = {rec.get('id') for rec in q.data['relief']}
     pr_wf, batch_wf = workflow_for(product, 'pr'), workflow_for(product, 'batch')
     cands = []
@@ -1477,25 +1583,23 @@ def relieve_trunk(product, items=None, source=None, out=print, dry_run=False, no
     exempt_globs = relief_exempt_paths(product)
     exempt_files = {}   # {head sha: [changed file]}, one Source.run_files call per sha per pass
     for wf in sorted({w for w in (pr_wf, batch_wf) if w}):
-        listed = runs if wf == twf else _list_runs(src, product, wf)
-        for r in listed or ():
+        for r in listed(wf) or ():
             rid, ev, branch = r.get('databaseId'), r.get('event'), r.get('headBranch') or ''
-            if (not rid or rid == newest.get('databaseId') or rid in done
+            if (not rid or rid == tid or rid in done
                     or r.get('status') not in statuses):
                 continue
             rc = _parse(r.get('createdAt'))
             if rc is None:
                 continue
-            if rc >= created and not starved:   # queued behind the trunk run: not in its way
+            if rc >= created and not starved:   # queued behind the protected run: not in its way
                 continue
             if ev == 'pull_request' and wf == pr_wf:
                 kind = 'pr'
             elif wf == batch_wf and ev != 'pull_request' and not (ev == 'push' and branch == trunk):
                 kind = 'batch'
             else:
-                continue
-            hit = _ITEM_IN_BRANCH_RE.search(branch)
-            item = hit.group(0) if hit else None
+                continue                        # a trunk run is never cancelled
+            item = _item_of(branch)
             prio, label = priority(item, items, branch, product=product)
             if prio == S1:
                 continue                        # an S1 or hotfix run is never cancelled
@@ -1514,7 +1618,7 @@ def relieve_trunk(product, items=None, source=None, out=print, dry_run=False, no
                 jobs = src.live_jobs(rid)
                 if not any(j.get('status') in QUEUED_STATUSES
                            and any(_job_labels(j) <= s for s in serving) for j in jobs or ()):
-                    continue                    # nothing of it waits for main's runners
+                    continue                    # nothing of it waits for those runners
                 sunk = _sunk_s(jobs, classes, by_name, cls_of, now)
             cands.append(((int(sunk // 60),) if escalated else (), group, -rc.timestamp(),
                           -int(rid), r, kind, item or branch or kind, prio, label, wf, rc, jobs,
@@ -1532,20 +1636,20 @@ def relieve_trunk(product, items=None, source=None, out=print, dry_run=False, no
             running = [j for j in jobs or () if j.get('status') == 'in_progress']
             state = 'in-progress' if running else 'queued'
             what = (f"{kind} run {rid} ({item}) — its queued {'/'.join(classes)} jobs compete "
-                    f"with {trunk}'s {names} queued {jwait}; sunk {int(sunk // 60)} min")
+                    f"with {possessive}'s {names} queued {jwait}; sunk {int(sunk // 60)} min")
             holds = [held.get(j.get('runner_name')) or _job_labels(j)
                      for j in running if j.get('runner_name')]
         elif starved:
             later = rc >= created
             what = (f"{kind} run {rid} ({item}, {label}) — created "
-                    f"{'after' if later else 'before'} {trunk} run {newest.get('databaseId')} at "
+                    f"{'after' if later else 'before'} {owner} at "
                     f"{sha} {'but' if later else 'and'} holds the {'/'.join(classes)} queue ahead "
                     f"of its queued {names} (queued {jwait})")
             holds = [held.get(j.get('runner_name')) or _job_labels(j)
                      for j in src.live_jobs(rid) or ()
                      if j.get('status') == 'in_progress' and j.get('runner_name')]
         else:
-            what = (f"{kind} run {rid} ({item}, {label}) — {trunk} run {newest.get('databaseId')} "
+            what = (f"{kind} run {rid} ({item}, {label}) — {owner} "
                     f"at {sha} has waited {_dur(waited)} for runners")
         if dry_run:
             out(f'ci queue: would cancel {state} {what}')
@@ -1554,19 +1658,19 @@ def relieve_trunk(product, items=None, source=None, out=print, dry_run=False, no
             continue
         else:
             out(f'ci queue: cancelled {state} {what}')
-            q.data['relief'].append({
-                'id': rid, 'kind': kind, 'item': item, 'prio': prio, 'label': label,
-                'workflow': wf, 'at': _iso(now), 'trunk_id': newest.get('databaseId'),
-                'trunk_sha': newest.get('headSha'), 'trunk_created': _iso(created)})
+            rec = {'id': rid, 'kind': kind, 'item': item, 'prio': prio, 'label': label,
+                   'workflow': wf, 'at': _iso(now), 'trunk_id': tid,
+                   'trunk_sha': target.get('headSha'), 'trunk_created': _iso(created)}
+            if for_id is not None:
+                rec['for'] = for_id
+            q.data['relief'].append(rec)
             n += 1
         if starved:
             freed_sets.extend(holds)
         else:
             for c, k in q.needs(wf).items():
                 freed[c] = freed.get(c, 0) + k
-    if q.write:
-        save(product.name, q.data)
-    return n, 0
+    return n
 
 
 # ---- reading it -------------------------------------------------------------------------------

@@ -252,6 +252,16 @@ first among equals, never S1 or hotfix, until the idle runners plus the runners 
 trunk's queued required jobs by label. Re-runs follow as above. One line each:
 `ci queue: cancelled in-progress pr run 111 (T-0341) — its queued heavy jobs compete with main's m6-e2e queued 45m; sunk 3 min`.
 
+**S1 PR relief.** An open S1 (or hotfix) fix PR's run is served the way the trunk run is — the
+two outrank every other run, the trunk run first. Once a required job of a queued S1 PR run has
+been queued longer than `ci.queue.s1_wait_min` minutes (default 5), the job-level rule runs for it:
+queued PR and batch runs in its way are cancelled, lowest priority first and newest first within
+it, until the idle plus freed runners fit its queued jobs by label; past twice `s1_wait_min` the
+escalation applies. Never the trunk run, an S1 or hotfix run, a run already in progress (below the
+escalation) or a CI-changing PR's run. Each cancel is re-run once the S1 run's required jobs have
+runners. One line each:
+`ci queue: cancelled queued pr run 120 (T-0341, Feature) — created after S1 PR run 850 (B-0007) at sha850 but holds the heavy queue ahead of its queued m6-e2e (queued 8m)`.
+
 **CI-config exemption.** Relief (queued-run cancel and in-progress escalation alike) never
 cancels a run whose PR changed a file under `.github/workflows/**` or `.github/actionlint.yaml`
 — the paths that reserve runners for the trunk — or under `ci.queue.relief_exempt_paths`,
@@ -268,6 +278,7 @@ ci:
     trunk_wait_min: 20   # minutes a queued trunk run waits before runs ahead of it are cancelled
     trunk_escalate_min: 40   # a required trunk job queued longer: competing runs with jobs on runners go too
     pr_wait_min: 45      # minutes an ordinary PR start waits before it starts on half its jobs
+    s1_wait_min: 5       # an S1 PR run's required job queued longer gets relief like the trunk
     workflows: {pr: checks.yml, trunk: checks.yml, batch: batch.yml}   # default: ci.workflow
     light_paths: ['docs/**', '*.md']   # a PR touching only these is sized as a light run
     estimate: {heavy: {full: 12, light: 4}}   # optional: overrides the measure ({heavy: 12}: both)
