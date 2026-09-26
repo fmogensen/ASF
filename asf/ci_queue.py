@@ -72,6 +72,13 @@ the exemptions are unchanged. One line: ``ci queue: task/T-0356 admitted after 2
 (starvation guard)``; the status row names the head's wait in line (``head T-0356 waits 105 min —
 …``).
 
+**Backfill.** While the head does not fit, an entry behind it starts when it fits entirely in
+what is free once the head's claim is set aside (and those of the entries ahead of it that fit
+so too — they go first, in line order): a light run on idle light runners, a run that fits in the
+heavy runners beyond the head's claim. The runners the head's claim needs are never taken. One
+line: ``ci queue: backfill <key> — fits in free <class> while head <key> waits``
+(:func:`backfill`). The head guard stays the backstop.
+
 **Draft PRs.** A branch whose PR is a draft is parked by its owner: it never enters the line,
 never gets a start, and is never set aside as demand ahead of others — :func:`admit` with
 ``draft`` refuses it and drops its entries, and the lane drops a draft branch's entries every
@@ -1118,6 +1125,48 @@ def wait_text(entry, now):
     return '' if age == math.inf else f'{max(0, int(age // 60))} min'
 
 
+#: a backfill admission's ``why`` starts so (:func:`backfill`)
+BACKFILL = 'backfill'
+
+
+def backfill(key, order, entries, needs_of, free, skip=()):
+    """The ``why`` of a backfill admission, or '' when there is none. A ``key`` behind a head
+    that does not fit starts when it fits entirely in what is free once the head's claim is set
+    aside, and those of the entries ahead of it that fit so too (they backfill first, in line
+    order) — never in the runners the head's claim needs. The whole-line set-aside held a light
+    run on the light slots of full runs that cannot start before the head does (2026-09-26
+    23:27: 7 light idle, ``light 0 free, needs 1``). The head guard stays the backstop."""
+    head = head_of(order, entries, skip)
+    if head is None or head == key or free is None:
+        return ''
+    if not shortfall(head, order, needs_of, free, skip=skip) or not needs_of(key):
+        return ''                               # the head fits: plain order serves the line
+
+    def take(avail, need):
+        for c, n in need.items():
+            if c in avail:
+                avail[c] = max(0, avail[c] - n)
+
+    def fit(avail, need):
+        return all(n <= avail[c] for c, n in need.items() if c in avail)
+
+    avail = dict(free)
+    take(avail, needs_of(head) or {})
+    for other in order:
+        if other == key:
+            break
+        if other == head or other in skip or not fit_applies(entries.get(other)):
+            continue
+        need = needs_of(other) or {}
+        if fit(avail, need):
+            take(avail, need)                   # it backfills ahead of ``key``
+    need = needs_of(key) or {}
+    if not fit(avail, need):
+        return ''
+    classes = ', '.join(c for c, n in sorted(need.items()) if n and c in avail) or 'runners'
+    return f'{BACKFILL} — fits in free {classes} while head {head} waits'
+
+
 def ceiling_held(order, entries, ceiling=None, inflight=None, admitted=0):
     """The entries of ``order`` the ceiling holds now (batch starts at or above it): they cannot
     start whatever is free, so a PR behind one is never held for the runners it would take."""
@@ -1156,6 +1205,9 @@ def decide(key, order, entries, needs_of, free, ceiling=None, inflight=None, adm
         waited = head_wait_s(e, now)
         if waited != math.inf and waited > head_wait_max_min * 60:
             return True, f'{HEAD_GUARD} {int(waited // 60)} min at the head (starvation guard)'
+    fits = backfill(key, order, entries, needs_of, free, skip)
+    if fits:
+        return True, fits
     if starved(e, now, pr_wait_min) and not shortfall(key, order, needs_of, free, half=True,
                                                       skip=skip):
         waited = _dur(_age((e or {}).get('since'), now))
@@ -1373,6 +1425,8 @@ class Queue:
             if why.startswith(HEAD_GUARD):      # the head guard: one line naming the wait
                 branch = key.split(':', 1)[1] if ':' in key else e['item']
                 self.out(f'ci queue: {branch} {why}')
+            elif why.startswith(BACKFILL):      # behind a head that does not fit
+                self.out(f'ci queue: {BACKFILL} {key} {why[len(BACKFILL):].lstrip()}')
             elif why:               # the PR starvation guard: one line naming the wait
                 self.out(f"ci queue: {e['item']} starts — {why} ({label}, {_ordinal(pos)} in line)")
             entries.pop(key, None)

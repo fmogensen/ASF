@@ -2191,3 +2191,68 @@ class TestOwnCadence(ReliefBase):
         # read back from the installed job as the same clock (no drift, never retired)
         label = scheduler.label_for('p', clock.name, {})
         self.assertEqual(scheduler.clock_of_plist(label, job['plist'], 'p', {}), clock)
+
+
+class TestBackfill(Base):
+    """2026-09-26 23:27–23:32, a product: 5 heavy and all 7 light runners idle, 26 in the line,
+    the head needing 7 heavy. The fit set aside every entry ahead's whole claim, one light per
+    full run: ``light 0 free, needs 1`` with 7 light idle. A later entry that fits in what is
+    free once the head's claim is set aside (and those of the entries ahead that fit so too)
+    starts now — ``ci queue: backfill <key> — fits in free <class> while head <key> waits``;
+    the runners the head's claim needs stay its own, and the head guard stays the backstop."""
+
+    def seed(self, full, light):
+        ci_queue.save('p', {'expect': {'ci.yml': {
+            'at': self.t0.strftime('%Y-%m-%dT%H:%M:%SZ'), 'needs': full, 'light': light,
+            'v': ci_queue.EXPECT_VERSION}}})
+
+    def ask(self, q, key, item, files=()):
+        return ci_queue.admit(q.product, key, 'pr', item=item, items=ITEMS,
+                              branch=key.split(':', 1)[1], files=files, queue=q)
+
+    def test_idle_light_and_a_head_needing_heavy_a_light_only_entry_starts(self):
+        p = product()
+        self.seed({'heavy': 3, 'light': 1}, {'light': 1})
+        q = self.queue(p, FakeGh(busy={'h1'}))           # heavy 2 free, light 2 free
+        self.assertFalse(self.ask(q, 'pr:feat/a', 'T-0341').admitted)   # Feature: needs 3 heavy
+        # a full run behind the head needs heavy the head's claim holds: it waits
+        q = self.queue(p, FakeGh(busy={'h1'}), minutes=1)
+        self.assertFalse(self.ask(q, 'pr:feat/c', 'T-0500').admitted)
+        # the whole-line set-aside left no light (1 for the head, 1 for feat/c): a light run
+        # waited on the light slot feat/c cannot use before the head starts
+        q = self.queue(p, FakeGh(busy={'h1'}), minutes=2)
+        d = self.ask(q, 'pr:docs/b', 'T-0500', files=['docs/guide.md'])
+        self.assertTrue(d.admitted, self.lines)
+        self.assertIn('ci queue: backfill pr:docs/b — fits in free light while head pr:feat/a '
+                      'waits', self.lines)
+        self.assertEqual(sorted(ci_queue.load('p')['entries']), ['pr:feat/a', 'pr:feat/c'])
+
+    def test_backfill_never_takes_what_the_heads_claim_needs(self):
+        p = product()
+        self.seed({'heavy': 3, 'light': 2}, {'light': 1})  # the head claims both light slots
+        q = self.queue(p, FakeGh(busy={'h1'}))
+        self.assertFalse(self.ask(q, 'pr:feat/a', 'T-0341').admitted)
+        self.assertFalse(self.ask(q, 'pr:docs/b', 'T-0500', files=['docs/guide.md']).admitted)
+        self.assertFalse([l for l in self.lines if 'backfill' in l])
+        # one light slot beyond the head's claim: the first light run takes it, the next finds
+        # none left (what started this pass is off the free count)
+        self.seed({'heavy': 3, 'light': 1}, {'light': 1})
+        ci_queue.save('p', dict(ci_queue.load('p'), entries={}))
+        q = self.queue(p, FakeGh(busy={'h1'}), minutes=1)
+        self.assertFalse(self.ask(q, 'pr:feat/a', 'T-0341').admitted)
+        self.assertTrue(self.ask(q, 'pr:docs/c', 'T-0500', files=['docs/x.md']).admitted)
+        self.assertFalse(self.ask(q, 'pr:docs/d', 'T-0500', files=['docs/y.md']).admitted)
+        # an entry ahead that backfills in line order keeps its place: docs/d waits behind the
+        # head, a later light run is not sized ahead of it
+        self.assertIn('pr:docs/d', ci_queue.load('p')['entries'])
+
+    def test_the_head_guard_still_fires_at_20_minutes(self):
+        p = product()
+        self.seed({'heavy': 3, 'light': 1}, {'light': 1})
+        for m in (0, 10, 19):
+            q = self.queue(p, FakeGh(busy={'h1'}), minutes=m)
+            self.assertFalse(self.ask(q, 'pr:feat/a', 'T-0341').admitted)
+        q = self.queue(p, FakeGh(busy={'h1'}), minutes=21)
+        self.assertTrue(self.ask(q, 'pr:feat/a', 'T-0341').admitted)
+        self.assertIn('ci queue: feat/a admitted after 21 min at the head (starvation guard)',
+                      self.lines)
