@@ -738,19 +738,19 @@ _MERGE_SUBJECT = (
 
 
 def branch_ids(branch):
-    """The ids a branch name carries as its item — `cloud/direct-F-0112`, `fix/b-0003`: the
-    item's own branch."""
+    """The ids a branch name carries as its item — `<prefix>direct-F-0112`, `<prefix>b-0003`:
+    the item's own branch."""
     return id_tokens(branch, BRANCH_ID_TOKEN)
 
 
 def naming_ids(subject, main=None):
     """The ids a commit subject (or a PR title) names as its item — the only way a commit names
-    one (a product's F-0112: a PR body quoting `origin/cloud/direct-F-0112` landed F-0112).
+    one (a product's F-0112: a PR body quoting `origin/<prefix>direct-F-0112` landed F-0112).
 
     - the conventional scope: `feat(F-0112): …`, `fix(T-0359, T-0360)!: …`;
     - a lead id: `F-0113 — Parity … (#830)`, `[B-0004] …`, `fix: T-0361 …`;
-    - a merge of the item's own branch: `Merge pull request #820 from o/cloud/direct-F-0112`,
-      `Merge branch 'cloud/T-0359'`, `merge-queue: #752 (cloud/T-0001 @ <sha>)` — the branch
+    - a merge of the item's own branch: `Merge pull request #820 from o/<prefix>F-0112`,
+      `Merge branch '<prefix>T-0359'`, `merge-queue: #752 (<prefix>T-0001 @ <sha>)` — the branch
       merged in, never a trunk merged into it.
 
     Nothing else: an id in prose (`…, for F-0115`), in a branch path the subject quotes, in a
