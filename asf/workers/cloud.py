@@ -7,8 +7,11 @@ own CI runners (``cloud.runs_on``): the job checks the branch out, installs the 
 ``claude -p`` with the brief, and commits and pushes that branch exactly as a local session does,
 so harvest is unchanged.
 
-The runtime ``claude-cloud`` is refused at config check (:data:`REFUSED`,
-:func:`config_problems`): the runtime CLI cannot create a cloud session non-interactively.
+The runtime ``claude-remote`` (:mod:`asf.workers.remote`) runs the session as a claude.ai routine
+instead: the runtime CLI's ``RemoteTrigger`` tool creates and fires it on the dispatching
+account's own login — no repo secret. The runtime ``claude-cloud`` is refused at config check
+(:data:`REFUSED`, :func:`config_problems`): the runtime CLI cannot create a cloud session
+non-interactively.
 
 The brief (:func:`cloud_brief`) is the local brief plus a CLOUD block: the branch, the
 ``ASF-Session`` trailer each commit carries — no host hook stamps it there — and the end marker:
@@ -73,9 +76,10 @@ import time
 from asf.workers import cloudpid
 
 RUNTIME_ACTIONS = 'actions'
+RUNTIME_REMOTE = 'claude-remote'
 RUNTIME = RUNTIME_ACTIONS
 #: the runtimes the lane launches with
-RUNTIMES = (RUNTIME_ACTIONS,)
+RUNTIMES = (RUNTIME_ACTIONS, RUNTIME_REMOTE)
 #: runtime -> why ASF refuses it at config check: a runtime that cannot launch is never enabled
 REFUSED = {
     'claude-cloud': (
@@ -83,7 +87,8 @@ REFUSED = {
         'exits "Error: --cloud cannot be combined with --print. Starting a new cloud session '
         'with --cloud is interactive only", `claude --bg --cloud` exits "--bg and --cloud are '
         'different backends", and -p only messages an existing cloud session by id '
-        '(verified on 2.1.282) — use runtime: actions'),
+        '(verified on 2.1.282) — use runtime: claude-remote (a routine created through the '
+        'CLI\'s RemoteTrigger tool) or actions'),
 }
 ROWS_ANY = 'any'
 ROWS_CLOUD_OK = 'cloud-ok'
@@ -121,6 +126,13 @@ class Settings:
     workflow: str = DEFAULT_WORKFLOW
     default: bool = False
     local_only: tuple = ()
+    # claude-remote (asf.workers.remote)
+    environment_id: str = ''     # one environment for every lane account …
+    environments: tuple = ()     # … or ((account, environment), …): environments are per account
+    model: str = ''
+    allowed_tools: tuple = ()
+    helper_model: str = 'haiku'
+    poll_min: float = 15
 
     @property
     def on(self):
@@ -139,6 +151,15 @@ def config_problems(block):
     rt = str(written or RUNTIME).replace('_', '-')
     if rt in REFUSED and (written or block.get('enabled')):
         out.append(('cloud.runtime', f'{rt} is refused: {REFUSED[rt]}'))
+    envs = block.get('environment_id')
+    if rt == RUNTIME_REMOTE and block.get('enabled') and not envs:
+        out.append(('cloud.environment_id', 'claude-remote needs the claude.ai cloud environment '
+                                            'the routine runs in (env_…, or {account: env_…})'))
+    if isinstance(envs, dict) and not all(isinstance(v, str) and v for v in envs.values()):
+        out.append(('cloud.environment_id', f'must map an account to an env_… id, not {envs!r}'))
+    tools = block.get('allowed_tools')
+    if tools is not None and not (isinstance(tools, list) and all(isinstance(t, str) for t in tools)):
+        out.append(('cloud.allowed_tools', f'must be a list of tool names, not {tools!r}'))
     secret = block.get('token_secret')
     if secret is not None and not SECRET_RE.match(str(secret)):
         out.append(('cloud.token_secret', f'must be a repo secret name, not {secret!r}'))
@@ -212,15 +233,29 @@ def settings(cfg, product=None):
                     token_secret=str(c.get('token_secret') or DEFAULT_TOKEN_SECRET),
                     workflow=str(c.get('workflow') or DEFAULT_WORKFLOW),
                     default=truthy(c.get('default')),
-                    local_only=_kinds(c.get('local_only')))
+                    local_only=_kinds(c.get('local_only')),
+                    environment_id='' if isinstance(c.get('environment_id'), dict)
+                    else str(c.get('environment_id') or ''),
+                    environments=tuple(sorted((str(k), str(v)) for k, v in
+                                              c['environment_id'].items()))
+                    if isinstance(c.get('environment_id'), dict) else (),
+                    model=str(c.get('model') or ''),
+                    allowed_tools=tuple(str(t) for t in c.get('allowed_tools') or ()
+                                        if isinstance(c.get('allowed_tools'), list)),
+                    helper_model=str(c.get('helper_model') or 'haiku'),
+                    poll_min=_float(c.get('poll_min'), 15))
 
 
 def lane_accounts(accounts, s):
     """The accounts whose quota cloud sessions spend: ``cloud.accounts`` when named, else the
     ``role: cloud`` ones."""
     if s.accounts:
-        return [a for a in accounts if a.name in s.accounts]
-    return [a for a in accounts if a.role == 'cloud']
+        out = [a for a in accounts if a.name in s.accounts]
+    else:
+        out = [a for a in accounts if a.role == 'cloud']
+    if s.runtime == RUNTIME_REMOTE and s.environments and not s.environment_id:
+        out = [a for a in out if a.name in dict(s.environments)]  # a routine needs its environment
+    return out
 
 
 def local_only(row, s):
@@ -253,21 +288,26 @@ def is_cloud(run):
 
 def lane_runtime(s, product):
     """The runtime object that launches this lane's sessions for ``product``."""
+    if s.runtime == RUNTIME_REMOTE:
+        from asf.workers import remote  # local: remote imports this module
+        return remote.RemoteRuntime(s, product)
     from asf.workers import actions  # local: actions imports this module
     return actions.ActionsRuntime(s, product)
 
 
 # ---- the brief --------------------------------------------------------------------------------
 
-def cloud_brief(text, job):
-    """The brief a cloud session gets: the local brief, then the CLOUD block."""
+def cloud_brief(text, job, setting=None):
+    """The brief a cloud session gets: the local brief, then the CLOUD block. ``setting``: the
+    block's opening lines for a runtime that is not a CI job (:mod:`asf.workers.remote`)."""
     sid = job.session or ''
-    lines = ['', '', 'CLOUD SESSION',
-             'You run in a CI job, not on the factory host: build and test happen here, in this '
-             'job. The worker environment (ASF_SESSION, BACKLOG_ID_RANGE, the caps) is already '
-             'exported, and the product setup has already run.',
-             f'- The repository is checked out on branch `{job.branch}` (base `{job.base}`). '
-             f'Commit and push on `{job.branch}` only; never push `{job.base}`, never force-push.',
+    setting = list(setting) if setting else [
+        'You run in a CI job, not on the factory host: build and test happen here, in this '
+        'job. The worker environment (ASF_SESSION, BACKLOG_ID_RANGE, the caps) is already '
+        'exported, and the product setup has already run.',
+        f'- The repository is checked out on branch `{job.branch}` (base `{job.base}`). '
+        f'Commit and push on `{job.branch}` only; never push `{job.base}`, never force-push.']
+    lines = ['', '', 'CLOUD SESSION', *setting,
              f'- Every commit message carries the trailer `{SESSION_TRAILER}: {sid}` '
              f'(`git commit --trailer "{SESSION_TRAILER}: {sid}"`).',
              '- Run the tests the brief names here, before you push.',
@@ -370,9 +410,15 @@ def _product_of(run):
 
 
 def stop(run, product=None, gh=None):
-    """Stop a cloud run: its workflow run is cancelled (``gh run cancel``). ``(ok, detail)``; the
-    token is recorded dead."""
+    """Stop a cloud run: its workflow run is cancelled (``gh run cancel``), or its routine disabled
+    (``claude-remote``). ``(ok, detail)``; the token is recorded dead."""
     from asf.workers import actions
+    from asf.workers import remote
+    if remote.is_remote(run):
+        ok = remote.retire(run)
+        cloudpid.record(run['pid'], DEAD, 'stopped')
+        return True, f'routine {remote.trigger_of(run)} disabled' if ok \
+            else f'routine {remote.trigger_of(run)} left as it is (disable refused or done)'
     parts, ok = [], True
     run_id = run.get('actions_run_id')
     product = product or _product_of(run)
@@ -391,11 +437,12 @@ def _load_cfg():
         return {}
 
 
-def sync(product, cfg=None, now=None, gh=None, stop_fn=None, out=print):
+def sync(product, cfg=None, now=None, gh=None, stop_fn=None, out=print, remote_client=None):
     """Every live cloud run of ``product`` brought up to date — see the module doc. Returns
     ``[(job, status, why)]`` for each run looked at."""
     from asf.workers import actions
     from asf.workers import pool as pool_mod
+    from asf.workers import remote
     cfg = cfg if cfg is not None else _load_cfg()
     s = settings(cfg, product)
     now = time.time() if now is None else now
@@ -410,7 +457,9 @@ def sync(product, cfg=None, now=None, gh=None, stop_fn=None, out=print):
         started = _parse_ts(run.get('started'))
         elapsed = None if started is None else (now - started) / 60.0
         run_id = run.get('actions_run_id')
-        if not run_id and run.get('actions_run_name'):
+        if remote.is_remote(run):  # a claude-remote routine run
+            run_id = run.get('remote_session_id')
+        elif not run_id and run.get('actions_run_name'):
             hit = gh.find_run(s.workflow, run['actions_run_name'])
             if hit:
                 run_id = hit['id']
@@ -418,7 +467,9 @@ def sync(product, cfg=None, now=None, gh=None, stop_fn=None, out=print):
                                         cloud_url=hit.get('url') or None)
                 run.update(actions_run_id=run_id, cloud_url=hit.get('url') or None)
         report = None
-        if not run.get('actions_run_name'):  # no workflow run: a launch of a refused runtime
+        if remote.is_remote(run):
+            status, why, report = remote.evidence(run, s, elapsed, now, remote_client)
+        elif not run.get('actions_run_name'):  # no workflow run: a launch of a refused runtime
             status, why = DEAD, 'no workflow run (a refused runtime launched it)'
         else:
             view = gh.view(run_id) if run_id else None  # before the report: no race with its end
@@ -495,6 +546,14 @@ def checks(cfg, product, run_cmd=None):
     if s.runtime == RUNTIME_ACTIONS:
         from asf.workers import actions
         rows += actions.checks(s, product, run_cmd=run_cmd)
+    if s.runtime == RUNTIME_REMOTE:
+        from asf.workers import remote
+        gaps = remote.doctor_rows(s, product)
+        rows += [('remote', req, ok, d) for req, ok, d in gaps]
+        if not gaps:
+            envs = s.environment_id or ', '.join(f'{a}={e}' for a, e in s.environments)
+            rows.append(('remote', True, True, f'claude-remote: routines in {envs}, source '
+                                               f'{remote.repo_url(product)}'))
     return rows
 
 
