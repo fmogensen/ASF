@@ -411,9 +411,10 @@ class OneClassifierTest(unittest.TestCase):
     this plan has not converted yet — Task 2 removes its two, Task 3 its three, Task 4 the last
     four and asserts ``NOT_YET == ()``, the moment this becomes the fence §3.6 asks for."""
 
-    #: Task 2 empties the first two, Task 3 the next three, Task 4 the next four. The last one,
-    #: `widen_footprint.py`, is a reader F-0098's plan does not name and no Task's `writes:`
-    #: covers (T-0087's REPORT: `needs writes:`) — it stays exempt until a Task claims it.
+    #: Task 2 empties the first two, Task 3 the next three, Task 4 the next four. The last three,
+    #: `score.py`, `cloudpid.py` and `widen_footprint.py`, are readers F-0098's plan does not name
+    #: and no Task's `writes:` covers (T-0087's REPORT: `needs writes:`) — they stay exempt until
+    #: a Task claims them.
     NOT_YET = (
         'asf/capacity.py',
         'asf/feeder/tiers.py',
@@ -424,6 +425,8 @@ class OneClassifierTest(unittest.TestCase):
         'asf/workers/health.py',
         'asf/tick/step_health.py',
         'asf/harvest/harvest.py',
+        'asf/scorecard/score.py',
+        'asf/workers/cloudpid.py',
         'asf/tick/widen_footprint.py',
     )
 
