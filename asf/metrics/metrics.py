@@ -511,10 +511,20 @@ def intake_latency_rows(events, conv=None):
     return [('intake → decided', a, na), ('decided → first session', b, nb)]
 
 
-def scorecard_rows(ci, sessions, ticks, conv=None, events=()):
-    """The rows of the waste table, computed from the streams."""
+def scorecard_rows(ci, sessions, ticks, conv=None, events=(), landing=None):
+    """The rows of the waste table, computed from the streams. `landing`, when given, is
+    `(non_landing_share, usd_per_landed_item, landed_items)` from `improve.measure.table` and
+    leads the table; `None` still leads, reading `—` with a note explaining why (the session
+    registry is machine-local, so a rollup with no product cannot resolve it)."""
     conv = conv or DEFAULTS
     rows = []
+    if landing is None:
+        rows.append(('landing', '—', 'no product resolved — the session registry is machine-local'))
+    else:
+        non_landing_share, usd_per_landed_item, landed_items = landing
+        usd = '—' if usd_per_landed_item is None else f"${usd_per_landed_item:.2f}"
+        rows.append(('landing', f"{round(100 * non_landing_share)} % of session time landed nothing",
+                     f"{usd} per landed item ({landed_items} landed, 7 days)"))
     n = len(ci)
     green = sum(1 for r in ci if r['conclusion'] == 'success')
     red = sum(1 for r in ci if r['conclusion'] == 'failure')
@@ -702,15 +712,24 @@ def delivered_table(rows):
     return lines
 
 
-def render_daily(root, day, items, conv=None):
+def render_daily(root, day, items, conv=None, product=None):
     ci = read_stream(root, 'ci', [day])
     sessions = read_stream(root, 'sessions', [day])
     ticks = read_stream(root, 'ticks', [day])
     week = days_back(day, 7)
+    landing = None
+    if product is not None:
+        from asf.improve import measure
+        try:
+            runs = measure.ended_runs(product, since=week[0], as_of=f'{day}T23:59:59Z')
+            t = measure.table(runs)
+            landing = (t['non_landing_share'], t['usd_per_landed_item'], t['landed_items'])
+        except env.ConfigError:
+            landing = None
     out = [f"# Factory scorecard {day}", '',
            f"generated: {day} — from metrics/ci ({len(ci)}), metrics/sessions ({len(sessions)}), metrics/ticks ({len(ticks)})", '',
            '## Waste', '', '| Metric | Value | Note |', '|---|---|---|']
-    for m, v, n in scorecard_rows(ci, sessions, ticks, conv, read_stream(root, 'events', week)):
+    for m, v, n in scorecard_rows(ci, sessions, ticks, conv, read_stream(root, 'events', week), landing):
         out.append(f"| {esc(m)} | {esc(v)} | {esc(n)} |".replace('|  |', '| |'))
     out += ['', f"## Cost per Feature (7 days)", '', f"{week[0]} … {week[-1]}; a Feature's row sums its Tasks, Stories and Bugs; "
             "a CI run's minutes are split over the items it names; "
@@ -1430,7 +1449,7 @@ def cmd_rollup(args, root):
         conv = _resolve_product(getattr(args, 'product', None)).conventions
     except env.ConfigError:
         conv = DEFAULTS     # a rollup over a checkout is readable with no product config
-    text = render_daily(root, day, items, conv)
+    text = render_daily(root, day, items, conv, product=getattr(args, 'product', None))
     daily = os.path.join(root, 'metrics', 'daily', f"{day}.md")
     print(f"{'wrote' if write_if_changed(daily, text) else 'unchanged'} {os.path.relpath(daily, root)}")
     changed, spend = write_costs(root, items, read_stream(root, 'ci'), read_stream(root, 'sessions'))

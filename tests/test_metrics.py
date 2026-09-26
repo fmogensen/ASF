@@ -302,6 +302,7 @@ generated: 2026-09-21 — from metrics/ci (3), metrics/sessions (4), metrics/tic
 
 | Metric | Value | Note |
 |---|---|---|
+| landing | — | no product resolved — the session registry is machine-local |
 | ci runs | 3 — 1 green, 1 red, 1 reruns | red rate 33 % |
 | runner-minutes | 40 (0 h) — useful 70 % | cancelled: batch 12 (30 %) — 30 % of the minutes |
 | red job: e2e | 1/2 (50 %) | |
@@ -371,6 +372,40 @@ class IntakeLatencyTests(Base):
                 metrics.read_stream(self.root, 'ticks'))
         self.assertEqual(metrics.scorecard_rows(*args), metrics.scorecard_rows(*args, events=()))
         self.assertFalse(any(r[0].startswith('intake') for r in metrics.scorecard_rows(*args)))
+
+
+class LandingRowTests(Base):
+    def test_landing_row_leads_and_carries_both_numbers(self):
+        rows = metrics.scorecard_rows([], [], [], landing=(0.35, 3.6, 86))
+        self.assertEqual(rows[0], ('landing', '35 % of session time landed nothing',
+                                    '$3.60 per landed item (86 landed, 7 days)'))
+
+    def test_no_landed_items_reads_dash_for_the_usd(self):
+        rows = metrics.scorecard_rows([], [], [], landing=(0.0, None, 0))
+        self.assertEqual(rows[0], ('landing', '0 % of session time landed nothing',
+                                    '— per landed item (0 landed, 7 days)'))
+
+    def test_none_reads_dash_with_its_note(self):
+        rows = metrics.scorecard_rows([], [], [])
+        self.assertEqual(rows[0], ('landing', '—', 'no product resolved — the session registry is machine-local'))
+
+    def test_render_daily_with_no_product_never_touches_measure(self):
+        with mock.patch('asf.improve.measure.ended_runs', side_effect=AssertionError('should not be called')):
+            md = metrics.render_daily(self.root, DAY, self.items)
+        self.assertIn('| landing | — | no product resolved — the session registry is machine-local |', md)
+
+    def test_render_daily_with_a_product_computes_landing(self):
+        with mock.patch('asf.improve.measure.ended_runs', return_value=['a run']) as ended_runs, \
+                mock.patch('asf.improve.measure.table',
+                            return_value={'non_landing_share': 0.35, 'usd_per_landed_item': 3.6, 'landed_items': 86}):
+            md = metrics.render_daily(self.root, DAY, self.items, product='sample')
+        ended_runs.assert_called_once_with('sample', since='2026-09-15', as_of=f'{DAY}T23:59:59Z')
+        self.assertIn('| landing | 35 % of session time landed nothing | $3.60 per landed item (86 landed, 7 days) |', md)
+
+    def test_a_missing_registry_renders_the_dash_form_not_an_error(self):
+        with mock.patch('asf.improve.measure.ended_runs', side_effect=env.ConfigError('no product configured')):
+            md = metrics.render_daily(self.root, DAY, self.items, product='sample')
+        self.assertIn('| landing | — | no product resolved — the session registry is machine-local |', md)
 
 
 class Rollup(Base):
