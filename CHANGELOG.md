@@ -2,6 +2,30 @@
 
 One entry per released version, newest first.
 
+## v0.1.24 — 2026-09-26
+
+### Features landed
+
+- F-0028 Prompt budget: four token dimensions itemised, never summed, with a cap per job
+- F-0078 The tick ends with two tables: in flight, and done since the last tick
+
+### In progress
+
+- F-0100 The savings pass: the tick proposes the next cheapest win from its own numbers
+- F-0112 Products update themselves to a new ASF release: upgrade: auto in the tick, with rollback on a red doctor
+- F-0113 An S1 silently holds all Feature work, and NEXT plans from different inputs than the tick
+
+### Improvements and hotfixes
+
+- fix(evidence): naming_ids' docstrings name no product branch prefix
+- fix(ci_queue): escalate trunk relief to in-progress runs whose queued jobs compete for main's runners
+- feat(ci): ci.reserve keeps N runners free of a PR-only label, for the trunk
+- feat(record): asf reopen — the supported way to correct a falsely derived closing
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.24"`
+
 ## v0.1.23 — 2026-09-26
 
 ### Bugs fixed
