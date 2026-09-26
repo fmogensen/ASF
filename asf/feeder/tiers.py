@@ -29,13 +29,15 @@ def free_slots(inflight, capacity):
     return max(int(capacity) - len(inflight or []), 0)
 
 
-def select(candidates, inflight, capacity, held=()):
+def select(candidates, inflight, capacity, held=(), s1_first=True):
     """The emitted rows, in order. ``candidates`` is :func:`asf.feeder.rows.candidates`' list;
-    ``held`` the item ids a hold parks (their launching rows take no slot)."""
+    ``held`` the item ids a hold parks (their launching rows take no slot). ``s1_first=False``
+    drops the S1 lane's cut of the tier-2 rows: the product's *demand*
+    (:func:`asf.tick.step_wave.demand`), not this tick's launch order."""
     held = set(held or ())
     ordered = sorted(candidates, key=tier_of)  # stable: keeps the Feature order within a tier
     free = free_slots(inflight, capacity)
-    s1_waiting = any(r.tier == TIER_S1 and r.launches and r.item_id not in held for r in ordered)
+    s1_waiting = s1_first and any(r.tier == TIER_S1 and r.launches and r.item_id not in held for r in ordered)
     out = []
     for r in ordered:
         if r.tier == TIER_REST and s1_waiting:

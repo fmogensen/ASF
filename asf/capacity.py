@@ -40,7 +40,8 @@ feeder only stops handing it new slots (``free_slots`` never goes below zero).
 
 **Borrowing.** The share is work-conserving: what another active product leaves idle is lent
 to this one. Each wave records its product's *demand* (:func:`write_demand`: its sessions in
-flight and the launching rows it would start given room) in ``state/<name>/demand.json``; a
+flight and its launchable ready rows, capped only by its own session ceiling — never by host
+pressure, this tick's room, the S1 lane's cut or the fair share) in ``state/<name>/demand.json``; a
 partner's *claim* is ``min(its share, max(its in-flight then + its wanted rows, its in-flight
 now))`` (:func:`claim`) — what its own wave recorded it would hold, so a partner held by host
 pressure lends nothing as its sessions end — and the rest of its share is borrowable. A partner with no fresh record (older than :data:`DEMAND_FRESH_S`, or none)
@@ -240,8 +241,8 @@ def _now():
 
 
 def write_demand(name, inflight, wanted):
-    """Record ``name``'s demand on the pool: ``inflight`` sessions and ``wanted`` launching rows
-    it would start given room. Written by every wave; read by the partners' :func:`fair_share`.
+    """Record ``name``'s demand on the pool: ``inflight`` sessions and ``wanted`` launchable
+    ready rows (:func:`asf.tick.step_wave.demand`). Written by every wave; read by the partners' :func:`fair_share`.
     A write that fails is ignored — a missing record lends nothing."""
     rec = {'at': _now().strftime('%Y-%m-%dT%H:%M:%SZ'), 'inflight': int(inflight),
            'wanted': int(wanted)}

@@ -339,7 +339,9 @@ class WaveStepTests(StepsTestCase):
         seen = {}
 
         def plan(index, product, inflight, capacity, attempts=None, occupancy=None,
-                 groom_state=None, held=None):
+                 groom_state=None, held=None, s1_first=True):
+            if not s1_first:        # the demand pass (step_wave.demand), not the cut
+                return self.rows
             seen.update(capacity=capacity, inflight=[s['item'] for s in inflight], ids=sorted(index))
             return self.rows
         ctx = self.ctx()
@@ -642,7 +644,8 @@ class LanePassBeforeTheWave(StepsTestCase):
             return real(*a, **kw)
 
         def plan(*a, **kw):
-            order.append('plan')
+            if kw.get('s1_first', True):    # not the demand pass (step_wave.demand)
+                order.append('plan')
             return []
         ctx = self.ctx()
         with mock.patch.object(lane, 'lane_pass', lane_pass), \
@@ -670,8 +673,9 @@ class WaveStep(StepsTestCase):
         seen = {}
 
         def plan(index, product, inflight, capacity, attempts=None, occupancy=None,
-                 groom_state=None, held=None):
-            seen['capacity'] = capacity
+                 groom_state=None, held=None, s1_first=True):
+            if s1_first:            # not the demand pass (step_wave.demand)
+                seen['capacity'] = capacity
             return []
 
         resolved = capacity.Resolved(sessions=7, sessions_bound='product', ci=None,
@@ -687,8 +691,9 @@ class WaveStep(StepsTestCase):
         seen = {}
 
         def plan(index, product, inflight, capacity, attempts=None, occupancy=None,
-                 groom_state=None, held=None):
-            seen['capacity'] = capacity
+                 groom_state=None, held=None, s1_first=True):
+            if s1_first:            # not the demand pass (step_wave.demand)
+                seen['capacity'] = capacity
             return []
 
         with mock.patch.object(feeder_rows, 'plan_rows', plan):
@@ -767,6 +772,77 @@ class AGatedRowGivesItsSlotBack(StepsTestCase):
         self.assertIn('; in flight 1: spec-f-0108; this wave 6: spec-f-0111, ', share[0])
         # a dropped row is said once, as the gate's own line — never as a fair-share wait
         self.assertEqual(sum(1 for ln in self.lines if ln.startswith('INVARIANT')), 4)
+
+
+class DemandIsTheReadyWork(StepsTestCase):
+    """2026-09-26 08:51 (a product tick): a product with 8 launchable rows, held by host
+    pressure, recorded ``demand.json`` ``{inflight 2, wanted 2}`` — only its two S1 rows, the S1
+    lane's cut having parked every Feature row behind them — so its partner borrowed 5 of its 9
+    slots and launched into them. ``wanted`` is the product's launchable ready rows, capped by
+    nothing but its own configured session ceiling: never host pressure, the room this tick,
+    the S1 lane's cut, or the fair share."""
+
+    product_extra = 'steps:\n  batch: off\ncapacity:\n  sessions: 16\n'
+
+    def setUp(self):
+        super().setUp()
+        self.launched = []
+
+        def build(product, row, index, inflight, repo_facts=None):
+            return _brief(row.brief_kind, row.item_id)
+
+        def wave(product, rows, n, brief_fn=None, out=print):
+            self.launched += [r.job for r in rows]
+            return [(r, {'model': 'opus'}) for r in rows], []
+        for name, fn in (('_build', build), ('_wave', wave), ('lane_pass', lambda ctx, out, **_kw: {})):
+            p = mock.patch.object(step_wave, name, fn)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def candidates(self, n_rest=7):
+        R = feeder_rows
+        s1 = [R.Row(0, R.BUG_FIX, 'B-0001', '', R.LAUNCH, 'fix-bug', '', 'S1 bug')]
+        rest = [R.Row(2, R.CARD_SPEC, f'F-01{n:02d}', f'F-01{n:02d}', R.LAUNCH, 'spec', '', 'card')
+                for n in range(n_rest)]
+        return s1 + rest
+
+    def resolved(self, sessions):
+        # the share cut under old weights: far below the product's own ceiling
+        return capacity.Resolved(sessions=sessions, sessions_bound='fair share', ci=None,
+                                 ci_bound=None, ci_inflight=None, batch={}, reserve={},
+                                 ceiling=sessions, fair_share=sessions, usable=12, active=2,
+                                 borrowed=0)
+
+    def run_wave(self, candidates, sessions=2):
+        with mock.patch.object(feeder_rows, 'candidates', lambda *a, **kw: candidates), \
+                mock.patch.object(capacity, 'resolve', lambda *a, **kw: self.resolved(sessions)), \
+                mock.patch.dict(os.environ, {'ASF_HOST_READING': '90 12 87'}):
+            step_wave.run(self.ctx(), out=self.lines.append)
+
+    def test_a_product_held_by_pressure_records_all_its_ready_rows(self):
+        self.run_wave(self.candidates())
+        self.assertEqual(self.launched, [])       # memory pressure: nothing starts, not even S1
+        self.assertEqual(capacity.read_demand_record('sample'), (0, 8))
+        # its partner's borrow excludes those slots: of a share of 9 it claims 8
+        self.assertEqual(capacity.claim('sample', 9), 8)
+
+    def test_wanted_is_capped_by_the_products_own_session_ceiling(self):
+        self.rewrite_ceiling(6)
+        self.session(job='spec-f-0900', item='F-0900', kind='spec', account='acct-a',
+                     pid=os.getpid(), started=pool_mod.now_iso())
+        self.run_wave(self.candidates())
+        self.assertEqual(capacity.read_demand_record('sample'), (1, 5))
+        self.assertEqual(capacity.claim('sample', 9), 6)
+
+    def test_a_product_with_no_ready_work_records_nothing_wanted_and_lends(self):
+        self.run_wave([])
+        self.assertEqual(capacity.read_demand_record('sample'), (0, 0))
+        self.assertEqual(capacity.claim('sample', 9), 0)
+
+    def rewrite_ceiling(self, n):
+        self.write_product(f'repo_dir: {self.repo}\nsteps:\n  batch: off\n'
+                           f'capacity:\n  sessions: {n}\n')
+        self.product = env.load_product('sample')
 
 
 # ---- prs --------------------------------------------------------------------------

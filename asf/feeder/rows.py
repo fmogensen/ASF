@@ -1007,8 +1007,10 @@ def finish_first(rows, items, product, inflight, held=()):
 
 
 def plan_rows(index, product, inflight, capacity, attempts=None, occupancy=None,
-              groom_state=None, landed_shas=None, decision_limit=None, held=None, exclude=None):
+              groom_state=None, landed_shas=None, decision_limit=None, held=None, exclude=None,
+              s1_first=True):
     """The rows the tick emits: tiered, S1 first, cut to ``capacity`` less what is in flight.
+    ``s1_first=False``: no S1 cut of the tier-2 rows (:func:`asf.feeder.tiers.select`).
     ``held``: the item ids an approval hold parks — shown, but given no slot. ``exclude``: the
     launching rows (:func:`asf.invariants.row_key`) the feeder's invariant gate dropped — they
     are not candidates, so the cut hands their slots to the next rows."""
@@ -1020,4 +1022,4 @@ def plan_rows(index, product, inflight, capacity, attempts=None, occupancy=None,
         from asf.invariants import row_key
         rows = [r for r in rows if not (r.launches and row_key(r) in exclude)]
     rows = finish_first(rows, items_of(index), product, inflight, held)
-    return tiers.select(rows, inflight, capacity, held=held)
+    return tiers.select(rows, inflight, capacity, held=held, s1_first=s1_first)
