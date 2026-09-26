@@ -17,7 +17,7 @@ import os
 import re
 import sys
 
-from asf import env
+from asf import env, proves
 from asf.evidence import closing, evidence
 from asf.record import frontmatter
 from asf.record.core import is_retired as core_is_retired
@@ -788,6 +788,39 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
     return new_state, closings, derived, stage_val, task_ev, evs
 
 
+def tick_proven(canonical, ev, stamp):
+    """The pass that turns a landed claim into a fact on the card (§2.7): over the Story cards
+    only, the ``## Acceptance`` line each of ``ev['proves']``'s claims names is flipped to
+    ``- [x]`` — once, never in reverse (D7). Runs after the write loop and before ``do_index``
+    (P14): that loop may have just rewritten the very card this pass ticks, so the card is
+    re-read off ``rec['path']`` and parsed afresh rather than reusing the body the write loop
+    already holds. One ``frontmatter.render`` write per Story that changed, and one
+    ``## History`` line per line newly ticked, in §2.7's shape — the ``PR #<n>`` clause omitted
+    where the claim's ``pr`` is null, a fast-forward landing having no pull request to name."""
+    for iid, rec in canonical.items():
+        if rec['meta'].get('type') != 'story':
+            continue
+        claims = (ev.get('proves') or {}).get(iid) or []
+        if not claims:
+            continue
+        with open(rec['path'], encoding='utf-8') as f:
+            text = f.read()
+        meta, body = frontmatter.parse(text, path=rec['relpath'])
+        history = []
+        for claim in claims:
+            body, changed = proves.tick(body, claim['line'], None)
+            if not changed:
+                continue
+            pr_clause = f", PR #{claim['pr']}" if claim.get('pr') else ''
+            history.append(f"- {stamp} ingest: proved line {claim['line']} — "
+                           f"{claim['task']}{pr_clause} ({claim['test']})")
+        if not history:
+            continue
+        body = append_history_lines(body, history)
+        with open(rec['path'], 'w', encoding='utf-8') as f:
+            f.write(frontmatter.render(meta, body))
+
+
 def ingest_into(root, ev, product=None):
     """The ingest pass over ``root`` with the evidence ``ev``: restamp, :func:`derive`, merge
     every changed machine block, re-index. Returns the exit code. A writer of the record: run it
@@ -834,5 +867,7 @@ def ingest_into(root, ev, product=None):
                     f.write(frontmatter.render(meta2, new_body))
         if type_ == 'feature' and stage_val.get(iid) == 'on-prod' and old != 'on-prod':
             write_on_prod_event(root, iid, old, now)
+
+    tick_proven(canonical, ev, now[:16].replace('T', ' '))
 
     return do_index(root)

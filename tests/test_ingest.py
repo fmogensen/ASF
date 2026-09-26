@@ -1111,5 +1111,110 @@ class FeatureOnProdEventTests(unittest.TestCase):
         self.assertEqual(before, after)
 
 
+class ProvenAcceptanceTests(IngestTestCase):
+    """§2.7: a landed claim ticks the Story acceptance line its test proves, once (D7)."""
+
+    STORY_BODY = (
+        "## Description\n\n"
+        "## Acceptance\n"
+        "- [ ] the claim and its parser\n"
+        "- [ ] a malformed claim is a problem, not a silent skip\n\n"
+        "## Non-goals\n\n"
+        "## History\n"
+        "- 2026-01-01: created\n\n"
+        "## Children\n\n"
+        "## Backlinks\n"
+    )
+
+    def make_story(self, body=None):
+        write(self.root, 'S-18754', 'story', 'The tick',
+              'stories', body=self.STORY_BODY if body is None else body)
+
+    def canonical(self):
+        by_id, _errors = ingest.load_items(self.root)
+        canonical, _dupes = ingest.canonicalize(by_id)
+        return canonical
+
+    def raw(self):
+        with open(os.path.join(self.root, 'stories', 'S-18754.md'), encoding='utf-8') as f:
+            return f.read()
+
+    def claim(self, line=2, pr=412, task='T-0123',
+              test='tests/test_proves.py::ParseTests::test_trailer', sha='d' * 40, source='pr'):
+        return {'line': line, 'test': test, 'task': task, 'pr': pr, 'sha': sha, 'source': source}
+
+    def test_line_two_ticks_and_the_rest_of_the_body_is_byte_identical(self):
+        self.make_story()
+        before_meta = self.meta('stories', 'S-18754')
+        ingest.tick_proven(self.canonical(), {'proves': {'S-18754': [self.claim()]}},
+                           '2026-09-24 12:30')
+        after_meta = self.meta('stories', 'S-18754')
+        self.assertEqual(before_meta, after_meta)
+        _meta, body = read_meta(self.root, 'stories', 'S-18754')
+        expected = self.STORY_BODY.replace(
+            '- [ ] a malformed claim is a problem, not a silent skip',
+            '- [x] a malformed claim is a problem, not a silent skip',
+        ).replace(
+            '## History\n- 2026-01-01: created\n\n',
+            '## History\n- 2026-01-01: created\n'
+            '- 2026-09-24 12:30 ingest: proved line 2 — T-0123, PR #412 '
+            '(tests/test_proves.py::ParseTests::test_trailer)\n\n',
+        )
+        self.assertEqual(body, expected)
+
+    def test_a_second_pass_writes_nothing_more(self):
+        self.make_story()
+        ev = {'proves': {'S-18754': [self.claim()]}}
+        ingest.tick_proven(self.canonical(), ev, '2026-09-24 12:30')
+        once = self.raw()
+        ingest.tick_proven(self.canonical(), ev, '2026-09-24 12:45')
+        self.assertEqual(self.raw(), once)
+
+    def test_a_claim_naming_a_line_the_story_does_not_have_changes_nothing(self):
+        self.make_story()
+        before = self.raw()
+        ingest.tick_proven(self.canonical(), {'proves': {'S-18754': [self.claim(line=9)]}},
+                           '2026-09-24 12:30')
+        self.assertEqual(self.raw(), before)
+
+    def test_a_null_pr_writes_no_pr_clause(self):
+        self.make_story()
+        ingest.tick_proven(
+            self.canonical(),
+            {'proves': {'S-18754': [self.claim(pr=None, source='commit')]}},
+            '2026-09-24 12:30')
+        _meta, body = read_meta(self.root, 'stories', 'S-18754')
+        self.assertIn(
+            '- 2026-09-24 12:30 ingest: proved line 2 — T-0123 '
+            '(tests/test_proves.py::ParseTests::test_trailer)', body)
+        self.assertNotIn('PR #', body)
+
+    def test_a_story_with_no_acceptance_section_changes_nothing(self):
+        body = "## Description\n\n## History\n- 2026-01-01: created\n\n## Children\n\n## Backlinks\n"
+        self.make_story(body=body)
+        before = self.raw()
+        ingest.tick_proven(self.canonical(), {'proves': {'S-18754': [self.claim()]}},
+                           '2026-09-24 12:30')
+        self.assertEqual(self.raw(), before)
+
+    def test_the_ticked_bullet_still_satisfies_the_story_shape_check(self):
+        self.make_story()
+        ingest.tick_proven(self.canonical(), {'proves': {'S-18754': [self.claim()]}},
+                           '2026-09-24 12:30')
+        _meta, body = read_meta(self.root, 'stories', 'S-18754')
+        _preamble, sections = ingest.parse_sections(body)
+        acceptance = dict(sections)['## Acceptance']
+        self.assertIn('- [x] a malformed claim is a problem, not a silent skip', acceptance)
+        self.assertTrue(check.ACCEPTANCE_ITEM_RE.search(acceptance))
+
+    def test_wired_into_cmd_ingest_between_the_write_loop_and_do_index(self):
+        self.make_story()
+        ev = dict(EMPTY_EV, proves={'S-18754': [self.claim()]})
+        self.assertEqual(self.run_ingest(ev), 0)
+        _meta, body = read_meta(self.root, 'stories', 'S-18754')
+        self.assertIn('- [x] a malformed claim is a problem, not a silent skip', body)
+        self.assertIn('ingest: proved line 2 — T-0123, PR #412', body)
+
+
 if __name__ == '__main__':
     unittest.main()
