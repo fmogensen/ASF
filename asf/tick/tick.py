@@ -410,6 +410,12 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
         # starved its own product for as long as the slowest other tick ran (2026-09-25: 40 min).
         print(f'tick: upgrade to {upgrade.read_pending()["sha"][:7]} pending — this tick runs;'
               ' the install goes at the next start')
+    # every asf step's module, imported now rather than lazily as each step runs (B-0135): an
+    # install that swaps the package mid-tick can no longer land between two of this tick's own
+    # step imports and mix old and new modules in one run
+    for step, owner, _ in rows:
+        if owner == 'asf':
+            _asf_step(step)
     rc = 0
     ran = []
     resolved = None

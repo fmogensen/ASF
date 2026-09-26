@@ -37,36 +37,48 @@ if [ -z "$REF" ]; then
 fi
 say "product $PRODUCT, ref ${REF:0:12} from $REPO_URL"
 
-# 1a. the same lock a running tick holds for its whole run (asf.tick.tick.lock_path): `pipx
-# install --force` is not atomic, and replacing the package under a running tick tears it — half
-# its modules old, half new (B-0135, an ImportError mid-groom). Bounded: a stuck tick asks the
-# operator rather than hanging the install forever.
+# 1. the same lock a running tick holds for its whole run (asf.tick.tick.lock_path), held across
+# the `pipx install --force` call itself, not just checked beforehand: `pipx install --force` is
+# not atomic, and replacing the package under a running tick — or one that starts while the swap
+# is in flight — tears it, half its modules old, half new (B-0135, an ImportError mid-groom).
+# Bounded: a stuck tick asks the operator rather than hanging the install forever.
 INSTALL_LOCK_WAIT_S="${ASF_INSTALL_LOCK_WAIT_S:-600}"
 INSTALL_LOCK_POLL_S="${ASF_INSTALL_LOCK_POLL_S:-10}"
 TICK_LOCK="$ASF_HOME/state/$PRODUCT/tick.lock"
 mkdir -p "$(dirname "$TICK_LOCK")"
-python3 - "$TICK_LOCK" "$INSTALL_LOCK_WAIT_S" "$INSTALL_LOCK_POLL_S" <<'PY' || die "a running tick of $PRODUCT still held its lock after ${INSTALL_LOCK_WAIT_S}s — wait for it to finish, then rerun"
-import fcntl, sys, time
-path, wait_s, poll_s = sys.argv[1], float(sys.argv[2]), float(sys.argv[3])
+rc=0
+python3 - "$TICK_LOCK" "$INSTALL_LOCK_WAIT_S" "$INSTALL_LOCK_POLL_S" "$REPO_URL" "$REF" <<'PY' || rc=$?
+import fcntl, subprocess, sys, time
+path, wait_s, poll_s, repo_url, ref = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), sys.argv[4], sys.argv[5]
 deadline = time.monotonic() + wait_s
 f = open(path, 'a')
 waited = False
 while True:
     try:
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        fcntl.flock(f, fcntl.LOCK_UN)
-        sys.exit(0)
+        break
     except OSError:
         if not waited:
             print('install: a running tick holds the lock — waiting', file=sys.stderr)
             waited = True
         if time.monotonic() >= deadline:
-            sys.exit(1)
+            sys.exit(99)  # distinct from pipx's own exit code: the wait timed out, not the install
         time.sleep(poll_s)
+# the lock is held from here through the install itself: a tick that starts now, or is already
+# running, blocks on this same lock until the swap below is done and it is released
+try:
+    subprocess.run(['pipx', 'install', '--force', f'git+{repo_url}@{ref}'],
+                    check=True, stdout=subprocess.DEVNULL)
+except subprocess.CalledProcessError as e:
+    sys.exit(e.returncode or 1)
+finally:
+    fcntl.flock(f, fcntl.LOCK_UN)
 PY
-
-# 1. the pinned install — pipx keeps it in its own venv; --force moves it to the new ref
-pipx install --force "git+${REPO_URL}@${REF}" >/dev/null
+if [ "$rc" -eq 99 ]; then
+  die "a running tick of $PRODUCT still held its lock after ${INSTALL_LOCK_WAIT_S}s — wait for it to finish, then rerun"
+elif [ "$rc" -ne 0 ]; then
+  die "pipx install --force git+${REPO_URL}@${REF} failed (exit $rc) while holding $PRODUCT's tick lock"
+fi
 # every run of this script is an install by hand (the tick's auto-upgrade runs pipx itself):
 # `asf release-readiness` counts these lines against the factory's stability
 mkdir -p "$ASF_HOME/logs" 2>/dev/null && \
