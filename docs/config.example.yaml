@@ -29,9 +29,28 @@ scheduler:
 # with the product it runs for, so cost per product is a sum.
 worker_pool:
   backend: claude-code   # claude-code | fake
-  models:                # the two model labels a brief uses, mapped to model ids — an unmapped
-    heavy: heavy-model-id   # label refuses the launch
-    light: light-model-id
+  # brief labels → the model ids this pool may launch. An unmapped label is refused, except
+  # `cheap`, which falls back to `light` (F-0093 D2) — a pool configured before the cheap tier
+  # keeps running, at the price it already paid.
+  models:
+    heavy: <your judgement model>
+    light: <your coding model>
+    cheap: <your smallest model>
+  # Measured 2026-09-23 over ASF's own build, as minutes of session time per landing:
+  #
+  # | kind       | model  | runs | hours | landed | min/landing |
+  # | ---        | ---    | ---  | ---   | ---    | ---         |
+  # | plan       | opus   | 11   | 5.8   | 11     | 32          |
+  # | correct    | sonnet | 39   | 19.7  | 16     | 74          |
+  # | fix-bug    | sonnet | 49   | 53.8  | 36     | 90          |
+  # | adjudicate | opus   | 35   | 24.1  | 16     | 90          |
+  # | coder      | sonnet | 38   | 52.2  | 19     | 165         |
+  # | spec       | opus   | 45   | 39.9  | 12     | 200         |
+  #
+  # The labels are mostly right and the counts are wrong: `spec`'s cost is the 45 runs behind 12
+  # landings, not the model. The pool had no tier below `light`, so a rebase, a close and the
+  # groom's clerical pass paid for judgement they never used.
+  # Re-read this weekly: `asf improve` recomputes the table above in `<record>/improve/<date>.md`.
   accounts:
     - name: acct-a
       role: local
