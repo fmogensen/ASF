@@ -2,6 +2,22 @@
 
 One entry per released version, newest first.
 
+## v0.1.21 — 2026-09-26
+
+### Bugs fixed
+
+- B-0128 An adjudicator's 'no further sessions' ruling does not stick: the lane re-adjudicates the item
+
+### Improvements and hotfixes
+
+- feat(cloud): cloud.default puts the cloud lane first; asf cloud doctor
+- feat(cloud): runtime claude-remote — a worker session as a claude.ai routine run
+- fix(capacity): demand is the product's ready rows, not the S1-cut plan
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.21"`
+
 ## v0.1.20 — 2026-09-26
 
 ### Features landed
