@@ -55,6 +55,8 @@ DEFAULT_DRAIN_WAIT_S = 180
 DEFAULT_MANUAL_WAIT_S = 600
 #: how often a draining upgrade looks for the other asf processes again
 DRAIN_POLL_S = 5
+#: the drain's sleep — its own name, so a test replaces it without touching time.sleep
+_drain_sleep = time.sleep
 #: ``upgrade.min_interval_min`` when the operator config leaves it out
 DEFAULT_MIN_INTERVAL_MIN = 30
 
@@ -462,7 +464,7 @@ def cmd_upgrade(args, run=subprocess.run):
     if not args.skip_pipx:
         rc = install(getattr(args, 'ref', None), run=run, owner=getattr(args, 'owner', None),
                      wait_s=getattr(args, 'wait', None) or 0,
-                     sleep=getattr(args, 'sleep', None) or time.sleep)
+                     sleep=getattr(args, 'sleep', None) or _drain_sleep)
         if rc != 0:
             return rc
     print(f'upgrade: package {__version__}, schema {schema.SCHEMA_VERSION}')
