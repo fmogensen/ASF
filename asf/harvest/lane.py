@@ -60,6 +60,9 @@ Transitions (plan §2 plus the §9 overrides):
 - T13n PUSHED/BACK → PUSHED    a naming refusal: the lane rewords the subjects itself
                                (:meth:`Lane.repair_naming`) — no session, no round; only a
                                reword it cannot push goes back to the session (no round)
+- T13s gate → PUSHED           the PR's sign-off check (``commit.signoff_check``, "DCO") red:
+                               the lane signs the unsigned commits off itself
+                               (:meth:`Lane.repair_signoff`) — a factory branch only
 - Th  any open, head moved     → PUSHED(new head) (R4)
 """
 import datetime
@@ -332,7 +335,7 @@ def commits_name_item(repo, trunk, branch, item):
     return bool(subjects) and all(githooks.names_item(s, item) for s in subjects)
 
 
-#: the author and committer fields :func:`reword_branch` carries onto each rewritten commit
+#: the author and committer fields :func:`rebuild_branch` carries onto each rewritten commit
 _IDENT = (('GIT_AUTHOR_NAME', '%an'), ('GIT_AUTHOR_EMAIL', '%ae'), ('GIT_AUTHOR_DATE', '%ad'),
           ('GIT_COMMITTER_NAME', '%cn'), ('GIT_COMMITTER_EMAIL', '%ce'),
           ('GIT_COMMITTER_DATE', '%cd'))
@@ -344,6 +347,43 @@ def reword_branch(repo, trunk, branch, item, kind=None):
     trees, authors, committers and dates identical, body untouched, no checkout and no hook run
     (``git commit-tree``). ``(None, 0)`` when nothing needs a reword or a commit cannot be
     rebuilt (a merge commit, a git error)."""
+    def reword(message, _ident):
+        subject, nl, body = message.partition('\n')
+        return githooks.name_subject(subject, item, kind) + nl + body
+    return rebuild_branch(repo, trunk, branch, reword)
+
+
+def signed_off(message, name, email):
+    """True when ``message`` carries ``Signed-off-by: <name> <email>`` as a trailer line."""
+    want = f'signed-off-by: {name} <{email}>'.lower()
+    return any(line.strip().lower() == want for line in (message or '').splitlines())
+
+
+def signoff_branch(repo, trunk, branch):
+    """``(new_tip, n)``: ``origin/<branch>`` from its merge-base onward, each commit its author has
+    not signed off given ``Signed-off-by: <author name> <author email>`` (``git
+    interpret-trailers``) — trees, authors, committers, dates and the rest of the message
+    identical, as :func:`reword_branch`. ``(None, 0)`` when every commit is signed off already or
+    one cannot be rebuilt."""
+    def sign(message, ident):
+        name, email = ident['GIT_AUTHOR_NAME'], ident['GIT_AUTHOR_EMAIL']
+        if signed_off(message, name, email):
+            return message
+        r = subprocess.run(['git', 'interpret-trailers', '--if-exists', 'addIfDifferent',
+                            '--trailer', f'Signed-off-by: {name} <{email}>'],
+                           input=message, cwd=repo, capture_output=True, text=True,
+                           env=H.clean_env(dict(os.environ)))
+        return r.stdout if r.returncode == 0 and r.stdout.strip() else None
+    return rebuild_branch(repo, trunk, branch, sign)
+
+
+def rebuild_branch(repo, trunk, branch, transform):
+    """``(new_tip, n)``: ``origin/<branch>`` from its merge-base with ``origin/<trunk>`` onward,
+    each commit's message passed through ``transform(message, ident)`` (``ident``: the commit's
+    ``GIT_AUTHOR_*``/``GIT_COMMITTER_*``) and the commit rebuilt with ``git commit-tree`` —
+    trees, authors, committers and dates identical, no checkout and no hook run. ``n`` counts the
+    messages that changed. ``(None, 0)`` when none did, or a commit cannot be rebuilt (a merge
+    commit, a git error, a ``transform`` that answers None)."""
     tip = H.sh(['git', 'rev-parse', '--verify', '-q', f'origin/{branch}'], cwd=repo).stdout.strip()
     base = H.sh(['git', 'merge-base', f'origin/{trunk}', f'origin/{branch}'],
                 cwd=repo).stdout.strip()
@@ -360,15 +400,17 @@ def reword_branch(repo, trunk, branch, item, kind=None):
             return None, 0  # a merge commit, or no commit: the lane refuses it otherwise
         raw = H.sh(['git', 'cat-file', 'commit', sha], cwd=repo).stdout
         message = raw.split('\n\n', 1)[1] if '\n\n' in raw else ''
-        subject, nl, body = message.partition('\n')
-        named = githooks.name_subject(subject, item, kind)
-        if named == subject and fields[-1] == parent:
+        ident = {k: v for (k, _), v in zip(_IDENT, fields)}
+        made_msg = transform(message, ident)
+        if made_msg is None:
+            return None, 0
+        if made_msg == message and fields[-1] == parent:
             parent = sha
             continue
-        n += named != subject
-        env = dict(os.environ, **{k: v for (k, _), v in zip(_IDENT, fields)})
+        n += made_msg != message
+        env = dict(os.environ, **ident)
         made = subprocess.run(['git', 'commit-tree', fields[-2], '-p', parent],
-                              input=named + nl + body, cwd=repo, capture_output=True, text=True,
+                              input=made_msg, cwd=repo, capture_output=True, text=True,
                               env=H.clean_env(env))
         parent = made.stdout.strip()
         if made.returncode != 0 or not parent:
@@ -1424,6 +1466,44 @@ class Lane:
             self.write(f, self.record(f, PUSHED, 'adopted'))
         return self.set(f, PUSHED, f'reworded {n} subjects (naming)')
 
+    def repair_signoff(self, f, check):
+        """A sign-off refusal (the PR's ``check`` — :meth:`Conventions.is_signoff_check` — red),
+        repaired by the lane with no session: each commit on the branch its author has not
+        signed off gets the trailer (:func:`signoff_branch`, trees unchanged), pushed from the ref
+        checkout over a lease on the old tip, and the branch is PUSHED at its new head so its
+        checks run again. The record, or None when it could not be (the caller sends the red
+        check back as before). A branch under no factory prefix is never rewritten."""
+        b, old = f['branch'], f.get('head')
+        if not old or not self.repo:
+            return None
+        if not f.get('kind'):
+            self.out(f'sign-off {b} ({check}): under no factory prefix — the lane does not '
+                     f'rewrite it')
+            return None
+        if self.dry_run:
+            self.out(f'DRY: would sign off the commits on {b} ({check}) — no session')
+            return None
+        new, n = signoff_branch(self.repo, self.trunk, b)
+        wt = self.ref_checkout() if new else ''
+        if not new or not wt:
+            self.out(f'sign-off {b} ({check}) failed: '
+                     f'{"every commit is signed off already" if not new else self.ref_wt_error}')
+            return None
+        r = H.sh(['git', 'push', '-q', f'--force-with-lease=refs/heads/{b}:{old}', 'origin',
+                  f'{new}:refs/heads/{b}'], cwd=wt)
+        if r.returncode != 0:
+            self.out(f'sign-off {b} ({check}) push refused: {push_why(r.stderr or r.stdout)}')
+            return None
+        H.sh(['git', 'update-ref', f'refs/remotes/origin/{b}', new], cwd=self.repo)
+        self.out(f'signed off {n} commits on {b} ({check}) — no session')
+        f['head'] = new
+        if f.get('review'):
+            f['review']['current'] = review_mod.is_current(self.repo, self.conv, f'origin/{b}',
+                                                           f['review'], new)
+        if f.get('run') is None:
+            self.write(f, self.record(f, PUSHED, 'adopted'))
+        return self.set(f, PUSHED, f'signed off {n} commits ({check})')
+
     def enter_back(self, f, reason):
         """BACK: a refusal or a review's changes go back to a session (a hold); a pending
         correction is already that."""
@@ -2380,6 +2460,10 @@ class GitHubHost(Host):
         if state == 'red':
             red = [c.get('name') or '?' for c in checks if c.get('bucket') in RED_BUCKETS
                    and (not required or c.get('name') in required)]
+            conv = self.product.conventions
+            unsigned = [n for n in red if conv.is_signoff_check(n)]
+            if unsigned and lane.repair_signoff(f, unsigned[0]) is not None:
+                return None  # a new head: its checks run again, next pass reads them
             on_trunk = self.trunk_red(red)
             if red and all(n in on_trunk for n in red):
                 lane.out(f'waiting {b}: PR #{number} checks red: {detail} — red on {self.trunk} '

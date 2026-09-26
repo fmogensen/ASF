@@ -939,6 +939,80 @@ class NamingRepair(LaneFixture):
         self.assertEqual(state.name, lifecycle.HELD)
 
 
+class SignoffRepair(LaneFixture):
+    """A PR whose DCO check is red: the lane signs each unsigned commit of a factory branch off
+    itself (trees unchanged, pushed over a lease) — and never rewrites a foreign branch."""
+
+    B, AUTHOR = NamingRepair.B, NamingRepair.AUTHOR
+    push_commits, tip, log = NamingRepair.push_commits, NamingRepair.tip, NamingRepair.log
+
+    def runner(self):
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        return lane.Lane(self.product(), self.state_dir, out=self.lines.append)
+
+    def setUp(self):
+        super().setUp()
+        self.lines = []
+
+    def test_the_lane_signs_off_a_factory_branch(self):
+        old = self.push_commits([('feat(T-0001): the door', {'a.txt': 'a\n'}),
+                                 ('feat(T-0001): the hinge\n\nSigned-off-by: Ada <ada@x>',
+                                  {'b.txt': 'b\n'})])
+        self.session('coder-t-0001', 'T-0001', self.B)
+        ln = self.runner()
+        f = {'branch': self.B, 'kind': 'code', 'item': 'T-0001', 'head': old,
+             'prev': rec(lane.GATE, head=old, pr=7), 'run': {'job': 'coder-t-0001'}}
+        got = ln.repair_signoff(f, 'DCO sign-off')
+        self.assertIsNotNone(got)
+        self.assertIn(f'signed off 1 commits on {self.B} (DCO sign-off) — no session', self.lines)
+        new = self.tip()
+        self.assertNotEqual(new, old)
+        self.assertEqual((got['state'], got['head']), (lane.PUSHED, new))
+        bodies = self.log('%B%x00', new).split('\x00')[:2]
+        self.assertEqual([b.count('Signed-off-by: Ada <ada@x>') for b in bodies], [1, 1], bodies)
+        self.assertTrue(bodies[1].rstrip().endswith('Signed-off-by: Ada <ada@x>'), bodies)
+        self.assertEqual(self.log('%T %an %ae %ad %cn %ce %cd %s', new),
+                         self.log('%T %an %ae %ad %cn %ce %cd %s', old))
+        # signed already: nothing to do, nothing pushed
+        f['head'] = new
+        self.assertIsNone(ln.repair_signoff(f, 'DCO'))
+        self.assertEqual(self.tip(), new)
+
+    def test_a_foreign_branch_is_never_rewritten(self):
+        old = self.push_commits([('feat(T-0001): the door', {'a.txt': 'a\n'})])
+        ln = self.runner()
+        f = {'branch': self.B, 'kind': None, 'item': 'T-0001', 'head': old,
+             'prev': rec(lane.GATE, head=old, pr=7), 'run': None}
+        self.assertIsNone(ln.repair_signoff(f, 'DCO'))
+        self.assertEqual(self.tip(), old)
+        self.assertTrue(any('under no factory prefix' in l for l in self.lines), self.lines)
+
+    def test_a_red_dco_check_triggers_the_repair_and_no_hold(self):
+        product = env.Product('p', {'repo_slug': 'o/p', 'conventions': {
+            'landing': 'pull-request', 'landing_checks': ['DCO sign-off', 'ci']}})
+        runner = lane.Lane.__new__(lane.Lane)
+        runner.product, runner.conv, runner.out, runner.dry_run = product, product.conventions, \
+            self.lines.append, False
+        runner.results, runner.now, runner.state_dir = {}, NOW, self.state_dir
+        runner.repo = None
+        host = lane.GitHubHost(product, None)
+        host.lane = runner
+        f = {'branch': 'worker/T-0001', 'prev': rec(lane.GATE, pr=7), 'class': lane.CODE,
+             'head': HEAD, 'kind': 'code'}
+        checks = [{'name': 'ci', 'bucket': 'pass'}, {'name': 'DCO sign-off', 'bucket': 'fail'}]
+        with mock.patch.object(harvest, '_gh', return_value=(0, json.dumps(checks), '')), \
+                mock.patch.object(lane.Lane, 'repair_signoff', return_value={'state': 'x'}) as rs, \
+                mock.patch.object(lane, 'send_back') as sb:
+            self.assertIsNone(host.check_gate(f, 7, ['src/a.py']))
+        rs.assert_called_once_with(f, 'DCO sign-off')
+        sb.assert_not_called()
+        # a product naming its own check: only that name counts
+        product = env.Product('p', {'repo_slug': 'o/p', 'conventions': {
+            'commit': {'signoff_check': 'signed'}}})
+        self.assertFalse(product.conventions.is_signoff_check('DCO'))
+        self.assertTrue(product.conventions.is_signoff_check('commits-signed'))
+
+
 class Occupancy(unittest.TestCase):
     """R16: the lane and the feeder are one stream — the feeder reads the lane's states through
     the one occupancy answer, and the rows follow them."""
