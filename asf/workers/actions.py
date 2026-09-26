@@ -173,7 +173,17 @@ def register(subparsers):
                                        'and print what to commit (pushes nothing)')
     env.add_product_arg(i)
     i.set_defaults(run=cmd_install)
+    d = sub.add_parser('doctor', help='is the cloud lane ready: one ok/gap line per check '
+                                      '(on/default, secret name, workflow on the trunk, an online '
+                                      'runner, accounts)')
+    env.add_product_arg(d)
+    d.set_defaults(run=cmd_doctor)
     return p
+
+
+def cmd_doctor(args):
+    product = env.load_product(args.product)
+    return cloud.doctor(env.load_config(), product)
 
 
 # ---- gh ---------------------------------------------------------------------------------------
@@ -365,35 +375,53 @@ class ActionsRuntime(runtime_mod.Runtime):
 
 # ---- doctor -----------------------------------------------------------------------------------
 
-def doctor_rows(s, product, run_cmd=None):
-    """``[(required, ok, detail)]``: the repo, the workflow on the default branch, the secret,
-    and an online runner for self-hosted labels."""
+def checks(s, product, run_cmd=None):
+    """``[(name, required, ok, detail)]``, one per check, passing or not: the repo, the workflow
+    on the default branch, the secret (``gh secret list``: names only, never values), and an
+    online runner for self-hosted labels."""
     gh = Gh(product, run=run_cmd)
     if not gh.slug:
-        return [(True, False, 'the product has no repo_slug: the lane dispatches a workflow '
-                              'of the product repo')]
+        return [('repo', True, False, 'the product has no repo_slug: the lane dispatches a '
+                                      'workflow of the product repo')]
     rows = []
     ok, err = gh.workflow_on(s, product.main)
-    if not ok:
-        rows.append((True, False, f'{workflow_path(s)} is not on {product.main} of {gh.slug} '
-                                  f'({err}): `asf cloud install --product {product.name}`, '
-                                  'then commit and push it'))
+    if ok:
+        rows.append(('workflow', True, True, f'{workflow_path(s)} on {product.main} of {gh.slug}'))
+    else:
+        rows.append(('workflow', True, False,
+                     f'{workflow_path(s)} is not on {product.main} of {gh.slug} ({err}): '
+                     f'`asf cloud install --product {product.name}`, then commit and push it'))
     names = gh.secret_names()
     if names is None:
-        rows.append((False, False, f'cannot list the secrets of {gh.slug}: is repo secret '
-                                   f'{s.token_secret} set?'))
+        rows.append(('secret', False, False, f'cannot list the secrets of {gh.slug}: is repo '
+                                             f'secret {s.token_secret} set?'))
     elif s.token_secret not in names:
-        rows.append((True, False, f'repo secret {s.token_secret} is missing on {gh.slug}: the '
-                                  'job has no token for the runtime CLI'))
+        rows.append(('secret', True, False, f'repo secret {s.token_secret} is missing on '
+                                            f'{gh.slug}: the job has no token for the runtime CLI'))
+    else:
+        rows.append(('secret', True, True, f'repo secret {s.token_secret} is set on {gh.slug}'))
     labels = [l for l in s.runs_on if l]
-    if not all(HOSTED_RE.match(l) for l in labels):
+    if all(HOSTED_RE.match(l) for l in labels):
+        rows.append(('runner', True, True, f'runs_on [{", ".join(labels)}]: GitHub-hosted, no '
+                                           'runner of the product needed'))
+    else:
         from asf import ci_pool
         try:
             runners = ci_pool.GitHubBackend(product, run=run_cmd).runners()
         except ci_pool.BackendError as e:
-            rows.append((False, False, f'cannot list runners: {e}'))
+            rows.append(('runner', False, False, f'cannot list runners: {e}'))
         else:
             want = {l.lower() for l in labels}
-            if not any(r.online and want <= r.norm_labels() for r in runners):
-                rows.append((True, False, f'no online runner carries [{", ".join(labels)}]'))
+            hits = sorted(r.name for r in runners if r.online and want <= r.norm_labels())
+            if hits:
+                rows.append(('runner', True, True, f'online runner {", ".join(hits)} carries '
+                                                   f'[{", ".join(labels)}]'))
+            else:
+                rows.append(('runner', True, False,
+                             f'no online runner carries [{", ".join(labels)}]'))
     return rows
+
+
+def doctor_rows(s, product, run_cmd=None):
+    """``[(required, ok, detail)]``: the failing :func:`checks`."""
+    return [(req, ok, d) for _n, req, ok, d in checks(s, product, run_cmd=run_cmd) if not ok]

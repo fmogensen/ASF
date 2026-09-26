@@ -25,12 +25,28 @@ dead run's worktree is brought up to ``origin/<branch>``, its brief ref is delet
 lands in the status file every liveness check reads — from then on health judges it like any run:
 pushed or not, empty or not.
 
-**Placement** (:func:`asf.workers.wave.wave`): a row goes to the cloud lane when the local lane
-cannot take it — no local seat, or host pressure — ``cloud.enabled`` is true, the row is eligible
-(``cloud.rows: any``, or a ``cloud-ok`` row) and the lane is under ``cloud.max_inflight``
-(else ``worker_pool.caps.cloud_max_inflight``). Its accounts are ``cloud.accounts``, else the
-pool accounts with ``role: cloud``: the account whose token the repo secret holds; its quota
-bands and 5h headroom apply as for any launch.
+**Placement** (:func:`asf.workers.wave.wave`). With ``cloud.default: false`` (the default) the
+cloud is OVERFLOW: a row goes there when the local lane cannot take it — no local seat, or host
+pressure — ``cloud.enabled`` is true, the row is eligible (``cloud.rows: any``, or a ``cloud-ok``
+row) and the lane is under ``cloud.max_inflight`` (else ``worker_pool.caps.cloud_max_inflight``).
+With ``cloud.default: true`` the cloud is the DEFAULT executor: a row of a kind in
+:data:`DEFAULT_KINDS` (every kind with ``cloud.rows: any``; a ``cloud-ok`` row too) goes to the
+cloud first, up to ``max_inflight``; the local lane takes it when the cloud lane is full or
+unready. A row whose kind is in ``cloud.local_only`` or whose item carries ``local_only: true``
+never leaves the host, in either mode. Its accounts are ``cloud.accounts``, else the pool
+accounts with ``role: cloud``: the account whose token the repo secret holds; its quota bands and
+5h headroom apply as for any launch.
+
+**Host pressure** holds the local lane only: a cloud row runs nothing here, and is bounded by
+``max_inflight`` and its account's quota instead. The fair share still bounds both lanes: a
+cloud session is a live session (:func:`asf.capacity.live_sessions`).
+
+**Readiness** (:func:`readiness`, read once per wave — never per row): the lane takes launches
+only while the doctor's critical checks pass (:func:`checks`: the lane is on, the token secret's
+name is in the repo's secrets, the workflow is on the trunk, an online runner carries
+``runs_on``, a cloud account resolves). An unready lane is one line — ``cloud lane unready:
+<why> — local lane only`` — and every row stays local. ``asf cloud doctor --product <p>``
+prints each check as ``ok`` or ``gap`` (:func:`doctor`).
 
 Config (``~/.ASF/config.yaml``; a product file's ``cloud:`` overrides key by key)::
 
@@ -41,6 +57,8 @@ Config (``~/.ASF/config.yaml``; a product file's ``cloud:`` overrides key by key
       token_secret: CLAUDE_CODE_OAUTH_TOKEN
       max_inflight: 4
       rows: any                  # or cloud-ok (default)
+      default: true              # cloud first (default false: overflow only)
+      local_only: [groom]        # kinds that never leave the host
       accounts: [acct-a]         # optional: default = the role: cloud accounts
       timeout_min: 240
 """
@@ -69,6 +87,10 @@ REFUSED = {
 }
 ROWS_ANY = 'any'
 ROWS_CLOUD_OK = 'cloud-ok'
+#: the row kinds ``cloud.default: true`` sends to the cloud first (``task`` is the feeder's name
+#: for a ``coder`` row)
+DEFAULT_KINDS = ('coder', 'task', 'correct', 'review', 'adjudicate', 'fix-bug', 'spec', 'plan',
+                 'direct', 'groom')
 DEFAULT_TIMEOUT_MIN = 240
 DEFAULT_LAUNCH_WAIT_S = 30
 DEFAULT_RUNS_ON = ('ubuntu-latest',)
@@ -97,6 +119,8 @@ class Settings:
     runs_on: tuple = DEFAULT_RUNS_ON
     token_secret: str = DEFAULT_TOKEN_SECRET
     workflow: str = DEFAULT_WORKFLOW
+    default: bool = False
+    local_only: tuple = ()
 
     @property
     def on(self):
@@ -133,6 +157,20 @@ def _float(v, default):
         return float(v)
     except (TypeError, ValueError):
         return default
+
+
+def truthy(v):
+    if isinstance(v, str):
+        return v.strip().lower() in ('true', 'yes', 'on', '1')
+    return bool(v)
+
+
+def _kinds(v):
+    if not v:
+        return ()
+    if isinstance(v, str):
+        v = [p.strip() for p in v.split(',')]
+    return tuple(str(p).strip() for p in v if str(p).strip())
 
 
 def _labels(v):
@@ -172,7 +210,9 @@ def settings(cfg, product=None):
                     launch_wait_s=_float(c.get('launch_wait_s'), DEFAULT_LAUNCH_WAIT_S),
                     runs_on=_labels(c.get('runs_on')),
                     token_secret=str(c.get('token_secret') or DEFAULT_TOKEN_SECRET),
-                    workflow=str(c.get('workflow') or DEFAULT_WORKFLOW))
+                    workflow=str(c.get('workflow') or DEFAULT_WORKFLOW),
+                    default=truthy(c.get('default')),
+                    local_only=_kinds(c.get('local_only')))
 
 
 def lane_accounts(accounts, s):
@@ -183,10 +223,28 @@ def lane_accounts(accounts, s):
     return [a for a in accounts if a.role == 'cloud']
 
 
+def local_only(row, s):
+    """The row never leaves the host: its kind is in ``cloud.local_only``, or its item says
+    ``local_only: true``."""
+    return getattr(row, 'kind', None) in s.local_only or truthy(getattr(row, 'local_only', False))
+
+
 def eligible(row, s):
-    """``cloud.rows: any`` takes every row; the default takes only a row marked ``cloud-ok``."""
+    """``cloud.rows: any`` takes every row; the default takes only a row marked ``cloud-ok``.
+    A local-only row is never eligible."""
+    if local_only(row, s):
+        return False
     return s.rows == ROWS_ANY or bool(getattr(row, 'cloud_ok', False)) \
         or getattr(row, 'lane', None) == 'cloud'
+
+
+def first(row, s):
+    """``cloud.default: true``: the row goes to the cloud before the local lane — a kind in
+    :data:`DEFAULT_KINDS` (any kind with ``cloud.rows: any``), or a ``cloud-ok`` row, and not
+    local-only."""
+    if not s.default or local_only(row, s):
+        return False
+    return eligible(row, s) or getattr(row, 'kind', None) in DEFAULT_KINDS
 
 
 def is_cloud(run):
@@ -399,33 +457,91 @@ def inflight(product_name):
                if is_cloud(r) and lifecycle.occupies(r))
 
 
-def doctor_rows(cfg, product, run_cmd=None):
-    """``[(required, ok, detail)]`` for the cloud lane — nothing when the lane is not enabled."""
+def checks(cfg, product, run_cmd=None):
+    """``[(name, required, ok, detail)]`` — every readiness check of the lane, one per line of
+    ``asf cloud doctor``: on/default, runtime, seats, accounts, then the runtime's own
+    (:func:`asf.workers.actions.checks`: workflow, secret, runner). ``required`` marks a
+    critical check: one failing makes the lane unready (:func:`readiness`)."""
     s = settings(cfg, product)
-    if not s.enabled:
-        return []
+    rows = [('enabled', True, s.enabled,
+             'cloud.enabled: true' if s.enabled else 'cloud.enabled: false — the lane takes no '
+                                                     'launch')]
+    rows.append(('default', False, s.default,
+                 'cloud.default: true — the cloud lane is the default executor' if s.default
+                 else 'cloud.default: false — the cloud lane is overflow only'))
     if s.runtime in REFUSED:
-        return [(True, False, f'cloud.runtime {s.runtime} is refused: {REFUSED[s.runtime]}')]
-    rows = []
+        rows.append(('runtime', True, False,
+                     f'cloud.runtime {s.runtime} is refused: {REFUSED[s.runtime]}'))
+        return rows
     if s.runtime not in RUNTIMES:
-        rows.append((True, False, f'cloud.runtime {s.runtime!r} is not one ASF runs '
-                                  f'({", ".join(RUNTIMES)})'))
+        rows.append(('runtime', True, False, f'cloud.runtime {s.runtime!r} is not one ASF runs '
+                                             f'({", ".join(RUNTIMES)})'))
+    else:
+        rows.append(('runtime', True, True, f'cloud.runtime {s.runtime}'))
     if s.max_inflight <= 0:
-        rows.append((True, False, 'cloud.max_inflight is 0: the lane has no seat — set it '
-                                  '(or worker_pool.caps.cloud_max_inflight)'))
+        rows.append(('seats', True, False, 'cloud.max_inflight is 0: the lane has no seat — set '
+                                           'it (or worker_pool.caps.cloud_max_inflight)'))
+    else:
+        rows.append(('seats', True, True, f'cloud.max_inflight {s.max_inflight}'))
     from asf.workers import pool as pool_mod
     accts = lane_accounts(pool_mod.accounts_from_config(cfg), s)
     if not accts:
         want = f'cloud.accounts {list(s.accounts)}' if s.accounts else 'a role: cloud account'
-        rows.append((True, False, f'no cloud-lane account: {want} names none of '
-                                  'worker_pool.accounts'))
+        rows.append(('accounts', True, False, f'no cloud-lane account: {want} names none of '
+                                              'worker_pool.accounts'))
+    else:
+        rows.append(('accounts', True, True,
+                     f'cloud accounts {", ".join(a.name for a in accts)}'))
     if s.runtime == RUNTIME_ACTIONS:
         from asf.workers import actions
-        rows += actions.doctor_rows(s, product, run_cmd=run_cmd)
-    if not any(not ok for _r, ok, _d in rows):
+        rows += actions.checks(s, product, run_cmd=run_cmd)
+    return rows
+
+
+def readiness(cfg, product, run_cmd=None):
+    """``(ready, why)``: the lane is on and every critical :func:`checks` row passes. The wave
+    reads it once per tick — each call costs a few ``gh`` calls."""
+    s = settings(cfg, product)
+    if not s.on:
+        return False, 'cloud lane off (cloud.enabled, runtime, max_inflight)'
+    return _verdict(checks(cfg, product, run_cmd=run_cmd))
+
+
+def _verdict(rows):
+    gaps = [d for _n, req, ok, d in rows if req and not ok]
+    return (not gaps), '; '.join(gaps)
+
+
+def doctor(cfg, product, run_cmd=None, out=print):
+    """``asf cloud doctor``: one ``ok``/``gap`` line per :func:`checks` row, then ``ready: yes`` or
+    ``ready: no — <why>``. 0 when the lane is ready, else 1."""
+    s = settings(cfg, product)
+    out(f'cloud doctor: {product.name} (repo {getattr(product, "repo_slug", None) or "?"}, '
+        f'trunk {getattr(product, "main", None) or "?"}, rows {s.rows}'
+        f'{", local_only " + ",".join(s.local_only) if s.local_only else ""})')
+    rows = checks(cfg, product, run_cmd=run_cmd)
+    for _n, _req, ok, detail in rows:
+        out(f'{"ok " if ok else "gap"} {detail}')
+    ready, why = _verdict(rows)
+    out('ready: yes' if ready else f'ready: no — {why}')
+    return 0 if ready else 1
+
+
+def doctor_rows(cfg, product, run_cmd=None):
+    """``[(required, ok, detail)]`` for the cloud lane — nothing when the lane is not enabled:
+    the failing :func:`checks`, else one green summary row."""
+    s = settings(cfg, product)
+    if not s.enabled:
+        return []
+    rows = [(req, ok, d) for name, req, ok, d in checks(cfg, product, run_cmd=run_cmd)
+            if not ok and name not in ('enabled', 'default')]
+    if not rows:
+        from asf.workers import pool as pool_mod
+        accts = lane_accounts(pool_mod.accounts_from_config(cfg), s)
         rows.insert(0, (False, True, f'cloud lane on: {s.max_inflight} seat(s), runtime '
                                      f'{s.runtime} on [{", ".join(s.runs_on)}], accounts '
-                                     f'{", ".join(a.name for a in accts)}, rows {s.rows}'))
+                                     f'{", ".join(a.name for a in accts)}, rows {s.rows}'
+                                     f'{", default" if s.default else ""}'))
     return rows
 
 
