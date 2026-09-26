@@ -15,6 +15,10 @@ already has a live session *of this product* waits with ``already running``: the
 ``(product, job)``, so ``spec-f-0001`` live under product ``b`` never blocks ``a``'s own
 (F-0076 D5). Once ``n`` launched, the remaining rows wait with ``wave full``.
 
+A row the wave step (:mod:`asf.tick.step_wave`) marked ``host_load_bypass`` — the one S1 row that
+passed the host guard's LOAD hold — prints ``(S1: passes host load hold)`` after its ``launched``
+line, so the bypass is visible, not just inferred.
+
 The pool's load still spans every product and the machine's own sessions. When that session
 table could not be read, the wave prints the degraded-count line once, before the first row::
 
@@ -147,8 +151,10 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
                     launched.append((row, rec))
                     url = rec.get('cloud_url') or rec.get('actions_run_name') or 'dispatched'
                     where = f'cloud {url}' if lane == 'cloud' else f"pid {rec.get('pid')}"
+                    bypass = ' (S1: passes host load hold)' if getattr(row, 'host_load_bypass',
+                                                                       False) else ''
                     out(f"launched {row.job:<24} {row.item:<10} → {acct.name} "
-                        f"({rec.get('model')}) {where}")
+                        f"({rec.get('model')}) {where}{bypass}")
                     continue
         waits.append((row, reason))
         out(f"waits    {row.job:<24} {row.item:<10} — {reason}")
