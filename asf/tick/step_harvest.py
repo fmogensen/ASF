@@ -15,6 +15,9 @@ gate per landing batch, never two at a time, and landing stays fast-forward only
 the lock a tick prints one ``harvest: gate running`` line and starts nothing; the first tick
 after it ends prints what it printed (``landed …``, ``held …``) once, then starts the next.
 
+While an upgrade is pending (:func:`asf.upgrade.pending`) the step starts no background run:
+a new one would keep the gap the install waits for from coming.
+
 A held branch is not a failed step: it is one line, and the next harvest looks again.
 """
 import argparse
@@ -166,6 +169,13 @@ def run(ctx, out=print, spawn=None):
     report_last(ctx, out)
     from asf.tick import step_wave  # R2: the lane pass is in-process — here when no wave ran it
     step_wave.lane_pass(ctx, out)
+    from asf import upgrade
+    held = upgrade.pending(out=out)
+    if held is not None:
+        # a detached harvest lives for many minutes: one started now keeps the gap the pending
+        # install needs from coming. The floor drains; the next tick after the install starts it.
+        out(f'harvest: not started — upgrade to {held["sha"][:7]} pending, the floor drains')
+        return 0
     items_file = None
     items = harvest.record_items(ctx.record_root()) if ctx.has_record else None
     if items is not None:
