@@ -201,17 +201,22 @@ def active_products(name):
 
 def usable_slots(cfg, quota_source=None):
     """The slots the pool can take now: per account ``0`` at stop, ``1`` in cooldown, ``cap``
-    when free. ``None`` when no pool account is configured."""
+    when free. An account a session limit stopped (``quota-limits.json``) is at stop until its
+    reset, whatever its reading says — the pool's own band (:meth:`asf.workers.pool.Pool.band`).
+    ``None`` when no pool account is configured."""
+    from asf.workers import headroom as headroom_mod
     from asf.workers import pool as pool_mod
     from asf.workers import quota as quota_mod
     accounts = pool_mod.accounts_from_config(cfg)
     if not accounts:
         return None
     source = quota_source or quota_mod.source_from_config(cfg)
-    guards = quota_mod.guards_from_config(cfg)
+    pool = pool_mod.Pool(accounts, quota_source=source,
+                         guards=quota_mod.guards_from_config(cfg),
+                         limits=headroom_mod.active_limits())
     total = 0
     for a in accounts:
-        state, _why = quota_mod.band(source.read(a), guards)
+        state, _why = pool.band(a)
         total += a.cap if state == quota_mod.FREE else 1 if state == quota_mod.COOLDOWN else 0
     return total
 

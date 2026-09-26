@@ -102,7 +102,9 @@ def cmd_quota(args):
     print('|---|---|---|---|---|---|')
     for a in p.accounts:
         u = p.usage(a)
-        state, why = quota.band(u, p.guards)
+        # the pool's band: a session limit (quota-limits.json) stops the account whatever the
+        # reading says — the same stop the wave and the status row read
+        state, why = p.band(a)
         u = u or {}
         cell = state if state == quota.FREE else f'{state} — {why}'
         print(f"| {a.name} | {a.role} | {p.load(a)} / {a.cap} | {u.get('five_h_pct', '?')} | "

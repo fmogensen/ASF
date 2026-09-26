@@ -298,5 +298,94 @@ class TestStatusCell(HomeCase):
         self.assertEqual(cell, f'w1 97%/40% stop — resets {local}')
 
 
+class TestTheRealLimiterIsNamed(unittest.TestCase):
+    """a product's 15:35 wave (2026-09-26): 3 launches on acct-a and 1 on acct-d left both at 4/4; every
+    later row waited with ``quota: acct-c stopped until 17:10`` — the session-limit branch ran
+    before the seat check, so the wait named an idle, stopped account instead of the full seats."""
+
+    def pool(self, accounts, usage, live=(), limits=None):
+        return pool_mod.Pool(accounts, quota_source=quota_mod.FakeQuotaSource(usage),
+                             guards=quota_mod.guards_from_config({}), live=live, limits=limits)
+
+    def until(self):
+        return (datetime.datetime.now(UTC) + datetime.timedelta(hours=1)).strftime(
+            '%Y-%m-%dT%H:%M:%SZ')
+
+    def test_the_15_35_wave_waits_on_the_full_seats_not_on_anette(self):
+        names = ('acct-a', 'acct-b', 'acct-c', 'acct-d', 'acct-e')
+        acc = [pool_mod.Account(n, cap=4) for n in names]
+        live = [{'account': n, 'model': 'claude-sonnet-5'} for n in ('acct-a', 'acct-d') for _ in range(4)]
+        until = self.until()
+        p = self.pool(acc, {'acct-a': {'five_h_pct': 3, 'seven_d_pct': 6},
+                            'acct-b': {'five_h_pct': 0, 'seven_d_pct': 100},
+                            'acct-c': {'five_h_pct': 42, 'seven_d_pct': 72},
+                            'acct-d': {'five_h_pct': 17, 'seven_d_pct': 22},
+                            'acct-e': {'five_h_pct': 100, 'seven_d_pct': 88}},
+                      live=live, limits={'acct-c': {'until': until},
+                                         'acct-e': {'until': until}})
+        acct, why = p.pick_account('review', 'claude-sonnet-5', lane='local')
+        self.assertIsNone(acct)
+        label = headroom.reset_label(until)
+        self.assertEqual(why, 'pool full — accounts at cap: acct-a 4/4, acct-d 4/4; the rest stopped: '
+                              'acct-b (seven_d_pct 100 ≥ 95), '
+                              f'acct-c (session limit until {label}), '
+                              f'acct-e (session limit until {label})')
+
+    def test_seats_and_headroom_together_name_both(self):
+        a, d = pool_mod.Account('acct-a', cap=4), pool_mod.Account('acct-d', cap=4)
+        live = [{'account': 'acct-a', 'model': 'claude-opus-5', 'kind': 'spec'}] * 4
+        p = self.pool([a, d], {'acct-a': {'five_h_pct': 3, 'seven_d_pct': 6},
+                                    'acct-d': {'five_h_pct': 88, 'seven_d_pct': 22}}, live=live)
+        acct, why = p.pick_account('spec', 'claude-opus-5')
+        self.assertIsNone(acct)
+        _fits, headroom_why, _total = p.headroom(d, 'spec', 'claude-opus-5')
+        self.assertTrue(headroom_why.startswith('headroom: acct-d would exceed 95% (now 88%'))
+        self.assertEqual(why, f'pool full — accounts at cap: acct-a 4/4; {headroom_why}')
+
+    def test_only_a_session_limit_left_still_names_the_reset(self):
+        a = pool_mod.Account('a', cap=4)
+        until = self.until()
+        p = self.pool([a], {'a': {'five_h_pct': 0, 'seven_d_pct': 0}},
+                      limits={'a': {'until': until}})
+        self.assertEqual(p.pick_account('review', 'sonnet'),
+                         (None, f'quota: a stopped until {headroom.reset_label(until)} '
+                                '(session limit)'))
+
+
+class TestOneStopSource(HomeCase):
+    """``asf workers quota`` and the capacity share read the session-limit stop the pool and the
+    status row read (``quota-limits.json``) — at 15:42 quota said acct-c ``free`` while status
+    said ``acct-c stop — resets 17:10``, and the fair share counted acct-c's 4 seats."""
+
+    def test_the_quota_table_shows_a_session_limit_stop(self):
+        import argparse
+        import contextlib
+        import io
+        from asf.workers import cmd_quota
+        until = datetime.datetime.now(UTC) + datetime.timedelta(minutes=90)
+        headroom.record_limit('w1', until, job='j', product='sample')
+        cfg = {'worker_pool': {'accounts': [{'name': 'w1', 'role': 'worker', 'cap': 4}],
+                               'quota_command': 'true {account}', 'sessions': 'fake'}}
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), \
+             mock.patch('asf.workers._product', return_value=self.product), \
+             mock.patch('asf.workers.spawn.load_cfg', return_value=cfg), \
+             mock.patch.object(quota_mod.CommandQuotaSource, 'read',
+                               lambda self, a: {'five_h_pct': 42, 'seven_d_pct': 72}):
+            cmd_quota(argparse.Namespace(product='sample'))
+        label = until.astimezone().strftime('%H:%M')
+        self.assertIn(f'| w1 | worker | 0 / 4 | 42 | 72 | stop — session limit until {label} |',
+                      buf.getvalue())
+
+    def test_a_session_limited_account_has_no_usable_slot(self):
+        from asf import capacity
+        until = datetime.datetime.now(UTC) + datetime.timedelta(minutes=90)
+        headroom.record_limit('b', until, job='j', product='sample')
+        cfg = {'worker_pool': {'accounts': [{'name': n, 'cap': 4} for n in ('a', 'b')]}}
+        source = quota_mod.FakeQuotaSource({'a': {'five_h_pct': 0, 'seven_d_pct': 0},
+                                            'b': {'five_h_pct': 0, 'seven_d_pct': 0}})
+        self.assertEqual(capacity.usable_slots(cfg, source), 4)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -443,13 +443,13 @@ class Pool:
                     < self.lane_cap(lane_of(a)) - self.reserve.get(lane_of(a), 0)]
             if not room:
                 return None, REASON_RESERVED
-        free, cooling, held, over, limited = [], [], False, [], []
+        free, cooling, held, over, limited, stopped = [], [], [], [], [], []
         for a in room:
             state, _why = self.band(a)
             if state == quota_mod.STOP and self.limit(a):
                 limited.append(a)
-                continue
             if state not in (quota_mod.FREE, quota_mod.COOLDOWN):
+                stopped.append(a)
                 continue
             fits, why, total = self.headroom(a, kind, model)
             if not fits:
@@ -459,13 +459,20 @@ class Pool:
             elif self.load(a) == 0:
                 cooling.append(a)
             else:
-                held = True                 # cooling and already carrying its one job
+                held.append(a)              # cooling and already carrying its one job
         if free:
             free.sort(key=lambda a: (self.load(a), a.name))
             return free[0], ''
         if cooling:
             cooling.sort(key=lambda a: a.name)  # every one of them is at load 0
             return cooling[0], ''
+        # Nothing launches. A seat at cap under its quota is the limiter the row actually waits
+        # on — it is named first, with every other account's own reason beside it, so a wait
+        # never names an idle stopped account while the working ones sit full (2026-09-26: acct-a
+        # and acct-d at 4/4 printed ``quota: acct-c stopped until 17:10``).
+        full = self.at_cap(cands, room, model)
+        if full:
+            return None, self.full_reason(full, stopped, model, over=over, held=held)
         if over:
             return None, min(over)[1]       # the account closest to fitting
         if held:
@@ -474,9 +481,6 @@ class Pool:
             first = min(limited, key=lambda a: self.limit(a))
             return None, (f'quota: {first.name} stopped until '
                           f'{headroom_mod.reset_label(self.limit(first))} (session limit)')
-        full = self.at_cap(cands, room, model)
-        if full:
-            return None, self.full_reason(full, room, model)
         return None, REASON_NO_QUOTA
 
     def at_cap(self, cands, room, model):
@@ -487,9 +491,12 @@ class Pool:
         return [a for a in cands if a.name not in names
                 and self.band(a)[0] in (quota_mod.FREE, quota_mod.COOLDOWN)]
 
-    def full_reason(self, full, stopped, model):
+    def full_reason(self, full, stopped, model, over=(), held=()):
         """``pool full — accounts at cap: a 4/4, b 4/4; the rest stopped: c (seven_d_pct 100 ≥
-        95)``: the seats the row waits on, and why the idle accounts cannot take it."""
+        95), d (session limit until 17:10); headroom: e would exceed 90% (…); cooling: f``: the
+        seats the row waits on, and why each account with a free seat cannot take it —
+        ``over`` is the headroom misses as ``(projected, why)``, ``held`` the cooling accounts
+        already carrying their one job."""
         def seats(a):
             mcap = a.caps.get(model_key(model))
             if mcap is not None and self.load(a, model) >= mcap and self.load(a) < a.cap:
@@ -499,6 +506,10 @@ class Pool:
         if stopped:
             why += '; the rest stopped: ' + ', '.join(f'{a.name} ({self.band(a)[1]})'
                                                      for a in stopped)
+        if over:
+            why += '; ' + min(over)[1]      # the account closest to fitting
+        if held:
+            why += '; cooling: ' + ', '.join(a.name for a in held)
         return why
 
     def take(self, account, model, job='', product=None, kind=None, lane=None):
