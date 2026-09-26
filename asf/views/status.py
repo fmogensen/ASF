@@ -169,7 +169,7 @@ def capacity_cell(cfg, product):
     if lane:
         parts.append(lane)
     if r.ci is not None:
-        parts.append(ci_clause(r.ci_inflight, r.ci, prs=ci_queue.mode(product) == 'on'))
+        parts.append(ci_clause(r.ci_inflight, r.ci))
     # the CI start queue: its depth and the head's decision now, computed live by the function
     # `asf ci queue` prints (one runner read, the cached estimate, this row's own in-flight
     # count), in the current mode; the last tick's snapshot, dated, when the host is unreadable
@@ -179,19 +179,17 @@ def capacity_cell(cfg, product):
     return ', '.join(parts)
 
 
-def ci_clause(inflight, gate, prs=False):
+def ci_clause(inflight, gate):
     """The CI clause of the Capacity row. ``capacity.ci`` is a *start gate*, not a ceiling on
-    every run: the tick holds its ``batch`` step, and a product with a ``ci.pool`` its ordinary
-    PR starts too (:mod:`asf.ci_queue`, whose clause follows this one), while that many runs are
-    in flight; S1, hotfix, trunk and deploy starts are exempt. The count is
+    every run: the tick holds its ``batch`` step (and the CI start queue, :mod:`asf.ci_queue`,
+    its batch starts) while that many runs are in flight; PR starts are governed by the queue's
+    runner fit alone, and S1, hotfix, trunk and deploy starts are exempt. The count is
     :func:`asf.capacity.ci_runs_in_flight` — every ``ci.workflow`` run not completed (PR, trunk
     and batch alike), the same one the queue's hold names — so an ``x/y`` fraction read as a
     breached cap; the clause names the total and what the gate holds instead."""
     from asf import capacity as capacity_mod
-    what = 'batch and PR starts' if prs else 'batch starts'
-    held = (' — they wait' if prs else ' — batch waits') \
-        if isinstance(inflight, int) and inflight >= gate else ''
-    return f"ci {capacity_mod.ci_inflight_text(inflight)} ({what} below {gate}{held})"
+    held = ' — batch waits' if isinstance(inflight, int) and inflight >= gate else ''
+    return f"ci {capacity_mod.ci_inflight_text(inflight)} (batch starts below {gate}{held})"
 
 
 def record_cell(root):
