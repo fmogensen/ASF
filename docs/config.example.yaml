@@ -111,6 +111,18 @@ host_guards:
 # `cloud:` overrides these keys one by one. `asf doctor` shows a `cloud lane` row set; `asf cloud
 # doctor --product <p>` prints each readiness check of the lane as ok or gap.
 #
+# Runtime `claude-remote` (asf.workers.remote) runs the session as a claude.ai routine instead —
+# no repo secret: a small local `claude -p` (helper_model) calls the CLI's RemoteTrigger tool on
+# the dispatching account's own login (its config_dir; the auth_env setup-token lacks the scope)
+# to create the routine (the brief, the product repo as its source) and fire it. A cloud
+# environment belongs to one account: `environment_id` is one env_… id or {account: env_…}.
+#   runtime: claude-remote
+#   environment_id: {acct-a: env_…}
+#   model: claude-opus-5       # optional: default the row's model
+#   allowed_tools: [Bash, Read, Write, Edit, Glob, Grep]
+#   helper_model: haiku
+#   poll_min: 15               # how often a working run's routine is read
+#
 # The runtime `claude-cloud` is refused at config check: the runtime CLI cannot create a cloud
 # session non-interactively (`-p --cloud` is interactive only), so a lane on it could never launch.
 cloud:

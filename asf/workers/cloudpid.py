@@ -3,8 +3,9 @@
 A local session is a process on this host, and every reader of the ledger asks "is it alive?" of
 its pid. A cloud session (:mod:`asf.workers.cloud`) is no process here, so its run records a
 *token*: ``pid: actions:<workflow run id>`` (``actions:<ASF session>`` until the run id is
-known). Runs of the refused ``claude-cloud`` runtime recorded ``cloud:<ASF session>``; those
-still read as tokens. Every liveness check that meets a token answers from the cloud status file
+known), or ``pid: remote:<routine trigger id>`` for the ``claude-remote`` runtime
+(:mod:`asf.workers.remote`). Runs of the refused ``claude-cloud`` runtime recorded
+``cloud:<ASF session>``; those still read as tokens. Every liveness check that meets a token answers from the cloud status file
 ``<ASF_HOME>/state/cloud-sessions.json``, which :func:`asf.workers.cloud.sync` writes each health
 pass: ``{token: {status, why, updated, …}}`` with ``status`` one of ``working``, ``finished``,
 ``dead``. A token the file does not know yet is a launch the sync has not seen: working. This
@@ -18,8 +19,10 @@ import tempfile
 from asf import env
 
 PREFIX = 'actions:'
-#: every token prefix a ledger may hold: the live one, and the refused runtime's
-PREFIXES = (PREFIX, 'cloud:')
+#: a ``claude-remote`` run's token: ``remote:<trigger id>``
+REMOTE_PREFIX = 'remote:'
+#: every token prefix a ledger may hold: the live ones, and the refused runtime's
+PREFIXES = (PREFIX, REMOTE_PREFIX, 'cloud:')
 WORKING = 'working'
 FINISHED = 'finished'
 DEAD = 'dead'
