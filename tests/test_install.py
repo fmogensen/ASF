@@ -1689,6 +1689,70 @@ class InstallScriptTest(unittest.TestCase):
         self.assertIn('run one to write it: asf console-permissions install --product demo '
                       '--scope user|repo', r.stdout)
 
+    def test_install_waits_on_a_held_tick_lock(self):
+        """B-0135: an install that races a running tick's ``pipx install --force`` tears it —
+        half the modules old, half new. The lock the tick holds for the whole of its run
+        (``asf.tick.tick.lock_path``) is the same one the install waits on before it touches
+        the package, so the two can never overlap."""
+        lock_path = os.path.join(self.asf_home, 'state', 'demo', 'tick.lock')
+        os.makedirs(os.path.dirname(lock_path))
+        pipx_log = os.path.join(self.tmp, 'pipx.log')
+        self._write_scripts(hooks_rc=0, pipx_log=pipx_log)
+
+        import fcntl
+        held = open(lock_path, 'a')
+        fcntl.flock(held, fcntl.LOCK_EX)
+        released_at = []
+
+        def release_after(delay):
+            time.sleep(delay)
+            released_at.append(time.monotonic())
+            fcntl.flock(held, fcntl.LOCK_UN)
+            held.close()
+
+        import threading
+        t = threading.Thread(target=release_after, args=(1.0,))
+        started = time.monotonic()
+        t.start()
+        try:
+            r = subprocess.run(
+                ['bash', INSTALL_SH, 'demo', 'deadbeef'], capture_output=True, text=True,
+                env=self._env(ASF_INSTALL_LOCK_WAIT_S='30', ASF_INSTALL_LOCK_POLL_S='0.1'),
+                timeout=60)
+        finally:
+            t.join()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(os.path.exists(pipx_log), r.stderr)
+        with open(pipx_log) as f:
+            pipx_calls = f.read()
+        self.assertIn('install', pipx_calls)
+        self.assertGreaterEqual(released_at[0], started + 1.0)
+        self.assertIn('install: a running tick holds the lock', r.stderr)
+
+    def test_a_stuck_tick_lock_times_out(self):
+        """The wait is bounded (B-0135): a tick lock nobody ever releases must not hang the
+        install forever — it gives up and asks the operator instead."""
+        lock_path = os.path.join(self.asf_home, 'state', 'demo', 'tick.lock')
+        os.makedirs(os.path.dirname(lock_path))
+        pipx_log = os.path.join(self.tmp, 'pipx.log')
+        self._write_scripts(hooks_rc=0, pipx_log=pipx_log)
+
+        import fcntl
+        held = open(lock_path, 'a')
+        fcntl.flock(held, fcntl.LOCK_EX)
+        try:
+            r = subprocess.run(
+                ['bash', INSTALL_SH, 'demo', 'deadbeef'], capture_output=True, text=True,
+                env=self._env(ASF_INSTALL_LOCK_WAIT_S='0.5', ASF_INSTALL_LOCK_POLL_S='0.1'),
+                timeout=60)
+        finally:
+            fcntl.flock(held, fcntl.LOCK_UN)
+            held.close()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(os.path.exists(pipx_log))
+        self.assertIn('NEEDS OPERATOR', r.stderr)
+        self.assertIn('tick', r.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()
