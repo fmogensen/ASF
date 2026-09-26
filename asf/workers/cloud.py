@@ -41,8 +41,10 @@ accounts with ``role: cloud``: the account whose token the repo secret holds; it
 5h headroom apply as for any launch.
 
 **Host pressure** holds the local lane only: a cloud row runs nothing here, and is bounded by
-``max_inflight`` and its account's quota instead. The fair share still bounds both lanes: a
-cloud session is a live session (:func:`asf.capacity.live_sessions`).
+``max_inflight`` and its account's quota instead. The fair share bounds the local lane: the wave
+step adds ``max_inflight`` seats beside the share and hands the wave the share's free local seats
+(``local_seats``: the share less the local sessions live), so the local accounts never take the
+cloud's seats; the status row reads ``sessions <local>/<share>, cloud <n>/<max_inflight>``.
 
 **Readiness** (:func:`readiness`, read once per wave — never per row): the lane takes launches
 only while the doctor's critical checks pass (:func:`checks`: the lane is on, the token secret's

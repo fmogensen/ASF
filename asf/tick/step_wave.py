@@ -490,6 +490,13 @@ def cloud_readiness(product, cloud):
         return False, f'readiness unreadable ({type(e).__name__}: {e})'
 
 
+def local_seats(sessions, running):
+    """The local lane's free seats: the share (``sessions``) less the local sessions live —
+    ``running`` less its cloud runs, whose seats are the cloud lane's own (:func:`split_hold`)."""
+    from asf.workers import cloud as cloud_mod
+    return max(0, sessions - sum(1 for r in running if not cloud_mod.is_cloud(r)))
+
+
 def split_hold(cloud, ready, host_held, host_why):
     """``(host_held, local_hold, extra seats)``: a ready cloud lane takes the host hold off its
     own rows — the hold becomes ``local_hold`` (the local lane only) — and adds its seats beside
@@ -698,7 +705,11 @@ def launch(ctx, out=print):
     launched, _waits = _wave(product, worker_rows, len(worker_rows),
                              brief_fn=lambda r: texts[r.job], out=out, refresh=refresh,
                              **({'local_hold': local_hold} if local_hold else {}),
-                             **({'cloud_ready': ready} if cloud.on else {}))
+                             **({'cloud_ready': ready} if cloud.on else {}),
+                             # the cloud's seats in ``seats`` are the cloud lane's: the local
+                             # lane takes the share's free local seats only (+ an S1 bypass)
+                             **({'local_seats': local_seats(r.sessions, running) + bypassed}
+                                if extra else {}))
     for wrow, rec in launched:
         ctx.event('launch', item=wrow.item, job=wrow.job,
                   model=rec.get('model'), brief_kind=kinds[wrow.job])

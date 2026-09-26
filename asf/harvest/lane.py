@@ -1465,7 +1465,7 @@ class Lane:
         b = f['branch']
         return ci_queue.admit(self.product, f'{kind}:{b}', kind, item=f.get('item') or b,
                               items=self.items, branch=b, files=f.get('files') or (),
-                              queue=self.ci_queue,
+                              queue=self.ci_queue, sha=f.get('head'),
                               draft=bool((f.get('pr') or {}).get('draft'))).admitted
 
     def ci_forget(self, f):

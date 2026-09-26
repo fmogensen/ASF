@@ -1950,3 +1950,168 @@ class TestHeadStarvation(Base):
             self.assertEqual(dict(ci_queue.config_problems(
                 {'queue': {'head_wait_max_min': bad}})).keys(), {'ci.queue.head_wait_max_min'})
         self.assertEqual(ci_queue.config_problems({'queue': {'head_wait_max_min': 30}}), [])
+
+
+class TestStaleSweep(ReliefBase):
+    """2026-09-26 22:07, a product: 45 entries in the line against 8 queued + 8 in-flight runs
+    at the host — 38 of them ``rerun:<run id>`` of relief records whose PR had merged (T-0354
+    sat at the head after its PR merged), whose branch head had moved on, or whose head sha
+    already had a run; one branch held up to four entries. Each pass drops (a) a merged/closed
+    PR's entries, (b) a draft's, (c) one whose head already has a run, one line each, and keys a
+    branch's re-run by the branch: one entry per branch."""
+
+    def prs(self):
+        pr = lambda n, b, sha, state='OPEN', draft=False: {  # noqa: E731
+            'number': n, 'headRefName': b, 'headRefOid': sha, 'state': state, 'isDraft': draft}
+        return [pr(11, 'task/T-0341', 'a1'), pr(12, 'bug/B-0008', 'b1', 'MERGED'),
+                pr(13, 'task/T-0500', 'c1', draft=True), pr(14, 'task/T-0600', 'd1'),
+                pr(15, 'task/T-0700', 'e1'), pr(16, 'task/T-0800', 'f1'),
+                pr(19, 'task/T-0900', 'h1'), pr(20, 'task/T-0902', 'g1', 'MERGED'),
+                pr(21, 'task/T-0903', 'i1', draft=True), pr(22, 'task/T-0904', 'j1', 'CLOSED')]
+
+    def listing(self):
+        t = lambda m: self.at(self.t0 + datetime.timedelta(minutes=m))  # noqa: E731
+        r = lambda i, b, sha, s='completed', c='cancelled': {  # noqa: E731
+            'databaseId': i, 'status': s, 'conclusion': c, 'event': 'pull_request',
+            'headBranch': b, 'headSha': sha, 'createdAt': t(-100 + i % 100)}
+        return {
+            'ci.yml': [{'databaseId': 900, 'status': 'completed', 'event': 'push',
+                        'headBranch': 'main', 'headSha': 'f' * 40, 'createdAt': t(-30)}],
+            'pr.yml': [r(300, 'task/T-0341', 'a0'), r(301, 'task/T-0341', 'a1'),
+                       r(302, 'bug/B-0008', 'b1'), r(303, 'task/T-0500', 'c1'),
+                       r(304, 'task/T-0600', 'd0'), r(314, 'task/T-0600', 'd1', 'queued', ''),
+                       r(305, 'task/T-0700', 'e1'), r(306, 'task/T-0700', 'e1', 'in_progress', ''),
+                       r(309, 'task/T-0900', 'h1', 'queued', ''),
+                       r(310, 'task/T-0341', 'a1')],
+            'batch.yml': [],
+        }
+
+    def sweep_gh(self, prs=None, views=None):
+        gh, base = self.gh(self.listing())
+        prs = self.prs() if prs is None else prs
+        views = views if views is not None else {
+            307: {'headBranch': 'task/T-0800', 'headSha': 'f1', 'status': 'completed',
+                  'conclusion': 'cancelled'}}
+
+        def run(argv, **kw):
+            if argv[:3] == ['gh', 'pr', 'list']:
+                gh.calls.append(argv)
+                if prs is False:
+                    return subprocess.CompletedProcess(argv, 1, '', 'unreachable')
+                state = argv[argv.index('--state') + 1]
+                out = [p for p in prs if state == 'all' or p['state'].lower() == state]
+                return subprocess.CompletedProcess(argv, 0, json.dumps(out), '')
+            if argv[:3] == ['gh', 'run', 'view']:
+                gh.calls.append(argv)
+                v = views.get(int(argv[3]))
+                return subprocess.CompletedProcess(argv, 0 if v else 1, json.dumps(v or {}), '')
+            return base(argv, **kw)
+        return gh, run
+
+    def seed_line(self):
+        self.seed(self.t0)
+        data = ci_queue.load('p')
+        stamp = self.at(self.t0 - datetime.timedelta(minutes=90))
+        rec = lambda i, item, **kw: dict({  # noqa: E731
+            'id': i, 'kind': 'pr', 'item': item, 'prio': 3, 'label': 'Task', 'workflow': 'pr.yml',
+            'at': stamp, 'trunk_id': 900, 'trunk_sha': 'f' * 40, 'trunk_created': stamp}, **kw)
+        data['relief'] = [rec(300, 'T-0341'), rec(301, 'T-0341'), rec(302, 'B-0008'),
+                          rec(303, 'T-0500'), rec(304, 'T-0600'), rec(305, 'T-0700'),
+                          rec(307, 'T-0800'), rec(310, 'T-0341', branch='task/T-0341', sha='a1')]
+        e = lambda item, **kw: dict({  # noqa: E731
+            'kind': 'pr', 'item': item, 'prio': 3, 'label': 'Task', 'workflow': 'pr.yml',
+            'run': 'full', 'since': stamp, 'seen': self.at(self.t0)}, **kw)
+        data['entries'] = {f"rerun:{r['id']}": e(r['item']) for r in data['relief']}
+        data['entries'].update({
+            'pr:task/T-0900': e('T-0900'), 'pr:task/T-0901': e('T-0901'),
+            'pr:task/T-0902': e('T-0902', sha='g1'), 'pr:task/T-0903': e('T-0903'),
+            'pr:task/T-0904': e('T-0904', sha='zz'), 'rerun:999': e('gone')})
+        ci_queue.save('p', data)
+
+    def drops(self):
+        return sorted(l for l in self.lines if ' drop ' in l)
+
+    def test_each_class_is_dropped_with_one_line_and_a_branch_keeps_one_entry(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed_line()
+        gh, run = self.sweep_gh()
+        self.relieve(p, run)                       # no runner free: what stays is held
+        data = ci_queue.load('p')
+        self.assertEqual(self.drops(), sorted([
+            # (a) merged or closed
+            'ci queue: drop rerun:302 — bug/B-0008: PR #12 merged',
+            'ci queue: drop pr:task/T-0902 — PR #20 merged',
+            # (b) draft
+            'ci queue: drop rerun:303 — task/T-0500: PR #13 is a draft, parked by its owner',
+            'ci queue: drop pr:task/T-0903 — PR #21 is a draft, parked by its owner',
+            # (c) the head moved on, or its head sha has a run already
+            'ci queue: drop rerun:300 — task/T-0341: superseded, head is now a1',
+            'ci queue: drop rerun:304 — task/T-0600: superseded, head is now d1',
+            'ci queue: drop rerun:305 — task/T-0700: run 306 covers e1',
+            'ci queue: drop pr:task/T-0900 — run 309 covers h1',
+            # the same branch and sha twice: the newest record stays
+            'ci queue: drop rerun:301 — task/T-0341: run 310 is its newer re-run record',
+            # an entry whose relief record is gone
+            'ci queue: drop rerun:999 — no relief record',
+        ]))
+        self.assertEqual(sorted(r['id'] for r in data['relief']), [307, 310])
+        # (d): one entry per branch, keyed by the branch; a legacy key keeps its place
+        self.assertEqual(sorted(data['entries']), [
+            'pr:task/T-0901', 'pr:task/T-0904', 'rerun:task/T-0341', 'rerun:task/T-0800'])
+        self.assertEqual(data['entries']['rerun:task/T-0800']['since'],
+                         self.at(self.t0 - datetime.timedelta(minutes=90)))
+        self.assertEqual(data['entries']['rerun:task/T-0800']['sha'], 'f1')
+        rec = next(r for r in data['relief'] if r['id'] == 307)
+        self.assertEqual((rec['branch'], rec['sha']), ('task/T-0800', 'f1'))
+        # the legacy record is looked up once, then carried
+        self.assertEqual(len([c for c in gh.calls if c[:3] == ['gh', 'run', 'view']]), 1)
+        self.assertEqual(self.cancels(gh, 'rerun'), [])
+        self.lines.clear()
+        gh, run = self.sweep_gh()
+        self.relieve(p, run, minutes=1)
+        self.assertEqual(self.drops(), [])
+        self.assertFalse([c for c in gh.calls if c[:3] == ['gh', 'run', 'view']])
+        self.assertEqual(sorted(ci_queue.load('p')['entries']), sorted(data['entries']))
+
+    def test_an_unreadable_pr_listing_drops_no_record(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed_line()
+        gh, run = self.sweep_gh(prs=False)
+        self.relieve(p, run)
+        self.assertEqual(self.drops(), ['ci queue: drop rerun:999 — no relief record'])
+        self.assertEqual(len(ci_queue.load('p')['relief']), 8)
+
+    def test_dry_run_names_the_drops_and_writes_nothing(self):
+        p = self.product(mode='dry-run')
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed_line()
+        before = ci_queue.load('p')
+        gh, run = self.sweep_gh()
+        self.relieve(p, run)
+        self.assertIn('ci queue (dry-run): would drop rerun:302 — bug/B-0008: PR #12 merged',
+                      self.lines)
+        self.assertEqual(ci_queue.load('p'), before)
+
+    def test_new_relief_records_carry_branch_and_sha(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        gh, run = self.gh(self.runs())
+        self.relieve(p, run)
+        rec = ci_queue.load('p')['relief'][0]
+        self.assertEqual((rec['id'], rec['branch'], rec['sha']), (101, 'bug/B-0008', 'a' * 40))
+
+    def test_a_pr_start_records_its_head_sha_and_keeps_its_place_on_a_new_one(self):
+        p = product()
+        q = self.queue(p, FakeGh(busy={'h1', 'h2', 'h3'}))
+        ci_queue.admit(p, 'pr:feat/a', 'pr', item='T-0341', items=ITEMS, branch='feat/a',
+                       sha='s1', queue=q)
+        since = ci_queue.load('p')['entries']['pr:feat/a']['since']
+        q = self.queue(p, FakeGh(busy={'h1', 'h2', 'h3'}), minutes=5)
+        ci_queue.admit(p, 'pr:feat/a', 'pr', item='T-0341', items=ITEMS, branch='feat/a',
+                       sha='s2', queue=q)
+        e = ci_queue.load('p')['entries']
+        self.assertEqual(list(e), ['pr:feat/a'])
+        self.assertEqual((e['pr:feat/a']['sha'], e['pr:feat/a']['since']), ('s2', since))
