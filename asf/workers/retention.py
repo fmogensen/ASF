@@ -29,7 +29,7 @@ import os
 import re
 import time
 
-from asf import env
+from asf import env, refguard
 from asf.harvest import harvest as H
 
 #: The lane's archive namespace (:meth:`asf.harvest.lane.Lane.archive` pushes ``archive/<b>``).
@@ -202,13 +202,18 @@ def candidates(conv, heads, dates, now, prs, protected, flight, item_text):
     return due, kept
 
 
-def delete(repo, branch, sha, slug=None):
+def delete(repo, branch, sha, slug=None, main=None, protected=None):
     """Delete ``branch`` on origin only while its tip is still ``sha``; ``(ok, why)``.
 
     With a hosted origin (``slug``) the ref is deleted through the host's API: a delete carries
     no content, and a ``git push --delete`` would run the product's own pre-push hook — one
     product's hook ran a whole-tree lint per delete and refused every one (2026-09-25). Without
-    a host, ``git push origin --delete`` over a lease on ``sha``."""
+    a host, ``git push origin --delete`` over a lease on ``sha``. The trunk and a protected ref
+    are refused before anything is sent (:mod:`asf.refguard`)."""
+    from asf import refguard
+    guard = refguard.refusal(branch, f'retention delete {branch}', main, protected)
+    if guard:
+        return False, guard
     if slug:
         ref = f'repos/{slug}/git/refs/heads/{branch}'
         rc, out, err = H._gh(['api', ref, '--jq', '.object.sha'])
@@ -273,7 +278,8 @@ def sweep(product, fix=False, out=print, items=None, host=None, now=None):
             out(f'retention: would delete {what}')
             result['due'].append(b)
             continue
-        ok, why = delete(repo, b, sha, slug=slug)
+        ok, why = delete(repo, b, sha, slug=slug, main=product.main,
+                         protected=refguard.listed(conv))
         if not ok and len(result['failed']) >= 2 and not result['deleted']:
             result['failed'].append(b)
             out(f'retention: delete failed {what} — {why}; stopping this pass after 3 failures')

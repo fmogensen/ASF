@@ -687,7 +687,7 @@ def commit_leftovers(wt, branch):
     return True, f'committed the session\'s leftovers on {branch}'
 
 
-def publish(wt, branch, remote_sha='', main='main'):
+def publish(wt, branch, remote_sha='', main='main', protected=None):
     """Push the worktree's HEAD to ``origin/<branch>`` as the factory (B-0056).
 
     A rebased lane branch — spawn's takeover rebase (B-0046, B-0048) or a conflict the session
@@ -704,6 +704,10 @@ def publish(wt, branch, remote_sha='', main='main'):
     ``(ok, line)``."""
     if not branch or branch == main:
         return False, f'publish refused: {branch or "no branch"} is not a lane branch'
+    from asf import refguard
+    guard = refguard.refusal(branch, f'publish {branch}', main, protected)
+    if guard:
+        return False, guard
     ref = f'refs/heads/{branch}'
     rebased = ''
     if remote_sha:

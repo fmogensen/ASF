@@ -49,6 +49,7 @@ import os
 import re
 import subprocess
 
+from asf import refguard
 from asf.workers import cloud
 from asf.workers import headroom
 from asf.workers import observe
@@ -210,7 +211,8 @@ def publish_gap(product, run, ev, reason, alive=pid_alive):
         ev = lifecycle.gather(product, run, alive=alive, worktree=wt)
     if not (ev.unpushed or (ev.remote_sha and not ev.head_on_remote)):
         return reason, ev, '; '.join(lines) or None
-    ok, line = lifecycle.publish(wt, branch, ev.remote_sha, main=product.main)
+    ok, line = lifecycle.publish(wt, branch, ev.remote_sha, main=product.main,
+                                 protected=refguard.listed(product.conventions))
     if not ok:
         return reason, ev, '; '.join(lines + [line])
     ev = lifecycle.gather(product, run, alive=alive, worktree=wt)
