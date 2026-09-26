@@ -1,4 +1,5 @@
 """asf.tick.watch — ``asf watch``: tail the ticks stream, one digest per tick line."""
+import datetime
 import json
 import os
 import shutil
@@ -10,6 +11,11 @@ from asf import cli, env
 from asf.tick import shadow, watch
 
 DAY = '2026-09-25'
+
+
+def _on_day():
+    """The clock ``watch`` reads the day's file by — pinned to ``DAY``, never the wall clock."""
+    return datetime.datetime(2026, 9, 25, 9, 30, tzinfo=datetime.timezone.utc)
 
 
 class WatchTests(unittest.TestCase):
@@ -37,7 +43,8 @@ class WatchTests(unittest.TestCase):
 
     def watch_once(self):
         lines = []
-        watch.run(self.product, out=lines.append, sleep=lambda s: None, forever=False)
+        watch.run(self.product, out=lines.append, sleep=lambda s: None, forever=False,
+                  now=_on_day)
         return lines
 
     def test_no_ticks_yet_prints_only_the_tail_line(self):
@@ -68,7 +75,7 @@ class WatchTests(unittest.TestCase):
 
         lines = []
         with self.assertRaises(SystemExit):
-            watch.run(self.product, out=lines.append, sleep=fake_sleep)
+            watch.run(self.product, out=lines.append, sleep=fake_sleep, now=_on_day)
         self.assertEqual(lines[1:], [
             '2026-09-25T09:00:00Z TICK — record ok, harvest FAILED',
             '2026-09-25T09:00:00Z launches 2, merges 1, relaunches 1',
@@ -89,7 +96,8 @@ class WatchTests(unittest.TestCase):
         with open(path, 'a', encoding='utf-8') as f:
             f.write('not json\n')
         lines = []
-        watch.run(self.product, out=lines.append, sleep=lambda s: None, forever=False)
+        watch.run(self.product, out=lines.append, sleep=lambda s: None, forever=False,
+                  now=_on_day)
         self.assertEqual(len(lines), 1)  # the malformed line and the tail line, minus the bad one
 
 
