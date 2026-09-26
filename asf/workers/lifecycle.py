@@ -566,7 +566,7 @@ def settled(path, item, at):
 PUSHED_SHA_RE = re.compile(r'\b[0-9a-f]{7,40}\b', re.I)
 
 
-def overruling(path, item, head):
+def overruling(path, item, head, unchanged_since=None):
     """The job of the adjudicate run whose ruling stands on ``head``, or None.
 
     An adjudicate session answers every open finding: *upheld* — it makes the edit and pushes it
@@ -575,7 +575,15 @@ def overruling(path, item, head):
     ``status: done``, carries a ``ruling:``, claims no ``blocked_on``/``superseded_by`` and says
     it left the branch at ``head`` (its ``pushed:`` sha) has answered the review of ``head``:
     the lane does not send that review back again (a product's B-1377, 2026-09-26: every ruling
-    re-held off the same stale review file, 14 adjudicate sessions)."""
+    re-held off the same stale review file, 14 adjudicate sessions).
+
+    The ``pushed:`` sha is the session's own claim, and it names the commit *it* thinks of as
+    the tip — B-1377's rulings named the code commit under the review commit that is the head,
+    and misspelled it past its ninth digit (``99bcb623ee0a…`` for ``99bcb623e36e…``), four more
+    sessions. So the ruling also stands on ``head`` when the run committed nothing
+    (``commits: none``) and spawn's ``launch_head`` — the fact — is ``head``, or when
+    ``unchanged_since(sha)`` (the lane's :func:`asf.evidence.review.only_reviews_since`) says
+    ``head`` is that sha plus review files only."""
     if not head or not path or not item:
         return None
     from asf.workers import report as report_mod
@@ -594,9 +602,15 @@ def overruling(path, item, head):
             or fields['blocked_on'] or fields['superseded_by']:
         return None
     m = PUSHED_SHA_RE.search(rep.get('pushed') or '')
-    if not m or not head.lower().startswith(m.group(0).lower()):
-        return None
-    return run.get('job')
+    sha = m.group(0).lower() if m else ''
+    if sha and head.lower().startswith(sha):
+        return run.get('job')
+    if not report_mod._claim(rep.get('commits')) and run.get('launch_head') \
+            and run['launch_head'].lower() == head.lower():
+        return run.get('job')  # launched on this head, committed nothing: the head it ruled on
+    if sha and unchanged_since and unchanged_since(sha):
+        return run.get('job')  # the head is that sha plus the review commit on top of it
+    return None
 
 
 #: a PR the ruling paragraph names, e.g. "waits on merge of #773" — B-0128's ``asf next`` line

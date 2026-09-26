@@ -202,3 +202,18 @@ def is_current(repo, conv, ref, review, head):
     after = (_git(repo, 'diff', '--name-only', last, ref) or '').split()
     reviews = _dir_of(conv) + '/'
     return not [f for f in after if not f.startswith(reviews)]
+
+
+def only_reviews_since(repo, conv, sha, ref):
+    """True when ``sha`` is an ancestor of ``ref`` and nothing outside the reviews directory
+    changed between them: ``ref`` is ``sha`` plus review files. A session naming the code commit
+    under a review commit (a product's B-1377: ``pushed: yes 99bcb623e``, the head its review
+    commit) left the branch where it found it all the same."""
+    if not sha or not ref:
+        return False
+    if subprocess.run(['git', 'merge-base', '--is-ancestor', sha, ref], cwd=repo,
+                      capture_output=True).returncode != 0:
+        return False
+    after = (_git(repo, 'diff', '--name-only', sha, ref) or '').split()
+    reviews = _dir_of(conv) + '/'
+    return not [f for f in after if not f.startswith(reviews)]

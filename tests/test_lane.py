@@ -499,16 +499,32 @@ class LaneRepo(LaneFixture):
                          (feeder_rows.STARVED_PLAN, 'plan', 'plan/F-0001', True))
         self.assertIn('retired_name', row.correction + '\n'.join(lines) or '')
 
-    def _adjudicated(self, pushed_sha, status='done', blocked_on='none'):
+    def _adjudicated(self, pushed_sha, status='done', blocked_on='none', review_commit=False,
+                     launch_head=None, commits='none'):
         """A held branch whose round-1 review reads changes requested, then a finished
-        adjudicate run whose REPORT says ``pushed: yes <pushed_sha>`` — a product's B-1377 loop."""
+        adjudicate run whose REPORT says ``pushed: yes <pushed_sha>`` — a product's B-1377 loop.
+        ``review_commit``: the review sits in its own commit on top of the code commit, as a
+        review session commits it; ``pushed_sha='code'`` then names that code commit."""
         review = ('verdict: changes requested\n\n## C\n\n- a.txt:1 is wrong\n')
-        self.push_lane('worker/T-0001', {'a.txt': 'a\n', 'reviews/1-t-0001.md': review},
-                       'feat(T-0001): a')
+        if review_commit:
+            self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat(T-0001): a')
+            self.write(self.worker, 'reviews/1-t-0001.md', review)
+            sh(['git', 'add', '-A'], cwd=self.worker)
+            sh(['git', 'commit', '-qm', 'review(T-0001): round 1 — changes requested'],
+               cwd=self.worker, env_=self.ident)
+            sh(['git', 'push', '-q', 'origin', 'worker/T-0001'], cwd=self.worker)
+        else:
+            self.push_lane('worker/T-0001', {'a.txt': 'a\n', 'reviews/1-t-0001.md': review},
+                           'feat(T-0001): a')
         head = sh(['git', 'rev-parse', 'worker/T-0001'], cwd=self.origin).stdout.strip()
+        if pushed_sha == 'code':
+            pushed_sha = sh(['git', 'rev-parse', 'worker/T-0001~1'],
+                            cwd=self.origin).stdout.strip()
+        if launch_head == 'head':
+            launch_head = head
         log = os.path.join(self.state_dir, 'adjudicate-t-0001.jsonl')
         report = (f'REPORT\nitem: T-0001\nkind: adjudicate\nstatus: {status}\n'
-                  f'branch: worker/T-0001\npushed: yes {pushed_sha or head}\ncommits: none\n'
+                  f'branch: worker/T-0001\npushed: yes {pushed_sha or head}\ncommits: {commits}\n'
                   f'ruling: the C list is false against this branch — a.txt:1 already reads a; '
                   f'overruled, do not reopen it.\nblocked_on: {blocked_on}\nwrites: a.txt\n'
                   f'superseded_by: none\n')
@@ -526,7 +542,7 @@ class LaneRepo(LaneFixture):
                                        'changes requested: answer its C list'}},
                        {'job': 'adjudicate-t-0001', 'item': 'T-0001', 'branch': 'worker/T-0001',
                         'kind': 'adjudicate', 'pid': 2, 'started': '2026-09-21T00:10:00Z',
-                        'log': log},
+                        'log': log, **({'launch_head': launch_head} if launch_head else {})},
                        {'job': 'adjudicate-t-0001', 'ended': '2026-09-21T00:15:00Z',
                         'end_reason': 'finished'}):
                 f.write(json.dumps(ln) + '\n')
@@ -553,6 +569,42 @@ class LaneRepo(LaneFixture):
         self.assertTrue(lifecycle.corrections(path)['T-0001']['settled'])
         lane.lane_pass(product, self.state_dir, out=lines.append)  # a second tick holds nothing
         self.assertTrue(lifecycle.corrections(path)['T-0001']['settled'], lines)
+
+    def test_a_ruling_naming_the_code_commit_under_the_review_commit_overrules_it(self):
+        """a product's B-1377 (2026-09-26, 18 adjudicate sessions): the review session commits its
+        review file on top of the code, so the head is the review commit — and the adjudicator's
+        REPORT named the code commit (``pushed: yes 99bcb623e``), the last one it could have
+        changed. Nothing outside the reviews directory differs between that sha and the head:
+        the ruling answered the review of this head all the same."""
+        self._adjudicated('code', review_commit=True)
+        product = self.product(lane={'review': {'code': 'required'}})
+        lines = []
+        lane.lane_pass(product, self.state_dir, out=lines.append)
+        rec_ = self.lane_of('worker/T-0001')
+        self.assertEqual(rec_['state'], lane.GATE, lines)
+        self.assertIn('adjudicate-t-0001', rec_['reason'])
+
+    def test_a_ruling_launched_on_the_head_it_left_alone_overrules_whatever_sha_it_names(self):
+        """The session's ``pushed:`` sha is its own claim; spawn's ``launch_head`` is the fact. A
+        ruling that committed nothing, launched on the head the branch still sits on, answered
+        the review of that head whatever sha its REPORT names — B-1377's last rulings wrote
+        ``pushed: yes 99bcb623ee0a…`` and ``99bcb623e5...`` for the commit 99bcb623e36e…, a sha
+        that exists nowhere, while spawn recorded the head both were launched on."""
+        self._adjudicated('e' * 40, launch_head='head')
+        product = self.product(lane={'review': {'code': 'required'}})
+        lines = []
+        lane.lane_pass(product, self.state_dir, out=lines.append)
+        self.assertEqual(self.lane_of('worker/T-0001')['state'], lane.GATE, lines)
+
+    def test_a_ruling_that_names_commits_or_another_launch_head_does_not_overrule(self):
+        for kw in ({'pushed_sha': 'e' * 40, 'launch_head': 'f' * 40},
+                   {'pushed_sha': 'e' * 40, 'launch_head': 'head', 'commits': 'abc1234 fix: C1'}):
+            with self.subTest(**kw):
+                self.setUp()
+                self._adjudicated(**kw)
+                product = self.product(lane={'review': {'code': 'required'}})
+                lane.lane_pass(product, self.state_dir, out=lambda *_: None)
+                self.assertEqual(self.lane_of('worker/T-0001')['state'], lane.BACK)
 
     def test_a_ruling_on_another_head_or_not_done_does_not_overrule(self):
         """The ruling stands on the head it ruled on only: a report naming another sha, one that

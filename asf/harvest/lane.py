@@ -1042,7 +1042,9 @@ class Lane:
             f['review'] = rv
             if rv and rv.get('current') and rv.get('verdict') == review_mod.CHANGES:
                 # the review's C list an adjudicate ruling already answered on this very head
-                f['overruled'] = lifecycle.overruling(self.path, item, head)
+                f['overruled'] = lifecycle.overruling(
+                    self.path, item, head,
+                    lambda sha: review_mod.only_reviews_since(repo, conv, sha, f'origin/{b}'))
         return f
 
     # ---- orphans --------------------------------------------------------------------------
