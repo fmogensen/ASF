@@ -497,10 +497,12 @@ def job_key(name):
 
 def _jobs_verdict(product, run, req, sh):
     """``(green, rule)`` for one completed run under the required-jobs rule, reading the jobs of
-    its latest attempt (``gh run view --json jobs``); ``rule`` names what decided."""
+    its latest attempt (``gh run view --json jobs``); ``rule`` names what decided. A required
+    job is green only when it concluded ``success``: ``skipped``, ``neutral``, ``cancelled`` or
+    missing never are. The run's own conclusion never stands in for its jobs — a run whose path
+    filter skipped the suites concludes ``success`` too (2026-09-26: a docs-only tip, suites
+    skipped, was announced for prod over a code commit whose run had not finished)."""
     names = ', '.join(req)
-    if run.get('conclusion') == 'success':  # a green run is green in every job
-        return True, f'green on required jobs [{names}]'
     view = _json(sh(['gh', 'run', 'view', str(run.get('databaseId')), '-R', product.repo_slug,
                      '--json', 'jobs']), dict)
     if view is None:
@@ -509,7 +511,9 @@ def _jobs_verdict(product, run, req, sh):
     for name in req:
         mine = [j for j in jobs if job_key(j.get('name')) == name]
         if not mine or any(j.get('conclusion') != 'success' for j in mine):
-            return False, f'required job {name} not green'
+            got = ', '.join(sorted({str(j.get('conclusion') or j.get('status') or '?')
+                                    for j in mine})) or 'missing'
+            return False, f'required job {name} not green ({got})'
     other = [f"{job_key(j.get('name'))} {j.get('conclusion') or j.get('status') or 'unknown'}"
              for j in jobs if job_key(j.get('name')) not in req
              and j.get('conclusion') not in ('success', 'skipped', 'neutral')]
@@ -558,7 +562,7 @@ def _sha_green(product, sha, ci_runs, sh, env='prod'):
 def _blank(product, env):
     return {'env': env, 'mode': mode(product, env), 'workflow': workflow(product, env),
             'ci': ci_workflow(product), 'deployed': None, 'prod': None, 'running': None,
-            'failed': None, 'candidate': None, 'main': None, 'behind': None, 'age': None, 'at': None,
+            'failed': None, 'failed_how': None, 'candidate': None, 'main': None, 'behind': None, 'age': None, 'at': None,
             'error': None, 'why': None, 'rule': None, 'required': _required_label(product, env),
             'paths': paths(product, env), 'relevant': None,
             'reader': reader(product, env)}
@@ -641,9 +645,11 @@ def facts(product, sh=_sh, now=None, env='prod', _ci=None):
         pick, rule = _pick(product, env, ci, sh)
     if pick and pick != f['deployed'] and _ahead(product, f['deployed'], pick, sh):
         f['candidate'], f['rule'] = pick, rule
-        f['failed'] = next((r.get('databaseId') for r in runs if r.get('headSha') == pick
-                            and r.get('status') == 'completed'
-                            and r.get('conclusion') not in ('success', None)), None)
+        bad = next((r for r in runs if r.get('headSha') == pick
+                    and r.get('status') == 'completed'
+                    and r.get('conclusion') not in ('success', None)), None)
+        if bad:
+            f['failed'], f['failed_how'] = bad.get('databaseId'), bad.get('conclusion')
     return _done(f)
 
 
@@ -727,11 +733,17 @@ def decide(product, f, env=None):
                  else f"no green {f['ci']} run on {trunk}")
         return False, f"{head} {lag} — {green} newer than {env}; {env} waits on a green {trunk}"
     why = f"; {f['rule']}" if f.get('rule') else ''
+    held = f.get('mode') != 'auto' or not wf
+    # a manual environment is held: its line leads with that, and never promises a dispatch
+    lead = f"{head} {env} {f.get('mode') or 'manual'} (held): " if held else f'{head} '
     if f['failed']:
-        return False, (f"{head} {wf} for {_s(f['candidate'])} FAILED (run {f['failed']}) — not"
-                       f" retried; {lag}; the next green sha dispatches again")
-    if f.get('mode') != 'auto' or not wf:
-        return False, f"{head} {lag} — {_manual(product, f, env)}{why}"
+        word = 'CANCELLED' if f.get('failed_how') == 'cancelled' else 'FAILED'
+        last = f"{wf} for {_s(f['candidate'])} {word} (run {f['failed']})"
+        if held:
+            return False, f"{lead}{last}; {lag} — {_manual(product, f, env)}{why}"
+        return False, f"{lead}{last} — not retried; {lag}; the next green sha dispatches again"
+    if held:
+        return False, f"{lead}{lag} — {_manual(product, f, env)}{why}"
     return True, f"{head} {lag} — dispatching {wf} for green {_s(f['candidate'])}{why}"
 
 

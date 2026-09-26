@@ -126,6 +126,27 @@ class Dispatch(unittest.TestCase):
         self.assertIsNone(sha)
         self.assertIn('FAILED (run 7)', lines[0])
 
+    def test_a_cancelled_deploy_reads_cancelled_not_failed(self):
+        sh = FakeSh([_run(GREEN, conclusion='cancelled', rid=7), _run(PROD)], [_run(GREEN)])
+        sha, lines = _tick(_product(auto=True), sh)
+        self.assertIsNone(sha)
+        self.assertIn('CANCELLED (run 7)', lines[0])
+        self.assertNotIn('FAILED', lines[0])
+
+    def test_a_manual_prod_never_says_the_next_green_sha_dispatches(self):
+        p = _modes(prod='manual')
+        for conclusion, word in (('cancelled', 'CANCELLED'), ('failure', 'FAILED')):
+            sh = FakeSh([_run(GREEN, conclusion=conclusion, rid=7), _run(PROD)], [_run(GREEN)])
+            text = deploy.line(p, sh=sh)
+            self.assertTrue(text.startswith('deploy: prod manual (held):'), text)
+            self.assertIn(f'{word} (run 7)', text)
+            self.assertNotIn('dispatches again', text)
+            self.assertNotIn('next tick dispatches', text)
+        sh = FakeSh([_run(PROD)], [_run(GREEN)])
+        text = deploy.line(p, sh=sh)
+        self.assertTrue(text.startswith('deploy: prod manual (held):'), text)
+        self.assertIn(f'green `{GREEN[:9]}`', text)
+
     def test_no_green_trunk_waits_on_green(self):
         sh = FakeSh([_run(PROD)], [_run(RED, conclusion='failure')])
         sha, lines = _tick(_product(auto=True), sh)
@@ -616,6 +637,63 @@ class RequiredJobs(unittest.TestCase):
         with mock.patch.object(deploy, 'marker_refusal', return_value='deploy: DISPATCH REFUSED'):
             self.assertEqual(deploy.tick(p, out=[].append, sh=sh), {})
         self.assertEqual(sh.dispatched(), [])
+
+
+class SkippedNeverGreen(unittest.TestCase):
+    """2026-09-26 incident: a docs-only tip's run skipped the required suites and concluded
+    success; the run-level conclusion short-circuited the job check and the tip was announced
+    for prod while the code commit under it had no finished run. A required job is green only
+    when it concluded ``success``; the run's own conclusion never stands in for its jobs."""
+    TIP, CODE, OLD = 'e' * 40, 'f' * 40, '9' * 40
+    REQ = ['gate', 'gate-tests', 'e2e']
+
+    def _p(self):
+        return _modes(prod='auto', prod_extra={'required_jobs': self.REQ})
+
+    def test_a_skipped_only_tip_is_no_candidate(self):
+        sh = FakeSh([_run(PROD)], [_run(self.TIP, rid=6)],
+                    jobs={6: [_job('gate'), _job('gate-tests', 'skipped'),
+                              _job('e2e', 'skipped')]})
+        f = deploy.facts(self._p(), sh=sh)
+        self.assertIsNone(f['candidate'])
+        self.assertTrue(any(c[:3] == ['gh', 'run', 'view'] for c in sh.calls),
+                        'a run-level success must not short-circuit the required jobs')
+        self.assertEqual(deploy.tick(self._p(), out=[].append, sh=sh), {})
+        self.assertEqual(sh.dispatched(), [])
+
+    def test_an_in_progress_ancestor_run_blocks_the_tip(self):
+        # the docs tip skipped the suites; the code commit under it is still running: the tip is
+        # never the candidate, and nothing newer than the unfinished code commit is either
+        runs = [_run(self.TIP, rid=6),
+                _run(self.CODE, status='in_progress', conclusion=None, rid=7)]
+        sh = FakeSh([_run(PROD)], runs,
+                    jobs={6: [_job('gate'), _job('gate-tests', 'skipped'),
+                              _job('e2e', 'skipped')]})
+        self.assertIsNone(deploy.facts(self._p(), sh=sh)['candidate'])
+        # an older sha whose own run is green on every required job is still deployable
+        runs.append(_run(self.OLD, rid=8))
+        sh = FakeSh([_run(PROD)], runs,
+                    jobs={6: [_job('gate'), _job('gate-tests', 'skipped'),
+                              _job('e2e', 'skipped')],
+                          8: [_job('gate'), _job('gate-tests'), _job('e2e')]})
+        self.assertEqual(deploy.facts(self._p(), sh=sh)['candidate'], self.OLD)
+
+    def test_a_cancelled_code_run_under_a_skipped_tip_is_no_candidate(self):
+        runs = [_run(self.TIP, rid=6), _run(self.CODE, conclusion='cancelled', rid=7)]
+        sh = FakeSh([_run(PROD)], runs,
+                    jobs={6: [_job('gate'), _job('gate-tests', 'skipped'), _job('e2e', 'skipped')],
+                          7: [_job('gate'), _job('gate-tests', 'cancelled'),
+                              _job('e2e', 'cancelled')]})
+        self.assertIsNone(deploy.facts(self._p(), sh=sh)['candidate'])
+
+    def test_a_success_run_is_read_job_by_job(self):
+        sh = FakeSh([_run(PROD)], [_run(GREEN, rid=5)],
+                    jobs={5: [_job('gate'), _job('gate-tests'), _job('e2e', 'neutral')]})
+        self.assertIsNone(deploy.facts(self._p(), sh=sh)['candidate'])
+        sh = FakeSh([_run(PROD)], [_run(GREEN, rid=5)],
+                    jobs={5: [_job('gate'), _job('gate-tests'), _job('e2e'),
+                              _job('soak', 'skipped')]})
+        self.assertEqual(deploy.facts(self._p(), sh=sh)['candidate'], GREEN)
 
 
 class RequiredJobsFrom(unittest.TestCase):
