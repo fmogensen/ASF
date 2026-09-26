@@ -37,7 +37,9 @@ launching row prints ``waits … — held: host pressure load <n>/cores <c>, swa
 ends on ``wave: held: …``. Sessions already running are never touched. With the cloud lane on
 (:mod:`asf.workers.cloud`) the held host only holds the local lane: the step prints ``wave: local
 lane held: …`` and the wave sends what the cloud lane can take there; its seats are added to the
-feeder's ceiling.
+feeder's ceiling. The lane counts as on only while it is ready (:func:`cloud_readiness`, read
+once per tick — :func:`asf.workers.cloud.readiness`): an unready lane adds no seat, lifts no
+hold, and the wave prints ``cloud lane unready: <why> — local lane only`` (:func:`split_hold`).
 
 Whatever the plan holds, the wave starts at most ``max(0, share − live)`` rows, ``live`` being
 :func:`asf.capacity.live_sessions` — the count the status Capacity row shows — so a stale plan or
@@ -388,7 +390,8 @@ def worker_row(row, brief, items, host_load_bypass=False):
                         feature=row.feature_id or None, branch=row.branch or None,
                         add_dirs=getattr(brief, 'add_dirs', None) or (),
                         card_digest=getattr(brief, 'card_digest', '') or '',
-                        host_load_bypass=host_load_bypass)
+                        host_load_bypass=host_load_bypass,
+                        local_only=cloud_mod.truthy(item.get('local_only')))
 
 
 def host_hold(planned):
@@ -417,6 +420,32 @@ def cloud_settings(product):
     except env.ConfigError:
         cfg = {}
     return cloud_mod.settings(cfg, product)
+
+
+def cloud_readiness(product, cloud):
+    """``(ready, why)`` of the cloud lane (:func:`asf.workers.cloud.readiness`) — read once per
+    tick, and only when the lane is on (it costs a few ``gh`` calls)."""
+    if not cloud.on:
+        return False, 'cloud lane off'
+    try:
+        cfg = env.load_config()
+    except env.ConfigError as e:
+        return False, f'config unreadable ({e})'
+    try:
+        return cloud_mod.readiness(cfg, product)
+    except Exception as e:  # noqa: BLE001 — an unreadable lane is an unready one
+        return False, f'readiness unreadable ({type(e).__name__}: {e})'
+
+
+def split_hold(cloud, ready, host_held, host_why):
+    """``(host_held, local_hold, extra seats)``: a ready cloud lane takes the host hold off its
+    own rows — the hold becomes ``local_hold`` (the local lane only) — and adds its seats beside
+    the local ones; an off or unready lane leaves the hold on every row and adds none."""
+    lane_open = cloud.on and bool(ready and ready[0])
+    extra = cloud.max_inflight if lane_open else 0
+    if host_held and lane_open:
+        return False, host_why, extra
+    return host_held, '', extra
 
 
 def push_deferred(ctx, out=print):
@@ -454,7 +483,8 @@ def launch(ctx, out=print):
     # the cloud lane's seats beside the local ones: the feeder takes every in-flight run (cloud
     # ones too) off the sum, so what is left is the free local seats plus the free cloud ones
     cloud = cloud_settings(product)
-    extra = cloud.max_inflight if cloud.on else 0
+    ready = cloud_readiness(product, cloud)     # once per tick, never per row
+    _held, _hold, extra = split_hold(cloud, ready, False, '')
     inputs = plan_inputs(product, ctx.record_root(), items)
     # the feeder check point: a violating row is dropped, logged, and its slot goes to the next
     planned, dropped = gated_plan(items, product, running, r.sessions + extra, inputs, out=out)
@@ -469,9 +499,7 @@ def launch(ctx, out=print):
         out(f'waits    {job:<24} {row.item_id:<10} — {r.fair_share_reason}; {counted}')
     host_held, host_why, reading = host_hold(planned)
     # a loaded host still starts cloud sessions: nothing of theirs runs here
-    local_hold = host_why if host_held and cloud.on else ''
-    if local_hold:
-        host_held = False
+    host_held, local_hold, _extra = split_hold(cloud, ready, host_held, host_why)
     # an S1 item's row passes the LOAD half of the guard — never memory/swap pressure, and at
     # most one such bypass live at a time, across every product (asf.workers.host.load_only_hold)
     s1_bypass_open = (host_held
@@ -544,7 +572,8 @@ def launch(ctx, out=print):
         return 0
     launched, _waits = _wave(product, worker_rows, len(worker_rows),
                              brief_fn=lambda r: texts[r.job], out=out,
-                             **({'local_hold': local_hold} if local_hold else {}))
+                             **({'local_hold': local_hold} if local_hold else {}),
+                             **({'cloud_ready': ready} if cloud.on else {}))
     for wrow, rec in launched:
         ctx.event('launch', item=wrow.item, job=wrow.job,
                   model=rec.get('model'), brief_kind=kinds[wrow.job])
