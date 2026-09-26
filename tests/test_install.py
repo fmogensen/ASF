@@ -979,6 +979,32 @@ class DrainIgnoresTestsTest(HomeCase):
         self.assertIsNone(upgrade.read_pending())  # never leaves the factory parked
 
 
+class DeadWaiterTest(HomeCase):
+    """A killed ``asf upgrade --wait`` never cleared its mark: the next tick drops it at once
+    instead of parking every product until the TTL (the 17:25 kill)."""
+    SHA = 'b' * 40
+
+    def test_an_operator_mark_records_its_pid(self):
+        self.assertEqual(upgrade.write_pending(self.SHA, None)['pid'], os.getpid())
+        self.assertNotIn('pid', upgrade.write_pending(self.SHA, 'factory'))
+
+    def test_a_dead_waiters_mark_no_longer_parks_the_ticks(self):
+        dead = subprocess.Popen([sys.executable, '-c', 'pass'])
+        dead.wait()
+        upgrade.write_pending(self.SHA, None)
+        data = upgrade.read_pending()
+        data['pid'] = dead.pid
+        upgrade._write_json(upgrade.pending_path(), data)
+        lines = []
+        self.assertFalse(upgrade.waiting('other', out=lines.append, installed='c' * 40))
+        self.assertIsNone(upgrade.read_pending())
+        self.assertIn('is gone', lines[0])
+
+    def test_a_live_waiters_mark_still_parks_them(self):
+        upgrade.write_pending(self.SHA, None)
+        self.assertTrue(upgrade.waiting('other', out=lambda _l: None, installed='c' * 40))
+
+
 class HooksTest(HomeCase):
     def setUp(self):
         super().setUp()

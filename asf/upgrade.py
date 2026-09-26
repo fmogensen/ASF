@@ -111,6 +111,8 @@ def write_pending(sha, owner, now=None):
     old = read_pending()
     at = old.get('at') if old and isinstance(old.get('at'), (int, float)) else None
     data = {'sha': sha, 'owner': owner, 'at': at if at is not None else (now or time.time())}
+    if owner is None:
+        data['pid'] = os.getpid()  # an operator's wait lives only as long as its process
     _write_json(pending_path(), data)
     return data
 
@@ -150,9 +152,20 @@ def _installed(sha, installed, run=subprocess.run):
     return p.returncode == 0
 
 
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # it exists, owned by someone else
+    return True
+
+
 def pending(now=None, installed=None, out=print, run=subprocess.run):
-    """The fresh pending marker, or ``None``. A stale one (older than :data:`PENDING_TTL_S`, or
-    its sha already installed) is removed; one that timed out uninstalled says so in a
+    """The fresh pending marker, or ``None``. A stale one (older than :data:`PENDING_TTL_S`, its
+    sha already installed, or an operator's wait whose process is gone — killed, it never
+    cleared its mark) is removed; one that timed out uninstalled says so in a
     ``NEEDS OPERATOR`` line and starts the cool-down (:func:`cooling`)."""
     data = read_pending()
     if data is None:
@@ -160,6 +173,11 @@ def pending(now=None, installed=None, out=print, run=subprocess.run):
     if installed is None:
         from asf import drift
         installed = drift.installed_commit()
+    pid = data.get('pid')
+    if data.get('owner') is None and isinstance(pid, int) and pid > 0 and not _alive(pid):
+        clear_pending()
+        out(f'upgrade: pending {data["sha"][:7]} dropped — its waiting process {pid} is gone')
+        return None
     at = data.get('at')
     age = (now or time.time()) - at if isinstance(at, (int, float)) else None
     if _installed(data['sha'], installed, run):
