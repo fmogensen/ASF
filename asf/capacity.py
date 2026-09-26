@@ -41,8 +41,9 @@ feeder only stops handing it new slots (``free_slots`` never goes below zero).
 **Borrowing.** The share is work-conserving: what another active product leaves idle is lent
 to this one. Each wave records its product's *demand* (:func:`write_demand`: its sessions in
 flight and the launching rows it would start given room) in ``state/<name>/demand.json``; a
-partner's *claim* is ``min(its share, its in-flight now + its wanted rows)``, and the rest of its
-share is borrowable. A partner with no fresh record (older than :data:`DEMAND_FRESH_S`, or none)
+partner's *claim* is ``min(its share, max(its in-flight then + its wanted rows, its in-flight
+now))`` (:func:`claim`) — what its own wave recorded it would hold, so a partner held by host
+pressure lends nothing as its sessions end — and the rest of its share is borrowable. A partner with no fresh record (older than :data:`DEMAND_FRESH_S`, or none)
 claims its whole share — nothing is lent on a guess. A partner that wakes records its demand on
 its next wave, its claim rises, and the borrower's share falls back: the borrower keeps its
 running sessions and gets no new slot until the lender has its own.
@@ -142,11 +143,20 @@ def total_ci(cfg):
     return v if isinstance(v, int) and v >= 0 else None
 
 
-def inflight_sessions(name):
-    """Live rows in ``state/<name>/sessions.jsonl`` — :func:`asf.workers.lifecycle.inflight`."""
+def live_sessions(name):
+    """The sessions that hold a seat of ``name``'s share: the live rows in
+    ``state/<name>/sessions.jsonl`` (:func:`asf.workers.lifecycle.inflight`). The one count of
+    them — the wave's ``in flight`` (``asf.tick.step_wave.inflight``, what the feeder takes off
+    the share), the status Capacity row, the CAPACITY table and a partner's claim all read it,
+    an S1 load-hold bypass's session among them."""
     from asf.workers import lifecycle
     from asf.workers import pool as pool_mod
-    return len(lifecycle.inflight(pool_mod.sessions_path(name)))
+    return lifecycle.inflight(pool_mod.sessions_path(name))
+
+
+def inflight_sessions(name):
+    """``len(live_sessions(name))``."""
+    return len(live_sessions(name))
 
 
 def inflight_sessions_elsewhere(name):
@@ -245,29 +255,49 @@ def write_demand(name, inflight, wanted):
         pass
 
 
-def read_demand(name, now=None):
-    """``name``'s ``wanted`` rows from its fresh demand record, else ``None`` (none, unreadable,
-    or older than :data:`DEMAND_FRESH_S`)."""
+def read_demand_record(name, now=None):
+    """``(inflight, wanted)`` from ``name``'s fresh demand record, else ``None`` (none,
+    unreadable, or older than :data:`DEMAND_FRESH_S`). ``inflight`` is ``None`` on a record
+    written before it was read."""
     try:
         with open(_demand_path(name), encoding='utf-8') as f:
             rec = json.load(f)
         at = datetime.datetime.strptime(rec['at'], '%Y-%m-%dT%H:%M:%SZ').replace(
             tzinfo=datetime.timezone.utc)
         wanted = int(rec['wanted'])
+        inflight = int(rec['inflight']) if rec.get('inflight') is not None else None
     except (OSError, ValueError, KeyError, TypeError):
         return None
     if ((now or _now()) - at).total_seconds() > DEMAND_FRESH_S:
         return None
-    return max(0, wanted)
+    return (None if inflight is None else max(0, inflight)), max(0, wanted)
+
+
+def read_demand(name, now=None):
+    """``name``'s ``wanted`` rows from its fresh demand record, else ``None``."""
+    rec = read_demand_record(name, now)
+    return None if rec is None else rec[1]
 
 
 def claim(name, share):
-    """The slots of its ``share`` a partner holds or wants now: ``min(share, in flight + wanted)``,
-    its whole share when its demand is unknown."""
-    wanted = read_demand(name)
-    if wanted is None:
+    """The slots of its ``share`` a partner holds or wants: ``min(share, max(recorded in flight +
+    wanted, in flight now))``, its whole share when its demand is unknown.
+
+    The record's own ``inflight``, not the live count, goes beside its ``wanted``: ``wanted`` was
+    cut to the room the partner had *then*. 2026-09-26 (a product tick): the partner's wave, held
+    by host pressure, recorded 4 in flight and 2 wanted; as its sessions ended the old sum (in
+    flight now + wanted) fell to 3, the borrower's share rose to 13 and it launched 11 — slots the
+    partner would have refilled but for the pressure. And once the partner launched its wanted
+    rows, the old sum counted them twice (in flight now and wanted), which read ``10/5``. The
+    live count still wins when the partner holds more than it recorded."""
+    rec = read_demand_record(name)
+    if rec is None:
         return share
-    return min(share, inflight_sessions(name) + wanted)
+    rec_inflight, wanted = rec
+    now = inflight_sessions(name)
+    if rec_inflight is None:
+        return min(share, now + wanted)
+    return min(share, max(rec_inflight + wanted, now))
 
 
 def fair_share(product, cfg, quota_source=None):
