@@ -5,7 +5,7 @@ Accounts come from ``config.yaml worker_pool.accounts``::
     worker_pool:
       accounts:
         - name: acct-a
-          role: local          # the lane: local | cloud
+          role: local          # the lane: cloud, or any other name (local, worker) = local
           cap: 3               # concurrent sessions
           caps: {opus: 2}      # optional per-model ceiling
           config_dir: ~/.ASF/accounts/acct-a   # the runtime's isolated config/home
@@ -242,6 +242,22 @@ def live_sessions(product):
 
 # ---- the pool ---------------------------------------------------------------
 
+def in_lane(account, lane):
+    """``account`` takes a row of ``lane``: any lane when None; ``local`` is every account that
+    is not ``role: cloud`` (a host account's role may be ``local``, ``worker`` or another name);
+    any other lane is its own role."""
+    if lane is None:
+        return True
+    if lane == 'local':
+        return account.role != 'cloud'
+    return account.role == lane
+
+
+def lane_of(account):
+    """The lane ``account`` serves: ``cloud`` for ``role: cloud``, else ``local``."""
+    return 'cloud' if account.role == 'cloud' else 'local'
+
+
 class Pool:
     """Accounts + their current load + the guard. ``live`` is the list of live session records
     (each with ``account``, ``model``); :meth:`take` adds one as a wave launches.
@@ -352,7 +368,7 @@ class Pool:
                    and (model is None or model_key(s.get('model')) == model_key(model)))
 
     def lane_load(self, lane):
-        names = {a.name for a in self.accounts if a.role == lane}
+        names = {a.name for a in self.accounts if in_lane(a, lane)}
         return sum(1 for s in self.live if s.get('account') in names and not is_cloud_lane(s))
 
     def cloud_load(self, account=None):
@@ -398,7 +414,7 @@ class Pool:
         return None, REASON_COOLDOWN
 
     def lane_cap(self, lane):
-        return sum(a.cap for a in self.accounts if a.role == lane)
+        return sum(a.cap for a in self.accounts if in_lane(a, lane))
 
     def under_caps(self, account, model):
         if self.load(account) >= account.cap:
@@ -407,14 +423,24 @@ class Pool:
         return mcap is None or self.load(account, model) < mcap
 
     def pick_account(self, kind, model, is_fix=False, s1_is_open=False, lane=None):
-        """(Account, '') or (None, reason). ``kind`` is carried for the reason text only."""
-        cands = [a for a in self.accounts if lane is None or a.role == lane]
+        """(Account, '') or (None, reason). ``kind`` is carried for the reason text only.
+
+        ``lane='local'`` is every account that is not ``role: cloud`` — a host account may carry
+        any other role (``local``, ``worker``, …); reading it as ``role == 'local'`` left a pool
+        of ``role: worker`` accounts with no local candidate at all once the cloud lane was on,
+        and every row waited on a bare ``pool full``. A full pool always names its seats."""
+        cands = [a for a in self.accounts if in_lane(a, lane)]
         room = [a for a in cands if self.under_caps(a, model)]
+        if not cands:
+            roles = ', '.join(f'{a.name} {a.role}' for a in self.accounts) or 'none'
+            return None, (f'{REASON_FULL} — no account serves the {lane} lane '
+                          f'(worker_pool.accounts roles: {roles})')
         if not room:
-            return None, REASON_FULL
+            return None, self.full_reason(cands, [], model)
         if s1_is_open and not is_fix:
             room = [a for a in room
-                    if self.lane_load(a.role) < self.lane_cap(a.role) - self.reserve.get(a.role, 0)]
+                    if self.lane_load(lane_of(a))
+                    < self.lane_cap(lane_of(a)) - self.reserve.get(lane_of(a), 0)]
             if not room:
                 return None, REASON_RESERVED
         free, cooling, held, over, limited = [], [], False, [], []

@@ -492,7 +492,8 @@ class PoolAcrossProductsTest(Home):
         self.assertEqual(p.load(acct), 1)
         self.assertEqual(p.live[-1]['owner'], 'foreign')
         self.assertIsNone(p.live[-1]['model'])
-        self.assertEqual(p.pick_account('task', 'opus'), (None, pool_mod.REASON_FULL))
+        self.assertEqual(p.pick_account('task', 'opus'),
+                         (None, 'pool full — accounts at cap: acct-a 1/1'))
 
     def test_an_extra_is_not_held_to_a_per_model_cap(self):
         """An extra's model is not known, so ``model: None`` falls out of the per-model ceiling

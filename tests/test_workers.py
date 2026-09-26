@@ -291,7 +291,8 @@ class TestPick(unittest.TestCase):
     def test_caps_and_model_caps(self):
         a = pool_mod.Account('a', cap=2, caps={'opus': 1})
         p = self.pool([a], live=[{'account': 'a', 'model': 'opus'}])
-        self.assertEqual(p.pick_account('spec', 'Opus'), (None, pool_mod.REASON_FULL))
+        self.assertEqual(p.pick_account('spec', 'Opus'),
+                         (None, 'pool full — accounts at cap: a 1/1 opus'))
         self.assertEqual(p.pick_account('spec', 'sonnet')[0].name, 'a')
 
     def test_over_guard_is_needs_operator_reason_not_exception(self):
@@ -381,6 +382,33 @@ class TestPick(unittest.TestCase):
         self.assertEqual(p.pick_account('fix-bug', 'opus', is_fix=True, s1_is_open=True)[0].name, 'a')
         # no S1 open → the slot is anyone's
         self.assertEqual(p.pick_account('spec', 'opus')[0].name, 'a')
+
+    def test_the_local_lane_is_every_account_not_role_cloud(self):
+        w = pool_mod.Account('w', role='worker', cap=2)
+        c = pool_mod.Account('c', role='cloud', cap=2)
+        p = self.pool([c, w])
+        self.assertEqual(p.pick_account('spec', 'opus', lane='local')[0].name, 'w')
+        self.assertEqual(p.pick_account('spec', 'opus', lane='cloud')[0].name, 'c')
+
+    def test_no_account_in_the_lane_says_so(self):
+        c = pool_mod.Account('c', role='cloud', cap=2)
+        acct, why = self.pool([c]).pick_account('spec', 'opus', lane='local')
+        self.assertIsNone(acct)
+        self.assertEqual(why, 'pool full — no account serves the local lane '
+                              '(worker_pool.accounts roles: c cloud)')
+
+    def test_a_full_pool_always_names_the_accounts_at_cap(self):
+        a = pool_mod.Account('a', cap=1)
+        p = self.pool([a], live=[{'account': 'a', 'model': 'sonnet'}])
+        self.assertEqual(p.pick_account('spec', 'opus'),
+                         (None, 'pool full — accounts at cap: a 1/1'))
+
+    def test_the_local_reserve_holds_on_worker_role_accounts(self):
+        w = pool_mod.Account('w', role='worker', cap=2)
+        p = self.pool([w], live=[{'account': 'w'}], reserve={'local': 1, 'cloud': 0})
+        self.assertEqual(p.pick_account('spec', 'opus', s1_is_open=True), (None, 'reserved for S1'))
+        self.assertEqual(p.pick_account('fix-bug', 'opus', is_fix=True, s1_is_open=True)[0].name,
+                         'w')
 
     def test_reserve_is_per_lane(self):
         loc = pool_mod.Account('l', role='local', cap=1)
@@ -841,7 +869,8 @@ class TestWave(Home):
         live = [{'job': f'spec-{i}', 'account': 'acct-a'} for i in range(2)]
         launched, waits, lines = self.run_wave([feature_row('spec-9'), s1_row()], 5, [acct], live)
         self.assertEqual([r.job for r, _ in launched], ['fix-b-0001'])
-        self.assertEqual([(r.job, why) for r, why in waits], [('spec-9', 'pool full')])
+        self.assertEqual([(r.job, why) for r, why in waits],
+                         [('spec-9', 'pool full — accounts at cap: acct-a 3/3')])
         self.assertTrue(lines[0].startswith('launched fix-b-0001'))
         self.assertIn('— pool full', lines[1])
 

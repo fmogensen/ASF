@@ -374,7 +374,8 @@ class Placement(Lanes):
         launched, waits, _lines = self.run_wave(rows, live=live)
         self.assertEqual([(r.job, rec['runtime_lane']) for r, rec in launched], [('spec-1', 'cloud')])
         self.assertEqual([(r.job, why) for r, why in waits],
-                         [('spec-2', 'pool full; cloud full — 2/2 in flight')])
+                         [('spec-2', 'pool full — accounts at cap: acct-a 1/1; '
+                                     'cloud full — 2/2 in flight')])
 
     def test_a_row_not_cloud_ok_waits_on_the_host(self):
         cfg = dict(self.cfg, cloud=dict(ON, rows='cloud-ok'))
@@ -391,7 +392,34 @@ class Placement(Lanes):
         cfg = dict(self.cfg, cloud={'enabled': False})
         live = [{'job': 'x', 'account': 'acct-a'}, {'job': 'y', 'account': 'acct-c'}]
         launched, waits, _ = self.run_wave([feature_row('spec-1')], live=live, cfg=cfg)
-        self.assertEqual((launched, waits[0][1]), ([], 'pool full'))
+        self.assertEqual((launched, waits[0][1]),
+                         ([], 'pool full — accounts at cap: acct-a 1/1, acct-c 1/1'))
+
+
+    def test_worker_role_accounts_take_the_local_lane_when_the_cloud_is_on(self):
+        """B: every account ``role: worker`` (not ``local``), the cloud lane on in overflow mode
+        and holding its only account: a free worker account with room gets the local launch —
+        the local lane is every account that is not ``role: cloud``."""
+        cfg = dict(self.cfg, cloud=dict(ON, rows='any', accounts=['w2']))
+        cfg['worker_pool'] = dict(cfg['worker_pool'], accounts=[
+            {'name': 'w1', 'role': 'worker', 'cap': 4},
+            {'name': 'w2', 'role': 'worker', 'cap': 4}])
+        live = [{'job': 'x', 'account': 'w1'},
+                {'job': 'c1', 'account': 'w2', 'runtime_lane': 'cloud'}]
+        launched, waits, lines = self.run_wave([feature_row('spec-1')], live=live, cfg=cfg)
+        self.assertEqual(waits, [])
+        (row, rec), = launched
+        self.assertEqual(rec['account'], 'w2')
+        self.assertNotEqual(rec.get('runtime_lane'), 'cloud')
+        self.assertIn('pid', lines[0])
+
+    def test_a_full_local_lane_names_its_accounts_and_caps(self):
+        live = [{'job': 'x', 'account': 'acct-a'},
+                {'job': 'c1', 'account': 'acct-c', 'runtime_lane': 'cloud'}]
+        cfg = dict(self.cfg, cloud=dict(ON, max_inflight=1))
+        _launched, waits, _ = self.run_wave([feature_row('spec-1')], live=live, cfg=cfg)
+        self.assertEqual(waits[0][1],
+                         'pool full — accounts at cap: acct-a 1/1; cloud full — 1/1 in flight')
 
 
 class DefaultPlacement(Lanes):
@@ -444,7 +472,7 @@ class DefaultPlacement(Lanes):
         row.local_only = True
         live = [{'job': 'x', 'account': 'acct-a'}]
         launched, waits, _ = self.run_wave([row], live=live, cfg=cfg)
-        self.assertEqual((launched, waits[0][1]), ([], 'pool full'))
+        self.assertEqual((launched, waits[0][1]), ([], 'pool full — accounts at cap: acct-a 1/1'))
 
     def test_a_full_cloud_lane_falls_back_to_local(self):
         live = [{'job': 'c1', 'account': 'acct-c', 'runtime_lane': 'cloud'},
