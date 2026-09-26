@@ -942,6 +942,58 @@ class TestHealth(Home):
         reapable = {j: d for j, w, d in found if w == 'reapable'}
         self.assertEqual(reapable, {'done': 'empty', 'gone': 'empty'})
 
+    def _ls_remote_one(self, cwd, branch):
+        p = subprocess.run(['git', 'ls-remote', '--heads', 'origin', branch], cwd=cwd,
+                           capture_output=True, text=True)
+        return p.stdout.split()[0] if p.returncode == 0 and p.stdout.strip() else ''
+
+    def test_remote_heads_answers_as_ls_remote_of_the_one_branch(self):
+        # ls-remote's pattern is a tail match: `B-1` finds refs/heads/B-1 and refs/heads/x/B-1
+        # alike, the first in ref order — the one snapshot must pick the same sha
+        rec = self.spawn('snap', {'running': True, 'pid': 5})
+        wt = rec['worktree']
+        self.commit(wt, 'a')
+        for b in ('fix/B-1', 'cloud/fix/B-1', 'B-1', 'zz/B-1'):
+            git('push', '-q', 'origin', f'HEAD:refs/heads/{b}', cwd=wt)
+            self.commit(wt, b.replace('/', '-'))
+        heads = lifecycle.RemoteHeads()
+        for cwd in (wt, self.repo):
+            for b in ('fix/B-1', 'B-1', 'cloud/fix/B-1', 'missing', 'fix', 'main', rec['branch']):
+                with self.subTest(cwd=cwd, branch=b):
+                    self.assertEqual(heads.sha(cwd, b), self._ls_remote_one(cwd, b))
+        self.assertIsNone(heads.sha(wt, 'B-*'))   # a glob: git's own answer, never guessed
+        self.assertIsNone(heads.sha(wt, ''))
+
+    def test_the_worktree_pass_asks_origin_once_and_finds_the_same(self):
+        for i, pushed in enumerate((True, False, True)):
+            rec = self.spawn(f'wt{i}', {'running': True, 'pid': 30 + i})
+            self.commit(rec['worktree'], f'f{i}')
+            if pushed:
+                git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
+        health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)  # settle
+
+        calls = []
+        real = subprocess.run
+
+        def counting(args, *a, **kw):
+            if isinstance(args, (list, tuple)) and 'ls-remote' in args:
+                calls.append(list(args))
+            return real(args, *a, **kw)
+
+        with mock.patch.object(lifecycle.RemoteHeads, 'sha', return_value=None), \
+                mock.patch.object(lifecycle.subprocess, 'run', side_effect=counting):
+            per_branch = health_mod.health(self.product, alive=lambda pid: False,
+                                           out=lambda s: None)
+        before, calls[:] = list(calls), []
+        with mock.patch.object(lifecycle.subprocess, 'run', side_effect=counting):
+            once = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertEqual(once, per_branch)
+        # the dead runs' revisit asks per branch as before (a publish may push between them);
+        # the worktree pass — one question per worktree before — asks origin once
+        whole = [c for c in calls if c[-1] == 'origin']
+        self.assertEqual(len(whole), 1, calls)
+        self.assertEqual(len(calls) - 1, len(before) - 3, (before, calls))
+
     def test_b0028_dead_pid_is_rejudged_when_the_result_arrives(self):
         rec = self.spawn('late', {'running': True, 'pid': 12})
         self.commit(rec['worktree'])
