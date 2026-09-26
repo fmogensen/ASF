@@ -115,6 +115,19 @@ class RulingFieldsTests(unittest.TestCase):
         self.assertEqual(report.ruling_fields(self.report('ruling: nothing')), none)
         self.assertEqual(report.ruling_fields('no report at all'), none)
 
+    def test_a_note_after_the_last_field_is_no_claim_of_an_id_field(self):
+        """a product's B-1377 (2026-09-26): the ruling ended ``superseded_by: none`` and then a
+        ``NEEDS OPERATOR: …`` paragraph. The run-on value read ``none\\nNEEDS OPERATOR: …`` — a
+        superseded claim — so the lane refused the ruling and the loop guard parked the item.
+        ``blocked_on`` and ``superseded_by`` name one item: their first line is the claim."""
+        text = self.report('ruling: overruled', 'blocked_on: none', 'writes: a.md',
+                           'superseded_by: none',
+                           "NEEDS OPERATOR: PR #829's `gate` checks are red from a cancelled run")
+        self.assertEqual(report.ruling_fields(text),
+                         {'blocked_on': None, 'writes': ['a.md'], 'superseded_by': None})
+        text = self.report('ruling: it waits', 'superseded_by: T-0030', 'the newer Task covers it')
+        self.assertEqual(report.ruling_fields(text)['superseded_by'], 'T-0030')
+
     def test_a_field_outside_the_last_report_block_is_ignored(self):
         earlier = 'REPORT\nitem: T-0009\nblocked_on: T-0001\n\nlater text\nREPORT\nitem: T-0009\n'
         self.assertIsNone(report.ruling_fields(earlier)['blocked_on'])

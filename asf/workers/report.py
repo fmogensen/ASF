@@ -73,12 +73,18 @@ def _claim(value):
 def ruling_fields(text):
     """``{'blocked_on': id|None, 'writes': [glob, ...]|None, 'superseded_by': id|None}`` off the
     last REPORT block — the ruling's mechanism (F-0090 D10). An absent field and a ``none``
-    value are both None: no claim."""
+    value are both None: no claim. ``blocked_on`` and ``superseded_by`` name one item, so only
+    their first line is the claim: a note run on after the last field (a product's B-1377:
+    ``superseded_by: none`` then ``NEEDS OPERATOR: …``) claims nothing."""
     rep = parse(text)
     writes = _claim(rep.get('writes'))
-    return {'blocked_on': _claim(rep.get('blocked_on')),
+    return {'blocked_on': _claim(_first_line(rep.get('blocked_on'))),
             'writes': writes.split() if writes else None,
-            'superseded_by': _claim(rep.get('superseded_by'))}
+            'superseded_by': _claim(_first_line(rep.get('superseded_by')))}
+
+
+def _first_line(value):
+    return (value or '').strip().split('\n', 1)[0]
 
 
 def failure(text):
