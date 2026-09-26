@@ -133,6 +133,13 @@ class SampleProductTest(unittest.TestCase):
         self.assertEqual(self.init.returncode, 0, self.init.stdout + self.init.stderr)
         self.assertIn('init: adopted 10 items', self.init.stdout)
 
+    def test_init_offers_the_console_permissions(self):
+        # B-0131 round 1: `asf init` on its own — no `tools/install.sh` in between — still ends
+        # with the offer, the same as the installer's step 6.
+        self.assertIn('allow  Bash(asf:*)', self.init.stdout)
+        self.assertIn('run one to write it: asf console-permissions install --product sample '
+                      '--scope user|repo', self.init.stdout)
+
     # ---- the tick ------------------------------------------------------------
 
     def test_tick_runs_every_step(self):
