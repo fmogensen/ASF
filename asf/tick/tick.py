@@ -392,7 +392,8 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
     upgraded = []
 
     def run_upgrade(head):
-        upgraded.append(upgrade.cmd_upgrade(_ns(skip_pipx=False, ref=head, owner=product.name)))
+        upgraded.append(upgrade.cmd_upgrade(_ns(skip_pipx=False, ref=head, owner=product.name,
+                                                wait=upgrade.drain_wait_s())))
         return upgraded[-1]
 
     with locks.record('version check', wait_s=0) as ok:
@@ -405,11 +406,13 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
         print('tick: the install was upgraded under this tick; its steps run on the next tick')
         return 0
     if upgraded and upgraded[-1] == drift.DEFERRED and upgrade.read_pending():
-        # the owner keeps working: the other products' ticks no longer start, so the gap opens
-        # when this tick ends, and the owner's next start installs. Skipping the owner's steps
-        # starved its own product for as long as the slowest other tick ran (2026-09-25: 40 min).
-        print(f'tick: upgrade to {upgrade.read_pending()["sha"][:7]} pending — this tick runs;'
-              ' the install goes at the next start')
+        # the owner already drained for upgrade.drain_wait_s and the floor is still busy. It
+        # keeps working (skipping its steps starved its own product for as long as the slowest
+        # other tick ran, 2026-09-25: 40 min), but it drains too: while the marker is pending
+        # no tick spawns a background harvest (step_harvest.run), the other products' ticks do
+        # not start, and what runs ends — the owner's next start finds the gap.
+        print(f'tick: upgrade to {upgrade.read_pending()["sha"][:7]} pending — this tick runs'
+              ' without a new background harvest; the install goes at the next start')
     rc = 0
     ran = []
     resolved = None

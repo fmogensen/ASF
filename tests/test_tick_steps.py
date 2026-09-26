@@ -1075,6 +1075,21 @@ class HarvestStepTests(StepsTestCase):
             'harvest: another harvest of sample holds the lock — skipped'])
         self.assertEqual(self.origin_main(), before)
 
+    def test_a_pending_upgrade_spawns_no_background_harvest(self):
+        """The floor drains for a pending install: a detached harvest lives for minutes, so
+        none starts while the marker is up (the owner's tick included)."""
+        from asf import upgrade
+        self.finished_branch()
+        upgrade.write_pending('d' * 40, 'sample')
+        self.addCleanup(upgrade.clear_pending)
+        spawn = mock.Mock(side_effect=AssertionError('a harvest under a pending upgrade'))
+        with mock.patch('asf.drift.installed_commit', return_value='c' * 40):
+            rc = step_harvest.run(self.ctx(), out=self.lines.append, spawn=spawn)
+        self.assertEqual(rc, 0)
+        spawn.assert_not_called()
+        self.assertIn('harvest: not started — upgrade to ddddddd pending, the floor drains',
+                      self.lines)
+
     def test_the_tick_after_a_green_gate_reports_the_landing_once(self):
         self.finished_branch()
         step_harvest.run(self.ctx(), out=self.lines.append, spawn=self.inline())
