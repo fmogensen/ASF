@@ -123,7 +123,9 @@ within it, until its queued jobs fit the idle plus freed runners by label — an
 ``s1_wait_min`` the escalation. Never the trunk run, an S1 or hotfix run, a run the host reports
 ``in_progress`` (below the escalation) or a CI-changing PR's run. Each cancel is remembered in
 ``relief`` with ``for`` (the S1 run's id) and re-run once that run's required jobs have runners;
-a trunk relief record still waits for the trunk run. The line names it: ``cancelled queued pr
+a trunk relief record still waits for the trunk run. The runs in its way include older ones
+whose queued jobs sit ahead of it. An S1 run a newer push superseded (cancelled before it started)
+hands its records to the branch's newest run, which they then wait for. The line names it: ``cancelled queued pr
 run 120 (T-0341, Feature) — created after S1 PR run 850 (B-0007) at … but holds the heavy queue
 ahead of its queued m6-e2e (queued 8m)``.
 
@@ -1298,7 +1300,7 @@ def cancel_superseded(product, source=None, out=print, dry_run=False):
 #: an item id in a branch name (``task/T-0341-…``)
 #: (either case: a lane branch is ``fix-bug/fix-bug-b-1382``)
 _ITEM_IN_BRANCH_RE = re.compile(r'\b[A-Za-z]-\d{4,}\b')
-_RUN_FIELDS = 'databaseId,status,event,headBranch,headSha,createdAt,startedAt'
+_RUN_FIELDS = 'databaseId,status,conclusion,event,headBranch,headSha,createdAt,startedAt'
 
 
 def _dur(seconds):
@@ -1488,10 +1490,19 @@ def relieve_trunk(product, items=None, source=None, out=print, dry_run=False, no
     s1_seen = {}
 
     def s1_started(rid):
-        """The S1 PR run once its required jobs are all on runners (or it left the queue)."""
+        """The S1 PR run once its required jobs are all on runners (or it left the queue). A
+        run cancelled before it started because a newer push superseded it hands its records to
+        the branch's newest run: they wait for that one (never re-run on a cancel)."""
         if rid not in s1_seen:
             r = pr_runs.get(rid)
-            if r is None or r.get('status') not in QUEUED_STATUSES:
+            newer = [o for o in pr_runs.values() if r is not None
+                     and o.get('headBranch') == r.get('headBranch') and o.get('databaseId') != rid
+                     and (_parse(o.get('createdAt')) or now) > (_parse(r.get('createdAt')) or now)]
+            if r is not None and r.get('conclusion') == 'cancelled' and newer:
+                latest = max(newer, key=lambda o: (_parse(o.get('createdAt')),
+                                                   int(o.get('databaseId') or 0)))
+                s1_seen[rid] = s1_started(latest.get('databaseId'))
+            elif r is None or r.get('status') not in QUEUED_STATUSES:
                 s1_seen[rid] = r or {}
             else:
                 jobs = src.live_jobs(rid)

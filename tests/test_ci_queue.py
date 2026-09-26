@@ -1008,6 +1008,51 @@ class TestS1PrRelief(ReliefBase):
         self.assertIn('S1 PR run 850', self.lines[-1])
         self.assertEqual(ci_queue.load('p')['relief'], [])
 
+    def test_an_older_queued_run_whose_jobs_sit_ahead_of_the_s1_run_is_cancelled_too(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        runs = self.runs(only=(850, 104, 103))
+        t = lambda m: self.at(self.t0 + datetime.timedelta(minutes=m))  # noqa: E731
+        # created 50 min before the S1 run; its heavy job queued ahead of the S1 run's, its
+        # gate on h2
+        runs['pr.yml'].append({'databaseId': 130, 'status': 'queued', 'event': 'pull_request',
+                               'headBranch': 'task/T-0500', 'headSha': 'sha130',
+                               'createdAt': t(-60)})
+        jobs = self.jobs()
+        jobs[130] = [{'name': 'gate', 'status': 'in_progress', 'labels': ['self-hosted', 'heavy'],
+                      'runner_name': 'h2', 'created_at': t(-60), 'started_at': t(-12)},
+                     {'name': 'm6-e2e', 'status': 'queued', 'labels': ['self-hosted', 'heavy'],
+                      'runner_name': None, 'created_at': t(-40), 'started_at': None}]
+        gh, run = self.gh(runs, jobs=jobs)
+        self.assertEqual(self.relieve(p, run), (1, 0))
+        self.assertEqual(self.cancels(gh), ['130'])
+        self.assertIn('created before S1 PR run 850 (B-0007)', self.lines[-1])
+
+    def test_a_superseded_s1_run_hands_its_records_to_the_branchs_newer_run(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        gh, run = self.gh(self.runs(), jobs=self.jobs())
+        self.relieve(p, run)
+        # a push supersedes 850 before its jobs start: it ends cancelled, 851 is queued
+        runs = self.runs()
+        s1 = runs['pr.yml'][0]
+        s1.update(status='completed', conclusion='cancelled')
+        runs['pr.yml'].append(dict(s1, databaseId=851, status='queued', conclusion='',
+                                   headSha='sha851', createdAt=self.at(self.t0)))
+        jobs = self.jobs()
+        jobs[851] = [dict(j, created_at=self.at(self.t0)) for j in jobs.pop(850)]
+        gh, run = self.gh(runs, jobs=jobs)
+        self.assertEqual(self.relieve(p, run, minutes=1)[1], 0)
+        self.assertEqual(self.cancels(gh, 'rerun'), [])
+        self.assertEqual(sorted(r['id'] for r in ci_queue.load('p')['relief']), [120, 121])
+        # 851's required jobs get runners: now they are re-run
+        jobs[851] = [dict(j, status='in_progress', runner_name='h1') for j in jobs[851]]
+        gh, run = self.gh(runs, busy=(), jobs=jobs)
+        self.assertEqual(self.relieve(p, run, minutes=2)[1], 2)
+        self.assertEqual(sorted(self.cancels(gh, 'rerun')), ['120', '121'])
+
     def test_trunk_relief_records_wait_for_the_trunk_not_the_s1_run(self):
         p = self.product()
         os.makedirs(env.state_dir('p'), exist_ok=True)
