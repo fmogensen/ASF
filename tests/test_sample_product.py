@@ -338,13 +338,6 @@ class FailurePathsBase(unittest.TestCase):
                     GIT_COMMITTER_NAME='sample', GIT_COMMITTER_EMAIL='sample@example.com',
                     GH_TOKEN='', PATH=SampleProductTest._path_with_offline_gh(
                         os.path.join(cls.tmp, 'bin')))
-        # F-0033/§2.6: an operator's own `core.hooksPath` (or any other inherited git config)
-        # reaching this fixture's child `git` makes the wave's hook preflight refuse to launch —
-        # `hermetic._git_config` *appends* to whatever count it finds, so the inherited pairs are
-        # dropped here rather than left for it to build on.
-        base.pop('GIT_CONFIG_COUNT', None)
-        for name in [n for n in base if hermetic.GIT_CONFIG_VAR_RE.match(n)]:
-            base.pop(name, None)
         cls.env = hermetic.build(base, home=cls.tmp)
         cls.ticks = []
         init = cls.asf('init', '--product', 'sample')
