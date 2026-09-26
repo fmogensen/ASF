@@ -19,7 +19,7 @@ from unittest import mock
 from asf import approvals, doctor, env
 from asf.conventions import Conventions
 from asf.feeder import rows as feeder_rows
-from asf.harvest import harvest, lane
+from asf.harvest import deploy, harvest, lane
 from asf.views import status
 from asf.workers import lifecycle
 
@@ -167,6 +167,96 @@ class Gate(unittest.TestCase):
     def test_pending_checks_never_merge_under_auto(self):
         ln, _lines = self.run_gate(pr_product('auto'), [{'name': 'gate', 'bucket': 'pending'}])
         self.assertEqual(ln.host.merges, [])
+
+
+class DirectLaneRequiredChecks(unittest.TestCase):
+    """2026-09-26: a direct-lane PR (``cloud/direct-*``) reached MERGING with a deploy-required
+    suite red — ``gate-tests`` read as "red but not required" because only ``landing_checks``
+    judged it. A direct-lane code PR goes through the same required set as any code PR (the
+    landing checks plus ``deploy_sha.prod``'s required jobs), and the checks are read again
+    right before MERGING: a snapshot that went red while the pass ran never merges."""
+
+    BRANCH = 'cloud/direct-F-0001'
+    DEPLOY = {'prod': {'mode': 'manual', 'workflow': 'd.yml',
+                       'required_jobs_from': {'file': 'scripts/merge.sh', 'var': 'REQUIRED'}}}
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='direct_req_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        patch = mock.patch.object(env, 'state_dir', lambda *_a, **_k: self.tmp)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def product(self):
+        return env.Product('p', {'repo_slug': 'o/p', 'main': 'main', 'deploy_sha': self.DEPLOY,
+                                 'conventions': {'landing': 'pull-request', 'merge': 'auto',
+                                                 'landing_checks': ['gate'],
+                                                 'landing_checks_missing': 'wait'}})
+
+    def run_gate(self, answers, read_from=lambda *_a: ['gate', 'gate-tests']):
+        """``answers``: the successive ``gh pr checks`` lists (the last one repeats)."""
+        product = self.product()
+        self.assertEqual(product.conventions.branch_kind(self.BRANCH), 'direct')
+        lines = []
+        ln = lane.Lane(product, self.tmp, out=lines.append)
+        ln.host = RecordingHost(product, ln)
+        f = {'branch': self.BRANCH, 'item': 'F-0001', 'kind': 'direct', 'head': HEAD, 'run': None,
+             'prev': {'state': lane.GATE, 'head': HEAD, 'pr': 7, 'reason': ''},
+             'files': ['src/a.ts', 'src/a.test.ts'], 'class': lane.CODE}
+        answers = list(answers)
+
+        def gh(*_a, **_k):
+            return 0, json.dumps(answers.pop(0) if len(answers) > 1 else answers[0]), ''
+
+        with mock.patch.object(harvest, '_gh', side_effect=gh), \
+                mock.patch.object(deploy, '_read_from', side_effect=read_from), \
+                mock.patch.object(lane, 'has_adjudicate_commit', return_value=False), \
+                mock.patch.object(lane, 'send_back',
+                                  side_effect=lambda ln_, f_, *a: ln_.results.update(
+                                      {f_['branch']: 'back'})):
+            ready = lane.precheck(ln, [f])
+            if ready:
+                lane.gate_set(ln, ready)
+        return ln, lines
+
+    GREEN = [{'name': 'gate', 'bucket': 'pass'}, {'name': 'gate-tests', 'bucket': 'pass'},
+             {'name': 'site', 'bucket': 'fail'}]
+    RED = [{'name': 'gate', 'bucket': 'pass'}, {'name': 'gate-tests', 'bucket': 'fail'},
+           {'name': 'site', 'bucket': 'fail'}]
+
+    def test_a_red_deploy_required_check_sends_a_direct_pr_back(self):
+        ln, lines = self.run_gate([self.RED])
+        self.assertEqual(ln.host.merges, [])
+        self.assertEqual(ln.results, {self.BRANCH: 'back'}, lines)
+        self.assertFalse([x for x in lines if 'MERGING' in x], lines)
+        (info,) = [x for x in lines if 'not required' in x]
+        self.assertIn('site', info)
+        self.assertNotIn('gate-tests', info)
+
+    def test_the_green_direct_pr_merges(self):
+        ln, lines = self.run_gate([self.GREEN])
+        self.assertEqual(ln.host.merges, [(self.BRANCH, 7)], lines)
+
+    def test_a_required_check_red_by_merge_time_never_enters_merging(self):
+        ln, lines = self.run_gate([self.GREEN, self.RED])
+        self.assertEqual(ln.host.merges, [])
+        self.assertFalse([x for x in lines if 'MERGING' in x], lines)
+        self.assertTrue([x for x in lines if 'gate-tests' in x and 'red' in x], lines)
+        self.assertNotEqual(ln.results.get(self.BRANCH), 'landed')
+
+    def test_required_jobs_from_unreadable_at_the_head_is_read_at_the_trunk(self):
+        # the file reads at the trunk but not at the PR head (say, not fetched yet): the
+        # landing checks alone never stand in for the deploy-required jobs
+        ln, lines = self.run_gate(
+            [self.RED], read_from=lambda _p, sha, *_a: None if sha == HEAD
+            else ['gate', 'gate-tests'])
+        self.assertEqual(ln.host.merges, [])
+        self.assertEqual(ln.results, {self.BRANCH: 'back'}, lines)
+
+    def test_required_jobs_from_unreadable_anywhere_holds(self):
+        ln, lines = self.run_gate([self.GREEN], read_from=lambda *_a: None)
+        self.assertEqual(ln.host.merges, [])
+        self.assertTrue([x for x in lines if 'required checks unknown' in x], lines)
 
 
 class ForeignPR(LaneFixture):

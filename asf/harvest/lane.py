@@ -2331,6 +2331,11 @@ def merge_prs(lane, ready):
         if not lane.ci_admits(f, 'trunk'):
             wait(lane, f, CI_QUEUE, green=f.get('green'))
             continue
+        stale = host.recheck(f, number)
+        if stale:
+            lane.out(f'held {b}: PR #{number} not merged — {stale}')
+            wait(lane, f, stale, 'held', state=WAITING_CI)
+            continue
         lane.set(f, MERGING, f'PR #{number}', method='squash')
         sha, how = host.merge(b, number, subject=squash_subject(lane, f, number))
         if how == 'queue':
@@ -2383,6 +2388,11 @@ class Host:
     def close(self, number, comment):
         """Close PR ``number`` with ``comment``; True when it closed (no PR host: nothing)."""
         return False
+
+    def recheck(self, f, number):
+        """Why PR ``number`` may not merge now after all (its checks read again right before
+        MERGING), or None. No PR host: nothing to read."""
+        return None
 
     def merge(self, branch, pr, subject=None):
         """Land it: ``(sha, method)`` with ``method`` one of ``ff|squash|merge|rebase|queue``, or
@@ -2512,14 +2522,38 @@ class GitHubHost(Host):
         be read."""
         from asf.harvest import deploy
         names = list(self.required_checks(state_dir))
-        if cls != DOCS and (deploy.required_from(self.product, 'prod')
-                            or deploy._names(deploy.env_cfg(self.product, 'prod')
-                                             .get('required_jobs'))):
-            jobs, why = deploy.required_jobs(self.product, 'prod', head)
+        spec = deploy.required_from(self.product, 'prod')
+        static = deploy._names(deploy.env_cfg(self.product, 'prod').get('required_jobs'))
+        if cls != DOCS and (spec or static):
+            jobs, src = deploy.required_jobs(self.product, 'prod', head)
             if jobs is None:
-                return None, why
+                return None, src
+            if spec and src is None:
+                # the file did not read at the head (not fetched, moved): its list at the trunk,
+                # never the landing checks alone standing in for the deploy-required jobs
+                at_trunk, src = deploy.required_jobs(self.product, 'prod', f'origin/{self.trunk}')
+                if src:
+                    jobs = list(at_trunk) + [j for j in static if j not in at_trunk]
+                elif not static:
+                    return None, (f'{spec[1]} unreadable in {spec[0]} at the PR head and at '
+                                  f'{self.trunk}')
             names += [j for j in jobs if j not in names]
         return tuple(names), None
+
+    def recheck(self, f, number):
+        """``None`` when PR ``number`` may still merge, else why not: its checks read again right
+        before MERGING, judged on the same required set as :meth:`check_gate` — a required check
+        that went red (or, merging on its checks alone, is no longer green) while the pass ran
+        never merges on the snapshot the pass started from."""
+        lane = self.lane
+        cls = f.get('class') or landing_class(self.product, f.get('files') or ())
+        required, why = self.merge_required(lane.state_dir, cls, f.get('head'))
+        if required is None:
+            return f'required checks unknown: {why}'
+        state, detail, _checks = pr_checks(self.slug, number, required)
+        if state == 'red' or (state != 'green' and f.get('how') == 'ci'):
+            return f'required checks {state} at merge: {detail}'
+        return None
 
     def required_checks(self, state_dir):
         named = self.product.conventions.get('landing_checks')
