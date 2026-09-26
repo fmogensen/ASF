@@ -227,13 +227,19 @@ def publish_gap(product, run, ev, reason, alive=pid_alive):
 
 def push_retry(ev, reason, line):
     """``(class, detail)`` when an unpushed run's push failed on the network or was refused by
-    the repo's hook — read off its REPORT's ``pushed:`` line and the factory's own publish line
-    — else None (:func:`asf.workers.lifecycle.push_failure`)."""
+    the repo's hook — read off its REPORT's ``why:`` field (when ``pushed: no``) and the
+    factory's own publish line — else None (:func:`asf.workers.lifecycle.push_failure`)."""
     if not (reason or '').startswith(UNPUSHED_REASON_PREFIXES):
         return None
-    said = report_mod.parse(str((ev.result or {}).get('result') or '')).get('pushed') or ''
-    if not report_mod.NO_RE.match(said):
-        said = ''
+    result_text = str((ev.result or {}).get('result') or '')
+    said = ''
+    if report_mod.fence(result_text) is not None:
+        try:
+            rep = report_mod.typed(result_text, None)
+        except report_mod.ReportError:
+            rep = {}
+        if rep.get('pushed') == 'no':
+            said = rep.get('why') or ''
     m = re.search(r'\bpublish \S+ refused: (.*)', line or '')  # the factory's own push
     published = m.group(1) if m else ''
     for text in (published, said):
