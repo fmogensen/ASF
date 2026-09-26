@@ -398,7 +398,7 @@ class TestSuperseded(Base):
         self.assertEqual(ci_queue.cancel_superseded(product(pool=False), source=NoGh()), 0)
 
 
-class TestTrunkRelief(Base):
+class ReliefBase(Base):
     """A trunk run queued past ``trunk_wait_min`` behind PR and batch runs at a FIFO host."""
     WF = {'pr': 'pr.yml', 'trunk': 'ci.yml', 'batch': 'batch.yml'}
 
@@ -428,11 +428,19 @@ class TestTrunkRelief(Base):
                            'headBranch': 'main', 'headSha': 'f' * 40, 'createdAt': t(-45)}],
         }
 
-    def gh(self, runs, busy=('h1', 'h2', 'h3')):
+    def gh(self, runs, busy=('h1', 'h2', 'h3'), jobs=None):
         gh = FakeGh(busy=busy)
         base = gh.__call__
 
         def run(argv, **kw):
+            live = next((a for a in argv if a.endswith('&filter=latest')), None)
+            if argv[:2] == ['gh', 'api'] and live:
+                gh.calls.append(argv)
+                rid = int(live.split('/runs/')[1].split('/')[0])
+                if rid not in (jobs or {}):
+                    return subprocess.CompletedProcess(argv, 1, '', 'not found')
+                return subprocess.CompletedProcess(
+                    argv, 0, '\n'.join(json.dumps(j) for j in jobs[rid]), '')
             if argv[:3] == ['gh', 'run', 'list'] and 'event' in argv[-1]:
                 gh.calls.append(argv)
                 wf = argv[argv.index('--workflow') + 1]
@@ -457,6 +465,8 @@ class TestTrunkRelief(Base):
     def cancels(self, gh, verb='cancel'):
         return [c[3] for c in gh.calls if c[:3] == ['gh', 'run', verb]]
 
+
+class TestTrunkRelief(ReliefBase):
     def test_waits_up_to_the_threshold_then_cancels_lowest_priority_queued_runs_first(self):
         p = self.product()
         os.makedirs(env.state_dir('p'), exist_ok=True)
@@ -552,6 +562,110 @@ class TestTrunkRelief(Base):
 
     def test_no_pool_makes_no_gh_call(self):
         self.assertEqual(ci_queue.relieve_trunk(product(pool=False), source=NoGh()), (0, 0))
+
+
+class TestTrunkJobStarvation(ReliefBase):
+    """The trunk run's early jobs ran; a *required* later job sits queued past the wait while PR
+    runs created after it take the heavy runners for their own later jobs (one product, 2026-09-26:
+    main's m3b-e2e queued 44 min, heavy 12/12 busy, 11 of 13 queued PR runs newer than main)."""
+
+    def product(self, **q):
+        data = {'repo_slug': 'o/r',
+                'ci': {'provider': 'github-actions', 'workflow': 'ci.yml', 'pool': pool_data(),
+                       'queue': dict({'workflows': self.WF}, **q)},
+                'deploy_sha': {'prod': {'required_jobs': ['gate', 'm3b-e2e']}}}
+        return env.Product('p', data)
+
+    def jobs(self, m3b_queued_min=25, m3b_status='queued', held_101='h2'):
+        t = lambda m: self.at(self.t0 + datetime.timedelta(minutes=m))  # noqa: E731
+        j = lambda name, status, labels, runner=None, m=-25: {  # noqa: E731
+            'name': name, 'status': status, 'labels': ['self-hosted', *labels],
+            'runner_name': runner, 'created_at': t(m), 'started_at': t(m)}
+        return {
+            900: [j('gate', 'completed', ['heavy'], 'h1'),
+                  j('m3b-e2e', m3b_status, ['heavy'], m=-m3b_queued_min),
+                  j('build-dev-images', 'queued', ['heavy'])],
+            106: [j('gate', 'completed', ['heavy'], 'h3', -5), j('e2e', 'queued', ['heavy'], m=-5)],
+            101: [j('e2e', 'in_progress', ['light' if held_101 == 'l1' else 'heavy'], held_101)],
+            107: [j('e2e', 'in_progress', ['heavy'], 'h1', -3)],
+        }
+
+    def runs(self, trunk_status='queued', trunk_created=None):
+        out = super().runs(trunk_status, trunk_created)
+        t = lambda m: self.at(self.t0 + datetime.timedelta(minutes=m))  # noqa: E731
+        pr = lambda i, b, m: {'databaseId': i, 'status': 'queued', 'event': 'pull_request',  # noqa
+                              'headBranch': b, 'headSha': 'a' * 40, 'createdAt': t(m)}
+        # 101 (created before main) and the rest; 102 (Feature, before main) dropped for clarity
+        out['pr.yml'] = [pr(101, 'bug/B-0008', -60), pr(106, 'task/T-0500', -5),
+                         pr(107, 'task/T-0341', -3), pr(103, 'bug/B-0007', -2),
+                         pr(104, 'hotfix/db', -1)]
+        return out
+
+    def test_newer_runs_are_cancelled_newest_first_until_the_required_job_has_a_runner(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        gh, run = self.gh(self.runs(), jobs=self.jobs())
+        self.assertEqual(self.relieve(p, run), (2, 0))
+        # 106 (created after main, only queued jobs) goes first; 101 frees heavy runner h2
+        self.assertEqual(self.cancels(gh), ['106', '101'])
+        self.assertEqual(self.lines[0],
+                         'ci queue: cancelled queued pr run 106 (T-0500, Task) — created after '
+                         'main run 900 at fffffffff but holds the heavy queue ahead of its queued '
+                         'm3b-e2e (queued 25m)')
+        self.assertIn('created before main run 900', self.lines[1])
+        self.assertEqual([r['id'] for r in ci_queue.load('p')['relief']], [106, 101])
+
+    def test_a_freed_runner_counts_only_when_it_carries_the_jobs_labels(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        gh, run = self.gh(self.runs(), jobs=self.jobs(held_101='l1'))
+        self.assertEqual(self.relieve(p, run), (3, 0))
+        # 101 held a light runner: m3b-e2e (heavy) still has none, so the Feature run 107 goes too
+        self.assertEqual(self.cancels(gh), ['106', '101', '107'])
+
+    def test_s1_and_hotfix_runs_are_never_cancelled(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        runs = self.runs()
+        runs['pr.yml'] = [r for r in runs['pr.yml'] if r['databaseId'] in (103, 104)]
+        runs['batch.yml'] = []
+        gh, run = self.gh(runs, jobs=self.jobs())
+        self.assertEqual(self.relieve(p, run), (0, 0))
+        self.assertEqual(self.cancels(gh), [])
+
+    def test_cancelled_runs_are_rerun_once_the_trunk_run_has_its_runners(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        gh, run = self.gh(self.runs(), jobs=self.jobs())
+        self.relieve(p, run)
+        gh, run = self.gh(self.runs(trunk_status='in_progress'), busy=(),
+                          jobs=self.jobs(m3b_status='in_progress'))
+        self.assertEqual(self.relieve(p, run, minutes=2), (0, 2))
+        self.assertEqual(sorted(self.cancels(gh, 'rerun')), ['101', '106'])
+        self.assertEqual(ci_queue.load('p')['relief'], [])
+
+    def test_nothing_is_cancelled_when_the_trunk_is_not_starved(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        # under the wait
+        gh, run = self.gh(self.runs(trunk_created=self.at(self.t0 - datetime.timedelta(minutes=19))),
+                          jobs=self.jobs(m3b_queued_min=19))
+        self.assertEqual(self.relieve(p, run), (0, 0))
+        # past the wait, but an idle runner can take the required job
+        gh2, run = self.gh(self.runs(), busy=('h1', 'h2'), jobs=self.jobs())
+        self.assertEqual(self.relieve(p, run), (0, 0))
+        # the required job runs; only an optional one is queued: the run-level rule alone, which
+        # never touches a run created after the trunk run
+        gh3, run = self.gh(self.runs(), jobs=self.jobs(m3b_status='in_progress'))
+        self.relieve(p, run)
+        self.assertEqual(self.cancels(gh) + self.cancels(gh2), [])
+        self.assertNotIn('106', self.cancels(gh3))
+        self.assertNotIn('107', self.cancels(gh3))
 
 
 class TestCeiling(Base):
