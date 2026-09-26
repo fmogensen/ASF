@@ -117,6 +117,38 @@ REDACTION_RULE = ("- Never write a worker account name or a machine path into th
                   "to a lane as `lane-N`. Run the redaction check before you push.")
 
 
+#: Carried beside :data:`EXTERNAL_CI_RULE` by a product that names its full-suite commands
+#: (``conventions.full_suite_commands``): a plan's verification step ("run the full check") is
+#: followed to the letter otherwise, and one such run on the host is dozens of test processes.
+#: The approvals hook refuses the same commands; this line says it before the first try.
+FULL_SUITE_RULE = ("- CI runs the full suite. Never run {commands} or any full-suite command "
+                   "locally; run only the targeted checks for what you touched (the package's "
+                   "own tests for the files you changed, plus lint/typecheck for touched "
+                   "packages). If the plan says to run a full-suite command, substitute the "
+                   "targeted set.")
+
+#: The regex decoration a readable command drops: a leading anchor, a trailing word boundary
+#: or end anchor (optionally after trailing whitespace).
+_ANCHORS = re.compile(r'^\^|(\\s\*)?\$$|\\b$')
+
+
+def readable_command(pattern):
+    """A ``full_suite_commands`` regex as the brief shows it: ``^pnpm check\b`` reads
+    ``pnpm check``; a pattern with alternation or classes left in it is shown as written."""
+    return _ANCHORS.sub('', _ANCHORS.sub('', pattern.strip())).strip() or pattern
+
+
+def full_suite_rule(product):
+    """:data:`FULL_SUITE_RULE` naming the product's ``full_suite_commands``, or None when it
+    names none."""
+    from asf import approvals
+    patterns = approvals.full_suite_patterns(product)
+    if not patterns:
+        return None
+    return FULL_SUITE_RULE.format(
+        commands=', '.join(f'`{readable_command(p)}`' for p in patterns))
+
+
 def ci_rules(product):
     """``[EXTERNAL_CI_RULE]`` when the product's PRs are gated by external CI
     (:func:`asf.harvest.harvest.external_ci`); ``[LOCAL_GATE_RULE]`` when instead harvest's own
@@ -126,7 +158,7 @@ def ci_rules(product):
         return []
     from asf.harvest import harvest
     if harvest.external_ci(product):
-        return [EXTERNAL_CI_RULE]
+        return [EXTERNAL_CI_RULE] + [r for r in (full_suite_rule(product),) if r]
     if harvest.local_gate(product):
         return [LOCAL_GATE_RULE]
     return []

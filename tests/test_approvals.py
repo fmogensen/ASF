@@ -287,11 +287,13 @@ class HookTest(unittest.TestCase):
                   "    - '^(npx |pnpm (exec )?)?turbo run test\\b'\n"
                   "    - '^pnpm( -r| --recursive)? test\\s*$'\n"
                   "    - '^pnpm gate\\b'\n"
-                  "    - 'm0-gate\\.sh'\n")
+                  "    - 'm0-gate\\.sh'\n"
+                  "    - '^pnpm( -s)? (run )?check\\b'\n")
 
     def test_an_external_ci_product_refuses_its_full_suite_without_a_hold(self):
         self.write_product(self.FULL_SUITE)
         for cmd in ('turbo run test', 'pnpm test', 'pnpm -r test', 'pnpm --recursive test',
+                    'pnpm check', 'cd /repo && pnpm run check 2>&1 | tail',
                     'pnpm gate', 'bash scripts/m0-gate.sh', 'npx turbo run test --concurrency=4',
                     'cd /repo && CI=1 pnpm test', 'pnpm install\npnpm test 2>&1 | tail -40'):
             with self.subTest(cmd=cmd):
@@ -310,6 +312,7 @@ class HookTest(unittest.TestCase):
     def test_a_targeted_run_is_allowed_on_an_external_ci_product(self):
         self.write_product(self.FULL_SUITE)
         for cmd in ('pnpm --filter @demo/db test -- src/repos/teach-recordings.test.ts',
+                    'pnpm --filter x test', 'pnpm --filter x check',
                     'pnpm -C packages/db test src/x.test.ts',
                     'npx vitest run src/x.test.ts',
                     'pnpm vitest run packages/db/src/x.test.ts',
