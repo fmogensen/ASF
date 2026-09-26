@@ -82,6 +82,16 @@ conventions:
   # line counts it measures per launch. Both shown at their defaults.
   # preamble_max_lines: 120
   # preamble_max_files: 12
+  # read as conventions.models.<kind> — the operator's override of the model label a kind runs
+  # on. Three labels, mapped to real model ids in ~/.ASF/config.yaml under worker_pool.models:
+  #   heavy  judgement — spec, spec-amend, plan, review, adjudicate, groom, reshape
+  #   light  code      — coder, fixer, fix-bug, correct
+  #   cheap  clerical  — rebase, close, groom-clerk
+  # Unset for a kind means the default above. Argue a change against the numbers, not taste:
+  # `asf improve` prints minutes-per-landing per kind and per model every week, and the table in
+  # docs/config.example.yaml is the measurement this routing was chosen from.
+  # models:
+  #   review: light
   # F-0031: globs whose match makes a landed branch's merge class merge_amendable_set (needs a
   # person, see approvals: below) rather than merge_routine_pr. The factory's own rules.
   amendable_paths: [rules/*, docs/CONSTITUTION.md]
