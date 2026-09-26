@@ -1479,14 +1479,16 @@ class TrunkCopiesDropped(LaneFixture):
         self.assertEqual(lifecycle.corrections(self.sessions()), {})
         self.assertFalse(any('back to its session' in l for l in self.lines), self.lines)
 
-    def test_a_merge_of_the_trunk_is_dropped_too(self):
+    def test_a_merge_beside_the_copies_is_dropped_too(self):
         sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
         sh(['git', 'checkout', '-q', '-B', self.B, 'origin/main'], cwd=self.worker)
+        self.commit('fix(ci): home-clock', {'x.txt': 'x\n'})
         self.commit('feat(T-0001): the door', {'a.txt': 'a\n'})
-        self.push_main({'y.txt': 'y\n'}, 'fix(ci): home-clock (#812)')
+        self.push_main({'y.txt': 'y\n'}, 'fix: y (#811)')
         sh(['git', 'checkout', '-q', self.B], cwd=self.worker)
         sh(['git', 'merge', '-q', '--no-edit', 'origin/main'], cwd=self.worker, env_=self.AUTHOR)
         sh(['git', 'push', '-q', '-f', 'origin', self.B], cwd=self.worker)
+        self.push_main({'x.txt': 'x\n'}, 'fix(ci): home-clock (#812)')  # the copy's original
         self.session('coder-t-0001', 'T-0001', self.B)
         lane.lane_pass(self.product(), self.state_dir, out=self.lines.append)
         new = self.tip()

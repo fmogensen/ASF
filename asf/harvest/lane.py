@@ -63,8 +63,8 @@ Transitions (plan §2 plus the §9 overrides):
 - T13n PUSHED/BACK → PUSHED    a naming refusal: the lane rewords the subjects itself
                                (:meth:`Lane.repair_naming`) — no session, no round; only a
                                reword it cannot push goes back to the session (no round)
-- T13c any open → PUSHED       trunk history under a factory branch (copies of trunk commits,
-                               merges): the lane rebuilds it as the trunk plus its own commits
+- T13c any open → PUSHED       copies of trunk commits under a factory branch (and any merge
+                               beside them; a merge alone is B-0056's hold): the lane rebuilds it as the trunk plus its own commits
                                (:meth:`Lane.drop_copies`), the old tip kept as
                                ``archive/<branch>-copies-<sha9>`` — no session; a pick that
                                conflicts pushes nothing and goes BACK with its files; a live
@@ -554,8 +554,8 @@ def drop_trunk_copies(repo, trunk, branch):
     res['copies'] = [row[1] for row in rows if row[0] == '=']
     m = H.sh(['git', 'rev-list', '--merges', f'{base}..{tip}'], cwd=repo)
     res['merges'] = m.stdout.split() if m.returncode == 0 else []
-    if not res['copies'] and not res['merges']:
-        res['why'] = 'no trunk history under the branch'
+    if not res['copies']:  # a merge alone is B-0056's: held back to its session
+        res['why'] = 'no copy of a trunk commit on the branch'
         return res
     own = [row for row in rows if row[0] != '=']
     parent = base
@@ -1775,7 +1775,8 @@ class Lane:
 
     def drop_copies(self, f):
         """Trunk history under a factory branch — copies of trunk commits (``git cherry``
-        ``-``: a session that merged or rebased the trunk in, an old reword) or merges — is
+        ``-``: a session that merged or rebased the trunk in, an old reword), with any merge
+        beside them (a merge alone is B-0056's hold) — is
         dropped by the lane with no session (:func:`drop_trunk_copies`): the old tip archived as
         ``archive/<branch>-copies-<sha9>``, the branch rebuilt as ``origin/<trunk>`` plus its
         own commits and pushed over a lease on the archived tip, one line logged, and the branch
@@ -1794,7 +1795,7 @@ class Lane:
         if corr.get('kind') == COPIES and prev.get('head') == old:
             return None  # held for its conflict: the session's rebase moves the head
         copies, merges = trunk_history(self.repo, self.trunk, b)
-        if not copies and not merges:
+        if not copies:  # a merge alone stays B-0056's hold: the session's rebase is published
             return None
         what = (f'{len(copies)} copies of origin/{self.trunk} commits' if copies else '') \
             + (' and ' if copies and merges else '') + (f'{len(merges)} merge(s)' if merges else '')
