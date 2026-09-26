@@ -1810,12 +1810,12 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertEqual(self.harvest(self.pr_product())[0], {'plan/F-0001': 'waiting'})
 
     def test_docs_only_red_checks_hold_and_go_back_to_the_session(self):
-        calls = self.fake_gh([{'name': 'DCO', 'bucket': 'fail'}])
+        calls = self.fake_gh([{'name': 'lint', 'bucket': 'fail'}])
         self.push_plan()
         results, lines = self.harvest(self.pr_product())
         self.assertEqual(results, {'plan/F-0001': 'held'})
         self.assertEqual(lines, ['held plan/F-0001: the plan turns the gate red on main — PR #41 '
-                                 'checks red: DCO. Change the plan so the product gate passes on '
+                                 'checks red: lint. Change the plan so the product gate passes on '
                                  'main; nothing is merged until it does — back to its session '
                                  '(round 1)'])
         self.assertEqual(self.merges(calls), [])
@@ -2316,11 +2316,11 @@ class ProductHarvestTests(unittest.TestCase):
     def test_with_no_required_checks_any_red_check_still_sends_the_pr_back(self):
         """Today's behaviour, kept: no ``landing_checks`` and no branch protection (the 404) —
         nothing names what matters, so every check judges and any red one sends the PR back."""
-        calls = self.fake_gh([{'name': 'ci', 'bucket': 'pass'}, {'name': 'DCO', 'bucket': 'fail'}])
+        calls = self.fake_gh([{'name': 'ci', 'bucket': 'pass'}, {'name': 'lint', 'bucket': 'fail'}])
         self.push_fix(['approved'])
         results, lines = self.harvest(self.pr_product())
         self.assertEqual(results, {'fix/B-0001': 'held'}, lines)
-        self.assertIn('held fix/B-0001: PR #41 checks red: DCO — back to its session (round 1)',
+        self.assertIn('held fix/B-0001: PR #41 checks red: lint — back to its session (round 1)',
                       lines)
         self.assertFalse([l for l in lines if 'informational' in l], lines)
         self.assertEqual(self.merges(calls), [])

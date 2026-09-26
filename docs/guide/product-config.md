@@ -169,6 +169,19 @@ should set `landing_checks_missing: {docs: local-gate, code: wait}` (or plain `w
 its CI gate job in `landing_checks`: code PRs then merge on CI's run of that job, and only what
 CI never gates (a docs PR its path filters skip) is gated here, one combined gate per harvest.
 
+**A product that requires a DCO sign-off** on every PR commit sets `conventions.commit.signoff:
+true`. Every worker commit then gets `Signed-off-by: <author name> <author email>` from the
+session's `commit-msg` hook when it has none, whatever the brief said about `git commit -s`. When
+a PR's sign-off check is red anyway — a check whose name contains `conventions.commit.signoff_check`
+(default `DCO`) — the lane signs the unsigned commits of a factory branch off itself (trees
+unchanged, pushed over a lease) and the checks run again. It never rewrites a branch under no
+factory prefix.
+
+```yaml
+conventions:
+  commit: {signoff: true}            # signoff_check: DCO (the default)
+```
+
 ### What approves a spec or a plan
 
 A Feature moves from spec to plan to code on evidence, never on a status someone typed. A spec (or
