@@ -754,6 +754,109 @@ class TestSpawn(Home):
         self.assertEqual(runtime_mod.failure_reason(rec), 'unknown model')
 
 
+class TestReclaimDeadWorktree(Home):
+    """2026-09-26 (T-0349, F-0003): a dead run's worktree, detached at a factory WIP commit with
+    a rebase of the branch in progress, held the branch — ``worktree add -B`` failed and the
+    launch surfaced NEEDS OPERATOR every tick. A dead holder is reclaimed: its commits not on
+    origin archived (``archive/<branch-dashed>-wip-<sha9>``), the rebase aborted, the tree
+    trashed, the add retried. A live run's worktree is never touched."""
+
+    def _stuck(self, job='coder-t-0349', push_branch=True):
+        """A run's worktree on its branch, left mid-rebase (a conflict) with a WIP commit made
+        detached on top — the B-0094 state. Returns ``(worktree, branch, wip_sha, branch_tip)``."""
+        rec = spawn_mod.spawn(self.product, feature_row(job), self.acct(), 'b',
+                              runtime=runtime_mod.FakeRuntime([{'ok': True, 'pid': 40}]),
+                              cfg=self.cfg)
+        wt, branch = rec['worktree'], rec['branch']
+        for k, v in (('user.email', 'ci@example.com'), ('user.name', 'ci')):
+            git('config', k, v, cwd=wt)
+        with open(os.path.join(wt, 'README'), 'w') as f:
+            f.write('branch side\n')
+        git('commit', '-q', '-am', 'branch work', cwd=wt)
+        if push_branch:
+            git('push', '-q', 'origin', f'HEAD:refs/heads/{branch}', cwd=wt)
+        tip = git('rev-parse', 'HEAD', cwd=wt)
+        other = os.path.join(self.tmp, 'other')
+        git('clone', '-q', os.path.join(self.tmp, 'origin.git'), other, cwd=self.tmp)
+        with open(os.path.join(other, 'README'), 'w') as f:
+            f.write('trunk side\n')
+        git('-c', 'user.email=ci@example.com', '-c', 'user.name=ci', 'commit', '-q', '-am',
+            'trunk moves', cwd=other)
+        git('push', '-q', 'origin', 'main', cwd=other)
+        git('fetch', '-q', 'origin', cwd=wt)
+        r = subprocess.run(['git', 'rebase', 'origin/main'], cwd=wt, capture_output=True)
+        self.assertNotEqual(r.returncode, 0)  # stopped on the conflict
+        with open(os.path.join(wt, 'README'), 'w') as f:
+            f.write('factory wip\n')
+        git('add', '-A', cwd=wt)
+        git('commit', '-q', '--no-verify', '-m', 'wip: committed by the factory', cwd=wt)
+        wip = git('rev-parse', 'HEAD', cwd=wt)
+        self.assertEqual(git('rev-parse', '--abbrev-ref', 'HEAD', cwd=wt), 'HEAD')
+        gitdir = git('rev-parse', '--absolute-git-dir', cwd=wt)
+        with open(os.path.join(gitdir, 'rebase-merge', 'head-name')) as f:
+            self.assertEqual(f.read().strip(), f'refs/heads/{branch}')
+        return wt, branch, wip, tip
+
+    def _adjudicate(self, branch, job='adjudicate-t-0349'):
+        return pool_mod.parse_row(json.dumps({'job': job, 'item': 'F-0001', 'state': 'FIX',
+                                              'action': 'ADJUDICATE', 'model': 'Opus',
+                                              'kind': 'adjudicate', 'branch': branch}))
+
+    def _remote_heads(self):
+        out = git('ls-remote', '--heads', os.path.join(self.tmp, 'origin.git'), cwd=self.tmp)
+        return {ln.split()[1][len('refs/heads/'):]: ln.split()[0] for ln in out.splitlines()}
+
+    def test_a_dead_stuck_rebase_worktree_is_reclaimed_and_the_spawn_succeeds(self):
+        wt, branch, wip, _tip = self._stuck()
+        err = io.StringIO()
+        with mock.patch.object(lifecycle, 'pid_alive', lambda pid: pid == os.getpid()), \
+                contextlib.redirect_stderr(err):
+            rec = spawn_mod.spawn(self.product, self._adjudicate(branch), self.acct(), 'b',
+                                  runtime=runtime_mod.FakeRuntime([{'running': True,
+                                                                    'pid': os.getpid()}]),
+                                  cfg=self.cfg)
+        archive = f'archive/{branch.replace("/", "-")}-wip-{wip[:9]}'
+        self.assertEqual(self._remote_heads().get(archive), wip)
+        self.assertFalse(os.path.exists(wt))
+        self.assertNotIn(os.path.realpath(wt), git('worktree', 'list', cwd=self.repo))
+        # the new worktree holds the branch (its takeover rebase conflicts: left for the session)
+        self.assertEqual(os.path.realpath(spawn_mod._holding_worktree(self.repo, branch)),
+                         os.path.realpath(rec['worktree']))
+        self.assertIn(f'reclaimed {os.path.realpath(wt)} from dead coder-t-0349: archived '
+                      f'{archive}', err.getvalue())
+
+    def test_a_live_sessions_stuck_worktree_is_never_touched(self):
+        wt, branch, wip, _tip = self._stuck()
+        with mock.patch.object(lifecycle, 'pid_alive', lambda pid: True):
+            with self.assertRaises(spawn_mod.WorktreeBusy):
+                spawn_mod.spawn(self.product, self._adjudicate(branch), self.acct(), 'b',
+                                runtime=runtime_mod.FakeRuntime([{'running': True}]),
+                                cfg=self.cfg)
+        self.assertEqual(git('rev-parse', 'HEAD', cwd=wt), wip)
+        gitdir = git('rev-parse', '--absolute-git-dir', cwd=wt)
+        self.assertTrue(os.path.isdir(os.path.join(gitdir, 'rebase-merge')))
+        self.assertFalse([h for h in self._remote_heads() if h.startswith('archive/')])
+
+    def test_unpushed_commits_are_archived_before_the_worktree_goes(self):
+        # the branch never reached origin: its own tip and the WIP on top are both kept
+        wt, branch, wip, tip = self._stuck(push_branch=False)
+        with mock.patch.object(lifecycle, 'pid_alive', lambda pid: pid == os.getpid()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            rec = spawn_mod.spawn(self.product, self._adjudicate(branch), self.acct(), 'b',
+                                  runtime=runtime_mod.FakeRuntime([{'running': True,
+                                                                    'pid': os.getpid()}]),
+                                  cfg=self.cfg)
+        archived = {sha for h, sha in self._remote_heads().items() if h.startswith('archive/')}
+        self.assertIn(wip, archived)
+        git('fetch', '-q', 'origin', cwd=self.repo)
+        for sha in (wip, tip):  # every unpushed commit reachable from an archive ref
+            self.assertTrue(any(subprocess.run(['git', 'merge-base', '--is-ancestor', sha, a],
+                                               cwd=self.repo).returncode == 0
+                                for a in archived), sha)
+        self.assertFalse(os.path.exists(wt))
+        self.assertEqual(git('rev-parse', '--abbrev-ref', 'HEAD', cwd=rec['worktree']), branch)
+
+
 class SpawnHookTests(Home):
     """T-0026 — no session is launched into a repo with no push gate: ``make_worktree`` calls
     ``asf.hooks.ensure_git_hooks(product)`` first, before any of the four worktree paths.
