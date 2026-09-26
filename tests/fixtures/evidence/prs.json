@@ -1,5 +1,5 @@
 [
-  {"number": 4, "title": "asf(views): the board shows S-0004's rows", "body": "", "state": "OPEN",
+  {"number": 4, "title": "feat(S-0004): the board rows", "body": "", "state": "OPEN",
    "headRefName": "worker/board-rows", "mergedAt": null, "mergeCommit": null},
   {"number": 3, "title": "a PR that was closed unmerged", "body": "would have fixed T-0008",
    "state": "CLOSED", "headRefName": "worker/abandoned", "mergedAt": null, "mergeCommit": null}

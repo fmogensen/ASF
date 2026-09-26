@@ -157,7 +157,7 @@ class DocLaneMergeIsNotALanding(unittest.TestCase):
                  "specs")
         # real work: a Task's code, and a Feature named by a code commit
         p.commit("feat(reader): the reader for T-0900 (#750)", {"src/reader.ts": "x"}, "t900")
-        p.commit("fix: wire F-0077 through (#751)", {"src/wire.ts": "x", "docs/plans/x.md": "y"},
+        p.commit("fix(F-0077): wire it through (#751)", {"src/wire.ts": "x", "docs/plans/x.md": "y"},
                  "f77")
         p.publish()
         s = p.sha

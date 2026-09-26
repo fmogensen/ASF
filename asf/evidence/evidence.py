@@ -723,6 +723,66 @@ def id_tokens(text, rx=ID_TOKEN):
     return list(dict.fromkeys(f"{t.upper()}-{n}" for t, n in rx.findall(text or "")))
 
 
+#: A subject's item scope: `kind(<ids>)!:` — the ids a conventional scope carries.
+_SCOPE_SUBJECT = re.compile(r"^[A-Za-z][\w-]*\((?P<scope>[^)]*)\)!?:")
+#: A subject that leads with its item: `F-0047 — …`, `[B-0004] …`, `fix: T-0361 …`,
+#: `asf(tick): T-0002 — …` (the code lane's squash under its PR title, and a hand-written lead).
+_LEAD_SUBJECT = re.compile(r"^(?:[A-Za-z][\w-]*(?:\([^)]*\))?!?:\s*)?"
+                           r"\[?(?P<ids>[EFSTBDR]-\d{4}(?:\s*[,/&]\s*[EFSTBDR]-\d{4})*)\]?(?![\w-])")
+#: A merge of a branch into the trunk: the branch merged in, never the one merged into.
+_MERGE_SUBJECT = (
+    re.compile(r"^Merge pull request #\d+ from (?:[^/\s]+/)?(?P<branch>\S+)"),
+    re.compile(r"^Merge (?:remote-tracking )?branch '(?P<branch>[^']+)'"),
+    re.compile(r"^merge-queue: #\d+ \((?P<branch>[^\s@)]+)"),
+)
+
+
+def branch_ids(branch):
+    """The ids a branch name carries as its item — `cloud/direct-F-0112`, `fix/b-0003`: the
+    item's own branch."""
+    return id_tokens(branch, BRANCH_ID_TOKEN)
+
+
+def naming_ids(subject, main=None):
+    """The ids a commit subject (or a PR title) names as its item — the only way a commit names
+    one (a product's F-0112: a PR body quoting `origin/cloud/direct-F-0112` landed F-0112).
+
+    - the conventional scope: `feat(F-0112): …`, `fix(T-0359, T-0360)!: …`;
+    - a lead id: `F-0113 — Parity … (#830)`, `[B-0004] …`, `fix: T-0361 …`;
+    - a merge of the item's own branch: `Merge pull request #820 from o/cloud/direct-F-0112`,
+      `Merge branch 'cloud/T-0359'`, `merge-queue: #752 (cloud/T-0001 @ <sha>)` — the branch
+      merged in, never a trunk merged into it.
+
+    Nothing else: an id in prose (`…, for F-0115`), in a branch path the subject quotes, in a
+    `Revert "…"`, or in a PR body names nothing."""
+    s = (subject or "").strip()
+    m = _SCOPE_SUBJECT.match(s)
+    if m:
+        ids = id_tokens(m["scope"])
+        if ids:
+            return ids
+    m = _LEAD_SUBJECT.match(s)
+    if m:
+        return id_tokens(m["ids"])
+    for rx in _MERGE_SUBJECT:
+        m = rx.match(s)
+        if m:
+            b = m["branch"]
+            for pre in ("refs/heads/", "origin/"):
+                if b.startswith(pre):
+                    b = b[len(pre):]
+            if main and b == main:
+                return []
+            return branch_ids(b)
+    return []
+
+
+def pr_naming_ids(pr):
+    """The ids a PR is the work of: its head branch's (the item's own branch), else what its
+    title names as :func:`naming_ids` reads a subject. Never its body."""
+    return branch_ids(pr.get("headRefName")) or naming_ids(pr.get("title"))
+
+
 def ci_provider(product):
     """The product's `ci.provider`, lower-cased; None for `ci: none` or no provider at all."""
     ci = product.ci if product is not None else None
@@ -938,8 +998,10 @@ def id_evidence(product, branches, prs, commits=None, green=None, merges=None):
 
     `commit` is first the lane's merge fact for the id (``merges``, the ``code`` half of
     :func:`merge_facts`: the run line's merge sha — a squash merge included, whatever its subject
-    says and whatever its ancestry); else the newest commit on main naming the id (a direct
-    trunk commit, a merged PR naming it in its title or body through its merge commit). `green`
+    says and whatever its ancestry); else the newest commit on main naming the id
+    (:func:`naming_ids` — its subject's scope or lead id, or a merge of its branch), else a merged
+    PR whose head is its branch or whose title names it (:func:`pr_naming_ids`), through its
+    merge commit. A PR body names nothing. `green`
     says a CI run on main passed at or after it, and is true outright for a product with no CI
     provider.
     """
@@ -972,12 +1034,12 @@ def id_evidence(product, branches, prs, commits=None, green=None, merges=None):
         known[sha] = paths
         if DOC_LANE_SUBJECT.match(subject or "") or docs_only(paths, dirs):
             continue
-        for iid in id_tokens(subject):
+        for iid in naming_ids(subject, product.main):
             r = rec(iid)
             r["commit"] = r["commit"] or sha
     merged_prs = []
     for p in sorted(prs, key=lambda p: p.get("number") or 0):
-        ids = id_tokens(f"{p.get('title') or ''}\n{p.get('body') or ''}")
+        ids = pr_naming_ids(p)
         state = p.get("state")
         sha = (p.get("mergeCommit") or {}).get("oid") if state == "MERGED" else None
         for iid in ids:

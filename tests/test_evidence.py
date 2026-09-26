@@ -355,8 +355,8 @@ class ProductRepo:
         subprocess.run(["git", "clone", "-q", self.origin, work], check=True, capture_output=True,
                        env=dict(os.environ, **GIT_ENV))
         git(work, "checkout", "-q", "-b", "main")
-        subjects = ["init", "asf(record): drop the double read (B-0001)",
-                    "asf(views): wire the board [T-0002]", "asf(free): land the free plan F-0005"]
+        subjects = ["init", "fix(B-0001): drop the double read",
+                    "feat(T-0002): wire the board", "feat(F-0005): land the free plan"]
         for n, subject in enumerate(subjects):
             with open(os.path.join(work, f"f{n}.txt"), "w") as f:
                 f.write(subject)
@@ -546,7 +546,7 @@ class DocLaneCommitTests(unittest.TestCase):
 
     def test_a_spec_commit_is_not_the_landing_commit(self):
         ev = self.evidence_for([("s1", "spec(F-0001, F-0002): the specs land"),
-                                ("c1", "asf(core): the loop, for F-0001")])
+                                ("c1", "asf(F-0001): the loop")])
         self.assertEqual(ev["F-0001"]["commit"], "c1")
         self.assertNotIn("F-0002", ev)
 
@@ -554,6 +554,83 @@ class DocLaneCommitTests(unittest.TestCase):
         ev = self.evidence_for([("p1", "plan(F-0003): the plan"), ("r1", "review(F-0003): round 1"),
                                 ("a1", "adjudicate(B-0004): a ruling")])
         self.assertEqual(ev, {})
+
+
+class NamingCommitTests(unittest.TestCase):
+    """F-0112: PR #847 (`fix(bands): … (#847)`, head `fix/bands-foreign-collision`) quoted
+    the branches `origin/cloud/direct-F-0112` and `origin/cloud/T-0359` in its body, and the
+    evidence read both ids as landed — F-0112 Resolved, T-0359 Closed — with no line of their
+    work on the trunk. A commit names an item by its subject's item token in the factory's form
+    (`kind(ID): …`, `ID — …`), a merge of the item's own branch, or a merged PR whose head is the
+    item's branch or whose title names it that way. Never by prose, never by a branch path."""
+
+    def setUp(self):
+        self.r = ProductRepo()
+        self.addCleanup(self.r.close)
+
+    def evidence_for(self, commits=(), prs=()):
+        return evidence.id_evidence(self.r.product(ci=None), [], list(prs), commits=list(commits),
+                                    green=[])
+
+    def pr(self, **kw):
+        return {"number": 847, "state": "MERGED", "mergedAt": "2026-09-26T11:00:00Z",
+                "mergeCommit": {"oid": self.r.head}, **kw}
+
+    def test_a_body_mention_lands_nothing(self):
+        body = ("a collision between `0289` on `origin/cloud/direct-F-0112` (a parked draft) "
+                "vs `origin/cloud/T-0359`; see also F-0113 and T-0400.")
+        ev = self.evidence_for(prs=[self.pr(
+            title="fix(bands): collisions between two other branches no longer fail every PR's gate",
+            body=body, headRefName="fix/bands-foreign-collision")])
+        for iid in ("F-0112", "T-0359", "F-0113", "T-0400"):
+            self.assertFalse((ev.get(iid) or {}).get("commit"), iid)
+
+    def test_a_branch_path_in_a_subject_lands_nothing(self):
+        ev = self.evidence_for(commits=[
+            ("c1", "fix(bands): the collision between origin/cloud/direct-F-0112 and cloud/T-0359"),
+            ("c2", "chore: prune cloud/direct-F-0113"),
+            ("c3", "Merge branch 'main' into cloud/T-0360"),
+            ("c4", "Revert \"feat(F-0114): the thing\""),
+            ("c5", "asf(core): the loop, for F-0115")])
+        self.assertEqual({i: r["commit"] for i, r in ev.items() if r["commit"]}, {})
+
+    def test_the_subject_scope_or_leading_id_lands(self):
+        ev = self.evidence_for(commits=[
+            ("c1", "feat(F-0112): the Danish product"),
+            ("c2", "fix(T-0359, T-0360)!: two tasks"),
+            ("c3", "F-0113 — Parity — 3.16 Teamwork (#830)"),
+            ("c4", "[B-0004] the banner"),
+            ("c5", "fix: T-0361 the band check"),
+            ("c6", "asf(tick): T-0002 — the tick calls it"),
+            ("c7", "wip(fix/B-0119): the session ended — committed by the factory (B-0094)")])
+        self.assertEqual({i: r["commit"] for i, r in ev.items()},
+                         {"F-0112": "c1", "T-0359": "c2", "T-0360": "c2", "F-0113": "c3",
+                          "B-0004": "c4", "T-0361": "c5", "T-0002": "c6", "B-0119": "c7"})
+
+    def test_a_merge_of_the_items_own_branch_lands(self):
+        ev = self.evidence_for(commits=[
+            ("m1", "Merge pull request #820 from acme/cloud/direct-F-0112"),
+            ("m2", "Merge branch 'cloud/T-0359'"),
+            ("m3", "Merge remote-tracking branch 'origin/fix/B-0003' into main"),
+            ("m4", "merge-queue: #752 (cloud/T-0001 @ 37921d84a9ed6f94d6d104dce65a494840b8dbad)")])
+        self.assertEqual({i: r["commit"] for i, r in ev.items()},
+                         {"F-0112": "m1", "T-0359": "m2", "B-0003": "m3", "T-0001": "m4"})
+
+    def test_a_merged_pr_whose_head_is_the_items_branch_lands(self):
+        ev = self.evidence_for(prs=[self.pr(title="the Danish product", body="",
+                                            headRefName="cloud/direct-F-0112")])
+        self.assertEqual(ev["F-0112"]["commit"], self.r.head)
+        self.assertEqual(ev["F-0112"]["pr"], 847)
+
+    def test_a_merged_pr_whose_title_names_the_item_lands(self):
+        ev = self.evidence_for(prs=[self.pr(title="F-0112 — Parity — 3.15 Danish product",
+                                            body="", headRefName="worker/danish")])
+        self.assertEqual(ev["F-0112"]["commit"], self.r.head)
+
+    def test_an_open_pr_body_mention_is_not_the_items_pr(self):
+        ev = self.evidence_for(prs=[{"number": 9, "state": "OPEN", "title": "fix(bands): x",
+                                     "body": "blocks cloud/T-0359", "headRefName": "fix/x"}])
+        self.assertNotIn("T-0359", ev)
 
 
 class IngestIdEvidenceTests(unittest.TestCase):

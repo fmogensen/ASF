@@ -496,7 +496,7 @@ class ChildrenResolvedProdTests(unittest.TestCase):
         self.t12 = commit('feat: part two')               # T-0012's merged PR, by its evidence
         self.f40 = commit('feat: whole (F-0040)')
         self.prod = self.f40
-        self.t21 = commit('feat: after the deploy (T-0021)')
+        self.t21 = commit('feat(T-0021): after the deploy')
 
         def ev(*lines):
             return 'evidence:\n' + ''.join(f'  - "{line}"\n' for line in lines)
