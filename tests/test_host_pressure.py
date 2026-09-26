@@ -59,6 +59,27 @@ class Judge(unittest.TestCase):
         g = {'load_per_core': None, 'swap_pct': None}
         self.assertEqual(host.judge({'load15': 900, 'cores': 1, 'swap_pct': 100}, g), (False, ''))
 
+    def test_a_spike_that_already_ended_holds_nothing(self):
+        # load1 4.6, load15 34, 10 cores, limit 30: the 15m average is still catching up on a
+        # spike that is already over — the 1m average says so, and the guard must not hold.
+        g = {'load_per_core': 3.0, 'swap_pct': 85}
+        held, why = host.judge({'load15': 34, 'load1': 4.6, 'cores': 10, 'swap_pct': 10}, g)
+        self.assertFalse(held)
+        self.assertEqual(why, '')
+
+    def test_a_sustained_load_holds(self):
+        g = {'load_per_core': 3.0, 'swap_pct': 85}
+        held, why = host.judge({'load15': 34, 'load1': 32, 'cores': 10, 'swap_pct': 10}, g)
+        self.assertTrue(held)
+        self.assertEqual(why, 'host pressure load 34 (1m 32)/cores 10, swap 10%')
+
+    def test_an_old_reading_without_load1_is_unchanged(self):
+        # $ASF_HOST_READING's old 3-field format, or any reading missing 'load1': behave exactly
+        # as before this guard existed — load15 alone judges it.
+        held, why = host.judge({'load15': 90.4, 'cores': 12, 'swap_pct': 87.2}, self.G)
+        self.assertTrue(held)
+        self.assertEqual(why, 'host pressure load 90/cores 12, swap 87%')
+
 
 class Probes(unittest.TestCase):
     def test_macos_swapusage_is_parsed(self):
@@ -77,11 +98,17 @@ class Probes(unittest.TestCase):
 
     def test_the_fixed_reading_env_stands_in_for_the_host(self):
         with mock.patch.dict(os.environ, {host.READING_ENV: '90 12 87'}):
-            self.assertEqual(host.probe().read(), {'load15': 90.0, 'cores': 12, 'swap_pct': 87.0})
+            self.assertEqual(host.probe().read(),
+                             {'load15': 90.0, 'cores': 12, 'swap_pct': 87.0, 'load1': None})
+
+    def test_the_fixed_reading_env_accepts_a_fourth_field_for_load1(self):
+        with mock.patch.dict(os.environ, {host.READING_ENV: '34 10 10 4.6'}):
+            self.assertEqual(host.probe().read(),
+                             {'load15': 34.0, 'cores': 10, 'swap_pct': 10.0, 'load1': 4.6})
 
     def test_the_system_probe_reads_something_and_never_raises(self):
         r = host.SystemProbe().read()
-        self.assertEqual(set(r), {'load15', 'cores', 'swap_pct', 'mem_pct'})
+        self.assertEqual(set(r), {'load15', 'load1', 'cores', 'swap_pct', 'mem_pct'})
 
     def test_the_suite_runs_on_a_quiet_host(self):
         # hermetic: a loaded developer machine must not turn every launching test red
