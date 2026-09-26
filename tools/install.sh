@@ -39,8 +39,10 @@ if [ -z "$REF" ]; then
 fi
 say "product $PRODUCT, ref ${REF:0:12} from $REPO_URL"
 
-# 1. the same lock a running tick holds for its whole run (asf.tick.tick.lock_path), held across
-# the `pipx install --force` call itself, not just checked beforehand: `pipx install --force` is
+# 1. the same lock a clock with an asf step holds for its whole run (asf.tick.tick.lock_path,
+# asf.tick.tick.Locks.held — a command-only clock takes it only briefly, around each record
+# part, and is not the case this fix protects), held across the `pipx install --force` call
+# itself, not just checked beforehand: `pipx install --force` is
 # not atomic, and replacing the package under a running tick — or one that starts while the swap
 # is in flight — tears it, half its modules old, half new (B-0135, an ImportError mid-groom).
 # Bounded: a stuck tick asks the operator rather than hanging the install forever.
