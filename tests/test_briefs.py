@@ -616,6 +616,19 @@ class DeliveryBriefTest(unittest.TestCase):
                 f.write(text.replace('test_timeout_retries_fallback', 'test_something_else'))
             self.assertNotEqual(build_mod.card_digest(prod, 'F-0003', index()), before)
 
+    def test_an_unrelated_cards_acceptance_does_not_stale_the_delivery_digest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            record = os.path.join(tmp, 'record')
+            shutil.copytree(RECORD, record)
+            prod = product(backlog_dir=record)
+            before = build_mod.card_digest(prod, 'F-0003', index())
+            path = os.path.join(record, 'features', 'F-0001.md')
+            with open(path, encoding='utf-8') as f:
+                text = f.read()
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(text.replace('holds the order in `pending`', 'parks the order as `held`'))
+            self.assertEqual(build_mod.card_digest(prod, 'F-0003', index()), before)
+
 
 class PlaceholderTest(unittest.TestCase):
     def context(self, kind='coder'):
