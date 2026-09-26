@@ -458,6 +458,10 @@ class Conventions:
     merge: str = DEFAULT_MERGE
     #: ``branch_retention``: merged over :data:`DEFAULT_BRANCH_RETENTION` (see there).
     branch_retention: dict = field(default_factory=lambda: dict(DEFAULT_BRANCH_RETENTION))
+    #: ``protected_refs``: branch names or globs no factory write may push, force or delete
+    #: (:mod:`asf.refguard`); unset is :data:`asf.refguard.DEFAULT_PROTECTED_REFS`. The trunk
+    #: is always protected.
+    protected_refs: list = None
     #: Everything the yaml carried that is not a field above, kept verbatim.
     extra: dict = field(default_factory=dict)
 

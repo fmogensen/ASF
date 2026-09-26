@@ -1013,6 +1013,175 @@ class SignoffRepair(LaneFixture):
         self.assertTrue(product.conventions.is_signoff_check('commits-signed'))
 
 
+class TrunkCommitsNeverReworded(LaneFixture):
+    """2026-09-26: the naming repair reworded trunk commits sitting under a factory branch (the
+    branch rebased onto a trunk its tracking ref did not know yet) into ``task(<item>): …`` copies
+    and pushed them. A repair rewrites only the branch's own commits — never one reachable from
+    the trunk, never a merge, never a copy of a trunk commit — and a rebuilt branch that is not
+    the old one's commits and diff is never pushed."""
+
+    B, AUTHOR = NamingRepair.B, NamingRepair.AUTHOR
+    tip = NamingRepair.tip
+
+    def setUp(self):
+        super().setUp()
+        self.lines = []
+
+    def commit(self, subject, files):
+        for rel, text in files.items():
+            self.write(self.worker, rel, text)
+        sh(['git', 'add', '-A'], cwd=self.worker)
+        sh(['git', 'commit', '-qm', subject], cwd=self.worker, env_=self.AUTHOR)
+
+    def naming(self, old):
+        return {'branch': self.B, 'kind': 'code', 'item': 'T-0001', 'head': old,
+                'refusal': (lifecycle.NAMING, 'commits do not name T-0001'),
+                'prev': rec(lane.GATE, head=old), 'run': {'job': 'coder-t-0001'}}
+
+    def test_a_branch_rebased_onto_a_trunk_the_tracking_ref_does_not_know(self):
+        # the product checkout's plain fetch never updates its origin/main: it stays at init
+        sh(['git', 'config', 'remote.origin.fetch',
+            '+refs/heads/worker/*:refs/remotes/origin/worker/*'], cwd=self.repo)
+        self.push_main({'x.txt': 'x\n'}, 'fix(ci): home-clock (#812)')
+        self.push_main({'y.txt': 'y\n'}, 'T-0341 — the thing (#814)')
+        trunk = self.origin_main()
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        sh(['git', 'checkout', '-q', '-B', self.B, 'origin/main'], cwd=self.worker)
+        self.commit('tidy up', {'a.txt': 'a\n'})
+        sh(['git', 'push', '-q', '-f', 'origin', self.B], cwd=self.worker)
+        old = self.tip()
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        stale = sh(['git', 'rev-parse', 'origin/main'], cwd=self.repo).stdout.strip()
+        self.assertNotEqual(stale, trunk)  # the bug's precondition
+        ln = lane.Lane(self.product(), self.state_dir, out=self.lines.append)
+        self.assertIsNotNone(ln.repair_naming(self.naming(old)))
+        self.assertIn(f'reworded 1 subjects on {self.B} (naming) — no session', self.lines)
+        new = self.tip()
+        self.assertEqual(sh(['git', 'log', '--format=%s', f'main..{new}'],
+                            cwd=self.origin).stdout.splitlines(), ['task(T-0001): tidy up'])
+        self.assertEqual(sh(['git', 'merge-base', '--is-ancestor', trunk, new],
+                            cwd=self.origin).returncode, 0)
+        subjects = sh(['git', 'log', '--format=%s', new], cwd=self.origin).stdout.splitlines()
+        self.assertFalse([s for s in subjects if s.startswith('task(') and '(#81' in s])
+        self.assertEqual(self.origin_main(), trunk)
+
+    def test_a_branch_with_the_trunk_merged_in_is_not_reworded(self):
+        sh(['git', 'checkout', '-q', '-B', self.B, 'origin/main'], cwd=self.worker)
+        self.commit('tidy up', {'a.txt': 'a\n'})
+        self.push_main({'x.txt': 'x\n'}, 'fix(ci): home-clock (#812)')
+        sh(['git', 'checkout', '-q', self.B], cwd=self.worker)
+        sh(['git', 'merge', '-q', '--no-edit', 'origin/main'], cwd=self.worker, env_=self.AUTHOR)
+        sh(['git', 'push', '-q', '-f', 'origin', self.B], cwd=self.worker)
+        old = self.tip()
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        why = []
+        self.assertEqual(lane.reword_branch(self.repo, 'main', self.B, 'T-0001', 'task', why),
+                         (None, 0))
+        self.assertIn('merge commit', why[0])
+        ln = lane.Lane(self.product(), self.state_dir, out=self.lines.append)
+        self.assertIsNone(ln.repair_naming(self.naming(old)))
+        self.assertEqual(self.tip(), old)
+        self.assertTrue(any('merge commit' in l and 'back to its session' in l
+                            for l in self.lines), self.lines)
+
+    def test_a_copy_of_a_trunk_commit_under_the_branch_is_not_reworded(self):
+        sh(['git', 'checkout', '-q', '-B', self.B, 'origin/main'], cwd=self.worker)
+        self.commit('fix(ci): home-clock', {'x.txt': 'x\n'})
+        self.commit('tidy up', {'a.txt': 'a\n'})
+        sh(['git', 'push', '-q', '-f', 'origin', self.B], cwd=self.worker)
+        self.push_main({'x.txt': 'x\n'}, 'fix(ci): home-clock (#812)')
+        old = self.tip()
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        ln = lane.Lane(self.product(), self.state_dir, out=self.lines.append)
+        self.assertIsNone(ln.repair_naming(self.naming(old)))
+        self.assertEqual(self.tip(), old)
+        self.assertTrue(any('copies of origin/main commits' in l and 'back to its session' in l
+                            for l in self.lines), self.lines)
+
+    def test_a_rebuilt_branch_that_fails_the_guard_is_never_pushed(self):
+        sh(['git', 'checkout', '-q', '-B', self.B, 'origin/main'], cwd=self.worker)
+        self.commit('tidy up', {'a.txt': 'a\n'})
+        sh(['git', 'push', '-q', '-f', 'origin', self.B], cwd=self.worker)
+        old = self.tip()
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        diffs = iter(['the old diff', 'another diff'])
+        ln = lane.Lane(self.product(), self.state_dir, out=self.lines.append)
+        with mock.patch.object(lane, '_diff', side_effect=lambda *a: next(diffs)):
+            self.assertIsNone(ln.repair_naming(self.naming(old)))
+        self.assertEqual(self.tip(), old)
+        self.assertTrue(any('rewrite guard' in l for l in self.lines), self.lines)
+
+
+class RefGuard(LaneFixture):
+    """The product's host may protect nothing: every factory ref write refuses the trunk and a
+    ``conventions.protected_refs`` ref itself, with one loud line."""
+
+    def setUp(self):
+        super().setUp()
+        self.lines = []
+        self.trunk = self.origin_main()
+        sh(['git', 'push', '-q', 'origin', 'HEAD:refs/heads/release/1'], cwd=self.repo)
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+
+    def runner(self, **conventions):
+        return lane.Lane(self.product(**conventions), self.state_dir, out=self.lines.append)
+
+    def loud(self):
+        self.assertTrue(any(l.startswith('REF GUARD: refused') for l in self.lines), self.lines)
+
+    def test_the_naming_repair_never_rewrites_the_trunk(self):
+        f = {'branch': 'main', 'kind': 'code', 'item': 'T-0001', 'head': self.trunk,
+             'refusal': (lifecycle.NAMING, 'x'), 'prev': rec(lane.GATE), 'run': None}
+        with mock.patch.object(lane, 'reword_branch') as rw:
+            self.assertIsNone(self.runner().repair_naming(f))
+        rw.assert_not_called()
+        self.loud()
+        self.assertEqual(self.origin_main(), self.trunk)
+
+    def test_the_signoff_repair_never_rewrites_a_protected_ref(self):
+        f = {'branch': 'release/1', 'kind': 'code', 'head': self.trunk, 'prev': rec(lane.GATE),
+             'run': None}
+        with mock.patch.object(lane, 'signoff_branch') as so:
+            self.assertIsNone(self.runner().repair_signoff(f, 'DCO'))
+        so.assert_not_called()
+        self.loud()
+
+    def test_a_ref_push_or_delete_never_reaches_the_trunk(self):
+        ln = self.runner()
+        self.assertFalse(ln.ref_push(':refs/heads/main', 'delete main'))
+        self.assertFalse(ln.ref_push(f'{self.trunk}:refs/heads/release/1', 'archive release/1'))
+        self.assertEqual(len(ln.ref_failures), 2)
+        self.loud()
+        self.assertEqual(self.origin_main(), self.trunk)
+        with mock.patch.object(harvest, '_gh') as gh:
+            ok, why = lane.api_ref('o/p', ':refs/heads/main', main='main')
+        gh.assert_not_called()
+        self.assertFalse(ok)
+        self.assertIn('REF GUARD', why)
+
+    def test_publish_retention_and_branch_push_refuse_the_trunk(self):
+        from asf.workers import retention
+        ok, line = lifecycle.publish(self.repo, 'release/1', '', main='trunk')
+        self.assertFalse(ok)
+        self.assertIn('REF GUARD', line)
+        ok, why = retention.delete(self.repo, 'main', self.trunk, main='main')
+        self.assertFalse(ok)
+        self.assertIn('REF GUARD', why)
+        ok, why = harvest.push_branch(self.repo, self.trunk, 'master', '')
+        self.assertFalse(ok)
+        self.assertIn('REF GUARD', why)
+        self.assertEqual(self.origin_main(), self.trunk)
+
+    def test_protected_refs_is_the_products_list_and_the_trunk_always(self):
+        from asf import refguard
+        ln = self.runner(protected_refs=['prod/*'])
+        self.assertTrue(ln.guarded('refs/heads/prod/eu', 'x'))
+        self.assertTrue(ln.guarded('main', 'x'))
+        self.assertFalse(ln.guarded('release/1', 'x'))
+        self.assertFalse(ln.guarded('worker/T-0001', 'x'))
+        self.assertTrue(refguard.refusal('release/3', 'x', out=lambda _l: None))
+
+
 class Occupancy(unittest.TestCase):
     """R16: the lane and the feeder are one stream — the feeder reads the lane's states through
     the one occupancy answer, and the rows follow them."""

@@ -29,7 +29,7 @@ import re
 import subprocess
 import time
 
-from asf import env
+from asf import env, refguard
 from asf import hooks
 from asf.workers import githooks
 from asf.workers import lifecycle
@@ -473,7 +473,8 @@ def _publish_fresh_branch(product, worktree, branch):
     hook included) before the launch. A refused push refuses the launch."""
     if _branch_exists_on_origin(worktree, branch):
         return
-    ok, line = lifecycle.publish(worktree, branch, '', main=product.main)
+    ok, line = lifecycle.publish(worktree, branch, '', main=product.main,
+                                 protected=refguard.listed(product.conventions))
     if not ok:
         raise SpawnError(f'cloud lane: {line}')
 

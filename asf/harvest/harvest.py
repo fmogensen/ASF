@@ -30,7 +30,7 @@ import tempfile
 import time
 
 
-from asf import env, hermetic
+from asf import env, hermetic, refguard
 from asf.conventions import Conventions
 from asf.workers import health as health_mod
 from asf.workers import lifecycle
@@ -441,13 +441,18 @@ def remote_head(repo, branch):
     return ls.stdout.split()[0] if ls.returncode == 0 and ls.stdout.strip() else ''
 
 
-def push_branch(repo, sha, branch, expected):
+def push_branch(repo, sha, branch, expected, main='main', protected=None):
     """Push ``sha`` to ``origin/<branch>`` over ``expected`` — the head read before any rebase
     (:func:`remote_head`), never one a fetch just before the push supplied: a lease taken from
     that fetch matches whatever origin holds, a plain force (2026-09-25: a stale local branch
     erased a person's newer commit). The push is refused, before it is made, when ``sha`` lacks
     a commit ``expected`` holds (:func:`asf.workers.lifecycle.lost_commits`), and by git when
-    origin moved since ``expected`` was read. ``(ok, reason)``."""
+    origin moved since ``expected`` was read. The trunk and a protected ref are never a target
+    (:mod:`asf.refguard`). ``(ok, reason)``."""
+    from asf import refguard
+    guard = refguard.refusal(branch, f'push branch {branch}', main, protected)
+    if guard:
+        return False, guard
     if expected:
         lost = lifecycle.lost_commits(repo, sha, expected, branch)
         if lost is None or lost:
@@ -558,7 +563,8 @@ def harvest_branch(repo, state_dir, is_record, job, branch, dry_run, conv=None, 
                 if landed.returncode != 0:
                     return hold(job, f'{sha} is not on origin/{trunk} after the push — nothing reaped')
             else:
-                pushed, why = push_branch(repo, sha, branch, expected)
+                pushed, why = push_branch(repo, sha, branch, expected, trunk,
+                                          refguard.listed(conv))
                 if not pushed:
                     return hold(job, why)
                 print(pr_create_line(repo, tmp, branch, trunk))

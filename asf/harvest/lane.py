@@ -75,7 +75,7 @@ import subprocess
 import tempfile
 import time
 
-from asf import approvals, customer_content, env
+from asf import approvals, customer_content, env, refguard
 from asf.evidence import review as review_mod
 from asf.feeder import footprint, widen
 from asf.harvest import harvest as H
@@ -341,16 +341,16 @@ _IDENT = (('GIT_AUTHOR_NAME', '%an'), ('GIT_AUTHOR_EMAIL', '%ae'), ('GIT_AUTHOR_
           ('GIT_COMMITTER_DATE', '%cd'))
 
 
-def reword_branch(repo, trunk, branch, item, kind=None):
-    """``(new_tip, n)``: ``origin/<branch>`` from its merge-base with ``origin/<trunk>`` onward,
-    each subject not naming ``item`` rewritten by :func:`asf.workers.githooks.name_subject` —
-    trees, authors, committers and dates identical, body untouched, no checkout and no hook run
-    (``git commit-tree``). ``(None, 0)`` when nothing needs a reword or a commit cannot be
-    rebuilt (a merge commit, a git error)."""
+def reword_branch(repo, trunk, branch, item, kind=None, why=None):
+    """``(new_tip, n)``: the branch's own commits (:func:`own_commits`), each subject not naming
+    ``item`` rewritten by :func:`asf.workers.githooks.name_subject` — trees, authors,
+    committers and dates identical, body untouched, no checkout and no hook run (``git
+    commit-tree``). ``(None, 0)`` when nothing needs a reword or the branch cannot be rewritten
+    safely — the reason appended to ``why`` when given."""
     def reword(message, _ident):
         subject, nl, body = message.partition('\n')
         return githooks.name_subject(subject, item, kind) + nl + body
-    return rebuild_branch(repo, trunk, branch, reword)
+    return rebuild_branch(repo, trunk, branch, reword, why)
 
 
 def signed_off(message, name, email):
@@ -359,12 +359,12 @@ def signed_off(message, name, email):
     return any(line.strip().lower() == want for line in (message or '').splitlines())
 
 
-def signoff_branch(repo, trunk, branch):
-    """``(new_tip, n)``: ``origin/<branch>`` from its merge-base onward, each commit its author has
-    not signed off given ``Signed-off-by: <author name> <author email>`` (``git
+def signoff_branch(repo, trunk, branch, why=None):
+    """``(new_tip, n)``: the branch's own commits (:func:`own_commits`), each commit its author
+    has not signed off given ``Signed-off-by: <author name> <author email>`` (``git
     interpret-trailers``) — trees, authors, committers, dates and the rest of the message
     identical, as :func:`reword_branch`. ``(None, 0)`` when every commit is signed off already or
-    one cannot be rebuilt."""
+    the branch cannot be rewritten safely."""
     def sign(message, ident):
         name, email = ident['GIT_AUTHOR_NAME'], ident['GIT_AUTHOR_EMAIL']
         if signed_off(message, name, email):
@@ -374,35 +374,84 @@ def signoff_branch(repo, trunk, branch):
                            input=message, cwd=repo, capture_output=True, text=True,
                            env=H.clean_env(dict(os.environ)))
         return r.stdout if r.returncode == 0 and r.stdout.strip() else None
-    return rebuild_branch(repo, trunk, branch, sign)
+    return rebuild_branch(repo, trunk, branch, sign, why)
 
 
-def rebuild_branch(repo, trunk, branch, transform):
-    """``(new_tip, n)``: ``origin/<branch>`` from its merge-base with ``origin/<trunk>`` onward,
-    each commit's message passed through ``transform(message, ident)`` (``ident``: the commit's
-    ``GIT_AUTHOR_*``/``GIT_COMMITTER_*``) and the commit rebuilt with ``git commit-tree`` —
-    trees, authors, committers and dates identical, no checkout and no hook run. ``n`` counts the
-    messages that changed. ``(None, 0)`` when none did, or a commit cannot be rebuilt (a merge
-    commit, a git error, a ``transform`` that answers None)."""
+def own_commits(repo, trunk, branch):
+    """``(base, shas, why)``: the commits that are ``origin/<branch>``'s own, oldest first, on
+    ``base`` (its merge-base with ``origin/<trunk>``) — ``git rev-list --no-merges
+    origin/<trunk>..origin/<branch>``. Only these may ever be rewritten: a commit reachable from
+    the trunk is not the branch's. ``shas`` is None, with ``why`` the one line, when the branch
+    is not a straight line of its own commits on the trunk: a merge on it (trunk history merged
+    in), a commit whose patch is already on the trunk (``git cherry`` ``-``: a copy of trunk
+    history under the branch), or a chain that does not run straight from ``base``."""
     tip = H.sh(['git', 'rev-parse', '--verify', '-q', f'origin/{branch}'], cwd=repo).stdout.strip()
     base = H.sh(['git', 'merge-base', f'origin/{trunk}', f'origin/{branch}'],
                 cwd=repo).stdout.strip()
     if not tip or not base:
+        return None, None, f'origin/{branch} or its merge-base with origin/{trunk} unreadable'
+    merges = H.sh(['git', 'rev-list', '--merges', f'origin/{trunk}..{tip}'], cwd=repo)
+    if merges.returncode != 0 or merges.stdout.split():
+        return None, None, (f'a merge commit on it ({merges.stdout.split()[0][:9]}) — trunk '
+                            f'history merged in; the lane rewrites no merge'
+                            if merges.returncode == 0 else 'git rev-list failed')
+    r = H.sh(['git', 'log', '--reverse', '--topo-order', '--no-merges', '--format=%H %P',
+              f'origin/{trunk}..{tip}'], cwd=repo)
+    if r.returncode != 0:
+        return None, None, 'git log failed'
+    rows = [l.split() for l in r.stdout.splitlines() if l.strip()]
+    cherry = H.sh(['git', 'cherry', f'origin/{trunk}', tip], cwd=repo)
+    if cherry.returncode != 0:
+        return None, None, 'git cherry failed'
+    dup = [l.split()[1] for l in cherry.stdout.splitlines() if l.startswith('- ')]
+    if dup:
+        return None, None, (f'{len(dup)} commit(s) on it are copies of origin/{trunk} commits '
+                            f'(first {dup[0][:9]}) — trunk history under the branch: rebase '
+                            f'onto origin/{trunk}')
+    parent = base
+    for row in rows:
+        if len(row) != 2 or row[1] != parent:
+            return None, None, f'{row[0][:9]} does not sit straight on its own history'
+        parent = row[0]
+    if parent != tip:
+        return None, None, f'origin/{branch} is not a straight line on origin/{trunk}'
+    return base, [row[0] for row in rows], ''
+
+
+def _diff(repo, trunk, rev):
+    r = H.sh(['git', 'diff', '--binary', '--full-index', f'origin/{trunk}...{rev}'], cwd=repo)
+    return r.stdout if r.returncode == 0 else None
+
+
+def rebuild_branch(repo, trunk, branch, transform, why=None):
+    """``(new_tip, n)``: the branch's own commits (:func:`own_commits` — never a trunk commit,
+    never a merge) each rebuilt with its message passed through ``transform(message, ident)``
+    (``ident``: the commit's ``GIT_AUTHOR_*``/``GIT_COMMITTER_*``) by ``git commit-tree`` —
+    trees, authors, committers and dates identical, no checkout and no hook run. ``n`` counts the
+    messages that changed. ``(None, 0)`` when none did, the branch is not its own straight line,
+    a commit cannot be rebuilt (a git error, a ``transform`` that answers None), or the rebuilt
+    branch fails the guard — its ``origin/<trunk>...`` diff must equal the old one's and it must
+    carry exactly as many commits past the trunk as the branch owned. ``why`` (a list, when
+    given) gets the one-line reason."""
+    note = why.append if why is not None else (lambda _s: None)
+    base, revs, reason = own_commits(repo, trunk, branch)
+    if revs is None:
+        note(reason)
         return None, 0
-    revs = H.sh(['git', 'rev-list', '--reverse', '--topo-order', f'{base}..{tip}'],
-                cwd=repo).stdout.split()
     parent, n = base, 0
     for sha in revs:
         r = H.sh(['git', 'log', '-1', '--date=raw',
                   '--format=' + '%x00'.join(f for _, f in _IDENT) + '%x00%T%x00%P', sha], cwd=repo)
         fields = r.stdout.rstrip('\n').split('\x00')
         if r.returncode != 0 or len(fields) != len(_IDENT) + 2 or len(fields[-1].split()) != 1:
-            return None, 0  # a merge commit, or no commit: the lane refuses it otherwise
+            note(f'{sha[:9]} unreadable')
+            return None, 0
         raw = H.sh(['git', 'cat-file', 'commit', sha], cwd=repo).stdout
         message = raw.split('\n\n', 1)[1] if '\n\n' in raw else ''
         ident = {k: v for (k, _), v in zip(_IDENT, fields)}
         made_msg = transform(message, ident)
         if made_msg is None:
+            note(f'{sha[:9]}: its message could not be rewritten')
             return None, 0
         if made_msg == message and fields[-1] == parent:
             parent = sha
@@ -414,8 +463,19 @@ def rebuild_branch(repo, trunk, branch, transform):
                               env=H.clean_env(env))
         parent = made.stdout.strip()
         if made.returncode != 0 or not parent:
+            note(f'{sha[:9]}: git commit-tree failed')
             return None, 0
-    return (parent, n) if n else (None, 0)
+    if not n:
+        return None, 0
+    # the guard, before anything is pushed: the same change on the trunk, the same commit count
+    count = H.sh(['git', 'rev-list', '--count', f'origin/{trunk}..{parent}'], cwd=repo)
+    old_diff = _diff(repo, trunk, f'origin/{branch}')
+    if count.stdout.strip() != str(len(revs)) or old_diff is None \
+            or _diff(repo, trunk, parent) != old_diff:
+        note(f'rewrite guard: the rebuilt branch is not the old one\'s {len(revs)} commits with '
+             f'the same diff on origin/{trunk} — nothing pushed')
+        return None, 0
+    return parent, n
 
 
 def has_adjudicate_commit(repo, trunk, branch):
@@ -494,11 +554,15 @@ def archive_commit(repo, branch, message):
     return made.stdout.strip() if made.returncode == 0 else ''
 
 
-def api_ref(slug, refspec, lease=None):
+def api_ref(slug, refspec, lease=None, main=None, protected=None):
     """Make one ref-only ``refspec`` on hosted ``slug`` through the host's API; ``(ok, why)``.
     ``<sha>:refs/heads/<b>`` creates the ref at ``sha`` (one already there at ``sha`` is done);
     ``:refs/heads/<b>`` deletes it — under ``lease`` (``refs/heads/<b>:<sha>``) only while its
-    tip is still ``sha``, as retention's hosted delete does."""
+    tip is still ``sha``, as retention's hosted delete does. The trunk and a protected ref are
+    refused before any call (:mod:`asf.refguard`)."""
+    guard = refguard.refusal(refspec, 'api ref write', main, protected)
+    if guard:
+        return False, guard
     src, _, dst = refspec.partition(':')
     ref = dst[len('refs/'):] if dst.startswith('refs/') else dst
     read = ['api', f'repos/{slug}/git/ref/{ref}', '--jq', '.object.sha']
@@ -1089,6 +1153,19 @@ class Lane:
         r = H.sh(['git', 'ls-remote', '--heads', 'origin', branch], cwd=self.repo)
         return r.returncode == 0 and not r.stdout.strip()
 
+    def guarded(self, target, what):
+        """The :mod:`asf.refguard` line refusing a factory write of ``what`` to ``target`` (the
+        trunk or a ``conventions.protected_refs`` ref), said loudly, else ''."""
+        return refguard.refusal(target, what, self.trunk, refguard.listed(self.conv),
+                                out=self.out)
+
+    def fresh_trunk(self):
+        """Fetch ``origin/<trunk>`` now: a rewrite reads the branch's own commits against it,
+        and a tracking ref older than the trunk the branch was rebased onto counts trunk commits
+        as the branch's (2026-09-26: trunk commits reworded onto a factory branch)."""
+        H.sh(['git', 'fetch', '-q', 'origin',
+              f'+refs/heads/{self.trunk}:refs/remotes/origin/{self.trunk}'], cwd=self.repo)
+
     def ref_push(self, refspec, what, lease=None, done=None):
         """Push the one ref-only ``refspec`` (``<sha>:refs/heads/…`` or ``:refs/heads/…``) from
         :meth:`ref_checkout`, over ``lease`` (``refs/heads/<b>:<sha>``) when given. A refusal is a
@@ -1100,11 +1177,14 @@ class Lane:
         (:func:`api_ref`): a ref carries no content, and each ``git push`` ran the product's
         pre-push hook and took 8-11 s an archive, 2-3 s a delete — one wave step spent 277 s of
         a five-minute tick on them (2026-09-25)."""
-        slug = self.ref_host()
-        wt = None if slug else self.ref_checkout()
-        if slug:
+        guard = self.guarded(refspec, what)
+        slug = None if guard else self.ref_host()
+        wt = None if guard or slug else self.ref_checkout()
+        if guard:
+            ok, why = False, guard
+        elif slug:
             started = time.monotonic()
-            ok, why = api_ref(slug, refspec, lease)
+            ok, why = api_ref(slug, refspec, lease, self.trunk, refguard.listed(self.conv))
             kind, _, branch = what.partition(' ')
             self.out(f'lane: push {branch or kind} {time.monotonic() - started:.1f}s '
                      f'({kind}, api)')
@@ -1440,11 +1520,16 @@ class Lane:
             self.out(f'DRY: would reword the subjects on {b} (naming) — no session')
             return None
         kind = githooks.COMMIT_KIND.get(f.get('kind'), 'chore')
-        new, n = reword_branch(self.repo, self.trunk, b, item, kind)
+        if self.guarded(b, f'reword {b} (naming)'):
+            return None
+        self.fresh_trunk()
+        why = []
+        new, n = reword_branch(self.repo, self.trunk, b, item, kind, why)
         wt = self.ref_checkout() if new else ''
         if not new or not wt:
             self.out(f'reword {b} (naming) failed: '
-                     f'{"no commit to reword" if not new else self.ref_wt_error} — back to its session')
+                     f'{(why[0] if why else "no commit to reword") if not new else self.ref_wt_error}'
+                     f' — back to its session')
             return None
         r = H.sh(['git', 'push', '-q', f'--force-with-lease=refs/heads/{b}:{old}', 'origin',
                   f'{new}:refs/heads/{b}'], cwd=wt)
@@ -1483,11 +1568,15 @@ class Lane:
         if self.dry_run:
             self.out(f'DRY: would sign off the commits on {b} ({check}) — no session')
             return None
-        new, n = signoff_branch(self.repo, self.trunk, b)
+        if self.guarded(b, f'sign-off {b} ({check})'):
+            return None
+        self.fresh_trunk()
+        why = []
+        new, n = signoff_branch(self.repo, self.trunk, b, why)
         wt = self.ref_checkout() if new else ''
         if not new or not wt:
             self.out(f'sign-off {b} ({check}) failed: '
-                     f'{"every commit is signed off already" if not new else self.ref_wt_error}')
+                     f'{(why[0] if why else "every commit is signed off already") if not new else self.ref_wt_error}')
             return None
         r = H.sh(['git', 'push', '-q', f'--force-with-lease=refs/heads/{b}:{old}', 'origin',
                   f'{new}:refs/heads/{b}'], cwd=wt)
