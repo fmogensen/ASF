@@ -15,6 +15,7 @@ can ask it without a cycle.
 import json
 import os
 import tempfile
+import threading
 
 from asf import env
 
@@ -54,6 +55,14 @@ def load():
 
 def record(tok, status, why='', **fields):
     """Write ``tok``'s status (atomically: a reader never sees half a file)."""
+    with _LOCK:  # a wave's cloud launches record from threads: none loses another's entry
+        return _record(tok, status, why, **fields)
+
+
+_LOCK = threading.Lock()
+
+
+def _record(tok, status, why='', **fields):
     data = load()
     rec = dict(data.get(tok) or {})
     rec.update({k: v for k, v in fields.items() if v is not None})

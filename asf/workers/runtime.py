@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 
 from asf import detach, env, hermetic
 from asf.workers import headroom, report
@@ -205,6 +206,14 @@ def seed_home(acct, operator_home=None):
     re-copied at every launch, so a refreshed login or an edited config file reaches the next
     session. Nothing but the listed paths ever enters the home. Returns ``(home, missing)``:
     the home (None when the session keeps the operator's) and the seed paths that do not exist."""
+    with _SEED_LOCK:  # a wave's launches on one account seed its home from threads
+        return _seed_home(acct, operator_home)
+
+
+_SEED_LOCK = threading.Lock()
+
+
+def _seed_home(acct, operator_home=None):
     home = session_home(acct)
     if home is None:
         return None, []

@@ -29,6 +29,7 @@
 import os
 import re
 import subprocess
+import threading
 import time
 
 from asf import env, refguard
@@ -82,6 +83,11 @@ def _read_ranges(path):
 def reserve_id_range(product, job, prefixes=None, start=DEFAULT_ID_START, size=DEFAULT_ID_SIZE):
     """The job's ``BACKLOG_ID_RANGE`` (``S:5000-5049,T:5000-5049``): reused if the job already
     holds one, else the next free block per prefix after every block the tsv has handed out."""
+    with _STATE_LOCK:  # a wave's launches run concurrently: two never read the same top block
+        return _reserve_id_range(product, job, prefixes, start, size)
+
+
+def _reserve_id_range(product, job, prefixes, start, size):
     prefixes = prefixes or DEFAULT_ID_PREFIXES
     path = id_ranges_path(product)
     rows = _read_ranges(path)
@@ -178,6 +184,34 @@ def make_worktree(product, job, branch, kind=None):
     repo = product.repo_dir
     if not repo or not os.path.isdir(repo):
         raise SpawnError(f'product repo_dir missing: {repo!r}')
+    with repo_lock(repo):  # the repo's shared refs and worktree list: one launch at a time
+        path, checkout, rebase = _place_worktree(product, repo, job, branch)
+    # the rest runs inside this launch's own worktree, on its own branch — the slow part (the
+    # rebase's publish runs the product's pre-push hook), so a wave's launches overlap here
+    if checkout:
+        _checkout_branch(path, branch, product.main)
+    if rebase:
+        _rebase_onto_trunk(path, branch, product.main, kind)
+    return path
+
+
+#: one lock per product repo (:func:`repo_lock`): a wave's launches run concurrently
+#: (:func:`asf.workers.wave.wave`), and a ``fetch``/``worktree add`` on one repo must not
+_REPO_LOCKS = {}
+_LOCKS_GUARD = threading.Lock()
+#: the state files every launch reads and writes (the id ranges, the hook shims)
+_STATE_LOCK = threading.Lock()
+
+
+def repo_lock(repo):
+    key = os.path.realpath(repo)
+    with _LOCKS_GUARD:
+        return _REPO_LOCKS.setdefault(key, threading.Lock())
+
+
+def _place_worktree(product, repo, job, branch):
+    """:func:`make_worktree`'s part on the shared repo: ``(path, checkout, rebase)`` — the
+    worktree, and whether it still needs its branch checked out and a rebase onto the trunk."""
     ok, detail = hooks.ensure_git_hooks(product)
     if not ok:
         raise SpawnError(detail)
@@ -194,20 +228,18 @@ def make_worktree(product, job, branch, kind=None):
         if what:
             raise SpawnError(why, clear=f'git -C {repo} worktree remove --force {candidate}'
                                         f'  # after checking nothing in it is wanted')
-        if candidate == path and _worktree_branch(candidate) not in (branch, 'HEAD', ''):
-            # another branch checked out (a detached or mid-rebase tree is left for the session)
-            _checkout_branch(candidate, branch, product.main)
-        if candidate == path or _worktree_branch(candidate) == branch:
-            _rebase_onto_trunk(candidate, branch, product.main, kind)
-            return candidate
+        current = _worktree_branch(candidate)
+        # another branch checked out (a detached or mid-rebase tree is left for the session)
+        checkout = candidate == path and current not in (branch, 'HEAD', '')
+        if candidate == path or current == branch:
+            return candidate, checkout, True
     if _branch_exists_on_origin(repo, branch):
         _git(['fetch', '-q', 'origin', branch], repo)
         if held:
             # a stale worktree of an ended run still holds the branch and is not reusable here
             _git(['worktree', 'remove', '--force', held], repo)
         _git(['worktree', 'add', '-q', '-B', branch, path, f'origin/{branch}'], repo)
-        _rebase_onto_trunk(path, branch, product.main, kind)
-        return path
+        return path, False, True
     if held:
         _git(['worktree', 'remove', '--force', held], repo)
         _git(['branch', '-D', branch], repo)
@@ -220,7 +252,7 @@ def make_worktree(product, job, branch, kind=None):
                              f'origin/{product.main} and no worktree — look before relaunching')
         _git(['branch', '-D', branch], repo)
     _git(['worktree', 'add', '-q', '-b', branch, path, f'origin/{product.main}'], repo)
-    return path
+    return path, False, False
 
 
 def _catch_up(path, branch, remote_sha, kind=None):
@@ -396,8 +428,9 @@ def run_worktree_setup(product, job, worktree, account=None, passthrough=(),
         why = f'timed out after {timeout}s'
     if why is None:
         return round(time.monotonic() - started, 1)
-    subprocess.run(['git', 'worktree', 'remove', '--force', worktree], cwd=product.repo_dir,
-                   capture_output=True)
+    with repo_lock(product.repo_dir):
+        subprocess.run(['git', 'worktree', 'remove', '--force', worktree], cwd=product.repo_dir,
+                       capture_output=True)
     raise SpawnError(f'worktree_setup `{command}` failed in {worktree} ({why}) — log: {log}',
                      clear=f'fix `{command}` (conventions.worktree_setup in '
                            f'products/{product.name}.yaml), then relaunch')
@@ -440,7 +473,8 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
             add_dirs.append(d)
     started = pool_mod.now_iso()
     sid = lifecycle.session_id(product.name, row.job, started)
-    hooks_dir = githooks.ensure(product)
+    with _STATE_LOCK:
+        hooks_dir = githooks.ensure(product)
     job = runtime_mod.Job(product.name, row.job, worktree, brief_path, model,
                           account=account, add_dirs=add_dirs,
                           permission_mode=wp.get('permission_mode')

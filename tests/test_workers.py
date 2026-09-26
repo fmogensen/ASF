@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -913,6 +914,131 @@ class TestWave(Home):
                          [('spec-2', pool_mod.REASON_COOLDOWN)])
         self.assertTrue(lines[1].endswith('— quota cooldown — one job at a time'), lines[1])
         self.assertNotIn('NEEDS OPERATOR', '\n'.join(lines))
+
+
+class TestWaveLaunchesConcurrently(Home):
+    """F-0161: a wave's per-launch setup (worktree, publish, install, cloud create) runs on a
+    bounded pool; the seat decisions stay serial, in row order."""
+
+    def wave(self, rows, n, spawn_fn, cap=8, cfg=None, out=None):
+        acct = pool_mod.Account('acct-a', role='local', cap=cap)
+        pool = pool_mod.Pool([acct], quota_source=quota_mod.FakeQuotaSource({}))
+        lines = [] if out is None else out
+        cfg = cfg or self.cfg
+        launched, waits = wave_mod.wave(self.product, rows, n, pool=pool, cfg=cfg,
+                                        out=lines.append, spawn_fn=spawn_fn)
+        return launched, waits, lines, pool
+
+    def test_launch_setups_overlap(self):
+        # serial launches never meet at the barrier: it breaks after its timeout
+        barrier = threading.Barrier(4, timeout=10)
+
+        def spawn_fn(product, row, acct, brief, runtime=None, cfg=None):
+            barrier.wait()
+            return {'job': row.job, 'model': 'opus', 'pid': 1}
+
+        rows = [feature_row(f'spec-{i}', item=f'F-000{i}') for i in range(4)]
+        launched, waits, lines, _ = self.wave(rows, 4, spawn_fn)
+        self.assertEqual([r.job for r, _ in launched], [f'spec-{i}' for i in range(4)])
+        self.assertEqual(waits, [])
+
+    def test_lines_keep_row_order_and_each_launch_prints_its_setup_time(self):
+        def spawn_fn(product, row, acct, brief, runtime=None, cfg=None):
+            time.sleep(0.2 if row.job == 'spec-0' else 0)  # the first row finishes last
+            return {'job': row.job, 'model': 'opus', 'pid': 1}
+
+        rows = [feature_row(f'spec-{i}', item=f'F-000{i}') for i in range(3)]
+        launched, _, lines, _ = self.wave(rows, 3, spawn_fn)
+        row_lines = [ln for ln in lines if ln.startswith(('launched', 'waits'))]
+        self.assertEqual([ln.split()[1] for ln in row_lines], ['spec-0', 'spec-1', 'spec-2'])
+        timing = [ln for ln in lines if ln.startswith('launch ')]
+        self.assertEqual([ln.split()[1] for ln in timing], ['spec-0:', 'spec-1:', 'spec-2:'])
+        self.assertRegex(timing[0], r'^launch spec-0: setup \d+\.\ds$')
+        self.assertGreaterEqual(float(timing[0].split()[-1][:-1]), 0.2)
+
+    def test_a_failed_launch_gives_its_seat_to_the_next_row(self):
+        def spawn_fn(product, row, acct, brief, runtime=None, cfg=None):
+            if row.job == 'spec-1':
+                raise spawn_mod.SpawnError('boom')
+            return {'job': row.job, 'model': 'opus', 'pid': 1}
+
+        rows = [feature_row(f'spec-{i}', item=f'F-000{i}') for i in range(4)]
+        launched, waits, lines, pool = self.wave(rows, 2, spawn_fn)
+        self.assertEqual([r.job for r, _ in launched], ['spec-0', 'spec-2'])
+        self.assertEqual([(r.job, why) for r, why in waits],
+                         [('spec-1', 'spawn failed: boom'), ('spec-3', 'wave full')])
+        self.assertEqual(sorted(s['job'] for s in pool.live), ['spec-0', 'spec-2'])
+
+    def test_a_failed_launch_frees_the_account_seat(self):
+        def spawn_fn(product, row, acct, brief, runtime=None, cfg=None):
+            if row.job == 'spec-0':
+                raise spawn_mod.SpawnError('boom')
+            return {'job': row.job, 'model': 'opus', 'pid': 1}
+
+        rows = [feature_row(f'spec-{i}', item=f'F-000{i}') for i in range(3)]
+        launched, waits, _, _ = self.wave(rows, 5, spawn_fn, cap=1)
+        self.assertEqual([r.job for r, _ in launched], ['spec-1'])
+        self.assertEqual([r.job for r, _ in waits], ['spec-0', 'spec-2'])
+
+    def test_two_rows_on_one_branch_never_launch_together(self):
+        seen = []
+
+        def spawn_fn(product, row, acct, brief, runtime=None, cfg=None):
+            seen.append(row.job)
+            return {'job': row.job, 'model': 'opus', 'pid': 1}
+
+        a = pool_mod.parse_row(json.dumps({'job': 'review-t-1', 'item': 'T-0001', 'state': 'X',
+                                           'action': 'REVIEW', 'model': 'Opus', 'kind': 'review',
+                                           'branch': 'cloud/T-0001'}))
+        b = pool_mod.parse_row(json.dumps({'job': 'correct-t-1', 'item': 'T-0001', 'state': 'X',
+                                           'action': 'CORRECT', 'model': 'Opus',
+                                           'kind': 'correct', 'branch': 'cloud/T-0001'}))
+        launched, waits, _, _ = self.wave([a, b], 5, spawn_fn)
+        self.assertEqual(seen, ['review-t-1'])
+        self.assertEqual([r.job for r, _ in launched], ['review-t-1'])
+        self.assertEqual([(r.job, why) for r, why in waits],
+                         [('correct-t-1', 'already running: branch cloud/T-0001 launches in '
+                                          'this wave (review-t-1)')])
+
+    def test_launch_concurrency_one_is_serial(self):
+        live = []
+        peak = []
+
+        def spawn_fn(product, row, acct, brief, runtime=None, cfg=None):
+            live.append(row.job)
+            peak.append(len(live))
+            time.sleep(0.05)
+            live.remove(row.job)
+            return {'job': row.job, 'model': 'opus', 'pid': 1}
+
+        cfg = json.loads(json.dumps(self.cfg))
+        cfg['worker_pool']['launch_concurrency'] = 1
+        rows = [feature_row(f'spec-{i}', item=f'F-000{i}') for i in range(3)]
+        launched, _, _, _ = self.wave(rows, 3, spawn_fn, cfg=cfg)
+        self.assertEqual(len(launched), 3)
+        self.assertEqual(max(peak), 1)
+
+    def test_id_ranges_reserved_from_threads_never_overlap(self):
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(8) as ex:
+            got = list(ex.map(lambda j: spawn_mod.reserve_id_range(self.product, f'j{j}'),
+                              range(16)))
+        self.assertEqual(len(set(got)), 16)
+
+    def test_real_spawns_in_parallel_all_land_in_the_ledger(self):
+        rows = [feature_row(f'spec-{i}', item=f'F-000{i}') for i in range(4)]
+        acct = pool_mod.Account('acct-a', role='local', cap=8)
+        pool = pool_mod.Pool([acct], quota_source=quota_mod.FakeQuotaSource({}))
+        rt = runtime_mod.FakeRuntime([{'running': True}] * 10)
+        launched, waits = wave_mod.wave(self.product, rows, 4, pool=pool, runtime=rt,
+                                        cfg=self.cfg, out=lambda s: None)
+        self.assertEqual(waits, [])
+        self.assertEqual(sorted(pool_mod.load_sessions(self.product)),
+                         [f'spec-{i}' for i in range(4)])
+        ranges = {rec['id_range'] for _, rec in launched}
+        self.assertEqual(len(ranges), 4)
+        for _, rec in launched:
+            self.assertTrue(os.path.isdir(rec['worktree']))
 
 
 class TestHealth(Home):

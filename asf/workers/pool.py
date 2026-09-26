@@ -48,6 +48,7 @@ import datetime
 import json
 import os
 import re
+import threading
 
 from asf import env
 from asf import capacity as capacity_mod
@@ -217,9 +218,14 @@ def sessions_path(product):
     return os.path.join(env.state_dir(product), 'sessions.jsonl')
 
 
+#: a wave's launches append from threads (:func:`asf.workers.wave.wave`): one line at a time
+_APPEND_LOCK = threading.Lock()
+
+
 def append_session(product, record):
-    with open(sessions_path(product), 'a', encoding='utf-8') as f:
-        f.write(json.dumps(record, sort_keys=True) + '\n')
+    line = json.dumps(record, sort_keys=True) + '\n'
+    with _APPEND_LOCK, open(sessions_path(product), 'a', encoding='utf-8') as f:
+        f.write(line)
 
 
 # The fields that belong to ONE run of a job (:data:`asf.workers.lifecycle.RUN_FIELDS`): a
@@ -519,3 +525,16 @@ class Pool:
                           'product': product, 'kind': kind, 'wave': True, 'lane': lane})
         self._committed[account.name] = (self._committed.get(account.name, 0.0)
                                          + self.costs.cost(kind, model))
+
+    def untake(self, account, model, job='', product=None, kind=None, lane=None):
+        """Undo one :meth:`take` — a seat the wave reserved for a launch that then failed
+        (:func:`asf.workers.wave.wave` reserves before the launch's setup runs)."""
+        want = {'job': job, 'account': account.name, 'model': model, 'product': product,
+                'kind': kind, 'wave': True, 'lane': lane}
+        for i in range(len(self.live) - 1, -1, -1):
+            if self.live[i] == want:
+                del self.live[i]
+                self._committed[account.name] = (self._committed.get(account.name, 0.0)
+                                                 - self.costs.cost(kind, model))
+                return True
+        return False
