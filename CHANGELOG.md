@@ -2,6 +2,27 @@
 
 One entry per released version, newest first.
 
+## v0.1.22 — 2026-09-26
+
+### In progress
+
+- F-0116 A session commits under its own identity, never the operator's
+
+### Improvements and hotfixes
+
+- feat(workers): the worktree reaper — ended sessions' pushed worktrees go, with a cap
+- fix(workers): the worktree reaper counts a commit lost only when its patch is on neither origin nor the trunk
+- perf(tick): fold the session registry once per content; one ls-remote per health pass
+- fix(upgrade): a pending sha already contained in the installed build is treated as installed
+- fix(lane): a draft PR parks the branch — no merge, no review/correction/adjudicate, no rebase
+- fix(workers): a run's cloud-lane marker no longer collides with the harvest lane record
+- fix(cloud): claude-remote's routine body is a short pointer; the brief rides a ref
+- fix(feeder): a decided S1/S2 Bug the feeder skips is a WAITS row that says why
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.22"`
+
 ## v0.1.21 — 2026-09-26
 
 ### Bugs fixed
