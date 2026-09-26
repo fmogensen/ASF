@@ -142,6 +142,12 @@ def safety(path, branch, main, heads, run=None, fetch=False):
     trunk = f'origin/{main}'
     if _git(['merge-base', '--is-ancestor', 'HEAD', trunk], path).returncode == 0:
         return True, f'on {trunk}'
+    cherry = _git(['cherry', trunk, 'HEAD'], path)
+    if cherry.returncode != 0:
+        return False, f'{trunk} unreadable'
+    off_trunk = _plus(cherry.stdout)  # own commits whose patch the trunk lacks
+    if not off_trunk:
+        return True, f'on {trunk} (by patch)'
     remote = (heads or {}).get(branch) if branch else None
     if remote:
         if not _has_object(path, remote) and fetch:
@@ -150,18 +156,20 @@ def safety(path, branch, main, heads, run=None, fetch=False):
             return False, f'origin/{branch} not fetched'
         if _git(['merge-base', '--is-ancestor', 'HEAD', remote], path).returncode == 0:
             return True, 'pushed'
-        m = lifecycle.unpushed_commits(path, remote, main)
+        on_remote = _git(['cherry', remote, 'HEAD'], path)
+        if on_remote.returncode != 0:
+            return False, f'origin/{branch} unreadable'
+        # a commit is lost only when its patch is on neither origin/<branch> nor the trunk
+        m = len(off_trunk & _plus(on_remote.stdout))
         if m == 0:
             return True, 'pushed (by patch)'
         return False, f'{m} unpushed commit(s)'
-    cherry = _git(['cherry', trunk, 'HEAD'], path)
-    if cherry.returncode == 0:
-        m = len([ln for ln in cherry.stdout.splitlines() if ln.startswith('+')])
-        if m == 0:
-            return True, f'on {trunk} (by patch)'
-        why = 'origin unreadable' if heads is None else 'branch not on origin'
-        return False, f'{m} unpushed commit(s) ({why})'
-    return False, f'{trunk} unreadable'
+    why = 'origin unreadable' if heads is None else 'branch not on origin'
+    return False, f'{len(off_trunk)} unpushed commit(s) ({why})'
+
+
+def _plus(cherry_out):
+    return {ln[2:].strip() for ln in cherry_out.splitlines() if ln.startswith('+')}
 
 
 def _epoch(iso):
