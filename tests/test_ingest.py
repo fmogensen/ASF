@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import tempfile
 import types
@@ -952,6 +953,162 @@ class NoCoderBeforeTheSpecLands(unittest.TestCase):
                                    for r in refs}):
             self.assertEqual(ingest._spec_home(meta, fev, ev, product), (True, ''))
         self.assertEqual(ingest._spec_home(meta, fev, ev, None), (False, ''))
+
+
+TS_RE = re.compile(r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$')
+
+
+class FeatureOnProdEventTests(unittest.TestCase):
+    """§2.1/§3.1: the transition into `on-prod` writes one `metrics/events` line, the durable
+    record F-0044's rollup reads. Built on the fixture shape of `ProductionIsTheProductsOwn`."""
+
+    def setUp(self):
+        self.root = make_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+
+    def run_ingest(self, ev):
+        with mock.patch.object(ingest.evidence, 'load', return_value=ev), \
+             mock.patch.object(ingest.evidence, 'ancestor_of', return_value=True):
+            return ingest.cmd_ingest(types.SimpleNamespace(fresh=False), self.root)
+
+    def events(self):
+        path = os.path.join(self.root, 'metrics', 'events', f"{today()}.jsonl")
+        if not os.path.exists(path):
+            return []
+        with open(path, encoding='utf-8') as f:
+            return [json.loads(line) for line in f if line.strip()]
+
+    def fev(self, branch):
+        return {'alias': None, 'spec': None, 'spec_branch': None, 'spec_on_main': False,
+               'spec_review': None, 'plan': None, 'plan_branch': None, 'plan_on_main': False,
+               'plan_review': None,
+               'tasks': {'T1': {'branch': branch, 'pr': 601, 'pr_state': 'MERGED',
+                                'merged_sha': 'd' * 40}},
+               'prs': [601]}
+
+    def landed_feature(self, iid, folder='features'):
+        write(self.root, iid, 'feature', 'Free plan', folder,
+              machine_lines=('state: Resolved', 'stage: landed',
+                             'stage_since: 2026-01-01T00:00:00Z', 'updated: 2026-01-01T00:00:00Z'))
+
+    def on_prod_ev(self, slug='f-0001', branch='cloud/free-plan-t-0001'):
+        return dict(EMPTY_EV, prod_sha='c' * 40, checked={601}, merged={601: 'd' * 40},
+                   features={slug: self.fev(branch)})
+
+    def test_the_transition_into_on_prod_writes_one_event(self):
+        self.landed_feature('F-0001')
+        write(self.root, 'T-0001', 'task', 'Wire it', 'tasks', parent='F-0001')
+        self.assertEqual(self.run_ingest(self.on_prod_ev()), 0)
+        meta, _body = read_meta(self.root, 'features', 'F-0001')
+        self.assertEqual(meta['stage'], 'on-prod')
+        events = self.events()
+        self.assertEqual(len(events), 1)
+        obj = events[0]
+        self.assertEqual(list(obj), sorted(obj))
+        self.assertTrue(TS_RE.match(obj['ts']))
+        self.assertEqual({k: v for k, v in obj.items() if k != 'ts'},
+                         {'from': 'landed', 'item': 'F-0001', 'kind': ingest.ON_PROD_EVENT})
+
+    def test_a_second_ingest_the_same_day_adds_none(self):
+        self.landed_feature('F-0001')
+        write(self.root, 'T-0001', 'task', 'Wire it', 'tasks', parent='F-0001')
+        ev = self.on_prod_ev()
+        self.assertEqual(self.run_ingest(ev), 0)
+        self.assertEqual(self.run_ingest(ev), 0)
+        self.assertEqual(len(self.events()), 1)
+
+    def test_landed_without_a_deployment_writes_none(self):
+        write(self.root, 'F-0002', 'feature', 'Add-on', 'features')
+        write(self.root, 'T-0002', 'task', 'Wire it', 'tasks', parent='F-0002')
+        ev = dict(EMPTY_EV, features={'f-0002': self.fev('cloud/add-on-t-0002')})
+        self.assertEqual(self.run_ingest(ev), 0)
+        meta, _body = read_meta(self.root, 'features', 'F-0002')
+        self.assertEqual(meta['stage'], 'landed')
+        self.assertEqual(self.events(), [])
+
+    def test_a_feature_already_at_on_prod_writes_none(self):
+        write(self.root, 'F-0003', 'feature', 'Widgets', 'features',
+              machine_lines=('state: Closed', 'stage: on-prod',
+                             'stage_since: 2026-01-01T00:00:00Z', 'updated: 2026-01-01T00:00:00Z'))
+        write(self.root, 'T-0003', 'task', 'Wire it', 'tasks', parent='F-0003')
+        self.assertEqual(self.run_ingest(self.on_prod_ev('f-0003', 'cloud/widgets-t-0003')), 0)
+        self.assertEqual(self.events(), [])
+
+    def test_a_task_and_a_bug_reaching_prod_write_none(self):
+        write(self.root, 'T-0001', 'task', 'Wire it', 'tasks')
+        write(self.root, 'B-0001', 'bug', 'A defect', 'bugs',
+              typed_lines=['links:', '  prs: [701]'])
+        ev = dict(EMPTY_EV, prod_sha='c' * 40, merged={701: 'e' * 40},
+                  ids={'T-0001': {'branches': [], 'open_prs': [], 'commit': 'a' * 40,
+                                  'pr': None, 'green': True}})
+        self.assertEqual(self.run_ingest(ev), 0)
+        meta, _body = read_meta(self.root, 'tasks', 'T-0001')
+        self.assertEqual(meta['state'], 'Closed')
+        self.assertEqual(self.events(), [])
+
+    def test_history_and_stage_since_are_unchanged_by_the_new_write(self):
+        """The event write is purely additive: stubbing it out changes nothing about the
+        Feature's own file, over the same fixture and the same evidence."""
+        self.landed_feature('F-0001')
+        write(self.root, 'T-0001', 'task', 'Wire it', 'tasks', parent='F-0001')
+        ev = self.on_prod_ev()
+        self.assertEqual(self.run_ingest(ev), 0)
+        with open(os.path.join(self.root, 'features', 'F-0001.md'), encoding='utf-8') as f:
+            with_write = f.read()
+
+        root2 = make_repo()
+        self.addCleanup(shutil.rmtree, root2, ignore_errors=True)
+        write(root2, 'F-0001', 'feature', 'Free plan', 'features',
+              machine_lines=('state: Resolved', 'stage: landed',
+                             'stage_since: 2026-01-01T00:00:00Z', 'updated: 2026-01-01T00:00:00Z'))
+        write(root2, 'T-0001', 'task', 'Wire it', 'tasks', parent='F-0001')
+        with mock.patch.object(ingest.evidence, 'load', return_value=ev), \
+             mock.patch.object(ingest.evidence, 'ancestor_of', return_value=True), \
+             mock.patch.object(ingest, 'write_on_prod_event', return_value=True):
+            self.assertEqual(ingest.cmd_ingest(types.SimpleNamespace(fresh=False), root2), 0)
+        with open(os.path.join(root2, 'features', 'F-0001.md'), encoding='utf-8') as f:
+            without_write = f.read()
+        self.assertEqual(with_write, without_write)
+
+    def test_write_on_prod_event_is_idempotent_and_sorted(self):
+        now = '2026-03-04T10:00:00Z'
+        self.assertTrue(ingest.write_on_prod_event(self.root, 'F-0009', 'landed', now))
+        self.assertFalse(ingest.write_on_prod_event(self.root, 'F-0009', 'landed', now))
+        path = os.path.join(self.root, 'metrics', 'events', '2026-03-04.jsonl')
+        with open(path, encoding='utf-8') as f:
+            lines = [l for l in f if l.strip()]
+        self.assertEqual(len(lines), 1)
+        obj = json.loads(lines[0])
+        self.assertEqual(obj, {'from': 'landed', 'item': 'F-0009', 'kind': ingest.ON_PROD_EVENT,
+                              'ts': now})
+        self.assertEqual(list(obj), sorted(obj))
+
+    def test_an_unparseable_line_is_skipped_not_raised_on(self):
+        day = today()
+        path = os.path.join(self.root, 'metrics', 'events', f"{day}.jsonl")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('not json\n')
+        now = f"{day}T10:00:00Z"
+        self.assertTrue(ingest.write_on_prod_event(self.root, 'F-0010', 'landed', now))
+        with open(path, encoding='utf-8') as f:
+            lines = [l for l in f if l.strip()]
+        self.assertEqual(len(lines), 2)
+
+    def test_intake_latency_rows_is_unmoved_by_the_new_kind(self):
+        from asf.metrics import metrics
+        evs = [
+            {'kind': 'intake', 'item': 'T-0001', 'filed': '2026-01-01T09:00:00Z',
+             'ts': '2026-01-01T09:00:00Z'},
+            {'kind': 'groom_answer', 'item': 'T-0001', 'field': 'decided', 'value': 'true',
+             'ts': '2026-01-01T09:10:00Z'},
+            {'kind': 'launch', 'item': 'T-0001', 'ts': '2026-01-01T09:20:00Z'},
+        ]
+        before = metrics.intake_latency_rows(evs)
+        evs2 = evs + [{'kind': ingest.ON_PROD_EVENT, 'item': 'F-0001', 'from': 'landed',
+                      'ts': '2026-01-01T09:30:00Z'}]
+        after = metrics.intake_latency_rows(evs2)
+        self.assertEqual(before, after)
 
 
 if __name__ == '__main__':

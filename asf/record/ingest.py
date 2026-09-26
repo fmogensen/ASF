@@ -12,6 +12,8 @@ module. Decisions and Rules have no lifecycle, so ingest never touches them.
 """
 import collections
 import dataclasses
+import json
+import os
 import re
 import sys
 
@@ -30,6 +32,35 @@ LANDING_CHILD_TYPES = {'story', 'task', 'bug'}
 MACHINE_KEY_ORDER = ['schema_version', 'state', 'stage', 'stage_since', 'cost', 'evidence',
                      'blocked', 'blocked_by_open', 'updated']
 RULE_PREFIX = 'rule: '
+# the `metrics/events` kind written when a Feature's stage enters `on-prod`, the durable record
+# read by the rollup's first line (F-0044)
+ON_PROD_EVENT = 'feature-on-prod'
+
+
+def write_on_prod_event(root, iid, from_stage, now):
+    """Append one `metrics/events/<day>.jsonl` line for `iid`'s transition into `on-prod`.
+    Idempotent per day (returns False and writes nothing on a repeat): the metrics clone this
+    feeds is reset and re-derived every cycle. Not `asf.metrics.metrics.append_event`: its
+    `natural_key` has no `events` branch and raises `KeyError` on a line with no `tick`."""
+    path = os.path.join(root, 'metrics', 'events', f"{now[:10]}.jsonl")
+    if os.path.exists(path):
+        with open(path, encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except ValueError:  # the stream is unvalidated (§1.1); a rollup must not fail on it
+                    continue
+                if obj.get('kind') == ON_PROD_EVENT and obj.get('item') == iid:
+                    return False
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    line = json.dumps({'from': from_stage or '', 'item': iid, 'kind': ON_PROD_EVENT, 'ts': now},
+                      sort_keys=True, ensure_ascii=False)
+    with open(path, 'a', encoding='utf-8') as f:
+        f.write(line + '\n')
+    return True
 
 
 def is_retired(meta):
@@ -787,6 +818,7 @@ def ingest_into(root, ev, product=None):
                                                   evs[iid], since):
             lines.insert(len(lines) - 1, closing.PREDATES_LINE % closing.created_of(rec['meta']))
         _typed, machine = frontmatter.split_machine(rec['meta'])
+        old = machine.get('stage')
         ordered, history = _ingest_fields(machine, new_state[iid], stage_val.get(iid), lines,
                                           blocked_pair, now)
         if ordered is None:
@@ -800,5 +832,7 @@ def ingest_into(root, ev, product=None):
             if new_body != body2:
                 with open(rec['path'], 'w', encoding='utf-8') as f:
                     f.write(frontmatter.render(meta2, new_body))
+        if type_ == 'feature' and stage_val.get(iid) == 'on-prod' and old != 'on-prod':
+            write_on_prod_event(root, iid, old, now)
 
     return do_index(root)
