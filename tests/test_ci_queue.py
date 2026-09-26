@@ -763,5 +763,110 @@ class TestModes(Base):
                                        'ci.queue.workflows.nightly', 'ci.queue.x'])
 
 
+
+def wide_pool(n_heavy=12, n_light=7):
+    """A pool like a real product's: ``n_heavy`` heavy runners, ``n_light`` light ones."""
+    from asf import ci_pool
+    rows = [{'runner': f'h{i}', 'provider': 'alpha', 'role': 'heavy'} for i in range(1, n_heavy + 1)]
+    rows += [{'runner': f'l{i}', 'provider': 'alpha', 'role': 'light'} for i in range(1, n_light + 1)]
+    return ci_pool.load_pool(env.Product('p', {'ci': {'pool': rows}}))
+
+
+def live_runners(pool, sub='fast-heavy', carriers=('h1', 'h2', 'h3', 'h4', 'h5', 'h6')):
+    """The runners API: every heavy runner carries ``heavy``, some also the sub-label ``sub``."""
+    from asf import ci_pool
+    out = []
+    for e in pool:
+        labels = ['self-hosted', 'linux', e.role] + ([sub] if e.runner in carriers else [])
+        out.append(ci_pool.Runner(e.runner, True, labels))
+    return out
+
+
+class TestSubLabels(Base):
+    """A job's class is the class of the runner that ran it; a sub-label of a class is that class."""
+
+    def test_a_sub_label_maps_to_its_parent_class_and_spanning_labels_to_none(self):
+        pool = wide_pool()
+        m = ci_queue.label_classes(pool, live_runners(pool))
+        self.assertEqual(m['fast-heavy'], 'heavy')
+        self.assertEqual(m['heavy'], 'heavy')
+        self.assertEqual(m['light'], 'light')
+        self.assertNotIn('self-hosted', m)
+        self.assertNotIn('provider-alpha', m)      # carried by both classes
+
+    def test_a_sub_label_job_counts_once_in_its_parent_class(self):
+        pool = wide_pool()
+        runners = live_runners(pool)
+        # one job, both labels, run on a pool runner; one on a runner outside the pool asking
+        # for the sub-label only; the same job id listed twice. Each is one heavy job.
+        jobs = [dict(job('h1', 0, 10, labels=['self-hosted', 'heavy', 'fast-heavy']), id=1),
+                dict(job('x-ephemeral', 0, 10, labels=['self-hosted', 'fast-heavy']), id=2),
+                dict(job('h2', 0, 10, labels=['self-hosted', 'fast-heavy']), id=3),
+                dict(job('h2', 0, 10, labels=['self-hosted', 'fast-heavy']), id=3)]
+        by_name = {e.runner: e for e in pool}
+        peak = ci_queue.peak_concurrent(jobs, by_name, ci_queue.label_classes(pool, runners))
+        self.assertEqual(peak, {'heavy': 3})
+        self.assertNotIn('fast-heavy', peak)
+        self.assertEqual(ci_queue.needs_from_history([jobs] * 5, pool, runners), {'heavy': 3})
+
+    def test_the_estimate_is_about_3_when_each_run_peaks_at_about_3_heavy(self):
+        """Ten runs, half asking for ``heavy``, half for the sub-label, each 3 heavy at once (one
+        run 4, one 2) over staggered stages on a 12-runner class: the estimate is 3, not 6+."""
+        pool = wide_pool()
+        runners = live_runners(pool)
+
+        def run(k, width):
+            lab = ['self-hosted', 'fast-heavy'] if k % 2 else ['self-hosted', 'heavy']
+            jobs, n = [], 0
+            for stage in range(3):               # three stages, one after the other
+                for i in range(width):
+                    n += 1
+                    jobs.append(dict(job(f'h{(n % 12) + 1}', stage * 10, stage * 10 + 10,
+                                         labels=lab), id=k * 100 + n))
+            jobs.append(dict(job('l1', 0, 5, labels=['self-hosted', 'light']), id=k * 100 + 99))
+            jobs.append(dict(job(None, conclusion='skipped', labels=lab), id=k * 100 + 98))
+            return jobs
+
+        runs = [run(k, 3) for k in range(8)] + [run(8, 4), run(9, 2)]
+        self.assertEqual(ci_queue.needs_from_history(runs, pool, runners),
+                         {'heavy': 3, 'light': 1})
+
+
+class TestStarvationGuard(Base):
+    def test_a_pr_waiting_past_pr_wait_min_starts_on_half_its_expected_jobs(self):
+        p = product()                              # expects heavy 3, light 1
+        gh = FakeGh(busy={'h1'})                  # heavy 2 free: short of 3, but ceil(3/2) = 2
+        d = self.admit(self.queue(p, gh), 'pr:task/T-0500', 'T-0500')
+        self.assertFalse(d.admitted)
+        self.assertIn('heavy 2 free, needs 3', self.lines[-1])
+        for m in (20, 40, 44):                     # asked again each tick, keeping its place
+            d = self.admit(self.queue(p, gh, minutes=m), 'pr:task/T-0500', 'T-0500')
+            self.assertFalse(d.admitted)          # not yet past the default 45 minutes
+        self.lines.clear()
+        d = self.admit(self.queue(p, gh, minutes=46), 'pr:task/T-0500', 'T-0500')
+        self.assertTrue(d.admitted)
+        self.assertEqual(len(self.lines), 1)
+        self.assertIn('T-0500 starts — starvation guard — waited 46m', self.lines[0])
+        self.assertNotIn('pr:task/T-0500', ci_queue.load('p')['entries'])
+
+    def test_the_guard_needs_half_free_and_holds_batch_and_ceiling(self):
+        p = product(queue={'pr_wait_min': 10})
+        busy2 = FakeGh(busy={'h1', 'h2'})         # heavy 1 free: below half of 3
+        self.assertFalse(self.admit(self.queue(p, busy2), 'pr:a', 'T-0500').admitted)
+        self.assertFalse(self.admit(self.queue(p, busy2, minutes=11), 'pr:a', 'T-0500').admitted)
+        busy1 = FakeGh(busy={'h1'})
+        self.assertFalse(self.admit(self.queue(p, busy1), 'batch', 'batch', kind='batch').admitted)
+        self.assertFalse(self.admit(self.queue(p, busy1, minutes=11), 'batch', 'batch',
+                                    kind='batch').admitted)     # a batch start is not guarded
+        pc = product(cap={'ci': 2}, queue={'pr_wait_min': 10}, name='c')
+        self.admit(self.queue(pc, FakeGh(inflight=2)), 'pr:c', 'T-0500')
+        self.assertFalse(self.admit(self.queue(pc, FakeGh(inflight=2, busy={'h1'}), minutes=11),
+                                    'pr:c', 'T-0500').admitted)  # the ceiling still holds
+        self.assertEqual(ci_queue.pr_wait_min(p), 10)
+        self.assertEqual(ci_queue.pr_wait_min(product()), 45)
+        self.assertEqual(dict(ci_queue.config_problems({'queue': {'pr_wait_min': 0}})).keys(),
+                         {'ci.queue.pr_wait_min'})
+
+
 if __name__ == '__main__':
     unittest.main()
