@@ -611,6 +611,11 @@ class TestCheckSavings(unittest.TestCase):
         self.assertTrue(any('min_landings' in d for d in bad), bad)
         self.assertTrue(any('spend_ratio' in d for d in bad), bad)
 
+    def test_a_non_dict_savings_block_is_named_not_crashed_on(self):
+        product = env.Product('a', {'conventions': {'savings': 'yes'}})
+        findings = doctor.check_savings(product)
+        self.assertEqual(findings, [(False, "conventions.savings must be a map, not 'yes'")])
+
     def test_the_row_appears_in_run_after_capacity(self):
         product = env.Product('a', {})
         with mock.patch.object(doctor, 'check_config', return_value=(True, '', {}, product)), \

@@ -502,11 +502,17 @@ def check_savings(product):
     """[(ok, detail)] — the ``savings`` doctor row's findings (spec f-0100 §2.9): every key of
     a product's ``conventions.savings`` block is a key of ``conventions.DEFAULT_SAVINGS`` and
     every value is a number greater than zero, so a misspelled or misvalued threshold is told to
-    the operator rather than silently read as the default. Green names the resolved count and how
-    many of the eight were overridden."""
+    the operator rather than silently read as the default. A block written in some shape other
+    than a map (``savings`` is not in ``MAP_CONVENTIONS``, so nothing upstream reshapes it) is its
+    own red finding rather than a crash. Green names the resolved count and how many of the eight
+    were overridden."""
     conv = getattr(product, 'conventions', None)
-    savings = getattr(conv, 'savings', None) or {}
+    savings = getattr(conv, 'savings', None)
     findings = []
+    if savings is not None and not isinstance(savings, dict):
+        findings.append((False, f'conventions.savings must be a map, not {savings!r}'))
+        savings = None
+    savings = savings or {}
     overridden = 0
     for key, value in savings.items():
         if key not in conventions.DEFAULT_SAVINGS:
