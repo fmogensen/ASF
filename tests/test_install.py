@@ -1645,6 +1645,50 @@ class InstallScriptTest(unittest.TestCase):
         self.assertIn('NEEDS OPERATOR', r.stderr)
         self.assertIn('tick', r.stderr)
 
+    def test_the_lock_is_held_across_the_install_itself_not_just_before_it(self):
+        """B-0135 C1: checking the lock and then releasing it before ``pipx install --force``
+        leaves a tick that starts during the install free to race it. The lock must be held
+        through the install, not just before it."""
+        lock_path = os.path.join(self.asf_home, 'state', 'demo', 'tick.lock')
+        os.makedirs(os.path.dirname(lock_path))
+        pipx_log = os.path.join(self.tmp, 'pipx.log')
+        pipx_body = f'#!/bin/sh\necho "$*" >> "{pipx_log}"\nsleep 1\nexit 0\n'
+        with open(os.path.join(self.bin_dir, 'pipx'), 'w') as f:
+            f.write(pipx_body)
+        os.chmod(os.path.join(self.bin_dir, 'pipx'), 0o755)
+        with open(os.path.join(self.bin_dir, 'asf'), 'w') as f:
+            f.write('#!/bin/sh\necho "$*" >> "%s"\ncase "$1" in\n'
+                    '  --version) echo "asf 0.0.0 (stub)";;\nesac\nexit 0\n' % self.log)
+        os.chmod(os.path.join(self.bin_dir, 'asf'), 0o755)
+
+        import fcntl
+        proc = subprocess.Popen(['bash', INSTALL_SH, 'demo', 'deadbeef'],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                 env=self._env())
+        try:
+            deadline = time.monotonic() + 10
+            while not os.path.exists(pipx_log) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertTrue(os.path.exists(pipx_log), 'pipx was never invoked')
+            probe = open(lock_path, 'a')
+            try:
+                with self.assertRaises(OSError):
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                probe.close()
+            out, err = proc.communicate(timeout=60)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+        self.assertEqual(proc.returncode, 0, err)
+        held = open(lock_path, 'a')
+        try:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(held, fcntl.LOCK_UN)
+        finally:
+            held.close()
+
 
 if __name__ == '__main__':
     unittest.main()
