@@ -685,6 +685,19 @@ class CorrectionRowTest(unittest.TestCase):
         self.assertEqual([(r.kind, r.brief_kind) for r in out],
                          [('STALEMATE → ADJUDICATE', 'adjudicate')])
 
+    def test_the_adjudicate_row_carries_the_holds_own_text_into_its_brief(self):
+        """The adjudicate brief says "read, in full: the hold's own text above" — a product,
+        2026-09-26: three adjudicate sessions on a Task held on a red CI check, none of whose
+        briefs held the hold's text at all (the row dropped it), so none saw what was red."""
+        import importlib
+        brief_build = importlib.import_module('asf.briefs.build')  # the package shadows the name
+        out = rows.plan_rows(s1_bugs('B-0001'), product(), [], 1, attempts={'B-0001': 1},
+                             occupancy=occ(corrections=self.corr(3, 'PR #7 checks red: gate\n'
+                                                                    'lint: 13 finding(s)')))
+        self.assertEqual(out[0].kind, rows.STALEMATE)
+        self.assertIn('lint: 13 finding(s)', out[0].correction)
+        self.assertIn('lint: 13 finding(s)', brief_build.correction_text(out[0], 'adjudicate'))
+
     def test_b0058_a_blocked_item_gets_no_correct_or_adjudicate_row(self):
         # the controller blocked eleven held items on the Bug about their loop; the next tick
         # still launched an adjudicate session on one — correction rows skipped `blocked`

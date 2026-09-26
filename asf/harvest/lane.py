@@ -2611,7 +2611,8 @@ class GitHubHost(Host):
                 lane.out(f'DRY: would hold {b}: PR #{number} checks red: {detail}')
                 lane.results[b] = 'dry'
                 return None
-            send_back(lane, f, 'gate', f'PR #{number} checks red: {detail}', ())
+            send_back(lane, f, 'gate', f'PR #{number} checks red: {detail}'
+                      + red_evidence(self.slug, checks, red), ())
             return None
         passed = {c.get('name') for c in checks if c.get('bucket') in PASS_BUCKETS}
         on_trunk = self.trunk_red(required or [c.get('name') for c in checks if c.get('name')])
@@ -2695,7 +2696,8 @@ def pr_checks(slug, number, required=()):
     pending — a red check the product does not require (a DCO bot, an advisory test job) never
     turns the PR red. With none required, any failed or cancelled check is red, else any not
     finished is pending. ``checks`` is always the full list."""
-    rc, stdout, err = H._gh(['pr', 'checks', str(number), '-R', slug, '--json', 'name,bucket'])
+    rc, stdout, err = H._gh(['pr', 'checks', str(number), '-R', slug, '--json',
+                             'name,bucket,link'])
     if 'no checks reported' in f'{stdout}\n{err}':
         return 'green', 'no checks', []
     try:
@@ -2710,6 +2712,46 @@ def pr_checks(slug, number, required=()):
     if pending:
         return 'pending', ', '.join(pending), checks
     return 'green', f'{len(checks)} check(s)', checks
+
+
+#: The last lines of a red CI job's log a correction carries, up to and with its error line.
+RED_LOG_LINES = 40
+_JOB_RE = re.compile(r'/job/(\d+)')
+_LOG_TS_RE = re.compile(r'^\ufeff?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z ?')
+_ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[ -/]*[@-~]')
+
+
+def red_log_lines(log, n=RED_LOG_LINES):
+    """The last ``n`` lines of a CI job ``log`` up to and with its first ``##[error]`` line (or
+    its end): the failing step's own output — after the step's header group (its command and
+    env) — with timestamps, colours and the runner's ``##[…]`` markers stripped."""
+    lines = [_ANSI_RE.sub('', _LOG_TS_RE.sub('', l)).rstrip() for l in (log or '').splitlines()]
+    end = next((i for i, l in enumerate(lines) if l.startswith('##[error]')), len(lines) - 1)
+    start = max([i + 1 for i, l in enumerate(lines[:end]) if l.startswith('##[endgroup]')] + [0])
+    kept = [l.replace('##[error]', '', 1) for l in lines[start:end + 1]
+            if l.strip() and not l.startswith(('##[group]', '##[endgroup]'))]
+    return kept[-n:]
+
+
+def red_evidence(slug, checks, red):
+    """What the session needs to answer a red CI check (a product, 2026-09-26: five rounds on
+    ``PR #795 checks red: gate`` alone, none told which lint failed where): per ``red`` check,
+    its link and the lines its job's log ended on (:func:`red_log_lines`). ``''`` when no red
+    check has a job link or no log reads — never raises."""
+    out = []
+    for c in checks or ():
+        link = c.get('link') or ''
+        m = _JOB_RE.search(link)
+        if c.get('name') not in red or not m:
+            continue
+        try:
+            rc, log, _err = H._gh(['api', f'repos/{slug}/actions/jobs/{m.group(1)}/logs'])
+        except OSError:
+            continue
+        lines = red_log_lines(log) if rc == 0 else []
+        if lines:
+            out.append(f"\n{c.get('name')}: {link}\n" + '\n'.join(lines))
+    return ''.join(out)
 
 
 def not_required_red(checks, required):

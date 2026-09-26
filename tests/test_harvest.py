@@ -2305,6 +2305,49 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertEqual(self.merges(calls), [])
         self.assertEqual(self.record('fix/B-0001')['correction']['kind'], 'gate')
 
+    def test_a_red_ci_check_hands_back_its_link_and_the_lines_that_failed(self):
+        """A product, 2026-09-26: a Task's PR red on CI's ``gate`` went back five times as
+        ``PR #795 checks red: gate`` and nothing else — two corrections and three adjudicate
+        sessions, none told which lint failed where. The correction carries the red job's link
+        and its log's last lines up to the error; the lane's own line stays one line."""
+        link = 'https://github.com/o/p/actions/runs/9/job/77'
+        log = ('2026-09-26T03:19:49.2Z ##[group]Run pnpm lint\n'
+               '2026-09-26T03:19:50.0Z \x1b[31munaliased-literal: 1 finding(s)\x1b[0m\n'
+               '2026-09-26T03:19:50.0Z   src/chart.ts:47 — #ffffff\n'
+               '2026-09-26T03:19:50.0Z ##[error]Process completed with exit code 1.\n'
+               '2026-09-26T03:19:50.1Z ##[group]Run actions/upload-artifact@v7\n')
+        calls = self.fake_gh([{'name': 'gate', 'bucket': 'fail', 'link': link}])
+        real = harvest._gh.side_effect
+
+        def gh(args):
+            if args[:2] == ['api', 'repos/o/p/actions/jobs/77/logs']:
+                calls.append(list(args))
+                return 0, log, ''
+            return real(args)
+        harvest._gh.side_effect = gh
+        self.push_fix(['approved'])
+        results, lines = self.harvest(self.pr_conv(landing_checks=['gate']))
+        self.assertEqual(results, {'fix/B-0001': 'held'}, lines)
+        self.assertIn('held fix/B-0001: PR #41 checks red: gate — back to its session (round 1)',
+                      lines)
+        text = self.record('fix/B-0001')['correction']['text']
+        self.assertTrue(text.startswith('PR #41 checks red: gate\n'), text)
+        self.assertIn(link, text)
+        self.assertIn('unaliased-literal: 1 finding(s)', text)
+        self.assertIn('src/chart.ts:47 — #ffffff', text)
+        self.assertIn('Process completed with exit code 1.', text)
+        self.assertNotIn('upload-artifact', text)
+        self.assertNotIn('\x1b', text)
+        self.assertNotIn('2026-09-26T03', text)
+
+    def test_red_log_lines_never_raise(self):
+        with mock.patch.object(harvest, '_gh', return_value=(1, '', 'HTTP 404')):
+            self.assertEqual(lane.red_evidence('o/p', [{'name': 'gate', 'bucket': 'fail',
+                                                        'link': 'https://x/runs/1/job/2'}],
+                                               ['gate']), '')
+        self.assertEqual(lane.red_evidence('o/p', [{'name': 'gate', 'bucket': 'fail'}],
+                                           ['gate']), '')
+
     def test_a_pending_check_that_is_not_required_does_not_hold_the_pr(self):
         calls = self.fake_gh([{'name': 'gate', 'bucket': 'pass'},
                               {'name': 'gate-tests', 'bucket': 'pending'}])

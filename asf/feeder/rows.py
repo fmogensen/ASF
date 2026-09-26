@@ -439,7 +439,7 @@ def correction_rows(items, product, busy, corrections):
             continue
         if rounds >= CORRECTION_ROUNDS and c.get('kind') != NAMING:
             out.append(Row(tier=tier, kind=STALEMATE, item_id=iid, feature_id=fid, action=LAUNCH,
-                           brief_kind='adjudicate', branch=branch,
+                           brief_kind='adjudicate', branch=branch, correction=c['text'],
                            reason=f"held {rounds} times ({c.get('kind')}): adjudicate, not another correction"))
         else:
             out.append(Row(tier=tier, kind=FIX_CORRECT, item_id=iid, feature_id=fid, action=LAUNCH,
