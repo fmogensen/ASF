@@ -60,6 +60,11 @@ per class (rounded up) are free after the entries ahead are set aside.
 Measured peaks near the pool's size would otherwise hold a PR for as long as any other run is
 in flight. The admission prints one line naming the wait and the free count.
 
+**Draft PRs.** A branch whose PR is a draft is parked by its owner: it never enters the line,
+never gets a start, and is never set aside as demand ahead of others — :func:`admit` with
+``draft`` refuses it and drops its entries, and the lane drops a draft branch's entries every
+pass (:func:`forget`).
+
 **Order.** S1 and hotfix items first (0), then trunk runs (1: every deploy waits on a green
 trunk, so a trunk run never queues behind PR runs), then PRs of customer-facing Features (2: the
 item sits under a Feature, and the Feature says ``customer_facing: true`` or the branch touches
@@ -1040,6 +1045,16 @@ class Queue:
                     free[c] = max(0, free[c] - n)
         return free
 
+    def drop(self, keys):
+        """Take ``keys`` out of the line (a draft PR's starts); the number dropped. Written at
+        once when anything left."""
+        if self.mode == 'off':
+            return 0
+        n = sum(1 for k in keys if self.data['entries'].pop(k, None) is not None)
+        if n and self.write:
+            save(self.product.name, self.data)
+        return n
+
     def admit(self, key, kind, item=None, prio=OTHER, label='other', workflow=None, run=FULL):
         """May the start ``key`` go now? Enqueues it (keeping its place), decides, and on
         admission moves it to ``started``. A hold prints its one line. ``run``: the run type
@@ -1091,14 +1106,29 @@ class Queue:
 
 
 def admit(product, key, kind, item=None, items=None, branch='', files=(), workflow=None,
-          source=None, out=print, inflight=None, queue=None):
-    """One start's question, for a caller with no :class:`Queue` of its own."""
+          source=None, out=print, inflight=None, queue=None, draft=False):
+    """One start's question, for a caller with no :class:`Queue` of its own. ``draft``: the
+    branch's PR is a draft — parked by its owner — so it never starts and leaves the line."""
     q = queue or Queue(product, source=source, out=out, inflight=inflight)
     if q.mode == 'off':
         return Decision(True, bypass=True)
+    if draft:
+        q.drop([key] + ([f'{k}:{branch}' for k in ('pr', 'trunk')] if branch else []))
+        return Decision(False, f'ci queue: {item or key} not started — its PR is a draft, '
+                               f'parked by its owner')
     prio, label = priority(item, items, branch, files, product, kind=kind)
     run = run_type(product, files) if kind == 'pr' else FULL
     return q.admit(key, kind, item=item, prio=prio, label=label, workflow=workflow, run=run)
+
+
+def forget(product, branch, queue=None, source=None, out=print):
+    """Take every start of ``branch`` (``pr:`` and ``trunk:``) out of the line: its PR is a
+    draft, parked by its owner, so nothing behind it waits on its runners. The number of entries
+    dropped; nothing for a product that is not queued. No ``gh`` call."""
+    q = queue or Queue(product, source=source, out=out)
+    if q.mode == 'off' or not branch:
+        return 0
+    return q.drop([f'{k}:{branch}' for k in ('pr', 'trunk')])
 
 
 #: the statuses of a run that has not reached a runner yet

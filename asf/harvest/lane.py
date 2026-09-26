@@ -1337,7 +1337,16 @@ class Lane:
         b = f['branch']
         return ci_queue.admit(self.product, f'{kind}:{b}', kind, item=f.get('item') or b,
                               items=self.items, branch=b, files=f.get('files') or (),
-                              queue=self.ci_queue).admitted
+                              queue=self.ci_queue,
+                              draft=bool((f.get('pr') or {}).get('draft'))).admitted
+
+    def ci_forget(self, f):
+        """A draft PR's branch leaves the CI start queue: parked by its owner, it never starts
+        and never holds the runners of the starts behind it."""
+        from asf import ci_queue
+        if self.ci_queue is None:
+            self.ci_queue = ci_queue.Queue(self.product, out=self.out)
+        ci_queue.forget(self.product, f['branch'], queue=self.ci_queue)
 
     # ---- writing ------------------------------------------------------------------------
 
@@ -1389,6 +1398,8 @@ class Lane:
         transition's side effect; the last record written, or None when nothing moved."""
         moved = None
         prev = f.get('prev') or {}
+        if (f.get('pr') or {}).get('draft'):
+            self.ci_forget(f)       # parked by its owner: never in the CI start queue's line
         if f.get('empty') and next_state(f.get('prev'), f) == (prev.get('state'),
                                                                   prev.get('reason', '')):
             if prev or f.get('ended'):  # a live session's fresh branch says nothing yet

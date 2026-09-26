@@ -1202,3 +1202,62 @@ class TestDemand(Base):
         self.assertEqual(sorted(bad), ['ci.queue.estimate.heavy.full',
                                        'ci.queue.estimate.heavy.huge',
                                        'ci.queue.estimate.light', 'ci.queue.light_paths'])
+
+
+class TestDraft(Base):
+    """A draft PR is parked by its owner: its branch never enters the line, never gets a start,
+    and is never set aside as demand ahead of the starts behind it."""
+
+    def test_a_draft_never_enters_the_line_nor_starts_and_asks_the_host_nothing(self):
+        p = product()
+        gh = FakeGh()
+        q = self.queue(p, gh)
+        d = ci_queue.admit(p, 'trunk:cloud/direct-F-0112', 'trunk', item='F-0112', items=ITEMS,
+                           branch='cloud/direct-F-0112', draft=True, queue=q)
+        self.assertFalse(d.admitted)
+        self.assertIn('draft', d.line)
+        self.assertEqual(ci_queue.load('p')['entries'], {})
+        self.assertEqual(ci_queue.load('p')['started'], [])
+        self.assertEqual(gh.calls, [])
+
+    def test_a_pr_turned_draft_leaves_the_line_and_holds_nothing_behind_it(self):
+        p = product()
+        self.assertFalse(self.admit(self.queue(p, FakeGh(busy={'h1'})), 'pr:feat/a',
+                                    'T-0341').admitted)          # Feature: 2 free, needs 3
+        self.assertFalse(self.admit(self.queue(p, FakeGh(), minutes=1), 'pr:feat/b',
+                                    'T-0500').admitted)          # 3 free, 3 set aside for a
+        # a's owner opened it as a draft: the lane forgets its branch
+        q = self.queue(p, FakeGh(), minutes=2)
+        self.assertEqual(ci_queue.forget(p, 'feat/a', queue=q), 1)
+        self.assertNotIn('pr:feat/a', ci_queue.load('p')['entries'])
+        self.assertTrue(self.admit(self.queue(p, FakeGh(), minutes=3), 'pr:feat/b',
+                                   'T-0500').admitted)
+        # asking again as a draft never re-enters it
+        q = self.queue(p, FakeGh(), minutes=4)
+        self.assertFalse(ci_queue.admit(p, 'pr:feat/a', 'pr', item='T-0341', items=ITEMS,
+                                        draft=True, queue=q).admitted)
+        self.assertEqual(ci_queue.load('p')['entries'], {})
+
+    def test_the_lane_never_asks_for_a_draft_and_forgets_it_each_pass(self):
+        import types
+        from unittest import mock
+        from asf.harvest import lane
+        self.t0 = ci_queue._now()           # the lane's own queue reads the real clock
+        p = product()
+        self.assertFalse(self.admit(self.queue(p, FakeGh(busy={'h1'})), 'pr:cloud/direct-F-0112',
+                                    'T-0341').admitted)
+        fake = types.SimpleNamespace(product=p, out=self.lines.append, ci_queue=None, items=ITEMS)
+        f = {'branch': 'cloud/direct-F-0112', 'item': 'F-0112',
+             'pr': {'number': 820, 'state': 'OPEN', 'draft': True}}
+        with mock.patch('subprocess.run', side_effect=NoGh()):
+            self.assertFalse(lane.Lane.ci_admits(fake, f, 'trunk'))
+            self.assertEqual(ci_queue.load('p')['entries'], {})
+        # the lane's pass forgets a draft branch's entries before it moves it
+        forgot = []
+        fake = types.SimpleNamespace(dry_run=False, repo=None, out=self.lines.append,
+                                     ci_forget=forgot.append)
+        prev = {'state': lane.PARKED, 'reason': 'PR #820 is a draft — parked by its owner',
+                'head': 'a' * 40}
+        lane.Lane.advance(fake, dict(f, prev=prev, head='a' * 40, mode='pr',
+                                     pr=dict(f['pr'], head='a' * 40)))
+        self.assertEqual([x['branch'] for x in forgot], ['cloud/direct-F-0112'])
