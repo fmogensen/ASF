@@ -7,7 +7,8 @@
 # A dev install (`pipx install -e <checkout>`) of the same package is replaced: one `asf` per machine.
 # The factory's own clocks run a checkout directly, so the command on PATH is the pinned release.
 #
-# 1. installs the factory as `asf` with pipx, pinned to <ref> (reinstalls when the ref moves)
+# 1. waits (bounded) for a running tick's lock, then installs the factory as `asf` with pipx,
+#    pinned to <ref> (reinstalls when the ref moves)
 # 2. checks ~/.ASF/config.yaml and ~/.ASF/products/<product>.yaml exist (the operator's config)
 # 3. installs the redaction hooks in the product's repos
 # 4. installs the product's clocks (the scheduler runs the pinned install, not a checkout)
@@ -35,6 +36,34 @@ if [ -z "$REF" ]; then
   [ -n "$REF" ] || die "cannot read main's head from $REPO_URL"
 fi
 say "product $PRODUCT, ref ${REF:0:12} from $REPO_URL"
+
+# 1a. the same lock a running tick holds for its whole run (asf.tick.tick.lock_path): `pipx
+# install --force` is not atomic, and replacing the package under a running tick tears it — half
+# its modules old, half new (B-0135, an ImportError mid-groom). Bounded: a stuck tick asks the
+# operator rather than hanging the install forever.
+INSTALL_LOCK_WAIT_S="${ASF_INSTALL_LOCK_WAIT_S:-600}"
+INSTALL_LOCK_POLL_S="${ASF_INSTALL_LOCK_POLL_S:-10}"
+TICK_LOCK="$ASF_HOME/state/$PRODUCT/tick.lock"
+mkdir -p "$(dirname "$TICK_LOCK")"
+python3 - "$TICK_LOCK" "$INSTALL_LOCK_WAIT_S" "$INSTALL_LOCK_POLL_S" <<'PY' || die "a running tick of $PRODUCT still held its lock after ${INSTALL_LOCK_WAIT_S}s — wait for it to finish, then rerun"
+import fcntl, sys, time
+path, wait_s, poll_s = sys.argv[1], float(sys.argv[2]), float(sys.argv[3])
+deadline = time.monotonic() + wait_s
+f = open(path, 'a')
+waited = False
+while True:
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(f, fcntl.LOCK_UN)
+        sys.exit(0)
+    except OSError:
+        if not waited:
+            print('install: a running tick holds the lock — waiting', file=sys.stderr)
+            waited = True
+        if time.monotonic() >= deadline:
+            sys.exit(1)
+        time.sleep(poll_s)
+PY
 
 # 1. the pinned install — pipx keeps it in its own venv; --force moves it to the new ref
 pipx install --force "git+${REPO_URL}@${REF}" >/dev/null
