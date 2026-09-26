@@ -104,7 +104,11 @@ class StagedCheckTests(unittest.TestCase):
         r = self.asf('check', '--staged')
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn('features/F-0001.md', r.stdout)
+        # every blocking finding is marked as such, and the exit is explained, not just implied
+        # by the absence of a "warning:" tag
+        self.assertIn(': blocking: bare decision reference', r.stdout)
         self.assertIn('1 pre-existing errors already on HEAD — not blocking', r.stdout)
+        self.assertIn('1 blocking error(s)', r.stdout)
         c = subprocess.run(['git', 'commit', '-qm', 'x'], cwd=self.root, env=self.env,
                            capture_output=True, text=True)
         self.assertNotEqual(c.returncode, 0, c.stdout + c.stderr)
@@ -251,12 +255,23 @@ class StagedCheckTests(unittest.TestCase):
         self.git(self.root, 'add', 'features/F-0001.md')
         self.assert_refused('blockedBy references missing item D-9999')
 
-    def test_a_backlink_left_stale_on_an_unstaged_card_is_refused(self):
+    def test_a_backlink_left_stale_on_an_unstaged_card_is_healed_not_refused(self):
+        # a card the commit never names — the target of a mention the staged card gained — is
+        # regenerated and swept into the commit by the hook itself, the same way index.json is;
+        # a stale Children/Backlinks section it produces is never a reason to refuse the commit
         feature = self.read('features/F-0001.md')
         self.write('features/F-0001.md', feature.replace(
             '# ---- machine ----', 'blockedBy:\n  - D-0001\n# ---- machine ----'))
         self.git(self.root, 'add', 'features/F-0001.md')
-        self.assert_refused('decisions/D-0001.md', '## Backlinks section is stale')
+        r = self.asf('check', '--staged')
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn('decisions/D-0001.md: regenerated from the staged cards and staged', r.stdout)
+        self.assertIn('F-0001', self.git(self.root, 'show', ':decisions/D-0001.md'))
+        c = subprocess.run(['git', 'commit', '-qm', 'x'], cwd=self.root, env=self.env,
+                           capture_output=True, text=True)
+        self.assertEqual(c.returncode, 0, c.stdout + c.stderr)
+        self.assertIn('F-0001', self.committed('decisions/D-0001.md'))
+        self.assertEqual(self.git(self.root, 'status', '--porcelain'), '')
 
     def test_a_new_duplicate_id_is_refused(self):
         write_item(self.root, 'F-0001', 'story', 'Same id', parent='F-0001')

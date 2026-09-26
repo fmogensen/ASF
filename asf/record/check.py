@@ -11,9 +11,9 @@ from asf.groom import shape
 from asf.init import ITEM_FOLDERS as LAYOUT_FOLDERS, STREAM_FOLDERS
 from asf.record import frontmatter, tree
 from asf.record.core import (
-    BARE_DECISION_RE, FOLDER_TO_TYPE, ID_RE, NO_PARENT_TYPES, PARENT_TYPES, as_list,
-    build_index_data, canonicalize, compute_derived, expected_body, is_open, load_items,
-    parse_sections, title_scrub, today, writes_intersect,
+    BARE_DECISION_RE, FOLDER_TO_TYPE, ID_RE, ITEM_FOLDERS as CARD_FOLDERS, NO_PARENT_TYPES,
+    PARENT_TYPES, as_list, build_index_data, canonicalize, compute_derived, expected_body,
+    is_open, load_items, parse_sections, title_scrub, today, writes_intersect,
 )
 from asf.record.index import entry_relpath
 from asf.redact import _run_git
@@ -402,11 +402,12 @@ def cmd_check_staged(root):
     the cards as the index holds them (``git show :<path>``, never the working tree) against the
     same check over ``HEAD``. An error the staged state has and ``HEAD`` has not refuses the
     commit, wherever it sits: in a staged card, or in one the staged change breaks (a deleted
-    parent or ``blockedBy`` target, a stale Children/Backlinks, a new duplicate id, an Active
-    ``writes:`` overlap). An ``index.json`` the staged change leaves stale is regenerated and
-    staged by the hook itself (:func:`stage_derived_index`), never a refusal. An error ``HEAD``
-    already carries is the record's standing debt: printed as a warning, never a reason to
-    refuse this commit."""
+    parent or ``blockedBy`` target, a new duplicate id, an Active ``writes:`` overlap).
+    ``index.json`` and any card's Children/Backlinks the staged change leaves stale — including a
+    card the commit never otherwise touches, such as the target of a mention a staged card gained
+    — are regenerated and staged by the hook itself (:func:`stage_derived`), never a refusal. An
+    error ``HEAD`` already carries is the record's standing debt: printed as a warning, never a
+    reason to refuse this commit."""
     found = committing_repo(root)
     if found is None:
         print('error: --staged needs the record to be a git checkout', file=sys.stderr)
@@ -426,46 +427,63 @@ def cmd_check_staged(root):
         tree.lay_out(repo, staged_dir, tree.record_paths(prefix))
         base = record_findings(os.path.join(head_dir, prefix), scrub, layout=False)
         now = record_findings(os.path.join(staged_dir, prefix), scrub, layout=False)
-        if now[2] - base[2]:  # the staged change leaves index.json stale: derive it, stage it
-            if stage_derived_index(repo, prefix, os.path.join(staged_dir, prefix)):
+        if now[2] - base[2]:  # the staged change leaves derived state stale: derive it, stage it
+            if stage_derived(repo, prefix, os.path.join(staged_dir, prefix), scrub):
                 now = record_findings(os.path.join(staged_dir, prefix), scrub, layout=False)
     return _report_staged(now, base, staged)
 
 
-def stage_derived_index(repo, prefix, staged_root):
-    """Regenerate ``index.json`` from the staged cards laid out at ``staged_root`` and stage it
-    in the commit's index (the ``GIT_INDEX_FILE`` git hands its hook) — as ``asf set`` refreshes
-    the index it commits: a hand edit is never refused for the derivation its own change implies.
-    The working-tree ``index.json`` is rewritten too when it held what was staged (no unstaged
-    hand edit of its own to keep). Only ``index.json``: a card error still refuses. True when
-    the index was staged."""
+def stage_derived(repo, prefix, staged_root, scrub=None):
+    """Regenerate every card's Children/Backlinks and ``index.json`` from the staged cards laid
+    out at ``staged_root``, and stage each rewritten path in the commit's index (the
+    ``GIT_INDEX_FILE`` git hands its hook) — as ``asf set`` refreshes what it commits: a hand
+    edit is never refused for the derivation its own change implies, and neither is a card left
+    with a stale Children/Backlinks section as a side effect of one the commit does touch (a new
+    mention, a new child) — the commit may never otherwise name that card at all. ``scrub`` must
+    be the same one :func:`record_findings` judges staleness with, or a rewrite here would still
+    read stale to it. The working tree is rewritten too for a path that held what was staged (no
+    unstaged hand edit of its own to keep). A card that fails to parse is left exactly as it
+    stands (:func:`asf.record.index.refresh` skips it). Returns the relpaths staged."""
     from asf.record.index import refresh
-    rel = prefix + 'index.json'
-    staged_index = os.path.join(staged_root, 'index.json')
-    if not os.path.isfile(staged_index):
-        return False  # a record without a staged index is never given one here
-    with open(staged_index, 'rb') as f:
-        before = f.read()
-    if 'index.json' not in refresh(staged_root, only=set()):
-        return False
-    blob = _run_git(repo, ['hash-object', '-w', '--', staged_index])
-    if blob.returncode != 0:
-        return False
-    sha = blob.stdout.strip()
-    if _run_git(repo, ['update-index', '--add', '--cacheinfo',
-                       f'100644,{sha},{rel}']).returncode != 0:
-        return False
-    work = os.path.join(repo, rel)
-    try:
-        with open(work, 'rb') as f:
-            on_disk = f.read()
-    except OSError:
-        on_disk = None
-    if on_disk == before:
-        with open(staged_index, 'rb') as src, open(work, 'wb') as dst:
-            dst.write(src.read())
-    print(f'{rel}: regenerated from the staged cards and staged')
-    return True
+    before = {}
+    for folder in CARD_FOLDERS:
+        d = os.path.join(staged_root, folder)
+        if not os.path.isdir(d):
+            continue
+        for name in os.listdir(d):
+            if name.endswith('.md'):
+                rel = f'{folder}/{name}'
+                with open(os.path.join(staged_root, rel), 'rb') as f:
+                    before[rel] = f.read()
+    index_path = os.path.join(staged_root, 'index.json')
+    if os.path.isfile(index_path):
+        with open(index_path, 'rb') as f:
+            before['index.json'] = f.read()
+
+    written = refresh(staged_root, scrub=scrub, create_index=True)
+    staged = []
+    for rel_in_root in written:
+        rel = prefix + rel_in_root
+        staged_path = os.path.join(staged_root, rel_in_root)
+        blob = _run_git(repo, ['hash-object', '-w', '--', staged_path])
+        if blob.returncode != 0:
+            continue
+        sha = blob.stdout.strip()
+        if _run_git(repo, ['update-index', '--add', '--cacheinfo',
+                           f'100644,{sha},{rel}']).returncode != 0:
+            continue
+        staged.append(rel)
+        work = os.path.join(repo, rel)
+        try:
+            with open(work, 'rb') as f:
+                on_disk = f.read()
+        except OSError:
+            on_disk = None
+        if on_disk == before.get(rel_in_root):
+            with open(staged_path, 'rb') as src, open(work, 'wb') as dst:
+                dst.write(src.read())
+        print(f'{rel}: regenerated from the staged cards and staged')
+    return staged
 
 
 def _report_staged(now, base, staged):
@@ -482,7 +500,7 @@ def _report_staged(now, base, staged):
             standing_keys[(path, msg)] -= 1
         (blocking if new else standing).append(f)
     for path, line, msg in blocking:
-        print(f"{path}:{line}: {msg}")
+        print(f"{path}:{line}: blocking: {msg}")
     for path, line, msg in sorted((w for w in warnings if w[0] in staged),
                                   key=lambda w: (w[0], w[1])):
         print(f"{path}:{line}: warning: {msg}")
@@ -490,6 +508,9 @@ def _report_staged(now, base, staged):
         print(f"{path}:{line}: warning: {msg}")
     if standing:
         print(f"{len(standing)} pre-existing errors already on HEAD — not blocking")
+    if blocking:
+        print(f"{len(blocking)} blocking error(s) — this commit is refused (not on HEAD, "
+              f"or worse than HEAD's)")
     return 1 if blocking else 0
 
 
