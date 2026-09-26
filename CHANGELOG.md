@@ -2,6 +2,27 @@
 
 One entry per released version, newest first.
 
+## v0.1.19 — 2026-09-26
+
+### Bugs fixed
+
+- B-0094 19% of sessions end 'not pushed': finished work is lost to a missing commit or push
+
+### In progress
+
+- F-0093 Model routing is argued from minutes-per-landing, and the pool gets a cheap tier
+
+### Improvements and hotfixes
+
+- fix(wave): an S1 fix passes the host load hold — one at a time, never past memory pressure
+- fix(upgrade): the floor drains for a pending install — bounded wait, no new harvest, a loud cap
+- test(upgrade): the drain test replaces the drain's own sleep, never time.sleep
+- fix(lane): a path-filtered required check is satisfied once its workflow completed beside a success
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.19"`
+
 ## v0.1.18 — 2026-09-26
 
 ### Bugs fixed
