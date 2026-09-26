@@ -2,6 +2,21 @@
 
 One entry per released version, newest first.
 
+## v0.1.33 — 2026-09-26
+
+### In progress
+
+- F-0035 Thin controller: every read loop moves to the tick, and a rule flags scriptable chores
+
+### Improvements and hotfixes
+
+- fix(ci_queue): backfill — an entry that fits beside the head's claim starts
+- fix(lane): a naming reword never costs a session
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.33"`
+
 ## v0.1.32 — 2026-09-26
 
 ### Features landed
