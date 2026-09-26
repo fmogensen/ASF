@@ -19,6 +19,10 @@ on work the host can now easily run. Where a 1-minute reading is available, the 
 only when both load1 and load15 are at/above the limit: a sustained load holds, a spike that has
 already ended does not. Without a 1-minute reading (``load1`` absent, e.g. the old 3-field
 ``$ASF_HOST_READING``), the guard falls back to load15 alone, exactly as before.
+
+An S1 Bug's fix session is the one row the LOAD half of this guard does not hold (the wave
+step's own rule, :mod:`asf.tick.step_wave`): :func:`load_only_hold` tells that case apart from a
+host over its memory/swap guard, which holds every row regardless of severity.
 """
 import os
 import re
@@ -47,9 +51,11 @@ def guards_from_config(cfg):
     return out
 
 
-def judge(reading, guards):
-    """``(held, why)``; ``why`` reads ``host pressure load 90/cores 12, swap 87%`` — or, with a
-    1-minute reading, ``host pressure load 34 (1m 32)/cores 10, swap 87%``."""
+def over_parts(reading, guards):
+    """``(over_load, over_mem)`` — whether this reading trips the load guard, and whether it
+    trips the memory/swap guard, each judged on its own (:func:`judge` ORs them together; the S1
+    load-hold bypass, :mod:`asf.tick.step_wave`, needs to tell the two apart: it may pass load
+    pressure, never memory pressure)."""
     r = reading or {}
     load, load1, cores = r.get('load15'), r.get('load1'), r.get('cores')
     swap = r.get('swap_pct')
@@ -57,7 +63,6 @@ def judge(reading, guards):
     # for hours (2026-09-25). Where the host reports memory pressure itself, that is the reading
     # the memory guard judges; swap is only the fallback.
     mem = r.get('mem_pct')
-    label = 'memory' if mem is not None else 'swap'
     if mem is not None:
         swap = mem
     over_load15 = (guards.get('load_per_core') is not None and load is not None and cores
@@ -65,9 +70,30 @@ def judge(reading, guards):
     # a spike that already ended leaves load15 high for up to 15 minutes after load1 has
     # dropped: only a sustained load — both averages over the limit — holds.
     over_load = over_load15 and (load1 is None or float(load1) >= guards['load_per_core'] * cores)
-    over_swap = (guards.get('swap_pct') is not None and swap is not None
-                 and float(swap) >= guards['swap_pct'])
-    if not (over_load or over_swap):
+    over_mem = (guards.get('swap_pct') is not None and swap is not None
+                and float(swap) >= guards['swap_pct'])
+    return over_load, over_mem
+
+
+def load_only_hold(reading, guards):
+    """Whether this reading holds on the LOAD guard alone — memory/swap is not over. The one
+    case the S1 load-hold bypass may pass: it never passes a host over its memory/swap guard."""
+    over_load, over_mem = over_parts(reading, guards)
+    return over_load and not over_mem
+
+
+def judge(reading, guards):
+    """``(held, why)``; ``why`` reads ``host pressure load 90/cores 12, swap 87%`` — or, with a
+    1-minute reading, ``host pressure load 34 (1m 32)/cores 10, swap 87%``."""
+    r = reading or {}
+    load, load1, cores = r.get('load15'), r.get('load1'), r.get('cores')
+    swap = r.get('swap_pct')
+    mem = r.get('mem_pct')
+    label = 'memory' if mem is not None else 'swap'
+    if mem is not None:
+        swap = mem
+    over_load, over_mem = over_parts(reading, guards)
+    if not (over_load or over_mem):
         return False, ''
     parts = []
     if load is not None and cores:

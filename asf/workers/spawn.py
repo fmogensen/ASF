@@ -22,7 +22,9 @@
    run) and its ``hooks_dir`` (:func:`asf.workers.githooks.ensure`), so every commit it makes
    carries an ``ASF-Session`` trailer (F-0076);
 5. one line in ``sessions.jsonl``: job, item, feature, kind, account, model, pid, worktree,
-   branch, started, session, product.
+   branch, started, session, product — plus ``host_load_bypass: true`` when the row carries it
+   (the wave step's S1 load-hold bypass, :mod:`asf.tick.step_wave`), so a later wave can see the
+   bypass is still live.
 """
 import os
 import re
@@ -460,6 +462,10 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
               'product': product.name, 'card_digest': getattr(row, 'card_digest', '') or ''}
     if setup_s is not None:
         record['setup_s'] = setup_s
+    if getattr(row, 'host_load_bypass', False):
+        # the S1 load-hold bypass (asf.tick.step_wave): at most one live at a time, across every
+        # product — the field a later wave's s1_bypass_live() reads off the live ledger
+        record['host_load_bypass'] = True
     record.update({k: v for k, v in (getattr(result, 'extra', None) or {}).items() if v is not None})
     # a launch line is a new run: the fold opens a run at every launch line, so the previous
     # run's terminal fields never reach this one (B-0041 — see asf.workers.lifecycle)

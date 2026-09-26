@@ -125,7 +125,7 @@ class Row:
 
     def __init__(self, job, item, state='', action='', title='', model='', kind=None,
                  severity=None, feature=None, lane=None, branch=None, test=None, add_dirs=(),
-                 card_digest='', cloud_ok=False):
+                 card_digest='', cloud_ok=False, host_load_bypass=False):
         self.job = job
         self.item = item
         self.state = state
@@ -146,6 +146,10 @@ class Row:
         self.card_digest = card_digest or ''
         #: the row may run in the cloud lane (``cloud-ok``; :func:`asf.workers.cloud.eligible`)
         self.cloud_ok = bool(cloud_ok)
+        #: this launch is the one S1 row passing the host guard's LOAD hold (the wave step's own
+        #: rule, :func:`asf.tick.step_wave.s1_bypass_live`) — carried onto the session ledger so
+        #: a later wave can see the bypass is still live.
+        self.host_load_bypass = bool(host_load_bypass)
 
     @property
     def is_fix(self):
@@ -161,7 +165,8 @@ class Row:
                    action=d.get('action', ''), title=d.get('title', ''), model=d.get('model', ''),
                    kind=d.get('kind'), severity=d.get('severity'), feature=d.get('feature'),
                    lane=d.get('lane'), branch=d.get('branch'), test=d.get('test'),
-                   cloud_ok=d.get('cloud_ok') or d.get('cloud-ok'))
+                   cloud_ok=d.get('cloud_ok') or d.get('cloud-ok'),
+                   host_load_bypass=d.get('host_load_bypass'))
 
     def __repr__(self):
         return f'Row({self.state} → {self.action} {self.item} {self.job})'
