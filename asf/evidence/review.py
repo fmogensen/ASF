@@ -168,6 +168,33 @@ def verdict_text(text):
     return m.group('v').strip().strip('`*_ ').lower() if m else ''
 
 
+#: The heading a review's C list sits under (``## C``, ``### C (blocking)``).
+C_HEADING_RE = re.compile(r'^#{2,4}\s*C\b[^\n]*$', re.M)
+#: A C item's own line: ``1.``, ``C1.``, ``- **C1**``, ``**C2**``, ``### C3`` — and its first
+#: repo path (``path:line`` or a backticked path) is what it is about.
+C_ITEM_RE = re.compile(r'^\s*(?:[-*]\s*)?(?:\*\*)?(?:#{3,4}\s*)?C?\d+(?:\*\*)?[.):]?\s+(?P<rest>.*)$')
+C_PATH_RE = re.compile(r'`?(?P<p>[\w.@-]*[\w@-]/?[\w./@-]*\.[A-Za-z0-9]+|\.[\w-]+/[\w./@-]+)'
+                       r'(?::\d[\d-]*)?`?')
+
+
+def c_items(body):
+    """The files a review's C list opens its items with, sorted and unique — the finding a
+    correction of this review answers. A C item carried over from the last round names the same
+    file (operator policy 2026-09-27: same C-item, same finding). ``[]`` for a review with no C
+    list, or none that names a file."""
+    m = C_HEADING_RE.search(body or '')
+    if not m:
+        return []
+    sect = body[m.end():]
+    end = re.search(r'^#{1,4}\s', sect, re.M)
+    out = set()
+    for line in (sect[:end.start()] if end else sect).splitlines():
+        item = C_ITEM_RE.match(line)
+        path = item and C_PATH_RE.search(item.group('rest'))
+        if path:
+            out.add(path.group('p'))
+    return sorted(out)
+
 def review_at(repo, conv, ref, item):
     """The newest review of ``item`` at ``ref`` (``origin/<branch>``) in ``repo``, for the lane:
     ``{round, verdict, text, head, path, body}`` — or None. The same reading as :func:`newest`."""

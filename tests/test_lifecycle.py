@@ -405,7 +405,10 @@ class StateMachineInvariants(unittest.TestCase):
         held = dict(run, rounds=1, correction={'kind': 'gate', 'text': 'FAIL: t', 'at': 't3'})
         self.assertEqual(str(lc.derive(held, lc.Evidence())), 'held(FAIL: t)')
         at_cap = dict(held, rounds=lc.ROUND_CAP)
-        self.assertEqual(lc.derive(at_cap, lc.Evidence()).name, lc.ADJUDICATE)
+        self.assertEqual(lc.derive(at_cap, lc.Evidence()).name, lc.HELD)  # mixed rounds: correct
+        same = dict(held, rounds=lc.ROUND_CAP,
+                    correction=dict(held['correction'], same=lc.ROUND_CAP))
+        self.assertEqual(lc.derive(same, lc.Evidence()).name, lc.ADJUDICATE)
         landed = dict(run, harvested='deadbeef')
         self.assertEqual(lc.derive(landed, lc.Evidence(worktree=True)).name, lc.LANDED)
         self.assertEqual(lc.derive(landed, lc.Evidence(worktree=False)).name, lc.REAPED)
@@ -449,7 +452,8 @@ class StateMachineInvariants(unittest.TestCase):
         The ruling's PR numbers (``#773``, ``#775``) come back too, for the WAITS ON merge row."""
         lines = [{'job': 'a', 'pid': 1, 'started': 't1', 'item': 'B-0001', 'branch': 'b',
                   'ended': 't2', 'end_reason': 'finished'},
-                 {'job': 'a', 'rounds': 3, 'correction': {'kind': 'review', 'text': 'x', 'at': 't3'}}]
+                 {'job': 'a', 'rounds': 3, 'correction': {'kind': 'review', 'text': 'x', 'at': 't3',
+                                                           'same': 3}}]
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         path = os.path.join(d, 's.jsonl')
@@ -691,31 +695,125 @@ class HoldInvariants(unittest.TestCase):
             for ln in lines:
                 f.write(json.dumps(ln) + '\n')
 
-    def test_rounds_climb_to_the_cap_then_adjudicate_then_flag(self):
-        # B-0048: the counter never passes the cap; the second hold at the cap flags the operator
-        run = {'job': 'a', 'item': 'B-0001', 'branch': 'fix/B-0001', 'pid': 1, 'started': 't'}
-        self.write(run)
+    def test_same_finding_climbs_to_the_cap_then_adjudicate_then_flag(self):
+        # B-0048: the rounds counter never passes the cap; the second hold at the cap flags the
+        # operator. The cap is counted on the SAME finding, each repeat answered by a session.
         for n in range(1, lc.ROUND_CAP + 1):
-            fields, line = lc.hold(self.path, run, 'gate', 'FAIL', f't{n}')
+            run = {'job': f'j{n}', 'item': 'B-0001', 'branch': 'fix/B-0001', 'pid': n,
+                   'started': f't{n}a', 'kind': 'coder' if n == 1 else 'correct'}
+            self.write(run)
+            fields, line = lc.hold(self.path, run, 'gate', 'FAIL', f't{n}b')
             self.assertEqual(fields['rounds'], n)
-            self.assertEqual(line, f'held fix/B-0001: FAIL — back to its session (round {n})')
-            self.write(dict(fields, job='a'))
-        fields, line = lc.hold(self.path, run, 'gate', 'FAIL', 'tx')
-        self.assertNotIn('rounds', fields)
+            self.assertEqual(fields['correction']['same'], n)
+            if n < lc.ROUND_CAP:
+                self.assertEqual(line, f'held fix/B-0001: FAIL — back to its session (round {n})')
+            self.write(dict(fields, job=f'j{n}'))
         self.assertTrue(fields['correction']['at_cap'])
         self.assertNotIn('operator_flagged', fields)
-        self.assertEqual(line, 'held fix/B-0001: FAIL — adjudicate pending')
-        self.write(dict(fields, job='a'))
-        fields, _ = lc.hold(self.path, run, 'gate', 'FAIL', 'ty')
-        self.assertEqual(fields.get('operator_flagged'), 1)
+        self.assertIn('adjudicate pending', line)
+        self.assertEqual(lc.derive(lc.latest(self.path)[f'j{lc.ROUND_CAP}'], lc.Evidence()).name,
+                         lc.ADJUDICATE)
+        for n, flagged in ((1, None), (2, 1)):  # the ruling's attempt fails; then it flags
+            run = {'job': f'adj{n}', 'item': 'B-0001', 'branch': 'fix/B-0001', 'pid': 9 + n,
+                   'started': f'tx{n}a', 'kind': 'adjudicate'}
+            self.write(run)
+            fields, line = lc.hold(self.path, run, 'gate', 'FAIL', f'tx{n}b')
+            self.write(dict(fields, job=f'adj{n}'))
+            self.assertNotIn('rounds', fields)
+            self.assertIn('adjudicate pending', line)
+            self.assertEqual(fields.get('operator_flagged'), flagged)
         self.assertEqual(lc.rounds_of(self.path, 'B-0001'), lc.ROUND_CAP)
-        self.assertEqual(lc.derive(lc.latest(self.path)['a'], lc.Evidence()).name, lc.ADJUDICATE)
 
     def test_rounds_count_over_every_job_of_the_item(self):
         self.write({'job': 'a', 'item': 'B-0001', 'branch': 'b', 'pid': 1, 'started': 't1', 'rounds': 2},
                    {'job': 'c', 'item': 'B-0001', 'branch': 'b', 'pid': 2, 'started': 't2'})
         fields, _ = lc.hold(self.path, lc.latest(self.path)['c'], 'conflict', 'x', 't3')
         self.assertEqual(fields['rounds'], 3)
+
+
+class SameFindingEscalation(unittest.TestCase):
+    """Operator policy 2026-09-27: an item goes to ADJUDICATE only after CORRECT failed twice on
+    the SAME finding (hold kind, review C-item, red check set) — a different finding resets it
+    to CORRECT. A product's last 24 h: 100 of 245 repair sessions were adjudicate, most of them
+    after three rounds of unrelated holds."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.path = os.path.join(self.d, 's.jsonl')
+        self.n = 0
+
+    def write(self, *lines):
+        with open(self.path, 'a') as f:
+            for ln in lines:
+                f.write(json.dumps(ln) + '\n')
+
+    def session(self, kind, hold_kind, text, finding=None):
+        """Launch a ``kind`` session on T-0001 and hold it; return the hold's fields."""
+        self.n += 1
+        run = {'job': f'{kind}-{self.n}', 'item': 'T-0001', 'branch': 'task/T-0001',
+               'pid': self.n, 'started': f't{self.n:02d}a', 'kind': kind}
+        self.write(run)
+        fields, _ = lc.hold(self.path, run, hold_kind, text, f't{self.n:02d}b', finding=finding)
+        self.write(dict(fields, job=run['job']))
+        return fields
+
+    def pending(self):
+        return lc.corrections(self.path)['T-0001']
+
+    RED_A = 'PR #7 checks red: gate, gate-tests\nlint: 3 finding(s)'
+    RED_B = 'PR #7 checks red: e2e'
+
+    def test_two_corrects_on_the_same_finding_is_adjudicate(self):
+        self.session('coder', 'gate', self.RED_A)
+        self.session('correct', 'gate', 'PR #9 checks red: gate-tests, gate\nlint: 1 finding(s)')
+        self.assertEqual(self.pending()['same'], 2)
+        fields = self.session('correct', 'gate', self.RED_A)
+        self.assertTrue(fields['correction']['at_cap'])
+        self.assertEqual(self.pending()['same'], lc.ROUND_CAP)
+
+    def test_a_correct_on_finding_a_then_b_is_still_correct(self):
+        self.session('coder', 'gate', self.RED_A)
+        self.session('correct', 'gate', self.RED_A)
+        fields = self.session('correct', 'gate', self.RED_B)  # a new red check: reset
+        self.assertNotIn('at_cap', fields['correction'])
+        self.assertEqual(self.pending()['same'], 1)
+        self.assertEqual(self.pending()['rounds'], 3)  # three rounds, mixed: still correct
+        fields = self.session('correct', 'rebase conflict', 'rebase conflicts in: a.ts. Rebase')
+        self.assertEqual(self.pending()['same'], 1)
+        self.assertNotIn('at_cap', fields['correction'])
+
+    def test_a_rehold_no_session_answered_counts_no_failure(self):
+        self.session('coder', 'gate', self.RED_A)
+        run = lc.latest(self.path)['coder-1']
+        fields, _ = lc.hold(self.path, run, 'gate', self.RED_A, 't01c')
+        self.assertEqual(fields['correction']['same'], 1)
+
+    def test_an_adjudicate_run_answers_nothing(self):
+        self.session('coder', 'gate', self.RED_A)
+        self.session('adjudicate', 'gate', self.RED_A)
+        self.assertEqual(self.pending()['same'], 1)
+
+    def test_a_review_c_item_carried_over_is_the_same_finding(self):
+        self.session('coder', 'review', 'r1 reads changes requested', finding=['a.ts', 'b.ts'])
+        self.session('correct', 'review', 'r2 reads changes requested', finding=['b.ts', 'c.ts'])
+        self.assertEqual(self.pending()['same'], 2)
+        self.session('correct', 'review', 'r3 reads changes requested', finding=['a.ts', 'd.ts'])
+        self.assertEqual(self.pending()['same'], 1)  # b.ts was fixed: a new finding
+
+    def test_mechanical_holds_never_count(self):
+        self.session('coder', 'gate', self.RED_A)
+        fields = self.session('correct', lc.NAMING, 'commits do not name T-0001')
+        self.assertNotIn('same', fields['correction'])
+
+    def test_the_finding_of_a_hold(self):
+        self.assertEqual(lc.finding_of('gate', self.RED_A), ['gate', 'gate-tests'])
+        self.assertEqual(lc.finding_of('rebase conflict',
+                                       "conflicted — rebase conflicts in: b/x.ts, a.md. Rebase"),
+                         ['a.md', 'b/x.ts'])
+        self.assertEqual(lc.finding_of('unpushed', 'not pushed: 1 unpushed commit(s) abc1234'),
+                         lc.finding_of('unpushed', 'not pushed: 7 unpushed commit(s) 9f9f9f9'))
+        self.assertEqual(lc.finding_of('review', 'x', ['b', 'a', 'b']), ['a', 'b'])
 
 
 class EmptyEndsTests(unittest.TestCase):

@@ -157,15 +157,16 @@ def is_eligible(record, path=None):
     return (record is not None and not lifecycle.is_live(record)
             and not lifecycle.landed(record) and record.get('harvest') != 'pr'
             # …except a branch already sent back for a correction that no session has answered
-            # and is still below the round cap: that one is owned by the round to come, not by
+            # and is still below the cap (the same finding held ROUND_CAP times in a row,
+            # lifecycle.repeats): that one is owned by the round to come, not by
             # the gate (D-0048). Re-gating an untouched branch every tick bumped its round with
             # no session having tried anything, and marched items to adjudication for nothing.
             # At the cap the item belongs to the adjudicate row, and the hold keeps printing.
             # ``path`` is what tells a correction apart from an *answered* correction: without
             # it a branch held once is skipped for ever, because the correction text never goes
             # away (my own B-0079 regression, found holding three green branches).
-            and not (lifecycle.pending_correction(record, path)
-                     and (record.get('rounds') or 0) < lifecycle.ROUND_CAP)
+            and not ((pending := lifecycle.pending_correction(record, path))
+                     and lifecycle.repeats(pending) < lifecycle.ROUND_CAP)
             # …and a branch whose item waits on an adjudication's instruction (a ``ruled``
             # correction): its session is to come — gating the untouched branch again would hold
             # it at the cap and bury the ruling under another adjudicate row (a product's F-0035)

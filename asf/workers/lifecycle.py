@@ -74,7 +74,9 @@ from asf.workers import cloudpid
 from asf.workers import headroom
 from asf.workers import runtime as runtime_mod
 
-#: Corrections a held branch gets before the feeder switches to an ADJUDICATE row.
+#: Holds on the SAME finding (:func:`finding_of`) — the first, then two corrections that failed
+#: it — before the feeder switches to an ADJUDICATE row. Operator policy 2026-09-27: a different
+#: finding resets the count to CORRECT; ``rounds`` still counts every hold, and decides nothing.
 ROUND_CAP = 3
 
 LAUNCHED = 'launched'
@@ -735,13 +737,14 @@ def attempts(path):
 
 
 def corrections(path):
-    """``{item: {kind, text, at, rounds, branch, ruled, settled, prs}}``: the newest pending correction
+    """``{item: {kind, text, at, rounds, same, branch, ruled, settled, prs}}``: the newest pending correction
     per item, with the branch of the run it was written on (a held spec branch is corrected on
     ``spec/<id>``, not on the item's task prefix). ``settled`` (B-0128): an adjudicate session has
     already ended over this same hold — the feeder shows a WAITS ON row, not another STALEMATE.
     ``prs`` (B-0128): the PR numbers that ruling names, for the same row to print. ``ruled``
     (:func:`ruled`): the correction is an adjudication's instruction — a session answers it
-    whatever the round."""
+    whatever the round. ``same``: the holds in a row on this finding (:func:`repeats`) — what the
+    ADJUDICATE row is decided on."""
     out = {}
     for item in {r.get('item') for rs in _folded(path).view.values() for r in rs if r.get('item')}:
         c = correction_of(path, item)
@@ -757,7 +760,7 @@ def correction_of(path, item):
     if not held:
         return None
     run, corr = max(held, key=lambda rc: rc[1].get('at') or '')
-    return dict(corr, rounds=rounds_of(path, item), branch=run.get('branch'),
+    return dict(corr, rounds=rounds_of(path, item), same=repeats(corr), branch=run.get('branch'),
                 ruled=ruled(path, item, corr),
                 settled=settled(path, item, corr.get('at')),
                 prs=settled_prs(path, item, corr.get('at')))
@@ -1413,7 +1416,7 @@ def derive(run, ev, cap=ROUND_CAP, path=None):
     rounds = run.get('rounds') or 0
     if corr:
         if corr.get('kind') not in MECHANICAL and (
-                corr.get('at_cap') or rounds >= cap and not ruled(path, run.get('item'), corr)):
+                corr.get('at_cap') or repeats(corr) >= cap and not ruled(path, run.get('item'), corr)):
             return State(ADJUDICATE, corr.get('text', ''), rounds)
         return State(HELD, corr.get('text', ''), rounds)
     if (run.get('correction') or {}).get('text'):
@@ -1575,11 +1578,14 @@ def loop_text(n, kind, sha, item):
             f'could not move the branch, fix that, then `asf unpark {item}`')
 
 
-def hold(path, run, kind, text, now, empty_cap=EMPTY_CAP, head=None):
+def hold(path, run, kind, text, now, empty_cap=EMPTY_CAP, head=None, finding=None):
     """``(fields, line)``: what to append to ``run`` to hold its branch and hand it back, and
-    the line to print. The rounds counter runs over every run of the item; at :data:`ROUND_CAP`
-    it stops climbing (B-0048) — the correction is marked ``at_cap`` so the feeder's ADJUDICATE
-    row takes it, and a second hold at the cap flags the operator instead of spawning another.
+    the line to print. The rounds counter runs over every run of the item and stops climbing at
+    :data:`ROUND_CAP` (B-0048). The escalation is counted on the hold's finding instead
+    (:func:`next_finding`; ``finding``: its keys when the caller knows them — a review's C list):
+    at :data:`ROUND_CAP` holds in a row on one finding the correction is marked ``at_cap`` so the
+    feeder's ADJUDICATE row takes it, and a second hold at the cap flags the operator instead of
+    spawning another. A different finding goes back to a correct session, whatever the rounds.
     An :data:`EMPTY` hold at ``empty_cap`` empty ends parks the item instead and spends no round,
     and so does the loop guard (:func:`same_head_loop`): the same kind handed the same head
     :data:`LOOP_CAP` times — ``head``, when the caller knows it, is where the branch sits now."""
@@ -1602,16 +1608,102 @@ def hold(path, run, kind, text, now, empty_cap=EMPTY_CAP, head=None):
     if kind in MECHANICAL:  # the lane's reword or rebuild failed: back to its session, no round
         fields = {'correction': {'kind': kind, 'text': text, 'at': now}}
         return fields, f'held {branch}: {head} — back to its session ({kind}, no round)'
+    keys, same = next_finding(path, run, kind, text, finding)
+    corr = {'kind': kind, 'text': text, 'at': now, 'finding': keys, 'same': same}
     prev = max([rounds_of(path, item), run.get('rounds') or 0])
-    if prev >= ROUND_CAP:
-        at_cap_before = any((r.get('correction') or {}).get('at_cap') for r in item_runs(path, item))
-        fields = {'correction': {'kind': kind, 'text': text, 'at': now, 'at_cap': True}}
-        if at_cap_before:
+    fields = {'correction': corr}
+    if prev < ROUND_CAP:  # B-0048: the counter never passes the cap
+        fields['rounds'] = prev + 1
+    if same >= ROUND_CAP:
+        # the first at_cap hold hands the item to adjudicate; the next is that ruling's own
+        # attempt failing; only a third — the adjudicate row cannot land either — flags
+        at_cap_before = sum(1 for r in item_runs(path, item)
+                            if (r.get('correction') or {}).get('at_cap'))
+        corr['at_cap'] = True
+        if at_cap_before >= 2:
             fields['operator_flagged'] = 1
-        return fields, f'held {branch}: {head} — adjudicate pending'
-    rounds = prev + 1
-    fields = {'rounds': rounds, 'correction': {'kind': kind, 'text': text, 'at': now}}
-    return fields, f'held {branch}: {head} — back to its session (round {rounds})'
+        return fields, (f'held {branch}: {head} — adjudicate pending ({kind}: the same finding '
+                        f'{same} times in a row)')
+    return fields, f'held {branch}: {head} — back to its session (round {min(prev + 1, ROUND_CAP)})'
+
+
+#: The hold kind a review's changes come back as (:mod:`asf.harvest.lane`): its finding is the C
+#: list's files, and a C-item carried over from the last round is the same finding.
+REVIEW = 'review'
+_RED_RE = re.compile(r'checks red:\s*([^\n]+)')
+_CONFLICT_RE = re.compile(r'conflicts in:\s*(.+?)(?:\.\s|\.?$)', re.M)
+_SHA_RE = re.compile(r'\b[0-9a-f]{7,40}\b')
+_NUM_RE = re.compile(r'\d+')
+
+
+def _names(raw, stop=(' — ', '. ')):
+    for s in stop:
+        raw = raw.split(s, 1)[0]
+    return sorted({n.strip(' .`') for n in raw.split(',') if n.strip(' .`')})
+
+
+def finding_of(kind, text, keys=None):
+    """What a hold of ``kind`` says is wrong, as a sorted list of keys: ``keys`` when the
+    caller knows them (a review's C-list files, :func:`asf.evidence.review.c_items`), else the red
+    check set (``checks red: gate, gate-tests``), else the conflicting files (``conflicts in:``),
+    else the hold's first line with its shas and numbers blanked — so a repeat of one finding
+    reads the same while a new one does not."""
+    if keys:
+        return sorted(set(keys))
+    t = text or ''
+    m = _RED_RE.search(t)
+    if m and _names(m.group(1)):
+        return _names(m.group(1))
+    m = _CONFLICT_RE.search(t)
+    if m and _names(m.group(1), stop=(' — ',)):
+        return _names(m.group(1), stop=(' — ',))
+    line = _NUM_RE.sub('<n>', _SHA_RE.sub('<sha>', t.split('\n', 1)[0]))
+    return [' '.join(line.split())[:200]]
+
+
+def same_finding(prev, kind, keys):
+    """The finding ``prev`` (an earlier correction) and a hold of ``kind`` on ``keys`` share —
+    the keys to carry on — or None when this is a new finding. The hold kind must match; a review
+    is the same finding while a C-item survives (the files in common), anything else when its
+    keys are equal."""
+    if not prev or prev.get('kind') != kind:
+        return None
+    before = prev.get('finding') or finding_of(prev.get('kind'), prev.get('text'))
+    if kind == REVIEW:
+        return sorted(set(before) & set(keys)) or None
+    return keys if sorted(before) == sorted(keys) else None
+
+
+def repeats(corr):
+    """How many holds in a row ``corr`` is on its one finding (1 for a new one). A correction
+    written before the count existed reads 1 — unless it was already marked ``at_cap``."""
+    corr = corr or {}
+    if corr.get('same'):
+        return int(corr['same'])
+    return ROUND_CAP if corr.get('at_cap') else 1
+
+
+def next_finding(path, run, kind, text, keys=None):
+    """``(keys, same)`` for a new hold on ``run``: its finding and how many holds in a row on
+    that finding it is. The item's latest counted correction is the one before; when this hold
+    names the same finding, the count climbs only when ``run`` is a later session than the one
+    that correction was written on — a session that tried and failed it — and not an adjudicate
+    one (it rules, it does not correct) nor one a spent window cut short. A re-hold of the same
+    run keeps the count; a new finding starts again at 1."""
+    keys = finding_of(kind, text, keys)
+    prev, prev_run = None, None
+    for r in item_runs(path, run.get('item')):
+        c = r.get('correction') or {}
+        if not c.get('text') or c.get('parked') or c.get('kind') in MECHANICAL + (FOOTPRINT,):
+            continue
+        if prev is None or (c.get('at') or '') >= (prev.get('at') or ''):
+            prev, prev_run = c, (r.get('job'), r.get('started'))
+    carried = same_finding(prev, kind, keys)
+    if carried is None:
+        return keys, 1
+    answered = ((run.get('job'), run.get('started')) != prev_run
+                and run.get('kind') != 'adjudicate' and not quota_exhausted(run))
+    return carried, repeats(prev) + (1 if answered else 0)
 
 
 #: A correction kind of its own: the branch needs paths outside its Task's ``writes:`` — the

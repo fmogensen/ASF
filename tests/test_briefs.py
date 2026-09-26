@@ -776,9 +776,9 @@ class KindModelGrantTest(unittest.TestCase):
 
     def test_the_default_labels(self):
         p = product()
-        for kind in ('spec', 'plan', 'adjudicate', 'review'):
+        for kind in ('spec', 'plan', 'review'):
             self.assertEqual(build_mod.model_for(p, kind), 'heavy', kind)
-        for kind in ('coder', 'fixer', 'rebase', 'close', 'fix-bug'):
+        for kind in ('coder', 'fixer', 'rebase', 'close', 'fix-bug', 'adjudicate'):
             self.assertEqual(build_mod.model_for(p, kind), 'light', kind)
 
     BUG = staticmethod(lambda sev: {'type': 'bug', 'severity': sev})
@@ -796,6 +796,15 @@ class KindModelGrantTest(unittest.TestCase):
             for sev in ('S2', 'S3'):
                 self.assertEqual(build_mod.model_for(p, kind, self.BUG(sev)), 'light', kind)
         self.assertEqual(build_mod.model_for(p, 'fix-bug', self.BUG('S1')), 'heavy')
+
+    def test_adjudicate_runs_light_unless_the_item_is_s1(self):
+        # operator policy 2026-09-27: 41% of a product's repair sessions were adjudicate, on
+        # heavy — a ruling over a held branch runs light; heavy stays for an S1 alone
+        p = product()
+        for item in (None, self.BUG('S2'), self.BUG('S3'), {'type': 'task'},
+                     {'type': 'story'}, {'type': 'feature'}, {'type': 'epic'}):
+            self.assertEqual(build_mod.model_for(p, 'adjudicate', item), 'light', item)
+        self.assertEqual(build_mod.model_for(p, 'adjudicate', self.BUG('S1')), 'heavy')
 
     def test_a_string_override_covers_every_class(self):
         p = product(conventions={'models': {'review': 'light', 'correct': 'heavy'}})
