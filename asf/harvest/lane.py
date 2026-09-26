@@ -61,8 +61,10 @@ Transitions (plan §2 plus the §9 overrides):
                                :data:`ORPHANS_PER_PASS` bound one pass
 - T13 BACK → PUSHED            the correcting session finished with a new head
 - T13n PUSHED/BACK → PUSHED    a naming refusal: the lane rewords the subjects itself
-                               (:meth:`Lane.repair_naming`) — no session, no round; only a
-                               reword it cannot push goes back to the session (no round)
+                               (:meth:`Lane.repair_naming`) — no session, no round, pushed
+                               ``--no-verify`` once every tree is identical; a live session,
+                               a second lease race or a refused push defers it (no hold); only
+                               a rewrite it cannot do goes back to the session (no round)
 - T13c any open → PUSHED       copies of trunk commits under a factory branch (and any merge
                                beside them; a merge alone is B-0056's hold): the lane rebuilds it as the trunk plus its own commits
                                (:meth:`Lane.drop_copies`), the old tip kept as
@@ -503,6 +505,51 @@ def rebuild_branch(repo, trunk, branch, transform, why=None):
              f'the same diff on origin/{trunk} — nothing pushed')
         return None, 0
     return parent, n
+
+
+#: :meth:`Lane.repair_naming`'s answer when the reword waits for a later pass — a live session
+#: holds the branch, the branch moved under two reads, or the push went nowhere (the remote, the
+#: network): no session is started and no hold is written
+DEFERRED = 'deferred'
+
+
+def trees_identical(repo, old, new):
+    """``(same, why)``: ``new`` is ``old`` with only its messages changed — the same parent under
+    the same number of commits, and the same tree on each, oldest first (``git rev-list
+    --first-parent``, walked back to where the two histories meet). ``why`` names the first
+    difference, else ''."""
+    base = H.sh(['git', 'merge-base', old, new], cwd=repo).stdout.strip()
+    if not base:
+        return False, f'{old[:9]} and {new[:9]} share no history'
+
+    def trees(tip):
+        r = H.sh(['git', 'log', '--first-parent', '--reverse', '--format=%T',
+                  f'{base}..{tip}'], cwd=repo)
+        return r.stdout.split() if r.returncode == 0 else None
+    a, b = trees(old), trees(new)
+    if a is None or b is None:
+        return False, 'the trees could not be read'
+    if len(a) != len(b):
+        return False, f'{len(a)} commits became {len(b)}'
+    for i, (x, y) in enumerate(zip(a, b), 1):
+        if x != y:
+            return False, f'commit {i} of {len(a)}: tree {x[:9]} became {y[:9]}'
+    return True, ''
+
+
+def push_cause(r):
+    """``(cause, text)`` for a refused push: ``'lease'`` (the branch moved since the read: a
+    stale lease, a non-fast-forward), ``'timeout'``, ``'remote'`` (the remote declined it) or
+    ``'other'`` — ``text`` the push's own words, hook output on stdout included."""
+    text = '\n'.join(s for s in (r.stderr, r.stdout) if s)
+    low = text.lower()
+    if r.returncode == gitpush.TIMED_OUT:
+        return 'timeout', push_why(text)
+    if 'stale info' in low or 'fetch first' in low or 'non-fast-forward' in low:
+        return 'lease', push_why(text)
+    if 'remote rejected' in low or 'declined' in low or 'protected' in low:
+        return 'remote', push_why(text)
+    return 'other', push_why(text)
 
 
 #: the correction kind of a trunk-history rebuild (:func:`drop_trunk_copies`) that conflicted:
@@ -1545,12 +1592,17 @@ class Lane:
         # a branch already held for naming (a session pending, none running): reworded here
         if prev.get('state') == BACK and not f.get('live') \
                 and (f.get('correction') or {}).get('kind') == lifecycle.NAMING:
-            moved = self.repair_naming(f) or moved
+            rec = self.repair_naming(f)
+            moved = rec if rec not in (None, DEFERRED) else moved
         for _ in range(MAX_STEPS):
             prev = f.get('prev')
             state, reason = next_state(prev, f)
             if state == BACK and reason == f'kind={lifecycle.NAMING}':
                 rec = self.repair_naming(f)
+                if rec == DEFERRED:
+                    if (f.get('refusal') or (None,))[0] == lifecycle.NAMING:
+                        break   # waits for a later pass: no session, no hold
+                    continue    # the subjects name the item now: read the branch on
                 if rec is not None:
                     moved = rec
                     continue
@@ -1720,15 +1772,31 @@ class Lane:
         return rec
 
     def repair_naming(self, f):
-        """A naming refusal, repaired by the lane with no session: the branch's subjects are
-        reworded (:func:`reword_branch`) and pushed from the ref checkout over a lease on the old
-        tip, a pending naming correction is cleared, and the branch is PUSHED at its new head —
-        the record, or None when it could not be (the caller holds it back to its session, as a
-        naming correction that spends no round). A branch under no factory prefix is never
-        reworded: it goes back to its session."""
-        b, item, old = f['branch'], f.get('item'), f.get('head')
-        if (f.get('refusal') or (None,))[0] != lifecycle.NAMING or not item or not old \
-                or not self.repo:
+        """A naming refusal, repaired by the lane with no session: the branch's tip is read from
+        origin, its subjects reworded (:func:`reword_branch`), every rewritten commit checked to
+        carry the same tree as the one it replaces (:func:`trees_identical`), and the result
+        pushed from the ref checkout over a lease on the tip read — with ``--no-verify``: the
+        push carries no content origin does not have, so the product's pre-push hook has nothing
+        to judge (2026-09-27: a product's redaction gate refused 437 such pushes in a day, each a
+        hold). A lease race is read again and retried once. A pending naming correction is
+        cleared and the branch is PUSHED at its new head — the record.
+
+        :data:`DEFERRED` — no session, no hold, the next pass tries again — while a live session
+        holds the branch, when it moved under both reads, or when the push went nowhere (the
+        remote declined it, it timed out). None — the caller holds it back to its session, as a
+        naming correction that spends no round, the cause in its text — only when the rewrite
+        cannot be done: a branch under no factory prefix (never rewritten), a branch that is not
+        its own straight line on the trunk, or a rewrite whose trees differ. One attempt a pass:
+        the answer is kept on ``f``."""
+        if 'naming_repair' in f:
+            return f['naming_repair']
+        f['naming_repair'] = res = self._repair_naming(f)
+        return res
+
+    def _repair_naming(self, f):
+        b, item = f['branch'], f.get('item')
+        if (f.get('refusal') or (None,))[0] != lifecycle.NAMING or not item \
+                or not f.get('head') or not self.repo:
             return None
         if not f.get('kind'):
             # a branch under no factory prefix (the registry knows it, B-0067) is someone else's
@@ -1736,6 +1804,10 @@ class Lane:
             self.out(f'reword {b} (naming): under no factory prefix — the lane does not rewrite '
                      f'it, back to its session')
             return None
+        if f.get('live'):
+            self.out(f'reword {b}: deferred — a live session holds the branch; the lane rewords '
+                     f'it once the session ends')
+            return DEFERRED
         if self.dry_run:
             self.out(f'DRY: would reword the subjects on {b} (naming) — no session')
             return None
@@ -1743,29 +1815,52 @@ class Lane:
         if self.guarded(b, f'reword {b} (naming)'):
             return None
         self.fresh_trunk()
-        why = []
-        new, n = reword_branch(self.repo, self.trunk, b, item, kind, why)
-        wt = self.ref_checkout() if new else ''
-        if not new or not wt:
-            self.out(f'reword {b} (naming) failed: '
-                     f'{(why[0] if why else "no commit to reword") if not new else self.ref_wt_error}'
-                     f' — back to its session')
-            if not new and why:
-                # the session gets the cause, not only the symptom: a product's T-0338 was told
-                # "reword them" 12 times while the lane knew its branch carried 22 copies of
-                # trunk commits — and reworded more trunk copies each time
-                f['refusal'] = (lifecycle.NAMING, f"{f['refusal'][1]}. The lane could not "
-                                                  f"because: {why[0]}")
-            return None
-        r = gitpush.push(['-q', f'--force-with-lease=refs/heads/{b}:{old}', 'origin',
-                          f'{new}:refs/heads/{b}'], wt,
-                         timeout=gitpush.push_timeout(self.conv), log=self.out)
-        if r.returncode != 0:
-            self.out(f'reword {b} (naming) push refused: {push_why(r.stderr or r.stdout)} — '
-                     f'back to its session')
-            return None
+        for attempt in (1, 2):
+            H.sh(['git', 'fetch', '-q', 'origin', f'+refs/heads/{b}:refs/remotes/origin/{b}'],
+                 cwd=self.repo)
+            old = H.sh(['git', 'rev-parse', '--verify', '-q', f'origin/{b}'],
+                       cwd=self.repo).stdout.strip()
+            if not old:
+                self.out(f'reword {b}: deferred — origin/{b} could not be read')
+                return DEFERRED
+            why = []
+            new, n = reword_branch(self.repo, self.trunk, b, item, kind, why)
+            if not new:
+                if not why:  # every subject names its item now: nothing left to reword
+                    f['head'] = old
+                    f['refusal'] = lane_refusal(self.repo, self.trunk, b, item, self.conv)
+                    if f['refusal'] is None or f['refusal'][0] != lifecycle.NAMING:
+                        self.out(f'reword {b}: every subject names {item} already at '
+                                 f'{old[:9]} — nothing to push')
+                        return DEFERRED
+                return self._naming_back(f, why[0] if why else 'no commit to reword')
+            same, differ = trees_identical(self.repo, old, new)
+            if not same:
+                return self._naming_back(f, f'the rewrite changed more than messages — trees '
+                                            f'differ ({differ}); nothing pushed')
+            wt = self.ref_checkout()
+            if not wt:
+                self.out(f'reword {b}: deferred — {self.ref_wt_error}')
+                return DEFERRED
+            r = gitpush.push(['-q', f'--force-with-lease=refs/heads/{b}:{old}', 'origin',
+                              f'{new}:refs/heads/{b}'], wt, refs_only=True,
+                             timeout=gitpush.push_timeout(self.conv), log=self.out)
+            if r.returncode == 0:
+                break
+            cause, text = push_cause(r)
+            if cause == 'lease' and attempt == 1:
+                self.out(f'reword {b}: the branch moved since {old[:9]} was read ({text}) — '
+                         f'read again and retried')
+                continue
+            if cause == 'lease':
+                self.out(f'reword {b}: deferred — the branch moved under both reads ({text}); '
+                         f'a writer is pushing it, the next pass reads it again')
+            else:
+                self.out(f'reword {b}: deferred — the push was refused ({cause}: {text}); '
+                         f'trees identical, no session — the next pass tries again')
+            return DEFERRED
         H.sh(['git', 'update-ref', f'refs/remotes/origin/{b}', new], cwd=self.repo)
-        self.out(f'reworded {n} subjects on {b} (naming) — no session')
+        self.out(f'reword {b}: {n} subjects, trees identical — pushed')
         f['head'] = new
         f['refusal'] = lane_refusal(self.repo, self.trunk, b, item, self.conv)
         if f.get('review'):
@@ -1777,6 +1872,14 @@ class Lane:
         if f.get('run') is None:
             self.write(f, self.record(f, PUSHED, 'adopted'))
         return self.set(f, PUSHED, f'reworded {n} subjects (naming)')
+
+    def _naming_back(self, f, why):
+        """The rewrite cannot be done by the lane: the one line, and the session's correction
+        carries the cause, not only the symptom (a product's T-0338 was told "reword them" 12
+        times while the lane knew its branch carried 22 copies of trunk commits). None."""
+        self.out(f'reword {f["branch"]}: {why} — back to its session (naming, no round)')
+        f['refusal'] = (lifecycle.NAMING, f"{f['refusal'][1]}. The lane could not because: {why}")
+        return None
 
     def drop_copies(self, f):
         """Trunk history under a factory branch — copies of trunk commits (``git cherry``

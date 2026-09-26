@@ -739,7 +739,7 @@ class ProductHarvestTests(unittest.TestCase):
         self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
         results, lines = self.harvest(self.product())
         self.assertEqual(results, {'fix/B-0001': 'landed'})
-        self.assertIn('reworded 1 subjects on fix/B-0001 (naming) — no session', lines)
+        self.assertIn('reword fix/B-0001: 1 subjects, trees identical — pushed', lines)
         self.assertFalse(any(l.startswith('held ') for l in lines), lines)
         subjects = sh(['git', 'log', '-2', '--format=%s', 'main'], cwd=self.origin).stdout
         self.assertEqual(subjects.splitlines(), ['fix(B-0001): tidy up', 'fix(B-0001): the change'])

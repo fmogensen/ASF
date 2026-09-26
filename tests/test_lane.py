@@ -1275,7 +1275,7 @@ class NamingRepair(LaneFixture):
         self.session('coder-t-0001', 'T-0001', self.B)
         lines = []
         lane.lane_pass(self.product(), self.state_dir, out=lines.append)
-        self.assertIn(f'reworded 2 subjects on {self.B} (naming) — no session', lines)
+        self.assertIn(f'reword {self.B}: 2 subjects, trees identical — pushed', lines)
         new = self.tip()
         self.assertNotEqual(new, old)
         self.assertEqual(self.log('%s', new).splitlines(),
@@ -1306,14 +1306,14 @@ class NamingRepair(LaneFixture):
         lines = []
         with mock.patch.object(lane, 'reword_branch', side_effect=racing):
             lane.lane_pass(self.product(), self.state_dir, out=lines.append)
-        self.assertEqual(self.log('%s', self.B).splitlines()[0], 'feat(T-0001): later')
-        self.assertTrue(any(l.startswith(f'reword {self.B} (naming) push refused') for l in lines),
+        # the lease refused the push over the writer's commit; the lane read it again and
+        # reworded the new tip — the writer's commit kept, no session
+        self.assertEqual(self.log('%s', self.B).splitlines(),
+                         ['feat(T-0001): later', 'task(T-0001): tidy up'])
+        self.assertTrue(any(l.startswith(f'reword {self.B}: the branch moved') for l in lines),
                         lines)
-        held = [l for l in lines if l.startswith(f'held {self.B}: commits do not name T-0001')]
-        self.assertTrue(held and held[0].endswith('(naming, no round)'), lines)
-        corr = lifecycle.corrections(self.sessions())['T-0001']
-        self.assertEqual((corr['kind'], corr['rounds']), (lifecycle.NAMING, 0))
-        self.assertEqual(self.lane_of(self.B)['reason'], 'kind=naming')
+        self.assertFalse(any(l.startswith('held ') for l in lines), lines)
+        self.assertEqual(lifecycle.corrections(self.sessions()), {})
 
     def test_a_branch_already_held_for_naming_is_reworded_and_its_correction_cleared(self):
         old = self.push_commits([('tidy up', {'a.txt': 'a\n'})])
@@ -1328,7 +1328,7 @@ class NamingRepair(LaneFixture):
         self.assertIn('T-0001', lifecycle.corrections(self.sessions()))
         lines = []
         lane.lane_pass(self.product(), self.state_dir, out=lines.append)
-        self.assertIn(f'reworded 1 subjects on {self.B} (naming) — no session', lines)
+        self.assertIn(f'reword {self.B}: 1 subjects, trees identical — pushed', lines)
         self.assertEqual(lifecycle.corrections(self.sessions()), {})
         self.assertEqual(self.lane_of(self.B)['state'], lane.GATE)
 
@@ -1444,6 +1444,172 @@ class SignoffRepair(LaneFixture):
         self.assertTrue(product.conventions.is_signoff_check('commits-signed'))
 
 
+class NamingRewordNeverCostsASession(LaneFixture):
+    """2026-09-27: a product's tick log carried 437 ``reword <b> (naming) push refused`` lines in a
+    day, every one the product's own pre-push hook (its redaction gate re-scans each rewritten
+    commit's diff: new shas, the same content origin already has) — and each sent the branch back
+    to a session. A message-only rewrite (same tree per commit, checked before the push) goes out
+    with ``--no-verify`` over a lease on the tip the lane read; a lease race is re-read and
+    retried once; a live session's branch waits; only a rewrite that cannot be done holds."""
+
+    B, AUTHOR = NamingRepair.B, NamingRepair.AUTHOR
+    tip, push_commits, log, sessions = (NamingRepair.tip, NamingRepair.push_commits,
+                                        NamingRepair.log, NamingRepair.sessions)
+
+    def setUp(self):
+        super().setUp()
+        self.lines = []
+
+    def naming(self, old, **kw):
+        f = {'branch': self.B, 'kind': 'code', 'item': 'T-0001', 'head': old,
+             'refusal': (lifecycle.NAMING, 'commits do not name T-0001'),
+             'prev': rec(lane.GATE, head=old), 'run': {'job': 'coder-t-0001'}}
+        f.update(kw)
+        return f
+
+    def runner(self):
+        return lane.Lane(self.product(), self.state_dir, out=self.lines.append)
+
+    def refusing_hook(self):
+        """The product's pre-push hook refuses everything — as a product's redaction gate refused
+        every rewritten commit whose content it had already let through."""
+        hook = os.path.join(self.repo, '.git', 'hooks', 'pre-push')
+        with open(hook, 'w', encoding='utf-8') as fh:
+            fh.write('#!/bin/sh\necho "redact: refused — 2 finding(s)"\nexit 1\n')
+        os.chmod(hook, 0o755)
+
+    def writer_pushes(self, subject, rel):
+        sh(['git', 'checkout', '-q', self.B], cwd=self.worker)
+        self.write(self.worker, rel, rel + '\n')
+        sh(['git', 'add', '-A'], cwd=self.worker)
+        sh(['git', 'commit', '-qm', subject], cwd=self.worker, env_=self.ident)
+        sh(['git', 'push', '-q', 'origin', self.B], cwd=self.worker)
+
+    def test_a_refusing_pre_push_hook_does_not_stop_a_message_only_reword(self):
+        self.refusing_hook()
+        old = self.push_commits([('tidy up', {'a.txt': 'a\n'}), ('fix: x', {'b.txt': 'b\n'})])
+        self.session('coder-t-0001', 'T-0001', self.B)
+        lane.lane_pass(self.product(), self.state_dir, out=self.lines.append)
+        self.assertIn(f'reword {self.B}: 2 subjects, trees identical — pushed', self.lines)
+        new = self.tip()
+        self.assertNotEqual(new, old)
+        self.assertEqual(self.log('%s', new).splitlines(),
+                         ['fix(T-0001): x', 'task(T-0001): tidy up'])
+        self.assertEqual(self.log('%T', new), self.log('%T', old))
+        self.assertFalse(any(l.startswith('held ') for l in self.lines), self.lines)
+        self.assertEqual(lifecycle.corrections(self.sessions()), {})
+
+    def test_the_hook_is_skipped_only_when_every_tree_is_identical(self):
+        self.refusing_hook()
+        old = self.push_commits([('tidy up', {'a.txt': 'a\n'})])
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        # a "reword" that changed content too: another tree under the rewritten commit
+        other = sh(['git', 'commit-tree', sh(['git', 'rev-parse', 'origin/main^{tree}'],
+                                              cwd=self.repo).stdout.strip(),
+                    '-p', 'origin/main', '-m', 'task(T-0001): tidy up'],
+                   cwd=self.repo, env_=self.ident).stdout.strip()
+        f = self.naming(old)
+        with mock.patch.object(lane, 'reword_branch', return_value=(other, 1)):
+            self.assertIsNone(self.runner().repair_naming(f))
+        self.assertEqual(self.tip(), old)
+        line = [l for l in self.lines if l.startswith(f'reword {self.B}:')]
+        self.assertTrue(line and 'trees differ' in line[0] and 'nothing pushed' in line[0],
+                        self.lines)
+        self.assertIn('The lane could not because:', f['refusal'][1])
+        self.assertIn('trees differ', f['refusal'][1])
+
+    def test_the_lease_is_on_the_tip_the_lane_read(self):
+        old = self.push_commits([('tidy up', {'a.txt': 'a\n'})])
+        self.writer_pushes('feat(T-0001): later', 'z.txt')  # the facts' head is behind origin
+        f = self.naming(old)
+        self.assertIsNotNone(self.runner().repair_naming(f))
+        self.assertEqual(self.log('%s', self.tip()).splitlines(),
+                         ['feat(T-0001): later', 'task(T-0001): tidy up'])
+        self.assertEqual(f['head'], self.tip())
+        self.assertIn(f'reword {self.B}: 1 subjects, trees identical — pushed', self.lines)
+
+    def test_a_lease_race_is_re_read_and_retried_once(self):
+        self.push_commits([('tidy up', {'a.txt': 'a\n'})])
+        self.session('coder-t-0001', 'T-0001', self.B)
+        real, calls = lane.reword_branch, []
+
+        def racing(*a, **kw):  # the writer pushes between the lane's read and its first push
+            out = real(*a, **kw)
+            calls.append(out)
+            if len(calls) == 1:
+                self.writer_pushes('feat(T-0001): later', 'z.txt')
+            return out
+        with mock.patch.object(lane, 'reword_branch', side_effect=racing):
+            lane.lane_pass(self.product(), self.state_dir, out=self.lines.append)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(self.log('%s', self.B).splitlines(),
+                         ['feat(T-0001): later', 'task(T-0001): tidy up'])
+        self.assertTrue(any(l.startswith(f'reword {self.B}: the branch moved') and 'retried' in l
+                            for l in self.lines), self.lines)
+        self.assertIn(f'reword {self.B}: 1 subjects, trees identical — pushed', self.lines)
+        self.assertFalse(any(l.startswith('held ') for l in self.lines), self.lines)
+        self.assertEqual(lifecycle.corrections(self.sessions()), {})
+
+    def test_a_second_lease_race_defers_with_no_session(self):
+        self.push_commits([('tidy up', {'a.txt': 'a\n'})])
+        self.session('coder-t-0001', 'T-0001', self.B)
+        real, calls = lane.reword_branch, []
+
+        def racing(*a, **kw):  # the writer pushes after every read
+            out = real(*a, **kw)
+            calls.append(out)
+            self.writer_pushes(f'feat(T-0001): later {len(calls)}', f'z{len(calls)}.txt')
+            return out
+        with mock.patch.object(lane, 'reword_branch', side_effect=racing):
+            lane.lane_pass(self.product(), self.state_dir, out=self.lines.append)
+        self.assertEqual(len(calls), 2)  # one retry, then the next pass
+        self.assertTrue(any(l.startswith(f'reword {self.B}: deferred') and 'moved' in l
+                            for l in self.lines), self.lines)
+        self.assertFalse(any(l.startswith('held ') for l in self.lines), self.lines)
+        self.assertEqual(lifecycle.corrections(self.sessions()), {})
+        self.assertNotEqual(self.lane_of(self.B).get('reason'), 'kind=naming')
+
+    def test_a_live_session_holding_the_branch_defers_the_reword(self):
+        old = self.push_commits([('tidy up', {'a.txt': 'a\n'})])
+        f = self.naming(old, live=True)
+        with mock.patch.object(lane, 'reword_branch') as rw:
+            self.assertEqual(self.runner().repair_naming(f), lane.DEFERRED)
+        rw.assert_not_called()
+        self.assertEqual(self.tip(), old)
+        self.assertTrue(any(l.startswith(f'reword {self.B}: deferred — a live session holds the '
+                                         f'branch') for l in self.lines), self.lines)
+        self.assertEqual(lifecycle.corrections(self.sessions()), {})
+
+    def test_a_deferred_reword_never_holds_in_the_pass(self):
+        old = self.push_commits([('tidy up', {'a.txt': 'a\n'})])
+        self.session('coder-t-0001', 'T-0001', self.B)
+        with mock.patch.object(lane.Lane, 'repair_naming', return_value=lane.DEFERRED) as rp:
+            lane.lane_pass(self.product(), self.state_dir, out=self.lines.append)
+        self.assertEqual(rp.call_count, 1)  # one attempt a pass, never two
+        self.assertFalse(any(l.startswith('held ') for l in self.lines), self.lines)
+        self.assertEqual(lifecycle.corrections(self.sessions()), {})
+        self.assertEqual(self.tip(), old)
+
+    def test_a_remote_refusal_defers_with_its_reason(self):
+        hook = os.path.join(self.origin, 'hooks', 'pre-receive')
+        old = self.push_commits([('tidy up', {'a.txt': 'a\n'})])
+        with open(hook, 'w', encoding='utf-8') as fh:
+            fh.write('#!/bin/sh\necho "protected branch hook declined" >&2\nexit 1\n')
+        os.chmod(hook, 0o755)
+        f = self.naming(old)
+        self.assertEqual(self.runner().repair_naming(f), lane.DEFERRED)
+        self.assertEqual(self.tip(), old)
+        line = [l for l in self.lines if l.startswith(f'reword {self.B}: deferred')]
+        self.assertTrue(line and 'protected branch hook declined' in line[0], self.lines)
+
+    def test_a_branch_under_no_factory_prefix_still_goes_back_to_its_session(self):
+        old = self.push_commits([('tidy up', {'a.txt': 'a\n'})])
+        f = self.naming(old, kind=None)
+        self.assertIsNone(self.runner().repair_naming(f))
+        self.assertEqual(self.tip(), old)
+        self.assertTrue(any('under no factory prefix' in l for l in self.lines), self.lines)
+
+
 class TrunkCommitsNeverReworded(LaneFixture):
     """2026-09-26: the naming repair reworded trunk commits sitting under a factory branch (the
     branch rebased onto a trunk its tracking ref did not know yet) into ``task(<item>): …`` copies
@@ -1486,7 +1652,7 @@ class TrunkCommitsNeverReworded(LaneFixture):
         self.assertNotEqual(stale, trunk)  # the bug's precondition
         ln = lane.Lane(self.product(), self.state_dir, out=self.lines.append)
         self.assertIsNotNone(ln.repair_naming(self.naming(old)))
-        self.assertIn(f'reworded 1 subjects on {self.B} (naming) — no session', self.lines)
+        self.assertIn(f'reword {self.B}: 1 subjects, trees identical — pushed', self.lines)
         new = self.tip()
         self.assertEqual(sh(['git', 'log', '--format=%s', f'main..{new}'],
                             cwd=self.origin).stdout.splitlines(), ['task(T-0001): tidy up'])
