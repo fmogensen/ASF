@@ -1,16 +1,24 @@
 """asf.workers.host — whether this host has room for one more session: a policy, not a guess.
 
-The READ is a probe: ``probe().read() -> {'load15', 'cores', 'swap_pct'}`` — the 15-minute load
-average (``os.getloadavg``), the core count, and swap in use as a percent (macOS ``sysctl -n
-vm.swapusage``; Linux ``/proc/meminfo``). A value the probe cannot read is ``None``, and ``None``
-never holds anything: an unreadable host is not a loaded one. ``$ASF_HOST_READING`` (``"<load15>
-<cores> <swap_pct>"``) stands in for the host — the suite's quiet host, or an operator asking
-what the tick would do at a given load.
+The READ is a probe: ``probe().read() -> {'load15', 'load1', 'cores', 'swap_pct'}`` — the
+15-minute and 1-minute load averages (``os.getloadavg``), the core count, and swap in use as a
+percent (macOS ``sysctl -n vm.swapusage``; Linux ``/proc/meminfo``). A value the probe cannot
+read is ``None``, and ``None`` never holds anything: an unreadable host is not a loaded one.
+``$ASF_HOST_READING`` (``"<load15> <cores> <swap_pct>"``, or with a 4th field ``"<load15>
+<cores> <swap_pct> <load1>"``) stands in for the host — the suite's quiet host, or an operator
+asking what the tick would do at a given load.
 
-The GUARD is two thresholds from ``config.yaml host_guards``: ``load_per_core`` (the 15-minute
-load over the core count) and ``swap_pct``. At or above either, the tick starts no new session;
-running sessions are never touched. Defaults (the key absent): 2.0 per core, 85 % swap. A value
-of 0 turns that one guard off.
+The GUARD is two thresholds from ``config.yaml host_guards``: ``load_per_core`` (the load over
+the core count) and ``swap_pct``. At or above either, the tick starts no new session; running
+sessions are never touched. Defaults (the key absent): 2.0 per core, 85 % swap. A value of 0
+turns that one guard off.
+
+The load guard judges the 15-minute average, but a spike that already ended leaves load15
+elevated for up to 15 minutes after load1 has dropped back down — every product would sit idle
+on work the host can now easily run. Where a 1-minute reading is available, the load guard holds
+only when both load1 and load15 are at/above the limit: a sustained load holds, a spike that has
+already ended does not. Without a 1-minute reading (``load1`` absent, e.g. the old 3-field
+``$ASF_HOST_READING``), the guard falls back to load15 alone, exactly as before.
 """
 import os
 import re
@@ -40,9 +48,11 @@ def guards_from_config(cfg):
 
 
 def judge(reading, guards):
-    """``(held, why)``; ``why`` reads ``host pressure load 90/cores 12, swap 87%``."""
+    """``(held, why)``; ``why`` reads ``host pressure load 90/cores 12, swap 87%`` — or, with a
+    1-minute reading, ``host pressure load 34 (1m 32)/cores 10, swap 87%``."""
     r = reading or {}
-    load, cores, swap = r.get('load15'), r.get('cores'), r.get('swap_pct')
+    load, load1, cores = r.get('load15'), r.get('load1'), r.get('cores')
+    swap = r.get('swap_pct')
     # macOS never gives swap back once used: 90 % swap with 69 % of memory free held every wave
     # for hours (2026-09-25). Where the host reports memory pressure itself, that is the reading
     # the memory guard judges; swap is only the fallback.
@@ -50,15 +60,21 @@ def judge(reading, guards):
     label = 'memory' if mem is not None else 'swap'
     if mem is not None:
         swap = mem
-    over_load = (guards.get('load_per_core') is not None and load is not None and cores
-                 and float(load) >= guards['load_per_core'] * cores)
+    over_load15 = (guards.get('load_per_core') is not None and load is not None and cores
+                   and float(load) >= guards['load_per_core'] * cores)
+    # a spike that already ended leaves load15 high for up to 15 minutes after load1 has
+    # dropped: only a sustained load — both averages over the limit — holds.
+    over_load = over_load15 and (load1 is None or float(load1) >= guards['load_per_core'] * cores)
     over_swap = (guards.get('swap_pct') is not None and swap is not None
                  and float(swap) >= guards['swap_pct'])
     if not (over_load or over_swap):
         return False, ''
     parts = []
     if load is not None and cores:
-        parts.append(f'load {float(load):.0f}/cores {cores}')
+        if load1 is not None:
+            parts.append(f'load {float(load):.0f} (1m {float(load1):.0f})/cores {cores}')
+        else:
+            parts.append(f'load {float(load):.0f}/cores {cores}')
     if swap is not None:
         parts.append(f'{label} {float(swap):.0f}%')
     return True, 'host pressure ' + ', '.join(parts)
@@ -94,11 +110,11 @@ class SystemProbe:
 
     def read(self):
         try:
-            load = os.getloadavg()[2]
+            load1, _load5, load15 = os.getloadavg()
         except (OSError, AttributeError):
-            load = None
-        return {'load15': load, 'cores': os.cpu_count(), 'swap_pct': self._swap(),
-                'mem_pct': self._memory()}
+            load1 = load15 = None
+        return {'load15': load15, 'load1': load1, 'cores': os.cpu_count(),
+                'swap_pct': self._swap(), 'mem_pct': self._memory()}
 
     @staticmethod
     def _memory():
@@ -130,19 +146,21 @@ class SystemProbe:
 class FixedProbe:
     """One reading, whatever the host says (``$ASF_HOST_READING``, or a test)."""
 
-    def __init__(self, load15=None, cores=None, swap_pct=None):
-        self.reading = {'load15': load15, 'cores': cores, 'swap_pct': swap_pct}
+    def __init__(self, load15=None, cores=None, swap_pct=None, load1=None):
+        self.reading = {'load15': load15, 'cores': cores, 'swap_pct': swap_pct, 'load1': load1}
 
     def read(self):
         return dict(self.reading)
 
 
 def probe():
-    """``$ASF_HOST_READING`` (``"<load15> <cores> <swap_pct>"``) when set, else the host."""
+    """``$ASF_HOST_READING`` (``"<load15> <cores> <swap_pct>"``, or with a 4th field, ``"<load15>
+    <cores> <swap_pct> <load1>"``) when set, else the host."""
     fixed = os.environ.get(READING_ENV, '').split()
-    if len(fixed) == 3:
+    if len(fixed) in (3, 4):
         try:
-            return FixedProbe(float(fixed[0]), int(fixed[1]), float(fixed[2]))
+            load1 = float(fixed[3]) if len(fixed) == 4 else None
+            return FixedProbe(float(fixed[0]), int(fixed[1]), float(fixed[2]), load1)
         except ValueError:
             pass
     return SystemProbe()
