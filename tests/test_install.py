@@ -1552,7 +1552,13 @@ class InstallScriptTest(unittest.TestCase):
                       r.stderr)
         self.assertIn('install: NEEDS OPERATOR: clock(s) still not loaded after retrying the '
                       'bootstrap: asf.demo.record-health-wave-prs-harvest', r.stderr)
-        self.assertIn('/plugin install asf@asf', r.stdout)  # step 5 still ran
+        self.assertIn('/plugin install asf@asf', r.stdout)  # step 6 still ran
+
+    def test_step_6_offers_the_console_permissions_and_writes_nothing(self):
+        r, calls = self._run(hooks_rc=0)
+        self.assertIn('console-permissions: allow Bash(asf:*)', r.stdout)
+        self.assertIn('run one to write it: asf console-permissions install --product demo '
+                      '--scope user|repo', r.stdout)
 
 
 if __name__ == '__main__':
