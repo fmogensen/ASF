@@ -1108,6 +1108,87 @@ class RefPushes(LaneFixture):
         self.assertNotIn('worker/free-plan-t1', self.heads())
         self.assertNotIn('delete', self.lane_of('worker/free-plan-t1'))
 
+
+class UnparkResetsLoopGuard(unittest.TestCase):
+    """A product's T-0338, 2026-09-26 17:28: ``asf unpark`` cleared a copies park and the very
+    next tick parked it again — the loop guard recounted the three adjudicate launches from
+    before the unpark, and a copies hold routes to a correct session, never adjudicate. The
+    guard counts only launches after the item's latest unpark, of the kind the hold routes to."""
+
+    H = 'e6f42c14b' + 'e' * 31
+    B = 'cloud/T-0338'
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.path = os.path.join(self.d, 'sessions.jsonl')
+
+    def write(self, *lines):
+        with open(self.path, 'a', encoding='utf-8') as f:
+            for ln in lines:
+                f.write(json.dumps(ln) + '\n')
+
+    def launch(self, n, kind, minute):
+        job = f'{kind}-t-0338'
+        self.write({'job': job, 'item': 'T-0338', 'branch': self.B, 'kind': kind, 'pid': n,
+                    'started': f'2026-09-26T{minute}:00Z', 'launch_head': self.H},
+                   {'job': job, 'ended': f'2026-09-26T{minute}:30Z',
+                    'end_reason': 'failed: not pushed: 0 uncommitted file(s), 1 unpushed commit(s)'})
+        return lifecycle.latest(self.path)[job]
+
+    def copies_hold(self, run):
+        fields, line = lifecycle.hold(self.path, run, lifecycle.COPIES,
+                                      'trunk history under the branch', '2026-09-26T18:00:00Z',
+                                      head=self.H)
+        self.write(dict(fields, job=run['job']))
+        return fields['correction'], line
+
+    def parked_then_unparked(self):
+        """Three adjudicate launches on one head, parked, then ``asf unpark`` at 17:28."""
+        for n, minute in enumerate(('15:00', '16:00', '17:00'), 1):
+            run = self.launch(n, 'adjudicate', minute)
+        self.write({'job': run['job'], 'correction': {'kind': lifecycle.COPIES, 'text': 'x',
+                    'at': '2026-09-26T17:10:00Z', 'parked': True, 'reason': 'loop'},
+                    'operator_flagged': 1})
+        self.write({'job': run['job'], 'correction': None, 'unparked': '2026-09-26T17:28:00Z',
+                    'unpark_why': 'fix'})
+        return lifecycle.latest(self.path)[run['job']]
+
+    def test_unpark_then_the_same_head_is_not_reparked_and_a_correct_row_follows(self):
+        run = self.parked_then_unparked()
+        corr, line = self.copies_hold(run)
+        self.assertNotIn('parked', corr, line)
+        self.assertTrue(line.endswith('(copies, no round)'), line)
+        items = {'T-0338': {'id': 'T-0338', 'type': 'task', 'state': 'Active'}}
+        product = env.Product('p', {'conventions': {}})
+        rows, _ = feeder_rows.correction_rows(items, product, set(),
+                                              lifecycle.corrections(self.path))
+        self.assertEqual([(r.item_id, r.kind) for r in rows],
+                         [('T-0338', feeder_rows.FIX_CORRECT)])
+        self.assertTrue(rows[0].launches)
+
+    def test_adjudicate_launches_never_park_a_copies_hold(self):
+        for n, minute in enumerate(('15:00', '16:00', '17:00'), 1):
+            run = self.launch(n, 'adjudicate', minute)
+        corr, line = self.copies_hold(run)
+        self.assertNotIn('parked', corr, line)
+
+    def test_three_correct_launches_after_the_unpark_on_an_unmoved_head_park_again(self):
+        self.parked_then_unparked()
+        for n, minute in enumerate(('17:40', '17:50', '17:55'), 4):
+            run = self.launch(n, 'correct', minute)
+        corr, line = self.copies_hold(run)
+        self.assertIs(corr['parked'], True)
+        self.assertIn('correct launched 3 times on e6f42c14b', corr['reason'])
+        self.assertTrue(line.startswith(f'parked {self.B}: '), line)
+
+    def test_launches_before_the_unpark_never_count_for_any_hold(self):
+        run = self.parked_then_unparked()
+        fields, _ = lifecycle.hold(self.path, run, 'review', 'x', '2026-09-26T18:00:00Z',
+                                   head=self.H)
+        self.assertNotIn('parked', fields['correction'])
+
+
 class NamingRepair(LaneFixture):
     """A branch whose subjects do not name its item is reworded by the lane itself — no session,
     no round, never a STALEMATE → ADJUDICATE row; a reword it cannot push goes back to the

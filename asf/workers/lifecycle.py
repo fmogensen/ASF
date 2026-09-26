@@ -1456,16 +1456,28 @@ def park_text(n):
 LOOP_CAP = 3
 
 
-def same_head_loop(path, run, head=None, cap=LOOP_CAP):
+#: The session kind a mechanical hold routes to (the feeder's FIX → CORRECT row): it never
+#: reaches adjudicate, so launches of another kind say nothing about whether it loops.
+CORRECT = 'correct'
+
+
+def same_head_loop(path, run, head=None, cap=LOOP_CAP, kind=None):
     """The sha ``run``'s item is looping on, or None: its last ``cap`` runs (a spent window's
-    excepted) are all of ``run``'s kind and were all launched on one head (spawn's
-    ``launch_head``) — so none of the first ``cap - 1`` added a commit — and the branch still
-    sits on it when ``head`` is known (the last one added none either). A product, 2026-09-26:
-    ``adjudicate-b-1377`` ×14 and ``correct-t-0338`` ×12, every one on a head nothing moved."""
-    item, kind = (run or {}).get('item'), (run or {}).get('kind')
+    excepted) are all of ``kind`` — the kind the hold routes to, ``run``'s own when not given —
+    and were all launched on one head (spawn's ``launch_head``) — so none of the first
+    ``cap - 1`` added a commit — and the branch still sits on it when ``head`` is known (the
+    last one added none either). A product, 2026-09-26: ``adjudicate-b-1377`` ×14 and
+    ``correct-t-0338`` ×12, every one on a head nothing moved. Only runs started after the
+    item's latest ``asf unpark`` (its ``unparked`` stamp) count: an unpark releases the item,
+    and recounting the launches it released re-parked T-0338 on the very next tick."""
+    item = (run or {}).get('item')
+    kind = kind or (run or {}).get('kind')
     if not item or not kind or not path:
         return None
-    rs = sorted((r for r in item_runs(path, item) if not quota_exhausted(r)),
+    all_runs = item_runs(path, item)
+    since = max((r.get('unparked') or '' for r in all_runs), default='')
+    rs = sorted((r for r in all_runs if not quota_exhausted(r)
+                 and (r.get('started') or '') > since),
                 key=lambda r: r.get('started') or '')[-cap:]
     heads = {r.get('launch_head') or '' for r in rs}
     if len(rs) < cap or len(heads) != 1 or '' in heads \
@@ -1493,10 +1505,11 @@ def hold(path, run, kind, text, now, empty_cap=EMPTY_CAP, head=None):
     :data:`LOOP_CAP` times — ``head``, when the caller knows it, is where the branch sits now."""
     item = run.get('item')
     branch = run.get('branch') or run.get('job')
-    loop = same_head_loop(path, run, head)
+    routes_to = CORRECT if kind in MECHANICAL else run.get('kind')
+    loop = same_head_loop(path, run, head, kind=routes_to)
     head = (text or '').split('\n', 1)[0]  # the line is one line; the correction keeps it all
     if loop:
-        reason = loop_text(LOOP_CAP, run.get('kind'), loop, item)
+        reason = loop_text(LOOP_CAP, routes_to, loop, item)
         fields = {'correction': {'kind': kind, 'text': text, 'at': now, 'parked': True,
                                  'reason': reason, 'loop_head': loop},
                   'operator_flagged': 1}
