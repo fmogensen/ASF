@@ -563,7 +563,7 @@ def _blank(product, env):
     return {'env': env, 'mode': mode(product, env), 'workflow': workflow(product, env),
             'ci': ci_workflow(product), 'deployed': None, 'prod': None, 'running': None,
             'failed': None, 'failed_how': None, 'candidate': None, 'main': None, 'behind': None, 'age': None, 'at': None,
-            'error': None, 'why': None, 'rule': None, 'required': _required_label(product, env),
+            'error': None, 'why': None, 'rule': None, 'ci_running': None, 'required': _required_label(product, env),
             'paths': paths(product, env), 'relevant': None,
             'reader': reader(product, env)}
 
@@ -643,6 +643,9 @@ def facts(product, sh=_sh, now=None, env='prod', _ci=None):
             return _done(f)
     else:
         pick, rule = _pick(product, env, ci, sh)
+    tip = ci[0] if ci else {}
+    if tip.get('status') != 'completed' and tip.get('headSha') not in (None, pick):
+        f['ci_running'] = (tip.get('databaseId'), tip.get('headSha'))  # its verdict is pending
     if pick and pick != f['deployed'] and _ahead(product, f['deployed'], pick, sh):
         f['candidate'], f['rule'] = pick, rule
         bad = next((r for r in runs if r.get('headSha') == pick
@@ -731,7 +734,12 @@ def decide(product, f, env=None):
         on = f.get('required') or ''
         green = (f"no {f['ci']} run on {trunk} green{on}" if on
                  else f"no green {f['ci']} run on {trunk}")
-        return False, f"{head} {lag} — {green} newer than {env}; {env} waits on a green {trunk}"
+        pending = ''
+        if f.get('ci_running'):
+            rid, sha = f['ci_running']
+            pending = f"; {f['ci']} run {rid} for {_s(sha)} still running"
+        return False, (f"{head} {lag} — {green} newer than {env}{pending};"
+                       f" {env} waits on a green {trunk}")
     why = f"; {f['rule']}" if f.get('rule') else ''
     held = f.get('mode') != 'auto' or not wf
     # a manual environment is held: its line leads with that, and never promises a dispatch

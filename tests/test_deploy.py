@@ -696,6 +696,63 @@ class SkippedNeverGreen(unittest.TestCase):
         self.assertEqual(deploy.facts(self._p(), sh=sh)['candidate'], GREEN)
 
 
+class TickAndViewAgree(unittest.TestCase):
+    """2026-09-26: a product's status row promised "the next tick dispatches deploy-prod.yml for
+    green `7524d7263`" while three tick logs said "no ci.yml run on main green". Both read
+    :func:`deploy.facts` and :func:`deploy.decide`; the ticks ran before the tip's CI run
+    completed. A run whose level conclusion is ``failure`` from a non-required job is green on
+    its required jobs; the view and the tick say the same thing about it."""
+    REQ = ['gate', 'gate-tests', 'm6-e2e']
+
+    def _p(self):
+        return _modes(prod='auto', prod_extra={'required_jobs': self.REQ})
+
+    def _jobs(self, **bad):
+        return [_job(n, bad.get(n.replace('-', '_'), 'success')) for n in self.REQ] + [
+            _job('site', bad.get('site', 'success'))]
+
+    def test_a_non_required_failure_dispatches_and_the_view_says_so(self):
+        runs = [_run(GREEN, conclusion='failure', rid=5)]
+        view = FakeSh([_run(PROD)], runs, jobs={5: self._jobs(site='failure')})
+        text = deploy.line(self._p(), sh=view)
+        self.assertIn(f'the next tick dispatches deploy-prod.yml for green `{GREEN[:9]}`', text)
+        self.assertIn('(site failure, not required)', text)
+        tick = FakeSh([_run(PROD)], runs, jobs={5: self._jobs(site='failure')})
+        lines = []
+        self.assertEqual(deploy.tick(self._p(), out=lines.append, sh=tick), {'prod': GREEN})
+        self.assertEqual(lines[0].replace(' — dispatching ', ' — the next tick dispatches ', 1),
+                         text)
+
+    def test_a_required_failure_neither_dispatches_nor_promises(self):
+        runs = [_run(GREEN, conclusion='failure', rid=5)]
+        sh = FakeSh([_run(PROD)], runs, jobs={5: self._jobs(m6_e2e='failure')})
+        text = deploy.line(self._p(), sh=sh)
+        self.assertNotIn('dispatches', text)
+        self.assertIn('prod waits on a green main', text)
+        self.assertEqual(deploy.tick(self._p(), out=[].append, sh=sh), {})
+        self.assertEqual(sh.dispatched(), [])
+
+    def test_an_in_flight_deploy_of_the_candidate_is_never_dispatched_twice(self):
+        deploys = [_run(GREEN, status='in_progress', conclusion=None, rid=9), _run(PROD)]
+        runs = [_run(GREEN, conclusion='failure', rid=5)]
+        sh = FakeSh(deploys, runs, jobs={5: self._jobs(site='failure')})
+        lines = []
+        self.assertEqual(deploy.tick(self._p(), out=lines.append, sh=sh), {})
+        self.assertEqual(sh.dispatched(), [])
+        self.assertIn(f'deploy-prod.yml run 9 for `{GREEN[:9]}` is queued or running', lines[0])
+        self.assertEqual(deploy.line(self._p(), sh=sh), lines[0])
+
+    def test_no_candidate_while_the_tip_run_is_unfinished_names_that_run(self):
+        # the tick's "no green" line reads as a verdict on a run that has not finished yet:
+        # name the running CI run, so the wait is not mistaken for a red trunk
+        runs = [_run(GREEN, status='in_progress', conclusion=None, rid=5)]
+        sh = FakeSh([_run(PROD)], runs)
+        lines = []
+        self.assertEqual(deploy.tick(self._p(), out=lines.append, sh=sh), {})
+        self.assertIn(f'ci.yml run 5 for `{GREEN[:9]}` still running', lines[0])
+        self.assertEqual(deploy.line(self._p(), sh=sh), lines[0])
+
+
 class RequiredJobsFrom(unittest.TestCase):
     SPEC = {'file': 'scripts/merge.sh', 'var': 'REQUIRED_CHECKS'}
 
