@@ -2,6 +2,21 @@
 
 One entry per released version, newest first.
 
+## v0.1.25 — 2026-09-26
+
+### Bugs fixed
+
+- B-0128 An adjudicator's 'no further sessions' ruling does not stick: the lane re-adjudicates the item
+- B-0136 An install can leave a product's tick clock unloaded; status just omits it
+
+### Improvements and hotfixes
+
+- fix(pool): a full wait names the full seats; quota and the share read the session-limit stop
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.25"`
+
 ## v0.1.24 — 2026-09-26
 
 ### Features landed
