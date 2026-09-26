@@ -1621,19 +1621,27 @@ class InstallScriptTest(unittest.TestCase):
     #: A clock still on disk but not in `launchctl list` — exactly the B-0136 incident.
     NOT_LOADED = 'asf.demo.record-health-wave-prs-harvest  not loaded'
 
-    def _run(self, hooks_rc=0, status_results=(('0', ''),)):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='install_sh_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.bin_dir = os.path.join(self.tmp, 'bin')
+        self.home = os.path.join(self.tmp, 'home')
+        self.asf_home = os.path.join(self.home, '.ASF')
+        self.log = os.path.join(self.tmp, 'calls.log')
+        self.status_calls = os.path.join(self.tmp, 'status_calls')
+        os.makedirs(self.bin_dir)
+        os.makedirs(os.path.join(self.asf_home, 'products'))
+        for rel in ('config.yaml', os.path.join('products', 'demo.yaml')):
+            open(os.path.join(self.asf_home, rel), 'w').close()
+
+    def _write_scripts(self, hooks_rc, status_results=(('0', ''),), pipx_log=None):
         """``status_results``: ``[(rc, stdout), ...]`` for successive ``scheduler status`` calls
         (the last entry repeats for any call beyond the list) — how install.sh's own retry
         of the bootstrap sees the clock check."""
-        tmp = tempfile.mkdtemp(prefix='install_sh_')
-        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
-        bin_dir, home = os.path.join(tmp, 'bin'), os.path.join(tmp, 'home')
-        asf_home, log = os.path.join(home, '.ASF'), os.path.join(tmp, 'calls.log')
-        counter = os.path.join(tmp, 'status_calls')
-        os.makedirs(bin_dir)
-        os.makedirs(os.path.join(asf_home, 'products'))
-        for rel in ('config.yaml', os.path.join('products', 'demo.yaml')):
-            open(os.path.join(asf_home, rel), 'w').close()
+        pipx_body = '#!/bin/sh\n'
+        if pipx_log:
+            pipx_body += f'echo "$*" >> "{pipx_log}"\n'
+        pipx_body += 'exit 0\n'
 
         cases = []
         for i, (rc, out) in enumerate(status_results, start=1):
@@ -1645,12 +1653,12 @@ class InstallScriptTest(unittest.TestCase):
         status_case = '\n'.join(cases)
 
         scripts = {
-            'pipx': '#!/bin/sh\nexit 0\n',
+            'pipx': pipx_body,
             'asf': ('#!/bin/sh\n'
-                    f'echo "$*" >> "{log}"\n'
+                    f'echo "$*" >> "{self.log}"\n'
                     'if [ "$1 $2" = "scheduler status" ]; then\n'
-                    f'  n=0; [ -f "{counter}" ] && n=$(cat "{counter}")\n'
-                    f'  n=$((n + 1)); echo "$n" > "{counter}"\n'
+                    f'  n=0; [ -f "{self.status_calls}" ] && n=$(cat "{self.status_calls}")\n'
+                    f'  n=$((n + 1)); echo "$n" > "{self.status_calls}"\n'
                     '  case "$n" in\n'
                     f'{status_case}\n'
                     '  esac\n'
@@ -1663,15 +1671,20 @@ class InstallScriptTest(unittest.TestCase):
                     'exit 0\n'),
         }
         for name, body in scripts.items():
-            path = os.path.join(bin_dir, name)
+            path = os.path.join(self.bin_dir, name)
             with open(path, 'w') as f:
                 f.write(body)
             os.chmod(path, 0o755)
-        run_env = dict(os.environ, HOME=home, ASF_HOME=asf_home,
-                       PATH=bin_dir + os.pathsep + os.environ.get('PATH', ''))
+
+    def _env(self, **extra):
+        return dict(os.environ, HOME=self.home, ASF_HOME=self.asf_home,
+                    PATH=self.bin_dir + os.pathsep + os.environ.get('PATH', ''), **extra)
+
+    def _run(self, hooks_rc=0, status_results=(('0', ''),), pipx_log=None, extra_env=None):
+        self._write_scripts(hooks_rc, status_results=status_results, pipx_log=pipx_log)
         r = subprocess.run(['bash', INSTALL_SH, 'demo', 'deadbeef'], capture_output=True,
-                           text=True, env=run_env, timeout=60)
-        with open(log) as f:
+                           text=True, env=self._env(**(extra_env or {})), timeout=60)
+        with open(self.log) as f:
             calls = [line.split()[0] for line in f if line.strip()]
         return r, calls
 
@@ -1722,6 +1735,70 @@ class InstallScriptTest(unittest.TestCase):
         self.assertIn('console-permissions: allow Bash(asf:*)', r.stdout)
         self.assertIn('run one to write it: asf console-permissions install --product demo '
                       '--scope user|repo', r.stdout)
+
+    def test_install_waits_on_a_held_tick_lock(self):
+        """B-0135: an install that races a running tick's ``pipx install --force`` tears it —
+        half the modules old, half new. The lock the tick holds for the whole of its run
+        (``asf.tick.tick.lock_path``) is the same one the install waits on before it touches
+        the package, so the two can never overlap."""
+        lock_path = os.path.join(self.asf_home, 'state', 'demo', 'tick.lock')
+        os.makedirs(os.path.dirname(lock_path))
+        pipx_log = os.path.join(self.tmp, 'pipx.log')
+        self._write_scripts(hooks_rc=0, pipx_log=pipx_log)
+
+        import fcntl
+        held = open(lock_path, 'a')
+        fcntl.flock(held, fcntl.LOCK_EX)
+        released_at = []
+
+        def release_after(delay):
+            time.sleep(delay)
+            released_at.append(time.monotonic())
+            fcntl.flock(held, fcntl.LOCK_UN)
+            held.close()
+
+        import threading
+        t = threading.Thread(target=release_after, args=(1.0,))
+        started = time.monotonic()
+        t.start()
+        try:
+            r = subprocess.run(
+                ['bash', INSTALL_SH, 'demo', 'deadbeef'], capture_output=True, text=True,
+                env=self._env(ASF_INSTALL_LOCK_WAIT_S='30', ASF_INSTALL_LOCK_POLL_S='0.1'),
+                timeout=60)
+        finally:
+            t.join()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(os.path.exists(pipx_log), r.stderr)
+        with open(pipx_log) as f:
+            pipx_calls = f.read()
+        self.assertIn('install', pipx_calls)
+        self.assertGreaterEqual(released_at[0], started + 1.0)
+        self.assertIn('install: a running tick holds the lock', r.stderr)
+
+    def test_a_stuck_tick_lock_times_out(self):
+        """The wait is bounded (B-0135): a tick lock nobody ever releases must not hang the
+        install forever — it gives up and asks the operator instead."""
+        lock_path = os.path.join(self.asf_home, 'state', 'demo', 'tick.lock')
+        os.makedirs(os.path.dirname(lock_path))
+        pipx_log = os.path.join(self.tmp, 'pipx.log')
+        self._write_scripts(hooks_rc=0, pipx_log=pipx_log)
+
+        import fcntl
+        held = open(lock_path, 'a')
+        fcntl.flock(held, fcntl.LOCK_EX)
+        try:
+            r = subprocess.run(
+                ['bash', INSTALL_SH, 'demo', 'deadbeef'], capture_output=True, text=True,
+                env=self._env(ASF_INSTALL_LOCK_WAIT_S='0.5', ASF_INSTALL_LOCK_POLL_S='0.1'),
+                timeout=60)
+        finally:
+            fcntl.flock(held, fcntl.LOCK_UN)
+            held.close()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(os.path.exists(pipx_log))
+        self.assertIn('NEEDS OPERATOR', r.stderr)
+        self.assertIn('tick', r.stderr)
 
 
 if __name__ == '__main__':
