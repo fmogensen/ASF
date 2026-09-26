@@ -131,7 +131,7 @@ class TickPrintsTheDriftLine(DriftTestCase):
                 mock.patch.object(upgrade, 'drain_wait_s', return_value=180), \
                 mock.patch.object(upgrade, '_install',
                                   side_effect=lambda ref, run, out: installed.append(ref) or 0), \
-                mock.patch.object(upgrade.time, 'sleep') as sleep, \
+                mock.patch.object(upgrade, '_drain_sleep') as sleep, \
                 mock.patch.object(tick, 'run_asf_step') as step:
             tick._run_steps(mock.Mock(), self.product, tick.Context(self.product),
                             [('harvest', 'asf', None)], None)
