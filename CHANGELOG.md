@@ -2,6 +2,30 @@
 
 One entry per released version, newest first.
 
+## v0.1.26 — 2026-09-26
+
+### Bugs fixed
+
+- B-0056 A session whose branch is already on origin merges its stale remote: nothing in the factory publishes a rebased lane branch, and no session may force
+- B-0123 A failed daily run is never retried until the next day
+
+### In progress
+
+- F-0111 hooks install from asf-live tells the operator to wire the dev install's path into the product's git hooks
+
+### Improvements and hotfixes
+
+- fix(lane): a ruling stands on the head it was launched on, not only the sha it names
+- fix(lane): a check the CI queue cancelled to re-run waits, never sends the PR back
+- fix(report): a note after superseded_by is no superseded claim
+- fix(ci-queue): relief never cancels a run whose PR changes CI config
+- fix(lane): a trunk-copies conflict is a rebase for a correct session — no round, never adjudicate
+- fix(publish): a rebase off trunk copies is published, the old tip archived
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.26"`
+
 ## v0.1.25 — 2026-09-26
 
 ### Bugs fixed
