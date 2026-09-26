@@ -28,6 +28,27 @@ class TestExampleConfigsParse(unittest.TestCase):
         self.assertEqual(product.branch_prefix('groom'), 'groom')
 
 
+class DocumentedModelsTests(unittest.TestCase):
+    """F-0093 §2.5.1: `conventions.models` documented, and the measured table beside the
+    `worker_pool` block it argues about."""
+
+    def test_products_example_documents_conventions_models(self):
+        text = open(os.path.join(REPO_ROOT, 'docs', 'products.example.yaml'), encoding='utf-8').read()
+        self.assertEqual(env.validate_product_text(text), [])
+        self.assertIn('conventions.models', text)
+        for label in ('heavy', 'light', 'cheap'):
+            self.assertIn(label, text)
+
+    def test_config_example_documents_the_measured_table(self):
+        path = os.path.join(REPO_ROOT, 'docs', 'config.example.yaml')
+        text = open(path, encoding='utf-8').read()
+        data = env.loads(text)
+        self.assertEqual(set(data['worker_pool']['models']), {'heavy', 'light', 'cheap'})
+        self.assertIn('min/landing', text)
+        for kind in ('plan', 'correct', 'fix-bug', 'adjudicate', 'coder', 'spec'):
+            self.assertIn(kind, text)
+
+
 class TestYamlSubset(unittest.TestCase):
     def test_scalars_and_nesting(self):
         text = """
