@@ -402,6 +402,23 @@ class PreambleTest(unittest.TestCase):
         self.assertIn('external CI', text)
         self.assertIn('never skipped', text)
 
+    def test_external_ci_names_the_full_suite_commands_it_forbids(self):
+        # 2026-09-27: a plan's "run the full check" step, followed on the host, was 122 test
+        # processes — the brief names the product's full-suite commands before the hook refuses
+        ext = {'landing': 'pull-request', 'landing_checks': ['gate'],
+               'landing_checks_missing': 'wait'}
+        suite = ['^pnpm check\\b', '^pnpm( -r)? test\\s*$', 'turbo run test']
+        text = preamble_mod.build(product(conventions={**ext, 'full_suite_commands': suite}),
+                                  ROWS['coder'], index(), [], REPO_FACTS)
+        self.assertIn('CI runs the full suite. Never run `pnpm check`, `pnpm( -r)? test`, '
+                      '`turbo run test` or any full-suite command locally', text)
+        self.assertIn('substitute the targeted set', text)
+        # configured but no external CI, or external CI with nothing named: no such line
+        for conv in ({'landing': 'fast-forward', 'full_suite_commands': suite}, ext):
+            text = preamble_mod.build(product(conventions=conv), ROWS['coder'], index(), [],
+                                      REPO_FACTS)
+            self.assertNotIn('CI runs the full suite. Never run', text, conv)
+
     def test_no_external_ci_leaves_the_local_gate_as_it_is(self):
         for conv in ({}, {'landing': 'pull-request'},          # PRs, but nothing declared as CI
                      {'landing': 'fast-forward', 'landing_checks': ['build']}):

@@ -440,6 +440,11 @@ conventions:
     - '^make check\b'
 ```
 
+The same list is named in the brief: every brief of such a product carries a standing rule that
+CI runs the full suite, listing these commands (anchors and a trailing `\b` dropped, so
+`'^pnpm check\b'` reads `pnpm check`) and telling the session to substitute the targeted set when
+its plan says to run one — a plan's verification step is otherwise followed to the letter.
+
 A product without external CI ignores the key; a pattern that is not a regex is a red `doctor`
 finding.
 
