@@ -452,7 +452,7 @@ PRODUCT_FIELDS = {
 CI_FIELDS = {
     'provider': _STR, 'workflow': _STR, 'test_command': _STR, 'budgets': _MAP,
     'runner_org': _STR, 'labels': _LIST, 'dev_job': _STR, 'deploy_workflow': _STR,
-    'pool': _LIST, 'queue': _MAP,
+    'pool': _LIST, 'queue': _MAP, 'reserve': None,
 }
 # `capacity:` is a map: this product's session/CI ceilings and its batch shape.
 CAPACITY_FIELDS = {'sessions': _STR, 'ci': _STR, 'weight': _STR, 'batch': _MAP}

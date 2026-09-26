@@ -764,13 +764,21 @@ def free_by_class(runners, pool):
     return {c: v['online'] - v['busy'] for c, v in load_by_class(runners, pool).items()}
 
 
-def runners_text(runners, pool):
+def runners_text(runners, pool, product=None):
     """The status view's Runners row from one runner read: ``19 online · heavy 12/12 busy ·
     light 4/7 busy`` per class of the pool, a plain ``n online, n busy, n idle`` total when the
-    product declares no classes; ``, n offline`` when any are."""
+    product declares no classes; ``, n offline`` when any are. With ``product`` declaring
+    ``ci.reserve``, `` · pr-heavy 9/12 (3 reserved for main)`` per reservation, as it stands on
+    the host now."""
     on = [r for r in runners if r.online]
     off = len(runners) - len(on)
     tail = f", {off} offline" if off else ""
+    if product is not None:
+        trunk = getattr(product, 'main', None) or 'main'
+        for res in ci_pool.load_reserve(product):
+            cands = [r for r in on if res.of in r.norm_labels()]
+            n = sum(1 for r in cands if res.label in r.norm_labels())
+            tail += f" · {res.short} {n}/{len(cands)} ({len(cands) - n} reserved for {trunk})"
     load = load_by_class(runners, pool)
     if not load:
         busy = sum(1 for r in on if r.busy)
@@ -951,6 +959,11 @@ class Queue:
         self.out = out
         self._inflight = inflight
         self._free = None
+        #: ``ci.reserve``: a PR run lands only on the runners it leaves labelled
+        self.reserves = ci_pool.load_reserve(product) if self.mode != 'off' else []
+        self._free_pr = None
+        #: per class, the online slots a PR run can reach, where a reservation makes it fewer
+        self._pr_cap = {}
         self._runners = ()
         self._read = False
         self.write = write and self.mode == 'on'
@@ -974,6 +987,12 @@ class Queue:
             self._free = free_by_class(self._runners, self.pool)
         except ci_pool.BackendError:
             self._runners, self._free = (), None
+        if self.reserves and self._free is not None:
+            prs = ci_pool.pr_runners(self._runners, self.reserves)
+            self._free_pr = free_by_class(prs, self.pool)
+            full, pr = load_by_class(self._runners, self.pool), load_by_class(prs, self.pool)
+            self._pr_cap = {c: v['online'] for c, v in pr.items()
+                            if v['online'] < full[c]['online']}
         if self._inflight is None and self.ceiling() is not None:
             try:
                 self._inflight = self.source.inflight()
@@ -1053,11 +1072,24 @@ class Queue:
             'v': EXPECT_VERSION}
         return n
 
-    def free(self):
+    def entry_needs(self, entry):
+        """An entry's expected jobs per class (:meth:`needs`); a PR start's capped at what a
+        PR run can reach when ``ci.reserve`` keeps runners free for the trunk — it can never
+        be sized past the runners it may land on."""
+        n = self.needs(entry.get('workflow'), entry.get('run', FULL))
+        if entry.get('kind') == 'pr' and self.reserves:
+            self._read_host()
+            n = {c: min(v, self._pr_cap[c]) if c in self._pr_cap else v for c, v in n.items()}
+        return n
+
+    def free(self, kind=None):
+        """Free slots per class, less what started this pass. ``kind`` ``pr``: only the runners
+        a PR run may land on (:func:`asf.ci_pool.pr_runners`) — the trunk sees them all."""
         self._read_host()
         if self._free is None:
             return None
-        free = dict(self._free)
+        base = self._free_pr if kind == 'pr' and self._free_pr is not None else self._free
+        free = dict(base)
         for s in self.data['started']:
             for c, n in (s.get('needs') or {}).items():
                 if c in free:
@@ -1087,10 +1119,9 @@ class Queue:
                  run=run if run in RUN_TYPES else FULL, seen=_iso(self.now))
         entries[key] = e
         order = line_order(entries)
-        needs = {k: self.needs(entries[k].get('workflow'), entries[k].get('run', FULL))
-                 for k in order}
         self._read_host()
-        free = self.free()
+        needs = {k: self.entry_needs(entries[k]) for k in order}
+        free = self.free(kind)
         ok, why = decide(key, order, entries, needs.get, free, self.ceiling(),
                          self._inflight, self.admitted_here, now=self.now,
                          pr_wait_min=pr_wait_min(self.product))
@@ -1521,11 +1552,11 @@ def live_line(product, source=None, inflight=None, now=None):
     line = LiveLine(q.mode, q, order, entries, {})
     if not order:
         return line
-    line.needs = {k: q.needs(entries[k].get('workflow'), entries[k].get('run', FULL))
-                  for k in order}
+    line.needs = {k: q.entry_needs(entries[k]) for k in order}
     line.free, line.ceiling = q.free(), q.ceiling()
     line.inflight = q._inflight
-    line.decisions = [(k, *decide(k, order, entries, line.needs.get, line.free, line.ceiling,
+    line.decisions = [(k, *decide(k, order, entries, line.needs.get,
+                                  q.free(entries[k].get('kind')), line.ceiling,
                                   line.inflight, now=q.now, pr_wait_min=pr_wait_min(product)))
                       for k in order]
     return line
@@ -1623,6 +1654,10 @@ def cmd_queue(args, source=None, out=print):
     out(f"free: {', '.join(f'{c} {n}' for c, n in sorted((free or {}).items())) or 'unknown'}"
         + (f'; {capacity.ci_inflight_text(line.inflight)} ({capacity.CI_INFLIGHT_WHAT}); '
            f'batch starts below {ceiling}' if ceiling is not None else ''))
+    if line.queue.reserves and free is not None:
+        pr = line.queue.free('pr') or {}
+        out(f"free to a PR run (ci.reserve keeps the rest for the trunk): "
+            f"{', '.join(f'{c} {n}' for c, n in sorted(pr.items()))}")
     for i, (k, ok, why) in enumerate(line.decisions, 1):
         e = entries[k]
         need = ', '.join(f'{c} {n}' for c, n in sorted(line.needs[k].items())) or 'nothing measured'

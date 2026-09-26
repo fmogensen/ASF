@@ -123,6 +123,36 @@ appended to `~/.ASF/state/<p>/ci-trials.jsonl`. A dry run prints the verdicts bu
 
 `--apply` changes labels on shared runners: it is an operator action, never run by the tick.
 
+## Reserving runners for the trunk: `ci.reserve`
+
+PR runs can fill every runner and leave a trunk run — the one every deploy waits on — queued
+behind them. `ci.reserve` keeps a few runners for the trunk:
+
+```yaml
+ci:
+  reserve: {label: class-pr-heavy, of: heavy, keep_free: 3, spread_by: box, prefer: fast-heavy}
+```
+
+Of the online runners carrying `of`, all but `keep_free` carry `label`. The workflow asks for it
+on PR runs only (`runs-on: [self-hosted, heavy, class-pr-heavy]` on `pull_request`,
+`[self-hosted, heavy]` on `push`), so the kept-free runners take trunk runs alone while the trunk
+still reaches every runner. Adding the label before the workflow asks for it changes nothing.
+
+The kept-free runners are chosen by: carrying `prefer` first (when set — say, the label the
+trunk's required jobs ask for, so the reserved runners can run them); then one per box
+(`spread_by: box`, the pool's `box`; `none` ignores boxes); then a runner already without the
+label (no churn); then a box with more runners (it keeps one for PRs too); then name, last
+first. Offline runners are neither counted nor touched; one going offline or coming back
+re-balances on the next tick.
+
+The tick applies it (one runner read per tick, adds before removes, one `ci reserve:` line per
+write); `asf ci reserve --product <p>` prints the split per runner and `--apply` writes it now.
+`asf ci reconcile` keeps the label where the reservation puts it, and the doctor never calls it
+a stray class. The doctor's `reserve:` row and the status Runners row say
+`pr-heavy 9/12 (3 reserved for main)`. The CI start queue sizes a PR start on the labelled
+runners only: its free runners, and its expected jobs capped at what it can reach, exclude the
+reserved ones; a trunk start sees them all.
+
 ## The pool sets `asf capacity`
 
 With a pool declared, the product's CI ceiling is the sum of every runner's `slots`, and

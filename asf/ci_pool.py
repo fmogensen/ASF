@@ -102,8 +102,14 @@ def _norm(label):
 def pool_problems(ci):
     """``[(dotted key, problem)]`` for a ``ci.pool`` the readers cannot use — checked on every
     product load (:func:`asf.env.validate_product_text`), like ``deploy_sha``'s modes."""
-    if not isinstance(ci, dict) or ci.get('pool') is None:
+    if not isinstance(ci, dict):
         return []
+    if ci.get('pool') is None:
+        return reserve_problems(ci)
+    return _pool_problems(ci) + reserve_problems(ci)
+
+
+def _pool_problems(ci):
     pool = ci['pool']
     if not isinstance(pool, list):
         return [('ci.pool', f'must be a list of runners, not {pool!r}')]
@@ -207,6 +213,215 @@ def pool_ci(product):
         return None, None
     by_role = slots_by_role(pool)
     return sum(by_role.values()), 'ci.pool: ' + ', '.join(f'{r} {n}' for r, n in by_role.items())
+
+
+# ---- reservations: runners kept free of a PR-only label -------------------------------------
+
+RESERVE_FIELDS = ('label', 'of', 'keep_free', 'spread_by', 'prefer')
+RESERVE_REQUIRED = ('label', 'of', 'keep_free')
+SPREAD_BY = ('box', 'none')
+
+
+@dataclasses.dataclass(frozen=True)
+class Reserve:
+    """``ci.reserve``: of the online runners carrying ``of``, all but ``keep_free`` carry
+    ``label``. A PR run's ``runs-on`` asks for ``label`` too, so the ``keep_free`` runners without
+    it take only trunk (push) runs: capacity reserved for the trunk."""
+    label: str
+    of: str
+    keep_free: int
+    spread_by: str = 'box'
+    prefer: str = ''
+
+    @property
+    def short(self):
+        """``pr-heavy`` for ``class-pr-heavy``: the label as the status row names it."""
+        return self.label[len(CLASS_PREFIX):] if self.label.startswith(CLASS_PREFIX) else self.label
+
+
+def _reserve_entries(ci):
+    r = ci.get('reserve') if isinstance(ci, dict) else None
+    if r is None:
+        return None
+    return [r] if isinstance(r, dict) else r
+
+
+def reserve_problems(ci):
+    """``[(dotted key, problem)]`` for a ``ci.reserve`` the tick cannot apply — one map, or a
+    list of maps ``{label, of, keep_free, spread_by, prefer}``."""
+    entries = _reserve_entries(ci)
+    if entries is None:
+        return []
+    if not isinstance(entries, list):
+        return [('ci.reserve', f'must be a map {{label, of, keep_free}} or a list of them, '
+                               f'not {entries!r}')]
+    out, labels = [], set()
+    for i, r in enumerate(entries):
+        key = 'ci.reserve' if isinstance(ci.get('reserve'), dict) else f'ci.reserve[{i}]'
+        if not isinstance(r, dict):
+            out.append((key, f'must be a map {{label, of, keep_free}}, not {r!r}'))
+            continue
+        for k in r:
+            if k not in RESERVE_FIELDS:
+                out.append((f'{key}.{k}', f"is not a field of a reservation ({', '.join(RESERVE_FIELDS)})"))
+        for k in RESERVE_REQUIRED:
+            if r.get(k) in (None, ''):
+                out.append((f'{key}.{k}', 'is required'))
+        for k in ('label', 'of', 'prefer'):
+            v = r.get(k)
+            if v in (None, ''):
+                continue
+            if not isinstance(v, str) or not LABEL_RE.match(_norm(v)):
+                out.append((f'{key}.{k}', f'must be one label (letters, digits, . _ -), not {v!r}'))
+            elif _norm(v) in DEFAULT_LABELS:
+                out.append((f'{key}.{k}', f'{v!r} is a label the CI host sets on every runner'))
+        n = r.get('keep_free')
+        if n is not None and (isinstance(n, bool) or not isinstance(n, int) or n < 0):
+            out.append((f'{key}.keep_free', f'must be a whole number >= 0, not {n!r}'))
+        s = r.get('spread_by')
+        if s is not None and s not in SPREAD_BY:
+            out.append((f'{key}.spread_by', f"must be one of {', '.join(SPREAD_BY)}, not {s!r}"))
+        lab = r.get('label')
+        if isinstance(lab, str) and lab:
+            if _norm(lab) == _norm(r.get('of') or ''):
+                out.append((f'{key}.label', 'must differ from `of`: it marks a subset of those runners'))
+            if _norm(lab) in labels:
+                out.append((f'{key}.label', f'{lab!r} is reserved twice'))
+            labels.add(_norm(lab))
+    return out
+
+
+def load_reserve(product):
+    """The product's ``ci.reserve`` as :class:`Reserve` rows; ``[]`` when none is declared or
+    it does not validate (the product load refuses such a file anyway)."""
+    ci = product.ci if isinstance(getattr(product, 'ci', None), dict) else {}
+    if reserve_problems(ci):
+        return []
+    return [Reserve(label=_norm(r['label']), of=_norm(r['of']), keep_free=int(r['keep_free']),
+                    spread_by=r.get('spread_by') or 'box', prefer=_norm(r.get('prefer') or ''))
+            for r in _reserve_entries(ci) or ()]
+
+
+def reserve_labels(product):
+    """The labels ``ci.reserve`` owns: never a class, never stray, never a reconcile removal."""
+    return {r.label for r in load_reserve(product)}
+
+
+@dataclasses.dataclass
+class ReservePlan:
+    reserve: Reserve
+    #: the online runners carrying ``of``, name order
+    candidates: list
+    #: of those, the ones that carry ``label`` once the plan is applied
+    labeled: list
+    #: of those, the ones kept free of it (reserved for the trunk)
+    reserved: list
+    #: runners the label goes on / comes off (an online runner carrying it without ``of`` too)
+    add: list
+    remove: list
+
+    def text(self, trunk='main'):
+        """``pr-heavy 9/12 (3 reserved for main)``."""
+        return (f"{self.reserve.short} {len(self.labeled)}/{len(self.candidates)} "
+                f"({len(self.reserved)} reserved for {trunk})")
+
+    @property
+    def settled(self):
+        return not self.add and not self.remove
+
+
+def reserve_plan(res, pool, runners):
+    """Which online runners carrying ``res.of`` carry ``res.label``: all but ``keep_free``.
+
+    The runners kept free are chosen, one at a time, by: carrying ``prefer`` (when set) first;
+    then a box not yet holding a kept-free runner (``spread_by: box``; a runner outside the pool
+    is its own box); then one already without the label (no churn); then a box with more
+    candidates (it keeps one for PR runs too); then the name, last first. Offline runners are
+    neither counted nor touched. Pure: the same runners give the same plan (idempotent)."""
+    box = {e.runner: e.box for e in pool if e.box}
+    cands = sorted((r for r in runners if r.online and res.of in r.norm_labels()),
+                   key=lambda r: r.name)
+
+    def box_of(r):
+        return (box.get(r.name) or r.name) if res.spread_by == 'box' else r.name
+
+    per_box = {}
+    for r in cands:
+        per_box[box_of(r)] = per_box.get(box_of(r), 0) + 1
+    used, reserved = {}, []
+    left = sorted(cands, key=lambda r: r.name, reverse=True)
+    for _ in range(min(res.keep_free, len(cands))):
+        pick = min(left, key=lambda r: (bool(res.prefer) and res.prefer not in r.norm_labels(),
+                                        used.get(box_of(r), 0), res.label in r.norm_labels(),
+                                        -per_box[box_of(r)]))
+        left.remove(pick)
+        used[box_of(pick)] = used.get(box_of(pick), 0) + 1
+        reserved.append(pick)
+    free_names = {r.name for r in reserved}
+    labeled = [r for r in cands if r.name not in free_names]
+    add = [r.name for r in labeled if res.label not in r.norm_labels()]
+    remove = [r.name for r in reserved if res.label in r.norm_labels()]
+    remove += sorted(r.name for r in runners if r.online and res.label in r.norm_labels()
+                     and res.of not in r.norm_labels())
+    return ReservePlan(res, [r.name for r in cands], [r.name for r in labeled],
+                       sorted(free_names), add, remove)
+
+
+def reserve_plans(product, runners, pool=None):
+    pool = load_pool(product) if pool is None else pool
+    return [reserve_plan(r, pool, runners) for r in load_reserve(product)]
+
+
+def pr_runners(runners, reserves):
+    """The runners a PR run can land on: every runner but those a reservation keeps free
+    (carrying ``of`` without ``label``) — read off the labels the host has now."""
+    out = []
+    for r in runners:
+        have = r.norm_labels()
+        if any(res.of in have and res.label not in have for res in reserves):
+            continue
+        out.append(r)
+    return out
+
+
+def apply_reserve(plans, backend, runners, out=print):
+    """Carry the reservation plans out: every add first, then the removes, so PR capacity never
+    dips below the target. One line per write; returns the number of writes that failed."""
+    by_name = {r.name: r for r in runners}
+    failed = 0
+    for p in plans:
+        for name in p.add:
+            try:
+                backend.add_labels(by_name[name], [p.reserve.label])
+                out(f"ci reserve: {name} + {p.reserve.label}")
+            except BackendError as e:
+                failed += 1
+                out(f"ci reserve: {name} add {p.reserve.label} failed — {e}")
+    for p in plans:
+        for name in p.remove:
+            try:
+                backend.remove_label(by_name[name], p.reserve.label)
+                out(f"ci reserve: {name} - {p.reserve.label} (kept free for the trunk)")
+            except BackendError as e:
+                failed += 1
+                out(f"ci reserve: {name} remove {p.reserve.label} failed — {e}")
+    return failed
+
+
+def reserve_table(plans, runners):
+    by_name = {r.name: r for r in runners}
+    rows = []
+    for p in plans:
+        for name in p.candidates:
+            what = ('add ' + p.reserve.label if name in p.add else
+                    'remove ' + p.reserve.label if name in p.remove else 'ok')
+            role = 'PR + trunk' if name in p.labeled else 'trunk only (reserved)'
+            rows.append((name, ', '.join(_ordered(by_name[name].labels)), role, what))
+        for name in p.remove:
+            if name not in p.candidates:
+                rows.append((name, ', '.join(_ordered(by_name[name].labels)),
+                             f"lacks '{p.reserve.of}'", 'remove ' + p.reserve.label))
+    return _table(('runner', 'current labels', 'takes', 'action'), rows)
 
 
 # ---- what the CI host says --------------------------------------------------------------------
@@ -486,8 +701,9 @@ def _satisfies(runner, ro):
     return ro.labels is not None and ro.labels <= runner.norm_labels()
 
 
-def drift(pool, runners, runs_on):
-    """``[(ok, detail)]`` — one finding per drift, ``[(True, summary)]`` when there is none."""
+def drift(pool, runners, runs_on, owned=frozenset()):
+    """``[(ok, detail)]`` — one finding per drift, ``[(True, summary)]`` when there is none.
+    ``owned``: the labels ``ci.reserve`` places (:func:`reserve_labels`) — never a stray class."""
     declared = {e.runner: e for e in pool}
     role_set = set(roles(pool))
     by_name = {r.name: r for r in runners}
@@ -539,7 +755,8 @@ def drift(pool, runners, runs_on):
                 parts.append(f"carries another role {', '.join(other_roles)}")
             out.append((False, f"role: {e.runner} {' and '.join(parts)} "
                                f"(labels [{', '.join(sorted(have))}])"))
-        stray = sorted(l for l in have if l.startswith(CLASS_PREFIX) and l != e.class_label)
+        stray = sorted(l for l in have if l.startswith(CLASS_PREFIX) and l != e.class_label
+                       and l not in owned)
         if (e.class_label and e.class_label not in have) or stray:
             want = f"'{e.class_label}'" if e.class_label else 'no class label'
             out.append((False, f"class label: {e.runner} should carry {want} "
@@ -572,7 +789,24 @@ def doctor_rows(product, backend=None):
         runners, runs_on = backend.runners(), backend.runs_on()
     except BackendError as e:
         return [(False, None, f'ci.pool: cannot read the CI host — {e}')] + classes
-    return [(True, ok, detail) for ok, detail in drift(pool, runners, runs_on)] + classes
+    rows = [(True, ok, detail) for ok, detail in drift(pool, runners, runs_on,
+                                                       owned=reserve_labels(product))]
+    return rows + reserve_rows(product, runners, pool) + classes
+
+
+def reserve_rows(product, runners, pool=None):
+    """``[(required, ok, detail)]``, advisory: one per ``ci.reserve`` —
+    ``reserve: pr-heavy 9/12 (3 reserved for main)``, not ok while the tick has writes to make."""
+    trunk = getattr(product, 'main', None) or 'main'
+    out = []
+    for p in reserve_plans(product, runners, pool):
+        detail = f'reserve: {p.text(trunk)}'
+        if not p.settled:
+            parts = ([f"add to {', '.join(p.add)}"] if p.add else []) + \
+                    ([f"remove from {', '.join(p.remove)}"] if p.remove else [])
+            detail += f" — {p.reserve.label}: {'; '.join(parts)} (the tick applies it)"
+        out.append((False, p.settled, detail))
+    return out
 
 
 # ---- reconcile: the plan and its apply --------------------------------------------------------
@@ -606,16 +840,20 @@ class Step:
         return '; '.join(parts) or 'ok'
 
 
-def plan(pool, runners, runs_on, trials=None):
+def plan(pool, runners, runs_on, trials=None, reserves=()):
     """One :class:`Step` per declared runner, then one per undeclared one (left untouched).
 
     The target is the host's own labels plus the role, ``provider-<name>`` and, when declared,
     ``class:<name>``; every other label
     goes — unless a current self-hosted ``runs-on`` needs it on this runner (the job's labels are
-    all on the runner once the adds are in), in which case it is ``blocked``."""
+    all on the runner once the adds are in), in which case it is ``blocked``. A label a
+    ``ci.reserve`` owns (``reserves``: :class:`Reserve` rows) follows :func:`reserve_plan`
+    instead: on where it places it, off where it keeps the runner free, never blocked."""
     trials = trials or {}
     by_name = {r.name: r for r in runners}
     jobs = [ro for ro in runs_on if ro.self_hosted]
+    rplans = [reserve_plan(res, pool, runners) for res in reserves]
+    owned = {p.reserve.label for p in rplans}
     out = []
     for e in pool:
         r = by_name.get(e.runner)
@@ -626,11 +864,16 @@ def plan(pool, runners, runs_on, trials=None):
         have = r.norm_labels()
         keep = {l for l in have if is_default(l, r)}
         target = keep | e.labels()
+        for p in rplans:
+            lab = p.reserve.label
+            if e.runner in p.labeled or (lab in have and e.runner not in p.remove):
+                target.add(lab)
         add = sorted(target - have)
         after = have | set(add)
         remove, blocked = [], []
         for label in sorted(have - target):
-            needed = any(label in ro.labels and ro.labels <= after for ro in jobs)
+            needed = label not in owned and any(label in ro.labels and ro.labels <= after
+                                                for ro in jobs)
             (blocked if needed else remove).append(label)
         trial = e.role in add and e.runner not in trials
         out.append(Step(e.runner, _ordered(r.labels), _ordered(target), add, remove, blocked,
@@ -830,10 +1073,33 @@ def trial_bug(name, trial):
     return sig, info
 
 
+def tick_reserve(product, backend, out=print):
+    """The tick's reservation pass: one runner read, then the writes :func:`reserve_plan` names
+    (none once settled). Returns the plans; ``[]`` when the host cannot be read."""
+    try:
+        runners = backend.runners()
+    except BackendError as e:
+        out(f"ci reserve: not applied — cannot read the CI host ({e})")
+        return []
+    plans = reserve_plans(product, runners)
+    if any(not p.settled for p in plans):
+        apply_reserve(plans, backend, runners, out=out)
+        trunk = getattr(product, 'main', None) or 'main'
+        for p in plans:
+            out(f"ci reserve: {p.text(trunk)}")
+    return plans
+
+
 def tick(ctx, backend=None, out=print):
     """The tick's half (the ``health`` step): judge pending trials, apply their verdicts, and file
-    one Bug per rolled-back trial in the record clone. No trials file, no CI host call."""
+    one Bug per rolled-back trial in the record clone. A product with ``ci.reserve`` first gets
+    its reservation applied (:func:`tick_reserve`, one runner read). No trials file and no
+    reservation, no CI host call."""
     product = ctx.product
+    if load_reserve(product):
+        backend = backend or backend_for(product)
+        if backend is not None:
+            tick_reserve(product, backend, out=out)
     trials = load_trials(product.name)
     if not trials:
         return
@@ -890,7 +1156,8 @@ def cmd_reconcile(args):
     except BackendError as e:
         print(f"ci reconcile: cannot read the CI host — {e}")
         return 2
-    steps = plan(pool, runners, runs_on, trials=load_trials(product.name))
+    steps = plan(pool, runners, runs_on, trials=load_trials(product.name),
+                 reserves=load_reserve(product))
     mode = 'APPLY' if args.apply else 'DRY RUN — nothing changed; --apply writes the labels'
     print(f"== CI RECONCILE {product.name} ({mode})")
     print(plan_table(steps))
@@ -899,6 +1166,35 @@ def cmd_reconcile(args):
     if not args.apply:
         return 0
     return 1 if apply(steps, backend, product.name) else 0
+
+
+def cmd_reserve(args, backend=None, out=print):
+    """``asf ci reserve``: per runner carrying a reservation's ``of``, its labels, what it takes
+    (PR + trunk, or trunk only) and the write the tick would make; ``--apply`` makes them now."""
+    product = env.load_product(args.product)
+    if not load_reserve(product):
+        out(f"ci reserve: {product.name} declares no ci.reserve — nothing to reserve")
+        return 0
+    backend = backend or backend_for(product)
+    if backend is None:
+        out(f"ci reserve: no runner backend for ci.provider "
+            f"{(product.ci or {}).get('provider')!r} in this release")
+        return 2
+    try:
+        runners = backend.runners()
+    except BackendError as e:
+        out(f"ci reserve: cannot read the CI host — {e}")
+        return 2
+    plans = reserve_plans(product, runners)
+    mode = 'APPLY' if args.apply else 'DRY RUN — nothing changed; --apply writes the labels'
+    out(f"== CI RESERVE {product.name} ({mode})")
+    out(reserve_table(plans, runners))
+    trunk = getattr(product, 'main', None) or 'main'
+    for p in plans:
+        out(f"{p.text(trunk)} — after the writes above")
+    if not args.apply:
+        return 0
+    return 1 if apply_reserve(plans, backend, runners, out=out) else 0
 
 
 def register(subparsers):
@@ -910,6 +1206,12 @@ def register(subparsers):
     r.add_argument('--apply', action='store_true',
                    help='write the labels (adds before removes); default is a dry-run plan')
     r.set_defaults(run=cmd_reconcile)
+    s = sub.add_parser('reserve', help='plan (default) or --apply ci.reserve: the PR-only label '
+                                       'on all but keep_free runners (the tick applies it too)')
+    env.add_product_arg(s)
+    s.add_argument('--apply', action='store_true',
+                   help='write the labels now (adds before removes); default is a dry-run plan')
+    s.set_defaults(run=cmd_reserve)
     from asf import ci_queue
     ci_queue.register(sub)
     return p

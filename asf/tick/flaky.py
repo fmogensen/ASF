@@ -245,10 +245,13 @@ def file_or_update(root, canonical, key, entry, now, default_bug_epic=None):
 
 # -------------------------------------------------------------- CI reader --
 
-def _runner_class(labels):
+def _runner_class(labels, ignore=()):
+    """The class a job's labels name; ``ignore``: labels that are no class (``ci.reserve``'s
+    PR-only label, :func:`asf.ci_pool.reserve_labels`)."""
     from asf import ci_pool
     names = [ci_pool._norm(l if isinstance(l, str) else (l or {}).get('name', ''))
              for l in labels or ()]
+    names = [n for n in names if n not in ignore]
     for n in names:
         if n.startswith(ci_pool.CLASS_PREFIX):
             return n[len(ci_pool.CLASS_PREFIX):]
@@ -318,13 +321,16 @@ def collect(state, source, workflow, conv, now, out=print):
     runs = sorted((r for r in source.runs(workflow, since) if str(r['id']) not in state['seen']),
                   key=lambda r: r['ts'])[:MAX_RUNS_PER_PASS]
     touched = set()
+    from asf import ci_pool
+    product = getattr(source, 'product', None)
+    ignore = ci_pool.reserve_labels(product) if product is not None else set()
     for r in runs:
         jobs = source.jobs(r['id'])
         if jobs is None:
             continue  # read again next pass
         flaky = []
         for j in jobs:
-            klass = _runner_class(j.get('labels'))
+            klass = _runner_class(j.get('labels'), ignore)
             for t in parse_flaky(source.log(j['id'])):
                 flaky.append((t, j.get('runner_name'), klass))
         run = dict(r, trunk=conv.is_trunk(r['branch']))

@@ -95,7 +95,7 @@ def runners_cell(product, source=None):
         runners = []
     if not runners:
         return f"? (no runners readable for {org or product.repo_slug})"
-    return ci_queue.runners_text(runners, pool)
+    return ci_queue.runners_text(runners, pool, product=product)
 
 
 #: The one documented key the Prod row reads: the deploy workflow whose newest success is prod.
