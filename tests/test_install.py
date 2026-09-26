@@ -901,6 +901,84 @@ class DrainTest(HomeCase):
         self.assertIsNone(p.parse_args(['upgrade']).wait)
 
 
+class EnvRun(FakeRun):
+    """``FakeRun`` whose ``ps eww`` answers each pid's environment from a dict (pid -> env text);
+    a pid missing from it prints nothing, as for a process ``ps`` cannot read."""
+
+    def __init__(self, envs, pgreps, **kw):
+        super().__init__(**kw)
+        self.envs, self.pgreps = envs, list(pgreps)
+
+    def __call__(self, cmd, **kw):
+        if cmd[:2] == ['pgrep', '-f']:
+            self.calls.append(cmd)
+            answer = self.pgreps.pop(0) if len(self.pgreps) > 1 else self.pgreps[0]
+            return mock.Mock(returncode=0 if answer else 1, stdout=answer)
+        if cmd[:2] == ['ps', 'eww']:
+            self.calls.append(cmd)
+            pids = cmd[-1].split(',')
+            return mock.Mock(returncode=0, stdout=''.join(
+                f'{p} {self.envs[int(p)]}\n' for p in pids if int(p) in self.envs))
+        return super().__call__(cmd, **kw)
+
+
+class DrainIgnoresTestsTest(HomeCase):
+    """A test suite's ``asf.cli tick --product sample`` under a temp ASF home is no factory
+    process of this install: the drain never waits on it (the 2026-09-26 17:10 freeze)."""
+    SHA = 'b' * 40
+
+    def envs(self):
+        test_home = os.path.join(self.tmp, 'asf_sample_x')
+        return {
+            # a test child of tools/run_tests.py: its own temp HOME and ASF_HOME
+            701: (f'/usr/bin/python3 -m asf.cli tick --product sample --fresh '
+                  f'HOME={test_home} ASF_HOME={test_home}/asf-home ASF_TESTS_HOME=/t'),
+            # a test child that set only HOME: its ASF home is HOME/.ASF, not ours
+            702: f'/usr/bin/python3 -m asf.cli tick --product sample HOME={test_home} USER=x',
+            # the real harvest of this install
+            703: (f'/usr/bin/python3 -m asf.tick.step_harvest --product asf '
+                  f'HOME=/Users/x ASF_HOME={env.ASF_HOME}'),
+        }
+
+    def test_other_ticks_counts_only_this_installs_home(self):
+        run = EnvRun(self.envs(), ['701\n702\n703\n'])
+        self.assertEqual(upgrade.other_ticks(run, me=set()), [703])
+
+    def test_a_process_whose_env_cannot_be_read_still_counts(self):
+        run = EnvRun({}, ['704\n'])
+        self.assertEqual(upgrade.other_ticks(run, me=set()), [704])
+
+    def test_a_default_home_process_counts(self):
+        # no ASF_HOME in its env: HOME/.ASF, which is ours
+        home = os.path.dirname(self.tmp)
+        with mock.patch.object(env, 'ASF_HOME', os.path.join(home, '.ASF')):
+            run = EnvRun({705: f'/usr/bin/python3 -m asf.cli tick --product asf HOME={home}'},
+                         ['705\n'])
+            self.assertEqual(upgrade.other_ticks(run, me=set()), [705])
+
+    def test_test_children_never_block_a_manual_wait(self):
+        envs = self.envs()
+        del envs[703]
+        run = EnvRun(envs, ['701\n702\n'], installed=FakeRun.HEAD)
+        slept = []
+        rc, out, _err = _quiet(upgrade.cmd_upgrade, argparse.Namespace(
+            skip_pipx=False, ref=None, owner=None, wait=540, sleep=slept.append), run=run)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(slept, [])
+        self.assertEqual(len(run.installs()), 1)
+        self.assertIsNone(upgrade.read_pending())
+
+    def test_an_interrupted_manual_wait_lifts_its_mark(self):
+        run = SequencedRun(['54171\n'], installed=FakeRun.HEAD)
+
+        def sleep(_s):
+            raise KeyboardInterrupt
+        with self.assertRaises(KeyboardInterrupt):
+            _quiet(upgrade.cmd_upgrade, argparse.Namespace(
+                skip_pipx=False, ref=None, owner=None, wait=540, sleep=sleep), run=run)
+        self.assertIsNone(upgrade.read_pending())  # never leaves the factory parked
+
+
 class HooksTest(HomeCase):
     def setUp(self):
         super().setUp()

@@ -18,7 +18,8 @@ a stuck upgrade never stops the factory.
 
 The floor drains rather than waits for luck. A running asf process counts — the ticks and the
 detached background harvest (``python -m asf.tick.step_harvest``) alike, since a reinstall under
-either tears it — and while a marker is pending no tick spawns a new background harvest
+either tears it; a process under another ASF home, such as a test suite's ``tick --product
+sample`` in a temp dir, is not the factory's and never counts — and while a marker is pending no tick spawns a new background harvest
 (:func:`asf.tick.step_harvest.run`), so the processes running out end. The owner's tick polls
 for them at its start for up to ``upgrade.drain_wait_s`` (:func:`drain_wait_s`, default
 :data:`DEFAULT_DRAIN_WAIT_S`) before it defers; ``asf upgrade --wait`` does the same by hand and
@@ -284,11 +285,45 @@ def remote_head(url, run=subprocess.run, branch='main'):
 
 
 def other_ticks(run=subprocess.run, me=None):
-    """Pids of the asf tick and background harvest processes other than this one (and its
-    parent)."""
+    """Pids of the asf tick and background harvest processes of this install's ASF home other
+    than this one (and its parent). A process under another ASF home — a test suite's
+    ``asf.cli tick --product sample`` in a temp dir — is not the factory's and never holds the
+    floor (:func:`foreign_homes`)."""
     me = me if me is not None else {os.getpid(), os.getppid()}
     text = _out(run, ['pgrep', '-f', TICK_PATTERN], timeout=10) or ''
-    return [int(x) for x in text.split() if x.isdigit() and int(x) not in me]
+    pids = [int(x) for x in text.split() if x.isdigit() and int(x) not in me]
+    foreign = foreign_homes(pids, run) if pids else set()
+    return [p for p in pids if p not in foreign]
+
+
+_ENV_HOME = re.compile(r'(?:^|\s)(ASF_HOME|HOME)=(\S+)')
+
+
+def _real(path):
+    return os.path.realpath(os.path.expanduser(path))
+
+
+def foreign_homes(pids, run=subprocess.run):
+    """The pids whose environment names an ASF home other than :data:`asf.env.ASF_HOME` —
+    ``ASF_HOME``, else ``HOME``/.ASF, exactly as :mod:`asf.env` resolves it. Read from
+    ``ps eww`` (the command followed by its environment); a process whose environment cannot be
+    read is not foreign — an unknown process still holds the floor."""
+    text = _out(run, ['ps', 'eww', '-o', 'pid=,command=', '-p', ','.join(str(p) for p in pids)],
+                timeout=10) or ''
+    ours = _real(env.ASF_HOME)
+    foreign = set()
+    for ln in text.splitlines():
+        parts = ln.split(None, 1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        found = {}
+        for name, value in _ENV_HOME.findall(parts[1]):
+            found[name] = value  # the environment follows the argv: the last one is the env's
+        home = found.get('ASF_HOME') or (os.path.join(found['HOME'], '.ASF')
+                                         if found.get('HOME') else None)
+        if home and _real(home) != ours:
+            foreign.add(int(parts[0]))
+    return foreign
 
 
 def describe(pids, run=subprocess.run):
@@ -404,7 +439,12 @@ def install(ref=None, run=subprocess.run, out=print, owner=None, wait_s=0, sleep
                 until = time.strftime('%H:%M', time.localtime(cooling() or time.time()))
                 out(f'upgrade: no pending mark until {until} — an earlier one expired; '
                     'the other ticks run')
-    others = drain(others, wait_s, run, out, sleep)
+    try:
+        others = drain(others, wait_s, run, out, sleep)
+    except BaseException:
+        if marked is not None and not owner:
+            clear_pending()  # an interrupted manual wait never leaves the factory parked
+        raise
     if others:
         where = 'the next tick' if owner else 'later'
         out(f'upgrade: deferred to {where} — another asf process is running '
