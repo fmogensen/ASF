@@ -1681,6 +1681,32 @@ class InstallScriptTest(unittest.TestCase):
         self.assertIn('run one to write it: asf console-permissions install --product demo '
                       '--scope user|repo', r.stdout)
 
+    def test_an_unloaded_clock_is_retried_once_and_then_succeeds(self):
+        """B-0136: the first read-back finds the clock not loaded; install.sh retries the
+        bootstrap once and, once that clock is loaded, the step is not a failure."""
+        r, calls = self._run(status_results=[('1', self.NOT_LOADED), ('0', '')])
+        self.assertEqual(calls, ['--version', 'hooks',
+                                 'scheduler', 'scheduler',   # install, then the failing status
+                                 'scheduler', 'scheduler',   # the retried install, then status
+                                 'doctor', 'console-permissions'], r.stderr)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn('FAILED', r.stderr)
+        self.assertIn('retrying the bootstrap once', r.stdout + r.stderr)
+
+    def test_an_unloaded_clock_still_missing_after_retry_fails_loudly_naming_it(self):
+        """B-0136's own acceptance: a clock still not loaded after the retry fails the install
+        loudly, naming the missing label — not just a bare non-zero exit."""
+        r, calls = self._run(status_results=[('1', self.NOT_LOADED)])
+        self.assertEqual(calls, ['--version', 'hooks', 'scheduler', 'scheduler',
+                                 'scheduler', 'scheduler', 'doctor', 'console-permissions'],
+                         r.stderr)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('install: FAILED step 4: asf scheduler install --product demo (exit 1)',
+                      r.stderr)
+        self.assertIn('install: NEEDS OPERATOR: clock(s) still not loaded after retrying the '
+                      'bootstrap: asf.demo.record-health-wave-prs-harvest', r.stderr)
+        self.assertIn('/plugin install asf@asf', r.stdout)  # steps 5 and 6 still ran
+
 
 if __name__ == '__main__':
     unittest.main()
