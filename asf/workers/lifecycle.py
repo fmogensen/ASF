@@ -562,7 +562,7 @@ def settled(path, item, at):
     return _settling_run(path, item, at) is not None
 
 
-#: the sha a REPORT's ``pushed:`` line names (``yes <sha>`` / ``rebased <sha> — …``)
+#: the sha a REPORT's typed ``sha`` field names
 PUSHED_SHA_RE = re.compile(r'\b[0-9a-f]{7,40}\b', re.I)
 
 
@@ -595,17 +595,19 @@ def overruling(path, item, head, unchanged_since=None):
     run = ruled[-1]  # only the newest ruling speaks for the branch as it stands
     rec = result_of(run) or {}
     text = rec.get('result') if isinstance(rec, dict) else ''
-    rep = report_mod.parse(text or '')
-    status = (rep.get('status') or '').strip().lower().split(' ')[0]
+    try:
+        rep = report_mod.typed(text or '', None)
+    except report_mod.ReportError:
+        rep = {}
     fields = report_mod.ruling_fields(text or '')
-    if status != 'done' or not report_mod.ruling(text or '') \
+    if rep.get('status') != 'done' or not report_mod.ruling(text or '') \
             or fields['blocked_on'] or fields['superseded_by']:
         return None
-    m = PUSHED_SHA_RE.search(rep.get('pushed') or '')
+    m = PUSHED_SHA_RE.search(rep.get('sha') or '')
     sha = m.group(0).lower() if m else ''
     if sha and head.lower().startswith(sha):
         return run.get('job')
-    if not report_mod._claim(rep.get('commits')) and run.get('launch_head') \
+    if not rep.get('commits') and run.get('launch_head') \
             and run['launch_head'].lower() == head.lower():
         return run.get('job')  # launched on this head, committed nothing: the head it ruled on
     if sha and unchanged_since and unchanged_since(sha):
