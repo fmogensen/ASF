@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from asf import ci_queue, env
 from asf.harvest import deploy
@@ -2115,3 +2116,78 @@ class TestStaleSweep(ReliefBase):
         e = ci_queue.load('p')['entries']
         self.assertEqual(list(e), ['pr:feat/a'])
         self.assertEqual((e['pr:feat/a']['sha'], e['pr:feat/a']['since']), ('s2', since))
+
+
+class TestOwnCadence(ReliefBase):
+    """2026-09-26 22:42, a product: 7 heavy + 7 light runners idle with 45 in the line. The
+    queue's pass (superseded, dedupe, relief and its re-runs) ran only inside a tick's lane pass
+    — once a tick, ticks of 7–24 min, and none while an upgrade was pending. It is its own
+    scheduler job now (``asf ci queue --apply``, every minute): its own lock, never the tick's,
+    never skipped nor counted by the upgrade drain."""
+
+    def test_the_pass_admits_while_a_tick_runs_and_an_upgrade_is_pending(self):
+        from asf import upgrade
+        from asf.tick import tick
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        gh, run = self.gh(self.runs())
+        self.relieve(p, run)                            # 101, 102, 201 cancelled for main
+        held = tick.acquire_lock(p)                     # a tick of p is mid-health
+        self.assertIsNotNone(held)
+        upgrade.write_pending('a' * 40, 'other')
+        try:
+            self.assertTrue(upgrade.read_pending())
+            gh, run = self.gh(self.runs(trunk_status='in_progress'), busy=())
+            self.lines.clear()
+            self.assertEqual(ci_queue.apply(p, source=ci_queue.GitHubSource(p, run=run),
+                                            out=self.lines.append,
+                                            now=self.t0 + datetime.timedelta(minutes=2)), 0)
+        finally:
+            held.close()
+        self.assertEqual(self.cancels(gh, 'rerun'), ['102', '101'])
+        self.assertIn('ci queue: re-ran pr run 102 (T-0341, Feature) — main run 900 at '
+                      'fffffffff started after waiting 24m', self.lines)
+
+    def test_one_pass_at_a_time_the_lane_pass_leaves_it_to_a_running_one(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        gh, run = self.gh(self.runs())
+        lock = ci_queue.acquire_pass_lock(p)
+        try:
+            self.assertIsNone(ci_queue.queue_pass(p, source=ci_queue.GitHubSource(p, run=run),
+                                                  out=self.lines.append, now=self.t0))
+            self.assertEqual(ci_queue.apply(p, source=ci_queue.GitHubSource(p, run=run),
+                                            out=self.lines.append, now=self.t0), 0)
+        finally:
+            lock.close()
+        self.assertEqual(gh.calls, [])
+        self.assertIn('ci queue: a pass of p runs already — skipped', self.lines)
+        # free again: the pass runs — cancels for the starved trunk run, as the lane's did
+        self.assertEqual(ci_queue.queue_pass(p, source=ci_queue.GitHubSource(p, run=run),
+                                             out=self.lines.append, now=self.t0), (3, 0))
+
+    def test_an_unqueued_product_makes_no_gh_call(self):
+        self.assertEqual(ci_queue.apply(product(pool=False), source=NoGh()), 0)
+
+    def test_a_queued_product_has_its_own_queue_clock_outside_the_drain(self):
+        import re
+        from asf import scheduler, upgrade
+        clocks = {'main': {'steps': ['record'], 'every': '5m'}}
+        queued = env.Product('p', {'repo_slug': 'o/r', 'clocks': clocks,
+                                   'ci': {'provider': 'github-actions', 'workflow': 'ci.yml',
+                                          'pool': pool_data()}})
+        plain = env.Product('p', {'repo_slug': 'o/r', 'clocks': clocks})
+        self.assertEqual([c.name for c in scheduler.clocks(plain)], ['main'])
+        clock = scheduler.clocks(queued)[-1]
+        self.assertEqual((clock.name, clock.interval_s), (scheduler.QUEUE_CLOCK, 60))
+        with mock.patch.object(scheduler, 'snapshot_repo', return_value=None):
+            job = scheduler.render(queued, clock, cfg={})
+        argv = job['argv']
+        self.assertEqual(argv[argv.index('ci'):], ['ci', 'queue', '--apply', '--product', 'p'])
+        self.assertNotIn('tick', argv)
+        self.assertIsNone(re.search(upgrade.TICK_PATTERN, ' '.join(argv)))
+        # read back from the installed job as the same clock (no drift, never retired)
+        label = scheduler.label_for('p', clock.name, {})
+        self.assertEqual(scheduler.clock_of_plist(label, job['plist'], 'p', {}), clock)

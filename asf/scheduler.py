@@ -32,6 +32,11 @@ clock renders one job, labelled ``<label_prefix>.<product>.<clock-name>`` and lo
 name only to the tick, not here: a clock whose only step is ``daily`` renders ``--steps daily``
 like any other (the daily stamp keeps it once a day); ``--daily`` alone would run every step.
 An installed job still carrying the old ``--daily`` form reads back as the daily clock.
+
+A product whose CI start queue is on also gets the queue's own job, never declared:
+:data:`QUEUE_CLOCK` (``asf.<product>.ci-queue``), ``asf ci queue --apply`` every
+:data:`QUEUE_EVERY_S` seconds (:func:`asf.ci_queue.apply`). ``install`` retires it once the queue
+is off.
 """
 import fnmatch
 import os
@@ -56,7 +61,15 @@ _CLOCK_KEYS = {'steps', 'shadow', 'every', 'at'}
 MIN_EVERY_S = 60
 _CRON_HOUR_DIVISORS = (1, 2, 3, 4, 6, 8, 12)
 
-Clock = namedtuple('Clock', 'name steps shadow interval_s calendar')
+#: ``command``: None for a tick clock; :data:`QUEUE_COMMAND` for the CI queue's own job
+Clock = namedtuple('Clock', 'name steps shadow interval_s calendar command', defaults=(None,))
+
+#: the CI start queue's own job (:func:`asf.ci_queue.apply`): every product whose queue is on
+#: (a ``ci.pool``, ``ci.queue.mode`` not ``off``) gets it beside its declared clocks — the pass
+#: must not wait for a tick (7–24 min, none while an upgrade is pending) to start idle runners
+QUEUE_CLOCK = 'ci-queue'
+QUEUE_COMMAND = 'ci-queue'
+QUEUE_EVERY_S = 60
 
 
 class SchedulerError(Exception):
@@ -186,7 +199,12 @@ def clock_code(product_name):
 
 
 def tick_argv(product_name, clock):
-    """``asf tick`` as the scheduler will run it — absolute interpreter, module form."""
+    """``asf tick`` as the scheduler will run it — absolute interpreter, module form. The
+    queue's clock runs ``asf ci queue --apply`` instead: no ``tick`` in it, so the upgrade
+    drain neither skips nor counts it (:data:`asf.upgrade.TICK_PATTERN`)."""
+    if clock.command == QUEUE_COMMAND:
+        return [sys.executable, '-m', 'asf.cli', 'ci', 'queue', '--apply', '--product',
+                product_name]
     argv = [sys.executable, '-m', 'asf.cli', 'tick', '--product', product_name]
     if clock.shadow:
         argv.append('--shadow')
@@ -290,6 +308,10 @@ def clocks(product):
 
     if errors:
         raise SchedulerError('\n'.join(errors))
+    if QUEUE_CLOCK not in declared and hasattr(product, '_get'):
+        from asf import ci_queue
+        if ci_queue.mode(product) != 'off':
+            built.append(Clock(QUEUE_CLOCK, [], False, QUEUE_EVERY_S, None, QUEUE_COMMAND))
     return built
 
 
@@ -656,6 +678,10 @@ def clock_of_plist(label, data, product_name, cfg=None):
     prefix = f'{label_prefix(cfg)}.{product_name}.'
     name = label[len(prefix):] if label.startswith(prefix) else ''
     argv = list((data or {}).get('ProgramArguments') or [])
+    every = (data or {}).get('StartInterval')
+    if (name == QUEUE_CLOCK and argv[-5:-2] == ['ci', 'queue', '--apply']
+            and isinstance(every, int) and every > 0):
+        return Clock(name, [], False, every, None, QUEUE_COMMAND)
     if not CLOCK_NAME_RE.match(name) or 'tick' not in argv:
         return None
     rest = argv[argv.index('tick') + 1:]
@@ -710,7 +736,8 @@ def _undeclared(product_name, declared_names, cfg):
 def _undeclared_lines(product_name, undeclared):
     lines = [f'scheduler: {label} is installed but not a clock in products/{product_name}.yaml'
              + ('' if c else ' (not a job this adapter renders)') for label, c in undeclared]
-    adoptable = [c for _label, c in undeclared if c]
+    # the queue's job is never declared: `install` retires it once the queue is off
+    adoptable = [c for _label, c in undeclared if c and not c.command]
     if adoptable:
         lines.append(f'scheduler: declare it in products/{product_name}.yaml '
                      f'(`asf scheduler install` does):')
@@ -721,7 +748,7 @@ def _undeclared_lines(product_name, undeclared):
 def adopt(product_name, undeclared):
     """Append the ``clocks:`` block for the installed jobs to a product file that has none —
     appended, so every byte above it stays as the operator wrote it. Returns the lines to print."""
-    adoptable = [(label, c) for label, c in undeclared if c]
+    adoptable = [(label, c) for label, c in undeclared if c and not c.command]
     if not adoptable:
         return []
     path = env.product_path(product_name)

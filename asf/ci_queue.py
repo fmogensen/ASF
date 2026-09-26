@@ -2079,6 +2079,82 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
     return n
 
 
+# ---- the queue's own pass ---------------------------------------------------------------------
+
+#: the pass's lock file in the product's state dir: one pass at a time, never the tick's lock
+PASS_LOCK = 'ci-queue.lock'
+
+
+def acquire_pass_lock(product, wait_s=0):
+    """The queue pass's lock (an open file holding ``flock``), or None when another pass of the
+    product holds it after ``wait_s``. It dies with its process."""
+    import fcntl
+    import time
+    f = open(os.path.join(env.state_dir(product.name), PASS_LOCK), 'a')
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return f
+        except OSError:
+            if time.monotonic() >= deadline:
+                f.close()
+                return None
+            time.sleep(0.5)
+
+
+def queue_pass(product, items=None, source=None, out=print, dry_run=False, listing=None,
+               now=None, wait_s=0):
+    """One pass of the queue under its lock: the superseded trunk runs, the duplicate pushes,
+    the relief — its sweep, its re-runs through the line (the head guard among them) and its
+    cancels. ``(cancelled, re-run)``; None when another pass holds the lock (the lane's pass
+    and the queue's own job are the same pass: either one does it). Not a queued product:
+    ``(0, 0)``, no ``gh`` call."""
+    if mode(product) == 'off' or not product.repo_slug:
+        return 0, 0
+    lock = acquire_pass_lock(product, wait_s)
+    if lock is None:
+        return None
+    try:
+        listing = {} if listing is None else listing
+        src = source or GitHubSource(product)
+        n = cancel_superseded(product, source=src, out=out, dry_run=dry_run)
+        n += cancel_duplicate_pushes(product, source=src, out=out, dry_run=dry_run,
+                                     listing=listing)
+        c, r = relieve_trunk(product, items=items, source=src, out=out, dry_run=dry_run,
+                             now=now, listing=listing)
+        return n + c, r
+    finally:
+        lock.close()
+
+
+def _saved_items(product):
+    """The record's items as the last harvest step saved them (``harvest-items.json``), for
+    the priorities; None when there is none."""
+    try:
+        with open(os.path.join(env.state_dir(product.name), 'harvest-items.json'),
+                  encoding='utf-8') as f:
+            items = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return items if isinstance(items, dict) else None
+
+
+def apply(product, source=None, out=print, now=None):
+    """``asf ci queue --apply``: the queue's own job, every minute (:data:`asf.scheduler.
+    QUEUE_CLOCK`). A tick runs the pass once, at its lane pass — ticks of 7–24 min, and none
+    while an upgrade is pending — so runners sat idle with the line full (2026-09-26 22:42: 7
+    heavy + 7 light idle, 45 queued). This job holds no tick lock, never waits on the upgrade
+    marker, and is no process the upgrade drain counts (:data:`asf.upgrade.TICK_PATTERN`): a
+    reinstall under it costs one pass, the next minute's runs. 0 always."""
+    if mode(product) == 'off':
+        return 0
+    got = queue_pass(product, items=_saved_items(product), source=source, out=out, now=now)
+    if got is None:
+        out(f'ci queue: a pass of {product.name} runs already — skipped')
+    return 0
+
+
 # ---- reading it -------------------------------------------------------------------------------
 
 @dataclasses.dataclass
@@ -2203,8 +2279,11 @@ def header(name, m, waiting):
 
 
 def cmd_queue(args, source=None, out=print):
-    """``asf ci queue``: the line, in order, with each entry's decision now. Writes nothing."""
+    """``asf ci queue``: the line, in order, with each entry's decision now. Writes nothing.
+    ``--apply``: run the queue's pass instead (:func:`apply`) — the scheduler's queue job."""
     product = env.load_product(args.product)
+    if getattr(args, 'apply', False):
+        return apply(product, source=source, out=out)
     m = mode(product)
     if m == 'off':
         out(f'ci queue: {product.name} is not queued (no ci.pool, or ci.queue.mode off) — '
@@ -2237,5 +2316,8 @@ def register(ci_subparsers):
     env.add_product_arg(q)
     q.add_argument('--dry-run', action='store_true',
                    help='accepted for symmetry; the view never writes')
+    q.add_argument('--apply', action='store_true',
+                   help='run the queue pass (superseded, dedupe, relief, re-runs) — the '
+                        "scheduler's ci-queue job")
     q.set_defaults(run=cmd_queue)
     return q
