@@ -155,6 +155,8 @@ class Overrides(unittest.TestCase):
 
     def test_r4_a_moved_head_in_any_open_state_is_pushed_again(self):
         for s in lane.OPEN_STATES:
+            if s == lane.PARKED:  # Tp': PARKED has its own resume rule, not R4's
+                continue
             with self.subTest(state=s):
                 state, reason = lane.next_state(rec(s), facts(head=NEW))
                 self.assertEqual(state, lane.PUSHED)
@@ -209,6 +211,76 @@ class Overrides(unittest.TestCase):
         # …but not while the harvest that wrote it still holds the gate
         self.assertEqual(lane.next_state(rec(lane.MERGING, reason='m'),
                                          facts(harvest_running=True)), (lane.MERGING, 'm'))
+
+
+class Draft(unittest.TestCase):
+    """Tp/Tp': the PR's owner parked it as a draft — no merge, no review/correction/adjudicate,
+    no reword or rebase — and unparks it by marking it ready again (B-0130)."""
+
+    def draft_pr(self, number=817, **kw):
+        pr = {'number': number, 'state': 'OPEN', 'head': HEAD, 'draft': True}
+        pr.update(kw)
+        return facts(mode='pr', pr=pr)
+
+    def test_tp_any_open_state_but_merging_and_queued_parks(self):
+        f = self.draft_pr()
+        for s in (None, lane.PUSHED, lane.PR_OPEN, lane.REVIEW, lane.GATE, lane.WAITING,
+                  lane.WAITING_CI, lane.BACK):
+            with self.subTest(state=s):
+                prev = rec(s) if s is not None else None
+                state, reason = lane.next_state(prev, f)
+                self.assertEqual(state, lane.PARKED)
+                self.assertIn('draft', reason)
+                self.assertIn('#817', reason)
+
+    def test_tp_merging_and_queued_are_not_interrupted_mid_merge(self):
+        merging = facts(mode='pr', pr={'number': 817, 'state': 'OPEN', 'head': HEAD,
+                                       'draft': True}, harvest_running=True)
+        self.assertEqual(lane.next_state(rec(lane.MERGING, reason='m'), merging),
+                         (lane.MERGING, 'm'))
+        queued = self.draft_pr(queued=True)
+        self.assertEqual(lane.next_state(rec(lane.QUEUED, reason='q'), queued), (lane.QUEUED, 'q'))
+
+    def test_tp_stays_parked_while_still_a_draft(self):
+        parked = rec(lane.PARKED, reason='PR #817 is a draft — parked by its owner')
+        self.assertEqual(lane.next_state(parked, self.draft_pr()), (lane.PARKED, parked['reason']))
+
+    def test_tp_a_closed_or_stale_draft_resolves_first_not_parked(self):
+        closed = facts(mode='pr', pr={'number': 817, 'state': 'CLOSED', 'head': HEAD,
+                                      'draft': True})
+        self.assertEqual(lane.next_state(rec(lane.REVIEW), closed)[0], lane.STALE)
+        merged = facts(mode='pr', pr={'number': 817, 'state': 'MERGED', 'head': HEAD,
+                                      'draft': True})
+        self.assertEqual(lane.next_state(rec(lane.GATE), merged), (lane.MERGED, 'method=external'))
+
+    def test_tpprime_ready_for_review_resumes_at_pr_open(self):
+        parked = rec(lane.PARKED, reason='PR #817 is a draft — parked by its owner')
+        ready = facts(mode='pr', pr={'number': 817, 'state': 'OPEN', 'head': HEAD,
+                                     'draft': False})
+        state, reason = lane.next_state(parked, ready)
+        self.assertEqual(state, lane.PR_OPEN)
+        self.assertIn('#817', reason)
+        # normal progression resumes from there, as any PR_OPEN branch's would
+        self.assertEqual(lane.next_state(rec(state, head=HEAD), ready)[0], lane.GATE)
+
+    def test_prs_reads_isdraft(self):
+        product = env.Product('p', {'repo_slug': 'o/p', 'conventions': {'landing': 'pull-request'}})
+        h = lane.GitHubHost(product)
+        data = [{'number': 817, 'headRefName': 'cloud/direct-F-0111', 'headRefOid': HEAD,
+                 'state': 'OPEN', 'isDraft': True, 'baseRefName': 'main'}]
+        with mock.patch.object(lane.H, 'gh_json', return_value=data) as m:
+            out = h.prs()
+        self.assertTrue(out['cloud/direct-F-0111']['draft'])
+        self.assertTrue(any('isDraft' in a for a in m.call_args[0][0]))
+
+    def test_prs_a_ready_pr_is_not_draft(self):
+        product = env.Product('p', {'repo_slug': 'o/p', 'conventions': {'landing': 'pull-request'}})
+        h = lane.GitHubHost(product)
+        data = [{'number': 818, 'headRefName': 'cloud/direct-F-0113', 'headRefOid': HEAD,
+                 'state': 'OPEN', 'isDraft': False}]
+        with mock.patch.object(lane.H, 'gh_json', return_value=data):
+            out = h.prs()
+        self.assertFalse(out['cloud/direct-F-0113']['draft'])
 
 
 class LandingClass(unittest.TestCase):
@@ -1309,6 +1381,27 @@ class Occupancy(unittest.TestCase):
         occ = lifecycle.occupancy(self.path)
         self.assertEqual(occ['docs']['F-0001']['spec'], lifecycle.PUSHED_WAIT)
         self.assertIn('spec/F-0001', occ['branches'])
+
+    def test_a_parked_draft_pr_launches_nothing_and_shows_a_waits_row(self):
+        """B-0130: PARKED is busy (no new session) and lands in ``landing``, never ``review`` —
+        the feeder shows a WAITS row naming the draft, never PUSHED → REVIEW nor an adjudicate."""
+        self.run_('coder-t-0004', 'T-0004', 'worker/T-0004', lane.PARKED, pr=817,
+                  reason='PR #817 is a draft — parked by its owner')
+        self.line(job='coder-t-0004', correction={'kind': 'gate', 'text': 'red', 'at': 'x'},
+                  rounds=1)
+        occ = lifecycle.occupancy(self.path)
+        self.assertIn('T-0004', occ['waiting_landing'])
+        self.assertNotIn('T-0004', occ['review'])
+        self.assertIn('draft', occ['landing']['T-0004']['why'])
+        item = {'T-0004': {'id': 'T-0004', 'type': 'task', 'state': 'Active', 'parent': 'F-0001'}}
+        product = env.Product('p', {'conventions': {}})
+        rows = feeder_rows.candidates(item, product, [], occupancy=occ)
+        self.assertEqual([r.kind for r in rows], [feeder_rows.PUSHED_LAND])
+        row = rows[0]
+        self.assertFalse(row.launches)
+        self.assertIn('draft', row.action + row.reason)
+        self.assertNotIn(feeder_rows.PUSHED_REVIEW, [r.kind for r in rows])
+        self.assertNotIn(feeder_rows.STALEMATE, [r.kind for r in rows])
 
 
 class FeederAndOutcomes(unittest.TestCase):
