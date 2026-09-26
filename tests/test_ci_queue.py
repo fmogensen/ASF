@@ -39,8 +39,10 @@ class FakeGh:
     """``subprocess.run`` for ``gh``: runners, a workflow's run history, its jobs, runs in flight.
     Every argv is logged."""
 
-    def __init__(self, busy=(), offline=(), history=None, inflight=0, listed=None):
+    def __init__(self, busy=(), offline=(), history=None, inflight=0, listed=None, files=None):
         self.busy, self.offline = set(busy), set(offline)
+        #: ``{run id: [changed file]}``: the PR (numbered as its run) each run was for
+        self.files = files or {}
         #: the completed runs ``gh run list`` names (default: every history run, a success)
         self.listed = listed
         # three runs of ci.yml: heavy 3, 3, 2 jobs and one light job each
@@ -74,6 +76,13 @@ class FakeGh:
         elif argv[:2] == ['gh', 'api'] and any('/jobs' in a for a in argv):
             run_id = int(next(a for a in argv if '/jobs' in a).split('/runs/')[1].split('/')[0])
             out = '\n'.join(json.dumps(j) for j in self.history[run_id - 1])
+        elif argv[:2] == ['gh', 'api'] and any('/pulls/' in a for a in argv):
+            n = int(next(a for a in argv if '/pulls/' in a).split('/pulls/')[1].split('/')[0])
+            out = '\n'.join(self.files.get(n) or ())
+        elif argv[:2] == ['gh', 'api'] and any('actions/runs/' in a for a in argv):
+            run_id = int(next(a for a in argv if 'actions/runs/' in a).split('/runs/')[1]
+                         .split('/')[0].split('?')[0])
+            out = str(run_id) if run_id in self.files else ''
         return subprocess.CompletedProcess(argv, 0, out, '')
 
 
@@ -195,15 +204,15 @@ class TestPeakConcurrency(Base):
         self.assertEqual(ci_queue.needs_from_history([staged_run()] * 4, pool),
                          {'heavy': 3, 'light': 1})
 
-    def test_the_median_over_the_runs_capped_at_the_class(self):
+    def test_the_p90_over_the_runs_capped_at_the_class(self):
         pool = self.pool()
-        # three of ten runs peak at 3 heavy, seven at 2: p90 said 3, the median is 2
+        # three of ten runs peak at 3 heavy, seven at 2: the median said 2, p90 is 3
         runs = [staged_run(stage2=2)] * 7 + [staged_run(stage2=3)] * 3
-        self.assertEqual(ci_queue.needs_from_history(runs, pool)['heavy'], 2)
-        # one outlier at 3 never lifts it
+        self.assertEqual(ci_queue.needs_from_history(runs, pool)['heavy'], 3)
+        # one run in ten at 3 sits above p90: it never lifts it
         runs = [staged_run(stage2=2)] * 9 + [staged_run(stage2=3)]
         self.assertEqual(ci_queue.needs_from_history(runs, pool)['heavy'], 2)
-        # an even split rounds up: 2 and 3 → 3
+        # two runs: 2 and 3 → 3
         runs = [staged_run(stage2=2), staged_run(stage2=3)]
         self.assertEqual(ci_queue.needs_from_history(runs, pool)['heavy'], 3)
         # a stage wider than the class (3 heavy runners) is capped at the class
@@ -218,7 +227,8 @@ class TestPeakConcurrency(Base):
         self.assertEqual(self.queue(p, gh).needs('ci.yml'), {'heavy': 3, 'light': 1})
         jq = next(a for c in gh.calls if any('/jobs' in x for x in c) for a in c
                   if a.startswith('.jobs'))
-        for field in ('runner_name', 'conclusion', 'started_at', 'completed_at', 'run_attempt'):
+        for field in ('runner_name', 'conclusion', 'created_at', 'started_at', 'completed_at',
+                      'run_attempt'):
             self.assertIn(field, jq)
 
     def test_the_estimate_ignores_cancelled_runs_and_superseded_attempts(self):
@@ -731,7 +741,7 @@ class TestModes(Base):
         for gh, said in ((FakeGh(), 'would start'),
                          (FakeGh(busy={'h1', 'h2'}), 'waits: heavy 1 free, needs 3')):
             view = self.view(p, gh)
-            self.assertIn(f'1. T-0341 [pr, Feature, since', view[2])
+            self.assertIn(f'1. T-0341 [pr, Feature, full run, since', view[2])
             self.assertTrue(view[2].endswith(said), view[2])
             row = ci_queue.status_clause(p, source=self.src(p, gh))
             self.assertEqual(row, f"ci queue 1, head T-0341 {said.replace('waits:', 'waits —')} "
@@ -934,3 +944,147 @@ class TestStarvationGuard(Base):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def fanout_run(width=12, runners=4):
+    """A run as the host reports it on a busy pool: ``gate`` on one heavy runner 0..5, then
+    ``width`` heavy jobs all queued at once at 5 (``created_at``) that start only as a runner
+    frees — ``runners`` at a time, each 10 minutes. The run *asks* for ``width`` heavy runners
+    at once though at most ``runners`` ever ran together."""
+    t = lambda m: f'2026-09-25T{10 + m // 60:02d}:{m % 60:02d}:00Z'
+    jobs = [{'id': 1, 'runner_name': 'h1', 'labels': ['self-hosted', 'heavy'],
+             'conclusion': 'success', 'created_at': t(0), 'started_at': t(0),
+             'completed_at': t(5)}]
+    for i in range(width):
+        start = 5 + 10 * (i // runners)
+        jobs.append({'id': 10 + i, 'runner_name': f'h{(i % 12) + 1}',
+                     'labels': ['self-hosted', 'heavy'], 'conclusion': 'success',
+                     'created_at': t(5), 'started_at': t(start), 'completed_at': t(start + 10)})
+    jobs.append({'id': 99, 'runner_name': None, 'labels': ['self-hosted', 'heavy'],
+                 'conclusion': 'skipped', 'created_at': t(5), 'started_at': t(5),
+                 'completed_at': t(5)})
+    return jobs
+
+
+def fanout_product(queue=None, conv=None):
+    ci = {'provider': 'github-actions', 'workflow': 'ci.yml',
+          'pool': [{'runner': f'h{i}', 'provider': 'alpha', 'role': 'heavy'} for i in range(1, 13)]
+          + [{'runner': 'l1', 'provider': 'alpha', 'role': 'light'}]}
+    if queue is not None:
+        ci['queue'] = queue
+    data = {'repo_slug': 'o/r', 'ci': ci}
+    if conv is not None:
+        data['conventions'] = conv
+    return env.Product('p', data)
+
+
+class FanoutGh(FakeGh):
+    """:class:`FakeGh` on the 12-heavy pool of :func:`fanout_product`."""
+
+    def __call__(self, argv, **kw):
+        if argv[:2] == ['gh', 'api'] and any('actions/runners' in a for a in argv):
+            self.calls.append(argv)
+            out = '\n'.join(json.dumps({
+                'name': f'h{i}', 'id': i, 'busy': f'h{i}' in self.busy, 'status': 'online',
+                'labels': [{'name': 'self-hosted'}, {'name': 'heavy'}]}) for i in range(1, 13))
+            return subprocess.CompletedProcess(argv, 0, out, '')
+        return super().__call__(argv, **kw)
+
+
+class TestDemand(Base):
+    """The estimate is the heavy runners a run *asks for* at once (its jobs queued or running
+    together), not how many a contended pool happened to give it; per run type (full / light),
+    at p90 over the runs."""
+
+    def test_a_fan_out_asks_for_every_job_at_once_however_few_ran_together(self):
+        pool = wide_pool()
+        by_name = {e.runner: e for e in pool}
+        # 12 heavy jobs queued at once after gate; the busy pool ran 4 at a time
+        self.assertEqual(ci_queue.peak_concurrent(fanout_run(12, 4), by_name, {'heavy': 'heavy'}),
+                         {'heavy': 12})
+        self.assertEqual(ci_queue.needs_from_history([fanout_run(12, 3)] * 5, pool),
+                         {'heavy': 12})
+        # a job with no created_at is counted from its start, as before
+        jobs = [dict(j, created_at=None) for j in fanout_run(12, 4)]
+        self.assertEqual(ci_queue.peak_concurrent(jobs, by_name, {'heavy': 'heavy'}),
+                         {'heavy': 4})
+
+    def test_run_type_by_changed_paths(self):
+        p = fanout_product()
+        self.assertEqual(ci_queue.run_type(p, ['docs/guide/x.md', 'README.md']), 'light')
+        self.assertEqual(ci_queue.run_type(p, ['docs/a/b/c.png']), 'light')
+        self.assertEqual(ci_queue.run_type(p, ['docs/x.md', 'src/a.py']), 'full')
+        self.assertEqual(ci_queue.run_type(p, []), 'full')          # nothing known: full
+        self.assertEqual(ci_queue.run_type(p, None), 'full')
+        p = fanout_product(queue={'light_paths': ['apps/site/**']})
+        self.assertEqual(ci_queue.run_type(p, ['apps/site/page.tsx']), 'light')
+        self.assertEqual(ci_queue.run_type(p, ['docs/x.md']), 'full')   # the list replaces
+        # the product's own docs roots (the lane's docs class) are light too
+        p = fanout_product(conv={'specs_dir': 'specs', 'doc_paths': ['plans/**']})
+        self.assertEqual(ci_queue.run_type(p, ['specs/a.txt', 'plans/b/c.txt']), 'light')
+
+    def test_full_and_light_runs_are_estimated_apart(self):
+        pool = wide_pool()
+        runs = [fanout_run(12, 3)] * 8 + [fanout_run(4, 4)] * 3
+        types = ['full'] * 8 + ['light'] * 3
+        self.assertEqual(ci_queue.needs_by_type(runs, types, pool),
+                         {'full': {'heavy': 12}, 'light': {'heavy': 4}})
+        # no light run measured: a light start is sized as a full one
+        self.assertEqual(ci_queue.needs_by_type(runs[:8], types[:8], pool),
+                         {'full': {'heavy': 12}, 'light': {'heavy': 12}})
+
+    def test_the_queue_sizes_a_docs_pr_as_a_light_run_and_a_code_pr_as_a_full_one(self):
+        p = fanout_product()
+        # runs 1..8 full (PRs touching code), 9..10 light (docs PRs), 11 a run with no PR
+        history = [fanout_run(12, 3)] * 8 + [fanout_run(4, 4)] * 2 + [fanout_run(12, 3)]
+        files = {i: ['src/app.py'] for i in range(1, 9)}
+        files.update({9: ['docs/a.md'], 10: ['README.md']})
+        gh = FanoutGh(busy={f'h{i}' for i in range(1, 7)}, history=history, files=files,
+                      listed=[{'databaseId': i, 'conclusion': 'success', 'attempt': 1}
+                              for i in range(1, 12)])
+        q = self.queue(p, gh, write=True)
+        self.assertEqual(q.needs('ci.yml'), {'heavy': 12})
+        self.assertEqual(q.needs('ci.yml', 'light'), {'heavy': 4})
+        self.assertFalse(ci_queue.admit(p, 'pr:code', 'pr', item='T-0500', items=ITEMS,
+                                        files=['src/app.py'], queue=q).admitted)
+        self.assertIn('heavy 6 free, needs 12', self.lines[-1])
+        q = self.queue(p, gh)
+        d = ci_queue.admit(p, 'pr:docs', 'pr', item='T-0341', items=ITEMS,
+                           files=['docs/guide.md'], queue=q)
+        self.assertTrue(d.admitted, self.lines)
+        # the next pass: the same run ids re-use the cached measure — no jobs or files read
+        gh2 = FanoutGh(history=history, files=files, listed=gh.listed)
+        q = self.queue(p, gh2, minutes=ci_queue.EXPECT_TTL_S // 60 + 1)
+        self.assertEqual(q.needs('ci.yml', 'light'), {'heavy': 4})
+        self.assertFalse([c for c in gh2.calls if any('/jobs' in a or '/pulls/' in a for a in c)])
+
+    def test_the_trunk_run_is_sized_full(self):
+        p = fanout_product()
+        history = [fanout_run(12, 3)] * 3 + [fanout_run(4, 4)] * 3
+        files = {i: ['src/a.py'] for i in (1, 2, 3)}
+        files.update({i: ['docs/a.md'] for i in (4, 5, 6)})
+        q = self.queue(p, FanoutGh(history=history, files=files))
+        self.assertEqual(q.needs(ci_queue.workflow_for(p, 'trunk')), {'heavy': 12})
+
+    def test_a_configured_estimate_overrides_the_measure(self):
+        p = fanout_product(queue={'estimate': {'heavy': {'full': 10, 'light': 2}}})
+        history = [fanout_run(12, 3)] * 3
+        q = self.queue(p, FanoutGh(history=history))
+        self.assertEqual(q.needs('ci.yml'), {'heavy': 10})
+        self.assertEqual(q.needs('ci.yml', 'light'), {'heavy': 2})
+        p = fanout_product(queue={'estimate': {'heavy': 7, 'light': {'light': 0}}})
+        q = self.queue(p, FanoutGh(history=history))
+        self.assertEqual(q.needs('ci.yml'), {'heavy': 7})
+        self.assertEqual(q.needs('ci.yml', 'light'), {'heavy': 7})
+
+    def test_config_problems_for_light_paths_and_estimate(self):
+        ok = {'queue': {'light_paths': ['docs/**'], 'estimate': {'heavy': {'full': 12,
+                                                                          'light': 4}}}}
+        self.assertEqual(ci_queue.config_problems(ok), [])
+        self.assertEqual(ci_queue.config_problems({'queue': {'estimate': {'heavy': 3}}}), [])
+        bad = dict(ci_queue.config_problems({'queue': {
+            'light_paths': 'docs/**', 'estimate': {'heavy': {'full': -1, 'huge': 3},
+                                                   'light': 'x'}}}))
+        self.assertEqual(sorted(bad), ['ci.queue.estimate.heavy.full',
+                                       'ci.queue.estimate.heavy.huge',
+                                       'ci.queue.estimate.light', 'ci.queue.light_paths'])
