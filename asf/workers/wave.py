@@ -92,15 +92,28 @@ def order(rows):
 
 
 def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_brief, out=print,
-         spawn_fn=None, local_hold='', cloud_runtime=None):
+         spawn_fn=None, local_hold='', cloud_runtime=None, cloud_ready=None):
     """Returns ``(launched, waits)``: lists of ``(row, record)`` and ``(row, reason)``.
 
-    ``local_hold`` (host pressure's reason) keeps every row off the local lane. A row the local
+    ``local_hold`` (host pressure's reason) keeps every row off the local lane — never off the
+    cloud lane. With ``cloud.default: true`` a row :func:`asf.workers.cloud.first` names goes to
+    the cloud lane first and to the local lane when the cloud is full; otherwise a row the local
     lane cannot take goes to the cloud lane when it is on and the row is eligible
-    (:mod:`asf.workers.cloud`), launched by ``cloud_runtime`` (default: the configured one);
-    its line reads ``launched … → <acct> (<model>) cloud <session url>``."""
+    (:mod:`asf.workers.cloud`). Cloud launches go through ``cloud_runtime`` (default: the
+    configured one); the line reads ``launched … → <acct> (<model>) cloud <session url>``.
+
+    ``cloud_ready`` is the lane's ``(ready, why)`` (:func:`asf.workers.cloud.readiness`), read
+    once per tick by the caller; ``None`` reads it here, once for the whole wave. An unready lane
+    prints ``cloud lane unready: <why> — local lane only`` once and takes no row."""
     cfg = spawn_mod.load_cfg() if cfg is None else cfg
     cloud = cloud_mod.settings(cfg, product)
+    if cloud.on:
+        ready, why = cloud_ready if cloud_ready is not None else cloud_mod.readiness(cfg, product)
+        if not ready:
+            out(f'cloud lane unready: {why} — local lane only')
+    else:
+        ready = False
+    cloud_open = cloud.on and ready
     sample = pool is None  # a tick's own pool: its readings are history (asf.workers.headroom)
     pool = pool or pool_mod.Pool.from_config(cfg, product)
     spawn_fn = spawn_fn or spawn_mod.spawn
@@ -116,14 +129,22 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
         elif (product.name, row.job) in running:
             reason = 'already running'
         else:
-            lane = 'local'
-            if local_hold:
-                acct, reason = None, f'held: {local_hold}'
-            else:
-                acct, reason = pool.pick_account(
-                    row.kind, row.model, is_fix=row.is_fix, s1_is_open=s1,
-                    lane=row.lane or ('local' if cloud.on else None))
-            if acct is None and cloud.on and cloud_mod.eligible(row, cloud):
+            lane, acct, creason = 'local', None, ''
+            first = cloud_open and cloud_mod.first(row, cloud)
+            if first:                           # cloud.default: the cloud lane before the local
+                acct, creason = pool.pick_cloud(row.kind, row.model, cloud)
+                if acct is not None:
+                    lane = 'cloud'
+            if acct is None:
+                if local_hold:
+                    acct, reason = None, f'held: {local_hold}'
+                else:
+                    acct, reason = pool.pick_account(
+                        row.kind, row.model, is_fix=row.is_fix, s1_is_open=s1,
+                        lane=row.lane or ('local' if cloud.on else None))
+                if acct is None and first:
+                    reason = f'{creason}; {reason}'
+            if acct is None and not first and cloud_open and cloud_mod.eligible(row, cloud):
                 cacct, creason = pool.pick_cloud(row.kind, row.model, cloud)
                 if cacct is not None:
                     acct, lane = cacct, 'cloud'

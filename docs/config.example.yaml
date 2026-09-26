@@ -108,7 +108,8 @@ host_guards:
 # builds, tests, commits and pushes, and harvest lands it as any branch. `asf cloud install
 # --product <p>` writes the workflow into the product checkout (commit it to the default branch);
 # the repo secret `token_secret` holds the cloud-lane account's own token. A product file's own
-# `cloud:` overrides these keys one by one. `asf doctor` shows a `cloud lane` row set.
+# `cloud:` overrides these keys one by one. `asf doctor` shows a `cloud lane` row set; `asf cloud
+# doctor --product <p>` prints each readiness check of the lane as ok or gap.
 #
 # The runtime `claude-cloud` is refused at config check: the runtime CLI cannot create a cloud
 # session non-interactively (`-p --cloud` is interactive only), so a lane on it could never launch.
@@ -121,6 +122,18 @@ cloud:
   rows: cloud-ok               # or `any`: which rows may go to the lane
   # accounts: [acct-a]         # whose quota they spend; unset = the role: cloud accounts
   timeout_min: 240             # a run still working after this is cancelled, and ends dead
+  # default: the cloud as the DEFAULT executor instead of overflow. true: a row of kind coder,
+  # correct, review, adjudicate, fix-bug, spec, plan, direct or groom (every kind with
+  # `rows: any`; a cloud-ok row too) goes to the cloud FIRST, up to max_inflight; the local lane
+  # takes rows that are local-only, and every row while the cloud lane is full or unready. Host
+  # pressure then holds local rows only — a cloud row runs nothing here, bounded by max_inflight
+  # and its account's quota; the fair share bounds both lanes (a cloud session is a live one).
+  # The lane is unready — the wave says `cloud lane unready: <why> — local lane only` — while a
+  # critical check of `asf cloud doctor --product <p>` fails (the token secret's name in the repo,
+  # the workflow on the trunk, an online runner carrying runs_on, a cloud account).
+  default: false
+  # local_only: [groom]        # kinds that never leave the host; a card's own `local_only: true`
+                               # keeps that item's rows local too (both modes)
 
 # capacity: the ceilings the factory runs under. Every number is "at most this many at once".
 # A key left out means "no opinion" — the next fallback applies (see docs/guide/product-config.md).

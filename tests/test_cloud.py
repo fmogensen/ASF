@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from asf import env
 from asf.workers import actions
@@ -321,7 +322,7 @@ class FakeCloudRuntime(runtime_mod.Runtime):
         return r
 
 
-class Placement(Home):
+class Lanes(Home):
     def setUp(self):
         super().setUp()
         self.product = env.Product('sample', dict(self.product._data, repo_slug='o/r'))
@@ -330,7 +331,7 @@ class Placement(Home):
             {'name': 'acct-a', 'role': 'local', 'cap': 1},
             {'name': 'acct-c', 'role': 'cloud', 'cap': 1}])
 
-    def run_wave(self, rows, live=(), local_hold='', cfg=None):
+    def run_wave(self, rows, live=(), local_hold='', cfg=None, ready=(True, '')):
         accounts = pool_mod.accounts_from_config(cfg or self.cfg)
         pool = pool_mod.Pool(accounts, quota_source=quota_mod.FakeQuotaSource({}), live=live)
         self.crt = FakeCloudRuntime()
@@ -338,9 +339,11 @@ class Placement(Home):
         launched, waits = wave_mod.wave(
             self.product, rows, 5, pool=pool,
             runtime=runtime_mod.FakeRuntime([{'running': True}] * 5), cfg=cfg or self.cfg,
-            out=lines.append, local_hold=local_hold, cloud_runtime=self.crt)
+            out=lines.append, local_hold=local_hold, cloud_runtime=self.crt, cloud_ready=ready)
         return launched, waits, lines
 
+
+class Placement(Lanes):
     def test_host_pressure_sends_the_row_to_the_cloud(self):
         launched, waits, lines = self.run_wave([feature_row('spec-1')],
                                                local_hold='host pressure load 50/cores 10')
@@ -389,6 +392,196 @@ class Placement(Home):
         live = [{'job': 'x', 'account': 'acct-a'}, {'job': 'y', 'account': 'acct-c'}]
         launched, waits, _ = self.run_wave([feature_row('spec-1')], live=live, cfg=cfg)
         self.assertEqual((launched, waits[0][1]), ([], 'pool full'))
+
+
+class DefaultPlacement(Lanes):
+    """``cloud.default: true``: an eligible row goes to the cloud first, local after."""
+
+    def setUp(self):
+        super().setUp()
+        self.cfg = dict(self.cfg, cloud=dict(ON, default=True, rows='cloud-ok'))
+
+    def lanes(self, launched):
+        return [(r.job, rec.get('lane') or 'local') for r, rec in launched]
+
+    def test_settings_read_the_keys(self):
+        s = cloud.settings({'cloud': {'enabled': True, 'max_inflight': 1}})
+        self.assertEqual((s.default, s.local_only), (False, ()))
+        s = cloud.settings({'cloud': {'enabled': True, 'max_inflight': 1, 'default': True,
+                                      'local_only': ['groom', 'review']}})
+        self.assertEqual((s.default, s.local_only), (True, ('groom', 'review')))
+        self.assertEqual(cloud.settings({'cloud': {'local_only': 'groom'}}).local_only,
+                         ('groom',))
+
+    def test_default_on_sends_an_eligible_row_to_the_cloud_first(self):
+        # a free local seat is there, and the row still goes to the cloud
+        launched, waits, lines = self.run_wave([feature_row('spec-1')])
+        self.assertEqual((self.lanes(launched), waits), ([('spec-1', 'cloud')], []))
+        self.assertIn('→ acct-c (opus) cloud', lines[0])
+
+    def test_a_kind_off_the_list_stays_local(self):
+        row = pool_mod.Row('close-f-0001', 'F-0001', model='Opus', kind='close')
+        launched, _waits, _ = self.run_wave([row])
+        self.assertEqual(self.lanes(launched), [('close-f-0001', 'local')])
+        # rows: any takes every kind first
+        cfg = dict(self.cfg, cloud=dict(self.cfg['cloud'], rows='any'))
+        row = pool_mod.Row('close-f-0002', 'F-0002', model='Opus', kind='close')
+        launched, _waits, _ = self.run_wave([row], cfg=cfg)
+        self.assertEqual(self.lanes(launched), [('close-f-0002', 'cloud')])
+
+    def test_local_only_kinds_and_items_stay_local(self):
+        cfg = dict(self.cfg, cloud=dict(self.cfg['cloud'], local_only=['spec']))
+        launched, _waits, _ = self.run_wave([feature_row('spec-1')], cfg=cfg)
+        self.assertEqual(self.lanes(launched), [('spec-1', 'local')])
+        row = feature_row('spec-2', item='F-0002')
+        row.local_only = True
+        launched, _waits, _ = self.run_wave([row])
+        self.assertEqual(self.lanes(launched), [('spec-2', 'local')])
+
+    def test_local_only_never_overflows_either(self):
+        cfg = dict(self.cfg, cloud=dict(ON, rows='any'))   # overflow mode
+        row = feature_row('spec-1')
+        row.local_only = True
+        live = [{'job': 'x', 'account': 'acct-a'}]
+        launched, waits, _ = self.run_wave([row], live=live, cfg=cfg)
+        self.assertEqual((launched, waits[0][1]), ([], 'pool full'))
+
+    def test_a_full_cloud_lane_falls_back_to_local(self):
+        live = [{'job': 'c1', 'account': 'acct-c', 'lane': 'cloud'},
+                {'job': 'c2', 'account': 'acct-c', 'lane': 'cloud'}]
+        launched, waits, _ = self.run_wave([feature_row('spec-1')], live=live)
+        self.assertEqual((self.lanes(launched), waits), ([('spec-1', 'local')], []))
+
+    def test_cloud_first_up_to_max_inflight_then_local(self):
+        rows = [feature_row(f'spec-{n}', item=f'F-000{n}') for n in (1, 2, 3)]
+        launched, _waits, _ = self.run_wave(rows)
+        self.assertEqual(self.lanes(launched),
+                         [('spec-1', 'cloud'), ('spec-2', 'cloud'), ('spec-3', 'local')])
+
+    def test_an_unready_lane_falls_back_to_local_with_one_line_why(self):
+        rows = [feature_row('spec-1'), feature_row('spec-2', item='F-0002')]
+        launched, _waits, lines = self.run_wave(
+            rows, ready=(False, 'repo secret CLAUDE_CODE_OAUTH_TOKEN is missing on o/r'))
+        self.assertEqual(self.lanes(launched), [('spec-1', 'local')])
+        why = [l for l in lines if l.startswith('cloud lane unready')]
+        self.assertEqual(why, ['cloud lane unready: repo secret CLAUDE_CODE_OAUTH_TOKEN is '
+                               'missing on o/r — local lane only'])
+
+    def test_host_pressure_holds_local_rows_but_not_cloud_rows(self):
+        cfg = dict(self.cfg, cloud=dict(self.cfg['cloud'], local_only=['close']))
+        close = pool_mod.Row('close-f-0009', 'F-0009', model='Opus', kind='close')
+        rows = [feature_row('spec-1'), close]
+        launched, waits, _ = self.run_wave(rows, local_hold='host pressure load 50/cores 10',
+                                           cfg=cfg)
+        self.assertEqual(self.lanes(launched), [('spec-1', 'cloud')])
+        self.assertEqual([(r.job, why) for r, why in waits],
+                         [('close-f-0009', 'held: host pressure load 50/cores 10')])
+
+    def test_readiness_is_read_once_per_wave_when_not_given(self):
+        calls = []
+
+        def ready(cfg, product, run_cmd=None):
+            calls.append(product.name)
+            return True, ''
+        rows = [feature_row(f'spec-{n}', item=f'F-000{n}') for n in (1, 2, 3)]
+        with mock.patch.object(cloud, 'readiness', ready):
+            launched, _waits, _ = self.run_wave(rows, ready=None)
+        self.assertEqual(calls, ['sample'])
+        self.assertEqual(len(launched), 3)
+
+
+class StepWaveLanes(unittest.TestCase):
+    """The wave step's split of the host hold: a ready lane takes the hold off cloud rows only;
+    an unready (or off) lane leaves the hold on every row and adds no seats."""
+
+    def test_the_split(self):
+        from asf.tick import step_wave
+        s = cloud.settings({'cloud': dict(ON, default=True)})
+        self.assertEqual(step_wave.split_hold(s, (True, ''), True, 'host pressure x'),
+                         (False, 'host pressure x', 2))
+        self.assertEqual(step_wave.split_hold(s, (False, 'no secret'), True, 'host pressure x'),
+                         (True, '', 0))
+        self.assertEqual(step_wave.split_hold(s, (True, ''), False, ''), (False, '', 2))
+        off = cloud.settings({})
+        self.assertEqual(step_wave.split_hold(off, (False, 'off'), True, 'h'), (True, '', 0))
+
+
+class Readiness(unittest.TestCase):
+    def product(self):
+        return env.Product('sample', {'repo_slug': 'o/r', 'main': 'main'})
+
+    def cfg(self, **over):
+        return {'cloud': dict(ON, default=True, **over),
+                'worker_pool': {'accounts': [{'name': 'acct-c', 'role': 'cloud'}]}}
+
+    def test_a_sound_lane_is_ready(self):
+        self.assertEqual(cloud.readiness(self.cfg(), self.product(), FakeGh()), (True, ''))
+
+    def test_a_critical_gap_is_unready_and_says_why(self):
+        ok, why = cloud.readiness(self.cfg(), self.product(), FakeGh(secrets=('OTHER',)))
+        self.assertFalse(ok)
+        self.assertIn('repo secret CLAUDE_CODE_OAUTH_TOKEN is missing on o/r', why)
+        ok, why = cloud.readiness(self.cfg(), self.product(), FakeGh(workflow=False))
+        self.assertFalse(ok)
+        self.assertIn('asf-worker.yml is not on main of o/r', why)
+
+    def test_an_unreadable_secret_list_is_not_critical(self):
+        self.assertEqual(cloud.readiness(self.cfg(), self.product(), FakeGh(secrets=None)),
+                         (True, ''))
+
+    def test_off_is_unready(self):
+        self.assertEqual(cloud.readiness({}, self.product(), FakeGh())[0], False)
+
+
+class DoctorCommand(unittest.TestCase):
+    def product(self):
+        return env.Product('sample', {'repo_slug': 'o/r', 'main': 'main'})
+
+    def cfg(self, **over):
+        return {'cloud': dict(dict(ON, default=True), **over),
+                'worker_pool': {'accounts': [{'name': 'acct-c', 'role': 'cloud'}]}}
+
+    def run_doctor(self, cfg, fake):
+        lines = []
+        rc = cloud.doctor(cfg, self.product(), run_cmd=fake, out=lines.append)
+        return rc, lines
+
+    def test_a_ready_lane_is_all_ok(self):
+        fake = FakeGh(runners=[{'name': 'r1', 'status': 'online',
+                                'labels': [{'name': 'self-hosted'}, {'name': 'linux'}]}])
+        rc, lines = self.run_doctor(self.cfg(runs_on=['self-hosted', 'linux']), fake)
+        self.assertEqual(rc, 0, lines)
+        body = [l for l in lines if l.startswith(('ok ', 'gap '))]
+        self.assertTrue(body and all(l.startswith('ok ') for l in body), lines)
+        text = '\n'.join(lines)
+        for want in ('cloud.enabled', 'cloud.default', 'repo secret CLAUDE_CODE_OAUTH_TOKEN',
+                     '.github/workflows/asf-worker.yml on main of o/r', 'online runner r1',
+                     'acct-c', 'ready: yes'):
+            self.assertIn(want, text)
+        # names only: the secret list is asked for names, never values
+        (secret_call,) = fake.named('secret', 'list')
+        self.assertEqual(secret_call[-2:], ['--json', 'name'])
+
+    def test_gaps_are_named_and_the_lane_is_unready(self):
+        fake = FakeGh(secrets=('OTHER',), workflow=False, runners=[
+            {'name': 'r1', 'status': 'offline', 'labels': [{'name': 'self-hosted'}]}])
+        rc, lines = self.run_doctor(self.cfg(runs_on=['self-hosted'], default=False), fake)
+        self.assertEqual(rc, 1)
+        text = '\n'.join(l for l in lines if l.startswith('gap '))
+        for want in ('cloud.default', 'repo secret CLAUDE_CODE_OAUTH_TOKEN is missing',
+                     'asf-worker.yml is not on main of o/r', 'no online runner carries'):
+            self.assertIn(want, text)
+        self.assertTrue(lines[-1].startswith('ready: no'), lines)
+
+    def test_off_says_so(self):
+        rc, lines = self.run_doctor({}, FakeGh())
+        self.assertEqual(rc, 1)
+        self.assertTrue(any(l.startswith('gap ') and 'cloud.enabled' in l for l in lines))
+
+    def test_the_cli_registers_the_subcommand(self):
+        from asf import cli
+        args = cli.build_parser().parse_args(['cloud', 'doctor', '--product', 'sample'])
+        self.assertEqual((args.cloud_command, args.product), ('doctor', 'sample'))
 
 
 class Sync(Placement):
