@@ -63,7 +63,13 @@ Transitions (plan §2 plus the §9 overrides):
 - T13n PUSHED/BACK → PUSHED    a naming refusal: the lane rewords the subjects itself
                                (:meth:`Lane.repair_naming`) — no session, no round; only a
                                reword it cannot push goes back to the session (no round)
-- T13s gate → PUSHED           the PR's sign-off check (``commit.signoff_check``, "DCO") red:
+- T13c any open → PUSHED       trunk history under a factory branch (copies of trunk commits,
+                               merges): the lane rebuilds it as the trunk plus its own commits
+                               (:meth:`Lane.drop_copies`), the old tip kept as
+                               ``archive/<branch>-copies-<sha9>`` — no session; a pick that
+                               conflicts pushes nothing and goes BACK with its files; a live
+                               session defers it
+- T13s gate → PUSHED          the PR's sign-off check (``commit.signoff_check``, "DCO") red:
                                the lane signs the unsigned commits off itself
                                (:meth:`Lane.repair_signoff`) — a factory branch only
 - Th  any open, head moved     → PUSHED(new head) (R4)
@@ -497,6 +503,114 @@ def rebuild_branch(repo, trunk, branch, transform, why=None):
              f'the same diff on origin/{trunk} — nothing pushed')
         return None, 0
     return parent, n
+
+
+#: the correction kind of a trunk-history rebuild (:func:`drop_trunk_copies`) that conflicted:
+#: its session rebases the branch's own commits onto the trunk, the factory publishes the result
+COPIES = 'copies'
+
+
+def trunk_history(repo, trunk, branch):
+    """``(copies, merges)``: the commits on ``origin/<branch>`` past ``origin/<trunk>`` whose
+    patch is already on the trunk (``--cherry-mark`` ``=``: copies of trunk commits, from a
+    session rebasing or merging the trunk in, or an old reword), and the merge commits on it."""
+    r = H.sh(['git', 'log', '--no-merges', '--cherry-mark', '--right-only', '--format=%m %H',
+              f'origin/{trunk}...origin/{branch}'], cwd=repo)
+    copies = [l.split()[1] for l in r.stdout.splitlines()
+              if r.returncode == 0 and l.startswith('= ')]
+    m = H.sh(['git', 'rev-list', '--merges', f'origin/{trunk}..origin/{branch}'], cwd=repo)
+    return copies, (m.stdout.split() if m.returncode == 0 else [])
+
+
+def _tree(repo, rev):
+    return H.sh(['git', 'rev-parse', f'{rev}^{{tree}}'], cwd=repo).stdout.strip()
+
+
+def drop_trunk_copies(repo, trunk, branch):
+    """Rebuild ``origin/<branch>`` as ``origin/<trunk>`` plus its OWN commits — every non-merge
+    commit past the trunk whose patch is not already on it — each applied in order by a
+    three-way merge against its own parent (``git merge-tree --merge-base``: a cherry-pick with
+    no checkout), its message, author and committer kept. Copies of trunk commits and merges are
+    dropped; a commit whose change the trunk already holds (an empty pick) too. Nothing is
+    pushed or written but objects. A dict: ``old`` (the tip read), ``new`` (the rebuilt tip, or
+    None), ``own`` (the shas kept), ``copies``, ``merges``, ``empty``, ``conflict``
+    (``(sha, [files])`` of the first pick that conflicts — the rebuild stops there) and ``why``
+    (why there is no ``new``). The guard: when the old tip merges cleanly into the trunk, the
+    rebuilt tree must be that merge's tree — never a change lost or brought back silently."""
+    res = {'old': '', 'new': None, 'own': [], 'copies': [], 'merges': [], 'empty': [],
+           'conflict': None, 'why': ''}
+    tip = H.sh(['git', 'rev-parse', '--verify', '-q', f'origin/{branch}'], cwd=repo).stdout.strip()
+    base = H.sh(['git', 'rev-parse', '--verify', '-q', f'origin/{trunk}'], cwd=repo).stdout.strip()
+    res['old'] = tip
+    if not tip or not base:
+        res['why'] = f'origin/{branch} or origin/{trunk} unreadable'
+        return res
+    r = H.sh(['git', 'log', '--reverse', '--topo-order', '--no-merges', '--cherry-mark',
+              '--right-only', '--format=%m %H %P', f'{base}...{tip}'], cwd=repo)
+    if r.returncode != 0:
+        res['why'] = 'git log failed'
+        return res
+    rows = [l.split() for l in r.stdout.splitlines() if l.strip()]
+    res['copies'] = [row[1] for row in rows if row[0] == '=']
+    m = H.sh(['git', 'rev-list', '--merges', f'{base}..{tip}'], cwd=repo)
+    res['merges'] = m.stdout.split() if m.returncode == 0 else []
+    if not res['copies'] and not res['merges']:
+        res['why'] = 'no trunk history under the branch'
+        return res
+    own = [row for row in rows if row[0] != '=']
+    parent = base
+    for row in own:
+        sha, parents = row[1], row[2:]
+        if len(parents) != 1:
+            res['why'] = f'{sha[:9]} has no single parent'
+            return res
+        mt = H.sh(['git', 'merge-tree', '--write-tree', '--name-only', '--no-messages',
+                   f'--merge-base={parents[0]}', parent, sha], cwd=repo)
+        lines = mt.stdout.splitlines()
+        if mt.returncode == 1:
+            files = []
+            for line in lines[1:]:
+                if not line.strip():
+                    break
+                if line not in files:
+                    files.append(line)
+            res['conflict'] = (sha, files)
+            return res
+        if mt.returncode != 0 or not lines:
+            res['why'] = f'{sha[:9]}: git merge-tree failed: {H.tail(mt.stderr or mt.stdout)}'
+            return res
+        tree = lines[0].strip()
+        if tree == _tree(repo, parent):
+            res['empty'].append(sha)  # its change is on the trunk already, by another patch
+            continue
+        info = H.sh(['git', 'log', '-1', '--date=raw',
+                     '--format=' + '%x00'.join(f for _, f in _IDENT), sha], cwd=repo)
+        fields = info.stdout.rstrip('\n').split('\x00')
+        raw = H.sh(['git', 'cat-file', 'commit', sha], cwd=repo).stdout
+        if info.returncode != 0 or len(fields) != len(_IDENT) or '\n\n' not in raw:
+            res['why'] = f'{sha[:9]} unreadable'
+            return res
+        env_ = dict(os.environ, **{k: v for (k, _), v in zip(_IDENT, fields)})
+        made = subprocess.run(['git', 'commit-tree', tree, '-p', parent],
+                              input=raw.split('\n\n', 1)[1], cwd=repo, capture_output=True,
+                              text=True, env=H.clean_env(env_))
+        if made.returncode != 0 or not made.stdout.strip():
+            res['why'] = f'{sha[:9]}: git commit-tree failed'
+            return res
+        parent = made.stdout.strip()
+        res['own'].append(sha)
+    if not res['own']:
+        res['why'] = (f'no own commit left: every commit on it is on origin/{trunk} already — '
+                      f'nothing to rebuild')
+        return res
+    whole = H.sh(['git', 'merge-tree', '--write-tree', '--no-messages', base, tip], cwd=repo)
+    if whole.returncode == 0 and whole.stdout.split()[:1] != [_tree(repo, parent)]:
+        res['why'] = (f'rebuild guard: the rebuilt tree is not origin/{branch} merged into '
+                      f'origin/{trunk} — a dropped commit is not the trunk\'s change; nothing '
+                      f'pushed')
+        return res
+    res['new'] = parent
+    return res
 
 
 def has_adjudicate_commit(repo, trunk, branch):
@@ -1419,6 +1533,11 @@ class Lane:
         if prev.get('delete') == DELETE_OWED and not self.dry_run and self.repo \
                 and f.get('head') and f['head'] == prev.get('head'):
             self.push_or_defer('delete', f)
+        # trunk history under a factory branch: rebuilt on the trunk here, before any refusal
+        # sends it back to a session that may not force-push
+        if self.repo:
+            moved = self.drop_copies(f) or moved
+            prev = f.get('prev') or {}
         # a branch already held for naming (a session pending, none running): reworded here
         if prev.get('state') == BACK and not f.get('live') \
                 and (f.get('correction') or {}).get('kind') == lifecycle.NAMING:
@@ -1653,6 +1772,99 @@ class Lane:
         if f.get('run') is None:
             self.write(f, self.record(f, PUSHED, 'adopted'))
         return self.set(f, PUSHED, f'reworded {n} subjects (naming)')
+
+    def drop_copies(self, f):
+        """Trunk history under a factory branch — copies of trunk commits (``git cherry``
+        ``-``: a session that merged or rebased the trunk in, an old reword) or merges — is
+        dropped by the lane with no session (:func:`drop_trunk_copies`): the old tip archived as
+        ``archive/<branch>-copies-<sha9>``, the branch rebuilt as ``origin/<trunk>`` plus its
+        own commits and pushed over a lease on the archived tip, one line logged, and the branch
+        goes on from PUSHED on the new head. A pick that conflicts pushes nothing: the branch is
+        kept as is and held back to its session with the conflicting files (:data:`COPIES`).
+        Never the trunk or a protected ref, never a branch under no factory prefix or a foreign
+        PR, never while a live session holds the branch (deferred until it ends). The record, or
+        None when nothing moved."""
+        b, old = f['branch'], f.get('head')
+        prev = f.get('prev') or {}
+        if not self.repo or not old or not f.get('kind') or f.get('foreign') \
+                or f.get('landed') or f.get('on_trunk') or (f.get('pr') or {}).get('draft') \
+                or prev.get('state') in (MERGING, QUEUED, PARKED) + TERMINAL_STATES:
+            return None
+        corr = f.get('correction') or {}
+        if corr.get('kind') == COPIES and prev.get('head') == old:
+            return None  # held for its conflict: the session's rebase moves the head
+        copies, merges = trunk_history(self.repo, self.trunk, b)
+        if not copies and not merges:
+            return None
+        what = (f'{len(copies)} copies of origin/{self.trunk} commits' if copies else '') \
+            + (' and ' if copies and merges else '') + (f'{len(merges)} merge(s)' if merges else '')
+        if f.get('live'):
+            self.out(f'trunk history on {b} ({what}): a live session holds it — the rebuild '
+                     f'waits for it to end')
+            return None
+        if self.guarded(b, f'drop trunk copies {b}'):
+            return None
+        if self.dry_run:
+            self.out(f'DRY: would rebuild {b} on origin/{self.trunk} without its {what}')
+            return None
+        self.fresh_trunk()
+        res = drop_trunk_copies(self.repo, self.trunk, b)
+        if res['old'] != old:
+            return None  # origin moved since the facts: next pass reads it again
+        if res['conflict']:
+            sha, files = res['conflict']
+            text = (f'trunk history under the branch ({what}): the lane rebuilt it on '
+                    f'origin/{self.trunk} and {sha[:9]} conflicts in {", ".join(files) or "?"} — '
+                    f'rebase the branch\'s own commits onto origin/{self.trunk} '
+                    f'(git rebase origin/{self.trunk}) resolving those files, never merge; the '
+                    f'factory publishes the rebased branch')
+            self.out(f'drop copies {b}: {sha[:9]} conflicts in {", ".join(files)} — the branch '
+                     f'is kept as is, back to its session')
+            if f.get('run') is None:
+                self.write(f, self.record(f, PUSHED, 'adopted'))
+            rec = self.set(f, BACK, f'kind={COPIES}')
+            self.results[b] = hold_with_correction(self.state_dir, b, f['run'], COPIES, text,
+                                                   self.out, head=old)
+            f['correction'] = {'kind': COPIES, 'text': text}
+            return rec
+        new = res['new']
+        if not new:
+            self.out(f'drop copies {b} failed: {res["why"]} — the branch is kept as is')
+            return None
+        archive = f'archive/{b}-copies-{old[:9]}'
+        if not self.ref_push(f'{old}:refs/heads/{archive}', f'archive {b}-copies'):
+            self.out(f'drop copies {b}: the old tip could not be archived — nothing pushed')
+            return None
+        wt = self.ref_checkout()
+        if not wt:
+            self.out(f'drop copies {b} failed: {self.ref_wt_error}')
+            return None
+        r = H.sh(['git', 'push', '-q', f'--force-with-lease=refs/heads/{b}:{old}', 'origin',
+                  f'{new}:refs/heads/{b}'], cwd=wt)
+        if r.returncode != 0:
+            self.out(f'drop copies {b} push refused: {push_why(r.stderr or r.stdout)} — kept')
+            return None
+        H.sh(['git', 'update-ref', f'refs/remotes/origin/{b}', new], cwd=self.repo)
+        dropped = len(res['copies']) + len(res['empty'])
+        self.out(f'dropped {dropped} trunk copies'
+                 + (f' and {len(res["merges"])} merge(s)' if res['merges'] else '')
+                 + f' from {b}: {old[:9]} → {new[:9]}, {len(res["own"])} own commit(s) on '
+                 f'origin/{self.trunk} ({self.trunk_sha_now()[:9]}); old tip kept as {archive}')
+        f['head'] = new
+        f['refusal'] = lane_refusal(self.repo, self.trunk, b, f.get('item'), self.conv)
+        if f.get('review'):
+            f['review']['current'] = review_mod.is_current(self.repo, self.conv, f'origin/{b}',
+                                                           f['review'], new)
+        if corr.get('kind') in (lifecycle.NAMING, COPIES, 'merge'):
+            H.mark_session(self.state_dir, (f.get('run') or {}).get('job') or b, correction=None)
+            f['correction'] = None
+        if f.get('run') is None:
+            self.write(f, self.record(f, PUSHED, 'adopted'))
+        state = BACK if f.get('correction') else PUSHED
+        return self.set(f, state, f'dropped {dropped} trunk copies')
+
+    def trunk_sha_now(self):
+        return H.sh(['git', 'rev-parse', f'origin/{self.trunk}'], cwd=self.repo).stdout.strip()
 
     def repair_signoff(self, f, check):
         """A sign-off refusal (the PR's ``check`` — :meth:`Conventions.is_signoff_check` — red),

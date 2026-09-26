@@ -1401,6 +1401,166 @@ class TrunkCommitsNeverReworded(LaneFixture):
         self.assertTrue(any('rewrite guard' in l for l in self.lines), self.lines)
 
 
+class TrunkCopiesDropped(LaneFixture):
+    """2026-09-26: lane branches carried copies of trunk commits (a product's T-0338: 22 of 31)
+    and looped — "rebase onto origin/main" went back to sessions whose briefs forbid a force.
+    The lane rebuilds a factory branch as the trunk plus its own commits itself: the old tip
+    archived, a conflict held back with its files and nothing pushed, never while a live session
+    holds the branch, never the trunk or a protected ref."""
+
+    B, AUTHOR = NamingRepair.B, NamingRepair.AUTHOR
+    tip = NamingRepair.tip
+    commit = TrunkCommitsNeverReworded.commit
+
+    def setUp(self):
+        super().setUp()
+        self.lines = []
+
+    def sessions(self):
+        return os.path.join(self.state_dir, 'sessions.jsonl')
+
+    def own(self, rev):
+        return sh(['git', 'log', '--format=%s', f'main..{rev}'], cwd=self.origin).stdout.split('\n')[:-1]
+
+    def copied_branch(self, own_files=None):
+        """A branch holding a copy of trunk commit ``x.txt`` (the trunk's own, landed later
+        under another sha) under two of its own commits."""
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        sh(['git', 'checkout', '-q', '-B', self.B, 'origin/main'], cwd=self.worker)
+        self.commit('feat(T-0001): the door', {'a.txt': 'a\n'})
+        self.commit('fix(ci): home-clock', {'x.txt': 'x\n'})
+        self.commit('fix(T-0001): the hinge', own_files or {'b.txt': 'b\n'})
+        sh(['git', 'push', '-q', '-f', 'origin', self.B], cwd=self.worker)
+        self.push_main({'x.txt': 'x\n'}, 'fix(ci): home-clock (#812)')
+        return self.tip()
+
+    def archive(self, old):
+        return sh(['git', 'rev-parse', '--verify', '-q',
+                   f'refs/heads/archive/{self.B}-copies-{old[:9]}'],
+                  cwd=self.origin).stdout.strip()
+
+    def test_copies_are_dropped_and_own_commits_kept_with_the_old_tip_archived(self):
+        old = self.copied_branch()
+        self.session('coder-t-0001', 'T-0001', self.B)
+        trunk = self.origin_main()
+        lane.lane_pass(self.product(), self.state_dir, out=self.lines.append)
+        new = self.tip()
+        self.assertNotEqual(new, old)
+        self.assertEqual(sh(['git', 'rev-parse', f'{new}~2'], cwd=self.origin).stdout.strip(),
+                         trunk)
+        self.assertEqual(self.own(new), ['fix(T-0001): the hinge', 'feat(T-0001): the door'])
+        # authors kept, the change the same
+        self.assertEqual(sh(['git', 'log', '--format=%an %ae %ad', f'main..{new}'],
+                            cwd=self.origin).stdout.splitlines(), ['Ada ada@x ' + sh(
+                                ['git', 'log', '-1', '--format=%ad', old],
+                                cwd=self.origin).stdout.strip()] * 2)
+        self.assertEqual(sh(['git', 'diff', f'main', new, '--stat'], cwd=self.origin).stdout,
+                         sh(['git', 'diff', 'main', old, '--stat'], cwd=self.origin).stdout)
+        self.assertEqual(self.archive(old), old)
+        done = [l for l in self.lines if l.startswith(f'dropped 1 trunk copies from {self.B}')]
+        self.assertEqual(len(done), 1, self.lines)
+        self.assertIn(f'{old[:9]} → {new[:9]}, 2 own commit(s)', done[0])
+        rec_ = self.lane_of(self.B)
+        self.assertEqual((rec_['state'], rec_['head']), (lane.GATE, new))
+        self.assertEqual(lifecycle.corrections(self.sessions()), {})
+        self.assertFalse(any('back to its session' in l for l in self.lines), self.lines)
+        self.assertEqual(self.origin_main(), trunk)
+
+    def test_a_naming_hold_caused_by_copies_is_cleared_not_sent_back(self):
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        sh(['git', 'checkout', '-q', '-B', self.B, 'origin/main'], cwd=self.worker)
+        self.commit('fix(ci): home-clock', {'x.txt': 'x\n'})
+        self.commit('tidy up', {'a.txt': 'a\n'})
+        sh(['git', 'push', '-q', '-f', 'origin', self.B], cwd=self.worker)
+        self.push_main({'x.txt': 'x\n'}, 'fix(ci): home-clock (#812)')
+        self.session('coder-t-0001', 'T-0001', self.B)
+        lane.lane_pass(self.product(), self.state_dir, out=self.lines.append)
+        self.assertEqual(self.own(self.tip()), ['task(T-0001): tidy up'])
+        self.assertEqual(lifecycle.corrections(self.sessions()), {})
+        self.assertFalse(any('back to its session' in l for l in self.lines), self.lines)
+
+    def test_a_merge_of_the_trunk_is_dropped_too(self):
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        sh(['git', 'checkout', '-q', '-B', self.B, 'origin/main'], cwd=self.worker)
+        self.commit('feat(T-0001): the door', {'a.txt': 'a\n'})
+        self.push_main({'y.txt': 'y\n'}, 'fix(ci): home-clock (#812)')
+        sh(['git', 'checkout', '-q', self.B], cwd=self.worker)
+        sh(['git', 'merge', '-q', '--no-edit', 'origin/main'], cwd=self.worker, env_=self.AUTHOR)
+        sh(['git', 'push', '-q', '-f', 'origin', self.B], cwd=self.worker)
+        self.session('coder-t-0001', 'T-0001', self.B)
+        lane.lane_pass(self.product(), self.state_dir, out=self.lines.append)
+        new = self.tip()
+        self.assertEqual(self.own(new), ['feat(T-0001): the door'])
+        self.assertEqual(sh(['git', 'rev-list', '--merges', f'main..{new}'],
+                            cwd=self.origin).stdout, '')
+        self.assertEqual(self.lane_of(self.B)['state'], lane.GATE)
+
+    def test_a_conflict_pushes_nothing_and_holds_with_the_files(self):
+        self.push_main({'c.txt': 'base\n'}, 'chore: c')
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        sh(['git', 'checkout', '-q', '-B', self.B, 'origin/main'], cwd=self.worker)
+        self.commit('fix(ci): home-clock', {'x.txt': 'x\n'})
+        self.commit('fix(T-0001): the hinge', {'c.txt': 'branch\n'})
+        sh(['git', 'push', '-q', '-f', 'origin', self.B], cwd=self.worker)
+        self.push_main({'x.txt': 'x\n'}, 'fix(ci): home-clock (#812)')
+        self.push_main({'c.txt': 'trunk\n'}, 'fix: c on the trunk (#813)')
+        old = self.tip()
+        self.session('coder-t-0001', 'T-0001', self.B)
+        lane.lane_pass(self.product(), self.state_dir, out=self.lines.append)
+        self.assertEqual(self.tip(), old)
+        self.assertEqual(self.archive(old), '')
+        self.assertTrue(any(l.startswith(f'drop copies {self.B}:') and 'c.txt' in l
+                            for l in self.lines), self.lines)
+        corr = lifecycle.corrections(self.sessions())['T-0001']
+        self.assertEqual(corr['kind'], lane.COPIES)
+        self.assertIn('conflicts in c.txt', corr['text'])
+        self.assertIn('the factory publishes the rebased branch', corr['text'])
+        self.assertEqual(self.lane_of(self.B)['state'], lane.BACK)
+        # the next pass on the same head leaves the hold alone: no second hold, no push
+        more = []
+        lane.lane_pass(self.product(), self.state_dir, out=more.append)
+        self.assertEqual(self.tip(), old)
+        self.assertFalse(any(l.startswith('held ') for l in more), more)
+
+    def test_a_live_session_defers_the_rebuild(self):
+        old = self.copied_branch()
+        p = subprocess.Popen(['true'])
+        p.wait()
+        with open(self.sessions(), 'a', encoding='utf-8') as fh:
+            fh.write(json.dumps({'job': 'coder-t-0001', 'item': 'T-0001', 'branch': self.B,
+                                 'kind': 'coder', 'pid': p.pid,
+                                 'started': '2026-09-21T00:00:00Z'}) + '\n')
+        lane.lane_pass(self.product(), self.state_dir, out=self.lines.append)
+        self.assertEqual(self.tip(), old)
+        self.assertEqual(self.archive(old), '')
+        self.assertTrue(any('a live session holds it' in l for l in self.lines), self.lines)
+
+    def test_a_branch_under_no_factory_prefix_is_never_rebuilt(self):
+        old = self.copied_branch()
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        f = {'branch': self.B, 'kind': None, 'item': 'T-0001', 'head': old,
+             'prev': rec(lane.PUSHED, head=old), 'run': {'job': 'x'}}
+        with mock.patch.object(lane, 'drop_trunk_copies') as dc:
+            self.assertIsNone(lane.Lane(self.product(), self.state_dir,
+                                        out=self.lines.append).drop_copies(f))
+        dc.assert_not_called()
+
+    def test_the_rebuild_guard_refuses_a_dropped_copy_the_trunk_reverted(self):
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        sh(['git', 'checkout', '-q', '-B', self.B, 'origin/main'], cwd=self.worker)
+        self.commit('fix(ci): home-clock', {'x.txt': 'x\n'})
+        self.commit('feat(T-0001): the door', {'a.txt': 'a\n'})
+        sh(['git', 'push', '-q', '-f', 'origin', self.B], cwd=self.worker)
+        self.push_main({'x.txt': 'x\n'}, 'fix(ci): home-clock (#812)')
+        sh(['git', 'rm', '-q', 'x.txt'], cwd=self.worker)
+        sh(['git', 'commit', '-qm', 'revert home-clock'], cwd=self.worker, env_=self.ident)
+        sh(['git', 'push', '-q', 'origin', 'tmp-main:main'], cwd=self.worker)
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        res = lane.drop_trunk_copies(self.repo, 'main', self.B)
+        self.assertIsNone(res['new'])
+        self.assertIn('rebuild guard', res['why'])
+
+
 class RefGuard(LaneFixture):
     """The product's host may protect nothing: every factory ref write refuses the trunk and a
     ``conventions.protected_refs`` ref itself, with one loud line."""
@@ -1424,6 +1584,17 @@ class RefGuard(LaneFixture):
         with mock.patch.object(lane, 'reword_branch') as rw:
             self.assertIsNone(self.runner().repair_naming(f))
         rw.assert_not_called()
+        self.loud()
+        self.assertEqual(self.origin_main(), self.trunk)
+
+    def test_the_copies_rebuild_never_rewrites_a_protected_ref(self):
+        for b in ('main', 'release/1'):
+            f = {'branch': b, 'kind': 'code', 'item': 'T-0001', 'head': self.trunk,
+                 'prev': rec(lane.PUSHED), 'run': None}
+            with mock.patch.object(lane, 'trunk_history', return_value=(['c' * 40], [])), \
+                    mock.patch.object(lane, 'drop_trunk_copies') as dc:
+                self.assertIsNone(self.runner().drop_copies(f))
+            dc.assert_not_called()
         self.loud()
         self.assertEqual(self.origin_main(), self.trunk)
 
