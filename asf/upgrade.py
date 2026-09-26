@@ -173,14 +173,6 @@ def pending(now=None, installed=None, out=print, run=subprocess.run):
             f'never found a gap — the parked ticks resume; the install is still due '
             f'(asf upgrade --ref {data["sha"][:7]} --wait)')
         return None
-    if age is None or age > PENDING_TTL_S or age < -60:
-        clear_pending()
-        _write_json(expired_path(), {'sha': data['sha'], 'owner': data.get('owner'),
-                                     'at': now or time.time()})
-        out(f'NEEDS OPERATOR: upgrade to {data["sha"][:7]} pending {int((age or 0) // 60)} min '
-            f'never found a gap — the parked ticks resume; the install is still due '
-            f'(asf upgrade --ref {data["sha"][:7]} --wait)')
-        return None
     return data
 
 
