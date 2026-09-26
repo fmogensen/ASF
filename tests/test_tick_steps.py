@@ -443,6 +443,88 @@ class WaveStepTests(StepsTestCase):
         self.assertEqual(len(evs), 1)
         self.assertEqual((evs[0]['load15'], evs[0]['cores'], evs[0]['swap_pct']), (90.0, 12, 87.0))
 
+    def test_an_s1_row_passes_the_load_only_hold_and_launches(self):
+        # 2026-09-26: fix-bug-b-1375 (S1) waited behind load other sessions made — "S1 first"
+        # must hold even under load: the LOAD half of the guard alone lets one S1 row through.
+        captured = []
+
+        def wave(product, rows, n, brief_fn=None, out=print):
+            captured.extend(rows)
+            bypass = ' (S1: passes host load hold)' if rows[0].host_load_bypass else ''
+            out(f'launched {rows[0].job:<24} {rows[0].item:<10} → acct-a (opus) pid 1{bypass}')
+            return [(rows[0], {'account': 'acct-a', 'model': 'opus', 'pid': 1})], []
+        reading = {'load15': 25.0, 'load1': 25.0, 'cores': 12, 'swap_pct': 10.0}
+        ctx = self.ctx()
+        with mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **kw: self.rows), \
+                mock.patch.object(step_wave, '_wave', wave), \
+                mock.patch.object(step_wave.host_mod, 'pressure',
+                                  return_value=(True, 'host pressure load 25 (1m 25)/cores 12, '
+                                                      'swap 10%', reading)):
+            step_wave.run(ctx, out=self.lines.append)
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0].item, 'B-0001')
+        self.assertTrue(captured[0].host_load_bypass)
+        self.assertIn('launched fix-bug-b-0001           B-0001     → acct-a (opus) pid 1 '
+                      '(S1: passes host load hold)', self.lines)
+        self.assertEqual(ctx.counts['launches'], 1)
+
+    def test_a_second_s1_bypass_waits_while_one_is_already_live(self):
+        # at most one S1 load-hold bypass at a time, across every product — the live ledger
+        # already carries one, so this tick's S1 row waits like any other under load pressure.
+        self.session(job='fix-bug-b-9000', item='B-9000', kind='fix-bug', pid=os.getpid(),
+                     host_load_bypass=True)
+        reading = {'load15': 25.0, 'load1': 25.0, 'cores': 12, 'swap_pct': 10.0}
+        ctx = self.ctx()
+        with mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **kw: self.rows), \
+                mock.patch.object(step_wave.host_mod, 'pressure',
+                                  return_value=(True, 'host pressure load 25 (1m 25)/cores 12, '
+                                                      'swap 10%', reading)):
+            step_wave.run(ctx, out=self.lines.append)
+        self.assertEqual(self.built, [])
+        self.assertEqual(self.waved, [])
+        self.assertEqual(ctx.counts['launches'], 0)
+        self.assertTrue(any(ln.startswith('waits    fix-bug-b-0001') and
+                            ln.endswith('— held: host pressure load 25 (1m 25)/cores 12, '
+                                        'swap 10%')
+                            for ln in self.lines), self.lines)
+
+    def test_an_s1_row_under_memory_pressure_is_held(self):
+        # the bypass never passes a host over its memory/swap guard — that holds every row,
+        # S1 included (host.load_only_hold is False whenever memory/swap is over too).
+        reading = {'load15': 5.0, 'load1': 5.0, 'cores': 12, 'swap_pct': 92.0}
+        ctx = self.ctx()
+        with mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **kw: self.rows), \
+                mock.patch.object(step_wave.host_mod, 'pressure',
+                                  return_value=(True, 'host pressure load 5 (1m 5)/cores 12, '
+                                                      'swap 92%', reading)):
+            step_wave.run(ctx, out=self.lines.append)
+        self.assertEqual(self.built, [])
+        self.assertEqual(self.waved, [])
+        self.assertEqual(ctx.counts['launches'], 0)
+        self.assertTrue(any(ln.startswith('waits    fix-bug-b-0001') and
+                            ln.endswith('— held: host pressure load 5 (1m 5)/cores 12, swap 92%')
+                            for ln in self.lines), self.lines)
+
+    def test_a_non_s1_row_under_load_is_held_unchanged(self):
+        # the bypass is an S1-only exception: any other row waits under load pressure exactly
+        # as before.
+        row = feeder_rows.Row(0, 'CARD → SPEC', 'F-0001', '', 'would launch spec-f-0001 (Opus)',
+                              'spec', 'spec/F-0001', 'ready')
+        reading = {'load15': 25.0, 'load1': 25.0, 'cores': 12, 'swap_pct': 10.0}
+        ctx = self.ctx()
+        with mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **kw: [row]), \
+                mock.patch.object(step_wave.host_mod, 'pressure',
+                                  return_value=(True, 'host pressure load 25 (1m 25)/cores 12, '
+                                                      'swap 10%', reading)):
+            step_wave.run(ctx, out=self.lines.append)
+        self.assertEqual(self.built, [])
+        self.assertEqual(self.waved, [])
+        self.assertEqual(ctx.counts['launches'], 0)
+        self.assertTrue(any(ln.startswith('waits    spec-f-0001') and
+                            ln.endswith('— held: host pressure load 25 (1m 25)/cores 12, '
+                                        'swap 10%')
+                            for ln in self.lines), self.lines)
+
     def test_the_wave_plans_over_the_plans_order(self):
         # defence in depth: the wave overlays the plan's order before the feeder sees the index
         seen = {}

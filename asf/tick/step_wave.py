@@ -39,6 +39,13 @@ ends on ``wave: held: …``. Sessions already running are never touched. With th
 lane held: …`` and the wave sends what the cloud lane can take there; its seats are added to the
 feeder's ceiling.
 
+An S1 item's row passes the LOAD half of that guard (:func:`asf.workers.host.load_only_hold`):
+"S1 first" must hold even under the load other sessions created. It never passes a host over its
+memory/swap guard — that holds every row, S1 included — and at most one such bypass may be live
+at a time, across every product (:func:`s1_bypass_live`, the session ledger the wave already
+reads): a second S1 row waits like any other while one is still running. The launch that takes it
+prints ``(S1: passes host load hold)`` on its ``launched`` line.
+
 Each launch appends a ``launch`` event (item, job, model, brief kind) to ``metrics/events``.
 """
 import importlib
@@ -60,6 +67,10 @@ from asf.workers import pool as pool_mod
 #: carries the job's key instead (the groom brief's job is ``groom-<date>``, D7).
 KIND_JOB_KEY = {'groom': 'groom_date'}
 _GROOM_FILE_RE = re.compile(r'^(\d{4}-\d{2}-\d{2})\.md$')
+
+#: the session ledger field a launch that passed the S1 load-hold bypass carries, so a later
+#: wave (this product's or another's — :func:`s1_bypass_live`) can see one is still live.
+HOST_LOAD_BYPASS_FIELD = 'host_load_bypass'
 
 
 def capacity(product=None):
@@ -356,8 +367,10 @@ def job_name(brief_kind, item_id, key=None):
     return f'{brief_kind}-{item_id if key is None else key}'.lower()
 
 
-def worker_row(row, brief, items):
-    """The workers' row for a feeder row and its brief."""
+def worker_row(row, brief, items, host_load_bypass=False):
+    """The workers' row for a feeder row and its brief. ``host_load_bypass``: this row's launch
+    is the S1 one passing the host guard's LOAD hold (:func:`s1_bypass_live`) — carried onto the
+    session ledger (:func:`asf.workers.spawn.spawn`) so a later wave can see it is still live."""
     item = items.get(row.item_id) or {}
     state, _, action = row.kind.partition(' → ')
     attr = KIND_JOB_KEY.get(brief.kind)
@@ -367,7 +380,8 @@ def worker_row(row, brief, items):
                         kind=brief.kind, severity=item.get('severity'),
                         feature=row.feature_id or None, branch=row.branch or None,
                         add_dirs=getattr(brief, 'add_dirs', None) or (),
-                        card_digest=getattr(brief, 'card_digest', '') or '')
+                        card_digest=getattr(brief, 'card_digest', '') or '',
+                        host_load_bypass=host_load_bypass)
 
 
 def host_hold(planned):
@@ -377,6 +391,15 @@ def host_hold(planned):
     if not any(row.launches for row in planned):
         return False, '', {}
     return host_mod.pressure(env.load_config())
+
+
+def s1_bypass_live():
+    """Whether an S1 session that already passed the load-hold bypass is still live, anywhere
+    across every product (:func:`asf.workers.lifecycle.live_all` — the same cross-product ledger
+    read the pool sums load over, F-0076): at most one such bypass runs at a time, so a second S1
+    row waits behind it like any other row under load pressure."""
+    root = os.path.join(env.ASF_HOME, 'state')
+    return any(r.get(HOST_LOAD_BYPASS_FIELD) for r in lifecycle.live_all(root))
 
 
 def cloud_settings(product):
@@ -442,6 +465,12 @@ def launch(ctx, out=print):
     local_hold = host_why if host_held and cloud.on else ''
     if local_hold:
         host_held = False
+    # an S1 item's row passes the LOAD half of the guard — never memory/swap pressure, and at
+    # most one such bypass live at a time, across every product (asf.workers.host.load_only_hold)
+    s1_bypass_open = (host_held
+                      and host_mod.load_only_hold(reading, host_mod.guards_from_config(env.load_config()))
+                      and not s1_bypass_live())
+    bypassed = False
     worker_rows, texts, kinds = [], {}, {}
     for row in planned:
         cause = getattr(row, 'cause', '')
@@ -456,10 +485,14 @@ def launch(ctx, out=print):
             job = job_name(row.brief_kind, row.item_id)
             out(f'waits    {job:<24} {row.item_id:<10} — held {cls} ({level})')
             continue
-        if host_held:                           # a loaded host takes no new session this tick
+        bypass = s1_bypass_open and (items.get(row.item_id) or {}).get('severity') == 'S1'
+        if host_held and not bypass:             # a loaded host takes no new session this tick
             job = job_name(row.brief_kind, row.item_id)
             out(f'waits    {job:<24} {row.item_id:<10} — held: {host_why}')
             continue
+        if bypass:
+            s1_bypass_open = False              # one bypass at a time, across the whole wave
+            bypassed = True
         if row.brief_kind == 'adjudicate' and getattr(row, 'between', ()):
             (la, ta), (lb, tb) = row.between
             pair = getattr(row, 'common', '')
@@ -468,7 +501,7 @@ def launch(ctx, out=print):
             out(f'adjudicate {job:<24} {row.item_id:<10} — {la}: {ta[:60]} ↔ {lb}: {tb[:60]}{common}')
         brief = _build(product, row, items, running,
                        repo_facts=repo_facts(product, row.branch))
-        wrow = worker_row(row, brief, items)
+        wrow = worker_row(row, brief, items, host_load_bypass=bypass)
         worker_rows.append(wrow)
         texts[wrow.job] = brief.text
         kinds[wrow.job] = brief.kind
@@ -480,8 +513,10 @@ def launch(ctx, out=print):
     if host_held:
         ctx.event('host_pressure', load15=reading.get('load15'), cores=reading.get('cores'),
                   swap_pct=reading.get('swap_pct'))
-        out(f'wave: held: {host_why} — no new session this tick; running sessions go on')
-        return 0
+        if not bypassed:
+            out(f'wave: held: {host_why} — no new session this tick; running sessions go on')
+            return 0
+        out(f'wave: held: {host_why} — an S1 row passes the load hold; the rest wait')
     if local_hold:
         ctx.event('host_pressure', load15=reading.get('load15'), cores=reading.get('cores'),
                   swap_pct=reading.get('swap_pct'))
