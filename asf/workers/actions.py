@@ -364,7 +364,11 @@ class ActionsRuntime(runtime_mod.Runtime):
         cloudpid.record(tok, cloud.WORKING, 'dispatched', run=run_id,
                         url=(hit or {}).get('url'))
         result = runtime_mod.Result(pid=tok, log_path=log_path)
-        result.extra = {'lane': 'cloud', 'cloud_runtime': self.name, 'actions_run_id': run_id,
+        # 'runtime_lane', never 'lane': the run record's 'lane' key is the harvest lane state
+        # machine's own record (a map — asf.harvest.lane.Lane.advance), a different concern from
+        # this runtime's cloud-vs-local marker; a shared key made retention.in_flight and other
+        # dict readers of run['lane'] crash on this string (F-lane-collision).
+        result.extra = {'runtime_lane': 'cloud', 'cloud_runtime': self.name, 'actions_run_id': run_id,
                         'actions_run_name': run_name, 'cloud_url': (hit or {}).get('url'),
                         'brief_ref': ref}
         return result

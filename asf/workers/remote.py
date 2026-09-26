@@ -411,7 +411,8 @@ class RemoteRuntime(runtime_mod.Runtime):
                                   'routine': link}) + '\n')
         cloudpid.record(tok, cloud.WORKING, 'dispatched', run=sid, url=where, routine=link)
         result = runtime_mod.Result(pid=tok, log_path=log_path)
-        result.extra = {'lane': 'cloud', 'cloud_runtime': self.name, 'remote_trigger_id': tid,
+        # 'runtime_lane', never 'lane': see asf.workers.actions.ActionsRuntime.run for why.
+        result.extra = {'runtime_lane': 'cloud', 'cloud_runtime': self.name, 'remote_trigger_id': tid,
                         'remote_session_id': sid, 'cloud_url': where, 'remote_routine_url': link}
         return result
 
