@@ -349,25 +349,50 @@ def _age_key(item):
     return item.get('created') or item.get('stage_since') or '~'
 
 
-def bug_rows(items, product, busy, attempts=None):
+def bug_rows(items, product, busy, attempts=None, why=None):
     """Within a tier: fewest attempts, then the older card, then id. ``attempts`` is ``{id: sessions
     the registry holds}``, ended or not. A Bug at the limit gets one adjudicate row — its session
-    is the next attempt, so the row is gone once it has run (attempts above the limit: silent)."""
-    attempts, out = attempts or {}, []
+    is the next attempt, so the row is gone once it has run.
+
+    A decided, open S1/S2 Bug is never silent (inbox "NEXT drops S1/S2 bugs silently"): each
+    branch that gives it no session is a non-launching ``WAITS ON`` row that says why — busy
+    (``why``: ``{id: what holds it}``, e.g. a live session or work waiting to land), blocked,
+    Active (its fixer branch is the work), or past the attempt limit (a person decides).
+    :func:`candidates` drops such a row when another row already speaks for the item."""
+    attempts, why, out = attempts or {}, why or {}, []
     limit = attempt_limit(product)
     bugs = sorted(ix.of_type(items, 'bug'), key=lambda v: (attempts.get(v['id'], 0), _age_key(v), v['id']))
     for b in bugs:
         sev = b.get('severity')
-        if sev not in ('S1', 'S2') or b.get('decided') is not True or not is_open(b) or b['id'] in busy:
+        if sev not in ('S1', 'S2') or b.get('decided') is not True or not is_open(b):
+            continue
+        tier = 0 if sev == 'S1' else 1
+        f = feature_of(items, b)
+        fid, n = f['id'] if f else '', attempts.get(b['id'], 0)
+
+        def waits(on, reason, bug=b, fid=fid, tier=tier):
+            return Row(tier=tier, kind=BUG_FIX, item_id=bug['id'], feature_id=fid,
+                       action=f'WAITS ON {on}', brief_kind='fix-bug',
+                       branch=branch_for(product, 'fix', bug['id']),
+                       reason=f"{bug.get('severity')} open, decided: {reason}", waits_on=on)
+        if b['id'] in busy:
+            held = why.get(b['id']) or 'session running'
+            on = 'landing' if 'land' in held else 'session'
+            out.append(waits(on, held))
             continue
         if b.get('blocked'):  # B-0058: a blocked Bug waits like a blocked Feature
+            blockers = list(b.get('blocked_by_open') or ())
+            on = blockers[0] if blockers else 'blocked'
+            out.append(waits(on, 'blocked by ' + (', '.join(blockers) or 'an open item')))
             continue
         # an Active Bug has a fixer branch/PR already: CONFLICT/STALE rows speak for it
         if b.get('state') == 'Active':
+            out.append(waits('branch', 'Active — its fixer branch/PR is the work, no session '
+                                       'or branch row holds it'))
             continue
-        f = feature_of(items, b)
-        fid, n = f['id'] if f else '', attempts.get(b['id'], 0)
         if n > limit:
+            out.append(waits('operator', f'adjudicated after {n} sessions (limit {limit}): '
+                                         'a person decides'))
             continue
         if n == limit:
             out.append(Row(tier=0 if sev == 'S1' else 1, kind=STALEMATE, item_id=b['id'],
@@ -904,7 +929,11 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
     running = running_footprints(items, busy)
     corrected, spoken = correction_rows(items, product, busy, corrections)
     rows = corrected + lane_rows(items, product, live | spoken, occ)
-    rows += bug_rows(items, product, busy | spoken, attempts)
+    held_by = {**{i: 'session running' for i in inflight_ids(inflight)},
+               **dict(occ.get('waiting_landing') or {}), **dict(occ.get('busy') or {})}
+    bugs = bug_rows(items, product, busy | spoken, attempts, held_by)
+    rows += [r for r in bugs if r.launches]
+    bug_waits = [r for r in bugs if not r.launches]
     rows += [r for r in branch_rows(items, product, busy) if r.feature_id not in stalled]
     gr = groom_row(index, product, busy, groom_state, inflight)
     if gr is not None:
@@ -920,6 +949,9 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
     rows += feature_rows(items, product, (busy - docs_waiting) | tasks_spoken, running,
                          landed_shas, occ)
     rows += undecided_rows(items, product, busy, decision_limit)
+    # a skipped S1/S2 Bug's WAITS row only where no other row already speaks for it
+    spoken_for = {r.item_id for r in rows}
+    rows += [r for r in bug_waits if r.item_id not in spoken_for]
     rows = hold_unlanded(rows, items, landed_shas)
     rows = hold_classes(rows, product)
 

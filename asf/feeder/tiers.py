@@ -7,7 +7,7 @@ The cut: ``capacity`` less the sessions already in flight is the number of launc
 An S1 row is always emitted first — with no free slot it still shows, waiting on one. While any
 S1 row is emitted (an S1 Bug no session holds), no tier-2 row is: Features wait until the
 incident has a session. A ``WAITS ON`` row launches nothing and costs no slot; it is shown for
-the Tasks the cut reached.
+the Tasks the cut reached, and always in tiers 0 and 1 (an S1/S2 Bug is never silent).
 
 A launching row on an item an approval hold parks (``held``, :func:`asf.approvals.parked` — a
 harvest merge hold, or a refused write to the amendable set; any other refusal from the hook
@@ -46,7 +46,9 @@ def select(candidates, inflight, capacity, held=(), s1_first=True):
             out.append(r)
             continue
         if not r.launches:
-            if free > 0:
+            # an S1/S2 row is named even with no slot free: a WAITS row for a held or busy Bug
+            # is the one place NEXT says why it gets no session
+            if free > 0 or r.tier < TIER_REST:
                 out.append(r)
             continue
         if free > 0:
