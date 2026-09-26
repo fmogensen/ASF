@@ -1048,11 +1048,15 @@ class FeatureOnProdEventTests(unittest.TestCase):
 
     def test_history_and_stage_since_are_unchanged_by_the_new_write(self):
         """The event write is purely additive: stubbing it out changes nothing about the
-        Feature's own file, over the same fixture and the same evidence."""
+        Feature's own file, over the same fixture and the same evidence. Both passes are
+        pinned to the same instant — two live calls to `now_iso` a clock tick apart would
+        disagree over `updated`/`stage_since`, not over the write being stubbed."""
         self.landed_feature('F-0001')
         write(self.root, 'T-0001', 'task', 'Wire it', 'tasks', parent='F-0001')
         ev = self.on_prod_ev()
-        self.assertEqual(self.run_ingest(ev), 0)
+        frozen = '2026-03-04T10:00:00Z'
+        with mock.patch.object(ingest, 'now_iso', return_value=frozen):
+            self.assertEqual(self.run_ingest(ev), 0)
         with open(os.path.join(self.root, 'features', 'F-0001.md'), encoding='utf-8') as f:
             with_write = f.read()
 
@@ -1064,7 +1068,8 @@ class FeatureOnProdEventTests(unittest.TestCase):
         write(root2, 'T-0001', 'task', 'Wire it', 'tasks', parent='F-0001')
         with mock.patch.object(ingest.evidence, 'load', return_value=ev), \
              mock.patch.object(ingest.evidence, 'ancestor_of', return_value=True), \
-             mock.patch.object(ingest, 'write_on_prod_event', return_value=True):
+             mock.patch.object(ingest, 'write_on_prod_event', return_value=True), \
+             mock.patch.object(ingest, 'now_iso', return_value=frozen):
             self.assertEqual(ingest.cmd_ingest(types.SimpleNamespace(fresh=False), root2), 0)
         with open(os.path.join(root2, 'features', 'F-0001.md'), encoding='utf-8') as f:
             without_write = f.read()
