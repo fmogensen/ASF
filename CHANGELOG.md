@@ -2,6 +2,25 @@
 
 One entry per released version, newest first.
 
+## v0.1.28 — 2026-09-26
+
+### Bugs fixed
+
+- B-0094 19% of sessions end 'not pushed': finished work is lost to a missing commit or push
+- B-0135 An install during a running tick tears it: groom ImportError from a half-swapped package
+
+### In progress
+
+- F-0161 Wave launch costs ~55 s per session: 5 launches make most of a 242 s wave
+
+### Improvements and hotfixes
+
+- fix(lifecycle): an unpark resets the loop guard; a copies hold counts correct launches only
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.28"`
+
 ## v0.1.27 — 2026-09-26
 
 ### Bugs fixed
