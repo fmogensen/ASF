@@ -28,6 +28,10 @@ class DefaultsTests(unittest.TestCase):
         self.assertEqual((c.harvest_gate, c.branches_per_tick, c.gate_timeout_s), ('combined', 12, 600))
         self.assertEqual((c.readme, c.readme_facts), ('README.md', 'docs/readme-numbers.json'))
         self.assertEqual(c.stage_limits, {})
+        self.assertEqual(c.heavy_share_pct, 50)
+
+    def test_the_two_model_labels_have_one_owner(self):
+        self.assertEqual((conv_mod.HEAVY, conv_mod.LIGHT), ('heavy', 'light'))
 
     def test_the_new_fields_default_to_none(self):
         c = Conventions()
@@ -179,6 +183,12 @@ class ForbiddenPatternsTests(unittest.TestCase):
         self.assertIsInstance(conv_mod.DEFAULT_SAVINGS, dict)
         self.assertEqual(len(conv_mod.forbidden_patterns()), 12)
 
+    def test_the_heavy_share_default_and_the_two_labels_add_no_pattern(self):
+        # DEFAULT_HEAVY_SHARE_PCT is an int, and HEAVY/LIGHT are not DEFAULT_* names — neither
+        # is a path-shaped string default, so the count is unmoved (F-0101 §1.3 P13).
+        self.assertIsInstance(conv_mod.DEFAULT_HEAVY_SHARE_PCT, int)
+        self.assertEqual(len(conv_mod.forbidden_patterns()), 12)
+
 
 class CheckConventionsScriptTests(unittest.TestCase):
     """The check itself: a literal that belongs in the product yaml fails the build."""
@@ -286,6 +296,7 @@ class ModuleConstantsTests(unittest.TestCase):
         self.assertEqual(conv_mod.DEFAULT_OUTCOME_MIN_SESSIONS, c.outcome_min_sessions)
         self.assertEqual(conv_mod.DEFAULT_REPEAT_FAILURE_N, c.repeat_failure_n)
         self.assertEqual(conv_mod.DEFAULT_IDLE_WAVE_TICKS, c.idle_wave_ticks)
+        self.assertEqual(conv_mod.DEFAULT_HEAVY_SHARE_PCT, c.heavy_share_pct)
 
 
 class AmendableFieldsTests(unittest.TestCase):

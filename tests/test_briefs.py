@@ -683,6 +683,11 @@ class CardDigestTests(unittest.TestCase):
 
 
 class KindModelGrantTest(unittest.TestCase):
+    def test_the_two_labels_have_one_owner(self):
+        from asf import conventions
+        self.assertIs(build_mod.HEAVY, conventions.HEAVY)
+        self.assertIs(build_mod.LIGHT, conventions.LIGHT)
+
     def test_the_feeder_kind_task_is_the_coder_template(self):
         self.assertEqual(build_mod.normalize_kind('task'), 'coder')
 

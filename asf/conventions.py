@@ -49,6 +49,8 @@ The product yaml carries the overrides::
       outcome_min_sessions: 20    # no rate below this many ended sessions in the window
       repeat_failure_n: 2         # the same item, the same class, this many times → a Bug
       idle_wave_ticks: 6          # consecutive idle waves with New Tasks → a Bug
+      heavy_share_pct: 50         # the share of labelled 7-day spend on the heavy model above
+                                  # which the rollup files a Bug (F-0101 §2.7)
 
 Unknown keys are kept (in :attr:`Conventions.extra`) rather than rejected: a product yaml is
 written by an operator and may carry conventions a module older than it does not read yet, and
@@ -76,6 +78,11 @@ DEFAULT_BRANCH_PREFIXES = {
 #: added after products wrote their prefix maps (a product naming ``code:`` alone still has a
 #: direct lane, under the default prefix).
 RECOGNISED_KINDS = ('direct',)
+
+#: The operator's two model labels. worker_pool.models maps them onto real model ids
+#: (asf.workers.spawn.model_arg), so no vendor's model id is written down in this repo.
+HEAVY = 'heavy'
+LIGHT = 'light'
 
 DEFAULT_SPECS_DIR = 'docs/specs'
 DEFAULT_PLANS_DIR = 'docs/plans'
@@ -135,6 +142,10 @@ DEFAULT_GATE_TIMEOUT_S = 600
 
 #: The window `asf status`'s Features row measures time-to-land over.
 DEFAULT_LAND_WINDOW_DAYS = 7
+
+#: The share of labelled 7-day session spend on HEAVY above which the rollup calls the mix a
+#: defect (F-0101 §2.7).
+DEFAULT_HEAVY_SHARE_PCT = 50
 
 #: The keys of the yaml's ``harvest:`` block and the field each one is.
 HARVEST_KEYS = {'gate': 'harvest_gate', 'branches_per_tick': 'branches_per_tick',
@@ -473,6 +484,9 @@ class Conventions:
     readme: str = DEFAULT_README
     readme_facts: str = DEFAULT_README_FACTS
     stage_limits: dict = field(default_factory=dict)
+    #: ``heavy_share_pct``: the share (of labelled 7-day spend) on HEAVY above which the rollup
+    #: files a Bug (:data:`DEFAULT_HEAVY_SHARE_PCT`).
+    heavy_share_pct: int = DEFAULT_HEAVY_SHARE_PCT
     #: ``savings``: the savings pass's window and six thresholds (F-0100 §2.9), merged per key
     #: through :func:`savings_for` — a product overriding one threshold keeps the other seven.
     savings: dict = field(default_factory=lambda: dict(DEFAULT_SAVINGS))
