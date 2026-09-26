@@ -166,6 +166,18 @@ re-run (not a relief record). Never touched: a trunk push, a deploy workflow, a 
 run on its sha (a branch that never gets a PR keeps its push CI). ``ci.queue.dedupe_push: off``
 turns it off.
 
+**Stale entries.** Each relief pass (:func:`sweep`, one ``gh pr list`` of the open PRs and one of
+the latest) drops what can no longer start, one line each —
+``ci queue: drop <key> — <reason>``: (a) a branch whose PR merged or closed (a PR start, a trunk
+start or a held re-run), (b) a branch whose PR is a draft, (c) a held re-run whose branch head
+moved on to a newer sha (the host runs the new head on its own) or whose head sha already has a
+live or finished run, a PR start whose open PR's head already has a run, and a re-run entry whose
+relief record is gone. A re-run is keyed by its branch (``rerun:<branch>``, the sha carried in
+the entry): one branch holds at most one entry, and of two records for one branch and sha the
+newest stays. A ``pr:`` start carries the head sha the lane asked for (``sha``), re-set on a new
+push, so a merged PR on an older sha never drops a reused branch's new start. An unreadable PR
+listing drops no record.
+
 **Configuration** (``ci.queue`` in the product file)::
 
     ci:
@@ -238,6 +250,9 @@ EXPECT_VERSION = 5
 #: the run conclusions measured: a cancelled (or otherwise cut short) run says nothing of its size
 MEASURED_CONCLUSIONS = frozenset({'success', 'failure'})
 GH_TIMEOUT_S = 30
+#: the open PRs listed for the stale sweep (every one), and the latest of any state
+PR_LIST_OPEN = 500
+PR_LIST_LATEST = 100
 S1, TRUNK, FEATURE, OTHER = 0, 1, 2, 3
 
 
@@ -615,6 +630,15 @@ class Source:
         runner_name, created_at, started_at, completed_at}]``, or None when unreadable."""
         return None
 
+    def prs(self):
+        """Every open PR plus the latest ones of any state: ``[{number, headRefName, state,
+        isDraft, headRefOid}]``, or None when the open ones are unreadable."""
+        return None
+
+    def run_head(self, run_id):
+        """One run's ``{headBranch, headSha, status, conclusion}``, or None when unreadable."""
+        return None
+
 
 class GitHubSource(Source):
     def __init__(self, product, run=None):
@@ -692,6 +716,36 @@ class GitHubSource(Source):
                     if isinstance(j, dict)]
         except ValueError:
             return None
+
+    def _json(self, args):
+        try:
+            return json.loads(self._gh(args) or 'null')
+        except (TypeError, ValueError):
+            return None
+
+    def prs(self):
+        if not self.slug:
+            return None
+        fields = ['--json', 'number,headRefName,state,isDraft,headRefOid']
+        opened = self._json(['pr', 'list', '-R', self.slug, '--state', 'open', '--limit',
+                             str(PR_LIST_OPEN), *fields])
+        if not isinstance(opened, list):
+            return None
+        latest = self._json(['pr', 'list', '-R', self.slug, '--state', 'all', '--limit',
+                             str(PR_LIST_LATEST), *fields])
+        seen, out = set(), []
+        for p in [*opened, *(latest if isinstance(latest, list) else ())]:
+            if isinstance(p, dict) and p.get('number') not in seen:
+                seen.add(p.get('number'))
+                out.append(p)
+        return out
+
+    def run_head(self, run_id):
+        if not self.slug or not run_id:
+            return None
+        got = self._json(['run', 'view', str(run_id), '-R', self.slug, '--json',
+                          'headBranch,headSha,status,conclusion'])
+        return got if isinstance(got, dict) and got.get('headBranch') else None
 
     def inflight(self):
         from asf import capacity
@@ -1289,10 +1343,12 @@ class Queue:
             e['head_since'] = (e.get('since') if first else None) or _iso(self.now)
         self.data['head'] = head
 
-    def admit(self, key, kind, item=None, prio=OTHER, label='other', workflow=None, run=FULL):
+    def admit(self, key, kind, item=None, prio=OTHER, label='other', workflow=None, run=FULL,
+              sha=None):
         """May the start ``key`` go now? Enqueues it (keeping its place), decides, and on
         admission moves it to ``started``. A hold prints its one line. ``run``: the run type
-        (:func:`run_type`) the start is sized as."""
+        (:func:`run_type`) the start is sized as; ``sha``: the head it starts on, re-set on a
+        new push (the entry keeps its place)."""
         if self.mode == 'off':
             return Decision(True, bypass=True)
         workflow = workflow or workflow_for(self.product, kind)
@@ -1300,6 +1356,8 @@ class Queue:
         e = entries.get(key) or {'since': _iso(self.now)}
         e.update(kind=kind, item=item or key, prio=prio, label=label, workflow=workflow,
                  run=run if run in RUN_TYPES else FULL, seen=_iso(self.now))
+        if sha:
+            e['sha'] = sha
         entries[key] = e
         order = line_order(entries)
         self._mark_head()
@@ -1345,9 +1403,10 @@ class Queue:
 
 
 def admit(product, key, kind, item=None, items=None, branch='', files=(), workflow=None,
-          source=None, out=print, inflight=None, queue=None, draft=False):
+          source=None, out=print, inflight=None, queue=None, draft=False, sha=None):
     """One start's question, for a caller with no :class:`Queue` of its own. ``draft``: the
-    branch's PR is a draft — parked by its owner — so it never starts and leaves the line."""
+    branch's PR is a draft — parked by its owner — so it never starts and leaves the line.
+    ``sha``: the branch head the start is for (:meth:`Queue.admit`)."""
     q = queue or Queue(product, source=source, out=out, inflight=inflight)
     if q.mode == 'off':
         return Decision(True, bypass=True)
@@ -1357,7 +1416,8 @@ def admit(product, key, kind, item=None, items=None, branch='', files=(), workfl
                                f'parked by its owner')
     prio, label = priority(item, items, branch, files, product, kind=kind)
     run = run_type(product, files) if kind == 'pr' else FULL
-    return q.admit(key, kind, item=item, prio=prio, label=label, workflow=workflow, run=run)
+    return q.admit(key, kind, item=item, prio=prio, label=label, workflow=workflow, run=run,
+                   sha=sha)
 
 
 def forget(product, branch, queue=None, source=None, out=print):
@@ -1521,9 +1581,9 @@ def _rerun_cancelled(q, src, product, started, dry_run, out, now):
             keep.append(rec)
             continue
         protected, who = got
-        d = q.admit(f'rerun:{rid}', rec.get('kind') or 'pr', item=rec.get('item'),
+        d = q.admit(_rerun_key(rec), rec.get('kind') or 'pr', item=rec.get('item'),
                     prio=rec.get('prio', OTHER), label=rec.get('label') or 'other',
-                    workflow=rec.get('workflow'))
+                    workflow=rec.get('workflow'), sha=rec.get('sha'))
         if not d.admitted or d.line:        # held (or a dry-run mode hold): next tick asks again
             keep.append(rec)
             continue
@@ -1545,6 +1605,141 @@ def _rerun_cancelled(q, src, product, started, dry_run, out, now):
         n += 1
     q.data['relief'] = keep
     return n
+
+
+def _rerun_key(rec):
+    """A held re-run's entry key: its branch once known (one entry per branch), else its id."""
+    return f"rerun:{rec['branch']}" if rec.get('branch') else f"rerun:{rec.get('id')}"
+
+
+#: a finished run whose conclusion is no verdict on its sha
+NO_VERDICT = frozenset({'cancelled', 'skipped', 'stale', ''})
+
+
+def _pr_state(pr):
+    s = str((pr or {}).get('state') or '').lower()
+    return 'merged' if s == 'merged' else 'closed' if s == 'closed' else s
+
+
+def sweep(q, src, listed, out=print, dry_run=False):
+    """Drop what can no longer start (see the module doc, *Stale entries*): relief records and
+    their ``rerun:`` entries, and ``pr:`` / ``trunk:`` entries. One line per drop; the number
+    dropped. A record's branch and sha are read off the listing (or one ``gh run view`` for a
+    record from before they were carried) and kept on it. ``dry_run``: the lines say
+    ``would drop`` and nothing changes."""
+    entries, relief = q.data['entries'], q.data['relief']
+    if not entries and not relief:
+        return 0                                # nothing to sweep: no ``gh`` call
+    byid = {}
+    for rec in relief:
+        wf = rec.get('workflow')
+        byid.update({str(r.get('databaseId')): r for r in (listed(wf) if wf else None) or ()})
+    for rec in relief:
+        if rec.get('branch') or rec.get('kind') != 'pr':
+            continue
+        r = byid.get(str(rec.get('id'))) or src.run_head(rec.get('id'))
+        if r and r.get('headBranch'):
+            rec['branch'], rec['sha'] = r.get('headBranch'), r.get('headSha')
+    prs = src.prs()
+    open_, closed = {}, {}
+    for p in prs or ():
+        b = p.get('headRefName')
+        side = open_ if str(p.get('state') or '').upper() == 'OPEN' else closed
+        if b and int(p.get('number') or 0) > int((side.get(b) or {}).get('number') or 0):
+            side[b] = p
+    drops = []                                  # (key or None, record or None, reason)
+
+    def runs_on(wf, branch, sha, but=None):
+        return [r for r in (listed(wf) if wf else None) or ()
+                if r.get('headBranch') == branch and r.get('headSha') == sha
+                and str(r.get('databaseId')) != str(but)]
+
+    keep = []
+    if prs is not None:
+        newest = {}
+        for rec in relief:
+            if rec.get('kind') == 'pr' and rec.get('branch') and rec.get('sha'):
+                k = (rec['branch'], rec['sha'])
+                if int(rec.get('id') or 0) > int(newest.get(k) or 0):
+                    newest[k] = rec.get('id')
+    for rec in relief:
+        b, sha, rid = rec.get('branch'), rec.get('sha'), rec.get('id')
+        why = None
+        if prs is not None and rec.get('kind') == 'pr' and b and sha:
+            pr = open_.get(b)
+            me = byid.get(str(rid)) or {}
+            cover = [r for r in runs_on(rec.get('workflow'), b, sha, but=rid)
+                     if r.get('status') != 'completed'
+                     or str(r.get('conclusion') or '') not in NO_VERDICT]
+            if pr is None:
+                gone = closed.get(b)
+                why = (f"PR #{gone.get('number')} {_pr_state(gone)}" if gone else 'no open PR')
+            elif pr.get('isDraft'):
+                why = f"PR #{pr.get('number')} is a draft, parked by its owner"
+            elif pr.get('headRefOid') and pr['headRefOid'] != sha:
+                why = f"superseded, head is now {pr['headRefOid'][:9]}"
+            elif me.get('status') and me.get('status') != 'completed':
+                why = f'run {rid} runs again already'
+            elif cover:
+                why = f"run {cover[0].get('databaseId')} covers {sha[:9]}"
+            elif newest.get((b, sha)) != rid:
+                why = f'run {newest[(b, sha)]} is its newer re-run record'
+        if why is None:
+            keep.append(rec)
+            continue
+        key = f'rerun:{rid}'
+        if key not in entries and b and f'rerun:{b}' in entries:
+            key = f'rerun:{b}'
+        drops.append((key, rec, f'{b}: {why}'))
+    kept_keys = {_rerun_key(rec) for rec in keep}
+    # a dropped record whose branch another record keeps names its own id, never that entry
+    drops = [(f"rerun:{r.get('id')}" if k in kept_keys else k, r, w) for k, r, w in drops]
+    for key, e in entries.items():
+        kind, _, b = key.partition(':')
+        if kind not in ('pr', 'trunk') or prs is None:
+            continue
+        pr, gone, why = open_.get(b), closed.get(b), None
+        if pr is not None and pr.get('isDraft'):
+            why = f"PR #{pr.get('number')} is a draft, parked by its owner"
+        elif pr is not None and kind == 'pr' and pr.get('headRefOid'):
+            ran = runs_on(e.get('workflow'), b, pr['headRefOid'])
+            if ran:
+                why = f"run {ran[0].get('databaseId')} covers {pr['headRefOid'][:9]}"
+        # a PR start after a *closed* PR on its sha may be the lane reopening it: merged only
+        elif pr is None and gone is not None and (
+                _pr_state(gone) == 'merged' or kind == 'trunk' and _pr_state(gone) == 'closed') \
+                and (not e.get('sha') or e['sha'] == gone.get('headRefOid')):
+            why = f"PR #{gone.get('number')} {_pr_state(gone)}"
+        if why:
+            drops.append((key, None, why))
+    dropped_keys = {k for k, _r, _w in drops}
+    for key in entries:
+        if (key.startswith('rerun:') and key not in kept_keys and key not in dropped_keys
+                and not any(key == f'rerun:{r.get("id")}' for r in keep)):
+            drops.append((key, None, 'no relief record'))
+    for key, _rec, why in drops:
+        out(f"ci queue{' (dry-run)' if dry_run else ''}: {'would drop' if dry_run else 'drop'} "
+            f'{key} — {why}')
+    if dry_run:
+        return len(drops)
+    gone_recs = [id(r) for _k, r, _w in drops if r is not None]
+    q.data['relief'] = [r for r in relief if id(r) not in gone_recs]
+    for key, _rec, _why in drops:
+        if key not in kept_keys:
+            entries.pop(key, None)
+    for rec in q.data['relief']:                # re-key a record's entry by its branch
+        new, old = _rerun_key(rec), f"rerun:{rec.get('id')}"
+        if new != old and old in entries:
+            e = entries.pop(old)
+            if new in entries:                  # the earlier place in line stands
+                since = [s for s in (e.get('since'), entries[new].get('since')) if s]
+                if since:
+                    entries[new]['since'] = min(since)
+            else:
+                entries[new] = e
+        if new in entries and rec.get('sha'):
+            entries[new]['sha'] = rec['sha']
+    return len(drops)
 
 
 def _item_of(branch):
@@ -1704,6 +1899,7 @@ def relieve_trunk(product, items=None, source=None, out=print, dry_run=False, no
         r = s1_started(rec['for'])
         return None if r is None else (r, 'S1 PR')
 
+    sweep(q, src, listed, out=out, dry_run=dry_run)
     rerun = _rerun_cancelled(q, src, product, started, dry_run, out, now) \
         if q.data['relief'] else 0
     n = 0
@@ -1869,7 +2065,8 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
             out(f'ci queue: cancelled {state} {what}')
             rec = {'id': rid, 'kind': kind, 'item': item, 'prio': prio, 'label': label,
                    'workflow': wf, 'at': _iso(now), 'trunk_id': tid,
-                   'trunk_sha': target.get('headSha'), 'trunk_created': _iso(created)}
+                   'trunk_sha': target.get('headSha'), 'trunk_created': _iso(created),
+                   'branch': r.get('headBranch'), 'sha': r.get('headSha')}
             if for_id is not None:
                 rec['for'] = for_id
             q.data['relief'].append(rec)

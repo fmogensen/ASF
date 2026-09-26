@@ -331,7 +331,7 @@ class Lanes(Home):
             {'name': 'acct-a', 'role': 'local', 'cap': 1},
             {'name': 'acct-c', 'role': 'cloud', 'cap': 1}])
 
-    def run_wave(self, rows, live=(), local_hold='', cfg=None, ready=(True, '')):
+    def run_wave(self, rows, live=(), local_hold='', cfg=None, ready=(True, ''), **kw):
         accounts = pool_mod.accounts_from_config(cfg or self.cfg)
         pool = pool_mod.Pool(accounts, quota_source=quota_mod.FakeQuotaSource({}), live=live)
         self.crt = FakeCloudRuntime()
@@ -339,7 +339,8 @@ class Lanes(Home):
         launched, waits = wave_mod.wave(
             self.product, rows, 5, pool=pool,
             runtime=runtime_mod.FakeRuntime([{'running': True}] * 5), cfg=cfg or self.cfg,
-            out=lines.append, local_hold=local_hold, cloud_runtime=self.crt, cloud_ready=ready)
+            out=lines.append, local_hold=local_hold, cloud_runtime=self.crt, cloud_ready=ready,
+            **kw)
         return launched, waits, lines
 
 
@@ -412,6 +413,34 @@ class Placement(Lanes):
         self.assertEqual(rec['account'], 'w2')
         self.assertNotEqual(rec.get('runtime_lane'), 'cloud')
         self.assertIn('pid', lines[0])
+
+    def test_the_local_share_bounds_the_local_lane_the_rest_overflows_to_the_cloud(self):
+        """2026-09-26, a product: share 9, cloud max_inflight 4 — the step's 13 seats; 4 local +
+        2 cloud in flight and the wave launched 6 more rows, all local (local accounts had room):
+        10 local sessions on a share of 9 (``sessions 10/9``). The cloud seats are the cloud's:
+        the local lane takes at most the share's free local seats, the rest overflow."""
+        cfg = dict(self.cfg)
+        cfg['worker_pool'] = dict(cfg['worker_pool'], accounts=[
+            {'name': 'acct-a', 'role': 'local', 'cap': 5},
+            {'name': 'acct-c', 'role': 'cloud', 'cap': 1}])
+        rows = [feature_row('spec-1'), feature_row('spec-2', item='F-0002'),
+                feature_row('spec-3', item='F-0003'), feature_row('spec-4', item='F-0004')]
+        launched, waits, _ = self.run_wave(rows, cfg=cfg, local_seats=1)
+        self.assertEqual([(r.job, rec.get('runtime_lane') or 'local') for r, rec in launched],
+                         [('spec-1', 'local'), ('spec-2', 'cloud'), ('spec-3', 'cloud')])
+        (row, why), = waits                 # the cloud lane's 2 seats taken too
+        self.assertEqual(row.job, 'spec-4')
+        self.assertTrue(why.startswith('no local seat — the share has 1 free this wave'), why)
+        # no bound given: the local accounts take more than the share's one seat, as before
+        launched, _waits, _ = self.run_wave(rows, cfg=cfg)
+        self.assertGreater(len([1 for _r, rec in launched if not rec.get('runtime_lane')]), 1)
+
+    def test_the_step_gives_the_wave_the_share_less_the_local_sessions_live(self):
+        from asf.tick import step_wave
+        running = [{'job': 'a', 'pid': 1}, {'job': 'b', 'pid': 2},
+                   {'job': 'c', 'pid': cloudpid.token('9')}]
+        self.assertEqual(step_wave.local_seats(9, running), 7)
+        self.assertEqual(step_wave.local_seats(1, running), 0)
 
     def test_a_full_local_lane_names_its_accounts_and_caps(self):
         live = [{'job': 'x', 'account': 'acct-a'},

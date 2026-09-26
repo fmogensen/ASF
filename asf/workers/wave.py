@@ -106,8 +106,15 @@ def order(rows):
 
 
 def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_brief, out=print,
-         spawn_fn=None, local_hold='', cloud_runtime=None, cloud_ready=None, refresh=None):
+         spawn_fn=None, local_hold='', cloud_runtime=None, cloud_ready=None, refresh=None,
+         local_seats=None):
     """Returns ``(launched, waits)``: lists of ``(row, record)`` and ``(row, reason)``.
+
+    ``local_seats`` (None: no bound): the local lane's free seats this wave — the share less the
+    local sessions live. ``n`` counts the cloud lane's seats beside the local ones, so without it
+    the local accounts would take them too (2026-09-26: 10 local sessions on a share of 9); a
+    row past it waits on ``no local seat`` or overflows to the cloud lane. A ``refresh`` row
+    widens it as it widens ``n``.
 
     ``local_hold`` (host pressure's reason) keeps every row off the local lane — never off the
     cloud lane. With ``cloud.default: true`` a row :func:`asf.workers.cloud.first` names goes to
@@ -156,10 +163,11 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
     inflight = {}              # future → (row, acct, lane, seat, entry)
     raised = None
     last_refresh = time.monotonic()
+    local_taken = 0            # local launches held (in flight or done) against ``local_seats``
 
     def fresh_rows():
         """``refresh``'s new rows (an S1 minted since the wave began), each job once."""
-        nonlocal s1, n, last_refresh
+        nonlocal s1, n, last_refresh, local_seats
         last_refresh = time.monotonic()
         try:
             got = [r for r in (refresh(set(known)) or ()) if r.job not in known]
@@ -171,6 +179,8 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
         if got:
             s1 = s1 or pool_mod.s1_open(got)
             n += len(got)
+            if local_seats is not None:
+                local_seats += len(got)
         return order(got)
 
     def decide(row):
@@ -195,6 +205,9 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
         if acct is None:
             if local_hold:
                 acct, reason = None, f'held: {local_hold}'
+            elif local_seats is not None and local_taken >= local_seats:
+                acct, reason = None, (f'no local seat — the share has {local_seats} free this '
+                                      f'wave, all taken')
             else:
                 acct, reason = pool.pick_account(
                     row.kind, row.model, is_fix=row.is_fix, s1_is_open=s1,
@@ -220,7 +233,7 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
 
     def settle(fut):
         """One finished launch: its seat kept, or freed. True when a seat came free."""
-        nonlocal raised
+        nonlocal raised, local_taken
         row, acct, lane, seat, entry, _seq = inflight.pop(fut)
         rec, err, secs = fut.result()
         if err is None:
@@ -238,6 +251,8 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
             timings[id(entry)] = f'launch {row.job}: setup {secs:.1f}s'
             return False
         pool.untake(acct, **seat)
+        if lane != 'cloud':
+            local_taken -= 1
         running.discard((product.name, row.job))
         branches.pop(_branch(product, row), None)
         if not isinstance(err, spawn_mod.SpawnError):
@@ -269,6 +284,8 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
                     seat = dict(model=_model(row, cfg), job=row.job, product=product.name,
                                 kind=row.kind, lane=lane if lane == 'cloud' else None)
                     pool.take(acct, **seat)     # held while the launch runs, freed if it fails
+                    if lane != 'cloud':
+                        local_taken += 1
                     running.add((product.name, row.job))
                     branches[_branch(product, row)] = row.job
                     entry[1] = None
