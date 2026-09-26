@@ -373,5 +373,92 @@ class IdlePoolLaunches(Home):
         self.assertEqual((r.sessions, r.borrowed), (4, 0))
 
 
+
+class ShareNeverOvershoots(Home):
+    """2026-09-26 08:17 and 08:42 (a product tick): after waves held by host pressure, the next
+    wave launched 11 and then 11 again under shares of 12 and 13 ("9 borrowed from idle
+    products"), and the status Capacity row read ``sessions 10/5`` minutes later. The partner was
+    not idle: its wave, held by host pressure, recorded ``in flight 4, wanted 2`` — and its claim
+    was read as its in flight *now* plus that ``wanted``, so each of its sessions that ended lent
+    one more slot it would have refilled but for the pressure; and once it launched its wanted
+    rows they counted twice (in flight now and in ``wanted``), which is the ``/5``. A partner's
+    claim is what its own wave recorded it would hold — in flight then plus wanted — never less
+    than it holds now."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_product('asf', WAVE_PRODUCT.format(name='asf'))
+        self.write_product('bots', WAVE_PRODUCT.format(name='bots'))
+
+    def launch(self, name, job, **fields):
+        pool_mod.append_session(name, dict(fields, job=job, started=pool_mod.now_iso(), pid=1))
+
+    def end(self, name, job):
+        pool_mod.append_session(name, {'job': job, 'ended': pool_mod.now_iso(),
+                                       'end_reason': 'finished'})
+
+    def resolve(self, name='asf'):
+        return capacity.resolve(env.load_product(name), two_free_pool_cfg(),
+                                quota_source=three_stopped())
+
+    def queue(self, n):
+        from asf.feeder import rows as R
+        return [R.Row(tier=2, kind='TASK → BUILD', item_id=f'T-{i:04d}', feature_id='',
+                      action=R.LAUNCH, brief_kind='task', branch='', reason='')
+                for i in range(n)]
+
+    def held_partner_whose_sessions_end(self):
+        """bots: 3 in flight, its wave held by host pressure with 1 row wanted — then all 3 end."""
+        for i in range(3):
+            self.launch('bots', f'task-t-{i}')
+        capacity.write_demand('bots', 3, 1)
+        for i in range(3):
+            self.end('bots', f'task-t-{i}')
+        self.assertEqual(capacity.inflight_sessions('bots'), 0)
+
+    def test_a_partner_held_by_pressure_lends_nothing_as_its_sessions_end(self):
+        self.held_partner_whose_sessions_end()
+        r = self.resolve()
+        self.assertEqual((r.sessions, r.borrowed), (4, 0))
+
+    def test_a_held_then_released_wave_with_a_long_queue_launches_only_share_less_live(self):
+        from asf.feeder import tiers
+        self.held_partner_whose_sessions_end()
+        for i in range(2):
+            self.launch('asf', f'coder-t-9{i}')
+        r = self.resolve()
+        running = capacity.live_sessions('asf')
+        out = tiers.select(self.queue(12), running, r.sessions)
+        self.assertEqual(sum(1 for x in out if x.launches), r.sessions - len(running))
+        self.assertEqual(sum(1 for x in out if x.launches), 2)
+
+    def test_a_partner_that_launched_its_wanted_rows_is_not_counted_twice(self):
+        capacity.write_demand('bots', 0, 3)
+        for i in range(3):
+            self.launch('bots', f'task-t-{i}')
+        r = self.resolve()
+        self.assertEqual((r.sessions, r.borrowed), (5, 1))
+
+    def test_a_partner_over_its_record_claims_what_it_holds(self):
+        capacity.write_demand('bots', 1, 0)
+        for i in range(3):
+            self.launch('bots', f'task-t-{i}')
+        self.assertEqual((self.resolve().sessions, self.resolve().borrowed), (5, 1))
+
+    def test_the_capacity_row_and_the_wave_count_the_same_live_sessions(self):
+        from asf.tick import step_wave
+        from asf.views import status
+        capacity.write_demand('bots', 3, 1)
+        for i in range(3):
+            self.launch('asf', f'coder-t-9{i}')
+        self.end('asf', 'coder-t-90')
+        p = env.load_product('asf')
+        self.assertEqual(step_wave.inflight(p), capacity.live_sessions('asf'))
+        self.assertEqual(len(step_wave.inflight(p)), capacity.inflight_sessions('asf'))
+        r = self.resolve()
+        with mock.patch('asf.workers.quota.source_from_config', return_value=three_stopped()):
+            cell = status.capacity_cell(two_free_pool_cfg(), p)
+        self.assertTrue(cell.startswith(f'sessions 2/{r.sessions}'), cell)
+
 if __name__ == '__main__':
     unittest.main()
