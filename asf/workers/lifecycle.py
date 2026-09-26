@@ -595,19 +595,34 @@ def overruling(path, item, head, unchanged_since=None):
     run = ruled[-1]  # only the newest ruling speaks for the branch as it stands
     rec = result_of(run) or {}
     text = rec.get('result') if isinstance(rec, dict) else ''
-    try:
-        rep = report_mod.typed(text or '', None)
-    except report_mod.ReportError:
-        rep = {}
-    fields = report_mod.ruling_fields(text or '')
-    if rep.get('status') != 'done' or not report_mod.ruling(text or '') \
-            or fields['blocked_on'] or fields['superseded_by']:
+    text = text or ''
+    if report_mod.fence(text) is not None:
+        try:
+            rep = report_mod.typed(text, None)
+        except report_mod.ReportError:
+            rep = {}
+        status = rep.get('status')
+        ruling_text = report_mod.ruling(text)
+        fields = report_mod.ruling_fields(text)
+        sha_claim = rep.get('sha') or ''
+        commits_claim = rep.get('commits')
+    else:
+        # no fence: nothing yet demands a typed report, so an adjudicate ruling today is
+        # prose-only more often than not — stand on the same prose read footprint_claim keeps
+        prose = report_mod._prose(text)
+        status = (prose.get('status') or '').strip().lower().split(' ')[0]
+        ruling_text = (prose.get('ruling') or '').strip()
+        fields = {'blocked_on': report_mod._claim(prose.get('blocked_on')),
+                  'superseded_by': report_mod._claim(prose.get('superseded_by'))}
+        sha_claim = prose.get('pushed') or ''
+        commits_claim = report_mod._claim(prose.get('commits'))
+    if status != 'done' or not ruling_text or fields['blocked_on'] or fields['superseded_by']:
         return None
-    m = PUSHED_SHA_RE.search(rep.get('sha') or '')
+    m = PUSHED_SHA_RE.search(sha_claim)
     sha = m.group(0).lower() if m else ''
     if sha and head.lower().startswith(sha):
         return run.get('job')
-    if not rep.get('commits') and run.get('launch_head') \
+    if not commits_claim and run.get('launch_head') \
             and run['launch_head'].lower() == head.lower():
         return run.get('job')  # launched on this head, committed nothing: the head it ruled on
     if sha and unchanged_since and unchanged_since(sha):
