@@ -428,8 +428,8 @@ class ReliefBase(Base):
                            'headBranch': 'main', 'headSha': 'f' * 40, 'createdAt': t(-45)}],
         }
 
-    def gh(self, runs, busy=('h1', 'h2', 'h3'), jobs=None):
-        gh = FakeGh(busy=busy)
+    def gh(self, runs, busy=('h1', 'h2', 'h3'), jobs=None, files=None):
+        gh = FakeGh(busy=busy, files=files)
         base = gh.__call__
 
         def run(argv, **kw):
@@ -486,6 +486,77 @@ class TestTrunkRelief(ReliefBase):
         gh, run = self.gh({k: [r for r in v if r['databaseId'] not in (101, 102, 201)]
                            for k, v in self.runs().items()})
         self.assertEqual(self.relieve(p, run, minutes=1), (0, 0))
+
+    def test_a_run_whose_pr_changes_ci_config_is_never_cancelled(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        runs = self.runs()
+        for r in runs['pr.yml']:
+            r['headSha'] = f"sha{r['databaseId']}"
+        gh, run = self.gh(runs, files={101: ['.github/workflows/checks.yml']})
+        # 101 (lowest priority, would go first) is exempt: 102 then batch 201 go instead
+        self.assertEqual(self.relieve(p, run), (2, 0))
+        self.assertEqual(self.cancels(gh), ['102', '201'])
+        self.assertEqual(self.lines[0], 'relief: exempt bug/B-0008 — changes CI config')
+        self.assertEqual([r['id'] for r in ci_queue.load('p')['relief']], [102, 201])
+
+    def test_a_run_whose_pr_changes_actionlint_config_is_never_cancelled(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        runs = self.runs()
+        for r in runs['pr.yml']:
+            r['headSha'] = f"sha{r['databaseId']}"
+        gh, run = self.gh(runs, files={101: ['.github/actionlint.yaml']})
+        self.assertEqual(self.relieve(p, run), (2, 0))
+        self.assertEqual(self.cancels(gh), ['102', '201'])
+        self.assertEqual(self.lines[0], 'relief: exempt bug/B-0008 — changes CI config')
+
+    def test_relief_exempt_paths_config_is_honoured(self):
+        p = self.product(relief_exempt_paths=['ops/runners/**'])
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        runs = self.runs()
+        for r in runs['pr.yml']:
+            r['headSha'] = f"sha{r['databaseId']}"
+        gh, run = self.gh(runs, files={101: ['ops/runners/pool.yaml']})
+        self.assertEqual(self.relieve(p, run), (2, 0))
+        self.assertEqual(self.cancels(gh), ['102', '201'])
+        self.assertEqual(self.lines[0], 'relief: exempt bug/B-0008 — changes CI config')
+        # a fresh pass (the earlier cancels forgotten): the same run's PR touching an ordinary
+        # path is not exempt
+        data = ci_queue.load('p')
+        data['relief'] = []
+        ci_queue.save('p', data)
+        self.lines.clear()
+        runs2 = self.runs()
+        for r in runs2['pr.yml']:
+            r['headSha'] = f"sha{r['databaseId']}"
+        gh2, run2 = self.gh(runs2, files={101: ['asf/foo.py']})
+        self.assertEqual(self.relieve(self.product(relief_exempt_paths=['ops/runners/**']), run2,
+                                      minutes=1), (3, 0))
+        self.assertEqual(self.cancels(gh2), ['101', '102', '201'])
+
+    def test_a_run_touching_light_paths_only_is_not_exempt_and_the_files_are_read_once_per_head_sha(
+            self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        runs = self.runs()
+        # 101 and 102 share a commit (same PR pushed twice, say): the lookup happens once
+        for r in runs['pr.yml']:
+            if r['databaseId'] in (101, 102):
+                r['headSha'] = 'shared-sha'
+        gh, run = self.gh(runs, files={101: ['docs/readme.md']})
+        self.assertEqual(self.relieve(p, run), (3, 0))
+        self.assertEqual(self.cancels(gh), ['101', '102', '201'])
+        # one changed-files lookup for the shared sha (101 or 102), not two — batch run 201's
+        # own lookup (its own sha) is separate
+        lookups = [c for c in gh.calls
+                  if any(f'actions/runs/{i}' in a and '/jobs' not in a for i in (101, 102)
+                        for a in c)]
+        self.assertEqual(len(lookups), 1)
 
     def test_stops_once_free_plus_freed_covers_the_trunk_run(self):
         p = self.product()
@@ -740,6 +811,22 @@ class TestTrunkEscalation(ReliefBase):
         rec = ci_queue.load('p')['relief']
         self.assertEqual([r['id'] for r in rec], [111])
         self.assertEqual(rec[0]['kind'], 'pr')
+
+    def test_escalation_never_cancels_a_run_whose_pr_changes_ci_config(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        runs = self.runs()
+        for r in runs['pr.yml']:
+            r['headSha'] = f"sha{r['databaseId']}"
+        gh, run = self.gh(runs, jobs=self.jobs(), files={111: ['.github/workflows/ci.yml']})
+        # 111 (least sunk) is exempt: 112 (next least sunk) is cancelled instead, and its held
+        # runner (h3) is enough for m6-e2e to fit
+        self.assertEqual(self.relieve(p, run), (1, 0))
+        self.assertEqual(self.cancels(gh), ['112'])
+        self.assertIn('relief: exempt task/T-0341 — changes CI config', self.lines)
+        rec = ci_queue.load('p')['relief']
+        self.assertEqual([r['id'] for r in rec], [112])
 
     def test_below_the_escalation_bar_the_job_level_order_holds(self):
         p = self.product()
@@ -1336,6 +1423,22 @@ class TestDemand(Base):
         self.assertEqual(sorted(bad), ['ci.queue.estimate.heavy.full',
                                        'ci.queue.estimate.heavy.huge',
                                        'ci.queue.estimate.light', 'ci.queue.light_paths'])
+
+    def test_config_problems_for_relief_exempt_paths(self):
+        self.assertEqual(ci_queue.config_problems(
+            {'queue': {'relief_exempt_paths': ['ops/runners/**']}}), [])
+        self.assertEqual(ci_queue.config_problems(
+            {'queue': {'relief_exempt_paths': 'ops/runners/**'}}),
+            [('ci.queue.relief_exempt_paths',
+              "must be a list of path globs, not 'ops/runners/**'")])
+
+    def test_relief_exempt_paths_is_the_defaults_plus_the_configured_extras(self):
+        self.assertEqual(ci_queue.relief_exempt_paths(product()),
+                         ['.github/workflows/**', '.github/actionlint.yaml'])
+        self.assertEqual(
+            ci_queue.relief_exempt_paths(product(queue={'relief_exempt_paths':
+                                                         ['ops/runners/**']})),
+            ['.github/workflows/**', '.github/actionlint.yaml', 'ops/runners/**'])
 
 
 class TestDraft(Base):

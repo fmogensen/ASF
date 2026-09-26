@@ -116,6 +116,15 @@ Every wait is UTC-aware now minus the host's UTC ``createdAt``, never local time
 
 **Every hold is one line**: ``ci queue: T-0341 waits — heavy 0 free, needs 3 (S2, 4th in line)``.
 
+**CI-config exemption.** A run whose PR changed a file under ``.github/workflows/**`` or
+``.github/actionlint.yaml`` (the paths that reserve runners for the trunk), or under
+``ci.queue.relief_exempt_paths``, is never a relief candidate — neither the queued-run cancel nor
+the in-progress escalation — however low its priority or however long the trunk has waited: relief
+cancelling the very PR that changes CI config would be self-defeating. The PR's changed files are
+read once per head sha per pass (:meth:`Source.run_files`, cached across every candidate that
+shares a commit) and never trigger a ``gh`` call for a run relief was not already about to
+cancel. The line says why: ``relief: exempt <branch> — changes CI config``.
+
 **Configuration** (``ci.queue`` in the product file)::
 
     ci:
@@ -128,6 +137,8 @@ Every wait is UTC-aware now minus the host's UTC ``createdAt``, never local time
         workflows: {pr: checks.yml, trunk: checks.yml, batch: batch.yml}  # default ci.workflow
         light_paths: ['docs/**', '*.md']  # a PR touching only these is sized as a light run
         estimate: {heavy: {full: 12, light: 4}}  # overrides the measure per class (and type)
+        relief_exempt_paths: ['ops/runners/**']  # never cancelled by relief; added to the
+                                                  # always-exempt .github/workflows/**
 
 A product without ``ci.pool`` (or with ``mode: off``) is not queued: every start goes as it did
 before, and no ``gh`` call is made here. ``mode: dry-run`` decides and prints each hold as
@@ -150,11 +161,14 @@ QUEUE_FILE = 'ci-queue.json'
 KINDS = ('pr', 'trunk', 'batch', 'deploy')
 MODES = ('on', 'dry-run', 'off')
 FIELDS = ('mode', 'history', 'workflows', 'trunk_wait_min', 'trunk_escalate_min', 'pr_wait_min',
-          'light_paths', 'estimate')
+          'light_paths', 'estimate', 'relief_exempt_paths')
 #: a run's type: ``light`` when its PR changed only light paths, else ``full``
 FULL, LIGHT = 'full', 'light'
 RUN_TYPES = (FULL, LIGHT)
 DEFAULT_LIGHT_PATHS = ('docs/**', '*.md')
+#: relief never cancels a run whose PR changed CI config — these paths, always, plus
+#: ``ci.queue.relief_exempt_paths``
+DEFAULT_RELIEF_EXEMPT_PATHS = ('.github/workflows/**', '.github/actionlint.yaml')
 #: the percentile of the per-run peaks the estimate takes (nearest rank)
 ESTIMATE_PERCENTILE = 90
 DEFAULT_HISTORY = 10
@@ -290,6 +304,16 @@ def light_paths(product):
     return list(DEFAULT_LIGHT_PATHS)
 
 
+def relief_exempt_paths(product):
+    """The globs a run's PR changing any of them exempts it from trunk relief (queued or
+    in-progress): always :data:`DEFAULT_RELIEF_EXEMPT_PATHS` (``.github/workflows/**``,
+    ``.github/actionlint.yaml`` — the paths that reserve runners for the trunk), plus
+    ``ci.queue.relief_exempt_paths`` (a list of extra globs, additive)."""
+    v = _qcfg(product).get('relief_exempt_paths')
+    extra = [str(g) for g in v if g] if isinstance(v, (list, tuple)) else []
+    return list(DEFAULT_RELIEF_EXEMPT_PATHS) + extra
+
+
 def _docs_file(product, f):
     """True when ``f`` lies under the product's docs roots — the lane's docs class."""
     try:
@@ -372,6 +396,9 @@ def config_problems(ci):
     lp = q.get('light_paths')
     if lp is not None and not (isinstance(lp, list) and all(isinstance(g, str) for g in lp)):
         out.append(('ci.queue.light_paths', f'must be a list of path globs, not {lp!r}'))
+    rep = q.get('relief_exempt_paths')
+    if rep is not None and not (isinstance(rep, list) and all(isinstance(g, str) for g in rep)):
+        out.append(('ci.queue.relief_exempt_paths', f'must be a list of path globs, not {rep!r}'))
     est = q.get('estimate')
     if est is not None:
         if not isinstance(est, dict):
@@ -1447,6 +1474,8 @@ def relieve_trunk(product, items=None, source=None, out=print, dry_run=False, no
     pr_wf, batch_wf = workflow_for(product, 'pr'), workflow_for(product, 'batch')
     cands = []
     statuses = QUEUED_STATUSES | ({'in_progress'} if escalated else frozenset())
+    exempt_globs = relief_exempt_paths(product)
+    exempt_files = {}   # {head sha: [changed file]}, one Source.run_files call per sha per pass
     for wf in sorted({w for w in (pr_wf, batch_wf) if w}):
         listed = runs if wf == twf else _list_runs(src, product, wf)
         for r in listed or ():
@@ -1470,6 +1499,12 @@ def relieve_trunk(product, items=None, source=None, out=print, dry_run=False, no
             prio, label = priority(item, items, branch, product=product)
             if prio == S1:
                 continue                        # an S1 or hotfix run is never cancelled
+            head = r.get('headSha')
+            if head not in exempt_files:
+                exempt_files[head] = src.run_files(rid)
+            if _touches(exempt_files[head] or (), exempt_globs):
+                out(f'relief: exempt {branch} — changes CI config')
+                continue
             if kind == 'batch':
                 group, label, item = 2, 'batch', 'batch'
             else:

@@ -252,6 +252,14 @@ first among equals, never S1 or hotfix, until the idle runners plus the runners 
 trunk's queued required jobs by label. Re-runs follow as above. One line each:
 `ci queue: cancelled in-progress pr run 111 (T-0341) — its queued heavy jobs compete with main's m6-e2e queued 45m; sunk 3 min`.
 
+**CI-config exemption.** Relief (queued-run cancel and in-progress escalation alike) never
+cancels a run whose PR changed a file under `.github/workflows/**` or `.github/actionlint.yaml`
+— the paths that reserve runners for the trunk — or under `ci.queue.relief_exempt_paths`,
+however low its priority or however long the trunk has waited: cancelling the very PR that
+changes CI config would be self-defeating. The changed files are read once per head sha per
+pass, so a run relief was never going to cancel triggers no extra `gh` call. One line:
+`relief: exempt <branch> — changes CI config`.
+
 ```yaml
 ci:
   queue:
@@ -263,6 +271,8 @@ ci:
     workflows: {pr: checks.yml, trunk: checks.yml, batch: batch.yml}   # default: ci.workflow
     light_paths: ['docs/**', '*.md']   # a PR touching only these is sized as a light run
     estimate: {heavy: {full: 12, light: 4}}   # optional: overrides the measure ({heavy: 12}: both)
+    relief_exempt_paths: ['ops/runners/**']   # never cancelled by relief; added to the
+                                               # always-exempt .github/workflows/**
 ```
 
 `mode: dry-run` decides every start and prints each hold as `ci queue (dry-run): … would wait`
