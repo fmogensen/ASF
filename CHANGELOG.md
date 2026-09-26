@@ -2,6 +2,25 @@
 
 One entry per released version, newest first.
 
+## v0.1.27 — 2026-09-26
+
+### Bugs fixed
+
+- B-0094 19% of sessions end 'not pushed': finished work is lost to a missing commit or push
+
+### In progress
+
+- F-0091 asf improve: the self-improvement pass is a tick step, not something someone remembers to ask for
+
+### Improvements and hotfixes
+
+- fix(upgrade): the drain counts only this install's ASF home — a test suite's ticks never hold the floor
+- fix(upgrade): a killed asf upgrade --wait never keeps the ticks parked
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.27"`
+
 ## v0.1.26 — 2026-09-26
 
 ### Bugs fixed
