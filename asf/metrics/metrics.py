@@ -720,12 +720,11 @@ def render_daily(root, day, items, conv=None, product=None):
     landing = None
     if product is not None:
         from asf.improve import measure
-        try:
+        from asf.workers import pool
+        if os.path.isfile(pool.sessions_path(product)):
             runs = measure.ended_runs(product, since=week[0], as_of=f'{day}T23:59:59Z')
             t = measure.table(runs)
             landing = (t['non_landing_share'], t['usd_per_landed_item'], t['landed_items'])
-        except env.ConfigError:
-            landing = None
     out = [f"# Factory scorecard {day}", '',
            f"generated: {day} — from metrics/ci ({len(ci)}), metrics/sessions ({len(sessions)}), metrics/ticks ({len(ticks)})", '',
            '## Waste', '', '| Metric | Value | Note |', '|---|---|---|']
