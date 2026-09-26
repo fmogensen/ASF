@@ -306,6 +306,11 @@ RED_TEST = ('import unittest\n\nfrom src.count import count\n\n\nclass EmptyTest
 GREEN_COUNT = ('def count(text):\n    if not text:\n        return 0\n'
                '    return len(text.split())\n')
 
+# F-0033/§2.3: one entry per tick of `WholeLoopFromCardToRelease` — a stage that repeats or never
+# appears names its own hinge.
+EXPECTED_LADDER = ['card', 'card', 'card', 'spec-draft', 'spec-approved',
+                   'spec-approved', 'plan-approved', 'building 0/1', 'landed']
+
 
 class FailurePathsBase(unittest.TestCase):
     """A fresh copy of ``sample/`` per class; the test plays the session between ticks (the fake
@@ -328,12 +333,19 @@ class FailurePathsBase(unittest.TestCase):
               os.path.join(cls.home, 'products', 'sample.yaml'), REPO=cls.repo, BACKLOG=cls.backlog)
         _fill(os.path.join(cls.sample, 'config.yaml'), os.path.join(cls.home, 'config.yaml'),
               SAMPLE=cls.sample)
-        cls.env = hermetic.build(dict(os.environ, ASF_HOME=cls.home, PYTHONPATH=ROOT,
-                                      GIT_AUTHOR_NAME='sample', GIT_AUTHOR_EMAIL='sample@example.com',
-                                      GIT_COMMITTER_NAME='sample', GIT_COMMITTER_EMAIL='sample@example.com',
-                                      GH_TOKEN='', PATH=SampleProductTest._path_with_offline_gh(
-                                          os.path.join(cls.tmp, 'bin'))),
-                                 home=cls.tmp)
+        base = dict(os.environ, ASF_HOME=cls.home, PYTHONPATH=ROOT,
+                    GIT_AUTHOR_NAME='sample', GIT_AUTHOR_EMAIL='sample@example.com',
+                    GIT_COMMITTER_NAME='sample', GIT_COMMITTER_EMAIL='sample@example.com',
+                    GH_TOKEN='', PATH=SampleProductTest._path_with_offline_gh(
+                        os.path.join(cls.tmp, 'bin')))
+        # F-0033/§2.6: an operator's own `core.hooksPath` (or any other inherited git config)
+        # reaching this fixture's child `git` makes the wave's hook preflight refuse to launch —
+        # `hermetic._git_config` *appends* to whatever count it finds, so the inherited pairs are
+        # dropped here rather than left for it to build on.
+        base.pop('GIT_CONFIG_COUNT', None)
+        for name in [n for n in base if hermetic.GIT_CONFIG_VAR_RE.match(n)]:
+            base.pop(name, None)
+        cls.env = hermetic.build(base, home=cls.tmp)
         cls.ticks = []
         init = cls.asf('init', '--product', 'sample')
         assert init.returncode == 0, init.stdout + init.stderr
@@ -528,6 +540,164 @@ class FinishedWithoutPushIsCorrected(FailurePathsBase):
     def test_tick_3_lands_the_corrected_branch(self):
         self.assertIsNotNone(self.find(self.t3, 'landed bugfix/B-0001 → '), self.t3)
         self.assertEqual(self.origin_subjects()[0], 'fix(B-0001): return 0 on empty, with test_empty')
+
+
+SPEC_F0001 = ('# F-0001 — Count words, not bytes\n\n'
+              'Return the number of words a file holds, not its byte count.\n')
+
+PLAN_F0001 = ('# Plan F-0001\n\n'
+              '### Task 1: land the word count\n'
+              'writes: README\n\n'
+              '**Steps**: land it\n\n'
+              'coverage: 1/1 stories; uncovered: none\n')
+
+
+class WholeLoopFromCardToRelease(FailurePathsBase):
+    """F-0033/§2.2: ``sample/`` walked from its first tick to a landed Task, the writes of every
+    session played between ticks the same way ``HeldThenCorrectedThenLanded`` already plays the
+    Bug's fix — the fake runtime returns a scripted result and touches no git. ``cls.ladder``
+    gathers the Feature's stage after every tick (§2.3).
+
+    Two things this loop must do that no other scenario in the module needs to:
+
+    - ``fix-bug-b-0001``'s own result is left unpushed for one tick on purpose. The S1 lane
+      clears the moment the Bug's *session* ends (:func:`asf.feeder.tiers.select`), not when its
+      branch actually lands — so pushing at once would clear S1 a tick earlier than §2.2's table
+      has it, and the ladder's first three ticks would read ``card, card`` instead of ``card,
+      card, card``. A held-then-corrected round (the same shape ``FinishedWithoutPushIsCorrected``
+      already exercises) spends the extra tick honestly.
+    - The tick that lands the plan and mints the Task is split into ``record`` alone, then the
+      rest. ``sample/``'s own ``T-0001`` (a real, pre-existing Task hanging off F-0001's story
+      S-0001) becomes an equally eligible ``PLAN → CODE`` row the instant F-0001's plan lands,
+      and its ``rank: 1`` beats a freshly-minted Task's (unranked, so it sorts last) for
+      ``sample/``'s one capacity slot — a plain tick here launches ``T-0001``, not ours, a tick
+      early. Running ``record`` alone first gives a window to rank the newly-minted Task ahead of
+      ``T-0001`` (an operator's own card, not ``sample/``'s conventions, so this touches nothing
+      the plan or spec claims) before ``wave`` ever runs, so the loop's own Task wins the slot on
+      the tick the table says it does.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.ladder = []
+        cls.coder_job = cls.task_id = cls.task_branch = None
+        cls.script({'ok': True, 'result': 'done'})
+
+        cls.t1 = cls.tick()                                    # wave: launches fix-bug-b-0001
+        cls.ladder.append(cls.stage())
+
+        cls.t2 = cls.tick()                                    # health: not pushed, held; wave: launches correct-b-0001
+        cls.ladder.append(cls.stage())
+        cls.play('correct-b-0001', [('src/count.py', GREEN_COUNT, 'fix(B-0001): return 0 on empty'),
+                                    ('tests/test_empty.py', RED_TEST, 'fix(B-0001): add test_empty')])
+
+        cls.t3 = cls.tick()                                    # health: finished; harvest: lands bugfix/B-0001;
+        cls.ladder.append(cls.stage())                         # ingest: Resolved, S1 clears; wave: launches spec-f-0001
+        cls.play('spec-f-0001', [('specs/f-0001.md', SPEC_F0001, 'spec(F-0001): draft')])
+
+        cls.t4 = cls.tick()                                    # harvest: lands spec/F-0001
+        cls.ladder.append(cls.stage())
+
+        cls.t5 = cls.tick()                                    # ingest: spec_on_main; wave: launches plan-f-0001
+        cls.ladder.append(cls.stage())
+        cls.play('plan-f-0001', [('plans/f-0001.md', PLAN_F0001, 'plan(F-0001): draft')])
+
+        cls.t6 = cls.tick()                                    # harvest: lands plan/F-0001
+        cls.ladder.append(cls.stage())
+
+        cls.t7a = cls.tick_steps('record')                     # record: mints the Task, if the plan is on the trunk
+        cls.task_id = cls.minted_task_id()
+        if cls.task_id:
+            cls.rank_ahead_of_t0001(cls.task_id)
+        cls.t7b = cls.tick_steps('record,health,groom,wave,prs,harvest,batch')  # wave: launches its coder
+        cls.t7 = cls.t7a + cls.t7b
+        cls.ladder.append(cls.stage())
+        if cls.task_id:
+            cls.coder_job = f'coder-{cls.task_id}'.lower()
+            s = cls.sessions().get(cls.coder_job)
+            if s:
+                cls.task_branch = _git(['rev-parse', '--abbrev-ref', 'HEAD'], cwd=s['worktree'])
+                cls.play(cls.coder_job, [('README', f'{cls.task_id} landed the word count.\n',
+                                          f'task({cls.task_id}): land the word count')])
+
+        cls.t8 = cls.tick()                                    # harvest: lands feature/<task>; ingest closes it
+        cls.ladder.append(cls.stage())
+
+        cls.t9 = cls.tick()                                    # ingest: the Feature reaches landed; the tables are read
+        cls.ladder.append(cls.stage())
+
+    @classmethod
+    def play(cls, job, writes):
+        """Commits ``writes`` (``[(rel, text, subject)]``) into ``job``'s worktree and pushes —
+        or does nothing when ``job`` never launched (§3.5: a broken loop stalls the ladder
+        instead of raising, so the failure names the stage that never arrived, not a KeyError)."""
+        s = cls.sessions().get(job)
+        if not s:
+            return
+        for rel, text, subject in writes:
+            cls.session_commits(s['worktree'], rel, text, subject)
+        cls.session_pushes(s['worktree'])
+
+    @classmethod
+    def tick_steps(cls, steps):
+        """Like :meth:`tick`, but only ``steps`` (comma-separated) of this one run — the record
+        tick alone, so :meth:`rank_ahead_of_t0001` gets a window before ``wave`` runs."""
+        p = cls.asf('tick', '--product', 'sample', '--fresh', '--steps', steps)
+        assert p.returncode == 0 and 'Traceback' not in p.stdout + p.stderr, p.stdout + p.stderr
+        lines = [ln for ln in p.stdout.splitlines() if ln.strip()]
+        lines += cls.background_harvest(lines)
+        cls.ticks.append(lines)
+        return lines
+
+    @classmethod
+    def rank_ahead_of_t0001(cls, task_id):
+        """Gives the freshly-minted Task a lower ``rank`` than ``sample/``'s own ``T-0001``
+        (``rank: 1``) — an operator's own re-prioritization, committed straight to the backlog
+        the way a hand edit would be, so the loop's Task — not the fixture's pre-existing one —
+        takes the one capacity slot ``wave`` hands out once F-0001's plan lands."""
+        path = os.path.join(cls.backlog, 'tasks', f'{task_id}.md')
+        with open(path, encoding='utf-8') as f:
+            text = f.read()
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text.replace('parent: F-0001', 'parent: F-0001\nrank: 0', 1))
+        _git(['add', '-A'], cwd=cls.backlog)
+        _git(['commit', '-q', '-m', 'operator: rank the minted task ahead of T-0001'], cwd=cls.backlog)
+        _git(['push', '-q', 'origin', 'HEAD:main'], cwd=cls.backlog)
+
+    @classmethod
+    def stage(cls):
+        with open(os.path.join(cls.backlog, 'index.json'), encoding='utf-8') as f:
+            return json.load(f)['items']['F-0001']['stage']
+
+    @classmethod
+    def task_children_of_f0001(cls):
+        with open(os.path.join(cls.backlog, 'index.json'), encoding='utf-8') as f:
+            items = json.load(f)['items']
+        return [iid for iid, it in items.items()
+                if it.get('type') == 'task' and it.get('parent') == 'F-0001']
+
+    @classmethod
+    def minted_task_id(cls):
+        """The one Task child of F-0001, or ``None`` before the plan lands — never raised: a
+        broken loop stalls the ladder (§3.5), it does not crash ``setUpClass``."""
+        tasks = cls.task_children_of_f0001()
+        assert len(tasks) <= 1, tasks
+        return tasks[0] if tasks else None
+
+    def test_the_stage_ladder(self):
+        self.assertEqual(self.ladder, EXPECTED_LADDER)
+
+    def test_each_stage_launched_the_session_it_should(self):
+        self.assertIsNotNone(self.find(self.t1, 'launched fix-bug-b-0001'), self.t1)
+        self.assertIsNotNone(self.find(self.t2, 'launched correct-b-0001'), self.t2)
+        self.assertIsNotNone(self.find(self.t3, 'launched spec-f-0001'), self.t3)
+        self.assertIsNotNone(self.find(self.t5, 'launched plan-f-0001'), self.t5)
+        self.assertIsNotNone(self.find(self.t7, f'launched {self.coder_job}'), self.t7)
+
+    def test_the_plan_minted_the_task_and_the_coder_took_the_code_lane(self):
+        self.assertEqual(self.task_children_of_f0001(), [self.task_id])
+        self.assertEqual(self.task_branch, f'feature/{self.task_id}')
 
 
 if __name__ == '__main__':
