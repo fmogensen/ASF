@@ -1388,30 +1388,102 @@ class ApiRef(unittest.TestCase):
 
 
 class SkippedRequiredCheck(unittest.TestCase):
-    def test_skipped_required_check_counts_as_passed(self):
-        """§12: a required check a path filter skipped decided it is not needed — passed; one
-        that never appears still waits (then the local gate)."""
-        product = env.Product('p', {'repo_slug': 'o/p', 'conventions': {
+    """2026-09-26 incident: a PR merged on its one landing check while the product's deploy-
+    required suites were still running (then cancelled) and one had failed. A PR merges on its
+    checks alone only when every required check concluded ``success`` on its head: skipped,
+    missing, pending, cancelled or failed never merges, and the held line names them."""
+    def _host(self, conv=None, deploy_sha=None):
+        cfg = {'repo_slug': 'o/p', 'conventions': dict({
             'landing': 'pull-request', 'landing_checks': ['ci', 'docs'],
-            'landing_checks_missing': 'wait'}})
+            'landing_checks_missing': 'wait'}, **(conv or {}))}
+        if deploy_sha is not None:
+            cfg['deploy_sha'] = deploy_sha
+        product = env.Product('p', cfg)
         tmp = tempfile.mkdtemp(prefix='skip_')
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         runner = lane.Lane.__new__(lane.Lane)
+        self.lines = []
         runner.product, runner.conv, runner.out, runner.dry_run = product, product.conventions, \
-            (lambda *_: None), False
+            self.lines.append, False
         runner.results, runner.now, runner.state_dir = {}, NOW, tmp
+        runner.repo = None
         host = lane.GitHubHost(product, None)
         host.lane = runner
-        f = {'branch': 'worker/T-0001', 'prev': rec(lane.GATE, pr=7), 'class': lane.CODE,
+        self.runner = runner
+        return host
+
+    def _gate(self, host, checks, cls=lane.CODE, prev=None):
+        f = {'branch': 'worker/T-0001', 'prev': prev or rec(lane.GATE, pr=7), 'class': cls,
              'head': HEAD}
-        checks = [{'name': 'ci', 'bucket': 'pass'}, {'name': 'docs', 'bucket': 'skipping'}]
-        with mock.patch.object(harvest, '_gh', return_value=(0, json.dumps(checks), '')):
-            self.assertEqual(host.check_gate(f, 7, ['src/a.py']), 'ci')
-        with mock.patch.object(harvest, '_gh', return_value=(0, json.dumps(checks[:1]), '')), \
+        with mock.patch.object(harvest, '_gh', return_value=(0, json.dumps(checks), '')), \
                 mock.patch.object(lane.Lane, 'set', lambda self, f, s, r, result=None, **kw:
-                                  runner.results.update({f['branch']: (s, r)})):
-            self.assertIsNone(host.check_gate(f, 7, ['src/a.py']))
-        self.assertEqual(runner.results['worker/T-0001'][0], lane.WAITING_CI)
+                                  self.results.update({f['branch']: (s, r)})), \
+                mock.patch.object(lane, 'send_back', lambda ln, f, *a, **k:
+                                  ln.results.update({f['branch']: ('back', a)})):
+            return host.check_gate(f, 7, ['src/a.py']), self.runner.results.get(f['branch'])
+
+    def test_a_skipped_required_check_never_merges(self):
+        host = self._host()
+        checks = [{'name': 'ci', 'bucket': 'pass'}, {'name': 'docs', 'bucket': 'skipping'}]
+        how, got = self._gate(host, checks)
+        self.assertIsNone(how)
+        self.assertEqual(got[0], lane.WAITING_CI)
+        self.assertIn('docs', got[1])
+        self.assertIn('skipped', got[1])
+        # and the missing-check clock running out never turns a skip into a local gate
+        old = rec(lane.WAITING_CI, pr=7, since=NOW - 10 * 86400)
+        how, got = self._gate(host, checks, prev=old)
+        self.assertIsNone(how)
+        self.assertEqual(got[0], lane.WAITING_CI)
+
+    def test_every_required_check_success_merges_on_ci(self):
+        host = self._host()
+        checks = [{'name': 'ci', 'bucket': 'pass'}, {'name': 'docs', 'bucket': 'pass'},
+                  {'name': 'lint', 'bucket': 'skipping'}]
+        self.assertEqual(self._gate(host, checks)[0], 'ci')
+
+    def test_a_missing_required_check_waits(self):
+        host = self._host()
+        how, got = self._gate(host, [{'name': 'ci', 'bucket': 'pass'}])
+        self.assertIsNone(how)
+        self.assertEqual(got[0], lane.WAITING_CI)
+        self.assertIn('docs', got[1])
+
+    def test_the_deploy_required_jobs_are_required_to_merge_code(self):
+        # the incident shape: the landing check green, the deploy-required suites unfinished,
+        # cancelled or failed — never a merge
+        host = self._host(conv={'landing_checks': ['gate']},
+                          deploy_sha={'prod': {'mode': 'manual', 'workflow': 'd.yml',
+                                               'required_jobs': ['gate', 'gate-tests', 'e2e']}})
+        pending = [{'name': 'gate', 'bucket': 'pass'}, {'name': 'gate-tests', 'bucket': 'pending'},
+                   {'name': 'e2e', 'bucket': 'pass'}]
+        how, got = self._gate(host, pending)
+        self.assertIsNone(how)
+        self.assertEqual(got[0], lane.WAITING_CI)
+        self.assertIn('gate-tests', got[1])
+        red = [{'name': 'gate', 'bucket': 'pass'}, {'name': 'gate-tests', 'bucket': 'cancel'},
+               {'name': 'e2e', 'bucket': 'fail'}]
+        how, got = self._gate(host, red)
+        self.assertIsNone(how)
+        self.assertNotEqual(got and got[0], 'ci')
+        missing = [{'name': 'gate', 'bucket': 'pass'}, {'name': 'e2e', 'bucket': 'pass'}]
+        how, got = self._gate(host, missing)
+        self.assertIsNone(how)
+        self.assertIn('gate-tests', got[1])
+        green = [{'name': 'gate', 'bucket': 'pass'}, {'name': 'gate-tests', 'bucket': 'pass'},
+                 {'name': 'e2e (shard 1)', 'bucket': 'pass'}, {'name': 'soak', 'bucket': 'fail'}]
+        self.assertEqual(self._gate(host, green)[0], 'ci')
+        # a matrix leg of a required job that failed is red
+        leg = green[:2] + [{'name': 'e2e (shard 1)', 'bucket': 'pass'},
+                           {'name': 'e2e (shard 2)', 'bucket': 'fail'}]
+        self.assertIsNone(self._gate(host, leg)[0])
+
+    def test_a_docs_pr_needs_only_its_landing_checks(self):
+        host = self._host(conv={'landing_checks': ['gate']},
+                          deploy_sha={'prod': {'mode': 'manual', 'workflow': 'd.yml',
+                                               'required_jobs': ['gate', 'gate-tests']}})
+        checks = [{'name': 'gate', 'bucket': 'pass'}, {'name': 'gate-tests', 'bucket': 'skipping'}]
+        self.assertEqual(self._gate(host, checks, cls=lane.DOCS)[0], 'ci')
 
 
 if __name__ == '__main__':

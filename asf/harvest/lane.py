@@ -138,7 +138,10 @@ SUBJECT_METHODS = ('--squash', '--merge')
 #: ``gh pr checks`` buckets that make a PR red, and those that count as run and passed — a
 #: required check a path filter skipped (``skipping``) decided it is not needed: passed (§12).
 RED_BUCKETS = ('fail', 'cancel')
-PASS_BUCKETS = ('pass', 'skipping')
+#: the one bucket that is green for a required check: a skipped required check (a path filter,
+#: an ``if:``) is not green — it tested nothing (2026-09-26 incident)
+PASS_BUCKETS = ('pass',)
+SKIP_BUCKET = 'skipping'
 #: A trunk check run that ended in one of these is red (:meth:`GitHubHost.trunk_red`).
 TRUNK_RED_CONCLUSIONS = ('failure', 'cancelled', 'timed_out', 'startup_failure')
 #: How many trunk commits, newest first, are read for a check's latest completed run.
@@ -2500,6 +2503,24 @@ class GitHubHost(Host):
                                .get('mergeQueue'))
         return self._queue
 
+    def merge_required(self, state_dir, cls, head=None):
+        """``(names, why)``: the checks that must each conclude success on the PR head before it
+        merges on its checks alone — :meth:`required_checks`, and for a code PR also the jobs
+        that make a trunk sha deployable to prod (``deploy_sha.prod.required_jobs_from`` read at
+        ``head``, else ``required_jobs``): a merge the deploy would refuse is not a merge.
+        ``why`` is set (names None) when a ``required_jobs_from`` with no list behind it cannot
+        be read."""
+        from asf.harvest import deploy
+        names = list(self.required_checks(state_dir))
+        if cls != DOCS and (deploy.required_from(self.product, 'prod')
+                            or deploy._names(deploy.env_cfg(self.product, 'prod')
+                                             .get('required_jobs'))):
+            jobs, why = deploy.required_jobs(self.product, 'prod', head)
+            if jobs is None:
+                return None, why
+            names += [j for j in jobs if j not in names]
+        return tuple(names), None
+
     def required_checks(self, state_dir):
         named = self.product.conventions.get('landing_checks')
         if named:
@@ -2573,7 +2594,12 @@ class GitHubHost(Host):
         """The PR's checks before the gate: ``'gate'`` (gate it locally), ``'ci'`` (its required
         checks passed under ``wait``), or None when it waits or went back."""
         lane, b, rec = self.lane, f['branch'], f.get('prev') or {}
-        required = self.required_checks(lane.state_dir)
+        cls = f.get('class') or landing_class(self.product, files)
+        required, why = self.merge_required(lane.state_dir, cls, f.get('head'))
+        if required is None:
+            lane.out(f'waiting {b}: PR #{number} required checks unknown — {why}')
+            wait(lane, f, f'required checks unknown: {why}', state=WAITING_CI)
+            return None
         state, detail, checks = pr_checks(self.slug, number, required)
         ignored = not_required_red(checks, required)
         if ignored:
@@ -2596,7 +2622,7 @@ class GitHubHost(Host):
             return None
         if state == 'red':
             red = [c.get('name') or '?' for c in checks if c.get('bucket') in RED_BUCKETS
-                   and (not required or c.get('name') in required)]
+                   and (not required or required_name(c.get('name'), required))]
             conv = self.product.conventions
             unsigned = [n for n in red if conv.is_signoff_check(n)]
             if unsigned and lane.repair_signoff(f, unsigned[0]) is not None:
@@ -2614,7 +2640,7 @@ class GitHubHost(Host):
             send_back(lane, f, 'gate', f'PR #{number} checks red: {detail}'
                       + red_evidence(self.slug, checks, red), ())
             return None
-        passed = {c.get('name') for c in checks if c.get('bucket') in PASS_BUCKETS}
+        passed = passed_names(checks, required)
         on_trunk = self.trunk_red(required or [c.get('name') for c in checks if c.get('name')])
         if on_trunk:
             tip = f.get('head') or f'origin/{b}'
@@ -2628,11 +2654,19 @@ class GitHubHost(Host):
                 return None
             lane.out(f'harvest: {b}: PR #{number} turns {", ".join(on_trunk)} green on top of '
                      f'the red {self.trunk} — it may land')
-        cls = f.get('class') or landing_class(self.product, files)
         if missing_policy(self.product.conventions, cls) == MISSING_LOCAL_GATE:
             return 'gate'
         if not required:
             return 'gate'
+        skipped = [n for n in required if n not in passed and any(
+            c.get('bucket') == SKIP_BUCKET and required_name(c.get('name'), (n,)) for c in checks)]
+        if skipped:
+            # a required check that ran nothing is not green, and no clock turns it into a local
+            # gate: it holds until a run of it concludes success on the head
+            lane.out(f'held {b}: PR #{number} required check(s) skipped, not green — '
+                     f'{", ".join(skipped)}')
+            wait(lane, f, f'required checks skipped: {", ".join(skipped)}', state=WAITING_CI)
+            return None
         missing = [name for name in required if name not in passed]
         if not missing:
             return 'ci'
@@ -2704,7 +2738,8 @@ def pr_checks(slug, number, required=()):
         checks = [c for c in json.loads(stdout) if isinstance(c, dict)]
     except (json.JSONDecodeError, TypeError):
         return 'unknown', H.tail(err) or f'gh pr checks exited {rc}', []
-    judged = [c for c in checks if c.get('name') in required] if required else checks
+    judged = ([c for c in checks if required_name(c.get('name'), required)] if required
+              else checks)
     red = [c.get('name') or '?' for c in judged if c.get('bucket') in RED_BUCKETS]
     if red:
         return 'red', ', '.join(red), checks
@@ -2754,13 +2789,36 @@ def red_evidence(slug, checks, red):
     return ''.join(out)
 
 
+def required_name(name, required):
+    """The name in ``required`` that check ``name`` answers for — itself, or its job name up to
+    the first space (a matrix leg ``e2e (shard 1)`` answers for ``e2e``) — else None."""
+    name = str(name or '')
+    if name in required:
+        return name
+    key = name.split(' ', 1)[0]
+    return key if key in required else None
+
+
+def passed_names(checks, required=()):
+    """The check names that passed; with ``required``, the required names every one of whose
+    checks (each matrix leg) concluded success."""
+    if not required:
+        return {c.get('name') for c in checks if c.get('bucket') in PASS_BUCKETS}
+    seen = {}
+    for c in checks:
+        n = required_name(c.get('name'), required)
+        if n:
+            seen.setdefault(n, []).append(c.get('bucket'))
+    return {n for n, b in seen.items() if b and all(x in PASS_BUCKETS for x in b)}
+
+
 def not_required_red(checks, required):
     """The names of ``checks`` that failed or were cancelled but are not ``required`` — told, never
     acted on. Empty when nothing is required: then every red check already counts."""
     if not required:
         return []
     return [c.get('name') or '?' for c in checks
-            if c.get('bucket') in RED_BUCKETS and c.get('name') not in required]
+            if c.get('bucket') in RED_BUCKETS and not required_name(c.get('name'), required)]
 
 
 def protected_checks(slug, trunk, state_dir, now=None):
