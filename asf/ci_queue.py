@@ -140,6 +140,18 @@ read once per head sha per pass (:meth:`Source.run_files`, cached across every c
 shares a commit) and never trigger a ``gh`` call for a run relief was not already about to
 cancel. The line says why: ``relief: exempt <branch> — changes CI config``.
 
+**Duplicate branch pushes.** A workflow on both ``push`` and ``pull_request`` runs twice on a
+branch's head once it has a PR — two runs, one sha, twice the runners.
+:func:`cancel_duplicate_pushes` (every tick, from the lane's pass, before the relief and on the
+same listing — one ``gh run list`` per workflow per pass) cancels a ``push`` run on a non-trunk
+branch, queued or in progress, whose head sha also has a ``pull_request`` run of the same
+workflow queued, in progress or completed green, newest first:
+``ci queue: cancel duplicate push <id> on <branch> — PR run <id> covers <sha9>``. It is never
+re-run (not a relief record). Never touched: a trunk push, a deploy workflow, a branch matching
+``ci.queue.dedupe_exempt_branches`` (default ``train/*``, ``release/*``), and a push with no PR
+run on its sha (a branch that never gets a PR keeps its push CI). ``ci.queue.dedupe_push: off``
+turns it off.
+
 **Configuration** (``ci.queue`` in the product file)::
 
     ci:
@@ -155,6 +167,8 @@ cancel. The line says why: ``relief: exempt <branch> — changes CI config``.
         estimate: {heavy: {full: 12, light: 4}}  # overrides the measure per class (and type)
         relief_exempt_paths: ['ops/runners/**']  # never cancelled by relief; added to the
                                                   # always-exempt .github/workflows/**
+        dedupe_push: on   # cancel a branch push run a PR run on the same sha covers
+        dedupe_exempt_branches: ['train/*', 'release/*']  # push runs never cancelled as dups
 
 A product without ``ci.pool`` (or with ``mode: off``) is not queued: every start goes as it did
 before, and no ``gh`` call is made here. ``mode: dry-run`` decides and prints each hold as
@@ -165,6 +179,7 @@ prints the line with each entry's decision, writing nothing.
 """
 import dataclasses
 import datetime
+import fnmatch
 import json
 import math
 import os
@@ -177,7 +192,10 @@ QUEUE_FILE = 'ci-queue.json'
 KINDS = ('pr', 'trunk', 'batch', 'deploy')
 MODES = ('on', 'dry-run', 'off')
 FIELDS = ('mode', 'history', 'workflows', 'trunk_wait_min', 'trunk_escalate_min', 'pr_wait_min',
-          'light_paths', 'estimate', 'relief_exempt_paths', 's1_wait_min')
+          'light_paths', 'estimate', 'relief_exempt_paths', 's1_wait_min', 'dedupe_push',
+          'dedupe_exempt_branches')
+#: the branches whose ``push`` runs are never cancelled as duplicates of a PR run
+DEFAULT_DEDUPE_EXEMPT = ('train/*', 'release/*')
 #: a run's type: ``light`` when its PR changed only light paths, else ``full``
 FULL, LIGHT = 'full', 'light'
 RUN_TYPES = (FULL, LIGHT)
@@ -320,6 +338,23 @@ def pr_wait_min(product):
     return v if ok else DEFAULT_PR_WAIT_MIN
 
 
+def dedupe_push(product):
+    """``ci.queue.dedupe_push``: cancel a branch push run a PR run covers (default on)."""
+    v = _qcfg(product).get('dedupe_push')
+    if v is None or v is True:
+        return True
+    return v is not False and str(v).strip().lower() != 'off'
+
+
+def dedupe_exempt_branches(product):
+    """``ci.queue.dedupe_exempt_branches``: branch globs whose push runs are never cancelled as
+    duplicates (default ``train/*``, ``release/*``)."""
+    v = _qcfg(product).get('dedupe_exempt_branches')
+    if isinstance(v, list) and all(isinstance(g, str) for g in v):
+        return tuple(v)
+    return DEFAULT_DEDUPE_EXEMPT
+
+
 def light_paths(product):
     """``ci.queue.light_paths``: the globs a light run's changed files all lie under (default
     ``docs/**``, ``*.md``); a list given replaces the default."""
@@ -424,6 +459,14 @@ def config_problems(ci):
     rep = q.get('relief_exempt_paths')
     if rep is not None and not (isinstance(rep, list) and all(isinstance(g, str) for g in rep)):
         out.append(('ci.queue.relief_exempt_paths', f'must be a list of path globs, not {rep!r}'))
+    dep = q.get('dedupe_exempt_branches')
+    if dep is not None and not (isinstance(dep, list) and all(isinstance(g, str) for g in dep)):
+        out.append(('ci.queue.dedupe_exempt_branches',
+                    f'must be a list of branch globs, not {dep!r}'))
+    dp = q.get('dedupe_push')
+    if dp is not None and dp is not True and dp is not False \
+            and str(dp).strip().lower() not in ('on', 'off'):
+        out.append(('ci.queue.dedupe_push', f'must be on or off, not {dp!r}'))
     est = q.get('estimate')
     if est is not None:
         if not isinstance(est, dict):
@@ -1308,13 +1351,71 @@ def _dur(seconds):
     return f'{m // 60}h{m % 60:02d}m' if m >= 60 else f'{m}m'
 
 
-def _list_runs(src, product, workflow):
+def _list_runs(src, product, workflow, listing=None):
+    """A workflow's latest runs, listed once per pass when ``listing`` (``{workflow: runs}``,
+    shared by the pass's steps) is handed in."""
+    if listing is not None and workflow in listing:
+        return listing[workflow]
     text = src._gh(['run', 'list', '-R', product.repo_slug, '--workflow', workflow, '--limit',
                     '100', '--json', _RUN_FIELDS])
     try:
-        return [r for r in json.loads(text or 'null') or () if isinstance(r, dict)]
+        runs = [r for r in json.loads(text or 'null') or () if isinstance(r, dict)]
     except (TypeError, ValueError):
-        return None
+        runs = None
+    if listing is not None:
+        listing[workflow] = runs
+    return runs
+
+
+def _deploy_workflow(product, wf):
+    q = _qcfg(product).get('workflows')
+    return (isinstance(q, dict) and q.get('deploy') == wf) or 'deploy' in str(wf).lower()
+
+
+def cancel_duplicate_pushes(product, source=None, out=print, dry_run=False, listing=None):
+    """Cancel every ``push`` run on a non-trunk branch, queued or in progress, whose head sha
+    also has a ``pull_request`` run of the same workflow queued, in progress or completed green —
+    the PR run covers that sha (see the module doc). Newest duplicate first, one line per cancel,
+    never re-run. The runs come from ``listing`` (one list per workflow per pass); a cancelled
+    run is marked cancelled there so the pass's later steps skip it. The number cancelled. Not a
+    queued product or ``dedupe_push: off``: nothing, no ``gh`` call. Never raises."""
+    m = mode(product)
+    if m == 'off' or not product.repo_slug or not dedupe_push(product):
+        return 0
+    dry_run = dry_run or m == 'dry-run'
+    src = source or GitHubSource(product)
+    trunk = getattr(product, 'main', None) or 'main'
+    exempt = dedupe_exempt_branches(product)
+    n = 0
+    wfs = {workflow_for(product, k) for k in ('pr', 'trunk', 'batch')}
+    for wf in sorted(w for w in wfs if w and not _deploy_workflow(product, w)):
+        runs = _list_runs(src, product, wf, listing) or ()
+        covers = {}   # {head sha: the PR run that covers it}
+        for r in runs:
+            if r.get('event') == 'pull_request' and r.get('headSha') and (
+                    r.get('status') != 'completed' or r.get('conclusion') == 'success'):
+                covers.setdefault(r['headSha'], r.get('databaseId'))
+        dups = [r for r in runs
+                if r.get('event') == 'push' and r.get('status') != 'completed'
+                and r.get('databaseId') and r.get('headSha') in covers
+                and (r.get('headBranch') or trunk) != trunk
+                and not any(fnmatch.fnmatchcase(r.get('headBranch') or '', g) for g in exempt)]
+        dups.sort(key=lambda r: (str(r.get('createdAt') or ''), int(r.get('databaseId') or 0)),
+                  reverse=True)
+        for r in dups:
+            rid, sha = r['databaseId'], r['headSha']
+            what = (f"duplicate push {rid} on {r.get('headBranch')} — PR run {covers[sha]} "
+                    f"covers {str(sha)[:9]}")
+            if dry_run:
+                out(f'ci queue: would cancel {what}')
+                continue
+            if src._gh(['run', 'cancel', str(rid), '-R', product.repo_slug]) is None:
+                out(f'ci queue: cancel of duplicate push {rid} refused')
+                continue
+            out(f'ci queue: cancel {what}')
+            r['status'], r['conclusion'] = 'completed', 'cancelled'
+            n += 1
+    return n
 
 
 def _covered(need, free, freed):
@@ -1437,7 +1538,8 @@ def _sunk_s(jobs, classes, by_name, cls_of, now):
     return total
 
 
-def relieve_trunk(product, items=None, source=None, out=print, dry_run=False, now=None):
+def relieve_trunk(product, items=None, source=None, out=print, dry_run=False, now=None,
+                  listing=None):
     """Starvation relief (see the module doc) for the trunk run and, after it, every queued S1
     or hotfix PR run: cancel queued runs ahead of a trunk run queued past
     ``ci.queue.trunk_wait_min``, lowest priority first, until the free runners plus the freed
@@ -1461,14 +1563,14 @@ def relieve_trunk(product, items=None, source=None, out=print, dry_run=False, no
     q = Queue(product, source=src, now=now, out=out, write=not dry_run)
     trunk = getattr(product, 'main', None) or 'main'
     twf = workflow_for(product, 'trunk')
-    runs = _list_runs(src, product, twf) if twf else None
+    runs = _list_runs(src, product, twf, listing) if twf else None
     if runs is None:
         return 0, 0
     lists = {twf: runs}
 
     def listed(wf):
         if wf not in lists:
-            lists[wf] = _list_runs(src, product, wf)
+            lists[wf] = _list_runs(src, product, wf, listing)
         return lists[wf]
 
     pushes = [r for r in runs if r.get('event') == 'push' and r.get('headBranch') == trunk]

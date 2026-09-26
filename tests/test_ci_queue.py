@@ -398,6 +398,132 @@ class TestSuperseded(Base):
         self.assertEqual(ci_queue.cancel_superseded(product(pool=False), source=NoGh()), 0)
 
 
+
+
+class TestDuplicatePush(Base):
+    """2026-09-26 17:35Z, a product: branch worktree-m-p4-t1 had ci.yml runs 36259590283 and
+    36259590441 (push) and 36259592614 (pull_request) on one sha cd5a5e5c3, all on heavy runners
+    while an S1 PR waited. The push runs are duplicates the PR run covers."""
+    SHA = 'cd5a5e5c3' + '0' * 31
+
+    def runs(self):
+        return [
+            {'databaseId': 36259590283, 'status': 'in_progress', 'conclusion': '',
+             'event': 'push', 'headBranch': 'worktree-m-p4-t1', 'headSha': self.SHA,
+             'createdAt': '2026-09-26T17:30:01Z'},
+            {'databaseId': 36259590441, 'status': 'queued', 'conclusion': '',
+             'event': 'push', 'headBranch': 'worktree-m-p4-t1', 'headSha': self.SHA,
+             'createdAt': '2026-09-26T17:30:02Z'},
+            {'databaseId': 36259592614, 'status': 'queued', 'conclusion': '',
+             'event': 'pull_request', 'headBranch': 'worktree-m-p4-t1', 'headSha': self.SHA,
+             'createdAt': '2026-09-26T17:30:10Z'},
+            # a plan branch with no PR (D44): its push CI stays
+            {'databaseId': 500, 'status': 'queued', 'conclusion': '', 'event': 'push',
+             'headBranch': 'plan-x', 'headSha': 'b' * 40, 'createdAt': '2026-09-26T17:31:00Z'},
+            # the trunk push on a sha a PR run also ran on: never touched
+            {'databaseId': 600, 'status': 'queued', 'conclusion': '', 'event': 'push',
+             'headBranch': 'main', 'headSha': 'c' * 40, 'createdAt': '2026-09-26T17:32:00Z'},
+            {'databaseId': 601, 'status': 'completed', 'conclusion': 'success',
+             'event': 'pull_request', 'headBranch': 'task/T-0500', 'headSha': 'c' * 40,
+             'createdAt': '2026-09-26T17:00:00Z'},
+            # a release train: exempt, whatever runs on its sha
+            {'databaseId': 700, 'status': 'queued', 'conclusion': '', 'event': 'push',
+             'headBranch': 'train/2026-09-26', 'headSha': 'd' * 40,
+             'createdAt': '2026-09-26T17:33:00Z'},
+            {'databaseId': 701, 'status': 'queued', 'conclusion': '', 'event': 'pull_request',
+             'headBranch': 'train/2026-09-26', 'headSha': 'd' * 40,
+             'createdAt': '2026-09-26T17:33:05Z'},
+            # a push whose PR run failed: the PR run covers nothing, the push stays
+            {'databaseId': 800, 'status': 'queued', 'conclusion': '', 'event': 'push',
+             'headBranch': 'task/T-0341', 'headSha': 'e' * 40,
+             'createdAt': '2026-09-26T17:34:00Z'},
+            {'databaseId': 801, 'status': 'completed', 'conclusion': 'failure',
+             'event': 'pull_request', 'headBranch': 'task/T-0341', 'headSha': 'e' * 40,
+             'createdAt': '2026-09-26T17:20:00Z'},
+            # a completed-green PR run covers a still-queued push on the same sha
+            {'databaseId': 900, 'status': 'queued', 'conclusion': '', 'event': 'push',
+             'headBranch': 'task/T-0600', 'headSha': 'f' * 40,
+             'createdAt': '2026-09-26T17:35:00Z'},
+            {'databaseId': 901, 'status': 'completed', 'conclusion': 'success',
+             'event': 'pull_request', 'headBranch': 'task/T-0600', 'headSha': 'f' * 40,
+             'createdAt': '2026-09-26T17:10:00Z'},
+        ]
+
+    def gh(self, runs):
+        gh = FakeGh()
+        base = gh.__call__
+
+        def run(argv, **kw):
+            if argv[:3] == ['gh', 'run', 'list'] and 'event' in argv[-1]:
+                gh.calls.append(argv)
+                return subprocess.CompletedProcess(argv, 0, json.dumps(runs), '')
+            return base(argv, **kw)
+        return gh, run
+
+    def dedupe(self, p, run, **kw):
+        return ci_queue.cancel_duplicate_pushes(p, source=ci_queue.GitHubSource(p, run=run),
+                                               out=self.lines.append, **kw)
+
+    def cancels(self, gh):
+        return [c[3] for c in gh.calls if c[:3] == ['gh', 'run', 'cancel']]
+
+    def test_the_1735z_shape_cancels_both_push_runs_and_keeps_the_pr_run(self):
+        p = product()
+        gh, run = self.gh(self.runs())
+        self.assertEqual(self.dedupe(p, run), 3)
+        # newest duplicate first; the PR run, the plan branch, trunk, the train and the push
+        # whose PR run failed are never touched
+        self.assertEqual(self.cancels(gh), ['900', '36259590441', '36259590283'])
+        self.assertIn('ci queue: cancel duplicate push 36259590441 on worktree-m-p4-t1 — '
+                      'PR run 36259592614 covers cd5a5e5c3', self.lines)
+        self.assertEqual(len(self.lines), 3)
+        # one list for the pass, never a call per run, never a re-run
+        self.assertEqual(len([c for c in gh.calls if c[:3] == ['gh', 'run', 'list']]), 1)
+        self.assertFalse([c for c in gh.calls if c[:3] == ['gh', 'run', 'rerun']])
+        self.assertEqual(ci_queue.load('p')['relief'], [])
+
+    def test_push_without_pr_run_trunk_and_train_are_kept(self):
+        p = product()
+        runs = [r for r in self.runs() if r['databaseId'] in (500, 600, 601, 700, 701)]
+        gh, run = self.gh(runs)
+        self.assertEqual(self.dedupe(p, run), 0)
+        self.assertEqual(self.cancels(gh), [])
+        self.assertEqual(self.lines, [])
+
+    def test_exempt_globs_are_configurable(self):
+        p = product(queue={'dedupe_exempt_branches': ['worktree-*']})
+        gh, run = self.gh(self.runs())
+        self.dedupe(p, run)
+        cancelled = self.cancels(gh)
+        self.assertNotIn('36259590283', cancelled)
+        self.assertIn('700', cancelled)   # train/* is no longer exempt once the list is set
+
+    def test_off_dry_run_and_unqueued_cancel_nothing(self):
+        gh, run = self.gh(self.runs())
+        self.assertEqual(self.dedupe(product(queue={'dedupe_push': 'off'}), run), 0)
+        self.assertFalse(gh.calls)
+        self.assertEqual(self.dedupe(product(queue={'mode': 'dry-run'}), run), 0)
+        self.assertEqual(self.cancels(gh), [])
+        self.assertTrue(self.lines and all('would cancel' in l for l in self.lines))
+        self.assertEqual(ci_queue.cancel_duplicate_pushes(product(pool=False), source=NoGh()), 0)
+
+    def test_shared_listing_marks_the_cancelled_run_so_relief_never_reruns_it(self):
+        p = product()
+        gh, run = self.gh(self.runs())
+        listing = {}
+        self.dedupe(p, run, listing=listing)
+        self.assertEqual(ci_queue._list_runs(ci_queue.GitHubSource(p, run=run), p, 'ci.yml',
+                                             listing)[1]['status'], 'completed')
+        self.assertEqual(len([c for c in gh.calls if c[:3] == ['gh', 'run', 'list']]), 1)
+
+    def test_config_problems_name_bad_dedupe_fields(self):
+        probs = dict(ci_queue.config_problems({'queue': {'dedupe_push': 'maybe',
+                                                         'dedupe_exempt_branches': 'train/*'}}))
+        self.assertIn('ci.queue.dedupe_push', probs)
+        self.assertIn('ci.queue.dedupe_exempt_branches', probs)
+        self.assertEqual(ci_queue.config_problems({'queue': {'dedupe_push': 'on'}}), [])
+
+
 class ReliefBase(Base):
     """A trunk run queued past ``trunk_wait_min`` behind PR and batch runs at a FIFO host."""
     WF = {'pr': 'pr.yml', 'trunk': 'ci.yml', 'batch': 'batch.yml'}

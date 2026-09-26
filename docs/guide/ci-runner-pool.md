@@ -229,6 +229,17 @@ still queued behind a newer one is moot. Each tick the lane cancels those, per t
 keeping the newest queued-or-running run; a run already in progress finishes. One line per cancel:
 `ci queue: cancelled superseded main run 2 (checks.yml at bbbbbbbbb) — run 4 at ddddddddd judges it`.
 
+**Duplicate branch pushes.** A workflow triggered on both `push` and `pull_request` runs twice
+on a branch's head once the branch has a PR: two runs, one sha, twice the runners. Each tick, on
+the same run listing the relief reads (one `gh run list` per workflow per pass), the lane cancels
+a `push` run on a non-trunk branch — queued or in progress — whose head sha also has a
+`pull_request` run of the same workflow queued, in progress or completed green, newest first. It
+is never re-run. A trunk push, a deploy workflow, a branch matching
+`ci.queue.dedupe_exempt_branches` (default `train/*`, `release/*`) and a push with no PR run on its
+sha (a branch that never gets a PR keeps its push CI) are never touched. `ci.queue.dedupe_push:
+off` turns it off. One line per cancel:
+`ci queue: cancel duplicate push 36259590441 on feat-x — PR run 36259592614 covers cd5a5e5c3`.
+
 **Trunk starvation relief.** The host's own queue is first in, first out, and the start queue
 cannot reorder runs the host already holds: a trunk run pushed after PR runs waits behind all of
 them. Each tick, when the newest trunk `push` run has been queued longer than
@@ -284,6 +295,8 @@ ci:
     estimate: {heavy: {full: 12, light: 4}}   # optional: overrides the measure ({heavy: 12}: both)
     relief_exempt_paths: ['ops/runners/**']   # never cancelled by relief; added to the
                                                # always-exempt .github/workflows/**
+    dedupe_push: on   # cancel a branch push run a PR run on the same sha covers
+    dedupe_exempt_branches: ['train/*', 'release/*']   # their push runs are never cancelled
 ```
 
 `mode: dry-run` decides every start and prints each hold as `ci queue (dry-run): … would wait`

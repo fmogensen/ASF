@@ -1973,8 +1973,13 @@ def lane_pass(product, state_dir=None, items=None, out=print, dry_run=False, roo
         lane.finish_ref_pushes()
     from asf import ci_queue  # a queued trunk run a newer one supersedes holds runners for nothing
     ci_queue.cancel_superseded(product, out=lane.out, dry_run=lane.dry_run)
+    listing = {}  # one ``gh run list`` per workflow for the pass's dedupe and relief
+    # a branch push run a PR run on the same sha covers holds runners twice for one verdict
+    ci_queue.cancel_duplicate_pushes(product, out=lane.out, dry_run=lane.dry_run,
+                                     listing=listing)
     # the host's queue is FIFO: a trunk run starved behind PR runs gets runs ahead of it cancelled
-    ci_queue.relieve_trunk(product, items=lane.items, out=lane.out, dry_run=lane.dry_run)
+    ci_queue.relieve_trunk(product, items=lane.items, out=lane.out, dry_run=lane.dry_run,
+                           listing=listing)
     return lane.results, found
 
 
