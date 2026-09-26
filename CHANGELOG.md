@@ -2,6 +2,27 @@
 
 One entry per released version, newest first.
 
+## v0.1.32 — 2026-09-26
+
+### Features landed
+
+- F-0090 Adjudication is the last resort: the cheap causes are ruled out before Opus is spent
+
+### In progress
+
+- F-0001 P0a — the two repositories and the licence
+- F-0003 P0c — seed this record with the factory itself
+- F-0102 Deliveries: one plan, one agent, one gate for several small Features and Bug fixes across the backlog
+
+### Improvements and hotfixes
+
+- fix(ci_queue, wave): the line drops what can no longer start; the local lane keeps to the share
+- fix(ci_queue): the queue's pass runs on its own clock, every minute
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.32"`
+
 ## v0.1.31 — 2026-09-26
 
 ### In progress
