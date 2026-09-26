@@ -662,8 +662,20 @@ def scheduler_rows(cfg, product, jobs=None):
     own = f'asf.{product.name}.'
     jobs = [j for j in jobs if not str(j.get('label', '')).startswith('asf.')
             or str(j.get('label', '')).startswith(own)]
-    if not jobs:
+    loaded_labels = {j['label'] for j in jobs}
+    try:
+        declared = scheduler.clocks(product)
+    except scheduler.SchedulerError:
+        declared = []
+    # a clock the product declares that launchd does not currently hold (a bootstrap that failed
+    # silently, or one an install never got to, B-0136) names itself here — the loop below only
+    # ever sees what's loaded, so this is the one place that would otherwise be silent
+    missing = sorted(scheduler.label_for(product.name, c.name, cfg) for c in declared
+                     if scheduler.label_for(product.name, c.name, cfg) not in loaded_labels)
+    if not jobs and not missing:
         rows.append((RED, '(none)', 'no factory job is loaded — nothing ticks this product'))
+    for label in missing:
+        rows.append((RED, label, f'declared in products/{product.name}.yaml but not loaded'))
     for job in sorted(jobs, key=lambda j: j['label']):
         label = job['label']
         info = scheduler.status(label)

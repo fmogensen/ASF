@@ -846,6 +846,25 @@ class TestSchedulerSection(unittest.TestCase):
         self.assertEqual(rows[0][0], doctor.RED)
         self.assertIn('nothing ticks', rows[0][2])
 
+    def test_a_declared_clock_with_no_loaded_job_is_red_naming_the_label(self):
+        """B-0136: an install once left ``record-health-wave-prs-harvest`` with a plist on disk
+        but never bootstrapped — loaded_jobs() never mentions it, so the old code had no row for
+        it at all. A clock the product declares that is not among the loaded jobs must name
+        itself RED, not vanish."""
+        product = env.Product('sample', {'repo_dir': self.tmp, 'repo_slug': 'acme/sample',
+                                         'backlog_dir': self.tmp,
+                                         'clocks': {'daily': {'shadow': True, 'at': '06:50'},
+                                                    'record-health-wave-prs-harvest':
+                                                        {'shadow': True, 'every': '10m'}}})
+        self.install_plist('asf.sample.daily', ['python3'], calendar={'Hour': 6, 'Minute': 50})
+        fake_loaded(self.statedir, ['asf.sample.daily'])
+        fake_print(self.statedir, 'asf.sample.daily', read_fixture('launchctl-print.txt'))
+
+        rows = doctor.scheduler_rows(self.cfg(), product)
+        self.assertIn((doctor.RED, 'asf.sample.record-health-wave-prs-harvest',
+                       'declared in products/sample.yaml but not loaded'), rows)
+        self.assertTrue(doctor.scheduler_is_red(rows))
+
     def test_daily_job_never_ran_uses_a_day_not_the_global_interval(self):
         self.install_plist('asf.sample.daily', ['python3'],
                            calendar={'Hour': 6, 'Minute': 50}, age_s=1800)

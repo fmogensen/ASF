@@ -225,6 +225,24 @@ class StatusViewTests(ViewsTestCase):
         with mock.patch.object(scheduler, 'loaded_jobs', lambda cfg=None: []):
             self.assertIn('no job loaded for p', self.rows({})['Cron'])
 
+    def test_cron_flags_a_declared_clock_that_is_not_loaded(self):
+        """B-0136: a clock the product declares but that launchd does not currently hold must
+        say so — the old code only ever looked at what's loaded, so a clock like this simply
+        never appeared in the Cron row."""
+        from asf import scheduler
+        product = env.Product('p', {'repo_dir': self.tmp, 'main': 'trunk',
+                                    'ci': {'provider': 'none'}, 'deploy_sha': 'none',
+                                    'clocks': {'daily': {'shadow': True, 'at': '06:50'},
+                                               'record-health-wave-prs-harvest':
+                                                   {'shadow': True, 'every': '10m'}}})
+        jobs = [{'label': 'asf.p.daily'}]
+        with mock.patch.object(scheduler, 'loaded_jobs', lambda cfg=None: jobs), \
+                mock.patch.object(scheduler, 'status',
+                                  lambda label: {'state': 'waiting', 'last_exit': 0}):
+            cell = status.cron_cell({}, product)
+        self.assertIn('asf.p.daily waiting (exit 0)', cell)
+        self.assertIn('clock asf.p.record-health-wave-prs-harvest not loaded', cell)
+
     def test_no_index_names_the_backlog(self):
         self.assertEqual(status.ready_cell(os.path.join(self.tmp, 'nowhere'), self.product),
                          '— (not configured: backlog_dir (no index.json))')

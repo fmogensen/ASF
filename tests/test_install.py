@@ -6,6 +6,7 @@ import datetime
 import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1513,19 +1514,43 @@ class InstallScriptTest(unittest.TestCase):
     abort the run — the scheduler install and the doctor still run, the failed step is named,
     and the script exits non-zero."""
 
-    def _run(self, hooks_rc):
+    #: A clock still on disk but not in `launchctl list` — exactly the B-0136 incident.
+    NOT_LOADED = 'asf.demo.record-health-wave-prs-harvest  not loaded'
+
+    def _run(self, hooks_rc=0, status_results=(('0', ''),)):
+        """``status_results``: ``[(rc, stdout), ...]`` for successive ``scheduler status`` calls
+        (the last entry repeats for any call beyond the list) — how install.sh's own retry
+        of the bootstrap sees the clock check."""
         tmp = tempfile.mkdtemp(prefix='install_sh_')
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         bin_dir, home = os.path.join(tmp, 'bin'), os.path.join(tmp, 'home')
         asf_home, log = os.path.join(home, '.ASF'), os.path.join(tmp, 'calls.log')
+        counter = os.path.join(tmp, 'status_calls')
         os.makedirs(bin_dir)
         os.makedirs(os.path.join(asf_home, 'products'))
         for rel in ('config.yaml', os.path.join('products', 'demo.yaml')):
             open(os.path.join(asf_home, rel), 'w').close()
+
+        cases = []
+        for i, (rc, out) in enumerate(status_results, start=1):
+            echo = f'printf %s\\\\n {shlex.quote(out)}; ' if out else ''
+            cases.append(f'      {i}) {echo}exit {rc} ;;')
+        last_rc, last_out = status_results[-1]
+        echo = f'printf %s\\\\n {shlex.quote(last_out)}; ' if last_out else ''
+        cases.append(f'      *) {echo}exit {last_rc} ;;')
+        status_case = '\n'.join(cases)
+
         scripts = {
             'pipx': '#!/bin/sh\nexit 0\n',
             'asf': ('#!/bin/sh\n'
                     f'echo "$*" >> "{log}"\n'
+                    'if [ "$1 $2" = "scheduler status" ]; then\n'
+                    f'  n=0; [ -f "{counter}" ] && n=$(cat "{counter}")\n'
+                    f'  n=$((n + 1)); echo "$n" > "{counter}"\n'
+                    '  case "$n" in\n'
+                    f'{status_case}\n'
+                    '  esac\n'
+                    'fi\n'
                     'case "$1" in\n'
                     '  --version) echo "asf 0.0.0 (stub)";;\n'
                     f'  hooks) echo "NEEDS OPERATOR: pre-push is not asf\'s" >&2; exit {hooks_rc};;\n'
@@ -1548,8 +1573,8 @@ class InstallScriptTest(unittest.TestCase):
 
     def test_a_failed_hooks_step_still_runs_the_scheduler_and_the_doctor(self):
         r, calls = self._run(hooks_rc=2)
-        self.assertEqual(calls, ['--version', 'hooks', 'scheduler', 'doctor', 'console-permissions'],
-                         r.stderr)
+        self.assertEqual(calls, ['--version', 'hooks', 'scheduler', 'scheduler', 'doctor',
+                                 'console-permissions'], r.stderr)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn('install: FAILED step 3: asf hooks install --product demo (exit 2)', r.stderr)
         self.assertNotIn('FAILED step 4', r.stderr)
@@ -1557,10 +1582,36 @@ class InstallScriptTest(unittest.TestCase):
 
     def test_every_step_green_exits_zero(self):
         r, calls = self._run(hooks_rc=0)
-        self.assertEqual(calls, ['--version', 'hooks', 'scheduler', 'doctor', 'console-permissions'],
-                         r.stderr)
+        self.assertEqual(calls, ['--version', 'hooks', 'scheduler', 'scheduler', 'doctor',
+                                 'console-permissions'], r.stderr)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn('FAILED', r.stderr)
+
+    def test_an_unloaded_clock_is_retried_once_and_then_succeeds(self):
+        """B-0136: the first read-back finds the clock not loaded; install.sh retries the
+        bootstrap once and, once that clock is loaded, the step is not a failure."""
+        r, calls = self._run(status_results=[('1', self.NOT_LOADED), ('0', '')])
+        self.assertEqual(calls, ['--version', 'hooks',
+                                 'scheduler', 'scheduler',   # install, then the failing status
+                                 'scheduler', 'scheduler',   # the retried install, then status
+                                 'doctor', 'console-permissions'], r.stderr)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn('FAILED', r.stderr)
+        self.assertIn('retrying the bootstrap once', r.stdout + r.stderr)
+
+    def test_an_unloaded_clock_still_missing_after_retry_fails_loudly_naming_it(self):
+        """B-0136's own acceptance: a clock still not loaded after the retry fails the install
+        loudly, naming the missing label — not just a bare non-zero exit."""
+        r, calls = self._run(status_results=[('1', self.NOT_LOADED)])
+        self.assertEqual(calls, ['--version', 'hooks', 'scheduler', 'scheduler',
+                                 'scheduler', 'scheduler', 'doctor', 'console-permissions'],
+                         r.stderr)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('install: FAILED step 4: asf scheduler install --product demo (exit 1)',
+                      r.stderr)
+        self.assertIn('install: NEEDS OPERATOR: clock(s) still not loaded after retrying the '
+                      'bootstrap: asf.demo.record-health-wave-prs-harvest', r.stderr)
+        self.assertIn('/plugin install asf@asf', r.stdout)  # steps 5 and 6 still ran
 
     def test_step_6_offers_the_console_permissions_and_writes_nothing(self):
         r, calls = self._run(hooks_rc=0)
