@@ -114,6 +114,33 @@ class TickPrintsTheDriftLine(DriftTestCase):
         step.assert_called()   # the owner keeps its product moving; others wait for the gap
         self.assertIn(f'tick: upgrade to {self.head[:7]} pending — this tick runs', out.getvalue())
 
+    def test_the_owner_tick_drains_a_live_background_harvest_then_installs(self):
+        """A background harvest from the owner's last tick is still running at its start: the
+        tick marks the upgrade pending, polls within upgrade.drain_wait_s, and installs once it
+        ends — never deferred forever behind its own product's harvest."""
+        from asf import upgrade
+        self.addCleanup(upgrade.clear_pending)
+        polls = iter([[54171], [54171], []])
+        installed = []
+        self.product = env.Product('p', {'repo_dir': self.repo, 'main': 'main',
+                                         'ci': {'provider': 'none'}, 'approvals': {'upgrade': 'auto'}})
+        out = io.StringIO()
+        with self.behind(), contextlib.redirect_stdout(out), mock.patch('asf.tick.summary.run'), \
+                mock.patch.object(upgrade, 'other_ticks', side_effect=lambda *a, **k: next(polls)), \
+                mock.patch.object(upgrade, 'describe', side_effect=lambda pids, run=None: [str(p) for p in pids]), \
+                mock.patch.object(upgrade, 'drain_wait_s', return_value=180), \
+                mock.patch.object(upgrade, '_install',
+                                  side_effect=lambda ref, run, out: installed.append(ref) or 0), \
+                mock.patch.object(upgrade.time, 'sleep') as sleep, \
+                mock.patch.object(tick, 'run_asf_step') as step:
+            tick._run_steps(mock.Mock(), self.product, tick.Context(self.product),
+                            [('harvest', 'asf', None)], None)
+        self.assertEqual(installed, [self.head])
+        self.assertEqual(sleep.call_count, 2)
+        step.assert_not_called()  # the steps run on the next tick, under the new install
+        self.assertIsNone(upgrade.read_pending())
+        self.assertIn('upgrade: the floor drained', out.getvalue())
+
     def test_no_line_of_drift_when_the_install_is_the_trunk(self):
         out = io.StringIO()
         with mock.patch.object(drift, 'installed_commit', return_value=self.head), \

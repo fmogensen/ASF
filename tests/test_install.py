@@ -555,8 +555,16 @@ class UpgradeTest(HomeCase):
         rc, out, _err = self.run_upgrade(run)
         self.assertEqual(rc, upgrade.DEFERRED)
         self.assertEqual(run.installs(), [])
-        self.assertIn('upgrade: deferred to the next tick', out)
+        self.assertIn('upgrade: deferred', out)
         self.assertIn('4242', out)
+        self.assertIn('rerun with --wait', out)  # a manual run is never silently deferred
+
+    def test_the_pattern_counts_the_background_harvest(self):
+        import re
+        pat = re.compile(upgrade.TICK_PATTERN)
+        self.assertTrue(pat.search('/usr/bin/python3 -m asf.tick.step_harvest --product asf '
+                                   '--items /Users/x/.ASF/state/asf/harvest-items.json'))
+        self.assertFalse(pat.search('/usr/bin/python3 -m asf.cli status'))
 
     def test_the_pattern_matches_ticks_not_shells_that_name_them(self):
         import re
@@ -676,6 +684,131 @@ class PendingUpgradeTest(HomeCase):
         upgrade.write_pending(self.SHA, 'factory')
         self.assertFalse(upgrade.waiting('other', out=lambda _l: None, installed=self.SHA))
         self.assertFalse(os.path.exists(upgrade.pending_path()))
+        self.assertIsNone(upgrade.cooling())  # an installed marker is no expiry
+
+    def test_the_pending_ttl_is_at_most_twenty_minutes(self):
+        self.assertLessEqual(upgrade.PENDING_TTL_S, 20 * 60)
+
+    def test_a_timed_out_marker_resumes_the_parked_ticks_loudly_and_does_not_repark_them(self):
+        upgrade.write_pending(self.SHA, 'factory', now=time.time() - upgrade.PENDING_TTL_S - 60)
+        lines = []
+        self.assertFalse(upgrade.waiting('other', out=lines.append, installed='c' * 40))
+        self.assertEqual(len(lines), 1, lines)
+        self.assertTrue(lines[0].startswith(f'NEEDS OPERATOR: upgrade to {self.SHA[:7]} pending'),
+                        lines)
+        self.assertIn('the parked ticks resume', lines[0])
+        # the owner's next deferral does not park them again straight away
+        rc, out, _err = self.run_upgrade(FakeRun(ticks='4242\n'))
+        self.assertEqual(rc, upgrade.DEFERRED)
+        self.assertIsNone(upgrade.read_pending())
+        self.assertIn('no pending mark until', out)
+        self.assertFalse(upgrade.waiting('other', out=lines.append, installed='c' * 40))
+        # once the cool-down has passed, a deferral parks them again
+        self.assertIsNotNone(upgrade.write_pending(self.SHA, 'factory',
+                                                   now=time.time() + upgrade.PENDING_TTL_S + 1))
+
+
+class SequencedRun(FakeRun):
+    """``FakeRun`` whose ``pgrep`` answers from a list, one per call (the last one repeats)."""
+
+    def __init__(self, pgreps, **kw):
+        super().__init__(**kw)
+        self.pgreps = list(pgreps)
+
+    def __call__(self, cmd, **kw):
+        if cmd[:2] == ['pgrep', '-f']:
+            self.calls.append(cmd)
+            answer = self.pgreps.pop(0) if len(self.pgreps) > 1 else self.pgreps[0]
+            return mock.Mock(returncode=0 if answer else 1, stdout=answer)
+        if cmd[:1] == ['ps']:
+            self.calls.append(cmd)
+            return mock.Mock(returncode=0, stdout=(
+                '54171   10:09 /usr/bin/python3 -m asf.tick.step_harvest --product asf\n'))
+        return super().__call__(cmd, **kw)
+
+
+class DrainTest(HomeCase):
+    """The owner's tick drains the floor for up to ``upgrade.drain_wait_s``, then installs."""
+    SHA = 'b' * 40
+
+    def upgrade(self, run, owner='factory', wait=None, ref=SHA):
+        slept = []
+        rc, out, _err = _quiet(upgrade.cmd_upgrade, argparse.Namespace(
+            skip_pipx=False, ref=ref, owner=owner, wait=wait, sleep=slept.append), run=run)
+        return rc, out, slept
+
+    def test_the_owner_drains_a_live_background_harvest_then_installs(self):
+        # a background harvest (pid 54171) is running at the owner's start; it ends two polls on
+        run = SequencedRun(['54171\n', '54171\n', '54171\n', ''], installed=self.SHA)
+        rc, out, slept = self.upgrade(run, wait=180)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(run.installs()), 1)
+        self.assertEqual(len(slept), 3)
+        self.assertLessEqual(sum(slept), 180)
+        self.assertIn('upgrade: waiting up to 180s for 1 asf process(es) to end:', out)
+        self.assertIn('54171 (10:09) -m asf.tick.step_harvest --product asf', out)
+        self.assertIn(f'upgrade: installed {self.SHA[:7]}', out)
+        self.assertIsNone(upgrade.read_pending())  # the install clears the mark
+
+    def test_the_owner_marks_pending_before_it_waits(self):
+        seen = []
+
+        def sleep(_s):
+            seen.append(upgrade.read_pending())
+        run = SequencedRun(['4242\n', ''], installed=self.SHA)
+        _quiet(upgrade.cmd_upgrade, argparse.Namespace(
+            skip_pipx=False, ref=self.SHA, owner='factory', wait=60, sleep=sleep), run=run)
+        self.assertEqual(seen[0]['sha'], self.SHA)  # parked the others while it drained
+
+    def test_the_wait_is_bounded_and_keeps_the_mark_for_the_next_start(self):
+        run = SequencedRun(['4242\n'], installed=self.SHA)
+        rc, out, slept = self.upgrade(run, wait=30)
+        self.assertEqual(rc, upgrade.DEFERRED)
+        self.assertEqual(run.installs(), [])
+        self.assertEqual(sum(slept), 30)
+        self.assertEqual(upgrade.read_pending()['sha'], self.SHA)
+        self.assertIn('upgrade: deferred to the next tick', out)
+
+    def test_the_drain_wait_reads_the_operator_config(self):
+        self.assertEqual(upgrade.drain_wait_s({}), upgrade.DEFAULT_DRAIN_WAIT_S)
+        self.assertEqual(upgrade.drain_wait_s({'upgrade': {'drain_wait_s': 45}}), 45)
+        self.assertEqual(upgrade.drain_wait_s({'upgrade': {'drain_wait_s': -1}}),
+                         upgrade.DEFAULT_DRAIN_WAIT_S)
+
+    def test_a_manual_wait_names_what_it_waits_on_and_installs(self):
+        run = SequencedRun(['54171\n', ''], installed=FakeRun.HEAD)
+        rc, out, slept = self.upgrade(run, owner=None, wait=600, ref=None)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(run.installs()[0][-1], f'git+https://github.com/o/r.git@{FakeRun.HEAD}')
+        self.assertIn('54171 (10:09) -m asf.tick.step_harvest', out)
+        self.assertEqual(len(slept), 1)
+        self.assertIsNone(upgrade.read_pending())
+
+    def test_a_manual_wait_parks_every_product_while_it_waits(self):
+        seen = []
+
+        def sleep(_s):
+            seen.append(upgrade.waiting('other', out=lambda _l: None, installed='c' * 40))
+        run = SequencedRun(['54171\n', ''], installed=FakeRun.HEAD)
+        _quiet(upgrade.cmd_upgrade, argparse.Namespace(
+            skip_pipx=False, ref=None, owner=None, wait=600, sleep=sleep), run=run)
+        self.assertEqual(seen, [True])
+
+    def test_a_manual_wait_that_times_out_says_so_and_lifts_its_mark(self):
+        run = SequencedRun(['54171\n'], installed=FakeRun.HEAD)
+        rc, out, slept = self.upgrade(run, owner=None, wait=20, ref=None)
+        self.assertEqual(rc, upgrade.DEFERRED)
+        self.assertEqual(run.installs(), [])
+        self.assertEqual(sum(slept), 20)
+        self.assertIn('upgrade: NOT installed', out)
+        self.assertIsNone(upgrade.read_pending())  # never leaves the factory parked
+
+    def test_the_cli_takes_wait_with_and_without_seconds(self):
+        p = argparse.ArgumentParser()
+        upgrade.register(p.add_subparsers())
+        self.assertEqual(p.parse_args(['upgrade', '--wait']).wait, upgrade.DEFAULT_MANUAL_WAIT_S)
+        self.assertEqual(p.parse_args(['upgrade', '--wait', '90']).wait, 90)
+        self.assertIsNone(p.parse_args(['upgrade']).wait)
 
 
 class HooksTest(HomeCase):

@@ -128,8 +128,11 @@ capacity:
 
 # upgrade: after the tick's auto-upgrade installs, the next waits this many minutes so one
 # install carries several commits (default 30). A commit with an `Urgent: yes` trailer skips it.
+# drain_wait_s: how long the upgrading tick waits at its start for the other asf ticks and
+# background harvests to end before it defers the install to its next start (default 180).
 # upgrade:
 #   min_interval_min: 30
+#   drain_wait_s: 180
 
 # Everything ASF reads and writes lives under ~/.ASF: products/, state/<product>/ (the session
 # ledger, the worktrees, the tick's record clone), logs/. Set $ASF_HOME to move all of it.

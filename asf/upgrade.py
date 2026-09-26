@@ -16,6 +16,16 @@ finish, and the owner's next tick finds the gap and installs, clearing the marke
 older than :data:`PENDING_TTL_S`, or whose sha is already installed, is removed and ignored —
 a stuck upgrade never stops the factory.
 
+The floor drains rather than waits for luck. A running asf process counts — the ticks and the
+detached background harvest (``python -m asf.tick.step_harvest``) alike, since a reinstall under
+either tears it — and while a marker is pending no tick spawns a new background harvest
+(:func:`asf.tick.step_harvest.run`), so the processes running out end. The owner's tick polls
+for them at its start for up to ``upgrade.drain_wait_s`` (:func:`drain_wait_s`, default
+:data:`DEFAULT_DRAIN_WAIT_S`) before it defers; ``asf upgrade --wait`` does the same by hand and
+names what it waits on. A marker that outlives :data:`PENDING_TTL_S` says so in a
+``NEEDS OPERATOR`` line when it is removed, and no new marker parks the other products for as
+long again (``state/upgrade-expired.json``): the parked products resume, whatever the install.
+
 Every upgrade pauses every product's ticks, so the tick's upgrades are batched: after one
 installs (``state/upgrade-last.json``), no tick starts another until ``upgrade.min_interval_min``
 (``~/.ASF/config.yaml``, default :data:`DEFAULT_MIN_INTERVAL_MIN`) has passed — by then several
@@ -36,9 +46,15 @@ PACKAGE_NAME = 'asf-factory'
 DEFAULT_REPO_URL = 'https://github.com/fmogensen/ASF.git'
 #: a tick's command line: ``python -m asf.cli tick …`` (the clocks) or ``…/bin/asf tick …`` —
 #: anchored on the interpreter's argv, so a shell whose script merely mentions them does not match
-TICK_PATTERN = r'(-m asf\.cli|/asf) tick( |$)'
-#: a pending marker older than this is stale: removed and ignored
-PENDING_TTL_S = 30 * 60
+TICK_PATTERN = r'(-m asf\.cli|/asf) tick( |$)|-m asf\.tick\.step_harvest( |$)'
+#: a pending marker older than this is stale: removed, reported, and ignored
+PENDING_TTL_S = 20 * 60
+#: ``upgrade.drain_wait_s`` when the operator config leaves it out
+DEFAULT_DRAIN_WAIT_S = 180
+#: ``asf upgrade --wait`` with no seconds given
+DEFAULT_MANUAL_WAIT_S = 600
+#: how often a draining upgrade looks for the other asf processes again
+DRAIN_POLL_S = 5
 #: ``upgrade.min_interval_min`` when the operator config leaves it out
 DEFAULT_MIN_INTERVAL_MIN = 30
 
@@ -56,18 +72,43 @@ def read_pending():
     return data if isinstance(data, dict) and data.get('sha') else None
 
 
-def write_pending(sha, owner, now=None):
-    """Mark the upgrade to ``sha`` pending, owned by product ``owner``. An existing marker keeps
-    its first timestamp (a newer head never extends the wait past :data:`PENDING_TTL_S`)."""
-    old = read_pending()
-    at = old.get('at') if old and isinstance(old.get('at'), (int, float)) else None
-    data = {'sha': sha, 'owner': owner, 'at': at if at is not None else (now or time.time())}
-    path = pending_path()
+def expired_path():
+    return os.path.join(env.ASF_HOME, 'state', 'upgrade-expired.json')
+
+
+def cooling(now=None):
+    """The epoch time until which no new pending marker parks the other products (a marker
+    expired: they resume for as long as they were parked), else ``None``."""
+    try:
+        with open(expired_path(), encoding='utf-8') as f:
+            at = json.load(f).get('at')
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not isinstance(at, (int, float)):
+        return None
+    until = at + PENDING_TTL_S
+    return until if (now or time.time()) < until else None
+
+
+def _write_json(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f'{path}.{os.getpid()}.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(data, f)
     os.replace(tmp, path)
+
+
+def write_pending(sha, owner, now=None):
+    """Mark the upgrade to ``sha`` pending, owned by product ``owner`` (``None``: an operator's
+    ``asf upgrade --wait``, which every product waits for). An existing marker keeps its first
+    timestamp (a newer head never extends the wait past :data:`PENDING_TTL_S`). Returns ``None``
+    and writes nothing while an expired marker cools down (:func:`cooling`)."""
+    if cooling(now) is not None:
+        return None
+    old = read_pending()
+    at = old.get('at') if old and isinstance(old.get('at'), (int, float)) else None
+    data = {'sha': sha, 'owner': owner, 'at': at if at is not None else (now or time.time())}
+    _write_json(pending_path(), data)
     return data
 
 
@@ -82,9 +123,10 @@ def _installed(sha, installed):
     return bool(installed and sha and (installed.startswith(sha) or sha.startswith(installed)))
 
 
-def pending(now=None, installed=None):
+def pending(now=None, installed=None, out=print):
     """The fresh pending marker, or ``None``. A stale one (older than :data:`PENDING_TTL_S`, or
-    its sha already installed) is removed."""
+    its sha already installed) is removed; one that timed out uninstalled says so in a
+    ``NEEDS OPERATOR`` line and starts the cool-down (:func:`cooling`)."""
     data = read_pending()
     if data is None:
         return None
@@ -93,8 +135,16 @@ def pending(now=None, installed=None):
         installed = drift.installed_commit()
     at = data.get('at')
     age = (now or time.time()) - at if isinstance(at, (int, float)) else None
-    if age is None or age > PENDING_TTL_S or age < -60 or _installed(data['sha'], installed):
+    if _installed(data['sha'], installed):
         clear_pending()
+        return None
+    if age is None or age > PENDING_TTL_S or age < -60:
+        clear_pending()
+        _write_json(expired_path(), {'sha': data['sha'], 'owner': data.get('owner'),
+                                     'at': now or time.time()})
+        out(f'NEEDS OPERATOR: upgrade to {data["sha"][:7]} pending {int((age or 0) // 60)} min '
+            f'never found a gap — the parked ticks resume; the install is still due '
+            f'(asf upgrade --ref {data["sha"][:7]} --wait)')
         return None
     return data
 
@@ -102,8 +152,8 @@ def pending(now=None, installed=None):
 def waiting(product_name, out=print, now=None, installed=None):
     """True when this tick must not start: an upgrade owned by another product is pending, and
     this tick's running would only keep the gap the upgrade needs from coming. The owner's ticks
-    go on — the owner retries the upgrade at its start."""
-    data = pending(now, installed)
+    go on — the owner drains and retries the upgrade at its start."""
+    data = pending(now, installed, out=out)
     if data is None or data.get('owner') == product_name:
         return False
     out(f'tick: waiting — upgrade to {data["sha"][:7]} pending')
@@ -125,26 +175,32 @@ def read_last():
 
 
 def record_last(sha, now=None):
-    path = last_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = f'{path}.{os.getpid()}.tmp'
-    with open(tmp, 'w', encoding='utf-8') as f:
-        json.dump({'sha': sha or '', 'at': now or time.time()}, f)
-    os.replace(tmp, path)
+    _write_json(last_path(), {'sha': sha or '', 'at': now or time.time()})
 
 
-def min_interval_s(cfg=None):
-    """``upgrade.min_interval_min`` from the operator config, in seconds (default 30 minutes)."""
+def _config_number(key, default, cfg=None):
+    """``upgrade.<key>`` from the operator config: a non-negative number, else ``default``."""
     if cfg is None:
         try:
             cfg = env.load_config()
         except Exception:  # noqa: BLE001 — a config problem leaves the default in force
             cfg = {}
     block = (cfg or {}).get('upgrade')
-    value = block.get('min_interval_min') if isinstance(block, dict) else None
+    value = block.get(key) if isinstance(block, dict) else None
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
-        value = DEFAULT_MIN_INTERVAL_MIN
-    return value * 60
+        value = default
+    return value
+
+
+def min_interval_s(cfg=None):
+    """``upgrade.min_interval_min`` from the operator config, in seconds (default 30 minutes)."""
+    return _config_number('min_interval_min', DEFAULT_MIN_INTERVAL_MIN, cfg) * 60
+
+
+def drain_wait_s(cfg=None):
+    """``upgrade.drain_wait_s``: how long the owner's tick waits at its start for the other asf
+    processes to end before it defers the install (default :data:`DEFAULT_DRAIN_WAIT_S`)."""
+    return _config_number('drain_wait_s', DEFAULT_DRAIN_WAIT_S, cfg)
 
 
 def urgent(repo, installed, head):
@@ -201,10 +257,43 @@ def remote_head(url, run=subprocess.run, branch='main'):
 
 
 def other_ticks(run=subprocess.run, me=None):
-    """Pids of the asf tick processes other than this one (and its parent)."""
+    """Pids of the asf tick and background harvest processes other than this one (and its
+    parent)."""
     me = me if me is not None else {os.getpid(), os.getppid()}
     text = _out(run, ['pgrep', '-f', TICK_PATTERN], timeout=10) or ''
     return [int(x) for x in text.split() if x.isdigit() and int(x) not in me]
+
+
+def describe(pids, run=subprocess.run):
+    """``pid (age) command`` for each pid, for the lines that say what an upgrade waits on."""
+    text = _out(run, ['ps', '-o', 'pid=,etime=,command=', '-p', ','.join(str(p) for p in pids)],
+                timeout=10) or ''
+    seen = {}
+    for ln in text.splitlines():
+        parts = ln.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit():
+            m = re.search(r'(-m \S+|/asf)( .*)?$', parts[2])
+            seen[int(parts[0])] = f'{parts[0]} ({parts[1]}) {(m.group(0) if m else parts[2])[:90]}'
+    return [seen.get(p, str(p)) for p in pids]
+
+
+def drain(others, wait_s, run=subprocess.run, out=print, sleep=time.sleep):
+    """Poll every :data:`DRAIN_POLL_S` for up to ``wait_s`` seconds until no other asf process
+    runs. Returns the ones still running (empty: the gap came)."""
+    if not others or not wait_s or wait_s <= 0:
+        return others
+    out(f'upgrade: waiting up to {int(wait_s)}s for {len(others)} asf process(es) to end:')
+    for line in describe(others, run):
+        out(f'  {line}')
+    waited = 0
+    while others and waited < wait_s:
+        step = min(DRAIN_POLL_S, wait_s - waited)
+        sleep(step)
+        waited += step
+        others = other_ticks(run)
+    if not others:
+        out(f'upgrade: the floor drained after {int(waited)}s')
+    return others
 
 
 def ci_red(url, ref, run=subprocess.run):
@@ -265,23 +354,45 @@ def reload_clocks(names, run=subprocess.run):
     return lines
 
 
-def install(ref=None, run=subprocess.run, out=print, owner=None):
+def install(ref=None, run=subprocess.run, out=print, owner=None, wait_s=0, sleep=time.sleep):
     """Reinstall at ``ref`` (default: ``main``'s head). 0 installed and verified, DEFERRED when
-    it waits for the next tick, else non-zero. A tick's upgrade (``owner``: its product) that
-    defers for other ticks marks itself pending, so the other ticks stop starting; any other
-    outcome clears the mark."""
+    it waits for the next tick, else non-zero.
+
+    While another asf process runs, the upgrade marks itself pending first — a tick's upgrade
+    (``owner``: its product), or an operator's waiting one (``wait_s`` and no owner), which every
+    product waits for — so no new tick starts and no new harvest spawns, then polls up to
+    ``wait_s`` seconds for the running ones to end (:func:`drain`). A tick's upgrade still
+    blocked defers and keeps its mark for its next start; any other outcome clears the mark
+    this call is responsible for."""
     others = other_ticks(run)
+    marked = None
+    if others and (owner or wait_s):
+        if not owner and not ref:
+            ref = remote_head(repo_url(run), run)  # the operator's marker names what it waits for
+        if ref and (owner or read_pending() is None):
+            marked = write_pending(ref, owner)
+            if marked is not None:
+                out(f'upgrade: pending {ref[:7]} — other ticks wait until it installs')
+            else:
+                until = time.strftime('%H:%M', time.localtime(cooling() or time.time()))
+                out(f'upgrade: no pending mark until {until} — an earlier one expired; '
+                    'the other ticks run')
+    others = drain(others, wait_s, run, out, sleep)
     if others:
-        out(f'upgrade: deferred to the next tick — another asf tick is running '
+        where = 'the next tick' if owner else 'later'
+        out(f'upgrade: deferred to {where} — another asf process is running '
             f'(pid {", ".join(str(p) for p in others)})')
-        if owner and ref:
-            write_pending(ref, owner)
-            out(f'upgrade: pending {ref[:7]} — other ticks wait until it installs')
+        for line in describe(others, run):
+            out(f'  {line}')
+        if not owner:
+            if marked is not None:
+                clear_pending()
+            out('upgrade: NOT installed — rerun with --wait [SECONDS] to wait for them to end')
         return DEFERRED
     rc = _install(ref, run, out)
     if rc == 0:
         record_last(ref)
-    if owner:
+    if owner or marked is not None:
         clear_pending()
     return rc
 
@@ -349,7 +460,9 @@ def render(rows):
 
 def cmd_upgrade(args, run=subprocess.run):
     if not args.skip_pipx:
-        rc = install(getattr(args, 'ref', None), run=run, owner=getattr(args, 'owner', None))
+        rc = install(getattr(args, 'ref', None), run=run, owner=getattr(args, 'owner', None),
+                     wait_s=getattr(args, 'wait', None) or 0,
+                     sleep=getattr(args, 'sleep', None) or time.sleep)
         if rc != 0:
             return rc
     print(f'upgrade: package {__version__}, schema {schema.SCHEMA_VERSION}')
@@ -361,5 +474,9 @@ def register(subparsers):
     p = subparsers.add_parser('upgrade', help="reinstall asf at main's head, then the schema check for every product")
     p.add_argument('--skip-pipx', action='store_true', help='only the schema table')
     p.add_argument('--ref', help="the commit to install (default: main's head)")
+    p.add_argument('--wait', type=int, nargs='?', const=DEFAULT_MANUAL_WAIT_S, default=None,
+                   metavar='SECONDS',
+                   help='when another asf tick or harvest runs: park new ticks and wait up to '
+                        f'SECONDS (default {DEFAULT_MANUAL_WAIT_S}) for them to end, then install')
     p.set_defaults(run=cmd_upgrade)
     return p
