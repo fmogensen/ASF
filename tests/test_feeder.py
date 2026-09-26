@@ -920,9 +920,28 @@ class UndecidedRowsTests(unittest.TestCase):
 class TiersTest(unittest.TestCase):
     """F-0071 acceptance 1: the S1 lane."""
 
-    def test_unheld_s1_blocks_every_feature(self):
-        out = rows.plan_rows(ten_features_and_an_s1(), product(), [], 4)
+    # 2026-09-26: the S1 lane reserves the first seat, not the whole floor — two product waves
+    # launched 1 row with 7 seats free (it replaced test_unheld_s1_blocks_every_feature)
+    def test_a_seated_s1_takes_the_first_seat_and_the_features_fill_the_rest(self):
+        out = rows.plan_rows(ten_features_and_an_s1(), product(), [], 7)
+        launching = [r for r in out if r.launches]
+        self.assertEqual(kinds(launching[:1]), [('BUG → FIX', 'B-0001')])
+        self.assertEqual([r.item_id for r in launching[1:]],
+                         ['F-0010', 'F-0009', 'F-0008', 'F-0007', 'F-0006', 'F-0005'])
+
+    def test_an_s1_that_cannot_be_seated_holds_every_feature(self):
+        busy = [{'item': 'X-1'}, {'item': 'X-2'}]
+        out = rows.plan_rows(ten_features_and_an_s1(), product(), busy, 2)
         self.assertEqual(kinds(out), [('BUG → FIX', 'B-0001')])
+        self.assertEqual(out[0].action, tiers.NO_SLOT)
+
+    def test_two_s1_rows_and_one_seat_hold_the_features(self):
+        idx = s1_bugs('B-0001', 'B-0002')
+        idx['items'].update(ten_features_and_an_s1()['items'])
+        idx['items']['B-0001'] = s1_bugs('B-0001')['items']['B-0001']
+        out = rows.plan_rows(idx, product(), [], 1)
+        self.assertEqual([r.item_id for r in out if r.launches], ['B-0001'])
+        self.assertEqual([r.item_id for r in out], ['B-0001', 'B-0002'])
 
     def test_held_s1_frees_the_rest_of_capacity(self):
         out = rows.plan_rows(ten_features_and_an_s1(), product(), [S1_SESSION], 4)
@@ -1012,7 +1031,9 @@ class FinishBeforeYouStart(unittest.TestCase):
         idx = finish_index(cards=2)
         idx['items']['B-0001']['severity'] = 'S1'
         out = rows.plan_rows(idx, product(), [], 10)
-        self.assertEqual(kinds(out), [('BUG → FIX', 'B-0001')])  # S1 still holds tier 2 back
+        # the S1 takes the first seat; with seats to spare tier 2 fills the rest (2026-09-26)
+        self.assertEqual(kinds(out)[0], ('BUG → FIX', 'B-0001'))
+        self.assertIn(('PLAN → CODE', 'T-0099'), kinds(out))
         idx['items']['B-0001']['severity'] = 'S2'
         out = rows.plan_rows(idx, product(), [], 10)
         self.assertEqual(kinds(out)[0], ('BUG → FIX', 'B-0001'))
@@ -1184,7 +1205,9 @@ class CliTest(unittest.TestCase):
     def test_next_json(self):
         rc, out = self.run_next(['next', '--product', 'sample', '--capacity', '10', '--json'])
         self.assertEqual(rc, 0)
-        self.assertEqual([d['item_id'] for d in json.loads(out)], ['B-0001', 'B-0004', 'B-0002'])
+        # the S1s first, then S2, then the tier-2 rows the seats left (2026-09-26)
+        self.assertEqual([d['item_id'] for d in json.loads(out)][:3], ['B-0001', 'B-0004', 'B-0002'])
+        self.assertIn('F-0001', [d['item_id'] for d in json.loads(out)])
 
     def test_next_holds_a_branch_awaiting_harvest_busy_as_the_tick_does(self):
         ledger = [{'job': 'fix-bug-b-0001', 'item': 'B-0001', 'branch': 'fix/B-0001', 'pid': 1,

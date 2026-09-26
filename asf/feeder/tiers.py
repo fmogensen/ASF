@@ -4,9 +4,11 @@ Tier 0 is an open S1 ``BUG → FIX``, tier 1 an S2 one, tier 2 everything else (
 then id — :func:`asf.feeder.rows.candidates` already hands tier 2 over in that order).
 
 The cut: ``capacity`` less the sessions already in flight is the number of launches this tick.
-An S1 row is always emitted first — with no free slot it still shows, waiting on one. While any
-S1 row is emitted (an S1 Bug no session holds), no tier-2 row is: Features wait until the
-incident has a session. A ``WAITS ON`` row launches nothing and costs no slot; it is shown for
+An S1 row is always emitted first — with no free slot it still shows, waiting on one. An S1 row
+takes the first seat, ahead of every other row; tier-2 rows are cut only while an S1 row that
+needs a session cannot get a seat — otherwise the seats left go to tier 2 in feeder order.
+(2026-09-26: the S1 lane reserves the first seat, not the whole floor — two product waves
+launched 1 row with 7 seats free while the lane held every tier-2 row behind a seated S1.) A ``WAITS ON`` row launches nothing and costs no slot; it is shown for
 the Tasks the cut reached, and always in tiers 0 and 1 (an S1/S2 Bug is never silent).
 
 A launching row on an item an approval hold parks (``held``, :func:`asf.approvals.parked` — a
@@ -37,7 +39,8 @@ def select(candidates, inflight, capacity, held=(), s1_first=True):
     held = set(held or ())
     ordered = sorted(candidates, key=tier_of)  # stable: keeps the Feature order within a tier
     free = free_slots(inflight, capacity)
-    s1_waiting = s1_first and any(r.tier == TIER_S1 and r.launches and r.item_id not in held for r in ordered)
+    s1_rows = sum(1 for r in ordered if r.tier == TIER_S1 and r.launches and r.item_id not in held)
+    s1_waiting = s1_first and s1_rows > free   # an S1 row that needs a session gets no seat
     out = []
     for r in ordered:
         if r.tier == TIER_REST and s1_waiting:
