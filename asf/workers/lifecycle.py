@@ -804,6 +804,10 @@ def occupancy(path, lanes=None, alive=None, result=None):
             state = rec['state']
             if state not in lane_mod.BUSY_STATES or landed(run) and state != lane_mod.MERGING:
                 continue
+            # a correction written on a landing wait is the lane's BACK already (T9c): the
+            # feeder's FIX → CORRECT row speaks for it, not a WAITS ON landing row
+            if lane_mod.correction_turns_back(rec, pending_correction(run, path)):
+                continue
             out['lanes'][branch] = dict(rec, item=item, kind=kind)
             pr = f" PR #{rec['pr']}" if rec.get('pr') else ''
             why = f"lane {state}{pr}: {rec.get('reason') or ''}".rstrip(': ')
