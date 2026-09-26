@@ -1221,6 +1221,25 @@ class NamingRepair(LaneFixture):
                                  lifecycle.Evidence())
         self.assertEqual(state.name, lifecycle.HELD)
 
+    def test_a_copies_conflict_never_reaches_adjudicate(self):
+        # a product's T-0338 at its round cap: the rebuild's conflict went to an adjudicate
+        # session, which rules on disputes and rebases nothing — then was held again
+        product = env.Product('p', {'conventions': {}})
+        items = {'T-0001': {'id': 'T-0001', 'type': 'task', 'state': 'Active'}}
+        c = {'kind': lane.COPIES, 'text': 'trunk history under the branch', 'rounds': 7,
+             'branch': self.B}
+        rows, _ids = feeder_rows.correction_rows(items, product, set(), {'T-0001': c})
+        self.assertEqual([r.kind for r in rows], [feeder_rows.FIX_CORRECT])
+        self.assertEqual((feeder_rows.COPIES, lane.COPIES), (lifecycle.COPIES,) * 2)
+        run = {'job': 'coder-t-0001', 'item': 'T-0001', 'branch': self.B, 'rounds': 9}
+        fields, line = lifecycle.hold(self.sessions(), run, lifecycle.COPIES, 'x', 'now')
+        self.assertNotIn('rounds', fields)
+        self.assertNotIn('at_cap', fields['correction'])
+        self.assertTrue(line.endswith('(copies, no round)'), line)
+        state = lifecycle.derive(dict(run, correction=fields['correction']),
+                                 lifecycle.Evidence())
+        self.assertEqual(state.name, lifecycle.HELD)
+
 
 class SignoffRepair(LaneFixture):
     """A PR whose DCO check is red: the lane signs each unsigned commit of a factory branch off
@@ -1514,7 +1533,9 @@ class TrunkCopiesDropped(LaneFixture):
         self.assertTrue(any(l.startswith(f'drop copies {self.B}:') and 'c.txt' in l
                             for l in self.lines), self.lines)
         corr = lifecycle.corrections(self.sessions())['T-0001']
-        self.assertEqual(corr['kind'], lane.COPIES)
+        self.assertEqual((corr['kind'], corr['rounds']), (lane.COPIES, 0))
+        self.assertTrue(any(l.startswith(f'held {self.B}: trunk history')
+                            and l.endswith('(copies, no round)') for l in self.lines), self.lines)
         self.assertIn('conflicts in c.txt', corr['text'])
         self.assertIn('the factory publishes the rebased branch', corr['text'])
         self.assertEqual(self.lane_of(self.B)['state'], lane.BACK)

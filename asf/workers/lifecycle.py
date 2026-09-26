@@ -1288,7 +1288,7 @@ def derive(run, ev, cap=ROUND_CAP, path=None):
     corr = pending_correction(run, path)
     rounds = run.get('rounds') or 0
     if corr:
-        if corr.get('kind') != NAMING and (corr.get('at_cap') or rounds >= cap):
+        if corr.get('kind') not in MECHANICAL and (corr.get('at_cap') or rounds >= cap):
             return State(ADJUDICATE, corr.get('text', ''), rounds)
         return State(HELD, corr.get('text', ''), rounds)
     if (run.get('correction') or {}).get('text'):
@@ -1386,6 +1386,11 @@ EMPTY_CAP = 2          #: ends that wrote nothing before the item is parked (`co
 #: the lane's refusal of commits that do not name their item: a mechanical defect the lane
 #: rewords itself (asf.harvest.lane); a hold of it spends no round and never reaches adjudicate
 NAMING = 'naming'
+#: the lane's trunk-copies rebuild (asf.harvest.lane.drop_trunk_copies) conflicted: a mechanical
+#: rebase its session does and the factory publishes — like NAMING, no round, never adjudicate
+COPIES = 'copies'
+#: the correction kinds that spend no round and never reach adjudicate
+MECHANICAL = (NAMING, COPIES)
 
 
 def empty_ends(path, item):
@@ -1456,9 +1461,9 @@ def hold(path, run, kind, text, now, empty_cap=EMPTY_CAP, head=None):
                                  'parked': True, 'reason': park_text(empty_ends(path, item))},
                   'operator_flagged': 1}
         return fields, f'parked {branch}: {fields["correction"]["reason"]}'
-    if kind == NAMING:  # the lane's reword failed: back to its session, no round spent
+    if kind in MECHANICAL:  # the lane's reword or rebuild failed: back to its session, no round
         fields = {'correction': {'kind': kind, 'text': text, 'at': now}}
-        return fields, f'held {branch}: {head} — back to its session (naming, no round)'
+        return fields, f'held {branch}: {head} — back to its session ({kind}, no round)'
     prev = max([rounds_of(path, item), run.get('rounds') or 0])
     if prev >= ROUND_CAP:
         at_cap_before = any((r.get('correction') or {}).get('at_cap') for r in item_runs(path, item))

@@ -64,6 +64,9 @@ CORRECTION_ROUNDS = 3  # == asf.workers.lifecycle.ROUND_CAP (the feeder imports 
 #: == asf.workers.lifecycle.NAMING: the lane rewords a naming refusal itself; one it could not
 #: goes back to a session as a correction and never to adjudicate, whatever the item's rounds
 NAMING = 'naming'
+#: == asf.workers.lifecycle.COPIES: the lane's trunk-copies rebuild conflicted — a rebase for a
+#: correct session, never adjudicate
+COPIES = 'copies'
 FOOTPRINT = 'footprint'  # == asf.workers.lifecycle.FOOTPRINT: a correction widen_footprint answers
 STALEMATE = 'STALEMATE → ADJUDICATE'
 CONFLICT = 'CONFLICT → REBASE'
@@ -465,7 +468,7 @@ def correction_rows(items, product, busy, corrections):
         if c.get('kind') == FOOTPRINT and c.get('verdict') != 'widen':
             out.append(footprint_row(item, product, c, tier, fid, branch))
             continue
-        if rounds >= CORRECTION_ROUNDS and c.get('kind') != NAMING:
+        if rounds >= CORRECTION_ROUNDS and c.get('kind') not in (NAMING, COPIES):
             if c.get('settled'):  # B-0128: already ruled at this hold — no second adjudicate
                 prs = c.get('prs') or ()
                 action = f"{WAITS_MERGE}: {', '.join(f'#{n}' for n in prs)}" if prs else WAITS_MERGE

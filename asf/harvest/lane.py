@@ -507,7 +507,8 @@ def rebuild_branch(repo, trunk, branch, transform, why=None):
 
 #: the correction kind of a trunk-history rebuild (:func:`drop_trunk_copies`) that conflicted:
 #: its session rebases the branch's own commits onto the trunk, the factory publishes the result
-COPIES = 'copies'
+#: (no round spent, never adjudicate — :data:`asf.workers.lifecycle.MECHANICAL`)
+COPIES = lifecycle.COPIES
 
 
 def trunk_history(repo, trunk, branch):
