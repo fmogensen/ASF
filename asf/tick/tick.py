@@ -420,6 +420,12 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
         if d_owner != 'off' and steps.daily_catch_up_due(product):
             print(steps.daily_catch_up_message(product))
             rows = list(rows) + [(d_step, d_owner, d_command)]
+    # every asf step's module, imported now rather than lazily as each step runs (B-0135): an
+    # install that swaps the package mid-tick can no longer land between two of this tick's own
+    # step imports and mix old and new modules in one run
+    for step, owner, _ in rows:
+        if owner == 'asf':
+            _asf_step(step)
     rc = 0
     ran = []
     resolved = None

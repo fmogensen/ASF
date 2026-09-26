@@ -110,7 +110,7 @@ bash tools/install.sh <product> v0.1.6     # or the newest tag that predates the
 
 | action | effect on running work |
 | --- | --- |
-| reinstalling the package | worker sessions are their own processes and keep running; the next tick runs the new code. `tools/install.sh` waits (bounded) on a running tick's own lock before it touches the package — `pipx install --force` is not atomic, and swapping it under a running tick tears that tick (B-0135: half its modules old, half new) |
+| reinstalling the package | worker sessions are their own processes and keep running; the next tick runs the new code. `tools/install.sh` waits (bounded) on a running tick's own lock, then holds it through the swap itself — `pipx install --force` is not atomic, and replacing the package under a running tick, or one that starts mid-swap, tears that tick (B-0135: half its modules old, half new) |
 | `asf hooks install` | idempotent; it only adds entries that are missing |
 | `asf scheduler install` | on launchd it boots out and reloads each tick job, which ends a tick that is running at that moment. Nothing is lost — the next tick resets its clone and derives again — but install between ticks when you can |
 | `asf schema-migrate` | refuses while sessions are in flight; `--drain` waits for them |
