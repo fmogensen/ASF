@@ -124,7 +124,9 @@ within it, until its queued jobs fit the idle plus freed runners by label — an
 ``in_progress`` (below the escalation) or a CI-changing PR's run. Each cancel is remembered in
 ``relief`` with ``for`` (the S1 run's id) and re-run once that run's required jobs have runners;
 a trunk relief record still waits for the trunk run. The runs in its way include older ones
-whose queued jobs sit ahead of it. An S1 run a newer push superseded (cancelled before it started)
+whose queued jobs sit ahead of it. Relief is label-aware (trunk and S1 alike): a run is in the
+way only when it holds a runner carrying ALL the labels of a starved job, or queues a job such a
+runner could serve — judged from its jobs, never its status; a run on other runners is left. An S1 run a newer push superseded (cancelled before it started)
 hands its records to the branch's newest run, which they then wait for. The line names it: ``cancelled queued pr
 run 120 (T-0341, Feature) — created after S1 PR run 850 (B-0007) at … but holds the heavy queue
 ahead of its queued m6-e2e (queued 8m)``.
@@ -1733,6 +1735,20 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
                            and any(_job_labels(j) <= s for s in serving) for j in jobs or ()):
                     continue                    # nothing of it waits for those runners
                 sunk = _sunk_s(jobs, classes, by_name, cls_of, now)
+            elif starved:
+                # label-aware: only a run that holds a runner able to take a starved job (one
+                # carrying ALL its labels) or queues a job such a runner could serve is in the
+                # way; a run on other runners (another provider's heavy box, say) frees nothing
+                jobs = src.live_jobs(rid)
+                if jobs is None:
+                    continue
+                holds_one = any(j.get('status') == 'in_progress' and j.get('runner_name')
+                                and any(w <= (held.get(j.get('runner_name')) or _job_labels(j))
+                                        for w in want) for j in jobs)
+                queues_one = any(j.get('status') in QUEUED_STATUSES
+                                 and any(_job_labels(j) <= s for s in serving) for j in jobs)
+                if not (holds_one or queues_one):
+                    continue                    # not in the way of those runners
             cands.append(((int(sunk // 60),) if escalated else (), group, -rc.timestamp(),
                           -int(rid), r, kind, item or branch or kind, prio, label, wf, rc, jobs,
                           sunk))
@@ -1759,7 +1775,7 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
                     f"{sha} {'but' if later else 'and'} holds the {'/'.join(classes)} queue ahead "
                     f"of its queued {names} (queued {jwait})")
             holds = [held.get(j.get('runner_name')) or _job_labels(j)
-                     for j in src.live_jobs(rid) or ()
+                     for j in jobs or ()
                      if j.get('status') == 'in_progress' and j.get('runner_name')]
         else:
             what = (f"{kind} run {rid} ({item}, {label}) — {owner} "

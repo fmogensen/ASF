@@ -818,9 +818,10 @@ class TestTrunkJobStarvation(ReliefBase):
         os.makedirs(env.state_dir('p'), exist_ok=True)
         self.seed(self.t0)
         gh, run = self.gh(self.runs(), jobs=self.jobs(held_101='l1'))
-        self.assertEqual(self.relieve(p, run), (3, 0))
-        # 101 held a light runner: m3b-e2e (heavy) still has none, so the Feature run 107 goes too
-        self.assertEqual(self.cancels(gh), ['106', '101', '107'])
+        self.assertEqual(self.relieve(p, run), (2, 0))
+        # 101 holds a light runner and queues nothing heavy: not in m3b-e2e's way, never
+        # cancelled; the Feature run 107 (on h1) goes instead
+        self.assertEqual(self.cancels(gh), ['106', '107'])
 
     def test_s1_and_hotfix_runs_are_never_cancelled(self):
         p = self.product()
@@ -959,9 +960,10 @@ class TestTrunkEscalation(ReliefBase):
         os.makedirs(env.state_dir('p'), exist_ok=True)
         self.seed(self.t0)
         gh, run = self.gh(self.runs(), jobs=self.jobs(m6_queued_min=30))
-        self.assertEqual(self.relieve(p, run), (2, 0))
-        # 30m: past trunk_wait_min (20), under 2 × 20 — newest first: 114, then 110 (frees h1)
-        self.assertEqual(self.cancels(gh), ['114', '110'])
+        self.assertEqual(self.relieve(p, run), (1, 0))
+        # 30m: past trunk_wait_min (20), under 2 × 20 — newest first: 114 queues only a light
+        # job and holds no runner (not in the heavy runners' way: skipped), then 110 (frees h1)
+        self.assertEqual(self.cancels(gh), ['110'])
         self.assertTrue(all('cancelled queued pr run' in l for l in self.lines))
 
     def test_the_escalation_bar_is_configurable(self):
@@ -972,7 +974,7 @@ class TestTrunkEscalation(ReliefBase):
         self.assertEqual(ci_queue.trunk_escalate_min(self.product(trunk_wait_min=15)), 30)
         gh, run = self.gh(self.runs(), jobs=self.jobs())
         self.relieve(p, run)
-        self.assertEqual(self.cancels(gh), ['114', '110'])     # 45m < 60m: not escalated
+        self.assertEqual(self.cancels(gh), ['110'])     # 45m < 60m: not escalated
         self.assertEqual(ci_queue.config_problems({'queue': {'trunk_escalate_min': 0}}),
                          [('ci.queue.trunk_escalate_min', 'must be a number of minutes > 0, not 0')])
         self.assertEqual(ci_queue.config_problems({'queue': {'trunk_escalate_min': 50}}), [])
@@ -1178,6 +1180,43 @@ class TestS1PrRelief(ReliefBase):
         gh, run = self.gh(runs, busy=(), jobs=jobs)
         self.assertEqual(self.relieve(p, run, minutes=2)[1], 2)
         self.assertEqual(sorted(self.cancels(gh, 'rerun')), ['120', '121'])
+
+    def test_relief_is_label_aware_a_run_on_runners_the_s1_job_cannot_use_is_left(self):
+        # one product, 2026-09-26: the S1 run's jobs need alpha-heavy AND class-pr-heavy; the
+        # busy heavy boxes of the other provider carry neither, so cancelling runs on them frees nothing
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        t = lambda m: self.at(self.t0 + datetime.timedelta(minutes=m))  # noqa: E731
+        pair = ['self-hosted', 'alpha-heavy', 'class-pr-heavy']
+
+        def job(name, status, labels, runner=None, created=-10):
+            return {'name': name, 'status': status, 'labels': labels, 'runner_name': runner,
+                    'created_at': t(created), 'started_at': t(created) if runner else None}
+        jobs = {850: [job('gate', 'completed', ['self-hosted', 'heavy'], 'h1'),
+                      job('m6-e2e', 'queued', pair, created=-8)],
+                # newest, ordinary: its job runs on the other-provider box h1, nothing of it queued
+                140: [job('gate', 'in_progress', ['self-hosted', 'heavy'], 'h1', -1)],
+                # older Feature run: its p1-e2e holds h2, a alpha-heavy class-pr-heavy runner
+                141: [job('p1-e2e', 'in_progress', pair, 'h2', -9)]}
+        runs = self.runs(only=(850,))
+        pr = lambda i, b, m: {'databaseId': i, 'status': 'queued', 'event': 'pull_request',  # noqa
+                              'headBranch': b, 'headSha': f'sha{i}', 'createdAt': t(m)}
+        runs['pr.yml'] += [pr(140, 'task/T-0500', -1), pr(141, 'task/T-0341', -30)]
+        gh, run = self.gh(runs, jobs=jobs)
+        labels = {'h1': ['heavy', 'beta-heavy'], 'h2': ['heavy', 'alpha-heavy', 'class-pr-heavy'],
+                  'h3': ['heavy', 'alpha-heavy', 'class-pr-heavy'], 'l1': ['light']}
+
+        def with_labels(argv, **kw):
+            if argv[:2] == ['gh', 'api'] and any('actions/runners' in a for a in argv):
+                gh.calls.append(argv)
+                return subprocess.CompletedProcess(argv, 0, '\n'.join(json.dumps({
+                    'name': n, 'id': i, 'busy': n != 'l1', 'status': 'online',
+                    'labels': [{'name': x} for x in ['self-hosted', *ls]]})
+                    for i, (n, ls) in enumerate(labels.items())), '')
+            return run(argv, **kw)
+        self.assertEqual(self.relieve(p, with_labels), (1, 0))
+        self.assertEqual(self.cancels(gh), ['141'])
 
     def test_trunk_relief_records_wait_for_the_trunk_not_the_s1_run(self):
         p = self.product()
