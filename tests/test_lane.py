@@ -644,6 +644,48 @@ class Orphans(LaneRepo):
         self.assertNotIn('worker/fact-t3', self.heads())
         self.assertEqual(self.lane_of('worker/fact-t3')['state'], lane.MERGED)
 
+    def lane_with_lines(self, prs):
+        lines = []
+        ln = lane.Lane(self.product(), self.state_dir, out=lines.append, items=None,
+                       now=time.time())
+        ln.host = FakePRHost(ln.product, ln, prs)
+        lane.lane_pass(ln.product, self.state_dir, lane=ln)
+        return ln, lines
+
+    def test_a_branch_reset_to_the_trunk_tip_with_an_open_pr_is_not_landed(self):
+        # a repair archived a corrupted branch and reset it to the trunk; its work is pushed
+        # again seconds later. Its tip equals the trunk, but none of its commits is there.
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat(T-0001): a')
+        self.session('coder-t-0001', 'T-0001', 'worker/T-0001')
+        prs = {'worker/T-0001': {'number': 9, 'state': 'OPEN'}}
+        self.lane_with_lines(prs)
+        before = self.lane_of('worker/T-0001')
+        self.assertTrue(before.get('state'))
+        sh(['git', 'push', '-q', '-f', 'origin', 'origin/main:refs/heads/worker/T-0001'],
+           cwd=self.worker)
+        ln, lines = self.lane_with_lines(prs)
+        self.assertIn('worker/T-0001', self.heads(), 'an empty branch is never deleted')
+        self.assertEqual(ln.host.closed, [])
+        self.assertEqual(self.lane_of('worker/T-0001'), before, 'its record is not advanced')
+        self.assertEqual(ln.results.get('worker/T-0001'), 'waiting')
+        self.assertTrue([l for l in lines if l.startswith('empty branch — waits: worker/T-0001')
+                         and 'PR #9' in l], lines)
+        self.assertFalse([l for l in lines if 'already on main' in l], lines)
+        # the same reset with no PR at all: no T-0001 commit is on the trunk, so still not landed
+        ln, lines = self.lane_with_lines({})
+        self.assertIn('worker/T-0001', self.heads())
+        self.assertEqual(self.lane_of('worker/T-0001'), before)
+
+    def test_a_branch_whose_item_commit_reached_the_trunk_lands(self):
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat(T-0001): a')
+        self.session('coder-t-0001', 'T-0001', 'worker/T-0001')
+        self.lane_with_lines({})
+        sh(['git', 'push', '-q', 'origin', 'worker/T-0001:main'], cwd=self.worker)
+        ln, lines = self.lane_with_lines({})
+        self.assertEqual(self.lane_of('worker/T-0001')['state'], lane.MERGED)
+        self.assertEqual(ln.results.get('worker/T-0001'), 'landed')
+        self.assertNotIn('worker/T-0001', self.heads())
+
     def test_one_pass_takes_up_a_bounded_number_of_orphans(self):
         for i in range(3):
             self.push_lane(f'worker/old-{i}', {f'o{i}.txt': 'o\n'}, 'old')
