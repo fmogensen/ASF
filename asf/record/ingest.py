@@ -502,20 +502,20 @@ def cmd_ingest(args, root):
     return rc
 
 
-def ingest_into(root, ev, product=None):
-    """The ingest pass over ``root`` with the evidence ``ev``: restamp, derive, merge every
-    changed machine block, re-index. Returns the exit code. A writer of the record: run it
-    through :func:`asf.record.stage.guarded` (as :func:`cmd_ingest` does)."""
-    restamp(root)
-    by_id, parse_errors = load_items(root)
-    if parse_errors:
-        for f, line, why in parse_errors:
-            print(f"{f}:{line}: {why}", file=sys.stderr)
-        return 1
-    canonical, _dupes = canonicalize(by_id)
+def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
+    """The read-only half of the ingest pass: every item's state (and a Feature's stage) from
+    the evidence ``ev``, in the same ``tasks → stories → bugs → features → descent → epics``
+    order :func:`ingest_into` writes in. Returns ``(new_state, closings, derived, stage_val,
+    task_ev, evs)`` — nothing is written; :func:`ingest_into` is the only writer.
 
-    now = now_iso()
-    date = today()
+    ``bypass_sticky`` names ids whose :func:`settle` skips ``closing.sticky`` — the item's rule
+    speaks even though its on-disk ``state`` is ``Closed``, the terminal hold (§1.4) turned off
+    for exactly those ids. ``ingest_into`` passes none, so its behavior is unchanged; this is
+    :mod:`asf.record.reopen`'s one legitimate use — re-deriving a falsely closed item as if it
+    had never closed, without touching the rule the rest of the record still holds to."""
+    now = now_iso() if now is None else now
+    date = today() if date is None else date
+    bypass_sticky = set(bypass_sticky)
 
     new_state = {}
     for iid, rec in canonical.items():
@@ -529,10 +529,12 @@ def ingest_into(root, ev, product=None):
     since = product.conventions.get('id_in_subject_since') if product is not None else None
 
     def settle(iid, type_, ev_obj, lines, sha=''):
-        """The one place a state is chosen: `closing.state_of`, held by `closing.sticky`."""
+        """The one place a state is chosen: `closing.state_of`, held by `closing.sticky` — unless
+        `iid` is in `bypass_sticky`, the terminal hold `asf reopen` lifts for this one item."""
         old = new_state[iid]
         raw = closing.state_of(type_, ev_obj, old)
-        final = closing.sticky(old, dataclasses.replace(raw, lines=tuple(lines)))
+        c = dataclasses.replace(raw, lines=tuple(lines))
+        final = c if iid in bypass_sticky else closing.sticky(old, c)
         closings[iid] = final
         evs[iid] = ev_obj
         new_state[iid] = final.state
@@ -752,10 +754,30 @@ def ingest_into(root, ev, product=None):
         settle(iid, 'epic', closing.Ev(children=tuple(states),
                                        typed_closed=bool(rec['meta'].get('closed'))), [])
 
+    return new_state, closings, derived, stage_val, task_ev, evs
+
+
+def ingest_into(root, ev, product=None):
+    """The ingest pass over ``root`` with the evidence ``ev``: restamp, :func:`derive`, merge
+    every changed machine block, re-index. Returns the exit code. A writer of the record: run it
+    through :func:`asf.record.stage.guarded` (as :func:`cmd_ingest` does)."""
+    restamp(root)
+    by_id, parse_errors = load_items(root)
+    if parse_errors:
+        for f, line, why in parse_errors:
+            print(f"{f}:{line}: {why}", file=sys.stderr)
+        return 1
+    canonical, _dupes = canonicalize(by_id)
+
+    now = now_iso()
+    date = today()
+    new_state, closings, _derived, stage_val, _task_ev, evs = derive(canonical, ev, product, now, date)
+    since = product.conventions.get('id_in_subject_since') if product is not None else None
+
     # ---- write: state/stage/evidence/blocked, one write_machine + History append per changed item
     for iid, rec in canonical.items():
         type_ = rec['meta'].get('type')
-        if type_ not in EVIDENCE_TYPES or iid in retired:
+        if type_ not in EVIDENCE_TYPES or (type_ == 'feature' and is_retired(rec['meta'])):
             continue
         blocked_pair = evidence.blocked_of(rec['meta'].get('blockedBy'), new_state)
         c = closings[iid]

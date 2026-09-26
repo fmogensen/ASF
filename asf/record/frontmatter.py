@@ -354,7 +354,7 @@ def split_machine(meta):
     return typed, machine
 
 
-_LIST_BLOCK_KEYS = {'evidence'}
+_LIST_BLOCK_KEYS = {'evidence', 'reopened'}
 
 
 def write_machine(path, machine):

@@ -24,7 +24,7 @@ from dataclasses import dataclass, field, replace
 #: The record writers in the order the tick runs them. A writer not listed here still runs,
 #: staged under its own name.
 WRITERS = ('backfill', 'ingest', 'plan-tasks', 'plan-order', 'file-bugs', 'rollup', 'index',
-           'widen', 'set', 'groom')
+           'widen', 'set', 'groom', 'reopen')
 
 #: Every finding a staged writer was refused on, in order, since the last :func:`drain`.
 REFUSED = []

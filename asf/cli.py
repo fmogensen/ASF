@@ -198,6 +198,13 @@ def build_parser():
     p_set.add_argument('assignments', nargs='+', metavar='FIELD=VALUE')
     p_set.add_argument('--product')
 
+    p_reopen = sub.add_parser(
+        'reopen', help='correct a falsely derived Resolved/Closed by re-deriving it from '
+                       'current evidence, the terminal hold lifted for this one item')
+    p_reopen.add_argument('id')
+    p_reopen.add_argument('--reason', required=True, help='why the prior closing was wrong')
+    p_reopen.add_argument('--product')
+
     p_check = sub.add_parser('check', help='validate the backlog')
     p_check.add_argument('paths', nargs='*')
     p_check.add_argument('--product')
@@ -452,6 +459,10 @@ def _main(argv=None):
         from asf.record.setfield import cmd_set
         return _published(cmd_set, args, resolve_record(args, announce=_announce_stderr),
                           f"record: set {args.id}")
+    if args.command == 'reopen':
+        from asf.record.reopen import cmd_reopen
+        return _published(cmd_reopen, args, resolve_record(args, announce=_announce_stderr),
+                          f"record: reopen {args.id}")
     if args.command == 'check':
         from asf.record.check import cmd_check, cmd_check_invariants
         if getattr(args, 'invariants', False) or getattr(args, 'deep', False):
