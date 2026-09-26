@@ -121,11 +121,35 @@ def clear_pending():
         pass
 
 
-def _installed(sha, installed):
-    return bool(installed and sha and (installed.startswith(sha) or sha.startswith(installed)))
+def clear_expired():
+    try:
+        os.remove(expired_path())
+    except OSError:
+        pass
 
 
-def pending(now=None, installed=None, out=print):
+def _installed(sha, installed, run=subprocess.run):
+    """True when ``sha`` is already in the installed build: an exact (or prefix) match, or an
+    ancestor of it in the factory's own repo (a newer install already carries the commit the
+    marker names). No repo beside the running package, an unresolvable sha, or any git error
+    falls back to the prefix result alone — a git hiccup never keeps a marker stuck pending."""
+    if not (installed and sha):
+        return False
+    if installed.startswith(sha) or sha.startswith(installed):
+        return True
+    from asf import drift
+    root = drift.factory_root()
+    if not root:
+        return False
+    try:
+        p = run(['git', '-C', root, 'merge-base', '--is-ancestor', sha, installed],
+                capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return p.returncode == 0
+
+
+def pending(now=None, installed=None, out=print, run=subprocess.run):
     """The fresh pending marker, or ``None``. A stale one (older than :data:`PENDING_TTL_S`, or
     its sha already installed) is removed; one that timed out uninstalled says so in a
     ``NEEDS OPERATOR`` line and starts the cool-down (:func:`cooling`)."""
@@ -137,8 +161,9 @@ def pending(now=None, installed=None, out=print):
         installed = drift.installed_commit()
     at = data.get('at')
     age = (now or time.time()) - at if isinstance(at, (int, float)) else None
-    if _installed(data['sha'], installed):
+    if _installed(data['sha'], installed, run):
         clear_pending()
+        clear_expired()  # the sha is in, whatever cool-down an earlier expiry left behind is moot
         return None
     if age is None or age > PENDING_TTL_S or age < -60:
         clear_pending()
@@ -151,11 +176,11 @@ def pending(now=None, installed=None, out=print):
     return data
 
 
-def waiting(product_name, out=print, now=None, installed=None):
+def waiting(product_name, out=print, now=None, installed=None, run=subprocess.run):
     """True when this tick must not start: an upgrade owned by another product is pending, and
     this tick's running would only keep the gap the upgrade needs from coming. The owner's ticks
     go on — the owner drains and retries the upgrade at its start."""
-    data = pending(now, installed, out=out)
+    data = pending(now, installed, out=out, run=run)
     if data is None or data.get('owner') == product_name:
         return False
     out(f'tick: waiting — upgrade to {data["sha"][:7]} pending')

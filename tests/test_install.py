@@ -709,6 +709,95 @@ class PendingUpgradeTest(HomeCase):
                                                    now=time.time() + upgrade.PENDING_TTL_S + 1))
 
 
+class AncestorPendingTest(HomeCase):
+    """A newer install can carry the pending sha as an ancestor rather than as its exact head
+    (B-0128 live incident, 2026-09-26): the marker must clear as soon as that install lands,
+    never ride out the TTL and fire a false NEEDS OPERATOR."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo = os.path.join(self.tmp, 'repo')
+        os.makedirs(self.repo)
+        _git(['init', '-q', '-b', 'main'], self.repo)
+        _git(['config', 'user.email', 't@example.com'], self.repo)
+        _git(['config', 'user.name', 't'], self.repo)
+        self.write(os.path.join(self.repo, 'root.txt'), 'root\n')
+        _git(['add', '-A'], self.repo)
+        _git(['commit', '-q', '-m', 'root'], self.repo)
+        root = _git(['rev-parse', 'HEAD'], self.repo)
+        self.write(os.path.join(self.repo, 'a.txt'), 'one\n')
+        _git(['add', '-A'], self.repo)
+        _git(['commit', '-q', '-m', 'first'], self.repo)
+        self.pending_sha = _git(['rev-parse', 'HEAD'], self.repo)
+        self.write(os.path.join(self.repo, 'b.txt'), 'two\n')
+        _git(['add', '-A'], self.repo)
+        _git(['commit', '-q', '-m', 'second'], self.repo)
+        self.installed_sha = _git(['rev-parse', 'HEAD'], self.repo)  # pending_sha is its ancestor
+        _git(['checkout', '-q', '-b', 'other', root], self.repo)  # diverges before pending_sha
+        self.write(os.path.join(self.repo, 'c.txt'), 'three\n')
+        _git(['add', '-A'], self.repo)
+        _git(['commit', '-q', '-m', 'unrelated'], self.repo)
+        self.unrelated_sha = _git(['rev-parse', 'HEAD'], self.repo)  # does not contain pending_sha
+        _git(['checkout', '-q', 'main'], self.repo)
+        patch = mock.patch('asf.drift.factory_root', return_value=self.repo)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_a_newer_install_containing_the_pending_sha_clears_the_marker(self):
+        upgrade.write_pending(self.pending_sha, 'factory')
+        lines = []
+        self.assertFalse(upgrade.waiting('other', out=lines.append, installed=self.installed_sha))
+        self.assertEqual(lines, [])  # no park, no NEEDS OPERATOR
+        self.assertIsNone(upgrade.read_pending())
+
+    def test_an_already_expired_marker_thats_actually_installed_clears_silently(self):
+        # a leftover expired.json (a prior, unrelated cool-down) must not survive either
+        old_at = time.time() - upgrade.PENDING_TTL_S - 60
+        upgrade._write_json(upgrade.pending_path(),
+                            {'sha': self.pending_sha, 'owner': 'factory', 'at': old_at})
+        upgrade._write_json(upgrade.expired_path(),
+                            {'sha': 'deadbeef' * 5, 'owner': 'factory', 'at': time.time() - 5})
+        lines = []
+        self.assertFalse(upgrade.waiting('other', out=lines.append, installed=self.installed_sha))
+        self.assertEqual(lines, [])  # never NEEDS OPERATOR
+        self.assertIsNone(upgrade.read_pending())
+        self.assertFalse(os.path.exists(upgrade.expired_path()))
+
+    def test_an_unrelated_install_leaves_the_marker_pending(self):
+        upgrade.write_pending(self.pending_sha, 'factory')
+        lines = []
+        self.assertTrue(upgrade.waiting('other', out=lines.append, installed=self.unrelated_sha))
+        self.assertEqual(lines, [f'tick: waiting — upgrade to {self.pending_sha[:7]} pending'])
+        self.assertIsNotNone(upgrade.read_pending())
+
+    def test_an_older_install_leaves_the_marker_pending(self):
+        upgrade.write_pending(self.installed_sha, 'factory')  # pending is ahead of the install
+        lines = []
+        self.assertTrue(upgrade.waiting('other', out=lines.append, installed=self.pending_sha))
+        self.assertIsNotNone(upgrade.read_pending())
+
+    def test_a_git_error_falls_back_to_the_prefix_check(self):
+        upgrade.write_pending(self.pending_sha, 'factory')
+        with mock.patch('asf.drift.factory_root', return_value=os.path.join(self.tmp, 'no-such-repo')):
+            lines = []
+            self.assertTrue(upgrade.waiting('other', out=lines.append, installed=self.installed_sha))
+        self.assertIsNotNone(upgrade.read_pending())  # the ancestor check errored — prefix says no
+
+    def test_no_factory_repo_falls_back_to_the_prefix_check(self):
+        upgrade.write_pending(self.pending_sha, 'factory')
+        with mock.patch('asf.drift.factory_root', return_value=None):
+            lines = []
+            self.assertTrue(upgrade.waiting('other', out=lines.append, installed=self.installed_sha))
+        self.assertIsNotNone(upgrade.read_pending())
+
+    def test_exact_match_still_works_without_touching_git(self):
+        upgrade.write_pending(self.pending_sha, 'factory')
+        with mock.patch('asf.drift.factory_root', side_effect=AssertionError('should not be called')):
+            self.assertFalse(upgrade.waiting('other', out=lambda _l: None,
+                                             installed=self.pending_sha))
+        self.assertIsNone(upgrade.read_pending())
+
+
 class SequencedRun(FakeRun):
     """``FakeRun`` whose ``pgrep`` answers from a list, one per call (the last one repeats)."""
 
