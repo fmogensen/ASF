@@ -2,6 +2,27 @@
 
 One entry per released version, newest first.
 
+## v0.1.23 — 2026-09-26
+
+### Bugs fixed
+
+- B-0123 A failed daily run is never retried until the next day
+
+### In progress
+
+- F-0112 Products update themselves to a new ASF release: upgrade: auto in the tick, with rollback on a red doctor
+
+### Improvements and hotfixes
+
+- fix(ci-queue): trunk relief acts on a required trunk job queued past the wait, whatever the PR runs' creation time
+- fix(deploy): a required-jobs candidate scan considers in-progress runs too
+- fix(record): a stale Backlinks section on a card the commit never touches heals itself
+- fix(pool): the local lane is every account not role: cloud — worker accounts launch with the cloud lane on
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.23"`
+
 ## v0.1.22 — 2026-09-26
 
 ### In progress
