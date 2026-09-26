@@ -10,12 +10,13 @@ tick asks again. Its entry keeps its place in line (``since``) while it keeps as
 
 **Admission.** A run starts only while
 
-- for a batch or an ordinary PR start, the product's CI ceiling (``capacity.ci``,
+- for a batch start only, the product's CI ceiling (``capacity.ci``,
   :func:`asf.capacity.product_ci` / ``total.ci``) has room: runs in flight
-  (:func:`asf.capacity.ci_runs_in_flight`, the one count the status row shows too) below it. An
-  S1 or hotfix start, a trunk run and a deploy are exempt (:func:`ceiling_applies`): PR runs
-  in flight never hold the trunk every deploy waits on; and
-- for a batch or an ordinary PR start only (the same starts the ceiling holds), for every runner
+  (:func:`asf.capacity.ci_runs_in_flight`, the one count the status row shows too) below it
+  (:func:`ceiling_applies`). The ceiling is the batch step's gate: a PR start is never held by
+  it — with the ceiling's worth of runs always in flight a PR would never open — and an S1 or
+  hotfix start, a trunk run and a deploy are exempt too; and
+- for a batch or an ordinary PR start only (:func:`fit_applies`), for every runner
   class the run needs, the free runners are at least its expected jobs there, after what every
   entry ahead of it in line needs of that class is set aside. An S1 or hotfix start, a trunk run
   and a deploy reserve nothing: they start at once, even with no runner free — the host queues
@@ -43,7 +44,7 @@ shows busy.
 
 **Starvation guard.** An ordinary PR start (not a batch) that has waited in line longer than
 ``ci.queue.pr_wait_min`` (default 45) minutes is admitted once at least *half* its expected jobs
-per class (rounded up) are free after the entries ahead are set aside — the ceiling still holds.
+per class (rounded up) are free after the entries ahead are set aside.
 Measured peaks near the pool's size would otherwise hold a PR for as long as any other run is
 in flight. The admission prints one line naming the wait and the free count.
 
@@ -86,7 +87,9 @@ Every wait is UTC-aware now minus the host's UTC ``createdAt``, never local time
 
 A product without ``ci.pool`` (or with ``mode: off``) is not queued: every start goes as it did
 before, and no ``gh`` call is made here. ``mode: dry-run`` decides and prints each hold as
-``ci queue (dry-run): … would wait`` but starts everything and writes nothing. ``asf ci queue``
+``ci queue (dry-run): … would wait`` but starts everything and writes nothing. The mode is read
+from the product file on disk at each ask (:func:`mode`), so a pass that loaded the product
+before the operator switched it to ``dry-run`` or ``off`` never holds a start on the old mode. ``asf ci queue``
 prints the line with each entry's decision, writing nothing.
 """
 import dataclasses
@@ -162,12 +165,36 @@ def _qcfg(product):
     return q if isinstance(q, dict) else {}
 
 
+def _file_mode(product):
+    """``ci.queue.mode`` as the product file on disk says it now — ``(True, value)`` — or
+    ``(False, None)`` when there is no readable file. A long pass (the tick) loads its product
+    once; an operator's switch to ``dry-run`` mid-pass must still hold nothing."""
+    name = getattr(product, 'name', None)
+    if not name:
+        return False, None
+    try:
+        path = env.product_path(name)
+        if not os.path.exists(path):
+            return False, None
+        data = env.load_file(path)
+    except Exception:  # noqa: BLE001 — an unreadable file: the loaded product's own value
+        return False, None
+    if not isinstance(data, dict):
+        return False, None
+    ci = data.get('ci') if isinstance(data.get('ci'), dict) else {}
+    q = ci.get('queue') if isinstance(ci.get('queue'), dict) else {}
+    return True, q.get('mode')
+
+
 def mode(product):
     """``on``, ``dry-run`` or ``off``: ``off`` for a product with no ``ci.pool`` (today's
-    behaviour), else ``ci.queue.mode`` (default ``on``)."""
+    behaviour), else ``ci.queue.mode`` (default ``on``) — read from the product file on disk
+    when there is one (:func:`_file_mode`), else from the loaded product."""
     if not ci_pool.load_pool(product):
         return 'off'
-    m = _qcfg(product).get('mode')
+    found, m = _file_mode(product)
+    if not found:
+        m = _qcfg(product).get('mode')
     if m is True or m is None:      # YAML reads a bare ``on`` as true
         return 'on'
     if m is False:                  # … and ``off`` as false
@@ -614,13 +641,22 @@ class Decision:
     bypass: bool = False
 
 
-def ceiling_applies(entry):
-    """Do ``capacity.ci`` and the runner fit hold this start? Only a batch or an ordinary PR start
-    (below S1 and trunk rank): an S1 or hotfix start, a trunk run and a deploy are exempt from
-    both — PR runs in flight must never hold the trunk run every deploy waits on, and the host
-    queues an exempt run's jobs itself, so it reserves no runners up front."""
+def fit_applies(entry):
+    """Does the runner fit hold this start? Only a batch or an ordinary PR start (below S1 and
+    trunk rank): an S1 or hotfix start, a trunk run and a deploy reserve nothing — PR runs in
+    flight must never hold the trunk run every deploy waits on, and the host queues an exempt
+    run's jobs itself."""
     entry = entry or {}
     return entry.get('kind') in ('pr', 'batch') and entry.get('prio', OTHER) > TRUNK
+
+
+def ceiling_applies(entry):
+    """Does ``capacity.ci`` hold this start? A batch start only: the ceiling is the batch step's
+    gate. An ordinary PR start is governed by the runner fit (and the starvation guard) alone —
+    with the ceiling's worth of runs always in flight a PR held by it would never open — and an
+    S1 or hotfix start, a trunk run and a deploy are exempt as before."""
+    entry = entry or {}
+    return entry.get('kind') == 'batch' and entry.get('prio', OTHER) > TRUNK
 
 
 def ceiling_reason(inflight, ceiling, admitted=0):
@@ -628,7 +664,7 @@ def ceiling_reason(inflight, ceiling, admitted=0):
     (:func:`asf.capacity.ci_runs_in_flight`) — the status row renders it with the same count."""
     from asf import capacity
     extra = f' + {admitted} started this pass' if admitted else ''
-    return (f'at the ci ceiling ({capacity.ci_inflight_text(inflight)}{extra}; batch and PR '
+    return (f'at the ci ceiling ({capacity.ci_inflight_text(inflight)}{extra}; batch '
             f'starts below {ceiling})')
 
 
@@ -637,14 +673,17 @@ def fit_reason(short):
     return ', '.join(f'{c} {a} free, needs {n}' for c, a, n in short)
 
 
-def shortfall(key, order, needs_of, free, half=False):
+def shortfall(key, order, needs_of, free, half=False, skip=()):
     """``[(class, free, needs)]`` for every class ``key`` needs more of than is free once the
     entries ahead of it in ``order`` are served; ``[]`` when it fits. ``half``: it fits on half
-    its needs per class, rounded up (the starvation guard)."""
+    its needs per class, rounded up (the starvation guard). ``skip``: entries ahead that cannot
+    start now whatever is free (a batch held at the ceiling) and so set nothing aside."""
     avail = dict(free)
     for other in order:
         if other == key:
             break
+        if other in skip:
+            continue
         for c, n in (needs_of(other) or {}).items():
             if c in avail:
                 avail[c] = max(0, avail[c] - n)
@@ -663,26 +702,37 @@ def starved(entry, now, wait_min):
     return _age(entry.get('since'), now) > wait_min * 60
 
 
+def ceiling_held(order, entries, ceiling=None, inflight=None, admitted=0):
+    """The entries of ``order`` the ceiling holds now (batch starts at or above it): they cannot
+    start whatever is free, so a PR behind one is never held for the runners it would take."""
+    if ceiling is None or inflight is None or inflight + admitted < ceiling:
+        return frozenset()
+    return frozenset(k for k in order if ceiling_applies(entries.get(k)))
+
+
 def decide(key, order, entries, needs_of, free, ceiling=None, inflight=None, admitted=0,
            now=None, pr_wait_min=None):
     """Pure: may ``key`` start now? ``(ok, why)``. ``order`` is the line; ``needs_of(key)`` the
     entry's ``{class: jobs}``; ``free`` the free slots per class (None: unknown — no runner
     check); ``ceiling``/``inflight`` the CI ceiling and runs in flight (None: no ceiling);
-    ``admitted`` runs this pass already started. The ceiling and the runner fit both hold only a
-    start :func:`ceiling_applies` to: an S1, hotfix, trunk or deploy start always goes. An
+    ``admitted`` runs this pass already started. The ceiling holds only a batch start
+    (:func:`ceiling_applies`); the runner fit a batch or an ordinary PR start
+    (:func:`fit_applies`): an S1, hotfix, trunk or deploy start always goes. An
     ordinary PR start waiting past ``pr_wait_min`` (at ``now``) fits on half its expected jobs
     per class; that admission's ``why`` names the guard (the only admission with a ``why``)."""
     e = entries.get(key)
-    if not ceiling_applies(e):
+    if not fit_applies(e):
         return True, ''
-    if ceiling is not None and inflight is not None and inflight + admitted >= ceiling:
+    skip = ceiling_held(order, entries, ceiling, inflight, admitted)
+    if key in skip:
         return False, ceiling_reason(inflight, ceiling, admitted)
     if free is None:
         return True, ''
-    short = shortfall(key, order, needs_of, free)
+    short = shortfall(key, order, needs_of, free, skip=skip)
     if not short:
         return True, ''
-    if starved(e, now, pr_wait_min) and not shortfall(key, order, needs_of, free, half=True):
+    if starved(e, now, pr_wait_min) and not shortfall(key, order, needs_of, free, half=True,
+                                                      skip=skip):
         waited = _dur(_age((e or {}).get('since'), now))
         return True, (f'starvation guard — waited {waited} (> {pr_wait_min}m), '
                       f'{fit_reason(short)}; half is free')
@@ -817,7 +867,9 @@ class Queue:
             e['at_ceiling'] = why.startswith('at the ci ceiling')
             # a fit hold keeps its free count per class; the needs are re-read from the one
             # cached estimate wherever the hold is shown again (:func:`status_clause`)
-            e['free'] = ({c: a for c, a, _n in shortfall(key, order, needs.get, free)}
+            skip = ceiling_held(order, entries, self.ceiling(), self._inflight,
+                                self.admitted_here)
+            e['free'] = ({c: a for c, a, _n in shortfall(key, order, needs.get, free, skip=skip)}
                          if not e['at_ceiling'] and free is not None else None)
             if self.mode == 'dry-run':
                 self.out(line.replace('ci queue:', 'ci queue (dry-run):', 1)
@@ -1173,7 +1225,7 @@ def cmd_queue(args, source=None, out=print):
     from asf import capacity
     out(f"free: {', '.join(f'{c} {n}' for c, n in sorted((free or {}).items())) or 'unknown'}"
         + (f'; {capacity.ci_inflight_text(line.inflight)} ({capacity.CI_INFLIGHT_WHAT}); '
-           f'batch and PR starts below {ceiling}' if ceiling is not None else ''))
+           f'batch starts below {ceiling}' if ceiling is not None else ''))
     for i, (k, ok, why) in enumerate(line.decisions, 1):
         e = entries[k]
         need = ', '.join(f'{c} {n}' for c, n in sorted(line.needs[k].items())) or 'nothing measured'

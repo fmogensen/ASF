@@ -148,11 +148,13 @@ product until the runners it will need are free:
 A push the CI host turns into a run on its own cannot be delayed once made, so the push (or the
 PR, or the merge) is what is held.
 
-**When a run starts.** A batch or an ordinary PR start needs runs in flight below the CI ceiling
-(`capacity.ci`, above). Runs in flight are one count, read by the queue and the status row alike:
-the runs of `ci.workflow` not completed — queued or running, PR, trunk and batch alike. An S1 or
-hotfix start, a trunk run and a deploy are exempt from the ceiling, so PR runs in flight never hold
-the trunk every deploy waits on. Every start, exempt or not, needs its runners: per runner class,
+**When a run starts.** A batch start needs runs in flight below the CI ceiling (`capacity.ci`,
+above): the ceiling is the batch step's gate and holds no other start — with the ceiling's worth of
+runs always in flight, a PR held by it would never open. Runs in flight are one count, read by the
+queue and the status row alike: the runs of `ci.workflow` not completed — queued or running, PR,
+trunk and batch alike. A batch held at the ceiling sets no runners aside for the starts behind it.
+A batch or an ordinary PR start needs its runners (an S1 or hotfix start, a trunk run and a deploy
+reserve nothing, so PR runs in flight never hold the trunk every deploy waits on): per runner class,
 the free runners (online, not busy, at their `slots`, from the runners API) must cover the run's
 **expected jobs** — over the last `history` completed runs of the workflow that start triggers,
 per run and class the peak number of jobs running at once (a job counts only if it got a runner and
@@ -168,7 +170,7 @@ a heavy run at the head is not starved by lighter ones behind it; a run only nee
 room still goes. A run admitted in the last three minutes still holds its runners, since its jobs
 queue on the host before any runner shows busy. **Starvation guard:** an ordinary PR start that
 has waited longer than `ci.queue.pr_wait_min` minutes (default 45) starts once half its expected
-jobs per class (rounded up) are free — the ceiling still holds — with one line:
+jobs per class (rounded up) are free, with one line:
 `ci queue: F-0112 starts — starvation guard — waited 1h05m (> 45m), heavy 4 free, needs 8; half is free`.
 
 **Order.** S1 and hotfix items first, then trunk runs (every deploy waits on a green trunk), then
@@ -180,7 +182,7 @@ PRs of customer-facing Features (the Feature says `customer_facing: true`, or th
 
 ```
 ci queue: T-0341 waits — heavy 0 free, needs 3 (S2, 4th in line)
-ci queue: T-0500 waits — at the ci ceiling (4 runs in flight; batch and PR starts below 4) (Task, 2nd in line)
+ci queue: batch waits — at the ci ceiling (4 runs in flight; batch starts below 4) (other, 2nd in line)
 ```
 
 and the status Capacity row ends with the depth and the head: `ci queue 3, head T-0341 waits — …`;
@@ -216,7 +218,9 @@ ci:
 
 `mode: dry-run` decides every start and prints each hold as `ci queue (dry-run): … would wait`
 (and each cancel as `would cancel`) but starts everything and writes nothing — the way to watch it
-before trusting it. `asf ci queue --product <p>` prints the line with each entry's expected jobs
+before trusting it. The mode is read from the product file at each ask, so a switch to `dry-run` or
+`off` holds nothing from the next start on, even inside a tick that loaded the product earlier.
+`asf ci queue --product <p>` prints the line with each entry's expected jobs
 and what would start now, writing nothing. A product with no `ci.pool`, or `mode: off`, is not
 queued: every start goes at once as before, and the queue makes no `gh` call.
 

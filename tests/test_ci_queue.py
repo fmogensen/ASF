@@ -545,20 +545,45 @@ class TestTrunkRelief(Base):
 
 
 class TestCeiling(Base):
-    def test_capacity_ci_is_a_hard_ceiling_above_the_queue(self):
+    def test_capacity_ci_is_the_batch_steps_ceiling(self):
         p = product(cap={'ci': 2})
-        d = self.admit(self.queue(p, FakeGh(inflight=2)), 'pr:a', 'T-0500')
+        d = self.admit(self.queue(p, FakeGh(inflight=2)), 'batch', 'batch', kind='batch')
         self.assertFalse(d.admitted)
-        self.assertEqual(self.lines, ['ci queue: T-0500 waits — at the ci ceiling (2 runs in '
-                                      'flight; batch and PR starts below 2) (Task, 1st in line)'])
-        q = self.queue(p, FakeGh(inflight=1), minutes=1)
+        self.assertEqual(self.lines, ['ci queue: batch waits — at the ci ceiling (2 runs in '
+                                      'flight; batch starts below 2) (other, 1st in line)'])
+        p2 = product(cap={'ci': 2}, name='p2')
+        q = self.queue(p2, FakeGh(inflight=1), minutes=1)
         self.assertTrue(self.admit(q, 'pr:a', 'T-0500').admitted)
         self.assertFalse(self.admit(q, 'batch', 'batch', kind='batch').admitted)  # 1 + 1 admitted
+        self.assertIn('1 runs in flight + 1 started this pass', self.lines[-1])
+
+    def test_a_feature_pr_at_the_ceiling_starts_when_the_runners_fit(self):
+        """The ceiling's worth of runs is always in flight: a Feature PR held by it would never
+        open. At the ceiling it is governed by the runner fit alone."""
+        p = product(cap={'ci': 4})
+        q = self.queue(p, FakeGh(inflight=4))
+        self.assertTrue(self.admit(q, 'pr:feat', 'T-0341').admitted)
+        self.assertEqual(self.lines, [])
+        q = self.queue(p, FakeGh(inflight=9, busy={'h1', 'h2'}), minutes=5)
+        self.assertFalse(self.admit(q, 'pr:feat2', 'T-0341').admitted)   # the fit still holds
+        self.assertEqual(self.lines, ['ci queue: T-0341 waits — heavy 1 free, needs 3 '
+                                      '(Feature, 1st in line)'])
+        self.lines.clear()
+        q = self.queue(p, FakeGh(inflight=4), minutes=10)
+        self.assertFalse(self.admit(q, 'batch', 'batch', kind='batch').admitted)
+        self.assertIn('at the ci ceiling', self.lines[-1])
+
+    def test_a_batch_held_at_the_ceiling_sets_no_runners_aside(self):
+        p = product(cap={'ci': 4}, name='b')
+        self.assertFalse(self.admit(self.queue(p, FakeGh(inflight=4)), 'batch', 'batch',
+                                    kind='batch').admitted)
+        q = self.queue(p, FakeGh(inflight=4), minutes=1)
+        self.assertTrue(self.admit(q, 'pr:task', 'T-0500').admitted)   # behind it in line
 
 
     def test_s1_hotfix_trunk_and_deploy_starts_are_exempt_from_ceiling_and_fit(self):
         """PR runs fill the ceiling (4/4): a trunk run ranked right after the S1 still starts;
-        a batch and an ordinary or Feature PR wait at the ceiling."""
+        a batch waits at the ceiling, an ordinary or Feature PR starts on the runner fit."""
         p = product(cap={'ci': 4})
         q = self.queue(p, FakeGh(inflight=4))
         self.assertTrue(self.admit(q, 'trunk:t', 'T-0500', kind='trunk').admitted)
@@ -570,23 +595,28 @@ class TestCeiling(Base):
         self.assertTrue(self.admit(q, 'deploy:prod', 'deploy prod', kind='deploy').admitted)
         self.lines.clear()
         q = self.queue(p, FakeGh(inflight=4), minutes=40)
-        self.assertFalse(self.admit(q, 'pr:feat', 'T-0341').admitted)
+        self.assertTrue(self.admit(q, 'pr:feat', 'T-0341').admitted)
         self.assertFalse(self.admit(q, 'batch', 'batch', kind='batch').admitted)
-        self.assertTrue(all('at the ci ceiling' in l for l in self.lines))
+        self.assertEqual(len(self.lines), 1)
+        self.assertIn('at the ci ceiling', self.lines[0])
         # exempt from the runner fit too: the host queues its jobs
         self.lines.clear()
         q = self.queue(p, FakeGh(inflight=4, busy={'h1', 'h2'}), minutes=50)
         self.assertTrue(self.admit(q, 'trunk:t2', 'T-0500', kind='trunk').admitted)
         self.assertEqual(self.lines, [])
 
-    def test_ceiling_applies_to_batch_and_ordinary_pr_starts_only(self):
-        ok = ci_queue.ceiling_applies
-        self.assertTrue(ok({'kind': 'pr', 'prio': ci_queue.OTHER}))
-        self.assertTrue(ok({'kind': 'pr', 'prio': ci_queue.FEATURE}))
-        self.assertTrue(ok({'kind': 'batch', 'prio': ci_queue.OTHER}))
-        self.assertFalse(ok({'kind': 'pr', 'prio': ci_queue.S1}))
-        self.assertFalse(ok({'kind': 'trunk', 'prio': ci_queue.TRUNK}))
-        self.assertFalse(ok({'kind': 'deploy', 'prio': ci_queue.OTHER}))
+    def test_ceiling_applies_to_batch_starts_only_fit_to_batch_and_ordinary_prs(self):
+        ceil, fit = ci_queue.ceiling_applies, ci_queue.fit_applies
+        self.assertFalse(ceil({'kind': 'pr', 'prio': ci_queue.OTHER}))
+        self.assertFalse(ceil({'kind': 'pr', 'prio': ci_queue.FEATURE}))
+        self.assertTrue(ceil({'kind': 'batch', 'prio': ci_queue.OTHER}))
+        self.assertTrue(fit({'kind': 'pr', 'prio': ci_queue.OTHER}))
+        self.assertTrue(fit({'kind': 'pr', 'prio': ci_queue.FEATURE}))
+        self.assertTrue(fit({'kind': 'batch', 'prio': ci_queue.OTHER}))
+        for ok in (ceil, fit):
+            self.assertFalse(ok({'kind': 'pr', 'prio': ci_queue.S1}))
+            self.assertFalse(ok({'kind': 'trunk', 'prio': ci_queue.TRUNK}))
+            self.assertFalse(ok({'kind': 'deploy', 'prio': ci_queue.OTHER}))
 
 
 class TestOneCount(Base):
@@ -605,18 +635,19 @@ class TestOneCount(Base):
         self.assertIn('not completed', capacity.CI_INFLIGHT_WHAT)
 
     def test_a_ceiling_hold_in_the_row_names_the_rows_own_count(self):
-        """The queue held a PR at 4/4; the row's count is now 5: the row names 5, never 4."""
+        """The queue held a batch at 4/4; the row's count is now 5: the row names 5, never 4."""
         from unittest import mock
         from asf.views import status
         p = product(cap={'ci': 4})
         self.t0 = ci_queue._now()   # the row reads the file as of now
-        self.assertFalse(self.admit(self.queue(p, FakeGh(inflight=4)), 'pr:a', 'T-0500').admitted)
+        self.assertFalse(self.admit(self.queue(p, FakeGh(inflight=4)), 'batch', 'batch',
+                                    kind='batch').admitted)
         self.assertIn('(4 runs in flight;', self.lines[-1])
         with mock.patch('subprocess.run', side_effect=FakeGh(inflight=5)):
             cell = status.capacity_cell({}, p)
-        self.assertIn('ci 5 runs in flight (batch and PR starts below 4 — they wait)', cell)
-        self.assertIn('head T-0500 waits — at the ci ceiling (5 runs in flight; batch and PR '
-                      'starts below 4) (Task, 1st in line)', cell)
+        self.assertIn('ci 5 runs in flight (batch starts below 4 — batch waits)', cell)
+        self.assertIn('head batch waits — at the ci ceiling (5 runs in flight; batch '
+                      'starts below 4) (other, 1st in line)', cell)
         self.assertNotIn('4 runs in flight', cell)
         self.assertNotIn('4/4', cell)
         # the count dropped below the ceiling: the head is not said to be at it
@@ -706,6 +737,38 @@ class TestModes(Base):
             self.assertEqual(row, f"ci queue 1, head T-0341 {said.replace('waits:', 'waits —')} "
                                   f"(Feature, 1st in line)")
             self.assertNotIn('as of tick', row)
+
+    def write_mode(self, name, m):
+        os.makedirs(os.path.join(self.tmp, 'products'), exist_ok=True)
+        with open(env.product_path(name), 'w', encoding='utf-8') as fh:
+            fh.write(f'repo_slug: o/r\nci:\n  workflow: ci.yml\n  queue:\n    mode: {m}\n')
+
+    def test_dry_run_in_the_product_file_holds_nothing_on_a_product_loaded_before(self):
+        """The tick loaded its product with the queue on; the operator set ``mode: dry-run`` in
+        the product file mid-pass: the lane's PR start is not held, the line says would wait."""
+        p = product(queue={'mode': 'on'})
+        self.write_mode('p', 'dry-run')
+        self.assertEqual(ci_queue.mode(p), 'dry-run')
+        d = self.admit(self.queue(p, FakeGh(busy={'h1', 'h2', 'h3'})), 'pr:a', 'T-0341')
+        self.assertTrue(d.admitted)
+        self.assertEqual(len(self.lines), 1)
+        self.assertTrue(self.lines[0].startswith('ci queue (dry-run): T-0341 would wait'),
+                        self.lines[0])
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, 'state', 'p', ci_queue.QUEUE_FILE)))
+        self.write_mode('p', 'off')
+        self.assertEqual(ci_queue.mode(p), 'off')
+
+    def test_the_lane_opens_a_pr_under_dry_run_from_the_product_file(self):
+        import types
+        from unittest import mock
+        from asf.harvest import lane
+        p = product(queue={'mode': 'on'})
+        self.write_mode('p', 'dry-run')
+        fake = types.SimpleNamespace(product=p, out=self.lines.append, ci_queue=None, items=ITEMS)
+        with mock.patch('subprocess.run', side_effect=FakeGh(busy={'h1', 'h2', 'h3'})):
+            self.assertTrue(lane.Lane.ci_admits(fake, {'branch': 'feat/x', 'item': 'T-0341'},
+                                                'pr'))
+        self.assertIn('would wait', self.lines[-1])
 
     def test_a_mode_change_shows_in_the_row_at_once(self):
         """The tick ran in dry-run; the mode is back to on: the row drops ``(dry-run)`` now."""
@@ -849,7 +912,7 @@ class TestStarvationGuard(Base):
         self.assertIn('T-0500 starts — starvation guard — waited 46m', self.lines[0])
         self.assertNotIn('pr:task/T-0500', ci_queue.load('p')['entries'])
 
-    def test_the_guard_needs_half_free_and_holds_batch_and_ceiling(self):
+    def test_the_guard_needs_half_free_and_holds_batch_not_at_the_ceiling(self):
         p = product(queue={'pr_wait_min': 10})
         busy2 = FakeGh(busy={'h1', 'h2'})         # heavy 1 free: below half of 3
         self.assertFalse(self.admit(self.queue(p, busy2), 'pr:a', 'T-0500').admitted)
@@ -859,9 +922,10 @@ class TestStarvationGuard(Base):
         self.assertFalse(self.admit(self.queue(p, busy1, minutes=11), 'batch', 'batch',
                                     kind='batch').admitted)     # a batch start is not guarded
         pc = product(cap={'ci': 2}, queue={'pr_wait_min': 10}, name='c')
-        self.admit(self.queue(pc, FakeGh(inflight=2)), 'pr:c', 'T-0500')
-        self.assertFalse(self.admit(self.queue(pc, FakeGh(inflight=2, busy={'h1'}), minutes=11),
-                                    'pr:c', 'T-0500').admitted)  # the ceiling still holds
+        self.assertFalse(self.admit(self.queue(pc, FakeGh(inflight=2, busy={'h1', 'h2'})),
+                                    'pr:c', 'T-0500').admitted)
+        self.assertTrue(self.admit(self.queue(pc, FakeGh(inflight=2, busy={'h1'}), minutes=11),
+                                   'pr:c', 'T-0500').admitted)  # the ceiling holds no PR
         self.assertEqual(ci_queue.pr_wait_min(p), 10)
         self.assertEqual(ci_queue.pr_wait_min(product()), 45)
         self.assertEqual(dict(ci_queue.config_problems({'queue': {'pr_wait_min': 0}})).keys(),
