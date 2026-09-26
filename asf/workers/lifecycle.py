@@ -948,7 +948,7 @@ def copies_archive(branch, remote_sha):
     return f'archive/{branch}-copies-{remote_sha[:9]}'
 
 
-def publish(wt, branch, remote_sha='', main='main', protected=None):
+def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout_s=None):
     """Push the worktree's HEAD to ``origin/<branch>`` as the factory (B-0056).
 
     A rebased lane branch — spawn's takeover rebase (B-0046, B-0048) or a conflict the session
@@ -962,10 +962,14 @@ def publish(wt, branch, remote_sha='', main='main', protected=None):
     A lease guards only against origin moving after ``remote_sha`` was read; a head that lacks
     commits ``remote_sha`` holds (a stale worktree) is refused before any push
     (:func:`lost_commits`), with the commits it would erase named.
+    The old tip's archive carries no new code and skips the product's pre-push hook; the
+    branch's own push runs it. Each push is killed after ``push_timeout_s`` (default
+    :func:`asf.gitpush.push_timeout`): a hook or a network hang never holds the tick.
     ``(ok, line)``."""
     if not branch or branch == main:
         return False, f'publish refused: {branch or "no branch"} is not a lane branch'
-    from asf import refguard
+    from asf import gitpush, refguard
+    limit = push_timeout_s or gitpush.push_timeout()
     guard = refguard.refusal(branch, f'publish {branch}', main, protected)
     if guard:
         return False, guard
@@ -979,7 +983,8 @@ def publish(wt, branch, remote_sha='', main='main', protected=None):
             archive = copies_archive(branch, remote_sha)
             if refguard.refusal(archive, f'archive {branch}', main, protected):
                 return False, f'publish {branch} refused: {archive} is a protected ref'
-            a = _git(['push', '-q', 'origin', f'{remote_sha}:refs/heads/{archive}'], wt)
+            a = gitpush.push(['-q', 'origin', f'{remote_sha}:refs/heads/{archive}'], wt,
+                             refs_only=True, timeout=limit)
             if a.returncode != 0:
                 return False, f'publish {branch} refused: the old tip could not be archived'
             rebased = f'rebased off trunk copies (old tip kept as {archive})'
@@ -989,10 +994,10 @@ def publish(wt, branch, remote_sha='', main='main', protected=None):
             if not ok:
                 return False, f'publish {branch} refused: {rebased or loss_refusal(branch, lost)}'
             remote_sha = fetched
-    args = ['push', '-q', 'origin', f'HEAD:{ref}']
+    args = ['-q', 'origin', f'HEAD:{ref}']
     if remote_sha:
-        args.insert(2, f'--force-with-lease={ref}:{remote_sha}')
-    p = _git(args, wt)
+        args.insert(1, f'--force-with-lease={ref}:{remote_sha}')
+    p = gitpush.push(args, wt, timeout=limit)
     if p.returncode != 0:
         why = [ln for ln in (p.stderr or p.stdout).splitlines() if ln.strip()]
         return False, f'publish {branch} refused: {why[-1].strip() if why else "push failed"}'

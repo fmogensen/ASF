@@ -30,7 +30,7 @@ import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
-from asf import env
+from asf import env, gitpush
 from asf import tokens
 from asf.conventions import (DEFAULT_CHANGELOG_FILE, DEFAULT_RELEASE_INSTALL, DEFAULT_RELEASE_MIN_INTERVAL,
                              Conventions)
@@ -1102,7 +1102,7 @@ def cut_tag(repo, name, sha, message):
     if subprocess.run(['git', '-C', repo, 'tag', '-a', '--cleanup=whitespace', name, sha, '-m', message],
                       capture_output=True, text=True, env=dated).returncode != 0:
         return False
-    if _git(repo, 'push', '-q', 'origin', f'refs/tags/{name}') is None:
+    if gitpush.push(['-q', 'origin', f'refs/tags/{name}'], repo, refs_only=True).returncode:
         _git(repo, 'tag', '-d', name)
         return False
     return True
@@ -1356,7 +1356,8 @@ def sync_changelog(root, product):
         return None
     added = [t for t in entries if not re.search(rf'(?m)^## {re.escape(t)}\b', current)]
     sha = _commit_file(repo, base, path, text, CHANGELOG_SUBJECT.format(tags=', '.join(added), path=path))
-    if not sha or _git(repo, 'push', '-q', 'origin', f'{sha}:refs/heads/{product.main}') is None:
+    if not sha or gitpush.push(['-q', 'origin', f'{sha}:refs/heads/{product.main}'],
+                               repo).returncode:
         print(f"release: could not push {path} to {product.main}; retrying next rollup", file=sys.stderr)
         return None
     print(f"release: {', '.join(added)} in {path}")

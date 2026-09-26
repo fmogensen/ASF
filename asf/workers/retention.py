@@ -29,7 +29,7 @@ import os
 import re
 import time
 
-from asf import env, refguard
+from asf import env, gitpush, refguard
 from asf.harvest import harvest as H
 
 #: The lane's archive namespace (:meth:`asf.harvest.lane.Lane.archive` pushes ``archive/<b>``).
@@ -203,13 +203,14 @@ def candidates(conv, heads, dates, now, prs, protected, flight, item_text):
     return due, kept
 
 
-def delete(repo, branch, sha, slug=None, main=None, protected=None):
+def delete(repo, branch, sha, slug=None, main=None, protected=None, push_timeout_s=None):
     """Delete ``branch`` on origin only while its tip is still ``sha``; ``(ok, why)``.
 
     With a hosted origin (``slug``) the ref is deleted through the host's API: a delete carries
     no content, and a ``git push --delete`` would run the product's own pre-push hook — one
     product's hook ran a whole-tree lint per delete and refused every one (2026-09-25). Without
-    a host, ``git push origin --delete`` over a lease on ``sha``. The trunk and a protected ref
+    a host, ``git push --no-verify origin --delete`` over a lease on ``sha``, bounded by
+    ``push_timeout_s`` (:mod:`asf.gitpush`). The trunk and a protected ref
     are refused before anything is sent (:mod:`asf.refguard`)."""
     from asf import refguard
     guard = refguard.refusal(branch, f'retention delete {branch}', main, protected)
@@ -224,8 +225,8 @@ def delete(repo, branch, sha, slug=None, main=None, protected=None):
             return False, f'tip moved ({out.strip()[:9]} is not {sha[:9]}) — kept'
         rc, out, err = H._gh(['api', '-X', 'DELETE', ref])
         return rc == 0, '' if rc == 0 else (H.tail(err or out) or f'gh exit {rc}')
-    r = H.sh(['git', 'push', '-q', f'--force-with-lease=refs/heads/{branch}:{sha}', 'origin',
-              '--delete', branch], cwd=repo)
+    r = gitpush.push(['-q', f'--force-with-lease=refs/heads/{branch}:{sha}', 'origin',
+                      '--delete', branch], repo, refs_only=True, timeout=push_timeout_s)
     return r.returncode == 0, H.tail(r.stderr or r.stdout) if r.returncode else ''
 
 
@@ -280,7 +281,8 @@ def sweep(product, fix=False, out=print, items=None, host=None, now=None):
             result['due'].append(b)
             continue
         ok, why = delete(repo, b, sha, slug=slug, main=product.main,
-                         protected=refguard.listed(conv))
+                         protected=refguard.listed(conv),
+                         push_timeout_s=gitpush.push_timeout(conv))
         if not ok and len(result['failed']) >= 2 and not result['deleted']:
             result['failed'].append(b)
             out(f'retention: delete failed {what} — {why}; stopping this pass after 3 failures')

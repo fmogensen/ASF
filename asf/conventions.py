@@ -22,6 +22,9 @@ The product yaml carries the overrides::
         gate: per-branch          # default combined: one gate per tick (B-0040)
         branches_per_tick: 3
         gate_timeout_s: 900       # default 600: a gate past it is killed and red (B-0072)
+      git:
+        push_timeout_s: 300       # default 120: a factory git push past it is killed, the ref
+                                  # logged and left as it was (asf.gitpush)
       amendable_paths: [rules/*, docs/CONSTITUTION.md]  # F-0031: a landed branch touching one
                                                           # of these globs is merge_amendable_set;
                                                           # unset = the defaults in asf/amendable.py,
@@ -133,12 +136,19 @@ DEFAULT_BRANCHES_PER_TICK = 12
 #: pre-commit hook hung the tick, and every tick after it). The tick's clock, by default.
 DEFAULT_GATE_TIMEOUT_S = 600
 
+#: The most seconds one factory ``git push`` may take (:mod:`asf.gitpush`) before its process
+#: group is killed: the ref is logged and left as it was, and the tick goes on. Spelt
+#: ``git: {push_timeout_s: …}`` in the yaml.
+DEFAULT_PUSH_TIMEOUT_S = 120
+
 #: The window `asf status`'s Features row measures time-to-land over.
 DEFAULT_LAND_WINDOW_DAYS = 7
 
 #: The keys of the yaml's ``harvest:`` block and the field each one is.
 HARVEST_KEYS = {'gate': 'harvest_gate', 'branches_per_tick': 'branches_per_tick',
                 'gate_timeout_s': 'gate_timeout_s'}
+#: The keys of the yaml's ``git:`` block and the field each one is.
+GIT_KEYS = {'push_timeout_s': 'push_timeout_s'}
 
 #: Paths (globs) that count as documentation beside ``specs_dir``, ``plans_dir`` and
 #: ``reviews_dir``: a branch touching only docs roots is the ``docs`` landing class
@@ -205,7 +215,7 @@ LANE_KEYS = {'review': 'lane_review', 'stale_after': 'lane_stale_after'}
 #: raises on it (a ``models: light`` string once failed every launch for forty minutes), and it
 #: fails loud: :meth:`Conventions.shape_findings` names it, and the doctor's ``conventions`` row
 #: is red with the key and the line.
-MAP_CONVENTIONS = ('models', 'branch_prefixes', 'harvest', 'branch_retention', 'commit')
+MAP_CONVENTIONS = ('models', 'branch_prefixes', 'harvest', 'git', 'branch_retention', 'commit')
 #: ``commit.signoff_check``'s default: a PR check whose name contains it is the sign-off check.
 DEFAULT_SIGNOFF_CHECK = 'DCO'
 #: The conventions that take one word or a map of those words per landing class (``default:``
@@ -458,6 +468,8 @@ class Conventions:
     harvest_gate: str = DEFAULT_HARVEST_GATE
     branches_per_tick: int = DEFAULT_BRANCHES_PER_TICK
     gate_timeout_s: int = DEFAULT_GATE_TIMEOUT_S
+    #: ``git.push_timeout_s`` (:data:`DEFAULT_PUSH_TIMEOUT_S`).
+    push_timeout_s: int = DEFAULT_PUSH_TIMEOUT_S
     briefs_dir: str = DEFAULT_BRIEFS_DIR
     evals_dir: str = DEFAULT_EVALS_DIR
     matrix_path: str = DEFAULT_MATRIX_PATH
@@ -537,19 +549,20 @@ class Conventions:
             # ``models.<kind>``: a label, or a map of labels by class (asf.briefs.build)
             if not model_value_ok(value):
                 misshapen[f'models.{kind}'] = value
-        harvest = data.pop('harvest', None)
-        if isinstance(harvest, dict):  # ``harvest: {gate, branches_per_tick}`` → the two fields
-            rest = {}
-            for key, value in harvest.items():
-                name = HARVEST_KEYS.get(key)
-                if name and value is not None:
-                    kwargs[name] = value
-                elif not name:
-                    rest[key] = value
-            if rest:
-                data['harvest'] = rest
-        elif harvest is not None:
-            data['harvest'] = harvest
+        for block, block_keys in (('harvest', HARVEST_KEYS), ('git', GIT_KEYS)):
+            value_ = data.pop(block, None)
+            if isinstance(value_, dict):  # ``harvest: {gate, …}`` / ``git: {…}`` → the fields
+                rest = {}
+                for key, value in value_.items():
+                    name = block_keys.get(key)
+                    if name and value is not None:
+                        kwargs[name] = value
+                    elif not name:
+                        rest[key] = value
+                if rest:
+                    data[block] = rest
+            elif value_ is not None:
+                data[block] = value_
         retention = data.pop('branch_retention', None)
         if isinstance(retention, dict):
             kwargs['branch_retention'] = {**DEFAULT_BRANCH_RETENTION,

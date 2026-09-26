@@ -948,16 +948,35 @@ fi
 exit 0
 """
 
+#: origin's own gate (a host's branch rule): it refuses a delete while the marker stands, and
+#: every ref under ``archive/`` while the archive marker does — ``--no-verify`` never skips it.
+RECEIVE = """#!/bin/sh
+while read -r _old new ref; do
+  if [ -f "{marker}" ] && [ "$new" = 0000000000000000000000000000000000000000 ]; then
+    echo "no deletes today" >&2; exit 1
+  fi
+  case "$ref" in refs/heads/archive/*)
+    [ -f "{marker}-archive" ] && { echo "claims: bad" >&2; exit 1; } ;;
+  esac
+done
+exit 0
+"""
+
 
 class RefPushes(LaneFixture):
     """The lane's ref-only pushes (archive, branch delete) leave from a clean checkout detached
-    at origin/<trunk>, so the product's pre-push hook runs in full against the trunk's tree —
-    never against a product checkout a person left behind or edited. A refused one is loud: a
-    line in the tick's output and a row in status and doctor, and the delete is owed and retried."""
+    at origin/<trunk> — never a product checkout a person left behind or edited — and carry no
+    new code, so the product's pre-push hook is skipped (``--no-verify``, 2026-09-26: an archive
+    push sat 8+ min in a product's hook). A refusal by origin is loud: a line in the tick's output
+    and a row in status and doctor, and the delete is owed and retried."""
 
     def setUp(self):
         super().setUp()
         self.marker = os.path.join(self.base, 'refuse-delete')
+        receive = os.path.join(self.origin, 'hooks', 'pre-receive')
+        with open(receive, 'w', encoding='utf-8') as f:
+            f.write(RECEIVE.replace('{marker}', self.marker))
+        os.chmod(receive, 0o755)
         self.write(self.repo, '.githooks/pre-push', HOOK.replace('{marker}', self.marker))
         os.chmod(os.path.join(self.repo, '.githooks/pre-push'), 0o755)
         sh(['git', 'add', '-A'], cwd=self.repo)
@@ -1037,10 +1056,39 @@ class RefPushes(LaneFixture):
         self.assertNotIn('delete', self.lane_of('worker/free-plan-t1'))
         self.assertEqual(self.rows(ln.product), (None, None, None))
 
-    def test_a_refused_archive_holds_the_branch_and_says_why(self):
-        self.push_main({'.githooks/pre-push': '#!/bin/sh\necho "claims: bad" >&2\nexit 1\n'},
-                       'a hook that refuses all')
+    def test_a_product_hook_that_refuses_all_never_holds_an_archive_or_a_delete(self):
+        # the trunk's own pre-push hook refuses everything and would take minutes: a ref push
+        # carries no new code, so it never runs
+        self.push_main({'.githooks/pre-push': '#!/bin/sh\nsleep 30\necho "lint: red" >&2\n'
+                                              'exit 1\n'}, 'a hook that refuses all')
         sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        started = time.monotonic()
+        ln, lines = self.run_lane()
+        self.assertLess(time.monotonic() - started, 25)
+        self.assertEqual([n for n, _ in ln.host.closed], [70])
+        self.assertNotIn('worker/free-plan-t1', self.heads())
+        self.assertIn('archive/worker/free-plan-t1', self.heads())
+        self.assertFalse([x for x in lines if 'ref push failed' in x], lines)
+
+    def test_a_hanging_ref_push_times_out_is_logged_and_the_pass_goes_on(self):
+        receive = os.path.join(self.origin, 'hooks', 'pre-receive')
+        with open(receive, 'w', encoding='utf-8') as f:
+            f.write('#!/bin/sh\nsleep 30\n')
+        started = time.monotonic()
+        lines = []
+        ln = lane.Lane(self.product(git={'push_timeout_s': 1}), self.state_dir,
+                       out=lines.append, items=self.items)
+        ln.host = FakePRHost(ln.product, ln, self.prs)
+        lane.lane_pass(ln.product, self.state_dir, items=self.items, lane=ln)
+        self.assertLess(time.monotonic() - started, 25)
+        self.assertIn('worker/free-plan-t1', self.heads())
+        self.assertNotIn('archive/worker/free-plan-t1', self.heads())
+        self.assertTrue([x for x in lines if x.startswith('push timed out after 1s:')
+                         and 'archive/worker/free-plan-t1' in x], lines)
+        self.assertIn('held worker/free-plan-t1: archive could not be pushed', lines)
+
+    def test_a_refused_archive_holds_the_branch_and_says_why(self):
+        open(self.marker + '-archive', 'w').close()
         ln, lines = self.run_lane()
         self.assertEqual(ln.host.closed, [])
         self.assertIn('worker/free-plan-t1', self.heads())

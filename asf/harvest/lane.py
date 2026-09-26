@@ -89,7 +89,7 @@ import subprocess
 import tempfile
 import time
 
-from asf import approvals, customer_content, env, refguard
+from asf import approvals, customer_content, env, gitpush, refguard
 from asf.evidence import review as review_mod
 from asf.feeder import footprint, widen
 from asf.harvest import harvest as H
@@ -1384,9 +1384,12 @@ class Lane:
             self.out(f'lane: push {branch or kind} {time.monotonic() - started:.1f}s '
                      f'({kind}, api)')
         elif wt:
-            cmd = ['git', 'push', '-q'] + ([f'--force-with-lease={lease}'] if lease else [])
+            # a ref carries no new code: the product's pre-push hook is skipped, and the push is
+            # bounded in time (2026-09-26: an archive push sat 8+ min in a product's hook)
+            args = ['-q'] + ([f'--force-with-lease={lease}'] if lease else [])
             started = time.monotonic()
-            r = H.sh(cmd + ['origin', refspec], cwd=wt)
+            r = gitpush.push(args + ['origin', refspec], wt, refs_only=True,
+                             timeout=gitpush.push_timeout(self.conv), log=self.out)
             kind, _, branch = what.partition(' ')
             self.out(f'lane: push {branch or kind} {time.monotonic() - started:.1f}s ({kind})')
             ok, why = r.returncode == 0, push_why(r.stderr or r.stdout)
@@ -1754,8 +1757,9 @@ class Lane:
                 f['refusal'] = (lifecycle.NAMING, f"{f['refusal'][1]}. The lane could not "
                                                   f"because: {why[0]}")
             return None
-        r = H.sh(['git', 'push', '-q', f'--force-with-lease=refs/heads/{b}:{old}', 'origin',
-                  f'{new}:refs/heads/{b}'], cwd=wt)
+        r = gitpush.push(['-q', f'--force-with-lease=refs/heads/{b}:{old}', 'origin',
+                          f'{new}:refs/heads/{b}'], wt,
+                         timeout=gitpush.push_timeout(self.conv), log=self.out)
         if r.returncode != 0:
             self.out(f'reword {b} (naming) push refused: {push_why(r.stderr or r.stdout)} — '
                      f'back to its session')
@@ -1841,8 +1845,9 @@ class Lane:
         if not wt:
             self.out(f'drop copies {b} failed: {self.ref_wt_error}')
             return None
-        r = H.sh(['git', 'push', '-q', f'--force-with-lease=refs/heads/{b}:{old}', 'origin',
-                  f'{new}:refs/heads/{b}'], cwd=wt)
+        r = gitpush.push(['-q', f'--force-with-lease=refs/heads/{b}:{old}', 'origin',
+                          f'{new}:refs/heads/{b}'], wt,
+                         timeout=gitpush.push_timeout(self.conv), log=self.out)
         if r.returncode != 0:
             self.out(f'drop copies {b} push refused: {push_why(r.stderr or r.stdout)} — kept')
             return None
@@ -1895,8 +1900,9 @@ class Lane:
             self.out(f'sign-off {b} ({check}) failed: '
                      f'{(why[0] if why else "every commit is signed off already") if not new else self.ref_wt_error}')
             return None
-        r = H.sh(['git', 'push', '-q', f'--force-with-lease=refs/heads/{b}:{old}', 'origin',
-                  f'{new}:refs/heads/{b}'], cwd=wt)
+        r = gitpush.push(['-q', f'--force-with-lease=refs/heads/{b}:{old}', 'origin',
+                          f'{new}:refs/heads/{b}'], wt,
+                         timeout=gitpush.push_timeout(self.conv), log=self.out)
         if r.returncode != 0:
             self.out(f'sign-off {b} ({check}) push refused: {push_why(r.stderr or r.stdout)}')
             return None

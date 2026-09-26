@@ -106,7 +106,8 @@ def commit_local(path, message):
 
 
 def _push_once(path, branch):
-    return _sh(['git', 'push', '-q', 'origin', f'HEAD:{branch}'], cwd=path, check=False).returncode == 0
+    from asf import gitpush
+    return gitpush.push(['-q', 'origin', f'HEAD:{branch}'], path).returncode == 0
 
 
 #: How many times origin may move under one push before the tick gives up on this tick's

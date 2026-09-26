@@ -30,7 +30,7 @@ import tempfile
 import time
 
 
-from asf import env, hermetic, refguard
+from asf import env, gitpush, hermetic, refguard
 from asf.conventions import Conventions
 from asf.workers import health as health_mod
 from asf.workers import lifecycle
@@ -431,7 +431,7 @@ def push_ff(repo, sha, trunk='main'):
     anc = sh(['git', 'merge-base', '--is-ancestor', origin_sha, sha], cwd=repo)
     if anc.returncode != 0:
         return False, True
-    push = sh(['git', 'push', 'origin', f'{sha}:refs/heads/{trunk}'], cwd=repo)
+    push = gitpush.push(['origin', f'{sha}:refs/heads/{trunk}'], repo)
     return push.returncode == 0, False
 
 
@@ -458,8 +458,8 @@ def push_branch(repo, sha, branch, expected, main='main', protected=None):
         lost = lifecycle.lost_commits(repo, sha, expected, branch)
         if lost is None or lost:
             return False, lifecycle.loss_refusal(branch, lost)
-    push = sh(['git', 'push', f'--force-with-lease=refs/heads/{branch}:{expected}', 'origin',
-               f'{sha}:refs/heads/{branch}'], cwd=repo)
+    push = gitpush.push([f'--force-with-lease=refs/heads/{branch}:{expected}', 'origin',
+                         f'{sha}:refs/heads/{branch}'], repo)
     if push.returncode != 0:
         return False, f'push branch failed: {tail(push.stderr or push.stdout)}'
     return True, None
