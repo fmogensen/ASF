@@ -525,6 +525,39 @@ class WaveStepTests(StepsTestCase):
                                         'swap 10%')
                             for ln in self.lines), self.lines)
 
+    def launching(self, n):
+        return [feeder_rows.Row(2, 'PLAN → CODE', f'T-01{i:02d}', 'F-0001',
+                                f'would launch task-t-01{i:02d} (Opus)', 'task',
+                                f'task/T-01{i:02d}', 'ready') for i in range(n)]
+
+    def test_the_wave_never_launches_past_share_less_live(self):
+        # 2026-09-26 08:17/08:42: a wave launched 11 after waves held by host pressure. Whatever
+        # the plan hands it, the wave starts at most max(0, share - live), live being the one
+        # count the Capacity row shows (asf.capacity.live_sessions) — an S1 load-hold bypass's
+        # session among them.
+        self.session(job='task-t-0001', item='T-0001', kind='task', account='acct-b',
+                     pid=os.getpid())
+        self.session(job='fix-bug-b-9000', item='B-9000', kind='fix-bug', pid=os.getpid(),
+                     host_load_bypass=True)
+        self.write_config('feeder:\n  capacity: 4\n')
+        ctx = self.ctx()
+        with mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **kw: self.launching(6)):
+            step_wave.run(ctx, out=self.lines.append)
+        self.assertEqual([len(w[0]) for w in self.waved], [2])
+        self.assertEqual(len(self.built), 2)
+        over = [ln for ln in self.lines if ln.startswith('waits    task-t-01')]
+        self.assertEqual(len(over), 4, self.lines)
+        self.assertTrue(all('no seat left: share 4, in flight 2' in ln for ln in over), over)
+
+    def test_a_full_share_launches_nothing(self):
+        for i in range(3):
+            self.session(job=f'task-t-000{i}', item=f'T-000{i}', kind='task', pid=os.getpid())
+        self.write_config('feeder:\n  capacity: 3\n')
+        with mock.patch.object(feeder_rows, 'plan_rows', lambda *a, **kw: self.launching(2)):
+            step_wave.run(self.ctx(), out=self.lines.append)
+        self.assertEqual(self.waved, [])
+        self.assertIn('wave: nothing to launch', self.lines)
+
     def test_the_wave_plans_over_the_plans_order(self):
         # defence in depth: the wave overlays the plan's order before the feeder sees the index
         seen = {}

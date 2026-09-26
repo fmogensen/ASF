@@ -39,6 +39,12 @@ ends on ``wave: held: …``. Sessions already running are never touched. With th
 lane held: …`` and the wave sends what the cloud lane can take there; its seats are added to the
 feeder's ceiling.
 
+Whatever the plan holds, the wave starts at most ``max(0, share − live)`` rows, ``live`` being
+:func:`asf.capacity.live_sessions` — the count the status Capacity row shows — so a stale plan or
+a row the feeder mis-cut can never overshoot the share; a row past it prints ``waits … — no seat
+left: share <n>, in flight <i>, this wave <w>``. The S1 bypass below is the one row that may pass
+it, and its session counts toward ``live`` on every later wave.
+
 An S1 item's row passes the LOAD half of that guard (:func:`asf.workers.host.load_only_hold`):
 "S1 first" must hold even under the load other sessions created. It never passes a host over its
 memory/swap guard — that holds every row, S1 included — and at most one such bypass may be live
@@ -78,8 +84,9 @@ def capacity(product=None):
 
 
 def inflight(product):
-    """The feeder's ``inflight`` list off the session ledger — :func:`asf.workers.lifecycle.inflight`."""
-    return lifecycle.inflight(pool_mod.sessions_path(product))
+    """The feeder's ``inflight`` list off the session ledger — :func:`asf.capacity.live_sessions`,
+    the one count the status Capacity row reads too."""
+    return capacity_mod.live_sessions(product)
 
 
 def attempts(product):
@@ -471,6 +478,11 @@ def launch(ctx, out=print):
                       and host_mod.load_only_hold(reading, host_mod.guards_from_config(env.load_config()))
                       and not s1_bypass_live())
     bypassed = False
+    # the hard cap: whatever the plan holds, this wave starts at most share - live, live being the
+    # one count the Capacity row shows (capacity_mod.live_sessions) — the S1 bypass the only row
+    # that may pass it, and its session counts toward live on every later wave
+    seats = r.sessions + extra
+    room = max(0, seats - len(running))
     worker_rows, texts, kinds = [], {}, {}
     for row in planned:
         cause = getattr(row, 'cause', '')
@@ -490,6 +502,12 @@ def launch(ctx, out=print):
             job = job_name(row.brief_kind, row.item_id)
             out(f'waits    {job:<24} {row.item_id:<10} — held: {host_why}')
             continue
+        if room <= 0 and not bypass:
+            job = job_name(row.brief_kind, row.item_id)
+            out(f'waits    {job:<24} {row.item_id:<10} — no seat left: share {seats}, '
+                f'in flight {len(running)}, this wave {len(worker_rows)}')
+            continue
+        room -= 1
         if bypass:
             s1_bypass_open = False              # one bypass at a time, across the whole wave
             bypassed = True
