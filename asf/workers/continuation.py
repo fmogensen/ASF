@@ -30,8 +30,8 @@ import subprocess
 import time
 
 from asf.briefs import preamble as preamble_mod
+from asf.evidence import review as review_mod
 from asf.feeder import rows as feeder_rows
-from asf.harvest import pr_hygiene
 from asf.views import index_reader
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
@@ -205,7 +205,7 @@ def _items(lines):
                     continue
                 break
             if (_ITEM_RE.match(line) or _HEADING_RE.match(line) or line.lstrip().startswith('|')
-                    or pr_hygiene.VERDICT_LINE.search(line)):
+                    or review_mod.VERDICT_LINE_RE.search(line)):
                 break
             body.append(line.rstrip())
             i += 1
@@ -213,10 +213,23 @@ def _items(lines):
     return out
 
 
+def _verdict_word(text):
+    """The review's own verdict, upper-cased (``CHANGES REQUESTED``) — its ``verdict:`` line's
+    own words (:data:`evidence.review.VERDICT_LINE_RE`, the one parser's pattern, P8) first, else
+    the first legacy word (:data:`evidence.review.LEGACY_WORD_RE`) anywhere in the text; ``''``
+    when neither is there."""
+    m = review_mod.VERDICT_LINE_RE.search(text)
+    if m:
+        return m.group('v').strip().strip('`*_ ').upper()
+    m = review_mod.LEGACY_WORD_RE.search(text)
+    return m.group(0).upper() if m else ''
+
+
 def findings(text):
     """A review file → ``{'verdict', 'table', 'criticals', 'improvements', 'missed'}``.
-    ``verdict`` is :func:`harvest.pr_hygiene.parse_verdict`'s (P8, the one parser); ``table`` is
-    the contiguous block of ``|`` lines under the check header, verbatim; ``criticals`` and
+    ``verdict`` is :func:`_verdict_word`'s (P8, the one parser's own patterns, reused rather than
+    a second one); ``table`` is the contiguous block of ``|`` lines under the check header,
+    verbatim; ``criticals`` and
     ``improvements`` are the ``C``/``I`` items in file order, each kept whole. ``missed`` is the
     ``### Missed in round N`` section's items — the ``I`` items among them are in
     ``improvements`` too (the template records a missed finding as an I) — or, when the section
@@ -232,7 +245,7 @@ def findings(text):
         missed = [t for _, t, n in items if at < n < end]
         if not missed:
             missed = [l.strip() for l in lines[at + 1:end] if l.strip()]
-    return {'verdict': pr_hygiene.parse_verdict(text),
+    return {'verdict': _verdict_word(text),
             'table': _table(lines),
             'criticals': [t for k, t, _ in items if k == 'C'],
             'improvements': [t for k, t, _ in items if k == 'I'],
