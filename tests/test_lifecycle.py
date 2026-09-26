@@ -135,6 +135,119 @@ class RegistryFoldInvariants(unittest.TestCase):
         return path
 
 
+class RegistryReadOnceInvariants(unittest.TestCase):
+    """The registry is parsed once per content, not once per question (the tick's own CPU: the
+    feeder's ``corrections`` asked ``item_runs`` per run per item, each a full re-read and
+    re-fold of ``sessions.jsonl`` — thousands of parses a tick). The cached answer must equal
+    the full read's, whatever was written in between, and be the caller's own to mutate."""
+
+    def _path(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return os.path.join(d, 'sessions.jsonl')
+
+    @staticmethod
+    def _write(path, lines, mode='w'):
+        with open(path, mode) as f:
+            for ln in lines:
+                f.write(json.dumps(ln) + '\n')
+
+    @staticmethod
+    def _full(path):
+        return lc.fold(lc.read_lines(path))
+
+    @staticmethod
+    def _full_item_runs(path, item):
+        return [r for rs in lc.fold(lc.read_lines(path)).values() for r in rs
+                if item and r.get('item') == item]
+
+    def test_runs_and_item_runs_equal_the_full_read_across_appends(self):
+        path = self._path()
+        for seed in range(40):
+            rng = random.Random(seed)
+            lines, _meant = generate(rng, jobs=4, lines=30)
+            self._write(path, lines[:10])
+            for cut in (10, 20, 30):
+                if cut > 10:
+                    self._write(path, lines[cut - 10:cut], mode='a')
+                with self.subTest(seed=seed, cut=cut):
+                    self.assertEqual(lc.runs(path), self._full(path))
+                    self.assertEqual(lc.latest(path),
+                                     {j: rs[-1] for j, rs in self._full(path).items()})
+                    for item in ('B-0001', 'B-0002', 'B-0003', 'B-0004', 'B-0009', None, ''):
+                        self.assertEqual(lc.item_runs(path, item),
+                                         self._full_item_runs(path, item))
+                    self.assertEqual(lc.corrections(path), self._uncached(lc.corrections, path))
+                    self.assertEqual(lc.attempts(path), self._uncached(lc.attempts, path))
+
+    def _uncached(self, fn, path):
+        """``fn(path)`` with the cache off: every read re-parses, as before the cache."""
+        from unittest import mock
+        with mock.patch.object(lc, '_REGISTRY_CACHE', _NeverHits()):
+            return fn(path)
+
+    def test_a_same_size_rewrite_is_read_again(self):
+        # a coarse filesystem clock (ext4 on CI) can leave mtime and size unchanged across a
+        # rewrite: the content itself is what the cache is keyed on
+        path = self._path()
+        self._write(path, [{'job': 'j', 'pid': 11, 'started': 't1', 'item': 'B-0001'}])
+        self.assertEqual(lc.runs(path)['j'][0]['pid'], 11)
+        st = os.stat(path)
+        self._write(path, [{'job': 'j', 'pid': 12, 'started': 't1', 'item': 'B-0001'}])
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+        self.assertEqual(os.stat(path).st_size, st.st_size)
+        self.assertEqual(lc.runs(path)['j'][0]['pid'], 12)
+        self.assertEqual(lc.item_runs(path, 'B-0001')[0]['pid'], 12)
+
+    def test_every_answer_is_the_callers_own_to_mutate(self):
+        path = self._path()
+        self._write(path, [{'job': 'j', 'pid': 1, 'started': 't1', 'item': 'B-0001',
+                            'correction': {'text': 'FAIL', 'at': 't0'}}])
+        a = lc.runs(path)
+        a['j'][0]['correction']['text'] = 'changed'
+        a['j'][0]['pid'] = 99
+        a['j'].append({'job': 'j'})
+        b = lc.item_runs(path, 'B-0001')
+        b[0]['correction']['at'] = 'changed'
+        self.assertEqual(lc.runs(path), self._full(path))
+        self.assertEqual(lc.item_runs(path, 'B-0001'), self._full_item_runs(path, 'B-0001'))
+        self.assertEqual(lc.latest(path)['j']['correction'], {'text': 'FAIL', 'at': 't0'})
+
+    def test_a_missing_registry_is_empty_and_a_new_one_is_read(self):
+        path = self._path()
+        self.assertEqual(lc.runs(path), {})
+        self.assertEqual(lc.item_runs(path, 'B-0001'), [])
+        self._write(path, [{'job': 'j', 'pid': 1, 'started': 't1', 'item': 'B-0001'}])
+        self.assertEqual(len(lc.item_runs(path, 'B-0001')), 1)
+        os.remove(path)
+        self.assertEqual(lc.runs(path), {})
+
+    def test_corrections_parses_the_registry_once(self):
+        path = self._path()
+        lines = []
+        for i in range(30):
+            item = f'B-{i:04d}'
+            lines += [{'job': f'fix-{i}', 'pid': i, 'started': f't{i:03d}', 'item': item,
+                       'branch': f'fix/{item}'},
+                      {'job': f'fix-{i}', 'ended': 'x', 'end_reason': 'failed',
+                       'correction': {'text': 'FAIL', 'at': f't{i:03d}z'}, 'rounds': 1}]
+        self._write(path, lines)
+        from unittest import mock
+        with mock.patch.object(lc, '_parse_registry', wraps=lc._parse_registry) as parse:
+            got = lc.corrections(path)
+            lc.occupancy(path)
+        self.assertEqual(len(got), 30)
+        self.assertEqual(got, self._uncached(lc.corrections, path))
+        self.assertLessEqual(parse.call_count, 1)
+
+
+class _NeverHits(dict):
+    """A registry cache that never holds anything: every read is a full parse."""
+
+    def __setitem__(self, key, value):
+        pass
+
+
 def evidences():
     """Every combination of the evidence fields the judgement reads."""
     for result, alive, remote, uncommitted, unpushed in itertools.product(

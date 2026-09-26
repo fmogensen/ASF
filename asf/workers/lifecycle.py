@@ -60,7 +60,9 @@ Every other module asks this one:
 * every reader of a session's own state — :func:`state_of` and :func:`classify` (F-0098).
 """
 import dataclasses
+import io
 import json
+import marshal
 import os
 import re
 import signal
@@ -207,24 +209,31 @@ def _product_from_registry_dir(path):
 
 
 def read_lines(path):
-    out = []
     if not path or not os.path.isfile(path):
-        return out
-    product_from_dir = _product_from_registry_dir(path)
-    with open(path, encoding='utf-8') as f:
-        for line in f:
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not (isinstance(rec, dict) and rec.get('job')):
-                continue
-            if is_launch(rec) and not rec.get('session'):
-                product = rec.get('product') or product_from_dir
-                if product:
-                    rec = dict(rec, product=product,
-                              session=session_id(product, rec['job'], rec.get('started') or ''))
-            out.append(rec)
+        return []
+    with open(path, 'rb') as f:
+        data = f.read()
+    return _parse_registry(data, _product_from_registry_dir(path))
+
+
+def _parse_registry(data, product_from_dir):
+    """The registry's lines (``data``, its bytes) as records: undecodable lines and lines with
+    no ``job`` skipped, a launch line with no ``session`` given one (F-0076)."""
+    out = []
+    # read as open(path, encoding='utf-8') would: universal newlines, nothing else a line end
+    for line in io.TextIOWrapper(io.BytesIO(data), encoding='utf-8'):
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not (isinstance(rec, dict) and rec.get('job')):
+            continue
+        if is_launch(rec) and not rec.get('session'):
+            product = rec.get('product') or product_from_dir
+            if product:
+                rec = dict(rec, product=product,
+                           session=session_id(product, rec['job'], rec.get('started') or ''))
+        out.append(rec)
     return out
 
 
@@ -246,8 +255,64 @@ def fold(lines):
     return {job: [_clean(r) for r in rs] for job, rs in runs.items()}
 
 
+#: ``{(path, ASF_HOME): _Folded}`` — the registry folded once per *content*: every question the
+#: tick asks of it (``corrections`` asked ``item_runs`` per run per item) used to re-read and
+#: re-fold the whole file, thousands of parses a tick. Keyed on the bytes themselves, never on
+#: mtime/size (a coarse filesystem clock can leave both unchanged across a rewrite), and on
+#: ``ASF_HOME``, which the derived product of a line depends on. A few entries only: one per
+#: product's registry.
+_REGISTRY_CACHE = {}
+_REGISTRY_CACHE_MAX = 8
+
+
+class _Folded:
+    """One registry content, folded: ``view`` is shared and never handed out — callers get
+    ``marshal`` copies (fresh objects, nested values included), exactly as a fresh parse."""
+
+    def __init__(self, data, view):
+        self.data = data
+        self.view = view
+        self.blob = marshal.dumps(view)
+        self._by_item = None
+
+    def by_item(self):
+        """``{item: [run, ...]}`` in :func:`runs` order — the view's runs, not copies."""
+        if self._by_item is None:
+            idx = {}
+            for rs in self.view.values():
+                for r in rs:
+                    item = r.get('item')
+                    if item and isinstance(item, (str, int, float)):  # a malformed id matches none
+                        idx.setdefault(item, []).append(r)
+            self._by_item = idx
+        return self._by_item
+
+
+_EMPTY = _Folded(b'', {})
+
+
+def _folded(path):
+    """The registry at ``path`` as a :class:`_Folded` (read-only view; :data:`_EMPTY` when there
+    is no file)."""
+    if not path or not os.path.isfile(path):
+        return _EMPTY
+    with open(path, 'rb') as f:
+        data = f.read()
+    key = (os.path.abspath(path), env.ASF_HOME)
+    hit = _REGISTRY_CACHE.get(key)
+    if hit is not None and hit.data == data:
+        return hit
+    hit = _Folded(data, fold(_parse_registry(data, _product_from_registry_dir(path))))
+    _REGISTRY_CACHE.pop(key, None)
+    while len(_REGISTRY_CACHE) >= _REGISTRY_CACHE_MAX:
+        _REGISTRY_CACHE.pop(next(iter(_REGISTRY_CACHE)))
+    _REGISTRY_CACHE[key] = hit
+    return hit
+
+
 def runs(path):
-    return fold(read_lines(path))
+    """``{job: [run, …]}`` — :func:`fold` of the registry, the caller's own copy."""
+    return marshal.loads(_folded(path).blob)
 
 
 def latest(path):
@@ -324,12 +389,21 @@ def rounds_of(path, item):
     """The correction rounds an item has had, over every run of every job on it."""
     if not item:
         return 0
-    return max([r.get('rounds') or 0 for rs in runs(path).values() for r in rs
-                if r.get('item') == item] + [0])
+    return max([r.get('rounds') or 0 for r in _item_view(path, item)] + [0])
+
+
+def _item_view(path, item):
+    """The runs on ``item`` off the shared view — read only, never handed out."""
+    if not item:
+        return []
+    if not isinstance(item, (str, int, float)):  # no id: matched the slow way, as ever
+        return [r for rs in _folded(path).view.values() for r in rs if r.get('item') == item]
+    return _folded(path).by_item().get(item, [])
 
 
 def item_runs(path, item):
-    return [r for rs in runs(path).values() for r in rs if item and r.get('item') == item]
+    """Every run on ``item``, in :func:`runs` order — the caller's own copies."""
+    return marshal.loads(marshal.dumps(_item_view(path, item)))
 
 
 # ---- the recorded transition, and the questions that need no git ----------------
@@ -416,7 +490,7 @@ def landed_earlier(path, run):
     branch, started = (run or {}).get('branch'), (run or {}).get('started') or ''
     if not path or not branch:
         return None
-    for rs in runs(path).values():
+    for rs in _folded(path).view.values():  # read only: the sha is all that leaves
         for r in rs:
             sha = r.get('harvested')
             if (r.get('branch') == branch and sha and sha not in NOT_A_LANDING
@@ -556,7 +630,7 @@ def attempts(path):
     """``{item: runs the registry holds for it}`` — every launch, ended or not, except a run
     a spent window cut short (:func:`quota_exhausted`)."""
     out = {}
-    for rs in runs(path).values():
+    for rs in _folded(path).view.values():  # read only: counts leave, never runs
         for r in rs:
             if r.get('item') and not quota_exhausted(r):
                 out[r['item']] = out.get(r['item'], 0) + 1
@@ -570,7 +644,7 @@ def corrections(path):
     already ended over this same hold — the feeder shows a WAITS ON row, not another STALEMATE.
     ``prs`` (B-0128): the PR numbers that ruling names, for the same row to print."""
     out = {}
-    for item in {r.get('item') for rs in runs(path).values() for r in rs if r.get('item')}:
+    for item in {r.get('item') for rs in _folded(path).view.values() for r in rs if r.get('item')}:
         held = [(r, pending_correction(r, path)) for r in item_runs(path, item)]
         held = [(r, c) for r, c in held if c]
         if not held:
@@ -869,9 +943,66 @@ def rebase_conflict_text(branch, line):
             f'those files, and commit; never a force, never a merge')
 
 
-def gather(product, run, alive=None, worktree=None):
+def _common_git_dir(wt):
+    """The repository ``wt`` is a checkout of — its own ``.git`` directory, or the one its
+    ``.git`` file's worktree points into (``commondir``) — or None when that cannot be read off
+    the files (the caller then asks git itself)."""
+    dot = os.path.join(wt, '.git')
+    try:
+        if os.path.isdir(dot):
+            return os.path.realpath(dot)
+        with open(dot, encoding='utf-8') as f:
+            first = f.readline().strip()
+        if not first.startswith('gitdir:'):
+            return None
+        gd = first[len('gitdir:'):].strip()
+        gd = gd if os.path.isabs(gd) else os.path.join(wt, gd)
+        common = os.path.join(gd, 'commondir')
+        if os.path.isfile(common):
+            with open(common, encoding='utf-8') as f:
+                rel = f.read().strip()
+            return os.path.realpath(rel if os.path.isabs(rel) else os.path.join(gd, rel))
+        return os.path.realpath(gd)
+    except OSError:
+        return None
+
+
+class RemoteHeads:
+    """``origin``'s heads for one pass over many worktrees: one ``git ls-remote --heads origin``
+    per repository, where the pass used to ask once per worktree (a network round trip and a
+    git process each — thirty-odd a health pass). Only for a pass that pushes nothing between
+    its questions: the answer is origin as it stood at the first one."""
+
+    _GLOB = frozenset('*?[\\')
+
+    def __init__(self):
+        self._by_repo = {}
+
+    def sha(self, wt, branch):
+        """What ``git ls-remote --heads origin <branch>`` run in ``wt`` would give as its first
+        sha — git matches the pattern against the tail of each ref (``refs/heads/x/<branch>``
+        too), first in ref order — ``''`` when no head matches; None when the snapshot cannot
+        answer (a glob in the name, a checkout it cannot place, ``ls-remote`` failed)."""
+        if not branch or self._GLOB & set(branch):
+            return None
+        repo = _common_git_dir(wt)
+        if repo is None:
+            return None
+        if repo not in self._by_repo:
+            p = _git(['ls-remote', '--heads', 'origin'], wt)
+            self._by_repo[repo] = ([tuple(ln.split('\t', 1)) for ln in p.stdout.splitlines()
+                                    if '\t' in ln] if p.returncode == 0 else None)
+        refs = self._by_repo[repo]
+        if refs is None:
+            return None
+        tail = '/' + branch
+        return next((sha for sha, ref in refs if ref.endswith(tail)), '')
+
+
+def gather(product, run, alive=None, worktree=None, heads=None):
     """The :class:`Evidence` for ``run`` — git in its worktree (``run['worktree']`` unless given),
-    ``origin/<branch>`` from the product repo's remote, the log through the runtime."""
+    ``origin/<branch>`` from the product repo's remote, the log through the runtime. ``heads``
+    (a :class:`RemoteHeads`) answers ``origin/<branch>`` for a pass over many worktrees."""
     alive = alive or pid_alive
     ev = Evidence(result=runtime_mod.read_result(run.get('log')), alive=alive(run.get('pid')))
     wt = worktree or run.get('worktree')
@@ -885,8 +1016,11 @@ def gather(product, run, alive=None, worktree=None):
     ev.worktree = True
     ev.uncommitted = len([ln for ln in st.stdout.splitlines() if ln.strip()])
     if branch:
-        ls = _git(['ls-remote', '--heads', 'origin', branch], wt)
-        ev.remote_sha = ls.stdout.split()[0] if ls.returncode == 0 and ls.stdout.strip() else ''
+        known = heads.sha(wt, branch) if heads is not None else None
+        if known is None:
+            ls = _git(['ls-remote', '--heads', 'origin', branch], wt)
+            known = ls.stdout.split()[0] if ls.returncode == 0 and ls.stdout.strip() else ''
+        ev.remote_sha = known
         log = _git(['reflog', 'show', '--format=%gs', f'refs/heads/{branch}'], wt)
         ev.has_commits = log.returncode == 0 and any(
             not ln.startswith('branch: Created from') for ln in log.stdout.splitlines() if ln.strip())
@@ -965,7 +1099,7 @@ def lands(run, path=None):
         return False
     branch = (run or {}).get('branch')
     if path and branch:
-        for rs in runs(path).values():
+        for rs in _folded(path).view.values():  # read only
             if any(r.get('branch') == branch and r.get('kind') in NO_LANDING_KINDS for r in rs):
                 return False
     return True
