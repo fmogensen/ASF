@@ -60,6 +60,18 @@ per class (rounded up) are free after the entries ahead are set aside.
 Measured peaks near the pool's size would otherwise hold a PR for as long as any other run is
 in flight. The admission prints one line naming the wait and the free count.
 
+**Head guard.** Runners free one at a time and the host hands each to a job of a run it already
+holds (first in, first out), so a head needing several of a class may never see them free at once
+— and every entry behind it that needs the class waits on the runners set aside for it
+(2026-09-26: ``head T-0356 waits — heavy 0 free, needs 4`` for 1h45). The head of the line
+(:func:`head_of`: the first entry the fit holds and the ceiling does not) that has waited *at the
+head* (``head_since``) longer than ``ci.queue.head_wait_max_min`` (default 20) minutes is admitted
+whatever is free: the host queues its jobs behind the current ones and it holds its place there.
+The entry behind it starts its own clock only then, so admissions never cascade. Priority order and
+the exemptions are unchanged. One line: ``ci queue: task/T-0356 admitted after 21 min at the head
+(starvation guard)``; the status row names the head's wait in line (``head T-0356 waits 105 min —
+…``).
+
 **Draft PRs.** A branch whose PR is a draft is parked by its owner: it never enters the line,
 never gets a start, and is never set aside as demand ahead of others — :func:`admit` with
 ``draft`` refuses it and drops its entries, and the lane drops a draft branch's entries every
@@ -164,6 +176,7 @@ turns it off.
         trunk_escalate_min: 40  # a required trunk job queued longer: competing runs go too
         s1_wait_min: 5    # an S1 PR run's required job queued longer gets relief like the trunk
         pr_wait_min: 45   # an ordinary PR start waiting longer starts on half its expected jobs
+        head_wait_max_min: 20  # the head of the line waiting longer at the head starts anyway
         workflows: {pr: checks.yml, trunk: checks.yml, batch: batch.yml}  # default ci.workflow
         light_paths: ['docs/**', '*.md']  # a PR touching only these is sized as a light run
         estimate: {heavy: {full: 12, light: 4}}  # overrides the measure per class (and type)
@@ -195,7 +208,7 @@ KINDS = ('pr', 'trunk', 'batch', 'deploy')
 MODES = ('on', 'dry-run', 'off')
 FIELDS = ('mode', 'history', 'workflows', 'trunk_wait_min', 'trunk_escalate_min', 'pr_wait_min',
           'light_paths', 'estimate', 'relief_exempt_paths', 's1_wait_min', 'dedupe_push',
-          'dedupe_exempt_branches')
+          'dedupe_exempt_branches', 'head_wait_max_min')
 #: the branches whose ``push`` runs are never cancelled as duplicates of a PR run
 DEFAULT_DEDUPE_EXEMPT = ('train/*', 'release/*')
 #: a run's type: ``light`` when its PR changed only light paths, else ``full``
@@ -211,6 +224,7 @@ DEFAULT_HISTORY = 10
 DEFAULT_TRUNK_WAIT_MIN = 20
 DEFAULT_S1_WAIT_MIN = 5
 DEFAULT_PR_WAIT_MIN = 45
+DEFAULT_HEAD_WAIT_MAX_MIN = 20
 #: a run the relief cancelled and could not re-run in this long is dropped from the file
 RELIEF_TTL_S = 24 * 60 * 60
 #: an entry not asked about again in this long has left the line (its caller moved on)
@@ -340,6 +354,14 @@ def pr_wait_min(product):
     return v if ok else DEFAULT_PR_WAIT_MIN
 
 
+def head_wait_max_min(product):
+    """``ci.queue.head_wait_max_min``: minutes the head of the line waits at the head before it
+    is admitted whatever is free (default 20)."""
+    v = _qcfg(product).get('head_wait_max_min')
+    ok = isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+    return v if ok else DEFAULT_HEAD_WAIT_MAX_MIN
+
+
 def dedupe_push(product):
     """``ci.queue.dedupe_push``: cancel a branch push run a PR run covers (default on)."""
     v = _qcfg(product).get('dedupe_push')
@@ -440,7 +462,8 @@ def config_problems(ci):
     if q.get('mode') is not None and str(q['mode']).strip().lower() not in MODES \
             and q['mode'] is not True and q['mode'] is not False:
         out.append(('ci.queue.mode', f"must be one of {', '.join(MODES)}, not {q['mode']!r}"))
-    for k in ('trunk_wait_min', 'trunk_escalate_min', 'pr_wait_min', 's1_wait_min'):
+    for k in ('trunk_wait_min', 'trunk_escalate_min', 'pr_wait_min', 's1_wait_min',
+              'head_wait_max_min'):
         w = q.get(k)
         if w is not None and (isinstance(w, bool) or not isinstance(w, (int, float)) or w <= 0):
             out.append((f'ci.queue.{k}', f'must be a number of minutes > 0, not {w!r}'))
@@ -1018,6 +1041,29 @@ def starved(entry, now, wait_min):
     return _age(entry.get('since'), now) > wait_min * 60
 
 
+#: the head guard's ``why`` starts so (:func:`decide`)
+HEAD_GUARD = 'admitted after'
+
+
+def head_of(order, entries, skip=()):
+    """The head of the line: the first entry of ``order`` the runner fit holds
+    (:func:`fit_applies`) that the ceiling does not hold now (``skip``); None when none."""
+    return next((k for k in order if k not in skip and fit_applies(entries.get(k))), None)
+
+
+def head_wait_s(entry, now):
+    """Seconds ``entry`` has waited at the head of the line: from ``head_since`` (stamped when
+    it became the head), else from ``since`` (a queue file from before the head was recorded)."""
+    entry = entry or {}
+    return _age(entry.get('head_since') or entry.get('since'), now)
+
+
+def wait_text(entry, now):
+    """``105 min``: how long ``entry`` has waited in line; '' when unknown."""
+    age = _age((entry or {}).get('since'), now) if now is not None else math.inf
+    return '' if age == math.inf else f'{max(0, int(age // 60))} min'
+
+
 def ceiling_held(order, entries, ceiling=None, inflight=None, admitted=0):
     """The entries of ``order`` the ceiling holds now (batch starts at or above it): they cannot
     start whatever is free, so a PR behind one is never held for the runners it would take."""
@@ -1027,7 +1073,7 @@ def ceiling_held(order, entries, ceiling=None, inflight=None, admitted=0):
 
 
 def decide(key, order, entries, needs_of, free, ceiling=None, inflight=None, admitted=0,
-           now=None, pr_wait_min=None):
+           now=None, pr_wait_min=None, head_wait_max_min=None):
     """Pure: may ``key`` start now? ``(ok, why)``. ``order`` is the line; ``needs_of(key)`` the
     entry's ``{class: jobs}``; ``free`` the free slots per class (None: unknown — no runner
     check); ``ceiling``/``inflight`` the CI ceiling and runs in flight (None: no ceiling);
@@ -1035,7 +1081,11 @@ def decide(key, order, entries, needs_of, free, ceiling=None, inflight=None, adm
     (:func:`ceiling_applies`); the runner fit a batch or an ordinary PR start
     (:func:`fit_applies`): an S1, hotfix, trunk or deploy start always goes. An
     ordinary PR start waiting past ``pr_wait_min`` (at ``now``) fits on half its expected jobs
-    per class; that admission's ``why`` names the guard (the only admission with a ``why``)."""
+    per class; that admission's ``why`` names the guard. The head of the line (:func:`head_of`)
+    that has waited at the head past ``head_wait_max_min`` is admitted whatever is free: runners
+    free one at a time and go to jobs of runs already on the host, so a head that needs several
+    would never see them free at once — the host queues its jobs behind theirs, and it holds
+    its place there. That ``why`` starts :data:`HEAD_GUARD`."""
     e = entries.get(key)
     if not fit_applies(e):
         return True, ''
@@ -1047,6 +1097,11 @@ def decide(key, order, entries, needs_of, free, ceiling=None, inflight=None, adm
     short = shortfall(key, order, needs_of, free, skip=skip)
     if not short:
         return True, ''
+    if (head_wait_max_min is not None and now is not None
+            and key == head_of(order, entries, skip)):
+        waited = head_wait_s(e, now)
+        if waited != math.inf and waited > head_wait_max_min * 60:
+            return True, f'{HEAD_GUARD} {int(waited // 60)} min at the head (starvation guard)'
     if starved(e, now, pr_wait_min) and not shortfall(key, order, needs_of, free, half=True,
                                                       skip=skip):
         waited = _dur(_age((e or {}).get('since'), now))
@@ -1215,6 +1270,25 @@ class Queue:
             save(self.product.name, self.data)
         return n
 
+    def _mark_head(self):
+        """Stamp ``head_since`` on the head of the line (:func:`head_of`) when it becomes the
+        head, and clear it on every other entry: the head guard counts the wait *at the head*,
+        so the entry behind an admitted head starts its own clock then and never follows it in
+        on its wait in line. A file that never recorded a head (``head``, a file from before the
+        guard) counts the head's wait from ``since``."""
+        entries = self.data['entries']
+        head = head_of(line_order(entries), entries)
+        for k, e in entries.items():
+            if k != head:
+                e.pop('head_since', None)
+        if head is None:
+            return
+        e = entries[head]
+        if self.data.get('head') != head or not e.get('head_since'):
+            first = 'head' not in self.data
+            e['head_since'] = (e.get('since') if first else None) or _iso(self.now)
+        self.data['head'] = head
+
     def admit(self, key, kind, item=None, prio=OTHER, label='other', workflow=None, run=FULL):
         """May the start ``key`` go now? Enqueues it (keeping its place), decides, and on
         admission moves it to ``started``. A hold prints its one line. ``run``: the run type
@@ -1228,17 +1302,23 @@ class Queue:
                  run=run if run in RUN_TYPES else FULL, seen=_iso(self.now))
         entries[key] = e
         order = line_order(entries)
+        self._mark_head()
         self._read_host()
         needs = {k: self.entry_needs(entries[k]) for k in order}
         free = self.free(kind)
         ok, why = decide(key, order, entries, needs.get, free, self.ceiling(),
                          self._inflight, self.admitted_here, now=self.now,
-                         pr_wait_min=pr_wait_min(self.product))
+                         pr_wait_min=pr_wait_min(self.product),
+                         head_wait_max_min=head_wait_max_min(self.product))
         pos = order.index(key) + 1
         if ok:
-            if why:                 # the starvation guard: one line naming the wait
+            if why.startswith(HEAD_GUARD):      # the head guard: one line naming the wait
+                branch = key.split(':', 1)[1] if ':' in key else e['item']
+                self.out(f'ci queue: {branch} {why}')
+            elif why:               # the PR starvation guard: one line naming the wait
                 self.out(f"ci queue: {e['item']} starts — {why} ({label}, {_ordinal(pos)} in line)")
             entries.pop(key, None)
+            self._mark_head()
             self.data['started'].append({'key': key, 'at': _iso(self.now), 'needs': needs[key]})
             self.admitted_here += 1
             decision = Decision(True, '')
@@ -1837,7 +1917,8 @@ def live_line(product, source=None, inflight=None, now=None):
     line.inflight = q._inflight
     line.decisions = [(k, *decide(k, order, entries, line.needs.get,
                                   q.free(entries[k].get('kind')), line.ceiling,
-                                  line.inflight, now=q.now, pr_wait_min=pr_wait_min(product)))
+                                  line.inflight, now=q.now, pr_wait_min=pr_wait_min(product),
+                                  head_wait_max_min=head_wait_max_min(product)))
                       for k in order]
     return line
 
@@ -1871,7 +1952,7 @@ def status_clause(product, now=None, inflight=None, ceiling=None, source=None):
         key, ok, why = line.decisions[0]
         head = line.entries[key]
         pos = f" ({head.get('label') or 'other'}, 1st in line)"
-        said = 'would start' if ok else f'waits — {why}'
+        said = 'would start' if ok else f'{_waits(head, line.queue.now)} — {why}'
         return f"ci queue {len(line.order)}{tag}, head {head.get('item')} {said}{pos}"
     return _snapshot_clause(product, now, inflight, ceiling, tag)
 
@@ -1906,7 +1987,14 @@ def _snapshot_clause(product, now, inflight, ceiling, tag):
             why = f"{head.get('item')} waits — the ci ceiling has room now, asked again next tick{pos}"
         else:
             why = f"{head.get('item')} waits — {ceiling_reason(inflight, ceiling)}{pos}"
+    why = why.replace(' waits — ', f' {_waits(head, now or _now())} — ', 1)
     return f'ci queue {len(entries)}{tag}, head {why}'
+
+
+def _waits(entry, now):
+    """``waits 105 min``: the head's hold, with how long it has waited in line."""
+    waited = wait_text(entry, now)
+    return f'waits {waited}' if waited else 'waits'
 
 
 def header(name, m, waiting):

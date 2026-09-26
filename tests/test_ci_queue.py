@@ -1335,7 +1335,7 @@ class TestOneCount(Base):
         with mock.patch('subprocess.run', side_effect=FakeGh(inflight=5)):
             cell = status.capacity_cell({}, p)
         self.assertIn('ci 5 runs in flight (batch starts below 4 — batch waits)', cell)
-        self.assertIn('head batch waits — at the ci ceiling (5 runs in flight; batch '
+        self.assertIn('head batch waits 0 min — at the ci ceiling (5 runs in flight; batch '
                       'starts below 4) (other, 1st in line)', cell)
         self.assertNotIn('4 runs in flight', cell)
         self.assertNotIn('4/4', cell)
@@ -1398,7 +1398,7 @@ class TestModes(Base):
         self.admit(self.queue(p, busy), 'pr:a', 'T-0500')
         self.admit(self.queue(p, busy), 'pr:b', 'T-0341')
         self.assertEqual(ci_queue.status_clause(p, now=self.t0, source=self.src(p, busy)),
-                         'ci queue 2, head T-0341 waits — heavy 0 free, needs 3 '
+                         'ci queue 2, head T-0341 waits 0 min — heavy 0 free, needs 3 '
                          '(Feature, 1st in line)')
 
     def view(self, p, gh):
@@ -1423,7 +1423,7 @@ class TestModes(Base):
             self.assertIn(f'1. T-0341 [pr, Feature, full run, since', view[2])
             self.assertTrue(view[2].endswith(said), view[2])
             row = ci_queue.status_clause(p, source=self.src(p, gh))
-            self.assertEqual(row, f"ci queue 1, head T-0341 {said.replace('waits:', 'waits —')} "
+            self.assertEqual(row, f"ci queue 1, head T-0341 {said.replace('waits:', 'waits 0 min —')} "
                                   f"(Feature, 1st in line)")
             self.assertNotIn('as of tick', row)
 
@@ -1469,7 +1469,7 @@ class TestModes(Base):
                       ci_queue.status_clause(dry, source=self.src(dry, gh)))
         on = product(queue={'mode': 'on'})
         row = ci_queue.status_clause(on, source=self.src(on, gh))
-        self.assertTrue(row.startswith('ci queue 1, head T-0500 waits — heavy 0 free'), row)
+        self.assertTrue(row.startswith('ci queue 1, head T-0500 waits 0 min — heavy 0 free'), row)
         self.assertNotIn('dry-run', row)
 
     def test_an_unreadable_host_shows_the_snapshot_dated(self):
@@ -1479,7 +1479,7 @@ class TestModes(Base):
         stamp = datetime.datetime.fromtimestamp(
             os.path.getmtime(ci_queue._path('p'))).strftime('%H:%M')
         self.assertEqual(ci_queue.status_clause(p, source=self.src(p, DeadGh())),
-                         f'ci queue 1 (as of tick {stamp}), head T-0341 waits — heavy 0 free, '
+                         f'ci queue 1 (as of tick {stamp}), head T-0341 waits 0 min — heavy 0 free, '
                          f'needs 3 (Feature, 1st in line)')
 
     def test_the_row_and_the_queue_line_read_one_estimate(self):
@@ -1497,10 +1497,10 @@ class TestModes(Base):
         data['expect']['ci.yml']['needs'] = {'heavy': 2, 'light': 1}
         ci_queue.save('p', data)
         row = ci_queue.status_clause(p, now=self.t0, source=self.src(p, busy))
-        self.assertIn('head T-0341 waits — heavy 0 free, needs 2 (Feature, 1st in line)', row)
+        self.assertIn('head T-0341 waits 0 min — heavy 0 free, needs 2 (Feature, 1st in line)', row)
         # the snapshot, when the host is unreadable, re-states the hold from the same estimate
         row = ci_queue.status_clause(p, now=self.t0, source=self.src(p, DeadGh()))
-        self.assertIn('head T-0341 waits — heavy 0 free, needs 2 (Feature, 1st in line)', row)
+        self.assertIn('head T-0341 waits 0 min — heavy 0 free, needs 2 (Feature, 1st in line)', row)
         q = self.queue(p, busy, minutes=1)
         self.assertFalse(self.admit(q, 'pr:a', 'T-0341').admitted)
         self.assertEqual(self.lines[-1].split(' — ', 1)[1].split(' (')[0],
@@ -1586,7 +1586,7 @@ class TestSubLabels(Base):
 
 class TestStarvationGuard(Base):
     def test_a_pr_waiting_past_pr_wait_min_starts_on_half_its_expected_jobs(self):
-        p = product()                              # expects heavy 3, light 1
+        p = product(queue={'head_wait_max_min': 120})   # expects heavy 3, light 1; the head
         gh = FakeGh(busy={'h1'})                  # heavy 2 free: short of 3, but ceil(3/2) = 2
         d = self.admit(self.queue(p, gh), 'pr:task/T-0500', 'T-0500')
         self.assertFalse(d.admitted)
@@ -1842,3 +1842,111 @@ class TestDraft(Base):
         lane.Lane.advance(fake, dict(f, prev=prev, head='a' * 40, mode='pr',
                                      pr=dict(f['pr'], head='a' * 40)))
         self.assertEqual([x['branch'] for x in forgot], ['cloud/direct-F-0112'])
+
+
+class TestHeadStarvation(Base):
+    """2026-09-26, a product: ``head T-0356 waits — heavy 0 free, needs 4`` from 18:57 to 20:42.
+    Heavy runners free one at a time and the host hands each to a job of a run already
+    dispatched (its own FIFO), so ``free >= need`` is never true for the head, and everything
+    behind it that needs the class waits on the runners set aside for it."""
+
+    def gh(self):
+        return FanoutGh(busy={f'h{i}' for i in range(1, 12)})   # one heavy runner free
+
+    def replay(self, p, until, step=5):
+        """Every tick, the head (Feature) and an entry behind it ask again; one heavy runner is
+        free at each, taken before the next tick by an in-flight run. ``{minute: admitted}``."""
+        out = {}
+        for m in range(0, until + 1, step):
+            q = self.queue(p, self.gh(), minutes=m)
+            head = self.admit(q, 'pr:task/T-0341', 'T-0341')
+            behind = self.admit(q, 'pr:task/T-0500', 'T-0500')
+            out[m] = (head.admitted, behind.admitted)
+            if head.admitted:
+                break
+        return out
+
+    def test_without_the_guard_the_head_never_starts(self):
+        p = fanout_product(queue={'estimate': {'heavy': 4, 'light': 0}, 'head_wait_max_min': 10_000})
+        got = self.replay(p, 105)
+        self.assertEqual(set(got.values()), {(False, False)})   # 105 minutes, nothing starts
+        self.assertIn('ci queue: T-0341 waits — heavy 1 free, needs 4 (Feature, 1st in line)',
+                      self.lines)
+
+    def test_the_head_is_admitted_past_head_wait_max_min_and_not_before(self):
+        p = fanout_product(queue={'estimate': {'heavy': 4, 'light': 0}})       # default 20
+        self.assertEqual(ci_queue.head_wait_max_min(p), 20)
+        got = self.replay(p, 60)
+        self.assertEqual([m for m, (h, _b) in got.items() if h], [25])
+        self.assertTrue(all(not h for m, (h, _b) in got.items() if m <= 20))
+        self.assertIn('ci queue: task/T-0341 admitted after 25 min at the head (starvation guard)',
+                      self.lines)
+        entries = ci_queue.load('p')['entries']
+        self.assertNotIn('pr:task/T-0341', entries)
+        # the next head's clock starts when it becomes the head, not when it entered the line
+        self.assertEqual(entries['pr:task/T-0500'].get('head_since'),
+                         ci_queue._iso(self.t0 + datetime.timedelta(minutes=25)))
+        q = self.queue(p, self.gh(), minutes=40)
+        self.assertFalse(self.admit(q, 'pr:task/T-0500', 'T-0500').admitted)
+        q = self.queue(p, self.gh(), minutes=46)
+        self.assertTrue(self.admit(q, 'pr:task/T-0500', 'T-0500').admitted)
+
+    def test_only_the_head_by_priority_is_guarded(self):
+        """An older S2 entry behind a younger Feature is not the head: it never jumps the line,
+        however long it has waited."""
+        p = fanout_product(queue={'estimate': {'heavy': 4, 'light': 0}})
+        self.assertFalse(self.admit(self.queue(p, self.gh()), 'pr:old', 'B-0008').admitted)
+        self.assertFalse(self.admit(self.queue(p, self.gh(), minutes=10), 'pr:feat',
+                                    'T-0341').admitted)
+        q = self.queue(p, self.gh(), minutes=25)          # the S2 waited 25, the Feature 15
+        self.assertFalse(self.admit(q, 'pr:old', 'B-0008').admitted)
+        self.assertIn('(S2, 2nd in line)', self.lines[-1])
+        self.assertFalse(self.admit(q, 'pr:feat', 'T-0341').admitted)
+        q = self.queue(p, self.gh(), minutes=31)
+        self.assertFalse(self.admit(q, 'pr:old', 'B-0008').admitted)
+        self.assertTrue(self.admit(q, 'pr:feat', 'T-0341').admitted)
+        self.assertIn('ci queue: feat admitted after 21 min at the head (starvation guard)',
+                      self.lines)
+        # the S2 is the head now, its clock started at 31: no cascade
+        self.assertFalse(self.admit(self.queue(p, self.gh(), minutes=35), 'pr:old',
+                                    'B-0008').admitted)
+
+    def test_a_queue_file_from_before_the_guard_counts_the_wait_in_line(self):
+        """No head recorded yet (the file predates the guard): the head that has waited 105
+        minutes is admitted on the first tick."""
+        p = fanout_product(queue={'estimate': {'heavy': 4, 'light': 0}})
+        self.assertFalse(self.admit(self.queue(p, self.gh()), 'pr:task/T-0356',
+                                    'T-0341').admitted)
+        data = ci_queue.load('p')
+        data.pop('head', None)
+        for e in data['entries'].values():
+            e.pop('head_since', None)
+        ci_queue.save('p', data)
+        for m in (25, 50, 75, 100):                     # the lane keeps asking every tick
+            e = ci_queue.load('p')
+            e['entries']['pr:task/T-0356']['seen'] = ci_queue._iso(
+                self.t0 + datetime.timedelta(minutes=m))
+            ci_queue.save('p', e)
+        self.assertTrue(self.admit(self.queue(p, self.gh(), minutes=105), 'pr:task/T-0356',
+                                   'T-0341').admitted)
+        self.assertIn('ci queue: task/T-0356 admitted after 105 min at the head '
+                      '(starvation guard)', self.lines)
+
+    def test_the_status_names_the_heads_wait(self):
+        p = fanout_product(queue={'estimate': {'heavy': 4, 'light': 0}})
+        self.admit(self.queue(p, self.gh()), 'pr:task/T-0341', 'T-0341')
+        self.admit(self.queue(p, self.gh(), minutes=15), 'pr:task/T-0341', 'T-0341')
+        src = ci_queue.GitHubSource(p, run=self.gh())
+        now = self.t0 + datetime.timedelta(minutes=15)
+        self.assertEqual(ci_queue.status_clause(p, now=now, source=src),
+                         'ci queue 1, head T-0341 waits 15 min — heavy 1 free, needs 4 '
+                         '(Feature, 1st in line)')
+
+    def test_config(self):
+        self.assertEqual(ci_queue.head_wait_max_min(fanout_product(
+            queue={'head_wait_max_min': 7})), 7)
+        self.assertEqual(ci_queue.head_wait_max_min(fanout_product()), 20)
+        for bad in (0, -1, 'x', True):
+            self.assertEqual(dict(ci_queue.config_problems(
+                {'queue': {'head_wait_max_min': bad}})).keys(), {'ci.queue.head_wait_max_min'})
+        self.assertEqual(ci_queue.config_problems({'queue': {'head_wait_max_min': 30}}), [])

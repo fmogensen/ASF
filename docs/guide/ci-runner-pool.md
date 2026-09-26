@@ -208,6 +208,14 @@ queue on the host before any runner shows busy. **Starvation guard:** an ordinar
 has waited longer than `ci.queue.pr_wait_min` minutes (default 45) starts once half its expected
 jobs per class (rounded up) are free, with one line:
 `ci queue: F-0112 starts — starvation guard — waited 1h05m (> 45m), heavy 4 free, needs 8; half is free`.
+**Head guard:** runners free one at a time and the host hands each to a job of a run it already
+holds, so a head needing several runners of a class may never see them free at once — and
+everything behind it that needs the class waits too. The head of the line that has waited *at the
+head* longer than `ci.queue.head_wait_max_min` minutes (default 20) is admitted whatever is free;
+the host queues its jobs behind the current ones, where it holds its place. The entry behind it
+starts its own clock only then, so admissions never cascade. One line:
+`ci queue: task/T-0356 admitted after 21 min at the head (starvation guard)`. The status row names
+the head's wait in line: `head T-0356 waits 105 min — heavy 0 free, needs 4 (Feature, 1st in line)`.
 
 **Order.** S1 and hotfix items first, then trunk runs (every deploy waits on a green trunk), then
 PRs of customer-facing Features (the Feature says `customer_facing: true`, or the branch touches
@@ -289,6 +297,7 @@ ci:
     trunk_wait_min: 20   # minutes a queued trunk run waits before runs ahead of it are cancelled
     trunk_escalate_min: 40   # a required trunk job queued longer: competing runs with jobs on runners go too
     pr_wait_min: 45      # minutes an ordinary PR start waits before it starts on half its jobs
+    head_wait_max_min: 20   # minutes the head of the line waits at the head before it starts anyway
     s1_wait_min: 5       # an S1 PR run's required job queued longer gets relief like the trunk
     workflows: {pr: checks.yml, trunk: checks.yml, batch: batch.yml}   # default: ci.workflow
     light_paths: ['docs/**', '*.md']   # a PR touching only these is sized as a light run
