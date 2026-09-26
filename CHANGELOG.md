@@ -2,6 +2,30 @@
 
 One entry per released version, newest first.
 
+## v0.1.17 — 2026-09-26
+
+### Bugs fixed
+
+- B-0002 `asf new` cannot type the fields a card needs, so every card must be rewritten after minting
+- B-0129 A PR check that also fails on the trunk is charged to the branch: corrections and adjudications burn on flaky trunk jobs
+
+### Improvements and hotfixes
+
+- fix(status): the Capacity row's CI queue clause is computed live, as asf ci queue computes it
+- fix(hooks): a worker's commit-msg signs the commit off under commit.signoff
+- fix(lane): a red DCO check is repaired by the lane — the unsigned commits signed off, trees unchanged
+- fix(lane): a branch rewrite touches only the branch's own commits; no factory write reaches the trunk
+- fix(harvest): a branch at the trunk tip is landed only when its item's work is on the trunk
+- fix(ci-queue): a job counts once, in its runner's class; a starved PR starts on half its jobs
+- fix(ci-queue): the ceiling holds batch starts only; dry-run is read from the product file
+- fix(lane): a red CI check hands back its link and failing lines; adjudicate sees the hold
+- fix(deploy): a skipped required job is never green; a run-level success never stands in for its jobs
+- fix(lane): auto-merge needs every required check success on the head
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.17"`
+
 ## v0.1.16 — 2026-09-25
 
 ### Bugs fixed
