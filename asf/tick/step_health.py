@@ -158,6 +158,7 @@ def run(ctx, out=print, runtime_fn=_runtime):
     product = ctx.product
     items = health_mod.record_items(product)
     found = health_mod.health(product, fix=True, out=out, items=items)
+    reap_worktrees(ctx, out=out)
     file_rulings(ctx, out=out)  # B-0064
     widen_footprints(ctx, items, out=out)
     stalled = stall_mod.stall(product, out=out)
@@ -172,6 +173,19 @@ def run(ctx, out=print, runtime_fn=_runtime):
     ci_trials(ctx, out=out)
     branch_retention(ctx, items, out=out)
     return 0
+
+
+def reap_worktrees(ctx, out=print):
+    """The worktree reaper (:mod:`asf.workers.worktrees`): ended sessions' worktrees whose work
+    is on origin or the trunk are removed, within the cap of live sessions +
+    ``worker_pool.worktree_buffer``. One line when it reaps; never raised — the next tick
+    reaps again."""
+    from asf.workers import worktrees
+    try:
+        return worktrees.reap(ctx.product, out=out)
+    except Exception as e:  # noqa: BLE001 — a reap never stops a tick
+        out(f'worktrees: skipped — {type(e).__name__}: {e}')
+        return None
 
 
 def branch_retention(ctx, items, out=print):

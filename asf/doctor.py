@@ -776,10 +776,24 @@ def run(product_name):
         rows.append(('lane pushes', False, False, refused))
     for ok, detail in check_ab_pairs(product):
         rows.append(('ab pairs', False, ok, detail))
+    ok, detail = check_worktrees(product)
+    rows.append(('worktrees', False, ok, detail))
     branches = check_branches(product)
     if branches:
         rows.append(('branches', False, branches[0], branches[1]))
     return rows
+
+
+def check_worktrees(product):
+    """``(ok, 'worktrees: N, X GB, R removable, …')`` — the worker worktrees now, their sizes and
+    what is removable as the tick's last reaper pass recorded them
+    (:func:`asf.workers.worktrees.doctor_line`), with the product's pnpm store when it has one.
+    Reads a state file; measures nothing."""
+    from asf.workers import worktrees
+    try:
+        return worktrees.doctor_line(product)
+    except (OSError, ValueError) as e:
+        return False, f'worktrees: unreadable ({e})'
 
 
 def check_branches(product):
