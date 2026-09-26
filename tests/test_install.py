@@ -1553,7 +1553,7 @@ class InstallScriptTest(unittest.TestCase):
                       r.stderr)
         self.assertIn('install: NEEDS OPERATOR: clock(s) still not loaded after retrying the '
                       'bootstrap: asf.demo.record-health-wave-prs-harvest', r.stderr)
-        self.assertIn('/plugin install asf@asf', r.stdout)  # step 5 still ran
+        self.assertIn('/plugin install asf@asf', r.stdout)  # step 6 still ran
 
 
 if __name__ == '__main__':
