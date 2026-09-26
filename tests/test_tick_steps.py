@@ -320,7 +320,7 @@ class WaveStepTests(StepsTestCase):
             self.built.append((row.item_id, sorted(index), inflight, repo_facts))
             return _brief('fix-bug', row.item_id)
 
-        def wave(product, rows, n, brief_fn=None, out=print):
+        def wave(product, rows, n, brief_fn=None, out=print, **_kw):
             self.waved.append(([(r.job, r.item, r.state, r.action, r.severity, r.model) for r in rows],
                                n, [brief_fn(r) for r in rows]))
             out(f'launched {rows[0].job:<24} {rows[0].item:<10} → acct-a (opus) pid 1')
@@ -365,6 +365,56 @@ class WaveStepTests(StepsTestCase):
         # the record is public: an event never carries an account name (B-0023)
         self.assertNotIn('account', launch_ev)
         self.assertEqual(ctx.counts['launches'], 1)
+
+    def test_an_s1_groomed_mid_wave_comes_back_through_the_waves_refresh(self):
+        # 2026-09-26: S1 B-1382 was groomed at 18:18 while the 18:11 wave was still launching; the
+        # wave's rows were fixed at its start, so the S1 waited the whole wave and the next tick's
+        # record and health with seats free. The wave re-reads the record for a new S1.
+        new_row = feeder_rows.Row(0, 'BUG → FIX', 'B-0009', '', 'would launch fix-b-0009 (Opus)',
+                                  'fix-bug', 'fix/B-0009', 'S1 open')
+
+        def plan(index, *a, **kw):
+            return self.rows + ([new_row] if 'B-0009' in index else [])
+
+        def groom_b0009():
+            """Another hand grooms the S1 into the record while the wave runs."""
+            _git(['pull', '-q', 'origin', 'main'], self.operator)
+            with open(os.path.join(self.operator, 'index.json')) as f:
+                idx = json.load(f)
+            idx['items']['B-0009'] = {'id': 'B-0009', 'type': 'bug', 'title': 'a new S1',
+                                      'folder': 'bugs', 'severity': 'S1', 'state': 'New',
+                                      'decided': True}
+            with open(os.path.join(self.operator, 'index.json'), 'w') as f:
+                json.dump(idx, f)
+            _git(['add', '-A'], self.operator)
+            _git(['-c', 'user.email=o@example.com', '-c', 'user.name=o', 'commit', '-q', '-m',
+                  'groom B-0009'], self.operator)
+            _git(['push', '-q', 'origin', 'HEAD:main'], self.operator)
+
+        got = {}
+
+        def wave(product, rows, n, brief_fn=None, out=print, refresh=None, **_kw):
+            known = {r.job for r in rows}
+            got['before'] = refresh(set(known))
+            groom_b0009()
+            got['after'] = refresh(set(known))
+            got['briefs'] = [brief_fn(r) for r in got['after']]
+            got['again'] = refresh(known | {r.job for r in got['after']})
+            return [], []
+        ctx = self.ctx()
+        with mock.patch.object(feeder_rows, 'plan_rows', plan), \
+                mock.patch.object(step_wave, '_wave', wave):
+            step_wave.run(ctx, out=self.lines.append)
+        self.assertEqual(got['before'], [])
+        self.assertEqual([(r.job, r.item, r.severity) for r in got['after']],
+                         [('fix-bug-b-0009', 'B-0009', 'S1')])
+        self.assertTrue(got['after'][0].is_s1_fix)
+        self.assertEqual(got['briefs'], ['brief for B-0009\n'])
+        self.assertEqual(got['again'], [])      # each new S1 comes back once
+        self.assertIn('wave: B-0009 is S1 and new since the wave began — it launches in this '
+                      'wave', self.lines)
+        # the tick's clone keeps its own work: a fetch, never a reset
+        self.assertFalse(os.path.exists(os.path.join(ctx.record_root(), 'bugs', 'B-0009.md')))
 
     def test_the_lane_pass_pushes_after_the_launches(self):
         # a product's [step:wave] spent 786 s pushing lane refs (each through the product's pre-push
@@ -450,7 +500,7 @@ class WaveStepTests(StepsTestCase):
         # must hold even under load: the LOAD half of the guard alone lets one S1 row through.
         captured = []
 
-        def wave(product, rows, n, brief_fn=None, out=print):
+        def wave(product, rows, n, brief_fn=None, out=print, **_kw):
             captured.extend(rows)
             bypass = ' (S1: passes host load hold)' if rows[0].host_load_bypass else ''
             out(f'launched {rows[0].job:<24} {rows[0].item:<10} → acct-a (opus) pid 1{bypass}')
@@ -729,7 +779,7 @@ class AGatedRowGivesItsSlotBack(StepsTestCase):
         def build(product, row, index, inflight, repo_facts=None):
             return _brief(row.brief_kind, row.item_id)
 
-        def wave(product, rows, n, brief_fn=None, out=print):
+        def wave(product, rows, n, brief_fn=None, out=print, **_kw):
             self.launched += [r.job for r in rows]
             return [(r, {'model': 'opus'}) for r in rows], []
         for name, fn in (('_build', build), ('_wave', wave), ('lane_pass', lambda ctx, out, **_kw: {})):
@@ -791,7 +841,7 @@ class DemandIsTheReadyWork(StepsTestCase):
         def build(product, row, index, inflight, repo_facts=None):
             return _brief(row.brief_kind, row.item_id)
 
-        def wave(product, rows, n, brief_fn=None, out=print):
+        def wave(product, rows, n, brief_fn=None, out=print, **_kw):
             self.launched += [r.job for r in rows]
             return [(r, {'model': 'opus'}) for r in rows], []
         for name, fn in (('_build', build), ('_wave', wave), ('lane_pass', lambda ctx, out, **_kw: {})):
@@ -857,7 +907,7 @@ class AdjudicateLineTests(StepsTestCase):
         def build(product, row, index, inflight, repo_facts=None):
             return _brief(row.brief_kind, row.item_id)
 
-        def wave(product, rows, n, brief_fn=None, out=print):
+        def wave(product, rows, n, brief_fn=None, out=print, **_kw):
             self.launched += [r.job for r in rows]
             return [(r, {'model': 'opus'}) for r in rows], []
         for name, fn in (('_build', build), ('_wave', wave)):

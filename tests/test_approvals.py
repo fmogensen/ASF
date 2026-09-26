@@ -847,7 +847,7 @@ class TickRaiseTest(TickTestCase):
         ]
         waved = []
 
-        def wave(product, worker_rows, n, brief_fn=None, out=print):
+        def wave(product, worker_rows, n, brief_fn=None, out=print, **_kw):
             waved.extend(r.item for r in worker_rows)
             return [(worker_rows[0], {'model': 'opus'})], []
 
@@ -869,7 +869,7 @@ class TickRaiseTest(TickTestCase):
         ]
         waved = []
 
-        def wave(product, worker_rows, n, brief_fn=None, out=print):
+        def wave(product, worker_rows, n, brief_fn=None, out=print, **_kw):
             waved.extend(r.item for r in worker_rows)
             return [(worker_rows[0], {'model': 'opus'})], []
 

@@ -1018,6 +1018,57 @@ class TestWaveLaunchesConcurrently(Home):
         self.assertEqual(len(launched), 3)
         self.assertEqual(max(peak), 1)
 
+    def test_an_s1_minted_mid_wave_launches_in_the_same_wave_ahead_of_the_rest(self):
+        # the wave's rows were fixed at its start; an S1 groomed while it launches goes next
+        calls, minted = [], []
+
+        def spawn_fn(product, row, acct, brief, runtime=None, cfg=None):
+            calls.append(row.job)
+            minted.append(True)             # the S1 lands in the record during this launch
+            return {'job': row.job, 'model': 'opus', 'pid': 1}
+
+        asked = []
+
+        def refresh(known):
+            asked.append(set(known))
+            if minted and not any('fix-b-0009' in k for k in asked[:-1]):
+                return [s1_row('fix-b-0009', item='B-0009'),
+                        feature_row('spec-0')]  # a job the wave has: never twice
+            return []
+
+        cfg = json.loads(json.dumps(self.cfg))
+        cfg['worker_pool']['launch_concurrency'] = 1
+        rows = [feature_row(f'spec-{i}', item=f'F-000{i}') for i in range(3)]
+        acct = pool_mod.Account('acct-a', role='local', cap=8)
+        pool = pool_mod.Pool([acct], quota_source=quota_mod.FakeQuotaSource({}))
+        with mock.patch.object(wave_mod, 'REFRESH_S', 0):
+            launched, waits = wave_mod.wave(self.product, rows, 3, pool=pool, cfg=cfg,
+                                            out=lambda s: None, spawn_fn=spawn_fn,
+                                            refresh=refresh)
+        self.assertEqual(calls, ['spec-0', 'fix-b-0009', 'spec-1', 'spec-2'])
+        self.assertEqual(sorted(r.job for r, _ in launched),
+                         ['fix-b-0009', 'spec-0', 'spec-1', 'spec-2'])
+        self.assertEqual(waits, [])
+        self.assertIn('spec-0', asked[0])
+
+    def test_the_last_look_before_the_wave_ends_catches_an_s1(self):
+        minted = []
+
+        def spawn_fn(product, row, acct, brief, runtime=None, cfg=None):
+            minted.append(row.job)
+            return {'job': row.job, 'model': 'opus', 'pid': 1}
+
+        def refresh(known):
+            return [s1_row('fix-b-0009', item='B-0009')] if minted and 'fix-b-0009' not in known else []
+
+        acct = pool_mod.Account('acct-a', role='local', cap=8)
+        pool = pool_mod.Pool([acct], quota_source=quota_mod.FakeQuotaSource({}))
+        launched, waits = wave_mod.wave(self.product, [feature_row('spec-0')], 1, pool=pool,
+                                        cfg=self.cfg, out=lambda s: None, spawn_fn=spawn_fn,
+                                        refresh=refresh)
+        self.assertEqual([r.job for r, _ in launched], ['spec-0', 'fix-b-0009'])
+        self.assertEqual(waits, [])
+
     def test_id_ranges_reserved_from_threads_never_overlap(self):
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(8) as ex:

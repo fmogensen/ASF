@@ -73,7 +73,7 @@ class GroomOnOriginReachesThePlainTick(StepsTestCase):
                                          text='brief\n', model='Opus', add_dirs=[],
                                          id_ranges_needed=[])
 
-        def wave(product, rows, n, brief_fn=None, out=print):
+        def wave(product, rows, n, brief_fn=None, out=print, **_kw):
             self.waved += [r.job for r in rows]
             return [], []
         for name, fn in (('_build', build), ('_wave', wave)):

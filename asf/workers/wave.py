@@ -38,7 +38,8 @@ table could not be read, the wave prints the degraded-count line once, before th
 import json
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor
+from concurrent.futures import wait as futures_wait
 
 from asf import env
 from asf.workers import cloud as cloud_mod
@@ -105,7 +106,7 @@ def order(rows):
 
 
 def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_brief, out=print,
-         spawn_fn=None, local_hold='', cloud_runtime=None, cloud_ready=None):
+         spawn_fn=None, local_hold='', cloud_runtime=None, cloud_ready=None, refresh=None):
     """Returns ``(launched, waits)``: lists of ``(row, record)`` and ``(row, reason)``.
 
     ``local_hold`` (host pressure's reason) keeps every row off the local lane — never off the
@@ -120,7 +121,12 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
     prints ``cloud lane unready: <why> — local lane only`` once and takes no row.
 
     ``cloud.max_creates_per_tick`` (0: no limit) bounds the cloud launches one wave tries — each
-    holds the tick while it runs; the rows past it wait for the next tick."""
+    holds the tick while it runs; the rows past it wait for the next tick.
+
+    ``refresh(known_jobs)`` (the wave step's re-read of the record, :mod:`asf.tick.step_wave`)
+    returns rows that arrived since the wave began — an S1 minted mid-wave. It is asked every
+    :data:`REFRESH_S` while launches run and once more before the wave ends; its rows go ahead
+    of every row not yet decided and widen ``n`` by their count, so they launch in this wave."""
     cfg = spawn_mod.load_cfg() if cfg is None else cfg
     cloud = cloud_mod.settings(cfg, product)
     if cloud.on:
@@ -141,129 +147,180 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
     if getattr(pool, 'unreadable', ''):
         out(f'pool: sessions unreadable ({pool.unreadable}) — counting registered sessions only')
     workers = launch_concurrency(cfg)
-    pending = order(rows)
-    branches = {}          # branch → the job launching on it in this wave
-    idx = 0
-    while idx < len(pending):
-        # 1. the seats, decided serially in row order; each planned launch holds its seat
-        batch, said = [], []   # batch: planned launches; said: [row, wait reason | None]
-        while idx < len(pending):
-            row = pending[idx]
-            if len(launched) + len(batch) >= n:
-                if batch:          # a launch in flight may fail and free its seat: decide later
-                    break
-                reason = 'wave full'
-            elif (product.name, row.job) in running:
-                reason = 'already running'
-            elif _branch(product, row) in branches:
-                b = _branch(product, row)
-                reason = f'already running: branch {b} launches in this wave ({branches[b]})'
+    pending = order(rows)      # rows not decided yet, in the order they are decided
+    known = {r.job for r in rows}
+    branches = {}              # branch → the job launching on it in this wave
+    said = []                  # [row, reason] per decided row (reason None: a launch), in order
+    tentative = []             # said entries of rows that found no seat while launches ran
+    outcome, timings = {}, {}
+    inflight = {}              # future → (row, acct, lane, seat, entry)
+    raised = None
+    last_refresh = time.monotonic()
+
+    def fresh_rows():
+        """``refresh``'s new rows (an S1 minted since the wave began), each job once."""
+        nonlocal s1, n, last_refresh
+        last_refresh = time.monotonic()
+        try:
+            got = [r for r in (refresh(set(known)) or ()) if r.job not in known]
+        except Exception as e:  # noqa: BLE001 — a failed re-read keeps the wave as it is
+            out(f'wave: re-read for new S1 rows failed — {type(e).__name__}: {e}')
+            return []
+        for r in got:
+            known.add(r.job)
+        if got:
+            s1 = s1 or pool_mod.s1_open(got)
+            n += len(got)
+        return order(got)
+
+    def decide(row):
+        """``(acct, lane, rt, reason)`` for one row: a seat, or why it waits."""
+        nonlocal cloud_tries
+        if len(launched) + len(inflight) >= n:
+            return None, None, None, 'wave full'
+        if (product.name, row.job) in running:
+            return None, None, None, 'already running'
+        b = _branch(product, row)
+        if b in branches:
+            return None, None, None, (f'already running: branch {b} launches in this wave '
+                                      f'({branches[b]})')
+        lane, acct, creason, reason = 'local', None, '', ''
+        capped = cloud_open and bool(cloud_cap) and cloud_tries >= cloud_cap
+        cloud_now = cloud_open and not capped
+        first = cloud_now and cloud_mod.first(row, cloud)
+        if first:                           # cloud.default: the cloud lane before the local
+            acct, creason = pool.pick_cloud(row.kind, row.model, cloud)
+            if acct is not None:
+                lane = 'cloud'
+        if acct is None:
+            if local_hold:
+                acct, reason = None, f'held: {local_hold}'
             else:
-                lane, acct, creason = 'local', None, ''
-                capped = cloud_open and bool(cloud_cap) and cloud_tries >= cloud_cap
-                cloud_now = cloud_open and not capped
-                first = cloud_now and cloud_mod.first(row, cloud)
-                if first:                           # cloud.default: the cloud lane before the local
-                    acct, creason = pool.pick_cloud(row.kind, row.model, cloud)
-                    if acct is not None:
-                        lane = 'cloud'
-                if acct is None:
-                    if local_hold:
-                        acct, reason = None, f'held: {local_hold}'
-                    else:
-                        acct, reason = pool.pick_account(
-                            row.kind, row.model, is_fix=row.is_fix, s1_is_open=s1,
-                            lane=row.lane or ('local' if cloud.on else None))
-                    if acct is None and first:
-                        reason = f'{creason}; {reason}'
-                if acct is None and capped and cloud_mod.eligible(row, cloud):
-                    reason = (f'{reason}; cloud lane: {cloud_tries} launches this tick '
-                              f'(cloud.max_creates_per_tick)')
-                if acct is None and not first and cloud_now and cloud_mod.eligible(row, cloud):
-                    cacct, creason = pool.pick_cloud(row.kind, row.model, cloud)
-                    if cacct is not None:
-                        acct, lane = cacct, 'cloud'
-                    else:
-                        reason = f'{reason}; {creason}'
+                acct, reason = pool.pick_account(
+                    row.kind, row.model, is_fix=row.is_fix, s1_is_open=s1,
+                    lane=row.lane or ('local' if cloud.on else None))
+            if acct is None and first:
+                reason = f'{creason}; {reason}'
+        if acct is None and capped and cloud_mod.eligible(row, cloud):
+            reason = (f'{reason}; cloud lane: {cloud_tries} launches this tick '
+                      f'(cloud.max_creates_per_tick)')
+        if acct is None and not first and cloud_now and cloud_mod.eligible(row, cloud):
+            cacct, creason = pool.pick_cloud(row.kind, row.model, cloud)
+            if cacct is not None:
+                acct, lane = cacct, 'cloud'
+            else:
+                reason = f'{reason}; {creason}'
+        if acct is None:
+            return None, None, None, reason
+        rt = runtime
+        if lane == 'cloud':
+            rt = cloud_runtime or cloud_mod.lane_runtime(cloud, product)
+            cloud_tries += 1
+        return acct, lane, rt, ''
+
+    def settle(fut):
+        """One finished launch: its seat kept, or freed. True when a seat came free."""
+        nonlocal raised
+        row, acct, lane, seat, entry, _seq = inflight.pop(fut)
+        rec, err, secs = fut.result()
+        if err is None:
+            failures.clear(row.job)
+            if rec.get('model') != seat['model']:  # the seat carries the launch's own model
+                pool.untake(acct, **seat)
+                pool.take(acct, **dict(seat, model=rec.get('model')))
+            launched.append((row, rec))
+            url = rec.get('cloud_url') or rec.get('actions_run_name') or 'dispatched'
+            where = f'cloud {url}' if lane == 'cloud' else f"pid {rec.get('pid')}"
+            bypass = ' (S1: passes host load hold)' if getattr(row, 'host_load_bypass',
+                                                               False) else ''
+            outcome[id(entry)] = (None, f"launched {row.job:<24} {row.item:<10} → "
+                                        f"{acct.name} ({rec.get('model')}) {where}{bypass}")
+            timings[id(entry)] = f'launch {row.job}: setup {secs:.1f}s'
+            return False
+        pool.untake(acct, **seat)
+        running.discard((product.name, row.job))
+        branches.pop(_branch(product, row), None)
+        if not isinstance(err, spawn_mod.SpawnError):
+            raised = raised or err
+            outcome[id(entry)] = (None, '')
+        elif isinstance(err, spawn_mod.WorktreeBusy):
+            outcome[id(entry)] = (f'already running: {err}', None)  # a live run holds the item
+        else:
+            reason = str(err) if str(err).startswith('NEEDS OPERATOR') else f'spawn failed: {err}'
+            reason = failures.note(row.job, reason, getattr(err, 'clear', ''))
+            # None: reported already and nothing changed — a wait that says nothing
+            outcome[id(entry)] = ((f'spawn failed: {err}', '') if reason is None
+                                  else (reason, None))
+        return True
+
+    ex = ThreadPoolExecutor(max_workers=workers)
+    try:
+        while True:
+            # 1. the seats, decided serially in row order — only as a launch slot is free, so a
+            #    row that arrives mid-wave (an S1, ``refresh``) is decided ahead of the rest
+            while pending and raised is None and len(inflight) < workers:
+                if inflight and len(launched) + len(inflight) >= n:
+                    break                       # full for now: a launch in flight may fail
+                row = pending.pop(0)
+                acct, lane, rt, reason = decide(row)
+                entry = [row, reason]
+                said.append(entry)
                 if acct is not None:
-                    rt = runtime
-                    if lane == 'cloud':
-                        rt = cloud_runtime or cloud_mod.lane_runtime(cloud, product)
-                        cloud_tries += 1
                     seat = dict(model=_model(row, cfg), job=row.job, product=product.name,
                                 kind=row.kind, lane=lane if lane == 'cloud' else None)
                     pool.take(acct, **seat)     # held while the launch runs, freed if it fails
                     running.add((product.name, row.job))
                     branches[_branch(product, row)] = row.job
-                    batch.append((row, acct, lane, rt, seat))
-                    said.append([row, None])
-                    idx += 1
+                    entry[1] = None
+                    fut = ex.submit(_timed, spawn_fn, product, row, acct, brief_fn(row), rt, cfg)
+                    inflight[fut] = (row, acct, lane, seat, entry, len(said))
+                elif inflight and reason != 'wave full' and not reason.startswith('already'):
+                    tentative.append(entry)     # a launch in flight may fail and free a seat
+            if not inflight:
+                if raised is None and not pending and refresh is not None:
+                    pending.extend(fresh_rows())   # the last look before the wave ends
+                if raised is None and pending:
                     continue
-                if batch:
-                    # no seat while launches are in flight: one of them may fail and free one —
-                    # the row is decided again after them (``tentative``), as a serial wave would
-                    said.append([row, reason, 'tentative'])
-                    idx += 1
-                    continue
-            said.append([row, reason])
-            idx += 1
-        # 2. the launches' setup, concurrently: worktree, publish, install, cloud create
-        done = _launch_all(batch, lambda b: spawn_fn(product, b[0], b[1], brief_fn(b[0]),
-                                                     runtime=b[3], cfg=cfg), workers)
-        # 3. the outcomes
-        outcome, timings, raised, freed = {}, [], None, False
-        for (row, acct, lane, rt, seat), (rec, err, secs) in zip(batch, done):
-            if err is None:
-                failures.clear(row.job)
-                if rec.get('model') != seat['model']:  # the seat carries the launch's own model
-                    pool.untake(acct, **seat)
-                    pool.take(acct, **dict(seat, model=rec.get('model')))
-                launched.append((row, rec))
-                url = rec.get('cloud_url') or rec.get('actions_run_name') or 'dispatched'
-                where = f'cloud {url}' if lane == 'cloud' else f"pid {rec.get('pid')}"
-                bypass = ' (S1: passes host load hold)' if getattr(row, 'host_load_bypass',
-                                                                   False) else ''
-                outcome[row.job] = (None, f"launched {row.job:<24} {row.item:<10} → "
-                                          f"{acct.name} ({rec.get('model')}) {where}{bypass}")
-                timings.append(f'launch {row.job}: setup {secs:.1f}s')
-                continue
-            pool.untake(acct, **seat)
-            running.discard((product.name, row.job))
-            branches.pop(_branch(product, row), None)
-            freed = True
-            if not isinstance(err, spawn_mod.SpawnError):
-                raised = raised or err
-                outcome[row.job] = (None, '')
-            elif isinstance(err, spawn_mod.WorktreeBusy):
-                outcome[row.job] = (f'already running: {err}', None)  # a live run holds it
-            else:
-                reason = (str(err) if str(err).startswith('NEEDS OPERATOR')
-                          else f'spawn failed: {err}')
-                reason = failures.note(row.job, reason, getattr(err, 'clear', ''))
-                # None: reported already and nothing changed — a wait that says nothing
-                outcome[row.job] = ((f'spawn failed: {err}', '') if reason is None
-                                    else (reason, None))
-        again = []
+                break
+            # 2. the launches' setup runs concurrently; each one settles as it ends
+            done, _ = futures_wait(list(inflight), timeout=REFRESH_S, return_when=FIRST_COMPLETED)
+            freed = False
+            for fut in sorted(done, key=lambda f: inflight[f][5]):
+                freed = settle(fut) or freed
+            if freed and tentative:         # decided once more, as a serial wave would have
+                again = [e[0] for e in tentative]
+                for e in tentative:
+                    said.remove(e)
+                tentative.clear()
+                pending[:0] = again
+            if (refresh is not None and raised is None
+                    and time.monotonic() - last_refresh >= REFRESH_S):
+                pending[:0] = fresh_rows()
+    finally:
+        ex.shutdown(wait=True)
+        pos = {e[0].job: i for i, e in enumerate(said)}
+        launched.sort(key=lambda lr: pos.get(lr[0].job, len(pos)))   # row order, not end order
         for entry in said:
+            reason, line = outcome.get(id(entry), (entry[1], None))
             row = entry[0]
-            if len(entry) == 3 and freed and raised is None:
-                again.append(row)          # a seat came free: decided once more, next round
-                continue
-            reason, line = outcome.get(row.job, (entry[1], None))
             if reason is not None:
                 waits.append((row, reason))
-                line = f"waits    {row.job:<24} {row.item:<10} — {reason}" if line is None else line
+                if line is None:
+                    line = f"waits    {row.job:<24} {row.item:<10} — {reason}"
             if line:
                 out(line)
-        for line in timings:
-            out(line)
-        if raised is not None:
-            raise raised
-        pending[idx:idx] = again
+        for entry in said:
+            if id(entry) in timings:
+                out(timings[id(entry)])
+    if raised is not None:
+        raise raised
     if sample:
         headroom_mod.record_samples(dict(pool._usage))
     return launched, waits
 
+
+#: how often a running wave asks ``refresh`` for rows that arrived since it began
+REFRESH_S = 30
 
 #: launches whose setup runs at once when ``worker_pool.launch_concurrency`` is not set
 DEFAULT_LAUNCH_CONCURRENCY = 4
@@ -297,16 +354,11 @@ def _model(row, cfg):
         return row.model
 
 
-def _launch_all(batch, launch, workers):
-    """``[(record, error, seconds)]`` for ``batch``, in its order: each item through ``launch``,
-    up to ``workers`` at a time."""
-    def one(item):
-        started = time.monotonic()
-        try:
-            return launch(item), None, time.monotonic() - started
-        except Exception as e:  # noqa: BLE001 — the caller sorts a refusal from a fault
-            return None, e, time.monotonic() - started
-    if workers <= 1 or len(batch) <= 1:
-        return [one(item) for item in batch]
-    with ThreadPoolExecutor(max_workers=min(workers, len(batch))) as ex:
-        return list(ex.map(one, batch))
+def _timed(spawn_fn, product, row, acct, brief, runtime, cfg):
+    """``(record, error, seconds)`` of one launch — run on the wave's launch pool."""
+    started = time.monotonic()
+    try:
+        rec = spawn_fn(product, row, acct, brief, runtime=runtime, cfg=cfg)
+        return rec, None, time.monotonic() - started
+    except Exception as e:  # noqa: BLE001 — the wave sorts a refusal from a fault
+        return None, e, time.monotonic() - started

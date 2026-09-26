@@ -483,6 +483,71 @@ def push_deferred(ctx, out=print):
         out(f'lane: deferred pushes failed — {(str(e) or type(e).__name__).splitlines()[0]}')
 
 
+def fresh_index(root):
+    """``{id: item}`` of the record's ``index.json`` as origin holds it now — a fetch into the
+    record clone and a read of the fetched file, never a reset: the tick's own uncommitted work
+    in the clone stays (its push rebases onto what origin gained, :func:`asf.tick.shadow.push`).
+    None when it cannot be read."""
+    from asf.tick import shadow
+    import json
+    if subprocess.run(['git', '-C', root, 'fetch', '-q', 'origin'], capture_output=True,
+                      text=True).returncode != 0:
+        return None
+    branch = shadow._default_branch(root)
+    p = subprocess.run(['git', '-C', root, 'show', f'origin/{branch}:index.json'],
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        return None
+    try:
+        raw = json.loads(p.stdout)
+        return {k: v for k, v in raw['items'].items() if not v.get('removed')}
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def s1_ids(items):
+    return {i for i, v in items.items() if (v or {}).get('severity') == 'S1'}
+
+
+def s1_refresher(ctx, items, held, texts, kinds, capacity, out=print, index_fn=None):
+    """The wave's ``refresh`` (:func:`asf.workers.wave.wave`): an S1 item that reached the
+    record after the wave's plan was cut (groomed mid-wave) launches in this wave instead of
+    waiting a whole wave and the next tick's record and health. Each call re-reads the record
+    (:func:`fresh_index`); only an S1 id the wave has not seen yet re-runs the feeder over the
+    fresh index, and its launching rows come back as worker rows — each id once."""
+    root = ctx.record_root()
+    product = ctx.product
+    seen = s1_ids(items)
+    index_fn = index_fn or fresh_index
+
+    def refresh(known):
+        fresh = index_fn(root)
+        if not fresh:
+            return []
+        new = s1_ids(fresh) - seen
+        if not new:
+            return []
+        seen.update(new)
+        running = inflight(product)
+        planned, _dropped = gated_plan(fresh, product, running, capacity + len(new),
+                                       plan_inputs(product, root, fresh), out=lambda _l: None)
+        rows = []
+        for row in planned:
+            if row.item_id not in new or not row.launches or row.item_id in held:
+                continue
+            brief = _build(product, row, fresh, running,
+                           repo_facts=repo_facts(product, row.branch))
+            wrow = worker_row(row, brief, fresh)
+            if wrow.job in known:
+                continue
+            texts[wrow.job] = brief.text
+            kinds[wrow.job] = brief.kind
+            out(f'wave: {row.item_id} is S1 and new since the wave began — it launches in this wave')
+            rows.append(wrow)
+        return rows
+    return refresh
+
+
 def run(ctx, out=print):
     """The wave: plan and launch (:func:`launch`), then the lane pass's deferred pushes."""
     try:
@@ -593,8 +658,11 @@ def launch(ctx, out=print):
     if not worker_rows:
         out('wave: nothing to launch')
         return 0
+    # an S1 groomed while the wave launches goes in this wave — not under a host hold, whose
+    # one S1 bypass (above) is the most a loaded host takes
+    refresh = None if host_held else s1_refresher(ctx, items, held, texts, kinds, seats, out=out)
     launched, _waits = _wave(product, worker_rows, len(worker_rows),
-                             brief_fn=lambda r: texts[r.job], out=out,
+                             brief_fn=lambda r: texts[r.job], out=out, refresh=refresh,
                              **({'local_hold': local_hold} if local_hold else {}),
                              **({'cloud_ready': ready} if cloud.on else {}))
     for wrow, rec in launched:
