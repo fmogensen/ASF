@@ -29,6 +29,7 @@
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 
@@ -144,14 +145,140 @@ def branch_for(product, row):
 
 
 def _holding_worktree(repo, branch):
+    """The worktree that holds ``branch``: the one with it checked out, or — what ``git worktree
+    list`` shows only as *detached* — one with a rebase of it in progress (2026-09-26: a dead
+    run's stuck rebase held its branch, and ``worktree add -B`` failed every tick)."""
     out = _git(['worktree', 'list', '--porcelain'], repo)
     path = None
+    detached = []
     for line in out.splitlines():
         if line.startswith('worktree '):
             path = line[len('worktree '):]
         elif line == f'branch refs/heads/{branch}':
             return path
+        elif line == 'detached' and path:
+            detached.append(path)
+    for p in detached:
+        if _in_progress_head(p) == f'refs/heads/{branch}':
+            return p
     return None
+
+
+def _admin_dir(path):
+    """A linked worktree's admin dir (``<repo>/.git/worktrees/<name>``), read from its ``.git``
+    file; '' when there is none."""
+    try:
+        with open(os.path.join(path, '.git'), encoding='utf-8') as f:
+            head = f.read().strip()
+    except OSError:
+        return ''
+    if not head.startswith('gitdir: '):
+        return ''
+    d = head[len('gitdir: '):]
+    return d if os.path.isabs(d) else os.path.normpath(os.path.join(path, d))
+
+
+def _in_progress_head(path):
+    """The ref a rebase in progress in the worktree at ``path`` will land on, or ''."""
+    admin = _admin_dir(path)
+    for sub in ('rebase-merge', 'rebase-apply'):
+        try:
+            with open(os.path.join(admin, sub, 'head-name'), encoding='utf-8') as f:
+                return f.read().strip()
+        except OSError:
+            continue
+    return ''
+
+
+def _archive_ref(branch, sha):
+    return f'archive/{branch.replace("/", "-")}-wip-{sha[:9]}'
+
+
+def _on_origin(repo, sha):
+    p = subprocess.run(['git', 'for-each-ref', '--contains', sha, '--count=1',
+                        '--format=%(refname)', 'refs/remotes/origin'],
+                       cwd=repo, capture_output=True, text=True)
+    return p.returncode == 0 and bool(p.stdout.strip())
+
+
+def _archive_unpushed(product, repo, holder, branch):
+    """Push every commit the dead ``holder`` carries that origin does not — its HEAD (a WIP the
+    factory committed detached, B-0094) and the local ``branch`` tip — to an ``archive/`` ref.
+    An archive carries no new code, so the product's pre-push hook is skipped
+    (:func:`asf.gitpush.push`, ``refs_only``). Returns the refs pushed; a push that fails
+    refuses the reclaim (the worktree is then left as it stands)."""
+    from asf import gitpush
+    subprocess.run(['git', 'fetch', '-q', '--prune', 'origin'], cwd=repo, capture_output=True)
+    tips = []
+    for rev, cwd in (('HEAD', holder), (f'refs/heads/{branch}', repo)):
+        p = subprocess.run(['git', 'rev-parse', '--verify', '-q', f'{rev}^{{commit}}'], cwd=cwd,
+                           capture_output=True, text=True)
+        sha = p.stdout.strip() if p.returncode == 0 else ''
+        if sha and sha not in tips and not _on_origin(repo, sha):
+            tips.append(sha)
+    # a tip another one already carries needs no ref of its own
+    tips = [t for t in tips if not any(
+        o != t and subprocess.run(['git', 'merge-base', '--is-ancestor', t, o], cwd=repo,
+                                  capture_output=True).returncode == 0 for o in tips)]
+    refs = []
+    for sha in tips:
+        ref = _archive_ref(branch, sha)
+        if refguard.refusal(ref, f'archive {branch}', product.main, None):
+            raise SpawnError(f'reclaim of {holder} refused: {ref} is a protected ref')
+        r = gitpush.push(['-q', 'origin', f'{sha}:refs/heads/{ref}'], repo, refs_only=True,
+                         timeout=gitpush.push_timeout(getattr(product, 'conventions', None)))
+        if r.returncode != 0:
+            raise SpawnError(f'reclaim of {holder} refused: {sha[:9]} could not be archived '
+                             f'to {ref}: {(r.stderr or "").strip()}')
+        refs.append(ref)
+    return refs
+
+
+def _reclaim(product, repo, job, holder, branch):
+    """Free ``branch`` from ``holder``, a worktree whose run is dead: archive its commits not on
+    origin (:func:`_archive_unpushed`), abort a rebase or merge in progress, move the tree to the
+    trash (:mod:`asf.workers.trash`) and prune. A live run's worktree is never touched
+    (:class:`WorktreeBusy`); one no run recorded is refused as before."""
+    registry = pool_mod.sessions_path(product)
+    if os.path.exists(holder):
+        what, why = lifecycle.launch_verdict(registry, job, holder)
+        if what == lifecycle.BUSY:
+            raise WorktreeBusy(why)
+        if what:
+            raise SpawnError(why, clear=f'git -C {repo} worktree remove --force {holder}'
+                                        f'  # after checking nothing in it is wanted')
+        run = lifecycle.by_worktree(registry).get(lifecycle.path_key(holder)) or {}
+        refs = _archive_unpushed(product, repo, holder, branch)
+        admin = _admin_dir(holder)
+        for state, args in (('rebase-merge', ['rebase', '--abort']),
+                            ('rebase-apply', ['rebase', '--abort']),
+                            ('MERGE_HEAD', ['merge', '--abort'])):
+            if admin and os.path.exists(os.path.join(admin, state)):
+                subprocess.run(['git', *args], cwd=holder, capture_output=True)
+        ok, why = _discard(product, holder)
+        if not ok:
+            raise SpawnError(f'reclaim of {holder} failed: {why}')
+        print(f'reclaimed {holder} from dead {run.get("job") or "?"}: archived '
+              f'{", ".join(refs) or "nothing"}', file=sys.stderr)
+    subprocess.run(['git', 'worktree', 'prune'], cwd=repo, capture_output=True)
+
+
+_HELD_BY = re.compile(r"already (?:used|checked out) by worktree at '?([^'\n]+?)'?\s*$", re.M)
+
+
+def _add_worktree(product, repo, job, branch, args):
+    """``git worktree add <args>``; when another worktree holds ``branch`` (a hold
+    :func:`_holding_worktree` did not see) and its run is dead, it is reclaimed and the add
+    retried once."""
+    p = subprocess.run(['git', 'worktree', 'add', *args], cwd=repo, capture_output=True,
+                       text=True)
+    if p.returncode == 0:
+        return
+    m = _HELD_BY.search(p.stderr or '')
+    if not m:
+        raise SpawnError(f"git worktree add {' '.join(args)}: {p.stderr.strip()}")
+    _reclaim(product, repo, job, m.group(1), branch)
+    _git(['worktree', 'add', *args], repo)
 
 
 def _branch_exists_on_origin(repo, branch):
@@ -237,11 +364,11 @@ def _place_worktree(product, repo, job, branch):
         _git(['fetch', '-q', 'origin', branch], repo)
         if held:
             # a stale worktree of an ended run still holds the branch and is not reusable here
-            _discard(product, held)
-        _git(['worktree', 'add', '-q', '-B', branch, path, f'origin/{branch}'], repo)
+            _reclaim(product, repo, job, held, branch)
+        _add_worktree(product, repo, job, branch, ['-q', '-B', branch, path, f'origin/{branch}'])
         return path, False, True
     if held:
-        _discard(product, held)
+        _reclaim(product, repo, job, held, branch)  # its unpushed commits archived first
         _git(['branch', '-D', branch], repo)
     elif _local_branch_exists(repo, branch):
         # a branch with no worktree and not on origin (a reaped one): reused when it carries
@@ -251,7 +378,7 @@ def _place_worktree(product, repo, job, branch):
             raise SpawnError(f'branch {branch} exists locally with {ahead} commit(s) not on '
                              f'origin/{product.main} and no worktree — look before relaunching')
         _git(['branch', '-D', branch], repo)
-    _git(['worktree', 'add', '-q', '-b', branch, path, f'origin/{product.main}'], repo)
+    _add_worktree(product, repo, job, branch, ['-q', '-b', branch, path, f'origin/{product.main}'])
     return path, False, False
 
 
