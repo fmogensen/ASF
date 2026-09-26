@@ -2,6 +2,24 @@
 
 One entry per released version, newest first.
 
+## v0.1.30 — 2026-09-26
+
+### In progress
+
+- F-0040 Story-to-test gate: a Task's pull request must tick an acceptance line with the test that proves it
+- F-0041 Small-Task trains: size class from the footprint, one train per lane, one CI run and one review per train
+- F-0044 The retro's first line: features on production per week, and cost per feature
+- F-0071 S1 lane: critical factory bugs pre-empt Feature work — tiers, reserved capacity, no ladder, a clock
+- F-0103 The tick files Bugs from its own session outcomes and a stalled wave
+
+### Improvements and hotfixes
+
+- fix(ci_queue): head guard — the head of the line starts after head_wait_max_min at the head
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.30"`
+
 ## v0.1.29 — 2026-09-26
 
 ### In progress
