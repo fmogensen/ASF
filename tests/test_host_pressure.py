@@ -81,6 +81,26 @@ class Judge(unittest.TestCase):
         self.assertEqual(why, 'host pressure load 90/cores 12, swap 87%')
 
 
+class LoadOnlyHold(unittest.TestCase):
+    """The S1 load-hold bypass (asf.tick.step_wave) needs load pressure told apart from
+    memory/swap pressure: it may pass the first, never the second."""
+    G = {'load_per_core': 2.0, 'swap_pct': 85}
+
+    def test_load_alone_is_load_only(self):
+        self.assertTrue(host.load_only_hold({'load15': 25, 'cores': 12, 'swap_pct': 10}, self.G))
+
+    def test_swap_over_the_guard_is_not_load_only(self):
+        self.assertFalse(host.load_only_hold({'load15': 25, 'cores': 12, 'swap_pct': 90}, self.G))
+        self.assertFalse(host.load_only_hold({'load15': 1, 'cores': 12, 'swap_pct': 90}, self.G))
+
+    def test_a_memory_reading_over_the_guard_is_not_load_only(self):
+        r = {'load15': 25, 'cores': 12, 'swap_pct': 10, 'mem_pct': 92}
+        self.assertFalse(host.load_only_hold(r, self.G))
+
+    def test_a_quiet_host_is_not_load_only_either(self):
+        self.assertFalse(host.load_only_hold({'load15': 1, 'cores': 12, 'swap_pct': 10}, self.G))
+
+
 class Probes(unittest.TestCase):
     def test_macos_swapusage_is_parsed(self):
         text = 'total = 13312.00M  used = 12595.25M  free = 716.75M  (encrypted)'
