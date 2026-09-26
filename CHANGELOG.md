@@ -2,6 +2,25 @@
 
 One entry per released version, newest first.
 
+## v0.1.18 — 2026-09-26
+
+### Bugs fixed
+
+- B-0131 The operator console cannot install fixes or run the factory's own commands under auto mode
+
+### In progress
+
+- F-0039 Same-session correction: review findings go back to the writer's own session; a fixer only for a dead one
+
+### Improvements and hotfixes
+
+- fix(lane): checks read again right before MERGING; required_jobs_from falls back to the trunk
+- fix(host): a load spike that has ended holds nothing — the guard needs the 1- and 15-minute loads both over
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.18"`
+
 ## v0.1.17 — 2026-09-26
 
 ### Bugs fixed
