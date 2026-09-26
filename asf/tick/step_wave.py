@@ -325,6 +325,36 @@ def gated_plan(items, product, running, capacity, inputs, out=print, exclude=Non
     return kept, exclude
 
 
+#: the plan :func:`left_out` compares against: every ready row, whatever the seats
+READY_ALL = 10_000
+
+
+def left_out(items, product, running, inputs, planned, logged, dropped, seats):
+    """``[(row, why)]``: each ready launching row the plan cut that no other line names — every
+    Ready row a wave does not launch says why (2026-09-26 19:22: a wave launched one S1 row with
+    7 seats free and said nothing of 6 ready rows the S1 lane had cut). ``why``: the S1 lane
+    (:func:`asf.feeder.tiers.select` — no tier-2 row while an S1 one waits for its session), or
+    no seat left under ``seats``. ``logged``: rows another line names (the fair share's)."""
+    from asf.feeder import tiers
+    ready = gated_plan(items, product, running, len(running) + READY_ALL, inputs,
+                       out=lambda _l: None, exclude=set(dropped or ()), s1_first=False)[0]
+    held = set(inputs.get('held') or ())
+    seen = {(x.item_id, x.kind) for x in list(planned) + list(logged)}
+    s1 = [x.item_id for x in planned if x.tier == tiers.TIER_S1 and x.item_id not in held
+          and (x.launches or x.action == tiers.NO_SLOT)]
+    out = []
+    for row in ready:
+        if not row.launches or row.item_id in held or (row.item_id, row.kind) in seen:
+            continue
+        if s1 and row.tier == tiers.TIER_REST:
+            why = (f"S1 first: {', '.join(dict.fromkeys(s1))} launches before any other row "
+                   f"(the S1 lane holds tier-2 rows until the incident has a session)")
+        else:
+            why = f'no seat left: share {seats}, in flight {len(running)}'
+        out.append((row, why))
+    return out
+
+
 def row_job(row):
     """The job a feeder row launches as (:func:`job_name`, its PD9 key when its kind has one)."""
     attr = KIND_JOB_KEY.get(row.brief_kind)
@@ -585,6 +615,9 @@ def launch(ctx, out=print):
     for row in share_held:
         job = job_name(row.brief_kind, row.item_id)
         out(f'waits    {job:<24} {row.item_id:<10} — {r.fair_share_reason}; {counted}')
+    for row, why in left_out(items, product, running, inputs, planned, share_held, dropped,
+                             r.sessions + extra):
+        out(f'waits    {row_job(row):<24} {row.item_id:<10} — {why}')
     host_held, host_why, reading = host_hold(planned)
     # a loaded host still starts cloud sessions: nothing of theirs runs here
     host_held, local_hold, _extra = split_hold(cloud, ready, host_held, host_why)

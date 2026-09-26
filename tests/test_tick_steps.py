@@ -416,6 +416,43 @@ class WaveStepTests(StepsTestCase):
         # the tick's clone keeps its own work: a fetch, never a reset
         self.assertFalse(os.path.exists(os.path.join(ctx.record_root(), 'bugs', 'B-0009.md')))
 
+    def test_every_ready_row_the_cut_leaves_out_says_why(self):
+        # 2026-09-26 19:22: the wave launched only S1 review-b-1382 with 7 seats free and said
+        # nothing of the 6 ready rows — the feeder's S1 lane had cut every tier-2 row silently
+        ready = [feeder_rows.Row(2, 'PLAN → CODE', 'T-0002', 'F-0001', 'would launch task-t-0002',
+                                 'task', 'task/T-0002', 'ready'),
+                 feeder_rows.Row(2, 'PLAN → CODE', 'T-0003', 'F-0001', 'would launch task-t-0003',
+                                 'task', 'task/T-0003', 'ready')]
+
+        def plan(index, product, inflight, capacity, s1_first=True, **kw):
+            cut = [self.rows[0]]                 # the S1 row; tier 2 cut behind it
+            if s1_first:
+                return cut
+            return cut + ready[:max(0, capacity - len(inflight) - 1)]
+        with mock.patch.object(feeder_rows, 'plan_rows', plan):
+            step_wave.run(self.ctx(), out=self.lines.append)
+        waits = [ln for ln in self.lines if ln.startswith('waits    ')]
+        self.assertEqual([ln.split()[1:3] for ln in waits],
+                         [['task-t-0002', 'T-0002'], ['task-t-0003', 'T-0003']], self.lines)
+        for ln in waits:
+            self.assertIn('S1 first: B-0001 launches before any other row', ln)
+        self.assertEqual([r[0][0][1] for r in self.waved], ['B-0001'])
+
+    def test_a_ready_row_past_the_seats_says_why(self):
+        ready = [feeder_rows.Row(2, 'PLAN → CODE', f'T-000{i}', 'F-0001',
+                                 f'would launch task-t-000{i}', 'task', f'task/T-000{i}', 'ready')
+                 for i in (2, 3, 4)]
+        self.write_config('feeder:\n  capacity: 1\n')
+
+        def plan(index, product, inflight, capacity, s1_first=True, **kw):
+            return ready[:max(0, capacity - len(inflight))]
+        with mock.patch.object(feeder_rows, 'plan_rows', plan):
+            step_wave.run(self.ctx(), out=self.lines.append)
+        waits = [ln for ln in self.lines if ln.startswith('waits    ')]
+        self.assertEqual([ln.split()[2] for ln in waits], ['T-0003', 'T-0004'], self.lines)
+        for ln in waits:
+            self.assertIn('— no seat left', ln)
+
     def test_the_lane_pass_pushes_after_the_launches(self):
         # a product's [step:wave] spent 786 s pushing lane refs (each through the product's pre-push
         # hook) before any launch — the pass defers its pushes, and they go after the wave
