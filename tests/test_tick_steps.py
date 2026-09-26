@@ -914,10 +914,14 @@ class PrsStepTests(StepsTestCase):
 
     def test_harvested_and_at_trunk_branches_are_not_candidates(self):
         """B-0029: a session already ``harvested`` has landed; a pushed branch with no commits
-        past the trunk has nothing to open — the lane marks it landed instead."""
+        past the trunk has nothing to open — the lane marks it landed instead, once its item's
+        work is on the trunk (a commit naming B-0002 there, no PR open). A branch merely reset
+        to the trunk tip, with no such commit, waits instead (test_lane)."""
         self.push_branch('fix/B-0001')
         self.finished('fix-bug-b-0001', 'fix/B-0001')
         self.session(job='fix-bug-b-0001', harvested='abc123')
+        _git(['commit', '-q', '--allow-empty', '-m', 'fix(B-0002): the work, landed'], self.repo)
+        _git(['push', '-q', 'origin', 'main'], self.repo)  # B-0002's work is on the trunk
         _git(['push', '-q', 'origin', 'main:refs/heads/fix/B-0002'], self.repo)  # at the trunk head
         self.finished('fix-bug-b-0002', 'fix/B-0002', item='B-0002')
         self.assertEqual(step_prs.run(self.ctx(), out=self.lines.append), 0)

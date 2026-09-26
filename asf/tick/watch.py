@@ -26,8 +26,12 @@ def _ticks_dir(root):
     return os.path.join(root, 'metrics', 'ticks')
 
 
-def _today_path(root):
-    day = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d')
+def _utcnow():
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def _today_path(root, now=_utcnow):
+    day = now().strftime('%Y-%m-%d')
     return os.path.join(_ticks_dir(root), f'{day}.jsonl')
 
 
@@ -58,15 +62,16 @@ def digest_lines(rec):
     return [f"{rec.get('ts', '?')} {line}" for line in summary.digest(ran, counts)]
 
 
-def run(product, out=print, sleep=time.sleep, poll=POLL_SECONDS, forever=True):
+def run(product, out=print, sleep=time.sleep, poll=POLL_SECONDS, forever=True, now=_utcnow):
     """Tail ``product``'s ticks stream, printing each tick as it lands. Never returns unless
-    ``forever`` is False (tests) or interrupted — the operator's ``ctrl-c`` is the only exit."""
+    ``forever`` is False (tests) or interrupted — the operator's ``ctrl-c`` is the only exit.
+    ``now`` is the UTC clock that names the day's file — injected so a test is not dated."""
     root = shadow.record_dir(product)
     out(f"watch: tailing {product.name}'s ticks in {root} (ctrl-c to stop)")
-    path = _today_path(root)
+    path = _today_path(root, now)
     pos = os.path.getsize(path) if os.path.isfile(path) else 0
     while True:
-        current = _today_path(root)
+        current = _today_path(root, now)
         if current != path:
             path, pos = current, 0
         lines, pos = _read_new_lines(path, pos)
