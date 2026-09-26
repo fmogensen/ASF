@@ -2,6 +2,25 @@
 
 One entry per released version, newest first.
 
+## v0.1.29 — 2026-09-26
+
+### In progress
+
+- F-0030 The README carries the argument, the mental model and the manual on one page
+- F-0161 Wave launch costs ~55 s per session: 5 launches make most of a 242 s wave
+
+### Improvements and hotfixes
+
+- fix(workers): reaped worktrees leave git at once and the disk in the background
+- ci_queue: relief serves an S1 fix PR run like the trunk run
+- ci_queue: S1 relief covers older runs ahead of it; a superseded S1 run hands its re-runs to the newer run
+- fix(ci_queue): cancel a branch push run a PR run on the same sha covers
+- ci_queue: relief is label-aware — a run is in a starved job's way only on runners carrying all its labels
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.29"`
+
 ## v0.1.28 — 2026-09-26
 
 ### Bugs fixed
