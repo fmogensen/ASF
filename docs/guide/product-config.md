@@ -164,6 +164,17 @@ branch after it. So harvest never merges a PR on its checks alone:
   and the PR is gated locally instead. With no required check declared there is nothing to wait
   for, and the local gate runs.
 
+  A CI that path-filters its own suites (a job whose `if:` is false reports *skipped*; a
+  workflow that never creates a job leaves it *missing*) is read by
+  `conventions.merge_skipped` — PR merges only; a deploy never counts a skipped job green:
+
+  | value | meaning |
+  | --- | --- |
+  | `path-filtered` (default) | a skipped or missing required check is satisfied when every GitHub Actions run on the PR head has completed, at least one required check concluded success, none is failed, cancelled or timed out, and the skip is the workflow's own — each job answering for it concluded `skipped`, or no completed run has a job of that name. A run still going waits (never the local-gate clock); the held and harvest lines name each satisfied check and why |
+  | `never` | a skipped or missing required check is never green: the PR waits for a run of it that concludes success |
+
+  The same judgement is read again right before MERGING.
+
 **A product whose gate is heavy** — minutes long, gigabytes of memory, a whole monorepo build —
 should set `landing_checks_missing: {docs: local-gate, code: wait}` (or plain `wait`) and name
 its CI gate job in `landing_checks`: code PRs then merge on CI's run of that job, and only what
