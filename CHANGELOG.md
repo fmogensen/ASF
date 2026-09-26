@@ -2,6 +2,25 @@
 
 One entry per released version, newest first.
 
+## v0.1.20 — 2026-09-26
+
+### Features landed
+
+- F-0098 'dead' sessions are nearly always finished ones not yet recorded: say 'ended, awaiting tick', free the slot at once
+
+### Bugs fixed
+
+- B-0094 19% of sessions end 'not pushed': finished work is lost to a missing commit or push
+
+### Improvements and hotfixes
+
+- fix(capacity): a partner's claim is what its wave recorded — a held partner lends nothing as its sessions end
+- fix(deploy): a no-candidate line names the tip's still-running CI run; tick and view pinned to agree
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.20"`
+
 ## v0.1.19 — 2026-09-26
 
 ### Bugs fixed
