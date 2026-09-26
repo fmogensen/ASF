@@ -1042,6 +1042,7 @@ def hold(path, run, kind, text, now, empty_cap=EMPTY_CAP):
     An :data:`EMPTY` hold at ``empty_cap`` empty ends parks the item instead and spends no round."""
     item = run.get('item')
     branch = run.get('branch') or run.get('job')
+    head = (text or '').split('\n', 1)[0]  # the line is one line; the correction keeps it all
     if kind == EMPTY and empty_ends(path, item) >= empty_cap:
         fields = {'correction': {'kind': kind, 'text': text, 'at': now,
                                  'parked': True, 'reason': park_text(empty_ends(path, item))},
@@ -1049,17 +1050,17 @@ def hold(path, run, kind, text, now, empty_cap=EMPTY_CAP):
         return fields, f'parked {branch}: {fields["correction"]["reason"]}'
     if kind == NAMING:  # the lane's reword failed: back to its session, no round spent
         fields = {'correction': {'kind': kind, 'text': text, 'at': now}}
-        return fields, f'held {branch}: {text} — back to its session (naming, no round)'
+        return fields, f'held {branch}: {head} — back to its session (naming, no round)'
     prev = max([rounds_of(path, item), run.get('rounds') or 0])
     if prev >= ROUND_CAP:
         at_cap_before = any((r.get('correction') or {}).get('at_cap') for r in item_runs(path, item))
         fields = {'correction': {'kind': kind, 'text': text, 'at': now, 'at_cap': True}}
         if at_cap_before:
             fields['operator_flagged'] = 1
-        return fields, f'held {branch}: {text} — adjudicate pending'
+        return fields, f'held {branch}: {head} — adjudicate pending'
     rounds = prev + 1
     fields = {'rounds': rounds, 'correction': {'kind': kind, 'text': text, 'at': now}}
-    return fields, f'held {branch}: {text} — back to its session (round {rounds})'
+    return fields, f'held {branch}: {head} — back to its session (round {rounds})'
 
 
 #: A correction kind of its own: the branch needs paths outside its Task's ``writes:`` — the
