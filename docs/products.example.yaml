@@ -162,6 +162,18 @@ conventions:
   # audit only: no hold, nothing parked. Match the unscoped forms only, so a runner given paths
   # (a targeted run) stays allowed. Ignored for any other product (default: none).
   # full_suite_commands: ['^make test$', '^make check\b']
+  # the savings pass's window and its six thresholds (F-0100 §2.9): a key left out keeps the
+  # documented default here; `asf doctor`'s `savings` row is red over an unknown key or a value
+  # that is not a positive number.
+  savings:
+    window_days: 7
+    min_landings: 5          # fewer landed changes than this: read, print, propose nothing
+    preamble_ratio: 2.0      # a kind's median input tokens over all kinds'
+    gate_minutes_max: 20.0   # gate minutes per landed change
+    rounds_per_landing: 1.3
+    step_duration_ratio: 1.5 # today's median step duration over the window's
+    spend_ratio: 1.5         # a kind's median dollars per landed change over all kinds'
+    failure_class_count: 3   # one gate signature, in the window
 
 # CI: which provider runs checks, which workflow file, budgets and runner labels.
 ci:

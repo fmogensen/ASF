@@ -584,6 +584,46 @@ class Capacity(unittest.TestCase):
         self.assertTrue(findings[0][0])
 
 
+class TestCheckSavings(unittest.TestCase):
+    """`doctor.check_savings` — spec f-0100 §2.9, the doctor's `savings` row."""
+
+    def test_a_clean_product_is_one_green_row(self):
+        product = env.Product('a', {'conventions': {'savings': {'gate_minutes_max': 30.0}}})
+        findings = doctor.check_savings(product)
+        self.assertEqual(findings, [(True, 'savings: 8 thresholds, 1 overridden')])
+
+    def test_no_savings_block_is_green_with_none_overridden(self):
+        product = env.Product('a', {})
+        findings = doctor.check_savings(product)
+        self.assertEqual(findings, [(True, 'savings: 8 thresholds, 0 overridden')])
+
+    def test_an_unknown_key_is_named(self):
+        product = env.Product('a', {'conventions': {'savings': {'windw_days': 7}}})
+        findings = doctor.check_savings(product)
+        bad = [d for ok, d in findings if not ok]
+        self.assertTrue(any('windw_days' in d for d in bad), bad)
+
+    def test_a_zero_or_negative_value_is_named(self):
+        product = env.Product('a', {'conventions': {'savings': {'min_landings': 0,
+                                                                  'spend_ratio': -1.5}}})
+        findings = doctor.check_savings(product)
+        bad = [d for ok, d in findings if not ok]
+        self.assertTrue(any('min_landings' in d for d in bad), bad)
+        self.assertTrue(any('spend_ratio' in d for d in bad), bad)
+
+    def test_the_row_appears_in_run_after_capacity(self):
+        product = env.Product('a', {})
+        with mock.patch.object(doctor, 'check_config', return_value=(True, '', {}, product)), \
+                mock.patch.object(doctor, 'check_cli_sessions', return_value=[]), \
+                mock.patch.object(doctor, 'check_drift', return_value=(True, '')):
+            rows = doctor.run('a')
+        names = [r[0] for r in rows]
+        self.assertIn('savings', names)
+        self.assertEqual(names.index('savings'), names.index('capacity') + 1)
+        savings_rows = [r for r in rows if r[0] == 'savings']
+        self.assertFalse(any(r[1] for r in savings_rows))  # never required
+
+
 class CheapTierAdviceTests(unittest.TestCase):
     """`doctor.check_models` — the `models` row naming an unmapped `cheap` (plan F-0093 Task 2)."""
 

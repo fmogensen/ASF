@@ -230,6 +230,14 @@ DEFAULT_RELEASE_MIN_INTERVAL = '60m'
 #: The yaml's ``release_install:`` overrides it; an empty value leaves the line out.
 DEFAULT_RELEASE_INSTALL = 'pipx install --force "git+https://github.com/{repo_slug}.git@{tag}"'
 
+#: The savings pass's window and thresholds (F-0100 §2.4). A product overrides any key;
+#: a key it does not name keeps the default here.
+DEFAULT_SAVINGS = {
+    'window_days': 7, 'min_landings': 5, 'preamble_ratio': 2.0, 'gate_minutes_max': 20.0,
+    'rounds_per_landing': 1.3, 'step_duration_ratio': 1.5, 'spend_ratio': 1.5,
+    'failure_class_count': 3,
+}
+
 
 def _normalise_prefix(value):
     """``feature`` → ``feature/``; ``feature/`` and ``m-`` are already prefixes."""
@@ -437,6 +445,9 @@ class Conventions:
     ci_dev_job: str = DEFAULT_CI_DEV_JOB
     deploy_workflow: str = DEFAULT_DEPLOY_WORKFLOW
     stage_limits: dict = field(default_factory=dict)
+    #: ``savings``: the savings pass's window and six thresholds (F-0100 §2.9), merged per key
+    #: through :func:`savings_for` — a product overriding one threshold keeps the other seven.
+    savings: dict = field(default_factory=lambda: dict(DEFAULT_SAVINGS))
     #: Globs (F-0031 §2.1) whose match makes a landed branch's merge class
     #: `merge_amendable_set` rather than `merge_routine_pr` — the factory's own rules. Three
     #: states (F-0024): unset (``None``) is the defaults in `asf/amendable.py`, a list is that
@@ -721,6 +732,14 @@ class Conventions:
 
     def values(self):
         return self.as_dict().values()
+
+
+def savings_for(conv, key):
+    """The savings pass's value for ``key`` (F-0100 §2.9): the product's own
+    ``conventions.savings`` entry when it named one, else :data:`DEFAULT_SAVINGS`'s — a product
+    overriding one threshold keeps the other seven."""
+    savings = getattr(conv, 'savings', None) or {}
+    return savings[key] if key in savings else DEFAULT_SAVINGS[key]
 
 
 if __name__ == '__main__':

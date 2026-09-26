@@ -50,7 +50,7 @@ import shutil
 import subprocess
 import time
 
-from asf import approvals, drift, env, hooks, schema, scheduler, tokens
+from asf import approvals, conventions, drift, env, hooks, schema, scheduler, tokens
 from asf.workers import pool
 
 _SKIP_DIRS = {'.git', 'node_modules', '__pycache__', 'dist', 'build', '.next', 'vendor', 'venv',
@@ -498,6 +498,33 @@ def check_capacity(cfg, product):
     return findings
 
 
+def check_savings(product):
+    """[(ok, detail)] — the ``savings`` doctor row's findings (spec f-0100 §2.9): every key of
+    a product's ``conventions.savings`` block is a key of ``conventions.DEFAULT_SAVINGS`` and
+    every value is a number greater than zero, so a misspelled or misvalued threshold is told to
+    the operator rather than silently read as the default. Green names the resolved count and how
+    many of the eight were overridden."""
+    conv = getattr(product, 'conventions', None)
+    savings = getattr(conv, 'savings', None) or {}
+    findings = []
+    overridden = 0
+    for key, value in savings.items():
+        if key not in conventions.DEFAULT_SAVINGS:
+            known = ', '.join(sorted(conventions.DEFAULT_SAVINGS))
+            findings.append((False, f'conventions.savings.{key} is not a known threshold '
+                                     f'(one of {known})'))
+            continue
+        if value != conventions.DEFAULT_SAVINGS[key]:
+            overridden += 1
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            findings.append((False, f'conventions.savings.{key} {value!r} must be a number '
+                                     f'greater than zero'))
+    if not findings:
+        findings.append((True, f'savings: {len(conventions.DEFAULT_SAVINGS)} thresholds, '
+                                f'{overridden} overridden'))
+    return findings
+
+
 def check_convention_shapes(product):
     """[(ok, detail)] — one RED finding per map-valued convention the product file wrote in
     another shape (``conventions.models: light``, ``landing_checks_missing: '{docs: wait}'``),
@@ -738,6 +765,8 @@ def run(product_name):
     rows.append(('briefs', True, ok, detail))
     for ok, detail in check_capacity(cfg, product):
         rows.append(('capacity', False, ok, detail))
+    for ok, detail in check_savings(product):
+        rows.append(('savings', False, ok, detail))
     for ok, detail in check_models(cfg):
         rows.append(('models', False, ok, detail))
     for detail in model_table_lines(product):

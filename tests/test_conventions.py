@@ -166,6 +166,12 @@ class ForbiddenPatternsTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), conv_mod.forbidden_patterns())
 
+    def test_the_dict_valued_savings_default_adds_no_pattern(self):
+        # forbidden_patterns() walks string defaults containing '/', '{' or '#' (P14); a
+        # dict-valued default like DEFAULT_SAVINGS is never a path-shaped literal.
+        self.assertIsInstance(conv_mod.DEFAULT_SAVINGS, dict)
+        self.assertEqual(len(conv_mod.forbidden_patterns()), 11)
+
 
 class CheckConventionsScriptTests(unittest.TestCase):
     """The check itself: a literal that belongs in the product yaml fails the build."""
@@ -266,6 +272,7 @@ class ModuleConstantsTests(unittest.TestCase):
         self.assertEqual(conv_mod.DEFAULT_HARVEST_GATE, c.harvest_gate)
         self.assertEqual(conv_mod.DEFAULT_BRANCHES_PER_TICK, c.branches_per_tick)
         self.assertEqual(conv_mod.DEFAULT_GATE_TIMEOUT_S, c.gate_timeout_s)
+        self.assertEqual(conv_mod.DEFAULT_SAVINGS, c.savings)
 
 
 class AmendableFieldsTests(unittest.TestCase):
@@ -280,6 +287,35 @@ class AmendableFieldsTests(unittest.TestCase):
         got = Conventions.from_mapping({'amendable_paths': ['a/*']}).amendable_paths
         self.assertEqual(got, ['a/*'])
         self.assertEqual(Conventions.from_mapping({'amendable_paths': []}).amendable_paths, [])
+
+
+class SavingsDefaultsTests(unittest.TestCase):
+    def test_the_defaults_are_what_the_card_says(self):
+        self.assertEqual(conv_mod.DEFAULT_SAVINGS, {
+            'window_days': 7, 'min_landings': 5, 'preamble_ratio': 2.0, 'gate_minutes_max': 20.0,
+            'rounds_per_landing': 1.3, 'step_duration_ratio': 1.5, 'spend_ratio': 1.5,
+            'failure_class_count': 3,
+        })
+
+    def test_a_fresh_conventions_carries_the_defaults(self):
+        self.assertEqual(Conventions().savings, conv_mod.DEFAULT_SAVINGS)
+
+    def test_two_instances_do_not_share_their_savings_dict(self):
+        a, b = Conventions(), Conventions()
+        a.savings['window_days'] = 14
+        self.assertEqual(b.savings['window_days'], 7)
+
+    def test_a_product_naming_none_gets_all_eight(self):
+        c = Conventions.from_mapping({})
+        for key in conv_mod.DEFAULT_SAVINGS:
+            self.assertEqual(conv_mod.savings_for(c, key), conv_mod.DEFAULT_SAVINGS[key])
+
+    def test_a_product_overriding_one_key_keeps_the_other_seven(self):
+        c = Conventions.from_mapping({'savings': {'gate_minutes_max': 30.0}})
+        self.assertEqual(conv_mod.savings_for(c, 'gate_minutes_max'), 30.0)
+        for key, default in conv_mod.DEFAULT_SAVINGS.items():
+            if key != 'gate_minutes_max':
+                self.assertEqual(conv_mod.savings_for(c, key), default)
 
 
 if __name__ == '__main__':
