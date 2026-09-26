@@ -202,6 +202,15 @@ def model_key(model):
     return str(model or '').strip().lower()
 
 
+def is_cloud_lane(s):
+    """A session the cloud runtime launched: ``runtime_lane: cloud`` — the current key
+    (:func:`asf.workers.actions.ActionsRuntime.run`, :func:`asf.workers.remote.RemoteRuntime.run`)
+    — or, for a launch line written before that split, the bare ``lane: cloud`` it used to write
+    into the harvest lane state machine's own key (F-lane-collision; the ledger is append-only,
+    so an old line still reads this way)."""
+    return s.get('runtime_lane') == 'cloud' or s.get('lane') == 'cloud'
+
+
 # ---- the session ledger -----------------------------------------------------
 
 def sessions_path(product):
@@ -339,16 +348,16 @@ class Pool:
         """The account's seats on this host: its cloud-lane runs (``lane: cloud``) hold none —
         they are counted against ``cloud.max_inflight`` (:meth:`cloud_load`)."""
         return sum(1 for s in self.live if s.get('account') == account.name
-                   and s.get('lane') != 'cloud'
+                   and not is_cloud_lane(s)
                    and (model is None or model_key(s.get('model')) == model_key(model)))
 
     def lane_load(self, lane):
         names = {a.name for a in self.accounts if a.role == lane}
-        return sum(1 for s in self.live if s.get('account') in names and s.get('lane') != 'cloud')
+        return sum(1 for s in self.live if s.get('account') in names and not is_cloud_lane(s))
 
     def cloud_load(self, account=None):
         """Live cloud-lane runs — every account's, or ``account``'s."""
-        return sum(1 for s in self.live if s.get('lane') == 'cloud'
+        return sum(1 for s in self.live if is_cloud_lane(s)
                    and (account is None or s.get('account') == account.name))
 
     def pick_cloud(self, kind, model, cloud_settings):

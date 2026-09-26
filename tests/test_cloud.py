@@ -316,7 +316,7 @@ class FakeCloudRuntime(runtime_mod.Runtime):
         log_path = job.log_path or runtime_mod.job_log_path(job.product, job.name)
         open(log_path, 'a').close()
         r = runtime_mod.Result(pid=cloudpid.token('500'), log_path=log_path)
-        r.extra = {'lane': 'cloud', 'actions_run_id': '500',
+        r.extra = {'runtime_lane': 'cloud', 'actions_run_id': '500',
                    'actions_run_name': f'asf {job.name} {job.session}',
                    'cloud_url': f'https://example.test/runs/{job.name}'}
         return r
@@ -349,7 +349,7 @@ class Placement(Lanes):
                                                local_hold='host pressure load 50/cores 10')
         self.assertEqual(waits, [])
         (row, rec), = launched
-        self.assertEqual((rec['account'], rec['lane'], rec['pid']),
+        self.assertEqual((rec['account'], rec['runtime_lane'], rec['pid']),
                          ('acct-c', 'cloud', 'actions:500'))
         self.assertIn('→ acct-c (opus) cloud https://example.test/runs/spec-1', lines[0])
         # the fresh branch is on origin before the job checks it out, and nothing was set up
@@ -365,14 +365,14 @@ class Placement(Lanes):
     def test_a_free_local_seat_keeps_the_row_local(self):
         launched, _waits, _lines = self.run_wave([feature_row('spec-1')])
         self.assertEqual(launched[0][1]['account'], 'acct-a')
-        self.assertNotEqual(launched[0][1].get('lane'), 'cloud')
+        self.assertNotEqual(launched[0][1].get('runtime_lane'), 'cloud')
 
     def test_a_full_local_lane_overflows_to_the_cloud_and_the_cloud_cap_holds(self):
         live = [{'job': 'x', 'account': 'acct-a'},                     # the local seat taken
-                {'job': 'c1', 'account': 'acct-c', 'lane': 'cloud'}]   # one of two cloud seats
+                {'job': 'c1', 'account': 'acct-c', 'runtime_lane': 'cloud'}]  # one of two cloud seats
         rows = [feature_row('spec-1'), feature_row('spec-2', item='F-0002')]
         launched, waits, _lines = self.run_wave(rows, live=live)
-        self.assertEqual([(r.job, rec['lane']) for r, rec in launched], [('spec-1', 'cloud')])
+        self.assertEqual([(r.job, rec['runtime_lane']) for r, rec in launched], [('spec-1', 'cloud')])
         self.assertEqual([(r.job, why) for r, why in waits],
                          [('spec-2', 'pool full; cloud full — 2/2 in flight')])
 
@@ -385,7 +385,7 @@ class Placement(Lanes):
         row = pool_mod.parse_row('STARVED → SPEC F-0003 "f" (cloud-ok)   → launch spec-3 (Opus)')
         self.assertTrue(row.cloud_ok)
         launched, _, _ = self.run_wave([row], local_hold='host pressure x', cfg=cfg)
-        self.assertEqual(launched[0][1]['lane'], 'cloud')
+        self.assertEqual(launched[0][1]['runtime_lane'], 'cloud')
 
     def test_the_lane_off_changes_nothing(self):
         cfg = dict(self.cfg, cloud={'enabled': False})
@@ -402,7 +402,7 @@ class DefaultPlacement(Lanes):
         self.cfg = dict(self.cfg, cloud=dict(ON, default=True, rows='cloud-ok'))
 
     def lanes(self, launched):
-        return [(r.job, rec.get('lane') or 'local') for r, rec in launched]
+        return [(r.job, rec.get('runtime_lane') or 'local') for r, rec in launched]
 
     def test_settings_read_the_keys(self):
         s = cloud.settings({'cloud': {'enabled': True, 'max_inflight': 1}})
@@ -447,8 +447,8 @@ class DefaultPlacement(Lanes):
         self.assertEqual((launched, waits[0][1]), ([], 'pool full'))
 
     def test_a_full_cloud_lane_falls_back_to_local(self):
-        live = [{'job': 'c1', 'account': 'acct-c', 'lane': 'cloud'},
-                {'job': 'c2', 'account': 'acct-c', 'lane': 'cloud'}]
+        live = [{'job': 'c1', 'account': 'acct-c', 'runtime_lane': 'cloud'},
+                {'job': 'c2', 'account': 'acct-c', 'runtime_lane': 'cloud'}]
         launched, waits, _ = self.run_wave([feature_row('spec-1')], live=live)
         self.assertEqual((self.lanes(launched), waits), ([('spec-1', 'local')], []))
 

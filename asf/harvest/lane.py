@@ -934,7 +934,7 @@ class Lane:
         running = H.try_lock_held(self.state_dir)
         names = {b for b in heads if conv.branch_kind(b) and b != trunk}
         names |= {b for b, r in runs.items() if b != trunk and b and (
-            b in heads or lifecycle.eligible(r) or (r.get('lane') or {}).get('state') in OPEN_STATES)}
+            b in heads or lifecycle.eligible(r) or lifecycle.lane_of(r).get('state') in OPEN_STATES)}
         names |= {b for b, p in pr_map.items() if conv.branch_kind(b) and p.get('state') == 'OPEN'}
         if self.auto:  # every open PR on the trunk, whoever opened it (foreign_pr decides)
             names |= {b for b, p in pr_map.items() if b and b != trunk
@@ -948,7 +948,7 @@ class Lane:
 
     def branch_facts(self, b, run, head, pr, prs, running):
         conv, trunk, repo = self.conv, self.trunk, self.repo
-        rec = (run or {}).get('lane') or {}
+        rec = lifecycle.lane_of(run)
         item = item_of(b, run)
         if not prs and rec.get('pr'):
             pr = {'number': rec['pr'], 'state': 'OPEN'}
@@ -2499,7 +2499,7 @@ class GitHubHost(Host):
                 'base': p.get('baseRefName') or None, 'draft': bool(p.get('isDraft'))}
         if self.lane is not None:
             self.in_queue = sum(1 for r in lifecycle.by_branch(self.lane.path).values()
-                                if (r.get('lane') or {}).get('state') == QUEUED)
+                                if lifecycle.lane_of(r).get('state') == QUEUED)
         return out
 
     def open(self, branch, item=None):
@@ -3027,7 +3027,7 @@ def snapshot_at(state_dir):
     path = H.sessions_path(state_dir)
     out = {}
     for b, run in lifecycle.by_branch(path).items():
-        rec = run.get('lane')
+        rec = lifecycle.lane_of(run)
         if rec:
             out[b] = dict(rec, item=rec.get('item') or run.get('item'), job=run.get('job'))
     return out

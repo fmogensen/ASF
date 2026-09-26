@@ -347,6 +347,16 @@ def by_branch(path):
     return out
 
 
+def lane_of(run):
+    """``run['lane']`` as the lane state machine's record (:mod:`asf.harvest.lane`), ``{}`` when
+    the run carries none or it is not a map. A cloud-lane launch's own ``runtime_lane`` marker
+    never lands here (F-lane-collision) — but an already-written registry line from before that
+    split named the same key with a bare string (``"lane": "cloud"``), and this is every reader's
+    one guard against it."""
+    rec = (run or {}).get('lane')
+    return rec if isinstance(rec, dict) else {}
+
+
 def _case_insensitive(path):
     """Whether the filesystem holding ``path`` (its nearest existing ancestor with a letter in
     its name) ignores case: the same entry answers under its name with the case swapped."""
@@ -686,7 +696,7 @@ def occupancy(path, lanes=None, alive=None, result=None):
            'lanes': {}, 'review': {}, 'landing': {}, 'branches': {}, 'docs': {}}
     for branch, run in by.items():
         item, kind = run.get('item'), run.get('kind')
-        rec = (lanes or {}).get(branch) if lanes is not None else run.get('lane')
+        rec = (lanes or {}).get(branch) if lanes is not None else lane_of(run)
         if not item or item in live_items:
             continue
         why = None
