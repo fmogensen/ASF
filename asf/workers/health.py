@@ -225,10 +225,15 @@ def publish_gap(product, run, ev, reason, alive=pid_alive):
     return lifecycle.judge(run, ev, landing=landing), ev, '; '.join(lines + [line])
 
 
+#: a prose `pushed:` line that opens with one of these says the same as the typed `pushed: no`
+PUSHED_NO_RE = re.compile(r'^\s*(no|none|not pushed|unpushed)\b', re.I)
+
+
 def push_retry(ev, reason, line):
     """``(class, detail)`` when an unpushed run's push failed on the network or was refused by
-    the repo's hook — read off its REPORT's ``why:`` field (when ``pushed: no``) and the
-    factory's own publish line — else None (:func:`asf.workers.lifecycle.push_failure`)."""
+    the repo's hook — read off its REPORT's ``why:`` field (when ``pushed: no``), or, when the
+    result carries no fenced report at all, the prose ``pushed:`` line it stands in for — and
+    the factory's own publish line — else None (:func:`asf.workers.lifecycle.push_failure`)."""
     if not (reason or '').startswith(UNPUSHED_REASON_PREFIXES):
         return None
     result_text = str((ev.result or {}).get('result') or '')
@@ -240,6 +245,10 @@ def push_retry(ev, reason, line):
             rep = {}
         if rep.get('pushed') == 'no':
             said = rep.get('why') or ''
+    else:
+        prose_pushed = report_mod._prose(result_text).get('pushed') or ''
+        if PUSHED_NO_RE.match(prose_pushed):
+            said = prose_pushed
     m = re.search(r'\bpublish \S+ refused: (.*)', line or '')  # the factory's own push
     published = m.group(1) if m else ''
     for text in (published, said):

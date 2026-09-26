@@ -352,9 +352,15 @@ def contract(kind):
             'back to you as a correction, and nothing else about your work is re-done.\n')
 
 
-# ---- the footprint claim: still read off the prose block; it is not the typed report's business
+# ---- the prose fallback: still read off the prose block when there is no fence to read
+# instead; it is not the typed report's business. :func:`footprint_claim` stands on it below;
+# a report that never demands the typed contract (nothing does yet — D11's own Task 1 note)
+# leaves `asf.workers.health.push_retry` and `asf.workers.lifecycle.overruling` standing on it
+# too, the same way, for the same reason.
 
-FIELD_RE = re.compile(r'^(?P<key>item|kind|status|branch|pushed|commits|tests|left out|needs writes)\s*:\s*(?P<value>.*)$', re.I)
+FIELD_RE = re.compile(
+    r'^(?P<key>item|kind|status|branch|pushed|commits|tests|left out|needs writes'
+    r'|ruling|blocked_on|superseded_by)\s*:\s*(?P<value>.*)$', re.I)
 HEAD_RE = re.compile(r'^\s*REPORT\s*$', re.M)
 #: The statuses a session reports when its Task is not whole: only these may claim more footprint.
 UNFINISHED = ('partial', 'blocked')
@@ -363,7 +369,9 @@ SECTION_RE = re.compile(r'^[A-Z][\w ]{0,40}:\s*$', re.M)
 
 
 def _prose(text):
-    """``{field: value}`` of the last prose REPORT block, for :func:`footprint_claim` alone."""
+    """``{field: value}`` of the last prose REPORT block — the fallback :func:`footprint_claim`,
+    :func:`asf.workers.health.push_retry` and :func:`asf.workers.lifecycle.overruling` keep for a
+    report with no fence to read instead."""
     text = str(text or '')
     heads = list(HEAD_RE.finditer(text))
     if not heads:
