@@ -881,5 +881,84 @@ class CacheTests(unittest.TestCase):
             evidence._cache_file("evidence.json", None)
 
 
+class LandedProvesTests(unittest.TestCase):
+    """discover()['proves'] (§2.6): only a claim that has landed is evidence."""
+
+    def setUp(self):
+        self.r = ProductRepo()
+        self.addCleanup(self.r.close)
+
+    def push_trailer_commit(self, subject, trailer):
+        with open(os.path.join(self.r.repo, "proves.txt"), "a") as f:
+            f.write(subject + "\n")
+        git(self.r.repo, "add", ".")
+        git(self.r.repo, "commit", "-q", "-m", f"{subject}\n\n{trailer}")
+        sha = git(self.r.repo, "rev-parse", "HEAD")
+        git(self.r.repo, "push", "-q", "origin", "main")
+        return sha
+
+    def merged_pr(self, number, sha, body, head="worker/T-0198"):
+        return {"number": number, "title": "task(T-0198): the thing", "body": body,
+                "state": "MERGED", "headRefName": head, "mergedAt": "2026-09-21T10:00:00Z",
+                "mergeCommit": {"oid": sha}}
+
+    def test_trailer_on_a_trunk_commit_lands_a_claim(self):
+        sha = self.push_trailer_commit(
+            "task(T-0198): evidence collects the claims",
+            "Proves: S-18754 line 1 - tests.test_evidence")
+        ev = self.r.discover(self.r.product(), prs=[])
+        self.assertEqual(ev["proves"]["S-18754"], [
+            {"line": 1, "test": "tests.test_evidence", "task": "T-0198", "pr": None, "sha": sha,
+             "source": "commit"}])
+
+    def test_a_merged_prs_body_lands_a_claim(self):
+        pr = self.merged_pr(12, self.r.head, "Proves: S-18754 line 2 - tests.test_evidence::T")
+        ev = self.r.discover(self.r.product(), prs=[pr])
+        self.assertEqual(ev["proves"]["S-18754"], [
+            {"line": 2, "test": "tests.test_evidence::T", "task": "T-0198", "pr": 12,
+             "sha": self.r.head, "source": "pr"}])
+
+    def test_an_open_prs_claim_is_absent(self):
+        pr = self.merged_pr(13, self.r.head, "Proves: S-18754 line 3 - tests.test_evidence")
+        pr["state"] = "OPEN"
+        pr["mergeCommit"] = None
+        ev = self.r.discover(self.r.product(), prs=[pr])
+        self.assertNotIn("S-18754", ev["proves"])
+
+    def test_a_merged_pr_not_ancestor_of_the_trunk_is_absent(self):
+        git(self.r.repo, "checkout", "-q", "-b", "unlanded")
+        git(self.r.repo, "commit", "-q", "--allow-empty", "-m", "task(T-0199): never lands")
+        unlanded = git(self.r.repo, "rev-parse", "HEAD")
+        git(self.r.repo, "push", "-q", "origin", "unlanded")
+        git(self.r.repo, "checkout", "-q", "main")
+        pr = self.merged_pr(14, unlanded, "Proves: S-18754 line 4 - tests.test_evidence")
+        ev = self.r.discover(self.r.product(), prs=[pr])
+        self.assertNotIn("S-18754", ev["proves"])
+
+    def test_the_same_claim_from_both_sources_keeps_the_pr_entry_once(self):
+        sha = self.push_trailer_commit(
+            "task(T-0198): evidence collects the claims",
+            "Proves: S-18754 line 5 - tests.test_evidence")
+        pr = self.merged_pr(15, sha, "Proves: S-18754 line 5 - tests.test_evidence")
+        ev = self.r.discover(self.r.product(), prs=[pr])
+        self.assertEqual(ev["proves"]["S-18754"], [
+            {"line": 5, "test": "tests.test_evidence", "task": "T-0198", "pr": 15, "sha": sha,
+             "source": "pr"}])
+
+    def test_entries_sort_by_line_then_task(self):
+        self.push_trailer_commit("task(T-0198): a", "Proves: S-18754 line 3 - t.a")
+        self.push_trailer_commit("task(T-0197): b", "Proves: S-18754 line 1 - t.b")
+        ev = self.r.discover(self.r.product(), prs=[])
+        self.assertEqual([(e["line"], e["task"]) for e in ev["proves"]["S-18754"]],
+                         [(1, "T-0197"), (3, "T-0198")])
+
+    def test_no_pull_request_host_still_lands_commit_claims(self):
+        sha = self.push_trailer_commit(
+            "task(T-0198): evidence collects the claims",
+            "Proves: S-18754 line 1 - tests.test_evidence")
+        ev = self.r.discover(self.r.product(), prs=[])
+        self.assertEqual(ev["proves"]["S-18754"][0]["sha"], sha)
+
+
 if __name__ == "__main__":
     unittest.main()

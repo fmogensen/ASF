@@ -35,7 +35,7 @@ import subprocess
 import sys
 import time
 
-from asf import env
+from asf import env, proves
 from asf.conventions import Conventions
 from asf.evidence import review
 
@@ -702,6 +702,7 @@ def discover(product=None, checked_file=None):
         "branches": sorted(branches),
         "ids": id_evidence(product, branches, prs, commits=commits, merges=merges),
         "lane_docs": lane_docs(product, prs, commits=commits, merges=merges),
+        "proves": landed_proves(product, prs),
         "ci": ci_provider(product),
     }
 
@@ -1080,6 +1081,77 @@ def id_evidence(product, branches, prs, commits=None, green=None, merges=None):
             covered[c] = under_green(c)
         r["green"] = covered[c]
     return out
+
+
+#: A trunk commit's ``git log --format=%H%x1e%B`` record: the 40-hex sha the record separator
+#: follows, at line start — robust against a commit body with blank lines (there is no other
+#: reliable terminator: %B's own trailing newline is not distinct from a blank body line).
+_LOG_RECORD_RE = re.compile(r"(?m)^([0-9a-f]{40})\x1e")
+
+
+def _parse_proves_log(text):
+    """[(sha, body), ...] from ``git log --format=%H%x1e%B`` output."""
+    text = text or ""
+    marks = list(_LOG_RECORD_RE.finditer(text))
+    return [(m.group(1), text[m.end():(marks[i + 1].start() if i + 1 < len(marks) else len(text))])
+            for i, m in enumerate(marks)]
+
+
+def landed_proves(product, prs):
+    """{story: [{line, test, task, pr, sha, source}, ...]} — every claim that has **landed**
+    (§2.6): a claim is not evidence until it is on the trunk.
+
+    Two sources, both keyed by Story id: a merged pull request whose merge commit is on the
+    trunk contributes its body's claims (``source: "pr"``, ``pr`` its number, ``sha`` the merge
+    oid, ``task`` the Task id among the PR's own ids, :func:`pr_naming_ids`) — no new
+    round-trip, `pr_list` already asks for ``body``. A ``Proves:`` trailer on a trunk commit
+    itself contributes that commit's claims (``source: "commit"``, ``pr`` ``None``, ``sha`` the
+    commit, ``task`` the id token in its subject) — what makes the tick work for a product that
+    lands by fast-forward and has no pull requests at all. A claim named by both collapses to
+    the pull-request entry, which is why it is read first. Each Story's list sorts by
+    ``(line, task)``.
+    """
+    main_ref = f"origin/{product.main}"
+    per_story = {}
+    seen = set()
+    on_main = None
+
+    def add(claim, task, pr, sha, source):
+        key = (claim.story, claim.line, claim.test)
+        if key in seen:
+            return
+        seen.add(key)
+        per_story.setdefault(claim.story, []).append(
+            {"line": claim.line, "test": claim.test, "task": task, "pr": pr, "sha": sha,
+             "source": source})
+
+    for p in sorted(prs or [], key=lambda p: p.get("number") or 0):
+        if p.get("state") != MERGED_STATE:
+            continue
+        sha = (p.get("mergeCommit") or {}).get("oid")
+        if not sha:
+            continue
+        if on_main is None:
+            on_main = ancestry(product, [main_ref])
+        if not on_main(sha):
+            continue
+        task = next((i for i in pr_naming_ids(p) if i.startswith("T-")), None)
+        for claim in proves.parse(p.get("body") or ""):
+            add(claim, task, p.get("number"), sha, "pr")
+
+    since = record_since(product)
+    cmd = f"git log --format=%H%x1e%B --grep=^Proves: {main_ref}"
+    if since:
+        cmd += f" --since={since}"
+    for sha, body in _parse_proves_log(sh(cmd, product=product)):
+        subject = body.splitlines()[0] if body else ""
+        task = next((i for i in naming_ids(subject, product.main) if i.startswith("T-")), None)
+        for claim in proves.parse(body):
+            add(claim, task, None, sha, "commit")
+
+    for entries in per_story.values():
+        entries.sort(key=lambda e: (e["line"], e["task"] or ""))
+    return per_story
 
 
 def id_state(iid, iev, has_ci=True):
