@@ -16,8 +16,9 @@ The row kinds::
                            hold (paths outside ``writes:``, :mod:`asf.feeder.widen`) waits on
                            the rule until it widened the Task, else is RESHAPE → PLAN
     STALEMATE → ADJUDICATE a Feature at spec-/plan-review round >= 4: adjudicate, and nothing
-                           else for that Feature (another review round will not converge); or a
-                           Bug with 3 sessions behind it and still open (not a fourth fix)
+                           else for that Feature (another review round will not converge); or any
+                           launching kind (``CAPPED_KINDS``, and a Bug's fix) with 3 sessions behind
+                           it and still open (not a fourth attempt)
     CONFLICT → REBASE      an Active Task/Bug whose PR no longer merges, no session on it
     STALE → CLOSE          an Active Task/Bug whose PR was closed unmerged, branch left behind
     CARD → SPEC            a decided Feature card with no spec
@@ -117,6 +118,11 @@ NEW_DOC_KINDS = (CARD_SPEC, STARVED_SPEC, STARVED_PLAN, SPEC_PLAN, DIRECT_BUILD)
 #: the session kinds (a run's brief kind) the finish-first cap counts as in flight
 NEW_DOC_SESSIONS = ('spec', 'plan', SPEC_PLAN_KIND, DIRECT)
 FINISH = 'WAITS ON finish'
+#: The kinds ``candidates`` caps at ``attempt_limit`` (F-0080 §2.6, P10) — §1.1's enumeration.
+#: Not here: ``BUG → FIX`` (``bug_rows`` caps it itself), ``FIX → CORRECT`` (it carries its own
+#: ``CORRECTION_ROUNDS``, and a correction is an answer the harvest asked for, not an attempt the
+#: factory chose), ``STALEMATE`` and ``GROOM → ADJUDICATE`` (already the adjudicate row).
+CAPPED_KINDS = frozenset({CARD_SPEC, STARVED_SPEC, STARVED_PLAN, PLAN_CODE, CONFLICT, STALE})
 REVIEW_RE = re.compile(r'^(spec|plan)-review r(\d+)')
 CLOSED_PR_RE = re.compile(r'\bPR #\d+ CLOSED\b')
 #: ingest's line for a spec that sits on a branch, not the trunk (``spec on <branch>[ (review …)]``)
@@ -908,6 +914,18 @@ def hold_classes(rows, product):
             if r.kind in kinds and r.launches else r for r in rows]
 
 
+def _capped(row, attempts, limit, product):
+    """None above the limit; the STALEMATE row at it; the row itself below it (rows.bug_rows)."""
+    n = attempts.get(row.item_id, 0)
+    if n > limit:
+        return None
+    if n == limit:
+        return dataclasses.replace(
+            row, kind=STALEMATE, brief_kind='adjudicate', action=LAUNCH,
+            reason=f"{row.kind} after {n} sessions: adjudicate, not another attempt")
+    return row
+
+
 def candidates(index, product, inflight, attempts=None, occupancy=None, groom_state=None,
                landed_shas=None, decision_limit=None):
     """Every row the index supports right now, uncut by capacity, in emit order: tier, then the
@@ -959,6 +977,9 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
     rows += [r for r in bug_waits if r.item_id not in spoken_for]
     rows = hold_unlanded(rows, items, landed_shas)
     rows = hold_classes(rows, product)
+    cap, attempts = attempt_limit(product), attempts or {}
+    rows = [c for c in (_capped(r, attempts, cap, product) if r.launches and r.kind in CAPPED_KINDS
+                        else r for r in rows) if c is not None]
 
     def key(pair):
         seq, r = pair
