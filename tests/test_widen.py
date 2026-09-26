@@ -45,9 +45,7 @@ REPO_FILES = ('src/a.py', 'tests/test_a.py', 'tests/test_b.py', 'tests/test_c.py
 
 class ReportClaimTests(unittest.TestCase):
     def test_needs_writes_is_a_field_of_the_contract(self):
-        self.assertIn('needs writes', report.FIELDS)
         text = REPORT.format(left='none', needs='tests/test_b.py lib/shared.py')
-        self.assertEqual(report.parse(text)['needs writes'], 'tests/test_b.py lib/shared.py')
         self.assertEqual(report.footprint_claim(text),
                          ('needs writes', ['tests/test_b.py', 'lib/shared.py']))
 

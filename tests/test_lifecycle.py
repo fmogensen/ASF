@@ -432,11 +432,11 @@ class StateMachineInvariants(unittest.TestCase):
         self.assertEqual(lc.attempts(path), {'B-0001': 2})
 
     def _ruling_log(self, d, text):
-        """A fake session log whose REPORT's ``ruling:`` field is ``text`` — what
+        """A fake session log whose typed REPORT's ``ruling`` field is ``text`` — what
         ``settled_prs`` reads (:func:`asf.workers.report.ruling`)."""
         log = os.path.join(d, 'ruling.jsonl')
         rec = {'type': 'result', 'subtype': 'success', 'is_error': False,
-               'result': f'REPORT\nitem: B-0001\nstatus: done\nruling: {text}\n'}
+               'result': report.render('adjudicate', item='B-0001', ruling=text)}
         with open(log, 'w') as f:
             f.write(json.dumps(rec) + '\n')
         return log

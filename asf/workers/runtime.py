@@ -483,7 +483,7 @@ def failure_reason(rec):
     if isinstance(asf, dict) and isinstance(asf.get('cap'), dict):
         return 'token cap'
     text = str((rec or {}).get('result') or '')
-    if report.parse(text):
+    if report.fence(text) is not None:
         # a session that wrote its typed REPORT reached its end: the CLI's error texts are not in
         # it, and its prose may quote them ("check_x: permission denied in this session")
         return report.failure(text)
