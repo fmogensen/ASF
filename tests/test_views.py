@@ -12,7 +12,7 @@ from unittest import mock
 from asf import env
 from asf.views import capacity as capacity_view
 from asf.views import index_reader as ix
-from asf.views import prod, sessions, status
+from asf.views import prod, sessions, status, work
 from asf.workers import observe
 from asf.workers import pool as pool_mod
 
@@ -270,7 +270,7 @@ class DecisionsCellTests(ViewsTestCase):
 
     def test_the_row_sits_directly_after_ready_to_launch(self):
         names, _ = self.rows()
-        self.assertEqual(names[names.index('Ready to launch') + 1], 'Decisions')
+        self.assertEqual(names[names.index('Features') + 1], 'Decisions')
 
 
 class RecordCellTests(ViewsTestCase):
@@ -389,6 +389,335 @@ class SpanTests(unittest.TestCase):
 
     def test_age_of_none_is_the_unparseable_dash(self):
         self.assertEqual(ix.age(None), '—')
+
+
+class WorkCountsTests(unittest.TestCase):
+    """§3.1: the counts, called directly — no table, no root, no product."""
+    NOW = dt.datetime(2026, 9, 24, 12, 0, 0, tzinfo=dt.timezone.utc)
+
+    @staticmethod
+    def _bug(id_, sev=None, state='New', stage_since=None):
+        b = {'id': id_, 'type': 'bug', 'state': state}
+        if sev is not None:
+            b['severity'] = sev
+        if stage_since is not None:
+            b['stage_since'] = stage_since
+        return b
+
+    @staticmethod
+    def _feature(id_, stage=None, decided=None, stage_since=None):
+        f = {'id': id_, 'type': 'feature'}
+        if stage is not None:
+            f['stage'] = stage
+        if decided is not None:
+            f['decided'] = decided
+        if stage_since is not None:
+            f['stage_since'] = stage_since
+        return f
+
+    def test_severity_never_falls_back_to_s3(self):
+        self.assertEqual(work.severity({'severity': None}), work.UNTYPED)
+        self.assertEqual(work.severity({}), work.UNTYPED)
+        self.assertEqual(work.severity({'severity': 'S9'}), work.UNTYPED)
+        self.assertEqual(work.severity({'severity': 'S1'}), 'S1')
+
+    def test_on_day_is_false_for_absent_or_unparseable(self):
+        self.assertFalse(work.on_day(None, self.NOW))
+        self.assertFalse(work.on_day('not-a-date', self.NOW))
+        self.assertTrue(work.on_day(self.NOW.strftime('%Y-%m-%dT%H:%M:%SZ'), self.NOW))
+
+    def test_within_is_half_open_and_requires_a_parseable_ts(self):
+        since, now = '2026-09-22T12:00:00Z', '2026-09-24T12:00:00Z'
+        self.assertFalse(work.within(since, since, now))    # exclusive of since
+        self.assertTrue(work.within(now, since, now))       # inclusive of now
+        self.assertFalse(work.within(None, since, now))
+        self.assertFalse(work.within('nope', since, now))
+
+    def test_open_by_severity_includes_untyped_and_excludes_done(self):
+        items = {b['id']: b for b in [
+            self._bug('B-0001', 'S1', 'Active'),
+            self._bug('B-0002', 'S2', 'New'),
+            self._bug('B-0003', 'S3', 'New'),
+            self._bug('B-0004', 'S2', 'Closed', stage_since='2026-09-24T09:00:00Z'),
+            self._bug('B-0005', None, 'New'),
+        ]}
+        result = work.bugs(items, {}, self.NOW)
+        self.assertEqual(result.open_by_sev, {'S1': 1, 'S2': 1, 'S3': 1, 'S?': 1})
+        self.assertEqual(result.total, 5)
+
+    def test_fixed_today_is_the_local_day_boundary(self):
+        now = dt.datetime(2026, 9, 24, 15, 30, 0, tzinfo=dt.timezone.utc)
+        local_midnight = dt.datetime.combine(now.astimezone().date(), dt.time.min,
+                                             tzinfo=now.astimezone().tzinfo)
+        just_after = (local_midnight + dt.timedelta(minutes=1)).astimezone(dt.timezone.utc)
+        just_before = (local_midnight - dt.timedelta(minutes=1)).astimezone(dt.timezone.utc)
+        items = {b['id']: b for b in [
+            self._bug('B-0001', 'S2', 'Closed', stage_since=just_after.strftime('%Y-%m-%dT%H:%M:%SZ')),
+            self._bug('B-0002', 'S2', 'Closed', stage_since=just_before.strftime('%Y-%m-%dT%H:%M:%SZ')),
+        ]}
+        result = work.bugs(items, {}, now)
+        self.assertEqual(result.fixed_today, 1)
+
+    def test_in_fix_counts_each_bug_once_and_excludes_ended_and_non_bugs(self):
+        items = {b['id']: b for b in [self._bug('B-0001', 'S1', 'Active'),
+                                      self._bug('B-0002', 'S2', 'Active')]}
+        items['F-0001'] = self._feature('F-0001', stage='building')
+        runs = {
+            'fix-b-0001-a': [{'item': 'B-0001'}],
+            'fix-b-0001-b': [{'item': 'B-0001'}],
+            'fix-b-0002': [{'item': 'B-0002', 'ended': '2026-09-24T00:00:00Z'}],
+            'spec-f-0001': [{'item': 'F-0001'}],
+        }
+        result = work.bugs(items, runs, self.NOW)
+        self.assertEqual(result.in_fix, ['B-0001'])
+        self.assertEqual(result.in_fix_s1, ['B-0001'])
+
+    def test_oldest_open_s1_s2_breaks_ties_to_the_lower_id(self):
+        items = {b['id']: b for b in [
+            self._bug('B-0001', 'S1', 'Active', stage_since='2026-09-20T12:00:00Z'),
+            self._bug('B-0100', 'S1', 'Active', stage_since='2026-09-20T12:00:00Z'),
+            self._bug('B-0002', 'S2', 'Active', stage_since='2026-09-22T12:00:00Z'),
+            self._bug('B-0003', 'S3', 'Active', stage_since='2026-09-01T12:00:00Z'),
+        ]}
+        result = work.bugs(items, {}, self.NOW)
+        self.assertEqual(result.oldest, ('B-0001', 'S1', 4 * 86400))
+
+    def test_oldest_is_the_empty_tuple_with_no_measurable_open_high_severity_bug(self):
+        items = {b['id']: b for b in [self._bug('B-0001', 'S3', 'Active')]}
+        self.assertEqual(work.bugs(items, {}, self.NOW).oldest, ())
+
+    def test_a_bug_with_no_stage_since_is_open_never_fixed_today_or_oldest(self):
+        items = {
+            'B-0001': {'id': 'B-0001', 'type': 'bug', 'state': 'Active', 'severity': 'S1'},
+            'B-0002': self._bug('B-0002', 'S2', 'Closed', stage_since='not-a-date'),
+        }
+        result = work.bugs(items, {}, self.NOW)
+        self.assertEqual(result.open_by_sev['S1'], 1)
+        self.assertEqual(result.fixed_today, 0)
+        self.assertEqual(result.oldest, ())
+
+    def test_feature_stage_counts_partition_the_five_clauses(self):
+        items = {f['id']: f for f in [
+            self._feature('F-0001', stage=None, decided=True),
+            self._feature('F-0002', stage='card', decided=False),
+            self._feature('F-0003', stage='card'),
+            self._feature('F-0004', stage='spec-draft'),
+            self._feature('F-0005', stage='spec-review'),
+            self._feature('F-0006', stage='spec-approved'),
+            self._feature('F-0007', stage='plan-draft'),
+            self._feature('F-0008', stage='plan-review'),
+            self._feature('F-0009', stage='plan-approved'),
+            self._feature('F-0010', stage='building'),
+        ]}
+        result = work.features(items, {}, self.NOW, 7)
+        self.assertEqual(result.building, 1)
+        self.assertEqual(result.spec_plan, 6)
+        self.assertEqual(result.decided_waiting, 1)
+        self.assertEqual(result.undecided, 2)
+        self.assertEqual(result.total, 10)
+
+    def test_landed_today_covers_landed_and_on_prod_newest_first(self):
+        items = {f['id']: f for f in [
+            self._feature('F-0001', stage='landed', stage_since='2026-09-24T09:00:00Z'),
+            self._feature('F-0002', stage='on-prod', stage_since='2026-09-24T11:00:00Z'),
+            self._feature('F-0003', stage='landed', stage_since='2026-09-23T09:00:00Z'),
+        ]}
+        result = work.features(items, {}, self.NOW, 7)
+        self.assertEqual(result.landed_today, ['F-0002', 'F-0001'])
+
+    def test_median_to_land_skips_the_unmeasured_and_the_out_of_window(self):
+        items = {
+            'F-0010': self._feature('F-0010', stage='landed', stage_since='2026-09-22T12:00:00Z'),
+            'F-0011': self._feature('F-0011', stage='landed', stage_since='2026-09-20T12:00:00Z'),
+            'F-0012': self._feature('F-0012', stage='landed', stage_since='2026-09-18T12:00:00Z'),
+            'F-0013': self._feature('F-0013', stage='landed', stage_since='2026-09-19T12:00:00Z'),
+            'F-0014': self._feature('F-0014', stage='landed', stage_since='2026-09-15T12:00:00Z'),
+            'T-0012': {'id': 'T-0012', 'type': 'task', 'parent': 'F-0012'},
+        }
+        runs = {
+            'land-f-0010': [{'item': 'F-0010', 'feature': 'F-0010', 'started': '2026-09-21T12:00:00Z'}],
+            'land-f-0011': [{'item': 'F-0011', 'feature': 'F-0011', 'started': '2026-09-17T12:00:00Z'}],
+            'land-t-0012': [{'item': 'T-0012', 'started': '2026-09-12T12:00:00Z'}],
+            'land-f-0014': [{'item': 'F-0014', 'feature': 'F-0014', 'started': '2026-09-13T12:00:00Z'}],
+        }
+        result = work.features(items, runs, self.NOW, 7)
+        self.assertEqual(result.measured, 3)
+        self.assertEqual(result.median_to_land, 3 * 86400)
+
+    def test_median_to_land_of_an_even_sample_is_the_mean_of_the_two_middles(self):
+        items = {
+            'F-0001': self._feature('F-0001', stage='landed', stage_since='2026-09-23T12:00:00Z'),
+            'F-0002': self._feature('F-0002', stage='landed', stage_since='2026-09-22T12:00:00Z'),
+        }
+        runs = {
+            'a': [{'item': 'F-0001', 'feature': 'F-0001', 'started': '2026-09-22T12:00:00Z'}],
+            'b': [{'item': 'F-0002', 'feature': 'F-0002', 'started': '2026-09-19T12:00:00Z'}],
+        }
+        result = work.features(items, runs, self.NOW, 7)
+        self.assertEqual(result.measured, 2)
+        self.assertEqual(result.median_to_land, 2 * 86400)
+
+    def test_no_measurable_feature_is_a_none_median(self):
+        items = {'F-0001': self._feature('F-0001', stage='landed', stage_since='2026-09-23T12:00:00Z')}
+        result = work.features(items, {}, self.NOW, 7)
+        self.assertIsNone(result.median_to_land)
+        self.assertEqual(result.measured, 0)
+
+    def test_every_function_is_pure_and_opens_no_subprocess(self):
+        items = {'B-0001': self._bug('B-0001', 'S1', 'Active', stage_since='2026-09-20T12:00:00Z')}
+        runs = {'fix-b-0001': [{'item': 'B-0001'}]}
+        fitems = {'F-0001': self._feature('F-0001', stage='landed', stage_since='2026-09-20T12:00:00Z')}
+        with mock.patch('subprocess.run', side_effect=AssertionError('no subprocess')):
+            self.assertEqual(work.bugs(items, runs, self.NOW), work.bugs(items, runs, self.NOW))
+            self.assertEqual(work.features(fitems, {}, self.NOW, 7),
+                             work.features(fitems, {}, self.NOW, 7))
+
+
+class StatusWorkRows(ViewsTestCase):
+    """§3.2: the two cells, through ``status.render`` and the existing ``rows()`` markdown parser."""
+
+    def _index(self, items):
+        with open(os.path.join(self.root, 'index.json'), 'w') as f:
+            json.dump({'generated': '', 'items': items}, f)
+
+    def rows(self, cfg=None):
+        text = status.render(self.root, self.product, cfg=cfg or {'scheduler': {'kind': 'none'}})
+        names = [ln.split(' | ')[0].lstrip('| ') for ln in text.splitlines() if ln.startswith('| ')]
+        cells = {ln.split(' | ')[0].lstrip('| '): ln.split(' | ', 1)[1].rstrip(' |')
+                for ln in text.splitlines() if ln.startswith('| ') and 'Metric' not in ln}
+        return names, cells
+
+    def test_bugs_and_features_rows_render_the_exact_cells(self):
+        now = dt.datetime.now(dt.timezone.utc)
+
+        def ago(**kw):
+            return (now - dt.timedelta(**kw)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        self._index({
+            'B-0091': {'id': 'B-0091', 'type': 'bug', 'folder': 'bugs', 'state': 'Active',
+                      'severity': 'S1', 'stage_since': ago(days=3, hours=1)},
+            'B-0092': {'id': 'B-0092', 'type': 'bug', 'folder': 'bugs', 'state': 'Active',
+                      'severity': 'S2', 'stage_since': ago(days=1)},
+            'B-0093': {'id': 'B-0093', 'type': 'bug', 'folder': 'bugs', 'state': 'New',
+                      'severity': 'S3'},
+            'B-0094': {'id': 'B-0094', 'type': 'bug', 'folder': 'bugs', 'state': 'Closed',
+                      'severity': 'S2', 'stage_since': ago(hours=1)},
+            'F-0090': {'id': 'F-0090', 'type': 'feature', 'folder': 'features', 'stage': 'landed',
+                      'stage_since': ago(hours=1), 'decided': True},
+            'F-0091': {'id': 'F-0091', 'type': 'feature', 'folder': 'features', 'stage': 'building',
+                      'decided': True},
+            'F-0092': {'id': 'F-0092', 'type': 'feature', 'folder': 'features', 'stage': 'spec-review',
+                      'decided': True},
+            'F-0093': {'id': 'F-0093', 'type': 'feature', 'folder': 'features', 'stage': 'card',
+                      'decided': True},
+            'F-0094': {'id': 'F-0094', 'type': 'feature', 'folder': 'features', 'stage': 'card',
+                      'decided': False},
+            'T-0090': {'id': 'T-0090', 'type': 'task', 'folder': 'tasks', 'parent': 'F-0090'},
+        })
+        pool_mod.append_session(self.product, dict(job='fix-b-0091', item='B-0091', kind='fix-bug',
+                                                    pid=os.getpid(), account='w1',
+                                                    branch='fix-bug/b-0091'))
+        pool_mod.append_session(self.product, dict(job='land-t-0090', item='T-0090', kind='task',
+                                                    pid=os.getpid(), account='w1', branch='task/t-0090',
+                                                    started=ago(days=3, hours=1)))
+        _names, rows = self.rows()
+        self.assertEqual(rows['Bugs'], 'open S1 1 · S2 1 · S3 1 · in fix 1 (S1 B-0091) · '
+                                       'fixed today 1 · oldest open S1/S2 B-0091 S1 3d')
+        self.assertEqual(rows['Features'], 'landed today 1 (F-0090) · building 1 · spec/plan 1 · '
+                                           'decided, waiting 1 · undecided 1 · median to land 3d (7d, n=1)')
+
+    def test_s_question_clause_only_appears_when_non_zero(self):
+        self._index({'B-0001': {'id': 'B-0001', 'type': 'bug', 'folder': 'bugs', 'state': 'New',
+                                'severity': 'S2'}})
+        self.assertNotIn('S?', self.rows()[1]['Bugs'])
+        self._index({
+            'B-0001': {'id': 'B-0001', 'type': 'bug', 'folder': 'bugs', 'state': 'New', 'severity': 'S2'},
+            'B-0002': {'id': 'B-0002', 'type': 'bug', 'folder': 'bugs', 'state': 'New'},
+            'B-0003': {'id': 'B-0003', 'type': 'bug', 'folder': 'bugs', 'state': 'New'},
+        })
+        self.assertIn('· S? 2', self.rows()[1]['Bugs'])
+
+    def test_the_s1_parenthetical_is_absent_when_only_an_s2_is_in_fix(self):
+        self._index({'B-0001': {'id': 'B-0001', 'type': 'bug', 'folder': 'bugs', 'state': 'New',
+                                'severity': 'S2'}})
+        pool_mod.append_session(self.product, dict(job='fix-b-0001', item='B-0001', kind='fix-bug',
+                                                    pid=os.getpid(), account='w1',
+                                                    branch='fix-bug/b-0001'))
+        cell = self.rows()[1]['Bugs']
+        self.assertIn('in fix 1', cell)
+        self.assertNotIn('(S1', cell)
+
+    def test_oldest_is_none_when_every_open_bug_is_s3(self):
+        self._index({'B-0001': {'id': 'B-0001', 'type': 'bug', 'folder': 'bugs', 'state': 'New',
+                                'severity': 'S3'}})
+        self.assertIn('oldest open S1/S2 none', self.rows()[1]['Bugs'])
+
+    def test_median_unknown_when_nothing_landed_in_the_window(self):
+        self._index({'F-0001': {'id': 'F-0001', 'type': 'feature', 'folder': 'features',
+                                'stage': 'building', 'decided': True}})
+        self.assertIn('median to land unknown (7d, n=0)', self.rows()[1]['Features'])
+
+    def test_empty_record_forms_are_not_a_bare_dash(self):
+        self._index({'F-0001': {'id': 'F-0001', 'type': 'feature', 'folder': 'features',
+                                'stage': 'building', 'decided': True}})
+        self.assertEqual(self.rows()[1]['Bugs'], 'no Bugs in the record')
+        self._index({'B-0001': {'id': 'B-0001', 'type': 'bug', 'folder': 'bugs', 'state': 'New',
+                                'severity': 'S3'}})
+        self.assertEqual(self.rows()[1]['Features'], 'no Features in the record')
+
+    def test_row_order_is_ready_to_launch_bugs_features(self):
+        self._index({'F-0001': {'id': 'F-0001', 'type': 'feature', 'folder': 'features',
+                                'state': 'New', 'decided': True}})
+        names, _cells = self.rows()
+        i = names.index('Ready to launch')
+        self.assertEqual(names[i:i + 3], ['Ready to launch', 'Bugs', 'Features'])
+
+    def test_land_window_days_convention_changes_the_window_and_its_label(self):
+        self._index({'F-0001': {'id': 'F-0001', 'type': 'feature', 'folder': 'features',
+                                'stage': 'building', 'decided': True}})
+        product = env.Product('p', {'repo_dir': self.tmp, 'main': 'trunk', 'ci': {'provider': 'none'},
+                                    'deploy_sha': 'none', 'conventions': {'land_window_days': 14}})
+        text = status.render(self.root, product, cfg={'scheduler': {'kind': 'none'}})
+        rows = {ln.split(' | ')[0].lstrip('| '): ln.split(' | ', 1)[1].rstrip(' |')
+               for ln in text.splitlines() if ln.startswith('| ') and 'Metric' not in ln}
+        self.assertIn('(14d,', rows['Features'])
+
+
+class WorkFailureTests(ViewsTestCase):
+    """§3.3: neither row can cost its reader anything."""
+
+    def test_no_index_names_the_key_for_both_rows(self):
+        nowhere = os.path.join(self.tmp, 'nowhere')
+        self.assertEqual(work.bugs_cell(nowhere, self.product),
+                         '— (not configured: backlog_dir (no index.json))')
+        self.assertEqual(work.features_cell(nowhere, self.product),
+                         '— (not configured: backlog_dir (no index.json))')
+
+    def test_a_corrupt_index_is_one_cell_and_the_table_survives(self):
+        with open(os.path.join(self.root, 'index.json'), 'w') as f:
+            f.write('{not json')
+        text = status.render(self.root, self.product, cfg={'scheduler': {'kind': 'none'}})
+        rows = {ln.split(' | ')[0].lstrip('| '): ln.split(' | ', 1)[1].rstrip(' |')
+               for ln in text.splitlines() if ln.startswith('| ') and 'Metric' not in ln}
+        self.assertTrue(rows['Bugs'].startswith('? ('), rows['Bugs'])
+        self.assertTrue(rows['Features'].startswith('? ('), rows['Features'])
+        self.assertIn('Groom', rows)
+
+    def test_an_unreadable_ledger_still_renders_with_in_fix_zero(self):
+        with open(os.path.join(self.root, 'index.json'), 'w') as f:
+            json.dump({'generated': '', 'items': {
+                'B-0001': {'id': 'B-0001', 'type': 'bug', 'state': 'New', 'severity': 'S1'},
+            }}, f)
+        with mock.patch('asf.workers.lifecycle.runs', side_effect=OSError('nope')):
+            cell = work.bugs_cell(self.root, self.product)
+        self.assertIn('in fix 0', cell)
+
+    def test_a_bug_with_no_stage_since_is_open_not_fixed_and_not_oldest(self):
+        items = {'B-0001': {'id': 'B-0001', 'type': 'bug', 'state': 'Active', 'severity': 'S1'}}
+        result = work.bugs(items, {}, dt.datetime.now(dt.timezone.utc))
+        self.assertEqual(result.open_by_sev['S1'], 1)
+        self.assertEqual(result.fixed_today, 0)
+        self.assertEqual(result.oldest, ())
 
 
 class ProdViewTests(ViewsTestCase):

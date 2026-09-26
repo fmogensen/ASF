@@ -57,6 +57,8 @@ class ShapeTests(SummaryTestCase):
     def test_empty_ledger_prints_two_none_headers(self):
         text = self.render()
         self.assertEqual(text.split('\n'), [
+            '', 'WORK since 2026-09-21T12:00:00Z (first tick on this clock)',
+            'bugs      +0 filed, 0 fixed', 'features  0 landed, 0 started',
             '', 'IN FLIGHT — none', '',
             'DONE since 2026-09-21T12:00:00Z — none (first tick on this clock)'])
 
@@ -64,7 +66,9 @@ class ShapeTests(SummaryTestCase):
         self.launch('spec-f-0001')
         text = self.render()
         self.assertIn('IN FLIGHT — 1 session', text)
-        self.assertIn('job', text.split('\n')[2])           # the column line follows the header
+        lines = text.split('\n')
+        header = lines[lines.index('IN FLIGHT — 1 session') + 1]
+        self.assertIn('job', header)                        # the column line follows the header
         row = [ln for ln in text.split('\n') if ln.startswith('spec-f-0001')][0]
         for cell in ('F-0001', 'spec', 'acct-a', 'opus', 'working', '12m'):
             self.assertIn(cell, row)
@@ -133,7 +137,7 @@ class DoneTests(SummaryTestCase):
         text = self.render()
         self.assertIn('failed: rate-limit', text)
         self.assertIn('dead pid', text)
-        self.assertNotIn('landed', text)
+        self.assertNotIn('landed', text.split('DONE')[1])
 
     def test_window_is_since_the_previous_stamp_half_open(self):
         summary.write_stamp(self.product, 'all', '2026-09-22T11:30:00Z')
@@ -213,6 +217,85 @@ class FailureTests(SummaryTestCase):
             summary.run(_ctx(self.product), None, out=lines.append, now=NOW)
         self.assertEqual(len(lines), 1, lines)
         self.assertTrue(lines[0].startswith('tick: summary not rendered ('), lines[0])
+
+
+class WorkDigestTests(SummaryTestCase):
+    """§3.4: the ``WORK since`` block's two delta lines, over ``SummaryTestCase``'s fixture."""
+
+    def _write_index(self, items):
+        with open(os.path.join(shadow.record_dir(self.product), 'index.json'), 'w') as f:
+            json.dump({'generated': '', 'items': items}, f)
+
+    def _launch(self, job, item, feature, started):
+        pool_mod.append_session(self.product, dict(job=job, item=item, kind='task', feature=feature,
+                                                    account='acct-a', model='opus', pid=101,
+                                                    branch=f'task/{item}', started=started))
+
+    def setUp(self):
+        super().setUp()
+        summary.write_stamp(self.product, 'all', '2026-09-22T11:30:00Z')
+        self._write_index({
+            'F-0001': {'id': 'F-0001', 'type': 'feature', 'title': 'a feature', 'folder': 'features',
+                      'state': 'New', 'decided': True, 'rank': 1},
+            'F-0002': {'id': 'F-0002', 'type': 'feature', 'title': 'b feature', 'folder': 'features',
+                      'state': 'New', 'decided': True, 'rank': 2},
+            'F-0003': {'id': 'F-0003', 'type': 'feature', 'title': 'c feature', 'folder': 'features',
+                      'state': 'New', 'decided': True, 'rank': 3},
+            'F-0004': {'id': 'F-0004', 'type': 'feature', 'title': 'landed', 'folder': 'features',
+                      'state': 'New', 'decided': True, 'rank': 4, 'stage': 'landed',
+                      'stage_since': '2026-09-22T11:45:00Z'},
+            'B-0010': {'id': 'B-0010', 'type': 'bug', 'title': 'filed', 'folder': 'bugs',
+                      'state': 'New', 'stage_since': '2026-09-22T11:45:00Z'},
+            'B-0011': {'id': 'B-0011', 'type': 'bug', 'title': 'fixed 1', 'folder': 'bugs',
+                      'state': 'Closed', 'stage_since': '2026-09-22T11:40:00Z'},
+            'B-0012': {'id': 'B-0012', 'type': 'bug', 'title': 'fixed 2', 'folder': 'bugs',
+                      'state': 'Resolved', 'stage_since': '2026-09-22T11:50:00Z'},
+            'B-0013': {'id': 'B-0013', 'type': 'bug', 'title': 'filed before the window', 'folder': 'bugs',
+                      'state': 'New', 'stage_since': '2026-09-22T11:00:00Z'},
+            'B-0014': {'id': 'B-0014', 'type': 'bug', 'title': 'no longer New', 'folder': 'bugs',
+                      'state': 'Active', 'stage_since': '2026-09-22T11:45:00Z'},
+        })
+
+    def test_the_block_sits_above_in_flight_and_names_the_since(self):
+        text = self.render()
+        lines = text.split('\n')
+        self.assertIn('WORK since 2026-09-22T11:30:00Z', lines)
+        self.assertLess(lines.index('WORK since 2026-09-22T11:30:00Z'), lines.index('IN FLIGHT — none'))
+
+    def test_bugs_line_counts_filed_and_fixed_in_the_window(self):
+        self.assertIn('bugs      +1 filed, 2 fixed', self.render())
+
+    def test_features_line_names_the_landed_feature_and_counts_started(self):
+        self._launch('spec-f-0001', 'F-0001', 'F-0001', '2026-09-22T11:35:00Z')
+        self._launch('spec-f-0002', 'F-0002', 'F-0002', '2026-09-22T11:36:00Z')
+        self._launch('spec-f-0003', 'F-0003', 'F-0003', '2026-09-22T11:37:00Z')
+        self._launch('spec-f-0003-again', 'F-0003', 'F-0003', '2026-09-22T11:38:00Z')
+        self._launch('spec-f-0004-before', 'F-0004', 'F-0004', '2026-09-22T11:00:00Z')
+        self.assertIn('features  1 landed (F-0004), 3 started', self.render())
+
+    def test_window_is_half_open_on_both_edges(self):
+        self._write_index({
+            'B-0001': {'id': 'B-0001', 'type': 'bug', 'state': 'New', 'stage_since': '2026-09-22T11:30:00Z'},
+            'B-0002': {'id': 'B-0002', 'type': 'bug', 'state': 'New', 'stage_since': NOW},
+        })
+        self.assertIn('bugs      +1 filed, 0 fixed', self.render())
+
+    def test_a_quiet_tick_still_prints_the_zeros(self):
+        self._write_index({})
+        text = self.render()
+        self.assertIn('bugs      +0 filed, 0 fixed', text)
+        self.assertIn('features  0 landed, 0 started', text)
+
+    def test_first_tick_marks_the_block_too(self):
+        os.remove(summary.stamp_path(self.product, 'all'))
+        self.assertIn('WORK since 2026-09-21T12:00:00Z (first tick on this clock)', self.render())
+
+    def test_an_unreadable_record_clone_drops_only_the_block(self):
+        with mock.patch.object(summary.index_reader, 'load', side_effect=OSError('nope')):
+            text = self.render()
+        self.assertNotIn('WORK since', text)
+        self.assertIn('IN FLIGHT', text)
+        self.assertIn('DONE since', text)
 
 
 class TickDigestTests(SummaryTestCase):

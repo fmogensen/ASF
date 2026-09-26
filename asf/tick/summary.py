@@ -1,5 +1,5 @@
-"""asf.tick.summary — the two tables the tick ends with: the sessions in flight, and the ones
-that ended since the last tick on this clock.
+"""asf.tick.summary — the three blocks the tick ends with: the ``WORK since`` deltas, the sessions
+in flight, and the ones that ended since the last tick on this clock.
 
 Folded out of the session ledger through :mod:`asf.workers.lifecycle` (the one model of a lane
 job's life), each row titled from the record clone's ``index.json``. Best-effort console output:
@@ -11,6 +11,7 @@ import os
 from asf import env, scheduler
 from asf.tick import shadow
 from asf.views import index_reader
+from asf.views import work
 from asf.views.sessions import pid_alive
 from asf.workers import lifecycle, pool
 
@@ -79,6 +80,17 @@ def titles(product):
     return {item_id: item.get('title') or '' for item_id, item in items.items()}
 
 
+def work_lines(product, since, now):
+    """The two delta lines, or () when the record clone or the ledger cannot be read — the block
+    is then absent and the two session tables are unaffected."""
+    try:
+        items, _generated = index_reader.load(shadow.record_dir(product))
+        runs = lifecycle.runs(pool.sessions_path(product))
+    except (OSError, ValueError, KeyError, TypeError):
+        return ()
+    return work.digest(items, runs, since, now)
+
+
 # ---- the rows, both through lifecycle -----------------------------------------------
 
 def inflight_rows(product, alive):
@@ -136,7 +148,7 @@ IN_FLIGHT_COLUMNS =('job', 'item', 'kind', 'feature', 'account', 'model', 'statu
 DONE_COLUMNS = ('job', 'item', 'kind', 'result', 'took', 'what')
 
 
-def render(inflight, done, titles_by_item, since, now, first):
+def render(inflight, done, titles_by_item, since, now, first, work_lines=()):
     in_records = [{
         'job': r.get('job'), 'item': r.get('item'), 'kind': r.get('kind'),
         'feature': r.get('feature'), 'account': r.get('account'), 'model': r.get('model'),
@@ -158,6 +170,10 @@ def render(inflight, done, titles_by_item, since, now, first):
     done_title = f'DONE since {since}'
     done_suffix = ' (first tick on this clock)' if first else ''
     lines = []
+    if work_lines:
+        lines.append('')
+        lines.append(f'WORK since {since}' + (' (first tick on this clock)' if first else ''))
+        lines.extend(work_lines)
     for title, columns, records, suffix in (
         ('IN FLIGHT', IN_FLIGHT_COLUMNS, in_records, ''),
         (done_title, DONE_COLUMNS, done_records, done_suffix),
@@ -186,7 +202,8 @@ def run(ctx, chosen, out=print, now=None, alive=pid_alive, ran=None):
         since = window_start(stamp, now)
         inflight = inflight_rows(product, alive)
         done = done_rows(product, since, now)
-        out(render(inflight, done, titles(product), since, now, stamp is None))
+        lines = work_lines(product, since, now)
+        out(render(inflight, done, titles(product), since, now, stamp is None, work_lines=lines))
         if ran is not None:
             out('\n' + '\n'.join(digest(ran, getattr(ctx, 'counts', None))))
         write_stamp(product, clock_name, now)

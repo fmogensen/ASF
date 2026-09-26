@@ -15,6 +15,10 @@ Every row is filled from what exists, or says which key would fill it —
   closing rule sees (``rule: no-rule``, §2.7 of the closing spec; ``asf check`` names each);
 * **Ready to launch** — what ``asf next --json`` would print (the feeder over the record's
   ``index.json``, less the sessions in flight);
+* **Bugs** — the work itself, from the record's ``index.json`` and the session ledger
+  (``asf.views.work``): open by severity, in fix now, fixed today, and the oldest open S1/S2;
+* **Features** — the same two sources: landed today, building, spec/plan in flight, decided and
+  waiting, undecided, and the median time to land over ``conventions.land_window_days``;
 * **Decisions** — the undecided cards (D6's one ranking) and the first few to decide;
 * **Quota 5h/7d** — each account through the quota source (``worker_pool.quota_command``), the
   cell naming the band when it is not ``free``, and a stopped account's reset (``— resets
@@ -372,6 +376,7 @@ def release_cell(root, product):
 
 
 def render(root, product, cfg=None):
+    from asf.views import work
     cfg = env.load_config() if cfg is None else cfg
     now = datetime.datetime.now().strftime('%H:%M')
     out = [f"**FACTORY STATUS {now}**", ""]
@@ -388,6 +393,8 @@ def render(root, product, cfg=None):
                        ('Release', lambda: release_cell(root, product)),
                        ('Record', lambda: record_cell(root)),
                        ('Ready to launch', lambda: ready_cell(root, product)),
+                       ('Bugs', lambda: work.bugs_cell(root, product)),
+                       ('Features', lambda: work.features_cell(root, product)),
                        ('Decisions', lambda: decisions_cell(root, product)),
                        ('Quota 5h/7d', lambda: quota_cell(cfg)),
                        ('Cron', lambda: cron_cell(cfg, product)),
