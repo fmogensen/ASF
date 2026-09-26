@@ -534,6 +534,38 @@ def already_on_trunk(repo, trunk, branch, conv, item):
     return False, []
 
 
+def item_on_trunk(repo, trunk, item):
+    """The first commit on ``origin/<trunk>`` whose subject names ``item`` as a token, or ''."""
+    if not item:
+        return ''
+    r = H.sh(['git', 'log', '--no-merges', '-F', '-i', f'--grep={item}', '--format=%H %s',
+              f'origin/{trunk}'], cwd=repo)
+    for line in (r.stdout.splitlines() if r.returncode == 0 else []):
+        sha, _, subject = line.partition(' ')
+        if githooks.names_item(subject, item):
+            return sha
+    return ''
+
+
+def empty_branch_landed(repo, trunk, branch, item, pr):
+    """``(landed, why)`` for a branch with nothing past the trunk. Landed only when it carries no
+    own commit (``--no-merges origin/<trunk>..origin/<branch>`` empty) and its work is on the
+    trunk: its PR merged, or a commit naming ``item`` reachable from the trunk with no PR still
+    open. A branch reset to the trunk tip — a repair's reset, seconds before its work is pushed
+    again — matches neither: it waits, never deleted, its record not advanced."""
+    own = H.sh(['git', 'rev-list', '--no-merges', f'origin/{trunk}..origin/{branch}'], cwd=repo)
+    if own.returncode != 0 or own.stdout.split():
+        return False, f'its own commits past origin/{trunk} unreadable or present'
+    pr = pr or {}
+    if pr.get('state') == 'MERGED':
+        return True, ''
+    if pr.get('state') == 'OPEN':
+        return False, f"its PR #{pr.get('number')} is still open"
+    if not item_on_trunk(repo, trunk, item):
+        return False, f'no commit naming {item or "its item"} is on origin/{trunk}'
+    return True, ''
+
+
 def superseded_by(items, item):
     """The state that supersedes a branch, or None: a removed card (B-0065) or a Bug the record
     holds Closed/Resolved (B-0057)."""
@@ -722,6 +754,8 @@ def next_state(prev, facts):
         return keep
     if s == MERGING and f.get('merging_landed'):  # R8: the push reached the trunk, the line did not
         return MERGED, 'method=' + (rec.get('method') or 'ff')
+    if f.get('empty'):  # nothing past the trunk and not landed: it waits, its record unmoved
+        return keep
     if s is None and f.get('orphan'):  # a run-less branch the lane closes (orphan_facts)
         return STALE, f['orphan']
     closed = f.get('closed')
@@ -941,7 +975,11 @@ class Lane:
                      cwd=repo).stdout.strip()
         f['ahead'] = int(ahead) if ahead.isdigit() else 0
         if f['ahead'] == 0:
-            f['on_trunk'] = lifecycle.finished(run) or bool(rec)
+            landed, why = empty_branch_landed(repo, trunk, b, item, pr)
+            if landed:
+                f['on_trunk'] = lifecycle.finished(run) or bool(rec)
+            else:
+                f['empty'] = why
             return f
         done, extras = already_on_trunk(repo, trunk, b, conv, item)
         f['on_trunk'], f['extras'] = done, extras
@@ -1073,7 +1111,11 @@ class Lane:
                      cwd=self.repo).stdout.strip()
         f['ahead'] = int(ahead) if ahead.isdigit() else 0
         if f['ahead'] == 0:
-            f['on_trunk'] = True
+            landed, why = empty_branch_landed(self.repo, self.trunk, b, item, pr)
+            if landed:
+                f['on_trunk'] = True
+            else:
+                f['empty'] = why
             return f
         done, extras = already_on_trunk(self.repo, self.trunk, b, self.conv, item)
         if done:
@@ -1319,6 +1361,12 @@ class Lane:
         transition's side effect; the last record written, or None when nothing moved."""
         moved = None
         prev = f.get('prev') or {}
+        if f.get('empty') and next_state(f.get('prev'), f) == (prev.get('state'),
+                                                                  prev.get('reason', '')):
+            if prev or f.get('ended'):  # a live session's fresh branch says nothing yet
+                self.out(f"empty branch — waits: {f['branch']}: {f['empty']}")
+                self.results[f['branch']] = 'waiting'
+            return None  # never deleted, never landed: an owed delete waits too
         if prev.get('delete') == DELETE_OWED and not self.dry_run and self.repo \
                 and f.get('head') and f['head'] == prev.get('head'):
             self.push_or_defer('delete', f)
