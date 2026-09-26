@@ -1486,5 +1486,148 @@ class SkippedRequiredCheck(unittest.TestCase):
         self.assertEqual(self._gate(host, checks, cls=lane.DOCS)[0], 'ci')
 
 
+class PathFilteredRequiredCheck(unittest.TestCase):
+    """A PR whose CI path-filters suites (a job ``if:`` false reports skipped; a job the workflow
+    never created is missing) merges under ``conventions.merge_skipped: path-filtered`` (the
+    default) once every workflow run on its head completed, a required check concluded success
+    and none is red. Anything short of that waits; ``never`` keeps skip-is-not-green."""
+    REQUIRED = ['gate', 'gate-tests', 'm8-e2e', 'p1-e2e']
+
+    def _host(self, conv=None):
+        cfg = {'repo_slug': 'o/p', 'conventions': dict({
+            'landing': 'pull-request', 'landing_checks': self.REQUIRED,
+            'landing_checks_missing': 'wait'}, **(conv or {}))}
+        product = env.Product('p', cfg)
+        tmp = tempfile.mkdtemp(prefix='pathf_')
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        runner = lane.Lane.__new__(lane.Lane)
+        self.lines = []
+        runner.product, runner.conv, runner.out, runner.dry_run = product, product.conventions, \
+            self.lines.append, False
+        runner.results, runner.now, runner.state_dir = {}, NOW, tmp
+        runner.repo = None
+        host = lane.GitHubHost(product, None)
+        host.lane = runner
+        self.runner = runner
+        return host
+
+    def _gh(self, checks, runs, jobs):
+        self.calls = []
+
+        def gh(args):
+            self.calls.append(args)
+            if args[:2] == ['pr', 'checks']:
+                return 0, json.dumps(checks), ''
+            if args[0] == 'api' and '/actions/runs?head_sha=' in args[1]:
+                return 0, json.dumps({'workflow_runs': runs}), ''
+            if args[0] == 'api' and args[1].split('?')[0].endswith('/jobs'):
+                return 0, json.dumps({'jobs': jobs}), ''
+            return 1, '', 'unexpected'
+        return gh
+
+    def _gate(self, host, checks, runs, jobs, prev=None):
+        f = {'branch': 'worker/T-0001', 'prev': prev or rec(lane.GATE, pr=7), 'class': lane.CODE,
+             'head': HEAD}
+        with mock.patch.object(harvest, '_gh', side_effect=self._gh(checks, runs, jobs)), \
+                mock.patch.object(lane.Lane, 'set', lambda self, f, s, r, result=None, **kw:
+                                  self.results.update({f['branch']: (s, r)})), \
+                mock.patch.object(lane, 'send_back', lambda ln, f, *a, **k:
+                                  ln.results.update({f['branch']: ('back', a)})):
+            how = host.check_gate(f, 7, ['src/a.py'])
+            return how, self.runner.results.get(f['branch']), f
+
+    CHECKS = [{'name': 'gate', 'bucket': 'pass'}, {'name': 'gate-tests', 'bucket': 'pass'},
+              {'name': 'm8-e2e', 'bucket': 'skipping'}]
+    JOBS = [{'name': 'changes', 'conclusion': 'success'},
+            {'name': 'gate', 'conclusion': 'success'},
+            {'name': 'gate-tests', 'conclusion': 'success'},
+            {'name': 'm8-e2e', 'conclusion': 'skipped'}]
+    DONE = [{'id': 11, 'name': 'ci', 'status': 'completed', 'conclusion': 'success'}]
+
+    def _checks(self, gate='pass'):
+        return [dict(c, bucket=gate) if c['name'] == 'gate' else c for c in self.CHECKS]
+
+    def test_completed_run_skipped_and_missing_with_a_success_merges(self):
+        host = self._host()
+        how, _got, f = self._gate(host, self._checks(), self.DONE, self.JOBS)
+        self.assertEqual(how, 'ci')
+        text = '\n'.join(self.lines)
+        self.assertIn('m8-e2e skipped by the workflow — satisfied (run completed, gate, '
+                      'gate-tests success)', text)
+        self.assertIn('p1-e2e not created by the workflow — satisfied', text)
+        self.assertTrue(f.get('on_checks'))
+
+    def test_a_run_still_in_progress_waits_and_never_reaches_the_local_gate(self):
+        host = self._host()
+        runs = self.DONE + [{'id': 12, 'name': 'e2e', 'status': 'in_progress'}]
+        old = rec(lane.WAITING_CI, pr=7, since=NOW - 10 * 86400)
+        how, got, _f = self._gate(host, self._checks(), runs, self.JOBS, prev=old)
+        self.assertIsNone(how)
+        self.assertEqual(got[0], lane.WAITING_CI)
+        self.assertIn('not completed', got[1])
+        self.assertIn('e2e', got[1])
+
+    def test_a_skip_beside_a_failed_required_check_is_red(self):
+        host = self._host()
+        how, got, _f = self._gate(host, self._checks('fail'), self.DONE, self.JOBS)
+        self.assertIsNone(how)
+        self.assertEqual(got[0], 'back')
+
+    def test_all_required_skipped_or_missing_with_no_success_waits(self):
+        host = self._host()
+        checks = [{'name': 'gate', 'bucket': 'skipping'},
+                  {'name': 'gate-tests', 'bucket': 'skipping'},
+                  {'name': 'm8-e2e', 'bucket': 'skipping'}]
+        jobs = [{'name': c['name'], 'conclusion': 'skipped'} for c in checks]
+        how, got, _f = self._gate(host, checks, self.DONE, jobs)
+        self.assertIsNone(how)
+        self.assertEqual(got[0], lane.WAITING_CI)
+        self.assertIn('skipped', got[1])
+
+    def test_a_neutral_check_is_not_a_workflow_skip(self):
+        # gh buckets NEUTRAL with SKIPPED; only a job that concluded `skipped` is the workflow's
+        host = self._host()
+        jobs = [dict(j, conclusion='neutral') if j['name'] == 'm8-e2e' else j for j in self.JOBS]
+        how, got, _f = self._gate(host, self._checks(), self.DONE, jobs)
+        self.assertIsNone(how)
+        self.assertIn('m8-e2e', got[1])
+
+    def test_never_keeps_skipped_not_green(self):
+        host = self._host(conv={'merge_skipped': 'never'})
+        how, got, _f = self._gate(host, self._checks(), self.DONE, self.JOBS)
+        self.assertIsNone(how)
+        self.assertEqual(got[0], lane.WAITING_CI)
+        self.assertIn('m8-e2e', got[1])
+        self.assertFalse(any('/actions/runs' in ' '.join(a) for a in self.calls))
+
+    def test_unreadable_runs_hold(self):
+        host = self._host()
+        how, got, _f = self._gate(host, self._checks(), [], self.JOBS)
+        self.assertIsNone(how)
+        self.assertIn('m8-e2e', got[1])
+
+    def test_recheck_before_merging_still_applies(self):
+        host = self._host()
+        f = {'branch': 'worker/T-0001', 'class': lane.CODE, 'head': HEAD, 'how': 'ci',
+             'on_checks': True}
+        with mock.patch.object(harvest, '_gh', side_effect=self._gh(
+                self._checks(), self.DONE, self.JOBS)):
+            self.assertIsNone(host.recheck(f, 7))
+        # a required check went red since the pass read them
+        with mock.patch.object(harvest, '_gh', side_effect=self._gh(
+                self._checks('fail'), self.DONE, self.JOBS)):
+            self.assertIn('red', host.recheck(f, 7))
+        # a new run started on the head: the skip is no longer the workflow's final word
+        runs = self.DONE + [{'id': 13, 'name': 'ci', 'status': 'queued'}]
+        with mock.patch.object(harvest, '_gh', side_effect=self._gh(
+                self._checks(), runs, self.JOBS)):
+            self.assertIn('not completed', host.recheck(f, 7))
+        # merge_skipped flipped to never between the gate and the merge
+        host = self._host(conv={'merge_skipped': 'never'})
+        with mock.patch.object(harvest, '_gh', side_effect=self._gh(
+                self._checks(), self.DONE, self.JOBS)):
+            self.assertIn('m8-e2e', host.recheck(f, 7))
+
+
 if __name__ == '__main__':
     unittest.main()
