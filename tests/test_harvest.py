@@ -2368,6 +2368,34 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertFalse([l for l in lines if 'informational' in l], lines)
         self.assertEqual(self.merges(calls), [])
 
+    def test_a_check_the_ci_queue_cancelled_to_rerun_waits_never_sends_the_pr_back(self):
+        """a product's B-1377 (2026-09-26): the CI queue's trunk relief cancelled PR #829's run
+        to free runners for a starved trunk run, keeping it to re-run. The lane read its
+        cancelled ``gate``/``gate-tests`` as red and held the branch — another adjudicate
+        session on a head nothing was wrong with. A check of a run the queue holds for re-run is
+        pending: the PR waits for the re-run."""
+        link = 'https://github.com/o/p/actions/runs/777/job/1'
+        calls = self.fake_gh([{'name': 'ci', 'bucket': 'cancel', 'link': link}])
+        with open(os.path.join(self.state_dir, 'ci-queue.json'), 'w', encoding='utf-8') as f:
+            json.dump({'relief': [{'id': 777, 'kind': 'pr', 'item': 'B-0001'}]}, f)
+        self.push_fix(['approved'])
+        results, lines = self.harvest(self.pr_product())
+        self.assertEqual(results, {'fix/B-0001': 'waiting'}, lines)
+        self.assertFalse([l for l in lines if l.startswith('held ')], lines)
+        self.assertTrue([l for l in lines if 're-run' in l], lines)
+        self.assertEqual(self.merges(calls), [])
+
+    def test_pr_checks_reads_a_cancel_the_queue_holds_for_rerun_as_pending(self):
+        out = json.dumps([{'name': 'gate', 'bucket': 'cancel',
+                           'link': 'https://github.com/o/p/actions/runs/5/job/9'},
+                          {'name': 'lint', 'bucket': 'cancel',
+                           'link': 'https://github.com/o/p/actions/runs/6/job/9'}])
+        with mock.patch.object(harvest, '_gh', return_value=(1, out, '')):
+            self.assertEqual(lane.pr_checks('o/p', 1, ('gate',), rerun=(5,))[0], 'pending')
+            self.assertEqual(lane.pr_checks('o/p', 1, ('lint',), rerun=(5,))[:2],
+                             ('red', 'lint'))  # a cancel nobody will re-run stays red
+            self.assertEqual(lane.pr_checks('o/p', 1, ('gate',))[:2], ('red', 'gate'))
+
     def test_pr_checks_judges_only_the_required_names(self):
         out = json.dumps([{'name': 'gate', 'bucket': 'pass'},
                           {'name': 'gate-tests', 'bucket': 'fail'},

@@ -822,6 +822,18 @@ def save(name, data):
         pass
 
 
+def rerun_ids(state_dir):
+    """The ids of the runs the trunk relief cancelled and holds to re-run (``relief``), read off
+    the queue file in ``state_dir``: their cancelled checks are no verdict on the PR's code — the
+    lane waits for the re-run instead of handing the branch back. Never raises."""
+    try:
+        with open(os.path.join(state_dir, QUEUE_FILE), encoding='utf-8') as f:
+            relief = (json.load(f) or {}).get('relief')
+    except (OSError, ValueError, AttributeError):
+        return frozenset()
+    return frozenset(str(r.get('id')) for r in relief or () if isinstance(r, dict) and r.get('id'))
+
+
 def prune(data, now):
     data['entries'] = {k: v for k, v in data['entries'].items()
                        if _age(v.get('seen'), now) <= STALE_S}

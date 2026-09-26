@@ -2768,7 +2768,7 @@ class GitHubHost(Host):
         p = H.gh_json(['pr', 'view', branch, '-R', self.slug, '--json',
                        'number,state,headRefOid,mergeCommit,autoMergeRequest'], {})
         required = self.required_checks(self.lane.state_dir) if p and self.lane else ()
-        state, _detail, _checks = (pr_checks(self.slug, p.get('number'), required) if p
+        state, _detail, _checks = (pr_checks(self.slug, p.get('number'), required, self.rerun_ids()) if p
                                    else ('none', '', []))
         return {'pr': p.get('number'), 'state': p.get('state'), 'head': p.get('headRefOid'),
                 'checks': {'green': 'passed', 'red': 'failed'}.get(state, state),
@@ -2824,7 +2824,7 @@ class GitHubHost(Host):
         required, why = self.merge_required(lane.state_dir, cls, f.get('head'))
         if required is None:
             return f'required checks unknown: {why}'
-        state, detail, checks = pr_checks(self.slug, number, required)
+        state, detail, checks = pr_checks(self.slug, number, required, self.rerun_ids())
         if state == 'red' or (state != 'green' and f.get('how') == 'ci'):
             return f'required checks {state} at merge: {detail}'
         if f.get('on_checks') and required:
@@ -2891,6 +2891,11 @@ class GitHubHost(Host):
                 out[n] = (f'{n} not created by the workflow — satisfied (run completed, {gate} '
                           f'success)')
         return out, None
+
+    def rerun_ids(self):
+        """The runs the CI queue cancelled and holds to re-run: their cancelled checks wait."""
+        from asf import ci_queue
+        return ci_queue.rerun_ids(self.lane.state_dir) if self.lane else frozenset()
 
     def required_checks(self, state_dir):
         named = self.product.conventions.get('landing_checks')
@@ -2971,7 +2976,7 @@ class GitHubHost(Host):
             lane.out(f'waiting {b}: PR #{number} required checks unknown — {why}')
             wait(lane, f, f'required checks unknown: {why}', state=WAITING_CI)
             return None
-        state, detail, checks = pr_checks(self.slug, number, required)
+        state, detail, checks = pr_checks(self.slug, number, required, self.rerun_ids())
         ignored = not_required_red(checks, required)
         if ignored:
             lane.out(f'harvest: {b}: PR #{number} check(s) red but not required — '
@@ -3103,13 +3108,22 @@ class GitHubHost(Host):
         return {n: red[n] for n in want if n in red}
 
 
-def pr_checks(slug, number, required=()):
+#: the run id in a check's link (``…/actions/runs/<id>/job/<id>``)
+_RUN_RE = re.compile(r'/actions/runs/(\d+)')
+
+
+def pr_checks(slug, number, required=(), rerun=()):
     """``('green'|'pending'|'red'|'unknown', detail, checks)`` for PR ``number``'s checks. No
     checks at all is green. With ``required`` names (``landing_checks`` or branch protection) only
     those judge: a failed or cancelled required one is red, else an unfinished required one is
     pending — a red check the product does not require (a DCO bot, an advisory test job) never
     turns the PR red. With none required, any failed or cancelled check is red, else any not
-    finished is pending. ``checks`` is always the full list."""
+    finished is pending. ``checks`` is always the full list.
+
+    ``rerun``: ids of runs the CI queue cancelled and holds to re-run
+    (:func:`asf.ci_queue.rerun_ids`) — a cancelled check of one is pending, never red: a
+    product's B-1377 (2026-09-26) was held on "checks red: gate, gate-tests" the trunk relief
+    had cancelled, and another session was launched on a head nothing was wrong with."""
     rc, stdout, err = H._gh(['pr', 'checks', str(number), '-R', slug, '--json',
                              'name,bucket,link'])
     if 'no checks reported' in f'{stdout}\n{err}':
@@ -3120,10 +3134,19 @@ def pr_checks(slug, number, required=()):
         return 'unknown', H.tail(err) or f'gh pr checks exited {rc}', []
     judged = ([c for c in checks if required_name(c.get('name'), required)] if required
               else checks)
-    red = [c.get('name') or '?' for c in judged if c.get('bucket') in RED_BUCKETS]
+    held = {str(i) for i in rerun or ()}
+
+    def rerun_of(c):
+        m = _RUN_RE.search(c.get('link') or '')
+        return c.get('bucket') == 'cancel' and bool(m) and m.group(1) in held
+
+    red = [c.get('name') or '?' for c in judged
+           if c.get('bucket') in RED_BUCKETS and not rerun_of(c)]
     if red:
         return 'red', ', '.join(red), checks
     pending = [c.get('name') or '?' for c in judged if c.get('bucket') == 'pending']
+    pending += [f"{c.get('name') or '?'} (cancelled by the CI queue, re-run queued)"
+                for c in judged if rerun_of(c)]
     if pending:
         return 'pending', ', '.join(pending), checks
     return 'green', f'{len(checks)} check(s)', checks
