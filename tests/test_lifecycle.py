@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from asf.workers import lifecycle as lc
 
@@ -802,6 +803,83 @@ class EmptyEndsTests(unittest.TestCase):
         self.write(dict(fields, job='b', rounds=1))
         run = lc.latest(self.path)['b']
         self.assertEqual(lc.derive(run, lc.Evidence(), path=self.path).name, lc.HELD)
+
+
+class SameHeadLoopGuard(unittest.TestCase):
+    """A product, 2026-09-26: ``adjudicate-b-1377`` launched 14 times and ``correct-t-0338`` 12
+    times, each on a head no session had moved. The same kind handed the same head
+    :data:`lc.LOOP_CAP` times in a row parks the item with the reason in the row, instead of
+    burning a fourth session."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.path = os.path.join(self.d, 's.jsonl')
+
+    def write(self, *lines):
+        with open(self.path, 'a') as f:
+            for ln in lines:
+                f.write(json.dumps(ln) + '\n')
+
+    def run_of(self, n, kind='correct', head='a' * 40, item='T-0001'):
+        job = f'{kind}-{item.lower()}'
+        ln = {'job': job, 'item': item, 'branch': 'worker/' + item, 'kind': kind, 'pid': n,
+              'started': 't%02d' % n}
+        if head:
+            ln['launch_head'] = head
+        self.write(ln, {'job': job, 'ended': 'e%02d' % n,
+                        'end_reason': 'failed: not pushed: 0 uncommitted file(s), 2 unpushed commit(s)'})
+        return lc.latest(self.path)[job]
+
+    def test_the_third_launch_on_one_head_parks_the_item(self):
+        for n in (1, 2):
+            fields, line = lc.hold(self.path, self.run_of(n), 'rebase conflict', 'x', 't%02dz' % n)
+            self.assertNotIn('parked', fields['correction'], line)
+            self.write(dict(fields, job='correct-t-0001'))
+        fields, line = lc.hold(self.path, self.run_of(3), 'rebase conflict', 'x', 't03z')
+        corr = fields['correction']
+        self.assertIs(corr['parked'], True)
+        self.assertEqual(fields['operator_flagged'], 1)
+        self.assertIn('correct launched 3 times on aaaaaaaaa', corr['reason'])
+        self.assertIn('asf unpark T-0001', corr['reason'])
+        self.assertEqual(line, 'parked worker/T-0001: ' + corr['reason'])
+        self.write(dict(fields, job='correct-t-0001'))
+        occ = lc.corrections(self.path)['T-0001']
+        self.assertTrue(occ['parked'])
+        from asf.feeder import rows as feeder_rows
+        items = {'T-0001': {'id': 'T-0001', 'type': 'task', 'state': 'Active'}}
+        product = mock.Mock()
+        product.conventions.branch_kind.return_value = 'code'
+        rows, _ = feeder_rows.correction_rows(items, product, set(), {'T-0001': occ})
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0].action.startswith(feeder_rows.PARKED), rows[0].action)
+        self.assertFalse(rows[0].launches)
+
+    def test_a_naming_hold_is_no_exemption(self):
+        for n in (1, 2):
+            self.run_of(n)
+        fields, _ = lc.hold(self.path, self.run_of(3), lc.NAMING, 'x', 'h3')
+        self.assertIs(fields['correction']['parked'], True)
+
+    def test_a_moved_head_a_known_other_head_another_kind_or_no_record_does_not_park(self):
+        cases = {'moved': [dict(head='a' * 40), dict(head='b' * 40), dict(head='b' * 40)],
+                 'kinds': [dict(kind='correct'), dict(kind='adjudicate'), dict(kind='adjudicate')],
+                 'unrecorded': [dict(head=None), dict(), dict()],
+                 'two': [dict(), dict()]}
+        for name, runs in cases.items():
+            with self.subTest(name):
+                self.setUp()
+                for n, kw in enumerate(runs, 1):
+                    last = self.run_of(n, **kw)
+                fields, _ = lc.hold(self.path, last, 'review', 'x', 'h')
+                self.assertNotIn('parked', fields['correction'])
+        self.setUp()
+        for n in (1, 2, 3):
+            last = self.run_of(n)
+        fields, _ = lc.hold(self.path, last, 'review', 'x', 'h', head='c' * 40)
+        self.assertNotIn('parked', fields['correction'])  # the last session pushed: not a loop
+        fields, _ = lc.hold(self.path, last, 'review', 'x', 'h', head='a' * 40)
+        self.assertIs(fields['correction']['parked'], True)
 
 
 class AwaitingHarvestInvariants(unittest.TestCase):

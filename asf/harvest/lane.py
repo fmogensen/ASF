@@ -35,6 +35,9 @@ Transitions (plan §2 plus the §9 overrides):
                                class (a state, no round is spent)
 - T4  REVIEW → GATE            the review of the current head reads approved (or policy none)
 - T5  REVIEW → BACK            the review of the current head reads changes (rounds+1)
+- T5a REVIEW → GATE            ... unless an adjudicate ruling already answered it on this very
+                               head (:func:`asf.workers.lifecycle.overruling`): it overruled the
+                               C list and pushed nothing — no second hold, no second ruling
 - T6  GATE → WAITING_CI        required checks pending/absent under ``landing_checks_missing``
 - T7  WAITING_CI → GATE        re-decided every harvest
 - T8  GATE → WAITING           trunk red alone (or a required check red on the trunk's latest
@@ -686,7 +689,7 @@ def widen_candidates(files, item_writes, touched=(), read=None, own=False):
 
 
 def hold_with_correction(state_dir, branch, record, kind, text, out, files=(), item_writes=(),
-                         touched=(), conv=None, own=False, read=None):
+                         touched=(), conv=None, own=False, read=None, head=None):
     """Hold ``branch`` and hand it back to its session (:func:`asf.workers.lifecycle.hold`).
     ``'held'`` — or ``'foreign'`` for a red naming only files outside its footprint (no round),
     or ``'timed-out'`` for a gate that ran out of time (no round). ``own``: the red is this
@@ -717,7 +720,7 @@ def hold_with_correction(state_dir, branch, record, kind, text, out, files=(), i
         out(line)
         return 'held'
     fields, line = lifecycle.hold(H.sessions_path(state_dir), dict(record, branch=branch, job=job),
-                                  kind, text, now_iso())
+                                  kind, text, now_iso(), head=head)
     H.mark_session(state_dir, job, **fields)
     out(line)
     return 'held'
@@ -838,6 +841,8 @@ def next_state(prev, facts):
                 and not incomplete(f):
             return GATE, f"{rv.get('path')} approved its head"
         if rv.get('current') and rv.get('verdict') == review_mod.CHANGES:
+            if f.get('overruled'):  # T5a: the ruling on this head already answered the review
+                return GATE, f"{rv.get('path')} overruled by {f['overruled']}'s ruling"
             return BACK, 'kind=review'
         rnd, why = review_reason(f)
         reason = f'round {rnd} wanted: {why}'
@@ -1035,6 +1040,9 @@ class Lane:
                 rv['current'] = review_mod.is_current(repo, conv, f'origin/{b}', rv, head)
                 rv['customer_row'] = customer_content.has_customer_row(rv.pop('body', ''))
             f['review'] = rv
+            if rv and rv.get('current') and rv.get('verdict') == review_mod.CHANGES:
+                # the review's C list an adjudicate ruling already answered on this very head
+                f['overruled'] = lifecycle.overruling(self.path, item, head)
         return f
 
     # ---- orphans --------------------------------------------------------------------------
@@ -1617,6 +1625,12 @@ class Lane:
             self.out(f'reword {b} (naming) failed: '
                      f'{(why[0] if why else "no commit to reword") if not new else self.ref_wt_error}'
                      f' — back to its session')
+            if not new and why:
+                # the session gets the cause, not only the symptom: a product's T-0338 was told
+                # "reword them" 12 times while the lane knew its branch carried 22 copies of
+                # trunk commits — and reworded more trunk copies each time
+                f['refusal'] = (lifecycle.NAMING, f"{f['refusal'][1]}. The lane could not "
+                                                  f"because: {why[0]}")
             return None
         r = H.sh(['git', 'push', '-q', f'--force-with-lease=refs/heads/{b}:{old}', 'origin',
                   f'{new}:refs/heads/{b}'], cwd=wt)
@@ -1701,7 +1715,8 @@ class Lane:
         if f.get('run') is None:
             self.write(f, self.record(f, PUSHED, 'adopted'))
         rec = self.set(f, BACK, reason)
-        self.results[b] = hold_with_correction(self.state_dir, b, f['run'], kind, text, self.out)
+        self.results[b] = hold_with_correction(self.state_dir, b, f['run'], kind, text, self.out,
+                                               head=f.get('head'))
         f['correction'] = {'kind': kind, 'text': text}
         return rec
 
@@ -2056,7 +2071,7 @@ def send_back(lane, f, kind, text, files):
         lane.set(f, BACK, f'kind={LANDING_GATE}')
         job = run.get('job') or b
         fields, line = lifecycle.hold(lane.path, dict(run, branch=b, job=job), LANDING_GATE, note,
-                                      now_iso())
+                                      now_iso(), head=f.get('head'))
         H.mark_session(lane.state_dir, job, **fields)
         lane.out(line)
         lane.results[b] = 'held'
@@ -2065,7 +2080,7 @@ def send_back(lane, f, kind, text, files):
     lane.set(f, BACK, f'kind={kind}')
     res = hold_with_correction(lane.state_dir, b, run, kind, text, lane.out, files,
                                card.get('writes') or (), f.get('files') or (), lane.conv,
-                               own=True, read=gate_reader(lane.repo, b))
+                               own=True, read=gate_reader(lane.repo, b), head=f.get('head'))
     if res != 'held':  # foreign / timed-out: no one's fault after all
         wait(lane, f, res)
     lane.results[b] = res

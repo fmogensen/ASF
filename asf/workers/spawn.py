@@ -460,6 +460,11 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
               'started': started, 'log': result.log_path, 'brief': brief_path,
               'id_range': id_range, 'runtime': runtime.name, 'session': sid,
               'product': product.name, 'card_digest': getattr(row, 'card_digest', '') or ''}
+    launch_head = _launch_head(product.repo_dir, branch)
+    if launch_head:
+        # the head a held branch was handed back on: the loop guard counts launches on one sha
+        # (asf.workers.lifecycle.same_head_loop)
+        record['launch_head'] = launch_head
     if setup_s is not None:
         record['setup_s'] = setup_s
     if getattr(row, 'host_load_bypass', False):
@@ -471,6 +476,14 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
     # run's terminal fields never reach this one (B-0041 — see asf.workers.lifecycle)
     pool_mod.append_session(product, record)
     return record
+
+
+def _launch_head(repo, branch):
+    """``origin/<branch>``'s sha in ``repo`` as the launch found it (:func:`make_worktree` has
+    fetched it), or None for a branch origin does not hold."""
+    p = subprocess.run(['git', 'rev-parse', '--verify', '-q', f'refs/remotes/origin/{branch}'],
+                       cwd=repo, capture_output=True, text=True)
+    return p.stdout.strip() if p.returncode == 0 and p.stdout.strip() else None
 
 
 def _publish_fresh_branch(product, worktree, branch):

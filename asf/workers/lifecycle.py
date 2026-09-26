@@ -562,6 +562,43 @@ def settled(path, item, at):
     return _settling_run(path, item, at) is not None
 
 
+#: the sha a REPORT's ``pushed:`` line names (``yes <sha>`` / ``rebased <sha> — …``)
+PUSHED_SHA_RE = re.compile(r'\b[0-9a-f]{7,40}\b', re.I)
+
+
+def overruling(path, item, head):
+    """The job of the adjudicate run whose ruling stands on ``head``, or None.
+
+    An adjudicate session answers every open finding: *upheld* — it makes the edit and pushes it
+    (the head moves, so the review is no longer current and a new round is asked for) — or
+    *overruled* — no edit. So the newest *finished* adjudicate run of ``item`` whose REPORT is
+    ``status: done``, carries a ``ruling:``, claims no ``blocked_on``/``superseded_by`` and says
+    it left the branch at ``head`` (its ``pushed:`` sha) has answered the review of ``head``:
+    the lane does not send that review back again (a product's B-1377, 2026-09-26: every ruling
+    re-held off the same stale review file, 14 adjudicate sessions)."""
+    if not head or not path or not item:
+        return None
+    from asf.workers import report as report_mod
+    ruled = sorted((r for r in item_runs(path, item)
+                    if r.get('kind') == 'adjudicate' and finished(r)),
+                   key=lambda r: r.get('started') or '')
+    if not ruled:
+        return None
+    run = ruled[-1]  # only the newest ruling speaks for the branch as it stands
+    rec = result_of(run) or {}
+    text = rec.get('result') if isinstance(rec, dict) else ''
+    rep = report_mod.parse(text or '')
+    status = (rep.get('status') or '').strip().lower().split(' ')[0]
+    fields = report_mod.ruling_fields(text or '')
+    if status != 'done' or not report_mod.ruling(text or '') \
+            or fields['blocked_on'] or fields['superseded_by']:
+        return None
+    m = PUSHED_SHA_RE.search(rep.get('pushed') or '')
+    if not m or not head.lower().startswith(m.group(0).lower()):
+        return None
+    return run.get('job')
+
+
 #: a PR the ruling paragraph names, e.g. "waits on merge of #773" — B-0128's ``asf next`` line
 PR_RE = re.compile(r'#(\d+)')
 
@@ -1351,15 +1388,55 @@ def park_text(n):
             f'or `asf unpark <item>` to let the wave try again')
 
 
-def hold(path, run, kind, text, now, empty_cap=EMPTY_CAP):
+#: Sessions of one kind handed the same head in a row before the item is parked (the loop guard).
+LOOP_CAP = 3
+
+
+def same_head_loop(path, run, head=None, cap=LOOP_CAP):
+    """The sha ``run``'s item is looping on, or None: its last ``cap`` runs (a spent window's
+    excepted) are all of ``run``'s kind and were all launched on one head (spawn's
+    ``launch_head``) — so none of the first ``cap - 1`` added a commit — and the branch still
+    sits on it when ``head`` is known (the last one added none either). A product, 2026-09-26:
+    ``adjudicate-b-1377`` ×14 and ``correct-t-0338`` ×12, every one on a head nothing moved."""
+    item, kind = (run or {}).get('item'), (run or {}).get('kind')
+    if not item or not kind or not path:
+        return None
+    rs = sorted((r for r in item_runs(path, item) if not quota_exhausted(r)),
+                key=lambda r: r.get('started') or '')[-cap:]
+    heads = {r.get('launch_head') or '' for r in rs}
+    if len(rs) < cap or len(heads) != 1 or '' in heads \
+            or any(r.get('kind') != kind for r in rs):
+        return None
+    sha = heads.pop()
+    if head and head != sha:
+        return None
+    return sha
+
+
+def loop_text(n, kind, sha, item):
+    return (f'{kind} launched {n} times on {sha[:9]} and no session added a commit: the item is '
+            f'parked, not handed to a {n + 1}th session. Read the last run\'s report for why it '
+            f'could not move the branch, fix that, then `asf unpark {item}`')
+
+
+def hold(path, run, kind, text, now, empty_cap=EMPTY_CAP, head=None):
     """``(fields, line)``: what to append to ``run`` to hold its branch and hand it back, and
     the line to print. The rounds counter runs over every run of the item; at :data:`ROUND_CAP`
     it stops climbing (B-0048) — the correction is marked ``at_cap`` so the feeder's ADJUDICATE
     row takes it, and a second hold at the cap flags the operator instead of spawning another.
-    An :data:`EMPTY` hold at ``empty_cap`` empty ends parks the item instead and spends no round."""
+    An :data:`EMPTY` hold at ``empty_cap`` empty ends parks the item instead and spends no round,
+    and so does the loop guard (:func:`same_head_loop`): the same kind handed the same head
+    :data:`LOOP_CAP` times — ``head``, when the caller knows it, is where the branch sits now."""
     item = run.get('item')
     branch = run.get('branch') or run.get('job')
+    loop = same_head_loop(path, run, head)
     head = (text or '').split('\n', 1)[0]  # the line is one line; the correction keeps it all
+    if loop:
+        reason = loop_text(LOOP_CAP, run.get('kind'), loop, item)
+        fields = {'correction': {'kind': kind, 'text': text, 'at': now, 'parked': True,
+                                 'reason': reason, 'loop_head': loop},
+                  'operator_flagged': 1}
+        return fields, f'parked {branch}: {reason}'
     if kind == EMPTY and empty_ends(path, item) >= empty_cap:
         fields = {'correction': {'kind': kind, 'text': text, 'at': now,
                                  'parked': True, 'reason': park_text(empty_ends(path, item))},

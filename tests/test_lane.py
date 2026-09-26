@@ -94,6 +94,12 @@ class Transitions(unittest.TestCase):
                                                                   review=CHANGES)),
                          (lane.BACK, 'kind=review'))
 
+    def test_t5a_changes_a_ruling_overruled_on_this_head_go_to_the_gate(self):
+        state, reason = lane.next_state(rec(lane.PR_OPEN), facts(
+            review_required=True, review=CHANGES, overruled='adjudicate-t-0001'))
+        self.assertEqual(state, lane.GATE)
+        self.assertIn("overruled by adjudicate-t-0001's ruling", reason)
+
     def test_t6_t7_t8_the_gate_states_are_the_gates_to_decide(self):
         for s in (lane.GATE, lane.WAITING_CI, lane.WAITING):
             with self.subTest(state=s):
@@ -492,6 +498,93 @@ class LaneRepo(LaneFixture):
         self.assertEqual((row.kind, row.brief_kind, row.branch, row.launches),
                          (feeder_rows.STARVED_PLAN, 'plan', 'plan/F-0001', True))
         self.assertIn('retired_name', row.correction + '\n'.join(lines) or '')
+
+    def _adjudicated(self, pushed_sha, status='done', blocked_on='none'):
+        """A held branch whose round-1 review reads changes requested, then a finished
+        adjudicate run whose REPORT says ``pushed: yes <pushed_sha>`` — a product's B-1377 loop."""
+        review = ('verdict: changes requested\n\n## C\n\n- a.txt:1 is wrong\n')
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n', 'reviews/1-t-0001.md': review},
+                       'feat(T-0001): a')
+        head = sh(['git', 'rev-parse', 'worker/T-0001'], cwd=self.origin).stdout.strip()
+        log = os.path.join(self.state_dir, 'adjudicate-t-0001.jsonl')
+        report = (f'REPORT\nitem: T-0001\nkind: adjudicate\nstatus: {status}\n'
+                  f'branch: worker/T-0001\npushed: yes {pushed_sha or head}\ncommits: none\n'
+                  f'ruling: the C list is false against this branch — a.txt:1 already reads a; '
+                  f'overruled, do not reopen it.\nblocked_on: {blocked_on}\nwrites: a.txt\n'
+                  f'superseded_by: none\n')
+        with open(log, 'w', encoding='utf-8') as f:
+            f.write(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
+                                'result': report}) + '\n')
+        path = os.path.join(self.state_dir, 'sessions.jsonl')
+        with open(path, 'a', encoding='utf-8') as f:
+            for ln in ({'job': 'coder-t-0001', 'item': 'T-0001', 'branch': 'worker/T-0001',
+                        'kind': 'coder', 'pid': 1, 'started': '2026-09-21T00:00:00Z'},
+                       {'job': 'coder-t-0001', 'ended': '2026-09-21T00:05:00Z',
+                        'end_reason': 'finished', 'rounds': 3,
+                        'correction': {'kind': 'review', 'at': '2026-09-21T00:06:00Z',
+                                       'at_cap': True, 'text': 'reviews/1-t-0001.md reads '
+                                       'changes requested: answer its C list'}},
+                       {'job': 'adjudicate-t-0001', 'item': 'T-0001', 'branch': 'worker/T-0001',
+                        'kind': 'adjudicate', 'pid': 2, 'started': '2026-09-21T00:10:00Z',
+                        'log': log},
+                       {'job': 'adjudicate-t-0001', 'ended': '2026-09-21T00:15:00Z',
+                        'end_reason': 'finished'}):
+                f.write(json.dumps(ln) + '\n')
+        return path, head
+
+    def test_an_adjudicate_ruling_on_the_unchanged_head_overrules_the_review(self):
+        """a product's B-1377 (2026-09-26, 14 adjudicate sessions): the adjudicator overruled the
+        round-1 review's C list and pushed nothing. Its run is a new job on the branch, so the
+        lane walked it - → PUSHED → PR_OPEN → BACK (kind=review) off the same stale review and
+        wrote a *new* correction after the ruling — which B-0128's ``settled`` (an adjudicate run
+        started after the hold) can never cover — and the feeder launched another adjudicate.
+        A finished ruling on this very head answers the review: the lane gates it, no new hold."""
+        path, head = self._adjudicated(None)
+        product = self.product(lane={'review': {'code': 'required'}})
+        lines = []
+        lane.lane_pass(product, self.state_dir, out=lines.append)
+        rec_ = self.lane_of('worker/T-0001')
+        self.assertEqual(rec_['state'], lane.GATE, lines)
+        self.assertIn('overruled', rec_['reason'])
+        self.assertIn('adjudicate-t-0001', rec_['reason'])
+        self.assertIsNone(lifecycle.pending_correction(lifecycle.latest(path)['adjudicate-t-0001'],
+                                                       path))
+        # the one hold the ruling answered stays settled (B-0128): a WAITS ON row, no session
+        self.assertTrue(lifecycle.corrections(path)['T-0001']['settled'])
+        lane.lane_pass(product, self.state_dir, out=lines.append)  # a second tick holds nothing
+        self.assertTrue(lifecycle.corrections(path)['T-0001']['settled'], lines)
+
+    def test_a_ruling_on_another_head_or_not_done_does_not_overrule(self):
+        """The ruling stands on the head it ruled on only: a report naming another sha, one that
+        is not ``done``, or one ``blocked_on`` another item, leaves the review's hold alone."""
+        for kw in ({'pushed_sha': 'c' * 40}, {'pushed_sha': None, 'status': 'partial'},
+                   {'pushed_sha': None, 'blocked_on': 'T-0009'}):
+            with self.subTest(**kw):
+                self.setUp()
+                path, _ = self._adjudicated(**kw)
+                product = self.product(lane={'review': {'code': 'required'}})
+                lane.lane_pass(product, self.state_dir, out=lambda *_: None)
+                self.assertEqual(self.lane_of('worker/T-0001')['state'], lane.BACK)
+
+    def test_a_correct_session_that_pushes_new_commits_asks_for_a_new_review_round(self):
+        """After a session answering a review pushes new commits, the next lane state is a new
+        REVIEW round on the new head — never another correction off the stale review file."""
+        path, head = self._adjudicated('d' * 40)
+        sh(['git', 'checkout', '-q', 'worker/T-0001'], cwd=self.worker)
+        self.write(self.worker, 'a.txt', 'fixed\n')
+        sh(['git', 'commit', '-qam', 'fix(T-0001): answer C1'], cwd=self.worker, env_=self.ident)
+        sh(['git', 'push', '-q', 'origin', 'worker/T-0001'], cwd=self.worker)
+        with open(path, 'a', encoding='utf-8') as f:
+            for ln in ({'job': 'correct-t-0001', 'item': 'T-0001', 'branch': 'worker/T-0001',
+                        'kind': 'correct', 'pid': 3, 'started': '2026-09-21T00:20:00Z'},
+                       {'job': 'correct-t-0001', 'ended': '2026-09-21T00:25:00Z',
+                        'end_reason': 'finished'}):
+                f.write(json.dumps(ln) + '\n')
+        product = self.product(lane={'review': {'code': 'required'}})
+        lane.lane_pass(product, self.state_dir, out=lambda *_: None)
+        rec_ = self.lane_of('worker/T-0001')
+        self.assertEqual((rec_['state'], rec_.get('round')), (lane.REVIEW, 2), rec_)
+        self.assertNotIn('T-0001', lifecycle.corrections(path))
 
     def test_red_trunk_waits_never_a_round(self):
         self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat(T-0001): a')
@@ -1231,10 +1324,16 @@ class TrunkCommitsNeverReworded(LaneFixture):
         old = self.tip()
         sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
         ln = lane.Lane(self.product(), self.state_dir, out=self.lines.append)
-        self.assertIsNone(ln.repair_naming(self.naming(old)))
+        f = self.naming(old)
+        self.assertIsNone(ln.repair_naming(f))
         self.assertEqual(self.tip(), old)
         self.assertTrue(any('copies of origin/main commits' in l and 'back to its session' in l
                             for l in self.lines), self.lines)
+        # a product's T-0338: the session is told the cause, not only "reword them"
+        self.assertEqual(f['refusal'][0], lifecycle.NAMING)
+        self.assertIn('The lane could not because: 1 commit(s) on it are copies of origin/main',
+                      f['refusal'][1])
+        self.assertIn('rebase onto origin/main', f['refusal'][1])
 
     def test_a_rebuilt_branch_that_fails_the_guard_is_never_pushed(self):
         sh(['git', 'checkout', '-q', '-B', self.B, 'origin/main'], cwd=self.worker)

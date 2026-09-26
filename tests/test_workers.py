@@ -451,6 +451,19 @@ class TestSpawn(Home):
         self.assertEqual(pool_mod.load_sessions(self.product)['fix-b-0001']['card_digest'],
                          'abcd1234abcd1234')
 
+    def test_the_ledger_line_keeps_the_head_a_held_branch_was_launched_on(self):
+        """The loop guard (:func:`asf.workers.lifecycle.same_head_loop`) counts launches on one
+        head: a branch already on origin records its sha as ``launch_head``; a fresh one none."""
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 4242}])
+        spawn_mod.spawn(self.product, s1_row(), self.acct(), 'fix\n', runtime=rt, cfg=self.cfg)
+        self.assertNotIn('launch_head', pool_mod.load_sessions(self.product)['fix-b-0001'])
+        git('push', '-q', 'origin', 'origin/main:refs/heads/fix-bug/fix-b-0002', cwd=self.repo)
+        row = s1_row(job='fix-b-0002', item='B-0002')
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 4243}])
+        spawn_mod.spawn(self.product, row, self.acct(), 'fix\n', runtime=rt, cfg=self.cfg)
+        self.assertEqual(pool_mod.load_sessions(self.product)['fix-b-0002']['launch_head'],
+                         git('rev-parse', 'origin/main', cwd=self.repo))
+
     def test_a_row_grants_its_own_directories_and_they_exist(self):
         # the groom brief grants the answers file's directory (PD7), but spawn passed only the
         # product's job_grants: the adjudicate session could not write its answers, and staged
