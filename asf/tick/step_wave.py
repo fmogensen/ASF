@@ -23,7 +23,8 @@
    gives its slot to the next candidate. Each launching row the fair share cut prints ``waits …
    — fair share: <n> of <usable> usable slots across <k> products; in flight <i>: <jobs>; this
    wave <w>: <jobs>`` — what the share was spent on; the wave records this product's demand
-   (:func:`asf.capacity.write_demand`) so an idle partner's share can be lent to it;
+   (:func:`demand` — its ready rows, never cut by pressure, room or share;
+   :func:`asf.capacity.write_demand`) so an idle partner's share can be lent to it;
 4. per launching row, a brief (``asf.briefs.build``) with the facts of its branch on the product
    repo's origin — whether it is pushed and its last commit, two ``git`` calls at most;
 5. one ``workers.wave`` over every briefed row, so the pool's S1 reserve sees them all; it prints
@@ -290,7 +291,8 @@ def held_by_share(items, product, running, resolved, planned, inputs, wider=None
 REPLANS = 8   # the gate's findings shrink the candidates each pass; this bounds a pathological loop
 
 
-def gated_plan(items, product, running, capacity, inputs, out=print, exclude=None):
+def gated_plan(items, product, running, capacity, inputs, out=print, exclude=None,
+               s1_first=True):
     """``(rows, exclude)``: the plan at ``capacity`` through the feeder's invariant gate
     (:func:`asf.invariants.feeder_gate`), a dropped row's slot handed to the next candidate.
 
@@ -310,7 +312,9 @@ def gated_plan(items, product, running, capacity, inputs, out=print, exclude=Non
             out(line)
     kept = []
     for _ in range(REPLANS):
-        kw = dict(inputs, exclude=frozenset(exclude)) if exclude else inputs
+        kw = dict(inputs, exclude=frozenset(exclude)) if exclude else dict(inputs)
+        if not s1_first:
+            kw['s1_first'] = False
         planned = feeder_rows.plan_rows(items, product, running, capacity, **kw)
         kept = invariants.feeder_gate(product, planned, items, out=say)
         dropped = ({invariants.row_key(r) for r in planned if r.launches}
@@ -341,6 +345,24 @@ def wanted(rows, held=()):
     """The launching rows a plan would start given room — a parked item's row is not one."""
     held = set(held or ())
     return sum(1 for r in rows if r.launches and r.item_id not in held)
+
+
+def demand(items, product, running, inputs, extra=0, exclude=None, cfg=None):
+    """This product's ``wanted`` for :func:`asf.capacity.write_demand`: its launchable ready rows
+    (the gate's drops and a parked item's rows are not), capped only by its own configured
+    session ceiling (:func:`asf.capacity.product_sessions`, plus the cloud lane's seats) less
+    what it has in flight.
+
+    2026-09-26 08:51 (a product tick): a product with 8 ready rows, held by host pressure,
+    recorded ``wanted 2`` — its plan's S1 cut had parked every tier-2 row behind its two S1
+    rows — and its partner borrowed the slots its ready work would have filled. So ``wanted``
+    ignores host pressure, this tick's room, the S1 lane's cut and the fair share: what the
+    product has ready is what it claims."""
+    cfg = env.load_config() if cfg is None else cfg
+    ceiling = capacity_mod.product_sessions(product, cfg)[0] + extra
+    rows = gated_plan(items, product, running, ceiling, inputs, out=lambda _l: None,
+                      exclude=set(exclude or ()), s1_first=False)[0]
+    return min(wanted(rows, inputs.get('held')), max(0, ceiling - len(running)))
 
 
 def _git(repo, args):
@@ -491,7 +513,8 @@ def launch(ctx, out=print):
     wider = (gated_plan(items, product, running, r.ceiling + extra, inputs, out=lambda _l: None,
                         exclude=set(dropped))[0]
              if r.ceiling is not None and r.ceiling != r.sessions else planned)
-    capacity_mod.write_demand(product.name, len(running), wanted(wider, inputs.get('held')))
+    capacity_mod.write_demand(product.name, len(running),
+                              demand(items, product, running, inputs, extra, exclude=dropped))
     share_held = held_by_share(items, product, running, r, planned, inputs, wider=wider)
     counted = share_counted(running, planned, inputs.get('held')) if share_held else ''
     for row in share_held:
