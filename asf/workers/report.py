@@ -340,7 +340,7 @@ def _sample(types, default, line):
 
 def contract(kind):
     """The text a brief prints for ``kind``, rendered from its schema — no template prints one.
-    :data:`COMMON` comes first, so the twelve contracts share their first eleven fields."""
+    :data:`COMMON` comes first, so every kind's contract shares its first eleven fields."""
     spec = schema(kind)
     rows = [f'  {json.dumps(name)}: {json.dumps(_sample(*spec[name]), ensure_ascii=False)}'
             for name in spec]
@@ -390,13 +390,13 @@ def footprint_claim(text):
     ``'needs writes'`` | ``'left out'`` | None; the tokens are raw (the caller resolves them
     against the repo, :func:`asf.feeder.widen.resolve`, and drops those already in ``writes:``)."""
     from asf.feeder import widen
-    obj = _common(text)
-    status = obj.get('status')
-    if status == 'done' and obj.get('pushed') in ('yes', 'rebased'):
+    rep = _prose(text)
+    status = (rep.get('status') or '').strip().lower().split(' ')[0]
+    pushed = (rep.get('pushed') or '').strip().lower().split(' ')[0]
+    if status == 'done' and pushed in ('yes', 'rebased'):
         # T-0349: a Task done and on origin is whole — a path its report names (an advisory
         # hook row, a note) is never a widening; it goes on to review
         return None, []
-    rep = _prose(text)
     if 'needs writes' in rep:
         value = _claim(rep.get('needs writes'))
         # the field is a path list by contract: every token stands, extension or not (LICENSE)
