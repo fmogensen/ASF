@@ -47,10 +47,14 @@ class DryRun:
     def dry_runs(self):
         """``(before, after1, after2, lines1, lines2)`` — two ``dry_run.run`` calls back to
         back, under the factory's own environment (:meth:`Factory.seams`), and the real state
-        directory's checksum before and after each."""
+        directory's checksum before and after each. The gate's own elapsed-time line
+        (:func:`asf.harvest.harvest.product_gate`) is pinned so it reads the same on both
+        calls — real wall-clock drift between two back-to-back runs is not the thing under
+        test here."""
         from asf import env
+        from asf.harvest import harvest as harvest_mod
         from asf.tick import dry_run
-        with self.f.seams():
+        with self.f.seams(), mock.patch.object(harvest_mod.time, 'monotonic', return_value=0.0):
             product = env.load_product('sample')
             real_state = env.state_dir(product)
             before = _checksum(real_state)
