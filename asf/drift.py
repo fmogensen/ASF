@@ -31,6 +31,13 @@ def _git(repo, *argv):
     return p.stdout.strip()
 
 
+def factory_root():
+    """The git repo the running package's source lives in — a checkout or linked worktree whose
+    ``.git`` sits beside :mod:`asf` — else ``None`` (a pip/pipx install has no such tree)."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return root if os.path.exists(os.path.join(root, '.git')) else None
+
+
 def installed_commit():
     """The commit the running package was built from, or ``None`` when it cannot be told (an
     install from a plain directory or an index records none)."""
@@ -41,8 +48,8 @@ def installed_commit():
             return commit
     except (metadata.PackageNotFoundError, ValueError, OSError):
         pass
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if os.path.exists(os.path.join(root, '.git')):  # a linked worktree (a clock snapshot) too
+    root = factory_root()  # a linked worktree (a clock snapshot) too
+    if root:
         try:
             return _git(root, 'rev-parse', 'HEAD')
         except (subprocess.SubprocessError, OSError):
