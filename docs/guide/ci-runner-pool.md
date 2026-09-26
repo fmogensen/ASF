@@ -157,14 +157,20 @@ A batch or an ordinary PR start needs its runners (an S1 or hotfix start, a trun
 reserve nothing, so PR runs in flight never hold the trunk every deploy waits on): per runner class,
 the free runners (online, not busy, at their `slots`, from the runners API) must cover the run's
 **expected jobs** — over the last `history` completed runs of the workflow that start triggers,
-per run and class the peak number of jobs running at once (a job counts only if it got a runner and
-was not skipped, over its started..completed span, so skipped or conditional jobs never count and
-sequential stages never add up), grouped by the class of the runner that actually ran it (the
+per run and class the peak number of jobs the run *asked for* at once (a job counts only if it got
+a runner and was not skipped, over its created..completed span — queued or running — so skipped or
+conditional jobs never count and sequential stages never add up; counting from `created_at`, not
+`started_at`, keeps a fan-out of 12 jobs queued together at 12 on a busy pool that ran them 4 at a
+time), grouped by the class of the runner that actually ran it (the
 `class`, else the `role`) — never by the job's `runs-on`. A runner outside the pool is classed by
 its labels: a label every carrier of which sits in one class names that class, so a sub-label
 carried only by `heavy` runners counts in `heavy`, once, and never adds a demand of its own; a job
-listed twice counts once. The median of that over the runs, capped at what the pool has of that
-class. Everything
+listed twice counts once. The p90 of that over the runs, capped at what the pool has of that
+class, per **run type**: a run whose PR changed only light paths (`ci.queue.light_paths`, default
+`docs/**` and `*.md`, or the product's docs roots) is `light`, every other run `full`, and each
+type is estimated from its own past runs (a type never seen is sized as `full`). A PR start is
+sized by the type its own changed files make; trunk, batch and deploy starts as `full`.
+`ci.queue.estimate` overrides the measure per class. Everything
 ahead in line has its expected jobs set aside first, so
 a heavy run at the head is not starved by lighter ones behind it; a run only needing a class with
 room still goes. A run admitted in the last three minutes still holds its runners, since its jobs
@@ -214,6 +220,8 @@ ci:
     trunk_wait_min: 20   # minutes a queued trunk run waits before runs ahead of it are cancelled
     pr_wait_min: 45      # minutes an ordinary PR start waits before it starts on half its jobs
     workflows: {pr: checks.yml, trunk: checks.yml, batch: batch.yml}   # default: ci.workflow
+    light_paths: ['docs/**', '*.md']   # a PR touching only these is sized as a light run
+    estimate: {heavy: {full: 12, light: 4}}   # optional: overrides the measure ({heavy: 12}: both)
 ```
 
 `mode: dry-run` decides every start and prints each hold as `ci queue (dry-run): … would wait`

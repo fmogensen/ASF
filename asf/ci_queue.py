@@ -26,17 +26,29 @@ tick asks again. Its entry keeps its place in line (``since``) while it keeps as
 ``ci.queue.history`` (default 10) runs of the workflow that start triggers that completed
 ``success`` or ``failure`` (a cancelled run is dropped), each read at its *latest attempt* only
 (a superseded attempt's jobs never count, and attempts never overlap), per run and class the peak
-number of jobs running *at once* — each job that got a runner (``runner_name`` set, conclusion
-not ``skipped``) counted over its ``started_at``..``completed_at``, so a skipped or conditional
-job never counts and sequential stages never add up — grouped by the class of the runner that
+number of jobs the run *asked for at once* — each job that got a runner (``runner_name`` set,
+conclusion not ``skipped``) counted over its ``created_at``..``completed_at`` (queued or running;
+``started_at`` when the host gives no ``created_at``), so a skipped or conditional job never
+counts and sequential stages never add up. Counting from ``created_at``, not ``started_at``, is
+what makes it the run's *demand*: on a busy pool a fan-out of 12 jobs queued together starts a
+few at a time, and the jobs *running* at once only say how many runners were free — an estimate
+that shrinks exactly when the pool is contended. Jobs are grouped by the class of the runner that
 actually ran it (its ``ci.pool`` entry's ``class``, else its ``role``), never by the job's
 ``runs-on``; a runner outside the pool, by its labels mapped through :func:`label_classes` (a
 label every carrier of which sits in one class names that class, so a sub-label such as
 ``fast-heavy`` carried only by ``heavy`` runners counts in ``heavy``, once — labels never make a
 demand of their own that sums with the parent). A job listed twice (same job id) counts once. The
-*median* of that over the runs (rounded up), capped at what the pool declares for that class. The figure is cached in the queue file keyed by the set of run
-ids it was measured from (re-measured only when that set changes; the ids are listed again after
-:data:`EXPECT_TTL_S`) and memoised per pass, so the hold line, the status Capacity row
+estimate is the *p90* (:data:`ESTIMATE_PERCENTILE`, nearest rank) of that over the runs, capped at
+what the pool declares for that class, taken separately per *run type*: a run whose PR changed
+only light paths (:func:`run_type`: every file under ``ci.queue.light_paths``, default
+``docs/**`` and ``*.md``, or under the product's docs roots — the lane's docs class) is
+``light``, every other run (code, no PR, a trunk push) ``full``. A PR start is sized by the type
+its own changed files make; every other start (trunk, batch, deploy) as ``full``; a type with no
+run measured falls back to ``full``. ``ci.queue.estimate`` overrides the measure per class, for
+both types (``{heavy: 12}``) or each (``{heavy: {full: 12, light: 4}}``). The figure is cached
+in the queue file keyed by the set of run ids it was measured from (re-measured only when that
+set changes, each run's own measure kept by id so only new runs are read; the ids are listed
+again after :data:`EXPECT_TTL_S`) and memoised per pass, so the hold line, the status Capacity row
 (:func:`status_clause`) and ``asf ci queue`` all name the one number. *Free runners* come from the runners API: an
 online runner that is not busy, counted at its ``slots``; runs this queue admitted in the last
 :data:`PICKUP_S` are subtracted too, because their jobs are queued on the host before any runner
@@ -84,6 +96,8 @@ Every wait is UTC-aware now minus the host's UTC ``createdAt``, never local time
         trunk_wait_min: 20  # a queued trunk run waiting longer gets runs ahead of it cancelled
         pr_wait_min: 45   # an ordinary PR start waiting longer starts on half its expected jobs
         workflows: {pr: checks.yml, trunk: checks.yml, batch: batch.yml}  # default ci.workflow
+        light_paths: ['docs/**', '*.md']  # a PR touching only these is sized as a light run
+        estimate: {heavy: {full: 12, light: 4}}  # overrides the measure per class (and type)
 
 A product without ``ci.pool`` (or with ``mode: off``) is not queued: every start goes as it did
 before, and no ``gh`` call is made here. ``mode: dry-run`` decides and prints each hold as
@@ -98,7 +112,6 @@ import json
 import math
 import os
 import re
-import statistics
 import subprocess
 
 from asf import ci_pool, env
@@ -106,7 +119,14 @@ from asf import ci_pool, env
 QUEUE_FILE = 'ci-queue.json'
 KINDS = ('pr', 'trunk', 'batch', 'deploy')
 MODES = ('on', 'dry-run', 'off')
-FIELDS = ('mode', 'history', 'workflows', 'trunk_wait_min', 'pr_wait_min')
+FIELDS = ('mode', 'history', 'workflows', 'trunk_wait_min', 'pr_wait_min', 'light_paths',
+          'estimate')
+#: a run's type: ``light`` when its PR changed only light paths, else ``full``
+FULL, LIGHT = 'full', 'light'
+RUN_TYPES = (FULL, LIGHT)
+DEFAULT_LIGHT_PATHS = ('docs/**', '*.md')
+#: the percentile of the per-run peaks the estimate takes (nearest rank)
+ESTIMATE_PERCENTILE = 90
 DEFAULT_HISTORY = 10
 DEFAULT_TRUNK_WAIT_MIN = 20
 DEFAULT_PR_WAIT_MIN = 45
@@ -119,7 +139,7 @@ PICKUP_S = 3 * 60
 #: how long a workflow's measured jobs per class are reused before its run ids are listed again
 EXPECT_TTL_S = 10 * 60
 #: the measure's version: a cached figure from another version is read again
-EXPECT_VERSION = 4
+EXPECT_VERSION = 5
 #: the run conclusions measured: a cancelled (or otherwise cut short) run says nothing of its size
 MEASURED_CONCLUSIONS = frozenset({'success', 'failure'})
 GH_TIMEOUT_S = 30
@@ -223,6 +243,55 @@ def pr_wait_min(product):
     return v if ok else DEFAULT_PR_WAIT_MIN
 
 
+def light_paths(product):
+    """``ci.queue.light_paths``: the globs a light run's changed files all lie under (default
+    ``docs/**``, ``*.md``); a list given replaces the default."""
+    v = _qcfg(product).get('light_paths')
+    if isinstance(v, (list, tuple)):
+        return [str(g) for g in v if g]
+    return list(DEFAULT_LIGHT_PATHS)
+
+
+def _docs_file(product, f):
+    """True when ``f`` lies under the product's docs roots — the lane's docs class."""
+    try:
+        from asf.harvest import lane
+        return lane.landing_class(product, [f]) == lane.DOCS
+    except Exception:  # noqa: BLE001 — no conventions readable: not a docs file
+        return False
+
+
+def run_type(product, files):
+    """``light`` when every one of ``files`` (a PR's changed files) lies under a
+    ``ci.queue.light_paths`` glob or the product's docs roots; else ``full`` — nothing known
+    (no files) is ``full``."""
+    files = [f for f in files or () if f]
+    if not files:
+        return FULL
+    globs = light_paths(product)
+    for f in files:
+        if not (_touches([f], globs) or _docs_file(product, f)):
+            return FULL
+    return LIGHT
+
+
+def _count(v):
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+
+
+def estimate_override(product, run):
+    """``{class: jobs}`` that ``ci.queue.estimate`` sets for a ``run`` type: ``{cls: n}`` for
+    both types, ``{cls: {full: n, light: m}}`` for each. A malformed value is ignored."""
+    v = _qcfg(product).get('estimate')
+    out = {}
+    for cls, n in (v.items() if isinstance(v, dict) else ()):
+        if isinstance(n, dict):
+            n = n.get(run)
+        if _count(n):
+            out[str(cls)] = n
+    return out
+
+
 def workflow_for(product, kind, default=None):
     """The workflow a ``kind`` of start triggers: ``ci.queue.workflows.<kind>``, else ``default``
     (a deploy passes its own), else ``ci.workflow``."""
@@ -262,6 +331,28 @@ def config_problems(ci):
             for k in wf:
                 if k not in KINDS:
                     out.append((f'ci.queue.workflows.{k}', f"is not a start kind ({', '.join(KINDS)})"))
+    lp = q.get('light_paths')
+    if lp is not None and not (isinstance(lp, list) and all(isinstance(g, str) for g in lp)):
+        out.append(('ci.queue.light_paths', f'must be a list of path globs, not {lp!r}'))
+    est = q.get('estimate')
+    if est is not None:
+        if not isinstance(est, dict):
+            out.append(('ci.queue.estimate', f'must be a map {{class: jobs}} or {{class: '
+                                             f'{{full: jobs, light: jobs}}}}, not {est!r}'))
+        else:
+            for cls, n in est.items():
+                if isinstance(n, dict):
+                    for t, m in n.items():
+                        if t not in RUN_TYPES:
+                            out.append((f'ci.queue.estimate.{cls}.{t}',
+                                        f"is not a run type ({', '.join(RUN_TYPES)})"))
+                        elif not _count(m):
+                            out.append((f'ci.queue.estimate.{cls}.{t}',
+                                        f'must be a whole number of jobs >= 0, not {m!r}'))
+                elif not _count(n):
+                    out.append((f'ci.queue.estimate.{cls}',
+                                f'must be a whole number of jobs >= 0 or {{full: n, light: m}}, '
+                                f'not {n!r}'))
     return out
 
 
@@ -346,6 +437,10 @@ class Source:
         run_attempt}]``, or None when unreadable."""
         raise NotImplementedError
 
+    def run_files(self, run_id):
+        """The files the PR a run was for changed, or None (no PR, or unreadable)."""
+        return None
+
     def run_jobs(self, workflow, n):
         """The latest attempt's jobs of each of :meth:`run_ids`."""
         ids = self.run_ids(workflow, n)
@@ -398,14 +493,27 @@ class GitHubSource(Source):
     def attempt_jobs(self, run_id, attempt):
         text = self._gh(['api', f'repos/{self.slug}/actions/runs/{run_id}/attempts/{attempt}/'
                                 'jobs?per_page=100',
-                         '--jq', '.jobs[] | {id, runner_name, labels, conclusion, started_at, '
-                         'completed_at, run_attempt}'])
+                         '--jq', '.jobs[] | {id, runner_name, labels, conclusion, created_at, '
+                         'started_at, completed_at, run_attempt}'])
         if text is None:
             return None
         try:
             return [json.loads(l) for l in text.splitlines() if l.strip()]
         except ValueError:
             return None
+
+    def run_files(self, run_id):
+        if not self.slug:
+            return None
+        num = (self._gh(['api', f'repos/{self.slug}/actions/runs/{run_id}',
+                         '--jq', '.pull_requests[0].number // empty']) or '').strip()
+        if not num.isdigit():
+            return None
+        text = self._gh(['api', f'repos/{self.slug}/pulls/{num}/files?per_page=100',
+                         '--paginate', '--jq', '.[].filename'])
+        if text is None:
+            return None
+        return [l.strip() for l in text.splitlines() if l.strip()]
 
     def inflight(self):
         from asf import capacity
@@ -461,11 +569,13 @@ def _job_class(job, by_name, labels):
 
 
 def peak_concurrent(jobs, by_name, labels):
-    """``{class: peak jobs running at once}`` for one run's ``jobs``. A job counts only when it
+    """``{class: peak jobs asked for at once}`` for one run's ``jobs``. A job counts only when it
     got a runner (``runner_name`` set) and did not end ``skipped``, once (a job id listed twice is
-    one job), in one class (:func:`_job_class`); it runs from ``started_at`` to ``completed_at``
-    (no ``completed_at``: to the end of the run; no ``started_at``: the whole run). A job ending
-    as another starts does not overlap it, so sequential stages count once. ``labels`` is a
+    one job), in one class (:func:`_job_class`); it holds its demand from ``created_at`` (queued:
+    the host wants a runner for it from then) to ``completed_at`` — ``started_at`` when there is
+    no ``created_at``; no ``completed_at``: to the end of the run; neither start: the whole run.
+    Jobs queued together count together however few the pool let run at once. A job ending as
+    another is queued does not overlap it, so sequential stages count once. ``labels`` is a
     :func:`label_classes` map (or the pool's role labels)."""
     labels = _as_label_map(labels)
     events = {}
@@ -481,7 +591,7 @@ def peak_concurrent(jobs, by_name, labels):
         key = _job_class(j, by_name, labels)
         if key is None:
             continue
-        start = _parse(j.get('started_at'))
+        start = _parse(j.get('created_at')) or _parse(j.get('started_at'))
         end = _parse(j.get('completed_at')) if start is not None else None
         lo = start.timestamp() if start is not None else float('-inf')
         hi = end.timestamp() if end is not None else float('inf')
@@ -499,9 +609,11 @@ def peak_concurrent(jobs, by_name, labels):
     return out
 
 
-def _median(values):
-    """The median of ``values`` (not empty), rounded up to whole jobs."""
-    return math.ceil(statistics.median(values))
+def _percentile(values, p=ESTIMATE_PERCENTILE):
+    """The ``p``-th percentile of ``values`` (not empty), nearest rank: a value some run
+    actually reached, never an interpolation."""
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(p / 100 * len(ordered)) - 1)]
 
 
 def latest_attempt(jobs):
@@ -515,29 +627,58 @@ def latest_attempt(jobs):
     return [j for j in jobs if j.get('run_attempt') in (None, last)]
 
 
-def needs_from_history(runs, pool, runners=()):
-    """``{class: expected jobs}`` from ``runs`` (each a list of jobs ``{id, runner_name, labels,
-    conclusion, started_at, completed_at, run_attempt}``): per class the median over the runs of
-    each run's peak concurrent jobs (:func:`peak_concurrent`) in its latest attempt
-    (:func:`latest_attempt`), capped at the class's declared slots. Each job counts in the class
-    of the runner that ran it; ``runners`` (the live runner read) widens the label map for a
-    runner outside the pool. A job on a runner outside every class (a hosted runner) needs
-    nothing of the pool."""
-    if not runs:
-        return {}
-    by_name = {e.runner: e for e in pool}
-    roles = label_classes(pool, runners)
+def _caps(pool):
     cap = {}
     for e in pool:
         cap[class_key(e)] = cap.get(class_key(e), 0) + e.slots
-    peaks = [{k: n for k, n in peak_concurrent(latest_attempt(jobs), by_name, roles).items()
-              if k in cap} for jobs in runs]
+    return cap
+
+
+def run_peaks(jobs, pool, runners=()):
+    """``{class: peak jobs asked for at once}`` of one run's ``jobs`` in its latest attempt
+    (:func:`latest_attempt`), only the pool's classes. Each job counts in the class of the
+    runner that ran it; ``runners`` (the live runner read) widens the label map for a runner
+    outside the pool. A job on a runner outside every class (a hosted runner) needs nothing of
+    the pool."""
+    by_name = {e.runner: e for e in pool}
+    cap = _caps(pool)
+    return {k: n for k, n in peak_concurrent(latest_attempt(jobs), by_name,
+                                             label_classes(pool, runners)).items() if k in cap}
+
+
+def estimate(peaks, pool):
+    """``{class: expected jobs}``: per class the p90 (:func:`_percentile`) of the per-run
+    ``peaks`` (a run naming no job of a class counts 0 there), capped at the class's slots."""
+    cap = _caps(pool)
     out = {}
-    for key in sorted({k for c in peaks for k in c}):
-        n = _median([c.get(key, 0) for c in peaks])
+    for key in sorted({k for c in peaks for k in c if k in cap}):
+        n = _percentile([c.get(key, 0) for c in peaks])
         if n > 0:
             out[key] = min(n, cap[key])
     return out
+
+
+def needs_from_history(runs, pool, runners=()):
+    """``{class: expected jobs}`` from ``runs`` (each a list of jobs ``{id, runner_name, labels,
+    conclusion, created_at, started_at, completed_at, run_attempt}``): the p90 over the runs of
+    each run's peak demand per class (:func:`run_peaks`), capped at the class."""
+    if not runs:
+        return {}
+    return estimate([run_peaks(jobs, pool, runners) for jobs in runs], pool)
+
+
+def needs_by_type(runs, types, pool, runners=()):
+    """``{full: needs, light: needs}``: :func:`needs_from_history` over the runs of each type
+    (``types`` parallel to ``runs``). A type with no run measured is sized as ``full`` — and
+    ``full`` with no full run, from every run."""
+    peaks = [run_peaks(jobs, pool, runners) for jobs in runs]
+    return _by_type(peaks, types, pool)
+
+
+def _by_type(peaks, types, pool):
+    split = {t: [p for p, k in zip(peaks, types) if k == t] for t in RUN_TYPES}
+    full = estimate(split[FULL] or peaks, pool) if peaks else {}
+    return {FULL: full, LIGHT: estimate(split[LIGHT], pool) if split[LIGHT] else dict(full)}
 
 
 def load_by_class(runners, pool):
@@ -795,33 +936,63 @@ class Queue:
         self._ceiling = min(vals) if vals else None
         return self._ceiling
 
-    def needs(self, workflow):
-        """The expected jobs per class of one run of ``workflow``: memoised for this pass, cached
-        in the file keyed by the run ids measured (see the module doc)."""
+    def needs(self, workflow, run=FULL):
+        """The expected jobs per class of one ``run`` type (``full`` / ``light``) of
+        ``workflow``: memoised for this pass, cached in the file keyed by the run ids measured,
+        ``ci.queue.estimate`` over the measure (see the module doc)."""
         if not workflow:
             return {}
+        run = run if run in RUN_TYPES else FULL
         if workflow not in self._needs:
             self._needs[workflow] = self._measure(workflow)
-        return dict(self._needs[workflow])
+        out = dict(self._needs[workflow].get(run) or {})
+        for cls, n in estimate_override(self.product, run).items():
+            if n > 0:
+                out[cls] = n
+            else:
+                out.pop(cls, None)
+        return out
+
+    @staticmethod
+    def _cached_types(cached):
+        return {FULL: dict(cached.get('needs') or {}),
+                LIGHT: dict(cached.get('light') or cached.get('needs') or {})}
 
     def _measure(self, workflow):
         cached = self.data['expect'].get(workflow)
         if not (isinstance(cached, dict) and cached.get('v') == EXPECT_VERSION):
             cached = None
         if cached is not None and _age(cached.get('at'), self.now) <= EXPECT_TTL_S:
-            return dict(cached.get('needs') or {})
+            return self._cached_types(cached)
         ids = self.source.run_ids(workflow, history(self.product))
         if ids is None:
-            return dict(cached.get('needs') or {}) if cached is not None else {}
+            return self._cached_types(cached) if cached is not None else {}
         key = [int(i) for i, _a in ids]
         if cached is not None and cached.get('ids') == key:
             cached['at'] = _iso(self.now)       # the same runs: the same number
-            return dict(cached.get('needs') or {})
-        runs = [j for j in (self.source.attempt_jobs(i, a) for i, a in ids) if j is not None]
+            return self._cached_types(cached)
+        # each run's own measure is kept by id: a new run id reads only that run
+        known = (cached or {}).get('per_run') if cached is not None else None
+        known = known if isinstance(known, dict) else {}
         self._read_host()           # the live labels map a runner outside the pool to its class
-        n = needs_from_history(runs, self.pool, self._runners or ())
-        self.data['expect'][workflow] = {'at': _iso(self.now), 'needs': n, 'runs': len(runs),
-                                         'ids': key, 'v': EXPECT_VERSION}
+        per_run, peaks, types = {}, [], []
+        for i, a in ids:
+            rec = known.get(str(int(i)))
+            if not (isinstance(rec, dict) and isinstance(rec.get('peak'), dict)
+                    and rec.get('attempt') == a):
+                jobs = self.source.attempt_jobs(i, a)
+                if jobs is None:
+                    continue
+                rec = {'attempt': a, 'peak': run_peaks(jobs, self.pool, self._runners or ()),
+                       'type': run_type(self.product, self.source.run_files(i))}
+            per_run[str(int(i))] = rec
+            peaks.append(rec['peak'])
+            types.append(rec.get('type') if rec.get('type') in RUN_TYPES else FULL)
+        n = _by_type(peaks, types, self.pool)
+        self.data['expect'][workflow] = {
+            'at': _iso(self.now), 'needs': n.get(FULL, {}), 'light': n.get(LIGHT, {}),
+            'runs': len(peaks), 'light_runs': types.count(LIGHT), 'ids': key, 'per_run': per_run,
+            'v': EXPECT_VERSION}
         return n
 
     def free(self):
@@ -835,19 +1006,21 @@ class Queue:
                     free[c] = max(0, free[c] - n)
         return free
 
-    def admit(self, key, kind, item=None, prio=OTHER, label='other', workflow=None):
+    def admit(self, key, kind, item=None, prio=OTHER, label='other', workflow=None, run=FULL):
         """May the start ``key`` go now? Enqueues it (keeping its place), decides, and on
-        admission moves it to ``started``. A hold prints its one line."""
+        admission moves it to ``started``. A hold prints its one line. ``run``: the run type
+        (:func:`run_type`) the start is sized as."""
         if self.mode == 'off':
             return Decision(True, bypass=True)
         workflow = workflow or workflow_for(self.product, kind)
         entries = self.data['entries']
         e = entries.get(key) or {'since': _iso(self.now)}
         e.update(kind=kind, item=item or key, prio=prio, label=label, workflow=workflow,
-                 seen=_iso(self.now))
+                 run=run if run in RUN_TYPES else FULL, seen=_iso(self.now))
         entries[key] = e
         order = line_order(entries)
-        needs = {k: self.needs(entries[k].get('workflow')) for k in order}
+        needs = {k: self.needs(entries[k].get('workflow'), entries[k].get('run', FULL))
+                 for k in order}
         self._read_host()
         free = self.free()
         ok, why = decide(key, order, entries, needs.get, free, self.ceiling(),
@@ -890,7 +1063,8 @@ def admit(product, key, kind, item=None, items=None, branch='', files=(), workfl
     if q.mode == 'off':
         return Decision(True, bypass=True)
     prio, label = priority(item, items, branch, files, product, kind=kind)
-    return q.admit(key, kind, item=item, prio=prio, label=label, workflow=workflow)
+    run = run_type(product, files) if kind == 'pr' else FULL
+    return q.admit(key, kind, item=item, prio=prio, label=label, workflow=workflow, run=run)
 
 
 #: the statuses of a run that has not reached a runner yet
@@ -1131,7 +1305,8 @@ def live_line(product, source=None, inflight=None, now=None):
     line = LiveLine(q.mode, q, order, entries, {})
     if not order:
         return line
-    line.needs = {k: q.needs(entries[k].get('workflow')) for k in order}
+    line.needs = {k: q.needs(entries[k].get('workflow'), entries[k].get('run', FULL))
+                  for k in order}
     line.free, line.ceiling = q.free(), q.ceiling()
     line.inflight = q._inflight
     line.decisions = [(k, *decide(k, order, entries, line.needs.get, line.free, line.ceiling,
@@ -1189,7 +1364,13 @@ def _snapshot_clause(product, now, inflight, ceiling, tag):
     if (not head.get('at_ceiling') and isinstance(held_free, dict) and held_free
             and isinstance(cached, dict) and cached.get('v') == EXPECT_VERSION):
         # a fit hold re-stated from the one cached estimate the queue line reads
-        need = cached.get('needs') or {}
+        run = head.get('run', FULL)
+        need = Queue._cached_types(cached).get(run) or {}
+        for cls, n in estimate_override(product, run).items():
+            if n > 0:
+                need[cls] = n
+            else:
+                need.pop(cls, None)
         short = [(c, a, need[c]) for c, a in sorted(held_free.items()) if need.get(c, 0) > a]
         why = (f"{head.get('item')} waits — {fit_reason(short)}{pos}" if short else
                f"{head.get('item')} waits — the runners fit now, asked again next tick{pos}")
@@ -1230,8 +1411,8 @@ def cmd_queue(args, source=None, out=print):
         e = entries[k]
         need = ', '.join(f'{c} {n}' for c, n in sorted(line.needs[k].items())) or 'nothing measured'
         said = (f'would start ({why})' if why else 'would start') if ok else 'waits: ' + why
-        out(f"{i}. {e.get('item')} [{e.get('kind')}, {e.get('label')}, since {e.get('since')}] "
-            f"needs {need} — {said}")
+        out(f"{i}. {e.get('item')} [{e.get('kind')}, {e.get('label')}, {e.get('run', FULL)} run, "
+            f"since {e.get('since')}] needs {need} — {said}")
     return 0
 
 
