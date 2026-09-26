@@ -241,13 +241,33 @@ def _clean(run):
     return {k: v for k, v in run.items() if not (k in RUN_FIELDS and v is None)}
 
 
+def _times(rec):
+    """The times a registry line records: its run's ``started``/``ended`` and its correction's
+    and lane record's ``at``."""
+    yield rec.get('started') or ''
+    yield rec.get('ended') or ''
+    for key in ('correction', 'lane'):
+        sub = rec.get(key)
+        if isinstance(sub, dict):
+            yield sub.get('at') or ''
+
+
 def fold(lines):
     """``{job: [run, …]}`` in launch order. A launch line opens a run; any other line updates
     the latest run of its job (a line before any launch opens a run of its own — a hand-written
-    registry). A run field written as null is dropped."""
-    runs = {}
+    registry). A run field written as null is dropped.
+
+    A correction written with no ``at`` (a hand-set instruction, ``update_session`` before it
+    stamped one) is as new as the newest time the registry had recorded when its line was
+    written: with an empty time :func:`pending_correction` took every run of the item — even
+    the ones before it — as its answer, and the correction was never read (a product's F-0035)."""
+    runs, clock = {}, ''
     for rec in lines:
         job = rec['job']
+        corr = rec.get('correction')
+        if isinstance(corr, dict) and corr.get('text') and not corr.get('at') and clock:
+            rec = dict(rec, correction=dict(corr, at=clock))
+        clock = max([clock] + [t for t in _times(rec) if isinstance(t, str)])
         if is_launch(rec) or job not in runs:
             runs.setdefault(job, []).append(dict(rec))
         else:
@@ -554,6 +574,22 @@ def _settling_run(path, item, at):
     return candidates[0] if candidates else None
 
 
+def ruled(path, item, corr):
+    """True when ``corr`` is an adjudication's instruction: not health's own hold at the cap
+    (``at_cap``), and written after an adjudicate session on ``item`` started. At the round cap
+    a hold goes to adjudication; what is written onto the held run after that — the ruling's
+    fix, or one made on the operator's behalf — is what the adjudication was for, and a session
+    carries it out (a FIX → CORRECT row), not a second adjudicate session over the same hold
+    (a product's F-0035 ``redact``). Health's next hold on that session's work is at the cap
+    again (``at_cap``), so the loop guard stands: one instruction per adjudication."""
+    corr = corr or {}
+    at = corr.get('at') or ''
+    if not at or corr.get('at_cap'):
+        return False
+    return any(r.get('kind') == 'adjudicate' and (r.get('started') or '~') <= at
+               for r in _item_view(path, item))
+
+
 def settled(path, item, at):
     """True when an adjudicate session has already *finished* over the correction raised ``at``
     (B-0128): the ruling is in, and the feeder asks for no second one over the same hold. A run
@@ -699,22 +735,32 @@ def attempts(path):
 
 
 def corrections(path):
-    """``{item: {kind, text, at, rounds, branch, settled, prs}}``: the newest pending correction
+    """``{item: {kind, text, at, rounds, branch, ruled, settled, prs}}``: the newest pending correction
     per item, with the branch of the run it was written on (a held spec branch is corrected on
     ``spec/<id>``, not on the item's task prefix). ``settled`` (B-0128): an adjudicate session has
     already ended over this same hold — the feeder shows a WAITS ON row, not another STALEMATE.
-    ``prs`` (B-0128): the PR numbers that ruling names, for the same row to print."""
+    ``prs`` (B-0128): the PR numbers that ruling names, for the same row to print. ``ruled``
+    (:func:`ruled`): the correction is an adjudication's instruction — a session answers it
+    whatever the round."""
     out = {}
     for item in {r.get('item') for rs in _folded(path).view.values() for r in rs if r.get('item')}:
-        held = [(r, pending_correction(r, path)) for r in item_runs(path, item)]
-        held = [(r, c) for r, c in held if c]
-        if not held:
-            continue
-        run, corr = max(held, key=lambda rc: rc[1].get('at') or '')
-        out[item] = dict(corr, rounds=rounds_of(path, item), branch=run.get('branch'),
-                          settled=settled(path, item, corr.get('at')),
-                          prs=settled_prs(path, item, corr.get('at')))
+        c = correction_of(path, item)
+        if c:
+            out[item] = c
     return out
+
+
+def correction_of(path, item):
+    """:func:`corrections`' entry for one ``item``, or None when none is pending."""
+    held = [(r, pending_correction(r, path)) for r in item_runs(path, item)]
+    held = [(r, c) for r, c in held if c]
+    if not held:
+        return None
+    run, corr = max(held, key=lambda rc: rc[1].get('at') or '')
+    return dict(corr, rounds=rounds_of(path, item), branch=run.get('branch'),
+                ruled=ruled(path, item, corr),
+                settled=settled(path, item, corr.get('at')),
+                prs=settled_prs(path, item, corr.get('at')))
 
 
 def occupancy(path, lanes=None, alive=None, result=None):
@@ -1338,7 +1384,8 @@ def derive(run, ev, cap=ROUND_CAP, path=None):
     corr = pending_correction(run, path)
     rounds = run.get('rounds') or 0
     if corr:
-        if corr.get('kind') not in MECHANICAL and (corr.get('at_cap') or rounds >= cap):
+        if corr.get('kind') not in MECHANICAL and (
+                corr.get('at_cap') or rounds >= cap and not ruled(path, run.get('item'), corr)):
             return State(ADJUDICATE, corr.get('text', ''), rounds)
         return State(HELD, corr.get('text', ''), rounds)
     if (run.get('correction') or {}).get('text'):

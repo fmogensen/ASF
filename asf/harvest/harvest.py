@@ -165,7 +165,12 @@ def is_eligible(record, path=None):
             # it a branch held once is skipped for ever, because the correction text never goes
             # away (my own B-0079 regression, found holding three green branches).
             and not (lifecycle.pending_correction(record, path)
-                     and (record.get('rounds') or 0) < lifecycle.ROUND_CAP))
+                     and (record.get('rounds') or 0) < lifecycle.ROUND_CAP)
+            # …and a branch whose item waits on an adjudication's instruction (a ``ruled``
+            # correction): its session is to come — gating the untouched branch again would hold
+            # it at the cap and bury the ruling under another adjudicate row (a product's F-0035)
+            and not (path is not None and record.get('item')
+                     and (lifecycle.correction_of(path, record['item']) or {}).get('ruled')))
 
 
 def mark_harvested(state_dir, job, sha):

@@ -437,7 +437,8 @@ def footprint_row(item, product, c, tier, fid, branch):
 def correction_rows(items, product, busy, corrections):
     """``corrections`` is ``{item: {kind, text, rounds, at, branch}}`` — a branch the harvest held
     (the row runs on that branch when it is given). Fewer
-    than 3 rounds: a FIX → CORRECT row in the item's severity tier; 3 or more: the ADJUDICATE row.
+    than 3 rounds, or a correction ``ruled`` (written after an adjudication, not its cap hold):
+    a FIX → CORRECT row in the item's severity tier; otherwise 3 or more: the ADJUDICATE row.
     Returns ``(rows, ids)``; ``ids`` are the items these rows speak for."""
     out, ids = [], set()
     for iid, c in sorted((corrections or {}).items()):
@@ -468,7 +469,8 @@ def correction_rows(items, product, busy, corrections):
         if c.get('kind') == FOOTPRINT and c.get('verdict') != 'widen':
             out.append(footprint_row(item, product, c, tier, fid, branch))
             continue
-        if rounds >= CORRECTION_ROUNDS and c.get('kind') not in (NAMING, COPIES):
+        if rounds >= CORRECTION_ROUNDS and c.get('kind') not in (NAMING, COPIES) \
+                and not c.get('ruled'):  # an adjudication's instruction: a session carries it out
             if c.get('settled'):  # B-0128: already ruled at this hold — no second adjudicate
                 prs = c.get('prs') or ()
                 action = f"{WAITS_MERGE}: {', '.join(f'#{n}' for n in prs)}" if prs else WAITS_MERGE

@@ -239,6 +239,12 @@ def load_sessions(product):
 
 
 def update_session(product, job, **fields):
+    """One update line for ``job``. A correction written without ``at`` gets one now: the
+    readers order corrections, and tell an answered one from a pending one, by it."""
+    corr = fields.get('correction')
+    if isinstance(corr, dict) and corr.get('text') and not corr.get('at'):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        fields['correction'] = dict(corr, at=now.strftime('%Y-%m-%dT%H:%M:%SZ'))
     append_session(product, dict(fields, job=job))
 
 
