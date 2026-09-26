@@ -50,7 +50,8 @@ MODEL_CLASSES = ('S1', 'S2', 'S3', 'task', 'story', 'feature', 'epic')
 #: saving is a code default, not a setting someone has to remember. ``default`` is the label for
 #: a class the kind does not name (and for a brief with no item). Judgement over a small change
 #: (the review, correction and adjudication of an S2/S3 Bug or of a Task) runs light; an S1 Bug,
-#: a spec, a plan and a Feature-level review run heavy. ``conventions.models.<kind>`` overrides a
+#: a spec, a plan and a Feature-level review run heavy. Adjudicate runs light for every class but
+#: S1 (operator policy 2026-09-27: 41% of a product's repair sessions were adjudicate, on heavy). ``conventions.models.<kind>`` overrides a
 #: row, as one label or as a map of this shape (:func:`model_for`).
 MODEL_TABLE = {
     'spec':       {'default': HEAVY},
@@ -60,7 +61,7 @@ MODEL_TABLE = {
     'groom':      {'default': HEAVY},
     'reshape':    {'default': HEAVY},
     'review':     {'default': HEAVY, 'S1': HEAVY, 'S2': LIGHT, 'S3': LIGHT, 'task': LIGHT},
-    'adjudicate': {'default': HEAVY, 'S1': HEAVY, 'S2': LIGHT, 'S3': LIGHT, 'task': LIGHT},
+    'adjudicate': {'default': LIGHT, 'S1': HEAVY, 'S2': LIGHT, 'S3': LIGHT, 'task': LIGHT},
     'correct':    {'default': LIGHT, 'S1': HEAVY, 'S2': LIGHT, 'S3': LIGHT, 'task': LIGHT},
     'fix-bug':    {'default': LIGHT, 'S1': HEAVY, 'S2': LIGHT, 'S3': LIGHT},
     'coder':      {'default': LIGHT},

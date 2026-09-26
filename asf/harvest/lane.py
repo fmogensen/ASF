@@ -851,11 +851,12 @@ def widen_candidates(files, item_writes, touched=(), read=None, own=False):
 
 
 def hold_with_correction(state_dir, branch, record, kind, text, out, files=(), item_writes=(),
-                         touched=(), conv=None, own=False, read=None, head=None):
+                         touched=(), conv=None, own=False, read=None, head=None, finding=None):
     """Hold ``branch`` and hand it back to its session (:func:`asf.workers.lifecycle.hold`).
     ``'held'`` — or ``'foreign'`` for a red naming only files outside its footprint (no round),
     or ``'timed-out'`` for a gate that ran out of time (no round). ``own``: the red is this
-    branch's whatever files it names (gated on a trunk green alone)."""
+    branch's whatever files it names (gated on a trunk green alone). ``finding``: the hold's
+    finding when the caller knows it — a review's C-list files (:func:`lifecycle.finding_of`)."""
     job = record.get('job') or branch
     if kind == 'gate' and text.startswith(H.TIMED_OUT):  # B-0082: a clock is not a defect
         out(f'{H.TIMED_OUT} {branch}: {text} — retried next tick')
@@ -882,7 +883,7 @@ def hold_with_correction(state_dir, branch, record, kind, text, out, files=(), i
         out(line)
         return 'held'
     fields, line = lifecycle.hold(H.sessions_path(state_dir), dict(record, branch=branch, job=job),
-                                  kind, text, now_iso(), head=head)
+                                  kind, text, now_iso(), head=head, finding=finding)
     H.mark_session(state_dir, job, **fields)
     out(line)
     return 'held'
@@ -2040,8 +2041,9 @@ class Lane:
         if f.get('run') is None:
             self.write(f, self.record(f, PUSHED, 'adopted'))
         rec = self.set(f, BACK, reason)
+        finding = review_mod.c_items((f.get('review') or {}).get('body')) if kind == 'review' else None
         self.results[b] = hold_with_correction(self.state_dir, b, f['run'], kind, text, self.out,
-                                               head=f.get('head'))
+                                               head=f.get('head'), finding=finding)
         f['correction'] = {'kind': kind, 'text': text}
         return rec
 

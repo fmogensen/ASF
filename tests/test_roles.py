@@ -381,10 +381,14 @@ class BindingTests(unittest.TestCase):
     def test_the_bindings_keep_the_labels_of_today(self):
         # D6: identity moves nothing about cost — the role a kind runs under is the same set the
         # per-kind label table already groups.
+        # The one exception, by operator policy 2026-09-27: adjudicate runs light (S1 heavy) while
+        # groom, its role-mate, stays heavy — a ruling over a held branch is not a groom pass.
+        moved = {'adjudicate'}
         heavy = {k for k, v in build_mod.DEFAULT_MODELS.items() if v == build_mod.HEAVY}
         by_role = {}
         for kind, name in roles.BINDINGS.items():
-            by_role.setdefault(name, set()).add(kind in heavy)
+            if kind not in moved:
+                by_role.setdefault(name, set()).add(kind in heavy)
         for name, labels in by_role.items():
             with self.subTest(role=name):
                 self.assertEqual(len(labels), 1)

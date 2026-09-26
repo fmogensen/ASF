@@ -108,5 +108,34 @@ class ReviewPatternApprovesTheSpec(unittest.TestCase):
         self.assertIsNone(review.newest(self.p.product(), "no-such-branch", "F-0001"))
 
 
+
+class CItems(unittest.TestCase):
+    """The files a review's C list opens its items with — the finding a correction answers
+    (operator policy 2026-09-27: a C-item carried over is the same finding)."""
+
+    BODY = """verdict: changes requested
+
+## C
+
+1. **`docs/process/README.md:69` — rule 2f is untouched.**
+   It still reads `pnpm gate` in `scripts/x.sh:3`.
+
+2. **`docs/process/README.md:263-264` (rule 2ab) still specify the run.**
+3. `.githooks/pre-push:5-6` repeats rule 2f.
+- **C4** `apps/web/lib/a.ts:10` — wrong.
+
+## I
+
+1. `apps/other.ts:1` — nice to have.
+"""
+
+    def test_the_files_each_c_item_opens_with(self):
+        self.assertEqual(review.c_items(self.BODY),
+                         ['.githooks/pre-push', 'apps/web/lib/a.ts', 'docs/process/README.md'])
+
+    def test_no_c_list_is_no_finding(self):
+        self.assertEqual(review.c_items('verdict: approved\n'), [])
+        self.assertEqual(review.c_items(None), [])
+
 if __name__ == '__main__':
     unittest.main()

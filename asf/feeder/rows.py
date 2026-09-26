@@ -60,7 +60,9 @@ from asf.views import index_reader as ix
 
 BUG_FIX = 'BUG → FIX'
 FIX_CORRECT = 'FIX → CORRECT'
-CORRECTION_ROUNDS = 3  # == asf.workers.lifecycle.ROUND_CAP (the feeder imports no git module)
+#: == asf.workers.lifecycle.ROUND_CAP (the feeder imports no git module): holds in a row
+#: on the SAME finding before a correction becomes the ADJUDICATE row (operator policy 2026-09-27)
+CORRECTION_ROUNDS = 3
 #: == asf.workers.lifecycle.NAMING: the lane rewords a naming refusal itself; one it could not
 #: goes back to a session as a correction and never to adjudicate, whatever the item's rounds
 NAMING = 'naming'
@@ -435,10 +437,13 @@ def footprint_row(item, product, c, tier, fid, branch):
 
 
 def correction_rows(items, product, busy, corrections):
-    """``corrections`` is ``{item: {kind, text, rounds, at, branch}}`` — a branch the harvest held
-    (the row runs on that branch when it is given). Fewer
-    than 3 rounds, or a correction ``ruled`` (written after an adjudication, not its cap hold):
-    a FIX → CORRECT row in the item's severity tier; otherwise 3 or more: the ADJUDICATE row.
+    """``corrections`` is ``{item: {kind, text, rounds, same, at, branch, ruled}}`` — a branch
+    the harvest held (the row runs on that branch when it is given). ``same`` is how many holds in
+    a row name this one finding (:func:`asf.workers.lifecycle.repeats`; a caller that passes none
+    is read by its ``rounds``): fewer than 3 — the first hold, or a correct that failed it once,
+    or a new finding after any number of rounds — or a correction ``ruled`` (written after an
+    adjudication, not its cap hold): a FIX → CORRECT row in the item's severity tier; otherwise
+    3 or more — CORRECT failed twice on the same finding — the ADJUDICATE row.
     Returns ``(rows, ids)``; ``ids`` are the items these rows speak for."""
     out, ids = [], set()
     for iid, c in sorted((corrections or {}).items()):
@@ -450,6 +455,7 @@ def correction_rows(items, product, busy, corrections):
         ids.add(iid)
         f = feature_of(items, item)
         fid, rounds = f['id'] if f else '', c.get('rounds') or 0
+        same = c['same'] if c.get('same') is not None else rounds
         tier = {'S1': 0, 'S2': 1}.get(item.get('severity'), 2)
         kind = 'fix' if item['type'] == 'bug' else 'task'
         branch = c.get('branch') or branch_for(product, kind, iid)
@@ -459,7 +465,7 @@ def correction_rows(items, product, busy, corrections):
                            branch=branch, reason=c.get('reason') or 'parked', waits_on='operator'))
             continue
         doc = product.conventions.branch_kind(branch) if c.get('kind') == LANDING_GATE else None
-        if doc in ('spec', 'plan') and rounds < CORRECTION_ROUNDS:  # a document the gate refused
+        if doc in ('spec', 'plan') and same < CORRECTION_ROUNDS:  # a document the gate refused
             out.append(Row(tier=tier, kind=STARVED_SPEC if doc == 'spec' else STARVED_PLAN,
                            item_id=iid, feature_id=fid or iid, action=LAUNCH, brief_kind=doc,
                            branch=branch, correction=c['text'],
@@ -469,7 +475,7 @@ def correction_rows(items, product, busy, corrections):
         if c.get('kind') == FOOTPRINT and c.get('verdict') != 'widen':
             out.append(footprint_row(item, product, c, tier, fid, branch))
             continue
-        if rounds >= CORRECTION_ROUNDS and c.get('kind') not in (NAMING, COPIES) \
+        if same >= CORRECTION_ROUNDS and c.get('kind') not in (NAMING, COPIES) \
                 and not c.get('ruled'):  # an adjudication's instruction: a session carries it out
             if c.get('settled'):  # B-0128: already ruled at this hold — no second adjudicate
                 prs = c.get('prs') or ()
@@ -481,7 +487,8 @@ def correction_rows(items, product, busy, corrections):
                 continue
             out.append(Row(tier=tier, kind=STALEMATE, item_id=iid, feature_id=fid, action=LAUNCH,
                            brief_kind='adjudicate', branch=branch, correction=c['text'],
-                           reason=f"held {rounds} times ({c.get('kind')}): adjudicate, not another correction"))
+                           reason=f"held {same} times on the same finding ({c.get('kind')}): "
+                                  f"adjudicate, not another correction"))
         else:
             out.append(Row(tier=tier, kind=FIX_CORRECT, item_id=iid, feature_id=fid, action=LAUNCH,
                            brief_kind='correct', branch=branch, correction=c['text'],

@@ -104,12 +104,15 @@ class RuledCorrection(unittest.TestCase):
         got, _ = feeder_rows.correction_rows(F0035, None, set(), corr)
         self.assertEqual([r.kind for r in got], [feeder_rows.STALEMATE])
 
-    def test_a_correction_before_any_adjudicate_keeps_the_round_cap(self):
+    def test_a_correction_before_any_adjudicate_is_counted_on_its_own_finding(self):
+        # operator policy 2026-09-27: round 3 of mixed holds (unpushed, died, redact) is not a
+        # stalemate — only CORRECT failing the same finding twice is
         lines = [ln for ln in f0035_registry() if ln.get('kind') != 'adjudicate']
         corr = lc.corrections(self.registry(lines))
         self.assertFalse(corr['F-0035']['ruled'])
+        self.assertEqual(corr['F-0035']['same'], 1)
         got, _ = feeder_rows.correction_rows(F0035, None, set(), corr)
-        self.assertEqual([r.kind for r in got], [feeder_rows.STALEMATE])
+        self.assertEqual([r.kind for r in got], [feeder_rows.FIX_CORRECT])
 
     def test_update_session_stamps_a_correction_that_carries_no_time(self):
         seen = []

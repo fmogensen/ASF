@@ -756,6 +756,33 @@ class CorrectionRowTest(unittest.TestCase):
         self.assertEqual([(r.kind, r.brief_kind) for r in out],
                          [('STALEMATE → ADJUDICATE', 'adjudicate')])
 
+    def test_mixed_findings_over_three_rounds_stay_correct(self):
+        # operator policy 2026-09-27: adjudicate only after CORRECT failed twice on the SAME
+        # finding — three rounds of different holds is still a correction
+        corr = self.corr(3)
+        corr['B-0001']['same'] = 1
+        out = rows.plan_rows(s1_bugs('B-0001'), product(), [], 1, attempts={'B-0001': 1},
+                             occupancy=occ(corrections=corr))
+        self.assertEqual([(r.kind, r.brief_kind) for r in out], [(rows.FIX_CORRECT, 'correct')])
+        self.assertTrue(out[0].launches)
+
+    def test_two_failed_corrects_on_the_same_finding_is_the_adjudicate_row(self):
+        corr = self.corr(3)
+        corr['B-0001']['same'] = 3
+        out = rows.plan_rows(s1_bugs('B-0001'), product(), [], 1, attempts={'B-0001': 1},
+                             occupancy=occ(corrections=corr))
+        self.assertEqual([(r.kind, r.brief_kind) for r in out],
+                         [('STALEMATE → ADJUDICATE', 'adjudicate')])
+        self.assertIn('same finding', out[0].reason)
+
+    def test_copies_and_naming_never_adjudicate_whatever_the_count(self):
+        for kind in (rows.NAMING, rows.COPIES):
+            corr = self.corr(3)
+            corr['B-0001'].update(kind=kind, same=5)
+            out = rows.plan_rows(s1_bugs('B-0001'), product(), [], 1, attempts={'B-0001': 1},
+                                 occupancy=occ(corrections=corr))
+            self.assertEqual([r.brief_kind for r in out], ['correct'], kind)
+
     def test_the_adjudicate_row_carries_the_holds_own_text_into_its_brief(self):
         """The adjudicate brief says "read, in full: the hold's own text above" — a product,
         2026-09-26: three adjudicate sessions on a Task held on a red CI check, none of whose

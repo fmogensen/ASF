@@ -1006,7 +1006,10 @@ class ProductHarvestTests(unittest.TestCase):
         # Ticks in between do nothing (B-0079) — an unanswered correction owns the branch.
         for expected_round in (1, 2, 3):
             _results, lines = self.harvest(product)
-            self.assertTrue(lines[-1].endswith(f'(round {expected_round})'), lines)
+            # the same red three holds in a row — CORRECT failed it twice — is the adjudicate
+            # row's (operator policy 2026-09-27: counted on the same finding)
+            self.assertTrue(lines[-1].endswith(f'(round {expected_round})' if expected_round < 3
+                                               else '3 times in a row)'), lines)
             self.assertEqual(self.record('fix/B-0001')['rounds'], expected_round)
             if expected_round < 3:
                 # the quiet tick between rounds: an unanswered correction owns the branch, so
@@ -1021,7 +1024,7 @@ class ProductHarvestTests(unittest.TestCase):
         self.session('adjudicate-b-0001', 'B-0001', 'fix/B-0001')
         _results, lines = self.harvest(product)
         self.assertTrue(lines[-1].startswith('held fix/B-0001: FAIL: test_red_gate'), lines)
-        self.assertTrue(lines[-1].endswith(' — adjudicate pending'), lines)
+        self.assertIn(' — adjudicate pending', lines[-1])
         path = harvest.sessions_path(self.state_dir)
         self.assertEqual(lifecycle.rounds_of(path, 'B-0001'), 3)
         self.assertFalse(self.record('fix/B-0001').get('operator_flagged'))
@@ -1029,7 +1032,7 @@ class ProductHarvestTests(unittest.TestCase):
         # a second hold at the cap: the adjudicate row's own attempt failed too
         self.session('adjudicate-b-0001-r2', 'B-0001', 'fix/B-0001')
         _results, lines = self.harvest(product)
-        self.assertTrue(lines[-1].endswith(' — adjudicate pending'), lines)
+        self.assertIn(' — adjudicate pending', lines[-1])
         self.assertEqual(lifecycle.rounds_of(path, 'B-0001'), 3)
         self.assertEqual(self.record('fix/B-0001').get('operator_flagged'), 1)
 
