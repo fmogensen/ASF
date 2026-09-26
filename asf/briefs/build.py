@@ -33,16 +33,12 @@ from asf import conventions as conventions_mod
 from asf import env
 from asf.briefs import facts as facts_mod
 from asf.briefs import preamble as preamble_mod
+from asf.conventions import HEAVY, LIGHT
 from asf.feeder import rows as feeder_rows
 from asf.views import index_reader as ix
 from asf.workers.stall import CORRECTION_HEAD
 
 TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
-
-#: The operator's two model labels. ``asf.workers`` maps them onto real model names, so no
-#: vendor's model id is ever written down here.
-HEAVY = 'heavy'
-LIGHT = 'light'
 
 KINDS = ('spec', 'plan', 'coder', 'review', 'fixer', 'rebase', 'close', 'adjudicate', 'fix-bug',
          'correct', 'groom', 'reshape', 'spec-plan', 'direct')
