@@ -49,8 +49,10 @@ class FakeHelper:
 
     def __init__(self, alter=False, answers=None, no_call=False):
         self.calls = []
-        self.alter = alter
+        self.alter = alter  # True: every create is altered; an int: the first n creates
         self.no_call = no_call
+        self.origin = None  # a bare origin: its refs/asf refs are read at each create
+        self.refs_at_create = None
         self.answers = {
             'create': (200, {'outcome': 'CREATE_TRIGGER_OUTCOME_CREATED',
                              'trigger': {'id': 'trig_1'}},
@@ -65,10 +67,16 @@ class FakeHelper:
     def __call__(self, argv, input='', env=None, **_kw):
         args = json.loads(input.split('<<<ARGS\n', 1)[1].split('\nARGS>>>', 1)[0])
         self.calls.append({'argv': argv, 'args': args, 'env': env})
+        if self.origin and args['action'] == 'create':
+            out = subprocess.run(['git', 'for-each-ref', '--format=%(refname)', 'refs/asf/'],
+                                 cwd=self.origin, capture_output=True, text=True).stdout
+            self.refs_at_create = out.split()
         if self.no_call:
             return subprocess.CompletedProcess(argv, 1, stdout='', stderr='Not logged in')
         sent = dict(args)
         if self.alter and args['action'] == 'create':
+            if self.alter is not True:
+                self.alter -= 1
             sent = json.loads(json.dumps(args))
             sent['body']['job_config']['ccr']['events'][0]['data']['message']['content'] = 'x'
         code, obj, tail = self.answers[args['action']]
@@ -169,14 +177,43 @@ class Helper(unittest.TestCase):
         body = remote.trigger_body('n', 'p', ENV_ID, 'm', (), 'u')
         self.assertEqual(c.create(body), ('trig_1', 'https://claude.ai/code/routines/trig_1'))
 
-    def test_an_altered_body_is_disabled_and_refused(self):
+    def test_an_altered_body_is_disabled_retried_once_then_refused(self):
         fake = FakeHelper(alter=True)
         c = remote.TriggerClient(acct(), binary='claude', run=fake, cwd='/t')
         with self.assertRaises(remote.HelperError) as cm:
             c.create(remote.trigger_body('n', 'p', ENV_ID, 'm', (), 'u'))
         self.assertIn('altered', str(cm.exception))
-        self.assertEqual(fake.actions(), ['create', 'update'])
+        self.assertEqual(fake.actions(), ['create', 'update', 'create', 'update'])
         self.assertEqual(fake.calls[1]['args']['body'], {'enabled': False})
+
+    def test_one_altered_create_is_retried_with_a_fresh_helper(self):
+        fake = FakeHelper(alter=1)
+        c = remote.TriggerClient(acct(), binary='claude', run=fake, cwd='/t')
+        body = remote.trigger_body('n', 'p', ENV_ID, 'm', (), 'u')
+        self.assertEqual(c.create(body), ('trig_1', 'https://claude.ai/code/routines/trig_1'))
+        self.assertEqual(fake.actions(), ['create', 'update', 'create'])
+        self.assertEqual(fake.calls[2]['args']['body'], body)
+
+    def test_a_helper_past_the_timeout_fails_clean_and_its_routine_is_disabled(self):
+        fake = FakeHelper()
+        seen = {}
+
+        def slow(argv, input='', env=None, **kw):
+            seen.setdefault('timeout', kw.get('timeout'))
+            if json.loads(input.split('<<<ARGS\n', 1)[1].split('\nARGS>>>', 1)[0])[
+                    'action'] == 'create':
+                done = fake(argv, input=input, env=env)  # made the routine, then hung
+                raise subprocess.TimeoutExpired(argv, kw.get('timeout'), output=done.stdout)
+            return fake(argv, input=input, env=env)
+
+        c = remote.TriggerClient(acct(), binary='claude', run=slow, cwd='/t')
+        with self.assertRaises(remote.HelperTimeout) as cm:
+            c.create(remote.trigger_body('n', 'p', ENV_ID, 'm', (), 'u'))
+        self.assertEqual(seen['timeout'], remote.HELPER_TIMEOUT_S)
+        self.assertLessEqual(remote.HELPER_TIMEOUT_S, 120)
+        self.assertTrue(str(cm.exception).startswith('timeout: helper create killed after'))
+        self.assertIn('routine trig_1 disabled', str(cm.exception))
+        self.assertEqual(fake.actions(), ['create', 'update'])  # not retried
 
     def test_a_refused_create_names_the_reason(self):
         fake = FakeHelper(answers={'create': (400, {'error': {
@@ -255,6 +292,7 @@ class Launch(Home):
                    log_path=os.path.join(self.tmp, 'j.jsonl'), **kw)
 
     def runtime(self, fake, block=ON):
+        fake.origin = os.path.join(self.tmp, 'origin.git')
         return remote.RemoteRuntime(
             cloud.settings({'cloud': block}), self.product,
             client=lambda a: remote.TriggerClient(a, binary='claude', run=fake, cwd=self.tmp))
@@ -272,13 +310,23 @@ class Launch(Home):
                          (ENV_ID, 'claude-opus-5',
                           [{'git_repository': {'url': 'https://github.com/o/r'}}]))
         prompt = ccr['events'][0]['data']['message']['content']
-        self.assertTrue(prompt.startswith('the brief'))
-        self.assertIn('ASF-Session: sid-1', prompt)
+        self.assertEqual(prompt, remote.pointer(self.job(), 'refs/asf/briefs/task-t-0001',
+                                                'https://github.com/o/r'))
+        self.assertFalse(prompt.startswith('the brief'))
+        self.assertIn('git fetch origin refs/asf/briefs/task-t-0001 && git show '
+                      'FETCH_HEAD:brief.md', prompt)
+        # the full brief is on origin's brief ref, pushed before the create
+        shown = git('show', 'refs/asf/briefs/task-t-0001:brief.md',
+                    cwd=os.path.join(self.tmp, 'origin.git'))
+        self.assertTrue(shown.startswith('the brief'))
+        self.assertIn('ASF-Session: sid-1', shown)
+        self.assertEqual(fake.refs_at_create, ['refs/asf/briefs/task-t-0001'])
         self.assertEqual(fake.calls[1]['args'], {'action': 'run', 'trigger_id': 'trig_1'})
         self.assertEqual(res.extra, {
             'runtime_lane': 'cloud', 'cloud_runtime': 'claude-remote', 'remote_trigger_id': 'trig_1',
             'remote_session_id': 'cse_9', 'cloud_url': 'https://claude.ai/code/session_9',
-            'remote_routine_url': 'https://claude.ai/code/routines/trig_1'})
+            'remote_routine_url': 'https://claude.ai/code/routines/trig_1',
+            'brief_ref': 'refs/asf/briefs/task-t-0001'})
         self.assertTrue(lifecycle.pid_alive(res.pid))
         with open(res.log_path) as f:
             logged = [json.loads(ln) for ln in f if ln.strip()]
@@ -302,6 +350,29 @@ class Launch(Home):
             self.runtime(fake).run(self.job())
         self.assertIn('fire cap', str(cm.exception))
         self.assertEqual(fake.actions(), ['create', 'run', 'update'])
+
+    def test_a_long_brief_stays_off_the_routine_body(self):
+        with open(self.brief, 'w') as f:
+            f.write('the brief ' + 'x\u00e9"\\`$ ' * 4000)
+        fake = FakeHelper()
+        self.runtime(fake).run(self.job())
+        body = fake.calls[0]['args']['body']
+        prompt = body['job_config']['ccr']['events'][0]['data']['message']['content']
+        self.assertLess(len(prompt), 600)
+        self.assertTrue(prompt.isascii())
+        self.assertLess(len(json.dumps(body)), 1200)
+
+    def test_a_failed_launch_deletes_the_brief_ref(self):
+        fake = FakeHelper(alter=True)
+        with self.assertRaises(spawn_mod.SpawnError) as cm:
+            self.runtime(fake).run(self.job())
+        self.assertIn('altered', str(cm.exception))
+        self.assertEqual(self.origin_refs(), [])
+
+    def origin_refs(self):
+        out = git('for-each-ref', '--format=%(refname)', 'refs/asf/',
+                  cwd=os.path.join(self.tmp, 'origin.git'))
+        return [ln for ln in out.splitlines() if ln.strip()]
 
     def test_no_repo_slug_refuses(self):
         self.product = env.Product('sample', {k: v for k, v in self.product._data.items()
@@ -340,6 +411,7 @@ class Sync(Home):
         (_row, rec), = launched
         self.assertEqual((rec['account'], rec['runtime_lane'], rec['pid']),
                          ('acct-c', 'cloud', 'remote:trig_1'))
+        self.assertEqual(rec['brief_ref'], 'refs/asf/briefs/spec-1')
         self.assertIn('cloud https://claude.ai/code/session_9', lines[0])
         return rec
 
@@ -372,6 +444,8 @@ class Sync(Home):
         self.assertEqual(status, cloud.FINISHED, why)
         self.assertEqual(self.fake.actions()[-1], 'update')
         self.assertFalse(lifecycle.pid_alive(rec['pid']))
+        origin = os.path.join(self.tmp, 'origin.git')
+        self.assertEqual(git('for-each-ref', 'refs/asf/', cwd=origin), '')  # gone with the run
         self.assertIn('item: F-0001', runtime_mod.read_result(rec['log'])['result'])
         self.sync()
         self.assertEqual(self.fake.actions().count('update'), 1)  # retired once
@@ -405,6 +479,50 @@ class Sync(Home):
             ok, detail = cloud.stop(rec)
         self.assertEqual((ok, detail), (True, 'routine trig_1 disabled'))
         self.assertFalse(lifecycle.pid_alive(rec['pid']))
+
+    def test_a_slow_helper_does_not_stall_the_wave_past_its_timeout(self):
+        slow = os.path.join(self.tmp, 'slow-claude')
+        with open(slow, 'w') as f:
+            f.write('#!/bin/sh\nexec sleep 30\n')
+        os.chmod(slow, 0o755)
+        accounts = pool_mod.accounts_from_config(self.cfg)
+        pool = pool_mod.Pool(accounts, quota_source=quota_mod.FakeQuotaSource({}))
+        rt = remote.RemoteRuntime(
+            cloud.settings(self.cfg, self.product), self.product,
+            client=lambda a: remote.TriggerClient(a, binary=slow, cwd=self.tmp, timeout=1))
+        t0 = time.monotonic()
+        launched, waits = wave_mod.wave(
+            self.product, [feature_row('spec-1')], 5, pool=pool,
+            runtime=runtime_mod.FakeRuntime([{'running': True}] * 5), cfg=self.cfg,
+            out=lambda _l: None, local_hold='host pressure', cloud_runtime=rt)
+        self.assertLess(time.monotonic() - t0, 15)
+        self.assertEqual(launched, [])
+        (_row, why), = waits
+        self.assertIn('spawn failed: cloud lane: timeout: helper create killed after 1s', why)
+        origin = os.path.join(self.tmp, 'origin.git')
+        self.assertEqual(git('for-each-ref', 'refs/asf/', cwd=origin), '')
+
+    def test_a_wave_tries_at_most_max_creates_per_tick_cloud_launches(self):
+        self.assertEqual(cloud.settings(self.cfg, self.product).max_creates_per_tick, 2)
+        self.assertEqual(cloud.settings({'cloud': dict(ON, runtime='actions')}).max_creates_per_tick,
+                         0)
+        self.cfg['cloud'] = dict(self.cfg['cloud'], max_inflight=5)
+        self.cfg['worker_pool'] = dict(self.cfg['worker_pool'], accounts=[
+            {'name': 'acct-a', 'role': 'local', 'cap': 1},
+            {'name': 'acct-c', 'role': 'worker', 'cap': 5}])
+        accounts = pool_mod.accounts_from_config(self.cfg)
+        pool = pool_mod.Pool(accounts, quota_source=quota_mod.FakeQuotaSource({}))
+        rt = remote.RemoteRuntime(cloud.settings(self.cfg, self.product), self.product,
+                                  client=self.client)
+        rows = [feature_row(f'spec-{i}', item=f'F-000{i}') for i in (1, 2, 3)]
+        launched, waits = wave_mod.wave(
+            self.product, rows, 5, pool=pool,
+            runtime=runtime_mod.FakeRuntime([{'running': True}] * 5), cfg=self.cfg,
+            out=lambda _l: None, local_hold='host pressure', cloud_runtime=rt)
+        self.assertEqual(len(launched), 2)
+        self.assertEqual(self.fake.actions().count('create'), 2)
+        (_row, why), = waits
+        self.assertIn('cloud lane: 2 launches this tick (cloud.max_creates_per_tick)', why)
 
     def test_the_lane_runtime_is_the_routine_runtime(self):
         rt = cloud.lane_runtime(cloud.settings(self.cfg, self.product), self.product)
