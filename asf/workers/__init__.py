@@ -77,7 +77,12 @@ def cmd_health(args):
     from asf.workers import health
     from asf.workers import retention
     product = _product(args)
+    from asf.workers import worktrees
     health.health(product, fix=args.fix)
+    if args.fix:
+        worktrees.reap(product)
+    else:  # what the worktree reaper would remove, and why the rest stay
+        worktrees.report(worktrees.dry_run(product)[0])
     retention.sweep(product, fix=args.fix)  # without --fix: what would go
     return 0
 
