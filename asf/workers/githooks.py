@@ -14,6 +14,11 @@ token (:func:`names_item`) is reworded to :func:`name_subject`'s — ``<kind>(<I
 the product's own hook sees it, so the lane never refuses a branch for naming. The id is the
 job's ``ASF_ITEM`` (:func:`item_env`), else the first id token in ``ASF_JOB``; a commit with
 neither, or outside a worker session (no ``ASF_JOB``), is left alone. It never blocks.
+
+Under the product's ``commit.signoff`` (``ASF_SIGNOFF=1``, :func:`item_env`) ``commit-msg`` also
+appends ``Signed-off-by: <author name> <author email>`` — the worktree's git identity — when the
+message carries no ``Signed-off-by`` yet (``git interpret-trailers --if-exists doNothing``), so a
+product's required DCO check passes whatever the brief said about ``git commit -s``.
 """
 import os
 import re
@@ -74,6 +79,17 @@ if [ "$name" = "commit-msg" ] && [ -n "$ASF_JOB" ] && [ -f "$1" ]; then
     fi
 fi
 
+# a product that requires a DCO sign-off (commit.signoff): the commit's author signs it off
+# unless the message already carries a Signed-off-by — an empty message stays empty (git aborts)
+if [ "$name" = "commit-msg" ] && [ "$ASF_SIGNOFF" = "1" ] && [ -f "$1" ] \
+        && grep -qv -e '^[[:space:]]*$' -e '^#' "$1"; then
+    who=$(git var GIT_AUTHOR_IDENT 2>/dev/null | sed 's/ [0-9][0-9]* [-+][0-9][0-9]*$//')
+    if [ -n "$who" ]; then
+        git interpret-trailers --in-place --if-exists doNothing \
+            --trailer "Signed-off-by: $who" "$1" 2>/dev/null || :
+    fi
+fi
+
 own=$(env -u GIT_CONFIG_COUNT git config --get core.hooksPath 2>/dev/null)
 if [ -n "$own" ]; then
     case "$own" in
@@ -125,12 +141,17 @@ def name_subject(subject, item, kind=None):
 
 def item_env(conv, item, branch):
     """``{ASF_ITEM, ASF_ITEM_KIND}`` for a session on ``branch`` for ``item`` — what the
-    ``commit-msg`` hook names each commit with; ``{}`` with no item."""
+    ``commit-msg`` hook names each commit with — plus ``ASF_SIGNOFF=1`` under the product's
+    ``commit.signoff`` (the hook then signs each commit off); ``{}`` with neither."""
+    out = {}
+    signoff = getattr(conv, 'signoff', None)
+    if callable(signoff) and signoff():
+        out['ASF_SIGNOFF'] = '1'
     if not item:
-        return {}
+        return out
     of = getattr(conv, 'branch_kind', None)
     kind = COMMIT_KIND.get(of(branch) if callable(of) and branch else None, 'chore')
-    return {'ASF_ITEM': str(item), 'ASF_ITEM_KIND': kind}
+    return {**out, 'ASF_ITEM': str(item), 'ASF_ITEM_KIND': kind}
 
 
 def _write_if_changed(path, text):
