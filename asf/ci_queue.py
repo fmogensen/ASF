@@ -27,16 +27,25 @@ tick asks again. Its entry keeps its place in line (``since``) while it keeps as
 (a superseded attempt's jobs never count, and attempts never overlap), per run and class the peak
 number of jobs running *at once* — each job that got a runner (``runner_name`` set, conclusion
 not ``skipped``) counted over its ``started_at``..``completed_at``, so a skipped or conditional
-job never counts and sequential stages never add up — grouped by the class of the runner each ran
-on (its ``ci.pool`` entry's ``class``, else its ``role``; a runner outside the pool, by its
-``class-<name>`` or role label); the *median* of that over the runs (rounded up), capped at what
-the pool declares for that class. The figure is cached in the queue file keyed by the set of run
+job never counts and sequential stages never add up — grouped by the class of the runner that
+actually ran it (its ``ci.pool`` entry's ``class``, else its ``role``), never by the job's
+``runs-on``; a runner outside the pool, by its labels mapped through :func:`label_classes` (a
+label every carrier of which sits in one class names that class, so a sub-label such as
+``fast-heavy`` carried only by ``heavy`` runners counts in ``heavy``, once — labels never make a
+demand of their own that sums with the parent). A job listed twice (same job id) counts once. The
+*median* of that over the runs (rounded up), capped at what the pool declares for that class. The figure is cached in the queue file keyed by the set of run
 ids it was measured from (re-measured only when that set changes; the ids are listed again after
 :data:`EXPECT_TTL_S`) and memoised per pass, so the hold line, the status Capacity row
 (:func:`status_clause`) and ``asf ci queue`` all name the one number. *Free runners* come from the runners API: an
 online runner that is not busy, counted at its ``slots``; runs this queue admitted in the last
 :data:`PICKUP_S` are subtracted too, because their jobs are queued on the host before any runner
 shows busy.
+
+**Starvation guard.** An ordinary PR start (not a batch) that has waited in line longer than
+``ci.queue.pr_wait_min`` (default 45) minutes is admitted once at least *half* its expected jobs
+per class (rounded up) are free after the entries ahead are set aside — the ceiling still holds.
+Measured peaks near the pool's size would otherwise hold a PR for as long as any other run is
+in flight. The admission prints one line naming the wait and the free count.
 
 **Order.** S1 and hotfix items first (0), then trunk runs (1: every deploy waits on a green
 trunk, so a trunk run never queues behind PR runs), then PRs of customer-facing Features (2: the
@@ -72,6 +81,7 @@ Every wait is UTC-aware now minus the host's UTC ``createdAt``, never local time
         mode: on          # on (default with a ci.pool) | dry-run | off
         history: 10       # runs of each workflow measured
         trunk_wait_min: 20  # a queued trunk run waiting longer gets runs ahead of it cancelled
+        pr_wait_min: 45   # an ordinary PR start waiting longer starts on half its expected jobs
         workflows: {pr: checks.yml, trunk: checks.yml, batch: batch.yml}  # default ci.workflow
 
 A product without ``ci.pool`` (or with ``mode: off``) is not queued: every start goes as it did
@@ -93,9 +103,10 @@ from asf import ci_pool, env
 QUEUE_FILE = 'ci-queue.json'
 KINDS = ('pr', 'trunk', 'batch', 'deploy')
 MODES = ('on', 'dry-run', 'off')
-FIELDS = ('mode', 'history', 'workflows', 'trunk_wait_min')
+FIELDS = ('mode', 'history', 'workflows', 'trunk_wait_min', 'pr_wait_min')
 DEFAULT_HISTORY = 10
 DEFAULT_TRUNK_WAIT_MIN = 20
+DEFAULT_PR_WAIT_MIN = 45
 #: a run the relief cancelled and could not re-run in this long is dropped from the file
 RELIEF_TTL_S = 24 * 60 * 60
 #: an entry not asked about again in this long has left the line (its caller moved on)
@@ -105,7 +116,7 @@ PICKUP_S = 3 * 60
 #: how long a workflow's measured jobs per class are reused before its run ids are listed again
 EXPECT_TTL_S = 10 * 60
 #: the measure's version: a cached figure from another version is read again
-EXPECT_VERSION = 3
+EXPECT_VERSION = 4
 #: the run conclusions measured: a cancelled (or otherwise cut short) run says nothing of its size
 MEASURED_CONCLUSIONS = frozenset({'success', 'failure'})
 GH_TIMEOUT_S = 30
@@ -177,6 +188,14 @@ def trunk_wait_min(product):
     return v if ok else DEFAULT_TRUNK_WAIT_MIN
 
 
+def pr_wait_min(product):
+    """``ci.queue.pr_wait_min``: minutes an ordinary PR start waits before the starvation guard
+    admits it on half its expected jobs (default 45)."""
+    v = _qcfg(product).get('pr_wait_min')
+    ok = isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+    return v if ok else DEFAULT_PR_WAIT_MIN
+
+
 def workflow_for(product, kind, default=None):
     """The workflow a ``kind`` of start triggers: ``ci.queue.workflows.<kind>``, else ``default``
     (a deploy passes its own), else ``ci.workflow``."""
@@ -201,9 +220,10 @@ def config_problems(ci):
     if q.get('mode') is not None and str(q['mode']).strip().lower() not in MODES \
             and q['mode'] is not True and q['mode'] is not False:
         out.append(('ci.queue.mode', f"must be one of {', '.join(MODES)}, not {q['mode']!r}"))
-    w = q.get('trunk_wait_min')
-    if w is not None and (isinstance(w, bool) or not isinstance(w, (int, float)) or w <= 0):
-        out.append(('ci.queue.trunk_wait_min', f'must be a number of minutes > 0, not {w!r}'))
+    for k in ('trunk_wait_min', 'pr_wait_min'):
+        w = q.get(k)
+        if w is not None and (isinstance(w, bool) or not isinstance(w, (int, float)) or w <= 0):
+            out.append((f'ci.queue.{k}', f'must be a number of minutes > 0, not {w!r}'))
     h = q.get('history')
     if h is not None and (isinstance(h, bool) or not isinstance(h, int) or h < 1):
         out.append(('ci.queue.history', f'must be a whole number >= 1, not {h!r}'))
@@ -351,7 +371,7 @@ class GitHubSource(Source):
     def attempt_jobs(self, run_id, attempt):
         text = self._gh(['api', f'repos/{self.slug}/actions/runs/{run_id}/attempts/{attempt}/'
                                 'jobs?per_page=100',
-                         '--jq', '.jobs[] | {runner_name, labels, conclusion, started_at, '
+                         '--jq', '.jobs[] | {id, runner_name, labels, conclusion, started_at, '
                          'completed_at, run_attempt}'])
         if text is None:
             return None
@@ -365,24 +385,73 @@ class GitHubSource(Source):
         return capacity.ci_runs_in_flight(self.product, run=self._run, timeout=GH_TIMEOUT_S)
 
 
-def _job_class(job, by_name, roles):
+def label_classes(pool, runners=()):
+    """``{label: class}``: the class a runner label stands for. A label names a class when every
+    runner carrying it — the pool's declared labels (role, ``class-<name>``) and the live runners'
+    labels, each runner in the class it is declared in — sits in that one class. So a sub-label
+    (``fast-heavy``, carried only by ``heavy`` runners) maps to ``heavy`` and never becomes a class
+    of its own; a label spanning classes (``self-hosted``, a provider) maps to none."""
+    by_name = {e.runner: e for e in pool}
+    seen = {}
+    for e in pool:
+        for l in e.labels():
+            seen.setdefault(ci_pool._norm(l), set()).add(class_key(e))
+    for r in runners or ():
+        e = by_name.get(getattr(r, 'name', None))
+        if e is None:
+            continue
+        for l in getattr(r, 'labels', None) or ():
+            seen.setdefault(ci_pool._norm(l), set()).add(class_key(e))
+    out = {l: next(iter(c)) for l, c in seen.items()
+           if len(c) == 1 and l not in ci_pool.DEFAULT_LABELS}
+    for e in pool:                       # an explicit class label always names its class
+        if e.cls:
+            out[ci_pool.CLASS_PREFIX + e.cls] = class_key(e)
+    return out
+
+
+def _as_label_map(labels):
+    """A ``{label: class}`` map, from a map or from a plain set of role labels (role → itself)."""
+    if isinstance(labels, dict):
+        return labels
+    return {ci_pool._norm(l): ci_pool._norm(l) for l in labels or ()}
+
+
+def _job_class(job, by_name, labels):
+    """The class of the runner that ran ``job``: the pool entry by ``runner_name``; a runner
+    outside the pool, by the job's labels through ``labels`` (:func:`label_classes`) — one class
+    however many of its labels map there, None when they map to none or disagree."""
     e = by_name.get(job.get('runner_name') or '')
     if e:
         return class_key(e)
-    return _label_key([l if isinstance(l, str) else (l or {}).get('name', '')
-                       for l in job.get('labels') or ()], roles)
+    names = [ci_pool._norm(l if isinstance(l, str) else (l or {}).get('name', ''))
+             for l in job.get('labels') or ()]
+    for l in names:
+        if l.startswith(ci_pool.CLASS_PREFIX) and l in labels:
+            return labels[l]
+    found = {labels[l] for l in names if l in labels}
+    return found.pop() if len(found) == 1 else None
 
 
-def peak_concurrent(jobs, by_name, roles):
+def peak_concurrent(jobs, by_name, labels):
     """``{class: peak jobs running at once}`` for one run's ``jobs``. A job counts only when it
-    got a runner (``runner_name`` set) and did not end ``skipped``; it runs from ``started_at``
-    to ``completed_at`` (no ``completed_at``: to the end of the run; no ``started_at``: the whole
-    run). A job ending as another starts does not overlap it, so sequential stages count once."""
+    got a runner (``runner_name`` set) and did not end ``skipped``, once (a job id listed twice is
+    one job), in one class (:func:`_job_class`); it runs from ``started_at`` to ``completed_at``
+    (no ``completed_at``: to the end of the run; no ``started_at``: the whole run). A job ending
+    as another starts does not overlap it, so sequential stages count once. ``labels`` is a
+    :func:`label_classes` map (or the pool's role labels)."""
+    labels = _as_label_map(labels)
     events = {}
+    ids = set()
     for j in jobs or ():
         if not isinstance(j, dict) or not j.get('runner_name') or j.get('conclusion') == 'skipped':
             continue
-        key = _job_class(j, by_name, roles)
+        jid = j.get('id')
+        if jid is not None:
+            if jid in ids:
+                continue
+            ids.add(jid)
+        key = _job_class(j, by_name, labels)
         if key is None:
             continue
         start = _parse(j.get('started_at'))
@@ -419,16 +488,18 @@ def latest_attempt(jobs):
     return [j for j in jobs if j.get('run_attempt') in (None, last)]
 
 
-def needs_from_history(runs, pool):
-    """``{class: expected jobs}`` from ``runs`` (each a list of jobs ``{runner_name, labels,
+def needs_from_history(runs, pool, runners=()):
+    """``{class: expected jobs}`` from ``runs`` (each a list of jobs ``{id, runner_name, labels,
     conclusion, started_at, completed_at, run_attempt}``): per class the median over the runs of
     each run's peak concurrent jobs (:func:`peak_concurrent`) in its latest attempt
-    (:func:`latest_attempt`), capped at the class's declared slots. A job on a runner outside
-    every class (a hosted runner) needs nothing of the pool."""
+    (:func:`latest_attempt`), capped at the class's declared slots. Each job counts in the class
+    of the runner that ran it; ``runners`` (the live runner read) widens the label map for a
+    runner outside the pool. A job on a runner outside every class (a hosted runner) needs
+    nothing of the pool."""
     if not runs:
         return {}
     by_name = {e.runner: e for e in pool}
-    roles = set(ci_pool.roles(pool))
+    roles = label_classes(pool, runners)
     cap = {}
     for e in pool:
         cap[class_key(e)] = cap.get(class_key(e), 0) + e.slots
@@ -566,9 +637,10 @@ def fit_reason(short):
     return ', '.join(f'{c} {a} free, needs {n}' for c, a, n in short)
 
 
-def shortfall(key, order, needs_of, free):
+def shortfall(key, order, needs_of, free, half=False):
     """``[(class, free, needs)]`` for every class ``key`` needs more of than is free once the
-    entries ahead of it in ``order`` are served; ``[]`` when it fits."""
+    entries ahead of it in ``order`` are served; ``[]`` when it fits. ``half``: it fits on half
+    its needs per class, rounded up (the starvation guard)."""
     avail = dict(free)
     for other in order:
         if other == key:
@@ -576,26 +648,45 @@ def shortfall(key, order, needs_of, free):
         for c, n in (needs_of(other) or {}).items():
             if c in avail:
                 avail[c] = max(0, avail[c] - n)
+    want = (lambda n: math.ceil(n / 2)) if half else (lambda n: n)
     return [(c, avail.get(c, 0), n) for c, n in sorted((needs_of(key) or {}).items())
-            if c in avail and n > avail[c]]
+            if c in avail and want(n) > avail[c]]
 
 
-def decide(key, order, entries, needs_of, free, ceiling=None, inflight=None, admitted=0):
+def starved(entry, now, wait_min):
+    """Has an ordinary PR start waited in line past ``wait_min`` minutes? (the starvation guard)"""
+    entry = entry or {}
+    if now is None or wait_min is None or entry.get('kind') != 'pr':
+        return False
+    if _parse(entry.get('since')) is None:
+        return False
+    return _age(entry.get('since'), now) > wait_min * 60
+
+
+def decide(key, order, entries, needs_of, free, ceiling=None, inflight=None, admitted=0,
+           now=None, pr_wait_min=None):
     """Pure: may ``key`` start now? ``(ok, why)``. ``order`` is the line; ``needs_of(key)`` the
     entry's ``{class: jobs}``; ``free`` the free slots per class (None: unknown — no runner
     check); ``ceiling``/``inflight`` the CI ceiling and runs in flight (None: no ceiling);
     ``admitted`` runs this pass already started. The ceiling and the runner fit both hold only a
-    start :func:`ceiling_applies` to: an S1, hotfix, trunk or deploy start always goes."""
-    if not ceiling_applies(entries.get(key)):
+    start :func:`ceiling_applies` to: an S1, hotfix, trunk or deploy start always goes. An
+    ordinary PR start waiting past ``pr_wait_min`` (at ``now``) fits on half its expected jobs
+    per class; that admission's ``why`` names the guard (the only admission with a ``why``)."""
+    e = entries.get(key)
+    if not ceiling_applies(e):
         return True, ''
     if ceiling is not None and inflight is not None and inflight + admitted >= ceiling:
         return False, ceiling_reason(inflight, ceiling, admitted)
     if free is None:
         return True, ''
     short = shortfall(key, order, needs_of, free)
-    if short:
-        return False, fit_reason(short)
-    return True, ''
+    if not short:
+        return True, ''
+    if starved(e, now, pr_wait_min) and not shortfall(key, order, needs_of, free, half=True):
+        waited = _dur(_age((e or {}).get('since'), now))
+        return True, (f'starvation guard — waited {waited} (> {pr_wait_min}m), '
+                      f'{fit_reason(short)}; half is free')
+    return False, fit_reason(short)
 
 
 class Queue:
@@ -611,6 +702,7 @@ class Queue:
         self.out = out
         self._inflight = inflight
         self._free = None
+        self._runners = ()
         self._read = False
         self.write = write and self.mode == 'on'
         self.data = prune(load(product.name), self.now) if self.mode != 'off' else None
@@ -629,9 +721,10 @@ class Queue:
             return
         self._read = True
         try:
-            self._free = free_by_class(self.source.runners(), self.pool)
+            self._runners = self.source.runners()
+            self._free = free_by_class(self._runners, self.pool)
         except ci_pool.BackendError:
-            self._free = None
+            self._runners, self._free = (), None
         if self._inflight is None and self.ceiling() is not None:
             try:
                 self._inflight = self.source.inflight()
@@ -675,7 +768,8 @@ class Queue:
             cached['at'] = _iso(self.now)       # the same runs: the same number
             return dict(cached.get('needs') or {})
         runs = [j for j in (self.source.attempt_jobs(i, a) for i, a in ids) if j is not None]
-        n = needs_from_history(runs, self.pool)
+        self._read_host()           # the live labels map a runner outside the pool to its class
+        n = needs_from_history(runs, self.pool, self._runners or ())
         self.data['expect'][workflow] = {'at': _iso(self.now), 'needs': n, 'runs': len(runs),
                                          'ids': key, 'v': EXPECT_VERSION}
         return n
@@ -707,9 +801,12 @@ class Queue:
         self._read_host()
         free = self.free()
         ok, why = decide(key, order, entries, needs.get, free, self.ceiling(),
-                         self._inflight, self.admitted_here)
+                         self._inflight, self.admitted_here, now=self.now,
+                         pr_wait_min=pr_wait_min(self.product))
         pos = order.index(key) + 1
         if ok:
+            if why:                 # the starvation guard: one line naming the wait
+                self.out(f"ci queue: {e['item']} starts — {why} ({label}, {_ordinal(pos)} in line)")
             entries.pop(key, None)
             self.data['started'].append({'key': key, 'at': _iso(self.now), 'needs': needs[key]})
             self.admitted_here += 1
@@ -986,7 +1083,8 @@ def live_line(product, source=None, inflight=None, now=None):
     line.free, line.ceiling = q.free(), q.ceiling()
     line.inflight = q._inflight
     line.decisions = [(k, *decide(k, order, entries, line.needs.get, line.free, line.ceiling,
-                                  line.inflight)) for k in order]
+                                  line.inflight, now=q.now, pr_wait_min=pr_wait_min(product)))
+                      for k in order]
     return line
 
 
@@ -1079,8 +1177,9 @@ def cmd_queue(args, source=None, out=print):
     for i, (k, ok, why) in enumerate(line.decisions, 1):
         e = entries[k]
         need = ', '.join(f'{c} {n}' for c, n in sorted(line.needs[k].items())) or 'nothing measured'
+        said = (f'would start ({why})' if why else 'would start') if ok else 'waits: ' + why
         out(f"{i}. {e.get('item')} [{e.get('kind')}, {e.get('label')}, since {e.get('since')}] "
-            f"needs {need} — {'would start' if ok else 'waits: ' + why}")
+            f"needs {need} — {said}")
     return 0
 
 
