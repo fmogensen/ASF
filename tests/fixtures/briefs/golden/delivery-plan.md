@@ -45,6 +45,11 @@ writes: (none declared)
 acceptance:
 - [ ] `tests/test_checkout.py::test_timeout_retries_fallback` passes.
 
+### Where to look
+`tests/test_checkout.py` (12 lines)
+- test_attempt_row_per_try (def) L3-12
+Read only these line ranges first.
+
 ### The last report for this item
 REPORT
 status: partial
@@ -125,6 +130,7 @@ pushed: yes <the sha origin/plan/F-0003 now points at> | rebased <sha> — the f
 commits: <sha> <subject> (one per line, or none)
 tests: <what you ran — and its last line>
 left out: <what and why, or none>
+needs writes: <coder/correct only — repo paths outside writes: that must change too, space-separated, or none>
 ruling: <adjudicate only — one paragraph: what was disputed, what now holds, what changes; else omit>
 blocked_on: <adjudicate only — the id this item must wait for, or none>
 writes: <adjudicate only — the corrected footprint, space-separated globs, or none>
