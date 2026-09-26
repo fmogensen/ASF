@@ -93,7 +93,7 @@ class Refused(unittest.TestCase):
         self.assertIn('--cloud cannot be combined with --print. Starting a new cloud session '
                       'with --cloud is interactive only', why)
         self.assertIn('--bg and --cloud are different backends', why)
-        self.assertIn('use runtime: actions', why)
+        self.assertIn('use runtime: claude-remote', why)
         self.assertEqual(cloud.config_problems({'runtime': 'claude-cloud'})[0][0], 'cloud.runtime')
         self.assertEqual(cloud.config_problems({'enabled': True}), [])  # the default: actions
         self.assertEqual(cloud.config_problems(None), [])
