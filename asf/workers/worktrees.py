@@ -24,11 +24,14 @@ first, then the spare ones, most recently used first — the rest are removed, l
 first. A relaunch on a removed branch recreates the worktree from ``origin/<branch>``
 (:func:`asf.workers.spawn.make_worktree`).
 
-Removal is ``git worktree remove`` (no force: git itself refuses a tree with changes) and a
-``git worktree prune`` — never a branch delete. Each pass writes ``worktrees.json`` in the
-product's state dir — the count, the sizes (``du -sk``, cached, at most
-:data:`SIZE_MEASURES_PER_PASS` fresh measurements a pass) and what is removable — which is what
-``asf doctor``'s ``worktrees`` row reads, so the doctor measures nothing itself.
+Removal is :func:`asf.workers.trash.discard` (a tree with changes is refused, as ``git worktree
+remove`` without force refuses it): the directory is renamed into ``<state>/trash/`` and ``git
+worktree prune`` frees its branch — never a branch delete — and a detached, nice'd deleter
+empties the trash after the tick (a pass that deleted ten ~1.9 GB trees inline held its
+health step for 611 s). Each pass writes ``worktrees.json`` in the product's state dir — the
+count, the sizes (``du -sk``, cached, at most :data:`SIZE_MEASURES_PER_PASS` fresh measurement a
+pass, never of a tree being reaped) and what is removable — which is what ``asf doctor``'s
+``worktrees`` row reads, so the doctor measures nothing itself.
 """
 import dataclasses
 import json
@@ -41,15 +44,16 @@ from asf import env
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 from asf.workers import spawn as spawn_mod
+from asf.workers import trash as trash_mod
 
 DEFAULT_BUFFER = 2
 #: An orphan worktree (no run on the ledger) younger than this is a launch being set up.
 ORPHAN_GRACE_S = 3600
 #: A cached size older than this is measured again.
 SIZE_TTL_S = 12 * 3600
-#: ``du`` runs at most this many times a pass (the reaped ones are measured regardless).
-SIZE_MEASURES_PER_PASS = 4
-DU_TIMEOUT_S = 120
+#: ``du`` runs at most this many times a pass, on kept worktrees only (the reaped ones never).
+SIZE_MEASURES_PER_PASS = 1
+DU_TIMEOUT_S = 30
 STATE_FILE = 'worktrees.json'
 
 LIVE, KEEP, SPARE, REMOVE = 'live', 'keep', 'spare', 'remove'
@@ -296,8 +300,8 @@ def _sizes(verdicts, cached, now, budget, measure=du_kb):
 
 def reap(product, buffer=None, alive=None, fix=True, out=print, now=None, measure=du_kb):
     """One pass: :func:`plan` with origin's missing objects fetched, then (``fix``) every
-    ``remove`` verdict removed. Prints one line when anything was reaped — ``worktrees: reaped
-    N (X GB), kept M`` — and records the state the doctor reads. Returns ``{'removed': [...],
+    ``remove`` verdict moved to the trash and the background deleter kicked. Prints one line when
+    anything was reaped — ``worktrees: reaped N — deleting in background, kept M`` — and records the state the doctor reads. Returns ``{'removed': [...],
     'failed': [(verdict, why)], 'verdicts': [...]}``."""
     if buffer is None:
         buffer = buffer_of(spawn_mod.load_cfg())
@@ -307,27 +311,28 @@ def reap(product, buffer=None, alive=None, fix=True, out=print, now=None, measur
     cached = state.get('sizes') if isinstance(state.get('sizes'), dict) else {}
     removed, failed = [], []
     reaped_kb = 0
+    sd = env.state_dir(product)
     for v in verdicts:
         if v.action != REMOVE or not fix:
             continue
+        # the size is the cached one or none: a du of a tree being reaped is minutes on a
+        # loaded host, and deleting it is the background deleter's job, never the tick's
         kb = (cached.get(v.name) or {}).get('kb') if isinstance(cached.get(v.name), dict) else None
-        if kb is None:
-            kb = measure(v.path) or 0
-        p = _git(['worktree', 'remove', v.path], product.repo_dir, timeout=600)
-        if p.returncode != 0:
-            failed.append((v, (p.stderr or p.stdout).strip().splitlines()[-1:] or ['refused']))
+        ok, why = trash_mod.discard(product.repo_dir, sd, v.path, kick_deleter=False)
+        if not ok:
+            failed.append((v, [why]))
             continue
         removed.append(v)
-        reaped_kb += kb
+        reaped_kb += kb or 0
         spawn_mod.release_id_range(product, v.job)
-    if removed:
-        _git(['worktree', 'prune'], product.repo_dir)
+    if fix:
+        trash_mod.kick(sd)  # also retries what an earlier deleter could not remove
     remaining = [v for v in verdicts if v not in removed]
     sizes = _sizes(remaining, cached, now, SIZE_MEASURES_PER_PASS, measure)
     for v, why in failed:
         out(f'worktrees: could not remove {v.name}: {why[0]}')
     if removed:
-        out(f'worktrees: reaped {len(removed)} ({_gb(reaped_kb)}), kept {len(remaining)}')
+        out(f'worktrees: reaped {len(removed)} — deleting in background, kept {len(remaining)}')
     _write_state(product, {
         'at': datetime.fromtimestamp(now, timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
         'count': len(remaining),
@@ -386,6 +391,9 @@ def doctor_line(product):
         parts.append(f'{removable} removable')
         ok = removable == 0
         parts.append(f'last pass reaped {state.get("reaped", 0)} at {state.get("at", "?")}')
+    waiting = trash_mod.pending(env.state_dir(product))
+    if waiting:
+        parts.append(f'trash: {len(waiting)} awaiting the background deleter')
     else:
         parts.append('no reaper pass yet')
     note = pnpm_note(product)

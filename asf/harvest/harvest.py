@@ -221,8 +221,9 @@ def reap(repo, state_dir, job, branch, sha=None, alive=None, session_source=None
         hold(job, f'not reaped: {why}')
         return False
     wt_path = os.path.join(state_dir, 'worktrees', job)
-    if os.path.isdir(wt_path):
-        sh(['git', 'worktree', 'remove', '--force', wt_path], cwd=repo)
+    if os.path.isdir(wt_path):  # out of git now, off the disk in the background
+        from asf.workers import trash
+        trash.discard(repo, state_dir, wt_path, check_clean=False)
     sh(['git', 'branch', '-D', branch], cwd=repo)
     mark_harvested(state_dir, job, sha)
     return True

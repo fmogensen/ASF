@@ -174,8 +174,12 @@ def in_trunk(worktree, main):
 
 
 def remove_worktree(product, path, branch=None):
-    p = _git(['worktree', 'remove', path], product.repo_dir)
-    if p.returncode != 0:
+    """The worktree out of git and into the trash (a tree with changes is refused), deleted in
+    the background (:mod:`asf.workers.trash`); then its ``branch``, when given, deleted."""
+    from asf import env
+    from asf.workers import trash
+    ok, _ = trash.discard(product.repo_dir, env.state_dir(product), path)
+    if not ok:
         return False
     if branch:
         _git(['branch', '-D', branch], product.repo_dir)

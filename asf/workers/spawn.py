@@ -237,11 +237,11 @@ def _place_worktree(product, repo, job, branch):
         _git(['fetch', '-q', 'origin', branch], repo)
         if held:
             # a stale worktree of an ended run still holds the branch and is not reusable here
-            _git(['worktree', 'remove', '--force', held], repo)
+            _discard(product, held)
         _git(['worktree', 'add', '-q', '-B', branch, path, f'origin/{branch}'], repo)
         return path, False, True
     if held:
-        _git(['worktree', 'remove', '--force', held], repo)
+        _discard(product, held)
         _git(['branch', '-D', branch], repo)
     elif _local_branch_exists(repo, branch):
         # a branch with no worktree and not on origin (a reaped one): reused when it carries
@@ -429,11 +429,17 @@ def run_worktree_setup(product, job, worktree, account=None, passthrough=(),
     if why is None:
         return round(time.monotonic() - started, 1)
     with repo_lock(product.repo_dir):
-        subprocess.run(['git', 'worktree', 'remove', '--force', worktree], cwd=product.repo_dir,
-                       capture_output=True)
+        _discard(product, worktree)
     raise SpawnError(f'worktree_setup `{command}` failed in {worktree} ({why}) — log: {log}',
                      clear=f'fix `{command}` (conventions.worktree_setup in '
                            f'products/{product.name}.yaml), then relaunch')
+
+
+def _discard(product, path):
+    """``git worktree remove --force`` without the wait: the tree leaves git at once and the disk
+    in the background (:mod:`asf.workers.trash`)."""
+    from asf.workers import trash
+    return trash.discard(product.repo_dir, env.state_dir(product), path, check_clean=False)
 
 
 def spawn(product, row, account, brief_text, runtime=None, cfg=None):

@@ -10,11 +10,14 @@ import shutil
 import subprocess
 import tempfile
 import time
+import sys
 import unittest
+from unittest import mock
 
 from asf import env
 from asf.workers import pool as pool_mod
 from asf.workers import spawn as spawn_mod
+from asf.workers import trash as trash_mod
 from asf.workers import worktrees as wt_mod
 
 try:
@@ -112,7 +115,7 @@ class Reaper(unittest.TestCase):
         self.assertTrue(git('ls-remote', '--heads', 'origin', branch, cwd=self.repo))
         self.assertNotIn(os.path.realpath(path), git('worktree', 'list', cwd=self.repo))
         self.assertEqual(len(lines), 1)
-        self.assertRegex(lines[0], r'^worktrees: reaped 1 \(\d+\.\d GB\), kept 0$')
+        self.assertEqual(lines[0], 'worktrees: reaped 1 — deleting in background, kept 0')
 
     def test_landed_on_the_trunk_without_a_remote_branch_is_removed(self):
         path, branch = self.worktree('landed', push=False)
@@ -239,6 +242,103 @@ class Reaper(unittest.TestCase):
         self.assertEqual(wt_mod.buffer_of({}), 2)
         self.assertEqual(wt_mod.buffer_of({'worker_pool': {'worktree_buffer': 5}}), 5)
         self.assertEqual(wt_mod.buffer_of({'worker_pool': {'worktree_buffer': 'x'}}), 2)
+
+    # ---- deletion is off the tick -------------------------------------------------------
+
+    def test_reap_moves_a_large_worktree_to_the_trash_without_deleting_or_measuring_it(self):
+        path, branch = self.worktree('big')
+        deps = os.path.join(path, 'node_modules')
+        for i in range(40):
+            d = os.path.join(deps, f'p{i}')
+            os.makedirs(d, exist_ok=True)
+            for j in range(100):
+                with open(os.path.join(d, f'f{j}.js'), 'w') as f:
+                    f.write('x')
+        measured, kicked = [], []
+        with mock.patch.object(trash_mod, 'kick', lambda sd, **k: kicked.append(sd)):
+            start = time.monotonic()
+            result = wt_mod.reap(self.product, buffer=2, alive=lambda pid: False,
+                                 out=lambda line: None, measure=measured.append)
+            took = time.monotonic() - start
+        self.assertEqual([v.name for v in result['removed']], ['big'])
+        self.assertFalse(os.path.exists(path))
+        left = trash_mod.pending(env.state_dir(self.product))
+        self.assertEqual(len(left), 1)
+        self.assertTrue(left[0].startswith('big-'))
+        moved = os.path.join(trash_mod.trash_dir(env.state_dir(self.product)), left[0])
+        files = sum(len(fs) for _, _, fs in os.walk(os.path.join(moved, 'node_modules')))
+        self.assertEqual(files, 4001)  # untouched: nothing was deleted inline
+        self.assertNotIn(path, measured)  # no du of what is being reaped
+        self.assertTrue(kicked)
+        self.assertLess(took, 10)
+
+    def test_the_branch_is_free_the_moment_the_worktree_is_trashed(self):
+        path, branch = self.worktree('done')
+        with mock.patch.object(trash_mod, 'kick', lambda sd, **k: None):
+            self.reap()
+        again = os.path.join(self.wdir, 'again')
+        git('worktree', 'add', '-q', '-B', branch, again, 'origin/main', cwd=self.repo)
+        self.assertTrue(os.path.isdir(again))
+
+    def test_the_background_deleter_empties_the_trash(self):
+        self.worktree('done')
+        self.reap()  # the real kick: a detached deleter
+        sd = env.state_dir(self.product)
+        deadline = time.monotonic() + 30
+        while trash_mod.pending(sd) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertEqual(trash_mod.pending(sd), [])
+
+    @unittest.skipIf(hasattr(os, 'geteuid') and os.geteuid() == 0, 'root deletes anything')
+    def test_a_failed_delete_leaves_the_trash_for_the_next_kick(self):
+        sd = env.state_dir(self.product)
+        stuck = os.path.join(trash_mod.trash_dir(sd), 'stuck-1', 'ro')
+        os.makedirs(stuck)
+        with open(os.path.join(stuck, 'f'), 'w') as f:
+            f.write('x')
+        os.chmod(stuck, 0o500)
+        try:
+            self._run_deleter(sd)
+            self.assertEqual(trash_mod.pending(sd), ['stuck-1'])
+        finally:
+            os.chmod(stuck, 0o700)
+        self._run_deleter(sd)
+        self.assertEqual(trash_mod.pending(sd), [])
+
+    def test_one_deleter_at_a_time(self):
+        import fcntl
+        sd = env.state_dir(self.product)
+        os.makedirs(os.path.join(trash_mod.trash_dir(sd), 'x-1'))
+        fd = os.open(os.path.join(trash_mod.trash_dir(sd), trash_mod.LOCK),
+                     os.O_CREAT | os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            self._run_deleter(sd)  # the lock is held: it leaves at once
+            self.assertEqual(trash_mod.pending(sd), ['x-1'])
+        finally:
+            os.close(fd)
+        self._run_deleter(sd)
+        self.assertEqual(trash_mod.pending(sd), [])
+
+    def test_the_deleter_is_never_counted_as_a_tick(self):
+        import re
+        from asf import upgrade
+        argv = ' '.join(['python3', '-I', '-S', '-c', trash_mod.DELETER, '/x/trash'])
+        self.assertIsNone(re.search(upgrade.TICK_PATTERN, argv))
+
+    def test_a_dirty_worktree_is_never_trashed(self):
+        path, _ = self.worktree('dirty')
+        with open(os.path.join(path, 'wip.txt'), 'w') as f:
+            f.write('wip')
+        ok, why = trash_mod.discard(self.repo, env.state_dir(self.product), path,
+                                    kick_deleter=False)
+        self.assertFalse(ok)
+        self.assertIn('uncommitted', why)
+        self.assertTrue(os.path.exists(os.path.join(path, 'wip.txt')))
+
+    def _run_deleter(self, sd):
+        subprocess.run([sys.executable, '-I', '-S', '-c', trash_mod.DELETER,
+                        trash_mod.trash_dir(sd)], check=True, timeout=60)
 
     # ---- what the doctor reads ----------------------------------------------------------
 
