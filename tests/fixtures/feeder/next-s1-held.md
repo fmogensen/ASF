@@ -1,8 +1,9 @@
-**NEXT** — 12 rows · 8 would launch
+**NEXT** — 13 rows · 8 would launch
 
 | Tier | Row | Item | Feature | Action |
 |---|---|---|---|---|
 | 0 | UNDECIDED → DECIDE | B-0004 | F-0002 | NEEDS DECISION |
+| 0 | BUG → FIX | B-0001 | F-0002 | WAITS ON session |
 | 1 | BUG → FIX | B-0002 | F-0004 | would launch fix-bug on fix/B-0002 |
 | 2 | CONFLICT → REBASE | T-0007 | F-0002 | would launch rebase on task/T-0007 |
 | 2 | PLAN → CODE | T-0001 | F-0002 | would launch task on worker/T-0001 |

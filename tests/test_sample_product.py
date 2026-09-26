@@ -209,12 +209,16 @@ class SampleProductTest(unittest.TestCase):
                      '--capacity', '2')
         self.assertEqual(p.returncode, 0, p.stderr)
         rows = json.loads(p.stdout)
-        self.assertNotIn('B-0001', [r['item_id'] for r in rows])  # in flight: no second session
-        self.assertEqual([(r['kind'], r['item_id'], r['branch']) for r in rows],
+        # in flight: no second session, but still named — a WAITS row, never silent
+        self.assertEqual([(r['item_id'], r['action']) for r in rows if r['item_id'] == 'B-0001'],
+                         [('B-0001', 'WAITS ON session')])
+        self.assertEqual([(r['kind'], r['item_id'], r['branch']) for r in rows
+                          if r['action'].startswith('would launch')],
                          [('CARD → SPEC', 'F-0001', 'spec/F-0001')])
         # at the sample's own capacity the Feature waits for the Bug's slot
         p = self.asf('next', '--product', 'sample', '--json', '--inflight', inflight)
-        self.assertEqual(json.loads(p.stdout), [])
+        self.assertEqual([(r['item_id'], r['action']) for r in json.loads(p.stdout)],
+                         [('B-0001', 'WAITS ON session')])
 
     def test_doctor_is_clean(self):
         p = self.asf('doctor', '--product', 'sample')

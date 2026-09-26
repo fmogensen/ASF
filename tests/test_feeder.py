@@ -298,8 +298,9 @@ class RowsTest(unittest.TestCase):
         self.assertEqual([(r.item_id, r.tier, r.brief_kind, r.branch) for r in bugs],
                          [('B-0001', 0, 'fix-bug', 'fix/B-0001'), ('B-0002', 1, 'fix-bug', 'fix/B-0002')])
 
-    def test_bug_with_a_session_is_not_a_row(self):
-        self.assertNotIn('B-0001', {r.item_id for r in self.cand([S1_SESSION])})
+    def test_bug_with_a_session_is_not_a_launching_row(self):
+        rs = [r for r in self.cand([S1_SESSION]) if r.item_id == 'B-0001']
+        self.assertEqual([(r.launches, r.waits_on) for r in rs], [(False, 'session')])
 
     def test_fix_prefix_from_conventions(self):
         p = product(conventions={'branch_prefixes': {'fix': 'hotfix-'}})
@@ -542,7 +543,77 @@ class AttemptOrderTest(unittest.TestCase):
 
     def test_once_adjudicated_the_bug_is_not_relaunched(self):
         out = rows.plan_rows(s1_bugs('B-0001'), product(), [], 1, attempts={'B-0001': 4})
-        self.assertEqual(out, [])
+        self.assertEqual([(r.item_id, r.launches, r.waits_on) for r in out],
+                         [('B-0001', False, 'operator')])
+
+
+class NoS1S2BugIsInvisible(unittest.TestCase):
+    """Inbox "NEXT drops S1/S2 bugs silently": every skip branch of :func:`rows.bug_rows` for a
+    decided, open S1/S2 Bug is a non-launching WAITS row that says why — busy, blocked, Active
+    with nothing else speaking for it, over the attempt limit — so NEXT always names it."""
+
+    def cand(self, items=None, inflight=(), occupancy=None, attempts=None):
+        idx = items or s1_bugs('B-0001')
+        return [r for r in rows.candidates(idx, product(), list(inflight), attempts=attempts,
+                                           occupancy=occupancy) if r.item_id == 'B-0001']
+
+    def only_wait(self, rs):
+        self.assertEqual(len(rs), 1, rs)
+        self.assertFalse(rs[0].launches)
+        self.assertTrue(rs[0].action.startswith('WAITS ON'), rs[0].action)
+        self.assertEqual(rs[0].tier, 0)
+        return rs[0]
+
+    def test_a_live_session_is_a_waits_row(self):
+        r = self.only_wait(self.cand(inflight=[S1_SESSION]))
+        self.assertEqual(r.waits_on, 'session')
+
+    def test_work_waiting_to_land_is_a_waits_row(self):
+        r = self.only_wait(self.cand(occupancy=occ(busy=['B-0001'])))
+        self.assertEqual(r.waits_on, 'landing')
+        self.assertIn('waiting to land', r.reason)
+
+    def test_a_blocked_bug_names_its_blockers(self):
+        idx = s1_bugs('B-0001')
+        idx['items']['B-0001'].update(blocked=True, blocked_by_open=['T-0009'])
+        r = self.only_wait(self.cand(idx))
+        self.assertEqual((r.action, r.waits_on), ('WAITS ON T-0009', 'T-0009'))
+
+    def test_an_active_bug_with_no_branch_row_is_a_waits_row(self):
+        idx = s1_bugs('B-0001')
+        idx['items']['B-0001']['state'] = 'Active'
+        r = self.only_wait(self.cand(idx))
+        self.assertEqual(r.waits_on, 'branch')
+
+    def test_over_the_attempt_limit_waits_on_the_operator(self):
+        r = self.only_wait(self.cand(attempts={'B-0001': 4}))
+        self.assertEqual(r.waits_on, 'operator')
+        self.assertIn('4 sessions', r.reason)
+
+    def test_a_correction_row_speaks_for_it_once(self):
+        corr = {'B-0001': {'kind': 'gate', 'text': 'FAIL: x', 'rounds': 1}}
+        rs = self.cand(occupancy=occ(corrections=corr))
+        self.assertEqual([(r.kind, r.launches) for r in rs], [(rows.FIX_CORRECT, True)])
+
+    def test_s3_and_undecided_bugs_stay_out(self):
+        idx = s1_bugs('B-0001')
+        for extra in ({'severity': 'S3'}, {'decided': False}):
+            with self.subTest(**extra):
+                i = copy.deepcopy(idx)
+                i['items']['B-0001'].update(extra)
+                self.assertFalse([r for r in self.cand(i, inflight=[S1_SESSION])
+                                  if r.kind == rows.BUG_FIX])
+
+    def test_shown_even_with_no_free_slot(self):
+        out = rows.plan_rows(s1_bugs('B-0001'), product(), [S1_SESSION], 1)
+        self.assertEqual([(r.item_id, r.action) for r in out], [('B-0001', 'WAITS ON session')])
+
+    def test_a_waits_row_takes_no_slot_and_holds_no_tier(self):
+        idx = s1_bugs('B-0001')
+        idx['items']['F-0001'] = {'id': 'F-0001', 'type': 'feature', 'decided': True,
+                                  'state': 'New', 'stage': 'card', 'rank': 1}
+        out = rows.plan_rows(idx, product(), [S1_SESSION], 3)
+        self.assertIn((rows.CARD_SPEC, 'F-0001', True), [(r.kind, r.item_id, r.launches) for r in out])
 
 
 class AlreadyOnTrunkTests(unittest.TestCase):
@@ -731,12 +802,15 @@ class CorrectionRowTest(unittest.TestCase):
             with self.subTest(rounds=rounds):
                 out = rows.plan_rows(items, product(), [], 1, attempts={'B-0001': 1},
                                      occupancy=occ(corrections=self.corr(rounds)))
-                self.assertEqual(out, [])
+                # no session of any kind: only the Bug's own WAITS row, saying it is blocked
+                self.assertEqual([(r.kind, r.launches, r.waits_on) for r in out],
+                                 [(rows.BUG_FIX, False, 'blocked')])
 
     def test_a_busy_item_gets_no_correct_row(self):
         out = rows.plan_rows(s1_bugs('B-0001'), product(), [{'item': 'B-0001'}], 1,
                              occupancy=occ(corrections=self.corr(1)))
-        self.assertEqual(out, [])
+        self.assertEqual([(r.kind, r.launches, r.waits_on) for r in out],
+                         [(rows.BUG_FIX, False, 'session')])
 
 
 def undecided_features(*specs, decided=()):
@@ -852,8 +926,10 @@ class TiersTest(unittest.TestCase):
 
     def test_held_s1_frees_the_rest_of_capacity(self):
         out = rows.plan_rows(ten_features_and_an_s1(), product(), [S1_SESSION], 4)
-        # rank order: F-0010 has rank 1
-        self.assertEqual(kinds(out), [('CARD → SPEC', 'F-0010'), ('CARD → SPEC', 'F-0009'),
+        # rank order: F-0010 has rank 1; the held S1 is still named, as a WAITS row, no slot
+        self.assertEqual([(r.item_id, r.waits_on) for r in out if not r.launches],
+                         [('B-0001', 'session')])
+        self.assertEqual(kinds(r for r in out if r.launches), [('CARD → SPEC', 'F-0010'), ('CARD → SPEC', 'F-0009'),
                                       ('CARD → SPEC', 'F-0008')])
 
     def test_s1_shows_even_without_a_free_slot(self):
@@ -879,7 +955,10 @@ class TiersTest(unittest.TestCase):
                         [r.branch for r in out])
         # finish before you start: the planned Features' Task rows take the slots before any
         # Feature's spec or plan does
-        self.assertEqual(kinds(out)[2:], [('CONFLICT → REBASE', 'T-0007'),
+        self.assertEqual(kinds(out)[:3], [('UNDECIDED → DECIDE', 'B-0004'), ('BUG → FIX', 'B-0001'),
+                                          ('BUG → FIX', 'B-0002')])
+        self.assertEqual([r.waits_on for r in out if r.item_id == 'B-0001'], ['session'])
+        self.assertEqual(kinds(out)[3:], [('CONFLICT → REBASE', 'T-0007'),
                                           ('PLAN → CODE', 'T-0001'), ('PLAN → CODE', 'T-0002'),
                                           ('PLAN → CODE', 'T-0003'), ('STALE → CLOSE', 'T-0006')])
         self.assertEqual([r.action for r in out if r.item_id == 'T-0002'], ['WAITS ON T-0001'])
@@ -1114,9 +1193,11 @@ class CliTest(unittest.TestCase):
         rc, out = self.run_next(['next', '--product', 'sample', '--capacity', '10', '--json'],
                                 ledger=ledger)
         self.assertEqual(rc, 0)
-        ids = [d['item_id'] for d in json.loads(out)]
-        self.assertNotIn('B-0001', ids)
-        self.assertEqual(ids[:2], ['B-0004', 'B-0002'])
+        got = json.loads(out)
+        ids = [d['item_id'] for d in got]
+        # held busy: named as a WAITS row (never silent), never a launch
+        self.assertEqual([d['action'] for d in got if d['item_id'] == 'B-0001'], ['WAITS ON landing'])
+        self.assertEqual(ids[:3], ['B-0004', 'B-0001', 'B-0002'])
 
 
     def test_next_reads_the_live_sessions_off_the_ledger_as_the_tick_does(self):
@@ -1126,7 +1207,8 @@ class CliTest(unittest.TestCase):
         rc, out = self.run_next(['next', '--product', 'sample', '--capacity', '10', '--json'],
                                 ledger=ledger)
         self.assertEqual(rc, 0)
-        self.assertNotIn('B-0001', [d['item_id'] for d in json.loads(out)])
+        self.assertEqual([d['action'] for d in json.loads(out) if d['item_id'] == 'B-0001'],
+                         ['WAITS ON session'])
 
 
 class NextAllTests(unittest.TestCase):
