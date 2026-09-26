@@ -294,13 +294,23 @@ def cron_cell(cfg, product):
         return not_configured(f'scheduler.kind ({kind} has no status adapter)')
     mine = [j for j in scheduler.loaded_jobs(cfg=cfg)
             if f'.{product.name}.' in j.get('label', '')]
-    if not mine:
+    loaded_labels = {j['label'] for j in mine}
+    try:
+        declared = scheduler.clocks(product)
+    except scheduler.SchedulerError:
+        declared = []
+    # a clock the product declares that launchd does not currently hold: loaded_jobs() never
+    # mentions it, so without this it just vanishes from the row instead of naming itself (B-0136)
+    missing = sorted(scheduler.label_for(product.name, c.name, cfg) for c in declared
+                     if scheduler.label_for(product.name, c.name, cfg) not in loaded_labels)
+    if not mine and not missing:
         return f"no job loaded for {product.name} — `asf scheduler install --product {product.name}`"
     parts = []
     for job in sorted(mine, key=lambda j: j['label']):
         info = scheduler.status(job['label'])
         exit_text = 'never exited' if info.get('never_exited') else f"exit {info.get('last_exit')}"
         parts.append(f"{job['label']} {info.get('state') or '?'} ({exit_text})")
+    parts.extend(f'clock {label} not loaded' for label in missing)
     return '; '.join(parts)
 
 

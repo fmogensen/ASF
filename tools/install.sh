@@ -10,7 +10,10 @@
 # 1. installs the factory as `asf` with pipx, pinned to <ref> (reinstalls when the ref moves)
 # 2. checks ~/.ASF/config.yaml and ~/.ASF/products/<product>.yaml exist (the operator's config)
 # 3. installs the redaction hooks in the product's repos
-# 4. installs the product's clocks (the scheduler runs the pinned install, not a checkout)
+# 4. installs the product's clocks (the scheduler runs the pinned install, not a checkout), then
+#    reads every declared clock back: a bootstrap can fail silently and leave one merely absent
+#    from `launchctl list` (B-0136), so a clock still not loaded gets one retried bootstrap before
+#    the step fails, naming the label
 # 5. runs the doctor, and prints the two Claude Code lines that add the /asf:* plugin
 #
 # Steps 1-2 abort at once (nothing after them can work). Steps 3 and 4 never abort: a failure is
@@ -59,7 +62,31 @@ step() {  # step <label> <command...>: run it; on failure record "<label> (exit 
   [ "$src" -eq 0 ] || FAILED+=("$label (exit $src)")
 }
 step "step 3: $BIN hooks install --product $PRODUCT" "$BIN" hooks install --product "$PRODUCT"
-step "step 4: $BIN scheduler install --product $PRODUCT" "$BIN" scheduler install --product "$PRODUCT"
+
+scheduler_install_verified() {  # install, then read every declared clock back; retry once
+  "$BIN" scheduler install --product "$PRODUCT"
+  local rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+
+  local out
+  out="$("$BIN" scheduler status --product "$PRODUCT" 2>&1)"
+  rc=$?
+  [ "$rc" -eq 0 ] && return 0
+
+  say "clock check: $(printf '%s\n' "$out" | grep 'not loaded' | tr '\n' ' ')— retrying the bootstrap once"
+  "$BIN" scheduler install --product "$PRODUCT" >/dev/null 2>&1
+
+  out="$("$BIN" scheduler status --product "$PRODUCT" 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    local missing
+    missing="$(printf '%s\n' "$out" | grep 'not loaded' | awk '{print $1}' | paste -sd, -)"
+    printf 'install: NEEDS OPERATOR: clock(s) still not loaded after retrying the bootstrap: %s\n' \
+      "${missing:-see step 4 output above}" >&2
+  fi
+  return "$rc"
+}
+step "step 4: $BIN scheduler install --product $PRODUCT" scheduler_install_verified
 
 # 5. verify — runs whatever steps 3 and 4 did
 step "step 5: $BIN doctor --product $PRODUCT" env ASF_TABLES=md "$BIN" doctor --product "$PRODUCT"
