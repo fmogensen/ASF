@@ -26,6 +26,7 @@ class DefaultsTests(unittest.TestCase):
         self.assertEqual((c.main, c.preamble_max_lines, c.prs_per_tick, c.land_window_days),
                          ('main', 120, 6, 7))
         self.assertEqual((c.harvest_gate, c.branches_per_tick, c.gate_timeout_s), ('combined', 12, 600))
+        self.assertEqual((c.readme, c.readme_facts), ('README.md', 'docs/readme-numbers.json'))
         self.assertEqual(c.stage_limits, {})
 
     def test_the_new_fields_default_to_none(self):
@@ -57,6 +58,12 @@ class FromMappingTests(unittest.TestCase):
         self.assertEqual(c.branch('spec', 'x'), 'spec/x')       # not overridden: still the default
         self.assertEqual((c.specs_dir, c.plans_dir, c.main), ('specs', 'plans', 'trunk'))
         self.assertEqual((c.default_bug_epic, c.prs_per_tick), ('E-0042', 2))
+
+    def test_readme_fields_override_and_default(self):
+        c = Conventions.from_mapping({'readme': 'docs/README.md', 'readme_facts': 'readme.json'})
+        self.assertEqual((c.readme, c.readme_facts), ('docs/README.md', 'readme.json'))
+        self.assertEqual(Conventions.from_mapping({}).readme, 'README.md')
+        self.assertEqual(Conventions.from_mapping({}).readme_facts, 'docs/readme-numbers.json')
 
     def test_the_harvest_block_names_the_gate_and_the_cap(self):
         """``harvest: {gate: per-branch, branches_per_tick: 3}`` is how a product yaml spells
@@ -138,7 +145,7 @@ class PathTests(unittest.TestCase):
 class ForbiddenPatternsTests(unittest.TestCase):
     def test_one_pattern_per_path_shaped_default(self):
         patterns = conv_mod.forbidden_patterns()
-        self.assertEqual(len(patterns), 11)
+        self.assertEqual(len(patterns), 12)
         self.assertIn("['\"]" + re.escape('cloud/direct-'), patterns)
         self.assertIn("['\"]" + re.escape(conv_mod.DEFAULT_RELEASE_INSTALL), patterns)
         self.assertIn("['\"]worker/", patterns)
@@ -170,7 +177,7 @@ class ForbiddenPatternsTests(unittest.TestCase):
         # forbidden_patterns() walks string defaults containing '/', '{' or '#' (P14); a
         # dict-valued default like DEFAULT_SAVINGS is never a path-shaped literal.
         self.assertIsInstance(conv_mod.DEFAULT_SAVINGS, dict)
-        self.assertEqual(len(conv_mod.forbidden_patterns()), 11)
+        self.assertEqual(len(conv_mod.forbidden_patterns()), 12)
 
 
 class CheckConventionsScriptTests(unittest.TestCase):
@@ -273,6 +280,8 @@ class ModuleConstantsTests(unittest.TestCase):
         self.assertEqual(conv_mod.DEFAULT_BRANCHES_PER_TICK, c.branches_per_tick)
         self.assertEqual(conv_mod.DEFAULT_GATE_TIMEOUT_S, c.gate_timeout_s)
         self.assertEqual(conv_mod.DEFAULT_SAVINGS, c.savings)
+        self.assertEqual((conv_mod.DEFAULT_README, conv_mod.DEFAULT_README_FACTS),
+                         (c.readme, c.readme_facts))
 
 
 class AmendableFieldsTests(unittest.TestCase):

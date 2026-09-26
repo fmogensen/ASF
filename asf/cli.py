@@ -264,6 +264,12 @@ def build_parser():
     p_doctor = sub.add_parser('doctor', help='is this product\'s ASF install sound — one table')
     p_doctor.add_argument('--product')
 
+    p_readme = sub.add_parser('readme', help='the README\'s generated spans — refresh, check or read as json')
+    p_readme.add_argument('--product')
+    p_readme.add_argument('--check', action='store_true', help='report drift against the committed facts (default)')
+    p_readme.add_argument('--refresh', action='store_true', help='rewrite the facts file and the page from the record')
+    p_readme.add_argument('--json', action='store_true')
+
     from asf.tick.tick import register as register_tick
     register_tick(sub)
     from asf.tick.watch import register as register_watch
@@ -513,6 +519,9 @@ def _main(argv=None):
     if args.command == 'doctor':
         from asf.doctor import cmd_doctor
         return cmd_doctor(args, root)
+    if args.command == 'readme':
+        from asf.views.readme import cmd_readme
+        return cmd_readme(args, root)
     if args.command == 'tick':
         from asf.tick.tick import cmd_tick
         return cmd_tick(args)

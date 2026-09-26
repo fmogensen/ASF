@@ -226,6 +226,10 @@ DEFAULT_CHANGELOG_FILE = 'CHANGELOG.md'
 #: A product with no deploy: the least time between two releases of its trunk (``<n>s|m|h|d``).
 #: The yaml's ``release_min_interval:`` overrides it.
 DEFAULT_RELEASE_MIN_INTERVAL = '60m'
+#: The README's own path, relative to the product's repo dir (`asf readme`, `asf/views/readme.py`).
+DEFAULT_README = 'README.md'
+#: The README's committed facts file, relative to the product's repo dir (`asf readme`).
+DEFAULT_README_FACTS = 'docs/readme-numbers.json'
 #: The "Upgrade" line of a version's release notes: ``{repo_slug}`` and ``{tag}`` substituted.
 #: The yaml's ``release_install:`` overrides it; an empty value leaves the line out.
 DEFAULT_RELEASE_INSTALL = 'pipx install --force "git+https://github.com/{repo_slug}.git@{tag}"'
@@ -444,6 +448,10 @@ class Conventions:
     ci_workflow: str = DEFAULT_CI_WORKFLOW
     ci_dev_job: str = DEFAULT_CI_DEV_JOB
     deploy_workflow: str = DEFAULT_DEPLOY_WORKFLOW
+    #: ``readme`` / ``readme_facts``: the README's own path and its committed facts file, relative
+    #: to the product's repo dir (:data:`DEFAULT_README`, :data:`DEFAULT_README_FACTS`).
+    readme: str = DEFAULT_README
+    readme_facts: str = DEFAULT_README_FACTS
     stage_limits: dict = field(default_factory=dict)
     #: ``savings``: the savings pass's window and six thresholds (F-0100 §2.9), merged per key
     #: through :func:`savings_for` — a product overriding one threshold keeps the other seven.

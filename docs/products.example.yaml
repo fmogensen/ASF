@@ -29,6 +29,10 @@ conventions:
   plans_dir: docs/plans
   reviews_dir: docs/reviews
   briefs_dir: docs/briefs
+  # the README `asf readme` renders spans into, and the committed facts file it writes them from
+  # (defaults shown).
+  readme: README.md
+  readme_facts: docs/readme-numbers.json
   # the branch each job kind pushes: code (a Task), fix (a Bug), spec, plan, groom. Any other key
   # (task, batch here) only adds a prefix the prs step and harvest recognise; `legacy: [..]`
   # names old prefixes that are recognised and never minted.

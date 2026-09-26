@@ -13,8 +13,10 @@ Read-only over the record: every number comes from `asf.views.index_reader` and
 """
 import argparse
 import collections
+import json
 import os
 import re
+import subprocess
 
 from asf.metrics import metrics
 from asf.views import index_reader
@@ -243,3 +245,211 @@ def facts(record_root, repo_root, product=None, now=None):
     return {'generated': metrics.iso(now), 'record': os.path.basename(os.path.abspath(record_root)),
             'record_generated': record_generated, 'day': now.astimezone(metrics.dt.timezone.utc)
             .strftime('%Y-%m-%d'), 'numbers': numbers}
+
+
+# ---------------------------------------------------------------- checks --
+
+#: The three ``##`` headings the page's parts carry, in order (§2.4).
+HEADINGS = ('## The argument', '## The mental model', '## The manual')
+
+_INLINE_CODE = re.compile(r'`([^`\n]+)`')
+_LINK = re.compile(r'\[[^\]]*\]\(([^)]+)\)')
+_DIGIT_RUN = re.compile(r'\d[\d,]*(?:\.\d+)?')
+_SCHEME = re.compile(r'^[a-zA-Z][a-zA-Z0-9+.-]*:')
+_FENCE = re.compile(r'^```', re.M)
+
+
+def _in_ranges(pos, ranges):
+    return any(a <= pos < b for a, b in ranges)
+
+
+def _in_fence(text, pos):
+    """True when `pos` sits inside a triple-backtick fenced block: a command's own argument is
+    not read by the link check (PD6)."""
+    return len(_FENCE.findall(text[:pos])) % 2 == 1
+
+
+def _skip_target(target):
+    """A link target or an inline-code path the link check does not resolve: an in-page anchor,
+    an absolute or home-relative path, a shell variable, or a URL scheme (PD6)."""
+    return not target or target.startswith(('#', '~', '/', '$')) or bool(_SCHEME.match(target))
+
+
+def _drift_complaints(found, numbers):
+    problems = []
+    keys = set()
+    for s in found:
+        keys.add(s.key)
+        entry = numbers.get(s.key)
+        if entry is None:
+            problems.append('span %r has no fact in the committed facts file' % s.key)
+        elif entry.get('text') != s.body:
+            problems.append('span %r has drifted from its fact' % s.key)
+    for key in numbers:
+        if key not in keys:
+            problems.append('fact %r has no span in the page' % key)
+    return problems
+
+
+def _digit_complaints(text, found):
+    skip = [(s.start, s.end) for s in found]
+    skip += [(m.start(), m.end()) for m in _INLINE_CODE.finditer(text)]
+    skip += [(m.start(1), m.end(1)) for m in _LINK.finditer(text)]
+    problems = []
+    for m in _DIGIT_RUN.finditer(text):
+        if m.group() in LITERALS or _in_ranges(m.start(), skip):
+            continue
+        problems.append('line %d: %r is a typed number — not in a span, inline code, a link '
+                        'target or LITERALS' % (_line_of(text, m.start()), m.group()))
+    return problems
+
+
+def _link_complaints(text, root):
+    problems = []
+    for m in _LINK.finditer(text):
+        target = m.group(1).split('#', 1)[0].strip()
+        if _skip_target(target):
+            continue
+        if not os.path.exists(os.path.join(root, target)):
+            problems.append('line %d: link target %r does not exist under the repo root'
+                            % (_line_of(text, m.start(1)), m.group(1)))
+    for m in _INLINE_CODE.finditer(text):
+        content = m.group(1)
+        if '/' not in content or _skip_target(content) or _in_fence(text, m.start()):
+            continue
+        if not os.path.exists(os.path.join(root, content)):
+            problems.append('line %d: %r does not exist under the repo root'
+                            % (_line_of(text, m.start()), content))
+    return problems
+
+
+def _budget_complaints(text):
+    problems = []
+    lines = len(text.splitlines())
+    if lines > MAX_LINES:
+        problems.append('the page is %d lines, over the %d-line budget' % (lines, MAX_LINES))
+    size = len(text.encode('utf-8'))
+    if size > MAX_BYTES:
+        problems.append('the page is %d bytes, over the %d-byte budget' % (size, MAX_BYTES))
+    return problems
+
+
+def _heading_complaints(text):
+    positions = {}
+    for i, line in enumerate(text.splitlines()):
+        if line.strip() in HEADINGS and line.strip() not in positions:
+            positions[line.strip()] = i
+    missing = [h for h in HEADINGS if h not in positions]
+    if missing:
+        return ['heading %r is missing' % h for h in missing]
+    if [positions[h] for h in HEADINGS] != sorted(positions.values()):
+        return ['the three part headings are out of order']
+    return []
+
+
+def complaints(text, facts, root):
+    """§2.1's five checks over `text`, one string per problem, empty when the page is sound:
+    a span whose body differs from its fact (and a fact with no span); a digit run in prose
+    outside a span, inline code, a link target and `LITERALS`; a relative link or path that does
+    not resolve under `root`; the line and byte budget; the three part headings, absent or out
+    of order."""
+    found = spans(text)
+    numbers = facts.get('numbers', {}) if isinstance(facts, dict) else {}
+    return (_drift_complaints(found, numbers) + _digit_complaints(text, found)
+            + _link_complaints(text, root) + _budget_complaints(text) + _heading_complaints(text))
+
+
+def check(repo_root, conv):
+    """The committed page and its facts, checked: `complaints`'s list, or `None` when the page
+    carries no span — the case that makes `asf readme` safe in front of any product."""
+    with open(os.path.join(repo_root, conv.readme), encoding='utf-8') as f:
+        text = f.read()
+    if not spans(text):
+        return None
+    facts_path = os.path.join(repo_root, conv.readme_facts)
+    if not os.path.isfile(facts_path):
+        return ['the facts file %r is missing — run `asf readme --refresh`' % conv.readme_facts]
+    with open(facts_path, encoding='utf-8') as f:
+        data = json.load(f)
+    return complaints(text, data, repo_root)
+
+
+def _git_root(cwd):
+    try:
+        out = subprocess.run(['git', 'rev-parse', '--show-toplevel'], capture_output=True,
+                             text=True, timeout=5, cwd=cwd)
+        if out.returncode == 0:
+            return out.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return cwd
+
+
+def cmd_readme(args, root=None):
+    """`asf readme [--product P] [--check] [--refresh] [--json]` (§2.3). `--refresh` resolves
+    the repo through `env.load_product(...).repo_dir` and the record through
+    `asf.cli.resolve_record`, then rewrites the facts file and the page. The default and
+    `--check` read the *committed* facts file, need no record, and report drift — `--product`
+    resolving is optional here, falling back to the git root (PD7). A README with no span is
+    not an error on any form."""
+    from asf import conventions as conventions_mod
+    from asf import env
+    root = root or os.getcwd()
+    product_name = getattr(args, 'product', None)
+    as_json = getattr(args, 'json', False)
+
+    if getattr(args, 'refresh', False):
+        from asf.cli import resolve_record
+        product = env.load_product(product_name)
+        repo_dir = product.repo_dir or root
+        conv = product.conventions
+        page_path = os.path.join(repo_dir, conv.readme)
+        with open(page_path, encoding='utf-8') as f:
+            text = f.read()
+        if not spans(text):
+            print('readme: no spans — nothing to render')
+            return 0
+        record_root = resolve_record(args)
+        data = facts(record_root, repo_dir, product=product_name)
+        facts_path = os.path.join(repo_dir, conv.readme_facts)
+        facts_changed = metrics.write_if_changed(facts_path, json.dumps(data, indent=2,
+                                                                        sort_keys=True) + '\n')
+        print('readme: %s %s' % (conv.readme_facts, 'rewritten' if facts_changed else 'unchanged'))
+        page_changed = metrics.write_if_changed(page_path, render(text, data))
+        print('readme: %s %s' % (conv.readme, 'rewritten' if page_changed else 'unchanged'))
+        return 0
+
+    try:
+        product = env.load_product(product_name)
+        repo_dir = product.repo_dir
+        conv = product.conventions
+    except env.ConfigError:
+        repo_dir = None
+        conv = conventions_mod.Conventions()
+    repo_dir = repo_dir or _git_root(root)
+
+    problems = check(repo_dir, conv)
+    if problems is None:
+        if as_json:
+            print(json.dumps({'ok': True, 'complaints': [], 'day': None, 'stale_days': None}))
+        else:
+            print('readme: no spans — nothing to render')
+        return 0
+
+    facts_path = os.path.join(repo_dir, conv.readme_facts)
+    day = None
+    if os.path.isfile(facts_path):
+        with open(facts_path, encoding='utf-8') as f:
+            day = json.load(f).get('day')
+    if as_json:
+        stale_days = None
+        if day:
+            today = metrics.now_utc().strftime('%Y-%m-%d')
+            stale_days = (metrics.dt.date.fromisoformat(today)
+                         - metrics.dt.date.fromisoformat(day)).days
+        print(json.dumps({'ok': not problems, 'complaints': problems, 'day': day,
+                          'stale_days': stale_days}))
+        return 1 if problems else 0
+    for p in problems:
+        print(p)
+    return 1 if problems else 0

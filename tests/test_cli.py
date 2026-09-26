@@ -263,6 +263,19 @@ class UnparkTests(unittest.TestCase):
         self.assertEqual((after, ids), ([], set()))
 
 
+class ReadmeParserTests(unittest.TestCase):
+    def test_readme_help_parses(self):
+        with self.assertRaises(SystemExit) as cm:
+            cli.build_parser().parse_args(['readme', '--help'])
+        self.assertEqual(cm.exception.code, 0)
+
+    def test_readme_is_a_registered_subcommand(self):
+        args = cli.build_parser().parse_args(['readme', '--product', 'sample', '--refresh',
+                                              '--check', '--json'])
+        self.assertEqual((args.command, args.product, args.refresh, args.check, args.json),
+                         ('readme', 'sample', True, True, True))
+
+
 class LineBufferedOutputTests(unittest.TestCase):
     """A scheduled tick writes to a log file: every line reaches it as it is printed."""
 

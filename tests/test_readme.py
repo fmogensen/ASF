@@ -1,12 +1,14 @@
 """tests.test_readme — the span grammar and the renderer (asf.views.readme)."""
 import builtins
+import contextlib
+import io
 import json
 import os
 import tempfile
 import unittest
 from unittest import mock
 
-from asf import cli
+from asf import cli, env
 from asf.views import readme
 
 PAGE = ('# Title\n'
@@ -269,6 +271,127 @@ class FactsTests(unittest.TestCase):
 
         with mock.patch('builtins.open', fake_open), mock.patch('os.walk', fake_walk):
             self.facts()
+
+
+class CommandTests(unittest.TestCase):
+    """``asf readme`` — refresh, check, json (§2.3, PD10)."""
+
+    SPANNED = ('# Title\n\n'
+               '## The argument\n\n'
+               'We ran <!--asf:n sessions-->9<!--/asf:n--> sessions.\n\n'
+               '## The mental model\n\n'
+               'Some prose.\n\n'
+               '## The manual\n\n'
+               '<!--asf:block scoreboard-->\n'
+               '| Metric | Value |\n'
+               '| a | 1 |\n'
+               '<!--/asf:block-->\n')
+    SPANLESS = '# Title\n\nNo spans here.\n'
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = os.path.join(self.tmp.name, 'repo')
+        os.makedirs(os.path.join(self.repo, 'docs'))
+        self._orig_home = env.ASF_HOME
+        env.ASF_HOME = os.path.join(self.tmp.name, 'ASF_HOME')
+        os.makedirs(env.ASF_HOME)
+        self.addCleanup(setattr, env, 'ASF_HOME', self._orig_home)
+        orig_product_env = os.environ.pop('ASF_PRODUCT', None)
+        self.addCleanup(lambda: orig_product_env is not None
+                        and os.environ.__setitem__('ASF_PRODUCT', orig_product_env))
+
+    def _write(self, name, text):
+        path = os.path.join(self.repo, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+
+    def _facts(self):
+        return {'generated': '2026-09-24T06:11:04Z', 'record': 'x', 'record_generated': 'y',
+                'day': '2026-09-24',
+                'numbers': {'sessions': {'value': 9, 'text': '9', 'source': 'metrics/sessions'},
+                            'scoreboard': {'value': None,
+                                          'text': '| Metric | Value |\n| a | 1 |\n',
+                                          'source': 'index.json'}}}
+
+    def _run(self, argv):
+        out = io.StringIO()
+        args = cli.build_parser().parse_args(['readme'] + argv)
+        with contextlib.redirect_stdout(out):
+            rc = readme.cmd_readme(args, root=self.repo)
+        return rc, out.getvalue()
+
+    def test_check_on_a_sound_page_is_silent_and_green(self):
+        self._write('README.md', self.SPANNED)
+        self._write('docs/readme-numbers.json', json.dumps(self._facts()))
+        self.assertEqual(self._run(['--check']), (0, ''))
+
+    def test_check_on_a_hand_edited_span_exits_1_naming_the_key(self):
+        self._write('README.md', self.SPANNED.replace('-->9<!--', '-->99<!--'))
+        self._write('docs/readme-numbers.json', json.dumps(self._facts()))
+        rc, out = self._run(['--check'])
+        self.assertEqual(rc, 1)
+        self.assertIn('sessions', out)
+
+    def test_check_needs_no_record(self):
+        """No ``config.yaml``, no ``products/``: ``env.load_product`` cannot resolve, and
+        ``--check`` still runs off the committed facts alone (PD7)."""
+        self._write('README.md', self.SPANNED)
+        self._write('docs/readme-numbers.json', json.dumps(self._facts()))
+        self.assertEqual(self._run([]), (0, ''))
+
+    def test_json_is_the_documented_shape(self):
+        self._write('README.md', self.SPANNED)
+        self._write('docs/readme-numbers.json', json.dumps(self._facts()))
+        rc, out = self._run(['--json'])
+        data = json.loads(out)
+        self.assertEqual(rc, 0)
+        self.assertEqual(set(data), {'ok', 'complaints', 'day', 'stale_days'})
+        self.assertEqual((data['ok'], data['complaints'], data['day']), (True, [], '2026-09-24'))
+        self.assertIsInstance(data['stale_days'], int)
+
+    def test_spanless_readme_is_exit_0_on_every_form(self):
+        self._write('README.md', self.SPANLESS)
+        for argv in ([], ['--check'], ['--json']):
+            rc, out = self._run(argv)
+            self.assertEqual(rc, 0, argv)
+            if '--json' in argv:
+                self.assertEqual(json.loads(out), {'ok': True, 'complaints': [], 'day': None,
+                                                    'stale_days': None})
+            else:
+                self.assertIn('no spans', out)
+
+    def test_refresh_writes_both_files_and_is_a_no_op_the_second_time(self):
+        record = os.path.join(self.tmp.name, 'backlog')
+        os.makedirs(record)
+        write_record(record, CI, SESSIONS, TICKS)
+        f = readme.facts(record, self.repo, now=NOW)
+        page = ''.join('<!--asf:n %s-->x<!--/asf:n-->\n' % k for k in KEYS
+                       if not f['numbers'][k]['text'].endswith('\n'))
+        page += ''.join('<!--asf:block %s-->\nx\n<!--/asf:block-->\n' % k for k in KEYS
+                        if f['numbers'][k]['text'].endswith('\n'))
+        self._write('README.md', page)
+        os.makedirs(os.path.join(env.ASF_HOME, 'products'))
+        with open(env.product_path('sample'), 'w') as fh:
+            fh.write('product: sample\nrepo_slug: x/y\nrepo_dir: %s\n'
+                     'main: main\nbacklog_dir: %s\n' % (self.repo, record))
+        argv = ['--product', 'sample', '--refresh']
+        with mock.patch.object(readme.metrics, 'now_utc', return_value=NOW):
+            rc1, out1 = self._run(argv)
+            rc2, out2 = self._run(argv)
+        self.assertEqual(rc1, 0)
+        self.assertIn('rewritten', out1)
+        facts_path = os.path.join(self.repo, 'docs', 'readme-numbers.json')
+        self.assertTrue(os.path.isfile(facts_path))
+        with open(os.path.join(self.repo, 'README.md'), encoding='utf-8') as fh:
+            rendered = fh.read()
+        with open(facts_path, encoding='utf-8') as fh:
+            facts_data = json.load(fh)
+        self.assertEqual(readme.render(rendered, facts_data), rendered)
+        self.assertEqual(rc2, 0)
+        self.assertIn('unchanged', out2)
+        self.assertNotIn('rewritten', out2)
 
 
 if __name__ == '__main__':
