@@ -362,6 +362,30 @@ class LaneRepo(LaneFixture):
         f = ln.branch_facts('worker/T-0001', None, heads['worker/T-0001'], pr, True, False)
         self.assertTrue(f['adopt'])
 
+    def test_branch_facts_diffs_the_branch_once(self):
+        # the files a branch touched were asked twice per branch per pass (already_on_trunk,
+        # then the landing class): one `git diff` each, the same answer both times
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n', 'b.txt': 'b\n'}, 'feat(T-0001): a')
+        items = {'T-0001': {'id': 'T-0001', 'type': 'task', 'state': 'Active'}}
+        ln = lane.Lane(self.product(), self.state_dir, out=lambda *_: None, items=items)
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        heads = ln.remote_heads()
+        ln.trunk_sha = heads['main']
+        pr = {'number': 7, 'state': 'OPEN'}
+        real = lane.touched_files
+        with mock.patch.object(lane, 'touched_files', side_effect=real) as touched:
+            f = ln.branch_facts('worker/T-0001', None, heads['worker/T-0001'], pr, True, False)
+        self.assertEqual(touched.call_count, 1)
+        self.assertEqual(f['files'], ['a.txt', 'b.txt'])
+        self.assertFalse(f['on_trunk'])
+        # given the files, already_on_trunk answers exactly as it does reading them itself
+        conv = ln.conv
+        for b in ('worker/T-0001',):
+            self.assertEqual(
+                lane.already_on_trunk(self.repo, 'main', b, conv, 'T-0001'),
+                lane.already_on_trunk(self.repo, 'main', b, conv, 'T-0001',
+                                      files=real(self.repo, 'main', b)))
+
     def test_r2_the_in_process_pass_stops_at_the_gate_and_the_gate_pass_lands(self):
         self.push_lane('worker/T-0001', {'a.txt': 'a\n'}, 'feat(T-0001): a')
         self.session('coder-t-0001', 'T-0001', 'worker/T-0001')

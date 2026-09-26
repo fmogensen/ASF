@@ -421,15 +421,17 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
     _git(['fetch', '-q', 'origin', product.main], product.repo_dir)
     wdir = spawn_mod.worktrees_dir(product)
     owners = lifecycle.by_worktree(registry)
+    heads = lifecycle.RemoteHeads()  # one ls-remote for the pass; nothing below pushes
     for name in sorted(os.listdir(wdir)):
         path = os.path.join(wdir, name)
         if not os.path.isdir(path):
             continue
         s = owners.get(lifecycle.path_key(path)) or sessions.get(name)
-        ev = lifecycle.gather(product, s or {}, alive=alive, worktree=path)
+        ev = lifecycle.gather(product, s or {}, alive=alive, worktree=path, heads=heads)
         if s is None and not ev.remote_sha:
             # an orphan carries no branch on its record: read the one checked out
-            ev = lifecycle.gather(product, {'branch': _head_branch(path)}, alive=alive, worktree=path)
+            ev = lifecycle.gather(product, {'branch': _head_branch(path)}, alive=alive,
+                                  worktree=path, heads=heads)
         what, detail = lifecycle.reap_verdict(s, ev, product.main, alive)
         if what is None:
             continue

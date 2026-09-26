@@ -527,10 +527,12 @@ def deliverable_of(conv, branch, item):
     return None
 
 
-def already_on_trunk(repo, trunk, branch, conv, item):
+def already_on_trunk(repo, trunk, branch, conv, item, files=None):
     """``(landed, extras)`` — B-0057: every file the branch touched is identical on the trunk; or,
-    for a spec/plan branch, its one deliverable is (``extras`` names what else it carried)."""
-    files = touched_files(repo, trunk, branch)
+    for a spec/plan branch, its one deliverable is (``extras`` names what else it carried).
+    ``files``: :func:`touched_files` of the branch when the caller has already read it."""
+    if files is None:
+        files = touched_files(repo, trunk, branch)
     r = H.sh(['git', 'diff', '--name-only', '--no-renames', f'origin/{trunk}',
               f'origin/{branch}', '--', *[f':(literal){f}' for f in files]],
              cwd=repo) if files else None
@@ -991,12 +993,13 @@ class Lane:
             else:
                 f['empty'] = why
             return f
-        done, extras = already_on_trunk(repo, trunk, b, conv, item)
+        files = touched_files(repo, trunk, b)  # read once: nothing fetches before its 2nd use
+        done, extras = already_on_trunk(repo, trunk, b, conv, item, files=files)
         f['on_trunk'], f['extras'] = done, extras
         if done:
             return f
         f['closed'] = superseded_by(self.items, item)
-        f['files'] = touched_files(repo, trunk, b)
+        f['files'] = files
         f['class'] = landing_class(self.product, f['files'])
         # a PR no factory item made merges only on a factory review of its head, whatever the
         # class; and its commits name no item, so the lane's naming refusal is not its to answer
