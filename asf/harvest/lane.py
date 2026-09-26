@@ -47,6 +47,9 @@ Transitions (plan §2 plus the §9 overrides):
                                the gate is a full suite and this host has no room for it, B-0109)
                                — never a correction, never a round
 - T9  GATE → BACK              red alone on a green trunk, conflict, a lane refusal
+- T9c wait → BACK              a pending correction written on a landing wait (PR_OPEN, REVIEW,
+                               GATE, WAITING_CI, WAITING) since its head arrived
+                               (:func:`correction_turns_back`): kind = the correction's
 - T10 GATE → MERGING → MERGED  merged by the host (FF ``push_ff``; PR ``gh pr merge``)
 - T10q GATE → QUEUED → MERGED  a merge queue took it; queue-rejected → WAITING (R5)
 - T11 any open → MERGED        found merged (the PR, the pushed sha, or the diff on the trunk)
@@ -129,6 +132,34 @@ OPEN_STATES = tuple(s for s in LANE_STATES if s not in TERMINAL_STATES)
 BUSY_STATES = tuple(s for s in OPEN_STATES if s != BACK)
 #: The states the gate (the detached harvest) decides; the in-process pass leaves them be.
 GATE_STATES = (GATE, WAITING, WAITING_CI)
+#: The landing waits a pending correction turns BACK (:func:`correction_turns_back`): the
+#: branch waits on a PR, a review or the gate, and nothing but a session's push changes it.
+#: MERGING and QUEUED are a merge under way; PARKED is its owner's.
+LANDING_WAITS = (PR_OPEN, REVIEW, GATE, WAITING_CI, WAITING)
+
+
+def head_since(prev, head, now):
+    """When the lane first saw ``head`` on the branch (a lane record's ``head_at``): ``prev``'s
+    own while the head has not moved — a record from before ``head_at`` existed, its ``at`` —
+    else ``now``."""
+    prev = prev or {}
+    if head and prev.get('head') == head:
+        return prev.get('head_at') or prev.get('at') or now
+    return now
+
+
+def correction_turns_back(rec, corr):
+    """True when a pending correction ``corr`` sends a branch the lane holds at ``rec`` BACK to
+    a session: ``rec`` is a landing wait (:data:`LANDING_WAITS`) and ``corr`` was written at or
+    after the lane first saw the current head (:func:`head_since`) — a correction the head moved
+    past is answered. Health's own hold at the round cap (``at_cap``) is not: it goes to
+    adjudication, and the gate may still land the branch as it stands (a product's T-0026,
+    2026-09-27: a ``redact`` stamped on PR #707 at GATE never reached a session)."""
+    rec, corr = rec or {}, corr or {}
+    if rec.get('state') not in LANDING_WAITS or not corr.get('text') or corr.get('at_cap'):
+        return False
+    since = rec.get('head_at') or rec.get('at') or ''
+    return (corr.get('at') or '') >= since
 
 #: The two landing classes (:func:`landing_class`).
 DOCS = 'docs'
@@ -979,6 +1010,8 @@ def next_state(prev, facts):
         if not f.get('ended') or f.get('landed') or not f.get('ahead'):
             return None, ''
         return PUSHED, 'adopted' if f.get('adopt') else 'finished'
+    if correction_turns_back(rec, corr):  # T9c: a correction written on a landing wait
+        return BACK, f"kind={corr.get('kind') or 'correction'}"
     if s == PUSHED:
         at = _parse_at(rec.get('at'))
         if at is not None and f.get('now') and f.get('stale_after') \
@@ -1528,7 +1561,9 @@ class Lane:
 
     def record(self, f, state, reason, **extra):
         pr = (f.get('pr') or {}).get('number') or (f.get('prev') or {}).get('pr')
-        rec = {'state': state, 'head': f.get('head'), 'pr': pr, 'at': now_iso(),
+        now = now_iso()
+        rec = {'state': state, 'head': f.get('head'), 'pr': pr, 'at': now,
+               'head_at': head_since(f.get('prev'), f.get('head'), now),
                'reason': reason, 'item': f.get('item')}
         rec.update({k: v for k, v in extra.items() if v is not None})
         return rec
