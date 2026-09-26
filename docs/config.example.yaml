@@ -118,7 +118,9 @@ host_guards:
 # Runtime `claude-remote` (asf.workers.remote) runs the session as a claude.ai routine instead —
 # no repo secret: a small local `claude -p` (helper_model) calls the CLI's RemoteTrigger tool on
 # the dispatching account's own login (its config_dir; the auth_env setup-token lacks the scope)
-# to create the routine (the brief, the product repo as its source) and fire it. A cloud
+# to create the routine (a short pointer to the brief, which ASF pushes to origin's
+# refs/asf/briefs/<job> and deletes when the run ends; the product repo as its source) and fire
+# it. Each helper call is killed after 120s (the launch fails `timeout`). A cloud
 # environment belongs to one account: `environment_id` is one env_… id or {account: env_…}.
 #   runtime: claude-remote
 #   environment_id: {acct-a: env_…}
@@ -126,6 +128,7 @@ host_guards:
 #   allowed_tools: [Bash, Read, Write, Edit, Glob, Grep]
 #   helper_model: haiku
 #   poll_min: 15               # how often a working run's routine is read
+#   max_creates_per_tick: 2    # cloud launches one wave tries (claude-remote default 2; 0: no limit)
 #
 # The runtime `claude-cloud` is refused at config check: the runtime CLI cannot create a cloud
 # session non-interactively (`-p --cloud` is interactive only), so a lane on it could never launch.

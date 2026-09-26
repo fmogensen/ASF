@@ -104,7 +104,10 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
 
     ``cloud_ready`` is the lane's ``(ready, why)`` (:func:`asf.workers.cloud.readiness`), read
     once per tick by the caller; ``None`` reads it here, once for the whole wave. An unready lane
-    prints ``cloud lane unready: <why> — local lane only`` once and takes no row."""
+    prints ``cloud lane unready: <why> — local lane only`` once and takes no row.
+
+    ``cloud.max_creates_per_tick`` (0: no limit) bounds the cloud launches one wave tries — each
+    holds the tick while it runs; the rows past it wait for the next tick."""
     cfg = spawn_mod.load_cfg() if cfg is None else cfg
     cloud = cloud_mod.settings(cfg, product)
     if cloud.on:
@@ -114,6 +117,7 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
     else:
         ready = False
     cloud_open = cloud.on and ready
+    cloud_cap, cloud_tries = cloud.max_creates_per_tick, 0
     sample = pool is None  # a tick's own pool: its readings are history (asf.workers.headroom)
     pool = pool or pool_mod.Pool.from_config(cfg, product)
     spawn_fn = spawn_fn or spawn_mod.spawn
@@ -130,7 +134,9 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
             reason = 'already running'
         else:
             lane, acct, creason = 'local', None, ''
-            first = cloud_open and cloud_mod.first(row, cloud)
+            capped = cloud_open and bool(cloud_cap) and cloud_tries >= cloud_cap
+            cloud_now = cloud_open and not capped
+            first = cloud_now and cloud_mod.first(row, cloud)
             if first:                           # cloud.default: the cloud lane before the local
                 acct, creason = pool.pick_cloud(row.kind, row.model, cloud)
                 if acct is not None:
@@ -144,7 +150,10 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
                         lane=row.lane or ('local' if cloud.on else None))
                 if acct is None and first:
                     reason = f'{creason}; {reason}'
-            if acct is None and not first and cloud_open and cloud_mod.eligible(row, cloud):
+            if acct is None and capped and cloud_mod.eligible(row, cloud):
+                reason = (f'{reason}; cloud lane: {cloud_tries} launches this tick '
+                          f'(cloud.max_creates_per_tick)')
+            if acct is None and not first and cloud_now and cloud_mod.eligible(row, cloud):
                 cacct, creason = pool.pick_cloud(row.kind, row.model, cloud)
                 if cacct is not None:
                     acct, lane = cacct, 'cloud'
@@ -154,6 +163,7 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
                 rt = runtime
                 if lane == 'cloud':
                     rt = cloud_runtime or cloud_mod.lane_runtime(cloud, product)
+                    cloud_tries += 1
                 try:
                     rec = spawn_fn(product, row, acct, brief_fn(row), runtime=rt, cfg=cfg)
                 except spawn_mod.WorktreeBusy as e:
