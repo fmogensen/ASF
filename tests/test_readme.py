@@ -353,7 +353,7 @@ class CommandTests(unittest.TestCase):
 
     def test_spanless_readme_is_exit_0_on_every_form(self):
         self._write('README.md', self.SPANLESS)
-        for argv in ([], ['--check'], ['--json']):
+        for argv in ([], ['--check'], ['--json'], ['--refresh']):
             rc, out = self._run(argv)
             self.assertEqual(rc, 0, argv)
             if '--json' in argv:

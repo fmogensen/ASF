@@ -387,11 +387,12 @@ def _git_root(cwd):
 
 def cmd_readme(args, root=None):
     """`asf readme [--product P] [--check] [--refresh] [--json]` (§2.3). `--refresh` resolves
-    the repo through `env.load_product(...).repo_dir` and the record through
-    `asf.cli.resolve_record`, then rewrites the facts file and the page. The default and
-    `--check` read the *committed* facts file, need no record, and report drift — `--product`
-    resolving is optional here, falling back to the git root (PD7). A README with no span is
-    not an error on any form."""
+    the repo the same way the default/`--check` path does — `env.load_product(...)`, falling
+    back to the git root on `ConfigError` (PD7) — and reads the page first: a spanless page
+    returns before the record (`asf.cli.resolve_record`) or the product config is ever required.
+    Only a page with a span rewrites the facts file and the page, and only then must the record
+    resolve. The default and `--check` read the *committed* facts file and need no record. A
+    README with no span is not an error on any form."""
     from asf import conventions as conventions_mod
     from asf import env
     root = root or os.getcwd()
@@ -400,9 +401,14 @@ def cmd_readme(args, root=None):
 
     if getattr(args, 'refresh', False):
         from asf.cli import resolve_record
-        product = env.load_product(product_name)
-        repo_dir = product.repo_dir or root
-        conv = product.conventions
+        try:
+            product = env.load_product(product_name)
+            repo_dir = product.repo_dir
+            conv = product.conventions
+        except env.ConfigError:
+            repo_dir = None
+            conv = conventions_mod.Conventions()
+        repo_dir = repo_dir or _git_root(root)
         page_path = os.path.join(repo_dir, conv.readme)
         with open(page_path, encoding='utf-8') as f:
             text = f.read()
