@@ -424,19 +424,35 @@ class WaveStepTests(StepsTestCase):
                  feeder_rows.Row(2, 'PLAN → CODE', 'T-0003', 'F-0001', 'would launch task-t-0003',
                                  'task', 'task/T-0003', 'ready')]
 
+        from asf.feeder import tiers
+        unseated = feeder_rows.Row(**{**self.rows[0].__dict__, 'action': tiers.NO_SLOT})
+
         def plan(index, product, inflight, capacity, s1_first=True, **kw):
-            cut = [self.rows[0]]                 # the S1 row; tier 2 cut behind it
             if s1_first:
-                return cut
-            return cut + ready[:max(0, capacity - len(inflight) - 1)]
+                return [unseated]                # the S1 row has no seat: tier 2 cut behind it
+            return [self.rows[0]] + ready
         with mock.patch.object(feeder_rows, 'plan_rows', plan):
             step_wave.run(self.ctx(), out=self.lines.append)
-        waits = [ln for ln in self.lines if ln.startswith('waits    ')]
+        waits = [ln for ln in self.lines if ln.startswith('waits    task')]
         self.assertEqual([ln.split()[1:3] for ln in waits],
                          [['task-t-0002', 'T-0002'], ['task-t-0003', 'T-0003']], self.lines)
         for ln in waits:
-            self.assertIn('S1 first: B-0001 launches before any other row', ln)
-        self.assertEqual([r[0][0][1] for r in self.waved], ['B-0001'])
+            self.assertIn('S1 first: B-0001 needs a seat before any other row', ln)
+        self.assertEqual(self.waved, [])
+
+    def test_a_seated_s1_leaves_the_rest_of_the_seats_to_tier_2(self):
+        # the new rule end to end: the real feeder, S1 first, tier 2 fills what is left
+        ready = feeder_rows.Row(2, 'PLAN → CODE', 'T-0002', 'F-0001', 'would launch task-t-0002',
+                                'task', 'task/T-0002', 'ready')
+
+        def plan(index, product, inflight, capacity, s1_first=True, **kw):
+            from asf.feeder import tiers
+            return tiers.select([self.rows[0], ready], inflight, capacity, s1_first=s1_first)
+        self.write_config('feeder:\n  capacity: 3\n')
+        with mock.patch.object(feeder_rows, 'plan_rows', plan):
+            step_wave.run(self.ctx(), out=self.lines.append)
+        self.assertEqual([j for j, *_ in self.waved[0][0]], ['fix-bug-b-0001', 'fix-bug-t-0002'])
+        self.assertFalse([ln for ln in self.lines if ln.startswith('waits    ')], self.lines)
 
     def test_a_ready_row_past_the_seats_says_why(self):
         ready = [feeder_rows.Row(2, 'PLAN → CODE', f'T-000{i}', 'F-0001',
