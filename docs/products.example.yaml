@@ -49,6 +49,11 @@ conventions:
   # reads `verdict: approved`; a docs-only spec/plan PR needs no review).
   # Unset: fast-forward when steps.batch is off or unset, else pull-request.
   # landing: fast-forward
+  # a PR whose CI path-filters suites: a required check the workflow itself skipped (job `if:`
+  # false) or never created counts as satisfied once every workflow run on the head completed,
+  # a required check concluded success and none is red (path-filtered, the default) | never
+  # (a skipped or missing required check never merges). PR merges only — deploys never.
+  # merge_skipped: path-filtered
   # harvest: one gate over every eligible branch (combined, bisecting on red) or per-branch; the
   # most branches one run gates; seconds before a gate is killed and counted red.
   # harvest:
