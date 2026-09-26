@@ -64,6 +64,11 @@ Transitions (plan §2 plus the §9 overrides):
                                the lane signs the unsigned commits off itself
                                (:meth:`Lane.repair_signoff`) — a factory branch only
 - Th  any open, head moved     → PUSHED(new head) (R4)
+- Tp  any open (not MERGING/QUEUED) → PARKED  the PR reads ``isDraft``: the owner parked it —
+                               no merge, no review/correction/adjudicate/fix row, no reword or
+                               rebase; the feeder shows a WAITS row naming the draft PR
+- Tp' PARKED → PR_OPEN         the PR is marked ready for review again — normal transitions
+                               resume from there
 """
 import datetime
 import fnmatch
@@ -93,13 +98,16 @@ WAITING = 'WAITING'
 QUEUED = 'QUEUED'
 MERGING = 'MERGING'
 BACK = 'BACK'
+#: the owner marked the PR a draft: every open state parks here — no merge, no review, no
+#: correction/adjudicate, no reword or rebase — until it is marked ready again (Tp/Tp')
+PARKED = 'PARKED'
 MERGED = 'MERGED'
 STALE = 'STALE'
 REAPED = 'REAPED'
 
 #: Every lane state, in the order a branch normally passes them.
 LANE_STATES = (PUSHED, PR_OPEN, REVIEW, GATE, WAITING_CI, WAITING, QUEUED, MERGING, BACK,
-               MERGED, STALE, REAPED)
+               PARKED, MERGED, STALE, REAPED)
 #: The states a branch ends in: no transition out except to REAPED (and STALE → PR_OPEN on a
 #: reopened PR).
 TERMINAL_STATES = (MERGED, STALE, REAPED)
@@ -775,6 +783,10 @@ def next_state(prev, facts):
         if not closed and pr.get('state') == 'OPEN' and head:
             return PR_OPEN, f'PR #{n} reopened'  # R6
         return keep
+    if s == PARKED:  # Tp'
+        if pr.get('draft'):
+            return keep
+        return (PR_OPEN, f'PR #{n} ready for review') if head else keep
     if f.get('on_trunk') and (s is not None or f.get('ended')):
         return MERGED, 'method=on-trunk'
     if closed and (s is not None or f.get('ended')):
@@ -786,6 +798,9 @@ def next_state(prev, facts):
     if pr.get('state') == 'CLOSED' and pr.get('head') in (None, '', head) \
             and (s is not None or f.get('ended')):
         return STALE, f'PR #{n} closed unmerged'
+    if pr.get('draft') and s not in (MERGING, QUEUED):  # Tp: parked by its owner, whatever it was
+        return PARKED, (f'PR #{n} is a draft — parked by its owner' if n
+                        else 'draft — parked by its owner')
     # R4 — a moved head: whatever reviewed or gated the old one is history
     if s in OPEN_STATES and rec.get('head') and head != rec['head']:
         return PUSHED, f"head moved {rec['head'][:7]} → {head[:7]}"
@@ -2467,10 +2482,12 @@ class GitHubHost(Host):
         self._trunk_runs = {}  # sha -> that commit's check runs (None: unreadable), one pass
 
     def prs(self):
-        """One ``gh pr list --state all``: ``{branch: pr}``, an open PR first, else the newest."""
+        """One ``gh pr list --state all``: ``{branch: pr}``, an open PR first, else the newest.
+        ``draft`` (``isDraft``): the owner parked it — the lane's one place this is read
+        (:func:`next_state`'s Tp parks any open state on it)."""
         data = H.gh_json(['pr', 'list', '-R', self.slug, '--state', 'all', '--limit', '500',
                           '--json', 'number,headRefName,headRefOid,state,mergeCommit,'
-                                    'autoMergeRequest,title,baseRefName'], [])
+                                    'autoMergeRequest,title,baseRefName,isDraft'], [])
         out = {}
         for p in sorted((p for p in data if isinstance(p, dict)),
                         key=lambda p: (p.get('state') == 'OPEN', int(p.get('number') or 0))):
@@ -2479,7 +2496,7 @@ class GitHubHost(Host):
                 'head': p.get('headRefOid') or None,
                 'merge_sha': (p.get('mergeCommit') or {}).get('oid') or None,
                 'queued': bool(p.get('autoMergeRequest')), 'title': p.get('title') or '',
-                'base': p.get('baseRefName') or None}
+                'base': p.get('baseRefName') or None, 'draft': bool(p.get('isDraft'))}
         if self.lane is not None:
             self.in_queue = sum(1 for r in lifecycle.by_branch(self.lane.path).values()
                                 if (r.get('lane') or {}).get('state') == QUEUED)
