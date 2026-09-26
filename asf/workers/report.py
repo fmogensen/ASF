@@ -360,7 +360,7 @@ def contract(kind):
 
 FIELD_RE = re.compile(
     r'^(?P<key>item|kind|status|branch|pushed|commits|tests|left out|needs writes'
-    r'|ruling|blocked_on|superseded_by)\s*:\s*(?P<value>.*)$', re.I)
+    r'|ruling|blocked_on|writes|superseded_by)\s*:\s*(?P<value>.*)$', re.I)
 HEAD_RE = re.compile(r'^\s*REPORT\s*$', re.M)
 #: The statuses a session reports when its Task is not whole: only these may claim more footprint.
 UNFINISHED = ('partial', 'blocked')
