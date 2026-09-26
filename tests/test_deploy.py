@@ -753,6 +753,55 @@ class TickAndViewAgree(unittest.TestCase):
         self.assertEqual(deploy.line(self._p(), sh=sh), lines[0])
 
 
+class InProgressRunIsACandidate(unittest.TestCase):
+    """2026-09-26: a main run had every required job green with only a non-required ``site`` job
+    still running, and prod said "still running; prod waits" — the candidate scan considered
+    completed runs only, even with required jobs configured. A run still queued or in progress
+    is a valid candidate once its required jobs' latest attempts are all ``success``; a required
+    job itself still queued or in progress is never green."""
+    REQ = ['gate', 'gate-tests', 'e2e']
+
+    def _p(self):
+        return _modes(prod='auto', prod_extra={'required_jobs': self.REQ})
+
+    def _job_running(self, name):
+        return {'name': name, 'conclusion': None, 'status': 'in_progress'}
+
+    def test_an_in_progress_run_green_on_required_jobs_is_a_candidate(self):
+        runs = [_run(GREEN, status='in_progress', conclusion=None, rid=6)]
+        jobs = {6: [_job('gate'), _job('gate-tests'), _job('e2e'), self._job_running('site')]}
+        sh = FakeSh([_run(PROD)], runs, jobs=jobs)
+        f = deploy.facts(self._p(), sh=sh)
+        self.assertEqual(f['candidate'], GREEN)
+        lines = []
+        sent = deploy.tick(self._p(), out=lines.append, sh=sh)
+        self.assertEqual(sent, {'prod': GREEN})
+        self.assertIn(f'dispatching deploy-prod.yml for green `{GREEN[:9]}`', lines[0])
+
+    def test_a_required_job_still_in_progress_is_not_green(self):
+        runs = [_run(GREEN, status='in_progress', conclusion=None, rid=6)]
+        jobs = {6: [_job('gate'), _job('gate-tests'), self._job_running('e2e')]}
+        sh = FakeSh([_run(PROD)], runs, jobs=jobs)
+        f = deploy.facts(self._p(), sh=sh)
+        self.assertIsNone(f['candidate'])
+        self.assertEqual(deploy.tick(self._p(), out=[].append, sh=sh), {})
+        self.assertEqual(sh.dispatched(), [])
+
+    def test_a_required_job_still_queued_is_not_green(self):
+        runs = [_run(GREEN, status='queued', conclusion=None, rid=6)]
+        jobs = {6: [_job('gate'), {'name': 'gate-tests', 'conclusion': None, 'status': 'queued'},
+                    _job('e2e')]}
+        sh = FakeSh([_run(PROD)], runs, jobs=jobs)
+        self.assertIsNone(deploy.facts(self._p(), sh=sh)['candidate'])
+
+    def test_no_required_jobs_configured_keeps_the_completed_only_rule(self):
+        runs = [_run(GREEN, status='in_progress', conclusion=None, rid=6)]
+        sh = FakeSh([_run(PROD)], runs)
+        p = _modes(prod='auto')
+        self.assertIsNone(deploy.facts(p, sh=sh)['candidate'])
+        self.assertFalse(any(c[:3] == ['gh', 'run', 'view'] for c in sh.calls))
+
+
 class RequiredJobsFrom(unittest.TestCase):
     SPEC = {'file': 'scripts/merge.sh', 'var': 'REQUIRED_CHECKS'}
 

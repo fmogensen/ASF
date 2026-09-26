@@ -496,8 +496,9 @@ def job_key(name):
 
 
 def _jobs_verdict(product, run, req, sh):
-    """``(green, rule)`` for one completed run under the required-jobs rule, reading the jobs of
-    its latest attempt (``gh run view --json jobs``); ``rule`` names what decided. A required
+    """``(green, rule)`` for one run (completed, queued or in progress) under the required-jobs
+    rule, reading the jobs of its latest attempt (``gh run view --json jobs``); ``rule`` names
+    what decided. A required
     job is green only when it concluded ``success``: ``skipped``, ``neutral``, ``cancelled`` or
     missing never are. The run's own conclusion never stands in for its jobs — a run whose path
     filter skipped the suites concludes ``success`` too (2026-09-26: a docs-only tip, suites
@@ -523,12 +524,15 @@ def _jobs_verdict(product, run, req, sh):
 
 def _pick(product, env, ci_runs, sh, limit=10):
     """``(sha, rule)``: the newest green trunk ``ci.workflow`` run for ``env`` — job-level under
-    :func:`required_jobs`, run-level without — and the rule that decided (None: no pick)."""
+    :func:`required_jobs`, run-level without — and the rule that decided (None: no pick).
+    Job-level scans every run regardless of its own status: a run still queued or in progress is
+    a valid candidate once its required jobs' latest attempts are all ``success`` (a non-required
+    job still running never blocks it); a required job itself still queued or in progress is not
+    green. Run-level (no required jobs configured) keeps the completed-only rule."""
     if not required_from(product, env) and not required_list(product, env):
         sha = next((r.get('headSha') for r in ci_runs if _green(r)), None)
         return sha, ('green run (run-level conclusion success)' if sha else None)
-    done = [r for r in ci_runs if r.get('status') == 'completed']
-    for r in done[:limit]:
+    for r in ci_runs[:limit]:
         req, _src = required_jobs(product, env, r.get('headSha'), sh)
         if not req:
             continue
