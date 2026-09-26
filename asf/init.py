@@ -317,6 +317,11 @@ def cmd_init(args):
     ok, detail = hooks_mod.ensure_git_hooks(product)
     print(f"init: git hooks {'in place' if ok else 'NOT installed'}" + (f' — {detail}' if detail else ''))
     print(roadmap.render(backlog, product), end='')
+
+    from asf import console_perms
+    print()
+    print(console_perms.offer_text(product))
+    print(f'run one to write it: asf console-permissions install --product {name} --scope user|repo')
     return 0
 
 
