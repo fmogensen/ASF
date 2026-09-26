@@ -414,6 +414,45 @@ def format_findings(findings):
     return [f'{f.path}:{f.line}: {f.kind} ({f.source})' for f in findings]
 
 
+#: :func:`format_findings`'s own line shape, read back — a caller that only has a hook's captured
+#: output (never the findings themselves) turns it back into :class:`Finding` objects this way.
+_FINDING_LINE_RE = re.compile(r'^(?P<path>.+):(?P<line>\d+): (?P<kind>name|secret) '
+                              r'\((?P<source>[^)]*)\)$')
+
+
+def parse_finding_lines(text):
+    """Every :func:`format_findings` line inside ``text`` (a hook's captured stdout/stderr) as a
+    :class:`Finding`. When a product's own ``pre-push`` hook is the only place ``asf.redact``
+    actually ran — its patterns, its environment — this is how a caller downstream (which never
+    ran the scan itself) recovers what was found well enough to build a precise
+    :func:`correction`, without repeating the matched text (D8: the hook's own output never
+    carried it, so neither does this)."""
+    out = []
+    for raw in (text or '').splitlines():
+        m = _FINDING_LINE_RE.match(raw.strip())
+        if m:
+            out.append(Finding(m.group('path'), int(m.group('line')), m.group('kind'),
+                               m.group('source')))
+    return out
+
+
+def correction(findings):
+    """One precise line per finding — what a session must change, in place of a generic "push
+    refused" (F-0035: a worker session's own account name landing in a spec cost 7+ rounds at a
+    product's redact hook before this existed). A worker-pool account name is named for what it
+    is, so the fix is obvious without a round-trip; a secret or any other protected name gets a
+    generic instruction. Never the matched text (D8)."""
+    out = []
+    for f in findings:
+        if f.kind == 'name' and f.source == NAME_SOURCE_POOL:
+            out.append(f'redact: {f.path}:{f.line} names a worker account — replace with lane-N')
+        elif f.kind == 'name':
+            out.append(f'redact: {f.path}:{f.line} names a protected name — remove it')
+        else:
+            out.append(f'redact: {f.path}:{f.line} is a secret — remove it before pushing')
+    return out
+
+
 # ---- the command ----------------------------------------------------------------
 
 def _repo_root(cwd):

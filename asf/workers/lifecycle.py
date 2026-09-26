@@ -994,6 +994,22 @@ def copies_archive(branch, remote_sha):
     return f'archive/{branch}-copies-{remote_sha[:9]}'
 
 
+def _redaction_findings(wt, remote_sha):
+    """Every :func:`asf.redact` finding on the commits this push would add (F-0035): the
+    factory's own scan of the branch diff, run before it pushes, so a worker-account name or a
+    machine path that would trip the product's own redact hook is named precisely up front —
+    never spent as a push, a generic refusal, and a round to work out why. No config and no
+    forbidden-names list is nothing to look for, not an error; a scanner that could not run costs
+    nothing here either (the product's own hook, which does run, is the backstop)."""
+    from asf import redact
+    try:
+        pats = redact.default_patterns(wt)
+        published = (remote_sha,) if remote_sha else ()
+        return redact.scan_unpublished(wt, 'HEAD', pats, published=published)
+    except Exception:
+        return []
+
+
 def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout_s=None):
     """Push the worktree's HEAD to ``origin/<branch>`` as the factory (B-0056).
 
@@ -1011,10 +1027,16 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
     The old tip's archive carries no new code and skips the product's pre-push hook; the
     branch's own push runs it. Each push is killed after ``push_timeout_s`` (default
     :func:`asf.gitpush.push_timeout`): a hook or a network hang never holds the tick.
+    Before that push, :func:`_redaction_findings` runs the same scan the hook would; a finding
+    refuses the push right there with a precise ``redact: <file>:<line> …`` correction
+    (:func:`asf.redact.correction`, F-0035) rather than the hook's generic refusal. A push the
+    hook itself still refuses over a redaction (some other repo, some other pattern list) has its
+    captured output parsed the same way (:func:`asf.redact.parse_finding_lines`) before falling
+    back to its raw last line.
     ``(ok, line)``."""
     if not branch or branch == main:
         return False, f'publish refused: {branch or "no branch"} is not a lane branch'
-    from asf import gitpush, refguard
+    from asf import gitpush, redact, refguard
     limit = push_timeout_s or gitpush.push_timeout()
     guard = refguard.refusal(branch, f'publish {branch}', main, protected)
     if guard:
@@ -1040,11 +1062,17 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
             if not ok:
                 return False, f'publish {branch} refused: {rebased or loss_refusal(branch, lost)}'
             remote_sha = fetched
+    findings = _redaction_findings(wt, remote_sha)
+    if findings:
+        return False, f'publish {branch} refused: ' + '; '.join(redact.correction(findings))
     args = ['-q', 'origin', f'HEAD:{ref}']
     if remote_sha:
         args.insert(1, f'--force-with-lease={ref}:{remote_sha}')
     p = gitpush.push(args, wt, timeout=limit)
     if p.returncode != 0:
+        hook_findings = redact.parse_finding_lines(f'{p.stderr or ""}\n{p.stdout or ""}')
+        if hook_findings:
+            return False, f'publish {branch} refused: ' + '; '.join(redact.correction(hook_findings))
         why = [ln for ln in (p.stderr or p.stdout).splitlines() if ln.strip()]
         return False, f'publish {branch} refused: {why[-1].strip() if why else "push failed"}'
     head = _git(['rev-parse', '--short', 'HEAD'], wt).stdout.strip()

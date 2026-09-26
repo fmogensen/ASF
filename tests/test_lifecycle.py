@@ -22,6 +22,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from asf import env, redact
 from asf.workers import lifecycle as lc
 
 OK = {'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'done'}
@@ -1402,6 +1403,97 @@ class OutcomeClassTests(unittest.TestCase):
             'finished', 'not pushed', 'empty branch', 'dead pid', 'pushed after stop',
             'unpushed work', 'unknown model', 'auth', 'quota-exhausted', 'permission', 'hook refused',
             'network error', 'other'))
+
+
+class PublishRedactionTests(unittest.TestCase):
+    """F-0035: a worker session's own account name landed in a product spec, and the product's
+    own redact pre-push hook refused the push with nothing more useful than "push refused" — 7+
+    rounds on one item. :func:`lc.publish` now runs the same scan itself before it ever pushes,
+    so the branch is held with a precise correction the first time, not after a wasted push."""
+
+    def sh(self, cmd, cwd):
+        r = subprocess.run(['git', *cmd], cwd=cwd, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, f"git {cmd}:\n{r.stdout}\n{r.stderr}")
+        return r.stdout.strip()
+
+    def setUp(self):
+        base = tempfile.mkdtemp(prefix='lifecycle_redact_')
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        self.home = os.path.join(base, 'home')
+        os.makedirs(self.home)
+        self.account = 'acct-' + 'lifecycle'
+        with open(os.path.join(self.home, 'config.yaml'), 'w', encoding='utf-8') as f:
+            f.write(f'worker_pool:\n  accounts:\n    - name: {self.account}\n')
+        origin, self.repo = os.path.join(base, 'origin.git'), os.path.join(base, 'repo')
+        self.sh(['init', '-q', '--bare', '-b', 'main', origin], base)
+        self.sh(['clone', '-q', origin, self.repo], base)
+        for k, v in (('user.name', 'Test'), ('user.email', 't@example.com'),
+                     ('commit.gpgsign', 'false')):
+            self.sh(['config', k, v], self.repo)
+        with open(os.path.join(self.repo, 'seed.txt'), 'w', encoding='utf-8') as f:
+            f.write('seed\n')
+        self.sh(['add', '-A'], self.repo)
+        self.sh(['commit', '-qm', 'seed'], self.repo)
+        self.sh(['push', '-q', 'origin', 'HEAD:main'], self.repo)
+        self.sh(['checkout', '-q', '-b', 'fix/B-9997'], self.repo)
+
+        old_home = env.ASF_HOME
+        env.ASF_HOME = self.home
+        self.addCleanup(lambda: setattr(env, 'ASF_HOME', old_home))
+        redact._DEFAULT_CACHE.clear()
+        self.addCleanup(redact._DEFAULT_CACHE.clear)
+
+    def test_a_worker_account_name_holds_the_push_with_a_precise_correction(self):
+        with open(os.path.join(self.repo, 'plan.md'), 'w', encoding='utf-8') as f:
+            f.write(f'a plan naming {self.account} directly\n')
+        self.sh(['add', '-A'], self.repo)
+        self.sh(['commit', '-qm', 'a plan'], self.repo)
+
+        ok, line = lc.publish(self.repo, 'fix/B-9997', '', main='main')
+
+        self.assertFalse(ok, line)
+        self.assertIn('publish fix/B-9997 refused:', line)
+        self.assertIn('redact: plan.md:1 names a worker account — replace with lane-N', line)
+        self.assertNotIn(self.account, line)  # never the matched text (D8)
+        # nothing was pushed: the branch does not exist on origin at all
+        self.assertEqual(self.sh(['ls-remote', '--heads', 'origin', 'fix/B-9997'], self.repo), '')
+
+    def test_a_clean_branch_is_still_published(self):
+        with open(os.path.join(self.repo, 'plan.md'), 'w', encoding='utf-8') as f:
+            f.write('a perfectly generic plan\n')
+        self.sh(['add', '-A'], self.repo)
+        self.sh(['commit', '-qm', 'a plan'], self.repo)
+
+        ok, line = lc.publish(self.repo, 'fix/B-9997', '', main='main')
+
+        self.assertTrue(ok, line)
+        self.assertIn('published fix/B-9997 at', line)
+
+
+class RedactionCorrectionTests(unittest.TestCase):
+    """The generic fallback (:func:`lc._redaction_findings` runs the same scan a repo's own
+    pre-push hook does, so the two cases below cover the same ground the hook-output parser
+    exists for): a product whose only scanner is its pre-push hook still gets the precise
+    ``redact: <file>:<line> …`` correction, parsed back out of the hook's own captured output."""
+
+    def test_a_worker_account_finding_line_becomes_the_lane_n_correction(self):
+        findings = redact.parse_finding_lines(
+            'docs/plans/p.md:12: name (worker_pool.accounts)\n'
+            'redact: refused — 1 finding(s); no line above is printed as it was\n')
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(redact.correction(findings),
+                         ['redact: docs/plans/p.md:12 names a worker account — replace with lane-N'])
+
+    def test_a_secret_finding_line_becomes_a_removal_correction(self):
+        findings = redact.parse_finding_lines('f.txt:4: secret (rule:aws-access-key)\n')
+        self.assertEqual(redact.correction(findings),
+                         ['redact: f.txt:4 is a secret — remove it before pushing'])
+
+    def test_lines_that_are_not_a_finding_are_ignored(self):
+        text = ('Enumerating objects: 3, done.\n'
+                'To origin\n'
+                ' ! [remote rejected] fix/B-1 -> fix/B-1 (pre-push hook declined)\n')
+        self.assertEqual(redact.parse_finding_lines(text), [])
 
 
 if __name__ == '__main__':

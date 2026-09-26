@@ -284,6 +284,18 @@ class GoldenBriefTest(unittest.TestCase):
                 self.assertIn('`pushed: rebased <sha> — the factory publishes`', tail)
                 self.assertIn('Never invent an id', tail)
 
+    def test_every_kind_carries_the_redaction_rule(self):
+        # F-0035: a worker session's own account name has landed in a spec before, costing rounds
+        # at the product's redact hook. The rule is generic (no product or account name) and
+        # unconditional — carried whatever `rules_tail` says, like the subject and CI rules.
+        for kind, r in sorted(ROWS.items()):
+            with self.subTest(kind=kind):
+                text = briefs.build(product(), r, index(), [], REPO_FACTS).text
+                self.assertIn(preamble_mod.REDACTION_RULE, text)
+        p = product(conventions={'rules_tail': 'ONE RULE: push to {main} and nothing else.'})
+        text = preamble_mod.build(p, ROWS['coder'], index(), [], REPO_FACTS)
+        self.assertIn(preamble_mod.REDACTION_RULE, text)
+
     def test_the_push_wording_is_not_duplicated_per_template(self):
         # fixer.md and rebase.md each carried their own copy of "a session that ends without a
         # push is counted dead and relaunched on top of you" — now that the closing paragraph
@@ -348,9 +360,11 @@ class PreambleTest(unittest.TestCase):
         self.assertNotIn('(312 lines)', text)
 
     def test_the_cap_holds_and_the_description_goes_first(self):
-        p = product(conventions={'preamble_max_lines': 30})
+        # 31, not 30: the redaction rule (REDACTION_RULE) is a fixed line of ### Standing rules,
+        # never trimmed, so the floor every kind sits on grew by one with it.
+        p = product(conventions={'preamble_max_lines': 31})
         text = preamble_mod.build(p, ROWS['coder'], index(), [], REPO_FACTS)
-        self.assertLessEqual(len(text.splitlines()), 30, text)
+        self.assertLessEqual(len(text.splitlines()), 31, text)
         self.assertIn('…truncated', text)
         self.assertNotIn('never inside the provider client itself', text)
         for identifier in ('T-0001', 'F-0001', 'task/T-0001', 'app/checkout/attempts.py'):

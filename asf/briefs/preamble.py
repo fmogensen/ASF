@@ -109,6 +109,14 @@ LOCAL_GATE_RULE = ("- Locally, run only the targeted tests for the files you cha
                    "session.")
 
 
+#: Carried by every brief, whatever `rules_tail` says (F-0035): a worker session's own account
+#: name or a path on the machine it runs on must never land in the product it is building — only
+#: in the record that documents the factory itself. Generic wording, no product or account name
+#: (the repo's own genericity check forbids naming either here).
+REDACTION_RULE = ("- Never write a worker account name or a machine path into the product; refer "
+                  "to a lane as `lane-N`. Run the redaction check before you push.")
+
+
 def ci_rules(product):
     """``[EXTERNAL_CI_RULE]`` when the product's PRs are gated by external CI
     (:func:`asf.harvest.harvest.external_ci`); ``[LOCAL_GATE_RULE]`` when instead harvest's own
@@ -566,6 +574,6 @@ def build(product, row, index, inflight=None, repo_facts=None, facts=None):
                 trimmable=True, marker='…truncated'),
         Section('rules', '### Standing rules',
                 rules_block(product, main).splitlines() + [subject_rule(row, facts['item'])]
-                + ci_rules(product)),
+                + [REDACTION_RULE] + ci_rules(product)),
     ]
     return '\n'.join(fit(sections, max_lines(product)))
