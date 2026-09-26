@@ -189,7 +189,9 @@ LANE_KEYS = {'review': 'lane_review', 'stale_after': 'lane_stale_after'}
 #: raises on it (a ``models: light`` string once failed every launch for forty minutes), and it
 #: fails loud: :meth:`Conventions.shape_findings` names it, and the doctor's ``conventions`` row
 #: is red with the key and the line.
-MAP_CONVENTIONS = ('models', 'branch_prefixes', 'harvest', 'branch_retention')
+MAP_CONVENTIONS = ('models', 'branch_prefixes', 'harvest', 'branch_retention', 'commit')
+#: ``commit.signoff_check``'s default: a PR check whose name contains it is the sign-off check.
+DEFAULT_SIGNOFF_CHECK = 'DCO'
 #: The conventions that take one word or a map of those words per landing class (``default:``
 #: for the rest). Any other value — ``'{docs: wait}'`` quoted into a string — is never a silent
 #: default: it is a red doctor finding.
@@ -576,6 +578,27 @@ class Conventions:
     def merge_auto(self):
         """True under ``merge: auto`` — the lane merges a green, reviewed PR itself."""
         return str(self.merge or '').strip().lower() == MERGE_AUTO
+
+    # ---- commits -------------------------------------------------------------
+
+    def signoff(self):
+        """``commit.signoff: true`` — every commit a worker makes carries a ``Signed-off-by:``
+        trailer (a DCO check the product requires): the ``commit-msg`` hook adds it
+        (:mod:`asf.workers.githooks`) and the lane re-signs a factory branch whose sign-off check
+        fails (:meth:`asf.harvest.lane.Lane.repair_signoff`). False unless set."""
+        value = self.map_of('commit').get('signoff')
+        return value is True or str(value).strip().lower() in ('true', 'yes', 'on', '1')
+
+    def signoff_check(self):
+        """``commit.signoff_check``: the text (case-insensitive) a PR check's name contains when
+        it is the sign-off check — :data:`DEFAULT_SIGNOFF_CHECK` unless set."""
+        value = self.map_of('commit').get('signoff_check')
+        return str(value).strip() if isinstance(value, str) and value.strip() \
+            else DEFAULT_SIGNOFF_CHECK
+
+    def is_signoff_check(self, name):
+        """True when a PR check called ``name`` is the product's sign-off check."""
+        return self.signoff_check().lower() in str(name or '').lower()
 
     # ---- branches ------------------------------------------------------------
 

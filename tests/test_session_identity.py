@@ -302,6 +302,39 @@ class CommitTrailerTest(Home):
         e['ASF_ITEM'] = 'T-[0001'  # an id awk cannot use as a pattern: the commit still goes
         self.assertEqual(self._commit(wt, e, msg='odd id').returncode, 0)
 
+    def _plain_commit(self, wt, e, msg):
+        with open(os.path.join(wt, 'f.txt'), 'a', encoding='utf-8') as f:
+            f.write(msg + '\n')
+        _git(['add', '.'], wt, env=e)
+        return _git(['commit', '-m', msg], wt, env=e)
+
+    def _signoffs(self, wt, e):
+        return _git(['log', '-1', '--format=%(trailers:key=Signed-off-by,valueonly)'], wt,
+                    env=e).stdout.split('\n')
+
+    def test_commit_msg_signs_off_only_under_commit_signoff(self):
+        # off (the default): a commit made without -s stays unsigned
+        job_obj = self._spawn_job(job='j8')
+        self.assertNotIn('ASF_SIGNOFF', job_obj.env)
+        wt, e = job_obj.cwd, self._env(job_obj)
+        self.assertEqual(self._plain_commit(wt, e, 'feat: unsigned').returncode, 0)
+        self.assertNotIn('Signed-off-by:', _git(['log', '-1', '--format=%B'], wt, env=e).stdout)
+        # on: the author's identity is signed off; one already there is never doubled
+        self.product = env.Product('sample', dict(self.product._data,
+                                                  conventions={'commit': {'signoff': True}}))
+        job_obj = self._spawn_job(job='j9')
+        self.assertEqual(job_obj.env['ASF_SIGNOFF'], '1')
+        wt, e = job_obj.cwd, self._env(job_obj, user='Ada Coder', email='ada@example.com')
+        p = self._plain_commit(wt, e, 'feat: signed')
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual([s for s in self._signoffs(wt, e) if s],
+                         ['Ada Coder <ada@example.com>'])
+        self.assertIn('ASF-Session:', _git(['log', '-1', '--format=%B'], wt, env=e).stdout)
+        p = self._commit(wt, e, msg='feat: signed with -s')
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual([s for s in self._signoffs(wt, e) if s],
+                         ['Ada Coder <ada@example.com>'])
+
     def test_commit_outside_a_session_gets_nothing(self):
         job_obj = self._spawn_job(job='j5')
         wt = job_obj.cwd
