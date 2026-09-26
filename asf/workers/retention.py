@@ -102,9 +102,10 @@ def in_flight(product):
     """The branches a run the registry still holds is on: not ended, or its lane state open."""
     from asf.harvest.lane import TERMINAL_STATES
     from asf.workers import pool as pool_mod
+    from asf.workers.lifecycle import lane_of
     out = set()
     for run in pool_mod.load_sessions(product).values():
-        state = (run.get('lane') or {}).get('state')
+        state = lane_of(run).get('state')
         if run.get('branch') and (not run.get('ended') or (state and state not in TERMINAL_STATES)):
             out.add(run['branch'])
     return out

@@ -241,6 +241,35 @@ class RegistryReadOnceInvariants(unittest.TestCase):
         self.assertLessEqual(parse.call_count, 1)
 
 
+class LaneOfInvariants(unittest.TestCase):
+    """``lane_of`` is the one guard every reader of ``run['lane']`` takes (F-lane-collision): a
+    cloud runtime's launch line written before its own marker moved to ``runtime_lane`` still
+    carries a bare string on the harvest lane state machine's key (``"lane": "cloud"``), and
+    nothing that expects a map may raise on it."""
+
+    def test_a_dict_lane_passes_through(self):
+        rec = {'state': 'QUEUED', 'pr': 7}
+        self.assertEqual(lc.lane_of({'lane': rec}), rec)
+
+    def test_a_string_lane_reads_as_absent(self):
+        self.assertEqual(lc.lane_of({'lane': 'cloud'}), {})
+
+    def test_no_lane_and_no_run_read_as_absent(self):
+        self.assertEqual(lc.lane_of({}), {})
+        self.assertEqual(lc.lane_of(None), {})
+
+    def test_occupancy_never_raises_on_a_string_lane(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        path = os.path.join(d, 'sessions.jsonl')
+        with open(path, 'w') as f:
+            f.write(json.dumps({'job': 'remote-1', 'item': 'T-0002', 'branch': 'cloud/remote-1',
+                                'pid': None, 'started': 't', 'lane': 'cloud'}) + '\n')
+        out = lc.occupancy(path)  # must not raise AttributeError: 'str' object has no attribute 'get'
+        self.assertNotIn('T-0002', out['busy'])
+        self.assertNotIn('T-0002', out['waiting_landing'])
+
+
 class _NeverHits(dict):
     """A registry cache that never holds anything: every read is a full parse."""
 

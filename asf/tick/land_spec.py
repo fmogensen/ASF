@@ -49,7 +49,7 @@ def spoken_for(run, path):
         return False
     from asf.harvest import lane
     return bool(lifecycle.is_live(run) or lifecycle.eligible(run) or run.get('harvest') == 'pr'
-                or (run.get('lane') or {}).get('state') in lane.OPEN_STATES
+                or lifecycle.lane_of(run).get('state') in lane.OPEN_STATES
                 or lifecycle.pending_correction(run, path))
 
 

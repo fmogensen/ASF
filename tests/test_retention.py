@@ -182,6 +182,20 @@ class RetentionSweep(unittest.TestCase):
                               capture_output=True, text=True).stdout
         self.assertEqual(refs.strip(), '')
 
+    def test_a_string_lane_never_crashes_in_flight_or_the_sweep(self):
+        """A launch line written before the cloud runtimes' marker moved off the ``lane`` key
+        (F-lane-collision) carries ``"lane": "cloud"`` — a bare string where every other reader
+        expects the harvest lane state machine's own map. ``in_flight`` (and the sweep that calls
+        it) must read that as no lane state, never raise, and still hold the branch in flight
+        because the run has not ended."""
+        pool_mod.append_session(self.product, {'job': 'remote-1', 'item': 'T-0002', 'pid': 2,
+                                               'branch': 'cloud/remote-held',
+                                               'started': 't', 'lane': 'cloud'})
+        flight = retention.in_flight(self.product)
+        self.assertIn('cloud/remote-held', flight)
+        res, _lines = self.sweep(fix=False)  # must run to completion — never raise
+        self.assertEqual(sorted(res['due']), DUE)
+
 
 class RetentionConventions(unittest.TestCase):
     def test_defaults(self):

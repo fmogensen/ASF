@@ -276,7 +276,7 @@ class Launch(Home):
         self.assertIn('ASF-Session: sid-1', prompt)
         self.assertEqual(fake.calls[1]['args'], {'action': 'run', 'trigger_id': 'trig_1'})
         self.assertEqual(res.extra, {
-            'lane': 'cloud', 'cloud_runtime': 'claude-remote', 'remote_trigger_id': 'trig_1',
+            'runtime_lane': 'cloud', 'cloud_runtime': 'claude-remote', 'remote_trigger_id': 'trig_1',
             'remote_session_id': 'cse_9', 'cloud_url': 'https://claude.ai/code/session_9',
             'remote_routine_url': 'https://claude.ai/code/routines/trig_1'})
         self.assertTrue(lifecycle.pid_alive(res.pid))
@@ -338,7 +338,7 @@ class Sync(Home):
             out=lines.append, local_hold='host pressure', cloud_runtime=rt)
         self.assertEqual(waits, [])
         (_row, rec), = launched
-        self.assertEqual((rec['account'], rec['lane'], rec['pid']),
+        self.assertEqual((rec['account'], rec['runtime_lane'], rec['pid']),
                          ('acct-c', 'cloud', 'remote:trig_1'))
         self.assertIn('cloud https://claude.ai/code/session_9', lines[0])
         return rec
