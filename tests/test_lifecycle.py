@@ -1174,6 +1174,70 @@ class UnpushedAfterARebaseTest(unittest.TestCase):
         self.assertEqual(lc.unpushed_commits(self.repo, '', 'main'), 1)
 
 
+class PublishACopiesRebaseTest(unittest.TestCase):
+    """2026-09-26: a lane branch carrying copies of trunk commits is held back (kind copies)
+    with "rebase onto origin/main, resolving <files>; the factory publishes the rebased branch".
+    The session's conflict-resolved commits no longer match origin's by patch, so publish
+    counted them lost, rebased back onto the copy-laden remote, conflicted, and told the session
+    "rebase onto origin/<branch>" — the opposite instruction (a product's T-0338). A remote
+    commit that is a copy of a trunk commit, or that the head carries under the same author and
+    subject, is not lost: the old tip is archived and the rebased head published."""
+
+    sh, commit = UnpushedAfterARebaseTest.sh, UnpushedAfterARebaseTest.commit
+
+    def setUp(self):
+        base = tempfile.mkdtemp(prefix='lifecycle_copies_')
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        origin, self.repo = os.path.join(base, 'origin.git'), os.path.join(base, 'repo')
+        self.sh(['init', '-q', '--bare', '-b', 'main', origin], base)
+        self.sh(['clone', '-q', origin, self.repo], base)
+        for k, v in (('user.name', 'Test'), ('user.email', 't@example.com'),
+                     ('commit.gpgsign', 'false')):
+            self.sh(['config', k, v], self.repo)
+        self.commit('c', 'base c')
+        self.sh(['push', '-q', 'origin', 'HEAD:main'], self.repo)
+        # a branch: a copy of the trunk commit `x`, then its own change to `c`
+        self.sh(['checkout', '-q', '-b', 'fix/B-7777'], self.repo)
+        self.commit('x', 'x lands on the trunk')      # the copy
+        self.commit('c', 'own change to c')          # its own commit
+        self.sh(['push', '-q', 'origin', 'fix/B-7777'], self.repo)
+        self.remote_sha = self.sh(['rev-parse', 'HEAD'], self.repo)
+        # the trunk lands x under another sha, then changes c itself
+        self.sh(['checkout', '-q', '-B', 'tmp', 'origin/main'], self.repo)
+        self.commit('x', 'x lands on the trunk')
+        self.commit('c', 'trunk change to c')
+        self.sh(['push', '-q', 'origin', 'tmp:main'], self.repo)
+        # the session answers the hold: rebase onto origin/main, resolving c by hand
+        self.sh(['checkout', '-q', 'fix/B-7777'], self.repo)
+        self.sh(['fetch', '-q', 'origin'], self.repo)
+        r = subprocess.run(['git', 'rebase', '-q', 'origin/main'], cwd=self.repo,
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)  # the conflict the lane named
+        with open(os.path.join(self.repo, 'c'), 'w', encoding='utf-8') as f:
+            f.write('resolved c')
+        self.sh(['add', 'c'], self.repo)
+        subprocess.run(['git', '-c', 'core.editor=true', 'rebase', '--continue'], cwd=self.repo,
+                       capture_output=True, text=True, check=True)
+
+    def test_the_rebased_head_is_published_and_the_old_tip_archived(self):
+        head = self.sh(['rev-parse', 'HEAD'], self.repo)
+        ok, line = lc.publish(self.repo, 'fix/B-7777', self.remote_sha, main='main')
+        self.assertTrue(ok, line)
+        self.assertEqual(self.sh(['ls-remote', '--heads', 'origin', 'fix/B-7777'],
+                                 self.repo).split()[0], head)
+        archive = f'archive/fix/B-7777-copies-{self.remote_sha[:9]}'
+        self.assertEqual(self.sh(['ls-remote', '--heads', 'origin', archive],
+                                 self.repo).split()[0], self.remote_sha)
+        self.assertIn(archive, line)
+
+    def test_a_remote_commit_the_head_does_not_carry_is_still_lost(self):
+        self.sh(['reset', '-q', '--hard', 'origin/main'], self.repo)  # the own commit dropped
+        ok, line = lc.publish(self.repo, 'fix/B-7777', self.remote_sha, main='main')
+        self.assertFalse(ok, line)
+        self.assertEqual(self.sh(['ls-remote', '--heads', 'origin', 'fix/B-7777'],
+                                 self.repo).split()[0], self.remote_sha)
+
+
 def _build_ahead(root):
     """A bare origin, a clone holding the lane branch ``lane/x`` at one commit (pushed), and a
     second clone that pushed one more commit onto it — the clone is the stale worktree."""

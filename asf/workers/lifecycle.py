@@ -913,6 +913,41 @@ def commit_leftovers(wt, branch):
     return True, f'committed the session\'s leftovers on {branch}'
 
 
+def rebased_off_copies(wt, new, remote_sha, lost, main='main'):
+    """True when every commit in ``lost`` (short shas on ``remote_sha`` that ``new`` lacks by
+    patch, :func:`lost_commits`) is accounted for by a rebase onto the trunk: a copy of a
+    trunk commit (``git cherry origin/<main>`` ``-``: its change is the trunk's), or a commit
+    ``new`` carries past the trunk under the same author and subject (a conflict resolved by
+    hand keeps its message, not its patch). A lane branch holding trunk copies is sent back
+    "rebase onto origin/<main>" (asf.harvest.lane.drop_copies); this is that rebase arriving."""
+    if not lost or not new or not remote_sha:
+        return False
+    _git(['fetch', '-q', 'origin', f'+refs/heads/{main}:refs/remotes/origin/{main}'], wt)
+    trunk = f'refs/remotes/origin/{main}'
+    cherry = _git(['cherry', trunk, remote_sha], wt)
+    mine = _git(['log', '--no-merges', '--format=%ae%x00%s', f'{trunk}..{new}'], wt)
+    theirs = _git(['log', '--no-merges', '--format=%H%x00%ae%x00%s', f'{trunk}..{remote_sha}'],
+                  wt)
+    if cherry.returncode != 0 or mine.returncode != 0 or theirs.returncode != 0:
+        return False
+    copies = {ln.split()[1] for ln in cherry.stdout.splitlines() if ln.startswith('- ')}
+    carried = set(mine.stdout.splitlines())
+    ident = {}
+    for ln in theirs.stdout.splitlines():
+        sha, _, rest = ln.partition('\x00')
+        ident[sha] = rest
+    for short in lost:
+        full = next((s for s in list(copies) + list(ident) if s.startswith(short)), '')
+        if not full or (full not in copies and ident.get(full) not in carried):
+            return False
+    return True
+
+
+def copies_archive(branch, remote_sha):
+    """The archive ref the old tip of a branch rebuilt off trunk copies is kept under."""
+    return f'archive/{branch}-copies-{remote_sha[:9]}'
+
+
 def publish(wt, branch, remote_sha='', main='main', protected=None):
     """Push the worktree's HEAD to ``origin/<branch>`` as the factory (B-0056).
 
@@ -939,6 +974,16 @@ def publish(wt, branch, remote_sha='', main='main', protected=None):
     if remote_sha:
         head = _git(['rev-parse', 'HEAD'], wt).stdout.strip()
         lost = lost_commits(wt, head, remote_sha, branch)
+        if lost and rebased_off_copies(wt, head, remote_sha, lost, main):
+            # the answer to a trunk-copies hold: the old tip is kept, then replaced
+            archive = copies_archive(branch, remote_sha)
+            if refguard.refusal(archive, f'archive {branch}', main, protected):
+                return False, f'publish {branch} refused: {archive} is a protected ref'
+            a = _git(['push', '-q', 'origin', f'{remote_sha}:refs/heads/{archive}'], wt)
+            if a.returncode != 0:
+                return False, f'publish {branch} refused: the old tip could not be archived'
+            rebased = f'rebased off trunk copies (old tip kept as {archive})'
+            lost = []
         if lost is None or lost:
             ok, fetched, rebased = rebase_onto_remote(wt, branch)
             if not ok:
