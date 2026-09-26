@@ -120,6 +120,24 @@ class Reaper(unittest.TestCase):
         git('fetch', '-q', 'origin', cwd=self.repo)
         self.assertEqual(self.plan()['landed'].action, wt_mod.REMOVE)
 
+    def test_rebased_onto_the_trunk_by_another_sha_is_removed(self):
+        # harvest lands a rebased copy and deletes the remote branch: the patch is the evidence
+        path, branch = self.worktree('rebased', push=False)
+        other = os.path.join(self.tmp, 'other')
+        git('clone', '-q', os.path.join(self.tmp, 'origin.git'), other, cwd=self.tmp)
+        for k, v in (('user.email', 'x@example.com'), ('user.name', 'x')):
+            git('config', k, v, cwd=other)
+        with open(os.path.join(other, 'unrelated.txt'), 'w') as f:
+            f.write('u')
+        git('add', '.', cwd=other)
+        git('commit', '-q', '-m', 'unrelated', cwd=other)
+        git('fetch', '-q', self.repo, branch, cwd=other)
+        git('cherry-pick', 'FETCH_HEAD', cwd=other)
+        git('push', '-q', 'origin', 'main', cwd=other)
+        git('fetch', '-q', 'origin', cwd=self.repo)
+        v = self.plan()['rebased']
+        self.assertEqual((v.action, v.reason), (wt_mod.REMOVE, 'on origin/main (by patch)'))
+
     def test_unpushed_commits_are_kept_with_the_reason(self):
         path, _ = self.worktree('ahead', push=True)
         with open(os.path.join(path, 'more.txt'), 'w') as f:
