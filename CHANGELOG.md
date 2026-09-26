@@ -2,6 +2,21 @@
 
 One entry per released version, newest first.
 
+## v0.1.31 — 2026-09-26
+
+### In progress
+
+- F-0040 Story-to-test gate: a Task's pull request must tick an acceptance line with the test that proves it
+- F-0101 Corrections of mechanical failures run on Opus: 25% of all spend goes to correct/adjudicate/groom sessions
+
+### Improvements and hotfixes
+
+- fix(gitpush): ref-only factory pushes skip the product hook; every push has a timeout
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.31"`
+
 ## v0.1.30 — 2026-09-26
 
 ### In progress
