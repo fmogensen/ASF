@@ -110,6 +110,10 @@ SECRET_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 WORKING, FINISHED, DEAD = cloudpid.WORKING, cloudpid.FINISHED, cloudpid.DEAD
 
 
+#: ``cloud.max_creates_per_tick``'s default for ``claude-remote``: each create is a helper call
+DEFAULT_REMOTE_CREATES_PER_TICK = 2
+
+
 # ---- config -----------------------------------------------------------------------------------
 
 @dataclasses.dataclass(frozen=True)
@@ -133,6 +137,8 @@ class Settings:
     allowed_tools: tuple = ()
     helper_model: str = 'haiku'
     poll_min: float = 15
+    #: cloud launches one wave may try (0: no limit) — a launch holds the tick while it runs
+    max_creates_per_tick: int = 0
 
     @property
     def on(self):
@@ -243,7 +249,12 @@ def settings(cfg, product=None):
                     allowed_tools=tuple(str(t) for t in c.get('allowed_tools') or ()
                                         if isinstance(c.get('allowed_tools'), list)),
                     helper_model=str(c.get('helper_model') or 'haiku'),
-                    poll_min=_float(c.get('poll_min'), 15))
+                    poll_min=_float(c.get('poll_min'), 15),
+                    max_creates_per_tick=max(0, _int(
+                        c.get('max_creates_per_tick'),
+                        DEFAULT_REMOTE_CREATES_PER_TICK
+                        if str(c.get('runtime') or '').replace('_', '-') == 'claude-remote'
+                        else 0)))
 
 
 def lane_accounts(accounts, s):

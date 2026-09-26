@@ -15,15 +15,22 @@ keychain holds that login; the runtime token variables dropped).
 default ``haiku``; ``--allowedTools RemoteTrigger``) told to relay one JSON argument object to
 ``RemoteTrigger`` unchanged. ASF never trusts its prose: it reads the tool call the model made and
 the tool's raw result off the ``stream-json`` log (a result too large to inline is read from the
-file the CLI saved it to), and a create whose body the model altered is disabled and refused.
+file the CLI saved it to), and a create whose body the model altered is disabled and retried
+once with a fresh helper, then refused.
 
 **A launch** (:class:`RemoteRuntime`): the brief is :func:`asf.workers.cloud.cloud_brief` with the
-routine's setting (check the branch out, export the worker environment, run the setup);
-``create`` makes a routine on the dispatching account — ``run_once_at`` far out, so nothing fires
-by schedule — whose one event is that brief, whose source is the product repo, in the account's
+routine's setting (check the branch out, export the worker environment, run the setup). It goes
+to origin's brief ref first (:func:`asf.workers.actions.push_brief`, ``refs/asf/briefs/<job>``,
+deleted when the run ends) — never into the routine body: the helper is a model, and a model
+does not copy a multi-KB brief byte-exact. ``create`` makes a routine on the dispatching
+account — ``run_once_at`` far out, so nothing fires by schedule — whose one event is a short,
+fixed, ASCII pointer to that ref (:func:`pointer`), whose source is the product repo, in the account's
 environment (``cloud.environment_id``: one id, or a map account → id — an environment belongs to
 one account, and another account's is refused ``environment_not_found``) with ``cloud.model`` (else the row's model) and ``cloud.allowed_tools``;
-``run`` fires it. The run records ``pid: remote:<trigger id>`` and the run's session id and link.
+``run`` fires it. Each helper call is killed at :data:`HELPER_TIMEOUT_S` — the launch fails
+``timeout``, and a routine the killed create had made is disabled — and a wave tries at most
+``cloud.max_creates_per_tick`` launches, so the lane never holds a tick for long. The run
+records ``pid: remote:<trigger id>``, the run's session id and link, and its ``brief_ref``.
 The routine runs on the dispatching account, so it counts in that account's in-flight like any
 session.
 
@@ -43,6 +50,7 @@ Config (``cloud:``)::
       allowed_tools: [Bash, Read, Write, Edit, Glob, Grep]
       helper_model: haiku          # the local relay's model
       poll_min: 15                 # how often a working run's routine is read
+      max_creates_per_tick: 2      # cloud launches one wave tries (0: no limit)
       accounts: [acct-a]
       max_inflight: 4
       rows: any
@@ -55,6 +63,7 @@ import time
 
 from asf import env
 from asf import hermetic
+from asf.workers import actions
 from asf.workers import cloud
 from asf.workers import cloudpid
 from asf.workers import runtime as runtime_mod
@@ -66,7 +75,9 @@ DEFAULT_HELPER_MODEL = 'haiku'
 DEFAULT_POLL_MIN = 15
 #: a routine ASF fires by ``run``: its schedule never comes
 FAR_FUTURE = '2036-01-01T00:00:00Z'
-HELPER_TIMEOUT_S = 300
+#: one helper call's hard limit: a create relays a short body in seconds; a helper past this
+#: is killed and the launch fails clean (``timeout``) instead of holding the tick
+HELPER_TIMEOUT_S = 120
 #: the variables that carry a runtime token: a helper that saw one would call the API with it
 #: (inference-only: 401) instead of the account's own login
 TOKEN_VARS = ('CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN')
@@ -81,6 +92,14 @@ RUNNING_STATES = ('', 'ROUTINE_RUN_STATUS_UNSPECIFIED', 'ROUTINE_RUN_STATUS_RUNN
 
 class HelperError(Exception):
     pass
+
+
+class HelperTimeout(HelperError):
+    """A helper killed at :data:`HELPER_TIMEOUT_S`; ``partial`` is the log it wrote so far."""
+
+    def __init__(self, msg, partial=''):
+        super().__init__(msg)
+        self.partial = partial
 
 
 def token(trigger_id):
@@ -98,6 +117,24 @@ def repo_url(product):
 
 
 # ---- the routine body -------------------------------------------------------------------------
+
+_SAFE_RE = re.compile(r'[^\w@%+=:,./-]')
+
+
+def _safe(v):
+    """A name for the pointer: ASCII, no quoting — anything else is dropped."""
+    return _SAFE_RE.sub('', str(v or '').encode('ascii', 'ignore').decode())
+
+
+def pointer(job, ref, url):
+    """The routine's one message: a short fixed ASCII pointer to the brief on ``ref`` — the
+    helper relays it byte-exact where a multi-KB brief comes back altered."""
+    ref, name = _safe(ref), _safe(job.name)
+    return (f'You are ASF worker session {_safe(job.session) or name} for job {name}. '
+            f'Repository {_safe(url)}, branch {_safe(job.branch)}. Your task is the brief on the '
+            f'git ref {ref}: run `git fetch origin {ref} && git show FETCH_HEAD:brief.md` and '
+            'follow that brief exactly; it is your whole task. Do nothing before you have read it.')
+
 
 def trigger_body(name, prompt, environment_id, model, allowed_tools, url):
     """The ``create`` body: a run-once routine ASF fires itself (``run_once_at`` far out), one
@@ -215,8 +252,10 @@ class TriggerClient:
     """The routine API through one ``claude -p`` per call, on ``account``'s login. ``run`` is
     injectable (tests: a fake that answers with a ``stream-json`` log)."""
 
-    def __init__(self, account, binary=None, model=DEFAULT_HELPER_MODEL, run=None, cwd=None):
+    def __init__(self, account, binary=None, model=DEFAULT_HELPER_MODEL, run=None, cwd=None,
+                 timeout=HELPER_TIMEOUT_S):
         self.account = account
+        self.timeout = timeout
         self.binary = binary or _binary()
         self.model = model or DEFAULT_HELPER_MODEL
         self._run = run or subprocess.run
@@ -244,7 +283,13 @@ class TriggerClient:
         try:
             p = self._run(self.command(), input=helper_prompt(args), capture_output=True,
                           text=True, env=helper_env(self.account), cwd=cwd,
-                          timeout=HELPER_TIMEOUT_S)
+                          timeout=self.timeout)
+        except subprocess.TimeoutExpired as e:
+            partial = e.stdout or e.output or ''
+            if isinstance(partial, bytes):
+                partial = partial.decode('utf-8', 'replace')
+            raise HelperTimeout(f'timeout: helper {action} killed after {self.timeout:g}s',
+                                partial) from None
         except (OSError, subprocess.SubprocessError) as e:
             raise HelperError(f'helper {action}: {type(e).__name__}') from None
         calls = [(inp, res) for inp, res in tool_calls(p.stdout)
@@ -257,16 +302,33 @@ class TriggerClient:
         code, obj, tail = http_json(result)
         return code, obj, tail, sent
 
-    def create(self, body):
-        """``(trigger id, routine link)``. A body the helper altered is disabled and refused."""
-        code, obj, tail, sent = self.call('create', body=body)
-        tid = trigger_id_of(obj)
-        if code not in (200, 201) or not tid:
-            raise HelperError(f'create refused: HTTP {code} {_err(obj, tail)}')
-        if sent.get('body') != body:
+    def create(self, body, attempts=2):
+        """``(trigger id, routine link)``. A body the helper altered is disabled and the create
+        retried with a fresh helper, ``attempts`` in all; then refused."""
+        for _ in range(max(1, attempts)):
+            try:
+                code, obj, tail, sent = self.call('create', body=body)
+            except HelperTimeout as e:
+                self._reap(e)
+                raise
+            tid = trigger_id_of(obj)
+            if code not in (200, 201) or not tid:
+                raise HelperError(f'create refused: HTTP {code} {_err(obj, tail)}')
+            if sent.get('body') == body:
+                return tid, _link(tail)
             self.disable(tid)
-            raise HelperError(f'create: the helper altered the body; routine {tid} disabled')
-        return tid, _link(tail)
+        raise HelperError(f'create: the helper altered the body; routine {tid} disabled')
+
+    def _reap(self, e):
+        """A create killed at the timeout may have made its routine: disable it."""
+        for inp, res in tool_calls(e.partial):
+            tid = trigger_id_of(http_json(res)[1]) if inp.get('action') == 'create' else None
+            if tid:
+                try:
+                    self.disable(tid)
+                    e.args = (f'{e.args[0]}; routine {tid} disabled',)
+                except HelperError:
+                    e.args = (f'{e.args[0]}; routine {tid} left enabled (disable failed)',)
 
     def fire(self, trigger_id):
         """The run's session id (None when the answer names none)."""
@@ -341,6 +403,10 @@ def _err(obj, tail):
     return (tail or '')[:200]
 
 
+def _safe_name(text):
+    return ' '.join(_safe(w) for w in str(text).split() if _safe(w))
+
+
 def _binary():
     wp = (cloud._load_cfg() or {}).get('worker_pool') or {}
     return wp.get('binary') or runtime_mod.DEFAULT_BINARY
@@ -384,13 +450,17 @@ class RemoteRuntime(runtime_mod.Runtime):
         log_path = job.log_path or runtime_mod.job_log_path(job.product, job.name)
         with open(job.brief_path, encoding='utf-8') as f:
             text = cloud.cloud_brief(f.read(), job, setting=setting_lines(job))
-        name = f'asf {product.name} {job.name} {job.session or ""}'.strip()
-        body = trigger_body(name, text, env_id, s.model or job.model,
+        ok, ref = actions.push_brief(job.cwd, job.name, text, job.env, getattr(job, 'setup', None))
+        if not ok:
+            raise SpawnError(f'cloud lane: {ref}')
+        name = _safe_name(f'asf {product.name} {job.name} {job.session or ""}')
+        body = trigger_body(name, pointer(job, ref, url), env_id, s.model or job.model,
                             s.allowed_tools, url)
         client = self.client(job.account)
         try:
             tid, link = client.create(body)
         except HelperError as e:
+            actions.delete_brief(job.cwd, ref)
             raise SpawnError(f'cloud lane: {e}') from None
         try:
             sid = client.fire(tid)
@@ -399,6 +469,7 @@ class RemoteRuntime(runtime_mod.Runtime):
                 client.disable(tid)
             except HelperError:
                 pass
+            actions.delete_brief(job.cwd, ref)
             raise SpawnError(f'cloud lane: routine {tid}: {e}') from None
         tok = token(tid)
         where = session_url(sid) or link
@@ -408,12 +479,13 @@ class RemoteRuntime(runtime_mod.Runtime):
                 log.write(line + '\n')
             log.write(json.dumps({'type': 'asf', 'subtype': 'cloud', 'runtime': self.name,
                                   'trigger': tid, 'run': sid, 'url': where,
-                                  'routine': link}) + '\n')
+                                  'routine': link, 'brief_ref': ref}) + '\n')
         cloudpid.record(tok, cloud.WORKING, 'dispatched', run=sid, url=where, routine=link)
         result = runtime_mod.Result(pid=tok, log_path=log_path)
         # 'runtime_lane', never 'lane': see asf.workers.actions.ActionsRuntime.run for why.
         result.extra = {'runtime_lane': 'cloud', 'cloud_runtime': self.name, 'remote_trigger_id': tid,
-                        'remote_session_id': sid, 'cloud_url': where, 'remote_routine_url': link}
+                        'remote_session_id': sid, 'cloud_url': where, 'remote_routine_url': link,
+                        'brief_ref': ref}
         return result
 
     def continue_run(self, job, wait=False):
