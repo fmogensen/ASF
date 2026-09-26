@@ -65,6 +65,7 @@ from asf import capacity as capacity_mod
 from asf.groom import policy as groom_policy
 from asf.record import plan_order
 from asf.workers import cloud as cloud_mod
+from asf.workers import continuation
 from asf.workers import host as host_mod
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
@@ -517,8 +518,20 @@ def launch(ctx, out=print):
             common = f' · both touch {pair}' if pair else ' · no file in common'
             job = job_name(row.brief_kind, row.item_id)
             out(f'adjudicate {job:<24} {row.item_id:<10} — {la}: {ta[:60]} ↔ {lb}: {tb[:60]}{common}')
+        run_, sid, rnd, why = continuation.target(product, row, ctx.record_root())
+        if sid:
+            rec = continuation.continue_run(product, row, run_, sid, rnd, why)
+            if rec:
+                out(f"continued {rec['job']:<24} {row.item_id:<10} → session {rec['session']} "
+                    f"(round {rnd})")
+                ctx.event('continue', item=row.item_id, job=rec['job'], session=rec['session'],
+                          round=rnd, kind=row.brief_kind)
+                continue
+            why = 'runtime declined to continue'
         brief = _build(product, row, items, running,
                        repo_facts=repo_facts(product, row.branch))
+        if why:
+            out(f"cold     {job_name(row.brief_kind, row.item_id):<24} {row.item_id:<10} — {why}")
         wrow = worker_row(row, brief, items, host_load_bypass=bypass)
         worker_rows.append(wrow)
         texts[wrow.job] = brief.text

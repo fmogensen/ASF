@@ -29,12 +29,15 @@ import re
 import subprocess
 import time
 
+from asf import env as env_mod
 from asf.briefs import preamble as preamble_mod
 from asf.evidence import review as review_mod
 from asf.feeder import rows as feeder_rows
 from asf.views import index_reader
+from asf.workers import githooks
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
+from asf.workers import runtime as runtime_mod
 from asf.workers import spawn as spawn_mod
 from asf.workers.stall import CORRECTION_HEAD
 
@@ -303,3 +306,66 @@ def prompt(product, run, row, round_n, review_path, text):
     while kept and len(render(kept).splitlines()) > cap:
         kept -= 1
     return render(kept)
+
+
+# ---- the launch that continues (§2.5) ------------------------------------------
+
+def continue_run(product, row, run, session_id, round_n, review_path):
+    """Continue ``run``'s session with ``row``'s findings. Writes the message to
+    ``<state>/briefs/<writer job>.continue-r<n>.md`` (through :func:`spawn.briefs_dir`, so it
+    sits beside a brief), rebuilds the ``Job`` :func:`spawn.spawn` would (PD8, PD6, PD10 — the
+    writer's own worktree, account and id range, no new reservation) with ``resume=session_id``
+    and the writer's own ``ASF_SESSION``, and calls :meth:`runtime.Runtime.continue_run`.
+
+    ``None`` when the worktree cannot be prepared or the account's credentials cannot be read (a
+    :class:`spawn.SpawnError`/:class:`runtime.AuthEnvError` is the fallback's trigger, not a
+    crash) or the runtime declines — the caller falls back in the same tick (PD9). Otherwise the
+    ledger record PD7 lists: the writer's ``job``, ``worktree``, ``branch``, ``id_range``,
+    ``account``, ``product`` and ``session``; the row's own ``item``, ``feature`` and ``kind``;
+    and this launch's own ``pid``, ``pgid``, ``started``, ``brief``, ``resumed`` and
+    ``continued: 1``."""
+    job = run['job']
+    branch = run['branch']
+    text = ''
+    if review_path:
+        try:
+            with open(review_path, encoding='utf-8') as f:
+                text = f.read()
+        except OSError:
+            text = ''
+    message = prompt(product, run, row, round_n, review_path, text)
+    brief_path = os.path.join(spawn_mod.briefs_dir(product), f'{job}.continue-r{round_n}.md')
+    with open(brief_path, 'w', encoding='utf-8') as f:
+        f.write(message)
+    cfg = spawn_mod.load_cfg()
+    wp = cfg.get('worker_pool') or {}
+    account = {a.name: a for a in pool_mod.accounts_from_config(cfg)}.get(run.get('account'))
+    product_auth_env = env_mod.product_auth_env(product)
+    try:
+        runtime_mod.auth_env_values(account, product_auth_env)
+        worktree = spawn_mod.make_worktree(product, job, branch)
+    except (spawn_mod.SpawnError, runtime_mod.AuthEnvError):
+        return None
+    add_dirs = [os.path.expanduser(d) for d in (product._get('job_grants') or [])]
+    job_env = {**env_mod.worker_env(cfg, product),
+               **githooks.item_env(getattr(product, 'conventions', None), row.item_id, branch),
+               'BACKLOG_ID_RANGE': run.get('id_range'), 'ASF_SESSION': run['session']}
+    runtime = runtime_mod.from_config(cfg)
+    j = runtime_mod.Job(product.name, job, worktree, brief_path, run.get('model'),
+                        account=account, add_dirs=add_dirs,
+                        permission_mode=wp.get('permission_mode') or runtime_mod.DEFAULT_PERMISSION_MODE,
+                        env=job_env, settings_file=spawn_mod.settings_file(wp),
+                        hooks_dir=githooks.ensure(product), resume=session_id,
+                        passthrough=env_mod.env_passthrough(cfg), product_auth_env=product_auth_env,
+                        branch=branch, base=product.main)
+    result = runtime.continue_run(j)
+    if result is None:
+        return None
+    record = {'job': job, 'item': row.item_id, 'feature': row.feature_id, 'kind': row.brief_kind,
+              'account': account.name if account else run.get('account'),
+              'pid': result.pid, 'pgid': result.pid, 'worktree': worktree, 'branch': branch,
+              'started': pool_mod.now_iso(), 'log': result.log_path, 'brief': brief_path,
+              'id_range': run.get('id_range'), 'runtime': runtime.name, 'session': run['session'],
+              'product': product.name, 'resumed': session_id, 'continued': 1}
+    pool_mod.append_session(product, record)
+    return record
