@@ -54,6 +54,11 @@ The product yaml carries the overrides::
       idle_wave_ticks: 6          # consecutive idle waves with New Tasks → a Bug
       heavy_share_pct: 50         # the share of labelled 7-day spend on the heavy model above
                                   # which the rollup files a Bug (F-0101 §2.7)
+      budget:
+        sessions: 3        # ended sessions an item may take before it stops (off: no limit)
+        usd: 10            # dollars an item may take before it stops (off: no limit)
+        run_minutes: 180   # one run's wall clock; over it the run is ended `run cap`
+        run_turns: 600     # one run's assistant turns; over it the run is ended `run cap`
 
 Unknown keys are kept (in :attr:`Conventions.extra`) rather than rejected: a product yaml is
 written by an operator and may carry conventions a module older than it does not read yet, and
@@ -226,7 +231,8 @@ LANE_KEYS = {'review': 'lane_review', 'stale_after': 'lane_stale_after'}
 #: raises on it (a ``models: light`` string once failed every launch for forty minutes), and it
 #: fails loud: :meth:`Conventions.shape_findings` names it, and the doctor's ``conventions`` row
 #: is red with the key and the line.
-MAP_CONVENTIONS = ('models', 'branch_prefixes', 'harvest', 'git', 'branch_retention', 'commit')
+MAP_CONVENTIONS = ('models', 'branch_prefixes', 'harvest', 'git', 'branch_retention', 'commit',
+                   'budget')
 #: ``commit.signoff_check``'s default: a PR check whose name contains it is the sign-off check.
 DEFAULT_SIGNOFF_CHECK = 'DCO'
 #: The conventions that take one word or a map of those words per landing class (``default:``
@@ -278,6 +284,10 @@ DEFAULT_SAVINGS = {
     'rounds_per_landing': 1.3, 'step_duration_ratio': 1.5, 'spend_ratio': 1.5,
     'failure_class_count': 3,
 }
+
+#: An item's budget and one run's caps (F-0092). A product overrides any key; a key it does not
+#: name keeps the default here. ``off`` on any key is no limit for that measure.
+DEFAULT_BUDGET = {'sessions': 3, 'usd': 10, 'run_minutes': 180, 'run_turns': 600}
 
 
 def _normalise_prefix(value):
@@ -502,6 +512,11 @@ class Conventions:
     #: ``savings``: the savings pass's window and six thresholds (F-0100 §2.9), merged per key
     #: through :func:`savings_for` — a product overriding one threshold keeps the other seven.
     savings: dict = field(default_factory=lambda: dict(DEFAULT_SAVINGS))
+    #: ``budget``: an item's budget and one run's caps (F-0092 §2.1), merged per key through
+    #: :func:`budget_for` — a product overriding one key keeps the other three. ``'budget'`` is
+    #: in :data:`MAP_CONVENTIONS`, so a misshapen block is a red doctor row, never a silent
+    #: default.
+    budget: dict = field(default_factory=lambda: dict(DEFAULT_BUDGET))
     #: Globs (F-0031 §2.1) whose match makes a landed branch's merge class
     #: `merge_amendable_set` rather than `merge_routine_pr` — the factory's own rules. Three
     #: states (F-0024): unset (``None``) is the defaults in `asf/amendable.py`, a list is that
@@ -795,6 +810,13 @@ def savings_for(conv, key):
     overriding one threshold keeps the other seven."""
     savings = getattr(conv, 'savings', None) or {}
     return savings[key] if key in savings else DEFAULT_SAVINGS[key]
+
+
+def budget_for(conv, key):
+    """An item's budget or a run's cap for ``key`` (F-0092 §2.1): the product's own
+    ``conventions.budget`` entry when it named one, else :data:`DEFAULT_BUDGET`'s."""
+    budget = getattr(conv, 'budget', None) or {}
+    return budget[key] if key in budget else DEFAULT_BUDGET[key]
 
 
 if __name__ == '__main__':
