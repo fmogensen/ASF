@@ -1024,6 +1024,9 @@ def rebased_off_copies(wt, new, remote_sha, lost, main='main'):
                   wt)
     if cherry.returncode != 0 or mine.returncode != 0 or theirs.returncode != 0:
         return False
+    base = _git(['merge-base', remote_sha, trunk], wt).stdout.strip()
+    if _net_change_kept(wt, new, remote_sha, base):
+        return True
     copies = {ln.split()[1] for ln in cherry.stdout.splitlines() if ln.startswith('- ')}
     carried = set(mine.stdout.splitlines())
     ident = {}
@@ -1036,7 +1039,7 @@ def rebased_off_copies(wt, new, remote_sha, lost, main='main'):
         if not full:
             return False
         if full in copies or ident.get(full) in carried or _empty_commit(wt, full) \
-                or _resolved_to_trunk(wt, full, new, trunk):
+                or _resolved_to_trunk(wt, full, new, trunk, base):
             continue
         if trunk_subjects is None:
             trunk_subjects = _trunk_subjects(wt, remote_sha, trunk)
@@ -1072,18 +1075,40 @@ def _empty_commit(wt, sha):
     return bool(tree) and tree == parent
 
 
-def _resolved_to_trunk(wt, sha, new, trunk):
-    """True when ``sha`` only added files that the trunk has since added its own copy of, and
-    ``new`` reads the trunk's: an add/add the rebase resolved in the trunk's favour, the commit
-    dropped as empty (a product's F-0037: the trunk landed its own plan at the path the branch's
-    plan commit added). A commit that changed an existing file stays lost work. The old tip is
-    archived before the push, so nothing is erased."""
+def _net_change_kept(wt, new, remote_sha, base):
+    """True when the old tip's whole net change against its trunk base, ``base..remote_sha``,
+    is already in ``new``: a three-way merge of it onto ``new`` merges cleanly and changes
+    nothing. The branch's work reached the trunk in another form (a product's F-0094: a sibling
+    lane's "carry the approved spec" commit landed its spec and band rows), so its own commits
+    dropped on the rebase lose nothing, whatever their patches. Merge-free: ``git merge-tree``
+    writes only objects; an old git without it answers False."""
+    if not base:
+        return False
+    p = _git(['merge-tree', '--write-tree', f'--merge-base={base}', new, remote_sha], wt)
+    tree = p.stdout.split('\n', 1)[0].strip()
+    if p.returncode != 0 or not tree:
+        return False
+    return tree == _git(['rev-parse', '-q', '--verify', f'{new}^{{tree}}'], wt).stdout.strip()
+
+
+def _resolved_to_trunk(wt, sha, new, trunk, base=''):
+    """True when ``sha`` only touched files that are the branch's own — added by it, or (given
+    the old tip's trunk ``base``) absent there — which the trunk has since added its own copy
+    of, and ``new`` reads the trunk's: an add/add the rebase resolved in the trunk's favour, the
+    commit dropped as empty (a product's F-0037: the trunk landed its own plan at the path the
+    branch's plan commit added; F-0014: a later revision of the plan was carried onto the trunk,
+    and the branch's follow-up fix to its copy dropped with it). A commit that changed a file
+    the trunk already had stays lost work. The old tip is archived before the push, so nothing
+    is erased."""
     files = _git(['diff-tree', '--no-commit-id', '--name-status', '-r', '--root', sha], wt)
     rows = [ln.split('\t', 1) for ln in files.stdout.splitlines() if ln.strip()]
     if files.returncode != 0 or not rows:
         return False
     for row in rows:
-        if len(row) != 2 or row[0] != 'A':
+        if len(row) != 2 or row[0] not in ('A', 'M'):
+            return False
+        if row[0] == 'M' and (not base or _git(['cat-file', '-e', f'{base}:{row[1]}'],
+                                                wt).returncode == 0):
             return False
         a = _git(['rev-parse', '-q', '--verify', f'{new}:{row[1]}'], wt).stdout.strip()
         b = _git(['rev-parse', '-q', '--verify', f'{trunk}:{row[1]}'], wt).stdout.strip()

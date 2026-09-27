@@ -1596,6 +1596,104 @@ class RebaseOffRewordedTrunkCopiesTest(unittest.TestCase):
                                       self.remote_sha, main='main'))
 
 
+class RebaseOffSupersededBranchWorkTest(unittest.TestCase):
+    """A product's F-0014/F-0094, 2026-09-27: a spec branch's own commits had since been carried
+    onto the trunk in another form (a later revision of the plan the branch added; the spec and
+    its band rows landed by a sibling lane's "carry the approved spec" commit). The correct
+    sessions rebased onto the trunk as told and git dropped those commits, yet publish counted
+    them lost: a follow-up edit to the branch's own file is not an add, and a band row in a
+    shared register is not a copy of any one trunk commit. The factory rebased back onto the old
+    tip, conflicted, and the loop guard parked both items after three rounds. A commit is
+    accounted for when every file it touched is the branch's own (absent at its trunk base) and
+    the new head reads the trunk's copy; the whole old tip is when its net change against its
+    trunk base is already in the new head."""
+
+    sh = UnpushedAfterARebaseTest.sh
+    commit = RebaseOverAReportCommitTest.commit
+
+    def setUp(self):
+        base = tempfile.mkdtemp(prefix='lifecycle_superseded_')
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        origin, self.repo = os.path.join(base, 'origin.git'), os.path.join(base, 'repo')
+        self.sh(['init', '-q', '--bare', '-b', 'main', origin], base)
+        self.sh(['clone', '-q', origin, self.repo], base)
+        for k, v in (('user.name', 'Test'), ('user.email', 't@example.com'),
+                     ('commit.gpgsign', 'false')):
+            self.sh(['config', k, v], self.repo)
+        self.commit('bands.md', 'row 1\n', 'base bands')
+        self.sh(['push', '-q', 'origin', 'HEAD:main'], self.repo)
+        self.sh(['checkout', '-q', '-b', 'cloud/x'], self.repo)
+
+    def push_branch(self):
+        self.sh(['push', '-q', 'origin', 'cloud/x'], self.repo)
+        self.remote_sha = self.sh(['rev-parse', 'HEAD'], self.repo)
+
+    def land_on_trunk(self, files, msg):
+        self.sh(['checkout', '-q', '-B', 'tmp', 'origin/main'], self.repo)
+        for name, text in files.items():
+            with open(os.path.join(self.repo, name), 'w', encoding='utf-8') as f:
+                f.write(text)
+        self.sh(['add', '-A'], self.repo)
+        self.sh(['commit', '-qm', msg], self.repo)
+        self.sh(['push', '-q', 'origin', 'tmp:main'], self.repo)
+        self.sh(['checkout', '-q', 'cloud/x'], self.repo)
+        self.sh(['fetch', '-q', 'origin'], self.repo)
+
+    def rebase_keeping_trunk(self):
+        """The session's ``git rebase origin/main``: every conflict resolved to the trunk's."""
+        r = subprocess.run(['git', '-c', 'core.editor=true', 'rebase', '-q', '-X', 'ours',
+                            'origin/main'], cwd=self.repo, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.head = self.sh(['rev-parse', 'HEAD'], self.repo)
+
+    def test_a_follow_up_edit_to_a_file_the_trunk_took_over_is_not_lost(self):
+        self.commit('plan.md', 'plan v1\n', 'plan(X): the plan')
+        self.commit('plan.md', 'plan v1, path fixed\n', 'plan(X): correct a path')
+        self.commit('own', 'own\n', 'spec(X): own')
+        self.push_branch()
+        self.land_on_trunk({'plan.md': 'plan v8, carried, path fixed\n'}, 'docs: carry the plan')
+        self.rebase_keeping_trunk()
+        self.assertTrue(lc.rebase_of(self.repo, self.head, self.remote_sha, main='main'))
+        ok, line = lc.publish(self.repo, 'cloud/x', self.remote_sha, main='main')
+        self.assertTrue(ok, line)
+        self.assertIn(lc.copies_archive('cloud/x', self.remote_sha), line)
+
+    def test_branch_work_the_trunk_carried_whole_is_not_lost(self):
+        self.commit('bands.md', 'row 1\nrow X\n', 'docs(spec): book row X')
+        self.commit('spec.md', 'spec v2\n', 'docs(spec): the spec')
+        self.commit('review.md', 'approved\n', 'docs(review): approved')
+        self.push_branch()
+        self.land_on_trunk({'bands.md': 'row 0\nrow 1\nrow X\n', 'spec.md': 'spec v2\n'},
+                           'docs: carry the approved spec for x-t2')
+        self.rebase_keeping_trunk()
+        self.assertTrue(lc.rebase_of(self.repo, self.head, self.remote_sha, main='main'))
+        ok, line = lc.publish(self.repo, 'cloud/x', self.remote_sha, main='main')
+        self.assertTrue(ok, line)
+
+    def test_an_edit_to_a_shared_file_the_head_dropped_is_still_lost(self):
+        self.commit('bands.md', 'row 1\nrow X\n', 'docs(spec): book row X')
+        self.commit('spec.md', 'spec v2\n', 'docs(spec): the spec')
+        self.push_branch()
+        self.land_on_trunk({'other': 'trunk\n'}, 'trunk moves on')
+        self.sh(['reset', '-q', '--hard', 'origin/main'], self.repo)
+        self.commit('spec.md', 'spec v2\n', 'docs(spec): the spec')  # row X dropped
+        head = self.sh(['rev-parse', 'HEAD'], self.repo)
+        self.assertFalse(lc.rebase_of(self.repo, head, self.remote_sha, main='main'))
+        lc.publish(self.repo, 'cloud/x', self.remote_sha, main='main')
+        self.sh(['fetch', '-q', 'origin'], self.repo)
+        self.assertIn('row X', self.sh(['show', 'origin/cloud/x:bands.md'], self.repo))
+
+    def test_a_follow_up_edit_the_trunk_never_took_over_is_still_lost(self):
+        self.commit('plan.md', 'plan v1\n', 'plan(X): the plan')
+        self.commit('plan.md', 'plan v1, path fixed\n', 'plan(X): correct a path')
+        self.push_branch()
+        self.land_on_trunk({'other': 'trunk\n'}, 'trunk moves on')
+        self.sh(['reset', '-q', '--hard', 'origin/main'], self.repo)
+        self.commit('plan.md', 'plan v1\n', 'plan(X): the plan')  # the fix dropped
+        head = self.sh(['rev-parse', 'HEAD'], self.repo)
+        self.assertFalse(lc.rebase_of(self.repo, head, self.remote_sha, main='main'))
+
+
 def _build_ahead(root):
     """A bare origin, a clone holding the lane branch ``lane/x`` at one commit (pushed), and a
     second clone that pushed one more commit onto it — the clone is the stale worktree."""
