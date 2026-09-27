@@ -21,10 +21,10 @@
    environment carrying the session's id (``ASF_SESSION``, minted from ``started`` before the
    run) and its ``hooks_dir`` (:func:`asf.workers.githooks.ensure`), so every commit it makes
    carries an ``ASF-Session`` trailer (F-0076);
-5. one line in ``sessions.jsonl``: job, item, feature, kind, account, model, pid, worktree,
-   branch, started, session, product — plus ``host_load_bypass: true`` when the row carries it
-   (the wave step's S1 load-hold bypass, :mod:`asf.tick.step_wave`), so a later wave can see the
-   bypass is still live.
+5. one line in ``sessions.jsonl``: job, item, feature, kind, account, model, model_label
+   (the row's label, beside the id ``model_arg`` resolved it to), pid, worktree, branch, started,
+   session, product — plus ``host_load_bypass: true`` when the row carries it (the wave step's S1
+   load-hold bypass, :mod:`asf.tick.step_wave`), so a later wave can see the bypass is still live.
 """
 import os
 import re
@@ -552,7 +552,7 @@ def write_brief(product, job, text):
 
 
 def model_arg(model, cfg=None):
-    """``worker_pool.models: {Opus: <id>}`` maps a row's model label. A label with no entry is
+    """``worker_pool.models: {heavy: <id>}`` maps a row's model label. A label with no entry is
     refused — the literal label is not a model id the runtime knows, and the session dies at once."""
     if not model:
         return None
@@ -697,6 +697,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
     result = runtime.run(job)
     record = {'job': row.job, 'item': row.item, 'feature': row.feature, 'kind': row.kind,
               'account': account.name if account else None, 'model': job.model,
+              'model_label': row.model,
               'pid': result.pid, 'pgid': result.pid, 'worktree': worktree, 'branch': branch,
               'started': started, 'log': result.log_path, 'brief': brief_path,
               'id_range': id_range, 'runtime': runtime.name, 'session': sid,

@@ -5,6 +5,7 @@ lane's transitions now (T12 STALE, T9 BACK ``kind=conflict``); the view lists th
 import io
 import json
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -13,6 +14,8 @@ from unittest import mock
 
 from asf import env
 from asf.harvest import pr_hygiene
+
+VENDOR_MODEL_RE = re.compile(r'(?i)\b(sonnet|opus|haiku|claude-[\w.-]+)\b')
 
 
 class HygieneView(unittest.TestCase):
@@ -40,6 +43,16 @@ class HygieneView(unittest.TestCase):
                           (pr_hygiene.CONFLICT_REBASE, 'worker/T-0002')])
         self.assertEqual(pr_hygiene.render(found[0]),
                          'STALE → CLOSE  worker/T-0001 (T-0001) PR #4 — PR #4 closed unmerged')
+
+    def test_no_row_names_a_model_vendor(self):
+        # P8 (F-0101): the view once printed the CONFLICT → REBASE line's model by hand; the
+        # honest enforcement is this assertion, not `check_generic.sh` (no rule of its own names
+        # a vendor here, and one that did would redden files this card does not own).
+        self.run_('a', 'T-0001', 'worker/T-0001', 'STALE', 'PR #4 closed unmerged', pr=4)
+        self.run_('b', 'T-0002', 'worker/T-0002', 'BACK', 'kind=conflict', pr=5)
+        found = pr_hygiene.rows(self.product, self.dir)
+        for row in found:
+            self.assertIsNone(VENDOR_MODEL_RE.search(pr_hygiene.render(row)))
 
     def test_main_prints_the_rows_and_the_lanes(self):
         self.run_('a', 'T-0001', 'worker/T-0001', 'STALE', 'branch gone', pr=4)
