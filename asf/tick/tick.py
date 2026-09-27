@@ -109,6 +109,13 @@ def run_step0(root, product, fresh=False):
         with timed('plan-order'):
             stage.guarded(root, 'plan-order', plan_order.backfill,
                           (plan_order.trunk_reader(product),), product=product)
+        if product.conventions.delivery_feature():
+            # the Feature is the delivery unit: a planned Feature's free Tasks become one
+            # delivery (or ordered slices), the freshly minted and the half-built alike
+            from asf.record import slice as slice_mod
+            with timed('slice'):
+                stage.guarded(root, 'slice', slice_mod.deliveries,
+                              (product, slice_mod.busy_items(product)), product=product)
     default_bug_epic = product.conventions.get('default_bug_epic')
     with timed('file-bugs'):
         bug_args = _ns(default_bug_epic=default_bug_epic, product=product.name,

@@ -39,7 +39,9 @@ from asf.workers import spawn as spawn_mod
 from asf.workers.stall import CORRECTION_HEAD
 
 #: Row kinds that may answer a branch by continuing its session. Everything else launches.
-ANSWERING = ('correct', 'spec', 'spec-amend', 'plan')
+#: ``delivery-code``: a delivery branch the lane held ``incomplete`` comes back to the session
+#: that was building it — its conversation holds the plan, the Tasks done and the ones left.
+ANSWERING = ('correct', 'spec', 'spec-amend', 'plan', 'delivery-code')
 #: Never continued, whatever the branch says (§1.4).
 NEVER = ('adjudicate', 'review', 'groom', 'reshape', 'rebase', 'close', 'fix-bug', 'task')
 

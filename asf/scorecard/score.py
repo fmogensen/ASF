@@ -183,7 +183,7 @@ def feature_rows(facts, only_landed=True):
         on_bugs = [agg[b] for b in bugs if b in agg and b not in ids]
         rows.append({
             'id': fid, 'title': f.get('title', ''), 'created': f.get('created'),
-            'lane': lane_of(f), 'ab_pair': f.get('ab_pair'),
+            'lane': lane_of(f), 'ab_pair': f.get('ab_pair'), 'unit': unit_of(items, f, ids),
             'landed': f.get('landed'), 'prod': f.get('prod'),
             'lead_days': days_between(f.get('created'), f.get('landed')),
             'prod_days': days_between(f.get('created'), f.get('prod')),
@@ -282,6 +282,52 @@ def cost_of(row):
     """A Feature's own spend plus the spend on the Bugs attributed to it — a lane that ships
     cheaper but breaks more pays for it here."""
     return round((row.get('usd') or 0.0) + (row.get('bug_usd') or 0.0), 2)
+
+
+#: The units a Feature is delivered in (``conventions.delivery``): ``direct`` (one session, no
+#: Tasks), ``feature`` (its Tasks in deliveries — one branch, one PR per slice), ``task`` (a
+#: branch and a PR per Task), or ``mixed`` (a half-built Feature migrated mid-way).
+UNIT_DIRECT, UNIT_FEATURE, UNIT_TASK, UNIT_MIXED = 'direct', 'feature', 'task', 'mixed'
+UNITS = (UNIT_FEATURE, UNIT_TASK, UNIT_MIXED, UNIT_DIRECT)
+
+
+def unit_of(items, feature, subtree_ids=None):
+    """The unit ``feature`` was delivered in, read off its Tasks' ``delivers:``/``delivered_by:``
+    (:mod:`asf.record.slice`): every Task in a delivery is ``feature``, none is ``task``, some
+    is ``mixed``; a ``lane: direct`` Feature (no Tasks) is ``direct``, and so is one with no
+    Task at all that landed."""
+    if lane_of(feature) == DIRECT:
+        return UNIT_DIRECT
+    ids = subtree_ids if subtree_ids is not None else subtree(children_map(items), feature['id'])
+    tasks = [items[i] for i in ids if i in items and items[i].get('type') == 'task'
+             and not items[i].get('removed')]
+    if not tasks:
+        return UNIT_DIRECT if feature.get('landed') else UNIT_TASK
+    grouped = [bool(t.get('delivers') or t.get('delivered_by')) for t in tasks]
+    if all(grouped):
+        return UNIT_FEATURE
+    return UNIT_MIXED if any(grouped) else UNIT_TASK
+
+
+def by_unit(facts, start, end, rows=None):
+    """``{unit: {...}}`` over the Features landed in ``[start, end)``, per unit
+    (:data:`UNITS`): how many, how many per day of the window, the median lead time from card
+    to landed, and per Feature the $ (own + its Bugs), the sessions and the repair sessions —
+    the numbers ``delivery: feature`` is vetted on."""
+    rows = feature_rows(facts) if rows is None else rows
+    days = max((end - start).total_seconds() / 86400, 1e-9)
+    out = {}
+    for unit in UNITS:
+        shipped = [r for r in rows if r.get('unit') == unit and in_window(r['landed'], start, end)]
+        out[unit] = {
+            'unit': unit, 'landed': len(shipped), 'ids': [r['id'] for r in shipped],
+            'per_day': round(len(shipped) / days, 2),
+            'median_lead_days': median([r['lead_days'] for r in shipped]),
+            'usd_per_feature': _mean([cost_of(r) for r in shipped]),
+            'sessions_per_feature': _mean([r['sessions'] for r in shipped]),
+            'repair_per_feature': _mean([r['repair_sessions'] for r in shipped]),
+        }
+    return out
 
 
 def _mean(xs):

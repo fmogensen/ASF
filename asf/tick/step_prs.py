@@ -74,7 +74,9 @@ def card_link(root, relpath):
     return f'https://{m.group(1)}/{m.group(2)}/blob/HEAD/{relpath}'
 
 
-def title_and_body(item_id, item, root, branch):
+def title_and_body(item_id, item, root, branch, items=None):
+    """The PR's title and body. A delivery lead's (``delivers:``) title names every item the
+    branch delivers and its body lists their cards: the one PR is the whole delivery's."""
     title = f"{item_id} — {item.get('title') or branch}" if item_id else branch
     rel = card_relpath(item) if item else None
     lines = []
@@ -85,6 +87,15 @@ def title_and_body(item_id, item, root, branch):
     accept = acceptance(root, rel)
     if accept:
         lines += ['', '## Acceptance'] + [f'- [ ] {a}' for a in accept]
+    members = [m for m in (item or {}).get('delivers') or () if m != item_id]
+    if members:
+        title += f" (delivers {', '.join(members)})"
+        lines += ['', '## Delivers']
+        for mid in members:
+            card = (items or {}).get(mid) or {}
+            mrel = card_relpath(card) if card else None
+            what = f"[{mid}]({card_link(root, mrel)})" if mrel else mid
+            lines.append(f"- {what} — {card.get('title') or ''}".rstrip(' —'))
     lines += ['', f'Opened by the tick from `{branch}`.']
     return title, '\n'.join(lines) + '\n'
 

@@ -369,20 +369,25 @@ def kind_of(row):
 
 
 def member_facts(product, items, item_id):
-    """``(id, type, title, writes, acceptance, fix)`` for one card of a delivery, its sections read
-    off the card file and clipped by :func:`section_lines`."""
+    """``(id, type, title, writes, acceptance, fix, proves)`` for one card of a delivery, its
+    sections read off the card file and clipped by :func:`section_lines`; ``proves`` the
+    numbered Story lines its ``stories:`` name (:func:`proves_lines`), ``''`` for a card that
+    lists none."""
     member = items.get(item_id) or {}
     sections = card_sections(product, member)
     return (item_id, member.get('type') or '?', member.get('title') or '—',
             list(member.get('writes') or []),
-            section_lines(sections, 'acceptance'), section_lines(sections, 'fix'))
+            section_lines(sections, 'acceptance'), section_lines(sections, 'fix'),
+            proves_lines(product, items, member))
 
 
 def member_lines(members):
-    """One block per card of a delivery: title, ``writes:``, ``## Acceptance``, and a Bug's
-    ``## Fix``."""
+    """One block per card of a delivery: title, ``writes:``, ``## Acceptance``, a Bug's
+    ``## Fix``, and the Story lines a Task proves (its ``Proves:`` trailers go on its commit)."""
     out = []
-    for n, (mid, mtype, title, writes, acceptance, fix) in enumerate(members):
+    for n, member in enumerate(members):
+        mid, mtype, title, writes, acceptance, fix = member[:6]
+        proves = member[6] if len(member) > 6 else ''
         out += ([''] if n else []) + [
             f"#### {mid} — {title} ({mtype})",
             f"writes: {', '.join(writes) if writes else '(none declared)'}"]
@@ -390,6 +395,8 @@ def member_lines(members):
             out += ['acceptance:'] + acceptance
         if fix:
             out += ['fix:'] + fix
+        if proves:
+            out += ['proves:'] + proves.splitlines()
     return out
 
 

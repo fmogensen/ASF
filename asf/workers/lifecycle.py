@@ -834,12 +834,16 @@ def occupancy(path, lanes=None, alive=None, result=None):
     live_items = {s['item']: f"session {s['job']} running" for s in inflight(path, alive)
                   if s.get('item')}
     out = {'busy': dict(live_items), 'waiting_landing': {}, 'corrections': corrections(path),
-           'lanes': {}, 'review': {}, 'landing': {}, 'branches': {}, 'docs': {}}
+           'lanes': {}, 'review': {}, 'landing': {}, 'branches': {}, 'docs': {}, 'landed': {}}
     for branch, run in by.items():
         item, kind = run.get('item'), run.get('kind')
         rec = (lanes or {}).get(branch) if lanes is not None else lane_of(run)
         if not item or item in live_items:
             continue
+        if landed(run) or (rec or {}).get('state') == lane_mod.MERGED:
+            # its branch landed and the record may not have caught up yet: not busy, not
+            # waiting — and not an idle branch either (the feeder's idle-branch rule reads this)
+            out['landed'][item] = run.get('harvested') or (rec or {}).get('sha') or ''
         why = None
         if rec and rec.get('state'):
             state = rec['state']
@@ -1804,6 +1808,11 @@ NAMING = 'naming'
 COPIES = 'copies'
 #: the correction kinds that spend no round and never reach adjudicate
 MECHANICAL = (NAMING, COPIES)
+#: the lane's hold of a delivery branch (``delivers:``) a member of which no commit names while
+#: its report does not say ``done`` — a crash, a run cap, ``status: partial``: no PR opens; the
+#: same lead comes back to a session that continues from the branch's head
+#: (asf.harvest.lane.incomplete_refusal, the feeder's DELIVERY → CODE row)
+INCOMPLETE = 'incomplete'
 
 
 def empty_ends(path, item):

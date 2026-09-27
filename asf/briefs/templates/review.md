@@ -13,7 +13,7 @@ row without evidence; a result with no evidence counts as `fail`:
 | acceptance tests byte-identical to the plan's | pass \| fail | file:line |
 | those tests were run and are green | pass \| fail | the run's last line |
 | the Gate commands are green | pass \| fail | each command's last line |
-| no secret value printed, no background process, no skipped check | pass \| fail | what you looked at |
+| no secret value printed, no background process, no skipped check | pass \| fail | what you looked at |{delivery_checks}
 
 Then, on its own line, `verdict: approved` or `verdict: changes requested`, then the C list (each
 one: file:line and the exact fix) and the I list (what you would change, but will not block on).

@@ -694,7 +694,10 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
     # `card` -> `plan-draft` -> `plan-review rN` -> `plan-approved` off the plan alone.
     for iid, rec in canonical.items():
         meta = rec['meta']
-        if meta.get('type') == 'feature' or not meta.get('delivers'):
+        if meta.get('type') in ('feature', 'task') or not meta.get('delivers'):
+            # a Task lead (a Feature delivery's slice, asf.record.slice) rides its Feature's
+            # plan, already approved: it needs no ladder of its own, and a stage on a Task
+            # would move its stage_since off its state changes
             continue
         _slug, fev = match_feature(meta, ev)
         if fev is None:
