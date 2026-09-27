@@ -1715,7 +1715,8 @@ class TableTests(unittest.TestCase):
         self.assertEqual(data[0]['item_id'], 'B-0001')
         self.assertEqual(set(data[0]), {'tier', 'kind', 'item_id', 'feature_id', 'action',
                                         'brief_kind', 'branch', 'reason', 'waits_on',
-                                        'correction', 'review_round', 'groom_date', 'groom_file',
+                                        'correction', 'review_round', 'precheck_level',
+                                        'precheck_why', 'groom_date', 'groom_file',
                                         'answers_file', 'open_questions'})
 
 
@@ -1938,3 +1939,44 @@ class WaveReadsTheBlockersOriginHolds(unittest.TestCase):
         from asf.tick import step_wave
         stale = rows.items_of(self.index)
         self.assertIs(step_wave.overlay_blockers(stale, None), stale)
+
+
+class PrecheckRowTests(unittest.TestCase):
+    """F-0060 §3.3, plan Task 2 step 14."""
+
+    def items(self):
+        return {'T-0001': {'id': 'T-0001', 'type': 'task', 'state': 'Active', 'writes': ['a.py']},
+                'T-0002': {'id': 'T-0002', 'type': 'task', 'state': 'Active', 'writes': ['b.py']}}
+
+    def test_one_pushed_precheck_row_per_branch_in_precheck(self):
+        occupancy = {'precheck': {'T-0001': {'branch': 'worker/T-0001', 'level': 'low',
+                                             'why': 'size class small', 'pr': None}}}
+        out = rows.lane_rows(self.items(), product(), set(), occupancy)
+        self.assertEqual(kinds(out), [('PUSHED → PRECHECK', 'T-0001')])
+        (row,) = out
+        self.assertEqual(row.brief_kind, 'precheck')
+        self.assertEqual(row.precheck_level, 'low')
+        self.assertEqual(row.precheck_why, 'size class small')
+        self.assertIn('level low', row.reason)
+        self.assertIn('size class small', row.reason)
+        self.assertTrue(row.launches)
+
+    def test_the_tier_matches_the_items_own_review_tier(self):
+        items = self.items()
+        occupancy = {'precheck': {'T-0001': {'branch': 'worker/T-0001', 'level': 'high', 'why': ''}}}
+        out = rows.lane_rows(items, product(), set(), occupancy)
+        self.assertEqual(out[0].tier, rows.review_tier(items['T-0001']))
+
+    def test_no_pushed_review_row_for_the_same_item_that_tick(self):
+        occupancy = {'precheck': {'T-0001': {'branch': 'worker/T-0001', 'level': 'low', 'why': ''}}}
+        out = rows.lane_rows(self.items(), product(), set(), occupancy)
+        self.assertEqual([r.kind for r in out if r.item_id == 'T-0001'], ['PUSHED → PRECHECK'])
+
+    def test_precheck_required_false_means_no_row_anywhere(self):
+        out = rows.lane_rows(self.items(), product(), set(), {})
+        self.assertEqual(out, [])
+
+    def test_a_precheck_item_a_correction_or_a_live_run_holds_raises_no_row(self):
+        occupancy = {'precheck': {'T-0001': {'branch': 'worker/T-0001', 'level': 'low', 'why': ''}}}
+        out = rows.lane_rows(self.items(), product(), {'T-0001'}, occupancy)
+        self.assertEqual(out, [])

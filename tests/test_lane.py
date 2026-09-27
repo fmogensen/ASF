@@ -19,7 +19,8 @@ import time
 import unittest
 from unittest import mock
 
-from asf import env
+from asf import env, invariants
+from asf import precheck as precheck_mod
 from asf.feeder import rows as feeder_rows
 from asf.harvest import harvest, lane
 from asf.workers import host, lifecycle
@@ -380,6 +381,9 @@ class LaneFixture(unittest.TestCase):
         conv = {'test_command': f'{sys.executable} -m unittest discover -s checks -p test_*.py',
                 'specs_dir': 'specs', 'plans_dir': 'plans', 'reviews_dir': 'reviews',
                 'lane': {'review': {'code': 'none'}},
+                # not this Task's own: every other fixture here predates the mechanical pass
+                # (F-0060) and does not mean to exercise it
+                'review': {'precheck': 'none'},
                 'branch_prefixes': {'code': 'worker/', 'plan': 'plan/', 'spec': 'spec/'}}
         conv.update(conventions)
         return env.Product('sample', {'repo_dir': self.repo, 'main': 'main',
@@ -2575,6 +2579,188 @@ class AMergeConflictGoesBack(unittest.TestCase):
         sb.assert_not_called()
         wt.assert_called_once()
         self.assertIn('merge refused', wt.call_args[0][2])
+
+
+class PrecheckStateTests(LaneFixture):
+    """F-0060 §3.3, plan Task 2 step 13: the ``PRECHECK`` state, its level and the facts that
+    decide it. The bounce (a high-confidence finding) is Task 3's; every branch here either has
+    no precheck yet, or a clean one, or one with a fault in its own table."""
+
+    def product(self, **conventions):
+        conventions.setdefault('review', {'precheck': 'required'})
+        return super().product(**conventions)
+
+    def head_of(self, branch):
+        return sh(['git', 'rev-parse', branch], cwd=self.origin).stdout.strip()
+
+    def add_precheck(self, branch, item, text):
+        """A second commit on ``branch``, the precheck file at its conventional path — the
+        worker is already checked out on ``branch`` after :meth:`push_lane`."""
+        path = self.product().conventions.precheck_path(item.lower())
+        self.write(self.worker, path, text)
+        sh(['git', 'add', '-A'], cwd=self.worker)
+        sh(['git', 'commit', '-qm', f'precheck({item}): the mechanical pass'],
+           cwd=self.worker, env_=self.ident)
+        sh(['git', 'push', '-q', 'origin', branch], cwd=self.worker)
+
+    def precheck_text(self, head, level, faulty=False):
+        lines = [f'head: {head}', f'level: {level}', '',
+                 '| check | result | confidence | evidence |', '| --- | --- | --- | --- |']
+        for i, dim in enumerate(precheck_mod.dimensions(level)):
+            if faulty and i == 0:
+                lines.append(f'| {dim} | <pass\\|fail> | <n/a\\|high\\|medium\\|low> | |')
+            else:
+                lines.append(f'| {dim} | pass | n/a | reviewed |')
+        return '\n'.join(lines) + '\n'
+
+    def test_a_small_footprint_enters_precheck_at_low(self):
+        self.push_lane('worker/T-0001', {'a.txt': 'a\n', 'b.txt': 'b\n', 'c.txt': 'c\n'},
+                       'feat(T-0001): a')
+        self.session('coder-t-0001', 'T-0001', 'worker/T-0001')
+        items = {'T-0001': {'id': 'T-0001', 'type': 'task', 'state': 'Active',
+                            'writes': ['a.txt', 'b.txt', 'c.txt']}}
+        lane.lane_pass(self.product(), self.state_dir, items=items, out=lambda *_: None)
+        rec_ = self.lane_of('worker/T-0001')
+        self.assertEqual(rec_['state'], lane.PRECHECK)
+        self.assertEqual(rec_.get('level'), precheck_mod.LOW)
+
+    def test_a_larger_footprint_enters_precheck_at_high(self):
+        files = {f'f{i}.txt': f'{i}\n' for i in range(20)}
+        self.push_lane('worker/T-0002', files, 'feat(T-0002): many files')
+        self.session('coder-t-0002', 'T-0002', 'worker/T-0002')
+        items = {'T-0002': {'id': 'T-0002', 'type': 'task', 'state': 'Active',
+                            'writes': list(files)}}
+        lane.lane_pass(self.product(), self.state_dir, items=items, out=lambda *_: None)
+        rec_ = self.lane_of('worker/T-0002')
+        self.assertEqual(rec_['state'], lane.PRECHECK)
+        self.assertEqual(rec_.get('level'), precheck_mod.HIGH)
+
+    def test_a_huge_diff_enters_precheck_at_max_whatever_the_footprint(self):
+        big = '\n'.join(f'line {i}' for i in range(4500)) + '\n'
+        self.push_lane('worker/T-0003', {'big.txt': big}, 'feat(T-0003): big')
+        self.session('coder-t-0003', 'T-0003', 'worker/T-0003')
+        items = {'T-0003': {'id': 'T-0003', 'type': 'task', 'state': 'Active',
+                            'writes': ['big.txt']}}
+        lane.lane_pass(self.product(), self.state_dir, items=items, out=lambda *_: None)
+        rec_ = self.lane_of('worker/T-0003')
+        self.assertEqual(rec_['state'], lane.PRECHECK)
+        self.assertEqual(rec_.get('level'), precheck_mod.MAX)
+
+    def test_a_docs_only_branch_never_enters_precheck(self):
+        self.push_lane('spec/F-0001', {'specs/f-0001.md': 'spec\n'}, 'spec(F-0001): x')
+        self.session('spec-f-0001', 'F-0001', 'spec/F-0001', kind='spec')
+        items = {'F-0001': {'id': 'F-0001', 'type': 'feature', 'state': 'Active'}}
+        lane.lane_pass(self.product(), self.state_dir, items=items, out=lambda *_: None)
+        rec_ = self.lane_of('spec/F-0001')
+        self.assertIn(rec_['state'], (lane.REVIEW, lane.GATE))
+
+    def test_a_branch_waived_by_lane_review_none_still_enters_precheck(self):
+        # D9: this fixture's own default (`lane: {review: {code: none}}`) already waives every
+        # code branch's review — the mechanical pass runs on it all the same
+        self.push_lane('worker/T-0004', {'a.txt': 'a\n', 'b.txt': 'b\n'}, 'feat(T-0004): a')
+        self.session('coder-t-0004', 'T-0004', 'worker/T-0004')
+        items = {'T-0004': {'id': 'T-0004', 'type': 'task', 'state': 'Active',
+                            'writes': ['a.txt', 'b.txt']}}
+        product = self.product(lane={'review': {'code': 'none'}})
+        lane.lane_pass(product, self.state_dir, items=items, out=lambda *_: None)
+        self.assertEqual(self.lane_of('worker/T-0004')['state'], lane.PRECHECK)
+
+    def test_a_branch_waived_by_skip_under_lines_still_enters_precheck(self):
+        self.push_lane('worker/T-0005', {'a.txt': 'a\n'}, 'feat(T-0005): a')
+        self.session('coder-t-0005', 'T-0005', 'worker/T-0005')
+        items = {'T-0005': {'id': 'T-0005', 'type': 'task', 'state': 'Active',
+                            'writes': ['a.txt'], 'parent': 'F-0002'},
+                 'F-0002': {'id': 'F-0002', 'type': 'feature', 'state': 'Active', 'size': 's'}}
+        product = self.product(lane={'review': {'code': 'required'}})
+        lane.lane_pass(product, self.state_dir, items=items, out=lambda *_: None)
+        self.assertEqual(self.lane_of('worker/T-0005')['state'], lane.PRECHECK)
+
+    def test_precheck_required_false_means_no_precheck_state_anywhere(self):
+        self.push_lane('worker/T-0006', {'a.txt': 'a\n', 'b.txt': 'b\n', 'c.txt': 'c\n'},
+                       'feat(T-0006): a')
+        self.session('coder-t-0006', 'T-0006', 'worker/T-0006')
+        items = {'T-0006': {'id': 'T-0006', 'type': 'task', 'state': 'Active',
+                            'writes': ['a.txt', 'b.txt', 'c.txt']}}
+        product = self.product(review={'precheck': 'none'})
+        lane.lane_pass(product, self.state_dir, items=items, out=lambda *_: None)
+        rec_ = self.lane_of('worker/T-0006')
+        self.assertIn(rec_['state'], (lane.REVIEW, lane.GATE))
+
+    def test_precheck_is_a_full_lane_state(self):
+        self.assertIn(lane.PRECHECK, lane.LANE_STATES)
+        self.assertIn(lane.PRECHECK, lane.OPEN_STATES)
+        self.assertIn(lane.PRECHECK, lane.BUSY_STATES)
+        self.assertIn(lane.PRECHECK, lane.LANDING_WAITS)
+
+    def test_invariants_accept_a_lane_record_carrying_it(self):
+        ctx = invariants.LaneContext(
+            lanes={'worker/T-0001': {'state': lane.PRECHECK, 'at': '2027-01-15T08:00:00Z',
+                                     'reason': 'precheck wanted: level low (size class small)'}},
+            branches={'worker/T-0001'}, now=invariants._epoch('2027-01-15T09:00:00Z'),
+            stale_after_s=2 * 86400)
+        self.assertEqual(invariants.check_i8(ctx), [])
+
+    def test_a_clean_precheck_of_the_head_goes_to_review(self):
+        self.push_lane('worker/T-0007', {'a.txt': 'a\n'}, 'feat(T-0007): a')
+        head = self.head_of('worker/T-0007')
+        self.add_precheck('worker/T-0007', 'T-0007', self.precheck_text(head, precheck_mod.LOW))
+        self.session('coder-t-0007', 'T-0007', 'worker/T-0007')
+        items = {'T-0007': {'id': 'T-0007', 'type': 'task', 'state': 'Active', 'writes': ['a.txt']}}
+        product = self.product(lane={'review': {'code': 'required'}})
+        lane.lane_pass(product, self.state_dir, items=items, out=lambda *_: None)
+        self.assertEqual(self.lane_of('worker/T-0007')['state'], lane.REVIEW)
+
+    def test_a_clean_precheck_of_a_waived_branch_goes_to_the_gate(self):
+        self.push_lane('worker/T-0008', {'a.txt': 'a\n'}, 'feat(T-0008): a')
+        head = self.head_of('worker/T-0008')
+        self.add_precheck('worker/T-0008', 'T-0008', self.precheck_text(head, precheck_mod.LOW))
+        self.session('coder-t-0008', 'T-0008', 'worker/T-0008')
+        items = {'T-0008': {'id': 'T-0008', 'type': 'task', 'state': 'Active', 'writes': ['a.txt']}}
+        lane.lane_pass(self.product(), self.state_dir, items=items, out=lambda *_: None)
+        self.assertEqual(self.lane_of('worker/T-0008')['state'], lane.GATE)
+
+    def test_a_precheck_of_an_older_head_is_treated_as_absent(self):
+        self.push_lane('worker/T-0009', {'a.txt': 'a\n'}, 'feat(T-0009): a')
+        stale_head = 'f' * 40  # not this branch's code: same_code reads it as history
+        self.add_precheck('worker/T-0009', 'T-0009',
+                          self.precheck_text(stale_head, precheck_mod.LOW))
+        self.session('coder-t-0009', 'T-0009', 'worker/T-0009')
+        items = {'T-0009': {'id': 'T-0009', 'type': 'task', 'state': 'Active', 'writes': ['a.txt']}}
+        lane.lane_pass(self.product(), self.state_dir, items=items, out=lambda *_: None)
+        rec_ = self.lane_of('worker/T-0009')
+        self.assertEqual(rec_['state'], lane.PRECHECK)
+        self.assertIn('precheck wanted', rec_['reason'])
+
+    def test_a_faulty_table_stays_in_precheck_naming_the_fault(self):
+        self.push_lane('worker/T-0010', {'a.txt': 'a\n'}, 'feat(T-0010): a')
+        head = self.head_of('worker/T-0010')
+        self.add_precheck('worker/T-0010', 'T-0010',
+                          self.precheck_text(head, precheck_mod.LOW, faulty=True))
+        self.session('coder-t-0010', 'T-0010', 'worker/T-0010')
+        items = {'T-0010': {'id': 'T-0010', 'type': 'task', 'state': 'Active', 'writes': ['a.txt']}}
+        lane.lane_pass(self.product(), self.state_dir, items=items, out=lambda *_: None)
+        rec_ = self.lane_of('worker/T-0010')
+        self.assertEqual(rec_['state'], lane.PRECHECK)
+        self.assertIn('precheck incomplete:', rec_['reason'])
+        self.assertIn('unfilled', rec_['reason'])
+
+    def test_pd9_a_changed_precheck_reason_is_re_recorded(self):
+        self.push_lane('worker/T-0011', {'a.txt': 'a\n'}, 'feat(T-0011): a')
+        self.session('coder-t-0011', 'T-0011', 'worker/T-0011')
+        items = {'T-0011': {'id': 'T-0011', 'type': 'task', 'state': 'Active', 'writes': ['a.txt']}}
+        product = self.product()
+        lane.lane_pass(product, self.state_dir, items=items, out=lambda *_: None)
+        first = self.lane_of('worker/T-0011')
+        self.assertEqual(first['state'], lane.PRECHECK)
+        self.assertIn('precheck wanted', first['reason'])
+        head = self.head_of('worker/T-0011')
+        self.add_precheck('worker/T-0011', 'T-0011',
+                          self.precheck_text(head, precheck_mod.LOW, faulty=True))
+        lane.lane_pass(product, self.state_dir, items=items, out=lambda *_: None)
+        second = self.lane_of('worker/T-0011')
+        self.assertEqual(second['state'], lane.PRECHECK)
+        self.assertNotEqual(second['reason'], first['reason'])
+        self.assertIn('precheck incomplete:', second['reason'])
 
 
 if __name__ == '__main__':

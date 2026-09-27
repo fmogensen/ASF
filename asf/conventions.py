@@ -39,6 +39,10 @@ The product yaml carries the overrides::
       review:
         skip_under_lines: 80      # a size: s Feature's Task under this many changed lines lands
                                   # on CI and the gate, no review session (0 = always review)
+        precheck: required        # none | required (default required): a code branch waits for
+                                  # a mechanical pass of its head before the review
+        precheck_max_lines: 1500  # a diff over this many changed lines is checked at the
+                                  # deepest level whatever its footprint says (0 = off)
       worktree_setup: make deps   # run in every fresh worker worktree (unset = nothing)
       merge: auto                 # auto | manual (default manual): under auto the lane merges
                                   # every open PR on the trunk whose required checks are green
@@ -229,6 +233,15 @@ DEFAULT_BRANCH_RETENTION = {'archive_days': 14, 'legacy_prefixes': [], 'legacy_d
 #: ``review: {skip_under_lines: …}``: a Task of a ``size: s`` Feature whose diff adds and removes
 #: fewer lines than this lands on CI and the gate alone — no review session. 0 turns it off.
 DEFAULT_REVIEW_SKIP_UNDER_LINES = 80
+
+#: ``{reviews_dir}`` and ``{slug}`` are substituted. The precheck's file is deliberately NOT of
+#: the review pattern's shape: ``asf.evidence.review`` must never read it as a round (F-0060 D2).
+DEFAULT_PRECHECK_PATTERN = '{reviews_dir}/precheck-{slug}.md'
+#: ``review: {precheck: required|none}`` — whether a code branch waits for a precheck of its head.
+DEFAULT_PRECHECK_POLICY = 'required'
+#: ``review: {precheck_max_lines: …}`` — a diff over this many changed lines is checked at the
+#: deepest level whatever its footprint says. 0 turns the rule off.
+DEFAULT_PRECHECK_MAX_LINES = 1500
 
 #: The keys of the yaml's ``lane:`` block and the field each one is.
 LANE_KEYS = {'review': 'lane_review', 'stale_after': 'lane_stale_after'}
@@ -485,6 +498,7 @@ class Conventions:
     plans_dir: str = DEFAULT_PLANS_DIR
     reviews_dir: str = DEFAULT_REVIEWS_DIR
     review_pattern: str = DEFAULT_REVIEW_PATTERN
+    precheck_pattern: str = DEFAULT_PRECHECK_PATTERN
     task_heading: str = DEFAULT_TASK_HEADING
     intake_dir: str = DEFAULT_INTAKE_DIR
     goals_file: str = DEFAULT_GOALS_FILE
@@ -674,6 +688,21 @@ class Conventions:
             return DEFAULT_REVIEW_SKIP_UNDER_LINES
         return value
 
+    def precheck_required(self):
+        """``review.precheck`` (:data:`DEFAULT_PRECHECK_POLICY`): False only for ``none``
+        (case-insensitive) — an absent or malformed value is ``required``."""
+        value = self.map_of('review').get('precheck', DEFAULT_PRECHECK_POLICY)
+        return str(value).strip().lower() != 'none'
+
+    def precheck_max_lines(self):
+        """``review.precheck_max_lines`` (:data:`DEFAULT_PRECHECK_MAX_LINES`): a diff over this
+        many changed lines is checked at :data:`asf.precheck.MAX` whatever its footprint says; 0
+        turns the rule off. A malformed value (a bool, a non-int, a negative one) is the default."""
+        value = self.map_of('review').get('precheck_max_lines')
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return DEFAULT_PRECHECK_MAX_LINES
+        return value
+
     def lane_stale_after_s(self):
         """``lane.stale_after`` in seconds."""
         return duration_seconds(self.lane_stale_after)
@@ -792,6 +821,11 @@ class Conventions:
         """Where round ``n`` of a review of ``slug`` lives."""
         return (str(self.review_pattern).replace('{reviews_dir}', self.reviews_dir)
                 .replace('{n}', str(n)).replace('{slug}', str(slug)))
+
+    def precheck_path(self, slug):
+        """Where the mechanical pass's findings for ``slug`` live (F-0060 D2)."""
+        return (str(self.precheck_pattern).replace('{reviews_dir}', self.reviews_dir)
+                .replace('{slug}', str(slug)))
 
     def doc_dir(self, key):
         """``spec`` → ``specs_dir``, ``plan`` → ``plans_dir``, ``review`` → ``reviews_dir``."""

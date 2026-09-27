@@ -70,6 +70,7 @@ import subprocess
 import time
 
 from asf import budget, env, tokens
+from asf import precheck as precheck_mod
 from asf.workers import cloudpid
 from asf.workers import headroom
 from asf.workers import runtime as runtime_mod
@@ -834,7 +835,7 @@ def occupancy(path, lanes=None, alive=None, result=None):
     live_items = {s['item']: f"session {s['job']} running" for s in inflight(path, alive)
                   if s.get('item')}
     out = {'busy': dict(live_items), 'waiting_landing': {}, 'corrections': corrections(path),
-           'lanes': {}, 'review': {}, 'landing': {}, 'branches': {}, 'docs': {}}
+           'lanes': {}, 'review': {}, 'precheck': {}, 'landing': {}, 'branches': {}, 'docs': {}}
     for branch, run in by.items():
         item, kind = run.get('item'), run.get('kind')
         rec = (lanes or {}).get(branch) if lanes is not None else lane_of(run)
@@ -852,7 +853,12 @@ def occupancy(path, lanes=None, alive=None, result=None):
             out['lanes'][branch] = dict(rec, item=item, kind=kind)
             pr = f" PR #{rec['pr']}" if rec.get('pr') else ''
             why = f"lane {state}{pr}: {rec.get('reason') or ''}".rstrip(': ')
-            if state == lane_mod.REVIEW:
+            if state == lane_mod.PRECHECK:
+                out['precheck'][item] = {'branch': branch,
+                                         'level': rec.get('level') or precheck_mod.HIGH,
+                                         'why': rec.get('level_why') or rec.get('reason') or '',
+                                         'pr': rec.get('pr')}
+            elif state == lane_mod.REVIEW:
                 out['review'][item] = {'branch': branch, 'round': int(rec.get('round') or 1),
                                        'pr': rec.get('pr'), 'why': rec.get('reason') or ''}
             else:

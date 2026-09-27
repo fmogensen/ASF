@@ -149,7 +149,7 @@ class PathTests(unittest.TestCase):
 class ForbiddenPatternsTests(unittest.TestCase):
     def test_one_pattern_per_path_shaped_default(self):
         patterns = conv_mod.forbidden_patterns()
-        self.assertEqual(len(patterns), 12)
+        self.assertEqual(len(patterns), 13)
         self.assertIn("['\"]" + re.escape('cloud/direct-'), patterns)
         self.assertIn("['\"]" + re.escape(conv_mod.DEFAULT_RELEASE_INSTALL), patterns)
         self.assertIn("['\"]worker/", patterns)
@@ -181,13 +181,13 @@ class ForbiddenPatternsTests(unittest.TestCase):
         # forbidden_patterns() walks string defaults containing '/', '{' or '#' (P14); a
         # dict-valued default like DEFAULT_SAVINGS is never a path-shaped literal.
         self.assertIsInstance(conv_mod.DEFAULT_SAVINGS, dict)
-        self.assertEqual(len(conv_mod.forbidden_patterns()), 12)
+        self.assertEqual(len(conv_mod.forbidden_patterns()), 13)
 
     def test_the_heavy_share_default_and_the_two_labels_add_no_pattern(self):
         # DEFAULT_HEAVY_SHARE_PCT is an int, and HEAVY/LIGHT are not DEFAULT_* names — neither
         # is a path-shaped string default, so the count is unmoved (F-0101 §1.3 P13).
         self.assertIsInstance(conv_mod.DEFAULT_HEAVY_SHARE_PCT, int)
-        self.assertEqual(len(conv_mod.forbidden_patterns()), 12)
+        self.assertEqual(len(conv_mod.forbidden_patterns()), 13)
 
 
 class CheckConventionsScriptTests(unittest.TestCase):
@@ -414,6 +414,45 @@ class SelfBugThresholdTests(unittest.TestCase):
         c = Conventions()
         self.assertEqual(c.get('repeat_failure_n'), c.repeat_failure_n)
         self.assertEqual(c['idle_wave_ticks'], c.idle_wave_ticks)
+
+
+class PrecheckConventionTests(unittest.TestCase):
+    """F-0060 §2.2, plan Task 2 step 12."""
+
+    def test_the_defaults(self):
+        c = Conventions()
+        self.assertEqual(c.precheck_pattern, '{reviews_dir}/precheck-{slug}.md')
+        self.assertTrue(c.precheck_required())
+        self.assertEqual(c.precheck_max_lines(), 1500)
+
+    def test_precheck_path_substitutes_the_reviews_dir_and_the_slug(self):
+        self.assertEqual(Conventions().precheck_path('t-0244'), 'docs/reviews/precheck-t-0244.md')
+        c = Conventions.from_mapping({'reviews_dir': 'reviews'})
+        self.assertEqual(c.precheck_path('t-0244'), 'reviews/precheck-t-0244.md')
+
+    def test_a_product_turns_the_pass_off_and_narrows_the_max_lines(self):
+        c = Conventions.from_mapping({'review': {'precheck': 'none', 'precheck_max_lines': 400}})
+        self.assertFalse(c.precheck_required())
+        self.assertEqual(c.precheck_max_lines(), 400)
+
+    def test_a_malformed_policy_is_still_required(self):
+        c = Conventions.from_mapping({'review': {'precheck': 'nonsense'}})
+        self.assertTrue(c.precheck_required())
+
+    def test_a_malformed_max_lines_is_the_default(self):
+        for bad in (True, -1, 'x'):
+            c = Conventions.from_mapping({'review': {'precheck_max_lines': bad}})
+            self.assertEqual(c.precheck_max_lines(), 1500, bad)
+
+    def test_zero_max_lines_turns_the_rule_off(self):
+        c = Conventions.from_mapping({'review': {'precheck_max_lines': 0}})
+        self.assertEqual(c.precheck_max_lines(), 0)
+
+    def test_the_pattern_is_not_a_review_round_d2(self):
+        from asf.evidence import review as review_mod
+        c = Conventions()
+        rx = review_mod.pattern_rx(c, 't-0244')
+        self.assertIsNone(rx.fullmatch(c.precheck_path('t-0244')))
 
 
 if __name__ == '__main__':

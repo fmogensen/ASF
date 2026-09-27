@@ -100,6 +100,8 @@ import tempfile
 import time
 
 from asf import approvals, customer_content, env, gitpush, refguard
+# not the merge precheck below (:2380) — a different question, an older name
+from asf import precheck as precheck_mod
 from asf.evidence import review as review_mod
 from asf.feeder import footprint, widen
 from asf.harvest import harvest as H
@@ -110,6 +112,7 @@ from asf.workers.pool import now_iso
 
 PUSHED = 'PUSHED'
 PR_OPEN = 'PR_OPEN'
+PRECHECK = 'PRECHECK'
 REVIEW = 'REVIEW'
 GATE = 'GATE'
 WAITING_CI = 'WAITING_CI'
@@ -125,8 +128,8 @@ STALE = 'STALE'
 REAPED = 'REAPED'
 
 #: Every lane state, in the order a branch normally passes them.
-LANE_STATES = (PUSHED, PR_OPEN, REVIEW, GATE, WAITING_CI, WAITING, QUEUED, MERGING, BACK,
-               PARKED, MERGED, STALE, REAPED)
+LANE_STATES = (PUSHED, PR_OPEN, PRECHECK, REVIEW, GATE, WAITING_CI, WAITING, QUEUED, MERGING,
+               BACK, PARKED, MERGED, STALE, REAPED)
 #: The states a branch ends in: no transition out except to REAPED (and STALE → PR_OPEN on a
 #: reopened PR).
 TERMINAL_STATES = (MERGED, STALE, REAPED)
@@ -140,7 +143,7 @@ GATE_STATES = (GATE, WAITING, WAITING_CI)
 #: The landing waits a pending correction turns BACK (:func:`correction_turns_back`): the
 #: branch waits on a PR, a review or the gate, and nothing but a session's push changes it.
 #: MERGING and QUEUED are a merge under way; PARKED is its owner's.
-LANDING_WAITS = (PR_OPEN, REVIEW, GATE, WAITING_CI, WAITING)
+LANDING_WAITS = (PR_OPEN, PRECHECK, REVIEW, GATE, WAITING_CI, WAITING)
 
 
 def head_since(prev, head, now):
@@ -376,6 +379,32 @@ def review_waived(conv, kind, items, item, lines):
     if limit and lines is not None and lines < limit and small_task(items, item):
         return f'size s: {lines} changed lines < review.skip_under_lines {limit}'
     return ''
+
+
+def size_class_of(items, item):
+    """The Task's own size class (:func:`asf.size.classify`), off its ``writes:`` footprint —
+    None for an item the record does not hold (a foreign PR reads as unknown, D4)."""
+    card = (items or {}).get(item or '')
+    if card is None:
+        return None
+    from asf import size as size_mod
+    return size_mod.classify(card.get('writes') or [], size_mod.SizeConfig())[0]
+
+
+def precheck_at(repo, conv, ref, item):
+    """The precheck file for ``item`` at ``ref`` (an ``origin/<branch>`` ref): ``{path, text,
+    head, level, rows}`` off :func:`asf.precheck.parse`, or None when the branch carries none —
+    the same ``git show`` :func:`asf.evidence.review.review_at` reads a review with."""
+    if not item or not repo:
+        return None
+    path = conv.precheck_path(str(item).lower())
+    r = H.sh(['git', 'show', f'{ref}:{path}'], cwd=repo)
+    if r.returncode != 0:
+        return None
+    text = r.stdout
+    rows, _faults = precheck_mod.parse(text)
+    return {'path': path, 'text': text, 'head': precheck_mod.head_of(text),
+            'level': precheck_mod.level_of(text), 'rows': rows}
 
 
 def first_commit_body(repo, trunk, branch):
@@ -1078,7 +1107,14 @@ def next_state(prev, facts):
         return PR_OPEN, 'open a PR'
     if s == PR_OPEN and f.get('mode') == 'pr' and not f.get('host'):
         return keep
-    if s in (PR_OPEN, REVIEW):  # T3/T4/T5: a review of the head already there counts at once
+    if s in (PR_OPEN, PRECHECK, REVIEW):  # T3/T4/T5: a review of the head already there counts at once
+        if f.get('precheck_required_here'):     # Tq/Tq'': the mechanical pass runs first
+            pc = f.get('precheck')
+            if not pc or not f.get('precheck_current'):
+                return PRECHECK, f"precheck wanted: level {f['level']} ({f['level_why']})"
+            if f.get('precheck_faults'):
+                return PRECHECK, f"precheck incomplete: {f['precheck_faults'][0]}"
+            # Tq'' — clean: fall through to the review the branch already owed, or to GATE
         rv = f.get('review') or {}
         if not f.get('review_required'):
             return GATE, f"review: none ({f['review_waived']})" if f.get('review_waived') \
@@ -1283,9 +1319,24 @@ class Lane:
         # a PR no factory item made merges only on a factory review of its head, whatever the
         # class; and its commits name no item, so the lane's naming refusal is not its to answer
         f['review_required'] = f['foreign'] or conv.review_required(f['class'])
+        # PD9/D9: the mechanical pass runs for every code branch, including one whose review is
+        # waived — so its facts are read here, independent of review_required, and before
+        # review_waived's own read of changed_lines (PD10)
+        if not f['foreign'] and f['class'] == CODE and conv.precheck_required():
+            f['precheck_required_here'] = True
+            f['lines'] = changed_lines(repo, trunk, b)
+            f['level'], f['level_why'] = precheck_mod.level_for(
+                size_class_of(self.items, item), f['lines'], conv.precheck_max_lines())
+            pc = precheck_at(repo, conv, f'origin/{b}', item)
+            f['precheck'] = pc
+            f['precheck_faults'] = precheck_mod.faults(pc['text'], f['level']) if pc else ()
+            f['precheck_current'] = bool(pc) and bool(pc.get('head')) and review_mod.same_code(
+                repo, conv, pc['head'], f'origin/{b}', f'origin/{trunk}')
         if f['review_required'] and not f['foreign'] and f['class'] == CODE:
-            lines = (changed_lines(repo, trunk, b) if f['kind'] != DIRECT
-                     and small_task(self.items, item) else None)
+            if f['kind'] != DIRECT and small_task(self.items, item):
+                lines = f['lines'] if 'lines' in f else changed_lines(repo, trunk, b)
+            else:
+                lines = None
             f['review_waived'] = review_waived(conv, f['kind'], self.items, item, lines)
             f['review_required'] = not f['review_waived']
         if rec.get('state') in (None, PUSHED, BACK) and not f['foreign']:
@@ -1712,7 +1763,7 @@ class Lane:
             if state is None or (prev and state == prev.get('state')
                                  and reason == prev.get('reason')):
                 break
-            if prev and state == prev.get('state') and state != REVIEW:
+            if prev and state == prev.get('state') and state not in (REVIEW, PRECHECK):
                 break
             rec = self.enter(f, state, reason)
             if rec is None:
@@ -1765,6 +1816,11 @@ class Lane:
         if state == PR_OPEN and reason.startswith('no PR host'):
             self.out(f'pr-lane {b}')
             return self.set(f, PR_OPEN, reason, result='pr')
+        if state == PRECHECK:
+            self.out(f"waiting {b}: no mechanical pass of its head — level {f['level']}: "
+                     f"{self.conv.precheck_path((f.get('item') or '').lower())} wanted")
+            return self.set(f, PRECHECK, reason, result='waiting',
+                            level=f['level'], level_why=f.get('level_why') or '')
         if state == REVIEW:
             rnd, why = review_reason(f)
             what = f"PR #{pr['number']}" if pr.get('number') else 'the head'

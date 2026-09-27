@@ -32,6 +32,8 @@ The row kinds::
     STARVED → PLAN         an approved spec with no plan, or a plan in draft/review, unmoved
     PUSHED → REVIEW        a Task/Bug whose lane state is REVIEW: a review session on its branch
                            (a state, not a correction — no round is spent)
+    PUSHED → PRECHECK      a Task/Bug whose lane state is PRECHECK: the mechanical pass on its
+                           branch, at the level the lane derived (F-0060)
     PUSHED → LAND          a Task/Bug in any other open lane state, or what would have been
                            CARD → SPEC / STARVED → SPEC / STARVED → PLAN but that document's
                            branch waits to land: ``WAITS ON landing``, no session
@@ -62,6 +64,7 @@ import dataclasses
 import math
 import re
 
+from asf import precheck as precheck_mod
 from asf.feeder import footprint
 from asf.groom import policy as groom_policy
 from asf.views import index_reader as ix
@@ -101,6 +104,8 @@ APPROVED_LAND = 'APPROVED → LAND'
 #: branch, with the failing line in its brief (R7) — ``asf.harvest.lane.LANDING_GATE``
 LANDING_GATE = 'landing-gate'
 PUSHED_REVIEW = 'PUSHED → REVIEW'
+#: a Task/Bug whose lane state is PRECHECK: the mechanical pass on its branch (F-0060)
+PUSHED_PRECHECK = 'PUSHED → PRECHECK'
 WAITS_LANDING = 'WAITS ON landing'
 #: a correction already adjudicated at this same hold (B-0128): no session, no round, until the
 #: PR merges or closes, or a new push moves the head
@@ -168,6 +173,9 @@ class Row:
     correction: str = ''
     #: a PUSHED → REVIEW row only: the round the reviewer writes
     review_round: int = 0
+    #: a PUSHED → PRECHECK row only: the level the mechanical pass runs at, and why
+    precheck_level: str = ''
+    precheck_why: str = ''
     #: the GROOM → ADJUDICATE row only (§2.5, PD8): the groom day, the record clone's groom
     #: file and the state dir's answers file, and the open questions' own lines (for the brief).
     groom_date: str = ''
@@ -624,16 +632,19 @@ def review_tier(item):
 
 
 def lane_rows(items, product, busy, occupancy):
-    """One row per Task/Bug the lane holds (``occupancy['review']`` / ``['landing']``) that is
-    open and no session holds and no correction speaks for (``busy``): PUSHED → REVIEW, a launch,
-    for the lane's REVIEW state (the round it asks for); a ``WAITS ON landing`` PUSHED → LAND row
-    for any other open lane state. BACK is a correction's (FIX → CORRECT)."""
+    """One row per Task/Bug the lane holds (``occupancy['review']`` / ``['precheck']`` /
+    ``['landing']``) that is open and no session holds and no correction speaks for (``busy``):
+    PUSHED → REVIEW, a launch, for the lane's REVIEW state (the round it asks for); PUSHED →
+    PRECHECK for its PRECHECK state (the level it asks for); a ``WAITS ON landing`` PUSHED →
+    LAND row for any other open lane state. An item is in exactly one bucket, so at most one row
+    is raised for it in a tick. BACK is a correction's (FIX → CORRECT)."""
     out = []
     occ = occupancy or {}
-    held = [(iid, h, True) for iid, h in (occ.get('review') or {}).items()]
-    held += [(iid, h, False) for iid, h in (occ.get('landing') or {}).items()]
+    held = [(iid, h, 'review') for iid, h in (occ.get('review') or {}).items()]
+    held += [(iid, h, 'precheck') for iid, h in (occ.get('precheck') or {}).items()]
+    held += [(iid, h, 'landing') for iid, h in (occ.get('landing') or {}).items()]
     from asf.harvest.lane import is_pr_item  # local: the lane imports the feeder
-    for iid, h, review in sorted(held, key=lambda t: t[0]):
+    for iid, h, bucket in sorted(held, key=lambda t: t[0]):
         item = items.get(iid)
         foreign = not item and is_pr_item(iid)  # merge: auto — a PR no factory item made
         if foreign:
@@ -651,13 +662,20 @@ def lane_rows(items, product, busy, occupancy):
         what = f'PR #{number}' if number else branch
         if foreign:
             what += ' (opened outside the factory, no card)'
-        if review:
+        if bucket == 'review':
             rnd = int(h.get('round') or 1)
             out.append(Row(tier=review_tier(item), kind=PUSHED_REVIEW, item_id=iid,
                            feature_id=fid, action=LAUNCH, brief_kind='review', branch=branch,
                            review_round=rnd,
                            reason=f"{what} has no review of its head: round {rnd} "
                                   f"({h.get('why') or 'no verdict'})"))
+        elif bucket == 'precheck':
+            level = h.get('level') or precheck_mod.HIGH
+            out.append(Row(tier=review_tier(item), kind=PUSHED_PRECHECK, item_id=iid,
+                           feature_id=fid, action=LAUNCH, brief_kind=precheck_mod.KIND,
+                           branch=branch, precheck_level=level, precheck_why=h.get('why') or '',
+                           reason=f"{what} has no precheck of its head: level {level} "
+                                  f"({h.get('why') or ''})"))
         else:
             out.append(Row(tier=review_tier(item), kind=PUSHED_LAND, item_id=iid,
                            feature_id=fid, action=f"{WAITS_LANDING}: {what} {h.get('state')}",
