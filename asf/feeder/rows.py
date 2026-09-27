@@ -38,6 +38,11 @@ The row kinds::
     PLAN → CODE            a New Task of an approved plan — unless its ``writes:`` overlaps a
                            running Task's, then ``WAITS ON <task>`` (the footprint gate)
     RESHAPE → PLAN         a Task the groom's split answer marked: hold it, reshape it
+    DELIVERY → PLAN        a delivery lead (``delivers:``) with no plan yet: one session plans
+                           every member as one document (brief ``delivery-plan``)
+    DELIVERY → CODE        a delivery lead whose plan is approved: one session builds every open
+                           member (brief ``delivery-code``) — unless the union of their
+                           ``writes:`` overlaps a running Task's, then ``WAITS ON <other>``
     UNDECIDED → DECIDE     an open Feature, or an open S1/S2 Bug, whose ``decided`` is not true: the
                            card a free slot is waiting for. Launches nothing, costs no slot, and is
                            cut to ``conventions.decision_rows``
@@ -102,6 +107,10 @@ WAITS_LANDING = 'WAITS ON landing'
 WAITS_MERGE = 'WAITS ON merge'
 PLAN_CODE = 'PLAN → CODE'
 RESHAPE = 'RESHAPE → PLAN'
+#: a delivery lead's document session (:func:`delivery_rows`) — no plan yet
+DELIVERY_PLAN = 'DELIVERY → PLAN'
+#: a delivery lead's build session — plan approved, every open member built in one branch
+DELIVERY_CODE = 'DELIVERY → CODE'
 GROOM_ADJUDICATE = 'GROOM → ADJUDICATE'
 #: the groom day's clerical half (F-0093 §2.4): the ``inbox:`` lines, a cheap session of their own
 GROOM_CLERK = 'GROOM → CLERK'
@@ -479,7 +488,8 @@ def bug_rows(items, product, busy, attempts=None, why=None):
     bugs = sorted(ix.of_type(items, 'bug'), key=lambda v: (attempts.get(v['id'], 0), _age_key(v), v['id']))
     for b in bugs:
         sev = b.get('severity')
-        if sev not in ('S1', 'S2') or b.get('decided') is not True or not is_open(b):
+        if sev not in ('S1', 'S2') or b.get('decided') is not True or not is_open(b) \
+                or b.get('delivers') or b.get('delivered_by'):
             continue
         tier = 0 if sev == 'S1' else 1
         f = feature_of(items, b)
@@ -675,6 +685,20 @@ def branch_rows(items, product, busy):
     return out
 
 
+def _delivery_union(items, lead):
+    """The ordered union of ``writes:`` across ``lead``'s open ``delivers:`` members (the lead
+    itself included, since ``delivers[0]`` is the lead) — the delivery's whole footprint."""
+    out = []
+    for m in lead.get('delivers') or ():
+        member = items.get(m)
+        if member is None or not is_open(member):
+            continue
+        for w in member.get('writes') or ():
+            if w not in out:
+                out.append(w)
+    return out
+
+
 def running_footprints(items, busy):
     """[(task_id, writes)] of every Task whose files are genuinely in play: a live session, or a
     pushed branch waiting for harvest (both in ``busy``).
@@ -683,11 +707,20 @@ def running_footprints(items, busy):
     branch — gate red, correction pending, or a card whose only evidence is a branch — is not
     being written by anyone, and treating it as in flight deadlocks every sibling that shares a
     file with it. Two branches that do touch the same file still meet at the rebase, where the
-    correction loop resolves it; a wait here must mean "someone is writing this now"."""
+    correction loop resolves it; a wait here must mean "someone is writing this now".
+
+    A delivery lead (``delivers:``) that is open and busy holds its union footprint the same
+    way — an unrelated Task sharing a file with any of its open members waits on the lead, not
+    on the member (F-0102 D-line)."""
     out = []
     for t in sorted(ix.of_type(items, 'task'), key=lambda v: v['id']):
         if t['id'] in busy and t.get('writes'):
             out.append((t['id'], list(t['writes'])))
+    for v in sorted(items.values(), key=lambda v: v['id']):
+        if v.get('delivers') and v['id'] in busy and is_open(v):
+            union = _delivery_union(items, v)
+            if union:
+                out.append((v['id'], union))
     return out
 
 
@@ -724,6 +757,73 @@ def _doc_row(kind, fid, doc, product, reason, occupancy, branch=None):
                branch=branch, reason=reason)
 
 
+def delivery_rows(items, product, busy, running, landed_shas=None):
+    """One row per delivery lead (an open card carrying ``delivers:``, in ``(rank, id)`` order),
+    plus a non-launching ``WAITS ON delivery <lead>`` row for every other open member — a
+    delivery speaks for its members, so they get no row of their own (:func:`feature_rows`,
+    :func:`bug_rows`).
+
+    A lead's ``open_members`` are the members of its own ``delivers:`` (the lead included — it is
+    ``delivers[0]``) still open: none left, the delivery is delivered, no row at all. A blocked
+    open member holds the whole delivery on that blocker. A busy lead gets no launching row of
+    its own — the member rows still show ``WAITS ON delivery``. Otherwise the lead's stage picks
+    the row: ``card``/``plan-draft``/``plan-review rN`` is :data:`DELIVERY_PLAN`;
+    ``plan-approved``/``building …`` is :data:`DELIVERY_CODE`, on the ordered union of the open
+    members' ``writes:`` (:func:`_delivery_union`) — ``footprint.first_conflict`` against
+    ``running`` holds it on the other item first, else it launches and the union joins
+    ``running`` so the Tasks placed after it (:func:`candidates` calls this before
+    :func:`feature_rows`) see the delivery's footprint (PD10, PD11)."""
+    out = []
+    leads = [v for v in items.values() if v.get('delivers')]
+    for lead in sorted(leads, key=lambda v: (ix.rank(v), v['id'])):
+        lid = lead['id']
+        open_members = [m for m in lead.get('delivers') or ()
+                        if m in items and is_open(items[m])]
+        if not open_members:
+            continue
+        others = [m for m in open_members if m != lid]
+        stage = lead.get('stage') or 'card'
+        word = stage.split(' ')[0]
+        code_stage = word in BUILD_STAGES
+        kind = DELIVERY_CODE if code_stage else DELIVERY_PLAN
+        brief = 'delivery-code' if code_stage else 'delivery-plan'
+        branch = branch_for(product, 'code' if code_stage else 'plan', lid)
+        blocked_id = next((m for m in open_members if items[m].get('blocked')), None)
+        if blocked_id is not None:
+            blockers = list(items[blocked_id].get('blocked_by_open') or ())
+            on = blockers[0] if blockers else 'blocked'
+            out.append(Row(tier=2, kind=kind, item_id=lid, feature_id=lid,
+                           action=f'WAITS ON {on}', brief_kind=brief, branch=branch,
+                           reason='blocked by ' + (', '.join(blockers) or 'an open item'),
+                           waits_on=on))
+        elif lid in busy:
+            pass
+        elif code_stage:
+            union = _delivery_union(items, lead)
+            other = footprint.first_conflict(union, running,
+                                             _conventions(product).get('shared_paths') or ())
+            if other:
+                out.append(Row(tier=2, kind=kind, item_id=lid, feature_id=lid,
+                               action=f'WAITS ON {other}', brief_kind=brief, branch=branch,
+                               reason=f'writes: overlaps {other}', waits_on=other))
+            else:
+                out.append(Row(tier=2, kind=kind, item_id=lid, feature_id=lid, action=LAUNCH,
+                               brief_kind=brief, branch=branch,
+                               reason=f'{len(open_members)} items, plan approved, footprint free'))
+                running.append((lid, union))
+        else:
+            reason = (f"{len(open_members)} items, no plan yet" if word == 'card'
+                      else f"{stage}, no session")
+            out.append(Row(tier=2, kind=kind, item_id=lid, feature_id=lid, action=LAUNCH,
+                           brief_kind=brief, branch=branch, reason=reason))
+        for m in others:
+            out.append(Row(tier=2, kind=kind, item_id=m, feature_id=lid,
+                           action=f'WAITS ON delivery {lid}', brief_kind='task', branch=branch,
+                           reason=f'delivered by {lid}: the delivery speaks for it',
+                           waits_on='delivery'))
+    return out
+
+
 def feature_rows(items, product, busy, running, landed_shas=None, occupancy=None):
     """Every Feature's rows, in Feature order (:func:`feature_order`: Epic rank, rank, id).
     ``running`` grows as PLAN → CODE rows are handed out, so two ready Tasks sharing a file never
@@ -733,7 +833,8 @@ def feature_rows(items, product, busy, running, landed_shas=None, occupancy=None
     <blocker>`` row, like a blocked Bug's (B-0058), and it claims no footprint (F-1129)."""
     out = []
     feats = [f for f in ix.of_type(items, 'feature')
-             if f.get('decided') is True and is_open(f)]
+             if f.get('decided') is True and is_open(f)
+             and not (f.get('delivers') or f.get('delivered_by'))]
     for f in sorted(feats, key=lambda v: feature_order(items, v)):
         if not f.get('blocked'):
             out.extend(_one_feature_rows(items, product, f, busy, running, landed_shas, occupancy))
@@ -963,7 +1064,7 @@ def undecided_rows(items, product, busy, limit=None):
 
 
 KIND_ORDER = {STALEMATE: 0, CONFLICT: 1, STALE: 2, GROOM_ADJUDICATE: 2, GROOM_CLERK: 2,
-              RESHAPE: 3}
+              RESHAPE: 3, DELIVERY_PLAN: 4, DELIVERY_CODE: 4}
 
 
 def _token(line):
@@ -1059,13 +1160,29 @@ def hold_unlanded(rows, items, landed_shas=None):
     """B-0080: ``after:`` holds every row kind, not only PLAN → CODE. An item whose predecessor
     has not landed is not in dispute, it is waiting: a launching row for it (code, correct,
     adjudicate, rebase, close) becomes ``WAITS ON <id>`` — no session, no round. The groom row
-    speaks for a day's questions, not for the item it names, so it is left alone."""
+    speaks for a day's questions, not for the item it names, so it is left alone.
+
+    A :data:`DELIVERY_PLAN`/:data:`DELIVERY_CODE` row's scan reads the lead **and** every member
+    of its ``delivers:`` — an ``after:`` any of them names holds the whole delivery on the first
+    unlanded predecessor found."""
     landed = landed_ids(items, landed_shas)
     absorbed = absorbers(items)
     out, said = [], set()
     for r in rows:
-        pending = [a for a in after_of(items, items.get(r.item_id) or {}, absorbed)
-                   if a not in landed]
+        if r.kind in (DELIVERY_PLAN, DELIVERY_CODE):
+            lead = items.get(r.item_id) or {}
+            ids = list(lead.get('delivers') or ())
+            if r.item_id not in ids:
+                ids = [r.item_id] + ids
+            pending, seen = [], set()
+            for iid in ids:
+                for a in after_of(items, items.get(iid) or {}, absorbed):
+                    if a not in landed and a not in seen:
+                        seen.add(a)
+                        pending.append(a)
+        else:
+            pending = [a for a in after_of(items, items.get(r.item_id) or {}, absorbed)
+                       if a not in landed]
         # ON TRUNK / PARKED / NEEDS DECISION are already non-launching answers with their own
         # waits_on: rewriting them into WAITS ON would hide the row the gate exists to print
         keeps = r.kind in (GROOM_ADJUDICATE, GROOM_CLERK) \
@@ -1153,6 +1270,7 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
     # a Feature's spec and plan wait to land one branch at a time: the document rows read that
     # per branch (:func:`_waiting_doc`), so one waiting document never holds the other
     docs_waiting = {i for i in waiting if (items.get(i) or {}).get('type') == 'feature'}
+    rows += delivery_rows(items, product, busy, running, landed_shas)
     rows += feature_rows(items, product, (busy - docs_waiting) | tasks_spoken, running,
                          landed_shas, occ)
     rows += undecided_rows(items, product, busy, decision_limit)
@@ -1198,7 +1316,7 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
         order = feature_order(items, f) if f else (ix.BIG, ix.BIG, r.feature_id or '~')
         phase = finish_phase(items, r)
         return (r.tier, phase, near(r, f) if phase == 0 and f else (0, 0), *order,
-                KIND_ORDER.get(r.kind, 4), seq)
+                KIND_ORDER.get(r.kind, 5), seq)
     return [r for _seq, r in sorted(enumerate(rows), key=key)]
 
 
