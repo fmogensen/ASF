@@ -814,17 +814,26 @@ class SecondProductDiscoverTests(unittest.TestCase):
         self.assertFalse(any(c.startswith("run list") for c in calls), calls)
         self.assertIsNone(ev["prod_sha"])
         self.assertIsNone(ev["dev_sha"])
+        self.assertFalse(ev["prod_deploys"])       # trunk is production: nothing to wait for
+        self.assertEqual(ev["prod_mode"], "manual")
 
     def test_workflows_from_conventions(self):
         calls = []
         product = self.r.product(conventions={
             "ci_workflow": "build.yml", "ci_dev_job": "stage", "deploy_workflow": "ship.yml"})
-        self.discover(product, gh_calls=calls)
+        ev = self.discover(product, gh_calls=calls)
+        self.assertTrue(ev["prod_deploys"])        # no successful run found: unknown, not "no deploy"
+        self.assertIsNone(ev["prod_sha"])
         joined = " ".join(calls)
         self.assertIn("--workflow ship.yml", joined)
         self.assertIn("--workflow build.yml", joined)
         self.assertNotIn("deploy-prod.yml", joined)
         self.assertNotIn("ci.yml", joined)
+
+
+    def test_prod_mode_auto_is_read_from_deploy_sha(self):
+        product = types.SimpleNamespace(deploy_sha={"prod": {"mode": "auto", "workflow": "ship.yml"}})
+        self.assertEqual(evidence._prod_mode(product), "auto")
 
 
 class MigrateSourcesTests(unittest.TestCase):

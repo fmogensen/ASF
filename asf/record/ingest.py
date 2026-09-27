@@ -380,27 +380,52 @@ def _own_ids(iid, ev):
     return bool(iev.get('branches') or iev.get('open_prs'))
 
 
+def _child_landing(cid, task_ev, ev):
+    """``(sha, pr)`` a child Task landed by: its plan row's merged PR, else the merge fact or
+    trunk commit naming its id (a Task no plan row lists still lands, T-0366)."""
+    tev, iev = task_ev.get(cid) or {}, _ids_of(cid, ev)
+    return (tev.get('merged_sha') or iev.get('commit') or '',
+            tev.get('pr') if tev.get('merged_sha') else (iev.get('pr') or tev.get('pr')))
+
+
 def _merged_in_prod(child_ids, task_ev, ev):
-    """Every child Task's merge is an ancestor of the deploy. False for a Task the plan does not
-    list: nothing says where its merge is."""
+    """Every child Task's landing sha is an ancestor of the deploy. False for a child nothing
+    says landed: nothing says where its merge is."""
     return bool(child_ids) and all(
-        task_ev.get(cid) and evidence.ancestor_of(task_ev[cid].get('merged_sha'), ev.get('prod_sha'))
+        evidence.ancestor_of(_child_landing(cid, task_ev, ev)[0], ev.get('prod_sha'))
         for cid in child_ids)
 
 
-def _in_prod(child_ids, task_ev, ev, merged=None):
-    """What "in production" means is the product's own (B-0077). A service configures
-    `deploy_sha`, and its work is in production when every child's merge is in that deploy and the
-    operator ticked its PR. A package, library or tool configures none — its trunk IS production,
-    and its Tasks already closed on a commit there with CI green (D-0047), so there is nothing
-    further to wait for. Without this, no Feature of such a product could ever leave `Resolved`.
+def _deploys(ev):
+    """The product deploys to prod. ``prod_deploys`` is discover()'s answer; an evidence cache
+    written before it existed says so by ``prod_sha`` alone, as it always did."""
+    return bool(ev.get('prod_deploys')) if 'prod_deploys' in ev else bool(ev.get('prod_sha'))
+
+
+def _in_prod(child_ids, task_ev, ev, merged=None, own_sha=''):
+    """What "in production" means is the product's own (B-0077). A package, library or tool
+    configures no deploy — its trunk IS production, and its Tasks already closed on a commit
+    there with CI green (D-0047), so there is nothing further to wait for. Without this, no
+    Feature of such a product could ever leave `Resolved`.
+
+    A product that deploys needs every child's landing sha (or, with no children, ``own_sha``)
+    inside the sha recorded as deployed — and a deploy it configures but cannot read (no
+    successful prod run known) is never "in prod". Then ``deploy_sha.prod.mode`` decides:
+    ``auto`` — ASF dispatched that deploy itself, so containment is the whole proof; ``manual``
+    — the operator also ticked each child's PR into ``checked.txt``.
     `merged` hands back a `_merged_in_prod` the caller already has."""
-    if not ev.get('prod_sha'):
+    if not _deploys(ev):
         return True
-    if merged is None:
-        merged = _merged_in_prod(child_ids, task_ev, ev)
-    return bool(merged) and all(
-        task_ev.get(cid) and task_ev[cid].get('pr') in (ev.get('checked') or ()) for cid in child_ids)
+    if not ev.get('prod_sha'):
+        return False
+    if not child_ids:
+        return ev.get('prod_mode') == 'auto' and bool(own_sha) and \
+            evidence.ancestor_of(own_sha, ev.get('prod_sha'))
+    if ev.get('prod_mode') != 'auto':
+        checked = ev.get('checked') or ()
+        if not all(_child_landing(cid, task_ev, ev)[1] in checked for cid in child_ids):
+            return False
+    return bool(_merged_in_prod(child_ids, task_ev, ev) if merged is None else merged)
 
 
 def _landing_sha(child_ids, task_ev, ev):
@@ -736,7 +761,13 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
             # the trunk IS production there (B-0077), so children Closed or a green commit naming
             # it is the whole of the evidence. A product that configures `deploy_sha` still waits
             # for the deploy and the operator's tick.
-            in_prod = (kids_closed or (not kids and bool(commit))) and _in_prod(kid_ids, task_ev, ev)
+            # a Closed Story is already in prod by its own rule; the rest carry a landing sha
+            landing = [cid for cid in kid_ids if canonical[cid]['meta'].get('type') != 'story']
+            if kids_closed and not landing:
+                in_prod = True
+            else:
+                in_prod = (kids_closed or (not kids and bool(commit))) and _in_prod(
+                    landing, task_ev, ev, own_sha=commit)
             c = settle(iid, 'feature', closing.Ev(children=tuple(kids), commit=commit, green=green,
                                                   in_prod=in_prod), [], sha=commit)
             if c.state in (closing.RESOLVED, closing.CLOSED):
@@ -760,7 +791,7 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
             merged_in_prod = _merged_in_prod(child_ids, task_ev, ev)
             in_prod = _in_prod(child_ids, task_ev, ev, merged=merged_in_prod)
         elif not child_ids and commit:
-            in_prod = _in_prod(child_ids, task_ev, ev)
+            in_prod = _in_prod(child_ids, task_ev, ev, own_sha=commit)
         # the board's ladder still says `landed`, not `on-prod`, for a product that deploys
         # nothing — "on prod" names a deployment, and there is none to name
         on_prod_for_stage = bool(merged_in_prod) and bool(ev.get('prod_sha'))
