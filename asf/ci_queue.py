@@ -1669,11 +1669,13 @@ def _covered(need, free, freed):
     return all(free.get(c, 0) + freed.get(c, 0) >= n for c, n in need.items())
 
 
-def _rerun_cancelled(q, src, product, started, dry_run, out, now):
+def _rerun_cancelled(q, src, product, started, dry_run, out, now, items=None):
     """Re-run every run the relief cancelled whose protected run has started — the trunk run,
-    or the S1 PR run it was cancelled for (``for``) — each through the queue at its original
-    priority. ``started(rec)`` is ``(the protected run, its name)`` once that run has started,
-    else None (the record is kept). The number re-run."""
+    or the S1 PR run it was cancelled for (``for``) — each through the queue at its priority,
+    read again off the record (``items``) every ask (:func:`_rerun_priority`): a record kept
+    across a change of the order never carries a stale number into the line. ``started(rec)``
+    is ``(the protected run, its name)`` once that run has started, else None (the record is
+    kept). The number re-run."""
     relief, keep, n = q.data['relief'], [], 0
     for rec in sorted(relief, key=lambda r: (r.get('prio', OTHER), r.get('at') or '')):
         rid = rec.get('id')
@@ -1686,9 +1688,10 @@ def _rerun_cancelled(q, src, product, started, dry_run, out, now):
             keep.append(rec)
             continue
         protected, who = got
+        prio, label, rank = _rerun_priority(rec, items, product)
         d = q.admit(_rerun_key(rec), rec.get('kind') or 'pr', item=rec.get('item'),
-                    prio=rec.get('prio', OTHER), label=rec.get('label') or 'other',
-                    workflow=rec.get('workflow'), sha=rec.get('sha'), rank=rec.get('rank'))
+                    prio=prio, label=label, workflow=rec.get('workflow'), sha=rec.get('sha'),
+                    rank=rank)
         if not d.admitted or d.line:        # held (or a dry-run mode hold): next tick asks again
             keep.append(rec)
             continue
@@ -1710,6 +1713,21 @@ def _rerun_cancelled(q, src, product, started, dry_run, out, now):
         n += 1
     q.data['relief'] = keep
     return n
+
+
+def _rerun_priority(rec, items, product=None):
+    """``(prio, label, rank)`` a held re-run asks at: a batch run as every batch start
+    (``OTHER``); a PR run as its branch's item stands in the record now (:func:`priority`); with
+    no record at hand, what the record held when it was cancelled."""
+    if rec.get('kind') == 'batch':
+        return OTHER, 'batch', None
+    if items is None:
+        label = rec.get('label') or 'other'
+        return (OTHER if label == 'other' else rec.get('prio', OTHER)), label, rec.get('rank')
+    branch = rec.get('branch') or ''
+    item = _item_of(branch) or rec.get('item')
+    prio, label = priority(item, items, branch, product=product)
+    return prio, label, (record_rank(item, items)[0] if prio == RANKED else None)
 
 
 def _rerun_key(rec):
@@ -2005,7 +2023,7 @@ def relieve_trunk(product, items=None, source=None, out=print, dry_run=False, no
         return None if r is None else (r, 'S1 PR')
 
     sweep(q, src, listed, out=out, dry_run=dry_run)
-    rerun = _rerun_cancelled(q, src, product, started, dry_run, out, now) \
+    rerun = _rerun_cancelled(q, src, product, started, dry_run, out, now, items) \
         if q.data['relief'] else 0
     n = 0
     if trunk_queued:

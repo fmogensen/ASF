@@ -790,6 +790,30 @@ class TestTrunkRelief(ReliefBase):
         self.assertEqual(self.cancels(gh, 'rerun'), ['201'])
         self.assertEqual(ci_queue.load('p')['relief'], [])
 
+    def test_a_held_rerun_asks_at_its_priority_in_the_record_now(self):
+        """A relief record kept across a change of the order (its stored ``prio`` from the old
+        numbering) never carries the stale number into the line: the re-run asks at what its
+        branch's item is in the record now, a branch with no item last."""
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        gh, run = self.gh(self.runs())
+        self.relieve(p, run)
+        data = ci_queue.load('p')
+        for rec in data['relief']:
+            rec['prio'] = 3 if rec['id'] == 101 else 2      # the old numbering's values
+            rec.pop('rank', None)
+        ci_queue.save('p', data)
+        gh, run = self.gh(self.runs(trunk_status='in_progress'))    # started, runners all busy
+        self.assertEqual(self.relieve(p, run, minutes=2), (0, 0))
+        entries = ci_queue.load('p')['entries']
+        self.assertEqual(entries['rerun:worker/plan-measure']['prio'], ci_queue.OTHER)
+        self.assertEqual(entries['rerun:task/T-0341']['prio'], ci_queue.RANKED)
+        self.assertEqual(entries['rerun:task/T-0341']['label'], 'Task F-0001 rank 1')
+        order = ci_queue.line_order(entries)
+        self.assertEqual(order[0], 'rerun:task/T-0341')
+        self.assertIn('rerun:worker/plan-measure', order[1:])
+
     def test_dry_run_says_what_it_would_cancel_and_writes_nothing(self):
         p = self.product(mode='dry-run')
         gh, run = self.gh(self.runs())
@@ -2162,7 +2186,10 @@ class TestStaleSweep(ReliefBase):
         gh, run = self.sweep_gh(prs=False)
         self.relieve(p, run)
         self.assertEqual(self.drops(), ['ci queue: drop rerun:999 — no relief record'])
-        self.assertEqual(len(ci_queue.load('p')['relief']), 8)
+        # none dropped: each record is kept, or re-run (the ranked T-0341 is the head now and
+        # the head guard admits it after its 90 min)
+        self.assertEqual(self.cancels(gh, 'rerun'), ['300'])
+        self.assertEqual(len(ci_queue.load('p')['relief']), 7)
 
     def test_dry_run_names_the_drops_and_writes_nothing(self):
         p = self.product(mode='dry-run')
