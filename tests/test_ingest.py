@@ -9,6 +9,7 @@ import types
 import unittest
 from unittest import mock
 
+from asf.env import Product
 from asf.record import check
 from asf.record import frontmatter
 from asf.record import ingest
@@ -570,6 +571,45 @@ class CmdIngestEndToEndTests(unittest.TestCase):
         meta, _body = read_meta(self.root, 'features', 'F-0001')
         self.assertEqual(meta['blocked'], True)
         self.assertEqual(meta['blocked_by_open'], ['Ops: key'])
+
+
+class EvidenceVocabularyTests(unittest.TestCase):
+    """T-0243 §2.5: the `spec on .../plan on ...` sentence ingest writes names the product's own
+    trunk — for a product whose ``main:`` is not ``main``, not always ``origin/main`` — so
+    :mod:`asf.feeder.rows` (:func:`asf.feeder.rows.plan_on_trunk`) can match it back."""
+
+    def setUp(self):
+        self.root = make_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+
+    def _fev(self, trunk):
+        return {'alias': None, 'spec': f'origin/{trunk}:docs/specs/f-0001.md',
+                'spec_branch': None, 'spec_on_main': True, 'spec_review': None, 'plan': None,
+                'plan_branch': None, 'plan_on_main': True, 'plan_review': None, 'tasks': {},
+                'prs': []}
+
+    def test_a_product_naming_no_trunk_still_reads_main(self):
+        write(self.root, 'E-0001', 'epic', 'Factory', 'epics')
+        write(self.root, 'F-0001', 'feature', 'Free plan', 'features', parent='E-0001')
+        ev = dict(EMPTY_EV, features={'f-0001': self._fev('main')})
+        with mock.patch.object(ingest.evidence, 'load', return_value=ev):
+            self.assertEqual(ingest.ingest_into(self.root, ev, None), 0)
+        meta, _body = read_meta(self.root, 'features', 'F-0001')
+        self.assertIn('spec on origin/main', meta['evidence'])
+        self.assertIn('plan on origin/main', meta['evidence'])
+
+    def test_a_product_whose_trunk_is_not_main_names_its_own(self):
+        write(self.root, 'E-0001', 'epic', 'Factory', 'epics')
+        write(self.root, 'F-0001', 'feature', 'Free plan', 'features', parent='E-0001')
+        ev = dict(EMPTY_EV, features={'f-0001': self._fev('trunk')})
+        product = Product('sample', {'main': 'trunk'})
+        with mock.patch.object(ingest.evidence, 'load', return_value=ev):
+            self.assertEqual(ingest.ingest_into(self.root, ev, product), 0)
+        meta, _body = read_meta(self.root, 'features', 'F-0001')
+        self.assertIn('spec on origin/trunk', meta['evidence'])
+        self.assertIn('plan on origin/trunk', meta['evidence'])
+        self.assertNotIn('spec on origin/main', meta['evidence'])
+        self.assertNotIn('plan on origin/main', meta['evidence'])
 
 
 class RemovedTaskTests(unittest.TestCase):

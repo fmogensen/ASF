@@ -243,6 +243,18 @@ def _conventions(product):
     return product.conventions
 
 
+def trunk_of(product):
+    """``conventions.main`` (default ``conventions.DEFAULT_MAIN``): the product's trunk name."""
+    return _conventions(product).main
+
+
+def plan_on_trunk(product):
+    """Ingest's line for a plan that landed on the trunk (:data:`PLAN_ON_TRUNK` for a product
+    that names none): ``plan on origin/<trunk>``, the product's own trunk name, not always
+    ``main`` (§2.5)."""
+    return f'plan on origin/{trunk_of(product)}'
+
+
 def branch_for(product, kind, item_id):
     """``<prefix><id>`` — the product's prefix for ``kind`` (:meth:`Conventions.branch`, B-0067)."""
     return _conventions(product).branch(kind, item_id)
@@ -768,7 +780,7 @@ def _one_feature_rows(items, product, f, busy, running, landed_shas, occupancy):
         out.append(_doc_row(CARD_SPEC, fid, 'spec', product, 'decided card, no spec', *waits))
     elif word in ('spec-draft', 'spec-review'):
         carrier = spec_carrier(f)
-        if carrier and PLAN_ON_TRUNK in (f.get('evidence') or []):
+        if carrier and plan_on_trunk(product) in (f.get('evidence') or []):
             # the plan landed on a spec the trunk never got: that spec is landed as it
             # stands, on its own branch — not written again, and no coder starts before it
             out.append(_doc_row(STARVED_SPEC, fid, 'spec', product,

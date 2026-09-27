@@ -778,14 +778,15 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
             plan_dict = {'exists': bool(fev.get('plan')), 'approved': plan_approved,
                          'review': plan_review[:2] if plan_review else None}
             stage_val[iid] = evidence.feature_stage(spec_dict, plan_dict, child_states, on_prod_for_stage)
+            from asf.feeder.rows import plan_on_trunk, trunk_of
             lines = []
             if spec_on_main:
-                lines.append('spec on origin/main')
+                lines.append(f"spec on origin/{trunk_of(product)}")
             elif spec_carrier:
                 r = f" (review r{spec_review[0]} {spec_review[1]})" if spec_review else ''
                 lines.append(f"spec on {spec_carrier}{r}")
             if fev.get('plan_on_main'):
-                lines.append('plan on origin/main')
+                lines.append(plan_on_trunk(product))
             elif fev.get('plan_branch'):
                 r = f" (review r{plan_review[0]} {plan_review[1]})" if plan_review else ''
                 lines.append(f"plan on {fev['plan_branch']}{r}")
