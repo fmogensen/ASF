@@ -1680,12 +1680,14 @@ class InstallScriptTest(unittest.TestCase):
         self.asf_home = os.path.join(self.home, '.ASF')
         self.log = os.path.join(self.tmp, 'calls.log')
         self.status_calls = os.path.join(self.tmp, 'status_calls')
+        self.doctor_calls = os.path.join(self.tmp, 'doctor_calls')
         os.makedirs(self.bin_dir)
         os.makedirs(os.path.join(self.asf_home, 'products'))
         for rel in ('config.yaml', os.path.join('products', 'demo.yaml')):
             open(os.path.join(self.asf_home, rel), 'w').close()
 
-    def _write_scripts(self, hooks_rc, status_results=(('0', ''),), pipx_log=None):
+    def _write_scripts(self, hooks_rc, status_results=(('0', ''),), pipx_log=None,
+                       doctor_results=(('0', ''),)):
         """``status_results``: ``[(rc, stdout), ...]`` for successive ``scheduler status`` calls
         (the last entry repeats for any call beyond the list) — how install.sh's own retry
         of the bootstrap sees the clock check."""
@@ -1702,6 +1704,7 @@ class InstallScriptTest(unittest.TestCase):
         echo = f'printf %s\\\\n {shlex.quote(last_out)}; ' if last_out else ''
         cases.append(f'      *) {echo}exit {last_rc} ;;')
         status_case = '\n'.join(cases)
+        doctor_case = self._case(doctor_results)
 
         scripts = {
             'pipx': pipx_body,
@@ -1712,6 +1715,13 @@ class InstallScriptTest(unittest.TestCase):
                     f'  n=$((n + 1)); echo "$n" > "{self.status_calls}"\n'
                     '  case "$n" in\n'
                     f'{status_case}\n'
+                    '  esac\n'
+                    'fi\n'
+                    'if [ "$1" = "doctor" ]; then\n'
+                    f'  n=0; [ -f "{self.doctor_calls}" ] && n=$(cat "{self.doctor_calls}")\n'
+                    f'  n=$((n + 1)); echo "$n" > "{self.doctor_calls}"\n'
+                    '  case "$n" in\n'
+                    f'{doctor_case}\n'
                     '  esac\n'
                     'fi\n'
                     'case "$1" in\n'
@@ -1727,12 +1737,24 @@ class InstallScriptTest(unittest.TestCase):
                 f.write(body)
             os.chmod(path, 0o755)
 
+    @staticmethod
+    def _case(results):
+        """The ``case`` arms a stub answers its n-th call with: ``[(rc, stdout), ...]``, the last
+        entry repeating for any call beyond the list."""
+        arms = []
+        for i, (rc, out) in enumerate(list(results) + [results[-1]], start=1):
+            echo = f'printf %s\\\\n {shlex.quote(out)}; ' if out else ''
+            arms.append(f'      {"*" if i > len(results) else i}) {echo}exit {rc} ;;')
+        return '\n'.join(arms)
+
     def _env(self, **extra):
         return dict(os.environ, HOME=self.home, ASF_HOME=self.asf_home,
                     PATH=self.bin_dir + os.pathsep + os.environ.get('PATH', ''), **extra)
 
-    def _run(self, hooks_rc=0, status_results=(('0', ''),), pipx_log=None, extra_env=None):
-        self._write_scripts(hooks_rc, status_results=status_results, pipx_log=pipx_log)
+    def _run(self, hooks_rc=0, status_results=(('0', ''),), pipx_log=None, extra_env=None,
+             doctor_results=(('0', ''),)):
+        self._write_scripts(hooks_rc, status_results=status_results, pipx_log=pipx_log,
+                            doctor_results=doctor_results)
         r = subprocess.run(['bash', INSTALL_SH, 'demo', 'deadbeef'], capture_output=True,
                            text=True, env=self._env(**(extra_env or {})), timeout=60)
         with open(self.log) as f:
@@ -1741,7 +1763,7 @@ class InstallScriptTest(unittest.TestCase):
 
     def test_a_failed_hooks_step_still_runs_the_scheduler_and_the_doctor(self):
         r, calls = self._run(hooks_rc=2)
-        self.assertEqual(calls, ['--version', 'hooks', 'scheduler', 'scheduler', 'doctor',
+        self.assertEqual(calls, ['doctor', '--version', 'hooks', 'scheduler', 'scheduler', 'doctor',
                                  'console-permissions'], r.stderr)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn('install: FAILED step 3: asf hooks install --product demo (exit 2)', r.stderr)
@@ -1750,7 +1772,7 @@ class InstallScriptTest(unittest.TestCase):
 
     def test_every_step_green_exits_zero(self):
         r, calls = self._run(hooks_rc=0)
-        self.assertEqual(calls, ['--version', 'hooks', 'scheduler', 'scheduler', 'doctor',
+        self.assertEqual(calls, ['doctor', '--version', 'hooks', 'scheduler', 'scheduler', 'doctor',
                                  'console-permissions'], r.stderr)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn('FAILED', r.stderr)
@@ -1759,7 +1781,7 @@ class InstallScriptTest(unittest.TestCase):
         """B-0136: the first read-back finds the clock not loaded; install.sh retries the
         bootstrap once and, once that clock is loaded, the step is not a failure."""
         r, calls = self._run(status_results=[('1', self.NOT_LOADED), ('0', '')])
-        self.assertEqual(calls, ['--version', 'hooks',
+        self.assertEqual(calls, ['doctor', '--version', 'hooks',
                                  'scheduler', 'scheduler',   # install, then the failing status
                                  'scheduler', 'scheduler',   # the retried install, then status
                                  'doctor', 'console-permissions'], r.stderr)
@@ -1771,7 +1793,7 @@ class InstallScriptTest(unittest.TestCase):
         """B-0136's own acceptance: a clock still not loaded after the retry fails the install
         loudly, naming the missing label — not just a bare non-zero exit."""
         r, calls = self._run(status_results=[('1', self.NOT_LOADED)])
-        self.assertEqual(calls, ['--version', 'hooks', 'scheduler', 'scheduler',
+        self.assertEqual(calls, ['doctor', '--version', 'hooks', 'scheduler', 'scheduler',
                                  'scheduler', 'scheduler', 'doctor', 'console-permissions'],
                          r.stderr)
         self.assertNotEqual(r.returncode, 0)
@@ -1780,6 +1802,53 @@ class InstallScriptTest(unittest.TestCase):
         self.assertIn('install: NEEDS OPERATOR: clock(s) still not loaded after retrying the '
                       'bootstrap: asf.demo.record-health-wave-prs-harvest', r.stderr)
         self.assertIn('/plugin install asf@asf', r.stdout)  # steps 5 and 6 still ran
+
+    #: A doctor table with two REDs, as ``ASF_TABLES=md asf doctor`` prints it.
+    DOCTOR_KNOWN = ('== DOCTOR demo\n'
+                    'config               ok    config.yaml\n'
+                    'one-factory          RED   ci-health.sh in product repo\n'
+                    'console permissions  RED   missing Bash(launchctl bootout gui/*/asf.*)\n'
+                    '\n== SCHEDULER demo\n'
+                    'ok      asf.demo.tick  state=running')
+
+    def test_a_doctor_red_that_was_red_before_the_install_is_a_warning(self):
+        """Every install of a day ended red on the same three known checks, none of them the
+        install's doing: a RED the doctor already showed before the install is named as
+        pre-existing and does not fail it."""
+        r, calls = self._run(doctor_results=[('1', self.DOCTOR_KNOWN)])
+        self.assertEqual(calls[0], 'doctor')  # the baseline, read before the package moves
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn('FAILED', r.stderr)
+        self.assertIn('install: WARN doctor RED before this install too (not caused by it): '
+                      'one-factory, console permissions', r.stderr)
+
+    def test_a_doctor_red_the_install_caused_fails_it_naming_the_check(self):
+        after = self.DOCTOR_KNOWN + '\nRED     asf.demo.batch  declared but not loaded'
+        after = after.replace('config               ok ', 'config               RED')
+        r, _calls = self._run(doctor_results=[('1', self.DOCTOR_KNOWN), ('1', after)])
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('install: FAILED step 5: asf doctor --product demo (exit 1)', r.stderr)
+        self.assertIn('install: doctor RED caused by this install: config, '
+                      'scheduler:asf.demo.batch', r.stderr)
+        self.assertIn('install: WARN doctor RED before this install too (not caused by it): '
+                      'one-factory, console permissions', r.stderr)
+
+    def test_no_asf_before_the_install_every_doctor_red_counts(self):
+        # a first install has no baseline: a doctor RED is the install's to answer
+        self._write_scripts(0, doctor_results=[('1', self.DOCTOR_KNOWN)])
+        asf, pending = os.path.join(self.bin_dir, 'asf'), os.path.join(self.tmp, 'asf.pending')
+        os.rename(asf, pending)
+        with open(os.path.join(self.bin_dir, 'pipx'), 'w') as f:  # pipx puts asf on PATH
+            f.write(f'#!/bin/sh\ncp "{pending}" "{asf}"\nexit 0\n')
+        r = subprocess.run(['bash', INSTALL_SH, 'demo', 'deadbeef'], capture_output=True,
+                           text=True, env=self._env(), timeout=60)
+        with open(self.log) as f:
+            calls = [line.split()[0] for line in f if line.strip()]
+        self.assertEqual(calls.count('doctor'), 1, calls)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('install: FAILED step 5', r.stderr)
+        self.assertIn('install: doctor RED caused by this install: one-factory, '
+                      'console permissions', r.stderr)
 
     def test_step_6_offers_the_console_permissions_and_writes_nothing(self):
         r, calls = self._run(hooks_rc=0)
@@ -1826,6 +1895,46 @@ class InstallScriptTest(unittest.TestCase):
         self.assertIn('install', pipx_calls)
         self.assertGreaterEqual(released_at[0], started + 1.0)
         self.assertIn('install: a running tick holds the lock', r.stderr)
+
+    def test_the_script_rewritten_during_the_lock_wait_still_runs_as_read(self):
+        """install.sh waits up to ten minutes on a tick's lock, run from a checkout other
+        sessions fast-forward. bash reads a script as it goes: a rewrite during the wait resumed
+        it at a stale byte offset mid-line (``line 84: the: command not found``) and the steps
+        after it failed, where the same commands by hand worked. The script is read whole
+        before its first command runs."""
+        script = os.path.join(self.tmp, 'install.sh')
+        shutil.copy(INSTALL_SH, script)
+        lock_path = os.path.join(self.asf_home, 'state', 'demo', 'tick.lock')
+        os.makedirs(os.path.dirname(lock_path))
+        self._write_scripts(hooks_rc=0)
+        import fcntl
+        held = open(lock_path, 'a')
+        fcntl.flock(held, fcntl.LOCK_EX)
+        proc = subprocess.Popen(['bash', script, 'demo', 'deadbeef'], stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True,
+                                env=self._env(ASF_INSTALL_LOCK_WAIT_S='30',
+                                              ASF_INSTALL_LOCK_POLL_S='0.1'))
+        try:
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                time.sleep(0.2)
+                if os.path.exists(self.log):  # the baseline doctor ran: the wait is next
+                    break
+            time.sleep(0.5)
+            with open(INSTALL_SH) as f:
+                text = f.read()
+            with open(script, 'w') as f:  # a checkout moving under the running install
+                f.write('# ' + 'x' * 97 + '\n' + '# the checkout moved\n' * 40 + text)
+            fcntl.flock(held, fcntl.LOCK_UN)
+            out, err = proc.communicate(timeout=60)
+        finally:
+            held.close()
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertNotIn('command not found', err)
+        self.assertIn('install: done', out)
 
     def test_a_stuck_tick_lock_times_out(self):
         """The wait is bounded (B-0135): a tick lock nobody ever releases must not hang the

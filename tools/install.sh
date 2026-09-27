@@ -15,7 +15,9 @@
 #    reads every declared clock back: a bootstrap can fail silently and leave one merely absent
 #    from `launchctl list` (B-0136), so a clock still not loaded gets one retried bootstrap before
 #    the step fails, naming the label
-# 5. runs the doctor, and prints the two Claude Code lines that add the /asf:* plugin
+# 5. runs the doctor, and prints the two Claude Code lines that add the /asf:* plugin. A RED check
+#    the doctor of the asf already installed showed before this install (read before step 1) is
+#    a warning, named as pre-existing; only a RED the install brought fails the step
 # 6. offers the console's own allow list (B-0131) — shown in full, never written here: the
 #    operator runs the install command themselves when ready
 #
@@ -23,6 +25,12 @@
 # is recorded, the rest still runs (the doctor included), each failed step gets a summary line,
 # and the exit status is non-zero when any step or the doctor failed.
 set -euo pipefail
+
+# The whole script is one compound command, read in full before its first command runs: bash
+# otherwise reads a script as it goes, and this one waits up to ten minutes on a tick's lock
+# while it is run from a checkout other sessions fast-forward — the rewrite resumed it at a stale
+# byte offset mid-line (`line 84: the: command not found`) and the steps after it failed.
+{
 
 REPO_URL="${ASF_REPO_URL:-https://github.com/fmogensen/ASF.git}"
 PRODUCT="${1:?usage: install.sh <product> [ref]}"
@@ -41,6 +49,35 @@ if [ -z "$REF" ]; then
   [ -n "$REF" ] || die "cannot read main's head from $REPO_URL"
 fi
 say "product $PRODUCT, ref ${REF:0:12} from $REPO_URL"
+
+# the doctor's REDs before this install: every install of a day ended red on the same known
+# checks, none of them the install's doing, and a red nobody can tell apart from a new one is a
+# red nobody reads. `doctor_reds <baseline>` reads a doctor table on stdin and prints two lines:
+# the REDs also in <baseline> (pre-existing), then the ones that are not (new), comma-joined.
+doctor_reds() {
+  python3 -c '
+import re, sys
+def reds(text):
+    out = []
+    for line in text.splitlines():
+        m = re.match(r"RED\s+(\S+)", line)  # a SCHEDULER row: the level first
+        key = f"scheduler:{m.group(1)}" if m else None
+        if not key:
+            m = re.match(r"(\S.*?)\s{2,}RED(\s|$)", line)  # a DOCTOR row: the check first
+            key = m.group(1) if m else None
+        if key and key not in out:
+            out.append(key)
+    return out
+before = set(reds(sys.argv[1]))
+now = reds(sys.stdin.read())
+print(", ".join(k for k in now if k in before))
+print(", ".join(k for k in now if k not in before))
+' "$1"
+}
+BASELINE_DOCTOR=""
+if PATH="$HOME/.local/bin:$PATH" command -v "$BIN" >/dev/null 2>&1; then
+  BASELINE_DOCTOR="$(PATH="$HOME/.local/bin:$PATH" ASF_TABLES=md "$BIN" doctor --product "$PRODUCT" 2>&1 || true)"
+fi
 
 # 1. the same lock a clock with an asf step holds for its whole run (asf.tick.tick.lock_path,
 # asf.tick.tick.Locks.held — a command-only clock takes it only briefly, around each record
@@ -133,8 +170,24 @@ scheduler_install_verified() {  # install, then read every declared clock back; 
 }
 step "step 4: $BIN scheduler install --product $PRODUCT" scheduler_install_verified
 
-# 5. verify — runs whatever steps 3 and 4 did
-step "step 5: $BIN doctor --product $PRODUCT" env ASF_TABLES=md "$BIN" doctor --product "$PRODUCT"
+# 5. verify — runs whatever steps 3 and 4 did; a RED already there before the install warns
+doctor_against_baseline() {
+  local out rc=0 split old new
+  out="$(ASF_TABLES=md "$BIN" doctor --product "$PRODUCT" 2>&1)" || rc=$?
+  printf '%s\n' "$out"
+  [ "$rc" -eq 0 ] && return 0
+  split="$(printf '%s\n' "$out" | doctor_reds "$BASELINE_DOCTOR")"
+  old="$(printf '%s\n' "$split" | sed -n 1p)"
+  new="$(printf '%s\n' "$split" | sed -n 2p)"
+  [ -z "$old" ] || printf 'install: WARN doctor RED before this install too (not caused by it): %s\n' "$old" >&2
+  if [ -n "$new" ]; then
+    printf 'install: doctor RED caused by this install: %s\n' "$new" >&2
+    return "$rc"
+  fi
+  [ -n "$old" ] && return 0
+  return "$rc"  # red with no RED row read: the doctor itself failed
+}
+step "step 5: $BIN doctor --product $PRODUCT" doctor_against_baseline
 
 # 6. offer the console's own allow list — the operator confirms by running the install command
 #    themselves; nothing is written by this script
@@ -158,3 +211,4 @@ for f in "${FAILED[@]}"; do
 done
 printf 'install: NEEDS OPERATOR: %d step(s) failed, the install is incomplete; fix them and re-run\n' "${#FAILED[@]}" >&2
 exit 1
+}
