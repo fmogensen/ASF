@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import unittest
 
 from asf import env
@@ -241,9 +242,12 @@ class LastReportTests(FactsCase):
         with open(self.path, 'w') as f:
             f.writelines(json.dumps(r) + '\n' for r in records)
 
-    def run_rec(self, job, ended, log, reason='finished'):
-        recs = [{'job': job, 'item': 'B-0001', 'started': '2026-01-01T00:00:00Z', 'pid': 1,
-                 'log': log}]
+    def run_rec(self, job, ended, log, reason='finished', branch=None):
+        rec = {'job': job, 'item': 'B-0001', 'started': '2026-01-01T00:00:00Z', 'pid': 1,
+               'log': log}
+        if branch:
+            rec['branch'] = branch
+        recs = [rec]
         if ended:
             recs.append({'job': job, 'ended': ended, 'end_reason': reason})
         return recs
@@ -277,6 +281,161 @@ class LastReportTests(FactsCase):
         text = facts.last_report(self.prod, 'B-0001')
         self.assertIn('left out: xxx', text)
         self.assertLessEqual(max(len(l) for l in text.splitlines()), 200)
+
+    def test_a_branch_given_ignores_other_branches_and_takes_the_newest_here(self):
+        other = self.log('other.log', 'REPORT\nstatus: done\npushed: yes other')
+        here = self.log('here.log', 'REPORT\nstatus: done\npushed: yes here')
+        self.ledger(*self.run_rec('job-other', '2026-01-03T00:00:00Z', other,
+                                   branch='fix/B-9999'),
+                    *self.run_rec('job-here', '2026-01-02T00:00:00Z', here,
+                                   branch='fix/B-0001'))
+        text = facts.last_report(self.prod, 'B-0001', branch='fix/B-0001')
+        self.assertIn('job-here', text)
+        self.assertIn('pushed: yes here', text)
+        self.assertNotIn('job-other', text)
+        self.assertNotIn('pushed: yes other', text)
+
+    def test_a_run_with_no_report_falls_back_to_the_branch_review_verdict(self):
+        log = self.log('crashed.log', 'a crash, no REPORT block here')
+        self.ledger(*self.run_rec('job-a', '2026-01-02T00:00:00Z', log, branch='fix/B-0001'))
+        review = (2, 'docs/reviews/fix-b-0001-r2.md', 'Verdict: approved')
+        text = facts.last_report(self.prod, 'B-0001', branch='fix/B-0001', review=review)
+        self.assertIn('job-a ended', text)
+        self.assertIn('review round 2 (docs/reviews/fix-b-0001-r2.md): verdict approved', text)
+
+    def test_a_report_already_present_ignores_the_review_fallback(self):
+        log = self.log('ok.log', 'REPORT\nstatus: done\npushed: yes abc')
+        self.ledger(*self.run_rec('job-a', '2026-01-02T00:00:00Z', log, branch='fix/B-0001'))
+        review = (1, 'docs/reviews/fix-b-0001-r1.md', 'Verdict: approved')
+        text = facts.last_report(self.prod, 'B-0001', branch='fix/B-0001', review=review)
+        self.assertNotIn('review round', text)
+
+    def test_a_branch_with_neither_a_run_nor_a_review_adds_nothing(self):
+        self.ledger()
+        self.assertEqual(facts.last_report(self.prod, 'B-0001', branch='fix/B-0001'), '')
+
+
+class PredecessorTests(FactsCase):
+    def setUp(self):
+        super().setUp()
+        self.prod = self.product()
+        self.path = os.path.join(env.state_dir(self.prod), 'sessions.jsonl')
+
+    def ledger(self, *records):
+        with open(self.path, 'w') as f:
+            f.writelines(json.dumps(r) + '\n' for r in records)
+
+    def launch(self, job, item, branch, kind, started):
+        return {'job': job, 'item': item, 'branch': branch, 'kind': kind, 'started': started,
+                'pid': 1}
+
+    def end(self, job, ended, reason='finished'):
+        return {'job': job, 'ended': ended, 'end_reason': reason}
+
+    def test_the_newest_ended_unlanded_run_is_returned_with_its_attempt(self):
+        self.ledger(self.launch('job-a', 'B-0001', 'fix/B-0001', 'coder', '2026-01-01T00:00:00Z'),
+                    self.end('job-a', '2026-01-01T01:00:00Z'),
+                    self.launch('job-a', 'B-0001', 'fix/B-0001', 'coder', '2026-01-02T00:00:00Z'),
+                    self.end('job-a', '2026-01-02T01:00:00Z'))
+        self.assertEqual(facts.predecessor(self.prod, 'B-0001', 'fix/B-0001', 'coder'),
+                         {'job': 'job-a', 'ended': '2026-01-02T01:00:00Z',
+                          'end_reason': 'finished', 'attempt': 2})
+
+    def test_a_live_run_is_not_a_predecessor(self):
+        self.ledger(self.launch('job-a', 'B-0001', 'fix/B-0001', 'coder', '2026-01-01T00:00:00Z'))
+        self.assertEqual(facts.predecessor(self.prod, 'B-0001', 'fix/B-0001', 'coder'), {})
+
+    def test_a_landed_run_is_not_a_predecessor(self):
+        self.ledger(self.launch('job-a', 'B-0001', 'fix/B-0001', 'coder', '2026-01-01T00:00:00Z'),
+                    self.end('job-a', '2026-01-01T01:00:00Z'),
+                    {'job': 'job-a', 'harvested': 'deadbeef'})
+        self.assertEqual(facts.predecessor(self.prod, 'B-0001', 'fix/B-0001', 'coder'), {})
+
+    def test_a_run_of_another_kind_on_the_same_branch_is_not_a_predecessor(self):
+        self.ledger(self.launch('job-r', 'B-0001', 'fix/B-0001', 'review', '2026-01-01T00:00:00Z'),
+                    self.end('job-r', '2026-01-01T01:00:00Z'))
+        self.assertEqual(facts.predecessor(self.prod, 'B-0001', 'fix/B-0001', 'coder'), {})
+
+    def test_a_run_of_the_same_kind_on_another_branch_is_not_a_predecessor(self):
+        self.ledger(self.launch('job-a', 'B-0001', 'fix/B-9999', 'coder', '2026-01-01T00:00:00Z'),
+                    self.end('job-a', '2026-01-01T01:00:00Z'))
+        self.assertEqual(facts.predecessor(self.prod, 'B-0001', 'fix/B-0001', 'coder'), {})
+
+    def test_an_item_with_no_run_at_all_is_empty(self):
+        self.ledger()
+        self.assertEqual(facts.predecessor(self.prod, 'B-0001', 'fix/B-0001', 'coder'), {})
+
+
+class ProgressLineTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='progress_')
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def log(self, name, records):
+        path = os.path.join(self.tmp, name)
+        with open(path, 'w') as f:
+            for rec in records:
+                f.write(json.dumps(rec) + '\n')
+        return path
+
+    def assistant(self, *texts, extra=''):
+        rec = {'type': 'assistant',
+               'message': {'content': [{'type': 'text', 'text': t} for t in texts]}}
+        if extra:
+            rec['pad'] = extra
+        return rec
+
+    def test_the_last_blocks_first_non_empty_line_is_taken(self):
+        path = self.log('a.log', [
+            {'type': 'system', 'subtype': 'init'},
+            self.assistant('first block\nmore'),
+            self.assistant('\n  second block first line  \nsecond line'),
+        ])
+        self.assertEqual(facts.last_progress(path), 'second block first line')
+
+    def test_a_result_after_the_last_turn_still_finds_it(self):
+        path = self.log('b.log', [
+            self.assistant('doing the thing'),
+            {'type': 'result', 'result': 'REPORT\nstatus: done'},
+        ])
+        self.assertEqual(facts.last_progress(path), 'doing the thing')
+
+    def test_a_long_line_is_capped(self):
+        path = self.log('c.log', [self.assistant('x' * 5000)])
+        out = facts.last_progress(path)
+        self.assertLessEqual(len(out), facts.FIELD_CAP)
+        self.assertTrue(out.endswith('…'))
+
+    def test_a_large_log_finds_the_turn_inside_the_tail(self):
+        path = self.log('d.log', [
+            self.assistant('too old to matter here', extra='x' * 5000),
+            self.assistant('inside the tail'),
+        ])
+        self.assertEqual(facts.last_progress(path, tail=200), 'inside the tail')
+
+    def test_a_turn_before_the_tail_is_not_seen(self):
+        path = self.log('e.log', [
+            self.assistant('too old to see'),
+            {'type': 'system', 'subtype': 'init', 'pad': 'x' * 4096},
+        ])
+        self.assertEqual(facts.last_progress(path, tail=64), '')
+
+    def test_a_missing_log_is_empty(self):
+        self.assertEqual(facts.last_progress(os.path.join(self.tmp, 'nope.log')), '')
+
+    def test_an_empty_log_is_empty(self):
+        self.assertEqual(facts.last_progress(self.log('empty.log', [])), '')
+
+    def test_pure_garbage_is_empty(self):
+        path = os.path.join(self.tmp, 'garbage.log')
+        with open(path, 'w') as f:
+            f.write('not json at all\n{"broken":\n')
+        self.assertEqual(facts.last_progress(path), '')
+
+    def test_no_assistant_turn_is_empty(self):
+        path = self.log('no_turn.log', [{'type': 'system', 'subtype': 'init'},
+                                         {'type': 'result', 'result': 'REPORT\nstatus: done'}])
+        self.assertEqual(facts.last_progress(path), '')
 
 
 class PreambleIsCodeTests(unittest.TestCase):

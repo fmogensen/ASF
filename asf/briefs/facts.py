@@ -16,14 +16,16 @@ Two rules:
   ``(not known here)`` marker; it is never guessed.
 """
 import ast
+import json
 import os
 import re
 import subprocess
 
 from asf import env
 from asf.briefs import preamble
+from asf.evidence import review as review_mod
 from asf.feeder import footprint
-from asf.workers import lifecycle, report, runtime
+from asf.workers import lifecycle, pool, report, runtime
 
 #: The most existing tests one brief names on its own account.
 TEST_LIMIT = 6
@@ -208,28 +210,126 @@ def tests_under(tree_paths, writes, limit=TEST_LIMIT):
     return found[:limit]
 
 
+def _squeeze(text, cap=FIELD_CAP):
+    """``text``, whitespace-collapsed, cut to ``cap`` with the ``…`` ellipsis when it runs over."""
+    line = ' '.join(str(text).split())
+    return line if len(line) <= cap else line[:cap - 1].rstrip() + '…'
+
+
 def _cap(label, value):
-    line = f'{label}: {" ".join(str(value).split())}'
-    return line if len(line) <= FIELD_CAP else line[:FIELD_CAP - 1].rstrip() + '…'
+    return _squeeze(f'{label}: {value}')
 
 
-def last_report(product, item_id):
+#: How much of a run's log the progress line is read from. A spent session's log is the largest
+#: file this factory writes; the last assistant turn is at the end of it either way.
+PROGRESS_TAIL_BYTES = 256 * 1024
+
+
+def last_progress(log, tail=PROGRESS_TAIL_BYTES):
+    """The last line an assistant turn printed in ``log``, squeezed and capped — what the run was
+    doing when it stopped. Reads the last ``tail`` bytes only, drops the first partial line, and
+    scans the parsed records backwards for a ``text`` block. ``''`` for no log, no readable
+    record, and every failure."""
+    if not log:
+        return ''
+    try:
+        with open(log, 'rb') as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            offset = max(0, size - tail)
+            f.seek(offset)
+            data = f.read()
+    except OSError:
+        return ''
+    if offset:
+        data = data.split(b'\n', 1)[1] if b'\n' in data else b''
+    for line in reversed(data.splitlines()):
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict) or rec.get('type') != 'assistant':
+            continue
+        message = rec.get('message')
+        content = message.get('content') if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        texts = [b.get('text') for b in content if isinstance(b, dict)
+                 and b.get('type') == 'text' and b.get('text')]
+        if not texts:
+            continue
+        for text_line in texts[-1].splitlines():
+            if text_line.strip():
+                return _squeeze(text_line.strip())
+        return ''
+    return ''
+
+
+def branch_review(repo, rev, tree_paths, product, slug, round_):
+    """The branch's newest review file the tree carries, at or below ``round_``: ``(n, path,
+    text)`` for the highest round whose :func:`asf.briefs.preamble.review_path_for` names a path
+    ``tree_paths`` holds, read with one ``git cat-file -p``; ``None`` for no match, an empty read
+    and every failure. Makes no listing of its own — the caller already holds one."""
+    tree_set = set(tree_paths or ())
+    for n in range(max(round_ or 0, 1), 0, -1):
+        path = preamble.review_path_for(product, slug, n)
+        if path not in tree_set:
+            continue
+        text = _git_text(repo, ['cat-file', '-p', f'{rev}:{path}'])
+        if text:
+            return (n, path, text)
+    return None
+
+
+def last_report(product, item_id, branch='', review=None):
     """The newest ended session's typed report on the item, else ``''``.
 
     ``<job> ended <ts> — <end_reason>`` and the five fields worth carrying, each capped — never
-    the transcript above the REPORT block. A log that is gone leaves the one ledger line."""
+    the transcript above the REPORT block. A log that is gone leaves the one ledger line. A
+    ``branch`` given keeps only that branch's runs; falsy, every run of the item, as before. When
+    the newest run left no REPORT and ``review`` (an ``(n, path, text)`` triple) is given, one
+    line — ``review round <n> (<path>): verdict <v>`` — stands in, omitted when the review carries
+    no verdict."""
     if not item_id:
         return ''
     path = os.path.join(env.state_dir(product), 'sessions.jsonl')
-    ended = [r for r in lifecycle.item_runs(path, item_id) if r.get('ended')]
+    ended = [r for r in lifecycle.item_runs(path, item_id)
+             if r.get('ended') and (not branch or r.get('branch') == branch)]
     if not ended:
         return ''
     run = max(ended, key=lambda r: str(r.get('ended')))
     lines = [f"{run.get('job', '?')} ended {run.get('ended')} — {run.get('end_reason') or '?'}"]
     result = runtime.read_result(run.get('log'))
     fields = report.parse((result or {}).get('result'))
-    lines += [_cap(key, fields[key]) for key in REPORT_FIELDS if fields.get(key)]
-    return '\n'.join(lines)
+    field_lines = [_cap(key, fields[key]) for key in REPORT_FIELDS if fields.get(key)]
+    if not field_lines and review:
+        n, review_path, text = review
+        verdict = review_mod.verdict_of(text)
+        if verdict is not None:
+            field_lines = [f'review round {n} ({review_path}): verdict {verdict}']
+    return '\n'.join(lines + field_lines)
+
+
+def predecessor(product, item_id, branch, kind):
+    """The run this launch is a relaunch of: the newest **ended**, unlanded run of ``item_id`` on
+    ``branch`` whose ``kind`` is this row's, or ``{}``. ``attempt`` is that run's 1-based index
+    among its job's own runs, in ledger order."""
+    if not item_id or not branch or not kind:
+        return {}
+    try:
+        runs = lifecycle.item_runs(pool.sessions_path(product), item_id)
+    except (OSError, ValueError):
+        return {}
+    matches = [r for r in runs if r.get('ended') and r.get('branch') == branch
+               and r.get('kind') == kind and not lifecycle.landed(r)]
+    if not matches:
+        return {}
+    run = max(matches, key=lambda r: str(r.get('ended') or ''))
+    job_runs = [r for r in runs if r.get('job') == run.get('job')]
+    return {'job': run.get('job'), 'ended': run.get('ended'), 'end_reason': run.get('end_reason'),
+            'attempt': job_runs.index(run) + 1}
 
 
 def repo_facts(product, row, index, inflight=None):
@@ -249,7 +349,8 @@ def repo_facts(product, row, index, inflight=None):
             facts['files'] = line_counts(repo, rev, wanted)
             facts['outlines'] = outlines_of(repo, rev, tree, plain['writes'])
     try:
-        facts['last_report'] = last_report(product, getattr(row, 'item_id', ''))
+        facts['last_report'] = last_report(product, getattr(row, 'item_id', ''),
+                                            branch=plain['branch'])
     except (OSError, ValueError):
         pass
     return facts
