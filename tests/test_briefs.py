@@ -689,6 +689,86 @@ class PlaceholderTest(unittest.TestCase):
                 self.assertEqual(leftover, [], f'{kind}: {leftover}')
 
 
+class ProvesBriefTests(unittest.TestCase):
+    """F-0040 Task 2: the coder brief asks for the `Proves:` trailer by name — the acceptance
+    lines its own tests tick, numbered the way `asf.proves.card_bullets` numbers them."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        os.makedirs(os.path.join(self.tmp, 'stories'))
+        self.product = Product('sample', {'backlog_dir': self.tmp})
+
+    def _story_card(self, sid, title, bullets):
+        body = f'---\nid: {sid}\ntype: story\ntitle: {title}\n---\n## Acceptance\n'
+        body += ''.join(f'- [ ] {b}\n' for b in bullets)
+        with open(os.path.join(self.tmp, 'stories', f'{sid}.md'), 'w', encoding='utf-8') as f:
+            f.write(body)
+
+    def test_two_stories_numbered_1_based_per_story(self):
+        self._story_card('S-18750', 'the claim and its parser',
+                          ['`tests/test_proves.py::ParseTests` passes',
+                           'a malformed claim is a problem, not a silent skip'])
+        self._story_card('S-18752', 'the refusal names what is wrong',
+                          ['a Task proving nothing is refused at the landing'])
+        items = {
+            'S-18750': {'id': 'S-18750', 'type': 'story', 'folder': 'stories',
+                        'title': 'the claim and its parser'},
+            'S-18752': {'id': 'S-18752', 'type': 'story', 'folder': 'stories',
+                        'title': 'the refusal names what is wrong'},
+        }
+        item = {'stories': ['S-18750', 'S-18752']}
+        lines = preamble_mod.proves_lines(self.product, items, item)
+        self.assertEqual(lines,
+            'S-18750 the claim and its parser: 1 `tests/test_proves.py::ParseTests` passes;\n'
+            '        2 a malformed claim is a problem, not a silent skip\n'
+            'S-18752 the refusal names what is wrong: 1 a Task proving nothing is refused at '
+            'the landing')
+
+    def test_a_task_with_no_stories_is_the_empty_string(self):
+        self.assertEqual(preamble_mod.proves_lines(self.product, {}, {'stories': []}), '')
+        self.assertEqual(preamble_mod.proves_lines(self.product, {}, {}), '')
+
+    def test_a_story_with_no_readable_card_drops_out_rather_than_raising(self):
+        self._story_card('S-18750', 'the one readable Story',
+                          ['a bullet the other Story lacks'])
+        items = {
+            'S-18750': {'id': 'S-18750', 'type': 'story', 'folder': 'stories',
+                        'title': 'the one readable Story'},
+            'S-18799': {'id': 'S-18799', 'type': 'story', 'folder': 'stories',
+                        'title': 'a Story whose card was never written'},
+        }
+        item = {'stories': ['S-18799', 'S-18750']}
+        lines = preamble_mod.proves_lines(self.product, items, item)
+        self.assertEqual(lines, 'S-18750 the one readable Story: 1 a bullet the other Story lacks')
+
+    def test_context_falls_back_when_the_task_lists_no_story(self):
+        facts = dict(preamble_mod.collect(product(), ROWS['coder'], index(), [], REPO_FACTS),
+                     kind='coder')
+        ctx = build_mod.context(product(), ROWS['coder'], 'coder', facts)
+        self.assertEqual(ctx['proves'], '(this Task lists no Story — say so in the report)')
+
+    def test_context_carries_the_computed_lines(self):
+        facts = dict(preamble_mod.collect(product(), ROWS['coder'], index(), [], REPO_FACTS),
+                     kind='coder')
+        facts['proves_lines'] = 'S-18750 title: 1 bullet'
+        ctx = build_mod.context(product(), ROWS['coder'], 'coder', facts)
+        self.assertEqual(ctx['proves'], 'S-18750 title: 1 bullet')
+
+    def test_templates_coder_names_the_trailer(self):
+        text = build_mod.load_template('coder')
+        self.assertIn('{proves}', text)
+        self.assertIn('Proves: <S-id> line <n> — <the test path that proves it>', text)
+        self.assertLess(text.index('{proves}'), text.index('Final message:'))
+
+    def test_a_coder_brief_names_the_trailer_and_the_report_field(self):
+        text = briefs.build(product(), ROWS['coder'], index(), [], REPO_FACTS).text
+        self.assertIn('Proves: <S-id> line <n> — <the test path that proves it>', text)
+        self.assertIn('refused at the landing and handed straight back', text)
+        self.assertIn('proves: <code only — the Proves: trailers you wrote, one per line; '
+                      'or none — <why>>', text)
+
+
 class CardDigestTests(unittest.TestCase):
     """F-0090 D4: the digest changes when what a brief states changes, and only then."""
 

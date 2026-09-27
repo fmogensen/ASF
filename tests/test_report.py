@@ -62,6 +62,20 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(rep['commits'], 'aaa one\nbbb two')
         self.assertNotIn('not', rep)
 
+    def test_proves_trailers_are_one_field_not_folded_into_left_out(self):
+        """F-0040 P6: each `Proves:` trailer line collides, case-insensitively, with the
+        `proves:` field name itself — a naive parse would restart the field on every line."""
+        text = ('REPORT\nitem: T-0195\nstatus: done\nleft out: none\n'
+                'proves: Proves: S-18750 line 1 — tests/test_proves.py::ParseTests::test_trailer\n'
+                'Proves: S-18750 line 2 — tests/test_proves.py::ParseTests::test_duplicates\n'
+                'ruling: not this kind\n```\n')
+        rep = report.parse(text)
+        self.assertEqual(rep['left out'], 'none')
+        self.assertEqual(rep['proves'],
+                         'Proves: S-18750 line 1 — tests/test_proves.py::ParseTests::test_trailer\n'
+                         'Proves: S-18750 line 2 — tests/test_proves.py::ParseTests::test_duplicates')
+        self.assertEqual(rep['ruling'], 'not this kind')
+
 
 class FailureAtTheSourceTests(unittest.TestCase):
     def test_pushed_no_is_unpushed_work(self):

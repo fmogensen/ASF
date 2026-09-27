@@ -70,6 +70,16 @@ BEFORE THE PUSH: the Task's Gate commands, and its acceptance tests byte-identic
 and passing. Paste the last line of each in the report. A test you changed to make it pass is a
 failed Task, not a passed one.
 
+PROVES — the acceptance lines your tests tick: (this Task lists no Story — say so in the report)
+Before the push, every line above that your tests now prove carries a trailer on its own line in
+one of your commit messages:
+
+    Proves: <S-id> line <n> — <the test path that proves it>
+
+`<n>` is the number above, not a line of the card file. The test path must exist on this branch.
+A Task that proves nothing is refused at the landing and handed straight back to you, so write
+the trailer with the commit, not after it.
+
 Final message: the pushed sha, the files written, the gate lines, the assumptions recorded.
 
 ## The heartbeat, the marker, and the report
@@ -111,6 +121,7 @@ commits: <sha> <subject> (one per line, or none)
 tests: <what you ran — and its last line>
 left out: <what and why, or none>
 needs writes: <coder/correct only — repo paths outside writes: that must change too, space-separated, or none>
+proves: <code only — the Proves: trailers you wrote, one per line; or none — <why>>
 ruling: <adjudicate only — one paragraph: what was disputed, what now holds, what changes; else omit>
 blocked_on: <adjudicate only — the id this item must wait for, or none>
 writes: <adjudicate only — the corrected footprint, space-separated globs, or none>

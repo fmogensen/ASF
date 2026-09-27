@@ -19,4 +19,14 @@ and sends this run back to you; that line is how the footprint grows, never a qu
 {gate_before_push} Paste the last line of each in the report. A test you changed to make it pass is a
 failed Task, not a passed one.
 
+PROVES — the acceptance lines your tests tick: {proves}
+Before the push, every line above that your tests now prove carries a trailer on its own line in
+one of your commit messages:
+
+    Proves: <S-id> line <n> — <the test path that proves it>
+
+`<n>` is the number above, not a line of the card file. The test path must exist on this branch.
+A Task that proves nothing is refused at the landing and handed straight back to you, so write
+the trailer with the commit, not after it.
+
 Final message: the pushed sha, the files written, the gate lines, the assumptions recorded.
