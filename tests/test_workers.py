@@ -1608,6 +1608,54 @@ class TestHealth(Home):
                          git('rev-parse', 'HEAD', cwd=wt))
         self.assertTrue(any(w == 'published' for _j, w, _d in found), found)
 
+    def test_an_ended_unpushed_run_is_published_again_once_the_factory_can(self):
+        # a product's F-0094: the factory's publish refused the session's commits (its rebase
+        # conflicted), the run ended `failed: not pushed` with a correction — and no later pass
+        # ever tried again. The publish fix landed, the worktree sat publishable, and the item
+        # waited for another whole session. An ended unpushed run's worktree is published again
+        # on every pass; once it goes out the run is re-judged and its correction dropped.
+        rec = self.spawn('stuck', {'ok': True})
+        wt, branch = rec['worktree'], rec['branch']
+        self.commit(wt, 'fix')
+        reason = 'failed: not pushed: 0 uncommitted file(s), 1 unpushed commit(s)'
+        pool_mod.update_session(self.product, 'stuck', ended='2026-09-27T07:00:45Z',
+                                end_reason=reason, rc=1,
+                                correction={'kind': lifecycle.UNPUSHED,
+                                            'text': lifecycle.unpushed_text(reason),
+                                            'at': '2026-09-27T07:00:45Z'})
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
+        run = pool_mod.load_sessions(self.product)['stuck']
+        self.assertTrue(any(j == 'stuck' and w == 'published' for j, w, _d in found), found)
+        self.assertEqual(run['end_reason'], 'finished')
+        self.assertIsNone(run.get('correction'))
+        self.assertEqual(git('ls-remote', '--heads', 'origin', branch, cwd=wt).split()[0],
+                         git('rev-parse', 'HEAD', cwd=wt))
+
+    def test_an_ended_unpushed_run_still_refused_gets_the_precise_refusal(self):
+        # the retried publish is refused again: the pending generic "commit and push what you
+        # have" is replaced by the factory's own refusal line, so the next session reads what
+        # blocked the push — and a refusal already carried is not re-logged every pass
+        rec = self.spawn('refused', {'ok': True})
+        wt, branch = rec['worktree'], rec['branch']
+        self.commit(wt, 'fix')
+        reason = 'failed: not pushed: 0 uncommitted file(s), 1 unpushed commit(s)'
+        pool_mod.update_session(self.product, 'refused', ended='2026-09-27T07:00:45Z',
+                                end_reason=reason, rc=1,
+                                correction={'kind': lifecycle.UNPUSHED,
+                                            'text': lifecycle.unpushed_text(reason),
+                                            'at': '2026-09-27T07:00:45Z'})
+        line = f'publish {branch} refused: redact: a.txt:1 names a worker account'
+        with mock.patch.object(lifecycle, 'publish', return_value=(False, line)) as pub:
+            found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+            self.assertEqual(pub.call_count, 1)
+            run = pool_mod.load_sessions(self.product)['refused']
+            self.assertIn('redact: a.txt:1', run['correction']['text'])
+            self.assertNotIn('commit and push what you have', run['correction']['text'])
+            self.assertIn(('refused', 'published', line), found)
+            found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+            self.assertEqual(pub.call_count, 2)
+            self.assertFalse(any(j == 'refused' and w == 'published' for j, w, _d in found), found)
+
     def test_b0063_stale_local_lane_branches_are_pruned_strays_named(self):
         # thirty-seven local branches sat in the scheduler's checkout after their worktrees
         # were reaped by hand or by a landing that rebased the tip: nothing pruned them

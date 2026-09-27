@@ -107,7 +107,7 @@ TRANSITIONS = {
 #: A run's own fields: they belong to one launch and never fold into the next (B-0041).
 RUN_FIELDS = ('ended', 'end_reason', 'rc', 'corrected', 'operator_flagged', 'harvested',
               'harvest', 'correction', 'rounds', 'stop_tip', 'capped', 'runtime_session',
-              'resumed', 'continued')
+              'resumed', 'continued', 'publish_refused')
 
 FINISHED = 'finished'
 #: read, never written: ledgers on disk carry this on runs health judged before F-0098

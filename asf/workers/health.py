@@ -225,6 +225,62 @@ def publish_gap(product, run, ev, reason, alive=pid_alive):
     return lifecycle.judge(run, ev, landing=landing), ev, '; '.join(lines + [line])
 
 
+def refusal_text(branch, line):
+    """The correction a publish the factory could not make hands the next session: the refusal
+    itself — the conflicting files, the lost commits, the ``redact: <file>:<line>`` finding or the
+    hook's own last line — never the generic "commit and push what you have"."""
+    if lifecycle.rebase_conflict(line):
+        return lifecycle.rebase_conflict_text(branch, line)
+    if lifecycle.stale_head(line):
+        return lifecycle.stale_head_text(branch, line)
+    why = (line or '').split('refused: ', 1)[-1]
+    return (f'your commits are on the branch; the factory could not publish them: {why} — fix '
+            f'what it names and commit; the factory publishes, never a push of your own')
+
+
+def republish(product, registry, job, run, alive, found):
+    """A product's F-0094: a run judged ``failed: not pushed`` whose publish the factory refused
+    (its rebase conflicted, a redaction, a hook) kept its commits in its worktree, and no later
+    pass ever tried again — the refusal's cause fixed, the worktree publishable, the item still
+    waited for a whole new session. Each pass publishes an ended unpushed run's worktree again
+    (:func:`publish_gap`), while the run still owns it and no live session is in it. Published,
+    the run is re-judged and a ``finished`` one drops its correction; refused again, a pending
+    unpushed correction carries the refusal (:func:`refusal_text`), and a refusal already
+    recorded is not printed again."""
+    reason = run.get('end_reason') or ''
+    wt, branch = run.get('worktree'), run.get('branch')
+    if not reason.startswith(UNPUSHED_REASON_PREFIXES) or run.get('harvested') or not branch:
+        return
+    if not wt or not os.path.isdir(wt) or alive(run.get('pid')):
+        return
+    owner = lifecycle.by_worktree(registry).get(lifecycle.path_key(wt))
+    if owner is not None and owner.get('job') != job:
+        return  # a later run took the worktree: its own judgement owns the branch
+    ev = lifecycle.gather(product, run, alive=alive)
+    reason, ev, line = publish_gap(product, run, ev, reason, alive)
+    if not line:
+        return
+    if ' refused: ' not in line:
+        found.append((job, 'published', line))
+        fields = {'end_reason': reason, 'rc': 0 if reason == lifecycle.FINISHED else 1,
+                  'publish_refused': None}
+        if reason == lifecycle.FINISHED:
+            fields['correction'] = None
+        pool_mod.update_session(product, job, **fields)
+        run.update(end_reason=reason)
+        found.append((job, 're-judged', reason))
+        return
+    if line == run.get('publish_refused'):
+        return
+    fields = {'publish_refused': line}
+    corr = run.get('correction')
+    if isinstance(corr, dict) and corr.get('kind') == lifecycle.UNPUSHED:
+        fields['correction'] = dict(corr, text=refusal_text(branch, line))
+    pool_mod.update_session(product, job, **fields)
+    run.update(fields)
+    found.append((job, 'published', line))
+
+
 def push_retry(ev, reason, line):
     """``(class, detail)`` when an unpushed run's push failed on the network or was refused by
     the repo's hook — read off its REPORT's ``pushed:`` line and the factory's own publish line
@@ -365,6 +421,8 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
                     found.append((job, 're-judged', reason))
                     if lifecycle.quota_exhausted(s):
                         found.append((job, 'quota', headroom.note_exhausted(product, s, ev.result)))
+            if not closed:
+                republish(product, registry, job, s, alive, found)
             continue
         ev = lifecycle.gather(product, s, alive=alive)
         reason = lifecycle.judge(s, ev, landing=lifecycle.lands(s, registry))
