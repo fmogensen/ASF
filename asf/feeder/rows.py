@@ -193,11 +193,27 @@ class Row:
 
 # ---- inputs -----------------------------------------------------------------
 
+class Items(dict):
+    """The live ``{id: item}`` map, plus :attr:`retired_done`: ``{id: card}`` of the *removed*
+    cards whose state is done. A removed card is out of every row, but not out of history — groom
+    removes a card that landed ("it landed…"), and an ``after:`` naming it must still read it
+    landed (:func:`landed_ids`), or its successors wait on it for ever (a product's T-0360)."""
+
+    retired_done = {}
+
+
 def items_of(index):
-    """The live ``{id: item}`` map from an ``index.json`` dict or an already-loaded item map."""
+    """The live ``{id: item}`` map (an :class:`Items`) from an ``index.json`` dict or an
+    already-loaded item map; a removed card is dropped, and remembered in ``retired_done`` when
+    it is done."""
     raw = index.get('items') if isinstance(index.get('items'), dict) else index
     live = {k: v for k, v in raw.items() if isinstance(v, dict) and not v.get('removed')}
-    return with_blockers(live, raw)
+    retired = dict(getattr(raw, 'retired_done', {}))
+    retired.update((k, v) for k, v in raw.items()
+                   if isinstance(v, dict) and v.get('removed') and v.get('state') in DONE_STATES)
+    out = Items(with_blockers(live, raw))
+    out.retired_done = retired
+    return out
 
 
 def with_blockers(items, raw=None):
@@ -368,21 +384,24 @@ def landed_ids(items, landed_shas=None):
 
     The fold runs over *all* items, not ``ix.feature_tasks``, so an ``after:`` naming a Task of
     another Feature is answerable at all. No ``landed_shas`` (the fact is absent): the record's
-    set alone, exactly as before.
+    set alone, exactly as before. A removed card that is done counts too
+    (:attr:`Items.retired_done`): groom retires a card that landed, and its successors must not
+    wait on it for ever (a product's T-0360).
     """
     done = {i for i, v in items.items() if v.get('state') in DONE_STATES}
-    return done | set(landed_shas or {})
+    return done | set(getattr(items, 'retired_done', ())) | set(landed_shas or {})
 
 
 def absorbers(items):
-    """``{merged id: absorber id}`` off every live card's ``merged:`` list. A groom merge removes
-    the merged card, and the index reader drops a removed card, so an ``after:`` naming it would
-    name an id that never lands again."""
+    """``{merged id: absorber id}`` off every live card's ``merged:`` list — and every retired
+    done card's (:attr:`Items.retired_done`), since an absorber that landed may be removed in
+    turn. A groom merge removes the merged card, and the index reader drops a removed card, so
+    an ``after:`` naming it would name an id that never lands again."""
     out = {}
-    for v in items.values():
+    for v in list(items.values()) + list(getattr(items, 'retired_done', {}).values()):
         for m in v.get('merged') or ():
             if isinstance(m, str):
-                out.setdefault(m, v['id'])
+                out.setdefault(m, v.get('id'))
     return out
 
 
