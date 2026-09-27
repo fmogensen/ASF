@@ -20,7 +20,8 @@ Every row is filled from what exists, or says which key would fill it —
   cell naming the band when it is not ``free``, and a stopped account's reset (``— resets
   15:20``): the one a session limit named (:mod:`asf.workers.headroom`), else the source's
   ``five_h_resets_at`` when it prints one; a reading older than ``quota_guards.stale_after_min``
-  (by the source's ``polled_at``) says ``stale since HH:MM``;
+  (by the source's ``polled_at``) says ``stale since HH:MM``, and one that was at or over a stop
+  when read stays ``stop`` to that window's reset;
 * **Cron** — the scheduler adapter's ``status()`` of this product's loaded jobs.
 """
 import datetime
@@ -276,6 +277,8 @@ def quota_cell(cfg):
         until = (limits.get(a.name) or {}).get('until')
         if until:
             state = quota_mod.STOP  # a session limit stopped it, whatever the reading says
+        if not until:
+            until = quota_mod.stale_stop_until(u, guards)  # a stale reading's stop holds to its reset
         if not until and five is not None and float(five) >= guards['stop']['five_h']:
             until = uu.get('five_h_resets_at')  # the source's own reset, for a full 5h window
         part = (f"{a.name} {five if five is not None else '?'}%/"

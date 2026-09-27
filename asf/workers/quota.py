@@ -12,11 +12,14 @@ Defaults: ``stop`` 95, ``cooldown`` 90, for every window. An unreadable account 
 ``stop`` (unknown ≠ free).
 
 **A stale reading.** The source may print ``polled_at`` (ISO) — when the vendor was last asked. A
-reading older than ``quota_guards.stale_after_min`` (default :data:`STALE_AFTER_MIN`) is stale: its
-percentages are history, not the account's state, so they neither band nor budget a launch. The
-account is then judged by the session-limit stop alone (a run that ended on a usage limit or a
-429 stops its account until the reset, :mod:`asf.workers.headroom`), and ``asf status`` says
-``stale since HH:MM``.
+reading older than ``quota_guards.stale_after_min`` (default :data:`STALE_AFTER_MIN`) is stale: a
+percentage *under* its stop is history, not the account's state, so it neither bands nor budgets a
+launch. A window that was *at or over* its stop when read cannot have come back before it resets,
+so the stale reading keeps the account stopped until that window's reset — the source's
+``<window>_resets_at`` (``five_h_resets_at``, ``seven_d_resets_at``, ``seven_d_model_resets_at``),
+else ``polled_at`` plus the window's length (:data:`WINDOW_LENGTH`). Otherwise the account is judged
+by the session-limit stop (a run that ended on a usage limit or a 429 stops its account until the
+reset, :mod:`asf.workers.headroom`), and ``asf status`` says ``stale since HH:MM``.
 """
 import datetime
 import json
@@ -28,6 +31,10 @@ BAND = 5                       # how far below the stop the cooldown opens, when
 WINDOW_KEYS = {'five_h': 'five_h_pct', 'seven_d': 'seven_d_pct', 'seven_d_model': 'seven_d_model_pct'}
 FREE, COOLDOWN, STOP = 'free', 'cooldown', 'stop'
 STALE_AFTER_MIN = 30          # minutes after ``polled_at`` a reading stops being current
+#: The longest a window can take to reset after it was read — a stale stop's hold when the source
+#: names no ``<window>_resets_at``.
+WINDOW_LENGTH = {'five_h': datetime.timedelta(hours=5), 'seven_d': datetime.timedelta(days=7),
+                 'seven_d_model': datetime.timedelta(days=7)}
 
 
 def guards_from_config(cfg):
@@ -93,15 +100,61 @@ def stale_label(since):
     return f"stale since {since.astimezone().strftime('%H:%M')}"
 
 
+def _reset_label(until):
+    """``HH:MM`` local; a reset more than a day ahead also names its weekday."""
+    far = until - datetime.datetime.now(datetime.timezone.utc) > datetime.timedelta(days=1)
+    return until.astimezone().strftime('%a %H:%M' if far else '%H:%M')
+
+
+def _ts(raw):
+    if not raw:
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(str(raw).replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=datetime.timezone.utc)
+
+
+def stale_stop(usage, guards, now=None):
+    """``(window key, pct, stop, until)`` for the first window a stale reading showed at or over
+    its stop whose reset is still ahead, else None. ``until`` is the source's
+    ``<window>_resets_at``, else ``polled_at`` + :data:`WINDOW_LENGTH` (aware datetime)."""
+    since = stale_since(usage, guards, now)
+    if since is None:
+        return None
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    for gk, uk in WINDOW_KEYS.items():
+        v = usage.get(uk)
+        if v is None or float(v) < guards['stop'][gk]:
+            continue
+        until = _ts(usage.get(f'{gk}_resets_at')) or since + WINDOW_LENGTH[gk]
+        if until > now:
+            return uk, float(v), guards['stop'][gk], until
+    return None
+
+
+def stale_stop_until(usage, guards, now=None):
+    """The reset (ISO, UTC) a stale stop holds its account until, or None."""
+    got = stale_stop(usage, guards, now)
+    return got[3].astimezone(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ') if got else None
+
+
 def band(usage, guards):
     """(state, why). ``usage`` None → ``(STOP, 'quota unreadable')``; a stale reading →
-    ``FREE`` (its percentages are not judged; the pool's session-limit stop still applies). Stop is judged over every
-    window before cooldown is — a stop in a later window must beat a cooldown in an earlier
-    one."""
+    ``STOP`` while a window it showed at or over its stop has not reset (:func:`stale_stop`),
+    else ``FREE`` (its percentages under the guard are not judged; the pool's session-limit stop
+    still applies). Stop is judged over every window before cooldown is — a stop in a later
+    window must beat a cooldown in an earlier one."""
     if usage is None:
         return STOP, 'quota unreadable'
     since = stale_since(usage, guards)
     if since is not None:
+        held = stale_stop(usage, guards)
+        if held is not None:
+            uk, v, stop, until = held
+            return STOP, (f'{uk} {v:g} ≥ {stop:g} when read ({stale_label(since)}) — until '
+                          f'{_reset_label(until)}')
         return FREE, f'quota {stale_label(since)} — session limits govern'
     for gk, uk in WINDOW_KEYS.items():
         v = usage.get(uk)

@@ -377,8 +377,12 @@ command, `{account}` substituted, printing one JSON line with `five_h_pct`, `sev
 optionally `seven_d_model_pct`). Without it every account reads 0 % and is always free; an account
 whose command fails reads as `stop`. The line may also carry `polled_at` (ISO), when the vendor was
 last asked: a reading older than `quota_guards.stale_after_min` (default 30) is stale — its
-percentages neither band nor budget a launch, the account is stopped only by a session limit (a run
-that ended on a usage limit or an API 429), and `asf status` shows `stale since HH:MM`.
+percentages under a stop neither band nor budget a launch, and `asf status` shows `stale since
+HH:MM`. A window the stale reading showed at or over its stop keeps the account stopped until that
+window resets: the line's `five_h_resets_at` / `seven_d_resets_at` / `seven_d_model_resets_at` (ISO)
+when printed, else `polled_at` plus the window's length. A run that ends on a usage limit or an API
+429 stops its account until the reset it names — recorded by the next wave of any product, before it
+places a launch.
 
 **The 5h window as a budget.** Each launch carries an estimate of its share of the 5h window, per
 kind and model family: a fixed table while history is thin (Opus spec/plan 10 %, Opus review 6 %,

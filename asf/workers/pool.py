@@ -328,6 +328,12 @@ class Pool:
         live = registered + [{'account': o.account, 'model': None, 'product': o.product,
                               'job': o.job, 'session': o.session, 'pid': o.pid, 'owner': o.owner}
                              for o in extra]
+        # a run that died on a usage limit stops its account now, not at its product's next
+        # health pass — another product's wave may be the next to place a launch
+        try:
+            lifecycle.note_spent_windows(os.path.join(env.ASF_HOME, 'state'))
+        except Exception:  # noqa: BLE001 — health still records it; never a blocker
+            pass
         return cls(accounts,
                    quota_source=quota_source or quota_mod.source_from_config(cfg),
                    guards=quota_mod.guards_from_config(cfg), reserve=reserve_from_config(cfg),

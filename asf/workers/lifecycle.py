@@ -360,6 +360,32 @@ def live_all(state_root, alive=None):
     return out
 
 
+def note_spent_windows(state_root=None, alive=None, now=None):
+    """Stop, at once, the account of every run under every product's registry that is still
+    live on the ledger, whose pid is gone, and whose log's last run closed on a usage-limit
+    result (:func:`asf.workers.runtime.failure_reason` → ``quota-exhausted``). Health records the
+    end only on its own product's next pass; the wave of another product may place a launch on
+    the same account before that, so the pool calls this before it reads the stops
+    (:func:`asf.workers.headroom.active_limits`). The lines :func:`headroom.note_exhausted` prints."""
+    state_root = state_root or os.path.join(env.ASF_HOME, 'state')
+    alive = alive or pid_alive
+    out = []
+    if not os.path.isdir(state_root):
+        return out
+    for name in sorted(os.listdir(state_root)):
+        path = os.path.join(state_root, name, 'sessions.jsonl')
+        if not os.path.isfile(path):
+            continue
+        for run in latest(path).values():
+            if not is_live(run) or not run.get('account') or alive(run.get('pid')):
+                continue
+            rec = runtime_mod.read_result(run.get('log'))
+            if rec is None or runtime_mod.failure_reason(rec) != headroom.QUOTA_EXHAUSTED:
+                continue
+            out.append(headroom.note_exhausted(run.get('product') or name, run, rec, now=now))
+    return out
+
+
 def by_branch(path):
     """``{branch: the latest run on it}`` across jobs, in file order (the last launch naming a
     branch owns it): a branch held and sent back runs under a new job name, and it is that run

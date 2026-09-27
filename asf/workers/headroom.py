@@ -200,7 +200,12 @@ def note_exhausted(product, run, rec, now=None):
 
 
 def reset_label(until):
-    return parse_ts(until).astimezone().strftime('%H:%M') if parse_ts(until) else '?'
+    """``HH:MM`` local; a reset more than a day ahead (a 7-day window) also names its weekday."""
+    t = parse_ts(until)
+    if t is None:
+        return '?'
+    fmt = '%a %H:%M' if t - now_utc() > datetime.timedelta(days=1) else '%H:%M'
+    return t.astimezone().strftime(fmt)
 
 
 # ---- the cost of one launch ---------------------------------------------------------
