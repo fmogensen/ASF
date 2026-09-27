@@ -188,10 +188,17 @@ DEFAULT_WORKTREE_SETUP = None
 #: ``conventions.merge``: who clicks merge on a green, reviewed PR — ``manual`` (the operator: the
 #: merge-time approval holds stay as the matrix sets them) or ``auto`` (the lane: those holds are
 #: ``auto`` for the product, and an open PR no factory item made gets a factory review first).
+#: ``queue`` is ``auto`` through the lane's own serialized merge queue (:mod:`asf.merge_queue`):
+#: green PRs are batched onto the trunk tip, the batch sha is gated on the product's whole
+#: required set, and the trunk is fast-forwarded to that exact sha — never a ``gh pr merge``.
 MERGE_AUTO = 'auto'
 MERGE_MANUAL = 'manual'
-MERGE_MODES = (MERGE_AUTO, MERGE_MANUAL)
+MERGE_QUEUE = 'queue'
+MERGE_MODES = (MERGE_AUTO, MERGE_MANUAL, MERGE_QUEUE)
 DEFAULT_MERGE = MERGE_MANUAL
+#: ``conventions.merge_queue: {ref_prefix, batch_size, inflight, timeout_min}`` — the queue's
+#: shape under ``merge: queue`` (:data:`asf.merge_queue.DEFAULTS`); ``ref_prefix`` is what the
+#: product's CI triggers its full matrix on.
 
 #: ``customer_content: {paths, forbidden_markers}`` — the pages a customer reads (a site's
 #: legal pages, its marketing copy) and the text that must never reach them
@@ -232,7 +239,7 @@ LANE_KEYS = {'review': 'lane_review', 'stale_after': 'lane_stale_after'}
 #: fails loud: :meth:`Conventions.shape_findings` names it, and the doctor's ``conventions`` row
 #: is red with the key and the line.
 MAP_CONVENTIONS = ('models', 'branch_prefixes', 'harvest', 'git', 'branch_retention', 'commit',
-                   'budget')
+                   'budget', 'merge_queue')
 #: ``commit.signoff_check``'s default: a PR check whose name contains it is the sign-off check.
 DEFAULT_SIGNOFF_CHECK = 'DCO'
 #: The conventions that take one word or a map of those words per landing class (``default:``
@@ -672,8 +679,14 @@ class Conventions:
         return duration_seconds(self.lane_stale_after)
 
     def merge_auto(self):
-        """True under ``merge: auto`` — the lane merges a green, reviewed PR itself."""
-        return str(self.merge or '').strip().lower() == MERGE_AUTO
+        """True under ``merge: auto`` or ``queue`` — the lane merges a green, reviewed PR
+        itself (directly, or through its own merge queue)."""
+        return str(self.merge or '').strip().lower() in (MERGE_AUTO, MERGE_QUEUE)
+
+    def merge_queue(self):
+        """True under ``merge: queue`` — the lane lands green PRs as gated batches
+        (:mod:`asf.merge_queue`), never by a direct host merge."""
+        return str(self.merge or '').strip().lower() == MERGE_QUEUE
 
     # ---- commits -------------------------------------------------------------
 

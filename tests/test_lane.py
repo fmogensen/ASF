@@ -2511,7 +2511,7 @@ class AMergeConflictGoesBack(unittest.TestCase):
 
     CONFLICT = 'GraphQL: Pull Request has merge conflicts (mergePullRequest)'
 
-    def _merge(self, how, cls, conflicting=False):
+    def _merge(self, how, cls, conflicting=False, files=('docs/decisions/bands.md',)):
         runner = lane.Lane.__new__(lane.Lane)
         lines = []
         runner.out, runner.dry_run, runner.results, runner.repo = lines.append, False, {}, None
@@ -2526,7 +2526,7 @@ class AMergeConflictGoesBack(unittest.TestCase):
              'head': HEAD, 'prev': rec(lane.GATE, pr=842), 'green': {'head': HEAD, 'trunk': NEW}}
         with mock.patch.object(lane.Lane, 'ci_admits', return_value=True), \
                 mock.patch.object(lane.Lane, 'set'), \
-                mock.patch.object(lane, 'conflict_files', return_value=['docs/decisions/bands.md']), \
+                mock.patch.object(lane, 'conflict_files', return_value=list(files)), \
                 mock.patch.object(lane, 'send_back') as sb, \
                 mock.patch.object(lane, 'wait') as wt:
             lane.merge_prs(runner, [f])
@@ -2569,7 +2569,9 @@ class AMergeConflictGoesBack(unittest.TestCase):
             self.assertIs(host.conflicting(842), False)
 
     def test_any_other_refusal_still_waits(self):
-        sb, wt, _lines = self._merge('To have the merge queue ... base branch policy', lane.DOCS)
+        # a policy refusal on a branch git merges clean: no conflict anywhere, it waits
+        sb, wt, _lines = self._merge('To have the merge queue ... base branch policy', lane.DOCS,
+                                     files=())
         sb.assert_not_called()
         wt.assert_called_once()
         self.assertIn('merge refused', wt.call_args[0][2])

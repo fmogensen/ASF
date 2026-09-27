@@ -52,6 +52,11 @@ Transitions (plan §2 plus the §9 overrides):
                                (:func:`correction_turns_back`): kind = the correction's
 - T10 GATE → MERGING → MERGED  merged by the host (FF ``push_ff``; PR ``gh pr merge``)
 - T10q GATE → QUEUED → MERGED  a merge queue took it; queue-rejected → WAITING (R5)
+- T10b GATE → QUEUED → MERGED  ``conventions.merge: queue``: the lane's own serialized queue
+                               (:mod:`asf.merge_queue`) cut the green PR into a batch ref
+                               (``batch`` and ``sha`` on the record), gated that exact sha on
+                               the product's whole required set, and fast-forwarded the trunk
+                               to it; a dropped batch → WAITING, cut again; a red one → BACK
 - T11 any open → MERGED        found merged (the PR, the pushed sha, or the diff on the trunk)
 - T12 any open → STALE         PR closed unmerged, branch gone, item superseded, PUSHED unmoved
                                past ``lane.stale_after``
@@ -1095,6 +1100,8 @@ def next_state(prev, facts):
     if s == MERGING:
         return keep if f.get('harvest_running') else (GATE, 'no merge seen after MERGING: gated again')
     if s == QUEUED:
+        if rec.get('batch'):  # T10b: the lane's own queue (asf.merge_queue) moves it
+            return keep
         if pr.get('state') == 'OPEN' and not pr.get('queued'):
             return WAITING, 'queue-rejected'
         return keep
@@ -1176,6 +1183,10 @@ class Lane:
         conv, trunk = self.conv, self.trunk
         runs = lifecycle.by_branch(self.path)
         heads = self.remote_heads()
+        if merge_queued(self):  # the queue's batch refs are its own, never a lane branch
+            from asf import merge_queue
+            prefix = merge_queue.settings(conv)['ref_prefix']
+            heads = {b: s for b, s in heads.items() if not b.startswith(prefix)}
         self.trunk_sha = heads.get(trunk) or H.sh(['git', 'rev-parse', f'origin/{trunk}'],
                                                  cwd=self.repo).stdout.strip()
         pr_map = self.host.prs() if prs else {}
@@ -2230,12 +2241,23 @@ def gate_pass(product, state_dir=None, items=None, out=print, dry_run=False, lan
             entries.append(f)
     entries = take_for_tick(lane, entries, items)
     ready = held_by_host(lane, precheck(lane, entries))
-    if ready:
+    if ready or merge_queued(lane):
         try:
-            gate_set(lane, ready)
+            if ready:
+                gate_set(lane, ready)
+            else:   # nothing new to gate: the batches in flight are still judged (T10b)
+                from asf import merge_queue
+                merge_queue.run(lane, [])
         finally:
             lane.finish_ref_pushes()
     return lane.results
+
+
+def merge_queued(lane):
+    """True when the product lands its PRs through the lane's own merge queue
+    (``conventions.merge: queue`` on a PR host: :mod:`asf.merge_queue`)."""
+    return lane.mode == 'pr' and not isinstance(lane.host, FastForwardHost) \
+        and bool(getattr(lane.conv, 'merge_queue', lambda: False)())
 
 
 def held_by_host(lane, ready):
@@ -2646,7 +2668,10 @@ def gate_set(product, entries):
                 gate_one_set(lane, [f], to_merge)
         else:
             gate_one_set(lane, group, to_merge)
-    if to_merge and not isinstance(lane.host, FastForwardHost):
+    if merge_queued(lane):   # T10b: batched onto the trunk, gated once as that sha
+        from asf import merge_queue
+        merge_queue.run(lane, to_merge)
+    elif to_merge and not isinstance(lane.host, FastForwardHost):
         merge_prs(lane, to_merge)
     return [(f['branch'], (f.get('prev') or {}).get('state'), (f.get('prev') or {}).get('reason'))
             for f in entries]
@@ -2895,12 +2920,16 @@ def merge_prs(lane, ready):
             continue
         if not sha:
             lane.out(f'held {b}: PR #{number} merge refused — {how}')
-            if MERGE_CONFLICT_RE.search(how or '') or host.conflicting(number):
-                # a trunk that moved under a green branch: the gate's conflict path, never a wait —
-                # its green is kept, so a wait would merge (and be refused) again every pass
-                # (a ``merge=union`` file merges clean here and conflicts on the host, which
-                # applies no merge driver — the rebase is what clears it either way)
-                files = conflict_files(lane.repo, lane.trunk, b)
+            # a trunk that moved under a green branch: the gate's conflict path, never a wait —
+            # its green is kept, so a wait would merge (and be refused) again every pass
+            # (a ``merge=union`` file merges clean here and conflicts on the host, which
+            # applies no merge driver — the rebase is what clears it either way). The text
+            # names it, or the host's ``mergeable`` does — or, when the host still reads
+            # UNKNOWN (it computes it lazily after the trunk moves) and the refusal keeps only
+            # gh's ``--auto`` hint, git does: a branch that does not merge onto the trunk is a
+            # conflict whatever the host managed to say (2026-09-26: 93 refusals, 25 on one PR)
+            files = conflict_files(lane.repo, lane.trunk, b)
+            if files or MERGE_CONFLICT_RE.search(how or '') or host.conflicting(number):
                 send_back(lane, f, 'conflict', f'PR #{number} merge refused — {how}'
                           + (f'; conflicts in {", ".join(files)}' if files else '')
                           + f' — rebase the branch onto origin/{lane.trunk} (git rebase '
