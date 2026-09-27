@@ -208,6 +208,9 @@ def card(meta, body):
                 stories=[str(x) for x in stories] if isinstance(stories, list) else [],
                 lane=str(meta.get('lane') or '').strip().lower() or None,
                 size=str(meta.get('size') or '').strip().lower() or None,
+                delivers=[str(x) for x in meta.get('delivers')]
+                if isinstance(meta.get('delivers'), list) else [],
+                delivered_by=str(meta.get('delivered_by') or '').strip() or None,
                 ab_pair=str(meta.get('ab_pair') or '').strip() or None,
                 links=meta.get('links') if isinstance(meta.get('links'), dict) else {})
 

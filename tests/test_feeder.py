@@ -1485,8 +1485,11 @@ class FinishBeforeYouStart(unittest.TestCase):
         # a Task that cannot start (it waits on its predecessor) is not ready to build either
         idx = finish_index(cards=4)
         idx['items']['T-0099']['after'] = ['T-0098']
+        # mid-lane: its PR is open (an Active Task nothing holds is an idle branch, and gets
+        # its coder back — tests/test_feature_delivery.py::IdleBranchTests)
         idx['items']['T-0098'] = {'id': 'T-0098', 'type': 'task', 'parent': 'F-0099',
-                                  'state': 'Active', 'writes': ['b.py']}
+                                  'state': 'Active', 'writes': ['b.py'],
+                                  'evidence': ['branch worker/T-0098, PR #98 OPEN']}
         out = rows.plan_rows(idx, product(), [], 10)
         self.assertFalse([r for r in out if r.waits_on == 'finish'], kinds(out))
 

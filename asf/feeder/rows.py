@@ -42,7 +42,14 @@ The row kinds::
                            every member as one document (brief ``delivery-plan``)
     DELIVERY → CODE        a delivery lead whose plan is approved: one session builds every open
                            member (brief ``delivery-code``) — unless the union of their
-                           ``writes:`` overlaps a running Task's, then ``WAITS ON <other>``
+                           ``writes:`` overlaps a running Task's, then ``WAITS ON <other>``.
+                           Under ``conventions.delivery: feature`` a Feature's Tasks are such a
+                           delivery, led by the first Task of each slice
+                           (:mod:`asf.record.slice`): the lead's ``after:`` inside the delivery
+                           is commit order, not a hold, and a branch the lane held
+                           ``incomplete`` (a crash, a run cap, ``status: partial``) comes back
+                           as this row with the hold's text — the session continues from the
+                           branch's head
     UNDECIDED → DECIDE     an open Feature, or an open S1/S2 Bug, whose ``decided`` is not true: the
                            card a free slot is waiting for. Launches nothing, costs no slot, and is
                            cut to ``conventions.decision_rows``
@@ -78,6 +85,9 @@ NAMING = 'naming'
 #: correct session, never adjudicate
 COPIES = 'copies'
 FOOTPRINT = 'footprint'  # == asf.workers.lifecycle.FOOTPRINT: a correction widen_footprint answers
+#: == asf.workers.lifecycle.INCOMPLETE: the lane held a delivery branch a member of which no
+#: commit names — the same lead comes back as a DELIVERY → CODE row and continues from the head
+INCOMPLETE = 'incomplete'
 STALEMATE = 'STALEMATE → ADJUDICATE'
 CONFLICT = 'CONFLICT → REBASE'
 STALE = 'STALE → CLOSE'
@@ -148,6 +158,7 @@ FINISH = 'WAITS ON finish'
 CAPPED_KINDS = frozenset({CARD_SPEC, STARVED_SPEC, STARVED_PLAN, PLAN_CODE, CONFLICT, STALE})
 REVIEW_RE = re.compile(r'^(spec|plan)-review r(\d+)')
 CLOSED_PR_RE = re.compile(r'\bPR #\d+ CLOSED\b')
+PR_RE = re.compile(r'\bPR #\d+\b')
 #: ingest's line for a spec that sits on a branch, not the trunk (``spec on <branch>[ (review …)]``)
 SPEC_ON_BRANCH_RE = re.compile(r'^spec on (?!origin/)(\S+)')
 PLAN_ON_TRUNK = 'plan on origin/main'
@@ -406,6 +417,32 @@ def is_small(feature):
             and not is_direct(feature))
 
 
+def feature_delivery(lead):
+    """True for a Feature delivery's slice (:mod:`asf.record.slice`, ``delivery: feature``): a
+    Task that leads a ``delivers:`` list. Its plan is its Feature's, already approved, so its
+    row is DELIVERY → CODE whatever stage the lead's own card carries."""
+    return bool(lead) and lead.get('type') == 'task' and bool(lead.get('delivers'))
+
+
+def delivery_lead_of(items, item):
+    """The lead of the delivery ``item`` is in — itself when it leads, its ``delivered_by``
+    otherwise — or None."""
+    if item.get('delivers'):
+        return item['id']
+    lead = item.get('delivered_by')
+    return lead if lead in items else None
+
+
+def delivered(items, item, landed_shas=None):
+    """True when a delivery speaks for ``item``: it is in one whose lead is still open and not
+    yet on the trunk. A member whose lead is done (the branch landed without it, F-0102 D11)
+    is residual: it goes back to its own lane at once, no groom pass needed."""
+    lead = delivery_lead_of(items, item)
+    if not lead:
+        return False
+    return is_open(items[lead]) and lead not in (landed_shas or {})
+
+
 def review_round(item):
     """(doc, round) off a ``spec-review r3`` / ``plan-review r4`` stage, else (None, 0)."""
     m = REVIEW_RE.match(item.get('stage') or '')
@@ -458,6 +495,17 @@ def _pr_conflicting(item):
 
 def _pr_closed(item):
     return any(CLOSED_PR_RE.search(e) for e in item.get('evidence') or [])
+
+
+def idle_branch(item):
+    """True for an Active Task whose branch nobody is moving: no PR names it in the evidence,
+    and (the caller's part) no session, no lane state, no correction on it. Nothing pushes
+    such a branch forward — the lane prints ``empty branch — waits`` for ever (a product's
+    T-0362 and T-0371, 2026-09-26: cloud runs dead on quota with nothing past the trunk) — so
+    the coder is launched again on the same branch, its worktree kept as it stands."""
+    return (item.get('type') == 'task' and item.get('state') == 'Active'
+            and not item.get('blocked')
+            and not any(PR_RE.search(str(e)) for e in item.get('evidence') or []))
 
 
 def _branch_of(item, product, kind):
@@ -609,6 +657,15 @@ def correction_rows(items, product, busy, corrections):
                            brief_kind='adjudicate', branch=branch, correction=c['text'],
                            reason=f"held {same} times on the same finding ({c.get('kind')}): "
                                   f"adjudicate, not another correction"))
+        elif c.get('kind') == INCOMPLETE and item.get('delivers'):
+            # a delivery branch a member of which no commit names: the same lead, the same
+            # brief, the hold's text under it — the session continues from the branch's head
+            f = _task_feature(items, item) if item['type'] == 'task' else feature_of(items, item)
+            out.append(Row(tier=tier, kind=DELIVERY_CODE, item_id=iid,
+                           feature_id=f['id'] if f else fid, action=LAUNCH,
+                           brief_kind='delivery-code', branch=branch, correction=c['text'],
+                           reason=f"the lane held it ({INCOMPLETE}), round {rounds}: continue "
+                                  f"the delivery from the head of {branch}"))
         else:
             out.append(Row(tier=tier, kind=FIX_CORRECT, item_id=iid, feature_id=fid, action=LAUNCH,
                            brief_kind='correct', branch=branch, correction=c['text'],
@@ -665,9 +722,15 @@ def lane_rows(items, product, busy, occupancy):
     return out
 
 
-def branch_rows(items, product, busy):
-    """CONFLICT → REBASE and STALE → CLOSE over Active Tasks and Bugs no session holds."""
+def branch_rows(items, product, busy, held=(), landed_shas=None):
+    """CONFLICT → REBASE and STALE → CLOSE over Active Tasks and Bugs no session holds — and,
+    for an Active Task on an idle branch (:func:`idle_branch`: no PR, and nothing in ``busy``
+    or ``held`` — no session, no correction, no lane state, no landing the record has yet to
+    ingest — nor on the trunk), its PLAN → CODE row again on that same branch: the coder
+    continues where the dead run stopped. A Task a delivery speaks for (:func:`delivered`) is
+    built there instead."""
     out = []
+    landed = landed_ids(items, landed_shas)
     for v in sorted(items.values(), key=lambda v: v['id']):
         if v['type'] not in ('task', 'bug') or v.get('state') != 'Active' or v['id'] in busy:
             continue
@@ -682,6 +745,12 @@ def branch_rows(items, product, busy):
             out.append(Row(tier=2, kind=CONFLICT, item_id=v['id'], feature_id=fid, action=LAUNCH,
                            brief_kind='rebase', branch=_branch_of(v, product, kind),
                            reason='PR does not merge cleanly, no session on it'))
+        elif (idle_branch(v) and v['id'] not in held and v['id'] not in landed
+              and not delivered(items, v, landed_shas)):
+            out.append(Row(tier=2, kind=PLAN_CODE, item_id=v['id'], feature_id=fid, action=LAUNCH,
+                           brief_kind='task', branch=_branch_of(v, product, kind),
+                           reason='Active on an idle branch: no session, no PR, nothing past '
+                                  'the trunk — the coder continues on its branch, worktree kept'))
     return out
 
 
@@ -774,17 +843,25 @@ def delivery_rows(items, product, busy, running, landed_shas=None):
     ``running`` so the Tasks placed after it (:func:`candidates` calls this before
     :func:`feature_rows`) see the delivery's footprint (PD10, PD11)."""
     out = []
-    leads = [v for v in items.values() if v.get('delivers')]
+    on_trunk = landed_shas or {}
+    leads = [v for v in items.values() if v.get('delivers') and is_open(v)
+             and v['id'] not in on_trunk]
     for lead in sorted(leads, key=lambda v: (ix.rank(v), v['id'])):
         lid = lead['id']
+        slice_ = feature_delivery(lead)
+        feature = _task_feature(items, lead) if slice_ else None
+        if slice_ and not in_build_stage(feature):
+            continue  # the Feature's own rows speak for it (its spec ladder, its stalemate)
+        fid = feature['id'] if feature else lid
         open_members = [m for m in lead.get('delivers') or ()
-                        if m in items and is_open(items[m])]
+                        if m in items and is_open(items[m]) and m not in on_trunk]
         if not open_members:
             continue
         others = [m for m in open_members if m != lid]
         stage = lead.get('stage') or 'card'
         word = stage.split(' ')[0]
-        code_stage = word in BUILD_STAGES
+        # a Feature delivery's plan is its Feature's, approved by construction (asf.record.slice)
+        code_stage = slice_ or word in BUILD_STAGES
         kind = DELIVERY_CODE if code_stage else DELIVERY_PLAN
         brief = 'delivery-code' if code_stage else 'delivery-plan'
         branch = branch_for(product, 'code' if code_stage else 'plan', lid)
@@ -792,7 +869,7 @@ def delivery_rows(items, product, busy, running, landed_shas=None):
         if blocked_id is not None:
             blockers = list(items[blocked_id].get('blocked_by_open') or ())
             on = blockers[0] if blockers else 'blocked'
-            out.append(Row(tier=2, kind=kind, item_id=lid, feature_id=lid,
+            out.append(Row(tier=2, kind=kind, item_id=lid, feature_id=fid,
                            action=f'WAITS ON {on}', brief_kind=brief, branch=branch,
                            reason='blocked by ' + (', '.join(blockers) or 'an open item'),
                            waits_on=on))
@@ -803,21 +880,23 @@ def delivery_rows(items, product, busy, running, landed_shas=None):
             other = footprint.first_conflict(union, running,
                                              _conventions(product).get('shared_paths') or ())
             if other:
-                out.append(Row(tier=2, kind=kind, item_id=lid, feature_id=lid,
+                out.append(Row(tier=2, kind=kind, item_id=lid, feature_id=fid,
                                action=f'WAITS ON {other}', brief_kind=brief, branch=branch,
                                reason=f'writes: overlaps {other}', waits_on=other))
             else:
-                out.append(Row(tier=2, kind=kind, item_id=lid, feature_id=lid, action=LAUNCH,
+                what = (f'{len(open_members)} Tasks of {fid}: one branch, one PR, one review'
+                        if slice_ else f'{len(open_members)} items, plan approved')
+                out.append(Row(tier=2, kind=kind, item_id=lid, feature_id=fid, action=LAUNCH,
                                brief_kind=brief, branch=branch,
-                               reason=f'{len(open_members)} items, plan approved, footprint free'))
+                               reason=f'{what}, footprint free'))
                 running.append((lid, union))
         else:
             reason = (f"{len(open_members)} items, no plan yet" if word == 'card'
                       else f"{stage}, no session")
-            out.append(Row(tier=2, kind=kind, item_id=lid, feature_id=lid, action=LAUNCH,
+            out.append(Row(tier=2, kind=kind, item_id=lid, feature_id=fid, action=LAUNCH,
                            brief_kind=brief, branch=branch, reason=reason))
         for m in others:
-            out.append(Row(tier=2, kind=kind, item_id=m, feature_id=lid,
+            out.append(Row(tier=2, kind=kind, item_id=m, feature_id=fid,
                            action=f'WAITS ON delivery {lid}', brief_kind='task', branch=branch,
                            reason=f'delivered by {lid}: the delivery speaks for it',
                            waits_on='delivery'))
@@ -955,9 +1034,13 @@ def land_spec_row(feature, product, occupancy):
 
 
 def task_rows(items, product, feature, busy, running, landed_shas=None):
+    """The Feature's New Tasks, one PLAN → CODE row each — the residual under ``delivery:
+    feature``: a Task a delivery speaks for (:func:`delivered`) gets its row from
+    :func:`delivery_rows`, not here."""
     out = []
     tasks = [t for t in ix.feature_tasks(items, feature)
-             if t.get('state', 'New') == 'New' and t['id'] not in busy and not t.get('blocked')]
+             if t.get('state', 'New') == 'New' and t['id'] not in busy and not t.get('blocked')
+             and not delivered(items, t, landed_shas)]
     landed = landed_ids(items, landed_shas)
     absorbed = absorbers(items)
     on_trunk = landed_shas or {}
@@ -1164,17 +1247,21 @@ def hold_unlanded(rows, items, landed_shas=None):
 
     A :data:`DELIVERY_PLAN`/:data:`DELIVERY_CODE` row's scan reads the lead **and** every member
     of its ``delivers:`` — an ``after:`` any of them names holds the whole delivery on the first
-    unlanded predecessor found."""
+    unlanded predecessor found. An ``after:`` naming another member of the same delivery is
+    not a hold: it is the order the one session commits in (``delivery: feature``)."""
     landed = landed_ids(items, landed_shas)
     absorbed = absorbers(items)
     out, said = [], set()
     for r in rows:
         if r.kind in (DELIVERY_PLAN, DELIVERY_CODE):
-            lead = items.get(r.item_id) or {}
+            # a member's WAITS ON delivery row scans its lead's list too: its own after: on a
+            # sibling of the delivery is commit order, not a hold
+            lid = delivery_lead_of(items, items.get(r.item_id) or {}) or r.item_id
+            lead = items.get(lid) or {}
             ids = list(lead.get('delivers') or ())
             if r.item_id not in ids:
                 ids = [r.item_id] + ids
-            pending, seen = [], set()
+            pending, seen = [], set(ids)
             for iid in ids:
                 for a in after_of(items, items.get(iid) or {}, absorbed):
                     if a not in landed and a not in seen:
@@ -1260,7 +1347,13 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
     bugs = bug_rows(items, product, busy | spoken, attempts, held_by)
     rows += [r for r in bugs if r.launches]
     bug_waits = [r for r in bugs if not r.launches]
-    rows += [r for r in branch_rows(items, product, busy) if r.feature_id not in stalled]
+    # an idle branch is one nothing holds: a correction, a lane state (a partial occupancy
+    # names it under review/landing alone) or a landing the record has not ingested yet
+    held = (spoken | set(occ.get('review') or ()) | set(occ.get('landing') or ())
+            | {v.get('item') for v in (occ.get('lanes') or {}).values() if v.get('item')}
+            | set(occ.get('landed') or ()))
+    rows += [r for r in branch_rows(items, product, busy, held, landed_shas)
+             if r.feature_id not in stalled]
     rows += groom_rows(index, product, busy, groom_state, inflight)
     # a Task a correction row speaks for gets no PLAN → CODE row too: one session per branch
     # (and a direct Feature's correction is its one session: no DIRECT → BUILD beside it)
@@ -1270,7 +1363,8 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
     # a Feature's spec and plan wait to land one branch at a time: the document rows read that
     # per branch (:func:`_waiting_doc`), so one waiting document never holds the other
     docs_waiting = {i for i in waiting if (items.get(i) or {}).get('type') == 'feature'}
-    rows += delivery_rows(items, product, busy, running, landed_shas)
+    # a lead a correction row speaks for gets no delivery row too: one session per branch
+    rows += delivery_rows(items, product, busy | spoken, running, landed_shas)
     rows += feature_rows(items, product, (busy - docs_waiting) | tasks_spoken, running,
                          landed_shas, occ)
     rows += undecided_rows(items, product, busy, decision_limit)
@@ -1437,9 +1531,11 @@ def build_cap(rows, items, product, inflight, capacity, held=(), occupancy=None,
     out = []
     for r in rows:
         f = items.get(r.feature_id) or items.get(r.item_id) or {}
+        first_task = (r.kind == PLAN_CODE
+                      or r.kind == DELIVERY_CODE and feature_delivery(items.get(r.item_id)))
         if (r.launches and not r.correction and r.item_id not in held and not f.get('ab_pair')
                 and r.feature_id not in building
-                and (r.kind in NEW_DOC_KINDS or (r.kind == PLAN_CODE and in_build_stage(f)))):
+                and (r.kind in NEW_DOC_KINDS or (first_task and in_build_stage(f)))):
             r = dataclasses.replace(r, action=f'{FINISH}: {reason}', waits_on='finish',
                                     reason=f'finish before you start — {reason}')
         out.append(r)

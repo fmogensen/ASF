@@ -394,6 +394,7 @@ def context(product, row, kind, facts):
         'tests': ', '.join(facts['tests']) if facts['tests'] else '(name the test you add)',
         'delivers': ', '.join(facts['delivers']) or '(none)',
         'delivery_count': len(facts['delivers']),
+        'delivery_checks': delivery_checks(facts),
         'stories': '; '.join(facts['stories']) if facts['stories'] else '(none yet)',
         'proves': facts['proves_lines'] or '(this Task lists no Story — say so in the report)',
         'description': (sections.get('description') or item.get('title') or '—').strip(),
@@ -413,7 +414,35 @@ def correction_text(row, kind):
     stall's head."""
     text = getattr(row, 'correction', '') or ''
     return CORRECTION_HEAD + text.rstrip() \
-        if kind in ('correct', 'spec', 'plan', 'adjudicate') and text else ''
+        if kind in ('correct', 'spec', 'plan', 'adjudicate', 'delivery-code') and text else ''
+
+
+def delivery_checks(facts):
+    """The review's per-item check blocks for a delivery lead (``delivers:``): one table per
+    member — the same six checks, judged on that member's commit and its section of the plan
+    — and, under each, one row per acceptance line of the Stories its Task proves. ``''`` for
+    a branch that delivers one item: the one table above is the verdict. Rendered right after
+    the table's last row, so it carries its own leading blank line."""
+    members = facts.get('members') or []
+    if len(members) < 2:
+        return ''
+    out = ['', '',
+           'THE BRANCH DELIVERS SEVERAL ITEMS — one block per item, in this order, each its own '
+           'table of the six checks above, judged on that item\'s own commit and its own section '
+           'of the plan. An item no commit names is a block of `fail` rows, not a missing block. '
+           'A C names the item it belongs to.', '']
+    for member in members:
+        mid, mtype, title, writes, acceptance, _fix = member[:6]
+        proves = member[6] if len(member) > 6 else ''
+        out.append(f"### {mid} — {title} ({mtype}); writes: "
+                   f"{', '.join(writes) if writes else '(none declared)'}")
+        if acceptance:
+            out += ['acceptance:'] + list(acceptance)
+        if proves:
+            out += ['one row per Story line below — `proves: <S-id> line <n>` pass | fail, with '
+                    'the test that proves it:', proves]
+        out.append('')
+    return '\n'.join(out).rstrip()
 
 
 def customer_section(product, kind, branch):

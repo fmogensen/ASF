@@ -47,6 +47,11 @@ Transitions (plan §2 plus the §9 overrides):
                                the gate is a full suite and this host has no room for it, B-0109)
                                — never a correction, never a round
 - T9  GATE → BACK              red alone on a green trunk, conflict, a lane refusal
+- T9i PUSHED → BACK            a delivery branch (``delivers:``) not whole — a member no commit
+                               names while the report does not say ``done``: a crash, a run
+                               cap, ``status: partial`` (:func:`incomplete_refusal`) — no PR
+                               opens; the lead comes back as a DELIVERY → CODE row and the
+                               session continues from the branch's head
 - T9c wait → BACK              a pending correction written on a landing wait (PR_OPEN, REVIEW,
                                GATE, WAITING_CI, WAITING) since its head arrived
                                (:func:`correction_turns_back`): kind = the correction's
@@ -730,6 +735,13 @@ def delivery_members(items, item):
     return tuple(((items or {}).get(item) or {}).get('delivers') or ())
 
 
+def feature_delivery(items, item):
+    """True when ``item`` leads a Feature delivery's slice (:mod:`asf.record.slice`,
+    ``conventions.delivery: feature``): a Task card carrying ``delivers:``."""
+    card = (items or {}).get(item) or {}
+    return card.get('type') == 'task' and bool(card.get('delivers'))
+
+
 def item_footprint(items, item):
     """The globs the branch of ``item`` may touch: its card's ``writes:``, plus every member's
     when it leads a delivery — the union the foreign-red rule measures a delivery against."""
@@ -771,6 +783,42 @@ def lane_refusal(repo, trunk, branch, item, conv=None, members=()):
     if conv is not None:
         return customer_content.refusal(repo, trunk, branch, conv)
     return None
+
+
+def report_status(run):
+    """The ``status:`` word of ``run``'s typed REPORT (``done`` | ``partial`` | ``blocked``), or
+    ``''`` when the run left none — a crash, a run cap, a log that is gone, no run at all."""
+    if not run:
+        return ''
+    from asf.workers import report as report_mod
+    result = lifecycle.result_of(run) or {}
+    fields = report_mod.parse(result.get('result') if isinstance(result, dict) else '')
+    return (fields.get('status') or '').strip().lower().split(' ')[0]
+
+
+def incomplete_refusal(repo, trunk, branch, members, run):
+    """``(kind, text)`` for a delivery branch that is not whole, or None: a member of
+    ``members`` no commit on ``origin/<branch>`` names, while the run's report does not say
+    ``done`` (``status: partial``, a crash, a run cap — no report at all). A ``done`` report
+    with members left out is F-0102 D11: the branch lands without them. No run to read (an
+    adopted branch) is no refusal either: the lane cannot know the session meant to go on.
+    The hold's text is the session's instruction: the branch's head is the state, a Task whose
+    commit is on it is done, the rest follow in order. No PR opens while it holds."""
+    if not members or run is None:
+        return None
+    named, missing = members_named(repo, trunk, branch, members)
+    if not missing:
+        return None
+    status = report_status(run)
+    if status == 'done':
+        return None
+    said = f'the report says {status}' if status else 'the run ended without a report'
+    return lifecycle.INCOMPLETE, (
+        f"delivery incomplete: no commit on origin/{branch} names {', '.join(missing)} "
+        f"(done: {', '.join(named) or 'none'}; {said}). No PR opens for a partial delivery. "
+        f"Continue from the head of origin/{branch}: a Task whose commit is on the branch is "
+        f"done — do not redo it; build {missing[0]} next, then the rest in order, one commit "
+        f"per Task with its id in the subject, and push the same branch.")
 
 
 def deliverable_of(conv, branch, item):
@@ -1289,8 +1337,14 @@ class Lane:
             f['review_waived'] = review_waived(conv, f['kind'], self.items, item, lines)
             f['review_required'] = not f['review_waived']
         if rec.get('state') in (None, PUSHED, BACK) and not f['foreign']:
-            f['refusal'] = lane_refusal(repo, trunk, b, item, conv,
-                                        members=delivery_members(self.items, item))
+            members = delivery_members(self.items, item)
+            f['refusal'] = lane_refusal(repo, trunk, b, item, conv, members=members)
+            if not f['refusal'] and feature_delivery(self.items, item):
+                # a Feature delivery not whole: no PR, back to its session (T9i). An F-0102
+                # cross-item delivery keeps its D11: the branch lands without a member
+                f['refusal'] = incomplete_refusal(repo, trunk, b, members, run)
+                if f['refusal']:  # the hold's finding: the members still missing (progress is a new finding)
+                    f['incomplete'] = members_named(repo, trunk, b, members)[1]
         f['customer'] = customer_content.touched(conv, f['files'])
         # a customer page is never landed unread: its diff needs a review whatever its class
         f['review_required'] = f['review_required'] or bool(f['customer'])
@@ -2151,7 +2205,8 @@ class Lane:
         if f.get('run') is None:
             self.write(f, self.record(f, PUSHED, 'adopted'))
         rec = self.set(f, BACK, reason)
-        finding = review_mod.c_items((f.get('review') or {}).get('body')) if kind == 'review' else None
+        finding = review_mod.c_items((f.get('review') or {}).get('body')) if kind == 'review' \
+            else f.get('incomplete') if kind == lifecycle.INCOMPLETE else None
         self.results[b] = hold_with_correction(self.state_dir, b, f['run'], kind, text, self.out,
                                                head=f.get('head'), finding=finding,
                                                main=self.trunk)
@@ -3070,7 +3125,8 @@ class GitHubHost(Host):
         from asf.tick import step_prs
         items = (self.lane.items if self.lane else None) or {}
         root = self.lane.root if self.lane else None
-        title, body = step_prs.title_and_body(item or '', items.get(item or '') or {}, root, branch)
+        title, body = step_prs.title_and_body(item or '', items.get(item or '') or {}, root, branch,
+                                              items=items)
         if self.product.conventions.branch_kind(branch) == DIRECT:
             note = first_commit_body(self.product.repo_dir, self.trunk, branch)
             if note:  # the direct session's spec+plan note: the PR description carries it

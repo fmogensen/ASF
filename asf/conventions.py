@@ -230,6 +230,20 @@ DEFAULT_BRANCH_RETENTION = {'archive_days': 14, 'legacy_prefixes': [], 'legacy_d
 #: fewer lines than this lands on CI and the gate alone — no review session. 0 turns it off.
 DEFAULT_REVIEW_SKIP_UNDER_LINES = 80
 
+#: ``delivery``: the unit the factory builds and lands a Feature in. ``task`` (the default) is
+#: one branch, one PR, one review per Task. ``feature`` makes the whole Feature one delivery
+#: (:mod:`asf.record.slice`): its Tasks one branch, one PR, one CI run and one review — cut into
+#: ordered slices only when the plan is larger than ``slice_max_tasks`` Tasks or its union
+#: footprint larger than ``size.medium_max_files`` files. Any other word is a red doctor finding
+#: and reads as the default.
+DELIVERY_TASK = 'task'
+DELIVERY_FEATURE = 'feature'
+DELIVERY_UNITS = (DELIVERY_TASK, DELIVERY_FEATURE)
+DEFAULT_DELIVERY = DELIVERY_TASK
+#: ``slice_max_tasks``: the most Tasks one Feature delivery carries before the plan is cut into
+#: slices along its ``after:`` boundaries (``delivery: feature`` only).
+DEFAULT_SLICE_MAX_TASKS = 6
+
 #: The keys of the yaml's ``lane:`` block and the field each one is.
 LANE_KEYS = {'review': 'lane_review', 'stale_after': 'lane_stale_after'}
 
@@ -554,6 +568,12 @@ class Conventions:
     #: ``merge``: ``auto`` | ``manual`` (:data:`DEFAULT_MERGE`); any other value is a red doctor
     #: finding and reads as the default.
     merge: str = DEFAULT_MERGE
+    #: ``delivery``: ``task`` | ``feature`` (:data:`DEFAULT_DELIVERY`) — the unit a Feature is
+    #: built and landed in; any other value is a red doctor finding and reads as the default.
+    delivery: str = DEFAULT_DELIVERY
+    #: ``slice_max_tasks`` (:data:`DEFAULT_SLICE_MAX_TASKS`): the most Tasks one Feature
+    #: delivery carries whole.
+    slice_max_tasks: int = DEFAULT_SLICE_MAX_TASKS
     #: ``branch_retention``: merged over :data:`DEFAULT_BRANCH_RETENTION` (see there).
     branch_retention: dict = field(default_factory=lambda: dict(DEFAULT_BRANCH_RETENTION))
     #: ``protected_refs``: branch names or globs no factory write may push, force or delete
@@ -591,6 +611,11 @@ class Conventions:
             misshapen['merge'] = data.pop('merge')
         elif merge is not None:
             data['merge'] = str(merge).strip().lower()
+        delivery = data.get('delivery')
+        if delivery is not None and str(delivery).strip().lower() not in DELIVERY_UNITS:
+            misshapen['delivery'] = data.pop('delivery')
+        elif delivery is not None:
+            data['delivery'] = str(delivery).strip().lower()
         models = data.get('models')
         for kind, value in (models.items() if isinstance(models, dict) else ()):
             # ``models.<kind>``: a label, or a map of labels by class (asf.briefs.build)
@@ -653,6 +678,7 @@ class Conventions:
             words = WORD_OR_MAP_CONVENTIONS.get(key)
             want = (f"one of {', '.join(words)} or a map of them per landing class" if words
                     else f"one of {', '.join(MERGE_MODES)}" if key == 'merge'
+                    else f"one of {', '.join(DELIVERY_UNITS)}" if key == 'delivery'
                     else 'a model label or a map of labels by class' if key.startswith('models.')
                     else 'a map')
             out.append((key, f'must be {want}, not {value!r}'))
@@ -687,6 +713,29 @@ class Conventions:
         """True under ``merge: queue`` — the lane lands green PRs as gated batches
         (:mod:`asf.merge_queue`), never by a direct host merge."""
         return str(self.merge or '').strip().lower() == MERGE_QUEUE
+
+    # ---- the delivery unit ---------------------------------------------------
+
+    def delivery_feature(self):
+        """True under ``delivery: feature`` — a Feature's Tasks are built and landed as one
+        delivery (:mod:`asf.record.slice`); the default ``task`` leaves every lane as it is."""
+        return str(self.delivery or '').strip().lower() == DELIVERY_FEATURE
+
+    def slice_max_tasks_n(self):
+        """``slice_max_tasks`` (:data:`DEFAULT_SLICE_MAX_TASKS`); a malformed value is the default."""
+        v = self.slice_max_tasks
+        return v if isinstance(v, int) and not isinstance(v, bool) and v >= 1 \
+            else DEFAULT_SLICE_MAX_TASKS
+
+    def slice_max_files(self):
+        """``size.medium_max_files`` — the file count above which a Feature delivery is cut
+        (the same threshold :mod:`asf.size` classes a footprint ``large`` by); the size module's
+        own default when the product's ``size:`` block does not name it."""
+        from asf.size import SizeConfig  # local: size imports the feeder's footprint rule
+        size = self.get('size')
+        v = size.get('medium_max_files') if isinstance(size, dict) else None
+        return v if isinstance(v, int) and not isinstance(v, bool) and v >= 1 \
+            else SizeConfig().medium_max_files
 
     # ---- commits -------------------------------------------------------------
 

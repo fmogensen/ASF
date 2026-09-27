@@ -99,6 +99,13 @@ conventions:
   # and the most globs a Task may write and still be batched. Both shown at their defaults.
   # area_depth: 2
   # batch_max_globs: 2
+  # asf.record.slice: the unit a Feature is built and landed in. `task` (the default) is one
+  # branch, one PR, one review per Task. `feature` makes the whole Feature one delivery — its
+  # Tasks one branch, one PR, one CI run, one review, one commit per Task — cut into ordered
+  # slices along the plan's `after:` only past `slice_max_tasks` Tasks or `size.medium_max_files`
+  # footprint entries. Both shown at their defaults.
+  # delivery: task
+  # slice_max_tasks: 6
   # asf.feeder.widen: the most paths one footprint widening adds to a Task's writes: — more is a
   # reshape of the Task. Shown at its default.
   # widen_max_files: 5

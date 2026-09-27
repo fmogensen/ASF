@@ -45,6 +45,7 @@ def compute(root, product, weeks=4, facts=None):
         'product': product.name, 'as_of': facts.as_of, 'window_days': cfg['window_days'],
         'headline': score.headline(facts, rows=rows), 'clutter': facts.clutter,
         'weeks': week_rows,
+        'units': score.by_unit(facts, start, end, rows),
         'features': [r for r in rows if (r['landed'] or '') >= oldest],
         'rank': diagnose.rank(facts, start, end),
         'causes': [dict(c.__dict__, loop=state.get(c.key)) for c in causes],
@@ -70,6 +71,19 @@ def render(d):
     c = d['clutter'] or {}
     out += ['', f"Clutter now: {_n(c.get('stale_prs'))} stale PRs of {_n(c.get('open_prs'))} open · "
                 f"{_n(c.get('branches'))} branches with no open PR", '']
+    units = d.get('units') or {}
+    if units:
+        out += [f"**By delivery unit** — last {d['window_days']} days", '',
+                '| Unit | Landed | Per day | Median lead (card→landed) | $/feature (own + its bugs) '
+                '| Sessions/feature | Repair/feature |', '|---|---|---|---|---|---|---|']
+        for unit in score.UNITS:
+            v = units.get(unit)
+            if not v:
+                continue
+            out.append(f"| {unit} | {v['landed']} | {_n(v['per_day'])} | {_n(v['median_lead_days'])} d "
+                       f"| {_m(v['usd_per_feature'])} | {_n(v['sessions_per_feature'])} "
+                       f"| {_n(v['repair_per_feature'])} |")
+        out.append('')
     out += ['**Features landed**', '',
             '| Feature | Landed | Prod | Lead | $ own | $ on its bugs | Sessions | Tokens | CI min '
             '| Repair | Corrections | Send-backs | Reopens | Bugs (S1) |',

@@ -70,6 +70,12 @@ def of(conv, item):
         usd = item_usd
     if item_sessions is not None or item_usd is not None:
         source = 'item'
+    # a delivery lead (``delivers:``) spends for every member it builds: its budget is the
+    # per-item one times the members, unless the card sets its own
+    members = len(item.get('delivers') or ()) if isinstance(item.get('delivers'), list) else 0
+    if members > 1 and source != 'item':
+        sessions = None if sessions is None else sessions * members
+        usd = None if usd is None else usd * members
     return Budget(sessions=sessions, usd=usd, source=source)
 
 

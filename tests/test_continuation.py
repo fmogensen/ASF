@@ -228,7 +228,7 @@ class RuleTests(Home):
         self.assertEqual(continuation.heartbeat_min(self.product), 6.0)
 
     def test_the_fences(self):
-        self.assertEqual(continuation.ANSWERING, ('correct', 'spec', 'spec-amend', 'plan'))
+        self.assertEqual(continuation.ANSWERING, ('correct', 'spec', 'spec-amend', 'plan', 'delivery-code'))
         self.assertEqual(continuation.NEVER, ('adjudicate', 'review', 'groom', 'reshape', 'rebase',
                                               'close', 'fix-bug', 'task'))
         self.assertEqual(continuation.DEFAULT_HEARTBEAT_MIN, 6)

@@ -825,6 +825,57 @@ class DeliveryLaneTest(LaneFixture):
         self.assertEqual(kind, 'merge')
         self.assertIn('merge commit on a lane branch', text)
 
+    def session_at(self, job, item, branch, started, end_reason='failed: dead pid'):
+        """A run that ended without a report — a crash, a run cap, a spent window."""
+        p = subprocess.Popen(['true'])
+        p.wait()
+        with open(os.path.join(self.state_dir, 'sessions.jsonl'), 'a', encoding='utf-8') as f:
+            f.write(json.dumps({'job': job, 'item': item, 'branch': branch, 'kind': 'delivery-code',
+                                'pid': p.pid, 'started': started}) + '\n')
+            f.write(json.dumps({'job': job, 'ended': started, 'end_reason': end_reason, 'rc': 1})
+                    + '\n')
+
+    def test_a_feature_delivery_not_whole_is_held_and_lands_once_whole(self):
+        """T9i (``delivery: feature``): a Task-led delivery whose run died with one member's
+        commit missing is held ``incomplete`` — no PR, the branch kept — and the next push that
+        completes it lands with every member."""
+        branch, lead = 'worker/T-0001', 'T-0001'
+        items = {'T-0001': {'type': 'task', 'delivers': ['T-0001', 'T-0002']},
+                 'T-0002': {'type': 'task', 'delivered_by': 'T-0001'}}
+        self.push_commits(branch, [('feat(T-0001): one', {'a.txt': 'a\n'})])
+        self.session_at('delivery-code-t-0001', lead, branch, '2026-09-21T00:00:00Z')
+        before = self.origin_main()
+        lines = []
+        results = harvest.run_product_harvest(self.product(), self.state_dir, out=lines.append,
+                                              items=items)
+        self.assertEqual(results, {branch: 'held'}, lines)
+        run = lifecycle.by_branch(os.path.join(self.state_dir, 'sessions.jsonl'))[branch]
+        self.assertEqual(run['lane']['state'], lane.BACK)
+        self.assertEqual(run['correction']['kind'], lifecycle.INCOMPLETE)
+        self.assertIn('no commit on origin/worker/T-0001 names T-0002', run['correction']['text'])
+        self.assertIn('the run ended without a report', run['correction']['text'])
+        self.assertEqual(run['correction']['finding'], ['T-0002'])
+        self.assertEqual(self.origin_main(), before, 'nothing lands while the delivery is partial')
+        self.assertTrue(any('held worker/T-0001: delivery incomplete' in ln for ln in lines), lines)
+        # the session answers the hold from the branch's head: the second member's commit lands both
+        self.push_commits(branch, [('feat(T-0001): one', {'a.txt': 'a\n'}),
+                                   ('feat(T-0002): two', {'b.txt': 'b\n'})])
+        later = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() + 60))
+        self.session('delivery-code-t-0001', lead, branch)
+        with open(os.path.join(self.state_dir, 'sessions.jsonl'), encoding='utf-8') as f:
+            text = f.read().replace('"started": "2026-09-21T00:00:00Z"', f'"started": "{later}"', 1)
+        # the fixture's session helper stamps a fixed start: the answering run must start after
+        # the hold, so its launch line is restamped (the last launch line is the answer's)
+        head, _sep, tail = text.rpartition('"started": "2026-09-21T00:00:00Z"')
+        text = head + f'"started": "{later}"' + tail if _sep else text
+        with open(os.path.join(self.state_dir, 'sessions.jsonl'), 'w', encoding='utf-8') as f:
+            f.write(text)
+        results = harvest.run_product_harvest(self.product(), self.state_dir, out=lines.append,
+                                              items=items)
+        self.assertEqual(results, {branch: 'landed'}, lines)
+        self.assertTrue(any(ln.startswith('landed worker/T-0001') and ln.endswith(': delivered T-0001, T-0002')
+                            for ln in lines), lines)
+
     def test_item_footprint_is_the_union_of_the_lead_and_its_members(self):
         items = {'F-0097': {'delivers': ['F-0097', 'B-0034'], 'writes': ['a/**']},
                  'B-0034': {'writes': ['a/**', 'b.py']}, 'B-0001': {'writes': ['z']}}
