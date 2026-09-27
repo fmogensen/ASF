@@ -12,6 +12,10 @@ FOR EACH ONE, one of two outcomes — never "noted", never a question back:
 - for a `refused on repeat:` line — a card the approvals hook refused the same action on run
   after run — decide what becomes of it: `no: <why>` to drop it, `close: <why>` to close it, or
   `reshape: <how>` to have its plan reshaped so the work needs no refused action;
+- for a `conflicts` line — two live rules or decisions that may say opposite things: `keep A`,
+  `keep B` (the other is marked superseded), `both` (they do not actually conflict, never asked
+  again), or `merge` (the survivor the line names takes the other's source line and history).
+  The two statements are the indented lines under the question in the groom file.
 - or, when the question is not yours to answer, the literal `NEEDS OPERATOR: <the question> —
   <your recommendation>`.
 
