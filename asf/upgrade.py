@@ -16,6 +16,13 @@ finish, and the owner's next tick finds the gap and installs, clearing the marke
 older than :data:`PENDING_TTL_S`, or whose sha is already installed, is removed and ignored —
 a stuck upgrade never stops the factory.
 
+The marker is written only for a target the install will actually take: a head the install would
+refuse — red remote CI, or no readable head — parks nobody (:func:`refuses`), and a marker this
+caller holds whose target the moved head has made uninstallable is cleared there and then rather
+than left to expire (B-0141). While a marker does hold the ticks, the doctor's ``SCHEDULER``
+section and the status ``Cron`` row say so (:func:`held`, :func:`held_label`) instead of reading
+``ok`` through a factory that is not ticking.
+
 The floor drains rather than waits for luck. A running asf process counts — the ticks and the
 detached background harvest (``python -m asf.tick.step_harvest``) alike, since a reinstall under
 either tears it; a process under another ASF home, such as a test suite's ``tick --product
@@ -49,7 +56,7 @@ DEFAULT_REPO_URL = 'https://github.com/fmogensen/ASF.git'
 #: anchored on the interpreter's argv, so a shell whose script merely mentions them does not match
 TICK_PATTERN = r'(-m asf\.cli|/asf) tick( |$)|-m asf\.tick\.step_harvest( |$)'
 #: a pending marker older than this is stale: removed, reported, and ignored
-PENDING_TTL_S = 20 * 60
+PENDING_TTL_S = 10 * 60
 #: ``upgrade.drain_wait_s`` when the operator config leaves it out
 DEFAULT_DRAIN_WAIT_S = 180
 #: ``asf upgrade --wait`` with no seconds given
@@ -193,6 +200,42 @@ def pending(now=None, installed=None, out=print, run=subprocess.run):
             f'(asf upgrade --ref {data["sha"][:7]} --wait)')
         return None
     return data
+
+
+def held(product_name=None, now=None):
+    """The pending marker while it still holds ``product_name``'s ticks, else ``None`` —
+    read-only, for the views that report the wait (:func:`asf.doctor.scheduler_rows`,
+    :func:`asf.views.status.cron_cell`). ``None`` for the marker's own owner: the owner's ticks
+    go on by design (:func:`waiting`), so a row about the owner must never claim it is waiting.
+
+    It drops the same markers :func:`waiting` ignores, minus the one that costs: a dead
+    operator's wait, a future ``at``, an expired TTL. It does *not* check whether the sha is
+    already installed — that is a ``git merge-base`` (:func:`_installed`) and does not belong in
+    a view — so read it as :func:`pending` minus the writes *and* minus that one check.
+    :func:`pending` is the one that expires and clears."""
+    data = read_pending()
+    if data is None:
+        return None
+    if product_name is not None and data.get('owner') == product_name:
+        return None
+    pid = data.get('pid')
+    if data.get('owner') is None and isinstance(pid, int) and pid > 0 and not _alive(pid):
+        return None  # an operator's wait that was killed before it cleared its own mark
+    at = data.get('at')
+    if not isinstance(at, (int, float)):
+        return None
+    age = (now or time.time()) - at
+    if age > PENDING_TTL_S or age < -60:  # a clock step leaves a future `at`; pending() clears it
+        return None
+    return data
+
+
+def held_label(data):
+    """``waiting on upgrade to <sha> since <time> (owner <product>)`` — what a row says while a
+    marker parks the ticks, so no view reads ``ok`` through a factory that is not ticking."""
+    return (f'waiting on upgrade to {data["sha"][:7]} since '
+            f'{time.strftime("%H:%M", time.localtime(data["at"]))} '
+            f'(owner {data.get("owner") or "operator"})')
 
 
 def waiting(product_name, out=print, now=None, installed=None, run=subprocess.run):
@@ -391,6 +434,17 @@ def ci_red(url, ref, run=subprocess.run):
     return any((r or {}).get('conclusion') in ('failure', 'timed_out') for r in runs)
 
 
+def refuses(url, ref, run=subprocess.run):
+    """Why :func:`_install` would refuse ``ref`` — one phrase — else ``None``. The pending marker
+    parks every other product's ticks, so it is written only for a target the upgrade will
+    actually install (B-0141: a red head parked the whole factory for the marker's whole life)."""
+    if not ref:
+        return f"main's head is unreadable from {url}"
+    if ci_red(url, ref, run):
+        return f'remote CI is red at {ref[:7]}'
+    return None
+
+
 _COMMIT_PY = ("import json;from importlib import metadata as m;"
               "t=m.distribution('asf-factory').read_text('direct_url.json') or '{}';"
               "print((json.loads(t).get('vcs_info') or {}).get('commit_id') or '')")
@@ -447,9 +501,18 @@ def install(ref=None, run=subprocess.run, out=print, owner=None, wait_s=0, sleep
     others = other_ticks(run)
     marked = None
     if others and (owner or wait_s):
+        url = repo_url(run)
         if not owner and not ref:
-            ref = remote_head(repo_url(run), run)  # the operator's marker names what it waits for
-        if ref and (owner or read_pending() is None):
+            ref = remote_head(url, run)  # the operator's marker names what it waits for
+        refusal = refuses(url, ref, run)
+        if refusal:
+            # the install will refuse this target, so no marker may park the other products for
+            # it — and one this caller holds for a head that has moved goes now, not at the TTL
+            wait = read_pending()
+            if wait is not None and (wait.get('owner') == owner or wait.get('sha') == ref):
+                clear_pending()
+            out(f'upgrade: no pending mark — {refusal}; the other ticks run')
+        elif ref and (owner or read_pending() is None):
             marked = write_pending(ref, owner)
             if marked is not None:
                 out(f'upgrade: pending {ref[:7]} — other ticks wait until it installs')

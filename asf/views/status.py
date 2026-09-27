@@ -22,7 +22,9 @@ Every row is filled from what exists, or says which key would fill it —
   ``five_h_resets_at`` when it prints one; a reading older than ``quota_guards.stale_after_min``
   (by the source's ``polled_at``) says ``stale since HH:MM``, and one that was at or over a stop
   when read stays ``stop`` to that window's reset;
-* **Cron** — the scheduler adapter's ``status()`` of this product's loaded jobs.
+* **Cron** — the scheduler adapter's ``status()`` of this product's loaded jobs, behind
+  ``waiting on upgrade to <sha> since <time> (owner <product>)`` while a pending upgrade marker
+  parks every tick (:func:`asf.upgrade.held`).
 """
 import datetime
 import json
@@ -295,10 +297,15 @@ def quota_cell(cfg):
 
 
 def cron_cell(cfg, product):
-    from asf import scheduler
+    from asf import scheduler, upgrade
+    # a loaded, on-time clock says nothing about whether ticks run: while an upgrade marker is
+    # pending this product's ticks exit at their start (B-0141), so the row names the wait first.
+    # The marker's owner keeps ticking — it installs the upgrade — so its row claims no wait.
+    marker = upgrade.held(product.name)
+    prefix = f'{upgrade.held_label(marker)}; ' if marker is not None else ''
     kind = scheduler.kind(cfg)
     if kind != 'launchd':
-        return not_configured(f'scheduler.kind ({kind} has no status adapter)')
+        return prefix + not_configured(f'scheduler.kind ({kind} has no status adapter)')
     mine = [j for j in scheduler.loaded_jobs(cfg=cfg)
             if f'.{product.name}.' in j.get('label', '')]
     loaded_labels = {j['label'] for j in mine}
@@ -311,14 +318,15 @@ def cron_cell(cfg, product):
     missing = sorted(scheduler.label_for(product.name, c.name, cfg) for c in declared
                      if scheduler.label_for(product.name, c.name, cfg) not in loaded_labels)
     if not mine and not missing:
-        return f"no job loaded for {product.name} — `asf scheduler install --product {product.name}`"
+        return (prefix + f"no job loaded for {product.name} — "
+                f"`asf scheduler install --product {product.name}`")
     parts = []
     for job in sorted(mine, key=lambda j: j['label']):
         info = scheduler.status(job['label'])
         exit_text = 'never exited' if info.get('never_exited') else f"exit {info.get('last_exit')}"
         parts.append(f"{job['label']} {info.get('state') or '?'} ({exit_text})")
     parts.extend(f'clock {label} not loaded' for label in missing)
-    return '; '.join(parts)
+    return prefix + '; '.join(parts)
 
 
 def _age(seconds):

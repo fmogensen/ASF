@@ -225,6 +225,52 @@ class StatusViewTests(ViewsTestCase):
         with mock.patch.object(scheduler, 'loaded_jobs', lambda cfg=None: []):
             self.assertIn('no job loaded for p', self.rows({})['Cron'])
 
+    def test_cron_names_the_upgrade_a_pending_marker_waits_on(self):
+        """B-0141: every tick skipped for half an hour on a pending upgrade while the Cron row
+        read a healthy 'waiting (exit 0)'. The row says what the ticks are held on."""
+        import time
+
+        from asf import scheduler, upgrade
+        at = time.time() - 300
+        upgrade.write_pending('f5aa236' + 'a' * 33, 'sample', now=at)
+        jobs = [{'label': 'asf.p.record-health'}]
+        with mock.patch.object(scheduler, 'loaded_jobs', lambda cfg=None: jobs), \
+                mock.patch.object(scheduler, 'status',
+                                  lambda label: {'state': 'waiting', 'last_exit': 0}):
+            cell = status.cron_cell({}, self.product)
+        self.assertIn(f'waiting on upgrade to f5aa236 since '
+                      f'{time.strftime("%H:%M", time.localtime(at))} (owner sample)', cell)
+        self.assertIn('asf.p.record-health waiting (exit 0)', cell)
+
+    def test_cron_tells_the_markers_owner_of_no_wait(self):
+        """B-0141 review round 1 C1 and C2: the owner's own ticks go on, and a marker no tick
+        honours — a dead operator wait, a future timestamp — holds nobody. Neither prefixes."""
+        import time
+
+        from asf import scheduler, upgrade
+        jobs = [{'label': 'asf.p.record-health'}]
+        healthy = 'asf.p.record-health waiting (exit 0)'
+
+        def cron():
+            with mock.patch.object(scheduler, 'loaded_jobs', lambda cfg=None: jobs), \
+                    mock.patch.object(scheduler, 'status',
+                                      lambda label: {'state': 'waiting', 'last_exit': 0}):
+                return status.cron_cell({}, self.product)
+
+        upgrade.write_pending('f5aa236' + 'a' * 33, self.product.name, now=time.time() - 300)
+        self.assertEqual(cron(), healthy)
+
+        upgrade.clear_pending()
+        upgrade.write_pending('f5aa236' + 'a' * 33, None, now=time.time() - 300)
+        data = upgrade.read_pending()
+        data['pid'] = 999999  # killed before its own BaseException cleanup cleared the mark
+        upgrade._write_json(upgrade.pending_path(), data)
+        self.assertEqual(cron(), healthy)
+
+        upgrade.clear_pending()
+        upgrade.write_pending('f5aa236' + 'a' * 33, 'other', now=time.time() + 3600)
+        self.assertEqual(cron(), healthy)
+
     def test_cron_flags_a_declared_clock_that_is_not_loaded(self):
         """B-0136: a clock the product declares but that launchd does not currently hold must
         say so — the old code only ever looked at what's loaded, so a clock like this simply
