@@ -342,6 +342,62 @@ class SavingsDefaultsTests(unittest.TestCase):
                 self.assertEqual(conv_mod.savings_for(c, key), default)
 
 
+class BudgetConventionTests(unittest.TestCase):
+    """F-0092 §2.1: the four numbers — sessions, usd, run_minutes, run_turns — in one place."""
+
+    def test_the_four_defaults_are_what_the_card_says(self):
+        self.assertEqual(conv_mod.DEFAULT_BUDGET,
+                         {'sessions': 3, 'usd': 10, 'run_minutes': 180, 'run_turns': 600})
+
+    def test_a_fresh_conventions_carries_the_defaults(self):
+        self.assertEqual(Conventions().budget, conv_mod.DEFAULT_BUDGET)
+
+    def test_two_instances_do_not_share_their_budget_dict(self):
+        a, b = Conventions(), Conventions()
+        a.budget['sessions'] = 5
+        self.assertEqual(b.budget['sessions'], 3)
+
+    def test_a_product_overriding_two_keys_keeps_the_other_two(self):
+        c = Conventions.from_mapping({'budget': {'sessions': 5, 'run_minutes': 'off'}})
+        self.assertEqual(conv_mod.budget_for(c, 'sessions'), 5)
+        self.assertEqual(conv_mod.budget_for(c, 'run_minutes'), 'off')
+        self.assertEqual(conv_mod.budget_for(c, 'usd'), 10)
+        self.assertEqual(conv_mod.budget_for(c, 'run_turns'), 600)
+
+    def test_budget_for_reads_a_key_the_product_did_not_name(self):
+        c = Conventions.from_mapping({'budget': {'sessions': 5}})
+        self.assertEqual(conv_mod.budget_for(c, 'usd'), 10)
+
+    def test_a_misshapen_budget_is_named_and_never_raises(self):
+        c = Conventions.from_mapping({'budget': 'oops'})
+        self.assertEqual(c.budget, conv_mod.DEFAULT_BUDGET)
+        self.assertIn('budget', dict(c.shape_findings()))
+        self.assertEqual(conv_mod.budget_for(c, 'sessions'), 3)
+
+    def test_budget_is_in_map_conventions(self):
+        self.assertIn('budget', conv_mod.MAP_CONVENTIONS)
+
+    def test_the_four_numbers_appear_nowhere_else_under_asf(self):
+        # `tools/check_conventions.sh` cannot see these: `forbidden_patterns()` only walks
+        # string-valued DEFAULT_* literals, and the four numbers are ints (P8). This is that
+        # check, given to the one thing that can run it.
+        patterns = ("'sessions': 3", "'usd': 10", "'run_minutes': 180", "'run_turns': 600")
+        hits = []
+        for root, _dirs, files in os.walk(os.path.join(REPO_ROOT, 'asf')):
+            for name in files:
+                if not name.endswith('.py'):
+                    continue
+                path = os.path.join(root, name)
+                with open(path, encoding='utf-8') as f:
+                    text = f.read()
+                for pattern in patterns:
+                    if pattern in text:
+                        hits.append((os.path.relpath(path, REPO_ROOT), pattern))
+        self.assertTrue(hits)
+        for rel, pattern in hits:
+            self.assertEqual(rel, os.path.join('asf', 'conventions.py'), (rel, pattern))
+
+
 class SelfBugThresholdTests(unittest.TestCase):
     def test_the_defaults_are_ten_twenty_two_six(self):
         c = Conventions()
