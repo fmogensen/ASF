@@ -443,7 +443,7 @@ PRODUCT_FIELDS = {
     'customer_paths': _LIST, 'stage_limits': _MAP, 'size_classes': _MAP, 'approvals': _MAP,
     'approval_signals': _MAP, 'steps': _MAP, 'job_grants': _LIST, 'groom': _MAP,
     'capacity': _MAP, 'clocks': _MAP, 'token_caps': _MAP, 'feeder': _MAP, 'improve': _MAP,
-    'release': _MAP, 'cloud': _MAP,
+    'release': _MAP, 'cloud': _MAP, 'credentials': _LIST,
 }
 # `ci:` is a map (or the bare word `none`, a product without CI); these are its keys.
 # `deploy_workflow` is a read-only alias of the documented `deploy_sha.workflow`: the status
@@ -603,6 +603,9 @@ def validate_product_text(text):
     from asf import ci_queue  # `ci.queue`: its mode, history and workflows (asf.ci_queue)
     for dotted, why in ci_queue.config_problems(data.get('ci')):
         problems.append((lines.get('ci.queue', lines.get('ci', 0)), dotted, why))
+    from asf import credentials as credentials_mod  # local: keeps env importable from credentials
+    for dotted, why in credentials_mod.product_problems(data.get('credentials')):
+        problems.append((lines.get('credentials', 0), dotted, why))
     # `conventions:` keeps unknown keys (asf.conventions), but the shaped ones are checked
     for key, why in conventions_mod.validate_mapping(data.get('conventions')):
         dotted = 'conventions.' + key
@@ -775,6 +778,12 @@ class Product:
         """The ``release:`` block: the release-readiness gate's thresholds and its ``blocking``
         Features (:mod:`asf.release` fills the defaults). ``{}`` when unset."""
         return self._get('release', {})
+
+    @property
+    def credentials(self):
+        """``credentials:`` — the provider names this product needs
+        (:mod:`asf.credentials`). ``[]`` when the product names none."""
+        return self._get('credentials') or []
 
     def branch_prefix(self, kind):
         """The prefix *without* its separator (``worker``), for the callers that compose

@@ -343,6 +343,32 @@ class ProductValidation(unittest.TestCase):
         self.assertEqual(env.Product('p', env.loads(well_formed)).improve['epic'], 'E-0001')
 
 
+class ProductFieldTests(unittest.TestCase):
+    def test_credentials_is_a_field_and_must_be_a_list_of_names(self):
+        body = _dedent("""
+            repo_slug: a/b
+            credentials: [a, b]
+            """)
+        self.assertEqual(env.validate_product_text(body), [])
+        product = env.Product('p', env.loads(body))
+        self.assertEqual(product.credentials, ['a', 'b'])
+
+        not_a_list = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            credentials:
+              a: b
+            """))
+        self.assertTrue(not_a_list)
+        self.assertTrue(all(key == 'credentials' for _line, key, _why in not_a_list))
+
+        duplicate = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            credentials: [a, a]
+            """))
+        self.assertTrue(duplicate)
+        self.assertTrue(all(key == 'credentials' for _line, key, _why in duplicate))
+
+
 class DeployProviderTests(unittest.TestCase):
     """T-0232: ``deploy_sha.provider`` gets a validator row — documented and unread until now
     (docs/products.example.yaml:237)."""
