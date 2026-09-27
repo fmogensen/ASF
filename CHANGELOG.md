@@ -2,6 +2,22 @@
 
 One entry per released version, newest first.
 
+## v0.1.54 — 2026-09-27
+
+### Features landed
+
+- F-0222 Detect a wedged cux usage lock and (opt-in) reclaim it
+
+### Improvements and hotfixes
+
+- perf(ingest): one rev-list of the deploy answers every in-prod question
+- review(PR-0180): round 1 — approved; one rev-list answers every in-prod question
+- perf(health): the factory's publishes of independent runs go at once
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.54"`
+
 ## v0.1.53 — 2026-09-27
 
 ### Features landed
