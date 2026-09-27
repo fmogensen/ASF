@@ -118,6 +118,73 @@ class HeadTests(FactsCase):
         self.assertTrue(out['head'].endswith('(origin/main — fix/B-9999 is not on origin yet)'),
                         out['head'])
 
+    def test_pushed_branch_reads_the_sha_ls_remote_reports_not_the_local_ref(self):
+        older = _git(['rev-parse', 'origin/fix/B-0001'], self.repo)
+        _git(['checkout', '-q', 'fix/B-0001'], self.repo)
+        with open(os.path.join(self.repo, 'fix2.txt'), 'w') as f:
+            f.write('fix2\n')
+        _git(['add', '-A'], self.repo)
+        _git(['commit', '-q', '-m', 'the second fix'], self.repo)
+        _git(['push', '-q', 'origin', 'fix/B-0001'], self.repo)
+        newer = _git(['rev-parse', 'origin/fix/B-0001'], self.repo)
+        newer_short = _git(['rev-parse', '--short', 'origin/fix/B-0001'], self.repo)
+        _git(['checkout', '-q', 'main'], self.repo)
+        _git(['update-ref', 'refs/remotes/origin/fix/B-0001', older], self.repo)
+        head, exists, rev = facts.head_of(self.repo, 'fix/B-0001', 'main')
+        self.assertIs(exists, True)
+        self.assertEqual(rev, newer)
+        self.assertTrue(head.startswith(newer_short), head)
+        self.assertTrue(head.endswith('(origin/fix/B-0001)'), head)
+
+    def test_a_head_the_clone_lacks_says_not_in_this_clone_yet(self):
+        origin = os.path.join(self.tmp, 'origin.git')
+        other = os.path.join(self.tmp, 'other')
+        _git(['clone', '-q', origin, other], self.tmp)
+        _git(['config', 'user.email', 'r@example.com'], other)
+        _git(['config', 'user.name', 'r'], other)
+        _git(['checkout', '-q', 'fix/B-0001'], other)
+        with open(os.path.join(other, 'more.txt'), 'w') as f:
+            f.write('more\n')
+        _git(['add', '-A'], other)
+        _git(['commit', '-q', '-m', 'not fetched here'], other)
+        _git(['push', '-q', 'origin', 'fix/B-0001'], other)
+        head, exists, rev = facts.head_of(self.repo, 'fix/B-0001', 'main')
+        self.assertIs(exists, True)
+        self.assertEqual(rev, '')
+        self.assertTrue(head.endswith('(origin/fix/B-0001 — not in this clone yet)'), head)
+        self.assertEqual(facts.commits_on(self.repo, rev, 'main'), {'total': 0, 'lines': []})
+
+
+class CommitListTests(FactsCase):
+    def _commit(self, name, msg):
+        with open(os.path.join(self.repo, name), 'w') as f:
+            f.write('x\n')
+        _git(['add', '-A'], self.repo)
+        _git(['commit', '-q', '-m', msg], self.repo)
+
+    def test_three_commits_above_the_trunk(self):
+        for i in range(3):
+            self._commit(f'c{i}.txt', f'commit {i}')
+        shas = _git(['log', '--format=%h', 'origin/main..HEAD'], self.repo).splitlines()
+        out = facts.commits_on(self.repo, 'HEAD', 'main')
+        self.assertEqual(out, {'total': 3, 'lines': [f'{shas[0]} commit 2', f'{shas[1]} commit 1',
+                                                       f'{shas[2]} commit 0']})
+
+    def test_level_with_the_trunk_is_empty(self):
+        self.assertEqual(facts.commits_on(self.repo, 'origin/main', 'main'),
+                         {'total': 0, 'lines': []})
+
+    def test_twelve_commits_are_capped_at_the_limit_with_the_true_total(self):
+        for i in range(12):
+            self._commit(f'd{i}.txt', f'commit {i}')
+        out = facts.commits_on(self.repo, 'HEAD', 'main')
+        self.assertEqual(out['total'], 12)
+        self.assertEqual(len(out['lines']), 10)
+
+    def test_a_rev_that_does_not_resolve_is_empty(self):
+        self.assertEqual(facts.commits_on(self.repo, 'deadbeef' * 5, 'main'),
+                         {'total': 0, 'lines': []})
+
 
 class SizeTests(FactsCase):
     def test_named_documents_are_measured(self):
