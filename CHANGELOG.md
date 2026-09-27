@@ -2,6 +2,25 @@
 
 One entry per released version, newest first.
 
+## v0.1.50 — 2026-09-27
+
+### Features landed
+
+- F-0022 The preamble: every brief opens with facts the runner already knows
+- F-0075 Redaction is a gate on every write path: operator names and secrets never reach a record or a public repo
+
+### In progress
+
+- F-0052 Budget enforcement per Epic
+- F-0053 Reviews return checks: every review ends in a machine-readable check table the tick reads
+- F-0061 Hooks as rule enforcement inside every worker session
+- F-0062 The launch path: skills as procedures, role agents with restricted tools, per-job caps, deny rules
+- F-0063 Relaunch from the branch, not from zero
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.50"`
+
 ## v0.1.49 — 2026-09-27
 
 ### In progress
