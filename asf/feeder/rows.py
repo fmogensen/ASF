@@ -1052,12 +1052,15 @@ def finish_first(rows, items, product, inflight, held=()):
 
 def plan_rows(index, product, inflight, capacity, attempts=None, occupancy=None,
               groom_state=None, landed_shas=None, decision_limit=None, held=None, exclude=None,
-              s1_first=True):
+              s1_first=True, gate=None):
     """The rows the tick emits: tiered, S1 first, cut to ``capacity`` less what is in flight.
     ``s1_first=False``: no S1 cut of the tier-2 rows (:func:`asf.feeder.tiers.select`).
     ``held``: the item ids an approval hold parks — shown, but given no slot. ``exclude``: the
     launching rows (:func:`asf.invariants.row_key`) the feeder's invariant gate dropped — they
-    are not candidates, so the cut hands their slots to the next rows."""
+    are not candidates, so the cut hands their slots to the next rows. ``gate``: ``gate(rows,
+    items) -> rows``, run before the cut — the launch-time invariants
+    (:func:`asf.invariants.feeder_waits`) turn a violating row into a WAITS row, so it takes no
+    seat and every view shows it waiting, never "would launch"."""
     from asf.feeder import tiers
     rows = candidates(index, product, inflight, attempts, occupancy=occupancy,
                       groom_state=groom_state, landed_shas=landed_shas,
@@ -1065,5 +1068,7 @@ def plan_rows(index, product, inflight, capacity, attempts=None, occupancy=None,
     if exclude:
         from asf.invariants import row_key
         rows = [r for r in rows if not (r.launches and row_key(r) in exclude)]
+    if gate is not None:
+        rows = gate(rows, items_of(index))
     rows = finish_first(rows, items_of(index), product, inflight, held)
     return tiers.select(rows, inflight, capacity, held=held, s1_first=s1_first)
