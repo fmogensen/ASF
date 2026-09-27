@@ -787,6 +787,38 @@ class HoldInvariants(unittest.TestCase):
         self.assertEqual(fields['rounds'], 3)
 
 
+class MechanicalCauseTests(unittest.TestCase):
+    """T-0166, §2.3: `mechanical(kind, text)` is the one place that says whether a correction is
+    a chore for the model it runs on — unrelated to `lc.MECHANICAL` (the hold's own no-round
+    routing)."""
+
+    def test_mechanical_over_every_cause_with_no_text(self):
+        for kind in lc.CAUSES:
+            with self.subTest(kind=kind):
+                self.assertEqual(lc.mechanical(kind, ''), kind in lc.MECHANICAL_CAUSES)
+
+    def test_named_test_regex_matches_a_unittest_failure_line(self):
+        self.assertTrue(lc.NAMED_TEST_RE.search('FAIL: test_x (tests.test_y.C.test_x)'))
+
+    def test_named_test_regex_matches_a_pytest_failure_line(self):
+        self.assertTrue(lc.NAMED_TEST_RE.search('FAILED tests/test_y.py::test_x'))
+
+    def test_a_named_test_makes_a_red_gate_mechanical(self):
+        self.assertTrue(lc.mechanical(lc.GATE, 'FAIL: test_x (tests.test_y.C.test_x)'))
+        self.assertTrue(lc.mechanical(lc.GATE, 'FAILED tests/test_y.py::test_x'))
+
+    def test_a_gate_naming_no_test_is_not_mechanical(self):
+        for text in ('check_generic: forbidden name found', 'ruff: E501 line too long'):
+            with self.subTest(text=text):
+                self.assertFalse(lc.mechanical(lc.GATE, text))
+
+    def test_a_timed_out_gate_is_never_mechanical_though_its_own_test_command_names_a_test(self):
+        # B-0082: a product whose test_command is `python3 -m unittest tests.test_all` writes
+        # that token into its own timeout line — the guard, not NAMED_TEST_RE, must catch it.
+        self.assertFalse(lc.mechanical(
+            lc.GATE, 'gate timed out after 900 s: python3 -m unittest tests.test_all'))
+
+
 class SameFindingEscalation(unittest.TestCase):
     """Operator policy 2026-09-27: an item goes to ADJUDICATE only after CORRECT failed twice on
     the SAME finding (hold kind, review C-item, red check set) — a different finding resets it

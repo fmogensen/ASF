@@ -107,7 +107,9 @@ def gate_timeout(conv):
         return int(DEFAULTS.gate_timeout_s)
 
 
-TIMED_OUT = 'gate timed out'
+#: one owner for the cause vocabulary (T-0166); harvest.TIMED_OUT and every existing reader
+#: (lane.py's H.TIMED_OUT) are unchanged.
+TIMED_OUT = lifecycle.TIMED_OUT
 
 
 def timed_out_line(cmd, timeout):

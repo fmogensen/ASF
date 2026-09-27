@@ -58,6 +58,12 @@ Every other module asks this one:
   :func:`attempts`, :func:`corrections`;
 * the PR step — :func:`finished`;
 * every reader of a session's own state — :func:`state_of` and :func:`classify` (F-0098).
+
+This module also owns what a *correction* means, not just a branch's state: harvest and health
+write a hold's cause as one of :data:`CAUSES` (``gate``, ``conflict``, ``merge``, ``naming``,
+``died``, ``unpushed``, ``pushed after stop``, ``empty``), and :func:`mechanical` says whether a
+correction of that cause is a chore a session fixes without judgement — the model it runs on
+reads that answer, never harvest or health themselves (F-0101, T-0166).
 """
 import dataclasses
 import io
@@ -1804,6 +1810,38 @@ NAMING = 'naming'
 COPIES = 'copies'
 #: the correction kinds that spend no round and never reach adjudicate
 MECHANICAL = (NAMING, COPIES)
+
+# ---- the cause vocabulary: one owner for what a correction means (T-0166) --------------------
+#: unrelated to :data:`MECHANICAL` above — that one says whether a hold spends a round; this one
+#: says whether the correction it names is a chore for the model it runs on (:func:`mechanical`).
+
+GATE = 'gate'          #: the product gate (the test command) came back red
+CONFLICT = 'conflict'  #: the branch does not rebase cleanly onto the trunk
+MERGE = 'merge'        #: a merge commit sits on a lane branch — never straight commits (B-0056)
+DIED = 'died'          #: the session's process died twice with no result (step_health, B-0062)
+CAUSES = (GATE, CONFLICT, MERGE, NAMING, DIED, UNPUSHED, PUSHED_AFTER_STOP, EMPTY)
+
+TIMED_OUT = 'gate timed out'  #: B-0082: a clock is not a defect — :func:`mechanical`'s guard
+
+#: A correction whose text names a test names the work: `FAIL: test_x (tests.test_y.C.test_x)`,
+#: `FAILED tests/test_y.py::test_x`. A gate line with no test name — a forbidden name, a lint,
+#: `gate timed out after 900 s` — names no work and is read, not fixed.
+NAMED_TEST_RE = re.compile(r'\btest_\w+|\b[\w./-]*test[\w.-]*\.py::\S+')
+
+#: Causes a session fixes without judgement: push, commit, rebase.
+MECHANICAL_CAUSES = (UNPUSHED, PUSHED_AFTER_STOP, CONFLICT, MERGE, NAMING, EMPTY)
+
+
+def mechanical(kind, text=''):
+    """True when the correction named by `kind` is a chore: the causes above always, and a red
+    `gate` when its text names the failing test — never when its text names a timeout (B-0082):
+    a product whose own test command is `python3 -m unittest tests.test_all` writes that token
+    into its own `gate timed out` line, and a clock is not a defect."""
+    if (text or '').strip().startswith(TIMED_OUT):
+        return False
+    if kind in MECHANICAL_CAUSES:
+        return True
+    return kind == GATE and bool(NAMED_TEST_RE.search(text or ''))
 
 
 def empty_ends(path, item):

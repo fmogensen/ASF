@@ -43,6 +43,11 @@ A live session whose worktree has no commits yet is listed ``opening``. Anything
 listed with why. A reap also releases the job's ``BACKLOG_ID_RANGE`` reservation (B-0007) —
 nothing can mint against it once the worktree is gone, and prints ``reaped <job> (<what landed, or
 empty>)``.
+
+The holds this module writes name their cause with :data:`asf.workers.lifecycle.UNPUSHED` or
+:data:`asf.workers.lifecycle.PUSHED_AFTER_STOP` — two of the module's own :data:`~asf.workers
+.lifecycle.CAUSES`, the vocabulary that says what a correction means across harvest and health
+alike (F-0101, T-0166).
 """
 import json
 import os

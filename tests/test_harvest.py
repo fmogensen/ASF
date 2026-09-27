@@ -1,3 +1,4 @@
+import ast
 import io
 import json
 import os
@@ -3084,3 +3085,40 @@ class StaleBranchPushTests(unittest.TestCase):
         ok, why = harvest.push_branch(self.repo, rebased, self.branch, self.stale)
         self.assertTrue(ok, why)
         self.assertEqual(self.remote_head(), rebased)
+
+
+class HoldCauseTests(unittest.TestCase):
+    """T-0166, §2.3, the structural half: every cause `lifecycle.hold` is called with, across
+    this footprint, resolves to a member of `lifecycle.CAUSES` — a new cause string that skips
+    the vocabulary fails here, not in production."""
+
+    FILES = ('asf/harvest/harvest.py', 'asf/workers/health.py', 'asf/tick/step_health.py')
+
+    @staticmethod
+    def _kind_of(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) \
+                and node.value.id == 'lifecycle':
+            return getattr(lifecycle, node.attr, None)
+        return None
+
+    def test_every_hold_kind_is_a_member_of_causes(self):
+        seen = 0
+        for rel in self.FILES:
+            path = os.path.join(REPO_ROOT, rel)
+            with open(path, encoding='utf-8') as f:
+                tree = ast.parse(f.read(), filename=rel)
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == 'hold' and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == 'lifecycle'):
+                    continue
+                if len(node.args) < 3:
+                    continue
+                seen += 1
+                kind = self._kind_of(node.args[2])
+                with self.subTest(file=rel, line=node.lineno):
+                    self.assertIsNotNone(kind, f'{rel}:{node.lineno} — unresolved hold kind')
+                    self.assertIn(kind, lifecycle.CAUSES)
+        self.assertGreater(seen, 0)  # a walk that finds nothing proves nothing
