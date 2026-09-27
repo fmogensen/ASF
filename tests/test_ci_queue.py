@@ -2400,6 +2400,75 @@ class TestStaleSweep(ReliefBase):
         self.assertEqual((e['pr:feat/a']['sha'], e['pr:feat/a']['since']), ('s2', since))
 
 
+class TestHeldPrOpens(ReliefBase):
+    """2026-09-27 06:18, a product: the head of the line, a ``pr:`` start the lane held (a Task,
+    since 01:27), read "would start" minute after minute while nothing started it — the lane
+    asks the queue once a tick, and the queue's own pass (every minute) only re-ran cancelled
+    runs. Its 4 heavy counted as taken, every entry behind it waited on "heavy 0 free". The
+    pass now opens each held PR the line admits (its run starts on it); a PR it cannot open is
+    one loud line and leaves the line, so it never holds the runners of the starts behind."""
+
+    def hold(self, p, branch, item, minutes=0):
+        q = self.queue(p, FakeGh(busy={'h1', 'h2', 'h3'}), minutes=minutes)
+        d = ci_queue.admit(p, f'pr:{branch}', 'pr', item=item, items=ITEMS, branch=branch,
+                           sha='a' * 40, queue=q)
+        self.assertFalse(d.admitted)
+
+    def apply(self, p, opened, minutes=5):
+        gh, run = self.gh(self.runs(trunk_status='in_progress'), busy=())
+
+        def opener(product, branch, item, items):
+            opened.append((branch, item))
+            return opened_result.pop(0)
+        opened_result = self.results
+        with mock.patch.object(ci_queue, '_open_pr', opener):
+            ci_queue.apply(p, source=ci_queue.GitHubSource(p, run=run), out=self.lines.append,
+                           now=self.t0 + datetime.timedelta(minutes=minutes))
+        return gh
+
+    def test_the_pass_opens_the_held_pr_at_the_head_once_it_fits(self):
+        p = self.product()
+        self.seed(self.t0)
+        self.hold(p, 'task/T-0341', 'T-0341')
+        self.results, opened = [(42, '')], []
+        self.apply(p, opened)
+        self.assertEqual(opened, [('task/T-0341', 'T-0341')])
+        data = ci_queue.load('p')
+        self.assertNotIn('pr:task/T-0341', data['entries'])
+        self.assertEqual([s['key'] for s in data['started']], ['pr:task/T-0341'])
+        self.assertTrue(any(l.startswith('ci queue: opened PR #42 for task/T-0341 (T-0341')
+                            for l in self.lines), self.lines)
+
+    def test_a_pr_it_cannot_open_is_loud_leaves_the_line_and_the_next_one_starts(self):
+        p = self.product()
+        self.seed(self.t0)
+        self.hold(p, 'task/T-0341', 'T-0341')
+        self.hold(p, 'task/T-0500', 'T-0500', minutes=1)
+        self.results, opened = [(None, 'no commits between main and task/T-0341'), (43, '')], []
+        self.apply(p, opened)
+        self.assertEqual(opened, [('task/T-0341', 'T-0341'), ('task/T-0500', 'T-0500')])
+        data = ci_queue.load('p')
+        self.assertEqual(data['entries'], {})
+        # the failed start holds no runner: only the opened one counts as started
+        self.assertEqual([s['key'] for s in data['started']], ['pr:task/T-0500'])
+        self.assertIn('ci queue: START FAILED T-0341 (task/T-0341) — PR not opened: no commits '
+                      'between main and task/T-0341; dropped from the line, the lane asks again '
+                      'at its next pass', self.lines)
+
+    def test_a_held_pr_that_does_not_fit_stays_in_line_and_nothing_opens(self):
+        p = self.product()
+        self.seed(self.t0)
+        self.hold(p, 'task/T-0341', 'T-0341')
+        gh, run = self.gh(self.runs(trunk_status='in_progress'))     # every heavy busy
+
+        def opener(*_a):
+            raise AssertionError('opened a PR that does not fit')
+        with mock.patch.object(ci_queue, '_open_pr', opener):
+            ci_queue.apply(p, source=ci_queue.GitHubSource(p, run=run), out=self.lines.append,
+                           now=self.t0 + datetime.timedelta(minutes=5))
+        self.assertIn('pr:task/T-0341', ci_queue.load('p')['entries'])
+
+
 class TestOwnCadence(ReliefBase):
     """2026-09-26 22:42, a product: 7 heavy + 7 light runners idle with 45 in the line. The
     queue's pass (superseded, dedupe, relief and its re-runs) ran only inside a tick's lane pass

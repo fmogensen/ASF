@@ -2677,6 +2677,86 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
 PASS_LOCK = 'ci-queue.lock'
 
 
+def _open_pr(product, branch, item, items):
+    """Open ``branch``'s PR as the lane does (:meth:`asf.harvest.lane.GitHubHost.open`: its
+    title and body, or adopt the open one naming it): ``(number, '')`` or ``(None, why)``. The
+    lane's next pass finds the PR open and moves the branch to PR_OPEN."""
+    from asf.harvest import lane as lane_mod
+    from asf.tick import shadow
+    root = shadow.record_dir(product)
+    ln = lane_mod.Lane(product, None, lambda _l: None, False, items or {},
+                       root if root and os.path.isdir(root) else None)
+    if ln.mode != 'pr' or not ln.slug:
+        return None, 'the product lands without a PR host'
+    return ln.host.open(branch, item)
+
+
+def open_held_prs(product, items=None, source=None, out=print, dry_run=False, now=None):
+    """Start the ``pr:`` entries the line admits now — PR opens the lane held (:meth:`asf.
+    harvest.lane.Lane.ci_admits`), whose host run starts when the PR opens. The lane asks once a
+    tick; between ticks runners freed and the head sat at "would start" holding its runners
+    against every start behind it (2026-09-27, a product: its head held there for 5 h). Each
+    admitted entry is opened here (:func:`_open_pr`), in line order, at most
+    ``prs_per_tick`` a pass. A PR that cannot be opened is one loud ``START FAILED`` line and
+    leaves the line — its started record too, so it holds no runner — and the pass moves on to
+    the next; the lane re-enqueues it at its next pass. The number opened. Never raises."""
+    if mode(product) != 'on' or not product.repo_slug:
+        return 0
+    from asf.tick import step_prs
+    now = (now or _now()).astimezone(datetime.timezone.utc)
+    try:
+        q = Queue(product, source=source, now=now, out=out, write=not dry_run)
+        cap, n, tried = step_prs.prs_per_tick(product), 0, set()
+        while n < cap:
+            entries = q.data['entries']
+            order = line_order(entries)
+            q._read_host()
+            if q._free is None:
+                return n                        # runners unreadable: nothing is known to fit
+            needs = {k: q.entry_needs(entries[k]) for k in order}
+            key = next((k for k in order if k.startswith('pr:') and k not in tried
+                        and entries[k].get('kind') == 'pr'
+                        and decide(k, order, entries, needs.get, q.free('pr'), q.ceiling(),
+                                   q._inflight, q.admitted_here, now=q.now,
+                                   pr_wait_min=pr_wait_min(product),
+                                   head_wait_max_min=head_wait_max_min(product))[0]), None)
+            if key is None:
+                return n
+            tried.add(key)
+            e, branch = entries[key], key.split(':', 1)[1]
+            item, label = e.get('item') or branch, e.get('label') or 'other'
+            if dry_run:
+                out(f'ci queue: would open PR for {branch} ({item}, {label})')
+                continue
+            d = q.admit(key, 'pr', item=item, prio=e.get('prio', OTHER), label=label,
+                        workflow=e.get('workflow'), run=e.get('run', FULL), sha=e.get('sha'),
+                        rank=e.get('rank'))
+            if not d.admitted or d.line:
+                continue
+            try:
+                number, why = _open_pr(product, branch, item, items)
+            except Exception as ex:  # noqa: BLE001 — a failed start must never stall the line
+                number, why = None, (str(ex) or type(ex).__name__).splitlines()[0]
+            if number:
+                out(f'ci queue: opened PR #{number} for {branch} ({item}, {label}) — its run '
+                    f'starts')
+                n += 1
+                continue
+            q.data['started'] = [s for s in q.data['started'] if s.get('key') != key]
+            q.data['entries'].pop(key, None)
+            q.admitted_here = max(0, q.admitted_here - 1)
+            q._mark_head()
+            if q.write:
+                save(product.name, q.data)
+            out(f'ci queue: START FAILED {item} ({branch}) — PR not opened: {why}; dropped '
+                f'from the line, the lane asks again at its next pass')
+        return n
+    except Exception as ex:  # noqa: BLE001 — the pass's other work is done; say so, loudly
+        out(f'ci queue: START FAILED — opening held PRs broke: '
+            f'{(str(ex) or type(ex).__name__).splitlines()[0]}')
+        return 0
+
+
 def acquire_pass_lock(product, wait_s=0):
     """The queue pass's lock (an open file holding ``flock``), or None when another pass of the
     product holds it after ``wait_s``. It dies with its process."""
@@ -2715,6 +2795,7 @@ def queue_pass(product, items=None, source=None, out=print, dry_run=False, listi
                                      listing=listing)
         c, r = relieve_trunk(product, items=items, source=src, out=out, dry_run=dry_run,
                              now=now, listing=listing)
+        open_held_prs(product, items=items, source=src, out=out, dry_run=dry_run, now=now)
         return n + c, r
     finally:
         lock.close()
