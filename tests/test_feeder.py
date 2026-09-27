@@ -14,6 +14,7 @@ import unittest
 from asf import env
 from asf.env import Product
 from asf.feeder import footprint, register, render, rows, tiers
+from asf.tick import step_wave
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.x` does not
     from occfixture import occ
 except ImportError:  # pragma: no cover - import shape only
@@ -536,6 +537,108 @@ class GroomRowTests(unittest.TestCase):
         self.assertEqual(len(self.groom_rows(p=p, attempts=2)), 1)
         self.assertEqual(len(self.groom_rows(p=p, attempts=3)), 0)
 
+
+
+class GroomSplitTests(unittest.TestCase):
+    """F-0093 §3 T3: the groom day splits on the line's token — the ``inbox:`` intakes go to a
+    cheap GROOM → CLERK row, every other question to GROOM → ADJUDICATE, each its own job."""
+
+    INTAKES = ['- [ ] inbox:a.md A — untyped → answer: ____',
+               '- [ ] inbox:b.md B — untyped → answer: ____',
+               '- [ ] inbox:c.md C — untyped → answer: ____']
+    IDS = ['- [ ] F-0001 One — why → answer: ____', '- [ ] F-0003 Three — why → answer: ____']
+
+    def setUp(self):
+        self.index = fixture_index()
+        self.auto = product(approvals={'groom': 'auto'})
+
+    def state(self, lines, **over):
+        ids = [rows._token(l) for l in lines]
+        base = {'date': '2026-09-22', 'open': ids, 'lines': lines, 'attempts': 0,
+                'clerk_attempts': 0, 'file': 'groom/2026-09-22.md',
+                'answers': 'state/groom/2026-09-22.answers',
+                'clerk_answers': 'state/groom/2026-09-22.clerk.answers',
+                'oldest': next((i for i in ids if not i.startswith('inbox:')),
+                               ids[0] if ids else None)}
+        base.update(over)
+        return base
+
+    def groom(self, lines, inflight=(), **over):
+        out = rows.candidates(self.index, self.auto, list(inflight),
+                              groom_state=self.state(lines, **over))
+        return {r.kind: r for r in out if r.kind in (rows.GROOM_ADJUDICATE, rows.GROOM_CLERK)}
+
+    def test_both_halves_yield_two_rows(self):
+        got = self.groom(self.INTAKES + self.IDS)
+        clerk, judge = got[rows.GROOM_CLERK], got[rows.GROOM_ADJUDICATE]
+        self.assertEqual(clerk.brief_kind, 'groom-clerk')
+        self.assertEqual(step_wave.row_job(clerk), 'groom-clerk-2026-09-22')
+        self.assertTrue(clerk.answers_file.endswith('.clerk.answers'))
+        self.assertEqual(clerk.open_questions, tuple(self.INTAKES))
+        self.assertEqual(clerk.item_id, 'inbox:a.md')
+        self.assertEqual((clerk.branch, clerk.groom_date, clerk.groom_file),
+                         (judge.branch, judge.groom_date, judge.groom_file))
+        self.assertEqual(judge.brief_kind, 'groom')
+        self.assertEqual(step_wave.row_job(judge), 'groom-2026-09-22')
+        self.assertEqual(judge.open_questions, tuple(self.IDS))
+        self.assertEqual(judge.item_id, 'F-0001')
+
+    def test_intakes_only_yield_the_clerk_row_alone(self):
+        self.assertEqual(list(self.groom(self.INTAKES)), [rows.GROOM_CLERK])
+
+    def test_ids_only_yield_the_judgement_row_alone(self):
+        self.assertEqual(list(self.groom(self.IDS)), [rows.GROOM_ADJUDICATE])
+
+    def test_neither_yields_nothing(self):
+        self.assertEqual(self.groom([]), {})
+
+    def test_a_live_clerk_suppresses_only_the_clerk_row(self):
+        got = self.groom(self.INTAKES + self.IDS, inflight=[{'job': 'groom-clerk-2026-09-22'}])
+        self.assertEqual(list(got), [rows.GROOM_ADJUDICATE])
+
+    def test_a_live_judge_suppresses_only_the_judgement_row(self):
+        got = self.groom(self.INTAKES + self.IDS, inflight=[{'job': 'groom-2026-09-22'}])
+        self.assertEqual(list(got), [rows.GROOM_CLERK])
+
+    def test_each_half_counts_its_own_attempts(self):
+        got = self.groom(self.INTAKES + self.IDS, clerk_attempts=1, clerk_new=[],
+                         attempts=1, new=['inbox:a.md'])
+        self.assertEqual(got, {}, 'an intake is never new to the judge; the clerk had its run')
+        got = self.groom(self.INTAKES + self.IDS, clerk_attempts=1, clerk_new=['inbox:c.md'],
+                         attempts=1, new=[])
+        self.assertEqual(list(got), [rows.GROOM_CLERK])
+
+
+class SpecAmendRowTests(unittest.TestCase):
+    """F-0093 §3 T7: the first spec run writes, every later one amends — same branch, same
+    item, one word apart."""
+
+    def feature(self, stage):
+        return {'items': {'F-0001': {'id': 'F-0001', 'type': 'feature', 'title': 'F',
+                                     'decided': True, 'rank': 1, 'stage': stage,
+                                     'state': 'New'}}}
+
+    def spec_row(self, stage):
+        out = rows.candidates(self.feature(stage), product(), [])
+        return next(r for r in out if r.item_id == 'F-0001' and r.launches)
+
+    def test_card_mints_spec(self):
+        r = self.spec_row('card')
+        self.assertEqual((r.kind, r.brief_kind), (rows.CARD_SPEC, 'spec'))
+
+    def test_spec_draft_and_review_mint_spec_amend_on_the_same_branch(self):
+        first = self.spec_row('card')
+        for stage in ('spec-draft', 'spec-review'):
+            with self.subTest(stage=stage):
+                r = self.spec_row(stage)
+                self.assertEqual((r.kind, r.brief_kind), (rows.STARVED_SPEC, 'spec-amend'))
+                self.assertEqual((r.branch, r.item_id), (first.branch, first.item_id))
+
+    def test_spec_amend_mints_ids_and_the_clerk_does_not(self):
+        import importlib
+        build_mod = importlib.import_module('asf.briefs.build')
+        self.assertIn('spec-amend', build_mod.ID_RANGE_KINDS)
+        self.assertNotIn('groom-clerk', build_mod.ID_RANGE_KINDS)
 
 def ten_features_and_an_s1():
     items = {'B-0001': {'id': 'B-0001', 'type': 'bug', 'title': 'Down', 'severity': 'S1',

@@ -79,8 +79,8 @@ def rules_block(product, main='main'):
 
 
 #: The subject prefix per brief kind; any other kind commits as a task.
-SUBJECT_KIND = {'spec': 'spec', 'plan': 'plan', 'fix-bug': 'fix', 'fixer': 'fix', 'review': 'review',
-                'spec-plan': 'plan', 'direct': 'feat'}
+SUBJECT_KIND = {'spec': 'spec', 'spec-amend': 'spec', 'plan': 'plan', 'fix-bug': 'fix', 'fixer': 'fix',
+                'review': 'review', 'spec-plan': 'plan', 'direct': 'feat'}
 
 
 def subject_rule(row, item):
@@ -225,7 +225,7 @@ def section_lines(sections, name, limit_chars=2000):
 #: left out of the preamble: an irrelevant path is a line the session pays for on every turn.
 REVIEW_KINDS = ('review', 'fixer', 'adjudicate')
 ANSWER_KINDS = ('fixer', 'adjudicate')
-STORY_KINDS = ('spec', 'plan', 'review', 'adjudicate', 'spec-plan', 'direct')
+STORY_KINDS = ('spec', 'spec-amend', 'plan', 'review', 'adjudicate', 'spec-plan', 'direct')
 
 #: The keys of ``repo_facts`` that :func:`collect` reads. :func:`asf.briefs.facts.repo_facts` is
 #: the one function that fills them, and ``tests.test_brief_facts.ContractTests`` holds the two

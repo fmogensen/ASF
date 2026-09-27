@@ -58,6 +58,7 @@ import math
 import re
 
 from asf.feeder import footprint
+from asf.groom import inbox as inbox_mod
 from asf.groom import policy as groom_policy
 from asf.views import index_reader as ix
 
@@ -103,6 +104,8 @@ WAITS_MERGE = 'WAITS ON merge'
 PLAN_CODE = 'PLAN → CODE'
 RESHAPE = 'RESHAPE → PLAN'
 GROOM_ADJUDICATE = 'GROOM → ADJUDICATE'
+#: the groom day's clerical half (F-0093 §2.4): the ``inbox:`` lines, a cheap session of their own
+GROOM_CLERK = 'GROOM → CLERK'
 UNDECIDED = 'UNDECIDED → DECIDE'
 NEEDS_DECISION = 'NEEDS DECISION'
 ON_TRUNK = 'ON TRUNK'
@@ -704,7 +707,9 @@ def _doc_row(kind, fid, doc, product, reason, occupancy, branch=None):
         return Row(tier=2, kind=PUSHED_LAND, item_id=fid, feature_id=fid,
                    action=f"{WAITS_LANDING}: {waiting}", brief_kind=doc, branch=branch,
                    reason=waiting)
-    return Row(tier=2, kind=kind, item_id=fid, feature_id=fid, action=LAUNCH, brief_kind=doc,
+    # F-0093 §2.6: a starved spec already exists on its branch — the run amends it in place
+    brief = 'spec-amend' if kind == STARVED_SPEC else doc
+    return Row(tier=2, kind=kind, item_id=fid, feature_id=fid, action=LAUNCH, brief_kind=brief,
                branch=branch, reason=reason)
 
 
@@ -946,47 +951,88 @@ def undecided_rows(items, product, busy, limit=None):
     return out
 
 
-KIND_ORDER = {STALEMATE: 0, CONFLICT: 1, STALE: 2, GROOM_ADJUDICATE: 2, RESHAPE: 3}
+KIND_ORDER = {STALEMATE: 0, CONFLICT: 1, STALE: 2, GROOM_ADJUDICATE: 2, GROOM_CLERK: 2,
+              RESHAPE: 3}
 
 
-def groom_row(index, product, busy, groom_state, inflight):
-    """At most one GROOM → ADJUDICATE row (§2.5): an adjudicate session per groom day, for
-    every question the policy pass did not answer — and, once the day had one, another only for
-    questions its brief did not carry (``groom_state['new']``), up to
-    ``groom.adjudicate_per_day``. ``groom_state`` is the one fact this module
-    cannot derive from ``index.json`` (P5) — the caller (:mod:`asf.tick.step_wave`) builds it
-    from the record clone's newest ``groom/<date>.md`` (:func:`asf.groom.policy.open_questions`)
-    and the ledger's ``groom-<date>`` attempts. No ``groom_state``, the gate off, no open
-    question, a live session already on that day's job, or the attempt cap reached: no row —
-    which keeps every existing feeder test and ``asf next`` unchanged (T8)."""
+def _token(line):
+    """The item token of an open question line (``F-0001`` or ``inbox:<file>``), else ``''``."""
+    m = groom_policy.OPEN_QUESTION_RE.match(line)
+    return m.group('id') if m else ''
+
+
+def _split_lines(lines):
+    """A groom day's open question lines, partitioned into the clerical half and the judgement
+    half. A line whose item token is ``inbox:<file>`` is a card intake could not type — a right
+    answer read off the card, not a ruling. Everything else is a policy question."""
+    clerk = [l for l in lines if _token(l).startswith(inbox_mod.TOKEN_PREFIX)]
+    judge = [l for l in lines if not _token(l).startswith(inbox_mod.TOKEN_PREFIX)]
+    return clerk, judge
+
+
+def _half_due(product, attempts, new):
+    """One half's own launch gate: ``attempts`` sessions its job already had, ``new`` the
+    questions of its half its last brief did not carry (``None``: the caller does not say)."""
+    if new is None:  # a caller that does not say which questions are new: the attempt cap alone
+        return attempts < groom_policy.adjudicate_attempts(product)
+    # the day already had its session: another only for questions asked since, up to the cap
+    return not attempts or bool(new and attempts < groom_policy.adjudicate_per_day(product))
+
+
+def groom_rows(index, product, busy, groom_state, inflight):
+    """At most two rows per groom day (§2.5, F-0093 §2.4): GROOM → ADJUDICATE for the questions
+    the policy pass did not answer, and GROOM → CLERK for the ``inbox:`` intakes — each a session
+    of its own, on its own job (``groom-<date>``, ``groom-clerk-<date>``), and each minted only
+    when its half has a line. Once a half had its session, another only for questions its brief
+    did not carry (``groom_state['new']`` / ``['clerk_new']``), up to ``groom.adjudicate_per_day``.
+    ``groom_state`` is the one fact this module cannot derive from ``index.json`` (P5) — the
+    caller (:mod:`asf.tick.step_wave`) builds it from the record clone's newest
+    ``groom/<date>.md`` and the ledger's attempts. No ``groom_state``, the gate off, no open
+    question: no row — which keeps every existing feeder test and ``asf next`` unchanged (T8)."""
     if not groom_state or not groom_policy.groom_auto(product):
-        return None
+        return []
     open_ids = list(groom_state.get('open') or ())
     if not open_ids:
-        return None
+        return []
     date = groom_state.get('date')
-    if any(s.get('job') == f'groom-{date}' for s in inflight or ()):
-        return None
-    attempts = groom_state.get('attempts') or 0
-    new = groom_state.get('new')
-    if new is None:  # a caller that does not say which questions are new: the attempt cap alone
-        if attempts >= groom_policy.adjudicate_attempts(product):
-            return None
-    elif attempts and not (new and attempts < groom_policy.adjudicate_per_day(product)):
-        # the day already had its session: another only for questions asked since, up to the cap
-        return None
+    live = {s.get('job') for s in inflight or ()}
+    lines = list(groom_state.get('lines') or ())
+    clerk_lines, judge_lines = _split_lines(lines)
+    if not lines:  # a caller that carries ids alone: every id is the judgement half's
+        judge_ids = [i for i in open_ids if not i.startswith(inbox_mod.TOKEN_PREFIX)]
+        clerk_ids = [i for i in open_ids if i.startswith(inbox_mod.TOKEN_PREFIX)]
+    else:
+        judge_ids = [_token(l) for l in judge_lines]
+        clerk_ids = [_token(l) for l in clerk_lines]
     items = items_of(index)
-    oldest = groom_state.get('oldest') or open_ids[0]
-    item = items.get(oldest) or {}
-    f = feature_of(items, item) if item else None
-    reason = (f"{len(open_ids)} groom questions no rule answers, oldest {oldest} "
-             f"(undecided {ix.age(item.get('stage_since'))})")
-    return Row(tier=2, kind=GROOM_ADJUDICATE, item_id=oldest, feature_id=f['id'] if f else '',
-              action=LAUNCH, brief_kind='groom',
-              branch=branch_for(product, 'groom', date), reason=reason,
-              groom_date=date, groom_file=groom_state.get('file', ''),
-              answers_file=groom_state.get('answers', ''),
-              open_questions=tuple(groom_state.get('lines') or ()))
+    common = dict(tier=2, action=LAUNCH, branch=branch_for(product, 'groom', date),
+                  groom_date=date, groom_file=groom_state.get('file', ''))
+    out = []
+    new = groom_state.get('new')
+    if new is not None:
+        new = [i for i in new if not str(i).startswith(inbox_mod.TOKEN_PREFIX)]
+    if judge_ids and f'groom-{date}' not in live \
+            and _half_due(product, groom_state.get('attempts') or 0, new):
+        oldest = groom_state.get('oldest')
+        if oldest not in judge_ids:
+            oldest = judge_ids[0]
+        item = items.get(oldest) or {}
+        f = feature_of(items, item) if item else None
+        reason = (f"{len(judge_ids)} groom questions no rule answers, oldest {oldest} "
+                  f"(undecided {ix.age(item.get('stage_since'))})")
+        out.append(Row(kind=GROOM_ADJUDICATE, item_id=oldest, feature_id=f['id'] if f else '',
+                       brief_kind='groom', reason=reason,
+                       answers_file=groom_state.get('answers', ''),
+                       open_questions=tuple(judge_lines), **common))
+    clerk_new = groom_state.get('clerk_new')
+    if clerk_ids and f'groom-clerk-{date}' not in live \
+            and _half_due(product, groom_state.get('clerk_attempts') or 0, clerk_new):
+        out.append(Row(kind=GROOM_CLERK, item_id=clerk_ids[0], feature_id='',
+                       brief_kind='groom-clerk',
+                       reason=f"{len(clerk_ids)} inbox cards intake could not type",
+                       answers_file=groom_state.get('clerk_answers', ''),
+                       open_questions=tuple(clerk_lines), **common))
+    return out
 
 
 def hold_unlanded(rows, items, landed_shas=None):
@@ -1002,7 +1048,8 @@ def hold_unlanded(rows, items, landed_shas=None):
                    if a not in landed]
         # ON TRUNK / PARKED / NEEDS DECISION are already non-launching answers with their own
         # waits_on: rewriting them into WAITS ON would hide the row the gate exists to print
-        keeps = r.kind == GROOM_ADJUDICATE or r.action.startswith((ON_TRUNK, PARKED, NEEDS_DECISION))
+        keeps = r.kind in (GROOM_ADJUDICATE, GROOM_CLERK) \
+            or r.action.startswith((ON_TRUNK, PARKED, NEEDS_DECISION))
         if pending and not keeps and (r.launches or r.waits_on):
             if r.item_id in said:  # a Task with a correction also has its PLAN → CODE row: once
                 continue
@@ -1077,9 +1124,7 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
     rows += [r for r in bugs if r.launches]
     bug_waits = [r for r in bugs if not r.launches]
     rows += [r for r in branch_rows(items, product, busy) if r.feature_id not in stalled]
-    gr = groom_row(index, product, busy, groom_state, inflight)
-    if gr is not None:
-        rows.append(gr)
+    rows += groom_rows(index, product, busy, groom_state, inflight)
     # a Task a correction row speaks for gets no PLAN → CODE row too: one session per branch
     # (and a direct Feature's correction is its one session: no DIRECT → BUILD beside it)
     tasks_spoken = {i for i in spoken if (items.get(i) or {}).get('type') == 'task'
@@ -1125,7 +1170,7 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
         f = items.get(r.feature_id) or {}
         if r.tier < 2:
             return (r.tier, 0, (0, 0), '', 0, seq)
-        if r.kind == GROOM_ADJUDICATE:
+        if r.kind in (GROOM_ADJUDICATE, GROOM_CLERK):
             # one session decides the whole day's questions for every Feature: it goes before
             # the Feature work, not at the rank of whichever card happens to be the oldest (an
             # unranked inbox card put it behind every launch, and the cut never reached it)

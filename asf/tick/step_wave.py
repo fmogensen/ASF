@@ -74,7 +74,7 @@ from asf.workers import pool as pool_mod
 
 #: PD9 — for a kind whose job name is not ``<brief kind>-<item id>``, the Row attribute that
 #: carries the job's key instead (the groom brief's job is ``groom-<date>``, D7).
-KIND_JOB_KEY = {'groom': 'groom_date'}
+KIND_JOB_KEY = {'groom': 'groom_date', 'groom-clerk': 'groom_date'}
 _GROOM_FILE_RE = re.compile(r'^(\d{4}-\d{2}-\d{2})\.md$')
 
 #: the session ledger field a launch that passed the S1 load-hold bypass carries, so a later
@@ -166,13 +166,21 @@ def groom_state(product, root):
     # or before the gate was on) still carries questions the operator owns
     owned = _operator_owned(product, items)
     pairs = [(iid, line) for iid, line in pairs if iid not in owned]
-    job = f'groom-{date}'
+    job, clerk_job = f'groom-{date}', f'groom-clerk-{date}'
     # sessions, not ledger lines: a run's end and harvest lines are no second attempt
-    attempts = sum(1 for rec in lifecycle.read_lines(pool_mod.sessions_path(product))
-                   if rec.get('job') == job and lifecycle.is_launch(rec))
+    launches = [rec.get('job') for rec in lifecycle.read_lines(pool_mod.sessions_path(product))
+                if rec.get('job') in (job, clerk_job) and lifecycle.is_launch(rec)]
+    attempts, clerk_attempts = launches.count(job), launches.count(clerk_job)
     open_ids = [iid for iid, _line in pairs]
+    # F-0093 §2.4: the `inbox:` lines are the clerk's half, its own job and its own count (P9)
+    clerk_ids = [iid for iid in open_ids if iid.startswith('inbox:')]
+    groom_dir = os.path.join(env.state_dir(product), 'groom')
     return {'date': date, 'file': path,
-            'answers': os.path.join(env.state_dir(product), 'groom', f'{date}.answers'),
+            'answers': os.path.join(groom_dir, f'{date}.answers'),
+            'clerk_answers': os.path.join(groom_dir, f'{date}.clerk.answers'),
+            'clerk_attempts': clerk_attempts,
+            'clerk_new': (_not_yet_put(product, clerk_job, clerk_ids) if clerk_attempts
+                          else list(clerk_ids)),
             'open': open_ids, 'lines': [line for _iid, line in pairs],
             'oldest': next((iid for iid, _l in pairs if not iid.startswith('inbox:')),
                            pairs[0][0] if pairs else None),

@@ -53,8 +53,8 @@ LATE_READ = datetime.timedelta(hours=1)
 
 #: Percent of a 5h window one launch spends, per model family and kind (``*``: any other).
 DEFAULT_COST = {
-    'opus': {'spec': 10, 'plan': 10, 'review': 6, 'adjudicate': 6, 'groom': 6, 'reshape': 6,
-             '*': 8},
+    'opus': {'spec': 10, 'spec-amend': 10, 'plan': 10, 'review': 6, 'adjudicate': 6, 'groom': 6,
+             'reshape': 6, '*': 8},
     'sonnet': {'*': 4},
     'haiku': {'*': 1},
     '*': {'*': 6},

@@ -977,6 +977,8 @@ def cmd_groom(args, root):
     if answers_file and os.path.isfile(answers_file):
         m = ANSWERS_FILE_RE.match(os.path.basename(answers_file))
         adj_date = m.group('date') if m else date
+        half = m.group('half') if m else None  # the clerk's file: its answers are its job's
+        adj_job = f'groom-{half}-{adj_date}' if half else f'groom-{adj_date}'
         adj_groom_path = os.path.join(root, 'groom', f'{adj_date}.md')
         adj_sections = {}
         if os.path.isfile(adj_groom_path):
@@ -985,7 +987,7 @@ def cmd_groom(args, root):
         with open(answers_file, encoding='utf-8') as f:
             answers_text = f.read()
         applied += apply_groom_answers(root, canonical, answers_file, date,
-                                       adjudicator_job=f'groom-{adj_date}', event=event,
+                                       adjudicator_job=adj_job, event=event,
                                        sections=adj_sections, intake_dir=intake_dir)
         os.rename(answers_file, answers_file + '.done')
 

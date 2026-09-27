@@ -39,7 +39,7 @@ from asf.workers import spawn as spawn_mod
 from asf.workers.stall import CORRECTION_HEAD
 
 #: Row kinds that may answer a branch by continuing its session. Everything else launches.
-ANSWERING = ('correct', 'spec', 'plan')
+ANSWERING = ('correct', 'spec', 'spec-amend', 'plan')
 #: Never continued, whatever the branch says (§1.4).
 NEVER = ('adjudicate', 'review', 'groom', 'reshape', 'rebase', 'close', 'fix-bug', 'task')
 
@@ -142,13 +142,14 @@ def target(product, row, root, runs=None, now=None, repo=None, cfg=None):
     if kind in NEVER or kind not in ANSWERING:
         return None, None, 0, f'kind {kind} never continues'
     rnd, review_path = 0, ''
-    if kind in ('spec', 'plan'):
+    if kind in ('spec', 'spec-amend', 'plan'):
+        want = 'spec' if kind == 'spec-amend' else kind  # an amendment answers the spec's round
         try:
             items, _ = index_reader.load(root)
         except (OSError, ValueError, KeyError):
             items = {}
         doc, rnd = feeder_rows.review_round(items.get(row.feature_id or row.item_id) or {})
-        if doc != kind:
+        if doc != want:
             return None, None, 0, 'no review round'
         review_path = product.conventions.review_path(row.item_id.lower(), rnd)
     now = time.time() if now is None else now

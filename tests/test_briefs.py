@@ -120,7 +120,25 @@ ROWS['delivery-plan'] = row('DELIVERY → PLAN', 'F-0003', 'delivery-plan', 'pla
                             '3 items in one delivery, no plan', feature_id='F-0003')
 ROWS['delivery-code'] = row('DELIVERY → CODE', 'F-0003', 'delivery-code', 'worker/F-0003',
                             'delivery plan approved, footprint free', feature_id='F-0003')
+
+
+def _groom_clerk_row():
+    r = row('GROOM → CLERK', 'F-0002', 'groom-clerk', 'groom/2026-09-22',
+            '3 intake cards no rule typed')
+    r.groom_file = 'groom/2026-09-22.md'
+    r.answers_file = '~/.ASF/state/sample/groom/2026-09-22.clerk.answers'
+    r.open_questions = (
+        '- [ ] inbox:a.md Rate limit card — feature or bug? → answer: ____',
+        '- [ ] inbox:b.md Checkout 500 card — which parent? → answer: ____',
+        '- [ ] inbox:c.md Typo card — worth a card? → answer: ____',
+    )
+    return r
+
+
 ROWS['groom'] = _groom_row()
+ROWS['groom-clerk'] = _groom_clerk_row()
+ROWS['spec-amend'] = row('STARVED → SPEC', 'F-0001', 'spec-amend', 'spec/F-0001',
+                         'spec-draft, the card changed')
 ROWS['reshape'] = row('RESHAPE → PLAN', 'T-0050', 'reshape', 'plan/T-0050',
                       'groom: split asf/feeder | asf/harvest', feature_id='F-0001')
 ROWS['spec-plan'] = row('CARD → SPEC+PLAN', 'F-0001', 'spec-plan', 'plan/F-0001',
@@ -875,8 +893,10 @@ class KindModelGrantTest(unittest.TestCase):
         p = product()
         for kind in ('spec', 'plan', 'review'):
             self.assertEqual(build_mod.model_for(p, kind), 'heavy', kind)
-        for kind in ('coder', 'fixer', 'rebase', 'close', 'fix-bug', 'adjudicate'):
+        for kind in ('coder', 'fixer', 'fix-bug', 'adjudicate'):
             self.assertEqual(build_mod.model_for(p, kind), 'light', kind)
+        for kind in ('rebase', 'close'):
+            self.assertEqual(build_mod.model_for(p, kind), 'cheap', kind)
 
     BUG = staticmethod(lambda sev: {'type': 'bug', 'severity': sev})
 
@@ -889,10 +909,15 @@ class KindModelGrantTest(unittest.TestCase):
         self.assertEqual(build_mod.model_for(p, 'review', {'type': 'feature'}), 'heavy')
         for kind in ('spec', 'plan'):
             self.assertEqual(build_mod.model_for(p, kind, {'type': 'task'}), 'heavy', kind)
-        for kind in ('close', 'rebase', 'fix-bug'):
+        for kind in ('close', 'rebase'):
             for sev in ('S2', 'S3'):
-                self.assertEqual(build_mod.model_for(p, kind, self.BUG(sev)), 'light', kind)
+                self.assertEqual(build_mod.model_for(p, kind, self.BUG(sev)), 'cheap', kind)
+        for sev in ('S2', 'S3'):
+            self.assertEqual(build_mod.model_for(p, 'fix-bug', self.BUG(sev)), 'light', sev)
         self.assertEqual(build_mod.model_for(p, 'fix-bug', self.BUG('S1')), 'heavy')
+        for kind in ('close', 'rebase'):
+            for sev in ('S1', 'S2', 'S3'):
+                self.assertEqual(build_mod.model_for(p, kind, self.BUG(sev)), 'cheap', kind)
 
     def test_adjudicate_runs_light_unless_the_item_is_s1(self):
         # operator policy 2026-09-27: 41% of a product's repair sessions were adjudicate, on
@@ -969,6 +994,63 @@ class KindModelGrantTest(unittest.TestCase):
     def test_a_groom_brief_grants_the_intake_directory_its_inbox_lines_name(self):
         brief = briefs.build(product(), ROWS['groom'], index(), [], REPO_FACTS)
         self.assertIn('inbox', brief.add_dirs)
+
+
+class CheapTierTests(unittest.TestCase):
+    def test_the_third_label(self):
+        self.assertEqual(build_mod.CHEAP, 'cheap')
+
+    def test_the_default_table(self):
+        for kind in ('rebase', 'close', 'groom-clerk'):
+            self.assertEqual(build_mod.model_for(product(), kind), 'cheap', kind)
+        for kind in ('plan', 'spec', 'spec-amend'):
+            self.assertEqual(build_mod.model_for(product(), kind), 'heavy', kind)
+
+    def test_a_conventions_override_still_wins(self):
+        p = product(conventions={'models': {'rebase': 'heavy'}})
+        self.assertEqual(build_mod.model_for(p, 'rebase'), 'heavy')
+
+    def test_the_id_range_kinds(self):
+        self.assertIn('spec-amend', build_mod.ID_RANGE_KINDS)
+        self.assertNotIn('groom-clerk', build_mod.ID_RANGE_KINDS)
+        for kind in ('spec-amend', 'groom-clerk'):
+            self.assertIn(kind, build_mod.KINDS)
+
+
+class GroomClerkBriefTests(unittest.TestCase):
+    def test_the_clerk_brief_carries_its_intake_lines_and_rails(self):
+        brief = briefs.build(product(), ROWS['groom-clerk'], index(), [], REPO_FACTS)
+        for name in ('a.md', 'b.md', 'c.md'):
+            self.assertIn(f'inbox:{name}', brief.text)
+        self.assertIn('.clerk.answers', brief.text)
+        self.assertIn('NEEDS OPERATOR', brief.text)
+        self.assertIn('EVERY QUESTION IS YOURS TO DECIDE', brief.text)
+        self.assertIn('THE REPOSITORY IS NOT YOUR WORK', brief.text)
+        self.assertEqual(brief.model, 'cheap')
+        self.assertFalse(brief.id_ranges_needed)
+        self.assertIn('inbox', brief.add_dirs)
+        self.assertNotIn('unblock <id>', brief.text)
+
+    def test_the_groom_brief_has_no_intake_bullet(self):
+        text = briefs.build(product(), ROWS['groom'], index(), [], REPO_FACTS).text
+        self.assertNotIn('for an `inbox:<file>` line', text)
+        self.assertIn('unblock <id>', text)
+        self.assertIn('EVERY QUESTION IS YOURS TO DECIDE', text)
+
+
+class SpecAmendBriefTests(unittest.TestCase):
+    def test_the_amend_brief_amends_in_place(self):
+        brief = briefs.build(product(), ROWS['spec-amend'], index(), [], REPO_FACTS)
+        self.assertIn('amended in place', brief.text)
+        self.assertIn('## Stories', brief.text)
+        self.assertNotIn('Create only that file', brief.text)
+        self.assertNotIn('{spec_path}', brief.text)
+        self.assertEqual(brief.model, 'heavy')
+        self.assertTrue(brief.id_ranges_needed)
+
+    def test_the_plain_spec_brief_still_creates(self):
+        text = briefs.build(product(), ROWS['spec'], index(), [], REPO_FACTS).text
+        self.assertIn('Create only that file', text)
 
 
 class GenericTest(unittest.TestCase):

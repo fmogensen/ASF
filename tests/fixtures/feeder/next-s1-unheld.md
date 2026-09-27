@@ -12,6 +12,6 @@
 | 2 | STALE → CLOSE | T-0006 | F-0007 | would launch close on task/T-0006 |
 | 2 | CARD → SPEC | F-0001 | F-0001 | would launch spec on spec/F-0001 |
 | 2 | STALEMATE → ADJUDICATE | F-0003 | F-0003 | would launch adjudicate on plan/F-0003 |
-| 2 | STARVED → SPEC | F-0004 | F-0004 | would launch spec on spec/F-0004 |
+| 2 | STARVED → SPEC | F-0004 | F-0004 | would launch spec-amend on spec/F-0004 |
 | 2 | STARVED → PLAN | F-0005 | F-0005 | WAITS ON finish: 0 spec/plan in flight + 2 this wave, cap 2 (feeder.max_specs_in_flight) while 2 planned Features have Tasks to build: F-0002, F-0007 |
 | 2 | UNDECIDED → DECIDE | F-0006 | F-0006 | NEEDS DECISION |

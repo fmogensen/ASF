@@ -96,8 +96,8 @@ ROWS_ANY = 'any'
 ROWS_CLOUD_OK = 'cloud-ok'
 #: the row kinds ``cloud.default: true`` sends to the cloud first (``task`` is the feeder's name
 #: for a ``coder`` row)
-DEFAULT_KINDS = ('coder', 'task', 'correct', 'review', 'adjudicate', 'fix-bug', 'spec', 'plan',
-                 'direct', 'groom')
+DEFAULT_KINDS = ('coder', 'task', 'correct', 'review', 'adjudicate', 'fix-bug', 'spec',
+                 'spec-amend', 'plan', 'direct', 'groom')
 DEFAULT_TIMEOUT_MIN = 240
 DEFAULT_LAUNCH_WAIT_S = 30
 DEFAULT_RUNS_ON = ('ubuntu-latest',)
