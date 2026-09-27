@@ -2,6 +2,28 @@
 
 One entry per released version, newest first.
 
+## v0.1.46 — 2026-09-27
+
+### In progress
+
+- F-0021 P5 — launch
+- F-0040 Story-to-test gate: a Task's pull request must tick an acceptance line with the test that proves it
+- F-0042 Credentials as a rule: a daily check that every signed-in tool is valid for three more days
+- F-0046 The conflicts pass: supersession enforced, same-subject rule and decision pairs into the groom
+- F-0052 Budget enforcement per Epic
+- F-0053 Reviews return checks: every review ends in a machine-readable check table the tick reads
+- F-0054 Failure classification before any relaunch: credential, quota, transport or work
+- F-0060 A mechanical correctness pass before the human-standard review
+- F-0092 An item has a budget: three sessions or $10, then it stops and says why
+
+### Improvements and hotfixes
+
+- feat(lane): merge: queue — the serialized merge queue lands only a gated sha
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.46"`
+
 ## v0.1.45 — 2026-09-27
 
 ### In progress
