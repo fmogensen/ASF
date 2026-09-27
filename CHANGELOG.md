@@ -2,6 +2,23 @@
 
 One entry per released version, newest first.
 
+## v0.1.47 — 2026-09-27
+
+### In progress
+
+- F-0021 P5 — launch
+- F-0046 The conflicts pass: supersession enforced, same-subject rule and decision pairs into the groom
+- F-0060 A mechanical correctness pass before the human-standard review
+
+### Improvements and hotfixes
+
+- feat(delivery): the Feature is the delivery unit — `conventions.delivery: feature`
+- refactor(feeder): branch_rows names its held set once
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.47"`
+
 ## v0.1.46 — 2026-09-27
 
 ### In progress
