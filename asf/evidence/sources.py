@@ -331,13 +331,18 @@ def ci_provider(product):
 
 def _deploy_configured(product):
     d = product.deploy_sha
-    return isinstance(d, dict) and bool(d)
+    if not isinstance(d, dict) or not d:
+        return False
+    if str(d.get('provider') or '').strip().lower() == 'none':
+        return False
+    return True
 
 
 def for_product(product, git=None, host=None, deploy=None):
     """`Sources(git, host, deploy)`: `LocalGit`; `NoHost` when `ci_provider(product) is None`,
-    else `GitHubHost`; `WorkflowDeploy` when the product configures a `deploy_sha`, else
-    `NoDeploy` (PD14). Each argument overrides its default."""
+    else `GitHubHost`; `WorkflowDeploy` when the product configures a non-empty `deploy_sha`
+    whose `provider` is not `none`, else `NoDeploy` (PD14). Each argument overrides its
+    default."""
     picked_git = git if git is not None else LocalGit(product)
     picked_host = host if host is not None else (
         NoHost() if ci_provider(product) is None else GitHubHost(product))

@@ -277,6 +277,18 @@ class ForProductTests(unittest.TestCase):
         src = sources.for_product(product)
         self.assertIsInstance(src.deploy, sources.WorkflowDeploy)
 
+    def test_no_deploy_for_provider_none(self):
+        product = env.Product('t', {'repo_dir': '/tmp', 'deploy_sha': {'provider': 'none'}})
+        src = sources.for_product(product)
+        self.assertIsInstance(src.deploy, sources.NoDeploy)
+
+    def test_no_deploy_for_provider_none_beside_a_stale_workflow_key(self):
+        product = env.Product('t', {'repo_dir': '/tmp',
+                                    'deploy_sha': {'provider': 'none',
+                                                   'prod': {'workflow': 'deploy-prod.yml'}}})
+        src = sources.for_product(product)
+        self.assertIsInstance(src.deploy, sources.NoDeploy)
+
     def test_each_override_is_honoured(self):
         product = env.Product('t', {'repo_dir': '/tmp'})
         git, host, deploy = object(), object(), object()
