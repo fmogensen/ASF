@@ -339,7 +339,7 @@ class WaveStepTests(StepsTestCase):
         seen = {}
 
         def plan(index, product, inflight, capacity, attempts=None, occupancy=None,
-                 groom_state=None, held=None, s1_first=True, gate=None):
+                 groom_state=None, held=None, s1_first=True, gate=None, bandwidth=None):
             if not s1_first:        # the demand pass (step_wave.demand), not the cut
                 return self.rows
             seen.update(capacity=capacity, inflight=[s['item'] for s in inflight], ids=sorted(index))
@@ -776,7 +776,7 @@ class WaveStep(StepsTestCase):
         seen = {}
 
         def plan(index, product, inflight, capacity, attempts=None, occupancy=None,
-                 groom_state=None, held=None, s1_first=True, gate=None):
+                 groom_state=None, held=None, s1_first=True, gate=None, bandwidth=None):
             if s1_first:            # not the demand pass (step_wave.demand)
                 seen['capacity'] = capacity
             return []
@@ -794,7 +794,7 @@ class WaveStep(StepsTestCase):
         seen = {}
 
         def plan(index, product, inflight, capacity, attempts=None, occupancy=None,
-                 groom_state=None, held=None, s1_first=True, gate=None):
+                 groom_state=None, held=None, s1_first=True, gate=None, bandwidth=None):
             if s1_first:            # not the demand pass (step_wave.demand)
                 seen['capacity'] = capacity
             return []
