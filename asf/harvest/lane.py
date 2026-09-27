@@ -104,7 +104,7 @@ import subprocess
 import tempfile
 import time
 
-from asf import approvals, customer_content, env, gitpush, refguard
+from asf import approvals, customer_content, env, gitpush, refguard, reviews
 from asf.evidence import review as review_mod
 from asf.feeder import footprint, widen
 from asf.harvest import harvest as H
@@ -328,6 +328,14 @@ def landing_class(product, files):
                      for f in files):
         return DOCS
     return CODE
+
+
+def review_kind(kind):
+    """The `asf.reviews` checklist a branch's `kind` (:func:`conventions.branch_kind`) reads by:
+    ``spec``/``plan`` keep their own name, anything else (``code``, ``fix``, ``direct``, a legacy
+    prefix, or None) reads as ``code`` — the one review checklist every non-doc branch answers to
+    (PS3)."""
+    return kind if kind in ('spec', 'plan') else CODE
 
 
 def shared_hits(conv, files):
@@ -1349,7 +1357,8 @@ class Lane:
         # a customer page is never landed unread: its diff needs a review whatever its class
         f['review_required'] = f['review_required'] or bool(f['customer'])
         if f['review_required'] and rec.get('state') in (None, PUSHED, BACK, PR_OPEN, REVIEW):
-            rv = review_mod.review_at(repo, conv, f'origin/{b}', item)
+            rv = review_mod.review_at(repo, conv, f'origin/{b}', item,
+                                       reviews.required(review_kind(f['kind'])))
             if rv:
                 rv['current'] = review_mod.is_current(repo, conv, f'origin/{b}', rv, head,
                                                        trunk=f'origin/{trunk}')

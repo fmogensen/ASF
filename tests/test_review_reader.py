@@ -6,6 +6,7 @@ import os
 import subprocess
 import unittest
 
+from asf import reviews
 from asf.conventions import Conventions
 from asf.evidence import evidence, review
 from tests.test_doc_lane_landing import GIT_ENV, PLAN, Product, git
@@ -40,6 +41,38 @@ class VerdictOf(unittest.TestCase):
     def test_head(self):
         self.assertEqual(review.head_of('verdict: approved\nhead: ABCDEF1234\n'), 'abcdef1234')
         self.assertIsNone(review.head_of('verdict: approved\n'))
+
+
+class TableVerdictOf(unittest.TestCase):
+    """The table decides first (D4): :func:`asf.reviews.verdict` over the checklist, `BOUNCE`
+    mapped to :data:`review.CHANGES` so the lane's two-value vocabulary is never stranded."""
+
+    MECH = reviews.CHECKLIST['spec'][0]
+    REQUIRED = reviews.required('spec')
+
+    @staticmethod
+    def table(fail=None, drop=None):
+        names = [n for n in TableVerdictOf.MECH if n != drop]
+        lines = ['| check | result | evidence |', '| --- | --- | --- |']
+        for n in names:
+            lines.append(f"| {n} | {'fail' if n == fail else 'pass'} | ok |")
+        return '\n'.join(lines) + '\n'
+
+    def test_full_coverage_all_pass_is_approved(self):
+        self.assertEqual(review.verdict_of(self.table(), self.REQUIRED), review.APPROVED)
+
+    def test_a_fail_row_under_a_typed_approved_line_is_changes(self):
+        text = self.table(fail=self.MECH[0]) + '\nverdict: approved\n'
+        self.assertEqual(review.verdict_of(text, self.REQUIRED), review.CHANGES)
+
+    def test_a_required_row_removed_is_changes_the_bounce_mapped(self):
+        text = self.table(drop=self.MECH[0])
+        self.assertEqual(review.verdict_of(text, self.REQUIRED), review.CHANGES)
+
+    def test_a_file_with_no_table_keeps_the_answer_its_verdict_line_gives(self):
+        self.assertEqual(review.verdict_of('verdict: approved\n', self.REQUIRED), review.APPROVED)
+        self.assertEqual(review.verdict_of('verdict: changes requested\n', self.REQUIRED),
+                         review.CHANGES)
 
 
 class Pick(unittest.TestCase):
@@ -200,6 +233,54 @@ class IsCurrentNamingAHead(unittest.TestCase):
     def test_an_unknown_named_head_is_not_current(self):
         self.commit_review(1, 'deadbeef1')
         self.assertFalse(self.current())
+
+
+class ReadNewestReviewAtForwardRequired(unittest.TestCase):
+    """``read``, ``newest`` and ``review_at`` each take a ``required=()`` that forwards to
+    :func:`review.verdict_of`, so a caller that knows the checklist a review must cover (C1 of
+    round 1) can make a table missing that coverage bounce instead of silently approving."""
+
+    MECH = reviews.CHECKLIST['code'][0]
+    REQUIRED = reviews.required('code')
+
+    @staticmethod
+    def table():
+        return f'| check | result | evidence |\n| --- | --- | --- |\n| {ReadNewestReviewAtForwardRequired.MECH[0]} | pass | ok |\n'
+
+    def test_read_forwards_required(self):
+        text = self.table()
+        self.assertEqual(review.read(text)[0], review.APPROVED)
+        self.assertEqual(review.read(text, required=self.REQUIRED)[0], review.CHANGES)
+
+    def setUp(self):
+        import tempfile
+        self.repo = tempfile.mkdtemp()
+        git(self.repo, 'init', '-q', '-b', 'main')
+        os.makedirs(os.path.join(self.repo, 'docs/reviews'), exist_ok=True)
+        with open(os.path.join(self.repo, 'src.py'), 'w') as fh:
+            fh.write('x = 1\n')
+        with open(os.path.join(self.repo, 'docs/reviews/1-t-1.md'), 'w') as fh:
+            fh.write(self.table())
+        git(self.repo, 'add', '-A')
+        git(self.repo, 'commit', '-qm', 'base')
+        self.conv = Conventions()
+
+    def test_newest_forwards_required(self):
+        p = self.p = Product()
+        self.addCleanup(p.close)
+        os.makedirs(os.path.join(p.work, 'docs/reviews'), exist_ok=True)
+        p.commit('review', {'docs/reviews/1-t-1.md': self.table()})
+        p.publish()
+        product = p.product()
+        self.assertEqual(review.newest(product, 'main', 'T-1'), (1, review.APPROVED, None))
+        self.assertEqual(review.newest(product, 'main', 'T-1', required=self.REQUIRED),
+                         (1, review.CHANGES, None))
+
+    def test_review_at_forwards_required(self):
+        self.assertEqual(review.review_at(self.repo, self.conv, 'main', 'T-1')['verdict'],
+                         review.APPROVED)
+        self.assertEqual(review.review_at(self.repo, self.conv, 'main', 'T-1',
+                                          required=self.REQUIRED)['verdict'], review.CHANGES)
 
 
 if __name__ == '__main__':

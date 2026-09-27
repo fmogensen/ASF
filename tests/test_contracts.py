@@ -191,8 +191,9 @@ class StubsImport(unittest.TestCase):
 
     def test_review(self):
         from asf.evidence import review
-        self.assertEqual(list(inspect.signature(review.newest).parameters), ['product', 'branch', 'item'])
-        self.assertEqual(list(inspect.signature(review.verdict_of).parameters), ['text'])
+        self.assertEqual(list(inspect.signature(review.newest).parameters),
+                         ['product', 'branch', 'item', 'required'])
+        self.assertEqual(list(inspect.signature(review.verdict_of).parameters), ['text', 'required'])
 
     def test_invariants(self):
         from asf import invariants

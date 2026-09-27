@@ -12,7 +12,7 @@ from unittest import mock
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUNNER = os.path.join(REPO_ROOT, 'tools', 'run_tests.py')
 
-from asf import env
+from asf import env, reviews
 from asf.conventions import Conventions
 from asf.evidence import evidence
 from asf.harvest import harvest, lane
@@ -1864,13 +1864,26 @@ class ProductHarvestTests(unittest.TestCase):
 
     # ---- the PR lane, native: a code branch needs the ASF review's approval --------------
 
-    REVIEW = ('| check | result | evidence |\n| --- | --- | --- |\n| scope | pass | a.txt |\n\n'
-              'verdict: {v}\n')
+    #: the six mechanical checks `lane.review_at` now requires (D4/PD6) — a fixture with fewer
+    #: rows would bounce regardless of its typed `verdict:` line
+    REQUIRED = reviews.required('code')
+
+    @classmethod
+    def review_text(cls, v):
+        """A review file whose table is a complete `REQUIRED` checklist stating the round's
+        verdict in its rows — all `pass` for an approving round, one `fail` for a
+        changes-requested one — beside the typed `verdict: {v}` line, so the rows and the word
+        agree (PS4)."""
+        result = 'pass' if v == 'approved' else 'fail'
+        rows = [f'| {name} | pass | a.txt |' for name in cls.REQUIRED[:-1]]
+        rows.append(f'| {cls.REQUIRED[-1]} | {result} | a.txt |')
+        table = '| check | result | evidence |\n| --- | --- | --- |\n' + '\n'.join(rows)
+        return f'{table}\n\nverdict: {v}\n'
 
     def push_fix(self, verdicts=(), extra=None):
         """``fix/B-0001`` with a change and one review file per verdict (round 1, 2, …)."""
         files = {'src/a.py': 'a = 1\n'}
-        files.update({f'.in/reviews/{n}-b-0001.md': self.REVIEW.format(v=v)
+        files.update({f'.in/reviews/{n}-b-0001.md': self.review_text(v)
                       for n, v in enumerate(verdicts, 1)})
         files.update(extra or {})
         self.push_lane('fix/B-0001', [('fix(B-0001): the change', files)])
@@ -1920,7 +1933,7 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertEqual(self.harvest(self.pr_product())[0], {'fix/B-0001': 'waiting'})
         # the review session: its verdict file lands on the branch
         sh(['git', 'checkout', '-q', 'fix/B-0001'], cwd=self.worker)
-        self.write(self.worker, '.in/reviews/1-b-0001.md', self.REVIEW.format(v='approved'))
+        self.write(self.worker, '.in/reviews/1-b-0001.md', self.review_text('approved'))
         sh(['git', 'add', '-A'], cwd=self.worker)
         sh(['git', 'commit', '-qm', 'review(B-0001): round 1'], cwd=self.worker)
         sh(['git', 'push', '-q', 'origin', 'fix/B-0001'], cwd=self.worker)

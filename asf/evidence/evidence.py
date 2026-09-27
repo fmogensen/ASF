@@ -35,7 +35,7 @@ import subprocess
 import sys
 import time
 
-from asf import env, proves
+from asf import env, proves, reviews
 from asf.conventions import Conventions
 from asf.evidence import review
 
@@ -244,13 +244,14 @@ def doc_slug(name):
 VERDICT_WORDS = {review.APPROVED: "APPROVED", review.CHANGES: "CHANGES REQUESTED"}
 
 
-def verdict_of(blob, legacy=True):
+def verdict_of(blob, legacy=True, required=()):
     """A review's verdict as the evidence spells it (``APPROVED`` / ``CHANGES REQUESTED`` / ``""``),
-    read by the one reader: :func:`asf.evidence.review.verdict_of` — its own ``verdict:`` line —
-    and, for a legacy ``<slug>-review-r<n>.md`` file, its first verdict word."""
+    read by the one reader: :func:`asf.evidence.review.verdict_of` — the check table first, its
+    own ``verdict:`` line for a file with no table — and, for a legacy ``<slug>-review-r<n>.md``
+    file, its first verdict word."""
     if not blob:
         return ""
-    v = review.legacy_verdict_of(blob) if legacy else review.verdict_of(blob)
+    v = review.legacy_verdict_of(blob) if legacy else review.verdict_of(blob, required)
     return VERDICT_WORDS.get(v, "")
 
 
@@ -354,13 +355,9 @@ def consumes_edges(text):
 # ---- the parity matrix ------------------------------------------------------------------------
 # Lifted from factory-parity.py.
 def cells(line):
-    """Split a markdown table row on unescaped `|`; a literal pipe is escaped `\\|`."""
-    c = re.split(r"(?<!\\)\|", line.strip())
-    if c and not c[0].strip():
-        c = c[1:]
-    if c and not c[-1].strip():
-        c = c[:-1]
-    return [x.replace("\\|", "|").strip() for x in c]
+    """Split a markdown table row on unescaped `|`; a literal pipe is escaped `\\|` — the one
+    splitter, owned by :func:`asf.reviews.cells`."""
+    return reviews.cells(line)
 
 
 VALID_STATUS = {"done", "doing", "todo"}
@@ -614,15 +611,24 @@ def discover(product=None, checked_file=None):
             if f:
                 task_blob_req.append(names[f])
     task_blobs = read_blobs(task_blob_req, product=product)
+    code_required = reviews.required("code")
     for rows in task_rows.values():
         for row in rows:
             rev = row.pop("review", None)
             if rev:
                 r, legacy, f = rev
                 names = task_trees.get(f"origin/{row['branch']}:{reviews_dir}", {})
-                row["review"] = (r, verdict_of(task_blobs.get(names.get(f)), legacy=legacy))
+                blob = task_blobs.get(names.get(f))
+                row["review"] = (r, verdict_of(blob, legacy=legacy, required=code_required))
+                if blob:
+                    text = blob[:review.READ_CHARS].decode("utf-8", "replace")
+                    checks, _faults = reviews.parse(text)
+                    row["checks"] = {"path": f, "round": r, "passed": reviews.passed(checks)}
+                else:
+                    row["checks"] = None
             else:
                 row["review"] = None
+                row["checks"] = None
 
     features = {}
     for it in inits.values():
@@ -633,7 +639,7 @@ def discover(product=None, checked_file=None):
             if not hit:
                 return None
             f, r, sha, legacy = hit
-            return (r, verdict_of(blobs.get(sha), legacy=legacy), f)
+            return (r, verdict_of(blobs.get(sha), legacy=legacy, required=reviews.required(kind)), f)
 
         own_branches = {b for b in (it["spec_branch"], it["plan_branch"]) if b}
         seen_pr, pr_numbers = set(), []
@@ -658,6 +664,7 @@ def discover(product=None, checked_file=None):
             "plan_review": review_tuple("plan"),
             "tasks": {row["id"]: {"branch": row["branch"], "pr": row["pr"],
                                   "pr_state": row["pr_state"], "review": row["review"],
+                                  "checks": row["checks"],
                                   "merged_sha": row["merged_sha"],
                                   "landed_no_branch": row["landed_no_branch"]}
                      for row in task_rows.get(slug, [])},
