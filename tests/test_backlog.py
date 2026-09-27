@@ -401,6 +401,24 @@ class CheckCommandTests(unittest.TestCase):
         r = run(['check'], self.root)
         self.assertIn('(type story, no matrix row, parent F-0001 is New)', r.stdout)
 
+    def test_a_review_proven_acceptance_line_still_reads_as_one(self):
+        # §2.5/D8: `proves.tick`'s ` — <path>` suffix rides on the bullet's own text, so
+        # `check.ACCEPTANCE_ITEM_RE` still finds the ticked line.
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        write_item(self.root, 'F-0001', 'feature', 'Free plan', parent='E-0001')
+        write_item(self.root, 'S-0104', 'story', 'The tick', parent='F-0001', body=(
+            "## Description\n\n## Acceptance\n"
+            "- [x] the table is parsed and the round's verdict comes from it"
+            " — docs/reviews/3-t-0176.md\n"
+            "- [ ] a fail row does not tick\n\n"
+            "## Non-goals\n\n## History\n- 2026-01-01: created\n\n"
+            "## Children\n\n## Backlinks\n"))
+        write_item(self.root, 'T-0001', 'task', 'Do it', parent='F-0001',
+                   typed_lines=('stories: [S-0104]',))
+        run(['index'], self.root)
+        r = run(['check'], self.root)
+        self.assertEqual(r.returncode, 0, r.stdout)
+
     def test_landed_must_be_a_hex_sha(self):
         write_item(self.root, 'E-0001', 'epic', 'Factory')
         write_item(self.root, 'F-0001', 'feature', 'Free plan', parent='E-0001',

@@ -9,6 +9,7 @@ import types
 import unittest
 from unittest import mock
 
+from asf import reviews
 from asf.env import Product
 from asf.record import check
 from asf.record import frontmatter
@@ -1078,6 +1079,17 @@ class NoCoderBeforeTheSpecLands(unittest.TestCase):
         self.assertEqual([(r.kind, r.branch, r.launches) for r in out],
                          [(rows.APPROVED_LAND, 'spec/F-0001', False)])
 
+    def test_a_changes_requested_spec_review_stays_at_its_round_never_approved(self):
+        # §3.6/PD6: a review's own check table decides the round's verdict before ingest ever
+        # sees it — a table with one `fail` and a table with a required check missing but a typed
+        # `verdict: APPROVED` line both read `CHANGES REQUESTED` by the reader (BOUNCE is mapped
+        # there, Task 30900), so ingest cannot tell the two apart and does not need to: either way
+        # it stays on its round, never approved.
+        meta, _out = self.rows_after(self.fev(
+            spec='origin/spec/F-0001:docs/specs/f-0001.md', spec_branch='spec/F-0001',
+            spec_review=(1, 'CHANGES REQUESTED', 'f-0001-spec-review-r1.md')))
+        self.assertEqual(meta['stage'], 'spec-review r1')
+
     def test_an_approved_spec_waiting_on_its_open_pr_is_pushed_and_waiting(self):
         from asf.env import Product
         from asf.feeder import rows
@@ -1404,6 +1416,99 @@ class ProvenAcceptanceTests(IngestTestCase):
         _meta, body = read_meta(self.root, 'stories', 'S-18754')
         self.assertIn('- [x] a malformed claim is a problem, not a silent skip', body)
         self.assertIn('ingest: proved line 2 — T-0123, PR #412', body)
+
+
+class ReviewProvenAcceptanceTests(IngestTestCase):
+    """§2.5: a Story acceptance line a code review's passing check names is ticked with the
+    review's path as evidence — the Story gains one ``acceptance n/m proven (<path>)`` evidence
+    line and one ``## History`` line, even when its state and stage do not move."""
+
+    LINE1 = "the table is parsed and the round's verdict comes from it"
+    LINE2 = "a Story acceptance line proven by a code review is ticked with the review path"
+    LINE3 = "a fail row does not tick and does not untick an earlier round's tick"
+
+    STORY_BODY = (
+        "## Description\n\n"
+        f"## Acceptance\n- [ ] {LINE1}\n- [ ] {LINE2}\n- [ ] {LINE3}\n\n"
+        "## Non-goals\n\n"
+        "## History\n- 2026-01-01: created\n\n"
+        "## Children\n\n## Backlinks\n"
+    )
+
+    def make_story(self, machine_lines=None):
+        kw = {'machine_lines': machine_lines} if machine_lines else {}
+        write(self.root, 'S-19950', 'story', 'The tick', 'stories', body=self.STORY_BODY, **kw)
+
+    def make_task(self):
+        write(self.root, 'T-19950', 'task', 'Wire it', 'tasks',
+              typed_lines=['stories: [S-19950]', 'links:', '  branches: [worker/t-19950]'])
+
+    def ev(self, passed, path='docs/reviews/3-t-19950.md', round_=3):
+        checks = {'path': path, 'round': round_, 'passed': passed} if passed is not None else None
+        return dict(EMPTY_EV, branches=['worker/t-19950'], features={'f-0001': {
+            'alias': None, 'spec': None, 'spec_branch': None, 'spec_on_main': False,
+            'spec_review': None, 'plan': None, 'plan_branch': None, 'plan_on_main': False,
+            'plan_review': None,
+            'tasks': {'T1': {'branch': 'worker/t-19950', 'pr': None, 'pr_state': None,
+                             'merged_sha': None, 'checks': checks}},
+            'prs': [],
+        }})
+
+    def raw(self):
+        with open(os.path.join(self.root, 'stories', 'S-19950.md'), encoding='utf-8') as f:
+            return f.read()
+
+    def two_of_three(self):
+        return [reviews.normalize(self.LINE1), reviews.normalize(self.LINE2)]
+
+    def test_two_of_three_lines_tick_with_the_review_path_as_suffix(self):
+        self.make_story()
+        self.make_task()
+        self.assertEqual(self.run_ingest(self.ev(self.two_of_three())), 0)
+        meta, body = read_meta(self.root, 'stories', 'S-19950')
+        self.assertIn(f'- [x] {self.LINE1} — docs/reviews/3-t-19950.md', body)
+        self.assertIn(f'- [x] {self.LINE2} — docs/reviews/3-t-19950.md', body)
+        self.assertIn(f'- [ ] {self.LINE3}', body)
+        self.assertIn('acceptance 2/3 proven (docs/reviews/3-t-19950.md)', meta['evidence'])
+        self.assertIn('ingest: acceptance 2/3 ticked (docs/reviews/3-t-19950.md)', body)
+
+    def test_a_second_ingest_writes_nothing_more(self):
+        self.make_story()
+        self.make_task()
+        ev = self.ev(self.two_of_three())
+        self.assertEqual(self.run_ingest(ev), 0)
+        once = self.raw()
+        self.assertEqual(self.run_ingest(ev), 0)
+        self.assertEqual(self.raw(), once)
+
+    def test_a_task_with_no_review_file_leaves_the_story_untouched(self):
+        self.make_story()
+        self.make_task()
+        self.assertEqual(self.run_ingest(self.ev(None)), 0)
+        meta, body = read_meta(self.root, 'stories', 'S-19950')
+        self.assertNotIn('proven', ' '.join(meta.get('evidence') or []))
+        _preamble, sections = ingest.parse_sections(body)
+        _pre2, sections2 = ingest.parse_sections(self.STORY_BODY)
+        self.assertEqual(dict(sections)['## Acceptance'], dict(sections2)['## Acceptance'])
+
+    def test_a_fail_row_does_not_untick_a_line_an_earlier_round_ticked(self):
+        self.make_story()
+        self.make_task()
+        self.assertEqual(self.run_ingest(self.ev(self.two_of_three())), 0)
+        # round 2: LINE2 no longer passes (a fail row) — LINE1 still does
+        self.assertEqual(self.run_ingest(self.ev([reviews.normalize(self.LINE1)],
+                                                 path='docs/reviews/4-t-19950.md', round_=4)), 0)
+        _meta, body = read_meta(self.root, 'stories', 'S-19950')
+        self.assertIn(f'- [x] {self.LINE2} — docs/reviews/3-t-19950.md', body)
+
+    def test_the_tick_happens_even_when_state_does_not_move(self):
+        self.make_story(machine_lines=('state: Active', 'stage_since: 2026-01-01T00:00:00Z',
+                                       'updated: 2026-01-01T00:00:00Z'))
+        self.make_task()
+        self.assertEqual(self.run_ingest(self.ev(self.two_of_three())), 0)
+        meta, body = read_meta(self.root, 'stories', 'S-19950')
+        self.assertEqual(meta['state'], 'Active')
+        self.assertIn(f'- [x] {self.LINE1} — docs/reviews/3-t-19950.md', body)
 
 
 if __name__ == '__main__':
