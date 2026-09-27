@@ -492,6 +492,9 @@ def _shape_ok(value, shape):
 #: is not shape-checked.
 DEPLOY_MODES = {'dev': ('auto', 'manual', 'ci'), 'prod': ('auto', 'manual')}
 DEPLOY_SOURCES = ('ci', 'dev')
+#: ``deploy_sha.provider`` — how the evidence pass's deploy source is picked
+#: (``asf.evidence.sources.for_product``); documented, unread until now. ``none`` opts out.
+DEPLOY_PROVIDERS = ('github-deployments', 'fly', 'vercel', 'script')
 #: the modes a named target (``deploy_sha.targets.<name>.mode``) may take
 DEPLOY_TARGET_MODES = ('auto', 'manual', 'ci')
 
@@ -505,6 +508,10 @@ def _deploy_problems(deploy):
     auto = deploy.get('auto')
     if auto is not None and not isinstance(auto, bool):
         out.append(('deploy_sha.auto', f'must be true or false, not {auto!r}'))
+    provider = deploy.get('provider')
+    if provider is not None and str(provider).strip().lower() not in (*DEPLOY_PROVIDERS, 'none'):
+        out.append(('deploy_sha.provider',
+                    f"must be one of {' | '.join(DEPLOY_PROVIDERS)} | none, not {provider!r}"))
     for env, modes in DEPLOY_MODES.items():
         block = deploy.get(env)
         if block is None:
