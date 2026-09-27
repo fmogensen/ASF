@@ -1444,6 +1444,57 @@ class RebaseOverAReportCommitTest(unittest.TestCase):
         self.assertIs(fields['correction'].get('parked'), True, line)
 
 
+class RebaseOffRewordedTrunkCopiesTest(unittest.TestCase):
+    """A product's T-0338/T-0349, 2026-09-27: the lane branch carried copies of trunk commits
+    whose patches no longer matched the trunk's (the trunk's own landing differed) and whose
+    subjects the lane had reworded (``task(T-0338): hotfix(hooks): … (#804)``). The session's
+    rebase onto the trunk dropped them — they are the trunk's — yet publish counted them lost
+    and the loop guard parked both items. A remote commit whose subject, reword prefix or not,
+    is a trunk commit's since the remote's base is a trunk copy."""
+
+    sh = UnpushedAfterARebaseTest.sh
+    commit = RebaseOverAReportCommitTest.commit
+
+    def setUp(self):
+        base = tempfile.mkdtemp(prefix='lifecycle_reword_')
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        origin, self.repo = os.path.join(base, 'origin.git'), os.path.join(base, 'repo')
+        self.sh(['init', '-q', '--bare', '-b', 'main', origin], base)
+        self.sh(['clone', '-q', origin, self.repo], base)
+        for k, v in (('user.name', 'Test'), ('user.email', 't@example.com'),
+                     ('commit.gpgsign', 'false')):
+            self.sh(['config', k, v], self.repo)
+        self.commit('c', 'base c')
+        self.commit('h', 'hook v0')
+        self.sh(['push', '-q', 'origin', 'HEAD:main'], self.repo)
+        self.sh(['checkout', '-q', '-b', 'cloud/T-0338'], self.repo)
+        self.commit('a', 'own a', 'task(T-0338): own a')
+        self.commit('h', 'hook v1', 'task(T-0338): hotfix(hooks): scan pushed files (#804)')
+        self.sh(['push', '-q', 'origin', 'cloud/T-0338'], self.repo)
+        self.remote_sha = self.sh(['rev-parse', 'HEAD'], self.repo)
+        self.sh(['checkout', '-q', '-B', 'tmp', 'origin/main'], self.repo)
+        self.commit('h', 'hook v2', 'hotfix(hooks): scan pushed files (#804)')
+        self.sh(['push', '-q', 'origin', 'tmp:main'], self.repo)
+        self.sh(['checkout', '-q', 'cloud/T-0338'], self.repo)
+        self.sh(['fetch', '-q', 'origin'], self.repo)
+        self.sh(['reset', '-q', '--hard', 'origin/main'], self.repo)
+        self.sh(['cherry-pick', self.sh(['rev-parse', f'{self.remote_sha}~1'], self.repo)],
+                self.repo)
+        self.head = self.sh(['rev-parse', 'HEAD'], self.repo)
+
+    def test_the_rebase_is_progress_and_published(self):
+        self.assertTrue(lc.rebase_of(self.repo, self.head, self.remote_sha, main='main'))
+        ok, line = lc.publish(self.repo, 'cloud/T-0338', self.remote_sha, main='main')
+        self.assertTrue(ok, line)
+        self.assertIn(lc.copies_archive('cloud/T-0338', self.remote_sha), line)
+
+    def test_a_subject_the_trunk_never_had_is_still_lost(self):
+        self.sh(['commit', '-q', '--amend', '-m', 'task(T-0338): own a, reworded'], self.repo)
+        self.sh(['reset', '-q', '--hard', 'origin/main'], self.repo)
+        self.assertFalse(lc.rebase_of(self.repo, self.sh(['rev-parse', 'HEAD'], self.repo),
+                                      self.remote_sha, main='main'))
+
+
 def _build_ahead(root):
     """A bare origin, a clone holding the lane branch ``lane/x`` at one commit (pushed), and a
     second clone that pushed one more commit onto it — the clone is the stale worktree."""

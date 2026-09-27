@@ -989,6 +989,7 @@ def rebased_off_copies(wt, new, remote_sha, lost, main='main'):
     for ln in theirs.stdout.splitlines():
         sha, _, rest = ln.partition('\x00')
         ident[sha] = rest
+    trunk_subjects = None
     for short in lost:
         full = next((s for s in list(copies) + list(ident) if s.startswith(short)), '')
         if not full:
@@ -996,8 +997,30 @@ def rebased_off_copies(wt, new, remote_sha, lost, main='main'):
         if full in copies or ident.get(full) in carried or _empty_commit(wt, full) \
                 or _resolved_to_trunk(wt, full, new, trunk):
             continue
+        if trunk_subjects is None:
+            trunk_subjects = _trunk_subjects(wt, remote_sha, trunk)
+        subject = (ident.get(full) or '').split('\x00', 1)[-1]
+        if subject and (subject in trunk_subjects
+                        or REWORD_PREFIX_RE.sub('', subject, count=1) in trunk_subjects):
+            continue
         return False
     return True
+
+
+#: The prefix the lane's reword puts on a subject that does not name the item
+#: (asf.harvest.lane.reword_branch): ``task(T-0338): hotfix(hooks): … (#804)``.
+REWORD_PREFIX_RE = re.compile(r'^[a-z][\w-]*\([A-Z][A-Z0-9]*-\d+\): ')
+
+
+def _trunk_subjects(wt, remote_sha, trunk):
+    """The subjects of the trunk's commits since ``remote_sha``'s base on it: a remote commit
+    under one of them (reworded or not) is the trunk's own change, landed there under another
+    patch (a product's T-0338/T-0349: ``(#804)``, ``(#827)``)."""
+    base = _git(['merge-base', remote_sha, trunk], wt).stdout.strip()
+    if not base:
+        return set()
+    p = _git(['log', '--no-merges', '--format=%s', f'{base}..{trunk}'], wt)
+    return {ln for ln in p.stdout.splitlines() if ln.strip()} if p.returncode == 0 else set()
 
 
 def _empty_commit(wt, sha):
