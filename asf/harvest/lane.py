@@ -2834,7 +2834,7 @@ def merge_prs(lane, ready):
             continue
         if not sha:
             lane.out(f'held {b}: PR #{number} merge refused — {how}')
-            if MERGE_CONFLICT_RE.search(how or ''):
+            if MERGE_CONFLICT_RE.search(how or '') or host.conflicting(number):
                 # a trunk that moved under a green branch: the gate's conflict path, never a wait —
                 # its green is kept, so a wait would merge (and be refused) again every pass
                 # (a ``merge=union`` file merges clean here and conflicts on the host, which
@@ -2900,6 +2900,10 @@ class Host:
         a refusal ``(None, reason)``. ``subject``: the squash subject to write, when the lane
         names one (:func:`squash_subject`). The caller writes MERGING before calling."""
         raise NotImplementedError
+
+    def conflicting(self, pr):
+        """True when the host says PR ``pr`` conflicts with its base. No PR host: False."""
+        return False
 
     def cancel_ci(self, branch):
         """Cancel the CI runs a merged PR still has going; how many were cancelled. No PR host,
@@ -3173,6 +3177,13 @@ class GitHubHost(Host):
             if 'not allowed' not in (err or '').lower():
                 break
         return None, H.tail(err) or 'gh pr merge failed'
+
+    def conflicting(self, pr):
+        """True when GitHub reads PR ``pr`` as ``mergeable: CONFLICTING``. A refused merge's
+        text keeps only gh's last line — the ``--auto`` hint, not the ``is not mergeable`` above
+        it — so the PR's own state is what names a conflict. Unreadable or UNKNOWN: False."""
+        got = H.gh_json(['pr', 'view', str(pr), '-R', self.slug, '--json', 'mergeable'], {})
+        return isinstance(got, dict) and got.get('mergeable') == 'CONFLICTING'
 
     def cancel_ci(self, branch):
         """Cancel ``branch``'s ``pull_request`` CI runs that have not finished. Called once its PR

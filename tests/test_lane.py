@@ -2396,7 +2396,7 @@ class AMergeConflictGoesBack(unittest.TestCase):
 
     CONFLICT = 'GraphQL: Pull Request has merge conflicts (mergePullRequest)'
 
-    def _merge(self, how, cls):
+    def _merge(self, how, cls, conflicting=False):
         runner = lane.Lane.__new__(lane.Lane)
         lines = []
         runner.out, runner.dry_run, runner.results, runner.repo = lines.append, False, {}, None
@@ -2405,6 +2405,7 @@ class AMergeConflictGoesBack(unittest.TestCase):
         fake.slots.return_value = (None, '')
         fake.recheck.return_value = None
         fake.merge.return_value = (None, how)
+        fake.conflicting.return_value = conflicting
         runner.host = fake
         f = {'branch': 'cloud/spec-x', 'class': cls, 'kind': 'spec', 'item': 'F-0001',
              'head': HEAD, 'prev': rec(lane.GATE, pr=842), 'green': {'head': HEAD, 'trunk': NEW}}
@@ -2431,6 +2432,26 @@ class AMergeConflictGoesBack(unittest.TestCase):
         sb, wt, _lines = self._merge(self.CONFLICT, lane.CODE)
         wt.assert_not_called()
         self.assertEqual(sb.call_args[0][2], 'conflict')
+
+    def test_a_refusal_whose_text_hides_the_conflict_asks_the_host(self):
+        # gh prints ``is not mergeable: the merge commit cannot be cleanly created`` and then
+        # the ``--auto`` hint; the refusal keeps only the last line, so the host's own
+        # ``mergeable`` (CONFLICTING) is what says it is a conflict
+        auto = ('To have the pull request merged after all the requirements have been met, add '
+                'the `--auto` flag.')
+        sb, wt, _lines = self._merge(auto, lane.DOCS, conflicting=True)
+        wt.assert_not_called()
+        self.assertEqual(sb.call_args[0][2], 'conflict')
+
+    def test_the_host_reads_conflicting_off_the_pr(self):
+        host = lane.GitHubHost.__new__(lane.GitHubHost)
+        host.slug = 'o/p'
+        for state, want in (('CONFLICTING', True), ('MERGEABLE', False), ('UNKNOWN', False)):
+            with mock.patch.object(harvest, '_gh',
+                                   return_value=(0, json.dumps({'mergeable': state}), '')):
+                self.assertIs(host.conflicting(842), want)
+        with mock.patch.object(harvest, '_gh', return_value=(1, '', 'boom')):
+            self.assertIs(host.conflicting(842), False)
 
     def test_any_other_refusal_still_waits(self):
         sb, wt, _lines = self._merge('To have the merge queue ... base branch policy', lane.DOCS)
