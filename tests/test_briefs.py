@@ -347,11 +347,9 @@ class ReshapeSplitPartsTests(unittest.TestCase):
     relaunched split of an item, each ``<id> (<writes>)`` — and the ``split_parts`` context key
     that carries them into a reshape brief.
 
-    ``asf/briefs/templates/reshape.md`` is in the amendable set (role_agents): a session cannot
-    edit it directly, only propose the change for a person to merge (``asf propose`` was
-    unavailable in this session too — see the T-0301 report). The paragraph itself, and its
-    rendered ``mint no new id`` text, are therefore not exercised here; everything the builder
-    computes ahead of the template — the function and the context key — is.
+    ``asf/briefs/templates/reshape.md`` is in the amendable set (role_agents), so its §2.7
+    paragraph was landed by the console, not the coder session; the rendered brief is tested
+    here with the rest.
     """
 
     def items(self):
@@ -397,6 +395,19 @@ class ReshapeSplitPartsTests(unittest.TestCase):
         ctx = build_mod.context(product(), r, 'reshape', facts)
         self.assertEqual(ctx['split_parts'],
                          'T-0190 (docs/guide/a.md), T-0191 (docs/guide/b.md docs/guide/c.md)')
+
+    def test_the_rendered_brief_names_the_parts_and_says_mint_no_new_id(self):
+        idx = {'items': dict(self.items(), **{
+            'F-0001': {'id': 'F-0001', 'type': 'feature', 'title': 'the feature'}})}
+        idx['items']['T-0181']['parent'] = 'F-0001'
+        r = row('RESHAPE → PLAN', 'T-0181', 'reshape', 'plan/T-0181',
+               'groom: split asf/feeder | asf/harvest')
+        text = briefs.build(product(), r, idx, [], REPO_FACTS).text
+        self.assertIn('The record already holds these parts of T-0181: T-0190 (docs/guide/a.md), '
+                      'T-0191 (docs/guide/b.md docs/guide/c.md).', text)
+        self.assertIn('mint no new id', text)
+        none = briefs.build(product(), ROWS['reshape'], index(), [], REPO_FACTS).text
+        self.assertIn('these parts of T-0050: none yet.', none)
 
     def test_context_is_none_yet_when_the_item_is_not_in_the_index(self):
         facts = dict(preamble_mod.collect(product(), ROWS['reshape'], index(), [], REPO_FACTS),
