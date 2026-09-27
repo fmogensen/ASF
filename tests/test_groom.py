@@ -13,7 +13,9 @@ from asf import env
 from asf.record import frontmatter
 from asf.record.core import canonicalize, load_items, today, tokenize
 from asf.groom import groom
+from asf.groom import digest
 from asf.groom import inbox as inbox_mod
+from asf.groom import policy
 from asf import hermetic
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -155,6 +157,143 @@ class NearDuplicateTests(unittest.TestCase):
             self.assertIn('near-duplicate of F-0001', lines[0])
         finally:
             shutil.rmtree(root, ignore_errors=True)
+
+
+class ConflictSectionTests(unittest.TestCase):
+    """F-0046 Task 5: the groom carries a rule/decision conflict pair through to the rendered
+    file, once, between the section it sits beside (`## Near-duplicate titles`) and the one it
+    precedes (`## Undecided > 14 days`)."""
+
+    def setUp(self):
+        self.root = make_repo()
+        write_item(
+            self.root, 'R-0007', 'rule', 'Harvest goes through rebase_and_resolve',
+            typed_lines=['scope: harvest', 'enforced: true', 'reason: keep the trunk clean',
+                        'check: check.sh'],
+            machine_lines=['state: New', 'stage_since: 2026-09-01T00:00:00Z',
+                          'updated: 2026-09-01T00:00:00Z'],
+            body=("## Statement\nHarvest never touches the trunk directly; it works through "
+                  "`harvest.rebase_and_resolve`.\n\n## Children\n\n## Backlinks\n"))
+        write_item(
+            self.root, 'D-0042', 'decision', 'A worker branch fast-forwards the trunk itself',
+            typed_lines=['decided: true', 'decided_by: ops', 'date: 2026-09-15',
+                        'scope: harvest'],
+            machine_lines=['state: New', 'stage_since: 2026-09-15T00:00:00Z',
+                          'updated: 2026-09-15T00:00:00Z'],
+            body=("## Statement\nA worker branch may fast-forward the trunk itself, bypassing "
+                  "`harvest.rebase_and_resolve` for a clean history.\n\n## Children\n\n"
+                  "## Backlinks\n"))
+        run(['index'], self.root)
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _groom(self):
+        r = run(['groom'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(os.path.join(self.root, 'groom', today() + '.md'), encoding='utf-8') as f:
+            return f.read(), r
+
+    def test_section_sits_between_dupes_and_undecided14_with_the_full_grammar(self):
+        text, r = self._groom()
+        dupes_at = text.index('## Near-duplicate titles')
+        conflicts_at = text.index('## Conflicting rules and decisions')
+        undecided14_at = text.index('## Undecided > 14 days')
+        self.assertTrue(dupes_at < conflicts_at < undecided14_at, text)
+        block = text[conflicts_at:undecided14_at]
+
+        head = ("- [ ] D-0042 conflicts R-0007 — scope `harvest`, shares "
+                "`harvest.rebase_and_resolve`; keep A · keep B · both · merge "
+                "(merge keeps D-0042) → answer: ____")
+        a_line = ('      A D-0042 "A worker branch may fast-forward the trunk itself, bypassing '
+                  '`harvest.rebase_and_resolve` for a clean history." — 2026-09-15')
+        b_line = ('      B R-0007 "Harvest never touches the trunk directly; it works through '
+                  '`harvest.rebase_and_resolve`." — rules/R-0007.md')
+        prec_line = '      precedence: D-0042 (newer, 2026-09-15)'
+        self.assertIn(head, block)
+        self.assertIn(a_line, block)
+        self.assertIn(b_line, block)
+        self.assertIn(prec_line, block)
+
+        self.assertIn('Conflicting rules and decisions: 1', r.stdout)
+
+    def test_policy_open_questions_counts_the_pair_once_under_its_lead_id(self):
+        text, _r = self._groom()
+        ids = [iid for iid, _line in policy.open_questions(text)]
+        self.assertEqual(ids.count('D-0042'), 1)
+        self.assertNotIn('R-0007', ids)
+
+    def test_digest_answer_line_matches_and_why_is_the_text_after_the_last_dash(self):
+        text, _r = self._groom()
+        matched = [m for m in (digest.ANSWER_LINE_RE.match(l) for l in text.splitlines()) if m]
+        conflict_matches = [m for m in matched if m.group('id') == 'D-0042']
+        self.assertEqual(len(conflict_matches), 1)
+        m = conflict_matches[0]
+        self.assertEqual(m.group('answer'), '____')
+        self.assertEqual(digest._why(m.group('rest')),
+                         'scope `harvest`, shares `harvest.rebase_and_resolve`; '
+                         'keep A · keep B · both · merge (merge keeps D-0042)')
+
+    def test_no_conflicting_pair_renders_none(self):
+        root = make_repo()
+        try:
+            write_item(root, 'F-0001', 'feature', 'Something', typed_lines=['decided: true'])
+            run(['index'], root)
+            r = run(['groom'], root)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(os.path.join(root, 'groom', today() + '.md'), encoding='utf-8') as f:
+                text = f.read()
+            conflicts_at = text.index('## Conflicting rules and decisions')
+            undecided14_at = text.index('## Undecided > 14 days')
+            self.assertEqual(text[conflicts_at:undecided14_at].strip(),
+                             '## Conflicting rules and decisions\n\n(none)')
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
+class ConflictDedupeTests(unittest.TestCase):
+    """F-0046 Task 5: ``merge_groom_text`` learns the conflicts block's own dedupe token — the
+    pair, not the lead id — so a same-tick or every-tick re-run never doubles a block and never
+    collapses two distinct pairs that happen to share a lead id."""
+
+    @staticmethod
+    def _block(a, b, survivor=None):
+        survivor = survivor or a
+        head = (f"- [ ] {a} conflicts {b} — reason; keep A · keep B · both · merge "
+                f"(merge keeps {survivor}) → answer: ____")
+        return '\n'.join([head, f'      A {a} "stmt" — src', f'      B {b} "stmt" — src',
+                          f'      precedence: {survivor} (why)'])
+
+    def test_incremental_merge_adds_once_then_nothing(self):
+        existing = "# Groom d\n\n## Conflicting rules and decisions\n\n(none)\n"
+        block = self._block('D-0001', 'R-0001')
+        text, added = groom.merge_groom_text(existing, {'conflicts': [block]})
+        self.assertEqual(added, 1)
+        self.assertIn(block, text)
+        text2, added2 = groom.merge_groom_text(text, {'conflicts': [block]})
+        self.assertEqual(added2, 0)
+        self.assertEqual(text2, text)
+
+    def test_one_lead_id_two_partners_yields_two_blocks_not_one(self):
+        # the naive lead-id token (`_LINE_TOKEN_RE`'s first `\S+`) is the same, `R-0001`, on both
+        # lines — the collapse `_CONFLICT_TOKEN_RE`/`line_token` must not let happen.
+        existing = "# Groom d\n\n## Conflicting rules and decisions\n\n(none)\n"
+        b1 = self._block('R-0001', 'D-0001')
+        b2 = self._block('R-0001', 'D-0002')
+        text, added = groom.merge_groom_text(existing, {'conflicts': [b1, b2]})
+        self.assertEqual(added, 2)
+        self.assertIn(b1, text)
+        self.assertIn(b2, text)
+
+    def test_answered_conflicts_line_is_untouched_through_incremental_merge(self):
+        answered_head = ("- [x] D-0001 conflicts R-0001 — reason; keep A · keep B · both · merge "
+                         "(merge keeps D-0001) → answer: keep A")
+        existing = ("# Groom d\n\n## Conflicting rules and decisions\n\n" + answered_head + "\n"
+                    '      A D-0001 "stmt" — src\n      B R-0001 "stmt" — src\n'
+                    '      precedence: D-0001 (why)\n')
+        text, added = groom.merge_groom_text(existing, {'conflicts': [self._block('D-0001', 'R-0001')]})
+        self.assertEqual(added, 0)
+        self.assertIn(answered_head, text)
 
 
 class GroomInboxIntegrationTests(unittest.TestCase):
