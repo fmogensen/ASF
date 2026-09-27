@@ -363,6 +363,27 @@ class AppendHistoryLinesTests(unittest.TestCase):
         body = "## History\n- x\n\n## Children\n"
         self.assertEqual(ingest.append_history_lines(body, []), body)
 
+    def test_wrapper_delegates_to_general_form(self):
+        body = "## History\n- 2026-01-01: created\n\n## Children\n"
+        lines = ['- 2026-02-02 09:00 ingest: state New → Active (x)']
+        self.assertEqual(ingest.append_history_lines(body, lines),
+                          ingest.append_section_lines(body, '## History', lines))
+
+
+class AppendSectionLinesTests(unittest.TestCase):
+    def test_appends_inside_named_non_last_section(self):
+        body = ("## Description\n\n## Source\n- old source line\n\n## History\n- 2026-01-01: created\n\n"
+                 "## Children\n\n## Backlinks\n")
+        new_body = ingest.append_section_lines(body, '## Source', ['- new source line'])
+        self.assertIn('- old source line\n- new source line', new_body)
+        self.assertIn('## History\n- 2026-01-01: created', new_body)
+        self.assertIn('## Children', new_body)
+        self.assertIn('## Backlinks', new_body)
+
+    def test_missing_heading_is_identity(self):
+        body = "## Description\n\n## History\n- x\n\n## Children\n"
+        self.assertEqual(ingest.append_section_lines(body, '## Source', ['- y']), body)
+
 
 class CmdIngestEndToEndTests(unittest.TestCase):
     def setUp(self):
