@@ -2,6 +2,23 @@
 
 One entry per released version, newest first.
 
+## v0.1.49 — 2026-09-27
+
+### In progress
+
+- F-0052 Budget enforcement per Epic
+- F-0055 A frozen eval set for the factory's judging tools
+- F-0056 Memory to code, first pass: what a session has to remember becomes a script, a row or a rule
+
+### Improvements and hotfixes
+
+- fix(tick): the wave's overlays keep the index reader's retired cards (#151)
+- fix(publish): a superseded branch commit is one the trunk holds whole (#154)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.49"`
+
 ## v0.1.48 — 2026-09-27
 
 ### In progress
