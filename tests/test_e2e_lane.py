@@ -41,6 +41,7 @@ or the scenario that carries it):
 9. PRs opened before the lane knew them were invisible → ``test_r19_s5_*``.
 """
 import atexit
+import contextlib
 import os
 import shutil
 import subprocess
@@ -576,6 +577,66 @@ class RefusedPushFF(LaneCase):
         self.until(lambda: self.rounds('T-0001'), 2, 'the refused push is held')
         texts = ' '.join(str(c.get('text') or '') for c in self.rounds('T-0001'))
         self.assertIn('the trunk is red', texts, 'the correction drops the hook\'s output')
+
+
+# ======================================================================================
+# Task 1 / PD18: the fixture writer is off, and `fork` never hands back a half copy
+# ======================================================================================
+
+class ForkUnderPruneTests(LaneCase):
+    """The case is the copy, not a scenario: a plain ``Factory(tmp).setup()``, never the ``ready``
+    template. PD18's writer raced the walk in `Factory.fork`'s own copy, not in `gitfixture`'s —
+    this proves both halves of the fix: the writer is off, and the retry recovers a whole copy."""
+
+    def test_published_repos_carry_no_background_housekeeping(self):
+        f = self.f
+        for repo in (f.repo, f.record_dir, f.repo_origin, f.record_origin):
+            out = subprocess.run(['git', 'config', 'gc.auto'], cwd=repo, capture_output=True,
+                                 text=True, check=True).stdout.strip()
+            self.assertEqual(out, '0', repo)
+
+    def test_fork_retries_once_on_a_source_pruned_mid_walk(self):
+        f = self.f
+        objects = os.path.join(f.record_dir, '.git', 'objects')
+        real_scandir = os.scandir
+        pruned = []
+
+        def flaky_scandir(path, *a, **kw):
+            if isinstance(path, (str, os.PathLike)) and os.fspath(path) == objects and not pruned:
+                entries = list(real_scandir(path, *a, **kw))
+                pruned.append(path)
+                if len(entries) > 1:  # gone by the time the walk reaches it, as `objects/pack`
+                    shutil.rmtree(entries[-1].path)  # or a fanout dir would be, mid-`gc --auto`
+                return contextlib.nullcontext(entries)
+            return real_scandir(path, *a, **kw)
+
+        dest = tempfile.mkdtemp(prefix='asf-e2e-fork-')
+        self.addCleanup(shutil.rmtree, dest, True)
+        with mock.patch.object(os, 'scandir', flaky_scandir):
+            other = f.fork(dest)
+        self.assertTrue(pruned, 'the case never reached the objects walk it means to race')
+        subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=other.record_dir, check=True,
+                       capture_output=True)
+        self.assertIsNotNone(other.snapshot(), 'the retry produced a whole copy, not a patched-over one')
+
+    def test_fork_raises_when_the_source_keeps_getting_pruned(self):
+        f = self.f
+        objects = os.path.join(f.record_dir, '.git', 'objects')
+        real_scandir = os.scandir
+
+        def always_flaky(path, *a, **kw):
+            if isinstance(path, (str, os.PathLike)) and os.fspath(path) == objects:
+                entries = list(real_scandir(path, *a, **kw))
+                if len(entries) > 1:
+                    shutil.rmtree(entries[-1].path)
+                return contextlib.nullcontext(entries)
+            return real_scandir(path, *a, **kw)
+
+        dest = tempfile.mkdtemp(prefix='asf-e2e-fork-')
+        self.addCleanup(shutil.rmtree, dest, True)
+        with mock.patch.object(os, 'scandir', always_flaky):
+            with self.assertRaises((shutil.Error, OSError)):
+                f.fork(dest)
 
 
 if __name__ == '__main__':

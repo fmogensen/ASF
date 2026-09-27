@@ -28,6 +28,7 @@ no login and fails at once, asking no network: in the harness, hygiene sees no P
 """
 import argparse
 import contextlib
+import errno
 import io
 import json
 import os
@@ -85,6 +86,48 @@ def _copy_over(src, dest):
 
 #: Directories whose files never carry a path (git's object store): not read by a fork.
 _NO_PATHS = ('objects',)
+
+
+def _ignore_git_locks(dirpath, names):
+    """The ignore ``gitfixture.fresh`` uses, scoped to inside a ``.git`` directory: a background
+    git maintenance lock can appear and vanish there while the walk runs. Elsewhere in a fork's
+    tree a ``*.lock`` is real, tracked content (the sample product's own ``uv.lock``), so the
+    pattern is never applied outside ``.git``."""
+    if '.git' not in dirpath.replace(os.sep, '/').split('/'):
+        return ()
+    return shutil.ignore_patterns('*.lock', 'gc.pid')(dirpath, names)
+
+
+def _copy_entry(src, dst):
+    """One top-level entry of a fork copy."""
+    if os.path.isdir(src) and not os.path.islink(src):
+        shutil.copytree(src, dst, symlinks=True, ignore=_ignore_git_locks)
+    else:
+        shutil.copy2(src, dst, follow_symlinks=False)
+
+
+def _copy_tree_once(src_root, dest_root):
+    for name in os.listdir(src_root):
+        _copy_entry(os.path.join(src_root, name), os.path.join(dest_root, name))
+
+
+def _missing_source_only(exc):
+    """True when every failure ``exc`` carries is a source path gone missing mid-walk — git's own
+    ``gc``/``maintenance`` pruning a loose object while the copy runs (PD18), the one race
+    ``fork`` retries for. Any other error is real, and is raised unchanged."""
+    if isinstance(exc, shutil.Error):
+        return all('No such file or directory' in str(msg) for _s, _d, msg in exc.args[0])
+    return isinstance(exc, OSError) and exc.errno == errno.ENOENT
+
+
+def _clear(dest_root):
+    """Delete every entry a partial copy left under ``dest_root`` (an existing directory kept)."""
+    for name in os.listdir(dest_root):
+        path = os.path.join(dest_root, name)
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+        else:
+            os.remove(path)
 
 
 def _rewrite_tree(root, pairs):
@@ -203,12 +246,18 @@ class Factory:
         to land) forks one built once instead of ticking there again."""
         import copy
         dest = os.path.realpath(tmp)
-        for name in os.listdir(self.tmp):
-            src = os.path.join(self.tmp, name)
-            if os.path.isdir(src) and not os.path.islink(src):
-                shutil.copytree(src, os.path.join(dest, name), symlinks=True)
-            else:
-                shutil.copy2(src, os.path.join(dest, name), follow_symlinks=False)
+        try:
+            _copy_tree_once(self.tmp, dest)
+        except (shutil.Error, OSError) as exc:
+            # git's own gc/maintenance can prune a loose object out of a fixture repo's
+            # `objects/` between this walk listing it and reaching it (PD18); `gitfixture.publish`
+            # is the first line of defence (every repo it makes turns that writer off) and this
+            # retry is the second, for a writer the harness does not own. A missing source is
+            # never skipped: a second failure is real, and is raised unchanged.
+            if not _missing_source_only(exc):
+                raise
+            _clear(dest)
+            _copy_tree_once(self.tmp, dest)
         pairs = [(self.tmp, dest)]
         if self.tmp.startswith('/private/'):  # the same dir by its /var alias
             pairs.append((self.tmp[len('/private'):], dest))
