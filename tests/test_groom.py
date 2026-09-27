@@ -11,11 +11,12 @@ from unittest import mock
 
 from asf import env
 from asf.record import frontmatter
-from asf.record.core import canonicalize, load_items, today, tokenize
+from asf.record.core import canonicalize, compute_derived, load_items, today, tokenize
 from asf.groom import groom
 from asf.groom import digest
 from asf.groom import inbox as inbox_mod
 from asf.groom import policy
+from asf.views import index_reader
 from asf import hermetic
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -880,6 +881,9 @@ class OverBudgetQuestionTests(unittest.TestCase):
         canonical, _ = canonicalize(by_id)
         return canonical
 
+    def derived(self):
+        return compute_derived(self.canonical())
+
     def product(self, **approvals):
         data = {'approvals': approvals} if approvals else {}
         return env.Product('demo', data)
@@ -887,7 +891,7 @@ class OverBudgetQuestionTests(unittest.TestCase):
     def test_one_line_per_open_over_budget_card_naming_both_measures_and_the_answers(self):
         write_item(self.root, 'T-0001', 'task', 'Chatty task', machine_lines=_machine((9, 13.53)))
         write_item(self.root, 'T-0002', 'task', 'Frugal task', machine_lines=_machine((1, 2)))
-        lines = groom.groom_over_budget_section(self.canonical(), self.product())
+        lines = groom.groom_over_budget_section(self.canonical(), self.derived(), self.product())
         self.assertEqual(len(lines), 1, lines)
         line = lines[0]
         self.assertTrue(line.startswith('- [ ] T-0001 Chatty task — '), line)
@@ -902,19 +906,19 @@ class OverBudgetQuestionTests(unittest.TestCase):
 
     def test_over_on_usd_alone_names_the_usd_measure(self):
         write_item(self.root, 'T-0001', 'task', 'Pricey task', machine_lines=_machine((1, 15)))
-        line = groom.groom_over_budget_section(self.canonical(), self.product())[0]
+        line = groom.groom_over_budget_section(self.canonical(), self.derived(), self.product())[0]
         self.assertIn('1/3 sessions', line)
         self.assertIn('$15/$10', line)
 
     def test_a_card_under_its_raised_budget_is_not_asked(self):
         write_item(self.root, 'T-0001', 'task', 'Already raised', typed_lines=['budget_sessions: 20'],
                   machine_lines=_machine((9, 2)))
-        self.assertEqual(groom.groom_over_budget_section(self.canonical(), self.product()), [])
+        self.assertEqual(groom.groom_over_budget_section(self.canonical(), self.derived(), self.product()), [])
 
     def test_an_item_budget_is_named_item_not_product_default(self):
         write_item(self.root, 'T-0001', 'task', 'Raised low', typed_lines=['budget_sessions: 5'],
                   machine_lines=_machine((5, 1)))
-        line = groom.groom_over_budget_section(self.canonical(), self.product())[0]
+        line = groom.groom_over_budget_section(self.canonical(), self.derived(), self.product())[0]
         self.assertIn('item', line)
         self.assertNotIn('product default', line)
 
@@ -922,16 +926,16 @@ class OverBudgetQuestionTests(unittest.TestCase):
         write_item(self.root, 'T-0001', 'task', 'Done and over',
                   machine_lines=['state: Closed', 'stage_since: 2026-09-01T00:00:00Z',
                                  'updated: 2026-09-01T00:00:00Z', 'cost: {sessions: 9, usd: 13.53}'])
-        self.assertEqual(groom.groom_over_budget_section(self.canonical(), self.product()), [])
+        self.assertEqual(groom.groom_over_budget_section(self.canonical(), self.derived(), self.product()), [])
 
     def test_a_reshaped_card_is_not_asked(self):
         write_item(self.root, 'T-0001', 'task', 'Reshaping', typed_lines=['reshape: split it'],
                   machine_lines=_machine((9, 13.53)))
-        self.assertEqual(groom.groom_over_budget_section(self.canonical(), self.product()), [])
+        self.assertEqual(groom.groom_over_budget_section(self.canonical(), self.derived(), self.product()), [])
 
     def test_no_product_asks_nothing(self):
         write_item(self.root, 'T-0001', 'task', 'Chatty task', machine_lines=_machine((9, 13.53)))
-        self.assertEqual(groom.groom_over_budget_section(self.canonical(), None), [])
+        self.assertEqual(groom.groom_over_budget_section(self.canonical(), self.derived(), None), [])
 
     def _run_groom(self, date='2026-09-21'):
         args = argparse.Namespace(date=date, apply=False, product=None, default_bug_epic=None,
@@ -961,7 +965,7 @@ class OverBudgetQuestionTests(unittest.TestCase):
 
     def test_the_full_line_matches_the_spec_word_for_word(self):
         write_item(self.root, 'T-0001', 'task', 'Chatty task', machine_lines=_machine((9, 13.53)))
-        line = groom.groom_over_budget_section(self.canonical(), self.product())[0]
+        line = groom.groom_over_budget_section(self.canonical(), self.derived(), self.product())[0]
         self.assertEqual(
             line,
             '- [ ] T-0001 Chatty task — 9/3 sessions, $13.53/$10 over budget (product default): '
@@ -1049,6 +1053,215 @@ class OverBudgetQuestionTests(unittest.TestCase):
         self.assertIn('budget_sessions: 12', text)
         self.assertIn('(adjudicator, groom-2026-09-20)', text)
         self.assertEqual(events[0][1]['by'], 'adjudicator:groom-2026-09-20')
+
+
+class EpicOverBudgetQuestionTests(unittest.TestCase):
+    """T-0280 (F-0052 §2.6): the groom asks one question per open Epic whose subtree spend is
+    over its own `budget_usd`, and `budget $<usd>` is the ruling that raises it."""
+
+    def setUp(self):
+        self.root = make_repo()
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def canonical(self):
+        by_id, _ = load_items(self.root)
+        canonical, _ = canonicalize(by_id)
+        return canonical
+
+    def derived(self):
+        return compute_derived(self.canonical())
+
+    def product(self):
+        return env.Product('demo', {})
+
+    def _epic_line(self, lines, iid='E-0001'):
+        found = [l for l in lines if l.startswith(f'- [ ] {iid} ')]
+        return found[0] if found else None
+
+    def test_one_line_per_open_over_budget_epic_naming_both_figures_and_the_answers(self):
+        write_item(self.root, 'E-0001', 'epic', 'Factory', typed_lines=['budget_usd: 500'])
+        write_item(self.root, 'T-0001', 'task', 'Chatty task', parent='E-0001',
+                  machine_lines=_machine((0, 300)))
+        write_item(self.root, 'T-0002', 'task', 'Frugal task', parent='E-0001',
+                  machine_lines=_machine((0, 212.40)))
+        lines = groom.groom_over_budget_section(self.canonical(), self.derived(), self.product())
+        line = self._epic_line(lines)
+        self.assertIsNotNone(line, lines)
+        self.assertEqual(
+            line,
+            '- [ ] E-0001 Factory — $512.40/$500 spent, new work held: raise it '
+            '(`budget $750`), reshape it (`reshape: <how>`) or close its work '
+            '(`no: <why>`) → answer: ____')
+
+    def test_an_epic_under_its_budget_is_not_asked(self):
+        write_item(self.root, 'E-0001', 'epic', 'Factory', typed_lines=['budget_usd: 500'])
+        write_item(self.root, 'T-0001', 'task', 'Frugal task', parent='E-0001',
+                  machine_lines=_machine((0, 400)))
+        lines = groom.groom_over_budget_section(self.canonical(), self.derived(), self.product())
+        self.assertIsNone(self._epic_line(lines))
+
+    def test_an_epic_with_no_budget_is_not_asked(self):
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        write_item(self.root, 'T-0001', 'task', 'Chatty task', parent='E-0001',
+                  machine_lines=_machine((0, 600)))
+        lines = groom.groom_over_budget_section(self.canonical(), self.derived(), self.product())
+        self.assertIsNone(self._epic_line(lines))
+
+    def test_a_closed_epic_is_not_asked(self):
+        write_item(self.root, 'E-0001', 'epic', 'Factory', typed_lines=['budget_usd: 500'],
+                  machine_lines=['state: Closed', 'stage_since: 2026-09-01T00:00:00Z',
+                                 'updated: 2026-09-01T00:00:00Z'])
+        write_item(self.root, 'T-0001', 'task', 'Chatty task', parent='E-0001',
+                  machine_lines=_machine((0, 600)))
+        lines = groom.groom_over_budget_section(self.canonical(), self.derived(), self.product())
+        self.assertIsNone(self._epic_line(lines))
+
+    def test_a_reshaped_epic_is_not_asked(self):
+        write_item(self.root, 'E-0001', 'epic', 'Factory',
+                  typed_lines=['budget_usd: 500', 'reshape: split it'])
+        write_item(self.root, 'T-0001', 'task', 'Chatty task', parent='E-0001',
+                  machine_lines=_machine((0, 600)))
+        lines = groom.groom_over_budget_section(self.canonical(), self.derived(), self.product())
+        self.assertIsNone(self._epic_line(lines))
+
+    def test_no_product_asks_nothing(self):
+        write_item(self.root, 'E-0001', 'epic', 'Factory', typed_lines=['budget_usd: 500'])
+        write_item(self.root, 'T-0001', 'task', 'Chatty task', parent='E-0001',
+                  machine_lines=_machine((0, 600)))
+        self.assertEqual(groom.groom_over_budget_section(self.canonical(), self.derived(), None), [])
+
+    def test_a_removed_task_under_the_epic_is_not_summed(self):
+        write_item(self.root, 'E-0001', 'epic', 'Factory', typed_lines=['budget_usd: 500'])
+        write_item(self.root, 'T-0001', 'task', 'Dropped', parent='E-0001',
+                  typed_lines=['removed: duplicate (groom 2026-09-01)'],
+                  machine_lines=_machine((0, 600)))
+        write_item(self.root, 'T-0002', 'task', 'Kept', parent='E-0001',
+                  machine_lines=_machine((0, 100)))
+        canonical, derived = self.canonical(), self.derived()
+        lines = groom.groom_over_budget_section(canonical, derived, self.product())
+        self.assertIsNone(self._epic_line(lines))
+        run(['index'], self.root)
+        ix_items, _generated = index_reader.load(self.root)
+        view = groom._index_view(canonical, derived)
+        self.assertEqual(index_reader.subtree_usd(view, view['E-0001']),
+                         index_reader.subtree_usd(ix_items, ix_items['E-0001']))
+        self.assertEqual(index_reader.subtree_usd(view, view['E-0001']), 100)
+
+    def test_answer_for_budget_dollars_only(self):
+        self.assertEqual(groom._parse_answer('budget $750'), ('budget', {'budget_usd': 750}))
+
+    def test_answer_for_budget_dollars_only_keeps_a_fraction(self):
+        self.assertEqual(groom._parse_answer('budget $12.50'), ('budget', {'budget_usd': 12.5}))
+
+    def test_answer_for_budget_with_no_dollar_sign_is_still_sessions(self):
+        self.assertEqual(groom._parse_answer('budget 750'), ('budget', {'budget_sessions': 750}))
+
+    def test_answer_for_the_two_present_forms_are_unchanged(self):
+        self.assertEqual(groom._parse_answer('budget 12'), ('budget', {'budget_sessions': 12}))
+        self.assertEqual(groom._parse_answer('budget 12 $25'),
+                         ('budget', {'budget_sessions': 12, 'budget_usd': 25}))
+
+    def _write_epic_prev(self, answer, prefix=''):
+        path = os.path.join(self.root, 'groom', '2026-09-20.md')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write("# Groom 2026-09-20\n\n## Over budget\n\n"
+                    "- [ ] E-0001 Factory — $600/$500 spent, new work held: raise it "
+                    "(`budget $900`), reshape it (`reshape: <how>`) or close its work "
+                    f"(`no: <why>`) → answer: {prefix}{answer}\n")
+        return path
+
+    def _ensure_over_budget_epic(self):
+        if not getattr(self, '_epic_ready', False):
+            write_item(self.root, 'E-0001', 'epic', 'Factory', typed_lines=['budget_usd: 500'])
+            write_item(self.root, 'T-0001', 'task', 'Chatty task', parent='E-0001',
+                      machine_lines=_machine((0, 600)))
+            run(['index'], self.root)
+            self._epic_ready = True
+
+    def apply_epic(self, answer, prefix='', adjudicator_job=None):
+        self._ensure_over_budget_epic()
+        prev = self._write_epic_prev(answer, prefix)
+        canonical = self.canonical()
+        with open(prev, encoding='utf-8') as f:
+            sections = groom._line_sections(f.read())
+        events = []
+        applied = groom.apply_groom_answers(self.root, canonical, prev, '2026-09-21',
+                                            adjudicator_job=adjudicator_job,
+                                            event=lambda kind, **f: events.append((kind, f)),
+                                            sections=sections)
+        with open(os.path.join(self.root, 'epics', 'E-0001.md')) as f:
+            text = f.read()
+        return applied, text, events
+
+    def test_budget_dollars_only_writes_typed_budget_usd_and_nothing_else(self):
+        applied, text, events = self.apply_epic('budget $750')
+        self.assertEqual(applied, 1)
+        self.assertIn('budget_usd: 750', text)
+        self.assertNotIn('budget_sessions:', text)
+        self.assertIn('2026-09-21 groom: budget → $750 (operator)', text)
+        self.assertEqual(events, [('groom_answer', {'item': 'E-0001', 'section': 'over_budget',
+                                                     'field': 'budget', 'value': '$750',
+                                                     'by': 'operator'})])
+
+    def test_a_second_apply_is_idempotent(self):
+        self.apply_epic('budget $750')
+        applied2, text2, _events = self.apply_epic('budget $750')
+        self.assertEqual(applied2, 0)
+        self.assertEqual(text2.count('budget_usd: 750'), 1)
+        self.assertEqual(text2.count('groom: budget →'), 1)
+
+    def test_a_sessions_answer_against_an_epic_is_refused(self):
+        out = io.StringIO()
+        self._ensure_over_budget_epic()
+        prev = self._write_epic_prev('budget 12')
+        canonical = self.canonical()
+        with open(prev, encoding='utf-8') as f:
+            sections = groom._line_sections(f.read())
+        with contextlib.redirect_stdout(out):
+            applied = groom.apply_groom_answers(self.root, canonical, prev, '2026-09-21',
+                                                sections=sections)
+        self.assertEqual(applied, 0)
+        self.assertIn('an Epic has no session budget', out.getvalue())
+        with open(os.path.join(self.root, 'epics', 'E-0001.md')) as f:
+            text = f.read()
+        self.assertNotIn('budget_sessions:', text)
+
+    def test_a_two_value_answer_against_an_epic_is_also_refused(self):
+        out = io.StringIO()
+        self._ensure_over_budget_epic()
+        prev = self._write_epic_prev('budget 12 $25')
+        canonical = self.canonical()
+        with open(prev, encoding='utf-8') as f:
+            sections = groom._line_sections(f.read())
+        with contextlib.redirect_stdout(out):
+            applied = groom.apply_groom_answers(self.root, canonical, prev, '2026-09-21',
+                                                sections=sections)
+        self.assertEqual(applied, 0)
+        self.assertIn('an Epic has no session budget', out.getvalue())
+        with open(os.path.join(self.root, 'epics', 'E-0001.md')) as f:
+            text = f.read()
+        self.assertNotIn('budget_sessions:', text)
+
+    def _run_groom(self, date='2026-09-21'):
+        args = argparse.Namespace(date=date, apply=False, product=None, default_bug_epic=None,
+                                  answers_file=None, event=None)
+        with mock.patch.object(env, 'load_product', return_value=self.product()):
+            rc = groom.cmd_groom(args, self.root)
+        with open(os.path.join(self.root, 'groom', f'{date}.md')) as f:
+            return rc, f.read()
+
+    def test_rendered_and_attributed_to_over_budget(self):
+        write_item(self.root, 'E-0001', 'epic', 'Factory', typed_lines=['budget_usd: 500'])
+        write_item(self.root, 'T-0001', 'task', 'Chatty task', parent='E-0001',
+                  machine_lines=_machine((0, 600)))
+        run(['index'], self.root)
+        rc, text = self._run_groom()
+        self.assertEqual(rc, 0)
+        self.assertIn('## Over budget', text)
+        self.assertIn('E-0001 Factory — $600/$500 spent, new work held', text)
+        self.assertEqual(groom._line_sections(text).get('E-0001'), 'over_budget')
 
 
 if __name__ == '__main__':
