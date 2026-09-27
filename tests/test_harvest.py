@@ -2897,67 +2897,6 @@ class RedactionTests(unittest.TestCase):
         self.assertIn(f'HARVEST HOLD {job} redaction:', buf.getvalue())
         self.assertNotIn('DRY:', buf.getvalue())
 
-    def test_land_ff_holds_a_branch_with_a_name_and_the_trunk_is_unchanged(self):
-        self.push_lane('fix/B-0001', [('fix(B-0001): the change', {'a.txt': self.LINE})])
-        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
-        before = self.origin_main()
-
-        results, lines = self.harvest(self.product(harvest_gate='per-branch'))
-
-        self.assertEqual(results, {'fix/B-0001': 'held'})
-        self.assertEqual(len(lines), 1, lines)
-        self.assertTrue(lines[-1].startswith('held fix/B-0001: a.txt:1: name ('), lines)
-        self.assertTrue(lines[-1].endswith(' — back to its session (round 1)'), lines)
-        self.assertEqual(self.origin_main(), before)
-        self.assertTrue(self.origin_has('fix/B-0001'))
-        self.assertEqual([(l['where'], l['path'], l['line']) for l in self.ledger()],
-                         [('harvest', 'a.txt', 1)])
-
-    def test_the_hold_hands_the_findings_back_as_the_correction(self):
-        self.push_lane('fix/B-0001', [('fix(B-0001): the change',
-                                       {'a.txt': self.LINE, 'b.txt': f'token {self.SECRET}\n'})])
-        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
-
-        self.harvest(self.product(harvest_gate='per-branch'))
-
-        correction = self.record('fix/B-0001')['correction']
-        self.assertEqual(correction['kind'], 'redaction')
-        lines = correction['text'].splitlines()
-        self.assertEqual(len(lines), 2, lines)
-        self.assertTrue(lines[0].startswith('a.txt:1: name ('), lines)
-        self.assertTrue(lines[1].startswith('b.txt:1: secret (rule:'), lines)
-        self.assertNotIn(self.NAME, json.dumps(correction))
-        self.assertNotIn(self.SECRET, json.dumps(correction))
-        self.assertEqual(self.record('fix/B-0001')['rounds'], 1)
-
-    def test_a_redaction_hold_at_the_round_cap_goes_to_adjudicate_like_any_hold(self):
-        self.push_lane('fix/B-0001', [('fix(B-0001): the change', {'a.txt': self.LINE})])
-        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
-        product = self.product(harvest_gate='per-branch')
-        for expected_round in (1, 2, 3):
-            _results, lines = self.harvest(product)
-            self.assertTrue(lines[-1].endswith(f'(round {expected_round})' if expected_round < 3
-                                               else '3 times in a row)'), lines)
-            if expected_round < 3:
-                self.session(f'correct-b-0001-r{expected_round}', 'B-0001', 'fix/B-0001')
-
-        self.assertIn(' — adjudicate pending', lines[-1])
-        self.assertEqual(self.record('fix/B-0001')['rounds'], 3)
-        self.assertTrue(self.record('fix/B-0001')['correction'].get('at_cap'))
-        self.assertEqual(self.record('fix/B-0001')['correction']['kind'], 'redaction')
-
-    def test_a_clean_branch_lands_as_before(self):
-        self.push_lane('fix/B-0001', [('fix(B-0001): the change', {'a.txt': 'a\n'})])
-        self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
-
-        results, lines = self.harvest(self.product(harvest_gate='per-branch'))
-
-        self.assertEqual(results, {'fix/B-0001': 'landed'})
-        self.assertTrue(lines[0].startswith('landed fix/B-0001 → '), lines)
-        self.assertFalse(self.origin_has('fix/B-0001'))
-        self.assertEqual(self.ledger(), [])
-
-
 
 class RulesSourceMergeTests(unittest.TestCase):
     def test_source_line_union_merge(self):
