@@ -58,7 +58,6 @@ import math
 import re
 
 from asf.feeder import footprint
-from asf.groom import inbox as inbox_mod
 from asf.groom import policy as groom_policy
 from asf.views import index_reader as ix
 
@@ -961,12 +960,20 @@ def _token(line):
     return m.group('id') if m else ''
 
 
+def _inbox_prefix():
+    """``asf.groom.inbox.TOKEN_PREFIX``, imported late: ``asf.groom.inbox`` reaches the record's
+    writers, which import this module back — at load it is a cycle."""
+    from asf.groom import inbox as inbox_mod
+    return inbox_mod.TOKEN_PREFIX
+
+
 def _split_lines(lines):
     """A groom day's open question lines, partitioned into the clerical half and the judgement
     half. A line whose item token is ``inbox:<file>`` is a card intake could not type — a right
     answer read off the card, not a ruling. Everything else is a policy question."""
-    clerk = [l for l in lines if _token(l).startswith(inbox_mod.TOKEN_PREFIX)]
-    judge = [l for l in lines if not _token(l).startswith(inbox_mod.TOKEN_PREFIX)]
+    prefix = _inbox_prefix()
+    clerk = [l for l in lines if _token(l).startswith(prefix)]
+    judge = [l for l in lines if not _token(l).startswith(prefix)]
     return clerk, judge
 
 
@@ -998,9 +1005,10 @@ def groom_rows(index, product, busy, groom_state, inflight):
     live = {s.get('job') for s in inflight or ()}
     lines = list(groom_state.get('lines') or ())
     clerk_lines, judge_lines = _split_lines(lines)
-    if not lines:  # a caller that carries ids alone: every id is the judgement half's
-        judge_ids = [i for i in open_ids if not i.startswith(inbox_mod.TOKEN_PREFIX)]
-        clerk_ids = [i for i in open_ids if i.startswith(inbox_mod.TOKEN_PREFIX)]
+    prefix = _inbox_prefix()
+    if not lines:  # a caller that carries ids alone: split the ids on the same token
+        judge_ids = [i for i in open_ids if not i.startswith(prefix)]
+        clerk_ids = [i for i in open_ids if i.startswith(prefix)]
     else:
         judge_ids = [_token(l) for l in judge_lines]
         clerk_ids = [_token(l) for l in clerk_lines]
@@ -1010,7 +1018,7 @@ def groom_rows(index, product, busy, groom_state, inflight):
     out = []
     new = groom_state.get('new')
     if new is not None:
-        new = [i for i in new if not str(i).startswith(inbox_mod.TOKEN_PREFIX)]
+        new = [i for i in new if not str(i).startswith(prefix)]
     if judge_ids and f'groom-{date}' not in live \
             and _half_due(product, groom_state.get('attempts') or 0, new):
         oldest = groom_state.get('oldest')
