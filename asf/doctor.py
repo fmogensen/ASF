@@ -801,6 +801,8 @@ def run(product_name):
         rows.append(('token-caps', False, ok, detail))
     for required, ok, detail in check_ci_pool(product):
         rows.append(('ci pool', required, ok, detail))
+    for required, ok, detail in check_ci_runners(product):
+        rows.append(('ci runners', required, ok, detail))
     for required, ok, detail in check_cloud(cfg, product):
         rows.append(('cloud lane', required, ok, detail))
     slow = check_gate_speed(product)
@@ -859,6 +861,17 @@ def check_ci_pool(product):
     provider-like labels in ``runs-on``, missing or offline runners. No rows without a pool."""
     from asf import ci_pool
     return ci_pool.doctor_rows(product)
+
+
+def check_ci_runners(product, now=None):
+    """[(required, ok, detail)] — the runners the CI queue's pass found busy with no job
+    (:func:`asf.ci_queue.runner_rows`, off its file, no ``gh`` call): red after 10 min. No rows
+    for a product the queue does not watch."""
+    from asf import ci_queue
+    try:
+        return ci_queue.runner_rows(product, now=now)
+    except Exception as e:  # noqa: BLE001 — an unreadable file is one unknown row
+        return [(False, None, f'cannot read the ci queue file — {e}')]
 
 
 def check_cloud(cfg, product):

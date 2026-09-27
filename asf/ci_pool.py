@@ -330,8 +330,10 @@ class ReservePlan:
         return not self.add and not self.remove
 
 
-def reserve_plan(res, pool, runners):
+def reserve_plan(res, pool, runners, unavailable=()):
     """Which online runners carrying ``res.of`` carry ``res.label``: all but ``keep_free``.
+    A runner in ``unavailable`` (busy with no job: :func:`asf.ci_queue.phantom_names`) counts as
+    offline — it keeps nothing free for the trunk, so another runner is kept free in its place.
 
     The runners kept free are chosen, one at a time, by: carrying ``prefer`` (when set) first;
     then a box not yet holding a kept-free runner (``spread_by: box``; a runner outside the pool
@@ -339,8 +341,9 @@ def reserve_plan(res, pool, runners):
     candidates (it keeps one for PR runs too); then the name, last first. Offline runners are
     neither counted nor touched. Pure: the same runners give the same plan (idempotent)."""
     box = {e.runner: e.box for e in pool if e.box}
-    cands = sorted((r for r in runners if r.online and res.of in r.norm_labels()),
-                   key=lambda r: r.name)
+    gone = set(unavailable or ())
+    cands = sorted((r for r in runners if r.online and r.name not in gone
+                    and res.of in r.norm_labels()), key=lambda r: r.name)
 
     def box_of(r):
         return (box.get(r.name) or r.name) if res.spread_by == 'box' else r.name
@@ -367,9 +370,23 @@ def reserve_plan(res, pool, runners):
                        sorted(free_names), add, remove)
 
 
-def reserve_plans(product, runners, pool=None):
+def reserve_plans(product, runners, pool=None, unavailable=None):
+    """One :func:`reserve_plan` per ``ci.reserve``; ``unavailable`` defaults to the phantom
+    runners the queue's pass has confirmed (its file, when there is one)."""
     pool = load_pool(product) if pool is None else pool
-    return [reserve_plan(r, pool, runners) for r in load_reserve(product)]
+    if unavailable is None:
+        unavailable = _phantoms_of(product)
+    return [reserve_plan(r, pool, runners, unavailable) for r in load_reserve(product)]
+
+
+def _phantoms_of(product):
+    from asf import ci_queue
+    if not os.path.exists(os.path.join(env.ASF_HOME, 'state', product.name, ci_queue.QUEUE_FILE)):
+        return set()
+    try:
+        return ci_queue.phantom_names(product.name)
+    except Exception:  # noqa: BLE001 — an unreadable file: every runner counts
+        return set()
 
 
 def pr_runners(runners, reserves):

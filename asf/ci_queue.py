@@ -157,6 +157,25 @@ hands its records to the branch's newest run, which they then wait for. The line
 run 120 (T-0341, Feature) — created after S1 PR run 850 (B-0007) at … but holds the heavy queue
 ahead of its queued m6-e2e (queued 8m)``.
 
+**Runners busy without a job.** A runner the host reports busy while no in-progress job of any
+non-completed run names it (:meth:`Source.busy_runners`: every run ``in_progress`` or ``queued``
+by status, however old, in every repo of ``ci.runner_org`` — the recent-runs listing misses an
+old run re-run) on :data:`PHANTOM_PASSES` consecutive passes is a *phantom*
+(:func:`update_phantoms`, every relief pass; ``phantom`` in the queue file). The queue counts it
+as offline — neither free nor one of the runners ``ci.reserve`` keeps free, so the reservation
+keeps another free in its place (:func:`asf.ci_pool.reserve_plans`). The doctor's ``ci
+runners`` row, the status clause and ``asf ci queue`` name it: ``runner-4b busy with no job
+for 12 min — restart its runner service`` (red past :data:`PHANTOM_RED_S`).
+
+**Broken reservation.** When a runner ``ci.reserve`` keeps for the trunk is a phantom or runs a
+PR job (a run whose ``runs-on`` predates the reservation label), and too few kept runners are
+left, a starved required trunk job (queued past :data:`PICKUP_S`) escalates at once — no wait
+for ``trunk_escalate_min``: the PR/batch runs holding a runner that carries all of a starved
+job's labels are cancelled, one holding a reserved runner first, then lowest priority, least
+sunk, until the starved jobs fit; never S1, hotfix, the trunk or a CI-changing PR. Re-runs follow
+as above: ``cancelled in-progress pr run 121 (T-0341) — main's reserved runners r1, r2 held by a
+pr job; it holds a runner main's gate-tests (queued 4m) can take; sunk 30 min``.
+
 **Every hold is one line**: ``ci queue: T-0341 waits — heavy 0 free, needs 3 (S2, 4th in line)``.
 
 **CI-config exemption.** A run whose PR changed a file under ``.github/workflows/**`` or
@@ -273,6 +292,13 @@ S1, TRUNK, S2, RANKED, OTHER = 0, 1, 2, 3, 4
 #: a ranked entry with no stored rank (a queue file from before the rank) sorts after every
 #: ranked one
 UNRANKED = [10 ** 7]
+#: a runner busy with no job in progress on this many consecutive passes is a phantom
+PHANTOM_PASSES = 2
+#: passes further apart than this are not consecutive: the count starts again (and a phantom
+#: record older than this is no longer believed)
+PHANTOM_GAP_S = 10 * 60
+#: a phantom this old turns the doctor's ``ci runners`` row red
+PHANTOM_RED_S = 10 * 60
 
 
 def _now():
@@ -686,6 +712,11 @@ class Source:
         """One run's ``{headBranch, headSha, status, conclusion}``, or None when unreadable."""
         return None
 
+    def busy_runners(self):
+        """``{runner name: {'run': run, 'job': name, 'repo': slug}}`` for every job in progress
+        on a runner, across every repo the runners serve; None when any of it is unreadable."""
+        return None
+
 
 class GitHubSource(Source):
     def __init__(self, product, run=None):
@@ -752,7 +783,79 @@ class GitHubSource(Source):
     def live_jobs(self, run_id):
         if not self.slug or not run_id:
             return None
-        text = self._gh(['api', f'repos/{self.slug}/actions/runs/{run_id}/jobs?per_page=100'
+        cached = getattr(self, '_live', {}).get(run_id)
+        if cached is not None:
+            return cached
+        return self._repo_jobs(self.slug, run_id)
+
+    def _runner_repos(self):
+        """The repos whose jobs the product's runners take: every live repo of
+        ``ci.runner_org``, else the product's own."""
+        ci = self.product.ci if isinstance(getattr(self.product, 'ci', None), dict) else {}
+        org = ci.get('runner_org')
+        if not org:
+            return [self.slug] if self.slug else None
+        text = self._gh(['api', '--paginate', f'orgs/{org}/repos?per_page=100',
+                         '--jq', '.[] | select(.archived | not) | .full_name'])
+        if text is None:
+            return None
+        repos = [l.strip() for l in text.splitlines() if l.strip()]
+        if self.slug and self.slug not in repos:
+            repos.append(self.slug)
+        return repos
+
+    def _runs_by_status(self, repo, status):
+        """Every run of ``repo`` in ``status``, however old — the recent-runs listing misses a
+        re-run of an old run (2026-09-27: two PR re-runs from the day before held the trunk's
+        reserved runners, invisible to it). None when unreadable."""
+        text = self._gh(['api', '--paginate', f'repos/{repo}/actions/runs?status={status}'
+                                              '&per_page=100',
+                         '--jq', '.total_count, (.workflow_runs[] | {id, status, conclusion, '
+                         'event, head_branch, head_sha, created_at, path})'])
+        if text is None:
+            return None
+        counted, runs = False, []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.isdigit():
+                counted = True
+                continue
+            try:
+                r = json.loads(line)
+            except ValueError:
+                return None
+            if isinstance(r, dict) and r.get('id'):
+                runs.append(r)
+        return runs if counted else None
+
+    def busy_runners(self):
+        repos = self._runner_repos()
+        if not repos:
+            return None
+        self._live = getattr(self, '_live', {})
+        out = {}
+        for repo in repos:
+            runs = {}
+            for status in ('in_progress', 'queued'):
+                got = self._runs_by_status(repo, status)
+                if got is None:
+                    return None
+                runs.update((r['id'], r) for r in got)
+            for rid, r in runs.items():
+                jobs = self._repo_jobs(repo, rid)
+                if jobs is None:
+                    return None
+                if repo == self.slug:
+                    self._live[rid] = jobs
+                for j in jobs:
+                    if j.get('status') == 'in_progress' and j.get('runner_name'):
+                        out[j['runner_name']] = {'run': r, 'job': j.get('name'), 'repo': repo}
+        return out
+
+    def _repo_jobs(self, repo, run_id):
+        text = self._gh(['api', f'repos/{repo}/actions/runs/{run_id}/jobs?per_page=100'
                                 '&filter=latest',
                          '--jq', '.jobs[] | {name, status, labels, runner_name, created_at, '
                          'started_at, completed_at}'])
@@ -1025,7 +1128,7 @@ def load(name):
         data = {}
     if not isinstance(data, dict):
         data = {}
-    for k in ('entries', 'started', 'expect', 'relief'):
+    for k in ('entries', 'started', 'expect', 'relief', 'phantom'):
         kind = list if k in ('started', 'relief') else dict
         if not isinstance(data.get(k), kind):
             data[k] = kind()
@@ -1060,6 +1163,92 @@ def prune(data, now):
                        if _age(v.get('seen'), now) <= STALE_S}
     data['started'] = [s for s in data['started'] if _age(s.get('at'), now) <= PICKUP_S]
     return data
+
+
+# ---- runners busy without a job ---------------------------------------------------------------
+
+def _phantoms(data, now):
+    """``{name: record}`` of the confirmed phantoms in a queue file's data: busy with no job on
+    :data:`PHANTOM_PASSES` consecutive passes, the last one no older than :data:`PHANTOM_GAP_S`."""
+    out = {}
+    for name, rec in ((data or {}).get('phantom') or {}).items():
+        if (isinstance(rec, dict) and int(rec.get('passes') or 0) >= PHANTOM_PASSES
+                and _age(rec.get('last'), now) <= PHANTOM_GAP_S):
+            out[name] = rec
+    return out
+
+
+def _phantom_names(data, now):
+    return set(_phantoms(data, now))
+
+
+def phantom_names(name, now=None):
+    """The product's confirmed phantom runners, off its queue file (no ``gh`` call)."""
+    return _phantom_names(load(name), now or _now())
+
+
+def update_phantoms(q, src):
+    """One pass of the phantom watch: a runner the host reports busy while no in-progress job
+    of any non-completed run (:meth:`Source.busy_runners`, the status listings of every repo
+    the runners serve) names it counts one pass more; a runner idle, offline or on a job leaves
+    the watch. Confirmed on the :data:`PHANTOM_PASSES`-th consecutive pass — then the queue
+    counts it as offline (:meth:`Queue._apply_runners`). An unreadable read learns nothing and
+    forgets nothing. One line when a runner is confirmed."""
+    q._read_host()
+    raw = q._raw_runners
+    if not raw:
+        return
+    try:
+        busy = src.busy_runners()
+    except Exception:  # noqa: BLE001 — an unreadable listing learns nothing
+        busy = None
+    q.busy = busy
+    if busy is None:
+        return
+    seen, now = q.data.get('phantom') or {}, q.now
+    watch = {}
+    for r in raw:
+        if not (r.online and r.busy) or r.name in busy:
+            continue
+        prev = seen.get(r.name)
+        if isinstance(prev, dict) and _age(prev.get('last'), now) <= PHANTOM_GAP_S:
+            rec = {'since': prev.get('since') or _iso(now), 'last': _iso(now),
+                   'passes': int(prev.get('passes') or 1) + 1}
+        else:
+            rec = {'since': _iso(now), 'last': _iso(now), 'passes': 1}
+        watch[r.name] = rec
+        if rec['passes'] == PHANTOM_PASSES:
+            q.out(f"ci runners: {phantom_text(r.name, rec, now)}")
+    q.data['phantom'] = watch
+    q._apply_runners()
+
+
+def phantom_text(name, rec, now):
+    """``runner-4b busy with no job for 12 min — restart its runner service``."""
+    mins = max(0, int(_age(rec.get('since'), now) // 60))
+    return f"{name} busy with no job for {mins} min — restart its runner service"
+
+
+def phantom_lines(product, now=None):
+    """One line per confirmed phantom runner, oldest first, off the queue file."""
+    now = now or _now()
+    ph = _phantoms(load(product.name), now)
+    return [phantom_text(n, ph[n], now)
+            for n in sorted(ph, key=lambda n: (_parse(ph[n].get('since')) or now, n))]
+
+
+def runner_rows(product, now=None):
+    """The doctor's ``ci runners`` rows, ``[(required, ok, detail)]``: one per phantom runner,
+    red once it has been busy with no job past :data:`PHANTOM_RED_S`; one ok row when none is;
+    ``[]`` for a product the queue does not watch. No ``gh`` call."""
+    if mode(product) == 'off':
+        return []
+    now = now or _now()
+    ph = _phantoms(load(product.name), now)
+    if not ph:
+        return [(True, True, 'no runner busy without a job')]
+    return [(True, _age(ph[n].get('since'), now) <= PHANTOM_RED_S, phantom_text(n, ph[n], now))
+            for n in sorted(ph, key=lambda n: (_parse(ph[n].get('since')) or now, n))]
 
 
 def line_order(entries):
@@ -1280,6 +1469,10 @@ class Queue:
         #: per class, the online slots a PR run can reach, where a reservation makes it fewer
         self._pr_cap = {}
         self._runners = ()
+        #: the runners as the host reports them (``_runners`` counts a phantom as offline)
+        self._raw_runners = None
+        #: :meth:`Source.busy_runners` as this pass read it (None: not read, or unreadable)
+        self.busy = None
         self._read = False
         self.write = write and self.mode == 'on'
         self.data = prune(load(product.name), self.now) if self.mode != 'off' else None
@@ -1298,21 +1491,36 @@ class Queue:
             return
         self._read = True
         try:
-            self._runners = self.source.runners()
-            self._free = free_by_class(self._runners, self.pool)
+            self._raw_runners = self.source.runners()
         except ci_pool.BackendError:
+            self._raw_runners = None
+        self._apply_runners()
+        if self._inflight is None and self.ceiling() is not None:
+            try:
+                self._inflight = self.source.inflight()
+            except Exception:  # noqa: BLE001 — an unreadable count never blocks
+                self._inflight = None
+
+    def phantoms(self):
+        """The runners busy with no job on :data:`PHANTOM_PASSES` consecutive passes."""
+        return _phantom_names(self.data, self.now) if self.data is not None else set()
+
+    def _apply_runners(self):
+        """The accounting from the runner read: a phantom (:meth:`phantoms`) counts as offline —
+        neither free nor a runner a reservation keeps free."""
+        if self._raw_runners is None:
             self._runners, self._free = (), None
+            return
+        gone = self.phantoms()
+        self._runners = [dataclasses.replace(r, online=False) if r.name in gone else r
+                         for r in self._raw_runners]
+        self._free = free_by_class(self._runners, self.pool)
         if self.reserves and self._free is not None:
             prs = ci_pool.pr_runners(self._runners, self.reserves)
             self._free_pr = free_by_class(prs, self.pool)
             full, pr = load_by_class(self._runners, self.pool), load_by_class(prs, self.pool)
             self._pr_cap = {c: v['online'] for c, v in pr.items()
                             if v['online'] < full[c]['online']}
-        if self._inflight is None and self.ceiling() is not None:
-            try:
-                self._inflight = self.source.inflight()
-            except Exception:  # noqa: BLE001 — an unreadable count never blocks
-                self._inflight = None
 
     def ceiling(self):
         if hasattr(self, '_ceiling'):
@@ -2022,6 +2230,7 @@ def relieve_trunk(product, items=None, source=None, out=print, dry_run=False, no
         r = s1_started(rec['for'])
         return None if r is None else (r, 'S1 PR')
 
+    update_phantoms(q, src)
     sweep(q, src, listed, out=out, dry_run=dry_run)
     rerun = _rerun_cancelled(q, src, product, started, dry_run, out, now, items) \
         if q.data['relief'] else 0
@@ -2042,6 +2251,53 @@ def relieve_trunk(product, items=None, source=None, out=print, dry_run=False, no
     return n, rerun
 
 
+def _broken_reserve(q):
+    """``{runner: why}`` for the runners ``ci.reserve`` keeps for the trunk that are not there
+    for it — busy with no job (a phantom) or held by a PR job (a run whose ``runs-on`` predates
+    the reservation label) — for each reservation left with fewer than ``keep_free`` runners
+    that are. ``{}`` when every reservation holds."""
+    if not q.reserves:
+        return {}
+    q._read_host()
+    ph, busy, out = q.phantoms(), q.busy or {}, {}
+    for res in q.reserves:
+        kept = [r for r in q._raw_runners or () if r.online and res.of in r.norm_labels()
+                and res.label not in r.norm_labels()]
+        bad = {}
+        for r in kept:
+            if r.name in ph:
+                bad[r.name] = 'busy with no job'
+            elif ((busy.get(r.name) or {}).get('run') or {}).get('event') == 'pull_request':
+                bad[r.name] = 'held by a pr job'
+        if bad and len(kept) - len(bad) < res.keep_free:
+            out.update(bad)
+    return out
+
+
+def _broken_text(bad):
+    """``r1, r2 busy with no job; r3 held by a pr job``."""
+    by = {}
+    for n, why in sorted(bad.items()):
+        by.setdefault(why, []).append(n)
+    return '; '.join(f"{', '.join(ns)} {why}" for why, ns in sorted(by.items()))
+
+
+def _busy_runs(q, wf, listed_runs):
+    """The runs holding a runner (:attr:`Queue.busy`) of workflow ``wf`` that its recent-runs
+    listing does not carry (an old run re-run), in the listing's shape."""
+    have = {r.get('databaseId') for r in listed_runs or ()}
+    out = {}
+    for rec in (q.busy or {}).values():
+        r = rec.get('run') or {}
+        if (rec.get('repo') == q.product.repo_slug and r.get('id') not in have
+                and os.path.basename(str(r.get('path') or '')) == wf):
+            out[r['id']] = {'databaseId': r['id'], 'status': r.get('status'),
+                            'conclusion': r.get('conclusion'), 'event': r.get('event'),
+                            'headBranch': r.get('head_branch'), 'headSha': r.get('head_sha'),
+                            'createdAt': r.get('created_at')}
+    return list(out.values())
+
+
 def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owner, possessive,
                  wait_s, escalate_s, run_level, for_id=None):
     """Relief for one protected run (the trunk run, or an S1 PR run): the runs in its way,
@@ -2054,6 +2310,11 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
     created = _parse(target.get('createdAt'))
     if created is None:
         return 0
+    # the trunk's reservation broken (a kept-free runner busy with no job, or held by a PR job,
+    # and too few left): the runners the trunk counts on are not there — no waiting it out
+    bad = _broken_reserve(q) if run_level else {}
+    if bad:
+        wait_s = min(wait_s, PICKUP_S)
     waited = (now - created).total_seconds()
     if waited <= wait_s:
         return 0
@@ -2078,7 +2339,9 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
         classes = sorted({_job_class(j, by_name, cls_of) or 'runner' for j, _w in starved})
         names = ', '.join(sorted({str(j.get('name') or '?') for j, _w in starved}))
         jwait = _dur(max(w for _j, w in starved))
-        escalated = max(w for _j, w in starved) > escalate_s
+        raw = {r.name: r.norm_labels() for r in q._raw_runners or ()}
+        bad = {n: why for n, why in bad.items() if any(w <= raw.get(n, set()) for w in want)}
+        escalated = max(w for _j, w in starved) > escalate_s or bool(bad)
         # the runners that could take one of the starved jobs: a queued job one of them serves
         # competes for them, whatever run it belongs to
         serving = [r.norm_labels() for r in q._runners
@@ -2097,7 +2360,7 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
     exempt_globs = relief_exempt_paths(product)
     exempt_files = {}   # {head sha: [changed file]}, one Source.run_files call per sha per pass
     for wf in sorted({w for w in (pr_wf, batch_wf) if w}):
-        for r in listed(wf) or ():
+        for r in [*(listed(wf) or ()), *(_busy_runs(q, wf, listed(wf)) if bad else ())]:
             rid, ev, branch = r.get('databaseId'), r.get('event'), r.get('headBranch') or ''
             if (not rid or rid == tid or rid in done
                     or r.get('status') not in statuses):
@@ -2127,8 +2390,20 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
                 group, label, item = 3, 'batch', 'batch'
             else:                               # the line's order reversed: other, ranked, S2
                 group = {OTHER: 0, RANKED: 1}.get(prio, 2)
-            jobs, sunk = None, 0.0
-            if escalated:
+            jobs, sunk, on_reserved = None, 0.0, False
+            if bad:
+                # the reservation is broken: a run holding a runner that can take a starved job
+                # goes, one holding a reserved runner first, then lowest priority, least sunk
+                jobs = src.live_jobs(rid)
+                on = [j.get('runner_name') for j in jobs or ()
+                      if j.get('status') == 'in_progress' and j.get('runner_name')
+                      and any(w <= (held.get(j.get('runner_name')) or _job_labels(j))
+                              for w in want)]
+                if not on:
+                    continue                    # it holds none of the runners the trunk needs
+                on_reserved = any(n in bad for n in on)
+                sunk = _sunk_s(jobs, classes, by_name, cls_of, now)
+            elif escalated:
                 jobs = src.live_jobs(rid)
                 if not any(j.get('status') in QUEUED_STATUSES
                            and any(_job_labels(j) <= s for s in serving) for j in jobs or ()):
@@ -2148,12 +2423,16 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
                                  and any(_job_labels(j) <= s for s in serving) for j in jobs)
                 if not (holds_one or queues_one):
                     continue                    # not in the way of those runners
-            cands.append(((int(sunk // 60),) if escalated else (), group, -rc.timestamp(),
-                          -int(rid), r, kind, item or branch or kind, prio, label, wf, rc, jobs,
-                          sunk))
-    cands.sort(key=lambda c: c[:4])
+            if bad:
+                key = (not on_reserved, group, int(sunk // 60), -rc.timestamp(), -int(rid))
+            elif escalated:
+                key = (int(sunk // 60), group, -rc.timestamp(), -int(rid))
+            else:
+                key = (group, -rc.timestamp(), -int(rid))
+            cands.append((key, r, kind, item or branch or kind, prio, label, wf, rc, jobs, sunk))
+    cands.sort(key=lambda c: c[0])
     freed, freed_sets, n = {}, [], 0
-    for _s, _g, _t, _i, r, kind, item, prio, label, wf, rc, jobs, sunk in cands:
+    for _key, r, kind, item, prio, label, wf, rc, jobs, sunk in cands:
         if starved and _fits(want, idle + freed_sets):
             break
         if not starved and _covered(need, free, freed):
@@ -2163,8 +2442,14 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
         if escalated:
             running = [j for j in jobs or () if j.get('status') == 'in_progress']
             state = 'in-progress' if running else 'queued'
-            what = (f"{kind} run {rid} ({item}) — its queued {'/'.join(classes)} jobs compete "
-                    f"with {possessive}'s {names} queued {jwait}; sunk {int(sunk // 60)} min")
+            if bad:
+                what = (f"{kind} run {rid} ({item}) — {possessive}'s reserved runners "
+                        f"{_broken_text(bad)}; it holds a runner {possessive}'s {names} "
+                        f"(queued {jwait}) can take; sunk {int(sunk // 60)} min")
+            else:
+                what = (f"{kind} run {rid} ({item}) — its queued {'/'.join(classes)} jobs "
+                        f"compete with {possessive}'s {names} queued {jwait}; "
+                        f"sunk {int(sunk // 60)} min")
             holds = [held.get(j.get('runner_name')) or _job_labels(j)
                      for j in running if j.get('runner_name')]
         elif starved:
@@ -2335,7 +2620,16 @@ def status_clause(product, now=None, inflight=None, ceiling=None, source=None):
     ``ci queue empty`` when nothing waits; None when the product is not queued. ``inflight`` is
     the row's own count (:func:`asf.capacity.ci_runs_in_flight`), handed to the queue so the row
     never shows two counts and reads it once. When the live read fails (the runners unreadable)
-    the tick's stored snapshot is shown instead, labelled ``as of tick HH:MM``."""
+    the tick's stored snapshot is shown instead, labelled ``as of tick HH:MM``. Each runner busy
+    with no job follows: ``; runner-4b busy with no job for 12 min — restart its runner
+    service``."""
+    clause = _status_clause(product, now, inflight, ceiling, source)
+    if clause is None:
+        return None
+    return '; '.join([clause, *phantom_lines(product, now)])
+
+
+def _status_clause(product, now, inflight, ceiling, source):
     m = mode(product)
     if m == 'off':
         return None
@@ -2416,6 +2710,8 @@ def cmd_queue(args, source=None, out=print):
         return 0
     line = live_line(product, source=source)
     out(header(product.name, m, len(line.order)))
+    for text in phantom_lines(product):
+        out(f'runner: {text}')
     if not line.order:
         return 0
     free, ceiling, entries = line.free, line.ceiling, line.entries
