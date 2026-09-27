@@ -1051,6 +1051,14 @@ def land_spec_row(feature, product, occupancy):
                       f"lands it — no coder starts before it is on the trunk")
 
 
+def _reshape_parts(items, item_id):
+    """The ids of open Tasks the record already holds whose ``split_from`` is ``item_id``,
+    sorted — a relaunched reshape row's reason names them, so the session mints no new ones for
+    parts that already exist."""
+    return sorted(t['id'] for t in items.values()
+                  if t.get('type') == 'task' and t.get('split_from') == item_id and is_open(t))
+
+
 def task_rows(items, product, feature, busy, running, landed_shas=None):
     """The Feature's New Tasks, one PLAN → CODE row each — the residual under ``delivery:
     feature``: a Task a delivery speaks for (:func:`delivered`) gets its row from
@@ -1088,10 +1096,14 @@ def task_rows(items, product, feature, busy, running, landed_shas=None):
                            branch=branch_for(product, 'code', t['id']),
                            reason='groom marked it for reshape: waiting on its reshape session',
                            waits_on='reshape'))
+            parts = _reshape_parts(items, t['id'])
+            reason = f"groom: {t['reshape']}"
+            if parts:
+                reason += f" (parts already minted: {', '.join(parts)})"
             out.append(Row(tier=2, kind=RESHAPE, item_id=t['id'], feature_id=feature['id'],
                            action=LAUNCH, brief_kind='reshape',
                            branch=branch_for(product, 'plan', t['id']),
-                           reason=f"groom: {t['reshape']}"))
+                           reason=reason))
             continue
         if t.get('split_from') and t.get('decided') is not True:
             out.append(Row(tier=2, kind=PLAN_CODE, item_id=t['id'], feature_id=feature['id'],
