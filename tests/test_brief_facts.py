@@ -15,6 +15,7 @@ from asf import env
 from asf.briefs import facts
 from asf.briefs import preamble as preamble_mod
 from asf.env import Product
+from asf.workers import report
 from asf.feeder.rows import Row
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.x` does not
@@ -182,33 +183,39 @@ class LastReportTests(FactsCase):
         return recs
 
     def test_the_newest_ended_session_report_is_carried(self):
-        old = self.log('old.log', 'REPORT\nstatus: partial\npushed: no')
-        new = self.log('new.log', 'lots of transcript\nREPORT\nstatus: done\npushed: yes abc')
+        old = self.log('old.log', report.render('coder', status='partial', pushed='no', why='waiting'))
+        new = self.log('new.log', 'lots of transcript\n' + report.render('coder', sha='abc'))
         self.ledger(*self.run_rec('job-old', '2026-01-01T01:00:00Z', old),
                     *self.run_rec('job-new', '2026-01-02T01:00:00Z', new))
         text = facts.last_report(self.prod, 'B-0001')
         self.assertIn('job-new ended 2026-01-02T01:00:00Z — finished', text)
         self.assertIn('status: done', text)
-        self.assertIn('pushed: yes abc', text)
+        self.assertIn('pushed: yes', text)
         self.assertNotIn('transcript', text)
         self.assertNotIn('job-old', text)
 
     def test_a_running_session_is_not_a_report(self):
-        self.ledger(*self.run_rec('job-a', None, self.log('a.log', 'REPORT\nstatus: done')))
+        self.ledger(*self.run_rec('job-a', None, self.log('a.log', report.render('coder'))))
         self.assertEqual(facts.last_report(self.prod, 'B-0001'), '')
 
     def test_a_missing_log_falls_back_to_the_ledger_line(self):
-        log = self.log('gone.log', 'REPORT\nstatus: done')
+        log = self.log('gone.log', report.render('coder'))
         self.ledger(*self.run_rec('job-a', '2026-01-02T01:00:00Z', log))
         os.remove(log)
         self.assertEqual(facts.last_report(self.prod, 'B-0001'),
                          'job-a ended 2026-01-02T01:00:00Z — finished')
 
+    def test_an_unreadable_report_leaves_the_ledger_line_alone(self):
+        log = self.log('bad.log', 'REPORT\nstatus: done\npushed: yes abc')
+        self.ledger(*self.run_rec('job-a', '2026-01-02T01:00:00Z', log))
+        self.assertEqual(facts.last_report(self.prod, 'B-0001'),
+                         'job-a ended 2026-01-02T01:00:00Z — finished')
+
     def test_a_field_is_capped(self):
-        log = self.log('big.log', 'REPORT\nstatus: done\nleft out: ' + 'x' * 5000)
+        log = self.log('big.log', report.render('coder', left_out=['x' * 5000]))
         self.ledger(*self.run_rec('job-a', '2026-01-02T01:00:00Z', log))
         text = facts.last_report(self.prod, 'B-0001')
-        self.assertIn('left out: xxx', text)
+        self.assertIn('left_out: xxx', text)
         self.assertLessEqual(max(len(l) for l in text.splitlines()), 200)
 
 
