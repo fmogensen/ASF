@@ -375,7 +375,10 @@ account is under its stop the row says `NEEDS OPERATOR: no account under quota`.
 are never stopped — the bands gate launches only. The bands need `worker_pool.quota_command` (a
 command, `{account}` substituted, printing one JSON line with `five_h_pct`, `seven_d_pct` and
 optionally `seven_d_model_pct`). Without it every account reads 0 % and is always free; an account
-whose command fails reads as `stop`.
+whose command fails reads as `stop`. The line may also carry `polled_at` (ISO), when the vendor was
+last asked: a reading older than `quota_guards.stale_after_min` (default 30) is stale — its
+percentages neither band nor budget a launch, the account is stopped only by a session limit (a run
+that ended on a usage limit or an API 429), and `asf status` shows `stale since HH:MM`.
 
 **The 5h window as a budget.** Each launch carries an estimate of its share of the 5h window, per
 kind and model family: a fixed table while history is thin (Opus spec/plan 10 %, Opus review 6 %,

@@ -10,7 +10,15 @@ The BAND is two thresholds per window, read from ``config.yaml quota_guards`` (p
 above ``cooldown`` an account takes one job at a time; at or above ``stop`` it takes none.
 Defaults: ``stop`` 95, ``cooldown`` 90, for every window. An unreadable account reads as
 ``stop`` (unknown ≠ free).
+
+**A stale reading.** The source may print ``polled_at`` (ISO) — when the vendor was last asked. A
+reading older than ``quota_guards.stale_after_min`` (default :data:`STALE_AFTER_MIN`) is stale: its
+percentages are history, not the account's state, so they neither band nor budget a launch. The
+account is then judged by the session-limit stop alone (a run that ended on a usage limit or a
+429 stops its account until the reset, :mod:`asf.workers.headroom`), and ``asf status`` says
+``stale since HH:MM``.
 """
+import datetime
 import json
 import shlex
 import subprocess
@@ -19,6 +27,7 @@ DEFAULT_STOP = {'five_h': 95, 'seven_d': 95, 'seven_d_model': 95}
 BAND = 5                       # how far below the stop the cooldown opens, when unnamed
 WINDOW_KEYS = {'five_h': 'five_h_pct', 'seven_d': 'seven_d_pct', 'seven_d_model': 'seven_d_model_pct'}
 FREE, COOLDOWN, STOP = 'free', 'cooldown', 'stop'
+STALE_AFTER_MIN = 30          # minutes after ``polled_at`` a reading stops being current
 
 
 def guards_from_config(cfg):
@@ -30,6 +39,7 @@ def guards_from_config(cfg):
     cfg = cfg or {}
     stop = dict(DEFAULT_STOP)
     cooldown = {}
+    stale_after = STALE_AFTER_MIN
     old = ((cfg.get('worker_pool') or {}).get('quota_guard')) or {}
     if old.get('max_5h') is not None:
         stop['five_h'] = float(old['max_5h']) * 100
@@ -40,6 +50,8 @@ def guards_from_config(cfg):
         for w in WINDOW_KEYS:
             if g.get(w) is not None:
                 stop[w] = float(g[w])
+        if g.get('stale_after_min') is not None:
+            stale_after = float(g['stale_after_min'])
         named_stop = g.get('stop') or {}
         named_cooldown = g.get('cooldown') or {}
         for w in WINDOW_KEYS:
@@ -51,15 +63,46 @@ def guards_from_config(cfg):
         if w not in cooldown:
             cooldown[w] = max(0, stop[w] - BAND)
         cooldown[w] = min(cooldown[w], stop[w])
-    return {'stop': stop, 'cooldown': cooldown}
+    return {'stop': stop, 'cooldown': cooldown, 'stale_after_min': stale_after}
+
+
+def polled_at(usage):
+    """The reading's ``polled_at`` as an aware datetime, or None when it names none."""
+    raw = (usage or {}).get('polled_at')
+    if not raw:
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(str(raw).replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=datetime.timezone.utc)
+
+
+def stale_since(usage, guards=None, now=None):
+    """When a stale reading was polled (aware datetime), else None. A reading that names no
+    ``polled_at`` is taken as current."""
+    polled = polled_at(usage)
+    if polled is None:
+        return None
+    limit = (guards or {}).get('stale_after_min', STALE_AFTER_MIN)
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    return polled if now - polled > datetime.timedelta(minutes=float(limit)) else None
+
+
+def stale_label(since):
+    return f"stale since {since.astimezone().strftime('%H:%M')}"
 
 
 def band(usage, guards):
-    """(state, why). ``usage`` None → ``(STOP, 'quota unreadable')``. Stop is judged over every
+    """(state, why). ``usage`` None → ``(STOP, 'quota unreadable')``; a stale reading →
+    ``FREE`` (its percentages are not judged; the pool's session-limit stop still applies). Stop is judged over every
     window before cooldown is — a stop in a later window must beat a cooldown in an earlier
     one."""
     if usage is None:
         return STOP, 'quota unreadable'
+    since = stale_since(usage, guards)
+    if since is not None:
+        return FREE, f'quota {stale_label(since)} — session limits govern'
     for gk, uk in WINDOW_KEYS.items():
         v = usage.get(uk)
         if v is not None and float(v) >= guards['stop'][gk]:
