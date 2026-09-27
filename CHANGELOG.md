@@ -2,6 +2,23 @@
 
 One entry per released version, newest first.
 
+## v0.1.35 — 2026-09-27
+
+### In progress
+
+- F-0075 Redaction is a gate on every write path: operator names and secrets never reach a record or a public repo
+- F-0113 An S1 silently holds all Feature work, and NEXT plans from different inputs than the tick
+
+### Improvements and hotfixes
+
+- fix(ci_queue): name no branch convention in the order's docstrings
+- fix(ci_queue): a held re-run asks at its item's priority in the record now
+- fix(ci_queue): runners busy without a job, and a broken trunk reservation escalates at once
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.35"`
+
 ## v0.1.34 — 2026-09-27
 
 ### In progress
