@@ -9,10 +9,10 @@ import tempfile
 import unittest
 from unittest import mock
 
-from asf import env
+from asf import budget, env
 from asf.views import capacity as capacity_view
 from asf.views import index_reader as ix
-from asf.views import prod, sessions, status
+from asf.views import prod, roadmap, sessions, status
 from asf.workers import observe
 from asf.workers import pool as pool_mod
 
@@ -494,6 +494,62 @@ class SubtreeUsdTests(unittest.TestCase):
         items = self.items()
         items['E-0001']['children'] = ['F-0001', 'F-0001', 'F-0002']
         self.assertEqual(ix.subtree_usd(items, items['E-0001']), 31.5)
+
+
+class RoadmapEpicBudgetTests(unittest.TestCase):
+    """F-0052 §2.5, T4: the roadmap's Spend / budget cell is budget.epic_spend's verdict."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='roadmap_budget_test_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _write(self, epics):
+        items = {}
+        for i, epic in enumerate(epics, start=1):
+            eid = f'E-{i:04d}'
+            items[eid] = dict({'id': eid, 'type': 'epic', 'title': 'goal', 'folder': 'epics',
+                                'state': 'Active', 'decided': True, 'rank': i}, **epic)
+        with open(os.path.join(self.tmp, 'index.json'), 'w') as f:
+            json.dump({'generated': '', 'items': items}, f)
+
+    def _row(self, text, eid):
+        line = next(l for l in text.splitlines() if f'| {eid} ' in l)
+        return [c.strip() for c in line.strip('|').split('|')]
+
+    def _spend_cell(self, eid='E-0001', **kwargs):
+        text = roadmap.render(self.tmp, **kwargs)
+        return self._row(text, eid)[-1]
+
+    def test_over_budget_cell_names_both_figures_and_the_marker(self):
+        self._write([{'cost': {'usd': 512.40}, 'budget_usd': 500}])
+        self.assertEqual(self._spend_cell(), f'$512.40 / $500.00 · {budget.OVER_MARK}')
+
+    def test_under_budget_cell_has_no_marker(self):
+        self._write([{'cost': {'usd': 499.99}, 'budget_usd': 500}])
+        self.assertEqual(self._spend_cell(), '$499.99 / $500.00')
+
+    def test_no_budget_prints_a_dash_for_it(self):
+        self._write([{'cost': {'usd': 512.40}}])
+        self.assertEqual(self._spend_cell(), '$512.40 / —')
+
+    def test_no_figures_at_all_is_the_table_own_empty_dash(self):
+        self._write([{}])
+        self.assertEqual(self._spend_cell(), '—')
+
+    def test_a_text_budget_with_nothing_measured_is_also_empty(self):
+        self._write([{'budget_usd': 'lots'}])
+        self.assertEqual(self._spend_cell(), '—')
+
+    def test_render_with_no_product_gives_the_same_cells(self):
+        self._write([{'cost': {'usd': 512.40}, 'budget_usd': 500}])
+        self.assertEqual(self._spend_cell(product=None),
+                          f'$512.40 / $500.00 · {budget.OVER_MARK}')
+
+    def test_table_still_has_its_seven_columns_and_row_order(self):
+        self._write([{'cost': {'usd': 512.40}, 'budget_usd': 500}, {'cost': {'usd': 1}}])
+        text = roadmap.render(self.tmp)
+        self.assertIn('| # | Epic | State | On prod | Next | Blocked | Spend / budget |', text)
+        self.assertLess(text.index('E-0001'), text.index('E-0002'))
 
 
 class ProdViewTests(ViewsTestCase):
