@@ -126,12 +126,14 @@ def claims_on_branch(git, trunk, branch):
     return parse(text or '')
 
 
-def tick(body, line_no, note):
+def tick(body, line_no, note, suffix=None):
     """``(new_body, changed)`` — flip the ``line_no``-th ``## Acceptance`` bullet from
     ``- [ ]`` to ``- [x]`` and leave every other character of the body alone. ``changed`` is
     False when the bullet does not exist or is already ticked: the tick is idempotent and never
     reverses (D7). ``note`` is the text the caller appends to ``## History``; this function does
-    not write it."""
+    not write it. ``suffix``, given on a bullet that is newly flipped, is appended to the line as
+    ``" — {suffix}"`` — the bullet's own text kept byte-identical (D8); a bullet already ticked is
+    left exactly as it is, suffix and all, so a re-run is a no-op."""
     lines = body.splitlines(keepends=True)
     idxs = []
     inside = False
@@ -148,6 +150,13 @@ def tick(body, line_no, note):
     new_line, count = _UNTICKED_RE.subn(r'\1[x]', lines[i], count=1)
     if not count:
         return body, False
+    if suffix:
+        ending = ''
+        if new_line.endswith('\r\n'):
+            new_line, ending = new_line[:-2], '\r\n'
+        elif new_line.endswith('\n'):
+            new_line, ending = new_line[:-1], '\n'
+        new_line = f'{new_line} — {suffix}{ending}'
     lines[i] = new_line
     return ''.join(lines), True
 

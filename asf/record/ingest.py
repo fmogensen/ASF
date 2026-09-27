@@ -17,7 +17,7 @@ import os
 import re
 import sys
 
-from asf import env, proves
+from asf import env, proves, reviews
 from asf.evidence import closing, evidence
 from asf.record import frontmatter
 from asf.record.core import is_retired as core_is_retired
@@ -663,12 +663,8 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
                                        open_prs=tuple(iev.get('open_prs') or ())), lines)
 
     # ---- Stories: their Tasks are the ones whose `stories:` name them (a removed Task covers nothing)
-    story_tasks = collections.defaultdict(list)
-    for iid, rec in canonical.items():
-        if rec['meta'].get('type') != 'task' or rec['meta'].get('removed'):
-            continue
-        for sid in rec['meta'].get('stories') or []:
-            story_tasks[sid].append(iid)
+    story_tasks = _story_tasks(canonical)
+    review_claims = review_proven(canonical, task_ev)
 
     for iid, rec in canonical.items():
         if rec['meta'].get('type') != 'story':
@@ -688,6 +684,10 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
             lines = [f"matrix status {sev['status']} ({legacy})"]
             if closing.ACTIVE in states:
                 lines.append("a Task lists it, Active")
+        claims = review_claims.get(iid)
+        if claims:
+            m = len(proves.bullets(rec['body']))
+            lines.append(f"acceptance {len(claims)}/{m} proven ({_newest_review_path(claims, task_ev)})")
         settle(iid, 'story', ev_obj, lines)
 
     # ---- Bugs: independent of other items
@@ -871,20 +871,81 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
     return new_state, closings, derived, stage_val, task_ev, evs
 
 
-def tick_proven(canonical, ev, stamp):
-    """The pass that turns a landed claim into a fact on the card (§2.7): over the Story cards
-    only, the ``## Acceptance`` line each of ``ev['proves']``'s claims names is flipped to
-    ``- [x]`` — once, never in reverse (D7). Runs after the write loop and before ``do_index``
-    (P14): that loop may have just rewritten the very card this pass ticks, so the card is
-    re-read off ``rec['path']`` and parsed afresh rather than reusing the body the write loop
-    already holds. One ``frontmatter.render`` write per Story that changed, and one
-    ``## History`` line per line newly ticked, in §2.7's shape — the ``PR #<n>`` clause omitted
-    where the claim's ``pr`` is null, a fast-forward landing having no pull request to name."""
+def _story_tasks(canonical):
+    """``{story_id: [task_id, ...]}`` — the Tasks whose ``stories:`` name each Story, in canonical
+    order (a removed Task covers nothing)."""
+    out = collections.defaultdict(list)
+    for iid, rec in canonical.items():
+        if rec['meta'].get('type') != 'task' or rec['meta'].get('removed'):
+            continue
+        for sid in rec['meta'].get('stories') or []:
+            out[sid].append(iid)
+    return out
+
+
+def review_proven(canonical, task_ev):
+    """``{story: [{line, test, task, path, source: 'review'}, ...]}`` (§2.5, PD10): for each
+    Story, the Tasks whose ``stories:`` name it (:func:`_story_tasks`), each Task's ``checks``
+    from ``task_ev`` folded into ``{normalized check name: (task, path)}`` over its passing rows.
+    A Story's acceptance line whose normalized text (:func:`asf.reviews.normalize`) is a key
+    yields a claim naming that bullet's 1-based ordinal and the review's path — ticked or not (a
+    line's own ``— <path>`` suffix, once one is added, is stripped before matching, so a later
+    round still finds it): :func:`proves.tick` is what makes an already-ticked line a no-op. Two
+    Tasks proving the same line: the first by Task id order wins. A Task whose ``checks`` is None
+    or missing contributes nothing."""
+    story_tasks = _story_tasks(canonical)
+    out = {}
+    for iid, rec in canonical.items():
+        if rec['meta'].get('type') != 'story':
+            continue
+        passing = {}
+        for tid in story_tasks.get(iid, []):
+            checks = (task_ev.get(tid) or {}).get('checks')
+            if not checks:
+                continue
+            for name in checks['passed']:
+                passing.setdefault(name, (tid, checks['path']))
+        if not passing:
+            continue
+        claims = []
+        for line_no, text in enumerate(proves.bullets(rec['body']), start=1):
+            hit = passing.get(reviews.normalize(text))
+            if not hit and ' — ' in text:
+                hit = passing.get(reviews.normalize(text.rsplit(' — ', 1)[0]))
+            if hit:
+                tid, path = hit
+                claims.append({'line': line_no, 'test': path, 'task': tid, 'path': path,
+                               'source': 'review'})
+        if claims:
+            out[iid] = claims
+    return out
+
+
+def _newest_review_path(claims, task_ev):
+    """The review path of ``claims``' newest round — the one path an aggregate evidence or
+    History line names."""
+    best = max(claims, key=lambda c: ((task_ev.get(c['task']) or {}).get('checks') or {}).get('round', 0))
+    return best['path']
+
+
+def tick_proven(canonical, ev, stamp, task_ev=None):
+    """The pass that turns a landed or review-proven claim into a fact on the card (§2.5, §2.7):
+    over the Story cards only, the ``## Acceptance`` line each of ``ev['proves']``'s claims and
+    each of :func:`review_proven`'s names is flipped to ``- [x]`` — once, never in reverse (D7).
+    Runs after the write loop and before ``do_index`` (P14): that loop may have just rewritten the
+    very card this pass ticks, so the card is re-read off ``rec['path']`` and parsed afresh rather
+    than reusing the body the write loop already holds. One ``frontmatter.render`` write per Story
+    that changed, and one ``## History`` line per landed claim newly ticked (the ``PR #<n>`` clause
+    omitted where the claim's ``pr`` is null, a fast-forward landing having no pull request to
+    name) plus one aggregate ``## History`` line, in §2.5's shape, when a review claim ticked
+    anything."""
+    review_claims = review_proven(canonical, task_ev or {})
     for iid, rec in canonical.items():
         if rec['meta'].get('type') != 'story':
             continue
         claims = (ev.get('proves') or {}).get(iid) or []
-        if not claims:
+        rclaims = review_claims.get(iid) or []
+        if not claims and not rclaims:
             continue
         with open(rec['path'], encoding='utf-8') as f:
             text = f.read()
@@ -897,6 +958,14 @@ def tick_proven(canonical, ev, stamp):
             pr_clause = f", PR #{claim['pr']}" if claim.get('pr') else ''
             history.append(f"- {stamp} ingest: proved line {claim['line']} — "
                            f"{claim['task']}{pr_clause} ({claim['test']})")
+        review_ticked = False
+        for claim in rclaims:
+            body, changed = proves.tick(body, claim['line'], None, suffix=claim['path'])
+            review_ticked = review_ticked or changed
+        if review_ticked:
+            m = len(proves.bullets(body))
+            path = _newest_review_path(rclaims, task_ev or {})
+            history.append(f"- {stamp} ingest: acceptance {len(rclaims)}/{m} ticked ({path})")
         if not history:
             continue
         body = append_history_lines(body, history)
@@ -918,7 +987,7 @@ def ingest_into(root, ev, product=None):
 
     now = now_iso()
     date = today()
-    new_state, closings, _derived, stage_val, _task_ev, evs = derive(canonical, ev, product, now, date)
+    new_state, closings, _derived, stage_val, task_ev, evs = derive(canonical, ev, product, now, date)
     since = product.conventions.get('id_in_subject_since') if product is not None else None
 
     # ---- write: state/stage/evidence/blocked, one write_machine + History append per changed item
@@ -951,6 +1020,6 @@ def ingest_into(root, ev, product=None):
         if type_ == 'feature' and stage_val.get(iid) == 'on-prod' and old != 'on-prod':
             write_on_prod_event(root, iid, old, now)
 
-    tick_proven(canonical, ev, now[:16].replace('T', ' '))
+    tick_proven(canonical, ev, now[:16].replace('T', ' '), task_ev)
 
     return do_index(root)

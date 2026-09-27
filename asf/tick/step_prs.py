@@ -14,8 +14,9 @@ import os
 import re
 import subprocess
 
+from asf import proves
+
 DEFAULT_PRS_PER_TICK = 6
-ACCEPT_RE = re.compile(r'^\s*[-*]\s*(?:\[[ xX]\]\s*)?(.+?)\s*$')
 
 
 def _git(repo, args):
@@ -46,7 +47,8 @@ def card_relpath(item):
 
 
 def acceptance(root, relpath):
-    """The card's ``## Acceptance`` bullets, their own checkbox stripped."""
+    """The card's ``## Acceptance`` bullets, their own checkbox stripped (:func:`asf.proves.bullets`
+    — one parser, PD8)."""
     if not root or not relpath:
         return []
     try:
@@ -54,15 +56,7 @@ def acceptance(root, relpath):
             text = f.read()
     except OSError:
         return []
-    lines, inside = [], False
-    for line in text.splitlines():
-        if line.startswith('## '):
-            inside = line.strip().lower() == '## acceptance'
-            continue
-        m = ACCEPT_RE.match(line) if inside else None
-        if m:
-            lines.append(m.group(1))
-    return lines
+    return proves.bullets(text)
 
 
 def card_link(root, relpath):
