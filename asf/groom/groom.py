@@ -6,8 +6,8 @@ import re
 from asf import budget
 from asf import env
 from asf.record import frontmatter
-from asf.record.core import (as_list, canonicalize, compute_derived, is_open, jaccard, load_items,
-                             parse_sections, tokenize)
+from asf.record.core import (as_list, canonicalize, compute_derived, is_open, is_retired,
+                             jaccard, load_items, parse_sections, tokenize)
 from asf.record.index import do_index
 from asf.record.ingest import append_history_lines, append_section_lines
 from asf.tick import stale
@@ -41,9 +41,12 @@ ANSWER_UNBLOCK = re.compile(r'^unblock\s+([A-Z]-\d{4})$', re.IGNORECASE)
 #: ``reshape: <how>`` — the card is held and reshaped (a Task's RESHAPE → PLAN row reads it).
 ANSWER_RESHAPE = re.compile(r'^reshape:\s*(?P<how>\S.*)$', re.IGNORECASE)
 #: ``budget <n> [$<usd>]`` — an item stopped by its budget (F-0092 §2.7) is raised to `<n>`
-#: sessions, and to `$<usd>` too when the answer names one.
-ANSWER_BUDGET = re.compile(r'^budget\s+(?P<sessions>\d+)(?:\s+\$?(?P<usd>\d+(?:\.\d+)?))?$',
-                           re.IGNORECASE)
+#: sessions, and to `$<usd>` too when the answer names one. ``budget $<usd>`` alone is an Epic's
+#: ruling (F-0052 §2.6, D9): the `$` is required there because `budget 750` with no `$` already
+#: means 750 sessions, and reading it as dollars instead would silently write the wrong field.
+ANSWER_BUDGET = re.compile(
+    r'^budget\s+(?:(?P<sessions>\d+)(?:\s+\$?(?P<usd>\d+(?:\.\d+)?))?'
+    r'|\$(?P<usd_only>\d+(?:\.\d+)?))$', re.IGNORECASE)
 #: A shape proposal's line (F-0086 D6): the verb after the id says what `yes` does.
 PROPOSAL_RE = re.compile(
     r'^- \[[ xX]\]\s+(?P<id>[A-Z]-\d{4})\s+(?P<verb>merge|batch|split)\s+(?P<rest>.*?)\s+—')
@@ -125,6 +128,9 @@ def _parse_answer(answer):
         return 'reshape', m.group('how').strip()
     m = ANSWER_BUDGET.match(a)
     if m:
+        if m.group('usd_only'):
+            usd = float(m.group('usd_only'))
+            return 'budget', {'budget_usd': int(usd) if usd == int(usd) else usd}
         fields = {'budget_sessions': int(m.group('sessions'))}
         if m.group('usd'):
             usd = float(m.group('usd'))
@@ -511,12 +517,16 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None, 
             continue
 
         if field == 'budget':
+            if 'budget_sessions' in value and typed.get('type') == 'epic':
+                # an Epic has no session budget (budget.of returns Budget() for one) — writing
+                # budget_sessions would type a field nothing reads (F-0052 §2.6)
+                _skipped(iid, raw_answer, 'an Epic has no session budget; answer `budget $<usd>`')
+                continue
             if all(typed.get(k) is not None and str(typed.get(k)) == str(v)
                    for k, v in value.items()):
                 continue  # already applied — keeps --apply idempotent
-            parts = [f"{value['budget_sessions']} sessions"]
-            if 'budget_usd' in value:
-                parts.append(f"${value['budget_usd']}")
+            parts = ([f"{value['budget_sessions']} sessions"] if 'budget_sessions' in value
+                     else []) + ([f"${value['budget_usd']}"] if 'budget_usd' in value else [])
             _write_card(rec, value, f"- {date} groom: budget → {' / '.join(parts)} {who}")
             applied += 1
             if event:
@@ -759,13 +769,30 @@ def groom_refused_section(canonical, product):
     return lines
 
 
-def groom_over_budget_section(canonical, product):
+def _index_view(canonical, derived):
+    """``canonical`` as :mod:`asf.views.index_reader` reads an index — ``id``, ``type``,
+    ``children``, ``cost`` — so an Epic's subtree spend is summed by the one function the
+    roadmap and the feeder use, not a third copy of the walk. A card
+    :func:`asf.record.core.is_retired` names (``removed:``/``moved_to:``) is skipped: ``ix.load``
+    drops it before the roadmap or the feeder sums anything, and a groom question about a figure
+    the table does not show is the one thing this view exists to prevent (F-0052 §2.6 P9)."""
+    return {iid: dict(rec['meta'], id=iid,
+                      children=(derived.get(iid) or {}).get('children') or [])
+            for iid, rec in canonical.items() if not is_retired(rec['meta'])}
+
+
+def groom_over_budget_section(canonical, derived, product):
     """One question per open card whose spend is over its budget (F-0092 §2.7): both measures
     (:func:`asf.budget.line`, minus its ``OVER BUDGET <id> — `` prefix — the same text the wave
     prints), whose budget it is (``product default`` / ``item``, from ``Spent.budget.source``),
     and the three answers — raise it, close it or reshape it. A card already marked for reshape
     is not asked, as :func:`groom_refused_section` skips it too. No state of its own: a card no
-    longer over budget (raised, or reshaped, or closed) simply stops appearing."""
+    longer over budget (raised, or reshaped, or closed) simply stops appearing.
+
+    Then one question per open Epic whose subtree spend is over its own ``budget_usd`` (F-0052
+    §2.6): both figures and ``new work held`` (:func:`asf.budget.epic_line`, the same text the
+    wave prints), and the ruling that raises it — dollars only, because an Epic has no session
+    budget (D9)."""
     if product is None:
         return []
     conv = product.conventions
@@ -784,6 +811,25 @@ def groom_over_budget_section(canonical, product):
         why = (f"{measures} over budget ({whose}): raise it (`budget 12` or `budget 12 $25`), "
                f"close it (`no: <why>`) or reshape it (`reshape: <how>`)")
         lines.append(_card_line(iid, typed.get('title', ''), why))
+
+    view = _index_view(canonical, derived)
+    epics = sorted(index_reader.of_type(view, 'epic'), key=lambda e: e['id'])
+    for e in epics:
+        rec = canonical.get(e['id'])
+        if rec is None or not is_open(rec):
+            continue
+        typed, _machine = frontmatter.split_machine(rec['meta'])
+        if typed.get('reshape'):
+            continue
+        s = budget.epic_spend(e['id'], index_reader.subtree_usd(view, e), typed.get('budget_usd'))
+        if not s.over:
+            continue
+        raised = s.budget * 1.5
+        raised = int(raised) if raised == int(raised) else raised
+        tail = budget.epic_line(s).split(' — ', 1)[1]
+        why = (f"{tail}: raise it (`budget ${raised}`), reshape it (`reshape: <how>`) or "
+               f"close its work (`no: <why>`)")
+        lines.append(_card_line(e['id'], typed.get('title', ''), why))
     return lines
 
 
@@ -1158,7 +1204,7 @@ def cmd_groom(args, root):
         since=conv.get('id_in_subject_since') if conv else None)
     sections[INBOX_QUESTIONS[1]] = inbox_mod.question_lines(root, intake_dir)
     sections[REFUSED_QUESTIONS[1]] = groom_refused_section(canonical, product)
-    sections[OVER_BUDGET_QUESTIONS[1]] = groom_over_budget_section(canonical, product)
+    sections[OVER_BUDGET_QUESTIONS[1]] = groom_over_budget_section(canonical, derived, product)
 
     auto = policy.groom_auto(product)
     by_rule = 0
