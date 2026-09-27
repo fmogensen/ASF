@@ -359,6 +359,83 @@ def publish_gap(product, run, ev, reason, alive=pid_alive):
     return lifecycle.judge(run, ev, landing=landing), ev, '; '.join(lines + [line])
 
 
+#: publishes the health pass makes at once. Each is a push the product's pre-push hook gates, and
+#: the hook's run is most of a tick's health step (one product, 2026-09-27: five publishes, 376 s of
+#: a 490 s step, one after another). Sessions push from their own worktrees side by side all
+#: day; the factory's publishes, one per branch, do the same.
+PUBLISH_WORKERS = 3
+
+
+def _groups(entries):
+    """Index lists of the runs that must be judged one after another, in the ledger's order:
+    runs sharing a branch, a worktree or an item. A run's evidence is gathered before its publish,
+    so a second run on the same branch must see the first one's push; runs of one item count
+    rounds off the same ledger lines. Everything else is independent."""
+    parent = list(range(len(entries)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    seen = {}
+    for i, (job, run, _gen) in enumerate(entries):
+        run = run or {}
+        wt = run.get('worktree')
+        keys = [('branch', run.get('branch') or job), ('item', run.get('item')),
+                ('worktree', lifecycle.path_key(wt) if wt else None)]
+        for key in keys:
+            if key[1] is None or key[1] == '':
+                continue
+            if key in seen:
+                parent[find(i)] = find(seen[key])
+            else:
+                seen[key] = i
+    groups = {}
+    for i in range(len(entries)):
+        groups.setdefault(find(i), []).append(i)
+    return sorted(groups.values(), key=lambda g: g[0])
+
+
+def run_steps(entries, publish, workers=None):
+    """Drives each run's pass — ``entries`` is ``[(job, run, generator)]``, the generator yielding
+    :func:`publish_gap`'s arguments and resumed with its result — to its end. The runs of one group
+    (:func:`_groups`) go strictly one after another in the ledger's order, exactly as a serial
+    loop would. The head run of every group runs to its next publish, those publishes are made at
+    once (at most ``workers``), and the heads are resumed one by one on this thread: every
+    judgement and registry write stays serial, only the publishes — a rebase and a push in the
+    run's own worktree — run beside each other."""
+    from concurrent.futures import ThreadPoolExecutor
+    workers = max(1, int(workers or PUBLISH_WORKERS))
+    queues = [[entries[i][2] for i in g] for g in _groups(entries)]
+    sends = [None] * len(queues)
+    pool = None
+    try:
+        while True:
+            asks = []
+            for qi, queue in enumerate(queues):
+                while queue:
+                    try:
+                        asks.append((qi, queue[0].send(sends[qi])))
+                        break
+                    except StopIteration:
+                        queue.pop(0)
+                        sends[qi] = None
+            if not asks:
+                return
+            if len(asks) == 1 or workers == 1:
+                results = [publish(*ask) for _qi, ask in asks]
+            else:
+                pool = pool or ThreadPoolExecutor(max_workers=workers)
+                results = list(pool.map(lambda qa: publish(*qa[1]), asks))
+            for (qi, _ask), result in zip(asks, results):
+                sends[qi] = result
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=True)
+
+
 def refusal_text(branch, line):
     """The correction a publish the factory could not make hands the next session: the refusal
     itself — the conflicting files, the lost commits, the ``redact: <file>:<line>`` finding or the
@@ -372,7 +449,7 @@ def refusal_text(branch, line):
             f'what it names and commit; the factory publishes, never a push of your own')
 
 
-def republish(product, registry, job, run, alive, found):
+def republish_steps(product, registry, job, run, alive, found):
     """A product's F-0094: a run judged ``failed: not pushed`` whose publish the factory refused
     (its rebase conflicted, a redaction, a hook) kept its commits in its worktree, and no later
     pass ever tried again — the refusal's cause fixed, the worktree publishable, the item still
@@ -391,7 +468,7 @@ def republish(product, registry, job, run, alive, found):
     if owner is not None and owner.get('job') != job:
         return  # a later run took the worktree: its own judgement owns the branch
     ev = lifecycle.gather(product, run, alive=alive)
-    reason, ev, line = publish_gap(product, run, ev, reason, alive)
+    reason, ev, line = yield (product, run, ev, reason, alive)  # publish_gap, by run_steps
     if not line:
         return
     if ' refused: ' not in line:
@@ -515,7 +592,9 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
         items = record_items(product)
     if alive is None:
         alive = alive_for(product, sessions.values(), session_source)
-    for job, s in sessions.items():
+    def steps(job, s, found):
+        # one run's pass, each publish_gap a yield: run_steps makes the publishes of runs on
+        # different branches and worktrees at once, and resumes every run in the ledger's order
         closed = lifecycle.closed_state(items, s.get('item'))
         if closed and s.get('ended') and lifecycle.pending_correction(s, registry):
             pool_mod.update_session(product, job, correction=None)
@@ -531,7 +610,7 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
                 s.pop('correction', None)
                 found.append((job, 'landed', f'its branch landed at {landed_sha[:9]}: '
                                              'nothing to push'))
-                continue
+                return
             if s.get('end_reason') == lifecycle.STOPPED and not s.get('correction'):
                 ev = lifecycle.gather(product, s, alive=alive)
                 if lifecycle.pushed_after_stop(s, ev):
@@ -546,7 +625,7 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
                 ev = lifecycle.gather(product, s, alive=alive)
                 if ev.result is not None:
                     reason = lifecycle.judge(s, ev, landing=lifecycle.lands(s, registry))
-                    reason, ev, line = publish_gap(product, s, ev, reason, alive)
+                    reason, ev, line = yield (product, s, ev, reason, alive)
                     if line:
                         found.append((job, 'published', line))
                     ok = reason == lifecycle.FINISHED
@@ -556,19 +635,19 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
                     if lifecycle.quota_exhausted(s):
                         found.append((job, 'quota', headroom.note_exhausted(product, s, ev.result)))
             if not closed:
-                republish(product, registry, job, s, alive, found)
-            continue
+                yield from republish_steps(product, registry, job, s, alive, found)
+            return
         ev = lifecycle.gather(product, s, alive=alive)
         reason = lifecycle.judge(s, ev, landing=lifecycle.lands(s, registry))
         if reason is None:
-            continue
-        reason, ev, line = publish_gap(product, s, ev, reason, alive)  # B-0056
+            return
+        reason, ev, line = yield (product, s, ev, reason, alive)  # B-0056
         if line:
             found.append((job, 'published', line))
         retry = push_retry(ev, reason, line)
         if retry and retry[0] == lifecycle.NETWORK_ERROR:  # B-0097: a blip — retried, no round
             found.append((job, 'retry', f'{retry[0]}: {retry[1]} — published again next pass'))
-            continue
+            return
         if retry:  # the repo's own pre-push hook refused it: its output, no round spent
             reason = f'failed: {retry[0]}: {retry[1]}'
         now = pool_mod.now_iso()
@@ -580,9 +659,9 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
             # the account's window, not the work: its account stops until the reset, and the
             # item relaunches — no hold, no round (asf.workers.headroom)
             found.append((job, 'quota', headroom.note_exhausted(product, s, ev.result)))
-            continue
+            return
         if closed:
-            continue  # nothing to send back: the worktree is reaped below when it is empty
+            return  # nothing to send back: the worktree is reaped below when it is empty
         if retry:
             text = (f'the push was refused by the repo\'s own hook — {retry[1]} — fix what it '
                     f'names, commit, and push again')
@@ -599,7 +678,7 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
                                                               main=product.main)
                 pool_mod.update_session(product, job, **fields)
                 found.append((job, 'held', line.split(': ', 1)[1]))
-                continue
+                return
             if lifecycle.stale_head(line):  # origin holds commits this head lacks: a rebase
                 text = lifecycle.stale_head_text(s.get('branch') or job, line)
             fields, line = lifecycle.hold(registry, s, lifecycle.UNPUSHED, text, now,
@@ -618,6 +697,12 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
                                           lifecycle.empty_branch_text(), now)
             pool_mod.update_session(product, job, **fields)
             found.append((job, 'held', line.split(': ', 1)[1]))
+
+    per_run = [(job, s, []) for job, s in sessions.items()]
+    run_steps([(job, s, steps(job, s, own)) for job, s, own in per_run],
+              lambda *args: publish_gap(*args))
+    for _job, _s, own in per_run:
+        found.extend(own)
     # T-0196: an ended run is finished — its cloud token settled, its lingering process stopped
     settled = settle_ended(product, sessions, fix=fix, session_source=session_source)
     found.extend(settled)
