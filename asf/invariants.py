@@ -389,12 +389,15 @@ def _feeder_only(check):
 
 #: The launching row kinds each lane state allows (R10). A state not named here — PUSHED,
 #: PR_OPEN, GATE, WAITING_CI, WAITING, QUEUED, MERGING — allows none: the lane holds the branch.
-#: REVIEW allows its review session; BACK the corrections that answer a send-back. A terminal
-#: state (MERGED, STALE, REAPED) or no lane record holds nothing.
+#: REVIEW allows its review session; BACK the corrections that answer a send-back — and a
+#: delivery's resume (``DELIVERY → CODE``: the lane held the branch ``incomplete`` and the same
+#: lead continues from its head; without it the gate turned every resume into ``WAITS ON
+#: landing: <branch> BACK``, a product's T-0362 and T-0027, 2026-09-27). A terminal state
+#: (MERGED, STALE, REAPED) or no lane record holds nothing.
 LANE_LAUNCH_KINDS = {
     'REVIEW': ('PUSHED → REVIEW',),
     'BACK': ('FIX → CORRECT', 'STARVED → SPEC', 'STARVED → PLAN', 'STALEMATE → ADJUDICATE',
-             'RESHAPE → PLAN', 'CONFLICT → REBASE', 'STALE → CLOSE'),
+             'RESHAPE → PLAN', 'CONFLICT → REBASE', 'STALE → CLOSE', 'DELIVERY → CODE'),
 }
 #: The occupancy fallback for a branch the lane has no record of: a busy or pushed item takes
 #: only its review; an item with a pending correction takes the BACK kinds.
