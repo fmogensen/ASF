@@ -1032,7 +1032,7 @@ def run_product_harvest(product, state_dir=None, dry_run=False, bug_root=None, o
     if is_record_repo(repo) and is_tracked(repo, 'index.json'):  # the record's own gate
         run_harvest(repo, state_dir or env.state_dir(product), dry_run, conv)
         return {}
-    lane = lane_mod.Lane(product, state_dir, out, dry_run, items)
+    lane = lane_mod.Lane(product, state_dir, out, dry_run, items, product.backlog_dir)
     sh(['git', 'fetch', '-q', '--prune', 'origin'], cwd=repo)
     if not dry_run:
         sync_checkout(repo, conv.main, out)  # a direct push to the trunk too (B-0042)

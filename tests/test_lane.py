@@ -3493,5 +3493,123 @@ class RelaunchOnlyWhatChanged(LaneFixture):
         self.assertFalse(any('not sent back again' in l for l in lines), lines)
 
 
+class ProvesRefusalTests(unittest.TestCase):
+    """F-0040 §2.5: ``lane_refusal``'s third kind — a Task branch may not land unless its
+    commits name, with a ``Proves:`` trailer, the acceptance line its tests tick. Skipped, never
+    refused, when ``items`` or ``root`` is missing, when the item is not a Task, or when the
+    Task lists no Story (D4, D5)."""
+
+    STORY = ('## Acceptance\n'
+             '- [ ] the parser reads a Proves trailer\n'
+             '- [ ] a malformed claim is a problem, not a silent skip\n')
+
+    def setUp(self):
+        self.repo = tempfile.mkdtemp(prefix='proves-repo-')
+        self.addCleanup(shutil.rmtree, self.repo, True)
+        sh(['git', 'init', '-q', '-b', 'main'], cwd=self.repo)
+        sh(['git', 'config', 'user.email', 't@t'], cwd=self.repo)
+        sh(['git', 'config', 'user.name', 't'], cwd=self.repo)
+        self.write(self.repo, 'a.txt', 'a\n')
+        sh(['git', 'add', '-A'], cwd=self.repo)
+        sh(['git', 'commit', '-qm', 'init'], cwd=self.repo)
+        base = sh(['git', 'rev-parse', 'HEAD'], cwd=self.repo).stdout.strip()
+        sh(['git', 'update-ref', 'refs/remotes/origin/main', base], cwd=self.repo)
+
+        self.root = tempfile.mkdtemp(prefix='proves-record-')
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.write(self.root, 'stories/s-18750.md', self.STORY)
+        self.items = {
+            'S-18750': {'type': 'story', 'folder': 'stories', 'id': 'S-18750'},
+            'T-0123': {'type': 'task', 'folder': 'tasks', 'id': 'T-0123',
+                      'stories': ['S-18750']},
+        }
+
+    def write(self, root, rel, text):
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+
+    def branch(self, commits, name='worker/T-0123'):
+        """``commits``: ``[(subject, {rel: text})]`` — one commit per pair, oldest first."""
+        sh(['git', 'checkout', '-q', '-B', name, 'main'], cwd=self.repo)
+        for subject, files in commits:
+            for rel, text in files.items():
+                self.write(self.repo, rel, text)
+            sh(['git', 'add', '-A'], cwd=self.repo)
+            sh(['git', 'commit', '-qm', subject], cwd=self.repo)
+        head = sh(['git', 'rev-parse', 'HEAD'], cwd=self.repo).stdout.strip()
+        sh(['git', 'update-ref', f'refs/remotes/origin/{name}', head], cwd=self.repo)
+
+    _DEFAULT = object()
+
+    def refusal(self, item='T-0123', items=_DEFAULT, root=_DEFAULT, branch='worker/T-0123'):
+        return lane.lane_refusal(self.repo, 'main', branch, item,
+                                 items=self.items if items is self._DEFAULT else items,
+                                 root=self.root if root is self._DEFAULT else root)
+
+    def test_a_task_proving_nothing_is_refused(self):
+        self.branch([('feat(T-0123): the parser reads a Proves trailer',
+                     {'tests/test_x.py': 'x\n'})])
+        kind, text = self.refusal()
+        self.assertEqual(kind, 'proves')
+        self.assertIn('no acceptance line proved: this Task lists S-18750', text)
+        self.assertIn('1 the parser reads a Proves trailer', text)
+        self.assertIn('2 a malformed claim is a problem, not a silent skip', text)
+        self.assertIn('Proves: S-18750 line 1 — <the test path that proves it>', text)
+
+    def test_a_good_claim_on_a_real_test_path_passes(self):
+        self.branch([('feat(T-0123): the parser reads a Proves trailer\n\n'
+                      'Proves: S-18750 line 1 — tests/test_x.py::test_trailer',
+                      {'tests/test_x.py': 'x\n'})])
+        self.assertIsNone(self.refusal())
+
+    def test_a_claim_naming_a_test_path_not_on_the_branch_is_refused(self):
+        self.branch([('feat(T-0123): the parser reads a Proves trailer\n\n'
+                      'Proves: S-18750 line 1 — tests/test_missing.py::test_trailer',
+                      {'tests/test_x.py': 'x\n'})])
+        kind, text = self.refusal()
+        self.assertEqual(kind, 'proves')
+        self.assertIn('no acceptance line proved', text)
+
+    def test_one_bad_claim_refuses_even_with_a_good_one_alongside(self):
+        # D3: every claim on the branch must resolve, not just one
+        self.branch([('feat(T-0123): two claims\n\n'
+                      'Proves: S-18750 line 1 — tests/test_x.py::test_trailer\n'
+                      'Proves: S-9999 line 1 — tests/test_x.py::test_trailer',
+                      {'tests/test_x.py': 'x\n'})])
+        kind, _text = self.refusal()
+        self.assertEqual(kind, 'proves')
+
+    def test_no_items_index_skips_the_refusal(self):
+        # D4: a missing index must never stop every landing in the factory
+        self.branch([('feat(T-0123): the parser reads a Proves trailer',
+                     {'tests/test_x.py': 'x\n'})])
+        self.assertIsNone(self.refusal(items=None))
+        self.assertIsNone(self.refusal(items={}))
+
+    def test_no_root_skips_the_refusal(self):
+        self.branch([('feat(T-0123): the parser reads a Proves trailer',
+                     {'tests/test_x.py': 'x\n'})])
+        self.assertIsNone(self.refusal(root=None))
+
+    def test_an_item_that_is_not_a_task_is_never_refused(self):
+        self.items['B-0001'] = {'type': 'bug', 'folder': 'bugs', 'id': 'B-0001'}
+        self.branch([('fix(B-0001): the fix', {'tests/test_x.py': 'x\n'})], name='worker/B-0001')
+        self.assertIsNone(self.refusal(item='B-0001', branch='worker/B-0001'))
+
+    def test_a_task_listing_no_story_is_never_refused(self):
+        # D5: the coder cannot fix a Task card outside its footprint — the rule check is the
+        # backstop, not the landing
+        self.items['T-0123'] = {'type': 'task', 'folder': 'tasks', 'id': 'T-0123'}
+        self.branch([('feat(T-0123): the fix', {'tests/test_x.py': 'x\n'})])
+        self.assertIsNone(self.refusal())
+
+    def test_naming_is_refused_before_proves_is_ever_checked(self):
+        self.branch([('feat(T-9999): wrong item', {'tests/test_x.py': 'x\n'})])
+        kind, _text = self.refusal()
+        self.assertEqual(kind, lifecycle.NAMING)
+
+
 if __name__ == '__main__':
     unittest.main()
