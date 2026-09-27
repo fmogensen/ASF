@@ -217,7 +217,8 @@ def ensure_git_hooks(product, which=shutil.which):
 
 
 def declared_hooks(rules_dir=RULES_DIR):
-    """``[(event, name)]`` from every rule card with a ``hook:`` line; empty if no ``rules/``."""
+    """``[(event, name)]`` from every rule card with a ``hook:`` line; empty if no ``rules/``.
+    A ``.md`` with no frontmatter (the directory's ``README.md``) is prose, not a card."""
     from asf.record import frontmatter
     out = []
     if not os.path.isdir(rules_dir):
@@ -227,7 +228,10 @@ def declared_hooks(rules_dir=RULES_DIR):
             continue
         path = os.path.join(rules_dir, f)
         with open(path, encoding='utf-8') as fh:
-            meta = frontmatter.parse(fh.read(), path)[0]
+            text = fh.read()
+        if not text.startswith('---'):
+            continue
+        meta = frontmatter.parse(text, path)[0]
         events = meta.get('hook')
         if not events:
             continue
