@@ -161,6 +161,33 @@ class AnAfterOnARemovedButLandedTaskIsLanded(unittest.TestCase):
         self.assertNotIn('T-0001', items)
         self.assertIn('T-0001', rows.landed_ids(rows.items_of(items)))
 
+    def test_read_through_the_index_reader_it_still_launches(self):
+        # `asf next` and the tick read index.json through asf.views.index_reader.load, which
+        # drops removed cards before the feeder ever sees them (the first fix missed this path)
+        from asf.views import index_reader
+        items, _generated = index_reader.load(self.written(self.index(delivery=True)))
+        self.assertNotIn('T-0001', items)
+        by = self.by(items)
+        self.assertEqual((by['T-0002'].kind, by['T-0002'].action), (rows.DELIVERY_CODE, rows.LAUNCH))
+        launching = [r.item_id for r in rows.plan_rows(items, product(), [], 3) if r.launches]
+        self.assertEqual(launching, ['T-0002'])
+
+    def test_a_blocked_by_on_a_removed_closed_card_does_not_block(self):
+        from asf.views import index_reader
+        idx = self.index()
+        idx['items']['T-0002'].pop('after')
+        idx['items']['T-0002']['blockedBy'] = ['T-0001']
+        items, _generated = index_reader.load(self.written(idx))
+        self.assertFalse(rows.items_of(items)['T-0002'].get('blocked'))
+        self.assertEqual(self.by(items)['T-0002'].action, 'would launch')
+
+    def written(self, idx):
+        root = tempfile.mkdtemp(prefix='feeder_retired_')
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        with open(os.path.join(root, 'index.json'), 'w', encoding='utf-8') as f:
+            json.dump(dict(idx, generated='now'), f)
+        return root
+
 
 class NoRowLaunchesBehindAnUnlandedPredecessor(unittest.TestCase):
     """B-0080: `after:` held the PLAN → CODE row only; a held branch's correction and adjudicate

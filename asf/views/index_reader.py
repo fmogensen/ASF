@@ -6,13 +6,37 @@ through here so ``asf tick --shadow`` and a plain ``asf roadmap`` see the same d
 the root is a product's real backlog or its shadow clone.
 
 Read-only, stdlib only. ``load()`` drops typed-``removed`` items: the index carries every card,
-the tables only want the live set.
+the tables only want the live set — but it keeps the removed cards that are done aside
+(:attr:`Items.retired_done`), so an ``after:`` naming one still reads it landed.
 """
 import datetime as dt
 import json
 import os
 
 BIG = 10 ** 6
+DONE_STATES = ('Resolved', 'Closed')
+
+
+class Items(dict):
+    """The live ``{id: item}`` map, plus :attr:`retired_done`: ``{id: card}`` of the *removed*
+    cards whose state is done. A removed card is out of every row, but not out of history — groom
+    removes a card that landed ("it landed…"), and an ``after:`` naming it must still read it
+    landed (:func:`asf.feeder.rows.landed_ids`), or its successors wait on it for ever (a
+    product's T-0360)."""
+
+    retired_done = {}
+
+
+def live(raw):
+    """``raw`` (``{id: card}``, removed cards included) as an :class:`Items`: the cards not
+    removed, with the removed ones that are done kept aside in ``retired_done`` (and any
+    ``raw`` already carries)."""
+    out = Items((k, v) for k, v in raw.items() if isinstance(v, dict) and not v.get('removed'))
+    retired = dict(getattr(raw, 'retired_done', {}))
+    retired.update((k, v) for k, v in raw.items()
+                   if isinstance(v, dict) and v.get('removed') and v.get('state') in DONE_STATES)
+    out.retired_done = retired
+    return out
 
 
 def load(root):
@@ -20,8 +44,7 @@ def load(root):
     path = os.path.join(root, 'index.json')
     with open(path, encoding='utf-8') as f:
         raw = json.load(f)
-    items = {k: v for k, v in raw['items'].items() if not v.get('removed')}
-    return items, raw.get('generated', '')
+    return live(raw['items']), raw.get('generated', '')
 
 
 def rank(item):

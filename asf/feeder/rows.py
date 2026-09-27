@@ -193,26 +193,18 @@ class Row:
 
 # ---- inputs -----------------------------------------------------------------
 
-class Items(dict):
-    """The live ``{id: item}`` map, plus :attr:`retired_done`: ``{id: card}`` of the *removed*
-    cards whose state is done. A removed card is out of every row, but not out of history — groom
-    removes a card that landed ("it landed…"), and an ``after:`` naming it must still read it
-    landed (:func:`landed_ids`), or its successors wait on it for ever (a product's T-0360)."""
-
-    retired_done = {}
+#: the index reader's live map: removed cards dropped, the done ones kept in ``retired_done``
+Items = ix.Items
 
 
 def items_of(index):
     """The live ``{id: item}`` map (an :class:`Items`) from an ``index.json`` dict or an
     already-loaded item map; a removed card is dropped, and remembered in ``retired_done`` when
-    it is done."""
+    it is done (:func:`asf.views.index_reader.live`)."""
     raw = index.get('items') if isinstance(index.get('items'), dict) else index
-    live = {k: v for k, v in raw.items() if isinstance(v, dict) and not v.get('removed')}
-    retired = dict(getattr(raw, 'retired_done', {}))
-    retired.update((k, v) for k, v in raw.items()
-                   if isinstance(v, dict) and v.get('removed') and v.get('state') in DONE_STATES)
-    out = Items(with_blockers(live, raw))
-    out.retired_done = retired
+    kept = ix.live(raw)
+    out = Items(with_blockers(dict(kept), raw))
+    out.retired_done = kept.retired_done
     return out
 
 
@@ -229,7 +221,11 @@ def with_blockers(items, raw=None):
         if 'blockedBy' not in v:
             continue
         if states is None:
-            states = {k: (w or {}).get('state', 'New') for k, w in (raw or items).items()
+            src = raw or items
+            # a removed card the index reader set aside (``retired_done``) still answers with
+            # its state: a blocker that landed and was then retired does not block
+            states = {k: (w or {}).get('state', 'New')
+                      for k, w in list(getattr(src, 'retired_done', {}).items()) + list(src.items())
                       if isinstance(w, dict)}
         blocked, open_blockers = blocked_of(v.get('blockedBy'), states)
         if bool(v.get('blocked')) == blocked and list(v.get('blocked_by_open') or ()) == open_blockers:
