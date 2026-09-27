@@ -85,9 +85,16 @@ never gets a start, and is never set aside as demand ahead of others — :func:`
 pass (:func:`forget`).
 
 **Order.** S1 and hotfix items first (0), then trunk runs (1: every deploy waits on a green
-trunk, so a trunk run never queues behind PR runs), then PRs of customer-facing Features (2: the
-item sits under a Feature, and the Feature says ``customer_facing: true`` or the branch touches
-``customer_paths``), then everything else (3); within a priority, oldest first.
+trunk, so a trunk run never queues behind PR runs), then S2 items (2), then every start whose
+branch maps to a record item (3: the lane's branch → item mapping), in the record's own order —
+the one ``asf next`` hands work out in (:func:`record_rank`: a Task's run before a Feature's own
+document PR, then the Feature's Epic rank, its rank, its id) — then everything the record has no
+item for (4: ``worker/*``, ``worktree-m-*``, ``cloud/*`` without an item, a batch, a deploy);
+within a priority (and a rank), oldest first. Age alone never puts an unranked branch ahead of
+the record's work (2026-09-27: ``worker/plan-measure-1`` held the heavy runners at the head
+ahead of every Feature Task); the head guard stays the backstop for a low rank, measured from
+its time at the head. The hold line names the rank: ``(Task F-0113 rank 2, 3rd in line)`` — the
+rank is the Feature's place among the record's open Features.
 
 **Superseded trunk runs.** A trunk run judges every commit below it, so an older trunk run still
 *queued* when a newer one exists is moot: :func:`cancel_superseded` cancels it, keeping the newest
@@ -101,9 +108,9 @@ reorder runs the host already holds. :func:`relieve_trunk` (every tick, from the
 when the newest trunk ``push`` run of the trunk workflow has been queued longer than
 ``ci.queue.trunk_wait_min`` (default 20) minutes, it cancels runs queued *ahead* of it (created
 earlier, not yet started — an in-progress run always finishes), lowest priority first — PR runs
-of ordinary items, then of customer-facing Features, then batch runs; newest first within each —
-until the free runners plus what the cancelled runs would have taken cover the trunk run's
-expected jobs in every class. An S1 or hotfix run is never cancelled. Each cancel is remembered
+of branches the record has no item for, then of the record's ranked items, then of S2 items,
+then batch runs; newest first within each — until the free runners plus what the cancelled runs
+would have taken cover the trunk run's expected jobs in every class. An S1 or hotfix run is never cancelled. Each cancel is remembered
 in the queue file (``relief``) and, once the trunk run has started, re-run (``gh run rerun``)
 through this queue at its original priority. One line per cancel and per re-run, naming the trunk
 sha and its wait. ``mode: dry-run`` (or a dry-run pass) prints what it would do, writes nothing.
@@ -260,7 +267,12 @@ GH_TIMEOUT_S = 30
 #: the open PRs listed for the stale sweep (every one), and the latest of any state
 PR_LIST_OPEN = 500
 PR_LIST_LATEST = 100
-S1, TRUNK, FEATURE, OTHER = 0, 1, 2, 3
+#: the line's priorities (:func:`priority`): S1/hotfix, trunk, S2, an item the record ranks, the
+#: rest (a branch the record has no item for)
+S1, TRUNK, S2, RANKED, OTHER = 0, 1, 2, 3, 4
+#: a ranked entry with no stored rank (a queue file from before the rank) sorts after every
+#: ranked one
+UNRANKED = [10 ** 7]
 
 
 def _now():
@@ -559,12 +571,16 @@ def _touches(files, paths):
 
 
 def priority(item_id, items=None, branch='', files=(), product=None, kind=None):
-    """``(rank, label)``: 0 for an S1 or hotfix item, 1 for a trunk run (``kind`` ``trunk``: every
-    deploy waits on a green trunk), 2 for a customer-facing Feature's PR, 3 for the rest;
-    ``label`` is what the hold line names (``S1``, ``hotfix``, ``trunk``, ``Feature``, the
-    severity, or the item type)."""
+    """``(prio, label)``: 0 for an S1 or hotfix item, 1 for a trunk run (``kind`` ``trunk``: every
+    deploy waits on a green trunk), 2 for an S2 item, 3 for an item the record holds (ordered
+    within by :func:`record_rank`), 4 for a start the record has no item for (a ``worker/*``,
+    ``worktree-m-*`` or ``cloud/*`` branch, a batch, a deploy). ``label`` is what the hold line
+    names: ``S1``, ``hotfix``, ``trunk``, ``S2``, ``Task F-0113 rank 2``, ``other``. ``files``
+    and ``product`` are accepted for the callers; the order reads the record alone."""
     items = items or {}
     card = items.get(item_id or '') or {}
+    if not isinstance(card, dict) or card.get('removed'):
+        card = {}
     sev = card.get('severity')
     if 'hotfix' in (branch or '').lower() or 'hotfix' in str(card.get('type') or '').lower():
         return S1, 'hotfix'
@@ -572,14 +588,38 @@ def priority(item_id, items=None, branch='', files=(), product=None, kind=None):
         return S1, 'S1'
     if kind == 'trunk':
         return TRUNK, 'trunk'
-    feature = _feature_of(items, card) if card else None
-    if feature is not None:
-        cust = feature.get('customer_facing') is True or card.get('customer_facing') is True
-        if not cust and product is not None:
-            cust = _touches(files, getattr(product, 'customer_paths', None) or [])
-        if cust:
-            return FEATURE, 'Feature'
-    return OTHER, sev or (str(card.get('type')).capitalize() if card.get('type') else 'other')
+    if sev == 'S2':
+        return S2, 'S2'
+    if card.get('id'):
+        return RANKED, record_rank(item_id, items)[1]
+    return OTHER, 'other'
+
+
+def record_rank(item_id, items):
+    """``(key, text)``: where the record puts ``item_id`` in the order ``asf next`` hands work out
+    (:func:`asf.feeder.rows.candidates`, tier 2): finish before you start (a Task's run before a
+    Feature's own spec or plan PR), then its Feature's order (the Epic's rank, the Feature's
+    rank, its id — :func:`asf.feeder.rows.feature_order`), then the item's id. ``text`` names
+    it — ``Task F-0113 rank 2``, the rank being the Feature's place among the record's open
+    Features (rank 1: the one ``asf next`` serves first). An item under no Feature sorts after
+    every ranked one (``Task unranked``). ``key`` is a JSON-safe list: it is stored on the
+    entry."""
+    from asf.feeder import rows
+    from asf.views import index_reader as ix
+    items = items or {}
+    card = items.get(item_id or '') or {}
+    kind = str(card.get('type') or 'item').capitalize()
+    phase = 1 if card.get('type') == 'feature' and not card.get('ab_pair') else 0
+    feature = _feature_of(items, card) if card.get('id') else None
+    if feature is None:
+        return [phase, ix.BIG, ix.BIG, '~', str(item_id)], f'{kind} unranked'
+    order = list(rows.feature_order(items, feature))
+    n = 1 + sum(1 for f in items.values()
+                if isinstance(f, dict) and f.get('type') == 'feature' and f.get('id')
+                and f['id'] != feature['id'] and not f.get('removed') and rows.is_open(f)
+                and list(rows.feature_order(items, f)) < order)
+    what = kind if card.get('type') == 'feature' else f"{kind} {feature['id']}"
+    return [phase, *order, str(item_id)], f'{what} rank {n}'
 
 
 # ---- the CI host ------------------------------------------------------------------------------
@@ -1023,9 +1063,14 @@ def prune(data, now):
 
 
 def line_order(entries):
-    """The entries' keys in line order: priority, then oldest first."""
-    return sorted(entries, key=lambda k: (entries[k].get('prio', OTHER),
-                                          entries[k].get('since') or '', k))
+    """The entries' keys in line order: priority, then — among the items the record ranks — the
+    record's rank (:func:`record_rank`), then oldest first."""
+    def key(k):
+        e = entries[k]
+        prio = e.get('prio', OTHER)
+        rank = e.get('rank') if isinstance(e.get('rank'), list) else None
+        return (prio, rank or (UNRANKED if prio == RANKED else []), e.get('since') or '', k)
+    return sorted(entries, key=key)
 
 
 def _ordinal(n):
@@ -1396,11 +1441,12 @@ class Queue:
         self.data['head'] = head
 
     def admit(self, key, kind, item=None, prio=OTHER, label='other', workflow=None, run=FULL,
-              sha=None):
+              sha=None, rank=None):
         """May the start ``key`` go now? Enqueues it (keeping its place), decides, and on
         admission moves it to ``started``. A hold prints its one line. ``run``: the run type
         (:func:`run_type`) the start is sized as; ``sha``: the head it starts on, re-set on a
-        new push (the entry keeps its place)."""
+        new push (the entry keeps its place); ``rank``: the record's order key of a ``RANKED``
+        start (:func:`record_rank`), re-read every ask."""
         if self.mode == 'off':
             return Decision(True, bypass=True)
         workflow = workflow or workflow_for(self.product, kind)
@@ -1410,6 +1456,10 @@ class Queue:
                  run=run if run in RUN_TYPES else FULL, seen=_iso(self.now))
         if sha:
             e['sha'] = sha
+        if isinstance(rank, (list, tuple)):
+            e['rank'] = list(rank)
+        else:
+            e.pop('rank', None)
         entries[key] = e
         order = line_order(entries)
         self._mark_head()
@@ -1469,9 +1519,10 @@ def admit(product, key, kind, item=None, items=None, branch='', files=(), workfl
         return Decision(False, f'ci queue: {item or key} not started — its PR is a draft, '
                                f'parked by its owner')
     prio, label = priority(item, items, branch, files, product, kind=kind)
+    rank = record_rank(item, items)[0] if prio == RANKED else None
     run = run_type(product, files) if kind == 'pr' else FULL
     return q.admit(key, kind, item=item, prio=prio, label=label, workflow=workflow, run=run,
-                   sha=sha)
+                   sha=sha, rank=rank)
 
 
 def forget(product, branch, queue=None, source=None, out=print):
@@ -1637,7 +1688,7 @@ def _rerun_cancelled(q, src, product, started, dry_run, out, now):
         protected, who = got
         d = q.admit(_rerun_key(rec), rec.get('kind') or 'pr', item=rec.get('item'),
                     prio=rec.get('prio', OTHER), label=rec.get('label') or 'other',
-                    workflow=rec.get('workflow'), sha=rec.get('sha'))
+                    workflow=rec.get('workflow'), sha=rec.get('sha'), rank=rec.get('rank'))
         if not d.admitted or d.line:        # held (or a dry-run mode hold): next tick asks again
             keep.append(rec)
             continue
@@ -2055,9 +2106,9 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
                 out(f'relief: exempt {branch} — changes CI config')
                 continue
             if kind == 'batch':
-                group, label, item = 2, 'batch', 'batch'
-            else:
-                group = 0 if prio >= OTHER else 1
+                group, label, item = 3, 'batch', 'batch'
+            else:                               # the line's order reversed: other, ranked, S2
+                group = {OTHER: 0, RANKED: 1}.get(prio, 2)
             jobs, sunk = None, 0.0
             if escalated:
                 jobs = src.live_jobs(rid)
@@ -2121,6 +2172,8 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
                    'workflow': wf, 'at': _iso(now), 'trunk_id': tid,
                    'trunk_sha': target.get('headSha'), 'trunk_created': _iso(created),
                    'branch': r.get('headBranch'), 'sha': r.get('headSha')}
+            if prio == RANKED:
+                rec['rank'] = record_rank(item, items)[0]
             if for_id is not None:
                 rec['for'] = for_id
             q.data['relief'].append(rec)

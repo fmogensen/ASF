@@ -272,7 +272,7 @@ class TestAdmission(Base):
         d = self.admit(self.queue(p, FakeGh(busy={'h1', 'h2'})), 'pr:task/T-0500', 'T-0500')
         self.assertFalse(d.admitted)
         self.assertEqual(self.lines, ['ci queue: T-0500 waits — heavy 1 free, needs 3 '
-                                      '(Task, 1st in line)'])
+                                      '(Task unranked, 1st in line)'])
         self.assertIn('pr:task/T-0500', ci_queue.load('p')['entries'])
         d = self.admit(self.queue(p, FakeGh(), minutes=5), 'pr:task/T-0500', 'T-0500')
         self.assertTrue(d.admitted)
@@ -297,35 +297,109 @@ class TestAdmission(Base):
 
 
 class TestPriority(Base):
-    def test_s1_then_trunk_then_customer_features_then_the_rest(self):
+    def test_s1_then_trunk_then_s2_then_the_records_items_then_the_rest(self):
         self.assertEqual(ci_queue.priority('B-0007', ITEMS), (0, 'S1'))
         self.assertEqual(ci_queue.priority('B-0007', ITEMS, kind='trunk'), (0, 'S1'))
         self.assertEqual(ci_queue.priority('T-0500', ITEMS, branch='hotfix/x'), (0, 'hotfix'))
         self.assertEqual(ci_queue.priority('T-0500', ITEMS, kind='trunk'), (1, 'trunk'))
-        self.assertEqual(ci_queue.priority('T-0341', ITEMS), (2, 'Feature'))
-        self.assertEqual(ci_queue.priority('B-0008', ITEMS), (3, 'S2'))
-        cust = env.Product('p', {'customer_paths': ['web/']})
-        items = dict(ITEMS, **{'F-0001': {'id': 'F-0001', 'type': 'feature'}})
-        self.assertEqual(ci_queue.priority('T-0341', items, files=['web/a.ts'], product=cust),
-                         (2, 'Feature'))
-        self.assertEqual(ci_queue.priority('T-0341', items, files=['lib/a.py'], product=cust)[0], 3)
+        self.assertEqual(ci_queue.priority('B-0008', ITEMS), (2, 'S2'))
+        self.assertEqual(ci_queue.priority('T-0341', ITEMS), (3, 'Task F-0001 rank 1'))
+        self.assertEqual(ci_queue.priority('T-0500', ITEMS), (3, 'Task unranked'))
+        self.assertEqual(ci_queue.priority('worker/plan-measure-1', ITEMS), (4, 'other'))
+        self.assertEqual(ci_queue.priority(None, ITEMS), (4, 'other'))
+        gone = dict(ITEMS, **{'T-0341': dict(ITEMS['T-0341'], removed=True)})
+        self.assertEqual(ci_queue.priority('T-0341', gone), (4, 'other'))
 
     def test_the_line_serves_priority_first_and_an_entry_ahead_keeps_its_runners(self):
         p = product()
         busy = FakeGh(busy={'h1', 'h2', 'h3'})
-        self.admit(self.queue(p, busy), 'pr:old', 'B-0008')             # S2, oldest
-        self.admit(self.queue(p, busy, minutes=1), 'pr:feat', 'T-0341')  # Feature
-        self.admit(self.queue(p, busy, minutes=4), 'pr:new', 'T-0500')  # other, newest
+        self.admit(self.queue(p, busy), 'pr:new', 'T-0500')              # Task, oldest
+        self.admit(self.queue(p, busy, minutes=1), 'pr:feat', 'T-0341')  # Task under F-0001
+        self.admit(self.queue(p, busy, minutes=4), 'pr:old', 'B-0008')  # S2, newest
         entries = ci_queue.load('p')['entries']
-        self.assertEqual(ci_queue.line_order(entries), ['pr:feat', 'pr:old', 'pr:new'])
-        self.assertEqual(self.lines[-1], 'ci queue: T-0500 waits — heavy 0 free, needs 3, '
-                                         'light 0 free, needs 1 (Task, 3rd in line)')
-        # runners come free: the S2 asks first, but the Feature ahead of it is owed them
+        self.assertEqual(ci_queue.line_order(entries), ['pr:old', 'pr:feat', 'pr:new'])
+        self.assertEqual(self.lines[-1], 'ci queue: B-0008 waits — heavy 0 free, needs 3 '
+                                         '(S2, 1st in line)')
+        # runners come free: the ranked Task asks first, but the S2 ahead of it is owed them
         q = self.queue(p, FakeGh(), minutes=5)
-        self.assertFalse(self.admit(q, 'pr:old', 'B-0008').admitted)
-        self.assertIn('(S2, 2nd in line)', self.lines[-1])
-        self.assertTrue(self.admit(q, 'pr:feat', 'T-0341').admitted)
+        self.assertFalse(self.admit(q, 'pr:feat', 'T-0341').admitted)
+        self.assertIn('(Task F-0001 rank 1, 2nd in line)', self.lines[-1])
+        self.assertTrue(self.admit(q, 'pr:old', 'B-0008').admitted)
 
+
+class TestRecordRank(Base):
+    """The line follows the record's own order (``asf next``): S2 before Feature work, the
+    record's items by Epic rank, Feature rank, id — never age alone — and a branch with no record
+    item last."""
+
+    ITEMS = {
+        'E-0001': {'id': 'E-0001', 'type': 'epic', 'rank': 2},
+        'E-0002': {'id': 'E-0002', 'type': 'epic', 'rank': 1},
+        # E-0002 is ranked first: its Feature leads though its own rank is higher
+        'F-0010': {'id': 'F-0010', 'type': 'feature', 'parent': 'E-0001', 'rank': 1},
+        'F-0020': {'id': 'F-0020', 'type': 'feature', 'parent': 'E-0002', 'rank': 5},
+        'F-0030': {'id': 'F-0030', 'type': 'feature', 'parent': 'E-0001', 'rank': 2,
+                   'state': 'Resolved'},
+        'S-0010': {'id': 'S-0010', 'type': 'story', 'parent': 'F-0010'},
+        'T-0011': {'id': 'T-0011', 'type': 'task', 'parent': 'S-0010'},
+        'T-0021': {'id': 'T-0021', 'type': 'task', 'parent': 'F-0020'},
+        'T-0022': {'id': 'T-0022', 'type': 'task', 'feature': 'F-0020'},
+        'B-0031': {'id': 'B-0031', 'type': 'bug', 'severity': 'S2', 'parent': 'F-0010'},
+    }
+
+    def line(self, asks):
+        p = product()
+        busy = FakeGh(busy={'h1', 'h2', 'h3'})
+        for m, (key, item) in enumerate(asks):
+            ci_queue.admit(p, key, 'pr', item=item, items=self.ITEMS, branch=key[3:],
+                           queue=self.queue(p, busy, minutes=m))
+        return ci_queue.line_order(ci_queue.load('p')['entries'])
+
+    def test_record_rank_follows_the_feeder_order(self):
+        rank = lambda i: ci_queue.record_rank(i, self.ITEMS)  # noqa: E731
+        self.assertEqual(rank('T-0021')[1], 'Task F-0020 rank 1')
+        self.assertEqual(rank('T-0022')[1], 'Task F-0020 rank 1')    # via its feature: field
+        self.assertEqual(rank('T-0011')[1], 'Task F-0010 rank 2')    # a resolved one never counts
+        self.assertEqual(rank('F-0010')[1], 'Feature rank 2')
+        self.assertLess(rank('T-0021')[0], rank('T-0022')[0])
+        self.assertLess(rank('T-0022')[0], rank('T-0011')[0])
+        # finish before you start: every Task's run before a Feature's own document PR
+        self.assertLess(rank('T-0011')[0], rank('F-0020')[0])
+        from asf.feeder import rows
+        self.assertEqual(rank('T-0021')[0][1:4], list(rows.feature_order(
+            self.ITEMS, self.ITEMS['F-0020'])))
+
+    def test_a_record_ranked_task_goes_ahead_of_an_older_unmapped_branch(self):
+        order = self.line([('pr:worker/plan-measure-1', 'worker/plan-measure-1'),
+                           ('pr:cloud/tc-t0', 'cloud/tc-t0'),
+                           ('pr:task/T-0011', 'T-0011'),
+                           ('pr:task/T-0021', 'T-0021')])
+        self.assertEqual(order, ['pr:task/T-0021', 'pr:task/T-0011',
+                                 'pr:worker/plan-measure-1', 'pr:cloud/tc-t0'])
+        # the later-asked, higher-ranked Task takes the head from the older unmapped branches
+        self.assertEqual(self.lines[-1], 'ci queue: T-0021 waits — heavy 0 free, needs 3 '
+                                         '(Task F-0020 rank 1, 1st in line)')
+
+    def test_an_s2_goes_ahead_of_the_feature_tasks(self):
+        order = self.line([('pr:task/T-0021', 'T-0021'), ('pr:task/T-0011', 'T-0011'),
+                           ('pr:bug/B-0031', 'B-0031')])
+        self.assertEqual(order, ['pr:bug/B-0031', 'pr:task/T-0021', 'pr:task/T-0011'])
+
+    def test_unmapped_branches_go_last_oldest_first(self):
+        order = self.line([('pr:worktree-m-a', 'worktree-m-a'), ('pr:feature/F-0010', 'F-0010'),
+                           ('pr:cloud/x-t1', 'cloud/x-t1'), ('pr:task/T-0021', 'T-0021')])
+        self.assertEqual(order, ['pr:task/T-0021', 'pr:feature/F-0010', 'pr:worktree-m-a',
+                                 'pr:cloud/x-t1'])
+
+    def test_an_entry_from_before_the_rank_sorts_after_the_ranked_ones(self):
+        entries = {'pr:a': {'prio': ci_queue.RANKED, 'since': '2026-09-25T10:00:00Z'},
+                   'pr:b': {'prio': ci_queue.RANKED, 'since': '2026-09-25T11:00:00Z',
+                            'rank': ci_queue.record_rank('T-0011', self.ITEMS)[0]},
+                   'pr:c': {'prio': ci_queue.OTHER, 'since': '2026-09-25T09:00:00Z'}}
+        self.assertEqual(ci_queue.line_order(entries), ['pr:b', 'pr:a', 'pr:c'])
+
+
+class TestPriorityExempt(Base):
     def test_trunk_and_s1_starts_go_with_no_runner_free(self):
         """The fit would fail (heavy 0 free, needs 3), yet a trunk run, an S1 and a hotfix PR go
         at once: the host queues their jobs, and they reserve nothing up front."""
@@ -545,7 +619,7 @@ class ReliefBase(Base):
                                   'headBranch': b, 'headSha': 'a' * 40, 'createdAt': t(m)}
         return {
             'ci.yml': [trunk],
-            'pr.yml': [pr(101, 'queued', 'bug/B-0008', -60),       # S2: cancelled first
+            'pr.yml': [pr(101, 'queued', 'worker/plan-measure', -60),  # no item: first
                        pr(102, 'queued', 'task/T-0341', -50),      # Feature: second
                        pr(103, 'queued', 'bug/B-0007', -40),       # S1: never
                        pr(104, 'queued', 'hotfix/db', -35),        # hotfix: never
@@ -605,7 +679,7 @@ class TestTrunkRelief(ReliefBase):
         self.assertEqual(self.relieve(p, run), (3, 0))
         # PR S2, then PR Feature, then batch (1 + 1 + 2 >= 3); never S1, hotfix, started or behind
         self.assertEqual(self.cancels(gh), ['101', '102', '201'])
-        self.assertEqual(self.lines[0], 'ci queue: cancelled queued pr run 101 (B-0008, S2) — '
+        self.assertEqual(self.lines[0], 'ci queue: cancelled queued pr run 101 (worker/plan-measure, other) — '
                                         'main run 900 at fffffffff has waited 25m for runners')
         self.assertEqual(len(self.lines), 3)
         self.assertEqual([r['id'] for r in ci_queue.load('p')['relief']], [101, 102, 201])
@@ -625,7 +699,7 @@ class TestTrunkRelief(ReliefBase):
         # 101 (lowest priority, would go first) is exempt: 102 then batch 201 go instead
         self.assertEqual(self.relieve(p, run), (2, 0))
         self.assertEqual(self.cancels(gh), ['102', '201'])
-        self.assertEqual(self.lines[0], 'relief: exempt bug/B-0008 — changes CI config')
+        self.assertEqual(self.lines[0], 'relief: exempt worker/plan-measure — changes CI config')
         self.assertEqual([r['id'] for r in ci_queue.load('p')['relief']], [102, 201])
 
     def test_a_run_whose_pr_changes_actionlint_config_is_never_cancelled(self):
@@ -638,7 +712,7 @@ class TestTrunkRelief(ReliefBase):
         gh, run = self.gh(runs, files={101: ['.github/actionlint.yaml']})
         self.assertEqual(self.relieve(p, run), (2, 0))
         self.assertEqual(self.cancels(gh), ['102', '201'])
-        self.assertEqual(self.lines[0], 'relief: exempt bug/B-0008 — changes CI config')
+        self.assertEqual(self.lines[0], 'relief: exempt worker/plan-measure — changes CI config')
 
     def test_relief_exempt_paths_config_is_honoured(self):
         p = self.product(relief_exempt_paths=['ops/runners/**'])
@@ -650,7 +724,7 @@ class TestTrunkRelief(ReliefBase):
         gh, run = self.gh(runs, files={101: ['ops/runners/pool.yaml']})
         self.assertEqual(self.relieve(p, run), (2, 0))
         self.assertEqual(self.cancels(gh), ['102', '201'])
-        self.assertEqual(self.lines[0], 'relief: exempt bug/B-0008 — changes CI config')
+        self.assertEqual(self.lines[0], 'relief: exempt worker/plan-measure — changes CI config')
         # a fresh pass (the earlier cancels forgotten): the same run's PR touching an ordinary
         # path is not exempt
         data = ci_queue.load('p')
@@ -707,7 +781,7 @@ class TestTrunkRelief(ReliefBase):
         gh, run = self.gh(self.runs(trunk_status='in_progress'), busy=())
         self.assertEqual(self.relieve(p, run, minutes=2), (0, 2))
         self.assertEqual(self.cancels(gh, 'rerun'), ['102', '101'])  # Feature, then S2
-        self.assertIn('ci queue: re-ran pr run 102 (T-0341, Feature) — main run 900 at '
+        self.assertIn('ci queue: re-ran pr run 102 (T-0341, Task F-0001 rank 1) — main run 900 at '
                       'fffffffff started after waiting 24m', self.lines)
         self.assertIn('ci queue: batch waits — heavy 1 free, needs 2 (batch, 1st in line)', self.lines)
         self.assertEqual([r['id'] for r in ci_queue.load('p')['relief']], [201])
@@ -794,7 +868,7 @@ class TestTrunkJobStarvation(ReliefBase):
         pr = lambda i, b, m: {'databaseId': i, 'status': 'queued', 'event': 'pull_request',  # noqa
                               'headBranch': b, 'headSha': 'a' * 40, 'createdAt': t(m)}
         # 101 (created before main) and the rest; 102 (Feature, before main) dropped for clarity
-        out['pr.yml'] = [pr(101, 'bug/B-0008', -60), pr(106, 'task/T-0500', -5),
+        out['pr.yml'] = [pr(101, 'worker/plan-measure', -60), pr(106, 'worker/late', -5),
                          pr(107, 'task/T-0341', -3), pr(103, 'bug/B-0007', -2),
                          pr(104, 'hotfix/db', -1)]
         return out
@@ -808,7 +882,7 @@ class TestTrunkJobStarvation(ReliefBase):
         # 106 (created after main, only queued jobs) goes first; 101 frees heavy runner h2
         self.assertEqual(self.cancels(gh), ['106', '101'])
         self.assertEqual(self.lines[0],
-                         'ci queue: cancelled queued pr run 106 (T-0500, Task) — created after '
+                         'ci queue: cancelled queued pr run 106 (worker/late, other) — created after '
                          'main run 900 at fffffffff but holds the heavy queue ahead of its queued '
                          'm3b-e2e (queued 25m)')
         self.assertIn('created before main run 900', self.lines[1])
@@ -1085,7 +1159,7 @@ class TestS1PrRelief(ReliefBase):
         # run 120, whose gate frees h2 — the S1 run's m6-e2e fits, stop
         self.assertEqual(self.cancels(gh), ['121', '120'])
         self.assertEqual(self.lines[-1],
-                         'ci queue: cancelled queued pr run 120 (T-0341, Feature) — created after '
+                         'ci queue: cancelled queued pr run 120 (T-0341, Task F-0001 rank 1) — created after '
                          'S1 PR run 850 (B-0007) at sha850 but holds the heavy queue ahead of its '
                          'queued m6-e2e (queued 8m)')
         self.assertIn('relief: exempt task/T-0500 — changes CI config', self.lines)
@@ -1257,7 +1331,7 @@ class TestCeiling(Base):
         q = self.queue(p, FakeGh(inflight=9, busy={'h1', 'h2'}), minutes=5)
         self.assertFalse(self.admit(q, 'pr:feat2', 'T-0341').admitted)   # the fit still holds
         self.assertEqual(self.lines, ['ci queue: T-0341 waits — heavy 1 free, needs 3 '
-                                      '(Feature, 1st in line)'])
+                                      '(Task F-0001 rank 1, 1st in line)'])
         self.lines.clear()
         q = self.queue(p, FakeGh(inflight=4), minutes=10)
         self.assertFalse(self.admit(q, 'batch', 'batch', kind='batch').admitted)
@@ -1298,10 +1372,10 @@ class TestCeiling(Base):
     def test_ceiling_applies_to_batch_starts_only_fit_to_batch_and_ordinary_prs(self):
         ceil, fit = ci_queue.ceiling_applies, ci_queue.fit_applies
         self.assertFalse(ceil({'kind': 'pr', 'prio': ci_queue.OTHER}))
-        self.assertFalse(ceil({'kind': 'pr', 'prio': ci_queue.FEATURE}))
+        self.assertFalse(ceil({'kind': 'pr', 'prio': ci_queue.RANKED}))
         self.assertTrue(ceil({'kind': 'batch', 'prio': ci_queue.OTHER}))
         self.assertTrue(fit({'kind': 'pr', 'prio': ci_queue.OTHER}))
-        self.assertTrue(fit({'kind': 'pr', 'prio': ci_queue.FEATURE}))
+        self.assertTrue(fit({'kind': 'pr', 'prio': ci_queue.RANKED}))
         self.assertTrue(fit({'kind': 'batch', 'prio': ci_queue.OTHER}))
         for ok in (ceil, fit):
             self.assertFalse(ok({'kind': 'pr', 'prio': ci_queue.S1}))
@@ -1366,7 +1440,7 @@ class TestModes(Base):
         d = self.admit(self.queue(p, FakeGh(busy={'h1', 'h2'})), 'pr:a', 'T-0500')
         self.assertTrue(d.admitted)
         self.assertEqual(self.lines, ['ci queue (dry-run): T-0500 would wait — heavy 1 free, '
-                                      'needs 3 (Task, 1st in line)'])
+                                      'needs 3 (Task unranked, 1st in line)'])
         self.assertFalse(os.path.exists(os.path.join(self.tmp, 'state', 'p', ci_queue.QUEUE_FILE)))
 
     def test_the_view_says_view_only_and_dry_run_only_for_mode_dry_run(self):
@@ -1400,7 +1474,7 @@ class TestModes(Base):
         self.admit(self.queue(p, busy), 'pr:b', 'T-0341')
         self.assertEqual(ci_queue.status_clause(p, now=self.t0, source=self.src(p, busy)),
                          'ci queue 2, head T-0341 waits 0 min — heavy 0 free, needs 3 '
-                         '(Feature, 1st in line)')
+                         '(Task F-0001 rank 1, 1st in line)')
 
     def view(self, p, gh):
         import types
@@ -1421,11 +1495,11 @@ class TestModes(Base):
         for gh, said in ((FakeGh(), 'would start'),
                          (FakeGh(busy={'h1', 'h2'}), 'waits: heavy 1 free, needs 3')):
             view = self.view(p, gh)
-            self.assertIn(f'1. T-0341 [pr, Feature, full run, since', view[2])
+            self.assertIn(f'1. T-0341 [pr, Task F-0001 rank 1, full run, since', view[2])
             self.assertTrue(view[2].endswith(said), view[2])
             row = ci_queue.status_clause(p, source=self.src(p, gh))
             self.assertEqual(row, f"ci queue 1, head T-0341 {said.replace('waits:', 'waits 0 min —')} "
-                                  f"(Feature, 1st in line)")
+                                  f"(Task F-0001 rank 1, 1st in line)")
             self.assertNotIn('as of tick', row)
 
     def write_mode(self, name, m):
@@ -1481,7 +1555,7 @@ class TestModes(Base):
             os.path.getmtime(ci_queue._path('p'))).strftime('%H:%M')
         self.assertEqual(ci_queue.status_clause(p, source=self.src(p, DeadGh())),
                          f'ci queue 1 (as of tick {stamp}), head T-0341 waits 0 min — heavy 0 free, '
-                         f'needs 3 (Feature, 1st in line)')
+                         f'needs 3 (Task F-0001 rank 1, 1st in line)')
 
     def test_the_row_and_the_queue_line_read_one_estimate(self):
         """The head was held when the estimate said 3; another start of the same tick measured
@@ -1498,10 +1572,10 @@ class TestModes(Base):
         data['expect']['ci.yml']['needs'] = {'heavy': 2, 'light': 1}
         ci_queue.save('p', data)
         row = ci_queue.status_clause(p, now=self.t0, source=self.src(p, busy))
-        self.assertIn('head T-0341 waits 0 min — heavy 0 free, needs 2 (Feature, 1st in line)', row)
+        self.assertIn('head T-0341 waits 0 min — heavy 0 free, needs 2 (Task F-0001 rank 1, 1st in line)', row)
         # the snapshot, when the host is unreadable, re-states the hold from the same estimate
         row = ci_queue.status_clause(p, now=self.t0, source=self.src(p, DeadGh()))
-        self.assertIn('head T-0341 waits 0 min — heavy 0 free, needs 2 (Feature, 1st in line)', row)
+        self.assertIn('head T-0341 waits 0 min — heavy 0 free, needs 2 (Task F-0001 rank 1, 1st in line)', row)
         q = self.queue(p, busy, minutes=1)
         self.assertFalse(self.admit(q, 'pr:a', 'T-0341').admitted)
         self.assertEqual(self.lines[-1].split(' — ', 1)[1].split(' (')[0],
@@ -1871,7 +1945,7 @@ class TestHeadStarvation(Base):
         p = fanout_product(queue={'estimate': {'heavy': 4, 'light': 0}, 'head_wait_max_min': 10_000})
         got = self.replay(p, 105)
         self.assertEqual(set(got.values()), {(False, False)})   # 105 minutes, nothing starts
-        self.assertIn('ci queue: T-0341 waits — heavy 1 free, needs 4 (Feature, 1st in line)',
+        self.assertIn('ci queue: T-0341 waits — heavy 1 free, needs 4 (Task F-0001 rank 1, 1st in line)',
                       self.lines)
 
     def test_the_head_is_admitted_past_head_wait_max_min_and_not_before(self):
@@ -1893,24 +1967,30 @@ class TestHeadStarvation(Base):
         self.assertTrue(self.admit(q, 'pr:task/T-0500', 'T-0500').admitted)
 
     def test_only_the_head_by_priority_is_guarded(self):
-        """An older S2 entry behind a younger Feature is not the head: it never jumps the line,
-        however long it has waited."""
+        """An older unranked entry (a branch with no record item) behind a younger ranked Task is
+        not the head: it never jumps the line, however long it has waited — and once it is the
+        head, the guard still admits it after ``head_wait_max_min`` at the head."""
         p = fanout_product(queue={'estimate': {'heavy': 4, 'light': 0}})
-        self.assertFalse(self.admit(self.queue(p, self.gh()), 'pr:old', 'B-0008').admitted)
+        self.assertFalse(self.admit(self.queue(p, self.gh()), 'pr:old', 'worker/plan-x').admitted)
         self.assertFalse(self.admit(self.queue(p, self.gh(), minutes=10), 'pr:feat',
                                     'T-0341').admitted)
-        q = self.queue(p, self.gh(), minutes=25)          # the S2 waited 25, the Feature 15
-        self.assertFalse(self.admit(q, 'pr:old', 'B-0008').admitted)
-        self.assertIn('(S2, 2nd in line)', self.lines[-1])
+        q = self.queue(p, self.gh(), minutes=25)          # the unranked one waited 25, the Task 15
+        self.assertFalse(self.admit(q, 'pr:old', 'worker/plan-x').admitted)
+        self.assertIn('(other, 2nd in line)', self.lines[-1])
         self.assertFalse(self.admit(q, 'pr:feat', 'T-0341').admitted)
         q = self.queue(p, self.gh(), minutes=31)
-        self.assertFalse(self.admit(q, 'pr:old', 'B-0008').admitted)
+        self.assertFalse(self.admit(q, 'pr:old', 'worker/plan-x').admitted)
         self.assertTrue(self.admit(q, 'pr:feat', 'T-0341').admitted)
         self.assertIn('ci queue: feat admitted after 21 min at the head (starvation guard)',
                       self.lines)
-        # the S2 is the head now, its clock started at 31: no cascade
+        # the unranked one is the head now, its clock started at 31: no cascade
         self.assertFalse(self.admit(self.queue(p, self.gh(), minutes=35), 'pr:old',
-                                    'B-0008').admitted)
+                                    'worker/plan-x').admitted)
+        # the guard stays the backstop for the lowest rank: 21 min at the head, admitted
+        self.assertTrue(self.admit(self.queue(p, self.gh(), minutes=52), 'pr:old',
+                                   'worker/plan-x').admitted)
+        self.assertIn('ci queue: old admitted after 21 min at the head (starvation guard)',
+                      self.lines)
 
     def test_a_queue_file_from_before_the_guard_counts_the_wait_in_line(self):
         """No head recorded yet (the file predates the guard): the head that has waited 105
@@ -1941,7 +2021,7 @@ class TestHeadStarvation(Base):
         now = self.t0 + datetime.timedelta(minutes=15)
         self.assertEqual(ci_queue.status_clause(p, now=now, source=src),
                          'ci queue 1, head T-0341 waits 15 min — heavy 1 free, needs 4 '
-                         '(Feature, 1st in line)')
+                         '(Task F-0001 rank 1, 1st in line)')
 
     def test_config(self):
         self.assertEqual(ci_queue.head_wait_max_min(fanout_product(
@@ -2102,7 +2182,7 @@ class TestStaleSweep(ReliefBase):
         gh, run = self.gh(self.runs())
         self.relieve(p, run)
         rec = ci_queue.load('p')['relief'][0]
-        self.assertEqual((rec['id'], rec['branch'], rec['sha']), (101, 'bug/B-0008', 'a' * 40))
+        self.assertEqual((rec['id'], rec['branch'], rec['sha']), (101, 'worker/plan-measure', 'a' * 40))
 
     def test_a_pr_start_records_its_head_sha_and_keeps_its_place_on_a_new_one(self):
         p = product()
@@ -2146,7 +2226,7 @@ class TestOwnCadence(ReliefBase):
         finally:
             held.close()
         self.assertEqual(self.cancels(gh, 'rerun'), ['102', '101'])
-        self.assertIn('ci queue: re-ran pr run 102 (T-0341, Feature) — main run 900 at '
+        self.assertIn('ci queue: re-ran pr run 102 (T-0341, Task F-0001 rank 1) — main run 900 at '
                       'fffffffff started after waiting 24m', self.lines)
 
     def test_one_pass_at_a_time_the_lane_pass_leaves_it_to_a_running_one(self):

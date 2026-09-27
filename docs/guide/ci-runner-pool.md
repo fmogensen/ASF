@@ -215,11 +215,15 @@ head* longer than `ci.queue.head_wait_max_min` minutes (default 20) is admitted 
 the host queues its jobs behind the current ones, where it holds its place. The entry behind it
 starts its own clock only then, so admissions never cascade. One line:
 `ci queue: task/T-0356 admitted after 21 min at the head (starvation guard)`. The status row names
-the head's wait in line: `head T-0356 waits 105 min — heavy 0 free, needs 4 (Feature, 1st in line)`.
+the head's wait in line: `head T-0356 waits 105 min — heavy 0 free, needs 4 (Task F-0113 rank 2, 1st in line)`.
 
 **Order.** S1 and hotfix items first, then trunk runs (every deploy waits on a green trunk), then
-PRs of customer-facing Features (the Feature says `customer_facing: true`, or the branch touches
-`customer_paths`), then everything else; oldest first within each. An entry nobody asked about for
+S2 items, then every start whose branch maps to a record item, in the record's own order — the one
+`asf next` hands work out in (a Task's run before a Feature's own document PR, then the Feature's
+Epic rank, its rank, its id) — then everything the record has no item for (`worker/*`,
+`worktree-m-*`, `cloud/*` without an item, batch, deploy); oldest first within each. The hold line
+names the rank: `(Task F-0113 rank 2, 3rd in line)`. The head guard stays the backstop for a low
+rank. An entry nobody asked about for
 30 minutes leaves the line.
 
 **Every hold is one line:**
@@ -252,8 +256,8 @@ off` turns it off. One line per cancel:
 cannot reorder runs the host already holds: a trunk run pushed after PR runs waits behind all of
 them. Each tick, when the newest trunk `push` run has been queued longer than
 `ci.queue.trunk_wait_min` minutes (default 20; the wait is UTC now minus the host's UTC
-`createdAt`), the lane cancels runs queued *ahead* of it and not yet started — PR runs of ordinary
-items first, then of customer-facing Features, then batch runs, newest first within each — until
+`createdAt`), the lane cancels runs queued *ahead* of it and not yet started — PR runs of branches
+the record has no item for first, then of the record's ranked items, then of S2 items, then batch runs, newest first within each — until
 the free runners plus what the cancelled runs would have taken cover the trunk run's expected jobs
 in every class. A run in progress, an S1 or a hotfix run is never cancelled. Each cancel is kept in
 the queue file and re-run (`gh run rerun`) through the queue at its original priority once the
