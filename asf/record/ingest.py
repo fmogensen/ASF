@@ -679,6 +679,28 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
             lines = ['fixer branch/PR open']
         settle(iid, 'bug', ev_obj, lines)
 
+    # ---- Deliveries: a lead of any type but Feature (a Feature already runs the ladder below)
+    # stages itself off its own plan document alone. No closing code here: the type's own rule,
+    # settled above, already chose `new_state[iid]` — a Bug is still `Resolved` when a commit
+    # names it. A delivery lead has no spec step, so `spec_dict` is `plan_dict` itself: with both
+    # arguments carrying the same `approved` bit, `feature_stage`'s spec gate
+    # (``not on_trunk and (plan approved or started)``) can never hold, and the ladder runs
+    # `card` -> `plan-draft` -> `plan-review rN` -> `plan-approved` off the plan alone.
+    for iid, rec in canonical.items():
+        meta = rec['meta']
+        if meta.get('type') == 'feature' or not meta.get('delivers'):
+            continue
+        _slug, fev = match_feature(meta, ev)
+        if fev is None:
+            stage_val[iid] = 'card'
+            continue
+        plan_review = fev.get('plan_review')
+        plan_approved = bool(plan_review and plan_review[1] == 'APPROVED') or bool(fev.get('plan_on_main'))
+        plan_dict = {'exists': bool(fev.get('plan')), 'approved': plan_approved,
+                     'review': plan_review[:2] if plan_review else None}
+        spec_dict = plan_dict
+        stage_val[iid] = evidence.feature_stage(spec_dict, plan_dict, [], False)
+
     # ---- Features: depend on their own children's derived state
     retired = set()
     for iid, rec in canonical.items():
