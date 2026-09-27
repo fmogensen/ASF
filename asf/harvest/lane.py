@@ -390,11 +390,25 @@ def _subjects(repo, trunk, branch):
                 cwd=repo).stdout.splitlines()
 
 
+def commits_name_items(repo, trunk, branch, ids):
+    """True when every commit subject on ``origin/<branch>`` not on ``origin/<trunk>`` names at
+    least one id of ``ids`` — a delivery's branch carries a commit per member."""
+    subjects = _subjects(repo, trunk, branch)
+    return bool(subjects) and all(any(githooks.names_item(s, i) for i in ids) for s in subjects)
+
+
 def commits_name_item(repo, trunk, branch, item):
     """True when every commit subject on ``origin/<branch>`` not on ``origin/<trunk>`` names
     ``item`` as a token."""
+    return commits_name_items(repo, trunk, branch, [item])
+
+
+def members_named(repo, trunk, branch, ids):
+    """``(named, missing)`` — the ids of ``ids`` that some commit subject on ``origin/<branch>``
+    names, and those none does, each in the order given."""
     subjects = _subjects(repo, trunk, branch)
-    return bool(subjects) and all(githooks.names_item(s, item) for s in subjects)
+    named = [i for i in ids if any(githooks.names_item(s, i) for s in subjects)]
+    return named, [i for i in ids if i not in named]
 
 
 #: the author and committer fields :func:`rebuild_branch` carries onto each rewritten commit
@@ -706,19 +720,47 @@ def merge_commits(repo, trunk, branch):
     return [l for l in r.stdout.splitlines() if l.strip()]
 
 
-def lane_refusal(repo, trunk, branch, item, conv=None):
+def delivery_members(items, item):
+    """The ids the card ``item`` delivers (its ``delivers:`` list), else ``()``."""
+    return tuple(((items or {}).get(item) or {}).get('delivers') or ())
+
+
+def item_footprint(items, item):
+    """The globs the branch of ``item`` may touch: its card's ``writes:``, plus every member's
+    when it leads a delivery — the union the foreign-red rule measures a delivery against."""
+    out = []
+    for i in (item, *delivery_members(items, item)):
+        out.extend(g for g in ((items or {}).get(i) or {}).get('writes') or () if g not in out)
+    return out
+
+
+def delivery_note(repo, trunk, branch, members):
+    """``: delivered <ids> — no commit for <ids>`` for a delivery branch — the ids some commit
+    named, and those none did — else ``''``. Read while ``origin/<branch>`` still exists
+    (PD6): the caller reads it before the branch is deleted."""
+    if not members:
+        return ''
+    named, missing = members_named(repo, trunk, branch, members)
+    note = f': delivered {", ".join(named) or "nothing"}'
+    return note + (f' — no commit for {", ".join(missing)}' if missing else '')
+
+
+def lane_refusal(repo, trunk, branch, item, conv=None, members=()):
     """``(kind, text)`` for a branch the lane refuses before any gate, or None: a merge commit
-    on it (B-0056), a commit not naming the item, or a line it adds to customer content that
-    carries a forbidden marker (:func:`asf.customer_content.refusal`, ``file:line`` each) — each
-    a correction back to its session."""
+    on it (B-0056), a commit not naming the item or one of a delivery's ``members``, or a line
+    it adds to customer content that carries a forbidden marker
+    (:func:`asf.customer_content.refusal`, ``file:line`` each) — each a correction back to its
+    session."""
     merges = merge_commits(repo, trunk, branch)
     if merges:
         return 'merge', (f'merge commit on a lane branch: {merges[0]} — a lane branch is straight '
                          f'commits on origin/{trunk}: rebase onto it, never merge origin/{branch} '
                          f'or origin/{trunk} into it; the factory publishes the rebased branch')
-    if not item or not commits_name_item(repo, trunk, branch, item):
+    ids = ([item] if item else []) + [m for m in members if m != item]
+    if not item or not commits_name_items(repo, trunk, branch, ids):
+        names = f'{item} or one of {", ".join(members)}' if members else item or 'an item id'
         return lifecycle.NAMING, (
-            f'commits do not name {item or "an item id"}: every commit subject on the branch '
+            f'commits do not name {names}: every commit subject on the branch '
             f'names its item — the lane could not reword them: reword them; the factory '
             f'publishes the rewritten branch')
     if conv is not None:
@@ -1205,6 +1247,9 @@ class Lane:
         ahead = H.sh(['git', 'rev-list', '--count', f'origin/{trunk}..origin/{b}'],
                      cwd=repo).stdout.strip()
         f['ahead'] = int(ahead) if ahead.isdigit() else 0
+        # PD6: read now, while origin/<trunk>..origin/<b> is still the branch's own diff — once
+        # it lands, the trunk catches up to it and the same read would find nothing
+        f['delivery_note'] = delivery_note(repo, trunk, b, delivery_members(self.items, item))
         if f['ahead'] == 0:
             landed, why = empty_branch_landed(repo, trunk, b, item, pr)
             if landed:
@@ -1229,7 +1274,8 @@ class Lane:
             f['review_waived'] = review_waived(conv, f['kind'], self.items, item, lines)
             f['review_required'] = not f['review_waived']
         if rec.get('state') in (None, PUSHED, BACK) and not f['foreign']:
-            f['refusal'] = lane_refusal(repo, trunk, b, item, conv)
+            f['refusal'] = lane_refusal(repo, trunk, b, item, conv,
+                                        members=delivery_members(self.items, item))
         f['customer'] = customer_content.touched(conv, f['files'])
         # a customer page is never landed unread: its diff needs a review whatever its class
         f['review_required'] = f['review_required'] or bool(f['customer'])
@@ -1713,18 +1759,20 @@ class Lane:
     def enter_merged(self, f, reason):
         b, prev, pr = f['branch'], f.get('prev') or {}, f.get('pr') or {}
         method = reason.split('=', 1)[-1]
+        # read in branch_facts (PD6): the trunk may have caught up to the branch by now
+        dnote = f.get('delivery_note') or ''
         if pr.get('state') == 'MERGED':
             sha = pr.get('merge_sha') or f"PR #{pr.get('number')}"
-            line = f"landed {b} → PR #{pr.get('number')} {sha} (merged)"
+            line = f"landed {b} → PR #{pr.get('number')} {sha} (merged){dnote}"
         elif prev.get('state') == MERGING and prev.get('sha') and f.get('merging_landed'):
             sha = prev['sha']
-            line = f'landed {b} → {sha} (the push reached {self.trunk})'
+            line = f'landed {b} → {sha} (the push reached {self.trunk}){dnote}'
         else:
             sha = self.trunk_sha
             extras = f.get('extras') or []
             note = f'; not its deliverable, dropped with the branch: {", ".join(extras)}' \
                 if extras else ''
-            line = f'landed {b}: already on {self.trunk} at {sha[:7]}{note}'
+            line = f'landed {b}: already on {self.trunk} at {sha[:7]}{note}{dnote}'
         if self.dry_run:
             self.out(f'DRY: would mark {b} landed — {line}')
             self.results[b] = 'dry'
@@ -1867,7 +1915,8 @@ class Lane:
             if not new:
                 if not why:  # every subject names its item now: nothing left to reword
                     f['head'] = old
-                    f['refusal'] = lane_refusal(self.repo, self.trunk, b, item, self.conv)
+                    f['refusal'] = lane_refusal(self.repo, self.trunk, b, item, self.conv,
+                                                members=delivery_members(self.items, item))
                     if f['refusal'] is None or f['refusal'][0] != lifecycle.NAMING:
                         self.out(f'reword {b}: every subject names {item} already at '
                                  f'{old[:9]} — nothing to push')
@@ -1901,7 +1950,8 @@ class Lane:
         H.sh(['git', 'update-ref', f'refs/remotes/origin/{b}', new], cwd=self.repo)
         self.out(f'reword {b}: {n} subjects, trees identical — pushed')
         f['head'] = new
-        f['refusal'] = lane_refusal(self.repo, self.trunk, b, item, self.conv)
+        f['refusal'] = lane_refusal(self.repo, self.trunk, b, item, self.conv,
+                                    members=delivery_members(self.items, item))
         if f.get('review'):
             f['review']['current'] = review_mod.is_current(self.repo, self.conv, f'origin/{b}',
                                                            f['review'], new)
@@ -2000,7 +2050,8 @@ class Lane:
                  + f' from {b}: {old[:9]} → {new[:9]}, {len(res["own"])} own commit(s) on '
                  f'origin/{self.trunk} ({self.trunk_sha_now()[:9]}); old tip kept as {archive}')
         f['head'] = new
-        f['refusal'] = lane_refusal(self.repo, self.trunk, b, f.get('item'), self.conv)
+        f['refusal'] = lane_refusal(self.repo, self.trunk, b, f.get('item'), self.conv,
+                                    members=delivery_members(self.items, f.get('item')))
         if f.get('review'):
             f['review']['current'] = review_mod.is_current(self.repo, self.conv, f'origin/{b}',
                                                            f['review'], new)
@@ -2489,12 +2540,11 @@ def send_back(lane, f, kind, text, files):
         lane.out(line)
         lane.results[b] = 'held'
         return 'held'
-    card = (lane.items or {}).get(f.get('item')) or {}
     lane.set(f, BACK, f'kind={kind}')
     res = hold_with_correction(lane.state_dir, b, run, kind, text, lane.out, files,
-                               card.get('writes') or (), f.get('files') or (), lane.conv,
-                               own=True, read=gate_reader(lane.repo, b), head=f.get('head'),
-                               main=lane.trunk)
+                               item_footprint(lane.items, f.get('item')), f.get('files') or (),
+                               lane.conv, own=True, read=gate_reader(lane.repo, b),
+                               head=f.get('head'), main=lane.trunk)
     if res != 'held':  # foreign / timed-out: no one's fault after all
         wait(lane, f, res)
     lane.results[b] = res
@@ -2724,8 +2774,9 @@ def push_set(lane, landing_set, sha, final=False):
         rec = lane.record(f, MERGED, 'method=ff', sha=sha, method='ff')
         lane.write(f, rec, harvested=sha, correction=None)
         f['prev'] = rec
+        # read in branch_facts (PD6): the trunk has since caught up to this push
         lane.delete_branch(f)
-        lane.out(f"landed {f['branch']} → {sha}")
+        lane.out(f"landed {f['branch']} → {sha}{f.get('delivery_note') or ''}")
         lane.results[f['branch']] = 'landed'
     return 'ok'
 
@@ -2852,7 +2903,7 @@ def merge_prs(lane, ready):
         rec = lane.record(f, MERGED, f'method={how}', sha=sha, method=how)
         lane.write(f, rec, harvested=sha, correction=None)
         f['prev'] = rec
-        lane.out(f'landed {b} → PR #{number} {sha}')
+        lane.out(f'landed {b} → PR #{number} {sha}{f.get("delivery_note") or ""}')
         if getattr(lane, 'auto', False):
             lane.out(auto_merge_line(f, number, sha))
         lane.results[b] = 'landed'
