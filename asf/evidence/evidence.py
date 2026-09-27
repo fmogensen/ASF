@@ -413,6 +413,12 @@ def _newest_with_job(workflow, job, branch, product=None):
     return None
 
 
+def _prod_mode(product):
+    """``deploy_sha.prod.mode`` as the deploy pass reads it (``auto`` | ``manual``)."""
+    from asf.harvest import deploy  # the deploy pass owns the reading of its own config
+    return deploy.mode(product, 'prod')
+
+
 def discover(product=None, checked_file=None):
     """The raw evidence `backlog.py ingest` needs, gathered fresh from the product repo and gh."""
     product = product or env.load_product()
@@ -695,6 +701,10 @@ def discover(product=None, checked_file=None):
         "features": features,
         "stories": stories,
         "prod_sha": prod["headSha"] if prod else None,
+        # the product deploys prod (a None `prod_sha` then means unknown, never "trunk is prod"),
+        # and who dispatches it: `auto` (ASF) needs no operator tick in checked.txt
+        "prod_deploys": bool(deploy_workflow),
+        "prod_mode": _prod_mode(product),
         "dev_sha": dev["headSha"] if dev else None,
         "checked": checked,
         "main_sha": main_sha or None,

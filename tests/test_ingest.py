@@ -131,6 +131,80 @@ class ProductionIsTheProductsOwn(unittest.TestCase):
         self.assertEqual(meta['stage'], 'landed')
 
 
+class AutoDeployIsTheProdTick(unittest.TestCase):
+    """`deploy_sha.prod.mode: auto` — ASF dispatches prod itself, so nobody ticks a PR into
+    `checked.txt`. A Task is in prod when its landing sha is contained in the sha recorded as
+    deployed (the newest successful run of the prod workflow); a deploy that is configured but
+    unknown never counts. `manual` keeps the operator's tick (S-0218: every Task Closed, T-0366's
+    merge inside the deployed sha, and the Story held at Resolved)."""
+
+    PROD = 'c' * 40
+    MERGE = 'a' * 40
+
+    def setUp(self):
+        self.root = make_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        write(self.root, 'F-0119', 'feature', 'Conversations', 'features')
+        write(self.root, 'S-0218', 'story', 'Queue preempts', 'stories', parent='F-0119')
+        write(self.root, 'T-0366', 'task', 'The record', 'tasks', parent='F-0119',
+              typed_lines=['stories: [S-0218]'])
+
+    def run_ingest(self, ev, deployed=()):
+        deployed = set(deployed)
+        with mock.patch.object(ingest.evidence, 'load', return_value=ev), \
+             mock.patch.object(ingest.evidence, 'ancestor_of',
+                               side_effect=lambda sha, base, product=None:
+                               bool(sha and base) and (sha, base) in deployed):
+            return ingest.cmd_ingest(types.SimpleNamespace(fresh=False), self.root)
+
+    def ev(self, mode='auto', prod_sha=PROD, checked=()):
+        # T-0366 lands by its merge fact alone — no plan row, so no task evidence of its own
+        return dict(EMPTY_EV, ci=True, prod_sha=prod_sha, prod_deploys=True, prod_mode=mode,
+                    checked=set(checked),
+                    ids={'T-0366': {'branches': [], 'open_prs': [], 'commit': self.MERGE,
+                                    'pr': 869, 'green': True}})
+
+    def state(self, folder, iid):
+        return read_meta(self.root, folder, iid)[0]['state']
+
+    def test_a_merge_inside_the_deployed_sha_closes_the_story_and_its_feature(self):
+        self.assertEqual(self.run_ingest(self.ev(), deployed={(self.MERGE, self.PROD)}), 0)
+        self.assertEqual(self.state('tasks', 'T-0366'), 'Closed')
+        self.assertEqual(self.state('stories', 'S-0218'), 'Closed')
+        self.assertEqual(self.state('features', 'F-0119'), 'Closed')
+
+    def test_a_merge_not_yet_deployed_stays_resolved(self):
+        self.assertEqual(self.run_ingest(self.ev(), deployed=()), 0)
+        self.assertEqual(self.state('tasks', 'T-0366'), 'Closed')
+        self.assertEqual(self.state('stories', 'S-0218'), 'Resolved')
+        self.assertEqual(self.state('features', 'F-0119'), 'Resolved')
+
+    def test_an_unknown_deploy_stays_resolved(self):
+        # the product deploys, but no successful prod run is known: never "trunk is prod"
+        self.assertEqual(self.run_ingest(self.ev(prod_sha=None),
+                                         deployed={(self.MERGE, self.PROD)}), 0)
+        self.assertEqual(self.state('stories', 'S-0218'), 'Resolved')
+        self.assertEqual(self.state('features', 'F-0119'), 'Resolved')
+
+    def test_manual_mode_still_waits_for_the_operators_tick(self):
+        self.assertEqual(self.run_ingest(self.ev(mode='manual'),
+                                         deployed={(self.MERGE, self.PROD)}), 0)
+        self.assertEqual(self.state('stories', 'S-0218'), 'Resolved')
+
+    def test_manual_mode_closes_on_the_tick(self):
+        self.assertEqual(self.run_ingest(self.ev(mode='manual', checked={869}),
+                                         deployed={(self.MERGE, self.PROD)}), 0)
+        self.assertEqual(self.state('stories', 'S-0218'), 'Closed')
+
+    def test_a_feature_with_no_tasks_closes_when_its_commit_is_deployed(self):
+        write(self.root, 'F-0200', 'feature', 'A one-commit feature', 'features')
+        ev = dict(EMPTY_EV, ci=True, prod_sha=self.PROD, prod_deploys=True, prod_mode='auto',
+                  ids={'F-0200': {'branches': [], 'open_prs': [], 'commit': 'd' * 40,
+                                  'pr': None, 'green': True}})
+        self.assertEqual(self.run_ingest(ev, deployed={('d' * 40, self.PROD)}), 0)
+        self.assertEqual(self.state('features', 'F-0200'), 'Closed')
+
+
 class LandingOutranksThePlan(unittest.TestCase):
     """B-0074: a Task listed in its plan's table stayed Active although its commit was on main
     with a green run — the plan's `branch … exists` line won. A landing outranks every source."""
