@@ -120,6 +120,37 @@ class RegistryFoldInvariants(unittest.TestCase):
         # the correction is answered: a run on the item started after it
         self.assertEqual(lc.corrections(path), {})
 
+    def test_by_branch_is_the_latest_launch_when_a_job_name_comes_back(self):
+        """B-0148, a product's T-0360/T-0097: correct-t-0360 ran, then adjudicate-t-0360, then
+        correct-t-0360 again ×30. The fold keys runs by job, so the adjudicate run — its job
+        first seen later — stayed the owner: the lane wrote every hold on it, the loop guard
+        counted adjudicate launches (none) and the finding never climbed (an adjudicate run
+        rules, it does not answer). The owner is the latest launch, whatever its job name."""
+        lines = [{'job': 'correct-t-1', 'pid': 1, 'started': 't1', 'branch': 'cloud/T-1', 'kind': 'correct'},
+                 {'job': 'correct-t-1', 'ended': 't2', 'end_reason': 'finished'},
+                 {'job': 'adjudicate-t-1', 'pid': 2, 'started': 't3', 'branch': 'cloud/T-1', 'kind': 'adjudicate'},
+                 {'job': 'adjudicate-t-1', 'ended': 't4', 'end_reason': 'finished'},
+                 {'job': 'correct-t-1', 'pid': 3, 'started': 't5', 'branch': 'cloud/T-1', 'kind': 'correct'}]
+        run = lc.by_branch(self._write(lines))['cloud/T-1']
+        self.assertEqual((run['job'], run['pid']), ('correct-t-1', 3))
+
+    def test_the_loop_guard_parks_correct_launches_after_an_adjudicate_ruling(self):
+        """B-0148: three correct sessions on one head after an adjudicate run park the item on
+        the lane's next review hold — the hold lands on the branch's latest run."""
+        lines = [{'job': 'correct-t-1', 'pid': 1, 'started': 't1', 'branch': 'cloud/T-1',
+                  'item': 'T-1', 'kind': 'correct', 'launch_head': 'a' * 40},
+                 {'job': 'adjudicate-t-1', 'pid': 2, 'started': 't2', 'branch': 'cloud/T-1',
+                  'item': 'T-1', 'kind': 'adjudicate', 'launch_head': 'a' * 40}]
+        for n in (3, 4, 5):
+            lines += [{'job': 'correct-t-1', 'pid': n, 'started': f't{n}', 'branch': 'cloud/T-1',
+                       'item': 'T-1', 'kind': 'correct', 'launch_head': 'b' * 40},
+                      {'job': 'correct-t-1', 'ended': f'e{n}', 'end_reason': 'finished'}]
+        path = self._write(lines)
+        run = lc.by_branch(path)['cloud/T-1']
+        fields, line = lc.hold(path, run, lc.REVIEW, 'r.md reads changes requested', 'now',
+                               head='b' * 40)
+        self.assertIs(fields['correction'].get('parked'), True, line)
+
     def test_by_worktree_is_the_last_run_that_recorded_the_directory(self):
         lines = [{'job': 'fix-b-0001', 'pid': 1, 'started': 't1', 'worktree': '/wt/fix-b-0001'},
                  {'job': 'fix-b-0001', 'ended': 't2', 'end_reason': 'failed: not pushed: 2 uncommitted file(s), 0 unpushed commit(s)'},

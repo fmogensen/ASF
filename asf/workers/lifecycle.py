@@ -396,14 +396,17 @@ def note_spent_windows(state_root=None, alive=None, now=None):
 
 
 def by_branch(path):
-    """``{branch: the latest run on it}`` across jobs, in file order (the last launch naming a
-    branch owns it): a branch held and sent back runs under a new job name, and it is that run
-    harvest reads."""
+    """``{branch: the latest run on it}`` across jobs (the last launch naming a branch owns it):
+    a branch held and sent back runs under a new job name, and it is that run harvest reads.
+    The latest by ``started``, not by job: the fold keys runs by job, so a job name that comes
+    back (``correct-t-0360`` after ``adjudicate-t-0360``) would otherwise leave the older job
+    the owner (B-0148). A run with no ``started`` falls back to fold order."""
     out = {}
     for rs in runs(path).values():
         for r in rs:
-            if r.get('branch'):
-                out[r['branch']] = r
+            b = r.get('branch')
+            if b and (b not in out or (r.get('started') or '') >= (out[b].get('started') or '')):
+                out[b] = r
     return out
 
 
