@@ -61,16 +61,16 @@ class TableTests(unittest.TestCase):
         self.assertEqual(len(faults), 1)
         self.assertIn('line 3', faults[0])
 
-    def test_invalid_result_word_is_unfilled_not_a_pass(self):
+    def test_invalid_result_word_is_a_fault_naming_its_line(self):
         text = (
             '| check | result | evidence |\n'
             '| --- | --- | --- |\n'
             '| the check | approved | ran it |\n'
         )
         checks, faults = reviews.parse(text)
-        self.assertEqual(faults, [])
-        self.assertEqual(len(checks), 1)
-        self.assertNotEqual(checks[0].result, reviews.PASS)
+        self.assertEqual(checks, [])
+        self.assertEqual(len(faults), 1)
+        self.assertIn('line 3', faults[0])
 
     def test_skeleton_placeholder_is_unfilled_not_a_pass(self):
         text = (

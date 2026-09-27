@@ -87,10 +87,10 @@ def parse(text):
     stripped of backticks and `*`, are one of `HEADERS`, and whose next line is a separator —
     otherwise no table is found there, no rows, no fault. Rows run until the first line that
     does not start with `|`; blocks are numbered from 1 in order of appearance. A row whose cell
-    count is not 3 is a fault naming its line, not a row. A result cell not in `RESULTS` — still
-    carrying the skeleton (`<pass|fail>`), empty, or any other word — makes the row's result
-    `'unfilled'` rather than a fault: it is a row that has not yet been answered. An empty
-    evidence cell makes an otherwise-answered row `fail`.
+    count is not 3 is a fault naming its line, not a row. A result cell not in `RESULTS` is a
+    fault naming its line — except a cell still carrying the skeleton (`<pass|fail>`, or holding
+    any `|` or `<`), which is reported as `'unfilled'` rather than a fault: it is a row that has
+    not yet been answered. An empty evidence cell makes an otherwise-answered row `fail`.
     """
     lines = (text or '').splitlines()
     checks, faults = [], []
@@ -108,11 +108,15 @@ def parse(text):
                     else:
                         name, result, evidence = row
                         r = result.strip().lower()
-                        res = r if r in RESULTS else _UNFILLED
-                        if res != _UNFILLED and not evidence.strip():
-                            res = FAIL
-                        checks.append(Check(name=name, result=res, evidence=evidence,
-                                            block=block, line=i + 1))
+                        if r in RESULTS:
+                            res = FAIL if not evidence.strip() else r
+                            checks.append(Check(name=name, result=res, evidence=evidence,
+                                                block=block, line=i + 1))
+                        elif '<' in result or '|' in result:
+                            checks.append(Check(name=name, result=_UNFILLED, evidence=evidence,
+                                                block=block, line=i + 1))
+                        else:
+                            faults.append(f'line {i + 1}: invalid result "{result}"')
                     i += 1
                 continue
         i += 1
