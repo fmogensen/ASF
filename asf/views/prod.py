@@ -11,6 +11,8 @@ import json
 import re
 import subprocess
 
+from asf.evidence import sources
+
 STRIP_PREFIX = re.compile(r'^[a-z]+(\([^)]*\))?[!]?:\s*')
 
 
@@ -22,37 +24,21 @@ def _sh(cmd, cwd=None, timeout=60):
         return ''
 
 
-def _gh_json(args, repo_slug, timeout=60):
-    out = _sh(['gh'] + args, timeout=timeout)
-    try:
-        return json.loads(out) if out else []
-    except json.JSONDecodeError:
-        return []
-
-
 def deploy_configured(product):
     """False for ``deploy_sha: none`` (or no ``deploy_sha`` at all): nothing is deployed."""
     d = product.deploy_sha
     return isinstance(d, dict) and bool(d)
 
 
-def _deploy_sha(product, kind):
+def _deploy_sha(product, kind, deploy=None):
     """(sha, iso_time) for a ``deploy_sha.<kind>`` rule from the product config, or (None, None)."""
     if not deploy_configured(product):
         return None, None
     cfg = product.deploy_sha.get(kind) or {}
     source = cfg.get('source')
     if source == 'github-deployments':
-        workflow = cfg.get('workflow')
-        args = ['run', 'list', '-R', product.repo_slug, '--workflow', workflow, '--limit', '15',
-                '--json', 'headSha,conclusion,updatedAt,headBranch']
-        if cfg.get('branch'):
-            args += ['--branch', cfg['branch']]
-        runs = _gh_json(args, product.repo_slug)
-        for r in runs:
-            if r.get('conclusion') == 'success':
-                return r.get('headSha'), r.get('updatedAt')
-        return None, None
+        deploy = deploy if deploy is not None else sources.for_product(product).deploy
+        return deploy.deployment(kind)
     if source == 'vercel':
         out = _sh(['vercel', 'ls', cfg.get('project', ''), '--prod', '--scope', cfg.get('scope', ''),
                    '--json'])

@@ -57,6 +57,8 @@ import json
 import os
 import subprocess
 
+from asf.evidence import sources
+
 DEFAULT_INPUT = 'sha'
 ENVS = ('dev', 'prod')
 #: the modes each environment may take; a named target takes TARGET_MODES
@@ -399,24 +401,6 @@ def _ahead(product, base, sha, sh):
                                base, sha]) is not None
 
 
-def _dev_job_run(product, ci_runs, sh, limit=5):
-    """The run whose trunk sha a ``ci`` dev runs: the newest completed ``ci.workflow`` run whose
-    ``ci.dev_job`` succeeded (the newest green run when no ``dev_job`` is named)."""
-    job = _conv(product).get('ci_dev_job')
-    done = [r for r in ci_runs if r.get('status') == 'completed']
-    if not job:
-        return next((r for r in done if r.get('conclusion') == 'success'), None)
-    for r in done[:limit]:
-        if r.get('conclusion') == 'success':
-            return r  # a green run is green in every job, its dev job included
-        view = _json(sh(['gh', 'run', 'view', str(r.get('databaseId')), '-R', product.repo_slug,
-                         '--json', 'jobs']), dict) or {}
-        if any(j.get('name') == job and j.get('conclusion') == 'success'
-               for j in view.get('jobs') or []):
-            return r
-    return None
-
-
 def _names(v):
     if isinstance(v, str):
         v = v.split()
@@ -586,12 +570,13 @@ def _set_behind(product, f, sh):
                          else _behind(product, f['deployed'], sh, f['paths']))
 
 
-def facts(product, sh=_sh, now=None, env='prod', _ci=None):
+def facts(product, sh=_sh, now=None, env='prod', _ci=None, deploy=None):
     """The facts of one environment, read-only: ``deployed`` (the sha it runs), ``running`` (a
     run of its workflow not yet completed), ``failed`` (the candidate's own failed deploy run
     id), ``candidate``, ``main``, ``behind``, ``age`` (since ``deployed`` landed), ``why`` (why
     there is no candidate, beyond a red trunk) and ``error`` (what could not be read)."""
     now = now or datetime.datetime.now(datetime.timezone.utc)
+    deploy = deploy if deploy is not None else sources.for_product(product).deploy
     trunk = product.main
     f = _blank(product, env)
     ci = _ci if _ci is not None else _runs(product, f['ci'], sh, branch=trunk)
@@ -600,8 +585,7 @@ def facts(product, sh=_sh, now=None, env='prod', _ci=None):
         return _done(f)
     f['main'] = sh(['git', '-C', product.repo_dir, 'rev-parse', f'origin/{trunk}'])
     if env == 'dev' and f['mode'] == 'ci':  # the product's CI deploys it; observe only
-        run = _dev_job_run(product, ci, sh) or {}
-        f['deployed'], f['at'] = run.get('headSha'), run.get('updatedAt')
+        f['deployed'], f['at'] = deploy.deployment(env)
         f['age'] = _age(f['at'], now)
         _set_behind(product, f, sh)
         return _done(f)
@@ -619,8 +603,7 @@ def facts(product, sh=_sh, now=None, env='prod', _ci=None):
         if not f['deployed'] and got[1] is not None:  # a CLI deploy: no commit sha on it
             f['deployed'] = recorded_sha(product, env, got[1])
     else:
-        last = next((r for r in runs if r.get('conclusion') == 'success'), {})
-        f['deployed'], f['at'] = last.get('headSha'), last.get('updatedAt')
+        f['deployed'], f['at'] = deploy.deployment(env)
         f['age'] = _age(f['at'], now)
     live = next((r for r in runs if r.get('status') != 'completed'), None)
     if live:
@@ -632,7 +615,7 @@ def facts(product, sh=_sh, now=None, env='prod', _ci=None):
         if not env_applies(product, 'dev'):
             f['why'] = f'{key(env)}.from is dev, but dev is not managed (deploy_sha.dev.mode)'
             return _done(f)
-        dev = facts(product, sh=sh, now=now, env='dev', _ci=ci)
+        dev = facts(product, sh=sh, now=now, env='dev', _ci=ci, deploy=deploy)
         if dev['error']:
             f['error'] = dev['error']
             return _done(f)

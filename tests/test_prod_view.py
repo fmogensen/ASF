@@ -42,6 +42,23 @@ def _gap_sh(cmd, cwd=None, timeout=60):
     return 'abc123456'
 
 
+class GithubDeploymentsProvider(unittest.TestCase):
+    """D16 — the ``github-deployments`` branch reads through one ``DeploySource``, not its own
+    ``gh run list``."""
+    def test_the_github_deployments_branch_reads_through_the_deploy_source(self):
+        product = types.SimpleNamespace(
+            deploy_sha={'prod': {'source': 'github-deployments', 'workflow': 'deploy.yml'}})
+        answer = ('aaa1111111111111111111111111111111111111', '2026-09-23T10:00:00Z')
+        deploy_source = types.SimpleNamespace(deployment=lambda kind: answer)
+        self.assertEqual(prod._deploy_sha(product, 'prod', deploy=deploy_source), answer)
+
+    def test_not_configured_never_reaches_the_deploy_source(self):
+        product = types.SimpleNamespace(deploy_sha=None)
+        deploy_source = types.SimpleNamespace(
+            deployment=lambda kind: (_ for _ in ()).throw(AssertionError('should not be read')))
+        self.assertEqual(prod._deploy_sha(product, 'prod', deploy=deploy_source), (None, None))
+
+
 class ProdCustomerPathsList(unittest.TestCase):
     def test_prod_render_with_list_customer_paths(self):
         with mock.patch.object(prod, '_sh', _sh), \
