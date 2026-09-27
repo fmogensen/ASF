@@ -57,6 +57,7 @@ prints ``(S1: passes host load hold)`` on its ``launched`` line.
 
 Each launch appends a ``launch`` event (item, job, model, brief kind) to ``metrics/events``.
 """
+import copy
 import importlib
 import inspect
 import os
@@ -584,7 +585,7 @@ def overlay_blockers(items, fresh):
         if not isinstance(f, dict) or f.get('blockedBy') == v.get('blockedBy'):
             continue
         if out is items:
-            out = dict(items)
+            out = copy.copy(items)  # a copy of the same kind: the retired cards come along
         out[iid] = dict(v, blockedBy=f.get('blockedBy') if 'blockedBy' in f else [])
     return out
 

@@ -181,6 +181,21 @@ class AnAfterOnARemovedButLandedTaskIsLanded(unittest.TestCase):
         self.assertFalse(rows.items_of(items)['T-0002'].get('blocked'))
         self.assertEqual(self.by(items)['T-0002'].action, 'would launch')
 
+    def test_it_launches_through_the_ticks_overlays(self):
+        # the tick's launch reads the index, then overlays origin's blockedBy and the plan's
+        # order — each a copy of the map, which must keep the retired cards (a product's tick
+        # still printed "WAITS ON T-0360" after `asf next` stopped)
+        from asf.record import plan_order
+        from asf.tick import step_wave
+        from asf.views import index_reader
+        items, _generated = index_reader.load(self.written(self.index(delivery=True)))
+        fresh = {'T-0003': {'blockedBy': ['T-0001']}}
+        items = step_wave.overlay_blockers(items, fresh)
+        items['T-0002'] = dict(items['T-0002'], links={'plan': 'plan.md'})
+        items = plan_order.overlay(items, lambda _path: '# plan\n')
+        by = self.by(items)
+        self.assertEqual((by['T-0002'].kind, by['T-0002'].action), (rows.DELIVERY_CODE, rows.LAUNCH))
+
     def written(self, idx):
         root = tempfile.mkdtemp(prefix='feeder_retired_')
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)

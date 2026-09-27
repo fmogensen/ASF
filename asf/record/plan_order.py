@@ -17,6 +17,7 @@ Three callers: the minter (new cards), :func:`backfill` (open cards minted befor
 tick's record step, idempotent, written through the parser), and :func:`overlay` (the wave's
 defence in depth: a Task whose card lacks ``after:`` still waits on its plan's predecessors).
 """
+import copy
 import re
 
 TASK_REF_RE = re.compile(r'\b(?:Tasks?|T)\s*(\d+)((?:\s*(?:,|and|&|or|\+)\s*(?:Task\s*)?\d+)*)',
@@ -305,7 +306,7 @@ def overlay(items, read_plan):
             plans.setdefault(path, []).append(i)
     if not plans:
         return items
-    items = dict(items)
+    items = copy.copy(items)  # a copy of the same kind: the index reader's retired cards come along
     for path, ids in plans.items():
         try:
             text = read_plan(path)
