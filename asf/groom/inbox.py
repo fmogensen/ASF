@@ -272,44 +272,58 @@ def question_lines(root, intake_dir=None):
 
 
 _CLAUSES = (
-    (re.compile(r'^feature$', re.IGNORECASE), lambda m: ('type', 'feature')),
-    (re.compile(r'^bug\s+(.+)$', re.IGNORECASE), lambda m: ('signature', m.group(1).strip())),
-    (re.compile(r'^parent\s+([A-Z]-\d{4})$', re.IGNORECASE), lambda m: ('parent', m.group(1).upper())),
-    (re.compile(r'^(S[123])$', re.IGNORECASE), lambda m: ('severity', m.group(1).upper())),
+    (re.compile(r'^feature$', re.IGNORECASE), lambda m: ('type', 'feature'), 'feature'),
+    (re.compile(r'^bug\s+(.+)$', re.IGNORECASE), lambda m: ('signature', m.group(1).strip()), 'bug <signature>'),
+    (re.compile(r'^parent\s+([A-Z]-\d{4})$', re.IGNORECASE), lambda m: ('parent', m.group(1).upper()), 'parent <id>'),
+    (re.compile(r'^(S[123])$', re.IGNORECASE), lambda m: ('severity', m.group(1).upper()), 'S1|S2|S3'),
 )
 _CLOSE_RE = re.compile(r'^(no|close)$', re.IGNORECASE)
 
+#: The whole grammar, in the words the refusal reason quotes back — `close` first (it is
+#: `_CLOSE_RE`, matched on the whole answer, before the `;`-split below), then `_CLAUSES`' own
+#: forms, read off `_CLAUSES` rather than re-typed so a form added there is a form named here.
+_CLAUSE_FORMS = ('close',) + tuple(form for _rx, _make, form in _CLAUSES)
+
 
 def parse_answer(answer):
-    """An inbox answer: ``'close'``, or ``{header: value}`` from ``;``-separated clauses —
-    ``feature``, ``bug <signature>``, ``parent <id>``, ``S1|S2|S3`` — or None when any clause is
-    outside that grammar (the line then changes nothing)."""
+    """An inbox answer: ``('close', None)``, ``({header: value}, None)`` from ``;``-separated
+    clauses — ``feature``, ``bug <signature>``, ``parent <id>``, ``S1|S2|S3`` — or
+    ``(None, reason)`` when a clause is outside that grammar (the line then changes nothing).
+    ``reason`` names the first clause that failed and the grammar it did not match; a clause
+    carrying an em dash (or its ASCII stand-in, ``' - '``) gets the words that make the mistake
+    fixable — a trailing ``— why`` is the one shape this grammar has always dropped."""
     a = answer.strip()
     if _CLOSE_RE.match(a):
-        return 'close'
+        return 'close', None
     headers = {}
     for clause in (c.strip() for c in a.split(';')):
-        for rx, make in _CLAUSES:
+        for rx, make, _form in _CLAUSES:
             m = rx.match(clause)
             if m:
                 k, v = make(m)
                 headers[k] = v
                 break
         else:
-            return None
-    return headers or None
+            why = ': an answer carries no why' if '—' in clause or ' - ' in clause else ''
+            reason = (f'"{clause}" is not a clause{why}. Clauses are '
+                      f'{" | ".join(_CLAUSE_FORMS)}, separated by `;`.')
+            return None, reason
+    return (headers or None), None
 
 
 def apply_answer(root, name, answer, date, who, intake_dir=None):
     """Apply one answer to ``<intake_dir>/<name>``: its ``## Question`` block goes, the answer's
     header lines go in under the title (replacing one of the same key), and the next intake
     reads the card again — a card or, still unsettled, a fresh question. ``close`` moves it to
-    ``done/`` unminted. Returns True when the card changed."""
+    ``done/`` unminted. Returns ``(applied, reason)`` — the pair is the contract, so a caller
+    cannot read the tuple's truthiness by accident: ``applied`` is the bool this returned before,
+    and ``reason`` is ``None`` when it applied or the message :func:`parse_answer` gave when it
+    did not."""
     d = os.path.join(root, intake_dir or DEFAULT_INTAKE_DIR)
     path = os.path.join(d, name)
-    parsed = parse_answer(answer)
+    parsed, reason = parse_answer(answer)
     if parsed is None or os.path.basename(name) != name or not os.path.isfile(path):
-        return False
+        return False, reason
     with open(path, encoding='utf-8') as f:
         text = f.read()
     body, _question = _split_question(text)
@@ -318,7 +332,7 @@ def apply_answer(root, name, answer, date, who, intake_dir=None):
         with open(os.path.join(d, 'done', name), 'w', encoding='utf-8') as f:
             f.write(f"→ closed (groom {date}, {who})\n\n{text}")
         os.remove(path)
-        return True
+        return True, None
     lines = body.split('\n')
     idx = next((i for i, l in enumerate(lines) if l.strip()), 0)
     keep = [l for l in lines[idx + 1:]
@@ -326,4 +340,4 @@ def apply_answer(root, name, answer, date, who, intake_dir=None):
     new = lines[:idx + 1] + [f'{k}: {v}' for k, v in parsed.items()] + keep
     with open(path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(new))
-    return True
+    return True, None

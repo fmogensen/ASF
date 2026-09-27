@@ -106,6 +106,76 @@ class InboxParsingTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
 
 
+class InboxAnswerGrammarTests(unittest.TestCase):
+    """T-0298: a refused `inbox:` answer is a line, not a silence."""
+
+    def test_feature_is_unchanged(self):
+        self.assertEqual(inbox_mod.parse_answer('feature'), ({'type': 'feature'}, None))
+
+    def test_close_is_unchanged(self):
+        self.assertEqual(inbox_mod.parse_answer('close'), ('close', None))
+
+    def test_a_trailing_why_names_the_clause_and_the_missing_why(self):
+        parsed, reason = inbox_mod.parse_answer(
+            'parent E-0001 — because the card changes the feeder')
+        self.assertIsNone(parsed)
+        self.assertIn('parent E-0001 — because the card changes the feeder', reason)
+        self.assertIn('an answer carries no why', reason)
+
+    def test_the_ascii_dash_is_the_same_mistake(self):
+        parsed, reason = inbox_mod.parse_answer(
+            'parent E-0001 - because the card changes the feeder')
+        self.assertIsNone(parsed)
+        self.assertIn('an answer carries no why', reason)
+
+    def test_a_clause_outside_the_grammar_names_the_five_forms(self):
+        parsed, reason = inbox_mod.parse_answer('nonsense')
+        self.assertIsNone(parsed)
+        self.assertNotIn('an answer carries no why', reason)
+        self.assertIn('"nonsense" is not a clause', reason)
+        self.assertIn('close | feature | bug <signature> | parent <id> | S1|S2|S3', reason)
+
+    def test_a_bad_inbox_answer_and_a_good_one_on_one_page(self):
+        root = make_repo()
+        try:
+            for name, title in (('billing-tiers.md', 'Billing tiers'),
+                                 ('onboarding.md', 'Onboarding flow')):
+                with open(os.path.join(root, 'inbox', name), 'w', encoding='utf-8') as f:
+                    f.write(f"# {title}\n\n## Question\nFeature or bug?\n")
+            groom_path = os.path.join(root, 'groom', '2026-09-20.md')
+            with open(groom_path, 'w', encoding='utf-8') as f:
+                f.write(
+                    "# Groom 2026-09-20\n\n## Inbox cards with a question\n"
+                    "- [ ] inbox:billing-tiers.md Billing tiers — Feature or bug? "
+                    "→ answer: parent E-0001 — because the card changes the feeder\n"
+                    "- [ ] inbox:onboarding.md Onboarding flow — Feature or bug? "
+                    "→ answer: feature\n"
+                )
+            events = []
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                applied = groom.apply_groom_answers(
+                    root, {}, groom_path, '2026-09-21',
+                    event=lambda kind, **kw: events.append((kind, kw)))
+            self.assertEqual(applied, 1)
+            self.assertEqual([e[1]['item'] for e in events], ['inbox:onboarding.md'])
+
+            refusal_lines = [l for l in out.getvalue().split('\n')
+                             if l.startswith('groom: answer not applied')]
+            self.assertEqual(len(refusal_lines), 1)
+            self.assertIn('inbox:billing-tiers.md', refusal_lines[0])
+            self.assertIn('an answer carries no why', refusal_lines[0])
+
+            with open(os.path.join(root, 'inbox', 'billing-tiers.md'), encoding='utf-8') as f:
+                self.assertIn('## Question', f.read())  # refused: changes nothing
+            with open(os.path.join(root, 'inbox', 'onboarding.md'), encoding='utf-8') as f:
+                onboarding_text = f.read()
+            self.assertNotIn('## Question', onboarding_text)
+            self.assertIn('type: feature', onboarding_text)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
 class AnswerParsingTests(unittest.TestCase):
     def test_yes(self):
         self.assertEqual(groom._parse_answer('yes'), ('decided', True))
