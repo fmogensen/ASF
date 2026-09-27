@@ -128,6 +128,13 @@ class TestPoolFallsBackToSessionLimits(HomeCase):
             self.assertEqual(runtime_mod.failure_reason(rec), headroom.QUOTA_EXHAUSTED, text)
 
 
+def _hours_ahead(n):
+    """``'11am'``-style: the hour ``n`` hours from now (UTC) — a fixed ``8am`` is in the past
+    between 08:00 and 09:00 UTC, and the test read no limit then."""
+    h = (datetime.datetime.now(UTC) + datetime.timedelta(hours=n)).hour
+    return f"{h % 12 or 12}{'am' if h < 12 else 'pm'}"
+
+
 class TestLimitDeathStopsAtOnce(HomeCase):
     """A run that died on a usage limit stops its account before the next launch is placed —
     not when its own product's health step next judges it. The regression: one product's run
@@ -151,7 +158,7 @@ class TestLimitDeathStopsAtOnce(HomeCase):
 
     def test_a_dead_run_on_a_usage_limit_stops_its_account(self):
         from asf.workers import lifecycle
-        self.write_run('other', 'coder-t-1', "You've hit your weekly limit · resets 8am (UTC)")
+        self.write_run('other', 'coder-t-1', f"You've hit your weekly limit · resets {_hours_ahead(3)} (UTC)")
         lines = lifecycle.note_spent_windows(alive=lambda _pid: False)
         self.assertEqual(len(lines), 1)
         self.assertIn('w1', headroom.active_limits())
@@ -163,7 +170,7 @@ class TestLimitDeathStopsAtOnce(HomeCase):
         self.assertEqual(headroom.active_limits(), {})
 
     def test_the_pool_reads_the_stop_the_death_left(self):
-        self.write_run('other', 'coder-t-3', "You've hit your weekly limit · resets 8am (UTC)")
+        self.write_run('other', 'coder-t-3', f"You've hit your weekly limit · resets {_hours_ahead(3)} (UTC)")
         cfg = {'worker_pool': {'accounts': [{'name': 'w1', 'cap': 2}]}}
         with mock.patch('asf.workers.lifecycle.pid_alive', lambda _pid: False), \
                 mock.patch('asf.workers.observe.read', lambda *a, **k: ([], '')):
