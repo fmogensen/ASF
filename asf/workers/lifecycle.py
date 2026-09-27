@@ -131,6 +131,9 @@ NETWORK_RE = re.compile(r'could not resolve host|connection (?:reset|refused|tim
 #: The end_reason of a run a spent window cut short (asf.workers.headroom).
 QUOTA_EXHAUSTED_REASON = f'failed: {headroom.QUOTA_EXHAUSTED}'
 HOOK_RE = re.compile(r'\bhook\b|pre-push|refused|declined', re.I)
+#: The factory's own pre-push redaction scan (:func:`_redaction_findings`) refusing a publish: the
+#: same refusal the hook would make, so its precise correction reaches the session (F-0003).
+REDACT_REFUSAL_RE = re.compile(r'(?:^|; )redact: \S+:\d+ ')
 
 #: Every class a session's ``end_reason`` falls into. ``finished`` is the only one that is not a
 #: failure; ``other`` is a failure whose signature this module does not name. Composed from the
@@ -1359,7 +1362,7 @@ def push_failure(text):
         return None
     if NETWORK_RE.search(text):
         return NETWORK_ERROR
-    if HOOK_RE.search(text):
+    if HOOK_RE.search(text) or REDACT_REFUSAL_RE.search(text):
         return HOOK_REFUSED
     return None
 
