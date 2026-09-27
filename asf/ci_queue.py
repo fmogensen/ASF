@@ -116,11 +116,16 @@ earlier, not yet started — an in-progress run always finishes), lowest priorit
 of branches the record has no item for, then of the record's ranked items, then of S2 items,
 then batch runs; newest first within each — until the free runners plus what the cancelled runs
 would have taken cover the trunk run's expected jobs in every class. An S1 or hotfix run is never cancelled. Each cancel is remembered
-in the queue file (``relief``) and, once the trunk run has started, re-run (``gh run rerun``)
+in the queue file (``relief``) and, once the trunk run it was cancelled for has started (that
+run, never a newer trunk run queued since), re-run (``gh run rerun``)
 through this queue at its original priority — unless its workflow file changed on the trunk since
 the run was created (``gh run rerun`` would replay the old definition, stale ``runs-on`` labels
 and all): then it is dropped, and the branch's next push runs fresh. One line per cancel and per re-run, naming the trunk
 sha and its wait. ``mode: dry-run`` (or a dry-run pass) prints what it would do, writes nothing.
+
+**Every admitted start starts.** What the line admits — the view's "would start" — the pass
+starts (:func:`start_admitted`): a held PR is opened, an open PR's run and a held re-run are
+re-run or dispatched fresh, or it is one ``START FAILED`` line and leaves the line.
 
 **Job-level starvation.** "Created after the trunk run" does not mean "behind it": a run's later
 jobs are queued only when their ``needs`` finish, so a PR run created after the trunk run queues
@@ -2364,8 +2369,16 @@ def relieve_trunk(product, items=None, source=None, out=print, dry_run=False, no
                 s1_seen[rid] = None if waiting else r
         return s1_seen[rid]
 
+    by_id = {str(r.get('databaseId')): r for r in pushes}
+
     def started(rec):
-        if rec.get('for') is None:          # cancelled for the trunk run
+        if rec.get('for') is None:          # cancelled for a trunk run: that run, not the newest
+            tid = rec.get('trunk_id')
+            own = by_id.get(str(tid)) if tid is not None else None
+            if own is not None:
+                return None if own.get('status') in QUEUED_STATUSES else (own, trunk)
+            if tid is not None:             # gone from the listing: long since done
+                return (newest or {}, trunk)
             return None if trunk_queued else (newest, trunk)
         r = s1_started(rec['for'])
         return None if r is None else (r, 'S1 PR')
@@ -2649,31 +2662,79 @@ def _open_pr(product, branch, item, items):
     return ln.host.open(branch, item)
 
 
-def open_held_prs(product, items=None, source=None, out=print, dry_run=False, now=None):
-    """Start the ``pr:`` entries the line admits now — PR opens the lane held (:meth:`asf.
-    harvest.lane.Lane.ci_admits`), whose host run starts when the PR opens. The lane asks once a
-    tick; between ticks runners freed and the head sat at "would start" holding its runners
-    against every start behind it (2026-09-27, a product: its head held there for 5 h). Each
-    admitted entry is opened here (:func:`_open_pr`), in line order, at most
-    ``prs_per_tick`` a pass. A PR that cannot be opened is one loud ``START FAILED`` line and
-    leaves the line — its started record too, so it holds no runner — and the pass moves on to
-    the next; the lane re-enqueues it at its next pass. The number opened. Never raises."""
+#: a run's conclusions an admitted start re-runs (``gh run rerun``): cut short, or red
+RERUN_CONCLUSIONS = frozenset({'cancelled', 'failure', 'timed_out', 'startup_failure'})
+_EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+
+
+def _start_run(product, src, branch, workflow, sha=None, rid=None, listing=None, blobs=None):
+    """Start the CI run of an admitted start whose PR is open (a relief re-run, or a ``pr:``
+    start whose PR the host has already): ``(what, '')`` or ``(None, why)``. A run of
+    ``workflow`` on the branch's head (``sha``) already queued or in progress is the start;
+    else ``rid`` (the run the relief cancelled), then the head's latest run when it was
+    cancelled or failed, is re-run (``gh run rerun`` — never a run created on a workflow the
+    trunk has changed since, :func:`_workflow_change`); else a fresh run is dispatched
+    (``gh workflow run``). Never raises."""
+    slug, blobs = product.repo_slug, ({} if blobs is None else blobs)
+    runs = [r for r in (_list_runs(src, product, workflow, listing) if workflow else None) or ()
+            if branch and r.get('headBranch') == branch and (not sha or r.get('headSha') == sha)]
+    runs.sort(key=lambda r: (_parse(r.get('createdAt')) or _EPOCH, int(r.get('databaseId') or 0)))
+    latest = runs[-1] if runs else None
+    if latest is not None and latest.get('status') in QUEUED_STATUSES | {'in_progress'}:
+        return f"run {latest.get('databaseId')} is {latest.get('status')} already", ''
+    cands = [str(rid)] if rid else []
+    if (latest is not None and latest.get('conclusion') in RERUN_CONCLUSIONS
+            and str(latest.get('databaseId')) not in cands):
+        cands.append(str(latest.get('databaseId')))
+    tried = []
+    for c in cands:
+        changed = _workflow_change(src, product, c, blobs)
+        if changed:
+            tried.append(f'run {c} is on an old {workflow} ({changed[0][:7]}→{changed[1][:7]})')
+            continue
+        if src._gh(['run', 'rerun', c, '-R', slug]) is not None:
+            return f're-ran run {c}', ''
+        tried.append(f'gh run rerun {c} refused')
+    if not branch or not workflow:
+        return None, '; '.join(tried + ['no branch or workflow to dispatch a fresh run on'])
+    if src._gh(['workflow', 'run', workflow, '--ref', branch, '-R', slug]) is not None:
+        return f'dispatched a fresh {workflow} run on {branch}', ''
+    tried.append(f'gh workflow run {workflow} --ref {branch} refused')
+    return None, '; '.join(tried)
+
+
+def start_admitted(product, items=None, source=None, out=print, dry_run=False, now=None,
+                   listing=None):
+    """Start every ``pr:`` and ``rerun:`` entry the line admits now, in line order — what
+    ``asf ci queue`` says "would start" is started here, every minute. The lane asks for a
+    held PR open once a tick, and a relief re-run was asked for only once its protected run
+    started: between them the head sat at "would start" holding its runners against every
+    start behind it (2026-09-27, a product: a held PR open for 5 h; then a relief re-run for
+    2 h, its record waiting on a newer trunk run). A ``pr:`` entry whose PR is not open is
+    opened as the lane opens it (:func:`_open_pr`, at most ``prs_per_tick`` a pass); one whose
+    PR is open, and a ``rerun:`` entry, gets its run started (:func:`_start_run`) and its
+    relief record leaves. A start that fails is one loud ``START FAILED`` line and leaves the
+    line — its started record and relief record too, so it holds no runner — and the pass
+    moves on to the next. The number started. Never raises."""
     if mode(product) != 'on' or not product.repo_slug:
         return 0
     from asf.tick import step_prs
     now = (now or _now()).astimezone(datetime.timezone.utc)
     try:
-        q = Queue(product, source=source, now=now, out=out, write=not dry_run)
-        cap, n, tried = step_prs.prs_per_tick(product), 0, set()
-        while n < cap:
+        src = source or GitHubSource(product)
+        q = Queue(product, source=src, now=now, out=out, write=not dry_run)
+        cap, opened, n, tried, blobs, prs = step_prs.prs_per_tick(product), 0, 0, set(), {}, []
+        listing = {} if listing is None else listing
+        while True:
             entries = q.data['entries']
             order = line_order(entries)
             q._read_host()
             if q._free is None:
                 return n                        # runners unreadable: nothing is known to fit
             needs = {k: q.entry_needs(entries[k]) for k in order}
-            key = next((k for k in order if k.startswith('pr:') and k not in tried
-                        and entries[k].get('kind') == 'pr'
+            key = next((k for k in order if k.split(':', 1)[0] in ('pr', 'rerun')
+                        and k not in tried and entries[k].get('kind') == 'pr'
+                        and not (k.startswith('pr:') and opened >= cap)
                         and decide(k, order, entries, needs.get, q.free('pr'), q.ceiling(),
                                    q._inflight, q.admitted_here, now=q.now,
                                    pr_wait_min=pr_wait_min(product),
@@ -2681,10 +2742,22 @@ def open_held_prs(product, items=None, source=None, out=print, dry_run=False, no
             if key is None:
                 return n
             tried.add(key)
-            e, branch = entries[key], key.split(':', 1)[1]
+            e = entries[key]
+            recs = [r for r in q.data['relief']
+                    if key in (_rerun_key(r), f"rerun:{r.get('id')}")]
+            rec = max(recs, key=lambda r: int(r.get('id') or 0)) if recs else {}
+            branch = rec.get('branch') or key.split(':', 1)[1]
+            if key.startswith('rerun:') and not rec.get('branch') and rec:
+                branch = ''                     # a record from before its branch was carried
             item, label = e.get('item') or branch, e.get('label') or 'other'
+            wf = e.get('workflow') or rec.get('workflow') or workflow_for(product, 'pr')
+            if key.startswith('pr:') and prs == []:
+                prs = src.prs() or None
+            has_pr = key.startswith('rerun:') or any(
+                p.get('headRefName') == branch and str(p.get('state') or '').upper() == 'OPEN'
+                for p in prs or ())
             if dry_run:
-                out(f'ci queue: would open PR for {branch} ({item}, {label})')
+                out(f'ci queue: would start {item} ({branch}, {label})')
                 continue
             d = q.admit(key, 'pr', item=item, prio=e.get('prio', OTHER), label=label,
                         workflow=e.get('workflow'), run=e.get('run', FULL), sha=e.get('sha'),
@@ -2692,25 +2765,37 @@ def open_held_prs(product, items=None, source=None, out=print, dry_run=False, no
             if not d.admitted or d.line:
                 continue
             try:
-                number, why = _open_pr(product, branch, item, items)
+                if has_pr:
+                    what, why = _start_run(product, src, branch, wf, sha=e.get('sha'),
+                                           rid=rec.get('id'), listing=listing, blobs=blobs)
+                else:
+                    number, why = _open_pr(product, branch, item, items)
+                    what = f'opened PR #{number}' if number else None
+                    opened += 1
             except Exception as ex:  # noqa: BLE001 — a failed start must never stall the line
-                number, why = None, (str(ex) or type(ex).__name__).splitlines()[0]
-            if number:
-                out(f'ci queue: opened PR #{number} for {branch} ({item}, {label}) — its run '
-                    f'starts')
-                n += 1
-                continue
-            q.data['started'] = [s for s in q.data['started'] if s.get('key') != key]
-            q.data['entries'].pop(key, None)
-            q.admitted_here = max(0, q.admitted_here - 1)
-            q._mark_head()
+                what, why = None, (str(ex) or type(ex).__name__).splitlines()[0]
+            if recs:
+                q.data['relief'] = [r for r in q.data['relief'] if r not in recs]
+            if what and not has_pr:
+                out(f'ci queue: opened PR #{what.rsplit("#", 1)[1]} for {branch} ({item}, '
+                    f'{label}) — its run starts')
+            elif what:
+                out(f'ci queue: START {item} ({branch or key}) — {what} ({label})')
+            else:
+                q.data['started'] = [s for s in q.data['started'] if s.get('key') != key]
+                q.data['entries'].pop(key, None)
+                q.admitted_here = max(0, q.admitted_here - 1)
+                q._mark_head()
+                then = ('the lane asks again at its next pass' if key.startswith('pr:') else
+                        'its relief record too; the branch\'s next push runs fresh')
+                how = 'PR not opened' if not has_pr else 'no run started'
+                out(f'ci queue: START FAILED {item} ({branch or key}) — {how}: {why}; dropped '
+                    f'from the line, {then}')
+            n += 1 if what else 0
             if q.write:
                 save(product.name, q.data)
-            out(f'ci queue: START FAILED {item} ({branch}) — PR not opened: {why}; dropped '
-                f'from the line, the lane asks again at its next pass')
-        return n
     except Exception as ex:  # noqa: BLE001 — the pass's other work is done; say so, loudly
-        out(f'ci queue: START FAILED — opening held PRs broke: '
+        out(f'ci queue: START FAILED — starting admitted entries broke: '
             f'{(str(ex) or type(ex).__name__).splitlines()[0]}')
         return 0
 
@@ -2752,7 +2837,8 @@ def queue_pass(product, items=None, source=None, out=print, dry_run=False, listi
                                      listing=listing)
         c, r = relieve_trunk(product, items=items, source=src, out=out, dry_run=dry_run,
                              now=now, listing=listing)
-        open_held_prs(product, items=items, source=src, out=out, dry_run=dry_run, now=now)
+        start_admitted(product, items=items, source=src, out=out, dry_run=dry_run, now=now,
+                       listing=listing)
         return n + c, r
     finally:
         lock.close()

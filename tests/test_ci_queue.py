@@ -2444,6 +2444,206 @@ class TestHeldPrOpens(ReliefBase):
         self.assertIn('pr:task/T-0341', ci_queue.load('p')['entries'])
 
 
+class TestAdmittedStarts(ReliefBase):
+    """2026-09-27 08:5x CEST, a product: the head of the line, ``rerun:cloud/T-0141`` (a run the
+    relief cancelled at 06:14Z for main run …326), read "would start (admitted after 28 min at
+    the head (starvation guard))" minute after minute while nothing started it. Its relief
+    record waited on the *newest* trunk run being queued — a newer push to main at 06:24Z,
+    queued, not the run it was cancelled for (on its runners since 06:24) — so the pass never
+    asked the line for it again, and nothing else starts a ``rerun:`` entry. A record now waits
+    for its own trunk run; and every entry the line admits is started by the pass — a re-run
+    (``gh run rerun``) or a fresh dispatch — or is one loud START FAILED line and leaves."""
+
+    def cancelled_runs(self, trunk_status='queued', newer_trunk=None):
+        """The runs after the relief cancelled 101, 102 and 201 for main run 900."""
+        runs = self.runs(trunk_status=trunk_status)
+        for r in runs['pr.yml'] + runs['batch.yml']:
+            if r['databaseId'] in (101, 102, 201):
+                r.update(status='completed', conclusion='cancelled')
+        if newer_trunk:
+            runs['ci.yml'].append(dict(runs['ci.yml'][0], databaseId=901, status='queued',
+                                       headSha='e' * 40, createdAt=self.at(newer_trunk),
+                                       startedAt=None))
+        return runs
+
+    def cancel_for_main(self, p):
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        gh, run = self.gh(self.runs())
+        self.relieve(p, run)
+        self.assertEqual(self.cancels(gh), ['101', '102', '201'])
+        self.lines.clear()
+
+    def hold_at_head(self, key, rid=None, item=None, prio=None, label=None, waited_min=30,
+                     sha='a' * 40):
+        """``key`` in the line, at its head for ``waited_min`` (a record's re-run by default)."""
+        data = ci_queue.load('p')
+        rec = next((r for r in data['relief'] if r['id'] == rid), {})
+        since = self.at(self.t0 - datetime.timedelta(minutes=waited_min))
+        e = {'kind': 'pr', 'item': item or rec.get('item'), 'label': label or rec.get('label'),
+             'prio': rec.get('prio', ci_queue.RANKED) if prio is None else prio,
+             'workflow': 'pr.yml', 'run': 'full', 'sha': sha, 'since': since,
+             'head_since': since, 'seen': self.at(self.t0)}
+        if rec.get('rank'):
+            e['rank'] = rec['rank']
+        data['entries'][key] = e
+        data['head'] = key
+        ci_queue.save('p', data)
+
+    def apply(self, p, run, minutes=1, opener=None):
+        opened = []
+
+        def default_opener(product, branch, item, items):
+            opened.append((branch, item))
+            return 44, ''
+        with mock.patch.object(ci_queue, '_open_pr', opener or default_opener):
+            ci_queue.apply(p, source=ci_queue.GitHubSource(p, run=run), out=self.lines.append,
+                           now=self.t0 + datetime.timedelta(minutes=minutes))
+        return opened
+
+    @staticmethod
+    def refusing(run, *verbs):
+        """``run`` that refuses every ``gh <verb …>`` in ``verbs`` (argv prefixes)."""
+        def wrapped(argv, **kw):
+            if any(argv[1:1 + len(v)] == list(v) for v in verbs):
+                return subprocess.CompletedProcess(argv, 1, '', 'HTTP 403: refused')
+            return run(argv, **kw)
+        return wrapped
+
+    def test_a_record_waits_for_its_own_trunk_run_not_a_newer_queued_one(self):
+        p = self.product()
+        self.cancel_for_main(p)
+        # main run 900 has its runners; a newer push to main (901) is queued a minute: the
+        # records cancelled for 900 re-run — they never wait on 901
+        gh, run = self.gh(self.cancelled_runs('in_progress', newer_trunk=self.t0 +
+                                              datetime.timedelta(minutes=1)), busy=())
+        self.assertEqual(self.relieve(p, run, minutes=2)[1], 2)
+        self.assertEqual(self.cancels(gh, 'rerun'), ['102', '101'])
+        self.assertEqual([r['id'] for r in ci_queue.load('p')['relief']], [201])
+
+    def test_a_record_whose_trunk_run_is_still_queued_waits(self):
+        p = self.product()
+        self.cancel_for_main(p)
+        gh, run = self.gh(self.cancelled_runs('queued'), busy=())
+        self.assertEqual(self.relieve(p, run, minutes=2)[1], 0)
+        self.assertEqual(self.cancels(gh, 'rerun'), [])
+
+    def test_an_admitted_rerun_head_starts_though_its_record_still_waits(self):
+        p = self.product()
+        self.cancel_for_main(p)
+        self.hold_at_head('rerun:task/T-0341', rid=102)
+        # main run 900 still queued, every heavy runner busy: only the head guard admits
+        gh, run = self.gh(self.cancelled_runs('queued'))
+        self.apply(p, run)
+        self.assertEqual(self.cancels(gh, 'rerun'), ['102'])
+        self.assertTrue(any(l.startswith('ci queue: START T-0341 (task/T-0341) — re-ran run 102')
+                            for l in self.lines), self.lines)
+        data = ci_queue.load('p')
+        self.assertNotIn('rerun:task/T-0341', data['entries'])
+        self.assertIn('rerun:task/T-0341', [s['key'] for s in data['started']])
+        self.assertNotIn(102, [r['id'] for r in data['relief']])
+
+    def test_a_failed_or_cancelled_latest_run_is_rerun_else_a_fresh_one_dispatched(self):
+        p = self.product()
+        self.cancel_for_main(p)
+        self.hold_at_head('rerun:task/T-0341', rid=102)
+        # 102 will not re-run; the head's newer run 107 failed: that one re-runs
+        runs = self.cancelled_runs('queued')
+        runs['pr.yml'].append({'databaseId': 107, 'status': 'completed', 'conclusion': 'failure',
+                               'event': 'pull_request', 'headBranch': 'task/T-0341',
+                               'headSha': 'a' * 40, 'createdAt': self.at(self.t0)})
+        gh, run = self.gh(runs)
+        refuse_102 = self.refusing(run, ('run', 'rerun', '102'))
+        self.apply(p, refuse_102)
+        self.assertTrue(any(l.startswith('ci queue: START T-0341 (task/T-0341) — re-ran run 107')
+                            for l in self.lines), self.lines)
+        # no run re-runs at all: a fresh one is dispatched on the branch
+        self.cancel_for_main(p)
+        self.hold_at_head('rerun:task/T-0341', rid=102)
+        gh, run = self.gh(self.cancelled_runs('queued'))
+        self.apply(p, self.refusing(run, ('run', 'rerun')), minutes=2)
+        self.assertIn(['gh', 'workflow', 'run', 'pr.yml', '--ref', 'task/T-0341', '-R', 'o/r'],
+                      gh.calls)
+        self.assertTrue(any(l.startswith('ci queue: START T-0341 (task/T-0341) — dispatched')
+                            for l in self.lines), self.lines)
+
+    def test_a_start_that_fails_is_loud_leaves_the_line_and_the_pass_moves_on(self):
+        p = self.product()
+        self.cancel_for_main(p)
+        self.hold_at_head('rerun:task/T-0341', rid=102)
+        s1, label = ci_queue.priority('B-0007', ITEMS, 'bug/B-0007')
+        data = ci_queue.load('p')
+        data['entries']['pr:bug/B-0007'] = {
+            'kind': 'pr', 'item': 'B-0007', 'label': label, 'prio': s1, 'workflow': 'pr.yml',
+            'run': 'full', 'sha': 'b' * 40, 'since': self.at(self.t0),
+            'seen': self.at(self.t0)}
+        ci_queue.save('p', data)
+        gh, run = self.gh(self.cancelled_runs('queued'))
+        opened = self.apply(p, self.refusing(run, ('run', 'rerun'), ('workflow', 'run')))
+        self.assertTrue(any(l.startswith('ci queue: START FAILED T-0341 (task/T-0341)')
+                            for l in self.lines), self.lines)
+        self.assertEqual(opened, [('bug/B-0007', 'B-0007')])
+        data = ci_queue.load('p')
+        self.assertNotIn('rerun:task/T-0341', data['entries'])
+        self.assertNotIn('rerun:task/T-0341', [s['key'] for s in data['started']])
+        self.assertNotIn(102, [r['id'] for r in data['relief']])
+
+    def test_an_admitted_pr_whose_pr_is_open_already_starts_a_run_not_an_open(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        self.hold_at_head('pr:task/T-0341', item='T-0341', label='Task F-0001 rank 1',
+                          sha='b' * 40)
+        gh, run = self.gh(self.cancelled_runs('in_progress'), busy=())
+
+        def with_pr(argv, **kw):
+            if argv[:3] == ['gh', 'pr', 'list']:
+                return subprocess.CompletedProcess(argv, 0, json.dumps([{
+                    'number': 795, 'headRefName': 'task/T-0341', 'state': 'OPEN',
+                    'isDraft': False, 'headRefOid': 'b' * 40}]), '')
+            return run(argv, **kw)
+
+        def opener(*_a):
+            raise AssertionError('opened a PR that is open')
+        self.apply(p, with_pr, opener=opener)
+        # its head (b…) has no run: re-running 102 (on a…) would test the old head
+        self.assertEqual(self.cancels(gh, 'rerun'), [])
+        self.assertIn(['gh', 'workflow', 'run', 'pr.yml', '--ref', 'task/T-0341', '-R', 'o/r'],
+                      gh.calls)
+
+    def test_every_entry_the_view_says_would_start_is_started_or_fails_loudly(self):
+        """The guard: what ``asf ci queue`` says would start, the pass starts — a start line
+        (``START``, ``opened PR``, ``re-ran``) or a ``START FAILED`` line for each."""
+        p = self.product()
+        self.cancel_for_main(p)
+        self.hold_at_head('rerun:task/T-0341', rid=102)
+        data = ci_queue.load('p')
+        for key, item in (('pr:bug/B-0007', 'B-0007'), ('pr:hotfix/db', 'hotfix/db')):
+            prio, label = ci_queue.priority(item, ITEMS, key.split(':', 1)[1])
+            data['entries'][key] = {'kind': 'pr', 'item': item, 'label': label, 'prio': prio,
+                                    'workflow': 'pr.yml', 'run': 'full', 'sha': 'b' * 40,
+                                    'since': self.at(self.t0), 'seen': self.at(self.t0)}
+        data['entries']['pr:task/T-0500'] = {
+            'kind': 'pr', 'item': 'T-0500', 'label': 'other', 'prio': ci_queue.OTHER,
+            'workflow': 'pr.yml', 'run': 'full', 'sha': 'b' * 40, 'since': self.at(self.t0),
+            'seen': self.at(self.t0)}
+        ci_queue.save('p', data)
+        gh, run = self.gh(self.cancelled_runs('queued'))
+        now = self.t0 + datetime.timedelta(minutes=1)
+        line = ci_queue.live_line(p, source=ci_queue.GitHubSource(p, run=run), now=now)
+        would = [line.entries[k]['item'] for k, ok, _w in line.decisions if ok]
+        self.assertEqual(sorted(would), ['B-0007', 'T-0341', 'hotfix/db'])
+
+        def opener(product, branch, item, items):
+            return (None, 'no commits') if branch == 'hotfix/db' else (45, '')
+        self.apply(p, run, opener=opener)
+        for item in would:
+            said = [l for l in self.lines if f' {item} ' in l or f' {item})' in l
+                    or f'({item},' in l]
+            self.assertTrue(any('START' in l or 'opened PR' in l or 're-ran' in l
+                                for l in said), (item, self.lines))
+
+
 class TestOwnCadence(ReliefBase):
     """2026-09-26 22:42, a product: 7 heavy + 7 light runners idle with 45 in the line. The
     queue's pass (superseded, dedupe, relief and its re-runs) ran only inside a tick's lane pass
