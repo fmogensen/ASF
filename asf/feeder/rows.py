@@ -69,6 +69,7 @@ import dataclasses
 import math
 import re
 
+from asf import budget
 from asf.feeder import footprint
 from asf.groom import policy as groom_policy
 from asf.views import index_reader as ix
@@ -115,6 +116,8 @@ WAITS_LANDING = 'WAITS ON landing'
 #: a correction already adjudicated at this same hold (B-0128): no session, no round, until the
 #: PR merges or closes, or a new push moves the head
 WAITS_MERGE = 'WAITS ON merge'
+#: an Epic past its typed budget (F-0052): this module owns the action word, asf.budget the money
+WAITS_BUDGET = 'WAITS ON budget'
 PLAN_CODE = 'PLAN → CODE'
 RESHAPE = 'RESHAPE → PLAN'
 #: a delivery lead's document session (:func:`delivery_rows`) — no plan yet
@@ -1305,6 +1308,54 @@ HELD_KINDS = {'features': (CARD_SPEC, STARVED_SPEC, STARVED_PLAN, PLAN_CODE, SPE
                           DIRECT_BUILD),
               'bugs': (BUG_FIX,)}
 HOLD = 'WAITS ON hold'
+#: the ``waits_on`` of a row an Epic's spent budget holds (F-0052)
+BUDGET = 'budget'
+#: what an Epic's spent budget holds: new work only, HELD_KINDS' own enumeration — one list, so
+#: feeder.hold and the budget hold can never disagree on what "new work" means
+BUDGET_HELD_KINDS = frozenset(k for ks in HELD_KINDS.values() for k in ks)
+
+
+def epic_verdicts(items):
+    """``{epic id: EpicSpend}`` for every Epic in the map — one subtree sum per Epic per pass."""
+    return {e['id']: budget.epic_spend(e['id'], ix.subtree_usd(items, e), e.get('budget_usd'))
+            for e in ix.of_type(items, 'epic')}
+
+
+def epics_over_budget(items):
+    """``[EpicSpend]`` in id order: every Epic past its budget that still has open work beneath
+    it. Read from the index alone — the wave's line must not depend on how many held rows
+    survived the capacity cut (F-0052 §1.1)."""
+    verdicts = epic_verdicts(items)
+    return [s for eid, s in sorted(verdicts.items())
+            if s.over and any(it['id'] != eid and is_open(it)
+                              for it in ix.subtree(items, items[eid]))]
+
+
+def over_budget_epics(rows, items, verdicts=None):
+    """F-0052: an Epic whose accumulated spend has passed its typed ``budget_usd`` starts nothing
+    new. Each launching row of :data:`BUDGET_HELD_KINDS` under such an Epic becomes
+    ``WAITS ON budget`` — no session, no slot, still shown — with the Epic and both figures in
+    its ``reason``.
+
+    Never held: every other kind (a review, a landing, a correction, a rebase, a stalemate, the
+    groom), because a budget stops starting work, not finishing it; and an S1/S2 Bug's
+    ``BUG → FIX``, because an incident is not discretionary spend. An item with no Epic above it
+    has no budget to be over."""
+    verdicts = epic_verdicts(items) if verdicts is None else verdicts
+    out = []
+    for r in rows:
+        item = items.get(r.item_id) or {}
+        epic = ix.epic_of(items, item)
+        s = verdicts.get(epic['id']) if epic else None
+        exempt = (r.kind == BUG_FIX and item.get('severity') in ('S1', 'S2'))
+        if s is None or not s.over or not r.launches or exempt \
+                or r.kind not in BUDGET_HELD_KINDS:
+            out.append(r)
+            continue
+        out.append(dataclasses.replace(
+            r, action=f'{WAITS_BUDGET}: {budget.epic_over(s)}', waits_on=BUDGET,
+            reason=budget.epic_reason(s)))
+    return out
 
 
 def hold_classes(rows, product):
@@ -1388,6 +1439,7 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
     rows += [r for r in bug_waits if r.item_id not in spoken_for]
     rows = hold_unlanded(rows, items, landed_shas)
     rows = hold_classes(rows, product)
+    rows = over_budget_epics(rows, items)          # F-0052
     cap, attempts = attempt_limit(product), attempts or {}
     rows = [c for c in (_capped(r, attempts, cap, product) if r.launches and r.kind in CAPPED_KINDS
                         else r for r in rows) if c is not None]
