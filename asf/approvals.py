@@ -411,20 +411,99 @@ def _runs_deploy_workflow(command, product):
                for w in workflows if isinstance(w, str) and w)
 
 
-def _command_matches(cls_name, command, product, extra_patterns):
+#: Programs that only read: a simple command running one of these runs nothing else and writes
+#: no file but through a redirection (F-0042, 2026-09-27: a spec session's ``grep`` for
+#: ``asf new rule`` in the docs was refused as if it ran it). ``sed``, ``awk``, ``sort`` and
+#: ``uniq`` are left out on purpose — each can write a file from its own arguments.
+_READ_ONLY_PROGRAMS = frozenset((
+    'grep', 'egrep', 'fgrep', 'rg', 'ag', 'ls', 'cat', 'head', 'tail', 'wc', 'less', 'more',
+    'stat', 'file', 'diff', 'cmp', 'cut', 'tr', 'nl', 'echo', 'printf', 'pwd', 'true', 'test',
+    'basename', 'dirname', 'realpath', 'readlink', 'which', 'jq',
+))
+
+#: ``find``'s actions that run or write something.
+_FIND_ACTIONS = frozenset(('-exec', '-execdir', '-ok', '-okdir', '-delete', '-fprint',
+                           '-fprint0', '-fprintf', '-fls'))
+
+#: ``git`` subcommands that only read the repository.
+_GIT_READS = frozenset(('diff', 'log', 'show', 'status', 'grep', 'blame', 'ls-files', 'ls-tree',
+                        'rev-parse', 'cat-file', 'rev-list', 'shortlog', 'describe', 'merge-base'))
+
+#: The redirection operators a written file follows.
+_REDIRECTS = frozenset(('>', '>>', '>|', '&>', '&>>'))
+
+
+def _read_only(argv):
+    """True when the simple command ``argv`` only reads (:data:`_READ_ONLY_PROGRAMS`, ``find``
+    with no action, ``git`` with a reading subcommand) — whatever its arguments mention."""
+    words = [w for w in argv if not (w and set(w) <= set('<>&|'))]
+    while words and _ASSIGNMENT.match(words[0]):
+        words.pop(0)
+    if not words:
+        return True
+    prog = os.path.basename(words[0])
+    if prog in _READ_ONLY_PROGRAMS:
+        return True
+    if prog == 'find':
+        return not any(w in _FIND_ACTIONS for w in words[1:])
+    if prog == 'git':
+        i = 1
+        while i < len(words) and words[i].startswith('-'):
+            i += 2 if words[i] in ('-C', '-c') else 1
+        return (i < len(words) and words[i] in _GIT_READS
+                and not any(w.startswith('--output') for w in words[i + 1:]))
+    return False
+
+
+def _run_text(command):
+    """``command`` as the text of what it runs: its simple commands that are not read-only
+    (:func:`_read_only`), each argv joined by spaces, heredoc bodies gone. A pattern such as
+    ``asf new rule`` inside a ``grep`` pattern is then text the grep searched for, never a
+    command the session ran. Unbalanced quotes: the command as it stands, the safe side."""
+    try:
+        argvs = _simple_commands(command)
+    except ValueError:
+        return command
+    return ' ; '.join(' '.join(a) for a in argvs if not _read_only(a))
+
+
+def written_words(command):
+    """The words of ``command`` that may name a file it writes: every word of a simple command
+    that is not read-only, and the redirection target of one that is — ``grep x rules/a.md >
+    out.txt`` writes ``out.txt``, not the rule card. Unbalanced quotes: every word, as before."""
+    try:
+        argvs = _simple_commands(command)
+    except ValueError:
+        return _BASH_WORD.findall(command)
+    out = []
+    for argv in argvs:
+        if not _read_only(argv):
+            out.extend(argv)
+            continue
+        out.extend(argv[i + 1] for i, t in enumerate(argv[:-1]) if t in _REDIRECTS)
+    return out
+
+
+def _command_matches(cls_name, command, product, extra_patterns, run_text=None):
+    """Whether ``command`` is ``cls_name``'s. The built-in patterns read :func:`_run_text` (what
+    the command runs, read-only commands and heredoc bodies left out); the product's own
+    ``approval_signals`` patterns read the command as written."""
     if cls_name == 'touch_production' and (
             _pushes_trunk(command, product.main) or _runs_deploy_workflow(command, product)):
         return True
-    patterns = list(_COMMAND_PATTERNS.get(cls_name, ())) + list(extra_patterns)
-    return any(re.search(p, command) for p in patterns)
+    text = _run_text(command) if run_text is None else run_text
+    return (any(re.search(p, text) for p in _COMMAND_PATTERNS.get(cls_name, ()))
+            or any(re.search(p, command) for p in extra_patterns))
 
 
 def _classify_command(product, command):
     sig = signals(product)
     detail = command[:120]
+    text = _run_text(command)
     out = []
     for c in CLASSES:
-        if _command_matches(c.name, command, product, sig.get(c.name, {}).get('commands', [])):
+        if _command_matches(c.name, command, product, sig.get(c.name, {}).get('commands', []),
+                            run_text=text):
             out.append((c.name, detail))
     return out
 
@@ -1044,6 +1123,27 @@ def raise_holds(ctx, out):
         append(product, {'event': 'closed', 'hold': hold, 'ts': _now_iso()})
 
     return parked(product, open_)
+
+
+def announce_console_amends(product, rows, out):
+    """One ``NEEDS OPERATOR`` line per CONSOLE → AMEND row (:data:`asf.feeder.rows.CONSOLE_AMEND`)
+    the ledger has not seen yet: a Task whose ``writes:`` reaches the amendable set gets no
+    worker session, so the console makes the edit on the Task's branch. An ``amend-announced``
+    line marks it said; it carries no ``hold`` key, so it opens no hold and parks nothing, and
+    however many ticks show the row, it is said once. Returns the items announced."""
+    from asf.feeder.rows import CONSOLE_AMEND        # local: the feeder imports this module
+    said = {rec.get('item') for rec in read(product) if rec.get('event') == 'amend-announced'}
+    announced = []
+    for row in rows:
+        if row.kind != CONSOLE_AMEND or row.item_id in said:
+            continue
+        out(f'NEEDS OPERATOR: {row.item_id} writes {row.amend} (amendable set) — no worker'
+            f' session edits it: the console makes the edit on {row.branch} and pushes it')
+        append(product, {'event': 'amend-announced', 'item': row.item_id, 'detail': row.amend,
+                         'ts': _now_iso()})
+        said.add(row.item_id)
+        announced.append(row.item_id)
+    return announced
 
 
 def parked(product, open_=None):

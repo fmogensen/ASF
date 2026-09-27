@@ -101,8 +101,9 @@ def _in_set(product, relpath):
 
 def write_target(product, tool_name, tool_input, cwd):
     """`(relpath, kind)` this call would write in the set, or None — the path tools by their
-    path argument, `Bash` by a word next to a `approvals._WRITING_TOKENS` token, exactly as
-    `approvals.operator_config_target` reads one."""
+    path argument, `Bash` (when a `approvals._WRITING_TOKENS` token is in it) by a word
+    `approvals.written_words` gives: any word of a command that is not read-only, and only the
+    redirection target of one that is (F-0042: a `grep` naming a rule card writes none)."""
     from asf import approvals  # local: see kind_of
     tool_input = tool_input or {}
     candidates = []
@@ -113,7 +114,7 @@ def write_target(product, tool_name, tool_input, cwd):
     elif tool_name == 'Bash':
         command = tool_input.get('command') or ''
         if any(re.search(t, command) for t in approvals._WRITING_TOKENS):
-            candidates = approvals._BASH_WORD.findall(command)
+            candidates = approvals.written_words(command)
     for path in candidates:
         if not path:
             continue
