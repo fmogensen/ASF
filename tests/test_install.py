@@ -629,6 +629,27 @@ class PendingUpgradeTest(HomeCase):
         self.assertLess(abs(data['at'] - time.time()), 60)
         self.assertIn(f'upgrade: pending {self.SHA[:7]}', out)
 
+    def test_a_red_head_writes_no_marker_and_clears_the_one_it_holds(self):
+        """B-0141 (live, 2026-09-25 21:44–22:10Z): main's head was red, which the install
+        refuses — but the deferral marked it pending anyway and parked every other product's
+        ticks until the marker expired. 0 sessions ran, 8 were ready. A marker is written only
+        for a target the upgrade will actually install, and one the moved head has made
+        uninstallable goes at once."""
+        upgrade.write_pending('c' * 40, 'factory')
+        run = FakeRun(ticks='4242\n', ci=json.dumps([{'conclusion': 'failure'}]))
+        rc, out, _err = self.run_upgrade(run)
+        self.assertEqual(rc, upgrade.DEFERRED)
+        self.assertIsNone(upgrade.read_pending())
+        self.assertFalse(os.path.exists(upgrade.pending_path()))
+        self.assertIn(f'remote CI is red at {self.SHA[:7]}', out)
+        self.assertFalse(upgrade.waiting('other', out=lambda _l: None, installed='d' * 40))
+
+    def test_a_green_head_still_writes_the_marker(self):
+        rc, _out, _err = self.run_upgrade(FakeRun(ticks='4242\n',
+                                                  ci=json.dumps([{'conclusion': 'success'}])))
+        self.assertEqual(rc, upgrade.DEFERRED)
+        self.assertEqual(upgrade.read_pending()['sha'], self.SHA)
+
     def test_a_manual_deferral_writes_none(self):
         self.run_upgrade(FakeRun(ticks='4242\n'), owner=None)
         self.assertIsNone(upgrade.read_pending())
@@ -687,8 +708,9 @@ class PendingUpgradeTest(HomeCase):
         self.assertFalse(os.path.exists(upgrade.pending_path()))
         self.assertIsNone(upgrade.cooling())  # an installed marker is no expiry
 
-    def test_the_pending_ttl_is_at_most_twenty_minutes(self):
-        self.assertLessEqual(upgrade.PENDING_TTL_S, 20 * 60)
+    def test_the_pending_ttl_is_ten_minutes(self):
+        """B-0141: a marker nothing clears held the whole factory for half an hour."""
+        self.assertEqual(upgrade.PENDING_TTL_S, 10 * 60)
 
     def test_a_timed_out_marker_resumes_the_parked_ticks_loudly_and_does_not_repark_them(self):
         upgrade.write_pending(self.SHA, 'factory', now=time.time() - upgrade.PENDING_TTL_S - 60)

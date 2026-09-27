@@ -914,6 +914,31 @@ class TestSchedulerSection(unittest.TestCase):
         self.assertEqual(rows[0][0], doctor.OK)
         self.assertIn('gh-actions', rows[0][2])
 
+    def test_a_pending_upgrade_names_what_the_ticks_wait_on(self):
+        """B-0141: while a pending marker parks the ticks, the section said 'ok' about clocks
+        that were firing into a tick that skipped every time. It names the wait instead."""
+        from asf import upgrade
+        log = self.write_log('tick-sample-record.log', 'tick: waiting — upgrade to f5aa236\n')
+        self.install_plist('asf.sample.record', ['/usr/bin/python3', '-m', 'asf.cli'], log=log)
+        fake_loaded(self.statedir, ['asf.sample.record'])
+        fake_print(self.statedir, 'asf.sample.record', read_fixture('launchctl-print.txt'))
+        at = time.time() - 300
+        upgrade.write_pending('f5aa236' + 'a' * 33, 'sample', now=at)
+
+        rows = doctor.scheduler_rows(self.cfg(), self.product)
+        held = [r for r in rows if r[1] == 'upgrade']
+        self.assertEqual(len(held), 1, rows)
+        self.assertNotEqual(held[0][0], doctor.OK)
+        self.assertEqual(held[0][2], f'waiting on upgrade to f5aa236 since '
+                                     f'{time.strftime("%H:%M", time.localtime(at))} '
+                                     f'(owner sample)')
+        self.assertFalse(doctor.scheduler_is_red(rows), 'a wait is a warning, not a failure')
+
+    def test_no_pending_upgrade_adds_no_row(self):
+        fake_loaded(self.statedir, [])
+        rows = doctor.scheduler_rows(self.cfg(), self.product)
+        self.assertEqual([r for r in rows if r[1] == 'upgrade'], [])
+
     def test_format_puts_every_job_on_its_own_line(self):
         rows = [(doctor.OK, 'asf.sample.record', 'state=running'),
                 (doctor.RED, 'asf.sample.dispatch', 'last-exit=1'),

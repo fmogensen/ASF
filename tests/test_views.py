@@ -225,6 +225,23 @@ class StatusViewTests(ViewsTestCase):
         with mock.patch.object(scheduler, 'loaded_jobs', lambda cfg=None: []):
             self.assertIn('no job loaded for p', self.rows({})['Cron'])
 
+    def test_cron_names_the_upgrade_a_pending_marker_waits_on(self):
+        """B-0141: every tick skipped for half an hour on a pending upgrade while the Cron row
+        read a healthy 'waiting (exit 0)'. The row says what the ticks are held on."""
+        import time
+
+        from asf import scheduler, upgrade
+        at = time.time() - 300
+        upgrade.write_pending('f5aa236' + 'a' * 33, 'sample', now=at)
+        jobs = [{'label': 'asf.p.record-health'}]
+        with mock.patch.object(scheduler, 'loaded_jobs', lambda cfg=None: jobs), \
+                mock.patch.object(scheduler, 'status',
+                                  lambda label: {'state': 'waiting', 'last_exit': 0}):
+            cell = status.cron_cell({}, self.product)
+        self.assertIn(f'waiting on upgrade to f5aa236 since '
+                      f'{time.strftime("%H:%M", time.localtime(at))} (owner sample)', cell)
+        self.assertIn('asf.p.record-health waiting (exit 0)', cell)
+
     def test_cron_flags_a_declared_clock_that_is_not_loaded(self):
         """B-0136: a clock the product declares but that launchd does not currently hold must
         say so — the old code only ever looked at what's loaded, so a clock like this simply
