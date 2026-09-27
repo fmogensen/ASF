@@ -974,13 +974,86 @@ def lost_commits(wt, new, remote_sha, branch=''):
     return [ln.split()[1][:9] for ln in p.stdout.splitlines() if ln.startswith('+')]
 
 
-def loss_refusal(branch, lost):
-    """The one-line reason a push that would erase ``lost`` (None: unknown) is refused."""
+def loss_refusal(branch, lost, main=None, subjects=None):
+    """The one-line reason a push that would erase ``lost`` (None: unknown) is refused, with
+    the one move that clears it. A head on the remote's own trunk base is behind
+    ``origin/<branch>``: rebase onto it. A head past the remote on the trunk (``main`` given:
+    :func:`past_remote_on_trunk`) already did the lane's rebase and dropped ``lost`` on the
+    way, and the factory could not carry them onto it (:func:`carry_onto_head`, a conflict):
+    rebase onto ``origin/<main>`` again and carry them by hand — never onto ``origin/<branch>``,
+    whose stale trunk history is what the rebase was for (a product's T-0338: the two
+    instructions alternated for 27 hours)."""
+    if lost is None and main:
+        return (f'cannot tell what origin/{branch} holds that this rebase onto origin/{main} '
+                f'dropped — fetch origin/{branch}, rebase onto origin/{main} again and carry '
+                f'what it holds; never onto origin/{branch}')
     if lost is None:
         return (f'cannot tell what origin/{branch} holds that this head lacks — '
                 f'fetch and rebase onto origin/{branch}, then push')
+    if main:
+        named = ', '.join(f'{sha} {subjects[sha]}' if subjects and subjects.get(sha) else sha
+                          for sha in lost)
+        return (f'would lose {len(lost)} commit(s) on origin/{branch} ({named}) that this '
+                f'rebase onto origin/{main} dropped and neither origin/{main} nor the head '
+                f'carries — rebase onto origin/{main} again and carry them '
+                f'(git cherry-pick {" ".join(lost)}); never onto origin/{branch}')
     return (f'would lose {len(lost)} commit(s) on origin/{branch} ({", ".join(lost)}) — '
             f'rebase onto origin/{branch}, then push')
+
+
+def past_remote_on_trunk(wt, new, remote_sha, main='main'):
+    """True when ``new``'s base on ``origin/<main>`` is strictly past ``remote_sha``'s: the
+    head is a rebase onto a newer trunk than ``origin/<branch>`` sits on. Such a head is never
+    rebased onto the remote — the trunk commits it carries would replay over their own stale
+    copies: a conflict by construction, or a branch with trunk history under it again, which
+    the lane holds again (the ping-pong). It is published over the old tip when every commit
+    it drops is accounted for (:func:`rebased_off_copies`) or carried onto it
+    (:func:`carry_onto_head`), and refused with the trunk named when one does not apply."""
+    if not wt or not new or not remote_sha:
+        return False
+    trunk = f'refs/remotes/origin/{main}'
+    old_base = _git(['merge-base', remote_sha, trunk], wt).stdout.strip()
+    new_base = _git(['merge-base', new, trunk], wt).stdout.strip()
+    return bool(old_base and new_base and old_base != new_base
+                and _git(['merge-base', '--is-ancestor', old_base, new_base], wt).returncode == 0)
+
+
+def carry_onto_head(wt, shas):
+    """Cherry-pick ``shas`` (short, in order) onto the worktree's clean HEAD: the commits
+    ``origin/<branch>`` holds that a rebase onto the trunk dropped and nothing accounts for,
+    carried by the factory the way a session would be told to. One that becomes empty is
+    skipped (its change is already here); one that conflicts, or a dirty tree, or None,
+    undoes every pick — HEAD is left exactly as it was — and answers False: the caller
+    refuses and names them. Never a merge, never a rebase onto the stale remote."""
+    if not shas:
+        return False
+    st = _git(['status', '--porcelain'], wt)
+    if st.returncode != 0 or st.stdout.strip():
+        return False
+    orig = _git(['rev-parse', 'HEAD'], wt).stdout.strip()
+    if not orig:
+        return False
+    for sha in shas:
+        r = _git(['cherry-pick', sha], wt)
+        if r.returncode == 0:
+            continue
+        unmerged = _git(['diff', '--name-only', '--diff-filter=U'], wt).stdout.strip()
+        if not unmerged and _git(['cherry-pick', '--skip'], wt).returncode == 0:
+            continue  # its change is already in the head: nothing to carry
+        _git(['cherry-pick', '--abort'], wt)
+        _git(['reset', '-q', '--hard', orig], wt)
+        return False
+    return True
+
+
+def _subjects(wt, shas):
+    """``{short sha: subject}`` for the commits ``shas`` names, each subject cut to 72 chars."""
+    out = {}
+    for sha in shas or []:
+        p = _git(['log', '-1', '--format=%s', sha], wt)
+        if p.returncode == 0 and p.stdout.strip():
+            out[sha] = p.stdout.strip()[:72]
+    return out
 
 
 def stale_head(text):
@@ -1009,13 +1082,29 @@ def commit_leftovers(wt, branch):
 
 def rebased_off_copies(wt, new, remote_sha, lost, main='main'):
     """True when every commit in ``lost`` (short shas on ``remote_sha`` that ``new`` lacks by
-    patch, :func:`lost_commits`) is accounted for by a rebase onto the trunk: a copy of a
-    trunk commit (``git cherry origin/<main>`` ``-``: its change is the trunk's), or a commit
-    ``new`` carries past the trunk under the same author and subject (a conflict resolved by
-    hand keeps its message, not its patch). A lane branch holding trunk copies is sent back
+    patch, :func:`lost_commits`) is accounted for by a rebase onto the trunk
+    (:func:`unaccounted_commits` names none). A lane branch holding trunk copies is sent back
     "rebase onto origin/<main>" (asf.harvest.lane.drop_copies); this is that rebase arriving."""
     if not lost or not new or not remote_sha:
         return False
+    return unaccounted_commits(wt, new, remote_sha, lost, main) == []
+
+
+def unaccounted_commits(wt, new, remote_sha, lost, main='main'):
+    """The commits in ``lost`` that a rebase of ``remote_sha`` onto the trunk does not account
+    for — each a short sha — or None when that cannot be read. A lost commit is accounted for
+    when it is the trunk's: a copy of a trunk commit (``git cherry origin/<main>`` ``-``: its
+    change is the trunk's), a commit under a trunk subject since the remote's base, reworded
+    or not (the trunk's own landing of it, another patch), or one that only added files the
+    trunk then added its own copy of (:func:`_resolved_to_trunk`); or the branch's own,
+    rewritten: a commit ``new`` carries past the trunk under the same author and subject (a
+    conflict resolved by hand keeps its message, not its patch — the patch-equivalent copies
+    :func:`lost_commits` already left out), or an empty one. The whole old tip is accounted
+    for when its net change against its trunk base is already in ``new``
+    (:func:`_net_change_kept`: a squash, or work the trunk carried in another form). What is
+    left is someone's work the head would erase: named to the session, never pushed over."""
+    if not lost or not new or not remote_sha:
+        return list(lost or [])
     _git(['fetch', '-q', 'origin', f'+refs/heads/{main}:refs/remotes/origin/{main}'], wt)
     trunk = f'refs/remotes/origin/{main}'
     cherry = _git(['cherry', trunk, remote_sha], wt)
@@ -1023,10 +1112,10 @@ def rebased_off_copies(wt, new, remote_sha, lost, main='main'):
     theirs = _git(['log', '--no-merges', '--format=%H%x00%ae%x00%s', f'{trunk}..{remote_sha}'],
                   wt)
     if cherry.returncode != 0 or mine.returncode != 0 or theirs.returncode != 0:
-        return False
+        return None
     base = _git(['merge-base', remote_sha, trunk], wt).stdout.strip()
     if _net_change_kept(wt, new, remote_sha, base):
-        return True
+        return []
     copies = {ln.split()[1] for ln in cherry.stdout.splitlines() if ln.startswith('- ')}
     carried = set(mine.stdout.splitlines())
     ident = {}
@@ -1034,10 +1123,12 @@ def rebased_off_copies(wt, new, remote_sha, lost, main='main'):
         sha, _, rest = ln.partition('\x00')
         ident[sha] = rest
     trunk_subjects = None
+    left = []
     for short in lost:
         full = next((s for s in list(copies) + list(ident) if s.startswith(short)), '')
         if not full:
-            return False
+            left.append(short)
+            continue
         if full in copies or ident.get(full) in carried or _empty_commit(wt, full) \
                 or _resolved_to_trunk(wt, full, new, trunk, base):
             continue
@@ -1047,8 +1138,8 @@ def rebased_off_copies(wt, new, remote_sha, lost, main='main'):
         if subject and (subject in trunk_subjects
                         or REWORD_PREFIX_RE.sub('', subject, count=1) in trunk_subjects):
             continue
-        return False
-    return True
+        left.append(short)
+    return left
 
 
 #: The prefix the lane's reword puts on a subject that does not name the item
@@ -1183,17 +1274,33 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
     the branch is on origin (origin moving since the evidence was gathered refuses the push —
     nothing is overwritten unseen), a plain push when it is not. The trunk is never a target.
     A lease guards only against origin moving after ``remote_sha`` was read; a head that lacks
-    commits ``remote_sha`` holds (a stale worktree) is refused before any push
-    (:func:`lost_commits`), with the commits it would erase named.
+    commits ``remote_sha`` holds is refused before any push (:func:`lost_commits`), with the
+    commits it would erase named — by which side of the trunk it sits on:
+
+    * on the remote's own trunk base, or behind it: a stale worktree, and origin moved ahead —
+      the factory rebases it onto ``origin/<branch>`` (:func:`rebase_onto_remote`) and pushes
+      the fast-forward; a conflict is a hold naming the files and that branch;
+    * past the remote's base (:func:`past_remote_on_trunk`): the lane's "rebase onto
+      origin/<main>" arriving. Every remote commit it drops must be accounted for
+      (:func:`rebased_off_copies`: the trunk's, or the branch's own rewritten): then the old tip
+      is archived (:func:`copies_archive`) and the head pushed over it under the lease. One not
+      accounted for is carried onto the head by the factory (:func:`carry_onto_head`, a
+      cherry-pick) and published the same way; one that does not apply refuses with "rebase
+      onto origin/<main> again and carry it" — the head is never rebased onto the stale
+      remote, whose trunk history is what the rebase was for.
+      Done the other way (a product's T-0338, 2026-09-26/27), the trunk commits replayed over
+      their own copies, conflicted, and the hold said "rebase onto origin/<branch>" — the
+      opposite of the lane's instruction — for sixty runs.
+
     The old tip's archive carries no new code and skips the product's pre-push hook; the
     branch's own push runs it. Each push is killed after ``push_timeout_s`` (default
     :func:`asf.gitpush.push_timeout`): a hook or a network hang never holds the tick.
-    Before that push, :func:`_redaction_findings` runs the same scan the hook would; a finding
-    refuses the push right there with a precise ``redact: <file>:<line> …`` correction
-    (:func:`asf.redact.correction`, F-0035) rather than the hook's generic refusal. A push the
-    hook itself still refuses over a redaction (some other repo, some other pattern list) has its
-    captured output parsed the same way (:func:`asf.redact.parse_finding_lines`) before falling
-    back to its raw last line.
+    Before any push, the archive included, :func:`_redaction_findings` runs the same scan the
+    hook would; a finding refuses the push right there with a precise ``redact: <file>:<line>
+    …`` correction (:func:`asf.redact.correction`, F-0035) rather than the hook's generic
+    refusal. A push the hook itself still refuses over a redaction (some other repo, some other
+    pattern list) has its captured output parsed the same way
+    (:func:`asf.redact.parse_finding_lines`) before falling back to its raw last line.
     ``(ok, line)``."""
     if not branch or branch == main:
         return False, f'publish refused: {branch or "no branch"} is not a lane branch'
@@ -1203,20 +1310,32 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
     if guard:
         return False, guard
     ref = f'refs/heads/{branch}'
-    rebased = ''
+    rebased, archive = '', ''
     if remote_sha:
         head = _git(['rev-parse', 'HEAD'], wt).stdout.strip()
         lost = lost_commits(wt, head, remote_sha, branch)
-        if lost and rebased_off_copies(wt, head, remote_sha, lost, main):
+        left = unaccounted_commits(wt, head, remote_sha, lost, main) if lost else lost
+        if lost and left == []:
             # the answer to a trunk-copies hold: the old tip is kept, then replaced
             archive = copies_archive(branch, remote_sha)
             if refguard.refusal(archive, f'archive {branch}', main, protected):
                 return False, f'publish {branch} refused: {archive} is a protected ref'
-            a = gitpush.push(['-q', 'origin', f'{remote_sha}:refs/heads/{archive}'], wt,
-                             refs_only=True, timeout=limit)
-            if a.returncode != 0:
-                return False, f'publish {branch} refused: the old tip could not be archived'
             rebased = f'rebased off trunk copies (old tip kept as {archive})'
+            lost = []
+        elif lost and past_remote_on_trunk(wt, head, remote_sha, main):
+            # the lane's rebase, with a commit origin/<branch> holds dropped on the way: the
+            # factory carries it onto the head — never the head back onto the stale remote —
+            # and one it cannot carry is named, with the trunk as the instruction
+            subjects = _subjects(wt, left)
+            if not carry_onto_head(wt, left):
+                why = loss_refusal(branch, left, main, subjects)
+                return False, f'publish {branch} refused: {why}'
+            archive = copies_archive(branch, remote_sha)
+            if refguard.refusal(archive, f'archive {branch}', main, protected):
+                return False, f'publish {branch} refused: {archive} is a protected ref'
+            named = ', '.join(f'{s} {subjects[s]}' if subjects.get(s) else s for s in left)
+            rebased = (f'carried {len(left)} commit(s) the rebase dropped ({named}) '
+                       f'(old tip kept as {archive})')
             lost = []
         if lost is None or lost:
             ok, fetched, rebased = rebase_onto_remote(wt, branch)
@@ -1226,6 +1345,11 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
     findings = _redaction_findings(wt, remote_sha)
     if findings:
         return False, f'publish {branch} refused: ' + '; '.join(redact.correction(findings))
+    if archive:
+        a = gitpush.push(['-q', 'origin', f'{remote_sha}:refs/heads/{archive}'], wt,
+                         refs_only=True, timeout=limit)
+        if a.returncode != 0:
+            return False, f'publish {branch} refused: the old tip could not be archived'
     args = ['-q', 'origin', f'HEAD:{ref}']
     if remote_sha:
         args.insert(1, f'--force-with-lease={ref}:{remote_sha}')
@@ -1251,7 +1375,10 @@ def rebase_onto_remote(wt, branch):
     ``origin/<branch>`` — the factory's own answer to a head that lacks commits origin holds.
     Sessions sent back "rebase onto origin/…, then push" failed at it round after round, each
     round an expensive session; the rebase is deterministic, so the factory does it. Never a
-    merge, never a force: the push that follows is a fast-forward of the fetched head.
+    merge, never a force: the push that follows is a fast-forward of the fetched head. For a
+    head on the remote's own trunk base or behind it only: a head past the remote on the trunk
+    (:func:`past_remote_on_trunk`) is :func:`publish`'s to archive over or refuse, never to
+    bring here — its trunk commits would replay over their own stale copies.
 
     ``ok`` with the fetched sha and ``rebased onto origin/<branch> (+N remote commits)``; a
     conflict is aborted (the worktree is left as it was) and ``line`` is ``rebase conflicts in:
@@ -1953,10 +2080,13 @@ def widenings(path, item):
 
 
 def stale_head_text(branch, line):
-    """The correction a run whose publish was refused for a stale head hands its next session."""
+    """The correction a run whose publish was refused for a stale head hands its next session.
+    The refusal (:func:`loss_refusal`) carries the one move that clears it — onto
+    ``origin/<branch>`` for a head behind it, onto ``origin/<main>`` again for a head past it
+    on the trunk — and this text repeats it, never a second, contradicting one."""
     why = (line or '').split('refused: ', 1)[-1]
-    return (f'origin/{branch} holds commits this worktree lacks: {why} — rebase onto '
-            f'origin/{branch} so both sides survive; never a force, never a merge')
+    return (f'origin/{branch} holds commits this worktree lacks: {why}; '
+            f'never a force, never a merge')
 
 
 #: A correction kind of its own: the factory's rebase onto the remote head conflicted.

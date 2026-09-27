@@ -1631,6 +1631,86 @@ class TestHealth(Home):
         self.assertEqual(git('ls-remote', '--heads', 'origin', branch, cwd=wt).split()[0],
                          git('rev-parse', 'HEAD', cwd=wt))
 
+    def _t0338_shape(self, job):
+        """A run whose worktree is the lane's rebase arriving (a product's T-0338): origin/<branch>
+        holds its own commit and a copy of a trunk commit on an old base; the trunk landed that
+        commit and changed the own commit's file; the head is the own commit, resolved by hand,
+        on the new trunk. ``(rec, wt, branch, old tip)``."""
+        rec = self.spawn(job, {'ok': True})
+        wt, branch = rec['worktree'], rec['branch']
+        self.commit(wt, 'copy')                       # a copy of what the trunk lands
+        self.commit(wt, 'own')                        # the branch's own commit
+        git('push', '-q', 'origin', branch, cwd=wt)
+        old = git('rev-parse', 'HEAD', cwd=wt)
+        other = tempfile.mkdtemp(prefix='trunk_')
+        self.addCleanup(shutil.rmtree, other, ignore_errors=True)
+        git('clone', '-q', git('remote', 'get-url', 'origin', cwd=wt), other, cwd=wt)
+        self.commit(other, 'copy')                    # the same patch lands on the trunk
+        with open(os.path.join(other, 'own'), 'w') as f:
+            f.write('trunk version')                  # and the trunk changes `own`
+        git('add', 'own', cwd=other)
+        git('commit', '-q', '-m', 'trunk own', cwd=other)
+        git('push', '-q', 'origin', 'HEAD:main', cwd=other)
+        git('fetch', '-q', 'origin', cwd=wt)
+        r = subprocess.run(['git', 'rebase', '-q', 'origin/main'], cwd=wt, capture_output=True)
+        self.assertNotEqual(r.returncode, 0)          # the conflict the lane named
+        with open(os.path.join(wt, 'own'), 'w') as f:
+            f.write('resolved')
+        git('add', 'own', cwd=wt)
+        subprocess.run(['git', '-c', 'core.editor=true', 'rebase', '--continue'], cwd=wt,
+                       capture_output=True, check=True)
+        self.assertEqual(git('merge-base', 'HEAD', 'origin/main', cwd=wt),
+                         git('rev-parse', 'origin/main', cwd=wt))
+        reason = 'failed: not pushed: 0 uncommitted file(s), 1 unpushed commit(s)'
+        pool_mod.update_session(self.product, job, ended='2026-09-27T07:00:45Z',
+                                end_reason=reason, rc=1,
+                                correction={'kind': lifecycle.UNPUSHED,
+                                            'text': lifecycle.unpushed_text(reason),
+                                            'at': '2026-09-27T07:00:45Z'})
+        return rec, wt, branch, old
+
+    def test_the_republish_pass_publishes_the_lanes_rebase_over_the_stale_remote(self):
+        # the ping-pong's exit: an ended run whose head is the lane's rebase is published by the
+        # republish pass over the stale remote (old tip archived) — never rebased back onto it,
+        # never refused "rebase onto origin/<branch>" — and the run is re-judged finished
+        _rec, wt, branch, old = self._t0338_shape('pingpong')
+        head = git('rev-parse', 'HEAD', cwd=wt)
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False,
+                                  out=lambda s: None)
+        lines = [d for j, w, d in found if j == 'pingpong' and w == 'published']
+        self.assertTrue(lines, found)
+        self.assertIn('old tip kept as', lines[0])
+        self.assertNotIn('refused', lines[0])
+        run = pool_mod.load_sessions(self.product)['pingpong']
+        self.assertEqual(run['end_reason'], 'finished')
+        self.assertIsNone(run.get('correction'))
+        self.assertEqual(self._ls_remote_one(wt, branch), head)
+        self.assertEqual(git('rev-parse', 'HEAD', cwd=wt), head)
+        self.assertEqual(self._ls_remote_one(wt, lifecycle.copies_archive(branch, old)), old)
+
+    def test_the_republish_pass_carries_a_commit_the_remote_gained_meanwhile(self):
+        # someone pushed onto origin/<branch> while the run was stuck: the pass carries that
+        # commit onto the rebase and publishes; nothing of theirs is dropped
+        _rec, wt, branch, _old = self._t0338_shape('carried')
+        other = tempfile.mkdtemp(prefix='person_')
+        self.addCleanup(shutil.rmtree, other, ignore_errors=True)
+        git('clone', '-q', '-b', branch, git('remote', 'get-url', 'origin', cwd=wt), other, cwd=wt)
+        self.commit(other, 'theirs')
+        git('push', '-q', 'origin', branch, cwd=other)
+        theirs = git('rev-parse', 'HEAD', cwd=other)
+        head = git('rev-parse', 'HEAD', cwd=wt)
+        found = health_mod.health(self.product, fix=True, alive=lambda pid: False,
+                                  out=lambda s: None)
+        lines = [d for j, w, d in found if j == 'carried' and w == 'published']
+        self.assertTrue(lines, found)
+        self.assertIn(f'carried 1 commit(s) the rebase dropped ({theirs[:9]} theirs)', lines[0])
+        run = pool_mod.load_sessions(self.product)['carried']
+        self.assertEqual(run['end_reason'], 'finished')
+        remote = self._ls_remote_one(wt, branch)
+        self.assertEqual(remote, git('rev-parse', 'HEAD', cwd=wt))
+        self.assertEqual(git('rev-parse', 'HEAD~1', cwd=wt), head)
+        self.assertEqual(git('log', '-1', '--format=%s', remote, cwd=wt), 'theirs')
+
     def test_an_ended_unpushed_run_still_refused_gets_the_precise_refusal(self):
         # the retried publish is refused again: the pending generic "commit and push what you
         # have" is replaced by the factory's own refusal line, so the next session reads what

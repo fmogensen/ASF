@@ -1368,11 +1368,22 @@ class UnpushedAfterARebaseTest(unittest.TestCase):
         self.assertEqual(self._remote(), newer)
 
     def test_a_stale_rebased_worktree_never_overwrites_newer_remote_commits(self):
-        # rebased onto the trunk, and origin gained a commit the rebase never saw
+        # rebased onto the trunk, and origin gained a commit the rebase never saw: the factory
+        # carries it onto the rebase (never the rebase back onto the stale remote, which put a
+        # copy of the trunk commit under the branch for the lane to drop again)
         newer = self._push_from_elsewhere('newer-work')
         ok, line = lc.publish(self.repo, 'fix/B-9999', newer, main='main')
         self.assertTrue(ok, line)
-        self.assertTrue(self._on_remote(newer))
+        self.assertIn('carried 1 commit', line)
+        remote = self._remote()
+        self.assertEqual(self.sh(['log', '-1', '--format=%s %ae', remote], self.repo),
+                         'newer-work p@example.com')
+        self.assertEqual(self.sh(['cherry', 'origin/main', remote], self.repo).count('- '), 0)
+        self.assertEqual(self.sh(['merge-base', remote, 'origin/main'], self.repo),
+                         self.sh(['rev-parse', 'origin/main'], self.repo))
+        self.assertEqual(self.sh(['ls-remote', '--heads', 'origin',
+                                  lc.copies_archive('fix/B-9999', newer)], self.repo).split()[0],
+                         newer)
 
     def test_a_rebase_holding_copies_of_every_remote_commit_still_publishes(self):
         newer = self._push_from_elsewhere('newer-work')
@@ -1536,14 +1547,21 @@ class RebaseOverAReportCommitTest(unittest.TestCase):
                                  self.repo).split()[0], self.remote_sha)
         self.assertFalse(os.path.isdir(os.path.join(self.repo, '.git', 'rebase-merge')))
 
-    def test_a_dropped_commit_of_its_own_is_still_lost(self):
-        # own b dropped as well: its file is not the trunk's, so it is lost work, never pushed
+    def test_a_dropped_commit_of_its_own_is_carried_back_never_lost(self):
+        # own b dropped as well: its file is not the trunk's, so it is work — not a rebase of
+        # the tip (rebase_of), and never pushed over: the factory carries it back onto the head
         self.sh(['reset', '-q', '--hard', 'HEAD~1'], self.repo)
         self.assertFalse(lc.rebase_of(self.repo, self.sh(['rev-parse', 'HEAD'], self.repo),
                                       self.remote_sha, main='main'))
         ok, line = lc.publish(self.repo, 'cloud/x', self.remote_sha, main='main')
-        self.assertFalse(ok, line)
-        self.assertEqual(self.remote(), self.remote_sha)
+        self.assertTrue(ok, line)
+        self.assertIn('carried 1 commit', line)
+        self.assertIn('spec(X): own b', line)
+        remote = self.remote()
+        self.assertEqual(remote, self.sh(['rev-parse', 'HEAD'], self.repo))
+        self.assertEqual(self.sh(['show', f'{remote}:b'], self.repo), 'own b')
+        self.assertEqual(self.sh(['merge-base', remote, 'origin/main'], self.repo),
+                         self.sh(['rev-parse', 'origin/main'], self.repo))
 
     def _three_runs(self):
         path = os.path.join(self.base, 's.jsonl')
@@ -1986,3 +2004,331 @@ class RedactionCorrectionTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class _RebaseShape(unittest.TestCase):
+    """A bare origin and a clone with a lane branch on it; helpers to move either side."""
+
+    sh = UnpushedAfterARebaseTest.sh
+    branch = 'cloud/T-0338'
+
+    def setUp(self):
+        base = tempfile.mkdtemp(prefix='lifecycle_pingpong_')
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        self.base = base
+        self.origin, self.repo = os.path.join(base, 'origin.git'), os.path.join(base, 'repo')
+        self.sh(['init', '-q', '--bare', '-b', 'main', self.origin], base)
+        self.sh(['clone', '-q', self.origin, self.repo], base)
+        self.identity(self.repo)
+        self.commit('c', 'base c\n', 'base c')
+        self.commit('b', 'b v0\n', 'base b')
+        self.commit('h', 'hook v0\n', 'base h')
+        self.sh(['push', '-q', 'origin', 'HEAD:main'], self.repo)
+        self.sh(['checkout', '-q', '-b', self.branch], self.repo)
+
+    def identity(self, repo, email='t@example.com'):
+        for k, v in (('user.name', 'Test'), ('user.email', email), ('commit.gpgsign', 'false')):
+            self.sh(['config', k, v], repo)
+
+    def commit(self, name, text, msg, repo=None):
+        repo = repo or self.repo
+        with open(os.path.join(repo, name), 'w', encoding='utf-8') as f:
+            f.write(text)
+        self.sh(['add', '-A'], repo)
+        self.sh(['commit', '-qm', msg], repo)
+        return self.sh(['rev-parse', 'HEAD'], repo)
+
+    def push_branch(self):
+        self.sh(['push', '-q', 'origin', self.branch], self.repo)
+        self.remote_sha = self.sh(['rev-parse', 'HEAD'], self.repo)
+        return self.remote_sha
+
+    def land_on_trunk(self, *commits):
+        """``(name, text, msg)`` commits landed on origin/main from a throwaway branch."""
+        self.sh(['checkout', '-q', '-B', 'tmp', 'origin/main'], self.repo)
+        for name, text, msg in commits:
+            self.commit(name, text, msg)
+        self.sh(['push', '-q', 'origin', 'tmp:main'], self.repo)
+        self.sh(['checkout', '-q', self.branch], self.repo)
+        self.sh(['fetch', '-q', 'origin'], self.repo)
+
+    def push_from_elsewhere(self, name, text, msg, email='person@example.com'):
+        """A commit on origin/<branch> made by someone else, from another clone."""
+        other = os.path.join(self.base, 'other-' + name)
+        self.sh(['clone', '-q', '-b', self.branch, self.origin, other], self.base)
+        self.identity(other, email)
+        sha = self.commit(name, text, msg, repo=other)
+        self.sh(['push', '-q', 'origin', self.branch], other)
+        return sha
+
+    def rebase_resolving(self, resolved, skip=()):
+        """``git rebase origin/main``; a conflict in a file of ``resolved`` is resolved to that
+        text, a commit whose subject is in ``skip`` is dropped (it is the trunk's)."""
+        r = subprocess.run(['git', 'rebase', '-q', 'origin/main'], cwd=self.repo,
+                           capture_output=True, text=True)
+        for _ in range(20):
+            if r.returncode == 0:
+                return self.sh(['rev-parse', 'HEAD'], self.repo)
+            subject = open(os.path.join(self.repo, '.git', 'rebase-merge', 'message'),
+                           encoding='utf-8').read().split('\n', 1)[0]
+            if subject in skip:
+                r = subprocess.run(['git', '-c', 'core.editor=true', 'rebase', '--skip'],
+                                   cwd=self.repo, capture_output=True, text=True)
+                continue
+            files = self.sh(['diff', '--name-only', '--diff-filter=U'], self.repo).split()
+            for name in files:
+                self.assertIn(name, resolved, f'unexpected conflict in {name} at {subject!r}')
+                with open(os.path.join(self.repo, name), 'w', encoding='utf-8') as f:
+                    f.write(resolved[name])
+                self.sh(['add', name], self.repo)
+            r = subprocess.run(['git', '-c', 'core.editor=true', 'rebase', '--continue'],
+                               cwd=self.repo, capture_output=True, text=True)
+        self.fail('the rebase never finished')
+
+    def remote(self):
+        return self.sh(['ls-remote', '--heads', 'origin', self.branch], self.repo).split()[0]
+
+    def on_origin(self, ref):
+        out = self.sh(['ls-remote', '--heads', 'origin', ref], self.repo)
+        return out.split()[0] if out else ''
+
+    def head(self):
+        return self.sh(['rev-parse', 'HEAD'], self.repo)
+
+    def mid_rebase(self):
+        return os.path.isdir(os.path.join(self.repo, '.git', 'rebase-merge'))
+
+
+class PublishRebasePingPongTest(_RebaseShape):
+    """A product's T-0338, 2026-09-26/27 — sixty runs in 27 hours. The lane held the branch
+    "trunk history under the branch: rebase the branch's own commits onto origin/main"; the
+    session did, resolving the conflicts the lane named, and its head then sat on a newer
+    trunk than origin/<branch> did. Publish counted the remote commits the rebase rewrote or
+    dropped as lost and — the ping-pong — rebased the fresh head back onto the stale remote:
+    the trunk commits it carried replayed over their own copies, conflicted, and the hold said
+    "rebase onto origin/<branch>", the opposite instruction. 155 runs ended "not pushed", 179
+    publishes were refused for "rebase conflicts", about 312 hours of lead time.
+
+    The shape: origin/main gained ``X`` (a patch the branch also carries), ``H'`` (a commit the
+    branch carries as a reworded copy with another patch, ``task(T-0338): hotfix(hooks): …
+    (#804)``) and its own change to ``b`` (so the branch's ``B`` conflicts); origin/<branch>
+    holds ``X``, ``H``, ``A``, ``B`` on the old base; the head is ``A``, ``B`` resolved and a
+    new ``C`` on the new trunk. A head past the remote on the trunk is never rebased onto the
+    remote: it is published under a lease with the old tip archived when every commit it drops
+    is accounted for; one that is not is carried onto the head by the factory, and refused
+    with the trunk named — never the branch — when that conflicts."""
+
+    def setUp(self):
+        super().setUp()
+        self.commit('x', 'x\n', 'chore: x lands on the trunk')
+        self.commit('h', 'hook v1\n', 'task(T-0338): hotfix(hooks): scan pushed files (#804)')
+        self.commit('a', 'own a\n', 'task(T-0338): own a')
+        self.commit('b', 'b v1\n', 'task(T-0338): own b')
+        self.push_branch()
+        self.land_on_trunk(('x', 'x\n', 'chore: x lands on the trunk'),
+                           ('h', 'hook v2\n', 'hotfix(hooks): scan pushed files (#804)'),
+                           ('b', 'b trunk\n', 'chore: the trunk changes b'))
+        self.rebase_resolving({'b': 'b resolved\n'},
+                              skip=('task(T-0338): hotfix(hooks): scan pushed files (#804)',))
+        self.new = self.commit('c', 'own c\n', 'task(T-0338): own c')
+        self.assertEqual(self.sh(['merge-base', 'HEAD', 'origin/main'], self.repo),
+                         self.sh(['rev-parse', 'origin/main'], self.repo))
+        self.assertEqual(self.sh(['rev-list', '--count', 'origin/main..HEAD'], self.repo), '3')
+
+    def test_the_head_sits_past_the_remote_on_the_trunk(self):
+        self.assertTrue(lc.past_remote_on_trunk(self.repo, self.head(), self.remote_sha, 'main'))
+        self.assertFalse(lc.past_remote_on_trunk(self.repo, self.remote_sha, self.head(), 'main'))
+        self.assertFalse(lc.past_remote_on_trunk(self.repo, self.remote_sha, self.remote_sha,
+                                                 'main'))
+
+    def test_the_t0338_shape_is_published_under_a_lease_with_the_old_tip_archived(self):
+        head = self.head()
+        ok, line = lc.publish(self.repo, self.branch, self.remote_sha, main='main')
+        self.assertTrue(ok, line)
+        self.assertEqual(self.remote(), head)
+        self.assertEqual(self.head(), head)  # never rebased onto the stale remote
+        self.assertFalse(self.mid_rebase())
+        archive = lc.copies_archive(self.branch, self.remote_sha)
+        self.assertEqual(self.on_origin(archive), self.remote_sha)
+        self.assertIn(archive, line)
+        self.assertNotIn('rebase conflicts', line)
+
+    def test_a_foreign_commit_that_applies_is_carried_onto_the_head_and_published(self):
+        # someone pushed to origin/<branch> after the session's rebase: the factory carries it
+        foreign = self.push_from_elsewhere('d', 'd by a person\n', "fix: a person's own fix")
+        head = self.head()
+        ok, line = lc.publish(self.repo, self.branch, foreign, main='main')
+        self.assertTrue(ok, line)
+        self.assertIn(f"carried 1 commit(s) the rebase dropped ({foreign[:9]} fix: a person's "
+                      f"own fix)", line)
+        remote = self.remote()
+        self.assertEqual(remote, self.head())
+        self.assertEqual(self.sh(['rev-parse', 'HEAD~1'], self.repo), head)  # on top of it
+        self.assertEqual(self.sh(['log', '-1', '--format=%s %ae', remote], self.repo),
+                         "fix: a person's own fix person@example.com")
+        self.assertEqual(self.sh(['cherry', 'origin/main', remote], self.repo).count('- '), 0)
+        self.assertEqual(self.on_origin(lc.copies_archive(self.branch, foreign)), foreign)
+
+    def test_a_foreign_commit_that_conflicts_is_never_dropped_and_the_trunk_is_named(self):
+        # someone pushed to origin/<branch> after the session's rebase; it touches `b`, so
+        # neither carrying it nor a rebase onto the remote applies — the session is told the
+        # trunk, never the branch
+        foreign = self.push_from_elsewhere('b', 'b by a person\n', "fix: a person's own fix")
+        head = self.head()
+        ok, line = lc.publish(self.repo, self.branch, foreign, main='main')
+        self.assertFalse(ok, line)
+        self.assertEqual(self.remote(), foreign)              # nothing clobbered
+        self.assertEqual(self.head(), head)                   # the worktree as it was
+        self.assertFalse(self.mid_rebase())
+        self.assertEqual(self.on_origin(lc.copies_archive(self.branch, foreign)), '')
+        self.assertTrue(lc.stale_head(line), line)
+        self.assertFalse(lc.rebase_conflict(line), line)     # the ping-pong's refusal
+        self.assertIsNone(lc.push_failure(line))
+        self.assertIn('would lose 1 commit', line)
+        self.assertIn(foreign[:9], line)
+        self.assertIn("a person's own fix", line)
+        self.assertNotIn('own b', line)      # accounted for: resolved by hand, carried
+        self.assertNotIn('(#804)', line)     # accounted for: the trunk's, reworded
+        self.assertIn('rebase onto origin/main', line)
+        self.assertIn(f'cherry-pick {foreign[:9]}', line)
+        self.assertNotIn(f'rebase onto origin/{self.branch}', line)
+
+    def test_the_hold_never_contradicts_the_lane(self):
+        foreign = self.push_from_elsewhere('b', 'b by a person\n', "fix: a person's own fix")
+        ok, line = lc.publish(self.repo, self.branch, foreign, main='main')
+        self.assertFalse(ok, line)
+        text = lc.stale_head_text(self.branch, line)
+        self.assertIn('rebase onto origin/main', text)
+        self.assertIn(foreign[:9], text)
+        self.assertNotIn(f'rebase onto origin/{self.branch}', text)
+        self.assertIn('never a force', text)
+
+    def test_a_foreign_commit_carried_onto_the_head_is_not_lost(self):
+        foreign = self.push_from_elsewhere('d', 'd by a person\n', "fix: a person's own fix")
+        self.sh(['fetch', '-q', 'origin'], self.repo)
+        self.sh(['cherry-pick', foreign], self.repo)  # the session carried it, as told
+        head = self.head()
+        ok, line = lc.publish(self.repo, self.branch, foreign, main='main')
+        self.assertTrue(ok, line)
+        self.assertEqual(self.remote(), head)
+        self.assertEqual(self.sh(['log', '-1', '--format=%ae', head], self.repo),
+                         'person@example.com')
+
+    def test_a_redaction_finding_refuses_before_the_old_tip_is_archived(self):
+        home = os.path.join(self.base, 'home')
+        os.makedirs(home)
+        account = 'acct-' + 'pingpong'
+        with open(os.path.join(home, 'config.yaml'), 'w', encoding='utf-8') as f:
+            f.write(f'worker_pool:\n  accounts:\n    - name: {account}\n')
+        old_home = env.ASF_HOME
+        env.ASF_HOME = home
+        self.addCleanup(lambda: setattr(env, 'ASF_HOME', old_home))
+        redact._DEFAULT_CACHE.clear()
+        self.addCleanup(redact._DEFAULT_CACHE.clear)
+        self.commit('plan.md', f'a plan naming {account} directly\n', 'task(T-0338): a plan')
+        ok, line = lc.publish(self.repo, self.branch, self.remote_sha, main='main')
+        self.assertFalse(ok, line)
+        self.assertIn('redact: plan.md:1', line)
+        self.assertEqual(self.remote(), self.remote_sha)
+        self.assertEqual(self.on_origin(lc.copies_archive(self.branch, self.remote_sha)), '')
+
+
+class PublishRewrittenOwnCommitsTest(_RebaseShape):
+    """The other shapes publish must hold: a plain new commit (a fast-forward), the session's own
+    commits rewritten by an amend or a squash after a rebase onto the trunk (published), a
+    squash that lost work (refused, the trunk named), and a stale head on the remote's own
+    base — origin/<branch> moved, the head did not — which is still rebased onto the remote by
+    the factory, and told "rebase onto origin/<branch>" when that conflicts: the one case where
+    that instruction is the right one."""
+
+    def setUp(self):
+        super().setUp()
+        self.commit('a', 'own a\n', 'task(T-0338): own a')
+        self.commit('b', 'b v1\n', 'task(T-0338): own b')
+        self.push_branch()
+
+    def test_a_new_commit_on_top_of_the_remote_is_a_fast_forward(self):
+        head = self.commit('c', 'own c\n', 'task(T-0338): own c')
+        ok, line = lc.publish(self.repo, self.branch, self.remote_sha, main='main')
+        self.assertTrue(ok, line)
+        self.assertEqual(self.remote(), head)
+        self.assertEqual(self.on_origin(lc.copies_archive(self.branch, self.remote_sha)), '')
+
+    def test_an_amended_own_commit_after_a_rebase_is_published(self):
+        self.land_on_trunk(('x', 'x\n', 'chore: x'))
+        self.rebase_resolving({})
+        self.commit('b', 'b v2\n', 'task(T-0338): own b')  # a new commit first, then fold it
+        self.sh(['reset', '-q', '--soft', 'HEAD~1'], self.repo)
+        self.sh(['commit', '-q', '--amend', '--no-edit'], self.repo)  # own b, amended
+        head = self.head()
+        ok, line = lc.publish(self.repo, self.branch, self.remote_sha, main='main')
+        self.assertTrue(ok, line)
+        self.assertEqual(self.remote(), head)
+
+    def test_own_commits_squashed_after_a_rebase_are_published(self):
+        self.land_on_trunk(('x', 'x\n', 'chore: x'))
+        self.rebase_resolving({})
+        self.sh(['reset', '-q', '--soft', 'origin/main'], self.repo)
+        self.sh(['commit', '-qm', 'task(T-0338): a and b, squashed'], self.repo)
+        head = self.head()
+        ok, line = lc.publish(self.repo, self.branch, self.remote_sha, main='main')
+        self.assertTrue(ok, line)
+        self.assertEqual(self.remote(), head)
+
+    def test_a_rewrite_that_dropped_a_commit_gets_it_carried_back(self):
+        self.land_on_trunk(('x', 'x\n', 'chore: x'))
+        self.rebase_resolving({})
+        self.sh(['reset', '-q', '--hard', 'HEAD~1'], self.repo)  # own b gone
+        self.sh(['commit', '-q', '--amend', '-m', 'task(T-0338): a, reworded'], self.repo)
+        head = self.head()
+        ok, line = lc.publish(self.repo, self.branch, self.remote_sha, main='main')
+        self.assertTrue(ok, line)
+        # `a, reworded` keeps its patch: only `own b` was dropped, and it alone is carried
+        self.assertIn(f'carried 1 commit(s) the rebase dropped ({self.remote_sha[:9]} '
+                      f'task(T-0338): own b)', line)
+        self.assertEqual(self.remote(), self.head())
+        self.assertEqual(self.sh(['rev-parse', 'HEAD~1'], self.repo), head)
+        with open(os.path.join(self.repo, 'b'), encoding='utf-8') as f:
+            self.assertEqual(f.read(), 'b v1\n')
+
+    def test_a_dropped_commit_that_no_longer_applies_is_refused_with_the_trunk_named(self):
+        self.land_on_trunk(('x', 'x\n', 'chore: x'))
+        self.rebase_resolving({})
+        self.sh(['reset', '-q', '--hard', 'HEAD~1'], self.repo)  # own b gone …
+        self.commit('b', 'b rewritten\n', 'task(T-0338): b, another way')  # … and b redone
+        head = self.head()
+        ok, line = lc.publish(self.repo, self.branch, self.remote_sha, main='main')
+        self.assertFalse(ok, line)
+        self.assertEqual(self.remote(), self.remote_sha)
+        self.assertEqual(self.head(), head)                    # every pick undone
+        self.assertEqual(self.sh(['status', '--porcelain'], self.repo), '')
+        self.assertFalse(self.mid_rebase())
+        self.assertTrue(lc.stale_head(line), line)
+        self.assertIn('would lose 1 commit', line)
+        self.assertIn(f'{self.remote_sha[:9]} task(T-0338): own b', line)
+        self.assertIn('rebase onto origin/main', line)
+        self.assertNotIn(f'rebase onto origin/{self.branch}', line)
+
+    def test_a_stale_head_on_the_remotes_base_is_rebased_onto_the_remote(self):
+        foreign = self.push_from_elsewhere('d', 'd by a person\n', "fix: a person's own fix")
+        self.commit('c', 'own c\n', 'task(T-0338): own c')
+        ok, line = lc.publish(self.repo, self.branch, foreign, main='main')
+        self.assertTrue(ok, line)
+        self.assertTrue(line.startswith(f'rebased onto origin/{self.branch} (+1 remote commits)'),
+                        line)
+        self.assertEqual(self.remote(), self.head())
+        self.assertEqual(self.sh(['rev-parse', 'HEAD~1'], self.repo), foreign)
+
+    def test_a_stale_head_on_the_remotes_base_whose_rebase_conflicts_is_told_the_branch(self):
+        foreign = self.push_from_elsewhere('b', 'b by a person\n', "fix: a person's own fix")
+        head = self.commit('b', 'b v2\n', 'task(T-0338): own b again')
+        ok, line = lc.publish(self.repo, self.branch, foreign, main='main')
+        self.assertFalse(ok, line)
+        self.assertTrue(lc.rebase_conflict(line), line)
+        self.assertIn('rebase conflicts in: b', line)
+        self.assertEqual(self.head(), head)
+        self.assertFalse(self.mid_rebase())
+        self.assertEqual(self.remote(), foreign)
+        text = lc.rebase_conflict_text(self.branch, line)
+        self.assertIn(f'Rebase onto origin/{self.branch}', text)
+        self.assertNotIn('rebase onto origin/main', text)
