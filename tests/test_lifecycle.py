@@ -2234,23 +2234,23 @@ class PublishRebasePingPongTest(_RebaseShape):
 
 
 class PublishSupersededByTrunkTest(_RebaseShape):
-    """A product's #529 (F-0097's plan branch), 2026-09-27: origin/<branch> held seven spec commits
-    whose content later landed on the trunk in a newer form (through #843). The rebased head
-    reads the trunk's copy of every file they touch; none is a patch copy of a trunk commit,
-    each conflicts when cherry-picked onto the head, so every publish refused "would lose 7
-    commits" and three correct sessions made no commit. A dropped commit whose every file the
-    head reads as the trunk has it, and whose branch change to that file the trunk's own
-    rewrite covers (the branch's net change merged onto the trunk, the trunk winning a
-    conflict, is the trunk's file) and whose trunk copy carries that change nearly whole (the
-    newer form of the same text), is accounted for. A change the trunk does not cover —
-    another hunk, another file, a line the trunk rewrote its own way — is still carried, or
-    refused."""
+    """A product's #529 (F-0097's plan branch), 2026-09-27: origin/<branch> held spec commits
+    whose content later landed on the trunk through another lane (#843). The rebased head reads
+    the trunk's copy of every file they touch; none is a patch copy of a trunk commit, each
+    conflicts when cherry-picked onto the head, so every publish refused "would lose 7 commits".
+    A dropped commit whose every file the head reads as the trunk has it, and whose branch
+    change to that file merges onto the trunk cleanly to the trunk's own file (the trunk holds
+    every line of it), is accounted for. A change the trunk does not hold — another hunk,
+    another file, a line the trunk wrote its own way, a person's clause inside the block both
+    sides wrote — is still carried, or refused: never published away (the 90%-agreement rule
+    with ``-X ours`` dropped the last two)."""
 
-    def spec(self, body=True, l10='line 10', **clauses):
+    def spec(self, body=True, l10='line 10', l1='line 1', **clauses):
         """A skeleton of twelve lines; ``body``: twenty clauses of the spec after line 5, clause
         ``cN`` read from ``clauses`` when given."""
         out = [f'line {n}' for n in range(1, 13)]
         out[9] = l10
+        out[0] = l1
         if body:
             out[5:5] = [clauses.get(f'c{k}', f'spec clause {k}') for k in range(1, 21)]
         return ''.join(f'{ln}\n' for ln in out)
@@ -2268,10 +2268,41 @@ class PublishSupersededByTrunkTest(_RebaseShape):
         self.sh(['reset', '-q', '--hard', 'origin/main'], self.repo)
         return self.commit('plan.md', 'the plan\n', 'docs(plan): voice parity plan')
 
-    def land_the_newer_form(self):
-        # the same spec, landed through another lane, with clause 3 in its final form
-        self.land_on_trunk(('spec.md', self.spec(c3='clause 3, final', c7='clause 7, revised'),
+    def land_the_newer_form(self, c3='clause 3, revised'):
+        # the same spec, landed through another lane, with the trunk's own edit to line 1
+        self.land_on_trunk(('spec.md', self.spec(c3=c3, c7='clause 7, revised',
+                                                 l1='line 1, the trunk'),
                             'spec(F-0097): the spec, landed (#843)'))
+
+    def test_a_line_the_trunk_wrote_its_own_way_is_never_accounted_for(self):
+        # clause 3 landed in the trunk's own final form: which one survives is a person's call
+        self.push_branch()
+        self.land_the_newer_form(c3='clause 3, final')
+        head = self.rebase_onto_trunk_as_the_trunk_has_it()
+        lost = lc.lost_commits(self.repo, head, self.remote_sha, self.branch)
+        self.assertEqual(len(lc.unaccounted_commits(self.repo, head, self.remote_sha, lost,
+                                                    'main')), 2)
+        ok, line = lc.publish(self.repo, self.branch, self.remote_sha, main='main')
+        self.assertFalse(ok, line)
+        self.assertEqual(self.remote(), self.remote_sha)
+
+    def test_a_persons_clause_inside_the_block_both_sides_wrote_is_never_published_away(self):
+        # 18 of the branch's 20 lines are the trunk's: a ratio called this superseded, and
+        # `-X ours` dropped the person's clause 15 from the published branch
+        self.commit('spec.md', self.spec(c3='clause 3, revised', c7='clause 7, revised',
+                                         c15='clause 15, a person'),
+                    "docs(spec): a person's clause")
+        self.push_branch()
+        self.land_the_newer_form(c3='clause 3, final')
+        head = self.rebase_onto_trunk_as_the_trunk_has_it()
+        lost = lc.lost_commits(self.repo, head, self.remote_sha, self.branch)
+        self.assertEqual(len(lc.unaccounted_commits(self.repo, head, self.remote_sha, lost,
+                                                    'main')), 3)
+        ok, line = lc.publish(self.repo, self.branch, self.remote_sha, main='main')
+        self.assertFalse(ok, line)
+        self.assertIn('would lose 3 commit', line)
+        self.assertEqual(self.remote(), self.remote_sha)
+        self.assertEqual(self.head(), head)
 
     def test_a_superseded_spec_commit_is_accounted_for(self):
         self.push_branch()
@@ -2330,7 +2361,8 @@ class PublishSupersededByTrunkTest(_RebaseShape):
         self.push_branch()
         self.land_the_newer_form()
         self.rebase_onto_trunk_as_the_trunk_has_it()
-        head = self.commit('spec.md', self.spec(c3='clause 3, final', c7='the session'),
+        head = self.commit('spec.md', self.spec(c3='clause 3, revised', c7='the session',
+                                                l1='line 1, the trunk'),
                            'docs(spec): the session edits the spec')
         lost = lc.lost_commits(self.repo, head, self.remote_sha, self.branch)
         self.assertEqual(len(lc.unaccounted_commits(self.repo, head, self.remote_sha, lost,

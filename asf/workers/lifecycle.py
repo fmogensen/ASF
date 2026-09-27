@@ -1104,7 +1104,7 @@ def unaccounted_commits(wt, new, remote_sha, lost, main='main'):
     rewritten: a commit ``new`` carries past the trunk under the same author and subject (a
     conflict resolved by hand keeps its message, not its patch — the patch-equivalent copies
     :func:`lost_commits` already left out), or an empty one; or superseded: the trunk has
-    since rewritten the files it touches in a newer form, and ``new`` reads the trunk's copy
+    since taken in every line of its files' change, and ``new`` reads the trunk's copy
     (:func:`_superseded_by_trunk`). The whole old tip is accounted
     for when its net change against its trunk base is already in ``new``
     (:func:`_net_change_kept`: a squash, or work the trunk carried in another form). What is
@@ -1194,16 +1194,17 @@ def _net_change_kept(wt, new, remote_sha, base):
 
 
 def _trunk_covered_tree(wt, remote_sha, trunk, base):
-    """The tree of the old tip's net change, ``base..remote_sha``, merged onto the trunk with
-    the trunk winning every conflicting hunk (``-X ours``), and the paths still conflicted (a
-    modify/delete): ``(tree, conflicted)``, or ``('', set())`` when it cannot be read. A path
-    where this tree reads the trunk's own blob holds no branch change the trunk did not cover:
-    each hunk of it is already in the trunk, or sits where the trunk wrote its own newer form.
-    A hunk the trunk left alone survives the merge, and the path then differs from the trunk.
-    Merge-free: ``git merge-tree`` writes only objects."""
+    """The tree of the old tip's net change, ``base..remote_sha``, merged onto the trunk — a
+    plain three-way merge, no side winning a conflict — and the paths it left conflicted:
+    ``(tree, conflicted)``, or ``('', set())`` when it cannot be read. A path that merges
+    cleanly to the trunk's own blob holds no branch change the trunk lacks: every hunk of it is
+    already in the trunk. A hunk the trunk left alone survives the merge, and a line both sides
+    wrote their own way conflicts, so either keeps the path apart from the trunk (``-X ours``
+    let the trunk win such a conflict, and a person's unique line inside a block both sides
+    wrote was published away with it). Merge-free: ``git merge-tree`` writes only objects."""
     if not base:
         return '', set()
-    p = _git(['merge-tree', '--write-tree', '--name-only', '--no-messages', '-X', 'ours',
+    p = _git(['merge-tree', '--write-tree', '--name-only', '--no-messages',
               f'--merge-base={base}', trunk, remote_sha], wt)
     lines = p.stdout.splitlines()
     if p.returncode not in (0, 1) or not lines or not lines[0].strip():
@@ -1211,27 +1212,17 @@ def _trunk_covered_tree(wt, remote_sha, trunk, base):
     return lines[0].strip(), {ln for ln in lines[1:] if ln.strip()}
 
 
-#: The share of the lines a branch's net change to a path writes (added lines present in the
-#: trunk's copy, removed lines absent from it) that the trunk's copy must agree with for the
-#: branch's change to count as superseded — the trunk carries the same text in a newer form,
-#: not its own rewrite of the same lines (a one-line edit both sides made differently agrees
-#: 1 in 2 and stays lost work).
-SUPERSEDED_AGREEMENT = 0.9
-
-
 def _superseded_by_trunk(wt, sha, new, trunk, covered, base='', remote_sha=''):
-    """True when ``sha``'s change was superseded by the trunk (a product's #529, F-0097's plan
-    branch: seven spec commits whose content later landed on the trunk in a newer form through
-    #843 — no patch copy, each a conflict when carried, "would lose 7 commits" at every
-    publish). Every path ``sha`` touches must be, at ``new``, the trunk's own blob (the head
-    kept nothing of its own there — present or absent alike), and the branch's whole net change
-    to that path must be covered by the trunk (:func:`_trunk_covered_tree`: merged onto the
-    trunk with the trunk winning, the path is the trunk's), and the trunk's copy must carry that
-    change nearly whole (:func:`_trunk_agrees`: the same text in a newer form, not the trunk's
-    own rewrite of the same lines). A person's hunk the trunk never rewrote survives that
-    merge, and a line both sides rewrote their own way disagrees, so its commit — and every
-    other commit on that path — stays unaccounted: carried by :func:`carry_onto_head`, or
-    refused. The old tip is archived before the push, as for every accounted rebase."""
+    """True when ``sha``'s change is already the trunk's (a product's #529, F-0097's plan branch:
+    spec commits whose content later landed on the trunk through another lane — no patch copy,
+    each a conflict when carried). Every path ``sha`` touches must be, at ``new``, the trunk's
+    own blob (the head kept nothing of its own there — present or absent alike), and the
+    branch's whole net change to that path must merge onto the trunk cleanly and leave the
+    trunk's blob (:func:`_trunk_covered_tree`): the trunk holds every line of it. A change the
+    trunk wrote its own way — a conflict — is never judged superseded, however much of the
+    file agrees: which side's line should survive is a person's call, so its commit stays
+    unaccounted, carried by :func:`carry_onto_head` or refused. The old tip is archived before
+    the push, as for every accounted rebase."""
     tree, conflicted = covered or ('', set())
     if not tree or not base or not remote_sha:
         return False
@@ -1246,32 +1237,7 @@ def _superseded_by_trunk(wt, sha, new, trunk, covered, base='', remote_sha=''):
         at_trunk = _blob(wt, trunk, path)
         if _blob(wt, new, path) != at_trunk or _blob(wt, tree, path) != at_trunk:
             return False
-        if not _trunk_agrees(wt, base, remote_sha, trunk, path):
-            return False
     return True
-
-
-def _trunk_agrees(wt, base, remote_sha, trunk, path):
-    """True when the trunk's copy of ``path`` carries the branch's net change to it,
-    ``base..remote_sha``, nearly whole: of the non-blank lines that change adds and removes,
-    at least :data:`SUPERSEDED_AGREEMENT` are added lines the trunk's copy has or removed lines
-    it lacks. No line changed agrees; a binary change never does."""
-    d = _git(['diff', '-U0', '--no-renames', '--no-color', base, remote_sha, '--', path], wt)
-    if d.returncode != 0:
-        return False
-    added, removed, in_hunk = [], [], False
-    for ln in d.stdout.splitlines():
-        if ln.startswith('Binary files '):
-            return False
-        in_hunk = in_hunk or ln.startswith('@@')
-        if in_hunk and ln[:1] in ('+', '-') and ln[1:].strip():
-            (added if ln[0] == '+' else removed).append(ln[1:].strip())
-    if not added and not removed:
-        return True
-    t = _git(['show', f'{trunk}:{path}'], wt)
-    have = {ln.strip() for ln in t.stdout.splitlines()} if t.returncode == 0 else set()
-    agree = sum(1 for ln in added if ln in have) + sum(1 for ln in removed if ln not in have)
-    return agree >= SUPERSEDED_AGREEMENT * (len(added) + len(removed))
 
 
 def _blob(wt, rev, path):
