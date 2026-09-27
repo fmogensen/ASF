@@ -279,6 +279,13 @@ class HookTests(unittest.TestCase):
             'git log --oneline -- rules/ asf/briefs/templates/coder.md',
             'git diff origin/main -- rules/README.md; git show HEAD:rules/R-0042.md',
             'rg "asf hooks install" docs > /tmp/out.txt',
+            # F-0064 (2026-09-27): the same misreading held a grep as touch_security
+            'grep -n "secrets\\|gh secret\\|gh auth\\|auth_env" asf/approvals.py | head -30',
+            # T-0301 (2026-09-27): a commit whose message names a template and a `<id>` was
+            # refused as a write to the template
+            'git commit -s -m "$(cat <<\'EOF\'\ntask(T-0301): parts\n\n'
+            'asf/briefs/templates/reshape.md is amendable; `<id> (<writes>)`\nEOF\n)"',
+            'git commit -s -m "task(T-0301): leave asf/briefs/templates/reshape.md, <id> -> x"',
         ):
             with self.subTest(command=command):
                 self.assertEqual(self.call('Bash', {'command': command}), (0, ''))
