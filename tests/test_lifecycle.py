@@ -816,6 +816,70 @@ class SameFindingEscalation(unittest.TestCase):
         self.assertEqual(lc.finding_of('review', 'x', ['b', 'a', 'b']), ['a', 'b'])
 
 
+class HookRefusalEscalation(unittest.TestCase):
+    """B-0140: a push the repo's own pre-push hook refuses is not tried a third time blind — the
+    first refusal spends no round, but a second identical refusal in a row routes by what the
+    hook said instead of asking a session to retry the same push it already failed."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.path = os.path.join(self.d, 's.jsonl')
+        self.n = 0
+
+    def write(self, *lines):
+        with open(self.path, 'a') as f:
+            for ln in lines:
+                f.write(json.dumps(ln) + '\n')
+
+    def hold(self, text):
+        self.n += 1
+        run = {'job': f'fix-{self.n}', 'item': 'B-0140', 'branch': 'fix/B-0140',
+               'pid': self.n, 'started': f't{self.n:02d}a', 'kind': 'fix-bug'}
+        self.write(run)
+        fields, line = lc.hook_refusal_hold(self.path, run, text, f't{self.n:02d}b')
+        self.write(dict(fields, job=run['job']))
+        return fields, line
+
+    LINT = ("the push was refused by the repo's own hook — pre-push: lint failed on x.py:12 — "
+            "fix what it names, commit, and push again")
+    REDACT = ("the push was refused by the repo's own hook — redact: plan.md:3 names a worker "
+              "account — fix what it names, commit, and push again")
+
+    def test_the_first_refusal_spends_no_round(self):
+        fields, line = self.hold(self.LINT)
+        self.assertEqual(fields['correction']['same'], 1)
+        self.assertNotIn('at_cap', fields['correction'])
+        self.assertNotIn('parked', fields['correction'])
+        self.assertIn('(no round spent)', line)
+
+    def test_the_correction_carries_the_hooks_own_tail(self):
+        fields, _ = self.hold(self.LINT)
+        self.assertIn('lint failed on x.py:12', fields['correction']['text'])
+
+    def test_a_second_identical_refusal_goes_to_adjudicate(self):
+        self.hold(self.LINT)
+        fields, line = self.hold(self.LINT)
+        self.assertEqual(fields['correction']['same'], 2)
+        self.assertTrue(fields['correction']['at_cap'])
+        self.assertIn('adjudicate pending', line)
+        self.assertEqual(lc.derive(lc.latest(self.path)['fix-2'], lc.Evidence()).name,
+                         lc.ADJUDICATE)
+
+    def test_a_second_identical_redaction_refusal_is_a_security_hold(self):
+        self.hold(self.REDACT)
+        fields, line = self.hold(self.REDACT)
+        self.assertTrue(fields['correction']['parked'])
+        self.assertEqual(fields.get('operator_flagged'), 1)
+        self.assertIn('security hold', line)
+
+    def test_a_different_refusal_resets_the_count(self):
+        self.hold(self.LINT)
+        fields, _ = self.hold(self.REDACT)
+        self.assertEqual(fields['correction']['same'], 1)
+        self.assertNotIn('at_cap', fields['correction'])
+
+
 class EmptyEndsTests(unittest.TestCase):
     """F-0095 §2.3: an empty end is its own kind, it is counted, and the second one parks."""
     EMPTY_END = 'failed: ' + lc.EMPTY_BRANCH
