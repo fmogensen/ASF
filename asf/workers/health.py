@@ -47,10 +47,13 @@ empty>)``.
 import json
 import os
 import re
+import signal
 import subprocess
+import time
 
 from asf import gitpush, refguard
 from asf.workers import cloud
+from asf.workers import cloudpid
 from asf.workers import headroom
 from asf.workers import observe
 from asf.workers import pool as pool_mod
@@ -67,6 +70,11 @@ UNPUSHED_REASON_PREFIXES = ('failed: not pushed', f'failed: {report_mod.UNPUSHED
 
 
 pid_alive = lifecycle.pid_alive
+
+#: seconds an ended run's own process gets to exit by itself before health stops it (T-0196)
+LINGER_GRACE_S = 300
+#: seconds between the SIGTERM and the SIGKILL of a lingering process
+STOP_WAIT_S = 5
 
 
 def record_items(product):
@@ -93,6 +101,132 @@ def alive_for(product, runs, session_source=None):
     if why:
         return pid_alive
     return observe.identity_alive(observed, runs)
+
+
+def remote_retire(run):
+    """Disable an ended ``claude-remote`` run's routine — :func:`asf.workers.remote.retire`, the
+    one call :func:`asf.workers.cloud.stop` already makes (once per token, a refusal is False)."""
+    from asf.workers import remote
+    return remote.retire(run)
+
+
+def command_line(pid):
+    """The process ``pid``'s command line (``ps -o command=``), ``''`` when it is gone."""
+    try:
+        p = subprocess.run(['ps', '-o', 'command=', '-p', str(int(pid))],
+                           capture_output=True, text=True)
+    except (OSError, ValueError, TypeError):
+        return ''
+    return p.stdout.strip() if p.returncode == 0 else ''
+
+
+def is_print_worker(cmd, binary=None):
+    """``cmd`` is a headless worker the factory launches: the runtime binary as ``argv[0]``,
+    ``-p``/``--print`` among its arguments. An interactive session never carries ``-p``."""
+    argv = (cmd or '').split()
+    binary = os.path.basename(binary or runtime_mod.DEFAULT_BINARY)
+    return bool(argv) and os.path.basename(argv[0]) == binary and (
+        '-p' in argv[1:] or '--print' in argv[1:])
+
+
+def _exists(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def stop_process(pid, wait_s=STOP_WAIT_S):
+    """SIGTERM, then SIGKILL when ``pid`` is still there after ``wait_s``. The signal that
+    ended it (``'SIGTERM'`` | ``'SIGKILL'``), or ``'gone'`` when it had already exited."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return 'gone'
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        if not _exists(pid):
+            return 'SIGTERM'
+        time.sleep(0.1)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return 'SIGTERM'
+    return 'SIGKILL'
+
+
+def settle_ended(product, sessions, now=None, fix=True, session_source=None, retire=None,
+                 cmdline=None, wait_s=STOP_WAIT_S, grace_s=LINGER_GRACE_S):
+    """T-0196: an ended run is finished, whatever its pid still answers. ``[(job, what, detail)]``.
+
+    * a cloud run (``pid: actions:…`` / ``remote:…``) whose token the status file still reads
+      ``working`` is settled (:func:`asf.workers.cloud.settle_ended`) — :func:`cloud.sync` never
+      looks at an ended run again, so the token otherwise answers alive for ever; with ``fix`` a
+      ``claude-remote`` run's routine is disabled too (:func:`remote_retire`) — ``settled``;
+    * a local run ended at least ``grace_s`` ago whose process is still up is stopped (SIGTERM,
+      then SIGKILL after ``wait_s``) — ``stopped`` — only when the process is provably the one
+      the factory launched for it: the observed session at the run's pid carries the run's own
+      ``ASF_SESSION``, and its command line is the runtime binary with ``-p``. A run with no
+      ``session``, a process with another or no ``ASF_SESSION`` (an interactive session) or any
+      other command line is never touched. Without ``fix`` it is only listed ``lingering``."""
+    now = time.time() if now is None else now
+    retire = retire or remote_retire
+    found, local = [], []
+    for job, run in sessions.items():
+        pid = run.get('pid')
+        if not run.get('ended') or not pid:
+            continue
+        if cloudpid.is_token(pid):
+            status = cloud.settle_ended(run)
+            if status is None:
+                continue
+            detail = f'{pid} {status}: run ended {run.get("end_reason") or ""}'.rstrip()
+            if fix and pid.startswith(cloudpid.REMOTE_PREFIX):
+                try:
+                    ok = retire(run)
+                except Exception:  # noqa: BLE001 — the token is settled either way
+                    ok = False
+                detail += '; routine disabled' if ok else '; routine left as it is'
+            found.append((job, 'settled', detail))
+            continue
+        ended = cloud._parse_ts(run.get('ended'))
+        if not run.get('session') or ended is None or now - ended < grace_s:
+            continue
+        try:
+            local.append((job, run, int(pid)))
+        except (TypeError, ValueError):
+            continue
+    if not local:
+        return found
+    cfg = spawn_mod.load_cfg()
+    observed, why = observe.read(cfg, [], source=session_source)
+    if why:
+        return found
+    by_pid = {}
+    for o in observed:
+        try:
+            by_pid[int(o.pid)] = o
+        except (TypeError, ValueError):
+            continue
+    cmdline = cmdline or command_line
+    binary = (cfg.get('worker_pool') or {}).get('binary') or runtime_mod.DEFAULT_BINARY
+    for job, run, pid in local:
+        o = by_pid.get(pid)
+        if o is None or o.owner != 'asf' or o.session != run.get('session'):
+            continue
+        if not is_print_worker(cmdline(pid), binary):
+            continue
+        mins = int((now - cloud._parse_ts(run['ended'])) // 60)
+        if not fix:
+            found.append((job, 'lingering', f'pid {pid}: ended {mins}m ago, still running'))
+            continue
+        how = stop_process(pid, wait_s)
+        found.append((job, 'stopped', f'pid {pid} ({how}): ended {run.get("end_reason")} '
+                                      f'{mins}m ago, its process still running'))
+    return found
 
 
 def _git(args, cwd):
@@ -484,6 +618,14 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
                                           lifecycle.empty_branch_text(), now)
             pool_mod.update_session(product, job, **fields)
             found.append((job, 'held', line.split(': ', 1)[1]))
+    # T-0196: an ended run is finished — its cloud token settled, its lingering process stopped
+    settled = settle_ended(product, sessions, fix=fix, session_source=session_source)
+    found.extend(settled)
+    gone_pids = {int(d.split()[1]) for _, what, d in settled if what == 'stopped'}
+    if gone_pids:
+        was_alive = alive
+        alive = lambda pid: (not (isinstance(pid, int) and pid in gone_pids)  # noqa: E731
+                             and was_alive(pid))
     _git(['fetch', '-q', 'origin', product.main], product.repo_dir)
     wdir = spawn_mod.worktrees_dir(product)
     owners = lifecycle.by_worktree(registry)

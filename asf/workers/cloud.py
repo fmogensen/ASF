@@ -511,6 +511,22 @@ def sync(product, cfg=None, now=None, gh=None, stop_fn=None, out=print, remote_c
     return found
 
 
+def settle_ended(run):
+    """An ended run's token that still says ``working`` in the status file, settled: ``finished``
+    for a run ended finished, ``dead`` for any other end. :func:`sync` reads only runs with no
+    ``ended`` line, so a run health ends in the same pass that first synced it (a quota-exhausted
+    result, a dead pid) kept its token ``working`` for ever, and every liveness check read it
+    alive (T-0196). Returns the status written, or None when there was nothing to settle."""
+    tok = (run or {}).get('pid')
+    if not run.get('ended') or not cloudpid.is_token(tok) or cloudpid.status(tok) != WORKING:
+        return None
+    from asf.workers import lifecycle
+    reason = run.get('end_reason') or 'ended'
+    status = FINISHED if reason == lifecycle.FINISHED else DEAD
+    cloudpid.record(tok, status, f'run ended: {reason}', job=run.get('job'))
+    return status
+
+
 # ---- placement's counts, status and doctor --------------------------------------------------
 
 def inflight(product_name):
