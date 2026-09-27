@@ -11,6 +11,7 @@ from asf.record.index import do_index
 from asf.record.ingest import append_history_lines
 from asf.tick import stale
 from asf.tick.stale import format_age, parse_iso
+from asf.groom import conflicts
 from asf.groom import policy
 from asf.groom import inbox
 from asf.groom.digest import write_digest
@@ -672,6 +673,7 @@ GROOM_SECTIONS = [
     ('Split parts to confirm', 'split_parts'),
     ('Blocked on a Closed item', 'blocked_closed'),
     ('Near-duplicate titles', 'dupes'),
+    ('Conflicting rules and decisions', 'conflicts'),
     ('Undecided > 14 days', 'undecided14'),
     ('Auto-filed Bugs not yet decided', 'auto_bugs'),
 ]
@@ -718,6 +720,7 @@ def build_groom_sections(canonical, derived, date, capacity=DEFAULT_CAPACITY,
         'predates': groom_predates_section(canonical, since),
         'blocked_closed': groom_blocked_on_closed(canonical),
         'dupes': groom_near_duplicates(canonical),
+        'conflicts': conflicts.conflict_lines(canonical),
         'undecided14': groom_undecided_section(canonical, now, 14, exclude=origin_ids),
         'auto_bugs': groom_auto_bugs_section(canonical),
     }
@@ -891,9 +894,25 @@ ANSWERS_FILE_RE = re.compile(r'^(?P<date>\d{4}-\d{2}-\d{2})(?:\.(?P<half>[a-z]+)
 
 #: A groom line's item token: an id, or ``inbox:<file>``.
 _LINE_TOKEN_RE = re.compile(r'^- \[[ xX]\]\s+(\S+)')
+#: A conflicts block's own token is the pair, not its lead id: one rule can conflict with
+#: several decisions, and ``_LINE_TOKEN_RE``'s first token would collapse those pairs into one
+#: line. Aliased from :data:`asf.groom.conflicts.CONFLICT_RE` (PD7) so the grammar has one home.
+_CONFLICT_TOKEN_RE = conflicts.CONFLICT_RE
 #: An open ``inbox:<file>`` line — settled once its card has left the intake dir.
 _OPEN_INBOX_LINE_RE = re.compile(r'^(- \[ \]\s+inbox:(?P<name>\S+)\s.*→\s*answer:\s*____)$')
 SETTLED_SUFFIX = ' (settled: the card left the inbox)'
+
+
+def line_token(line):
+    """The dedupe token for one groom line, or one conflicts block's first line: the pair
+    (:data:`_CONFLICT_TOKEN_RE`) when the line opens a conflicts question, else
+    :data:`_LINE_TOKEN_RE`'s lead token, else the line itself. ``.match`` anchors at the start of
+    the string, so a multi-line conflicts block is matched on its own first line."""
+    m = _CONFLICT_TOKEN_RE.match(line)
+    if m:
+        return conflicts.decline_key(m.group('a'), m.group('b'))
+    m = _LINE_TOKEN_RE.match(line)
+    return m.group(1) if m else line
 
 
 def merge_groom_text(existing, sections, intake_path=None):
@@ -917,12 +936,11 @@ def merge_groom_text(existing, sections, intake_path=None):
         if start is not None:
             end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith('## ')),
                        len(lines))
-        have = {m.group(1) for l in (lines[start + 1:end] if start is not None else ())
-                for m in [_LINE_TOKEN_RE.match(l)] if m}
+        have = {line_token(l) for l in (lines[start + 1:end] if start is not None else ())
+                if _CONFLICT_TOKEN_RE.match(l) or _LINE_TOKEN_RE.match(l)}
         new = []
         for line in sections.get(key) or []:
-            m = _LINE_TOKEN_RE.match(line)
-            token = m.group(1) if m else line
+            token = line_token(line)
             if token not in have:
                 have.add(token)
                 new.append(line)
