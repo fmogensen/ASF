@@ -2,6 +2,27 @@
 
 One entry per released version, newest first.
 
+## v0.1.39 — 2026-09-27
+
+### Bugs fixed
+
+- B-0058 A blocked Bug still gets its FIX row and a blocked item its CORRECT or ADJUDICATE row: the feeder reads blocked for Features only
+- B-0062 A session that died twice asks the operator every tick instead of being held: the one dead end in the lane that is not a correction
+
+### In progress
+
+- F-0102 Deliveries: one plan, one agent, one gate for several small Features and Bug fixes across the backlog
+
+### Improvements and hotfixes
+
+- fix(lane): a refused merge asks the host whether the PR conflicts
+- fix(quota): a stale reading at a stop holds to its reset; a limit death stops its account at once
+- fix(ci_queue): the queue never cancels a trunk push run
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.39"`
+
 ## v0.1.38 — 2026-09-27
 
 ### In progress
