@@ -2233,6 +2233,110 @@ class PublishRebasePingPongTest(_RebaseShape):
         self.assertEqual(self.on_origin(lc.copies_archive(self.branch, self.remote_sha)), '')
 
 
+class PublishSupersededByTrunkTest(_RebaseShape):
+    """A product's #529 (F-0097's plan branch), 2026-09-27: origin/<branch> held seven spec commits
+    whose content later landed on the trunk in a newer form (through #843). The rebased head
+    reads the trunk's copy of every file they touch; none is a patch copy of a trunk commit,
+    each conflicts when cherry-picked onto the head, so every publish refused "would lose 7
+    commits" and three correct sessions made no commit. A dropped commit whose every file the
+    head reads as the trunk has it, and whose branch change to that file the trunk's own
+    rewrite covers (the branch's net change merged onto the trunk, the trunk winning a
+    conflict, is the trunk's file) and whose trunk copy carries that change nearly whole (the
+    newer form of the same text), is accounted for. A change the trunk does not cover —
+    another hunk, another file, a line the trunk rewrote its own way — is still carried, or
+    refused."""
+
+    def spec(self, body=True, l10='line 10', **clauses):
+        """A skeleton of twelve lines; ``body``: twenty clauses of the spec after line 5, clause
+        ``cN`` read from ``clauses`` when given."""
+        out = [f'line {n}' for n in range(1, 13)]
+        out[9] = l10
+        if body:
+            out[5:5] = [clauses.get(f'c{k}', f'spec clause {k}') for k in range(1, 21)]
+        return ''.join(f'{ln}\n' for ln in out)
+
+    def setUp(self):
+        super().setUp()
+        self.land_on_trunk(('spec.md', self.spec(body=False), 'docs(spec): skeleton'))
+        self.sh(['reset', '-q', '--hard', 'origin/main'], self.repo)
+        self.commit('spec.md', self.spec(c3='clause 3, draft'), 'docs(spec): voice parity rev 1')
+        self.commit('spec.md', self.spec(c3='clause 3, revised', c7='clause 7, revised'),
+                    'docs(spec): voice parity rev 2')
+
+    def rebase_onto_trunk_as_the_trunk_has_it(self):
+        """The session's rebase: the head is the trunk plus the session's own plan commit."""
+        self.sh(['reset', '-q', '--hard', 'origin/main'], self.repo)
+        return self.commit('plan.md', 'the plan\n', 'docs(plan): voice parity plan')
+
+    def land_the_newer_form(self):
+        # the same spec, landed through another lane, with clause 3 in its final form
+        self.land_on_trunk(('spec.md', self.spec(c3='clause 3, final', c7='clause 7, revised'),
+                            'spec(F-0097): the spec, landed (#843)'))
+
+    def test_a_superseded_spec_commit_is_accounted_for(self):
+        self.push_branch()
+        self.land_the_newer_form()
+        head = self.rebase_onto_trunk_as_the_trunk_has_it()
+        lost = lc.lost_commits(self.repo, head, self.remote_sha, self.branch)
+        self.assertEqual(len(lost), 2)
+        self.assertEqual(lc.unaccounted_commits(self.repo, head, self.remote_sha, lost, 'main'), [])
+        ok, line = lc.publish(self.repo, self.branch, self.remote_sha, main='main')
+        self.assertTrue(ok, line)
+        self.assertEqual(self.remote(), head)
+        self.assertEqual(self.on_origin(lc.copies_archive(self.branch, self.remote_sha)),
+                         self.remote_sha)
+
+    def test_a_unique_commit_beside_the_superseded_ones_is_still_carried(self):
+        self.commit('notes.md', 'a person\'s notes\n', "docs: a person's own notes")
+        self.push_branch()
+        self.land_the_newer_form()
+        head = self.rebase_onto_trunk_as_the_trunk_has_it()
+        lost = lc.lost_commits(self.repo, head, self.remote_sha, self.branch)
+        self.assertEqual(lc.unaccounted_commits(self.repo, head, self.remote_sha, lost, 'main'),
+                         [self.remote_sha[:9]])
+        ok, line = lc.publish(self.repo, self.branch, self.remote_sha, main='main')
+        self.assertTrue(ok, line)
+        self.assertIn("carried 1 commit(s) the rebase dropped", line)
+        self.assertEqual(self.sh(['rev-parse', 'HEAD~1'], self.repo), head)
+        with open(os.path.join(self.repo, 'notes.md'), encoding='utf-8') as f:
+            self.assertEqual(f.read(), "a person's notes\n")
+
+    def test_a_unique_hunk_the_trunk_did_not_rewrite_is_never_accounted_for(self):
+        # the branch also changed line 10, which the trunk's newer form left alone: the file's
+        # branch change is not covered, so no commit touching it is the trunk's
+        self.commit('spec.md', self.spec(c3='clause 3, revised', c7='clause 7, revised',
+                                         l10='a person'), "docs(spec): a person's own line")
+        self.push_branch()
+        self.land_the_newer_form()
+        head = self.rebase_onto_trunk_as_the_trunk_has_it()
+        lost = lc.lost_commits(self.repo, head, self.remote_sha, self.branch)
+        self.assertEqual(len(lc.unaccounted_commits(self.repo, head, self.remote_sha, lost,
+                                                    'main')), 3)
+        ok, line = lc.publish(self.repo, self.branch, self.remote_sha, main='main')
+        self.assertFalse(ok, line)
+        self.assertIn('would lose 3 commit', line)
+        self.assertEqual(self.remote(), self.remote_sha)
+        self.assertEqual(self.head(), head)
+
+    def test_a_branch_change_the_trunk_never_touched_is_never_accounted_for(self):
+        # the head dropped the branch's spec work and the trunk never rewrote it: lost work
+        self.push_branch()
+        head = self.rebase_onto_trunk_as_the_trunk_has_it()
+        lost = lc.lost_commits(self.repo, head, self.remote_sha, self.branch)
+        self.assertEqual(len(lc.unaccounted_commits(self.repo, head, self.remote_sha, lost,
+                                                    'main')), 2)
+
+    def test_a_head_that_edits_the_file_itself_is_not_the_trunks(self):
+        self.push_branch()
+        self.land_the_newer_form()
+        self.rebase_onto_trunk_as_the_trunk_has_it()
+        head = self.commit('spec.md', self.spec(c3='clause 3, final', c7='the session'),
+                           'docs(spec): the session edits the spec')
+        lost = lc.lost_commits(self.repo, head, self.remote_sha, self.branch)
+        self.assertEqual(len(lc.unaccounted_commits(self.repo, head, self.remote_sha, lost,
+                                                    'main')), 2)
+
+
 class PublishRewrittenOwnCommitsTest(_RebaseShape):
     """The other shapes publish must hold: a plain new commit (a fast-forward), the session's own
     commits rewritten by an amend or a squash after a rebase onto the trunk (published), a

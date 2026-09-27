@@ -107,6 +107,61 @@ class AnAfterOnAMergedTaskWaitsOnItsAbsorber(unittest.TestCase):
         self.assertEqual(self.by(idx)['T-0001'].action, 'would launch')
 
 
+class AnAfterOnARemovedButLandedTaskIsLanded(unittest.TestCase):
+    """A product's T-0360 landed (PR #850, Closed) and groom then set ``removed: "it landed…"`` on it;
+    the index reader drops a removed card, so ``landed_ids`` never saw it Closed and T-0362,
+    T-0363 and T-0364 (F-0117's delivery) waited ON T-0360 for ever. A removed card still
+    answers ``after:`` with its state: done is done."""
+
+    def index(self, state='Closed', delivery=False):
+        items = {
+            'F-0001': {'id': 'F-0001', 'type': 'feature', 'stage': 'building 1/3', 'decided': True,
+                       'state': 'Active', 'children': ['T-0001', 'T-0002', 'T-0003']},
+            'T-0001': {'id': 'T-0001', 'type': 'task', 'parent': 'F-0001', 'rank': 1,
+                       'decided': True, 'state': state, 'writes': ['a.py'],
+                       'removed': 'it landed as PR #850'},
+            'T-0002': {'id': 'T-0002', 'type': 'task', 'parent': 'F-0001', 'rank': 2,
+                       'decided': True, 'state': 'New', 'writes': ['b.py'], 'after': ['T-0001']},
+            'T-0003': {'id': 'T-0003', 'type': 'task', 'parent': 'F-0001', 'rank': 3,
+                       'decided': True, 'state': 'New', 'writes': ['c.py'],
+                       'after': ['T-0001', 'T-0002']}}
+        if delivery:
+            items['T-0002']['delivers'] = ['T-0002', 'T-0003']
+            items['T-0003']['delivered_by'] = 'T-0002'
+        return {'items': items}
+
+    def by(self, idx):
+        return {r.item_id: r for r in rows.candidates(idx, product(), [])}
+
+    def test_a_task_after_a_removed_closed_task_launches(self):
+        by = self.by(self.index())
+        self.assertEqual(by['T-0002'].action, 'would launch')
+        self.assertEqual(by['T-0003'].action, 'WAITS ON T-0002')
+
+    def test_a_delivery_after_a_removed_closed_task_launches(self):
+        by = self.by(self.index(delivery=True))
+        self.assertEqual((by['T-0002'].kind, by['T-0002'].action), (rows.DELIVERY_CODE, rows.LAUNCH))
+
+    def test_it_launches_through_the_whole_plan(self):
+        launching = [r.item_id for r in rows.plan_rows(self.index(), product(), [], 3) if r.launches]
+        self.assertEqual(launching, ['T-0002'])
+
+    def test_a_removed_card_still_open_does_not_count_as_landed(self):
+        self.assertNotIn('T-0001', rows.landed_ids(rows.items_of(self.index(state='Active'))))
+        self.assertIn('T-0001', rows.landed_ids(rows.items_of(self.index())))
+
+    def test_an_after_on_a_task_merged_into_a_removed_closed_task_launches(self):
+        idx = self.index()
+        idx['items']['T-0001']['merged'] = ['T-0009']
+        idx['items']['T-0002']['after'] = ['T-0009']
+        self.assertEqual(self.by(idx)['T-0002'].action, 'would launch')
+
+    def test_the_removed_card_stays_out_of_the_live_map(self):
+        items = rows.items_of(self.index())
+        self.assertNotIn('T-0001', items)
+        self.assertIn('T-0001', rows.landed_ids(rows.items_of(items)))
+
+
 class NoRowLaunchesBehindAnUnlandedPredecessor(unittest.TestCase):
     """B-0080: `after:` held the PLAN → CODE row only; a held branch's correction and adjudicate
     rows launched anyway (on Opus) for an item that was not in dispute, only waiting."""
