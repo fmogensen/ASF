@@ -2,6 +2,28 @@
 
 One entry per released version, newest first.
 
+## v0.1.41 — 2026-09-27
+
+### Bugs fixed
+
+- B-0141 An upgrade that cannot install still parks every product's ticks for 30 minutes
+- B-0146 The TICK summary says every step is ok while the tick exits 1
+
+### In progress
+
+- F-0010 P3 wave 2 — evidence and ingest
+- F-0013 P3 wave 5 — the feeder and the tick
+- F-0014 P3 wave 6 — the CLI and the plugin
+- F-0038 A factory-only CI class: a push touching only factory code runs lint and the factory tests
+- F-0080 Closing is derived and total: a definition of done per type, reconciliation for work that predates it, nothing re-emitted
+- F-0092 An item has a budget: three sessions or $10, then it stops and says why
+- F-0099 Groom every tick: intake, policy pass and questions run on each tick, not once a day
+- F-0102 Deliveries: one plan, one agent, one gate for several small Features and Bug fixes across the backlog
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.41"`
+
 ## v0.1.40 — 2026-09-27
 
 ### Bugs fixed
