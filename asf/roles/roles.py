@@ -54,14 +54,16 @@ BINDINGS = {'spec': 'asf-writer', 'spec-amend': 'asf-writer', 'plan': 'asf-write
             'adjudicate': 'asf-interrogator',
             'delivery-plan': 'asf-writer', 'delivery-code': 'asf-coder'}
 
-#: Every role no kind binds, with the reason none does.
+#: Every role no kind binds, with the reason none does. `asf-locator` is not here (D15, F-0062):
+#: its old reason was the missing launch path, which `asf.roles.launch` ships — the role is now
+#: launchable, and which kind should run it is a feeder question, not a launch one.
 UNBOUND = {'asf-prober': 'no phase yet — the production probe is a view, not a session',
            'asf-security': 'no phase yet — the panel it belongs to is not in this epic',
-           'asf-documenter': 'no phase yet — the docs surface has no lane of its own',
-           'asf-locator': 'no launch path yet — the runtime pipes one brief and picks one '
-                          'model (F-0029 D2); a restricted-tool sub-agent needs a launch '
-                          'mechanism this factory does not have, so the role ships and binds '
-                          'to nothing'}
+           'asf-documenter': 'no phase yet — the docs surface has no lane of its own'}
+
+#: Roles neither bound nor in :data:`UNBOUND`: launchable (`asf.roles.launch.TABLE`), with no
+#: phase of their own yet — which kind should run one is a feeder question, not a launch one.
+UNBOUND_NO_REASON = ('asf-locator',)
 
 #: The prefix every role name now carries, and the alias every bare pre-prefix name resolves
 #: through — :func:`load` accepts the old name (``for_kind`` never took one: its argument is a
@@ -69,7 +71,8 @@ UNBOUND = {'asf-prober': 'no phase yet — the production probe is a view, not a
 #: written against the names of before this rename keeps working; ``doctor`` reads
 #: :func:`alias_note` to say so instead of resolving it silently.
 ROLE_PREFIX = 'asf-'
-ALIASES = {name[len(ROLE_PREFIX):]: name for name in set(BINDINGS.values()) | set(UNBOUND)}
+ALIASES = {name[len(ROLE_PREFIX):]: name
+          for name in set(BINDINGS.values()) | set(UNBOUND) | set(UNBOUND_NO_REASON)}
 
 
 def alias_note(name):

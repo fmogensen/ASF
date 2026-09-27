@@ -347,7 +347,8 @@ class BudgetConventionTests(unittest.TestCase):
 
     def test_the_four_defaults_are_what_the_card_says(self):
         self.assertEqual(conv_mod.DEFAULT_BUDGET,
-                         {'sessions': 3, 'usd': 10, 'run_minutes': 180, 'run_turns': 600})
+                         {'sessions': 3, 'usd': 10, 'run_minutes': 180, 'run_turns': 600,
+                          'run_turns_by_kind': {}})
 
     def test_a_fresh_conventions_carries_the_defaults(self):
         self.assertEqual(Conventions().budget, conv_mod.DEFAULT_BUDGET)

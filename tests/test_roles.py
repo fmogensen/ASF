@@ -370,13 +370,20 @@ class BindingTests(unittest.TestCase):
         bound = set(roles.BINDINGS.values())
         for name in roles.load_all():
             with self.subTest(role=name):
-                if name in bound:
+                if name in bound or name in roles.UNBOUND_NO_REASON:
                     self.assertNotIn(name, roles.UNBOUND)
                 else:
                     self.assertTrue(roles.UNBOUND.get(name, '').strip())
-        self.assertEqual(set(roles.UNBOUND),
-                         {'asf-prober', 'asf-security', 'asf-documenter', 'asf-locator'})
-        self.assertEqual(set(roles.load_all()), bound | set(roles.UNBOUND))
+        self.assertEqual(set(roles.UNBOUND), {'asf-prober', 'asf-security', 'asf-documenter'})
+        self.assertEqual(set(roles.load_all()),
+                         bound | set(roles.UNBOUND) | set(roles.UNBOUND_NO_REASON))
+
+    def test_no_unbound_reason_names_a_launch_path(self):
+        # D15: asf-locator's old reason was the missing launch path this Feature ships — the
+        # next role that ships unbound has to give a real one.
+        for name, reason in roles.UNBOUND.items():
+            with self.subTest(role=name):
+                self.assertNotIn('launch path', reason)
 
     def test_the_bindings_keep_the_labels_of_today(self):
         # D6: identity moves nothing about cost — the role a kind runs under is the same set the
