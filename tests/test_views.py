@@ -461,6 +461,41 @@ class SpanTests(unittest.TestCase):
         self.assertEqual(ix.age(None), '—')
 
 
+class SubtreeUsdTests(unittest.TestCase):
+    """F-0052 §2.2, T1: the one function the roadmap, the feeder and the groom all sum through."""
+
+    def items(self):
+        return {
+            'E-0001': {'id': 'E-0001', 'type': 'epic', 'children': ['F-0001', 'F-0002']},
+            'F-0001': {'id': 'F-0001', 'type': 'feature', 'parent': 'E-0001',
+                       'children': ['T-0001', 'T-0002'], 'cost': {'usd': 1.5}},
+            'T-0001': {'id': 'T-0001', 'type': 'task', 'parent': 'F-0001',
+                       'cost': {'usd': 10.0}},
+            'T-0002': {'id': 'T-0002', 'type': 'task', 'parent': 'F-0001',
+                       'cost': {'usd': 20.0}},
+            'F-0002': {'id': 'F-0002', 'type': 'feature', 'parent': 'E-0001', 'children': []},
+        }
+
+    def test_subtree_usd_equals_the_hand_sum_and_ix_usd_of_ix_subtree(self):
+        items = self.items()
+        epic = items['E-0001']
+        self.assertEqual(ix.subtree_usd(items, epic), 31.5)
+        self.assertEqual(ix.subtree_usd(items, epic), ix.usd(ix.subtree(items, epic)))
+
+    def test_a_feature_own_figure_counts_as_well_as_its_tasks(self):
+        items = self.items()
+        self.assertEqual(ix.subtree_usd(items, items['F-0001']), 31.5)
+
+    def test_none_when_nothing_beneath_it_is_measured(self):
+        items = self.items()
+        self.assertIsNone(ix.subtree_usd(items, items['F-0002']))
+
+    def test_a_children_list_naming_an_id_twice_is_summed_once(self):
+        items = self.items()
+        items['E-0001']['children'] = ['F-0001', 'F-0001', 'F-0002']
+        self.assertEqual(ix.subtree_usd(items, items['E-0001']), 31.5)
+
+
 class ProdViewTests(ViewsTestCase):
     def test_no_deploy_configured(self):
         text = prod.render(self.root, self.product)

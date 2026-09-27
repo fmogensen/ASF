@@ -14,6 +14,10 @@ SESSIONS, USD, MINUTES, TURNS = 'sessions', 'usd', 'run_minutes', 'run_turns'
 OFF = 'off'                     #: a measure a product turned off, as `asf.tokens` spells it
 RUN_CAP = 'run cap'             #: the `end_reason` a capped run is recorded with
 OVER = 'OVER BUDGET'            #: the first word of the line the wave prints
+#: an Epic's only budget: the typed field on its own card (F-0052 §1.3 — no product default)
+EPIC_USD = 'budget_usd'
+#: what the roadmap's Spend / budget cell appends for an Epic past it
+OVER_MARK = 'over — work held'
 
 
 @dataclass(frozen=True)
@@ -53,7 +57,8 @@ def of(conv, item):
     ``conventions.budget`` under the card's own ``budget_sessions:`` / ``budget_usd:``.
 
     An Epic has no budget (``Budget()``): it launches no row, and its ``budget_usd`` is the
-    subtree figure the rollup reports (F-0101), not a stop.
+    subtree figure the rollup reports (F-0101), not a stop — read now by :func:`epic_spend` as
+    the subtree's own stop (F-0052).
     """
     item = item or {}
     if item.get('type') == 'epic':
@@ -110,6 +115,51 @@ def line(item_id, s):
     usd_spent = '—' if s.usd is None else _money(s.usd)
     return (f'{OVER} {item_id} — {s.sessions}/{sessions_cap} sessions, '
             f'${usd_spent}/${usd_cap}')
+
+
+@dataclass(frozen=True)
+class EpicSpend:
+    """What an Epic's subtree has spent against the budget its own card types. ``usd`` is the sum
+    of ``cost.usd`` beneath it (``None``: nothing under it was measured); ``budget`` is its
+    ``budget_usd`` (``None``: no budget, so no stop)."""
+    epic_id: str = ''
+    usd: float = None
+    budget: float = None
+
+    @property
+    def over(self):
+        return (isinstance(self.usd, (int, float)) and isinstance(self.budget, (int, float))
+                and self.usd >= self.budget)
+
+
+def epic_spend(epic_id, spend_usd, budget_usd):
+    """:class:`EpicSpend` for one Epic. Two numbers in, one verdict out: the caller sums the
+    subtree (:func:`asf.views.index_reader.subtree_usd`), because this module reads no index.
+    A non-numeric figure on either side is ``None`` — an unmeasured dollar is not a spent one,
+    and a ``budget_usd:`` an operator typed as text is no budget at all."""
+    return EpicSpend(epic_id=epic_id,
+                      usd=spend_usd if isinstance(spend_usd, (int, float)) else None,
+                      budget=budget_usd if isinstance(budget_usd, (int, float)) else None)
+
+
+def epic_line(s):
+    """The wave's line for a held Epic — the Epic's id, its spend and its budget::
+
+        OVER BUDGET <epic id> — $512.40/$500 spent, new work held
+
+    The same first word as :func:`line`, so one grep finds every budget stop."""
+    return f'{OVER} {s.epic_id} — ${_money(s.usd)}/${_money(s.budget)} spent, new work held'
+
+
+def epic_over(s):
+    """The feeder's action tail for a row an over-budget Epic holds: ``<epic id> over $500``."""
+    return f'{s.epic_id} over ${_money(s.budget)}'
+
+
+def epic_reason(s):
+    """The feeder's reason for a row an over-budget Epic holds."""
+    return (f'{s.epic_id} over budget: ${_money(s.usd)}/${_money(s.budget)} spent — '
+            f'raise it, reshape it or close its work')
 
 
 def run_caps(conv):
