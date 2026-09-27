@@ -2,6 +2,21 @@
 
 One entry per released version, newest first.
 
+## v0.1.51 — 2026-09-27
+
+### In progress
+
+- F-0024 Self-amendment policy: the factory proposes, humans approve and merge
+- F-0046 The conflicts pass: supersession enforced, same-subject rule and decision pairs into the groom
+- F-0052 Budget enforcement per Epic
+- F-0055 A frozen eval set for the factory's judging tools
+- F-0064 Events at the source: every tool appends its own event, and the human log is rendered from the streams
+- F-0065 Spike: a sandboxed shell for worker sessions
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.51"`
+
 ## v0.1.50 — 2026-09-27
 
 ### Features landed
