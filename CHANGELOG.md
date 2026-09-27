@@ -2,6 +2,32 @@
 
 One entry per released version, newest first.
 
+## v0.1.52 — 2026-09-27
+
+### Features landed
+
+- F-0075 Redaction is a gate on every write path: operator names and secrets never reach a record or a public repo
+- F-0093 Model routing is argued from minutes-per-landing, and the pool gets a cheap tier
+
+### In progress
+
+- F-0042 Credentials as a rule: a daily check that every signed-in tool is valid for three more days
+- F-0046 The conflicts pass: supersession enforced, same-subject rule and decision pairs into the groom
+- F-0053 Reviews return checks: every review ends in a machine-readable check table the tick reads
+- F-0055 A frozen eval set for the factory's judging tools
+- F-0056 Memory to code, first pass: what a session has to remember becomes a script, a row or a rule
+- F-0060 A mechanical correctness pass before the human-standard review
+- F-0061 Hooks as rule enforcement inside every worker session
+- F-0062 The launch path: skills as procedures, role agents with restricted tools, per-job caps, deny rules
+- F-0064 Events at the source: every tool appends its own event, and the human log is rendered from the streams
+- F-0065 Spike: a sandboxed shell for worker sessions
+- F-0066 A progress heartbeat: no progress for twenty minutes is a stall, not only silence
+- F-0069 Security checks by code: a review pass on sensitive paths, secret and dependency scanning as rules
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.52"`
+
 ## v0.1.51 — 2026-09-27
 
 ### In progress
