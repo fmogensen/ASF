@@ -235,5 +235,53 @@ class IsCurrentNamingAHead(unittest.TestCase):
         self.assertFalse(self.current())
 
 
+class ReadNewestReviewAtForwardRequired(unittest.TestCase):
+    """``read``, ``newest`` and ``review_at`` each take a ``required=()`` that forwards to
+    :func:`review.verdict_of`, so a caller that knows the checklist a review must cover (C1 of
+    round 1) can make a table missing that coverage bounce instead of silently approving."""
+
+    MECH = reviews.CHECKLIST['code'][0]
+    REQUIRED = reviews.required('code')
+
+    @staticmethod
+    def table():
+        return f'| check | result | evidence |\n| --- | --- | --- |\n| {ReadNewestReviewAtForwardRequired.MECH[0]} | pass | ok |\n'
+
+    def test_read_forwards_required(self):
+        text = self.table()
+        self.assertEqual(review.read(text)[0], review.APPROVED)
+        self.assertEqual(review.read(text, required=self.REQUIRED)[0], review.CHANGES)
+
+    def setUp(self):
+        import tempfile
+        self.repo = tempfile.mkdtemp()
+        git(self.repo, 'init', '-q', '-b', 'main')
+        os.makedirs(os.path.join(self.repo, 'docs/reviews'), exist_ok=True)
+        with open(os.path.join(self.repo, 'src.py'), 'w') as fh:
+            fh.write('x = 1\n')
+        with open(os.path.join(self.repo, 'docs/reviews/1-t-1.md'), 'w') as fh:
+            fh.write(self.table())
+        git(self.repo, 'add', '-A')
+        git(self.repo, 'commit', '-qm', 'base')
+        self.conv = Conventions()
+
+    def test_newest_forwards_required(self):
+        p = self.p = Product()
+        self.addCleanup(p.close)
+        os.makedirs(os.path.join(p.work, 'docs/reviews'), exist_ok=True)
+        p.commit('review', {'docs/reviews/1-t-1.md': self.table()})
+        p.publish()
+        product = p.product()
+        self.assertEqual(review.newest(product, 'main', 'T-1'), (1, review.APPROVED, None))
+        self.assertEqual(review.newest(product, 'main', 'T-1', required=self.REQUIRED),
+                         (1, review.CHANGES, None))
+
+    def test_review_at_forwards_required(self):
+        self.assertEqual(review.review_at(self.repo, self.conv, 'main', 'T-1')['verdict'],
+                         review.APPROVED)
+        self.assertEqual(review.review_at(self.repo, self.conv, 'main', 'T-1',
+                                          required=self.REQUIRED)['verdict'], review.CHANGES)
+
+
 if __name__ == '__main__':
     unittest.main()

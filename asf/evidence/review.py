@@ -137,9 +137,9 @@ def pick(conv, paths, slug, legacy_prefixes=()):
     return found[-1] if found else None
 
 
-def read(text, legacy=False):
+def read(text, legacy=False, required=()):
     """``(verdict, head)`` of a review's text, the legacy word fallback for a legacy file."""
-    return (legacy_verdict_of(text) if legacy else verdict_of(text)), head_of(text)
+    return (legacy_verdict_of(text) if legacy else verdict_of(text, required)), head_of(text)
 
 
 def _git(repo, *args):
@@ -147,7 +147,7 @@ def _git(repo, *args):
     return p.stdout if p.returncode == 0 else None
 
 
-def newest(product, branch, item):
+def newest(product, branch, item, required=()):
     """The newest review of ``item`` visible on ``branch`` (the trunk when ``branch`` is the
     trunk), read through ``conventions.review_pattern``: ``(round, verdict, head)`` — ``round``
     the highest ``{n}``, ``verdict`` from :func:`verdict_of`, ``head`` the sha the review names
@@ -169,7 +169,7 @@ def newest(product, branch, item):
         return None
     n, path, legacy = hit
     text = _git(repo, 'show', f'{ref}:{path}') or ''
-    verdict, head = read(text, legacy)
+    verdict, head = read(text, legacy, required)
     return n, verdict, head
 
 
@@ -207,7 +207,7 @@ def c_items(body):
             out.add(path.group('p'))
     return sorted(out)
 
-def review_at(repo, conv, ref, item):
+def review_at(repo, conv, ref, item, required=()):
     """The newest review of ``item`` at ``ref`` (``origin/<branch>``) in ``repo``, for the lane:
     ``{round, verdict, text, head, path, body}`` — or None. The same reading as :func:`newest`."""
     if not item or not repo:
@@ -222,7 +222,7 @@ def review_at(repo, conv, ref, item):
         return None
     n, path, legacy = hit
     body = _git(repo, 'show', f'{ref}:{path}') or ''
-    verdict, head = read(body, legacy)
+    verdict, head = read(body, legacy, required)
     return {'round': n, 'verdict': verdict, 'text': verdict_text(body) or (verdict or ''),
             'head': head, 'path': path, 'body': body[:READ_CHARS]}
 
