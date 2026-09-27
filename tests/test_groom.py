@@ -175,6 +175,31 @@ class InboxAnswerGrammarTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_a_second_apply_of_an_already_closed_card_stays_silent(self):
+        root = make_repo()
+        try:
+            with open(os.path.join(root, 'inbox', 'thing.md'), 'w', encoding='utf-8') as f:
+                f.write("# Thing\n\n## Question\nFeature or bug?\n")
+            groom_path = os.path.join(root, 'groom', '2026-09-20.md')
+            with open(groom_path, 'w', encoding='utf-8') as f:
+                f.write(
+                    "# Groom 2026-09-20\n\n## Inbox cards with a question\n"
+                    "- [ ] inbox:thing.md Thing — Feature or bug? → answer: close\n"
+                )
+            with contextlib.redirect_stdout(io.StringIO()):
+                applied = groom.apply_groom_answers(root, {}, groom_path, '2026-09-21')
+            self.assertEqual(applied, 1)
+
+            # a second `--apply` over the same prev_path: `close` already moved the card to
+            # `done/`, so `apply_answer` returns `(False, None)` — not a grammar refusal.
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                applied_again = groom.apply_groom_answers(root, {}, groom_path, '2026-09-21')
+            self.assertEqual(applied_again, 0)
+            self.assertEqual(out.getvalue(), '')
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
 
 class AnswerParsingTests(unittest.TestCase):
     def test_yes(self):

@@ -435,7 +435,7 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None, 
                 if event:
                     event('groom_answer', item=f"inbox:{im.group('name')}", section='inbox_questions',
                           field='inbox', value=word, by=by)
-            else:
+            elif reason:
                 print(f"groom: answer not applied — inbox:{im.group('name')}: {reason}")
             continue
         m = ANSWER_LINE_RE.match(line)
