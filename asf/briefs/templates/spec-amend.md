@@ -15,6 +15,9 @@ and its id. If, having read it, you believe the document should be replaced rath
 amended, do not replace it — write one line saying so at the top of your report and amend what
 you can, because a rewrite is a decision the reviewer makes and not you.
 
+Every commit subject names the card — `spec({item_id}): <what>` — the lane refuses a branch whose
+subjects do not name {item_id} as a token (the branch name does not count).
+
 SHAPE, in this order:
 1. **Decisions** — what is in and what is out, every precondition the work depends on, and one
    row per choice you had to make (what was chosen, against what, why).

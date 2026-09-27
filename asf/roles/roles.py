@@ -44,12 +44,14 @@ FORBIDDEN = ('model', 'backend', 'effort', 'tools')
 
 #: Every brief kind → the role it runs under. Read twice: by the brief, and by the tests that
 #: hold it equal to ``asf.briefs.build.KINDS``.
-BINDINGS = {'spec': 'asf-writer', 'plan': 'asf-writer', 'reshape': 'asf-writer',
+BINDINGS = {'spec': 'asf-writer', 'spec-amend': 'asf-writer', 'plan': 'asf-writer',
+            'reshape': 'asf-writer',
             'spec-plan': 'asf-writer', 'direct': 'asf-builder',
             'review': 'asf-reviewer', 'coder': 'asf-coder',
             'fixer': 'asf-fixer', 'correct': 'asf-fixer', 'rebase': 'asf-fixer',
             'fix-bug': 'asf-diagnostician', 'close': 'asf-harvester',
-            'groom': 'asf-interrogator', 'adjudicate': 'asf-interrogator',
+            'groom': 'asf-interrogator', 'groom-clerk': 'asf-interrogator',
+            'adjudicate': 'asf-interrogator',
             'delivery-plan': 'asf-writer', 'delivery-code': 'asf-coder'}
 
 #: Every role no kind binds, with the reason none does.

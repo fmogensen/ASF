@@ -38,6 +38,7 @@ left out: the retry itself, F-0001 owns it
 - Finish with the typed REPORT below, as the last thing you print.
 - Anything a human must decide or run: `NEEDS OPERATOR: <what> — <the command or the answer>`.
 - Every commit subject names the item: `task(F-0002): <what>`. Harvest holds a branch whose commits do not name it; the id inside the branch name does not count.
+- Never write a worker account name or a machine path into the product; refer to a lane as `lane-N`. Run the redaction check before you push.
 
 ## Your job: type the intake cards, and only those
 
@@ -57,8 +58,10 @@ FOR EACH ONE, one of two outcomes — never "noted", never a question back:
 - or, when the question is not yours to answer, the literal `NEEDS OPERATOR: <the question> —
   <your recommendation>`.
 
-FOUR THINGS ARE NEVER YOURS: licence, money, security, and anything that changes what the customer
-sees. Those go to `NEEDS OPERATOR`, matching every other kind's rail.
+EVERY QUESTION IS YOURS TO DECIDE — scope, rank, priority, a release or a launch included — save
+three: an answer that spends money, touches credentials, or takes an action that cannot be undone
+(the approval matrix's own classes). Only those go to `NEEDS OPERATOR`; anything else sent there
+is a question parked on the operator, which is a defect.
 
 Write every answer, and nothing else, to the answers file `~/.ASF/state/sample/groom/2026-09-22.clerk.answers` — one line per
 question, in the groom file's own grammar, `adjudicator:` in place of `controller:`:
@@ -111,6 +114,7 @@ commits: <sha> <subject> (one per line, or none)
 tests: <what you ran — and its last line>
 left out: <what and why, or none>
 needs writes: <coder/correct only — repo paths outside writes: that must change too, space-separated, or none>
+proves: <code only — the Proves: trailers you wrote, one per line; or none — <why>>
 ruling: <adjudicate only — one paragraph: what was disputed, what now holds, what changes; else omit>
 blocked_on: <adjudicate only — the id this item must wait for, or none>
 writes: <adjudicate only — the corrected footprint, space-separated globs, or none>

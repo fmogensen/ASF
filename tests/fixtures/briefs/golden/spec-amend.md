@@ -49,6 +49,7 @@ left out: the retry itself, F-0001 owns it
 - Finish with the typed REPORT below, as the last thing you print.
 - Anything a human must decide or run: `NEEDS OPERATOR: <what> — <the command or the answer>`.
 - Every commit subject names the item: `task(F-0001): <what>`. Harvest holds a branch whose commits do not name it; the id inside the branch name does not count.
+- Never write a worker account name or a machine path into the product; refer to a lane as `lane-N`. Run the redaction check before you push.
 
 ## Your job: amend the spec for F-0001
 
@@ -66,6 +67,9 @@ same attention as a changed one. A Story the `## Stories` block already carries 
 and its id. If, having read it, you believe the document should be replaced rather than
 amended, do not replace it — write one line saying so at the top of your report and amend what
 you can, because a rewrite is a decision the reviewer makes and not you.
+
+Every commit subject names the card — `spec(F-0001): <what>` — the lane refuses a branch whose
+subjects do not name F-0001 as a token (the branch name does not count).
 
 SHAPE, in this order:
 1. **Decisions** — what is in and what is out, every precondition the work depends on, and one
@@ -124,6 +128,7 @@ commits: <sha> <subject> (one per line, or none)
 tests: <what you ran — and its last line>
 left out: <what and why, or none>
 needs writes: <coder/correct only — repo paths outside writes: that must change too, space-separated, or none>
+proves: <code only — the Proves: trailers you wrote, one per line; or none — <why>>
 ruling: <adjudicate only — one paragraph: what was disputed, what now holds, what changes; else omit>
 blocked_on: <adjudicate only — the id this item must wait for, or none>
 writes: <adjudicate only — the corrected footprint, space-separated globs, or none>

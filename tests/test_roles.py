@@ -383,7 +383,8 @@ class BindingTests(unittest.TestCase):
         # per-kind label table already groups.
         # The one exception, by operator policy 2026-09-27: adjudicate runs light (S1 heavy) while
         # groom, its role-mate, stays heavy — a ruling over a held branch is not a groom pass.
-        moved = {'adjudicate'}
+        # And plan F-0093 §2.1: groom-clerk, the groom's clerical pass, runs on the cheap tier.
+        moved = {'adjudicate', 'groom-clerk'}
         heavy = {k for k, v in build_mod.DEFAULT_MODELS.items() if v == build_mod.HEAVY}
         by_role = {}
         for kind, name in roles.BINDINGS.items():
