@@ -388,12 +388,31 @@ def _child_landing(cid, task_ev, ev):
             tev.get('pr') if tev.get('merged_sha') else (iev.get('pr') or tev.get('pr')))
 
 
-def _merged_in_prod(child_ids, task_ev, ev):
+def _prod_reach(ev, product=None):
+    """``sha -> bool``: is ``sha`` inside the deployed ``prod_sha``. With a product, one
+    ``rev-list`` of the deploy answers every question a derive asks, read the first time one is
+    asked (a ``merge-base`` fork per Task, per tick, was the alternative); without one, each
+    question is :func:`evidence.ancestor_of`'s, as it always was."""
+    base = ev.get('prod_sha')
+    if product is None:
+        return lambda sha: evidence.ancestor_of(sha, base)
+    reach = []
+
+    def check(sha):
+        if not sha or not base:
+            return False
+        if not reach:
+            reach.append(evidence.ancestry(product, [base]))
+        return reach[0](sha)
+    return check
+
+
+def _merged_in_prod(child_ids, task_ev, ev, reach=None):
     """Every child Task's landing sha is an ancestor of the deploy. False for a child nothing
-    says landed: nothing says where its merge is."""
+    says landed: nothing says where its merge is. `reach` is a :func:`_prod_reach` to ask."""
+    reach = reach or _prod_reach(ev)
     return bool(child_ids) and all(
-        evidence.ancestor_of(_child_landing(cid, task_ev, ev)[0], ev.get('prod_sha'))
-        for cid in child_ids)
+        reach(_child_landing(cid, task_ev, ev)[0]) for cid in child_ids)
 
 
 def _deploys(ev):
@@ -402,7 +421,7 @@ def _deploys(ev):
     return bool(ev.get('prod_deploys')) if 'prod_deploys' in ev else bool(ev.get('prod_sha'))
 
 
-def _in_prod(child_ids, task_ev, ev, merged=None, own_sha=''):
+def _in_prod(child_ids, task_ev, ev, merged=None, own_sha='', reach=None):
     """What "in production" means is the product's own (B-0077). A package, library or tool
     configures no deploy — its trunk IS production, and its Tasks already closed on a commit
     there with CI green (D-0047), so there is nothing further to wait for. Without this, no
@@ -413,19 +432,19 @@ def _in_prod(child_ids, task_ev, ev, merged=None, own_sha=''):
     successful prod run known) is never "in prod". Then ``deploy_sha.prod.mode`` decides:
     ``auto`` — ASF dispatched that deploy itself, so containment is the whole proof; ``manual``
     — the operator also ticked each child's PR into ``checked.txt``.
-    `merged` hands back a `_merged_in_prod` the caller already has."""
+    `merged` hands back a `_merged_in_prod` the caller already has; `reach` a `_prod_reach`."""
     if not _deploys(ev):
         return True
     if not ev.get('prod_sha'):
         return False
     if not child_ids:
         return ev.get('prod_mode') == 'auto' and bool(own_sha) and \
-            evidence.ancestor_of(own_sha, ev.get('prod_sha'))
+            (reach or _prod_reach(ev))(own_sha)
     if ev.get('prod_mode') != 'auto':
         checked = ev.get('checked') or ()
         if not all(_child_landing(cid, task_ev, ev)[1] in checked for cid in child_ids):
             return False
-    return bool(_merged_in_prod(child_ids, task_ev, ev) if merged is None else merged)
+    return bool(_merged_in_prod(child_ids, task_ev, ev, reach) if merged is None else merged)
 
 
 def _landing_sha(child_ids, task_ev, ev):
@@ -589,6 +608,7 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
     task_ev = {}
     evs = {}          # iid -> the Ev its closing was chosen from, what `predates` reads
     since = product.conventions.get('id_in_subject_since') if product is not None else None
+    reach = _prod_reach(ev, product)  # one rev-list of the deploy for every in-prod question
 
     def settle(iid, type_, ev_obj, lines, sha=''):
         """The one place a state is chosen: `closing.state_of`, held by `closing.sticky` — unless
@@ -660,7 +680,7 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
         ev_obj = closing.Ev(children=tuple(states), matrix_status=(sev or {}).get('status') or '',
                             child_evidence=any(derived[cid].own for cid in task_ids)
                             or (sev is None and _own_ids(iid, ev)),
-                            in_prod=all_closed and _in_prod(task_ids, task_ev, ev))
+                            in_prod=all_closed and _in_prod(task_ids, task_ev, ev, reach=reach))
         if sev is None:
             _st, id_lines = match_ids(iid, ev)
             lines = id_lines or [f"no evidence found ({date})"]
@@ -702,7 +722,7 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
             ev_obj.quiet_limit = float(stale.limit_seconds(
                 stale.load_limits(product).get('bug_quiet') or closing.BUG_QUIET_DEFAULT))
         if linked and bev['merged_sha']:
-            in_prod = evidence.ancestor_of(bev['merged_sha'], ev.get('prod_sha'))
+            in_prod = reach(bev['merged_sha'])
             quiet = closing.state_of('bug', ev_obj, new_state[iid]).state == closing.CLOSED
             lines = [f"fix merged ({bev['merged_sha'][:9]})"
                      + (' -- pending 3-day quiet' if in_prod and not quiet else '')]
@@ -767,7 +787,7 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
                 in_prod = True
             else:
                 in_prod = (kids_closed or (not kids and bool(commit))) and _in_prod(
-                    landing, task_ev, ev, own_sha=commit)
+                    landing, task_ev, ev, own_sha=commit, reach=reach)
             c = settle(iid, 'feature', closing.Ev(children=tuple(kids), commit=commit, green=green,
                                                   in_prod=in_prod), [], sha=commit)
             if c.state in (closing.RESOLVED, closing.CLOSED):
@@ -788,10 +808,10 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
         all_closed = bool(child_ids) and all(s == closing.CLOSED for s in child_states)
         merged_in_prod = in_prod = False
         if all_closed:
-            merged_in_prod = _merged_in_prod(child_ids, task_ev, ev)
-            in_prod = _in_prod(child_ids, task_ev, ev, merged=merged_in_prod)
+            merged_in_prod = _merged_in_prod(child_ids, task_ev, ev, reach)
+            in_prod = _in_prod(child_ids, task_ev, ev, merged=merged_in_prod, reach=reach)
         elif not child_ids and commit:
-            in_prod = _in_prod(child_ids, task_ev, ev, own_sha=commit)
+            in_prod = _in_prod(child_ids, task_ev, ev, own_sha=commit, reach=reach)
         # the board's ladder still says `landed`, not `on-prod`, for a product that deploys
         # nothing — "on prod" names a deployment, and there is none to name
         on_prod_for_stage = bool(merged_in_prod) and bool(ev.get('prod_sha'))
