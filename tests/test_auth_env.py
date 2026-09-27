@@ -5,8 +5,11 @@ account's sessions — never HOME, never the keychain. A missing file refuses th
 written to disk, no value reaches a log ASF writes, and the redaction gate knows every value."""
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 import unittest
+from unittest import mock
 
 from asf import doctor, env, redact
 from asf.workers import pool as pool_mod
@@ -347,6 +350,102 @@ class ProductAuthEnvRedaction(unittest.TestCase):
         self.assertTrue(any(f.source == 'auth_env:GH_TOKEN' for f in findings))
         for f in findings:
             self.assertNotIn(GH, repr(f))
+
+
+class WorkerPushAuthDoctor(unittest.TestCase):
+    """The ``worker push auth`` row (:func:`asf.doctor.check_worker_push_auth`): a real
+    ``git ls-remote`` and ``push --dry-run`` under each account's own worker env — never the
+    operator's keychain — so a token that is present but wrong, or an account with none at all,
+    is caught before a session ever tries to push (2026-09-26: 4 local worker sessions failed to
+    push with "could not read Username for 'https://github.com': Device not configured", the
+    keychain unreachable from the launched process)."""
+
+    def setUp(self):
+        self.repo = tempfile.mkdtemp(prefix='asf-doctor-push-auth-')
+        self.addCleanup(shutil.rmtree, self.repo, ignore_errors=True)
+        self.product = env.Product('sample', {'repo_dir': self.repo})
+
+    def cfg(self, *accounts):
+        return {'worker_pool': {'accounts': list(accounts)}}
+
+    @staticmethod
+    def fake_git(calls):
+        """Stands in for real git: ``ls-remote``/``push`` succeed only when the child's own
+        environment carries ``GH_TOKEN`` — exactly what the inline credential helper a real push
+        uses reads (:func:`asf.workers.runtime.git_credential_config`) — else git's own error for
+        no usable credential and no terminal to prompt on."""
+        def run(cmd, cwd=None, env=None, **kw):
+            calls.append((list(cmd), dict(env or {})))
+            if (env or {}).get('GH_TOKEN'):
+                return subprocess.CompletedProcess(cmd, 0, '', '')
+            return subprocess.CompletedProcess(
+                cmd, 128, '',
+                "fatal: could not read Username for 'https://github.com': "
+                "Device not configured\n")
+        return run
+
+    def test_an_account_with_no_credential_is_named_red(self):
+        calls = []
+        with mock.patch.object(doctor.subprocess, 'run', side_effect=self.fake_git(calls)):
+            ok, detail = doctor.check_worker_push_auth(self.cfg({'name': 'acct-a'}), self.product)
+        self.assertFalse(ok)
+        self.assertIn('acct-a', detail)
+        self.assertIn('Device not configured', detail)
+        self.assertTrue(any(c[0][:2] == ['git', 'ls-remote'] for c in calls))
+        # a failed ls-remote refuses the account at once — the dry-run push never runs
+        self.assertFalse(any(c[0][:2] == ['git', 'push'] for c in calls))
+
+    def test_an_account_with_a_gh_token_authenticates(self):
+        token_file = os.path.join(self.repo, 'a.gh')
+        with open(token_file, 'w', encoding='utf-8') as f:
+            f.write(GH)
+        calls = []
+        with mock.patch.object(doctor.subprocess, 'run', side_effect=self.fake_git(calls)):
+            ok, detail = doctor.check_worker_push_auth(
+                self.cfg({'name': 'acct-a', 'auth_env': {'GH_TOKEN': token_file}}), self.product)
+        self.assertTrue(ok, detail)
+        self.assertIn('acct-a', detail)
+        self.assertTrue(any(c[0][:2] == ['git', 'push'] for c in calls))
+        pushed_env = next(e for c, e in calls if c[:2] == ['git', 'push'])
+        self.assertEqual(pushed_env['GH_TOKEN'], GH)
+        self.assertNotIn(GH, detail)   # never printed
+
+    def test_a_second_account_is_probed_independently(self):
+        token_file = os.path.join(self.repo, 'b.gh')
+        with open(token_file, 'w', encoding='utf-8') as f:
+            f.write(GH)
+        calls = []
+        with mock.patch.object(doctor.subprocess, 'run', side_effect=self.fake_git(calls)):
+            ok, detail = doctor.check_worker_push_auth(self.cfg(
+                {'name': 'acct-a'},
+                {'name': 'acct-b', 'auth_env': {'GH_TOKEN': token_file}}), self.product)
+        self.assertFalse(ok)
+        self.assertIn('acct-a', detail)
+        self.assertNotIn('acct-b', detail)   # only the failing one is named
+
+    def test_no_worker_accounts_or_no_repo_is_nothing_to_probe(self):
+        ok, detail = doctor.check_worker_push_auth({'worker_pool': {}}, self.product)
+        self.assertTrue(ok, detail)
+        ok, detail = doctor.check_worker_push_auth(
+            self.cfg({'name': 'acct-a'}), env.Product('sample', {'repo_dir': '/nowhere-at-all'}))
+        self.assertTrue(ok, detail)
+
+    def test_fake_backend_needs_no_probe(self):
+        cfg = self.cfg({'name': 'acct-a'})
+        cfg['worker_pool']['backend'] = 'fake'
+        with mock.patch.object(doctor.subprocess, 'run',
+                               side_effect=AssertionError('should not be called')):
+            ok, detail = doctor.check_worker_push_auth(cfg, self.product)
+        self.assertTrue(ok, detail)
+
+    def test_a_missing_auth_env_file_is_named_without_probing_git(self):
+        calls = []
+        with mock.patch.object(doctor.subprocess, 'run', side_effect=self.fake_git(calls)):
+            ok, detail = doctor.check_worker_push_auth(self.cfg(
+                {'name': 'acct-a', 'auth_env': {'GH_TOKEN': '/nowhere/a.gh'}}), self.product)
+        self.assertFalse(ok)
+        self.assertIn('acct-a', detail)
+        self.assertEqual(calls, [])
 
 
 if __name__ == '__main__':
