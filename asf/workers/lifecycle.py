@@ -69,7 +69,7 @@ import signal
 import subprocess
 import time
 
-from asf import env
+from asf import budget, env, tokens
 from asf.workers import cloudpid
 from asf.workers import headroom
 from asf.workers import runtime as runtime_mod
@@ -149,7 +149,7 @@ HOOK_REDACTION_RE = re.compile(r'\bredact:\s*\S+:\d+\b')
 #: constants that write the strings, so a rename follows.
 OUTCOME_CLASSES = (FINISHED, NOT_PUSHED, EMPTY_BRANCH.split(':')[0], DEAD_PID, PUSHED_AFTER_STOP,
                    runtime_mod.report.UNPUSHED, *(name for name, _ in runtime_mod.FAILURE_SIGNATURES),
-                   HOOK_REFUSED, NETWORK_ERROR, OTHER)
+                   HOOK_REFUSED, NETWORK_ERROR, tokens.TOKEN_CAP, budget.RUN_CAP, OTHER)
 FAILING_CLASSES = tuple(c for c in OUTCOME_CLASSES if c != FINISHED)
 
 # ---- the session states (§2.1) ---------------------------------------------------

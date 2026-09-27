@@ -79,6 +79,7 @@ class Meter:
     by_dim: dict = field(default_factory=_empty)
     lines: int = 0
     runs: int = 0
+    turns: int = 0
 
 
 def _fold(tally, usage):
@@ -89,12 +90,14 @@ def _fold(tally, usage):
 
 
 def meter(log_path):
-    """One pass over a job log: the last run's result and its tally. Never raises.
+    """One pass over a job log: the last run's result, its tally and its turn count. Never raises.
 
     A ``system``/``init`` line is the run boundary (as in ``runtime.read_result``, B-0028): it drops
-    the result and the tally. An ``assistant`` line adds each dimension it carries; a ``result`` line
-    is kept. At the end the result's own usage, when it carries any of the four, replaces the tally
-    wholesale — the runtime's count wins over the sum of turns, and nothing adds the two (D2).
+    the result, the tally and the turn count. An ``assistant`` line adds each dimension it carries
+    and counts one turn; a ``result`` line is kept. At the end the result's own usage, when it
+    carries any of the four, replaces the tally wholesale — the runtime's count wins over the sum
+    of turns, and nothing adds the two (D2). ``turns`` is not one of the four dimensions (§1.3): it
+    is the run measure :mod:`asf.budget` judges beside the wall clock.
     """
     m = Meter()
     try:
@@ -114,8 +117,10 @@ def meter(log_path):
                 if kind == 'system' and rec.get('subtype') == 'init':
                     m.result = None
                     m.by_dim = _empty()
+                    m.turns = 0
                     m.runs += 1
                 elif kind == 'assistant':
+                    m.turns += 1
                     _fold(m.by_dim, usage_of(rec))
                 elif kind == 'result':
                     m.result = rec
@@ -186,6 +191,9 @@ def over(by_dim, cap):
         if isinstance(n, int) and isinstance(limit, int) and n > limit:
             return d, n, limit
     return None
+
+
+TOKEN_CAP = 'token cap'          #: the `end_reason` a run capped on a token dimension is recorded with
 
 
 def cap_text(kind, dimension, tokens, limit):
