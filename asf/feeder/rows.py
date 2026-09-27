@@ -729,7 +729,6 @@ def branch_rows(items, product, busy, held=(), landed_shas=None):
     ingest — nor on the trunk), its PLAN → CODE row again on that same branch: the coder
     continues where the dead run stopped. A Task a delivery speaks for (:func:`delivered`) is
     built there instead."""
-    spoken = held
     out = []
     landed = landed_ids(items, landed_shas)
     for v in sorted(items.values(), key=lambda v: v['id']):
@@ -746,7 +745,7 @@ def branch_rows(items, product, busy, held=(), landed_shas=None):
             out.append(Row(tier=2, kind=CONFLICT, item_id=v['id'], feature_id=fid, action=LAUNCH,
                            brief_kind='rebase', branch=_branch_of(v, product, kind),
                            reason='PR does not merge cleanly, no session on it'))
-        elif (idle_branch(v) and v['id'] not in spoken and v['id'] not in landed
+        elif (idle_branch(v) and v['id'] not in held and v['id'] not in landed
               and not delivered(items, v, landed_shas)):
             out.append(Row(tier=2, kind=PLAN_CODE, item_id=v['id'], feature_id=fid, action=LAUNCH,
                            brief_kind='task', branch=_branch_of(v, product, kind),
