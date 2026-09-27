@@ -647,6 +647,11 @@ def launch(ctx, out=print):
     product = ctx.product
     held = approvals.raise_holds(ctx, out)
     lane_pass(ctx, out, defer_pushes=True)
+    try:  # a wedged account-manager usage lock, reclaimed before the pool reads quota (opt-in)
+        from asf.workers import cuxlock
+        cuxlock.tick_pass(env.load_config(), out, ctx.event)
+    except Exception as e:  # noqa: BLE001 — never a blocker for the wave
+        out(f'quota    cux lock reclaim failed — {e}')
     items, _generated = index_reader.load(ctx.record_root())
     # the clone is as old as the tick's start: a blockedBy pushed since stops this wave (F-1129)
     items = overlay_blockers(items, fresh_index(ctx.record_root()))
