@@ -2936,12 +2936,12 @@ class RedactionTests(unittest.TestCase):
         product = self.product(harvest_gate='per-branch')
         for expected_round in (1, 2, 3):
             _results, lines = self.harvest(product)
-            self.assertTrue(lines[-1].endswith(f'(round {expected_round})'), lines)
+            self.assertTrue(lines[-1].endswith(f'(round {expected_round})' if expected_round < 3
+                                               else '3 times in a row)'), lines)
             if expected_round < 3:
                 self.session(f'correct-b-0001-r{expected_round}', 'B-0001', 'fix/B-0001')
 
-        _results, lines = self.harvest(product)
-        self.assertTrue(lines[-1].endswith(' — adjudicate pending'), lines)
+        self.assertIn(' — adjudicate pending', lines[-1])
         self.assertEqual(self.record('fix/B-0001')['rounds'], 3)
         self.assertTrue(self.record('fix/B-0001')['correction'].get('at_cap'))
         self.assertEqual(self.record('fix/B-0001')['correction']['kind'], 'redaction')
