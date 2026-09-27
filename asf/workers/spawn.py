@@ -57,6 +57,12 @@ class WorktreeBusy(SpawnError):
     """The worktree is held by a live run: the item is already at work — a wait, not a fault."""
 
 
+class WorktreeExternal(SpawnError):
+    """The branch is checked out in a worktree ASF did not create (outside its own
+    ``worktrees_dir``) — someone else's checkout, still at work on it. A wait, never an
+    operator matter, and never reclaimed or removed (B-0142)."""
+
+
 def _git(args, cwd):
     p = subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True)
     if p.returncode != 0:
@@ -162,6 +168,13 @@ def _holding_worktree(repo, branch):
         if _in_progress_head(p) == f'refs/heads/{branch}':
             return p
     return None
+
+
+def _under(path, parent):
+    """Whether ``path`` sits inside ``parent`` (a worktree ASF's own ``worktrees_dir``, so an
+    ORPHAN found outside it is someone else's checkout, not one the factory ever owned)."""
+    child, base = lifecycle.path_key(path), lifecycle.path_key(parent)
+    return child == base or child.startswith(base + os.sep)
 
 
 def _admin_dir(path):
@@ -385,6 +398,11 @@ def _place_worktree(product, repo, job, branch):
     held = _holding_worktree(repo, branch)
     if held and lifecycle.path_key(held) == lifecycle.path_key(path):
         held = path  # one directory, spelled ~/.ASF by git and ~/.asf by us (or the reverse)
+    if held and held != path and not _under(held, worktrees_dir(product)):
+        # a worktree ASF did not create holds the branch (a console agent's own checkout,
+        # still at work in it): never NEEDS OPERATOR, never reclaimed (B-0142)
+        raise WorktreeExternal(f'branch checked out in an external worktree '
+                               f"{os.path.realpath(held)}; waits until it's released")
     for candidate in dict.fromkeys(p for p in (path, held) if p and os.path.exists(p)):
         what, why = lifecycle.launch_verdict(registry, job, candidate)
         if what == lifecycle.BUSY:

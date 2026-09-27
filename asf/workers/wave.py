@@ -260,6 +260,8 @@ def wave(product, rows, n, pool=None, runtime=None, cfg=None, brief_fn=default_b
             outcome[id(entry)] = (None, '')
         elif isinstance(err, spawn_mod.WorktreeBusy):
             outcome[id(entry)] = (f'already running: {err}', None)  # a live run holds the item
+        elif isinstance(err, spawn_mod.WorktreeExternal):
+            outcome[id(entry)] = (str(err), None)  # someone else's checkout — a wait, not ours
         else:
             reason = str(err) if str(err).startswith('NEEDS OPERATOR') else f'spawn failed: {err}'
             reason = failures.note(row.job, reason, getattr(err, 'clear', ''))

@@ -733,6 +733,24 @@ class TestSpawn(Home):
                             runtime=runtime_mod.FakeRuntime([{'ok': True}]), cfg=self.cfg)
         self.assertIn('spec/F-0001 exists locally with 1 commit(s)', str(cm.exception))
 
+    def test_b0142_a_branch_held_by_an_external_worktree_waits_and_is_never_removed(self):
+        # a worktree ASF did not create (outside ~/.ASF/state/<p>/worktrees) holds the branch —
+        # a console agent's own checkout, still at work on it. No run recorded it, but it is not
+        # an operator matter: never NEEDS OPERATOR, never reclaimed or removed by the factory.
+        git('branch', 'spec/F-0001', 'origin/main', cwd=self.repo)
+        external = os.path.join(self.tmp, 'external-agent-worktree')
+        git('worktree', 'add', '-q', external, 'spec/F-0001', cwd=self.repo)
+        row = pool_mod.parse_row(json.dumps({'job': 'spec-f-0001', 'item': 'F-0001', 'state': 'CARD',
+                                             'action': 'SPEC', 'model': 'Opus', 'kind': 'spec',
+                                             'branch': 'spec/F-0001'}))
+        with self.assertRaises(spawn_mod.WorktreeExternal) as cm:
+            spawn_mod.spawn(self.product, row, self.acct(), 'b',
+                            runtime=runtime_mod.FakeRuntime([{'ok': True}]), cfg=self.cfg)
+        self.assertIn(f'external worktree {os.path.realpath(external)}', str(cm.exception))
+        self.assertIn("waits until it's released", str(cm.exception))
+        self.assertTrue(os.path.isdir(external))  # never touched, let alone removed
+        self.assertIn(os.path.realpath(external), git('worktree', 'list', cwd=self.repo))
+
     def test_b0024_unmapped_model_label_spawns_nothing(self):
         cfg = {'worker_pool': {'accounts': [{'name': 'acct-a', 'role': 'local', 'cap': 2}]}}
         rt = runtime_mod.FakeRuntime([{'running': True}])
@@ -1071,6 +1089,20 @@ class TestWave(Home):
             self.assertIn('already running: worktree already exists', waits[0][1])
             self.assertIn('held by live run correct-9', lines[0])
             self.assertNotIn('NEEDS OPERATOR', lines[0])
+
+    def test_b0142_a_branch_held_by_an_external_worktree_waits_not_needs_operator(self):
+        acct = pool_mod.Account('acct-a', role='local', cap=3)
+        row = feature_row('spec-9')
+        branch = spawn_mod.branch_for(self.product, row)
+        git('branch', branch, 'origin/main', cwd=self.repo)
+        external = os.path.join(self.tmp, 'external-agent-worktree')
+        git('worktree', 'add', '-q', external, branch, cwd=self.repo)
+        for _ in range(4):
+            _, waits, lines = self.run_wave([row], 5, [acct])
+            self.assertIn(f'external worktree {os.path.realpath(external)}', waits[0][1])
+            self.assertIn("waits until it's released", waits[0][1])
+            self.assertNotIn('NEEDS OPERATOR', lines[0])
+        self.assertTrue(os.path.isdir(external))  # never removed by the factory
 
     def test_pool_full_of_features_an_s1_arrives_and_launches(self):
         acct = pool_mod.Account('acct-a', role='local', cap=3)
