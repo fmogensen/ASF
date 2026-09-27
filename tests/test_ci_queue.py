@@ -1784,6 +1784,117 @@ class TestStarvationGuard(Base):
                          {'ci.queue.pr_wait_min'})
 
 
+def waits(item, action, branch='', feature=''):
+    """A feeder row (:class:`asf.feeder.rows.Row`'s fields the queue reads)."""
+    import types
+    return types.SimpleNamespace(item_id=item, action=action, branch=branch or f'cloud/{item}',
+                                 feature_id=feature)
+
+
+class TestUnblocks(Base):
+    """Within a tier the entry more of ``asf next``'s rows wait on goes first; a rank, a priority
+    and the starvation guard are untouched, and nothing waiting falls back to age (2026-09-27,
+    the first customer: T-0374, T-0382, T-0360, T-0367 each held 3 waiting rows, F-0092's
+    spec PR 2)."""
+
+    ITEMS = TestRecordRank.ITEMS
+
+    def setUp(self):
+        super().setUp()
+        ci_queue._UNBLOCKS_CACHE.clear()
+
+    def tearDown(self):
+        ci_queue._UNBLOCKS_CACHE.clear()
+        super().tearDown()
+
+    def line(self, asks, feeder):
+        p = product()
+        busy = FakeGh(busy={'h1', 'h2', 'h3'})
+        for m, (key, item) in enumerate(asks):
+            ci_queue.admit(p, key, 'pr', item=item, items=self.ITEMS, branch=key.split(':')[1],
+                           queue=self.queue(p, busy, minutes=m, feeder=feeder))
+        return ci_queue.line_order(ci_queue.load('p')['entries'])
+
+    def test_dependents_count_the_rows_waiting_on_an_item_never_its_own_landing(self):
+        rows = [waits('T-0383', 'WAITS ON T-0382'), waits('T-0384', 'WAITS ON T-0382'),
+                waits('T-0038', 'WAITS ON F-0092 spec+plan on the trunk'),
+                waits('T-0039', 'WAITS ON F-0092 spec+plan on the trunk'),
+                waits('T-0382', 'WAITS ON landing: cloud/T-0382 PUSHED'),       # its own
+                waits('T-0352', 'WAITS ON landing: PR #825 WAITING'),           # its own
+                waits('T-0999', 'WAITS ON landing: PR #825 WAITING', 'cloud/T-0999'),
+                waits('T-0998', 'WAITS ON landing: cloud/T-0352 PUSHED', 'cloud/T-0998'),
+                waits('T-0024', 'WAITS ON writes'), waits('B-1384', 'WAITS ON session'),
+                waits('T-0100', 'WAITS ON T-0100'),
+                waits('T-0101', 'LAUNCH')]
+        self.assertEqual(ci_queue.dependents(rows),
+                         {'T-0382': 2, 'F-0092': 2, 'cloud/T-0352': 2})
+        self.assertEqual(ci_queue.entry_unblocks('pr:cloud/T-0352', {'item': 'T-0352'},
+                                                 ci_queue.dependents(rows)), 2)
+
+    def test_same_rank_entries_go_by_dependents(self):
+        asks = [('pr:task/T-0021', 'T-0021'), ('pr:task/T-0022', 'T-0022')]
+        self.assertEqual(self.line(asks, []), ['pr:task/T-0021', 'pr:task/T-0022'])
+        ci_queue.save('p', {})
+        rows = [waits('T-0030', 'WAITS ON T-0022'), waits('T-0031', 'WAITS ON T-0022')]
+        self.assertEqual(self.line(asks, rows), ['pr:task/T-0022', 'pr:task/T-0021'])
+        entries = ci_queue.load('p')['entries']
+        self.assertEqual(entries['pr:task/T-0022']['unblocks'], 2)
+        self.assertNotIn('unblocks', entries['pr:task/T-0021'])
+
+    def test_different_ranks_and_priorities_are_unaffected(self):
+        rows = [waits(f'T-09{i}', 'WAITS ON T-0011') for i in range(10, 15)]
+        rows += [waits(f'T-08{i}', 'WAITS ON landing: worker/x') for i in range(10, 13)]
+        order = self.line([('pr:task/T-0021', 'T-0021'), ('pr:task/T-0011', 'T-0011'),
+                           ('pr:worker/x', 'worker/x'), ('pr:bug/B-0031', 'B-0031')], rows)
+        self.assertEqual(order, ['pr:bug/B-0031', 'pr:task/T-0021', 'pr:task/T-0011',
+                                 'pr:worker/x'])
+
+    def test_zero_dependents_falls_back_to_age(self):
+        asks = [('pr:worker/old', 'worker/old'), ('pr:worker/mid', 'worker/mid'),
+                ('pr:worker/new', 'worker/new')]
+        self.assertEqual(self.line(asks, []), ['pr:worker/old', 'pr:worker/mid',
+                                               'pr:worker/new'])
+        ci_queue.save('p', {})
+        rows = [waits('T-0900', 'WAITS ON landing: worker/new', 'cloud/T-0900')]
+        self.assertEqual(self.line(asks, rows), ['pr:worker/new', 'pr:worker/old',
+                                                 'pr:worker/mid'])
+
+    def test_the_view_says_unblocks_and_the_pass_plans_once(self):
+        root = os.path.join(self.tmp, 'record')
+        os.makedirs(root)
+        with open(os.path.join(root, 'index.json'), 'w', encoding='utf-8') as f:
+            json.dump({'items': {}}, f)
+        p = env.Product('p', dict(product()._data, backlog_dir=root))
+        busy = FakeGh(busy={'h1', 'h2', 'h3'})
+        rows = [waits('T-0030', 'WAITS ON T-0341'), waits('T-0031', 'WAITS ON T-0341'),
+                waits('T-0032', 'WAITS ON T-0341')]
+        self.t0 = ci_queue._now()                 # the view reads the line as of now
+        with mock.patch.object(ci_queue, 'feeder_rows', return_value=rows) as planned:
+            self.admit(self.queue(p, busy), 'pr:a', 'T-0500')
+            self.admit(self.queue(p, busy, minutes=1), 'pr:b', 'T-0341')
+            lines = []
+            with mock.patch.object(env, 'load_product', return_value=p):
+                ci_queue.cmd_queue(mock.Mock(product='p', apply=False),
+                                   source=ci_queue.GitHubSource(p, run=busy), out=lines.append)
+        self.assertEqual(planned.call_count, 1)
+        self.assertIn('1. T-0341 [pr, Task F-0001 rank 1, unblocks 3, full run', lines[-2])
+        self.assertIn('2. T-0500 [pr, Task unranked, full run', lines[-1])
+
+    def test_the_starvation_guard_is_unchanged(self):
+        p = product(queue={'head_wait_max_min': 120})
+        gh = FakeGh(busy={'h1'})
+        rows = [waits('T-0030', 'WAITS ON T-0500')]
+        self.assertFalse(self.admit(self.queue(p, gh, feeder=rows), 'pr:task/T-0500',
+                                    'T-0500').admitted)
+        for m in (20, 40, 44):                    # asked again each tick, keeping its place
+            self.assertFalse(self.admit(self.queue(p, gh, minutes=m, feeder=rows),
+                                        'pr:task/T-0500', 'T-0500').admitted)
+        self.lines.clear()
+        self.assertTrue(self.admit(self.queue(p, gh, minutes=46, feeder=rows), 'pr:task/T-0500',
+                                   'T-0500').admitted)
+        self.assertIn('T-0500 starts — starvation guard — waited 46m', self.lines[0])
+
+
 if __name__ == '__main__':
     unittest.main()
 
