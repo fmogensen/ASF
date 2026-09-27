@@ -135,6 +135,46 @@ class ClosedItemIsNeverHeld(Home):
         self.assertEqual(got, 'closed')
 
 
+class ReapedEmptyDeadRun(DeadRunHoldsNoSeat):
+    """spec-f-1129: the operator killed a spec session 36 s in; health reaped its worktree empty
+    (no commit, no branch), the cold retry could not start in the reaped worktree, and the run
+    was held "died twice" — a correction that would launch a correct session on a branch that
+    never existed. A first death with nothing written goes back to the item's own row."""
+
+    class Ctx:
+        def __init__(self, product):
+            self.product, self.events = product, []
+            self.counts = {'relaunches': 0}
+
+        def event(self, kind, **fields):
+            self.events.append(kind)
+
+    def test_a_first_death_reaped_empty_is_released_not_held(self):
+        path = self.registry(launch('spec-f-0001', 1, item='F-0001', kind='spec'),
+                             {'job': 'spec-f-0001', 'ended': 't', 'end_reason': 'dead pid'})
+        s = lifecycle.latest(path)['spec-f-0001']
+        ctx = self.Ctx(self.product)
+        got = step_health.handle_dead(ctx, dict(s, job='spec-f-0001'),
+                                      runtime_fn=lambda: self.fail('no retry'), out=lambda s: None,
+                                      items={'F-0001': {'state': 'New'}}, reaped_empty=True)
+        self.assertEqual(got, 'released')
+        self.assertEqual(lifecycle.corrections(path), {})
+        self.assertEqual(ctx.events, [])
+
+    def test_a_second_death_reaped_empty_is_still_held(self):
+        path = self.registry(launch('spec-f-0001', 1, item='F-0001', kind='spec'),
+                             {'job': 'spec-f-0001', 'ended': 't1', 'end_reason': 'dead pid'},
+                             launch('spec-f-0001', 2, item='F-0001', kind='spec',
+                                    started='2026-09-24T05:10:55Z'),
+                             {'job': 'spec-f-0001', 'ended': 't2', 'end_reason': 'dead pid'})
+        s = lifecycle.latest(path)['spec-f-0001']
+        got = step_health.handle_dead(self.Ctx(self.product), dict(s, job='spec-f-0001'),
+                                      runtime_fn=lambda: self.fail('no retry'), out=lambda s: None,
+                                      items={'F-0001': {'state': 'New'}}, reaped_empty=True)
+        self.assertEqual(got, 'held')
+        self.assertEqual(set(lifecycle.corrections(path)), {'F-0001'})
+
+
 class FeederSendsNothingBack(unittest.TestCase):
     def test_a_removed_or_done_item_gets_no_correction_row(self):
         corr = {'kind': 'unpushed', 'text': 'empty branch', 'rounds': 1, 'at': 't'}

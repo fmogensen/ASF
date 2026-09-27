@@ -63,20 +63,35 @@ def dead_jobs(found, stalled):
     return list(dict.fromkeys(jobs))
 
 
-def handle_dead(ctx, session, runtime_fn=_runtime, out=print, items=None):
-    """``corrected`` | ``operator`` | ``flagged`` (already raised) | ``closed`` for one dead
-    session. ``items`` is the record's index: a dead run of a removed or done item is only ended
-    (health did that) — no cold retry, no hold, nothing sent back to a session."""
+def died_before(path, job):
+    """True when ``job``'s run before its latest one also ended on a dead pid."""
+    rs = lifecycle.runs(path).get(job) or []
+    return len(rs) >= 2 and rs[-2].get('end_reason') == 'dead pid'
+
+
+def handle_dead(ctx, session, runtime_fn=_runtime, out=print, items=None, reaped_empty=False):
+    """``corrected`` | ``operator`` | ``flagged`` (already raised) | ``closed`` | ``released``
+    for one dead session. ``items`` is the record's index: a dead run of a removed or done item is
+    only ended (health did that) — no cold retry, no hold, nothing sent back to a session.
+    ``reaped_empty``: health reaped the run's worktree with nothing in it (no commit, no branch)
+    — a first death has nothing to retry or correct, and the item's own feeder row relaunches it
+    (spec-f-1129: a hold there queued a correct session on a branch that never existed); a
+    second death in a row is held as ever (B-0062)."""
     product = ctx.product
     job = session['job']
     if session.get('operator_flagged'):
         return 'flagged'
     if lifecycle.closed_state(items, session.get('item')):
         return 'closed'
+    if reaped_empty and not str(job).endswith('-correction') \
+            and not died_before(pool_mod.sessions_path(product), job):
+        out(f"DEAD  {job:<24} reaped empty: nothing to retry or correct — "
+            f"{session.get('item') or '?'} goes back to its own row")
+        return 'released'
     # a correction is never corrected again (B-0085): its own failure is what holds the item, and
     # the round is counted there. Without this the tick would correct the correction for ever.
     is_correction = str(job).endswith('-correction')
-    if not session.get('corrected') and not is_correction:
+    if not session.get('corrected') and not is_correction and not reaped_empty:  # no worktree
         try:
             ok = stall_mod.correct_once(product, session, error_text(session), runtime_fn())
         except (OSError, KeyError) as e:
@@ -164,11 +179,12 @@ def run(ctx, out=print, runtime_fn=_runtime):
     stalled = stall_mod.stall(product, out=out)
     ctx.counts['stalls'] += len(stalled)
     sessions = pool_mod.load_sessions(product)
+    empty = {job for job, what, detail in found if what == 'reaped' and detail == 'empty'}
     for job in dead_jobs(found, stalled):
         session = sessions.get(job)
         if session is not None:
             handle_dead(ctx, dict(session, job=job), runtime_fn=runtime_fn, out=out,
-                        items=items)
+                        items=items, reaped_empty=job in empty)
     hold_failed_corrections(ctx, sessions, out=out, items=items)
     ci_trials(ctx, out=out)
     branch_retention(ctx, items, out=out)
