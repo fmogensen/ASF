@@ -167,10 +167,17 @@ def render(inflight, done, titles_by_item, since, now, first):
     return '\n'.join(lines)
 
 
+def _step_word(r):
+    if r.get('ok'):
+        return f"{r['step']} ok"
+    reason = r.get('reason')
+    return f"{r['step']} FAILED ({reason})" if reason else f"{r['step']} FAILED"
+
+
 def digest(ran, counts):
     """What this tick did, in two lines: each step and whether it ran ok, then the non-zero
     counters (launches, merges, stalls, refusals, relaunches)."""
-    steps_line = ', '.join(f"{r['step']} {'ok' if r.get('ok') else 'FAILED'}" for r in ran)
+    steps_line = ', '.join(_step_word(r) for r in ran)
     did = ', '.join(f'{name} {n}' for name, n in (counts or {}).items() if n)
     return [f"TICK — {steps_line or 'no step ran'}", did or 'nothing launched, merged or stalled']
 
