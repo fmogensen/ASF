@@ -7,9 +7,10 @@ import types
 import unittest
 from unittest import mock
 
-from asf import env
+from asf import env, reviews
 from asf.evidence import evidence
 from asf.record import frontmatter, ingest, match
+from tests.test_doc_lane_landing import PLAN, Product
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PRS_FIXTURE = os.path.join(HERE, "fixtures", "evidence", "prs.json")
@@ -90,6 +91,20 @@ class PlanTasksTests(unittest.TestCase):
         self.assertNotIn("brand-t1", cand["T1"])
 
 
+def _spec_table(fail=None, drop=None, unfilled=None, na=None, blank_evidence=None):
+    names = [n for n in reviews.CHECKLIST["spec"][0] if n != drop]
+    lines = ["| check | result | evidence |", "| --- | --- | --- |"]
+    for n in names:
+        if n == unfilled:
+            lines.append(f"| {n} | <pass\\|fail> | huh |")
+        elif n == blank_evidence:
+            lines.append(f"| {n} | pass | |")
+        else:
+            result = "fail" if n == fail else ("n/a" if n == na else "pass")
+            lines.append(f"| {n} | {result} | ok |")
+    return ("\n".join(lines) + "\n").encode()
+
+
 class VerdictOfTests(unittest.TestCase):
     def test_approved(self):
         self.assertEqual(evidence.verdict_of(b"Verdict: APPROVED\n"), "APPROVED")
@@ -103,6 +118,44 @@ class VerdictOfTests(unittest.TestCase):
     def test_empty_blob(self):
         self.assertEqual(evidence.verdict_of(None), "")
         self.assertEqual(evidence.verdict_of(b""), "")
+
+    # -- §3.2/§3.5: the table decides, through the one reader (legacy=False, a pattern-form file)
+    REQUIRED = reviews.required("spec")
+
+    def test_full_coverage_all_pass_is_approved(self):
+        self.assertEqual(
+            evidence.verdict_of(_spec_table(), legacy=False, required=self.REQUIRED), "APPROVED")
+
+    def test_one_row_fail_is_changes_requested(self):
+        text = _spec_table(fail=reviews.CHECKLIST["spec"][0][0])
+        self.assertEqual(
+            evidence.verdict_of(text, legacy=False, required=self.REQUIRED), "CHANGES REQUESTED")
+
+    def test_a_required_check_absent_bounces_as_changes_requested(self):
+        text = _spec_table(drop=reviews.CHECKLIST["spec"][0][0])
+        self.assertEqual(
+            evidence.verdict_of(text, legacy=False, required=self.REQUIRED), "CHANGES REQUESTED")
+
+    def test_an_unfilled_result_cell_bounces_as_changes_requested(self):
+        text = _spec_table(unfilled=reviews.CHECKLIST["spec"][0][0])
+        self.assertEqual(
+            evidence.verdict_of(text, legacy=False, required=self.REQUIRED), "CHANGES REQUESTED")
+
+    def test_a_typed_approved_line_never_wins_over_a_failing_table(self):
+        text = (_spec_table(fail=reviews.CHECKLIST["spec"][0][0]).decode()
+                + "\nverdict: APPROVED\n").encode()
+        self.assertEqual(
+            evidence.verdict_of(text, legacy=False, required=self.REQUIRED), "CHANGES REQUESTED")
+
+    def test_pass_and_na_with_full_coverage_is_approved(self):
+        text = _spec_table(na=reviews.CHECKLIST["spec"][0][0])
+        self.assertEqual(
+            evidence.verdict_of(text, legacy=False, required=self.REQUIRED), "APPROVED")
+
+    def test_a_pass_row_with_empty_evidence_is_changes_requested(self):
+        text = _spec_table(blank_evidence=reviews.CHECKLIST["spec"][0][0])
+        self.assertEqual(
+            evidence.verdict_of(text, legacy=False, required=self.REQUIRED), "CHANGES REQUESTED")
 
 
 class ParseRowsTests(unittest.TestCase):
@@ -138,6 +191,63 @@ class ParseRowsTests(unittest.TestCase):
         text = self.HEADER + "| notes | something |\n"
         rows, _broken = evidence.parse_rows(text)
         self.assertEqual(rows, [])
+
+
+def _code_table(names):
+    lines = ["| check | result | evidence |", "| --- | --- | --- |"]
+    lines += [f"| {n} | pass | ok |" for n in names]
+    return "\n".join(lines) + "\n"
+
+
+class TwoBranchFixtureTests(unittest.TestCase):
+    """§3.5: a spec branch carrying round 1 and round 2 review files, a worker branch carrying a
+    code review with four `pass` rows — the round's verdict and a task row's `checks` both come
+    from the one reader (`asf.evidence.review`) through `asf.reviews`."""
+
+    def setUp(self):
+        self.p = Product()
+        self.addCleanup(self.p.close)
+        p = self.p
+        p.commit("seed", {"src/a.ts": "x"})
+        p.publish()
+
+        spec_mech = reviews.CHECKLIST["spec"][0]
+        code_mech = reviews.CHECKLIST["code"][0][:4]
+
+        git(p.work, "checkout", "-q", "-b", "spec")
+        p.commit("spec", {
+            "docs/specs/f-0001.md": "# F-0001 — the reader\n",
+            "docs/reviews/1-f-0001.md": _spec_table().decode(),
+            "docs/reviews/2-f-0001.md": _spec_table(fail=spec_mech[0]).decode(),
+        })
+        git(p.work, "push", "-q", "origin", "spec:refs/heads/cloud/spec-f-0001")
+
+        git(p.work, "checkout", "-q", "main")
+        p.commit("docs(plan): f-0001", {"docs/plans/f-0001.md": "# Plan\n\n" + PLAN})
+
+        git(p.work, "checkout", "-q", "-b", "task")
+        p.commit("task", {"docs/reviews/1-f-0001-t1.md": _code_table(code_mech)})
+        git(p.work, "push", "-q", "origin", "task:refs/heads/cloud/f-0001-t1")
+
+        git(p.work, "checkout", "-q", "main")
+        p.publish()
+        git(p.repo, "fetch", "-q", "origin")
+
+        self.code_mech = code_mech
+
+    def test_spec_review_is_the_newer_rounds_table(self):
+        ev = self.p.discover([])
+        self.assertEqual(ev["features"]["f-0001"]["spec_review"],
+                         (2, "CHANGES REQUESTED", "2-f-0001.md"))
+
+    def test_task_row_carries_the_passing_checks(self):
+        ev = self.p.discover([])
+        tasks = ev["features"]["f-0001"]["tasks"]
+        self.assertEqual(tasks["T1"]["checks"], {
+            "path": "1-f-0001-t1.md", "round": 1,
+            "passed": [reviews.normalize(n) for n in self.code_mech],
+        })
+        self.assertIsNone(tasks["T2"]["checks"])
 
 
 class DocSlugTests(unittest.TestCase):

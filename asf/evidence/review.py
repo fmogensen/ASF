@@ -14,9 +14,12 @@ still carries the legacy form ``<prefix>-review-r<n>.md`` in the reviews directo
 review keeps its verdict. When both forms carry a round, the higher round wins, and the pattern
 form wins a tie.
 
-**The verdict** is the review's own ``verdict:`` line (:func:`verdict_of`) — the first one wins.
-A legacy file written before the line existed is read by its first verdict word
-(``APPROVED``/``CHANGES REQUESTED``/``BOUNCE``/``REVISE``), and only a legacy file is.
+**The verdict** is derived from the review's own check table first — :mod:`asf.reviews` is the
+one owner of that grammar, and its ``BOUNCE`` reads as :data:`CHANGES` here, so no lane branch is
+stranded on a third value. The review's own ``verdict:`` line (:func:`verdict_of`) answers only
+for a file that carries no table at all — the first one wins. A legacy file written before either
+existed is read by its first verdict word (``APPROVED``/``CHANGES REQUESTED``/``BOUNCE``/
+``REVISE``), and only a legacy file is.
 
 A review is *current* for a head when the head it names (its ``head:`` line) is that head; a
 review of an older head is history, not a verdict.
@@ -24,6 +27,7 @@ review of an older head is history, not a verdict.
 import re
 import subprocess
 
+from asf import reviews
 from asf.conventions import DEFAULT_REVIEW_PATTERN, DEFAULT_REVIEWS_DIR
 
 APPROVED = 'approved'
@@ -44,13 +48,21 @@ LEGACY_NAME_RE = re.compile(r'(?P<prefix>.+)-review-r(?P<n>\d+)[a-z]?\.md')
 READ_CHARS = 20000
 
 
-def verdict_of(text):
-    """A review's verdict from its text: :data:`APPROVED` for ``verdict: approved``,
-    :data:`CHANGES` for ``verdict: changes…`` (``changes requested`` and the like), None when the
-    text carries no verdict line. Case-insensitive; the first verdict line wins."""
+def verdict_of(text, required=()):
+    """A review's verdict, derived from its check table first (:func:`asf.reviews.verdict`,
+    ``BOUNCE`` mapped to :data:`CHANGES` so the lane's two-value vocabulary is never stranded):
+    :data:`APPROVED`, :data:`CHANGES`, or — a file with no table at all — its own ``verdict:``
+    line (``verdict: approved``, ``verdict: changes…`` and the like), None when neither is
+    present. Case-insensitive; the first verdict line wins."""
     if isinstance(text, (bytes, bytearray)):
         text = bytes(text[:READ_CHARS]).decode('utf-8', 'replace')
-    for m in VERDICT_LINE_RE.finditer((text or '')[:READ_CHARS]):
+    text = (text or '')[:READ_CHARS]
+    v = reviews.verdict(text, required)
+    if v == reviews.APPROVED:
+        return APPROVED
+    if v in (reviews.CHANGES, reviews.BOUNCE):
+        return CHANGES
+    for m in VERDICT_LINE_RE.finditer(text):
         word = m.group('v').strip().strip('`*_ ').lower()
         if word.startswith('approved'):
             return APPROVED
