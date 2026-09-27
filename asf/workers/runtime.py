@@ -20,7 +20,7 @@ import subprocess
 import tempfile
 import threading
 
-from asf import detach, env, hermetic
+from asf import budget, detach, env, hermetic, tokens
 from asf.workers import headroom, report
 
 DEFAULT_BINARY = 'claude'
@@ -472,16 +472,18 @@ FAILURE_SIGNATURES = (
 
 
 def failure_reason(rec):
-    """``'token cap'`` when the record carries the factory's structured ``asf.cap`` object, else
-    the signature name when a result's text is one of the CLI's error messages, else what the
-    session's own typed REPORT declares (``pushed: no`` → ``unpushed work``,
-    :mod:`asf.workers.report`), else None.
+    """``tokens.TOKEN_CAP`` when the record carries the factory's structured ``asf.cap`` object,
+    ``budget.RUN_CAP`` when it carries ``asf.run_cap``, else the signature name when a result's
+    text is one of the CLI's error messages, else what the session's own typed REPORT declares
+    (``pushed: no`` → ``unpushed work``, :mod:`asf.workers.report`), else None.
 
-    The structured field is read first: a session's own report text lands in ``result`` and is
-    forgeable, the factory's field is not (F-0028 D9)."""
+    The structured fields are read first: a session's own report text lands in ``result`` and is
+    forgeable, the factory's fields are not (F-0028 D9)."""
     asf = (rec or {}).get('asf')
     if isinstance(asf, dict) and isinstance(asf.get('cap'), dict):
-        return 'token cap'
+        return tokens.TOKEN_CAP
+    if isinstance(asf, dict) and isinstance(asf.get('run_cap'), dict):
+        return budget.RUN_CAP
     text = str((rec or {}).get('result') or '')
     if report.parse(text):
         # a session that wrote its typed REPORT reached its end: the CLI's error texts are not in

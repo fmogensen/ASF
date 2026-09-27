@@ -1857,7 +1857,15 @@ class OutcomeClassTests(unittest.TestCase):
         self.assertEqual(lc.OUTCOME_CLASSES, (
             'finished', 'not pushed', 'empty branch', 'dead pid', 'pushed after stop',
             'unpushed work', 'unknown model', 'auth', 'quota-exhausted', 'permission', 'hook refused',
-            'network error', 'other'))
+            'network error', 'token cap', 'run cap', 'other'))
+
+    def test_a_run_ended_by_its_token_cap(self):
+        self.assertIn(lc.tokens.TOKEN_CAP, lc.OUTCOME_CLASSES)
+        self.assertEqual(lc.outcome_class(f'failed: {lc.tokens.TOKEN_CAP}'), lc.tokens.TOKEN_CAP)
+
+    def test_a_run_ended_by_its_run_cap(self):
+        self.assertIn(lc.budget.RUN_CAP, lc.OUTCOME_CLASSES)
+        self.assertEqual(lc.outcome_class(f'failed: {lc.budget.RUN_CAP}'), lc.budget.RUN_CAP)
 
 
 class PublishRedactionTests(unittest.TestCase):

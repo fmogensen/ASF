@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from asf import budget
 from asf import env
 from asf import tokens as tk
 from asf.env import Product
@@ -210,6 +211,16 @@ class MeterTest(LogCase):
         m = tk.meter(self.log(self.three()))
         self.assertEqual(tuple(m.by_dim), tk.DIMENSIONS)
         self.assertFalse([k for k in m.by_dim if re.search(r'total|sum|tokens$', k)])
+
+    def test_turns_are_counted_per_assistant_line(self):
+        m = tk.meter(self.log(self.three()))
+        self.assertEqual(m.turns, 3)
+        self.assertNotIn('run_turns', tk.DIMENSIONS)
+
+    def test_turns_reset_at_an_init_boundary(self):
+        m = tk.meter(self.log([INIT, assistant(i=100), {'type': 'result'},
+                               INIT, assistant(i=7), assistant(i=8)]))
+        self.assertEqual(m.turns, 2)
 
 
 class CapsTest(unittest.TestCase):
@@ -422,7 +433,7 @@ class CapStopTest(Home):
     def test_under_cap_is_untouched(self):
         self.over_and_live([INIT, assistant(i=10, o=1)])
         before = self.read_bytes()
-        rows, out = self.capped()
+        rows, out = self.capped(now='2026-09-24T10:05:00Z')
         self.assertEqual(rows, [])
         self.assertEqual(out, ['cap: none'])
         self.assertEqual(self.read_bytes(), before)
@@ -487,6 +498,80 @@ class CapStopTest(Home):
         caps = tk.caps(env.Product('sample', {'token_caps': {'spec': {'input': 5}}}))
         rows, _ = self.capped(caps=caps)
         self.assertEqual(rows, [(self.JOB, 'input', 10, 5)])
+
+
+class RunCapStopTest(CapStopTest):
+    """F-0092 §2.8: a run within every token dimension's cap but over its own wall clock or turn
+    cap is ended the same way — signalled, given a run-cap result line, marked ``capped``."""
+
+    def under_input(self):
+        return [INIT, assistant(i=10, o=1)]
+
+    def over_clock_and_live(self):
+        self.write_log(self.under_input())
+        self.launch(started='2026-09-24T06:00:00Z')
+
+    def test_over_the_wall_clock_is_stopped_and_gets_a_run_cap_result_line(self):
+        self.over_clock_and_live()
+        rows, out = self.capped(now='2026-09-24T10:00:00Z')
+        self.assertEqual(rows, [(self.JOB, 'run_minutes', 240, 180)])
+        last = self.read_lines()[-1]
+        self.assertEqual(last['type'], 'result')
+        self.assertTrue(last['is_error'])
+        self.assertEqual(last['asf']['run_cap'],
+                         {'kind': 'spec', 'measure': 'run_minutes', 'value': 240, 'limit': 180,
+                          'at': '2026-09-24T10:00:00Z'})
+        self.assertEqual(self.signals[0], (self.PID, signal.SIGTERM))
+        self.assertEqual(out, [f'CAP   {self.JOB}  run_minutes 240 over 180 (spec)'])
+
+    def test_the_run_cap_line_is_what_every_reader_sees(self):
+        self.over_clock_and_live()
+        self.capped(now='2026-09-24T10:00:00Z')
+        result = runtime_mod.read_result(self.log_path)
+        self.assertIsNotNone(result)
+        self.assertFalse(runtime_mod.result_ok(result))
+        self.assertEqual(runtime_mod.failure_reason(result), budget.RUN_CAP)
+        self.assertEqual(lifecycle.judge(self.run_of(), lifecycle.Evidence(result=result, alive=False)),
+                         'failed: run cap')
+
+    def test_registry_records_the_run_cap(self):
+        self.over_clock_and_live()
+        self.capped(now='2026-09-24T10:00:00Z')
+        self.assertEqual(self.run_of()['capped'],
+                         {'measure': 'run_minutes', 'value': 240, 'limit': 180,
+                          'at': '2026-09-24T10:00:00Z'})
+
+    def test_a_run_within_both_caps_is_untouched(self):
+        self.write_log(self.under_input())
+        self.launch(started='2026-09-24T09:58:00Z')
+        rows, out = self.capped(now='2026-09-24T10:00:00Z')
+        self.assertEqual(rows, [])
+        self.assertEqual(out, ['cap: none'])
+
+    def test_a_run_that_already_has_a_result_is_never_stopped_by_the_run_cap(self):
+        self.write_log(self.under_input() + [{'type': 'result', 'subtype': 'success', 'result': 'done'}])
+        self.launch(started='2026-09-24T06:00:00Z')
+        before = self.read_bytes()
+        rows, _ = self.capped(now='2026-09-24T10:00:00Z')
+        self.assertEqual(rows, [])
+        self.assertEqual(self.signals, [])
+        self.assertEqual(self.read_bytes(), before)
+
+    def test_stop_false_judges_the_run_cap_only(self):
+        self.over_clock_and_live()
+        rows, _ = self.capped(now='2026-09-24T10:00:00Z', stop=False)
+        self.assertEqual(rows, [(self.JOB, 'run_minutes', 240, 180)])
+        self.assertEqual(self.signals, [])
+        self.assertNotIn('capped', self.run_of())
+
+    def test_over_turns_is_named_when_the_wall_clock_is_off(self):
+        product = env.Product('sample', {'repo_dir': self.repo,
+                                         'conventions': {'budget': {'run_minutes': 'off', 'run_turns': 2}}})
+        self.write_log([INIT, assistant(i=1), assistant(i=1), assistant(i=1)])
+        self.launch(started='2026-09-24T06:00:00Z')
+        out = []
+        rows = stall_mod.capped(product, alive=self.alive, now='2026-09-24T06:01:00Z', out=out.append)
+        self.assertEqual(rows, [(self.JOB, 'run_turns', 3, 2)])
 
 
 if __name__ == '__main__':

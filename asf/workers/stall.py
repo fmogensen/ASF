@@ -18,19 +18,22 @@ recorded on the original session so a second failure (or a session already corre
 returns False and the caller files the Bug instead.
 
 ``capped(product)`` is the other half of "a live session the factory must end": a run over any
-one token dimension's cap (:mod:`asf.tokens`) is signalled dead (``stop_session``: SIGTERM to its
-process group, SIGKILL after a grace), gets one ``result`` line of the factory's own appended to
-its log — ``is_error``, with a structured ``asf.cap`` object every reader already understands as
-``failed: token cap`` — and is marked ``capped`` on its registry line. A run that already has a
-result is never touched, and a pid that no longer carries the run's session id is never
-signalled (F-0076 D11): it is left to health's ``dead pid`` path.
+one token dimension's cap (:mod:`asf.tokens`) or either of a run's own caps — wall clock, turns
+(:mod:`asf.budget`) — is signalled dead (``stop_session``: SIGTERM to its process group, SIGKILL
+after a grace), gets one ``result`` line of the factory's own appended to its log — ``is_error``,
+with a structured ``asf.cap`` or ``asf.run_cap`` object every reader already understands as
+``failed: token cap`` or ``failed: run cap`` — and is marked ``capped`` on its registry line. A
+run that already has a result is never touched, and a pid that no longer carries the run's
+session id is never signalled (F-0076 D11): it is left to health's ``dead pid`` path.
 """
+import calendar
 import json
 import os
 import re
 import signal
 import time
 
+from asf import budget
 from asf import env
 from asf import tokens
 from asf.metrics import metrics as metrics_mod
@@ -159,10 +162,33 @@ def _append_line(path, rec):
         f.write((json.dumps(rec) + '\n').encode('utf-8'))
 
 
+def elapsed_min(session, now=None):
+    """The run's ``started`` to ``now``, in minutes; ``None`` when the ledger has no usable
+    ``started``."""
+    started = session.get('started')
+    if not started:
+        return None
+    try:
+        began = calendar.timegm(time.strptime(str(started), '%Y-%m-%dT%H:%M:%SZ'))
+    except ValueError:
+        return None
+    if now is None:
+        at = time.time()
+    elif isinstance(now, (int, float)):
+        at = now
+    else:
+        try:
+            at = calendar.timegm(time.strptime(str(now), '%Y-%m-%dT%H:%M:%SZ'))
+        except ValueError:
+            return None
+    return int((at - began) / 60)
+
+
 def capped(product, now=None, alive=None, caps=None, stop=True, out=print):
-    """Returns ``[(job, dimension, tokens, limit)]`` for every live run over one dimension's cap,
-    in ``live_sessions`` order; each is stopped, given a cap result line and marked ``capped`` on
-    its registry line. ``stop=False`` judges only: nothing is signalled, appended or marked.
+    """Returns ``[(job, measure, value, limit)]`` for every live run over one token dimension's
+    cap or one of its own run caps (wall clock, turns), in ``live_sessions`` order; each is
+    stopped, given a cap result line and marked ``capped`` on its registry line. ``stop=False``
+    judges only: nothing is signalled, appended or marked.
 
     A malformed ``token_caps:`` block stops nothing (D13); a run that has a result is never
     touched; a pid that is not this run's is never signalled and is left to health."""
@@ -173,6 +199,7 @@ def capped(product, now=None, alive=None, caps=None, stop=True, out=print):
         except tokens.TokenCapError as e:
             out(f'token cap: {e}')
             return []
+    conv = getattr(product, 'conventions', None)
     live = pool_mod.live_sessions(product)
     if alive is None:
         alive = health_mod.alive_for(product, live)
@@ -185,20 +212,24 @@ def capped(product, now=None, alive=None, caps=None, stop=True, out=print):
             continue
         kind = metrics_mod.session_kind(s)
         verdict = tokens.over(m.by_dim, caps.get(kind) or caps.get('default') or {})
-        if verdict is None or not alive(s.get('pid')):
+        run_verdict = None if verdict else budget.run_over(elapsed_min(s, now), m.turns, budget.run_caps(conv))
+        if (verdict is None and run_verdict is None) or not alive(s.get('pid')):
             continue
-        dimension, spent, limit = verdict
+        measure, value, limit = verdict or run_verdict
         detail = ''
         if stop:
             stop_session(s, alive)
             if runtime_mod.read_result(s['log']) is None:
-                _append_line(s['log'], tokens.cap_result(kind, dimension, spent, limit, m.by_dim, at))
+                rec = (tokens.cap_result(kind, measure, value, limit, m.by_dim, at) if verdict
+                       else budget.run_cap_result(kind, measure, value, limit, at))
+                _append_line(s['log'], rec)
             else:
                 detail = ' finished first'
-            pool_mod.update_session(product, s['job'], capped={
-                'dimension': dimension, 'tokens': spent, 'limit': limit, 'at': at})
-        found.append((s['job'], dimension, spent, limit))
-        out(f"CAP   {s['job']}  {dimension} {spent} over {limit} ({kind}){detail}")
+            mark = ({'dimension': measure, 'tokens': value, 'limit': limit, 'at': at} if verdict
+                    else {'measure': measure, 'value': value, 'limit': limit, 'at': at})
+            pool_mod.update_session(product, s['job'], capped=mark)
+        found.append((s['job'], measure, value, limit))
+        out(f"CAP   {s['job']}  {measure} {value} over {limit} ({kind}){detail}")
     if not found:
         out('cap: none')
     return found

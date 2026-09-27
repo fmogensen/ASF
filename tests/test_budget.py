@@ -1,7 +1,9 @@
 import unittest
 
 from asf import budget
+from asf import tokens
 from asf.conventions import Conventions
+from asf.workers import runtime as runtime_mod
 
 
 class ItemBudgetTests(unittest.TestCase):
@@ -111,6 +113,16 @@ class RunCapTests(unittest.TestCase):
         self.assertEqual(rec['asf']['run_cap'],
                          {'kind': 'code', 'measure': 'run_minutes', 'value': 240, 'limit': 180,
                           'at': '2026-09-28T04:12:00Z'})
+
+    def test_failure_reason_of_a_run_cap_record_is_run_cap(self):
+        rec = budget.run_cap_result('code', 'run_minutes', 240, 180, '2026-09-28T04:12:00Z')
+        self.assertEqual(runtime_mod.failure_reason(rec), budget.RUN_CAP)
+
+    def test_failure_reason_of_a_token_cap_record_is_still_token_cap(self):
+        rec = tokens.cap_result('code', 'input', 9_000_000, 8_000_000,
+                                {'input': 9_000_000, 'output': None, 'cache_read': None,
+                                 'cache_write': None}, '2026-09-28T04:12:00Z')
+        self.assertEqual(runtime_mod.failure_reason(rec), tokens.TOKEN_CAP)
 
 
 if __name__ == '__main__':
