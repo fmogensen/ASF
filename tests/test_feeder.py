@@ -846,6 +846,43 @@ class CapOverEveryLaunchingKindTest(unittest.TestCase):
                 self.assertEqual([r for r in out if r.item_id in ('T-0001', 'F-0001')], [])
 
 
+class TrunkNameTests(unittest.TestCase):
+    """T-0243 §2.5: ``PLAN_ON_TRUNK`` names ``main`` for a product that names no trunk, but the
+    STARVED → SPEC row must match a product's own ``plan on origin/<trunk>`` sentence too."""
+
+    def test_trunk_of_defaults_to_main(self):
+        self.assertEqual(rows.trunk_of(None), 'main')
+        self.assertEqual(rows.trunk_of(product()), 'main')
+
+    def test_trunk_of_reads_the_products_own_trunk(self):
+        self.assertEqual(rows.trunk_of(product(main='trunk')), 'trunk')
+
+    def test_plan_on_trunk_names_the_products_own_trunk(self):
+        self.assertEqual(rows.plan_on_trunk(product()), rows.PLAN_ON_TRUNK)
+        self.assertEqual(rows.plan_on_trunk(product(main='trunk')), 'plan on origin/trunk')
+
+    def _feature(self, evidence):
+        return {'id': 'F-0001', 'type': 'feature', 'decided': True, 'state': 'New',
+                'stage': 'spec-review r1', 'evidence': evidence}
+
+    def test_starved_spec_lands_the_carrier_for_a_product_naming_no_trunk(self):
+        f = self._feature(['spec on spec/F-0001', 'plan on origin/main'])
+        out = rows._one_feature_rows({'F-0001': f}, None, f, set(), [], {}, {})
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].kind, rows.STARVED_SPEC)
+        self.assertEqual(out[0].branch, 'spec/F-0001')
+        self.assertIn('land the existing spec', out[0].reason)
+
+    def test_starved_spec_lands_the_carrier_for_a_product_whose_trunk_is_not_main(self):
+        p = product(main='trunk')
+        f = self._feature(['spec on spec/F-0001', 'plan on origin/trunk'])
+        out = rows._one_feature_rows({'F-0001': f}, p, f, set(), [], {}, {})
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].kind, rows.STARVED_SPEC)
+        self.assertEqual(out[0].branch, 'spec/F-0001')
+        self.assertIn('land the existing spec', out[0].reason)
+
+
 class AlreadyOnTrunkTests(unittest.TestCase):
     """F-0095 §3.2: a New Task the trunk already names is not launched into an empty branch."""
 
