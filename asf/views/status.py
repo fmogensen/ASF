@@ -427,10 +427,14 @@ def lane_push_cell(product):
 
 
 def merge_cell(product):
-    """``auto`` or ``manual`` — ``conventions.merge``: whether the lane merges a green, reviewed
-    PR itself or the operator clicks merge."""
+    """``auto``, ``queue`` or ``manual`` — ``conventions.merge``: whether the lane merges a green,
+    reviewed PR itself (directly, or through its merge queue) or the operator clicks merge."""
     conv = getattr(product, 'conventions', None)
-    return 'auto' if conv is not None and conv.merge_auto() else 'manual'
+    if conv is None:
+        return 'manual'
+    if getattr(conv, 'merge_queue', lambda: False)():
+        return 'queue'
+    return 'auto' if conv.merge_auto() else 'manual'
 
 
 def value_cell(root, product):

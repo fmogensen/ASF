@@ -58,6 +58,26 @@ conventions:
   # a required check concluded success and none is red (path-filtered, the default) | never
   # (a skipped or missing required check never merges). PR merges only — deploys never.
   # merge_skipped: path-filtered
+  # who clicks merge on a green, reviewed PR: manual (the operator; the default) | auto (the lane,
+  # by `gh pr merge`) | queue (the lane, through its own serialized merge queue: green PRs are
+  # merged onto the trunk tip as one batch ref, CI runs once on that sha against the product's
+  # whole required set — landing_checks plus deploy_sha.prod.required_jobs_from, read at the
+  # batch sha; a skipped required check is not green — and the trunk is fast-forwarded to that
+  # exact sha. A moved member head or a trunk that moved past the batch drops it and cuts it
+  # again; a red batch splits in two, a red batch of one goes back to its session).
+  # merge: manual
+  # the queue's shape under `merge: queue` (defaults shown): the ref prefix the product's CI runs
+  # its full matrix on, PRs per batch, batches in flight (each stacked on the one before), and how
+  # long a batch may wait for its checks before it is cut again.
+  # merge_queue:
+  #   ref_prefix: batch/
+  #   batch_size: 3
+  #   inflight: 2
+  #   timeout_min: 360
+  #   start_kind: trunk   # the CI start queue admits the batch push as a trunk start (trunk priority,
+  #                       # every runner, never held at capacity.ci) | batch (the batch step's kind).
+  #                       # Which runners the run lands on is the workflow's runs-on for a push of
+  #                       # the batch ref — a push, not a pull_request, so main's own class.
   # harvest: one gate over every eligible branch (combined, bisecting on red) or per-branch; the
   # most branches one run gates; seconds before a gate is killed and counted red.
   # harvest:
