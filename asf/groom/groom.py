@@ -3,6 +3,7 @@ import datetime
 import os
 import re
 
+from asf import budget
 from asf import env
 from asf.record import frontmatter
 from asf.record.core import as_list, canonicalize, compute_derived, is_open, jaccard, load_items, tokenize
@@ -37,6 +38,10 @@ ANSWER_SEVERITY = re.compile(r'^(S[123])$', re.IGNORECASE)
 ANSWER_UNBLOCK = re.compile(r'^unblock\s+([A-Z]-\d{4})$', re.IGNORECASE)
 #: ``reshape: <how>`` — the card is held and reshaped (a Task's RESHAPE → PLAN row reads it).
 ANSWER_RESHAPE = re.compile(r'^reshape:\s*(?P<how>\S.*)$', re.IGNORECASE)
+#: ``budget <n> [$<usd>]`` — an item stopped by its budget (F-0092 §2.7) is raised to `<n>`
+#: sessions, and to `$<usd>` too when the answer names one.
+ANSWER_BUDGET = re.compile(r'^budget\s+(?P<sessions>\d+)(?:\s+\$?(?P<usd>\d+(?:\.\d+)?))?$',
+                           re.IGNORECASE)
 #: A shape proposal's line (F-0086 D6): the verb after the id says what `yes` does.
 PROPOSAL_RE = re.compile(
     r'^- \[[ xX]\]\s+(?P<id>[A-Z]-\d{4})\s+(?P<verb>merge|batch|split)\s+(?P<rest>.*?)\s+—')
@@ -116,6 +121,13 @@ def _parse_answer(answer):
     m = ANSWER_RESHAPE.match(a)
     if m:
         return 'reshape', m.group('how').strip()
+    m = ANSWER_BUDGET.match(a)
+    if m:
+        fields = {'budget_sessions': int(m.group('sessions'))}
+        if m.group('usd'):
+            usd = float(m.group('usd'))
+            fields['budget_usd'] = int(usd) if usd == int(usd) else usd
+        return 'budget', fields
     return None, None
 
 
@@ -328,7 +340,8 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None, 
                 _skipped(iid, raw_answer, 'left for the operator'
                          if word.upper().startswith('NEEDS OPERATOR') else
                          'not an answer the grammar knows (yes, no, open, rank <n>, parent <id>, '
-                         'S1/S2/S3, unblock <id>, landed <sha>, reshape: <how>)')
+                         'S1/S2/S3, unblock <id>, landed <sha>, reshape: <how>, '
+                         'budget <n> [$<usd>])')
             continue
 
         typed, _machine = frontmatter.split_machine(rec['meta'])
@@ -367,6 +380,20 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None, 
             if event:
                 event('groom_answer', item=iid, section=(sections or {}).get(iid, ''),
                      field=field, value=hist_value, by=by)
+            continue
+
+        if field == 'budget':
+            if all(typed.get(k) is not None and str(typed.get(k)) == str(v)
+                   for k, v in value.items()):
+                continue  # already applied — keeps --apply idempotent
+            parts = [f"{value['budget_sessions']} sessions"]
+            if 'budget_usd' in value:
+                parts.append(f"${value['budget_usd']}")
+            _write_card(rec, value, f"- {date} groom: budget → {' / '.join(parts)} {who}")
+            applied += 1
+            if event:
+                event('groom_answer', item=iid, section=(sections or {}).get(iid, ''),
+                     field='budget', value=' / '.join(parts), by=by)
             continue
 
         if field == 'removed':
@@ -604,6 +631,34 @@ def groom_refused_section(canonical, product):
     return lines
 
 
+def groom_over_budget_section(canonical, product):
+    """One question per open card whose spend is over its budget (F-0092 §2.7): both measures
+    (:func:`asf.budget.line`, minus its ``OVER BUDGET <id> — `` prefix — the same text the wave
+    prints), whose budget it is (``product default`` / ``item``, from ``Spent.budget.source``),
+    and the three answers — raise it, close it or reshape it. A card already marked for reshape
+    is not asked, as :func:`groom_refused_section` skips it too. No state of its own: a card no
+    longer over budget (raised, or reshaped, or closed) simply stops appearing."""
+    if product is None:
+        return []
+    conv = product.conventions
+    lines = []
+    for iid, rec in sorted(canonical.items()):
+        if not is_open(rec):
+            continue
+        typed, _machine = frontmatter.split_machine(rec['meta'])
+        if typed.get('reshape'):
+            continue
+        s = budget.spent(conv, rec['meta'])
+        if not s.over:
+            continue
+        measures = budget.line(iid, s).split(' — ', 1)[1]
+        whose = 'item' if s.budget.source == 'item' else 'product default'
+        why = (f"over budget ({whose}): {measures} — raise it (`budget 12` or `budget 12 $25`), "
+               f"close it (`no: <why>`) or reshape it (`reshape: <how>`)")
+        lines.append(_card_line(iid, typed.get('title', ''), why))
+    return lines
+
+
 GROOM_SECTIONS = [
     ('Inbox cards to decide', 'inbox'),
     ('Undecided, asked nowhere else', 'undecided_new'),
@@ -676,7 +731,11 @@ INBOX_QUESTIONS = ('Inbox cards with a question', 'inbox_questions')
 #: Rendered only when it has lines: the cards the approvals hook keeps refusing
 #: (:func:`groom_refused_section`) — the adjudicator's to drop, reshape or close.
 REFUSED_QUESTIONS = ('Refused on repeat relaunches', 'refused')
-EXTRA_SECTIONS = [INBOX_QUESTIONS, REFUSED_QUESTIONS]
+#: Rendered only when it has lines: the open cards a budget has stopped
+#: (:func:`groom_over_budget_section`) — the operator's ruling, or the adjudicator's under
+#: ``approvals.groom: auto``.
+OVER_BUDGET_QUESTIONS = ('Over budget', 'over_budget')
+EXTRA_SECTIONS = [INBOX_QUESTIONS, REFUSED_QUESTIONS, OVER_BUDGET_QUESTIONS]
 
 _SECTION_BY_TITLE = {title: key for title, key in GROOM_SECTIONS + EXTRA_SECTIONS}
 _HEADER_RE = re.compile(r'^## (.+)$')
@@ -952,6 +1011,7 @@ def cmd_groom(args, root):
         since=conv.get('id_in_subject_since') if conv else None)
     sections[INBOX_QUESTIONS[1]] = inbox_mod.question_lines(root, intake_dir)
     sections[REFUSED_QUESTIONS[1]] = groom_refused_section(canonical, product)
+    sections[OVER_BUDGET_QUESTIONS[1]] = groom_over_budget_section(canonical, product)
 
     auto = policy.groom_auto(product)
     by_rule = 0
