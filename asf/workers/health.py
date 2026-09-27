@@ -394,9 +394,9 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
         if retry:
             text = (f'the push was refused by the repo\'s own hook — {retry[1]} — fix what it '
                     f'names, commit, and push again')
-            pool_mod.update_session(product, job, correction={
-                'kind': lifecycle.HOOK_REFUSED, 'text': text, 'at': now})
-            found.append((job, 'held', f'{s.get("branch") or job}: {text} (no round spent)'))
+            fields, line = lifecycle.hook_refusal_hold(registry, s, text, now)
+            pool_mod.update_session(product, job, **fields)
+            found.append((job, 'held', line.split(': ', 1)[1]))
         elif reason.startswith(UNPUSHED_REASON_PREFIXES):
             # the run's own work is the correction's input: the next session on the branch
             # commits and pushes it, or says why not (B-0051, B-0052)

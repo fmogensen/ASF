@@ -134,6 +134,15 @@ HOOK_RE = re.compile(r'\bhook\b|pre-push|refused|declined', re.I)
 #: The factory's own pre-push redaction scan (:func:`_redaction_findings`) refusing a publish: the
 #: same refusal the hook would make, so its precise correction reaches the session (F-0003).
 REDACT_REFUSAL_RE = re.compile(r'(?:^|; )redact: \S+:\d+ ')
+#: How many holds in a row on the SAME hook refusal (:func:`hook_refusal_hold`'s own
+#: :func:`next_finding`) run before the second is never tried a third time blind (B-0140): lower
+#: than :data:`ROUND_CAP` because a hook refusal spends no round in the first place — a session
+#: is not at fault for the hook, so there is no reason to let it try the identical push twice.
+HOOK_REFUSAL_CAP = 2
+#: A hook's refusal text carries the redaction scanner's own ``redact: <file>:<line>`` line
+#: (:mod:`asf.redact`) anywhere in it — the same line a product's own pre-push hook prints when
+#: it runs that scan itself.
+HOOK_REDACTION_RE = re.compile(r'\bredact:\s*\S+:\d+\b')
 
 #: Every class a session's ``end_reason`` falls into. ``finished`` is the only one that is not a
 #: failure; ``other`` is a failure whose signature this module does not name. Composed from the
@@ -1850,6 +1859,35 @@ def footprint_hold(run, paths, fact, text, now, tests=()):
                              'fact': fact, 'tests': list(tests)}}
     return fields, (f'held {branch}: footprint needs {" ".join(paths)} ({fact}) — '
                     f'widen_footprint decides')
+
+
+def hook_refusal_hold(path, run, text, now):
+    """``(fields, line)``: ``run``'s push the repo's own pre-push hook refused. The first hold on
+    a finding spends no round — the hook, not the session, is what failed, so the item is simply
+    relaunched to try again (B-0097). A *second* hold naming the same finding in a row
+    (:func:`next_finding`, at :data:`HOOK_REFUSAL_CAP`) is never tried a third time blind: the
+    hook has now said the identical thing twice, so this reads what it said and routes by it
+    (B-0140) — a redaction finding (:data:`HOOK_REDACTION_RE`) is parked as a security hold, since
+    only a person decides what a flagged secret needs, never another session; anything else is
+    marked ``at_cap`` so the item goes to ADJUDICATE the way any other stuck finding does
+    (:func:`hold`). A lint or test naming paths outside the Task's own ``writes:`` is left as a
+    plain ``hook refused`` correction either way: :mod:`asf.tick.widen_footprint` turns that into
+    a ``footprint`` hold the same tick, before a wave ever reads this one's ``at_cap``."""
+    branch = run.get('branch') or run.get('job')
+    keys, same = next_finding(path, run, HOOK_REFUSED, text)
+    corr = {'kind': HOOK_REFUSED, 'text': text, 'at': now, 'finding': keys, 'same': same}
+    if same < HOOK_REFUSAL_CAP:
+        return {'correction': corr}, f'held {branch}: {text} (no round spent)'
+    if HOOK_REDACTION_RE.search(text):
+        reason = (f'a redaction finding refused the push {same} times running — a person '
+                  'decides, not another session')
+        corr.update(parked=True, reason=reason)
+        return ({'correction': corr, 'operator_flagged': 1},
+                f'held {branch}: {reason} (security hold)')
+    corr['at_cap'] = True
+    return ({'correction': corr},
+            f'held {branch}: {text} — adjudicate pending (hook refused the same way {same} '
+            f'times in a row)')
 
 
 def widenings(path, item):
