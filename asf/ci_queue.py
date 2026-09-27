@@ -112,7 +112,9 @@ of branches the record has no item for, then of the record's ranked items, then 
 then batch runs; newest first within each — until the free runners plus what the cancelled runs
 would have taken cover the trunk run's expected jobs in every class. An S1 or hotfix run is never cancelled. Each cancel is remembered
 in the queue file (``relief``) and, once the trunk run has started, re-run (``gh run rerun``)
-through this queue at its original priority. One line per cancel and per re-run, naming the trunk
+through this queue at its original priority — unless its workflow file changed on the trunk since
+the run was created (``gh run rerun`` would replay the old definition, stale ``runs-on`` labels
+and all): then it is dropped, and the branch's next push runs fresh. One line per cancel and per re-run, naming the trunk
 sha and its wait. ``mode: dry-run`` (or a dry-run pass) prints what it would do, writes nothing.
 
 **Job-level starvation.** "Created after the trunk run" does not mean "behind it": a run's later
@@ -717,6 +719,14 @@ class Source:
         on a runner, across every repo the runners serve; None when any of it is unreadable."""
         return None
 
+    def run_workflow(self, run_id):
+        """``(head sha, workflow file path)`` one run was created on, or None when unreadable."""
+        return None
+
+    def blob(self, path, ref):
+        """The blob sha of the file at ``path`` at ``ref``, or None when unreadable."""
+        return None
+
 
 class GitHubSource(Source):
     def __init__(self, product, run=None):
@@ -896,6 +906,22 @@ class GitHubSource(Source):
         got = self._json(['run', 'view', str(run_id), '-R', self.slug, '--json',
                           'headBranch,headSha,status,conclusion'])
         return got if isinstance(got, dict) and got.get('headBranch') else None
+
+    def run_workflow(self, run_id):
+        if not self.slug or not run_id:
+            return None
+        text = self._gh(['api', f'repos/{self.slug}/actions/runs/{run_id}',
+                         '--jq', '[.head_sha, .path] | @tsv'])
+        parts = (text or '').strip().split('\t')
+        if len(parts) != 2 or not all(parts):
+            return None
+        return parts[0], parts[1].split('@')[0]
+
+    def blob(self, path, ref):
+        if not self.slug or not path or not ref:
+            return None
+        text = self._gh(['api', f'repos/{self.slug}/contents/{path}?ref={ref}', '--jq', '.sha'])
+        return (text or '').strip() or None
 
     def inflight(self):
         from asf import capacity
@@ -1884,7 +1910,7 @@ def _rerun_cancelled(q, src, product, started, dry_run, out, now, items=None):
     across a change of the order never carries a stale number into the line. ``started(rec)``
     is ``(the protected run, its name)`` once that run has started, else None (the record is
     kept). The number re-run."""
-    relief, keep, n = q.data['relief'], [], 0
+    relief, keep, n, blobs = q.data['relief'], [], 0, {}
     for rec in sorted(relief, key=lambda r: (r.get('prio', OTHER), r.get('at') or '')):
         rid = rec.get('id')
         if not rid or _age(rec.get('at'), now) > RELIEF_TTL_S:
@@ -1896,6 +1922,14 @@ def _rerun_cancelled(q, src, product, started, dry_run, out, now, items=None):
             keep.append(rec)
             continue
         protected, who = got
+        changed = _workflow_change(src, product, rid, blobs)
+        if changed:
+            what = (f"skip rerun {rid} on {rec.get('branch') or rec.get('item')} — workflow "
+                    f"changed since ({changed[0][:7]}→{changed[1][:7]}); next push runs fresh")
+            out(f'ci queue: would {what}' if dry_run else f'ci queue: {what}')
+            if dry_run:
+                keep.append(rec)
+            continue
         prio, label, rank = _rerun_priority(rec, items, product)
         d = q.admit(_rerun_key(rec), rec.get('kind') or 'pr', item=rec.get('item'),
                     prio=prio, label=label, workflow=rec.get('workflow'), sha=rec.get('sha'),
@@ -1921,6 +1955,26 @@ def _rerun_cancelled(q, src, product, started, dry_run, out, now, items=None):
         n += 1
     q.data['relief'] = keep
     return n
+
+
+def _workflow_change(src, product, rid, blobs):
+    """``(old blob, new blob)`` when the workflow file run ``rid`` was created on differs from
+    the trunk tip's, else None (the same, or unreadable: re-run as before). ``gh run rerun``
+    replays the run's own workflow definition, so a run created before the trunk changed its
+    workflow would re-run with the old jobs — their old ``runs-on`` labels among them, landing
+    on runners the new ones reserve for the trunk; such a run is dropped and the branch's next
+    push runs fresh. ``blobs`` spans one pass: one lookup per ``(ref, path)``."""
+    got = src.run_workflow(rid)
+    if not got:
+        return None
+    head, path = got
+
+    def blob(ref):
+        if (ref, path) not in blobs:
+            blobs[(ref, path)] = src.blob(path, ref)
+        return blobs[(ref, path)]
+    old, new = blob(head), blob(getattr(product, 'main', None) or 'main')
+    return (old, new) if old and new and old != new else None
 
 
 def _rerun_priority(rec, items, product=None):

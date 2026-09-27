@@ -790,6 +790,70 @@ class TestTrunkRelief(ReliefBase):
         self.assertEqual(self.cancels(gh, 'rerun'), ['201'])
         self.assertEqual(ci_queue.load('p')['relief'], [])
 
+    def workflows(self, run, blobs):
+        """``run`` answering a run's ``(head sha, workflow path)`` and a path's blob per ref
+        (``blobs``: ``{(ref, path): blob}``); every other call as ``run`` answers it."""
+        heads = {101: 'a' * 40, 102: 'a' * 40, 201: 'f' * 40}
+        paths = {101: '.github/workflows/pr.yml', 102: '.github/workflows/pr.yml',
+                 201: '.github/workflows/batch.yml'}
+
+        def wrapped(argv, **kw):
+            api = next((a for a in argv if a.startswith('repos/o/r/')), '') \
+                if argv[:2] == ['gh', 'api'] else ''
+            tail = api[len('repos/o/r/'):]
+            if tail.startswith('actions/runs/') and tail.split('/')[2:3] and \
+                    '/' not in tail[len('actions/runs/'):] and 'head_sha' in ' '.join(argv):
+                run(['gh', 'noop', *argv[1:]])          # logged for the lookup count
+                rid = int(tail.split('/')[2])
+                return subprocess.CompletedProcess(argv, 0, f'{heads[rid]}\t{paths[rid]}\n', '')
+            if tail.startswith('contents/'):
+                run(['gh', 'noop', *argv[1:]])
+                path, ref = tail[len('contents/'):].split('?ref=')
+                return subprocess.CompletedProcess(argv, 0, blobs.get((ref, path), 'same') + '\n',
+                                                   '')
+            return run(argv, **kw)
+        return wrapped
+
+    def test_a_run_created_on_a_changed_workflow_is_never_rerun(self):
+        """``gh run rerun`` replays the run's own workflow definition: a PR run created before
+        the trunk changed its workflow (new runs-on labels) would land on runners reserved for
+        the trunk. It is dropped, never re-run; the batch run on an unchanged workflow is."""
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        gh, run = self.gh(self.runs())
+        self.relieve(p, run)
+        self.lines.clear()
+        gh, run = self.gh(self.runs(trunk_status='in_progress'), busy=())
+        blobs = {('a' * 40, '.github/workflows/pr.yml'): '1111111aaaa',
+                 ('main', '.github/workflows/pr.yml'): '2222222bbbb'}
+        self.relieve(p, self.workflows(run, blobs), minutes=2)
+        self.assertEqual(self.cancels(gh, 'rerun'), ['201'])
+        self.assertIn('ci queue: skip rerun 102 on task/T-0341 — workflow changed since '
+                      '(1111111→2222222); next push runs fresh', self.lines)
+        self.assertIn('ci queue: skip rerun 101 on worker/plan-measure — workflow changed since '
+                      '(1111111→2222222); next push runs fresh', self.lines)
+        self.assertEqual(ci_queue.load('p')['relief'], [])
+        # one run lookup per run; one blob per (ref, path): pr.yml at a*40 and main, batch.yml
+        # at f*40 and main
+        looks = [c for c in gh.calls if c[:2] == ['gh', 'noop']]
+        runs_looked = [a for c in looks for a in c if '/actions/runs/' in a]
+        self.assertEqual(sorted(runs_looked), sorted(f'repos/o/r/actions/runs/{i}'
+                                                     for i in (101, 102, 201)))
+        self.assertEqual(len([c for c in looks if any('/contents/' in a for a in c)]), 4)
+
+    def test_a_run_on_the_same_workflow_is_rerun_as_before(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        gh, run = self.gh(self.runs())
+        self.relieve(p, run)
+        self.lines.clear()
+        gh, run = self.gh(self.runs(trunk_status='in_progress'), busy=())
+        self.assertEqual(self.relieve(p, self.workflows(run, {}), minutes=2), (0, 2))
+        self.assertEqual(self.cancels(gh, 'rerun'), ['102', '101'])
+        self.assertFalse([l for l in self.lines if 'skip rerun' in l])
+
     def test_a_held_rerun_asks_at_its_priority_in_the_record_now(self):
         """A relief record kept across a change of the order (its stored ``prio`` from the old
         numbering) never carries the stale number into the line: the re-run asks at what its
