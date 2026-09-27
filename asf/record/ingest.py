@@ -286,18 +286,24 @@ def _section_lines(content):
     return [l for l in content.split('\n') if l.strip() != '']
 
 
-def append_history_lines(body, new_lines):
+def append_section_lines(body, heading, new_lines):
+    """`new_lines` appended inside the section named `heading` — the body unchanged if no
+    section carries that heading."""
     if not new_lines:
         return body
     preamble, sections = parse_sections(body)
     n = len(sections)
     out_sections = []
-    for idx, (heading, content) in enumerate(sections):
-        if heading.strip() == '## History':
+    for idx, (section_heading, content) in enumerate(sections):
+        if section_heading.strip() == heading:
             is_last = idx == n - 1
             content = section_content(_section_lines(content) + list(new_lines), is_last)
-        out_sections.append([heading, content])
+        out_sections.append([section_heading, content])
     return render_sections(preamble, out_sections)
+
+
+def append_history_lines(body, new_lines):
+    return append_section_lines(body, '## History', new_lines)
 
 
 def _phrase(ev_lines):
