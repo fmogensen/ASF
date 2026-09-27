@@ -51,6 +51,7 @@ any Feature's own (:func:`finish_phase`); ``plan_rows()`` caps new spec/plan ses
 planned Tasks wait (:func:`finish_first`) and hands the rows to :mod:`asf.feeder.tiers` to order
 and cut to capacity.
 """
+import copy
 import dataclasses
 import re
 
@@ -158,7 +159,38 @@ class Row:
 def items_of(index):
     """The live ``{id: item}`` map from an ``index.json`` dict or an already-loaded item map."""
     raw = index.get('items') if isinstance(index.get('items'), dict) else index
-    return {k: v for k, v in raw.items() if isinstance(v, dict) and not v.get('removed')}
+    live = {k: v for k, v in raw.items() if isinstance(v, dict) and not v.get('removed')}
+    return with_blockers(live, raw)
+
+
+def with_blockers(items, raw=None):
+    """``items`` with ``blocked`` / ``blocked_by_open`` derived from each card's own ``blockedBy``
+    against the map's states — the ingest's rule (:func:`asf.evidence.evidence.blocked_of`), read
+    here too, because a ``blockedBy`` set after the last ingest (``asf set``) reaches the index
+    with no ``blocked`` beside it and would launch a blocked item (F-1129). A card with no
+    ``blockedBy`` keeps what it carries. Changed cards are copies; the input is not mutated."""
+    from asf.evidence.evidence import blocked_of
+    states = None
+    out = items
+    for iid, v in items.items():
+        if 'blockedBy' not in v:
+            continue
+        if states is None:
+            states = {k: (w or {}).get('state', 'New') for k, w in (raw or items).items()
+                      if isinstance(w, dict)}
+        blocked, open_blockers = blocked_of(v.get('blockedBy'), states)
+        if bool(v.get('blocked')) == blocked and list(v.get('blocked_by_open') or ()) == open_blockers:
+            continue
+        w = dict(v)
+        if blocked:
+            w.update(blocked=True, blocked_by_open=open_blockers)
+        else:
+            w.pop('blocked', None)
+            w.pop('blocked_by_open', None)
+        if out is items:
+            out = dict(items)
+        out[iid] = w
+    return out
 
 
 def inflight_ids(inflight):
@@ -616,54 +648,76 @@ def feature_rows(items, product, busy, running, landed_shas=None, occupancy=None
     """Every Feature's rows, in Feature order (:func:`feature_order`: Epic rank, rank, id).
     ``running`` grows as PLAN → CODE rows are handed out, so two ready Tasks sharing a file never
     both launch. ``occupancy`` (:func:`asf.workers.lifecycle.occupancy`): a spec or plan whose
-    work is pushed and waiting to land is not starved (PUSHED → LAND)."""
+    work is pushed and waiting to land is not starved (PUSHED → LAND). A blocked Feature
+    (``blockedBy`` an open item) launches nothing: each row it would have is a ``WAITS ON
+    <blocker>`` row, like a blocked Bug's (B-0058), and it claims no footprint (F-1129)."""
+    out = []
+    feats = [f for f in ix.of_type(items, 'feature')
+             if f.get('decided') is True and is_open(f)]
+    for f in sorted(feats, key=lambda v: feature_order(items, v)):
+        if not f.get('blocked'):
+            out.extend(_one_feature_rows(items, product, f, busy, running, landed_shas, occupancy))
+            continue
+        mine = _one_feature_rows(items, product, f, busy, copy.copy(running), landed_shas,
+                                 occupancy)
+        out.extend(blocked_row(r, f) if r.launches else r for r in mine)
+    return out
+
+
+def blocked_row(row, item):
+    """``row`` of a blocked ``item`` as the non-launching row that names what it waits on."""
+    blockers = list(item.get('blocked_by_open') or ())
+    on = blockers[0] if blockers else 'blocked'
+    return dataclasses.replace(row, action=f'WAITS ON {on}', waits_on=on,
+                               reason='blocked by ' + (', '.join(blockers) or 'an open item'))
+
+
+def _one_feature_rows(items, product, f, busy, running, landed_shas, occupancy):
+    """One decided, open Feature's rows (:func:`feature_rows`)."""
     out = []
     limit = stalemate_round(product)
-    feats = [f for f in ix.of_type(items, 'feature')
-             if f.get('decided') is True and is_open(f) and not f.get('blocked')]
-    for f in sorted(feats, key=lambda v: feature_order(items, v)):
-        fid = f['id']
-        stage = f.get('stage') or 'card'
-        doc, rnd = review_round(f)
-        if doc and rnd >= limit:
-            if fid not in busy:
-                out.append(Row(tier=2, kind=STALEMATE, item_id=fid, feature_id=fid, action=LAUNCH,
-                               brief_kind='adjudicate', branch=branch_for(product, doc, fid),
-                               reason=f"{doc}-review r{rnd} >= r{limit}: adjudicate, no further round"))
-            continue
-        if fid in busy:
-            continue
-        word = stage.split(' ')[0]
-        waits = (occupancy,)
-        if is_direct(f) and word not in BUILD_STAGES:
-            row = direct_row(f, product, occupancy)
-            if row is not None:
-                out.append(row)
-            continue
-        if word == 'card' and is_small(f):
-            out.append(spec_plan_row(fid, product, occupancy))
-        elif word == 'card':
-            out.append(_doc_row(CARD_SPEC, fid, 'spec', product, 'decided card, no spec', *waits))
-        elif word in ('spec-draft', 'spec-review'):
-            carrier = spec_carrier(f)
-            if carrier and PLAN_ON_TRUNK in (f.get('evidence') or []):
-                # the plan landed on a spec the trunk never got: that spec is landed as it
-                # stands, on its own branch — not written again, and no coder starts before it
-                out.append(_doc_row(STARVED_SPEC, fid, 'spec', product,
-                                    f"{stage}: the plan is on the trunk but the spec is still on "
-                                    f"{carrier} — land the existing spec from that branch, "
-                                    f"don't rewrite it", *waits, branch=carrier))
-            else:
-                out.append(_doc_row(STARVED_SPEC, fid, 'spec', product, f"{stage}, no session",
-                                    *waits))
-        elif word == 'spec-approved' and spec_carrier(f):
-            out.append(land_spec_row(f, product, *waits))
-        elif word in ('spec-approved', 'plan-draft', 'plan-review'):
-            out.append(_doc_row(STARVED_PLAN, fid, 'plan', product,
-                                f"{stage}, no session" if word != 'spec-approved'
-                                else 'spec approved, no plan', *waits))
-        elif word in ('plan-approved', 'building'):
-            out.extend(task_rows(items, product, f, busy, running, landed_shas))
+    fid = f['id']
+    stage = f.get('stage') or 'card'
+    doc, rnd = review_round(f)
+    if doc and rnd >= limit:
+        if fid not in busy:
+            out.append(Row(tier=2, kind=STALEMATE, item_id=fid, feature_id=fid, action=LAUNCH,
+                           brief_kind='adjudicate', branch=branch_for(product, doc, fid),
+                           reason=f"{doc}-review r{rnd} >= r{limit}: adjudicate, no further round"))
+        return out
+    if fid in busy:
+        return out
+    word = stage.split(' ')[0]
+    waits = (occupancy,)
+    if is_direct(f) and word not in BUILD_STAGES:
+        row = direct_row(f, product, occupancy)
+        if row is not None:
+            out.append(row)
+        return out
+    if word == 'card' and is_small(f):
+        out.append(spec_plan_row(fid, product, occupancy))
+    elif word == 'card':
+        out.append(_doc_row(CARD_SPEC, fid, 'spec', product, 'decided card, no spec', *waits))
+    elif word in ('spec-draft', 'spec-review'):
+        carrier = spec_carrier(f)
+        if carrier and PLAN_ON_TRUNK in (f.get('evidence') or []):
+            # the plan landed on a spec the trunk never got: that spec is landed as it
+            # stands, on its own branch — not written again, and no coder starts before it
+            out.append(_doc_row(STARVED_SPEC, fid, 'spec', product,
+                                f"{stage}: the plan is on the trunk but the spec is still on "
+                                f"{carrier} — land the existing spec from that branch, "
+                                f"don't rewrite it", *waits, branch=carrier))
+        else:
+            out.append(_doc_row(STARVED_SPEC, fid, 'spec', product, f"{stage}, no session",
+                                *waits))
+    elif word == 'spec-approved' and spec_carrier(f):
+        out.append(land_spec_row(f, product, *waits))
+    elif word in ('spec-approved', 'plan-draft', 'plan-review'):
+        out.append(_doc_row(STARVED_PLAN, fid, 'plan', product,
+                            f"{stage}, no session" if word != 'spec-approved'
+                            else 'spec approved, no plan', *waits))
+    elif word in ('plan-approved', 'building'):
+        out.extend(task_rows(items, product, f, busy, running, landed_shas))
     return out
 
 

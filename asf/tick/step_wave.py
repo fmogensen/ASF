@@ -560,6 +560,26 @@ def fresh_index(root):
         return None
 
 
+def overlay_blockers(items, fresh):
+    """``items`` (the record clone's map) with each card's ``blockedBy`` as ``fresh`` (origin's
+    map, :func:`fresh_index`) holds it now: the clone is reset at the tick's start and the wave
+    plans minutes later, so an ``asf set blockedBy=`` pushed in between reached no plan and the
+    wave launched a spec on a blocked Feature (F-1129). A blocker origin dropped is dropped here
+    too. The feeder derives ``blocked`` from the field (:func:`asf.feeder.rows.with_blockers`).
+    ``fresh`` None (origin unreadable): ``items`` unchanged. The input is not mutated."""
+    if not fresh:
+        return items
+    out = items
+    for iid, v in items.items():
+        f = fresh.get(iid)
+        if not isinstance(f, dict) or f.get('blockedBy') == v.get('blockedBy'):
+            continue
+        if out is items:
+            out = dict(items)
+        out[iid] = dict(v, blockedBy=f.get('blockedBy') if 'blockedBy' in f else [])
+    return out
+
+
 def s1_ids(items):
     return {i for i, v in items.items() if (v or {}).get('severity') == 'S1'}
 
@@ -618,6 +638,8 @@ def launch(ctx, out=print):
     held = approvals.raise_holds(ctx, out)
     lane_pass(ctx, out, defer_pushes=True)
     items, _generated = index_reader.load(ctx.record_root())
+    # the clone is as old as the tick's start: a blockedBy pushed since stops this wave (F-1129)
+    items = overlay_blockers(items, fresh_index(ctx.record_root()))
     if product.repo_dir:  # defence in depth: a Task whose card lacks `after:` waits on its plan's order
         items = plan_order.overlay(items, plan_order.trunk_reader(product))
     running = inflight(product)

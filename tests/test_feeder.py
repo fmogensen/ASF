@@ -314,10 +314,52 @@ class RowsTest(unittest.TestCase):
         self.assertEqual(rows.branch_for(p, 'code', 'T-0001'), 'feature/T-0001')
         self.assertEqual(rows.branch_for(None, 'code', 'T-0001'), 'worker/T-0001')
 
-    def test_blocked_feature_emits_nothing(self):
+    def test_blocked_feature_launches_nothing_and_says_it_waits(self):
         idx = copy.deepcopy(self.index)
-        idx['items']['F-0001']['blocked'] = True
-        self.assertNotIn('F-0001', {r.item_id for r in rows.candidates(idx, self.p, [])})
+        idx['items']['F-0001'].update(blocked=True, blocked_by_open=['B-0002'])
+        f1 = [r for r in rows.candidates(idx, self.p, []) if r.item_id == 'F-0001']
+        self.assertEqual([(r.kind, r.launches, r.action, r.waits_on) for r in f1],
+                         [(rows.CARD_SPEC, False, 'WAITS ON B-0002', 'B-0002')])
+
+    def test_blockedby_set_after_ingest_blocks_every_document_row(self):
+        # F-1129: `asf set blockedBy=` landed after the ingest derived `blocked`, so the index
+        # carried the field but no `blocked`: the wave launched a spec on a blocked Feature
+        for fid in ('F-0001', 'F-0003', 'F-0004', 'F-0005'):
+            idx = copy.deepcopy(self.index)
+            idx['items'][fid]['blockedBy'] = 'B-0003'   # open; a bare string, as `asf set` writes
+            idx['items'][fid].pop('blocked', None)
+            mine = [r for r in rows.candidates(idx, self.p, []) if r.item_id == fid]
+            self.assertTrue(mine, fid)
+            self.assertFalse([r for r in mine if r.launches], fid)
+            self.assertIn('WAITS ON B-0003', [r.action for r in mine], fid)
+
+    def test_a_blocked_building_features_tasks_launch_nothing(self):
+        idx = copy.deepcopy(self.index)
+        free = {r.item_id for r in rows.candidates(idx, self.p, [])
+                if r.feature_id == 'F-0002' and r.kind == rows.PLAN_CODE and r.launches}
+        self.assertTrue(free)
+        idx['items']['F-0002']['blockedBy'] = ['B-0003']
+        code = [r for r in rows.candidates(idx, self.p, [])
+                if r.feature_id == 'F-0002' and r.kind == rows.PLAN_CODE]
+        self.assertLessEqual(free, {r.item_id for r in code})
+        self.assertFalse([r for r in code if r.launches])
+        self.assertEqual({r.waits_on for r in code if r.item_id in free}, {'B-0003'})
+
+    def test_a_closed_blocker_blocks_nothing(self):
+        idx = copy.deepcopy(self.index)
+        idx['items']['F-0001'].update(blockedBy='B-0005', blocked=True,
+                                      blocked_by_open=['B-0005'])   # stale: B-0005 is Resolved
+        idx['items']['B-0005']['state'] = 'Closed'
+        f1 = [r for r in rows.candidates(idx, self.p, []) if r.item_id == 'F-0001']
+        self.assertEqual([(r.kind, r.launches) for r in f1], [(rows.CARD_SPEC, True)])
+
+    def test_items_of_derives_blocked_from_blockedby(self):
+        idx = copy.deepcopy(self.index)
+        idx['items']['F-0001']['blockedBy'] = ['B-0002', 'B-0005', 'the vendor']
+        f1 = rows.items_of(idx)['F-0001']
+        self.assertEqual((f1.get('blocked'), f1.get('blocked_by_open')),
+                         (True, ['B-0002', 'B-0005', 'the vendor']))
+        self.assertNotIn('blocked', self.index['items']['F-0001'])   # the input is not mutated
 
     def test_takes_a_bare_item_map(self):
         self.assertEqual(kinds(rows.candidates(self.index['items'], self.p, [])), kinds(self.cand()))
@@ -1380,3 +1422,36 @@ class ATaskWithNoWritesIsNotLaunched(unittest.TestCase):
         self.assertEqual(by_id['T-0001'].action, 'WAITS ON writes')
         self.assertIn('no writes: declared', by_id['T-0001'].reason)
         self.assertEqual(by_id['T-0002'].action, rows_mod.LAUNCH)
+
+
+class WaveReadsTheBlockersOriginHolds(unittest.TestCase):
+    """F-1129: the wave plans from the record clone as the tick's start reset it — minutes old.
+    An ``asf set blockedBy=`` pushed since must still stop this wave's launch."""
+
+    def setUp(self):
+        self.index = fixture_index()
+        self.p = product()
+
+    def test_a_blocker_set_since_the_clone_stops_the_launch(self):
+        from asf.tick import step_wave
+        stale = rows.items_of(copy.deepcopy(self.index))
+        fresh = copy.deepcopy(stale)
+        fresh['F-0001'] = dict(fresh['F-0001'], blockedBy='B-0002')
+        items = step_wave.overlay_blockers(stale, fresh)
+        f1 = [r for r in rows.candidates(items, self.p, []) if r.item_id == 'F-0001']
+        self.assertEqual([(r.launches, r.action) for r in f1], [(False, 'WAITS ON B-0002')])
+        self.assertNotIn('blockedBy', stale['F-0001'])   # the clone's map is not mutated
+
+    def test_a_blocker_dropped_since_the_clone_frees_the_item(self):
+        from asf.tick import step_wave
+        stale = copy.deepcopy(self.index['items'])
+        stale['F-0001'].update(blockedBy='B-0002', blocked=True, blocked_by_open=['B-0002'])
+        fresh = copy.deepcopy(self.index['items'])
+        items = step_wave.overlay_blockers(stale, fresh)
+        f1 = [r for r in rows.candidates(items, self.p, []) if r.item_id == 'F-0001']
+        self.assertEqual([r.launches for r in f1], [True])
+
+    def test_no_fresh_index_keeps_the_clone(self):
+        from asf.tick import step_wave
+        stale = rows.items_of(self.index)
+        self.assertIs(step_wave.overlay_blockers(stale, None), stale)
