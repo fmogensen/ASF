@@ -1849,6 +1849,32 @@ def repeats(corr):
     return ROUND_CAP if corr.get('at_cap') else 1
 
 
+def review_answered(path, item, review_path, head):
+    """The job of a ``correct`` run that answered the review hold on ``review_path`` without a
+    commit, or None (B-0149): the item's latest review correction names ``review_path``, and a
+    correct run started after it — launched on ``head``, the branch still there — finished.
+    The lane's restack can clear a review's finding (a conflict with the trunk) under it, so the
+    session has nothing to change; the review then wants a fresh round, not another correction."""
+    if not path or not item or not review_path or not head:
+        return None
+    rs = item_runs(path, item)
+    holds = [(r.get('correction') or {}) for r in rs]
+    holds = [c for c in holds if c.get('kind') == REVIEW and c.get('at')]
+    if not holds:
+        return None
+    last = max(holds, key=lambda c: c['at'])
+    if not str(last.get('text') or '').startswith(f'{review_path} '):
+        return None
+    for r in sorted(rs, key=lambda r: r.get('started') or '', reverse=True):
+        if (r.get('started') or '') <= last['at']:
+            break
+        if r.get('kind') == CORRECT and r.get('end_reason') == FINISHED \
+                and not quota_exhausted(r) \
+                and (r.get('launch_head') or '').lower() == head.lower():
+            return r.get('job')
+    return None
+
+
 def next_finding(path, run, kind, text, keys=None):
     """``(keys, same)`` for a new hold on ``run``: its finding and how many holds in a row on
     that finding it is. The item's latest counted correction is the one before; when this hold

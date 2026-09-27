@@ -151,6 +151,31 @@ class RegistryFoldInvariants(unittest.TestCase):
                                head='b' * 40)
         self.assertIs(fields['correction'].get('parked'), True, line)
 
+    def test_a_review_answered_without_a_commit(self):
+        """B-0149: the review hold's correction, then a correct run launched on the head the
+        hold named that finished there — nothing changed, the session says it is resolved."""
+        H = 'd' * 40
+        hold = {'job': 'adjudicate-t-1', 'correction': {
+            'kind': 'review', 'at': '2026-01-01T07:17:39Z',
+            'text': 'rv/4-t-1.md reads changes requested: answer its C list on cloud/T-1'}}
+        lines = [{'job': 'adjudicate-t-1', 'pid': 1, 'started': '2026-01-01T07:00:00Z',
+                  'branch': 'cloud/T-1', 'item': 'T-1', 'kind': 'adjudicate'},
+                 {'job': 'adjudicate-t-1', 'ended': 't', 'end_reason': 'finished'}, hold]
+        path = self._write(lines)
+        self.assertIsNone(lc.review_answered(path, 'T-1', 'rv/4-t-1.md', H))
+        run = {'job': 'correct-t-1', 'pid': 2, 'started': '2026-01-01T07:18:39Z',
+               'branch': 'cloud/T-1', 'item': 'T-1', 'kind': 'correct', 'launch_head': H}
+        path = self._write(lines + [run])
+        self.assertIsNone(lc.review_answered(path, 'T-1', 'rv/4-t-1.md', H))  # still running
+        done = {'job': 'correct-t-1', 'ended': 't2', 'end_reason': 'finished'}
+        path = self._write(lines + [run, done])
+        self.assertEqual(lc.review_answered(path, 'T-1', 'rv/4-t-1.md', H), 'correct-t-1')
+        self.assertIsNone(lc.review_answered(path, 'T-1', 'rv/4-t-1.md', 'e' * 40))  # moved
+        self.assertIsNone(lc.review_answered(path, 'T-1', 'rv/5-t-1.md', H))  # another review
+        failed = dict(done, end_reason='failed: rc 1')
+        path = self._write(lines + [run, failed])
+        self.assertIsNone(lc.review_answered(path, 'T-1', 'rv/4-t-1.md', H))
+
     def test_by_worktree_is_the_last_run_that_recorded_the_directory(self):
         lines = [{'job': 'fix-b-0001', 'pid': 1, 'started': 't1', 'worktree': '/wt/fix-b-0001'},
                  {'job': 'fix-b-0001', 'ended': 't2', 'end_reason': 'failed: not pushed: 2 uncommitted file(s), 0 unpushed commit(s)'},

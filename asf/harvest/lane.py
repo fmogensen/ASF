@@ -1084,6 +1084,10 @@ def next_state(prev, facts):
         if rv.get('current') and rv.get('verdict') == review_mod.CHANGES:
             if f.get('overruled'):  # T5a: the ruling on this head already answered the review
                 return GATE, f"{rv.get('path')} overruled by {f['overruled']}'s ruling"
+            if f.get('review_answered'):  # T5b: answered without a commit — review it again
+                reason = (f"round {int(rv.get('round') or 0) + 1} wanted: {rv.get('path')} was "
+                          f"answered by {f['review_answered']} without a commit")
+                return (REVIEW, reason) if s != REVIEW or reason != rec.get('reason') else keep
             return BACK, 'kind=review'
         rnd, why = review_reason(f)
         reason = f'round {rnd} wanted: {why}'
@@ -1287,6 +1291,8 @@ class Lane:
                 rv['customer_row'] = customer_content.has_customer_row(rv.pop('body', ''))
             f['review'] = rv
             if rv and rv.get('current') and rv.get('verdict') == review_mod.CHANGES:
+                f['review_answered'] = lifecycle.review_answered(self.path, item, rv.get('path'),
+                                                                 head)
                 # the review's C list an adjudicate ruling already answered on this very head
                 f['overruled'] = lifecycle.overruling(
                     self.path, item, head,

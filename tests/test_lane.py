@@ -94,6 +94,20 @@ class Transitions(unittest.TestCase):
                                                                   review=CHANGES)),
                          (lane.BACK, 'kind=review'))
 
+    def test_t5b_changes_a_correction_answered_without_a_commit_want_a_fresh_review(self):
+        """B-0149, a product's T-0360/T-0097: the lane's restack cleared the review's finding
+        (a conflict with the trunk), so the correct session found nothing to change and pushed
+        nothing. The review of the head still read changes, and BACK relaunched a correction
+        every wave. A review a correction answered without a commit wants a fresh round."""
+        state, reason = lane.next_state(rec(lane.PR_OPEN), facts(
+            review_required=True, review=CHANGES, review_answered='correct-t-0001'))
+        self.assertEqual(state, lane.REVIEW)
+        self.assertEqual(reason, 'round 2 wanted: r/t-0001-r1.md was answered by '
+                                 'correct-t-0001 without a commit')
+        self.assertEqual(lane.next_state(rec(lane.REVIEW, reason=reason), facts(
+            review_required=True, review=CHANGES, review_answered='correct-t-0001'))[0],
+            lane.REVIEW)
+
     def test_t5a_changes_a_ruling_overruled_on_this_head_go_to_the_gate(self):
         state, reason = lane.next_state(rec(lane.PR_OPEN), facts(
             review_required=True, review=CHANGES, overruled='adjudicate-t-0001'))
