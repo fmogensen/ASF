@@ -2,6 +2,26 @@
 
 One entry per released version, newest first.
 
+## v0.1.38 — 2026-09-27
+
+### In progress
+
+- F-0003 P0c — seed this record with the factory itself
+- F-0010 P3 wave 2 — evidence and ingest
+- F-0013 P3 wave 5 — the feeder and the tick
+- F-0014 P3 wave 6 — the CLI and the plugin
+- F-0092 An item has a budget: three sessions or $10, then it stops and says why
+
+### Improvements and hotfixes
+
+- fix(lane): a merge the host refuses for conflicts goes BACK to be rebased, never waits
+- fix(quota): a reading older than stale_after_min is stale — status says so, the wave ignores it
+- fix(ci_queue): the queue's pass opens the held PRs the line admits
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.38"`
+
 ## v0.1.37 — 2026-09-27
 
 ### Features landed
