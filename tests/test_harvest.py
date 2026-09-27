@@ -576,6 +576,9 @@ class ProductHarvestTests(unittest.TestCase):
         conventions.setdefault('test_command', PRODUCT_TEST)
         # the gate's own behaviour, a branch at a time: no review session stands before it
         conventions.setdefault('lane', {'review': {'code': 'none'}})
+        # not this Task's own: this fixture predates the mechanical pass (F-0060) and does
+        # not mean to exercise it
+        conventions.setdefault('review', {'precheck': 'none'})
         return env.Product('sample', {'repo_dir': self.repo, 'main': 'main',
                                       'conventions': conventions, 'steps': {'batch': 'off'}})
 
@@ -1557,7 +1560,10 @@ class ProductHarvestTests(unittest.TestCase):
         data = {'repo_dir': self.repo, 'repo_slug': 'o/p', 'main': 'main',
                 'conventions': {'test_command': PRODUCT_TEST, 'landing': 'pull-request',
                                 'specs_dir': 'docs/specs', 'plans_dir': 'docs/plans',
-                                'reviews_dir': '.in/reviews'},
+                                'reviews_dir': '.in/reviews',
+                                # not this Task's own: this fixture predates the mechanical
+                                # pass (F-0060) and does not mean to exercise it
+                                'review': {'precheck': 'none'}},
                 'steps': {'batch': 'bash q.sh'}}
         data.update(extra)
         return env.Product('sample', data)
@@ -2183,7 +2189,10 @@ class ProductHarvestTests(unittest.TestCase):
 
     def pr_conv(self, **extra):
         conv = {'test_command': PRODUCT_TEST, 'landing': 'pull-request',
-                'specs_dir': 'docs/specs', 'plans_dir': 'docs/plans', 'reviews_dir': '.in/reviews'}
+                'specs_dir': 'docs/specs', 'plans_dir': 'docs/plans', 'reviews_dir': '.in/reviews',
+                # not this Task's own: this fixture predates the mechanical pass (F-0060) and
+                # does not mean to exercise it
+                'review': {'precheck': 'none'}}
         conv.update(extra)
         return self.pr_product(conventions=conv)
 
@@ -2712,6 +2721,9 @@ class GateLedgerTests(unittest.TestCase):
     def product(self, **conventions):
         conventions.setdefault('test_command', PRODUCT_TEST)
         conventions.setdefault('lane', {'review': {'code': 'none'}})  # no review before the gate
+        # not this Task's own: this fixture predates the mechanical pass (F-0060) and does
+        # not mean to exercise it
+        conventions.setdefault('review', {'precheck': 'none'})
         return env.Product('sample', {'repo_dir': self.repo, 'main': 'main',
                                       'conventions': conventions, 'steps': {'batch': 'off'}})
 
