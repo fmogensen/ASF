@@ -95,9 +95,10 @@ within a priority (and a Feature's rank), the entry more of the feeder's rows wa
 dependents, a Feature's ``spec+plan on the trunk`` Tasks, another row's ``WAITS ON landing:``
 of its branch or PR), then oldest first; the queue line says ``unblocks 3``. Age alone never
 puts an unranked branch ahead of the record's work (2026-09-27: ``worker/plan-measure-1`` held
-the heavy runners at the head ahead of every Feature Task); the head guard stays the backstop for a low rank, measured from
-its time at the head. The hold line names the rank: ``(Task F-0113 rank 2, 3rd in line)`` — the
-rank is the Feature's place among the record's open Features.
+the heavy runners at the head ahead of every Feature Task); the head guard stays the backstop
+for a low rank, measured from its time at the head. The hold line names the rank: ``(Task
+F-0113 rank 2, 3rd in line)`` — the rank is the Feature's place among the record's open
+Features.
 
 **Superseded trunk runs.** A trunk run judges every commit below it, so an older trunk run still
 *queued* when a newer one exists is moot: :func:`cancel_superseded` cancels it, keeping the newest
