@@ -480,6 +480,109 @@ class ReshapeRowsTest(unittest.TestCase):
                          [(rows.RESHAPE, 'T-0050', True)])
 
 
+class DeliveryRowsTest(unittest.TestCase):
+    """T-0174 / S-17452: delivery_rows speaks for a delivery's members — one plan row, one code
+    row, the union footprint, and a WAITS ON delivery row for every other open member."""
+
+    def lead(self, members, **over):
+        base = {'id': 'F-0097', 'type': 'feature', 'state': 'New', 'rank': 1,
+               'stage': 'card', 'delivers': ['F-0097'] + list(members)}
+        base.update(over)
+        return base
+
+    def member_bug(self, mid='B-0034', **over):
+        base = {'id': mid, 'type': 'bug', 'state': 'New', 'severity': 'S2', 'decided': True,
+               'delivered_by': 'F-0097', 'writes': ['asf/groom/groom.py']}
+        base.update(over)
+        return base
+
+    def member_story(self, mid='S-0055', **over):
+        base = {'id': mid, 'type': 'story', 'state': 'New', 'delivered_by': 'F-0097',
+               'writes': ['docs/specs/s-0055.md']}
+        base.update(over)
+        return base
+
+    def idx(self, lead, *members):
+        items = {lead['id']: lead}
+        for m in members:
+            items[m['id']] = m
+        return {'items': items}
+
+    def test_card_stage_lead_gets_a_plan_row(self):
+        bug, story = self.member_bug(), self.member_story()
+        lead = self.lead([bug['id'], story['id']])
+        out = rows.delivery_rows(rows.items_of(self.idx(lead, bug, story)), product(), set(), [])
+        plan = [r for r in out if r.item_id == 'F-0097']
+        self.assertEqual(len(plan), 1)
+        r = plan[0]
+        self.assertEqual((r.kind, r.brief_kind, r.branch, r.action),
+                         (rows.DELIVERY_PLAN, 'delivery-plan', 'plan/F-0097', rows.LAUNCH))
+        waits = [r for r in out if r.item_id != 'F-0097']
+        self.assertEqual({r.item_id for r in waits}, {'B-0034', 'S-0055'})
+        for w in waits:
+            self.assertEqual((w.action, w.waits_on, w.brief_kind, w.launches),
+                             ('WAITS ON delivery F-0097', 'delivery', 'task', False))
+
+    def test_plan_approved_lead_gets_a_code_row(self):
+        bug = self.member_bug()
+        lead = self.lead([bug['id']], stage='plan-approved')
+        out = rows.delivery_rows(rows.items_of(self.idx(lead, bug)), product(), set(), [])
+        code = [r for r in out if r.item_id == 'F-0097'][0]
+        self.assertEqual((code.kind, code.brief_kind, code.branch, code.action),
+                         (rows.DELIVERY_CODE, 'delivery-code', 'worker/F-0097', rows.LAUNCH))
+
+    def test_members_get_no_rows_of_their_own(self):
+        bug = self.member_bug()
+        feature_member = {'id': 'F-0098', 'type': 'feature', 'state': 'New', 'decided': True,
+                          'stage': 'card', 'delivered_by': 'F-0097', 'writes': ['asf/x.py']}
+        lead = self.lead([bug['id'], feature_member['id']])
+        out = rows.candidates(self.idx(lead, bug, feature_member), product(), [])
+        self.assertNotIn(rows.BUG_FIX, {r.kind for r in out if r.item_id == 'B-0034'})
+        self.assertNotIn(rows.CARD_SPEC, {r.kind for r in out if r.item_id == 'F-0098'})
+
+    def test_union_footprint_holds_and_waits(self):
+        bug = self.member_bug(writes=['asf/groom/groom.py'])
+        lead = self.lead([bug['id']], stage='plan-approved')
+        other_feature = {'id': 'F-0002', 'type': 'feature', 'decided': True, 'state': 'Active',
+                         'rank': 2, 'stage': 'building 1/1', 'children': ['T-0001']}
+        task = {'id': 'T-0001', 'type': 'task', 'parent': 'F-0002', 'state': 'New',
+               'writes': ['asf/groom/groom.py']}
+        idx = self.idx(lead, bug)
+        idx['items'][other_feature['id']] = other_feature
+        idx['items'][task['id']] = task
+
+        out = rows.candidates(idx, product(), [{'item': 'T-0001'}])
+        code = [r for r in out if r.item_id == 'F-0097' and r.kind == rows.DELIVERY_CODE][0]
+        self.assertEqual((code.action, code.waits_on), ('WAITS ON T-0001', 'T-0001'))
+
+        idx2 = copy.deepcopy(idx)
+        out2 = rows.candidates(idx2, product(), [{'item': 'F-0097'}])
+        task_row = [r for r in out2 if r.item_id == 'T-0001'][0]
+        self.assertEqual((task_row.action, task_row.waits_on), ('WAITS ON F-0097', 'F-0097'))
+
+    def test_delivered_delivery_emits_nothing(self):
+        bug = self.member_bug(state='Resolved')
+        lead = self.lead([bug['id']], state='Closed', stage='building 2/2')
+        out = rows.delivery_rows(rows.items_of(self.idx(lead, bug)), product(), set(), [])
+        self.assertEqual(out, [])
+
+    def test_busy_lead_emits_no_launching_row(self):
+        bug = self.member_bug()
+        lead = self.lead([bug['id']])
+        out = rows.delivery_rows(rows.items_of(self.idx(lead, bug)), product(), {'F-0097'}, [])
+        self.assertEqual([r.item_id for r in out], ['B-0034'])
+        r = out[0]
+        self.assertEqual((r.action, r.waits_on, r.launches),
+                         ('WAITS ON delivery F-0097', 'delivery', False))
+
+    def test_delivery_row_takes_one_slot(self):
+        bug, story = self.member_bug(), self.member_story()
+        lead = self.lead([bug['id'], story['id']], stage='plan-approved')
+        out = rows.plan_rows(self.idx(lead, bug, story), product(), [], 1)
+        launching = [r for r in out if r.launches]
+        self.assertEqual([(r.kind, r.item_id) for r in launching], [(rows.DELIVERY_CODE, 'F-0097')])
+
+
 class GroomRowTests(unittest.TestCase):
     """T8: one GROOM → ADJUDICATE row per groom day, for every question the policy pass did not
     answer, capped at ``groom.adjudicate_attempts`` sessions (§2.5)."""
