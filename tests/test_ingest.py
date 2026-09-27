@@ -1408,3 +1408,69 @@ class ProvenAcceptanceTests(IngestTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class InProdAsksOneRevList(unittest.TestCase):
+    """Every in-prod question a derive asks — a Story's, a Feature's, a Bug's — is answered from
+    one ``rev-list`` of the deployed sha, not a ``merge-base`` fork per Task per tick; and the
+    answers are the ones ``merge-base --is-ancestor`` gives."""
+
+    TASKS = 6
+
+    def git(self, *args):
+        import subprocess
+        return subprocess.run(['git', '-C', self.repo, *args], check=True, capture_output=True,
+                              text=True, env=dict(os.environ, GIT_AUTHOR_NAME='t',
+                                                  GIT_AUTHOR_EMAIL='t@t', GIT_COMMITTER_NAME='t',
+                                                  GIT_COMMITTER_EMAIL='t@t')).stdout.strip()
+
+    def setUp(self):
+        self.root = make_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.repo = tempfile.mkdtemp(prefix='ingest_prod_repo_')
+        self.addCleanup(shutil.rmtree, self.repo, ignore_errors=True)
+        self.git('init', '-q', '-b', 'main')
+        self.shas = []
+        for n in range(self.TASKS + 1):
+            self.git('commit', '-q', '--allow-empty', '-m', f'c{n}')
+            self.shas.append(self.git('rev-parse', 'HEAD'))
+        self.git('checkout', '-q', '-b', 'side', self.shas[0])
+        self.git('commit', '-q', '--allow-empty', '-m', 'undeployed')
+        self.undeployed = self.git('rev-parse', 'HEAD')
+        self.prod = self.shas[-1]
+        self.product = Product('sample', {'repo_dir': self.repo, 'repo_slug': 'sample/product',
+                                          'main': 'main', 'backlog_dir': self.root})
+        for fid in ('F-0001', 'F-0002'):
+            write(self.root, fid, 'feature', fid, 'features')
+        self.ids = {}
+        for n in range(self.TASKS):
+            tid = f'T-{n + 10:04d}'
+            write(self.root, tid, 'task', tid, 'tasks', parent='F-0001')
+            self.ids[tid] = {'branches': [], 'open_prs': [], 'commit': self.shas[n + 1],
+                             'pr': 100 + n, 'green': True}
+        write(self.root, 'T-0099', 'task', 'late', 'tasks', parent='F-0002')
+        self.ids['T-0099'] = {'branches': [], 'open_prs': [], 'commit': self.undeployed,
+                              'pr': 199, 'green': True}
+
+    def derive(self):
+        from asf.record.core import canonicalize, load_items
+        canonical, _ = canonicalize(load_items(self.root)[0])
+        ev = dict(EMPTY_EV, ci=True, prod_sha=self.prod, prod_deploys=True, prod_mode='auto',
+                  ids=self.ids)
+        return ingest.derive(canonical, ev, self.product)
+
+    def test_one_git_call_answers_every_task(self):
+        import subprocess
+        real = subprocess.run
+        with mock.patch.object(ingest.evidence.subprocess, 'run', side_effect=real) as run:
+            new_state = self.derive()[0]
+        git_calls = [c for c in run.call_args_list if c.args and c.args[0][:1] == ['git']]
+        self.assertEqual(len(git_calls), 1, git_calls)
+        self.assertEqual(new_state['F-0001'], 'Closed')    # all six merges are deployed
+        self.assertEqual(new_state['F-0002'], 'Resolved')  # its one merge is not
+
+    def test_the_answers_are_merge_bases(self):
+        reach = ingest._prod_reach({'prod_sha': self.prod}, self.product)
+        for sha in self.shas + [self.undeployed, 'f' * 40, '']:
+            self.assertEqual(reach(sha),
+                             ingest.evidence.ancestor_of(sha, self.prod, product=self.product), sha)
