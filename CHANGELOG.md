@@ -2,6 +2,23 @@
 
 One entry per released version, newest first.
 
+## v0.1.53 — 2026-09-27
+
+### Features landed
+
+- F-0098 'dead' sessions are nearly always finished ones not yet recorded: say 'ended, awaiting tick', free the slot at once
+
+### In progress
+
+- F-0042 Credentials as a rule: a daily check that every signed-in tool is valid for three more days
+- F-0052 Budget enforcement per Epic
+- F-0063 Relaunch from the branch, not from zero
+- F-0067 Clean floor, re-scoped: the sweep, the registry and the tool repository
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.53"`
+
 ## v0.1.52 — 2026-09-27
 
 ### Features landed
