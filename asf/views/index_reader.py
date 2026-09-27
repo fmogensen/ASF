@@ -122,6 +122,12 @@ def usd(items):
     return sum(vals) if vals else None
 
 
+def subtree_usd(items, item):
+    """The measured dollars at and under ``item`` — the figure the roadmap prints, the feeder
+    gates on and the groom asks about, so the three can never disagree."""
+    return usd(subtree(items, item))
+
+
 def money(x):
     return '—' if x is None else f"${x:,.2f}"
 

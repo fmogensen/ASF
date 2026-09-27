@@ -1,3 +1,4 @@
+import dataclasses
 import unittest
 
 from asf import budget
@@ -72,6 +73,50 @@ class ItemBudgetTests(unittest.TestCase):
         s = budget.spent(c, {'cost': {'sessions': 9, 'usd': 16.59}})
         self.assertEqual(budget.line('T-0021', s),
                          'OVER BUDGET T-0021 — 9/3 sessions, $16.59/$—')
+
+
+class EpicBudgetTests(unittest.TestCase):
+    """F-0052 §2.1, T1: the Epic verdict, still a leaf."""
+
+    def test_over_at_512_40_of_500(self):
+        s = budget.epic_spend('E-0001', 512.40, 500)
+        self.assertTrue(s.over)
+        self.assertEqual(budget.epic_line(s),
+                          'OVER BUDGET E-0001 — $512.40/$500 spent, new work held')
+
+    def test_not_over_just_under(self):
+        self.assertFalse(budget.epic_spend('E-0001', 499.99, 500).over)
+
+    def test_over_at_exactly_the_cap(self):
+        self.assertTrue(budget.epic_spend('E-0001', 500, 500).over)
+
+    def test_never_over_and_never_raising(self):
+        for spend, cap in [(None, 500), (512.40, None), (None, None),
+                            ('lots', 500), (512.40, 'plenty')]:
+            with self.subTest(spend=spend, cap=cap):
+                self.assertFalse(budget.epic_spend('E-0001', spend, cap).over)
+
+    def test_money_prints_a_whole_and_a_fractional_dollar(self):
+        self.assertEqual(budget.epic_line(budget.epic_spend('E-0001', 10, 10)),
+                          'OVER BUDGET E-0001 — $10/$10 spent, new work held')
+        self.assertEqual(budget.epic_line(budget.epic_spend('E-0001', 512.4, 512.4)),
+                          'OVER BUDGET E-0001 — $512.40/$512.40 spent, new work held')
+
+    def test_epic_spend_is_frozen(self):
+        s = budget.epic_spend('E-0001', 512.40, 500)
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            s.usd = 0
+
+    def test_an_epic_still_has_no_item_budget(self):
+        b = budget.of(Conventions(), {'type': 'epic', 'budget_usd': 500})
+        self.assertEqual(b, budget.Budget())
+
+    def test_epic_over_and_epic_reason_texts(self):
+        s = budget.epic_spend('E-0001', 512.40, 500)
+        self.assertEqual(budget.epic_over(s), 'E-0001 over $500')
+        self.assertEqual(budget.epic_reason(s),
+                          'E-0001 over budget: $512.40/$500 spent — '
+                          'raise it, reshape it or close its work')
 
 
 class RunCapTests(unittest.TestCase):
