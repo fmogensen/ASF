@@ -355,7 +355,18 @@ def quota_cell(cfg):
         if state == quota_mod.STOP and headroom.parse_ts(until):
             part += f" — resets {headroom.reset_label(until)}"
         parts.append(part)
-    return ', '.join(parts)
+    return quota_lock_prefix(cfg) + ', '.join(parts)
+
+
+def quota_lock_prefix(cfg):
+    """``cux lock wedged N min — held by pid X (child of Y); `` when the account manager's usage
+    lock is wedged (:mod:`asf.workers.cuxlock`) — the cause behind a row of stale readings."""
+    from asf.workers import cuxlock
+    try:
+        w = cuxlock.probe_wedge()
+    except Exception:  # noqa: BLE001 — a probe that fails says nothing
+        return ''
+    return f'{w.label}; ' if w is not None and w.wedged else ''
 
 
 def cron_cell(cfg, product):

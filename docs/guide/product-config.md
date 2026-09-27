@@ -384,6 +384,24 @@ when printed, else `polled_at` plus the window's length. A run that ends on a us
 429 stops its account until the reset it names — recorded by the next wave of any product, before it
 places a launch.
 
+**A wedged usage lock.** A quota command that refreshes through the cux account manager depends on
+its global lock, `~/.cux/.lock`. When a holder keeps it for 5 minutes or more, `asf status` starts
+the Quota row with `cux lock wedged N min — held by pid X (child of Y)` and `asf doctor` shows a
+`quota lock` row, so a row of `stale since` readings names its cause. The tick can reclaim it,
+opt-in (off by default):
+
+```yaml
+quota_guards:
+  reclaim_cux_lock: true   # default false; only a YAML true turns it on
+```
+
+On, the wave SIGTERMs (never SIGKILL) a holder only when it is a cux process, a child of a cux
+process, not a claude process, at least 15 minutes old and without children of its own; every
+other holder must be the parent of such a target, or nothing is touched. It reads the process table
+twice and acts only when both reads agree (pid and start time), then moves the lock to
+`.lock.stale-HHMM`, runs `cux usage refresh` once and logs the pids (`cux_lock_reclaim` event).
+A wrapper, a claude session, or anything with a child is never signalled.
+
 **The 5h window as a budget.** Each launch carries an estimate of its share of the 5h window, per
 kind and model family: a fixed table while history is thin (Opus spec/plan 10 %, Opus review 6 %,
 any Sonnet 4 %), else the median `total_cost_usd` of that kind's recent runs over the dollars of a

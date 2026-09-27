@@ -883,12 +883,31 @@ def run(product_name):
         rows.append(('lane pushes', False, False, refused))
     for ok, detail in check_ab_pairs(product):
         rows.append(('ab pairs', False, ok, detail))
+    lock = check_cux_lock()
+    if lock is not None:
+        rows.append(('quota lock', False, lock[0], lock[1]))
     ok, detail = check_worktrees(product)
     rows.append(('worktrees', False, ok, detail))
     branches = check_branches(product)
     if branches:
         rows.append(('branches', False, branches[0], branches[1]))
     return rows
+
+
+def check_cux_lock():
+    """``(ok, detail)`` for the account manager's usage lock (:mod:`asf.workers.cuxlock`), or
+    None when this host has none. Wedged: not ok, and names the holder and the opt-in reclaim."""
+    from asf.workers import cuxlock
+    try:
+        w = cuxlock.probe_wedge()
+    except Exception as e:  # noqa: BLE001 — an unreadable probe is one unknown row
+        return None, f'cannot read the cux lock — {e}'
+    if w is None:
+        return None
+    if w.wedged:
+        return False, (f'{w.label} — quota readings go stale; quota_guards.reclaim_cux_lock: '
+                       f'true lets the tick reclaim it')
+    return True, w.label
 
 
 def check_worktrees(product):
