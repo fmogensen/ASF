@@ -90,9 +90,12 @@ branch maps to a record item (3: the lane's branch → item mapping), in the rec
 the one ``asf next`` hands work out in (:func:`record_rank`: a Task's run before a Feature's own
 document PR, then the Feature's Epic rank, its rank, its id) — then everything the record has no
 item for (4: a branch no lane item claims — a scratch or worker branch — a batch, a deploy);
-within a priority (and a rank), oldest first. Age alone never puts an unranked branch ahead of
-the record's work (2026-09-27: ``worker/plan-measure-1`` held the heavy runners at the head
-ahead of every Feature Task); the head guard stays the backstop for a low rank, measured from
+within a priority (and a Feature's rank), the entry more of the feeder's rows wait on first
+(:func:`unblocks`: ``asf next``'s ``WAITS ON <item>`` rows naming it — a Task's ``after:``
+dependents, a Feature's ``spec+plan on the trunk`` Tasks, another row's ``WAITS ON landing:``
+of its branch or PR), then oldest first; the queue line says ``unblocks 3``. Age alone never
+puts an unranked branch ahead of the record's work (2026-09-27: ``worker/plan-measure-1`` held
+the heavy runners at the head ahead of every Feature Task); the head guard stays the backstop for a low rank, measured from
 its time at the head. The hold line names the rank: ``(Task F-0113 rank 2, 3rd in line)`` — the
 rank is the Feature's place among the record's open Features.
 
@@ -247,6 +250,7 @@ import math
 import os
 import re
 import subprocess
+import time
 
 from asf import ci_pool, env
 
@@ -1279,13 +1283,129 @@ def runner_rows(product, now=None):
 
 def line_order(entries):
     """The entries' keys in line order: priority, then — among the items the record ranks — the
-    record's rank (:func:`record_rank`), then oldest first."""
+    record's rank (:func:`record_rank`: its Feature's place — the item id breaks it last), then
+    within that tier the entry more feeder rows wait on first (``unblocks``: :func:`unblocks`),
+    then oldest first."""
     def key(k):
         e = entries[k]
         prio = e.get('prio', OTHER)
         rank = e.get('rank') if isinstance(e.get('rank'), list) else None
-        return (prio, rank or (UNRANKED if prio == RANKED else []), e.get('since') or '', k)
+        rank = rank or (UNRANKED if prio == RANKED else [])
+        n = e.get('unblocks')
+        n = n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else 0
+        tier, last = (rank[:-1], rank[-1:]) if len(rank) > 1 else (rank, [])
+        return (prio, tier, -n, last, e.get('since') or '', k)
     return sorted(entries, key=key)
+
+
+# ---- what an entry unblocks: the feeder rows waiting on it ------------------------------------
+
+#: a pass's dependents are reused this long: the lane's pass and the queue job build a
+#: :class:`Queue` per start they ask about, and the feeder's rows are planned once for all
+UNBLOCKS_TTL_S = 60
+_UNBLOCKS_CACHE = {}
+_ID = re.compile(r'([A-Z]{1,3}-\d+)\b')
+_PR = re.compile(r'PR #(\d+)')
+_WAITS = 'WAITS ON '
+_LANDING = 'WAITS ON landing: '
+
+
+def dependents(rows):
+    """``{item id or branch: rows waiting on it}`` from the feeder's rows (``asf next``). A
+    ``WAITS ON <id>`` row — a Task's ``after:``, a footprint overlap, ``<F> spec+plan on the
+    trunk`` — counts for ``<id>``; a ``WAITS ON landing: <branch | PR #n>`` row counts for that
+    branch (a PR number read back through the landing row that names its own branch). A row
+    counts only when it names another item than its own: waiting on its own landing unblocks
+    nothing else."""
+    rows = list(rows or ())
+    pr_branch = {}
+    for r in rows:
+        a = str(getattr(r, 'action', '') or '')
+        m = _PR.search(a) if a.startswith(_LANDING) else None
+        if m and getattr(r, 'branch', ''):
+            pr_branch.setdefault(m.group(1), r.branch)
+    out = {}
+    for r in rows:
+        a = str(getattr(r, 'action', '') or '')
+        own_item, own_branch = getattr(r, 'item_id', ''), getattr(r, 'branch', '')
+        if a.startswith(_LANDING):
+            what = a[len(_LANDING):].strip()
+            m = _PR.search(what)
+            target = pr_branch.get(m.group(1), '') if m else (what.split() or [''])[0]
+            if '/' not in target or target == own_branch:
+                continue
+            named = _ID.search(target)
+            if named and named.group(1) == own_item:
+                continue
+        elif a.startswith(_WAITS):
+            m = _ID.match(a[len(_WAITS):])
+            if not m or m.group(1) == own_item:
+                continue
+            target = m.group(1)
+        else:
+            continue
+        out[target] = out.get(target, 0) + 1
+    return out
+
+
+def feeder_rows(product):
+    """The rows ``asf next`` prints for ``product``, from :func:`asf.feeder.render.cmd_next`'s
+    own inputs (the record's index, the ledger's live sessions, the session ceiling, the plan
+    inputs) — no ``gh`` call. [] when the product has no record index or the plan fails."""
+    root = getattr(product, 'backlog_dir', None)
+    if not root or not os.path.isfile(os.path.join(root, 'index.json')):
+        return []
+    try:
+        from asf.feeder import rows as R
+        from asf.tick import step_wave
+        from asf.views import index_reader as ix
+        items, _generated = ix.load(root)
+        return R.plan_rows(items, product, step_wave.inflight(product),
+                           step_wave.capacity(product), **step_wave.plan_inputs(product, root))
+    except Exception:  # noqa: BLE001 — the tie-break never blocks the line
+        return []
+
+
+def unblocks(product, rows=None):
+    """``{item id or branch: feeder rows waiting on it}`` (:func:`dependents`) for this pass,
+    planned once and reused for :data:`UNBLOCKS_TTL_S` while the record's index stands.
+    ``rows``: the feeder's rows handed in."""
+    if rows is not None:
+        return dependents(rows)
+    root = getattr(product, 'backlog_dir', None) or ''
+    try:
+        stamp = os.path.getmtime(os.path.join(root, 'index.json')) if root else None
+    except OSError:
+        stamp = None
+    if stamp is None:
+        return {}                               # no record index: nothing to plan from
+    name = (getattr(product, 'name', ''), root, stamp)
+    now = time.monotonic()
+    hit = _UNBLOCKS_CACHE.get(name)
+    if hit and now - hit[0] < UNBLOCKS_TTL_S:
+        return hit[1]
+    got = dependents(feeder_rows(product))
+    _UNBLOCKS_CACHE[name] = (now, got)
+    return got
+
+
+def entry_unblocks(key, entry, deps):
+    """How many feeder rows wait on the entry ``key``: by its item, or by the branch its key
+    names (``pr:<branch>``, ``rerun:<branch>``), whichever says more."""
+    deps = deps or {}
+    n = deps.get(str((entry or {}).get('item') or ''), 0)
+    branch = key.split(':', 1)[1] if ':' in key else ''
+    return max(n, deps.get(branch, 0)) if branch else n
+
+
+def stamp_unblocks(entries, deps):
+    """Set each entry's ``unblocks`` from ``deps``; an entry nothing waits on carries none."""
+    for k, e in entries.items():
+        n = entry_unblocks(k, e, deps)
+        if n:
+            e['unblocks'] = n
+        else:
+            e.pop('unblocks', None)
 
 
 def _ordinal(n):
@@ -1480,7 +1600,8 @@ class Queue:
     """One product's queue for one caller's pass: reads the host once, answers :meth:`admit`
     for each start, and writes the file after each answer."""
 
-    def __init__(self, product, source=None, now=None, out=print, inflight=None, write=True):
+    def __init__(self, product, source=None, now=None, out=print, inflight=None, write=True,
+                 feeder=None):
         self.product = product
         self.mode = mode(product)
         self.pool = ci_pool.load_pool(product) if self.mode != 'off' else []
@@ -1502,6 +1623,11 @@ class Queue:
         self._read = False
         self.write = write and self.mode == 'on'
         self.data = prune(load(product.name), self.now) if self.mode != 'off' else None
+        #: ``{item or branch: feeder rows waiting on it}``, the line's tie-break within a tier
+        #: (:func:`unblocks`); ``feeder``: the feeder's rows handed in instead of planned
+        self.deps = unblocks(product, rows=feeder) if self.mode != 'off' else {}
+        if self.data is not None:
+            stamp_unblocks(self.data['entries'], self.deps)
         self.admitted_here = 0
         #: each workflow's expected jobs, measured once per pass: every line of it agrees
         self._needs = {}
@@ -1694,6 +1820,7 @@ class Queue:
             e['rank'] = list(rank)
         else:
             e.pop('rank', None)
+        stamp_unblocks({key: e}, self.deps)
         entries[key] = e
         order = line_order(entries)
         self._mark_head()
@@ -2781,7 +2908,9 @@ def cmd_queue(args, source=None, out=print):
         e = entries[k]
         need = ', '.join(f'{c} {n}' for c, n in sorted(line.needs[k].items())) or 'nothing measured'
         said = (f'would start ({why})' if why else 'would start') if ok else 'waits: ' + why
-        out(f"{i}. {e.get('item')} [{e.get('kind')}, {e.get('label')}, {e.get('run', FULL)} run, "
+        deps = f", unblocks {e['unblocks']}" if e.get('unblocks') else ''
+        out(f"{i}. {e.get('item')} [{e.get('kind')}, {e.get('label')}{deps}, "
+            f"{e.get('run', FULL)} run, "
             f"since {e.get('since')}] needs {need} — {said}")
     return 0
 
