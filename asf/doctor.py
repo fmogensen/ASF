@@ -703,15 +703,16 @@ def _job_plist(job):
 
 
 def scheduler_rows(cfg, product, jobs=None):
-    """[(level, label, detail)] — the pending upgrade while one holds the ticks, one line per
-    loaded factory job, then the yellow dir lines."""
+    """[(level, label, detail)] — the pending upgrade while one holds *this* product's ticks, one
+    line per loaded factory job, then the yellow dir lines."""
     from asf import upgrade
     rows = []
     # a clock can fire on time into a tick that skips every time on a pending upgrade (B-0141):
-    # the wait is the section's first line, so the jobs' `ok` is never read as a ticking factory
-    waiting = upgrade.held()
-    if waiting is not None:
-        rows.append((YELLOW, 'upgrade', upgrade.held_label(waiting)))
+    # the wait is the section's first line, so the jobs' `ok` is never read as a ticking factory.
+    # The marker's owner is the one product still ticking, so it reads no wait here.
+    marker = upgrade.held(product.name)
+    if marker is not None:
+        rows.append((YELLOW, 'upgrade', upgrade.held_label(marker)))
     if 'interval_s' in (cfg.get('scheduler') or {}):
         rows.append((YELLOW, 'config',
                      'scheduler.interval_s is set but no longer read — clocks live in '

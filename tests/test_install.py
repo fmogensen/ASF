@@ -712,6 +712,35 @@ class PendingUpgradeTest(HomeCase):
         """B-0141: a marker nothing clears held the whole factory for half an hour."""
         self.assertEqual(upgrade.PENDING_TTL_S, 10 * 60)
 
+    def test_held_reports_a_wait_to_exactly_the_products_that_are_waiting(self):
+        """B-0141 review round 1, C1 and C2: `held` is what the doctor and the status Cron row
+        read, so it answers the same question `waiting` does — for the owner, whose ticks go on,
+        and for the markers no tick honours, the answer is no wait at all."""
+        upgrade.write_pending(self.SHA, 'factory')
+        self.assertIsNone(upgrade.held('factory'))  # the owner drains and installs; it ticks
+        self.assertEqual(upgrade.held('other')['sha'], self.SHA)
+        self.assertEqual(upgrade.held()['sha'], self.SHA)  # no product named: the marker itself
+
+        # each of the three below is a marker still on disk that no tick honours: `held` reads it
+        # and reports no wait, rather than leaving the doctor to announce one nobody is serving
+        upgrade.clear_pending()  # an operator's wait whose process was killed
+        upgrade.write_pending(self.SHA, None)
+        data = upgrade.read_pending()
+        data['pid'] = 999999
+        upgrade._write_json(upgrade.pending_path(), data)
+        self.assertIsNone(upgrade.held('other'))
+        self.assertFalse(upgrade.waiting('other', out=lambda _l: None, installed='c' * 40))
+
+        upgrade.clear_pending()  # a clock step dated the marker in the future
+        upgrade.clear_expired()  # the drop above left no cool-down, but the one below would
+        self.assertIsNotNone(upgrade.write_pending(self.SHA, 'factory', now=time.time() + 3600))
+        self.assertIsNone(upgrade.held('other'))
+
+        upgrade.clear_pending()  # past the TTL, every tick resumes
+        self.assertIsNotNone(upgrade.write_pending(
+            self.SHA, 'factory', now=time.time() - upgrade.PENDING_TTL_S - 1))
+        self.assertIsNone(upgrade.held('other'))
+
     def test_a_timed_out_marker_resumes_the_parked_ticks_loudly_and_does_not_repark_them(self):
         upgrade.write_pending(self.SHA, 'factory', now=time.time() - upgrade.PENDING_TTL_S - 60)
         lines = []

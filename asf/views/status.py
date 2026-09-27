@@ -299,9 +299,10 @@ def quota_cell(cfg):
 def cron_cell(cfg, product):
     from asf import scheduler, upgrade
     # a loaded, on-time clock says nothing about whether ticks run: while an upgrade marker is
-    # pending every tick exits at its start (B-0141), so the row names the wait first
-    waiting = upgrade.held()
-    prefix = f'{upgrade.held_label(waiting)}; ' if waiting is not None else ''
+    # pending this product's ticks exit at their start (B-0141), so the row names the wait first.
+    # The marker's owner keeps ticking — it installs the upgrade — so its row claims no wait.
+    marker = upgrade.held(product.name)
+    prefix = f'{upgrade.held_label(marker)}; ' if marker is not None else ''
     kind = scheduler.kind(cfg)
     if kind != 'launchd':
         return prefix + not_configured(f'scheduler.kind ({kind} has no status adapter)')

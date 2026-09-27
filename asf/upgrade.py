@@ -202,15 +202,30 @@ def pending(now=None, installed=None, out=print, run=subprocess.run):
     return data
 
 
-def held(now=None):
-    """The pending marker while it still holds the other products' ticks, else ``None`` —
+def held(product_name=None, now=None):
+    """The pending marker while it still holds ``product_name``'s ticks, else ``None`` —
     read-only, for the views that report the wait (:func:`asf.doctor.scheduler_rows`,
-    :func:`asf.views.status.cron_cell`). :func:`pending` is the one that expires and clears."""
+    :func:`asf.views.status.cron_cell`). ``None`` for the marker's own owner: the owner's ticks
+    go on by design (:func:`waiting`), so a row about the owner must never claim it is waiting.
+
+    It drops the same markers :func:`waiting` ignores, minus the one that costs: a dead
+    operator's wait, a future ``at``, an expired TTL. It does *not* check whether the sha is
+    already installed — that is a ``git merge-base`` (:func:`_installed`) and does not belong in
+    a view — so read it as :func:`pending` minus the writes *and* minus that one check.
+    :func:`pending` is the one that expires and clears."""
     data = read_pending()
     if data is None:
         return None
+    if product_name is not None and data.get('owner') == product_name:
+        return None
+    pid = data.get('pid')
+    if data.get('owner') is None and isinstance(pid, int) and pid > 0 and not _alive(pid):
+        return None  # an operator's wait that was killed before it cleared its own mark
     at = data.get('at')
-    if not isinstance(at, (int, float)) or (now or time.time()) - at > PENDING_TTL_S:
+    if not isinstance(at, (int, float)):
+        return None
+    age = (now or time.time()) - at
+    if age > PENDING_TTL_S or age < -60:  # a clock step leaves a future `at`; pending() clears it
         return None
     return data
 
