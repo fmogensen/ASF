@@ -106,6 +106,7 @@ commits: <sha> <subject> (one per line, or none)
 tests: <what you ran — and its last line>
 left out: <what and why, or none>
 needs writes: <coder/correct only — repo paths outside writes: that must change too, space-separated, or none>
+proves: <code only — the Proves: trailers you wrote, one per line; or none — <why>>
 ruling: <adjudicate only — one paragraph: what was disputed, what now holds, what changes; else omit>
 blocked_on: <adjudicate only — the id this item must wait for, or none>
 writes: <adjudicate only — the corrected footprint, space-separated globs, or none>

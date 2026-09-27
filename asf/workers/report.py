@@ -12,6 +12,7 @@ Every brief ends with the same block (:data:`asf.briefs.build.TAIL`)::
     tests: <what you ran — and its last line>
     left out: <what and why, or none>
     needs writes: <repo paths outside writes: that must change too, or none>
+    proves: <the Proves: trailers you wrote, one per line; or none — <why>>
 
 :func:`parse` reads it off a result's text (the last ``REPORT`` block wins). :func:`failure`
 names the one failure the report itself declares: ``pushed: no`` — the session says its work
@@ -23,9 +24,9 @@ nothing; the evidence rule still applies.
 import re
 
 FIELDS = ('item', 'kind', 'status', 'branch', 'pushed', 'commits', 'tests', 'left out',
-          'needs writes', 'ruling', 'blocked_on', 'writes', 'superseded_by')
+          'needs writes', 'proves', 'ruling', 'blocked_on', 'writes', 'superseded_by')
 HEAD_RE = re.compile(r'^\s*REPORT\s*$', re.M)
-FIELD_RE = re.compile(r'^(?P<key>item|kind|status|branch|pushed|commits|tests|left out|needs writes|ruling|blocked_on|writes|superseded_by)\s*:\s*(?P<value>.*)$', re.I)
+FIELD_RE = re.compile(r'^(?P<key>item|kind|status|branch|pushed|commits|tests|left out|needs writes|proves|ruling|blocked_on|writes|superseded_by)\s*:\s*(?P<value>.*)$', re.I)
 NO_RE = re.compile(r'^\s*(no|none|not pushed|unpushed)\b', re.I)
 NONE_RE = re.compile(r'^(none|n/a|-|—)$', re.I)
 UNPUSHED = 'unpushed work'
@@ -33,7 +34,9 @@ UNPUSHED = 'unpushed work'
 
 def parse(text):
     """``{field: value}`` of the last REPORT block in ``text``, or ``{}``. A field's value runs
-    to the next field line; a fenced block's closing ````` ``` ````` ends the report."""
+    to the next field line; a fenced block's closing ````` ``` ````` ends the report. A line that
+    names the field already open — ``proves:``'s own trailers each start ``Proves: …`` — is a
+    continuation, not a restart: a real report never states one field twice running."""
     text = str(text or '')
     heads = list(HEAD_RE.finditer(text))
     if not heads:
@@ -41,14 +44,16 @@ def parse(text):
     body = text[heads[-1].end():]
     out, key = {}, None
     for line in body.splitlines():
-        if line.strip().startswith('```'):
+        stripped = line.strip()
+        if stripped.startswith('```'):
             break
-        m = FIELD_RE.match(line.strip())
-        if m:
-            key = ' '.join(m.group('key').lower().split())
+        m = FIELD_RE.match(stripped)
+        new_key = ' '.join(m.group('key').lower().split()) if m else None
+        if m and new_key != key:
+            key = new_key
             out[key] = m.group('value').strip()
-        elif key and line.strip():
-            out[key] = (out[key] + '\n' + line.strip()).strip()
+        elif key and stripped:
+            out[key] = (out[key] + '\n' + stripped).strip()
     return out
 
 

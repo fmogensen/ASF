@@ -306,6 +306,76 @@ class GoldenBriefTest(unittest.TestCase):
                 self.assertNotIn('counted dead and relaunched on top of you', text)
 
 
+class ProvesBriefTests(unittest.TestCase):
+    """F-0040 §2.3: the coder brief's ``{proves}`` fact, and the REPORT block's ``proves:``
+    field — both code-generated, so a coder is asked for the trailer whatever the template says.
+
+    ``asf/briefs/templates/coder.md`` is in the amendable set (role_agents): a session cannot
+    edit it directly, only propose the change for a person to merge (T-0195's report — the
+    proposal is `NEEDS OPERATOR`, not run here). The PROVES paragraph itself, and the assertion
+    that the template names ``Proves:``, are therefore not exercised by this class; everything
+    the builder computes ahead of the template — the fact and the context key — is.
+    """
+
+    def _root(self):
+        root = tempfile.mkdtemp(prefix='proves_brief_')
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        os.makedirs(os.path.join(root, 'stories'))
+        return root
+
+    def _story(self, root, sid, bullets):
+        with open(os.path.join(root, 'stories', f'{sid}.md'), 'w', encoding='utf-8') as f:
+            f.write('## Acceptance\n' + ''.join(f'- [ ] {b}\n' for b in bullets))
+
+    def _facts(self, root, stories, story_items=None):
+        task = {'id': 'T-0300', 'type': 'task', 'title': 'a coder task', 'feature': 'F-0009',
+                'parent': 'F-0009', 'folder': 'tasks', 'writes': ['a.py'], 'stories': stories}
+        feature = {'id': 'F-0009', 'type': 'feature', 'title': 'the feature', 'folder': 'features'}
+        items = {'T-0300': task, 'F-0009': feature}
+        items.update(story_items or {})
+        index_ = {'generated': '', 'items': items}
+        p = product(backlog_dir=root)
+        r = row('PLAN → CODE', 'T-0300', 'task', 'task/T-0300', 'plan approved, footprint free',
+               feature_id='F-0009')
+        return preamble_mod.collect(p, r, index_, [], REPO_FACTS), p, r
+
+    def test_two_stories_numbered_independently_and_context_carries_it(self):
+        root = self._root()
+        self._story(root, 'S-0010', ['a', 'b'])
+        self._story(root, 'S-0011', ['c'])
+        story_items = {'S-0010': {'id': 'S-0010', 'type': 'story', 'folder': 'stories',
+                                  'title': 'first story'},
+                       'S-0011': {'id': 'S-0011', 'type': 'story', 'folder': 'stories',
+                                  'title': 'second story'}}
+        facts, p, r = self._facts(root, ['S-0010', 'S-0011'], story_items)
+        self.assertEqual(facts['proves_lines'],
+                         'S-0010 first story: 1 a;\n       2 b\nS-0011 second story: 1 c')
+        ctx = build_mod.context(p, r, 'coder', facts)
+        self.assertEqual(ctx['proves'], facts['proves_lines'])
+
+    def test_a_task_with_no_stories_gets_the_fallback_not_an_empty_string(self):
+        facts, p, r = self._facts(self._root(), [])
+        self.assertEqual(facts['proves_lines'], '')
+        ctx = build_mod.context(p, r, 'coder', facts)
+        self.assertEqual(ctx['proves'], '(this Task lists no Story — say so in the report)')
+
+    def test_a_storys_unreadable_card_drops_out_rather_than_raising(self):
+        story_items = {'S-0099': {'id': 'S-0099', 'type': 'story', 'folder': 'stories',
+                                  'title': 'gone'}}
+        facts, p, r = self._facts(self._root(), ['S-0099'], story_items)  # no card file written
+        self.assertEqual(facts['proves_lines'], '')
+        ctx = build_mod.context(p, r, 'coder', facts)
+        self.assertEqual(ctx['proves'], '(this Task lists no Story — say so in the report)')
+
+    def test_the_rendered_report_block_carries_a_proves_field(self):
+        text = briefs.build(product(), ROWS['coder'], index(), [], REPO_FACTS).text
+        self.assertIn('proves: <code only — the Proves: trailers you wrote, one per line; '
+                     'or none — <why>>', text)
+        # every kind's REPORT block gains the field, not the coder's alone
+        self.assertIn('proves:', briefs.build(product(), ROWS['fix-bug'], index(), [],
+                                              REPO_FACTS).text)
+
+
 class ReshapeBriefTest(unittest.TestCase):
     def test_reshape_kind_renders_with_id_range(self):
         text = briefs.build(product(), ROWS['reshape'], index(), [], REPO_FACTS).text
