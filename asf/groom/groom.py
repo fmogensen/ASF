@@ -6,9 +6,10 @@ import re
 from asf import budget
 from asf import env
 from asf.record import frontmatter
-from asf.record.core import as_list, canonicalize, compute_derived, is_open, jaccard, load_items, tokenize
+from asf.record.core import (as_list, canonicalize, compute_derived, is_open, jaccard, load_items,
+                             parse_sections, tokenize)
 from asf.record.index import do_index
-from asf.record.ingest import append_history_lines
+from asf.record.ingest import append_history_lines, append_section_lines
 from asf.tick import stale
 from asf.tick.stale import format_age, parse_iso
 from asf.groom import conflicts
@@ -266,6 +267,120 @@ def apply_proposal(root, canonical, verb, ids, areas, answer, date, who, derived
     return 0
 
 
+def _existing_lines(body, heading):
+    """The non-blank lines already inside `body`'s `heading` section, or `[]` when the section
+    isn't there."""
+    _preamble, sections = parse_sections(body)
+    for section_heading, content in sections:
+        if section_heading.strip() == heading:
+            return [l for l in content.split('\n') if l.strip()]
+    return []
+
+
+def _merge_source_and_history(loser_rec, survivor_rec):
+    """Read-modify-write the survivor's file: every `## Source` line of the loser's the survivor
+    doesn't already carry, and every `## History` line of the loser's — suffixed `(from
+    <loser>)` — the survivor doesn't already carry. A survivor body with no `## Source` section
+    comes back unchanged there (PD10); the loser's own file is untouched here."""
+    with open(survivor_rec['path'], encoding='utf-8') as f:
+        text = f.read()
+    meta, orig_body = frontmatter.parse(text, path=survivor_rec['relpath'])
+    body = orig_body
+
+    have_source = _existing_lines(body, '## Source')
+    new_source = [l for l in _existing_lines(loser_rec['body'], '## Source') if l not in have_source]
+    body = append_section_lines(body, '## Source', new_source)
+
+    loser_id = loser_rec['meta']['id']
+    have_hist = _existing_lines(body, '## History')
+    new_hist = [f"{l} (from {loser_id})" for l in _existing_lines(loser_rec['body'], '## History')
+                if f"{l} (from {loser_id})" not in have_hist]
+    body = append_section_lines(body, '## History', new_hist)
+
+    if body != orig_body:
+        with open(survivor_rec['path'], 'w', encoding='utf-8') as f:
+            f.write(frontmatter.render(meta, body))
+
+
+def apply_conflict(canonical, a, b, answer, date, who, emit=None):
+    """One conflicts line's answer. Returns the number of cards written.
+
+    `keep A` / `keep B`  the loser gains ``superseded_by: <survivor>``, the survivor gains the
+                         loser in ``supersedes:``; one History line each.
+    `both`               both cards gain ``decline_key(a, b)`` in ``conflict_declined:``; the
+                         pair is never proposed again.
+    `merge`              `keep <the precedence winner>`, and first the survivor's ``## Source``
+                         gains every source line of the loser's it does not already carry, and
+                         its ``## History`` gains the loser's History lines, each suffixed
+                         ``(from <loser>)``.
+
+    Anything else, including a blank slot, writes nothing.
+    """
+    word, _why = split_why(answer)
+    word = word.strip()
+    lower = word.lower()
+    a_rec, b_rec = canonical.get(a), canonical.get(b)
+    if a_rec is None or b_rec is None:
+        return 0
+    key = conflicts.decline_key(a, b)
+
+    if lower == 'both':
+        n = 0
+        for iid, rec in ((a, a_rec), (b, b_rec)):
+            declined = as_list(rec['meta'].get('conflict_declined'))
+            if key in declined:
+                continue
+            _write_card(rec, {'conflict_declined': declined + [key]},
+                        f"- {date} groom: conflict declined {key} {who}")
+            if emit:
+                emit(iid, 'conflict_declined', key)
+            n += 1
+        return n
+
+    if lower not in ('keep a', 'keep b', 'merge'):
+        return 0
+
+    is_merge = lower == 'merge'
+    if is_merge:
+        survivor, _prec_why = conflicts.precedence(a_rec, b_rec)
+    else:
+        survivor = a if lower == 'keep a' else b
+    loser = b if survivor == a else a
+    survivor_rec, loser_rec = canonical[survivor], canonical[loser]
+
+    if (loser_rec['meta'].get('superseded_by') == survivor
+            and loser in as_list(survivor_rec['meta'].get('supersedes'))):
+        return 0  # already applied — keeps --apply idempotent
+
+    existing = loser_rec['meta'].get('superseded_by')
+    if existing and existing != survivor:
+        print(f"groom: {word} {key} skipped — {loser} is already superseded by {existing}")
+        return 0
+
+    edges = conflicts.supersession_edges(canonical) | {(loser, survivor)}
+    if conflicts.cycles(edges):
+        print(f"groom: {word} {key} skipped — {loser} would close a supersession cycle "
+              f"through {survivor}")
+        return 0
+
+    if is_merge:
+        _merge_source_and_history(loser_rec, survivor_rec)
+        loser_hist = (f"- {date} groom: merged {loser}'s source and history, "
+                      f"superseded_by → {survivor} {who}")
+    else:
+        loser_hist = f"- {date} groom: superseded_by → {survivor} {who}"
+    _write_card(loser_rec, {'superseded_by': survivor}, loser_hist)
+    if emit:
+        emit(loser, 'superseded_by', survivor)
+
+    supersedes = sorted(set(as_list(survivor_rec['meta'].get('supersedes'))) | {loser})
+    _write_card(survivor_rec, {'supersedes': supersedes},
+                f"- {date} groom: supersedes → {', '.join(supersedes)} {who}")
+    if emit:
+        emit(survivor, 'supersedes', ', '.join(supersedes))
+    return 2
+
+
 def _skipped(iid, answer, why):
     """One line naming an answered groom line that changed nothing, and why."""
     a = answer.strip()
@@ -323,6 +438,18 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None, 
             continue
 
         raw_answer, who, by = _attribution(raw_answer, adjudicator_job)
+
+        cm = conflicts.CONFLICT_RE.match(line)
+        if cm:
+            def emit(item, fld, val, _sec=(sections or {}).get(iid, ''), _by=by):
+                if event:
+                    event('groom_answer', item=item, section=_sec, field=fld, value=val, by=_by)
+            if conflicts.CONFLICT_ANSWER_RE.match(split_why(raw_answer)[0]):
+                applied += apply_conflict(canonical, cm.group('a'), cm.group('b'), raw_answer,
+                                          date, who, emit=emit)
+            elif not unanswered(raw_answer):
+                _skipped(iid, raw_answer, 'not a conflicts answer (keep A, keep B, both, merge)')
+            continue
 
         pm = PROPOSAL_RE.match(line)
         proposal = _parse_proposal(pm) if pm else None
