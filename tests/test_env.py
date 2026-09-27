@@ -343,6 +343,30 @@ class ProductValidation(unittest.TestCase):
         self.assertEqual(env.Product('p', env.loads(well_formed)).improve['epic'], 'E-0001')
 
 
+class DeployProviderTests(unittest.TestCase):
+    """T-0232: ``deploy_sha.provider`` gets a validator row — documented and unread until now
+    (docs/products.example.yaml:237)."""
+
+    def test_every_documented_provider_and_none_validate(self):
+        for provider in ('github-deployments', 'fly', 'vercel', 'script', 'none'):
+            problems = env.validate_product_text(_dedent(f"""
+                repo_slug: a/b
+                deploy_sha:
+                  provider: {provider}
+                """))
+            self.assertEqual(problems, [], provider)
+
+    def test_a_typo_is_refused(self):
+        problems = env.validate_product_text(_dedent("""
+            repo_slug: a/b
+            deploy_sha:
+              provider: heroku
+            """))
+        self.assertIn((2, 'deploy_sha.provider',
+                      "must be one of github-deployments | fly | vercel | script | none, "
+                      "not 'heroku'"), problems)
+
+
 def _dedent(text):
     lines = [l for l in text.splitlines() if l.strip() != '']
     if not lines:
