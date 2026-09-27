@@ -17,6 +17,7 @@ from asf import env as env_mod
 
 from asf import hermetic
 from asf.harvest import harvest
+from asf.tick import step_harvest
 from asf.workers import pool as pool_mod
 from asf.workers import runtime as runtime_mod
 
@@ -179,6 +180,15 @@ class OneBuilderTests(unittest.TestCase):
         base = dict(LEAKS, PATH='/bin', HOME='/me')
         self.assertEqual(harvest.clean_env(base), hermetic.git_env(base))
         self.assertEqual(harvest.GIT_HOOK_VARS, hermetic.GIT_HOOK)
+
+    def test_spawn_backgrounds_env_is_hermetic_build_with_the_package_parent_first(self):
+        product = env_mod.Product('sample', {})
+        with mock.patch.object(step_harvest.detach, 'spawn', return_value=123) as spawn:
+            pid = step_harvest.spawn_background(product)
+        self.assertEqual(pid, 123)
+        self.assertEqual(spawn.call_args.kwargs['env'],
+                         hermetic.build(worktree=hermetic.package_parent(),
+                                        identity={'ASF_HOME': env_mod.ASF_HOME}))
 
     def test_the_worker_env_is_hermetic_build_with_the_jobs_identity(self):
         acct = pool_mod.Account('acct-a', home='/homes/a', config_dir='/cfg/a')
