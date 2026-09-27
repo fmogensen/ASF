@@ -358,6 +358,22 @@ def gate_before_push_direct(product):
     return DIRECT_GATE_REMOTE if _external_ci(product) else DIRECT_GATE_LOCAL
 
 
+def split_parts(items, item_id):
+    """The open Tasks the record already holds for a relaunched split of ``item_id`` — each
+    ``<id> (<writes>)``, sorted by id, or ``'none yet'`` when there are none (or no ``item_id``).
+    ``items`` is the live index (:func:`asf.feeder.rows.items_of`), so the openness test is the
+    state check the feeder's own rows use (:func:`asf.feeder.rows.is_open`)."""
+    if not item_id:
+        return 'none yet'
+    parts = sorted((t for t in items.values()
+                    if t.get('type') == 'task' and t.get('split_from') == item_id
+                    and feeder_rows.is_open(t)),
+                   key=lambda t: t['id'])
+    if not parts:
+        return 'none yet'
+    return ', '.join(f"{t['id']} ({' '.join(t.get('writes') or []) or '—'})" for t in parts)
+
+
 def context(product, row, kind, facts):
     """Every name a template may use. One flat dict, so a missing key is a missing key."""
     item, feature, epic = facts['item'], facts['feature'], facts['epic']
@@ -397,6 +413,7 @@ def context(product, row, kind, facts):
         'delivery_checks': delivery_checks(facts),
         'stories': '; '.join(facts['stories']) if facts['stories'] else '(none yet)',
         'proves': facts['proves_lines'] or '(this Task lists no Story — say so in the report)',
+        'split_parts': split_parts(facts['items'], item.get('id')),
         'description': (sections.get('description') or item.get('title') or '—').strip(),
         'acceptance': (sections.get('acceptance') or '—').strip(),
         'fix': (sections.get('fix')

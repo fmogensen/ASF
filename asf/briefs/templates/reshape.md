@@ -10,6 +10,10 @@ DELIVERABLE, on branch `{branch}` cut from `origin/{main}`:
 - {item_id}'s section of the plan replaced by one section per part, each with Files, Steps, Gate
   and Acceptance (the spec's fenced tests, byte-identical);
 - {item_id} marked `removed: split into <ids>`.
+The record already holds these parts of {item_id}: {split_parts}. When that is not `none yet`,
+a previous attempt at this split got part-way: **verify and finish it — mint no new id**. Check
+each part against the plan's sections and against {item_id}'s Stories, add only what is
+missing, and mark {item_id} `removed: split into <ids>` so this stops being asked for.
 When the reason is `footprint: needs <paths>`, the factory found {item_id}'s `writes:` too narrow
 (its coder, or its gate, named those paths as ones it must change): cut it so every part's
 `writes:` holds the files its acceptance needs, those paths among them.

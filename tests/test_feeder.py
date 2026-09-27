@@ -577,6 +577,62 @@ class ReshapeRowsTest(unittest.TestCase):
                          [(rows.RESHAPE, 'T-0050', True)])
 
 
+class ReshapeRelaunchTests(unittest.TestCase):
+    """T-0301 (F-0056 §2.7): a relaunched reshape's LAUNCH row names the parts the record
+    already holds, so a session that died after minting some of the split's ids is told, not
+    left to rediscover it."""
+
+    def idx(self, tasks):
+        items = {'F-0001': {'id': 'F-0001', 'type': 'feature', 'decided': True, 'state': 'Active',
+                            'rank': 1, 'stage': 'building 1/2', 'children': list(tasks)}}
+        items.update(tasks)
+        return {'items': items}
+
+    def task(self, tid, **over):
+        base = {'id': tid, 'type': 'task', 'parent': 'F-0001', 'state': 'New',
+               'writes': [f'asf/{tid}.py']}
+        base.update(over)
+        return base
+
+    def reshape_row(self, idx):
+        return [r for r in rows.candidates(idx, product(), []) if r.kind == rows.RESHAPE][0]
+
+    def test_no_parts_minted_yet_is_byte_identical_to_today(self):
+        idx = self.idx({'T-0050': self.task(
+            'T-0050', reshape='split asf/feeder | asf/harvest (groom 2026-09-22)')})
+        self.assertEqual(self.reshape_row(idx).reason,
+                         'groom: split asf/feeder | asf/harvest (groom 2026-09-22)')
+
+    def test_open_split_parts_are_named_sorted_by_id(self):
+        idx = self.idx({
+            'T-0050': self.task('T-0050',
+                                reshape='split asf/feeder | asf/harvest (groom 2026-09-22)'),
+            'T-0191': self.task('T-0191', split_from='T-0050', decided=True),
+            'T-0190': self.task('T-0190', split_from='T-0050', decided=True),
+        })
+        self.assertEqual(self.reshape_row(idx).reason,
+                         'groom: split asf/feeder | asf/harvest (groom 2026-09-22) '
+                         '(parts already minted: T-0190, T-0191)')
+
+    def test_a_done_part_is_not_named(self):
+        idx = self.idx({
+            'T-0050': self.task('T-0050',
+                                reshape='split asf/feeder | asf/harvest (groom 2026-09-22)'),
+            'T-0190': self.task('T-0190', split_from='T-0050', decided=True, state='Resolved'),
+        })
+        self.assertEqual(self.reshape_row(idx).reason,
+                         'groom: split asf/feeder | asf/harvest (groom 2026-09-22)')
+
+    def test_a_part_of_a_different_task_is_not_named(self):
+        idx = self.idx({
+            'T-0050': self.task('T-0050',
+                                reshape='split asf/feeder | asf/harvest (groom 2026-09-22)'),
+            'T-0190': self.task('T-0190', split_from='T-0099', decided=True),
+        })
+        self.assertEqual(self.reshape_row(idx).reason,
+                         'groom: split asf/feeder | asf/harvest (groom 2026-09-22)')
+
+
 class DeliveryRowsTest(unittest.TestCase):
     """T-0174 / S-17452: delivery_rows speaks for a delivery's members — one plan row, one code
     row, the union footprint, and a WAITS ON delivery row for every other open member."""

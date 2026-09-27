@@ -45,6 +45,10 @@ DELIVERABLE, on branch `plan/T-0050` cut from `origin/main`:
 - T-0050's section of the plan replaced by one section per part, each with Files, Steps, Gate
   and Acceptance (the spec's fenced tests, byte-identical);
 - T-0050 marked `removed: split into <ids>`.
+The record already holds these parts of T-0050: none yet. When that is not `none yet`,
+a previous attempt at this split got part-way: **verify and finish it — mint no new id**. Check
+each part against the plan's sections and against T-0050's Stories, add only what is
+missing, and mark T-0050 `removed: split into <ids>` so this stops being asked for.
 When the reason is `footprint: needs <paths>`, the factory found T-0050's `writes:` too narrow
 (its coder, or its gate, named those paths as ones it must change): cut it so every part's
 `writes:` holds the files its acceptance needs, those paths among them.

@@ -342,6 +342,80 @@ class ReshapeBriefTest(unittest.TestCase):
         self.assertEqual(build_mod.normalize_kind('reshape'), 'reshape')
 
 
+class ReshapeSplitPartsTests(unittest.TestCase):
+    """F-0056 §2.7 / T-0301: ``split_parts`` — the open Tasks the record already holds for a
+    relaunched split of an item, each ``<id> (<writes>)`` — and the ``split_parts`` context key
+    that carries them into a reshape brief.
+
+    ``asf/briefs/templates/reshape.md`` is in the amendable set (role_agents), so its §2.7
+    paragraph was landed by the console, not the coder session; the rendered brief is tested
+    here with the rest.
+    """
+
+    def items(self):
+        return {
+            'T-0181': {'id': 'T-0181', 'type': 'task', 'state': 'New', 'writes': ['a.py']},
+            'T-0190': {'id': 'T-0190', 'type': 'task', 'state': 'New',
+                      'split_from': 'T-0181', 'writes': ['docs/guide/a.md']},
+            'T-0191': {'id': 'T-0191', 'type': 'task', 'state': 'New',
+                      'split_from': 'T-0181', 'writes': ['docs/guide/b.md', 'docs/guide/c.md']},
+        }
+
+    def test_open_parts_are_listed_with_their_writes_sorted_by_id(self):
+        self.assertEqual(build_mod.split_parts(self.items(), 'T-0181'),
+                         'T-0190 (docs/guide/a.md), T-0191 (docs/guide/b.md docs/guide/c.md)')
+
+    def test_a_part_with_no_writes_shows_the_dash(self):
+        items = self.items()
+        items['T-0190']['writes'] = []
+        self.assertEqual(build_mod.split_parts({'T-0190': items['T-0190']}, 'T-0181'),
+                         'T-0190 (—)')
+
+    def test_a_done_part_is_dropped(self):
+        items = self.items()
+        items['T-0190']['state'] = 'Resolved'
+        self.assertEqual(build_mod.split_parts(items, 'T-0181'),
+                         'T-0191 (docs/guide/b.md docs/guide/c.md)')
+
+    def test_no_parts_is_none_yet(self):
+        self.assertEqual(build_mod.split_parts({'T-0181': self.items()['T-0181']}, 'T-0181'),
+                         'none yet')
+
+    def test_no_item_id_is_none_yet(self):
+        self.assertEqual(build_mod.split_parts(self.items(), None), 'none yet')
+        self.assertEqual(build_mod.split_parts(self.items(), ''), 'none yet')
+
+    def test_context_carries_split_parts_for_a_reshape_row(self):
+        idx = {'items': dict(self.items(), **{
+            'F-0001': {'id': 'F-0001', 'type': 'feature', 'title': 'the feature'}})}
+        idx['items']['T-0181']['parent'] = 'F-0001'
+        r = row('RESHAPE → PLAN', 'T-0181', 'reshape', 'plan/T-0181',
+               'groom: split asf/feeder | asf/harvest')
+        facts = preamble_mod.collect(product(), r, idx, [], REPO_FACTS)
+        ctx = build_mod.context(product(), r, 'reshape', facts)
+        self.assertEqual(ctx['split_parts'],
+                         'T-0190 (docs/guide/a.md), T-0191 (docs/guide/b.md docs/guide/c.md)')
+
+    def test_the_rendered_brief_names_the_parts_and_says_mint_no_new_id(self):
+        idx = {'items': dict(self.items(), **{
+            'F-0001': {'id': 'F-0001', 'type': 'feature', 'title': 'the feature'}})}
+        idx['items']['T-0181']['parent'] = 'F-0001'
+        r = row('RESHAPE → PLAN', 'T-0181', 'reshape', 'plan/T-0181',
+               'groom: split asf/feeder | asf/harvest')
+        text = briefs.build(product(), r, idx, [], REPO_FACTS).text
+        self.assertIn('The record already holds these parts of T-0181: T-0190 (docs/guide/a.md), '
+                      'T-0191 (docs/guide/b.md docs/guide/c.md).', text)
+        self.assertIn('mint no new id', text)
+        none = briefs.build(product(), ROWS['reshape'], index(), [], REPO_FACTS).text
+        self.assertIn('these parts of T-0050: none yet.', none)
+
+    def test_context_is_none_yet_when_the_item_is_not_in_the_index(self):
+        facts = dict(preamble_mod.collect(product(), ROWS['reshape'], index(), [], REPO_FACTS),
+                    kind='reshape')
+        ctx = build_mod.context(product(), ROWS['reshape'], 'reshape', facts)
+        self.assertEqual(ctx['split_parts'], 'none yet')
+
+
 class PreambleTest(unittest.TestCase):
     def test_identifiers_are_there_without_the_session_looking(self):
         text = preamble_mod.build(product(), ROWS['coder'], index(), [], REPO_FACTS)
