@@ -227,6 +227,12 @@ def ci_trials(ctx, out=print):
         out(f"ci trial: not judged ({type(e).__name__}: {e})")
 
 
+def ran_to_its_end(rec):
+    """True when a run's result says it finished its turn (``success``, no error) — whatever its
+    REPORT then asked for, it did not die (B-0150)."""
+    return bool(rec) and not rec.get('is_error') and rec.get('subtype', 'success') == 'success'
+
+
 def hold_failed_corrections(ctx, sessions, out=print, items=None):
     """A correction that has ended without finishing holds the run it was correcting (B-0085).
 
@@ -245,6 +251,13 @@ def hold_failed_corrections(ctx, sessions, out=print, items=None):
             continue  # a spent window, not a failure: it relaunches, and holds nothing
         original = sessions.get(job[:-len('-correction')])
         if original is None or lifecycle.pending_correction(original, path):
+            continue
+        # B-0150: a run launched after the correction is not the one it corrected
+        if (original.get('started') or '') > (run_rec.get('started') or ''):
+            continue
+        # B-0150: a correction that wrote its result ran to the end — whatever failed after
+        # it (a push, unpushed work) is publish's to route, never "died twice"
+        if ran_to_its_end(runtime_mod.read_result(run_rec.get('log'))):
             continue
         if lifecycle.closed_state(items, original.get('item')):
             continue  # a removed or done item's run is never held

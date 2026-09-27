@@ -247,6 +247,61 @@ class TestExhaustedRun(HomeCase):
         self.assertIsNone(lifecycle.latest(path)['spec-f-1'].get('correction'))
 
 
+    def test_a_correction_of_an_earlier_run_holds_nothing(self):
+        """B-0150, a product's F-0094: ``correct-f-0094-correction`` failed at 00:24; the item
+        ran three more ``correct-f-0094`` sessions after it, and at 08:xx the stale correction
+        held the latest one "died twice" — a run it never corrected."""
+        from asf.tick import step_health
+        path = self.ledger(
+            {'job': 'spec-f-1', 'item': 'F-0001', 'started': '2026-09-25T10:00:00Z', 'pid': 1},
+            {'job': 'spec-f-1', 'ended': '2026-09-25T10:20:00Z', 'end_reason': 'dead pid',
+             'corrected': True},
+            {'job': 'spec-f-1-correction', 'item': 'F-0001', 'started': '2026-09-25T10:40:00Z',
+             'pid': 2},
+            {'job': 'spec-f-1-correction', 'ended': '2026-09-25T10:50:00Z',
+             'end_reason': 'failed: rc 1'},
+            {'job': 'spec-f-1', 'item': 'F-0001', 'started': '2026-09-25T12:00:00Z', 'pid': 3},
+            {'job': 'spec-f-1', 'ended': '2026-09-25T12:20:00Z', 'end_reason': 'failed: rc 1'})
+        ctx = mock.Mock(product=self.product)
+        step_health.hold_failed_corrections(ctx, lifecycle.latest(path), out=lambda s: None)
+        self.assertIsNone(lifecycle.latest(path)['spec-f-1'].get('correction'))
+
+    def test_a_correction_that_wrote_a_result_did_not_die(self):
+        """B-0150: the correction ended ``end_turn`` with a result — it ran to the end; its
+        failure (unpushed work) is publish's, not a death, and is never held "died twice"."""
+        from asf.tick import step_health
+        log = os.path.join(os.path.dirname(pool_mod.sessions_path(self.product)), 'c.jsonl')
+        with open(log, 'w') as f:
+            f.write(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 's'}) + '\n')
+            f.write(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
+                                'stop_reason': 'end_turn', 'result': 'REPORT\nstatus: done'})
+                    + '\n')
+        path = self.ledger(
+            {'job': 'spec-f-1', 'item': 'F-0001', 'started': '2026-09-25T10:00:00Z', 'pid': 1},
+            {'job': 'spec-f-1', 'ended': '2026-09-25T10:20:00Z', 'end_reason': 'dead pid',
+             'corrected': True},
+            {'job': 'spec-f-1-correction', 'item': 'F-0001', 'started': '2026-09-25T10:40:00Z',
+             'pid': 2, 'log': log},
+            {'job': 'spec-f-1-correction', 'ended': '2026-09-25T10:50:00Z',
+             'end_reason': 'failed: unpushed work'})
+        ctx = mock.Mock(product=self.product)
+        step_health.hold_failed_corrections(ctx, lifecycle.latest(path), out=lambda s: None)
+        self.assertIsNone(lifecycle.latest(path)['spec-f-1'].get('correction'))
+
+    def test_a_correction_that_died_still_holds(self):
+        from asf.tick import step_health
+        path = self.ledger(
+            {'job': 'spec-f-1', 'item': 'F-0001', 'started': '2026-09-25T10:00:00Z', 'pid': 1},
+            {'job': 'spec-f-1', 'ended': '2026-09-25T10:20:00Z', 'end_reason': 'dead pid',
+             'corrected': True},
+            {'job': 'spec-f-1-correction', 'item': 'F-0001', 'started': '2026-09-25T10:40:00Z',
+             'pid': 2},
+            {'job': 'spec-f-1-correction', 'ended': '2026-09-25T10:50:00Z',
+             'end_reason': 'dead pid'})
+        ctx = mock.Mock(product=self.product)
+        step_health.hold_failed_corrections(ctx, lifecycle.latest(path), out=lambda s: None)
+        self.assertEqual(lifecycle.latest(path)['spec-f-1']['correction']['kind'], 'died')
+
 try:
     from test_workers import Home as RepoHome, feature_row
 except ImportError:  # pragma: no cover - import shape only
