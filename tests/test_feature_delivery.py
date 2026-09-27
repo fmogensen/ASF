@@ -365,6 +365,43 @@ class FeatureDeliveryRowsTest(unittest.TestCase):
         self.assertIn('continue the delivery from the head of worker/T-0001', r.reason)
         self.assertEqual(rows.INCOMPLETE, lifecycle.INCOMPLETE)
 
+    def test_a_lane_back_incomplete_branch_launches_the_resume_not_waits_on_landing(self):
+        """2026-09-27, a product: delivery-code-t-0362 pushed T-0362, reported partial, the
+        lane held cloud/T-0362 BACK (kind=incomplete) — and ``asf next`` said ``WAITS ON
+        landing: cloud/T-0362 BACK`` every tick after: I4 allowed BACK the correction kinds
+        but not the delivery's own resume row, so the feeder's gate turned it into a wait."""
+        from asf import invariants
+        occ = {'busy': {}, 'waiting_landing': {}, 'landing': {}, 'review': {},
+               'corrections': {'T-0001': {'kind': lifecycle.INCOMPLETE, 'rounds': 1, 'same': 1,
+                                          'branch': 'worker/T-0001', 'at': '2026-01-01T00:00:00Z',
+                                          'text': 'delivery incomplete: no commit on '
+                                                  'origin/worker/T-0001 names T-0002, T-0003 '
+                                                  '(done: T-0001; the report says partial).'}}}
+        lanes = {'worker/T-0001': {'state': lane.BACK, 'reason': f'kind={lifecycle.INCOMPLETE}'}}
+
+        def gate(rs, _items):
+            ctx = invariants.FeederContext(rows=list(rs), lanes=lanes, occupancy=occ)
+            with mock.patch.object(invariants, 'feeder_context', return_value=ctx):
+                return invariants.feeder_waits(product(), rs, _items, out=lambda _l: None)
+
+        out = rows.plan_rows(self.index(), product(), [], 3, occupancy=occ, gate=gate)
+        r = [r for r in out if r.item_id == 'T-0001'][0]
+        self.assertEqual((r.kind, r.action, r.branch, r.brief_kind),
+                         (rows.DELIVERY_CODE, rows.LAUNCH, 'worker/T-0001', 'delivery-code'))
+        self.assertIn('done: T-0001', r.correction)
+        self.assertIn('T-0002, T-0003', r.correction)
+
+    def test_a_parked_incomplete_hold_launches_nothing(self):
+        occ = {'corrections': {'T-0001': {'kind': lifecycle.INCOMPLETE, 'rounds': 2, 'same': 2,
+                                          'parked': True, 'reason': 'no Task progress twice',
+                                          'branch': 'worker/T-0001', 'at': '2026-01-01T00:00:00Z',
+                                          'text': 'delivery incomplete: no commit names T-0002'}}}
+        out = rows.candidates(self.index(), product(), [], occupancy=occ)
+        mine = [r for r in out if r.item_id == 'T-0001']
+        self.assertEqual(len(mine), 1)
+        self.assertFalse(mine[0].launches)
+        self.assertTrue(mine[0].action.startswith(rows.PARKED), mine[0].action)
+
     def test_the_lead_counts_against_the_features_in_build_cap(self):
         idx = self.index(**{'F-0002': {'type': 'feature', 'decided': True, 'state': 'Active',
                                        'stage': 'building 0/1', 'children': ['T-0010'], 'rank': 0},
@@ -472,6 +509,60 @@ class IncompleteLaneTests(unittest.TestCase):
             self.assertIn('build T-0002 next', text)
             self.assertIn('No PR opens', text)
         self.assertIn('the run ended without a report', self.refusal(['T-0001'], ['T-0002'], None)[1])
+
+    def sessions(self, lines):
+        import json
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        path = os.path.join(d, 'sessions.jsonl')
+        with open(path, 'w', encoding='utf-8') as f:
+            for ln in lines:
+                f.write(json.dumps(ln) + '\n')
+        return path
+
+    def run_line(self, n, started):
+        return {'job': 'delivery-code-t-0001', 'pid': n, 'started': started,
+                'branch': 'worker/T-0001', 'item': 'T-0001', 'kind': 'delivery-code',
+                'launch_head': f'{n}' * 40}
+
+    def incomplete(self, missing, at):
+        return {'job': 'delivery-code-t-0001', 'correction': {
+            'kind': lifecycle.INCOMPLETE, 'at': at, 'finding': list(missing),
+            'same': 1, 'text': f"delivery incomplete: no commit names {', '.join(missing)}"}}
+
+    def test_a_resume_that_moves_no_task_forward_twice_parks_the_lead(self):
+        """Pause after the second failure: the first incomplete hold resumes; a resumed run that
+        leaves the same Tasks unbuilt is the second — the lead is parked, not relaunched."""
+        first = [self.run_line(1, 't1'),
+                 {'job': 'delivery-code-t-0001', 'ended': 'e1', 'end_reason': 'finished'},
+                 self.incomplete(['T-0002', 'T-0003'], 't2')]
+        resumed = first + [self.run_line(2, 't3'),
+                           {'job': 'delivery-code-t-0001', 'ended': 'e3', 'end_reason': 'finished'}]
+        path = self.sessions(resumed)
+        run = lifecycle.by_branch(path)['worker/T-0001']
+        fields, line = lifecycle.hold(path, run, lifecycle.INCOMPLETE,
+                                      'delivery incomplete: no commit names T-0002, T-0003', 't4',
+                                      finding=['T-0002', 'T-0003'])
+        corr = fields['correction']
+        self.assertIs(corr.get('parked'), True, line)
+        self.assertIn('no new Task', corr['reason'])
+        self.assertIn('T-0002, T-0003', corr['reason'])
+        self.assertTrue(line.startswith('parked worker/T-0001'), line)
+        # progress — one more Task on the branch — is a new finding: it resumes again
+        fields, line = lifecycle.hold(path, run, lifecycle.INCOMPLETE,
+                                      'delivery incomplete: no commit names T-0003', 't4',
+                                      finding=['T-0003'])
+        self.assertNotIn('parked', fields['correction'], line)
+        self.assertEqual(fields['correction']['same'], 1)
+
+    def test_the_first_incomplete_hold_resumes(self):
+        path = self.sessions([self.run_line(1, 't1'),
+                              {'job': 'delivery-code-t-0001', 'ended': 'e1', 'end_reason': 'finished'}])
+        run = lifecycle.by_branch(path)['worker/T-0001']
+        fields, _line = lifecycle.hold(path, run, lifecycle.INCOMPLETE,
+                                       'delivery incomplete: no commit names T-0002', 't2',
+                                       finding=['T-0002'])
+        self.assertNotIn('parked', fields['correction'])
 
     def test_done_lands_without_the_left_out_and_whole_is_no_refusal(self):
         self.assertIsNone(self.refusal(['T-0001'], ['T-0002'], 'done'))

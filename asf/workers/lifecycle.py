@@ -1872,6 +1872,17 @@ MECHANICAL = (NAMING, COPIES)
 #: same lead comes back to a session that continues from the branch's head
 #: (asf.harvest.lane.incomplete_refusal, the feeder's DELIVERY → CODE row)
 INCOMPLETE = 'incomplete'
+#: incomplete holds in a row on the same unbuilt Tasks — the first run and one resume that
+#: moved no Task forward — before the lead is parked (the operator's "pause after the 2nd
+#: failure"); a resume that commits one more Task is a new finding and resumes again
+INCOMPLETE_CAP = 2
+
+
+def incomplete_park_text(n, missing, item):
+    return (f'delivery incomplete {n} times in a row with no new Task on the branch '
+            f'(still unbuilt: {", ".join(missing or ()) or "?"}): the lead is parked, not '
+            f'resumed again. Read the last run\'s report for why it stopped, fix that, then '
+            f'`asf unpark {item}`')
 
 
 def empty_ends(path, item):
@@ -1971,6 +1982,11 @@ def hold(path, run, kind, text, now, empty_cap=EMPTY_CAP, head=None, finding=Non
         return fields, f'held {branch}: {head} — back to its session ({kind}, no round)'
     keys, same = next_finding(path, run, kind, text, finding)
     corr = {'kind': kind, 'text': text, 'at': now, 'finding': keys, 'same': same}
+    if kind == INCOMPLETE and same >= INCOMPLETE_CAP:
+        # a resumed delivery left the very same Tasks unbuilt: pause after the second failure
+        reason = incomplete_park_text(same, keys, item)
+        fields = {'correction': dict(corr, parked=True, reason=reason), 'operator_flagged': 1}
+        return fields, f'parked {branch}: {reason}'
     prev = max([rounds_of(path, item), run.get('rounds') or 0])
     fields = {'correction': corr}
     if prev < ROUND_CAP:  # B-0048: the counter never passes the cap
