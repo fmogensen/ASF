@@ -196,6 +196,12 @@ class StatusViewTests(ViewsTestCase):
         self.assertEqual(rows['Agents'], '1 working')
         self.assertEqual(rows['Ready to launch'], '0')  # the Feature is in flight
 
+    def test_features_in_build_against_the_cap(self):
+        # F-0195: X / N and the inputs auto sized N from
+        rows = self.rows({'scheduler': {'kind': 'none'}})
+        self.assertRegex(rows['Features in build'],
+                         r'^0 / \d+ \(auto: sessions \d+, quota-stopped \S+, CI free \S+\)$')
+
     def test_quota_through_the_quota_source(self):
         cfg = {'scheduler': {'kind': 'none'},
                'worker_pool': {'quota_command': 'echo', 'accounts': [{'name': 'w1'}]}}

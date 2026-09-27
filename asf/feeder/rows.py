@@ -54,6 +54,7 @@ and cut to capacity.
 """
 import copy
 import dataclasses
+import math
 import re
 
 from asf.feeder import footprint
@@ -113,6 +114,14 @@ STALEMATE_ROUND = 4
 ATTEMPT_LIMIT = 3
 DECISION_ROWS = 5  #: `conventions.decision_rows` — rows minted, and ids named in the wave's line
 MAX_SPECS_IN_FLIGHT = 2  #: `conventions.feeder.max_specs_in_flight` (:func:`finish_first`)
+#: `conventions.feeder.max_features_in_build` (:func:`build_cap`): a whole number, or ``auto``
+AUTO = 'auto'
+MAX_FEATURES_IN_BUILD = AUTO
+#: `conventions.feeder.features_per_session`: ``auto``'s Features in build per session slot
+FEATURES_PER_SESSION = 2
+#: ``auto`` never sizes the cap below this: a product with its bandwidth all but gone still
+#: finishes two Features side by side, so one stuck Feature never idles the product
+MIN_FEATURES_IN_BUILD = 2
 #: the stages of a Feature whose plan is approved and whose Tasks are the work
 BUILD_STAGES = ('plan-approved', 'building')
 #: the rows that start a new document — or a whole direct Feature: what the finish-first cap
@@ -256,6 +265,55 @@ def max_specs_in_flight(product):
     feeder = _conventions(product).get('feeder')
     v = feeder.get('max_specs_in_flight') if isinstance(feeder, dict) else None
     return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else MAX_SPECS_IN_FLIGHT
+
+
+def max_features_in_build(product):
+    """``conventions.feeder.max_features_in_build`` (default ``auto``): the most Features a
+    product builds at once (:func:`build_cap`) — a whole number >= 1, or ``auto``
+    (:func:`features_cap`). Anything else reads as the default."""
+    feeder = _conventions(product).get('feeder')
+    v = feeder.get('max_features_in_build') if isinstance(feeder, dict) else None
+    if isinstance(v, int) and not isinstance(v, bool) and v >= 1:
+        return v
+    return MAX_FEATURES_IN_BUILD
+
+
+def features_per_session(product):
+    """``conventions.feeder.features_per_session`` (default 2): ``auto``'s Features in build per
+    session slot — a number > 0."""
+    feeder = _conventions(product).get('feeder')
+    v = feeder.get('features_per_session') if isinstance(feeder, dict) else None
+    ok = isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+    return v if ok else FEATURES_PER_SESSION
+
+
+def features_cap(product, capacity, bandwidth=None):
+    """``(N, why)``: how many Features this product builds at once, and the inputs that set it.
+
+    A fixed ``feeder.max_features_in_build`` is N as it stands. ``auto`` derives N every tick
+    from the bandwidth (``bandwidth``: :func:`asf.capacity.bandwidth` — ``sessions``,
+    ``accounts``, ``quota_stopped``, ``ci_free``; an absent fact is ``None``): ``sessions ×
+    features_per_session``, scaled by the share of accounts not at their quota stop, halved
+    while CI has no free slot, rounded up, and never below :data:`MIN_FEATURES_IN_BUILD`. No
+    ``sessions`` fact: ``capacity``, the session slots this plan cuts to."""
+    fixed = max_features_in_build(product)
+    if fixed != AUTO:
+        return fixed, 'feeder.max_features_in_build'
+    bw = bandwidth or {}
+    sessions = bw.get('sessions')
+    sessions = sessions if isinstance(sessions, int) and sessions >= 0 else max(int(capacity), 0)
+    n = sessions * features_per_session(product)
+    accounts, stopped, ci_free = bw.get('accounts'), bw.get('quota_stopped'), bw.get('ci_free')
+    if isinstance(accounts, int) and accounts > 0 and isinstance(stopped, int):
+        n = n * max(accounts - stopped, 0) / accounts
+    if isinstance(ci_free, int) and ci_free <= 0:
+        n = n / 2
+    cap = max(MIN_FEATURES_IN_BUILD, math.ceil(n))
+
+    def said(v):
+        return '?' if v is None else str(v)
+    return cap, (f"auto: sessions {sessions}, quota-stopped {said(stopped)}"
+                 f"{'' if accounts is None else f'/{accounts}'}, CI free {said(ci_free)}")
 
 
 def decision_rows(product):
@@ -1042,18 +1100,40 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
     rows = [c for c in (_capped(r, attempts, cap, product) if r.launches and r.kind in CAPPED_KINDS
                         else r for r in rows) if c is not None]
 
+    landed = landed_ids(items, landed_shas)
+    absorbed = absorbers(items)
+    nearness = {}
+
+    def near(r, f):
+        """Finish the nearest-to-done first: a Task row of a Feature in build sorts by the depth
+        of its Feature's ``after:`` chain still to land, shortest first (:func:`chain_left` —
+        each link is a trip through the lane), then by the share of its Tasks already landed,
+        highest first; the Feature's order breaks a tie."""
+        if r.feature_id not in nearness:
+            if in_build_stage(f):
+                done, total = task_share(items, f, landed)
+                nearness[r.feature_id] = (chain_left(items, f, landed, absorbed),
+                                          -done / total if total else 0)
+            else:
+                # a row of a Feature not in build keeps its Feature's order, behind the finishing
+                # — but a lane experiment's arm goes first: both arms start in one window
+                nearness[r.feature_id] = (0, 0) if f.get('ab_pair') else (ix.BIG, 0)
+        return nearness[r.feature_id]
+
     def key(pair):
         seq, r = pair
         f = items.get(r.feature_id) or {}
         if r.tier < 2:
-            return (r.tier, 0, '', 0, seq)
+            return (r.tier, 0, (0, 0), '', 0, seq)
         if r.kind == GROOM_ADJUDICATE:
             # one session decides the whole day's questions for every Feature: it goes before
             # the Feature work, not at the rank of whichever card happens to be the oldest (an
             # unranked inbox card put it behind every launch, and the cut never reached it)
-            return (r.tier, -1, -1, '', 0, seq)
+            return (r.tier, -1, (-1, -1), -1, '', 0, seq)
         order = feature_order(items, f) if f else (ix.BIG, ix.BIG, r.feature_id or '~')
-        return (r.tier, finish_phase(items, r), *order, KIND_ORDER.get(r.kind, 4), seq)
+        phase = finish_phase(items, r)
+        return (r.tier, phase, near(r, f) if phase == 0 and f else (0, 0), *order,
+                KIND_ORDER.get(r.kind, 4), seq)
     return [r for _seq, r in sorted(enumerate(rows), key=key)]
 
 
@@ -1085,6 +1165,101 @@ def buildable_features(items, rows, held=()):
         f = items.get(r.feature_id) or {}
         if (f.get('stage') or '').split(' ')[0] in BUILD_STAGES and r.feature_id not in out:
             out.append(r.feature_id)
+    return out
+
+
+def in_build_stage(feature):
+    """True for an open Feature whose plan is approved: its Tasks are the work (:data:`BUILD_STAGES`)."""
+    return (is_open(feature or {}) and feature.get('type') == 'feature'
+            and (feature.get('stage') or '').split(' ')[0] in BUILD_STAGES)
+
+
+def task_share(items, feature, landed=()):
+    """``(landed, total)``: the Feature's Tasks, and how many of them are on the trunk."""
+    tasks = ix.feature_tasks(items, feature)
+    done = sum(1 for t in tasks if t.get('state') in DONE_STATES or t['id'] in landed)
+    return done, len(tasks)
+
+
+def chain_left(items, feature, landed=(), absorbed=None):
+    """The depth of the Feature's longest chain of ``after:`` among its Tasks not yet landed —
+    each link is a trip through the lane, so a Feature's time to done is its chain, not its
+    count: three parallel Tasks left are 1, three chained are 3. None left: 0."""
+    landed = set(landed or ())
+    absorbed = absorbers(items) if absorbed is None else absorbed
+    left = {t['id']: t for t in ix.feature_tasks(items, feature)
+            if t.get('state') not in DONE_STATES and t['id'] not in landed}
+    depth = {}
+
+    def walk(tid, seen):
+        if tid not in depth:
+            before = [a for a in after_of(items, left[tid], absorbed) if a in left and a not in seen]
+            depth[tid] = 1 + max((walk(a, seen | {a}) for a in before), default=0)
+        return depth[tid]
+    return max((walk(t, {t}) for t in left), default=0)
+
+
+def features_in_build(items, busy=(), landed=()):
+    """The Features in build: plan approved, still open, and at least one Task started — landed,
+    past ``New``, or held by a session or a branch waiting to land (``busy``). A planned
+    Feature none of whose Tasks has started is not in build yet: its first Task is what
+    :func:`build_cap` holds."""
+    busy, landed = set(busy or ()), set(landed or ())
+    out = []
+    for f in ix.of_type(items, 'feature'):
+        if not in_build_stage(f):
+            continue
+        if any(t.get('state', 'New') != 'New' or t['id'] in busy or t['id'] in landed
+               for t in ix.feature_tasks(items, f)):
+            out.append(f['id'])
+    return sorted(out)
+
+
+def build_load(items, product, capacity, inflight=(), occupancy=None, landed_shas=None,
+               bandwidth=None):
+    """``(X, N, why)``: the Features in build (:func:`features_in_build`), the cap
+    (:func:`features_cap`), and the inputs that set it — what ``asf next`` and ``asf status``
+    show, and what :func:`build_cap` holds by."""
+    items = items_of(items)
+    busy = inflight_ids(inflight) | occupied(occupancy)
+    building = features_in_build(items, busy, landed_ids(items, landed_shas))
+    cap, why = features_cap(product, capacity, bandwidth)
+    return len(building), cap, why
+
+
+def build_load_line(x, cap, why):
+    """How every view writes :func:`build_load`: ``Features in build 7 / 6 (auto: …)``."""
+    return f"Features in build {x} / {cap} ({why})"
+
+
+def build_cap(rows, items, product, inflight, capacity, held=(), occupancy=None,
+              landed_shas=None, bandwidth=None):
+    """``feeder.max_features_in_build`` (default ``auto``, :func:`features_cap`): while the
+    product has N or more Features in build (:func:`features_in_build`), no new Feature starts —
+    neither a spec or plan (:data:`NEW_DOC_KINDS`) nor the first Task of a planned Feature
+    nothing of which has started. Each such launching row becomes ``WAITS ON finish: X in build,
+    cap N (…)``. Rows of a Feature already in build (its Tasks, corrections, reviews) are never
+    held, nor a correction of a document the lane refused, nor a lane experiment's arm
+    (``ab_pair``).
+
+    No Feature in build has a row that launches (:func:`buildable_features`): no cap — the new
+    work is the only work there is, and holding it would idle the product."""
+    held = set(held or ())
+    busy = inflight_ids(inflight) | occupied(occupancy)
+    building = set(features_in_build(items, busy, landed_ids(items, landed_shas)))
+    cap, why = features_cap(product, capacity, bandwidth)
+    if len(building) < cap or not building & set(buildable_features(items, rows, held)):
+        return rows
+    reason = f"{len(building)} in build, cap {cap} ({why})"
+    out = []
+    for r in rows:
+        f = items.get(r.feature_id) or items.get(r.item_id) or {}
+        if (r.launches and not r.correction and r.item_id not in held and not f.get('ab_pair')
+                and r.feature_id not in building
+                and (r.kind in NEW_DOC_KINDS or (r.kind == PLAN_CODE and in_build_stage(f)))):
+            r = dataclasses.replace(r, action=f'{FINISH}: {reason}', waits_on='finish',
+                                    reason=f'finish before you start — {reason}')
+        out.append(r)
     return out
 
 
@@ -1127,7 +1302,7 @@ def finish_first(rows, items, product, inflight, held=()):
 
 def plan_rows(index, product, inflight, capacity, attempts=None, occupancy=None,
               groom_state=None, landed_shas=None, decision_limit=None, held=None, exclude=None,
-              s1_first=True, gate=None):
+              s1_first=True, gate=None, bandwidth=None):
     """The rows the tick emits: tiered, S1 first, cut to ``capacity`` less what is in flight.
     ``s1_first=False``: no S1 cut of the tier-2 rows (:func:`asf.feeder.tiers.select`).
     ``held``: the item ids an approval hold parks — shown, but given no slot. ``exclude``: the
@@ -1135,7 +1310,8 @@ def plan_rows(index, product, inflight, capacity, attempts=None, occupancy=None,
     are not candidates, so the cut hands their slots to the next rows. ``gate``: ``gate(rows,
     items) -> rows``, run before the cut — the launch-time invariants
     (:func:`asf.invariants.feeder_waits`) turn a violating row into a WAITS row, so it takes no
-    seat and every view shows it waiting, never "would launch"."""
+    seat and every view shows it waiting, never "would launch". ``bandwidth``: the facts
+    ``feeder.max_features_in_build: auto`` sizes its cap from (:func:`build_cap`)."""
     from asf.feeder import tiers
     rows = candidates(index, product, inflight, attempts, occupancy=occupancy,
                       groom_state=groom_state, landed_shas=landed_shas,
@@ -1145,5 +1321,7 @@ def plan_rows(index, product, inflight, capacity, attempts=None, occupancy=None,
         rows = [r for r in rows if not (r.launches and row_key(r) in exclude)]
     if gate is not None:
         rows = gate(rows, items_of(index))
+    rows = build_cap(rows, items_of(index), product, inflight, capacity, held,
+                     occupancy=occupancy, landed_shas=landed_shas, bandwidth=bandwidth)
     rows = finish_first(rows, items_of(index), product, inflight, held)
     return tiers.select(rows, inflight, capacity, held=held, s1_first=s1_first)

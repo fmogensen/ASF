@@ -1284,6 +1284,157 @@ class FinishBeforeYouStart(unittest.TestCase):
         self.assertEqual([k for k, _ in conventions.validate_mapping({'feeder': 3})], ['feeder'])
 
 
+def build_index(started=3, unstarted=1, cards=2, landed=None, tasks=2):
+    """``cards`` decided Feature cards (F-0001 first), ``started`` Features in build (F-0101…:
+    ``landed[i]`` of ``tasks`` Tasks Resolved, default 1, the rest New) and ``unstarted``
+    plan-approved Features none of whose Tasks has started (F-0201…)."""
+    items = {'E-0001': {'id': 'E-0001', 'type': 'epic', 'rank': 1, 'state': 'New'}}
+    for n in range(1, cards + 1):
+        items[f'F-{n:04d}'] = {'id': f'F-{n:04d}', 'type': 'feature', 'parent': 'E-0001',
+                               'rank': n, 'stage': 'card', 'state': 'New', 'decided': True}
+
+    def feature(fid, rank, stage, done, count):
+        kids = [f'T-{fid[2:]}{k}' for k in range(count)]
+        items[fid] = {'id': fid, 'type': 'feature', 'parent': 'E-0001', 'rank': rank,
+                      'stage': stage, 'state': 'Active', 'decided': True, 'children': kids}
+        for k, tid in enumerate(kids):
+            items[tid] = {'id': tid, 'type': 'task', 'parent': fid, 'rank': k + 1,
+                          'state': 'Resolved' if k < done else 'New', 'writes': [f'{tid}.py']}
+    for n in range(started):
+        done = (landed or {}).get(n, 1)
+        feature(f'F-{101 + n:04d}', 10 + n, 'building', done, tasks)
+    for n in range(unstarted):
+        feature(f'F-{201 + n:04d}', 50 + n, 'plan-approved', 0, tasks)
+    return {'items': items}
+
+
+def cap(n, **extra):
+    return product(conventions={'feeder': {'max_features_in_build': n, **extra}})
+
+
+class FeaturesInBuildCap(unittest.TestCase):
+    """F-0195: a product with 99 Features Active and 7 ever Resolved — each spec that lands adds
+    another open Feature. While N or more Features are in build, no new Feature starts; the
+    ones in build finish, nearest-to-done first."""
+
+    def test_over_the_cap_new_specs_and_first_tasks_wait_while_in_build_tasks_launch(self):
+        out = rows.plan_rows(build_index(started=3), cap(2), [], 20)
+        by = {r.item_id: r for r in out}
+        for fid in ('F-0101', 'F-0102', 'F-0103'):
+            self.assertTrue(by[f'T-{fid[2:]}1'].launches, kinds(out))
+        for iid in ('F-0001', 'F-0002', 'T-02010'):
+            self.assertFalse(by[iid].launches, kinds(out))
+            self.assertEqual(by[iid].waits_on, 'finish')
+            self.assertEqual(by[iid].action,
+                             'WAITS ON finish: 3 in build, cap 2 (feeder.max_features_in_build)')
+
+    def test_under_the_cap_nothing_is_held(self):
+        out = rows.plan_rows(build_index(started=3), cap(4), [], 20)
+        launched = [r.item_id for r in out if r.launches]
+        self.assertIn('F-0001', launched)
+        self.assertIn('T-02010', launched)
+        self.assertFalse([r for r in out if r.action.startswith('WAITS ON finish: 3 in build')])
+
+    def test_a_task_in_flight_or_waiting_to_land_starts_its_feature(self):
+        idx = build_index(started=1, unstarted=1)
+        out = rows.plan_rows(idx, cap(2), [], 20)
+        self.assertTrue({r.item_id: r for r in out}['F-0001'].launches)   # 1 in build
+        for kw in ({'inflight': [{'item': 'T-02010', 'kind': 'coder'}]},
+                   {'occupancy': {'waiting_landing': {'T-02010': 'PR #1'}}}):
+            out = rows.plan_rows(idx, cap(2), kw.pop('inflight', []), 20, **kw)
+            by = {r.item_id: r for r in out}
+            self.assertEqual(by['F-0001'].action,
+                             'WAITS ON finish: 2 in build, cap 2 (feeder.max_features_in_build)')
+            self.assertTrue(by['T-02011'].launches)   # F-0201 is in build now: it flows
+
+    def test_no_cap_while_no_feature_in_build_has_a_row_that_launches(self):
+        # every in-build Task is busy: holding the new work would idle the product
+        idx = build_index(started=3)
+        running = [{'item': f'T-0{n}1', 'kind': 'coder'} for n in (101, 102, 103)]
+        out = rows.plan_rows(idx, cap(2), running, 20)
+        self.assertTrue({r.item_id: r for r in out}['F-0001'].launches, kinds(out))
+
+    def test_a_refused_documents_correction_and_a_lane_experiment_are_never_held(self):
+        idx = build_index(started=3)
+        idx['items']['F-0001']['stage'] = 'spec-draft'
+        idx['items']['F-0002']['ab_pair'] = 'p1'
+        occupancy = {'corrections': {'F-0001': {'kind': rows.LANDING_GATE, 'text': 'gate red',
+                                                'rounds': 1, 'branch': 'spec/F-0001'}}}
+        out = rows.plan_rows(idx, cap(2), [], 20, occupancy=occupancy)
+        by = {r.item_id: r for r in out}
+        self.assertTrue(by['F-0001'].launches)
+        self.assertTrue(by['F-0002'].launches)
+
+    def test_the_nearest_to_done_feature_launches_first(self):
+        # F-0101 ranks first with 1 of 10 landed; F-0102 has 9 of 10 — one Task left
+        idx = build_index(started=2, unstarted=0, cards=0, tasks=10, landed={0: 1, 1: 9})
+        out = rows.plan_rows(idx, product(), [], 1)
+        self.assertEqual([r.feature_id for r in out if r.launches], ['F-0102'])
+        # the chain still to land weighs first: 3 Tasks left in parallel (depth 1) finish
+        # before 2 left in a chain (depth 2), though fewer of them have landed
+        idx = build_index(started=2, unstarted=0, cards=0, tasks=5, landed={0: 2, 1: 3})
+        idx['items']['T-01024']['after'] = ['T-01023']
+        out = rows.plan_rows(idx, product(), [], 1)
+        self.assertEqual(rows.chain_left(idx['items'], idx['items']['F-0102']), 2)
+        self.assertEqual(rows.chain_left(idx['items'], idx['items']['F-0101']), 1)
+        self.assertEqual([r.feature_id for r in out if r.launches], ['F-0101'])
+        # a tie goes by rank
+        idx = build_index(started=2, unstarted=0, cards=0, tasks=10, landed={0: 5, 1: 5})
+        out = rows.candidates(idx, product(), [])
+        self.assertEqual(out[0].feature_id, 'F-0101')
+
+    def test_auto_sizes_the_cap_from_the_bandwidth(self):
+        p = product()
+        self.assertEqual(rows.max_features_in_build(p), 'auto')
+        bw = {'sessions': 3, 'accounts': 5, 'quota_stopped': 0, 'ci_free': 2}
+        self.assertEqual(rows.features_cap(p, 1, bw),
+                         (6, 'auto: sessions 3, quota-stopped 0/5, CI free 2'))
+        self.assertEqual(rows.features_cap(p, 1, dict(bw, quota_stopped=2))[0], 4)   # 3.6
+        self.assertEqual(rows.features_cap(p, 1, dict(bw, quota_stopped=2, ci_free=0))[0], 2)
+        self.assertEqual(rows.features_cap(p, 1, dict(bw, sessions=9, quota_stopped=2,
+                                                        ci_free=0))[0], 6)   # 5.4
+        # never below the floor, however little bandwidth is left
+        self.assertEqual(rows.features_cap(p, 1, dict(bw, quota_stopped=5))[0],
+                         rows.MIN_FEATURES_IN_BUILD)
+        # no bandwidth fact: the plan's own capacity is the sessions
+        self.assertEqual(rows.features_cap(p, 4, None),
+                         (8, 'auto: sessions 4, quota-stopped ?, CI free ?'))
+        self.assertEqual(rows.features_cap(product(conventions={'feeder': {
+            'features_per_session': 1}}), 4, None)[0], 4)
+
+    def test_auto_holds_by_the_bandwidth_and_says_its_inputs(self):
+        bw = {'sessions': 1, 'accounts': 2, 'quota_stopped': 1, 'ci_free': 0}
+        out = rows.plan_rows(build_index(started=3), product(), [], 20, bandwidth=bw)
+        self.assertEqual({r.item_id: r for r in out}['F-0001'].action,
+                         'WAITS ON finish: 3 in build, cap 2 '
+                         '(auto: sessions 1, quota-stopped 1/2, CI free 0)')
+        out = rows.plan_rows(build_index(started=3), product(), [], 20,
+                             bandwidth=dict(bw, sessions=3, quota_stopped=0, ci_free=1))
+        self.assertTrue({r.item_id: r for r in out}['F-0001'].launches)
+
+    def test_build_load_is_what_the_views_show(self):
+        x, n, why = rows.build_load(build_index(started=3), cap(2), 5)
+        self.assertEqual((x, n), (3, 2))
+        self.assertEqual(rows.build_load_line(x, n, why),
+                         'Features in build 3 / 2 (feeder.max_features_in_build)')
+
+    def test_the_cap_is_a_convention(self):
+        for bad in (0, -1, 'many', True, None):
+            self.assertEqual(rows.max_features_in_build(cap(bad)), 'auto')
+        self.assertEqual(rows.max_features_in_build(cap(5)), 5)
+        for bad in (0, -1, 'x', True):
+            self.assertEqual(rows.features_per_session(cap('auto', features_per_session=bad)), 2)
+        self.assertEqual(rows.features_per_session(cap('auto', features_per_session=1.5)), 1.5)
+        from asf import conventions
+        for ok in ('auto', 1, 12):
+            self.assertEqual(conventions.validate_mapping(
+                {'feeder': {'max_features_in_build': ok, 'features_per_session': 2}}), [])
+        self.assertEqual([k for k, _ in conventions.validate_mapping(
+            {'feeder': {'max_features_in_build': 0}})], ['feeder.max_features_in_build'])
+        self.assertEqual([k for k, _ in conventions.validate_mapping(
+            {'feeder': {'features_per_session': 'two'}})], ['feeder.features_per_session'])
+
+
 class IncidentsTest(unittest.TestCase):
     """F-0071 acceptance 5, 6: the S1 clock."""
 
@@ -1354,7 +1505,11 @@ class CliTest(unittest.TestCase):
     def test_next_table(self):
         rc, out = self.run_next(['next', '--product', 'sample', '--capacity', '10', '--inflight', '@INFLIGHT'])
         self.assertEqual(rc, 0)
-        self.assertEqual(out, golden('next-s1-held.md'))
+        table, load = out.rsplit('\n\n', 1)
+        self.assertEqual(table + '\n', golden('next-s1-held.md'))
+        # F-0195: the Features in build against the cap, under the table
+        self.assertRegex(load, r'^Features in build 2 / \d+ \(auto: sessions \d+, '
+                               r'quota-stopped \S+, CI free \S+\)\n$')
 
     def test_next_json(self):
         rc, out = self.run_next(['next', '--product', 'sample', '--capacity', '10', '--json'])

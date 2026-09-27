@@ -273,6 +273,7 @@ def plan_inputs(product, root, index=None):
             'groom_state': groom_state(product, root) if groom_policy.groom_auto(product) else None,
             'held': set(approvals.parked(product)),
             'gate': invariant_gate(product),
+            'bandwidth': capacity_mod.bandwidth(product),
             **triage}
 
 

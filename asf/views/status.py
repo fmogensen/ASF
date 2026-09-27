@@ -13,6 +13,9 @@ Every row is filled from what exists, or says which key would fill it —
   a green sha waiting in ``manual`` mode), then each managed dev environment's own line;
 * **Agents** — the workers' session registry, ``~/.ASF/state/<product>/sessions.jsonl``;
 * **Capacity** — the session and CI ceilings the resolver (``asf.capacity.resolve``) hands back;
+* **Features in build** — X / N: the Features in build against ``feeder.max_features_in_build``
+  and the inputs ``auto`` sized it from (:func:`asf.feeder.rows.build_load`) — while X >= N no
+  new Feature starts;
 * **Record** — the record's counts from ``index.json``: open, Active, blocked, and the items no
   closing rule sees (``rule: no-rule``, §2.7 of the closing spec; ``asf check`` names each);
 * **Ready to launch** — what ``asf next --json`` would print (the feeder over the record's
@@ -280,6 +283,21 @@ def ready_cell(root, product):
     return f"{len(launching)} — first: {first.kind} {first.item_id}"
 
 
+def build_cell(root, product):
+    """``3 / 6 (auto: sessions 3, quota-stopped 2/5, CI free 1)`` — what ``asf next`` says under
+    its table (:func:`asf.feeder.rows.build_load`)."""
+    from asf.feeder import rows as feeder_rows
+    from asf.tick.step_wave import capacity, inflight, plan_inputs
+    from asf.views import index_reader as ix
+    if not root or not os.path.exists(os.path.join(root, 'index.json')):
+        return not_configured('backlog_dir (no index.json)')
+    items, _generated = ix.load(root)
+    inputs = plan_inputs(product, root)
+    x, n, why = feeder_rows.build_load(items, product, capacity(product), inflight(product),
+                                       inputs.get('occupancy'), bandwidth=inputs.get('bandwidth'))
+    return f"{x} / {n} ({why})" + (' — no new Feature starts' if x >= n else '')
+
+
 def decisions_cell(root, product):
     """The decision debt: how many open cards wait for ``decided: true``, and the ids to spend it
     on first — the same ranking (``undecided_rows``) and the same ``busy`` the wave plans with."""
@@ -453,6 +471,7 @@ def render(root, product, cfg=None):
                        ('Agents', lambda: agents_cell(product)),
                        ('Merge', lambda: merge_cell(product)),
                        ('Capacity', lambda: capacity_cell(cfg, product)),
+                       ('Features in build', lambda: build_cell(root, product)),
                        ('Value', lambda: value_cell(root, product)),
                        ('A/B pairs', lambda: ab_pairs_cell(root, product)),
                        ('Release', lambda: release_cell(root, product)),

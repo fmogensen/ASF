@@ -407,6 +407,17 @@ def validate_mapping(data):
         elif cap is not None and (isinstance(cap, bool) or not isinstance(cap, int) or cap < 0):
             problems.append(('feeder.max_specs_in_flight',
                              f'must be a whole number >= 0, not {cap!r}'))
+        if isinstance(feeder, dict):
+            wip = feeder.get('max_features_in_build')
+            if wip is not None and wip != 'auto' and (
+                    isinstance(wip, bool) or not isinstance(wip, int) or wip < 1):
+                problems.append(('feeder.max_features_in_build',
+                                 f'must be auto or a whole number >= 1, not {wip!r}'))
+            per = feeder.get('features_per_session')
+            if per is not None and (isinstance(per, bool) or not isinstance(per, (int, float))
+                                    or per <= 0):
+                problems.append(('feeder.features_per_session',
+                                 f'must be a number > 0, not {per!r}'))
     problems.extend(_retention_problems(data.get('branch_retention')))
     lane = data.get('lane')
     if lane is None:

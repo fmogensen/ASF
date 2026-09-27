@@ -221,6 +221,41 @@ def usable_slots(cfg, quota_source=None):
     return total
 
 
+def quota_stopped(cfg, quota_source=None):
+    """``(accounts, stopped)``: the pool's accounts, and how many sit at their quota stop now
+    (the band :func:`usable_slots` reads). ``(None, None)`` when no pool account is configured."""
+    from asf.workers import headroom as headroom_mod
+    from asf.workers import pool as pool_mod
+    from asf.workers import quota as quota_mod
+    accounts = pool_mod.accounts_from_config(cfg)
+    if not accounts:
+        return None, None
+    source = quota_source or quota_mod.source_from_config(cfg)
+    pool = pool_mod.Pool(accounts, quota_source=source,
+                         guards=quota_mod.guards_from_config(cfg),
+                         limits=headroom_mod.active_limits())
+    return len(accounts), sum(1 for a in accounts if pool.band(a)[0] == quota_mod.STOP)
+
+
+def bandwidth(product, cfg=None, resolved=None, quota_source=None):
+    """The facts ``feeder.max_features_in_build: auto`` sizes its cap from
+    (:func:`asf.feeder.rows.features_cap`): ``sessions`` (this product's session ceiling now),
+    ``accounts`` and ``quota_stopped`` (:func:`quota_stopped`), ``ci_free`` (CI slots less the
+    runs in flight; ``None`` with no CI cap or no count). ``resolved``: a :func:`resolve` the
+    caller already has. Never raises: a fact it cannot read is ``None``."""
+    out = {'sessions': None, 'accounts': None, 'quota_stopped': None, 'ci_free': None}
+    try:
+        cfg = env.load_config() if cfg is None else cfg
+        r = resolved if resolved is not None else resolve(product, cfg, quota_source=quota_source)
+        out['sessions'] = r.sessions
+        if r.ci is not None and r.ci_inflight is not None:
+            out['ci_free'] = max(int(r.ci) - int(r.ci_inflight), 0)
+        out['accounts'], out['quota_stopped'] = quota_stopped(cfg, quota_source)
+    except Exception:  # noqa: BLE001 — a missing fact sizes the cap from what is left (D8)
+        pass
+    return out
+
+
 def product_weight(product):
     """The product's ``capacity.weight`` (an int >= 1), else 1: its share of the pool against the
     other active products' weights — the operator's product-over-factory lever."""

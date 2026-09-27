@@ -61,9 +61,10 @@ def action_cell(row):
     return row.action
 
 
-def table(rows, header=None, hidden=0):
+def table(rows, header=None, hidden=0, load=None):
     """The rows table — markdown, like every other ``asf`` view. ``hidden``: the undecided cards
-    the decision-row cap left out; the footer is a line of the table, not a row."""
+    the decision-row cap left out; the footer is a line of the table, not a row. ``load``:
+    :func:`asf.feeder.rows.build_load`'s ``(X, N, why)``, said under the table."""
     out = [header or f"**NEXT** — {len(rows)} rows · "
                      f"{sum(1 for r in rows if r.launches)} would launch"]
     out.append('')
@@ -74,6 +75,9 @@ def table(rows, header=None, hidden=0):
                                      (str(r.tier), r.kind, r.item_id, r.feature_id, action_cell(r))) + ' |')
     if not rows:
         out.append('| — | nothing to start | — | — | — |')
+    if load is not None:
+        out.append('')
+        out.append(R.build_load_line(*load))
     if hidden > 0:
         out.append('')
         out.append(f"— {hidden} more cards await a decision (asf next --all)")
@@ -114,7 +118,9 @@ def cmd_next(args, root=None):
     if getattr(args, 'json', False):
         print(rows_json(rows), end='')
     else:
-        print(table(rows, hidden=hidden), end='')
+        load = R.build_load(items, product, capacity, inflight, inputs.get('occupancy'),
+                            bandwidth=inputs.get('bandwidth'))
+        print(table(rows, hidden=hidden, load=load), end='')
     return 0
 
 
