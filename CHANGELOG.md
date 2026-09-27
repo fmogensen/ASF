@@ -2,6 +2,23 @@
 
 One entry per released version, newest first.
 
+## v0.1.36 — 2026-09-27
+
+### In progress
+
+- F-0010 P3 wave 2 — evidence and ingest
+- F-0025 Typed envelopes: every job ends with a machine-readable report beside its prose
+- F-0029 Roles: one file per role, five sections, model and access from config
+- F-0092 An item has a budget: three sessions or $10, then it stops and says why
+
+### Improvements and hotfixes
+
+- fix(ci_queue): never re-run a run whose workflow changed on the trunk since
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.36"`
+
 ## v0.1.35 — 2026-09-27
 
 ### In progress
