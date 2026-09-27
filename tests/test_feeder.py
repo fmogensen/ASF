@@ -1046,6 +1046,188 @@ class CapOverEveryLaunchingKindTest(unittest.TestCase):
                 self.assertEqual([r for r in out if r.item_id in ('T-0001', 'F-0001')], [])
 
 
+class EpicOverBudgetHoldTests(unittest.TestCase):
+    """F-0052 §2.3/§3.2: an Epic whose subtree has spent past its typed ``budget_usd`` holds
+    every launching row of ``BUDGET_HELD_KINDS`` beneath it, and nothing that finishes, rules or
+    fixes an incident."""
+
+    #: the seven BUDGET_HELD_KINDS rows the fixture's E-0001 can be made to emit, and the item
+    #: whose row is held
+    HELD_CASES = [
+        (rows.CARD_SPEC, 'F-0001'), (rows.STARVED_SPEC, 'F-0004'),
+        (rows.STARVED_PLAN, 'F-0005'), (rows.SPEC_PLAN, 'F-0009'),
+        (rows.DIRECT_BUILD, 'F-0010'), (rows.PLAN_CODE, 'T-0001'),
+        (rows.PLAN_CODE, 'T-0003')]
+
+    def budget_index(self, budget_usd=500, spend_usd=600):
+        """The feeder fixture's E-0001, plus: a ``size: s`` and a ``lane: direct`` Feature (so
+        every BUDGET_HELD_KINDS kind is reachable), an unbudgeted E-0002 and a parentless
+        Feature (so D1's "no row of theirs changes" has something to check), and enough
+        ``cost.usd`` on F-0001 to push E-0001 past ``budget_usd`` (``None``: no measured spend)."""
+        idx = copy.deepcopy(fixture_index())
+        items = idx['items']
+        if spend_usd is None:
+            items['F-0001'].pop('cost', None)
+        else:
+            items['F-0001']['cost'] = {'usd': spend_usd}
+        if budget_usd is None:
+            items['E-0001'].pop('budget_usd', None)
+        else:
+            items['E-0001']['budget_usd'] = budget_usd
+        items['E-0001']['children'] += ['F-0009', 'F-0010']
+        items['F-0009'] = {'id': 'F-0009', 'type': 'feature', 'title': 'small Feature',
+                           'decided': True, 'rank': 9, 'stage': 'card', 'state': 'New',
+                           'parent': 'E-0001', 'size': 's'}
+        items['F-0010'] = {'id': 'F-0010', 'type': 'feature', 'title': 'direct Feature',
+                           'decided': True, 'rank': 10, 'stage': 'card', 'state': 'New',
+                           'parent': 'E-0001', 'lane': 'direct'}
+        items['E-0002'] = {'id': 'E-0002', 'type': 'epic', 'state': 'Active',
+                           'children': ['F-0100']}
+        items['F-0100'] = {'id': 'F-0100', 'type': 'feature', 'title': 'under E-0002',
+                           'decided': True, 'rank': 1, 'stage': 'card', 'state': 'New',
+                           'parent': 'E-0002'}
+        items['F-0101'] = {'id': 'F-0101', 'type': 'feature', 'title': 'parentless',
+                           'decided': True, 'rank': 1, 'stage': 'card', 'state': 'New'}
+        return idx
+
+    def cand(self, idx, **kw):
+        return rows.candidates(idx, product(), [], **kw)
+
+    def by_id(self, out, iid):
+        return [r for r in out if r.item_id == iid]
+
+    def test_budget_held_kinds_is_held_kinds_own_union(self):
+        self.assertEqual(rows.BUDGET_HELD_KINDS,
+                         set(rows.HELD_KINDS['features']) | set(rows.HELD_KINDS['bugs']))
+
+    def test_every_launching_kind_of_budget_held_kinds_is_held(self):
+        out = self.cand(self.budget_index())
+        for kind, iid in self.HELD_CASES:
+            with self.subTest(kind=kind, item=iid):
+                got = self.by_id(out, iid)
+                self.assertEqual(len(got), 1, got)
+                r = got[0]
+                self.assertEqual(r.kind, kind)
+                self.assertFalse(r.launches)
+                self.assertEqual(r.waits_on, rows.BUDGET)
+                self.assertIn('E-0001', r.action)
+                self.assertIn('$500', r.action)
+                self.assertIn('E-0001', r.reason)
+                self.assertIn('$600', r.reason)
+                self.assertIn('$500', r.reason)
+
+    def test_every_other_kind_under_the_same_epic_is_byte_identical_to_the_unheld_plan(self):
+        unheld, held = self.budget_index(budget_usd=None), self.budget_index()
+        never_held = (rows.PUSHED_REVIEW, rows.PUSHED_LAND, rows.FIX_CORRECT, rows.CONFLICT,
+                     rows.STALEMATE, rows.STALE, rows.UNDECIDED)
+        o = {'review': {'T-0004': {'branch': 'task/T-0004', 'pr': 30}},
+            'corrections': {'T-0002': {'kind': 'gate', 'text': 'FAIL: x', 'rounds': 1}}}
+        out_unheld = self.cand(unheld, occupancy=occ(**o))
+        out_held = self.cand(held, occupancy=occ(**o))
+        got_unheld = [r for r in out_unheld if r.kind in never_held]
+        got_held = [r for r in out_held if r.kind in never_held]
+        self.assertTrue(got_unheld, 'the fixture must actually emit these kinds')
+        self.assertEqual(got_unheld, got_held)
+
+    def test_pushed_land_under_the_epic_is_unaffected(self):
+        o = occ(landing={'B-0003': {'branch': 'fix/B-0003', 'pr': 40, 'state': 'CONFLICTING',
+                                    'why': 'reason'}})
+        unheld = self.by_id(self.cand(self.budget_index(budget_usd=None), occupancy=o), 'B-0003')
+        held = self.by_id(self.cand(self.budget_index(), occupancy=o), 'B-0003')
+        self.assertEqual(unheld, held)
+        self.assertEqual(unheld[0].kind, rows.PUSHED_LAND)
+
+    def test_groom_rows_under_the_epic_are_unaffected(self):
+        lines = ['- [ ] inbox:a.md A — untyped → answer: ____',
+                '- [ ] F-0001 One — why → answer: ____']
+        ids = [rows._token(l) for l in lines]
+        state = {'date': '2026-09-22', 'open': ids, 'lines': lines, 'attempts': 0,
+                'clerk_attempts': 0, 'file': 'groom/2026-09-22.md',
+                'answers': 'state/groom/2026-09-22.answers',
+                'clerk_answers': 'state/groom/2026-09-22.clerk.answers',
+                'oldest': next(i for i in ids if not i.startswith('inbox:'))}
+        auto = product(approvals={'groom': 'auto'})
+        groom_kinds = (rows.GROOM_ADJUDICATE, rows.GROOM_CLERK)
+        unheld = [r for r in rows.candidates(self.budget_index(budget_usd=None), auto, [],
+                                            groom_state=state) if r.kind in groom_kinds]
+        held = [r for r in rows.candidates(self.budget_index(), auto, [], groom_state=state)
+               if r.kind in groom_kinds]
+        self.assertEqual(unheld, held)
+        self.assertEqual({r.kind for r in unheld}, set(groom_kinds))
+
+    def test_s1_and_s2_bug_fix_still_launch(self):
+        out = self.cand(self.budget_index())
+        for iid in ('B-0001', 'B-0002'):  # S1, S2
+            with self.subTest(item=iid):
+                got = self.by_id(out, iid)
+                self.assertEqual([(r.kind, r.launches) for r in got], [(rows.BUG_FIX, True)])
+
+    def test_s3_bug_fix_is_held_against_over_budget_epics_directly(self):
+        """P6: bug_rows makes no S3 BUG → FIX row, so the rule is asserted on a hand-built one."""
+        items = {'E-0001': {'id': 'E-0001', 'type': 'epic', 'state': 'Active',
+                            'budget_usd': 500, 'children': ['B-0001']},
+                'B-0001': {'id': 'B-0001', 'type': 'bug', 'state': 'New', 'parent': 'E-0001',
+                            'severity': 'S3', 'cost': {'usd': 600}}}
+
+        def bug_row(sev):
+            items['B-0001']['severity'] = sev
+            row = rows.Row(tier=2, kind=rows.BUG_FIX, item_id='B-0001', feature_id='',
+                          action=rows.LAUNCH, brief_kind='fix-bug', branch='fix/B-0001',
+                          reason='S3 open, decided')
+            return rows.over_budget_epics([row], items)[0]
+
+        self.assertFalse(bug_row('S3').launches)
+        self.assertEqual(bug_row('S3').waits_on, rows.BUDGET)
+        for sev in ('S1', 'S2'):
+            with self.subTest(severity=sev):
+                self.assertTrue(bug_row(sev).launches)
+
+    def test_no_row_under_an_unbudgeted_epic_or_a_parentless_feature_changes(self):
+        unheld, held = self.budget_index(budget_usd=None), self.budget_index()
+        for iid in ('F-0100', 'F-0101'):
+            with self.subTest(item=iid):
+                self.assertEqual(self.by_id(self.cand(unheld), iid),
+                                 self.by_id(self.cand(held), iid))
+
+    def test_under_budget_holds_nothing(self):
+        out = self.cand(self.budget_index(spend_usd=499.99))
+        r = self.by_id(out, 'F-0001')[0]
+        self.assertTrue(r.launches)
+        self.assertEqual(r.waits_on, '')
+
+    def test_raising_the_budget_unholds_every_row_touching_nothing_else(self):
+        unbudgeted, raised = self.budget_index(budget_usd=None), self.budget_index(budget_usd=750)
+        for kind, iid in self.HELD_CASES:
+            with self.subTest(kind=kind, item=iid):
+                self.assertEqual(self.by_id(self.cand(unbudgeted), iid),
+                                 self.by_id(self.cand(raised), iid))
+
+    def test_an_unmeasured_subtree_holds_nothing(self):
+        unheld = self.budget_index(budget_usd=None, spend_usd=None)
+        held = self.budget_index(spend_usd=None)  # budget_usd set, nothing under it measured
+        for kind, iid in self.HELD_CASES:
+            with self.subTest(kind=kind, item=iid):
+                self.assertEqual(self.by_id(self.cand(unheld), iid),
+                                 self.by_id(self.cand(held), iid))
+
+    def test_epics_over_budget(self):
+        over = self.budget_index()
+        items = rows.items_of(over)
+        self.assertEqual([s.epic_id for s in rows.epics_over_budget(items)], ['E-0001'])
+
+        no_epic = {'F-0001': {'id': 'F-0001', 'type': 'feature', 'state': 'New'}}
+        self.assertEqual(rows.epics_over_budget(no_epic), [])
+
+    def test_epics_over_budget_is_empty_when_all_its_work_is_closed(self):
+        items = {'E-0001': {'id': 'E-0001', 'type': 'epic', 'state': 'Active',
+                            'budget_usd': 500, 'children': ['F-0001']},
+                'F-0001': {'id': 'F-0001', 'type': 'feature', 'state': 'Closed',
+                            'parent': 'E-0001', 'children': ['T-0001']},
+                'T-0001': {'id': 'T-0001', 'type': 'task', 'state': 'Closed',
+                            'parent': 'F-0001', 'cost': {'usd': 600}}}
+        self.assertEqual(rows.epics_over_budget(items), [])
+
+
 class TrunkNameTests(unittest.TestCase):
     """T-0243 §2.5: ``PLAN_ON_TRUNK`` names ``main`` for a product that names no trunk, but the
     STARVED → SPEC row must match a product's own ``plan on origin/<trunk>`` sentence too."""
