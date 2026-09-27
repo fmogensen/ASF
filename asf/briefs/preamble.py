@@ -25,6 +25,7 @@ import importlib
 import os
 import re
 
+from asf import proves as proves_mod
 from asf.conventions import Conventions
 from asf.feeder import rows as feeder_rows
 from asf.record import frontmatter
@@ -322,6 +323,37 @@ def stories_of(items, feature):
             for c in ix.children(items, feature, 'story')]
 
 
+def proves_lines(product, items, item):
+    """For each id on the Task's ``stories:``, the Story's title and its acceptance bullets
+    numbered 1-based (starting over at each Story):
+
+        S-18750 the claim and its parser: 1 `tests/test_proves.py::ParseTests` passes;
+                2 a malformed claim is a problem, not a silent skip
+
+    (8 spaces — ``len('S-18750') + 1``, the width of the id and the space after it).
+
+    The bullets come from :func:`asf.proves.card_bullets` — the one function the numbering, the
+    refusal, the pull-request block and the tick all count with, so the number in the brief is
+    the number the gate resolves. ``''`` when the Task lists no Story or holds no readable card
+    for one — a Story that drops out is silently absent, not an empty line."""
+    root = getattr(product, 'backlog_dir', None) if product is not None else None
+    out = []
+    for sid in (item or {}).get('stories') or []:
+        story_item = (items or {}).get(sid)
+        if not story_item or story_item.get('type') != 'story':
+            continue
+        card_bullets = proves_mod.card_bullets(root, story_item)
+        if not card_bullets:
+            continue
+        lead = f"{sid} {story_item.get('title', '')}".rstrip() + ': '
+        pad = ' ' * (len(sid) + 1)
+        for n, bullet in enumerate(card_bullets, 1):
+            sep = ';' if n < len(card_bullets) else ''
+            prefix = lead if n == 1 else pad
+            out.append(f"{prefix}{n} {bullet}{sep}")
+    return '\n'.join(out)
+
+
 def kind_of(row):
     """The row's template kind, or ``''`` when it names none.
 
@@ -408,6 +440,7 @@ def collect(product, row, index, inflight=None, repo_facts=None):
         'members': [member_facts(product, items, i) for i in delivers],
         'tests': named_tests(sections, item, repo_facts),
         'stories': stories_of(items, feature),
+        'proves_lines': proves_lines(product, items, item),
         'round': read_round,
         'next_round': rnd + 1 if rnd else 1,
         'review_path': review_path,

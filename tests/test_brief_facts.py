@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import unittest
 
 from asf import env
@@ -247,6 +248,68 @@ class PreambleIsCodeTests(unittest.TestCase):
         self.assertEqual(first, preamble_mod.build(product, row, index, [], given))
         preamble_mod.collect(product, row, index, [], given)
         self.assertEqual(first, preamble_mod.build(product, row, index, [], given))
+
+
+class ProvesLinesTests(unittest.TestCase):
+    """F-0040 §2.3: the fact ``build.context``'s ``proves`` key is built from — the Story titles
+    and their acceptance bullets, numbered per Story, the same numbering
+    :func:`asf.proves.card_bullets` gives the refusal, the pull-request block and the tick."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix='proves_lines_')
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        os.makedirs(os.path.join(self.root, 'stories'))
+        self.product = Product('sample', {'backlog_dir': self.root})
+
+    def _story(self, sid, title, bullets):
+        with open(os.path.join(self.root, 'stories', f'{sid}.md'), 'w', encoding='utf-8') as f:
+            f.write('## Acceptance\n' + ''.join(f'- [ ] {b}\n' for b in bullets))
+        return {'id': sid, 'type': 'story', 'folder': 'stories', 'title': title}
+
+    def test_numbered_1_based_under_the_story(self):
+        story = self._story('S-18750', 'the claim and its parser',
+                            ['`tests/test_proves.py::ParseTests` passes',
+                             'a malformed claim is a problem, not a silent skip'])
+        items, item = {'S-18750': story}, {'stories': ['S-18750']}
+        self.assertEqual(
+            preamble_mod.proves_lines(self.product, items, item),
+            'S-18750 the claim and its parser: 1 `tests/test_proves.py::ParseTests` passes;\n'
+            '        2 a malformed claim is a problem, not a silent skip')
+
+    def test_a_task_with_no_stories_is_empty(self):
+        self.assertEqual(preamble_mod.proves_lines(self.product, {}, {}), '')
+
+    def test_two_stories_number_independently(self):
+        s1 = self._story('S-0001', 'first', ['a', 'b'])
+        s2 = self._story('S-0002', 'second', ['c'])
+        items = {'S-0001': s1, 'S-0002': s2}
+        item = {'stories': ['S-0001', 'S-0002']}
+        self.assertEqual(preamble_mod.proves_lines(self.product, items, item),
+                         'S-0001 first: 1 a;\n       2 b\nS-0002 second: 1 c')
+
+    def test_a_story_with_an_unreadable_card_drops_out(self):
+        items = {'S-9999': {'id': 'S-9999', 'type': 'story', 'folder': 'stories', 'title': 'gone'}}
+        item = {'stories': ['S-9999']}
+        self.assertEqual(preamble_mod.proves_lines(self.product, items, item), '')
+
+    def test_an_id_that_is_not_a_story_drops_out(self):
+        items = {'T-0002': {'id': 'T-0002', 'type': 'task', 'folder': 'tasks', 'title': 'not a story'}}
+        item = {'stories': ['T-0002']}
+        self.assertEqual(preamble_mod.proves_lines(self.product, items, item), '')
+
+    def test_collect_carries_the_fact_beside_stories(self):
+        story = self._story('S-0003', 'a story', ['x'])
+        index = {'items': {'T-0009': {'id': 'T-0009', 'type': 'task', 'title': 't',
+                                      'feature': 'F-0001', 'parent': 'F-0001', 'folder': 'tasks',
+                                      'stories': ['S-0003']},
+                           'S-0003': story,
+                           'F-0001': {'id': 'F-0001', 'type': 'feature', 'title': 'f',
+                                      'folder': 'features'}},
+                'generated': ''}
+        row = Row(tier=2, kind='PLAN → CODE', item_id='T-0009', feature_id='F-0001',
+                  action='would launch', brief_kind='task', branch='task/T-0009', reason='r')
+        facts = preamble_mod.collect(self.product, row, index, [], {})
+        self.assertEqual(facts['proves_lines'], 'S-0003 a story: 1 x')
 
 
 if __name__ == '__main__':
