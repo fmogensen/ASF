@@ -2139,6 +2139,32 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertEqual([f['branch'] for f in lane.pr_order(entries, items)],
                          ['worker/hotfix-T-0003', 'fix/B-0002', 'fix/B-0001', 'worker/F-0009'])
 
+    def test_pr_order_least_recently_gated_first_within_a_rank(self):
+        """2026-09-27: 23 branches at the gate, a cap of 12, and pr_order ordered by name alone
+        within a rank — the same twelve WAITING code PRs (`cloud/T-…`) took every tick and the
+        spec PRs #841/#842/#843 (`cloud/spec-…`) sat in GATE, never gated, for five hours.
+        Within a rank the branch the gate took longest ago (never: first) goes first."""
+        entries = [{'branch': b, 'item': None} for b in ('cloud/T-0001', 'cloud/T-0002',
+                                                          'cloud/spec-a', 'cloud/spec-b')]
+        visits = {'cloud/T-0001': 200.0, 'cloud/T-0002': 100.0, 'cloud/spec-b': 50.0}
+        self.assertEqual([f['branch'] for f in lane.pr_order(entries, {}, visits)],
+                         ['cloud/spec-a', 'cloud/spec-b', 'cloud/T-0002', 'cloud/T-0001'])
+
+    def test_gate_cap_rotates_so_no_branch_starves(self):
+        """The cap takes the least recently gated and records its visit: over ceil(n/cap) ticks
+        every eligible branch is gated once, however many never leave WAITING."""
+        state = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, state, True)
+        fake = mock.Mock(state_dir=state, conv=Conventions.from_mapping(
+            {'harvest': {'branches_per_tick': 2}}), dry_run=False, out=lambda *_: None)
+        entries = [{'branch': f'cloud/T-000{i}', 'item': None} for i in range(1, 4)]
+        entries.append({'branch': 'cloud/spec-x', 'item': None})
+        seen = []
+        for tick in range(2):
+            taken = lane.take_for_tick(fake, list(entries), {}, now=1000.0 + tick)
+            seen += [f['branch'] for f in taken]
+        self.assertEqual(sorted(seen), sorted(f['branch'] for f in entries))
+
     # ---- the PR lane, native: green checks are not a green trunk ----------------------------
 
     #: A trunk-only rule, as a product's CI runs it on the trunk alone: no plan may cite a name

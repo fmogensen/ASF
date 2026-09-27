@@ -214,6 +214,8 @@ HOST_PRESSURE = 'host-pressure'
 #: Consecutive gate timeouts, and the file the status and doctor rows read (§12).
 GATE_SLOW = 'gate-slow.json'
 GATE_SLOW_AFTER = 2
+#: ``{branch: epoch}`` the gate last took each branch: the capped rotation (:func:`take_for_tick`)
+GATE_VISITS = 'gate-visits.json'
 #: Full gates one landing may spend: the first, and the confirmations after each bisection.
 CONFIRM_ROUNDS = 3
 #: how many transitions one branch may take in one pass
@@ -2165,7 +2167,7 @@ def gate_pass(product, state_dir=None, items=None, out=print, dry_run=False, lan
         if rec.get('state') in GATE_STATES and not f.get('live') and f.get('head') \
                 and f['head'] == rec.get('head'):
             entries.append(f)
-    entries = H.cap_to_tick(pr_order(entries, items), lane.out, lane.conv)
+    entries = take_for_tick(lane, entries, items)
     ready = held_by_host(lane, precheck(lane, entries))
     if ready:
         try:
@@ -2197,14 +2199,58 @@ def held_by_host(lane, ready):
     return [f for f in ready if f.get('how') == 'ci']
 
 
-def pr_order(entries, items=None):
-    """``entries`` hotfix first, then S1, S2, the rest — stable."""
+def pr_order(entries, items=None, visits=None):
+    """``entries`` hotfix first, then S1, S2, the rest; within a rank the branch the gate took
+    longest ago first (never taken: first) — ``visits`` ``{branch: epoch}`` (:data:`GATE_VISITS`)
+    — else stable. Without the visit order a capped tick took the same first ``branches_per_tick``
+    by name every time: twelve WAITING code PRs held the cap and three spec PRs sat in GATE,
+    never gated (2026-09-27)."""
+    visits = visits or {}
+
     def rank(f):
         if 'hotfix' in f['branch'].lower():
-            return 0
-        card = (items or {}).get(f.get('item') or '') or {}
-        return {'S1': 1, 'S2': 2}.get(card.get('severity'), 3)
+            sev = 0
+        else:
+            card = (items or {}).get(f.get('item') or '') or {}
+            sev = {'S1': 1, 'S2': 2}.get(card.get('severity'), 3)
+        try:
+            seen = float(visits.get(f['branch']) or 0.0)
+        except (TypeError, ValueError):
+            seen = 0.0
+        return sev, seen
     return sorted(entries, key=rank)
+
+
+def read_visits(state_dir):
+    """``{branch: epoch}`` the gate last took each branch (:data:`GATE_VISITS`); {} unreadable."""
+    try:
+        with open(os.path.join(state_dir, GATE_VISITS), encoding='utf-8') as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def take_for_tick(lane, entries, items=None, now=None):
+    """The gate entries this tick takes: :func:`pr_order` over the recorded visits, capped to
+    ``branches_per_tick`` (:func:`asf.harvest.harvest.cap_to_tick`); the taken ones' visits are
+    stamped so the next capped tick starts from the rest — no branch starves behind the cap.
+    Only branches still eligible are kept in the file."""
+    visits = read_visits(lane.state_dir)
+    taken = H.cap_to_tick(pr_order(entries, items, visits), lane.out, lane.conv)
+    if not lane.dry_run:
+        stamp = time.time() if now is None else now
+        names = {f['branch'] for f in entries}
+        kept = {b: t for b, t in visits.items() if b in names}
+        kept.update({f['branch']: stamp for f in taken})
+        path = os.path.join(lane.state_dir, GATE_VISITS)
+        try:
+            with open(path + '.tmp', 'w', encoding='utf-8') as fh:
+                json.dump(kept, fh, sort_keys=True)
+            os.replace(path + '.tmp', path)
+        except OSError:
+            pass
+    return taken
 
 
 def missing_policy(conv, cls):
