@@ -577,6 +577,74 @@ class ReshapeRowsTest(unittest.TestCase):
                          [(rows.RESHAPE, 'T-0050', True)])
 
 
+class ConsoleAmendRowsTest(unittest.TestCase):
+    """T-0183, T-0259, T-0288, T-0301, T-0303 (2026-09-27): a Task whose ``writes:`` names a path
+    in the amendable set was launched, spent its session on the hook's refusal, and waited hours
+    for the console. The footprint says so at plan time: such a Task gets one non-launching
+    CONSOLE → AMEND row and no worker session."""
+
+    def idx(self, tasks):
+        items = {'F-0001': {'id': 'F-0001', 'type': 'feature', 'decided': True, 'state': 'Active',
+                            'rank': 1, 'stage': 'building 1/2', 'children': list(tasks)}}
+        items.update(tasks)
+        return {'items': items}
+
+    def task(self, tid, writes):
+        return {'id': tid, 'type': 'task', 'parent': 'F-0001', 'state': 'New', 'writes': writes}
+
+    def test_writes_in_the_set_launch_nothing_and_give_one_console_row(self):
+        idx = self.idx({'T-0303': self.task('T-0303', ['asf/x.py', 'rules/README.md'])})
+        mine = [r for r in rows.candidates(idx, product(), []) if r.item_id == 'T-0303']
+        self.assertEqual(len(mine), 1, mine)
+        r = mine[0]
+        self.assertEqual((r.kind, r.action, r.waits_on, r.launches, r.branch),
+                         (rows.CONSOLE_AMEND, 'WAITS ON console: amendable rules/README.md',
+                          'console', False, 'worker/T-0303'))
+        self.assertEqual(r.amend, 'rules/README.md')
+        self.assertIn('amendable set', r.reason)
+        self.assertEqual([x for x in rows.plan_rows(idx, product(), [], 5) if x.launches], [])
+
+    def test_a_role_agent_template_is_in_the_set_too(self):
+        idx = self.idx({'T-0301': self.task('T-0301', ['asf/briefs/templates/reshape.md'])})
+        r = [r for r in rows.candidates(idx, product(), []) if r.item_id == 'T-0301'][0]
+        self.assertEqual((r.kind, r.launches), (rows.CONSOLE_AMEND, False))
+
+    def test_writes_outside_the_set_launch_normally(self):
+        idx = self.idx({'T-0303': self.task('T-0303', ['rules/README.md']),
+                        'T-0304': self.task('T-0304', ['asf/feeder/rows.py', 'docs/rules.md'])})
+        out = rows.plan_rows(idx, product(), [], 5)
+        self.assertEqual([(r.kind, r.item_id) for r in out if r.launches],
+                         [(rows.PLAN_CODE, 'T-0304')])
+
+    def test_an_opted_out_set_launches_it(self):
+        idx = self.idx({'T-0303': self.task('T-0303', ['rules/README.md'])})
+        p = product(conventions={'amendable_paths': []})
+        r = [r for r in rows.candidates(idx, p, []) if r.item_id == 'T-0303'][0]
+        self.assertEqual((r.kind, r.action), (rows.PLAN_CODE, rows.LAUNCH))
+
+    def test_a_correction_of_such_a_task_waits_on_the_console_too(self):
+        # T-0303 (2026-09-27): after the hook refused the coder, the harvest's hold turned into a
+        # FIX → CORRECT row that would launch a second session into the same refusal
+        idx = self.idx({'T-0303': self.task('T-0303', ['rules/README.md'])})
+        corr = {'T-0303': {'kind': 'incomplete', 'text': 'no commit', 'rounds': 1,
+                           'at': '2026-09-27T00:00:00Z', 'branch': 'worker/T-0303'}}
+        mine = [r for r in rows.candidates(idx, product(), [], occupancy=occ(corrections=corr))
+                if r.item_id == 'T-0303']
+        self.assertEqual([(r.kind, r.launches, r.brief_kind) for r in mine],
+                         [(rows.CONSOLE_AMEND, False, 'correct')])
+
+    def test_a_delivery_whose_union_reaches_the_set_waits_on_the_console(self):
+        lead = {'id': 'F-0097', 'type': 'feature', 'state': 'New', 'rank': 1,
+                'stage': 'plan-approved', 'delivers': ['F-0097', 'B-0034']}
+        bug = {'id': 'B-0034', 'type': 'bug', 'state': 'New', 'severity': 'S2', 'decided': True,
+               'delivered_by': 'F-0097', 'writes': ['asf/briefs/templates/groom.md']}
+        out = rows.delivery_rows(rows.items_of({'items': {'F-0097': lead, 'B-0034': bug}}),
+                                 product(), set(), [])
+        code = [r for r in out if r.item_id == 'F-0097'][0]
+        self.assertEqual((code.kind, code.launches, code.waits_on),
+                         (rows.CONSOLE_AMEND, False, 'console'))
+
+
 class DeliveryRowsTest(unittest.TestCase):
     """T-0174 / S-17452: delivery_rows speaks for a delivery's members — one plan row, one code
     row, the union footprint, and a WAITS ON delivery row for every other open member."""
@@ -1998,7 +2066,7 @@ class TableTests(unittest.TestCase):
         self.assertEqual(set(data[0]), {'tier', 'kind', 'item_id', 'feature_id', 'action',
                                         'brief_kind', 'branch', 'reason', 'waits_on',
                                         'correction', 'review_round', 'groom_date', 'groom_file',
-                                        'answers_file', 'open_questions'})
+                                        'answers_file', 'open_questions', 'amend'})
 
 
 class CliTest(unittest.TestCase):

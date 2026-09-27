@@ -69,7 +69,7 @@ import dataclasses
 import math
 import re
 
-from asf import budget
+from asf import amendable, budget
 from asf.feeder import footprint
 from asf.groom import policy as groom_policy
 from asf.views import index_reader as ix
@@ -119,6 +119,10 @@ WAITS_MERGE = 'WAITS ON merge'
 #: an Epic past its typed budget (F-0052): this module owns the action word, asf.budget the money
 WAITS_BUDGET = 'WAITS ON budget'
 PLAN_CODE = 'PLAN → CODE'
+#: A Task (or delivery) whose ``writes:`` reaches the amendable set (:mod:`asf.amendable`): no
+#: worker session may edit that set, so none is launched to be refused — the console makes the
+#: edit on the item's branch (T-0183, T-0259, T-0288, T-0301, T-0303 on 2026-09-27).
+CONSOLE_AMEND = 'CONSOLE → AMEND'
 RESHAPE = 'RESHAPE → PLAN'
 #: a delivery lead's document session (:func:`delivery_rows`) — no plan yet
 DELIVERY_PLAN = 'DELIVERY → PLAN'
@@ -188,6 +192,8 @@ class Row:
     groom_file: str = ''
     answers_file: str = ''
     open_questions: tuple = ()
+    #: a CONSOLE → AMEND row only: the ``writes:`` entry that reaches the amendable set
+    amend: str = ''
 
     @property
     def launches(self):
@@ -598,6 +604,22 @@ def bug_rows(items, product, busy, attempts=None, why=None):
     return out
 
 
+def console_amend_row(product, item_id, feature_id, writes, branch, brief_kind='task',
+                      tier=2):
+    """The CONSOLE → AMEND row for an item whose ``writes:`` reaches the amendable set
+    (:func:`asf.amendable.reaches`, a glob intersection), else None. It launches nothing and
+    claims no footprint: a worker would only be refused ``touch_amendable_set`` by the hook, its
+    session spent and the item stalled until the console made the edit anyway."""
+    hit = amendable.reaches(product, list(writes or ()))
+    if not hit:
+        return None
+    return Row(tier=tier, kind=CONSOLE_AMEND, item_id=item_id, feature_id=feature_id,
+               action=f'WAITS ON console: amendable {hit}', brief_kind=brief_kind, branch=branch,
+               reason=f'writes: {hit} is in the amendable set — no worker session edits it; the '
+                      f'console makes the edit on {branch}',
+               waits_on='console', amend=hit)
+
+
 def footprint_row(item, product, c, tier, fid, branch):
     """The row a ``footprint`` correction (:mod:`asf.feeder.widen`) stands for until the rule
     has widened the Task — a widened one is an ordinary FIX → CORRECT row, on the wider
@@ -649,6 +671,12 @@ def correction_rows(items, product, busy, corrections):
             out.append(Row(tier=tier, kind=FIX_CORRECT, item_id=iid, feature_id=fid,
                            action=f'{PARKED} {c.get("reason") or c["kind"]}', brief_kind='correct',
                            branch=branch, reason=c.get('reason') or 'parked', waits_on='operator'))
+            continue
+        # a correction of an item whose writes: reach the amendable set is the console's too: a
+        # session relaunched on it only buys the hook's refusal again (T-0303, 2026-09-27)
+        amend = console_amend_row(product, iid, fid, item.get('writes'), branch, 'correct', tier)
+        if amend:
+            out.append(amend)
             continue
         doc = product.conventions.branch_kind(branch) if c.get('kind') == LANDING_GATE else None
         if doc in ('spec', 'plan') and same < CORRECTION_ROUNDS:  # a document the gate refused
@@ -893,6 +921,9 @@ def delivery_rows(items, product, busy, running, landed_shas=None):
                            waits_on=on))
         elif lid in busy:
             pass
+        elif code_stage and (amend := console_amend_row(
+                product, lid, fid, _delivery_union(items, lead), branch, brief)):
+            out.append(amend)
         elif code_stage:
             union = _delivery_union(items, lead)
             other = footprint.first_conflict(union, running,
@@ -1108,6 +1139,11 @@ def task_rows(items, product, feature, busy, running, landed_shas=None):
                            branch=branch_for(product, 'code', t['id']),
                            reason='no writes: declared: the plan must name the files this Task '
                                   'writes before a coder can start', waits_on='writes'))
+            continue
+        amend = console_amend_row(product, t['id'], feature['id'], writes,
+                                  branch_for(product, 'code', t['id']))
+        if amend:
+            out.append(amend)
             continue
         other = footprint.first_conflict(writes, running,
                                          _conventions(product).get('shared_paths') or ())

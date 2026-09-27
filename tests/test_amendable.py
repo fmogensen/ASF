@@ -268,6 +268,67 @@ class HookTests(unittest.TestCase):
         self.assertEqual(self.ledger(), [])
 
 
+    def test_a_read_only_command_that_names_the_set_is_not_held(self):
+        """F-0042 (2026-09-27): a spec session's read-only grep was refused because its pattern
+        text held ``asf new rule`` and ``rules/``. A command that only reads — grep, ls, cat,
+        git diff/log/show — runs nothing of the set and writes nothing in it."""
+        for command in (
+            'grep -rln "rules/R-\\|asf new rule\\|rule card" docs/specs/ docs/plans/ | head -20',
+            'grep -n "a>b" rules/R-0042.md',
+            'ls rules/ && cat rules/README.md 2>&1 | head -5',
+            'git log --oneline -- rules/ asf/briefs/templates/coder.md',
+            'git diff origin/main -- rules/README.md; git show HEAD:rules/R-0042.md',
+            'rg "asf hooks install" docs > /tmp/out.txt',
+            # F-0064 (2026-09-27): the same misreading held a grep as touch_security
+            'grep -n "secrets\\|gh secret\\|gh auth\\|auth_env" asf/approvals.py | head -30',
+            # T-0301 (2026-09-27): a commit whose message names a template and a `<id>` was
+            # refused as a write to the template
+            'git commit -s -m "$(cat <<\'EOF\'\ntask(T-0301): parts\n\n'
+            'asf/briefs/templates/reshape.md is amendable; `<id> (<writes>)`\nEOF\n)"',
+            'git commit -s -m "task(T-0301): leave asf/briefs/templates/reshape.md, <id> -> x"',
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(self.call('Bash', {'command': command}), (0, ''))
+        self.assertEqual(self.ledger(), [])
+
+    def test_a_real_write_or_run_in_a_read_only_shaped_command_is_still_held(self):
+        for command, kind in (
+            ('cat /tmp/x > rules/README.md', 'rule_cards'),
+            ('grep -v old rules/R-0042.md | tee rules/R-0042.md', 'rule_cards'),
+            ('git show HEAD:x.md > .githooks/pre-commit', 'hooks'),
+            ('ls && asf new rule --title x', None),
+            ('bash -c "asf new rule --title x"', None),
+        ):
+            with self.subTest(command=command):
+                rc, out = self.call('Bash', {'command': command})
+                self.assertEqual(rc, 2, out)
+                self.assertIn('REFUSED touch_amendable_set (human-now)', out)
+                self.assertEqual(self.ledger()[-1].get('kind'), kind)
+
+    def test_a_console_amend_row_is_announced_once(self):
+        """The CONSOLE → AMEND row (the feeder's plan-time route) says one NEEDS OPERATOR line
+        the first tick it is seen, and nothing on the next — no hold, nothing parked."""
+        from asf.feeder import rows
+        prod = env.load_product('demo')
+        row = rows.Row(tier=2, kind=rows.CONSOLE_AMEND, item_id='T-0303', feature_id='F-0042',
+                       action='WAITS ON console: amendable rules/README.md', brief_kind='task',
+                       branch='worker/T-0303', reason='x', waits_on='console',
+                       amend='rules/README.md')
+        other = rows.Row(tier=2, kind=rows.PLAN_CODE, item_id='T-0001', feature_id='F-0042',
+                         action=rows.LAUNCH, brief_kind='task', branch='worker/T-0001',
+                         reason='y')
+        lines = []
+        approvals.announce_console_amends(prod, [row, other], lines.append)
+        self.assertEqual(len(lines), 1, lines)
+        self.assertTrue(lines[0].startswith('NEEDS OPERATOR: T-0303 writes rules/README.md'),
+                        lines[0])
+        lines.clear()
+        approvals.announce_console_amends(prod, [row, other], lines.append)
+        self.assertEqual(lines, [])
+        self.assertEqual(approvals.open_holds(prod), [])
+        self.assertEqual(approvals.parked(prod), {})
+
+
 class PolicyTests(TickTestCase):
     """§3.3 — the policy cannot be widened or granted away: ``matrix`` refuses any level but
     ``human-now`` for ``touch_amendable_set`` (F-0024's own message), the hook refuses even when

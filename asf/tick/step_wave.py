@@ -660,6 +660,10 @@ def launch(ctx, out=print):
     ready = cloud_readiness(product, cloud)     # once per tick, never per row
     _held, _hold, extra = split_hold(cloud, ready, False, '')
     inputs = plan_inputs(product, ctx.record_root(), items)
+    # a Task whose writes: reach the amendable set launches nothing: say it to the console once
+    approvals.announce_console_amends(
+        product, feeder_rows.plan_rows(items, product, running, READY_ALL,
+                                       **dict(inputs, s1_first=False)), out)
     # the feeder check point: a violating row is dropped, logged, and its slot goes to the next
     planned, dropped = gated_plan(items, product, running, r.sessions + extra, inputs, out=out)
     wider = (gated_plan(items, product, running, r.ceiling + extra, inputs, out=lambda _l: None,
