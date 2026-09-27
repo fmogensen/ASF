@@ -2,6 +2,22 @@
 
 One entry per released version, newest first.
 
+## v0.1.44 — 2026-09-27
+
+### Features landed
+
+- F-0033 Dogfood end to end in CI
+- F-0093 Model routing is argued from minutes-per-landing, and the pool gets a cheap tier
+
+### In progress
+
+- F-0013 P3 wave 5 — the feeder and the tick
+- F-0024 Self-amendment policy: the factory proposes, humans approve and merge
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.44"`
+
 ## v0.1.43 — 2026-09-27
 
 ### Features landed
