@@ -1872,11 +1872,13 @@ class ColdRetryModelTests(Home):
                         runtime=runtime_mod.FakeRuntime([{'ok': False}]), cfg=self.cfg)
         session = pool_mod.load_sessions(self.product)['j']
         cfg = {'worker_pool': {'accounts': [{'name': 'acct-a', 'role': 'local', 'cap': 2}]}}
-        with mock.patch.object(stall_mod, '_cfg', return_value=cfg):
-            with self.assertRaises(spawn_mod.SpawnError) as cm:
-                stall_mod.correct_once(self.product, session, 'boom',
-                                       runtime_mod.FakeRuntime([{'ok': True}]))
-        self.assertIn('NEEDS OPERATOR', str(cm.exception))
+        buf = io.StringIO()
+        with mock.patch.object(stall_mod, '_cfg', return_value=cfg), \
+             contextlib.redirect_stdout(buf):
+            self.assertFalse(stall_mod.correct_once(self.product, session, 'boom',
+                                                     runtime_mod.FakeRuntime([{'ok': True}])))
+        self.assertIn('NEEDS OPERATOR', buf.getvalue())
+        self.assertNotIn('j-correction', pool_mod.load_sessions(self.product))
 
 
 class LaunchRecordTests(Home):

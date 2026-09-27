@@ -234,7 +234,11 @@ def correct_once(product, session, error_text, runtime):
     # name — the submodule path is the only way to reach `model_for` from here.
     from asf.briefs.build import model_for
     label = model_for(product, session.get('kind'))
-    model = spawn_mod.model_arg(label, cfg)
+    try:
+        model = spawn_mod.model_arg(label, cfg)
+    except spawn_mod.SpawnError as e:  # unmapped label: no retry, one session held
+        print(f"correction of {session['job']} not launched: {e}")
+        return False
     job = runtime_mod.Job(product.name, retry_job, session.get('worktree'), path,
                           model, account=_account(session),
                           env=retry_env, hooks_dir=hooks_dir,
