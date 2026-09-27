@@ -137,5 +137,70 @@ class CItems(unittest.TestCase):
         self.assertEqual(review.c_items('verdict: approved\n'), [])
         self.assertEqual(review.c_items(None), [])
 
+
+class IsCurrentNamingAHead(unittest.TestCase):
+    """B-0147: a review naming the head it read (``Head: <sha>``, as the brief's preamble hands
+    it) is committed on that branch by its own session, and the lane rewrites the branch's
+    commits (reword, sign-off, trunk copies dropped, a restack onto a newer trunk). Neither
+    changes what was reviewed, so the verdict stands; else every round asks for the next one."""
+
+    def setUp(self):
+        import tempfile
+        self.repo = tempfile.mkdtemp()
+        git(self.repo, 'init', '-q', '-b', 'main')
+        self.write('app.py', 'x = 1\n')
+        git(self.repo, 'add', '-A')
+        git(self.repo, 'commit', '-qm', 'base')
+        git(self.repo, 'checkout', '-qb', 'worker/T-1')
+        self.write('app.py', 'x = 2\n')
+        git(self.repo, 'commit', '-qam', 'task(T-1): the change')
+        self.code = git(self.repo, 'rev-parse', 'HEAD')
+        self.conv = Conventions()
+
+    def write(self, path, text):
+        full = os.path.join(self.repo, path)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, 'w') as fh:
+            fh.write(text)
+
+    def commit_review(self, n, head):
+        path = f'{review._dir_of(self.conv)}/{n}-t-1.md'
+        self.write(path, f'# Review\n\nHead: `{head[:9]}`\n\nverdict: approved\n')
+        git(self.repo, 'add', '-A')
+        git(self.repo, 'commit', '-qm', f'review(T-1): round {n}')
+
+    def current(self, trunk='main'):
+        ref = 'worker/T-1'
+        rv = review.review_at(self.repo, self.conv, ref, 'T-1')
+        self.assertEqual(rv['verdict'], review.APPROVED)
+        tip = git(self.repo, 'rev-parse', ref)
+        return review.is_current(self.repo, self.conv, ref, rv, tip, trunk=trunk)
+
+    def test_the_review_commit_on_top_of_the_head_it_names_is_current(self):
+        self.commit_review(1, self.code)
+        self.assertTrue(self.current())
+
+    def test_a_restack_onto_a_newer_trunk_keeps_it_current(self):
+        self.commit_review(1, self.code)
+        git(self.repo, 'checkout', '-q', 'main')
+        self.write('other.py', 'y = 1\n')
+        git(self.repo, 'add', '-A')
+        git(self.repo, 'commit', '-qm', 'trunk moves')
+        git(self.repo, 'checkout', '-q', 'worker/T-1')
+        git(self.repo, 'rebase', '-q', '--committer-date-is-author-date', 'main')
+        self.assertNotEqual(git(self.repo, 'rev-parse', 'worker/T-1~1'), self.code)
+        self.assertTrue(self.current())
+
+    def test_code_after_the_named_head_is_not_current(self):
+        self.write('app.py', 'x = 3\n')
+        git(self.repo, 'commit', '-qam', 'more code')
+        self.commit_review(1, self.code)
+        self.assertFalse(self.current())
+
+    def test_an_unknown_named_head_is_not_current(self):
+        self.commit_review(1, 'deadbeef1')
+        self.assertFalse(self.current())
+
+
 if __name__ == '__main__':
     unittest.main()

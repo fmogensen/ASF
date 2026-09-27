@@ -1236,7 +1236,8 @@ class Lane:
         if f['review_required'] and rec.get('state') in (None, PUSHED, BACK, PR_OPEN, REVIEW):
             rv = review_mod.review_at(repo, conv, f'origin/{b}', item)
             if rv:
-                rv['current'] = review_mod.is_current(repo, conv, f'origin/{b}', rv, head)
+                rv['current'] = review_mod.is_current(repo, conv, f'origin/{b}', rv, head,
+                                                       trunk=f'origin/{trunk}')
                 rv['customer_row'] = customer_content.has_customer_row(rv.pop('body', ''))
             f['review'] = rv
             if rv and rv.get('current') and rv.get('verdict') == review_mod.CHANGES:
@@ -1904,7 +1905,8 @@ class Lane:
         f['refusal'] = lane_refusal(self.repo, self.trunk, b, item, self.conv)
         if f.get('review'):
             f['review']['current'] = review_mod.is_current(self.repo, self.conv, f'origin/{b}',
-                                                           f['review'], new)
+                                                           f['review'], new,
+                                                           trunk=f'origin/{self.trunk}')
         if f.get('correction') and (f['correction'].get('kind') == lifecycle.NAMING):
             H.mark_session(self.state_dir, (f.get('run') or {}).get('job') or b, correction=None)
             f['correction'] = None
@@ -2003,7 +2005,8 @@ class Lane:
         f['refusal'] = lane_refusal(self.repo, self.trunk, b, f.get('item'), self.conv)
         if f.get('review'):
             f['review']['current'] = review_mod.is_current(self.repo, self.conv, f'origin/{b}',
-                                                           f['review'], new)
+                                                           f['review'], new,
+                                                           trunk=f'origin/{self.trunk}')
         if corr.get('kind') in (lifecycle.NAMING, COPIES, 'merge'):
             H.mark_session(self.state_dir, (f.get('run') or {}).get('job') or b, correction=None)
             f['correction'] = None
@@ -2053,7 +2056,8 @@ class Lane:
         f['head'] = new
         if f.get('review'):
             f['review']['current'] = review_mod.is_current(self.repo, self.conv, f'origin/{b}',
-                                                           f['review'], new)
+                                                           f['review'], new,
+                                                           trunk=f'origin/{self.trunk}')
         if f.get('run') is None:
             self.write(f, self.record(f, PUSHED, 'adopted'))
         return self.set(f, PUSHED, f'signed off {n} commits ({check})')

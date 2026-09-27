@@ -215,20 +215,61 @@ def review_at(repo, conv, ref, item):
             'head': head, 'path': path, 'body': body[:READ_CHARS]}
 
 
-def is_current(repo, conv, ref, review, head):
+def is_current(repo, conv, ref, review, head, trunk=None):
     """True when ``review`` (from :func:`review_at`) reviewed ``head``, the tip of ``ref``: the
     head its ``head:`` line names, or — a review naming none, as a review session commits it on
-    the branch it reviews — nothing outside the reviews directory changed after it."""
+    the branch it reviews — nothing outside the reviews directory changed after it.
+
+    A named head that is not the tip still stands when the code it names is the code at the tip
+    (B-0147): the session's own review commit moves the tip, and the lane rewrites commits
+    (reword, sign-off, trunk copies dropped, a restack onto ``trunk``) without changing what was
+    reviewed — the same tree outside the reviews directory, or the same own patch over
+    ``trunk`` (``origin/<trunk>``)."""
     if not review:
         return False
     if review.get('head'):
-        return bool(head) and head.lower().startswith(review['head'])
+        if not head:
+            return False
+        if head.lower().startswith(review['head']):
+            return True
+        return same_code(repo, conv, review['head'], ref, trunk)
     last = (_git(repo, 'log', '-1', '--format=%H', ref, '--', review['path']) or '').strip()
     if not last:
         return False
     after = (_git(repo, 'diff', '--name-only', last, ref) or '').split()
     reviews = _dir_of(conv) + '/'
     return not [f for f in after if not f.startswith(reviews)]
+
+
+def _own_patch(repo, conv, trunk, rev):
+    """The ``git patch-id --stable`` of ``rev``'s own diff over ``trunk`` outside the reviews
+    directory, or None."""
+    base = (_git(repo, 'merge-base', trunk, rev) or '').strip()
+    if not base:
+        return None
+    diff = _git(repo, 'diff', base, rev, '--', '.', f':(exclude){_dir_of(conv)}')
+    if not diff:
+        return None
+    p = subprocess.run(['git', '-C', repo, 'patch-id', '--stable'], input=diff,
+                       capture_output=True, text=True, timeout=120)
+    return (p.stdout.split() or [None])[0] if p.returncode == 0 else None
+
+
+def same_code(repo, conv, named, ref, trunk=None):
+    """True when the commit ``named`` holds the code ``ref`` holds: no file outside the reviews
+    directory differs between them, or — ``ref`` restacked onto a newer ``trunk`` — the two carry
+    the same own patch over it. False for a ``named`` sha the repo does not know."""
+    sha = (_git(repo, 'rev-parse', '--verify', '--quiet', f'{named}^{{commit}}') or '').strip()
+    if not sha:
+        return False
+    reviews = _dir_of(conv) + '/'
+    after = _git(repo, 'diff', '--name-only', sha, ref)
+    if after is not None and not [f for f in after.split() if not f.startswith(reviews)]:
+        return True
+    if not trunk:
+        return False
+    mine, theirs = _own_patch(repo, conv, trunk, sha), _own_patch(repo, conv, trunk, ref)
+    return bool(mine) and mine == theirs
 
 
 def only_reviews_since(repo, conv, sha, ref):
