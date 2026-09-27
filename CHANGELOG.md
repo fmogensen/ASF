@@ -2,6 +2,18 @@
 
 One entry per released version, newest first.
 
+## v0.1.45 — 2026-09-27
+
+### In progress
+
+- F-0013 P3 wave 5 — the feeder and the tick
+- F-0060 A mechanical correctness pass before the human-standard review
+- F-0102 Deliveries: one plan, one agent, one gate for several small Features and Bug fixes across the backlog
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.45"`
+
 ## v0.1.44 — 2026-09-27
 
 ### Features landed
