@@ -802,6 +802,55 @@ class BugQuietTests(IngestTestCase):
         self.assertEqual(self.meta('bugs', 'B-0001')['state'], 'Closed')
 
 
+class DeliveryStageTests(IngestTestCase):
+    """T-0177: a lead of any type but Feature stages itself off its own plan document, the same
+    `card -> plan-draft -> plan-review rN -> plan-approved` ladder a Feature runs, with no spec
+    step of its own. `state` is untouched: the type's own rule still decides it."""
+
+    def fev(self, **over):
+        out = {'alias': None, 'spec': None, 'spec_branch': None, 'spec_on_main': False,
+               'spec_review': None, 'plan': None, 'plan_branch': None, 'plan_on_main': False,
+               'plan_review': None, 'tasks': {}, 'prs': []}
+        out.update(over)
+        return out
+
+    def test_bug_lead_is_staged_from_its_plan(self):
+        write(self.root, 'B-0034', 'bug', 'A defect', 'bugs', typed_lines=['delivers: [B-0034]'])
+        on_trunk = dict(EMPTY_EV, features={'b-0034': self.fev(
+            plan='origin/main:docs/plans/b-0034.md', plan_on_main=True)})
+        self.run_ingest(on_trunk)
+        self.assertEqual(self.meta('bugs', 'B-0034')['stage'], 'plan-approved')
+
+        on_branch = dict(EMPTY_EV, features={'b-0034': self.fev(
+            plan='origin/plan/B-0034:docs/plans/b-0034.md', plan_branch='plan/B-0034')})
+        self.run_ingest(on_branch)
+        self.assertEqual(self.meta('bugs', 'B-0034')['stage'], 'plan-draft')
+
+    def test_bug_lead_without_a_plan_is_a_card(self):
+        write(self.root, 'B-0035', 'bug', 'Another defect', 'bugs',
+              typed_lines=['delivers: [B-0035]'])
+        self.run_ingest(EMPTY_EV)
+        self.assertEqual(self.meta('bugs', 'B-0035')['stage'], 'card')
+
+    def test_a_bug_that_leads_nothing_gets_no_stage(self):
+        write(self.root, 'B-0036', 'bug', 'Not a lead', 'bugs')
+        self.run_ingest(EMPTY_EV)
+        self.assertNotIn('stage', self.meta('bugs', 'B-0036'))
+
+    def test_commit_closes_each_member(self):
+        write(self.root, 'F-0097', 'feature', 'A grouped delivery', 'features',
+              typed_lines=['delivers: [F-0097, B-0034, S-0055]'])
+        write(self.root, 'B-0034', 'bug', 'A defect', 'bugs', typed_lines=['delivered_by: F-0097'])
+        write(self.root, 'S-0055', 'story', 'A small story', 'stories',
+              typed_lines=['delivered_by: F-0097'])
+        ev = dict(EMPTY_EV, ci=True,
+                  ids={**landed_ids('F-0097', 'a' * 40), **landed_ids('B-0034', 'b' * 40)})
+        self.run_ingest(ev)
+        self.assertEqual(self.meta('features', 'F-0097')['state'], 'Closed')
+        self.assertEqual(self.meta('bugs', 'B-0034')['state'], 'Closed')
+        self.assertEqual(self.meta('stories', 'S-0055')['state'], 'New')
+
+
 class IngestDerivesNothing(unittest.TestCase):
     """§3.2: `asf.evidence.closing` chooses every state. A `task_state`-style call growing back
     into ingest is a sixth definition of done, and this is what stops it."""
