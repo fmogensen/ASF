@@ -11,17 +11,22 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from asf import env as env_mod
 
 from asf import hermetic
 from asf.harvest import harvest
+from asf.tick import step_harvest
 from asf.workers import pool as pool_mod
 from asf.workers import runtime as runtime_mod
 
 LEAKS = {'ASF_PRODUCT': 'live-product', 'ASF_JOB': 'someone-elses-job',
          'BACKLOG_ID_RANGE': 'S:1-2', 'GIT_DIR': '/elsewhere/.git',
-         'GIT_WORK_TREE': '/elsewhere', 'GIT_INDEX_FILE': '/elsewhere/index'}
+         'GIT_WORK_TREE': '/elsewhere', 'GIT_INDEX_FILE': '/elsewhere/index',
+         'GIT_PREFIX': 'sub/', 'GIT_OBJECT_DIRECTORY': '/elsewhere/objects',
+         'GIT_ALTERNATE_OBJECT_DIRECTORIES': '/elsewhere/alt-objects',
+         'GIT_QUARANTINE_PATH': '/elsewhere/quarantine'}
 
 
 def bases():
@@ -171,6 +176,20 @@ class OneBuilderTests(unittest.TestCase):
         base = dict(LEAKS, PATH='/bin', HOME='/me', PYTHONPATH='/base/pp')
         self.assertEqual(harvest.gate_env('/wt', base=base), hermetic.build(base, worktree='/wt'))
 
+    def test_harvests_clean_env_is_hermetic_git_env(self):
+        base = dict(LEAKS, PATH='/bin', HOME='/me')
+        self.assertEqual(harvest.clean_env(base), hermetic.git_env(base))
+        self.assertEqual(harvest.GIT_HOOK_VARS, hermetic.GIT_HOOK)
+
+    def test_spawn_backgrounds_env_is_hermetic_build_with_the_package_parent_first(self):
+        product = env_mod.Product('sample', {})
+        with mock.patch.object(step_harvest.detach, 'spawn', return_value=123) as spawn:
+            pid = step_harvest.spawn_background(product)
+        self.assertEqual(pid, 123)
+        self.assertEqual(spawn.call_args.kwargs['env'],
+                         hermetic.build(worktree=hermetic.package_parent(),
+                                        identity={'ASF_HOME': env_mod.ASF_HOME}))
+
     def test_the_worker_env_is_hermetic_build_with_the_jobs_identity(self):
         acct = pool_mod.Account('acct-a', home='/homes/a', config_dir='/cfg/a')
         job = runtime_mod.Job('sample', 'j1', '/wt', '/b.md', 'opus', account=acct,
@@ -246,6 +265,32 @@ class OneBuilderTests(unittest.TestCase):
                               '-p', 'test_00_home.py'], cwd=root, env=base,
                              capture_output=True, text=True)
         self.assertEqual(out.returncode, 0, out.stderr)
+
+
+class GitEnvTests(unittest.TestCase):
+    """asf.hermetic.git_env — the whole environment for a ``git`` child: every variable a git
+    hook exports gone, nothing else touched (F-0013 D4: the same list :func:`build` strips,
+    strict widening from the three ``asf.harvest.harvest`` and ``asf.hermetic`` used to strip
+    on their own)."""
+
+    def test_every_hook_variable_is_stripped_and_nothing_else_is_touched(self):
+        base = dict(LEAKS, PATH='/bin', HOME='/me', ASF_PRODUCT='p')
+        env = hermetic.git_env(base)
+        for var in hermetic.GIT_HOOK:
+            self.assertNotIn(var, env, base)
+        self.assertEqual(env['PATH'], '/bin')
+        self.assertEqual(env['ASF_PRODUCT'], 'p')  # git_env strips no caller identity, no config
+
+    def test_the_default_base_is_the_process_environment(self):
+        with mock.patch.dict(os.environ, {'GIT_DIR': '/elsewhere/.git', 'PATH': '/bin'}):
+            env = hermetic.git_env()
+        self.assertNotIn('GIT_DIR', env)
+        self.assertEqual(env['PATH'], '/bin')
+
+    def test_the_base_is_not_mutated(self):
+        base = {'GIT_DIR': '/x', 'PATH': '/bin'}
+        hermetic.git_env(base)
+        self.assertEqual(base, {'GIT_DIR': '/x', 'PATH': '/bin'})
 
 
 if __name__ == '__main__':

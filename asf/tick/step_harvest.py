@@ -27,7 +27,7 @@ import os
 import subprocess
 import sys
 
-from asf import detach, env
+from asf import detach, env, hermetic
 from asf.harvest import harvest
 
 
@@ -128,13 +128,11 @@ def background(product, items_file=None, out=print):
 def spawn_background(product, items_file=None):
     """Start :func:`background` as a detached process (never the tick's child); its output goes
     to ``logs/harvest-<product>.log``. Returns its pid."""
-    import asf
     argv = [sys.executable, '-m', 'asf.tick.step_harvest', '--product', product.name]
     if items_file:
         argv += ['--items', items_file]
-    pkg_parent = os.path.dirname(os.path.dirname(os.path.abspath(asf.__file__)))
-    path = os.pathsep.join(p for p in (pkg_parent, os.environ.get('PYTHONPATH')) if p)
-    child_env = dict(os.environ, ASF_HOME=env.ASF_HOME, PYTHONPATH=path)
+    child_env = hermetic.build(worktree=hermetic.package_parent(),
+                               identity={'ASF_HOME': env.ASF_HOME})
     with open(log_path(product), 'ab') as log, open(os.devnull, 'rb') as null:
         return detach.spawn(argv, cwd=os.path.abspath(env.state_dir(product)), env=child_env,
                             stdin=null, stdout=log, stderr=subprocess.STDOUT)

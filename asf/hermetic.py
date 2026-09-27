@@ -34,8 +34,11 @@ import re
 CALLER_IDENTITY = ('ASF_PRODUCT', 'ASF_JOB', 'ASF_SESSION', 'BACKLOG_ID_RANGE', 'ASF_ITEM',
                    'ASF_ITEM_KIND', 'ASF_SIGNOFF')
 
-#: What a git hook exports; a ``git`` child that inherits them ignores its ``cwd``.
-GIT_HOOK = ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE')
+#: What a git hook exports; a ``git`` child that inherits them ignores its ``cwd``, and under a
+#: ``pre-push`` quarantine writes its objects where they are discarded. The list is
+#: :mod:`asf.gitpush`'s, which has been the complete one in production (F-0013 D4).
+GIT_HOOK = ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_PREFIX', 'GIT_OBJECT_DIRECTORY',
+            'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_QUARANTINE_PATH')
 
 #: Config keys a child never inherits through the base's ``GIT_CONFIG_*`` — lowercase, the way
 #: git compares a section and a key. ``core.hooksPath`` is a caller session's own hook dir
@@ -68,6 +71,15 @@ MODES = ('gate', 'worker')
 def package_parent():
     """The directory the running ``asf`` package is imported from."""
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def git_env(base=None):
+    """``base`` (default the caller's) minus every variable a git hook exports. The whole
+    environment for a ``git`` child — :func:`build` is for a child that runs *code*."""
+    env = dict(os.environ if base is None else base)
+    for var in GIT_HOOK:
+        env.pop(var, None)
+    return env
 
 
 def git_config_pairs(env):
