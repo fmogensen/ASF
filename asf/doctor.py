@@ -27,9 +27,13 @@ in it), a ``worker_pool.env_passthrough`` name that looks like a credential, or 
 account with no ``auth_env`` for the runtime's login variable (an isolated HOME finds no login).
 **worker secrets** (:func:`check_worker_secrets`) lists each ``auth_env`` file's presence —
 every account's and the product's own ``conventions.auth_env`` — by variable name only, red when
-one is missing (its launches are refused). An eleventh,
-**clock code** (:func:`check_clock_code`, informational), names the snapshot sha the clock last
-ticked from when the package runs from a checkout (:mod:`asf.snapshot`).
+one is missing (its launches are refused). **worker push auth**
+(:func:`check_worker_push_auth`) actually probes each account's push credential — a real
+``git ls-remote`` and ``push --dry-run`` under that account's own environment — since a file
+present is not proof the token still works, or that no keychain a spawned session cannot reach is
+still in the way. An eleventh, **clock code** (:func:`check_clock_code`, informational), names
+the snapshot sha the clock last ticked from when the package runs from a checkout
+(:mod:`asf.snapshot`).
 
 A twelfth row, **console permissions** (:func:`asf.console_perms.check_doctor`, B-0131), is red
 when the operator's own console — not a worker account's — would still hit a permission prompt on
@@ -285,6 +289,62 @@ def check_worker_secrets(cfg, product=None):
         return False, 'missing: ' + ', '.join(missing) + (
             f"; present: {', '.join(present)}" if present else '')
     return True, ('present: ' + ', '.join(present)) if present else 'no auth_env files configured'
+
+
+#: The ref a push probe targets: ``--dry-run`` never creates it, so the name is never seen on
+#: origin — it only has to be a ref name git accepts.
+PUSH_AUTH_PROBE_REF = 'refs/heads/asf-doctor-push-probe'
+
+
+def check_worker_push_auth(cfg, product):
+    """(ok, detail) — the ``worker push auth`` row: ``git ls-remote origin`` and a
+    ``git push --dry-run --no-verify origin HEAD:...`` against the product's own repo, run once
+    per worker account under exactly the environment that account's sessions get
+    (:func:`asf.workers.runtime.build_env`) — never the operator's HOME or its keychain. Neither
+    call touches a remote ref (``--dry-run``) or runs the product's own pre-push hook
+    (``--no-verify``, the same skip a ref-only factory push takes, :mod:`asf.gitpush`).
+
+    Catches what ``worker secrets`` cannot: a file present and non-empty but a token expired,
+    revoked or wrong for this repo, or an account with no ``GH_TOKEN`` at all silently falling
+    back to a credential store a spawned, non-interactive session cannot reach (2026-09-26: 4
+    local sessions failed to push with ``could not read Username for 'https://github.com': Device
+    not configured`` — the osxkeychain helper unreachable from the launched process).
+
+    Red names each account whose probe fails, with git's own last line of output. No worker
+    accounts, no product repo, or the ``fake`` backend (no agent session ever pushes): nothing to
+    probe."""
+    from asf.workers import runtime
+    accounts = pool.accounts_from_config(cfg)
+    if not accounts or product is None or not product.repo_dir or not os.path.isdir(product.repo_dir):
+        return True, 'no worker accounts or product repo to probe'
+    if _backend_is_fake(cfg):
+        return True, 'worker_pool.backend fake runs no agent session (nothing to push)'
+    product_auth_env = env.product_auth_env(product)
+    failures, oks = [], []
+    for acct in accounts:
+        try:
+            job_env = runtime.build_env(runtime.Job(product.name, 'doctor-probe', product.repo_dir,
+                                                     None, None, account=acct,
+                                                     product_auth_env=product_auth_env))
+        except runtime.AuthEnvError as e:
+            failures.append(f'{acct.name}: {e}')
+            continue
+        job_env['GIT_TERMINAL_PROMPT'] = '0'  # a broken credential fails at once, never hangs
+        probe = subprocess.run(['git', 'ls-remote', 'origin'], cwd=product.repo_dir, env=job_env,
+                               capture_output=True, text=True, timeout=15)
+        if probe.returncode == 0:
+            probe = subprocess.run(
+                ['git', 'push', '--dry-run', '--no-verify', 'origin',
+                 f'HEAD:{PUSH_AUTH_PROBE_REF}'],
+                cwd=product.repo_dir, env=job_env, capture_output=True, text=True, timeout=15)
+        if probe.returncode != 0:
+            lines = [l for l in (probe.stderr or probe.stdout or '').splitlines() if l.strip()]
+            failures.append(f'{acct.name}: ' + (lines[-1].strip() if lines else 'push auth failed'))
+        else:
+            oks.append(acct.name)
+    if failures:
+        return False, '; '.join(failures)
+    return True, 'authenticates for ' + ', '.join(oks)
 
 
 def check_clock_code(product):
@@ -773,6 +833,8 @@ def run(product_name):
     rows.append(('worker env', True, ok, detail))
     ok, detail = check_worker_secrets(cfg, product)
     rows.append(('worker secrets', True, ok, detail))
+    ok, detail = check_worker_push_auth(cfg, product)
+    rows.append(('worker push auth', True, ok, detail))
     ok, detail = check_clock_code(product)
     rows.append(('clock code', False, ok, detail))
     ok, detail = check_drift(product)
