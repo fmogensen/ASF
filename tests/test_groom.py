@@ -520,7 +520,7 @@ class OverBudgetQuestionTests(unittest.TestCase):
         rc, text = self._run_groom()
         self.assertEqual(rc, 0)
         self.assertIn('## Over budget', text)
-        self.assertIn('T-0001 Chatty task — over budget', text)
+        self.assertIn('T-0001 Chatty task — 9/3 sessions, $13.53/$10 over budget', text)
         self.assertEqual(groom._line_sections(text).get('T-0001'), 'over_budget')
 
     def test_no_lines_no_section(self):
@@ -530,33 +530,34 @@ class OverBudgetQuestionTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertNotIn('## Over budget', text)
 
-
-class OverBudgetAnswerTests(unittest.TestCase):
-    """The applier's side: `budget <n> [$<usd>]` raises the card, idempotently, attributed."""
-
-    def setUp(self):
-        self.root = make_repo()
+    def test_the_full_line_matches_the_spec_word_for_word(self):
         write_item(self.root, 'T-0001', 'task', 'Chatty task', machine_lines=_machine((9, 13.53)))
-        run(['index'], self.root)
+        line = groom.groom_over_budget_section(self.canonical(), self.product())[0]
+        self.assertEqual(
+            line,
+            '- [ ] T-0001 Chatty task — 9/3 sessions, $13.53/$10 over budget (product default): '
+            'raise it (`budget 12` or `budget 12 $25`), close it (`no: <why>`) or reshape it '
+            '(`reshape: <how>`) → answer: ____')
 
-    def tearDown(self):
-        shutil.rmtree(self.root, ignore_errors=True)
-
-    def canonical(self):
-        by_id, _ = load_items(self.root)
-        canonical, _ = canonicalize(by_id)
-        return canonical
+    # The applier's side: `budget <n> [$<usd>]` raises the card, idempotently, attributed.
 
     def write_prev(self, answer, prefix=''):
         path = os.path.join(self.root, 'groom', '2026-09-20.md')
         with open(path, 'w', encoding='utf-8') as f:
             f.write("# Groom 2026-09-20\n\n## Over budget\n\n"
-                    f"- [ ] T-0001 Chatty task — over budget (product default): 9/3 sessions, "
-                    f"$13.53/$10 — raise it (`budget 12` or `budget 12 $25`), close it "
+                    f"- [ ] T-0001 Chatty task — 9/3 sessions, $13.53/$10 over budget (product "
+                    f"default): raise it (`budget 12` or `budget 12 $25`), close it "
                     f"(`no: <why>`) or reshape it (`reshape: <how>`) → answer: {prefix}{answer}\n")
         return path
 
+    def _ensure_chatty_task(self):
+        if not getattr(self, '_chatty_task_ready', False):
+            write_item(self.root, 'T-0001', 'task', 'Chatty task', machine_lines=_machine((9, 13.53)))
+            run(['index'], self.root)
+            self._chatty_task_ready = True
+
     def apply(self, answer, prefix='', adjudicator_job=None):
+        self._ensure_chatty_task()
         prev = self.write_prev(answer, prefix)
         canonical = self.canonical()
         with open(prev, encoding='utf-8') as f:
@@ -600,6 +601,7 @@ class OverBudgetAnswerTests(unittest.TestCase):
         self.assertIn('removed: not worth more (groom 2026-09-21)', text)
 
     def test_budget_soon_is_skipped_naming_the_grammar(self):
+        self._ensure_chatty_task()
         out = io.StringIO()
         prev = self.write_prev('budget soon')
         canonical = self.canonical()

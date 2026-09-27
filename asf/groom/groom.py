@@ -653,7 +653,7 @@ def groom_over_budget_section(canonical, product):
             continue
         measures = budget.line(iid, s).split(' — ', 1)[1]
         whose = 'item' if s.budget.source == 'item' else 'product default'
-        why = (f"over budget ({whose}): {measures} — raise it (`budget 12` or `budget 12 $25`), "
+        why = (f"{measures} over budget ({whose}): raise it (`budget 12` or `budget 12 $25`), "
                f"close it (`no: <why>`) or reshape it (`reshape: <how>`)")
         lines.append(_card_line(iid, typed.get('title', ''), why))
     return lines
