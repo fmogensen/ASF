@@ -2,6 +2,18 @@
 
 One entry per released version, newest first.
 
+## v0.1.40 — 2026-09-27
+
+### Bugs fixed
+
+- B-0140 A push refused by the repo's pre-push hook loops as 'unpushed work' — carry the hook's output into the correction and route by it
+- B-0142 Branch held by an external (non-factory) worktree reports NEEDS OPERATOR every tick; should be a WAITS
+- B-0143 Local worker sessions can't authenticate git pushes (keychain unavailable); route via factory credentials
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.40"`
+
 ## v0.1.39 — 2026-09-27
 
 ### Bugs fixed
