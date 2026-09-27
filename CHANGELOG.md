@@ -2,6 +2,29 @@
 
 One entry per released version, newest first.
 
+## v0.1.37 — 2026-09-27
+
+### Features landed
+
+- F-0075 Redaction is a gate on every write path: operator names and secrets never reach a record or a public repo
+
+### In progress
+
+- F-0024 Self-amendment policy: the factory proposes, humans approve and merge
+- F-0037 Questions in batches: a non-blocking question goes to the groom; only a blocked launch or merge interrupts
+- F-0040 Story-to-test gate: a Task's pull request must tick an acceptance line with the test that proves it
+
+### Improvements and hotfixes
+
+- fix(feeder): judge the launch-time invariants before the cut, not after it
+- fix(harvest): the capped gate takes the least recently gated first, so no branch starves
+- feat(ci_queue): within a tier, the entry more feeder rows wait on goes first
+- docs(ci_queue): reflow the order paragraph
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.37"`
+
 ## v0.1.36 — 2026-09-27
 
 ### In progress
