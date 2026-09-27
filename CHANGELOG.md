@@ -2,6 +2,30 @@
 
 One entry per released version, newest first.
 
+## v0.1.48 — 2026-09-27
+
+### In progress
+
+- B-0147 Invariant I10 refused a write to features/F-0093.md
+- F-0052 Budget enforcement per Epic
+- F-0053 Reviews return checks: every review ends in a machine-readable check table the tick reads
+- F-0054 Failure classification before any relaunch: credential, quota, transport or work
+- F-0055 A frozen eval set for the factory's judging tools
+- F-0056 Memory to code, first pass: what a session has to remember becomes a script, a row or a rule
+- F-0061 Hooks as rule enforcement inside every worker session
+- F-0092 An item has a budget: three sessions or $10, then it stops and says why
+- F-0097 asf status says nothing about Bugs and Features: add a Bugs row and a Features row
+- F-0117 Command center: follow every product's factory live and talk to each product's orchestrator; each product keeps its own controller
+
+### Improvements and hotfixes
+
+- fix(ingest): deploy_sha.prod.mode auto is its own prod tick (#146)
+- fix(feeder): the index reader keeps a removed done card for after: and blockedBy (#149)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.48"`
+
 ## v0.1.47 — 2026-09-27
 
 ### In progress
