@@ -21,3 +21,4 @@ defaults on purpose:
 - `product.yaml` — `~/.ASF/products/sample.yaml`; `@REPO@` and `@BACKLOG@` are filled in by the test.
 - `config.yaml` — the operator config it runs under (`@SAMPLE@` is this directory's copy): the fake
   worker backend, one launch slot, no scheduler.
+- CI walks this product from its first card to a cut release note, not only through one tick.

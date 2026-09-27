@@ -41,6 +41,10 @@ jobs:
           python3 tools/run_tests.py
       - name: the sample product, end to end (init, one tick, next, doctor)
         run: python3 -m unittest -v tests.test_sample_product
+      # F-0033: the whole loop — card → spec → plan → task → harvest → release notes — against
+      # the sample product on the replay runtime, with the stamped tables pinned to goldens.
+      - name: the whole loop, card to release notes (goldens)
+        run: python3 -m unittest -v tests.test_sample_product.WholeLoopFromCardToRelease
       # F-0087 (B-0033, B-0038, B-0043, B-0047): the suite is hermetic. It runs once more under
       # `env -i` with an operator-like home that names this checkout as the product `asf`,
       # ASF_PRODUCT exported the way the tick exports it, and a host git config whose
