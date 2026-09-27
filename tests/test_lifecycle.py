@@ -1337,6 +1337,113 @@ class PublishACopiesRebaseTest(unittest.TestCase):
                                  self.repo).split()[0], self.remote_sha)
 
 
+class RebaseOverAReportCommitTest(unittest.TestCase):
+    """A product's F-0037, 2026-09-27: a correct session rebased its lane branch cleanly onto
+    the trunk (22 own commits atop origin/main) and made no commit of its own; origin's tip was
+    the cloud session's empty ``asf: report`` commit, and one of the branch's commits (a plan
+    file) was dropped because the trunk had since landed its own version of that file. Publish
+    counted that commit lost, rebased back onto the report commit, conflicted, and the loop
+    guard parked the item as "no session added a commit" after three rounds. A head that is a
+    rebase of origin's tip on a newer base is progress: publish archives the old tip and pushes
+    it with a lease, and the loop guard counts it as a moved head."""
+
+    sh = UnpushedAfterARebaseTest.sh
+
+    def commit(self, name, text, msg=None):
+        with open(os.path.join(self.repo, name), 'w', encoding='utf-8') as f:
+            f.write(text)
+        self.sh(['add', '-A'], self.repo)
+        self.sh(['commit', '-qm', msg or text], self.repo)
+        return self.sh(['rev-parse', 'HEAD'], self.repo)
+
+    def setUp(self):
+        base = tempfile.mkdtemp(prefix='lifecycle_report_')
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        self.base = base
+        origin, self.repo = os.path.join(base, 'origin.git'), os.path.join(base, 'repo')
+        self.sh(['init', '-q', '--bare', '-b', 'main', origin], base)
+        self.sh(['clone', '-q', origin, self.repo], base)
+        for k, v in (('user.name', 'Test'), ('user.email', 't@example.com'),
+                     ('commit.gpgsign', 'false')):
+            self.sh(['config', k, v], self.repo)
+        self.commit('c', 'base c')
+        self.sh(['push', '-q', 'origin', 'HEAD:main'], self.repo)
+        self.sh(['checkout', '-q', '-b', 'cloud/x'], self.repo)
+        self.commit('a', 'own a', 'spec(X): own a')
+        self.commit('plan.md', 'branch plan', 'plan(X): the plan')
+        self.commit('b', 'own b', 'spec(X): own b')
+        self.sh(['commit', '-q', '--allow-empty', '-m', 'asf: report correct-x'], self.repo)
+        self.sh(['push', '-q', 'origin', 'cloud/x'], self.repo)
+        self.remote_sha = self.sh(['rev-parse', 'HEAD'], self.repo)
+        # the trunk lands its own plan at the same path, then moves on
+        self.sh(['checkout', '-q', '-B', 'tmp', 'origin/main'], self.repo)
+        self.commit('plan.md', 'trunk plan', 'plan(X): the human plan (#739)')
+        self.commit('t', 'trunk t')
+        self.sh(['push', '-q', 'origin', 'tmp:main'], self.repo)
+        # the session: rebase onto origin/main, keeping the trunk's plan (the commit drops)
+        self.sh(['checkout', '-q', 'cloud/x'], self.repo)
+        self.sh(['reset', '-q', '--hard', 'HEAD~1'], self.repo)  # the local head: no report
+        self.sh(['fetch', '-q', 'origin'], self.repo)
+        r = subprocess.run(['git', 'rebase', '-q', 'origin/main'], cwd=self.repo,
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)  # plan.md: add/add
+        r = subprocess.run(['git', '-c', 'core.editor=true', 'rebase', '--skip'], cwd=self.repo,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.head = self.sh(['rev-parse', 'HEAD'], self.repo)
+        self.assertEqual(self.sh(['merge-base', 'HEAD', 'origin/main'], self.repo),
+                         self.sh(['rev-parse', 'origin/main'], self.repo))
+
+    def remote(self):
+        return self.sh(['ls-remote', '--heads', 'origin', 'cloud/x'], self.repo).split()[0]
+
+    def test_the_rebase_is_progress(self):
+        self.assertTrue(lc.rebase_of(self.repo, self.head, self.remote_sha, main='main'))
+        self.assertFalse(lc.rebase_of(self.repo, self.remote_sha, self.remote_sha, main='main'))
+
+    def test_publish_archives_the_old_tip_and_pushes_the_rebase(self):
+        ok, line = lc.publish(self.repo, 'cloud/x', self.remote_sha, main='main')
+        self.assertTrue(ok, line)
+        self.assertEqual(self.remote(), self.head)
+        archive = lc.copies_archive('cloud/x', self.remote_sha)
+        self.assertEqual(self.sh(['ls-remote', '--heads', 'origin', archive],
+                                 self.repo).split()[0], self.remote_sha)
+        self.assertFalse(os.path.isdir(os.path.join(self.repo, '.git', 'rebase-merge')))
+
+    def test_a_dropped_commit_of_its_own_is_still_lost(self):
+        # own b dropped as well: its file is not the trunk's, so it is lost work, never pushed
+        self.sh(['reset', '-q', '--hard', 'HEAD~1'], self.repo)
+        self.assertFalse(lc.rebase_of(self.repo, self.sh(['rev-parse', 'HEAD'], self.repo),
+                                      self.remote_sha, main='main'))
+        ok, line = lc.publish(self.repo, 'cloud/x', self.remote_sha, main='main')
+        self.assertFalse(ok, line)
+        self.assertEqual(self.remote(), self.remote_sha)
+
+    def _three_runs(self):
+        path = os.path.join(self.base, 's.jsonl')
+        with open(path, 'w') as f:
+            for n in (1, 2, 3):
+                f.write(json.dumps({'job': 'correct-f-0037', 'item': 'F-0037', 'kind': 'correct',
+                                    'branch': 'cloud/x', 'pid': n, 'started': 't%02d' % n,
+                                    'launch_head': self.remote_sha,
+                                    'worktree': self.repo}) + '\n')
+                f.write(json.dumps({'job': 'correct-f-0037', 'ended': 'e%02d' % n,
+                                    'end_reason': 'failed: not pushed: 0 uncommitted file(s), '
+                                                  '11 unpushed commit(s)'}) + '\n')
+        return path, lc.latest(path)['correct-f-0037']
+
+    def test_the_loop_guard_counts_the_rebase_as_a_moved_head(self):
+        path, run = self._three_runs()
+        fields, line = lc.hold(path, run, lc.REBASE_CONFLICT, 'x', 'now', main='main')
+        self.assertNotIn('parked', fields['correction'], line)
+
+    def test_the_loop_guard_still_parks_an_unmoved_head(self):
+        path, run = self._three_runs()
+        self.sh(['reset', '-q', '--hard', self.remote_sha], self.repo)
+        fields, line = lc.hold(path, run, lc.REBASE_CONFLICT, 'x', 'now', main='main')
+        self.assertIs(fields['correction'].get('parked'), True, line)
+
+
 def _build_ahead(root):
     """A bare origin, a clone holding the lane branch ``lane/x`` at one commit (pushed), and a
     second clone that pushed one more commit onto it — the clone is the stale worktree."""

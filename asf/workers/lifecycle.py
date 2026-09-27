@@ -991,9 +991,74 @@ def rebased_off_copies(wt, new, remote_sha, lost, main='main'):
         ident[sha] = rest
     for short in lost:
         full = next((s for s in list(copies) + list(ident) if s.startswith(short)), '')
-        if not full or (full not in copies and ident.get(full) not in carried):
+        if not full:
+            return False
+        if full in copies or ident.get(full) in carried or _empty_commit(wt, full) \
+                or _resolved_to_trunk(wt, full, new, trunk):
+            continue
+        return False
+    return True
+
+
+def _empty_commit(wt, sha):
+    """True for a commit that changes nothing — a cloud session's ``asf: report`` commit made
+    ``--allow-empty``: no work of anyone's to lose."""
+    tree = _git(['rev-parse', '-q', '--verify', f'{sha}^{{tree}}'], wt).stdout.strip()
+    parent = _git(['rev-parse', '-q', '--verify', f'{sha}^1^{{tree}}'], wt).stdout.strip()
+    return bool(tree) and tree == parent
+
+
+def _resolved_to_trunk(wt, sha, new, trunk):
+    """True when ``sha`` only added files that the trunk has since added its own copy of, and
+    ``new`` reads the trunk's: an add/add the rebase resolved in the trunk's favour, the commit
+    dropped as empty (a product's F-0037: the trunk landed its own plan at the path the branch's
+    plan commit added). A commit that changed an existing file stays lost work. The old tip is
+    archived before the push, so nothing is erased."""
+    files = _git(['diff-tree', '--no-commit-id', '--name-status', '-r', '--root', sha], wt)
+    rows = [ln.split('\t', 1) for ln in files.stdout.splitlines() if ln.strip()]
+    if files.returncode != 0 or not rows:
+        return False
+    for row in rows:
+        if len(row) != 2 or row[0] != 'A':
+            return False
+        a = _git(['rev-parse', '-q', '--verify', f'{new}:{row[1]}'], wt).stdout.strip()
+        b = _git(['rev-parse', '-q', '--verify', f'{trunk}:{row[1]}'], wt).stdout.strip()
+        if not b or a != b:
             return False
     return True
+
+
+def rebase_of(wt, new, remote_sha, main='main'):
+    """True when ``new`` is a rebase of ``remote_sha`` onto a newer trunk base — progress, though
+    no commit of the session's own is new: ``new`` is not ``remote_sha`` nor behind it, its base
+    on ``origin/<main>`` is at or past ``remote_sha``'s, and every commit of ``remote_sha`` it
+    lacks is accounted for (:func:`lost_commits` ``[]``, or :func:`rebased_off_copies`). A
+    product's F-0037, 2026-09-27: a clean rebase with ``commits: none`` was counted an empty run
+    and parked by the loop guard, and never published."""
+    if not wt or not new or not remote_sha or new == remote_sha:
+        return False
+    if _git(['merge-base', '--is-ancestor', new, remote_sha], wt).returncode == 0:
+        return False  # behind origin, or the same commit
+    trunk = f'refs/remotes/origin/{main}'
+    if _git(['merge-base', '--is-ancestor', remote_sha, new], wt).returncode == 0:
+        return True  # a fast-forward: plainly moved
+    old_base = _git(['merge-base', remote_sha, trunk], wt).stdout.strip()
+    new_base = _git(['merge-base', new, trunk], wt).stdout.strip()
+    if not old_base or not new_base or \
+            _git(['merge-base', '--is-ancestor', old_base, new_base], wt).returncode != 0:
+        return False
+    lost = lost_commits(wt, new, remote_sha)
+    if lost == []:
+        return True
+    return bool(lost) and rebased_off_copies(wt, new, remote_sha, lost, main)
+
+
+def worktree_head(wt):
+    """The worktree's HEAD sha, '' when there is none to read."""
+    if not wt or not os.path.isdir(wt):
+        return ''
+    p = _git(['rev-parse', '-q', '--verify', 'HEAD^{commit}'], wt)
+    return p.stdout.strip() if p.returncode == 0 else ''
 
 
 def copies_archive(branch, remote_sha):
@@ -1548,7 +1613,7 @@ LOOP_CAP = 3
 CORRECT = 'correct'
 
 
-def same_head_loop(path, run, head=None, cap=LOOP_CAP, kind=None):
+def same_head_loop(path, run, head=None, cap=LOOP_CAP, kind=None, main=None):
     """The sha ``run``'s item is looping on, or None: its last ``cap`` runs (a spent window's
     excepted) are all of ``kind`` — the kind the hold routes to, ``run``'s own when not given —
     and were all launched on one head (spawn's ``launch_head``) — so none of the first
@@ -1556,7 +1621,10 @@ def same_head_loop(path, run, head=None, cap=LOOP_CAP, kind=None):
     last one added none either). A product, 2026-09-26: ``adjudicate-b-1377`` ×14 and
     ``correct-t-0338`` ×12, every one on a head nothing moved. Only runs started after the
     item's latest ``asf unpark`` (its ``unparked`` stamp) count: an unpark releases the item,
-    and recounting the launches it released re-parked T-0338 on the very next tick."""
+    and recounting the launches it released re-parked T-0338 on the very next tick.
+
+    A worktree whose HEAD is a rebase of that sha onto a newer trunk (:func:`rebase_of`, with
+    ``main`` given) moved the branch, though no commit is new: not a loop (a product's F-0037)."""
     item = (run or {}).get('item')
     kind = kind or (run or {}).get('kind')
     if not item or not kind or not path:
@@ -1573,6 +1641,10 @@ def same_head_loop(path, run, head=None, cap=LOOP_CAP, kind=None):
     sha = heads.pop()
     if head and head != sha:
         return None
+    if main:
+        wt = (run or {}).get('worktree')
+        if rebase_of(wt, worktree_head(wt), sha, main):
+            return None
     return sha
 
 
@@ -1582,7 +1654,7 @@ def loop_text(n, kind, sha, item):
             f'could not move the branch, fix that, then `asf unpark {item}`')
 
 
-def hold(path, run, kind, text, now, empty_cap=EMPTY_CAP, head=None, finding=None):
+def hold(path, run, kind, text, now, empty_cap=EMPTY_CAP, head=None, finding=None, main=None):
     """``(fields, line)``: what to append to ``run`` to hold its branch and hand it back, and
     the line to print. The rounds counter runs over every run of the item and stops climbing at
     :data:`ROUND_CAP` (B-0048). The escalation is counted on the hold's finding instead
@@ -1592,11 +1664,12 @@ def hold(path, run, kind, text, now, empty_cap=EMPTY_CAP, head=None, finding=Non
     spawning another. A different finding goes back to a correct session, whatever the rounds.
     An :data:`EMPTY` hold at ``empty_cap`` empty ends parks the item instead and spends no round,
     and so does the loop guard (:func:`same_head_loop`): the same kind handed the same head
-    :data:`LOOP_CAP` times — ``head``, when the caller knows it, is where the branch sits now."""
+    :data:`LOOP_CAP` times — ``head``, when the caller knows it, is where the branch sits now;
+    ``main``, when given, lets a worktree rebased onto a newer trunk count as a moved head."""
     item = run.get('item')
     branch = run.get('branch') or run.get('job')
     routes_to = CORRECT if kind in MECHANICAL else run.get('kind')
-    loop = same_head_loop(path, run, head, kind=routes_to)
+    loop = same_head_loop(path, run, head, kind=routes_to, main=main)
     head = (text or '').split('\n', 1)[0]  # the line is one line; the correction keeps it all
     if loop:
         reason = loop_text(LOOP_CAP, routes_to, loop, item)
@@ -1746,7 +1819,7 @@ def stale_head_text(branch, line):
 REBASE_CONFLICT = 'rebase conflict'
 
 
-def rebase_conflict_hold(path, run, text, now):
+def rebase_conflict_hold(path, run, text, now, main=None):
     """``(fields, line)``: hold ``run``'s branch after the factory's rebase onto its remote head
     conflicted. The first such hold on the item spends no round — the session did its part; the
     remote moved under it. A repeat is an ordinary round (:func:`hold`)."""
@@ -1754,7 +1827,7 @@ def rebase_conflict_hold(path, run, text, now):
     earlier = [r for r in item_runs(path, item) if r is not run
                and (r.get('correction') or {}).get('kind') == REBASE_CONFLICT]
     if earlier or not item:
-        return hold(path, run, REBASE_CONFLICT, text, now)
+        return hold(path, run, REBASE_CONFLICT, text, now, main=main)
     branch = run.get('branch') or run.get('job')
     fields = {'correction': {'kind': REBASE_CONFLICT, 'text': text, 'at': now}}
     return fields, f'held {branch}: {text} — back to its session (no round spent)'

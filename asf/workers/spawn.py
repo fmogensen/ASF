@@ -295,7 +295,7 @@ def make_worktree(product, job, branch, kind=None):
 
     A worktree already holding ``branch`` (this job's own, or an ended job's that a correction on
     the same branch follows) is reused as it stands — its tree and its branch, rebased onto the
-    fetched trunk (a conflict is left in place for the session to resolve) — as long as the run
+    fetched trunk (a conflict is aborted: no worktree is handed over mid-rebase) — as long as the run
     that recorded it has ended; a live run's worktree is never touched (B-0025, B-0051). A branch
     already on origin with no worktree left (any row kind: a held branch sent back for another
     round, B-0046, B-0048) gets a worktree on it, rebased the same way. Otherwise a fresh branch
@@ -315,11 +315,48 @@ def make_worktree(product, job, branch, kind=None):
         path, checkout, rebase = _place_worktree(product, repo, job, branch)
     # the rest runs inside this launch's own worktree, on its own branch — the slow part (the
     # rebase's publish runs the product's pre-push hook), so a wave's launches overlap here
+    _settle(product, repo, path, branch)  # a dead run's rebase or merge is never inherited
     if checkout:
         _checkout_branch(path, branch, product.main)
     if rebase:
         _rebase_onto_trunk(path, branch, product.main, kind)
+    _settle(product, repo, path, branch)
+    if _in_progress(path):
+        raise SpawnError(f'worktree {path} is still mid-rebase or mid-merge after an abort; '
+                         f'no session is handed it',
+                         clear=f'git -C {path} status  # abort what is in progress, then relaunch')
     return path
+
+
+#: What a worktree can be left in the middle of, and the command that abandons it.
+_IN_PROGRESS = (('rebase-merge', ['rebase', '--abort']), ('rebase-apply', ['rebase', '--abort']),
+                ('MERGE_HEAD', ['merge', '--abort']),
+                ('CHERRY_PICK_HEAD', ['cherry-pick', '--abort']))
+
+
+def _in_progress(path):
+    """The operations in progress in the worktree at ``path`` (``rebase-merge``, …), [] when
+    none."""
+    admin = _admin_dir(path) or os.path.join(path, '.git')
+    return [state for state, _ in _IN_PROGRESS if os.path.exists(os.path.join(admin, state))]
+
+
+def _settle(product, repo, path, branch):
+    """No worktree is handed to a session mid-rebase (a product's F-0037, 2026-09-27: a session
+    arrived to a rebase onto a stale report commit replaying 257 unrelated commits). Whatever is
+    in progress is abandoned — after the commits it holds that origin lacks are archived
+    (:func:`_archive_unpushed`)."""
+    states = _in_progress(path)
+    if not states:
+        return
+    try:
+        _archive_unpushed(product, repo, path, branch)
+    except SpawnError as e:
+        print(f'settle {path}: {e}', file=sys.stderr)
+    for state, args in _IN_PROGRESS:
+        if state in states:
+            subprocess.run(['git', *args], cwd=path, capture_output=True)
+    print(f'settled {path}: aborted the {", ".join(states)} left in progress', file=sys.stderr)
 
 
 #: one lock per product repo (:func:`repo_lock`): a wave's launches run concurrently
@@ -356,7 +393,7 @@ def _place_worktree(product, repo, job, branch):
             raise SpawnError(why, clear=f'git -C {repo} worktree remove --force {candidate}'
                                         f'  # after checking nothing in it is wanted')
         current = _worktree_branch(candidate)
-        # another branch checked out (a detached or mid-rebase tree is left for the session)
+        # another branch checked out (a detached tree; one mid-rebase is settled before launch)
         checkout = candidate == path and current not in (branch, 'HEAD', '')
         if candidate == path or current == branch:
             return candidate, checkout, True
@@ -382,14 +419,15 @@ def _place_worktree(product, repo, job, branch):
     return path, False, False
 
 
-def _catch_up(path, branch, remote_sha, kind=None):
+def _catch_up(path, branch, remote_sha, kind=None, main=None):
     """Bring a reused worktree up to ``origin/<branch>`` at ``remote_sha`` before anything is
     rebased or published (2026-09-25: a review's worktree sat at an older head, the takeover
     published it over a person's newer commit, and the review then judged and pushed on top of
     the stale head). A review is reset to the remote head — it reviews what origin holds. Any
     other kind: a head behind origin is fast-forwarded; a head that has diverged is rebased onto
-    origin's (a conflict is left in place for the session). True when the worktree now holds
-    every commit origin does."""
+    origin's — its own commits only, never onto a report commit — and a conflict is aborted. A
+    head already a rebase of origin's tip onto a newer trunk is left for publish. True when the
+    worktree now holds every commit origin does."""
     def git(*args):
         return subprocess.run(['git', *args], cwd=path, capture_output=True, text=True)
     git('fetch', '-q', 'origin', branch)
@@ -404,11 +442,44 @@ def _catch_up(path, branch, remote_sha, kind=None):
     head = git('rev-parse', 'HEAD').stdout.strip()
     if lifecycle.lost_commits(path, head, remote_sha, branch) == []:
         return True  # origin's commits are here as rebased copies
-    return git('rebase', '-q', remote_sha).returncode == 0
+    if main and lifecycle.rebase_of(path, head, remote_sha, main):
+        return True  # a rebase of origin's tip onto a newer trunk: the factory publishes it
+    # only the head's own commits are replayed — never the trunk commits a head rebased onto a
+    # newer trunk carries past origin's tip — and never onto a report commit (F-0037)
+    onto = _past_reports(path, remote_sha)
+    base = git('merge-base', 'HEAD', f'origin/{main}').stdout.strip() if main else ''
+    args = ['rebase', '-q', '--onto', onto, base] if base else ['rebase', '-q', onto]
+    if git(*args).returncode == 0:
+        return True
+    git('rebase', '--abort')  # a conflict is never left for the session
+    return False
+
+
+#: The subject a cloud session's report commit carries (asf.workers.cloud.cloud_brief).
+REPORT_SUBJECT = 'asf: report '
+
+
+def _past_reports(path, sha):
+    """``sha`` peeled past its trailing empty ``asf: report`` commits (first parent): a report
+    commit is a session's end marker, never a base to rebase onto. One that carries work is a
+    commit like any other."""
+    for _ in range(20):
+        p = subprocess.run(['git', 'log', '-1', '--format=%s%n%T%n%P', sha], cwd=path,
+                           capture_output=True, text=True)
+        subject, tree, parents = (p.stdout.split('\n') + ['', '', ''])[:3]
+        parent = parents.split()[0] if parents.split() else ''
+        if p.returncode != 0 or not subject.startswith(REPORT_SUBJECT) or not parent:
+            return sha
+        ptree = subprocess.run(['git', 'rev-parse', f'{parent}^{{tree}}'], cwd=path,
+                               capture_output=True, text=True).stdout.strip()
+        if ptree != tree:
+            return sha
+        sha = parent
+    return sha
 
 
 def _rebase_onto_trunk(path, branch, main, kind=None):
-    """Rebase the worktree onto the fetched trunk. A conflict is left in place for the session.
+    """Rebase the worktree onto the fetched trunk. A conflict is aborted, never left in place.
     A rebase that completes and moves a branch already on origin is published by the factory at
     once (:func:`asf.workers.lifecycle.publish`, B-0056): the session then starts on a branch
     that origin holds, and its own pushes are fast-forwards — it never faces the non-fast-forward
@@ -416,11 +487,14 @@ def _rebase_onto_trunk(path, branch, main, kind=None):
     ls = subprocess.run(['git', 'ls-remote', '--heads', 'origin', branch], cwd=path,
                         capture_output=True, text=True)
     remote_sha = ls.stdout.split()[0] if ls.returncode == 0 and ls.stdout.strip() else ''
-    if remote_sha and not _catch_up(path, branch, remote_sha, kind):
+    if remote_sha and not _catch_up(path, branch, remote_sha, kind, main):
         return  # behind origin and not caught up: never rebased or published from here
     r = subprocess.run(['git', 'rebase', '-q', f'origin/{main}'], cwd=path,
                        capture_output=True, text=True)
-    if r.returncode != 0 or not remote_sha:
+    if r.returncode != 0:
+        subprocess.run(['git', 'rebase', '--abort'], cwd=path, capture_output=True)
+        return
+    if not remote_sha:
         return
     head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=path, capture_output=True,
                           text=True).stdout.strip()

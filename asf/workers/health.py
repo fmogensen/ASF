@@ -346,7 +346,8 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
                 ev = lifecycle.gather(product, s, alive=alive)
                 if lifecycle.pushed_after_stop(s, ev):
                     fields, line = lifecycle.hold(registry, s, lifecycle.PUSHED_AFTER_STOP,
-                                                  lifecycle.PUSHED_AFTER_STOP, pool_mod.now_iso())
+                                                  lifecycle.PUSHED_AFTER_STOP, pool_mod.now_iso(),
+                                                  main=product.main)
                     pool_mod.update_session(product, job, **fields)
                     found.append((job, 'held', line.split(': ', 1)[1]))
             # a `dead pid` judgement is revisited: the result may have landed after the check,
@@ -402,13 +403,15 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
             text = lifecycle.unpushed_text(reason)
             if lifecycle.rebase_conflict(line):  # the factory's rebase conflicted: files named
                 text = lifecycle.rebase_conflict_text(s.get('branch') or job, line)
-                fields, line = lifecycle.rebase_conflict_hold(registry, s, text, now)
+                fields, line = lifecycle.rebase_conflict_hold(registry, s, text, now,
+                                                              main=product.main)
                 pool_mod.update_session(product, job, **fields)
                 found.append((job, 'held', line.split(': ', 1)[1]))
                 continue
             if lifecycle.stale_head(line):  # origin holds commits this head lacks: a rebase
                 text = lifecycle.stale_head_text(s.get('branch') or job, line)
-            fields, line = lifecycle.hold(registry, s, lifecycle.UNPUSHED, text, now)
+            fields, line = lifecycle.hold(registry, s, lifecycle.UNPUSHED, text, now,
+                                          main=product.main)
             pool_mod.update_session(product, job, **fields)
             found.append((job, 'held', line.split(': ', 1)[1]))
         elif reason == f'failed: {lifecycle.EMPTY_BRANCH}' and lifecycle.landed_earlier(registry, s):

@@ -819,9 +819,10 @@ class TestReclaimDeadWorktree(Home):
         self.assertEqual(self._remote_heads().get(archive), wip)
         self.assertFalse(os.path.exists(wt))
         self.assertNotIn(os.path.realpath(wt), git('worktree', 'list', cwd=self.repo))
-        # the new worktree holds the branch (its takeover rebase conflicts: left for the session)
+        # the new worktree holds the branch (its takeover rebase conflicts: aborted, F-0037)
         self.assertEqual(os.path.realpath(spawn_mod._holding_worktree(self.repo, branch)),
                          os.path.realpath(rec['worktree']))
+        self.assertEqual(spawn_mod._in_progress(rec['worktree']), [])
         self.assertIn(f'reclaimed {os.path.realpath(wt)} from dead coder-t-0349: archived '
                       f'{archive}', err.getvalue())
 
@@ -855,6 +856,96 @@ class TestReclaimDeadWorktree(Home):
                                 for a in archived), sha)
         self.assertFalse(os.path.exists(wt))
         self.assertEqual(git('rev-parse', '--abbrev-ref', 'HEAD', cwd=rec['worktree']), branch)
+
+
+class TestNoWorktreeHandedOverMidRebase(Home):
+    """A product's F-0037, 2026-09-27: a correct session's worktree started with a rebase in
+    progress whose ``onto`` was the branch's stale ``asf: report`` commit, replaying 257
+    unrelated commits. The worktree's head had been rebased onto a newer trunk by the last
+    session and origin's tip was the cloud session's report commit: :func:`spawn._catch_up`
+    rebased the whole head onto origin's tip — every trunk commit the head had gained in the
+    range — and left the conflict for the session. A head that is a rebase of origin's tip is
+    caught up (the factory publishes it); no factory rebase goes onto a report commit or
+    replays trunk commits; and no worktree is ever handed over mid-rebase."""
+
+    def _rebased_over_a_report(self, job='correct-f-0037'):
+        rec = spawn_mod.spawn(self.product, feature_row(job), self.acct(), 'b',
+                              runtime=runtime_mod.FakeRuntime([{'ok': True, 'pid': 40}]),
+                              cfg=self.cfg)
+        wt, branch = rec['worktree'], rec['branch']
+        for k, v in (('user.email', 'ci@example.com'), ('user.name', 'ci')):
+            git('config', k, v, cwd=wt)
+        with open(os.path.join(wt, 'README'), 'w') as f:
+            f.write('branch side\n')
+        git('commit', '-q', '-am', 'spec(F-0001): branch work', cwd=wt)
+        git('push', '-q', 'origin', f'HEAD:refs/heads/{branch}', cwd=wt)
+        other = os.path.join(self.tmp, 'other')
+        git('clone', '-q', '-b', branch, os.path.join(self.tmp, 'origin.git'), other, cwd=self.tmp)
+        for k, v in (('user.email', 'ci@example.com'), ('user.name', 'ci')):
+            git('config', k, v, cwd=other)
+        git('commit', '-q', '--allow-empty', '-m', f'asf: report {job}', cwd=other)
+        git('push', '-q', 'origin', branch, cwd=other)
+        report = git('rev-parse', 'HEAD', cwd=other)
+        git('checkout', '-q', 'main', cwd=other)
+        with open(os.path.join(other, 'README'), 'w') as f:
+            f.write('trunk side\n')
+        git('commit', '-q', '-am', 'trunk moves', cwd=other)
+        git('push', '-q', 'origin', 'main', cwd=other)
+        # the last session rebased onto the trunk, resolving README, and never pushed
+        git('fetch', '-q', 'origin', cwd=wt)
+        r = subprocess.run(['git', 'rebase', 'origin/main'], cwd=wt, capture_output=True)
+        self.assertNotEqual(r.returncode, 0)
+        with open(os.path.join(wt, 'README'), 'w') as f:
+            f.write('resolved\n')
+        git('add', 'README', cwd=wt)
+        subprocess.run(['git', '-c', 'core.editor=true', 'rebase', '--continue'], cwd=wt,
+                       capture_output=True, check=True)
+        return wt, branch, report, git('rev-parse', 'HEAD', cwd=wt)
+
+    def _in_progress(self, wt):
+        gitdir = git('rev-parse', '--absolute-git-dir', cwd=wt)
+        return [s for s in ('rebase-merge', 'rebase-apply', 'MERGE_HEAD')
+                if os.path.exists(os.path.join(gitdir, s))]
+
+    def test_a_head_rebased_over_a_report_commit_is_published_never_rebased_onto_it(self):
+        wt, branch, report, head = self._rebased_over_a_report()
+        with mock.patch.object(lifecycle, 'pid_alive', lambda pid: False):
+            path = spawn_mod.make_worktree(self.product, 'correct-f-0037', branch, kind='correct')
+        self.assertEqual(os.path.realpath(path), os.path.realpath(wt))
+        self.assertEqual(self._in_progress(wt), [])
+        self.assertEqual(git('rev-parse', 'HEAD', cwd=wt), head)
+        self.assertEqual(git('ls-remote', '--heads', 'origin', branch, cwd=wt).split()[0], head)
+        archive = lifecycle.copies_archive(branch, report)
+        self.assertEqual(git('ls-remote', '--heads', 'origin', archive, cwd=wt).split()[0], report)
+
+    def test_a_conflicting_catch_up_is_aborted_never_handed_over(self):
+        wt, branch, report, head = self._rebased_over_a_report()
+        # a person's real commit on origin that the head lacks and that conflicts
+        person = os.path.join(self.tmp, 'person')
+        git('clone', '-q', '-b', branch, os.path.join(self.tmp, 'origin.git'), person,
+            cwd=self.tmp)
+        with open(os.path.join(person, 'README'), 'w') as f:
+            f.write('a person\n')
+        git('-c', 'user.email=p@example.com', '-c', 'user.name=p', 'commit', '-q', '-am',
+            'a person edits README', cwd=person)
+        git('push', '-q', 'origin', branch, cwd=person)
+        with mock.patch.object(lifecycle, 'pid_alive', lambda pid: False):
+            spawn_mod.make_worktree(self.product, 'correct-f-0037', branch, kind='correct')
+        self.assertEqual(self._in_progress(wt), [])
+        self.assertEqual(git('rev-parse', 'HEAD', cwd=wt), head)
+        self.assertEqual(git('status', '--porcelain', cwd=wt), '')
+
+    def test_a_worktree_left_mid_rebase_is_settled_before_launch(self):
+        wt, branch, report, head = self._rebased_over_a_report()
+        git('reset', '-q', '--hard', 'origin/' + branch, cwd=wt)  # back on the report tip
+        r = subprocess.run(['git', 'rebase', 'origin/main'], cwd=wt, capture_output=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self._in_progress(wt), ['rebase-merge'])
+        with mock.patch.object(lifecycle, 'pid_alive', lambda pid: False):
+            spawn_mod.make_worktree(self.product, 'correct-f-0037', branch, kind='correct')
+        self.assertEqual(self._in_progress(wt), [])
+        self.assertEqual(git('rev-parse', '--abbrev-ref', 'HEAD', cwd=wt), branch)
+        self.assertEqual(git('status', '--porcelain', cwd=wt), '')
 
 
 class SpawnHookTests(Home):

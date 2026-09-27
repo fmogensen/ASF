@@ -882,7 +882,8 @@ def widen_candidates(files, item_writes, touched=(), read=None, own=False):
 
 
 def hold_with_correction(state_dir, branch, record, kind, text, out, files=(), item_writes=(),
-                         touched=(), conv=None, own=False, read=None, head=None, finding=None):
+                         touched=(), conv=None, own=False, read=None, head=None, finding=None,
+                         main=None):
     """Hold ``branch`` and hand it back to its session (:func:`asf.workers.lifecycle.hold`).
     ``'held'`` — or ``'foreign'`` for a red naming only files outside its footprint (no round),
     or ``'timed-out'`` for a gate that ran out of time (no round). ``own``: the red is this
@@ -914,7 +915,7 @@ def hold_with_correction(state_dir, branch, record, kind, text, out, files=(), i
         out(line)
         return 'held'
     fields, line = lifecycle.hold(H.sessions_path(state_dir), dict(record, branch=branch, job=job),
-                                  kind, text, now_iso(), head=head, finding=finding)
+                                  kind, text, now_iso(), head=head, finding=finding, main=main)
     H.mark_session(state_dir, job, **fields)
     out(line)
     return 'held'
@@ -1969,7 +1970,7 @@ class Lane:
                 self.write(f, self.record(f, PUSHED, 'adopted'))
             rec = self.set(f, BACK, f'kind={COPIES}')
             self.results[b] = hold_with_correction(self.state_dir, b, f['run'], COPIES, text,
-                                                   self.out, head=old)
+                                                   self.out, head=old, main=self.trunk)
             f['correction'] = {'kind': COPIES, 'text': text}
             return rec
         new = res['new']
@@ -2078,7 +2079,8 @@ class Lane:
         rec = self.set(f, BACK, reason)
         finding = review_mod.c_items((f.get('review') or {}).get('body')) if kind == 'review' else None
         self.results[b] = hold_with_correction(self.state_dir, b, f['run'], kind, text, self.out,
-                                               head=f.get('head'), finding=finding)
+                                               head=f.get('head'), finding=finding,
+                                               main=self.trunk)
         f['correction'] = {'kind': kind, 'text': text}
         return rec
 
@@ -2436,7 +2438,7 @@ def send_back(lane, f, kind, text, files):
         lane.set(f, BACK, f'kind={LANDING_GATE}')
         job = run.get('job') or b
         fields, line = lifecycle.hold(lane.path, dict(run, branch=b, job=job), LANDING_GATE, note,
-                                      now_iso(), head=f.get('head'))
+                                      now_iso(), head=f.get('head'), main=lane.trunk)
         H.mark_session(lane.state_dir, job, **fields)
         lane.out(line)
         lane.results[b] = 'held'
@@ -2445,7 +2447,8 @@ def send_back(lane, f, kind, text, files):
     lane.set(f, BACK, f'kind={kind}')
     res = hold_with_correction(lane.state_dir, b, run, kind, text, lane.out, files,
                                card.get('writes') or (), f.get('files') or (), lane.conv,
-                               own=True, read=gate_reader(lane.repo, b), head=f.get('head'))
+                               own=True, read=gate_reader(lane.repo, b), head=f.get('head'),
+                               main=lane.trunk)
     if res != 'held':  # foreign / timed-out: no one's fault after all
         wait(lane, f, res)
     lane.results[b] = res
