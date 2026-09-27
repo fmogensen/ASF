@@ -677,6 +677,20 @@ class SummaryTests(TickTestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(out.rstrip('\n').split('\n')[-1], 'tick: summary not rendered (boom)')
 
+    def test_a_refused_push_is_named_failed_in_the_tick_line_not_ok(self):
+        """B-0146: the tick exited 1 on a refused push while its TICK line still read
+        ``record ok`` — the failing step named nowhere a person reads. The line and the exit
+        code must agree, and the reason (the push's own line) rides with it."""
+        hook = os.path.join(self.origin, 'hooks', 'pre-receive')
+        with open(hook, 'w') as f:
+            f.write('#!/bin/sh\nexit 1\n')
+        os.chmod(hook, 0o755)
+        rc, out = self.run_tick(steps='record')
+        self.assertEqual(rc, 1)
+        tick_line = [l for l in out.splitlines() if l.startswith('TICK — ')][0]
+        self.assertIn('record ok', tick_line)
+        self.assertIn('commit FAILED (push refused)', tick_line)
+
 
 class StepTimingTests(TickTestCase):
     """Each step names its seconds as it ends, and the tick its total: a slow step is visible in

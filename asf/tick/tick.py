@@ -501,16 +501,23 @@ def finish(ctx, ran):
     derived state, the steps' events and that line together. Only when a step made the record
     clone this tick: a ``--steps`` run of command steps alone does not clone the record to log
     itself. Returns 1 when the commit or its push failed, else 0 — printed, never raised (the
-    steps already ran)."""
+    steps already ran). A failure here named no step in ``ran`` (B-0146: every named step read
+    ``ok`` while the tick exited 1) — on failure it appends its own ``commit`` entry, so the TICK
+    line names it too."""
     if not ctx.has_record:
         return 0
     file_invariant_bugs(ctx)
     write_tick_line(ctx, ran)
     try:
-        return commit_and_push(ctx)
+        rc = commit_and_push(ctx)
+        reason = None if not rc else 'push refused'
     except (subprocess.CalledProcessError, OSError, env.ConfigError) as e:
-        print(f"tick: state not committed ({(getattr(e, 'stderr', None) or str(e)).strip()})")
-        return 1
+        detail = (getattr(e, 'stderr', None) or str(e)).strip()
+        print(f"tick: state not committed ({detail})")
+        rc, reason = 1, _first_line(detail) or type(e).__name__
+    if rc:
+        ran.append({'step': 'commit', 'ok': False, 'seconds': 0.0, 'reason': reason})
+    return rc
 
 
 def file_invariant_bugs(ctx):
