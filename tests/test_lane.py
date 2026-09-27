@@ -2386,5 +2386,58 @@ class PathFilteredRequiredCheck(unittest.TestCase):
             self.assertIn('m8-e2e', host.recheck(f, 7))
 
 
+class AMergeConflictGoesBack(unittest.TestCase):
+    """2026-09-27: a product's two spec-lane PRs and one code PR passed GATE, and the host
+    refused each merge for conflicts with a trunk that moved under them. The lane recorded
+    WAITING (``merge refused``) with its green kept, and the next pass merged — and was refused —
+    again: the code PR went WAITING → MERGING → WAITING on the conflict fifteen times in 21
+    hours. A conflict is no one's clock: the branch goes BACK to be rebased, the gate's own
+    conflict path (docs: a landing-gate correction; code: its session's round)."""
+
+    CONFLICT = 'GraphQL: Pull Request has merge conflicts (mergePullRequest)'
+
+    def _merge(self, how, cls):
+        runner = lane.Lane.__new__(lane.Lane)
+        lines = []
+        runner.out, runner.dry_run, runner.results, runner.repo = lines.append, False, {}, None
+        runner.trunk = 'main'
+        fake = mock.Mock(in_queue=0, merged=0)
+        fake.slots.return_value = (None, '')
+        fake.recheck.return_value = None
+        fake.merge.return_value = (None, how)
+        runner.host = fake
+        f = {'branch': 'cloud/spec-x', 'class': cls, 'kind': 'spec', 'item': 'F-0001',
+             'head': HEAD, 'prev': rec(lane.GATE, pr=842), 'green': {'head': HEAD, 'trunk': NEW}}
+        with mock.patch.object(lane.Lane, 'ci_admits', return_value=True), \
+                mock.patch.object(lane.Lane, 'set'), \
+                mock.patch.object(lane, 'conflict_files', return_value=['docs/decisions/bands.md']), \
+                mock.patch.object(lane, 'send_back') as sb, \
+                mock.patch.object(lane, 'wait') as wt:
+            lane.merge_prs(runner, [f])
+        return sb, wt, lines
+
+    def test_a_docs_lane_refused_for_conflicts_goes_back(self):
+        sb, wt, _lines = self._merge(self.CONFLICT, lane.DOCS)
+        wt.assert_not_called()
+        sb.assert_called_once()
+        _ln, f, kind, text, files = sb.call_args[0]
+        self.assertEqual((f['branch'], kind), ('cloud/spec-x', 'conflict'))
+        self.assertIn('#842', text)
+        self.assertIn('merge conflicts', text)
+        self.assertIn('git rebase origin/main', text)
+        self.assertEqual(list(files), ['docs/decisions/bands.md'])
+
+    def test_a_code_lane_refused_for_conflicts_goes_back(self):
+        sb, wt, _lines = self._merge(self.CONFLICT, lane.CODE)
+        wt.assert_not_called()
+        self.assertEqual(sb.call_args[0][2], 'conflict')
+
+    def test_any_other_refusal_still_waits(self):
+        sb, wt, _lines = self._merge('To have the merge queue ... base branch policy', lane.DOCS)
+        sb.assert_not_called()
+        wt.assert_called_once()
+        self.assertIn('merge refused', wt.call_args[0][2])
+
+
 if __name__ == '__main__':
     unittest.main()

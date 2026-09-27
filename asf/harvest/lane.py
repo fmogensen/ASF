@@ -2784,6 +2784,24 @@ def auto_merge_line(f, number, sha):
             f"{str(sha)[:12]}; touched {len(files)} file(s): {shown}{more}")
 
 
+#: a host's merge refusal that is a conflict with the trunk (GitHub: ``Pull Request has merge
+#: conflicts``, ``is not mergeable``) — the branch goes BACK to be rebased, never waits
+MERGE_CONFLICT_RE = re.compile(r'merge conflict|not mergeable|conflicting', re.I)
+
+
+def conflict_files(repo, trunk, branch):
+    """The files ``origin/<branch>`` conflicts in against a freshly fetched ``origin/<trunk>``
+    (the pass may have just merged onto it), or ``[]`` when unknown."""
+    if not repo:
+        return []
+    H.sh(['git', 'fetch', '-q', 'origin', trunk, branch], cwd=repo)
+    got = H.sh(['git', 'merge-tree', '--write-tree', '--name-only', '--no-messages',
+                f'origin/{trunk}', f'origin/{branch}'], cwd=repo)
+    if got.returncode != 1:
+        return []
+    return [l for l in (got.stdout or '').splitlines()[1:] if l.strip()]
+
+
 def merge_prs(lane, ready):
     """PR mode: merge every green PR the budget has room for — MERGING first (R3), then ``gh pr
     merge`` (or ``--auto`` into a merge queue: QUEUED)."""
@@ -2816,6 +2834,18 @@ def merge_prs(lane, ready):
             continue
         if not sha:
             lane.out(f'held {b}: PR #{number} merge refused — {how}')
+            if MERGE_CONFLICT_RE.search(how or ''):
+                # a trunk that moved under a green branch: the gate's conflict path, never a wait —
+                # its green is kept, so a wait would merge (and be refused) again every pass
+                # (a ``merge=union`` file merges clean here and conflicts on the host, which
+                # applies no merge driver — the rebase is what clears it either way)
+                files = conflict_files(lane.repo, lane.trunk, b)
+                send_back(lane, f, 'conflict', f'PR #{number} merge refused — {how}'
+                          + (f'; conflicts in {", ".join(files)}' if files else '')
+                          + f' — rebase the branch onto origin/{lane.trunk} (git rebase '
+                          f'origin/{lane.trunk}), never merge; the factory publishes the rebased '
+                          f'branch', files)
+                continue
             wait(lane, f, f'merge refused: {how}', 'held', green=f.get('green'))
             continue
         host.merged += 1
