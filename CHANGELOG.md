@@ -2,6 +2,38 @@
 
 One entry per released version, newest first.
 
+## v0.1.42 — 2026-09-27
+
+### Features landed
+
+- F-0075 Redaction is a gate on every write path: operator names and secrets never reach a record or a public repo
+
+### Bugs fixed
+
+- B-0087 The console operator is never told what a tick did: no per-tick digest, no asf watch
+- B-0094 19% of sessions end 'not pushed': finished work is lost to a missing commit or push
+- B-0124 Status shows a 7-hour-old snapshot as current when every tick fails offline
+
+### In progress
+
+- F-0014 P3 wave 6 — the CLI and the plugin
+- F-0021 P5 — launch
+- F-0029 Roles: one file per role, five sections, model and access from config
+- F-0037 Questions in batches: a non-blocking question goes to the groom; only a blocked launch or merge interrupts
+- F-0040 Story-to-test gate: a Task's pull request must tick an acceptance line with the test that proves it
+- F-0080 Closing is derived and total: a definition of done per type, reconciliation for work that predates it, nothing re-emitted
+- F-0092 An item has a budget: three sessions or $10, then it stops and says why
+- F-0094 A decided Epic with no Features never starts: no row breaks an Epic into Features
+- F-0099 Groom every tick: intake, policy pass and questions run on each tick, not once a day
+
+### Improvements and hotfixes
+
+- test(quota_stale): the limit resets hours ahead, not at a fixed 8am
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.42"`
+
 ## v0.1.41 — 2026-09-27
 
 ### Bugs fixed
