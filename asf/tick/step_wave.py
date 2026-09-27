@@ -272,7 +272,20 @@ def plan_inputs(product, root, index=None):
     return {'attempts': attempts(product), 'occupancy': occupancy(product),
             'groom_state': groom_state(product, root) if groom_policy.groom_auto(product) else None,
             'held': set(approvals.parked(product)),
+            'gate': invariant_gate(product),
             **triage}
+
+
+def invariant_gate(product):
+    """``plan_rows``' ``gate``: the launch-time invariants (I4, I5, I7) judged before the cut
+    (:func:`asf.invariants.feeder_waits`) — a violating row waits with the invariant's reason
+    and its seat goes to the next valid row. Silent: the wave's :func:`gated_plan` is the net
+    that logs."""
+    from asf import invariants
+
+    def gate(rows, items):
+        return invariants.feeder_waits(product, rows, items, out=lambda _l: None)
+    return gate
 
 
 def held_by_share(items, product, running, resolved, planned, inputs, wider=None):
@@ -319,6 +332,10 @@ def gated_plan(items, product, running, capacity, inputs, out=print, exclude=Non
         kept = invariants.feeder_gate(product, planned, items, out=say)
         dropped = ({invariants.row_key(r) for r in planned if r.launches}
                    - {invariants.row_key(r) for r in kept if r.launches})
+        if dropped and inputs.get('gate') is not None:
+            # the feeder judged these rows before the cut: the net firing means it missed one
+            say(f"INVARIANT net: the feeder planned {len(dropped)} row(s) its gate drops "
+                f"({', '.join(sorted(dropped))})")
         if not dropped - exclude:
             break
         exclude |= dropped

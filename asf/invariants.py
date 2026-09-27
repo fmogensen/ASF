@@ -34,6 +34,9 @@ class Finding:
     subject: str
     message: str
     paths: tuple = field(default_factory=tuple)
+    #: a ``feeder`` finding about a row: what the row waits on, for its ``WAITS ON …`` action
+    #: (:func:`feeder_waits`) — empty: the message stands in
+    waits: str = ''
 
 
 @dataclass(frozen=True)
@@ -425,6 +428,18 @@ def _allowed_kinds(ctx, row):
     return None, None
 
 
+def _i4_waits(why, branch):
+    """What a row I4 holds waits on: the branch's landing, its live session or its pending
+    correction — named by the state that holds it."""
+    if why == 'occupancy busy':
+        return f'session: {branch}'
+    if why == 'occupancy corrections':
+        return f'correction: {branch}'
+    if why and why.startswith('lane '):
+        return f'landing: {branch} {why[len("lane "):]}'
+    return f'landing: {branch}'
+
+
 def check_i4(ctx):
     """I4 (R10) — at most one launching row per branch, and its kind matches the branch's lane
     state: REVIEW takes the review session (``PUSHED → REVIEW`` is legal), BACK takes a
@@ -436,11 +451,13 @@ def check_i4(ctx):
         if allowed is not None and row.kind not in allowed:
             out.append(Finding('I4', 'feeder', row_key(row),
                                f'{row.kind} launches on {row.branch} in {why} '
-                               f"(allows {', '.join(allowed) or 'no launch'})"))
+                               f"(allows {', '.join(allowed) or 'no launch'})",
+                               waits=_i4_waits(why, row.branch)))
             continue
         if row.branch and row.branch in seen:
             out.append(Finding('I4', 'feeder', row_key(row),
-                               f'a second launching row on {row.branch} (first: {seen[row.branch]})'))
+                               f'a second launching row on {row.branch} (first: {seen[row.branch]})',
+                               waits=f'{row.branch}: {seen[row.branch]}'))
             continue
         if row.branch:
             seen[row.branch] = row_key(row)
@@ -469,7 +486,8 @@ def check_i5(ctx):
         missing = [d for d in ('spec', 'plan') if docs.get(d) is False]
         if missing:
             out.append(Finding('I5', 'feeder', row_key(row),
-                               f"{fid}'s {' and '.join(missing)} not on the trunk"))
+                               f"{fid}'s {' and '.join(missing)} not on the trunk",
+                               waits=f"{fid} {'+'.join(missing)} on the trunk"))
     return out
 
 
@@ -502,7 +520,8 @@ def check_i7(ctx):
     for row in _launching(ctx):
         if row.branch and row.branch in by_branch:
             out.append(Finding('I7', 'feeder', row_key(row),
-                               f'{row.branch} is held by live session {by_branch[row.branch][0]}'))
+                               f'{row.branch} is held by live session {by_branch[row.branch][0]}',
+                               waits=f'session {by_branch[row.branch][0]} on {row.branch}'))
     return out
 
 
@@ -726,6 +745,42 @@ def feeder_gate(product, rows, items, out=print):
         out(f'INVARIANT {f.invariant}: {f.subject} — {f.message}')
         drop.setdefault(f.subject, f)
     return [r for r in rows if not (getattr(r, 'launches', False) and row_key(r) in drop)]
+
+
+def feeder_waits(product, rows, items, out=print):
+    """The feeder's own invariant pass, **before** the cut: every launching row a ``feeder``
+    invariant (I4, I5, I7) refuses becomes a ``WAITS ON <what>`` row carrying the invariant's
+    reason, so it takes no seat and the next valid row gets it. Rows keep their order; a row the
+    invariants keep is returned as is. Never raises: facts that cannot be read keep every row
+    (R9), and the wave's :func:`feeder_gate` stays the net.
+
+    2026-09-27 04:22 (a product tick): eight rows ranked first each violated I4 or I5; the cut gave
+    them the seats, the wave's gate dropped them, and ``asf next`` kept saying "8 would launch"
+    while the local lane idled at 0/9."""
+    import dataclasses
+    from asf.feeder import tiers
+    rows = list(rows)
+    if not any(getattr(r, 'launches', False) for r in rows):
+        return rows
+    try:
+        # I4 keeps the first launching row of a branch in tier order: judge in that order
+        ctx = feeder_context(product, sorted(rows, key=tiers.tier_of), items)
+        findings = run(ctx, scope='feeder', out=out)
+    except Exception:  # noqa: BLE001 — no facts, no verdict: the wave's gate still runs
+        return rows
+    first = {}
+    for f in findings:
+        first.setdefault(f.subject, f)
+    kept = []
+    for r in rows:
+        f = first.get(row_key(r)) if getattr(r, 'launches', False) else None
+        if f is None:
+            kept.append(r)
+            continue
+        kept.append(dataclasses.replace(
+            r, action=f'WAITS ON {f.waits or f.message}', waits_on=f'invariant {f.invariant}',
+            reason=f'INVARIANT {f.invariant}: {f.message}'))
+    return kept
 
 
 def lane_context(product, now=None):

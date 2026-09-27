@@ -531,8 +531,11 @@ def _planned_rows(product, root):
     from asf.views import index_reader
     items, _generated = index_reader.load(root)
     running = step_wave.inflight(product)
+    inputs = step_wave.plan_inputs(product, root)
+    # ungated: the check reports every row an invariant refuses, not the WAITS rows it became
+    inputs.pop('gate', None)
     rows = feeder_rows.plan_rows(items, product, running, capacity_mod.resolve(product).sessions,
-                                 **step_wave.plan_inputs(product, root))
+                                 **inputs)
     return rows, items
 
 

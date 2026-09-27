@@ -339,7 +339,7 @@ class WaveStepTests(StepsTestCase):
         seen = {}
 
         def plan(index, product, inflight, capacity, attempts=None, occupancy=None,
-                 groom_state=None, held=None, s1_first=True):
+                 groom_state=None, held=None, s1_first=True, gate=None):
             if not s1_first:        # the demand pass (step_wave.demand), not the cut
                 return self.rows
             seen.update(capacity=capacity, inflight=[s['item'] for s in inflight], ids=sorted(index))
@@ -776,7 +776,7 @@ class WaveStep(StepsTestCase):
         seen = {}
 
         def plan(index, product, inflight, capacity, attempts=None, occupancy=None,
-                 groom_state=None, held=None, s1_first=True):
+                 groom_state=None, held=None, s1_first=True, gate=None):
             if s1_first:            # not the demand pass (step_wave.demand)
                 seen['capacity'] = capacity
             return []
@@ -794,7 +794,7 @@ class WaveStep(StepsTestCase):
         seen = {}
 
         def plan(index, product, inflight, capacity, attempts=None, occupancy=None,
-                 groom_state=None, held=None, s1_first=True):
+                 groom_state=None, held=None, s1_first=True, gate=None):
             if s1_first:            # not the demand pass (step_wave.demand)
                 seen['capacity'] = capacity
             return []
@@ -873,8 +873,10 @@ class AGatedRowGivesItsSlotBack(StepsTestCase):
         share = [ln for ln in self.lines if 'fair share' in ln]
         self.assertEqual([ln.split()[1] for ln in share], [f'spec-f-01{n}' for n in range(17, 23)])
         self.assertIn('; in flight 1: spec-f-0108; this wave 6: spec-f-0111, ', share[0])
-        # a dropped row is said once, as the gate's own line — never as a fair-share wait
-        self.assertEqual(sum(1 for ln in self.lines if ln.startswith('INVARIANT')), 4)
+        # a dropped row is said once, as the gate's own line — never as a fair-share wait —
+        # and the net says the feeder (whose facts here judged nothing) let them through
+        self.assertEqual(sum(1 for ln in self.lines if ln.startswith('INVARIANT I5')), 4)
+        self.assertEqual(sum(1 for ln in self.lines if ln.startswith('INVARIANT net: ')), 1)
 
 
 class DemandIsTheReadyWork(StepsTestCase):
