@@ -451,6 +451,51 @@ def _stale_view():
     return _STALE.fresh()
 
 
+class RebasedCopyTests(unittest.TestCase):
+    """A lane branch rebased onto the trunk re-creates its already-published commits with new
+    shas; their patches are on the remote tip, so the scan must not report them again (F-0003:
+    the factory's publish of a rebased spec branch was refused round after round for review
+    files that were already on origin)."""
+
+    def setUp(self):
+        self.repo = tempfile.mkdtemp(prefix='redact_rebased_')
+        self.addCleanup(shutil.rmtree, self.repo, ignore_errors=True)
+        _init_repo(self.repo)
+        _git(['checkout', '-q', '-B', 'main'], self.repo)
+        _write(self.repo, 'seed.txt', 'seed\n')
+        _commit(self.repo, 'seed')
+        _git(['checkout', '-q', '-b', 'lane'], self.repo)
+        _write(self.repo, 'review.md', f'a review naming {_WORD}\n')
+        _commit(self.repo, 'a published review')
+        self.published = _rev_parse(self.repo)
+        _git(['checkout', '-q', 'main'], self.repo)
+        _write(self.repo, 'trunk.txt', 'trunk work\n')
+        _commit(self.repo, 'trunk moves on')
+        _git(['checkout', '-q', 'lane'], self.repo)
+        _git(['rebase', '-q', 'main'], self.repo)
+        names = _write(self.repo, os.path.join('..', os.path.basename(self.repo) + '-names.txt'),
+                       f'\\b{_WORD}\\b\n')
+        self.addCleanup(os.remove, names)
+        self.pats = redact.patterns(cfg={}, environ={}, extra=(names,))
+
+    def test_a_rebased_copy_of_a_published_commit_is_not_reported(self):
+        self.assertNotEqual(_rev_parse(self.repo), self.published)
+
+        findings = redact.scan_unpublished(self.repo, 'HEAD', self.pats,
+                                           published=(self.published,))
+
+        self.assertEqual(findings, [])
+
+    def test_a_new_commit_on_the_rebased_branch_is_still_refused(self):
+        _write(self.repo, 'new.md', f'a fresh mention of {_WORD}\n')
+        _commit(self.repo, 'a new commit')
+
+        findings = redact.scan_unpublished(self.repo, 'HEAD', self.pats,
+                                           published=(self.published,))
+
+        self.assertEqual({f.path for f in findings}, {'new.md'})
+
+
 class PrePushStaleViewTests(unittest.TestCase):
     def setUp(self):
         self.root = _stale_view()

@@ -359,10 +359,19 @@ def _is_commit(repo, sha):
 def scan_unpublished(repo, head, pats, published=()):
     """Every commit reachable from ``head`` and from no ``refs/remotes/origin/*`` ref (D4) — nor
     from any sha of ``published`` (a pre-push line's remote sha: the remote already has it) —
-    each against its parent, plus its message with the trailer block removed."""
+    each against its parent, plus its message with the trailer block removed.
+
+    A commit whose patch a ``published`` tip already carries (``git cherry``'s ``-``: a rebase's
+    copy of a pushed commit, new sha, same change) is not new either, and is not scanned again —
+    a rebased lane branch was otherwise refused for content origin already held (F-0003)."""
     exclude = [s for s in published if s and set(s) != {'0'} and _is_commit(repo, s)]
     shas = [s for s in _run_git(repo, ['rev-list', head, '--not', '--remotes=origin']
                                 + exclude).stdout.split() if s]
+    copies = set()
+    for tip in exclude:
+        out = _run_git(repo, ['cherry', tip, head]).stdout
+        copies.update(ln.split()[1] for ln in out.splitlines() if ln.startswith('- '))
+    shas = [s for s in shas if s not in copies]
     findings = []
     for sha in shas:
         diff = _run_git(repo, ['show', '-U0', '--format=', sha]).stdout

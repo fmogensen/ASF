@@ -1262,6 +1262,12 @@ class UnpushedAfterARebaseTest(unittest.TestCase):
         ok, line = lc.publish(self.repo, 'fix/B-9999', newer, main='main')
         self.assertTrue(ok, line)
 
+    def test_the_factorys_own_redact_refusal_is_a_hook_refusal(self):
+        # F-0003: its correction must reach the session, never a generic "commit and push"
+        line = ('publish cloud/spec-x refused: redact: .sdd-input/reviews/r2.md:20 names a '
+                'worker account — replace with lane-N')
+        self.assertEqual(lc.push_failure(line.split('refused: ', 1)[1]), lc.HOOK_REFUSED)
+
     def test_a_stale_head_refusal_is_not_a_hook_refusal(self):
         # never retried as a push: the branch is held for a rebase onto the remote head
         line = ('publish fix/B-9999 refused: would lose 1 commit(s) on origin/fix/B-9999 '
