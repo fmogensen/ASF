@@ -129,6 +129,12 @@ class LaunchIdentityTest(Home):
         s = pool_mod.load_sessions(self.product)['j1']
         self.assertEqual((s['session'], s['product']), (rec['session'], 'sample'))
 
+    def test_launch_records_model_label_beside_the_runtime_model(self):
+        rec, job_obj, rt = self._spawn()
+        self.assertEqual(rec['model_label'], 'Opus')
+        self.assertEqual(rec['model'], 'opus')
+        self.assertNotEqual(rec['model_label'], rec['model'])
+
     def test_env_carries_asf_session(self):
         rec, job_obj, rt = self._spawn(job='j2')
         e = runtime_mod.build_env(job_obj, base={'PATH': os.environ.get('PATH', ''), 'HOME': '/me'})
@@ -157,6 +163,7 @@ class LaunchIdentityTest(Home):
         retry = pool_mod.load_sessions(self.product)['j4-correction']
         self.assertNotEqual(retry['session'], session['session'])
         self.assertTrue(retry['session'].startswith('sample/j4-correction@'))
+        self.assertEqual(retry['model_label'], 'light')  # fix-bug's need, resolved fresh
 
 
 class CommitTrailerTest(Home):

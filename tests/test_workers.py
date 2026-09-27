@@ -85,7 +85,9 @@ class Home(unittest.TestCase):
                                               'job_grants': [self.grant],
                                               'stage_limits': {'silent_min': 30}})
         self.cfg = {'worker_pool': {'accounts': [{'name': 'acct-a', 'role': 'local', 'cap': 2}],
-                                    'models': {'Opus': 'opus'}, 'sessions': 'fake'}}
+                                    'models': {'Opus': 'opus', 'heavy': 'model-heavy',
+                                              'light': 'model-light'},
+                                    'sessions': 'fake'}}
         # asf.hooks.ensure_git_hooks is Task 8353's (F-0075) and is not yet in this checkout;
         # a test that cares about the push-gate check overrides this with its own
         # mock.patch.object(hooks_mod, 'ensure_git_hooks', ..., create=True) around its call.
@@ -93,6 +95,12 @@ class Home(unittest.TestCase):
                                     return_value=(True, 'ok'))
         patcher.start()
         self.addCleanup(patcher.stop)
+        # stall._cfg() reads env.load_config() with no cfg to pass through (correct_once takes
+        # no cfg parameter): the operator's own ~/.ASF/config.yaml must never leak into a test,
+        # so this fixture's cfg answers for it too.
+        cfg_patcher = mock.patch.object(env, 'load_config', return_value=self.cfg)
+        cfg_patcher.start()
+        self.addCleanup(cfg_patcher.stop)
 
     def tearDown(self):
         env.ASF_HOME = self._home
@@ -1817,6 +1825,70 @@ class TestCorrectOnce(Home):
         self.assertEqual(retry['branch'], rec['branch'])
         self.assertEqual(retry['worktree'], rec['worktree'])
         self.assertNotIn('end_reason', sessions['j'])
+
+
+class ColdRetryModelTests(Home):
+    """The cold retry resolves its own model from the need its kind serves (Task 4, §2.4 row 1)
+    — it never reads the id the dead session recorded."""
+
+    def test_a_dead_spec_sessions_retry_is_heavy_not_the_dead_id(self):
+        spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b\n',
+                        runtime=runtime_mod.FakeRuntime([{'ok': False}]), cfg=self.cfg)
+        session = pool_mod.load_sessions(self.product)['j']
+        session['model'] = 'bogus-dead-id'  # never read by the retry
+        self.assertTrue(stall_mod.correct_once(self.product, session, 'boom',
+                                               runtime_mod.FakeRuntime([{'ok': True}])))
+        retry = pool_mod.load_sessions(self.product)['j-correction']
+        self.assertEqual(retry['model_label'], 'heavy')
+        self.assertEqual(retry['model'], 'model-heavy')
+        self.assertNotEqual(retry['model'], 'bogus-dead-id')
+
+    def test_a_dead_coder_sessions_retry_is_light(self):
+        row = pool_mod.Row('c1', 'T-0001', kind='coder', model='Opus')
+        spawn_mod.spawn(self.product, row, self.acct(), 'b\n',
+                        runtime=runtime_mod.FakeRuntime([{'ok': False}]), cfg=self.cfg)
+        session = pool_mod.load_sessions(self.product)['c1']
+        self.assertTrue(stall_mod.correct_once(self.product, session, 'boom',
+                                               runtime_mod.FakeRuntime([{'ok': True}])))
+        retry = pool_mod.load_sessions(self.product)['c1-correction']
+        self.assertEqual(retry['model_label'], 'light')
+        self.assertEqual(retry['model'], 'model-light')
+
+    def test_a_products_own_models_convention_reaches_the_retry(self):
+        spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b\n',
+                        runtime=runtime_mod.FakeRuntime([{'ok': False}]), cfg=self.cfg)
+        session = pool_mod.load_sessions(self.product)['j']
+        product = env.Product('sample', {'repo_dir': self.repo, 'main': 'main',
+                                         'job_grants': [self.grant],
+                                         'conventions': {'models': {'spec': 'light'}}})
+        self.assertTrue(stall_mod.correct_once(product, session, 'boom',
+                                               runtime_mod.FakeRuntime([{'ok': True}])))
+        retry = pool_mod.load_sessions(product)['j-correction']
+        self.assertEqual(retry['model_label'], 'light')
+        self.assertEqual(retry['model'], 'model-light')
+
+    def test_an_unmapped_label_refuses_the_retry(self):
+        spawn_mod.spawn(self.product, feature_row('j'), self.acct(), 'b\n',
+                        runtime=runtime_mod.FakeRuntime([{'ok': False}]), cfg=self.cfg)
+        session = pool_mod.load_sessions(self.product)['j']
+        cfg = {'worker_pool': {'accounts': [{'name': 'acct-a', 'role': 'local', 'cap': 2}]}}
+        with mock.patch.object(stall_mod, '_cfg', return_value=cfg):
+            with self.assertRaises(spawn_mod.SpawnError) as cm:
+                stall_mod.correct_once(self.product, session, 'boom',
+                                       runtime_mod.FakeRuntime([{'ok': True}]))
+        self.assertIn('NEEDS OPERATOR', str(cm.exception))
+
+
+class LaunchRecordTests(Home):
+    """Every launch records ``model_label`` beside the runtime ``model`` (Task 4, §2.5) — one
+    reader (Task 5's metric) serves both the fresh launch and the cold retry."""
+
+    def test_spawn_writes_the_label_beside_the_resolved_id(self):
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 4242}])
+        rec = spawn_mod.spawn(self.product, s1_row(), self.acct(), 'fix\n', runtime=rt, cfg=self.cfg)
+        self.assertEqual(rec['model_label'], 'Opus')
+        self.assertEqual(rec['model'], 'opus')
+        self.assertNotEqual(rec['model_label'], rec['model'])
 
 
 class TestCli(unittest.TestCase):

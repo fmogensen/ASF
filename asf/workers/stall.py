@@ -13,9 +13,13 @@ any state, ``<job> STALL`` / ``<job> DEAD`` only in that state.
 cold, before anyone files a Bug: the runtime is relaunched in the same worktree with the original
 brief + ``CORRECTION: the step failed with:`` + the error, but under its own job name and log —
 never the dead session's — so the retry's own ledger line carries its outcome and the dead run's
-line is never rewritten to look like the one that passed (D-0048, part b). ``corrected: 1`` is
-recorded on the original session so a second failure (or a session already corrected once)
-returns False and the caller files the Bug instead.
+line is never rewritten to look like the one that passed (D-0048, part b). The model is resolved
+fresh from the dead session's ``kind`` (:func:`asf.briefs.build.model_for`), never inherited off
+the dead record — a product's ``models:`` convention can move a retry to a different label than
+the one that died with, and the retry's ledger line carries both ``model`` (the id) and
+``model_label`` (the need), like every other launch does. ``corrected: 1`` is recorded on the
+original session so a second failure (or a session already corrected once) returns False and the
+caller files the Bug instead.
 
 ``capped(product)`` is the other half of "a live session the factory must end": a run over any
 one token dimension's cap (:mod:`asf.tokens`) is signalled dead (``stop_session``: SIGTERM to its
@@ -40,6 +44,7 @@ from asf.workers import health as health_mod
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 from asf.workers import runtime as runtime_mod
+from asf.workers import spawn as spawn_mod
 
 DEFAULT_SILENT_MIN = 30
 CORRECTION_HEAD = '\n\nCORRECTION: the step failed with:\n'
@@ -223,10 +228,17 @@ def correct_once(product, session, error_text, runtime):
                                      session.get('branch')), 'ASF_SESSION': sid}
     if session.get('id_range'):
         retry_env['BACKLOG_ID_RANGE'] = session['id_range']
+    cfg = _cfg()
+    # local: asf.briefs.build imports stall for CORRECTION_HEAD (a cycle at module-load time),
+    # and asf.briefs's own __init__ re-exports the `build` function over the module of the same
+    # name — the submodule path is the only way to reach `model_for` from here.
+    from asf.briefs.build import model_for
+    label = model_for(product, session.get('kind'))
+    model = spawn_mod.model_arg(label, cfg)
     job = runtime_mod.Job(product.name, retry_job, session.get('worktree'), path,
-                          session.get('model'), account=_account(session),
+                          model, account=_account(session),
                           env=retry_env, hooks_dir=hooks_dir,
-                          passthrough=env.env_passthrough(_cfg()))
+                          passthrough=env.env_passthrough(cfg))
     # launched, not waited on (B-0085): this runs inside the tick's health step, and waiting
     # here stopped health, harvest and the operator's tables for as long as a model session takes
     # — one tick sat inside four serial adjudications for an hour. The run is in the registry
@@ -241,7 +253,7 @@ def correct_once(product, session, error_text, runtime):
     retry = {
         'job': retry_job, 'item': session.get('item'), 'feature': session.get('feature'),
         'kind': session.get('kind'), 'account': session.get('account'),
-        'model': session.get('model'), 'pid': result.pid, 'worktree': session.get('worktree'),
+        'model': model, 'model_label': label, 'pid': result.pid, 'worktree': session.get('worktree'),
         'branch': session.get('branch'), 'started': started,
         'log': result.log_path, 'brief': path, 'id_range': session.get('id_range'),
         'runtime': runtime.name, 'session': sid, 'product': product.name,
