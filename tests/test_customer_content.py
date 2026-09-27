@@ -15,6 +15,7 @@ from unittest import mock
 
 from asf import conventions as conv_mod
 from asf import customer_content as cc
+from asf.evidence import sources
 from asf.harvest import deploy, lane
 
 import asf.briefs.build  # noqa: E402,F401 — the module; the package exports a build() function
@@ -132,8 +133,41 @@ class Markers(unittest.TestCase):
         self.assertEqual(probs[0][0], 'customer_content.forbidden_markers')
 
 
+#: the ``FakeSh`` the deploy source below reads its ``gh run list`` stub off — same pattern as
+#: tests/test_deploy.py's ``_CURRENT_SH`` (D16): each test builds a fresh one right before
+#: driving `deploy`, so the most recent one is always the right one.
+_CURRENT_SH = [None]
+
+
+class _FakeDeploy:
+    """``sources.DeploySource`` double: the newest success of the environment's workflow, read
+    through the same ``sh`` each test already stubs for ``gh run list`` — the rule
+    ``asf.evidence.sources.WorkflowDeploy`` runs itself, since this module's product is a bare
+    ``SimpleNamespace`` with no real host to hit."""
+
+    def __init__(self, product, sh):
+        self.product, self.sh = product, sh
+
+    def deployment(self, env_name):
+        wf = deploy.workflow(self.product, env_name)
+        if not wf:
+            return None, None
+        runs = json.loads(self.sh(['gh', 'run', 'list', '--workflow', wf]))
+        last = next((r for r in runs if r.get('conclusion') == 'success'), None)
+        return (last.get('headSha'), last.get('updatedAt')) if last else (None, None)
+
+
+def _fake_for_product(product, git=None, host=None, deploy=None):
+    return sources.Sources(None, None, _FakeDeploy(product, _CURRENT_SH[0]))
+
+
 class DeployRefusal(unittest.TestCase):
     PROD, GREEN = 'a' * 40, 'b' * 40
+
+    def setUp(self):
+        patcher = mock.patch.object(sources, 'for_product', _fake_for_product)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _sh(self):
         calls = []
@@ -151,6 +185,7 @@ class DeployRefusal(unittest.TestCase):
                 return '3'
             return ''
         sh.calls = calls
+        _CURRENT_SH[0] = sh
         return sh
 
     def _product(self, conv, **targets):

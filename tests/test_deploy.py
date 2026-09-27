@@ -5,7 +5,9 @@ import json
 import os
 import types
 import unittest
+from unittest import mock
 
+from asf.evidence import sources
 from asf.harvest import deploy
 
 PROD, GREEN, RED, MAIN = 'a' * 40, 'b' * 40, 'c' * 40, 'd' * 40
@@ -32,6 +34,52 @@ def _modes(dev=None, prod=None, **extra):
                                  conventions=conv, deploy_sha=d)
 
 
+#: the ``FakeSh`` `facts()` reads its deploy source off by default (see ``FakeDeploy``/``FakeSh``
+#: below) — each test builds one ``FakeSh`` right before driving `deploy`, so the most recent one
+#: is always the right one.
+_CURRENT_SH = [None]
+
+
+class FakeDeploy:
+    """``sources.DeploySource`` double: the same rule ``facts()`` used to run itself before D16 —
+    a workflow's newest success, dev's ``ci`` mode reading ``ci.dev_job`` (the newest completed
+    trunk run when none is named) — so every test's existing ``FakeSh`` stubs still answer it."""
+
+    def __init__(self, product, sh):
+        self.product, self.sh = product, sh
+
+    def deployment(self, env_name):
+        if env_name == 'dev' and deploy.mode(self.product, 'dev') == 'ci':
+            return self._ci_job()
+        wf = deploy.workflow(self.product, env_name)
+        runs = {'deploy-prod.yml': self.sh.deploys, 'deploy-dev.yml': self.sh.dev,
+                'site-deploy.yml': self.sh.site}.get(wf, [])
+        last = next((r for r in runs if r.get('conclusion') == 'success'), None)
+        return (last.get('headSha'), last.get('updatedAt')) if last else (None, None)
+
+    def _ci_job(self):
+        job = deploy._conv(self.product).get('ci_dev_job')
+        done = [r for r in self.sh.ci if r.get('status') == 'completed']
+        run = next((r for r in done[:5] if r.get('conclusion') == 'success'
+                    or (job and any(j.get('name') == job and j.get('conclusion') == 'success'
+                                    for j in self.sh.jobs.get(r.get('databaseId'), [])))), None)
+        return (run.get('headSha'), run.get('updatedAt')) if run else (None, None)
+
+
+def _fake_for_product(product, git=None, host=None, deploy=None):
+    return sources.Sources(None, None, FakeDeploy(product, _CURRENT_SH[0]))
+
+
+def setUpModule():
+    global _patcher
+    _patcher = mock.patch.object(sources, 'for_product', _fake_for_product)
+    _patcher.start()
+
+
+def tearDownModule():
+    _patcher.stop()
+
+
 class FakeSh:
     def __init__(self, deploys, ci, behind='5', ancestor=True, dispatch_ok=True, dev=None,
                  jobs=None, by_commit=None, site=None, relevant='2', vercel=None):
@@ -39,6 +87,7 @@ class FakeSh:
         self.ancestor, self.dispatch_ok, self.calls = ancestor, dispatch_ok, []
         self.dev, self.jobs, self.by_commit = dev or [], jobs or {}, by_commit or {}
         self.site, self.relevant, self.vercel = site or [], relevant, vercel
+        _CURRENT_SH[0] = self  # the deploy source `facts()` reads by default answers off this
 
     def __call__(self, cmd, cwd=None, timeout=60):
         self.calls.append(cmd)
