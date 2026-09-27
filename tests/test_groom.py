@@ -1,4 +1,6 @@
 import argparse
+import contextlib
+import io
 import os
 import shutil
 import subprocess
@@ -422,6 +424,202 @@ class GroomSectionCoverageTests(unittest.TestCase):
         with open(os.path.join(self.root, 'groom', today() + '.md')) as f:
             text = f.read()
         self.assertIn('F-0002 Blocked one — blockedBy F-0001, which is Closed', text)
+
+
+def _machine(cost=None, **extra):
+    lines = ['state: Active', 'stage_since: 2026-09-01T00:00:00Z',
+             'updated: 2026-09-01T00:00:00Z']
+    if cost is not None:
+        lines.append(f"cost: {{sessions: {cost[0]}, usd: {cost[1]}}}")
+    for k, v in extra.items():
+        lines.append(f"{k}: {v}")
+    return lines
+
+
+class OverBudgetQuestionTests(unittest.TestCase):
+    """T6 (F-0092 §2.7): the groom asks one question per open card a budget has stopped, and
+    `budget <n> [$<usd>]` raises it."""
+
+    def setUp(self):
+        self.root = make_repo()
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def canonical(self):
+        by_id, _ = load_items(self.root)
+        canonical, _ = canonicalize(by_id)
+        return canonical
+
+    def product(self, **approvals):
+        data = {'approvals': approvals} if approvals else {}
+        return env.Product('demo', data)
+
+    def test_one_line_per_open_over_budget_card_naming_both_measures_and_the_answers(self):
+        write_item(self.root, 'T-0001', 'task', 'Chatty task', machine_lines=_machine((9, 13.53)))
+        write_item(self.root, 'T-0002', 'task', 'Frugal task', machine_lines=_machine((1, 2)))
+        lines = groom.groom_over_budget_section(self.canonical(), self.product())
+        self.assertEqual(len(lines), 1, lines)
+        line = lines[0]
+        self.assertTrue(line.startswith('- [ ] T-0001 Chatty task — '), line)
+        self.assertIn('9/3 sessions', line)
+        self.assertIn('$13.53/$10', line)
+        self.assertIn('product default', line)
+        self.assertIn('`budget 12`', line)
+        self.assertIn('`budget 12 $25`', line)
+        self.assertIn('close it (`no: <why>`)', line)
+        self.assertIn('reshape it (`reshape: <how>`)', line)
+        self.assertTrue(line.endswith('→ answer: ____'), line)
+
+    def test_over_on_usd_alone_names_the_usd_measure(self):
+        write_item(self.root, 'T-0001', 'task', 'Pricey task', machine_lines=_machine((1, 15)))
+        line = groom.groom_over_budget_section(self.canonical(), self.product())[0]
+        self.assertIn('1/3 sessions', line)
+        self.assertIn('$15/$10', line)
+
+    def test_a_card_under_its_raised_budget_is_not_asked(self):
+        write_item(self.root, 'T-0001', 'task', 'Already raised', typed_lines=['budget_sessions: 20'],
+                  machine_lines=_machine((9, 2)))
+        self.assertEqual(groom.groom_over_budget_section(self.canonical(), self.product()), [])
+
+    def test_an_item_budget_is_named_item_not_product_default(self):
+        write_item(self.root, 'T-0001', 'task', 'Raised low', typed_lines=['budget_sessions: 5'],
+                  machine_lines=_machine((5, 1)))
+        line = groom.groom_over_budget_section(self.canonical(), self.product())[0]
+        self.assertIn('item', line)
+        self.assertNotIn('product default', line)
+
+    def test_a_closed_card_is_not_asked(self):
+        write_item(self.root, 'T-0001', 'task', 'Done and over',
+                  machine_lines=['state: Closed', 'stage_since: 2026-09-01T00:00:00Z',
+                                 'updated: 2026-09-01T00:00:00Z', 'cost: {sessions: 9, usd: 13.53}'])
+        self.assertEqual(groom.groom_over_budget_section(self.canonical(), self.product()), [])
+
+    def test_a_reshaped_card_is_not_asked(self):
+        write_item(self.root, 'T-0001', 'task', 'Reshaping', typed_lines=['reshape: split it'],
+                  machine_lines=_machine((9, 13.53)))
+        self.assertEqual(groom.groom_over_budget_section(self.canonical(), self.product()), [])
+
+    def test_no_product_asks_nothing(self):
+        write_item(self.root, 'T-0001', 'task', 'Chatty task', machine_lines=_machine((9, 13.53)))
+        self.assertEqual(groom.groom_over_budget_section(self.canonical(), None), [])
+
+    def _run_groom(self, date='2026-09-21'):
+        args = argparse.Namespace(date=date, apply=False, product=None, default_bug_epic=None,
+                                  answers_file=None, event=None)
+        with mock.patch.object(env, 'load_product', return_value=self.product()):
+            rc = groom.cmd_groom(args, self.root)
+        with open(os.path.join(self.root, 'groom', f'{date}.md')) as f:
+            return rc, f.read()
+
+    def test_rendered_and_attributed_to_over_budget_when_it_has_lines(self):
+        write_item(self.root, 'E-0009', 'epic', 'Factory', typed_lines=['decided: true'])
+        write_item(self.root, 'T-0001', 'task', 'Chatty task', parent='E-0009',
+                  machine_lines=_machine((9, 13.53)))
+        run(['index'], self.root)
+        rc, text = self._run_groom()
+        self.assertEqual(rc, 0)
+        self.assertIn('## Over budget', text)
+        self.assertIn('T-0001 Chatty task — 9/3 sessions, $13.53/$10 over budget', text)
+        self.assertEqual(groom._line_sections(text).get('T-0001'), 'over_budget')
+
+    def test_no_lines_no_section(self):
+        write_item(self.root, 'E-0009', 'epic', 'Factory', typed_lines=['decided: true'])
+        run(['index'], self.root)
+        rc, text = self._run_groom()
+        self.assertEqual(rc, 0)
+        self.assertNotIn('## Over budget', text)
+
+    def test_the_full_line_matches_the_spec_word_for_word(self):
+        write_item(self.root, 'T-0001', 'task', 'Chatty task', machine_lines=_machine((9, 13.53)))
+        line = groom.groom_over_budget_section(self.canonical(), self.product())[0]
+        self.assertEqual(
+            line,
+            '- [ ] T-0001 Chatty task — 9/3 sessions, $13.53/$10 over budget (product default): '
+            'raise it (`budget 12` or `budget 12 $25`), close it (`no: <why>`) or reshape it '
+            '(`reshape: <how>`) → answer: ____')
+
+    # The applier's side: `budget <n> [$<usd>]` raises the card, idempotently, attributed.
+
+    def write_prev(self, answer, prefix=''):
+        path = os.path.join(self.root, 'groom', '2026-09-20.md')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write("# Groom 2026-09-20\n\n## Over budget\n\n"
+                    f"- [ ] T-0001 Chatty task — 9/3 sessions, $13.53/$10 over budget (product "
+                    f"default): raise it (`budget 12` or `budget 12 $25`), close it "
+                    f"(`no: <why>`) or reshape it (`reshape: <how>`) → answer: {prefix}{answer}\n")
+        return path
+
+    def _ensure_chatty_task(self):
+        if not getattr(self, '_chatty_task_ready', False):
+            write_item(self.root, 'T-0001', 'task', 'Chatty task', machine_lines=_machine((9, 13.53)))
+            run(['index'], self.root)
+            self._chatty_task_ready = True
+
+    def apply(self, answer, prefix='', adjudicator_job=None):
+        self._ensure_chatty_task()
+        prev = self.write_prev(answer, prefix)
+        canonical = self.canonical()
+        with open(prev, encoding='utf-8') as f:
+            sections = groom._line_sections(f.read())
+        events = []
+        applied = groom.apply_groom_answers(self.root, canonical, prev, '2026-09-21',
+                                            adjudicator_job=adjudicator_job,
+                                            event=lambda kind, **f: events.append((kind, f)),
+                                            sections=sections)
+        with open(os.path.join(self.root, 'tasks', 'T-0001.md')) as f:
+            text = f.read()
+        return applied, text, events
+
+    def test_budget_n_writes_sessions_only(self):
+        applied, text, events = self.apply('budget 12')
+        self.assertEqual(applied, 1)
+        self.assertIn('budget_sessions: 12', text)
+        self.assertNotIn('budget_usd:', text)
+        self.assertIn('2026-09-21 groom: budget → 12 sessions (operator)', text)
+        self.assertEqual(events, [('groom_answer', {'item': 'T-0001', 'section': 'over_budget',
+                                                     'field': 'budget', 'value': '12 sessions',
+                                                     'by': 'operator'})])
+
+    def test_budget_n_usd_writes_both(self):
+        applied, text, _events = self.apply('budget 12 $25')
+        self.assertEqual(applied, 1)
+        self.assertIn('budget_sessions: 12', text)
+        self.assertIn('budget_usd: 25', text)
+        self.assertIn('2026-09-21 groom: budget → 12 sessions / $25 (operator)', text)
+
+    def test_a_second_apply_is_idempotent(self):
+        self.apply('budget 12')
+        applied2, text2, _events = self.apply('budget 12')
+        self.assertEqual(applied2, 0)
+        self.assertEqual(text2.count('budget_sessions: 12'), 1)
+        self.assertEqual(text2.count('groom: budget →'), 1)
+
+    def test_no_closes_the_card_as_any_no_does(self):
+        applied, text, _events = self.apply('no: not worth more')
+        self.assertEqual(applied, 1)
+        self.assertIn('removed: not worth more (groom 2026-09-21)', text)
+
+    def test_budget_soon_is_skipped_naming_the_grammar(self):
+        self._ensure_chatty_task()
+        out = io.StringIO()
+        prev = self.write_prev('budget soon')
+        canonical = self.canonical()
+        with open(prev, encoding='utf-8') as f:
+            sections = groom._line_sections(f.read())
+        with contextlib.redirect_stdout(out):
+            applied = groom.apply_groom_answers(self.root, canonical, prev, '2026-09-21',
+                                                sections=sections)
+        self.assertEqual(applied, 0)
+        self.assertIn('budget <n> [$<usd>]', out.getvalue())
+
+    def test_adjudicator_prefix_applies_and_attributes_under_auto(self):
+        applied, text, events = self.apply('budget 12', prefix='adjudicator: ',
+                                           adjudicator_job='groom-2026-09-20')
+        self.assertEqual(applied, 1)
+        self.assertIn('budget_sessions: 12', text)
+        self.assertIn('(adjudicator, groom-2026-09-20)', text)
+        self.assertEqual(events[0][1]['by'], 'adjudicator:groom-2026-09-20')
 
 
 if __name__ == '__main__':
