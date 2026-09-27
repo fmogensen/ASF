@@ -65,15 +65,21 @@ def head_of(repo, branch, main):
     """``(head, branch_exists, rev)`` — the line naming the commit the work starts from, whether
     the branch is on origin, and the rev the other facts are read at.
 
-    A pushed branch reads its own tip. An unpushed one reads the trunk's and *says so*: without
-    the parenthetical the sha would read as the branch's own head, which it is not."""
+    A pushed branch reads its own tip — the sha ``ls-remote`` reported, not the local
+    ``refs/remotes/origin/<branch>`` the wave's process may not have fetched this tick. An
+    unpushed one reads the trunk's and *says so*: without the parenthetical the sha would read as
+    the branch's own head, which it is not."""
     if not repo or not os.path.isdir(repo):
         return '', False, ''
-    exists = bool(branch) and bool(_git_text(repo, ['ls-remote', '--heads', 'origin', branch]))
-    rev = ''
-    if exists:
-        rev = f'origin/{branch}' if _git(repo, ['rev-parse', '--verify', '-q',
-                                                 f'origin/{branch}^{{commit}}']) is not None else ''
+    ls = _git_text(repo, ['ls-remote', '--heads', 'origin', branch]) if branch else ''
+    sha = ls.split()[0] if ls else ''
+    exists = bool(sha)
+    rev = sha if sha and _git(repo, ['cat-file', '-e', f'{sha}^{{commit}}']) is not None else ''
+    if sha and not rev:
+        # origin has moved and this clone has not fetched it: never pass the older ref off as
+        # the head — the commit list would then read as the whole of what was done
+        return f'{sha[:9]} (origin/{branch} — not in this clone yet)', True, ''
+    own = bool(sha) and bool(rev)
     if not rev:
         trunk = f'origin/{main}'
         rev = trunk if _git(repo, ['rev-parse', '--verify', '-q', f'{trunk}^{{commit}}']) \
@@ -83,9 +89,24 @@ def head_of(repo, branch, main):
     line = _git_text(repo, ['log', '-1', '--format=%h %s', rev])
     if not line:
         return '', exists, rev
-    where = f'({rev})' if rev == f'origin/{branch}' \
-        else f'({rev} — {branch} is not on origin yet)' if branch else f'({rev})'
+    where = f'(origin/{branch})' if own \
+        else f'(origin/{main} — {branch} is not on origin yet)' if branch else f'(origin/{main})'
     return f'{line} {where}', exists, rev
+
+
+#: The most commits the brief lists between the trunk and the branch head; over it the block
+#: prints the count and names the `git log` that has the rest.
+COMMIT_LIMIT = 10
+
+
+def commits_on(repo, rev, main, limit=COMMIT_LIMIT):
+    """``{'total': n, 'lines': ['<short sha> <subject>', ...]}`` for ``origin/<main>..<rev>``,
+    newest first, ``lines`` cut to ``limit``. ``{'total': 0, 'lines': []}`` for a rev the clone
+    does not hold, a branch level with the trunk, and every failure — one ``git log``, no fetch."""
+    if not repo or not rev:
+        return {'total': 0, 'lines': []}
+    lines = _git_text(repo, ['log', '--format=%h %s', f'origin/{main}..{rev}']).splitlines()
+    return {'total': len(lines), 'lines': lines[:limit]}
 
 
 def _lines_of(blob):
