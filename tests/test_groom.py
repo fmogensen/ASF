@@ -296,6 +296,296 @@ class ConflictDedupeTests(unittest.TestCase):
         self.assertIn(answered_head, text)
 
 
+class ConflictApplyTests(unittest.TestCase):
+    """F-0046 Task 6: the four answers to a conflicts line, applied through `asf groom --apply`.
+    `R-0007 conflicts D-0042` by scope, with `D-0042` the precedence winner (newer)."""
+
+    def setUp(self):
+        self.root = make_repo()
+        write_item(
+            self.root, 'R-0007', 'rule', 'Harvest goes through rebase_and_resolve',
+            typed_lines=['scope: harvest', 'enforced: true', 'reason: keep the trunk clean',
+                        'check: check.sh'],
+            machine_lines=['state: New', 'stage_since: 2026-09-01T00:00:00Z',
+                          'updated: 2026-09-01T00:00:00Z'],
+            body=("## Statement\nHarvest never touches the trunk directly; it works through "
+                  "`harvest.rebase_and_resolve`.\n\n## Source\nrules/legacy-harvest-note.md\n\n"
+                  "## History\n- 2026-09-01: created\n\n## Children\n\n## Backlinks\n"))
+        write_item(
+            self.root, 'D-0042', 'decision', 'A worker branch fast-forwards the trunk itself',
+            typed_lines=['decided: true', 'decided_by: ops', 'date: 2026-09-15',
+                        'scope: harvest'],
+            machine_lines=['state: New', 'stage_since: 2026-09-15T00:00:00Z',
+                          'updated: 2026-09-15T00:00:00Z'],
+            body=("## Statement\nA worker branch may fast-forward the trunk itself, bypassing "
+                  "`harvest.rebase_and_resolve` for a clean history.\n\n## Source\n\n"
+                  "## History\n- 2026-09-15: created\n\n## Children\n\n## Backlinks\n"))
+        run(['index'], self.root)
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    @staticmethod
+    def _question(answer):
+        return ("- [ ] D-0042 conflicts R-0007 — scope `harvest`, shares "
+                "`harvest.rebase_and_resolve`; keep A · keep B · both · merge "
+                f"(merge keeps D-0042) → answer: {answer}\n"
+                '      A D-0042 "stmt" — src\n      B R-0007 "stmt" — src\n'
+                '      precedence: D-0042 (newer, 2026-09-15)\n')
+
+    def _write_yesterday(self, answer):
+        with open(os.path.join(self.root, 'groom', '2026-09-20.md'), 'w', encoding='utf-8') as f:
+            f.write("# Groom 2026-09-20\n\n## Conflicting rules and decisions\n\n" +
+                    self._question(answer))
+
+    def _apply(self, date='2026-09-21'):
+        return run(['groom', '--date', date, '--apply'], self.root)
+
+    def _text(self, folder, name):
+        with open(os.path.join(self.root, folder, f'{name}.md'), encoding='utf-8') as f:
+            return f.read()
+
+    def test_keep_a_writes_the_pair_check_demands(self):
+        self._write_yesterday('keep A')
+        r = self._apply()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('applied 2', r.stdout)
+
+        loser = self._text('rules', 'R-0007')
+        meta, body = frontmatter.parse(loser, path='rules/R-0007.md')
+        self.assertEqual(meta['superseded_by'], 'D-0042')
+        self.assertIn('- 2026-09-21 groom: superseded_by → D-0042 (operator)', body)
+
+        winner = self._text('decisions', 'D-0042')
+        meta, body = frontmatter.parse(winner, path='decisions/D-0042.md')
+        self.assertEqual(meta['supersedes'], ['R-0007'])
+        self.assertIn('- 2026-09-21 groom: supersedes → R-0007 (operator)', body)
+        # the pair asf check demands (Task 2): each field names the other card, in both
+        # directions, with no dangling half
+        self.assertEqual(run(['index'], self.root).returncode, 0)
+
+    def test_keep_b_is_the_mirror(self):
+        self._write_yesterday('keep B')
+        r = self._apply()
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+        winner = self._text('rules', 'R-0007')
+        meta, _body = frontmatter.parse(winner, path='rules/R-0007.md')
+        self.assertEqual(meta['supersedes'], ['D-0042'])
+
+        loser = self._text('decisions', 'D-0042')
+        meta, body = frontmatter.parse(loser, path='decisions/D-0042.md')
+        self.assertEqual(meta['superseded_by'], 'R-0007')
+        self.assertIn('- 2026-09-21 groom: superseded_by → R-0007 (operator)', body)
+
+    def test_both_declines_and_carries_no_supersession_field(self):
+        self._write_yesterday('both')
+        r = self._apply()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('applied 2', r.stdout)
+
+        for folder, name in (('rules', 'R-0007'), ('decisions', 'D-0042')):
+            meta, body = frontmatter.parse(self._text(folder, name), path=f'{folder}/{name}.md')
+            self.assertEqual(meta['conflict_declined'], ['D-0042+R-0007'])
+            self.assertNotIn('superseded_by', meta)
+            self.assertNotIn('supersedes', meta)
+            self.assertIn('- 2026-09-21 groom: conflict declined D-0042+R-0007 (operator)', body)
+
+        # the next groom no longer proposes an already-declined pair
+        r2 = run(['groom', '--date', '2026-09-22'], self.root)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        with open(os.path.join(self.root, 'groom', '2026-09-22.md'), encoding='utf-8') as f:
+            text = f.read()
+        conflicts_at = text.index('## Conflicting rules and decisions')
+        undecided14_at = text.index('## Undecided > 14 days')
+        self.assertEqual(text[conflicts_at:undecided14_at].strip(),
+                         '## Conflicting rules and decisions\n\n(none)')
+
+    def test_merge_copies_source_and_history_onto_the_survivor(self):
+        self._write_yesterday('merge')
+        r = self._apply()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('applied 2', r.stdout)
+
+        winner = self._text('decisions', 'D-0042')
+        meta, body = frontmatter.parse(winner, path='decisions/D-0042.md')
+        self.assertEqual(meta.get('supersedes'), ['R-0007'])
+        self.assertIn('rules/legacy-harvest-note.md', body)
+        self.assertIn('- 2026-09-01: created (from R-0007)', body)
+
+        loser = self._text('rules', 'R-0007')
+        meta, body = frontmatter.parse(loser, path='rules/R-0007.md')
+        self.assertEqual(meta['superseded_by'], 'D-0042')
+        self.assertIn("- 2026-09-21 groom: merged R-0007's source and history, "
+                     "superseded_by → D-0042 (operator)", body)
+        # the loser's own body is otherwise unchanged
+        self.assertIn('Harvest never touches the trunk directly', body)
+
+    def test_merge_onto_a_survivor_with_no_source_section_lands_the_supersession_anyway(self):
+        write_item(
+            self.root, 'D-0043', 'decision', 'A migrated decision with no Source section',
+            typed_lines=['decided: true', 'decided_by: ops', 'date: 2026-09-16'],
+            machine_lines=['state: New', 'stage_since: 2026-09-16T00:00:00Z',
+                          'updated: 2026-09-16T00:00:00Z'],
+            body=("## Statement\nHarvest never touches the trunk directly; it works through "
+                  "`harvest.rebase_and_resolve`, one more time.\n\n## Context\n\n"
+                  "## History\n- 2026-09-16: created\n\n## Children\n\n## Backlinks\n"))
+        run(['index'], self.root)
+        with open(os.path.join(self.root, 'groom', '2026-09-20.md'), 'w', encoding='utf-8') as f:
+            f.write("# Groom 2026-09-20\n\n## Conflicting rules and decisions\n\n" +
+                    ("- [ ] D-0043 conflicts R-0007 — overlap 0.62; keep A · keep B · both · "
+                     "merge (merge keeps D-0043) → answer: merge\n"))
+        r = self._apply()
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+        winner = self._text('decisions', 'D-0043')
+        meta, body = frontmatter.parse(winner, path='decisions/D-0043.md')
+        self.assertEqual(meta['supersedes'], ['R-0007'])
+        self.assertNotIn('## Source', body)
+        self.assertIn('one more time.', body)  # every other section byte-identical otherwise
+
+        loser = self._text('rules', 'R-0007')
+        meta, _body = frontmatter.parse(loser, path='rules/R-0007.md')
+        self.assertEqual(meta['superseded_by'], 'D-0043')
+
+    def test_blank_slot_bar_yes_and_rank_write_nothing(self):
+        for answer in ('', '____', 'yes', 'rank 3'):
+            with self.subTest(answer=answer):
+                self._write_yesterday(answer)
+                r = self._apply()
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertIn('applied 0', r.stdout)
+                meta, _body = frontmatter.parse(self._text('rules', 'R-0007'),
+                                                path='rules/R-0007.md')
+                self.assertNotIn('superseded_by', meta)
+                self.assertNotIn('decided', meta)
+
+    def test_the_answer_may_carry_a_why(self):
+        self._write_yesterday('keep A — R-0007 is the older wording')
+        r = self._apply()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        meta, body = frontmatter.parse(self._text('rules', 'R-0007'), path='rules/R-0007.md')
+        self.assertEqual(meta['superseded_by'], 'D-0042')
+        self.assertIn('- 2026-09-21 groom: superseded_by → D-0042 (operator)', body)
+        self.assertNotIn('older wording', body)  # the why is not written onto either card
+
+    def test_groom_answer_events_carry_section_conflicts_and_the_field_per_card(self):
+        self._write_yesterday('keep A')
+        with open(os.path.join(self.root, 'groom', '2026-09-20.md'), encoding='utf-8') as f:
+            prev_sections = groom._line_sections(f.read())
+        by_id, _errors = load_items(self.root)
+        canonical, _dupes = canonicalize(by_id)
+        events = []
+        groom.apply_groom_answers(
+            self.root, canonical, os.path.join(self.root, 'groom', '2026-09-20.md'), '2026-09-21',
+            event=lambda kind, **kw: events.append((kind, kw)), sections=prev_sections)
+        by_item = {e[1]['item']: e[1] for e in events}
+        self.assertEqual(by_item['R-0007']['section'], 'conflicts')
+        self.assertEqual(by_item['R-0007']['field'], 'superseded_by')
+        self.assertEqual(by_item['D-0042']['section'], 'conflicts')
+        self.assertEqual(by_item['D-0042']['field'], 'supersedes')
+
+
+class ConflictIdempotencyTests(unittest.TestCase):
+    """F-0046 Task 6: `--apply` requires every answer to be idempotent, and the two refusals to
+    write nothing at all."""
+
+    def setUp(self):
+        self.root = make_repo()
+        write_item(
+            self.root, 'R-0007', 'rule', 'Harvest goes through rebase_and_resolve',
+            typed_lines=['scope: harvest', 'enforced: true', 'reason: keep the trunk clean',
+                        'check: check.sh'],
+            machine_lines=['state: New', 'stage_since: 2026-09-01T00:00:00Z',
+                          'updated: 2026-09-01T00:00:00Z'],
+            body=("## Statement\nHarvest never touches the trunk directly; it works through "
+                  "`harvest.rebase_and_resolve`.\n\n## Source\nrules/legacy-harvest-note.md\n\n"
+                  "## History\n- 2026-09-01: created\n\n## Children\n\n## Backlinks\n"))
+        write_item(
+            self.root, 'D-0042', 'decision', 'A worker branch fast-forwards the trunk itself',
+            typed_lines=['decided: true', 'decided_by: ops', 'date: 2026-09-15',
+                        'scope: harvest'],
+            machine_lines=['state: New', 'stage_since: 2026-09-15T00:00:00Z',
+                          'updated: 2026-09-15T00:00:00Z'],
+            body=("## Statement\nA worker branch may fast-forward the trunk itself, bypassing "
+                  "`harvest.rebase_and_resolve` for a clean history.\n\n## Source\n\n"
+                  "## History\n- 2026-09-15: created\n\n## Children\n\n## Backlinks\n"))
+        run(['index'], self.root)
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _write_yesterday(self, answer):
+        with open(os.path.join(self.root, 'groom', '2026-09-20.md'), 'w', encoding='utf-8') as f:
+            f.write("# Groom 2026-09-20\n\n## Conflicting rules and decisions\n\n"
+                    "- [ ] D-0042 conflicts R-0007 — scope `harvest`, shares "
+                    "`harvest.rebase_and_resolve`; keep A · keep B · both · merge "
+                    f"(merge keeps D-0042) → answer: {answer}\n")
+
+    def _text(self, folder, name):
+        with open(os.path.join(self.root, folder, f'{name}.md'), encoding='utf-8') as f:
+            return f.read()
+
+    def test_reapplying_the_same_file_writes_nothing_the_second_time(self):
+        self._write_yesterday('keep A')
+        run(['groom', '--date', '2026-09-21', '--apply'], self.root)
+        snapshot = (self._text('rules', 'R-0007'), self._text('decisions', 'D-0042'))
+        r2 = run(['groom', '--date', '2026-09-21', '--apply'], self.root)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertIn('applied 0', r2.stdout)
+        self.assertEqual((self._text('rules', 'R-0007'), self._text('decisions', 'D-0042')),
+                         snapshot)
+
+    def test_merge_run_twice_does_not_duplicate_source_or_history(self):
+        self._write_yesterday('merge')
+        run(['groom', '--date', '2026-09-21', '--apply'], self.root)
+        snapshot = self._text('decisions', 'D-0042')
+        r2 = run(['groom', '--date', '2026-09-21', '--apply'], self.root)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertIn('applied 0', r2.stdout)
+        self.assertEqual(self._text('decisions', 'D-0042'), snapshot)
+        self.assertEqual(snapshot.count('rules/legacy-harvest-note.md'), 1)
+        self.assertEqual(snapshot.count('- 2026-09-01: created (from R-0007)'), 1)
+
+    def test_keep_a_refuses_when_the_loser_is_already_superseded_by_a_third_card(self):
+        write_item(
+            self.root, 'D-0051', 'decision', 'A third card, unrelated to the pair',
+            typed_lines=['decided: true', 'decided_by: ops', 'date: 2026-09-18'])
+        frontmatter.write_typed(os.path.join(self.root, 'rules', 'R-0007.md'),
+                                {'superseded_by': 'D-0051'})
+        run(['index'], self.root)
+        self._write_yesterday('keep A')
+        r = run(['groom', '--date', '2026-09-21', '--apply'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('applied 0', r.stdout)
+        self.assertIn('groom: keep A D-0042+R-0007 skipped — R-0007 is already superseded by '
+                      'D-0051', r.stdout)
+        meta, _body = frontmatter.parse(self._text('decisions', 'D-0042'),
+                                        path='decisions/D-0042.md')
+        self.assertNotIn('supersedes', meta)
+
+    def test_keep_a_refuses_a_supersession_cycle(self):
+        # R-0007 already superseded by D-0042 the other way around; `keep A` on this pair would
+        # try to make R-0007 supersede D-0042 back — a 2-cycle.
+        frontmatter.write_typed(os.path.join(self.root, 'decisions', 'D-0042.md'),
+                                {'superseded_by': 'R-0007'})
+        frontmatter.write_typed(os.path.join(self.root, 'rules', 'R-0007.md'),
+                                {'supersedes': ['D-0042']})
+        run(['index'], self.root)
+        with open(os.path.join(self.root, 'groom', '2026-09-20.md'), 'w', encoding='utf-8') as f:
+            f.write("# Groom 2026-09-20\n\n## Conflicting rules and decisions\n\n"
+                    "- [ ] D-0042 conflicts R-0007 — reason; keep A · keep B · both · merge "
+                    "(merge keeps D-0042) → answer: keep A\n")
+        r = run(['groom', '--date', '2026-09-21', '--apply'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('applied 0', r.stdout)
+        self.assertIn('groom: keep A D-0042+R-0007 skipped — R-0007 would close a supersession '
+                      'cycle through D-0042', r.stdout)
+        meta, _body = frontmatter.parse(self._text('decisions', 'D-0042'),
+                                        path='decisions/D-0042.md')
+        self.assertEqual(meta['superseded_by'], 'R-0007')  # unchanged
+
+
 class GroomInboxIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.root = make_repo()
