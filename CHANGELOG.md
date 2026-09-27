@@ -2,6 +2,23 @@
 
 One entry per released version, newest first.
 
+## v0.1.34 — 2026-09-27
+
+### In progress
+
+- F-0003 P0c — seed this record with the factory itself
+- F-0075 Redaction is a gate on every write path: operator names and secrets never reach a record or a public repo
+
+### Improvements and hotfixes
+
+- feat(lifecycle, feeder, briefs): adjudicate later and cheaper
+- fix(briefs): an external-CI brief names the full-suite commands it must not run
+- fix(tests): pin the clock in the on-prod ingest idempotence check
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.34"`
+
 ## v0.1.33 — 2026-09-26
 
 ### In progress
