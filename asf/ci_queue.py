@@ -89,7 +89,7 @@ trunk, so a trunk run never queues behind PR runs), then S2 items (2), then ever
 branch maps to a record item (3: the lane's branch → item mapping), in the record's own order —
 the one ``asf next`` hands work out in (:func:`record_rank`: a Task's run before a Feature's own
 document PR, then the Feature's Epic rank, its rank, its id) — then everything the record has no
-item for (4: ``worker/*``, ``worktree-m-*``, ``cloud/*`` without an item, a batch, a deploy);
+item for (4: a branch no lane item claims — a scratch or worker branch — a batch, a deploy);
 within a priority (and a rank), oldest first. Age alone never puts an unranked branch ahead of
 the record's work (2026-09-27: ``worker/plan-measure-1`` held the heavy runners at the head
 ahead of every Feature Task); the head guard stays the backstop for a low rank, measured from
@@ -573,8 +573,8 @@ def _touches(files, paths):
 def priority(item_id, items=None, branch='', files=(), product=None, kind=None):
     """``(prio, label)``: 0 for an S1 or hotfix item, 1 for a trunk run (``kind`` ``trunk``: every
     deploy waits on a green trunk), 2 for an S2 item, 3 for an item the record holds (ordered
-    within by :func:`record_rank`), 4 for a start the record has no item for (a ``worker/*``,
-    ``worktree-m-*`` or ``cloud/*`` branch, a batch, a deploy). ``label`` is what the hold line
+    within by :func:`record_rank`), 4 for a start the record has no item for (a scratch or
+    worker branch no lane item claims, a batch, a deploy). ``label`` is what the hold line
     names: ``S1``, ``hotfix``, ``trunk``, ``S2``, ``Task F-0113 rank 2``, ``other``. ``files``
     and ``product`` are accepted for the callers; the order reads the record alone."""
     items = items or {}
