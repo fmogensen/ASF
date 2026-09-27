@@ -4,6 +4,7 @@ Read off the record's ``index.json`` only: every Epic is a card there. A product
 goals in a file of its own brings them in once with ``asf migrate`` (``conventions.goals_file``);
 the roadmap never reads the product repo for them.
 """
+from asf import budget
 from asf.views import index_reader as ix
 from asf.views.pr_annotate import annotator, pr_states, table
 
@@ -52,10 +53,10 @@ def render(root, product=None):
         if len(nxt) > NEXT_FEATURES:
             parts.append(f"+{len(nxt) - NEXT_FEATURES} more")
         prod_cell = _cut(f"{len(prod)}: " + "; ".join(f"{f['id']} {f['title']}" for f in prod)) if prod else ""
-        spend = ix.usd(ix.subtree(items, e))
-        budget = e.get('budget_usd')
-        spend_cell = '' if spend is None and budget is None else \
-            f"{ix.money(spend)} / {ix.money(budget) if isinstance(budget, (int, float)) else '—'}"
+        s = budget.epic_spend(e['id'], ix.subtree_usd(items, e), e.get('budget_usd'))
+        spend_cell = '' if s.usd is None and s.budget is None else (
+            f"{ix.money(s.usd)} / {ix.money(s.budget) if s.budget is not None else '—'}"
+            + (f" · {budget.OVER_MARK}" if s.over else ''))
         rows.append([
             str(e['rank']) if isinstance(e.get('rank'), int) else '',
             f"{e['id']} {e['title']}" + (f" ({e['legacy_id']})" if e.get('legacy_id') else ''),
