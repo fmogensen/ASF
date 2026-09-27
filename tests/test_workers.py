@@ -1072,6 +1072,69 @@ class SpawnHookTests(Home):
                          'spec/F-0001')
 
 
+class RelaunchHeadTests(Home):
+    """T-0345 — a relaunched session starts on the old head: :func:`spawn.make_worktree` hands a
+    second run of the same job the worktree the first run left, on top of its commits (or a
+    rebase of them, when the trunk moved under it); the launch line's ``launch_head`` names the
+    sha origin held when the launch fetched it; and a worktree reused while behind origin is
+    caught up before anything is committed, never left to diverge (:func:`spawn._catch_up`)."""
+
+    def _push_two_commits(self, job):
+        """Spawn ``job``, push two commits on its branch, end the run. Returns
+        ``(branch, old_head)``."""
+        rec = spawn_mod.spawn(self.product, feature_row(job), self.acct(), 'b',
+                              runtime=runtime_mod.FakeRuntime([{'ok': True, 'pid': 40}]),
+                              cfg=self.cfg)
+        wt, branch = rec['worktree'], rec['branch']
+        for k, v in (('user.email', 'ci@example.com'), ('user.name', 'ci')):
+            git('config', k, v, cwd=wt)
+        for i in (1, 2):
+            with open(os.path.join(wt, f'f{i}.txt'), 'w') as f:
+                f.write(f'commit {i}\n')
+            git('add', f'f{i}.txt', cwd=wt)
+            git('commit', '-q', '-m', f'work {i}', cwd=wt)
+        git('push', '-q', 'origin', f'HEAD:refs/heads/{branch}', cwd=wt)
+        old_head = git('rev-parse', 'HEAD', cwd=wt)
+        health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        return branch, old_head
+
+    def test_a_relaunch_starts_on_top_of_the_old_head(self):
+        branch, old_head = self._push_two_commits('relaunch-a')
+        wt = spawn_mod.make_worktree(self.product, 'relaunch-a', branch, kind='correct')
+        for k, v in (('user.email', 'ci@example.com'), ('user.name', 'ci')):
+            git('config', k, v, cwd=wt)
+        with open(os.path.join(wt, 'round2.txt'), 'w') as f:
+            f.write('round 2\n')
+        git('add', 'round2.txt', cwd=wt)
+        git('commit', '-q', '-m', 'round 2 continues', cwd=wt)
+        parent = git('rev-parse', 'HEAD~1', cwd=wt)
+        on_old_head = parent == old_head
+        rebased = lifecycle.rebase_of(wt, lifecycle.worktree_head(wt), old_head, self.product.main)
+        self.assertTrue(on_old_head or rebased)
+
+    def test_launch_head_names_the_sha_origin_held_at_launch(self):
+        branch, old_head = self._push_two_commits('relaunch-b')
+        spawn_mod.make_worktree(self.product, 'relaunch-b', branch, kind='correct')
+        self.assertEqual(spawn_mod._launch_head(self.repo, branch),
+                         git('rev-parse', f'origin/{branch}', cwd=self.repo))
+        self.assertEqual(spawn_mod._launch_head(self.repo, branch), old_head)
+
+    def test_a_worktree_behind_origin_is_caught_up_before_the_commit(self):
+        branch, old_head = self._push_two_commits('relaunch-c')
+        wt = spawn_mod.make_worktree(self.product, 'relaunch-c', branch, kind='correct')
+        # a person pushes on top while the worktree sits at the old head
+        other = os.path.join(self.tmp, 'other')
+        git('clone', '-q', '-b', branch, os.path.join(self.tmp, 'origin.git'), other, cwd=self.tmp)
+        git('-c', 'user.email=p@example.com', '-c', 'user.name=p', 'commit', '-q',
+            '--allow-empty', '-m', 'a person pushes on top', cwd=other)
+        git('push', '-q', 'origin', branch, cwd=other)
+        newer = git('rev-parse', 'HEAD', cwd=other)
+        health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        wt2 = spawn_mod.make_worktree(self.product, 'relaunch-c', branch, kind='correct')
+        self.assertEqual(os.path.realpath(wt2), os.path.realpath(wt))
+        git('merge-base', '--is-ancestor', newer, 'HEAD', cwd=wt2)
+
+
 class TestWave(Home):
     def run_wave(self, rows, n, accounts, live=(), usage=None):
         pool = pool_mod.Pool(accounts, quota_source=quota_mod.FakeQuotaSource(usage or {}),
