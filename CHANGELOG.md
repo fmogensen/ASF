@@ -2,6 +2,35 @@
 
 One entry per released version, newest first.
 
+## v0.1.43 — 2026-09-27
+
+### Features landed
+
+- F-0195 Feeder: finish planned Features before starting new specs
+
+### Bugs fixed
+
+- B-0114 native landing: a merged spec/plan PR marks its Feature landed/Resolved, so no coder ever launches
+
+### In progress
+
+- F-0010 P3 wave 2 — evidence and ingest
+- F-0033 Dogfood end to end in CI
+- F-0038 A factory-only CI class: a push touching only factory code runs lint and the factory tests
+- F-0092 An item has a budget: three sessions or $10, then it stops and says why
+- F-0094 A decided Epic with no Features never starts: no row breaks an Epic into Features
+- F-0100 The savings pass: the tick proposes the next cheapest win from its own numbers
+- F-0111 hooks install from asf-live tells the operator to wire the dev install's path into the product's git hooks
+
+### Improvements and hotfixes
+
+- fix(install): read the whole script before running it; a pre-existing doctor RED warns
+- test(tick_steps): the fake planners take plan_rows' bandwidth
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.43"`
+
 ## v0.1.42 — 2026-09-27
 
 ### Features landed
