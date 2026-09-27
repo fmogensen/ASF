@@ -21,14 +21,11 @@ import signal
 import subprocess
 import sys
 
+from asf import hermetic
 from asf.conventions import DEFAULT_PUSH_TIMEOUT_S
 
 #: The returncode a push killed on its timeout reports (the ``timeout(1)`` convention).
 TIMED_OUT = 124
-
-#: Variables a git hook exports: a push made under one would act on the hook's repo, not ``cwd``.
-_HOOK_VARS = ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_PREFIX', 'GIT_OBJECT_DIRECTORY',
-              'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_QUARANTINE_PATH')
 
 
 def push_timeout(conv=None):
@@ -53,9 +50,7 @@ def push(args, cwd, refs_only=False, timeout=None, env=None, log=None):
     ``log`` (default stderr)."""
     cmd = push_args(args, refs_only)
     limit = timeout if timeout is not None else push_timeout()
-    run_env = dict(os.environ if env is None else env)
-    for var in _HOOK_VARS:
-        run_env.pop(var, None)
+    run_env = hermetic.git_env(env)
     p = subprocess.Popen(cmd, cwd=cwd, env=run_env, stdin=subprocess.DEVNULL,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                          start_new_session=True)

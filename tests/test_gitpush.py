@@ -8,8 +8,9 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 
-from asf import gitpush
+from asf import gitpush, hermetic
 from asf.conventions import DEFAULT_PUSH_TIMEOUT_S, Conventions
 from asf.workers import lifecycle as lc
 from tests import test_lifecycle as tl
@@ -87,6 +88,26 @@ class PushTest(unittest.TestCase):
         self.assertEqual(Conventions.from_mapping({'git': {}}), Conventions())
         self.assertEqual(gitpush.push_timeout(Conventions.from_mapping(
             {'git': {'push_timeout_s': 'soon'}})), DEFAULT_PUSH_TIMEOUT_S)
+
+    def test_the_child_env_is_hermetic_git_env(self):
+        # F-0013 D4: gitpush no longer builds its own hook-variable list — one remover, shared
+        # with the harvest gate and everything else that spawns a git child.
+        base = dict(os.environ, GIT_DIR='/elsewhere/.git', GIT_QUARANTINE_PATH='/elsewhere/q',
+                    FAKE_VAR='keep')
+        captured = {}
+
+        class FakePopen:
+            def __init__(self, *args, **kwargs):
+                captured['env'] = kwargs['env']
+                self.pid = 1
+                self.returncode = 0
+
+            def communicate(self, timeout=None):
+                return '', ''
+
+        with mock.patch.object(gitpush.subprocess, 'Popen', FakePopen):
+            gitpush.push(['-q', 'origin', f'{self.sha}:refs/heads/x'], self.repo, env=base)
+        self.assertEqual(captured['env'], hermetic.git_env(base))
 
 
 class PublishArchiveSkipsTheHookTest(unittest.TestCase):

@@ -73,10 +73,7 @@ def clean_env(env=None):
     """`env` (default: the caller's) minus the variables a git hook exports. Harvest runs from
     the tick, but also from a pre-commit hook or a worker session under one; a `git` child
     that inherits GIT_DIR/GIT_WORK_TREE ignores its `cwd` and writes into the hook's repo."""
-    env = dict(os.environ if env is None else env)
-    for var in GIT_HOOK_VARS:
-        env.pop(var, None)
-    return env
+    return hermetic.git_env(env)
 
 
 def sh(cmd, cwd=None, env=None):
