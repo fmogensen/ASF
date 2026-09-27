@@ -37,8 +37,10 @@ import statistics
 from asf import env
 
 QUOTA_EXHAUSTED = 'quota-exhausted'
-#: The CLI's texts for a spent window: the session limit, the usage limit, a rate limit.
-LIMIT_RE = re.compile(r"hit your (?:\w+ )?limit|(?:session|usage|weekly) limit|rate limit|"
+#: The CLI's texts for a spent window: the session limit, the usage limit, a rate limit (the
+#: API's own 429 ``rate_limit_error`` too).
+LIMIT_RE = re.compile(r"hit your (?:\w+ )?limit|(?:session|usage|weekly) limit|rate[ _]limit|"
+                      r"API Error: 429|"
                       r"quota (?:exceeded|exhausted)", re.I)
 RESET_RE = re.compile(r'resets\s+(?:(?P<mon>[A-Za-z]{3})[a-z]*\.?\s+(?P<day>\d{1,2}),?\s+(?:at\s+)?)?'
                       r'(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ap>[ap]\.?m\.?)?'

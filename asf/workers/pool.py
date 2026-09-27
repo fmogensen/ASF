@@ -355,9 +355,10 @@ class Pool:
         """``(fits, why, projected)``: whether one more ``(kind, model)`` launch keeps ``account`` under the
         5h guard — ``five_h_pct`` now, plus this wave's launches on it at their full estimate,
         plus the sessions already running on it at the table's allowance, plus this launch
-        (:mod:`asf.workers.headroom`). An account with no 5h reading is the band's to judge."""
+        (:mod:`asf.workers.headroom`). An account with no 5h reading, or a stale one, is the band's
+        to judge."""
         u = self.usage(account) or {}
-        if u.get('five_h_pct') is None:
+        if u.get('five_h_pct') is None or quota_mod.stale_since(u, self.guards) is not None:
             return True, '', 0.0
         now = float(u['five_h_pct'])
         running = sum(self.costs.cost(s.get('kind'), s.get('model')) for s in self.live

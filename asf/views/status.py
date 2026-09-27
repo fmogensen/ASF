@@ -19,7 +19,8 @@ Every row is filled from what exists, or says which key would fill it —
 * **Quota 5h/7d** — each account through the quota source (``worker_pool.quota_command``), the
   cell naming the band when it is not ``free``, and a stopped account's reset (``— resets
   15:20``): the one a session limit named (:mod:`asf.workers.headroom`), else the source's
-  ``five_h_resets_at`` when it prints one;
+  ``five_h_resets_at`` when it prints one; a reading older than ``quota_guards.stale_after_min``
+  (by the source's ``polled_at``) says ``stale since HH:MM``;
 * **Cron** — the scheduler adapter's ``status()`` of this product's loaded jobs.
 """
 import datetime
@@ -281,6 +282,9 @@ def quota_cell(cfg):
                 f"{seven if seven is not None else '?'}%")
         if state != quota_mod.FREE:
             part += f" {state}"
+        since = quota_mod.stale_since(u, guards)
+        if since is not None:
+            part += f" {quota_mod.stale_label(since)}"
         if state == quota_mod.STOP and headroom.parse_ts(until):
             part += f" — resets {headroom.reset_label(until)}"
         parts.append(part)
