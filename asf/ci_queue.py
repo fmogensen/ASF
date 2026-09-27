@@ -100,11 +100,12 @@ for a low rank, measured from its time at the head. The hold line names the rank
 F-0113 rank 2, 3rd in line)`` — the rank is the Feature's place among the record's open
 Features.
 
-**Superseded trunk runs.** A trunk run judges every commit below it, so an older trunk run still
-*queued* when a newer one exists is moot: :func:`cancel_superseded` cancels it, keeping the newest
-queued-or-running ``push`` run on the trunk per workflow, one line per cancel. A run already in
-progress finishes. The lane's in-process pass calls it every tick for a queued product. An entry nobody
-asked about for :data:`STALE_S` leaves the line.
+**Trunk runs are never cancelled.** The queue cancels no ``push`` run on the trunk — not an
+older one a newer landing "supersedes", not a duplicate, not for relief. The deploy waits on a
+green trunk run; with a landing every few minutes, cancelling the older trunk run on each landing
+(the superseded pass until 2026-09-27: a product's run 36295828657 at ``86ac40ef2``) meant no trunk
+run ever finished and prod starved. An entry nobody asked about for :data:`STALE_S` leaves the
+line.
 
 **Trunk starvation relief.** The host's own queue is first in, first out: a trunk run pushed
 after PR runs already sit there waits behind all of them, and the start queue above cannot
@@ -1906,49 +1907,6 @@ def trunk_workflows(product):
     return sorted({w for w in (workflow_for(product, 'trunk'), ci.get('workflow')) if w})
 
 
-def cancel_superseded(product, source=None, out=print, dry_run=False):
-    """Cancel the trunk's superseded queued runs: per trunk workflow, every ``push`` run on the
-    trunk still queued while a newer queued-or-running one exists. One line per cancel; the
-    number cancelled. Not a queued product (no ``ci.pool``, ``mode: off``): nothing, no ``gh``
-    call. ``dry_run`` (or ``mode: dry-run``) names what it would cancel. Never raises."""
-    m = mode(product)
-    if m == 'off' or not product.repo_slug:
-        return 0
-    dry_run = dry_run or m == 'dry-run'
-    src = source or GitHubSource(product)
-    trunk = getattr(product, 'main', None) or 'main'
-    n = 0
-    for wf in trunk_workflows(product):
-        text = src._gh(['run', 'list', '-R', product.repo_slug, '--workflow', wf, '--branch',
-                        trunk, '--event', 'push', '--limit', '50', '--json',
-                        'databaseId,status,createdAt,headSha'])
-        try:
-            runs = [r for r in json.loads(text or 'null') or ()
-                    if isinstance(r, dict) and r.get('status') != 'completed']
-        except (TypeError, ValueError):
-            continue
-        if len(runs) < 2:
-            continue
-        runs.sort(key=lambda r: (str(r.get('createdAt') or ''), int(r.get('databaseId') or 0)))
-        newest = runs[-1]
-        for r in runs[:-1]:
-            if r.get('status') not in QUEUED_STATUSES or not r.get('databaseId'):
-                continue
-            what = (f"ci queue: {'would cancel' if dry_run else 'cancelled'} superseded {trunk} "
-                    f"run {r['databaseId']} ({wf} at {str(r.get('headSha') or '?')[:9]}) — "
-                    f"run {newest.get('databaseId')} at {str(newest.get('headSha') or '?')[:9]} "
-                    f"judges it")
-            if dry_run:
-                out(what)
-                continue
-            if src._gh(['run', 'cancel', str(r['databaseId']), '-R', product.repo_slug]) is None:
-                out(f"ci queue: cancel of superseded {trunk} run {r['databaseId']} refused")
-                continue
-            out(what)
-            n += 1
-    return n
-
-
 #: an item id in a branch name (``task/T-0341-…``)
 #: (either case: a lane branch is ``fix-bug/fix-bug-b-1382``)
 _ITEM_IN_BRANCH_RE = re.compile(r'\b[A-Za-z]-\d{4,}\b')
@@ -2777,7 +2735,7 @@ def acquire_pass_lock(product, wait_s=0):
 
 def queue_pass(product, items=None, source=None, out=print, dry_run=False, listing=None,
                now=None, wait_s=0):
-    """One pass of the queue under its lock: the superseded trunk runs, the duplicate pushes,
+    """One pass of the queue under its lock: the duplicate pushes (never on the trunk),
     the relief — its sweep, its re-runs through the line (the head guard among them) and its
     cancels. ``(cancelled, re-run)``; None when another pass holds the lock (the lane's pass
     and the queue's own job are the same pass: either one does it). Not a queued product:
@@ -2790,8 +2748,7 @@ def queue_pass(product, items=None, source=None, out=print, dry_run=False, listi
     try:
         listing = {} if listing is None else listing
         src = source or GitHubSource(product)
-        n = cancel_superseded(product, source=src, out=out, dry_run=dry_run)
-        n += cancel_duplicate_pushes(product, source=src, out=out, dry_run=dry_run,
+        n = cancel_duplicate_pushes(product, source=src, out=out, dry_run=dry_run,
                                      listing=listing)
         c, r = relieve_trunk(product, items=items, source=src, out=out, dry_run=dry_run,
                              now=now, listing=listing)

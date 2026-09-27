@@ -416,7 +416,12 @@ class TestPriorityExempt(Base):
         self.assertFalse(self.admit(q, 'pr:feat', 'T-0341').admitted)
 
 
-class TestSuperseded(Base):
+class TestTrunkRunsNeverCancelled(Base):
+    """2026-09-27: the queue's superseded pass cancelled a product's main run 36295828657 (T-0382,
+    its required jobs queued behind the pool) the moment 5c8251130 landed. With a merge every few
+    minutes each landing killed the run before it, no main run ever finished, and the deploy never
+    saw a green main. A trunk ``push`` run is never cancelled by the queue: the deploy needs a
+    green trunk run, and only a finished one gives it."""
     RUNS = [
         {'databaseId': 1, 'status': 'in_progress', 'createdAt': '2026-09-25T19:00:00Z',
          'headSha': 'a' * 40},
@@ -426,54 +431,24 @@ class TestSuperseded(Base):
          'headSha': 'c' * 40},
         {'databaseId': 4, 'status': 'queued', 'createdAt': '2026-09-25T19:20:00Z',
          'headSha': 'd' * 40},
-        {'databaseId': 0, 'status': 'completed', 'createdAt': '2026-09-25T18:00:00Z',
-         'headSha': 'e' * 40},
     ]
 
-    def gh(self, runs):
-        gh = FakeGh()
+    def test_the_pass_leaves_every_older_trunk_run_alone(self):
+        p = product()
+        gh = FakeGh(history=[[{'name': 'gate', 'status': 'queued', 'runner_name': ''}]] * 4)
         base = gh.__call__
+        runs = [dict(r, event='push', headBranch='main', conclusion=None) for r in self.RUNS]
 
         def run(argv, **kw):
-            if argv[:3] == ['gh', 'run', 'list'] and '--event' in argv:
+            if argv[:3] == ['gh', 'run', 'list'] and '--json' in argv:
                 gh.calls.append(argv)
                 return subprocess.CompletedProcess(argv, 0, json.dumps(runs), '')
             return base(argv, **kw)
-        return gh, run
-
-    def test_older_queued_trunk_runs_are_cancelled_keeping_the_newest(self):
-        p = product()
-        gh, run = self.gh(self.RUNS)
-        n = ci_queue.cancel_superseded(p, source=ci_queue.GitHubSource(p, run=run),
-                                       out=self.lines.append)
-        self.assertEqual(n, 2)
+        ci_queue.queue_pass(p, source=ci_queue.GitHubSource(p, run=run), out=self.lines.append)
         cancels = [c[3] for c in gh.calls if c[:3] == ['gh', 'run', 'cancel']]
-        self.assertEqual(cancels, ['2', '3'])  # the running 1 finishes, the newest 4 stays
-        self.assertEqual(len(self.lines), 2)
-        self.assertEqual(self.lines[0], 'ci queue: cancelled superseded main run 2 (ci.yml at '
-                                        'bbbbbbbbb) — run 4 at ddddddddd judges it')
-        listed = next(c for c in gh.calls if '--event' in c)
-        self.assertEqual(listed[listed.index('--branch') + 1], 'main')
-        self.assertEqual(listed[listed.index('--event') + 1], 'push')
-
-    def test_dry_run_names_them_and_cancels_nothing(self):
-        p = product(queue={'mode': 'dry-run'})
-        gh, run = self.gh(self.RUNS)
-        self.assertEqual(ci_queue.cancel_superseded(
-            p, source=ci_queue.GitHubSource(p, run=run), out=self.lines.append), 0)
-        self.assertFalse([c for c in gh.calls if c[:3] == ['gh', 'run', 'cancel']])
-        self.assertEqual(len(self.lines), 2)
-        self.assertTrue(all('would cancel' in l for l in self.lines))
-
-    def test_one_live_run_or_no_pool_cancels_nothing(self):
-        gh, run = self.gh(self.RUNS[:1] + self.RUNS[4:])
-        p = product()
-        self.assertEqual(ci_queue.cancel_superseded(p, source=ci_queue.GitHubSource(p, run=run)),
-                         0)
-        self.assertEqual(ci_queue.cancel_superseded(product(pool=False), source=NoGh()), 0)
-
-
-
+        self.assertEqual(cancels, [])
+        self.assertFalse([l for l in self.lines if 'superseded' in l])
+        self.assertFalse(hasattr(ci_queue, 'cancel_superseded'))
 
 class TestDuplicatePush(Base):
     """2026-09-26 17:35Z, a product: branch worktree-m-p4-t1 had ci.yml runs 36259590283 and

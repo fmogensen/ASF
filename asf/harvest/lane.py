@@ -2121,7 +2121,7 @@ def lane_pass(product, state_dir=None, items=None, out=print, dry_run=False, roo
             lane.advance(found[b])
     finally:
         lane.finish_ref_pushes()
-    # the queue's pass (superseded trunk runs, duplicate pushes, relief and its re-runs), under
+    # the queue's pass (duplicate pushes, relief and its re-runs), under
     # its own lock: the queue's own scheduler job runs it every minute too, and a pass running
     # there already does this one's work (asf.ci_queue.queue_pass)
     from asf import ci_queue
