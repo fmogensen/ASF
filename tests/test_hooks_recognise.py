@@ -95,7 +95,7 @@ class IsOursSettingsFormTests(unittest.TestCase):
                         self.assertIs(hooks._is_ours(command, name, product), ours)
 
     def test_a_command_naming_a_different_program_is_not_ours(self):
-        self.assertFalse(hooks._is_ours('/dir/notasf hook approvals', 'approvals', None))
+        self.assertFalse(hooks._is_ours('/dir/asfmt hook approvals', 'approvals', None))
 
     def test_a_product_mismatch_is_not_ours(self):
         self.assertFalse(hooks._is_ours('asf hook approvals --product q', 'approvals', 'p'))
@@ -204,7 +204,7 @@ class ApprovalsMissingReadsEveryFormTests(unittest.TestCase):
                 self.assertEqual(hooks.approvals_missing([account]), [])
 
     def test_a_near_miss_still_answers_the_account(self):
-        account = self._account('/dir/notasf hook approvals')
+        account = self._account('/dir/asfmt hook approvals')
         self.assertEqual(hooks.approvals_missing([account]), [account])
 
     def test_no_settings_file_at_all_answers_the_account(self):

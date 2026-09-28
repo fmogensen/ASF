@@ -89,10 +89,16 @@ def _git_hook_body(name, asf_path, product_name):
             f'exec "{asf_path}" redact --{name} --product {product_name}\n')
 
 
+#: A pipx ``--suffix`` appended to the declared console-script name: empty, or starting with a
+#: digit or one of ``._+-`` — ``-live``, ``2``, ``.old`` and the like. Never a bare letter: a
+#: command that merely starts with ``asf`` (``asfmt``) is a different program, not a suffixed
+#: install, and this is what keeps it from being consumed as one below.
+_SUFFIX = r'''(?:[0-9._+-][A-Za-z0-9._+-]*)?'''
+
 #: The shape of an entry point asf may write: the declared console-script name (F-0111 P3) with
-#: any pipx ``--suffix`` appended — ``asf``, ``asf-live``, ``asf2`` and the like. Used, path prefix
-#: and quoting aside, by both recognisers below (F-0111 "reading back what asf writes").
-_ENTRY_TOKEN = r'''(?:[^\s"'\n]*/)?\basf[A-Za-z0-9._+-]*'''
+#: :data:`_SUFFIX` appended — ``asf``, ``asf-live``, ``asf2`` and the like. Used, path prefix and
+#: quoting aside, by both recognisers below (F-0111 "reading back what asf writes").
+_ENTRY_TOKEN = rf'''(?:[^\s"'\n]*/)?\basf{_SUFFIX}'''
 
 
 def _hook_line_re(name):
@@ -295,12 +301,13 @@ def hook_command(asf_path, name, product):
 def _is_ours(command, name, product):
     """A settings ``command`` is asf's own hook entry for ``name`` (F-0111 §"reading back what
     asf writes") when it is an entry-point basename — bare or after a ``/``, any pipx
-    ``--suffix`` included — or ``-m asf.cli``, followed by ``hook <name>`` and, when ``product``
-    is given, its ``--product <p>`` tail; the whole command, not a prefix of a longer one (the
-    ``$`` anchor is unchanged)."""
+    ``--suffix`` included (:data:`_SUFFIX`, so a different program that merely starts with
+    ``asf`` — ``asfmt`` — cannot satisfy this) — or ``-m asf.cli``, followed by ``hook <name>``
+    and, when ``product`` is given, its ``--product <p>`` tail; the whole command, not a prefix
+    of a longer one (the ``$`` anchor is unchanged)."""
     n = re.escape(name)
     tail = rf' --product {re.escape(product)}' if product is not None else ''
-    return bool(re.search(rf'(?:(^|/)asf[A-Za-z0-9._+-]*|-m asf\.cli) hook {n}{tail}$', command or ''))
+    return bool(re.search(rf'(?:(^|/)asf{_SUFFIX}|-m asf\.cli) hook {n}{tail}$', command or ''))
 
 
 def merge(settings, hooks, asf_path, product):
