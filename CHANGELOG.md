@@ -2,6 +2,17 @@
 
 One entry per released version, newest first.
 
+## v0.1.68 — 2026-09-28
+
+### In progress
+
+- F-0126 feeder: a Task with no writes: (migrated pre-ASF plan) is launched and can only block
+- F-0127 A product declares a worktree setup command; the spawner runs it in every fresh worktree
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.68"`
+
 ## v0.1.67 — 2026-09-28
 
 ### Bugs fixed
