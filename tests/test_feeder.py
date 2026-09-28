@@ -2582,6 +2582,81 @@ class ADeliveryWithNoWritesDoesNotLaunch(unittest.TestCase):
         self.assertEqual((r.action, r.waits_on), ('WAITS ON delivery F-0097', 'delivery'))
 
 
+class APlanOffTheTrunkFeedsNoCoder(unittest.TestCase):
+    """F-0126 D5: a coder reads the plan from the trunk; a Feature whose plan is on a branch is
+    landed first, exactly as its spec already is."""
+
+    def feature(self, tasks, **over):
+        base = {'id': 'F-0001', 'type': 'feature', 'decided': True, 'state': 'Active', 'rank': 1,
+               'stage': 'plan-approved', 'evidence': ['plan on plan/f-0001'],
+               'children': [t['id'] for t in tasks]}
+        base.update(over)
+        items = {base['id']: base}
+        for t in tasks:
+            items[t['id']] = t
+        return items
+
+    def task(self, tid, **over):
+        base = {'id': tid, 'type': 'task', 'parent': 'F-0001', 'state': 'New', 'rank': 1,
+               'writes': [f'{tid}.py']}
+        base.update(over)
+        return base
+
+    def test_gated_feature_lands_the_plan_and_launches_no_coder(self):
+        for stage in ('plan-approved', 'building 1/3'):
+            with self.subTest(stage=stage):
+                items = self.feature([self.task('T-0001'), self.task('T-0002')], stage=stage)
+                out = rows.candidates(items, product(), [])
+                got = [r for r in out if r.item_id == 'F-0001']
+                self.assertEqual(len(got), 1, got)
+                r = got[0]
+                self.assertEqual(r.kind, rows.APPROVED_LAND)
+                self.assertFalse(r.launches)
+                self.assertEqual(r.action, 'WAITS ON landing: plan approved on plan/f-0001')
+                self.assertEqual(r.reason, 'plan approved on plan/f-0001, not on the trunk: the '
+                                           'lane adopts it and lands it — no coder starts before '
+                                           'it is on the trunk')
+                self.assertEqual([r2 for r2 in out if r2.kind == rows.PLAN_CODE], [])
+
+    def test_plan_on_trunk_launches_as_today(self):
+        items = self.feature([self.task('T-0001'), self.task('T-0002')],
+                             evidence=['plan on origin/main'])
+        out = rows.candidates(items, product(), [])
+        launching = {r.item_id for r in out if r.launches}
+        self.assertIn('T-0001', launching)
+        self.assertIn('T-0002', launching)
+
+    def test_no_plan_evidence_line_launches_as_today(self):
+        items = self.feature([self.task('T-0001'), self.task('T-0002')], evidence=[])
+        out = rows.candidates(items, product(), [])
+        launching = {r.item_id for r in out if r.launches}
+        self.assertIn('T-0001', launching)
+        self.assertIn('T-0002', launching)
+
+    def test_a_spec_approved_feature_with_a_plan_branch_is_untouched(self):
+        items = self.feature([self.task('T-0001')], stage='spec-approved')
+        out = rows._one_feature_rows(items, product(), items['F-0001'], set(), [], {}, {})
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].kind, rows.STARVED_PLAN)
+        self.assertEqual(out[0].reason, 'spec approved, no plan')
+
+    def test_an_active_task_of_a_gated_feature_still_gets_its_branch_row(self):
+        items = self.feature([self.task('T-0001', state='Active', writes=[])])
+        out = rows.candidates(items, product(), [])
+        got = [r for r in out if r.item_id == 'T-0001']
+        self.assertEqual(len(got), 1, got)
+        self.assertEqual(got[0].kind, rows.PLAN_CODE)
+        self.assertTrue(got[0].launches)
+
+    def test_a_pushed_plan_branch_gives_pushed_land_not_approved_land(self):
+        items = self.feature([self.task('T-0001')])
+        out = rows.candidates(items, product(), [], occupancy=occ(open_branches=['plan/f-0001']))
+        got = [r for r in out if r.item_id == 'F-0001']
+        self.assertEqual(len(got), 1, got)
+        self.assertEqual(got[0].kind, rows.PUSHED_LAND)
+        self.assertFalse(got[0].launches)
+
+
 class WaveReadsTheBlockersOriginHolds(unittest.TestCase):
     """F-1129: the wave plans from the record clone as the tick's start reset it — minutes old.
     An ``asf set blockedBy=`` pushed since must still stop this wave's launch."""
