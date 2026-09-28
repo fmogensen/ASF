@@ -8,15 +8,31 @@ what it means and the one command that clears it; then the common stalls that pr
 
 ### The installer
 
+The bootstrap (`tools/install.sh`, or the `curl … | bash` line in the root README):
+
 | line | meaning | fix |
 | --- | --- | --- |
-| `install: NEEDS OPERATOR: pipx is not installed …` | step 1 cannot run | `brew install pipx` (or `python3 -m pip install --user pipx`) |
-| `install: NEEDS OPERATOR: git is not installed` | step 1 cannot run | install git |
-| `install: NEEDS OPERATOR: cannot read main's head from <url>` | no ref given and the repo is unreachable | pass a tag or sha, or check `ASF_REPO_URL` and the network |
+| `install: NEEDS OPERATOR: pipx is not installed …` | before pipx can run | `brew install pipx` (or `python3 -m pip install --user pipx`) |
+| `install: NEEDS OPERATOR: git is not installed` | before git can run | install git |
+| `install: NEEDS OPERATOR: no v<major>.<minor>.<patch> tag found on <url> …` | no ref given and the remote has no release tag | pass one: `bash tools/install.sh <product> <ref>` |
+| `install: NEEDS OPERATOR: a running tick of <p> still held its lock after <n>s …` | a tick would be torn by a package swap mid-run | wait for it to finish, then rerun |
+| `install: NEEDS OPERATOR: pipx install --force … failed (exit <n>) while holding <p>'s tick lock` | the pipx install itself failed | fix what pipx printed above, then rerun |
 | `install: NEEDS OPERATOR: asf is not on PATH after pipx install …` | pipx's bin dir is not on `PATH` | `pipx ensurepath`, open a new shell |
-| `install: NEEDS OPERATOR: ~/.ASF/config.yaml is missing …` | no operator config | `cp docs/config.example.yaml ~/.ASF/config.yaml` and fill it in |
-| `install: NEEDS OPERATOR: ~/.ASF/products/<p>.yaml is missing …` | no product file | `cp docs/products.example.yaml ~/.ASF/products/<p>.yaml`, fill it in |
-| `install: NEEDS OPERATOR: N step(s) failed …` | a `FAILED step N` line above it | run that step's command to see why, fix it, rerun the installer |
+
+`asf install --product <p>` (what the bootstrap hands off to):
+
+| line | meaning | fix |
+| --- | --- | --- |
+| `NEEDS OPERATOR: <tool(s)> not on PATH — install and re-run` | step 1: a missing prerequisite (`git`, and `gh` unless the product has no PR host) | install the named tool(s) |
+| `NEEDS OPERATOR: <version> is a checkout at <dir> — pass --allow-checkout …` | step 2: run from a checkout or editable install | pass `--allow-checkout`, or install the pinned package instead |
+| `NEEDS OPERATOR: no --<repo\|record\|scheduler> given, and no default — pass --<name>` | a flag with no default, given `--yes` or off a tty | pass the flag |
+| `NEEDS OPERATOR: no worker account found — run claude setup-token for <name>, then uncomment its auth_env in <config>` | step 6: no account token found | `claude setup-token`, then edit `~/.ASF/config.yaml` |
+| `install: NEEDS OPERATOR: clock(s) still not loaded after retrying the bootstrap: <labels>` | step 8: a clock still absent after one retried install | `asf scheduler install --product <p>`, or install it on your own scheduler |
+| `install: in the Claude Code session for this product, add the plugin once: /plugin marketplace add <dir>` then `/plugin install asf@asf` | step 9's tail, when the runtime CLI offers no non-interactive install | run the two lines in that session |
+| `asf install: NEEDS OPERATOR — fix the FAILED step(s) above and re-run` | one or more of steps 1–12 failed | fix each `FAILED` line above, then rerun the installer — it is idempotent |
+
+`asf uninstall --product <p>` ends `asf uninstall: the package itself: pipx uninstall asf-factory` —
+it never removes the interpreter running it, so that last step is always yours.
 
 ### Configuration
 

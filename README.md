@@ -17,16 +17,10 @@ and judge. Multi-product from day one. The factory builds itself through the sam
 Needs macOS or Linux, `git`, `gh`, `pipx` and Claude Code. Per product, once:
 
 ```bash
-cp docs/config.example.yaml ~/.ASF/config.yaml                 # first product only; fill in accounts
-cp docs/products.example.yaml ~/.ASF/products/<product>.yaml   # fill in repo_dir, backlog_dir
-curl -fsSL https://raw.githubusercontent.com/fmogensen/ASF/main/tools/install.sh | bash -s -- <product> [sha|tag]
+curl -fsSL https://raw.githubusercontent.com/fmogensen/ASF/main/tools/install.sh | bash -s -- <product> -- --repo <dir> --record <dir> --scheduler launchd
 ```
 
-The installer pins the factory as `asf`, installs the product's redaction hooks and clocks, and ends with
-`asf doctor`. In that product's Claude Code session: `/plugin marketplace add fmogensen/ASF`, then
-`/plugin install asf@asf`. A session whose working directory is the product's repo or its record
-needs no `ASF_PRODUCT`; set it only for a session started outside both. Rerun the installer with a
-new ref to upgrade.
+The last two steps are the doctor and a dry tick run; then in that product's Claude Code session, `/plugin marketplace add ~/.ASF/plugin` and `/plugin install asf@asf`. A session whose working directory is the product's repo or its record needs no `ASF_PRODUCT`.
 
 The operator's guide is [`docs/guide/`](docs/guide/): [getting started](docs/guide/getting-started.md),
 [the product file](docs/guide/product-config.md), [the daily loop](docs/guide/operating.md),

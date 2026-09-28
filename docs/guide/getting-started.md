@@ -12,80 +12,65 @@ Put one software product on ASF: two config files, one installer run, the plugin
   checked out, with an `origin`. It can start empty; `asf init` lays it out.
 - One or more worker accounts: a Claude Code login each, ideally in its own config directory.
 
-## 1. The config files
+## 1. The flags
 
 Everything ASF knows about you and your products lives under `~/.ASF` (`$ASF_HOME` overrides it).
-Nothing product-specific lives in the ASF repo.
+Nothing product-specific lives in the ASF repo. `asf install` writes it all from flags — there is
+no file to copy by hand:
 
-```bash
-mkdir -p ~/.ASF/products
-cp docs/config.example.yaml   ~/.ASF/config.yaml               # once per machine
-cp docs/products.example.yaml ~/.ASF/products/<product>.yaml   # once per product
-```
+| flag | what it does | default |
+| --- | --- | --- |
+| `--repo` | the product's code repo | the current directory; asked once |
+| `--repo-url` | cloned into `--repo` only when that directory does not exist | — |
+| `--record` | the record's directory (the backlog: one markdown card per work item) | the product file's `backlog_dir`; asked once |
+| `--record-url` | cloned into `--record` only when that directory does not exist | — |
+| `--scheduler` | the clock adapter: `launchd` (installed end to end) or `cron` (ASF prints the lines, you add them) or `none` | `launchd`; asked once |
+| `--account` | one worker account, `NAME[:CONFIG_DIR]`; repeatable | detected under `<ASF_HOME>/accounts/` |
+| `--fake-workers` | `worker_pool.backend: fake`, and no account | off |
+| `--console-permissions` | writes the console's own allow list at this scope (`user` or `repo`) instead of only offering it | offered, not written |
+| `--allow-checkout` | configure from a checkout or editable install | refused otherwise |
+| `--yes` | never prompt; a missing flag with no default is refused | off (a missing flag is asked for on a tty) |
 
-`~/.ASF/config.yaml` is shared by every product. Fill in at least:
+`~/.ASF/config.yaml` is written once, from these flags: `default_product`, `scheduler.kind`,
+`worker_pool.backend|models|accounts`, `capacity.total.sessions`. It is never rewritten after
+that — edit it by hand, or see [product-config.md](product-config.md) for every key it does not
+write. `worker_pool.models` (the `heavy` and `light` model ids) and `capacity` are left for you to
+fill in; `worker_pool.accounts`' `home` — the session's `HOME`; without it a session inherits
+every CLI login you have (see [Safety](operating.md#safety-what-a-worker-session-can-reach)) — is
+also yours to add.
 
-| key | what to put there |
+| key | what it resolves |
 | --- | --- |
 | `default_product` | the product `asf` targets when no `--product`, no `$ASF_PRODUCT` and no product whose repo or record holds the working directory answers |
-| `scheduler.kind` | `launchd` (default; installed end to end) or `cron` (ASF prints the lines, you add them) |
-| `worker_pool.accounts` | one entry per worker account: `name`, `cap` (concurrent sessions), `config_dir`, and `home` — the session's `HOME`; without it a session inherits every CLI login you have (see [Safety](operating.md#safety-what-a-worker-session-can-reach)) |
-| `worker_pool.models` | the two model labels ASF uses, `heavy` and `light`, mapped to real model ids |
-| `worker_pool.quota_command` | optional: prints an account's usage windows; without it the quota bands never apply |
-| `capacity` | totals across products, and the per-product default |
 
-`~/.ASF/products/<product>.yaml` describes one product. The keys that must be right before the
-first run: `product`, `repo_slug` (for `gh`; not needed with `ci: none`), `repo_dir`,
-`main`, `backlog_dir`, `ci.test_command` (the gate branches must pass before they land), `steps`
-and `clocks`. [product-config.md](product-config.md) goes through them key by key.
-
-If you would rather have ASF discover the repo facts, `asf init --product <product> --repo <dir>
---backlog <dir>` writes a product file with a `# TODO` on every key it could not fill — but only
-when no file exists yet; it never overwrites one, it prints the diff it would have made. It needs
-`asf` on `PATH`, so on a new machine copy the example first and run the installer.
+`~/.ASF/products/<product>.yaml` describes the product: `product`, `repo_slug` (for `gh`; not
+needed with `ci: none`), `repo_dir`, `main`, `backlog_dir`, `ci.test_command` (the gate branches
+must pass before they land), `steps` and `clocks`. `asf install` writes it via `asf init`, filling
+what `--repo`/`--repo-url` and `--record`/`--record-url` gave it and leaving a `# TODO` on every
+key it could not — it never overwrites an existing file, it prints the diff it would have made.
+[product-config.md](product-config.md) goes through the keys one by one.
 
 ## 2. Run the installer
 
-From a checkout of the ASF repo:
-
 ```bash
-bash tools/install.sh <product> [ref]
+curl -fsSL https://raw.githubusercontent.com/fmogensen/ASF/main/tools/install.sh | bash -s -- <product> [ref] -- <asf install flags>
 ```
 
-or without a checkout, the `curl … | bash -s -- <product> [ref]` line in the root README. `ref` is a
-release tag (`v0.1.1`) or a commit sha; without one the installer pins `main`'s current head.
-`ASF_REPO_URL` points it at a fork or mirror.
+or, from a checkout of the ASF repo, `bash tools/install.sh <product> [ref] -- <asf install
+flags>`. `ref` is a release tag (`v0.1.1`) or a commit sha; without one the installer pins the
+newest release tag. `ASF_REPO_URL` points it at a fork or mirror. It installs the pinned package
+as `asf`, then hands off to `asf install --product <product> <asf install flags>` — the config,
+the record, the account, the hooks, the clocks, the plugin and the doctor, each run once.
 
-What it does, in order:
-
-1. `pipx install --force` of the package, pinned to `ref`, as the command `asf`. A dev install
-   (`pipx install -e`) is replaced: one `asf` per machine. It prints `install: asf <version> (<sha>)`.
-2. Checks that `~/.ASF/config.yaml` and `~/.ASF/products/<product>.yaml` exist. It never writes them.
-3. `asf hooks install --product <product>`:
-   - a git `pre-commit` and `pre-push` in both `repo_dir` and `backlog_dir`, each running
-     `asf redact` (the redaction gate, see [product-config.md](product-config.md#redaction-hooks));
-   - the approvals hook in every worker account's Claude Code settings;
-   - the Claude Code hooks any rule card declares, in the product repo's `.claude/settings.json`.
-4. `asf scheduler install --product <product>`: one scheduler job per clock in the product file.
-5. `asf doctor --product <product>`, then the two plugin lines below.
-
-Steps 1–2 abort at once. Steps 3–5 never abort: each failure is recorded, the rest still runs.
-
-### Reading its output
-
-| line | meaning |
-| --- | --- |
-| `install: product <p>, ref <sha12> from <url>` | what is being installed |
-| `install: asf 0.1.0 (<sha>)` | the install landed; the sha is the commit you are running |
-| `install: NEEDS OPERATOR: …` then exit 2 | a precondition is missing — pipx or git not installed, `asf` not on `PATH` after the install, a config file missing, or `main`'s head came back empty; the line says what to do |
-| the installer stops with no `install:` line after it, exit non-zero | a command failed under `set -e` and the script ended with that command's own exit code: `pipx install` failed (its own error is printed above), or `git ls-remote` could not reach the repo while resolving `main`. Fix what that command printed and rerun |
-| `install: FAILED step N: <command> (exit K)` | that step failed; run the command yourself to see why |
-| `install: NEEDS OPERATOR: N step(s) failed …` then exit 1 | fix each `FAILED` line and run the installer again — it is idempotent |
-| `install: done` | every step and the doctor passed |
-
-With `scheduler.kind: cron`, step 4 always reports `FAILED … (exit 3)`: ASF cannot edit your
-crontab, so it prints the lines and exits 3. Add the printed lines with `crontab -e`; the rest of
-the install is fine. Any other kind has no adapter and prints the command each job must run.
+The bootstrap pins the release with `pipx install --force`, replacing any dev install
+(`pipx install -e`) — one `asf` per machine — then hands off to `asf install`'s own twelve steps:
+the host and this `asf`, `~/.ASF/config.yaml`, the repos, the record's adopt, the account, the
+hooks, the clocks, the plugin, the console permissions offer, the doctor, and a dry tick run —
+each printing one `step N: <label>: <detail>` line. Steps 1–5 abort the run when they fail; steps
+6–12 record a failure and keep going, so a red doctor or a missing account still leaves the rest
+installed. `NEEDS OPERATOR: …` lines name what only you can do — see
+[troubleshooting.md](troubleshooting.md). The whole run is idempotent: rerun it after fixing a
+`FAILED` line.
 
 ## 3. Adopt the record
 
