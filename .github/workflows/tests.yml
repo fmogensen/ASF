@@ -41,6 +41,12 @@ jobs:
           python3 tools/run_tests.py
       - name: the sample product, end to end (init, one tick, next, doctor)
         run: python3 -m unittest -v tests.test_sample_product
+      # F-0107/T-0409: zero to green — one `asf install` into a temp HOME, doctor green, a dry
+      # run, then the same command again writing nothing new. Beside the sample step (not inside
+      # it, and before the hermetic re-run below) so a failure here names the installer, not the
+      # sample product's own tick.
+      - name: asf install, zero to green (a temp HOME, sample/, doctor, a dry run, then again)
+        run: python3 -m unittest -v tests.test_install_e2e
       # F-0033: the whole loop — card → spec → plan → task → harvest → release notes — against
       # the sample product on the replay runtime, with the stamped tables pinned to goldens.
       - name: the whole loop, card to release notes (goldens)
