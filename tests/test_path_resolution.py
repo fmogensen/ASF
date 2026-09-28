@@ -49,6 +49,7 @@ COMMANDS = [
     (['harvest', '--dry-run'], 'repo'),
     (['workers', 'health'], 'repo'),
     (['workers', 'stall'], 'repo'),
+    (['workers', 'progress'], 'repo'),
     (['workers', 'quota'], 'repo'),
     (['scheduler', 'status'], 'repo'),
     (['tick', '--steps', 'health'], 'repo'),

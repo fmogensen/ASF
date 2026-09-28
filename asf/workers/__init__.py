@@ -1,11 +1,13 @@
 """asf.workers — the worker pool as code: spawn, launch wave, health, stall, quota, reserve-id,
-sessions.
+sessions, progress.
 
-``register(sub)`` adds ``asf workers spawn|wave|health|stall|quota|reserve-id|sessions --product
-X``; each leaf sets ``func`` so the caller dispatches with ``args.func(args)``.
+``register(sub)`` adds ``asf workers spawn|wave|health|stall|quota|reserve-id|sessions|progress
+--product X``; each leaf sets ``func`` so the caller dispatches with ``args.func(args)``.
 """
+import calendar
 import json
 import sys
+import time
 
 
 def _product(args):
@@ -93,6 +95,58 @@ def cmd_stall(args):
     return 1 if found else 0
 
 
+def _ago(at, now):
+    """Minutes since ``at`` (§2.1's ``%Y-%m-%dT%H:%M:%SZ``), or None for anything that does not
+    parse — the same grammar :func:`asf.progress`'s own ``_epoch`` reads, kept local rather than
+    reaching into that module's private helper."""
+    if not at:
+        return None
+    try:
+        epoch = calendar.timegm(time.strptime(at, '%Y-%m-%dT%H:%M:%SZ'))
+    except (ValueError, TypeError):
+        return None
+    return int((now - epoch) / 60)
+
+
+def cmd_progress(args):
+    """``progress --job J --watch`` runs the sampler; ``progress --job J`` prints that job's
+    newest sample and its verdict; ``progress --product P`` alone renders the table over the
+    live runs and exits 1 when any of them is stuck, 0 otherwise (the convention ``cmd_stall``
+    already uses)."""
+    from asf import progress
+    from asf.workers import pool as pool_mod
+    product = _product(args)
+    now = time.time()
+    limit = progress.progress_min(product)
+    if args.job:
+        if args.watch:
+            progress.watch(product, args.job)
+            return 0
+        samples = progress.read(product, args.job)
+        verdict = progress.judge(samples, now, limit)
+        newest = samples[-1] if samples else {}
+        for_ = f'{int(verdict.minutes)}m' if verdict.minutes is not None else '—'
+        print(f"{args.job}  {verdict.cls}  for {for_}  commit {newest.get('commit') or '—'}  "
+              f"{newest.get('files') or 0} files — {verdict.evidence}")
+        return 0
+    print('| Job | Class | For | Commit | Files | Classes (10m) | Last call |')
+    print('|---|---|---|---|---|---|---|')
+    stuck = False
+    for s in pool_mod.live_sessions(product):
+        samples = progress.read(product, s['job'])
+        verdict = progress.judge(samples, now, limit)
+        if verdict.cls == progress.STUCK:
+            stuck = True
+        newest = samples[-1] if samples else {}
+        classes = progress.window_classes(samples, now)
+        ago = _ago(newest.get('last_call_at'), now)
+        for_ = f'{int(verdict.minutes)}m' if verdict.minutes is not None else '—'
+        print(f"| {s['job']} | {verdict.cls} | {for_} | {newest.get('commit') or '—'} | "
+              f"{newest.get('files') or 0} | {', '.join(classes) or '—'} | "
+              f"{f'{ago}m ago' if ago is not None else '—'} |")
+    return 1 if stuck else 0
+
+
 def cmd_quota(args):
     from asf.workers import pool, quota, spawn
     product = _product(args)
@@ -147,7 +201,8 @@ def cmd_sessions(args):
 
 def register(sub):
     from asf.env import add_product_arg
-    p = sub.add_parser('workers', help='the worker pool: spawn, wave, health, stall, quota, sessions')
+    p = sub.add_parser('workers', help='the worker pool: spawn, wave, health, stall, quota, '
+                                       'sessions, progress')
     wsub = p.add_subparsers(dest='workers_command', required=True)
 
     s = wsub.add_parser('spawn', help='launch one feeder row now')
@@ -185,4 +240,10 @@ def register(sub):
     add_product_arg(se)
     se.add_argument('--json', action='store_true')
     se.set_defaults(func=cmd_sessions)
+
+    pr = wsub.add_parser('progress', help='the sampler, its watch child, and the class per run')
+    add_product_arg(pr)
+    pr.add_argument('--job', help='one job: its newest sample and verdict, or --watch to sample it')
+    pr.add_argument('--watch', action='store_true', help='run the sampler for --job, detached')
+    pr.set_defaults(func=cmd_progress)
     return p

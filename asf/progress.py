@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import time
 
 from asf import env
@@ -356,3 +357,101 @@ def result_record(kind, minutes, evidence, at):
            'result': f'no progress for {minutes}m ({evidence}) — stopped by the factory',
            'asf': {'no_progress': {'kind': kind, 'minutes': minutes,
                                    'evidence': evidence, 'at': at}}}
+
+
+# ---- the sampler process, and the spawner that starts it ---------------------
+
+def _job_record(product, job):
+    """The ledger's own view of ``job``, folded from every line naming it — not
+    :mod:`asf.workers.pool`'s fold (the licence forbids the import), just enough to know the
+    pid, the log, the worktree, and whether the run has ended. ``None`` when the job has no line
+    at all, or the ledger cannot be read."""
+    path = os.path.join(env.state_dir(product), 'sessions.jsonl')
+    rec, seen = {}, False
+    try:
+        with open(path, encoding='utf-8') as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    line = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(line, dict) and line.get('job') == job:
+                    rec.update(line)
+                    seen = True
+    except OSError:
+        return None
+    return rec if seen else None
+
+
+def _pid_alive(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except (OSError, ValueError, TypeError):
+        return False
+    return True
+
+
+def watch(product, job, every=SAMPLE_EVERY_S, alive=None, now=None, max_h=WATCH_MAX_H):
+    """Sample ``job`` every ``every`` seconds until it ends; returns the number of samples taken.
+
+    Ends on: a sample whose ``result`` is True (the run wrote its result), a pid that is gone
+    (``os.kill(pid, 0)`` by default, ``alive`` injected for the test), a registry line that is no
+    longer live, or ``max_h`` since it started. It judges nothing and stops nothing — a sampler
+    that exits early costs resolution, and the tick's own sample (§2.5) is what guarantees a
+    fresh one. Every iteration is wrapped: an OSError in one sample is skipped, not fatal.
+
+    ``now``, when given, is a zero-argument clock called once per iteration (a scripted one, for
+    the test) rather than a fixed instant — :func:`time.time` otherwise. Reading the registry
+    line is the one place this needs the ledger: :func:`_job_record` reads the sessions JSONL
+    under ``env.state_dir(product)`` directly, the fold it needs being "the last line for this
+    job", not :mod:`asf.workers.pool`'s whole one, which the licence forbids importing.
+    """
+    clock = now if callable(now) else time.time
+    alive = alive if alive is not None else _pid_alive
+    started = clock()
+    taken = 0
+    while True:
+        t = clock()
+        if (t - started) / 3600 >= max_h:
+            return taken
+        rec = _job_record(product, job)
+        if rec is None or rec.get('ended'):
+            return taken
+        if not alive(rec.get('pid')):
+            return taken
+        try:
+            sampled = sample(product, rec, now=t)
+        except OSError:
+            sampled = None
+        if sampled is not None:
+            taken += 1
+            if sampled.get('result'):
+                return taken
+        time.sleep(every)
+
+
+def start(product, record, cfg=None, spawn_fn=None, cloud=False):
+    """Start the sampler for a launch, detached; returns its pid, or None when it was not started
+    — a cloud run (no local log), ``worker_pool.progress_sampler: false``, or a failure. A launch
+    is never refused because the sampler did not start: the spawn is inside its own ``try``."""
+    if cloud:
+        return None
+    if (cfg or {}).get('worker_pool', {}).get('progress_sampler') is False:
+        return None
+    argv = [sys.executable, '-m', 'asf.cli', 'workers', 'progress',
+           '--product', product.name, '--job', record['job'], '--watch']
+    if spawn_fn is None:
+        # imported here, not at module level: asf.detach is stdlib-only (its own docstring says
+        # so), but importing it above would still read as a sibling module to LeafImportTests —
+        # the one import this leaf takes beside asf.env, because the licence is about avoiding a
+        # cycle back into asf.workers, and asf.detach has none (F-0066 Task 5 step 2)
+        from asf.detach import spawn as spawn_fn
+    try:
+        return spawn_fn(argv)
+    except OSError:
+        return None

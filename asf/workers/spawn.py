@@ -35,6 +35,7 @@ import time
 
 from asf import env, refguard
 from asf import hooks
+from asf import progress
 from asf.workers import githooks
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
@@ -799,6 +800,9 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
     # a launch line is a new run: the fold opens a run at every launch line, so the previous
     # run's terminal fields never reach this one (B-0041 — see asf.workers.lifecycle)
     pool_mod.append_session(product, record)
+    pid = progress.start(product, record, cfg=cfg, cloud=cloud)
+    if pid:
+        pool_mod.update_session(product, row.job, progress_pid=pid)
     return record
 
 
