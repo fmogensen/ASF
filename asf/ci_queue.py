@@ -321,6 +321,12 @@ STALL_PASSES = 2
 #: passes further apart than this are not consecutive: the count starts again (and a stall
 #: record older than this is no longer believed)
 STALL_GAP_S = 10 * 60
+#: the step wedging the same branch and sha this many times is not re-run again: the step is
+#: the defect, not the run
+MAX_STALL_RERUNS = 2
+#: a stall history record joins the count this long — two days, so a backfill on either side of
+#: midnight still joins it to the ``ci`` event it belongs to
+STALL_HISTORY_TTL_S = 48 * 60 * 60
 #: a job whose newest started step is this old with no step completed since is stalled
 DEFAULT_STEP_SILENCE_MIN = 10
 MOVING, STEP_SILENCE, BUDGET, UNKNOWN = 'moving', 'step-silence', 'budget', 'unknown'
@@ -1276,8 +1282,8 @@ def load(name):
         data = {}
     if not isinstance(data, dict):
         data = {}
-    for k in ('entries', 'started', 'expect', 'relief', 'phantom', 'stalled'):
-        kind = list if k in ('started', 'relief') else dict
+    for k in ('entries', 'started', 'expect', 'relief', 'phantom', 'stalled', 'stalls'):
+        kind = list if k in ('started', 'relief', 'stalls') else dict
         if not isinstance(data.get(k), kind):
             data[k] = kind()
     return data
@@ -1310,6 +1316,8 @@ def prune(data, now):
     data['entries'] = {k: v for k, v in data['entries'].items()
                        if _age(v.get('seen'), now) <= STALE_S}
     data['started'] = [s for s in data['started'] if _age(s.get('at'), now) <= PICKUP_S]
+    data['stalls'] = [s for s in data.get('stalls') or ()
+                      if _age(s.get('at'), now) <= STALL_HISTORY_TTL_S]
     return data
 
 
@@ -1426,8 +1434,12 @@ def update_stalls(product, src, items=None, out=print, dry_run=False, now=None):
     run: ``mode: on`` calls ``gh run cancel`` and the record joins ``relief`` carrying ``stall``
     and ``stall_step`` (re-run like every other relief cancel, :func:`_rerun_cancelled`);
     ``mode: dry-run`` prints ``would cancel`` and writes nothing; a refused cancel keeps the
-    record for the next pass to try again. An unreadable :meth:`Source.live_runs` learns nothing
-    and forgets nothing — the records already in the file stand. The number cancelled."""
+    record for the next pass to try again. Every cancel joins the queue file's ``stalls``
+    history (kept :data:`STALL_HISTORY_TTL_S`, pruned by :func:`prune`) under its branch and
+    sha; past :data:`MAX_STALL_RERUNS` stalls on the same ``(branch, sha)`` the run is cancelled
+    and not re-run — one loud line, no ``relief`` record — because a step that wedges every time
+    is a defect in the step. An unreadable :meth:`Source.live_runs` learns nothing and forgets
+    nothing — the records already in the file stand. The number cancelled."""
     m = mode(product)
     if m == 'off' or not product.repo_slug:
         return 0
@@ -1492,13 +1504,23 @@ def update_stalls(product, src, items=None, out=print, dry_run=False, now=None):
             out(f'ci queue: cancel of stalled {kind} run {rid} refused — tried again next pass')
             continue
         out(f'ci queue: cancelled in-progress {what}')
-        relief = {'id': rid, 'kind': kind, 'item': rec['item'], 'prio': prio,
-                  'label': rec['label'], 'workflow': rec['workflow'], 'at': _iso(now),
-                  'branch': rec['branch'], 'sha': rec['sha'],
-                  'stall': STEP_SILENCE, 'stall_step': rec['step']}
-        if prio == RANKED:
-            relief['rank'] = record_rank(rec['item'], items)[0]
-        data['relief'].append(relief)
+        branch, sha = rec['branch'], rec['sha']
+        prior = sum(1 for s in data['stalls']
+                   if s.get('branch') == branch and s.get('sha') == sha)
+        data['stalls'].append({'run': rid, 'branch': branch, 'sha': sha, 'step': rec['step'],
+                               'at': _iso(now), 'job': rec['job']})
+        if prior + 1 > MAX_STALL_RERUNS:
+            out(f'ci queue: NOT re-running {kind} run {rid} ({rec["item"]}) — step '
+                f'"{rec["step"]}" has stalled {prior + 1} times on {branch} at '
+                f'{str(sha or "?")[:9]}; the step is the defect, not the run')
+        else:
+            relief = {'id': rid, 'kind': kind, 'item': rec['item'], 'prio': prio,
+                      'label': rec['label'], 'workflow': rec['workflow'], 'at': _iso(now),
+                      'branch': branch, 'sha': sha, 'stall': STEP_SILENCE,
+                      'stall_step': rec['step'], 'stalls': prior + 1}
+            if prio == RANKED:
+                relief['rank'] = record_rank(rec['item'], items)[0]
+            data['relief'].append(relief)
         watch.pop(key, None)
         n += 1
     data['stalled'] = watch
@@ -2270,14 +2292,25 @@ def _rerun_cancelled(q, src, product, started, dry_run, out, now, items=None, li
                     f"next tick")
                 keep.append(rec)
                 continue
-            out(f'ci queue: skip stale rerun {stale}; {fresh} instead — {who} run '
-                f"{rec.get('trunk_id')} at {str(rec.get('trunk_sha') or '?')[:9]} started after "
-                f"waiting {waited}")
+            if rec.get('stall'):             # a stalled step: no protected run to report on
+                mins = int(_age(rec.get('at'), now) // 60)
+                out(f'ci queue: skip stale rerun {stale}; {fresh} instead — cancelled {mins} '
+                    f'min ago, stalled in step "{rec.get("stall_step")}"')
+            else:
+                out(f'ci queue: skip stale rerun {stale}; {fresh} instead — {who} run '
+                    f"{rec.get('trunk_id')} at {str(rec.get('trunk_sha') or '?')[:9]} started "
+                    f"after waiting {waited}")
             n += 1
             continue
-        what = (f"re-ran {rec.get('kind')} run {rid} ({rec.get('item')}, {rec.get('label')}) — "
-                f"{who} run {rec.get('trunk_id')} at {str(rec.get('trunk_sha') or '?')[:9]} "
-                f"started after waiting {waited}")
+        if rec.get('stall'):                # a stalled step: no protected run to report on
+            mins = int(_age(rec.get('at'), now) // 60)
+            what = (f"re-ran {rec.get('kind')} run {rid} ({rec.get('item')}, "
+                    f"{rec.get('label')}) — cancelled {mins} min ago, stalled in step "
+                    f"\"{rec.get('stall_step')}\"")
+        else:
+            what = (f"re-ran {rec.get('kind')} run {rid} ({rec.get('item')}, {rec.get('label')}) — "
+                    f"{who} run {rec.get('trunk_id')} at {str(rec.get('trunk_sha') or '?')[:9]} "
+                    f"started after waiting {waited}")
         if dry_run:
             out(f'ci queue: would have {what}')
             keep.append(rec)
