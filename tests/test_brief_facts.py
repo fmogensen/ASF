@@ -388,8 +388,7 @@ class ProgressLineTests(unittest.TestCase):
     def test_the_last_blocks_first_non_empty_line_is_taken(self):
         path = self.log('a.log', [
             {'type': 'system', 'subtype': 'init'},
-            self.assistant('first block\nmore'),
-            self.assistant('\n  second block first line  \nsecond line'),
+            self.assistant('first block\nmore', '\n  second block first line  \nsecond line'),
         ])
         self.assertEqual(facts.last_progress(path), 'second block first line')
 
