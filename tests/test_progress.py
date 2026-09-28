@@ -14,6 +14,8 @@ import unittest
 
 from asf import env
 from asf import progress
+from asf.workers import pool as pool_mod
+from asf.workers import stall as stall_mod
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
@@ -47,6 +49,12 @@ def _init_repo(path):
     _git(['config', 'user.email', 'a@example.com'], path)
     _git(['config', 'user.name', 'a'], path)
     _git(['commit', '-q', '--allow-empty', '-m', 'init'], path)
+
+
+def _init_repo_no_commit(path):
+    """A worktree that never changes and has nothing to probe a commit off of."""
+    os.makedirs(path, exist_ok=True)
+    _git(['init', '-q', '-b', 'main', '.'], path)
 
 
 class ScanTests(unittest.TestCase):
@@ -324,6 +332,75 @@ class ResultRecordTests(unittest.TestCase):
         self.assertEqual(rec['asf']['no_progress'],
                          {'kind': 'loop', 'minutes': 23, 'evidence': 'no commit, 0 files changed',
                           'at': '2026-01-01T00:00:00Z'})
+
+
+class DeniedLoopTests(unittest.TestCase):
+    """F-0066's card, as a fixture: a live run whose every tool call is denied — the fifth rung
+    (F-0066 §2.5, T-0349's own acceptance)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self._home = env.ASF_HOME
+        env.ASF_HOME = os.path.join(self.tmp, 'home')
+        self.product = env.Product('sample', {})
+        self.worktree = os.path.join(self.tmp, 'wt')
+        _init_repo_no_commit(self.worktree)
+        self.log = os.path.join(self.tmp, 'job.jsonl')
+        self.base = 1_700_000_000
+        self.run_ = {'job': 'loop', 'log': self.log, 'worktree': self.worktree, 'pid': 4242,
+                    'started': time.strftime(AT_FMT, time.gmtime(self.base))}
+        pool_mod.append_session(self.product, self.run_)
+        self.alive = lambda pid: True
+
+    def tearDown(self):
+        env.ASF_HOME = self._home
+
+    def _deny(self, minute, arg='ls'):
+        at = self.base + minute * 60
+        with open(self.log, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(_assistant([_tool_use('Bash', {'command': arg})])) + '\n')
+            f.write(json.dumps({'type': 'user', 'message': {'content': [
+                {'type': 'tool_result', 'is_error': True, 'content': 'denied'}]}}) + '\n')
+        os.utime(self.log, (at, at))
+        return at
+
+    def test_stuck_at_twenty_minutes_not_before(self):
+        for minute in range(20):
+            now = self._deny(minute)
+            progress.sample(self.product, self.run_, now=now)
+        now19 = self.base + 19 * 60
+        found = stall_mod.stall(self.product, now=now19, alive=self.alive, out=lambda s: None,
+                                sample=False)
+        self.assertEqual(found, [])
+        now20 = self._deny(20)
+        progress.sample(self.product, self.run_, now=now20)
+        lines = []
+        found = stall_mod.stall(self.product, now=now20, alive=self.alive, out=lines.append,
+                                sample=False)
+        self.assertEqual(found, [('loop', 'STUCK', 20)])
+        self.assertEqual(len(lines), 1)
+        self.assertIn('no commit', lines[0])
+        self.assertIn('1 tool class', lines[0])
+        self.assertIn('no new call', lines[0])
+
+    def test_a_changing_argument_is_moving_at_twenty_and_after(self):
+        for minute in range(22):
+            now = self._deny(minute, arg=f'cmd-{minute}')
+            progress.sample(self.product, self.run_, now=now)
+            if minute >= 20:
+                found = stall_mod.stall(self.product, now=now, alive=self.alive,
+                                        out=lambda s: None, sample=False)
+                self.assertEqual(found, [])
+
+    def test_silence_past_silent_min_is_stall_never_stuck(self):
+        for minute in range(5):
+            now = self._deny(minute)
+            progress.sample(self.product, self.run_, now=now)
+        later = self.base + 4 * 60 + 31 * 60   # the log has gone silent since minute 4
+        found = stall_mod.stall(self.product, now=later, alive=self.alive, out=lambda s: None,
+                                sample=False)
+        self.assertEqual([(j, st) for j, st, _ in found], [('loop', 'STALL')])
 
 
 class LeafImportTests(unittest.TestCase):

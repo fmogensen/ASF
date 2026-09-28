@@ -17,6 +17,7 @@ from unittest import mock
 
 from asf import env
 from asf import hooks as hooks_mod
+from asf import progress
 from asf.workers import health as health_mod
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
@@ -2054,6 +2055,80 @@ class TestStall(Home):
             p = env.Product('x', {'stage_limits': {'silent_min': v}})
             self.assertEqual(stall_mod.silent_minutes(p), want)
         self.assertEqual(stall_mod.silent_minutes(env.Product('x', {})), 30)
+
+    def _prime(self, job, now, same=True):
+        base = {'commit': 'abc', 'digest': 'd1', 'classes': 1, 'novel': 1, 'files': 0,
+                'seen': ['Bash']}
+        older_at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now - 20 * 60))
+        newer_at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now))
+        progress.append(self.product, job, dict(base, at=older_at, last_call_at=older_at))
+        newer = dict(base, at=newer_at, last_call_at=newer_at if same else older_at)
+        if not same:
+            newer['commit'] = 'zzz'
+        progress.append(self.product, job, newer)
+
+    def test_stuck_moving_and_cloud_rows(self):
+        self.spawn('loop', {'running': True, 'pid': 101})
+        self.spawn('busy2', {'running': True, 'pid': 102})
+        self.spawn('cloud-run', {'running': True, 'pid': 'actions:1'})
+        now = time.time()
+        self._prime('loop', now, same=True)
+        self._prime('busy2', now, same=False)
+        self._prime('cloud-run', now, same=True)
+        alive = lambda pid: pid in (101, 102, 'actions:1')
+        found = stall_mod.stall(self.product, now=now, alive=alive, out=lambda s: None,
+                                sample=False)
+        self.assertEqual(sorted((j, st) for j, st, _ in found), [('loop', 'STUCK')])
+        self.assertEqual([m for j, _, m in found if j == 'loop'][0], 20)
+        sessions = pool_mod.load_sessions(self.product)
+        self.assertEqual(sessions['loop']['progress'], progress.STUCK)
+        self.assertEqual(sessions['busy2']['progress'], progress.MOVING)
+        self.assertNotIn('progress', sessions['cloud-run'])
+
+    def test_class_written_once_not_repeated_when_unchanged(self):
+        self.spawn('loop', {'running': True, 'pid': 101})
+        now = time.time()
+        self._prime('loop', now, same=True)
+        alive = lambda pid: pid == 101
+        stall_mod.stall(self.product, now=now, alive=alive, out=lambda s: None, sample=False)
+        with open(pool_mod.sessions_path(self.product)) as f:
+            n1 = len(f.readlines())
+        stall_mod.stall(self.product, now=now, alive=alive, out=lambda s: None, sample=False)
+        with open(pool_mod.sessions_path(self.product)) as f:
+            n2 = len(f.readlines())
+        self.assertEqual(n1, n2)
+
+    def test_input_row_for_a_needs_operator_line(self):
+        self.spawn('needs-cred', {'ok': False, 'result': 'NEEDS OPERATOR: no credential'})
+        found = stall_mod.stall(self.product, now=time.time(), alive=lambda pid: False,
+                                out=lambda s: None, sample=False)
+        self.assertIn(('needs-cred', 'INPUT', None), found)
+
+    def test_input_row_for_a_blocked_report(self):
+        text = 'REPORT\nitem: T-01\nkind: fix\nstatus: blocked\nleft out: needs a credential\n'
+        self.spawn('blocked', {'ok': False, 'result': text})
+        found = stall_mod.stall(self.product, now=time.time(), alive=lambda pid: False,
+                                out=lambda s: None, sample=False)
+        self.assertIn(('blocked', 'INPUT', None), found)
+
+    def test_ack_silences_stuck_and_input_leaving_the_rest(self):
+        self.spawn('loop', {'running': True, 'pid': 101})
+        self.spawn('blocked', {'ok': False, 'result': 'NEEDS OPERATOR: need approval'})
+        self.spawn('quiet2', {'running': True, 'pid': 103})
+        now = time.time()
+        self._prime('loop', now, same=True)
+        log = pool_mod.load_sessions(self.product)['quiet2']['log']
+        os.utime(log, (now - 31 * 60, now - 31 * 60))
+        alive = lambda pid: pid in (101, 103)
+        found = stall_mod.stall(self.product, now=now, alive=alive, out=lambda s: None,
+                                sample=False)
+        self.assertEqual(sorted((j, st) for j, st, _ in found),
+                         [('blocked', 'INPUT'), ('loop', 'STUCK'), ('quiet2', 'STALL')])
+        with open(stall_mod.ack_path(self.product), 'w') as f:
+            f.write('loop STUCK\nblocked INPUT\n')
+        found = stall_mod.stall(self.product, now=now, alive=alive, out=lambda s: None,
+                                sample=False)
+        self.assertEqual([(j, st) for j, st, _ in found], [('quiet2', 'STALL')])
 
 
 class TestCorrectOnce(Home):

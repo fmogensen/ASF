@@ -4,10 +4,15 @@
 
 * no result line, pid alive, log silent longer than ``stage_limits.silent_min`` (default 30
   minutes; an int is minutes, a duration string like ``45m``/``1h`` works too) → ``STALL``;
-* no result line and the pid is dead → ``DEAD``.
+* no result line and the pid is dead → ``DEAD``;
+* no result line, pid alive, writing but standing still by :mod:`asf.progress`'s judge over
+  ``stage_limits.progress_min`` (default 20 minutes; ``0`` turns the row off) → ``STUCK``;
+* a run's own result text declares a question that has not been raised yet
+  (:func:`asf.workers.report.needs_input`), newest run per job, live or ended → ``INPUT``.
 
 ``~/.ASF/state/<product>/stall-ack.txt`` suppresses a known one: a line ``<job>`` acks it in
-any state, ``<job> STALL`` / ``<job> DEAD`` only in that state.
+any state, ``<job> STALL`` / ``<job> DEAD`` / ``<job> STUCK`` / ``<job> INPUT`` only in that
+state.
 
 ``correct_once(product, session, error_text, runtime)`` — a step that fails gets one more try,
 cold, before anyone files a Bug: the runtime is relaunched in the same worktree with the original
@@ -29,12 +34,12 @@ session id is never signalled (F-0076 D11): it is left to health's ``dead pid`` 
 import calendar
 import json
 import os
-import re
 import signal
 import time
 
 from asf import budget
 from asf import env
+from asf import progress
 from asf import tokens
 from asf.metrics import metrics as metrics_mod
 from asf.workers import cloudpid
@@ -42,6 +47,7 @@ from asf.workers import githooks
 from asf.workers import health as health_mod
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
+from asf.workers import report as report_mod
 from asf.workers import runtime as runtime_mod
 
 DEFAULT_SILENT_MIN = 30
@@ -50,14 +56,8 @@ STOP_POLL_S = 0.5
 
 
 def silent_minutes(product):
-    v = (product.stage_limits or {}).get('silent_min', DEFAULT_SILENT_MIN)
-    if isinstance(v, (int, float)):
-        return float(v)
-    m = re.match(r'^\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*$', str(v))
-    if not m:
-        return float(DEFAULT_SILENT_MIN)
-    n = float(m.group(1))
-    return n * {'s': 1 / 60, 'm': 1, '': 1, 'h': 60, 'd': 1440}[m.group(2)]
+    return progress.minutes_of((product.stage_limits or {}).get('silent_min', DEFAULT_SILENT_MIN),
+                               DEFAULT_SILENT_MIN)
 
 
 def ack_path(product):
@@ -76,8 +76,8 @@ def load_acks(product):
     return acks
 
 
-def classify(session, now, silent_min, alive):
-    """``STALL`` | ``DEAD`` | None for one live session."""
+def classify(session, now, silent_min, alive, verdict=None):
+    """``STALL`` | ``DEAD`` | ``STUCK`` | None for one live session."""
     log = session.get('log')
     if runtime_mod.read_result(log) is not None:
         return None
@@ -89,29 +89,70 @@ def classify(session, now, silent_min, alive):
         mtime = os.path.getmtime(log)
     except (OSError, TypeError):
         return None
-    return 'STALL' if (now - mtime) / 60 > silent_min else None
+    if (now - mtime) / 60 > silent_min:
+        return 'STALL'
+    return 'STUCK' if verdict is not None and verdict.cls == progress.STUCK else None
 
 
-def stall(product, now=None, alive=None, session_source=None, out=print):
-    """Returns ``[(job, STALL|DEAD, minutes silent)]``, acked ones left out."""
+def _input_rows(product, acks):
+    """``[(job, question)]`` — every job's newest run, live or ended, whose result text declares
+    a question not yet raised (D10: by the time a session is waiting on a human it has written
+    its result and exited, so this is a different walk over the ledger, not a live-session rung)."""
+    rows = []
+    for job, s in pool_mod.load_sessions(product).items():
+        if s.get('input_flagged') or (job, None) in acks or (job, 'INPUT') in acks:
+            continue
+        rec = runtime_mod.read_result(s.get('log'))
+        if rec is None:
+            continue
+        question = report_mod.needs_input(str(rec.get('result') or ''))
+        if question is not None:
+            rows.append((job, question))
+    return rows
+
+
+def stall(product, now=None, alive=None, session_source=None, out=print, sample=True):
+    """Returns ``[(job, STALL|DEAD|STUCK|INPUT, minutes)]``, acked ones left out.
+
+    Before it judges, one sample per live local run is taken in-process (``sample=False`` for a
+    caller that only wants to read): a sampler that died must cost resolution, never sight
+    (F-0066 D7). The judged class is written onto the run's registry line when it changed, so the
+    run's own outcome carries it (D13). ``INPUT`` is the one row over runs that are not live: a
+    run whose result text declares a question (:func:`asf.workers.report.needs_input`) and that
+    has not been raised yet, newest run per job.
+    """
     now = time.time() if now is None else now
     limit = silent_minutes(product)
+    plimit = progress.progress_min(product)
     acks = load_acks(product)
     live = pool_mod.live_sessions(product)
     if alive is None:
         alive = health_mod.alive_for(product, live, session_source)
     found = []
     for s in live:
-        state = classify(s, now, limit, alive)
+        verdict = None
+        if plimit > 0 and not cloudpid.is_token(s.get('pid')):
+            if sample:
+                progress.sample(product, s, now=now)
+            verdict = progress.judge(progress.read(product, s['job']), now, plimit)
+            if verdict.cls != s.get('progress'):
+                pool_mod.update_session(product, s['job'], progress=verdict.cls)
+        state = classify(s, now, limit, alive, verdict=verdict)
         if state is None or (s['job'], None) in acks or (s['job'], state) in acks:
             continue
-        try:
-            quiet = int((now - os.path.getmtime(s.get('log'))) / 60)
-        except (OSError, TypeError):
-            quiet = None
-        found.append((s['job'], state, quiet))
-    for job, state, quiet in found:
-        out(f'{state:<5} {job:<24} silent {quiet if quiet is not None else "?"}m')
+        if state == 'STUCK':
+            minutes = int(verdict.minutes)
+            out(f'{state:<5} {s["job"]:<24} no progress {minutes}m — {verdict.evidence}')
+        else:
+            try:
+                minutes = int((now - os.path.getmtime(s.get('log'))) / 60)
+            except (OSError, TypeError):
+                minutes = None
+            out(f'{state:<5} {s["job"]:<24} silent {minutes if minutes is not None else "?"}m')
+        found.append((s['job'], state, minutes))
+    for job, question in _input_rows(product, acks):
+        out(f'{"INPUT":<5} {job:<24} needs input — {question}')
+        found.append((job, 'INPUT', None))
     if not found:
         out('stall: none')
     return found
