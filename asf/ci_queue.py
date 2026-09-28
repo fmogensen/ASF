@@ -120,7 +120,9 @@ in the queue file (``relief``) and, once the trunk run it was cancelled for has 
 run, never a newer trunk run queued since), re-run (``gh run rerun``)
 through this queue at its original priority — unless its workflow file changed on the trunk since
 the run was created (``gh run rerun`` would replay the old definition, stale ``runs-on`` labels
-and all): then it is dropped, and the branch's next push runs fresh. One line per cancel and per re-run, naming the trunk
+and all): then, once it is admitted its own place in the line, a fresh run is dispatched for the
+branch instead (:func:`_start_run`) — never simply dropped, so an open PR is never left with no
+run and no place in the queue. One line per cancel and per re-run, naming the trunk
 sha and its wait. ``mode: dry-run`` (or a dry-run pass) prints what it would do, writes nothing.
 
 **Every admitted start starts.** What the line admits — the view's "would start" — the pass
@@ -2212,19 +2214,31 @@ def _covered(need, free, freed):
     return all(free.get(c, 0) + freed.get(c, 0) >= n for c, n in need.items())
 
 
-def _rerun_cancelled(q, src, product, started, dry_run, out, now, items=None):
+def _rerun_cancelled(q, src, product, started, dry_run, out, now, items=None, listing=None):
     """Re-run every run the relief cancelled whose protected run has started — the trunk run,
     or the S1 PR run it was cancelled for (``for``) — each through the queue at its priority,
     read again off the record (``items``) every ask (:func:`_rerun_priority`): a record kept
     across a change of the order never carries a stale number into the line. ``started(rec)``
     is ``(the protected run, its name)`` once that run has started, else None (the record is
-    kept). The number re-run."""
+    kept). A run created on a workflow the trunk has changed since (:func:`_workflow_change`) is
+    never replayed (``gh run rerun`` would revive the stale definition, its old ``runs-on``
+    labels and all); it still asks for its place in the line like any other re-run, and once
+    admitted a fresh run is dispatched for the branch instead (:func:`_start_run`, the same
+    mechanism a held ``pr:`` start uses) rather than dropped — a record leaves ``relief`` only
+    once something has actually started for it, so a branch is never left with no run and no
+    place in line (2026-09-28, a product: dropped on a workflow change, its held ``rerun:``
+    entry swept out next as ``no relief record``, the PR stranded ~6h). Every other drop (the
+    TTL past :data:`RELIEF_TTL_S`, a refused cancel) pops the record's ``rerun:`` entry with it
+    in the same beat — an entry never outlives the record that placed it, so ``sweep`` never has
+    to catch one later. The number re-run."""
     relief, keep, n, blobs = q.data['relief'], [], 0, {}
+    entries = q.data['entries']
     for rec in sorted(relief, key=lambda r: (r.get('prio', OTHER), r.get('at') or '')):
         rid = rec.get('id')
         if not rid or _age(rec.get('at'), now) > RELIEF_TTL_S:
             out(f"ci queue: dropped cancelled {rec.get('kind')} run {rid} ({rec.get('item')}) — "
                 f"not re-run within {RELIEF_TTL_S // 3600}h")
+            entries.pop(_rerun_key(rec), None)
             continue
         got = started(rec)
         if got is None:                     # what it was cancelled for still waits
@@ -2232,13 +2246,6 @@ def _rerun_cancelled(q, src, product, started, dry_run, out, now, items=None):
             continue
         protected, who = got
         changed = _workflow_change(src, product, rid, blobs)
-        if changed:
-            what = (f"skip rerun {rid} on {rec.get('branch') or rec.get('item')} — workflow "
-                    f"changed since ({changed[0][:7]}→{changed[1][:7]}); next push runs fresh")
-            out(f'ci queue: would {what}' if dry_run else f'ci queue: {what}')
-            if dry_run:
-                keep.append(rec)
-            continue
         prio, label, rank = _rerun_priority(rec, items, product)
         d = q.admit(_rerun_key(rec), rec.get('kind') or 'pr', item=rec.get('item'),
                     prio=prio, label=label, workflow=rec.get('workflow'), sha=rec.get('sha'),
@@ -2248,6 +2255,26 @@ def _rerun_cancelled(q, src, product, started, dry_run, out, now, items=None):
             continue
         began = _parse((protected or {}).get('startedAt')) or now
         waited = _dur((began - (_parse(rec.get('trunk_created')) or began)).total_seconds())
+        if changed:
+            stale = (f"{rec.get('kind')} run {rid} ({rec.get('item')}, {rec.get('label')}) on "
+                    f"{rec.get('branch') or rec.get('item')} — workflow changed since "
+                    f"({changed[0][:7]}→{changed[1][:7]})")
+            if dry_run:
+                out(f'ci queue: would skip stale rerun {stale}; start a fresh run instead')
+                keep.append(rec)
+                continue
+            fresh, why = _start_run(product, src, rec.get('branch'), rec.get('workflow'),
+                                    sha=rec.get('sha'), rid=rid, listing=listing, blobs=blobs)
+            if not fresh:
+                out(f"ci queue: fresh run for cancelled {stale} refused — {why}; tried again "
+                    f"next tick")
+                keep.append(rec)
+                continue
+            out(f'ci queue: skip stale rerun {stale}; {fresh} instead — {who} run '
+                f"{rec.get('trunk_id')} at {str(rec.get('trunk_sha') or '?')[:9]} started after "
+                f"waiting {waited}")
+            n += 1
+            continue
         what = (f"re-ran {rec.get('kind')} run {rid} ({rec.get('item')}, {rec.get('label')}) — "
                 f"{who} run {rec.get('trunk_id')} at {str(rec.get('trunk_sha') or '?')[:9]} "
                 f"started after waiting {waited}")
@@ -2271,8 +2298,9 @@ def _workflow_change(src, product, rid, blobs):
     the trunk tip's, else None (the same, or unreadable: re-run as before). ``gh run rerun``
     replays the run's own workflow definition, so a run created before the trunk changed its
     workflow would re-run with the old jobs — their old ``runs-on`` labels among them, landing
-    on runners the new ones reserve for the trunk; such a run is dropped and the branch's next
-    push runs fresh. ``blobs`` spans one pass: one lookup per ``(ref, path)``."""
+    on runners the new ones reserve for the trunk; such a run is never replayed — a fresh run is
+    dispatched for the branch instead (:func:`_rerun_cancelled`, :func:`_start_run`). ``blobs``
+    spans one pass: one lookup per ``(ref, path)``."""
     got = src.run_workflow(rid)
     if not got:
         return None
@@ -2632,7 +2660,7 @@ def relieve_trunk(product, items=None, source=None, out=print, dry_run=False, no
 
     update_phantoms(q, src)
     sweep(q, src, listed, out=out, dry_run=dry_run)
-    rerun = _rerun_cancelled(q, src, product, started, dry_run, out, now, items) \
+    rerun = _rerun_cancelled(q, src, product, started, dry_run, out, now, items, listing) \
         if q.data['relief'] else 0
     n = 0
     if trunk_queued:

@@ -792,7 +792,12 @@ class TestTrunkRelief(ReliefBase):
     def test_a_run_created_on_a_changed_workflow_is_never_rerun(self):
         """``gh run rerun`` replays the run's own workflow definition: a PR run created before
         the trunk changed its workflow (new runs-on labels) would land on runners reserved for
-        the trunk. It is dropped, never re-run; the batch run on an unchanged workflow is."""
+        the trunk. It asks for its place in line like any other re-run (never simply dropped —
+        2026-09-28, a product: dropped here, its held entry swept out next as "no relief
+        record", the PR stranded ~6h) and, once admitted, a fresh run replaces the stale one
+        (here, the branch's still-queued run itself) instead of ``gh run rerun`` on it; the
+        batch run on an unchanged workflow is re-run as before, held for the next tick behind
+        the two PR starts it now competes with for runners."""
         p = self.product()
         os.makedirs(env.state_dir('p'), exist_ok=True)
         self.seed(self.t0)
@@ -802,15 +807,20 @@ class TestTrunkRelief(ReliefBase):
         gh, run = self.gh(self.runs(trunk_status='in_progress'), busy=())
         blobs = {('a' * 40, '.github/workflows/pr.yml'): '1111111aaaa',
                  ('main', '.github/workflows/pr.yml'): '2222222bbbb'}
-        self.relieve(p, self.workflows(run, blobs), minutes=2)
-        self.assertEqual(self.cancels(gh, 'rerun'), ['201'])
-        self.assertIn('ci queue: skip rerun 102 on task/T-0341 — workflow changed since '
-                      '(1111111→2222222); next push runs fresh', self.lines)
-        self.assertIn('ci queue: skip rerun 101 on worker/plan-measure — workflow changed since '
-                      '(1111111→2222222); next push runs fresh', self.lines)
-        self.assertEqual(ci_queue.load('p')['relief'], [])
+        self.assertEqual(self.relieve(p, self.workflows(run, blobs), minutes=2), (0, 2))
+        # neither PR run is replayed with `gh run rerun`; the batch run, unchanged, is held for
+        # capacity instead (the two PR starts took the runners it needs)
+        self.assertEqual(self.cancels(gh, 'rerun'), [])
+        self.assertIn('ci queue: skip stale rerun pr run 102 (T-0341, Task F-0001 rank 1) on '
+                      'task/T-0341 — workflow changed since (1111111→2222222); run 102 is '
+                      'queued already instead', [l.split(' — main')[0] for l in self.lines])
+        self.assertIn('ci queue: skip stale rerun pr run 101 (worker/plan-measure, other) on '
+                      'worker/plan-measure — workflow changed since (1111111→2222222); run 101 '
+                      'is queued already instead', [l.split(' — main')[0] for l in self.lines])
+        self.assertEqual([r['id'] for r in ci_queue.load('p')['relief']], [201])
         # one run lookup per run; one blob per (ref, path): pr.yml at a*40 and main, batch.yml
-        # at f*40 and main
+        # at f*40 and main — the workflow-changed PR runs resolve as already queued, without
+        # ever asking `_start_run` to look at their run or its workflow a second time
         looks = [c for c in gh.calls if c[:2] == ['gh', 'noop']]
         runs_looked = [a for c in looks for a in c if '/actions/runs/' in a]
         self.assertEqual(sorted(runs_looked), sorted(f'repos/o/r/actions/runs/{i}'
@@ -852,6 +862,53 @@ class TestTrunkRelief(ReliefBase):
         order = ci_queue.line_order(entries)
         self.assertEqual(order[0], 'rerun:task/T-0341')
         self.assertIn('rerun:worker/plan-measure', order[1:])
+
+    def test_a_workflow_change_starts_a_fresh_run_instead_of_stranding_the_pr(self):
+        """2026-09-28, a product: a PR run cancelled for relief sat held (every runner busy) —
+        its ``rerun:<branch>`` entry created and kept. By the time runners freed, the trunk's
+        workflow had changed since the cancelled run was created: the record was dropped without
+        ever being admitted, its held entry left behind — swept out next tick as "no relief
+        record" — and the PR was left with no run and no place in the queue, stranded ~6h until
+        someone pushed by hand. The record now asks for its place in line like any other re-run;
+        once admitted, a fresh run starts for the branch instead of the stale one, and the entry
+        never outlives it."""
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        # tick 1: the trunk relief cancels 101, 102 and 201
+        gh, run = self.gh(self.runs())
+        self.relieve(p, run)
+        # tick 2: the trunk has started, but every runner is still busy — the Feature's re-run
+        # is held, and an entry is created and kept for it (as in the test above)
+        gh, run = self.gh(self.runs(trunk_status='in_progress'))
+        self.assertEqual(self.relieve(p, run, minutes=2), (0, 0))
+        self.assertIn('rerun:task/T-0341', ci_queue.load('p')['entries'])
+        # isolate the Feature's record and entry: the other two are the same story already
+        # covered elsewhere, and would only make this tick's outcome harder to read
+        data = ci_queue.load('p')
+        data['relief'] = [r for r in data['relief'] if r['item'] == 'T-0341']
+        data['entries'] = {k: e for k, e in data['entries'].items() if k == 'rerun:task/T-0341'}
+        ci_queue.save('p', data)
+        # tick 3: runners are free, the trunk's workflow has changed since, and the host no
+        # longer lists the cancelled run at all (it dropped off — nothing left to replay)
+        runs3 = {'ci.yml': [{'databaseId': 900, 'status': 'in_progress', 'event': 'push',
+                             'headBranch': 'main', 'headSha': 'f' * 40,
+                             'createdAt': self.at(self.t0 - datetime.timedelta(minutes=25)),
+                             'startedAt': self.at(self.t0 - datetime.timedelta(minutes=1))}],
+                 'pr.yml': [], 'batch.yml': []}
+        gh3, run3 = self.gh(runs3, busy=())
+        blobs = {('a' * 40, '.github/workflows/pr.yml'): '1111111aaaa',
+                 ('main', '.github/workflows/pr.yml'): '2222222bbbb'}
+        self.assertEqual(self.relieve(p, self.workflows(run3, blobs), minutes=3), (0, 1))
+        self.assertEqual([c for c in gh3.calls if c[:2] == ['gh', 'workflow']],
+                         [['gh', 'workflow', 'run', 'pr.yml', '--ref', 'task/T-0341', '-R',
+                           'o/r']])
+        self.assertTrue(any('skip stale rerun' in l
+                            and 'dispatched a fresh pr.yml run on task/T-0341 instead' in l
+                            for l in self.lines), self.lines)
+        data = ci_queue.load('p')
+        self.assertEqual(data['relief'], [])
+        self.assertNotIn('rerun:task/T-0341', data['entries'])
 
     def test_dry_run_says_what_it_would_cancel_and_writes_nothing(self):
         p = self.product(mode='dry-run')
