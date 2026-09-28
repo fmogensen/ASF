@@ -30,6 +30,8 @@ class Template:
             atexit.register(shutil.rmtree, root, True)
             self.build(root)
             _disable_hooks(root)
+            for git_dir in _all_repo_roots(root):
+                _no_housekeeping(git_dir)
             self.root = root
         return self.root
 
@@ -74,6 +76,28 @@ def _working_tree_roots(root):
     return roots
 
 
+def _all_repo_roots(root):
+    """Every git repo directory under ``root``: the working trees :func:`_working_tree_roots`
+    finds, plus the bare ones the builders make — a directory named ``*.git`` (equivalently, one
+    ``git rev-parse --is-bare-repository`` calls true). The non-e2e fixtures fork templates too,
+    and a bare origin's own ``receive-pack`` runs the same ``--auto`` hook on every push it gets."""
+    roots = list(_working_tree_roots(root))
+    for dirpath, dirnames, _filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d != '.git']
+        if dirpath.endswith('.git') and dirpath not in roots:
+            roots.append(dirpath)
+    return roots
+
+
+def _no_housekeeping(repo):
+    """Turn off git's own background writer on ``repo``: a detached ``gc --auto`` or ``git
+    maintenance run --auto``, started by a fixture's own commit or push, repacks and prunes loose
+    objects while a copy of that fixture walks its ``objects/`` — the same race ``fresh``'s own
+    lock-file ignore below already met once (a CI run failed on ``objects/maintenance.lock``)."""
+    for key, value in (('gc.auto', '0'), ('gc.autoDetach', 'false'), ('maintenance.auto', 'false')):
+        subprocess.run(['git', 'config', key, value], cwd=repo, check=True)
+
+
 def _rewrite_paths(dest, mapping):
     for dirpath, _dirnames, filenames in os.walk(dest):
         for name in filenames:
@@ -103,7 +127,9 @@ def publish(tree, origin, name='fixture', email='fixture@example.com', trunk='ma
         subprocess.run(['git', *args], cwd=cwd, check=True, capture_output=True, text=True)
     os.makedirs(os.path.dirname(origin), exist_ok=True)
     git('init', '-q', '--bare', '-b', trunk, origin, cwd=os.path.dirname(origin))
+    _no_housekeeping(origin)  # `receive-pack` runs the same `--auto` hook on every push it gets
     git('init', '-q', '-b', trunk, cwd=tree)
+    _no_housekeeping(tree)  # before the first commit: none of this repo's own can ever start one
     git('config', 'user.email', email, cwd=tree)
     git('config', 'user.name', name, cwd=tree)
     git('add', '-A', cwd=tree)
