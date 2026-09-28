@@ -2,6 +2,29 @@
 
 One entry per released version, newest first.
 
+## v0.1.59 — 2026-09-28
+
+### In progress
+
+- F-0050 The product improvement loop: the factory proposes product changes from the product's own measurements
+- F-0051 The production verification probe: a real customer journey after every deploy
+- F-0060 A mechanical correctness pass before the human-standard review
+- F-0062 The launch path: skills as procedures, role agents with restricted tools, per-job caps, deny rules
+- F-0063 Relaunch from the branch, not from zero
+- F-0065 Spike: a sandboxed shell for worker sessions
+- F-0066 A progress heartbeat: no progress for twenty minutes is a stall, not only silence
+- F-0069 Security checks by code: a review pass on sensitive paths, secret and dependency scanning as rules
+- F-0070 A CI step-silence rule: a job with no new step for ten minutes is stalled, even under budget
+
+### Improvements and hotfixes
+
+- fix(ci-queue): a PR run ranks by the record ids its title carries (#203)
+- fix(deploy): name the ignore-file-excludes-traced-files cause on a failed deploy (#204)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.59"`
+
 ## v0.1.58 — 2026-09-28
 
 ### Bugs fixed
