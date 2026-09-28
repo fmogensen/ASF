@@ -17,10 +17,23 @@ never parks) is
 emitted — the wave says it waits for a person — but costs no slot and holds no tier back: it
 cannot start whatever the capacity, so a slot given to it is a slot no session gets.
 """
+import collections
+
 from asf.feeder import rows as R
 
 TIER_S1, TIER_S2, TIER_REST = 0, 1, 2
 NO_SLOT = 'WAITS ON a free slot'
+
+#: a tier-0 WAITS row whose ``waits_on`` is one of these is being worked — a live session, a
+#: branch, a landing, a merge. Every other reason is a person's (F-0113, D5).
+WORKED = ('session', 'landing', 'branch', 'merge')
+
+Gate = collections.namedtuple('Gate', 'holders held behind by_kind unworked')
+#: holders  [item id]   the S1 rows that took the floor: tier 0, launching, unparked, no seat
+#: held     int         tier-2 launching rows the cut dropped
+#: behind   int         tier-2 launching rows behind the S1 lane at all (held + the seated ones)
+#: by_kind  [(kind, n)] the held rows by row kind, in feeder order
+#: unworked [(id, waits_on, reason)]  open S1s no row launches and nothing is working (D5)
 
 
 def tier_of(row):
@@ -59,4 +72,93 @@ def select(candidates, inflight, capacity, held=(), s1_first=True):
             out.append(r)
         elif r.tier == TIER_S1:
             out.append(R.Row(**{**r.__dict__, 'action': NO_SLOT}))
+    return out
+
+
+def gate(cut, uncut, held=()):
+    """What the S1 lane did to this plan, or ``None`` when it did nothing worth a line.
+
+    ``cut`` is the plan as :func:`select` cut it, ``uncut`` the same plan made with
+    ``s1_first=False`` (:func:`asf.feeder.rows.plan_rows`) — their difference in tier-2
+    launching rows is what the lane dropped. ``held``: the item ids an approval hold parks.
+    ``None`` when no S1 took the floor and no open S1 is going unworked."""
+    held = set(held or ())
+    holders = list(dict.fromkeys(r.item_id for r in cut
+                                  if r.tier == TIER_S1 and r.action == NO_SLOT
+                                  and r.item_id not in held))
+    behind_rows = [r for r in uncut if r.tier == TIER_REST and r.launches and r.item_id not in held]
+    cut_keys = {(r.item_id, r.kind) for r in cut}
+    dropped = [r for r in behind_rows if (r.item_id, r.kind) not in cut_keys]
+    order, counts = [], {}
+    for r in dropped:
+        if r.kind not in counts:
+            order.append(r.kind)
+        counts[r.kind] = counts.get(r.kind, 0) + 1
+    by_kind = [(k, counts[k]) for k in order]
+    unworked = []
+    for r in uncut:
+        if r.tier != TIER_S1:
+            continue
+        if r.launches:
+            if r.item_id in held:
+                unworked.append((r.item_id, 'held', r.reason))
+        elif r.waits_on not in WORKED:
+            unworked.append((r.item_id, r.waits_on, r.reason))
+    if not holders and not unworked:
+        return None
+    return Gate(holders=holders, held=len(dropped), behind=len(behind_rows),
+                by_kind=by_kind, unworked=unworked)
+
+
+def gate_line(g):
+    """The one line every view prints, or ``None``::
+
+        S1 gate: B-0057 holds 94 rows (PLAN → CODE 47, CARD → SPEC 27, STARVED → PLAN 12, STARVED → SPEC 8)
+
+    Two holders read ``B-0057, B-0061 hold 94 rows``. ``None`` when ``g`` is ``None`` or
+    ``g.held`` is 0 — a gate with nothing behind it is not news."""
+    if g is None or not g.held:
+        return None
+    verb = 'holds' if len(g.holders) == 1 else 'hold'
+    kinds = ', '.join(f'{k} {n}' for k, n in g.by_kind)
+    return f"S1 gate: {', '.join(g.holders)} {verb} {g.held} rows ({kinds})"
+
+
+def _remedy(item_id, waits_on, reason, product):
+    """(reason as printed, command) for one :data:`Gate.unworked` entry — the spec's remedy
+    table, switched on ``waits_on``. The row's own ``reason`` already carries the age or the
+    attempt count; never re-derived off the item, because this function is handed none."""
+    name = product.name if hasattr(product, 'name') else product
+    if waits_on == 'decision':
+        return reason.split(' — ', 1)[0], f'asf set {item_id} decided=true --product {name}'
+    if waits_on == 'operator':
+        text = reason.split(': ', 1)[-1].split(' (limit', 1)[0]
+        return text, f'asf set {item_id} severity=S2 --product {name}'
+    if waits_on == 'held':
+        from asf import approvals
+        cls = approvals.parked(product).get(item_id, ('hold', None))[0]
+        return f'held {cls}', f'asf approvals resolve {item_id}/{cls} granted|done|dropped'
+    tail = reason.split(': ', 1)[-1]
+    if tail.startswith('blocked by '):
+        return tail, f'asf set {item_id} blockedBy= --product {name}'
+    return reason, f'asf set {item_id} severity=S2 --product {name}'
+
+
+def needs_operator(g, product, skip=()):
+    """One line per S1 nothing is working, or ``[]``. ``skip``: ids another line already named
+    this tick (D8)::
+
+        NEEDS OPERATOR: B-0057 is S1 and nothing is working it — blocked by B-0041 — the S1
+        lane holds 0 of 94 tier-2 rows behind it — asf set B-0057 blockedBy= --product asf
+    """
+    if g is None:
+        return []
+    skip = set(skip or ())
+    out = []
+    for item_id, waits_on, reason in g.unworked:
+        if item_id in skip:
+            continue
+        text, cmd = _remedy(item_id, waits_on, reason, product)
+        out.append(f'NEEDS OPERATOR: {item_id} is S1 and nothing is working it — {text} — '
+                   f'the S1 lane holds {g.held} of {g.behind} tier-2 rows behind it — {cmd}')
     return out

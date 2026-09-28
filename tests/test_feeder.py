@@ -1727,6 +1727,87 @@ class TiersTest(unittest.TestCase):
         self.assertEqual([r.action for r in out if r.item_id == 'T-0002'], ['WAITS ON T-0001'])
 
 
+class S1GateTests(unittest.TestCase):
+    """F-0113 Task 1: ``tiers.Gate`` — what the S1 lane's cut dropped, said in one string.
+
+    ``cut`` is this tick's plan; ``uncut`` the product's demand — the same rows at a capacity
+    with room for everything, ``s1_first=False`` (:func:`asf.feeder.rows.plan_rows`'s own
+    contrast, not this tick's launch order). ``gate`` diffs the two."""
+
+    def test_a_single_unseated_s1_holds_every_feature_behind_it(self):
+        idx = ten_features_and_an_s1()
+        busy = [{'item': 'X-1'}]
+        cut = rows.plan_rows(idx, product(), busy, 1)
+        uncut = rows.plan_rows(idx, product(), busy, 11, s1_first=False)
+        g = tiers.gate(cut, uncut)
+        self.assertEqual(g.holders, ['B-0001'])
+        self.assertEqual(g.held, 9)
+        self.assertEqual(g.behind, 9)
+        self.assertEqual(g.by_kind, [('CARD → SPEC', 9)])
+        self.assertEqual(tiers.gate_line(g),
+                         'S1 gate: B-0001 holds 9 rows (CARD → SPEC 9)')
+
+    def test_two_unseated_s1_rows_read_together_in_the_line(self):
+        idx = s1_bugs('B-0001', 'B-0002')
+        idx['items'].update(ten_features_and_an_s1()['items'])
+        idx['items']['B-0001'] = s1_bugs('B-0001')['items']['B-0001']
+        busy = [{'item': 'X-1'}, {'item': 'X-2'}]
+        cut = rows.plan_rows(idx, product(), busy, 2)
+        uncut = rows.plan_rows(idx, product(), busy, 12, s1_first=False)
+        g = tiers.gate(cut, uncut)
+        self.assertEqual(g.holders, ['B-0001', 'B-0002'])
+        self.assertEqual(tiers.gate_line(g), 'S1 gate: B-0001, B-0002 hold 8 rows (CARD → SPEC 8)')
+
+    def test_a_plan_with_no_s1_gives_no_gate(self):
+        idx = finish_index(cards=3)
+        del idx['items']['B-0001']
+        cut = rows.plan_rows(idx, product(), [], 3)
+        uncut = rows.plan_rows(idx, product(), [], 3, s1_first=False)
+        self.assertIsNone(tiers.gate(cut, uncut))
+        self.assertIsNone(tiers.gate_line(None))
+
+    def test_a_seated_s1_holds_nothing_so_there_is_no_gate(self):
+        # capacity to spare: the S1 takes the first seat and every Feature still launches —
+        # nothing held, nothing unworked, no Gate at all (D7)
+        cut = rows.plan_rows(ten_features_and_an_s1(), product(), [], 11)
+        uncut = rows.plan_rows(ten_features_and_an_s1(), product(), [], 11, s1_first=False)
+        self.assertIsNone(tiers.gate(cut, uncut))
+
+    def test_a_gate_with_nothing_held_prints_no_line(self):
+        # an unworked S1 that cannot launch anyway (blocked) never reaches for a seat: held is 0,
+        # but it still rides in unworked — a Gate with nothing behind it is not news (D7)
+        idx = finish_index(cards=5)
+        idx['items']['B-0002'] = {'id': 'B-0002', 'type': 'bug', 'severity': 'S1',
+                                  'decided': True, 'state': 'New', 'blocked': True,
+                                  'blocked_by_open': ['B-0099']}
+        cut = rows.plan_rows(idx, product(), [], 3)
+        uncut = rows.plan_rows(idx, product(), [], 3, s1_first=False)
+        g = tiers.gate(cut, uncut)
+        self.assertEqual(g.held, 0)
+        self.assertIsNone(tiers.gate_line(g))
+        self.assertEqual(g.unworked, [('B-0002', 'B-0099', 'S1 open, decided: blocked by B-0099')])
+
+    def test_a_held_parked_s1_is_not_a_holder(self):
+        idx = ten_features_and_an_s1()
+        busy = [{'item': 'X-1'}]
+        cut = rows.plan_rows(idx, product(), busy, 1, held=['B-0001'])
+        uncut = rows.plan_rows(idx, product(), busy, 11, s1_first=False, held=['B-0001'])
+        g = tiers.gate(cut, uncut, held=['B-0001'])
+        self.assertEqual(g.holders, [])
+
+    def test_a_held_tier_2_row_is_not_counted_as_dropped_by_the_s1_lane(self):
+        # a tier-2 row an approval hold parks always launches (costs no slot) — it is not the
+        # S1 lane's doing when it never reaches `cut`, so it must not inflate held/behind/by_kind
+        idx = ten_features_and_an_s1()
+        busy = [{'item': 'X-1'}]
+        cut = rows.plan_rows(idx, product(), busy, 1, held=['F-0001'])
+        uncut = rows.plan_rows(idx, product(), busy, 11, s1_first=False, held=['F-0001'])
+        g = tiers.gate(cut, uncut, held=['F-0001'])
+        self.assertEqual(g.held, 9)
+        self.assertEqual(g.behind, 9)
+        self.assertEqual(g.by_kind, [('CARD → SPEC', 9)])
+
+
 def finish_index(cards=4, build_stage='plan-approved', task_state='New'):
     """A ranked Epic of ``cards`` decided Feature cards (F-0001 first) and, ranked last, F-0099:
     planned, one Task (T-0099) ready to build — and an open S2 Bug."""
