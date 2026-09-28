@@ -93,6 +93,49 @@ class FailureAtTheSourceTests(unittest.TestCase):
         self.assertTrue(runtime_mod.result_ok(ok))
 
 
+class NeedsInputTests(unittest.TestCase):
+    def test_the_first_needs_operator_line_of_two(self):
+        text = ('NEEDS OPERATOR: rotate the deploy key — run tools/rotate.sh\n'
+                'NEEDS OPERATOR: approve the migration — run asf migrate --apply\n'
+                'REPORT\nitem: B-0001\nstatus: done\n')
+        self.assertEqual(report.needs_input(text),
+                          'rotate the deploy key — run tools/rotate.sh')
+
+    def test_a_needs_operator_line_outside_any_report_block_is_still_found(self):
+        text = ('I did the work.\nNEEDS OPERATOR: confirm the rollback — run tools/rollback.sh\n'
+                '\nREPORT\nitem: B-0001\nstatus: done\nbranch: fix/B-0001\n')
+        self.assertEqual(report.needs_input(text), 'confirm the rollback — run tools/rollback.sh')
+
+    def test_a_blocked_report_with_no_operator_line_gives_its_left_out(self):
+        text = ('REPORT\nitem: B-0001\nstatus: blocked\nbranch: fix/B-0001\n'
+                'left out: the migration — the prod DB is unreachable from this host\n')
+        self.assertEqual(report.needs_input(text),
+                          'the migration — the prod DB is unreachable from this host')
+
+    def test_a_blocked_report_with_no_left_out_gives_the_first_line_of_the_text(self):
+        text = ('The prod DB is unreachable from this host.\n\n'
+                'REPORT\nitem: B-0001\nstatus: blocked\nbranch: fix/B-0001\nleft out: none\n')
+        self.assertEqual(report.needs_input(text), 'The prod DB is unreachable from this host.')
+
+    def test_none_for_a_done_report(self):
+        self.assertIsNone(report.needs_input(DONE))
+
+    def test_none_for_a_report_that_merely_mentions_waiting_for_ci(self):
+        text = ('REPORT\nitem: B-0001\nstatus: partial\nbranch: fix/B-0001\n'
+                'left out: the push — waiting for CI to go green\n')
+        self.assertIsNone(report.needs_input(text))
+
+    def test_none_for_text_with_no_report_at_all(self):
+        self.assertIsNone(report.needs_input('I did the work and pushed it.'))
+
+    def test_none_for_empty_and_none_text(self):
+        self.assertIsNone(report.needs_input(''))
+        self.assertIsNone(report.needs_input(None))
+
+    def test_unfinished_still_pairs_partial_and_blocked(self):
+        self.assertEqual(report.UNFINISHED, ('partial', 'blocked'))
+
+
 if __name__ == '__main__':
     unittest.main()
 

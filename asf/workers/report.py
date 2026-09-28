@@ -19,7 +19,9 @@ names the one failure the report itself declares: ``pushed: no`` — the session
 is not on origin. That is a failed session at the source (B-0052: six sessions ended
 ``success`` with "I'll wait for the background suite and push later"), before health measures
 the same thing against git (B-0051). A report that carries no ``pushed:`` line declares
-nothing; the evidence rule still applies.
+nothing; the evidence rule still applies. :func:`needs_input` names the second thing a report
+declares: the question a run raises for a human, either a ``NEEDS OPERATOR:`` line or a
+``status: blocked`` report's own words — never a phrase merely mentioned in passing.
 """
 import re
 
@@ -30,6 +32,9 @@ FIELD_RE = re.compile(r'^(?P<key>item|kind|status|branch|pushed|commits|tests|le
 NO_RE = re.compile(r'^\s*(no|none|not pushed|unpushed)\b', re.I)
 NONE_RE = re.compile(r'^(none|n/a|-|—)$', re.I)
 UNPUSHED = 'unpushed work'
+#: A line a brief tells every session to print when a human must decide, answer or run something.
+OPERATOR_RE = re.compile(r'^\s*NEEDS OPERATOR\s*:\s*(?P<what>.+)$', re.M)
+BLOCKED = 'blocked'
 
 
 def parse(text):
@@ -100,8 +105,29 @@ def failure(text):
     return None
 
 
+def needs_input(text):
+    """The question a result's own text declares, or None: the first ``NEEDS OPERATOR:`` line, else
+    the ``status: blocked`` report's own words (its ``left out:``, else its first line).
+
+    Only these two — both of them things the session *declared*, in the grammar every brief hands
+    it (P8). No phrase list: a run that says "waiting for CI" in passing is not waiting for a
+    human, and a list of such phrases flags the wrong sessions for ever (D5, D11)."""
+    text = str(text or '')
+    m = OPERATOR_RE.search(text)
+    if m:
+        return m.group('what').strip()
+    rep = parse(text)
+    if (rep.get('status') or '').strip().lower() != BLOCKED:
+        return None
+    left = _claim(rep.get('left out'))
+    if left:
+        return left
+    stripped = text.strip()
+    return stripped.splitlines()[0] if stripped else None
+
+
 #: The statuses a session reports when its Task is not whole: only these may claim more footprint.
-UNFINISHED = ('partial', 'blocked')
+UNFINISHED = ('partial', BLOCKED)
 #: A line that opens a section of its own inside a field's run-on value: ``Assumptions:``.
 SECTION_RE = re.compile(r'^[A-Z][\w ]{0,40}:\s*$', re.M)
 
