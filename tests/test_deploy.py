@@ -597,6 +597,54 @@ class Validation(unittest.TestCase):
         self.assertEqual(p.conventions.get('deploy_workflow'), 'd.yml')
 
 
+class FailedRunCause(unittest.TestCase):
+    """A failed deploy run's log is read for a known cause (a site-deploy incident): an ignore
+    file excluding a path the prebuilt build traced crashes the deploy after the CLI warns about
+    it."""
+    LOG = ("Retrieving list of deployment files...\n"
+          "Warning: `.vercelignore` excludes at least 3 files the prebuilt functions need\n"
+          "Error: ENOENT: no such file or directory, readlink"
+          " '/vercel/path0/docs/data.json'\n")
+
+    def test_failed_run_cause_parses_the_ignore_file_warning(self):
+        self.assertEqual(deploy.failed_run_cause(self.LOG), deploy.IGNORE_EXCLUDES_CAUSE)
+
+    def test_failed_run_cause_is_none_for_an_unrelated_failure(self):
+        self.assertIsNone(deploy.failed_run_cause('Error: some other build failure\n'))
+        self.assertIsNone(deploy.failed_run_cause(None))
+        self.assertIsNone(deploy.failed_run_cause(''))
+
+    def test_a_failed_deploy_names_the_cause_in_its_line(self):
+        log = self.LOG
+
+        class LogSh(FakeSh):
+            def __call__(self, cmd, cwd=None, timeout=60):
+                if cmd[:3] == ['gh', 'run', 'view'] and '--log-failed' in cmd:
+                    self.calls.append(cmd)
+                    return log
+                return super().__call__(cmd, cwd, timeout)
+
+        sh = LogSh([_run(GREEN, conclusion='failure', rid=7), _run(PROD)], [_run(GREEN)])
+        sha, lines = _tick(_product(auto=True), sh)
+        self.assertIsNone(sha)
+        self.assertIn('FAILED (run 7)', lines[0])
+        self.assertIn(deploy.IGNORE_EXCLUDES_CAUSE, lines[0])
+        self.assertIn(['gh', 'run', 'view', '7', '-R', 'o/r', '--log-failed'], sh.calls)
+
+    def test_a_failed_deploy_with_no_known_cause_names_none(self):
+        class LogSh(FakeSh):
+            def __call__(self, cmd, cwd=None, timeout=60):
+                if cmd[:3] == ['gh', 'run', 'view'] and '--log-failed' in cmd:
+                    return 'Error: some other build failure\n'
+                return super().__call__(cmd, cwd, timeout)
+
+        sh = LogSh([_run(GREEN, conclusion='failure', rid=7), _run(PROD)], [_run(GREEN)])
+        sha, lines = _tick(_product(auto=True), sh)
+        self.assertIsNone(sha)
+        self.assertIn('FAILED (run 7)', lines[0])
+        self.assertNotIn(deploy.IGNORE_EXCLUDES_CAUSE, lines[0])
+
+
 class HarvestStep(unittest.TestCase):
     def test_the_harvest_step_runs_the_deploy_pass_and_survives_its_fault(self):
         from unittest import mock
