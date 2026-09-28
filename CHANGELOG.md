@@ -2,6 +2,45 @@
 
 One entry per released version, newest first.
 
+## v0.1.70 — 2026-09-28
+
+### Features landed
+
+- F-0031 The approval matrix as code
+- F-0098 'dead' sessions are nearly always finished ones not yet recorded: say 'ended, awaiting tick', free the slot at once
+
+### Bugs fixed
+
+- B-0056 A session whose branch is already on origin merges its stale remote: nothing in the factory publishes a rebased lane branch, and no session may force
+- B-0075 Workers still background the test suite and end without pushing; prose cannot stop it
+- B-0094 19% of sessions end 'not pushed': finished work is lost to a missing commit or push
+- B-0128 An adjudicator's 'no further sessions' ruling does not stick: the lane re-adjudicates the item
+- B-0149 CI-red cards count cancelled runs and fixed history
+
+### In progress
+
+- F-0001 P0a — the two repositories and the licence
+- F-0040 Story-to-test gate: a Task's pull request must tick an acceptance line with the test that proves it
+- F-0094 A decided Epic with no Features never starts: no row breaks an Epic into Features
+- F-0122 The /asf:* tables read backlog_dir, which the tick never pulls — views go stale
+- F-0126 feeder: a Task with no writes: (migrated pre-ASF plan) is launched and can only block
+- F-0143 A pre-commit hook pointing at the /x/asf test fixture path broke review-b-0111's commit
+- F-0144 asf set cannot widen a Task's writes: footprint
+- F-0148 Scorecard: a total across products and the week-over-week delta, as the daily rollup's first line
+- F-0149 Scorecard attribution: session spend matched to no Feature, and CI red counted per job instead of per root cause
+- F-0150 Scorecard loop: a card whose number got worse is reverted, and adoptions are Decisions with both readings
+- F-0152 Adjudicate brief names review round 1 instead of the newest round
+- F-0155 asf next/status read backlog_dir while the tick acts on its own clone — NEXT lags the tick
+- F-0156 711 branches carry no open PR
+- F-0157 Sessions die with 'failed: empty branch' 12 times a week
+- F-0158 Sessions die with 'failed: not pushed' 72 times a week
+- F-0159 CI gate:--- test_dry_run: FAILED (rc N) is red 6 times a week
+- F-0160 Health records a session ended at its first result while the process keeps working
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.70"`
+
 ## v0.1.69 — 2026-09-28
 
 ### Features landed
