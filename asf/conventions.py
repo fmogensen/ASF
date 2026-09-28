@@ -226,6 +226,48 @@ DEFAULT_FORBIDDEN_MARKERS = (
     r'<<\s*[A-Z][A-Z0-9_ ]*\s*>>',
 )
 
+#: ``security: {paths, alerts, ports}`` — the three parts of the security pass
+#: (:mod:`asf.security`): which of the product's own named classes a diff's files fall under,
+#: how long the host's own secret- and dependency-scanning feeds may go unread, and the nightly
+#: probe of every box's exposed ports. Unset, nothing is sensitive and no check violates.
+#: ``paths`` is ``{class: [glob]}``, globs matched as ``customer_content``'s are; ``alerts`` is
+#: ``{max_age_h}``; ``ports`` is ``{boxes, workflow, artifact, max_age_h, ports}`` — the boxes
+#: beyond ``ci.pool``'s own, the workflow and artifact that carry the probe's result, how old
+#: that result may be, and the ports checked (:data:`DEFAULT_PROBE_PORTS` unless named).
+DEFAULT_ALERT_MAX_AGE_H = 24
+DEFAULT_PROBE_MAX_AGE_H = 30
+#: The common database and daemon ports the nightly probe checks unless a product names its own.
+DEFAULT_PROBE_PORTS = (
+    445,    # smb
+    1433,
+    1521,
+    2049,   # nfs
+    2375,
+    2376,   # docker
+    2379,   # etcd
+    3306,
+    3389,   # rdp
+    4369,   # epmd
+    5432,
+    5672,
+    5900,   # vnc
+    5984,
+    6379,
+    6443,   # kube-apiserver
+    7000,
+    8086,
+    9000,
+    9042,
+    9092,
+    9200,
+    9300,
+    10250,  # kubelet
+    11211,
+    15672,
+    27017,
+    27018,
+)
+
 #: ``branch_retention:`` — how long origin's heads nobody owns any more are kept
 #: (:mod:`asf.workers.retention`). ``archive_days``: the lane's ``archive/<b>`` heads (a superseded
 #: branch, kept for reference) go this many days after they were archived. ``legacy_prefixes``:
@@ -381,6 +423,12 @@ def _path_list_problem(value):
     return None
 
 
+def _positive_number_problem(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return f'must be a positive number, not {value!r}'
+    return None
+
+
 #: A bare variable name (``auth_env``, ``worker_pool.accounts[].auth_env`` in ``asf.env``): a
 #: leading letter/underscore, then letters, digits or underscores — what a shell accepts on the
 #: left of ``export``.
@@ -390,8 +438,9 @@ _VAR_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 def validate_mapping(data):
     """The shaped keys of a ``conventions:`` mapping checked: ``[(dotted key, problem)]``, empty
     when they are well-formed. Only ``doc_paths``, ``shared_paths``, ``lane``, ``worktree_setup``,
-    ``auth_env``, ``full_suite_commands``, ``customer_content`` and ``feeder`` are checked — every other key is kept
-    verbatim (see the module doc), so a product file written for a newer ``asf`` still loads."""
+    ``auth_env``, ``full_suite_commands``, ``customer_content``, ``security`` and ``feeder`` are
+    checked — every other key is kept verbatim (see the module doc), so a product file written
+    for a newer ``asf`` still loads."""
     problems = []
     if not isinstance(data, dict):
         return problems
@@ -448,6 +497,62 @@ def validate_mapping(data):
                 except re.error as e:
                     problems.append(('customer_content.forbidden_markers',
                                      f'{pattern!r} is not a regex ({e})'))
+    sec = data.get('security')
+    if sec is not None:
+        if not isinstance(sec, dict):
+            problems.append(('security', f'must be a map (paths, alerts, ports), not {sec!r}'))
+        else:
+            paths = sec.get('paths')
+            if paths is not None:
+                if not isinstance(paths, dict):
+                    problems.append(('security.paths',
+                                     f'must be a map of class name to path list, not {paths!r}'))
+                else:
+                    for name, globs in paths.items():
+                        if not isinstance(name, str) or not name.strip():
+                            problems.append(('security.paths', f'{name!r} is not a class name'))
+                            continue
+                        why = _path_list_problem(globs)
+                        if why:
+                            problems.append((f'security.paths.{name}', why))
+            alerts = sec.get('alerts')
+            if alerts is not None:
+                if not isinstance(alerts, dict):
+                    problems.append(('security.alerts', f'must be a map (max_age_h), not {alerts!r}'))
+                elif alerts.get('max_age_h') is not None:
+                    why = _positive_number_problem(alerts['max_age_h'])
+                    if why:
+                        problems.append(('security.alerts.max_age_h', why))
+            ports = sec.get('ports')
+            if ports is not None:
+                if not isinstance(ports, dict):
+                    problems.append(('security.ports', f'must be a map (boxes, workflow, artifact,'
+                                                        f' max_age_h, ports), not {ports!r}'))
+                else:
+                    if ports.get('max_age_h') is not None:
+                        why = _positive_number_problem(ports['max_age_h'])
+                        if why:
+                            problems.append(('security.ports.max_age_h', why))
+                    port_list = ports.get('ports')
+                    if port_list is not None:
+                        bad = (not isinstance(port_list, list)
+                               or not all(isinstance(p, int) and not isinstance(p, bool)
+                                          and 1 <= p <= 65535 for p in port_list))
+                        if bad:
+                            problems.append(('security.ports.ports',
+                                             f'must be a list of ports 1-65535, not {port_list!r}'))
+                    boxes = ports.get('boxes')
+                    if boxes is not None:
+                        bad = (not isinstance(boxes, list)
+                               or not all(isinstance(b, str) and b.strip() for b in boxes))
+                        if bad:
+                            problems.append(('security.ports.boxes',
+                                             f'must be a list of labels, not {boxes!r}'))
+                    for key in ('workflow', 'artifact'):
+                        value = ports.get(key)
+                        if value is not None and (not isinstance(value, str) or not value.strip()):
+                            problems.append((f'security.ports.{key}',
+                                             f'must be a non-empty string, not {value!r}'))
     feeder = data.get('feeder')
     if feeder is not None:
         cap = feeder.get('max_specs_in_flight') if isinstance(feeder, dict) else None
@@ -871,6 +976,44 @@ class Conventions:
 
     def is_trunk(self, branch):
         return (branch or '') == self.main
+
+    # ---- security --------------------------------------------------------------
+
+    def security_paths(self):
+        """``security.paths``: ``{class: [glob]}`` — a value that is not a map reads as ``{}``
+        (nothing is sensitive); ``validate_mapping`` is where a malformed one is a loud problem,
+        not a silent default."""
+        value = self.map_of('security').get('paths')
+        return value if isinstance(value, dict) else {}
+
+    def security_alerts(self):
+        """``security.alerts``: ``{max_age_h}`` — :data:`DEFAULT_ALERT_MAX_AGE_H` when unset or
+        unusable."""
+        value = self.map_of('security').get('alerts')
+        value = value if isinstance(value, dict) else {}
+        max_age_h = value.get('max_age_h')
+        if isinstance(max_age_h, bool) or not isinstance(max_age_h, (int, float)) or max_age_h <= 0:
+            max_age_h = DEFAULT_ALERT_MAX_AGE_H
+        return {'max_age_h': max_age_h}
+
+    def security_ports(self):
+        """``security.ports``: ``{boxes, workflow, artifact, max_age_h, ports}`` — ``max_age_h``
+        and ``ports`` defaulted (:data:`DEFAULT_PROBE_MAX_AGE_H`, :data:`DEFAULT_PROBE_PORTS`)
+        when unset or unusable, ``boxes`` a list, ``workflow`` and ``artifact`` as configured."""
+        value = self.map_of('security').get('ports')
+        value = value if isinstance(value, dict) else {}
+        max_age_h = value.get('max_age_h')
+        if isinstance(max_age_h, bool) or not isinstance(max_age_h, (int, float)) or max_age_h <= 0:
+            max_age_h = DEFAULT_PROBE_MAX_AGE_H
+        ports = value.get('ports')
+        if (not isinstance(ports, list)
+                or not all(isinstance(p, int) and not isinstance(p, bool) and 1 <= p <= 65535
+                          for p in ports)):
+            ports = list(DEFAULT_PROBE_PORTS)
+        boxes = value.get('boxes')
+        boxes = boxes if isinstance(boxes, list) else []
+        return {'boxes': boxes, 'workflow': value.get('workflow'), 'artifact': value.get('artifact'),
+                'max_age_h': max_age_h, 'ports': ports}
 
     # ---- paths ---------------------------------------------------------------
 

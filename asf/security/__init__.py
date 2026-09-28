@@ -1,0 +1,28 @@
+"""asf.security — the security pass in three parts, all off ``conventions.security``: which of
+the product's own named classes a diff's files fall under (:mod:`asf.security.paths`), the host's
+own secret- and dependency-scanning feeds read as ASF's own Bugs, and the nightly probe of every
+box's exposed ports. Unset, nothing is sensitive and no check violates.
+
+No line this package prints, holds or files ever carries a machine address or an alert value
+(D11, P20) — only what a check found: counts, classes, box labels.
+"""
+import os
+
+from asf import env
+
+
+def gh_env(product):
+    """The environment ``gh`` runs with: this process's, with the product's ``auth_env`` files
+    read over it — the behaviour :func:`asf.ci_pool._gh_env` documents. An unreadable file leaves
+    the ambient login in place. It opens the files named in the product's config and spells no
+    path of its own."""
+    out = dict(os.environ)
+    for var, path in env.product_auth_env(product).items():
+        try:
+            with open(path, encoding='utf-8') as f:
+                value = f.read().strip()
+        except OSError:
+            continue
+        if value:
+            out[var] = value
+    return out
