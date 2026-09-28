@@ -1703,7 +1703,7 @@ class TestHealth(Home):
         self.assertEqual(s['rounds'], 1)
         self.assertFalse(lifecycle.eligible(s))  # never sits `awaiting harvest` with nothing to land
 
-    def _lane_landed_then_relaunched(self):
+    def _lane_landed_then_relaunched(self, second_step=None):
         """Run one on a lane branch, squash-merged by the native PR lane (marked harvested at
         merge), then a second session on the same branch that writes nothing and pushes."""
         rec = self.spawn('plan-f-0079', {'ok': True, 'pid': 91})
@@ -1716,7 +1716,7 @@ class TestHealth(Home):
         shutil.rmtree(rec['worktree'])
         git('worktree', 'prune', cwd=self.repo)
         git('branch', '-D', rec['branch'], cwd=self.repo)
-        again = self.spawn('plan-f-0079', {'ok': True, 'pid': 92})
+        again = self.spawn('plan-f-0079', second_step or {'ok': True, 'pid': 92})
         git('push', '-q', 'origin', again['branch'], cwd=again['worktree'])
         return again
 
@@ -2077,6 +2077,154 @@ class TestHealth(Home):
         found = health_mod.health(self.product, fix=True, alive=lambda pid: False, out=lambda s: None)
         self.assertIn(('wip', 'keep', 'ended: session stopped by operator, not finished'), found)
         self.assertTrue(os.path.isdir(wt))
+
+
+class ABlockedRunIsParkedUntilTheCardChanges(Home):
+    """F-0126 §5: a run that ends with nothing to land while its own report declares a question
+    for a person is parked, not handed back to another session — relaunching it would only buy
+    the same report again. The park lifts when the item's card changes, or `asf unpark` says so."""
+
+    ITEM = 'T-0001'
+
+    def spawn(self, job, step, item=ITEM):
+        rt = runtime_mod.FakeRuntime([step])
+        return spawn_mod.spawn(self.product, feature_row(job, item=item), self.acct(), 'b',
+                               runtime=rt, cfg=self.cfg)
+
+    def commit(self, wt, name='x'):
+        for k, v in (('user.email', 'ci@example.com'), ('user.name', 'ci')):
+            git('config', k, v, cwd=wt)
+        with open(os.path.join(wt, name), 'w') as f:
+            f.write(name)
+        git('add', name, cwd=wt)
+        git('commit', '-q', '-m', name, cwd=wt)
+
+    def card(self, **fields):
+        return {self.ITEM: dict({'id': self.ITEM, 'title': 'a task', 'writes': ['a.py']}, **fields)}
+
+    def test_an_empty_branch_with_a_needs_operator_line_is_parked(self):
+        items = self.card()
+        rec = self.spawn('parked', {'ok': True, 'pid': 71,
+                                    'result': 'NEEDS OPERATOR: which account owns this?'})
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None,
+                                  items=items)
+        self.assertIn(('parked', 'ended', 'failed: empty branch: nothing to land'), found)
+        self.assertFalse([f for f in found if f[1] == 'held'], found)
+        parked = [d for j, w, d in found if w == 'parked']
+        self.assertEqual(len(parked), 1, found)
+        self.assertIn('which account owns this?', parked[0])
+        s = pool_mod.load_sessions(self.product)['parked']
+        corr = s['correction']
+        self.assertEqual(corr['kind'], lifecycle.BLOCKED)
+        self.assertIs(corr['parked'], True)
+        self.assertEqual(s['operator_flagged'], 1)
+        self.assertEqual(corr['card'], lifecycle.card_fingerprint(self.product, self.ITEM, items))
+        self.assertNotIn('rounds', s)  # no round spent
+        self.assertEqual(s['end_reason'], 'failed: empty branch: nothing to land')
+
+    def test_a_status_blocked_report_with_no_needs_operator_line_parks_on_its_own_words(self):
+        items = self.card()
+        text = 'REPORT\nitem: T-0001\nkind: coder\nstatus: blocked\nleft out: needs a credential\n'
+        rec = self.spawn('worded', {'ok': True, 'pid': 72, 'result': text})
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None,
+                                  items=items)
+        parked = [d for j, w, d in found if w == 'parked']
+        self.assertEqual(len(parked), 1, found)
+        self.assertIn('needs a credential', parked[0])
+
+    def test_a_second_pass_with_the_card_unchanged_leaves_the_park_as_it_was(self):
+        items = self.card()
+        rec = self.spawn('parked', {'ok': True, 'pid': 73,
+                                    'result': 'NEEDS OPERATOR: which account owns this?'})
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
+        health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None, items=items)
+        before = pool_mod.load_sessions(self.product)['parked']['correction']
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None,
+                                  items=items)
+        self.assertFalse([f for f in found if f[1] == 'parked'], found)
+        after = pool_mod.load_sessions(self.product)['parked']['correction']
+        self.assertEqual(after, before)
+
+    def test_the_card_gaining_writes_releases_the_park(self):
+        items = self.card()
+        rec = self.spawn('parked', {'ok': True, 'pid': 74,
+                                    'result': 'NEEDS OPERATOR: which account owns this?'})
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
+        health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None, items=items)
+        changed = self.card(writes=['a.py', 'b.py'])
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None,
+                                  items=changed)
+        released = [d for j, w, d in found if w == 'released']
+        self.assertEqual(released, [f'{self.ITEM}: the card changed — the park lifts'], found)
+        s = pool_mod.load_sessions(self.product)['parked']
+        self.assertNotIn('correction', s)
+
+    def test_a_pushed_finished_run_with_a_needs_operator_line_is_not_parked(self):
+        items = self.card()
+        rec = self.spawn('done', {'ok': True, 'pid': 75,
+                                  'result': 'REPORT\nitem: T-0001\nkind: coder\nstatus: done\n'
+                                            'pushed: yes abc123\nNEEDS OPERATOR: a ruling later\n'})
+        self.commit(rec['worktree'])
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None,
+                                  items=items)
+        self.assertFalse([f for f in found if f[1] in ('parked', 'held')], found)
+        self.assertIn(('done', 'ended', 'finished'), found)
+
+    def test_an_empty_branch_landed_earlier_is_landed_not_parked(self):
+        rec = self.spawn('plan-f-0079', {'ok': True, 'pid': 91})
+        self.commit(rec['worktree'])
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
+        health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        pool_mod.update_session(self.product, 'plan-f-0079', harvested='6' * 40, correction=None)
+        time.sleep(1.1)
+        git('push', '-q', 'origin', '--delete', rec['branch'], cwd=rec['worktree'])
+        shutil.rmtree(rec['worktree'])
+        git('worktree', 'prune', cwd=self.repo)
+        git('branch', '-D', rec['branch'], cwd=self.repo)
+        again = self.spawn('plan-f-0079', {'ok': True, 'pid': 92,
+                                           'result': 'NEEDS OPERATOR: does this still apply?'},
+                           item='F-0001')
+        git('push', '-q', 'origin', again['branch'], cwd=again['worktree'])
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertFalse([f for f in found if f[1] == 'parked'], found)
+        self.assertIn('landed', [w for j, w, d in found if j == 'plan-f-0079'])
+
+    def test_a_hook_refusal_takes_the_retry_branch_and_is_held_not_parked(self):
+        items = self.card()
+        rec = self.spawn('refused', {'ok': True, 'pid': 76,
+                                     'result': 'NEEDS OPERATOR: is this account right?'})
+        self.commit(rec['worktree'])  # uncommitted-nothing but unpushed: 'not pushed' reason
+        with mock.patch.object(health_mod, 'push_retry',
+                               return_value=(lifecycle.HOOK_REFUSED, 'redact: secrets.py:1 a key')):
+            found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None,
+                                      items=items)
+        self.assertFalse([f for f in found if f[1] == 'parked'], found)
+        held = [d for j, w, d in found if w == 'held']
+        self.assertTrue(held, found)
+
+    def test_a_closed_items_park_is_released_not_kept(self):
+        items = self.card()
+        rec = self.spawn('parked', {'ok': True, 'pid': 77,
+                                    'result': 'NEEDS OPERATOR: which account owns this?'})
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
+        health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None, items=items)
+        closed = self.card(state='Resolved')
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None,
+                                  items=closed)
+        self.assertFalse([f for f in found if f[1] == 'parked'], found)
+        self.assertIn(('parked', 'released', f'{self.ITEM} is Resolved: no correction'), found)
+
+    def test_items_none_parks_nothing_and_raises_nothing(self):
+        rec = self.spawn('noindex', {'ok': True, 'pid': 78,
+                                     'result': 'NEEDS OPERATOR: which account owns this?'})
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None,
+                                  items=None)
+        self.assertFalse([f for f in found if f[1] == 'parked'], found)
+        self.assertFalse([f for f in found if f[1] == 'released'], found)
 
 
 class TestStall(Home):
