@@ -264,6 +264,11 @@ def build_parser():
     p_doctor = sub.add_parser('doctor', help='is this product\'s ASF install sound — one table')
     p_doctor.add_argument('--product')
 
+    p_reserve = sub.add_parser(
+        'reserve', help='claim the next number in a declared sequence (conventions.sequences)')
+    p_reserve.add_argument('sequence')
+    p_reserve.add_argument('--product')
+
     p_readme = sub.add_parser('readme', help='the README\'s generated spans — refresh, check or read as json')
     p_readme.add_argument('--product')
     p_readme.add_argument('--check', action='store_true', help='report drift against the committed facts (default)')
@@ -519,6 +524,9 @@ def _main(argv=None):
     if args.command == 'doctor':
         from asf.doctor import cmd_doctor
         return cmd_doctor(args, root)
+    if args.command == 'reserve':
+        from asf.reserve import cmd_reserve
+        return cmd_reserve(args, root)
     if args.command == 'readme':
         from asf.views.readme import cmd_readme
         return cmd_readme(args, root)
