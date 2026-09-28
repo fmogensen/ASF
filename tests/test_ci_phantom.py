@@ -37,10 +37,13 @@ def product(org=None):
                              'deploy_sha': {'prod': {'required_jobs': ['gate-tests']}}})
 
 
-def job(name, status, labels, runner=None, created=-5, start=None):
-    return {'name': name, 'status': status, 'labels': labels, 'runner_name': runner,
-            'created_at': at(created), 'started_at': at(start) if start is not None else None,
-            'completed_at': None}
+def job(name, status, labels, runner=None, created=-5, start=None, steps=None):
+    out = {'name': name, 'status': status, 'labels': labels, 'runner_name': runner,
+           'created_at': at(created), 'started_at': at(start) if start is not None else None,
+           'completed_at': None}
+    if steps is not None:
+        out['steps'] = steps
+    return out
 
 
 class Host:
@@ -68,11 +71,27 @@ class Host:
                   'path': '.github/workflows/pr.yml'},
         }
         self.jobs = {
-            900: [job('gate', 'completed', HEAVY, 'h1', -6, -6),
+            900: [job('gate', 'completed', HEAVY, 'h1', -6, -6, steps=[
+                      {'name': 'checkout', 'status': 'completed', 'started_at': t(-6),
+                       'completed_at': t(-5)},
+                      {'name': 'test', 'status': 'completed', 'started_at': t(-5),
+                       'completed_at': t(-4)}]),
                   job('gate-tests', 'queued', HEAVY, created=-trunk_queued_min)],
-            110: [job('gate', 'in_progress', PR_OK, 'h1', -30, -30)],
-            111: [job('gate', 'in_progress', PR_OK, 'h2', -20, -20)],
-            112: [job('gate', 'in_progress', PR_OK, 'h3', -10, -10)],
+            110: [job('gate', 'in_progress', PR_OK, 'h1', -30, -30, steps=[
+                      {'name': 'checkout', 'status': 'completed', 'started_at': t(-30),
+                       'completed_at': t(-29)},
+                      {'name': 'test', 'status': 'in_progress', 'started_at': t(-29),
+                       'completed_at': None}])],
+            111: [job('gate', 'in_progress', PR_OK, 'h2', -20, -20, steps=[
+                      {'name': 'checkout', 'status': 'completed', 'started_at': t(-20),
+                       'completed_at': t(-19)},
+                      {'name': 'test', 'status': 'in_progress', 'started_at': t(-19),
+                       'completed_at': None}])],
+            112: [job('gate', 'in_progress', PR_OK, 'h3', -10, -10, steps=[
+                      {'name': 'checkout', 'status': 'completed', 'started_at': t(-10),
+                       'completed_at': t(-9)},
+                      {'name': 'test', 'status': 'in_progress', 'started_at': t(-9),
+                       'completed_at': None}])],
         }
 
     def runner_rows(self):

@@ -177,7 +177,9 @@ old run re-run) on :data:`PHANTOM_PASSES` consecutive passes is a *phantom*
 as offline — neither free nor one of the runners ``ci.reserve`` keeps free, so the reservation
 keeps another free in its place (:func:`asf.ci_pool.reserve_plans`). The doctor's ``ci
 runners`` row, the status clause and ``asf ci queue`` name it: ``runner-4b busy with no job
-for 12 min — restart its runner service`` (red past :data:`PHANTOM_RED_S`).
+for 12 min — restart its runner service`` (red past :data:`PHANTOM_RED_S`). The stall watch
+asks the same listing question and pays for one answer (:meth:`Source.live_runs`): a pass that
+runs both watches lists a repo's queued and in-progress runs once, not twice.
 
 **Broken reservation.** When a runner ``ci.reserve`` keeps for the trunk is a phantom or runs a
 PR job (a run whose ``runs-on`` predates the reservation label), and too few kept runners are
@@ -713,7 +715,15 @@ class Source:
 
     def live_jobs(self, run_id):
         """One run's jobs as they stand now (latest attempt): ``[{name, status, labels,
-        runner_name, created_at, started_at, completed_at}]``, or None when unreadable."""
+        runner_name, created_at, started_at, completed_at, steps}]`` — ``steps`` being
+        ``[{name, status, started_at, completed_at}]`` in the provider's own order — or None
+        when unreadable. A provider that publishes no steps leaves the key out."""
+        return None
+
+    def live_runs(self):
+        """The product's own runs not completed: ``[{id, status, headBranch, headSha,
+        createdAt, workflow}]``, or None when unreadable. The population the step-silence
+        watch judges."""
         return None
 
     def prs(self):
@@ -828,12 +838,18 @@ class GitHubSource(Source):
     def _runs_by_status(self, repo, status):
         """Every run of ``repo`` in ``status``, however old — the recent-runs listing misses a
         re-run of an old run (2026-09-27: two PR re-runs from the day before held the trunk's
-        reserved runners, invisible to it). None when unreadable."""
+        reserved runners, invisible to it). Memoised per ``(repo, status)`` for the pass: the
+        phantom watch and the stall watch ask the same listing. None when unreadable."""
+        self._by_status = getattr(self, '_by_status', {})
+        key = (repo, status)
+        if key in self._by_status:
+            return self._by_status[key]
         text = self._gh(['api', '--paginate', f'repos/{repo}/actions/runs?status={status}'
                                               '&per_page=100',
                          '--jq', '.total_count, (.workflow_runs[] | {id, status, conclusion, '
                          'event, head_branch, head_sha, created_at, path})'])
         if text is None:
+            self._by_status[key] = None
             return None
         counted, runs = False, []
         for line in text.splitlines():
@@ -846,10 +862,13 @@ class GitHubSource(Source):
             try:
                 r = json.loads(line)
             except ValueError:
+                self._by_status[key] = None
                 return None
             if isinstance(r, dict) and r.get('id'):
                 runs.append(r)
-        return runs if counted else None
+        result = runs if counted else None
+        self._by_status[key] = result
+        return result
 
     def busy_runners(self):
         repos = self._runner_repos()
@@ -875,11 +894,26 @@ class GitHubSource(Source):
                         out[j['runner_name']] = {'run': r, 'job': j.get('name'), 'repo': repo}
         return out
 
+    def live_runs(self):
+        if not self.slug:
+            return None
+        runs = {}
+        for status in ('queued', 'in_progress'):
+            got = self._runs_by_status(self.slug, status)
+            if got is None:
+                return None
+            runs.update((r['id'], r) for r in got)
+        return [{'id': r['id'], 'status': r['status'], 'headBranch': r.get('head_branch'),
+                 'headSha': r.get('head_sha'), 'createdAt': r.get('created_at'),
+                 'workflow': os.path.basename(r['path'])}
+                for r in runs.values()]
+
     def _repo_jobs(self, repo, run_id):
         text = self._gh(['api', f'repos/{repo}/actions/runs/{run_id}/jobs?per_page=100'
                                 '&filter=latest',
                          '--jq', '.jobs[] | {name, status, labels, runner_name, created_at, '
-                         'started_at, completed_at}'])
+                         'started_at, completed_at, steps: [.steps[]? | {name, status, '
+                         'started_at, completed_at}]}'])
         if text is None:
             return None
         try:
