@@ -403,3 +403,61 @@ def _dedent(text):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ProductOfCwdTests(unittest.TestCase):
+    """A bare ``asf status`` from a product's checkout resolves that product, not the
+    operator's ``default_product`` (a product repo read the default product's record)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = os.path.realpath(self.tmp.name)
+        self.home = os.path.join(root, 'home')
+        os.makedirs(os.path.join(self.home, 'products'))
+        self.asf_repo = os.path.join(root, 'ASF')
+        self.asf_record = os.path.join(root, 'ASF-backlog')   # a sibling sharing the prefix
+        self.bot_repo = os.path.join(root, 'bot', 'bot')
+        self.bot_record = os.path.join(root, 'bot', 'backlog')
+        for d in (self.asf_repo, self.asf_record, os.path.join(self.bot_repo, 'apps', 'web'), self.bot_record):
+            os.makedirs(d, exist_ok=True)
+        with open(os.path.join(self.home, 'config.yaml'), 'w') as f:
+            f.write('default_product: asf\n')
+        for name, repo, rec in (('asf', self.asf_repo, self.asf_record), ('bot', self.bot_repo, self.bot_record)):
+            with open(os.path.join(self.home, 'products', f'{name}.yaml'), 'w') as f:
+                f.write(f'product: {name}\nrepo_dir: {repo}\nbacklog_dir: {rec}\n')
+        with open(os.path.join(self.home, 'products', 'broken.yaml'), 'w') as f:
+            f.write(': : [\n')
+        self.old_home, env.ASF_HOME = env.ASF_HOME, self.home
+        self.old_env = os.environ.pop('ASF_PRODUCT', None)
+        self.old_cwd = os.getcwd()
+
+    def tearDown(self):
+        os.chdir(self.old_cwd)
+        env.ASF_HOME = self.old_home
+        if self.old_env is not None:
+            os.environ['ASF_PRODUCT'] = self.old_env
+        self.tmp.cleanup()
+
+    def test_cwd_inside_a_product_repo_resolves_that_product(self):
+        os.chdir(os.path.join(self.bot_repo, 'apps', 'web'))
+        self.assertEqual(env.default_product_name(), 'bot')
+        os.chdir(self.bot_record)
+        self.assertEqual(env.default_product_name(), 'bot')
+
+    def test_prefix_sibling_is_not_inside(self):
+        os.chdir(self.asf_record)
+        self.assertEqual(env.product_of_dir(), 'asf')
+        self.assertIsNone(env.product_of_dir(self.asf_repo + '-other'))
+
+    def test_outside_every_product_falls_back_to_default(self):
+        os.chdir(self.tmp.name)
+        self.assertIsNone(env.product_of_dir())
+        self.assertEqual(env.default_product_name(), 'asf')
+
+    def test_env_var_still_wins(self):
+        os.chdir(self.bot_repo)
+        os.environ['ASF_PRODUCT'] = 'asf'
+        try:
+            self.assertEqual(env.default_product_name(), 'asf')
+        finally:
+            del os.environ['ASF_PRODUCT']

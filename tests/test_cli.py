@@ -134,7 +134,17 @@ class RecordCommandUsesTheProductRecordTests(unittest.TestCase):
         self.assertEqual(out.splitlines()[0], f"record: {self.backlog_dir}", out)
         self.assertFalse(os.path.isdir(os.path.join(self.product_repo, 'groom')))
 
+    def test_groom_bare_from_the_product_repo_resolves_that_product(self):
+        rc, out = self._run(['groom'])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out.splitlines()[0], f"record: {self.backlog_dir}", out)
+        self.assertFalse(os.path.isdir(os.path.join(self.product_repo, 'groom')))
+
     def test_groom_from_an_unconfigured_product_repo_refuses_rather_than_grooming_nothing(self):
+        # a repo no product file claims (a configured product's repo_dir resolves that product)
+        self.product_repo = os.path.join(self.tmp, 'unclaimed-repo')
+        os.makedirs(self.product_repo)
+        os.chdir(self.product_repo)
         rc, out = self._run(['groom'])
         self.assertEqual(rc, 2, out)
         lines = out.strip().splitlines()

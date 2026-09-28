@@ -419,10 +419,52 @@ def product_auth_env(product):
     return {str(k): os.path.expanduser(str(v)) for k, v in auth.items()} if isinstance(auth, dict) else {}
 
 
+def product_of_dir(path=None):
+    """The product whose checkout contains ``path`` (default: the cwd) — its ``repo_dir``,
+    ``backlog_dir`` or state directory — or None. The deepest root wins, so a product nested
+    inside another's tree resolves to itself. A product file that does not parse is skipped:
+    this is a guess made before any product is loaded, never a reason to fail one."""
+    try:
+        here = os.path.realpath(path or os.getcwd())
+    except OSError:
+        return None
+    pdir = os.path.join(ASF_HOME, 'products')
+    try:
+        files = sorted(f for f in os.listdir(pdir) if f.endswith('.yaml'))
+    except OSError:
+        return None
+    best, best_len = None, -1
+    for f in files:
+        name = f[:-len('.yaml')]
+        try:
+            data = load_file(os.path.join(pdir, f)) or {}
+        except Exception:  # noqa: BLE001 — a broken sibling product never blocks resolution
+            continue
+        if not isinstance(data, dict):
+            continue
+        roots = [data.get('repo_dir'), data.get('backlog_dir'), os.path.join(ASF_HOME, 'state', name)]
+        for root in roots:
+            if not root or not isinstance(root, str):
+                continue
+            root = os.path.realpath(os.path.expanduser(root))
+            try:
+                inside = os.path.commonpath([here, root]) == root
+            except ValueError:
+                inside = False
+            if inside and len(root) > best_len:
+                best, best_len = name, len(root)
+    return best
+
+
 def default_product_name():
-    """``$ASF_PRODUCT`` first, else ``config.yaml``'s ``default_product``."""
+    """``$ASF_PRODUCT`` first, else the product whose checkout holds the cwd
+    (:func:`product_of_dir` — ``asf status`` run bare in a product's repo reads that product,
+    not the operator's default), else ``config.yaml``'s ``default_product``."""
     if os.environ.get('ASF_PRODUCT'):
         return os.environ['ASF_PRODUCT']
+    here = product_of_dir()
+    if here:
+        return here
     cfg = load_config()
     name = cfg.get('default_product')
     if not name:
