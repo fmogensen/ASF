@@ -428,12 +428,15 @@ def apply_groom_answers(root, canonical, prev_path, date, adjudicator_job=None, 
         im = INBOX_ANSWER_RE.match(line)
         if im:  # an inbox card intake asked about: the answer edits the card, intake re-reads it
             word, who, by = _attribution(im.group('answer').strip(), adjudicator_job)
-            if inbox_mod.apply_answer(root, im.group('name'), word, date, who.strip('()'),
-                                      intake_dir=intake_dir):
+            applied_ok, reason = inbox_mod.apply_answer(root, im.group('name'), word, date,
+                                                         who.strip('()'), intake_dir=intake_dir)
+            if applied_ok:
                 applied += 1
                 if event:
                     event('groom_answer', item=f"inbox:{im.group('name')}", section='inbox_questions',
                           field='inbox', value=word, by=by)
+            elif reason:
+                print(f"groom: answer not applied — inbox:{im.group('name')}: {reason}")
             continue
         m = ANSWER_LINE_RE.match(line)
         if not m:
