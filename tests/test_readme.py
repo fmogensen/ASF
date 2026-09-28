@@ -504,5 +504,38 @@ class ProductResolutionProseTests(unittest.TestCase):
             self.assertIn(needle, row)
 
 
+class WorktreeSetupProseTests(unittest.TestCase):
+    """F-0127/T-0484: the product-config guide documents `worktree_setup` — the conventions
+    table row and the subsection under it — read from the checkout, not a fixture."""
+
+    def _read(self, path):
+        with open(os.path.join(REPO_ROOT, path), encoding='utf-8') as f:
+            return f.read()
+
+    def _section(self, text, heading):
+        lines = text.splitlines()
+        start = next(i for i, l in enumerate(lines) if l.strip() == heading)
+        end = next(i for i in range(start + 1, len(lines)) if lines[i].startswith('###'))
+        return lines[start + 1:end]
+
+    def test_conventions_table_names_worktree_setup(self):
+        text = self._read('docs/guide/product-config.md')
+        row = [l for l in text.splitlines() if l.startswith('| `worktree_setup`')][0]
+        self.assertIn('idempotent', row)
+
+    def test_heading_names_worktree_setup_and_fresh_worktree(self):
+        text = self._read('docs/guide/product-config.md')
+        heading = [l for l in text.splitlines() if l.startswith('### `worktree_setup`')][0]
+        self.assertIn('worktree_setup', heading)
+        self.assertIn('fresh worktree', heading)
+
+    def test_subsection_names_every_clause_a_product_depends_on(self):
+        text = self._read('docs/guide/product-config.md')
+        section = '\n'.join(self._section(text, '### `worktree_setup` — the command a fresh worktree needs'))
+        for needle in ('900', 'briefs/', '.setup.log', 'masked', 'removes the\n  worktree',
+                       'idempotent', 'once per worktree', 'lane: cloud'):
+            self.assertIn(needle, section)
+
+
 if __name__ == '__main__':
     unittest.main()
