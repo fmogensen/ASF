@@ -345,6 +345,25 @@ def remote_head(url, run=subprocess.run, branch='main'):
     return (text or '').split('\t')[0].strip() or None
 
 
+#: a resolved commit is exactly this — 40 hex characters — never looked up again (``--to``'s sha
+#: form costs no network round trip)
+HEX40 = re.compile(r'[0-9a-fA-F]{40}$')
+
+
+def resolve_ref(url, ref, run=subprocess.run):
+    """``ref`` as a commit, for the CI guard, ``write_pending`` and the marker (PD12): unchanged
+    when it already is a 40-hex sha, else the commit ``git ls-remote <url> <ref>`` names — the
+    dereferenced commit on a ``^{}`` line for an annotated tag, else the line's own sha. ``None``
+    when ``ref`` matches nothing on ``url``."""
+    if not ref or HEX40.match(ref):
+        return ref
+    text = _out(run, ['git', 'ls-remote', url, ref])
+    lines = [ln for ln in (text or '').splitlines() if ln.strip()]
+    deref = next((ln for ln in lines if ln.endswith('^{}')), None)
+    line = deref or (lines[0] if lines else '')
+    return line.split('\t')[0].strip() or None
+
+
 def other_ticks(run=subprocess.run, me=None):
     """Pids of the asf tick and background harvest processes of this install's ASF home other
     than this one (and its parent). A process under another ASF home — a test suite's
@@ -497,9 +516,22 @@ def install(ref=None, run=subprocess.run, out=print, owner=None, wait_s=0, sleep
     product waits for — so no new tick starts and no new harvest spawns, then polls up to
     ``wait_s`` seconds for the running ones to end (:func:`drain`). A tick's upgrade still
     blocked defers and keeps its mark for its next start; any other outcome clears the mark
-    this call is responsible for."""
+    this call is responsible for.
+
+    ``ref`` may be a tag as well as a sha (``--to``/``--ref``): resolved to its commit up front
+    (PD12) — that commit is what the CI guard, the pending marker and the post-install check see
+    — while ``pipx`` still receives the tag as the operator gave it, so ``direct_url.json``
+    records it and :func:`asf.cli.version_string` reports the release."""
     others = other_ticks(run)
     marked = None
+    pin = ref
+    if ref and not HEX40.match(ref):
+        url = repo_url(run)
+        resolved = resolve_ref(url, ref, run)
+        if resolved is None:
+            out(f'upgrade: refused — {ref} does not resolve to a commit on {url}')
+            return 2
+        ref = resolved
     if others and (owner or wait_s):
         url = repo_url(run)
         if not owner and not ref:
@@ -537,7 +569,7 @@ def install(ref=None, run=subprocess.run, out=print, owner=None, wait_s=0, sleep
                 clear_pending()
             out('upgrade: NOT installed — rerun with --wait [SECONDS] to wait for them to end')
         return DEFERRED
-    rc = _install(ref, run, out)
+    rc = _install(ref, run, out, pin=pin) if pin != ref else _install(ref, run, out)
     if rc == 0:
         record_last(ref)
     if owner or marked is not None:
@@ -545,7 +577,10 @@ def install(ref=None, run=subprocess.run, out=print, owner=None, wait_s=0, sleep
     return rc
 
 
-def _install(ref, run, out):
+def _install(ref, run, out, pin=None):
+    """Reinstall at ``ref``. ``pin`` is what ``pipx`` receives on the command line when it
+    differs from ``ref`` — the tag :func:`install` resolved ``ref`` from; ``None`` (the default)
+    means ``pipx`` receives ``ref`` itself, as every caller but :func:`install`'s ``--to`` does."""
     url = repo_url(run)
     ref = ref or remote_head(url, run)
     if not ref:
@@ -554,7 +589,7 @@ def _install(ref, run, out):
     if ci_red(url, ref, run):
         out(f'upgrade: skipped — remote CI is red at {ref[:7]}; the next green head installs')
         return DEFERRED
-    cmd = upgrade_command(url, ref)
+    cmd = upgrade_command(url, pin or ref)
     out('upgrade: ' + ' '.join(cmd))
     try:
         rc = run(cmd).returncode
@@ -621,7 +656,10 @@ def cmd_upgrade(args, run=subprocess.run):
 def register(subparsers):
     p = subparsers.add_parser('upgrade', help="reinstall asf at main's head, then the schema check for every product")
     p.add_argument('--skip-pipx', action='store_true', help='only the schema table')
-    p.add_argument('--ref', help="the commit to install (default: main's head)")
+    p.add_argument('--to', dest='ref', metavar='REF',
+                   help="the commit or tag to install (default: main's head)")
+    p.add_argument('--ref', dest='ref', metavar='REF',
+                   help='same as --to — the accepted older spelling')
     p.add_argument('--wait', type=int, nargs='?', const=DEFAULT_MANUAL_WAIT_S, default=None,
                    metavar='SECONDS',
                    help='when another asf tick or harvest runs: park new ticks and wait up to '
