@@ -20,7 +20,7 @@ Needs macOS or Linux, `git`, `gh`, `pipx` and Claude Code. Per product, once:
 curl -fsSL https://raw.githubusercontent.com/fmogensen/ASF/main/tools/install.sh | bash -s -- <product> -- --repo <dir> --record <dir> --scheduler launchd
 ```
 
-Ends on `asf doctor`; then in that product's Claude Code session, `/plugin marketplace add ~/.ASF/plugin` and `/plugin install asf@asf`. A session whose working directory is the product's repo or its record needs no `ASF_PRODUCT`.
+The last two steps are the doctor and a dry tick run; then in that product's Claude Code session, `/plugin marketplace add ~/.ASF/plugin` and `/plugin install asf@asf`. A session whose working directory is the product's repo or its record needs no `ASF_PRODUCT`.
 
 The operator's guide is [`docs/guide/`](docs/guide/): [getting started](docs/guide/getting-started.md),
 [the product file](docs/guide/product-config.md), [the daily loop](docs/guide/operating.md),
