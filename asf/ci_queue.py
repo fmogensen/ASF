@@ -898,7 +898,7 @@ class GitHubSource(Source):
         if not self.slug:
             return None
         runs = {}
-        for status in ('queued', 'in_progress'):
+        for status in QUEUED_STATUSES | {'in_progress'}:
             got = self._runs_by_status(self.slug, status)
             if got is None:
                 return None

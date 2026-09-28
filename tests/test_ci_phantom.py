@@ -69,6 +69,9 @@ class Host:
             112: {'id': 112, 'status': 'in_progress', 'event': 'pull_request',
                   'head_branch': 'bug/B-0008', 'head_sha': 'c' * 40, 'created_at': t(-20),
                   'path': '.github/workflows/pr.yml'},
+            113: {'id': 113, 'status': 'requested', 'event': 'pull_request',
+                  'head_branch': 'chore/misc', 'head_sha': 'g' * 40, 'created_at': t(-5),
+                  'path': '.github/workflows/pr.yml'},
         }
         self.jobs = {
             900: [job('gate', 'completed', HEAVY, 'h1', -6, -6, steps=[
