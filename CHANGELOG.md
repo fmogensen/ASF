@@ -2,6 +2,29 @@
 
 One entry per released version, newest first.
 
+## v0.1.61 — 2026-09-28
+
+### Bugs fixed
+
+- B-0047 asf plugin check resolves the plugin directory from the package, not the checkout; CI is red on a plain install
+
+### In progress
+
+- F-0050 The product improvement loop: the factory proposes product changes from the product's own measurements
+- F-0066 A progress heartbeat: no progress for twenty minutes is a stall, not only silence
+- F-0068 Spike: one Feature through a hosted agent runtime, compared with the local pool
+- F-0069 Security checks by code: a review pass on sensitive paths, secret and dependency scanning as rules
+- F-0084 The command surface reads as one product: names, one voice, and "writes" marked
+- F-0107 asf install: one command from zero to a ticking factory (from a release tag, doctor green)
+
+### Improvements and hotfixes
+
+- fix(capacity): CI free from idle self-hosted runners, not whole runs in flight (#222)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.61"`
+
 ## v0.1.60 — 2026-09-28
 
 ### Bugs fixed
