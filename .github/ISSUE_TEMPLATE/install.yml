@@ -1,0 +1,31 @@
+name: Install problem
+description: The installer, or a first run, did not go cleanly.
+title: "install: "
+labels: ["feedback", "install"]
+body:
+  - type: input
+    id: os
+    attributes:
+      label: OS and version
+      description: e.g. macOS 14.5, Ubuntu 22.04.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: The command you ran
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: The output
+      description: Paste it as-is.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor-row
+    attributes:
+      label: "asf doctor's failing row"
+    validations:
+      required: true

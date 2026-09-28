@@ -1,0 +1,33 @@
+name: Bug report
+description: Something in the factory did not do what it should.
+title: "bug: "
+labels: ["feedback", "bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you ran, and what it did.
+    validations:
+      required: true
+  - type: textarea
+    id: what-expected
+    attributes:
+      label: What was expected
+      description: What should have happened instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: "asf --version"
+      description: The output of `asf --version`.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor-row
+    attributes:
+      label: The doctor row, if any
+      description: The failing row from `asf doctor`, if this looks like one.
+    validations:
+      required: false

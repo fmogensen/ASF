@@ -1,0 +1,17 @@
+name: Idea
+description: Something you wanted the factory to do, and it could not.
+title: "idea: "
+labels: ["feedback", "idea"]
+body:
+  - type: textarea
+    id: wanted
+    attributes:
+      label: What you wanted to do
+    validations:
+      required: true
+  - type: textarea
+    id: why-not
+    attributes:
+      label: Why the factory cannot do it today
+    validations:
+      required: true

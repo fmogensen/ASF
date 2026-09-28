@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Ask a question
+    url: https://github.com/fmogensen/ASF-backlog
+    about: Questions and discussion live in the record, not the issue tracker.
