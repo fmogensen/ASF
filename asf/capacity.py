@@ -28,7 +28,10 @@ total; ``sessions_bound`` names whichever term won.
 **The CI law.** Symmetrical, and skipped entirely when neither ``capacity.ci``, a declared
 ``ci.pool`` nor ``capacity.total.ci`` is configured — no ``gh`` call. A declared pool sets the
 product's CI ceiling to the sum of its runners' slots; an explicit ``capacity.ci`` overrides it. An unreadable or unconfigured count is
-``None`` (unknown), and unknown never lowers a ceiling nor blocks a caller.
+``None`` (unknown), and unknown never lowers a ceiling nor blocks a caller. What the feeder's
+``auto`` cap reads as *CI free* (:func:`bandwidth`) comes from the runners themselves when the
+product declares a self-hosted ``ci.pool`` and the host reads (:func:`runner_ci_free`); a run in
+flight with only a tail job left holds one runner there, not a whole slot.
 
 **The fair share.** Every product draws on one worker pool, so a product's ceiling is also
 bounded by its share of what the pool can take *now*: ``usable`` is the sum over accounts of
@@ -240,8 +243,10 @@ def quota_stopped(cfg, quota_source=None):
 def bandwidth(product, cfg=None, resolved=None, quota_source=None):
     """The facts ``feeder.max_features_in_build: auto`` sizes its cap from
     (:func:`asf.feeder.rows.features_cap`): ``sessions`` (this product's session ceiling now),
-    ``accounts`` and ``quota_stopped`` (:func:`quota_stopped`), ``ci_free`` (CI slots less the
-    runs in flight; ``None`` with no CI cap or no count). ``resolved``: a :func:`resolve` the
+    ``accounts`` and ``quota_stopped`` (:func:`quota_stopped`), ``ci_free`` (the runs the idle
+    self-hosted runners can take now, :func:`runner_ci_free`, capped at the CI ceiling; where no
+    runner read or measure is at hand, CI slots less the runs in flight; ``None`` with no CI cap
+    or no count). ``resolved``: a :func:`resolve` the
     caller already has. Never raises: a fact it cannot read is ``None``."""
     out = {'sessions': None, 'accounts': None, 'quota_stopped': None, 'ci_free': None,
            'quota_in_sessions': False}
@@ -251,12 +256,85 @@ def bandwidth(product, cfg=None, resolved=None, quota_source=None):
         out['sessions'] = r.sessions
         # a fair share is cut from the usable slots: the quota stop is in it already
         out['quota_in_sessions'] = r.sessions_bound == 'fair share'
-        if r.ci is not None and r.ci_inflight is not None:
+        by_runners = runner_ci_free(product)
+        if by_runners is not None:
+            free = by_runners[0]
+            out['ci_free'] = free if r.ci is None else min(free, int(r.ci))
+        elif r.ci is not None and r.ci_inflight is not None:
             out['ci_free'] = max(int(r.ci) - int(r.ci_inflight), 0)
         out['accounts'], out['quota_stopped'] = quota_stopped(cfg, quota_source)
     except Exception:  # noqa: BLE001 — a missing fact sizes the cap from what is left (D8)
         pass
     return out
+
+
+def expected_run_needs(product, workflow=None):
+    """``{class: jobs}`` one full run of ``ci.workflow`` asks of the self-hosted pool at once: the
+    CI queue's cached measure (:meth:`asf.ci_queue.Queue.needs`, read off its file — no ``gh``
+    call) with ``ci.queue.estimate`` over it. ``{}`` when neither is at hand."""
+    from asf import ci_queue
+    ci = product.ci if isinstance(getattr(product, 'ci', None), dict) else {}
+    workflow = workflow or ci.get('workflow')
+    out = {}
+    if workflow:
+        try:
+            cached = (ci_queue.load(product.name).get('expect') or {}).get(workflow)
+        except Exception:  # noqa: BLE001 — an unreadable queue file: no measure
+            cached = None
+        if isinstance(cached, dict) and cached.get('v') == ci_queue.EXPECT_VERSION:
+            out = {c: n for c, n in (cached.get('needs') or {}).items()
+                   if isinstance(n, int) and n > 0}
+    for cls, n in ci_queue.estimate_override(product, ci_queue.FULL).items():
+        if n > 0:
+            out[cls] = n
+        else:
+            out.pop(cls, None)
+    return out
+
+
+def runner_ci_free(product, runners=None, needs=None, phantoms=None):
+    """``(free, {class: runs})``: how many more CI runs the self-hosted pool can take *now* —
+    per class, its idle online runners (a phantom counts as offline; with ``ci.reserve``, only
+    the runners a PR run may land on) divided by the jobs one run asks of that class
+    (:func:`expected_run_needs`, capped at what the class has online), the bottleneck class
+    deciding. A run whose tail job alone is left (a long ``site`` job) holds one runner, not a
+    whole run's worth, so the idle runners around it still count. ``None`` when the product
+    declares no ``ci.pool``, no run need is known, or the runners cannot be read — the caller
+    falls back to CI slots less the runs in flight. Never raises."""
+    from asf import ci_pool, ci_queue
+    try:
+        pool = ci_pool.load_pool(product)
+        if not pool:
+            return None
+        needs = expected_run_needs(product) if needs is None else needs
+        needs = {c: n for c, n in (needs or {}).items() if isinstance(n, int) and n > 0}
+        if not needs:
+            return None
+        if runners is None:
+            backend = ci_pool.backend_for(product)
+            if backend is None:
+                return None
+            runners = backend.runners()
+        if not runners:
+            return None
+        gone = ci_pool._phantoms_of(product) if phantoms is None else set(phantoms)
+        runners = [dataclasses.replace(r, online=False) if r.name in gone else r for r in runners]
+        reserves = ci_pool.load_reserve(product)
+        if reserves:
+            runners = ci_pool.pr_runners(runners, reserves)
+        load = ci_queue.load_by_class(runners, pool)
+        per = {}
+        for cls, n in needs.items():
+            if cls not in load:
+                continue
+            online, busy = load[cls]['online'], load[cls]['busy']
+            need = min(n, online)
+            per[cls] = (online - busy) // need if need > 0 else 0
+        if not per:
+            return None
+        return min(per.values()), per
+    except Exception:  # noqa: BLE001 — an unreadable host: the in-flight formula decides
+        return None
 
 
 def product_weight(product):
