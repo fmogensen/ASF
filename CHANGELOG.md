@@ -2,6 +2,20 @@
 
 One entry per released version, newest first.
 
+## v0.1.64 — 2026-09-28
+
+### In progress
+
+- F-0070 A CI step-silence rule: a job with no new step for ten minutes is stalled, even under budget
+- F-0107 asf install: one command from zero to a ticking factory (from a release tag, doctor green)
+- F-0108 Release ASF 0.1 for feedback: general installer, first-user docs, release notes, a feedback channel
+- F-0110 /asf:* in a product's own session shows another product: resolve the product from the working directory
+- F-0113 An S1 silently holds all Feature work, and NEXT plans from different inputs than the tick
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.64"`
+
 ## v0.1.63 — 2026-09-28
 
 ### Bugs fixed
