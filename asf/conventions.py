@@ -59,6 +59,12 @@ The product yaml carries the overrides::
         usd: 10            # dollars an item may take before it stops (off: no limit)
         run_minutes: 180   # one run's wall clock; over it the run is ended `run cap`
         run_turns: 600     # one run's assistant turns; over it the run is ended `run cap`
+        run_turns_by_kind: # per-kind override of run_turns (F-0062 §2.5); a kind not named
+          close: 60        # here keeps run_turns
+      roles:
+        asf-coder:         # a TABLE row's effort and permission_mode only — widening tools,
+          effort: medium   # writes or connections is an operator action (asf/amendable.py:53),
+                           # not a product setting (F-0062 §2.1)
 
 Unknown keys are kept (in :attr:`Conventions.extra`) rather than rejected: a product yaml is
 written by an operator and may carry conventions a module older than it does not read yet, and
@@ -253,7 +259,7 @@ LANE_KEYS = {'review': 'lane_review', 'stale_after': 'lane_stale_after'}
 #: fails loud: :meth:`Conventions.shape_findings` names it, and the doctor's ``conventions`` row
 #: is red with the key and the line.
 MAP_CONVENTIONS = ('models', 'branch_prefixes', 'harvest', 'git', 'branch_retention', 'commit',
-                   'budget', 'merge_queue')
+                   'budget', 'merge_queue', 'roles')
 #: ``commit.signoff_check``'s default: a PR check whose name contains it is the sign-off check.
 DEFAULT_SIGNOFF_CHECK = 'DCO'
 #: The conventions that take one word or a map of those words per landing class (``default:``
@@ -308,7 +314,15 @@ DEFAULT_SAVINGS = {
 
 #: An item's budget and one run's caps (F-0092). A product overrides any key; a key it does not
 #: name keeps the default here. ``off`` on any key is no limit for that measure.
-DEFAULT_BUDGET = {'sessions': 3, 'usd': 10, 'run_minutes': 180, 'run_turns': 600}
+#: ``run_turns_by_kind`` (F-0062 §2.5) overrides ``run_turns`` per brief kind, read through
+#: :func:`asf.budget.run_caps` — a kind it does not name keeps ``run_turns``.
+DEFAULT_BUDGET = {'sessions': 3, 'usd': 10, 'run_minutes': 180, 'run_turns': 600,
+                  'run_turns_by_kind': {}}
+
+#: ``conventions.roles``: a product's per-role override of a launch table row's ``effort`` and
+#: ``permission_mode`` only (F-0062 §2.1, :func:`asf.roles.launch.launch_for`). Empty by default
+#: — a role a product does not name launches exactly as :data:`asf.roles.launch.TABLE` has it.
+DEFAULT_ROLES = {}
 
 
 def _normalise_prefix(value):
@@ -549,6 +563,11 @@ class Conventions:
     #: in :data:`MAP_CONVENTIONS`, so a misshapen block is a red doctor row, never a silent
     #: default.
     budget: dict = field(default_factory=lambda: dict(DEFAULT_BUDGET))
+    #: ``roles``: a product's per-role override of a launch table row's ``effort`` and
+    #: ``permission_mode`` only (F-0062 §2.1), read through
+    #: :func:`asf.roles.launch.launch_for`. ``'roles'`` is in :data:`MAP_CONVENTIONS`, so a
+    #: misshapen block is a red doctor row, never a silent default.
+    roles: dict = field(default_factory=lambda: dict(DEFAULT_ROLES))
     #: Globs (F-0031 §2.1) whose match makes a landed branch's merge class
     #: `merge_amendable_set` rather than `merge_routine_pr` — the factory's own rules. Three
     #: states (F-0024): unset (``None``) is the defaults in `asf/amendable.py`, a list is that
