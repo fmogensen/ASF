@@ -26,10 +26,15 @@ FIXTURE_DIR="${ASF_HOME}/state/spike/f-0065/fixture"
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# One line, trimmed, capped, and stripped of any string shaped like a GitHub token — belt and
-# braces over what the probes already never print (§4).
+# One line, trimmed, capped: the actual $GH_TOKEN value (exact-value redaction, matching
+# asf.workers.runtime.mask) stripped first, then any string still shaped like a GitHub token —
+# belt and braces over what the probes already never print (§4).
 oneline() {
-  printf '%s' "$1" \
+  local msg="$1"
+  if [ -n "${GH_TOKEN:-}" ]; then
+    msg="${msg//$GH_TOKEN/[redacted:GH_TOKEN]}"
+  fi
+  printf '%s' "$msg" \
     | tr '\n\r\t' '   ' \
     | sed -E 's/gh[pousr]_[A-Za-z0-9_]{20,}/[redacted]/g; s/github_pat_[A-Za-z0-9_]{20,}/[redacted]/g' \
     | tr -s ' ' \
