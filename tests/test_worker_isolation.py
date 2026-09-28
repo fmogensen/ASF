@@ -5,8 +5,10 @@ from ``home_seed``, the doctor's ``worker env`` row is red on a leak, and the pr
 
 Every session here is a real process (a stand-in binary that dumps its environment), launched
 through :func:`asf.workers.spawn.spawn` the way a tick launches one."""
+import json
 import os
 import shutil
+import subprocess
 import tempfile
 import time
 import unittest
@@ -66,6 +68,9 @@ class IsolatedSession(Home):
         self.bin = tempfile.mkdtemp(prefix='asf-agent-bin-')
         self.addCleanup(shutil.rmtree, self.bin, ignore_errors=True)
         self.dump = os.path.join(self.bin, 'env.txt')
+
+    def product_with(self, command):
+        return env.Product('sample', dict(self.product._data, conventions={'worktree_setup': command}))
 
     def spawn(self, account, cfg_extra=None, job='j1', product=None):
         cfg = dict(self.cfg)
@@ -135,9 +140,6 @@ class IsolatedSession(Home):
 
 
 class WorktreeSetup(IsolatedSession):
-    def product_with(self, command):
-        return env.Product('sample', dict(self.product._data, conventions={'worktree_setup': command}))
-
     def test_the_setup_command_runs_in_a_fresh_worktree_under_the_worker_env(self):
         product = self.product_with('printf "%s|%s" "$HOME" "${FAKE_SECRET:-none}" > .setup-marker')
         acct = pool_mod.Account('acct-a', config_dir='/cfg/acct-a')
@@ -162,6 +164,188 @@ class WorktreeSetup(IsolatedSession):
         acct = pool_mod.Account('acct-a', config_dir='/cfg/acct-a')
         rec, _seen = self.spawn(acct)
         self.assertNotIn('setup_s', rec)
+
+
+class WorktreeSetupMarker(unittest.TestCase):
+    """``setup_marker_path`` / ``setup_done`` / ``_record_setup`` on their own: a git worktree and
+    nothing else — no account, no runtime stand-in, no spawn (F-0127, PD6)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='asf-setup-marker-')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.repo = os.path.join(self.tmp, 'repo')
+        os.makedirs(self.repo)
+        subprocess.run(['git', 'init', '-q', '-b', 'main', self.repo], check=True)
+        for k, v in (('user.email', 'ci@example.com'), ('user.name', 'ci')):
+            subprocess.run(['git', 'config', k, v], cwd=self.repo, check=True)
+        with open(os.path.join(self.repo, 'README'), 'w', encoding='utf-8') as f:
+            f.write('seed\n')
+        subprocess.run(['git', 'add', '.'], cwd=self.repo, check=True)
+        subprocess.run(['git', 'commit', '-q', '-m', 'seed'], cwd=self.repo, check=True)
+        self.wt = os.path.join(self.tmp, 'wt')
+        subprocess.run(['git', 'worktree', 'add', '-q', '-b', 'feature', self.wt, 'main'],
+                       cwd=self.repo, check=True)
+
+    def test_setup_marker_path_resolves_through_the_trees_own_admin_dir(self):
+        admin = spawn_mod._admin_dir(self.wt)
+        self.assertEqual(spawn_mod.setup_marker_path(self.wt),
+                         os.path.join(admin, spawn_mod.SETUP_MARKER))
+
+    def test_a_suffixed_admin_dir_resolves_to_its_own_worktree_not_the_firsts(self):
+        # a second worktree whose directory shares the first's basename gets its admin dir
+        # suffixed by git (`wt`, `wt_1`, ...); the path must resolve to its own, never the first's
+        other = os.path.join(self.tmp, 'elsewhere')
+        os.makedirs(other)
+        wt2 = os.path.join(other, 'wt')
+        subprocess.run(['git', 'worktree', 'add', '-q', '-b', 'feature2', wt2, 'main'],
+                       cwd=self.repo, check=True)
+        admin1, admin2 = spawn_mod._admin_dir(self.wt), spawn_mod._admin_dir(wt2)
+        self.assertNotEqual(admin1, admin2)
+        self.assertEqual(spawn_mod.setup_marker_path(self.wt), os.path.join(admin1, spawn_mod.SETUP_MARKER))
+        self.assertEqual(spawn_mod.setup_marker_path(wt2), os.path.join(admin2, spawn_mod.SETUP_MARKER))
+
+    def test_setup_done_is_false_with_no_marker(self):
+        self.assertFalse(spawn_mod.setup_done(self.wt, 'pnpm install'))
+
+    def test_record_setup_then_setup_done_is_true_for_that_command(self):
+        command = 'pnpm install'
+        path = spawn_mod._record_setup(self.wt, command, 1.5)
+        self.assertEqual(path, spawn_mod.setup_marker_path(self.wt))
+        self.assertTrue(spawn_mod.setup_done(self.wt, command))
+        with open(path, encoding='utf-8') as f:
+            obj = json.load(f)
+        self.assertEqual(obj, {'command': command, 'at': obj.get('at'), 'took_s': 1.5})
+        self.assertEqual(set(obj), {'command', 'at', 'took_s'})
+
+    def test_setup_done_is_false_for_a_different_command(self):
+        spawn_mod._record_setup(self.wt, 'pnpm install', 1.0)
+        self.assertFalse(spawn_mod.setup_done(self.wt, 'make deps'))
+
+    def test_setup_done_is_false_for_a_truncated_or_non_json_or_scalar_marker(self):
+        path = spawn_mod.setup_marker_path(self.wt)
+        for contents in ('{"command": "pnpm install"', 'not json',
+                         '"pnpm install"', '["pnpm install"]'):
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(contents)
+            self.assertFalse(spawn_mod.setup_done(self.wt, 'pnpm install'), contents)
+
+    def test_a_path_with_no_admin_dir_is_not_set_up_and_records_nothing(self):
+        not_a_worktree = os.path.join(self.tmp, 'not-a-worktree')
+        os.makedirs(not_a_worktree)
+        self.assertEqual(spawn_mod.setup_marker_path(not_a_worktree), '')
+        self.assertFalse(spawn_mod.setup_done(not_a_worktree, 'pnpm install'))
+        self.assertEqual(spawn_mod._record_setup(not_a_worktree, 'pnpm install', 1.0), '')
+
+    def test_record_setup_returns_empty_and_raises_nothing_when_the_admin_dir_is_unwritable(self):
+        with mock.patch.object(spawn_mod, 'setup_marker_path',
+                               return_value=os.path.join(self.tmp, 'no-such-dir', 'asf-setup')):
+            self.assertEqual(spawn_mod._record_setup(self.wt, 'pnpm install', 1.0), '')
+
+    def test_a_set_up_worktree_has_a_clean_git_status_and_the_marker_is_outside_the_tree(self):
+        spawn_mod._record_setup(self.wt, 'pnpm install', 1.0)
+        st = subprocess.run(['git', 'status', '--porcelain'], cwd=self.wt, capture_output=True,
+                            text=True)
+        self.assertEqual(st.stdout, '')
+        self.assertFalse(spawn_mod.setup_marker_path(self.wt).startswith(self.wt + os.sep))
+
+
+class WorktreeSetupRunsOnce(IsolatedSession):
+    """Once per worktree, and again when the command changes (F-0127)."""
+
+    def test_a_second_launch_skips_it_a_changed_command_reruns_it(self):
+        counter = os.path.join(self.tmp, 'counter')
+        product = self.product_with(f'printf x >> {counter}')
+        acct = pool_mod.Account('acct-a', config_dir='/cfg/acct-a')
+
+        rec1, _seen = self.spawn(acct, product=product, job='j1')
+        with open(counter, encoding='utf-8') as f:
+            self.assertEqual(f.read(), 'x')
+        self.assertIsInstance(rec1['setup_s'], float)
+        with open(spawn_mod.setup_marker_path(rec1['worktree']), encoding='utf-8') as f:
+            self.assertEqual(json.load(f)['command'], product.conventions.worktree_setup)
+        # the run is ended the way a correction's relaunch finds it, so make_worktree reuses it
+        pool_mod.update_session(product, 'j1', ended=pool_mod.now_iso())
+
+        log_mtime = os.stat(spawn_mod.setup_log_path(product, 'j1')).st_mtime
+        os.remove(self.dump)
+        rec2, _seen = self.spawn(acct, product=product, job='j1')
+        self.assertEqual(rec2['worktree'], rec1['worktree'])
+        with open(counter, encoding='utf-8') as f:
+            self.assertEqual(f.read(), 'x')           # nothing ran a second time
+        self.assertNotIn('setup_s', rec2)
+        self.assertEqual(os.stat(spawn_mod.setup_log_path(product, 'j1')).st_mtime, log_mtime)
+        pool_mod.update_session(product, 'j1', ended=pool_mod.now_iso())
+
+        other = self.product_with(f'printf y >> {counter}')
+        os.remove(self.dump)
+        rec3, _seen = self.spawn(acct, product=other, job='j1')
+        self.assertEqual(rec3['worktree'], rec1['worktree'])
+        with open(counter, encoding='utf-8') as f:
+            self.assertEqual(f.read(), 'xy')
+        self.assertIsInstance(rec3['setup_s'], float)
+        with open(spawn_mod.setup_marker_path(rec3['worktree']), encoding='utf-8') as f:
+            self.assertEqual(json.load(f)['command'], other.conventions.worktree_setup)
+
+
+class WorktreeSetupAfterReclaim(IsolatedSession):
+    """The card's own test: a stale orphan reclaimed and recreated at the job's own path gets its
+    setup, instead of handing a session a checkout with no dependencies (F-0127)."""
+
+    def setUp(self):
+        super().setUp()
+        # the setup command's own output is what a real one's dependency install is: gitignored,
+        # so an orphan's leftover-commit (asf.workers.spawn._commit_leftovers) finds nothing to
+        # commit and the reclaimed branch stays exactly at origin's tip
+        with open(os.path.join(self.repo, '.gitignore'), 'a', encoding='utf-8') as f:
+            f.write('installed\nfrom-before-the-reclaim\n')
+        subprocess.run(['git', 'add', '.gitignore'], cwd=self.repo, check=True)
+        subprocess.run(['git', '-c', 'user.email=ci@example.com', '-c', 'user.name=ci', 'commit',
+                        '-q', '-m', 'ignore the test setup command\'s own output'],
+                       cwd=self.repo, check=True)
+        subprocess.run(['git', 'push', '-q', 'origin', self.product.main], cwd=self.repo,
+                       check=True)
+
+    def test_a_stale_orphan_reclaimed_and_recreated_at_the_same_path_gets_its_setup(self):
+        product = self.product_with('touch installed')
+        acct = pool_mod.Account('acct-a', config_dir='/cfg/acct-a')
+
+        rec1, _seen = self.spawn(acct, product=product, job='j1')
+        self.assertTrue(os.path.exists(os.path.join(rec1['worktree'], 'installed')))
+        canary = os.path.join(rec1['worktree'], 'from-before-the-reclaim')
+        with open(canary, 'w', encoding='utf-8') as f:
+            f.write('x')
+
+        # no run recorded for j1 any more (an ORPHAN, PD4), made stale enough to reclaim at once
+        with open(pool_mod.sessions_path(product), 'w', encoding='utf-8'):
+            pass
+        os.remove(self.dump)
+        with mock.patch.object(spawn_mod, 'ORPHAN_GRACE_S', 0):
+            rec2, _seen = self.spawn(acct, product=product, job='j1')
+
+        self.assertEqual(rec2['worktree'], rec1['worktree'])
+        self.assertFalse(os.path.exists(canary))          # the old tree really was discarded
+        self.assertTrue(os.path.exists(os.path.join(rec2['worktree'], 'installed')))  # setup reran
+        with open(spawn_mod.setup_marker_path(rec2['worktree']), encoding='utf-8') as f:
+            self.assertEqual(json.load(f)['command'], product.conventions.worktree_setup)
+        self.assertIsInstance(rec2['setup_s'], float)
+
+    def test_a_branch_taken_over_from_origin_with_no_local_worktree_gets_its_setup_too(self):
+        product = self.product_with('touch installed')
+        acct = pool_mod.Account('acct-a', config_dir='/cfg/acct-a')
+
+        rec1, _seen = self.spawn(acct, product=product, job='j1')
+        branch = rec1['branch']
+        subprocess.run(['git', 'push', '-q', 'origin', branch], cwd=rec1['worktree'], check=True)
+        spawn_mod._discard(product, rec1['worktree'])   # a worktree reaped elsewhere, branch kept
+
+        row2 = pool_mod.Row('j2', 'B-0001', state='BUG', action='FIX', severity='S1', branch=branch)
+        os.remove(self.dump)
+        rt = runtime_mod.ClaudeCodeRuntime(binary=_dump_binary(self.bin, self.dump))
+        rec2 = spawn_mod.spawn(product, row2, acct, 'do it\n', runtime=rt, cfg=self.cfg)
+
+        self.assertNotEqual(rec2['worktree'], rec1['worktree'])
+        self.assertTrue(os.path.exists(os.path.join(rec2['worktree'], 'installed')))
+        self.assertIsInstance(rec2['setup_s'], float)
 
 
 class WorkerEnvDoctorRow(unittest.TestCase):
