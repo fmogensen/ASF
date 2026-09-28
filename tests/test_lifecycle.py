@@ -1078,6 +1078,7 @@ class BlockedParkTests(unittest.TestCase):
         self.assertEqual(lc.card_fingerprint(product, 'T-0001', None), '')
         self.assertEqual(lc.card_fingerprint(product, '', items), '')
         self.assertEqual(lc.card_fingerprint(product, None, items), '')
+        self.assertEqual(lc.card_fingerprint(product, 'T-9999', items), '')
 
 
 class SameHeadLoopGuard(unittest.TestCase):

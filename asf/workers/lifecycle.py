@@ -1910,7 +1910,7 @@ def card_fingerprint(product, item_id, items):
     (:func:`asf.briefs.build.card_digest`): ``## History``, the machine block, ``state``,
     ``evidence``, ``stage_since`` and ``updated`` are outside it by ``DIGEST_FIELDS``' own rule,
     and a park that lifted on those would be no park at all (D9)."""
-    if not item_id or items is None:
+    if not item_id or items is None or item_id not in items:
         return ''
     import importlib
     digest = importlib.import_module('asf.briefs.build').card_digest
