@@ -10,10 +10,9 @@ verification tail.
 Twelve steps, in order, each printing one line — ``ok`` / ``wrote …`` / ``already in place`` /
 ``repaired …`` / ``FAILED … (exit N)`` — then a summary and one exit status. Steps 1-6 (the host,
 this ``asf``, the config, the repos, the adopt, the account) abort the run when they fail: nothing
-after them can work. This module carries steps 1-6; steps 7-12 (the hooks, the clocks, the
-plugin, the console offer, the doctor and the dry run) land with the Task that also writes their
-tests, and never abort — a failure there is recorded and the rest still runs, the same discipline
-the bootstrap's own step function already has today.
+after them can work. Steps 7-12 (the hooks, the clocks, the plugin, the console offer, the doctor
+and the dry run) never abort — a failure there is recorded and the rest still runs, the same
+discipline the bootstrap's own step function already has today.
 """
 import argparse
 import difflib
@@ -22,7 +21,8 @@ import shutil
 import subprocess
 import sys
 
-from asf import cli, env, init
+from asf import cli, console_perms, doctor, env, hooks, init, plugin_build, scheduler
+from asf.tick import dry_run
 
 #: The bootstrap script this module is `exec`ed by — never written as a literal path (the
 #: convention checker's own fence: a hardcoded `tools/*.sh` name is a product's tooling call).
@@ -275,6 +275,178 @@ def _step_account(args, plan):
     return 0, f"{len(plan['names'])} account(s): {', '.join(plan['names'])}"
 
 
+# ---- the doctor baseline (read before step 3 writes anything) -------------------
+
+def _doctor_red_keys(product_name):
+    """The set of RED keys the doctor's DOCTOR and SCHEDULER tables show right now: a check's own
+    name for a DOCTOR row, ``scheduler:<label>`` for a SCHEDULER row — the same shape
+    ``tools/install.sh``'s own ``doctor_reds`` reads off the printed table, computed here from the
+    rows themselves. Safe to call before ``config.yaml`` or the product file exist: a missing one
+    is one ``ConfigError`` :func:`asf.doctor.check_config` already catches, and ``run`` returns
+    just the single ``config`` row."""
+    rows = doctor.run(product_name)
+    keys = {name for name, required, ok, _detail in rows if required and ok is False}
+    if rows and rows[0][2]:
+        cfg = env.load_config()
+        product = env.load_product(product_name)
+        srows = doctor.scheduler_rows(cfg, product)
+        keys |= {f'scheduler:{label}' for level, label, _detail in srows if level == doctor.RED}
+    return keys
+
+
+# ---- step 7: the hooks ------------------------------------------------------------
+
+def _step_hooks(args):
+    """Step 7 — ``asf hooks install --product <p>``, in-process. Idempotent because
+    ``hooks.merge`` merges and keeps every unrelated key (``asf/hooks.py:252-272``)."""
+    product = env.load_product(args.product)
+    rc, message = hooks.install(product)
+    print(message, file=sys.stderr if rc else sys.stdout)
+    return rc, ('ok' if rc == 0 else 'see NEEDS OPERATOR above')
+
+
+# ---- step 8: the clocks, with their read-back retry ------------------------------
+
+def _clock_labels(product_name, cfg):
+    try:
+        declared = scheduler.clocks(env.load_product(product_name))
+    except scheduler.SchedulerError:
+        return []
+    return [scheduler.label_for(product_name, c.name, cfg) for c in declared]
+
+
+def _clocks_not_loaded(labels):
+    return [label for label in labels if not scheduler.status(label).get('loaded')]
+
+
+def _step_scheduler(args):
+    """Step 8 — ``asf scheduler install --product <p>``, then every declared clock read back
+    through ``asf scheduler status``; a clock still absent gets one retried bootstrap, and one
+    still not loaded after it is a ``NEEDS OPERATOR`` line naming it and a failed step
+    (``scheduler_install_verified``, ``tools/install.sh:149-171``, behaviour intact). With
+    ``--scheduler none`` there is nothing to install or read back (PD10)."""
+    if args.scheduler == 'none':
+        return 0, 'already in place'
+    install_ns = argparse.Namespace(scheduler_command='install', product=args.product,
+                                    clock=None, label=None, json=False)
+    rc = scheduler.cmd_scheduler(install_ns)
+    if rc not in (0, 3):
+        return rc, 'asf scheduler install failed'
+    cfg = env.load_config()
+    if scheduler.kind(cfg) != 'launchd':
+        return 0, 'ok'
+    labels = _clock_labels(args.product, cfg)
+    missing = _clocks_not_loaded(labels)
+    if not missing:
+        return 0, 'ok'
+    print(f"install: clock check: {', '.join(missing)} not loaded — retrying the bootstrap once",
+         file=sys.stderr)
+    scheduler.cmd_scheduler(install_ns)
+    missing = _clocks_not_loaded(labels)
+    if not missing:
+        return 0, 'repaired (clock retried)'
+    print('install: NEEDS OPERATOR: clock(s) still not loaded after retrying the bootstrap: '
+         + ', '.join(missing), file=sys.stderr)
+    return 1, f'clock(s) not loaded: {", ".join(missing)}'
+
+
+# ---- step 9: the plugin -----------------------------------------------------------
+
+def _step_plugin(args):
+    """Step 9 — ``asf plugin install``, calling :func:`asf.plugin_build.install` (Task 3's
+    writer). The tree is regenerated byte-identical, so a second run writes nothing new."""
+    rc = plugin_build.install(out=print)
+    return rc, 'ok'
+
+
+# ---- step 10: the console permissions offer ----------------------------------------
+
+def _step_console_permissions(args):
+    """Step 10 — ``asf console-permissions offer --product <p>`` printed, or
+    ``install --product <p> --scope <s>`` when ``--console-permissions`` was given
+    (``asf/console_perms.py:154-163``)."""
+    command = 'install' if args.console_permissions else 'offer'
+    ns = argparse.Namespace(console_permissions_command=command, product=args.product,
+                            scope=args.console_permissions or 'user')
+    rc = console_perms.cmd_console_permissions(ns)
+    if command == 'offer':
+        return rc, 'offered'
+    return rc, ('wrote' if rc == 0 else 'FAILED')
+
+
+# ---- step 11: the doctor, against the baseline -------------------------------------
+
+def _step_doctor(args, baseline):
+    """Step 11 — ``asf doctor --product <p>`` against the baseline read before step 3: a RED
+    also in the baseline is one ``WARN`` line naming it and does not fail the step, a RED that is
+    not fails it, and a non-zero doctor with no RED row read is a failure (the doctor itself
+    broke). The exit status is the doctor's own (``asf/doctor.py:1079-1091``)."""
+    rc = doctor.cmd_doctor(argparse.Namespace(product=args.product), None)
+    if rc == 0:
+        return 0, 'ok'
+    current = _doctor_red_keys(args.product)
+    old = sorted(k for k in current if k in baseline)
+    new = sorted(k for k in current if k not in baseline)
+    if old:
+        print('install: WARN doctor RED before this install too (not caused by it): '
+             + ', '.join(old), file=sys.stderr)
+    if new:
+        print('install: doctor RED caused by this install: ' + ', '.join(new), file=sys.stderr)
+        return rc, f'RED caused by this install: {", ".join(new)}'
+    if old:
+        return 0, f'pre-existing RED only: {", ".join(old)}'
+    return rc, 'doctor exited non-zero with no RED row read'
+
+
+# ---- step 12: the tick dry run -----------------------------------------------------
+
+def _step_dry_run(args):
+    """Step 12 — ``asf tick --product <p> --dry-run`` (``asf/tick/tick.py:344-346``): a
+    throwaway copy of the state directory, never pushing, never launching."""
+    product = env.load_product(args.product)
+    rc = dry_run.run(product, out=print)
+    return rc, ('ok' if rc == 0 else 'dry run failed')
+
+
+# ---- the tail: the plugin console commands, or the probed command instead ---------
+
+def _probe_plugin_command():
+    """The runtime's own CLI, probed once at run time for a non-interactive plugin-install
+    subcommand (D8): a ``claude`` on ``PATH`` whose ``plugin --help`` names both ``install`` and
+    ``marketplace``. A probe that finds nothing supported is not a guess — the operator line
+    stays the answer."""
+    claude = shutil.which('claude')
+    if not claude:
+        return None
+    try:
+        result = subprocess.run([claude, 'plugin', '--help'], capture_output=True, text=True,
+                                timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    help_text = result.stdout + result.stderr
+    if 'install' in help_text and 'marketplace' in help_text:
+        return claude
+    return None
+
+
+def _tail_lines(dest):
+    """The plugin's two console commands naming the written path, or — when the probe finds a
+    supported command — that command run instead, and which was used (D8)."""
+    claude = _probe_plugin_command()
+    if claude:
+        subprocess.run([claude, 'plugin', 'marketplace', 'add', dest], check=False)
+        subprocess.run([claude, 'plugin', 'install', 'asf@asf'], check=False)
+        return [f'install: ran {claude} plugin marketplace add {dest} and '
+               f'{claude} plugin install asf@asf (the runtime CLI offered a non-interactive install)']
+    return [
+        'install: in the Claude Code session for this product, add the plugin once:',
+        f'  /plugin marketplace add {dest}',
+        '  /plugin install asf@asf',
+    ]
+
+
 # ---- the missing-flag rule (PD9) ------------------------------------------------
 
 def _resolve_missing(args):
@@ -308,6 +480,7 @@ def _resolve_missing(args):
 def cmd_install(args, out=print):
     if not _resolve_missing(args):
         return 2
+    baseline = _doctor_red_keys(args.product)  # before step 3 writes anything
     plan = _account_plan(args)
     steps = [
         Step('step 1: the host', lambda: _step_host(args), True),
@@ -316,8 +489,19 @@ def cmd_install(args, out=print):
         Step('step 4: the repos', lambda: _step_repos(args), True),
         Step('step 5: the adopt', lambda: _step_adopt(args), True),
         Step('step 6: the account', lambda: _step_account(args, plan), False),
+        Step('step 7: the hooks', lambda: _step_hooks(args), False),
+        Step('step 8: the clocks', lambda: _step_scheduler(args), False),
+        Step('step 9: the plugin', lambda: _step_plugin(args), False),
+        Step('step 10: the console permissions', lambda: _step_console_permissions(args), False),
+        Step('step 11: the doctor', lambda: _step_doctor(args, baseline), False),
+        Step('step 12: the dry run', lambda: _step_dry_run(args), False),
     ]
-    return run_steps(steps, out=out)
+    rc = run_steps(steps, out=out)
+    for line in _tail_lines(plugin_build.installed_plugin_dir()):
+        out(line)
+    out('asf install: done' if rc == 0 else
+       'asf install: NEEDS OPERATOR — fix the FAILED step(s) above and re-run')
+    return rc
 
 
 def register(subparsers):

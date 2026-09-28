@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import datetime
 import glob
+import hashlib
 import importlib.util
 import io
 import json
@@ -29,6 +30,22 @@ def _git(args, cwd=None):
     env = {k: v for k, v in os.environ.items() if k not in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE')}
     return subprocess.run(['git'] + args, cwd=cwd, check=True, capture_output=True, text=True,
                           env=env).stdout.strip()
+
+
+def _publish(tree, origin):
+    """``tree`` becomes a git repo whose ``main`` is pushed to a new bare ``origin`` —
+    ``tests/test_sample_product.py``'s own fixture, needed here too for a product whose
+    ``repo_dir``/``backlog_dir`` are real git repos (D12's shape, run through ``asf install``
+    instead of ``asf init``)."""
+    _git(['init', '-q', '--bare', '-b', 'main', origin])
+    _git(['init', '-q', '-b', 'main'], cwd=tree)
+    _git(['config', 'user.email', 'sample@example.com'], cwd=tree)
+    _git(['config', 'user.name', 'sample'], cwd=tree)
+    _git(['add', '-A'], cwd=tree)
+    _git(['commit', '-q', '-m', 'sample'], cwd=tree)
+    _git(['remote', 'add', 'origin', origin], cwd=tree)
+    _git(['push', '-q', '-u', 'origin', 'main'], cwd=tree)
+    _git(['remote', 'set-head', 'origin', 'main'], cwd=tree)
 
 
 def _quiet(fn, *a, **kw):
@@ -2359,10 +2376,247 @@ class InstallStepsTests(HomeCase):
                 mock.patch.object(install, '_step_config', make('config', (1, 'nope'))), \
                 mock.patch.object(install, '_step_repos', make('repos', (0, 'ok'))), \
                 mock.patch.object(install, '_step_adopt', make('adopt', (0, 'ok'))), \
-                mock.patch.object(install, '_step_account', make('account', (0, 'ok'))):
+                mock.patch.object(install, '_step_account', make('account', (0, 'ok'))), \
+                mock.patch.object(install, '_probe_plugin_command', return_value=None):
             rc, out, err = _quiet(install.cmd_install, args)
         self.assertEqual(rc, 1)
         self.assertEqual(calls, ['host', 'asf', 'config'])
+
+    def test_baseline_is_read_before_any_step_runs(self):
+        calls = []
+        args = _install_args(repo='/r', record='/b', scheduler='none', fake_workers=True)
+
+        def fake_baseline(product_name):
+            calls.append('baseline')
+            return set()
+
+        def fake_host(*a):
+            calls.append('step 1')
+            return 1, 'stop here'
+
+        with mock.patch.object(install, '_doctor_red_keys', side_effect=fake_baseline), \
+                mock.patch.object(install, '_step_host', side_effect=fake_host), \
+                mock.patch.object(install, '_probe_plugin_command', return_value=None):
+            _quiet(install.cmd_install, args)
+        self.assertEqual(calls, ['baseline', 'step 1'])
+
+    # ---- step 7: the hooks -------------------------------------------------------------
+
+    def test_step_7_calls_hooks_install_in_process(self):
+        args = _install_args()
+        with mock.patch.object(install.env, 'load_product', return_value='THE-PRODUCT'), \
+                mock.patch.object(install.hooks, 'install',
+                                  return_value=(0, 'hooks: ok')) as inst:
+            result, out, err = _quiet(install._step_hooks, args)
+        self.assertEqual(result, (0, 'ok'))
+        inst.assert_called_once_with('THE-PRODUCT')
+        self.assertIn('hooks: ok', out)
+
+    def test_step_7_a_refusal_is_recorded_not_raised(self):
+        args = _install_args()
+        with mock.patch.object(install.env, 'load_product', return_value='THE-PRODUCT'), \
+                mock.patch.object(install.hooks, 'install',
+                                  return_value=(2, 'NEEDS OPERATOR: no repo_dir')):
+            result, out, err = _quiet(install._step_hooks, args)
+        self.assertEqual(result[0], 2)
+        self.assertIn('NEEDS OPERATOR', err)
+
+    # ---- step 8: the clocks, with their read-back retry ----------------------------------
+
+    def test_step_8_scheduler_none_installs_and_reads_back_nothing(self):
+        args = _install_args(scheduler='none')
+        with mock.patch.object(install.scheduler, 'cmd_scheduler') as cmd:
+            result = install._step_scheduler(args)
+        self.assertEqual(result, (0, 'already in place'))
+        cmd.assert_not_called()
+
+    def test_step_8_installs_and_reads_back_a_loaded_clock(self):
+        args = _install_args(scheduler='launchd')
+        with mock.patch.object(install.scheduler, 'cmd_scheduler', return_value=0) as cmd, \
+                mock.patch.object(install.env, 'load_config',
+                                  return_value={'scheduler': {'kind': 'launchd'}}), \
+                mock.patch.object(install, '_clock_labels', return_value=['asf.demo.tick']), \
+                mock.patch.object(install.scheduler, 'status', return_value={'loaded': True}):
+            result = install._step_scheduler(args)
+        self.assertEqual(result, (0, 'ok'))
+        cmd.assert_called_once()
+
+    def test_step_8_an_unloaded_clock_is_retried_once_and_then_succeeds(self):
+        """B-0136's own shape: the first read-back finds the clock not loaded; one retried
+        bootstrap, and the clock loaded after it is not a failure."""
+        args = _install_args(scheduler='launchd')
+        with mock.patch.object(install.scheduler, 'cmd_scheduler', return_value=0) as cmd, \
+                mock.patch.object(install.env, 'load_config',
+                                  return_value={'scheduler': {'kind': 'launchd'}}), \
+                mock.patch.object(install, '_clock_labels', return_value=['asf.demo.tick']), \
+                mock.patch.object(install.scheduler, 'status',
+                                  side_effect=[{'loaded': False}, {'loaded': True}]):
+            result, out, err = _quiet(install._step_scheduler, args)
+        self.assertEqual(result, (0, 'repaired (clock retried)'))
+        self.assertEqual(cmd.call_count, 2)
+        self.assertIn('retrying the bootstrap once', err)
+
+    def test_step_8_still_missing_after_retry_fails_loudly_naming_it(self):
+        args = _install_args(scheduler='launchd')
+        with mock.patch.object(install.scheduler, 'cmd_scheduler', return_value=0), \
+                mock.patch.object(install.env, 'load_config',
+                                  return_value={'scheduler': {'kind': 'launchd'}}), \
+                mock.patch.object(install, '_clock_labels', return_value=['asf.demo.tick']), \
+                mock.patch.object(install.scheduler, 'status', return_value={'loaded': False}):
+            result, out, err = _quiet(install._step_scheduler, args)
+        self.assertEqual(result[0], 1)
+        self.assertIn('asf.demo.tick', result[1])
+        self.assertIn('NEEDS OPERATOR: clock(s) still not loaded after retrying the bootstrap: '
+                     'asf.demo.tick', err)
+
+    def test_step_8_install_failure_is_not_masked_by_the_read_back(self):
+        args = _install_args(scheduler='launchd')
+        with mock.patch.object(install.scheduler, 'cmd_scheduler', return_value=1):
+            result = install._step_scheduler(args)
+        self.assertEqual(result, (1, 'asf scheduler install failed'))
+
+    # ---- step 9: the plugin -----------------------------------------------------------
+
+    def test_step_9_calls_plugin_install(self):
+        with mock.patch.object(install.plugin_build, 'install', return_value=0) as inst:
+            result = install._step_plugin(_install_args())
+        self.assertEqual(result, (0, 'ok'))
+        inst.assert_called_once_with(out=print)
+
+    # ---- step 10: the console permissions offer ----------------------------------------
+
+    def test_step_10_offers_when_console_permissions_not_given(self):
+        args = _install_args(console_permissions=None)
+        with mock.patch.object(install.console_perms, 'cmd_console_permissions',
+                              return_value=0) as cmd:
+            result = install._step_console_permissions(args)
+        self.assertEqual(result, (0, 'offered'))
+        ns = cmd.call_args.args[0]
+        self.assertEqual(ns.console_permissions_command, 'offer')
+
+    def test_step_10_installs_at_the_given_scope(self):
+        args = _install_args(console_permissions='repo')
+        with mock.patch.object(install.console_perms, 'cmd_console_permissions',
+                              return_value=0) as cmd:
+            result = install._step_console_permissions(args)
+        self.assertEqual(result, (0, 'wrote'))
+        ns = cmd.call_args.args[0]
+        self.assertEqual((ns.console_permissions_command, ns.scope), ('install', 'repo'))
+
+    # ---- step 11 and 12, and the tail --------------------------------------------------
+
+    def test_doctor_baseline_before_anything_is_configured_is_the_one_config_row(self):
+        self.assertEqual(install._doctor_red_keys('demo'), {'config'})
+
+    def test_doctor_and_dry_run_tail(self):
+        args = _install_args()
+
+        # a pre-existing RED warns and does not fail the step
+        with mock.patch.object(install.doctor, 'cmd_doctor', return_value=1), \
+                mock.patch.object(install, '_doctor_red_keys', return_value={'one-factory'}):
+            result, out, err = _quiet(install._step_doctor, args, {'one-factory'})
+        self.assertEqual(result, (0, 'pre-existing RED only: one-factory'))
+        self.assertIn('WARN doctor RED before this install too (not caused by it): one-factory',
+                      err)
+
+        # a new RED fails the step and is named, distinctly from the pre-existing one
+        with mock.patch.object(install.doctor, 'cmd_doctor', return_value=1), \
+                mock.patch.object(install, '_doctor_red_keys',
+                                  return_value={'one-factory', 'drift'}):
+            result, out, err = _quiet(install._step_doctor, args, {'one-factory'})
+        self.assertEqual(result, (1, 'RED caused by this install: drift'))
+        self.assertIn('doctor RED caused by this install: drift', err)
+        self.assertIn('WARN doctor RED before this install too (not caused by it): one-factory',
+                      err)
+
+        # a green doctor passes without even reading the baseline
+        with mock.patch.object(install.doctor, 'cmd_doctor', return_value=0), \
+                mock.patch.object(install, '_doctor_red_keys') as red_keys:
+            result = install._step_doctor(args, set())
+        self.assertEqual(result, (0, 'ok'))
+        red_keys.assert_not_called()
+
+        # a non-zero doctor with no RED row read at all is a failure: the doctor itself broke
+        with mock.patch.object(install.doctor, 'cmd_doctor', return_value=2), \
+                mock.patch.object(install, '_doctor_red_keys', return_value=set()):
+            result = install._step_doctor(args, set())
+        self.assertEqual(result, (2, 'doctor exited non-zero with no RED row read'))
+
+        # the dry run is called with --dry-run's own semantics, and its exit status is the step's
+        with mock.patch.object(install.dry_run, 'run', return_value=0) as run, \
+                mock.patch.object(install.env, 'load_product', return_value='THE-PRODUCT'):
+            result = install._step_dry_run(args)
+        self.assertEqual(result, (0, 'ok'))
+        run.assert_called_once_with('THE-PRODUCT', out=print)
+
+        with mock.patch.object(install.dry_run, 'run', return_value=1), \
+                mock.patch.object(install.env, 'load_product', return_value='THE-PRODUCT'):
+            result = install._step_dry_run(args)
+        self.assertEqual(result, (1, 'dry run failed'))
+
+        # the two /plugin lines carry the written path
+        with mock.patch.object(install, '_probe_plugin_command', return_value=None):
+            lines = install._tail_lines('/the/asf/home/plugin')
+        self.assertIn('  /plugin marketplace add /the/asf/home/plugin', lines)
+        self.assertIn('  /plugin install asf@asf', lines)
+
+        # the probe, when it finds a supported command, runs it and says so
+        with mock.patch.object(install, '_probe_plugin_command', return_value='/usr/bin/claude'), \
+                mock.patch.object(install.subprocess, 'run') as run:
+            lines = install._tail_lines('/the/asf/home/plugin')
+        self.assertEqual(run.call_count, 2)
+        self.assertTrue(any('/usr/bin/claude' in line for line in lines), lines)
+
+        # the probe itself: an absent claude never shells out
+        with mock.patch.object(install.shutil, 'which', return_value=None):
+            self.assertIsNone(install._probe_plugin_command())
+
+    def test_idempotent_second_run(self):
+        """The whole command, run twice over one temp HOME/ASF_HOME against ``sample/``'s repo
+        and record, published to two bare origins (``tests/test_sample_product.py``'s own
+        shape, run through ``asf install`` instead of ``asf init``): both runs exit 0 with every
+        step ``ok``/``already in place``, and the second changes no byte on disk."""
+        sample = os.path.join(self.tmp, 'sample')
+        shutil.copytree(os.path.join(REPO, 'sample'), sample)
+        repo = os.path.join(sample, 'repo')
+        backlog = os.path.join(sample, 'backlog')
+        _publish(repo, os.path.join(self.tmp, 'repo.git'))
+        _publish(backlog, os.path.join(self.tmp, 'backlog.git'))
+
+        with open(os.path.join(sample, 'product.yaml'), encoding='utf-8') as f:
+            product_yaml = f.read().replace('@REPO@', repo).replace('@BACKLOG@', backlog)
+        self.write(env.product_path('sample'), product_yaml)
+        with open(os.path.join(sample, 'config.yaml'), encoding='utf-8') as f:
+            config_yaml = f.read().replace('@SAMPLE@', sample)
+        self.write(env.config_path(), config_yaml)
+
+        def _snapshot():
+            digests = {}
+            for root in (env.ASF_HOME, repo, backlog):
+                for dirpath, dirnames, filenames in os.walk(root):
+                    dirnames[:] = [d for d in dirnames if d != '.git']
+                    for name in filenames:
+                        path = os.path.join(dirpath, name)
+                        with open(path, 'rb') as fh:
+                            digests[path] = hashlib.sha256(fh.read()).hexdigest()
+            return digests
+
+        args = _install_args(repo=repo, record=backlog, scheduler='none', fake_workers=True,
+                             allow_checkout=True, console_permissions=None)
+
+        with mock.patch.object(install, '_probe_plugin_command', return_value=None):
+            rc1, out1, err1 = _quiet(install.cmd_install, args)
+            self.assertEqual(rc1, 0, out1 + err1)
+            self.assertNotIn('FAILED', out1 + err1)
+
+            snapshot_after_first = _snapshot()
+
+            rc2, out2, err2 = _quiet(install.cmd_install, args)
+        self.assertEqual(rc2, 0, out2 + err2)
+        self.assertNotIn('FAILED', out2 + err2)
+        self.assertIn('every step passed', out2)
+        self.assertEqual(_snapshot(), snapshot_after_first,
+                         'a second run must change no byte on disk')
 
 
 class PackageDataTests(unittest.TestCase):
