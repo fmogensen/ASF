@@ -326,5 +326,146 @@ class TwelveMinutesTests(Base):
         self.assertLess(cancels.index('200'), cancels.index('110'))
 
 
+class ReRunTests(Base):
+    """The cancel is remembered and re-run like every other cancel here (:func:`rerun_ids`,
+    :func:`_rerun_cancelled`'s ``started`` clause), and the third stall on one ``(branch, sha)``
+    is not — one loud line, no ``relief`` record, and the ``stalls`` history counts it whether
+    or not the cap was hit."""
+
+    def _host(self, start_min, run_id=200, branch='task/T-0341', sha='d' * 40,
+              path='.github/workflows/pr.yml', step_name='unit tests'):
+        host = Host()
+        host.runs = {run_id: {'id': run_id, 'status': 'in_progress', 'event': 'pull_request',
+                              'head_branch': branch, 'head_sha': sha,
+                              'created_at': at(start_min - 1), 'path': path}}
+        host.jobs = {run_id: [job('gate', 'in_progress', HEAVY, 'h1', start_min, start_min,
+                                  steps=[{'name': step_name, 'status': 'in_progress',
+                                          'started_at': at(start_min), 'completed_at': None}])]}
+        return host
+
+    def stall(self, p, host, minutes):
+        return ci_queue.update_stalls(p, ci_queue.GitHubSource(p, run=host), items=ITEMS,
+                                      out=self.lines.append,
+                                      now=T0 + datetime.timedelta(minutes=minutes))
+
+    def _cancel(self, p, host):
+        self.stall(p, host, 0)
+        return self.stall(p, host, 1)
+
+    def test_the_cancel_writes_a_relief_record_carrying_the_class_and_the_step(self):
+        p, host = product(), self._host(-11)
+        self.assertEqual(self._cancel(p, host), 1)
+        relief = ci_queue.load(p.name)['relief']
+        self.assertEqual(len(relief), 1)
+        rec = relief[0]
+        self.assertEqual(rec['id'], 200)
+        self.assertEqual(rec['stall'], ci_queue.STEP_SILENCE)
+        self.assertEqual(rec['stall_step'], 'unit tests')
+        self.assertEqual(rec['stalls'], 1)
+
+    def test_rerun_ids_carries_the_cancelled_run_so_the_lane_waits(self):
+        p, host = product(), self._host(-11)
+        self._cancel(p, host)
+        self.assertIn('200', ci_queue.rerun_ids(env.state_dir(p.name)))
+
+    def test_the_record_is_re_run_on_the_next_pass_with_nothing_to_wait_for(self):
+        p, host = product(), self._host(-11)
+        self._cancel(p, host)
+        self.lines.clear()
+        self.relieve(p, host, minutes=2)
+        reruns = [c[3] for c in host.calls if c[:3] == ['gh', 'run', 'rerun']]
+        self.assertEqual(reruns, ['200'])
+        self.assertEqual(ci_queue.load(p.name)['relief'], [])
+
+    def test_the_re_run_line_names_the_step_it_was_cancelled_for(self):
+        p, host = product(), self._host(-11)
+        self._cancel(p, host)
+        self.lines.clear()
+        self.relieve(p, host, minutes=2)
+        self.assertTrue(any('re-ran pr run 200' in l and 'stalled in step "unit tests"' in l
+                            for l in self.lines), self.lines)
+
+    def test_a_stale_workflow_still_refuses_the_re_run(self):
+        p, host = product(), self._host(-11)
+        self._cancel(p, host)
+        self.lines.clear()
+
+        def stale(argv, **kw):
+            joined = ' '.join(argv)
+            if argv[:2] == ['gh', 'api'] and 'actions/runs/200' in joined and 'jobs' not in joined:
+                return subprocess.CompletedProcess(argv, 0, f"{'d' * 40}\t{'.github/workflows/pr.yml'}\n", '')
+            if argv[:2] == ['gh', 'api'] and 'contents/.github/workflows/pr.yml' in joined:
+                blob = '1111111aaaa' if f'ref={"d" * 40}' in joined else '2222222bbbb'
+                return subprocess.CompletedProcess(argv, 0, blob + '\n', '')
+            return host(argv, **kw)
+
+        self.relieve(p, stale, minutes=2)
+        reruns = [c for c in host.calls if c[:3] == ['gh', 'run', 'rerun']]
+        self.assertEqual(reruns, [])
+        self.assertIn('ci queue: skip rerun 200 on task/T-0341 — workflow changed since '
+                      '(1111111→2222222); next push runs fresh', self.lines)
+        self.assertEqual(ci_queue.load(p.name)['relief'], [])
+
+    def test_the_third_stall_on_one_sha_is_cancelled_and_not_re_run(self):
+        p, host = product(), self._host(-11)
+        branch, sha = host.runs[200]['head_branch'], host.runs[200]['head_sha']
+        data = ci_queue.load(p.name)
+        data['stalls'] = [{'run': 1, 'branch': branch, 'sha': sha, 'step': 'unit tests',
+                           'at': ci_queue._iso(T0), 'job': 'gate'},
+                          {'run': 2, 'branch': branch, 'sha': sha, 'step': 'unit tests',
+                           'at': ci_queue._iso(T0), 'job': 'gate'}]
+        ci_queue.save(p.name, data)
+        self.assertEqual(self._cancel(p, host), 1)
+        self.assertEqual(host.cancels(), ['200'])
+        self.assertTrue(any(
+            'ci queue: NOT re-running pr run 200 (T-0341) — step "unit tests" has stalled 3 '
+            f'times on {branch} at {sha[:9]}; the step is the defect, not the run' in l
+            for l in self.lines), self.lines)
+        self.assertEqual(ci_queue.load(p.name)['relief'], [])
+        self.lines.clear()
+        self.relieve(p, host, minutes=2)
+        self.assertEqual([c for c in host.calls if c[:3] == ['gh', 'run', 'rerun']], [])
+
+    def test_the_cap_is_counted_per_branch_and_sha_not_per_run(self):
+        p, host = product(), self._host(-11)
+        branch, sha = host.runs[200]['head_branch'], host.runs[200]['head_sha']
+        data = ci_queue.load(p.name)
+        data['stalls'] = [{'run': 1, 'branch': branch, 'sha': sha, 'step': 'unit tests',
+                           'at': ci_queue._iso(T0), 'job': 'gate'},
+                          {'run': 2, 'branch': branch, 'sha': sha, 'step': 'unit tests',
+                           'at': ci_queue._iso(T0), 'job': 'gate'}]
+        ci_queue.save(p.name, data)
+        self._cancel(p, host)
+        self.assertEqual(ci_queue.load(p.name)['relief'], [])   # capped on this sha
+
+        host2 = self._host(-11, run_id=201, branch=branch, sha='e' * 40)
+        self.assertEqual(self._cancel(p, host2), 1)
+        relief = ci_queue.load(p.name)['relief']
+        self.assertEqual([(r['id'], r['stalls']) for r in relief], [(201, 1)])
+
+    def test_the_history_record_is_written_even_at_the_cap(self):
+        p, host = product(), self._host(-11)
+        branch, sha = host.runs[200]['head_branch'], host.runs[200]['head_sha']
+        data = ci_queue.load(p.name)
+        data['stalls'] = [{'run': 1, 'branch': branch, 'sha': sha, 'step': 'unit tests',
+                           'at': ci_queue._iso(T0), 'job': 'gate'},
+                          {'run': 2, 'branch': branch, 'sha': sha, 'step': 'unit tests',
+                           'at': ci_queue._iso(T0), 'job': 'gate'}]
+        ci_queue.save(p.name, data)
+        self._cancel(p, host)
+        stalls = ci_queue.load(p.name)['stalls']
+        self.assertEqual(len(stalls), 3)
+        self.assertEqual(stalls[-1]['run'], 200)
+
+    def test_the_history_is_pruned_at_forty_eight_hours(self):
+        data = {'entries': {}, 'started': [], 'stalls': [
+            {'run': 1, 'branch': 'b', 'sha': 's', 'step': 'x', 'job': 'gate',
+             'at': ci_queue._iso(T0 - datetime.timedelta(hours=49))},
+            {'run': 2, 'branch': 'b', 'sha': 's', 'step': 'x', 'job': 'gate',
+             'at': ci_queue._iso(T0 - datetime.timedelta(hours=47))}]}
+        pruned = ci_queue.prune(data, T0)
+        self.assertEqual([s['run'] for s in pruned['stalls']], [2])
+
+
 if __name__ == '__main__':
     unittest.main()

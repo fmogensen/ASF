@@ -2206,6 +2206,15 @@ class TestHeadStarvation(Base):
                 {'queue': {'head_wait_max_min': bad}})).keys(), {'ci.queue.head_wait_max_min'})
         self.assertEqual(ci_queue.config_problems({'queue': {'head_wait_max_min': 30}}), [])
 
+    def test_a_queue_file_from_before_the_stall_watch_loads(self):
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        with open(ci_queue._path('p'), 'w', encoding='utf-8') as f:
+            json.dump({'entries': {}, 'started': []}, f)
+        data = ci_queue.load('p')
+        self.assertEqual(data['stalled'], {})
+        self.assertEqual(data['stalls'], [])
+        self.assertEqual(ci_queue.prune(data, self.t0)['stalls'], [])
+
 
 class TestStaleSweep(ReliefBase):
     """2026-09-26 22:07, a product: 45 entries in the line against 8 queued + 8 in-flight runs
