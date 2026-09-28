@@ -1915,7 +1915,8 @@ def trunk_workflows(product):
 #: an item id in a branch name (``task/T-0341-…``)
 #: (either case: a lane branch is ``fix-bug/fix-bug-b-1382``)
 _ITEM_IN_BRANCH_RE = re.compile(r'\b[A-Za-z]-\d{4,}\b')
-_RUN_FIELDS = 'databaseId,status,conclusion,event,headBranch,headSha,createdAt,startedAt'
+_RUN_FIELDS = ('databaseId,status,conclusion,event,headBranch,headSha,createdAt,startedAt,'
+               'displayTitle')
 
 
 def _dur(seconds):
@@ -2079,6 +2080,8 @@ def _rerun_priority(rec, items, product=None):
         return (OTHER if label == 'other' else rec.get('prio', OTHER)), label, rec.get('rank')
     branch = rec.get('branch') or ''
     item = _item_of(branch) or rec.get('item')
+    if not isinstance(items.get(item or ''), dict):
+        item = _item_of_run(branch, rec.get('title'), items) or item
     prio, label = priority(item, items, branch, product=product)
     return prio, label, (record_rank(item, items)[0] if prio == RANKED else None)
 
@@ -2225,6 +2228,31 @@ def _item_of(branch):
     return hit.group(0).upper() if hit else None
 
 
+#: a token that may name a record item or its ``legacy_id``: ``T-0048``, ``F-0094``, ``F-BILL-7``
+_ID_TOKEN_RE = re.compile(r'\b[A-Za-z]+(?:-[A-Za-z]+)*-\d+\b')
+
+
+def _item_of_run(branch, title, items):
+    """The record item a run is for: the id its branch names (:func:`_item_of`); else the first
+    token of its branch or title (a PR run's ``displayTitle`` is the PR's title) that is a record
+    id or a record item's ``legacy_id`` (a catalogue row like ``F-BILL-7``), so a PR on a branch
+    that names no item still ranks as the record work it carries. None when neither names one."""
+    item = _item_of(branch)
+    if item or not items:
+        return item
+    legacy = None
+    for tok in _ID_TOKEN_RE.findall(f'{branch or ""} {title or ""}'):
+        tok = tok.upper()
+        if isinstance(items.get(tok), dict):
+            return tok
+        if legacy is None:
+            legacy = {str(c.get('legacy_id')).upper(): i for i, c in items.items()
+                      if isinstance(c, dict) and c.get('legacy_id') and not c.get('removed')}
+        if tok in legacy:
+            return legacy[tok]
+    return None
+
+
 def _job_labels(job):
     return frozenset(ci_pool._norm(l if isinstance(l, str) else (l or {}).get('name', ''))
                      for l in job.get('labels') or ()) - {''}
@@ -2337,7 +2365,7 @@ def relieve_trunk(product, items=None, source=None, out=print, dry_run=False, no
     for r in pr_runs.values():
         if r.get('status') not in QUEUED_STATUSES or _parse(r.get('createdAt')) is None:
             continue
-        item = _item_of(r.get('headBranch'))
+        item = _item_of_run(r.get('headBranch'), r.get('displayTitle'), items)
         prio, label = priority(item, items, r.get('headBranch') or '', product=product)
         if prio == S1:
             s1_runs.append((r, item or label))
@@ -2447,7 +2475,8 @@ def _busy_runs(q, wf, listed_runs):
             out[r['id']] = {'databaseId': r['id'], 'status': r.get('status'),
                             'conclusion': r.get('conclusion'), 'event': r.get('event'),
                             'headBranch': r.get('head_branch'), 'headSha': r.get('head_sha'),
-                            'createdAt': r.get('created_at')}
+                            'createdAt': r.get('created_at'),
+                            'displayTitle': r.get('display_title')}
     return list(out.values())
 
 
@@ -2529,7 +2558,7 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
                 kind = 'batch'
             else:
                 continue                        # a trunk run is never cancelled
-            item = _item_of(branch)
+            item = _item_of_run(branch, r.get('displayTitle'), items)
             prio, label = priority(item, items, branch, product=product)
             if prio == S1:
                 continue                        # an S1 or hotfix run is never cancelled
@@ -2628,6 +2657,8 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
                    'workflow': wf, 'at': _iso(now), 'trunk_id': tid,
                    'trunk_sha': target.get('headSha'), 'trunk_created': _iso(created),
                    'branch': r.get('headBranch'), 'sha': r.get('headSha')}
+            if r.get('displayTitle'):
+                rec['title'] = r.get('displayTitle')
             if prio == RANKED:
                 rec['rank'] = record_rank(item, items)[0]
             if for_id is not None:
