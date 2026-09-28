@@ -8,9 +8,9 @@ row without evidence; a result with no evidence counts as `fail`:
 
 | check | result | evidence |
 | --- | --- | --- |
-| scope: the diff stays inside `writes:` | pass \| fail | the file, or the one outside it |
+| the diff stays inside `writes:` | pass \| fail | the file, or the one outside it |
 | every Step of the Task is implemented | pass \| fail | the step → the code |
-| acceptance tests byte-identical to the plan's | pass \| fail | file:line |
+| the acceptance tests are byte-identical to the plan's | pass \| fail | file:line |
 | those tests were run and are green | pass \| fail | the run's last line |
 | the Gate commands are green | pass \| fail | each command's last line |
 | no secret value printed, no background process, no skipped check | pass \| fail | what you looked at |{delivery_checks}

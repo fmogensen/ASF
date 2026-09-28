@@ -138,10 +138,33 @@ def required(kind):
     return tuple(normalize(name) for name in CHECKLIST[kind][0])
 
 
+#: Words a check's name may add or drop without naming another check.
+_FILLER = frozenset({'a', 'an', 'the', 'are', 'is', 'be', 'to', 'of', 'and'})
+
+
+def _words(name):
+    return {w.rstrip('.,;:') for w in normalize(name).split()} - _FILLER - {''}
+
+
+def covers(row_name, required_name):
+    """True when a row names the required check: its normalized name is the required one, or
+    every word of the required name (filler aside) is among the row's — a row worded shorter or
+    under a label, as a brief's skeleton has it (``scope: the diff stays inside `writes:```,
+    ``acceptance tests byte-identical to the plan's``). An approved review whose rows said the
+    checklist in the brief's words once read as a missing check: 119 of 121 approved code
+    reviews derived ``BOUNCE``, and each sent an approved branch back for a correction round."""
+    row, req = normalize(row_name), normalize(required_name)
+    if row == req:
+        return True
+    need = _words(req)
+    return bool(need) and need <= _words(row)
+
+
 def missing(checks, required_names):
-    """The names of `required_names` no row of `checks` covers, in checklist order."""
-    have = {normalize(c.name) for c in checks}
-    return [name for name in required_names if name not in have]
+    """The names of `required_names` no row of `checks` covers (:func:`covers`), in checklist
+    order."""
+    names = [c.name for c in checks]
+    return [name for name in required_names if not any(covers(n, name) for n in names)]
 
 
 def verdict(text, required=()):
