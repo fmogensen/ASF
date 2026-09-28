@@ -2408,10 +2408,6 @@ class EpicRankOrdersFeatures(unittest.TestCase):
         self.assertEqual([i for i in out if i[0] in 'FT'], self.ORDER)
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class ATaskWithNoWritesIsNotLaunched(unittest.TestCase):
     def test_no_writes_waits_instead_of_launching(self):
         from asf.feeder import rows as rows_mod
@@ -2423,10 +2419,167 @@ class ATaskWithNoWritesIsNotLaunched(unittest.TestCase):
                        'writes': ['x.py']},
         }
         out = rows_mod.task_rows(items, None, items['F-0001'], set(), [])
-        by_id = {r.item_id: r for r in out}
+        by_id = {r.item_id: r for r in out if r.kind == rows_mod.PLAN_CODE}
         self.assertEqual(by_id['T-0001'].action, 'WAITS ON writes')
         self.assertIn('no writes: declared', by_id['T-0001'].reason)
         self.assertEqual(by_id['T-0002'].action, rows_mod.LAUNCH)
+
+
+class ANoWritesTaskIsRecut(unittest.TestCase):
+    """F-0126 D2/D3: a Task with no ``writes:`` is re-cut, not launched — one reshape session
+    per Feature repairs the plan section every no-writes Task of it shares."""
+
+    def feature(self, fid, tasks, **over):
+        base = {'id': fid, 'type': 'feature', 'decided': True, 'state': 'Active', 'rank': 1,
+               'stage': 'plan-approved', 'children': [t['id'] for t in tasks]}
+        base.update(over)
+        items = {fid: base}
+        for t in tasks:
+            items[t['id']] = t
+        return items
+
+    def task(self, tid, parent='F-0001', **over):
+        base = {'id': tid, 'type': 'task', 'parent': parent, 'state': 'New', 'rank': 1}
+        base.update(over)
+        return base
+
+    def test_two_no_writes_tasks_give_one_recut_and_two_waits(self):
+        items = self.feature('F-0001', [
+            self.task('T-0001', rank=1),
+            self.task('T-0002', rank=2),
+            self.task('T-0003', rank=3, writes=['a.py']),
+        ])
+        out = rows.task_rows(items, product(), items['F-0001'], set(), [])
+        waits = [r for r in out if r.action == 'WAITS ON writes']
+        self.assertEqual({r.item_id for r in waits}, {'T-0001', 'T-0002'})
+        for r in waits:
+            self.assertEqual(r.reason, 'no writes: declared: the plan must name the files this '
+                                       'Task writes before a coder can start')
+        reshapes = [r for r in out if r.kind == rows.RESHAPE]
+        self.assertEqual(len(reshapes), 1)
+        r = reshapes[0]
+        self.assertEqual((r.item_id, r.action, r.brief_kind, r.branch),
+                         ('T-0001', rows.LAUNCH, 'reshape', 'plan/T-0001'))
+        self.assertTrue(r.reason.startswith('no writes:'))
+        by_id = {r.item_id: r for r in out if r.kind == rows.PLAN_CODE}
+        self.assertEqual(by_id['T-0003'].action, rows.LAUNCH)
+
+    def test_recut_lands_on_the_lower_rank_when_ids_order_the_other_way(self):
+        items = self.feature('F-0001', [
+            self.task('T-0002', rank=1),
+            self.task('T-0001', rank=2),
+        ])
+        out = rows.task_rows(items, product(), items['F-0001'], set(), [])
+        r = [r for r in out if r.kind == rows.RESHAPE][0]
+        self.assertEqual(r.item_id, 'T-0002')
+
+    def test_recut_lands_on_the_lower_id_when_ranks_tie(self):
+        items = self.feature('F-0001', [
+            self.task('T-0002', rank=1),
+            self.task('T-0001', rank=1),
+        ])
+        out = rows.task_rows(items, product(), items['F-0001'], set(), [])
+        r = [r for r in out if r.kind == rows.RESHAPE][0]
+        self.assertEqual(r.item_id, 'T-0001')
+
+    def test_a_second_feature_gets_its_own_recut(self):
+        items = self.feature('F-0001', [self.task('T-0001', rank=1)])
+        items.update(self.feature('F-0002', [self.task('T-0101', parent='F-0002', rank=1)]))
+        out1 = rows.task_rows(items, product(), items['F-0001'], set(), [])
+        out2 = rows.task_rows(items, product(), items['F-0002'], set(), [])
+        self.assertEqual([r.item_id for r in out1 if r.kind == rows.RESHAPE], ['T-0001'])
+        self.assertEqual([r.item_id for r in out2 if r.kind == rows.RESHAPE], ['T-0101'])
+
+    def test_a_feature_with_every_task_writes_gets_no_reshape_row(self):
+        items = self.feature('F-0001', [self.task('T-0001', writes=['a.py'])])
+        out = rows.task_rows(items, product(), items['F-0001'], set(), [])
+        self.assertEqual([r for r in out if r.kind == rows.RESHAPE], [])
+
+    def test_a_groomed_reshape_task_keeps_its_own_pair_and_does_not_consume_the_recut(self):
+        items = self.feature('F-0001', [
+            self.task('T-0001', rank=1,
+                      reshape='split asf/feeder | asf/harvest (groom 2026-09-22)'),
+            self.task('T-0002', rank=2),
+        ])
+        out = rows.task_rows(items, product(), items['F-0001'], set(), [])
+        reshapes = {r.item_id: r for r in out if r.kind == rows.RESHAPE}
+        self.assertEqual(set(reshapes), {'T-0001', 'T-0002'})
+        self.assertEqual(reshapes['T-0001'].branch, 'plan/T-0001')
+        self.assertEqual(reshapes['T-0002'].branch, 'plan/T-0002')
+        self.assertTrue(reshapes['T-0002'].reason.startswith('no writes:'))
+        groom_wait = [r for r in out if r.item_id == 'T-0001' and r.kind == rows.PLAN_CODE][0]
+        self.assertEqual(groom_wait.action, 'WAITS ON reshape')
+
+
+class ADeliveryWithNoWritesDoesNotLaunch(unittest.TestCase):
+    """F-0126 D1/PD14: a delivery whose open members carry no ``writes:`` is refused before the
+    conflict check — an empty footprint is not a claim, and ``running`` stays that way."""
+
+    def lead(self, members, **over):
+        base = {'id': 'F-0097', 'type': 'feature', 'state': 'New', 'rank': 1,
+               'stage': 'plan-approved', 'delivers': ['F-0097'] + list(members)}
+        base.update(over)
+        return base
+
+    def member(self, mid, **over):
+        base = {'id': mid, 'type': 'bug', 'state': 'New', 'severity': 'S2', 'decided': True,
+               'delivered_by': 'F-0097'}
+        base.update(over)
+        return base
+
+    def idx(self, lead, *members):
+        items = {lead['id']: lead}
+        for m in members:
+            items[m['id']] = m
+        return {'items': items}
+
+    def test_no_writes_on_any_open_member_waits_and_claims_no_footprint(self):
+        bug = self.member('B-0034')
+        lead = self.lead([bug['id']])
+        out = rows.delivery_rows(rows.items_of(self.idx(lead, bug)), product(), set(), [])
+        code = [r for r in out if r.item_id == 'F-0097'][0]
+        self.assertEqual((code.action, code.waits_on, code.launches),
+                         ('WAITS ON writes', 'writes', False))
+        self.assertIn('no writes: declared on any open member', code.reason)
+
+    def test_a_task_beside_it_still_launches(self):
+        bug = self.member('B-0034')
+        lead = self.lead([bug['id']])
+        other_feature = {'id': 'F-0002', 'type': 'feature', 'decided': True, 'state': 'Active',
+                         'rank': 2, 'stage': 'building 1/1', 'children': ['T-0001']}
+        task = {'id': 'T-0001', 'type': 'task', 'parent': 'F-0002', 'state': 'New',
+               'writes': ['a.py']}
+        idx = self.idx(lead, bug)
+        idx['items'][other_feature['id']] = other_feature
+        idx['items'][task['id']] = task
+        out = rows.candidates(idx, product(), [])
+        launching = {r.item_id for r in out if r.launches}
+        self.assertNotIn('F-0097', launching)
+        self.assertIn('T-0001', launching)
+
+    def test_a_member_that_does_declare_writes_is_unaffected(self):
+        bug = self.member('B-0034', writes=['asf/x.py'])
+        lead = self.lead([bug['id']])
+        out = rows.delivery_rows(rows.items_of(self.idx(lead, bug)), product(), set(), [])
+        code = [r for r in out if r.item_id == 'F-0097'][0]
+        self.assertEqual(code.action, rows.LAUNCH)
+
+    def test_the_only_member_with_writes_being_closed_still_refuses(self):
+        open_bug = self.member('B-0034')
+        closed_bug = self.member('B-0035', writes=['asf/x.py'], state='Resolved')
+        lead = self.lead([open_bug['id'], closed_bug['id']])
+        out = rows.delivery_rows(rows.items_of(self.idx(lead, open_bug, closed_bug)),
+                                 product(), set(), [])
+        code = [r for r in out if r.item_id == 'F-0097'][0]
+        self.assertEqual((code.action, code.launches), ('WAITS ON writes', False))
+
+    def test_a_busy_lead_gets_no_row_from_either_arm(self):
+        bug = self.member('B-0034')
+        lead = self.lead([bug['id']])
+        out = rows.delivery_rows(rows.items_of(self.idx(lead, bug)), product(), {'F-0097'}, [])
+        self.assertEqual([r.item_id for r in out], ['B-0034'])
+        r = out[0]
+        self.assertEqual((r.action, r.waits_on), ('WAITS ON delivery F-0097', 'delivery'))
 
 
 class WaveReadsTheBlockersOriginHolds(unittest.TestCase):
@@ -2460,3 +2613,7 @@ class WaveReadsTheBlockersOriginHolds(unittest.TestCase):
         from asf.tick import step_wave
         stale = rows.items_of(self.index)
         self.assertIs(step_wave.overlay_blockers(stale, None), stale)
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -170,6 +170,11 @@ PR_RE = re.compile(r'\bPR #\d+\b')
 SPEC_ON_BRANCH_RE = re.compile(r'^spec on (?!origin/)(\S+)')
 PLAN_ON_TRUNK = 'plan on origin/main'
 CONFLICTING = 'CONFLICTING'
+#: The RESHAPE → PLAN reason for a Task whose card carries no `writes:` — a Task migrated from a
+#: plan written before the machine-read lines existed. The reshape brief keys its second mode on
+#: the leading `no writes:` (F-0126 D4).
+NO_WRITES_RECUT = ('no writes: declared — this Task came from a plan section with no '
+                   'stories:/writes:/after: lines; re-cut that section so it carries them')
 
 
 @dataclasses.dataclass
@@ -949,6 +954,13 @@ def delivery_rows(items, product, busy, running, landed_shas=None):
             out.append(amend)
         elif code_stage:
             union = _delivery_union(items, lead)
+            if not union:       # D1: an empty footprint claims nothing and can build nothing
+                out.append(Row(tier=2, kind=kind, item_id=lid, feature_id=fid,
+                               action='WAITS ON writes', brief_kind=brief, branch=branch,
+                               reason='no writes: declared on any open member: the plan must name '
+                                      'the files this delivery writes before a coder can start',
+                               waits_on='writes'))
+                continue
             other = footprint.first_conflict(union, running,
                                              _conventions(product).get('shared_paths') or ())
             if other:
@@ -1121,6 +1133,7 @@ def task_rows(items, product, feature, busy, running, landed_shas=None):
     landed = landed_ids(items, landed_shas)
     absorbed = absorbers(items)
     on_trunk = landed_shas or {}
+    recut = None     # the one Task of this Feature a reshape session re-cuts (D2)
     for t in sorted(tasks, key=lambda v: (ix.rank(v), v['id'])):
         if t['id'] in on_trunk:  # already on main: a coder would find the surface there and write nothing
             sha, subject = on_trunk[t['id']]
@@ -1167,6 +1180,12 @@ def task_rows(items, product, feature, busy, running, landed_shas=None):
                            branch=branch_for(product, 'code', t['id']),
                            reason='no writes: declared: the plan must name the files this Task '
                                   'writes before a coder can start', waits_on='writes'))
+            if recut is None:   # one plan document, one session, one branch (D2)
+                recut = t['id']
+                out.append(Row(tier=2, kind=RESHAPE, item_id=t['id'], feature_id=feature['id'],
+                               action=LAUNCH, brief_kind='reshape',
+                               branch=branch_for(product, 'plan', t['id']),
+                               reason=NO_WRITES_RECUT))
             continue
         amend = console_amend_row(product, t['id'], feature['id'], writes,
                                   branch_for(product, 'code', t['id']))
