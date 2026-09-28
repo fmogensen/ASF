@@ -462,3 +462,110 @@ class ShareNeverOvershoots(Home):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def pool_product(name='acme', extra_ci=None, ci_cap=4):
+    """A product with a self-hosted pool: 4 heavy and 3 light runners."""
+    pool = [{'runner': f'h{i}', 'role': 'heavy'} for i in range(1, 5)]
+    pool += [{'runner': f'l{i}', 'role': 'light'} for i in range(1, 4)]
+    ci = dict({'workflow': 'ci.yml', 'pool': pool}, **(extra_ci or {}))
+    return product(name, {'repo_slug': 'acme/x', 'ci': ci, 'capacity': {'ci': ci_cap}})
+
+
+def runners(busy=(), offline=(), extra_labels=None):
+    from asf import ci_pool
+    out = []
+    for n in ('h1', 'h2', 'h3', 'h4', 'l1', 'l2', 'l3'):
+        labels = ['self-hosted', 'heavy' if n[0] == 'h' else 'light']
+        labels += (extra_labels or {}).get(n, [])
+        out.append(ci_pool.Runner(name=n, online=n not in offline, labels=labels,
+                                  busy=n in busy))
+    return out
+
+
+class RunnerCiFree(Home):
+    """CI free from real runner availability: idle runners per class over one run's need."""
+
+    def test_a_tail_job_holds_one_runner_not_a_whole_run(self):
+        # 2026-09-28 (a product): every run in flight had only a long `site` job left, so
+        # ci 4 less 6 runs in flight read CI free 0 while most runners sat idle
+        p = pool_product()
+        free = capacity.runner_ci_free(p, runners=runners(busy={'h1'}),
+                                       needs={'heavy': 2, 'light': 1}, phantoms=())
+        self.assertEqual(free, (1, {'heavy': 1, 'light': 3}))
+
+    def test_the_bottleneck_class_decides(self):
+        p = pool_product()
+        free = capacity.runner_ci_free(p, runners=runners(busy={'l1', 'l2'}),
+                                       needs={'heavy': 1, 'light': 1}, phantoms=())
+        self.assertEqual(free[0], 1)
+        free = capacity.runner_ci_free(p, runners=runners(busy={'l1', 'l2', 'l3'}),
+                                       needs={'heavy': 1, 'light': 1}, phantoms=())
+        self.assertEqual(free[0], 0)
+
+    def test_a_need_past_the_online_class_is_capped_at_it(self):
+        p = pool_product()
+        free = capacity.runner_ci_free(p, runners=runners(offline={'h3', 'h4'}),
+                                       needs={'heavy': 12}, phantoms=())
+        self.assertEqual(free, (1, {'heavy': 1}))
+
+    def test_a_phantom_counts_as_offline(self):
+        p = pool_product()
+        free = capacity.runner_ci_free(p, runners=runners(), needs={'heavy': 2},
+                                       phantoms={'h1', 'h2'})
+        self.assertEqual(free, (1, {'heavy': 1}))
+
+    def test_a_reserve_leaves_only_the_runners_a_pr_run_reaches(self):
+        p = pool_product(extra_ci={'reserve': {'label': 'class-pr-heavy', 'of': 'heavy',
+                                               'keep_free': 2}})
+        pr = {'h1': ['class-pr-heavy'], 'h2': ['class-pr-heavy']}
+        free = capacity.runner_ci_free(p, runners=runners(busy={'h1'}, extra_labels=pr),
+                                       needs={'heavy': 1}, phantoms=())
+        self.assertEqual(free, (1, {'heavy': 1}))
+
+    def test_no_pool_no_need_or_no_runners_is_none(self):
+        self.assertIsNone(capacity.runner_ci_free(product('acme', {'ci': {'workflow': 'ci.yml'}}),
+                                                  runners=runners(), needs={'heavy': 1}))
+        self.assertIsNone(capacity.runner_ci_free(pool_product(), runners=runners(), needs={},
+                                                  phantoms=()))
+        self.assertIsNone(capacity.runner_ci_free(pool_product(), runners=[],
+                                                  needs={'heavy': 1}, phantoms=()))
+
+    def test_an_unreadable_host_is_none(self):
+        from asf import ci_pool
+        p = pool_product()
+        with mock.patch.object(ci_pool.GitHubBackend, 'runners',
+                               side_effect=ci_pool.BackendError('gh down')):
+            self.assertIsNone(capacity.runner_ci_free(p, needs={'heavy': 1}, phantoms=()))
+
+    def test_the_need_comes_from_the_queue_measure_under_the_estimate(self):
+        from asf import ci_queue
+        p = pool_product(extra_ci={'queue': {'estimate': {'heavy': {'full': 3, 'light': 1}}}})
+        os.makedirs(env.state_dir('acme'), exist_ok=True)
+        data = ci_queue.load('acme')
+        data['expect']['ci.yml'] = {'v': ci_queue.EXPECT_VERSION, 'needs': {'heavy': 4, 'light': 2},
+                                    'light': {'heavy': 1}, 'at': '2026-09-28T08:00:00Z'}
+        ci_queue.save('acme', data)
+        self.assertEqual(capacity.expected_run_needs(p), {'heavy': 3, 'light': 2})
+
+    def test_no_measure_and_no_estimate_is_no_need(self):
+        self.assertEqual(capacity.expected_run_needs(pool_product()), {})
+
+
+class BandwidthCiFree(Home):
+    """``bandwidth()['ci_free']``: the runner figure when it reads, else ci less in flight."""
+
+    def _bw(self, p, by_runners):
+        self.write_product('acme')
+        with mock.patch.object(capacity, 'runner_ci_free', return_value=by_runners):
+            return capacity.bandwidth(p, cfg={}, resolved=capacity.resolve(
+                p, cfg={}, ci_source=CountingCiSource(6)))
+
+    def test_runners_idle_beside_tail_jobs_free_ci(self):
+        self.assertEqual(self._bw(pool_product(), (2, {'heavy': 2}))['ci_free'], 2)
+
+    def test_the_runner_figure_is_capped_at_the_ci_ceiling(self):
+        self.assertEqual(self._bw(pool_product(), (9, {'heavy': 9}))['ci_free'], 4)
+
+    def test_no_runner_figure_falls_back_to_runs_in_flight(self):
+        self.assertEqual(self._bw(pool_product(), None)['ci_free'], 0)
