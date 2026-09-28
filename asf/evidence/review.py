@@ -53,12 +53,23 @@ def verdict_of(text, required=()):
     ``BOUNCE`` mapped to :data:`CHANGES` so the lane's two-value vocabulary is never stranded):
     :data:`APPROVED`, :data:`CHANGES`, or — a file with no table at all — its own ``verdict:``
     line (``verdict: approved``, ``verdict: changes…`` and the like), None when neither is
-    present. Case-insensitive; the first verdict line wins."""
+    present. Case-insensitive; the first verdict line wins.
+
+    A table whose only fault is a ``fail`` row reads :data:`APPROVED` when the reviewer approved
+    over it and asked for nothing (:func:`asks_nothing`): the review's own ``verdict: approved``
+    line and a C list that is empty. Such a review once read as changes and sent the branch to a
+    correction whose brief — "answer its C list" — held nothing to answer; the rounds ran out and
+    the item went to adjudication (69 of 1,526 reviews over 8 days on two products: a Bug with no
+    plan marked "acceptance tests byte-identical" ``fail``, a Gate the reviewer's sandbox could not
+    run while CI is green). An unfilled or missing row (``BOUNCE``) still reads :data:`CHANGES`."""
     if isinstance(text, (bytes, bytearray)):
         text = bytes(text[:READ_CHARS]).decode('utf-8', 'replace')
     text = (text or '')[:READ_CHARS]
     v = reviews.verdict(text, required)
     if v == reviews.APPROVED:
+        return APPROVED
+    if v == reviews.CHANGES and asks_nothing(text):
+        # a fail row the reviewer weighed and approved over: nothing for a correction to answer
         return APPROVED
     if v in (reviews.CHANGES, reviews.BOUNCE):
         return CHANGES
@@ -206,6 +217,35 @@ def c_items(body):
         if path:
             out.add(path.group('p'))
     return sorted(out)
+
+#: A C list that says it holds nothing: ``None.``, ``(none)``, ``- none.``, ``**None.**``,
+#: ``C: none.``, ``No C list``, ``Nothing blocks``.
+NO_C_RE = re.compile(r'^[\s>*_`(\[-]*(?:c(?:\s+list)?\s*[:\u2014-]\s*[*_`(]*)?'
+                     r'(?:none|nothing|no\s+c\b)', re.I)
+#: A C item labelled as one anywhere in a review: ``C1.``, ``- **C2**``, ``### C3``.
+C_LABEL_RE = re.compile(r'^\s*(?:[-*]\s*)?(?:\*\*)?(?:#{3,4}\s*)?C\d+\b', re.M)
+#: A C list on one line, with no heading: ``C: none.``, ``**C list:** …``.
+C_LINE_RE = re.compile(r'^[\s*_]*C(?:\s+list)?[\s*_]*:.*$', re.M)
+
+
+def asks_nothing(text):
+    """True when a review approved and asked for nothing: its first ``verdict:`` line says
+    approved, and its C list is empty — the section under the C heading opens with "none" (what
+    follows it is the last round's items, answered), or, with no C heading, no line is labelled
+    ``C<n>`` and a one-line ``C:`` says none. A C section that opens with anything else is a request, whatever it says."""
+    text = (text or '')[:READ_CHARS]
+    m = VERDICT_LINE_RE.search(text)
+    if not m or not m.group('v').strip().strip('`*_ ').lower().startswith('approved'):
+        return False
+    h = C_HEADING_RE.search(text)
+    if not h:
+        return not C_LABEL_RE.search(text) and not any(
+            not NO_C_RE.match(ln) for ln in C_LINE_RE.findall(text))
+    sect = text[h.end():]
+    end = re.search(r'^#{1,4}\s', sect, re.M)
+    lines = [ln for ln in (sect[:end.start()] if end else sect).splitlines() if ln.strip()]
+    return not lines or bool(NO_C_RE.match(lines[0]))
+
 
 def review_at(repo, conv, ref, item, required=()):
     """The newest review of ``item`` at ``ref`` (``origin/<branch>``) in ``repo``, for the lane:

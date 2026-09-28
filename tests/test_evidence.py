@@ -141,11 +141,17 @@ class VerdictOfTests(unittest.TestCase):
         self.assertEqual(
             evidence.verdict_of(text, legacy=False, required=self.REQUIRED), "CHANGES REQUESTED")
 
-    def test_a_typed_approved_line_never_wins_over_a_failing_table(self):
+    def test_a_typed_approved_line_never_wins_over_a_failing_table_with_a_c_item(self):
         text = (_spec_table(fail=reviews.CHECKLIST["spec"][0][0]).decode()
-                + "\nverdict: APPROVED\n").encode()
+                + "\nverdict: APPROVED\n\n## C\n\n- `docs/spec.md:4` — name the owner\n").encode()
         self.assertEqual(
             evidence.verdict_of(text, legacy=False, required=self.REQUIRED), "CHANGES REQUESTED")
+
+    def test_a_failing_table_approved_over_with_an_empty_c_list_is_approved(self):
+        text = (_spec_table(fail=reviews.CHECKLIST["spec"][0][0]).decode()
+                + "\nverdict: APPROVED\n\n## C\n\nNone.\n").encode()
+        self.assertEqual(
+            evidence.verdict_of(text, legacy=False, required=self.REQUIRED), "APPROVED")
 
     def test_pass_and_na_with_full_coverage_is_approved(self):
         text = _spec_table(na=reviews.CHECKLIST["spec"][0][0])
