@@ -9,7 +9,6 @@ import importlib.util
 import io
 import json
 import os
-import shlex
 import shutil
 import subprocess
 import sys
@@ -1699,13 +1698,78 @@ class VersionStringTest(unittest.TestCase):
 INSTALL_SH = os.path.join(REPO, 'tools', 'install.sh')
 
 
-class InstallScriptTest(unittest.TestCase):
-    """``install.sh`` on a stubbed PATH: a failing hooks step (a foreign hook, exit 2) does not
-    abort the run — the scheduler install and the doctor still run, the failed step is named,
-    and the script exits non-zero."""
+def _bootstrap_resolve_tag_snippet():
+    """The exact ``python3`` heredoc the bootstrap runs to resolve the default ref — read from
+    the script itself, not retyped, so :class:`ReleaseRefTests` pins the two copies of PD6's
+    rule equal instead of merely asserting they agree by construction."""
+    with open(INSTALL_SH, encoding='utf-8') as f:
+        text = f.read()
+    marker = "<<'RESOLVE_TAG'\n"
+    start = text.index(marker) + len(marker)
+    end = text.index("\nRESOLVE_TAG\n", start)
+    return text[start:end]
 
-    #: A clock still on disk but not in `launchctl list` — exactly the B-0136 incident.
-    NOT_LOADED = 'asf.demo.record-health-wave-prs-harvest  not loaded'
+
+class ReleaseRefTests(unittest.TestCase):
+    """``asf.install.newest_tag`` and the bootstrap's own copy of the same rule (PD6/PD7), on
+    one fixture remote carrying ``v0.1.0``, ``v0.2.0``, ``v0.10.0`` and the stray
+    ``v0.2.0-rc1``."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='release_ref_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.remote = os.path.join(self.tmp, 'remote.git')
+        _git(['init', '-q', '-b', 'main', self.remote])
+        for tag in ('v0.1.0', 'v0.2.0', 'v0.10.0', 'v0.2.0-rc1'):
+            _git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty',
+                 '-m', tag], self.remote)
+            _git(['tag', tag], self.remote)
+        self.ls_remote = _git(['ls-remote', '--tags', '--refs', self.remote, 'v*'], self.tmp)
+
+    def test_newest_tag_picks_the_highest_semver_and_rejects_the_stray(self):
+        self.assertEqual(install.newest_tag(self.ls_remote.splitlines()), 'v0.10.0')
+        self.assertIsNone(install.newest_tag([]))
+        self.assertIsNone(install.newest_tag(['v0.2.0-rc1']))
+        self.assertTrue(cli.RELEASE_TAG.fullmatch('v0.10.0'))
+        self.assertFalse(cli.RELEASE_TAG.fullmatch('v0.2.0-rc1'))
+
+    def test_the_bootstraps_inline_python_answers_the_same_string(self):
+        snippet = _bootstrap_resolve_tag_snippet()
+        r = subprocess.run(['python3', '-', self.ls_remote], input=snippet, capture_output=True,
+                           text=True, timeout=10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), install.newest_tag(self.ls_remote.splitlines()))
+        self.assertEqual(r.stdout.strip(), 'v0.10.0')
+
+    def test_no_matching_tag_is_none_and_the_bootstrap_needs_operator_not_a_fallback(self):
+        self.assertIsNone(install.newest_tag([]))
+        empty_remote = os.path.join(self.tmp, 'empty.git')
+        _git(['init', '-q', '-b', 'main', empty_remote])
+        _git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty',
+             '-m', 'c'], empty_remote)
+        bin_dir = os.path.join(self.tmp, 'bin')
+        os.makedirs(bin_dir)
+        for name in ('pipx', 'asf'):
+            path = os.path.join(bin_dir, name)
+            with open(path, 'w') as f:
+                f.write('#!/bin/sh\nexit 0\n')
+            os.chmod(path, 0o755)
+        home = os.path.join(self.tmp, 'home')
+        asf_home = os.path.join(home, '.ASF')
+        os.makedirs(asf_home)
+        env = dict(os.environ, HOME=home, ASF_HOME=asf_home, ASF_REPO_URL=empty_remote,
+                   PATH=bin_dir + os.pathsep + os.environ.get('PATH', ''))
+        r = subprocess.run(['bash', INSTALL_SH, 'demo'], capture_output=True, text=True, env=env,
+                           timeout=30)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('NEEDS OPERATOR', r.stderr)
+        self.assertNotIn('main', r.stderr)  # never a silent fall back to the trunk
+
+
+class InstallScriptTest(unittest.TestCase):
+    """``install.sh`` on a stubbed PATH: the prerequisite check, resolving ``<ref>`` — pinned,
+    or defaulted to the newest release tag — the tick lock (unchanged), and the hand-over to
+    ``asf install``, whose exit status the script carries back."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix='install_sh_')
@@ -1714,57 +1778,19 @@ class InstallScriptTest(unittest.TestCase):
         self.home = os.path.join(self.tmp, 'home')
         self.asf_home = os.path.join(self.home, '.ASF')
         self.log = os.path.join(self.tmp, 'calls.log')
-        self.status_calls = os.path.join(self.tmp, 'status_calls')
-        self.doctor_calls = os.path.join(self.tmp, 'doctor_calls')
+        self.pipx_log = os.path.join(self.tmp, 'pipx.log')
         os.makedirs(self.bin_dir)
-        os.makedirs(os.path.join(self.asf_home, 'products'))
-        for rel in ('config.yaml', os.path.join('products', 'demo.yaml')):
-            open(os.path.join(self.asf_home, rel), 'w').close()
+        os.makedirs(self.asf_home)
+        self.remote = os.path.join(self.tmp, 'remote.git')
+        _git(['init', '-q', '-b', 'main', self.remote])
+        _git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty',
+             '-m', 'c'], self.remote)
+        _git(['tag', 'v0.3.0'], self.remote)
 
-    def _write_scripts(self, hooks_rc, status_results=(('0', ''),), pipx_log=None,
-                       doctor_results=(('0', ''),)):
-        """``status_results``: ``[(rc, stdout), ...]`` for successive ``scheduler status`` calls
-        (the last entry repeats for any call beyond the list) — how install.sh's own retry
-        of the bootstrap sees the clock check."""
-        pipx_body = '#!/bin/sh\n'
-        if pipx_log:
-            pipx_body += f'echo "$*" >> "{pipx_log}"\n'
-        pipx_body += 'exit 0\n'
-
-        cases = []
-        for i, (rc, out) in enumerate(status_results, start=1):
-            echo = f'printf %s\\\\n {shlex.quote(out)}; ' if out else ''
-            cases.append(f'      {i}) {echo}exit {rc} ;;')
-        last_rc, last_out = status_results[-1]
-        echo = f'printf %s\\\\n {shlex.quote(last_out)}; ' if last_out else ''
-        cases.append(f'      *) {echo}exit {last_rc} ;;')
-        status_case = '\n'.join(cases)
-        doctor_case = self._case(doctor_results)
-
+    def _write_scripts(self, install_rc=0):
         scripts = {
-            'pipx': pipx_body,
-            'asf': ('#!/bin/sh\n'
-                    f'echo "$*" >> "{self.log}"\n'
-                    'if [ "$1 $2" = "scheduler status" ]; then\n'
-                    f'  n=0; [ -f "{self.status_calls}" ] && n=$(cat "{self.status_calls}")\n'
-                    f'  n=$((n + 1)); echo "$n" > "{self.status_calls}"\n'
-                    '  case "$n" in\n'
-                    f'{status_case}\n'
-                    '  esac\n'
-                    'fi\n'
-                    'if [ "$1" = "doctor" ]; then\n'
-                    f'  n=0; [ -f "{self.doctor_calls}" ] && n=$(cat "{self.doctor_calls}")\n'
-                    f'  n=$((n + 1)); echo "$n" > "{self.doctor_calls}"\n'
-                    '  case "$n" in\n'
-                    f'{doctor_case}\n'
-                    '  esac\n'
-                    'fi\n'
-                    'case "$1" in\n'
-                    '  --version) echo "asf 0.0.0 (stub)";;\n'
-                    f'  hooks) echo "NEEDS OPERATOR: pre-push is not asf\'s" >&2; exit {hooks_rc};;\n'
-                    '  console-permissions) echo "console-permissions: allow Bash(asf:*)";;\n'
-                    'esac\n'
-                    'exit 0\n'),
+            'pipx': f'#!/bin/sh\necho "$*" >> "{self.pipx_log}"\nexit 0\n',
+            'asf': f'#!/bin/sh\necho "$*" >> "{self.log}"\nexit {install_rc}\n',
         }
         for name, body in scripts.items():
             path = os.path.join(self.bin_dir, name)
@@ -1772,124 +1798,67 @@ class InstallScriptTest(unittest.TestCase):
                 f.write(body)
             os.chmod(path, 0o755)
 
-    @staticmethod
-    def _case(results):
-        """The ``case`` arms a stub answers its n-th call with: ``[(rc, stdout), ...]``, the last
-        entry repeating for any call beyond the list."""
-        arms = []
-        for i, (rc, out) in enumerate(list(results) + [results[-1]], start=1):
-            echo = f'printf %s\\\\n {shlex.quote(out)}; ' if out else ''
-            arms.append(f'      {"*" if i > len(results) else i}) {echo}exit {rc} ;;')
-        return '\n'.join(arms)
-
     def _env(self, **extra):
-        return dict(os.environ, HOME=self.home, ASF_HOME=self.asf_home,
-                    PATH=self.bin_dir + os.pathsep + os.environ.get('PATH', ''), **extra)
+        base = dict(os.environ, HOME=self.home, ASF_HOME=self.asf_home, ASF_REPO_URL=self.remote,
+                    PATH=self.bin_dir + os.pathsep + os.environ.get('PATH', ''))
+        base.update(extra)
+        return base
 
-    def _run(self, hooks_rc=0, status_results=(('0', ''),), pipx_log=None, extra_env=None,
-             doctor_results=(('0', ''),)):
-        self._write_scripts(hooks_rc, status_results=status_results, pipx_log=pipx_log,
-                            doctor_results=doctor_results)
-        r = subprocess.run(['bash', INSTALL_SH, 'demo', 'deadbeef'], capture_output=True,
-                           text=True, env=self._env(**(extra_env or {})), timeout=60)
+    def _run(self, args, install_rc=0, **extra_env):
+        self._write_scripts(install_rc=install_rc)
+        return subprocess.run(['bash', INSTALL_SH] + args, capture_output=True, text=True,
+                              env=self._env(**extra_env), timeout=60)
+
+    def _pipx_call(self):
+        with open(self.pipx_log) as f:
+            return f.read().strip()
+
+    def _asf_call(self):
         with open(self.log) as f:
-            calls = [line.split()[0] for line in f if line.strip()]
-        return r, calls
+            return f.read().strip()
 
-    def test_a_failed_hooks_step_still_runs_the_scheduler_and_the_doctor(self):
-        r, calls = self._run(hooks_rc=2)
-        self.assertEqual(calls, ['doctor', '--version', 'hooks', 'scheduler', 'scheduler', 'doctor',
-                                 'console-permissions'], r.stderr)
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn('install: FAILED step 3: asf hooks install --product demo (exit 2)', r.stderr)
-        self.assertNotIn('FAILED step 4', r.stderr)
-        self.assertIn('/plugin install asf@asf', r.stdout)
-
-    def test_every_step_green_exits_zero(self):
-        r, calls = self._run(hooks_rc=0)
-        self.assertEqual(calls, ['doctor', '--version', 'hooks', 'scheduler', 'scheduler', 'doctor',
-                                 'console-permissions'], r.stderr)
+    def test_no_ref_resolves_the_newest_release_tag_and_says_so(self):
+        r = self._run(['demo'])
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertNotIn('FAILED', r.stderr)
+        self.assertEqual(self._pipx_call(), f'install --force git+{self.remote}@v0.3.0')
+        self.assertEqual(self._asf_call(), 'install --product demo')
+        self.assertIn(f'install: product demo, release v0.3.0 from {self.remote}', r.stdout)
 
-    def test_an_unloaded_clock_is_retried_once_and_then_succeeds(self):
-        """B-0136: the first read-back finds the clock not loaded; install.sh retries the
-        bootstrap once and, once that clock is loaded, the step is not a failure."""
-        r, calls = self._run(status_results=[('1', self.NOT_LOADED), ('0', '')])
-        self.assertEqual(calls, ['doctor', '--version', 'hooks',
-                                 'scheduler', 'scheduler',   # install, then the failing status
-                                 'scheduler', 'scheduler',   # the retried install, then status
-                                 'doctor', 'console-permissions'], r.stderr)
+    def test_a_second_argument_pins_the_ref_with_no_tag_resolution(self):
+        r = self._run(['demo', 'deadbeef'])
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertNotIn('FAILED', r.stderr)
-        self.assertIn('retrying the bootstrap once', r.stdout + r.stderr)
+        self.assertEqual(self._pipx_call(), f'install --force git+{self.remote}@deadbeef')
+        self.assertIn('install: product demo, ref deadbeef', r.stdout)
 
-    def test_an_unloaded_clock_still_missing_after_retry_fails_loudly_naming_it(self):
-        """B-0136's own acceptance: a clock still not loaded after the retry fails the install
-        loudly, naming the missing label — not just a bare non-zero exit."""
-        r, calls = self._run(status_results=[('1', self.NOT_LOADED)])
-        self.assertEqual(calls, ['doctor', '--version', 'hooks', 'scheduler', 'scheduler',
-                                 'scheduler', 'scheduler', 'doctor', 'console-permissions'],
-                         r.stderr)
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn('install: FAILED step 4: asf scheduler install --product demo (exit 1)',
-                      r.stderr)
-        self.assertIn('install: NEEDS OPERATOR: clock(s) still not loaded after retrying the '
-                      'bootstrap: asf.demo.record-health-wave-prs-harvest', r.stderr)
-        self.assertIn('/plugin install asf@asf', r.stdout)  # steps 5 and 6 still ran
-
-    #: A doctor table with two REDs, as ``ASF_TABLES=md asf doctor`` prints it.
-    DOCTOR_KNOWN = ('== DOCTOR demo\n'
-                    'config               ok    config.yaml\n'
-                    'one-factory          RED   ci-health.sh in product repo\n'
-                    'console permissions  RED   missing Bash(launchctl bootout gui/*/asf.*)\n'
-                    '\n== SCHEDULER demo\n'
-                    'ok      asf.demo.tick  state=running')
-
-    def test_a_doctor_red_that_was_red_before_the_install_is_a_warning(self):
-        """Every install of a day ended red on the same three known checks, none of them the
-        install's doing: a RED the doctor already showed before the install is named as
-        pre-existing and does not fail it."""
-        r, calls = self._run(doctor_results=[('1', self.DOCTOR_KNOWN)])
-        self.assertEqual(calls[0], 'doctor')  # the baseline, read before the package moves
+    def test_asf_ref_env_pins_the_ref_the_same_way_as_the_second_argument(self):
+        r = self._run(['demo'], ASF_REF='deadbeef')
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertNotIn('FAILED', r.stderr)
-        self.assertIn('install: WARN doctor RED before this install too (not caused by it): '
-                      'one-factory, console permissions', r.stderr)
+        self.assertEqual(self._pipx_call(), f'install --force git+{self.remote}@deadbeef')
 
-    def test_a_doctor_red_the_install_caused_fails_it_naming_the_check(self):
-        after = self.DOCTOR_KNOWN + '\nRED     asf.demo.batch  declared but not loaded'
-        after = after.replace('config               ok ', 'config               RED')
-        r, _calls = self._run(doctor_results=[('1', self.DOCTOR_KNOWN), ('1', after)])
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn('install: FAILED step 5: asf doctor --product demo (exit 1)', r.stderr)
-        self.assertIn('install: doctor RED caused by this install: config, '
-                      'scheduler:asf.demo.batch', r.stderr)
-        self.assertIn('install: WARN doctor RED before this install too (not caused by it): '
-                      'one-factory, console permissions', r.stderr)
+    def test_flags_after_dashdash_reach_asf_install_unchanged_and_in_order(self):
+        r = self._run(['demo', '--', '--fake-workers', '--yes'])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._asf_call(), 'install --product demo --fake-workers --yes')
 
-    def test_no_asf_before_the_install_every_doctor_red_counts(self):
-        # a first install has no baseline: a doctor RED is the install's to answer
-        self._write_scripts(0, doctor_results=[('1', self.DOCTOR_KNOWN)])
-        asf, pending = os.path.join(self.bin_dir, 'asf'), os.path.join(self.tmp, 'asf.pending')
-        os.rename(asf, pending)
-        with open(os.path.join(self.bin_dir, 'pipx'), 'w') as f:  # pipx puts asf on PATH
-            f.write(f'#!/bin/sh\ncp "{pending}" "{asf}"\nexit 0\n')
-        r = subprocess.run(['bash', INSTALL_SH, 'demo', 'deadbeef'], capture_output=True,
-                           text=True, env=self._env(), timeout=60)
-        with open(self.log) as f:
-            calls = [line.split()[0] for line in f if line.strip()]
-        self.assertEqual(calls.count('doctor'), 1, calls)
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn('install: FAILED step 5', r.stderr)
-        self.assertIn('install: doctor RED caused by this install: one-factory, '
-                      'console permissions', r.stderr)
+    def test_ref_and_flags_after_dashdash_together(self):
+        r = self._run(['demo', 'deadbeef', '--', '--scheduler', 'none'])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._pipx_call(), f'install --force git+{self.remote}@deadbeef')
+        self.assertEqual(self._asf_call(), 'install --product demo --scheduler none')
 
-    def test_step_6_offers_the_console_permissions_and_writes_nothing(self):
-        r, calls = self._run(hooks_rc=0)
-        self.assertIn('console-permissions: allow Bash(asf:*)', r.stdout)
-        self.assertIn('run one to write it: asf console-permissions install --product demo '
-                      '--scope user|repo', r.stdout)
+    def test_the_install_log_line_carries_the_resolved_ref(self):
+        r = self._run(['demo'])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(os.path.join(self.asf_home, 'logs', 'install.log')) as f:
+            line = f.read().strip()
+        _when, product, ref = line.split('\t')
+        self.assertEqual(product, 'demo')
+        self.assertEqual(ref, 'v0.3.0')
+
+    def test_asf_installs_own_exit_status_is_the_scripts(self):
+        r = self._run(['demo'], install_rc=3)
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertEqual(self._asf_call(), 'install --product demo')
 
     def test_install_waits_on_a_held_tick_lock(self):
         """B-0135: an install that races a running tick's ``pipx install --force`` tears it —
@@ -1898,8 +1867,7 @@ class InstallScriptTest(unittest.TestCase):
         the package, so the two can never overlap."""
         lock_path = os.path.join(self.asf_home, 'state', 'demo', 'tick.lock')
         os.makedirs(os.path.dirname(lock_path))
-        pipx_log = os.path.join(self.tmp, 'pipx.log')
-        self._write_scripts(hooks_rc=0, pipx_log=pipx_log)
+        self._write_scripts()
 
         import fcntl
         held = open(lock_path, 'a')
@@ -1924,8 +1892,8 @@ class InstallScriptTest(unittest.TestCase):
         finally:
             t.join()
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertTrue(os.path.exists(pipx_log), r.stderr)
-        with open(pipx_log) as f:
+        self.assertTrue(os.path.exists(self.pipx_log), r.stderr)
+        with open(self.pipx_log) as f:
             pipx_calls = f.read()
         self.assertIn('install', pipx_calls)
         self.assertGreaterEqual(released_at[0], started + 1.0)
@@ -1941,7 +1909,7 @@ class InstallScriptTest(unittest.TestCase):
         shutil.copy(INSTALL_SH, script)
         lock_path = os.path.join(self.asf_home, 'state', 'demo', 'tick.lock')
         os.makedirs(os.path.dirname(lock_path))
-        self._write_scripts(hooks_rc=0)
+        self._write_scripts()
         import fcntl
         held = open(lock_path, 'a')
         fcntl.flock(held, fcntl.LOCK_EX)
@@ -1953,7 +1921,7 @@ class InstallScriptTest(unittest.TestCase):
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
                 time.sleep(0.2)
-                if os.path.exists(self.log):  # the baseline doctor ran: the wait is next
+                if os.path.exists(self.pipx_log):  # the wait is over, pipx is running
                     break
             time.sleep(0.5)
             with open(INSTALL_SH) as f:
@@ -1969,15 +1937,15 @@ class InstallScriptTest(unittest.TestCase):
                 proc.communicate()
         self.assertEqual(proc.returncode, 0, err)
         self.assertNotIn('command not found', err)
-        self.assertIn('install: done', out)
+        with open(self.log) as f:
+            self.assertEqual(f.read().strip(), 'install --product demo')
 
     def test_a_stuck_tick_lock_times_out(self):
         """The wait is bounded (B-0135): a tick lock nobody ever releases must not hang the
         install forever — it gives up and asks the operator instead."""
         lock_path = os.path.join(self.asf_home, 'state', 'demo', 'tick.lock')
         os.makedirs(os.path.dirname(lock_path))
-        pipx_log = os.path.join(self.tmp, 'pipx.log')
-        self._write_scripts(hooks_rc=0, pipx_log=pipx_log)
+        self._write_scripts()
 
         import fcntl
         held = open(lock_path, 'a')
@@ -1991,7 +1959,7 @@ class InstallScriptTest(unittest.TestCase):
             fcntl.flock(held, fcntl.LOCK_UN)
             held.close()
         self.assertNotEqual(r.returncode, 0)
-        self.assertFalse(os.path.exists(pipx_log))
+        self.assertFalse(os.path.exists(self.pipx_log))
         self.assertIn('NEEDS OPERATOR', r.stderr)
         self.assertIn('tick', r.stderr)
 
@@ -2001,14 +1969,11 @@ class InstallScriptTest(unittest.TestCase):
         through the install, not just before it."""
         lock_path = os.path.join(self.asf_home, 'state', 'demo', 'tick.lock')
         os.makedirs(os.path.dirname(lock_path))
-        pipx_log = os.path.join(self.tmp, 'pipx.log')
-        pipx_body = f'#!/bin/sh\necho "$*" >> "{pipx_log}"\nsleep 1\nexit 0\n'
         with open(os.path.join(self.bin_dir, 'pipx'), 'w') as f:
-            f.write(pipx_body)
+            f.write(f'#!/bin/sh\necho "$*" >> "{self.pipx_log}"\nsleep 1\nexit 0\n')
         os.chmod(os.path.join(self.bin_dir, 'pipx'), 0o755)
         with open(os.path.join(self.bin_dir, 'asf'), 'w') as f:
-            f.write('#!/bin/sh\necho "$*" >> "%s"\ncase "$1" in\n'
-                    '  --version) echo "asf 0.0.0 (stub)";;\nesac\nexit 0\n' % self.log)
+            f.write(f'#!/bin/sh\necho "$*" >> "{self.log}"\nexit 0\n')
         os.chmod(os.path.join(self.bin_dir, 'asf'), 0o755)
 
         import fcntl
@@ -2017,9 +1982,9 @@ class InstallScriptTest(unittest.TestCase):
                                  env=self._env())
         try:
             deadline = time.monotonic() + 10
-            while not os.path.exists(pipx_log) and time.monotonic() < deadline:
+            while not os.path.exists(self.pipx_log) and time.monotonic() < deadline:
                 time.sleep(0.05)
-            self.assertTrue(os.path.exists(pipx_log), 'pipx was never invoked')
+            self.assertTrue(os.path.exists(self.pipx_log), 'pipx was never invoked')
             probe = open(lock_path, 'a')
             try:
                 with self.assertRaises(OSError):

@@ -17,6 +17,7 @@ discipline the bootstrap's own step function already has today.
 import argparse
 import difflib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -35,6 +36,29 @@ DEFAULT_SESSIONS = 2
 #: The Claude Code runtime's own credential file, found under an account's ``config_dir``. Its
 #: presence is checked with ``os.path.isfile``; its bytes are never opened (D10).
 RUNTIME_CREDENTIAL_FILE = '.credentials.json'
+
+# ---- the release-tag default (PD6) ------------------------------------------
+
+def newest_tag(refs):
+    """The newest ``v<major>.<minor>.<patch>`` tag among ``refs`` — bare tag names, or
+    ``git ls-remote``'s own ``<sha>\\trefs/tags/<name>`` lines — kept only when
+    ``cli.RELEASE_TAG`` fullmatches the name (a stray like ``v0.2.0-rc1`` is dropped), then
+    ordered by the integer tuple of its digits (``v0.10.0`` sorts after ``v0.2.0``, unlike a
+    lexical sort). ``None`` when nothing matches. The bootstrap that installs this package before
+    it exists on ``PATH`` carries its own copy of this same rule, pinned equal to this one by
+    ``ReleaseRefTests`` (PD7)."""
+    names = []
+    for ref in refs:
+        ref = ref.strip()
+        if not ref:
+            continue
+        name = ref.rsplit(None, 1)[-1].rsplit('refs/tags/', 1)[-1]
+        if cli.RELEASE_TAG.fullmatch(name):
+            names.append(name)
+    if not names:
+        return None
+    return max(names, key=lambda n: tuple(int(g) for g in re.findall(r'\d+', n)))
+
 
 CONFIG_TEMPLATE = """\
 # ~/.ASF/config.yaml — written once by `asf install`, from its own template; never rewritten

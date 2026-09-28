@@ -1,29 +1,23 @@
 #!/usr/bin/env bash
-# tools/install.sh — one product's ASF install from a pinned git ref, idempotent.
+# tools/install.sh — one product's ASF install: pins a release with pipx, then hands off to
+# `asf install` for everything else.
 #
-#   bash tools/install.sh <product> [ref]          # ref: a sha or tag; default: origin main's head
-#   curl -fsSL https://raw.githubusercontent.com/fmogensen/ASF/main/tools/install.sh | bash -s -- <product> [ref]
+#   bash tools/install.sh <product> [ref] [-- <asf install flags>]
+#   curl -fsSL https://raw.githubusercontent.com/fmogensen/ASF/main/tools/install.sh | bash -s -- <product> [ref] [-- <asf install flags>]
 #
-# A dev install (`pipx install -e <checkout>`) of the same package is replaced: one `asf` per machine.
-# The factory's own clocks run a checkout directly, so the command on PATH is the pinned release.
+# ref: a branch head or a sha (ASF_REF, or a second argument); with neither given, the newest
+# `v<major>.<minor>.<patch>` tag on the remote (`git ls-remote --tags`) is used, and the tag
+# chosen is printed — never a silent fall back to a branch. A dev install
+# (`pipx install -e <checkout>`) of the same package is replaced: one `asf` per machine. The
+# factory's own clocks run a checkout directly, so the command on PATH is the pinned release.
 #
 # 1. waits (bounded) for a running tick's lock, then installs the factory as `asf` with pipx,
-#    pinned to <ref> (reinstalls when the ref moves)
-# 2. checks ~/.ASF/config.yaml and ~/.ASF/products/<product>.yaml exist (the operator's config)
-# 3. installs the redaction hooks in the product's repos
-# 4. installs the product's clocks (the scheduler runs the pinned install, not a checkout), then
-#    reads every declared clock back: a bootstrap can fail silently and leave one merely absent
-#    from `launchctl list` (B-0136), so a clock still not loaded gets one retried bootstrap before
-#    the step fails, naming the label
-# 5. runs the doctor, and prints the two Claude Code lines that add the /asf:* plugin. A RED check
-#    the doctor of the asf already installed showed before this install (read before step 1) is
-#    a warning, named as pre-existing; only a RED the install brought fails the step
-# 6. offers the console's own allow list (B-0131) — shown in full, never written here: the
-#    operator runs the install command themselves when ready
-#
-# Steps 1-2 abort at once (nothing after them can work). Steps 3, 4 and 6 never abort: a failure
-# is recorded, the rest still runs (the doctor included), each failed step gets a summary line,
-# and the exit status is non-zero when any step or the doctor failed.
+#    pinned to <ref> (reinstalls when the ref moves), and appends one line to
+#    <ASF_HOME>/logs/install.log
+# 2. hands off: once `asf` is on PATH, this script `exec`s `asf install --product <product>` with
+#    whatever flags followed `--`, so the config, the record, the account, the hooks, the clocks,
+#    the plugin and the doctor each run once, in Python, with one exit status — the one this
+#    script carries back
 set -euo pipefail
 
 # The whole script is one compound command, read in full before its first command runs: bash
@@ -33,8 +27,16 @@ set -euo pipefail
 {
 
 REPO_URL="${ASF_REPO_URL:-https://github.com/fmogensen/ASF.git}"
-PRODUCT="${1:?usage: install.sh <product> [ref]}"
-REF="${2:-}"
+PRODUCT="${1:?usage: install.sh <product> [ref] [-- <asf install flags>]}"
+shift
+REF="${ASF_REF:-}"
+if [ $# -gt 0 ] && [ "$1" != "--" ]; then
+  REF="$1"
+  shift
+fi
+if [ $# -gt 0 ] && [ "$1" = "--" ]; then
+  shift
+fi
 ASF_HOME="${ASF_HOME:-$HOME/.ASF}"
 BIN="asf"
 
@@ -45,38 +47,26 @@ command -v pipx >/dev/null 2>&1 || die "pipx is not installed — brew install p
 command -v git >/dev/null 2>&1 || die "git is not installed"
 
 if [ -z "$REF" ]; then
-  REF="$(git ls-remote "$REPO_URL" refs/heads/main | cut -f1)"
-  [ -n "$REF" ] || die "cannot read main's head from $REPO_URL"
-fi
-say "product $PRODUCT, ref ${REF:0:12} from $REPO_URL"
-
-# the doctor's REDs before this install: every install of a day ended red on the same known
-# checks, none of them the install's doing, and a red nobody can tell apart from a new one is a
-# red nobody reads. `doctor_reds <baseline>` reads a doctor table on stdin and prints two lines:
-# the REDs also in <baseline> (pre-existing), then the ones that are not (new), comma-joined.
-doctor_reds() {
-  python3 -c '
+  TAG_REFS="$(git ls-remote --tags --refs "$REPO_URL" 'v*')"
+  REF="$(python3 - "$TAG_REFS" <<'RESOLVE_TAG'
 import re, sys
-def reds(text):
-    out = []
-    for line in text.splitlines():
-        m = re.match(r"RED\s+(\S+)", line)  # a SCHEDULER row: the level first
-        key = f"scheduler:{m.group(1)}" if m else None
-        if not key:
-            m = re.match(r"(\S.*?)\s{2,}RED(\s|$)", line)  # a DOCTOR row: the check first
-            key = m.group(1) if m else None
-        if key and key not in out:
-            out.append(key)
-    return out
-before = set(reds(sys.argv[1]))
-now = reds(sys.stdin.read())
-print(", ".join(k for k in now if k in before))
-print(", ".join(k for k in now if k not in before))
-' "$1"
-}
-BASELINE_DOCTOR=""
-if PATH="$HOME/.local/bin:$PATH" command -v "$BIN" >/dev/null 2>&1; then
-  BASELINE_DOCTOR="$(PATH="$HOME/.local/bin:$PATH" ASF_TABLES=md "$BIN" doctor --product "$PRODUCT" 2>&1 || true)"
+pattern = re.compile(r"v\d+\.\d+\.\d+")
+names = []
+for line in sys.argv[1].splitlines():
+    line = line.strip()
+    if not line:
+        continue
+    name = line.rsplit(None, 1)[-1].rsplit("refs/tags/", 1)[-1]
+    if pattern.fullmatch(name):
+        names.append(name)
+if names:
+    print(max(names, key=lambda n: tuple(int(g) for g in re.findall(r"\d+", n))))
+RESOLVE_TAG
+)"
+  [ -n "$REF" ] || die "no v<major>.<minor>.<patch> tag found on $REPO_URL — pass one: install.sh $PRODUCT <ref>"
+  say "product $PRODUCT, release $REF from $REPO_URL"
+else
+  say "product $PRODUCT, ref ${REF:0:12} from $REPO_URL"
 fi
 
 # 1. the same lock a clock with an asf step holds for its whole run (asf.tick.tick.lock_path,
@@ -129,86 +119,8 @@ mkdir -p "$ASF_HOME/logs" 2>/dev/null && \
   printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PRODUCT" "$REF" >> "$ASF_HOME/logs/install.log" || true
 export PATH="$HOME/.local/bin:$PATH"
 command -v "$BIN" >/dev/null 2>&1 || die "$BIN is not on PATH after pipx install — run: pipx ensurepath"
-say "$("$BIN" --version)"
 
-# 2. the operator's config — never written here (it names the operator's repos and accounts)
-[ -f "$ASF_HOME/config.yaml" ] || die "$ASF_HOME/config.yaml is missing — start from docs/config.example.yaml"
-[ -f "$ASF_HOME/products/$PRODUCT.yaml" ] || die "$ASF_HOME/products/$PRODUCT.yaml is missing — start from docs/products.example.yaml, then: $BIN init --product $PRODUCT"
-
-# 3. redaction hooks, 4. the product's clocks — both idempotent; a failure is recorded, not fatal
-FAILED=()
-step() {  # step <label> <command...>: run it; on failure record "<label> (exit N)" and go on
-  local label="$1"; shift
-  local src=0
-  "$@" || src=$?
-  [ "$src" -eq 0 ] || FAILED+=("$label (exit $src)")
-}
-step "step 3: $BIN hooks install --product $PRODUCT" "$BIN" hooks install --product "$PRODUCT"
-
-scheduler_install_verified() {  # install, then read every declared clock back; retry once
-  "$BIN" scheduler install --product "$PRODUCT"
-  local rc=$?
-  [ "$rc" -eq 0 ] || return "$rc"
-
-  local out
-  out="$("$BIN" scheduler status --product "$PRODUCT" 2>&1)"
-  rc=$?
-  [ "$rc" -eq 0 ] && return 0
-
-  say "clock check: $(printf '%s\n' "$out" | grep 'not loaded' | tr '\n' ' ')— retrying the bootstrap once"
-  "$BIN" scheduler install --product "$PRODUCT" >/dev/null 2>&1
-
-  out="$("$BIN" scheduler status --product "$PRODUCT" 2>&1)"
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    local missing
-    missing="$(printf '%s\n' "$out" | grep 'not loaded' | awk '{print $1}' | paste -sd, -)"
-    printf 'install: NEEDS OPERATOR: clock(s) still not loaded after retrying the bootstrap: %s\n' \
-      "${missing:-see step 4 output above}" >&2
-  fi
-  return "$rc"
-}
-step "step 4: $BIN scheduler install --product $PRODUCT" scheduler_install_verified
-
-# 5. verify — runs whatever steps 3 and 4 did; a RED already there before the install warns
-doctor_against_baseline() {
-  local out rc=0 split old new
-  out="$(ASF_TABLES=md "$BIN" doctor --product "$PRODUCT" 2>&1)" || rc=$?
-  printf '%s\n' "$out"
-  [ "$rc" -eq 0 ] && return 0
-  split="$(printf '%s\n' "$out" | doctor_reds "$BASELINE_DOCTOR")"
-  old="$(printf '%s\n' "$split" | sed -n 1p)"
-  new="$(printf '%s\n' "$split" | sed -n 2p)"
-  [ -z "$old" ] || printf 'install: WARN doctor RED before this install too (not caused by it): %s\n' "$old" >&2
-  if [ -n "$new" ]; then
-    printf 'install: doctor RED caused by this install: %s\n' "$new" >&2
-    return "$rc"
-  fi
-  [ -n "$old" ] && return 0
-  return "$rc"  # red with no RED row read: the doctor itself failed
-}
-step "step 5: $BIN doctor --product $PRODUCT" doctor_against_baseline
-
-# 6. offer the console's own allow list — the operator confirms by running the install command
-#    themselves; nothing is written by this script
-echo
-step "step 6: $BIN console-permissions offer --product $PRODUCT" \
-  "$BIN" console-permissions offer --product "$PRODUCT"
-say "run one to write it: $BIN console-permissions install --product $PRODUCT --scope user|repo"
-cat <<EOF
-
-install: in the Claude Code session for $PRODUCT, add the plugin once:
-  /plugin marketplace add fmogensen/ASF
-  /plugin install asf@asf
-install: and start that session with ASF_PRODUCT=$PRODUCT so /asf:* reads this product.
-EOF
-if [ "${#FAILED[@]}" -eq 0 ]; then
-  say "done"
-  exit 0
-fi
-for f in "${FAILED[@]}"; do
-  printf 'install: FAILED %s\n' "$f" >&2
-done
-printf 'install: NEEDS OPERATOR: %d step(s) failed, the install is incomplete; fix them and re-run\n' "${#FAILED[@]}" >&2
-exit 1
+# 2. everything else — the config, the record, the account, the hooks, the clocks, the plugin,
+# the doctor — is `asf install`'s own; its exit status is this script's
+exec "$BIN" install --product "$PRODUCT" "$@"
 }
