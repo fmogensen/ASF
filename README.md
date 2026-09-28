@@ -24,7 +24,9 @@ curl -fsSL https://raw.githubusercontent.com/fmogensen/ASF/main/tools/install.sh
 
 The installer pins the factory as `asf`, installs the product's redaction hooks and clocks, and ends with
 `asf doctor`. In that product's Claude Code session: `/plugin marketplace add fmogensen/ASF`, then
-`/plugin install asf@asf`, with `ASF_PRODUCT=<product>` set. Rerun the installer with a new ref to upgrade.
+`/plugin install asf@asf`. A session whose working directory is the product's repo or its record
+needs no `ASF_PRODUCT`; set it only for a session started outside both. Rerun the installer with a
+new ref to upgrade.
 
 The operator's guide is [`docs/guide/`](docs/guide/): [getting started](docs/guide/getting-started.md),
 [the product file](docs/guide/product-config.md), [the daily loop](docs/guide/operating.md),
