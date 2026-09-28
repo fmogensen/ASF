@@ -357,6 +357,24 @@ class Pool:
             return quota_mod.STOP, f'session limit until {headroom_mod.reset_label(until)}'
         return quota_mod.band(self.usage(account), self.guards)
 
+    def banded_seats(self):
+        """``(banded, caps)``: the seats the quota guard has taken across this pool right now,
+        and the seats the pool would have with every account free.
+
+        Per account: ``cap`` at stop, ``cap - 1`` in cooldown, ``0`` when free — the complement of
+        :func:`asf.capacity.usable_slots`' sum over the same accounts, so ``caps - banded`` is that
+        figure exactly (§3.2 pins them). Read off :meth:`usage`, which is memoised per instance
+        (:meth:`band`), so this costs no reading, no subprocess and no file.
+
+        An unreadable account bands as ``STOP`` (:func:`asf.workers.quota.band`, "unknown ≠
+        free"), so its whole cap counts as taken — which is what the pool does with it anyway."""
+        caps = sum(a.cap for a in self.accounts)
+        banded = 0
+        for a in self.accounts:
+            state, _why = self.band(a)
+            banded += a.cap if state == quota_mod.STOP else a.cap - 1 if state == quota_mod.COOLDOWN else 0
+        return banded, caps
+
     def headroom(self, account, kind, model):
         """``(fits, why, projected)``: whether one more ``(kind, model)`` launch keeps ``account`` under the
         5h guard — ``five_h_pct`` now, plus this wave's launches on it at their full estimate,
