@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from asf import env
 from asf import progress
@@ -403,10 +404,92 @@ class DeniedLoopTests(unittest.TestCase):
         self.assertEqual([(j, st) for j, st, _ in found], [('loop', 'STALL')])
 
 
-class LeafImportTests(unittest.TestCase):
-    """PD13: the stdlib and ``asf.env``, exactly the licence :mod:`asf.tokens` takes."""
+class WatchTests(unittest.TestCase):
+    """F-0066 §2.4: the sampler loop, driven with no real clock and no real sleep — ``now`` is a
+    scripted zero-argument clock, ``every=0`` costs the suite no real wait."""
 
-    def test_no_asf_import_but_asf_env(self):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self._home = env.ASF_HOME
+        env.ASF_HOME = os.path.join(self.tmp, 'home')
+        self.product = env.Product('sample', {})
+        self.worktree = os.path.join(self.tmp, 'wt')
+        _init_repo(self.worktree)
+        self.log = os.path.join(self.tmp, 'job.jsonl')
+        pool_mod.append_session(self.product, {'job': 'w1', 'pid': 111, 'log': self.log,
+                                               'worktree': self.worktree,
+                                               'started': _at(0)})
+
+    def tearDown(self):
+        env.ASF_HOME = self._home
+
+    def _write_log(self, *recs):
+        with open(self.log, 'a', encoding='utf-8') as f:
+            for r in recs:
+                f.write(json.dumps(r) + '\n')
+
+    def _clock(self, times):
+        it = iter(times)
+        return lambda: next(it)
+
+    def test_ends_when_the_log_gains_a_result(self):
+        self._write_log(_assistant([_tool_use('Bash')]))
+        n = {'i': 0}
+
+        def clock():
+            n['i'] += 1
+            if n['i'] == 4:  # the first call is watch()'s own `started`, not a sample
+                self._write_log({'type': 'result'})
+            return n['i'] * 60
+        taken = progress.watch(self.product, 'w1', every=0, alive=lambda pid: True, now=clock)
+        self.assertEqual(taken, 3)
+
+    def test_ends_when_alive_goes_false(self):
+        self._write_log(_assistant([_tool_use('Bash')]))
+        n = {'i': 0}
+
+        def alive(pid):
+            n['i'] += 1
+            return n['i'] <= 2
+        taken = progress.watch(self.product, 'w1', every=0, alive=alive,
+                               now=self._clock([60, 120, 180, 240]))
+        self.assertEqual(taken, 2)
+
+    def test_ends_at_max_h(self):
+        self._write_log(_assistant([_tool_use('Bash')]))
+        taken = progress.watch(self.product, 'w1', every=0, alive=lambda pid: True,
+                               now=self._clock([0, 3600, 7200]), max_h=2)
+        self.assertEqual(taken, 1)
+
+    def test_an_oserror_in_one_sample_is_skipped_not_fatal(self):
+        self._write_log(_assistant([_tool_use('Bash')]))
+        real_sample = progress.sample
+        n = {'sample': 0}
+
+        def flaky(*a, **kw):
+            n['sample'] += 1
+            if n['sample'] == 1:
+                raise OSError('disk full')
+            return real_sample(*a, **kw)
+        m = {'i': 0}
+
+        def alive(pid):
+            m['i'] += 1
+            return m['i'] <= 2
+        with mock.patch.object(progress, 'sample', side_effect=flaky):
+            taken = progress.watch(self.product, 'w1', every=0, alive=alive,
+                                   now=self._clock([60, 120, 180, 240]))
+        self.assertEqual(n['sample'], 2)
+        self.assertEqual(taken, 1)
+
+
+class LeafImportTests(unittest.TestCase):
+    """PD13: the stdlib and ``asf.env``, exactly the licence :mod:`asf.tokens` takes — plus
+    ``asf.detach`` (F-0066 Task 5 step 2), imported inside :func:`progress.start` only: stdlib-only
+    itself, so it costs the leaf no cycle back into :mod:`asf.workers`."""
+
+    def test_no_asf_import_but_asf_env_and_asf_detach(self):
         path = os.path.join(REPO_ROOT, 'asf', 'progress.py')
         with open(path, encoding='utf-8') as f:
             tree = ast.parse(f.read(), filename=path)
@@ -416,8 +499,11 @@ class LeafImportTests(unittest.TestCase):
                     self.assertNotEqual(alias.name.split('.')[0], 'asf', alias.name)
             elif isinstance(node, ast.ImportFrom):
                 if node.module and node.module.split('.')[0] == 'asf':
-                    self.assertEqual(node.module, 'asf')
-                    self.assertEqual({a.name for a in node.names}, {'env'})
+                    if node.module == 'asf.detach':
+                        self.assertEqual({a.name for a in node.names}, {'spawn'})
+                    else:
+                        self.assertEqual(node.module, 'asf')
+                        self.assertEqual({a.name for a in node.names}, {'env'})
 
 
 if __name__ == '__main__':

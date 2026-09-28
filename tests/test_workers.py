@@ -53,6 +53,13 @@ def s1_row(job='fix-b-0001', item='B-0001', sev='S1'):
     return pool_mod.parse_row(f'BUG → FIX {item} "a bug" ({sev})   → launch {job} (Opus)')
 
 
+def _cfg_with_sampler(cfg):
+    """``cfg`` with the sampler turned back on — ``Home.cfg`` disables it so the other spawn
+    tests never fork a real detached process (F-0066 Task 5)."""
+    return {**cfg, 'worker_pool': {k: v for k, v in cfg['worker_pool'].items()
+                                   if k != 'progress_sampler'}}
+
+
 def _build_home_repos(tmp):
     """A bare origin with one seed commit and its clone — built once, copied per test (B-0071)."""
     origin = os.path.join(tmp, 'origin.git')
@@ -86,7 +93,11 @@ class Home(unittest.TestCase):
                                               'job_grants': [self.grant],
                                               'stage_limits': {'silent_min': 30}})
         self.cfg = {'worker_pool': {'accounts': [{'name': 'acct-a', 'role': 'local', 'cap': 2}],
-                                    'models': {'Opus': 'opus'}, 'sessions': 'fake'}}
+                                    'models': {'Opus': 'opus'}, 'sessions': 'fake',
+                                    # off by default: every other spawn test here would otherwise
+                                    # fork a real detached sampler process (F-0066 Task 5); the
+                                    # sampler-specific tests turn it back on with _cfg_with_sampler
+                                    'progress_sampler': False}}
         # asf.hooks.ensure_git_hooks is Task 8353's (F-0075) and is not yet in this checkout;
         # a test that cares about the push-gate check overrides this with its own
         # mock.patch.object(hooks_mod, 'ensure_git_hooks', ..., create=True) around its call.
@@ -791,6 +802,48 @@ class TestSpawn(Home):
             f.write(json.dumps(rec) + '\n')
         self.assertFalse(runtime_mod.result_ok(runtime_mod.read_result(log)))
         self.assertEqual(runtime_mod.failure_reason(rec), 'unknown model')
+
+    def test_spawn_starts_the_sampler_once_for_a_local_launch(self):
+        calls = []
+
+        def fake_spawn(argv):
+            calls.append(argv)
+            return 5150
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 4242}])
+        with mock.patch('asf.detach.spawn', side_effect=fake_spawn):
+            spawn_mod.spawn(self.product, feature_row('samp'), self.acct(), 'b', runtime=rt,
+                            cfg=_cfg_with_sampler(self.cfg))
+        self.assertEqual(calls, [[sys.executable, '-m', 'asf.cli', 'workers', 'progress',
+                                  '--product', 'sample', '--job', 'samp', '--watch']])
+        self.assertEqual(pool_mod.load_sessions(self.product)['samp']['progress_pid'], 5150)
+
+    def test_spawn_starts_no_sampler_for_a_cloud_lane(self):
+        calls = []
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 4242}])
+        rt.lane = 'cloud'
+        with mock.patch('asf.detach.spawn', side_effect=lambda argv: calls.append(argv) or 1):
+            spawn_mod.spawn(self.product, feature_row('cloudy'), self.acct(), 'b', runtime=rt,
+                            cfg=_cfg_with_sampler(self.cfg))
+        self.assertEqual(calls, [])
+        self.assertNotIn('progress_pid', pool_mod.load_sessions(self.product)['cloudy'])
+
+    def test_spawn_starts_no_sampler_under_progress_sampler_false(self):
+        calls = []
+        cfg = dict(self.cfg, worker_pool=dict(self.cfg['worker_pool'], progress_sampler=False))
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 4242}])
+        with mock.patch('asf.detach.spawn', side_effect=lambda argv: calls.append(argv) or 1):
+            spawn_mod.spawn(self.product, feature_row('quietsamp'), self.acct(), 'b', runtime=rt,
+                            cfg=cfg)
+        self.assertEqual(calls, [])
+        self.assertNotIn('progress_pid', pool_mod.load_sessions(self.product)['quietsamp'])
+
+    def test_spawn_record_still_returned_when_the_sampler_start_raises(self):
+        rt = runtime_mod.FakeRuntime([{'running': True, 'pid': 4242}])
+        with mock.patch('asf.detach.spawn', side_effect=OSError('no fork slots')):
+            rec = spawn_mod.spawn(self.product, feature_row('failsamp'), self.acct(), 'b',
+                                  runtime=rt, cfg=_cfg_with_sampler(self.cfg))
+        self.assertEqual(rec['job'], 'failsamp')
+        self.assertNotIn('progress_pid', pool_mod.load_sessions(self.product)['failsamp'])
 
 
 class TestReclaimDeadWorktree(Home):
@@ -2202,12 +2255,12 @@ class TestCorrectOnce(Home):
 
 
 class TestCli(unittest.TestCase):
-    def test_register_adds_the_six_verbs(self):
+    def test_register_adds_the_seven_verbs(self):
         p = argparse.ArgumentParser()
         sub = p.add_subparsers(dest='command')
         register(sub)
         for verb in ('spawn --row x --brief y', 'wave -n 2', 'health --fix', 'stall', 'quota',
-                     'reserve-id --job j'):
+                     'reserve-id --job j', 'progress --job j'):
             args = p.parse_args(['workers', *verb.split(), '--product', 'sample'])
             self.assertEqual(args.product, 'sample')
             self.assertTrue(callable(args.func))
@@ -2260,6 +2313,73 @@ class TestReserveIdCli(Home):
              mock.patch('asf.workers.spawn.load_cfg', return_value=self.cfg):
             args.func(args)
         self.assertEqual(buf2.getvalue().strip(), printed)
+
+
+class TestProgressCli(Home):
+    def spawn(self, job, step):
+        rt = runtime_mod.FakeRuntime([step])
+        return spawn_mod.spawn(self.product, feature_row(job), self.acct(), 'b', runtime=rt,
+                               cfg=self.cfg)
+
+    def _prime(self, job, now, same=True):
+        base = {'commit': 'abc', 'digest': 'd1', 'classes': 1, 'novel': 1, 'files': 0,
+               'seen': ['Bash']}
+        older_at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now - 20 * 60))
+        newer_at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now))
+        progress.append(self.product, job, dict(base, at=older_at, last_call_at=older_at))
+        newer = dict(base, at=newer_at, last_call_at=newer_at if same else older_at)
+        if not same:
+            newer['commit'] = 'zzz'
+        progress.append(self.product, job, newer)
+
+    def run_progress(self, argv):
+        p = argparse.ArgumentParser()
+        sub = p.add_subparsers(dest='command')
+        register(sub)
+        args = p.parse_args(['workers', 'progress', *argv, '--product', 'sample'])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), \
+             mock.patch('asf.workers._product', return_value=self.product):
+            rc = args.func(args)
+        return rc, buf.getvalue()
+
+    def test_product_alone_renders_the_table_and_exits_1_when_stuck(self):
+        self.spawn('loop', {'running': True, 'pid': 101})
+        self.spawn('busy', {'running': True, 'pid': 102})
+        now = time.time()
+        self._prime('loop', now, same=True)
+        self._prime('busy', now, same=False)
+        with mock.patch('time.time', return_value=now):
+            rc, out = self.run_progress([])
+        self.assertIn('| Job | Class | For | Commit | Files | Classes (10m) | Last call |', out)
+        self.assertIn('| loop | stuck |', out)
+        self.assertIn('| busy | moving |', out)
+        self.assertEqual(rc, 1)
+
+    def test_product_alone_exits_0_without_a_stuck_run(self):
+        self.spawn('busy', {'running': True, 'pid': 102})
+        now = time.time()
+        self._prime('busy', now, same=False)
+        with mock.patch('time.time', return_value=now):
+            rc, out = self.run_progress([])
+        self.assertEqual(rc, 0)
+
+    def test_job_prints_the_newest_sample_and_its_verdict(self):
+        self.spawn('loop', {'running': True, 'pid': 101})
+        now = time.time()
+        self._prime('loop', now, same=True)
+        with mock.patch('time.time', return_value=now):
+            rc, out = self.run_progress(['--job', 'loop'])
+        self.assertEqual(rc, 0)
+        self.assertIn('loop', out)
+        self.assertIn('stuck', out)
+
+    def test_job_watch_calls_watch(self):
+        self.spawn('loop', {'running': True, 'pid': 101})
+        with mock.patch('asf.progress.watch') as watch:
+            rc, out = self.run_progress(['--job', 'loop', '--watch'])
+        self.assertEqual(rc, 0)
+        watch.assert_called_once_with(self.product, 'loop')
 
 
 if __name__ == '__main__':
