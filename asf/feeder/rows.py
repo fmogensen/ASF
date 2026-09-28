@@ -168,6 +168,8 @@ CLOSED_PR_RE = re.compile(r'\bPR #\d+ CLOSED\b')
 PR_RE = re.compile(r'\bPR #\d+\b')
 #: ingest's line for a spec that sits on a branch, not the trunk (``spec on <branch>[ (review …)]``)
 SPEC_ON_BRANCH_RE = re.compile(r'^spec on (?!origin/)(\S+)')
+#: ingest's line for a plan that sits on a branch, not the trunk (``plan on <branch>[ (review …)]``)
+PLAN_ON_BRANCH_RE = re.compile(r'^plan on (?!origin/)(\S+)')
 PLAN_ON_TRUNK = 'plan on origin/main'
 CONFLICTING = 'CONFLICTING'
 #: The RESHAPE → PLAN reason for a Task whose card carries no `writes:` — a Task migrated from a
@@ -885,6 +887,15 @@ def spec_carrier(feature):
     return ''
 
 
+def plan_carrier(feature):
+    """The branch ``feature``'s plan sits on when it is not on the trunk, from ingest's line."""
+    for line in feature.get('evidence') or []:
+        m = PLAN_ON_BRANCH_RE.match(str(line))
+        if m:
+            return m.group(1)
+    return ''
+
+
 def _doc_row(kind, fid, doc, product, reason, occupancy, branch=None):
     """The launching row for ``fid``'s ``doc`` — or, when that document's work is pushed and
     waiting to land, a PUSHED → LAND row that launches nothing."""
@@ -1065,6 +1076,8 @@ def _one_feature_rows(items, product, f, busy, running, landed_shas, occupancy):
         out.append(_doc_row(STARVED_PLAN, fid, 'plan', product,
                             f"{stage}, no session" if word != 'spec-approved'
                             else 'spec approved, no plan', *waits))
+    elif word in ('plan-approved', 'building') and plan_carrier(f):
+        out.append(land_plan_row(f, product, *waits))
     elif word in ('plan-approved', 'building'):
         out.extend(task_rows(items, product, f, busy, running, landed_shas))
     return out
@@ -1102,24 +1115,33 @@ def spec_plan_row(fid, product, occupancy):
     return dataclasses.replace(row, brief_kind=SPEC_PLAN_KIND)
 
 
-def land_spec_row(feature, product, occupancy):
-    """An approved spec on a branch, not the trunk: coders read the spec from the trunk, so it is
-    landed first — as written, never rewritten. Pushed and waiting (a PR open, a run the docs
+def land_doc_row(feature, product, occupancy, doc):
+    """An approved spec or plan on a branch, not the trunk: coders read it from the trunk, so it
+    is landed first — as written, never rewritten. Pushed and waiting (a PR open, a run the docs
     lane has not merged yet): PUSHED → LAND; else APPROVED → LAND, which launches nothing — the
     lane adopts the branch (:mod:`asf.tick.land_spec`) and lands it once green. A branch that
-    cannot land as it stands comes back as a STARVED → SPEC session through its
+    cannot land as it stands comes back as a STARVED → SPEC/PLAN session through its
     :data:`LANDING_GATE` correction (:func:`correction_rows`)."""
-    fid, carrier = feature['id'], spec_carrier(feature)
-    waiting = _waiting_doc(fid, 'spec', product, occupancy, carrier)
+    fid = feature['id']
+    carrier = spec_carrier(feature) if doc == 'spec' else plan_carrier(feature)
+    waiting = _waiting_doc(fid, doc, product, occupancy, carrier)
     if waiting:
         return Row(tier=2, kind=PUSHED_LAND, item_id=fid, feature_id=fid,
-                   action=f"{WAITS_LANDING}: {waiting}", brief_kind='spec', branch=carrier,
+                   action=f"{WAITS_LANDING}: {waiting}", brief_kind=doc, branch=carrier,
                    reason=waiting)
     return Row(tier=2, kind=APPROVED_LAND, item_id=fid, feature_id=fid,
-               action=f"{WAITS_LANDING}: spec approved on {carrier}", brief_kind='spec',
+               action=f"{WAITS_LANDING}: {doc} approved on {carrier}", brief_kind=doc,
                branch=carrier, waits_on='landing',
-               reason=f"spec approved on {carrier}, not on the trunk: the lane adopts it and "
+               reason=f"{doc} approved on {carrier}, not on the trunk: the lane adopts it and "
                       f"lands it — no coder starts before it is on the trunk")
+
+
+def land_spec_row(feature, product, occupancy):
+    return land_doc_row(feature, product, occupancy, 'spec')
+
+
+def land_plan_row(feature, product, occupancy):
+    return land_doc_row(feature, product, occupancy, 'plan')
 
 
 def task_rows(items, product, feature, busy, running, landed_shas=None):
