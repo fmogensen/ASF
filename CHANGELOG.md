@@ -2,6 +2,22 @@
 
 One entry per released version, newest first.
 
+## v0.1.62 — 2026-09-28
+
+### In progress
+
+- F-0068 Spike: one Feature through a hosted agent runtime, compared with the local pool
+- F-0070 A CI step-silence rule: a job with no new step for ten minutes is stalled, even under budget
+- F-0084 The command surface reads as one product: names, one voice, and "writes" marked
+- F-0107 asf install: one command from zero to a ticking factory (from a release tag, doctor green)
+- F-0108 Release ASF 0.1 for feedback: general installer, first-user docs, release notes, a feedback channel
+- F-0109 install.sh: the operating session cannot run it, it leaves the pre-ASF clocks running, and it installs hooks without the human-now approval
+- F-0110 /asf:* in a product's own session shows another product: resolve the product from the working directory
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.62"`
+
 ## v0.1.61 — 2026-09-28
 
 ### Bugs fixed
