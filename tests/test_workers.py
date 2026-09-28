@@ -896,6 +896,70 @@ class TestReclaimDeadWorktree(Home):
         self.assertEqual(git('rev-parse', '--abbrev-ref', 'HEAD', cwd=rec['worktree']), branch)
 
 
+class TestReclaimOrphanHolder(TestReclaimDeadWorktree):
+    """A worktree in ASF's own dir that no run recorded holds a branch another role needs: a
+    stale one (untouched for ``ORPHAN_GRACE_S``) is reclaimed — its uncommitted files committed
+    and archived first — instead of a NEEDS OPERATOR every tick for ever; a fresh one (a launch
+    whose ledger line is not written yet) is still refused."""
+
+    def _orphan(self, age_s):
+        wt, branch, _wip, _tip = self._stuck(job='coder-t-0349')
+        with open(os.path.join(wt, 'NOTES'), 'w') as f:
+            f.write('uncommitted work\n')
+        # the ledger never recorded it: drop every line naming its worktree
+        reg = pool_mod.sessions_path(self.product)
+        with open(reg) as f:
+            keep = [ln for ln in f if 'coder-t-0349' not in ln]
+        with open(reg, 'w') as f:
+            f.writelines(keep)
+        return wt, branch, time.time() + age_s
+
+    def _spawn(self, branch, now):
+        err = io.StringIO()
+        with mock.patch.object(spawn_mod.time, 'time', lambda: now), \
+                mock.patch.object(lifecycle, 'pid_alive', lambda pid: pid == os.getpid()), \
+                contextlib.redirect_stderr(err):
+            rec = spawn_mod.spawn(self.product, self._adjudicate(branch), self.acct(), 'b',
+                                  runtime=runtime_mod.FakeRuntime([{'running': True,
+                                                                    'pid': os.getpid()}]),
+                                  cfg=self.cfg)
+        return rec, err.getvalue()
+
+    def test_a_stale_orphan_holder_is_reclaimed_with_its_leftovers_archived(self):
+        wt, branch, later = self._orphan(spawn_mod.ORPHAN_GRACE_S + 60)
+        rec, err = self._spawn(branch, later)
+        self.assertFalse(os.path.exists(wt))
+        self.assertIn('from an orphan (no run recorded)', err)
+        self.assertEqual(os.path.realpath(spawn_mod._holding_worktree(self.repo, branch)),
+                         os.path.realpath(rec['worktree']))
+        archives = [h for h in self._remote_heads() if h.startswith('archive/')]
+        self.assertTrue(archives)
+        git('fetch', '-q', 'origin', cwd=self.repo)
+        files = {git('show', f'origin/{a}:NOTES', cwd=self.repo) for a in archives
+                 if subprocess.run(['git', 'cat-file', '-e', f'origin/{a}:NOTES'],
+                                   cwd=self.repo).returncode == 0}
+        self.assertEqual(files, {'uncommitted work'})
+
+    def test_a_fresh_orphan_holder_is_still_refused(self):
+        wt, branch, _later = self._orphan(0)
+        with self.assertRaises(spawn_mod.SpawnError) as cm:
+            self._spawn(branch, time.time())
+        self.assertIn('no run recorded it', str(cm.exception))
+        self.assertTrue(os.path.exists(wt))
+
+
+class TestSpawnFailureMemoryForgets(Home):
+    def test_a_failure_not_seen_again_is_forgotten(self):
+        f = wave_mod.Failures(self.product, now=1000)
+        f.note('adjudicate-t-0349', 'spawn failed: held')
+        f.note('adjudicate-t-0349', 'spawn failed: held')
+        self.assertEqual(wave_mod.Failures(self.product, now=1000 + 60).seen['adjudicate-t-0349']['count'], 2)
+        later = wave_mod.Failures(self.product, now=1000 + wave_mod.Failures.FORGET_S + 1)
+        self.assertNotIn('adjudicate-t-0349', later.seen)
+        # and the file itself forgot it
+        self.assertNotIn('adjudicate-t-0349', wave_mod.Failures(self.product, now=1000).seen)
+
+
 class TestNoWorktreeHandedOverMidRebase(Home):
     """A product's F-0037, 2026-09-27: a correct session's worktree started with a rebase in
     progress whose ``onto`` was the branch's stale ``asf: report`` commit, replaying 257

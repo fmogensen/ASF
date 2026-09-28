@@ -247,20 +247,67 @@ def _archive_unpushed(product, repo, holder, branch):
     return refs
 
 
-def _reclaim(product, repo, job, holder, branch):
+#: how long a worktree no run recorded (an ORPHAN in ASF's own worktrees dir) must sit untouched
+#: before a spawn that needs its path or its branch reclaims it. Younger, it may be a launch whose
+#: ledger line is not written yet; older, nothing is at work in it, and refusing it only turned a
+#: stale holder into a NEEDS OPERATOR every tick for ever.
+ORPHAN_GRACE_S = 1800
+
+
+def _last_touched(path):
+    """The newest mtime of the worktree at ``path``: the tree itself, its ``.git`` file and its
+    admin dir's HEAD and index (a commit or a checkout moves those). 0 when none can be read."""
+    admin = _admin_dir(path)
+    newest = 0.0
+    for p in (path, os.path.join(path, '.git'),
+              *((os.path.join(admin, 'HEAD'), os.path.join(admin, 'index')) if admin else ())):
+        try:
+            newest = max(newest, os.stat(p).st_mtime)
+        except OSError:
+            continue
+    return newest
+
+
+def _stale_orphan(path, now=None):
+    """Whether the orphan worktree at ``path`` is old enough to reclaim (:data:`ORPHAN_GRACE_S`)."""
+    now = time.time() if now is None else now
+    return now - _last_touched(path) >= ORPHAN_GRACE_S
+
+
+def _commit_leftovers(holder):
+    """Commit whatever an orphan's tree holds uncommitted (tracked and untracked), hooks off, so
+    :func:`_archive_unpushed` keeps it under an ``archive/`` ref before the tree goes. A tree
+    with nothing to commit is left as it is."""
+    st = subprocess.run(['git', 'status', '--porcelain'], cwd=holder, capture_output=True,
+                        text=True)
+    if st.returncode != 0 or not st.stdout.strip():
+        return
+    subprocess.run(['git', 'add', '-A'], cwd=holder, capture_output=True)
+    subprocess.run(['git', '-c', 'user.name=asf', '-c', 'user.email=asf@localhost', 'commit',
+                    '-q', '--no-verify', '-m', 'wip: an orphan worktree, reclaimed by the factory'],
+                   cwd=holder, capture_output=True)
+
+
+def _reclaim(product, repo, job, holder, branch, now=None):
     """Free ``branch`` from ``holder``, a worktree whose run is dead: archive its commits not on
     origin (:func:`_archive_unpushed`), abort a rebase or merge in progress, move the tree to the
     trash (:mod:`asf.workers.trash`) and prune. A live run's worktree is never touched
-    (:class:`WorktreeBusy`); one no run recorded is refused as before."""
+    (:class:`WorktreeBusy`). One no run recorded (an orphan) is reclaimed the same way — its
+    uncommitted files committed first, so the archive keeps them — once it has sat untouched for
+    :data:`ORPHAN_GRACE_S`; younger, it is refused as before (a launch may still be writing its
+    ledger line). A stale holder never blocks a spawn for ever."""
     registry = pool_mod.sessions_path(product)
     if os.path.exists(holder):
         what, why = lifecycle.launch_verdict(registry, job, holder)
         if what == lifecycle.BUSY:
             raise WorktreeBusy(why)
-        if what:
+        orphan = what == lifecycle.ORPHAN
+        if what and not (orphan and _stale_orphan(holder, now)):
             raise SpawnError(why, clear=f'git -C {repo} worktree remove --force {holder}'
                                         f'  # after checking nothing in it is wanted')
         run = lifecycle.by_worktree(registry).get(lifecycle.path_key(holder)) or {}
+        if orphan:
+            _commit_leftovers(holder)
         refs = _archive_unpushed(product, repo, holder, branch)
         admin = _admin_dir(holder)
         for state, args in (('rebase-merge', ['rebase', '--abort']),
@@ -271,7 +318,8 @@ def _reclaim(product, repo, job, holder, branch):
         ok, why = _discard(product, holder)
         if not ok:
             raise SpawnError(f'reclaim of {holder} failed: {why}')
-        print(f'reclaimed {holder} from dead {run.get("job") or "?"}: archived '
+        owner = 'an orphan (no run recorded)' if orphan else f'dead {run.get("job") or "?"}'
+        print(f'reclaimed {holder} from {owner}: archived '
               f'{", ".join(refs) or "nothing"}', file=sys.stderr)
     subprocess.run(['git', 'worktree', 'prune'], cwd=repo, capture_output=True)
 
@@ -407,6 +455,13 @@ def _place_worktree(product, repo, job, branch):
         what, why = lifecycle.launch_verdict(registry, job, candidate)
         if what == lifecycle.BUSY:
             raise WorktreeBusy(why)
+        if what == lifecycle.ORPHAN and _stale_orphan(candidate):
+            # an orphan nothing has touched in ORPHAN_GRACE_S: reclaimed (archived, trashed),
+            # never a NEEDS OPERATOR every tick for ever
+            _reclaim(product, repo, job, candidate, branch)
+            if candidate == held:
+                held = None
+            continue
         if what:
             raise SpawnError(why, clear=f'git -C {repo} worktree remove --force {candidate}'
                                         f'  # after checking nothing in it is wanted')

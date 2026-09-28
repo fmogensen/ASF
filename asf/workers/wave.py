@@ -62,7 +62,14 @@ class Failures:
     after that the row waits silently until the failure changes or the spawn succeeds. A state
     dir that cannot be read or written only loses the memory — every failure prints."""
 
-    def __init__(self, product):
+    #: a failure not seen again for this long is forgotten: its job stopped failing (it launched
+    #: on another path, its holder was reaped, its row left the wave), and a count kept from days
+    #: ago read as a live deadlock (2026-09-28: adjudicate-t-0349 "failed 13x" two days after the
+    #: holder was gone)
+    FORGET_S = 6 * 3600
+
+    def __init__(self, product, now=None):
+        self.now = time.time() if now is None else now
         try:
             self.path = os.path.join(env.state_dir(product), 'spawn-failures.json')
             with open(self.path, encoding='utf-8') as f:
@@ -72,6 +79,12 @@ class Failures:
             self.path = getattr(self, 'path', None)
         if not isinstance(self.seen, dict):
             self.seen = {}
+        stale = [job for job, v in self.seen.items()
+                 if not isinstance(v, dict) or self.now - float(v.get('at') or 0) > self.FORGET_S]
+        for job in stale:
+            del self.seen[job]
+        if stale:
+            self._save()
 
     def _save(self):
         if not self.path:
@@ -86,7 +99,7 @@ class Failures:
         """The line to print for ``job`` failing with ``reason`` — or None to print nothing."""
         prev = self.seen.get(job) or {}
         count = prev.get('count', 0) + 1 if prev.get('reason') == reason else 1
-        self.seen[job] = {'reason': reason, 'count': count}
+        self.seen[job] = {'reason': reason, 'count': count, 'at': round(self.now)}
         self._save()
         if count == 1 or reason.startswith('NEEDS OPERATOR'):
             return reason
