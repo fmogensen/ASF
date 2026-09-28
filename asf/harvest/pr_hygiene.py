@@ -23,21 +23,57 @@ from asf import env
 STALE_CLOSE = 'STALE → CLOSE'
 CONFLICT_REBASE = 'CONFLICT → REBASE'
 
+#: row kind → (the listing's ``lane`` token, its ``action``) — the whole vocabulary a product's
+#: rule check switches on, in one place (F-0119, D5/D6). A lane the hygiene view does not hold is
+#: not in this table, and adding one is a row here and a branch in :func:`rows`.
+LANES = {
+    STALE_CLOSE:     ('stale', 'close'),
+    CONFLICT_REBASE: ('conflict', 'rebase'),
+}
+
 
 def rows(product, state_dir=None):
-    """``[{kind, branch, item, pr, why}]`` — the lane's STALE branches whose run did not land,
-    and its BACK ``kind=conflict`` ones, in branch order."""
+    """``[{kind, branch, item, pr, why, since}]`` — the lane's STALE branches whose run did not
+    land, and its BACK ``kind=conflict`` ones, in branch order.
+
+    ``since`` is when the branch entered the lane it is in: the record's ``at``, which the lane
+    stamps on a transition and does not rewrite while the state and the reason hold, else its
+    ``head_at``, else None for a registry line written before either existed (F-0119, D2/D3)."""
     from asf.harvest import lane
     out = []
     for branch, rec in sorted(lane.snapshot_at(state_dir or env.state_dir(product)).items()):
         state, reason = rec.get('state'), rec.get('reason') or ''
         if state == lane.STALE and not rec.get('sha'):
             out.append({'kind': STALE_CLOSE, 'branch': branch, 'item': rec.get('item'),
-                        'pr': rec.get('pr'), 'why': reason})
+                        'pr': rec.get('pr'), 'why': reason,
+                        'since': rec.get('at') or rec.get('head_at')})
         elif state == lane.BACK and reason == 'kind=conflict':
             out.append({'kind': CONFLICT_REBASE, 'branch': branch, 'item': rec.get('item'),
-                        'pr': rec.get('pr'), 'why': 'back to its session (conflict)'})
+                        'pr': rec.get('pr'), 'why': 'back to its session (conflict)',
+                        'since': rec.get('at') or rec.get('head_at')})
     return out
+
+
+def _entries(rows_):
+    out = []
+    for r in rows_:
+        if not r.get('pr'):
+            continue
+        lane_token, action = LANES[r['kind']]
+        out.append({'pr': r['pr'], 'branch': r['branch'], 'lane': lane_token,
+                    'since': r.get('since'), 'action': action})
+    return out
+
+
+def lanes(product, state_dir=None):
+    """``[{action, branch, lane, pr, since}]`` — one entry per :func:`rows` row that carries a PR
+    number, in the same order: what ASF's PR-hygiene pass owns, as data.
+
+    This is the answer a product's rule check reads to tell an open PR the factory is already
+    working from one its own rule may flag (F-0119). It reads the lane registry the ``prs`` step
+    already wrote (:func:`asf.harvest.lane.snapshot_at`) and makes no network call. A row with no
+    PR number is not in the listing — it has no PR to answer about (D4)."""
+    return _entries(rows(product, state_dir))
 
 
 def render(row):
