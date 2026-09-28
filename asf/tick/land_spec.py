@@ -1,18 +1,20 @@
-"""asf.tick.land_spec — an approved spec that is not on the trunk is landed, as written.
+"""asf.tick.land_spec — an approved spec or plan that is not on the trunk is landed, as written.
 
-Coders read the spec from the trunk, so a Feature whose spec review is APPROVED but whose spec
-still sits on a branch stays ``spec-approved`` (:func:`asf.evidence.evidence.feature_stage`) and
-its feeder row is APPROVED → LAND, which launches nothing. This is what that row stands for: the
-lane pass (:func:`asf.tick.step_wave.lane_pass`), before it moves anything, adopts every such
-branch no run speaks for — through the lane (:meth:`asf.harvest.lane.Lane.adopt`).
+Coders read the spec and the plan from the trunk, so a Feature whose spec review is APPROVED but
+whose spec still sits on a branch stays ``spec-approved`` (:func:`asf.evidence.evidence.feature_stage`),
+and one whose plan is on a branch stays ``plan-approved``/``building`` with no carrier for
+``task_rows`` — both give a feeder row that launches nothing (APPROVED → LAND). This is what that
+row stands for: the lane pass (:func:`asf.tick.step_wave.lane_pass`), before it moves anything,
+adopts every such branch no run speaks for — through the lane (:meth:`asf.harvest.lane.Lane.adopt`).
 
 * The branch can land as it stands — a spec/plan lane branch whose diff is documents only and
   that merges into the trunk cleanly: the lane adopts it PUSHED on a synthetic run (no session,
-  no pid) and lands it like any finished spec branch.
+  no pid) and lands it like any finished spec or plan branch, under the job ``land-spec-<id>`` or
+  ``land-plan-<id>``.
 * Otherwise (it conflicts, it carries more than documents, or it is no lane branch at all): the
   adopted run is BACK with a ``landing-gate`` correction, and the feeder hands it to a
-  STARVED → SPEC session that lands the existing approved spec — never rewrites it — on the
-  lane's own branch.
+  STARVED → SPEC or STARVED → PLAN session that lands the existing approved document — never
+  rewrites it — on the lane's own branch.
 
 A branch whose latest run is live, pushed and waiting, held by an open lane state or still owes
 a correction is left alone: something already speaks for it.
@@ -24,21 +26,27 @@ from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 
 JOB_PREFIX = 'land-spec-'
+PLAN_JOB_PREFIX = 'land-plan-'
+
+#: (document kind, the stage words it is wanted at, the row's carrier reader)
+DOCS = (
+    ('spec', ('spec-approved',), feeder_rows.spec_carrier),
+    ('plan', ('plan-approved', 'building'), feeder_rows.plan_carrier),
+)
 
 
 def wanted(items):
-    """``[(feature id, branch its approved spec is on)]`` for every open, decided, unblocked
-    Feature at ``spec-approved`` whose spec is on a branch, not the trunk."""
+    """``[(feature id, branch the document is on, doc)]`` for every open, decided, unblocked
+    Feature whose approved spec — or whose plan — is on a branch, not the trunk."""
     out = []
     for f in sorted(items.values(), key=lambda v: v.get('id') or ''):
         if f.get('type') != 'feature' or f.get('decided') is not True or f.get('blocked') \
                 or not feeder_rows.is_open(f) or f.get('removed') or f.get('moved_to'):
             continue
-        if str(f.get('stage') or '').split(' ')[0] != 'spec-approved':
-            continue
-        carrier = feeder_rows.spec_carrier(f)
-        if carrier:
-            out.append((f['id'], carrier))
+        stage_word = str(f.get('stage') or '').split(' ')[0]
+        for doc, stages, read in DOCS:
+            if stage_word in stages and (carrier := read(f)):
+                out.append((f['id'], carrier, doc))
     return out
 
 
@@ -82,8 +90,8 @@ def why_not_as_is(product, branch, item):
 
 
 def adopt(product, items, now=None, out=print):
-    """Adopt every approved spec branch :func:`wanted` names and no run speaks for; returns the
-    ``[(feature id, branch, why-not-as-is)]`` it wrote a run for."""
+    """Adopt every approved spec or plan branch :func:`wanted` names and no run speaks for;
+    returns the ``[(feature id, branch, why-not-as-is)]`` it wrote a run for."""
     from asf.harvest import lane as lane_mod
     if not product.repo_dir:
         return []
@@ -92,25 +100,25 @@ def adopt(product, items, now=None, out=print):
     by_branch = lifecycle.by_branch(path)
     owed = lifecycle.corrections(path)
     done = []
-    for fid, carrier in wanted(items):
-        lane = feeder_rows.branch_for(product, 'spec', fid)
+    for fid, carrier, doc in wanted(items):
+        lane = feeder_rows.branch_for(product, doc, fid)
         if fid in owed or spoken_for(by_branch.get(carrier), path) \
                 or spoken_for(by_branch.get(lane), path):
             continue
         why = why_not_as_is(product, carrier, fid)
-        job = f'{JOB_PREFIX}{fid}'.lower()
+        job = f'{JOB_PREFIX if doc == "spec" else PLAN_JOB_PREFIX}{fid}'.lower()
         if not why:
-            host.adopt(carrier, fid, 'spec', job=job)
-            out(f'land-spec: {fid} — approved spec on {carrier} adopted by the lane')
+            host.adopt(carrier, fid, doc, job=job)
+            out(f'land-{doc}: {fid} — approved {doc} on {carrier} adopted by the lane')
         else:
-            branch = carrier if product.conventions.branch_kind(carrier) == 'spec' else lane
-            text = (f'The spec for {fid} is approved but not on the trunk: it is on {carrier}, '
-                    f'and {why}. Land the existing approved spec on the trunk from {branch} — '
+            branch = carrier if product.conventions.branch_kind(carrier) == doc else lane
+            text = (f'The {doc} for {fid} is approved but not on the trunk: it is on {carrier}, '
+                    f'and {why}. Land the existing approved {doc} on the trunk from {branch} — '
                     f'bring it over from {carrier} as written, resolve what stops it merging, '
                     f"and don't rewrite it.")
-            host.adopt(branch, fid, 'spec', job=job,
+            host.adopt(branch, fid, doc, job=job,
                        correction={'kind': feeder_rows.LANDING_GATE, 'text': text})
-            out(f'land-spec: {fid} — approved spec on {carrier} cannot land as it stands '
+            out(f'land-{doc}: {fid} — approved {doc} on {carrier} cannot land as it stands '
                 f'({why}): a session lands it on {branch}')
         done.append((fid, carrier, why))
     return done

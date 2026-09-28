@@ -122,7 +122,140 @@ class LandTheApprovedSpec(unittest.TestCase):
         on_trunk = {"F-0001": dict(self.items(self.lane)["F-0001"],
                                    evidence=["spec on origin/main", "plan on origin/main"])}
         self.assertEqual(land_spec.wanted(on_trunk), [])
-        self.assertEqual(land_spec.wanted(self.items(self.lane)), [("F-0001", self.lane)])
+        self.assertEqual(land_spec.wanted(self.items(self.lane)),
+                         [("F-0001", self.lane, "spec")])
+
+
+class LandTheApprovedPlan(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="land_plan_")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        home = env.ASF_HOME
+        env.ASF_HOME = os.path.join(self.tmp, "home")
+        self.addCleanup(setattr, env, "ASF_HOME", home)
+        origin, self.work = os.path.join(self.tmp, "origin.git"), os.path.join(self.tmp, "work")
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", origin], check=True,
+                       env=dict(os.environ, **GIT_ENV))
+        subprocess.run(["git", "clone", "-q", origin, self.work], check=True, capture_output=True,
+                       env=dict(os.environ, **GIT_ENV))
+        git(self.work, "checkout", "-q", "-b", "main")
+        self.commit("init", {"README.md": "x\n", "docs/plans/other.md": "a\n"})
+        git(self.work, "push", "-q", "origin", "main")
+        self.product = env.Product("sample", {"repo_dir": self.work, "main": "main"})
+        self.lane = rows.branch_for(self.product, "plan", "F-0001")
+
+    def commit(self, subject, files):
+        for path, text in files.items():
+            full = os.path.join(self.work, path)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "w") as f:
+                f.write(text)
+        git(self.work, "add", ".")
+        git(self.work, "commit", "-q", "-m", subject)
+
+    def push_branch(self, name, files, subject="plan(F-0001): the widget plan"):
+        git(self.work, "checkout", "-q", "-b", name, "main")
+        self.commit(subject, files)
+        git(self.work, "push", "-q", "origin", name)
+        git(self.work, "checkout", "-q", "main")
+        git(self.work, "fetch", "-q", "origin")
+
+    def items(self, branch, stage="plan-approved", spec_evidence="spec on origin/main"):
+        return {"F-0001": {"id": "F-0001", "type": "feature", "decided": True, "state": "Active",
+                           "stage": stage,
+                           "evidence": [spec_evidence, f"plan on {branch}"]}}
+
+    def runs(self):
+        return lifecycle.by_branch(pool_mod.sessions_path(self.product))
+
+    def test_a_clean_docs_only_lane_branch_is_handed_to_the_docs_lane(self):
+        self.push_branch(self.lane, {"docs/plans/f-0001.md": "# widgets\n"})
+        self.assertEqual(land_spec.wanted(self.items(self.lane)),
+                         [("F-0001", self.lane, "plan")])
+        done = land_spec.adopt(self.product, self.items(self.lane), now="2026-01-01T00:00:00Z",
+                               out=lambda *_a: None)
+        self.assertEqual(done, [("F-0001", self.lane, "")])
+        run = self.runs()[self.lane]
+        self.assertEqual(run["job"], f"land-plan-f-0001")
+        self.assertTrue(lifecycle.eligible(run))
+        self.assertIsNone(lifecycle.pending_correction(run))
+        self.assertEqual(land_spec.adopt(self.product, self.items(self.lane),
+                                         out=lambda *_a: None), [])
+        self.assertEqual(run['lane']['state'], 'PUSHED')
+
+    def test_a_feature_at_building_is_named_too(self):
+        self.push_branch(self.lane, {"docs/plans/f-0001.md": "# widgets\n"})
+        self.assertEqual(land_spec.wanted(self.items(self.lane, stage="building 1/3")),
+                         [("F-0001", self.lane, "plan")])
+
+    def test_a_branch_carrying_code_goes_to_a_session_that_lands_it_unrewritten(self):
+        self.push_branch(self.lane, {"asf/tick/widget.py": "x = 1\n"})
+        (done,) = land_spec.adopt(self.product, self.items(self.lane), out=lambda *_a: None)
+        self.assertIn("more than documents", done[2])
+        path = pool_mod.sessions_path(self.product)
+        corr = lifecycle.corrections(path)
+        self.assertEqual(corr["F-0001"]["kind"], rows.LANDING_GATE)
+        self.assertIn("plan", corr["F-0001"]["text"])
+        self.assertIn(self.lane, corr["F-0001"]["text"])
+        self.assertEqual(self.runs()[self.lane]["lane"]["state"], "BACK")
+        (row,) = rows.candidates({"items": self.items(self.lane)}, self.product, [],
+                                 occupancy=lifecycle.occupancy(path))
+        self.assertEqual((row.kind, row.branch, row.launches),
+                         (rows.STARVED_PLAN, self.lane, True))
+        self.assertIn("don't rewrite it", row.correction)
+
+    def test_a_conflicting_branch_goes_to_a_session_that_lands_it_unrewritten(self):
+        self.push_branch(self.lane, {"docs/plans/other.md": "b\n"})
+        self.commit("docs: move the trunk on", {"docs/plans/other.md": "c\n"})
+        git(self.work, "push", "-q", "origin", "main")
+        git(self.work, "fetch", "-q", "origin")
+        (done,) = land_spec.adopt(self.product, self.items(self.lane), out=lambda *_a: None)
+        self.assertIn("conflicts", done[2])
+        self.assertEqual(self.runs()[self.lane]["lane"]["state"], "BACK")
+
+    def test_a_plan_on_a_pre_lane_branch_is_landed_by_a_session_on_the_lane_branch(self):
+        self.push_branch("old/widgets", {"docs/plans/widgets.md": "# widgets\n"},
+                         subject="widgets plan")
+        (done,) = land_spec.adopt(self.product, self.items("old/widgets"), out=lambda *_a: None)
+        self.assertIn("no spec/plan lane branch", done[2])
+        corr = lifecycle.corrections(pool_mod.sessions_path(self.product))
+        self.assertEqual(corr["F-0001"]["branch"], self.lane)
+        self.assertIn("old/widgets", corr["F-0001"]["text"])
+
+    def test_a_spec_approved_feature_with_a_plan_off_the_trunk_yields_only_the_spec_triple(self):
+        spec_lane = rows.branch_for(self.product, "spec", "F-0001")
+        items = self.items(self.lane, stage="spec-approved",
+                           spec_evidence=f"spec on {spec_lane} (review r1 APPROVED)")
+        self.assertEqual(land_spec.wanted(items), [("F-0001", spec_lane, "spec")])
+
+    def test_a_feature_owed_a_correction_is_skipped(self):
+        self.push_branch("old/widgets", {"docs/plans/widgets.md": "# widgets\n"},
+                         subject="widgets plan")
+        land_spec.adopt(self.product, self.items("old/widgets"), out=lambda *_a: None)
+        self.assertIn("F-0001", lifecycle.corrections(pool_mod.sessions_path(self.product)))
+        self.push_branch(self.lane, {"docs/plans/f-0001.md": "# widgets\n"})
+        self.assertEqual(land_spec.adopt(self.product, self.items(self.lane),
+                                         out=lambda *_a: None), [])
+
+    def test_a_spec_and_a_plan_landing_each_get_their_own_job(self):
+        spec_lane = rows.branch_for(self.product, "spec", "F-0002")
+        git(self.work, "checkout", "-q", "-b", spec_lane, "main")
+        self.commit("spec(F-0002): the widget spec", {"docs/specs/f-0002.md": "# widgets\n"})
+        git(self.work, "push", "-q", "origin", spec_lane)
+        git(self.work, "checkout", "-q", "main")
+        git(self.work, "fetch", "-q", "origin")
+        self.push_branch(self.lane, {"docs/plans/f-0001.md": "# widgets\n"})
+        items = self.items(self.lane)
+        items["F-0002"] = {"id": "F-0002", "type": "feature", "decided": True, "state": "Active",
+                           "stage": "spec-approved",
+                           "evidence": [f"spec on {spec_lane} (review r1 APPROVED)",
+                                        "plan on origin/main"]}
+        self.assertEqual(sorted(land_spec.wanted(items)),
+                         sorted([("F-0001", self.lane, "plan"), ("F-0002", spec_lane, "spec")]))
+        done = land_spec.adopt(self.product, items, out=lambda *_a: None)
+        self.assertEqual(sorted(done), sorted([("F-0001", self.lane, ""), ("F-0002", spec_lane, "")]))
+        self.assertEqual(self.runs()[spec_lane]["job"], "land-spec-f-0002")
+        self.assertEqual(self.runs()[self.lane]["job"], "land-plan-f-0001")
 
 
 if __name__ == "__main__":
