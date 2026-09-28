@@ -280,7 +280,7 @@ def _step_account(args, plan):
 def _doctor_red_keys(product_name):
     """The set of RED keys the doctor's DOCTOR and SCHEDULER tables show right now: a check's own
     name for a DOCTOR row, ``scheduler:<label>`` for a SCHEDULER row — the same shape
-    ``tools/install.sh``'s own ``doctor_reds`` reads off the printed table, computed here from the
+    the bootstrap script's own ``doctor_reds`` reads off the printed table, computed here from the
     rows themselves. Safe to call before ``config.yaml`` or the product file exist: a missing one
     is one ``ConfigError`` :func:`asf.doctor.check_config` already catches, and ``run`` returns
     just the single ``config`` row."""
@@ -323,7 +323,7 @@ def _step_scheduler(args):
     """Step 8 — ``asf scheduler install --product <p>``, then every declared clock read back
     through ``asf scheduler status``; a clock still absent gets one retried bootstrap, and one
     still not loaded after it is a ``NEEDS OPERATOR`` line naming it and a failed step
-    (``scheduler_install_verified``, ``tools/install.sh:149-171``, behaviour intact). With
+    (``scheduler_install_verified``, the bootstrap's own retry, behaviour intact). With
     ``--scheduler none`` there is nothing to install or read back (PD10)."""
     if args.scheduler == 'none':
         return 0, 'already in place'
