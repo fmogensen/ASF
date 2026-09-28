@@ -73,8 +73,6 @@ if not os.path.isdir(os.path.join(FIXTURE_REPO, '.git')):
 
 JOB_NAME = f'{role}.{variant}'
 LOG_PATH = os.path.join(STATE, f'{JOB_NAME}.jsonl')
-if os.path.exists(LOG_PATH):
-    os.remove(LOG_PATH)  # a re-run of a leg overwrites its own file and no other (§4)
 
 # ---- the account: the local lane only, never the cloud lane this Feature does not measure -----
 cfg = asf_env.load_config()
@@ -119,9 +117,15 @@ with open(brief_path, 'w', encoding='utf-8') as f:
 # ---- the job and the real environment (PD5): built through the package, never by hand ----------
 hooks_dir = githooks.ensure(PRODUCT)
 permission_mode = 'default' if variant == 'mode-default' else runtime.DEFAULT_PERMISSION_MODE
+passthrough = asf_env.env_passthrough(cfg)
+if variant == 'grant-net-passthrough':
+    # §3.9: the name a proxied egress needs that hermetic.WORKER_ALLOW strips
+    # (asf/hermetic.py:63-66) — the one thing that distinguishes this leg from grant-net, whose
+    # settings file is otherwise byte-identical (settings/coder.grant-net*.json's own header).
+    passthrough = tuple(passthrough) + ('HTTPS_PROXY',)
 job = runtime.Job(PRODUCT, JOB_NAME, FIXTURE_REPO, brief_path, None, account=acct,
                   permission_mode=permission_mode, log_path=LOG_PATH, hooks_dir=hooks_dir,
-                  passthrough=asf_env.env_passthrough(cfg),
+                  passthrough=passthrough,
                   product_auth_env=asf_env.product_auth_env(PRODUCT))
 try:
     built_env = runtime.build_env(job)
@@ -165,6 +169,9 @@ with open(rendered_path, 'w', encoding='utf-8') as f:
 job.settings_file = rendered_path
 
 # ---- the launch: one real session, foreground, waited on ---------------------------------------
+if os.path.exists(LOG_PATH):
+    os.remove(LOG_PATH)  # a re-run of a leg overwrites its own file and no other (§4) — removed
+    # only here, immediately before the launch, so a refused leg above never touches an existing log
 print(f'session.sh: launching {JOB_NAME} …', file=sys.stderr)
 result = runtime.ClaudeCodeRuntime().run(job, wait=True)
 print(job.log_path or LOG_PATH)
