@@ -1911,6 +1911,24 @@ class InstallScriptTest(unittest.TestCase):
         self.assertEqual(self._asf_call(), 'install --product demo')
         self.assertIn(f'install: product demo, release v0.3.0 from {self.remote}', r.stdout)
 
+    def test_the_closing_lines_state_the_rule_instead_of_asking_for_asf_product(self):
+        r = self._run(['demo'])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        closing_lines = (
+            'install: /asf:* resolves the product from the working directory — a session '
+            'started in',
+            "install: demo's repo or its record needs no ASF_PRODUCT.",
+            'install: set ASF_PRODUCT=demo only for a session that runs outside both.',
+        )
+        for line in closing_lines:
+            self.assertIn(line, r.stdout)
+        self.assertNotIn('start that session with ASF_PRODUCT', r.stdout)
+        asf_product_lines = [line for line in r.stdout.splitlines() if 'ASF_PRODUCT' in line]
+        self.assertEqual(asf_product_lines, list(closing_lines[1:]))
+        for line in closing_lines:
+            self.assertNotIn(self.tmp, line)
+            self.assertNotIn(self.bin_dir, line)
+
     def test_a_second_argument_pins_the_ref_with_no_tag_resolution(self):
         r = self._run(['demo', 'deadbeef'])
         self.assertEqual(r.returncode, 0, r.stderr)

@@ -120,6 +120,10 @@ mkdir -p "$ASF_HOME/logs" 2>/dev/null && \
 export PATH="$HOME/.local/bin:$PATH"
 command -v "$BIN" >/dev/null 2>&1 || die "$BIN is not on PATH after pipx install — run: pipx ensurepath"
 
+say "/asf:* resolves the product from the working directory — a session started in"
+say "$PRODUCT's repo or its record needs no ASF_PRODUCT."
+say "set ASF_PRODUCT=$PRODUCT only for a session that runs outside both."
+
 # 2. everything else — the config, the record, the account, the hooks, the clocks, the plugin,
 # the doctor — is `asf install`'s own; its exit status is this script's
 exec "$BIN" install --product "$PRODUCT" "$@"
