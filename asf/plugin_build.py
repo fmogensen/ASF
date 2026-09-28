@@ -9,9 +9,11 @@ the source; a skill that names a command the CLI lacks, or a view without a skil
 import argparse
 import json
 import os
+import shutil
 import sys
 
 from asf import __version__
+from asf import env
 
 PACKAGE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -29,6 +31,12 @@ def default_plugin_dir(cwd=None):
 
 
 PLUGIN_DIR = default_plugin_dir() or os.path.join(PACKAGE_ROOT, 'plugin')
+
+
+def installed_plugin_dir():
+    """Where ``asf plugin install`` writes (B-0047): under ``<ASF_HOME>``, never the runtime's
+    own configuration directory (PD15, D7) — a plain ``pipx`` install has no checkout to find."""
+    return os.path.join(env.ASF_HOME, 'plugin')
 
 # Operator views: print the table verbatim and stop.
 VIEWS = ('status', 'next', 'backlog', 'roadmap', 'parity', 'prod', 'sessions', 'doctor', 'capacity',
@@ -184,15 +192,38 @@ def check(plugin_dir=PLUGIN_DIR, out=print):
     return 0
 
 
+def install(dest=None, out=print):
+    """The whole tree under ``<ASF_HOME>`` (or ``dest``), written from the CLI's own parser,
+    reading nothing from a checkout — so a plain install still has the ``/asf:*`` skills
+    (B-0047). Every file is written whether or not it differs, so the tree is regenerated
+    byte-identical on a second run. Strays under the destination's ``plugin/skills`` are
+    removed, not merely reported: a skill dropped from the CLI must not linger in an installed
+    tree — unlike :func:`build`, which only reports them on a checkout."""
+    dest = dest or installed_plugin_dir()
+    plugin_dir = os.path.join(dest, 'plugin')
+    for path, text in expected_files(plugin_dir).items():
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+    for n in stray_skills(plugin_dir):
+        shutil.rmtree(os.path.join(plugin_dir, 'skills', n))
+        out(f'plugin: removed stray skill {n} (no command named {n})')
+    out(f'plugin: {len(skill_names())} skills, plugin.json, marketplace.json written to {dest}')
+    return 0
+
+
 def register(sub):
-    p = sub.add_parser('plugin', help='the Claude Code plugin, generated from the CLI: build | check')
-    p.add_argument('action', choices=['build', 'check'])
+    p = sub.add_parser('plugin', help='the Claude Code plugin, generated from the CLI: build | check | install')
+    p.add_argument('action', choices=['build', 'check', 'install'])
     p.add_argument('--dir', default=None,
-                   help='the plugin directory (default: <checkout>/plugin, found from the cwd)')
+                   help='the plugin directory (default for build/check: <checkout>/plugin, found '
+                        'from the cwd; default for install: <ASF_HOME>/plugin)')
     p.set_defaults(run=lambda args: run_action(args.action, args.dir))
 
 
 def run_action(action, plugin_dir=None, out=print, cwd=None):
+    if action == 'install':
+        return install(plugin_dir, out=out)
     d = plugin_dir or default_plugin_dir(cwd)
     if not d:
         out('plugin: no checkout here (no .claude-plugin/marketplace.json in the cwd) — pass --dir <checkout>/plugin')
@@ -202,7 +233,7 @@ def run_action(action, plugin_dir=None, out=print, cwd=None):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog='asf plugin')
-    ap.add_argument('action', choices=['build', 'check'])
+    ap.add_argument('action', choices=['build', 'check', 'install'])
     ap.add_argument('--dir', default=None)
     a = ap.parse_args(argv)
     return run_action(a.action, a.dir)

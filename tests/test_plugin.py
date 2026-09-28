@@ -128,5 +128,87 @@ class PluginTests(unittest.TestCase):
         self.assertRegex(r.stdout, r'^asf (v\d+\.\d+\.\d+(\+\d+)?|\d+\.\d+\.\d+)')
 
 
+class PluginInstallTests(unittest.TestCase):
+    """`asf plugin install` (T-0405, B-0047): the marketplace tree from the installed package,
+    reading nothing from a checkout — so a `pipx` install has the `/asf:*` skills."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = os.path.join(self.tmp.name, 'ASF_HOME')
+        self.cwd = os.path.join(self.tmp.name, 'no-checkout-here')
+        os.makedirs(self.cwd)
+        self.env_patch = mock.patch.object(plugin_build.env, 'ASF_HOME', self.home)
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
+        self.old_cwd = os.getcwd()
+        os.chdir(self.cwd)
+        self.addCleanup(os.chdir, self.old_cwd)
+
+    def test_writes_every_expected_file_under_installed_plugin_dir(self):
+        dest = plugin_build.installed_plugin_dir()
+        self.assertEqual(dest, os.path.join(self.home, 'plugin'))
+        self.assertEqual(plugin_build.run_action('install', out=lambda s: None), 0)
+        plugin_dir = os.path.join(dest, 'plugin')
+        expected = plugin_build.expected_files(plugin_dir)
+        self.assertTrue(expected)
+        for path, text in expected.items():
+            with open(path, encoding='utf-8') as f:
+                self.assertEqual(f.read(), text, path)
+
+    def test_second_run_changes_no_byte(self):
+        plugin_build.run_action('install', out=lambda s: None)
+        dest = plugin_build.installed_plugin_dir()
+        plugin_dir = os.path.join(dest, 'plugin')
+        before = {}
+        for root, _, names in os.walk(dest):
+            for n in names:
+                p = os.path.join(root, n)
+                with open(p, 'rb') as f:
+                    before[p] = f.read()
+        plugin_build.run_action('install', out=lambda s: None)
+        after = {}
+        for root, _, names in os.walk(dest):
+            for n in names:
+                p = os.path.join(root, n)
+                with open(p, 'rb') as f:
+                    after[p] = f.read()
+        self.assertEqual(before, after)
+        self.assertTrue(before)
+        del plugin_dir
+
+    def test_stray_skill_is_removed(self):
+        dest = plugin_build.installed_plugin_dir()
+        plugin_build.run_action('install', out=lambda s: None)
+        plugin_dir = os.path.join(dest, 'plugin')
+        stray = os.path.join(plugin_dir, 'skills', 'stray')
+        os.makedirs(stray)
+        with open(os.path.join(stray, 'SKILL.md'), 'w') as f:
+            f.write('x')
+        plugin_build.run_action('install', out=lambda s: None)
+        self.assertFalse(os.path.exists(stray))
+
+    def test_dir_overrides_the_destination(self):
+        override = os.path.join(self.tmp.name, 'elsewhere')
+        self.assertEqual(plugin_build.run_action('install', plugin_dir=override,
+                                                  out=lambda s: None), 0)
+        plugin_dir = os.path.join(override, 'plugin')
+        for path in plugin_build.expected_files(plugin_dir):
+            self.assertTrue(os.path.isfile(path), path)
+        self.assertFalse(os.path.exists(plugin_build.installed_plugin_dir()))
+
+    def test_default_plugin_dir_never_called_on_the_install_path(self):
+        with mock.patch.object(plugin_build, 'default_plugin_dir') as m:
+            self.assertEqual(plugin_build.run_action('install', out=lambda s: None), 0)
+            m.assert_not_called()
+
+    def test_registered_as_a_third_action(self):
+        sub = [a for a in build_parser()._actions if a.dest == 'command'][0]
+        p = sub.choices['plugin']
+        action = [a for a in p._actions if a.dest == 'action'][0]
+        self.assertEqual(action.choices, ['build', 'check', 'install'])
+
+
 if __name__ == '__main__':
     unittest.main()
