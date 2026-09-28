@@ -2623,6 +2623,47 @@ class InstallStepsTests(HomeCase):
         with mock.patch.object(install.shutil, 'which', return_value=None):
             self.assertIsNone(install._probe_plugin_command())
 
+    def test_the_closing_lines_state_the_rule_and_print_beside_the_plugin_tail(self):
+        args = _install_args(repo='/r', record='/b', scheduler='none', fake_workers=True)
+
+        def ok(*a):
+            return (0, 'ok')
+
+        with mock.patch.object(install, '_step_host', ok), \
+                mock.patch.object(install, '_step_asf', ok), \
+                mock.patch.object(install, '_step_config', ok), \
+                mock.patch.object(install, '_step_repos', ok), \
+                mock.patch.object(install, '_step_adopt', ok), \
+                mock.patch.object(install, '_step_account', ok), \
+                mock.patch.object(install, '_step_hooks', ok), \
+                mock.patch.object(install, '_step_scheduler', ok), \
+                mock.patch.object(install, '_step_plugin', ok), \
+                mock.patch.object(install, '_step_console_permissions', ok), \
+                mock.patch.object(install, '_step_doctor', ok), \
+                mock.patch.object(install, '_step_dry_run', ok), \
+                mock.patch.object(install, '_probe_plugin_command', return_value=None):
+            rc, out, err = _quiet(install.cmd_install, args)
+        self.assertEqual(rc, 0, out + err)
+        lines = out.splitlines()
+        closing_lines = [
+            'install: /asf:* resolves the product from the working directory — a session '
+            'started in',
+            "install: demo's repo or its record needs no ASF_PRODUCT.",
+            'install: set ASF_PRODUCT=demo only for a session that runs outside both.',
+        ]
+        for line in closing_lines:
+            self.assertIn(line, lines)
+        plugin_index = next(i for i, l in enumerate(lines) if 'marketplace add' in l)
+        self.assertTrue(
+            all(lines.index(closing) < plugin_index for closing in closing_lines),
+            'the closing lines must print immediately before the /plugin tail, not before the '
+            'steps that precede it')
+        asf_product_lines = [l for l in lines if 'ASF_PRODUCT' in l]
+        self.assertEqual(asf_product_lines, closing_lines[1:])
+        for line in closing_lines:
+            self.assertNotIn('/r', line)
+            self.assertNotIn('/b', line)
+
     def test_idempotent_second_run(self):
         """The whole command, run twice over one temp HOME/ASF_HOME against ``sample/``'s repo
         and record, published to two bare origins (``tests/test_sample_product.py``'s own

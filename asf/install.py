@@ -524,6 +524,10 @@ def cmd_install(args, out=print):
         Step('step 12: the dry run', lambda: _step_dry_run(args), False),
     ]
     rc = run_steps(steps, out=out)
+    out('install: /asf:* resolves the product from the working directory — a session '
+       'started in')
+    out(f"install: {args.product}'s repo or its record needs no ASF_PRODUCT.")
+    out(f'install: set ASF_PRODUCT={args.product} only for a session that runs outside both.')
     for line in _tail_lines(plugin_build.installed_plugin_dir()):
         out(line)
     out('asf install: done' if rc == 0 else
