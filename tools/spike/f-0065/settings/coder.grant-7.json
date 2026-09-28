@@ -10,8 +10,8 @@
   "sandbox": {  // sandbox: the settings-reference's top-level key for the Bash sandbox (code.claude.com/docs/en/settings-reference (fetched 2026-09-28))
     "enabled": true,  // sandbox.enabled: "Turn on Bash sandboxing on macOS, Linux, and WSL2" (code.claude.com/docs/en/settings-reference (fetched 2026-09-28))
     "network": {  // sandbox.network: the harness groups every network grant under this key (code.claude.com/docs/en/settings-reference (fetched 2026-09-28))
-      "allowedDomains": [  // sandbox.network.allowedDomains (code.claude.com/docs/en/settings-reference (fetched 2026-09-28)); P10's registry -- a VALUE placeholder, not a guessed KEY (D2/PD4/§3.10 only forbid the latter): Task 1 (fixture.sh) is this Task's wave-1 sibling and had not landed when this leg was written, so the fixture's package manager is not yet known. Task 5, which measures the coder's table, names it here.
-        "<the package registry -- named once Task 1 lands fixture.sh and picks a package manager>"
+      "allowedDomains": [  // sandbox.network.allowedDomains (code.claude.com/docs/en/settings-reference (fetched 2026-09-28)); P10's registry -- fixture.sh (Task 1) installs the fixture's one dependency with npm (tools/spike/f-0065/fixture.sh), whose default registry is this domain
+        "registry.npmjs.org"
       ]
     }
   }
