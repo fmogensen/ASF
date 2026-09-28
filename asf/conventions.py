@@ -67,6 +67,8 @@ The product yaml carries the overrides::
                            # not a product setting (F-0062 §2.1)
       sequences:                              # `asf reserve <name>` (B-0151): one run of N's is
         migrations: db/migrations/NNNN_*.sql  # the zero-padded number field in the path
+        bands: docs/decisions/NNNN-*.md       # a directory sequence too — one number per file,
+                                               # never one file holding every band (unsupported)
 
 Unknown keys are kept (in :attr:`Conventions.extra`) rather than rejected: a product yaml is
 written by an operator and may carry conventions a module older than it does not read yet, and
@@ -327,10 +329,13 @@ DEFAULT_BUDGET = {'sessions': 3, 'usd': 10, 'run_minutes': 180, 'run_turns': 600
 DEFAULT_ROLES = {}
 
 #: ``conventions.sequences``: a product's numbered file sequences (a migration, a decision band)
-#: whose next number `asf reserve <name>` claims (B-0151, :mod:`asf.reserve`) — a path with one
-#: run of ``N``s standing in for the zero-padded number, e.g.
-#: ``{migrations: 'db/migrations/NNNN_*.sql'}``. Empty by default — a product names none, `asf
-#: reserve` refuses any name.
+#: whose next number `asf reserve <name>` claims (B-0151, :mod:`asf.reserve`) — a directory path
+#: with one run of ``N``s standing in for the zero-padded number each file in it carries, e.g.
+#: ``{migrations: 'db/migrations/NNNN_*.sql', bands: 'docs/decisions/NNNN-*.md'}``. Only that one
+#: shape (one file, one number) is a sequence; numbers recorded as rows inside a single shared
+#: file are not (:func:`asf.reserve.pattern_regex` raises `ValueError` on a pattern with no
+#: ``N`` run — the same error a plain, unnumbered filename like ``bands.md`` would raise). Empty
+#: by default — a product names none, `asf reserve` refuses any name.
 DEFAULT_SEQUENCES = {}
 
 

@@ -3,23 +3,33 @@
 next number.
 
 ``asf reserve <sequence>`` returns one past the highest number any of these carries: ``origin``'s
-trunk, every open lane branch (unmerged code/fix branches on origin), and every number this
-product has already reserved for the sequence — and records the new claim before returning, so a
-second call made before the first claim's branch is even pushed does not repeat it (two sessions
-each seeing only main, and both picking the same migration number, is the incident this closes).
+trunk, every open lane branch (unmerged code/fix branches on origin), and every number already
+claimed for the sequence — and records the new claim, on ``origin`` itself, before returning, so
+a second call made before the first claim's branch is even pushed does not repeat it (two
+sessions each seeing only main, and both picking the same migration number, is the incident this
+closes). The claim is a ref on origin (:func:`claim`), not a local file: a local ``ASF_HOME``
+path is only ever seen by the one runner that wrote it, and a cloud session's runner is fresh
+every time (:mod:`asf.workers.cloud`) — two cloud sessions racing before either has pushed their
+own branch must still see each other, so the claim has to live somewhere every runner reaches.
 Renumbering a landed collision against main at publish time is a separate step, not this one.
 """
-import json
-import os
 import re
 
-from asf import env
+from asf import env, gitpush
 from asf.evidence import evidence
+from asf.harvest import harvest as H
 
-#: The reservations file for one product's sequence, under its own state dir
-#: (:func:`asf.env.state_dir`) — never the product repo, so a claim survives a branch that is
-#: never pushed without leaving a trace an operator has to clean up.
-RESERVATIONS_FILE = 'reservations-%s.json'
+#: ``refs/heads/reservations/<sequence>/<n>`` is one product's claim ref for one number: created
+#: (never updated) on ``origin`` at a fresh, parentless commit (:data:`EMPTY_TREE`) — unrelated
+#: to any other commit, so a second create attempt at the same ref is never a fast-forward and
+#: git itself refuses it, whichever of two racing pushes origin saw first wins. The name carries
+#: no ``code``/``fix``/… prefix, so :func:`open_branch_trees`'s own lane scan already skips it;
+#: it is otherwise an ordinary head and outlives the branch it was claimed for on purpose (an
+#: abandoned claim is never renumbered — the same accepted cost the old local file had).
+RESERVATION_PREFIX = 'reservations'
+#: The empty tree's well-known sha (``git hash-object -t tree /dev/null``) — every git object
+#: store already has it, so a claim commit needs no blob or tree written first.
+EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
 
 
 def pattern_regex(filename_pattern):
@@ -76,26 +86,37 @@ def format_number(n, width):
     return str(n).zfill(width)
 
 
-def _reservations_path(product, sequence):
-    return os.path.join(env.state_dir(product), RESERVATIONS_FILE % sequence)
+def _reservation_ref(sequence, n):
+    return f'refs/heads/{RESERVATION_PREFIX}/{sequence}/{n}'
 
 
-def _load_reservations(path):
-    if not os.path.exists(path):
-        return []
-    try:
-        with open(path, encoding='utf-8') as f:
-            data = json.load(f)
-        return [int(n) for n in data] if isinstance(data, list) else []
-    except (OSError, ValueError):
-        return []
+def remote_reserved_numbers(product, sequence):
+    """Every number already claimed for ``sequence`` on ``origin`` — one ``ls-remote``, the same
+    view every runner gets, a fresh cloud checkout included (B-0151 review C1: a local file is
+    only ever seen by the one runner that wrote it)."""
+    out = H.sh(['git', 'ls-remote', '--heads', 'origin', _reservation_ref(sequence, '*')],
+              cwd=product.repo_dir)
+    numbers = []
+    for line in out.stdout.splitlines():
+        _sha, _tab, ref = line.partition('\t')
+        tail = ref.rpartition('/')[2]
+        if tail.isdigit():
+            numbers.append(int(tail))
+    return numbers
 
 
-def _save_reservations(path, numbers):
-    tmp = f'{path}.{os.getpid()}'
-    with open(tmp, 'w', encoding='utf-8') as f:
-        json.dump(numbers, f)
-    os.replace(tmp, path)
+def claim(product, sequence, n):
+    """Create :func:`_reservation_ref` (``sequence``, ``n``) on ``origin``: True once it is this
+    call's commit that landed there, False when another session's claim already holds it — a
+    fresh, parentless commit (:data:`EMPTY_TREE`) is never a fast-forward of another one, so git
+    itself refuses whichever of two racing pushes origin sees second."""
+    commit = H.sh(['git', 'commit-tree', EMPTY_TREE, '-m', f'reserve {sequence} {n}'],
+                 cwd=product.repo_dir).stdout.strip()
+    if not commit:
+        raise SystemExit(f'reserve: could not build a claim commit in {product.repo_dir!r}')
+    result = gitpush.push(['origin', f'{commit}:{_reservation_ref(sequence, n)}'],
+                          product.repo_dir, refs_only=True)
+    return result.returncode == 0
 
 
 def open_branch_trees(product, dirname):
@@ -120,11 +141,20 @@ def open_branch_trees(product, dirname):
     return {r: list(trees.get(f'{r}:{dirname}', {})) for r in revs}
 
 
+#: How many claims :func:`reserve` retries past a collision before it gives up — generous: a
+#: collision only happens while two sessions race the very same number, and each loses at most
+#: once before the next candidate is free.
+MAX_ATTEMPTS = 50
+
+
 def reserve(product, sequence):
     """Claim the next number in ``product``'s declared ``sequence``
-    (``conventions.sequences``): max(trunk, every open lane branch, every number this product
-    already reserved) + 1, recorded before it is returned. The zero-padded number, as a string.
-    ``SystemExit`` when ``sequence`` names no declared pattern."""
+    (``conventions.sequences``): max(trunk, every open lane branch, every number already
+    claimed) + 1, claimed on ``origin`` (:func:`claim`) before it is returned — so a second call
+    made before either session's branch is even pushed does not repeat it, cloud sessions
+    included (B-0151 review C1). The zero-padded number, as a string. ``SystemExit`` when
+    ``sequence`` names no declared pattern, or every candidate up to :data:`MAX_ATTEMPTS`
+    collided (heavy, sustained contention — not the incident this closes)."""
     conv = product.conventions
     pattern = conv.map_of('sequences').get(sequence)
     if not pattern:
@@ -132,11 +162,13 @@ def reserve(product, sequence):
                          f"(conventions.sequences: {{{sequence}: ...}})")
     dirname, _filename = split_pattern(pattern)
     trees = open_branch_trees(product, dirname)
-    path = _reservations_path(product, sequence)
-    reserved = _load_reservations(path)
-    n, width = compute_next(pattern, trees, reserved)
-    _save_reservations(path, reserved + [n])
-    return format_number(n, width)
+    for _attempt in range(MAX_ATTEMPTS):
+        reserved = remote_reserved_numbers(product, sequence)
+        n, width = compute_next(pattern, trees, reserved)
+        if claim(product, sequence, n):
+            return format_number(n, width)
+    raise SystemExit(f"reserve: could not claim a number for {sequence!r} after "
+                     f"{MAX_ATTEMPTS} collisions")
 
 
 def cmd_reserve(args, root=None):
