@@ -2782,3 +2782,48 @@ class TestBackfill(Base):
         self.assertTrue(self.ask(q, 'pr:feat/a', 'T-0341').admitted)
         self.assertIn('ci queue: feat/a admitted after 21 min at the head (starvation guard)',
                       self.lines)
+
+
+class ItemOfRunTest(unittest.TestCase):
+    """A PR run on a branch that names no item ranks as the record work its title carries
+    (a product PR on `cloud/tm-t1`, titled "F-BILL-7, F-BILL-8, F-RUN-10 — …", was relieved as
+    "other", prio 4, behind every Feature PR)."""
+
+    ITEMS = {
+        'F-0094': {'id': 'F-0094', 'type': 'feature', 'title': 'Transparent meter'},
+        'T-0048': {'id': 'T-0048', 'type': 'task', 'parent': 'F-0094'},
+        'S-0019': {'id': 'S-0019', 'type': 'story', 'parent': 'F-0094', 'legacy_id': 'F-BILL-7'},
+        'S-0099': {'id': 'S-0099', 'type': 'story', 'legacy_id': 'F-OLD-1', 'removed': True},
+    }
+
+    def test_branch_id_still_wins(self):
+        self.assertEqual(ci_queue._item_of_run('task/T-0048-x', 'F-BILL-7 — y', self.ITEMS),
+                         'T-0048')
+
+    def test_record_id_in_title(self):
+        self.assertEqual(ci_queue._item_of_run('cloud/tm-t1', 'T-0048 — the catalogue', self.ITEMS),
+                         'T-0048')
+
+    def test_legacy_catalogue_row_in_title(self):
+        self.assertEqual(ci_queue._item_of_run(
+            'cloud/tm-t1', "F-BILL-7, F-BILL-8, F-RUN-10 — the turn's estimate", self.ITEMS),
+            'S-0019')
+
+    def test_unknown_or_removed_tokens_name_nothing(self):
+        self.assertIsNone(ci_queue._item_of_run('cloud/tm-t1', 'F-OLD-1 and X-9 — misc', self.ITEMS))
+        self.assertIsNone(ci_queue._item_of_run('cloud/tm-t1', None, self.ITEMS))
+        self.assertIsNone(ci_queue._item_of_run('cloud/tm-t1', 'F-BILL-7', None))
+
+    def test_ranks_as_record_work_not_other(self):
+        item = ci_queue._item_of_run('cloud/tm-t1', 'F-BILL-7, F-BILL-8 — meter', self.ITEMS)
+        prio, _label = ci_queue.priority(item, self.ITEMS, 'cloud/tm-t1')
+        self.assertEqual(prio, ci_queue.RANKED)
+
+    def test_held_rerun_ranks_by_its_recorded_title(self):
+        rec = {'kind': 'pr', 'branch': 'cloud/tm-t1', 'item': 'cloud/tm-t1', 'label': 'other',
+               'prio': ci_queue.OTHER, 'title': 'F-BILL-7, F-BILL-8, F-RUN-10 — meter'}
+        prio, _label, rank = ci_queue._rerun_priority(rec, self.ITEMS)
+        self.assertEqual(prio, ci_queue.RANKED)
+        self.assertIsNotNone(rank)
+        rec.pop('title')
+        self.assertEqual(ci_queue._rerun_priority(rec, self.ITEMS)[0], ci_queue.OTHER)
