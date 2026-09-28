@@ -118,7 +118,7 @@ class SeamTests(unittest.TestCase):
     def test_live_runs_returns_the_products_non_completed_runs_in_the_queues_vocabulary(self):
         p, host = product(), Host()
         runs = ci_queue.GitHubSource(p, run=host).live_runs()
-        self.assertEqual({r['id'] for r in runs}, {900, 110, 111, 112})
+        self.assertEqual({r['id'] for r in runs}, {900, 110, 111, 112, 113})
         for r in runs:
             want = host.runs[r['id']]
             self.assertEqual(r, {'id': want['id'], 'status': want['status'],
@@ -146,7 +146,10 @@ class SeamTests(unittest.TestCase):
                     src.busy_runners()
                 calls = [c for c in host.calls if c[:2] == ['gh', 'api']
                         and any('/actions/runs?status=' in a for a in c)]
-                self.assertEqual(len(calls), 2, calls)
+                statuses = [next(a for a in c if '/actions/runs?status=' in a)
+                           .split('status=')[1].split('&')[0] for c in calls]
+                self.assertEqual(len(statuses), len(set(statuses)), calls)
+                self.assertEqual(set(statuses), ci_queue.QUEUED_STATUSES | {'in_progress'})
 
     def test_an_unreadable_listing_makes_live_runs_none_and_is_not_asked_twice(self):
         p, host = product(), Host()
