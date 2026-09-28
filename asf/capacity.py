@@ -243,11 +243,14 @@ def bandwidth(product, cfg=None, resolved=None, quota_source=None):
     ``accounts`` and ``quota_stopped`` (:func:`quota_stopped`), ``ci_free`` (CI slots less the
     runs in flight; ``None`` with no CI cap or no count). ``resolved``: a :func:`resolve` the
     caller already has. Never raises: a fact it cannot read is ``None``."""
-    out = {'sessions': None, 'accounts': None, 'quota_stopped': None, 'ci_free': None}
+    out = {'sessions': None, 'accounts': None, 'quota_stopped': None, 'ci_free': None,
+           'quota_in_sessions': False}
     try:
         cfg = env.load_config() if cfg is None else cfg
         r = resolved if resolved is not None else resolve(product, cfg, quota_source=quota_source)
         out['sessions'] = r.sessions
+        # a fair share is cut from the usable slots: the quota stop is in it already
+        out['quota_in_sessions'] = r.sessions_bound == 'fair share'
         if r.ci is not None and r.ci_inflight is not None:
             out['ci_free'] = max(int(r.ci) - int(r.ci_inflight), 0)
         out['accounts'], out['quota_stopped'] = quota_stopped(cfg, quota_source)

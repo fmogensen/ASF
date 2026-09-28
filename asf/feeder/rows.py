@@ -348,7 +348,8 @@ def features_cap(product, capacity, bandwidth=None):
     A fixed ``feeder.max_features_in_build`` is N as it stands. ``auto`` derives N every tick
     from the bandwidth (``bandwidth``: :func:`asf.capacity.bandwidth` — ``sessions``,
     ``accounts``, ``quota_stopped``, ``ci_free``; an absent fact is ``None``): ``sessions ×
-    features_per_session``, scaled by the share of accounts not at their quota stop, halved
+    features_per_session``, scaled by the share of accounts not at their quota stop (unless
+    ``quota_in_sessions``: the sessions are a fair share of the usable slots already), halved
     while CI has no free slot, rounded up, and never below :data:`MIN_FEATURES_IN_BUILD`. No
     ``sessions`` fact: ``capacity``, the session slots this plan cuts to."""
     fixed = max_features_in_build(product)
@@ -359,7 +360,10 @@ def features_cap(product, capacity, bandwidth=None):
     sessions = sessions if isinstance(sessions, int) and sessions >= 0 else max(int(capacity), 0)
     n = sessions * features_per_session(product)
     accounts, stopped, ci_free = bw.get('accounts'), bw.get('quota_stopped'), bw.get('ci_free')
-    if isinstance(accounts, int) and accounts > 0 and isinstance(stopped, int):
+    # a fair share is cut from the usable slots, which already give a stopped account none:
+    # scaling it by the stopped share again counts the stop twice
+    if (isinstance(accounts, int) and accounts > 0 and isinstance(stopped, int)
+            and not bw.get('quota_in_sessions')):
         n = n * max(accounts - stopped, 0) / accounts
     if isinstance(ci_free, int) and ci_free <= 0:
         n = n / 2
@@ -1595,16 +1599,35 @@ def features_in_build(items, busy=(), landed=()):
     return sorted(out)
 
 
+def features_moving(items, rows, busy=(), landed=(), held=()):
+    """The Features in build (:func:`features_in_build`) that take the factory's bandwidth now:
+    a Task held by a session or a branch waiting to land (``busy``), or a Task with a launching
+    row (:func:`buildable_features`). A Feature in build with neither — its landed Tasks behind
+    it, the rest waiting on work that is not moving — is stalled: holding new work does not
+    finish it, so it does not count against :func:`build_cap` (37 counted, 7 moving: the
+    factory's own record, 2026-09-28)."""
+    busy = set(busy or ())
+    ready = set(buildable_features(items, rows, set(held or ())))
+    return [f for f in features_in_build(items, busy, landed)
+            if f in ready or any(t['id'] in busy for t in ix.feature_tasks(items, items[f]))]
+
+
 def build_load(items, product, capacity, inflight=(), occupancy=None, landed_shas=None,
-               bandwidth=None):
-    """``(X, N, why)``: the Features in build (:func:`features_in_build`), the cap
-    (:func:`features_cap`), and the inputs that set it — what ``asf next`` and ``asf status``
-    show, and what :func:`build_cap` holds by."""
-    items = items_of(items)
+               bandwidth=None, rows=None, attempts=None, groom_state=None, held=None, gate=None):
+    """``(X, N, why)``: the Features in build that are moving (:func:`features_moving`), the
+    cap (:func:`features_cap`), and the inputs that set it — what ``asf next`` and ``asf
+    status`` show, and what :func:`build_cap` holds by. ``rows``: the uncut candidates; absent,
+    they are drawn here as :func:`plan_rows` draws them."""
+    index, items = items, items_of(items)
     busy = inflight_ids(inflight) | occupied(occupancy)
-    building = features_in_build(items, busy, landed_ids(items, landed_shas))
+    if rows is None:
+        rows = candidates(index, product, inflight, attempts, occupancy=occupancy,
+                          groom_state=groom_state, landed_shas=landed_shas)
+        if gate is not None:
+            rows = gate(rows, items)
+    moving = features_moving(items, rows, busy, landed_ids(items, landed_shas), held)
     cap, why = features_cap(product, capacity, bandwidth)
-    return len(building), cap, why
+    return len(moving), cap, why
 
 
 def build_load_line(x, cap, why):
@@ -1626,11 +1649,13 @@ def build_cap(rows, items, product, inflight, capacity, held=(), occupancy=None,
     work is the only work there is, and holding it would idle the product."""
     held = set(held or ())
     busy = inflight_ids(inflight) | occupied(occupancy)
-    building = set(features_in_build(items, busy, landed_ids(items, landed_shas)))
+    landed = landed_ids(items, landed_shas)
+    building = set(features_in_build(items, busy, landed))
+    moving = features_moving(items, rows, busy, landed, held)
     cap, why = features_cap(product, capacity, bandwidth)
-    if len(building) < cap or not building & set(buildable_features(items, rows, held)):
+    if len(moving) < cap or not building & set(buildable_features(items, rows, held)):
         return rows
-    reason = f"{len(building)} in build, cap {cap} ({why})"
+    reason = f"{len(moving)} in build, cap {cap} ({why})"
     out = []
     for r in rows:
         f = items.get(r.feature_id) or items.get(r.item_id) or {}

@@ -294,7 +294,10 @@ def build_cell(root, product):
     items, _generated = ix.load(root)
     inputs = plan_inputs(product, root)
     x, n, why = feeder_rows.build_load(items, product, capacity(product), inflight(product),
-                                       inputs.get('occupancy'), bandwidth=inputs.get('bandwidth'))
+                                       inputs.get('occupancy'), bandwidth=inputs.get('bandwidth'),
+                                       attempts=inputs.get('attempts'),
+                                       groom_state=inputs.get('groom_state'),
+                                       held=inputs.get('held'), gate=inputs.get('gate'))
     return f"{x} / {n} ({why})" + (' — no new Feature starts' if x >= n else '')
 
 
