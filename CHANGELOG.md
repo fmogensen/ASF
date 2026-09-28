@@ -2,6 +2,25 @@
 
 One entry per released version, newest first.
 
+## v0.1.55 — 2026-09-28
+
+### Bugs fixed
+
+- B-0094 19% of sessions end 'not pushed': finished work is lost to a missing commit or push
+
+### In progress
+
+- F-0040 Story-to-test gate: a Task's pull request must tick an acceptance line with the test that proves it
+- F-0053 Reviews return checks: every review ends in a machine-readable check table the tick reads
+- F-0056 Memory to code, first pass: what a session has to remember becomes a script, a row or a rule
+- F-0062 The launch path: skills as procedures, role agents with restricted tools, per-job caps, deny rules
+- F-0063 Relaunch from the branch, not from zero
+- F-0066 A progress heartbeat: no progress for twenty minutes is a stall, not only silence
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.55"`
+
 ## v0.1.54 — 2026-09-27
 
 ### Features landed
