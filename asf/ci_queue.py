@@ -314,6 +314,11 @@ PHANTOM_PASSES = 2
 PHANTOM_GAP_S = 10 * 60
 #: a phantom this old turns the doctor's ``ci runners`` row red
 PHANTOM_RED_S = 10 * 60
+#: a job stalled in the same step on this many consecutive passes is cancelled
+STALL_PASSES = 2
+#: passes further apart than this are not consecutive: the count starts again (and a stall
+#: record older than this is no longer believed)
+STALL_GAP_S = 10 * 60
 #: a job whose newest started step is this old with no step completed since is stalled
 DEFAULT_STEP_SILENCE_MIN = 10
 MOVING, STEP_SILENCE, BUDGET, UNKNOWN = 'moving', 'step-silence', 'budget', 'unknown'
@@ -1269,7 +1274,7 @@ def load(name):
         data = {}
     if not isinstance(data, dict):
         data = {}
-    for k in ('entries', 'started', 'expect', 'relief', 'phantom'):
+    for k in ('entries', 'started', 'expect', 'relief', 'phantom', 'stalled'):
         kind = list if k in ('started', 'relief') else dict
         if not isinstance(data.get(k), kind):
             data[k] = kind()
@@ -1390,6 +1395,114 @@ def runner_rows(product, now=None):
         return [(True, True, 'no runner busy without a job')]
     return [(True, _age(ph[n].get('since'), now) <= PHANTOM_RED_S, phantom_text(n, ph[n], now))
             for n in sorted(ph, key=lambda n: (_parse(ph[n].get('since')) or now, n))]
+
+
+# ---- the step-silence watch, across passes -----------------------------------------------------
+
+def _stall_kind(product, run):
+    """A stalled run's kind, for its line and its relief record: ``trunk`` for a run on the
+    product's own trunk branch, ``batch`` for one of the batch workflow, ``pr`` for everything
+    else — no exemption inherited, unlike the relief's own derivation (D6)."""
+    trunk = getattr(product, 'main', None) or 'main'
+    if run.get('headBranch') == trunk:
+        return 'trunk'
+    if run.get('workflow') and run.get('workflow') == workflow_for(product, 'batch'):
+        return 'batch'
+    return 'pr'
+
+
+def update_stalls(product, src, items=None, out=print, dry_run=False, now=None):
+    """One pass of the step-silence watch (see the module doc), mirroring :func:`update_phantoms`
+    step for step but reading and writing the queue file directly through :func:`load`/
+    :func:`save` rather than through a :class:`Queue` (PD3 — nothing it needs is on ``Queue``).
+    Every in-progress job of every live run of the product (:meth:`Source.live_runs`,
+    :meth:`Source.live_jobs`) is judged (:func:`step_silence`); one confirmed past the limit
+    (:func:`step_silence_seconds`) counts one pass more under a record keyed ``<run>:<job>`` in
+    the queue file's ``stalled`` map, confirmed on the :data:`STALL_PASSES`-th consecutive pass
+    (:data:`STALL_GAP_S` for "consecutive", as the phantom watch). A job whose newest step
+    changed, or whose run left the listing, leaves the watch. The confirming pass cancels the
+    run: ``mode: on`` calls ``gh run cancel`` and the record joins ``relief`` carrying ``stall``
+    and ``stall_step`` (re-run like every other relief cancel, :func:`_rerun_cancelled`);
+    ``mode: dry-run`` prints ``would cancel`` and writes nothing; a refused cancel keeps the
+    record for the next pass to try again. An unreadable :meth:`Source.live_runs` learns nothing
+    and forgets nothing — the records already in the file stand. The number cancelled."""
+    m = mode(product)
+    if m == 'off' or not product.repo_slug:
+        return 0
+    dry_run = dry_run or m == 'dry-run'
+    limit = step_silence_seconds(product)
+    if limit <= 0:
+        return 0
+    now = now or _now()
+    try:
+        runs = src.live_runs()
+    except Exception:  # noqa: BLE001 — an unreadable listing learns nothing and forgets nothing
+        runs = None
+    if runs is None:
+        return 0
+    data = load(product.name)
+    prev = data.get('stalled') or {}
+    watch, confirmed = {}, []
+    for run in runs:
+        jobs = src.live_jobs(run.get('id'))
+        if jobs is None:
+            continue
+        for job in jobs:
+            if not isinstance(job, dict) or job.get('status') != 'in_progress':
+                continue
+            cls, step, since = step_silence(job, now, limit)
+            if cls != STEP_SILENCE:
+                continue
+            key = f"{run['id']}:{job.get('name')}"
+            since_iso = _iso(since)
+            p = prev.get(key)
+            if (isinstance(p, dict) and _age(p.get('last'), now) <= STALL_GAP_S
+                    and p.get('step') == step and p.get('since') == since_iso):
+                passes = min(int(p.get('passes') or 1) + 1, STALL_PASSES)
+            else:
+                passes = 1
+            branch, sha = run.get('headBranch'), run.get('headSha')
+            item = _item_of_run(branch, None, items)
+            prio, label = priority(item, items, branch, product=product)
+            rec = {'run': run['id'], 'job': job.get('name'), 'step': step, 'since': since_iso,
+                   'last': _iso(now), 'passes': passes, 'branch': branch, 'sha': sha,
+                   'item': item, 'label': label, 'workflow': run.get('workflow')}
+            watch[key] = rec
+            kind = _stall_kind(product, run)
+            if passes == STALL_PASSES:
+                confirmed.append((key, rec, kind, prio))
+            else:
+                mins = int((now - since).total_seconds() // 60)
+                out(f'ci queue: stalled in-progress {kind} run {run["id"]} ({item}, {label}) — '
+                    f'its job {job.get("name")} has been inside step "{step}" for {mins} min '
+                    f'with no step completed since')
+    n = 0
+    for key, rec, kind, prio in sorted(confirmed, key=lambda c: c[1]['since']):
+        rid = rec['run']
+        mins = int(_age(rec['since'], now) // 60)
+        what = (f'{kind} run {rid} ({rec["item"]}, {rec["label"]}) — stalled on step silence: '
+                f'its job {rec["job"]} has been inside step "{rec["step"]}" for {mins} min with '
+                f'no step completed since; re-run once its branch reaches the head of the line')
+        if dry_run:
+            out(f'ci queue: would cancel in-progress {what}')
+            continue
+        if src._gh(['run', 'cancel', str(rid), '-R', product.repo_slug]) is None:
+            out(f'ci queue: cancel of stalled {kind} run {rid} refused — tried again next pass')
+            continue
+        out(f'ci queue: cancelled in-progress {what}')
+        relief = {'id': rid, 'kind': kind, 'item': rec['item'], 'prio': prio,
+                  'label': rec['label'], 'workflow': rec['workflow'], 'at': _iso(now),
+                  'branch': rec['branch'], 'sha': rec['sha'],
+                  'stall': STEP_SILENCE, 'stall_step': rec['step']}
+        if prio == RANKED:
+            relief['rank'] = record_rank(rec['item'], items)[0]
+        data['relief'].append(relief)
+        watch.pop(key, None)
+        n += 1
+    data['stalled'] = watch
+    if not dry_run:
+        save(product.name, data)
+    return n
 
 
 def line_order(entries):
@@ -2504,6 +2617,8 @@ def relieve_trunk(product, items=None, source=None, out=print, dry_run=False, no
     by_id = {str(r.get('databaseId')): r for r in pushes}
 
     def started(rec):
+        if rec.get('stall'):                # a stalled step: nothing protects it (§2.4)
+            return None, 'its stalled step'
         if rec.get('for') is None:          # cancelled for a trunk run: that run, not the newest
             tid = rec.get('trunk_id')
             own = by_id.get(str(tid)) if tid is not None else None
@@ -2955,7 +3070,9 @@ def acquire_pass_lock(product, wait_s=0):
 
 def queue_pass(product, items=None, source=None, out=print, dry_run=False, listing=None,
                now=None, wait_s=0):
-    """One pass of the queue under its lock: the duplicate pushes (never on the trunk),
+    """One pass of the queue under its lock: the duplicate pushes (never on the trunk), the
+    step-silence watch (a job hung inside a step is cancelled by its twelfth minute, D6 — before
+    the relief, so the runners it frees are runners the relief can hand to the starving trunk),
     the relief — its sweep, its re-runs through the line (the head guard among them) and its
     cancels. ``(cancelled, re-run)``; None when another pass holds the lock (the lane's pass
     and the queue's own job are the same pass: either one does it). Not a queued product:
@@ -2970,11 +3087,12 @@ def queue_pass(product, items=None, source=None, out=print, dry_run=False, listi
         src = source or GitHubSource(product)
         n = cancel_duplicate_pushes(product, source=src, out=out, dry_run=dry_run,
                                      listing=listing)
+        s = update_stalls(product, src, items=items, out=out, dry_run=dry_run, now=now)
         c, r = relieve_trunk(product, items=items, source=src, out=out, dry_run=dry_run,
                              now=now, listing=listing)
         start_admitted(product, items=items, source=src, out=out, dry_run=dry_run, now=now,
                        listing=listing)
-        return n + c, r
+        return n + s + c, r
     finally:
         lock.close()
 
