@@ -47,7 +47,8 @@ DIALOGUES = {
     'groom': (
         "Then read `<backlog_dir>/groom/<today UTC>.md` (`backlog_dir` is in "
         "`~/.ASF/products/<product>.yaml`; the product is `--product` if given, else `$ASF_PRODUCT`, "
-        "else `default_product` in `~/.ASF/config.yaml`) and show its open questions "
+        "else the product whose repo or record holds the working directory, else `default_product` "
+        "in `~/.ASF/config.yaml`) and show its open questions "
         "(`→ answer: ____`) as one table: item, question, your recommended answer with a one-line "
         "reason. Wait for the operator's answers (`yes` / `no` / `rank 2` / `parent E-nnnn` / `S1` / "
         "`duplicate of B-nnnn` / `all as recommended`); write each into that line's `answer:` slot, "
@@ -57,8 +58,9 @@ DIALOGUES = {
 }
 
 PREAMBLE = ("Print the output below **verbatim** in a fenced code block{stop}. The product is "
-            "`$ASF_PRODUCT`, else `default_product` in `~/.ASF/config.yaml`; arguments after the "
-            "command are passed through.")
+            "`--product` if you give one, else `$ASF_PRODUCT`, else the product whose repo or "
+            "record holds the working directory, else `default_product` in `~/.ASF/config.yaml`; "
+            "arguments after the command are passed through.")
 # ASF_TABLES=box: the output is captured through a pipe, yet read in a console (asf.tables).
 # `|| true`: a RED exit code is the table's verdict, not a failure — Claude Code refuses to show
 # the output of a `!` command that exits non-zero.

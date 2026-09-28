@@ -27,7 +27,7 @@ cp docs/products.example.yaml ~/.ASF/products/<product>.yaml   # once per produc
 
 | key | what to put there |
 | --- | --- |
-| `default_product` | the product `asf` targets when no `--product` and no `$ASF_PRODUCT` is given |
+| `default_product` | the product `asf` targets when no `--product`, no `$ASF_PRODUCT` and no product whose repo or record holds the working directory answers |
 | `scheduler.kind` | `launchd` (default; installed end to end) or `cron` (ASF prints the lines, you add them) |
 | `worker_pool.accounts` | one entry per worker account: `name`, `cap` (concurrent sessions), `config_dir`, and `home` — the session's `HOME`; without it a session inherits every CLI login you have (see [Safety](operating.md#safety-what-a-worker-session-can-reach)) |
 | `worker_pool.models` | the two model labels ASF uses, `heavy` and `light`, mapped to real model ids |
@@ -111,10 +111,12 @@ In the Claude Code session you run the product from:
 /plugin install asf@asf
 ```
 
-Start that session with `ASF_PRODUCT=<product>` in its environment. Every skill passes its
-arguments through, and chooses the product the way the CLI does: `--product` if you give one
-(`/asf:status --product other`), else `$ASF_PRODUCT`, else `default_product` in
-`~/.ASF/config.yaml`. The skills run `asf` from `PATH` (they add `~/.local/bin`).
+A session started in the product's repo or its record needs no `ASF_PRODUCT`; set it only for a
+session started outside both. Every skill passes its arguments through, and chooses the product
+the way the CLI does: `--product` if you give one (`/asf:status --product other`), else
+`$ASF_PRODUCT`, else the product whose repo or record holds the working directory, else
+`default_product` in `~/.ASF/config.yaml`. The skills run `asf` from `PATH` (they add
+`~/.local/bin`).
 
 ## 5. The first `asf doctor`
 

@@ -11,6 +11,8 @@ from unittest import mock
 from asf import cli, env
 from asf.views import readme
 
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 PAGE = ('# Title\n'
         '\n'
         'We ran <!--asf:n sessions-->1,204<!--/asf:n--> sessions.\n'
@@ -392,6 +394,31 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(rc2, 0)
         self.assertIn('unchanged', out2)
         self.assertNotIn('rewritten', out2)
+
+
+class ProductResolutionProseTests(unittest.TestCase):
+    """F-0110/T-0426: the README and the guide describe the four-step order (S-32605), not the
+    pre-#198 three steps — read from the checkout, not a fixture."""
+
+    def _read(self, path):
+        with open(os.path.join(REPO_ROOT, path), encoding='utf-8') as f:
+            return f.read()
+
+    def test_readme_names_the_working_directory_step(self):
+        text = self._read('README.md')
+        self.assertIn('working directory', text)
+        self.assertNotIn('with `ASF_PRODUCT=<product>` set', text)
+
+    def test_guide_names_the_working_directory_step(self):
+        text = self._read('docs/guide/getting-started.md')
+        self.assertIn('working directory', text)
+        self.assertNotIn('Start that session with `ASF_PRODUCT=<product>` in its environment.', text)
+
+    def test_guide_default_product_row_names_the_three_inputs_that_precede_it(self):
+        text = self._read('docs/guide/getting-started.md')
+        row = [l for l in text.splitlines() if l.startswith('| `default_product`')][0]
+        for needle in ('--product', '$ASF_PRODUCT', 'working directory'):
+            self.assertIn(needle, row)
 
 
 if __name__ == '__main__':

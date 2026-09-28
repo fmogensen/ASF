@@ -110,6 +110,22 @@ class PluginTests(unittest.TestCase):
                         'no SessionStart hook prints the console rules')
         self.assertEqual(plugin_build.diff(), [], 'run `asf plugin build`')
 
+    def test_preamble_and_groom_dialogue_name_the_four_step_order(self):
+        # F-0110/T-0426: #198 made the four-step order true (asf/env.py:459-474); both strings
+        # that state it in prose name the working-directory step, not just --product/$ASF_PRODUCT
+        for text in (plugin_build.PREAMBLE, plugin_build.DIALOGUES['groom']):
+            self.assertIn('--product', text)
+            self.assertIn('$ASF_PRODUCT', text)
+            self.assertIn('working directory', text)
+            self.assertIn('default_product', text)
+
+    def test_no_generated_skill_states_the_pre_198_three_step_order(self):
+        for path in SKILLS:
+            text = open(path, encoding='utf-8').read()
+            with self.subTest(skill=os.path.basename(os.path.dirname(path))):
+                if '$ASF_PRODUCT' in text:
+                    self.assertIn('working directory', text)
+
     def test_plugin_json(self):
         import json
         with open(os.path.join(REPO_ROOT, 'plugin', '.claude-plugin', 'plugin.json'),
