@@ -1024,6 +1024,62 @@ class EmptyEndsTests(unittest.TestCase):
         self.assertEqual(lc.derive(run, lc.Evidence(), path=self.path).name, lc.HELD)
 
 
+class BlockedParkTests(unittest.TestCase):
+    """F-0126 §5: a run that ended with nothing to land while its own report declared a
+    question for a person is parked, not handed to another session — until its card changes."""
+
+    def product(self):
+        return env.Product('sample', {'backlog_dir': '/nonexistent'})
+
+    def test_blocked_park_returns_the_six_correction_keys(self):
+        fields, line = lc.blocked_park('why is this stuck?', 'T-0001', 'deadbeef01234567', 't1')
+        corr = fields['correction']
+        self.assertEqual(set(corr), {'kind', 'text', 'at', 'parked', 'reason', 'card'})
+        self.assertEqual(corr['kind'], lc.BLOCKED)
+        self.assertEqual(corr['text'], 'why is this stuck?')
+        self.assertEqual(corr['at'], 't1')
+        self.assertIs(corr['parked'], True)
+        self.assertEqual(corr['card'], 'deadbeef01234567')
+        self.assertEqual(fields['operator_flagged'], 1)
+        self.assertEqual(line, f'parked T-0001: {corr["reason"]}')
+
+    def test_the_text_quotes_the_question_and_names_the_way_out(self):
+        fields, _ = lc.blocked_park('why is this stuck?', 'T-0001', 'card1', 't1')
+        reason = fields['correction']['reason']
+        self.assertIn('why is this stuck?', reason)
+        self.assertIn('asf unpark T-0001', reason)
+        self.assertIn('RESHAPE → PLAN', reason)
+
+    def test_card_fingerprint_is_stable_and_reacts_to_writes_and_after(self):
+        product = self.product()
+        card = {'id': 'T-0001', 'title': 'a task', 'writes': ['a.py'], 'after': 'none'}
+        items = {'T-0001': card}
+        first = lc.card_fingerprint(product, 'T-0001', items)
+        self.assertTrue(first)
+        self.assertEqual(lc.card_fingerprint(product, 'T-0001', items), first)
+        widened = {'T-0001': dict(card, writes=['a.py', 'b.py'])}
+        self.assertNotEqual(lc.card_fingerprint(product, 'T-0001', widened), first)
+        reordered = {'T-0001': dict(card, after='T-0000')}
+        self.assertNotEqual(lc.card_fingerprint(product, 'T-0001', reordered), first)
+
+    def test_card_fingerprint_ignores_state_evidence_stage_since_and_updated(self):
+        product = self.product()
+        card = {'id': 'T-0001', 'title': 'a task', 'writes': ['a.py'], 'state': 'New',
+                'evidence': ['x'], 'stage_since': 't0', 'updated': 't0'}
+        items = {'T-0001': card}
+        before = lc.card_fingerprint(product, 'T-0001', items)
+        moved = {'T-0001': dict(card, state='Active', evidence=['x', 'y'], stage_since='t1',
+                                updated='t1')}
+        self.assertEqual(lc.card_fingerprint(product, 'T-0001', moved), before)
+
+    def test_card_fingerprint_is_empty_for_none_items_or_no_id(self):
+        product = self.product()
+        items = {'T-0001': {'id': 'T-0001'}}
+        self.assertEqual(lc.card_fingerprint(product, 'T-0001', None), '')
+        self.assertEqual(lc.card_fingerprint(product, '', items), '')
+        self.assertEqual(lc.card_fingerprint(product, None, items), '')
+
+
 class SameHeadLoopGuard(unittest.TestCase):
     """A product, 2026-09-26: ``adjudicate-b-1377`` launched 14 times and ``correct-t-0338`` 12
     times, each on a head no session had moved. The same kind handed the same head

@@ -1876,6 +1876,10 @@ INCOMPLETE = 'incomplete'
 #: moved no Task forward — before the lead is parked (the operator's "pause after the 2nd
 #: failure"); a resume that commits one more Task is a new finding and resumes again
 INCOMPLETE_CAP = 2
+#: A run that ended with nothing to land while its own report declared a question for a person:
+#: relaunching it buys the same report again, so the item is parked until its card changes
+#: (F-0126) or `asf unpark` releases it.
+BLOCKED = 'blocked'
 
 
 def incomplete_park_text(n, missing, item):
@@ -1897,6 +1901,36 @@ def park_text(n):
     return (f'ended empty {n} times: nothing was written on any of them — the Task is parked. '
             f'Check whether its work is already on the trunk, then close it, reshape its plan, '
             f'or `asf unpark <item>` to let the wave try again')
+
+
+def card_fingerprint(product, item_id, items):
+    """A short digest of what ``item_id``'s card states — '' for a falsy ``item_id`` or a
+    ``None`` ``items`` (a tick that could not read the record clone parks and releases nothing,
+    rather than raising). It is the digest a brief is already cut from
+    (:func:`asf.briefs.build.card_digest`): ``## History``, the machine block, ``state``,
+    ``evidence``, ``stage_since`` and ``updated`` are outside it by ``DIGEST_FIELDS``' own rule,
+    and a park that lifted on those would be no park at all (D9)."""
+    if not item_id or items is None:
+        return ''
+    import importlib
+    digest = importlib.import_module('asf.briefs.build').card_digest
+    return digest(product, item_id, items)
+
+
+def blocked_park_text(question, item):
+    return (f'the session ended with nothing to land and declared: {question} — the item is '
+            f'parked, not handed to another session. Re-cut its card (a Task with no writes: '
+            f'is re-cut by its RESHAPE → PLAN session), or `asf unpark {item}` to release it')
+
+
+def blocked_park(question, item, card, now):
+    """``(fields, line)``: the pending correction that parks a run whose report declared a
+    question, and the line to print. A function of its own and not a branch of :func:`hold`,
+    because ``hold`` spends a round and counts findings and this spends neither."""
+    reason = blocked_park_text(question, item)
+    fields = {'correction': {'kind': BLOCKED, 'text': question, 'at': now, 'parked': True,
+                             'reason': reason, 'card': card}, 'operator_flagged': 1}
+    return fields, f'parked {item}: {reason}'
 
 
 #: Sessions of one kind handed the same head in a row before the item is parked (the loop guard).

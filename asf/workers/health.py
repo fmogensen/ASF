@@ -600,6 +600,12 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
             pool_mod.update_session(product, job, correction=None)
             s.pop('correction', None)
             found.append((job, 'released', f'{s.get("item")} is {closed}: no correction'))
+        corr = lifecycle.pending_correction(s, registry)
+        if corr and corr.get('kind') == lifecycle.BLOCKED and corr.get('card') and items is not None \
+                and corr['card'] != lifecycle.card_fingerprint(product, s.get('item'), items):
+            pool_mod.update_session(product, job, correction=None)
+            s.pop('correction', None)
+            found.append((job, 'released', f'{s.get("item")}: the card changed — the park lifts'))
         if s.get('ended'):
             landed_sha = lifecycle.empty_on_a_landed_lane(registry, s)
             if landed_sha:
@@ -655,6 +661,7 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
                                 runtime_session=runtime_mod.runtime_session(s.get('log')) or None)
         s.update(ended=now, end_reason=reason)
         found.append((job, 'ended', reason))
+        question = report_mod.needs_input(str((ev.result or {}).get('result') or ''))
         if lifecycle.quota_exhausted(s):
             # the account's window, not the work: its account stops until the reset, and the
             # item relaunches — no hold, no round (asf.workers.headroom)
@@ -668,6 +675,19 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
             fields, line = lifecycle.hook_refusal_hold(registry, s, text, now)
             pool_mod.update_session(product, job, **fields)
             found.append((job, 'held', line.split(': ', 1)[1]))
+        elif reason == f'failed: {lifecycle.EMPTY_BRANCH}' and lifecycle.landed_earlier(registry, s):
+            landed_sha = lifecycle.landed_earlier(registry, s)
+            pool_mod.update_session(product, job, harvested=landed_sha)
+            s.update(harvested=landed_sha)
+            found.append((job, 'landed', f'its branch landed at {landed_sha[:9]}: nothing to push'))
+        elif question and items is not None and (reason.startswith(UNPUSHED_REASON_PREFIXES)
+                                                  or reason == f'failed: {lifecycle.EMPTY_BRANCH}'):
+            # nothing to land, and the run's own report declared a question for a person:
+            # relaunching it buys the same report again, so the item is parked (F-0126)
+            fields, line = lifecycle.blocked_park(
+                question, s.get('item'), lifecycle.card_fingerprint(product, s.get('item'), items), now)
+            pool_mod.update_session(product, job, **fields)
+            found.append((job, 'parked', line))
         elif reason.startswith(UNPUSHED_REASON_PREFIXES):
             # the run's own work is the correction's input: the next session on the branch
             # commits and pushes it, or says why not (B-0051, B-0052)
@@ -685,11 +705,6 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
                                           main=product.main)
             pool_mod.update_session(product, job, **fields)
             found.append((job, 'held', line.split(': ', 1)[1]))
-        elif reason == f'failed: {lifecycle.EMPTY_BRANCH}' and lifecycle.landed_earlier(registry, s):
-            landed_sha = lifecycle.landed_earlier(registry, s)
-            pool_mod.update_session(product, job, harvested=landed_sha)
-            s.update(harvested=landed_sha)
-            found.append((job, 'landed', f'its branch landed at {landed_sha[:9]}: nothing to push'))
         elif reason == f'failed: {lifecycle.EMPTY_BRANCH}':
             # a pushed branch with nothing on it: the same loop, sent back to commit real work
             # or say why there is none (B-0076)
