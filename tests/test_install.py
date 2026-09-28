@@ -1457,7 +1457,7 @@ class GitHookTests(unittest.TestCase):
         with open(foreign, 'rb') as f:
             before = f.read()
         product = self._product(repo_dir=repo)
-        ok, detail = hooks.ensure_git_hooks(product, which=self.which)
+        ok, detail = hooks.ensure_git_hooks(product, which=self.which, chain=False)
         self.assertFalse(ok)
         self.assertTrue(detail.startswith('NEEDS OPERATOR: '), detail)
         self.assertIn(foreign, detail)
@@ -1465,6 +1465,25 @@ class GitHookTests(unittest.TestCase):
         with open(foreign, 'rb') as f:
             self.assertEqual(f.read(), before)
         # the pre-commit hook, which was not in the way, is still written
+        self.assertTrue(os.path.isfile(os.path.join(repo, '.git', 'hooks', 'pre-commit')))
+
+    def test_a_foreign_hook_is_chained_when_chain_is_true(self):
+        repo = self._repo('repo')
+        foreign = os.path.join(repo, '.git', 'hooks', 'pre-push')
+        with open(foreign, 'w') as f:
+            f.write('#!/bin/sh\necho not asf\n')
+        os.chmod(foreign, 0o700)   # a mode distinct from _write_hook's 0o755
+        with open(foreign, 'rb') as f:
+            before = f.read()
+        product = self._product(repo_dir=repo)
+        ok, detail = hooks.ensure_git_hooks(product, which=self.which, chain=True)
+        self.assertTrue(ok, detail)
+        local = foreign + '.local'
+        with open(local, 'rb') as f:
+            self.assertEqual(f.read(), before)
+        self.assertEqual(os.stat(local).st_mode & 0o777, 0o700)   # the original's own mode, kept
+        self.assertIn(f'chained {foreign} → {local}', detail)
+        # pre-commit, which was never in the way, is written exactly as before
         self.assertTrue(os.path.isfile(os.path.join(repo, '.git', 'hooks', 'pre-commit')))
 
     def test_an_asf_init_record_hook_is_asfs_own_and_a_new_product_starts_green(self):
