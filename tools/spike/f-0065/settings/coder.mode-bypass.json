@@ -1,0 +1,13 @@
+// tools/spike/f-0065/settings/coder.mode-bypass.json -- the fence on, nothing granted, under one permission mode (§3.5, D7)
+// every key here is real, read off the harness at code.claude.com/docs/en/settings-reference
+// (fetched 2026-09-28, this build has no --help flag naming sandbox settings -- P12);
+// collect.py --surface checks that none was guessed (§3.10). Path values are
+// ${REPO}/${STATE}/${HOME}/${TMPDIR} placeholders session.sh renders (PD4).
+{
+  "permissions": {
+    "defaultMode": "bypassPermissions"  // permissions.defaultMode (code.claude.com/docs/en/settings-reference (fetched 2026-09-28)); this leg's own value is the thing being measured (§3.5) -- "bypassPermissions" is a value read off the settings-reference's enum, not a guess
+  },
+  "sandbox": {  // sandbox: the settings-reference's top-level key for the Bash sandbox (code.claude.com/docs/en/settings-reference (fetched 2026-09-28))
+    "enabled": true  // sandbox.enabled: "Turn on Bash sandboxing on macOS, Linux, and WSL2" (code.claude.com/docs/en/settings-reference (fetched 2026-09-28))
+  }
+}

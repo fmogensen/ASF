@@ -1,0 +1,18 @@
+// tools/spike/f-0065/settings/coder.grant-7.json -- bare plus exactly one grant over bare -- registry (§2.5)
+// every key here is real, read off the harness at code.claude.com/docs/en/settings-reference
+// (fetched 2026-09-28, this build has no --help flag naming sandbox settings -- P12);
+// collect.py --surface checks that none was guessed (§3.10). Path values are
+// ${REPO}/${STATE}/${HOME}/${TMPDIR} placeholders session.sh renders (PD4).
+{
+  "permissions": {
+    "defaultMode": "bypassPermissions"  // permissions.defaultMode: "Set the permission mode new sessions start in" (code.claude.com/docs/en/settings-reference (fetched 2026-09-28)); this build's own launch-path default (asf/workers/runtime.py:27) until §3.5/Task 4 proves whether it keeps the fence
+  },
+  "sandbox": {  // sandbox: the settings-reference's top-level key for the Bash sandbox (code.claude.com/docs/en/settings-reference (fetched 2026-09-28))
+    "enabled": true,  // sandbox.enabled: "Turn on Bash sandboxing on macOS, Linux, and WSL2" (code.claude.com/docs/en/settings-reference (fetched 2026-09-28))
+    "network": {  // sandbox.network: the harness groups every network grant under this key (code.claude.com/docs/en/settings-reference (fetched 2026-09-28))
+      "allowedDomains": [  // sandbox.network.allowedDomains (code.claude.com/docs/en/settings-reference (fetched 2026-09-28)); P10's registry -- a VALUE placeholder, not a guessed KEY (D2/PD4/§3.10 only forbid the latter): Task 1 (fixture.sh) is this Task's wave-1 sibling and had not landed when this leg was written, so the fixture's package manager is not yet known. Task 5, which measures the coder's table, names it here.
+        "<the package registry -- named once Task 1 lands fixture.sh and picks a package manager>"
+      ]
+    }
+  }
+}
