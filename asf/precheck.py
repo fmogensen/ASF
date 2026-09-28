@@ -45,6 +45,16 @@ DIMENSIONS = {
     ),
 }
 
+#: The rows any diff touching a sensitive class owes, whatever the class.
+SECURITY_DIMENSIONS = (
+    'the diff adds no new trust in a value that comes from outside the process',
+    'nothing the diff adds weakens or removes an existing check, guard or hook',
+    'no secret value appears in the diff, a fixture, a test or a log line it adds',
+)
+#: The row one touched class owes. The class name is the product's; this sentence is not.
+CLASS_DIMENSION = ('{name}: every path the diff adds or changes here enforces what the code '
+                    'around it enforces, and the attack an outsider would try is named')
+
 #: A row's own ``head:`` line, the same one-line rule as ``asf.evidence.review.head_of``.
 _HEAD_LINE_RE = re.compile(r'^[\s*#>|_-]*head[\s*_]*:[\s*_`]*(?P<sha>[0-9a-f]{7,40})\b', re.I | re.M)
 #: A row's own ``level:`` line (PD7) — the peer of ``head:``.
@@ -54,8 +64,21 @@ _SEP_CELL_RE = re.compile(r'^[-:]+$')
 _LEADING_TOKEN_RE = re.compile(r'^\S+')
 
 
-def dimensions(level):
-    """The dimension list for ``level``, cumulative and in order — LOW's first. An unknown
+def class_dimension(name):
+    """:data:`CLASS_DIMENSION` for one class name."""
+    return CLASS_DIMENSION.format(name=name)
+
+
+def security_dimensions(hit):
+    """The dimensions a diff touching ``hit`` (``{class: [file]}``) owes: one per class, in the
+    order the configuration named them, then :data:`SECURITY_DIMENSIONS`. ``()`` for ``{}``."""
+    if not hit:
+        return ()
+    return tuple(class_dimension(name) for name in hit) + SECURITY_DIMENSIONS
+
+
+def dimensions(level, security=()):
+    """The level's cumulative list, then ``security`` — LOW's first, the classes last. An unknown
     level reads as HIGH's (D4's rule for an unknown class, read the same way); never empty."""
     if level not in LEVELS:
         level = HIGH
@@ -64,16 +87,22 @@ def dimensions(level):
         out.extend(DIMENSIONS[lvl])
         if lvl == level:
             break
+    out.extend(security)
     return tuple(out)
 
 
-def level_for(size_class, changed_lines, max_lines):
+def level_for(size_class, changed_lines, max_lines, security=False):
     """``(level, why)`` (D3/D4). ``max`` when ``changed_lines`` is known and over ``max_lines``;
     else ``low`` for :data:`asf.size.SMALL` and ``high`` for anything else, an unknown class
-    included. ``why`` is the sentence the row, the brief and the lane line all print."""
+    included — floored at :data:`HIGH` when ``security``, a sensitive diff never read at
+    :data:`LOW`, whatever its footprint says. ``why`` is the sentence the row, the brief and the
+    lane line all print; the floor names itself: ``size class small, floored by sensitive
+    paths``."""
     if changed_lines is not None and max_lines and changed_lines > max_lines:
         return MAX, f'{changed_lines} changed lines > {max_lines}'
     if size_class == size.SMALL:
+        if security:
+            return HIGH, f'size class {size.SMALL}, floored by sensitive paths'
         return LOW, f'size class {size.SMALL}'
     return HIGH, f'size class {size_class or "unknown"}'
 
@@ -155,11 +184,11 @@ def parse(text):
     return rows, faults
 
 
-def covered(rows, level):
-    """The dimensions of :func:`dimensions` ``(level)`` no row's normalized ``check`` matches,
-    in level order — the pass's own completeness."""
+def covered(rows, level, security=()):
+    """The dimensions of :func:`dimensions` ``(level, security)`` no row's normalized ``check``
+    matches, in level order — the pass's own completeness."""
     checks = {_norm(r.check) for r in rows}
-    return tuple(d for d in dimensions(level) if _norm(d) not in checks)
+    return tuple(d for d in dimensions(level, security) if _norm(d) not in checks)
 
 
 def findings(rows):
@@ -184,13 +213,14 @@ def keys(rows):
     return sorted(out)
 
 
-def faults(text, level):
+def faults(text, level, security=()):
     """The lines ``asf precheck`` prints: :func:`parse`'s own faults, then one
-    ``dimension not covered: "<name>"`` per uncovered dimension, then ``no head: line`` when
-    :func:`head_of` finds none, then ``no level: line`` when :func:`level_of` finds none (PD7)."""
+    ``dimension not covered: "<name>"`` per uncovered dimension (a class row included), then
+    ``no head: line`` when :func:`head_of` finds none, then ``no level: line`` when
+    :func:`level_of` finds none (PD7)."""
     rows, out = parse(text)
     out = list(out)
-    for name in covered(rows, level):
+    for name in covered(rows, level, security):
         out.append(f'dimension not covered: "{name}"')
     if head_of(text) is None:
         out.append('no head: line')
@@ -199,13 +229,14 @@ def faults(text, level):
     return out
 
 
-def render_table(level):
+def render_table(level, security=()):
     """The skeleton the brief carries: the header, the separator, and one row per dimension of
-    ``level``, so :func:`parse` finds one row per dimension and exactly two *unfilled* faults
-    per row."""
+    ``level`` then ``security``, so :func:`parse` finds one row per dimension and exactly two
+    *unfilled* faults per row."""
     header = '| ' + ' | '.join(HEADER) + ' |'
     sep = '| ' + ' | '.join('---' for _ in HEADER) + ' |'
-    rows = [f'| {dim} | <pass\\|fail> | <n/a\\|high\\|medium\\|low> | ' for dim in dimensions(level)]
+    rows = [f'| {dim} | <pass\\|fail> | <n/a\\|high\\|medium\\|low> | '
+            for dim in dimensions(level, security)]
     return '\n'.join([header, sep, *rows])
 
 
