@@ -1151,6 +1151,85 @@ class NoCoderBeforeTheSpecLands(unittest.TestCase):
         self.assertEqual(ingest._spec_home(meta, fev, ev, None), (False, ''))
 
 
+class APlanReachedOnlyByItsLink(unittest.TestCase):
+    """D6/§3: a migrated Feature's `links.plan` names a plan the lane's own discovery never
+    found — a pre-ASF plan carried on a pre-lane branch. `_plan_home` looks for it on the trunk
+    and on every remote branch, exactly as `_spec_home` already does for the spec."""
+
+    def meta(self, link='docs/plans/f-0xxx.md'):
+        return {'id': 'F-0001', 'type': 'feature', 'links': ({'plan': link} if link else {})}
+
+    def fev(self, **kw):
+        out = {'alias': None, 'plan': None, 'plan_branch': None, 'plan_on_main': False,
+               'plan_review': None}
+        out.update(kw)
+        return out
+
+    def resolving(self, found_prefix):
+        return lambda refs, product=None: {
+            r: ('abc' if r.startswith(found_prefix) else None) for r in refs}
+
+    def test_found_only_on_a_pre_lane_branch(self):
+        product = types.SimpleNamespace(main='main')
+        ev = dict(EMPTY_EV, branches=['main', 'old/plan'])
+        with mock.patch.object(ingest.evidence, 'resolve',
+                               side_effect=self.resolving('origin/old/plan:')):
+            self.assertEqual(
+                ingest._plan_home(self.meta(), self.fev(), ev, product), (False, 'old/plan'))
+
+    def test_the_same_link_found_on_the_trunk(self):
+        product = types.SimpleNamespace(main='main')
+        ev = dict(EMPTY_EV, branches=['main', 'old/plan'])
+        with mock.patch.object(ingest.evidence, 'resolve',
+                               side_effect=self.resolving('origin/main:')):
+            self.assertEqual(
+                ingest._plan_home(self.meta(), self.fev(), ev, product), (True, ''))
+
+    def test_a_link_on_two_branches_takes_doc_carriers_first(self):
+        product = types.SimpleNamespace(main='main')
+        ev = dict(EMPTY_EV, branches=['main', 'zzz/plan', 'aaa/plan'])
+        with mock.patch.object(
+                ingest.evidence, 'resolve',
+                side_effect=lambda refs, product=None: {
+                    r: ('abc' if r.startswith(('origin/zzz/plan:', 'origin/aaa/plan:')) else None)
+                    for r in refs}):
+            self.assertEqual(
+                ingest._plan_home(self.meta(), self.fev(), ev, product), (False, 'aaa/plan'))
+
+    def test_a_feature_the_lane_discovered_never_reaches_the_link_lookup(self):
+        product = types.SimpleNamespace(main='main')
+        ev = dict(EMPTY_EV, branches=['main', 'old/plan'])
+        with mock.patch.object(ingest.evidence, 'resolve') as resolve:
+            self.assertEqual(
+                ingest._plan_home(self.meta(), self.fev(plan_on_main=True), ev, product),
+                (True, ''))
+            self.assertEqual(
+                ingest._plan_home(self.meta(), self.fev(plan_branch='plan/F-0001'), ev, product),
+                (False, 'plan/F-0001'))
+        resolve.assert_not_called()
+
+    def test_no_link_and_no_discovery_returns_nothing(self):
+        product = types.SimpleNamespace(main='main')
+        ev = dict(EMPTY_EV, branches=['main'])
+        self.assertEqual(
+            ingest._plan_home(self.meta(link=None), self.fev(), ev, product), (False, ''))
+
+    def test_a_trunk_that_is_not_main_renders_through_its_own_name(self):
+        product = types.SimpleNamespace(main='release')
+        ev = dict(EMPTY_EV, branches=['release'])
+        with mock.patch.object(ingest.evidence, 'resolve',
+                               side_effect=self.resolving('origin/release:')):
+            self.assertEqual(
+                ingest._plan_home(self.meta(), self.fev(), ev, product), (True, ''))
+
+    def test_product_none_returns_without_touching_git(self):
+        ev = dict(EMPTY_EV, branches=['main', 'old/plan'])
+        with mock.patch.object(ingest.evidence, 'resolve') as resolve:
+            self.assertEqual(
+                ingest._plan_home(self.meta(), self.fev(), ev, None), (False, ''))
+        resolve.assert_not_called()
+
+
 TS_RE = re.compile(r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$')
 
 

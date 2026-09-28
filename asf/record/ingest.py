@@ -504,6 +504,25 @@ def _spec_home(meta, fev, ev, product):
     return on_trunk, ('' if on_trunk else (carriers[0] if carriers else ''))
 
 
+def _plan_home(meta, fev, ev, product):
+    """``(on_trunk, carrier_branch)`` for a matched Feature's plan. The lane's discovery answers
+    first: on the trunk, or on its plan branch. A typed ``links.plan`` the lane never saw —
+    a migrated card's plan on a pre-lane branch with no PR — is looked for on the trunk and on
+    every remote branch, so a plan reached only by its link counts where it really is."""
+    if fev.get('plan_on_main'):
+        return True, ''
+    rev = (fev.get('plan') or '').split(':', 1)[0] if ':' in (fev.get('plan') or '') else ''
+    carrier = fev.get('plan_branch') or (rev[len('origin/'):] if rev.startswith('origin/') else '')
+    if carrier:
+        return False, carrier
+    typed, _machine = frontmatter.split_machine(meta)
+    link = (typed.get('links') or {}).get('plan')
+    if not link or product is None:
+        return False, ''
+    on_trunk, carriers = evidence.doc_carriers(_path_only(link), ev.get('branches') or (), product)
+    return on_trunk, ('' if on_trunk else (carriers[0] if carriers else ''))
+
+
 @dataclasses.dataclass
 class _Derived:
     """What descent needs to know about an item after its own rule spoke."""
@@ -823,7 +842,8 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
         # "spec-draft" sent the feeder back to write the same spec again
         spec_on_main, spec_carrier = _spec_home(rec['meta'], fev, ev, product)
         spec_approved = bool(spec_review and spec_review[1] == 'APPROVED') or spec_on_main
-        plan_approved = bool(plan_review and plan_review[1] == 'APPROVED') or bool(fev.get('plan_on_main'))
+        plan_on_main, plan_branch = _plan_home(rec['meta'], fev, ev, product)
+        plan_approved = bool(plan_review and plan_review[1] == 'APPROVED') or plan_on_main
         ev_obj = closing.Ev(children=tuple(child_states), commit=commit, green=green, in_prod=in_prod,
                             spec_on_main=spec_on_main, plan_approved=plan_approved)
         if not child_ids and commit:
@@ -845,11 +865,11 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
             elif spec_carrier:
                 r = f" (review r{spec_review[0]} {spec_review[1]})" if spec_review else ''
                 lines.append(f"spec on {spec_carrier}{r}")
-            if fev.get('plan_on_main'):
+            if plan_on_main:
                 lines.append(plan_on_trunk(product))
-            elif fev.get('plan_branch'):
+            elif plan_branch:
                 r = f" (review r{plan_review[0]} {plan_review[1]})" if plan_review else ''
-                lines.append(f"plan on {fev['plan_branch']}{r}")
+                lines.append(f"plan on {plan_branch}{r}")
             if child_ids:
                 lines.append(f"{sum(1 for s in child_states if s == 'Closed')}/{len(child_ids)} tasks Closed")
             lines = lines or [f"no evidence found ({date})"]
