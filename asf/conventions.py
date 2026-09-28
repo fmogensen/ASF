@@ -65,6 +65,10 @@ The product yaml carries the overrides::
         asf-coder:         # a TABLE row's effort and permission_mode only — widening tools,
           effort: medium   # writes or connections is an operator action (asf/amendable.py:53),
                            # not a product setting (F-0062 §2.1)
+      sequences:                              # `asf reserve <name>` (B-0151): one run of N's is
+        migrations: db/migrations/NNNN_*.sql  # the zero-padded number field in the path
+        bands: docs/decisions/NNNN-*.md       # a directory sequence too — one number per file,
+                                               # never one file holding every band (unsupported)
 
 Unknown keys are kept (in :attr:`Conventions.extra`) rather than rejected: a product yaml is
 written by an operator and may carry conventions a module older than it does not read yet, and
@@ -259,7 +263,7 @@ LANE_KEYS = {'review': 'lane_review', 'stale_after': 'lane_stale_after'}
 #: fails loud: :meth:`Conventions.shape_findings` names it, and the doctor's ``conventions`` row
 #: is red with the key and the line.
 MAP_CONVENTIONS = ('models', 'branch_prefixes', 'harvest', 'git', 'branch_retention', 'commit',
-                   'budget', 'merge_queue', 'roles')
+                   'budget', 'merge_queue', 'roles', 'sequences')
 #: ``commit.signoff_check``'s default: a PR check whose name contains it is the sign-off check.
 DEFAULT_SIGNOFF_CHECK = 'DCO'
 #: The conventions that take one word or a map of those words per landing class (``default:``
@@ -323,6 +327,16 @@ DEFAULT_BUDGET = {'sessions': 3, 'usd': 10, 'run_minutes': 180, 'run_turns': 600
 #: ``permission_mode`` only (F-0062 §2.1, :func:`asf.roles.launch.launch_for`). Empty by default
 #: — a role a product does not name launches exactly as :data:`asf.roles.launch.TABLE` has it.
 DEFAULT_ROLES = {}
+
+#: ``conventions.sequences``: a product's numbered file sequences (a migration, a decision band)
+#: whose next number `asf reserve <name>` claims (B-0151, :mod:`asf.reserve`) — a directory path
+#: with one run of ``N``s standing in for the zero-padded number each file in it carries, e.g.
+#: ``{migrations: 'db/migrations/NNNN_*.sql', bands: 'docs/decisions/NNNN-*.md'}``. Only that one
+#: shape (one file, one number) is a sequence; numbers recorded as rows inside a single shared
+#: file are not (:func:`asf.reserve.pattern_regex` raises `ValueError` on a pattern with no
+#: ``N`` run — the same error a plain, unnumbered filename like ``bands.md`` would raise). Empty
+#: by default — a product names none, `asf reserve` refuses any name.
+DEFAULT_SEQUENCES = {}
 
 
 def _normalise_prefix(value):
@@ -568,6 +582,10 @@ class Conventions:
     #: :func:`asf.roles.launch.launch_for`. ``'roles'`` is in :data:`MAP_CONVENTIONS`, so a
     #: misshapen block is a red doctor row, never a silent default.
     roles: dict = field(default_factory=lambda: dict(DEFAULT_ROLES))
+    #: ``sequences``: a product's numbered file sequences, name -> ``NNNN``-shaped path
+    #: (:data:`DEFAULT_SEQUENCES`, :mod:`asf.reserve`). ``'sequences'`` is in
+    #: :data:`MAP_CONVENTIONS`, so a misshapen block is a red doctor row, never a silent default.
+    sequences: dict = field(default_factory=lambda: dict(DEFAULT_SEQUENCES))
     #: Globs (F-0031 §2.1) whose match makes a landed branch's merge class
     #: `merge_amendable_set` rather than `merge_routine_pr` — the factory's own rules. Three
     #: states (F-0024): unset (``None``) is the defaults in `asf/amendable.py`, a list is that
