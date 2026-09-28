@@ -1,0 +1,18 @@
+// tools/spike/f-0065/settings/coder.grant-6.json -- bare plus exactly one grant over bare -- tmp (§2.5)
+// every key here is real, read off the harness at code.claude.com/docs/en/settings-reference
+// (fetched 2026-09-28, this build has no --help flag naming sandbox settings -- P12);
+// collect.py --surface checks that none was guessed (§3.10). Path values are
+// ${REPO}/${STATE}/${HOME}/${TMPDIR} placeholders session.sh renders (PD4).
+{
+  "permissions": {
+    "defaultMode": "bypassPermissions"  // permissions.defaultMode: "Set the permission mode new sessions start in" (code.claude.com/docs/en/settings-reference (fetched 2026-09-28)); this build's own launch-path default (asf/workers/runtime.py:27) until §3.5/Task 4 proves whether it keeps the fence
+  },
+  "sandbox": {  // sandbox: the settings-reference's top-level key for the Bash sandbox (code.claude.com/docs/en/settings-reference (fetched 2026-09-28))
+    "enabled": true,  // sandbox.enabled: "Turn on Bash sandboxing on macOS, Linux, and WSL2" (code.claude.com/docs/en/settings-reference (fetched 2026-09-28))
+    "filesystem": {  // sandbox.filesystem: the harness groups every filesystem grant under this key (code.claude.com/docs/en/settings-reference (fetched 2026-09-28))
+      "allowWrite": [  // sandbox.filesystem.allowWrite (code.claude.com/docs/en/settings-reference (fetched 2026-09-28)); P09's fixture writes under TMPDIR -- the same docs page says $TMPDIR is already a default write target, so this leg is what tells Task 5 whether the default already covers it (then this grant reads 'not needed')
+        "${TMPDIR}"
+      ]
+    }
+  }
+}

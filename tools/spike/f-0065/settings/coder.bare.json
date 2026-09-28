@@ -1,0 +1,13 @@
+// tools/spike/f-0065/settings/coder.bare.json -- the fence on, nothing granted (§2.2)
+// every key here is real, read off the harness at code.claude.com/docs/en/settings-reference
+// (fetched 2026-09-28, this build has no --help flag naming sandbox settings -- P12);
+// collect.py --surface checks that none was guessed (§3.10). Path values are
+// ${REPO}/${STATE}/${HOME}/${TMPDIR} placeholders session.sh renders (PD4).
+{
+  "permissions": {
+    "defaultMode": "bypassPermissions"  // permissions.defaultMode: "Set the permission mode new sessions start in" (code.claude.com/docs/en/settings-reference (fetched 2026-09-28)); this build's own launch-path default (asf/workers/runtime.py:27) until §3.5/Task 4 proves whether it keeps the fence
+  },
+  "sandbox": {  // sandbox: the settings-reference's top-level key for the Bash sandbox (code.claude.com/docs/en/settings-reference (fetched 2026-09-28))
+    "enabled": true  // sandbox.enabled: "Turn on Bash sandboxing on macOS, Linux, and WSL2" (code.claude.com/docs/en/settings-reference (fetched 2026-09-28))
+  }
+}
