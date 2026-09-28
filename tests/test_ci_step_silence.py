@@ -9,7 +9,7 @@ import unittest
 
 from asf import ci_queue, env
 from asf.workers import stall
-from tests.test_ci_phantom import HEAVY, Host, job, product
+from tests.test_ci_phantom import Base, HEAVY, ITEMS, Host, T0, at, job, product
 
 
 def _t(minutes_ago, now):
@@ -181,6 +181,149 @@ class SeamTests(unittest.TestCase):
         jobs = ci_queue.GitHubSource(p, run=host).live_jobs(900)
         gate_tests = next(j for j in jobs if j['name'] == 'gate-tests')
         self.assertNotIn('steps', gate_tests)
+
+
+class TwelveMinutesTests(Base):
+    """A job hung inside a step is cancelled within twelve minutes, and a moving one never is —
+    driven a pass a minute from the step's start (``QUEUE_EVERY_S``), over a fake host carrying
+    only the run under test (so a fixture job's own, unrelated, long-stale ``steps`` never
+    joins the watch)."""
+
+    def _host(self, start_min, run_id=200, branch='task/T-0341', run_status='in_progress',
+              path='.github/workflows/pr.yml', step_name='unit tests'):
+        host = Host()
+        host.runs = {run_id: {'id': run_id, 'status': run_status, 'event': 'pull_request',
+                              'head_branch': branch, 'head_sha': 'd' * 40,
+                              'created_at': at(start_min - 1), 'path': path}}
+        host.jobs = {run_id: [job('gate', 'in_progress', HEAVY, 'h1', start_min, start_min,
+                                  steps=[{'name': step_name, 'status': 'in_progress',
+                                          'started_at': at(start_min), 'completed_at': None}])]}
+        return host
+
+    def stall(self, p, host, minutes, dry_run=False):
+        return ci_queue.update_stalls(p, ci_queue.GitHubSource(p, run=host), items=ITEMS,
+                                      out=self.lines.append, dry_run=dry_run,
+                                      now=T0 + datetime.timedelta(minutes=minutes))
+
+    def test_a_job_hung_inside_a_step_is_cancelled_by_the_twelfth_minute(self):
+        p, host = product(), self._host(-11)
+        self.stall(p, host, 0)
+        self.assertEqual(host.cancels(), [])
+        self.assertEqual(self.stall(p, host, 1), 1)
+        self.assertEqual(host.cancels(), ['200'])
+        self.assertTrue(any('cancelled in-progress pr run 200' in l and 'gate' in l
+                            and '"unit tests"' in l for l in self.lines), self.lines)
+
+    def test_nothing_is_cancelled_before_the_threshold(self):
+        p, host = product(), self._host(-9)
+        self.stall(p, host, 0)
+        self.assertEqual(host.cancels(), [])
+
+    def test_one_pass_only_records_and_does_not_cancel(self):
+        p, host = product(), self._host(-11)
+        self.stall(p, host, 0)
+        rec = ci_queue.load(p.name)['stalled']['200:gate']
+        self.assertEqual(rec['passes'], 1)
+        self.assertEqual(host.cancels(), [])
+
+    def test_a_job_that_starts_a_new_step_leaves_the_watch(self):
+        p, host = product(), self._host(-11)
+        self.stall(p, host, 0)
+        self.assertIn('200:gate', ci_queue.load(p.name)['stalled'])
+        host.jobs[200][0]['steps'] = [{'name': 'deploy', 'status': 'in_progress',
+                                       'started_at': at(0), 'completed_at': None}]
+        self.stall(p, host, 1)
+        self.assertEqual(ci_queue.load(p.name)['stalled'], {})
+        self.assertEqual(host.cancels(), [])
+
+    def test_a_dry_run_mode_prints_would_cancel_and_writes_nothing(self):
+        p, host = product(), self._host(-11)
+        self.stall(p, host, 0)
+        path = os.path.join(env.state_dir(p.name), ci_queue.QUEUE_FILE)
+        with open(path, encoding='utf-8') as f:
+            before = f.read()
+        self.stall(p, host, 1, dry_run=True)
+        self.assertTrue(any('would cancel in-progress pr run 200' in l for l in self.lines),
+                        self.lines)
+        self.assertEqual(host.cancels(), [])
+        with open(path, encoding='utf-8') as f:
+            after = f.read()
+        self.assertEqual(before, after)
+
+    def test_mode_off_makes_no_host_call(self):
+        p, host = product(), self._host(-11)
+        p.ci['queue']['mode'] = 'off'
+        self.assertEqual(self.stall(p, host, 1), 0)
+        self.assertEqual(host.calls, [])
+        p.ci['queue']['mode'] = 'on'
+        p.ci['queue']['step_silence_min'] = 'off'
+        self.assertEqual(self.stall(p, host, 1), 0)
+        self.assertEqual(host.calls, [])
+
+    def test_an_unreadable_listing_neither_cancels_nor_forgets(self):
+        p, host = product(), self._host(-11)
+        self.stall(p, host, 0)
+        before = ci_queue.load(p.name)['stalled']['200:gate']
+
+        class _Flaky:
+            def live_runs(self):
+                raise RuntimeError('boom')
+
+        n = ci_queue.update_stalls(p, _Flaky(), items=ITEMS, out=self.lines.append,
+                                   now=T0 + datetime.timedelta(minutes=1))
+        self.assertEqual(n, 0)
+        self.assertEqual(ci_queue.load(p.name)['stalled']['200:gate'], before)
+
+    def test_a_refused_cancel_keeps_the_record_and_says_so(self):
+        p, host = product(), self._host(-11)
+
+        class _RefuseCancel(ci_queue.GitHubSource):
+            def _gh(self, args):
+                if args[:2] == ['run', 'cancel']:
+                    return None
+                return super()._gh(args)
+
+        src = _RefuseCancel(p, run=host)
+        ci_queue.update_stalls(p, src, items=ITEMS, out=self.lines.append, now=T0)
+        n = ci_queue.update_stalls(p, src, items=ITEMS, out=self.lines.append,
+                                   now=T0 + datetime.timedelta(minutes=1))
+        self.assertEqual(n, 0)
+        self.assertTrue(any('cancel of stalled pr run 200 refused' in l for l in self.lines),
+                        self.lines)
+        rec = ci_queue.load(p.name)['stalled']['200:gate']
+        self.assertEqual(rec['passes'], ci_queue.STALL_PASSES)
+
+    def test_the_trunk_run_is_cancelled_too_and_a_ci_config_pr_is_not_exempt(self):
+        p, host = product(), self._host(-11, branch='main', path='.github/workflows/ci.yml')
+        self.stall(p, host, 0)
+        self.assertEqual(self.stall(p, host, 1), 1)
+        self.assertEqual(host.cancels(), ['200'])
+        self.assertTrue(any('cancelled in-progress trunk run 200' in l for l in self.lines),
+                        self.lines)
+
+    def test_the_watch_runs_before_the_relief_in_the_pass(self):
+        p, host = product(), Host(trunk_queued_min=5)
+        for jobs in host.jobs.values():
+            for j in jobs:
+                j.pop('steps', None)
+        host.runs[200] = {'id': 200, 'status': 'in_progress', 'event': 'pull_request',
+                          'head_branch': 'task/T-0341', 'head_sha': 'd' * 40,
+                          'created_at': at(-12), 'path': '.github/workflows/pr.yml'}
+        host.jobs[200] = [job('gate2', 'in_progress', HEAVY, 'x1', -11, -11, steps=[
+            {'name': 'unit tests', 'status': 'in_progress', 'started_at': at(-11),
+             'completed_at': None}])]
+
+        def pass_(minutes):
+            return ci_queue.queue_pass(p, items=ITEMS, source=ci_queue.GitHubSource(p, run=host),
+                                       out=self.lines.append,
+                                       now=T0 + datetime.timedelta(minutes=minutes))
+
+        pass_(0)
+        pass_(1)
+        cancels = host.cancels()
+        self.assertIn('200', cancels)
+        self.assertIn('110', cancels)
+        self.assertLess(cancels.index('200'), cancels.index('110'))
 
 
 if __name__ == '__main__':
