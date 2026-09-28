@@ -2,6 +2,17 @@
 
 One entry per released version, newest first.
 
+## v0.1.56 — 2026-09-28
+
+### In progress
+
+- F-0062 The launch path: skills as procedures, role agents with restricted tools, per-job caps, deny rules
+- F-0067 Clean floor, re-scoped: the sweep, the registry and the tool repository
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.56"`
+
 ## v0.1.55 — 2026-09-28
 
 ### Bugs fixed
