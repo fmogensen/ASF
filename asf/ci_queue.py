@@ -312,6 +312,9 @@ PHANTOM_PASSES = 2
 PHANTOM_GAP_S = 10 * 60
 #: a phantom this old turns the doctor's ``ci runners`` row red
 PHANTOM_RED_S = 10 * 60
+#: a job whose newest started step is this old with no step completed since is stalled
+DEFAULT_STEP_SILENCE_MIN = 10
+MOVING, STEP_SILENCE, BUDGET, UNKNOWN = 'moving', 'step-silence', 'budget', 'unknown'
 
 
 def _now():
@@ -343,6 +346,73 @@ def _parse(stamp):
 def _age(stamp, now):
     t = _parse(stamp)
     return (now - t).total_seconds() if t else float('inf')
+
+
+# ---- the step-silence judge ---------------------------------------------------------------------
+
+def step_silence(job, now, limit_s):
+    """``(class, step name, since)`` for one in-progress job (the card's rule):
+
+    the newest of its steps carrying a ``started_at`` is the step it is inside; when that start
+    is more than ``limit_s`` old and no step of the job completed at or after it, the job is
+    :data:`STEP_SILENCE`, named by that step. Under the limit — or with a step completed since —
+    it is :data:`MOVING`. A job with no step carrying a start is :data:`UNKNOWN` and nothing is
+    claimed about it (a provider that publishes no steps, a job the listing caught before its
+    first step, a step whose stamp will not parse).
+    """
+    steps = job.get('steps') if isinstance(job, dict) else None
+    if not isinstance(steps, list) or not steps:
+        return UNKNOWN, None, None
+    newest_name, newest_start, newest_i = None, None, -1
+    for i, step in enumerate(steps):
+        start = _parse(step.get('started_at')) if isinstance(step, dict) else None
+        if start is None:
+            continue
+        if newest_start is None or start > newest_start or \
+                (start == newest_start and i > newest_i):
+            newest_name, newest_start, newest_i = step.get('name'), start, i
+    if newest_start is None:
+        return UNKNOWN, None, None
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        done = _parse(step.get('completed_at'))
+        if done is not None and done >= newest_start:
+            return MOVING, newest_name, newest_start
+    if (now - newest_start).total_seconds() <= limit_s:
+        return MOVING, newest_name, newest_start
+    return STEP_SILENCE, newest_name, newest_start
+
+
+_STEP_SILENCE_OFF = frozenset({'off', 'none', 'false'})
+_MINUTES_UNITS = {'s': 1 / 60, 'm': 1, '': 1, 'h': 60, 'd': 1440}
+_MINUTES_RE = re.compile(r'^\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*$')
+
+
+def _minutes(v, default):
+    """The duration grammar at this module's level (D11, P17): a bool is the default, an int or
+    float is minutes, a string matching ``\\d+(.\\d+)?[smhd]?`` scales by
+    :data:`_MINUTES_UNITS`, anything else is the default. The same table as
+    :func:`asf.workers.stall.silent_minutes`, which this module may not import."""
+    if isinstance(v, bool):
+        return default
+    if isinstance(v, (int, float)):
+        return v
+    m = _MINUTES_RE.match(str(v)) if isinstance(v, str) else None
+    if not m:
+        return default
+    return float(m.group(1)) * _MINUTES_UNITS[m.group(2)]
+
+
+def step_silence_seconds(product):
+    """``ci.queue.step_silence_min`` as seconds: an int is minutes, ``10m``/``1h``/``30s`` parse,
+    default :data:`DEFAULT_STEP_SILENCE_MIN`. ``0``, ``off``, ``none`` or ``false`` → 0, the
+    watch off."""
+    v = _qcfg(product).get('step_silence_min')
+    if v is False or (isinstance(v, str) and v.strip().lower() in _STEP_SILENCE_OFF):
+        return 0
+    minutes = _minutes(v, DEFAULT_STEP_SILENCE_MIN)
+    return max(minutes, 0) * 60
 
 
 # ---- configuration ----------------------------------------------------------------------------
