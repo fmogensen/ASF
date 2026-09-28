@@ -281,6 +281,25 @@ def controls_ok(probes):
     return bool(probes) and all(probes.get(pid, (None,))[0] == 'refused' for pid in CONTROL_PROBES)
 
 
+def _control_violation(role, variant):
+    """``None`` when this leg's own log is fine to build a table from; otherwise the reason,
+    naming the leg the same way ``--require-control`` does (D4, §2.3). ``off`` is the no-fence
+    control column, exempt by name (§2.2); a leg with no log yet reads `unpaired` — the pair
+    discipline's own "work left" state — not a fence the harness silently ignored (P11), so it
+    is not a violation here either."""
+    if variant == 'off':
+        return None
+    probes = probes_from_log(role, variant)
+    if probes is None or controls_ok(probes):
+        return None
+    bad = [pid for pid in CONTROL_PROBES if probes.get(pid, (None,))[0] != 'refused']
+    reasons = ', '.join(f'{pid}={probes.get(pid, ("unpaired",))[0]}' for pid in bad)
+    return (
+        f'{role}.{variant}: control probe(s) not refused ({reasons}) — the settings file '
+        'was ignored (P11); no table from this leg'
+    )
+
+
 def cmd_require_control(args):
     role = args.role
     legs = [args.leg] if args.leg else ['bare']
@@ -309,6 +328,11 @@ def cmd_pair(args):
     leg_a, leg_b = args.pair
     role_a, variant_a = leg_a.split('.', 1)
     role_b, variant_b = leg_b.split('.', 1)
+    for role, variant in ((role_a, variant_a), (role_b, variant_b)):
+        violation = _control_violation(role, variant)
+        if violation:
+            print(violation, file=sys.stderr)
+            return 1
     probes_a = probes_from_log(role_a, variant_a) or {}
     probes_b = probes_from_log(role_b, variant_b) or {}
     log_a_missing = read_log(role_a, variant_a) is None
@@ -368,8 +392,18 @@ def _markdown_table(role):
 
 def cmd_markdown(args):
     roles = ['coder', 'reviewer', 'prober'] if args.all else [args.role]
-    print('\n\n'.join(_markdown_table(r) for r in roles))
-    return 0
+    tables = []
+    rc = 0
+    for role in roles:
+        violation = _control_violation(role, 'bare')
+        if violation:
+            print(violation, file=sys.stderr)
+            rc = 1
+            continue
+        tables.append(_markdown_table(role))
+    if tables:
+        print('\n\n'.join(tables))
+    return rc
 
 
 def cmd_unpaired(args):
