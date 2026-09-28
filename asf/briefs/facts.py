@@ -333,13 +333,16 @@ def predecessor(product, item_id, branch, kind):
 
 
 def repo_facts(product, row, index, inflight=None):
-    """The six keys of :data:`asf.briefs.preamble.REPO_FACT_KEYS`, always all six."""
+    """The nine keys of :data:`asf.briefs.preamble.REPO_FACT_KEYS`, always all nine."""
     facts = {'head': '', 'branch_exists': False, 'files': {}, 'tests': [], 'last_report': '',
-             'outlines': {}}
+             'outlines': {}, 'commits': {'total': 0, 'lines': []}, 'progress': '', 'relaunch': {}}
     plain = preamble.collect(product, row, index, inflight)
+    item_id = getattr(row, 'item_id', '') or ''
+    main = getattr(product, 'main', 'main')
     repo = getattr(product, 'repo_dir', None)
+    rev, tree = '', []
     if repo and os.path.isdir(repo):
-        head, exists, rev = head_of(repo, plain['branch'], getattr(product, 'main', 'main'))
+        head, exists, rev = head_of(repo, plain['branch'], main)
         facts['head'], facts['branch_exists'] = head, exists
         if rev:
             tree = _git_text(repo, ['ls-tree', '-r', '--name-only', rev]).splitlines()
@@ -348,9 +351,24 @@ def repo_facts(product, row, index, inflight=None):
                                            product=product)
             facts['files'] = line_counts(repo, rev, wanted)
             facts['outlines'] = outlines_of(repo, rev, tree, plain['writes'])
+            facts['commits'] = commits_on(repo, rev, main)
+    relaunch = predecessor(product, item_id, plain['branch'], getattr(row, 'kind', ''))
+    facts['relaunch'] = relaunch
+    review = None
+    if relaunch:
+        try:
+            runs = lifecycle.item_runs(pool.sessions_path(product), item_id)
+        except (OSError, ValueError):
+            runs = []
+        run = next((r for r in runs if r.get('job') == relaunch.get('job')
+                   and r.get('ended') == relaunch.get('ended')), None)
+        if run:
+            facts['progress'] = last_progress(run.get('log'))
+        if repo and rev:
+            review = branch_review(repo, rev, tree, product, (item_id or 'item').lower(),
+                                   plain['round'])
     try:
-        facts['last_report'] = last_report(product, getattr(row, 'item_id', ''),
-                                            branch=plain['branch'])
+        facts['last_report'] = last_report(product, item_id, branch=plain['branch'], review=review)
     except (OSError, ValueError):
         pass
     return facts
