@@ -19,7 +19,7 @@ import unittest
 from unittest import mock
 
 import asf
-from asf import cli, console_perms, conventions, env, hooks, init, install, schema, upgrade
+from asf import cli, console_perms, conventions, env, hooks, init, install, release, schema, upgrade
 from tests.gitfixture import executable_asf
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -2582,6 +2582,177 @@ class InstallStepsTests(HomeCase):
         self.assertIn('every step passed', out2)
         self.assertEqual(_snapshot(), snapshot_after_first,
                          'a second run must change no byte on disk')
+
+
+class UninstallTests(HomeCase):
+    """``asf uninstall``: the clocks, the runtime hook entries, the git hooks and the plugin
+    tree go; another product's clock, a declared legacy label, a foreign hook and every other
+    settings key survive; the record, the repos, the config and the state/log directories are
+    byte-identical after; ``--dry-run`` removes nothing; the log row is written and
+    ``release.install_log`` skips it."""
+
+    def setUp(self):
+        super().setUp()
+        from tests.test_scheduler import fake_launchctl, fake_loaded
+        self._fake_loaded = fake_loaded
+        self._orig_environ = dict(os.environ)
+        self.addCleanup(self._restore_env)
+        self.home = os.path.join(self.tmp, 'home')
+        os.makedirs(self.home, exist_ok=True)
+        bindir, self.statedir = fake_launchctl(self.tmp)
+        os.environ['HOME'] = self.home
+        os.environ['PATH'] = bindir + os.pathsep + os.environ.get('PATH', '')
+        os.environ['FAKE_LAUNCHCTL_DIR'] = self.statedir
+
+        self.repo = os.path.join(self.tmp, 'repo')
+        self.backlog = os.path.join(self.tmp, 'backlog')
+        _git(['init', '-q', self.repo])
+        _git(['init', '-q', self.backlog])
+        self.write(env.product_path('demo'),
+                  f'product: demo\nrepo_dir: {self.repo}\nbacklog_dir: {self.backlog}\n')
+        self.account_dir = os.path.join(self.tmp, 'account-a')
+        os.makedirs(self.account_dir, exist_ok=True)
+        self.write(env.config_path(),
+                  'schema_version: 1\ndefault_product: demo\n'
+                  'scheduler:\n  kind: launchd\n  label_prefix: asf\n'
+                  '  legacy_labels: [old.factory.*]\n'
+                  'worker_pool:\n  backend: claude-code\n  accounts:\n'
+                  f'    - name: acct-a\n      config_dir: {self.account_dir}\n')
+
+        self.account_settings = os.path.join(self.account_dir, 'settings.json')
+        self.write(self.account_settings, json.dumps({
+            'permissions': {'allow': ['Bash(ls)']},
+            'customKey': 'kept',
+            'hooks': {'PreToolUse': [{'matcher': '*', 'hooks': [
+                {'type': 'command', 'command': '/usr/local/bin/asf hook approvals'}]}]},
+        }))
+
+        self.git_hooks_dir = hooks.git_hooks_dir(self.repo)
+        os.makedirs(self.git_hooks_dir, exist_ok=True)
+        self.pre_commit = os.path.join(self.git_hooks_dir, 'pre-commit')
+        self.pre_push = os.path.join(self.git_hooks_dir, 'pre-push')
+        self.write(self.pre_commit, hooks._git_hook_body('pre-commit', '/usr/local/bin/asf', 'demo'))
+        self.write(self.pre_push, '#!/bin/sh\necho not ours\n')
+
+        self.plugin_dir = install.plugin_build.installed_plugin_dir()
+        self.write(os.path.join(self.plugin_dir, '.claude-plugin', 'marketplace.json'), '{}')
+
+        for label in ('asf.demo.tick', 'asf.demo.ci-queue', 'asf.other.tick', 'old.factory.dispatch'):
+            self._write_plist(label)
+        self._fake_loaded(self.statedir, ['asf.demo.tick', 'asf.demo.ci-queue', 'asf.other.tick',
+                                          'old.factory.dispatch'])
+
+    def _restore_env(self):
+        os.environ.clear()
+        os.environ.update(self._orig_environ)
+
+    def _write_plist(self, label):
+        path = os.path.join(self.home, 'Library', 'LaunchAgents', f'{label}.plist')
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'wb') as f:
+            f.write(b'')
+        return path
+
+    def _plist_exists(self, label):
+        return os.path.isfile(os.path.join(self.home, 'Library', 'LaunchAgents', f'{label}.plist'))
+
+    def _booted_out(self):
+        path = os.path.join(self.statedir, 'booted-out.txt')
+        if not os.path.isfile(path):
+            return []
+        with open(path, encoding='utf-8') as f:
+            return [l.strip() for l in f if l.strip()]
+
+    def _digests(self, roots):
+        digests = {}
+        for root in roots:
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [d for d in dirnames if d != '.git']
+                for name in filenames:
+                    path = os.path.join(dirpath, name)
+                    with open(path, 'rb') as f:
+                        digests[path] = hashlib.sha256(f.read()).hexdigest()
+        return digests
+
+    def test_dry_run_prints_the_table_and_removes_nothing(self):
+        before = self._digests([env.ASF_HOME, self.repo, self.backlog])
+        rc, out, _err = _quiet(install.cmd_uninstall,
+                               argparse.Namespace(product='demo', dry_run=True))
+        self.assertEqual(rc, 0)
+        self.assertIn('asf uninstall: the package itself: pipx uninstall asf-factory', out)
+        self.assertEqual(self._booted_out(), [])
+        self.assertTrue(self._plist_exists('asf.demo.tick'))
+        self.assertTrue(os.path.isfile(self.pre_commit))
+        self.assertTrue(os.path.isdir(self.plugin_dir))
+        self.assertFalse(os.path.isfile(os.path.join(env.ASF_HOME, 'logs', 'install.log')))
+        self.assertEqual(self._digests([env.ASF_HOME, self.repo, self.backlog]), before)
+
+    def test_uninstall_removes_the_jobs_the_hooks_and_the_plugin_tree_and_nothing_else(self):
+        with open(env.config_path(), encoding='utf-8') as f:
+            config_before = f.read()
+        with open(env.product_path('demo'), encoding='utf-8') as f:
+            product_before = f.read()
+
+        rc, out, _err = _quiet(install.cmd_uninstall,
+                               argparse.Namespace(product='demo', dry_run=False))
+        self.assertEqual(rc, 0)
+
+        # 1. the clocks: this product's jobs (including the never-declared ci-queue) are booted
+        # out and their plists removed; another product's job and the declared legacy label stay
+        self.assertEqual(sorted(self._booted_out()), ['asf.demo.ci-queue', 'asf.demo.tick'])
+        self.assertFalse(self._plist_exists('asf.demo.tick'))
+        self.assertFalse(self._plist_exists('asf.demo.ci-queue'))
+        self.assertTrue(self._plist_exists('asf.other.tick'))
+        self.assertTrue(self._plist_exists('old.factory.dispatch'))
+
+        # 2. the runtime hook entries: the approvals entry is gone, every other key survives
+        with open(self.account_settings, encoding='utf-8') as f:
+            settings = json.load(f)
+        self.assertEqual(settings['permissions'], {'allow': ['Bash(ls)']})
+        self.assertEqual(settings['customKey'], 'kept')
+        self.assertNotIn('hooks', settings)
+
+        # 3. the git hooks: asf's own pre-commit goes, the foreign pre-push is left and reported
+        self.assertFalse(os.path.exists(self.pre_commit))
+        self.assertTrue(os.path.isfile(self.pre_push))
+        self.assertIn('left (not ours)', out)
+
+        # 4. the plugin tree is gone, the checkout's own plugin/ is untouched
+        self.assertFalse(os.path.exists(self.plugin_dir))
+        self.assertTrue(os.path.isdir(install.plugin_build.PLUGIN_DIR))
+
+        # 5. untouched: the record (implied by the repos below), both repos, config.yaml,
+        # products/, state/
+        with open(env.config_path(), encoding='utf-8') as f:
+            self.assertEqual(f.read(), config_before)
+        with open(env.product_path('demo'), encoding='utf-8') as f:
+            self.assertEqual(f.read(), product_before)
+
+        # 6. the last line names the one command uninstall will not run itself
+        self.assertTrue(out.strip().splitlines()[-1].endswith(
+            'asf uninstall: the package itself: pipx uninstall asf-factory'))
+
+        # 8. the log: one row, and release.install_log skips it
+        log_path = os.path.join(env.ASF_HOME, 'logs', 'install.log')
+        with open(log_path, encoding='utf-8') as f:
+            line = f.read().strip()
+        date, product, ref = line.split('\t')
+        self.assertEqual((product, ref), ('demo', 'uninstall'))
+        self.assertRegex(date, r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
+        self.assertEqual(release.install_log(os.path.join(env.ASF_HOME, 'logs'), '2000-01-01T00:00:00Z'), [])
+
+    def test_no_targets_read_absent(self):
+        """A product with no repo_dir/backlog_dir, no matching clock, no account and no plugin
+        tree reports every target ``absent``, never a crash."""
+        shutil.rmtree(self.plugin_dir)
+        self.write(env.product_path('bare'), 'product: bare\n')
+        self.write(env.config_path(), 'schema_version: 1\nscheduler:\n  kind: launchd\n')
+        rc, out, _err = _quiet(install.cmd_uninstall,
+                               argparse.Namespace(product='bare', dry_run=False))
+        self.assertEqual(rc, 0)
+        self.assertIn('clocks: absent', out)
+        self.assertIn('hook entries: absent', out)
+        self.assertIn('plugin tree: absent', out)
 
 
 class PackageDataTests(unittest.TestCase):

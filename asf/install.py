@@ -15,7 +15,9 @@ and the dry run) never abort — a failure there is recorded and the rest still 
 discipline the bootstrap's own step function already has today.
 """
 import argparse
+import datetime
 import difflib
+import json
 import os
 import re
 import shutil
@@ -24,6 +26,7 @@ import sys
 
 from asf import cli, console_perms, doctor, env, hooks, init, plugin_build, scheduler
 from asf.tick import dry_run
+from asf.workers import pool
 
 #: The bootstrap script this module is `exec`ed by — never written as a literal path (the
 #: convention checker's own fence: a hardcoded `tools/*.sh` name is a product's tooling call).
@@ -550,4 +553,155 @@ def register(subparsers):
     p.add_argument('--yes', action='store_true',
                    help='never prompt; a missing flag with no default is refused')
     p.set_defaults(run=cmd_install)
+    return p
+
+
+# ---- asf uninstall ---------------------------------------------------------------
+#
+# The inverse of the four things `asf install` puts on the machine — the clocks, the runtime
+# hook entries, the git hooks, and the generated plugin tree — and nothing else (D9): the record,
+# both repos, `<ASF_HOME>/config.yaml`, `products/`, `state/` and `logs/` are never touched here.
+
+def _uninstall_clocks(product_name, cfg, dry_run):
+    """Every loaded job labelled ``<label_prefix>.<product_name>.*`` — the never-declared
+    ``ci-queue`` clock included, since it is found the same way any other loaded job is
+    (:func:`scheduler.loaded_jobs`), not read off the product file. Another product's jobs and a
+    legacy label the operator still declares are outside this prefix and are left alone."""
+    prefix = f'{scheduler.label_prefix(cfg)}.{product_name}.'
+    labels = sorted(job['label'] for job in scheduler.loaded_jobs(cfg=cfg)
+                    if job['label'].startswith(prefix))
+    if not labels:
+        return [('clocks', 'absent')]
+    rows = []
+    for label in labels:
+        if not dry_run:
+            scheduler.uninstall(label)
+        rows.append((f'clock {label}', 'removed'))
+    return rows
+
+
+def _drop_asf_hook_entries(settings):
+    """``settings`` with every hook entry :func:`hooks._is_ours` recognises as the approvals hook
+    (the only one ``hooks.install`` ever writes into an account's own settings file) removed;
+    every other key, and every other hook entry, is kept untouched. Returns
+    ``(new_settings, changed)``."""
+    settings = dict(settings)
+    new_hooks = {}
+    changed = False
+    for event, groups in (settings.get('hooks') or {}).items():
+        new_groups = []
+        for g in groups:
+            before = g.get('hooks') or []
+            kept = [h for h in before if not hooks._is_ours(h.get('command'), 'approvals', None)]
+            changed = changed or len(kept) != len(before)
+            if kept:
+                new_groups.append(dict(g, hooks=kept))
+        if new_groups:
+            new_hooks[event] = new_groups
+    if not changed:
+        return settings, False
+    if new_hooks:
+        settings['hooks'] = new_hooks
+    else:
+        settings.pop('hooks', None)
+    return settings, True
+
+
+def _uninstall_hook_entries(cfg, dry_run):
+    """The runtime hook entries :func:`hooks._is_ours` recognises, dropped from every worker
+    account's settings file; every other key in that file is kept (`asf/hooks.py:246,276`)."""
+    rows = []
+    for account in pool.accounts_from_config(cfg):
+        path = hooks.account_settings_path(account)
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding='utf-8') as f:
+            current = json.load(f)
+        updated, changed = _drop_asf_hook_entries(current)
+        if not changed:
+            continue
+        if not dry_run:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(json.dumps(updated, indent=2) + '\n')
+        rows.append((f'hook entries in {path}', 'removed'))
+    return rows or [('hook entries', 'absent')]
+
+
+def _uninstall_git_hooks(product, dry_run):
+    """The ``pre-commit`` / ``pre-push`` files ASF wrote in ``repo_dir`` and ``backlog_dir``,
+    removed when :func:`hooks.is_git_hook_ours` says they are ours; a foreign hook is reported
+    ``left (not ours)`` and kept (`asf/hooks.py:92`)."""
+    rows = []
+    for label, repo in (('repo', product.repo_dir), ('backlog', product.backlog_dir)):
+        if not repo:
+            continue
+        hooks_dir = hooks.git_hooks_dir(repo)
+        if hooks_dir is None:
+            continue
+        for name in hooks.GIT_HOOK_NAMES:
+            path = os.path.join(hooks_dir, name)
+            target = f'git hook: {label} {name}'
+            if not os.path.isfile(path):
+                rows.append((target, 'absent'))
+                continue
+            with open(path, encoding='utf-8') as f:
+                text = f.read()
+            if hooks.is_git_hook_ours(text, name):
+                if not dry_run:
+                    os.remove(path)
+                rows.append((target, 'removed'))
+            else:
+                rows.append((target, 'left (not ours)'))
+    return rows
+
+
+def _uninstall_plugin(dry_run):
+    """``<ASF_HOME>/plugin`` removed; the checkout's own ``plugin/`` is never touched — this is
+    the generated tree :func:`plugin_build.installed_plugin_dir` names, never the checkout's."""
+    dest = plugin_build.installed_plugin_dir()
+    if not os.path.isdir(dest):
+        return [('plugin tree', 'absent')]
+    if not dry_run:
+        shutil.rmtree(dest)
+    return [('plugin tree', 'removed')]
+
+
+def _append_uninstall_log(product_name):
+    """One ``<utc>\\t<product>\\tuninstall`` line, the same shape the bootstrap's own install
+    row takes — ``release.install_log`` skips a row whose ref is ``uninstall`` (PD8), so the
+    readiness view keeps counting installs by hand and not teardowns."""
+    path = os.path.join(env.ASF_HOME, 'logs', 'install.log')
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    with open(path, 'a', encoding='utf-8') as f:
+        f.write(f'{stamp}\t{product_name}\tuninstall\n')
+
+
+def cmd_uninstall(args, out=print):
+    """``asf uninstall --product <p> [--dry-run]``: takes away what ``asf install`` put on the
+    machine — the clocks, the runtime hook entries, the git hooks, the generated plugin tree —
+    and leaves the record, the repos and the operator's config exactly where they were (D9).
+    ``--dry-run`` prints the same table and removes nothing."""
+    cfg = env.load_config()
+    product = env.load_product(args.product)
+    rows = (_uninstall_clocks(args.product, cfg, args.dry_run)
+           + _uninstall_hook_entries(cfg, args.dry_run)
+           + _uninstall_git_hooks(product, args.dry_run)
+           + _uninstall_plugin(args.dry_run))
+    out(f'asf uninstall: {args.product}' + (' (dry run)' if args.dry_run else ''))
+    for target, verdict in rows:
+        out(f'  {target}: {verdict}')
+    out('asf uninstall: the package itself: pipx uninstall asf-factory')
+    if not args.dry_run:
+        _append_uninstall_log(args.product)
+    return 0
+
+
+def register_uninstall(subparsers):
+    p = subparsers.add_parser(
+        'uninstall', help='remove the clocks, the hook entries and the plugin tree this '
+                          'product installed; leaves the record, the repos and the config')
+    p.add_argument('--product', required=True)
+    p.add_argument('--dry-run', action='store_true', help='print the same table, remove nothing')
+    p.set_defaults(run=cmd_uninstall)
     return p
