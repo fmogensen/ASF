@@ -346,6 +346,180 @@ class DiagnoseTests(unittest.TestCase):
             diagnose.metric(f, 'nonsense', s, s + wk)
 
 
+class SessionAttributionTests(unittest.TestCase):
+    """score.feature_of_session — the ladder, over hand-built items and events."""
+
+    def items(self, **extra):
+        base = {
+            'E-0001': {'id': 'E-0001', 'type': 'epic', 'parent': None, 'text': '',
+                       'created': '2026-08-01T00:00:00Z'},
+            'F-0001': {'id': 'F-0001', 'type': 'feature', 'parent': 'E-0001', 'text': '',
+                       'created': '2026-09-01T00:00:00Z'},
+        }
+        base.update(extra)
+        return base
+
+    def test_a_bug_under_an_epic_naming_a_feature_is_charged_to_it(self):
+        items = self.items(**{
+            'B-0001': {'id': 'B-0001', 'type': 'bug', 'parent': 'E-0001',
+                       'text': 'broke after F-0001 landed', 'created': '2026-09-05T00:00:00Z'},
+        })
+        ev = {'item': 'B-0001', 'branch': None}
+        self.assertEqual(score.feature_of_session(items, ev), 'F-0001')
+
+    def test_a_bug_naming_two_features_goes_to_the_newest_carded(self):
+        items = self.items(**{
+            'F-0002': {'id': 'F-0002', 'type': 'feature', 'parent': 'E-0001', 'text': '',
+                       'created': '2026-09-05T00:00:00Z'},
+            'B-0001': {'id': 'B-0001', 'type': 'bug', 'parent': 'E-0001',
+                       'text': 'about F-0001 and F-0002', 'created': '2026-09-06T00:00:00Z'},
+        })
+        ev = {'item': 'B-0001', 'branch': None}
+        self.assertEqual(score.feature_of_session(items, ev), 'F-0002')
+
+    def test_a_bug_naming_a_feature_carded_after_it_goes_to_neither(self):
+        items = self.items(**{
+            'F-0003': {'id': 'F-0003', 'type': 'feature', 'parent': 'E-0001', 'text': '',
+                       'created': '2026-09-10T00:00:00Z'},
+            'B-0001': {'id': 'B-0001', 'type': 'bug', 'parent': 'E-0001', 'text': 'about F-0003',
+                       'created': '2026-09-05T00:00:00Z'},
+        })
+        ev = {'item': 'B-0001', 'branch': None}
+        self.assertIsNone(score.feature_of_session(items, ev))
+
+    def test_an_epic_or_a_decision_naming_a_feature_is_not_charged_to_it(self):
+        items = self.items(**{
+            'D-0001': {'id': 'D-0001', 'type': 'decision', 'parent': 'E-0001', 'text': 'per F-0001',
+                       'created': '2026-09-05T00:00:00Z'},
+        })
+        items['E-0001'] = dict(items['E-0001'], text='covers F-0001')
+        self.assertIsNone(score.feature_of_session(items, {'item': 'E-0001', 'branch': None}))
+        self.assertIsNone(score.feature_of_session(items, {'item': 'D-0001', 'branch': None}))
+
+    def test_a_branch_naming_a_task_under_a_feature_is_charged_to_it(self):
+        items = self.items(**{
+            'T-0001': {'id': 'T-0001', 'type': 'task', 'parent': 'F-0001', 'text': '',
+                       'created': '2026-09-02T00:00:00Z'},
+        })
+        ev = {'item': None, 'branch': 'worker/T-0001'}
+        self.assertEqual(score.feature_of_session(items, ev), 'F-0001')
+
+    def test_a_branch_naming_a_bug_goes_through_the_text_rung_too(self):
+        items = self.items(**{
+            'B-0002': {'id': 'B-0002', 'type': 'bug', 'parent': 'E-0001', 'text': 'about F-0001',
+                       'created': '2026-09-05T00:00:00Z'},
+        })
+        ev = {'item': None, 'branch': 'fix/B-0002'}
+        self.assertEqual(score.feature_of_session(items, ev), 'F-0001')
+
+    def test_a_branch_naming_a_removed_or_unknown_id_falls_through(self):
+        items = self.items(**{
+            'B-0003': {'id': 'B-0003', 'type': 'bug', 'parent': 'E-0001', 'text': 'about F-0001',
+                       'created': '2026-09-05T00:00:00Z', 'removed': True},
+            'T-0001': {'id': 'T-0001', 'type': 'task', 'parent': 'F-0001', 'text': '',
+                       'created': '2026-09-02T00:00:00Z'},
+        })
+        removed_ev = {'item': None, 'branch': 'fix/B-0003-T-0001'}
+        self.assertEqual(score.feature_of_session(items, removed_ev), 'F-0001')
+        unknown_ev = {'item': None, 'branch': 'fix/B-0099-T-0001'}
+        self.assertEqual(score.feature_of_session(items, unknown_ev), 'F-0001')
+
+    def test_a_session_with_neither_item_nor_branch_is_none(self):
+        items = self.items()
+        self.assertIsNone(score.feature_of_session(items, {'item': None, 'branch': None}))
+
+    def test_a_task_under_a_feature_resolves_as_feature_of_does_today(self):
+        items = self.items(**{
+            'T-0001': {'id': 'T-0001', 'type': 'task', 'parent': 'F-0001', 'text': '',
+                       'created': '2026-09-02T00:00:00Z'},
+        })
+        ev = {'item': 'T-0001', 'branch': None}
+        self.assertEqual(score.feature_of_session(items, ev), score.feature_of(items, 'T-0001'))
+
+
+class UnattributedSpendTests(unittest.TestCase):
+    """diagnose.rank's 'unattributed' row and view.render's printing of it — the card's first
+    acceptance, over the shapes the 2026-09-25 run found."""
+
+    def window_items(self):
+        return {
+            'E-0001': {'id': 'E-0001', 'type': 'epic', 'parent': None, 'text': '',
+                       'created': '2026-08-01T00:00:00Z'},
+            'F-0001': {'id': 'F-0001', 'type': 'feature', 'parent': 'E-0001', 'text': '',
+                       'created': '2026-09-01T00:00:00Z'},
+            'F-0002': {'id': 'F-0002', 'type': 'feature', 'parent': 'E-0001', 'text': '',
+                       'created': '2026-09-01T00:00:00Z'},
+            # a Bug under an Epic whose text names a Feature
+            'B-0001': {'id': 'B-0001', 'type': 'bug', 'parent': 'E-0001',
+                       'text': 'about F-0001', 'created': '2026-09-05T00:00:00Z'},
+            # an unmatched job's item, resolved only through the branch it ran on
+            'T-0002': {'id': 'T-0002', 'type': 'task', 'parent': 'F-0002', 'text': '',
+                       'created': '2026-09-02T00:00:00Z'},
+            # a card outside every Feature, resolved only because its branch names one directly
+            'B-0002': {'id': 'B-0002', 'type': 'bug', 'parent': 'E-0001', 'text': '',
+                       'created': '2026-09-05T00:00:00Z'},
+        }
+
+    def window_sessions(self):
+        return [
+            {'ts': '2026-09-05T10:00:00Z', 'task': 'x', 'item': 'F-0001', 'branch': None, 'usd': 85.0},
+            {'ts': '2026-09-05T11:00:00Z', 'task': 'x', 'item': 'B-0001', 'branch': None, 'usd': 6.0},
+            {'ts': '2026-09-05T12:00:00Z', 'task': 'x', 'item': None, 'branch': 'worker/T-0002', 'usd': 4.0},
+            {'ts': '2026-09-05T13:00:00Z', 'task': 'x', 'item': 'B-0002', 'branch': 'fix/B-0002-F-0001',
+             'usd': 5.0},
+        ]
+
+    def facts(self):
+        return Facts(items=self.window_items(), sessions=self.window_sessions(), ci=[], gates=[],
+                     runs=[], clutter={}, as_of='2026-09-06T23:00:00Z')
+
+    def test_the_window_moves_from_over_ten_percent_to_zero(self):
+        f = self.facts()
+        start, end = diagnose.window(f.as_of, 7)
+        old_unplaced = sum(s['usd'] for s in f.sessions if score.feature_of(f.items, s.get('item')) is None)
+        total = sum(s['usd'] for s in f.sessions)
+        self.assertGreater(old_unplaced / total, 0.10)
+        r = diagnose.rank(f, start, end)
+        self.assertEqual(r['unattributed'], {'usd': 0.0, 'sessions': 0, 'share': 0.0})
+        self.assertEqual(sum(c['usd'] for c in r['by_feature']), r['usd'])
+        self.assertNotIn(diagnose.UNATTRIBUTED, [c['name'] for c in r['by_feature']])
+
+    def test_share_is_zero_and_division_free_over_an_empty_window(self):
+        f = Facts(items={}, sessions=[], ci=[], gates=[], runs=[], clutter={}, as_of='2026-09-06T23:00:00Z')
+        start, end = diagnose.window(f.as_of, 7)
+        r = diagnose.rank(f, start, end)
+        self.assertEqual(r['unattributed'], {'usd': 0.0, 'sessions': 0, 'share': 0.0})
+
+    def test_a_wholly_unattributed_session_keeps_the_none_row_and_the_share(self):
+        items = {
+            'E-0001': {'id': 'E-0001', 'type': 'epic', 'parent': None, 'text': '',
+                       'created': '2026-08-01T00:00:00Z'},
+            'T-0003': {'id': 'T-0003', 'type': 'task', 'parent': 'E-0001', 'text': '',
+                       'created': '2026-09-03T00:00:00Z'},
+        }
+        sessions = [{'ts': '2026-09-05T10:00:00Z', 'task': 'x', 'item': 'T-0003', 'branch': None, 'usd': 10.0}]
+        f = Facts(items=items, sessions=sessions, ci=[], gates=[], runs=[], clutter={},
+                  as_of='2026-09-06T23:00:00Z')
+        start, end = diagnose.window(f.as_of, 7)
+        r = diagnose.rank(f, start, end)
+        self.assertEqual(r['unattributed'], {'usd': 10.0, 'sessions': 1, 'share': 1.0})
+        self.assertEqual([c['name'] for c in r['by_feature']], [diagnose.UNATTRIBUTED])
+
+    def test_render_prints_the_row_and_none_when_empty(self):
+        from asf.views import scorecard as view
+        f = self.facts()
+        start, end = diagnose.window(f.as_of, 7)
+        rk = diagnose.rank(f, start, end)
+        d = {'product': 'p', 'as_of': f.as_of, 'headline': score.headline(f), 'clutter': {},
+             'weeks': [], 'features': [], 'window_days': 7, 'causes': [], 'loop': {},
+             'rank': rk, 'diagnostics': []}
+        self.assertIn('| unattributed | none |', view.render(d))
+
+        d['rank'] = dict(rk, unattributed={'usd': 10.0, 'sessions': 2, 'share': 0.5})
+        rendered = view.render(d)
+        self.assertIn('| unattributed | $10.00 (50 %), 2 sessions', rendered)
+
+
 class Prod:
     def __init__(self, name='p', improve=None, repo_dir=None, epic='E-0001'):
         self.name, self.improve, self.repo_dir, self.repo_slug, self.main = name, improve or {}, repo_dir, None, 'main'
@@ -674,7 +848,8 @@ class ChildrenResolvedProdTests(unittest.TestCase):
         d = {'product': 'p', 'as_of': f.as_of, 'headline': score.headline(f), 'clutter': {},
              'weeks': [], 'features': [], 'window_days': 14, 'causes': [], 'loop': {},
              'rank': {'usd': 0, 'hours': 0, 'by_kind': [], 'by_failure': [], 'by_ci_job': [],
-                      'by_feature': []}, 'diagnostics': f.diagnostics}
+                      'by_feature': [], 'unattributed': {'usd': 0.0, 'sessions': 0, 'share': 0.0}},
+             'diagnostics': f.diagnostics}
         self.assertEqual(view.render(d).count('F-0030 landed without a traceable commit'), 1)
 
     def test_the_value_row_counts_them(self):
