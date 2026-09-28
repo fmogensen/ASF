@@ -2292,9 +2292,14 @@ def _rerun_cancelled(q, src, product, started, dry_run, out, now, items=None, li
                     f"next tick")
                 keep.append(rec)
                 continue
-            out(f'ci queue: skip stale rerun {stale}; {fresh} instead — {who} run '
-                f"{rec.get('trunk_id')} at {str(rec.get('trunk_sha') or '?')[:9]} started after "
-                f"waiting {waited}")
+            if rec.get('stall'):             # a stalled step: no protected run to report on
+                mins = int(_age(rec.get('at'), now) // 60)
+                out(f'ci queue: skip stale rerun {stale}; {fresh} instead — cancelled {mins} '
+                    f'min ago, stalled in step "{rec.get("stall_step")}"')
+            else:
+                out(f'ci queue: skip stale rerun {stale}; {fresh} instead — {who} run '
+                    f"{rec.get('trunk_id')} at {str(rec.get('trunk_sha') or '?')[:9]} started "
+                    f"after waiting {waited}")
             n += 1
             continue
         if rec.get('stall'):                # a stalled step: no protected run to report on

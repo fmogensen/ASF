@@ -385,10 +385,11 @@ class ReRunTests(Base):
         self.assertTrue(any('re-ran pr run 200' in l and 'stalled in step "unit tests"' in l
                             for l in self.lines), self.lines)
 
-    def test_a_stale_workflow_still_refuses_the_re_run(self):
+    def test_a_stale_workflow_starts_a_fresh_run_instead_of_replaying_the_stale_one(self):
         p, host = product(), self._host(-11)
         self._cancel(p, host)
         self.lines.clear()
+        del host.runs[200]          # cancelled: gone from the listing, nothing left to replay
 
         def stale(argv, **kw):
             joined = ' '.join(argv)
@@ -402,8 +403,14 @@ class ReRunTests(Base):
         self.relieve(p, stale, minutes=2)
         reruns = [c for c in host.calls if c[:3] == ['gh', 'run', 'rerun']]
         self.assertEqual(reruns, [])
-        self.assertIn('ci queue: skip rerun 200 on task/T-0341 — workflow changed since '
-                      '(1111111→2222222); next push runs fresh', self.lines)
+        self.assertEqual([c for c in host.calls if c[:2] == ['gh', 'workflow']],
+                         [['gh', 'workflow', 'run', 'pr.yml', '--ref', 'task/T-0341', '-R',
+                           p.repo_slug]])
+        self.assertTrue(any(
+            'skip stale rerun pr run 200 (T-0341, Task unranked) on task/T-0341 — workflow '
+            'changed since (1111111→2222222); dispatched a fresh pr.yml run on task/T-0341 '
+            'instead — cancelled 1 min ago, stalled in step "unit tests"' in l
+            for l in self.lines), self.lines)
         self.assertEqual(ci_queue.load(p.name)['relief'], [])
 
     def test_the_third_stall_on_one_sha_is_cancelled_and_not_re_run(self):
