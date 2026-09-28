@@ -4,6 +4,9 @@ description: The coder's gate — what to run, in what order, and what a red one
 allowed-tools: Read, Bash
 ---
 
+Before the push: the Task's Gate commands, and its acceptance tests byte-identical from the plan,
+and passing.
+
 Before the push, every acceptance line your tests now prove carries a trailer on its own line in
 one of your commit messages:
 
