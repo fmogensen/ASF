@@ -61,9 +61,35 @@ class TableVerdictOf(unittest.TestCase):
     def test_full_coverage_all_pass_is_approved(self):
         self.assertEqual(review.verdict_of(self.table(), self.REQUIRED), review.APPROVED)
 
-    def test_a_fail_row_under_a_typed_approved_line_is_changes(self):
-        text = self.table(fail=self.MECH[0]) + '\nverdict: approved\n'
-        self.assertEqual(review.verdict_of(text, self.REQUIRED), review.CHANGES)
+    def test_a_fail_row_under_a_typed_approved_line_with_a_c_item_is_changes(self):
+        for c in ('## C\n\n- `a.py:3` — fix the guard\n', '## C list\n\nThe guard at a.py:3.\n',
+                  'C1. `a.py:3` — fix the guard\n', 'C: `a.py:3` — fix the guard\n'):
+            with self.subTest(c=c):
+                text = self.table(fail=self.MECH[0]) + '\nverdict: approved\n\n' + c
+                self.assertEqual(review.verdict_of(text, self.REQUIRED), review.CHANGES)
+
+    def test_a_fail_row_the_reviewer_approved_over_asking_nothing_is_approved(self):
+        """A product's T-0362 (2026-09-27): rows for Tasks already on the trunk marked ``fail``,
+        ``verdict: approved``, ``## C list`` "None." — read as changes, it went correct → review
+        → correct → adjudicate with no C item to answer. 69 of 1,526 reviews over 8 days."""
+        for c in ('## C list\n\nNone.\n', '## C\n\n(none)\n', '## C\n\n- none.\n',
+                  "## C — Critical (0)\n\nNone found.\n",
+                  "## C\n\nNone. Round 1's C1 is fixed:\n- **C1** `a.py:3` — closed\n\n## I\n\n- x\n",
+                  'C: none.\n', 'No C list — nothing found blocks this diff.\n', ''):
+            with self.subTest(c=c):
+                text = self.table(fail=self.MECH[0]) + '\nverdict: approved\n\n' + c
+                self.assertEqual(review.verdict_of(text, self.REQUIRED), review.APPROVED)
+
+    def test_a_fail_row_under_a_changes_line_or_a_missing_row_stays_changes(self):
+        empty = '\n## C\n\nNone.\n'
+        self.assertEqual(review.verdict_of(self.table(fail=self.MECH[0]) +
+                                           '\nverdict: changes requested\n' + empty,
+                                           self.REQUIRED), review.CHANGES)
+        self.assertEqual(review.verdict_of(self.table(fail=self.MECH[0]) + empty, self.REQUIRED),
+                         review.CHANGES)
+        self.assertEqual(review.verdict_of(self.table(drop=self.MECH[0]) +
+                                           '\nverdict: approved\n' + empty, self.REQUIRED),
+                         review.CHANGES)
 
     def test_a_required_row_removed_is_changes_the_bounce_mapped(self):
         text = self.table(drop=self.MECH[0])
