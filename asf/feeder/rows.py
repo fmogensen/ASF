@@ -576,6 +576,10 @@ def bug_rows(items, product, busy, attempts=None, why=None):
                        action=f'WAITS ON {on}', brief_kind='fix-bug',
                        branch=branch_for(product, 'fix', bug['id']),
                        reason=f"{bug.get('severity')} open, decided: {reason}", waits_on=on)
+        row = foreign_row(product, b, tier, fid, 'fix-bug', BUG_FIX)
+        if row is not None:
+            out.append(row)
+            continue
         if b['id'] in busy:
             held = why.get(b['id']) or 'session running'
             on = 'landing' if 'land' in held else 'session'
@@ -622,6 +626,21 @@ def console_amend_row(product, item_id, feature_id, writes, branch, brief_kind='
                reason=f'writes: {hit} is in the amendable set — no worker session edits it; the '
                       f'console makes the edit on {branch}',
                waits_on='console', amend=hit)
+
+
+def foreign_row(product, item, tier, feature_id, brief_kind, kind):
+    """The NEEDS DECISION row for an item flagged as another product's work (``belongs_to:``,
+    F-0120), else None. It launches nothing and costs no slot (:mod:`asf.feeder.tiers`), so an
+    S1 flagged this way no longer holds the tier-2 rows behind it."""
+    name = (item or {}).get('belongs_to')
+    if not name:
+        return None
+    return Row(tier=tier, kind=kind, item_id=item['id'], feature_id=feature_id,
+               action=NEEDS_DECISION, brief_kind=brief_kind,
+               branch=branch_for(product, 'fix' if kind == BUG_FIX else 'spec', item['id']),
+               reason=f"looks like {name}'s work, not this product's: "
+                      f"asf move {item['id']} --to {name} (or --remove)",
+               waits_on='decision')
 
 
 def footprint_row(item, product, c, tier, fid, branch):
@@ -991,6 +1010,12 @@ def _one_feature_rows(items, product, f, busy, running, landed_shas, occupancy):
     limit = stalemate_round(product)
     fid = f['id']
     stage = f.get('stage') or 'card'
+    word = stage.split(' ')[0]
+    if word not in BUILD_STAGES:
+        row = foreign_row(product, f, 2, fid, 'spec', UNDECIDED)
+        if row is not None:
+            out.append(row)
+            return out
     doc, rnd = review_round(f)
     if doc and rnd >= limit:
         if fid not in busy:
@@ -1000,7 +1025,6 @@ def _one_feature_rows(items, product, f, busy, running, landed_shas, occupancy):
         return out
     if fid in busy:
         return out
-    word = stage.split(' ')[0]
     waits = (occupancy,)
     if is_direct(f) and word not in BUILD_STAGES:
         row = direct_row(f, product, occupancy)

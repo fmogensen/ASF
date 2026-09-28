@@ -1029,6 +1029,77 @@ class NoS1S2BugIsInvisible(unittest.TestCase):
         self.assertIn((rows.CARD_SPEC, 'F-0001', True), [(r.kind, r.item_id, r.launches) for r in out])
 
 
+class ForeignCardRowTests(unittest.TestCase):
+    """F-0120 §6: a card flagged ``belongs_to:`` another product decides nothing and holds
+    nothing — :func:`rows.foreign_row`, called from :func:`rows.bug_rows` and
+    :func:`rows._one_feature_rows`."""
+
+    def feature(self, **over):
+        f = {'id': 'F-0001', 'type': 'feature', 'title': 'F', 'decided': True, 'rank': 1,
+             'stage': 'card', 'state': 'New'}
+        f.update(over)
+        return {'items': {'F-0001': f}}
+
+    def test_a_flagged_s1_bug_is_one_needs_decision_row(self):
+        idx = s1_bugs('B-0001')
+        idx['items']['B-0001']['belongs_to'] = 'acme'
+        out = [r for r in rows.candidates(idx, product(), []) if r.item_id == 'B-0001']
+        self.assertEqual(len(out), 1)
+        r = out[0]
+        self.assertEqual((r.action, r.waits_on, r.launches), ('NEEDS DECISION', 'decision', False))
+        self.assertIn('asf move B-0001 --to acme', r.reason)
+
+    def test_hold_unlanded_leaves_it_alone(self):
+        idx = s1_bugs('B-0001')
+        idx['items']['B-0001'].update(belongs_to='acme', after=['B-0099'])
+        idx['items']['B-0099'] = {'id': 'B-0099', 'type': 'bug', 'severity': 'S2',
+                                  'decided': True, 'state': 'New'}
+        out = [r for r in rows.candidates(idx, product(), []) if r.item_id == 'B-0001']
+        self.assertEqual(out[0].action, 'NEEDS DECISION')
+
+    def test_frees_the_tier2_seat_it_used_to_hold(self):
+        """P9's measurement: the row that used to cut the tier-2 rows behind it no longer
+        launches, so both now get the seats a flagged S1 no longer spends one of."""
+        idx = s1_bugs('B-0001')
+        idx['items']['F-0001'] = {'id': 'F-0001', 'type': 'feature', 'decided': True,
+                                  'state': 'New', 'stage': 'card', 'rank': 1}
+        idx['items']['F-0002'] = {'id': 'F-0002', 'type': 'feature', 'decided': True,
+                                  'state': 'New', 'stage': 'card', 'rank': 2}
+        unflagged = rows.plan_rows(idx, product(), [], 2)
+        flagged = copy.deepcopy(idx)
+        flagged['items']['B-0001']['belongs_to'] = 'acme'
+        held = rows.plan_rows(flagged, product(), [], 2)
+        launching = lambda out: [r for r in out if r.kind == rows.CARD_SPEC and r.launches]
+        self.assertEqual(len(launching(unflagged)), 1)
+        self.assertEqual(len(launching(held)), 2)
+
+    def test_flagged_feature_at_spec_approved_yields_needs_decision(self):
+        idx = self.feature(stage='spec-approved', belongs_to='acme')
+        out = [r for r in rows.candidates(idx, product(), []) if r.item_id == 'F-0001']
+        self.assertEqual(len(out), 1)
+        r = out[0]
+        self.assertEqual((r.action, r.waits_on, r.launches), ('NEEDS DECISION', 'decision', False))
+        self.assertIn('asf move F-0001 --to acme', r.reason)
+
+    def test_flagged_feature_at_building_yields_task_rows_unchanged(self):
+        idx = {'items': {
+            'F-0001': {'id': 'F-0001', 'type': 'feature', 'decided': True, 'state': 'Active',
+                      'stage': 'building 0/1', 'rank': 1, 'children': ['T-0001'],
+                      'belongs_to': 'acme'},
+            'T-0001': {'id': 'T-0001', 'type': 'task', 'parent': 'F-0001', 'state': 'New',
+                      'writes': ['a.py']}}}
+        out = [r for r in rows.candidates(idx, product(), []) if r.item_id == 'T-0001']
+        self.assertEqual([(r.kind, r.action) for r in out], [(rows.PLAN_CODE, rows.LAUNCH)])
+
+    def test_unflagged_rows_are_byte_identical_to_today(self):
+        idx = s1_bugs('B-0001')
+        idx['items'].update(self.feature()['items'])
+        out = rows.candidates(idx, product(), [])
+        got = {(r.item_id, r.kind, r.action) for r in out}
+        self.assertIn(('B-0001', rows.BUG_FIX, rows.LAUNCH), got)
+        self.assertIn(('F-0001', rows.CARD_SPEC, rows.LAUNCH), got)
+
+
 class CapOverEveryLaunchingKindTest(unittest.TestCase):
     """F-0080 §2.6 / §3.6: one adjudicate row at the limit, silence above it, for every kind."""
 
