@@ -2,6 +2,26 @@
 
 One entry per released version, newest first.
 
+## v0.1.65 — 2026-09-28
+
+### Bugs fixed
+
+- B-0136 An install can leave a product's tick clock unloaded; status just omits it
+
+### In progress
+
+- F-0107 asf install: one command from zero to a ticking factory (from a release tag, doctor green)
+- F-0111 hooks install from asf-live tells the operator to wire the dev install's path into the product's git hooks
+- F-0112 Products update themselves to a new ASF release: upgrade: auto in the tick, with rollback on a red doctor
+- F-0113 An S1 silently holds all Feature work, and NEXT plans from different inputs than the tick
+- F-0114 Upgrades never break other installs: automatic, versioned, rollback-safe migrations with an upgrade test from every release
+- F-0119 asf pr-hygiene --lanes: a machine-readable listing product rule checks can call
+- F-0120 Adopting a record: flag cards that belong to another product and move or remove them in bulk (asf move)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.65"`
+
 ## v0.1.64 — 2026-09-28
 
 ### In progress
