@@ -647,6 +647,93 @@ class UpgradeTest(HomeCase):
         self.assertEqual(lines, ['upgrade: reloaded clock asf.alpha.tick'])
 
 
+class UpgradeToTests(HomeCase):
+    """``asf upgrade --to <sha|tag>`` (S-32359): ``--to`` and ``--ref`` reach the same argument, a
+    tag is resolved to its commit before the CI guard reads it, and ``pipx`` still receives the
+    tag as the operator gave it."""
+    TAG = 'v0.1.1'
+    SHA = 'c' * 40
+    URL = 'https://github.com/o/r.git'
+
+    def run_upgrade(self, run, ref):
+        return _quiet(upgrade.cmd_upgrade, argparse.Namespace(skip_pipx=False, ref=ref), run=run)
+
+    def test_to_and_ref_reach_the_same_dest(self):
+        p = argparse.ArgumentParser()
+        upgrade.register(p.add_subparsers())
+        self.assertEqual(p.parse_args(['upgrade', '--to', self.TAG]).ref, self.TAG)
+        self.assertEqual(p.parse_args(['upgrade', '--ref', self.TAG]).ref, self.TAG)
+
+    def test_a_40_hex_sha_is_not_ls_remoted(self):
+        run = FakeRun()
+        self.assertEqual(upgrade.resolve_ref(self.URL, FakeRun.HEAD, run=run), FakeRun.HEAD)
+        self.assertEqual(run.calls, [])
+
+    def test_a_tag_resolves_through_ls_remote(self):
+        run = FakeRun()
+        run.answers[('git', 'ls-remote')] = f'{self.SHA}\trefs/tags/{self.TAG}\n'
+        self.assertEqual(upgrade.resolve_ref(self.URL, self.TAG, run=run), self.SHA)
+
+    def test_an_annotated_tag_prefers_its_dereferenced_commit(self):
+        run = FakeRun()
+        run.answers[('git', 'ls-remote')] = (
+            f'{"a" * 40}\trefs/tags/{self.TAG}\n{self.SHA}\trefs/tags/{self.TAG}^{{}}\n')
+        self.assertEqual(upgrade.resolve_ref(self.URL, self.TAG, run=run), self.SHA)
+
+    def test_an_unknown_tag_does_not_resolve(self):
+        run = FakeRun()
+        run.answers[('git', 'ls-remote')] = ''
+        self.assertIsNone(upgrade.resolve_ref(self.URL, 'v9.9.9', run=run))
+
+    def test_a_tag_is_resolved_before_ci_is_read_and_the_guard_reads_the_resolved_sha(self):
+        run = FakeRun(ci='[{"conclusion": "failure"}]')
+        run.answers[('git', 'ls-remote')] = f'{self.SHA}\trefs/tags/{self.TAG}\n'
+        rc, out, _err = self.run_upgrade(run, self.TAG)
+        self.assertEqual(rc, upgrade.DEFERRED)
+        self.assertEqual(run.installs(), [])
+        self.assertIn(f'remote CI is red at {self.SHA[:7]}', out)
+
+    def test_pipx_receives_the_tag_as_given_and_verification_reads_the_resolved_sha(self):
+        run = FakeRun(installed=self.SHA)
+        run.answers[('git', 'ls-remote')] = f'{self.SHA}\trefs/tags/{self.TAG}\n'
+        rc, out, _err = self.run_upgrade(run, self.TAG)
+        self.assertEqual(rc, 0)
+        self.assertEqual(run.installs(), [['pipx', 'install', '--force', f'git+{self.URL}@{self.TAG}']])
+        self.assertIn(f'upgrade: installed {self.SHA[:7]}', out)
+
+    def test_an_unresolvable_ref_is_one_refusal_line_and_a_non_zero_exit(self):
+        run = FakeRun()
+        run.answers[('git', 'ls-remote')] = ''
+        rc, out, _err = self.run_upgrade(run, 'v9.9.9')
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(run.installs(), [])
+        self.assertIn('v9.9.9', out)
+        self.assertIn('refused', out)
+
+    def test_the_resolved_sha_is_what_the_pending_marker_holds(self):
+        run = FakeRun(ticks='4242\n')
+        run.answers[('git', 'ls-remote')] = f'{self.SHA}\trefs/tags/{self.TAG}\n'
+        rc, _out, _err = _quiet(upgrade.cmd_upgrade,
+                                argparse.Namespace(skip_pipx=False, ref=self.TAG, owner='factory'),
+                                run=run)
+        self.assertEqual(rc, upgrade.DEFERRED)
+        self.assertEqual(upgrade.read_pending()['sha'], self.SHA)
+
+    def test_the_clock_reload_still_runs_after_a_tag_install(self):
+        self.write(env.config_path(), '')
+        agents = os.path.join(self.tmp, 'LaunchAgents')
+        self.write(os.path.join(agents, 'asf.alpha.tick.plist'), '')
+        run = FakeRun(installed=self.SHA)
+        run.answers[('git', 'ls-remote')] = f'{self.SHA}\trefs/tags/{self.TAG}\n'
+        self.write(env.product_path('alpha'), 'backlog_dir: /nonexistent\n')
+        with mock.patch('asf.scheduler.launch_agents_dir', return_value=agents), \
+                mock.patch('asf.scheduler.bootstrap', return_value=(True, '')) as boot:
+            rc, out, _err = self.run_upgrade(run, self.TAG)
+        self.assertEqual(rc, 0)
+        boot.assert_called_once_with(os.path.join(agents, 'asf.alpha.tick.plist'))
+        self.assertIn('upgrade: reloaded clock asf.alpha.tick', out)
+
+
 class PendingUpgradeTest(HomeCase):
     """A deferred upgrade marks itself pending, so the other ticks stop starting and a gap comes."""
     SHA = 'b' * 40
