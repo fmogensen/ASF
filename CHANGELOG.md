@@ -2,6 +2,23 @@
 
 One entry per released version, newest first.
 
+## v0.1.57 — 2026-09-28
+
+### In progress
+
+- F-0053 Reviews return checks: every review ends in a machine-readable check table the tick reads
+- F-0063 Relaunch from the branch, not from zero
+- F-0120 Adopting a record: flag cards that belong to another product and move or remove them in bulk (asf move)
+
+### Improvements and hotfixes
+
+- fix(reviews): a pipe in the evidence or a qualified result is a row, not a fault (#197)
+- fix(env): a bare command resolves the product whose checkout holds the cwd (#198)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.57"`
+
 ## v0.1.56 — 2026-09-28
 
 ### In progress
