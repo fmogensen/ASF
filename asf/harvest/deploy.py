@@ -31,7 +31,10 @@ success``. The ``deploy`` line names the rule that decided.
 The rules are the same for every environment: the candidate deploys only when it descends from
 the environment's deployed sha (the newest successful run of its ``workflow``), no run of that
 workflow is queued or running, no deploy of that very sha has already failed (a failed sha is
-not retried; the next green sha is), and it is green — a red trunk never deploys. The dispatch is
+not retried; the next green sha is), and it is green — a red trunk never deploys. A failed run's
+own log is read for a known cause (:func:`failed_run_cause`; so far only the CLI warning that an
+ignore file excludes files a prebuilt build's traced functions need — the FAILED/CANCELLED line
+names it, not just the run id). The dispatch is
 ``gh workflow run <workflow> -R <slug> --ref <trunk> -f <input>=<sha>`` (``input`` default
 ``sha``; ``none`` sends no input).
 
@@ -55,6 +58,7 @@ rest, dev and the named targets after it. The tick prints them (:func:`tick`); `
 import datetime
 import json
 import os
+import re
 import subprocess
 
 from asf.evidence import sources
@@ -547,10 +551,35 @@ def _sha_green(product, sha, ci_runs, sh, env='prod'):
     return bool(got[0]), got[1]
 
 
+#: A prebuilt deploy's ignore file (``.vercelignore`` or the like) excluded a path its traced
+#: functions need — the deploy runs, its CLI prints this warning, and it then crashes (ENOENT on
+#: a readlink of the missing file): a site-deploy incident where a repo-root ``.vercelignore``
+#: excluded ``docs/`` while the prebuilt Next functions had traced ``docs/`` files. Named here so
+#: the failed line says *this*, not just FAILED, the next time an ignore file drifts from what a
+#: build traces.
+IGNORE_EXCLUDES_CAUSE = 'an ignore file excludes files the prebuilt functions need'
+_IGNORE_EXCLUDES_RE = re.compile(
+    r'ignore[^\n]{0,40}\bexclud\w*\b[^\n]{0,160}\bprebuilt function', re.IGNORECASE)
+
+
+def failed_run_cause(log):
+    """The named cause of a failed deploy run's log, or None when it matches no known cause
+    (:data:`IGNORE_EXCLUDES_CAUSE` is the only one so far)."""
+    return IGNORE_EXCLUDES_CAUSE if log and _IGNORE_EXCLUDES_RE.search(log) else None
+
+
+def _failed_cause(product, run_id, sh):
+    """:func:`failed_run_cause` of ``run_id``'s own log — the failing job's steps only, never
+    the whole run (a soak or a matrix leg that did not fail carries nothing useful here). None
+    when the log itself cannot be read."""
+    log = sh(['gh', 'run', 'view', str(run_id), '-R', product.repo_slug, '--log-failed'])
+    return failed_run_cause(log)
+
+
 def _blank(product, env):
     return {'env': env, 'mode': mode(product, env), 'workflow': workflow(product, env),
             'ci': ci_workflow(product), 'deployed': None, 'prod': None, 'running': None,
-            'failed': None, 'failed_how': None, 'candidate': None, 'main': None, 'behind': None, 'age': None, 'at': None,
+            'failed': None, 'failed_how': None, 'failed_cause': None, 'candidate': None, 'main': None, 'behind': None, 'age': None, 'at': None,
             'error': None, 'why': None, 'rule': None, 'ci_running': None, 'required': _required_label(product, env),
             'paths': paths(product, env), 'relevant': None,
             'reader': reader(product, env)}
@@ -640,6 +669,7 @@ def facts(product, sh=_sh, now=None, env='prod', _ci=None, deploy=None):
                     and r.get('conclusion') not in ('success', None)), None)
         if bad:
             f['failed'], f['failed_how'] = bad.get('databaseId'), bad.get('conclusion')
+            f['failed_cause'] = _failed_cause(product, f['failed'], sh)
     return _done(f)
 
 
@@ -733,7 +763,8 @@ def decide(product, f, env=None):
     lead = f"{head} {env} {f.get('mode') or 'manual'} (held): " if held else f'{head} '
     if f['failed']:
         word = 'CANCELLED' if f.get('failed_how') == 'cancelled' else 'FAILED'
-        last = f"{wf} for {_s(f['candidate'])} {word} (run {f['failed']})"
+        cause = f" — {f['failed_cause']}" if f.get('failed_cause') else ''
+        last = f"{wf} for {_s(f['candidate'])} {word} (run {f['failed']}){cause}"
         if held:
             return False, f"{lead}{last}; {lag} — {_manual(product, f, env)}{why}"
         return False, f"{lead}{last} — not retried; {lag}; the next green sha dispatches again"
