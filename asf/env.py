@@ -12,6 +12,7 @@ cannot read — unbalanced, or a map entry with no ``key:`` — raises :class:`C
 the key and the line; it is never loaded as a string. Anything else outside that subset is a bug
 in the config file, not a feature to add here.
 """
+import collections
 import os
 import re
 
@@ -419,21 +420,26 @@ def product_auth_env(product):
     return {str(k): os.path.expanduser(str(v)) for k, v in auth.items()} if isinstance(auth, dict) else {}
 
 
+Resolution = collections.namedtuple('Resolution', 'name source')
+
+#: The four inputs that can name a product, in the order they are tried. The token is printed
+#: in every view's first line, so a wrong fallback is visible (F-0110).
+PRODUCT_SOURCES = ('--product', '$ASF_PRODUCT', 'cwd', 'default_product')
+
+
 def product_of_dir(path=None):
     """The product whose checkout contains ``path`` (default: the cwd) — its ``repo_dir``,
     ``backlog_dir`` or state directory — or None. The deepest root wins, so a product nested
     inside another's tree resolves to itself. A product file that does not parse is skipped:
-    this is a guess made before any product is loaded, never a reason to fail one."""
-    try:
-        here = os.path.realpath(path or os.getcwd())
-    except OSError:
-        return None
+    this is a guess made before any product is loaded, never a reason to fail one. The
+    comparison is containment by directory identity (``st_dev``/``st_ino``), not by spelling, so
+    a root that differs only by case on a case-insensitive filesystem still matches (P11)."""
     pdir = os.path.join(ASF_HOME, 'products')
     try:
         files = sorted(f for f in os.listdir(pdir) if f.endswith('.yaml'))
     except OSError:
         return None
-    best, best_len = None, -1
+    ids = {}  # (st_dev, st_ino) -> (name, len(root))
     for f in files:
         name = f[:-len('.yaml')]
         try:
@@ -448,30 +454,57 @@ def product_of_dir(path=None):
                 continue
             root = os.path.realpath(os.path.expanduser(root))
             try:
-                inside = os.path.commonpath([here, root]) == root
-            except ValueError:
-                inside = False
-            if inside and len(root) > best_len:
-                best, best_len = name, len(root)
-    return best
+                st = os.stat(root)
+            except OSError:  # a root that does not exist is not a root
+                continue
+            key = (st.st_dev, st.st_ino)
+            if len(root) > ids.get(key, (None, -1))[1]:
+                ids[key] = (name, len(root))
+    try:
+        here = os.path.realpath(path or os.getcwd())
+    except OSError:
+        return None
+    while True:
+        try:
+            st = os.stat(here)
+        except OSError:
+            return None
+        hit = ids.get((st.st_dev, st.st_ino))
+        if hit:
+            return hit[0]
+        parent = os.path.dirname(here)
+        if parent == here:
+            return None
+        here = parent
+
+
+def resolve_product(explicit=None, path=None):
+    """Which product a command acts on, and what chose it: ``--product``, else
+    ``$ASF_PRODUCT``, else the product whose repo or record holds ``path`` (default: the cwd —
+    :func:`product_of_dir`), else ``config.yaml``'s ``default_product``. Raises
+    :class:`ConfigError` naming all four when none answers."""
+    if explicit:
+        return Resolution(explicit, '--product')
+    if os.environ.get('ASF_PRODUCT'):
+        return Resolution(os.environ['ASF_PRODUCT'], '$ASF_PRODUCT')
+    here = product_of_dir(path)
+    if here:
+        return Resolution(here, 'cwd')
+    cfg = load_config()
+    name = cfg.get('default_product')
+    if name:
+        return Resolution(name, 'default_product')
+    raise ConfigError(
+        'no --product, no $ASF_PRODUCT, no product whose repo or record holds %s, '
+        'and config.yaml has no default_product' % (os.path.realpath(path or os.getcwd()),)
+    )
 
 
 def default_product_name():
     """``$ASF_PRODUCT`` first, else the product whose checkout holds the cwd
     (:func:`product_of_dir` — ``asf status`` run bare in a product's repo reads that product,
     not the operator's default), else ``config.yaml``'s ``default_product``."""
-    if os.environ.get('ASF_PRODUCT'):
-        return os.environ['ASF_PRODUCT']
-    here = product_of_dir()
-    if here:
-        return here
-    cfg = load_config()
-    name = cfg.get('default_product')
-    if not name:
-        raise ConfigError(
-            'no product given (--product), no $ASF_PRODUCT, and config.yaml has no default_product'
-        )
-    return name
+    return resolve_product().name
 
 
 # ---- the product file's declared fields ------------------------------------

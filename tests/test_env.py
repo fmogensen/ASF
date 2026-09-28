@@ -461,3 +461,107 @@ class ProductOfCwdTests(unittest.TestCase):
             self.assertEqual(env.default_product_name(), 'asf')
         finally:
             del os.environ['ASF_PRODUCT']
+
+    def test_nested_product_resolves_to_the_inner_one(self):
+        nested_repo = os.path.join(self.asf_repo, 'vendor', 'bot')
+        os.makedirs(nested_repo)
+        with open(os.path.join(self.home, 'products', 'nested.yaml'), 'w') as f:
+            f.write('product: nested\nrepo_dir: %s\n' % nested_repo)
+        self.assertEqual(env.product_of_dir(nested_repo), 'nested')
+        self.assertEqual(env.product_of_dir(self.asf_repo), 'asf')
+
+    def test_root_spelled_in_another_case_still_matches(self):
+        probe = os.path.join(self.tmp.name, 'CaseProbe')
+        os.mkdir(probe)
+        if not os.path.isdir(os.path.join(self.tmp.name, 'caseprobe')):
+            self.skipTest('needs a case-insensitive filesystem')
+        cased_root = os.path.join(self.tmp.name, 'Cased', 'Repo')
+        os.makedirs(cased_root)
+        with open(os.path.join(self.home, 'products', 'cased.yaml'), 'w') as f:
+            f.write('product: cased\nrepo_dir: %s\n' % cased_root)
+        other_case = os.path.join(self.tmp.name, 'cased', 'repo')
+        self.assertNotEqual(
+            os.path.commonpath([os.path.realpath(other_case), cased_root]), cased_root
+        )
+        self.assertEqual(env.product_of_dir(other_case), 'cased')
+
+    def test_root_that_does_not_exist_is_skipped_not_raised(self):
+        with open(os.path.join(self.home, 'products', 'ghost.yaml'), 'w') as f:
+            f.write('product: ghost\nrepo_dir: %s\n' % os.path.join(self.tmp.name, 'nowhere'))
+        self.assertEqual(env.product_of_dir(self.bot_repo), 'bot')
+
+    def test_state_dir_root_resolves_its_product(self):
+        state_dir = os.path.join(self.home, 'state', 'bot')
+        os.makedirs(state_dir)
+        self.assertEqual(env.product_of_dir(state_dir), 'bot')
+
+
+class ProductResolutionOrderTests(unittest.TestCase):
+    """T-0422: one function walks the order and names the input that chose the product."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = os.path.realpath(self.tmp.name)
+        self.home = os.path.join(root, 'home')
+        os.makedirs(os.path.join(self.home, 'products'))
+        self.asf_repo = os.path.join(root, 'ASF')
+        self.bot_repo = os.path.join(root, 'bot')
+        for d in (self.asf_repo, self.bot_repo):
+            os.makedirs(d, exist_ok=True)
+        with open(os.path.join(self.home, 'config.yaml'), 'w') as f:
+            f.write('default_product: asf\n')
+        for name, repo in (('asf', self.asf_repo), ('bot', self.bot_repo)):
+            with open(os.path.join(self.home, 'products', f'{name}.yaml'), 'w') as f:
+                f.write(f'product: {name}\nrepo_dir: {repo}\n')
+        self.old_home, env.ASF_HOME = env.ASF_HOME, self.home
+        self.old_env = os.environ.pop('ASF_PRODUCT', None)
+        self.old_cwd = os.getcwd()
+
+    def tearDown(self):
+        os.chdir(self.old_cwd)
+        env.ASF_HOME = self.old_home
+        os.environ.pop('ASF_PRODUCT', None)
+        if self.old_env is not None:
+            os.environ['ASF_PRODUCT'] = self.old_env
+        self.tmp.cleanup()
+
+    def test_explicit_wins_over_everything(self):
+        os.chdir(self.asf_repo)
+        os.environ['ASF_PRODUCT'] = 'asf'
+        self.assertEqual(env.resolve_product('bot'), env.Resolution('bot', '--product'))
+
+    def test_env_var_wins_over_cwd_and_default(self):
+        os.chdir(self.bot_repo)
+        os.environ['ASF_PRODUCT'] = 'asf'
+        self.assertEqual(env.resolve_product(), env.Resolution('asf', '$ASF_PRODUCT'))
+
+    def test_cwd_wins_over_default(self):
+        os.chdir(self.bot_repo)
+        self.assertEqual(env.resolve_product(), env.Resolution('bot', 'cwd'))
+
+    def test_default_product_is_the_last_resort(self):
+        os.chdir(self.tmp.name)
+        self.assertEqual(env.resolve_product(), env.Resolution('asf', 'default_product'))
+
+    def test_none_answering_names_all_four(self):
+        with open(os.path.join(self.home, 'config.yaml'), 'w') as f:
+            f.write('worker_pool: 1\n')
+        os.chdir(self.tmp.name)
+        with self.assertRaises(env.ConfigError) as ctx:
+            env.resolve_product()
+        message = str(ctx.exception)
+        for token in ('--product', '$ASF_PRODUCT', self.tmp.name, 'default_product'):
+            self.assertIn(token, message)
+
+    def test_default_product_name_matches_resolve_product_name(self):
+        scenarios = [
+            (self.asf_repo, {'ASF_PRODUCT': 'asf'}),
+            (self.bot_repo, {'ASF_PRODUCT': 'asf'}),
+            (self.bot_repo, {}),
+            (self.tmp.name, {}),
+        ]
+        for cwd, extra_env in scenarios:
+            os.chdir(cwd)
+            os.environ.pop('ASF_PRODUCT', None)
+            os.environ.update(extra_env)
+            self.assertEqual(env.default_product_name(), env.resolve_product().name)
