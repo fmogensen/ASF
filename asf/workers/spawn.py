@@ -9,9 +9,9 @@
    ``Product.repo_dir`` — an ended run's worktree on that branch, or a branch already on origin
    (a held branch sent back for another round, ``correct`` or ``adjudicate`` alike), is reused
    instead, rebased onto ``origin/<main>``; only a live run's worktree refuses
-   (:func:`make_worktree`); a *fresh* worktree then runs the product's
-   ``conventions.worktree_setup`` under the session's own environment
-   (:func:`run_worktree_setup`) — a failure refuses the launch and removes the worktree;
+   (:func:`make_worktree`); the product's ``conventions.worktree_setup`` then runs in it unless
+   the worktree already records that exact command (:func:`run_worktree_setup`,
+   :func:`setup_done`) — a failure refuses the launch and removes the worktree;
 2. an id range reserved for the job in ``~/.ASF/state/<product>/id-ranges.tsv`` and handed to
    the session as ``BACKLOG_ID_RANGE`` (so parallel writers never mint the same id — see
    ``asf.record.ids``);
@@ -26,6 +26,7 @@
    (the wave step's S1 load-hold bypass, :mod:`asf.tick.step_wave`), so a later wave can see the
    bypass is still live.
 """
+import json
 import os
 import re
 import subprocess
@@ -672,18 +673,73 @@ def setup_log_path(product, job):
     return os.path.join(briefs_dir(product), f'{job}.setup.log')
 
 
+#: The worktree's own record that the product's setup command ran in it: a JSON file in the
+#: worktree's **git admin dir** (``<repo>/.git/worktrees/<name>/asf-setup``), never in the tree.
+#: An untracked file in the tree would read as uncommitted work for ever, and no worktree would be
+#: reaped again (:func:`asf.workers.worktrees.safety`); the admin dir is deleted with the tree by
+#: ``git worktree remove`` and ``git worktree prune``, which is what makes a recreated path count
+#: as fresh (F-0127, D1/D2).
+SETUP_MARKER = 'asf-setup'
+
+
+def setup_marker_path(worktree):
+    """``worktree``'s setup marker, resolved through the tree's own ``.git`` file
+    (:func:`_admin_dir`) so a suffixed admin dir resolves to its own; '' when there is none."""
+    admin = _admin_dir(worktree)
+    return os.path.join(admin, SETUP_MARKER) if admin else ''
+
+
+def setup_done(worktree, command):
+    """Whether ``command`` has already run in ``worktree``: its marker parses and names exactly
+    this command.
+
+    This is what *fresh* means (F-0127). A worktree with no marker has not been set up, whatever
+    its path held before the launch — a reclaimed orphan is a new checkout at an old path, and the
+    old admin dir went with the old tree (D1/D2). A marker naming a different command is a tree the
+    product's current command has not run in (D3). An unreadable or malformed marker, or a tree
+    with no admin dir, is not set up: running an idempotent command again is the safe answer, and
+    handing a session a tree that may hold no dependencies is not (D8)."""
+    path = setup_marker_path(worktree)
+    if not path:
+        return False
+    try:
+        with open(path, encoding='utf-8') as f:
+            return json.load(f).get('command') == command
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def _record_setup(worktree, command, took_s):
+    """Write the marker: the command verbatim, the UTC time, the seconds it took. Returns the path,
+    or '' when it could not be written — which is not a failed launch (D7): the setup did run, and
+    the only cost of a lost marker is one repeat in that worktree."""
+    path = setup_marker_path(worktree)
+    if not path:
+        return ''
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump({'command': command, 'at': pool_mod.now_iso(), 'took_s': took_s},
+                      f, sort_keys=True)
+    except OSError:
+        return ''
+    return path
+
+
 def run_worktree_setup(product, job, worktree, account=None, passthrough=(),
                        timeout=WORKTREE_SETUP_TIMEOUT_S):
-    """Run the product's ``conventions.worktree_setup`` (a shell command) in the fresh
-    ``worktree``, under the environment the session itself will have
-    (:func:`asf.workers.runtime.build_env`, worker mode: the allow-list, the account's HOME).
-    Its output goes to ``briefs/<job>.setup.log``. Returns the seconds it took, or None when the
-    product declares no command. A failure or a timeout removes the worktree — a fresh one
-    without its setup is never handed over, nor reused as if it had one — and raises
-    :class:`SpawnError` naming the command and its first line of error output."""
+    """Run the product's ``conventions.worktree_setup`` (a shell command) in ``worktree``, under
+    the environment the session itself will have (:func:`asf.workers.runtime.build_env`, worker
+    mode: the allow-list, the account's HOME). Its output goes to ``briefs/<job>.setup.log``.
+    Returns the seconds it took, or None when the product declares no command or this worktree
+    already carries the marker for it (:func:`setup_done`) — a reused tree keeps the install it
+    already has. A failure or a timeout removes the worktree — a tree without its setup is never
+    handed over, nor reused as if it had one — and raises :class:`SpawnError` naming the command
+    and its first line of error output."""
     command = getattr(product.conventions, 'worktree_setup', None)
     if not command:
         return None
+    if setup_done(worktree, command):
+        return None          # this tree already ran exactly this command (F-0127, D6)
     runtime_mod.seed_home(account)
     product_auth_env = env.product_auth_env(product)
     job_env = runtime_mod.build_env(runtime_mod.Job(product.name, job, worktree, None, None,
@@ -712,7 +768,9 @@ def run_worktree_setup(product, job, worktree, account=None, passthrough=(),
     except subprocess.TimeoutExpired:
         why = f'timed out after {timeout}s'
     if why is None:
-        return round(time.monotonic() - started, 1)
+        took = round(time.monotonic() - started, 1)
+        _record_setup(worktree, command, took)
+        return took
     with repo_lock(product.repo_dir):
         _discard(product, worktree)
     raise SpawnError(f'worktree_setup `{command}` failed in {worktree} ({why}) — log: {log}',
@@ -740,8 +798,6 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
         raise SpawnError(str(e), clear=e.clear) from None
     model = model_arg(row.model, cfg)
     branch = branch_for(product, row)
-    own_path = os.path.join(worktrees_dir(product), row.job)
-    fresh = not os.path.exists(own_path)
     worktree = make_worktree(product, row.job, branch, kind=row.kind)
     cloud = getattr(runtime, 'lane', 'local') == 'cloud'
     setup_s = None
@@ -749,7 +805,10 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
         # the session runs off this host (asf.workers.cloud): nothing is set up or built here,
         # and the branch it checks out must be on origin — a fresh one is published first
         _publish_fresh_branch(product, worktree, branch)
-    elif fresh and worktree == own_path:  # a new worktree, not an ended run's reused one
+    else:
+        # whether this worktree is fresh is the worktree's own record, not whether its path
+        # existed a moment ago: a reclaimed orphan is a new checkout at an old path, and that
+        # launch used to skip its setup and hand over a tree with no dependencies (F-0127)
         setup_s = run_worktree_setup(product, row.job, worktree, account, passthrough)
     id_range = reserve_id_range(product, row.job,
                                 prefixes=wp.get('id_range_prefixes') or DEFAULT_ID_PREFIXES,
