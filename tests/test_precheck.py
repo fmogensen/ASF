@@ -57,6 +57,35 @@ class LevelTests(unittest.TestCase):
         level, why = precheck.level_for(size.SMALL, 4000, 0)
         self.assertEqual(level, precheck.LOW)
 
+    def test_small_task_floored_to_high_by_security(self):
+        level, why = precheck.level_for(size.SMALL, 40, 1500, security=True)
+        self.assertEqual(level, precheck.HIGH)
+        self.assertEqual(why, 'size class small, floored by sensitive paths')
+
+    def test_max_answer_unchanged_by_security(self):
+        level, why = precheck.level_for(size.SMALL, 4000, 1500, security=True)
+        self.assertEqual(level, precheck.MAX)
+        self.assertIn('4000', why)
+        self.assertIn('1500', why)
+
+    def test_every_case_reasserted_with_security_false(self):
+        self.assertEqual(precheck.level_for(size.SMALL, 40, 1500, security=False),
+                          precheck.level_for(size.SMALL, 40, 1500))
+        self.assertEqual(precheck.level_for(size.MEDIUM, 40, 1500, security=False),
+                          precheck.level_for(size.MEDIUM, 40, 1500))
+        self.assertEqual(precheck.level_for(size.LARGE, 40, 1500, security=False),
+                          precheck.level_for(size.LARGE, 40, 1500))
+        self.assertEqual(precheck.level_for(size.SMALL, 4000, 1500, security=False),
+                          precheck.level_for(size.SMALL, 4000, 1500))
+        self.assertEqual(precheck.level_for(size.LARGE, 4000, 1500, security=False),
+                          precheck.level_for(size.LARGE, 4000, 1500))
+        self.assertEqual(precheck.level_for(size.SMALL, None, 1500, security=False),
+                          precheck.level_for(size.SMALL, None, 1500))
+        self.assertEqual(precheck.level_for(None, 40, 1500, security=False),
+                          precheck.level_for(None, 40, 1500))
+        self.assertEqual(precheck.level_for(size.SMALL, 4000, 0, security=False),
+                          precheck.level_for(size.SMALL, 4000, 0))
+
     def test_dimensions_low_is_its_own_four(self):
         low = precheck.dimensions(precheck.LOW)
         self.assertEqual(low, precheck.DIMENSIONS[precheck.LOW])
@@ -78,6 +107,61 @@ class LevelTests(unittest.TestCase):
 
     def test_unknown_level_reads_as_high(self):
         self.assertEqual(precheck.dimensions('nonsense'), precheck.dimensions(precheck.HIGH))
+
+
+class SecurityDimensionTests(unittest.TestCase):
+    """§3.2: the rows a sensitive diff owes, additive over the level's own."""
+
+    def test_security_dimensions_empty_for_no_hit(self):
+        self.assertEqual(precheck.security_dimensions({}), ())
+        self.assertEqual(precheck.security_dimensions(None), ())
+
+    def test_security_dimensions_two_classes_in_order_then_the_standing_three(self):
+        hit = {'auth': ['a.py'], 'billing': ['b.py']}
+        dims = precheck.security_dimensions(hit)
+        self.assertEqual(dims, (precheck.class_dimension('auth'), precheck.class_dimension('billing'))
+                          + precheck.SECURITY_DIMENSIONS)
+        self.assertEqual(len(dims), len(set(dims)))
+
+    def test_dimensions_default_security_matches_plain_dimensions(self):
+        self.assertEqual(precheck.dimensions(precheck.LOW),
+                          precheck.DIMENSIONS[precheck.LOW])
+        self.assertEqual(precheck.dimensions(precheck.HIGH),
+                          precheck.DIMENSIONS[precheck.LOW] + precheck.DIMENSIONS[precheck.HIGH])
+
+    def test_covered_default_security_matches_plain_covered(self):
+        rows, faults = precheck.parse(table())
+        self.assertEqual(precheck.covered(rows, precheck.LOW), precheck.DIMENSIONS[precheck.LOW])
+
+    def test_dimensions_high_with_security_is_high_then_security_rows_in_order(self):
+        security = precheck.security_dimensions({'billing': ['b.py']})
+        self.assertEqual(precheck.dimensions(precheck.HIGH, security=security),
+                          precheck.DIMENSIONS[precheck.LOW] + precheck.DIMENSIONS[precheck.HIGH]
+                          + security)
+
+    def test_covered_names_an_uncovered_class_row(self):
+        security = precheck.security_dimensions({'billing': ['b.py']})
+        rows, faults = precheck.parse(table())
+        self.assertEqual(precheck.covered(rows, precheck.LOW, security=security),
+                          precheck.DIMENSIONS[precheck.LOW] + security)
+
+    def test_faults_one_dimension_not_covered_per_class_row(self):
+        security = precheck.security_dimensions({'billing': ['b.py']})
+        answered = precheck.dimensions(precheck.HIGH) + precheck.SECURITY_DIMENSIONS
+        rows_text = table(*(f'| {d} | pass | n/a | ok |' for d in answered))
+        class_faults = [f for f in precheck.faults(rows_text, precheck.HIGH, security=security)
+                         if 'dimension not covered' in f]
+        self.assertEqual(len(class_faults), 1)
+        self.assertIn('billing:', class_faults[0])
+
+    def test_render_table_with_security_reparses_one_row_per_dimension(self):
+        security = precheck.security_dimensions({'billing': ['b.py']})
+        text = precheck.render_table(precheck.HIGH, security=security)
+        rows, faults = precheck.parse(text)
+        expected = len(precheck.dimensions(precheck.HIGH, security=security))
+        self.assertEqual(len(rows), expected)
+        self.assertEqual(len(faults), expected * 2)
+        self.assertTrue(all('unfilled' in f for f in faults))
 
 
 class TableTests(unittest.TestCase):
