@@ -2,6 +2,23 @@
 
 One entry per released version, newest first.
 
+## v0.1.69 — 2026-09-28
+
+### Features landed
+
+- F-0107 asf install: one command from zero to a ticking factory (from a release tag, doctor green)
+- F-0127 A product declares a worktree setup command; the spawner runs it in every fresh worktree
+
+### In progress
+
+- F-0110 /asf:* in a product's own session shows another product: resolve the product from the working directory
+- F-0126 feeder: a Task with no writes: (migrated pre-ASF plan) is launched and can only block
+- F-0143 A pre-commit hook pointing at the /x/asf test fixture path broke review-b-0111's commit
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.69"`
+
 ## v0.1.68 — 2026-09-28
 
 ### In progress
