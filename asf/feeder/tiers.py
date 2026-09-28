@@ -86,7 +86,7 @@ def gate(cut, uncut, held=()):
     holders = list(dict.fromkeys(r.item_id for r in cut
                                   if r.tier == TIER_S1 and r.action == NO_SLOT
                                   and r.item_id not in held))
-    behind_rows = [r for r in uncut if r.tier == TIER_REST and r.launches]
+    behind_rows = [r for r in uncut if r.tier == TIER_REST and r.launches and r.item_id not in held]
     cut_keys = {(r.item_id, r.kind) for r in cut}
     dropped = [r for r in behind_rows if (r.item_id, r.kind) not in cut_keys]
     order, counts = [], {}

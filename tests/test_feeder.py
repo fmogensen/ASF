@@ -1795,6 +1795,18 @@ class S1GateTests(unittest.TestCase):
         g = tiers.gate(cut, uncut, held=['B-0001'])
         self.assertEqual(g.holders, [])
 
+    def test_a_held_tier_2_row_is_not_counted_as_dropped_by_the_s1_lane(self):
+        # a tier-2 row an approval hold parks always launches (costs no slot) — it is not the
+        # S1 lane's doing when it never reaches `cut`, so it must not inflate held/behind/by_kind
+        idx = ten_features_and_an_s1()
+        busy = [{'item': 'X-1'}]
+        cut = rows.plan_rows(idx, product(), busy, 1, held=['F-0001'])
+        uncut = rows.plan_rows(idx, product(), busy, 11, s1_first=False, held=['F-0001'])
+        g = tiers.gate(cut, uncut, held=['F-0001'])
+        self.assertEqual(g.held, 9)
+        self.assertEqual(g.behind, 9)
+        self.assertEqual(g.by_kind, [('CARD → SPEC', 9)])
+
 
 def finish_index(cards=4, build_stage='plan-approved', task_state='New'):
     """A ranked Epic of ``cards`` decided Feature cards (F-0001 first) and, ranked last, F-0099:
