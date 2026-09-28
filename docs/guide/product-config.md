@@ -628,11 +628,13 @@ secret-looking environment variables. A finding is printed as a location and a p
 never the matched text.
 
 `asf hooks install` writes a `pre-commit` and a `pre-push` into the real hooks directory (`git
-rev-parse --git-path hooks`, which honours `core.hooksPath`) of `repo_dir` and `backlog_dir`. The
-doctor's `redaction-hooks` row accepts any hook file that contains `asf redact --pre-commit` (or
-`--pre-push`) in any spelling — a quoted path to `asf`, a bare `asf` on `PATH`, or `python3 -m
-asf.redact`. A hook file already there that is not ASF's is never edited; the installer stops with
-`NEEDS OPERATOR: <path> is not asf's — add the line: …`.
+rev-parse --git-path hooks`, which honours `core.hooksPath`) of `repo_dir` and `backlog_dir`; the
+line it writes names the entry point of the install that ran the command — a plain `asf` or a
+pipx `--suffix` install (`asf-live`) alike. The doctor's `redaction-hooks` row accepts any hook
+file that contains `asf redact --pre-commit` (or `--pre-push`) in any spelling asf can write — a
+quoted or unquoted path to `asf`, a suffixed entry point, a bare `asf` on `PATH`, `python3 -m
+asf.redact`, or `python3 -m asf.cli redact`. A hook file already there that is not ASF's is never
+edited; the installer stops with `NEEDS OPERATOR: <path> is not asf's — add the line: …`.
 
 The foreign hook does not stop the rest: `asf hooks install` still writes the approvals hook into
 every worker account and every git hook it can, then reports the foreign one and exits 2. doctor's

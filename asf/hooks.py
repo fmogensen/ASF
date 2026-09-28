@@ -89,12 +89,67 @@ def _git_hook_body(name, asf_path, product_name):
             f'exec "{asf_path}" redact --{name} --product {product_name}\n')
 
 
+#: A pipx ``--suffix`` appended to the declared console-script name: empty, or starting with a
+#: digit or one of ``._+-`` — ``-live``, ``2``, ``.old`` and the like. Never a bare letter: a
+#: command that merely starts with ``asf`` (``asfmt``) is a different program, not a suffixed
+#: install, and this is what keeps it from being consumed as one below.
+_SUFFIX = r'''(?:[0-9._+-][A-Za-z0-9._+-]*)?'''
+
+#: The shape of an entry point asf may write: the declared console-script name (F-0111 P3) with
+#: :data:`_SUFFIX` appended — ``asf``, ``asf-live``, ``asf2`` and the like. Used, path prefix and
+#: quoting aside, by both recognisers below (F-0111 "reading back what asf writes").
+_ENTRY_TOKEN = rf'''(?:[^\s"'\n]*/)?\basf{_SUFFIX}'''
+
+
+def _hook_line_re(name):
+    """Every form :func:`_git_hook_body` or an operator's ``-m`` invocation can write for hook
+    ``name`` (F-0111 §"reading back what asf writes"): an entry-point basename — bare, quoted or
+    path-qualified — followed by ``redact --<name>``, or ``-m asf.redact --<name>``, or ``-m
+    asf.cli redact --<name>``. Each branch is anchored at a word boundary on the left, so a longer
+    command name that merely starts with ``asf`` (``asfmt``) is never matched by accident."""
+    n = re.escape(name)
+    return re.compile(
+        rf'''(?:(?P<q>["']){_ENTRY_TOKEN}(?P=q)|(?<!["']){_ENTRY_TOKEN})\s+redact\s+--{n}\b'''
+        rf'''|-m\s+asf\.redact\s+--{n}\b'''
+        rf'''|-m\s+asf\.cli\s+redact\s+--{n}\b''')
+
+
 def is_git_hook_ours(text, name):
-    """A hook file is *installed* when it contains ``asf redact --<name>`` or
-    ``asf.redact --<name>`` in any form (§2.4) — the quoted command form :func:`_git_hook_body`
-    writes (``"<path>/asf" redact ...``), unquoted (``asf`` on ``PATH``), or the module form
-    (``python3 -m asf.redact``) an operator or another product might write instead."""
-    return bool(re.search(rf'''asf['" .]*redact\s+--{re.escape(name)}\b''', text or ''))
+    """A hook file is *installed* when a line that is not a ``#`` comment matches
+    :func:`_hook_line_re` (§2.4, F-0111) — the quoted or unquoted command form
+    :func:`_git_hook_body` writes, a suffixed entry point (a pipx ``--suffix`` install, F-0111
+    P3), or the module form (``python3 -m asf.redact`` or ``-m asf.cli redact``) an operator or
+    another product might write instead. A match inside a quoted string that is not itself the
+    whole command (``echo "asf redact --pre-push"``) is not ours — the closing quote around the
+    entry point, when there is one, must land right after it, not at the end of the line."""
+    pat = _hook_line_re(name)
+    return any(pat.search(line) for line in (text or '').splitlines() if not line.strip().startswith('#'))
+
+
+def hook_entry(text, name):
+    """The command the line :func:`is_git_hook_ours` matches for hook ``name`` names, unquoted
+    (F-0111): the entry-point path for the basename form, the interpreter for either module form,
+    ``None`` when no line matches. Also ``None`` for a bare entry-point name — a command with no
+    ``/`` in it (PD5): ``asf init``'s hooks resolve it at hook-run time by design and are never a
+    repair candidate."""
+    n = re.escape(name)
+    entry_pat = re.compile(
+        rf'''(?:(?P<q>["'])(?P<qpath>{_ENTRY_TOKEN})(?P=q)|(?<!["'])(?P<upath>{_ENTRY_TOKEN}))'''
+        rf'''\s+redact\s+--{n}\b''')
+    module_pat = re.compile(
+        rf'''(?:(?P<mq>["'])(?P<qi>[^\s"'\n]+)(?P=mq)|(?<!["'])(?P<ui>[^\s"'\n]+))'''
+        rf'''\s+-m\s+asf\.(?:redact|cli\s+redact)\s+--{n}\b''')
+    for line in (text or '').splitlines():
+        if line.strip().startswith('#'):
+            continue
+        m = module_pat.search(line)  # tried first: the entry pattern's shape also fits
+        if m:                        # ``asf.cli``/``asf.redact`` as a (wrong) bare entry name
+            return m.group('qi') or m.group('ui')
+        m = entry_pat.search(line)
+        if m:
+            path = m.group('qpath') or m.group('upath')
+            return path if '/' in path else None
+    return None
 
 
 #: A record pre-commit line that runs ``asf check`` over the whole record — the invocation
@@ -244,9 +299,15 @@ def hook_command(asf_path, name, product):
 
 
 def _is_ours(command, name, product):
-    if product is None:
-        return bool(re.search(rf'(^|/)asf hook {re.escape(name)}$', command or ''))
-    return bool(re.search(rf'(^|/)asf hook {re.escape(name)} --product {re.escape(product)}$', command or ''))
+    """A settings ``command`` is asf's own hook entry for ``name`` (F-0111 §"reading back what
+    asf writes") when it is an entry-point basename — bare or after a ``/``, any pipx
+    ``--suffix`` included (:data:`_SUFFIX`, so a different program that merely starts with
+    ``asf`` — ``asfmt`` — cannot satisfy this) — or ``-m asf.cli``, followed by ``hook <name>``
+    and, when ``product`` is given, its ``--product <p>`` tail; the whole command, not a prefix
+    of a longer one (the ``$`` anchor is unchanged)."""
+    n = re.escape(name)
+    tail = rf' --product {re.escape(product)}' if product is not None else ''
+    return bool(re.search(rf'(?:(^|/)asf{_SUFFIX}|-m asf\.cli) hook {n}{tail}$', command or ''))
 
 
 def merge(settings, hooks, asf_path, product):
