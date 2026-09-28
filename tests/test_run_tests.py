@@ -189,6 +189,103 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(runner.parse(red)[3], {'unexpected successes': 1})
 
 
+class HookLeakTests(unittest.TestCase):
+    """The backstop (F-0143 S-34602): a hook file the confine never saw turns the run red."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix='hook_leak_')
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        subprocess.run(['git', 'init', '-q', self.root], check=True, capture_output=True)
+        self.runner = load_runner()
+
+    def _hooks_dir(self):
+        out = subprocess.run(['git', '-C', self.root, 'rev-parse', '--git-path', 'hooks'],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        return out if os.path.isabs(out) else os.path.join(self.root, out)
+
+    def test_hook_dirs_is_the_repos_own_and_core_hookspath_when_set(self):
+        own = self._hooks_dir()
+        self.assertEqual(self.runner.hook_dirs(self.root), [own])
+        shared = os.path.join(self.root, 'shared')
+        os.makedirs(shared)
+        subprocess.run(['git', '-C', self.root, 'config', 'core.hooksPath', shared],
+                       check=True, capture_output=True)
+        # git's own --git-path answer already follows core.hooksPath once set, so the
+        # de-duplicated list collapses to the one dir both resolutions now name (D11).
+        self.assertEqual(self._hooks_dir(), shared)
+        self.assertEqual(self.runner.hook_dirs(self.root), [shared])
+
+    def test_hook_dirs_of_a_tree_that_is_not_a_git_repo_is_empty(self):
+        not_repo = tempfile.mkdtemp(prefix='not_a_repo_')
+        self.addCleanup(shutil.rmtree, not_repo, ignore_errors=True)
+        self.assertEqual(self.runner.hook_dirs(not_repo), [])
+
+    def test_hook_digest_of_a_missing_dir_and_of_devnull_is_empty_and_does_not_raise(self):
+        missing = os.path.join(self.root, 'nope')
+        self.assertEqual(self.runner.hook_digest([missing, os.devnull]), {})
+
+    def test_hook_leaks_is_empty_for_an_unchanged_pair(self):
+        d = self._hooks_dir()
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, 'pre-push'), 'w') as f:
+            f.write('unchanged\n')
+        before = self.runner.hook_digest([d])
+        self.assertEqual(self.runner.hook_leaks(before, before), [])
+
+    def test_hook_leaks_names_an_added_an_overwritten_and_a_removed_file(self):
+        d = self._hooks_dir()
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, 'pre-push'), 'w') as f:
+            f.write('AAAAAAAAAA')
+        with open(os.path.join(d, 'pre-commit'), 'w') as f:
+            f.write('BBBBBBBBBB')
+        before = self.runner.hook_digest([d])
+        os.remove(os.path.join(d, 'pre-push'))
+        with open(os.path.join(d, 'pre-commit'), 'w') as f:
+            f.write('CBBBBBBBBB')  # same length as before — a size check would miss this (D10)
+        with open(os.path.join(d, 'post-checkout'), 'w') as f:
+            f.write('DDDDDDDDDD')
+        after = self.runner.hook_digest([d])
+        self.assertEqual(self.runner.hook_leaks(before, after), sorted([
+            f'{d}/pre-push removed',
+            f'{d}/pre-commit changed',
+            f'{d}/post-checkout added',
+        ]))
+
+    def _plant(self, tests_dir, name, text):
+        with open(os.path.join(tests_dir, name + '.py'), 'w', encoding='utf-8') as f:
+            f.write(text)
+
+    def test_the_runner_reddens_when_a_planted_module_writes_a_hook_the_confine_never_saw(self):
+        tests_dir = os.path.join(self.root, 'tests')
+        os.makedirs(tests_dir)
+        open(os.path.join(tests_dir, '__init__.py'), 'w').close()
+        hooks_dir = self._hooks_dir()
+        self._plant(tests_dir, 'test_plant', (
+            "import os, unittest\n\nclass T(unittest.TestCase):\n"
+            "    def test_it(self):\n"
+            f"        os.makedirs({hooks_dir!r}, exist_ok=True)\n"
+            f"        with open(os.path.join({hooks_dir!r}, 'pre-commit'), 'w') as f:\n"
+            "            f.write('planted by a suite write that never asked git')\n"))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = self.runner.run(tests_dir, out=lambda l: print(l))
+        text = buf.getvalue()
+        self.assertNotEqual(rc, 0, text)
+        self.assertIn(f'hook leak: {hooks_dir}/pre-commit added', text)
+        self.assertIn('FAILED (hook files changed outside a temp repo — F-0143)', text)
+
+    def test_the_runner_over_a_clean_module_exits_zero(self):
+        tests_dir = os.path.join(self.root, 'tests')
+        os.makedirs(tests_dir)
+        open(os.path.join(tests_dir, '__init__.py'), 'w').close()
+        self._plant(tests_dir, 'test_clean', GREEN)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = self.runner.run(tests_dir, out=lambda l: print(l))
+        self.assertEqual(rc, 0, buf.getvalue())
+
+
 class CommandLineTests(unittest.TestCase):
     def test_list_prints_the_plan_and_shards_is_capped(self):
         r = subprocess.run([sys.executable, RUNNER, '--list', '--shards', '3'], cwd=REPO_ROOT,

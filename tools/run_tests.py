@@ -22,6 +22,7 @@ exit status is non-zero when any process was. ``--shards 1`` is the serial suite
 a time. Python 3 stdlib only.
 """
 import argparse
+import hashlib
 import os
 import re
 import shutil
@@ -149,6 +150,66 @@ def parse_only(text):
     return names or None
 
 
+def hook_dirs(root):
+    """Every hooks directory a suite run could damage, resolved from ``root`` itself: what
+    ``git rev-parse --git-path hooks`` answers, plus ``core.hooksPath`` when the repo sets one (on a
+    factory host that is a directory shared by every worktree, which is why one stray fixture hook
+    refuses another session's commits — review-b-0111). Resolved, never configured: the path is
+    machine-specific and belongs in no tracked file. ``root`` is **``run``'s own** (``root, package =
+    os.path.split(tests_dir)``, `tools/run_tests.py:155`), never the module-level ``ROOT``: the
+    runner's own tests drive ``run`` over a fixture ``tests/`` dir, and a check rooted at the real
+    checkout would digest the host's live hooks during them — reading another session's writes as
+    this run's leak, and reaching outside the fixture besides. A fixture root is not a git repo, so
+    its digest is empty and the check is inert there, which is what lets the unit cases below drive
+    ``hook_leaks`` directly."""
+    env = hermetic.build()
+    p = subprocess.run(['git', '-C', root, 'rev-parse', '--git-path', 'hooks'],
+                       capture_output=True, text=True, env=env)
+    if p.returncode != 0:
+        return []
+    out = p.stdout.strip()
+    dirs = [out if os.path.isabs(out) else os.path.join(root, out)]
+    c = subprocess.run(['git', '-C', root, 'config', 'core.hooksPath'],
+                       capture_output=True, text=True, env=env)
+    if c.returncode == 0:
+        hp = c.stdout.strip()
+        dirs.append(hp if os.path.isabs(hp) else os.path.join(root, hp))
+    return list(dict.fromkeys(dirs))
+
+
+def hook_digest(dirs):
+    """``{path: {name: sha256}}`` for each of ``dirs`` that exists — one digest per file, so an
+    overwritten hook is caught and not just an added one (D10)."""
+    out = {}
+    for d in dirs:
+        if not os.path.isdir(d):
+            continue
+        files = {}
+        for name in os.listdir(d):
+            path = os.path.join(d, name)
+            if os.path.isfile(path):
+                with open(path, 'rb') as f:
+                    files[name] = hashlib.sha256(f.read()).hexdigest()
+        out[d] = files
+    return out
+
+
+def hook_leaks(before, after):
+    """The lines naming every hook file added, changed or removed between two digests; empty when
+    the run left them all byte-identical."""
+    lines = []
+    for d in set(before) | set(after):
+        b, a = before.get(d, {}), after.get(d, {})
+        for name in set(b) | set(a):
+            if name not in b:
+                lines.append(f'{d}/{name} added')
+            elif name not in a:
+                lines.append(f'{d}/{name} removed')
+            elif b[name] != a[name]:
+                lines.append(f'{d}/{name} changed')
+    return sorted(lines)
+
+
 def run(tests_dir, shards=None, verbose=False, out=print, serial=SERIAL, only=None):
     """Run the suite — or, with ``only``, just those modules of it; the exit status."""
     tests_dir = os.path.abspath(tests_dir)
@@ -159,6 +220,8 @@ def run(tests_dir, shards=None, verbose=False, out=print, serial=SERIAL, only=No
         pool = [m for m in pool if m in only]
         tail = [m for m in tail if m in only]
     homes = tempfile.mkdtemp(prefix='asf-tests-')
+    dirs = hook_dirs(root)
+    before = hook_digest(dirs)
     results = []
     started = time.monotonic()
 
@@ -193,7 +256,12 @@ def run(tests_dir, shards=None, verbose=False, out=print, serial=SERIAL, only=No
         shutil.rmtree(homes, ignore_errors=True)
     out('')
     out(summary(results, time.monotonic() - started, shards))
-    return 0 if all(rc == 0 and parse(o)[2] == 'OK' for _m, rc, o in results) else 1
+    leaks = hook_leaks(before, hook_digest(dirs))
+    for line in leaks:
+        out(f'hook leak: {line}')
+    if leaks:
+        out('FAILED (hook files changed outside a temp repo — F-0143)')
+    return 0 if not leaks and all(rc == 0 and parse(o)[2] == 'OK' for _m, rc, o in results) else 1
 
 
 def build_parser():
