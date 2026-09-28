@@ -119,7 +119,9 @@ def cmd_next(args, root=None):
         print(rows_json(rows), end='')
     else:
         load = R.build_load(items, product, capacity, inflight, inputs.get('occupancy'),
-                            bandwidth=inputs.get('bandwidth'))
+                            bandwidth=inputs.get('bandwidth'), attempts=inputs.get('attempts'),
+                            groom_state=inputs.get('groom_state'), held=inputs.get('held'),
+                            gate=inputs.get('gate'))
         print(table(rows, hidden=hidden, load=load), end='')
     return 0
 

@@ -1844,6 +1844,26 @@ class FinishBeforeYouStart(unittest.TestCase):
         out = rows.plan_rows(finish_index(cards=4), product(), [], 10, held={'T-0099'})
         self.assertFalse([r for r in out if r.waits_on == 'finish'])
 
+    def test_a_stalled_feature_in_build_does_not_count(self):
+        # 2026-09-28: 37 counted in build on the factory's own record, 7 moving — the rest had
+        # landed Tasks behind them and nothing running or launchable ahead; new starts froze
+        idx = build_index(started=3)
+        for tid in ('T-01021', 'T-01031'):
+            idx['items'][tid]['blockedBy'] = ['F-0002']   # an open card: waits, launches nothing
+        items = rows.items_of(idx)
+        self.assertEqual(rows.features_in_build(items), ['F-0101', 'F-0102', 'F-0103'])
+        self.assertEqual(rows.build_load(idx, cap(2), 5)[0], 1)
+        by = {r.item_id: r for r in rows.plan_rows(idx, cap(2), [], 20)}
+        self.assertTrue(by['F-0001'].launches, by['F-0001'].action)
+        # a stalled Feature's Task held by a session moves again: it counts
+        self.assertEqual(rows.build_load(idx, cap(2), 5, [{'item': 'T-01021', 'kind': 'coder'}])[0],
+                         2)
+
+    def test_a_fair_share_is_not_cut_by_the_quota_stop_twice(self):
+        bw = {'sessions': 3, 'accounts': 5, 'quota_stopped': 2, 'ci_free': 2}
+        self.assertEqual(rows.features_cap(product(), 1, bw)[0], 4)   # 3.6
+        self.assertEqual(rows.features_cap(product(), 1, dict(bw, quota_in_sessions=True))[0], 6)
+
     def test_the_cap_is_a_convention(self):
         for cap, launched in ((0, []), (3, ['F-0001', 'F-0002', 'F-0003'])):
             p = product(conventions={'feeder': {'max_specs_in_flight': cap}})

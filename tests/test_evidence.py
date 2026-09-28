@@ -410,6 +410,9 @@ class EpicStateTests(unittest.TestCase):
 class BlockedOfTests(unittest.TestCase):
     def test_no_blockers(self):
         self.assertEqual(evidence.blocked_of([], {}), (False, []))
+        # ``blockedBy: ""`` names nothing: it never blocks (a product's F-0120, 2026-09-28)
+        self.assertEqual(evidence.blocked_of("", {}), (False, []))
+        self.assertEqual(evidence.blocked_of(["", "  "], {}), (False, []))
 
     def test_open_item_blocker(self):
         blocked, open_ = evidence.blocked_of(["F-0051"], {"F-0051": "Active"})

@@ -1426,6 +1426,8 @@ def blocked_of(blocked_by, state_by_id):
     from asf.record.core import as_list
     open_blockers = []
     for b in as_list(blocked_by):
+        if isinstance(b, str) and not b.strip():
+            continue  # ``blockedBy: ""`` names nothing: an empty blocker never blocks
         if b in state_by_id:
             if state_by_id[b] != "Closed":
                 open_blockers.append(b)
