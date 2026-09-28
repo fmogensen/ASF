@@ -104,6 +104,29 @@ class TableTests(unittest.TestCase):
         self.assertEqual(faults, [])
         self.assertEqual(checks[0].result, reviews.FAIL)
 
+    def test_an_unescaped_pipe_in_the_evidence_stays_in_the_evidence(self):
+        text = ('| check | result | evidence |\n| --- | --- | --- |\n'
+                '| no secret value printed | pass | `grep -E "key|token"` → no match |\n')
+        checks, faults = reviews.parse(text)
+        self.assertEqual(faults, [])
+        self.assertEqual(checks[0].result, reviews.PASS)
+        self.assertIn('token', checks[0].evidence)
+
+    def test_a_result_opening_a_qualifier_is_its_word(self):
+        text = ('| check | result | evidence |\n| --- | --- | --- |\n'
+                '| the Gate commands are green | pass, with a caveat | ran them |\n'
+                '| the diff stays inside `writes:` | FAIL — one file outside | x.py |\n')
+        checks, faults = reviews.parse(text)
+        self.assertEqual(faults, [])
+        self.assertEqual([c.result for c in checks], [reviews.PASS, reviews.FAIL])
+
+    def test_a_row_too_wide_with_no_result_word_is_still_a_fault(self):
+        text = ('| check | result | evidence |\n| --- | --- | --- |\n'
+                '| a | b | c | d |\n| x | passable | y |\n')
+        checks, faults = reviews.parse(text)
+        self.assertEqual(checks, [])
+        self.assertEqual(len(faults), 2)
+
     def test_render_table_reparses_with_no_fault(self):
         names = reviews.required('spec')
         text = reviews.render_table(names)

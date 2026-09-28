@@ -103,11 +103,15 @@ def parse(text):
                 i += 2
                 while i < n and lines[i].strip().startswith('|'):
                     row = cells(lines[i])
+                    if len(row) > 3 and _result_word(row[1]):
+                        # an unescaped `|` in the evidence (a grep pattern, a shell pipe): the
+                        # name and the result are whole, the rest is the evidence
+                        row = [row[0], row[1], ' | '.join(row[2:])]
                     if len(row) != 3:
                         faults.append(f'line {i + 1}: expected 3 cells, found {len(row)}')
                     else:
                         name, result, evidence = row
-                        r = result.strip().lower()
+                        r = _result_word(result) or result.strip().lower()
                         if r in RESULTS:
                             res = FAIL if not evidence.strip() else r
                             checks.append(Check(name=name, result=res, evidence=evidence,
@@ -121,6 +125,21 @@ def parse(text):
                 continue
         i += 1
     return checks, faults
+
+
+#: A result cell that opens with its word and then qualifies it: `pass, with a caveat`,
+#: `fail — the gate is red`. The word is the result; the rest belongs in the evidence.
+_RESULT_LEAD_RE = re.compile(r'^(pass|fail|n/a)(?:$|[\s,;:.(\u2014-])', re.I)
+
+
+def _result_word(cell):
+    """The result a cell states — `pass`, `fail` or `n/a` — alone or opening a qualifier, else
+    ''. A skeleton cell (`<pass\\|fail>`) states none."""
+    c = (cell or '').replace('`', '').replace('*', '').strip()
+    if '<' in c:
+        return ''
+    m = _RESULT_LEAD_RE.match(c)
+    return m.group(1).lower() if m else ''
 
 
 def normalize(name):
