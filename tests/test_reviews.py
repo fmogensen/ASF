@@ -1,3 +1,4 @@
+import os
 import unittest
 
 from asf import reviews
@@ -129,6 +130,31 @@ class NormalizeTests(unittest.TestCase):
         checks = [reviews.Check(name=required[-1], result=reviews.PASS, evidence='a',
                                 block=1, line=1)]
         self.assertEqual(reviews.missing(checks, required), list(required[:-1]))
+
+    def test_a_row_worded_shorter_or_under_a_label_covers_its_check(self):
+        # the brief's skeleton once worded two rows so: 119 of 121 approved code reviews read
+        # BOUNCE and each sent an approved branch back for a correction round
+        required = reviews.required('code')
+        names = ['scope: the diff stays inside `writes:`', 'every Step of the Task is implemented',
+                 "acceptance tests byte-identical to the plan's",
+                 'those tests were run and are green', 'the Gate commands are green',
+                 'no secret value printed, no background process, no skipped check']
+        checks = [reviews.Check(name=n, result=reviews.PASS, evidence='e', block=1, line=i)
+                  for i, n in enumerate(names)]
+        self.assertEqual(reviews.missing(checks, required), [])
+
+    def test_a_row_naming_another_check_does_not_cover(self):
+        self.assertFalse(reviews.covers('the acceptance tests are green',
+                                        "the acceptance tests are byte-identical to the plan's"))
+        self.assertFalse(reviews.covers('the diff', 'the diff stays inside `writes:`'))
+
+    def test_the_review_brief_skeleton_names_the_code_checklist(self):
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            'asf', 'briefs', 'templates', 'review.md')
+        with open(path, encoding='utf-8') as fh:
+            checks, _faults = reviews.parse(fh.read().replace("{delivery_checks}", ""))
+        self.assertEqual([reviews.normalize(c.name) for c in checks][:6],
+                         list(reviews.required('code')))
 
 
 class VerdictTests(unittest.TestCase):
