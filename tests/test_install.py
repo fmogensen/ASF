@@ -19,7 +19,7 @@ import unittest
 from unittest import mock
 
 import asf
-from asf import console_perms, conventions, env, hooks, init, schema, upgrade
+from asf import cli, console_perms, conventions, env, hooks, init, install, schema, upgrade
 from tests.gitfixture import executable_asf
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -43,6 +43,22 @@ def _files(root):
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d != '.git']
         out.update(os.path.relpath(os.path.join(dirpath, f), root) for f in filenames)
+    return out
+
+
+def _keys(data, prefix=''):
+    """Every dotted key path a parsed config carries — a list of maps (``worker_pool.accounts``)
+    unions its items' keys under the same path, index dropped, so one entry missing a key the
+    others carry still reads as documented."""
+    out = set()
+    if isinstance(data, dict):
+        for k, v in data.items():
+            dotted = f'{prefix}.{k}' if prefix else k
+            out.add(dotted)
+            out |= _keys(v, dotted)
+    elif isinstance(data, list):
+        for item in data:
+            out |= _keys(item, prefix)
     return out
 
 
@@ -2005,6 +2021,348 @@ class InstallScriptTest(unittest.TestCase):
             fcntl.flock(held, fcntl.LOCK_UN)
         finally:
             held.close()
+
+
+def _install_args(**over):
+    base = dict(product='demo', repo=None, repo_url=None, record=None, record_url=None,
+               scheduler=None, account=None, fake_workers=False, console_permissions=None,
+               allow_checkout=False, yes=True)
+    base.update(over)
+    return argparse.Namespace(**base)
+
+
+class InstallCommandTests(HomeCase):
+    """``asf install``'s own surface: every flag the parser carries, the required ``--product``,
+    the checkout refusal, the missing-flag rule and the version line."""
+
+    def _parser(self):
+        top = argparse.ArgumentParser()
+        sub = top.add_subparsers(dest='command')
+        install.register(sub)
+        return top
+
+    def test_parser_carries_every_flag(self):
+        top = self._parser()
+        args = top.parse_args([
+            'install', '--product', 'demo', '--repo', '/r', '--repo-url', 'https://x/r.git',
+            '--record', '/b', '--record-url', 'https://x/b.git', '--scheduler', 'cron',
+            '--account', 'a:~/x', '--account', 'b', '--fake-workers',
+            '--console-permissions', 'repo', '--allow-checkout', '--yes',
+        ])
+        self.assertEqual(args.product, 'demo')
+        self.assertEqual(args.repo, '/r')
+        self.assertEqual(args.repo_url, 'https://x/r.git')
+        self.assertEqual(args.record, '/b')
+        self.assertEqual(args.record_url, 'https://x/b.git')
+        self.assertEqual(args.scheduler, 'cron')
+        self.assertEqual(args.account, ['a:~/x', 'b'])
+        self.assertTrue(args.fake_workers)
+        self.assertEqual(args.console_permissions, 'repo')
+        self.assertTrue(args.allow_checkout)
+        self.assertTrue(args.yes)
+        self.assertIs(args.run, install.cmd_install)
+
+    def test_scheduler_and_console_permissions_reject_an_unknown_value(self):
+        top = self._parser()
+        with self.assertRaises(SystemExit):
+            top.parse_args(['install', '--product', 'demo', '--scheduler', 'systemd'])
+        with self.assertRaises(SystemExit):
+            top.parse_args(['install', '--product', 'demo', '--console-permissions', 'global'])
+
+    def test_product_is_required(self):
+        top = self._parser()
+        with self.assertRaises(SystemExit):
+            top.parse_args(['install'])
+
+    def test_checkout_install_refuses_without_allow_checkout_and_runs_with_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(cli, '_checkout_root', return_value=tmp):
+                rc, detail = install._step_asf(_install_args(allow_checkout=False))
+                self.assertEqual(rc, 1)
+                self.assertIn('checkout', detail)
+                rc, detail = install._step_asf(_install_args(allow_checkout=True))
+                self.assertEqual(rc, 0)
+
+    def test_version_line_names_what_version_string_returns(self):
+        with mock.patch.object(cli, '_checkout_root', return_value=None), \
+                mock.patch.object(cli, 'version_string', return_value='v9.9.9 (deadbee)'):
+            rc, detail = install._step_asf(_install_args())
+        self.assertEqual((rc, detail), (0, 'v9.9.9 (deadbee)'))
+
+    def test_tty_prompt_asks_once_per_missing_flag_and_takes_the_default_on_empty_answer(self):
+        # a default for --record too, so an empty answer at each of the three prompts is taken
+        self.write(env.product_path('demo'), 'product: demo\nbacklog_dir: /existing/backlog\n')
+        args = _install_args(repo=None, record=None, scheduler=None, yes=False)
+        with mock.patch('sys.stdin.isatty', return_value=True), \
+                mock.patch('builtins.input', side_effect=['', '', '']) as fake_input:
+            ok = install._resolve_missing(args)
+        self.assertTrue(ok)
+        self.assertEqual(fake_input.call_count, 3)
+        self.assertEqual(args.repo, os.getcwd())
+        self.assertEqual(args.scheduler, 'launchd')
+        self.assertEqual(args.record, '/existing/backlog')
+
+    def test_yes_off_tty_with_no_default_is_needs_operator_and_writes_nothing(self):
+        args = _install_args(repo=None, record=None, scheduler=None, yes=True)
+        result, out, err = _quiet(install.cmd_install, args)
+        self.assertEqual(result, 2)
+        self.assertIn('NEEDS OPERATOR', err)
+        self.assertIn('--record', err)
+        self.assertFalse(os.path.exists(env.config_path()))
+        self.assertEqual(os.listdir(os.path.join(env.ASF_HOME, 'products')), [])
+
+
+class InstallConfigTemplateTests(HomeCase):
+    """The operator config: written only when absent, from :data:`install.CONFIG_TEMPLATE`, and
+    every key it writes is a key ``docs/config.example.yaml`` documents active — read from that
+    file, never a hand-kept list (D4)."""
+
+    def _plan(self, fake=False):
+        args = _install_args(scheduler='launchd', fake_workers=fake)
+        return args, install._account_plan(args)
+
+    def test_written_when_absent(self):
+        args, plan = self._plan()
+        rc, detail = install._step_config(args, plan)
+        self.assertEqual(rc, 0)
+        self.assertTrue(detail.startswith('wrote '))
+        self.assertTrue(os.path.isfile(env.config_path()))
+
+    def test_not_rewritten_when_present_and_the_diff_not_made_is_printed(self):
+        args, plan = self._plan()
+        self.write(env.config_path(), 'default_product: something-else\n')
+        result, out, err = _quiet(install._step_config, args, plan)
+        self.assertEqual(result, (0, 'already in place'))
+        with open(env.config_path(), encoding='utf-8') as f:
+            self.assertEqual(f.read(), 'default_product: something-else\n')  # never rewritten
+        self.assertIn('left as is', out)
+        self.assertIn('default_product', out)
+
+    def test_every_key_the_template_writes_is_documented_in_the_example(self):
+        with open(os.path.join(REPO, 'docs', 'config.example.yaml'), encoding='utf-8') as f:
+            example_keys = _keys(env.loads(f.read()))
+        for fake in (False, True):
+            args, plan = self._plan(fake=fake)
+            rendered = install._render_config(args, plan)
+            rendered_keys = _keys(env.loads(rendered))
+            self.assertLessEqual(rendered_keys, example_keys, rendered_keys - example_keys)
+
+    def test_env_loads_and_load_config_accept_what_it_writes(self):
+        args, plan = self._plan()
+        rc, detail = install._step_config(args, plan)
+        self.assertEqual(rc, 0)
+        cfg = env.load_config()
+        self.assertEqual(cfg['default_product'], 'demo')
+        self.assertEqual(cfg['scheduler']['kind'], 'launchd')
+        self.assertEqual(cfg['capacity']['total']['sessions'], install.DEFAULT_SESSIONS)
+
+
+class InstallAccountsTests(HomeCase):
+    """``--account`` (repeatable), detection under ``<ASF_HOME>/accounts/``, and the one-stanza
+    fallback — never a credential read (D10)."""
+
+    def test_one_account_flag(self):
+        args = _install_args(account=['acct-a:~/x'])
+        plan = install._account_plan(args)
+        self.assertEqual(plan['names'], ['acct-a'])
+        self.assertIn(f"config_dir: {os.path.expanduser('~/x')}", plan['stanzas'][0])
+        self.assertIsNone(plan['operator_line'])
+
+    def test_account_flag_with_no_dir_defaults_under_asf_home(self):
+        args = _install_args(account=['acct-a'])
+        plan = install._account_plan(args)
+        self.assertIn(f"config_dir: {os.path.join(env.ASF_HOME, 'accounts', 'acct-a')}",
+                     plan['stanzas'][0])
+
+    def test_two_account_flags(self):
+        args = _install_args(account=['a:~/a', 'b:~/b'])
+        plan = install._account_plan(args)
+        self.assertEqual(plan['names'], ['a', 'b'])
+        self.assertEqual(len(plan['stanzas']), 2)
+
+    def test_detection_finds_only_the_credentialled_directory(self):
+        accounts = os.path.join(env.ASF_HOME, 'accounts')
+        credentialled, bare = os.path.join(accounts, 'has-cred'), os.path.join(accounts, 'bare')
+        os.makedirs(credentialled)
+        os.makedirs(bare)
+        self.write(os.path.join(credentialled, install.RUNTIME_CREDENTIAL_FILE), '{}')
+        self.assertEqual(install.detect_accounts(env.ASF_HOME), [('has-cred', credentialled)])
+        args = _install_args()
+        plan = install._account_plan(args)
+        self.assertEqual(plan['names'], ['has-cred'])
+        self.assertIsNone(plan['operator_line'])
+
+    def test_neither_flag_nor_detection_writes_one_stanza_and_needs_operator_but_returns_0(self):
+        args = _install_args()
+        plan = install._account_plan(args)
+        self.assertEqual(plan['names'], ['acct-a'])
+        self.assertIsNotNone(plan['operator_line'])
+        result, out, err = _quiet(install._step_account, args, plan)
+        self.assertEqual(result[0], 0)
+        self.assertIn('NEEDS OPERATOR', err)
+        self.assertIn('claude setup-token', err)
+
+    def test_fake_workers_writes_backend_fake_and_no_stanza(self):
+        args = _install_args(fake_workers=True)
+        plan = install._account_plan(args)
+        self.assertEqual(plan['backend'], 'fake')
+        self.assertEqual(plan['stanzas'], [])
+        self.assertIsNone(plan['operator_line'])
+        result, out, err = _quiet(install._step_account, args, plan)
+        self.assertEqual(result, (0, 'backend: fake, no account'))
+        self.assertEqual(err, '')
+
+    def test_no_credential_file_is_ever_opened(self):
+        config_dir = os.path.join(env.ASF_HOME, 'accounts', 'acct-a')
+        os.makedirs(config_dir)
+        self.write(os.path.join(config_dir, install.RUNTIME_CREDENTIAL_FILE), '{"secret": "x"}')
+        real_open = open
+
+        def spy(path, *a, **kw):
+            self.assertNotEqual(os.path.basename(str(path)), install.RUNTIME_CREDENTIAL_FILE)
+            return real_open(path, *a, **kw)
+
+        with mock.patch('builtins.open', side_effect=spy):
+            found = install.detect_accounts(env.ASF_HOME)
+        self.assertEqual(found, [('acct-a', config_dir)])
+
+
+class InstallStepsTests(HomeCase):
+    """The step framework (abort stops, record-and-continue does not, the summary names each
+    failure, a non-zero exit), and steps 1-6: the host, this ``asf``, the config, the repos, the
+    adopt, the account."""
+
+    # ---- the framework -------------------------------------------------------------
+
+    def test_an_abort_step_that_fails_stops_the_run(self):
+        calls = []
+        steps = [
+            install.Step('a', lambda: (1, 'bad'), True),
+            install.Step('b', lambda: (calls.append('b'), (0, 'ok'))[1], True),
+        ]
+        rc = install.run_steps(steps, out=lambda *a: None)
+        self.assertEqual(rc, 1)
+        self.assertEqual(calls, [])
+
+    def test_a_non_abort_step_that_fails_records_and_continues(self):
+        calls = []
+        steps = [
+            install.Step('a', lambda: (1, 'bad'), False),
+            install.Step('b', lambda: (calls.append('b'), (0, 'ok'))[1], False),
+        ]
+        rc = install.run_steps(steps, out=lambda *a: None)
+        self.assertEqual(rc, 1)
+        self.assertEqual(calls, ['b'])
+
+    def test_the_summary_names_each_failure_and_the_exit_status_is_non_zero(self):
+        lines = []
+        steps = [
+            install.Step('step 1: ok one', lambda: (0, 'ok'), True),
+            install.Step('step 2: broke', lambda: (3, 'broke'), False),
+        ]
+        rc = install.run_steps(steps, out=lines.append)
+        self.assertEqual(rc, 1)
+        self.assertTrue(any('step 2: broke' in l and 'exit 3' in l for l in lines))
+
+    def test_every_step_passing_exits_0(self):
+        steps = [install.Step('a', lambda: (0, 'ok'), True), install.Step('b', lambda: (0, 'ok'), False)]
+        self.assertEqual(install.run_steps(steps, out=lambda *a: None), 0)
+
+    # ---- step 1: the host -----------------------------------------------------------
+
+    def test_step_1_missing_git_is_needs_operator_and_fails(self):
+        with mock.patch.object(install.shutil, 'which', return_value=None):
+            result, out, err = _quiet(install._step_host, _install_args())
+        self.assertEqual(result[0], 1)
+        self.assertIn('NEEDS OPERATOR', err)
+
+    def test_step_1_ok_when_both_tools_are_on_path(self):
+        with mock.patch.object(install.shutil, 'which', return_value='/usr/bin/x'):
+            rc, detail = install._step_host(_install_args())
+        self.assertEqual((rc, detail), (0, 'ok'))
+
+    def test_step_1_gh_is_optional_for_a_product_with_no_pr_host(self):
+        self.write(env.product_path('demo'), 'product: demo\nci: none\n')
+
+        def which(name):
+            return '/usr/bin/git' if name == 'git' else None
+
+        with mock.patch.object(install.shutil, 'which', side_effect=which):
+            rc, detail = install._step_host(_install_args())
+        self.assertEqual((rc, detail), (0, 'ok'))
+
+    # ---- step 2: this asf -------------------------------------------------------------
+
+    def test_step_2_ok_off_a_checkout(self):
+        with mock.patch.object(cli, '_checkout_root', return_value=None):
+            rc, detail = install._step_asf(_install_args())
+        self.assertEqual(rc, 0)
+
+    # ---- step 4: the repos -------------------------------------------------------------
+
+    def test_step_4_clones_only_into_a_directory_that_does_not_exist(self):
+        record = os.path.join(self.tmp, 'record')
+        origin = os.path.join(self.tmp, 'record-origin.git')
+        _git(['init', '-q', '--bare', origin])
+        rc, detail = install._step_repos(_install_args(record=record, record_url=origin))
+        self.assertEqual(rc, 0)
+        self.assertTrue(os.path.isdir(os.path.join(record, '.git')))
+        marker = os.path.join(record, 'marker')
+        open(marker, 'w').close()
+        rc, detail = install._step_repos(_install_args(record=record, record_url=origin))
+        self.assertEqual(rc, 0)
+        self.assertTrue(os.path.exists(marker), 'an existing directory is read, never written to')
+
+    def test_step_4_is_a_no_op_with_no_url(self):
+        rc, detail = install._step_repos(_install_args())
+        self.assertEqual(rc, 0)
+
+    # ---- step 5: the adopt ------------------------------------------------------------
+
+    def test_adopt_step_leaves_an_existing_product_file_and_prints_the_diff(self):
+        path = env.product_path('demo')
+        self.write(path, '# a hand-edited product file\nproduct: demo\n')
+        record = os.path.join(self.tmp, 'record')
+        result, out, err = _quiet(install._step_adopt, _install_args(record=record))
+        self.assertEqual(result, (0, 'ok'))
+        with open(path, encoding='utf-8') as f:
+            self.assertEqual(f.read(), '# a hand-edited product file\nproduct: demo\n')
+        self.assertIn('exists', out)
+
+    def test_adopt_step_aborts_when_no_backlog_dir_and_no_record(self):
+        result, out, err = _quiet(install._step_adopt, _install_args())
+        self.assertEqual(result[0], 2)
+        self.assertIn('NEEDS OPERATOR', err)
+
+    # ---- step 6: the account -----------------------------------------------------------
+
+    def test_step_6_never_fails_even_with_no_account_found(self):
+        args = _install_args()
+        plan = install._account_plan(args)
+        rc, detail = install._step_account(args, plan)
+        self.assertEqual(rc, 0)
+
+    # ---- the whole pipeline: order and abort ------------------------------------------
+
+    def test_cmd_install_runs_steps_in_order_and_an_abort_stops_the_rest(self):
+        args = _install_args(repo='/r', record='/b', scheduler='launchd')
+        calls = []
+
+        def make(label, result):
+            def fn(*a):
+                calls.append(label)
+                return result
+            return fn
+
+        with mock.patch.object(install, '_step_host', make('host', (0, 'ok'))), \
+                mock.patch.object(install, '_step_asf', make('asf', (0, 'v1'))), \
+                mock.patch.object(install, '_step_config', make('config', (1, 'nope'))), \
+                mock.patch.object(install, '_step_repos', make('repos', (0, 'ok'))), \
+                mock.patch.object(install, '_step_adopt', make('adopt', (0, 'ok'))), \
+                mock.patch.object(install, '_step_account', make('account', (0, 'ok'))):
+            rc, out, err = _quiet(install.cmd_install, args)
+        self.assertEqual(rc, 1)
+        self.assertEqual(calls, ['host', 'asf', 'config'])
 
 
 class PackageDataTests(unittest.TestCase):
