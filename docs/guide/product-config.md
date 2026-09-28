@@ -74,6 +74,7 @@ The ones that matter most:
 | `intake_dir` | `inbox` | where `asf inbox` drops a card for the groom |
 | `default_bug_epic` | none | the Epic a filed Bug is parented under; unset, the groom asks |
 | `amendable_paths` | `[]` | globs that make a landing `merge_amendable_set` (see approvals) |
+| `worktree_setup` | none | a shell command run in every fresh worker worktree before its session starts — the dependency install or codegen the product's gate needs. Must be idempotent — see below |
 | `landing` | derived | `fast-forward` or `pull-request` — below |
 | `harvest:` → `gate`, `branches_per_tick`, `gate_timeout_s` | `combined`, 12, 600 | how harvest gates: one gate over all eligible branches (bisecting on red) or `per-branch`; how many per run; seconds before a gate is killed and counted red |
 | `prs_per_tick` | 6 | PRs the `prs` step opens per tick |
@@ -82,6 +83,32 @@ The ones that matter most:
 
 `ci.test_command` (under `ci:`, not `conventions:`) is the gate: the command a branch must pass
 before it lands. Without one there is no test gate.
+
+### `worktree_setup` — the command a fresh worktree needs
+
+Each worker session gets its own git worktree, and git gives it a checkout and nothing else: no
+`node_modules`, no virtualenv, no generated sources. `worktree_setup` is the one command that
+makes such a checkout buildable, and the factory runs it in the worktree **before** the session
+starts, so no session ever has to.
+
+- It runs in the **worktree**, under the environment the session itself will have: the worker
+  allow-list, the account's own HOME, the product's `auth_env` — never the operator's
+  environment, and never a value the tick happens to carry (see operating.md, Safety).
+- Its output goes to `~/.ASF/state/<product>/briefs/<job>.setup.log`, with every `auth_env`
+  value masked.
+- It gets **900 seconds**. A failure or a timeout **refuses the launch and removes the
+  worktree** — a tree without its setup is never handed to a session, nor reused as though it
+  had one — and names the log; the same failure twice in a row is a `NEEDS OPERATOR` telling you
+  which key to fix.
+- It runs **once per worktree**: the worktree records the command that ran in it, and a worktree
+  reused by a later session — a correction on the same branch, say — keeps the install it
+  already has. A worktree the factory recreates gets the command again, and so does one whose
+  recorded command is not the one the product declares now.
+- So **make it idempotent.** `pnpm install`, `make deps` and a codegen step already are. A
+  command that fails when its work is already done will refuse a relaunch.
+- A session that runs **off this host** (`lane: cloud`) never runs it here: the command is handed
+  to the run that needs it — the CI job gets it with its brief, a routine session is told to run
+  it first.
 
 ### Landing: fast-forward or pull-request
 
