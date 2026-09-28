@@ -2,6 +2,25 @@
 
 One entry per released version, newest first.
 
+## v0.1.66 — 2026-09-28
+
+### In progress
+
+- F-0107 asf install: one command from zero to a ticking factory (from a release tag, doctor green)
+- F-0111 hooks install from asf-live tells the operator to wire the dev install's path into the product's git hooks
+- F-0113 An S1 silently holds all Feature work, and NEXT plans from different inputs than the tick
+- F-0114 Upgrades never break other installs: automatic, versioned, rollback-safe migrations with an upgrade test from every release
+- F-0119 asf pr-hygiene --lanes: a machine-readable listing product rule checks can call
+- F-0120 Adopting a record: flag cards that belong to another product and move or remove them in bulk (asf move)
+- F-0121 asf hooks install chains an existing git hook instead of refusing (stdin shared, one command)
+- F-0122 The /asf:* tables read backlog_dir, which the tick never pulls — views go stale
+- F-0125 Onboarding: adopt a product's in-flight PRs (asf adopt-pr + legacy review form) so native landing drains them
+- F-0126 feeder: a Task with no writes: (migrated pre-ASF plan) is launched and can only block
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.66"`
+
 ## v0.1.65 — 2026-09-28
 
 ### Bugs fixed
