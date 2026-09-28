@@ -3,6 +3,8 @@
 import argparse
 import contextlib
 import datetime
+import glob
+import importlib.util
 import io
 import json
 import os
@@ -2003,6 +2005,38 @@ class InstallScriptTest(unittest.TestCase):
             fcntl.flock(held, fcntl.LOCK_UN)
         finally:
             held.close()
+
+
+class PackageDataTests(unittest.TestCase):
+    """PD11 — a wheel built from this tree, installed into a temporary prefix, carries every
+    procedure skill and the plugin manifest (`pyproject.toml`'s `asf.procedures` package-data
+    line, F-0062 Task 3). The build never touches the network (`--no-build-isolation`): it uses
+    whichever `setuptools` this interpreter already has, and skips rather than fails when there
+    is none — a missing build tool is a gap in this environment, not in the package."""
+
+    @unittest.skipUnless(importlib.util.find_spec('setuptools'),
+                         'setuptools is not installed in this interpreter')
+    def test_a_built_wheel_installed_into_a_temp_prefix_carries_every_skill_and_the_manifest(self):
+        from asf import procedures
+        tmp = tempfile.mkdtemp(prefix='asf-wheel-')
+        self.addCleanup(shutil.rmtree, tmp, True)
+        built = subprocess.run([sys.executable, '-m', 'pip', 'wheel', REPO, '--no-deps',
+                                '--no-build-isolation', '-w', tmp],
+                               capture_output=True, text=True)
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+        wheels = glob.glob(os.path.join(tmp, '*.whl'))
+        self.assertEqual(len(wheels), 1, wheels)
+        prefix = os.path.join(tmp, 'install')
+        installed = subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-deps',
+                                    '--target', prefix, wheels[0]],
+                                   capture_output=True, text=True)
+        self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+        skills_dir = os.path.join(prefix, 'asf', 'procedures', 'skills')
+        for name in procedures.skill_names():
+            with self.subTest(skill=name):
+                self.assertTrue(os.path.isfile(os.path.join(skills_dir, name, 'SKILL.md')))
+        self.assertTrue(os.path.isfile(
+            os.path.join(prefix, 'asf', 'procedures', '.claude-plugin', 'plugin.json')))
 
 
 if __name__ == '__main__':

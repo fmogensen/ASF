@@ -1,10 +1,12 @@
-"""F-0062 Task 1 — the launch table, the capability probe and the agents file.
+"""F-0062 Tasks 1 and 3 — the launch table, the capability probe, the agents file, and the four
+procedure skills.
 
-Three modules, three classes: :class:`LaunchTableTests` over `asf.roles.launch` (the table
-covers the roles and the roles cover the table, T1), :class:`CapabilityTests` over
+Four modules, four classes: :class:`LaunchTableTests` over `asf.roles.launch` (the table covers
+the roles and the roles cover the table, T1), :class:`CapabilityTests` over
 `asf.workers.capability` (what the installed binary accepts, T2), :class:`AgentFileTests` over
-`write_agents_file` (T4). Nothing here launches a real session or invokes a real runtime binary —
-`CapabilityTests`' own fixture is a small executable script on a tmpdir `PATH`.
+`write_agents_file` (T4), :class:`ProcedureSkillTests` over `asf.procedures` (the four skills
+shipped as package data, T12). Nothing here launches a real session or invokes a real runtime
+binary — `CapabilityTests`' own fixture is a small executable script on a tmpdir `PATH`.
 """
 import json
 import os
@@ -18,9 +20,12 @@ from unittest import mock
 
 from asf import briefs as briefs_mod
 from asf import env
+from asf import procedures
+from asf.briefs.build import TAIL
 from asf.roles import launch as launch_mod
 from asf.roles import roles
 from asf.workers import capability
+from asf.workers import report as report_mod
 
 VALID_ROLE = """---
 name: asf-demo
@@ -324,6 +329,55 @@ class AgentFileTests(unittest.TestCase):
         self.assertIn('asf-demo', str(ctx.exception))
         self.assertIn('frontmatter', str(ctx.exception))
         self.assertFalse(os.path.exists(launch_mod.agents_path(self.product, 'job-a')))
+
+
+class ProcedureSkillTests(unittest.TestCase):
+    """T12 — the four procedure skills ship as package data and load."""
+
+    #: The fenced REPORT envelope of `build.TAIL`, verbatim — what the report-shape skill must
+    #: carry byte-identical, because `workers.report.parse` reads exactly this shape.
+    REPORT_BLOCK = re.search(r'```\n(.*?)\n```', TAIL, re.S).group(1)
+
+    def _skill_path(self, name, *parts):
+        return os.path.join(procedures.plugin_dir(), 'skills', name, *parts)
+
+    def _skill_text(self, name):
+        with open(self._skill_path(name, 'SKILL.md'), encoding='utf-8') as f:
+            return f.read()
+
+    def test_the_four_skill_directories_exist_and_are_exactly_skill_names(self):
+        skills_dir = os.path.join(procedures.plugin_dir(), 'skills')
+        names = {d for d in os.listdir(skills_dir) if os.path.isdir(os.path.join(skills_dir, d))}
+        self.assertEqual(names, set(procedures.skill_names()))
+
+    def test_every_skills_frontmatter_parses_and_names_its_own_directory(self):
+        for name in procedures.skill_names():
+            with self.subTest(skill=name):
+                text = self._skill_text(name)
+                head = text.split('---')[1]
+                keys = {line.split(':', 1)[0].strip() for line in head.strip().splitlines()
+                       if ':' in line}
+                self.assertEqual(keys, {'name', 'description', 'allowed-tools'})
+                self.assertIn(f'name: {name}\n', text)
+
+    def test_plugin_dir_holds_a_readable_manifest(self):
+        path = os.path.join(procedures.plugin_dir(), '.claude-plugin', 'plugin.json')
+        with open(path, encoding='utf-8') as f:
+            manifest = json.load(f)
+        self.assertTrue(manifest.get('name'))
+        self.assertTrue(manifest.get('description'))
+        self.assertTrue(manifest.get('version'))
+
+    def test_report_shape_carries_the_tails_fenced_block_byte_identical(self):
+        self.assertIn(self.REPORT_BLOCK, self._skill_text('report-shape'))
+
+    def test_report_parse_accepts_a_report_written_to_the_skills_shape(self):
+        text = 'a session doing the work\nREPORT\n' + self.REPORT_BLOCK
+        parsed = report_mod.parse(text)
+        for field in ('item', 'kind', 'status', 'branch', 'pushed', 'commits', 'tests'):
+            with self.subTest(field=field):
+                self.assertIn(field, parsed)
+        self.assertEqual(parsed['item'], '{item_id}')
 
 
 if __name__ == '__main__':
