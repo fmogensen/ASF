@@ -28,8 +28,10 @@ def parts(product, root, event=None):
     from asf.metrics.metrics import cmd_rollup
     from asf.tick.stale import cmd_stale
     from asf.scorecard.loop import daily as scorecard_daily
+    from asf.security import ports
     return [
         ('stale', lambda: cmd_stale(_ns(json=False), root)),
+        ('security-ports', lambda: ports.dispatch(product)),
         ('rollup', lambda: cmd_rollup(_ns(day=yesterday(), no_releases=False,
                                           product=product.name), root)),
         # the value loop: measure, snapshot, file a card per cause over threshold, verify landed ones
