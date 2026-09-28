@@ -2,6 +2,26 @@
 
 One entry per released version, newest first.
 
+## v0.1.60 — 2026-09-28
+
+### Bugs fixed
+
+- B-0090 The operator's console rules live in assistant memory, not code: the plugin ships no hooks enforcing them
+- B-0128 An adjudicator's 'no further sessions' ruling does not stick: the lane re-adjudicates the item
+- B-0151 Lane branches collide on sequential numbers (migrations, bands); ASF should reserve them
+
+### In progress
+
+- F-0051 The production verification probe: a real customer journey after every deploy
+- F-0065 Spike: a sandboxed shell for worker sessions
+- F-0066 A progress heartbeat: no progress for twenty minutes is a stall, not only silence
+- F-0069 Security checks by code: a review pass on sensitive paths, secret and dependency scanning as rules
+- F-0070 A CI step-silence rule: a job with no new step for ten minutes is stalled, even under budget
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.60"`
+
 ## v0.1.59 — 2026-09-28
 
 ### In progress
