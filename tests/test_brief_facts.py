@@ -105,6 +105,50 @@ class ContractTests(FactsCase):
         self.assertEqual((out['files'], out['tests']), ({}, []))
 
 
+class RelaunchFactsTests(FactsCase):
+    """§2.5/T5: ``repo_facts`` wires ``predecessor``, ``last_progress`` and ``commits_on`` into
+    the three new keys, and pays for the log read only when there is a predecessor to read."""
+
+    def ledger(self, *records):
+        path = os.path.join(env.state_dir(self.product()), 'sessions.jsonl')
+        with open(path, 'w') as f:
+            f.writelines(json.dumps(r) + '\n' for r in records)
+
+    def log(self, *texts):
+        path = os.path.join(self.tmp, 'run.log')
+        with open(path, 'w') as f:
+            for text in texts:
+                f.write(json.dumps(
+                    {'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': text}]}})
+                    + '\n')
+        return path
+
+    def test_a_predecessor_on_the_branch_fills_commits_progress_and_relaunch(self):
+        self.ledger(
+            {'job': 'job-a', 'item': 'T-0001', 'branch': 'fix/B-0001', 'kind': 'PLAN → CODE',
+             'started': '2026-01-01T00:00:00Z', 'log': self.log('writing the fix'), 'pid': 1},
+            {'job': 'job-a', 'ended': '2026-01-01T01:00:00Z', 'end_reason': 'stopped'})
+        out = self.facts_for()
+        self.assertEqual(out['relaunch'], {'job': 'job-a', 'ended': '2026-01-01T01:00:00Z',
+                                           'end_reason': 'stopped', 'attempt': 1})
+        self.assertEqual(out['progress'], 'writing the fix')
+        self.assertEqual(out['commits']['total'], 1)
+        self.assertTrue(out['commits']['lines'][0].endswith('the fix'), out['commits'])
+
+    def test_no_predecessor_pays_for_no_log_read_though_the_branch_still_lists_its_commits(self):
+        out = self.facts_for()
+        self.assertEqual(out['relaunch'], {})
+        self.assertEqual(out['progress'], '')
+        self.assertEqual(out['commits']['total'], 1)   # C2 is not gated on a relaunch (PD5)
+
+    def test_a_live_run_is_not_a_relaunch_and_fills_no_progress(self):
+        self.ledger({'job': 'job-a', 'item': 'T-0001', 'branch': 'fix/B-0001', 'kind': 'PLAN → CODE',
+                    'started': '2026-01-01T00:00:00Z', 'log': self.log('still going'), 'pid': 1})
+        out = self.facts_for()
+        self.assertEqual(out['relaunch'], {})
+        self.assertEqual(out['progress'], '')
+
+
 class HeadTests(FactsCase):
     def test_pushed_branch_reads_its_own_head(self):
         sha = _git(['rev-parse', '--short', 'origin/fix/B-0001'], self.repo)

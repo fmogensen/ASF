@@ -231,7 +231,8 @@ STORY_KINDS = ('spec', 'spec-amend', 'plan', 'review', 'adjudicate', 'spec-plan'
 #: the one function that fills them, and ``tests.test_brief_facts.ContractTests`` holds the two
 #: equal — the drift between what a caller fills and what the preamble reads is the defect that
 #: left every brief printing ``(not known here)``.
-REPO_FACT_KEYS = ('head', 'branch_exists', 'files', 'tests', 'last_report', 'outlines')
+REPO_FACT_KEYS = ('head', 'branch_exists', 'files', 'tests', 'last_report', 'outlines',
+                  'commits', 'progress', 'relaunch')
 
 
 def _strip_rev(value):
@@ -455,6 +456,9 @@ def collect(product, row, index, inflight=None, repo_facts=None):
         'head': (repo_facts or {}).get('head') or '',
         'branch_exists': (repo_facts or {}).get('branch_exists'),
         'last_report': (repo_facts or {}).get('last_report') or '',
+        'commits': dict((repo_facts or {}).get('commits') or {}),
+        'progress': (repo_facts or {}).get('progress') or '',
+        'relaunch': dict((repo_facts or {}).get('relaunch') or {}),
         'inflight': list(inflight or []),
     }
 
@@ -508,7 +512,7 @@ def fit(sections, limit):
 
     for name in TRIM_ORDER:
         block = next((s for s in sections if s.name == name), None)
-        if block is None:
+        if block is None or not block.trimmable:
             continue
         guard = len(block.body) + 2
         while total() > limit and guard > 0 and block.trim():
@@ -605,6 +609,50 @@ def outline_lines(facts):
     return out
 
 
+#: The instruction half of :func:`relaunch_lines`, once the commits above the trunk exist to
+#: continue from: the worktree is rebased before the session starts (P10, P11), so the shas the
+#: block just listed are origin's, not the worktree's — only the subjects carry over.
+_CONTINUE_PARAGRAPH = """Your worktree was rebased onto origin/{main} before you started, so its shas are not the ones
+above; the subjects are. Continue from that head: never recut the branch, never open another,
+never redo what those subjects already did — read them first and pick up after the last one.
+Commit and push within fifteen minutes, then keep pushing: what is not on origin is what the
+next relaunch loses."""
+
+#: D15: a predecessor that left no commit on the branch has nothing to "not redo" — the honest
+#: instruction is the fifteen minutes alone.
+_NOTHING_PUSHED_LINE = ("Nothing was pushed: the previous run left no commit on the branch, so "
+                       "there is nothing to continue from — start the work, and commit and push "
+                       "within fifteen minutes so this does not repeat.")
+
+
+def relaunch_lines(facts, main):
+    """The ``### The branch already holds your work`` body (§2.5): the predecessor run, the
+    commits above the trunk, where it stopped, and the instruction to continue rather than redo.
+    Called only when ``facts['relaunch']`` is truthy — a first launch never sees this text."""
+    r = facts['relaunch']
+    commits = facts.get('commits') or {}
+    total, lines = commits.get('total') or 0, commits.get('lines') or []
+    branch = facts['branch']
+    out = [f"This item has run before: {r.get('job')} ended {r.get('ended')} — "
+          f"{r.get('end_reason')} (attempt {r.get('attempt')})."]
+    if total:
+        out.append(f"Its work is on `{branch}` and is yours to continue. {total} commits above "
+                  f"origin/{main}, newest first:")
+        out += [f'- {line}' for line in lines]
+        if total > len(lines):
+            out.append(f"({total - len(lines)} more — `git log --oneline "
+                      f"origin/{main}..origin/{branch}`)")
+    else:
+        out.append(f"Its work is on `{branch}` and is yours to continue.")
+    if facts.get('progress'):
+        out.append(f"Where it stopped: {facts['progress']}")
+    if total:
+        out += _CONTINUE_PARAGRAPH.format(main=main).splitlines()
+    else:
+        out.append(_NOTHING_PUSHED_LINE)
+    return out
+
+
 def convention_lines(product):
     conv = conventions(product)
     prefixes = conv.map_of('branch_prefixes')
@@ -628,6 +676,8 @@ def build(product, row, index, inflight=None, repo_facts=None, facts=None):
         Section('identity', '## What is already known (do not go looking for it)',
                 identity_lines(row, facts)),
         Section('state', '', state_lines(product, facts)),
+        Section('relaunch', '### The branch already holds your work',
+                relaunch_lines(facts, main) if facts['relaunch'] else []),
         Section('conventions', '', convention_lines(product)),
         Section('description', '### Description',
                 section_lines(facts['sections'], 'description') or
@@ -643,7 +693,7 @@ def build(product, row, index, inflight=None, repo_facts=None, facts=None):
                 trimmable=True, marker='…truncated'),
         Section('last_report', '### The last report for this item',
                 [l.rstrip() for l in str(facts['last_report']).splitlines() if l.strip()],
-                trimmable=True, marker='…truncated'),
+                trimmable=not facts['relaunch'], marker='…truncated'),
         Section('rules', '### Standing rules',
                 rules_block(product, main).splitlines() + [subject_rule(row, facts['item'])]
                 + [REDACTION_RULE] + ci_rules(product)),

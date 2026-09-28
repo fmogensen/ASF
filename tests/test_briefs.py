@@ -618,6 +618,80 @@ class WhereToLookTests(unittest.TestCase):
         self.assertEqual(len(facts_mod.file_outline(py, 'x.py')), facts_mod.OUTLINE_LIMIT)
 
 
+RELAUNCH = {
+    'job': 'spec-f-0063', 'ended': '2026-09-27T14:02:11Z', 'end_reason': 'stopped', 'attempt': 2,
+}
+RELAUNCH_COMMITS = {
+    'total': 4, 'lines': ['9f1c4ab spec(F-0063): the decisions and the preconditions',
+                          '3ac0e21 spec(F-0063): the design, S2.1 and S2.2']}
+RELAUNCH_PROGRESS = 'writing S2.3 — the tail read for the progress line'
+REPO_FACTS_RELAUNCH = dict(REPO_FACTS, commits=RELAUNCH_COMMITS, progress=RELAUNCH_PROGRESS,
+                           relaunch=RELAUNCH)
+
+
+class RelaunchBlockTests(unittest.TestCase):
+    """§2.5/T5: the block a relaunch brief carries, and the identity a first launch keeps."""
+
+    def _section(self, text, heading='### The branch already holds your work',
+                next_heading='Specs live in'):
+        body = text[text.index(heading) + len(heading) + 1:]
+        return body[:body.index(next_heading)].rstrip('\n')
+
+    def test_a_relaunch_brief_carries_the_head_the_commits_the_report_and_where_it_stopped(self):
+        text = preamble_mod.build(product(), ROWS['coder'], index(), [], REPO_FACTS_RELAUNCH)
+        self.assertIn('Head: abc1234 record the provider outcome', text)  # C1
+        self.assertIn('4 commits above origin/main, newest first:', text)
+        self.assertIn('- 9f1c4ab spec(F-0063): the decisions and the preconditions', text)
+        self.assertIn('(2 more — `git log --oneline origin/main..origin/task/T-0001`)', text)  # C2
+        self.assertIn('### The last report for this item', text)  # C3
+        self.assertIn('REPORT\nstatus: partial', text)
+        self.assertIn(f'Where it stopped: {RELAUNCH_PROGRESS}', text)  # C4
+
+    def test_the_branch_already_holds_your_work_section_is_the_whole_instruction(self):
+        text = preamble_mod.build(product(), ROWS['coder'], index(), [], REPO_FACTS_RELAUNCH)
+        section = self._section(text)
+        self.assertEqual(section, '\n'.join(
+            preamble_mod.relaunch_lines(preamble_mod.collect(
+                product(), ROWS['coder'], index(), [], REPO_FACTS_RELAUNCH), 'main')))
+        self.assertIn('never recut', section)
+        self.assertIn('never redo', section)
+        self.assertIn('fifteen minutes', section)
+
+    def test_a_brief_with_no_relaunch_fact_is_byte_identical_to_todays(self):
+        with_relaunch = dict(REPO_FACTS, relaunch={})
+        self.assertEqual(preamble_mod.build(product(), ROWS['coder'], index(), [], REPO_FACTS),
+                         preamble_mod.build(product(), ROWS['coder'], index(), [], with_relaunch))
+        text = preamble_mod.build(product(), ROWS['coder'], index(), [], REPO_FACTS)
+        self.assertNotIn('### The branch already holds your work', text)
+
+    def test_a_predecessor_that_pushed_nothing_says_so_and_drops_the_never_redo_clause(self):
+        facts_ = dict(REPO_FACTS_RELAUNCH, commits={'total': 0, 'lines': []})
+        text = preamble_mod.build(product(), ROWS['coder'], index(), [], facts_)
+        self.assertIn('Nothing was pushed: the previous run left no commit on the branch', text)
+        self.assertNotIn('never redo', text)
+        self.assertNotIn('commits above origin/main', text)
+
+    def test_over_the_cap_the_block_and_the_last_report_survive_whole(self):
+        p = product(conventions={'preamble_max_lines': 40})
+        text = preamble_mod.build(p, ROWS['coder'], index(), [], REPO_FACTS_RELAUNCH)
+        self.assertIn('### The branch already holds your work', text)
+        self.assertIn('never redo', text)
+        self.assertIn('### The last report for this item', text)
+        self.assertIn('REPORT\nstatus: partial', text)
+        for identifier in ('T-0001', 'F-0001', 'task/T-0001',
+                          'app/checkout/attempts.py, tests/test_checkout.py'):
+            self.assertIn(identifier, text)
+
+    def test_golden_briefs_are_unaffected_by_the_new_keys(self):
+        # P16/§2.7: REPO_FACTS carries no `relaunch`, so every golden brief stays as it was.
+        for kind, r in sorted(ROWS.items()):
+            with self.subTest(kind=kind):
+                brief = briefs.build(product(), r, index(), [], REPO_FACTS)
+                path = os.path.join(GOLDEN, f'{kind}.md')
+                with open(path, encoding='utf-8') as f:
+                    self.assertEqual(brief.text, f.read())
+
+
 class DeliveryBriefTest(unittest.TestCase):
     """F-0102: the two brief kinds of a delivery, and the digest that folds its members."""
 
