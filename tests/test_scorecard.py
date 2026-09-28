@@ -169,6 +169,141 @@ class ScoreTests(unittest.TestCase):
         self.assertFalse(score.is_dead(run('j', '2026-09-01T00:00:00Z', 'failed', landed=True)))
 
 
+class TotalRowTests(unittest.TestCase):
+    """score.total_row over literal stored weekly rows (F-0148) — no Facts, no file, no clock."""
+
+    ROW_P = {'week': '2026-09-21', 'landed': 2, 'on_prod': 1, 'tasks_landed': 1, 'sessions': 10,
+             'tokens': 500, 'usd': 20.0, 'ci_min': 5.0, 'repair_sessions': 3, 'send_backs': 1,
+             'bugs': 1, 's1': 0, 'dead_sessions': 1, 'dead_usd': 2.0,
+             'usd_per_feature': 10.0, 'own_usd_per_feature': 8.0,
+             'clutter': {'open_prs': 5, 'stale_prs': 2, 'branches': 3}}
+    ROW_Q = {'week': '2026-09-21', 'landed': 3, 'on_prod': 2, 'tasks_landed': 2, 'sessions': 15,
+             'tokens': 700, 'usd': 90.0, 'ci_min': 8.0, 'repair_sessions': 4, 'send_backs': 0,
+             'bugs': 2, 's1': 1, 'dead_sessions': 0, 'dead_usd': 0.0,
+             'usd_per_feature': 30.0, 'own_usd_per_feature': 25.0,
+             'clutter': {'open_prs': 3, 'stale_prs': 0, 'branches': 0}}
+
+    def test_the_summing_keys_are_added(self):
+        t = score.total_row([self.ROW_P, self.ROW_Q])
+        self.assertEqual(t['landed'], 5)
+        self.assertEqual(t['on_prod'], 3)
+        self.assertEqual(t['tasks_landed'], 3)
+        self.assertEqual(t['sessions'], 25)
+        self.assertEqual(t['tokens'], 1200)
+        self.assertEqual(t['usd'], 110.0)
+        self.assertEqual(t['ci_min'], 13.0)
+        self.assertEqual(t['repair_sessions'], 7)
+        self.assertEqual(t['send_backs'], 1)
+        self.assertEqual(t['bugs'], 3)
+        self.assertEqual(t['s1'], 1)
+        self.assertEqual(t['dead_sessions'], 1)
+        self.assertEqual(t['dead_usd'], 2.0)
+        self.assertEqual(t['products'], 2)
+
+    def test_usd_per_feature_is_all_in_over_every_landing_not_a_mean_of_means(self):
+        t = score.total_row([self.ROW_P, self.ROW_Q])
+        # 20 + 90 all-in over 2 + 3 landed
+        self.assertEqual(t['usd_per_feature'], 22.0)
+        naive_mean = (self.ROW_P['usd_per_feature'] + self.ROW_Q['usd_per_feature']) / 2
+        self.assertNotEqual(t['usd_per_feature'], naive_mean)
+
+    def test_own_usd_per_feature_is_the_landed_weighted_mean_exact_against_its_spend(self):
+        t = score.total_row([self.ROW_P, self.ROW_Q])
+        own_spend = (self.ROW_P['own_usd_per_feature'] * self.ROW_P['landed']
+                     + self.ROW_Q['own_usd_per_feature'] * self.ROW_Q['landed'])
+        self.assertEqual(own_spend, 91.0)
+        self.assertEqual(t['own_usd_per_feature'], 18.2)
+        self.assertEqual(round(t['own_usd_per_feature'] * t['landed'], 2), own_spend)
+
+    def test_the_three_medians_are_none(self):
+        t = score.total_row([self.ROW_P, self.ROW_Q])
+        for k in score.TOTAL_MEDIANS:
+            self.assertIsNone(t[k])
+
+    def test_clutter_sums_a_key_no_row_reads_stays_none_a_key_every_row_reads_as_zero_stays_zero(self):
+        rows = [{'week': '2026-09-21', 'landed': 0, 'clutter': {'stale_prs': 0}},
+                {'week': '2026-09-21', 'landed': 0, 'clutter': {'stale_prs': 0, 'branches': 5}}]
+        t = score.total_row(rows)
+        self.assertIsNone(t['clutter']['open_prs'])    # no row carries a reading
+        self.assertEqual(t['clutter']['stale_prs'], 0)  # every row read it, all zero
+        self.assertEqual(t['clutter']['branches'], 5)
+
+    def test_a_week_where_nothing_landed_gives_none_ratios_and_no_division_by_zero(self):
+        row = {'week': '2026-09-21', 'landed': 0, 'on_prod': 0, 'usd': 50.0,
+               'own_usd_per_feature': 0, 'repair_sessions': 0}
+        t = score.total_row([row])
+        self.assertIsNone(t['usd_per_feature'])
+        self.assertIsNone(t['own_usd_per_feature'])
+        self.assertIsNone(t['repair_per_feature'])
+
+    def test_an_empty_row_list_gives_a_total_that_says_it_covers_nothing(self):
+        t = score.total_row([])
+        self.assertEqual(t['products'], 0)
+        self.assertEqual(t['landed'], 0)
+        self.assertIsNone(t['week'])
+
+
+class TotalLineTests(unittest.TestCase):
+    """score.delta_row, score.delta and score.total_line (F-0148) — pure, over literal dicts."""
+
+    def test_delta_row_skips_a_key_missing_or_none_on_either_side_never_reading_it_as_zero(self):
+        now = {'on_prod': 7, 'landed': 11, 'usd': 422.40}
+        prev = {'on_prod': 5, 'landed': None, 'usd': 382.40}
+        d = score.delta_row(now, prev)
+        self.assertEqual(d, {'on_prod': 2, 'usd': 40.0})
+        self.assertNotIn('landed', d)   # None on prev, not read as zero
+        self.assertEqual(score.delta_row(now, {}), {})
+        self.assertEqual(score.delta_row(now, None), {})
+        self.assertEqual(score.delta_row(None, prev), {})
+
+    def test_delta_renders_the_five_shapes(self):
+        self.assertEqual(score.delta(3), '+3')
+        self.assertEqual(score.delta(-6.10, money=True), '-$6.10')
+        self.assertEqual(score.delta(2.5, unit='d'), '+2.5 d')
+        self.assertEqual(score.delta(0), '0')
+        self.assertEqual(score.delta(None), '—')
+
+    def test_the_line_carries_every_headline_number_with_its_delta_the_week_the_day_and_the_count(self):
+        totals = {
+            'day': 3, 'days': 7,
+            'total': {'week': '2026-09-21', 'products': 3, 'on_prod': 7, 'landed': 11,
+                      'usd_per_feature': 38.40, 'own_usd_per_feature': 21.00,
+                      'repair_per_feature': 2.1, 'usd': 422.40},
+            'delta': {'on_prod': 2, 'landed': 3, 'usd_per_feature': -6.10,
+                      'own_usd_per_feature': -1.40, 'repair_per_feature': -0.4, 'usd': 40.00},
+        }
+        line = score.total_line(totals)
+        self.assertEqual(line,
+            'scorecard week 2026-09-21 (day 3/7, 3 products): 7 on prod (+2) · 11 landed (+3) · '
+            '$38.40/feature all-in (-$6.10) · $21.00/feature own (-$1.40) · '
+            '2.1 repair sessions/feature (-0.4) · $422.40 all-in (+$40.00)')
+        self.assertNotIn('sample', line)
+        self.assertNotIn('other', line)
+
+    def test_the_line_reads_all_dashes_when_there_is_nothing_stored_to_compare_against(self):
+        totals = {
+            'day': 1, 'days': 7,
+            'total': {'week': '2026-09-21', 'products': 2, 'on_prod': 0, 'landed': 1,
+                      'usd_per_feature': 12.00, 'own_usd_per_feature': 12.00,
+                      'repair_per_feature': 0.0, 'usd': 12.00},
+            'delta': {},
+        }
+        line = score.total_line(totals)
+        self.assertEqual(line,
+            'scorecard week 2026-09-21 (day 1/7, 2 products): 0 on prod (—) · 1 landed (—) · '
+            '$12.00/feature all-in (—) · $12.00/feature own (—) · '
+            '0 repair sessions/feature (—) · $12.00 all-in (—)')
+
+    def test_total_line_of_none_is_the_no_snapshot_sentence(self):
+        self.assertEqual(score.total_line(None),
+                         'scorecard: no weekly snapshot yet — the daily step writes the first one')
+
+    def test_total_line_of_an_envelope_with_zero_products_is_the_same_sentence(self):
+        totals = {'day': 1, 'days': 7, 'total': {'products': 0}, 'delta': {}}
+        self.assertEqual(score.total_line(totals),
+                         'scorecard: no weekly snapshot yet — the daily step writes the first one')
+
+
 class DiagnoseTests(unittest.TestCase):
     def window(self, f, days=7):
         return diagnose.window(f.as_of, days)

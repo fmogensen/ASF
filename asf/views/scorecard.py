@@ -163,12 +163,7 @@ def _side_cell(side, key):
 
 
 def _delta_cell(v, key):
-    if v is None:
-        return '—'
-    sign = '+' if v > 0 else ('-' if v < 0 else '')
-    if key == 'cost':
-        return f'{sign}${abs(v):,.2f}'
-    return f'{sign}{abs(v):g}' + (' d' if key == 'lead_days' else '')
+    return score.delta(v, money=(key == 'cost'), unit='d' if key == 'lead_days' else '')
 
 
 PAIR_HEADS = {'lead_days': 'lead', 'cost': '$', 'sessions': 'sessions',

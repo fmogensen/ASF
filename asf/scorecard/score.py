@@ -424,3 +424,105 @@ def headline_line(h, clutter=None):
     if clutter and clutter.get('stale_prs'):
         parts.append(f"{clutter['stale_prs']} stale PRs")
     return ' · '.join(parts)
+
+
+# ------------------------------------------------------------ the total --
+
+#: A stored weekly row's keys that add across products (:func:`total_row`). A median does not
+#: add and a ratio is recomputed over the sums — see D4, D7.
+TOTAL_SUMS = ('landed', 'on_prod', 'tasks_landed', 'sessions', 'tokens', 'usd', 'ci_min',
+              'repair_sessions', 'send_backs', 'bugs', 's1', 'dead_sessions', 'dead_usd')
+#: The medians a total cannot carry: `None` on every total row, printed by no total line.
+TOTAL_MEDIANS = ('median_lead_days', 'median_prod_days', 'median_task_days')
+#: A week's clutter block, summed over the products that have a reading (`None` where none does).
+CLUTTER_SUMS = ('open_prs', 'stale_prs', 'branches')
+#: The numbers the total line prints, each beside its week-over-week delta, in print order.
+DELTA_KEYS = ('on_prod', 'landed', 'usd_per_feature', 'own_usd_per_feature',
+              'repair_per_feature', 'usd')
+
+
+def _clutter_total(rows):
+    """:data:`CLUTTER_SUMS` summed over the rows whose ``clutter`` carries a number for the key,
+    ``None`` for a key no row could read (D8's shape, applied to clutter)."""
+    out = {}
+    for k in CLUTTER_SUMS:
+        vals = [r['clutter'][k] for r in rows if isinstance(r.get('clutter'), dict)
+                and isinstance(r['clutter'].get(k), (int, float))
+                and not isinstance(r['clutter'].get(k), bool)]
+        out[k] = round(sum(vals), 2) if vals else None
+    return out
+
+
+def total_row(rows):
+    """One row across several products' stored weekly rows (:func:`asf.scorecard.loop.snapshot`):
+    :data:`TOTAL_SUMS` added, the three ratios recomputed over the sums — so ``usd_per_feature``
+    is all-in $ over *every* product's landings, not a mean of means — ``own_usd_per_feature`` the
+    landed-weighted mean (exact: a week's own mean times its landings is that week's own spend),
+    the medians ``None`` (D4), and ``products`` how many rows were summed.
+
+    A product with no row for the week is simply not in ``rows`` (D8): the total says what it
+    covers and never reads an unmeasured product as a zero."""
+    rows = list(rows)
+    out = {k: round(sum(_num(r.get(k)) for r in rows), 2) for k in TOTAL_SUMS}
+    out.update({k: int(out[k]) for k in ('landed', 'on_prod', 'tasks_landed', 'sessions',
+                                         'tokens', 'send_backs', 'bugs', 's1', 'dead_sessions')})
+    n = out['landed']
+    own = sum(_num(r.get('own_usd_per_feature')) * _num(r.get('landed')) for r in rows)
+    out.update({k: None for k in TOTAL_MEDIANS})
+    out.update(
+        product='total', products=len(rows),
+        week=rows[0].get('week') if rows and len({r.get('week') for r in rows}) == 1 else None,
+        usd_per_feature=round(out['usd'] / n, 2) if n else None,
+        own_usd_per_feature=round(own / n, 2) if n else None,
+        repair_per_feature=round(out['repair_sessions'] / n, 1) if n else None,
+        clutter=_clutter_total(rows))
+    return out
+
+
+def delta_row(now, prev, keys=DELTA_KEYS):
+    """``{key: now[key] - prev[key]}`` for every key both rows carry as a number. A key missing or
+    ``None`` on either side is absent — a delta against no reading is not zero."""
+    if not now or not prev:
+        return {}
+    out = {}
+    for k in keys:
+        a, b = now.get(k), prev.get(k)
+        if isinstance(a, (int, float)) and not isinstance(a, bool) \
+                and isinstance(b, (int, float)) and not isinstance(b, bool):
+            out[k] = a - b
+    return out
+
+
+def delta(v, money=False, unit=''):
+    """``+3`` · ``-$6.10`` · ``+2.5 d`` · ``0`` · ``—`` — one signed change, rendered once (D9).
+    ``views.scorecard._delta_cell`` is this function keyed on :data:`PAIR_METRICS`."""
+    if v is None:
+        return '—'
+    sign = '+' if v > 0 else ('-' if v < 0 else '')
+    body = f'${abs(v):,.2f}' if money else format(abs(v), 'g')
+    return f'{sign}{body}' + (f' {unit}' if unit else '')
+
+
+def total_line(totals):
+    """The daily rollup's first line and the last row of ``asf scorecard --all``: the whole
+    factory's week, each headline number beside its change against the stored week before it.
+
+    ``totals`` is :func:`asf.scorecard.loop.totals`, or ``None`` when nothing has been measured
+    yet (D12). No product is named — the count is (D6)."""
+    total = (totals or {}).get('total')
+    if not totals or not total or not total.get('products'):
+        return 'scorecard: no weekly snapshot yet — the daily step writes the first one'
+    d = totals.get('delta') or {}
+    rpf = '—' if total['repair_per_feature'] is None else format(total['repair_per_feature'], 'g')
+    parts = [
+        f"{format(total['on_prod'], 'g')} on prod ({delta(d.get('on_prod'))})",
+        f"{format(total['landed'], 'g')} landed ({delta(d.get('landed'))})",
+        f"{_money(total['usd_per_feature'])}/feature all-in "
+        f"({delta(d.get('usd_per_feature'), money=True)})",
+        f"{_money(total['own_usd_per_feature'])}/feature own "
+        f"({delta(d.get('own_usd_per_feature'), money=True)})",
+        f"{rpf} repair sessions/feature ({delta(d.get('repair_per_feature'))})",
+        f"{_money(total['usd'])} all-in ({delta(d.get('usd'), money=True)})",
+    ]
+    return (f"scorecard week {total['week']} (day {totals['day']}/{totals['days']}, "
+            f"{total['products']} products): " + ' · '.join(parts))
