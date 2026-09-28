@@ -303,6 +303,169 @@ class SetListFieldTests(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
 
 
+class SetListFieldNormalisationTests(unittest.TestCase):
+    """T-0500: both sides of a list-field op are flattened first, so a plan's packed entry
+    (``writes: [a.py b.py]``) is the paths it names, not the string it packed them into."""
+    def setUp(self):
+        self.root = make_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        write_item(self.root, 'F-0001', 'feature', 'Thing', parent='E-0001')
+        write_item(self.root, 'T-0002', 'task', 'Other', parent='F-0001')
+        write_item(self.root, 'T-0003', 'task', 'Another', parent='F-0001')
+        self.task = write_item(self.root, 'T-0001', 'task', 'Do', parent='F-0001',
+                               typed_lines=('writes: [asf/a.py asf/b.py, docs/g.md]',
+                                            'after: [T-0002 T-0003]'))
+
+    def read(self):
+        with open(self.task, encoding='utf-8') as f:
+            return f.read()
+
+    def meta(self):
+        return frontmatter.parse(self.read())[0]
+
+    def test_removing_a_path_from_a_packed_entry_splits_it(self):
+        r = run(['set', 'T-0001', 'writes-=asf/b.py'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.meta()['writes'], ['asf/a.py', 'docs/g.md'])
+
+    def test_add_already_covered_by_a_packed_entry_says_so_and_flattens_the_card(self):
+        r = run(['set', 'T-0001', 'writes+=asf/a.py'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('already covers', r.stdout)
+        self.assertEqual(self.meta()['writes'], ['asf/a.py', 'asf/b.py', 'docs/g.md'])
+
+    def test_after_field_normalises_the_same_way(self):
+        r = run(['set', 'T-0001', 'after-=T-0003'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.meta()['after'], ['T-0002'])
+
+    def test_a_covered_add_on_an_already_flat_card_is_byte_identical(self):
+        flat = write_item(self.root, 'T-0004', 'task', 'Flat', parent='F-0001',
+                          typed_lines=('writes: [asf/a.py, asf/b.py]',))
+        with open(flat, encoding='utf-8') as f:
+            before = f.read()
+        r = run(['set', 'T-0004', 'writes+=asf/a.py'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(flat, encoding='utf-8') as f:
+            self.assertEqual(f.read(), before)
+
+
+class SetFootprintCoverageTests(unittest.TestCase):
+    """T-0500 (D3, D8): on ``writes:`` an add the footprint already covers by glob is a no-op
+    that says so, and a remove that would remove nothing is refused rather than reported done."""
+    def setUp(self):
+        self.root = make_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        write_item(self.root, 'F-0001', 'feature', 'Thing', parent='E-0001')
+        self.task = write_item(self.root, 'T-0001', 'task', 'Do', parent='F-0001',
+                               typed_lines=('writes: [asf/feeder/**]',))
+
+    def read(self):
+        with open(self.task, encoding='utf-8') as f:
+            return f.read()
+
+    def meta(self):
+        return frontmatter.parse(self.read())[0]
+
+    def test_covered_add_is_a_no_op_that_says_so(self):
+        r = run(['set', 'T-0001', 'writes+=asf/feeder/rows.py'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('already covers asf/feeder/rows.py', r.stdout)
+        self.assertEqual(self.meta()['writes'], ['asf/feeder/**'])
+
+    def test_remove_of_a_covered_path_is_refused(self):
+        before = self.read()
+        r = run(['set', 'T-0001', 'writes-=asf/feeder/rows.py'], self.root)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn('asf/feeder/** covers it', r.stderr)
+        self.assertEqual(self.read(), before)
+
+    def test_remove_of_a_path_the_field_does_not_name_is_refused(self):
+        before = self.read()
+        r = run(['set', 'T-0001', 'writes-=nope.py'], self.root)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn('does not name it', r.stderr)
+        self.assertEqual(self.read(), before)
+
+    def test_coverage_rule_is_widen_covered_directly(self):
+        from asf.feeder import widen
+        self.assertTrue(widen.covered('asf/feeder/rows.py', ['asf/feeder/**']))
+
+    def test_a_covered_pair_in_one_command_refuses_the_second_op(self):
+        before = self.read()
+        r = run(['set', 'T-0001', 'writes+=asf/feeder/rows.py', 'writes-=asf/feeder/rows.py'],
+                self.root)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertEqual(self.read(), before)
+
+    def test_an_uncovered_pair_in_one_command_exits_0_with_the_footprint_unchanged(self):
+        r = run(['set', 'T-0001', 'writes+=docs/z.md', 'writes-=docs/z.md'], self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.meta()['writes'], ['asf/feeder/**'])
+
+
+class SetFootprintStageTests(unittest.TestCase):
+    """T-0500 (P2, P3): `writes+=` goes through the same stage and publish as every other typed
+    write — an intersecting footprint is refused before it is written, and a successful write is
+    committed and pushed, with `index.json` re-derived in the same commit."""
+    ACTIVE = ('schema_version: 1', 'state: Active', 'stage_since: 2026-01-01T00:00:00Z',
+             'updated: 2026-01-01T00:00:00Z')
+
+    def test_an_intersecting_write_is_refused_before_it_is_written(self):
+        root = make_repo()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        write_item(root, 'E-0001', 'epic', 'Factory')
+        write_item(root, 'F-0001', 'feature', 'Thing', parent='E-0001')
+        write_item(root, 'T-0002', 'task', 'Other', parent='F-0001',
+                  typed_lines=('writes: [lib/x.py]',), machine_lines=self.ACTIVE)
+        t1 = write_item(root, 'T-0001', 'task', 'Do', parent='F-0001',
+                        typed_lines=('writes: [src/a.py]',), machine_lines=self.ACTIVE)
+        with open(t1, encoding='utf-8') as f:
+            before = f.read()
+        r = run(['set', 'T-0001', 'writes+=lib/x.py'], root)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn('I3', r.stderr)
+        self.assertIn('writes: intersects', r.stderr)
+        with open(t1, encoding='utf-8') as f:
+            self.assertEqual(f.read(), before)
+
+    def test_a_successful_write_is_committed_and_pushed(self):
+        tmp = tempfile.mkdtemp(prefix='setpub_')
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        origin = os.path.join(tmp, 'origin.git')
+        root = os.path.join(tmp, 'record')
+
+        def git(*a, cwd=None):
+            return subprocess.run(['git', *a], cwd=cwd or root, capture_output=True, text=True,
+                                  check=True).stdout.strip()
+
+        subprocess.run(['git', 'init', '-q', '--bare', '-b', 'main', origin], check=True)
+        subprocess.run(['git', 'clone', '-q', origin, root], check=True)
+        git('config', 'user.name', 'T')
+        git('config', 'user.email', 't@x')
+        for f in FOLDERS:
+            os.makedirs(os.path.join(root, f), exist_ok=True)
+        write_item(root, 'E-0001', 'epic', 'Factory')
+        write_item(root, 'F-0001', 'feature', 'Thing', parent='E-0001')
+        write_item(root, 'T-0001', 'task', 'Do', parent='F-0001',
+                  typed_lines=('writes: [src/a.py]',), machine_lines=self.ACTIVE)
+        run(['index'], root)  # so index.json already exists and is re-derived by the set below
+        git('add', '-A')
+        git('commit', '-qm', 'seed')
+        git('push', '-q', 'origin', 'HEAD:main')
+
+        r = run(['set', 'T-0001', 'writes+=src/b.py'], root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(git('status', '--porcelain'), '')
+        self.assertEqual(git('rev-parse', 'HEAD'), git('rev-parse', 'main', cwd=origin))
+        self.assertEqual(git('log', '-1', '--format=%s'), 'record: set T-0001')
+        changed = git('show', '--stat', '--format=', 'HEAD')
+        self.assertIn('tasks/T-0001.md', changed)
+        self.assertIn('index.json', changed)
+
+
 class RecordPreCommitHookTests(unittest.TestCase):
     """B-0084: a commit into the record runs ``asf check`` on what it touches, even when a
     marker leaked in from another repo's hook run."""

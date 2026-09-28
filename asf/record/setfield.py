@@ -5,7 +5,10 @@ field=value…`` renders the change, parses the result back, and writes only whe
 round-trips to exactly what was asked.
 
 A Task's list fields ``writes:`` and ``after:`` take three forms: ``writes=[a, b]`` replaces the
-list, ``writes+=a`` (or ``writes+=[a, b]``) adds what is not there yet, ``writes-=a`` removes."""
+list, ``writes+=a`` (or ``writes+=[a, b]``) adds what is not there yet, ``writes-=a`` removes.
+Both sides are flattened first, so a plan's packed entry (``writes: [a.py b.py]``) is the paths it
+names. On ``writes:`` an add the footprint already covers adds nothing, and a remove that would
+remove nothing is refused."""
 import os
 import sys
 import tempfile
@@ -53,15 +56,39 @@ def parse_assignments(type_, pairs):
     return out
 
 
-def apply_list(current, op, value):
-    """``current`` with ``value`` put by ``op``: ``=`` replaces, ``+`` appends what is missing,
-    ``-`` drops what is named."""
-    have = _as_list(current)
+def apply_list(current, op, value, covers=False):
+    """``(new, changed)``: ``current`` with ``value`` put by ``op``. Both sides are flattened
+    first (:func:`asf.feeder.widen.norm_writes`), so an entry a plan packed two paths into
+    (``writes: [a.py b.py]``) is the two paths it names — the shape every other reader of
+    ``writes:`` already sees (D2).
+
+    ``=`` replaces, ``+`` adds what is not there, ``-`` drops what is named. With ``covers``
+    (``writes:``, whose entries are path globs) ``+`` also drops a path the footprint already
+    covers by :func:`asf.feeder.widen.covered` — the rule the tick's own widening uses, so the
+    hand route and the automatic one add the same paths (D3). ``changed`` is False when the op
+    left the footprint as it was."""
+    from asf.feeder import widen  # the tree's one splitting and coverage rule (D3, D4)
+    have = widen.norm_writes(_as_list(current))
+    want = widen.norm_writes(value)
     if op == '+':
-        return have + [v for v in dict.fromkeys(value) if v not in have]
+        add = [v for v in want if v not in have and not (covers and widen.covered(v, have))]
+        return have + add, bool(add)
     if op == '-':
-        return [v for v in have if v not in value]
-    return list(dict.fromkeys(value))
+        kept = [v for v in have if v not in want]
+        return kept, kept != have
+    return want, want != have
+
+
+def _why_not_removed(field, item_id, base, value):
+    """D5's reason: the glob that covers each path, else that the field does not name it."""
+    from asf.feeder import widen
+    have = widen.norm_writes(_as_list(base))
+    out = []
+    for v in widen.norm_writes(value):
+        glob = next((w for w in have if w != v and widen.covered(v, [w])), None)
+        out.append(f"{glob} covers it; replace the glob ({field}=[…])" if glob
+                   else f"{item_id}'s {field}: does not name it")
+    return '; '.join(dict.fromkeys(out))
 
 
 def cmd_set(args, root):
@@ -77,10 +104,20 @@ def cmd_set(args, root):
         print(f"error: {e}", file=sys.stderr)
         return 2
     updates = {}
+    idempotent = []
+    all_noop = True  # PD4: the `set` line is suppressed only when every op was a list-field no-op
     for top, sub, op, value in sets:
         if top in LIST_FIELDS.get(rec['meta'].get('type'), ()):
             base = updates[top] if top in updates else rec['meta'].get(top)
-            updates[top] = apply_list(base, op, value)
+            updates[top], changed = apply_list(base, op, value, covers=(top == 'writes'))
+            if changed:
+                all_noop = False
+            if op == '-' and not changed:
+                print(f"error: {top}-={' '.join(value)} removes nothing — "
+                      + _why_not_removed(top, args.id, base, value), file=sys.stderr)
+                return 2
+            if op == '+' and not changed:
+                idempotent.append((top, value))
             if top == 'writes' and not updates[top]:
                 print(f"error: a Task keeps a writes: footprint — {args.id} would have none",
                       file=sys.stderr)
@@ -89,16 +126,24 @@ def cmd_set(args, root):
             links = dict(updates.get(top) or rec['meta'].get(top) or {})
             links[sub] = value
             updates[top] = links
+            all_noop = False
         else:
             updates[top] = value
+            all_noop = False
 
     err = set_typed(rec, updates)
     if err:
         print(f"error: {err}", file=sys.stderr)
         return 2
+    if idempotent:
+        from asf.feeder import widen  # function-local like the other two (D4)
+        for top, value in idempotent:
+            print(f"{args.id}: {top}: already covers {' '.join(widen.norm_writes(value))} — "
+                  "footprint unchanged")
     lists = LIST_FIELDS.get(rec['meta'].get('type'), ())
-    print(f"{args.id}: set " + ', '.join(
-        f"{k}={' '.join(v)}" if k in lists else k for k, v in updates.items()))
+    if not all_noop:
+        print(f"{args.id}: set " + ', '.join(
+            f"{k}={' '.join(v)}" if k in lists else k for k, v in updates.items()))
     return 0
 
 
