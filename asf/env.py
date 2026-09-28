@@ -879,9 +879,15 @@ def load_product(name=None):
     return Product(name, data)
 
 
-def state_dir(product=None):
+def state_path(product=None):
+    """``~/.ASF/state/<name>`` for ``product`` — a read that only wants to know whether
+    something is there uses this one; it creates nothing."""
     name = product.name if isinstance(product, Product) else (product or default_product_name())
-    path = os.path.join(ASF_HOME, 'state', name)
+    return os.path.join(ASF_HOME, 'state', name)
+
+
+def state_dir(product=None):
+    path = state_path(product)
     os.makedirs(path, exist_ok=True)
     return path
 

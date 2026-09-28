@@ -22,7 +22,7 @@ from asf import env
 
 
 def shadow_dir(product):
-    return os.path.join(env.state_dir(product), 'shadow')
+    return os.path.join(env.state_path(product), 'shadow')
 
 
 def _sh(args, cwd=None, check=True):
@@ -42,7 +42,7 @@ def _default_branch(clone_dir):
 
 
 def record_dir(product):
-    return os.path.join(env.state_dir(product), 'record')
+    return os.path.join(env.state_path(product), 'record')
 
 
 def factory_identity():
@@ -225,4 +225,5 @@ def sync_operator_checkout(product, out=print):
         detail = (merge.stderr or merge.stdout).strip().splitlines()
         out(f'record: {repo} not fast-forwarded — {detail[-1] if detail else "merge refused"}')
         return False
+    out(f'record: {repo} fast-forwarded to origin/{trunk}')
     return True

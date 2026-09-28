@@ -565,3 +565,42 @@ class ProductResolutionOrderTests(unittest.TestCase):
             os.environ.pop('ASF_PRODUCT', None)
             os.environ.update(extra_env)
             self.assertEqual(env.default_product_name(), env.resolve_product().name)
+
+
+class StatePath(unittest.TestCase):
+    """``state_path`` answers where the clone is without creating it; only ``state_dir``
+    makes the directory."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.home, 'products'))
+        with open(os.path.join(self.home, 'products', 'bot.yaml'), 'w') as f:
+            f.write('product: bot\n')
+        with open(os.path.join(self.home, 'config.yaml'), 'w') as f:
+            f.write('default_product: bot\n')
+        self.old_home, env.ASF_HOME = env.ASF_HOME, self.home
+        self.old_env = os.environ.pop('ASF_PRODUCT', None)
+
+    def tearDown(self):
+        env.ASF_HOME = self.old_home
+        if self.old_env is not None:
+            os.environ['ASF_PRODUCT'] = self.old_env
+
+    def test_state_path_does_not_create_the_directory(self):
+        path = env.state_path('bot')
+        self.assertEqual(path, os.path.join(self.home, 'state', 'bot'))
+        self.assertFalse(os.path.exists(path))
+
+    def test_state_dir_creates_the_same_path(self):
+        self.assertEqual(env.state_dir('bot'), env.state_path('bot'))
+        self.assertTrue(os.path.isdir(env.state_path('bot')))
+
+    def test_calling_state_path_twice_creates_nothing(self):
+        env.state_path('bot')
+        env.state_path('bot')
+        self.assertFalse(os.path.exists(os.path.join(self.home, 'state', 'bot')))
+
+    def test_accepts_a_product_a_bare_name_and_none(self):
+        product = env.Product('bot', {})
+        self.assertEqual(env.state_path(product), env.state_path('bot'))
+        self.assertEqual(env.state_path(None), env.state_path('bot'))
