@@ -2,6 +2,29 @@
 
 One entry per released version, newest first.
 
+## v0.1.63 — 2026-09-28
+
+### Bugs fixed
+
+- B-0047 asf plugin check resolves the plugin directory from the package, not the checkout; CI is red on a plain install
+
+### In progress
+
+- F-0070 A CI step-silence rule: a job with no new step for ten minutes is stalled, even under budget
+- F-0107 asf install: one command from zero to a ticking factory (from a release tag, doctor green)
+- F-0108 Release ASF 0.1 for feedback: general installer, first-user docs, release notes, a feedback channel
+- F-0110 /asf:* in a product's own session shows another product: resolve the product from the working directory
+- F-0111 hooks install from asf-live tells the operator to wire the dev install's path into the product's git hooks
+- F-0112 Products update themselves to a new ASF release: upgrade: auto in the tick, with rollback on a red doctor
+
+### Improvements and hotfixes
+
+- ci_queue: a rerun skipped for a workflow change starts fresh instead of dropping (#241)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.63"`
+
 ## v0.1.62 — 2026-09-28
 
 ### In progress
