@@ -2,6 +2,34 @@
 
 One entry per released version, newest first.
 
+## v0.1.67 — 2026-09-28
+
+### Bugs fixed
+
+- B-0050 Record commands use the cwd as the record: /asf:groom from a product repo grooms nothing and writes groom/ into the product repo
+- B-0095 The PROD view crashes on a product whose `customer_paths` is the documented list
+- B-0119 tick logs stay empty while steps run; a live tick looks the same as a hung one
+
+### In progress
+
+- F-0107 asf install: one command from zero to a ticking factory (from a release tag, doctor green)
+- F-0119 asf pr-hygiene --lanes: a machine-readable listing product rule checks can call
+- F-0120 Adopting a record: flag cards that belong to another product and move or remove them in bulk (asf move)
+- F-0122 The /asf:* tables read backlog_dir, which the tick never pulls — views go stale
+- F-0125 Onboarding: adopt a product's in-flight PRs (asf adopt-pr + legacy review form) so native landing drains them
+- F-0126 feeder: a Task with no writes: (migrated pre-ASF plan) is launched and can only block
+- F-0127 A product declares a worktree setup command; the spawner runs it in every fresh worktree
+- F-0128 approvals: decide_feature: auto — ASF decides a product's Features itself (operator instruction)
+- F-0129 asf config check/migrate: an old or hand-made product yaml maps onto the schema without a hand rewrite
+- F-0142 tick: a start/end line per step (owner, pid, time) and doctor's SCHEDULER shows the current step
+- F-0143 A pre-commit hook pointing at the /x/asf test fixture path broke review-b-0111's commit
+- F-0144 asf set cannot widen a Task's writes: footprint
+- F-0148 Scorecard: a total across products and the week-over-week delta, as the daily rollup's first line
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.67"`
+
 ## v0.1.66 — 2026-09-28
 
 ### In progress
