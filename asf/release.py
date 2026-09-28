@@ -203,15 +203,19 @@ def upgrade_facts(logs, dates, since):
 
 
 def install_log(log_dir, since):
-    """The install script's runs since ``since``: one ``<iso>\\t<product>\\t<ref>`` line each."""
+    """The install script's runs since ``since``: one ``<iso>\\t<product>\\t<ref>`` line each.
+    A row whose ref is ``uninstall`` (``asf uninstall``'s own log line, T-0407 PD8) is skipped —
+    it is a teardown, not a hand install, and counting it would make a torn-down product read as
+    evidence against the machine's stability."""
     out = []
     try:
         with open(os.path.join(log_dir, 'install.log'), encoding='utf-8') as f:
             for line in f:
                 parts = line.rstrip('\n').split('\t')
-                if parts and parts[0] >= since:
+                ref = parts[2] if len(parts) > 2 else ''
+                if parts and parts[0] >= since and ref != 'uninstall':
                     out.append({'date': parts[0], 'product': parts[1] if len(parts) > 1 else '',
-                                'ref': (parts[2] if len(parts) > 2 else '')[:12]})
+                                'ref': ref[:12]})
     except OSError:
         pass
     return out

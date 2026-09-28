@@ -335,11 +335,12 @@ def register(subparsers):
 
 
 def register_commands(subparsers):
-    """``init``, ``install``, ``schema-migrate``, ``upgrade``, ``hooks``, ``hook``,
+    """``init``, ``install``, ``uninstall``, ``schema-migrate``, ``upgrade``, ``hooks``, ``hook``,
     ``console-permissions`` — each parser carries its handler as ``args.run(args)``."""
     from asf import console_perms, hooks, install, upgrade
     register(subparsers)
     install.register(subparsers)
+    install.register_uninstall(subparsers)
     schema.register(subparsers)
     upgrade.register(subparsers)
     hooks.register(subparsers)
