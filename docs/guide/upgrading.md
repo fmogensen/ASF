@@ -22,18 +22,24 @@ nothing:
 
 ## Upgrading
 
-Upgrade by running the installer again with the new ref:
+Upgrade by running `asf upgrade --to <sha|tag>` — `--ref` is accepted as the same flag, the older
+spelling:
 
 ```bash
-bash tools/install.sh <product> v0.1.1     # a tag
-bash tools/install.sh <product> 7a5881d    # or any commit sha
-bash tools/install.sh <product>            # or main's current head
+asf upgrade --to v0.1.1     # a tag
+asf upgrade --to 7a5881d    # or any commit sha
+asf upgrade                 # or main's current head
 ```
 
-It reinstalls the pinned package with `pipx install --force`, re-applies the hooks and the clocks
-(both idempotent) and ends with the doctor. With several products, run it once per product — the
-package is shared, so the first run upgrades `asf` for all of them, and each later run
-re-applies that product's hooks and clocks.
+`--to` may be a tag as well as a sha; it is resolved to its commit before the CI guard reads it,
+while `pipx` still receives the tag itself, so `asf --version` reports the release. It reinstalls
+the pinned package with `pipx install --force`, reloads any clock not loaded after the swap, and
+prints the schema table below. The package is shared across products — one `asf upgrade` upgrades
+it for all of them.
+
+Rerun the installer instead (`bash tools/install.sh <product> [ref] -- <asf install flags>`, or
+the `curl … | bash -s --` line in the root README) when a product's hooks or clocks also need
+re-applying — both are idempotent, so it is always safe to run again.
 
 Then check:
 
@@ -43,8 +49,9 @@ asf upgrade --skip-pipx        # one row per product: record schema, package sch
 asf doctor --product <p>
 ```
 
-`asf upgrade` without `--skip-pipx` also runs `pipx upgrade asf-factory`. A pinned install keeps
-the spec it was installed with, so move a pin with the installer, not with `asf upgrade`.
+`asf upgrade` without `--skip-pipx` also runs the `pipx install --force` above. A pinned install
+keeps the spec it was installed with, so move a pin with `asf upgrade --to`, not with the
+installer's bare rerun.
 
 ### The fix package's rollout (once, per product)
 

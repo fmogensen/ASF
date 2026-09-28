@@ -1,4 +1,5 @@
 """tests.test_readme — the span grammar and the renderer (asf.views.readme)."""
+import argparse
 import builtins
 import contextlib
 import io
@@ -394,6 +395,88 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(rc2, 0)
         self.assertIn('unchanged', out2)
         self.assertNotIn('rewritten', out2)
+
+
+def _install_parser():
+    """The ``asf install`` subparser, off the real :func:`cli.build_parser` — never a hand-kept
+    flag list, so a flag added or dropped there is caught here too (T-0410, §2.8)."""
+    parser = cli.build_parser()
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return action.choices['install']
+    raise AssertionError('no install subcommand')
+
+
+def _install_flags():
+    """Every ``--flag`` ``asf install`` carries, excluding ``-h``/``--help`` and ``--product``
+    (named separately in the bootstrap line, not the flag table)."""
+    flags = []
+    for a in _install_parser()._actions:
+        for opt in a.option_strings:
+            if opt not in ('-h', '--help', '--product'):
+                flags.append(opt)
+    return flags
+
+
+class InstallSectionTests(unittest.TestCase):
+    """T-0410: the README's Install section is five lines or fewer, and the guide stops opening
+    with two files to copy by hand (§2.8)."""
+
+    def _read(self, path):
+        with open(os.path.join(REPO_ROOT, path), encoding='utf-8') as f:
+            return f.read()
+
+    def _section(self, text, heading):
+        """The lines strictly between a ``## <heading>`` line and the next heading or paragraph
+        that is no longer about installing (the README carries no heading of its own between
+        ``## Install`` and the links paragraph that follows it)."""
+        lines = text.splitlines()
+        start = next(i for i, l in enumerate(lines) if l.strip() == heading)
+        end = next(i for i in range(start + 1, len(lines))
+                  if lines[i].startswith(('#', "The operator's guide is")))
+        return lines[start + 1:end]
+
+    def test_install_section_is_five_lines_or_fewer(self):
+        section = self._section(self._read('README.md'), '## Install')
+        content = [l for l in section if l.strip() and not l.startswith('```')]
+        self.assertLessEqual(len(content), 5, content)
+
+    def test_install_section_has_no_hand_copied_yaml(self):
+        section = '\n'.join(self._section(self._read('README.md'), '## Install'))
+        self.assertNotIn('cp docs/', section)
+
+    def test_install_section_fence_names_the_bootstrap_and_three_flags(self):
+        section = '\n'.join(self._section(self._read('README.md'), '## Install'))
+        self.assertIn('tools/install.sh', section)
+        for flag in ('--repo', '--record', '--scheduler'):
+            self.assertIn(flag, section)
+
+    def test_getting_started_has_no_hand_copied_yaml(self):
+        text = self._read('docs/guide/getting-started.md')
+        self.assertNotIn('cp docs/config.example.yaml', text)
+        self.assertNotIn('cp docs/products.example.yaml', text)
+
+    def test_getting_started_flag_table_matches_the_parser(self):
+        """Every ``--flag`` the guide's table names is one the parser carries, and every flag
+        the parser carries is named in the table — read off ``build_parser``, not a hand-kept
+        list, so the table cannot drift from the command."""
+        text = self._read('docs/guide/getting-started.md')
+        table_flags = [line.split('|')[1].strip().strip('`')
+                      for line in text.splitlines() if line.startswith('| `--')]
+        self.assertEqual(sorted(table_flags), sorted(_install_flags()))
+
+    def test_upgrading_names_to(self):
+        text = self._read('docs/guide/upgrading.md')
+        self.assertIn('--to', text)
+
+    def test_troubleshooting_names_the_installer_operator_lines(self):
+        text = self._read('docs/guide/troubleshooting.md')
+        for needle in ('not on PATH — install and re-run',
+                       'claude setup-token',
+                       '/plugin marketplace add', '/plugin install asf@asf',
+                       'clock(s) still not loaded after retrying the bootstrap',
+                       'pipx uninstall asf-factory'):
+            self.assertIn(needle, text, needle)
 
 
 class ProductResolutionProseTests(unittest.TestCase):
