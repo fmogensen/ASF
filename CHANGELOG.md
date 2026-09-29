@@ -2,6 +2,32 @@
 
 One entry per released version, newest first.
 
+## v0.1.74 — 2026-09-29
+
+### Features landed
+
+- F-0082 Quota: a cooldown band before the stop — one new job per account from 90 %, none from 95 %
+- F-0090 Adjudication is the last resort: the cheap causes are ruled out before Opus is spent
+
+### In progress
+
+- F-0120 Adopting a record: flag cards that belong to another product and move or remove them in bulk (asf move)
+- F-0158 Sessions die with 'failed: not pushed' 72 times a week
+- F-0162 asf upgrade writes the pending marker before checking the ref exists
+- F-0163 asf set cannot change a bug's severity (needed to downgrade an S1)
+- F-0167 asf status blocks on quota_command: reads uncached per account, 60 s timeout each
+- F-0234 Sessions die with 'dead pid' 5.5 times a week
+- F-0235 Sessions die with 'failed: hook refused' 19.5 times a week
+
+### Improvements and hotfixes
+
+- fix(publish): a worker-account name in unpublished commits is rewritten to lane-N, not refused forever (#340)
+- fix(feeder): a REPLAN row waits on any of the Feature's Tasks with a PR in flight (#349)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.74"`
+
 ## v0.1.73 — 2026-09-29
 
 ### Features landed
