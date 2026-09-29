@@ -541,7 +541,8 @@ def invariant_findings(root, product=None, deep=False, out=print, ingest=None):
     """Every invariant, read-only, against the record at ``root`` and the product's state
     directory: the record audit (:func:`asf.invariants.record_audit`), the feeder over the rows
     the wave would plan, the lane report, and with ``deep`` I6 on a copy of the record. Returns
-    ``[Finding]``; the I9 events are printed, never counted."""
+    ``[Finding]``; the I9 events are printed, never counted and never marked seen: the audit
+    lists every foreign merge the history holds, where the tick says each one once."""
     from asf import invariants
     findings = list(invariants.record_audit(root, product))
     if product is not None:

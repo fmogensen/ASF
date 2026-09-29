@@ -683,6 +683,63 @@ def i9_events(ctx):
     return out
 
 
+#: the branches an I9 event has already been recorded for, beside the session ledger the events
+#: are folded out of (:func:`_sessions_path`): ``{branch: {'pr', 'at'}}``
+I9_SEEN = 'i9-seen.json'
+
+
+def _i9_path(product):
+    """The I9 ledger's path, beside ``sessions.jsonl`` — or ``None`` when it cannot be derived,
+    which means no ledger, and every event is said again (C11)."""
+    try:
+        return os.path.join(os.path.dirname(_sessions_path(product)), I9_SEEN)
+    except OSError:
+        return None
+
+
+def i9_seen(product):
+    """The branches an I9 event has already been recorded for. Missing, unreadable or
+    undeliverable: ``{}`` — a de-duplicator fails into saying it again, never into silence."""
+    import json      # the module imports it per function (:func:`lane_history`), not at the top
+    path = _i9_path(product)
+    if not path:
+        return {}
+    try:
+        with open(path, encoding='utf-8') as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def i9_unseen(product, events, now=None):
+    """The events of ``events`` this product has not recorded before — one per branch, ever —
+    with the ledger written to carry them. The fold they come from is over an append-only file
+    (:func:`lane_history`), so without the ledger a merge found outside the lane is re-said
+    every tick for as long as the product lives. Never raises: a path that cannot be derived,
+    or a ledger that cannot be read or written, only means the event is said again (next tick,
+    or right away)."""
+    import datetime
+    import json
+    if not events:
+        return []
+    seen = i9_seen(product)
+    new = [ev for ev in events if ev.get('branch') not in seen]
+    if not new:
+        return new
+    at = now or datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    seen.update({ev['branch']: {'pr': ev.get('pr'), 'at': at} for ev in new})
+    path = _i9_path(product)
+    if path:
+        try:
+            with open(path + '.tmp', 'w', encoding='utf-8') as fh:
+                json.dump(seen, fh, sort_keys=True)
+            os.replace(path + '.tmp', path)
+        except OSError:
+            pass
+    return new
+
+
 INVARIANTS.extend([
     Invariant('I4', 'feeder', _feeder_only(check_i4)),
     Invariant('I5', 'feeder', _feeder_only(check_i5)),
@@ -873,12 +930,13 @@ def lane_context(product, now=None):
 
 def lane_report(product, out=print, event=None, now=None):
     """The lane check point, after harvest: ``INVARIANT I8: <branch> — <why>`` per finding and
-    ``EVENT I9: <message>`` per merge from outside the lane (and ``event('foreign-merge', …)``
-    when given). Report only: returns ``(findings, events)``, never raises."""
+    ``EVENT I9: <message>`` per merge from outside the lane not recorded before (and
+    ``event('foreign-merge', …)`` when given). Report only: returns ``(findings, events)``,
+    never raises."""
     try:
         ctx = lane_context(product, now)
         findings = run(ctx, scope='lane', out=out)
-        events = i9_events(ctx)
+        events = i9_unseen(product, i9_events(ctx))
     except Exception as e:  # noqa: BLE001 — a lane report never stops the tick
         out(f'INVARIANT lane: not checked ({type(e).__name__}: {e})')
         return [], []
