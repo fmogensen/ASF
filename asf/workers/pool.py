@@ -56,6 +56,7 @@ from asf.workers import headroom as headroom_mod
 from asf.workers import lifecycle
 from asf.workers import observe
 from asf.workers import quota as quota_mod
+from asf.workers import seats as seats_mod
 
 DEFAULT_RESERVE = capacity_mod.DEFAULT_RESERVE  # re-export: existing importers keep working
 SESSION_FIELDS = ('job', 'item', 'feature', 'kind', 'account', 'model', 'pid', 'worktree',
@@ -270,14 +271,42 @@ def lane_of(account):
     return 'cloud' if account.role == 'cloud' else 'local'
 
 
+def claim_rows(claims, base):
+    """One live row per claim not already spoken for by ``base`` (:meth:`Pool.from_config`,
+    :meth:`Pool._refresh`) — the two never disagree about what a claim row looks like.
+
+    A claim whose ``(product, job)`` is already a row of ``base`` is dropped: the launch line
+    landed and the registry holds that seat now, and counting both would be the mirror of the
+    defect this card closes. A claim of this process's own pid becomes the **exact** 7-key seat
+    dict :meth:`Pool.take` appends to ``live`` — those keys and no others, so :meth:`Pool.untake`'s
+    identity scan still finds it (P11). Another process's claim becomes a row that carries
+    ``lane``, so :func:`is_cloud_lane` reads a cloud claim as cloud and it holds no local seat."""
+    held = {(s.get('product'), s.get('job')) for s in base}
+    rows = []
+    for c in claims:
+        if (c.get('product'), c.get('job')) in held:
+            continue
+        if c.get('pid') == os.getpid():
+            rows.append({'job': c.get('job'), 'account': c.get('account'),
+                        'model': c.get('model'), 'product': c.get('product'),
+                        'kind': c.get('kind'), 'wave': True, 'lane': c.get('lane')})
+        else:
+            rows.append({'account': c.get('account'), 'model': c.get('model'),
+                        'product': c.get('product'), 'job': c.get('job'),
+                        'kind': c.get('kind'), 'lane': c.get('lane'), 'claim': True})
+    return rows
+
+
 class Pool:
     """Accounts + their current load + the guard. ``live`` is the list of live session records
     (each with ``account``, ``model``); :meth:`take` adds one as a wave launches.
 
     Built by :meth:`from_config`, ``live`` spans every product's registry and the observed
-    sessions no registry knows, each seat once; ``unreadable`` is why the session table could not
-    be read, and ``''`` when it could. A hand-built pool is readable and its ``live`` is one
-    product's list."""
+    sessions no registry knows, each seat once, plus this host's outstanding claims
+    (:mod:`asf.workers.seats`); ``unreadable`` is why the session table could not be read, and
+    ``''`` when it could; ``seats_degraded`` is why claims are not being shared, and ``''`` when
+    they are. A hand-built pool is readable, shares no claims across processes, and its ``live``
+    is base + claims: ``_base`` is the list it was given, kept as given across a ``take``."""
 
     def __init__(self, accounts, quota_source=None, guards=None, reserve=None, live=(),
                  unreadable='', costs=None, limits=None):
@@ -285,8 +314,16 @@ class Pool:
         self.quota = quota_source or quota_mod.NoQuotaSource()
         self.guards = guards or quota_mod.guards_from_config({})
         self.reserve = dict(DEFAULT_RESERVE if reserve is None else reserve)
+        #: the build's own rows — kept as given for a hand-built pool (PD2); a ``from_config``
+        #: pool re-reads instead (``self._reread``) and never consults this again
+        self._base = [dict(s) for s in live]
         self.live = [dict(s) for s in live]
         self.unreadable = unreadable
+        #: why claims are not shared across products right now, or ``''`` (PD5)
+        self.seats_degraded = ''
+        #: ``from_config``'s closure over ``(seen_pids, seen_sessions)`` that re-reads the
+        #: registries without re-running ``observe.read`` (C3); ``None`` for a hand-built pool
+        self._reread = None
         #: the per-launch share of a 5h window (:class:`asf.workers.headroom.CostTable`)
         self.costs = costs or headroom_mod.CostTable()
         #: ``{account: {until, …}}`` — accounts a session limit stopped until their reset
@@ -315,30 +352,44 @@ class Pool:
         observed, why = observe.read(cfg, accounts, source=session_source)
         seen_pids = {o.pid for o in observed} - {None}
         seen_sessions = {o.session for o in observed} - {None}
-        # a run holds a seat while its pid answers, or while ps shows its process — a dead run
-        # with no ``ended`` line yet is no load (:func:`asf.workers.lifecycle.occupies`)
-        registered = [r for r in lifecycle.live_all(os.path.join(env.ASF_HOME, 'state'),
-                                                    alive=lambda _pid: True)
-                      if lifecycle.pid_alive(r.get('pid')) or r.get('pid') in seen_pids
-                      or (r.get('session') is not None and r.get('session') in seen_sessions)]
+
+        def registered_now():
+            # a run holds a seat while its pid answers, or while ps shows its process — a dead
+            # run with no ``ended`` line yet is no load (:func:`asf.workers.lifecycle.occupies`)
+            return [r for r in lifecycle.live_all(os.path.join(env.ASF_HOME, 'state'),
+                                                  alive=lambda _pid: True)
+                   if lifecycle.pid_alive(r.get('pid')) or r.get('pid') in seen_pids
+                   or (r.get('session') is not None and r.get('session') in seen_sessions)]
+
+        registered = registered_now()
         pids = {r.get('pid') for r in registered} - {None}
         sessions = {r.get('session') for r in registered} - {None}
-        extra = [o for o in observed
+        extras = [{'account': o.account, 'model': None, 'product': o.product,
+                  'job': o.job, 'session': o.session, 'pid': o.pid, 'owner': o.owner}
+                 for o in observed
                  if o.account is not None and o.pid not in pids and o.session not in sessions]
-        live = registered + [{'account': o.account, 'model': None, 'product': o.product,
-                              'job': o.job, 'session': o.session, 'pid': o.pid, 'owner': o.owner}
-                             for o in extra]
+        live = registered + extras
+        # every product's outstanding claim, counted once against every pool it is not a row of
+        # yet (:mod:`asf.workers.seats`, PD5); ``registered`` is passed so the sweep's rule (c)
+        # walks no registry twice (P4)
+        claims, seats_why = seats_mod.read(registered=registered)
         # a run that died on a usage limit stops its account now, not at its product's next
         # health pass — another product's wave may be the next to place a launch
         try:
             lifecycle.note_spent_windows(os.path.join(env.ASF_HOME, 'state'))
         except Exception:  # noqa: BLE001 — health still records it; never a blocker
             pass
-        return cls(accounts,
+        pool = cls(accounts,
                    quota_source=quota_source or quota_mod.source_from_config(cfg),
                    guards=quota_mod.guards_from_config(cfg), reserve=reserve_from_config(cfg),
                    live=live, unreadable=why, costs=headroom_mod.table_from_config(cfg),
                    limits=headroom_mod.active_limits())
+        pool.seats_degraded = seats_why
+        # ``observe.read`` is not re-run: the re-read keeps the ps-observed ``extras`` frozen from
+        # this build and only re-walks the registries (C3)
+        pool._reread = lambda: registered_now() + extras
+        pool.live = pool._base + claim_rows(claims, pool._base)
+        return pool
 
     def usage(self, account):
         if account.name not in self._usage:
@@ -549,23 +600,82 @@ class Pool:
             why += '; cooling: ' + ', '.join(a.name for a in held)
         return why
 
+    def _refresh(self, ledger):
+        """Recompute ``self.live`` under the caller's lock (:mod:`asf.workers.seats`), called only
+        by :meth:`take`, :meth:`untake` and :meth:`retake`. A ``from_config`` pool re-reads the
+        registries fresh — a launch line that landed since the build stops being double-counted —
+        a hand-built pool keeps the list its caller gave it (PD2); either way the ledger's claims
+        are layered on top (:func:`claim_rows`), so the two can never disagree about a claim row."""
+        base = self._reread() if self._reread is not None else self._base
+        self.live = base + claim_rows(ledger.claims, base)
+
     def take(self, account, model, job='', product=None, kind=None, lane=None):
-        """One launch of this wave on ``account``: a seat (a cloud one for ``lane='cloud'``),
-        and its full estimate committed against the account's 5h headroom."""
+        """Claim one seat on ``account`` for this launch, across every product on this host.
+
+        Returns ``True`` when the seat is ours. ``False`` when the account filled up between the
+        pick and this call — another product's wave claimed it, or a launch of ours landed — and
+        the row must be decided again (:func:`asf.workers.wave.wave`)."""
+        try:
+            with seats_mod.held() as ledger:
+                self._refresh(ledger)
+                if lane != 'cloud' and not self.under_caps(account, model):
+                    return False  # a held lock is milliseconds; the caller retries (C6)
+                ledger.add({'account': account.name, 'product': product, 'job': job,
+                           'model': model, 'kind': kind, 'lane': lane, 'pid': os.getpid(),
+                           'at': now_iso()})
+        except seats_mod.Busy:
+            return False
+        except seats_mod.Unusable as e:
+            # a host that cannot hold a ledger must still launch (C6); the operator sees the line
+            self.seats_degraded = str(e)
         self.live.append({'job': job, 'account': account.name, 'model': model,
                           'product': product, 'kind': kind, 'wave': True, 'lane': lane})
         self._committed[account.name] = (self._committed.get(account.name, 0.0)
                                          + self.costs.cost(kind, model))
+        return True
 
     def untake(self, account, model, job='', product=None, kind=None, lane=None):
         """Undo one :meth:`take` — a seat the wave reserved for a launch that then failed
-        (:func:`asf.workers.wave.wave` reserves before the launch's setup runs)."""
+        (:func:`asf.workers.wave.wave` reserves before the launch's setup runs). Also removes the
+        claim, so a failed spawn frees the seat now rather than at ``CLAIM_TTL_S`` (C5); a ``Busy``
+        or ``Unusable`` ledger here loses only this eager release — the sweep's rule (a) or (b)
+        collects it — so neither raises out of ``untake``."""
         want = {'job': job, 'account': account.name, 'model': model, 'product': product,
                 'kind': kind, 'wave': True, 'lane': lane}
+        found = False
         for i in range(len(self.live) - 1, -1, -1):
             if self.live[i] == want:
                 del self.live[i]
                 self._committed[account.name] = (self._committed.get(account.name, 0.0)
                                                  - self.costs.cost(kind, model))
-                return True
-        return False
+                found = True
+                break
+        try:
+            with seats_mod.held() as ledger:
+                ledger.remove(product, job)
+        except (seats_mod.Busy, seats_mod.Unusable):
+            pass
+        return found
+
+    def retake(self, account, seat, model):
+        """Move a held claim's ``model`` (C8) — one lock, no cap test, never refused: the swap
+        happens after the launch already succeeded, and refusing there would free a seat for a
+        session that is running. Replaces the claim's ``model`` and the live row's together, and
+        returns the new seat dict."""
+        product, job = seat.get('product'), seat.get('job')
+        try:
+            with seats_mod.held() as ledger:
+                ledger.remove(product, job)
+                ledger.add({'account': account.name, 'product': product, 'job': job,
+                           'model': model, 'kind': seat.get('kind'), 'lane': seat.get('lane'),
+                           'pid': os.getpid(), 'at': now_iso()})
+        except (seats_mod.Busy, seats_mod.Unusable):
+            pass
+        old = dict(seat, account=account.name, wave=True)
+        new_seat = dict(seat, model=model)
+        new_live = dict(new_seat, account=account.name, wave=True)
+        for i, s in enumerate(self.live):
+            if s == old:
+                self.live[i] = new_live
+                break
+        return new_seat
