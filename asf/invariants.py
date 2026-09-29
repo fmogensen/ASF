@@ -248,15 +248,18 @@ def ordered(edges, a, b):
     return _reaches(edges, a, b) or _reaches(edges, b, a)
 
 
-def unordered_overlaps(tasks):
+def unordered_overlaps(tasks, shared=()):
     """``[(a, b, glob_a, glob_b)]`` — every pair of Active, non-``removed:`` Tasks carrying
     ``writes:`` whose globs intersect (``core.writes_intersect``) that the record has **not**
     ordered (:func:`ordered`), ``a`` < ``b``, the first intersecting glob pair. ``tasks`` is
     every Task, Active or not: a Closed or removed one is no pair of its own but may still be a
-    link in an ``after:`` chain.
+    link in an ``after:`` chain. ``shared``: the product's ``conventions.shared_paths`` — a glob
+    either side of the pair covers is skipped, so two Tasks whose only common glob is a declared
+    lockfile are no pair at all (the feeder does not serialise them either).
 
     Reachability runs only for a pair whose globs already intersect, so the cost is the number
     of intersecting pairs, not the square of the record."""
+    from asf.feeder import footprint
     from asf.record.core import writes_intersect
     edges = _after_edges(tasks)
     active = sorted((iid, _writes_of(t)) for iid, t in tasks.items()
@@ -267,7 +270,11 @@ def unordered_overlaps(tasks):
         for b, wb in active[i + 1:]:
             glob = None
             for x in wa:
+                if footprint.is_shared(x, shared):
+                    continue
                 for y in wb:
+                    if footprint.is_shared(y, shared):
+                        continue
                     if writes_intersect(x, y):
                         glob = (x, y)
                         break
@@ -291,7 +298,10 @@ def check_i3(ctx):
     the guard keeps ingest from replaying a standing overlap every tick — a Task moved to Active
     because its branch exists would otherwise be put back forever; the ``after:`` half keeps a
     writer from silencing a live overlap for good by removing the order without touching the
-    paths (C3)."""
+    paths (C3).
+
+    A glob ``ctx.product``'s ``conventions.shared_paths`` covers is no pair, because the feeder
+    does not serialise it either (:func:`asf.feeder.footprint.shared_globs`)."""
     changed_ids = {}
     for path in _card_paths(ctx.staged):
         _at, after = _after(ctx, path)
@@ -305,8 +315,10 @@ def check_i3(ctx):
     if not changed_ids or not any(m.get('type') == 'task' for p in changed_ids.values()
                                   for m in [_after(ctx, p)[1]]):
         return []
-    new = ({(a, b) for a, b, *_globs in unordered_overlaps(overlap_tasks(_record(ctx)))} -
-           {(a, b) for a, b, *_globs in unordered_overlaps(overlap_tasks(_before_record(ctx)))})
+    from asf.feeder import footprint
+    shared = footprint.shared_globs(ctx.product)
+    new = ({(a, b) for a, b, *_globs in unordered_overlaps(overlap_tasks(_record(ctx)), shared)} -
+           {(a, b) for a, b, *_globs in unordered_overlaps(overlap_tasks(_before_record(ctx)), shared)})
     out = []
     for a, b in sorted(new):
         for iid, other in ((a, b), (b, a)):

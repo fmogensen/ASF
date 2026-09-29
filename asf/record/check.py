@@ -8,6 +8,7 @@ from collections import Counter
 
 from asf import invariants
 from asf.conventions import DEFAULT_SPECS_DIR
+from asf.feeder import footprint
 from asf.groom import shape
 from asf.init import ITEM_FOLDERS as LAYOUT_FOLDERS, STREAM_FOLDERS
 from asf.record import frontmatter, tree
@@ -135,13 +136,14 @@ def staged_paths(repo, prefix=''):
 
 
 def cmd_check(args, root):
+    shared = footprint.shared_globs(product_of(args))
     if getattr(args, 'staged', False):
-        return cmd_check_staged(root)
+        return cmd_check_staged(root, shared)
     paths = args.paths or None
     restrict = None
     if paths:
         restrict = {os.path.relpath(os.path.abspath(p), root) for p in paths}
-    findings, warnings, _index_wrong = record_findings(root)
+    findings, warnings, _index_wrong = record_findings(root, shared=shared)
     if restrict is not None:
         findings = [f for f in findings
                     if f[0] in restrict or f[0] == 'index.json' or f[0] in LAYOUT]
@@ -160,13 +162,15 @@ LAYOUT = tuple(LAYOUT_FOLDERS) + tuple(STREAM_FOLDERS)
 INDEX_STALE = 'index.json is stale (run `asf index`)'
 
 
-def record_findings(root, scrub=None, layout=True):
+def record_findings(root, scrub=None, layout=True, shared=()):
     """Every check over the record at ``root``: ``(findings, warnings, index_wrong)`` — findings
     and warnings as ``(relpath, line, message)``; ``index_wrong`` the ``index.json`` entries that
     differ from what the cards derive, one ``(id, expected, on disk)`` key each (a card that fails
     to parse is its own finding, never a stale entry too). ``scrub`` is the title scrub the
     derived sections are judged with (by default the record's own); ``layout`` False skips the
-    layout folders (a scratch copy of the record has only its cards)."""
+    layout folders (a scratch copy of the record has only its cards). ``shared``: the product's
+    ``conventions.shared_paths``, passed to the Active-Task overlap check so a lockfile the
+    product declares never reads as two Tasks' footprints intersecting."""
     by_id, parse_errors = load_items(root)
     canonical, dupes = canonicalize(by_id)
     derived = compute_derived(canonical)
@@ -352,7 +356,7 @@ def record_findings(root, scrub=None, layout=True):
 
     # Active task writes: overlap — the one definition (asf.invariants.unordered_overlaps)
     tasks = invariants.overlap_tasks({iid: rec['meta'] for iid, rec in canonical.items()})
-    for a, b, g1, g2 in invariants.unordered_overlaps(tasks):
+    for a, b, g1, g2 in invariants.unordered_overlaps(tasks, shared):
         rec = canonical[a]
         add(rec, find_line(rec, 'writes'), f"writes: {g1!r} intersects Active task {b}'s {g2!r}")
 
@@ -388,7 +392,7 @@ def _key(entry):
     return json.dumps(entry, sort_keys=True)
 
 
-def cmd_check_staged(root):
+def cmd_check_staged(root, shared=()):
     """``asf check --staged``, the record pre-commit: the commit is judged by what it stages —
     the cards as the index holds them (``git show :<path>``, never the working tree) against the
     same check over ``HEAD``. An error the staged state has and ``HEAD`` has not refuses the
@@ -398,7 +402,9 @@ def cmd_check_staged(root):
     card the commit never otherwise touches, such as the target of a mention a staged card gained
     — are regenerated and staged by the hook itself (:func:`stage_derived`), never a refusal. An
     error ``HEAD`` already carries is the record's standing debt: printed as a warning, never a
-    reason to refuse this commit."""
+    reason to refuse this commit. ``shared``: the product's ``conventions.shared_paths``, given to
+    both sides of the comparison — the same set on ``HEAD`` and on the staged tree, or a finding
+    ``HEAD`` already carries would read as new."""
     found = committing_repo(root)
     if found is None:
         print('error: --staged needs the record to be a git checkout', file=sys.stderr)
@@ -416,11 +422,12 @@ def cmd_check_staged(root):
         staged_dir = os.path.join(scratch, 'staged')
         tree.lay_out_head(repo, head_dir, tree.record_paths(prefix), scratch)
         tree.lay_out(repo, staged_dir, tree.record_paths(prefix))
-        base = record_findings(os.path.join(head_dir, prefix), scrub, layout=False)
-        now = record_findings(os.path.join(staged_dir, prefix), scrub, layout=False)
+        base = record_findings(os.path.join(head_dir, prefix), scrub, layout=False, shared=shared)
+        now = record_findings(os.path.join(staged_dir, prefix), scrub, layout=False, shared=shared)
         if now[2] - base[2]:  # the staged change leaves derived state stale: derive it, stage it
             if stage_derived(repo, prefix, os.path.join(staged_dir, prefix), scrub):
-                now = record_findings(os.path.join(staged_dir, prefix), scrub, layout=False)
+                now = record_findings(os.path.join(staged_dir, prefix), scrub, layout=False,
+                                      shared=shared)
     return _report_staged(now, base, staged)
 
 
@@ -505,7 +512,7 @@ def _report_staged(now, base, staged):
     return 1 if blocking else 0
 
 
-def _product_of(args):
+def product_of(args):
     from asf import env
     try:
         return env.load_product(getattr(args, 'product', None))
@@ -555,7 +562,7 @@ def invariant_findings(root, product=None, deep=False, out=print, ingest=None):
 def cmd_check_invariants(args, root):
     """``asf check --invariants [--deep]``: one ``INVARIANT <id>: <subject> — <why>`` line per
     violation; exit 1 when there is any. Never writes the record or the state directory."""
-    findings = invariant_findings(root, _product_of(args), deep=getattr(args, 'deep', False))
+    findings = invariant_findings(root, product_of(args), deep=getattr(args, 'deep', False))
     for f in findings:
         where = f" ({', '.join(f.paths)})" if f.paths else ''
         print(f'INVARIANT {f.invariant}: {f.subject} — {f.message}{where}')

@@ -197,22 +197,29 @@ def max_files(product):
     return v if isinstance(v, int) and v >= 0 else MAX_FILES
 
 
-def decide(task_id, paths, limit=MAX_FILES, protected=None, running=(), widened_before=0):
+def decide(task_id, paths, limit=MAX_FILES, protected=None, running=(), widened_before=0,
+           shared=()):
     """The ``widen_footprint`` verdict for ``task_id`` needing ``paths`` outside its ``writes:``.
 
     ``protected``: ``{path: (class, level)}`` — the paths under an approvals-protected glob whose
     class is not granted. ``running``: ``[(task_id, writes)]`` of the open Tasks — Active in the
     record or with a run in play — and the widenings already made this pass.
-    ``widened_before``: how many times this Task was already widened."""
+    ``widened_before``: how many times this Task was already widened. ``shared``: the product's
+    ``conventions.shared_paths``. A path the set covers is a lockfile the product has declared
+    merge-serialised: it never makes this widening wait on another Task, and it is not counted
+    toward ``limit`` — the cap judges a mis-cut plan, and the one file every dependency-adding
+    Task touches is no evidence of one (D3). Every other refusal still applies to it: a second
+    widening is still a RESHAPE, and an approvals-protected path is still an approval."""
     paths = tuple(dict.fromkeys(p for p in paths or () if p))
-    if widened_before or len(paths) > limit:
+    scoped = tuple(p for p in paths if not footprint.is_shared(p, shared))
+    if widened_before or len(scoped) > limit:
         return Verdict(RESHAPE, paths, RESHAPE_REASON.format(paths=' '.join(paths)))
     for p in paths:
         if (protected or {}).get(p):
             cls, level = protected[p]
             return Verdict(APPROVAL, paths, cls, level)
     other = footprint.first_conflict(list(paths), [(t, norm_writes(w)) for t, w in running or ()
-                                                   if t != task_id])
+                                                   if t != task_id], shared)
     if other:
         return Verdict(WAITS, paths, other)
     return Verdict(WIDEN, paths)
@@ -230,12 +237,14 @@ def widened_paths(body):
     return out
 
 
-def overlapping_widenings(writes, widened, others):
+def overlapping_widenings(writes, widened, others, shared=()):
     """``(owner, [paths])``: the paths of ``writes`` a widening added (``widened``) that intersect
     an open Task's ``writes:`` by ``asf check``'s test — the first such owner of ``others``
-    (``[(task_id, writes)]``) — else None. A plan-declared path is never named."""
+    (``[(task_id, writes)]``) — else None. A plan-declared path is never named. A path the
+    ``shared`` set covers is never named either: the product has declared it merge-serialised, so
+    it is not this Task's to give back."""
     for owner, other in others:
-        hit = [w for w in writes if w in widened
+        hit = [w for w in writes if w in widened and not footprint.is_shared(w, shared)
                and any(writes_intersect(w, o) for o in other)]
         if hit:
             return owner, hit

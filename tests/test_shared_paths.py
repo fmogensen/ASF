@@ -5,6 +5,8 @@ and the exemption that stops at the shared set.
 predicate. ``RecordCheckTests`` (Task 2), ``SharedSerialisationTests`` (Task 4) and
 ``RegenerateSharedTests`` (Task 5) extend this module as the plan's later Tasks land.
 """
+import os
+import shutil
 import unittest
 
 from asf import env
@@ -63,3 +65,35 @@ class IsSharedTests(unittest.TestCase):
     def test_empty_shared_set_shares_nothing(self):
         self.assertFalse(footprint.is_shared('x', ()))
         self.assertFalse(footprint.is_shared('x', None))
+
+
+class RecordCheckTests(unittest.TestCase):
+    """Task 2, S-37302: ``record_findings``'s Active-pair loop skips a shared glob on either
+    side — the record half of ``asf check`` and I3 agreeing with the feeder. ``SharedPathI3Tests``
+    (``tests/test_record_stage.py``) is the I3 / ``set_typed`` half."""
+
+    def setUp(self):
+        from asf.init import STREAM_FOLDERS
+        from tests.test_record_stage import make_record, write
+        self.root = make_record()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        for folder in STREAM_FOLDERS:
+            os.makedirs(os.path.join(self.root, folder), exist_ok=True)
+        write(self.root, 'E-0001', 'epic')
+        write(self.root, 'F-0001', 'feature', parent='E-0001')
+        write(self.root, 'T-0001', 'task', parent='F-0001', typed=('writes: [src/a.py, uv.lock]',),
+              machine=('schema_version: 1', 'state: Active', 'stage_since: 2026-01-01T00:00:00Z',
+                       'updated: 2026-01-01T00:00:00Z'))
+        write(self.root, 'T-0002', 'task', parent='F-0001', typed=('writes: [src/b.py, uv.lock]',),
+              machine=('schema_version: 1', 'state: Active', 'stage_since: 2026-01-01T00:00:00Z',
+                       'updated: 2026-01-01T00:00:00Z'))
+        from asf.record.index import do_index
+        do_index(self.root)
+
+    def test_two_active_tasks_sharing_only_the_lockfile_are_no_overlap(self):
+        from asf.record.check import record_findings
+        findings, _w, _iw = record_findings(self.root, shared=('uv.lock',))
+        self.assertFalse(any('intersects Active task' in msg for _p, _l, msg in findings), findings)
+        # no product: today's answer, which refuses (D4)
+        findings, _w, _iw = record_findings(self.root)
+        self.assertTrue(any('intersects Active task' in msg for _p, _l, msg in findings), findings)

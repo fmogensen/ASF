@@ -74,6 +74,38 @@ class StagedCheckTests(unittest.TestCase):
     def head(self):
         return self.git(self.root, 'rev-parse', 'HEAD')
 
+    def declare_shared_paths(self):
+        """PD2: a product resolved from ``self.root`` as its ``backlog_dir`` (cwd during the
+        hook), declaring ``conventions.shared_paths: [uv.lock]``."""
+        products = os.path.join(self.env['ASF_HOME'], 'products')
+        os.makedirs(products, exist_ok=True)
+        with open(os.path.join(products, 'sample.yaml'), 'w') as f:
+            f.write('product: sample\nrepo_slug: acme/sample\nmain: main\n'
+                    f'backlog_dir: {self.root}\nconventions:\n  specs_dir: docs/specs\n'
+                    '  shared_paths: [uv.lock]\n')
+
+    def test_a_staged_task_sharing_only_the_lockfile_is_refused_with_no_product_and_accepted_with_one(self):
+        # PD2: cmd_check_staged is the fifth reader of the overlap — the record pre-commit that
+        # refuses this card's own scenario (minting two Tasks that share a lockfile) unless it
+        # too is given the product's shared set.
+        active = ['schema_version: 1', 'state: Active', 'stage_since: 2026-01-01T00:00:00Z',
+                 'updated: 2026-01-01T00:00:00Z']
+        write_item(self.root, 'T-0001', 'task', 'Task one', parent='F-0001',
+                  typed_lines=['writes: [uv.lock]'], machine_lines=active)
+        self.asf('index')
+        self.git(self.root, 'add', '-A')
+        self.git(self.root, 'commit', '-qm', 'T-0001')
+        self.git(self.root, 'push', '-q', 'origin', 'HEAD:main')
+        write_item(self.root, 'T-0002', 'task', 'Task two', parent='F-0001',
+                  typed_lines=['writes: [uv.lock]'], machine_lines=active)
+        self.git(self.root, 'add', 'tasks/T-0002.md')
+        r = self.asf('check', '--staged')
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn('intersects Active task', r.stdout)
+        self.declare_shared_paths()
+        r = self.asf('check', '--staged')
+        self.assertEqual(r.returncode, 0, r.stdout)
+
     def test_set_on_another_card_commits_past_a_standing_error(self):
         before = self.head()
         r = self.asf('set', 'F-0001', 'rank=5')

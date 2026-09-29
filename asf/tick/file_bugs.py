@@ -23,6 +23,7 @@ import subprocess
 import sys
 
 from asf.conventions import Conventions
+from asf.feeder import footprint
 from asf.record import frontmatter
 from asf.record.core import canonicalize, load_items, today
 from asf.record.index import do_index
@@ -208,7 +209,7 @@ def error_class(message):
     return ' '.join(_ITEM_ID_RE.sub('…', _QUOTED_RE.sub('…', message)).split())
 
 
-def record_error_signatures(root, findings=None, canonical=None):
+def record_error_signatures(root, findings=None, canonical=None, shared=()):
     """One signature per error CLASS `asf check` reports over the record, every card carrying it
     an evidence line (B-0132). The record pre-commit judges only what a commit stages, so an
     error in a card nobody touched no longer refuses anything — this is what keeps that standing
@@ -218,10 +219,13 @@ def record_error_signatures(root, findings=None, canonical=None):
     A card this tool filed itself (one carrying a typed ``signature``) is not the record's debt
     and is skipped: a Bug filed with no parent because the product configures no usable
     ``default_bug_epic`` is already reported once (``usable_bug_epic``), and filing a Bug about
-    it would make every run file a Bug about the Bug the last run filed."""
+    it would make every run file a Bug about the Bug the last run filed.
+
+    ``shared``: the product's ``conventions.shared_paths``, passed straight to
+    ``record_findings`` — a Bug is never filed for an overlap the feeder already exempts."""
     if findings is None:
         from asf.record.check import record_findings
-        findings, _warnings, _index_wrong = record_findings(root, layout=False)
+        findings, _warnings, _index_wrong = record_findings(root, layout=False, shared=shared)
     if canonical is None:
         by_id, _errors = load_items(root)
         canonical, _dupes = canonicalize(by_id)
@@ -521,7 +525,8 @@ def cmd_file_bugs(args, root):
     signatures.update(ci_signatures(root, now, conv))
     signatures.update(refusal_signatures(root, now))
     signatures.update(rule_violation_signatures(root, rule_data))
-    signatures.update(record_error_signatures(root, canonical=canonical))
+    signatures.update(record_error_signatures(root, canonical=canonical,
+                                              shared=footprint.shared_globs(conv)))
     if rule_data is not None:
         report_check_failures(rule_data.get('broken') or [], ledger,
                               now.strftime('%Y-%m-%dT%H:%M:%SZ'))

@@ -36,6 +36,7 @@ import os
 import subprocess
 
 from asf import approvals
+from asf.feeder import footprint
 from asf.feeder import rows as feeder_rows
 from asf.feeder import widen
 from asf.workers import lifecycle
@@ -221,7 +222,7 @@ def _card(root, item_id):
     return canonicalize(by_id)[0].get(item_id)
 
 
-def write_card(root, item_id, updates, stamp, note):
+def write_card(root, item_id, updates, stamp, note, product=None):
     """Write ``updates`` on ``item_id``'s card through the parser, append the History line
     ``- <stamp> <note>``, and commit that card alone as ``<item>: <note>`` (in a git checkout).
     None, or why the card is unchanged."""
@@ -233,8 +234,10 @@ def write_card(root, item_id, updates, stamp, note):
     if rec is None:
         return f'no card for {item_id} in the record'
     # validated before the commit below (I3 through the record stage): a widening that would
-    # leave two Active Tasks' writes: intersecting is refused, the card unchanged
-    err = set_typed(rec, updates, writer='widen')
+    # leave two Active Tasks' writes: intersecting is refused, the card unchanged — unless the
+    # intersection is only a path `product`'s conventions.shared_paths declares, which I3 already
+    # exempts (P8)
+    err = set_typed(rec, updates, writer='widen', product=product)
     if err:
         return err
     with open(rec['path'], encoding='utf-8') as f:
@@ -323,11 +326,12 @@ def apply(ctx, items, out=print):
             in_play = open_footprints(product, items)
         v = widen.decide(item_id, needs, widen.max_files(product),
                          protected_paths(product, item_id, needs), in_play,
-                         widenings(ctx, path, item_id))
+                         widenings(ctx, path, item_id), footprint.shared_globs(product))
         if v.kind == widen.WIDEN:
             wider = writes + list(v.paths)
             note = widen.HISTORY.format(paths=' '.join(v.paths), fact=fact)
-            err = write_card(ctx.record_root(), item_id, {'writes': wider}, stamp, note)
+            err = write_card(ctx.record_root(), item_id, {'writes': wider}, stamp, note,
+                             product=product)
             if err:
                 out(f'widen {job}: {item_id} unchanged — {err}')
                 continue
@@ -341,7 +345,8 @@ def apply(ctx, items, out=print):
                 f'correction, no round spent)')
         elif v.kind == widen.RESHAPE:
             note = f'reshape → {v.detail} ({fact})'
-            err = write_card(ctx.record_root(), item_id, {'reshape': v.detail}, stamp, note)
+            err = write_card(ctx.record_root(), item_id, {'reshape': v.detail}, stamp, note,
+                             product=product)
             if err:
                 out(f'widen {job}: {item_id} unchanged — {err}')
                 continue
@@ -396,6 +401,7 @@ def revert_overlaps(ctx, items, out=print):
     stamp = pool_mod.now_iso()[:16].replace('T', ' ')
     done = {}
     in_play = open_footprints(product, items)
+    shared = footprint.shared_globs(product)
     for iid, writes in list(in_play):
         rec = _card(root, iid)
         if rec is None:
@@ -404,7 +410,8 @@ def revert_overlaps(ctx, items, out=print):
         if not widened:
             continue
         others = [(t, w) for t, w in in_play if t != iid]
-        hit = widen.overlapping_widenings(list(rec['meta'].get('writes') or ()), widened, others)
+        hit = widen.overlapping_widenings(list(rec['meta'].get('writes') or ()), widened, others,
+                                          shared)
         if not hit:
             continue
         owner, paths = hit
@@ -416,7 +423,8 @@ def revert_overlaps(ctx, items, out=print):
         updates = {'writes': kept}
         if after != list(rec['meta'].get('after') or ()):
             updates['after'] = after
-        err = write_card(root, iid, updates, stamp, widen.REVERTED.format(owner=owner))
+        err = write_card(root, iid, updates, stamp, widen.REVERTED.format(owner=owner),
+                         product=product)
         if err:
             out(f'widen: {iid} not reverted — {err}')
             continue
@@ -447,11 +455,14 @@ def serialize_overlaps(ctx, items, out=print):
     ``serialized behind <owner>: writes: overlaps <glob>``, committed alone (:func:`write_card`).
 
     Never a cycle: an edge is proposed only where neither Task reaches the other, so the edge it
-    adds cannot close one. Idempotent: the ordered pair is not a candidate again. ``items`` is
-    updated in place; the index is re-derived once when anything was written. Returns
+    adds cannot close one. Idempotent: the ordered pair is not a candidate again. A pair whose
+    only common glob is a path the product's ``conventions.shared_paths`` covers is never ordered
+    here either: harvest serialises it at merge instead (:func:`asf.feeder.footprint.shared_globs`).
+    ``items`` is updated in place; the index is re-derived once when anything was written. Returns
     ``{task: owner}``."""
     from asf import invariants
     from asf.record.core import canonicalize, load_items
+    product = ctx.product
     root = ctx.record_root()
     stamp = pool_mod.now_iso()[:16].replace('T', ' ')
     by_id, _errors = load_items(root)
@@ -461,7 +472,7 @@ def serialize_overlaps(ctx, items, out=print):
     done = {}
     reindex = False
     for owner, held, _glob_owner, glob in invariants.unordered_overlaps(
-            invariants.overlap_tasks(tasks)):
+            invariants.overlap_tasks(tasks), footprint.shared_globs(product)):
         if invariants.ordered(edges, owner, held):
             continue  # an edge written earlier in this pass has already ordered the pair
         rec = _card(root, held)
@@ -469,7 +480,7 @@ def serialize_overlaps(ctx, items, out=print):
             continue
         updates = {'after': list(rec['meta'].get('after') or ()) + [owner]}
         note = widen.SERIALIZED.format(owner=owner, glob=glob)
-        err = write_card(root, held, updates, stamp, note)
+        err = write_card(root, held, updates, stamp, note, product=product)
         if err:
             out(f'widen: {held} not serialized — {err}')
             continue

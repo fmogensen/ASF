@@ -40,7 +40,7 @@ REPORT = ('done my part\n\nREPORT\nitem: T-0001\nkind: coder\nstatus: partial\n'
           'tests: ok\nleft out: {left}\nneeds writes: {needs}\n```\n')
 REPO_FILES = ('src/a.py', 'tests/test_a.py', 'tests/test_b.py', 'tests/test_c.py',
               'lib/shared.py', 'lib/x.py', 'lib/y.py', 'lib/z.py', 'LICENSE',
-              'web/app/items/[id]/sibling.test.ts')
+              'web/app/items/[id]/sibling.test.ts', 'uv.lock')
 
 
 class ReportClaimTests(unittest.TestCase):
@@ -107,6 +107,44 @@ class DecideTests(unittest.TestCase):
         self.assertEqual(widen.widened_paths('- x footprint widened: +a.py b/c.py (report: x)\n'
                                              '- y footprint widened: +d.py (gate)\n'),
                          ['a.py', 'b/c.py', 'd.py'])
+
+    def test_a_shared_path_widens_where_it_would_otherwise_wait(self):
+        # S-37301: the widening the rule allows, where the same call with no `shared` waits
+        v = widen.decide('T-0002', ['uv.lock'], running=[('T-0001', ['src/a.py', 'uv.lock'])])
+        self.assertEqual((v.kind, v.detail), (widen.WAITS, 'T-0001'))
+        v = widen.decide('T-0002', ['uv.lock'], running=[('T-0001', ['src/a.py', 'uv.lock'])],
+                         shared=['uv.lock'])
+        self.assertEqual(v.kind, widen.WIDEN)
+
+    def test_a_shared_path_costs_nothing_against_the_cap(self):
+        five = [f'{i}.py' for i in range(5)]
+        # five real paths plus the lockfile: WIDEN with the set, RESHAPE without it (D3)
+        v = widen.decide('T-1', five + ['uv.lock'], limit=5, shared=['uv.lock'])
+        self.assertEqual(v.kind, widen.WIDEN)
+        v = widen.decide('T-1', five + ['uv.lock'], limit=5)
+        self.assertEqual(v.kind, widen.RESHAPE)
+        # six real paths plus the lockfile: still a RESHAPE, and the reason names every path (PD9)
+        six = [f'{i}.py' for i in range(6)]
+        v = widen.decide('T-1', six + ['uv.lock'], limit=5, shared=['uv.lock'])
+        self.assertEqual(v.kind, widen.RESHAPE)
+        self.assertEqual(v.detail, widen.RESHAPE_REASON.format(
+            paths=' '.join(six + ['uv.lock'])))
+
+    def test_a_shared_path_is_still_an_approval_and_a_second_widening_is_still_a_reshape(self):
+        v = widen.decide('T-1', ['uv.lock'], protected={'uv.lock': ('touch_legal', 'human-now')},
+                         shared=['uv.lock'])
+        self.assertEqual((v.kind, v.detail, v.level), (widen.APPROVAL, 'touch_legal', 'human-now'))
+        v = widen.decide('T-1', ['uv.lock'], widened_before=1, shared=['uv.lock'])
+        self.assertEqual(v.kind, widen.RESHAPE)
+
+    def test_a_shared_path_is_never_named_as_a_widening_to_revert(self):
+        self.assertIsNone(widen.overlapping_widenings(
+            ['src/b.py', 'uv.lock'], ['uv.lock'], [('T-0001', ['src/a.py', 'uv.lock'])],
+            shared=['uv.lock']))
+        # the exemption is what changed: with no shared set, the same call reverts it
+        self.assertEqual(widen.overlapping_widenings(
+            ['src/b.py', 'uv.lock'], ['uv.lock'], [('T-0001', ['src/a.py', 'uv.lock'])]),
+            ('T-0001', ['uv.lock']))
 
 
 class WidenStepBase(StepsTestCase):
@@ -309,10 +347,12 @@ class WidenStepTests(WidenStepBase):
         _git(['commit', '-q', '-m', f'{iid}'], self.root)
 
     def check(self):
-        """``asf check``'s findings on the record."""
+        """``asf check``'s findings on the record, over ``self.product`` (named explicitly, since
+        the test's cwd resolves no product of its own) — so a declared ``shared_paths`` exempts
+        the same overlaps here as it does for the widen tick itself."""
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            cmd_check(types.SimpleNamespace(paths=None), self.root)
+            cmd_check(types.SimpleNamespace(paths=None, product=self.product.name), self.root)
         return buf.getvalue()
 
     def test_a_path_an_active_task_writes_waits_though_no_session_runs_it(self):
@@ -385,6 +425,32 @@ class WidenStepTests(WidenStepBase):
         self.assertEqual(items['T-0001']['reshape'], 'footprint: needs lib/x.py')
         self.assertNotIn('lib/x.py', items['T-0001']['writes'])
         self.assertEqual([r.kind for r in self.rows()], [feeder_rows.RESHAPE])
+
+
+class SharedPathWidenTests(WidenStepBase):
+    """S-37301: a shared path widens freely, through the whole tick — the widen rule's exemption
+    and I3's have to hold together, or the write the rule allows is refused before it lands
+    (PD1)."""
+
+    product_extra = 'steps:\n  batch: off\nconventions:\n  shared_paths: [uv.lock]\n'
+
+    active = WidenStepTests.active
+    check = WidenStepTests.check
+
+    def test_a_shared_path_widens_and_the_widening_stands(self):
+        self.active('T-0002', 'lib/shared.py, uv.lock')
+        self.finished('coder-t-0001', 'uv.lock')
+        _held, verdicts = self.tick()
+        self.assertEqual(verdicts, {'coder-t-0001': widen.WIDEN}, self.lines)
+        self.assertIn('uv.lock', self.writes())
+        self.assertIn('footprint widened: +uv.lock', self.card_text('T-0001'))
+        self.assertNotIn('intersects Active task', self.check())
+        before = int(_git(['rev-list', '--count', 'HEAD'], self.root))
+        # a second tick neither reverts the widening (P6) nor serializes it behind T-0002 (T-0545)
+        self.tick()
+        self.assertEqual(int(_git(['rev-list', '--count', 'HEAD'], self.root)), before)
+        self.assertNotIn('footprint widening reverted', self.card_text('T-0001'))
+        self.assertFalse(self.items()['T-0001'].get('after'))
 
 
 class SerializeOverlapTests(WidenStepBase):
