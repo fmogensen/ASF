@@ -52,6 +52,7 @@ import subprocess
 import time
 
 from asf import gitpush, refguard
+from asf.evidence import review_store
 from asf.workers import cloud
 from asf.workers import cloudpid
 from asf.workers import headroom
@@ -325,6 +326,35 @@ def worktree_empty(worktree, main):
     reap would lose (B-0025, B-0049)."""
     st = _git(['status', '--porcelain'], worktree)
     return st.returncode == 0 and not st.stdout.strip() and in_trunk(worktree, main)
+
+
+#: The kinds whose session writes a review: filed off the branch when the run ends.
+REVIEW_FILING_KINDS = ('review',)
+
+
+def file_review(product, job, run, ev, alive, found):
+    """A finished review run's review, filed off its branch (:func:`asf.evidence.review_store.take`)
+    before anything is judged or committed: the session writes the file in its worktree and
+    commits nothing, because a push to a PR branch restarts the PR's whole CI and moves the head
+    a merge watcher is pinned to. The run records ``review_filed`` (its judgement then needs no
+    commit of its own) and the evidence is gathered again. Returns the evidence to judge."""
+    if run.get('kind') not in REVIEW_FILING_KINDS or ev.result is None or ev.alive:
+        return ev
+    wt, branch, item = run.get('worktree'), run.get('branch'), run.get('item')
+    try:
+        filed = review_store.take(review_store.root(product), product.conventions, wt, branch,
+                                  item, ev.remote_sha)
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        found.append((job, 'filed', f'review not filed: {(str(e) or type(e).__name__)[:200]}'))
+        return ev
+    if not filed:
+        return ev
+    n, path = filed[-1]
+    pool_mod.update_session(product, job, review_filed=path)
+    run['review_filed'] = path
+    found.append((job, 'filed', f'review round {n} of {item} filed off {branch} '
+                                f'({os.path.basename(path)})'))
+    return lifecycle.gather(product, run, alive=alive)
 
 
 def publish_gap(product, run, ev, reason, alive=pid_alive):
@@ -629,6 +659,7 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
             # or a correction may have finished the run (B-0028)
             if s.get('end_reason') == lifecycle.DEAD_PID and not s.get('harvested'):
                 ev = lifecycle.gather(product, s, alive=alive)
+                ev = file_review(product, job, s, ev, alive, found)
                 if ev.result is not None:
                     reason = lifecycle.judge(s, ev, landing=lifecycle.lands(s, registry))
                     reason, ev, line = yield (product, s, ev, reason, alive)
@@ -644,6 +675,7 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
                 yield from republish_steps(product, registry, job, s, alive, found)
             return
         ev = lifecycle.gather(product, s, alive=alive)
+        ev = file_review(product, job, s, ev, alive, found)
         reason = lifecycle.judge(s, ev, landing=lifecycle.lands(s, registry))
         if reason is None:
             return

@@ -38,6 +38,7 @@ import time
 from asf import env, proves, reviews
 from asf.conventions import Conventions
 from asf.evidence import review
+from asf.evidence import review_store
 
 # An evidence-file path, not per-product config — no obvious Product field for it.
 # TODO(config): no Product field for this yet.
@@ -392,6 +393,19 @@ def verdict_of(blob, legacy=True, required=()):
     return VERDICT_WORDS.get(v, "")
 
 
+#: The key a review filed in the review store (:mod:`asf.evidence.review_store`) is read under,
+#: beside the blob shas of the branch's own review files.
+STORED_KEY = "store:"
+
+
+def stored_name(conv, reviews_dir, slug, n):
+    """The name (under ``reviews_dir``) the convention gives round ``n`` of ``slug`` — what a
+    stored review is reported as, the name it would carry on the branch."""
+    path = conv.review_path(str(slug).lower(), n)
+    rdir = str(reviews_dir).strip("/") + "/"
+    return path[len(rdir):] if path.startswith(rdir) else path
+
+
 def pick_review(conv, reviews_dir, names, slugs, legacy_prefixes, trunk=None):
     """``(file name, round, legacy)`` of the newest review among ``names`` (a reviews-dir tree:
     ``{name: blob sha}``) for any of ``slugs`` — the one contract, ``conventions.review_pattern``
@@ -654,6 +668,8 @@ def discover(product=None, checked_file=None):
 
     # ---- the review files each row needs a verdict from
     wanted = {}
+    store = review_store.root(product)
+    stored_blobs = {}
     for it in inits.values():
         slug = it["slug"]
         for kind in ("spec", "plan"):
@@ -667,11 +683,21 @@ def discover(product=None, checked_file=None):
             f, r, legacy = pick_review(conv, reviews_dir, names, [slug],
                                        (f"{kind}-{slug}", slug, f"{slug}-{kind}"),
                                        trunk=main_review_tree)
-            if f:
+            # the review store first: a review filed off the branch it reviewed
+            stored = review_store.newest_of(store, [slug], branch) if store else None
+            if review_store.prefer(stored, r if f else None):
+                key = STORED_KEY + stored["file"]
+                stored_blobs[key] = stored["text"].encode("utf-8")
+                wanted.setdefault(slug, {})[kind] = (
+                    stored_name(conv, reviews_dir, slug, stored["round"]), stored["round"], key,
+                    False)
+            elif f:
                 wanted.setdefault(slug, {})[kind] = (f, r, names[f], legacy)
 
     blobs = read_blobs(list(plan_req.values()) + list(spec_req.values()) +
-                       [v[2] for d in wanted.values() for v in d.values()], product=product)
+                       [v[2] for d in wanted.values() for v in d.values()
+                        if not str(v[2]).startswith(STORED_KEY)], product=product)
+    blobs.update(stored_blobs)
 
     brief_dirs = {}
     for slug in inits:
@@ -750,18 +776,25 @@ def discover(product=None, checked_file=None):
             ids = row["cand"] + [row["branch"].split("/", 1)[-1]]
             f, r, legacy = pick_review(conv, reviews_dir, names, ids,
                                        [p for i in ids for p in (i, f"hotfix-{i}", f"review-{i}")])
-            row["review"] = (r, legacy, f) if f else None
-            if f:
-                task_blob_req.append(names[f])
+            stored = review_store.newest_of(store, ids, row["branch"]) if store else None
+            if review_store.prefer(stored, r if f else None):
+                key = STORED_KEY + stored["file"]
+                stored_blobs[key] = stored["text"].encode("utf-8")
+                row["review"] = (stored["round"], False,
+                                 stored_name(conv, reviews_dir, ids[0], stored["round"]), key)
+            else:
+                row["review"] = (r, legacy, f, names[f]) if f else None
+                if f:
+                    task_blob_req.append(names[f])
     task_blobs = read_blobs(task_blob_req, product=product)
+    task_blobs.update(stored_blobs)
     code_required = reviews.required("code")
     for rows in task_rows.values():
         for row in rows:
             rev = row.pop("review", None)
             if rev:
-                r, legacy, f = rev
-                names = task_trees.get(f"origin/{row['branch']}:{reviews_dir}", {})
-                blob = task_blobs.get(names.get(f))
+                r, legacy, f, key = rev
+                blob = task_blobs.get(key)
                 row["review"] = (r, verdict_of(blob, legacy=legacy, required=code_required))
                 if blob:
                     text = blob[:review.READ_CHARS].decode("utf-8", "replace")

@@ -51,7 +51,8 @@ left out: the retry itself, F-0001 owns it
 
 ## Your job: close the review on T-0001
 
-The binding list is the newest review on `task/T-0001` — `docs/reviews/1-t-0001.md`. Read it in full before you
+The binding list is the newest review of `task/T-0001` — `docs/reviews/1-t-0001.md` (kept off the branch: its
+text is quoted at the end of this brief when it is not in your worktree). Read it in full before you
 change anything. Fix every C exactly as it specifies; apply the I's it leaves to you; never
 redesign and never widen the scope: this branch is already reviewed, and a change the review did
 not ask for buys another round.

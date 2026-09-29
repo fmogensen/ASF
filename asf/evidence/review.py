@@ -1,7 +1,11 @@
 """asf.evidence.review — the one review reader (W2 implements the reader; W1's lane calls it).
 
 A review is a file at ``conventions.review_pattern`` (``{reviews_dir}``, ``{n}`` the round,
-``{slug}`` substituted) on a branch or on the trunk. The same reader answers for a spec, a plan
+``{slug}`` substituted). A new one lives off the branch it reviews, in the review store
+(:mod:`asf.evidence.review_store`), bound to the head it reviewed — a review committed to a PR
+branch restarted the PR's CI; the files a branch or the trunk carries (every review before the
+store, a cloud session's) are still read, and a stored review wins unless the branch holds a
+strictly higher round. The same reader answers for a spec, a plan
 and code — spec/plan approval in ``asf.evidence``, T3/T4/T5 in :mod:`asf.harvest.lane` — and
 replaces ``harvest.review_verdict``/``review_round``/``review_is_current``,
 ``evidence.rx_review``/``newest_review``/``verdict_of`` and ``pr_hygiene.parse_verdict``/
@@ -28,6 +32,7 @@ import re
 import subprocess
 
 from asf import reviews
+from asf.evidence import review_store
 from asf.conventions import DEFAULT_REVIEW_PATTERN, DEFAULT_REVIEWS_DIR
 
 APPROVED = 'approved'
@@ -159,29 +164,16 @@ def _git(repo, *args):
 
 
 def newest(product, branch, item, required=()):
-    """The newest review of ``item`` visible on ``branch`` (the trunk when ``branch`` is the
-    trunk), read through ``conventions.review_pattern``: ``(round, verdict, head)`` — ``round``
-    the highest ``{n}``, ``verdict`` from :func:`verdict_of`, ``head`` the sha the review names
-    (None when it names none) — or None when there is no review file."""
+    """The newest review of ``item`` for ``branch`` (the trunk when ``branch`` is the trunk): the
+    review store's (:mod:`asf.evidence.review_store`) first, else the file ``branch`` carries,
+    read through ``conventions.review_pattern``: ``(round, verdict, head)`` — ``round`` the
+    highest ``{n}``, ``verdict`` from :func:`verdict_of`, ``head`` the sha the review is bound to
+    (None when a branch file names none) — or None when there is no review."""
     if not item or not branch or product is None:
         return None
-    conv = product.conventions
-    repo = getattr(product, 'repo_dir', None)
-    if not repo:
-        return None
-    ref = f'origin/{branch}'
-    listed = _git(repo, 'ls-tree', '-r', '--name-only', ref, '--', _dir_of(conv))
-    if listed is None:
-        return None
-    slug = str(item).lower()
-    hit = pick(conv, listed.splitlines(), slug, (slug, f'spec-{slug}', f'plan-{slug}',
-                                                  f'{slug}-spec', f'{slug}-plan'))
-    if hit is None:
-        return None
-    n, path, legacy = hit
-    text = _git(repo, 'show', f'{ref}:{path}') or ''
-    verdict, head = read(text, legacy, required)
-    return n, verdict, head
+    rv = review_at(getattr(product, 'repo_dir', None), product.conventions, f'origin/{branch}',
+                   item, required, store=review_store.root(product))
+    return (rv['round'], rv['verdict'], rv['head']) if rv else None
 
 
 def verdict_text(text):
@@ -247,24 +239,39 @@ def asks_nothing(text):
     return not lines or bool(NO_C_RE.match(lines[0]))
 
 
-def review_at(repo, conv, ref, item, required=()):
-    """The newest review of ``item`` at ``ref`` (``origin/<branch>``) in ``repo``, for the lane:
-    ``{round, verdict, text, head, path, body}`` — or None. The same reading as :func:`newest`."""
-    if not item or not repo:
-        return None
-    listed = _git(repo, 'ls-tree', '-r', '--name-only', ref, '--', _dir_of(conv))
-    if listed is None:
+def review_at(repo, conv, ref, item, required=(), store=None):
+    """The newest review of ``item`` for ``ref`` (``origin/<branch>``) in ``repo``, for the lane:
+    ``{round, verdict, text, head, path, body}`` — or None.
+
+    ``store`` (:func:`asf.evidence.review_store.root`) is read first: a review filed there for
+    the branch is bound to the head it reviewed (``head``), and its ``path`` is the one the
+    convention names (``conventions.review_path``), as if it were on the branch — plus
+    ``stored``, the entry's own file. The branch's own review files (every review before the
+    store, and a cloud session's) still answer, and win only with a strictly higher round."""
+    if not item:
         return None
     slug = str(item).lower()
+    branch_rv = None
+    listed = _git(repo, 'ls-tree', '-r', '--name-only', ref, '--', _dir_of(conv)) if repo else None
     hit = pick(conv, listed.splitlines(), slug, (slug, f'spec-{slug}', f'plan-{slug}',
-                                                  f'{slug}-spec', f'{slug}-plan'))
-    if hit is None:
-        return None
-    n, path, legacy = hit
-    body = _git(repo, 'show', f'{ref}:{path}') or ''
-    verdict, head = read(body, legacy, required)
-    return {'round': n, 'verdict': verdict, 'text': verdict_text(body) or (verdict or ''),
-            'head': head, 'path': path, 'body': body[:READ_CHARS]}
+                                                 f'{slug}-spec', f'{slug}-plan')) \
+        if listed is not None else None
+    if hit is not None:
+        n, path, legacy = hit
+        body = _git(repo, 'show', f'{ref}:{path}') or ''
+        verdict, head = read(body, legacy, required)
+        branch_rv = {'round': n, 'verdict': verdict, 'text': verdict_text(body) or (verdict or ''),
+                     'head': head, 'path': path, 'body': body[:READ_CHARS]}
+    stored = review_store.newest(store, slug, ref) if store else None
+    if review_store.prefer(stored, branch_rv['round'] if branch_rv else None):
+        body = stored['text']
+        verdict = verdict_of(body, required)
+        return {'round': stored['round'], 'verdict': verdict,
+                'text': verdict_text(body) or (verdict or ''), 'head': stored['head'],
+                'path': conv.review_path(slug, stored['round']) if hasattr(conv, 'review_path')
+                else stored['file'],
+                'body': body[:READ_CHARS], 'stored': stored['file']}
+    return branch_rv
 
 
 def is_current(repo, conv, ref, review, head, trunk=None):
