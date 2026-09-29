@@ -179,8 +179,9 @@ def rank(facts, start, end):
         c['runs'] += 1
         c['usd'] = round(c['usd'] + (r.usd or 0.0), 2)
         c['minutes'] = round(c['minutes'] + r.minutes, 1)
-        sub = sub_cause(r)
-        c['sub'][sub] = c['sub'].get(sub, 0) + 1
+        if k == 'failed: not pushed':
+            sub = sub_cause(r)
+            c['sub'][sub] = c['sub'].get(sub, 0) + 1
 
     jobs = {}
     for run in facts.ci:
@@ -279,9 +280,10 @@ def causes(facts, start, end, limits=None):
             detail = (f"{c['runs']} runs ended '{c['name']}' without landing over {days} days, "
                       f"${c['usd']:,.2f} and {c['minutes'] / 60:.1f} h spent on them; threshold "
                       f"{t['failure_per_week']:g}/week.")
-            line = sub_cause_line(c['sub'], c['runs'])
-            if line:
-                detail += f' {line}'
+            if c['name'] == 'failed: not pushed':
+                line = sub_cause_line(c['sub'], c['runs'])
+                if line:
+                    detail += f' {line}'
             out.append(Cause(
                 f"failure:{c['name']}", FACTORY, per_week, t['failure_per_week'], 'runs/week',
                 f"Sessions die with '{c['name']}' {per_week:g} times a week", detail))
