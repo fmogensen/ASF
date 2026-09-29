@@ -57,7 +57,7 @@ def mint_id(root, canonical, type_):
 
 
 def write_new_item(root, canonical, type_, new_id, typed_fields, body, date, why,
-                    acceptance=(), sections=None, shape=None):
+                    acceptance=(), sections=None, shape=None, state='New'):
     folder, _prefix = TYPES[type_]
     meta = frontmatter.FrontmatterDict()
     meta['id'] = new_id
@@ -67,7 +67,7 @@ def write_new_item(root, canonical, type_, new_id, typed_fields, body, date, why
             meta[k] = v
     ts = now_iso()
     meta['schema_version'] = SCHEMA_VERSION
-    meta['state'] = 'New'
+    meta['state'] = state  # the state a card is born in, 'New' unless the writer records something already true
     meta['stage_since'] = ts
     meta['updated'] = ts
     meta.machine_keys = {'schema_version', 'state', 'stage_since', 'updated'}
