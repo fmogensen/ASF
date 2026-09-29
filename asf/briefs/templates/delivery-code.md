@@ -27,6 +27,14 @@ your tests prove carries a trailer in that item's own commit message, on its own
 `<n>` is the number in the block, not a line of the card file. The test path must exist on this
 branch. An item that proves nothing is refused at the landing and handed straight back to you.
 
+AN ITEM ALREADY ON THE TRUNK — its work landed on `origin/{main}` under another commit, before
+the card existed or by another lane: no commit there names its id, so the card stays open. Verify
+it against the item's section and run the test that covers it, then make that item's one commit
+an empty, signed one — `git commit --allow-empty -s -m "<kind>(<id>): already landed in <sha> —
+verified by <test>"`, with the item's `Proves:` trailers naming the test that already proves each
+line — and push. That commit is the evidence the record needs, not a fabricated one; a report
+that only says "already on main" closes nothing, and the lane relaunches this session.
+
 An item you cannot finish: commit nothing for it — no half of it — name it under `left out`, and
 carry on with the rest. A run that ends with items left says `status: partial`: no PR opens for
 a partial delivery, and the same session comes back to this branch to finish. Only `status: done`

@@ -2365,15 +2365,28 @@ def rebase_conflict_hold(path, run, text, now, main=None):
     return fields, f'held {branch}: {text} — back to its session (no round spent)'
 
 
+#: The one way out of the empty-branch loop for an item whose work the trunk already holds under
+#: another commit (landed before the card existed, or by another lane): no commit on the trunk
+#: names the id, so no evidence rule can close the card, and a report that only says so is judged
+#: empty again and relaunched until the loop parks it (five sessions on one Task, each
+#: reporting "already on main"). The empty commit naming the id is the evidence the record reads.
+ALREADY_LANDED = ('if the work is already on the trunk under another commit, verify it, run the '
+                  'test that covers it, then make one empty signed commit per item naming its id '
+                  '— `git commit --allow-empty -s -m "<kind>(<id>): already landed in <sha> — '
+                  'verified by <test>"` — and push: a report that only says so closes nothing')
+
+
 def unpushed_text(reason):
     """The correction a run judged ``failed: not pushed: …`` hands its next session."""
     gap = reason.split('failed: ', 1)[-1]
-    return f'{UNPUSHED} work: {gap} — commit and push what you have, or say why not in the report'
+    return (f'{UNPUSHED} work: {gap} — commit and push what you have, or say why not in the '
+            f'report; {ALREADY_LANDED}')
 
 
 def empty_branch_text():
     """The correction a run judged ``failed: empty branch: …`` hands its next session (B-0076)."""
-    return f'{EMPTY_BRANCH} — commit and push what you have, or say why not in the report'
+    return (f'{EMPTY_BRANCH} — commit and push what you have, or say why not in the report; '
+            f'{ALREADY_LANDED}')
 
 
 # ---- what spawn and health ask ---------------------------------------------------

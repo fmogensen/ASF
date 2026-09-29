@@ -971,6 +971,14 @@ class EmptyEndsTests(unittest.TestCase):
         self.assertEqual(lc.empty_ends(self.path, 'T-0003'), 0)
         self.assertEqual(lc.empty_ends(self.path, None), 0)
 
+    def test_the_empty_and_unpushed_corrections_name_the_already_landed_commit(self):
+        # a session whose item is already on the trunk needs a commit naming the id, not a report
+        for text in (lc.empty_branch_text(),
+                     lc.unpushed_text('failed: not pushed: 0 uncommitted file(s), 0 unpushed commit(s)')):
+            self.assertIn('commit and push what you have', text)
+            self.assertIn('--allow-empty', text)
+            self.assertIn('already landed in <sha>', text)
+
     def test_the_first_empty_end_is_an_ordinary_hold(self):
         run = self.run_of('a', 1, self.EMPTY_END)
         fields, line = lc.hold(self.path, run, lc.EMPTY, lc.empty_branch_text(), 'tn')
