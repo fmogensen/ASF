@@ -479,10 +479,13 @@ def new_install_commit(run=subprocess.run):
     return (_out(run, [python, '-c', _COMMIT_PY]) or '').strip() or None
 
 
-def reload_clocks(names, run=subprocess.run):
-    """Bootstrap every product clock whose plist is on disk but that launchd has not loaded (an
-    install once left the tick clock unloaded). Loaded jobs are never booted out — one of them
-    may be the tick running this upgrade. Returns the lines to print."""
+def reload_clocks(names, run=subprocess.run, unloaded=()):
+    """Report every product clock whose plist is on disk but that launchd has not loaded, and
+    bootstrap only those this upgrade run itself unloaded (``unloaded``: labels). A clock the
+    operator paused (``asf scheduler pause``) is named with its pause; one booted out by hand
+    with no pause record is an unknown state, so it is named with the command that starts it —
+    never loaded silently. Loaded jobs are never booted out — one of them may be the tick
+    running this upgrade. Returns the lines to print."""
     from asf import scheduler
     try:
         cfg = env.load_config()
@@ -495,11 +498,20 @@ def reload_clocks(names, run=subprocess.run):
     if listed is None:
         return ['upgrade: launchctl list failed — clocks not checked']
     loaded = set(scheduler.parse_list(listed))
+    unloaded = set(unloaded)
     lines = []
     for name in names:
         for path in sorted(glob.glob(os.path.join(scheduler.launch_agents_dir(), f'{prefix}.{name}.*.plist'))):
             label = os.path.basename(path)[:-len('.plist')]
             if label in loaded:
+                continue
+            record = scheduler.pause_record(label, cfg)
+            if record is not None:
+                lines.append(f'upgrade: clock {label} {scheduler.pause_text(record)} — left unloaded')
+                continue
+            if label not in unloaded:
+                lines.append(f'upgrade: clock {label} not loaded — '
+                             f'{scheduler.resume_hint(label, cfg)} to start it')
                 continue
             ok, err = scheduler.bootstrap(path)
             lines.append(f'upgrade: reloaded clock {label}' if ok

@@ -633,18 +633,51 @@ class UpgradeTest(HomeCase):
         self.assertEqual(rc, 1)
         self.assertNotIn('| product |', out)
 
-    def test_an_unloaded_clock_is_reloaded_and_a_loaded_one_left_alone(self):
+    def _clocks(self, labels, loaded):
         agents = os.path.join(self.tmp, 'LaunchAgents')
-        for label in ('asf.alpha.tick', 'asf.alpha.daily', 'asf.beta.tick'):
+        for label in labels:
             self.write(os.path.join(agents, f'{label}.plist'), '')
         self.write(env.config_path(), '')
         run = FakeRun()
-        run.answers[('launchctl', 'list')] = '-\t0\tasf.alpha.daily\n'
+        run.answers[('launchctl', 'list')] = ''.join(f'-\t0\t{label}\n' for label in loaded)
+        return agents, run
+
+    def test_a_clock_this_run_unloaded_is_reloaded_and_a_loaded_one_left_alone(self):
+        agents, run = self._clocks(('asf.alpha.tick', 'asf.alpha.daily', 'asf.beta.tick'),
+                                   ['asf.alpha.daily'])
+        with mock.patch('asf.scheduler.launch_agents_dir', return_value=agents), \
+                mock.patch('asf.scheduler.bootstrap', return_value=(True, '')) as boot:
+            lines = upgrade.reload_clocks(['alpha'], run=run, unloaded={'asf.alpha.tick'})
+        boot.assert_called_once_with(os.path.join(agents, 'asf.alpha.tick.plist'))
+        self.assertEqual(lines, ['upgrade: reloaded clock asf.alpha.tick'])
+
+    def test_a_clock_booted_out_by_hand_is_named_never_reloaded(self):
+        """An operator booted a product's clocks out with no pause record: the upgrade does not
+        know why, so it must not restart them — it names the command that does."""
+        agents, run = self._clocks(('asf.alpha.tick', 'asf.alpha.daily'), ['asf.alpha.daily'])
         with mock.patch('asf.scheduler.launch_agents_dir', return_value=agents), \
                 mock.patch('asf.scheduler.bootstrap', return_value=(True, '')) as boot:
             lines = upgrade.reload_clocks(['alpha'], run=run)
-        boot.assert_called_once_with(os.path.join(agents, 'asf.alpha.tick.plist'))
-        self.assertEqual(lines, ['upgrade: reloaded clock asf.alpha.tick'])
+        boot.assert_not_called()
+        self.assertEqual(lines, ['upgrade: clock asf.alpha.tick not loaded — '
+                                 '`asf scheduler resume --product alpha --clock tick` to start it'])
+
+    def test_a_paused_clock_is_never_reloaded_even_if_this_run_unloaded_it(self):
+        from asf import scheduler
+        agents, run = self._clocks(('asf.alpha.tick', 'asf.alpha.batch'), [])
+        path = scheduler.pause_path('alpha')
+        self.write(path, json.dumps({'tick': {'reason': 'operator reset', 'by': 'op',
+                                              'at': '2026-09-29T10:00:00+02:00'}}))
+        with mock.patch('asf.scheduler.launch_agents_dir', return_value=agents), \
+                mock.patch('asf.scheduler._launchctl', return_value=(0, '', '')) as ctl:
+            lines = upgrade.reload_clocks(['alpha'], run=run,
+                                          unloaded={'asf.alpha.tick', 'asf.alpha.batch'})
+        self.assertEqual([c.args[0][0] for c in ctl.call_args_list], ['bootstrap'])
+        self.assertIn('asf.alpha.batch.plist', ctl.call_args_list[0].args[0][2])
+        self.assertEqual(lines, [
+            'upgrade: reloaded clock asf.alpha.batch',
+            'upgrade: clock asf.alpha.tick paused since 2026-09-29T10:00:00+02:00 '
+            '(operator reset; by op) — left unloaded'])
 
 
 class UpgradeToTests(HomeCase):
@@ -730,8 +763,8 @@ class UpgradeToTests(HomeCase):
                 mock.patch('asf.scheduler.bootstrap', return_value=(True, '')) as boot:
             rc, out, _err = self.run_upgrade(run, self.TAG)
         self.assertEqual(rc, 0)
-        boot.assert_called_once_with(os.path.join(agents, 'asf.alpha.tick.plist'))
-        self.assertIn('upgrade: reloaded clock asf.alpha.tick', out)
+        boot.assert_not_called()  # booted out outside this run: named, never loaded silently
+        self.assertIn('upgrade: clock asf.alpha.tick not loaded — `asf scheduler resume', out)
 
 
 class PendingUpgradeTest(HomeCase):

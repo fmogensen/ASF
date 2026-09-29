@@ -465,6 +465,11 @@ def install(job):
     with open(path, 'wb') as f:
         plistlib.dump(job['plist'], f)
     lines = [f'scheduler: wrote {path}']
+    record = pause_record(label)
+    if record is not None:
+        lines.append(f'scheduler: {label} {pause_text(record)} — not loaded; '
+                     f'{resume_hint(label)} to start it')
+        return lines
     _launchctl(['bootout', f'gui/{_uid()}/{label}'])  # not loaded yet is the ordinary case
     rc, _out, err = _launchctl(['bootstrap', f'gui/{_uid()}', path])
     if rc == 0:
@@ -487,10 +492,139 @@ def uninstall(label, remove_plist=True):
     return lines
 
 
-def bootstrap(path):
-    """Load an existing plist by path — what a rollback does to a job cutover booted out."""
+def bootstrap(path, force=False):
+    """Load an existing plist by path — what a rollback does to a job cutover booted out. A
+    paused clock (:func:`pause_record`) is never loaded here: it returns ``(False, 'paused since
+    …')``. Only :func:`resume` passes ``force``, after it has cleared the pause."""
+    label = os.path.basename(path)[:-len('.plist')] if path.endswith('.plist') else ''
+    record = None if force else pause_record(label)
+    if record is not None:
+        return False, pause_text(record)
     rc, _out, err = _launchctl(['bootstrap', f'gui/{_uid()}', path])
     return rc == 0, (err.strip() if rc else '')
+
+
+# ---- the durable pause ------------------------------------------------------
+#
+# Booting a clock out by hand leaves no trace: the next install, upgrade or doctor repair sees a
+# plist that launchd does not hold and loads it again, restarting a factory the operator stopped.
+# ``asf scheduler pause`` records the pause (reason, who, when) under the product's state dir
+# before it boots the clock out, and every path that loads a clock asks :func:`pause_record`
+# first. ``asf scheduler resume`` clears the record and loads the clock again.
+
+PAUSE_FILE = 'paused-clocks.json'
+
+
+def pause_path(product_name):
+    return os.path.join(env.ASF_HOME, 'state', product_name, PAUSE_FILE)
+
+
+def read_pauses(product_name):
+    """``{clock: {'reason', 'by', 'at'}}`` — the product's paused clocks; ``{}`` when none."""
+    import json
+    try:
+        with open(pause_path(product_name), encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, dict)} if isinstance(data, dict) \
+        else {}
+
+
+def _write_pauses(product_name, pauses):
+    import json
+    path = pause_path(product_name)
+    if not pauses:
+        if os.path.exists(path):
+            os.remove(path)
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f'{path}.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(pauses, f, indent=2, sort_keys=True)
+        f.write('\n')
+    os.replace(tmp, path)
+
+
+def split_label(label, cfg=None):
+    """``(product, clock)`` for ``<prefix>.<product>.<clock>``, else ``None``."""
+    try:
+        prefix = label_prefix(cfg)
+    except env.ConfigError:
+        prefix = DEFAULT_LABEL_PREFIX
+    if not label or not label.startswith(prefix + '.'):
+        return None
+    product_name, _, clock = label[len(prefix) + 1:].rpartition('.')
+    return (product_name, clock) if product_name and clock else None
+
+
+def pause_record(label, cfg=None):
+    """The pause record holding ``label`` unloaded, or ``None`` when it is not paused."""
+    parts = split_label(label, cfg)
+    if parts is None:
+        return None
+    record = read_pauses(parts[0]).get(parts[1])
+    return dict(record, label=label) if record is not None else None
+
+
+def pause_text(record):
+    return (f"paused since {record.get('at') or '?'} ({record.get('reason') or 'no reason'}; "
+            f"by {record.get('by') or '?'})")
+
+
+def product_labels(product_name, cfg=None):
+    """Every clock label of ``product_name`` with a plist in LaunchAgents, sorted."""
+    import glob
+    pattern = os.path.join(launch_agents_dir(), f'{label_prefix(cfg)}.{product_name}.*.plist')
+    return sorted(os.path.basename(p)[:-len('.plist')] for p in glob.glob(pattern))
+
+
+def resume_hint(label, cfg=None):
+    parts = split_label(label, cfg)
+    if parts is None:
+        return '`asf scheduler resume`'
+    return f'`asf scheduler resume --product {parts[0]} --clock {parts[1]}`'
+
+
+def pause(product_name, clock_names, reason, by, cfg=None, now=None):
+    """Record the pause of each clock, then boot it out. The record is written first, so an
+    upgrade or install racing this call finds it before it could load the clock again."""
+    import datetime
+    at = (now or datetime.datetime.now()).astimezone().isoformat(timespec='seconds')
+    pauses = read_pauses(product_name)
+    for clock in clock_names:
+        pauses[clock] = {'reason': reason, 'by': by, 'at': at}
+    _write_pauses(product_name, pauses)
+    lines = []
+    for clock in clock_names:
+        label = label_for(product_name, clock, cfg)
+        rc, _out, err = _launchctl(['bootout', f'gui/{_uid()}/{label}'])
+        state = 'booted out' if rc == 0 else 'was not loaded'
+        lines.append(f'scheduler: paused {label} ({state}) — {reason}')
+    return lines
+
+
+def resume(product_name, clock_names, cfg=None):
+    """Clear each clock's pause and load its plist again (one already loaded is left alone)."""
+    pauses = read_pauses(product_name)
+    for clock in clock_names:
+        pauses.pop(clock, None)
+    _write_pauses(product_name, pauses)
+    lines = []
+    for clock in clock_names:
+        label = label_for(product_name, clock, cfg)
+        path = plist_path(label)
+        if not os.path.exists(path):
+            lines.append(f'scheduler: resumed {label} — no plist at {path}; '
+                         f'`asf scheduler install --product {product_name}` writes it')
+            continue
+        if status(label).get('loaded'):
+            lines.append(f'scheduler: resumed {label} (already loaded)')
+            continue
+        ok, err = bootstrap(path, force=True)
+        lines.append(f'scheduler: resumed {label}' if ok
+                     else f'scheduler: resume {label}: bootstrap failed ({err})')
+    return lines
 
 
 _STATE_RE = re.compile(r'^\s*state\s*=\s*(.+?)\s*$')
@@ -767,9 +901,13 @@ def adopt(product_name, undeclared):
 def register(sub):
     """``asf scheduler render|install|status|list`` — wired into ``asf.cli``'s subparsers."""
     p = sub.add_parser('scheduler', help='the factory clock: render, install and read back jobs')
-    p.add_argument('scheduler_command', choices=['render', 'install', 'status', 'list'])
+    p.add_argument('scheduler_command',
+                   choices=['render', 'install', 'status', 'list', 'pause', 'resume'])
     p.add_argument('--product')
-    p.add_argument('--clock', help='the clock name from products/<p>.yaml (default: every clock)')
+    p.add_argument('--clock', help='the clock name from products/<p>.yaml (default: every clock); '
+                                   'pause/resume take a comma-separated list')
+    p.add_argument('--reason', help='pause: why the clocks are stopped (recorded, required)')
+    p.add_argument('--by', help='pause: who paused them (default: $USER)')
     p.add_argument('--label', help='status: read this label directly instead of a declared clock')
     p.add_argument('--json', action='store_true', help='machine-readable output')
     return p
@@ -777,10 +915,44 @@ def register(sub):
 
 def _status_line(info):
     if not info.get('loaded'):
+        record = pause_record(info['label'])
+        if record is not None:
+            return f"{info['label']}  PAUSED — {pause_text(record)}"
         return f"{info['label']}  not loaded"
     exit_text = 'never exited' if info.get('never_exited') else info.get('last_exit')
     return (f"{info['label']}  state={info.get('state')}  runs={info.get('runs')}  "
             f"last-exit={exit_text}  program={info.get('program')}")
+
+
+def _cmd_pause_resume(args, command, product_name, cfg):
+    if kind(cfg) != 'launchd':
+        print(f'scheduler: {command} needs scheduler kind launchd, not {kind(cfg)!r}')
+        return 2
+    names = [c.strip() for c in (args.clock or '').split(',') if c.strip()]
+    bad = [c for c in names if not CLOCK_NAME_RE.match(c)]
+    if bad:
+        print(f'scheduler: not a clock name: {", ".join(bad)}')
+        return 2
+    prefix = f'{label_prefix(cfg)}.{product_name}.'
+    if command == 'pause':
+        reason = (getattr(args, 'reason', None) or '').strip()
+        if not reason:
+            print('scheduler: pause needs --reason "<why>" — it is recorded with the pause')
+            return 2
+        names = names or [label[len(prefix):] for label in product_labels(product_name, cfg)]
+        if not names:
+            print(f'scheduler: no clock of {product_name} to pause')
+            return 2
+        by = getattr(args, 'by', None) or os.environ.get('USER') or '?'
+        lines = pause(product_name, names, reason, by, cfg=cfg)
+    else:
+        if not names:
+            names = sorted(set(read_pauses(product_name)) | {
+                label[len(prefix):] for label in product_labels(product_name, cfg)})
+        lines = resume(product_name, names, cfg=cfg)
+    for line in lines:
+        print(line)
+    return 1 if any('failed' in line for line in lines) else 0
 
 
 def cmd_scheduler(args, root=None):
@@ -803,6 +975,9 @@ def cmd_scheduler(args, root=None):
         return 0
 
     product_name = args.product or env.default_product_name()
+
+    if command in ('pause', 'resume'):
+        return _cmd_pause_resume(args, command, product_name, cfg)
 
     if command == 'status' and args.label:
         info = status(args.label)
@@ -879,7 +1054,8 @@ def cmd_scheduler(args, root=None):
                 print(_status_line(info))
             for line in _undeclared_lines(product_name, extra):
                 print(line)
-        return 1 if extra or any(not i.get('loaded') for i in infos) else 0
+        return 1 if extra or any(not i.get('loaded') and pause_record(
+            label_for(product_name, i['clock'], cfg)) is None for i in infos) else 0
 
     # install
     job_kind = kind(cfg)

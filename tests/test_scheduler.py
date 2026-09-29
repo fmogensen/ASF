@@ -459,6 +459,96 @@ class LoadedJobsTest(SchedulerTestCase):
         self.assertEqual(jobs[0]['paths'], [])
 
 
+class PauseTest(SchedulerTestCase):
+    """``asf scheduler pause|resume``: a durable pause every clock-loading path honours."""
+    RECORD = Clock('record', ['record'], False, 600, None)
+
+    def _run(self, args):
+        proc_env = dict(os.environ, ASF_HOME=self.asf_home, PYTHONPATH=scheduler.repo_root())
+        return subprocess.run([sys.executable, '-m', 'asf.scheduler'] + args, capture_output=True,
+                              text=True, env=proc_env, cwd=scheduler.repo_root(), timeout=60)
+
+    def _plists(self, *clocks):
+        os.makedirs(scheduler.launch_agents_dir(), exist_ok=True)
+        for clock in clocks:
+            with open(scheduler.plist_path(f'asf.sample.{clock}'), 'w') as f:
+                f.write('')
+
+    def test_pause_records_then_boots_out_and_resume_clears_then_bootstraps(self):
+        self._plists('tick', 'batch', 'daily')
+        result = self._run(['pause', '--product', 'sample', '--clock', 'tick,batch',
+                            '--reason', 'operator reset', '--by', 'op'])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        pauses = scheduler.read_pauses('sample')
+        self.assertEqual(sorted(pauses), ['batch', 'tick'])
+        self.assertEqual(pauses['tick']['reason'], 'operator reset')
+        self.assertEqual(pauses['tick']['by'], 'op')
+        self.assertTrue(pauses['tick']['at'])
+        argv = stub_argv(self.statedir)
+        self.assertEqual([a.split()[0] for a in argv], ['bootout', 'bootout'])
+        self.assertTrue(argv[0].endswith('/asf.sample.tick'))
+
+        result = self._run(['resume', '--product', 'sample', '--clock', 'tick'])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(sorted(scheduler.read_pauses('sample')), ['batch'])
+        self.assertTrue(stub_argv(self.statedir)[-1].startswith('bootstrap gui/'))
+        self.assertIn('asf.sample.tick.plist', stub_argv(self.statedir)[-1])
+
+    def test_pause_needs_a_reason(self):
+        self._plists('tick')
+        result = self._run(['pause', '--product', 'sample', '--clock', 'tick'])
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(scheduler.read_pauses('sample'), {})
+
+    def test_pause_without_a_clock_pauses_every_installed_one(self):
+        self._plists('tick', 'daily')
+        result = self._run(['pause', '--product', 'sample', '--reason', 'r'])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(sorted(scheduler.read_pauses('sample')), ['daily', 'tick'])
+        self._run(['resume', '--product', 'sample'])
+        self.assertEqual(scheduler.read_pauses('sample'), {})
+        self.assertFalse(os.path.exists(scheduler.pause_path('sample')))
+
+    def test_install_writes_a_paused_clock_but_never_loads_it(self):
+        scheduler.pause('sample', ['record'], 'operator reset', 'op')
+        before = len(stub_argv(self.statedir))
+        job = scheduler.render('sample', self.RECORD)
+        lines = scheduler.install(job)
+        self.assertTrue(os.path.isfile(job['path']))
+        self.assertEqual(len(stub_argv(self.statedir)), before, 'no launchctl call')
+        self.assertIn('paused since', ' '.join(lines))
+        self.assertIn('asf scheduler resume --product sample --clock record', ' '.join(lines))
+
+    def test_bootstrap_refuses_a_paused_clock_unless_resume_forces_it(self):
+        self._plists('tick')
+        scheduler.pause('sample', ['tick'], 'r', 'op')
+        before = len(stub_argv(self.statedir))
+        ok, err = scheduler.bootstrap(scheduler.plist_path('asf.sample.tick'))
+        self.assertFalse(ok)
+        self.assertIn('paused since', err)
+        self.assertEqual(len(stub_argv(self.statedir)), before)
+        ok, _err = scheduler.bootstrap(scheduler.plist_path('asf.sample.tick'), force=True)
+        self.assertTrue(ok)
+
+    def test_status_names_the_pause_and_does_not_fail_on_it(self):
+        self.write_product('  tick:\n    steps: [record]\n    every: 5m\n')
+        scheduler.pause('sample', ['tick'], 'operator reset', 'op')
+        result = self._run(['status', '--product', 'sample'])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('asf.sample.tick  PAUSED — paused since', result.stdout)
+        self.assertIn('operator reset', result.stdout)
+
+    def test_the_install_steps_clock_check_skips_a_paused_clock(self):
+        from asf import install as install_mod
+        scheduler.pause('sample', ['tick'], 'r', 'op')
+        self.assertEqual(install_mod._clocks_not_loaded(['asf.sample.tick', 'asf.sample.x']),
+                         ['asf.sample.x'])
+
+    def test_a_label_splits_into_product_and_clock(self):
+        self.assertEqual(scheduler.split_label('asf.sample.ci-queue'), ('sample', 'ci-queue'))
+        self.assertIsNone(scheduler.split_label('other.sample.tick'))
+
+
 class CliTest(SchedulerTestCase):
     """The subcommand surface. Driven through ``python3 -m asf.scheduler``: ``asf scheduler``
     reaches the same :func:`asf.scheduler.cmd_scheduler` once ``asf/cli.py`` wires

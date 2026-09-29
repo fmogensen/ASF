@@ -295,6 +295,22 @@ class StatusViewTests(ViewsTestCase):
         self.assertIn('asf.p.daily waiting (exit 0)', cell)
         self.assertIn('clock asf.p.record-health-wave-prs-harvest not loaded', cell)
 
+    def test_a_paused_product_shows_a_paused_row_and_its_cron_says_paused(self):
+        from asf import scheduler
+        self.assertIsNone(status.paused_cell({}, self.product))
+        scheduler.pause('p', ['tick'], 'operator reset', 'op')
+        cell = status.paused_cell({}, self.product)
+        self.assertIn('asf.p.tick paused since', cell)
+        self.assertIn('operator reset; by op', cell)
+        product = env.Product('p', {'repo_dir': self.tmp, 'main': 'trunk',
+                                    'ci': {'provider': 'none'}, 'deploy_sha': 'none',
+                                    'clocks': {'tick': {'shadow': True, 'every': '10m'}}})
+        with mock.patch.object(scheduler, 'loaded_jobs', lambda cfg=None: []):
+            self.assertIn('clock asf.p.tick paused', status.cron_cell({}, product))
+        with mock.patch.object(status, 'paused_cell', return_value='X'), \
+                mock.patch.object(status, 'cron_cell', return_value='-'):
+            self.assertIn('| PAUSED | X |', status.render(self.root, self.product, cfg={}))
+
     def test_no_index_names_the_backlog(self):
         self.assertEqual(status.ready_cell(os.path.join(self.tmp, 'nowhere'), self.product),
                          '— (not configured: backlog_dir (no index.json))')
