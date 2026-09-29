@@ -11,6 +11,7 @@ the same thing (idempotence).
 """
 import hashlib
 import os
+import re
 import tempfile
 import types
 import unittest
@@ -47,14 +48,13 @@ class DryRun:
     def dry_runs(self):
         """``(before, after1, after2, lines1, lines2)`` — two ``dry_run.run`` calls back to
         back, under the factory's own environment (:meth:`Factory.seams`), and the real state
-        directory's checksum before and after each. The gate's own elapsed-time line
-        (:func:`asf.harvest.harvest.product_gate`) is pinned so it reads the same on both
-        calls — real wall-clock drift between two back-to-back runs is not the thing under
-        test here."""
+        directory's checksum before and after each. No clock is pinned: a rehearsal's
+        transcript carries no wall clock (:func:`asf.harvest.harvest.product_gate`'s
+        ``timing=False``), so two runs a second apart on a loaded host print the same
+        bytes."""
         from asf import env
-        from asf.harvest import harvest as harvest_mod
         from asf.tick import dry_run
-        with self.f.seams(), mock.patch.object(harvest_mod.time, 'monotonic', return_value=0.0):
+        with self.f.seams():
             product = env.load_product('sample')
             real_state = env.state_dir(product)
             before = _checksum(real_state)
@@ -78,6 +78,8 @@ class DryRun:
         self.assertEqual(before, after1, 'a dry run wrote to the real state directory')
         self.assertEqual(after1, after2, 'a second dry run wrote to the real state directory')
         self.assertEqual(lines1, lines2, 'two dry runs printed different things')
+        # a rehearsal is diffed run against run: no line of it may carry a wall clock (F-0159)
+        self.assertFalse([l for l in lines1 if re.search(r'\b\d+(\.\d+)?s\b', l)], lines1)
         self.assertFalse([l for l in lines1 if l.startswith('INVARIANT')], lines1)
         # T-0001's branch, still open and still waiting — never landed, never touched
         self.assertTrue(any('feature/T-0001' in l for l in lines1), lines1)
