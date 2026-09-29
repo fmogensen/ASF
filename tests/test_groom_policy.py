@@ -426,6 +426,26 @@ class FactPolicyTests(unittest.TestCase):
         runs = (_run('2026-09-23T10:00:00Z', 'aaaaaaaaaaaa', refusal='failure'),)
         self.assertIsNone(self._ask(policy.decide_or_close_ci_red, 'B-0001', ci_runs=runs))
 
+    def test_ci_red_refuses_to_close_on_a_green_older_than_the_window(self):
+        write_item(self.root, 'B-0001', 'bug', 'CI red: gate-tests: pnpm test', parent='E-0009',
+                  typed_lines=['decided: false', 'signature: "gate-tests: pnpm test"', 'count: 1',
+                               'last_filed: 2026-09-12'])
+        runs = (_run('2026-09-10T10:00:00Z', 'aaaaaaaaaaaa', **{'gate-tests': 'failure'}),
+                _run('2026-09-14T10:00:00Z', 'bbbbbbbbbbbb', **{'gate-tests': 'success'}))
+        self.assertIsNone(self._ask(policy.decide_or_close_ci_red, 'B-0001', ci_runs=runs,
+                                    ci_red_days=7))
+
+    def test_ci_red_closes_on_a_green_inside_the_window(self):
+        write_item(self.root, 'B-0001', 'bug', 'CI red: gate-tests: pnpm test', parent='E-0009',
+                  typed_lines=['decided: false', 'signature: "gate-tests: pnpm test"', 'count: 1',
+                               'last_filed: 2026-09-12'])
+        runs = (_run('2026-09-10T10:00:00Z', 'aaaaaaaaaaaa', **{'gate-tests': 'failure'}),
+                _run('2026-09-22T10:00:00Z', 'bbbbbbbbbbbb', **{'gate-tests': 'success'}))
+        ans = self._ask(policy.decide_or_close_ci_red, 'B-0001', ci_runs=runs, ci_red_days=7)
+        self.assertEqual(ans, policy.Answer('no: green since bbbbbbbbb', 'removed',
+                                            'green since bbbbbbbbb (groom 2026-09-24)',
+                                            'gate-tests green since bbbbbbbbb'))
+
     # -- decide_by_approval --------------------------------------------------------------------
 
     def test_decide_by_approval_decides_under_auto(self):
