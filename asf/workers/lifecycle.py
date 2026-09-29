@@ -1261,6 +1261,30 @@ def stale_head(text):
     return bool(STALE_HEAD_RE.search(text or '')) or 'cannot tell what origin/' in (text or '')
 
 
+#: git's own error lines in a push's or commit's output. ``hint:`` is not one of them — git prints
+#: its fast-forward hint last, so "the last line" is a hint more often than an error.
+GIT_ERROR_RE = re.compile(r'^(?:fatal|error|remote)\s*:', re.I)
+#: git's summary of a failed push: that there was an error, never which one.
+GIT_PUSH_SUMMARY_RE = re.compile(r'^error:\s*failed to push some refs\b', re.I)
+#: the most error lines one refusal carries — a refusal is one line on a tick's output
+GIT_ERROR_LINES = 3
+
+
+def git_error(output, limit=GIT_ERROR_LINES):
+    """The exact git error in a push's or commit's output (F-0176): its ``fatal:`` / ``error:`` /
+    ``remote:`` lines in git's own order, joined with ``; ``. A refusal that named none falls back
+    to the last line that is neither a hint nor the ``failed to push some refs`` summary — a local
+    pre-push hook's own message has no prefix at all, and it is the one thing worth reading.
+    ``'push failed'`` when git printed nothing."""
+    lines = [ln.strip() for ln in (output or '').splitlines() if ln.strip()]
+    named = [ln for ln in lines if GIT_ERROR_RE.match(ln) and not GIT_PUSH_SUMMARY_RE.match(ln)]
+    if named:
+        return '; '.join(named[:limit])
+    rest = [ln for ln in lines
+            if not ln.lower().startswith('hint:') and not GIT_PUSH_SUMMARY_RE.match(ln)]
+    return (rest or lines or ['push failed'])[-1]
+
+
 def commit_leftovers(wt, branch):
     """Commit, signed off, whatever a finished session left uncommitted in its worktree (B-0094).
 
@@ -1274,8 +1298,7 @@ def commit_leftovers(wt, branch):
     p = _git(['commit', '-q', '-s', '-m', f'wip({branch}): the session ended with this uncommitted — '
               'committed by the factory (B-0094)'], wt)
     if p.returncode != 0:
-        why = [ln for ln in (p.stderr or p.stdout).splitlines() if ln.strip()]
-        return False, f'commit {branch} refused: {why[-1].strip() if why else "commit failed"}'
+        return False, f'commit {branch} refused: {git_error((p.stderr or "") + chr(10) + (p.stdout or ""))}'
     return True, f'committed the session\'s leftovers on {branch}'
 
 
@@ -1643,8 +1666,7 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
         hook_findings = redact.parse_finding_lines(f'{p.stderr or ""}\n{p.stdout or ""}')
         if hook_findings:
             return False, f'publish {branch} refused: ' + '; '.join(redact.correction(hook_findings))
-        why = [ln for ln in (p.stderr or p.stdout).splitlines() if ln.strip()]
-        return False, f'publish {branch} refused: {why[-1].strip() if why else "push failed"}'
+        return False, f'publish {branch} refused: {git_error((p.stderr or "") + chr(10) + (p.stdout or ""))}'
     head = _git(['rev-parse', '--short', 'HEAD'], wt).stdout.strip()
     if rebased:
         return True, f'{rebased} and pushed: published {branch} at {head}'
