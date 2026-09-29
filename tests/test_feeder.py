@@ -2542,6 +2542,32 @@ class ADeliveryWithNoWritesDoesNotLaunch(unittest.TestCase):
                          ('WAITS ON writes', 'writes', False))
         self.assertIn('no writes: declared on any open member', code.reason)
 
+    def test_a_task_led_delivery_with_no_writes_gets_its_re_cut(self):
+        # without the RESHAPE row the delivery waits on a footprint no session ever declares
+        feature = {'id': 'F-0009', 'type': 'feature', 'decided': True, 'state': 'Active',
+                   'rank': 1, 'stage': 'building 0/2', 'children': ['T-0332', 'T-0333']}
+        lead = {'id': 'T-0332', 'type': 'task', 'parent': 'F-0009', 'state': 'Active',
+                'delivers': ['T-0332', 'T-0333']}
+        member = {'id': 'T-0333', 'type': 'task', 'parent': 'F-0009', 'state': 'New',
+                  'delivered_by': 'T-0332'}
+        idx = {'items': {v['id']: v for v in (feature, lead, member)}}
+        out = rows.delivery_rows(rows.items_of(idx), product(), set(), [])
+        code = [r for r in out if r.item_id == 'T-0332' and r.kind == rows.DELIVERY_CODE][0]
+        self.assertEqual((code.action, code.launches), ('WAITS ON writes', False))
+        recut = [r for r in out if r.kind == rows.RESHAPE]
+        self.assertEqual([(r.item_id, r.action, r.brief_kind) for r in recut],
+                         [('T-0332', rows.LAUNCH, 'reshape')])
+        self.assertEqual(recut[0].reason, rows.NO_WRITES_RECUT)
+        # busy (its re-cut running): no second session
+        out = rows.delivery_rows(rows.items_of(idx), product(), {'T-0332'}, [])
+        self.assertEqual([r for r in out if r.kind == rows.RESHAPE], [])
+
+    def test_a_feature_led_delivery_with_no_writes_gets_no_task_re_cut(self):
+        bug = self.member('B-0034')
+        lead = self.lead([bug['id']])
+        out = rows.delivery_rows(rows.items_of(self.idx(lead, bug)), product(), set(), [])
+        self.assertEqual([r for r in out if r.kind == rows.RESHAPE], [])
+
     def test_a_task_beside_it_still_launches(self):
         bug = self.member('B-0034')
         lead = self.lead([bug['id']])

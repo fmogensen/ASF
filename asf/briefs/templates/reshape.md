@@ -16,4 +16,9 @@ When the reason is `footprint: needs <paths>`, the factory found {item_id}'s `wr
 If a part cannot pass its own acceptance without another part, say so and leave {item_id} whole:
 `NEEDS OPERATOR: {item_id} does not split along <area> — answer no on the split line`.
 
+If {item_id}'s work — or that of a Task it delivers — is ALREADY on `origin/{main}` under another
+commit, there is nothing to cut: verify it, run the test that covers it, and push one empty,
+signed commit per such Task instead — `git commit --allow-empty -s -m "task(<id>): already landed
+in <sha> — verified by <test>"`. A report that only says so closes nothing.
+
 Final message: the pushed sha, the part ids with their writes, the coverage line.
