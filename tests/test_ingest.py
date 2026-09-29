@@ -793,6 +793,19 @@ class RemovedTaskTests(unittest.TestCase):
         derived['T-0003'] = own('Closed')
         self.assertEqual(ingest.orphaned_tasks(canonical, derived), set())
 
+    def test_a_replan_applied_after_the_survivors_removal_carries_the_orphans(self):
+        canonical = {
+            'F-0001': {'meta': {'type': 'feature', 'reshape_applied_at': '2026-01-03T10:00:00Z'}},
+            'T-0001': {'meta': {'type': 'task', 'parent': 'F-0001',
+                                'removed': 'merged into T-0002 (groom 2026-01-02)'}},
+            'T-0002': {'meta': {'type': 'task', 'parent': 'F-0001',
+                                'removed': 'already on main (groom 2026-01-03)'}},
+        }
+        derived = {k: ingest._Derived(closing.Closing('New', 'x')) for k in canonical}
+        self.assertEqual(ingest.orphaned_tasks(canonical, derived), set())
+        canonical['F-0001']['meta']['reshape_applied_at'] = '2026-01-01T10:00:00Z'
+        self.assertEqual(ingest.orphaned_tasks(canonical, derived), {'T-0001'})
+
     def test_a_survivor_held_closed_by_a_wrong_descent_does_not_vouch(self):
         # the incident's second tick: the survivor itself was closed parent-closed, and the
         # terminal hold keeps it Closed — its own evidence still lands nothing
