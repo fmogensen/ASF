@@ -448,6 +448,7 @@ def _in_prod(child_ids, task_ev, ev, merged=None, own_sha='', reach=None):
 
 
 _MERGED_INTO = re.compile(r'\bmerged into ([Tt]-\d{4})\b')
+_REMOVED_ON = re.compile(r'\((?:groom|replan)?\s*(\d{4}-\d{2}-\d{2})')
 
 
 def orphaned_tasks(canonical, derived):
@@ -455,10 +456,12 @@ def orphaned_tasks(canonical, derived):
     survivor (the survivor's ``merged:`` names it, or its own ``removed: merged into T-…``), and
     following survivors ends at a Task that is itself removed and never landed — its own rule,
     before the terminal hold, says neither Resolved nor Closed (a survivor a wrong descent once
-    closed stays held Closed, and must not vouch for the scope folded into it). A groom that removes the survivor — "the deliverable is already on
-    main" — speaks for the survivor's own scope, never for the Tasks folded into it: those are
-    still the Feature's work to do. Such a Task still counts among its Feature's children, and a
-    closing parent never descends onto it."""
+    closed stays held Closed, and must not vouch for the scope folded into it). A groom that
+    removes the survivor — "the deliverable is already on main" — speaks for the survivor's own
+    scope, never for the Tasks folded into it: those are still the Feature's work to do. Such a
+    Task still counts among its Feature's children, and a closing parent never descends onto it
+    — until a replan of its Feature is applied on or after the survivor's removal: the replan
+    re-cuts every open Task of the Feature, so the scope lives on in the Tasks it minted."""
     into = {}
     for iid, rec in canonical.items():
         meta = rec['meta']
@@ -481,9 +484,15 @@ def orphaned_tasks(canonical, derived):
             cur = into[cur]
         survivor = (canonical.get(cur) or {}).get('meta') or {}
         own = derived.get(cur)
-        if survivor.get('removed') and (own.raw.state if own else closing.NEW) not in (
+        if not survivor.get('removed') or (own.raw.state if own else closing.NEW) in (
                 closing.RESOLVED, closing.CLOSED):
-            out.add(iid)
+            continue
+        feature = (canonical.get(rec['meta'].get('parent')) or {}).get('meta') or {}
+        replanned = str(feature.get('reshape_applied_at') or '')[:10]
+        when = _REMOVED_ON.search(str(survivor.get('removed') or ''))
+        if replanned and (not when or replanned >= when.group(1)):
+            continue
+        out.add(iid)
     return out
 
 
