@@ -42,6 +42,15 @@ def run(job, ended, reason, landed=False, usd=1.0, minutes=10.0, publish_refused
                publish_refused=publish_refused, worktree=worktree)
 
 
+def gate(ts, signature='--- test_tick_steps: FAILED (rc 1)', conclusion='failure', scheme=None,
+         branches=('fix/x',), seconds=60.0):
+    g = {'ts': ts, 'branches': list(branches), 'seconds': seconds, 'conclusion': conclusion,
+         'signature': signature}
+    if scheme is not None:
+        g['signature_scheme'] = scheme
+    return g
+
+
 def items_fixture():
     """F-0001 carded 09-01, landed 09-03 10:00, on prod (Closed) 09-04 10:00; one Task under it;
     B-0001 an S1 filed 09-05 naming F-0001; F-0002 carded and still building."""
@@ -443,8 +452,8 @@ class Prod:
         self.conventions = mock.Mock(intake_dir='inbox', default_bug_epic=epic)
 
 
-def cause(key='failure:dead pid', scope=diagnose.FACTORY, value=8.0):
-    return diagnose.Cause(key, scope, value, 5.0, 'runs/week', 'Sessions die', 'detail.')
+def cause(key='failure:dead pid', scope=diagnose.FACTORY, value=8.0, scheme=None):
+    return diagnose.Cause(key, scope, value, 5.0, 'runs/week', 'Sessions die', 'detail.', scheme=scheme)
 
 
 class FilingTests(unittest.TestCase):
@@ -545,6 +554,119 @@ class VerifyTests(unittest.TestCase):
         self.assertFalse(loop.moved(10, 8.5, 0.2))
         self.assertTrue(loop.moved(0, 0, 0.2))
         self.assertIsNone(loop.moved(None, 1, 0.2))
+
+
+class SchemeChangeTests(unittest.TestCase):
+    """T-0542: a `gate:` cause key whose after-window speaks a newer signature scheme than it was
+    filed under is not read as a win — it is `scheme changed`, with no after-number and no reopen."""
+
+    KEY = 'gate:--- test_tick_steps: FAILED (rc N)'
+
+    def setUp(self):
+        self.q = []
+        self.enq = lambda target, e: self.q.append((target, e))
+
+    def entry(self, scheme=1, **kw):
+        e = {'n': 1, 'marker': f'scorecard-cause: {self.KEY} #1', 'target': 'p', 'scope': 'product',
+             'title': 'CI is red', 'filed': '2026-09-06', 'baseline': 3.5, 'unit': 'red runs/week',
+             'threshold': 3.0, 'card': None, 'verdict': None, 'log': [], 'scheme': scheme}
+        e.update(kw)
+        return e
+
+    def verify(self, gates, entry, landed='2026-09-08T00:00:00Z', as_of='2026-09-23T00:00:00Z',
+               card='F-0009', marker=None):
+        f = facts_fixture(gates=gates, as_of=as_of)
+        state = {self.KEY: entry}
+        cards = {card: {'id': card, 'text': f"x\n{marker or entry['marker']}\n", 'landed': landed,
+                        'removed': False}}
+        p = Prod()
+        done = loop.verify(p, f, loop.settings(p), state, lambda t: cards, as_of, enqueue_fn=self.enq,
+                           epic_fn=lambda t, c, pr: 'E-0001')
+        return done, state
+
+    def test_a_scheme_change_in_the_after_window_is_recorded_with_no_after_number_and_no_reopen(self):
+        # before (08-25 .. 09-08): 1 red / 2 weeks = 0.5/week
+        gates = [gate('2026-09-01T00:00:00Z'), gate('2026-09-10T00:00:00Z', scheme=2)]
+        done, state = self.verify(gates, self.entry(scheme=1))
+        self.assertEqual(done, [(self.KEY, 'scheme changed')])
+        e = state[self.KEY]
+        self.assertEqual(e['verdict'], 'scheme changed')
+        self.assertIsNone(e['after'])
+        self.assertEqual(e['before'], 0.5)
+        self.assertNotIn('reopens', e)                       # C9: no reopen
+        (target, entry), = self.q
+        self.assertEqual((target, entry['kind'], entry['card']), ('p', 'history', 'F-0009'))
+        self.assertIn('scheme changed', entry['line'])
+        self.assertIn('0.5 before', entry['line'])
+        self.assertIn('no comparable reading after', entry['line'])
+        self.assertIn('from 1 to 2', entry['line'])
+        self.assertEqual(len(self.q), 1)                     # no inbox enqueue
+
+    def test_the_scheme_still_spoken_in_the_after_window_is_judged_the_ordinary_way(self):
+        # after window still carries a scheme-1 red gate alongside no scheme-2 one: not a change
+        gates = [gate('2026-09-01T00:00:00Z'), gate('2026-09-10T00:00:00Z')]
+        done, state = self.verify(gates, self.entry(scheme=1))
+        self.assertEqual(done, [(self.KEY, "didn't move")])   # 0.5 before, 0.5 after — reopened, not scheme changed
+        self.assertEqual(state[self.KEY]['baseline'], 0.5)
+        self.assertEqual(state[self.KEY]['reopens'], 'F-0009')
+
+    def test_an_entry_with_no_scheme_key_is_judged_the_ordinary_way(self):
+        no_scheme = self.entry()
+        del no_scheme['scheme']
+        gates = [gate('2026-09-01T00:00:00Z'), gate('2026-09-10T00:00:00Z', scheme=2)]
+        done, state = self.verify(gates, no_scheme)
+        self.assertEqual(done, [(self.KEY, "didn't move")])   # 0.5 before, 0.5 after — scheme unread
+        self.assertEqual(state[self.KEY]['baseline'], 0.5)
+        self.assertEqual(state[self.KEY]['reopens'], 'F-0009')
+
+    def test_an_after_window_with_no_red_gate_at_all_still_reads_a_genuine_fall_as_moved(self):
+        gates = [gate('2026-09-01T00:00:00Z')]                # before only: 0.5/week, after: nothing red
+        done, state = self.verify(gates, self.entry(scheme=1))
+        self.assertEqual(done, [(self.KEY, 'moved')])
+        self.assertEqual(state[self.KEY]['after'], 0.0)
+
+    def test_file_causes_writes_scheme_for_a_gate_cause_and_none_for_others(self):
+        state = {}
+        found = [cause('gate:x', diagnose.PRODUCT, scheme=2), cause('kind:y', diagnose.FACTORY)]
+        p = Prod()
+        loop.file_causes(p, found, loop.settings(p), '2026-09-06T00:00:00Z', state, factory='fac',
+                         enqueue_fn=lambda t, e: None, epic_fn=lambda t, c, pr: 'E-0001')
+        self.assertEqual(state['gate:x']['scheme'], 2)
+        self.assertIsNone(state['kind:y']['scheme'])
+
+    def test_a_reopened_gate_cause_carries_its_scheme_so_a_later_verify_can_still_catch_a_change(self):
+        # round 1: didn't move (0.5 before, 0.5 after, both scheme 1) — reopened
+        gates1 = [gate('2026-09-01T00:00:00Z'), gate('2026-09-10T00:00:00Z')]
+        done1, state = self.verify(gates1, self.entry(scheme=1))
+        self.assertEqual(done1, [(self.KEY, "didn't move")])
+        reopened = state[self.KEY]
+        self.assertEqual(reopened['reopens'], 'F-0009')
+        self.assertEqual(reopened['scheme'], 1)               # the after-window it was just read over
+        self.assertEqual(reopened['marker'], f'scorecard-cause: {self.KEY} #2')
+
+        # round 2: the reopened entry's after-window now speaks only scheme 2 — caught, not closed
+        gates2 = [gate('2026-10-15T00:00:00Z', scheme=2)]
+        done2, state2 = self.verify(gates2, reopened, landed='2026-10-08T00:00:00Z',
+                                    as_of='2026-10-23T00:00:00Z', card='F-0010',
+                                    marker=reopened['marker'])
+        self.assertEqual(done2, [(self.KEY, 'scheme changed')])
+        self.assertIsNone(state2[self.KEY]['after'])
+
+    def test_a_non_gate_causes_reopened_entry_carries_no_scheme(self):
+        state = {'failure:dead pid': {'n': 1, 'marker': 'scorecard-cause: failure:dead pid #1',
+                                      'target': 'p', 'scope': 'factory', 'title': 'Sessions die',
+                                      'filed': '2026-09-06', 'baseline': 8.0, 'unit': 'runs/week',
+                                      'threshold': 5.0, 'card': None, 'verdict': None, 'log': [],
+                                      'scheme': None}}
+        cards = {'F-0009': {'id': 'F-0009', 'text': 'x\nscorecard-cause: failure:dead pid #1\n',
+                            'landed': '2026-09-08T00:00:00Z', 'removed': False}}
+        runs = [run(f'j{i}', f'2026-09-{d:02d}T01:00:00Z', 'dead pid') for i, d in enumerate((1, 2, 10, 11, 12))]
+        f = facts_fixture(runs=runs, as_of='2026-09-23T00:00:00Z')
+        p = Prod()
+        done = loop.verify(p, f, loop.settings(p), state, lambda t: cards, '2026-09-23T00:00:00Z',
+                           enqueue_fn=self.enq, epic_fn=lambda t, c, pr: 'E-0001')
+        self.assertEqual(done, [('failure:dead pid', "didn't move")])
+        self.assertIsNone(state['failure:dead pid']['scheme'])
 
 
 class DirectionTests(unittest.TestCase):
