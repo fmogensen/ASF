@@ -2663,3 +2663,84 @@ class PublishRewrittenOwnCommitsTest(_RebaseShape):
         text = lc.rebase_conflict_text(self.branch, line)
         self.assertIn(f'Rebase onto origin/{self.branch}', text)
         self.assertNotIn('rebase onto origin/main', text)
+
+
+def _build_unpublished(root):
+    """A bare origin and a clone on ``lane/x``, pushed and clean — the base every case in
+    :class:`UnpublishedTests` mutates from."""
+    def git(*args, cwd):
+        subprocess.run(['git', *args], cwd=cwd, check=True, capture_output=True, text=True)
+    origin, wt = os.path.join(root, 'origin.git'), os.path.join(root, 'wt')
+    git('init', '-q', '--bare', '-b', 'main', origin, cwd=root)
+    git('clone', '-q', origin, wt, cwd=root)
+    for k, v in (('user.name', 'T'), ('user.email', 't@example.com'), ('commit.gpgsign', 'false')):
+        git('config', k, v, cwd=wt)
+    with open(os.path.join(wt, 'seed'), 'w') as f:
+        f.write('base\n')
+    git('add', '-A', cwd=wt)
+    git('commit', '-qm', 'seed', cwd=wt)
+    git('push', '-q', 'origin', 'HEAD:main', cwd=wt)
+    git('checkout', '-q', '-b', 'lane/x', cwd=wt)
+    git('push', '-q', '-u', 'origin', 'lane/x', cwd=wt)
+
+
+UNPUBLISHED = Template(_build_unpublished, prefix='lifecycle_unpublished_')
+
+
+class UnpublishedTests(unittest.TestCase):
+    """T1 fence: :func:`lc.unpublished` is the one owner of "is this branch's work on origin" —
+    over a real worktree rather than gathered :class:`lc.Evidence` — and :func:`health.push_gap`
+    delegates to it byte for byte."""
+
+    def setUp(self):
+        self.root = UNPUBLISHED.fresh()
+        self.wt = os.path.join(self.root, 'wt')
+
+    def git(self, *args):
+        return subprocess.run(['git', *args], cwd=self.wt, check=True, capture_output=True,
+                              text=True).stdout.strip()
+
+    def write(self, *names):
+        for name in names:
+            with open(os.path.join(self.wt, name), 'w') as f:
+                f.write('x\n')
+
+    def test_a_clean_pushed_branch_is_published(self):
+        self.assertEqual(lc.unpublished(self.wt, 'lane/x', main='main'), (True, ''))
+
+    def test_uncommitted_files_are_counted(self):
+        self.write('a', 'b')
+        self.assertEqual(
+            lc.unpublished(self.wt, 'lane/x', main='main'),
+            (False, 'not pushed: 2 uncommitted file(s), 0 unpushed commit(s)'))
+
+    def test_an_unpushed_commit_above_a_pushed_head_is_counted(self):
+        self.write('c')
+        self.git('add', '-A')
+        self.git('commit', '-qm', 'local work')
+        self.assertEqual(
+            lc.unpublished(self.wt, 'lane/x', main='main'),
+            (False, 'not pushed: 0 uncommitted file(s), 1 unpushed commit(s)'))
+
+    def test_a_branch_never_pushed_is_not_ok_even_with_a_clean_tree(self):
+        self.git('checkout', '-q', '-b', 'lane/never')
+        ok, detail = lc.unpublished(self.wt, 'lane/never', main='main')
+        self.assertFalse(ok)
+        self.assertEqual(detail, 'not pushed: 0 uncommitted file(s), 0 unpushed commit(s)')
+
+    def test_a_detached_head_answers_no_branch(self):
+        self.git('checkout', '-q', '--detach', 'HEAD')
+        self.assertEqual(lc.unpublished(self.wt, '', main='main'), (False, 'no branch'))
+
+    def test_detail_is_byte_identical_to_push_gap_over_gathered_evidence(self):
+        self.write('a', 'b')
+        ok, detail = lc.unpublished(self.wt, 'lane/x', main='main')
+        self.assertEqual(detail, lc.push_gap(lc.Evidence(uncommitted=2, unpushed=0)))
+
+    def test_health_push_gap_delegates_to_unpublished(self):
+        from asf.workers import health
+        self.assertEqual(health.push_gap(self.wt, 'lane/x', 'main'),
+                          lc.unpublished(self.wt, 'lane/x', 'main'))
+        self.write('a', 'b')
+        self.assertEqual(health.push_gap(self.wt, 'lane/x', 'main'),
+                          lc.unpublished(self.wt, 'lane/x', 'main'))
