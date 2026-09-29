@@ -177,6 +177,16 @@ class WidenStepBase(StepsTestCase):
         with open(os.path.join(self.root, 'tasks', f'{iid}.md'), 'w') as f:
             f.write(TASK.format(id=iid, writes=writes))
 
+    def active(self, iid, writes, history=''):
+        """A Task Active in the record (no session), its History carrying ``history``."""
+        with open(os.path.join(self.root, 'tasks', f'{iid}.md'), 'w') as f:
+            f.write(TASK.format(id=iid, writes=writes)
+                    .replace('\n---\n## Description', '\n# ---- machine ----\nstate: Active\n'
+                             '---\n## Description', 1)
+                    .replace('- made\n', '- made\n' + history))
+        _git(['add', '-A'], self.root)
+        _git(['commit', '-q', '-m', f'{iid}'], self.root)
+
     def items(self):
         do_index(self.root)
         return index_reader.load(self.root)[0]
@@ -336,16 +346,6 @@ class WidenStepTests(WidenStepBase):
         self.assertEqual([(r.action, r.waits_on, r.launches) for r in rows],
                          [('WAITS ON T-0002', 'T-0002', False)])
 
-    def active(self, iid, writes, history=''):
-        """A Task Active in the record (no session), its History carrying ``history``."""
-        with open(os.path.join(self.root, 'tasks', f'{iid}.md'), 'w') as f:
-            f.write(TASK.format(id=iid, writes=writes)
-                    .replace('\n---\n## Description', '\n# ---- machine ----\nstate: Active\n'
-                             '---\n## Description', 1)
-                    .replace('- made\n', '- made\n' + history))
-        _git(['add', '-A'], self.root)
-        _git(['commit', '-q', '-m', f'{iid}'], self.root)
-
     def check(self):
         """``asf check``'s findings on the record, over ``self.product`` (named explicitly, since
         the test's cwd resolves no product of its own) — so a declared ``shared_paths`` exempts
@@ -461,7 +461,6 @@ class SerializeOverlapTests(WidenStepBase):
     the record rather than ``items`` so a chain through a removed card still counts as ordered
     (PD4)."""
 
-    active = WidenStepTests.active
     check = WidenStepTests.check
 
     def rows(self, iid):
@@ -644,6 +643,42 @@ class RefusalWidenTests(WidenStepBase):
         self.assertEqual(self.writes(), ['src/a.py', 'tests/test_a.py'])
         self.assertEqual([(r.action, r.waits_on, r.launches) for r in self.rows()],
                          [('WAITS ON T-0002', 'T-0002', False)])
+
+    def test_a_refused_path_an_active_task_writes_waits_though_no_session_runs_it(self):
+        # the card's acceptance: an overlap with a Task Active in the record — no session at
+        # all — holds the Task instead of widening it (open_footprints reads the record too)
+        self.active('T-0002', 'lib/shared.py')
+        self.refused()
+        _held, verdicts = self.tick()
+        self.assertEqual(verdicts, {'coder-t-0001': widen.WAITS}, self.lines)
+        self.assertEqual(self.writes(), ['src/a.py', 'tests/test_a.py'])
+        self.assertEqual([(r.action, r.waits_on, r.launches) for r in self.rows()],
+                         [('WAITS ON T-0002', 'T-0002', False)])
+
+    def test_a_refusal_at_the_cap_widens_rather_than_going_to_adjudication(self):
+        # B-0140 marks the second identical refusal at_cap, and lifecycle.derive routes an
+        # at_cap correction to ADJUDICATE. The widening runs first (step_health: health, then
+        # widen_footprints) and footprint_hold writes a fresh correction, so the Task comes
+        # back as a correction — it is never marked dead. The feeder's row is FIX → CORRECT
+        # either way (P11), so derive is what discriminates.
+        self.refused()
+        path = pool_mod.sessions_path(self.product)
+        corr = lifecycle.latest(path)['coder-t-0001']['correction']
+        self.session(job='coder-t-0001', correction=dict(corr, at_cap=True, same=2))
+        run = lifecycle.latest(path)['coder-t-0001']
+        self.assertEqual(lifecycle.derive(run, lifecycle.Evidence(), path=path).name,
+                         lifecycle.ADJUDICATE)  # what the at_cap correction alone would be
+        _held, verdicts = self.tick()
+        self.assertEqual(verdicts, {'coder-t-0001': widen.WIDEN}, self.lines)
+        self.assertEqual(self.writes(), ['src/a.py', 'tests/test_a.py', 'lib/shared.py'])
+        run = lifecycle.latest(path)['coder-t-0001']
+        self.assertEqual(run['correction']['kind'], lifecycle.FOOTPRINT)
+        self.assertNotIn('at_cap', run['correction'])
+        self.assertEqual(lifecycle.derive(run, lifecycle.Evidence(), path=path).name,
+                         lifecycle.HELD)
+        self.assertFalse(self.rounds())  # no round spent
+        self.assertEqual([(r.kind, r.brief_kind, r.launches) for r in self.rows()],
+                         [(feeder_rows.FIX_CORRECT, 'correct', True)])
 
     def test_a_refusal_naming_only_its_own_files_stays_a_plain_hook_correction(self):
         self.refused(text='no — pre-push lint fails: src/a.py:3 unused import')
