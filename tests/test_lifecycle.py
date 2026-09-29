@@ -1548,6 +1548,128 @@ class UnpushedAfterARebaseTest(unittest.TestCase):
         self.assertEqual(lc.unpushed_commits(self.repo, '', 'main'), 1)
 
 
+class GitErrorTests(unittest.TestCase):
+    """F-0176: a publish or commit refusal names git's own ``fatal:``/``error:``/``remote:``
+    lines, never the ``failed to push some refs`` summary and never a fast-forward hint — both
+    of which git prints *after* the line a reader needs."""
+
+    sh = UnpushedAfterARebaseTest.sh
+
+    def test_a_stale_info_rejection_keeps_the_rejected_line_and_drops_the_summary(self):
+        output = (" ! [rejected]        HEAD -> fix/B-9999 (stale info)\n"
+                  "error: failed to push some refs to 'origin'\n")
+        self.assertEqual(lc.git_error(output),
+                         '! [rejected]        HEAD -> fix/B-9999 (stale info)')
+
+    def test_a_permission_denial_keeps_both_lines_in_gits_own_order(self):
+        output = ('remote: Permission to org/asf.git denied to lane-2.\n'
+                  "fatal: unable to access 'url': The requested URL returned error: 403\n")
+        self.assertEqual(lc.git_error(output),
+                         "remote: Permission to org/asf.git denied to lane-2.; "
+                         "fatal: unable to access 'url': The requested URL returned error: 403")
+
+    def test_an_unprefixed_local_hook_line_is_the_fallback(self):
+        output = 'pre-push: lint failed on x.py:12\nerror: failed to push some refs to \'origin\'\n'
+        self.assertEqual(lc.git_error(output), 'pre-push: lint failed on x.py:12')
+
+    def test_empty_and_whitespace_only_output_is_push_failed(self):
+        self.assertEqual(lc.git_error(''), 'push failed')
+        self.assertEqual(lc.git_error('   \n\n  \n'), 'push failed')
+
+    def test_a_summary_plus_hint_block_with_nothing_else_falls_back_past_both(self):
+        # no line survives the hint/summary filter, so the raw last line is what is left —
+        # a hint, here, because git printed nothing but the summary and its hints
+        output = ("error: failed to push some refs to 'origin'\n"
+                  "hint: Updates were rejected because the tip of your current branch is behind\n"
+                  "hint: its remote counterpart.\n")
+        self.assertEqual(lc.git_error(output), 'hint: its remote counterpart.')
+
+    def test_more_than_the_limit_of_named_lines_is_cut(self):
+        output = 'fatal: a\nfatal: b\nfatal: c\nfatal: d\n'
+        self.assertEqual(lc.git_error(output), 'fatal: a; fatal: b; fatal: c')
+
+    def test_push_failures_retry_classification_is_unchanged_on_every_row(self):
+        # PD10: the text git_error keeps still drives push_failure the same way it always did
+        self.assertIsNone(lc.push_failure(
+            '! [rejected]        HEAD -> fix/B-9999 (stale info)'))
+        self.assertEqual(lc.push_failure(
+            "remote: Permission to org/asf.git denied to lane-2.; "
+            "fatal: unable to access 'url': The requested URL returned error: 403"),
+            lc.NETWORK_ERROR)
+        self.assertEqual(lc.push_failure('pre-push: lint failed on x.py:12'), lc.HOOK_REFUSED)
+
+    def test_a_live_lease_rejection_names_gits_own_rejection_not_its_summary(self):
+        # b0056_a_lease_that_moved_is_refused_and_nothing_is_overwritten's fixture: origin moved
+        # after the evidence was gathered, and the force-with-lease is refused
+        base = tempfile.mkdtemp(prefix='lifecycle_git_error_')
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        origin, repo = os.path.join(base, 'origin.git'), os.path.join(base, 'repo')
+        self.sh(['init', '-q', '--bare', '-b', 'main', origin], base)
+        self.sh(['clone', '-q', origin, repo], base)
+        for k, v in (('user.name', 'Test'), ('user.email', 't@example.com'),
+                     ('commit.gpgsign', 'false')):
+            self.sh(['config', k, v], repo)
+        with open(os.path.join(repo, 'seed'), 'w') as f:
+            f.write('seed')
+        self.sh(['add', '-A'], repo)
+        self.sh(['commit', '-qm', 'seed'], repo)
+        self.sh(['push', '-q', 'origin', 'HEAD:main'], repo)
+        self.sh(['checkout', '-q', '-b', 'fix/B-9999'], repo)
+        with open(os.path.join(repo, 'fix'), 'w') as f:
+            f.write('fix')
+        self.sh(['add', '-A'], repo)
+        self.sh(['commit', '-qm', 'the fix'], repo)
+        self.sh(['push', '-q', 'origin', 'fix/B-9999'], repo)
+        remote_sha = self.sh(['rev-parse', 'origin/fix/B-9999'], repo)
+        other = os.path.join(base, 'other')
+        self.sh(['clone', '-q', '-b', 'fix/B-9999', origin, other], base)
+        for k, v in (('user.name', 'Person'), ('user.email', 'p@example.com'),
+                     ('commit.gpgsign', 'false')):
+            self.sh(['config', k, v], other)
+        with open(os.path.join(other, 'late'), 'w') as f:
+            f.write('late')
+        self.sh(['add', '-A'], other)
+        self.sh(['commit', '-qm', 'late work on origin'], other)
+        self.sh(['push', '-q', 'origin', 'fix/B-9999'], other)
+
+        ok, line = lc.publish(repo, 'fix/B-9999', remote_sha, main='main')
+
+        self.assertFalse(ok, line)
+        self.assertIn('! [rejected]', line)
+        self.assertIn('stale info', line)
+        self.assertNotIn('failed to push some refs', line)
+
+    def test_commit_leftovers_reads_the_hooks_stdout_a_stderr_only_summary_used_to_hide(self):
+        base = tempfile.mkdtemp(prefix='lifecycle_git_error_commit_')
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        origin, repo = os.path.join(base, 'origin.git'), os.path.join(base, 'repo')
+        self.sh(['init', '-q', '--bare', '-b', 'main', origin], base)
+        self.sh(['clone', '-q', origin, repo], base)
+        for k, v in (('user.name', 'Test'), ('user.email', 't@example.com'),
+                     ('commit.gpgsign', 'false')):
+            self.sh(['config', k, v], repo)
+        with open(os.path.join(repo, 'seed'), 'w') as f:
+            f.write('seed')
+        self.sh(['add', '-A'], repo)
+        self.sh(['commit', '-qm', 'seed'], repo)
+        self.sh(['push', '-q', 'origin', 'HEAD:main'], repo)
+        self.sh(['checkout', '-q', '-b', 'fix/B-9999'], repo)
+        hooks = os.path.join(base, 'refusing-hooks')
+        os.makedirs(hooks)
+        with open(os.path.join(hooks, 'pre-commit'), 'w') as f:
+            f.write('#!/bin/sh\necho "commit refused" >&2\n'
+                    'echo "pre-commit: lint failed on x.py:12"\nexit 1\n')
+        os.chmod(os.path.join(hooks, 'pre-commit'), 0o755)
+        self.sh(['config', 'core.hooksPath', hooks], repo)
+        with open(os.path.join(repo, 'work.txt'), 'w') as f:
+            f.write('half done')
+
+        ok, line = lc.commit_leftovers(repo, 'fix/B-9999')
+
+        self.assertFalse(ok, line)
+        self.assertEqual(line, 'commit fix/B-9999 refused: pre-commit: lint failed on x.py:12')
+
+
 class PublishACopiesRebaseTest(unittest.TestCase):
     """2026-09-26: a lane branch carrying copies of trunk commits is held back (kind copies)
     with "rebase onto origin/main, resolving <files>; the factory publishes the rebased branch".
