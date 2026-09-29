@@ -726,6 +726,15 @@ class NamingCommitTests(unittest.TestCase):
                          {"F-0112": "c1", "T-0359": "c2", "T-0360": "c2", "F-0113": "c3",
                           "B-0004": "c4", "T-0361": "c5", "T-0002": "c6", "B-0119": "c7"})
 
+    def test_stacked_scopes_land_every_item_they_name(self):
+        # a product's T-0450: its work landed inside the sibling Task's commit, the subject
+        # naming both; crediting only the first sent T-0450 round empty-branch corrections
+        ev = self.evidence_for(commits=[
+            ("c1", "task(T-0448): task(T-0450): the 23 first interactions are guarded"),
+            ("c2", "fix(bands): task: T-0451 is prose here, not a scope")])
+        self.assertEqual({i: r["commit"] for i, r in ev.items() if r["commit"]},
+                         {"T-0448": "c1", "T-0450": "c1"})
+
     def test_a_merge_of_the_items_own_branch_lands(self):
         ev = self.evidence_for(commits=[
             ("m1", "Merge pull request #820 from acme/cloud/direct-F-0112"),
