@@ -243,12 +243,11 @@ def refusal(snapshot, ref):
     prs = (snapshot or {}).get('prs') or {}
     by_seq = collections.OrderedDict()
     for sequence, number, holder_ref in clash_list:
-        by_seq.setdefault(sequence, []).append(number)
+        by_seq.setdefault((sequence, holder_ref), []).append(number)
     sentences = []
-    for sequence, numbers in by_seq.items():
+    for (sequence, holder_ref), numbers in by_seq.items():
         width = seq_info.get(sequence, {}).get('width') or 0
         numbers_str = ', '.join(reserve.format_number(n, width) for n in numbers)
-        holder_ref = holder(holds, sequence, numbers[0])
         pr = (prs.get(holder_ref) or {}).get('number')
         pr_part = f' (PR {pr})' if pr else ''
         singular = len(numbers) == 1

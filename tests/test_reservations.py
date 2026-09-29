@@ -197,6 +197,19 @@ class Refusal(unittest.TestCase):
         self.assertIn('PR 844', text)
         self.assertIn('0291', text)  # one past the highest held (0290) — C7's next-free rule
 
+    def test_two_numbers_in_one_sequence_held_by_two_different_refs_each_name_their_own(self):
+        snap = {
+            'trunk': 'main',
+            'prs': {'worker/A': {'number': 10, 'state': 'OPEN'},
+                    'worker/B': {'number': 20, 'state': 'OPEN'}},
+            'sequences': {'bands': {'width': 4, 'held': {
+                '100': ['worker/A', 'plan/X'],
+                '200': ['worker/B', 'plan/X']}}},
+        }
+        _kind, text = reservations.refusal(snap, 'plan/X')
+        self.assertIn('bands 0100 is held by worker/A (PR 10)', text)
+        self.assertIn('bands 0200 is held by worker/B (PR 20)', text)
+
     def test_the_holder_itself_is_refused_nothing(self):
         self.assertIsNone(reservations.refusal(self._snapshot(), 'worker/T-0361'))
 
