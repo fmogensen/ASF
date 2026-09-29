@@ -722,6 +722,7 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
         return final
 
     # ---- Tasks: no dependency on any other item's derived state
+    green_main = _green_after(ev, product)  # a typed `landed:`'s own green half (F-0106, P12)
     for iid, rec in canonical.items():
         if rec['meta'].get('type') != 'task':
             continue
@@ -759,10 +760,15 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
             # its PR was closed unmerged and its branch still sits at that head: the evidence
             # above no longer counts that branch, so the Task derives back to ready (New)
             lines = [ln for ln in lines if not ln.startswith('no evidence found')] + [reset_line(reset)]
+        typed_landed = str(frontmatter.split_machine(rec['meta'])[0].get('landed') or '')
         # a merged PR is its own green: a plan's Task never waited on CI to close
         green = bool(iev.get('green')) if commit else bool(merged)
+        if typed_landed and not green:
+            green = green_main(typed_landed)          # _green_after, one per derive (P12)
+        if typed_landed and not commit and not merged:
+            lines = lines + [f'landed {typed_landed[:9]} (typed)']
         settle(iid, 'task', closing.Ev(commit=commit, green=green, merged_sha=merged,
-                                       branch=branch, pr_state=pr_state,
+                                       branch=branch, pr_state=pr_state, landed=typed_landed,
                                        open_prs=tuple(iev.get('open_prs') or ())), lines)
 
     # ---- Stories: their Tasks are the ones whose `stories:` name them (a removed Task covers nothing)
