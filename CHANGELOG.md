@@ -2,6 +2,30 @@
 
 One entry per released version, newest first.
 
+## v0.1.73 — 2026-09-29
+
+### Features landed
+
+- F-0150 Scorecard loop: a card whose number got worse is reverted, and adoptions are Decisions with both readings
+- F-0156 711 branches carry no open PR
+
+### In progress
+
+- F-0157 Sessions die with 'failed: empty branch' 12 times a week
+
+### Improvements and hotfixes
+
+- fix(scheduler): a durable clock pause; upgrade never reloads a clock it did not unload (#332)
+- fix(tick): asf tick --dry-run is side-effect free, structurally (#336)
+- fix(review): reviews never touch the PR branch — filed off it, bound to the head they reviewed (#337)
+- fix(briefs): a Task whose work is already on the trunk has a way to close — the empty commit naming its id (#334)
+- fix(feeder): a Task-led delivery with no writes gets its RESHAPE re-cut, not a wait no session ends (#338)
+- fix(lane): a merged or closed PR never yields a review, landing or correction row (#339)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.73"`
+
 ## v0.1.72 — 2026-09-29
 
 ### Features landed
