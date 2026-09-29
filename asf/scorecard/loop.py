@@ -10,8 +10,9 @@ Once a day, per product (:func:`daily`):
    marker line ``scorecard-cause: <key> #<n>``;
 3. **verify** — once the card that marker names has landed and ``verify_weeks`` have passed, the
    cause's number over the ``verify_weeks`` before the landing is compared with the same span
-   after it. The verdict — ``moved`` or ``didn't move``, with both numbers — goes onto the card's
-   History; a card that did not move is reopened as a new inbox card (``#<n+1>``) with the numbers.
+   after it. The verdict — ``moved``, ``didn't move``, ``dropped`` or ``scheme changed``, with both
+   numbers — goes onto the card's History; a card that did not move is reopened as a new inbox card
+   (``#<n+1>``) with the numbers.
 
 Cards and History lines never go straight into a record: they are queued in the *target*
 product's ``state/<target>/scorecard-queue.jsonl`` and that product's own daily step writes them
@@ -309,7 +310,7 @@ def file_causes(product, found, cfg, as_of, state, factory=None, enqueue_fn=enqu
         state[cause.key] = {'n': 1, 'marker': marker, 'target': target, 'scope': cause.scope,
                             'title': cause.title, 'filed': as_of[:10], 'baseline': cause.value,
                             'unit': cause.unit, 'threshold': cause.threshold,
-                            'card': None, 'verdict': None, 'log': []}
+                            'card': None, 'verdict': None, 'log': [], 'scheme': cause.scheme}
         filed.append(cause.key)
     return filed
 
@@ -374,6 +375,23 @@ def verify(product, facts, cfg, state, cards_of, as_of, enqueue_fn=enqueue, root
             continue
         if key.startswith('clutter:'):
             before = entry.get('baseline')      # a clutter count has no history: the filing's reading
+        filed_scheme = entry.get('scheme')
+        if key.startswith('gate:') and filed_scheme is not None:
+            after_schemes = diagnose.schemes(facts, landed, landed + span)
+            if after_schemes and filed_scheme not in after_schemes:
+                # C9: the key cannot recur under a scheme that no longer writes it, so `after` is a
+                # 0 nothing measured. Record that, and do not reopen — the loop cannot know which
+                # new key replaced this one.
+                line = (f"- {as_of[:10]} scorecard: {key} scheme changed — {_fmt(before)} before, "
+                        f"no comparable reading after (the gate's signature scheme moved from "
+                        f"{filed_scheme} to {max(after_schemes)}; this key is no longer written)")
+                enqueue_fn(entry['target'], {'kind': 'history', 'card': iid,
+                                             'marker': entry['marker'], 'line': line})
+                entry['log'].append(line[2:])
+                entry.update(verdict='scheme changed', verified=as_of[:10], before=before,
+                             after=None)
+                done.append((key, 'scheme changed'))
+                continue
         verdict = moved(before, after, cfg['min_move'])
         if verdict is None:
             continue
@@ -398,7 +416,9 @@ def verify(product, facts, cfg, state, cards_of, as_of, enqueue_fn=enqueue, root
             state[key] = {'n': n, 'marker': marker, 'target': entry['target'], 'scope': entry['scope'],
                           'title': entry['title'], 'filed': as_of[:10], 'baseline': after,
                           'unit': entry['unit'], 'threshold': entry['threshold'], 'card': None,
-                          'verdict': None, 'log': entry['log'], 'reopens': iid}
+                          'verdict': None, 'log': entry['log'], 'reopens': iid,
+                          'scheme': (max(diagnose.schemes(facts, landed, landed + span), default=None)
+                                     if key.startswith('gate:') else None)}
     return done
 
 

@@ -36,7 +36,7 @@ THRESHOLDS = {
 FACTORY, PRODUCT = 'factory', 'product'
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True)          # frozen stands (P9) — the field is added, not the decorator changed
 class Cause:
     key: str
     scope: str
@@ -45,6 +45,10 @@ class Cause:
     unit: str
     title: str
     detail: str
+    #: For a ``gate:`` cause, the signature scheme its reading was taken under; None otherwise.
+    #: Carried into the cause's state entry so a later verify can tell a real fall from a key that
+    #: stopped existing because the gate started naming causes differently (F-0169).
+    scheme: int | None = None
 
 
 def thresholds(overrides=None):
@@ -57,6 +61,18 @@ def thresholds(overrides=None):
 
 def _weeks(start, end):
     return max((end - start).total_seconds() / (7 * 86400), 1 / 7)
+
+
+#: The signature scheme a gate event with no ``signature_scheme`` was written under.
+SCHEME_1 = 1
+
+
+def schemes(facts, start, end):
+    """Every signature scheme the red gates in ``[start, end)`` were written under — empty when the
+    window holds no red gate to ask. A gate event with no ``signature_scheme`` predates F-0169 and
+    reads as scheme 1."""
+    return {int(g.get('signature_scheme') or SCHEME_1) for g in facts.gates
+            if score.in_window(g.get('ts'), start, end) and g.get('conclusion') != 'success'}
 
 
 def _sig_class(sig):
@@ -294,7 +310,9 @@ def causes(facts, start, end, limits=None):
                 c['name'], PRODUCT, per_week, t['ci_red_per_week'], 'red runs/week',
                 f"CI {c['name']} is red {per_week:g} times a week",
                 f"{c['red']} of {c['runs']} runs red over {days} days, {c['minutes']:,.0f} runner "
-                f"minutes; threshold {t['ci_red_per_week']:g}/week."))
+                f"minutes; threshold {t['ci_red_per_week']:g}/week.",
+                scheme=(max(schemes(facts, start, end), default=None)
+                        if c['name'].startswith('gate:') else None)))
     landed = _landed_window(facts, start, end)
     lead = score.median([x['lead_days'] for x in landed])
     if len(landed) >= 3 and lead is not None and lead > t['lead_days']:
