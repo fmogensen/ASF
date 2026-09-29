@@ -722,6 +722,12 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
                 question, s.get('item'), lifecycle.card_fingerprint(product, s.get('item'), items), now)
             pool_mod.update_session(product, job, **fields)
             found.append((job, 'parked', line))
+        elif reason == f'failed: {lifecycle.EMPTY_BRANCH}' and lifecycle.delivered_off_branch(
+                registry, s, str((ev.result or {}).get('result') or '')):
+            why = lifecycle.delivered_off_branch(registry, s, str((ev.result or {}).get('result') or ''))
+            pool_mod.update_session(product, job, end_reason=lifecycle.NOTHING_TO_LAND)
+            s.update(end_reason=lifecycle.NOTHING_TO_LAND)
+            found.append((job, 're-judged', f'{lifecycle.NOTHING_TO_LAND} — {why}'))
         elif reason.startswith(UNPUSHED_REASON_PREFIXES):
             # the run's own work is the correction's input: the next session on the branch
             # commits and pushes it, or says why not (B-0051, B-0052)
@@ -741,11 +747,13 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
             found.append((job, 'held', line.split(': ', 1)[1]))
         elif reason == f'failed: {lifecycle.EMPTY_BRANCH}':
             # a pushed branch with nothing on it: the same loop, sent back to commit real work
-            # or say why there is none (B-0076)
-            fields, line = lifecycle.hold(registry, s, lifecycle.UNPUSHED,
+            # or say why there is none (B-0076) — its second genuine empty end parks it instead
+            # (EMPTY_CAP)
+            fields, line = lifecycle.hold(registry, s, lifecycle.EMPTY,
                                           lifecycle.empty_branch_text(), now)
             pool_mod.update_session(product, job, **fields)
-            found.append((job, 'held', line.split(': ', 1)[1]))
+            what = 'parked' if fields['correction'].get('parked') else 'held'
+            found.append((job, what, line.split(': ', 1)[1]))
 
     per_run = [(job, s, []) for job, s in sessions.items()]
     run_steps([(job, s, steps(job, s, own)) for job, s, own in per_run],
