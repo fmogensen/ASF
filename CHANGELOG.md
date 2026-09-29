@@ -2,6 +2,31 @@
 
 One entry per released version, newest first.
 
+## v0.1.75 — 2026-09-29
+
+### Features landed
+
+- F-0098 'dead' sessions are nearly always finished ones not yet recorded: say 'ended, awaiting tick', free the slot at once
+- F-0159 CI gate:--- test_dry_run: FAILED (rc N) is red 6 times a week
+
+### In progress
+
+- F-0021 P5 — launch
+- F-0030 The README carries the argument, the mental model and the manual on one page
+- F-0060 A mechanical correctness pass before the human-standard review
+- F-0068 Spike: one Feature through a hosted agent runtime, compared with the local pool
+- F-0069 Security checks by code: a review pass on sensitive paths, secret and dependency scanning as rules
+- F-0120 Adopting a record: flag cards that belong to another product and move or remove them in bulk (asf move)
+- F-0125 Onboarding: adopt a product's in-flight PRs (asf adopt-pr + legacy review form) so native landing drains them
+- F-0126 feeder: a Task with no writes: (migrated pre-ASF plan) is launched and can only block
+- F-0157 Sessions die with 'failed: empty branch' 12 times a week
+- F-0158 Sessions die with 'failed: not pushed' 72 times a week
+- F-0234 Sessions die with 'dead pid' 5.5 times a week
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.75"`
+
 ## v0.1.74 — 2026-09-29
 
 ### Features landed
