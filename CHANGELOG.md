@@ -2,6 +2,47 @@
 
 One entry per released version, newest first.
 
+## v0.1.81 — 2026-09-29
+
+### Features landed
+
+- F-0095 The wave relaunches coders on Tasks that end 'empty branch: nothing to land'
+
+### Bugs fixed
+
+- B-0051 A session that ends 'finished' without pushing blocks its item forever: health says finished, harvest sees nothing, spawn refuses the worktree
+
+### In progress
+
+- F-0040 Story-to-test gate: a Task's pull request must tick an acceptance line with the test that proves it
+- F-0051 The production verification probe: a real customer journey after every deploy
+- F-0094 A decided Epic with no Features never starts: no row breaks an Epic into Features
+- F-0104 Products tick on a pinned live install; `asf upgrade` moves it to the merged head
+- F-0105 The landing gate runs 15–25 min on the operator's machine next to 8 sessions: gate on CI instead
+- F-0106 Plans cut Tasks already on trunk, and depend on ids that were never minted: coders end with an empty branch
+- F-0111 hooks install from asf-live tells the operator to wire the dev install's path into the product's git hooks
+- F-0126 feeder: a Task with no writes: (migrated pre-ASF plan) is launched and can only block
+- F-0131 Classify every cancelled CI job as timeout, runner loss or failure, and list jobs near their limit
+- F-0133 Groom commits its own output; a foreign daily stamp never skips the native daily; new products groom by default
+- F-0160 Health records a session ended at its first result while the process keeps working
+- F-0207 Pending upgrade starves: every owner tick defers because another owner tick is running
+- F-0208 Plan preflight across open branches: refuse a reserved range another open branch already holds
+- F-0218 asf unpark releases one parked job per call
+- F-0224 Repair sessions 'review' take 17 % of session spend
+- F-0227 An ended worker run whose pid stays alive blocks its item forever (T-0196)
+- F-0229 Lane reaches MERGING with PR #None (plan/T-0189); I9 events repeat every tick
+- F-0231 No command releases a stale correction; F-1129 holds one for a never-pushed branch
+- F-0232 Route a Task whose writes: touch the amendable set to the console at plan time, not a worker launch
+- F-0233 Stories/Features of a deploying product never close: _in_prod needs checked.txt, which nothing writes
+
+### Improvements and hotfixes
+
+- fix(ingest): an applied replan carries the Tasks a removed survivor orphaned (#433)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.81"`
+
 ## v0.1.80 — 2026-09-29
 
 ### Bugs fixed
