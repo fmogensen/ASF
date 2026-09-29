@@ -6,14 +6,17 @@ invariants (:mod:`asf.invariants`) judge that change alone, and only the paths a
 refuses are put back — to what they held before *that* writer ran — while everything else it
 wrote, and every other writer's output, stands. A bad write is refused before commit instead of
 refusing every commit after it."""
+import contextlib
+import io
 import os
 import shutil
 import subprocess
 import tempfile
+import types
 import unittest
 from unittest import mock
 
-from asf import invariants, redact
+from asf import env, invariants, redact
 from asf.record import frontmatter, ingest, stage
 from asf.record.core import load_items
 from asf.record.index import do_index
@@ -267,6 +270,84 @@ class I3NeverIntersectingWrites(StageTestCase):
         write(self.root, 'T-0003', 'task', parent='F-0001', typed=('writes: [src/a.py]',),
               machine=('schema_version: 1', 'state: Active'))
         self.assertIsNone(set_typed(self.rec('T-0003'), {'title': 'renamed'}))
+
+
+class SharedPathI3Tests(StageTestCase):
+    """S-37302: ``asf check`` and I3 agree with the feeder — a glob the product declares
+    ``conventions.shared_paths`` is no pair, and the widen writer's product reaches I3 so the
+    widening the rule allows is the widening that is written (P8)."""
+
+    def setUp(self):
+        super().setUp()
+        subprocess.run(['git', 'init', '-q', self.root], check=True, env=dict(os.environ, **GIT_ENV))
+        from asf.init import STREAM_FOLDERS
+        for folder in STREAM_FOLDERS:
+            os.makedirs(os.path.join(self.root, folder), exist_ok=True)
+        write(self.root, 'E-0001', 'epic')
+        write(self.root, 'F-0001', 'feature', parent='E-0001')
+        self.owner = write(self.root, 'T-0001', 'task', parent='F-0001',
+                           typed=('writes: [src/a.py]',),
+                           machine=('schema_version: 1', 'state: Active',
+                                    'stage_since: 2026-01-01T00:00:00Z',
+                                    'updated: 2026-01-01T00:00:00Z'))
+        self.task = write(self.root, 'T-0002', 'task', parent='F-0001',
+                          typed=('writes: [uv.lock]',),
+                          machine=('schema_version: 1', 'state: Active',
+                                   'stage_since: 2026-01-01T00:00:00Z',
+                                   'updated: 2026-01-01T00:00:00Z'))
+        do_index(self.root)
+        self.git('add', '-A')
+        self.git('commit', '-q', '-m', 'seed')
+        self.product = env.Product('sample', {'conventions': {'shared_paths': ['uv.lock']}})
+
+    def git(self, *args):
+        return subprocess.run(['git', '-C', self.root, *args], check=True, capture_output=True,
+                              text=True, env=dict(os.environ, **GIT_ENV)).stdout
+
+    def rec(self, iid):
+        return load_items(self.root)[0][iid][0]
+
+    def active_task(self, iid, writes):
+        return write(self.root, iid, 'task', parent='F-0001', typed=(f'writes: [{writes}]',),
+                    machine=('schema_version: 1', 'state: Active',
+                             'stage_since: 2026-01-01T00:00:00Z', 'updated: 2026-01-01T00:00:00Z'))
+
+    def test_record_findings_exempts_the_shared_glob(self):
+        # T-0001 [src/a.py], T-0002 [uv.lock]: no overlap at all — add T-0003 [uv.lock] so the
+        # pair's only common glob is the declared lockfile
+        self.active_task('T-0003', 'uv.lock')
+        from asf.record.check import record_findings
+        findings, _w, _iw = record_findings(self.root, shared=['uv.lock'])
+        self.assertFalse(any('intersects Active task' in msg for _p, _l, msg in findings), findings)
+        findings, _w, _iw = record_findings(self.root)  # no product: today's refusal (D4)
+        self.assertTrue(any('intersects Active task' in msg for _p, _l, msg in findings), findings)
+
+    def test_only_the_shared_glob_is_exempt(self):
+        # T-0002 [uv.lock, src/a.py]: the real path still overlaps T-0001's, even with the set
+        self.active_task('T-0002', 'uv.lock, src/a.py')
+        from asf.record.check import record_findings
+        findings, _w, _iw = record_findings(self.root, shared=['uv.lock'])
+        self.assertTrue(any('intersects Active task' in msg for _p, _l, msg in findings), findings)
+
+    def test_i3_exempts_a_widening_onto_the_shared_glob(self):
+        self.assertIsNone(set_typed(self.rec('T-0001'), {'writes': ['src/a.py', 'uv.lock']},
+                                    writer='widen', product=self.product))
+        self.assertEqual(meta(self.root, self.owner)['writes'], ['src/a.py', 'uv.lock'])
+
+    def test_with_no_product_the_write_is_still_refused(self):
+        err = set_typed(self.rec('T-0001'), {'writes': ['src/a.py', 'uv.lock']}, writer='widen')
+        self.assertIn('I3', err)
+        self.assertEqual(meta(self.root, self.owner)['writes'], ['src/a.py'])
+
+    def test_asf_check_exits_0_over_the_declared_set(self):
+        from asf.record.check import cmd_check
+        self.active_task('T-0003', 'uv.lock')  # the shared-only pair the set must exempt
+        do_index(self.root)
+        buf = io.StringIO()
+        with mock.patch('asf.env.load_product', return_value=self.product):
+            with contextlib.redirect_stdout(buf):
+                rc = cmd_check(types.SimpleNamespace(paths=None, product='sample'), self.root)
+        self.assertEqual(rc, 0, buf.getvalue())
 
 
 class I10FeatureLandsOnlyOnClosedTasks(StageTestCase):

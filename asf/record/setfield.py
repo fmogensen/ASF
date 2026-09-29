@@ -131,7 +131,8 @@ def cmd_set(args, root):
             updates[top] = value
             all_noop = False
 
-    err = set_typed(rec, updates)
+    from asf.record.check import product_of  # the same soft loader cmd_check uses (D5, PD6)
+    err = set_typed(rec, updates, product=product_of(args))
     if err:
         print(f"error: {err}", file=sys.stderr)
         return 2
@@ -147,10 +148,13 @@ def cmd_set(args, root):
     return 0
 
 
-def set_typed(rec, updates, writer='set'):
+def set_typed(rec, updates, writer='set', product=None):
     """Write ``updates`` (typed fields) onto the card ``rec`` (a ``load_items`` record) through the
     parser: rendered on a scratch copy, parsed back, written only when every field round-trips.
-    Returns None on success, else the reason the card is unchanged."""
+    ``product``: passed to the record stage's I3 check, so a ``writes:`` update that only adds a
+    path ``product``'s ``conventions.shared_paths`` covers is never refused as intersecting
+    another Active Task's footprint. Returns None on success, else the reason the card is
+    unchanged."""
     # write to a scratch copy first: the card is replaced only if it parses back to the ask
     fd, scratch = tempfile.mkstemp(suffix='.md')
     try:
@@ -178,7 +182,7 @@ def set_typed(rec, updates, writer='set'):
         # writes: now intersecting another's) refuses the write before anyone commits it
         from asf.record import stage
         _r, _staged, findings = stage.guarded(root, writer, _write, (rec['path'], new_text),
-                                              only=[rec['relpath']])
+                                              product=product, only=[rec['relpath']])
         if findings:
             return (f"{', '.join(updates)} refused — "
                     + '; '.join(f'{f.invariant}: {f.message}' for f in findings)
