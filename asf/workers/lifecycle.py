@@ -899,7 +899,49 @@ def correction_of(path, item):
                 prs=settled_prs(path, item, corr.get('at')))
 
 
-def occupancy(path, lanes=None, alive=None, result=None):
+#: the evidence pass's PR list (:class:`asf.evidence.sources.GitHubHost`), under the state dir
+PR_CACHE = 'cache-prs.json'
+
+
+def ended_prs(state_dir):
+    """``{number: {'state', 'head'}}`` of every PR the evidence pass last saw MERGED or CLOSED,
+    read off its cache (no ``gh``); ``{}`` when there is none or it cannot be read. A merged or
+    closed PR is over: :func:`occupancy` never lets a lane record still naming it ask for a
+    review, a landing or a correction (the lane catches up on its own next pass)."""
+    try:
+        with open(os.path.join(state_dir, PR_CACHE)) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for p in data if isinstance(data, list) else ():
+        if not isinstance(p, dict):
+            continue
+        state, number = str(p.get('state') or '').upper(), p.get('number')
+        if state in ('MERGED', 'CLOSED') and isinstance(number, int):
+            out[number] = {'state': state, 'head': p.get('headRefOid') or None}
+    return out
+
+
+def pr_ended(rec, ended):
+    """The state (``MERGED``/``CLOSED``) of the PR lane record ``rec`` names when ``ended``
+    (:func:`ended_prs`) holds it over, else None. A merge is final whatever the branch head did
+    after it (a file pushed to the dead branch); a close counts only for the head it closed,
+    or when either side names none."""
+    try:
+        number = int((rec or {}).get('pr') or 0)
+    except (TypeError, ValueError):
+        return None
+    hit = (ended or {}).get(number)
+    if not number or not hit:
+        return None
+    if hit['state'] == 'MERGED':
+        return 'MERGED'
+    heads = (hit.get('head'), rec.get('head'))
+    return 'CLOSED' if None in heads or heads[0] == heads[1] else None
+
+
+def occupancy(path, lanes=None, alive=None, result=None, ended=None):
     """The one answer to "is this item busy?" (the contract; W3 implements it). The feeder reads
     this and nothing else.
 
@@ -920,18 +962,28 @@ def occupancy(path, lanes=None, alive=None, result=None):
     lane states: a PUSHED → LAND row), ``branches`` (``{branch: why}`` of every waiting branch)
     and ``docs`` (``{item: {kind: why}}``: a spec or plan pushed and waiting is not starved).
 
-    ``lanes`` (the argument): ``{branch: record}`` to use instead of the run lines' own."""
+    ``lanes`` (the argument): ``{branch: record}`` to use instead of the run lines' own.
+    ``ended`` (:func:`ended_prs`): PRs the host says are merged or closed — a lane record still
+    naming one holds nothing and asks for nothing, and a correction on its branch is dropped.
+    A merged PR's item counts as ``landed``."""
     from asf.harvest import lane as lane_mod  # the lane's states, no cycle at import
     by = by_branch(path)
     live_items = {s['item']: f"session {s['job']} running" for s in inflight(path, alive)
                   if s.get('item')}
     out = {'busy': dict(live_items), 'waiting_landing': {}, 'corrections': corrections(path),
            'lanes': {}, 'review': {}, 'landing': {}, 'branches': {}, 'docs': {}, 'landed': {}}
+    dead_branches = set()
     for branch, run in by.items():
         item, kind = run.get('item'), run.get('kind')
         rec = (lanes or {}).get(branch) if lanes is not None else lane_of(run)
         if not item or item in live_items or before_reset(path, run):
             continue  # a reset item's old branch holds nothing: its PR was closed unmerged
+        over = pr_ended(rec, ended) if rec and rec.get('state') != lane_mod.MERGED else None
+        if over:  # the PR is over: no review, landing or correction for it, whatever the record
+            dead_branches.add(branch)
+            if over == 'MERGED':
+                out['landed'][item] = (rec or {}).get('sha') or ''
+            continue
         if landed(run) or (rec or {}).get('state') == lane_mod.MERGED:
             # its branch landed and the record may not have caught up yet: not busy, not
             # waiting — and not an idle branch either (the feeder's idle-branch rule reads this)
@@ -968,6 +1020,8 @@ def occupancy(path, lanes=None, alive=None, result=None):
         out['branches'][branch] = why
         if kind:
             out['docs'].setdefault(item, {})[kind] = why
+    out['corrections'] = {i: c for i, c in out['corrections'].items()
+                          if c.get('branch') not in dead_branches}
     return out
 
 

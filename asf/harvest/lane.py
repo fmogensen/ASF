@@ -1066,9 +1066,12 @@ def next_state(prev, facts):
     n = pr.get('number')
     if s == REAPED:
         return keep
+    # a PR no factory item made is its own item: that PR merged or closed ends it, whatever
+    # the branch head did after (a file pushed to the dead branch is no new work to review)
+    own_pr = bool(f.get('foreign') and n and n == rec.get('pr'))
     # T11 — merged by the host; ours when MERGING/QUEUED came first (R3)
     if pr.get('state') == 'MERGED' and s != MERGED and (
-            not head or pr.get('head') in (None, '', head) or s in (MERGING, QUEUED)):
+            not head or pr.get('head') in (None, '', head) or s in (MERGING, QUEUED) or own_pr):
         if s in (MERGING, QUEUED):
             return MERGED, 'method=' + ('queue' if s == QUEUED else rec.get('method') or 'squash')
         return MERGED, 'method=external'
@@ -1099,7 +1102,7 @@ def next_state(prev, facts):
         if f.get('gone_merged'):
             return MERGED, 'method=on-trunk'
         return (None, '') if s is None else (STALE, 'branch gone')
-    if pr.get('state') == 'CLOSED' and pr.get('head') in (None, '', head) \
+    if pr.get('state') == 'CLOSED' and (pr.get('head') in (None, '', head) or own_pr) \
             and (s is not None or f.get('ended')):
         return STALE, f'PR #{n} closed unmerged'
     if pr.get('draft') and s not in (MERGING, QUEUED):  # Tp: parked by its owner, whatever it was
