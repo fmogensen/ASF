@@ -6,6 +6,7 @@ import sys
 import tempfile
 from collections import Counter
 
+from asf import invariants
 from asf.conventions import DEFAULT_SPECS_DIR
 from asf.groom import shape
 from asf.init import ITEM_FOLDERS as LAYOUT_FOLDERS, STREAM_FOLDERS
@@ -13,7 +14,7 @@ from asf.record import frontmatter, tree
 from asf.record.core import (
     BARE_DECISION_RE, FOLDER_TO_TYPE, ID_RE, ITEM_FOLDERS as CARD_FOLDERS, NO_PARENT_TYPES,
     PARENT_TYPES, as_list, build_index_data, canonicalize, compute_derived, expected_body,
-    is_open, load_items, parse_sections, title_scrub, today, writes_intersect,
+    is_open, load_items, parse_sections, title_scrub, today,
 )
 from asf.record.index import entry_relpath
 from asf.redact import _run_git
@@ -349,21 +350,11 @@ def record_findings(root, scrub=None, layout=True):
             if cid not in task_story_ids:
                 add(rec, find_line(rec, 'id'), f"story {cid} has no Task listing it in stories:")
 
-    # Active task writes: overlap
-    active_tasks = [
-        rec for rec in canonical.values()
-        if rec['meta'].get('type') == 'task'
-        and frontmatter.split_machine(rec['meta'])[1].get('state') == 'Active'
-        and rec['meta'].get('writes')
-    ]
-    for i in range(len(active_tasks)):
-        for j in range(i + 1, len(active_tasks)):
-            t1, t2 = active_tasks[i], active_tasks[j]
-            for g1 in t1['meta']['writes']:
-                for g2 in t2['meta']['writes']:
-                    if writes_intersect(g1, g2):
-                        add(t1, find_line(t1, 'writes'),
-                            f"writes: {g1!r} intersects Active task {t2['meta'].get('id')}'s {g2!r}")
+    # Active task writes: overlap — the one definition (asf.invariants.unordered_overlaps)
+    tasks = invariants.overlap_tasks({iid: rec['meta'] for iid, rec in canonical.items()})
+    for a, b, g1, g2 in invariants.unordered_overlaps(tasks):
+        rec = canonical[a]
+        add(rec, find_line(rec, 'writes'), f"writes: {g1!r} intersects Active task {b}'s {g2!r}")
 
     # index.json staleness
     index_wrong = set()  # (id, expected entry, entry on disk) for every entry out of date

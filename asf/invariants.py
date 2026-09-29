@@ -200,50 +200,113 @@ def _state(meta):
     return _machine(meta).get('state', 'New')
 
 
-def _active_writes(metas):
-    return {iid: [str(w) for w in (m.get('writes') or ())] for iid, m in metas.items()
-            if m.get('type') == 'task' and not m.get('removed') and _state(m) == 'Active'
-            and m.get('writes')}
-
-
 def _writes_of(meta):
     return sorted(str(w) for w in (meta.get('writes') or ()))
 
 
-def _intersecting(metas):
+def _after_of(meta):
+    return sorted(str(a) for a in (meta.get('after') or ()))
+
+
+def overlap_tasks(metas):
+    """``{id: {'type', 'state', 'writes', 'after', 'removed'}}`` — a record's metas (whichever of
+    typed or machine block each field lives in) normalised into the shape :func:`unordered_overlaps`
+    takes, ``state`` read through :func:`_state` so a machine-block value and a plain dict's
+    top-level one are read alike."""
+    return {iid: {'type': m.get('type'), 'state': _state(m), 'writes': m.get('writes') or (),
+                  'after': m.get('after') or (), 'removed': m.get('removed')}
+            for iid, m in metas.items()}
+
+
+def _after_edges(tasks):
+    """``{id: [after ids]}`` over every Task in ``tasks`` — a chain may run through a Closed or
+    removed one, so it is not filtered here."""
+    return {iid: [str(a) for a in (t.get('after') or ())]
+            for iid, t in tasks.items() if t.get('type') == 'task'}
+
+
+def _reaches(edges, start, target):
+    seen = set()
+    stack = list(edges.get(start) or ())
+    while stack:
+        cur = stack.pop()
+        if cur == target:
+            return True
+        if cur in seen:
+            continue
+        seen.add(cur)
+        stack.extend(edges.get(cur) or ())
+    return False
+
+
+def ordered(edges, a, b):
+    """True when ``a`` is reachable from ``b`` through ``after:``, or ``b`` from ``a``, either
+    transitively: the record has said which of the two comes first, so they are not in flight
+    together. Evaluated fresh against the ``edges`` it is given on every call — never cached
+    across calls, so a caller that mutates ``edges`` between calls (the tick pass writing one
+    edge at a time) sees its own edge the moment it is added."""
+    return _reaches(edges, a, b) or _reaches(edges, b, a)
+
+
+def unordered_overlaps(tasks):
+    """``[(a, b, glob_a, glob_b)]`` — every pair of Active, non-``removed:`` Tasks carrying
+    ``writes:`` whose globs intersect (``core.writes_intersect``) that the record has **not**
+    ordered (:func:`ordered`), ``a`` < ``b``, the first intersecting glob pair. ``tasks`` is
+    every Task, Active or not: a Closed or removed one is no pair of its own but may still be a
+    link in an ``after:`` chain.
+
+    Reachability runs only for a pair whose globs already intersect, so the cost is the number
+    of intersecting pairs, not the square of the record."""
     from asf.record.core import writes_intersect
-    tasks = sorted(_active_writes(metas).items())
-    pairs = set()
-    for i, (a, wa) in enumerate(tasks):
-        for b, wb in tasks[i + 1:]:
-            if any(writes_intersect(x, y) for x in wa for y in wb):
-                pairs.add((a, b))
-    return pairs
+    edges = _after_edges(tasks)
+    active = sorted((iid, _writes_of(t)) for iid, t in tasks.items()
+                    if t.get('type') == 'task' and not t.get('removed')
+                    and t.get('state') == 'Active' and t.get('writes'))
+    out = []
+    for i, (a, wa) in enumerate(active):
+        for b, wb in active[i + 1:]:
+            glob = None
+            for x in wa:
+                for y in wb:
+                    if writes_intersect(x, y):
+                        glob = (x, y)
+                        break
+                if glob:
+                    break
+            if glob and not ordered(edges, a, b):
+                out.append((a, b, glob[0], glob[1]))
+    return out
 
 
 def check_i3(ctx):
-    """I3 — never write intersecting ``writes:``: no two Active Tasks' ``writes:`` intersect by
-    ``asf check``'s own test (``core.writes_intersect``). A pair this writer's change created is
-    refused at the card(s) of the pair it wrote — the widen pass, ``asf set`` and the plan minter
-    are refused before their commit, not after it.
+    """I3 — never leave two Active Tasks' ``writes:`` unordered: no two Active Tasks' ``writes:``
+    may intersect by ``asf check``'s own test (``core.writes_intersect``) unless the record has
+    ordered the pair through ``after:`` (``invariants.unordered_overlaps``). A pair this writer's
+    change created — or un-ordered, by changing ``after:`` while the ``writes:`` still intersect —
+    is refused at the card(s) of the pair it wrote: the widen pass, ``asf set`` and the plan
+    minter are refused before their commit, not after it.
 
-    Only a card whose ``writes:`` this writer wrote (changed, or a new card) is judged: a
-    derived state change is a fact, never a footprint write. Ingest moving a Task to Active
-    because its branch exists would otherwise be put back on every tick — the record lying
-    about the branch, one refusal per tick, forever."""
+    Only a card whose ``writes:`` or ``after:`` this writer wrote (changed, or a new card) is
+    judged: a derived state change is a fact, never a footprint write. The ``writes:`` half of
+    the guard keeps ingest from replaying a standing overlap every tick — a Task moved to Active
+    because its branch exists would otherwise be put back forever; the ``after:`` half keeps a
+    writer from silencing a live overlap for good by removing the order without touching the
+    paths (C3)."""
     changed_ids = {}
     for path in _card_paths(ctx.staged):
         _at, after = _after(ctx, path)
         if not after or not after.get('id'):
             continue
         _bt, before = _before(ctx, path)
-        if before and _writes_of(before) == _writes_of(after):
+        if (before and _writes_of(before) == _writes_of(after)
+                and _after_of(before) == _after_of(after)):
             continue
         changed_ids[after['id']] = path
     if not changed_ids or not any(m.get('type') == 'task' for p in changed_ids.values()
                                   for m in [_after(ctx, p)[1]]):
         return []
-    new = _intersecting(_record(ctx)) - _intersecting(_before_record(ctx))
+    new = ({(a, b) for a, b, *_globs in unordered_overlaps(overlap_tasks(_record(ctx)))} -
+           {(a, b) for a, b, *_globs in unordered_overlaps(overlap_tasks(_before_record(ctx)))})
     out = []
     for a, b in sorted(new):
         for iid, other in ((a, b), (b, a)):

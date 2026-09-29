@@ -782,6 +782,59 @@ class CheckCommandTests(unittest.TestCase):
         self.assertIn('index.json is stale', r.stdout)
 
 
+class CheckOverlapTests(unittest.TestCase):
+    """The spec's acceptance 2: `asf check`'s Active×Active loop reads the same
+    `invariants.unordered_overlaps` as I3 (C2) — one line per unordered pair regardless of how
+    many globs it intersects on (PD5), none for an ordered pair, none for a removed: card."""
+
+    def setUp(self):
+        self.root = make_repo()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        write_item(self.root, 'E-0001', 'epic', 'Factory')
+        write_item(self.root, 'F-0001', 'feature', 'Free plan', parent='E-0001')
+
+    def task(self, id_, writes, after=None, removed=None):
+        typed = [f"writes: [{writes}]"]
+        if after:
+            typed.append(f"after: [{after}]")
+        if removed:
+            typed.append(f"removed: {removed}")
+        write_item(self.root, id_, 'task', id_, parent='F-0001', typed_lines=typed,
+                   machine_lines=['state: Active', 'stage_since: 2026-01-01T00:00:00Z',
+                                  'updated: 2026-01-01T00:00:00Z'])
+
+    def lines(self, out):
+        return [l for l in out.splitlines() if 'intersects Active task' in l]
+
+    def test_an_unordered_pair_is_one_line(self):
+        self.task('T-0001', 'lib/x.py')
+        self.task('T-0002', 'lib/x.py')
+        run(['index'], self.root)
+        r = run(['check'], self.root)
+        self.assertEqual(len(self.lines(r.stdout)), 1, r.stdout)
+
+    def test_an_unordered_pair_on_two_globs_is_still_one_line(self):
+        self.task('T-0001', 'lib/a.py, lib/b.py')
+        self.task('T-0002', 'lib/a.py, lib/b.py')
+        run(['index'], self.root)
+        r = run(['check'], self.root)
+        self.assertEqual(len(self.lines(r.stdout)), 1, r.stdout)
+
+    def test_an_ordered_pair_is_no_line(self):
+        self.task('T-0001', 'lib/x.py')
+        self.task('T-0002', 'lib/x.py', after='T-0001')
+        run(['index'], self.root)
+        r = run(['check'], self.root)
+        self.assertEqual(self.lines(r.stdout), [])
+
+    def test_a_removed_card_is_no_line(self):
+        self.task('T-0001', 'lib/x.py')
+        self.task('T-0002', 'lib/x.py', removed='2026-01-02')
+        run(['index'], self.root)
+        r = run(['check'], self.root)
+        self.assertEqual(self.lines(r.stdout), [])
+
+
 class IndexCommandTests(unittest.TestCase):
     def setUp(self):
         self.root = make_repo()

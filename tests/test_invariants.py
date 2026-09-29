@@ -334,12 +334,17 @@ class R9SoftFailure(unittest.TestCase):
         self.assertEqual((findings, events, lines), ([], [], []))
 
 
-def _card(root, iid, writes, state='Active'):
+def _card(root, iid, writes, state='Active', after=(), removed=None):
     os.makedirs(os.path.join(root, 'tasks'), exist_ok=True)
     rel = f'tasks/{iid}.md'
+    typed = [f'id: {iid}', 'type: task', f'title: {iid}', 'parent: F-0001', f'writes: [{writes}]']
+    if after:
+        typed.append(f"after: [{', '.join(after)}]")
+    if removed:
+        typed.append(f'removed: {removed}')
     with open(os.path.join(root, rel), 'w', encoding='utf-8') as f:
-        f.write(f'---\nid: {iid}\ntype: task\ntitle: {iid}\nparent: F-0001\nwrites: [{writes}]\n'
-                f'# ---- machine ----\nschema_version: 1\nstate: {state}\n---\n'
+        f.write('---\n' + '\n'.join(typed) +
+                f'\n# ---- machine ----\nschema_version: 1\nstate: {state}\n---\n'
                 '## Description\n\n## History\n- 2026-01-01: created\n')
     return rel
 
@@ -385,6 +390,63 @@ class R9RecordStepInTheTick(TickTestCase):
         rc, out = self.run_tick(steps='record')
         self.assertEqual(rc, 0, out)
         self.assertEqual(self.origin_files('bugs'), bugs)
+
+
+class OrderedOverlapTests(unittest.TestCase):
+    """The spec's acceptance 1: an overlap violates I3 only when the record has not ordered the
+    pair (C1), and a writer that un-orders a live overlap is refused at the card it wrote (C3)."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix='ordered_overlap_')
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+
+    def check(self, paths, before=None):
+        staged = stage.Staged('test', tuple(paths), before or {p: None for p in paths})
+        return invariants.check_i3(stage.RecordContext(self.root, staged))
+
+    def subjects(self, findings):
+        return sorted(f.subject for f in findings)
+
+    def test_a_pair_with_no_order_is_two_findings(self):
+        p1 = _card(self.root, 'T-0001', 'lib/x.py')
+        p2 = _card(self.root, 'T-0002', 'lib/x.py')
+        self.assertEqual(self.subjects(self.check([p1, p2])), ['T-0001', 'T-0002'])
+
+    def test_the_same_pair_ordered_either_direction_is_none(self):
+        p1 = _card(self.root, 'T-0001', 'lib/x.py')
+        p2 = _card(self.root, 'T-0002', 'lib/x.py', after=('T-0001',))
+        self.assertEqual(self.check([p1, p2]), [])
+
+        p1 = _card(self.root, 'T-0001', 'lib/x.py', after=('T-0002',))
+        p2 = _card(self.root, 'T-0002', 'lib/x.py')
+        self.assertEqual(self.check([p1, p2]), [])
+
+    def test_a_chain_through_a_closed_task_is_ordered(self):
+        _card(self.root, 'T-0001', 'lib/x.py')
+        _card(self.root, 'T-0002', '', state='Closed', after=('T-0001',))
+        p3 = _card(self.root, 'T-0003', 'lib/x.py', after=('T-0002',))
+        self.assertEqual(self.check([p3]), [])
+
+    def test_a_chain_through_a_removed_task_is_ordered(self):
+        # PD4's live shape: T-0058 after [T-0057 (removed)], T-0057 after [T-0056]
+        _card(self.root, 'T-0001', 'lib/x.py')
+        _card(self.root, 'T-0002', '', after=('T-0001',), removed='merged into T-0001')
+        p3 = _card(self.root, 'T-0003', 'lib/x.py', after=('T-0002',))
+        self.assertEqual(self.check([p3]), [])
+
+    def test_a_writer_that_removes_the_order_is_refused_at_the_card_it_wrote(self):
+        _card(self.root, 'T-0001', 'lib/x.py')
+        p2 = _card(self.root, 'T-0002', 'lib/x.py', after=('T-0001',))
+        before_text = _read(os.path.join(self.root, p2))
+        _card(self.root, 'T-0002', 'lib/x.py')  # the after: id is gone, writes: unchanged
+        self.assertEqual(self.subjects(self.check([p2], before={p2: before_text})), ['T-0002'])
+
+    def test_a_writer_that_only_adds_after_is_not_refused(self):
+        _card(self.root, 'T-0001', 'lib/x.py')
+        p2 = _card(self.root, 'T-0002', 'lib/x.py')
+        before_text = _read(os.path.join(self.root, p2))
+        _card(self.root, 'T-0002', 'lib/x.py', after=('T-0001',))
+        self.assertEqual(self.check([p2], before={p2: before_text}), [])
 
 
 if __name__ == '__main__':
