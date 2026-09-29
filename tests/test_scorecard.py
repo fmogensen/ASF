@@ -15,6 +15,7 @@ from asf.groom.inbox import parse_inbox_file
 from asf.improve.measure import Run
 from asf.scorecard import diagnose, facts, loop, score
 from asf.scorecard.facts import Facts
+from asf.workers import lifecycle
 
 UTC = datetime.timezone.utc
 
@@ -35,9 +36,10 @@ def write(root, rel, text):
     return path
 
 
-def run(job, ended, reason, landed=False, usd=1.0, minutes=10.0):
+def run(job, ended, reason, landed=False, usd=1.0, minutes=10.0, publish_refused='', worktree=''):
     return Run(job=job, kind='task', model='m', item=None, started=ended, ended=ended,
-               minutes=minutes, landed=landed, end_reason=reason, usd=usd)
+               minutes=minutes, landed=landed, end_reason=reason, usd=usd,
+               publish_refused=publish_refused, worktree=worktree)
 
 
 def items_fixture():
@@ -344,6 +346,95 @@ class DiagnoseTests(unittest.TestCase):
         self.assertEqual(diagnose.metric(f, 'lead-time', s, s + wk), 2.4)
         with self.assertRaises(KeyError):
             diagnose.metric(f, 'nonsense', s, s + wk)
+
+
+class NotPushedCauseTests(unittest.TestCase):
+    """T-0525: the frozen string, class, key and title do not move; the cause's detail gains one
+    line naming the sub-causes a reopen would need."""
+
+    def window(self, f, days=7):
+        return diagnose.window(f.as_of, days)
+
+    def test_the_frozen_string_class_key_and_title_are_unchanged(self):
+        text = lifecycle.push_gap(lifecycle.Evidence(uncommitted=3, unpushed=0))
+        self.assertEqual(text, 'not pushed: 3 uncommitted file(s), 0 unpushed commit(s)')
+        self.assertEqual(score.failure_class(f'failed: {text}'), 'failed: not pushed')
+        runs = [run(f'j{i}', '2026-09-05T00:00:00Z', f'failed: {text}') for i in range(6)]
+        f = facts_fixture(runs=runs)
+        s, e = self.window(f)
+        found = {c.key: c for c in diagnose.causes(f, s, e)}
+        self.assertIn('failure:failed: not pushed', found)
+        c = found['failure:failed: not pushed']
+        self.assertEqual(c.title, "Sessions die with 'failed: not pushed' 6 times a week")
+        weeks = (e - s).total_seconds() / (7 * 86400)
+        self.assertEqual(diagnose.metric(f, 'failure:failed: not pushed', s, e),
+                          round(6 / weeks, 2))
+
+    def test_sub_cause_returns_the_right_name_for_each_precedence_case(self):
+        wt = '/tmp/wt'
+        uncommitted = run('u', 'x', f"failed: {lifecycle.push_gap(lifecycle.Evidence(uncommitted=3, unpushed=0))}", worktree=wt)
+        unpushed = run('u', 'x', f"failed: {lifecycle.push_gap(lifecycle.Evidence(uncommitted=0, unpushed=2))}", worktree=wt)
+        never_pushed = run('u', 'x', f"failed: {lifecycle.push_gap(lifecycle.Evidence(uncommitted=0, unpushed=0))}", worktree=wt)
+        no_worktree = run('u', 'x', 'failed: not pushed: n/a', worktree='')
+        other = run('u', 'x', 'failed: not pushed: something odd', worktree=wt)
+        hook_refused = run('u', 'x', '', worktree=wt, publish_refused='refused by the repo pre-push hook')
+        rebase = run('u', 'x', '', worktree=wt, publish_refused='rebase conflicts in: foo.py')
+        stale = run('u', 'x', '', worktree=wt, publish_refused='would lose 3 commits from the stale head')
+        network = run('u', 'x', '', worktree=wt, publish_refused='connection reset by peer')
+        generic_refused = run('u', 'x', '', worktree=wt, publish_refused='a signal killed the push midway')
+        # publish_refused wins even over a missing worktree: the factory tried before it lost it
+        refused_beats_no_worktree = run('u', 'x', '', worktree='', publish_refused='refused by the repo pre-push hook')
+
+        self.assertEqual(diagnose.sub_cause(uncommitted), 'uncommitted')
+        self.assertEqual(diagnose.sub_cause(unpushed), 'unpushed')
+        self.assertEqual(diagnose.sub_cause(never_pushed), 'never pushed')
+        self.assertEqual(diagnose.sub_cause(no_worktree), 'no worktree')
+        self.assertEqual(diagnose.sub_cause(other), 'other')
+        self.assertEqual(diagnose.sub_cause(hook_refused), 'hook refused')
+        self.assertEqual(diagnose.sub_cause(rebase), 'rebase conflict')
+        self.assertEqual(diagnose.sub_cause(stale), 'stale head')
+        self.assertEqual(diagnose.sub_cause(network), 'network')
+        self.assertEqual(diagnose.sub_cause(generic_refused), 'refused')
+        self.assertEqual(diagnose.sub_cause(refused_beats_no_worktree), 'hook refused')
+
+    def test_sub_cause_line_omits_empty_buckets_and_sums_to_the_total(self):
+        subs = {'uncommitted': 9, 'unpushed': 6, 'hook refused': 4, 'rebase conflict': 1, 'no worktree': 3}
+        line = diagnose.sub_cause_line(subs, 23)
+        self.assertEqual(line,
+            "of the 23 runs: 9 left files uncommitted, 6 committed and never pushed, "
+            "5 the factory could not publish (4 hook refused, 1 rebase conflict), "
+            "3 had no worktree left to publish.")
+        self.assertNotIn('never pushed the branch', line)   # zero runs in that bucket: absent
+        self.assertNotIn('stale head', line)                # zero runs in that refusal split: absent
+        self.assertEqual(diagnose.sub_cause_line({}, 0), '')
+        self.assertEqual(diagnose.sub_cause_line({'uncommitted': 1}, 0), '')
+
+    def test_the_causes_detail_carries_the_sub_cause_line_that_sums_to_its_own_count(self):
+        wt = '/tmp/wt'
+        runs = [
+            run('u1', '2026-09-05T00:00:00Z',
+                f"failed: {lifecycle.push_gap(lifecycle.Evidence(uncommitted=3, unpushed=0))}", worktree=wt),
+            run('u2', '2026-09-05T00:00:00Z',
+                f"failed: {lifecycle.push_gap(lifecycle.Evidence(uncommitted=0, unpushed=2))}", worktree=wt),
+            run('u3', '2026-09-05T00:00:00Z',
+                f"failed: {lifecycle.push_gap(lifecycle.Evidence(uncommitted=0, unpushed=0))}", worktree=wt),
+            run('u4', '2026-09-05T00:00:00Z', 'failed: not pushed: n/a', worktree=wt,
+                publish_refused='refused by the repo pre-push hook'),
+            run('u5', '2026-09-05T00:00:00Z', 'failed: not pushed: n/a', worktree=wt,
+                publish_refused='rebase conflicts in: foo.py'),
+            run('u6', '2026-09-05T00:00:00Z', 'failed: not pushed: n/a', worktree=''),
+            run('u7', '2026-09-05T00:00:00Z', 'failed: not pushed: something odd', worktree=wt),
+        ]
+        f = facts_fixture(runs=runs)
+        found = {c.key: c for c in diagnose.causes(f, *self.window(f))}
+        c = found['failure:failed: not pushed']
+        self.assertEqual(c.title, "Sessions die with 'failed: not pushed' 7 times a week")   # unchanged shape
+        expected_line = (
+            "of the 7 runs: 1 left files uncommitted, 1 committed and never pushed, "
+            "1 never pushed the branch at all, 2 the factory could not publish "
+            "(1 hook refused, 1 rebase conflict), 1 had no worktree left to publish, "
+            "1 ended for a reason this line cannot read.")
+        self.assertTrue(c.detail.endswith(expected_line), c.detail)
 
 
 class Prod:
