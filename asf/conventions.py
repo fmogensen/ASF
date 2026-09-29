@@ -53,6 +53,8 @@ The product yaml carries the overrides::
       outcome_min_sessions: 20    # no rate below this many ended sessions in the window
       repeat_failure_n: 2         # the same item, the same class, this many times → a Bug
       idle_wave_ticks: 6          # consecutive idle waves with New Tasks → a Bug
+      stop_gate_rounds: 2         # a session's Stop refused this many times before the gate
+                                  # stands aside (0 disables the gate for the product)
       heavy_share_pct: 50         # the share of labelled 7-day spend on the heavy model above
                                   # which the rollup files a Bug (F-0101 §2.7)
       budget:
@@ -145,6 +147,11 @@ DEFAULT_REPEAT_FAILURE_N = 2
 #: How many consecutive ticks may launch nothing while New Tasks exist before the tick files a
 #: Bug for the stalled wave (F-0103).
 DEFAULT_IDLE_WAVE_TICKS = 6
+#: How many times the built-in Stop gate (:mod:`asf.workers.stopgate`) may refuse one run's exit
+#: before it stands aside and the factory's own publish/correction path is the net — an unbounded
+#: gate would turn one stuck session into an infinite one (F-0158 §1.3). ``0`` disables the gate
+#: for the product: the operator's escape hatch.
+DEFAULT_STOP_GATE_ROUNDS = 2
 #: How harvest gates a tick's eligible branches (B-0040): ``combined`` — every branch rebased in
 #: turn onto one throwaway head, one gate, one fast-forward push, bisecting on red — or
 #: ``per-branch``, one gate and one push per landing. Spelt ``harvest: {gate: …}`` in the yaml.
@@ -658,6 +665,7 @@ class Conventions:
     outcome_min_sessions: int = DEFAULT_OUTCOME_MIN_SESSIONS
     repeat_failure_n: int = DEFAULT_REPEAT_FAILURE_N
     idle_wave_ticks: int = DEFAULT_IDLE_WAVE_TICKS
+    stop_gate_rounds: int = DEFAULT_STOP_GATE_ROUNDS
     harvest_gate: str = DEFAULT_HARVEST_GATE
     branches_per_tick: int = DEFAULT_BRANCHES_PER_TICK
     gate_timeout_s: int = DEFAULT_GATE_TIMEOUT_S
