@@ -1759,6 +1759,30 @@ def push_gap(ev):
     return f'{NOT_PUSHED}: {ev.uncommitted} uncommitted file(s), {ev.unpushed} unpushed commit(s)'
 
 
+def unpublished(wt, branch, main='main'):
+    """``(ok, detail)``: whether ``branch``'s work in worktree ``wt`` is on origin, and what is
+    missing when it is not — ``not pushed: <n> uncommitted file(s), <m> unpushed commit(s)``,
+    the same text :func:`push_gap` formats from gathered evidence (B-0051).
+
+    ``n`` is ``git status --porcelain``; ``m`` is :func:`unpushed_commits`, by patch and above
+    the trunk, so a branch harvest rebased after the session pushed it is not held forever
+    (B-0053). A branch with no remote head at all is unpushed even with nothing to push: the
+    session must publish the branch it was given (D-0048 then reads ``empty branch``)."""
+    if not branch:
+        head = _git(['rev-parse', '--abbrev-ref', 'HEAD'], wt)
+        branch = head.stdout.strip() if head.returncode == 0 else ''
+    if not branch or branch == 'HEAD':
+        return False, 'no branch'
+    st = _git(['status', '--porcelain'], wt)
+    n = len([line for line in st.stdout.splitlines() if line.strip()]) if st.returncode == 0 else 0
+    ls = _git(['ls-remote', '--heads', 'origin', branch], wt)
+    remote = ls.stdout.split()[0] if ls.returncode == 0 and ls.stdout.strip() else ''
+    m = unpushed_commits(wt, remote, main)
+    if n == 0 and m == 0 and remote:
+        return True, ''
+    return False, push_gap(Evidence(uncommitted=n, unpushed=m))
+
+
 def outcome_class(result):
     """The class of an ``end_reason`` (the ``sessions`` stream's ``result``), or None when the
     line describes no outcome — ``running``, ``unknown``, ``stopped`` (an operator's decision,

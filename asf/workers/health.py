@@ -264,16 +264,7 @@ def push_gap(worktree, branch, main):
     (B-0051: a result that says ok is not "finished" until this is (0, 0)). The count is
     :func:`asf.workers.lifecycle.unpushed_commits`, by patch and above the trunk, so a branch
     harvest rebased after the session pushed it is not held "unpushed" forever (B-0053)."""
-    st = _git(['status', '--porcelain'], worktree)
-    n = len([line for line in st.stdout.splitlines() if line.strip()]) if st.returncode == 0 else 0
-    remote = ''
-    if branch:
-        ls = _git(['ls-remote', '--heads', 'origin', branch], worktree)
-        remote = ls.stdout.split()[0] if ls.returncode == 0 and ls.stdout.strip() else ''
-    m = lifecycle.unpushed_commits(worktree, remote, main)
-    if n == 0 and m == 0 and remote:
-        return True, ''
-    return False, f'not pushed: {n} uncommitted file(s), {m} unpushed commit(s)'
+    return lifecycle.unpublished(worktree, branch, main)
 
 
 def result_reason(worktree, branch, main, rec):
