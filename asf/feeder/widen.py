@@ -42,6 +42,8 @@ MAX_FILES = DEFAULT_WIDEN_MAX_FILES
 HISTORY = 'footprint widened: +{paths} ({fact})'
 #: The History line that undoes a widening whose paths intersect an open Task's ``writes:``.
 REVERTED = 'footprint widening reverted: overlaps {owner}'
+#: The History line the tick's order pass appends to the later-minted card of a standing overlap.
+SERIALIZED = 'serialized behind {owner}: writes: overlaps {glob}'
 #: A widening's History line, read back: the paths it added.
 WIDENED_RE = re.compile(r'footprint widened: \+(.+?) \(')
 #: The reshape reason (the RESHAPE row's reason, and the card's ``reshape:`` value).

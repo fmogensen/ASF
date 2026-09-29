@@ -440,10 +440,59 @@ def revert_overlaps(ctx, items, out=print):
     return done
 
 
+def serialize_overlaps(ctx, items, out=print):
+    """Order every standing overlap the record has not ordered: for each pair of Active Tasks whose
+    ``writes:`` intersect with no ``after:`` either way (:func:`asf.invariants.unordered_overlaps`),
+    the later-minted card gets ``after: <the earlier>`` and one History line
+    ``serialized behind <owner>: writes: overlaps <glob>``, committed alone (:func:`write_card`).
+
+    Never a cycle: an edge is proposed only where neither Task reaches the other, so the edge it
+    adds cannot close one. Idempotent: the ordered pair is not a candidate again. ``items`` is
+    updated in place; the index is re-derived once when anything was written. Returns
+    ``{task: owner}``."""
+    from asf import invariants
+    from asf.record.core import canonicalize, load_items
+    root = ctx.record_root()
+    stamp = pool_mod.now_iso()[:16].replace('T', ' ')
+    by_id, _errors = load_items(root)
+    canonical, _dupes = canonicalize(by_id)
+    tasks = {iid: rec['meta'] for iid, rec in canonical.items()}
+    edges = invariants._after_edges(tasks)
+    done = {}
+    reindex = False
+    for owner, held, _glob_owner, glob in invariants.unordered_overlaps(
+            invariants.overlap_tasks(tasks)):
+        if invariants.ordered(edges, owner, held):
+            continue  # an edge written earlier in this pass has already ordered the pair
+        rec = _card(root, held)
+        if rec is None:
+            continue
+        updates = {'after': list(rec['meta'].get('after') or ()) + [owner]}
+        note = widen.SERIALIZED.format(owner=owner, glob=glob)
+        err = write_card(root, held, updates, stamp, note)
+        if err:
+            out(f'widen: {held} not serialized — {err}')
+            continue
+        edges.setdefault(held, []).append(owner)
+        done[held] = owner
+        if items is not None and held in items:
+            items[held] = dict(items[held], **updates)
+        reindex = True
+        ctx.event('serialized', item=held, text=f'after: {owner} — writes: overlaps {glob}')
+        out(f'serialized {held}: after: {owner} — writes: overlaps {glob}')
+    if reindex:
+        err = _reindex(root)
+        if err:
+            out(f'widen: index not re-derived — {err}')
+    return done
+
+
 def run(ctx, out=print, items=None):
     """Both halves, in order: the REPORT facts, then the rule — and last, the repair of any
-    widening already in the record that overlaps an open Task."""
+    widening already in the record that overlaps an open Task, then the order written over what
+    is left."""
     held = report_facts(ctx, items, out=out) + refusal_facts(ctx, items, out=out)
     verdicts = apply(ctx, items, out=out)
     revert_overlaps(ctx, items, out=out)
+    serialize_overlaps(ctx, items, out=out)
     return held, verdicts
