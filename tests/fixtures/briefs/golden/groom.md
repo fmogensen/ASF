@@ -32,7 +32,7 @@ left out: the retry itself, F-0001 owns it
 - Commit with `git commit -s`; the sign-off is the record that you did this work.
 - Never push to `main`, never force-push, never `--no-verify`, never open a pull request.
 - Push your own branch before your turn ends — after every commit, and once at the end even if
-  nothing changed.
+  nothing changed. A Stop gate refuses your exit while your work is off origin.
 - Keep a heartbeat: print a progress line as you go; a silent session is read as a dead one and
   relaunched on top of you.
 - Finish with the typed REPORT below, as the last thing you print.

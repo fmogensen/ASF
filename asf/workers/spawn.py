@@ -41,6 +41,7 @@ from asf.workers import githooks
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 from asf.workers import runtime as runtime_mod
+from asf.workers import stopgate
 
 DEFAULT_ID_PREFIXES = ['S', 'T', 'B']
 DEFAULT_ID_START = 5000
@@ -907,6 +908,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
                                 start=int(wp.get('id_range_start', DEFAULT_ID_START)),
                                 size=int(wp.get('id_range_size', DEFAULT_ID_SIZE)))
     brief_path = write_brief(product, row.job, brief_for(row, brief_text))
+    stopgate.clear(product, row.job)  # a correction round arrives with a fresh bound
     add_dirs = [os.path.expanduser(d) for d in (product._get('job_grants') or [])]
     for d in getattr(row, 'add_dirs', None) or ():  # the row's own grants are the factory's dirs
         d = os.path.expanduser(d)
