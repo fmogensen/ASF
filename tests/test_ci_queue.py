@@ -2893,3 +2893,120 @@ class ItemOfRunTest(unittest.TestCase):
         self.assertIsNotNone(rank)
         rec.pop('title')
         self.assertEqual(ci_queue._rerun_priority(rec, self.ITEMS)[0], ci_queue.OTHER)
+
+
+class TestRefusedRerun(ReliefBase):
+    """2026-09-29, a product: the queue cancelled a PR run for a main run, then logged "re-run of
+    cancelled pr run … refused — tried again next tick" 944 passes in a row — ``_gh`` dropped
+    ``gh``'s stderr, so no reason was ever read, and nothing counted or escalated. Each refusal
+    now carries ``gh``'s reason; after :data:`RERUN_REFUSALS_MAX` a fresh run is dispatched for
+    the branch head; both refused, the record is ``stuck``: one STUCK line, named on the status
+    row and red on the doctor, asked again every :data:`STUCK_RETRY_S`."""
+
+    cancelled_runs = TestAdmittedStarts.cancelled_runs
+    cancel_for_main = TestAdmittedStarts.cancel_for_main
+    WHY = 'run 102 cannot be rerun; This workflow is already running'
+
+    def refusing(self, run, *verbs):
+        def wrapped(argv, **kw):
+            self.argvs.append(argv)
+            if any(argv[1:1 + len(v)] == list(v) for v in verbs):
+                return subprocess.CompletedProcess(argv, 1, '', f'X\n{self.WHY}\n')
+            return run(argv, **kw)
+        return wrapped
+
+    def setUp(self):
+        super().setUp()
+        self.argvs = []                     # every argv, refused ones too
+
+    def dispatches(self, _gh=None):
+        return [c for c in self.argvs if c[:3] == ['gh', 'workflow', 'run']]
+
+    def test_a_refusal_is_logged_with_its_reason_and_counted(self):
+        p = self.product()
+        self.cancel_for_main(p)
+        gh, run = self.gh(self.cancelled_runs('in_progress'), busy=())
+        self.relieve(p, self.refusing(run, ('run', 'rerun', '102')), minutes=2)
+        self.assertIn(f'ci queue: re-run of cancelled pr run 102 (T-0341) refused '
+                      f'(1/{ci_queue.RERUN_REFUSALS_MAX}) — {self.WHY}; tried again next tick',
+                      self.lines)
+        rec = next(r for r in ci_queue.load('p')['relief'] if r['id'] == 102)
+        self.assertEqual((rec['refusals'], rec['refused_why']), (1, self.WHY))
+
+    def test_a_rerun_that_goes_through_after_a_refusal_is_reported(self):
+        p = self.product()
+        self.cancel_for_main(p)
+        gh, run = self.gh(self.cancelled_runs('in_progress'), busy=())
+        self.relieve(p, self.refusing(run, ('run', 'rerun', '102')), minutes=2)
+        self.lines.clear()
+        self.relieve(p, run, minutes=3)
+        self.assertTrue(any(l.startswith('ci queue: re-ran pr run 102 (T-0341') and
+                            l.endswith('after 1 refused') for l in self.lines), self.lines)
+        self.assertNotIn(102, [r['id'] for r in ci_queue.load('p')['relief']])
+
+    def test_the_third_refusal_dispatches_a_fresh_run_of_the_branch_head(self):
+        p = self.product()
+        self.cancel_for_main(p)
+        gh, run = self.gh(self.cancelled_runs('in_progress'), busy=())
+        refuse = self.refusing(run, ('run', 'rerun', '102'))
+        for i in range(ci_queue.RERUN_REFUSALS_MAX):   # passes past PICKUP_S apart
+            self.relieve(p, refuse, minutes=2 + 5 * i)
+        self.assertEqual(self.cancels(gh, 'rerun').count('102'), 0)  # every one refused
+        self.assertEqual([c for c in self.argvs if c[:4] == ['gh', 'run', 'rerun', '102']],
+                         [['gh', 'run', 'rerun', '102', '-R', 'o/r']] * ci_queue.RERUN_REFUSALS_MAX)
+        self.assertEqual(self.dispatches(gh),
+                         [['gh', 'workflow', 'run', 'pr.yml', '--ref', 'task/T-0341', '-R', 'o/r']])
+        self.assertTrue(any(l.startswith(f'ci queue: re-run of cancelled pr run 102 (T-0341) '
+                                         f'refused {ci_queue.RERUN_REFUSALS_MAX} times — last: '
+                                         f'{self.WHY}; dispatched a fresh pr.yml run')
+                            for l in self.lines), self.lines)
+        self.assertNotIn(102, [r['id'] for r in ci_queue.load('p')['relief']])
+
+    def test_both_refused_is_a_named_stuck_failure_not_a_silent_loop(self):
+        p = self.product()
+        self.cancel_for_main(p)
+        gh, run = self.gh(self.cancelled_runs('in_progress'), busy=())
+        refuse = self.refusing(run, ('run', 'rerun', '102'), ('workflow', 'run'))
+        last = 2 + 5 * (ci_queue.RERUN_REFUSALS_MAX - 1)
+        for m in range(2, last + 1, 5):                     # passes past PICKUP_S apart
+            self.relieve(p, refuse, minutes=m)
+        stuck = [l for l in self.lines if l.startswith('ci queue: STUCK pr run 102 (T-0341)')]
+        self.assertEqual(len(stuck), 1, self.lines)
+        self.assertIn(self.WHY, stuck[0])
+        self.assertIn('fresh run refused too', stuck[0])
+        now = self.t0 + datetime.timedelta(minutes=last + 5)
+        named = ci_queue.stuck_lines(p, now=now)
+        self.assertEqual(len(named), 1)
+        self.assertTrue(named[0].startswith('CI START STUCK pr run 102 (T-0341) on task/T-0341'))
+        self.assertIn((True, False, named[0]), ci_queue.runner_rows(p, now=now))
+        # within STUCK_RETRY_S: no gh write at all, no new line
+        n_calls, self.lines[:] = len(self.argvs), []
+        self.relieve(p, refuse, now=now)
+        writes = [c for c in self.argvs[n_calls:]
+                  if c[:3] in (['gh', 'run', 'rerun'], ['gh', 'workflow', 'run'])]
+        self.assertEqual(writes, [])
+        self.assertFalse([l for l in self.lines if '102' in l], self.lines)
+        # past it: asked again (the fresh dispatch), still no second STUCK line
+        later = now + datetime.timedelta(seconds=ci_queue.STUCK_RETRY_S + 60)
+        self.relieve(p, refuse, now=later)
+        self.assertTrue(len(self.dispatches(gh)) >= 2, self.lines)
+        self.assertFalse([l for l in self.lines if 'STUCK' in l], self.lines)
+        # the dispatch goes through at last: the record leaves, the status row is clear
+        self.relieve(p, self.refusing(run, ('run', 'rerun', '102')),
+                     now=later + datetime.timedelta(seconds=ci_queue.STUCK_RETRY_S + 60))
+        self.assertNotIn(102, [r['id'] for r in ci_queue.load('p')['relief']])
+        self.assertEqual(ci_queue.stuck_lines(p), [])
+
+    def test_gh_try_names_the_reason(self):
+        p = self.product()
+
+        def boom(argv, **_kw):
+            raise FileNotFoundError('gh')
+
+        def slow(argv, **_kw):
+            raise subprocess.TimeoutExpired(argv, 30)
+        self.assertEqual(ci_queue.GitHubSource(p, run=boom).gh_try(['x'])[0], None)
+        self.assertIn('gh did not run', ci_queue.GitHubSource(p, run=boom).gh_try(['x'])[1])
+        self.assertIn('timed out', ci_queue.GitHubSource(p, run=slow).gh_try(['x'])[1])
+        self.assertEqual(ci_queue.GitHubSource(p, run=DeadGh()).gh_try(['x']),
+                         (None, 'unreachable'))
