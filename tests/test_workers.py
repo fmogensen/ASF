@@ -2266,6 +2266,93 @@ class NothingToLandHealthTests(Home):
         self.assertTrue([f for f in found if f[0] == 'adjudicate-4' and f[1] == 'held'], found)
 
 
+class RulingReadyPublishTests(Home):
+    """F-0176 Task 2: an adjudicate run whose REPORT rules a branch ready — a ``ruling:`` naming
+    no ``blocked_on:`` — is published by the factory on the pass that judges it: the branch the
+    session itself has no credential to put on origin (B-0123 went round six times because
+    nothing ever did). Nothing is held: the run ends honestly ``failed``, and a ruling that names
+    what it waits on opens no publish at all."""
+
+    def spawn(self, job, item, branch, step):
+        row = pool_mod.Row(job, item, kind='adjudicate', model='Opus', branch=branch)
+        rt = runtime_mod.FakeRuntime([step])
+        return spawn_mod.spawn(self.product, row, self.acct(), 'b', runtime=rt, cfg=self.cfg)
+
+    def commit(self, wt, name='x'):
+        for k, v in (('user.email', 'ci@example.com'), ('user.name', 'ci')):
+            git('config', k, v, cwd=wt)
+        with open(os.path.join(wt, name), 'w') as f:
+            f.write(name)
+        git('add', name, cwd=wt)
+        git('commit', '-q', '-m', name, cwd=wt)
+
+    def _ruling(self, blocked_on='none'):
+        return ('REPORT\nitem: B-0123\nkind: adjudicate\nstatus: done\n'
+                'ruling: the branch is ready — only the missing push credential stands between '
+                'this HEAD and origin\n'
+                f'blocked_on: {blocked_on}\n'
+                'pushed: rebased deadbee — the factory publishes\n')
+
+    def _remote_sha(self, wt, branch):
+        p = subprocess.run(['git', 'ls-remote', '--heads', 'origin', branch], cwd=wt,
+                           capture_output=True, text=True)
+        return p.stdout.split()[0] if p.returncode == 0 and p.stdout.strip() else ''
+
+    def test_a_ready_ruling_publishes_the_branch_and_holds_nothing(self):
+        branch = 'fix/B-0123'
+        rec = self.spawn('adjudicate-ready', 'B-0123', branch,
+                         {'ok': False, 'pid': 91, 'result': self._ruling()})
+        wt = rec['worktree']
+        self.commit(wt, 'fix')  # a commit origin lacks: the session's own work
+        head = git('rev-parse', 'HEAD', cwd=wt)
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertEqual(self._remote_sha(wt, branch), head)
+        published = [d for j, w, d in found if j == 'adjudicate-ready' and w == 'published']
+        self.assertTrue(published, found)
+        self.assertFalse([f for f in found if f[0] == 'adjudicate-ready' and f[1] in ('held', 'parked')],
+                         found)
+        s = pool_mod.load_sessions(self.product)['adjudicate-ready']
+        self.assertNotIn('correction', s)
+        self.assertEqual(s['end_reason'], 'failed')
+
+    def test_a_ruling_that_names_what_it_waits_on_publishes_nothing(self):
+        branch = 'fix/B-0124'
+        rec = self.spawn('adjudicate-blocked', 'B-0124', branch,
+                         {'ok': False, 'pid': 92, 'result': self._ruling(blocked_on='T-0519')})
+        wt = rec['worktree']
+        self.commit(wt, 'fix')
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertEqual(self._remote_sha(wt, branch), '')
+        self.assertFalse([f for f in found if f[0] == 'adjudicate-blocked' and f[1] == 'published'],
+                         found)
+
+    def test_a_stray_ruling_field_off_an_adjudicate_kind_is_not_ready(self):
+        branch = 'fix/B-0125'
+        rec = self.spawn('coder-1', 'B-0125', branch,
+                         {'ok': False, 'pid': 93, 'result': self._ruling()})
+        s = dict(pool_mod.load_sessions(self.product)['coder-1'], kind='coder')
+        self.assertFalse(health_mod.ruling_ready(s))
+
+    def test_an_adjudicate_report_with_no_ruling_field_is_not_ready(self):
+        branch = 'fix/B-0126'
+        text = ('REPORT\nitem: B-0126\nkind: adjudicate\nstatus: done\n'
+                'pushed: rebased deadbee — the factory publishes\n')
+        self.spawn('adjudicate-plain', 'B-0126', branch, {'ok': False, 'pid': 94, 'result': text})
+        s = pool_mod.load_sessions(self.product)['adjudicate-plain']
+        self.assertFalse(health_mod.ruling_ready(s))
+
+    def test_publishing_twice_publishes_once(self):
+        branch = 'fix/B-0127'
+        rec = self.spawn('adjudicate-twice', 'B-0127', branch,
+                         {'ok': False, 'pid': 95, 'result': self._ruling()})
+        wt = rec['worktree']
+        self.commit(wt, 'fix')
+        health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertFalse([f for f in found if f[0] == 'adjudicate-twice' and f[1] == 'published'],
+                         found)
+
+
 class EmptyBranchParkTests(Home):
     """F-0157 Task 3 §3: `hold`'s `EMPTY_CAP` park, wired to its real switch — the item's
     second genuine empty end parks it, rather than spending a third, fourth and fifth session
