@@ -2,6 +2,40 @@
 
 One entry per released version, newest first.
 
+## v0.1.72 — 2026-09-29
+
+### Features landed
+
+- F-0098 'dead' sessions are nearly always finished ones not yet recorded: say 'ended, awaiting tick', free the slot at once
+
+### Bugs fixed
+
+- B-0028 A corrected or late-finishing session stays 'dead pid'; harvest never lands its branch
+
+### In progress
+
+- F-0035 Thin controller: every read loop moves to the tick, and a rule flags scriptable chores
+- F-0040 Story-to-test gate: a Task's pull request must tick an acceptance line with the test that proves it
+- F-0150 Scorecard loop: a card whose number got worse is reverted, and adoptions are Decisions with both readings
+- F-0156 711 branches carry no open PR
+- F-0158 Sessions die with 'failed: not pushed' 72 times a week
+- F-0159 CI gate:--- test_dry_run: FAILED (rc N) is red 6 times a week
+- F-0160 Health records a session ended at its first result while the process keeps working
+- F-0162 asf upgrade writes the pending marker before checking the ref exists
+- F-0163 asf set cannot change a bug's severity (needed to downgrade an S1)
+- F-0169 CI gate:--- test_tick_steps: FAILED (rc N) is red 3.5 times a week
+- F-0235 Sessions die with 'failed: hook refused' 19.5 times a week
+
+### Improvements and hotfixes
+
+- fix(ci-queue): a refused re-run says why, is bounded, and falls back to a fresh run (#321)
+- fix(spawn): rebase a held branch onto the trunk at launch only when it needs it (#329)
+- fix(record): a PR closed unmerged resets its Task to ready and clears its rounds (#331)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.72"`
+
 ## v0.1.71 — 2026-09-29
 
 ### In progress
