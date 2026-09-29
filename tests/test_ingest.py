@@ -13,6 +13,7 @@ from asf import reviews
 from asf.env import Product
 from asf.record import check
 from asf.record import frontmatter
+from asf.evidence import closing
 from asf.record import ingest
 from asf.record.core import today
 from asf.record.index import do_index
@@ -785,10 +786,21 @@ class RemovedTaskTests(unittest.TestCase):
             'T-0004': {'meta': {'type': 'task', 'removed': 'merged into T-0005 (groom x)'}},
             'T-0005': {'meta': {'type': 'task'}},
         }
-        new_state = {k: 'New' for k in canonical}
-        self.assertEqual(ingest.orphaned_tasks(canonical, new_state), {'T-0001', 'T-0002'})
-        new_state['T-0003'] = 'Closed'
-        self.assertEqual(ingest.orphaned_tasks(canonical, new_state), set())
+        def own(state):
+            return ingest._Derived(closing.Closing(state, 'x'))
+        derived = {k: own('New') for k in canonical}
+        self.assertEqual(ingest.orphaned_tasks(canonical, derived), {'T-0001', 'T-0002'})
+        derived['T-0003'] = own('Closed')
+        self.assertEqual(ingest.orphaned_tasks(canonical, derived), set())
+
+    def test_a_survivor_held_closed_by_a_wrong_descent_does_not_vouch(self):
+        # the incident's second tick: the survivor itself was closed parent-closed, and the
+        # terminal hold keeps it Closed — its own evidence still lands nothing
+        self.orphan_tree(survivor_machine=('state: Closed', 'stage_since: 2026-01-01T00:00:00Z',
+                                           'updated: 2026-01-01T00:00:00Z'))
+        self.run_ingest(self.orphan_evidence())
+        feature, _b = read_meta(self.root, 'features', 'F-0001')
+        self.assertNotEqual(feature['state'], 'Closed')
 
     def test_story_on_a_removed_task_only_is_uncovered(self):
         write(self.root, 'E-0001', 'epic', 'Factory', 'epics')

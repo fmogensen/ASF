@@ -450,11 +450,12 @@ def _in_prod(child_ids, task_ev, ev, merged=None, own_sha='', reach=None):
 _MERGED_INTO = re.compile(r'\bmerged into ([Tt]-\d{4})\b')
 
 
-def orphaned_tasks(canonical, new_state):
+def orphaned_tasks(canonical, derived):
     """The removed Tasks whose scope no live Task carries any more: each was merged into a
     survivor (the survivor's ``merged:`` names it, or its own ``removed: merged into T-…``), and
-    following survivors ends at a Task that is itself removed and never landed (derived neither
-    Resolved nor Closed). A groom that removes the survivor — "the deliverable is already on
+    following survivors ends at a Task that is itself removed and never landed — its own rule,
+    before the terminal hold, says neither Resolved nor Closed (a survivor a wrong descent once
+    closed stays held Closed, and must not vouch for the scope folded into it). A groom that removes the survivor — "the deliverable is already on
     main" — speaks for the survivor's own scope, never for the Tasks folded into it: those are
     still the Feature's work to do. Such a Task still counts among its Feature's children, and a
     closing parent never descends onto it."""
@@ -479,7 +480,9 @@ def orphaned_tasks(canonical, new_state):
             seen.add(cur)
             cur = into[cur]
         survivor = (canonical.get(cur) or {}).get('meta') or {}
-        if survivor.get('removed') and new_state.get(cur) not in (closing.RESOLVED, closing.CLOSED):
+        own = derived.get(cur)
+        if survivor.get('removed') and (own.raw.state if own else closing.NEW) not in (
+                closing.RESOLVED, closing.CLOSED):
             out.add(iid)
     return out
 
@@ -847,7 +850,7 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
         stage_val[iid] = evidence.feature_stage(spec_dict, plan_dict, [], False)
 
     # ---- Features: depend on their own children's derived state
-    orphans = orphaned_tasks(canonical, new_state)
+    orphans = orphaned_tasks(canonical, derived)
     retired = set()
     for iid, rec in canonical.items():
         if rec['meta'].get('type') != 'feature':
