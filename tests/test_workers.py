@@ -20,6 +20,7 @@ from asf import hooks as hooks_mod
 from asf import progress
 from asf.workers import health as health_mod
 from asf.workers import lifecycle
+from asf.workers import observe
 from asf.workers import pool as pool_mod
 from asf.workers import quota as quota_mod
 from asf.workers import runtime as runtime_mod
@@ -2601,6 +2602,93 @@ class TestStall(Home):
         found = stall_mod.stall(self.product, now=now, alive=alive, out=lambda s: None,
                                 sample=False)
         self.assertEqual([(j, st) for j, st, _ in found], [('quiet2', 'STALL')])
+
+
+class LivenessForTests(unittest.TestCase):
+    """F-0234 §2: `observe.liveness_for`, and `identity_alive` re-expressed on top of it — both
+    doors (P6) shut at one callable. The false death: a process is really there, but the
+    observation could not read its session — no longer a corpse when it looks like one of the
+    factory's own."""
+
+    RUN = {'job': 'j', 'pid': 4242, 'session': 'p/j@t'}
+
+    @staticmethod
+    def _observed(pid, session=None):
+        return observe.Observed(pid=pid, ppid=None, account=None, session=session,
+                                 product=None, job=None, owner='foreign', cwd=None)
+
+    def test_the_false_death_is_alive_and_unknown(self):
+        obs = self._observed(4242, session=None)
+        alive = observe.identity_alive([obs], [self.RUN], exists=lambda p: True,
+                                        is_ours=lambda p: True)
+        self.assertTrue(alive(4242))
+        verdict = observe.liveness_for([obs], [self.RUN], exists=lambda p: True,
+                                        is_ours=lambda p: True)
+        self.assertEqual(verdict(4242), lifecycle.UNKNOWN)
+        self.assertIsNone(stall_mod.classify({'pid': 4242}, time.time(), 30, alive))
+
+    def test_the_reverse_row_something_not_ours_is_reused(self):
+        # the same fixture, is_ours=False: REUSED, not ALIVE — a rule, not just an outcome
+        obs = self._observed(4242, session=None)
+        alive = observe.identity_alive([obs], [self.RUN], exists=lambda p: True,
+                                        is_ours=lambda p: False)
+        self.assertFalse(alive(4242))
+        verdict = observe.liveness_for([obs], [self.RUN], exists=lambda p: True,
+                                        is_ours=lambda p: False)
+        self.assertEqual(verdict(4242), lifecycle.REUSED)
+
+    def test_a_pid_no_run_recorded_is_alive_iff_observed(self):
+        # unchanged rule (PD3): with no run at all, only the observation decides
+        obs = self._observed(9999, session=None)
+        self.assertTrue(observe.identity_alive([obs], [])(9999))
+        self.assertFalse(observe.identity_alive([], [])(9999))
+
+    def test_a_cloud_token_follows_cloudpid_alive(self):
+        # unchanged rule (PD3): the cloud branch comes ahead of the recorded/unrecorded split
+        tok = lifecycle.cloudpid.token('1')
+        run = {'job': 'j', 'pid': tok}
+        with mock.patch.object(lifecycle.cloudpid, 'alive', return_value=True):
+            self.assertTrue(observe.identity_alive([], [run])(tok))
+        with mock.patch.object(lifecycle.cloudpid, 'alive', return_value=False):
+            self.assertFalse(observe.identity_alive([], [run])(tok))
+
+
+class LivenessSilenceBoundTests(unittest.TestCase):
+    """F-0234 §2 / S-35801: `UNKNOWN` defers only while the log moves — past
+    `stall.silent_minutes` it is `GONE`, and the run is judged `dead pid` exactly as today, so
+    the bound restores today's behaviour rather than inventing a third outcome."""
+
+    RUN = {'job': 'j', 'pid': 4242, 'session': 'p/j@t'}
+
+    @staticmethod
+    def _observed(pid):
+        return observe.Observed(pid=pid, ppid=None, account=None, session=None,
+                                 product=None, job=None, owner='foreign', cwd=None)
+
+    def test_within_the_bound_is_unknown_and_alive(self):
+        obs = self._observed(4242)
+        alive = observe.identity_alive([obs], [self.RUN], exists=lambda p: True,
+                                        is_ours=lambda p: True, silent_min=30,
+                                        silent_for=lambda p: 5.0)
+        self.assertTrue(alive(4242))
+
+    def test_past_the_bound_is_gone_and_judged_dead_pid(self):
+        obs = self._observed(4242)
+        alive = observe.identity_alive([obs], [self.RUN], exists=lambda p: True,
+                                        is_ours=lambda p: True, silent_min=30,
+                                        silent_for=lambda p: 31.0)
+        self.assertFalse(alive(4242))
+        ev = lifecycle.gather(None, self.RUN, alive=alive)
+        self.assertEqual(lifecycle.judge(self.RUN, ev), lifecycle.DEAD_PID)
+
+    def test_an_unmeasured_silence_stays_unknown(self):
+        # PD4's guard: silent_for answering None (no log, or an unreadable mtime) is "not
+        # measured", not "quiet forever"
+        obs = self._observed(4242)
+        alive = observe.identity_alive([obs], [self.RUN], exists=lambda p: True,
+                                        is_ours=lambda p: True, silent_min=30,
+                                        silent_for=lambda p: None)
+        self.assertTrue(alive(4242))
 
 
 class TestCorrectOnce(Home):
