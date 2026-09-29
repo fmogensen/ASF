@@ -2,6 +2,34 @@
 
 One entry per released version, newest first.
 
+## v0.1.80 — 2026-09-29
+
+### Bugs fixed
+
+- B-0051 A session that ends 'finished' without pushing blocks its item forever: health says finished, harvest sees nothing, spawn refuses the worktree
+- B-0058 A blocked Bug still gets its FIX row and a blocked item its CORRECT or ADJUDICATE row: the feeder reads blocked for Features only
+
+### In progress
+
+- F-0040 Story-to-test gate: a Task's pull request must tick an acceptance line with the test that proves it
+- F-0060 A mechanical correctness pass before the human-standard review
+- F-0190 Deploy relevance counts test-only commits as undeployed changes
+- F-0209 Plans get writes: right; lane widens writes: on refusal instead of dying
+- F-0212 The approvals hook holds a read-only 'git config core.hooksPath' as a security write
+- F-0218 asf unpark releases one parked job per call
+- F-0223 Sessions die with 'failed' 6.5 times a week
+- F-0224 Repair sessions 'review' take 17 % of session spend
+- F-0227 An ended worker run whose pid stays alive blocks its item forever (T-0196)
+- F-0231 No command releases a stale correction; F-1129 holds one for a never-pushed branch
+
+### Improvements and hotfixes
+
+- fix(ingest): a removed survivor never closes a Feature over the Tasks merged into it (#426)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.80"`
+
 ## v0.1.79 — 2026-09-29
 
 ### Bugs fixed
