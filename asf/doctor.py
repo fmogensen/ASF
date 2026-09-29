@@ -923,9 +923,9 @@ def check_worktrees(product):
 
 
 def check_branches(product):
-    """``(ok, 'unowned branches: N (prefixes …)')`` — origin's heads no configured pattern owns,
-    as the last retention pass counted them (:func:`asf.workers.retention.doctor_line`), else
-    None before one ran."""
+    """``(ok, 'branches: N of M heads carry no open PR — …')`` — the census of origin's heads by
+    the rule that covers each one, as the last retention pass took it
+    (:func:`asf.workers.retention.doctor_line`), else None before one ran."""
     from asf.workers import retention
     try:
         return retention.doctor_line(product)
