@@ -2,6 +2,33 @@
 
 One entry per released version, newest first.
 
+## v0.1.77 — 2026-09-29
+
+### Features landed
+
+- F-0078 The tick ends with two tables: in flight, and done since the last tick
+- F-0173 A ruling should survive a lane rebase (same patch-ids, new head)
+
+### Bugs fixed
+
+- B-0123 A failed daily run is never retried until the next day
+
+### In progress
+
+- F-0170 32 pre-existing I3 writes: overlaps after the invariants audit; groom on no clock
+- F-0175 ASF collects trunk CI runs itself — CI facts go stale when a product's legacy collector is retired
+- F-0176 B-0123 loop: 'died without a result' while both logs end in a ruling; ready branch never published
+- F-0185 Connectors: declare each external service (CI, deploy, db, …) once per product — asf connect sets up auth, doctor/status/approvals/sessions all read it
+- F-0186 conventions.doc_paths: let a product declare extra document folders so approved spec branches land without a session
+- F-0187 conventions.shared_paths: lock files overlap every Task — serialise them at merge, not in the feeder
+- F-0188 coverage: a product declares references; generic reference coverage (generalises matrix_path + asf parity)
+- F-0189 Cross-product seat overcommit: two waves launch on one account at once (6 of cap 4)
+- F-0234 Sessions die with 'dead pid' 5.5 times a week
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.77"`
+
 ## v0.1.76 — 2026-09-29
 
 ### Features landed
