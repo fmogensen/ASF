@@ -80,8 +80,10 @@ session (B-0051) and comes back to you as a correction. Say so yourself in the r
 `pushed:` line: `pushed: no` is read as that failure at once.
 
 Your branch is `task/T-0001`, and it may already be on origin (`exists:` above — a held branch
-comes back to its session, and the worktree was rebased onto `origin/main` before you started;
-if `git status` shows a rebase in progress, finish it first). A lane branch is straight commits
+comes back to its session, and the worktree was rebased onto `origin/main` before you started
+only if the branch needed it — trunk history on it, or a conflict; a branch behind the trunk is
+fine: never rebase or update it just to catch up. If `git status` shows a rebase in progress,
+finish it first). A lane branch is straight commits
 on the trunk: never merge `origin/task/T-0001` or `origin/main` into it, never force-push, never
 recut it or open another branch. Push with `git push origin task/T-0001`. If that is refused as
 non-fast-forward, the rebase is why: stop there — do not merge, do not force — and write

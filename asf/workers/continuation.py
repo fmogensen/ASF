@@ -283,8 +283,8 @@ def prompt(product, run, row, round_n, review_path, text):
         body = [(CORRECTION_HEAD + correction).strip('\n')] if correction else []
         criticals, improvements = [], []
     intro = (f'This is your own session, your own worktree and your own branch `{branch}`, '
-             f'rebased onto origin/{main} before this message. Do not re-read what you wrote; '
-             f'read the findings.')
+             f'rebased onto origin/{main} before this message only if it needed it. Do not '
+             f're-read what you wrote; read the findings.')
     closing = ("Fix every C exactly as it specifies; apply the I's you agree with; never widen "
                "the scope — a change the review did not ask for buys another round. Re-run the "
                f"acceptance tests and the Gate. Commit with `git commit -s`, push `{branch}`, and "
