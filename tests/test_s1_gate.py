@@ -4,6 +4,7 @@ import unittest
 
 from asf.env import Product
 from asf.feeder import rows, tiers
+from asf.views import index_reader as ix
 
 
 def product(**extra):
@@ -73,15 +74,16 @@ class AnUnworkedS1HoldsNothing(unittest.TestCase):
                           'asf set B-0057 severity=S2 --product sample'])
 
     def test_an_undecided_s1_holds_nothing(self):
+        stage_since = '2026-01-01T00:00:00Z'
         bug = {'id': 'B-0057', 'type': 'bug', 'severity': 'S1', 'decided': False, 'state': 'New',
-              'stage_since': '2026-01-01T00:00:00Z'}
+              'stage_since': stage_since}
         cut, uncut = self._plans(bug)
         g = self._assert_holds_nothing(cut, uncut)
         self.assertEqual([e[0] for e in g.unworked], ['B-0057'])
         self.assertEqual(tiers.needs_operator(g, product()),
-                         ['NEEDS OPERATOR: B-0057 is S1 and nothing is working it — undecided '
-                          '270d — the S1 lane holds 0 of 0 tier-2 rows behind it — asf set '
-                          'B-0057 decided=true --product sample'])
+                         [f'NEEDS OPERATOR: B-0057 is S1 and nothing is working it — undecided '
+                          f'{ix.age(stage_since)} — the S1 lane holds 0 of 0 tier-2 rows behind '
+                          'it — asf set B-0057 decided=true --product sample'])
 
     def test_a_parked_s1_holds_nothing(self):
         bug = {'id': 'B-0057', 'type': 'bug', 'severity': 'S1', 'decided': True, 'state': 'New'}
