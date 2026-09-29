@@ -2,6 +2,28 @@
 
 One entry per released version, newest first.
 
+## v0.1.78 — 2026-09-29
+
+### Bugs fixed
+
+- B-0019 Health reaps a live job whose branch has no commits yet (reads "no commits" as "merged")
+
+### In progress
+
+- F-0170 32 pre-existing I3 writes: overlaps after the invariants audit; groom on no clock
+- F-0176 B-0123 loop: 'died without a result' while both logs end in a ruling; ready branch never published
+- F-0186 conventions.doc_paths: let a product declare extra document folders so approved spec branches land without a session
+- F-0187 conventions.shared_paths: lock files overlap every Task — serialise them at merge, not in the feeder
+- F-0189 Cross-product seat overcommit: two waves launch on one account at once (6 of cap 4)
+- F-0190 Deploy relevance counts test-only commits as undeployed changes
+- F-0200 Intake: an S1 card stuck on a signature question sits silently; the 'S1:' title prefix is ignored
+- F-0201 Landed spec/plan branches keep their worker worktree
+- F-0203 Lane rebases a PR onto a moved main mid-CI, restarting its required jobs (S1 #858 superseded 4x)
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.78"`
+
 ## v0.1.77 — 2026-09-29
 
 ### Features landed
