@@ -223,7 +223,7 @@ def render(root, product):
         sha, ts = _deploy_sha(product, kind)
         head.append(f"**{kind.capitalize()}** `{short(sha)}` {_local(ts)}")
     for e, f in named:
-        rel = 'relevant ' if f['paths'] else ''
+        rel = 'relevant ' if deploy.filtered(f) else ''
         behind = '?' if f['relevant'] is None else f['relevant']
         head.append(f"**{e.capitalize()}** `{short(f['deployed'])}` {behind} {rel}behind"
                     f" ({f['mode']})")
@@ -236,6 +236,9 @@ def render(root, product):
     out.append("| Target | What | State | PR |")
     out.append("|---|---|---|---|")
     targets = [('prod', prod_sha, prod_ts, [])]
+    # `within` is the target's `paths`, not its excludes (C4, PD8): `_customer_rows` has already
+    # filtered through `product.customer_paths`, so a test-only PR is not in these rows to begin
+    # with — an exclude-only target genuinely has no path restriction here.
     targets += [(e, f['deployed'], None, f['paths']) for e, f in named if not f['error']]
     rows = _check_rows(product, targets)
     if not rows:

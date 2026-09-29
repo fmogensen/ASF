@@ -319,6 +319,9 @@ def findings(product, sh=_sh):
         if source(product, t) == 'dev' and not env_applies(product, 'dev'):
             out.append((False, f'{k}.from: dev, but dev is not managed — {t} has no candidate'))
         scope = ', '.join(paths(product, t)) or 'every commit'
+        n = len(excludes(product, t))
+        if n:
+            scope += f" less {n} exclude{'' if n == 1 else 's'}"
         targets.append(f"{t} {tm} ({wf or 'no workflow'}, {scope})")
     if workflow(product, 'prod') or dm or targets:
         prod = (f"prod {mode(product, 'prod')} ({workflow(product, 'prod')}, from "
@@ -743,9 +746,17 @@ def _head(env):
     return 'deploy:' if env == 'prod' else f'deploy {env}:'
 
 
+def _scope(f):
+    """The filter in words: what a commit must touch, and that it must fall outside the
+    excludes."""
+    return ' '.join(x for x in (f"touching {', '.join(f['paths'])}" if f['paths'] else None,
+                                'outside its excludes' if f['exclude'] else None) if x)
+
+
 def _lag(product, f, env):
     """How far ``env`` is behind the trunk: the named targets say the relevant count (the
-    commits touching their ``paths``) and their mode; dev and prod keep their plain count."""
+    commits touching their ``paths`` and outside their excludes) and their mode; dev and prod
+    say it too once they carry a filter (C6), and keep their plain count when they carry none."""
     trunk, age = product.main, (f"deployed {f['age']} ago" if f['age'] else None)
     if not f['deployed']:  # no sha: nothing to count behind — say so, never "None commits"
         extra = [age, f"mode {f.get('mode')}" if is_target(env) else None]
@@ -754,10 +765,14 @@ def _lag(product, f, env):
                 + (f" ({tail})" if tail else '')
                 + (f"; `asf deploy record {env} <sha>` names it" if is_target(env) else ''))
     if not is_target(env):
+        if filtered(f):
+            all_ = f" ({f['behind']} in all)" if f['behind'] is not None else ''
+            return (f"{trunk} is {_n(f['relevant'], 'relevant ')} ahead of {env}"
+                    f" {_s(f['deployed'])}" + all_ + (f" ({age})" if age else ''))
         return (f"{trunk} is {_n(f['behind'])} ahead of {env} {_s(f['deployed'])}"
                 + (f" ({age})" if age else ''))
-    rel = 'relevant ' if f['paths'] else ''
-    extra = [f"{f['behind']} in all" if f['paths'] and f['behind'] is not None else None, age,
+    rel = 'relevant ' if filtered(f) else ''
+    extra = [f"{f['behind']} in all" if filtered(f) and f['behind'] is not None else None, age,
              f"mode {f.get('mode')}"]
     return (f"{env} {_s(f['deployed'])} is {_n(f['relevant'], rel)} behind {trunk}"
             f" ({'; '.join(x for x in extra if x)})")
@@ -770,7 +785,7 @@ def _manual(product, f, env):
     if not is_target(env):
         return (f"MANUAL: green {_s(f['candidate'])} waits on a hand dispatch of {wf}"
                 f" ({k}.mode: {f.get('mode')})")
-    rel = 'relevant ' if f['paths'] else ''
+    rel = 'relevant ' if filtered(f) else ''
     how = f'a hand dispatch of {wf}' if wf else f'a hand deploy — no {k}.workflow to dispatch'
     lag = (f"is {_n(f['relevant'], rel)} behind" if f['deployed']
            else 'runs an unknown sha')
@@ -794,10 +809,9 @@ def decide(product, f, env=None):
         return False, f"{head} {who} deploys {env} on its own (ASF observes) — {state}"
     if at_main:
         return False, f"{head} {env} {_s(f['deployed'])} is {trunk}"
-    if f['paths'] and f['relevant'] == 0:
-        return False, (f"{head} {env} {_s(f['deployed'])} has every {trunk} commit touching"
-                       f" {', '.join(f['paths'])} ({f['behind']} other commits since;"
-                       f" mode {f.get('mode')})")
+    if filtered(f) and f['relevant'] == 0:
+        return False, (f"{head} {env} {_s(f['deployed'])} has every {trunk} commit {_scope(f)}"
+                       f" ({f['behind']} other commits since; mode {f.get('mode')})")
     if f['running']:
         rid, sha = f['running']
         return False, f"{head} {wf} run {rid} for {_s(sha)} is queued or running — {lag}"
