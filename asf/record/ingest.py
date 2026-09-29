@@ -447,6 +447,43 @@ def _in_prod(child_ids, task_ev, ev, merged=None, own_sha='', reach=None):
     return bool(_merged_in_prod(child_ids, task_ev, ev, reach) if merged is None else merged)
 
 
+_MERGED_INTO = re.compile(r'\bmerged into ([Tt]-\d{4})\b')
+
+
+def orphaned_tasks(canonical, new_state):
+    """The removed Tasks whose scope no live Task carries any more: each was merged into a
+    survivor (the survivor's ``merged:`` names it, or its own ``removed: merged into T-…``), and
+    following survivors ends at a Task that is itself removed and never landed (derived neither
+    Resolved nor Closed). A groom that removes the survivor — "the deliverable is already on
+    main" — speaks for the survivor's own scope, never for the Tasks folded into it: those are
+    still the Feature's work to do. Such a Task still counts among its Feature's children, and a
+    closing parent never descends onto it."""
+    into = {}
+    for iid, rec in canonical.items():
+        meta = rec['meta']
+        if meta.get('type') != 'task':
+            continue
+        for other in meta.get('merged') or ():
+            into.setdefault(str(other).upper(), iid)
+    for iid, rec in canonical.items():
+        m = _MERGED_INTO.search(str(rec['meta'].get('removed') or ''))
+        if rec['meta'].get('type') == 'task' and m:
+            into.setdefault(iid, m.group(1).upper())
+    out = set()
+    for iid, rec in canonical.items():
+        if rec['meta'].get('type') != 'task' or not rec['meta'].get('removed') or iid not in into:
+            continue
+        cur, seen = into[iid], {iid}
+        while cur in into and cur not in seen and (canonical.get(cur) or {}).get(
+                'meta', {}).get('removed'):
+            seen.add(cur)
+            cur = into[cur]
+        survivor = (canonical.get(cur) or {}).get('meta') or {}
+        if survivor.get('removed') and new_state.get(cur) not in (closing.RESOLVED, closing.CLOSED):
+            out.add(iid)
+    return out
+
+
 def _landing_sha(child_ids, task_ev, ev):
     """The newest commit or merge that landed one of `child_ids`, for the line that names it."""
     for cid in reversed(child_ids):
@@ -531,7 +568,7 @@ class _Derived:
     own: bool = False         #: it carries a branch, a PR or a commit of its own
 
 
-def descend(canonical, new_state, closings, derived):
+def descend(canonical, new_state, closings, derived, keep=()):
     """A Feature that closed closes the children beneath it that have no evidence of their own.
 
     A child is evidence-free when its rule was `no-rule`, or its state is New with no branch, no
@@ -539,7 +576,9 @@ def descend(canonical, new_state, closings, derived):
     PR, a branch — keeps the state its own rule gave it: descent may not overrule evidence, only
     reach where there is none. One level at a time, to a fixed point (Feature → Story → Task): an
     item descent closed passes it on. A Bug is never descended onto — its own `quiet` rule is what
-    says the defect is gone. Rewrites `new_state` and `closings` in place."""
+    says the defect is gone. Nor is a Task in `keep` (:func:`orphaned_tasks`): its scope was
+    folded into a survivor that never landed, so its parent's close proves nothing for it.
+    Rewrites `new_state` and `closings` in place."""
     reached = {iid for iid, c in closings.items()
                if c.state == closing.CLOSED and canonical[iid]['meta'].get('type') == 'feature'}
     sha = {iid: derived[iid].sha for iid in reached}
@@ -550,7 +589,7 @@ def descend(canonical, new_state, closings, derived):
             type_ = rec['meta'].get('type')
             parent = rec['meta'].get('parent')
             if iid in reached or parent not in reached or type_ not in ('story', 'task') \
-                    or iid not in derived:
+                    or iid not in derived or iid in keep:
                 continue
             d = derived[iid]
             if not (d.raw.rule == closing.NO_RULE or (d.raw.state == closing.NEW and not d.own)):
@@ -808,6 +847,7 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
         stage_val[iid] = evidence.feature_stage(spec_dict, plan_dict, [], False)
 
     # ---- Features: depend on their own children's derived state
+    orphans = orphaned_tasks(canonical, new_state)
     retired = set()
     for iid, rec in canonical.items():
         if rec['meta'].get('type') != 'feature':
@@ -855,7 +895,7 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
             continue
         child_ids = [cid for cid, crec in canonical.items()
                      if crec['meta'].get('type') == 'task' and crec['meta'].get('parent') == iid
-                     and not crec['meta'].get('removed')]
+                     and (not crec['meta'].get('removed') or cid in orphans)]
         child_states = [new_state[cid] for cid in child_ids]
         all_closed = bool(child_ids) and all(s == closing.CLOSED for s in child_states)
         merged_in_prod = in_prod = False
@@ -909,7 +949,7 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
         settle(iid, 'feature', ev_obj, lines, sha=commit or _landing_sha(child_ids, task_ev, ev))
 
     # ---- Descent: a Feature that closed closes the children beneath it that nothing else names
-    descend(canonical, new_state, closings, derived)
+    descend(canonical, new_state, closings, derived, keep=orphans)
 
     # ---- Epics: purely a function of their children's derived state; no product-repo evidence
     for iid, rec in canonical.items():
