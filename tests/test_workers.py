@@ -782,9 +782,9 @@ class TestSpawn(Home):
         self.assertIn(('fix-bug-b-0001', 'ended',
                        'failed: not pushed: 1 uncommitted file(s), 0 unpushed commit(s)'), found)
         held = [d for j, w, d in found if w == 'held']
-        self.assertEqual(held, ['unpushed work: not pushed: 1 uncommitted file(s), 0 unpushed '
-                                'commit(s) — commit and push what you have, or say why not in the '
-                                'report — back to its session (round 1)'])
+        self.assertEqual(held, [lifecycle.unpushed_text(
+            'failed: not pushed: 1 uncommitted file(s), 0 unpushed commit(s)')
+            + ' — back to its session (round 1)'])
         self.assertTrue(os.path.isdir(wt))  # kept: there is work in it
         corr = step_wave_corrections(self.product)
         self.assertEqual(corr['B-0001']['kind'], 'unpushed')

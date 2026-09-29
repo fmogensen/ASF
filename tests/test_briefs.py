@@ -719,6 +719,15 @@ class DeliveryBriefTest(unittest.TestCase):
         self.assertIn('docs/plans/f-0003.md', b.text)
         self.assertEqual(b.model, 'light')
 
+    def test_a_build_brief_names_the_way_out_for_work_already_on_the_trunk(self):
+        # work landed under another commit before the card existed; five
+        # sessions reported "already on main" with no commit, each judged empty and relaunched
+        for kind in ('delivery-code', 'coder'):
+            text = self.brief(kind).text
+            self.assertIn('--allow-empty', text, kind)
+            self.assertIn('already landed in <sha>', text, kind)
+            self.assertIn('closes nothing', text, kind)
+
     def test_neither_kind_needs_an_id_range(self):
         self.assertFalse(build_mod.id_ranges_needed('delivery-plan'))
         self.assertFalse(build_mod.id_ranges_needed('delivery-code'))

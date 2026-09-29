@@ -29,4 +29,10 @@ one of your commit messages:
 A Task that proves nothing is refused at the landing and handed straight back to you, so write
 the trailer with the commit, not after it.
 
+If the Task's work is ALREADY on `origin/{main}` under another commit (landed before the card
+existed, or by another lane): verify it, run the test that covers it, then make one empty, signed
+commit — `git commit --allow-empty -s -m "task({item_id}): already landed in <sha> — verified by
+<test>"`, with the `Proves:` trailers naming the test that already proves each line — and push. A
+report that only says "already on main" closes nothing, and the lane relaunches this session.
+
 Final message: the pushed sha, the files written, the gate lines, the assumptions recorded.
