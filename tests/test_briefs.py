@@ -141,6 +141,8 @@ ROWS['spec-amend'] = row('STARVED → SPEC', 'F-0001', 'spec-amend', 'spec/F-000
                          'spec-draft, the card changed')
 ROWS['reshape'] = row('RESHAPE → PLAN', 'T-0050', 'reshape', 'plan/T-0050',
                       'groom: split asf/feeder | asf/harvest', feature_id='F-0001')
+ROWS['replan'] = row('RESHAPE → REPLAN', 'F-0001', 'replan', 'plan/F-0001-replan',
+                    'groom: move the export onto the new reader', feature_id='F-0001')
 ROWS['spec-plan'] = row('CARD → SPEC+PLAN', 'F-0001', 'spec-plan', 'plan/F-0001',
                         'decided card, size s: spec and plan in one session')
 ROWS['direct'] = row('DIRECT → BUILD', 'F-0001', 'direct', 'cloud/direct-F-0001',

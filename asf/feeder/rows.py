@@ -38,6 +38,12 @@ The row kinds::
     PLAN → CODE            a New Task of an approved plan — unless its ``writes:`` overlaps a
                            running Task's, then ``WAITS ON <task>`` (the footprint gate)
     RESHAPE → PLAN         a Task the groom's split answer marked: hold it, reshape it
+    RESHAPE → REPLAN       a Feature in build whose ``reshape:`` no replan has carried out yet
+                           (:mod:`asf.record.replan`): one ``replan`` session rewrites, adds or
+                           drops its not-yet-landed Tasks and their ``after:`` in one document the
+                           record applies once it lands; until then the Feature's code rows wait
+                           (``WAITS ON replan``). A spec/plan session to the caps
+                           (:func:`finish_first`, :func:`build_cap`)
     DELIVERY → PLAN        a delivery lead (``delivers:``) with no plan yet: one session plans
                            every member as one document (brief ``delivery-plan``)
     DELIVERY → CODE        a delivery lead whose plan is approved: one session builds every open
@@ -72,6 +78,7 @@ import re
 from asf import amendable, budget
 from asf.feeder import footprint
 from asf.groom import policy as groom_policy
+from asf.record import replan as replan_mod
 from asf.views import index_reader as ix
 
 BUG_FIX = 'BUG → FIX'
@@ -124,6 +131,11 @@ PLAN_CODE = 'PLAN → CODE'
 #: edit on the item's branch (T-0183, T-0259, T-0288, T-0301, T-0303 on 2026-09-27).
 CONSOLE_AMEND = 'CONSOLE → AMEND'
 RESHAPE = 'RESHAPE → PLAN'
+#: a Feature's pending ``reshape:`` (:mod:`asf.record.replan`): one session re-plans its open Tasks
+REPLAN = 'RESHAPE → REPLAN'
+REPLAN_KIND = 'replan'
+#: the ``waits_on`` of a code row whose Feature waits on its replan
+WAITS_REPLAN = 'replan'
 #: a delivery lead's document session (:func:`delivery_rows`) — no plan yet
 DELIVERY_PLAN = 'DELIVERY → PLAN'
 #: a delivery lead's build session — plan approved, every open member built in one branch
@@ -154,9 +166,9 @@ MIN_FEATURES_IN_BUILD = 2
 BUILD_STAGES = ('plan-approved', 'building')
 #: the rows that start a new document — or a whole direct Feature: what the finish-first cap
 #: counts and holds
-NEW_DOC_KINDS = (CARD_SPEC, STARVED_SPEC, STARVED_PLAN, SPEC_PLAN, DIRECT_BUILD)
+NEW_DOC_KINDS = (CARD_SPEC, STARVED_SPEC, STARVED_PLAN, SPEC_PLAN, DIRECT_BUILD, REPLAN)
 #: the session kinds (a run's brief kind) the finish-first cap counts as in flight
-NEW_DOC_SESSIONS = ('spec', 'plan', SPEC_PLAN_KIND, DIRECT)
+NEW_DOC_SESSIONS = ('spec', 'plan', SPEC_PLAN_KIND, DIRECT, REPLAN_KIND)
 FINISH = 'WAITS ON finish'
 #: The kinds ``candidates`` caps at ``attempt_limit`` (F-0080 §2.6, P10) — §1.1's enumeration.
 #: Not here: ``BUG → FIX`` (``bug_rows`` caps it itself), ``FIX → CORRECT`` (it carries its own
@@ -674,6 +686,18 @@ def footprint_row(item, product, c, tier, fid, branch):
                brief_kind='correct', branch=branch, reason=why, waits_on=waits)
 
 
+def landed_doc(item, product, c):
+    """True for a :data:`LANDING_GATE` correction on a spec or plan branch whose document the
+    ingest already reads on the trunk (``<doc> on origin/<trunk>``): the refusal was answered by
+    the landing itself (a product's F-0090: a settled spec hold still spoke for the Feature two
+    days after its spec and plan landed, so the Feature got no row)."""
+    if (c or {}).get('kind') != LANDING_GATE:
+        return False
+    doc = _conventions(product).branch_kind(c.get('branch') or '')
+    return doc in ('spec', 'plan') and \
+        f'{doc} on origin/{trunk_of(product)}' in (item.get('evidence') or ())
+
+
 def correction_rows(items, product, busy, corrections):
     """``corrections`` is ``{item: {kind, text, rounds, same, at, branch, ruled}}`` — a branch
     the harvest held (the row runs on that branch when it is given). ``same`` is how many holds in
@@ -689,6 +713,10 @@ def correction_rows(items, product, busy, corrections):
         if not item or not c or not c.get('text') or not is_open(item) or iid in busy:
             continue
         if item.get('blocked'):  # B-0058: a blocked item gets no correction or adjudicate row either
+            continue
+        if landed_doc(item, product, c):
+            # the document the lane refused has since landed: the hold is over, and a Feature it
+            # still spoke for would get no row at all — its plan, its replan, its Tasks
             continue
         ids.add(iid)
         f = feature_of(items, item)
@@ -960,6 +988,11 @@ def delivery_rows(items, product, busy, running, landed_shas=None):
                            waits_on=on))
         elif lid in busy:
             pass
+        elif replan_mod.pending(feature or _task_feature(items, lead)):
+            f_ = feature or _task_feature(items, lead)
+            out.append(replan_wait(Row(tier=2, kind=kind, item_id=lid, feature_id=fid,
+                                       action=LAUNCH, brief_kind=brief, branch=branch,
+                                       reason=''), f_['id']))
         elif code_stage and (amend := console_amend_row(
                 product, lid, fid, _delivery_union(items, lead), branch, brief)):
             out.append(amend)
@@ -1085,8 +1118,62 @@ def _one_feature_rows(items, product, f, busy, running, landed_shas, occupancy):
                             else 'spec approved, no plan', *waits))
     elif word in ('plan-approved', 'building') and plan_carrier(f):
         out.append(land_plan_row(f, product, *waits))
+    elif word in ('plan-approved', 'building') and replan_mod.pending(f):
+        # the Feature's plan is being replaced: its Tasks' rows wait on the replan, and claim
+        # no footprint (a copy of ``running``) — the replan may move or drop every one of them
+        out.append(replan_row(f, product, occupancy))
+        out.extend(replan_wait(r, fid) if r.launches else r
+                   for r in task_rows(items, product, f, busy, copy.copy(running), landed_shas))
     elif word in ('plan-approved', 'building'):
         out.extend(task_rows(items, product, f, busy, running, landed_shas))
+    return out
+
+
+def replan_branch(product, fid):
+    """The replan's branch: the plan lane, under a name that is not the Feature's own plan
+    branch — the ingest reads ``<plan prefix><id>`` as the Feature's plan, and a replan is not
+    that document (:data:`asf.record.replan.SUBDIR`)."""
+    return branch_for(product, 'plan', f'{fid}-replan')
+
+
+def replan_row(feature, product, occupancy):
+    """A Feature's pending ``reshape:`` (:func:`asf.record.replan.pending`): RESHAPE → REPLAN,
+    one ``replan`` session on :func:`replan_branch` with the reshape text as its binding input —
+    or PUSHED → LAND while that branch waits on the lane. The record applies the landed replan
+    (:func:`asf.record.replan.apply_replans`) and records ``reshape_applied``, which ends it."""
+    fid = feature['id']
+    branch = replan_branch(product, fid)
+    waiting = _waiting_doc(fid, 'plan', product, occupancy, branch)
+    if waiting:
+        return Row(tier=2, kind=PUSHED_LAND, item_id=fid, feature_id=fid,
+                   action=f"{WAITS_LANDING}: {waiting}", brief_kind=REPLAN_KIND, branch=branch,
+                   reason=waiting)
+    return Row(tier=2, kind=REPLAN, item_id=fid, feature_id=fid, action=LAUNCH,
+               brief_kind=REPLAN_KIND, branch=branch, reason=f"groom: {feature['reshape']}")
+
+
+def replan_wait(row, fid):
+    """``row`` as the non-launching row of a Feature whose replan is pending."""
+    return dataclasses.replace(row, action=f'WAITS ON replan {fid}', waits_on=WAITS_REPLAN,
+                               reason=f'{fid} is being re-planned (reshape:): its Tasks wait for '
+                                      f'the replan to land')
+
+
+#: the launching rows a pending replan holds: work cut from the plan the replan replaces
+REPLAN_HELD = (PLAN_CODE, RESHAPE, DELIVERY_PLAN, DELIVERY_CODE, CONSOLE_AMEND)
+
+
+def hold_replanning(rows, items):
+    """Every launching :data:`REPLAN_HELD` row of a Feature whose ``reshape:`` is pending
+    becomes ``WAITS ON replan <fid>`` — a correction's resume of a delivery included: it would
+    build the plan the replan replaces. A review, a landing, a rebase and the replan itself are
+    never held: work already pushed finishes."""
+    out = []
+    for r in rows:
+        f = items.get(r.feature_id) or {}
+        if r.launches and r.kind in REPLAN_HELD and replan_mod.pending(f):
+            r = replan_wait(r, f['id'])
+        out.append(r)
     return out
 
 
@@ -1277,7 +1364,7 @@ def undecided_rows(items, product, busy, limit=None):
 
 
 KIND_ORDER = {STALEMATE: 0, CONFLICT: 1, STALE: 2, GROOM_ADJUDICATE: 2, GROOM_CLERK: 2,
-              RESHAPE: 3, DELIVERY_PLAN: 4, DELIVERY_CODE: 4}
+              RESHAPE: 3, REPLAN: 3, DELIVERY_PLAN: 4, DELIVERY_CODE: 4}
 
 
 def _token(line):
@@ -1417,7 +1504,7 @@ def hold_unlanded(rows, items, landed_shas=None):
 #: the rows ``feeder.hold`` holds, per class it names: new work only — a review, a correction,
 #: an adjudicate, the groom and landing are never held
 HELD_KINDS = {'features': (CARD_SPEC, STARVED_SPEC, STARVED_PLAN, PLAN_CODE, SPEC_PLAN,
-                          DIRECT_BUILD),
+                          DIRECT_BUILD, REPLAN),
               'bugs': (BUG_FIX,)}
 HOLD = 'WAITS ON hold'
 #: the ``waits_on`` of a row an Epic's spent budget holds (F-0052)
@@ -1550,6 +1637,7 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
     spoken_for = {r.item_id for r in rows}
     rows += [r for r in bug_waits if r.item_id not in spoken_for]
     rows = hold_unlanded(rows, items, landed_shas)
+    rows = hold_replanning(rows, items)
     rows = hold_classes(rows, product)
     rows = over_budget_epics(rows, items)          # F-0052
     cap, attempts = attempt_limit(product), attempts or {}

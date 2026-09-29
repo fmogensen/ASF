@@ -229,8 +229,8 @@ class RuleTests(Home):
 
     def test_the_fences(self):
         self.assertEqual(continuation.ANSWERING, ('correct', 'spec', 'spec-amend', 'plan', 'delivery-code'))
-        self.assertEqual(continuation.NEVER, ('adjudicate', 'review', 'groom', 'reshape', 'rebase',
-                                              'close', 'fix-bug', 'task'))
+        self.assertEqual(continuation.NEVER, ('adjudicate', 'review', 'groom', 'reshape', 'replan',
+                                              'rebase', 'close', 'fix-bug', 'task'))
         self.assertEqual(continuation.DEFAULT_HEARTBEAT_MIN, 6)
 
     def target(self, row, stage='spec-review r1', run=None):

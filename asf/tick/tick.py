@@ -106,6 +106,10 @@ def run_step0(root, product, fresh=False):
             mint_plan_tasks(root, product, evidence.load(product=product))
         # open Tasks minted before the minter wrote order: the plan's order lands as `after:`
         from asf.record import plan_order
+        # a Feature's reshape: its landed replan rewrites, adds and drops its open Tasks
+        from asf.record import replan
+        with timed('replan'):
+            replan.apply_replans(root, product, plan_order.trunk_reader(product))
         with timed('plan-order'):
             stage.guarded(root, 'plan-order', plan_order.backfill,
                           (plan_order.trunk_reader(product),), product=product)

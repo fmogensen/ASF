@@ -48,7 +48,7 @@ CHEAP = 'cheap'
 
 KINDS = ('spec', 'spec-amend', 'plan', 'coder', 'review', 'fixer', 'rebase', 'close', 'adjudicate',
          'fix-bug', 'correct', 'groom', 'groom-clerk', 'reshape', 'spec-plan', 'direct',
-         'delivery-plan', 'delivery-code')
+         'delivery-plan', 'delivery-code', 'replan')
 KIND_ALIASES = {'task': 'coder', 'code': 'coder', 'fix': 'fixer', 'bug': 'fix-bug',
                 'fix_bug': 'fix-bug', 'spec_plan': 'spec-plan'}
 #: The class of an item, for picking its model within a kind: a Bug's severity, else its type.
@@ -71,6 +71,7 @@ MODEL_TABLE = {
     'groom':      {'default': HEAVY},
     'groom-clerk': {'default': CHEAP},
     'reshape':    {'default': HEAVY},
+    'replan':     {'default': HEAVY},
     'review':     {'default': HEAVY, 'S1': HEAVY, 'S2': LIGHT, 'S3': LIGHT, 'task': LIGHT},
     'adjudicate': {'default': LIGHT, 'S1': HEAVY, 'S2': LIGHT, 'S3': LIGHT, 'task': LIGHT},
     'correct':    {'default': LIGHT, 'S1': HEAVY, 'S2': LIGHT, 'S3': LIGHT, 'task': LIGHT},
@@ -408,6 +409,36 @@ def context(product, row, kind, facts):
         'groom_file': getattr(row, 'groom_file', '') or '—',
         'answers_file': getattr(row, 'answers_file', '') or '—',
         'open_questions': '\n'.join(getattr(row, 'open_questions', ()) or ()) or '(none)',
+        **replan_context(product, feature, facts.get('items') or {}),
+    }
+
+
+def replan_context(product, feature, items):
+    """What a ``replan`` brief names: the Feature's ``reshape:`` text (the binding input), its
+    digest, the replan's path (:func:`asf.record.replan.doc_path`), and one line per Task of the
+    Feature — the landed ones kept as they are, the open ones the replan may rewrite or drop.
+    Every key renders for any brief (a missing key is an error), empty-worded when the brief's
+    Feature carries no ``reshape:``."""
+    from asf.record import replan as replan_mod
+    feature = feature or {}
+    how = ' '.join(str(feature.get('reshape') or '').split())
+    d = replan_mod.digest(how) if how else ''
+    plans_dir = preamble_mod.conventions(product).plans_dir
+    fid = feature.get('id') or ''
+    lines = []
+    for t in sorted(ix.feature_tasks(items, feature) if fid else (), key=lambda v: v['id']):
+        done = t.get('state') in feeder_rows.DONE_STATES
+        after = ', '.join(t.get('after') or ()) or 'none'
+        lead = (f"; delivers {', '.join(t['delivers'])}" if t.get('delivers') else
+                f"; delivered by {t['delivered_by']}" if t.get('delivered_by') else '')
+        lines.append(f"- {t['id']} [{'landed — keep' if done else t.get('state') or 'New'}] "
+                     f"{' '.join(str(t.get('title') or '').split())}; writes: "
+                     f"{', '.join(t.get('writes') or ()) or '(none)'}; after: {after}{lead}")
+    return {
+        'reshape': how or '(none)',
+        'reshape_digest': d or '(none)',
+        'replan_path': replan_mod.doc_path(plans_dir, fid, d) if fid and d else '(none)',
+        'feature_tasks': '\n'.join(lines) or '(none)',
     }
 
 

@@ -43,7 +43,8 @@ from asf.workers.stall import CORRECTION_HEAD
 #: that was building it — its conversation holds the plan, the Tasks done and the ones left.
 ANSWERING = ('correct', 'spec', 'spec-amend', 'plan', 'delivery-code')
 #: Never continued, whatever the branch says (§1.4).
-NEVER = ('adjudicate', 'review', 'groom', 'reshape', 'rebase', 'close', 'fix-bug', 'task')
+NEVER = ('adjudicate', 'review', 'groom', 'reshape', 'replan', 'rebase', 'close', 'fix-bug',
+         'task')
 
 DEFAULT_HEARTBEAT_MIN = 6
 
