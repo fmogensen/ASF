@@ -559,8 +559,9 @@ class NamedTargets(unittest.TestCase):
         self.assertTrue(any(not ok and 'deploy_sha.targets.site' in d for ok, d in found))
         self.assertFalse(deploy.env_applies(p, 'site'))
         ok = deploy.findings(_site())
-        self.assertTrue(any(k and 'site manual (site-deploy.yml, apps/site/**)' in d
-                            for k, d in ok))
+        self.assertTrue(any(
+            k and 'site manual (site-deploy.yml, apps/site/** less 7 excludes)' in d
+            for k, d in ok))
 
     def test_a_target_workflow_is_touch_production(self):
         from asf import approvals
@@ -755,6 +756,86 @@ class RelevanceAgainstGit(unittest.TestCase):
         self.assertFalse(go)
         self.assertIn('has every main commit touching apps/site/**', line)
         self.assertNotIn('dispatching', line)
+
+
+class RelevanceLines(unittest.TestCase):
+    """The words follow the one predicate (C5): a filtered environment says why it is at zero,
+    dev and prod say ``relevant`` when they carry a filter and nothing at all when they do not
+    (C6), and the findings line and ``asf prod``'s header read ``filtered(f)`` too."""
+
+    def test_a_filtered_zero_names_the_excludes_and_the_argv_carries_them_in_order(self):
+        sh = FakeSh([_run(PROD)], [_run(GREEN)], site=[_run(SITE)], behind='9', relevant='0')
+        sent, lines = _site_tick(_site(), sh)
+        self.assertEqual(sent, {})
+        self.assertIn('has every main commit touching apps/site/** outside its excludes',
+                      lines[0])
+        self.assertNotIn('dispatching', lines[0])
+        rel = [c for c in sh.calls if 'rev-list' in c and '--' in c]
+        argv = rel[0]
+        got = argv[argv.index('--') + 1:]
+        self.assertEqual(got, [':(glob)apps/site/**']
+                         + [f':(exclude,glob){g}' for g in deploy.DEFAULT_EXCLUDES])
+
+    def test_exclude_defaults_false_narrows_the_argv_and_the_findings_line(self):
+        p = _site(exclude=['docs/**'], exclude_defaults=False)
+        sh = FakeSh([_run(PROD)], [_run(GREEN)], site=[_run(SITE)], behind='9', relevant='0')
+        _site_tick(p, sh)
+        rel = [c for c in sh.calls if 'rev-list' in c and '--' in c]
+        argv = rel[0]
+        got = argv[argv.index('--') + 1:]
+        self.assertEqual(got, [':(glob)apps/site/**', ':(exclude,glob)docs/**'])
+        found = deploy.findings(p)
+        self.assertTrue(any(
+            k and 'site manual (site-deploy.yml, apps/site/** less 1 exclude)' in d
+            for k, d in found))
+
+    def test_a_nonzero_relevant_count_keeps_todays_sentence(self):
+        sh = FakeSh([_run(PROD)], [_run(GREEN)], site=[_run(SITE)], behind='237', relevant='15')
+        sent, lines = _site_tick(_site(), sh)
+        self.assertIn('15 relevant commits behind main (237 in all', lines[0])
+
+    def test_prod_with_a_filter_says_relevant_and_ahead_of(self):
+        p = _modes(prod='manual', prod_extra={'paths': ['apps/site/**']})
+        sh = FakeSh([_run(PROD)], [_run(GREEN)], behind='9', relevant='3')
+        lines = []
+        sent = deploy.tick(p, out=lines.append, sh=sh)
+        self.assertEqual(sent, {})
+        self.assertIn('main is 3 relevant commits ahead of prod', lines[0])
+        self.assertIn('(9 in all)', lines[0])
+
+    def test_prod_with_a_filter_stops_at_zero(self):
+        p = _modes(prod='manual', prod_extra={'paths': ['apps/site/**']})
+        sh = FakeSh([_run(PROD)], [_run(GREEN)], behind='9', relevant='0')
+        lines = []
+        sent = deploy.tick(p, out=lines.append, sh=sh)
+        self.assertEqual(sent, {})
+        self.assertIn('has every main commit touching apps/site/** outside its excludes',
+                      lines[0])
+
+    def test_prod_with_neither_key_is_byte_for_byte_unchanged(self):
+        p = _modes(prod='manual')
+        f = deploy._blank(p, 'prod')
+        f['deployed'], f['behind'] = PROD, 9
+        self.assertEqual(deploy._lag(p, f, 'prod'), f"main is 9 commits ahead of prod `{PROD[:9]}`")
+
+    def test_an_exclude_only_target_reads_relevant_in_asf_prods_header(self):
+        from asf.views import prod as prod_view
+        facts = {'deployed': SITE, 'paths': [], 'exclude': ['docs/**'], 'relevant': 1,
+                 'mode': 'manual', 'error': None}
+        product = types.SimpleNamespace(
+            repo_dir='.', main='main', repo_slug='o/r', customer_paths=[],
+            deploy_sha={'prod': {'source': 'vercel'}})
+        with mock.patch.object(prod_view, '_sh', lambda *a, **k: 'abc123456'), \
+                mock.patch.object(prod_view, '_deploy_sha', return_value=('aaa1', None)), \
+                mock.patch.object(deploy, 'applies', return_value=True), \
+                mock.patch.object(deploy, 'states', return_value=[('site', facts)]), \
+                mock.patch.object(deploy, 'view_line', return_value='deploy site: MANUAL'):
+            out = prod_view.render(None, product)
+        self.assertIn(f'**Site** `{SITE[:9]}` 1 relevant behind (manual)', out)
+
+    def test_filtered_never_raises_on_a_bare_or_paths_only_dict(self):
+        self.assertFalse(deploy.filtered({}))
+        self.assertTrue(deploy.filtered({'paths': ['x']}))
 
 
 class Validation(unittest.TestCase):
