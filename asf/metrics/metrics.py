@@ -30,7 +30,7 @@ import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
-from asf import env, gitpush
+from asf import env, gitpush, mutation_guard
 from asf import tokens
 from asf.conventions import (DEFAULT_CHANGELOG_FILE, DEFAULT_RELEASE_INSTALL, DEFAULT_RELEASE_MIN_INTERVAL,
                              Conventions)
@@ -800,7 +800,14 @@ GH_PATH_PREFIX = '/opt/homebrew/bin:'
 
 def gh(args, timeout=120, quiet=False):
     """`gh …` → stdout text, or None when it failed (logged unless `quiet`). The one place the
-    rollup and the backfill call gh."""
+    rollup and the backfill call gh. A dry run in progress (:mod:`asf.mutation_guard`) refuses a
+    mutating call (`release create`, …) instead of running it — the same backstop
+    :func:`asf.harvest.harvest._gh` and :meth:`asf.ci_queue.GitHubSource.gh_try` give their own
+    callers; a read (`release view`, the backfill's listings) is never touched."""
+    if mutation_guard.is_active() and mutation_guard.is_mutating_gh(args):
+        if not quiet:
+            print(mutation_guard.would_line('gh', args), file=sys.stderr)
+        return None
     env_vars = {**os.environ, 'PATH': GH_PATH_PREFIX + os.environ.get('PATH', '')}
     try:
         p = subprocess.run(['gh'] + list(args), capture_output=True, text=True, timeout=timeout, env=env_vars)

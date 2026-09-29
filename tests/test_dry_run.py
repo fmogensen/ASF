@@ -93,6 +93,54 @@ class DryRunReadyFF(DryRun, LaneCase):
     landing = FF
 
 
+class NeverReconcilesAHumanMerge(LaneCase):
+    """2026-09-29 regression: T-0001's PR is merged by hand, outside the factory (as
+    ``test_r12_human_merge_is_landed_not_foreign`` does) — its branch kept, since no
+    ``--delete-branch`` was asked for — and ``asf tick --dry-run`` runs before any real tick
+    reconciles it. A live tick's lane pass would record the merge as a landing and delete the
+    now-superseded branch (:meth:`asf.harvest.lane.Lane.enter_merged`); a dry run must not.
+
+    ``asf.tick.step_wave.lane_pass`` used to build its :class:`~asf.harvest.lane.Lane` with
+    ``dry_run`` hardcoded ``False`` whatever ``asf.tick.dry_run.run`` asked for, so this exact
+    reconciliation happened for real — deleting an already-landed branch
+    (``ci_queue``'s own pass, run at the end of the same lane pass, is the other half of that
+    incident: not reproduced here, since the sample product carries no CI pool). Every ``gh``
+    call the fake logs (:meth:`Factory.gh_calls`) and the branch's presence on the real origin
+    are the check: nothing here may move even once."""
+
+    landing = PR
+    stage = 'planned'
+    start = 'ready'
+
+    def test_dry_run_never_reconciles_an_external_merge(self):
+        from asf import env
+        from asf.tick import dry_run
+        f = self.f
+        self.until(lambda: f.prs('feature/T-0001'), 3, 'the PR is opened')
+        number = f.prs('feature/T-0001')[0]['number']
+        p = f.gh('pr', 'merge', str(number), '-R', 'example/sample', '--squash')  # branch kept
+        self.assertEqual(p.returncode, 0, p.stderr)
+        before_calls = len(f.gh_calls())
+        trunk_before = f.trunk_log()
+
+        lines = []
+        with f.seams():
+            product = env.load_product('sample')
+            rc = dry_run.run(product, out=lines.append)
+
+        self.assertEqual(rc, 0, lines)
+        self.assertTrue(f.on_origin('feature/T-0001'),
+                        'the dry run deleted a branch merged by hand, outside the factory')
+        self.assertFalse(self.harvested('T-0001'),
+                         'the dry run recorded the human merge as a real landing')
+        self.assertEqual(f.trunk_log(), trunk_before, 'the dry run pushed onto the trunk')
+        new_calls = [c['argv'] for c in f.gh_calls()[before_calls:]]
+        mutating = [a for a in new_calls
+                   if tuple(a[:2]) in (('pr', 'merge'), ('pr', 'close'), ('run', 'cancel'),
+                                       ('run', 'rerun'), ('workflow', 'run'))]
+        self.assertEqual(mutating, [], f'the dry run made a mutating gh call: {mutating}')
+
+
 class DryRunHostPressure(unittest.TestCase):
     """Under host pressure the dry run's wave says what a live tick would: every launching row
     waits, held by the host guard, and the section ends on ``wave: held: …`` — nothing launched."""

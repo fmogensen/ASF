@@ -263,7 +263,7 @@ import re
 import subprocess
 import time
 
-from asf import ci_pool, env
+from asf import ci_pool, env, mutation_guard
 
 QUEUE_FILE = 'ci-queue.json'
 KINDS = ('pr', 'trunk', 'batch', 'deploy')
@@ -852,7 +852,12 @@ class GitHubSource(Source):
         """``(stdout, '')``, or ``(None, why)`` — ``why`` the last line ``gh`` printed (its
         stderr: GitHub's own reason, e.g. ``run 1 cannot be rerun; …``), so a refused write is
         logged with its cause, never a bare "refused" (2026-09-29, a product: 944 passes of
-        one re-run refused with no reason read)."""
+        one re-run refused with no reason read). A dry run in progress
+        (:mod:`asf.mutation_guard`) refuses a mutating call (``run cancel``, ``run rerun``,
+        ``workflow run`` …) itself, the backstop for a caller — this queue's own pass included —
+        that never threaded its own ``dry_run`` flag this far; a read is never touched."""
+        if mutation_guard.is_active() and mutation_guard.is_mutating_gh(args):
+            return None, mutation_guard.would_line('gh', args)
         try:
             p = self._run(['gh', *args], capture_output=True, text=True, timeout=GH_TIMEOUT_S,
                           env=ci_pool._gh_env(self.product))

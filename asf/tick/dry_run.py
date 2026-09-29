@@ -13,13 +13,25 @@ real one, and nothing pushes it anywhere.
 Nothing is pushed (the record step's diff is read, never committed —
 :func:`asf.tick.shadow.commit_local`/:func:`asf.tick.shadow.push` are never called), nothing is
 written to GitHub or the trunk (a spec/plan's ``land_spec.adopt`` only stages the record clone's
-working tree, never committed here; the lane's own ``dry_run=True`` turns every PR open, review
-wait and merge into one ``lane: DRY …``/``DRY: would …`` line instead of the host call —
-:class:`asf.harvest.lane.Lane`, reused unmodified: :func:`asf.harvest.harvest.run_product_harvest`
-is exactly what the live harvest runs, on the same throwaway ``git worktree`` copy of the trunk
-its gate always builds — the gate's own "dry runs in-process on copies") and nothing is launched
-(the wave's rows are planned — :func:`asf.feeder.rows.plan_rows`, the same call
-:mod:`asf.tick.step_wave` makes — and printed, never handed to :mod:`asf.workers.wave`).
+working tree, never committed here; ``step_wave.lane_pass(ctx, out, dry_run=True)`` threads this
+call's own ``dry_run`` onto the :class:`asf.harvest.lane.Lane` it builds, which turns every PR
+open, review wait, merge, archive and delete into one ``lane: DRY …``/``DRY: would …`` line
+instead of the host or push call, and the ``ci_queue`` pass the lane's own ``lane_pass`` runs at
+its end the same way; :func:`asf.harvest.harvest.run_product_harvest` is exactly what the live
+harvest runs, on the same throwaway ``git worktree`` copy of the trunk its gate always builds —
+the gate's own "dry runs in-process on copies") and nothing is launched (the wave's rows are
+planned — :func:`asf.feeder.rows.plan_rows`, the same call :mod:`asf.tick.step_wave` makes — and
+printed, never handed to :mod:`asf.workers.wave`).
+
+Every one of those ``dry_run`` threads is also backstopped structurally
+(:mod:`asf.mutation_guard`, on for this whole function): a git push
+(:func:`asf.gitpush.push`) and a mutating ``gh`` call (:func:`asf.harvest.harvest._gh`,
+:meth:`asf.ci_queue.GitHubSource.gh_try`, :func:`asf.metrics.metrics.gh`) refuse on their own
+while it is on, whatever ``dry_run`` value the step that called them carried — so a step that
+forgets to thread its own flag this far (2026-09-29: ``step_wave.lane_pass`` once built its
+``Lane`` with ``dry_run`` hardcoded ``False``, and ``asf tick --dry-run`` deleted two
+already-landed branches and let the ci-queue pass cancel four queued runs) still cannot write
+anything real.
 
 Prints, in order:
 
@@ -145,14 +157,21 @@ def _wave_rows(product, root, out):
 
 def run(product, fresh=False, out=print):
     """``asf tick --dry-run``. Returns 0; a step's own failure is one line, same as a live tick —
-    never worth losing the rest of the rehearsal over."""
+    never worth losing the rest of the rehearsal over.
+
+    :func:`asf.mutation_guard.active` is on for the whole rehearsal: every ``git push`` and every
+    mutating ``gh`` call — however deep the call, and whether or not the step that made it
+    remembered its own ``dry_run`` flag — refuses instead of running, the backstop behind each
+    step's own ``dry_run`` threading (2026-09-29 plan §6 regression: a missed thread here deleted
+    two already-landed branches and let the ci-queue pass cancel four queued runs)."""
+    from asf import mutation_guard
     from asf.harvest import harvest as harvest_mod
     from asf.tick import step_wave
     from asf.tick.tick import Context, run_step0
 
     tmp, copy_path = _copy_state(product)
     try:
-        with _StateDirOverride(product.name, copy_path):
+        with mutation_guard.active(), _StateDirOverride(product.name, copy_path):
             ctx = Context(product, fresh=fresh)
             try:
                 root = ctx.record_root()
@@ -164,7 +183,7 @@ def run(product, fresh=False, out=print):
             _record_diff(root, out)
 
             out('== lane')
-            step_wave.lane_pass(ctx, out)  # land_spec.adopt + the code lane, in-process (R2)
+            step_wave.lane_pass(ctx, out, dry_run=True)  # land_spec.adopt + the code lane (R2)
 
             _wave_rows(product, root, out)
 

@@ -21,7 +21,7 @@ import signal
 import subprocess
 import sys
 
-from asf import hermetic
+from asf import hermetic, mutation_guard
 from asf.conventions import DEFAULT_PUSH_TIMEOUT_S
 
 #: The returncode a push killed on its timeout reports (the ``timeout(1)`` convention).
@@ -47,8 +47,15 @@ def push(args, cwd, refs_only=False, timeout=None, env=None, log=None):
     ``refs_only``: the push carries no new code — ``--no-verify``, the product's hook skipped.
     ``timeout``: seconds (default :func:`push_timeout`); past it the push's process group is
     killed, ``returncode`` is :data:`TIMED_OUT`, ``stderr`` names the refs, and a line goes to
-    ``log`` (default stderr)."""
+    ``log`` (default stderr). A dry run in progress (:mod:`asf.mutation_guard`) refuses instead of
+    running ``git`` at all — the backstop for a caller that never threaded its own ``dry_run``
+    flag this far (2026-09-29): a non-zero, non-:data:`TIMED_OUT` ``returncode`` and ``stderr``
+    naming why, exactly the shape a refused push already is to every caller here."""
     cmd = push_args(args, refs_only)
+    if mutation_guard.is_active():
+        line = mutation_guard.would_line('git', cmd)
+        (log or (lambda s: print(s, file=sys.stderr)))(line)
+        return subprocess.CompletedProcess(cmd, 1, '', line)
     limit = timeout if timeout is not None else push_timeout()
     run_env = hermetic.git_env(env)
     p = subprocess.Popen(cmd, cwd=cwd, env=run_env, stdin=subprocess.DEVNULL,
