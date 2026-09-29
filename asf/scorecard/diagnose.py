@@ -65,6 +65,92 @@ def _sig_class(sig):
     return re.sub(r'\s+', ' ', re.sub(r'\d+', 'N', s)).strip()[:80] or 'unknown'
 
 
+#: The `failed: not pushed` cause's sub-causes, in the order its detail line prints them —
+#: disjoint by construction and exhaustive (PD2: a fifth, `never pushed`, for the branch origin
+#: never held; a sixth, `other`, for an `end_reason` the count regex below cannot read), read off
+#: evidence already recorded on :class:`asf.improve.measure.Run` and computed nowhere else.
+NOT_PUSHED_SUBS = ('uncommitted', 'unpushed', 'never pushed', 'refused', 'no worktree', 'other')
+#: The `refused` sub-cause's own split, in the order its parenthesised clause prints them —
+#: `asf.workers.lifecycle`'s pure text classifiers over `Run.publish_refused`, read as evidence
+#: and computed nowhere else.
+REFUSAL_SUBS = ('hook refused', 'rebase conflict', 'stale head', 'network', 'refused')
+#: §1.3's frozen string, the only thing `sub_cause` reads off `Run.end_reason`: frozen for the
+#: length of this Feature, and the T6 fence is what says so.
+_COUNT_RE = re.compile(r'(\d+) uncommitted file\(s\), (\d+) unpushed commit\(s\)')
+_SUB_PHRASES = {
+    'uncommitted': 'left files uncommitted',
+    'unpushed': 'committed and never pushed',
+    'never pushed': 'never pushed the branch at all',
+    'no worktree': 'had no worktree left to publish',
+    'other': 'ended for a reason this line cannot read',
+}
+
+
+def sub_cause(run):
+    """One ``run`` to one name of :data:`NOT_PUSHED_SUBS` (or, under ``refused``, of
+    :data:`REFUSAL_SUBS`) — pure, in this precedence, which is what makes the buckets disjoint and
+    the sub-cause line sum to the count above it:
+
+    1. a non-empty ``run.publish_refused`` — the factory tried and was refused, split by
+       ``lifecycle``'s own classifiers.
+    2. a falsy ``run.worktree`` — nothing was left to publish.
+    3. the ``end_reason``'s uncommitted count above zero.
+    4. uncommitted zero, unpushed count above zero.
+    5. both zero — the branch origin never held (PD2).
+    6. an ``end_reason`` the count regex cannot read.
+    """
+    if run.publish_refused:
+        from asf.workers import lifecycle
+        text = run.publish_refused
+        if lifecycle.rebase_conflict(text):
+            return 'rebase conflict'
+        if lifecycle.stale_head(text):
+            return 'stale head'
+        failure = lifecycle.push_failure(text)
+        if failure == lifecycle.HOOK_REFUSED:
+            return 'hook refused'
+        if failure == lifecycle.NETWORK_ERROR:
+            return 'network'
+        return 'refused'
+    if not run.worktree:
+        return 'no worktree'
+    m = _COUNT_RE.search(run.end_reason or '')
+    if not m:
+        return 'other'
+    uncommitted, unpushed = int(m.group(1)), int(m.group(2))
+    if uncommitted:
+        return 'uncommitted'
+    if unpushed:
+        return 'unpushed'
+    return 'never pushed'
+
+
+def sub_cause_line(subs, total):
+    """§2.6's sentence from a ``{name: int}`` dict (:data:`rank`'s failure fold's ``sub`` key):
+    ``of the 23 runs: 9 left files uncommitted, 6 committed and never pushed, 5 the factory could
+    not publish (4 hook refused, 1 rebase conflict), 3 had no worktree left to publish.`` A
+    sub-cause no run has is absent, never printed as zero; the refusal split is parenthesised
+    inside its own clause. ``''`` when no run is in the class. Pure."""
+    if not subs or not total:
+        return ''
+    parts = []
+    for name in NOT_PUSHED_SUBS:
+        if name == 'refused':
+            n = sum(subs.get(s, 0) for s in REFUSAL_SUBS)
+            if not n:
+                continue
+            inner = ', '.join(f'{subs[s]} {s}' for s in REFUSAL_SUBS if subs.get(s))
+            parts.append(f'{n} the factory could not publish ({inner})')
+            continue
+        n = subs.get(name, 0)
+        if not n:
+            continue
+        parts.append(f'{n} {_SUB_PHRASES[name]}')
+    if not parts:
+        return ''
+    return f'of the {total} runs: ' + ', '.join(parts) + '.'
+
+
 def rank(facts, start, end):
     """``{'usd', 'hours', 'by_kind', 'by_failure', 'by_ci_job', 'by_feature'}`` over ``[start, end)``;
     each ``by_*`` a list of dicts, largest first."""
@@ -89,10 +175,13 @@ def rank(facts, start, end):
         if not score.is_dead(r) or not score.in_window(r.ended, start, end):
             continue
         k = score.failure_class(r.end_reason)
-        c = fails.setdefault(k, {'name': k, 'runs': 0, 'usd': 0.0, 'minutes': 0.0})
+        c = fails.setdefault(k, {'name': k, 'runs': 0, 'usd': 0.0, 'minutes': 0.0, 'sub': {}})
         c['runs'] += 1
         c['usd'] = round(c['usd'] + (r.usd or 0.0), 2)
         c['minutes'] = round(c['minutes'] + r.minutes, 1)
+        if k == 'failed: not pushed':
+            sub = sub_cause(r)
+            c['sub'][sub] = c['sub'].get(sub, 0) + 1
 
     jobs = {}
     for run in facts.ci:
@@ -188,12 +277,16 @@ def causes(facts, start, end, limits=None):
     for c in r['by_failure']:
         per_week = round(c['runs'] / weeks, 2)
         if per_week > t['failure_per_week']:
+            detail = (f"{c['runs']} runs ended '{c['name']}' without landing over {days} days, "
+                      f"${c['usd']:,.2f} and {c['minutes'] / 60:.1f} h spent on them; threshold "
+                      f"{t['failure_per_week']:g}/week.")
+            if c['name'] == 'failed: not pushed':
+                line = sub_cause_line(c['sub'], c['runs'])
+                if line:
+                    detail += f' {line}'
             out.append(Cause(
                 f"failure:{c['name']}", FACTORY, per_week, t['failure_per_week'], 'runs/week',
-                f"Sessions die with '{c['name']}' {per_week:g} times a week",
-                f"{c['runs']} runs ended '{c['name']}' without landing over {days} days, "
-                f"${c['usd']:,.2f} and {c['minutes'] / 60:.1f} h spent on them; threshold "
-                f"{t['failure_per_week']:g}/week."))
+                f"Sessions die with '{c['name']}' {per_week:g} times a week", detail))
     for c in r['by_ci_job']:
         per_week = round(c['red'] / weeks, 2)
         if c['red'] and per_week > t['ci_red_per_week']:
