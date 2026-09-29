@@ -46,6 +46,14 @@ make the target behind only by the trunk commits that touch them. Its deployed s
 successful run of its ``workflow``, or, with ``source: vercel`` (``project``, ``scope``), the
 newest READY production deployment's commit. The rules above hold for every target.
 
+A ``paths``- or ``exclude``-scoped environment's count is also outside its excludes: seven
+:data:`DEFAULT_EXCLUDES` globs (test, spec, e2e, test-config and Markdown files a deploy never
+ships) added to the environment's own ``exclude:`` list unless it sets ``exclude_defaults:
+false``, in which case ``exclude:`` alone decides. ``paths``, ``exclude`` and
+``exclude_defaults`` read the same under ``deploy_sha.dev`` and ``deploy_sha.prod`` as under a
+named target. An environment naming neither ``paths:`` nor ``exclude:`` has no filter at all —
+the defaults never engage on their own.
+
 **Customer content.** Before any dispatch the candidate's tree is scanned under
 ``conventions.customer_content.paths`` (:func:`marker_refusal`): a forbidden marker there — an
 internal note, a TODO, a placeholder — refuses the dispatch with one loud line, every tick, until
@@ -343,18 +351,29 @@ def _green(run):
     return run.get('status') == 'completed' and run.get('conclusion') == 'success'
 
 
-def pathspecs(globs):
-    """``paths`` globs as git pathspecs (``**`` crosses ``/``; a trailing ``/`` is a directory)."""
-    return [':(glob)' + (g + '**' if g.endswith('/') else g) for g in globs]
+def _dir(g):
+    """A trailing-``/`` glob gains ``**`` so it matches the directory (``paths`` and ``exclude``
+    share this rule)."""
+    return g + '**' if g.endswith('/') else g
 
 
-def _behind(product, base, sh, globs=None):
-    """Trunk commits ``base`` lacks — only those touching ``globs`` when given."""
+def pathspecs(globs, exclude=()):
+    """``paths``/``exclude`` globs as git pathspecs (``**`` crosses ``/``; a trailing ``/`` is a
+    directory). An exclude is the same glob under ``:(exclude,glob)``: git drops its files from
+    the match, so a commit that touches only excluded files matches nothing and is not counted,
+    while a commit touching one shipped file among ten test files still counts."""
+    return ([':(glob)' + _dir(g) for g in globs]
+            + [':(exclude,glob)' + _dir(g) for g in exclude])
+
+
+def _behind(product, base, sh, globs=None, exclude=None):
+    """Trunk commits ``base`` lacks — only those touching ``globs`` and outside ``exclude`` when
+    either is given."""
     if not base:
         return None
     argv = ['git', '-C', product.repo_dir, 'rev-list', '--count', f'{base}..origin/{product.main}']
-    if globs:
-        argv += ['--'] + pathspecs(globs)
+    if globs or exclude:
+        argv += ['--'] + pathspecs(globs or [], exclude or [])
     count = sh(argv)
     return int(count) if count and count.isdigit() else None
 
@@ -618,22 +637,22 @@ def _blank(product, env):
             'ci': ci_workflow(product), 'deployed': None, 'prod': None, 'running': None,
             'failed': None, 'failed_how': None, 'failed_cause': None, 'candidate': None, 'main': None, 'behind': None, 'age': None, 'at': None,
             'error': None, 'why': None, 'rule': None, 'ci_running': None, 'required': _required_label(product, env),
-            'paths': paths(product, env), 'relevant': None,
+            'paths': paths(product, env), 'exclude': excludes(product, env), 'relevant': None,
             'reader': reader(product, env)}
 
 
 def _done(f):
     f['prod'] = f['deployed']  # the old name, kept for callers that read prod's facts
-    if f['relevant'] is None and not f['paths']:
+    if f['relevant'] is None and not filtered(f):
         f['relevant'] = f['behind']
     return f
 
 
 def _set_behind(product, f, sh):
     f['behind'] = _behind(product, f['deployed'], sh)
-    if f['paths']:
+    if filtered(f):
         f['relevant'] = (0 if f['behind'] == 0
-                         else _behind(product, f['deployed'], sh, f['paths']))
+                         else _behind(product, f['deployed'], sh, f['paths'], f['exclude']))
 
 
 def facts(product, sh=_sh, now=None, env='prod', _ci=None, deploy=None):
