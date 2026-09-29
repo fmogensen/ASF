@@ -367,11 +367,12 @@ class WidenStepTests(WidenStepBase):
         self.active('T-0002', 'lib/shared.py')
         self.active('T-0001', 'src/a.py, tests/test_a.py, lib/shared.py',
                     '- 2026-09-24 08:40 footprint widened: +tests/test_a.py (report: needs writes)\n')
-        head = _git(['rev-parse', 'HEAD'], self.root)
         self.tick()
         self.assertEqual(self.writes(), ['src/a.py', 'tests/test_a.py', 'lib/shared.py'])
         self.assertNotIn('reverted', self.card_text('T-0001'))
-        self.assertEqual(_git(['rev-parse', 'HEAD'], self.root), head)
+        # not reverted — the plan-declared overlap still stands between two Active Tasks, so the
+        # tick's order pass (T-0545) serializes it onto the later card instead of a person
+        self.assertEqual(self.items()['T-0002']['after'], ['T-0001'])
 
     def test_a_second_widening_is_a_reshape(self):
         self.finished('coder-t-0001', 'tests/test_b.py')
@@ -384,6 +385,145 @@ class WidenStepTests(WidenStepBase):
         self.assertEqual(items['T-0001']['reshape'], 'footprint: needs lib/x.py')
         self.assertNotIn('lib/x.py', items['T-0001']['writes'])
         self.assertEqual([r.kind for r in self.rows()], [feeder_rows.RESHAPE])
+
+
+class SerializeOverlapTests(WidenStepBase):
+    """T-0545: the tick's third pass orders every standing Active×Active overlap the record has
+    not ordered (:func:`asf.invariants.unordered_overlaps`) — the later-minted card gets
+    ``after: <the earlier>``, one History line, one commit — re-asking reachability against its
+    own edges before every write so a batch of candidates never closes a cycle (PD3), and reading
+    the record rather than ``items`` so a chain through a removed card still counts as ordered
+    (PD4)."""
+
+    active = WidenStepTests.active
+    check = WidenStepTests.check
+
+    def rows(self, iid):
+        """``WidenStepBase.rows`` filters on ``T-0001``; the held card here is ``T-0002`` (PD10)."""
+        path = pool_mod.sessions_path(self.product)
+        items = self.items()
+        return [r for r in feeder_rows.candidates(
+                    items, self.product, lifecycle.inflight(path, alive=lambda _p: False),
+                    occupancy=occ(corrections=lifecycle.corrections(path)))
+                if r.item_id == iid]
+
+    def _edit(self, iid, fn, msg=None):
+        path = os.path.join(self.root, 'tasks', f'{iid}.md')
+        with open(path) as f:
+            text = f.read()
+        with open(path, 'w') as f:
+            f.write(fn(text))
+        _git(['add', '-A'], self.root)
+        _git(['commit', '-q', '-m', msg or iid], self.root)
+
+    def _after(self, iid, ids):
+        self._edit(iid, lambda t: t.replace(
+            'decided: true\n', f"decided: true\nafter: [{', '.join(ids)}]\n", 1))
+
+    def _close(self, iid):
+        self._edit(iid, lambda t: t.replace('state: Active\n', 'state: Closed\n', 1),
+                   f'{iid} closed')
+
+    def _remove(self, iid, note):
+        self._edit(iid, lambda t: t.replace(
+            'decided: true\n', f"decided: true\nremoved: {note}\n", 1))
+
+    def test_an_unordered_pair_is_serialized_onto_the_later_minted_card(self):
+        self.active('T-0001', 'lib/shared.py')
+        self.active('T-0002', 'lib/shared.py')
+        self.assertIn('intersects Active task', self.check())
+        held, verdicts = self.tick()
+        self.assertEqual((held, verdicts), ([], {}))
+        self.assertIsNone(self.items()['T-0001'].get('after'))
+        self.assertEqual(self.items()['T-0002']['after'], ['T-0001'])
+        self.assertIn('serialized behind T-0001: writes: overlaps lib/shared.py',
+                      self.card_text('T-0002'))
+        self.assertNotIn('serialized', self.card_text('T-0001'))
+        subject = _git(['log', '-1', '--format=%s'], self.root).strip()
+        self.assertEqual(subject,
+                         'T-0002: serialized behind T-0001: writes: overlaps lib/shared.py')
+        self.assertEqual(_git(['show', '--name-only', '--format=', 'HEAD'], self.root).split(),
+                         ['tasks/T-0002.md'])  # one commit, the held card alone
+        self.assertNotIn('intersects Active task', self.check())
+
+    def test_the_held_tasks_rows_wait_then_launch_once_the_owner_lands(self):
+        self.active('T-0001', 'lib/shared.py')
+        self.active('T-0002', 'lib/shared.py')
+        self.tick()
+        rows = self.rows('T-0002')
+        self.assertTrue(rows)
+        self.assertEqual([(r.action, r.waits_on, r.reason) for r in rows],
+                         [('WAITS ON T-0001', 'T-0001', 'after: T-0001 has not landed')])
+        self._close('T-0001')
+        rows = self.rows('T-0002')
+        self.assertTrue(rows)
+        self.assertEqual(rows[0].action, feeder_rows.LAUNCH)
+
+    def test_a_second_pass_writes_nothing(self):
+        self.active('T-0001', 'lib/shared.py')
+        self.active('T-0002', 'lib/shared.py')
+        self.tick()
+        before = _git(['rev-parse', 'HEAD'], self.root)
+        self.assertEqual(self.tick(), ([], {}))
+        self.assertEqual(_git(['rev-parse', 'HEAD'], self.root), before)
+        self.assertEqual(self.items()['T-0002']['after'], ['T-0001'])
+
+    def test_a_pair_already_ordered_the_other_way_is_untouched(self):
+        self.active('T-0001', 'lib/shared.py')
+        self.active('T-0002', 'lib/shared.py')
+        self._after('T-0001', ['T-0002'])
+        head = _git(['rev-parse', 'HEAD'], self.root)
+        self.tick()
+        self.assertEqual(_git(['rev-parse', 'HEAD'], self.root), head)
+        self.assertEqual(self.items()['T-0001']['after'], ['T-0002'])
+        self.assertIsNone(self.items()['T-0002'].get('after'))
+
+    def test_a_candidate_batch_never_closes_a_cycle(self):
+        # PD3: three Tasks A < C < B by id (T-0001 < T-0002 < T-0003), all pairwise overlapping,
+        # with a pre-existing low->high edge A after B (T-0001 after: [T-0003]) — the shape a
+        # plan's ordinal-based backfill leaves in the live record. A pass that trusts one
+        # snapshot of candidates proposes C->A and B->C against the *original* graph and closes
+        # A->B->C->A; re-asking reachability after every write must propose fewer edges than
+        # there are candidate pairs and leave no cycle.
+        self.card('T-0003', 'lib/shared.py')
+        _git(['add', '-A'], self.root)
+        _git(['commit', '-q', '-m', 'T-0003'], self.root)
+        self.active('T-0001', 'lib/shared.py')
+        self._after('T-0001', ['T-0003'])
+        self.active('T-0002', 'lib/shared.py')
+        self.active('T-0003', 'lib/shared.py')
+        self.assertEqual(self.check().count('intersects Active task'), 2)
+        self.tick()
+        items = self.items()
+        self.assertEqual({iid: items[iid].get('after') or [] for iid in
+                          ('T-0001', 'T-0002', 'T-0003')},
+                         {'T-0001': ['T-0003'], 'T-0002': ['T-0001'], 'T-0003': []})
+        self.assertNotIn('intersects Active task', self.check())
+
+    def test_a_pair_ordered_through_a_removed_intermediate_gets_no_commit(self):
+        # PD4: B after [X], X after [A], X removed — the index drops a removed card, but the
+        # record still reads the chain, and this pass must read the record.
+        self.active('T-0001', 'lib/shared.py')
+        self.active('T-0002', 'lib/shared.py')
+        self.active('T-0003', 'lib/shared.py')
+        self._after('T-0002', ['T-0001'])
+        self._remove('T-0002', 'merged into T-0001')
+        self._after('T-0003', ['T-0002'])
+        head = _git(['rev-parse', 'HEAD'], self.root)
+        self.tick()
+        self.assertEqual(_git(['rev-parse', 'HEAD'], self.root), head)
+
+    def test_a_widened_overlap_still_reverts_rather_than_serializes(self):
+        self.active('T-0002', 'lib/shared.py')
+        self.active('T-0001', 'src/a.py, tests/test_a.py, lib/shared.py',
+                    '- 2026-09-24 08:40 footprint widened: +lib/shared.py (report: needs writes)\n')
+        before = _git(['rev-list', '--count', 'HEAD'], self.root).strip()
+        self.tick()
+        self.assertIn('footprint widening reverted: overlaps T-0002', self.card_text('T-0001'))
+        self.assertNotIn('serialized', self.card_text('T-0001'))
+        self.assertNotIn('serialized', self.card_text('T-0002'))
+        # one commit only: the revert, not a serialization on top of it
+        self.assertEqual(int(_git(['rev-list', '--count', 'HEAD'], self.root)), int(before) + 1)
 
 
 class RefusalWidenTests(WidenStepBase):
