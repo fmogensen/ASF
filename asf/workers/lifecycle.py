@@ -110,6 +110,11 @@ RUN_FIELDS = ('ended', 'end_reason', 'rc', 'corrected', 'operator_flagged', 'har
               'resumed', 'continued', 'publish_refused')
 
 FINISHED = 'finished'
+#: A session whose deliverable was never a commit, and which delivered it: not a failure, and not
+#: a landing. `finished` means "pushed commits"; this means "there was nothing to push, the session
+#: said so, and what it did produce is somewhere the branch cannot show" — an adjudicate ruling on
+#: the item's card, or a review finding the lane's own restack already cleared (F-0157).
+NOTHING_TO_LAND = 'nothing to land'
 #: read, never written: ledgers on disk carry this on runs health judged before F-0098
 DEAD_PID = 'dead pid'
 STOPPED = 'stopped'
@@ -144,13 +149,14 @@ HOOK_REFUSAL_CAP = 2
 #: it runs that scan itself.
 HOOK_REDACTION_RE = re.compile(r'\bredact:\s*\S+:\d+\b')
 
-#: Every class a session's ``end_reason`` falls into. ``finished`` is the only one that is not a
-#: failure; ``other`` is a failure whose signature this module does not name. Composed from the
-#: constants that write the strings, so a rename follows.
+#: Every class a session's ``end_reason`` falls into. ``finished`` and ``nothing to land`` are the
+#: only two that are not a failure; ``other`` is a failure whose signature this module does not
+#: name. Composed from the constants that write the strings, so a rename follows.
 OUTCOME_CLASSES = (FINISHED, NOT_PUSHED, EMPTY_BRANCH.split(':')[0], DEAD_PID, PUSHED_AFTER_STOP,
                    runtime_mod.report.UNPUSHED, *(name for name, _ in runtime_mod.FAILURE_SIGNATURES),
-                   HOOK_REFUSED, NETWORK_ERROR, tokens.TOKEN_CAP, budget.RUN_CAP, OTHER)
-FAILING_CLASSES = tuple(c for c in OUTCOME_CLASSES if c != FINISHED)
+                   HOOK_REFUSED, NETWORK_ERROR, tokens.TOKEN_CAP, budget.RUN_CAP, NOTHING_TO_LAND,
+                   OTHER)
+FAILING_CLASSES = tuple(c for c in OUTCOME_CLASSES if c not in (FINISHED, NOTHING_TO_LAND))
 
 # ---- the session states (§2.1) ---------------------------------------------------
 
@@ -159,7 +165,7 @@ ENDED_AWAITING_TICK = 'ended-awaiting-tick'
 FAILED = 'failed'
 DEAD = 'dead'
 #: FINISHED ('finished') is reused: it is already the end_reason health writes.
-SESSION_STATES = (WORKING, ENDED_AWAITING_TICK, FINISHED, FAILED, DEAD)
+SESSION_STATES = (WORKING, ENDED_AWAITING_TICK, FINISHED, NOTHING_TO_LAND, FAILED, DEAD)
 
 PUSHED_NO_REPORT = 'pushed, no report'
 NO_RECORD = 'no end-of-run record, nothing pushed'
@@ -1595,6 +1601,8 @@ def outcome_class(result):
         return None
     if text == FINISHED:
         return FINISHED
+    if text == NOTHING_TO_LAND:
+        return NOTHING_TO_LAND
     if text == DEAD_PID:
         return DEAD_PID
     if text == 'failed':
@@ -1604,6 +1612,10 @@ def outcome_class(result):
     for prefix in (NOT_PUSHED, OUTCOME_CLASSES[2], HOOK_REFUSED, NETWORK_ERROR):
         if text.startswith(prefix):
             return prefix
+    # a ``failed: …`` signature is never NOTHING_TO_LAND: that class is not a failure, and
+    # `judge` never writes it prefixed — a real failure that happens to share its words is OTHER
+    if text == NOTHING_TO_LAND:
+        return OTHER
     return text if text in OUTCOME_CLASSES[3:-1] else OTHER
 
 
@@ -1706,6 +1718,8 @@ def classify(run, ev, path=None):
         reason = run.get('end_reason') or DEAD_PID
         if reason == FINISHED:
             return Status(FINISHED, result=FINISHED, source='ledger')
+        if reason == NOTHING_TO_LAND:
+            return Status(NOTHING_TO_LAND, result=NOTHING_TO_LAND, source='ledger')
         if reason == STOPPED:
             return Status(DEAD, result=STOPPED, reason=STOPPED_BY_OPERATOR, source='ledger')
         if is_dead_reason(reason):
@@ -1774,6 +1788,8 @@ def derive(run, ev, cap=ROUND_CAP, path=None):
         return State(RUNNING if ev.has_commits else LAUNCHED)
     if status.result == FINISHED:
         return State(PUSHED, FINISHED, rounds)
+    if status.result == NOTHING_TO_LAND:
+        return State(PUSHED, NOTHING_TO_LAND, rounds)
     return State(ENDED, status.result or status.reason, rounds)
 
 
@@ -1858,7 +1874,7 @@ def pushed_after_stop(run, ev):
 
 UNPUSHED = 'unpushed'
 EMPTY = 'empty'        #: a correction kind of its own: `UNPUSHED` is work not on origin, this is no work
-EMPTY_CAP = 2          #: ends that wrote nothing before the item is parked (`conventions.empty_cap`)
+EMPTY_CAP = 2          #: ends that wrote nothing before the item is parked (`hold`'s own `empty_cap=`)
 #: the lane's refusal of commits that do not name their item: a mechanical defect the lane
 #: rewords itself (asf.harvest.lane); a hold of it spends no round and never reaches adjudicate
 NAMING = 'naming'
@@ -2117,6 +2133,42 @@ def review_answered(path, item, review_path, head):
                 and not quota_exhausted(r) \
                 and (r.get('launch_head') or '').lower() == head.lower():
             return r.get('job')
+    return None
+
+
+def delivered_off_branch(path, run, text):
+    """Why ``run``'s empty branch is not a failure — the deliverable it produced somewhere its
+    branch cannot show — or None. Pure: the ledger and the REPORT text, no git and no clock.
+
+    Two kinds have such a deliverable. An ``adjudicate`` run's is the ``ruling:`` paragraph of its
+    REPORT, which :func:`asf.tick.step_health.file_rulings` files on the item's card; its brief
+    forbids the commit that would leave a mark on the branch, because an overruled finding is not
+    edited. A ``correct`` run answering a **review** hold has none to produce when the lane's own
+    restack already cleared the finding under it (B-0149): there is nothing to change, and the
+    lane's answer is a fresh review round, not a pass.
+
+    Either way the run must say so itself, in its own REPORT: ``status: done``, ``commits:`` claiming
+    nothing (:func:`asf.workers.report._claim`), and no ``NEEDS OPERATOR`` — a question is F-0126's
+    blocked park, which keeps winning over this."""
+    from asf.workers import report as report_mod
+    text = text or ''
+    rep = report_mod.parse(text)
+    status = (rep.get('status') or '').strip().lower().split(' ')[0]
+    if status != 'done' or report_mod._claim(rep.get('commits')) or report_mod.needs_input(text):
+        return None
+    kind = run.get('kind')
+    if kind == 'adjudicate':
+        ruling = report_mod.ruling(text)
+        return f'ruling filed: {ruling[:60]}…' if ruling else None
+    if kind == CORRECT:
+        rs = item_runs(path, run.get('item'))
+        holds = [(r.get('correction') or {}) for r in rs]
+        holds = [c for c in holds if c.get('kind') == REVIEW and c.get('at')]
+        if not holds:
+            return None
+        last = max(holds, key=lambda c: c['at'])
+        review_path = str(last.get('text') or '').split(' ', 1)[0]
+        return f'{review_path}: the finding is gone' if review_path else None
     return None
 
 

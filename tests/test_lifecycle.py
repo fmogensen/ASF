@@ -19,10 +19,12 @@ import random
 import shutil
 import subprocess
 import tempfile
+import types
 import unittest
 from unittest import mock
 
 from asf import env, redact
+from asf.scorecard import score
 from asf.workers import lifecycle as lc
 
 OK = {'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'done'}
@@ -1894,6 +1896,133 @@ class FactoryRebaseTests(unittest.TestCase):
         self.assertEqual(fields['rounds'], 1)
 
 
+class NothingToLandTests(unittest.TestCase):
+    """F-0157: a fourth thing an ended run can be — not a failure, and not a landing. ``finished``
+    means "pushed commits"; this means there was nothing to push and the session said so."""
+
+    def test_the_constant(self):
+        self.assertEqual(lc.NOTHING_TO_LAND, 'nothing to land')
+
+    def test_it_is_in_outcome_classes_and_not_in_failing_classes(self):
+        self.assertIn(lc.NOTHING_TO_LAND, lc.OUTCOME_CLASSES)
+        self.assertNotIn(lc.NOTHING_TO_LAND, lc.FAILING_CLASSES)
+        for c in lc.OUTCOME_CLASSES:
+            if c not in (lc.FINISHED, lc.NOTHING_TO_LAND):
+                self.assertIn(c, lc.FAILING_CLASSES)
+
+    def test_outcome_class_returns_it(self):
+        self.assertEqual(lc.outcome_class('nothing to land'), lc.NOTHING_TO_LAND)
+
+    def test_a_real_failure_naming_the_same_words_is_not_it(self):
+        # a failure whose signature nobody named still reads OTHER, not this class
+        self.assertEqual(lc.outcome_class('failed: nothing to land'), lc.OTHER)
+
+    def test_pd1_the_two_index_invariants_outcome_class_reads_by_position(self):
+        # outcome_class's prefix loop reads OUTCOME_CLASSES[2] for the empty-branch prefix
+        self.assertEqual(lc.OUTCOME_CLASSES[2], 'empty branch')
+        # outcome_class's membership fallback reads OUTCOME_CLASSES[3:-1]
+        self.assertEqual(lc.OUTCOME_CLASSES[3:-1], (
+            'dead pid', 'pushed after stop', 'unpushed work', 'unknown model', 'auth',
+            'quota-exhausted', 'permission', 'hook refused', 'network error', 'token cap',
+            'run cap', 'nothing to land'))
+
+    def test_classify_on_a_run_ended_with_it(self):
+        run = {'ended': 't1', 'end_reason': lc.NOTHING_TO_LAND}
+        status = lc.classify(run, lc.Evidence())
+        self.assertEqual(status.name, lc.NOTHING_TO_LAND)
+        self.assertEqual(status.result, lc.NOTHING_TO_LAND)
+        self.assertEqual(status.label, lc.NOTHING_TO_LAND)
+        self.assertEqual(status.source, 'ledger')
+        self.assertNotEqual(status.name, lc.FAILED)
+        self.assertNotEqual(status.name, lc.DEAD)
+
+    def test_derive_on_the_same_run(self):
+        run = {'ended': 't1', 'end_reason': lc.NOTHING_TO_LAND}
+        state = lc.derive(run, lc.Evidence())
+        self.assertEqual(state.name, lc.PUSHED)
+        self.assertEqual(state.reason, lc.NOTHING_TO_LAND)
+
+    def test_the_scorecards_reading_is_untouched(self):
+        # P8: the new end_reason starts with none of DEAD_PREFIXES, so is_dead is false for it,
+        # and 'failed: empty branch' keeps its old meaning for every run that still ends that way
+        self.assertFalse(score.failure_class(lc.NOTHING_TO_LAND).startswith(score.DEAD_PREFIXES))
+        self.assertFalse(score.is_dead(
+            types.SimpleNamespace(landed=False, end_reason=lc.NOTHING_TO_LAND)))
+        self.assertEqual(score.failure_class(f'failed: {lc.EMPTY_BRANCH}'), 'failed: empty branch')
+
+
+class DeliveredOffBranchTests(unittest.TestCase):
+    """F-0157 P3, P4(c): the pure proof that an empty branch is not a failure — a ``ruling:`` for
+    an ``adjudicate`` run, the item's latest ``REVIEW`` hold for a ``correct`` run, ``None`` for
+    every other kind and for any report that is not ``status: done`` with ``commits:`` claiming
+    nothing and no ``NEEDS OPERATOR``."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.path = os.path.join(self.d, 's.jsonl')
+
+    def write(self, ln, path=None):
+        with open(path or self.path, 'a') as f:
+            f.write(json.dumps(ln) + '\n')
+
+    RULING = 'REPORT\nitem: T-0001\nstatus: done\ncommits: none\nruling: overruled — no defect\n'
+
+    def test_an_adjudicate_ruling_is_believed(self):
+        run = {'kind': 'adjudicate', 'item': 'T-0001'}
+        self.assertEqual(lc.delivered_off_branch(None, run, self.RULING),
+                         'ruling filed: overruled — no defect…')
+
+    def test_an_adjudicate_run_with_no_ruling_is_not_believed(self):
+        text = 'REPORT\nitem: T-0001\nstatus: done\ncommits: none\n'
+        run = {'kind': 'adjudicate', 'item': 'T-0001'}
+        self.assertIsNone(lc.delivered_off_branch(None, run, text))
+
+    def test_a_correct_run_answering_a_cleared_review_is_believed(self):
+        self.write({'job': 'correct-t-0001', 'item': 'T-0001', 'correction':
+                    {'kind': lc.REVIEW, 'text': 'docs/reviews/r-t-0001.md needs another pass',
+                     'at': 't1'}})
+        run = {'kind': 'correct', 'item': 'T-0001'}
+        text = 'REPORT\nitem: T-0001\nstatus: done\ncommits: none\n'
+        self.assertEqual(lc.delivered_off_branch(self.path, run, text),
+                         'docs/reviews/r-t-0001.md: the finding is gone')
+
+    def test_a_correct_run_over_a_footprint_or_a_gate_hold_is_not_believed(self):
+        for kind in (lc.FOOTPRINT, 'gate'):
+            with self.subTest(kind=kind):
+                path = os.path.join(self.d, f'{kind}.jsonl')
+                self.write({'job': 'correct-t-0001', 'item': 'T-0001', 'correction':
+                           {'kind': kind, 'text': 'x', 'at': 't1'}}, path=path)
+                run = {'kind': 'correct', 'item': 'T-0001'}
+                text = 'REPORT\nitem: T-0001\nstatus: done\ncommits: none\n'
+                self.assertIsNone(lc.delivered_off_branch(path, run, text))
+
+    def test_a_coder_a_spec_and_a_plan_run_with_a_clean_report_are_never_believed(self):
+        text = 'REPORT\nitem: T-0001\nstatus: done\ncommits: none\n'
+        for kind in ('coder', 'spec', 'plan', 'fix-bug', 'review', 'reshape', 'close'):
+            with self.subTest(kind=kind):
+                run = {'kind': kind, 'item': 'T-0001'}
+                self.assertIsNone(lc.delivered_off_branch(self.path, run, text))
+
+    def test_the_three_report_gates(self):
+        run = {'kind': 'adjudicate', 'item': 'T-0001'}
+        partial = 'REPORT\nitem: T-0001\nstatus: partial\ncommits: none\nruling: overruled\n'
+        self.assertIsNone(lc.delivered_off_branch(None, run, partial))
+        claims_a_sha = 'REPORT\nitem: T-0001\nstatus: done\ncommits: deadbeef fix\nruling: overruled\n'
+        self.assertIsNone(lc.delivered_off_branch(None, run, claims_a_sha))
+        # pinned against an adjudicate run with a real ruling: F-0126's blocked park still wins
+        needs_operator = self.RULING + 'NEEDS OPERATOR: pick a knob\n'
+        self.assertIsNone(lc.delivered_off_branch(None, run, needs_operator))
+
+    def test_every_no_claim_spelling_of_commits_passes(self):
+        run = {'kind': 'adjudicate', 'item': 'T-0001'}
+        for value in ('', 'none', 'n/a', '-', '—'):
+            with self.subTest(commits=value):
+                text = f'REPORT\nitem: T-0001\nstatus: done\ncommits: {value}\nruling: overruled\n'
+                self.assertEqual(lc.delivered_off_branch(None, run, text),
+                                 'ruling filed: overruled…')
+
+
 class OutcomeClassTests(unittest.TestCase):
     """T-0201, §2.1: one owner for what a session's end means."""
 
@@ -1950,14 +2079,15 @@ class OutcomeClassTests(unittest.TestCase):
             with self.subTest(end_reason=s):
                 self.assertIn(lc.outcome_class(s), lc.OUTCOME_CLASSES)
 
-    def test_the_failing_classes_are_all_but_finished(self):
-        self.assertEqual(set(lc.FAILING_CLASSES), set(lc.OUTCOME_CLASSES) - {lc.FINISHED})
+    def test_the_failing_classes_are_all_but_the_two_that_are_not_failures(self):
+        self.assertEqual(set(lc.FAILING_CLASSES),
+                         set(lc.OUTCOME_CLASSES) - {lc.FINISHED, lc.NOTHING_TO_LAND})
 
     def test_the_vocabulary_is_the_specs_in_the_specs_order(self):
         self.assertEqual(lc.OUTCOME_CLASSES, (
             'finished', 'not pushed', 'empty branch', 'dead pid', 'pushed after stop',
             'unpushed work', 'unknown model', 'auth', 'quota-exhausted', 'permission', 'hook refused',
-            'network error', 'token cap', 'run cap', 'other'))
+            'network error', 'token cap', 'run cap', 'nothing to land', 'other'))
 
     def test_a_run_ended_by_its_token_cap(self):
         self.assertIn(lc.tokens.TOKEN_CAP, lc.OUTCOME_CLASSES)
