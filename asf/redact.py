@@ -398,6 +398,91 @@ def scan_tree(repo, pats):
     return findings
 
 
+def lane_substitutions(pats):
+    """``[(regex, 'lane-N')]`` — one per worker-pool account pattern, numbered in pool order: what
+    :func:`rewrite_unpublished_names` puts in place of each account name."""
+    pool = [p for p in pats or () if p.kind == 'name' and p.source == NAME_SOURCE_POOL]
+    return [(p.regex, f'lane-{n}') for n, p in enumerate(pool, start=1)]
+
+
+def _substitute(text, subs):
+    for regex, token in subs:
+        text = regex.sub(token, text)
+    return text
+
+
+def rewrite_unpublished_names(repo, head, pats, published=()):
+    """Rewrite every commit :func:`scan_unpublished` reads — the commits from ``head`` origin does
+    not have — with each worker-pool account name replaced by its ``lane-N``, in the files the
+    range touches and in each message. A session told "replace with lane-N" fixes the file in a
+    new commit, but the scan reads every commit's own diff, so the earlier commits still name the
+    account and the push is refused again, run after run (a product's spec branch, 2026-09-29):
+    only a history rewrite clears it, and a session may never rewrite a branch. The factory does,
+    before it publishes — the commits are unpublished, so nothing on origin moves.
+
+    Returns the new head sha, or ``None`` when there is nothing to rewrite or the range is not a
+    plain chain (a merge commit in it): the refusal then stands as before. Authors, dates and
+    every other byte are kept; only the substituted lines differ."""
+    subs = lane_substitutions(pats)
+    if not subs:
+        return None
+    exclude = [s for s in published if s and set(s) != {'0'} and _is_commit(repo, s)]
+    out = _run_git(repo, ['rev-list', '--reverse', '--topo-order', '--parents', head, '--not',
+                          '--remotes=origin'] + exclude)
+    if out.returncode != 0:
+        return None
+    chain = [ln.split() for ln in out.stdout.splitlines() if ln.strip()]
+    if not chain or any(len(c) != 2 for c in chain):
+        return None
+    if any(chain[i][1] != chain[i - 1][0] for i in range(1, len(chain))):
+        return None
+    import tempfile
+    parent, touched, changed = chain[0][1], set(), False
+    with tempfile.TemporaryDirectory(prefix='asf-redact-') as tmp:
+        git_env = {'GIT_INDEX_FILE': os.path.join(tmp, 'index')}
+        for sha, _old_parent in chain:
+            names = _run_git(repo, ['diff-tree', '--no-commit-id', '--no-renames', '-r', '-z',
+                                    '--name-only', sha]).stdout
+            touched.update(p for p in names.split('\0') if p)
+            if _run_git(repo, ['read-tree', sha], git_env=git_env).returncode != 0:
+                return None
+            for path in sorted(touched):
+                ls = _run_git(repo, ['ls-tree', '-z', sha, '--', path]).stdout.rstrip('\0')
+                meta = ls.split('\t', 1)[0].split()
+                if len(meta) != 3 or meta[1] != 'blob':
+                    continue
+                blob = subprocess.run(['git', 'cat-file', 'blob', meta[2]], cwd=repo,
+                                      capture_output=True)
+                try:
+                    text = blob.stdout.decode('utf-8')
+                except UnicodeDecodeError:
+                    continue
+                new = _substitute(text, subs)
+                if new == text:
+                    continue
+                w = _run_git(repo, ['hash-object', '-w', '--stdin'], input_text=new)
+                if w.returncode != 0:
+                    return None
+                _run_git(repo, ['update-index', '--cacheinfo',
+                                f'{meta[0]},{w.stdout.strip()},{path}'], git_env=git_env)
+            tree = _run_git(repo, ['write-tree'], git_env=git_env).stdout.strip()
+            info = _run_git(repo, ['log', '-1', '--format=%T%x00%an%x00%ae%x00%ad%x00%B',
+                                   '--date=raw', sha]).stdout
+            old_tree, an, ae, ad, message = info.split('\0', 4)
+            new_message = _substitute(message, subs)
+            if tree == old_tree and parent == _old_parent and new_message == message:
+                parent = sha
+                continue
+            changed = True
+            commit_env = {'GIT_AUTHOR_NAME': an, 'GIT_AUTHOR_EMAIL': ae, 'GIT_AUTHOR_DATE': ad}
+            c = _run_git(repo, ['commit-tree', tree, '-p', parent], input_text=new_message,
+                         git_env=commit_env)
+            if c.returncode != 0 or not c.stdout.strip():
+                return None
+            parent = c.stdout.strip()
+    return parent if changed else None
+
+
 # ---- the gate and its output ---------------------------------------------------
 
 def gate(findings, where, product=None):

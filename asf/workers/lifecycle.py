@@ -1471,6 +1471,27 @@ def _redaction_findings(wt, remote_sha):
         return []
 
 
+def _rewrite_account_names(wt, remote_sha, findings):
+    """True when the worktree's unpublished commits were rewritten with every worker-account
+    name as ``lane-N`` (:func:`asf.redact.rewrite_unpublished_names`) and the worktree moved to
+    the result. Only for a finding that is a worker-account name, and only on a clean worktree
+    (nothing the session left uncommitted is ever touched). A session cannot clear such a
+    finding itself: its fix is a new commit, and the scan still reads the old ones — the same
+    refusal every run, forever."""
+    from asf import redact
+    if not any(f.kind == 'name' and f.source == redact.NAME_SOURCE_POOL for f in findings):
+        return False
+    if _git(['status', '--porcelain', '--untracked-files=no'], wt).stdout.strip():
+        return False
+    try:
+        pats = redact.default_patterns(wt)
+        new = redact.rewrite_unpublished_names(
+            wt, 'HEAD', pats, published=(remote_sha,) if remote_sha else ())
+    except Exception:  # noqa: BLE001 — the refusal stands; nothing moved
+        return False
+    return bool(new) and _git(['reset', '-q', '--hard', new], wt).returncode == 0
+
+
 def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout_s=None):
     """Push the worktree's HEAD to ``origin/<branch>`` as the factory (B-0056).
 
@@ -1507,7 +1528,10 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
     Before any push, the archive included, :func:`_redaction_findings` runs the same scan the
     hook would; a finding refuses the push right there with a precise ``redact: <file>:<line>
     …`` correction (:func:`asf.redact.correction`, F-0035) rather than the hook's generic
-    refusal. A push the hook itself still refuses over a redaction (some other repo, some other
+    refusal. A worker-account name is not refused but rewritten: the unpublished commits are
+    replayed with it as ``lane-N`` (:func:`_rewrite_account_names`) — a session's own fix is a
+    new commit the per-commit scan never credits. A push the hook itself still refuses over a
+    redaction (some other repo, some other
     pattern list) has its captured output parsed the same way
     (:func:`asf.redact.parse_finding_lines`) before falling back to its raw last line.
     ``(ok, line)``."""
@@ -1552,6 +1576,9 @@ def publish(wt, branch, remote_sha='', main='main', protected=None, push_timeout
                 return False, f'publish {branch} refused: {rebased or loss_refusal(branch, lost)}'
             remote_sha = fetched
     findings = _redaction_findings(wt, remote_sha)
+    if findings and _rewrite_account_names(wt, remote_sha, findings):
+        rebased = ', '.join(x for x in (rebased, 'worker-account names rewritten to lane-N') if x)
+        findings = _redaction_findings(wt, remote_sha)
     if findings:
         return False, f'publish {branch} refused: ' + '; '.join(redact.correction(findings))
     if archive:
