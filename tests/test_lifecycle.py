@@ -2144,20 +2144,66 @@ class PublishRedactionTests(unittest.TestCase):
         redact._DEFAULT_CACHE.clear()
         self.addCleanup(redact._DEFAULT_CACHE.clear)
 
-    def test_a_worker_account_name_holds_the_push_with_a_precise_correction(self):
-        with open(os.path.join(self.repo, 'plan.md'), 'w', encoding='utf-8') as f:
-            f.write(f'a plan naming {self.account} directly\n')
+    def write_commit(self, name, text, message):
+        with open(os.path.join(self.repo, name), 'w', encoding='utf-8') as f:
+            f.write(text)
         self.sh(['add', '-A'], self.repo)
-        self.sh(['commit', '-qm', 'a plan'], self.repo)
+        self.sh(['commit', '-qm', message], self.repo)
+
+    def test_a_protected_name_holds_the_push_with_a_precise_correction(self):
+        with open(os.path.join(self.home, 'redact-names.txt'), 'w', encoding='utf-8') as f:
+            f.write('operator-' + 'private\n')
+        redact._DEFAULT_CACHE.clear()
+        self.write_commit('plan.md', 'a plan naming operator-' + 'private directly\n', 'a plan')
 
         ok, line = lc.publish(self.repo, 'fix/B-9997', '', main='main')
 
         self.assertFalse(ok, line)
         self.assertIn('publish fix/B-9997 refused:', line)
-        self.assertIn('redact: plan.md:1 names a worker account — replace with lane-N', line)
-        self.assertNotIn(self.account, line)  # never the matched text (D8)
+        self.assertIn('redact: plan.md:1 names a protected name — remove it', line)
+        self.assertNotIn('operator-' + 'private', line)  # never the matched text (D8)
         # nothing was pushed: the branch does not exist on origin at all
         self.assertEqual(self.sh(['ls-remote', '--heads', 'origin', 'fix/B-9997'], self.repo), '')
+
+    def test_a_worker_account_name_fixed_in_a_later_commit_is_rewritten_and_published(self):
+        # the loop: the session was told "replace with lane-N", fixed the file in a new commit,
+        # and the per-commit scan still read the first — refused every run. The factory rewrites
+        # the unpublished commits and publishes; no commit on origin names the account.
+        self.write_commit('plan.md', f'a plan naming {self.account} directly\n',
+                          f'a plan for {self.account}')
+        self.write_commit('other.md', 'untouched\n', 'another file')
+        self.write_commit('plan.md', 'a plan naming lane-1 directly\n', 'replace with lane-N')
+        before = self.sh(['rev-list', '--count', 'origin/main..HEAD'], self.repo)
+
+        ok, line = lc.publish(self.repo, 'fix/B-9997', '', main='main')
+
+        self.assertTrue(ok, line)
+        self.assertIn('worker-account names rewritten to lane-N', line)
+        self.assertNotIn(self.account, line)
+        remote = self.sh(['rev-parse', 'origin/fix/B-9997'], self.repo)
+        self.assertEqual(remote, self.sh(['rev-parse', 'HEAD'], self.repo))
+        self.assertEqual(self.sh(['rev-list', '--count', f'origin/main..{remote}'], self.repo),
+                         before)
+        history = self.sh(['log', '-p', '--format=%B%an', f'origin/main..{remote}'], self.repo)
+        self.assertNotIn(self.account, history)
+        self.assertIn('a plan for lane-1', history)
+        self.assertIn('Test', history)  # the author is kept
+        self.assertEqual(redact.scan_unpublished(self.repo, 'HEAD', redact.default_patterns(
+            self.repo), published=(remote,)), [])
+        with open(os.path.join(self.repo, 'other.md'), encoding='utf-8') as f:
+            self.assertEqual(f.read(), 'untouched\n')
+
+    def test_uncommitted_work_is_never_rewritten_under_the_session(self):
+        self.write_commit('plan.md', f'a plan naming {self.account} directly\n', 'a plan')
+        with open(os.path.join(self.repo, 'seed.txt'), 'w', encoding='utf-8') as f:
+            f.write('work in progress\n')
+
+        ok, line = lc.publish(self.repo, 'fix/B-9997', '', main='main')
+
+        self.assertFalse(ok, line)
+        self.assertIn('redact: plan.md:1 names a worker account — replace with lane-N', line)
+        with open(os.path.join(self.repo, 'seed.txt'), encoding='utf-8') as f:
+            self.assertEqual(f.read(), 'work in progress\n')
 
     def test_a_clean_branch_is_still_published(self):
         with open(os.path.join(self.repo, 'plan.md'), 'w', encoding='utf-8') as f:
@@ -2420,7 +2466,8 @@ class PublishRebasePingPongTest(_RebaseShape):
         self.addCleanup(lambda: setattr(env, 'ASF_HOME', old_home))
         redact._DEFAULT_CACHE.clear()
         self.addCleanup(redact._DEFAULT_CACHE.clear)
-        self.commit('plan.md', f'a plan naming {account} directly\n', 'task(T-0338): a plan')
+        # a secret, not a worker-account name: an account name is rewritten, never refused
+        self.commit('plan.md', 'a plan quoting AKIA' + 'ABCDEFGHIJKLMNOP\n', 'task(T-0338): a plan')
         ok, line = lc.publish(self.repo, self.branch, self.remote_sha, main='main')
         self.assertFalse(ok, line)
         self.assertIn('redact: plan.md:1', line)
