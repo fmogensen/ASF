@@ -110,11 +110,17 @@ def corrections(product):
     return lifecycle.corrections(pool_mod.sessions_path(product))
 
 
-def lane_pass(ctx, out=print, defer_pushes=False):
+def lane_pass(ctx, out=print, defer_pushes=False, dry_run=False):
     """R2: the lane's feeder-visible transitions, in-process, before the wave reads the lane —
     once per tick (the ``prs`` step skips it when the wave ran it). A failure is one line: the
     wave still plans off the lane as it stood. ``defer_pushes`` (the wave's own call): the pass's
-    ref pushes wait on ``ctx.lane`` for :func:`push_deferred`, after the launches."""
+    ref pushes wait on ``ctx.lane`` for :func:`push_deferred`, after the launches. ``dry_run``
+    (:mod:`asf.tick.dry_run`'s own call): threaded onto the :class:`~asf.harvest.lane.Lane` this
+    pass builds — every push, archive, delete, PR open/close/merge and the ``ci_queue`` pass
+    :func:`asf.harvest.lane.lane_pass` makes at its end become one ``DRY``/``would …`` line
+    instead (2026-09-29: this call hardcoded ``dry_run=False`` regardless of the caller's own —
+    ``asf tick --dry-run`` deleted two already-landed branches pending their delete and the
+    ci-queue step cancelled four queued runs, both through this one pass)."""
     from asf.harvest import harvest, lane
     from asf.tick import land_spec
     from asf.views import index_reader
@@ -126,7 +132,7 @@ def lane_pass(ctx, out=print, defer_pushes=False):
         root = ctx.record_root()
         if os.path.isfile(os.path.join(root, 'index.json')):  # an approved spec off the trunk
             land_spec.adopt(product, index_reader.load(root)[0], out=out)
-        ctx.lane = lane.Lane(product, None, out, False, harvest.record_items(root), root)
+        ctx.lane = lane.Lane(product, None, out, dry_run, harvest.record_items(root), root)
         results, _found = lane.lane_pass(product, out=out, lane=ctx.lane,
                                           defer_pushes=defer_pushes)
         return results
