@@ -2606,6 +2606,102 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertEqual(len(self.merges(calls)), 1)
 
 
+class RuledOnThisHeadTests(unittest.TestCase):
+    """F-0157 P4(b,c): the lane acting on what it can now read — ``asf/harvest/lane.py:1368-1374``
+    sets ``f['overruled']``/``f['review_answered']`` from :func:`lifecycle.overruling` and
+    :func:`lifecycle.review_answered`, and ``:1146-1152`` acts on them. A run ended
+    :data:`lifecycle.NOTHING_TO_LAND` makes both reachable for the first time — B-1377's ruling
+    closes the loop at the gate instead of bouncing the same review file back again, and B-0149's
+    answered-without-a-commit correction wants a fresh review round instead of another one.
+
+    Does not subclass :class:`ProductHarvestTests` (PD1 of `docs/plans/f-0157.md`'s Task 1): that
+    would re-run its inherited tests a second time. Borrows the fixture instead, as
+    :class:`GateTimingLineTests` does."""
+
+    setUp = ProductHarvestTests.setUp
+    write = ProductHarvestTests.write
+    pr_product = ProductHarvestTests.pr_product
+    fake_gh = ProductHarvestTests.fake_gh
+    push_lane = ProductHarvestTests.push_lane
+    session = ProductHarvestTests.session
+    harvest = ProductHarvestTests.harvest
+    record = ProductHarvestTests.record
+    REQUIRED = ProductHarvestTests.REQUIRED
+    review_text = ProductHarvestTests.review_text
+    push_fix = ProductHarvestTests.push_fix
+    BUG = ProductHarvestTests.BUG
+
+    @staticmethod
+    def _after(at, seconds=60):
+        """An ISO timestamp ``seconds`` after ``at`` — a run launched after the hold it answers."""
+        from datetime import datetime, timedelta, timezone
+        dt = datetime.strptime(at, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+        return (dt + timedelta(seconds=seconds)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    def _append_run(self, job, kind, end_reason, started, launch_head, log=None):
+        launch = {'job': job, 'item': 'B-0001', 'branch': 'fix/B-0001', 'kind': kind,
+                  'pid': dead_pid(), 'started': started, 'launch_head': launch_head}
+        if log:
+            launch['log'] = log
+        end = {'job': job, 'ended': self._after(started, 300), 'end_reason': end_reason}
+        with open(os.path.join(self.state_dir, 'sessions.jsonl'), 'a', encoding='utf-8') as f:
+            f.write(json.dumps(launch) + '\n')
+            f.write(json.dumps(end) + '\n')
+
+    def _ruling_log(self, text):
+        log = os.path.join(self.state_dir, 'ruling.jsonl')
+        with open(log, 'w', encoding='utf-8') as f:
+            f.write(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
+                                'result': text}) + '\n')
+        return log
+
+    def _hold_a_changes_review(self):
+        """``fix/B-0001`` approved once, then read changes requested — held, a review correction
+        on the item — the setup :meth:`Lane.facts` needs before ``overruled``/``review_answered``
+        are ever asked for (``rv.get('current') and rv.get('verdict') == CHANGES``)."""
+        self.fake_gh([{'name': 'ci', 'bucket': 'pass'}])
+        self.push_fix(['approved', 'changes requested'])
+        self.assertEqual(self.harvest(self.pr_product())[0], {'fix/B-0001': 'held'})
+        path = harvest.sessions_path(self.state_dir)
+        at = lifecycle.corrections(path)['B-0001']['at']
+        head = sh(['git', 'rev-parse', 'fix/B-0001'], cwd=self.worker).stdout.strip()
+        return path, at, head
+
+    def test_t5a_a_ruling_on_this_head_overrules_the_review_at_the_gate(self):
+        """B-1377: 14 adjudicate sessions each re-held off the same stale review file. An
+        adjudicate run ended ``nothing to land``, committing nothing, on the review's own head
+        now overrules it — the T5a arm — instead of another BACK, 'kind=review'."""
+        path, at, head = self._hold_a_changes_review()
+        log = self._ruling_log('REPORT\nitem: B-0001\nstatus: done\ncommits: none\n'
+                               'ruling: overruled — the C list is stale\n')
+        self._append_run('adjudicate-b-0001', 'adjudicate', lifecycle.NOTHING_TO_LAND,
+                         self._after(at), head, log=log)
+        self.assertEqual(lifecycle.overruling(path, 'B-0001', head), 'adjudicate-b-0001')
+        self.fake_gh([{'name': 'ci', 'bucket': 'pass'}])
+        lines = []
+        lane.lane_pass(self.pr_product(), self.state_dir, items=self.BUG, out=lines.append)
+        rec = self.record('fix/B-0001')
+        self.assertEqual(rec['lane']['state'], 'GATE')
+        self.assertIn("overruled by adjudicate-b-0001's ruling", rec['lane']['reason'])
+
+    def test_t5b_a_correct_run_that_changed_nothing_wants_a_fresh_review_round(self):
+        """B-0149: the lane's own restack cleared the review's finding under a ``correct`` run
+        that then had nothing to change and pushed nothing — the T5b arm — a fresh review round,
+        not another correction bounced BACK at the same finding."""
+        path, at, head = self._hold_a_changes_review()
+        self._append_run('correct-b-0001', 'correct', lifecycle.NOTHING_TO_LAND,
+                         self._after(at), head)
+        self.assertEqual(lifecycle.review_answered(path, 'B-0001', '.in/reviews/2-b-0001.md', head),
+                         'correct-b-0001')
+        self.fake_gh([{'name': 'ci', 'bucket': 'pass'}])
+        lines = []
+        lane.lane_pass(self.pr_product(), self.state_dir, items=self.BUG, out=lines.append)
+        rec = self.record('fix/B-0001')
+        self.assertEqual(rec['lane']['state'], 'REVIEW')
+        self.assertIn('round 3 wanted', rec['lane']['reason'])
+        self.assertIn('answered by correct-b-0001 without a commit', rec['lane']['reason'])
+
+
 class GateFilesTests(unittest.TestCase):
     OUTPUT = (
         'FAIL: test_x (tests.test_feeder.FeederTests.test_x)\n'

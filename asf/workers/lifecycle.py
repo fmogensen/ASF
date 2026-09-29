@@ -632,6 +632,14 @@ def finished(run):
     return bool(run) and bool(run.get('ended')) and run.get('end_reason') == FINISHED
 
 
+def delivered(run):
+    """Ended with its work delivered: :func:`finished` — pushed commits — or
+    :data:`NOTHING_TO_LAND`, a deliverable the branch cannot show (F-0157). What a reader asking
+    "did this session do its job" wants; :func:`finished` alone means "and it is on the branch"."""
+    return finished(run) or (bool(run) and bool(run.get('ended'))
+                             and run.get('end_reason') == NOTHING_TO_LAND)
+
+
 def landed(run):
     return bool(run) and bool(run.get('harvested'))
 
@@ -701,7 +709,7 @@ def _settling_run(path, item, at):
     """The adjudicate run that settled the correction raised ``at`` (B-0128) — the earliest
     finished adjudicate run started at or after it — or None."""
     candidates = sorted((r for r in item_runs(path, item)
-                          if r.get('kind') == 'adjudicate' and finished(r)
+                          if r.get('kind') == 'adjudicate' and delivered(r)
                           and (r.get('started') or '') >= (at or '')),
                          key=lambda r: r.get('started') or '')
     return candidates[0] if candidates else None
@@ -757,7 +765,7 @@ def overruling(path, item, head, unchanged_since=None):
         return None
     from asf.workers import report as report_mod
     ruled = sorted((r for r in item_runs(path, item)
-                    if r.get('kind') == 'adjudicate' and finished(r)),
+                    if r.get('kind') == 'adjudicate' and delivered(r)),
                    key=lambda r: r.get('started') or '')
     if not ruled:
         return None
@@ -2322,7 +2330,7 @@ def review_answered(path, item, review_path, head):
     for r in sorted(rs, key=lambda r: r.get('started') or '', reverse=True):
         if (r.get('started') or '') <= last['at']:
             break
-        if r.get('kind') == CORRECT and r.get('end_reason') == FINISHED \
+        if r.get('kind') == CORRECT and delivered(r) \
                 and not quota_exhausted(r) \
                 and (r.get('launch_head') or '').lower() == head.lower():
             return r.get('job')
