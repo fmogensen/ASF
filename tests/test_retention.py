@@ -40,6 +40,10 @@ HEADS = {
     'cloud/active': 30,           # the product's own lane prefix: never a legacy head
     'release/1.0': 30,            # a release: never
     'analysis/x': 30,             # no pattern owns it: reported, not deleted
+    'legacy/T-0009': 30,          # an id whose card is Closed, under no owned prefix: settled
+    'legacy/T-0010': 30,          # an id whose card is Open: not settled, not held → kept
+    'legacy/T-0011': 2,           # a Closed card but a young tip: under settled_days → kept
+    'integration/backfill': 30,   # no id, no card; the trunk does not carry it → never settled
 }
 DUE = ['archive/cloud/old', 'docs/closed', 'hb/dead']
 
@@ -82,7 +86,10 @@ class RetentionSweep(unittest.TestCase):
         pool_mod.append_session(self.product, {'job': 'j1', 'item': 'T-0001', 'pid': 1,
                                                'branch': 'cloud/held', 'started': 't'})
         self.items = {'F-0001': {'state': 'Open', 'branch': 'docs/named'},
-                      'F-0002': {'state': 'Closed', 'note': 'kept on docs/closed'}}
+                      'F-0002': {'state': 'Closed', 'note': 'kept on docs/closed'},
+                      'T-0009': {'state': 'Closed'},
+                      'T-0010': {'state': 'Open', 'note': 'still open'},
+                      'T-0011': {'state': 'Closed'}}
         self.host = ({'worker/pr'}, {'hb/protected'})
 
     def make(self, retention_over):
@@ -167,14 +174,26 @@ class RetentionSweep(unittest.TestCase):
 
     def test_unowned_heads_are_counted_and_the_doctor_names_them(self):
         res, lines = self.sweep(fix=False)
-        self.assertEqual(res['unowned'], {'analysis/': 1})
-        self.assertIn('retention: unowned branches: 1 (prefixes analysis/ 1)', lines)
+        self.assertEqual(res['unowned'], {'legacy/': 3, 'analysis/': 1, 'integration/': 1})
+        self.assertIn('retention: unowned branches: 5 (prefixes legacy/ 3, analysis/ 1, '
+                      'integration/ 1)', lines)
         ok, line = doctor.check_branches(self.product)
         self.assertFalse(ok)
-        self.assertTrue(line.startswith('unowned branches: 1 (prefixes analysis/ 1)'), line)
+        self.assertEqual(line, retention.census_line(retention.read_state(self.product)))
+        self.assertIn('15 of 17 heads carry no open PR', line)
+        self.assertIn('3 unowned (prefixes analysis/ 1, integration/ 1, legacy/ 1)', line)
 
     def test_no_doctor_row_before_a_sweep(self):
         self.assertIsNone(doctor.check_branches(self.product))
+
+    def test_the_census_lands_in_the_state_file_and_deletes_nothing_new(self):
+        self.sweep(fix=True)
+        census = retention.read_state(self.product)['census']
+        self.assertTrue({'total', 'no_pr', 'by_rule', 'unowned'} <= set(census))
+        self.assertEqual(census['by_rule']['settled'], 2)  # legacy/T-0009, legacy/T-0011
+        left = self.heads()
+        for b in ('legacy/T-0009', 'legacy/T-0010', 'legacy/T-0011', 'integration/backfill'):
+            self.assertIn(b, left)
 
     def test_the_fetch_namespace_is_left_empty(self):
         self.sweep(fix=False)
@@ -195,6 +214,118 @@ class RetentionSweep(unittest.TestCase):
         self.assertIn('cloud/remote-held', flight)
         res, _lines = self.sweep(fix=False)  # must run to completion — never raise
         self.assertEqual(sorted(res['due']), DUE)
+
+
+class Census(unittest.TestCase):
+    """:func:`asf.workers.retention.census` and :func:`census_line`, driven with literal dicts —
+    no fixture, no git, no clock."""
+
+    #: The same 17 names the fixture's origin carries (``main`` plus every module-level
+    #: :data:`HEADS` entry); the shas stand in for shas nothing here reads.
+    _NAMES = ['main'] + list(HEADS)
+    HEADS = {b: f's{i}' for i, b in enumerate(_NAMES)}
+    #: legacy/T-0009 and legacy/T-0011 carry Closed cards; legacy/T-0010's is Open.
+    SETTLED = {'legacy/T-0009', 'legacy/T-0011'}
+
+    def conv(self, **retention_over):
+        return conventions.Conventions.from_mapping({
+            'branch_prefixes': {'code': 'cloud/'},
+            'branch_retention': {'legacy_prefixes': ['hb/', 'docs/', 'worker/'],
+                                 **retention_over},
+            'branch_patterns': {'hotfix': '*hotfix*'}})
+
+    def settled_of(self, b):
+        return f'{b} is Closed in the record' if b in self.SETTLED else None
+
+    def census(self, **retention_over):
+        conv = self.conv(**retention_over)
+        return conv, retention.census(conv, self.HEADS, {'worker/pr'}, {'hb/protected'},
+                                     {'cloud/held', 'docs/named'}, self.settled_of)
+
+    def test_every_head_lands_in_exactly_one_class(self):
+        _conv, data = self.census()
+        self.assertEqual(data['total'], 17)
+        self.assertEqual(sum(data['by_rule'].values()), 17)
+        self.assertEqual(data['by_rule'], {'trunk': 1, 'release': 1, 'protected': 1, 'held': 3,
+                                          'archive': 2, 'legacy': 3, 'settled': 2, 'lane': 1,
+                                          'unowned': 3})
+
+    def test_no_pr_is_every_head_but_the_trunk_that_carries_no_open_pr(self):
+        _conv, data = self.census()
+        self.assertEqual(data['no_pr'], 15)  # 17 heads, minus the trunk, minus worker/pr
+        conv = self.conv()
+        blind = retention.census(conv, self.HEADS, None, None, set(), lambda b: None)
+        self.assertIsNone(blind['no_pr'])
+
+    def test_the_unowned_map_and_the_unowned_class_are_different_counts(self):
+        conv, data = self.census()
+        self.assertEqual(data['unowned'], retention.unowned(conv, self.HEADS))
+        self.assertEqual(data['unowned'], {'legacy/': 3, 'analysis/': 1, 'integration/': 1})
+        self.assertEqual(data['by_rule']['unowned'], 3)  # legacy/T-0009, T-0011 are settled
+        self.assertNotEqual(sum(data['unowned'].values()), data['by_rule']['unowned'])
+
+    def test_an_archive_head_something_holds_is_held_not_archive(self):
+        conv = self.conv()
+        data = retention.census(conv, {'archive/x': 's'}, set(), set(), {'x'}, lambda b: None)
+        self.assertEqual(data['by_rule'], {'held': 1})
+
+    def test_a_settled_head_is_classed_settled_whatever_its_settled_of_reports(self):
+        """``census`` takes no age at all — a caller whose ``settled_of`` ignores age (as
+        :func:`asf.workers.retention.settled_reason` does) still lands the head as settled."""
+        conv = self.conv(settled_days=0)
+        data = retention.census(conv, {'young': 's'}, set(), set(), set(), lambda b: 'closed')
+        self.assertEqual(data['by_rule'], {'settled': 1})
+
+    def test_census_line_matches_the_designs_own_example(self):
+        data = {'census': {'total': 712, 'no_pr': 711,
+                           'by_rule': {'settled': 402, 'archive': 120, 'lane': 88,
+                                      'unowned': 51, 'held': 25},
+                           'unowned_groups': {'hotfix-': 40, 'analysis/': 11}},
+               'deleted': 50, 'due': 352}
+        self.assertEqual(retention.census_line(data),
+                         'branches: 711 of 712 heads carry no open PR — 402 settled, 120 archive,'
+                         ' 88 lane, 51 unowned (prefixes hotfix- 40, analysis/ 11), 25 held; '
+                         '50 deleted, 352 expired awaiting delete')
+
+    def test_census_line_when_the_pr_host_did_not_answer(self):
+        data = {'census': {'total': 5, 'no_pr': None, 'by_rule': {'unowned': 5},
+                           'unowned_groups': {'x/': 5}}, 'deleted': 0, 'due': 0}
+        self.assertEqual(retention.census_line(data),
+                         'branches: 5 heads, the PR host did not answer — 5 unowned '
+                         '(prefixes x/ 5); 0 deleted, 0 expired awaiting delete')
+
+    def test_doctor_line_is_ok_exactly_when_no_head_is_unowned(self):
+        home = tempfile.mkdtemp(prefix='census_home_')
+        self.addCleanup(shutil.rmtree, home, True)
+        with mock.patch.object(env, 'ASF_HOME', home):
+            product = env.Product('sample', {})
+            self.assertIsNone(retention.doctor_line(product))
+            retention.write_state(product, {'at': 't', 'heads': 1, 'unowned': {}, 'deleted': 0,
+                                            'due': 0, 'kept': 0,
+                                            'census': {'total': 1, 'no_pr': 1,
+                                                      'by_rule': {'trunk': 1},
+                                                      'unowned_groups': {}}})
+            ok, line = retention.doctor_line(product)
+            self.assertTrue(ok)
+            self.assertEqual(line, retention.census_line(retention.read_state(product)))
+            retention.write_state(product, {'at': 't', 'heads': 1, 'unowned': {'x/': 1},
+                                            'deleted': 0, 'due': 0, 'kept': 0,
+                                            'census': {'total': 1, 'no_pr': 1,
+                                                      'by_rule': {'unowned': 1},
+                                                      'unowned_groups': {'x/': 1}}})
+            ok, _line = retention.doctor_line(product)
+            self.assertFalse(ok)
+
+    def test_a_state_file_with_no_census_key_still_renders_todays_line(self):
+        home = tempfile.mkdtemp(prefix='census_home_')
+        self.addCleanup(shutil.rmtree, home, True)
+        with mock.patch.object(env, 'ASF_HOME', home):
+            product = env.Product('sample', {})
+            retention.write_state(product, {'at': 't', 'heads': 3, 'unowned': {'x/': 2},
+                                            'deleted': 0, 'due': 0, 'kept': 0})
+            ok, line = retention.doctor_line(product)
+            self.assertFalse(ok)
+            self.assertTrue(line.startswith('unowned branches: 2 (prefixes x/ 2)'), line)
 
 
 class RetentionConventions(unittest.TestCase):

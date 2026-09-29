@@ -56,23 +56,26 @@ def remote_heads(repo):
     return out
 
 
-def tip_dates(repo, prefixes):
-    """``{branch: (sha, committer unix time)}`` for origin's heads under ``prefixes`` — one fetch
-    into :data:`FETCH_NS`, one ``for-each-ref``, then the namespace is emptied."""
+def tips(repo, trunk):
+    """``({branch: (sha, committer unix time)}, {branch the trunk already contains})`` for every
+    head on origin — one fetch into :data:`FETCH_NS`, two ``for-each-ref`` reads, then the
+    namespace is emptied. Containment is read in the same pass because the settled rule needs
+    both facts about the same ref (D9)."""
     _clear_ns(repo)
-    specs = [f'+refs/heads/{p}*:{FETCH_NS}{p}*' for p in dict.fromkeys(prefixes)]
-    if not specs:
-        return {}
-    H.sh(['git', 'fetch', '-q', '--no-tags', 'origin', *specs], cwd=repo)
+    H.sh(['git', 'fetch', '-q', '--no-tags', 'origin',
+          f'+refs/heads/*:{FETCH_NS}*'], cwd=repo)
+    dates = {}
     r = H.sh(['git', 'for-each-ref', '--format=%(refname) %(objectname) %(committerdate:unix)',
               FETCH_NS], cwd=repo)
-    out = {}
     for line in r.stdout.splitlines():
         parts = line.split()
         if len(parts) == 3 and parts[2].isdigit():
-            out[parts[0][len(FETCH_NS):]] = (parts[1], int(parts[2]))
+            dates[parts[0][len(FETCH_NS):]] = (parts[1], int(parts[2]))
+    m = H.sh(['git', 'for-each-ref', '--merged', f'{FETCH_NS}{trunk}', '--format=%(refname)',
+              FETCH_NS], cwd=repo)
+    contained = {ref[len(FETCH_NS):] for ref in m.stdout.split()}
     _clear_ns(repo)
-    return out
+    return dates, contained
 
 
 def _clear_ns(repo):
@@ -161,8 +164,98 @@ def unowned_line(counts):
             if n else 'unowned branches: 0')
 
 
+#: The census's classes, in the order a head is tried against them: each head lands in exactly one.
+CENSUS_CLASSES = ('trunk', 'release', 'protected', 'held', 'archive', 'legacy', 'settled',
+                  'lane', 'unowned')
+
+
+def census(conv, heads, prs, protected, holds, settled_of):
+    """Every head on origin in exactly one class, plus ``no_pr`` — the number
+    ``clutter:branches`` reads (every head but the trunk that no open PR carries,
+    :data:`asf.scorecard.facts.forge_clutter`), or None when the PR list was unreadable.
+
+    ``holds`` is the branches something still holds (an in-flight run, an open card);
+    ``settled_of(b)`` is :func:`settled_reason`. The classes are tried in
+    :data:`CENSUS_CLASSES` order, so a head an open PR carries is ``held`` however it is named,
+    and an ``archive/`` head keeps the archive rule's days (D3)."""
+    active = {conv.prefix(k) for k in conv.kinds()}
+    legacy = conv.retention('legacy_prefixes')
+    by_rule = {c: 0 for c in CENSUS_CLASSES}
+    unowned_groups = {}
+    for b in heads:
+        names = [b, b[len(ARCHIVE_PREFIX):]] if b.startswith(ARCHIVE_PREFIX) else [b]
+        if conv.is_trunk(b):
+            cls = 'trunk'
+        elif b.startswith(RELEASE_PREFIXES):
+            cls = 'release'
+        elif b in (protected or ()):
+            cls = 'protected'
+        elif (prs is not None and any(n in prs for n in names)) or any(n in holds for n in names):
+            cls = 'held'
+        elif b.startswith(ARCHIVE_PREFIX):
+            cls = 'archive'
+        elif any(b.startswith(p) for p in legacy) and _longest(b, active) < _longest(b, legacy):
+            cls = 'legacy'
+        elif settled_of(b):
+            cls = 'settled'
+        elif conv.branch_kind(b):
+            cls = 'lane'
+        else:
+            cls = 'unowned'
+        by_rule[cls] += 1
+        if cls == 'unowned':
+            unowned_groups[group(b)] = unowned_groups.get(group(b), 0) + 1
+    no_pr = (sum(1 for b in heads if not conv.is_trunk(b) and b not in prs)
+            if prs is not None else None)
+    return {'total': len(heads), 'no_pr': no_pr,
+            'by_rule': {c: n for c, n in by_rule.items() if n},
+            'unowned': unowned(conv, heads),
+            'unowned_groups': dict(sorted(unowned_groups.items(), key=lambda kv: (-kv[1], kv[0])))}
+
+
+def census_line(data):
+    """``'branches: N of M heads carry no open PR — …; D deleted, E expired awaiting delete'``
+    off a ``sweep`` state dict — ``data['census']`` for the class split, ``data['deleted']`` and
+    ``data['due']`` for the tail. The non-zero classes are ordered by descending count then
+    :data:`CENSUS_CLASSES` order; the ``unowned`` class carries its own prefix tally (over just
+    the heads that class holds, not the wider :func:`unowned` map — PD10) in parentheses."""
+    c = data['census']
+    total, no_pr, by_rule = c['total'], c.get('no_pr'), c.get('by_rule') or {}
+    first = (f'{no_pr} of {total} heads carry no open PR' if no_pr is not None
+             else f'{total} heads, the PR host did not answer')
+    order = {cls: i for i, cls in enumerate(CENSUS_CLASSES)}
+    parts = []
+    for cls, n in sorted(((cls, n) for cls, n in by_rule.items() if n),
+                         key=lambda cn: (-cn[1], order[cn[0]])):
+        if cls == 'unowned':
+            groups = c.get('unowned_groups') or {}
+            prefixes = ', '.join(f'{p} {n}' for p, n in groups.items())
+            parts.append(f'{n} unowned (prefixes {prefixes})')
+        else:
+            parts.append(f'{n} {cls}')
+    return (f"branches: {first} — {', '.join(parts)}; "
+            f"{data.get('deleted', 0)} deleted, {data.get('due', 0)} expired awaiting delete")
+
+
 def _longest(branch, prefixes):
     return max((len(p) for p in prefixes if branch.startswith(p)), default=0)
+
+
+def settled_reason(items, b, contained):
+    """Why a head's work is over — or None, and then it is never a settled candidate.
+
+    ``the trunk carries it``: every commit on it is already on the trunk, so the delete loses
+    nothing, card or no card. ``<id> is <state> in the record``: the id token in its name is a
+    card :func:`asf.workers.lifecycle.closed_state` calls done or removed — the work it was cut
+    for is finished, whichever branch finished it. A head the trunk does not carry and no card
+    claims is never settled: the factory deletes nothing it cannot account for (Out)."""
+    from asf.harvest.lane import item_of
+    from asf.workers import lifecycle
+    if b in contained:
+        return 'the trunk carries it'
+    item = item_of(b, None)
+    closed = lifecycle.closed_state(items, item) if item else None
+    return f'{item} is {closed} in the record' if closed else None
 
 
 def candidates(conv, heads, dates, now, prs, protected, flight, item_text):
@@ -263,12 +356,14 @@ def sweep(product, fix=False, out=print, items=None, host=None, now=None):
     if items is None:
         from asf.workers.health import record_items
         items = record_items(product)
-    prefixes = [p for p in (ARCHIVE_PREFIX, *conv.retention('legacy_prefixes'))
-                if any(b.startswith(p) for b in heads)]
-    dates = tip_dates(repo, prefixes) if prefixes else {}
-    prs, protected = host if host is not None else (host_facts(product) if dates else (set(), set()))
-    due, kept = candidates(conv, heads, dates, now, prs, protected, in_flight(product),
-                           open_item_text(items))
+    dates, contained = tips(repo, conv.main)
+    prs, protected = host if host is not None else host_facts(product)
+    item_text = open_item_text(items)
+    flight = in_flight(product)
+    holds = flight | {b for b in heads if _names(item_text, b)}
+    due, kept = candidates(conv, heads, dates, now, prs, protected, flight, item_text)
+    census_result = census(conv, heads, prs, protected, holds,
+                          lambda b: settled_reason(items, b, contained))
     result['kept'] = kept
     blind = prs is None or protected is None
     cap = conv.retention('per_tick')
@@ -301,18 +396,28 @@ def sweep(product, fix=False, out=print, items=None, host=None, now=None):
         out(f'retention: {len(due) - cap} more expired, left for the next pass (per_tick {cap})')
     if result['unowned']:
         out(f"retention: {unowned_line(result['unowned'])}")
+    stamp = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime(
+        '%Y-%m-%dT%H:%M:%SZ')
     write_state(product, {
-        'at': datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime(
-            '%Y-%m-%dT%H:%M:%SZ'),
+        'at': stamp,
         'heads': len(heads), 'unowned': result['unowned'], 'deleted': len(result['deleted']),
-        'due': len(result['due']), 'kept': len(kept)})
+        'due': len(result['due']), 'kept': len(kept),
+        'census': {**census_result, 'at': stamp}})
     return result
 
 
 def doctor_line(product):
-    """``(ok, 'unowned branches: N (prefixes …)')`` from the last pass, or None before one ran."""
+    """``(ok, census_line(...))`` from the last pass's census, or the old ``unowned branches: N``
+    line for a state file an older binary wrote (no ``census`` key — an upgrade never loses the
+    row), or None before any pass has run. ``ok`` is False exactly when a head belongs to no rule
+    (:data:`CENSUS_CLASSES`'s ``unowned`` class)."""
     data = read_state(product)
-    if not isinstance(data, dict) or not isinstance(data.get('unowned'), dict):
+    if not isinstance(data, dict):
+        return None
+    census_data = data.get('census')
+    if isinstance(census_data, dict):
+        return not census_data.get('by_rule', {}).get('unowned'), census_line(data)
+    if not isinstance(data.get('unowned'), dict):
         return None
     counts = data['unowned']
     line = unowned_line(counts) + f" — of {data.get('heads', '?')} heads at {data.get('at', '?')}"
