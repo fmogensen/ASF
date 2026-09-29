@@ -563,6 +563,61 @@ class NamedTargets(unittest.TestCase):
         self.assertFalse(approvals._runs_deploy_workflow('gh workflow run ci.yml', p))
 
 
+class RelevanceFilter(unittest.TestCase):
+    """``excludes()`` and ``filtered()``: the defaults are added, never substituted, and never
+    make a filter where none was asked for. Nothing calls either yet — this Task changes no
+    observed behaviour."""
+
+    def test_paths_alone_gets_exactly_the_defaults(self):
+        self.assertEqual(deploy.excludes(_site(), 'site'), list(deploy.DEFAULT_EXCLUDES))
+
+    def test_an_own_exclude_follows_the_defaults_in_order(self):
+        p = _site(exclude=['apps/site/fixtures/**'])
+        self.assertEqual(deploy.excludes(p, 'site'),
+                         list(deploy.DEFAULT_EXCLUDES) + ['apps/site/fixtures/**'])
+
+    def test_a_repeated_default_and_a_self_repeat_each_appear_once(self):
+        p = _site(exclude=[deploy.DEFAULT_EXCLUDES[0], 'x/**', 'x/**'])
+        got = deploy.excludes(p, 'site')
+        self.assertEqual(got, list(deploy.DEFAULT_EXCLUDES) + ['x/**'])
+        self.assertEqual(len(got), len(deploy.DEFAULT_EXCLUDES) + 1)
+
+    def test_exclude_defaults_false_leaves_the_own_list_alone(self):
+        p = _site(exclude=['x/**', 'x/**'], exclude_defaults=False)
+        self.assertEqual(deploy.excludes(p, 'site'), ['x/**'])
+        empty = _site(exclude=[], exclude_defaults=False)
+        self.assertEqual(deploy.excludes(empty, 'site'), [])
+        self.assertTrue(deploy.filtered({'paths': deploy.paths(empty, 'site'), 'exclude': []}))
+
+    def test_neither_key_resolves_to_no_filter_at_all(self):
+        target = _modes(prod='manual')
+        target.deploy_sha['targets'] = {'site': {'mode': 'manual', 'workflow': 'site-deploy.yml'}}
+        self.assertEqual(deploy.excludes(target, 'site'), [])
+        self.assertEqual(deploy.excludes(_modes(prod='manual'), 'prod'), [])
+        self.assertEqual(deploy.excludes(_modes(dev='manual'), 'dev'), [])
+
+    def test_a_bare_string_coerces_like_paths_and_a_non_list_reads_as_none(self):
+        p = _site(exclude='docs/**')
+        self.assertEqual(deploy.excludes(p, 'site'), list(deploy.DEFAULT_EXCLUDES) + ['docs/**'])
+        p7 = _site(exclude=7)
+        self.assertEqual(deploy.excludes(p7, 'site'), list(deploy.DEFAULT_EXCLUDES))
+
+    def test_paths_and_exclude_read_the_same_under_prod_as_under_a_target(self):
+        p = _modes(prod='manual', prod_extra={'paths': ['apps/site/**'],
+                                              'exclude': ['apps/site/fixtures/**']})
+        self.assertEqual(deploy.paths(p, 'prod'), ['apps/site/**'])
+        self.assertEqual(deploy.excludes(p, 'prod'),
+                         list(deploy.DEFAULT_EXCLUDES) + ['apps/site/fixtures/**'])
+
+    def test_filtered_reads_paths_or_exclude_and_never_raises_on_a_bare_dict(self):
+        self.assertTrue(deploy.filtered({'paths': ['a/**'], 'exclude': []}))
+        self.assertTrue(deploy.filtered({'paths': [], 'exclude': ['a/**']}))
+        self.assertTrue(deploy.filtered({'paths': ['a/**'], 'exclude': ['b/**']}))
+        self.assertFalse(deploy.filtered({'paths': [], 'exclude': []}))
+        self.assertFalse(deploy.filtered({}))
+        self.assertFalse(deploy.filtered({'paths': []}))
+
+
 class Validation(unittest.TestCase):
     def _problems(self, block):
         from asf import env
