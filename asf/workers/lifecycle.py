@@ -781,7 +781,7 @@ def settled(path, item, at):
 PUSHED_SHA_RE = re.compile(r'\b[0-9a-f]{7,40}\b', re.I)
 
 
-def overruling(path, item, head, unchanged_since=None):
+def overruling(path, item, head, same_code=None):
     """The job of the adjudicate run whose ruling stands on ``head``, or None.
 
     An adjudicate session answers every open finding: *upheld* — it makes the edit and pushes it
@@ -795,10 +795,14 @@ def overruling(path, item, head, unchanged_since=None):
     The ``pushed:`` sha is the session's own claim, and it names the commit *it* thinks of as
     the tip — B-1377's rulings named the code commit under the review commit that is the head,
     and misspelled it past its ninth digit (``99bcb623ee0a…`` for ``99bcb623e36e…``), four more
-    sessions. So the ruling also stands on ``head`` when the run committed nothing
-    (``commits: none``) and spawn's ``launch_head`` — the fact — is ``head``, or when
-    ``unchanged_since(sha)`` (the lane's :func:`asf.evidence.review.only_reviews_since`) says
-    ``head`` is that sha plus review files only."""
+    sessions. So a ruling offers two shas: the one it claims, and — for a run that committed
+    nothing — spawn's recorded ``launch_head``, the fact behind the claim. Either stands on
+    ``head`` when it *is* ``head``, or when ``same_code(sha)`` (the lane's
+    :func:`asf.evidence.review.same_code`) says ``head`` carries the code that sha carried: the
+    same tree outside the reviews directory, or the same own patch over the trunk. The lane
+    rewrites a branch without changing what was ruled on — a review commit on top, a reword, a
+    sign-off, a restack onto a moved trunk — and the ruling is measured with the same ruler
+    B-0147 measures its review with, so the two stand or fall together."""
     if not head or not path or not item:
         return None
     from asf.workers import report as report_mod
@@ -817,14 +821,13 @@ def overruling(path, item, head, unchanged_since=None):
             or fields['blocked_on'] or fields['superseded_by']:
         return None
     m = PUSHED_SHA_RE.search(rep.get('pushed') or '')
-    sha = m.group(0).lower() if m else ''
-    if sha and head.lower().startswith(sha):
-        return run.get('job')
-    if not report_mod._claim(rep.get('commits')) and run.get('launch_head') \
-            and run['launch_head'].lower() == head.lower():
-        return run.get('job')  # launched on this head, committed nothing: the head it ruled on
-    if sha and unchanged_since and unchanged_since(sha):
-        return run.get('job')  # the head is that sha plus the review commit on top of it
+    ruled = [m.group(0).lower()] if m else []
+    if not report_mod._claim(rep.get('commits')) and run.get('launch_head'):
+        ruled.append(run['launch_head'].lower())  # the fact behind the claim, for a run that
+        # committed nothing: one that committed has moved the head past what it ruled on
+    for sha in ruled:
+        if head.lower().startswith(sha) or (same_code and same_code(sha)):
+            return run.get('job')
     return None
 
 

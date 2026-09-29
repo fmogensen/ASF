@@ -35,9 +35,10 @@ Transitions (plan §2 plus the §9 overrides):
                                class (a state, no round is spent)
 - T4  REVIEW → GATE            the review of the current head reads approved (or policy none)
 - T5  REVIEW → BACK            the review of the current head reads changes (rounds+1)
-- T5a REVIEW → GATE            ... unless an adjudicate ruling already answered it on this very
-                               head (:func:`asf.workers.lifecycle.overruling`): it overruled the
-                               C list and pushed nothing — no second hold, no second ruling
+- T5a REVIEW → GATE            ... unless an adjudicate ruling already answered it on the code
+                               this head carries (:func:`asf.workers.lifecycle.overruling`): it
+                               overruled the C list and pushed nothing — no second hold, no
+                               second ruling
 - T6  GATE → WAITING_CI        required checks pending/absent under ``landing_checks_missing``
 - T7  WAITING_CI → GATE        re-decided every harvest
 - T8  GATE → WAITING           trunk red alone (or a required check red on the trunk's latest
@@ -1372,10 +1373,12 @@ class Lane:
             if rv and rv.get('current') and rv.get('verdict') == review_mod.CHANGES:
                 f['review_answered'] = lifecycle.review_answered(self.path, item, rv.get('path'),
                                                                  head)
-                # the review's C list an adjudicate ruling already answered on this very head
+                # the review's C list an adjudicate ruling already answered on the code this
+                # head carries
                 f['overruled'] = lifecycle.overruling(
                     self.path, item, head,
-                    lambda sha: review_mod.only_reviews_since(repo, conv, sha, f'origin/{b}'))
+                    lambda sha: review_mod.same_code(repo, conv, sha, f'origin/{b}',
+                                                      trunk=f'origin/{trunk}'))
         return f
 
     # ---- orphans --------------------------------------------------------------------------
