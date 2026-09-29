@@ -80,7 +80,8 @@ def recurring_bug_count(product):
 
 def ci_red_days(product):
     """``groom.ci_red_days`` (default :data:`CI_RED_DAYS`): how recent a trunk failure of a
-    job must be for ``decide_or_close_ci_red`` to take the job as red."""
+    job must be for ``decide_or_close_ci_red`` to take the job as red — and, the same window,
+    how recent the job's newest trunk fact must be for the policy to answer off it at all."""
     v = _groom_config(product).get('ci_red_days')
     return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else CI_RED_DAYS
 
@@ -424,7 +425,8 @@ def decide_or_close_ci_red(item_id, rec, canonical, derived, ctx):
     """An auto-filed Bug saying a named CI job is red, judged by that job's trunk runs
     (``ctx.ci_runs``): its latest trunk run failed within ``ctx.ci_red_days`` → decided; its
     latest trunk run passed after the Bug was last filed → closed, green since the first run of
-    that green streak. No trunk run of the job, or only a stale failure → no answer."""
+    that green streak. No trunk run of the job, or a newest run older than ``ctx.ci_red_days`` →
+    no answer: a policy never answers off a fact older than its own window (F-0175)."""
     import datetime
     from asf.record import frontmatter
     typed, machine = frontmatter.split_machine(rec['meta'])
@@ -436,9 +438,9 @@ def decide_or_close_ci_red(item_id, rec, canonical, derived, ctx):
     if not runs:
         return None
     latest = runs[-1]
+    if ctx.now - latest['ts'] > datetime.timedelta(days=ctx.ci_red_days):
+        return None            # the job's newest fact is older than the window: no answer off it
     if latest['jobs'][job] == 'failure':
-        if ctx.now - latest['ts'] > datetime.timedelta(days=ctx.ci_red_days):
-            return None
         return Answer('yes', 'decided', True,
                       f"{job} failed on the trunk at {str(latest.get('sha') or '')[:9]}")
     filed = _filed_at(typed, machine)
