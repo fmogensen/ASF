@@ -92,6 +92,47 @@ class SetTests(unittest.TestCase):
         self.assertIsNone(amendable.reaches(p, ['docs/**']))
         self.assertEqual(amendable.reaches(p, ['docs/**', 'rules/*']), 'rules/*')
 
+    def test_partition_splits_inside_first_each_side_in_order(self):
+        p = product()
+        self.assertEqual(amendable.partition(p, ['rules/*']), (['rules/*'], []))
+        self.assertEqual(amendable.partition(p, ['docs/**']), ([], ['docs/**']))
+        self.assertEqual(amendable.partition(p, ['docs/**', 'rules/*']),
+                          (['rules/*'], ['docs/**']))
+        self.assertEqual(amendable.partition(p, []), ([], []))
+
+    def test_an_excluded_glob_lands_in_outside(self):
+        p = product(amendable_paths=['docs/process/*', '!docs/process/evidence/*'])
+        self.assertEqual(amendable.partition(p, ['docs/process/evidence/x/*']),
+                          ([], ['docs/process/evidence/x/*']))
+
+    def test_reaches_is_partitions_first_inside(self):
+        p = product()
+        cases = [['rules/*'], ['docs/**'], ['docs/**', 'rules/*'], []]
+        for globs in cases:
+            inside, _outside = amendable.partition(p, globs)
+            self.assertEqual(amendable.reaches(p, globs), (inside or [None])[0])
+        pe = product(amendable_paths=['docs/process/*', '!docs/process/evidence/*'])
+        globs = ['docs/process/evidence/x/*']
+        inside, _outside = amendable.partition(pe, globs)
+        self.assertEqual(amendable.reaches(pe, globs), (inside or [None])[0])
+
+    def test_glob_set_is_the_pair_and_threads_the_same_answer(self):
+        p = product()
+        gs = amendable.glob_set(p)
+        self.assertEqual(gs, (amendable.paths(p), amendable.excluded(p)))
+        for globs in [['rules/*'], ['docs/**'], ['docs/**', 'rules/*'], []]:
+            self.assertEqual(amendable.partition(p, globs, glob_set=gs),
+                              amendable.partition(p, globs))
+            self.assertEqual(amendable.reaches(p, globs, glob_set=gs),
+                              amendable.reaches(p, globs))
+        pe = product(amendable_paths=['docs/process/*', '!docs/process/evidence/*'])
+        gse = amendable.glob_set(pe)
+        globs = ['docs/process/evidence/x/*']
+        self.assertEqual(amendable.partition(pe, globs, glob_set=gse),
+                          amendable.partition(pe, globs))
+        self.assertEqual(amendable.reaches(pe, globs, glob_set=gse),
+                          amendable.reaches(pe, globs))
+
     def test_write_target(self):
         p = product()
         hit = amendable.write_target(p, 'Write', {'file_path': 'rules/R-0099.md'}, REPO_ROOT)

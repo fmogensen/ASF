@@ -139,14 +139,34 @@ def _reach(a, b):
     return a == b or fnmatch.fnmatch(a, b) or fnmatch.fnmatch(b, a)
 
 
-def reaches(product, globs):
+def reaches(product, globs, glob_set=None):
     """The first of `globs` (a Task's `writes:`) that overlaps the set — a glob intersection,
-    not a file test: `rules/*` and `rules/R-0042.md` both reach `rules/*.md`."""
+    not a file test: `rules/*` and `rules/R-0042.md` both reach `rules/*.md`. `glob_set`, when
+    given, is the `(paths, excluded)` pair to test against instead of reading `product`."""
     import fnmatch
-    out = excluded(product)
+    keep, out = glob_set if glob_set is not None else (paths(product), excluded(product))
     for g in globs:
         if any(fnmatch.fnmatch(g, x) for x in out):
             continue
-        if any(_reach(g, s) for s in paths(product)):
+        if any(_reach(g, s) for s in keep):
             return g
     return None
+
+
+def partition(product, globs, glob_set=None):
+    """``(inside, outside)`` — the globs of ``globs`` that reach the amendable set
+    (:func:`reaches`'s own two-way test) and those that do not, each in the order given.
+    A Task whose ``writes:`` splits non-empty on both sides is *bundled*: the console must
+    edit the ``inside`` half and no worker session may, so the ``outside`` half is dragged
+    to a writer that should never have had it (F-0232)."""
+    gs = glob_set if glob_set is not None else (paths(product), excluded(product))
+    inside, outside = [], []
+    for g in globs:
+        (inside if reaches(product, [g], glob_set=gs) else outside).append(g)
+    return inside, outside
+
+
+def glob_set(product):
+    """``(paths, excluded)`` for ``product`` — what an edge resolves once and threads to a
+    product-free reader, as ``footprint.shared_globs`` does for ``conventions.shared_paths``."""
+    return (paths(product), excluded(product))
