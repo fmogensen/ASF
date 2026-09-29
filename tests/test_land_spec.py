@@ -70,6 +70,34 @@ class LandTheApprovedSpec(unittest.TestCase):
     def runs(self):
         return lifecycle.by_branch(pool_mod.sessions_path(self.product))
 
+    def declared(self, *globs):
+        """The same repo, read by a product that declares `globs` as documents."""
+        return env.Product("sample", {"repo_dir": self.work, "main": "main",
+                                      "conventions": {"doc_paths": list(globs)}})
+
+    def test_a_branch_touching_a_declared_doc_path_lands_as_it_stands(self):
+        self.push_branch(self.lane, {"docs/specs/f-0001.md": "# widgets\n",
+                                     "decisions/0007-widgets.md": "the register\n"})
+        product = self.declared("decisions/**")
+        self.assertEqual(land_spec.why_not_as_is(product, self.lane, "F-0001"), "")
+        self.assertEqual(land_spec.adopt(product, self.items(self.lane), out=lambda *_a: None),
+                         [("F-0001", self.lane, "")])
+        self.assertEqual(self.runs()[self.lane]["lane"]["state"], "PUSHED")
+        self.assertIsNone(lifecycle.pending_correction(self.runs()[self.lane]))
+
+    def test_an_undeclared_path_is_not_docs_only(self):
+        self.push_branch(self.lane, {"docs/specs/f-0001.md": "# widgets\n",
+                                     "decisions/0007-widgets.md": "the register\n"})
+        self.assertIn("more than documents",
+                      land_spec.why_not_as_is(self.product, self.lane, "F-0001"))
+
+    def test_a_declared_doc_path_never_carries_code_in_with_it(self):
+        self.push_branch(self.lane, {"docs/specs/f-0001.md": "# widgets\n",
+                                     "decisions/0007-widgets.md": "the register\n",
+                                     "src/a.py": "x = 1\n"})
+        self.assertIn("more than documents",
+                      land_spec.why_not_as_is(self.declared("decisions/**"), self.lane, "F-0001"))
+
     def test_a_clean_docs_only_lane_branch_is_handed_to_the_docs_lane(self):
         self.push_branch(self.lane, {"docs/specs/f-0001.md": "# widgets\n"})
         done = land_spec.adopt(self.product, self.items(self.lane), now="2026-01-01T00:00:00Z",
