@@ -847,12 +847,17 @@ def keep_red_output(text, verdict, only=None):
         return None
 
 
-def product_gate(tmp, conv, asf_repo, out=None, only=None):
+def product_gate(tmp, conv, asf_repo, out=None, only=None, timing=True):
     """``(ok, first failing line, files, red modules)``: the product's test command, then — on
     asf's own repo — its generic and conventions checks. Each within ``harvest.gate_timeout_s``
     (B-0072). With ``only`` (module names): just those modules of the test command, named in
     :data:`ONLY_VAR`, and no checks — a bisection's targeted re-run; the full gate confirms
-    whatever lands. ``out`` gets one timing line per gate: ``gate: <n> modules, <s>s, red: …``."""
+    whatever lands. ``out`` gets one timing line per gate: ``gate: <n> modules, <s>s, red: …``.
+    With ``timing=False`` — a rehearsal, ``asf tick --dry-run`` — that line carries no duration
+    (``gate: <n> modules, red: …``): the rehearsal's transcript is compared run against run, and
+    an elapsed time is the one token in it that is not a function of the record. The gate's real
+    duration still reaches ``gates.jsonl`` through :func:`asf.harvest.lane.gate_groups`'s own
+    clock."""
     env = gate_env(tmp)
     cmds = []
     if conv.test_command:
@@ -869,7 +874,8 @@ def product_gate(tmp, conv, asf_repo, out=None, only=None):
 
     def timed(verdict):
         if out:
-            out(f'gate: {count[0]} modules, {time.monotonic() - started:.0f}s, {verdict}')
+            secs = f'{time.monotonic() - started:.0f}s, ' if timing else ''
+            out(f'gate: {count[0]} modules, {secs}{verdict}')
 
     for i, cmd in enumerate(cmds):
         rc, stdout, err = sh_timed(cmd, tmp, env, timeout)

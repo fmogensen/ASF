@@ -1354,8 +1354,8 @@ class ProductHarvestTests(unittest.TestCase):
         real = harvest.product_gate
         fulls = []
 
-        def gate(tmp, conv, asf_repo, out=None, only=None):
-            ok, line, files, red = real(tmp, conv, asf_repo, out, only)
+        def gate(tmp, conv, asf_repo, out=None, only=None, timing=True):
+            ok, line, files, red = real(tmp, conv, asf_repo, out, only, timing=timing)
             if not only:
                 fulls.append(ok)
                 if len(fulls) > 1:  # every confirmation is red on a module nobody named
@@ -1397,12 +1397,12 @@ class ProductHarvestTests(unittest.TestCase):
         real = harvest.product_gate
         fulls = []
 
-        def gate(tmp, conv, asf_repo, out=None, only=None):
+        def gate(tmp, conv, asf_repo, out=None, only=None, timing=True):
             if not only:
                 fulls.append(1)
                 if len(fulls) == 1:
                     return False, 'ERROR: setUpClass (checks.test_fx.Fx)', [], ('test_fx',)
-            return real(tmp, conv, asf_repo, out, only)
+            return real(tmp, conv, asf_repo, out, only, timing=timing)
         return mock.patch.object(harvest, 'product_gate', side_effect=gate)
 
     @staticmethod
@@ -2704,6 +2704,41 @@ class ForeignRedTests(unittest.TestCase):
 PRODUCT_REPOS = Template(ProductHarvestTests.build, prefix='harvest_product_')
 
 
+class GateTimingLineTests(unittest.TestCase):
+    """F-0159, D4: a rehearsal and a journal are different documents — the live gate line keeps
+    its seconds (an operator watches it creep toward ``gate_timeout_s``), but a rehearsal's
+    transcript is diffed run against run, and an elapsed time is the one token in it that is not
+    a function of the record. Does not subclass :class:`ProductHarvestTests` (PD1): that would
+    re-run its 113 inherited tests a second time."""
+
+    setUp = ProductHarvestTests.setUp
+    write = ProductHarvestTests.write
+    product = ProductHarvestTests.product
+    push_lane = ProductHarvestTests.push_lane
+    session = ProductHarvestTests.session
+    lanes = ProductHarvestTests.lanes
+    harvest = ProductHarvestTests.harvest
+
+    def test_a_rehearsals_gate_line_carries_no_duration(self):
+        self.lanes(3)
+        lines = []
+        harvest.run_product_harvest(self.product(), self.state_dir, dry_run=True,
+                                    out=lines.append)
+        gates = [l for l in lines if l.startswith('gate: ')]
+        self.assertTrue(gates, lines)  # PD2: an empty list here is the vacuous pass to avoid
+        for line in gates:
+            self.assertRegex(line, r'^gate: \S+ modules, (green|red: .+)$')
+            self.assertNotRegex(line, r'\d+s')
+
+    def test_a_live_gate_line_still_carries_its_duration(self):
+        self.lanes(3)
+        _results, lines = self.harvest(self.product(), timings=True)  # PD2: timings=True
+        gates = [l for l in lines if l.startswith('gate: ')]
+        self.assertTrue(gates, lines)
+        for line in gates:
+            self.assertRegex(line, r'^gate: \S+ modules, \d+s, (green|red: .+)$')
+
+
 class GateLedgerTests(unittest.TestCase):
     """§2.2's ledger half: every landing gate — per-branch or combined — appends one timed, named
     line to ``gates.jsonl``, and :func:`asf.metrics.metrics.gates_from_ledger` reads it back."""
@@ -2825,6 +2860,20 @@ class GateLedgerTests(unittest.TestCase):
         self.assertEqual(len(groups), 1)
         self.assertTrue(groups[0][2])
         self.assertEqual(self.ledger(), [])
+
+    def test_the_ledger_still_records_the_gates_real_seconds(self):
+        """D2: dropping the duration from the rehearsal's *line* costs the record nothing — the
+        ledger is fed by :func:`asf.harvest.lane.gate_groups`'s own clock, untouched by
+        ``timing`` (PD6). A dry run writes to the copy, never here (P10), so this is live."""
+        branch = self.lane(1)
+        results, _lines = self.harvest(self.product())
+        self.assertEqual(results, {branch: 'landed'})
+        lines = self.ledger()
+        self.assertEqual(len(lines), 1)
+        self.assertIsInstance(lines[0]['seconds'], (int, float))
+        self.assertGreaterEqual(lines[0]['seconds'], 0)
+        self.assertIn('line', lines[0])
+        self.assertIs(lines[0]['ok'], True)
 
     def test_the_ledger_a_harvest_writes_is_read_back_into_a_valid_gates_event(self):
         from asf.metrics import metrics
