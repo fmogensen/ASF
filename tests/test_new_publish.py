@@ -9,6 +9,7 @@ import tempfile
 import unittest
 
 from asf.groom.inbox import cmd_inbox
+from asf.record import frontmatter
 from asf.record.ids import write_new_item
 from asf.record.new import cmd_new
 
@@ -54,6 +55,16 @@ class NewPublishesTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(git(self.root, 'status', '--porcelain'), '')
         self.assertEqual(git(self.root, 'rev-parse', 'HEAD'), git(self.origin, 'rev-parse', 'main'))
+
+    def test_write_new_item_state_keyword(self):
+        write_new_item(self.root, {}, 'decision', 'D-0001', {'title': 'A decision'}, '',
+                       '2026-01-01', 'seed', state='Closed')
+        with open(os.path.join(self.root, 'decisions', 'D-0001.md'), encoding='utf-8') as f:
+            meta, _body = frontmatter.parse(f.read())
+        self.assertEqual(meta['state'], 'Closed')
+        with open(os.path.join(self.root, 'features', 'F-0001.md'), encoding='utf-8') as f:
+            meta, _body = frontmatter.parse(f.read())
+        self.assertEqual(meta['state'], 'New')
 
 
 if __name__ == '__main__':
