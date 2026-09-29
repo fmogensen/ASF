@@ -194,10 +194,147 @@ def doc_carriers(path, branches, product):
 
 # ---- inputs ---------------------------------------------------------------------------------
 def remote_branches(product=None):
+    return set(remote_heads(product=product))
+
+
+def remote_heads(product=None):
+    """``{branch: sha}`` of every branch on origin (one fetch, one ``ls-remote``)."""
     product = product or env.load_product()
     sh("git fetch --prune -q origin", timeout=180, product=product)
     out = sh("git ls-remote --heads origin", timeout=120, product=product)
-    return {ln.split("refs/heads/", 1)[1] for ln in out.splitlines() if "refs/heads/" in ln}
+    heads = {}
+    for ln in out.splitlines():
+        sha, _, ref = ln.partition("\t")
+        if ref.startswith("refs/heads/"):
+            heads[ref[len("refs/heads/"):]] = sha.strip()
+    return heads
+
+
+#: The tag a closed-unmerged PR's head is kept under when the PR is closed without landing
+#: (``archive/pr-<N>``) — the provenance a reset Task records.
+ARCHIVE_PR_TAG = "archive/pr-{}"
+_ARCHIVE_PR_RE = re.compile(r"^refs/tags/archive/pr-(\d+)(\^\{\})?$")
+
+
+def archive_tags(product=None):
+    """``{pr number: sha}`` of every ``archive/pr-<N>`` tag on origin (an annotated tag read as
+    the commit it points at)."""
+    product = product or env.load_product()
+    out = sh("git ls-remote --tags origin 'refs/tags/archive/pr-*'", timeout=120, product=product)
+    tags = {}
+    for ln in out.splitlines():
+        sha, _, ref = ln.partition("\t")
+        m = _ARCHIVE_PR_RE.match(ref.strip())
+        if m and (m.group(2) or int(m.group(1)) not in tags):
+            tags[int(m.group(1))] = sha.strip()
+    return tags
+
+
+#: Branches a reset never touches: an operator's hotfix, and the factory's own archives.
+RESET_EXEMPT = ("hotfix/", "archive/")
+
+
+def dead_branches(heads, prs, archive=None, prefixes=None, committed=None):
+    """``{branch: {pr, head, archive}}`` — the lane branches whose work was closed without
+    landing: the newest PR on the branch is CLOSED unmerged, no PR on it is open or merged,
+    and the branch holds nothing newer than the close — it sits at that PR's head or at its
+    ``archive/pr-<N>`` tag, or its head was committed at or before ``closedAt`` (a session's
+    push that arrived after the close). A branch the list shows no PR for is dead when an
+    ``archive/pr-<N>`` tag sits at its head (the closer's own record, for a PR older than the
+    list). Such a branch is no evidence of work in flight: its item restarts from its
+    spec/plan. A branch committed past the close carries new work and is alive; ``hotfix/*``
+    and ``archive/*`` are never dead here. ``archive`` is the tag's name when one sits at the
+    head (provenance), else ''. Pure: ``heads`` is :func:`remote_heads`, ``prs``
+    :func:`pr_list`, ``archive`` :func:`archive_tags`, ``committed`` ``{sha: committer ISO
+    time}`` of the heads it asks about (:func:`commit_times`)."""
+    prefixes = prefixes or branch_prefixes()
+    lanes = tuple(v for k in ("code", "fix", "spec", "plan") for v in [prefixes.get(k)] if v)
+    archive = archive or {}
+    committed = committed or {}
+    tag_at = {}
+    for n, sha in archive.items():
+        tag_at.setdefault(sha, max(n, tag_at.get(sha, 0)))
+    by_head = {}
+    for p in prs or ():
+        by_head.setdefault(p.get("headRefName") or "", []).append(p)
+    out = {}
+    for b, sha in sorted((heads or {}).items()):
+        if b.startswith(RESET_EXEMPT) or not lanes or not b.startswith(lanes) or not sha:
+            continue
+        on_b = by_head.get(b) or []
+        if not on_b:
+            n = tag_at.get(sha)
+            if n:
+                out[b] = {"pr": n, "head": sha, "archive": ARCHIVE_PR_TAG.format(n)}
+            continue
+        if any(p.get("state") in ("OPEN", "MERGED") for p in on_b):
+            continue
+        last = max(on_b, key=lambda p: p.get("number") or 0)
+        n = last.get("number")
+        if last.get("state") != "CLOSED" or not n:
+            continue
+        tag = archive.get(n)
+        closed_at = _utc(last.get("closedAt"))
+        stale = bool(closed_at) and bool(_utc(committed.get(sha))) \
+            and _utc(committed.get(sha)) <= closed_at
+        if sha not in (last.get("headRefOid"), tag) and not stale:
+            continue  # committed past the close: new work, alive
+        out[b] = {"pr": n, "head": sha, "archive": ARCHIVE_PR_TAG.format(n) if tag == sha else ""}
+    return out
+
+
+def _utc(stamp):
+    """An ISO time as a comparable UTC string (``YYYY-MM-DDTHH:MM:SS``), '' when unreadable."""
+    import datetime
+    try:
+        t = datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return ""
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=datetime.timezone.utc)
+    return t.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def closed_moved_heads(heads, prs, archive=None, prefixes=None):
+    """The heads :func:`dead_branches` needs a commit time for: lane branches whose newest PR
+    is closed unmerged and whose head is neither that PR's head nor its archive tag."""
+    prefixes = prefixes or branch_prefixes()
+    lanes = tuple(v for k in ("code", "fix", "spec", "plan") for v in [prefixes.get(k)] if v)
+    last = {}
+    for p in prs or ():
+        b = p.get("headRefName") or ""
+        if b in (heads or {}) and (p.get("number") or 0) > (last.get(b) or {}).get("number", 0):
+            last[b] = p
+    return sorted({heads[b] for b, p in last.items()
+                   if lanes and b.startswith(lanes) and p.get("state") == "CLOSED"
+                   and heads[b] not in (p.get("headRefOid"), (archive or {}).get(p.get("number")))})
+
+
+def commit_times(shas, product=None):
+    """``{sha: committer ISO time}`` for the commits the local clone holds (one ``git show``)."""
+    if not shas:
+        return {}
+    out = sh("git show -s --format=%H%x09%cI " + " ".join(shas), product=product)
+    times = {}
+    for ln in (out or "").splitlines():
+        sha, _, at = ln.partition("\t")
+        if sha and at:
+            times[sha.strip()] = at.strip()
+    return times
+
+
+def resets_of(dead, live=()):
+    """``{item id: {branch, pr, head, archive}}`` — the items :func:`dead_branches` names, by
+    the id tokens in each dead branch's name (the newest PR wins when two name one item). An
+    item a ``live`` branch still names (its plan PR closed, its code branch at work) is not
+    reset: its work is in flight elsewhere."""
+    alive = {iid for b in live or () for iid in id_tokens(b, BRANCH_ID_TOKEN)}
+    out = {}
+    for b, d in sorted((dead or {}).items(), key=lambda kv: kv[1].get("pr") or 0):
+        for iid in id_tokens(b, BRANCH_ID_TOKEN):
+            if iid not in alive:
+                out[iid] = dict(d, branch=b)
+    return out
 
 
 def pr_list(product=None):
@@ -212,7 +349,7 @@ def pr_list(product=None):
     # mergeCommit is extra vs. factory-board.py's field list: evidence.py needs the merge sha
     # (Feature/Task Closed rules), factory-board.py's board never did; `body` carries id tokens.
     raw = sh(f"gh pr list -R {product.repo_slug} --state all --limit 300 "
-             "--json number,title,body,state,headRefName,mergedAt,mergeCommit", timeout=180,
+             "--json number,title,body,state,headRefName,headRefOid,closedAt,mergedAt,mergeCommit", timeout=180,
              product=product)
     try:
         data = json.loads(raw) if raw else []
@@ -431,8 +568,14 @@ def discover(product=None, checked_file=None):
     briefs_dir = conv.get("briefs_dir")
     matrix_path = conv.get("matrix_path")
 
-    branches = remote_branches(product=product)
+    heads = remote_heads(product=product)
     prs = pr_list(product=product)
+    # a lane branch whose PR was closed unmerged is not work in flight (its item resets to its
+    # spec/plan); an `archive/*` branch is a kept copy, never work in flight either
+    tags = archive_tags(product=product)
+    moved = closed_moved_heads(heads, prs, tags, prefixes)
+    dead = dead_branches(heads, prs, tags, prefixes, commit_times(moved, product=product))
+    branches = {b for b in heads if b not in dead and not b.startswith("archive/")}
     pr_by_head = {}
     for p in prs:
         pr_by_head.setdefault(p.get("headRefName") or "", []).append(p)
@@ -717,6 +860,7 @@ def discover(product=None, checked_file=None):
         "main_sha": main_sha or None,
         "merged": merged,
         "branches": sorted(branches),
+        "resets": resets_of(dead, branches),
         "ids": id_evidence(product, branches, prs, commits=commits, merges=merges),
         "lane_docs": lane_docs(product, prs, commits=commits, merges=merges),
         "proves": landed_proves(product, prs),

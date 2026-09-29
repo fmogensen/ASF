@@ -849,7 +849,7 @@ def _derived_fields(root):
 def _default_ingest(root):
     import argparse
     from asf.record.ingest import cmd_ingest
-    cmd_ingest(argparse.Namespace(fresh=True, product=None), root)
+    cmd_ingest(argparse.Namespace(fresh=True, product=None, registry=False), root)
 
 
 def check_i6(root, ingest=None):

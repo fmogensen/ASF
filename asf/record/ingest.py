@@ -582,6 +582,32 @@ def restamp(root):
     return schema.stamp_cards(root, version)
 
 
+def reset_line(reset):
+    """The evidence line of a Task whose PR was closed unmerged (``ev['resets']``)."""
+    kept = f"; its head kept as {reset['archive']}" if reset.get('archive') else ''
+    return (f"PR #{reset.get('pr')} closed unmerged on {reset.get('branch')}{kept} "
+            f"— reset to ready")
+
+
+def apply_resets(ev, product, out=print, alive=None):
+    """Write one registry reset line (:func:`asf.workers.lifecycle.note_reset`) per item the
+    evidence names in ``ev['resets']`` — a PR closed unmerged, its branch still at that head —
+    so that item's old rounds, corrections, rulings and waits stop counting and its next session
+    cuts the branch fresh from the trunk. Idempotent: an item already reset for that PR and
+    head is skipped, and so is one a live session holds. Returns the items reset now."""
+    if product is None:
+        return []
+    from asf.workers import lifecycle, pool as pool_mod
+    path = pool_mod.sessions_path(product)
+    if not os.path.isfile(path):
+        return []
+    done = [iid for iid, r in sorted((ev.get('resets') or {}).items())
+            if lifecycle.note_reset(path, iid, r, alive=alive)]
+    if done:
+        out(f"ingest: reset {len(done)} item(s) whose PR closed unmerged: {', '.join(done)}")
+    return done
+
+
 def cmd_ingest(args, root):
     # the evidence is the record's product's (B-0050): the resolved --product, else the default
     # when one is configured (a record with no product configured reads evidence's own default)
@@ -599,6 +625,8 @@ def cmd_ingest(args, root):
                                           product=product)
     if staged.refused:
         do_index(root)  # the derived sections and index.json over the cards that stood
+    if getattr(args, 'registry', True):
+        apply_resets(ev, product)
     return rc
 
 
@@ -675,6 +703,11 @@ def derive(canonical, ev, product=None, now=None, date=None, bypass_sticky=()):
             lines = [f"PR #{tev['pr']} {tev.get('pr_state')}"]
         else:
             lines = [f"in plan {slug} ({tid}), no branch yet"]
+        reset = (ev.get('resets') or {}).get(iid)
+        if reset and not commit and not merged:
+            # its PR was closed unmerged and its branch still sits at that head: the evidence
+            # above no longer counts that branch, so the Task derives back to ready (New)
+            lines = [ln for ln in lines if not ln.startswith('no evidence found')] + [reset_line(reset)]
         # a merged PR is its own green: a plan's Task never waited on CI to close
         green = bool(iev.get('green')) if commit else bool(merged)
         settle(iid, 'task', closing.Ev(commit=commit, green=green, merged_sha=merged,
