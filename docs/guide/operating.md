@@ -209,7 +209,8 @@ Other holds you will see:
   relaunched with the refusal in its brief, and a repeat goes to the groom's adjudicator.
 - `parked <branch>: ended empty 2 times …` — a Task whose sessions wrote nothing twice. Check
   whether its work is already on the trunk, then close the Task, reshape its plan, or release it:
-  `asf unpark <item> --why "<reason>" --product <p>`.
+  `asf unpark <item> --why "<reason>" --product <p>` — one call releases **every** park the item
+  is holding and prints how many; anything still holding it afterwards is named on its own line.
 - `held <branch>: ruling belongs in the record` — an adjudicate ruling was committed to the product
   repo instead of reported.
 - `held <branch>: commits do not name <ITEM>: every commit subject on the branch names its item …`
