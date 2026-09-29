@@ -2,6 +2,32 @@
 
 One entry per released version, newest first.
 
+## v0.1.79 — 2026-09-29
+
+### Bugs fixed
+
+- B-0019 Health reaps a live job whose branch has no commits yet (reads "no commits" as "merged")
+- B-0141 An upgrade that cannot install still parks every product's ticks for 30 minutes
+
+### In progress
+
+- F-0190 Deploy relevance counts test-only commits as undeployed changes
+- F-0200 Intake: an S1 card stuck on a signature question sits silently; the 'S1:' title prefix is ignored
+- F-0201 Landed spec/plan branches keep their worker worktree
+- F-0203 Lane rebases a PR onto a moved main mid-CI, restarting its required jobs (S1 #858 superseded 4x)
+- F-0204 merge_skipped: a missing non-Actions required check counts as path-filtered
+- F-0206 Orphaned dead session row (B-1381, unknown account) never reaped for 5 h
+- F-0207 Pending upgrade starves: every owner tick defers because another owner tick is running
+- F-0208 Plan preflight across open branches: refuse a reserved range another open branch already holds
+- F-0209 Plans get writes: right; lane widens writes: on refusal instead of dying
+- F-0212 The approvals hook holds a read-only 'git config core.hooksPath' as a security write
+- F-0218 asf unpark releases one parked job per call
+- F-0223 Sessions die with 'failed' 6.5 times a week
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.79"`
+
 ## v0.1.78 — 2026-09-29
 
 ### Bugs fixed
