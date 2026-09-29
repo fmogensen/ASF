@@ -23,7 +23,7 @@ import re
 
 from asf.evidence import evidence
 from asf.record.core import canonicalize, load_items, today
-from asf.record import decisions, idcheck, idclaim, plan_order
+from asf.record import decisions, idcheck, idclaim, plan_order, trunk_check
 from asf.record.ids import mint_id, write_new_item
 from asf.record.ingest import is_retired, match_feature
 
@@ -163,10 +163,24 @@ def _mint(root, product, ev, out=print, read_ref=None):
                 out(f"plan-tasks: {fid}: {plan_path} {t['tid']} duplicates {dup} "
                     f"(same parent, stories and writes) — not minted")
                 continue
+            # F-0106: the trunk is asked before the card is born. A Task whose named tests are
+            # already on origin/main is minted closed-by-trunk with the sha, not New — a coder
+            # launched onto it would find the surface there and end `empty branch` (T-0083/T-0084).
+            found = (trunk_check.satisfied_on_trunk(product, t['body'], writes)
+                    if product is not None else None)
+            state, why = 'New', f'plan {fid}'
+            if found:
+                sha, subject, reason = found
+                typed['landed'] = sha
+                state = 'Closed'
+                why = f'plan {fid} — already on the trunk at {sha[:12]}: {reason}'
+                out(f'plan-tasks: {fid}: {t["tid"]} is already on the trunk at {sha[:12]} '
+                    f'"{subject[:60]}" — minted Closed ({reason})')
             new_id = mint_id(root, canonical, 'task')
             keys[new_id] = idcheck.task_key(fid, typed.get('stories'), typed.get('writes'))
             body = t['body'].strip()[:DESCRIPTION_CHARS]
-            write_new_item(root, canonical, 'task', new_id, typed, body, today(), f'plan {fid}')
+            write_new_item(root, canonical, 'task', new_id, typed, body, today(), why,
+                           state=state)
             ids.append(new_id)
         made.extend(ids)
         out(f"plan-tasks: {fid}: {len(ids)} Task(s) from {plan_path}: {', '.join(ids)}")
