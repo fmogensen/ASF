@@ -865,6 +865,20 @@ class TestSchedulerSection(unittest.TestCase):
                        'declared in products/sample.yaml but not loaded'), rows)
         self.assertTrue(doctor.scheduler_is_red(rows))
 
+    def test_a_paused_clock_is_a_paused_row_not_red(self):
+        from asf import scheduler
+        product = env.Product('sample', {'repo_dir': self.tmp, 'repo_slug': 'acme/sample',
+                                         'backlog_dir': self.tmp,
+                                         'clocks': {'tick': {'shadow': True, 'every': '10m'}}})
+        self.install_plist('asf.sample.tick', ['python3'])
+        scheduler.pause('sample', ['tick'], 'operator reset', 'op')
+        fake_loaded(self.statedir, [])
+        rows = doctor.scheduler_rows(self.cfg(), product)
+        self.assertEqual([(r[0], r[1]) for r in rows], [(doctor.YELLOW, 'PAUSED')])
+        self.assertIn('asf.sample.tick paused since', rows[0][2])
+        self.assertIn('operator reset', rows[0][2])
+        self.assertFalse(doctor.scheduler_is_red(rows))
+
     def test_daily_job_never_ran_uses_a_day_not_the_global_interval(self):
         self.install_plist('asf.sample.daily', ['python3'],
                            calendar={'Hour': 6, 'Minute': 50}, age_s=1800)

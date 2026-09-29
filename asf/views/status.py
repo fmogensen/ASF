@@ -27,6 +27,8 @@ Every row is filled from what exists, or says which key would fill it —
   ``five_h_resets_at`` when it prints one; a reading older than ``quota_guards.stale_after_min``
   (by the source's ``polled_at``) says ``stale since HH:MM``, and one that was at or over a stop
   when read stays ``stop`` to that window's reset;
+* **PAUSED** — the clocks ``asf scheduler pause`` holds unloaded (reason, who, since when);
+  no row while none is;
 * **Cron** — the scheduler adapter's ``status()`` of this product's loaded jobs, behind
   ``waiting on upgrade to <sha> since <time> (owner <product>)`` while a pending upgrade marker
   parks every tick (:func:`asf.upgrade.held`).
@@ -372,6 +374,17 @@ def quota_lock_prefix(cfg):
     return f'{w.label}; ' if w is not None and w.wedged else ''
 
 
+def paused_cell(cfg, product):
+    """``PAUSED``: each clock ``asf scheduler pause`` holds unloaded, with its reason, who and
+    when — no row while none is paused."""
+    from asf import scheduler
+    pauses = scheduler.read_pauses(product.name)
+    if not pauses:
+        return None
+    return '; '.join(f'{scheduler.label_for(product.name, clock, cfg)} '
+                     f'{scheduler.pause_text(record)}' for clock, record in sorted(pauses.items()))
+
+
 def cron_cell(cfg, product):
     from asf import scheduler, upgrade
     # a loaded, on-time clock says nothing about whether ticks run: while an upgrade marker is
@@ -401,7 +414,8 @@ def cron_cell(cfg, product):
         info = scheduler.status(job['label'])
         exit_text = 'never exited' if info.get('never_exited') else f"exit {info.get('last_exit')}"
         parts.append(f"{job['label']} {info.get('state') or '?'} ({exit_text})")
-    parts.extend(f'clock {label} not loaded' for label in missing)
+    parts.extend(f'clock {label} paused' if scheduler.pause_record(label, cfg) is not None
+                 else f'clock {label} not loaded' for label in missing)
     return prefix + '; '.join(parts)
 
 
@@ -497,6 +511,7 @@ def render(root, product, cfg=None):
                        ('Ready to launch', lambda: ready_cell(root, product)),
                        ('Decisions', lambda: decisions_cell(root, product)),
                        ('Quota 5h/7d', lambda: quota_cell(cfg)),
+                       ('PAUSED', lambda: paused_cell(cfg, product)),
                        ('Cron', lambda: cron_cell(cfg, product)),
                        ('Groom', lambda: groom_cell(root, product)),
                        ('Gate', lambda: gate_cell(product)),

@@ -343,7 +343,10 @@ def _clock_labels(product_name, cfg):
 
 
 def _clocks_not_loaded(labels):
-    return [label for label in labels if not scheduler.status(label).get('loaded')]
+    """The labels launchd does not hold — a paused clock (``asf scheduler pause``) is meant to be
+    unloaded, so it is never counted, and never retried into loading."""
+    return [label for label in labels if not scheduler.status(label).get('loaded')
+            and scheduler.pause_record(label) is None]
 
 
 def _step_scheduler(args):

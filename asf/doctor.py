@@ -740,7 +740,15 @@ def scheduler_rows(cfg, product, jobs=None):
     # ever sees what's loaded, so this is the one place that would otherwise be silent
     missing = sorted(scheduler.label_for(product.name, c.name, cfg) for c in declared
                      if scheduler.label_for(product.name, c.name, cfg) not in loaded_labels)
-    if not jobs and not missing:
+    paused = {label: scheduler.pause_record(label, cfg)
+              for label in scheduler.product_labels(product.name, cfg) + missing}
+    paused = {label: record for label, record in paused.items()
+              if record is not None and label not in loaded_labels}
+    for label in sorted(paused):
+        rows.append((YELLOW, 'PAUSED', f'{label} {scheduler.pause_text(paused[label])} — '
+                     f'{scheduler.resume_hint(label, cfg)} to start it'))
+    missing = [label for label in missing if label not in paused]
+    if not jobs and not missing and not paused:
         rows.append((RED, '(none)', 'no factory job is loaded — nothing ticks this product'))
     for label in missing:
         rows.append((RED, label, f'declared in products/{product.name}.yaml but not loaded'))
