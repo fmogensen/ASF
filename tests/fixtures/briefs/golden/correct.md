@@ -43,7 +43,7 @@ left out: the retry itself, F-0001 owns it
 
 ## Your job: correct B-0001 — the harvest held `fix/B-0001`
 
-The harvest gate held `fix/B-0001` and sent it back to you: your worktree is already on `fix/B-0001`, and the rebase onto `origin/main` was started for you — if `git status` shows a conflict it is still in place: resolve it (or, if the rebase finished cleanly, carry on), fix what the failure below names (a conflict is resolved so both sides survive), run the full suite, and push the same branch — never a new one, never a merge of `origin/fix/B-0001` or `origin/main` into it, never a force. A push refused as non-fast-forward is the rebase you were handed: stop there and report `pushed: rebased <sha> — the factory publishes`. Change nothing the failure does not ask for; paste the suite's last line in the report.
+The harvest gate held `fix/B-0001` and sent it back to you: your worktree is already on `fix/B-0001`, and a rebase onto `origin/main` was started for you if the branch needed one — if `git status` shows a conflict it is still in place: resolve it (otherwise carry on; a branch merely behind the trunk is never rebased just to catch up), fix what the failure below names (a conflict is resolved so both sides survive), run the full suite, and push the same branch — never a new one, never a merge of `origin/fix/B-0001` or `origin/main` into it, never a force. A push refused as non-fast-forward is the rebase you were handed: stop there and report `pushed: rebased <sha> — the factory publishes`. Change nothing the failure does not ask for; paste the suite's last line in the report.
 
 THE BOUNDARY IS `writes:` — (none declared)
 When the failure below says the footprint was widened, the paths it added are inside that list now: change them as the failure asks. A file still outside it that must change goes, as a full repo path, on the REPORT's `needs writes:` line with `status: partial` — never edited, never a question to a person.
@@ -64,8 +64,10 @@ session (B-0051) and comes back to you as a correction. Say so yourself in the r
 `pushed:` line: `pushed: no` is read as that failure at once.
 
 Your branch is `fix/B-0001`, and it may already be on origin (`exists:` above — a held branch
-comes back to its session, and the worktree was rebased onto `origin/main` before you started;
-if `git status` shows a rebase in progress, finish it first). A lane branch is straight commits
+comes back to its session, and the worktree was rebased onto `origin/main` before you started
+only if the branch needed it — trunk history on it, or a conflict; a branch behind the trunk is
+fine: never rebase or update it just to catch up. If `git status` shows a rebase in progress,
+finish it first). A lane branch is straight commits
 on the trunk: never merge `origin/fix/B-0001` or `origin/main` into it, never force-push, never
 recut it or open another branch. Push with `git push origin fix/B-0001`. If that is refused as
 non-fast-forward, the rebase is why: stop there — do not merge, do not force — and write

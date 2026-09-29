@@ -612,8 +612,8 @@ def outline_lines(facts):
 #: The instruction half of :func:`relaunch_lines`, once the commits above the trunk exist to
 #: continue from: the worktree is rebased before the session starts (P10, P11), so the shas the
 #: block just listed are origin's, not the worktree's — only the subjects carry over.
-_CONTINUE_PARAGRAPH = """Your worktree was rebased onto origin/{main} before you started, so its shas are not the ones
-above; the subjects are. Continue from that head: never recut the branch, never open another,
+_CONTINUE_PARAGRAPH = """Your worktree may have been rebased onto origin/{main} before you started, so its shas may not
+be the ones above; the subjects are. Continue from that head: never recut the branch, never open another,
 never redo what those subjects already did — read them first and pick up after the last one.
 Commit and push within fifteen minutes, then keep pushing: what is not on origin is what the
 next relaunch loses."""

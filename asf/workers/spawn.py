@@ -553,22 +553,57 @@ def _past_reports(path, sha):
     return sha
 
 
+def trunk_rebase_needed(path, main):
+    """Why the worktree's head must be rebased onto ``origin/<main>`` before a session starts on
+    a branch origin already holds, or ``''`` when it need not be. Every such rebase is published
+    at once, and every publish is a push that starts the product's CI on the PR and cancels the
+    run already going there: measured on a product's PRs (2026-09-29), 25 of 57 superseded CI
+    runs were superseded by this launch rebase alone, the branch's own changes byte-identical —
+    each one heavy e2e minutes thrown away. A branch behind its trunk needs no rebase to be
+    reviewed, tested or landed: a pull request's CI runs on the merge with its base, the merge
+    queue builds its own batch refs, and a PR that stops merging cleanly is a CONFLICT → REBASE
+    row of its own. So the head is rebased only for what a rebase alone clears:
+
+    * trunk history on it — merge commits, or copies of trunk commits (``git cherry`` ``-``)
+      past ``origin/<main>`` — which the lane would otherwise hold (B-0056, ``drop_copies``);
+    * a head that does not merge cleanly into ``origin/<main>`` (``git merge-tree``): the
+      session resolves on the trunk it must land on. A rebase that conflicts is still aborted.
+    """
+    def git(*args):
+        return subprocess.run(['git', *args], cwd=path, capture_output=True, text=True)
+    trunk = f'origin/{main}'
+    merges = git('rev-list', '--merges', f'{trunk}..HEAD')
+    if merges.returncode != 0 or merges.stdout.strip():
+        return 'merge commits above the trunk'
+    cherry = git('cherry', trunk, 'HEAD')
+    if cherry.returncode != 0 or any(l.startswith('-') for l in cherry.stdout.splitlines()):
+        return 'copies of trunk commits above the trunk'
+    mt = git('merge-tree', '--write-tree', '--quiet', trunk, 'HEAD')
+    if mt.returncode != 0:
+        return 'does not merge cleanly into the trunk'
+    return ''
+
+
 def _rebase_onto_trunk(path, branch, main, kind=None):
-    """Rebase the worktree onto the fetched trunk. A conflict is aborted, never left in place.
-    A rebase that completes and moves a branch already on origin is published by the factory at
-    once (:func:`asf.workers.lifecycle.publish`, B-0056): the session then starts on a branch
-    that origin holds, and its own pushes are fast-forwards — it never faces the non-fast-forward
-    that made sessions merge their stale remote."""
+    """Rebase the worktree onto the fetched trunk — for a branch already on origin only when
+    :func:`trunk_rebase_needed` says so (a fresh, unpublished branch always: rebasing it pushes
+    nothing). A conflict is aborted, never left in place. A rebase that completes and moves a
+    branch already on origin is published by the factory at once
+    (:func:`asf.workers.lifecycle.publish`, B-0056): the session then starts on a branch that
+    origin holds, and its own pushes are fast-forwards — it never faces the non-fast-forward
+    that made sessions merge their stale remote. A head the rebase is skipped for is origin's
+    own (or a fast-forward of it), so the session's pushes are fast-forwards too."""
     ls = subprocess.run(['git', 'ls-remote', '--heads', 'origin', branch], cwd=path,
                         capture_output=True, text=True)
     remote_sha = ls.stdout.split()[0] if ls.returncode == 0 and ls.stdout.strip() else ''
     if remote_sha and not _catch_up(path, branch, remote_sha, kind, main):
         return  # behind origin and not caught up: never rebased or published from here
-    r = subprocess.run(['git', 'rebase', '-q', f'origin/{main}'], cwd=path,
-                       capture_output=True, text=True)
-    if r.returncode != 0:
-        subprocess.run(['git', 'rebase', '--abort'], cwd=path, capture_output=True)
-        return
+    if not remote_sha or trunk_rebase_needed(path, main):
+        r = subprocess.run(['git', 'rebase', '-q', f'origin/{main}'], cwd=path,
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            subprocess.run(['git', 'rebase', '--abort'], cwd=path, capture_output=True)
+            return
     if not remote_sha:
         return
     head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=path, capture_output=True,

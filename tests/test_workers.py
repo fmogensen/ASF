@@ -518,7 +518,10 @@ class TestSpawn(Home):
         brief = SimpleNamespace(kind='groom', model='opus', add_dirs=['/x/groom'])
         self.assertEqual(step_wave.worker_row(frow, brief, {}).add_dirs, ['/x/groom'])
 
-    def test_b0046_correct_row_spawns_on_the_held_branch_rebased_onto_main(self):
+    def test_b0046_correct_row_spawns_on_the_held_branch_not_rebased_when_it_merges_clean(self):
+        # 2026-09-29: the launch rebase onto a moved trunk was published at once — a push that
+        # restarted the PR's CI with the branch's own changes byte-identical (25 of 57 superseded
+        # runs). A held branch that merges cleanly is taken as origin holds it: nothing pushed.
         def commit(cwd, name, text, msg):
             with open(os.path.join(cwd, name), 'w') as f:
                 f.write(text)
@@ -541,11 +544,83 @@ class TestSpawn(Home):
         self.assertEqual(rec['branch'], 'fix/B-0046')
         self.assertEqual(git('rev-parse', '--abbrev-ref', 'HEAD', cwd=wt), 'fix/B-0046')
         self.assertTrue(os.path.exists(os.path.join(wt, 'a.txt')))
-        self.assertTrue(os.path.exists(os.path.join(wt, 'b.txt')))
-        git('merge-base', '--is-ancestor', 'origin/main', 'HEAD', cwd=wt)
-        # B-0056: the factory published the rebase — the session's own push is a fast-forward
+        self.assertFalse(os.path.exists(os.path.join(wt, 'b.txt')))  # not rebased: not needed
+        held = git('rev-parse', 'fix/B-0046', cwd=other)
+        # nothing published: origin still holds the held head, and the session's own push is a
+        # fast-forward of it
         self.assertEqual(git('ls-remote', '--heads', 'origin', 'fix/B-0046', cwd=wt).split()[0],
-                         git('rev-parse', 'HEAD', cwd=wt))
+                         held)
+        self.assertEqual(git('rev-parse', 'HEAD', cwd=wt), held)
+
+    def _held_branch_behind_main(self, name, text_on_main='main\n', shape='plain'):
+        """``fix/<name>`` on origin with one commit of its own, and ``main`` one commit past its
+        base. ``shape``: ``plain``; ``merge`` — the branch merged the trunk in; ``copy`` — the
+        branch carries a cherry-picked copy of a trunk commit; ``conflict`` — main's commit
+        rewrites the branch's own file. Returns the clone the pushes were made from."""
+        def commit(cwd, fname, text, msg):
+            with open(os.path.join(cwd, fname), 'w') as f:
+                f.write(text)
+            git('add', '.', cwd=cwd)
+            git('-c', 'user.email=ci@example.com', '-c', 'user.name=ci', 'commit', '-q', '-m', msg,
+                cwd=cwd)
+        other = os.path.join(self.tmp, f'other-{name}')
+        git('clone', '-q', os.path.join(self.tmp, 'origin.git'), other, cwd=self.tmp)
+        branch = f'fix/{name}'
+        git('checkout', '-q', '-b', branch, cwd=other)
+        commit(other, 'a.txt', 'branch\n', 'held work')
+        git('checkout', '-q', 'main', cwd=other)
+        commit(other, 'a.txt' if shape == 'conflict' else f'b-{name}.txt', text_on_main,
+               'main moves on')
+        git('push', '-q', 'origin', 'main', cwd=other)
+        git('checkout', '-q', branch, cwd=other)
+        if shape == 'merge':
+            git('-c', 'user.email=ci@example.com', '-c', 'user.name=ci', 'merge', '-q',
+                '--no-edit', 'main', cwd=other)
+        elif shape == 'copy':
+            main_sha = git('rev-parse', 'main', cwd=other)
+            git('-c', 'user.email=ci@example.com', '-c', 'user.name=ci', 'cherry-pick', main_sha,
+                cwd=other)
+            commit(other, 'c.txt', 'more\n', 'more held work')
+        git('push', '-q', 'origin', branch, cwd=other)
+        return other, branch
+
+    def test_a_held_branch_carrying_trunk_history_is_rebased_and_published(self):
+        # what a rebase alone clears still gets it: a merge of the trunk, or a copy of a trunk
+        # commit, on the branch (the lane would hold it, B-0056)
+        for shape in ('merge', 'copy'):
+            with self.subTest(shape=shape):
+                name = f'B-{shape}'
+                other, branch = self._held_branch_behind_main(name, shape=shape)
+                row = pool_mod.Row(f'correct-{name.lower()}', name, kind='correct', branch=branch)
+                rec = spawn_mod.spawn(self.product, row, self.acct(), 'fix it\n',
+                                      runtime=runtime_mod.FakeRuntime([{'running': True, 'pid': 1}]),
+                                      cfg=self.cfg)
+                wt = rec['worktree']
+                self.assertEqual(git('rev-list', '--merges', 'origin/main..HEAD', cwd=wt), '')
+                git('merge-base', '--is-ancestor', 'origin/main', 'HEAD', cwd=wt)
+                self.assertEqual(git('ls-remote', '--heads', 'origin', branch, cwd=wt).split()[0],
+                                 git('rev-parse', 'HEAD', cwd=wt))
+
+    def test_trunk_rebase_needed_names_only_what_a_rebase_clears(self):
+        cases = {'plain': '', 'merge': 'merge commits above the trunk',
+                 'copy': 'copies of trunk commits above the trunk',
+                 'conflict': 'does not merge cleanly into the trunk'}
+        for shape, want in cases.items():
+            with self.subTest(shape=shape):
+                other, branch = self._held_branch_behind_main(f'N-{shape}', 'trunk\n', shape)
+                git('fetch', '-q', 'origin', cwd=other)
+                git('checkout', '-q', branch, cwd=other)
+                self.assertEqual(spawn_mod.trunk_rebase_needed(other, 'main'), want)
+
+    def test_a_review_on_a_branch_behind_main_pushes_nothing(self):
+        other, branch = self._held_branch_behind_main('B-review')
+        held = git('rev-parse', branch, cwd=other)
+        row = pool_mod.Row('review-b-review', 'B-review', kind='review', branch=branch)
+        rec = spawn_mod.spawn(self.product, row, self.acct(), 'review it\n',
+                              runtime=runtime_mod.FakeRuntime([{'running': True, 'pid': 1}]),
+                              cfg=self.cfg)
+        self.assertEqual(git('rev-parse', 'HEAD', cwd=rec['worktree']), held)
+        self.assertEqual(git('ls-remote', '--heads', 'origin', branch, cwd=other).split()[0], held)
 
     def test_b0048_adjudicate_row_spawns_on_the_held_branch(self):
         """The reuse-a-held-branch rule (B-0046) was keyed on ``kind == 'correct'`` — a
@@ -573,8 +648,9 @@ class TestSpawn(Home):
         self.assertEqual(rec['branch'], 'fix/B-0048')
         self.assertEqual(git('rev-parse', '--abbrev-ref', 'HEAD', cwd=wt), 'fix/B-0048')
         self.assertTrue(os.path.exists(os.path.join(wt, 'a.txt')))  # the held branch's own work
-        self.assertTrue(os.path.exists(os.path.join(wt, 'b.txt')))  # rebased onto main
-        git('merge-base', '--is-ancestor', 'origin/main', 'HEAD', cwd=wt)
+        self.assertFalse(os.path.exists(os.path.join(wt, 'b.txt')))  # merges clean: not rebased
+        self.assertEqual(git('ls-remote', '--heads', 'origin', 'fix/B-0048', cwd=wt).split()[0],
+                         git('rev-parse', 'HEAD', cwd=wt))
 
     def test_id_ranges_do_not_overlap_and_are_sticky(self):
         r1 = spawn_mod.reserve_id_range(self.product, 'j1', prefixes=['T'])
@@ -600,10 +676,10 @@ class TestSpawn(Home):
     def test_b0051_ended_sessions_worktree_is_reused_not_refused(self):
         # a session that ended 'finished' without pushing (B-0051) must not permanently block
         # its item: the next spawn for the same job reuses the worktree as it stands — branch
-        # and tree — rebased onto the trunk, instead of refusing it forever. The refusal stays
-        # only for a worktree whose session is still live (B-0025). Since B-0056 the factory
-        # publishes the committed work at health time, so the run is finished and pushed; the
-        # takeover and its rebase (published too) still hold.
+        # and tree — instead of refusing it forever. The refusal stays only for a worktree whose
+        # session is still live (B-0025). Since B-0056 the factory publishes the committed work
+        # at health time, so the run is finished and pushed. A trunk that moved meanwhile is not
+        # rebased onto: the branch merges cleanly, and a published rebase restarts the PR's CI.
         row = feature_row('again')
         rt = runtime_mod.FakeRuntime([{'ok': True, 'pid': 40}])
         rec = spawn_mod.spawn(self.product, row, self.acct(), 'b', runtime=rt, cfg=self.cfg)
@@ -633,10 +709,9 @@ class TestSpawn(Home):
         rec2 = spawn_mod.spawn(self.product, row, self.acct(), 'b', runtime=rt2, cfg=self.cfg)
         self.assertEqual(os.path.realpath(rec2['worktree']), os.path.realpath(wt))
         self.assertTrue(os.path.exists(os.path.join(wt, 'x')))
-        self.assertTrue(os.path.exists(os.path.join(wt, 'trunk.txt')))
+        self.assertFalse(os.path.exists(os.path.join(wt, 'trunk.txt')))  # not rebased
         self.assertEqual(git('ls-remote', '--heads', 'origin', rec['branch'], cwd=wt).split()[0],
-                         git('rev-parse', 'HEAD', cwd=wt))  # the takeover rebase, published
-        git('merge-base', '--is-ancestor', 'origin/main', 'HEAD', cwd=wt)
+                         git('rev-parse', 'HEAD', cwd=wt))  # origin's head, nothing pushed
 
     def _ended_run_then_a_newer_remote_head(self, job):
         """An ended run's worktree whose branch is on origin; a person then pushes a newer
