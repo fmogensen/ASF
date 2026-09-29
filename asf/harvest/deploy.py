@@ -70,6 +70,14 @@ MODES = {'dev': ('auto', 'manual', 'ci'), 'prod': ('auto', 'manual')}
 TARGET_MODES = ('auto', 'manual', 'ci')
 #: where prod's (and a named target's) candidate comes from
 SOURCES = ('ci', 'dev')
+#: paths a deploy never ships. Added to an environment's own ``exclude`` list unless that
+#: environment sets ``exclude_defaults: false``, and engaged only where the environment already
+#: carries a filter of its own (``paths`` or ``exclude``) — the defaults never make a filter
+#: where none was asked for (see ``excludes``).
+DEFAULT_EXCLUDES = (
+    '**/*.test.*', '**/*.spec.*', '**/e2e/**', '**/playwright.config.*', '**/vitest.config.*',
+    '**/__tests__/**', '**/*.md',
+)
 
 
 def _sh(cmd, cwd=None, timeout=60):
@@ -124,12 +132,41 @@ def env_cfg(product, env):
     return d if isinstance(d, dict) else {}
 
 
-def paths(product, env):
-    """The target's ``paths`` globs ([] = every trunk commit counts)."""
-    v = env_cfg(product, env).get('paths')
+def _globs(v):
+    """A bare string becomes a one-element list; a list keeps its non-empty string members;
+    anything else is ``[]``."""
     if isinstance(v, str):
         v = [v]
     return [p for p in v if isinstance(p, str) and p] if isinstance(v, list) else []
+
+
+def paths(product, env):
+    """The target's ``paths`` globs ([] = every trunk commit counts)."""
+    return _globs(env_cfg(product, env).get('paths'))
+
+
+def excludes(product, env):
+    """The globs a filtered environment's commits are dropped for: the environment's own
+    ``exclude`` list, with ``DEFAULT_EXCLUDES`` added first, in their own order, unless the
+    environment sets ``exclude_defaults: false`` (identity against ``False`` — a missing key or
+    ``exclude_defaults: 0`` is not ``false``). ``[]`` when the environment carries neither
+    ``paths`` nor ``exclude`` — an untouched environment gets no filter at all, however long
+    ``DEFAULT_EXCLUDES`` is."""
+    cfg = env_cfg(product, env)
+    own = _globs(cfg.get('exclude'))
+    if not own and not paths(product, env):
+        return []
+    if cfg.get('exclude_defaults') is False:
+        return list(dict.fromkeys(own))
+    return list(DEFAULT_EXCLUDES) + [g for g in dict.fromkeys(own) if g not in DEFAULT_EXCLUDES]
+
+
+def filtered(f):
+    """True when a facts dict carries a path filter — ``paths`` or ``exclude`` — the one
+    predicate every count and every line reads, so the two can never disagree about whether an
+    environment is filtered. ``.get``, not subscription: this is a public predicate and not every
+    facts-shaped mapping that reaches it carries an ``exclude`` key."""
+    return bool(f.get('paths') or f.get('exclude'))
 
 
 def reader(product, env):
