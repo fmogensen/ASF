@@ -26,6 +26,7 @@ from unittest import mock
 from asf import env, redact
 from asf.scorecard import score
 from asf.workers import lifecycle as lc
+from asf.workers import observe
 
 OK = {'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'done'}
 ERR = {'type': 'result', 'subtype': 'error', 'is_error': True, 'result': 'boom'}
@@ -386,6 +387,76 @@ class JudgementInvariants(unittest.TestCase):
         landed_ev = lc.Evidence(result=OK, remote_sha='s', head_on_remote=True, in_trunk=True,
                                 has_commits=True, worktree=True)
         self.assertEqual(lc.judge(self.RUN, landed_ev), lc.FINISHED)
+
+
+class LivenessVerdictTests(unittest.TestCase):
+    """F-0234 §1: `lifecycle.liveness`, one row per verdict, each stating only the facts it
+    means and leaving every other argument at its default. The function has no caller yet
+    (Task 1 of the plan) — this pins its own contract in isolation."""
+
+    @staticmethod
+    def _observed(pid, session):
+        return observe.Observed(pid=pid, ppid=None, account=None, session=session,
+                                 product=None, job=None, owner=None, cwd=None)
+
+    def test_the_os_has_the_last_word_whatever_the_observation_says(self):
+        # a pid the OS does not answer for is GONE even though the observation carries the
+        # run's own session — this is the row that proves the order (P3)
+        run = {'pid': 1, 'session': 'p/j@t'}
+        seen = self._observed(1, 'p/j@t')
+        self.assertEqual(lc.liveness(run, seen, exists=lambda p: False), lc.GONE)
+
+    def test_an_observed_session_carrying_the_runs_own_id_is_alive(self):
+        run = {'pid': 1, 'session': 'p/j@t'}
+        seen = self._observed(1, 'p/j@t')
+        self.assertEqual(lc.liveness(run, seen, exists=lambda p: True), lc.ALIVE)
+
+    def test_a_run_with_no_session_of_its_own_observed_at_all_is_alive(self):
+        # F-0076's rule for a run recorded before sessions existed, kept whole
+        run = {'pid': 1}
+        seen = self._observed(1, 'p/other@t')
+        self.assertEqual(lc.liveness(run, seen, exists=lambda p: True), lc.ALIVE)
+
+    def test_an_observed_session_naming_a_different_id_is_reused(self):
+        run = {'pid': 1, 'session': 'p/j@t'}
+        seen = self._observed(1, 'p/other@t')
+        self.assertEqual(lc.liveness(run, seen, exists=lambda p: True), lc.REUSED)
+
+    def test_not_ours_with_no_observation_is_reused(self):
+        run = {'pid': 1, 'session': 'p/j@t'}
+        self.assertEqual(lc.liveness(run, None, exists=lambda p: True, is_ours=False), lc.REUSED)
+
+    def test_ours_silent_within_the_bound_is_unknown(self):
+        # the live worker that is no longer a corpse — the card's whole reason
+        run = {'pid': 1, 'session': 'p/j@t'}
+        self.assertEqual(lc.liveness(run, None, exists=lambda p: True, is_ours=True,
+                                      silent_min=30, silent_for=5.0), lc.UNKNOWN)
+
+    def test_ours_silent_past_the_bound_is_gone(self):
+        run = {'pid': 1, 'session': 'p/j@t'}
+        self.assertEqual(lc.liveness(run, None, exists=lambda p: True, is_ours=True,
+                                      silent_min=30, silent_for=31.0), lc.GONE)
+
+    def test_a_cloud_token_follows_cloudpid_alive_not_exists(self):
+        # exists is patched to answer the opposite of cloudpid.alive, so a pass here proves the
+        # cloud branch comes first and never consults exists at all
+        run = {'pid': lc.cloudpid.token('1')}
+        with mock.patch.object(lc.cloudpid, 'alive', return_value=True):
+            self.assertEqual(lc.liveness(run, None, exists=lambda p: False), lc.ALIVE)
+        with mock.patch.object(lc.cloudpid, 'alive', return_value=False):
+            self.assertEqual(lc.liveness(run, None, exists=lambda p: True), lc.GONE)
+
+    def test_an_unmeasured_silence_is_not_a_silence(self):
+        # PD1, PD4: is_ours=True alone does not make a missing bound a silence
+        run = {'pid': 1, 'session': 'p/j@t'}
+        self.assertEqual(lc.liveness(run, None, exists=lambda p: True, is_ours=True,
+                                      silent_min=30, silent_for=None), lc.UNKNOWN)
+        self.assertEqual(lc.liveness(run, None, exists=lambda p: True, is_ours=True,
+                                      silent_min=None, silent_for=31.0), lc.UNKNOWN)
+
+    def test_the_vocabulary(self):
+        self.assertEqual(set(lc.LIVENESS), {lc.ALIVE, lc.GONE, lc.REUSED, lc.UNKNOWN})
+        self.assertLessEqual(set(lc.LIVE_VERDICTS), set(lc.LIVENESS))
 
 
 class NoLandingRunInvariants(unittest.TestCase):

@@ -595,6 +595,44 @@ def pid_alive(pid):
     return True
 
 
+#: What a liveness check can conclude about a run's pid. Only :data:`GONE` and :data:`REUSED`
+#: end a run; :data:`UNKNOWN` is the honest answer when a process answers at the pid, looks like
+#: one of ours, and the observation could not name its session — a worker, not a corpse (F-0234).
+ALIVE = 'alive'
+GONE = 'gone'
+REUSED = 'reused'
+UNKNOWN = 'unknown'
+LIVENESS = (ALIVE, GONE, REUSED, UNKNOWN)
+#: The verdicts under which a run keeps running.
+LIVE_VERDICTS = (ALIVE, UNKNOWN)
+
+
+def liveness(run, observed, exists, is_ours=None, silent_min=None, silent_for=None):
+    """Which of :data:`LIVENESS` describes ``run``'s pid. Pure: every fact arrives as an argument.
+
+    ``observed`` is the :class:`asf.workers.observe.Observed` sitting at the pid, or None;
+    ``exists(pid)`` is the OS answer (:func:`pid_alive`); ``is_ours`` is True/False/None for
+    "the process there is one of the factory's headless workers" (:func:`asf.workers.health.
+    is_print_worker` over its command line), None when it was not asked; ``silent_for`` and
+    ``silent_min`` are minutes — how long the run's log has been still, and how long it may be.
+    """
+    pid = run.get('pid')
+    if cloudpid.is_token(pid):          # a cloud run is no process here: its status file answers
+        return ALIVE if cloudpid.alive(pid) else GONE
+    if not exists(pid):
+        return GONE                     # the OS has the last word on a pid that answers nothing
+    if observed is not None:
+        if not run.get('session') or run.get('session') == observed.session:
+            return ALIVE
+        if observed.session:
+            return REUSED               # it names a session, and not ours: the pid was recycled
+    if is_ours is False:
+        return REUSED                   # something answers there, and it is not a worker of ours
+    if silent_min is not None and silent_for is not None and silent_for > silent_min:
+        return GONE                     # ours, answering, and it has written nothing since
+    return UNKNOWN
+
+
 def occupies(run, alive=None):
     """The run holds a seat: live on the ledger (:func:`is_live`) AND its pid still answers.
 
