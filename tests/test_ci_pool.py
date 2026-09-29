@@ -1,8 +1,10 @@
 """asf.ci_pool — the declared runner pool against a fake CI host: validation, the doctor's drift
 rows, the reconcile plan and its add-before-remove order, a trial's pass and rollback, and the CI
 ceiling the pool sets. No test shells out: the host is :class:`FakeBackend`."""
+import json
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 
@@ -119,6 +121,78 @@ class RunsOnParser(unittest.TestCase):
         self.assertEqual(got, {'gate': frozenset({'self-hosted', 'heavy'}),
                                'hosted': frozenset({'ubuntu-latest'}), 'mat': None,
                                'blk': frozenset({'self-hosted', 'light'})})
+
+
+class FakeRun:
+    """A fake ``gh``: a workflow directory listing plus each file's raw text, keyed by the
+    ``contents/<path>`` fragment ``_api`` builds. Every argv is logged."""
+
+    def __init__(self, files, texts):
+        self.files = files
+        self.texts = texts
+        self.calls = []
+
+    def __call__(self, argv, **_kw):
+        self.calls.append(argv)
+        target = argv[2]
+        if 'workflows?ref=' in target:
+            out = '\n'.join(json.dumps({'path': p}) for p in self.files)
+            return subprocess.CompletedProcess(argv, 0, out, '')
+        for path, text in self.texts.items():
+            if f'contents/{path}?ref=' in target:
+                return subprocess.CompletedProcess(argv, 0, text, '')
+        return subprocess.CompletedProcess(argv, 1, '', 'not found')
+
+
+class JobTimeouts(unittest.TestCase):
+    def test_the_eight_shapes(self):
+        text = '\n'.join([
+            'on: push', 'jobs:',
+            '  a:', '    timeout-minutes: 45', '    runs-on: ubuntu-latest',
+            '    steps:', '      - run: echo',
+            '  b:', '    runs-on: ubuntu-latest',
+            '  c:', '    runs-on: ubuntu-latest', '    timeout-minutes: 20',
+            '    steps:', '      - name: test', '        timeout-minutes: 5',
+            '  d:', '    name: Deploy Job', '    runs-on: ubuntu-latest',
+            '    timeout-minutes: 15',
+            '  e:', '    runs-on: ubuntu-latest', '    timeout-minutes: ${{ matrix.timeout }}',
+            '  f:', '    runs-on: ubuntu-latest', '    timeout-minutes: soon', ''])
+        self.assertEqual(ci_pool.parse_timeouts(text),
+                         {'a': 45, 'c': 20, 'd': 15, 'Deploy Job': 15})
+
+    def test_no_jobs_at_all(self):
+        self.assertEqual(ci_pool.parse_timeouts('on: push\n'), {})
+
+    def test_this_repos_own_workflow_declares_none(self):
+        with open('.github/workflows/tests.yml', encoding='utf-8') as f:
+            text = f.read()
+        self.assertEqual(ci_pool.parse_timeouts(text), {})
+
+    def test_default_job_timeout_min(self):
+        self.assertEqual(ci_pool.DEFAULT_JOB_TIMEOUT_MIN, 360)
+
+    def test_github_backend_merges_across_files_and_shares_the_walk_with_runs_on(self):
+        files = ['ci.yml', 'other.yml']
+        texts = {
+            'ci.yml': '\n'.join(['jobs:', '  tests:', '    runs-on: ubuntu-latest',
+                                 '    timeout-minutes: 30', '']),
+            'other.yml': '\n'.join(['jobs:', '  tests:', '    runs-on: ubuntu-latest',
+                                    '    timeout-minutes: 45', '  extra:',
+                                    '    runs-on: ubuntu-latest', '']),
+        }
+        run = FakeRun(files, texts)
+        backend = ci_pool.GitHubBackend(product(), run=run)
+        self.assertEqual(backend.timeouts(), {'tests': 45})
+        walked = {c[2] for c in run.calls if 'workflows?ref=' not in c[2]}
+        self.assertEqual(len(walked), 2)
+        got = {r.job for r in backend.runs_on()}
+        self.assertEqual(got, {'tests', 'extra'})
+
+    def test_backend_error_with_no_repo_slug(self):
+        p = env.Product('p2', {'ci': {'provider': 'github-actions'}})
+        backend = ci_pool.GitHubBackend(p, run=FakeRun([], {}))
+        with self.assertRaises(ci_pool.BackendError):
+            backend.timeouts()
 
 
 class Drift(unittest.TestCase):
