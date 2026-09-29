@@ -278,6 +278,9 @@ def fold(lines):
     runs, clock = {}, ''
     for rec in lines:
         job = rec['job']
+        if is_reset(rec):
+            clock = max([clock, rec[RESET].get('at') or ''])
+            continue  # a boundary on its item's runs (:func:`resets`), never a run of its own
         corr = rec.get('correction')
         if isinstance(corr, dict) and corr.get('text') and not corr.get('at') and clock:
             rec = dict(rec, correction=dict(corr, at=clock))
@@ -303,23 +306,32 @@ class _Folded:
     """One registry content, folded: ``view`` is shared and never handed out — callers get
     ``marshal`` copies (fresh objects, nested values included), exactly as a fresh parse."""
 
-    def __init__(self, data, view):
+    def __init__(self, data, view, resets=None):
         self.data = data
         self.view = view
         self.blob = marshal.dumps(view)
+        self.resets = resets or {}
         self._by_item = None
 
     def by_item(self):
-        """``{item: [run, ...]}`` in :func:`runs` order — the view's runs, not copies."""
+        """``{item: [run, ...]}`` in :func:`runs` order — the view's runs, not copies. A run
+        started before its item's newest reset (:func:`resets`) is not the item's any more: it
+        spent its rounds, its corrections and its rulings on work that was closed."""
         if self._by_item is None:
             idx = {}
             for rs in self.view.values():
                 for r in rs:
                     item = r.get('item')
                     if item and isinstance(item, (str, int, float)):  # a malformed id matches none
-                        idx.setdefault(item, []).append(r)
+                        if not self.before_reset(r):
+                            idx.setdefault(item, []).append(r)
             self._by_item = idx
         return self._by_item
+
+    def before_reset(self, run):
+        """True when ``run`` started before its item's newest reset."""
+        at = self.resets.get((run or {}).get('item'))
+        return bool(at) and ((run or {}).get('started') or '') < at['at']
 
 
 _EMPTY = _Folded(b'', {})
@@ -336,7 +348,8 @@ def _folded(path):
     hit = _REGISTRY_CACHE.get(key)
     if hit is not None and hit.data == data:
         return hit
-    hit = _Folded(data, fold(_parse_registry(data, _product_from_registry_dir(path))))
+    lines = _parse_registry(data, _product_from_registry_dir(path))
+    hit = _Folded(data, fold(lines), _resets(lines))
     _REGISTRY_CACHE.pop(key, None)
     while len(_REGISTRY_CACHE) >= _REGISTRY_CACHE_MAX:
         _REGISTRY_CACHE.pop(next(iter(_REGISTRY_CACHE)))
@@ -352,6 +365,77 @@ def runs(path):
 def latest(path):
     """``{job: its latest run}`` — what every reader of the registry means by "the session"."""
     return {job: rs[-1] for job, rs in runs(path).items()}
+
+
+# ---- resets: an item whose PR was closed unmerged starts over -----------------------------
+#: The key of a registry line that resets an item (:func:`note_reset`): ``{at, pr, branch, head,
+#: archive}``. Its job is :func:`reset_job` — never a launch, never a run.
+RESET = 'reset'
+
+
+def is_reset(rec):
+    return isinstance((rec or {}).get(RESET), dict) and bool((rec or {}).get('item'))
+
+
+def reset_job(item):
+    return f'reset-{str(item).lower()}'
+
+
+def _resets(lines):
+    """``{item: its newest reset}`` from the registry's lines."""
+    out = {}
+    for rec in lines:
+        if is_reset(rec):
+            r = dict(rec[RESET], item=rec['item'])
+            if (r.get('at') or '') >= ((out.get(rec['item']) or {}).get('at') or ''):
+                out[rec['item']] = r
+    return out
+
+
+def resets(path):
+    """``{item: {at, pr, branch, head, archive}}`` — each item's newest reset. Every run of the
+    item started before ``at`` is history: no round, correction, ruling or attempt of it counts
+    (:func:`rounds_of`, :func:`corrections`, :func:`attempts`), and no landing waits on it."""
+    return {k: dict(v) for k, v in _folded(path).resets.items()}
+
+
+def before_reset(path, run):
+    """True when ``run`` started before its item's newest reset (:func:`resets`)."""
+    return _folded(path).before_reset(run)
+
+
+def reset_of_branch(path, branch):
+    """The newest reset naming ``branch`` (``{at, pr, branch, head, archive, item}``), or None:
+    while origin still sits at its ``head`` — the closed PR's — spawn cuts the branch fresh from
+    the trunk (:func:`asf.workers.spawn.retire_dead_branch`)."""
+    found = [r for r in _folded(path).resets.values() if branch and r.get('branch') == branch]
+    return dict(max(found, key=lambda r: r.get('at') or '')) if found else None
+
+
+def note_reset(path, item, reset, now=None, alive=None):
+    """Append one reset line for ``item`` (``reset``: ``{pr, branch, head, archive}``, from
+    :func:`asf.evidence.evidence.resets_of`) unless its newest reset already names the same PR
+    and head, or a run of the item holds a seat (a live session is left to finish; the next
+    pass resets it). True when a line was written."""
+    if not path or not item:
+        return False
+    prev = _folded(path).resets.get(item) or {}
+    if prev.get('pr') == reset.get('pr') and prev.get('head') == reset.get('head'):
+        return False
+    if any(r.get('item') == item and occupies(r, alive)
+           for rs in _folded(path).view.values() for r in rs[-1:]):
+        return False
+    rec = {'job': reset_job(item), 'item': item,
+           RESET: {'at': now or now_iso_utc(), 'pr': reset.get('pr'),
+                   'branch': reset.get('branch') or '', 'head': reset.get('head') or '',
+                   'archive': reset.get('archive') or ''}}
+    with open(path, 'a', encoding='utf-8') as f:
+        f.write(json.dumps(rec, sort_keys=True) + '\n')
+    return True
+
+
+def now_iso_utc():
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
 
 
 def live_all(state_root, alive=None):
@@ -594,8 +678,8 @@ def pending_correction(run, path=None):
     corr = (run or {}).get('correction') or {}
     if not corr.get('text'):
         return None
-    if path is not None and empty_on_a_landed_lane(path, run):
-        return None
+    if path is not None and (before_reset(path, run) or empty_on_a_landed_lane(path, run)):
+        return None  # a reset item's old corrections are for work that was closed
     at = corr.get('at') or ''
     if path is not None:
         me = (run.get('job'), run.get('started'))
@@ -725,7 +809,7 @@ def awaiting_harvest(path, alive=None, result=None):
     pid is gone, but its session is done, not missing."""
     out = set()
     for run in by_branch(path).values():
-        if not run.get('item') or pending_correction(run, path):
+        if not run.get('item') or before_reset(path, run) or pending_correction(run, path):
             continue
         if eligible(run) or finished_unrecorded(run, alive, result):
             out.add(run['item'])
@@ -746,7 +830,8 @@ def unlanded(path, alive=None, result=None):
     out = {}
     for run in by_branch(path).values():
         item, kind = run.get('item'), run.get('kind')
-        if not item or not kind or landed(run) or pending_correction(run, path):
+        if not item or not kind or landed(run) or before_reset(path, run) \
+                or pending_correction(run, path):
             continue
         if run.get('harvest') == 'pr':
             why = PR_WAIT
@@ -770,9 +855,10 @@ def attempts(path):
     """``{item: runs the registry holds for it}`` — every launch, ended or not, except a run
     a spent window cut short (:func:`quota_exhausted`)."""
     out = {}
-    for rs in _folded(path).view.values():  # read only: counts leave, never runs
+    folded = _folded(path)
+    for rs in folded.view.values():  # read only: counts leave, never runs
         for r in rs:
-            if r.get('item') and not quota_exhausted(r):
+            if r.get('item') and not quota_exhausted(r) and not folded.before_reset(r):
                 out[r['item']] = out.get(r['item'], 0) + 1
     return out
 
@@ -838,8 +924,8 @@ def occupancy(path, lanes=None, alive=None, result=None):
     for branch, run in by.items():
         item, kind = run.get('item'), run.get('kind')
         rec = (lanes or {}).get(branch) if lanes is not None else lane_of(run)
-        if not item or item in live_items:
-            continue
+        if not item or item in live_items or before_reset(path, run):
+            continue  # a reset item's old branch holds nothing: its PR was closed unmerged
         if landed(run) or (rec or {}).get('state') == lane_mod.MERGED:
             # its branch landed and the record may not have caught up yet: not busy, not
             # waiting — and not an idle branch either (the feeder's idle-branch rule reads this)

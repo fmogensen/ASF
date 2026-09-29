@@ -72,7 +72,11 @@ def writer(product, branch):
     """The latest run on ``branch`` (:func:`lifecycle.by_branch`), or None. A branch's writer is
     whoever holds it now — a held ``spec/F-0039`` is corrected on ``spec/F-0039`` (the lane state
     machine's own ruling), so this is the same run the correction was written on."""
-    return lifecycle.by_branch(pool_mod.sessions_path(product)).get(branch)
+    path = pool_mod.sessions_path(product)
+    run = lifecycle.by_branch(path).get(branch)
+    # a run from before its item's reset (a PR closed unmerged) wrote work that was closed: its
+    # conversation is not continued
+    return None if run and lifecycle.before_reset(path, run) else run
 
 
 def dead(run, product, now):

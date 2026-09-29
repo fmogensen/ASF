@@ -329,6 +329,61 @@ def _reclaim(product, repo, job, holder, branch, now=None):
 _HELD_BY = re.compile(r"already (?:used|checked out) by worktree at '?([^'\n]+?)'?\s*$", re.M)
 
 
+def _origin_sha(repo, branch):
+    out = _git(['ls-remote', '--heads', 'origin', f'refs/heads/{branch}'], repo).strip()
+    return out.split()[0] if out else ''
+
+
+def retire_dead_branch(product, repo, job, branch, holders=()):
+    """A restart of an item whose PR was closed unmerged (a registry reset,
+    :func:`asf.workers.lifecycle.reset_of_branch`) starts from the trunk, never from the closed
+    work: while ``origin/<branch>`` still sits at the reset's head, that head is kept as its
+    ``archive/pr-<N>`` tag (pushed here when the closer left none), every dead worktree holding
+    the branch is reclaimed (:func:`_reclaim`: its unpushed commits archived), the local branch
+    is dropped and the remote one deleted under a lease on that very head. The launch then cuts
+    ``branch`` fresh from the trunk. True when it retired the branch; False when there is no
+    reset for it or origin moved past the dead head (new work: the branch is alive)."""
+    from asf import gitpush
+    reset = lifecycle.reset_of_branch(pool_mod.sessions_path(product), branch)
+    dead = (reset or {}).get('head') or ''
+    if not dead or _origin_sha(repo, branch) != dead:
+        return False
+    guard = refguard.refusal(branch, f'retire {branch}', product.main, None)
+    if guard:
+        raise SpawnError(guard)
+    limit = gitpush.push_timeout(getattr(product, 'conventions', None))
+    tag = reset.get('archive') or f"archive/pr-{reset.get('pr')}"
+    have = _git(['ls-remote', '--tags', 'origin', f'refs/tags/{tag}', f'refs/tags/{tag}^{{}}'],
+                repo).split()
+    if have and dead not in have:
+        tag = f'{tag}-{dead[:9]}'  # the PR's own tag keeps its head; this later push gets its own
+        have = _git(['ls-remote', '--tags', 'origin', f'refs/tags/{tag}'], repo).split()
+    if dead not in have:
+        r = gitpush.push(['-q', 'origin', f'{dead}:refs/tags/{tag}'], repo, refs_only=True,
+                         timeout=limit)
+        if r.returncode != 0:
+            raise SpawnError(f'retire {branch} refused: {dead[:9]} could not be kept as {tag}: '
+                             f'{(r.stderr or "").strip()}')
+    for holder in dict.fromkeys(h for h in holders if h and os.path.exists(h)):
+        _reclaim(product, repo, job, holder, branch)
+    if _local_branch_exists(repo, branch):
+        tip = _git(['rev-parse', f'refs/heads/{branch}'], repo).strip()
+        kept = tip == dead or subprocess.run(
+            ['git', 'merge-base', '--is-ancestor', tip, dead], cwd=repo,
+            capture_output=True).returncode == 0 or _on_origin(repo, tip)
+        if not kept:
+            raise SpawnError(f'branch {branch} exists locally with commits past the closed '
+                             f'PR #{reset.get("pr")} and not on origin — look before relaunching')
+        _git(['branch', '-D', branch], repo)
+    r = gitpush.push(['-q', f'--force-with-lease=refs/heads/{branch}:{dead}', 'origin',
+                      f':refs/heads/{branch}'], repo, refs_only=True, timeout=limit)
+    if r.returncode != 0:
+        raise SpawnError(f'retire {branch} refused: {(r.stderr or "").strip() or "push failed"}')
+    print(f'retired {branch}: PR #{reset.get("pr")} closed unmerged, its head {dead[:9]} kept '
+          f'as {tag}; cut fresh from origin/{product.main}', file=sys.stderr)
+    return True
+
+
 def _add_worktree(product, repo, job, branch, args):
     """``git worktree add <args>``; when another worktree holds ``branch`` (a hold
     :func:`_holding_worktree` did not see) and its run is dead, it is reclaimed and the add
@@ -453,6 +508,8 @@ def _place_worktree(product, repo, job, branch):
         # still at work in it): never NEEDS OPERATOR, never reclaimed (B-0142)
         raise WorktreeExternal(f'branch checked out in an external worktree '
                                f"{os.path.realpath(held)}; waits until it's released")
+    if retire_dead_branch(product, repo, job, branch, (path, held)):
+        held = None  # the dead branch's worktrees and refs are gone: cut fresh below
     for candidate in dict.fromkeys(p for p in (path, held) if p and os.path.exists(p)):
         what, why = lifecycle.launch_verdict(registry, job, candidate)
         if what == lifecycle.BUSY:
