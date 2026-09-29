@@ -1750,7 +1750,9 @@ def judge(run, ev, landing=None):
     if run.get('branch') and landing:
         if not ev.pushed:
             return f'failed: {push_gap(ev)}'
-        if not ev.has_commits:
+        if not ev.has_commits and not run.get('review_filed'):
+            # a review session commits nothing: the review it wrote, filed off the branch
+            # (asf.evidence.review_store), is its work
             return f'failed: {EMPTY_BRANCH}'
     return FINISHED
 

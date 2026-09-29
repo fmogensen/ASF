@@ -106,6 +106,7 @@ import time
 
 from asf import approvals, customer_content, env, gitpush, refguard, reviews
 from asf.evidence import review as review_mod
+from asf.evidence import review_store
 from asf.feeder import footprint, widen
 from asf.harvest import harvest as H
 from asf.workers import githooks
@@ -1358,7 +1359,8 @@ class Lane:
         f['review_required'] = f['review_required'] or bool(f['customer'])
         if f['review_required'] and rec.get('state') in (None, PUSHED, BACK, PR_OPEN, REVIEW):
             rv = review_mod.review_at(repo, conv, f'origin/{b}', item,
-                                       reviews.required(review_kind(f['kind'])))
+                                       reviews.required(review_kind(f['kind'])),
+                                       store=os.path.join(self.state_dir, review_store.DIRNAME))
             if rv:
                 rv['current'] = review_mod.is_current(repo, conv, f'origin/{b}', rv, head,
                                                        trunk=f'origin/{trunk}')

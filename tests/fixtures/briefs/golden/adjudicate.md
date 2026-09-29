@@ -47,7 +47,8 @@ left out: the retry itself, F-0001 owns it
 the loop — there is no round after yours.
 
 Read, in full: the hold's own text above (the gate line, the conflict, the refusal), the newest
-review `docs/reviews/4-f-0002.md` if there is one, the last report, and the document or code under dispute
+review `docs/reviews/4-f-0002.md` if there is one (quoted at the end of this brief when the factory keeps it off
+the branch), the last report, and the document or code under dispute
 (`docs/specs/f-0002.md` / `docs/plans/f-0002.md` / the branch's diff against `origin/main` as the case requires).
 
 FOR EACH OPEN FINDING OR HOLD, one of two outcomes — never "noted", never a question back:

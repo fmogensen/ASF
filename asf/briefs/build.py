@@ -27,6 +27,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import re
 import string
 
 from asf import conventions as conventions_mod
@@ -479,7 +480,8 @@ FOREIGN_REVIEW = (
     "no plan.\nRead its description (`gh pr view {number}`) as the plan: the scope, Step and "
     "acceptance rows judge the\ndiff against what the description says it does; the Gate row is "
     "the PR's required checks (`gh pr checks {number}`).\nThe merge waits on your verdict: "
-    "commit `{review_path}` on `{branch}` and push it.")
+    "write `{review_path}` and leave it uncommitted —\nthe factory files it off `{branch}`; a "
+    "push there would restart the PR's CI.")
 
 
 def foreign_review_text(kind, ctx):
@@ -492,6 +494,31 @@ def foreign_review_text(kind, ctx):
                                  review_path=ctx['review_path'])
 
 
+#: The kinds whose brief quotes the branch's newest review when the factory keeps it off the
+#: branch (:mod:`asf.evidence.review_store`): the session cannot open it in its worktree.
+STORED_REVIEW_KINDS = ('review', 'fixer', 'adjudicate', 'correct')
+
+
+def stored_review_section(product, kind, branch, item_id):
+    """The newest review of ``item_id`` filed off ``branch``, quoted whole for a
+    :data:`STORED_REVIEW_KINDS` brief — a reviewer's previous round, the list a fixer or a
+    correction answers, the finding an adjudicator rules on. ``''`` when none is filed."""
+    if kind not in STORED_REVIEW_KINDS or product is None or not branch or not item_id \
+            or item_id == 'none':
+        return ''
+    from asf.evidence import review_store
+    slug = str(item_id).lower()
+    stored = review_store.newest(review_store.root(product), slug, branch)
+    if not stored:
+        return ''
+    path = preamble_mod.review_path_for(product, slug, stored['round'])
+    text = stored['text'].rstrip('\n')
+    fence = '~' * max(4, max((len(m) for m in re.findall(r'~{3,}', text)), default=0) + 1)
+    return (f"\n\nTHE NEWEST REVIEW — `{path}`, round {stored['round']}, of head "
+            f"{stored['head'][:12]}. The factory keeps reviews off the branch, so it is not in "
+            f"your worktree; this is its text:\n\n{fence}\n{text}\n{fence}")
+
+
 def build(product, row, index, inflight=None, repo_facts=None):
     """The brief for one feeder row."""
     kind = normalize_kind(getattr(row, 'brief_kind', '') or getattr(row, 'kind', ''))
@@ -502,7 +529,8 @@ def build(product, row, index, inflight=None, repo_facts=None):
              preamble_mod.build(product, row, index, inflight, repo_facts, facts=facts),
              render(load_template(kind), ctx).rstrip() + correction_text(row, kind)
              + customer_section(product, kind, facts['branch'])
-             + foreign_review_text(kind, ctx) + refusal_section(product, ctx['item_id']),
+             + foreign_review_text(kind, ctx) + refusal_section(product, ctx['item_id'])
+             + stored_review_section(product, kind, facts['branch'], ctx['item_id']),
              render(TAIL, ctx)]
     return Brief(kind=kind, item_id=ctx['item_id'], text='\n\n'.join(p.strip() for p in parts) + '\n',
                  model=model_for(product, kind, facts['item']), add_dirs=add_dirs_for(product, row, kind),

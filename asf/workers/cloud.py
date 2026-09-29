@@ -324,6 +324,8 @@ def cloud_brief(text, job, setting=None):
              f'- Every commit message carries the trailer `{SESSION_TRAILER}: {sid}` '
              f'(`git commit --trailer "{SESSION_TRAILER}: {sid}"`).',
              '- Run the tests the brief names here, before you push.',
+             '- A review file the brief says to leave uncommitted is committed here, with the '
+             'report commit: off the factory host the branch is the only way back.',
              f'- Your last act: one commit — `--allow-empty` only when there is nothing else to '
              f'commit — whose message is the subject `asf: report {job.name}`, then your REPORT '
              f'block as the body, then the trailers `{SESSION_TRAILER}: {sid}` and '

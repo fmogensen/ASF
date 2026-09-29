@@ -24,6 +24,7 @@ import subprocess
 from asf import env
 from asf.briefs import preamble
 from asf.evidence import review as review_mod
+from asf.evidence import review_store
 from asf.feeder import footprint
 from asf.workers import lifecycle, pool, report, runtime
 
@@ -283,6 +284,20 @@ def branch_review(repo, rev, tree_paths, product, slug, round_):
     return None
 
 
+def stored_review(product, item_id, branch, review=None):
+    """The review of ``item_id`` filed off ``branch`` (:mod:`asf.evidence.review_store`) as the
+    ``(n, path, text)`` triple :func:`branch_review` answers — when it is newer than ``review``,
+    the branch's own (the branch wins only with a strictly higher round) — else ``review``."""
+    if not item_id or not branch:
+        return review
+    slug = str(item_id).lower()
+    stored = review_store.newest(review_store.root(product), slug, branch)
+    if not review_store.prefer(stored, review[0] if review else None):
+        return review
+    return (stored['round'], preamble.review_path_for(product, slug, stored['round']),
+            stored['text'])
+
+
 def last_report(product, item_id, branch='', review=None):
     """The newest ended session's typed report on the item, else ``''``.
 
@@ -367,6 +382,7 @@ def repo_facts(product, row, index, inflight=None):
         if repo and rev:
             review = branch_review(repo, rev, tree, product, (item_id or 'item').lower(),
                                    plain['round'])
+        review = stored_review(product, item_id, plain['branch'], review)
     try:
         facts['last_report'] = last_report(product, item_id, branch=plain['branch'], review=review)
     except (OSError, ValueError):

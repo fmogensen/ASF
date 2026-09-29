@@ -4,7 +4,8 @@
 the loop — there is no round after yours.
 
 Read, in full: the hold's own text above (the gate line, the conflict, the refusal), the newest
-review `{review_path}` if there is one, the last report, and the document or code under dispute
+review `{review_path}` if there is one (quoted at the end of this brief when the factory keeps it off
+the branch), the last report, and the document or code under dispute
 (`{spec_path}` / `{plan_path}` / the branch's diff against `origin/{main}` as the case requires).
 
 FOR EACH OPEN FINDING OR HOLD, one of two outcomes — never "noted", never a question back:
