@@ -1017,7 +1017,7 @@ def delivery_rows(items, product, busy, running, landed_shas=None):
                                    reason=NO_WRITES_RECUT))
                 continue
             other = footprint.first_conflict(union, running,
-                                             _conventions(product).get('shared_paths') or ())
+                                             footprint.shared_globs(product))
             if other:
                 out.append(Row(tier=2, kind=kind, item_id=lid, feature_id=fid,
                                action=f'WAITS ON {other}', brief_kind=brief, branch=branch,
@@ -1343,7 +1343,7 @@ def task_rows(items, product, feature, busy, running, landed_shas=None):
             out.append(amend)
             continue
         other = footprint.first_conflict(writes, running,
-                                         _conventions(product).get('shared_paths') or ())
+                                         footprint.shared_globs(product))
         if other:
             out.append(Row(tier=2, kind=PLAN_CODE, item_id=t['id'], feature_id=feature['id'],
                            action=f"WAITS ON {other}", brief_kind='task',
