@@ -2154,6 +2154,181 @@ class TestHealth(Home):
         self.assertTrue(os.path.isdir(wt))
 
 
+class NothingToLandHealthTests(Home):
+    """F-0157 Task 3 §2: health's `elif` rewrites `failed: empty branch: …` to
+    `lifecycle.NOTHING_TO_LAND` when the run's own report proves it — an adjudicate run's
+    ruling, or a correct run answering a review hold the lane's restack already cleared — and
+    never raises a hold, spends a round or writes a correction for such a run. F-0126's blocked
+    park still wins over it, and every other kind is still held exactly as before."""
+
+    def spawn(self, job, item, kind, step, branch=None):
+        row = pool_mod.Row(job, item, kind=kind, model='Opus', branch=branch or f'{kind}/{job}')
+        rt = runtime_mod.FakeRuntime([step])
+        return spawn_mod.spawn(self.product, row, self.acct(), 'b', runtime=rt, cfg=self.cfg)
+
+    def _report(self, item, kind, branch, status='done', commits='none', extra=''):
+        return (f'REPORT\nitem: {item}\nkind: {kind}\nstatus: {status}\nbranch: {branch}\n'
+                f'pushed: yes\ncommits: {commits}\ntests: n/a\nleft out: none\n{extra}')
+
+    def test_an_adjudicate_ruling_with_no_commit_is_rejudged_nothing_to_land(self):
+        branch = 'adjudicate/F-0001a'
+        text = self._report('F-0001', 'adjudicate', branch,
+                            extra='ruling: overruled — the finding does not hold\n')
+        rec = self.spawn('adjudicate-1', 'F-0001', 'adjudicate',
+                         {'ok': True, 'pid': 81, 'result': text}, branch=branch)
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        rejudged = [d for j, w, d in found if j == 'adjudicate-1' and w == 're-judged']
+        self.assertEqual(len(rejudged), 1, found)
+        self.assertIn('ruling filed', rejudged[0])
+        self.assertFalse([f for f in found if f[0] == 'adjudicate-1' and f[1] in ('held', 'parked')],
+                         found)
+        s = pool_mod.load_sessions(self.product)['adjudicate-1']
+        self.assertEqual(s['end_reason'], lifecycle.NOTHING_TO_LAND)
+        self.assertNotIn('correction', s)
+        self.assertNotIn('rounds', s)
+        self.assertFalse(lifecycle.eligible(s))  # `eligible` reads `finished`, not `delivered`
+
+    def test_the_same_ruling_with_needs_operator_is_parked_not_rejudged(self):
+        item = 'F-0001'
+        items = {item: {'id': item, 'title': 'a feature', 'writes': ['a.py']}}
+        branch = 'adjudicate/F-0001b'
+        text = self._report(item, 'adjudicate', branch,
+                            extra='ruling: overruled — the finding does not hold\n'
+                                  'NEEDS OPERATOR: which account owns this?\n')
+        rec = self.spawn('adjudicate-2', item, 'adjudicate',
+                         {'ok': True, 'pid': 82, 'result': text}, branch=branch)
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None,
+                                  items=items)
+        self.assertFalse([f for f in found if f[0] == 'adjudicate-2' and f[1] == 're-judged'], found)
+        parked = [d for j, w, d in found if j == 'adjudicate-2' and w == 'parked']
+        self.assertEqual(len(parked), 1, found)
+        s = pool_mod.load_sessions(self.product)['adjudicate-2']
+        self.assertEqual(s['correction']['kind'], lifecycle.BLOCKED)
+        self.assertEqual(s['end_reason'], f'failed: {lifecycle.EMPTY_BRANCH}')
+
+    def test_a_correct_run_answering_a_cleared_review_hold_is_rejudged(self):
+        item = 'F-0001'
+        review_path = 'docs/reviews/1-f-0001.md'
+        pool_mod.append_session(self.product, {
+            'job': 'held-review', 'item': item, 'kind': 'adjudicate', 'pid': 998,
+            'started': '2026-01-01T00:00:00Z', 'branch': 'adjudicate/held-review',
+            'ended': '2026-01-01T00:05:00Z', 'end_reason': lifecycle.FINISHED,
+            'harvested': 'f' * 40,
+            'correction': {'kind': lifecycle.REVIEW, 'at': '2026-01-01T00:10:00Z',
+                           'text': f'{review_path} reads changes requested'}})
+        branch = 'correct/F-0001'
+        text = self._report(item, 'correct', branch)
+        rec = self.spawn('correct-1', item, 'correct',
+                         {'ok': True, 'pid': 83, 'result': text}, branch=branch)
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        rejudged = [d for j, w, d in found if j == 'correct-1' and w == 're-judged']
+        self.assertEqual(len(rejudged), 1, found)
+        self.assertIn(review_path, rejudged[0])
+        s = pool_mod.load_sessions(self.product)['correct-1']
+        self.assertEqual(s['end_reason'], lifecycle.NOTHING_TO_LAND)
+
+    def test_a_coder_run_with_an_empty_branch_and_a_clean_report_is_still_held(self):
+        branch = 'coder/F-0001'
+        text = self._report('F-0001', 'coder', branch)
+        rec = self.spawn('coder-1', 'F-0001', 'coder',
+                         {'ok': True, 'pid': 86, 'result': text}, branch=branch)
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('coder-1', 'ended', f'failed: {lifecycle.EMPTY_BRANCH}'), found)
+        self.assertTrue([f for f in found if f[0] == 'coder-1' and f[1] == 'held'], found)
+        s = pool_mod.load_sessions(self.product)['coder-1']
+        self.assertEqual(s['correction']['kind'], lifecycle.EMPTY)  # P6: EMPTY, not UNPUSHED
+
+    def test_an_adjudicate_run_with_a_partial_status_is_still_held(self):
+        branch = 'adjudicate/F-0001c'
+        text = self._report('F-0001', 'adjudicate', branch, status='partial',
+                            extra='ruling: overruled — the finding does not hold\n')
+        rec = self.spawn('adjudicate-3', 'F-0001', 'adjudicate',
+                         {'ok': True, 'pid': 84, 'result': text}, branch=branch)
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('adjudicate-3', 'ended', f'failed: {lifecycle.EMPTY_BRANCH}'), found)
+        self.assertTrue([f for f in found if f[0] == 'adjudicate-3' and f[1] == 'held'], found)
+
+    def test_an_adjudicate_run_claiming_a_commit_is_still_held(self):
+        branch = 'adjudicate/F-0001d'
+        text = self._report('F-0001', 'adjudicate', branch, commits='deadbee fixed it',
+                            extra='ruling: overruled — the finding does not hold\n')
+        rec = self.spawn('adjudicate-4', 'F-0001', 'adjudicate',
+                         {'ok': True, 'pid': 85, 'result': text}, branch=branch)
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('adjudicate-4', 'ended', f'failed: {lifecycle.EMPTY_BRANCH}'), found)
+        self.assertTrue([f for f in found if f[0] == 'adjudicate-4' and f[1] == 'held'], found)
+
+
+class EmptyBranchParkTests(Home):
+    """F-0157 Task 3 §3: `hold`'s `EMPTY_CAP` park, wired to its real switch — the item's
+    second genuine empty end parks it, rather than spending a third, fourth and fifth session
+    on its way to the round cap (P6, P7)."""
+
+    def spawn(self, job, item, step, branch=None):
+        row = pool_mod.Row(job, item, kind='coder', model='Opus', branch=branch or f'coder/{job}')
+        rt = runtime_mod.FakeRuntime([step])
+        return spawn_mod.spawn(self.product, row, self.acct(), 'b', runtime=rt, cfg=self.cfg)
+
+    def test_the_first_empty_end_holds_and_spends_a_round_without_parking(self):
+        rec = self.spawn('empty-1', 'F-0001', {'ok': True, 'pid': 91})
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertTrue([f for f in found if f[0] == 'empty-1' and f[1] == 'held'], found)
+        self.assertFalse([f for f in found if f[0] == 'empty-1' and f[1] == 'parked'], found)
+        s = pool_mod.load_sessions(self.product)['empty-1']
+        self.assertEqual(s['correction']['kind'], lifecycle.EMPTY)
+        self.assertNotIn('parked', s['correction'])
+        self.assertEqual(s['rounds'], 1)
+        self.assertNotIn('operator_flagged', s)
+
+    def test_the_second_empty_end_on_one_item_parks_it(self):
+        rec1 = self.spawn('empty-1', 'F-0001', {'ok': True, 'pid': 92})
+        git('push', '-q', 'origin', rec1['branch'], cwd=rec1['worktree'])
+        health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+
+        rec2 = self.spawn('empty-2', 'F-0001', {'ok': True, 'pid': 93})
+        git('push', '-q', 'origin', rec2['branch'], cwd=rec2['worktree'])
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        parked = [d for j, w, d in found if j == 'empty-2' and w == 'parked']
+        self.assertEqual(len(parked), 1, found)
+        self.assertFalse([f for f in found if f[0] == 'empty-2' and f[1] == 'held'], found)
+        s = pool_mod.load_sessions(self.product)['empty-2']
+        corr = s['correction']
+        self.assertEqual(corr['kind'], lifecycle.EMPTY)
+        self.assertIs(corr['parked'], True)
+        self.assertEqual(corr['reason'], lifecycle.park_text(2))
+        self.assertEqual(s['operator_flagged'], 1)
+
+    def test_a_rejudged_nothing_to_land_end_does_not_count_toward_the_cap(self):
+        rec1 = self.spawn('empty-1', 'F-0001', {'ok': True, 'pid': 94})
+        git('push', '-q', 'origin', rec1['branch'], cwd=rec1['worktree'])
+        health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+
+        row = pool_mod.Row('adjudicate-mid', 'F-0001', kind='adjudicate', model='Opus',
+                           branch='adjudicate/mid')
+        text = ('REPORT\nitem: F-0001\nkind: adjudicate\nstatus: done\nbranch: adjudicate/mid\n'
+                'pushed: yes\ncommits: none\ntests: n/a\nleft out: none\n'
+                'ruling: overruled — the finding does not hold\n')
+        rt = runtime_mod.FakeRuntime([{'ok': True, 'pid': 95, 'result': text}])
+        rec_mid = spawn_mod.spawn(self.product, row, self.acct(), 'b', runtime=rt, cfg=self.cfg)
+        git('push', '-q', 'origin', rec_mid['branch'], cwd=rec_mid['worktree'])
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('adjudicate-mid', 're-judged'), [(j, w) for j, w, d in found])
+        self.assertEqual(lifecycle.empty_ends(pool_mod.sessions_path(self.product), 'F-0001'), 1)
+
+        rec2 = self.spawn('empty-2', 'F-0001', {'ok': True, 'pid': 96})
+        git('push', '-q', 'origin', rec2['branch'], cwd=rec2['worktree'])
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        parked = [d for j, w, d in found if j == 'empty-2' and w == 'parked']
+        self.assertEqual(len(parked), 1, found)
+
+
 class ABlockedRunIsParkedUntilTheCardChanges(Home):
     """F-0126 §5: a run that ends with nothing to land while its own report declares a question
     for a person is parked, not handed back to another session — relaunching it would only buy
