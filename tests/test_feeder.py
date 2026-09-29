@@ -15,6 +15,7 @@ from asf import env
 from asf.env import Product
 from asf.feeder import footprint, register, render, rows, tiers
 from asf.tick import step_wave
+from asf.workers import lifecycle
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.x` does not
     from occfixture import occ
 except ImportError:  # pragma: no cover - import shape only
@@ -1626,6 +1627,48 @@ class CorrectionRowTest(unittest.TestCase):
                              occupancy=occ(corrections=self.corr(1)))
         self.assertEqual([(r.kind, r.launches, r.waits_on) for r in out],
                          [(rows.BUG_FIX, False, 'session')])
+
+
+class NoSecondAdjudicateTests(unittest.TestCase):
+    """F-0157 P4(a): the arm at ``asf/feeder/rows.py:722-730`` — B-0128's ``settled``, off a real
+    registry through :func:`lifecycle.corrections`, not a hand-built ``corr`` dict. A hold at
+    :data:`rows.CORRECTION_ROUNDS` whose adjudicate run has already ruled — ending
+    :data:`lifecycle.NOTHING_TO_LAND`, unreachable before this Task — raises a ``FIX → CORRECT``
+    row waiting on the merge, not a second ``STALEMATE → ADJUDICATE`` row."""
+
+    def _write(self, adjudicate_end_reason):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        path = os.path.join(d, 's.jsonl')
+        lines = [{'job': 'fix-bug-b-0001', 'pid': 1, 'started': 't1', 'item': 'B-0001',
+                  'branch': 'fix/B-0001', 'ended': 't2', 'end_reason': 'finished'},
+                 {'job': 'fix-bug-b-0001', 'rounds': 3,
+                  'correction': {'kind': 'gate', 'text': 'FAIL: test_x', 'at': 't3', 'same': 3}},
+                 {'job': 'adjudicate-b-0001', 'item': 'B-0001', 'branch': 'fix/B-0001',
+                  'kind': 'adjudicate', 'pid': 2, 'started': 't4', 'ended': 't5',
+                  'end_reason': adjudicate_end_reason}]
+        with open(path, 'w', encoding='utf-8') as f:
+            for ln in lines:
+                f.write(json.dumps(ln) + '\n')
+        return lifecycle.corrections(path)
+
+    def test_a_ruling_that_committed_nothing_waits_on_merge_not_a_second_adjudicate(self):
+        corr = self._write(lifecycle.NOTHING_TO_LAND)
+        self.assertTrue(corr['B-0001']['settled'])
+        out = rows.plan_rows(s1_bugs('B-0001'), product(), [], 1, attempts={'B-0001': 3},
+                             occupancy=occ(corrections=corr))
+        self.assertEqual([(r.kind, r.brief_kind) for r in out], [(rows.FIX_CORRECT, 'correct')])
+        self.assertFalse(out[0].launches)
+        self.assertTrue(out[0].action.startswith(rows.WAITS_MERGE), out[0].action)
+
+    def test_the_before_picture_a_run_read_empty_branch_settles_nothing(self):
+        # the same fixture, the run ended the empty-branch failure this card replaces: unreachable
+        corr = self._write(f'failed: {lifecycle.EMPTY_BRANCH}')
+        self.assertFalse(corr['B-0001']['settled'])
+        out = rows.plan_rows(s1_bugs('B-0001'), product(), [], 1, attempts={'B-0001': 3},
+                             occupancy=occ(corrections=corr))
+        self.assertEqual([(r.kind, r.brief_kind) for r in out],
+                         [(rows.STALEMATE, 'adjudicate')])
 
 
 def undecided_features(*specs, decided=()):

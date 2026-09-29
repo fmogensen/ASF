@@ -2031,6 +2031,107 @@ class DeliveredOffBranchTests(unittest.TestCase):
                                  'ruling filed: overruled…')
 
 
+class DeliveredReadersTests(unittest.TestCase):
+    """F-0157 P4: three shipped mechanisms — ``settled`` (B-0128), ``overruling`` (B-1377) and
+    ``review_answered`` (B-0149) — proved reachable for the first time now that each gates on
+    :func:`lc.delivered` instead of :func:`lc.finished`, which a run ended
+    :data:`lc.NOTHING_TO_LAND` can never be. Each case also pins the before-picture: the same run
+    read as ``failed: empty branch: nothing to land`` — what every one of these runs read before
+    this card — finds nothing."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+
+    def _log(self, name, text):
+        log = os.path.join(self.d, name)
+        rec = {'type': 'result', 'subtype': 'success', 'is_error': False, 'result': text}
+        with open(log, 'w') as f:
+            f.write(json.dumps(rec) + '\n')
+        return log
+
+    def _write(self, lines, name):
+        path = os.path.join(self.d, name)
+        with open(path, 'w') as f:
+            for ln in lines:
+                f.write(json.dumps(ln) + '\n')
+        return path
+
+    def test_settled_over_a_ruling_that_committed_nothing(self):
+        hold_at = '2026-01-01T07:17:39Z'
+        lines = [{'job': 'h', 'pid': 1, 'started': 't1', 'item': 'B-0001', 'branch': 'b',
+                  'ended': 't2', 'end_reason': 'finished'},
+                 {'job': 'h', 'rounds': 1, 'correction': {'kind': lc.REVIEW, 'text': 'x', 'at': hold_at}}]
+        log = self._log('ruling.jsonl',
+                        'REPORT\nitem: B-0001\nstatus: done\ncommits: none\nruling: overruled — no defect\n')
+        run = {'job': 'adjudicate-b-0001', 'item': 'B-0001', 'branch': 'b', 'kind': 'adjudicate',
+               'pid': 2, 'started': '2026-01-01T07:18:00Z', 'ended': '2026-01-01T07:19:00Z',
+               'end_reason': lc.NOTHING_TO_LAND, 'log': log}
+        path = self._write(lines + [run], 'settled.jsonl')
+        self.assertEqual(lc._settling_run(path, 'B-0001', hold_at).get('job'), 'adjudicate-b-0001')
+        self.assertTrue(lc.settled(path, 'B-0001', hold_at))
+        self.assertTrue(lc.corrections(path)['B-0001']['settled'])
+        # the before-picture: the empty-branch failure this card replaces settled nothing
+        before = dict(run, end_reason=f'failed: {lc.EMPTY_BRANCH}')
+        path = self._write(lines + [before], 'unsettled.jsonl')
+        self.assertIsNone(lc._settling_run(path, 'B-0001', hold_at))
+        self.assertFalse(lc.settled(path, 'B-0001', hold_at))
+        self.assertFalse(lc.corrections(path)['B-0001']['settled'])
+
+    def test_overruling_over_its_commits_none_clause(self):
+        head = 'a' * 40
+        log = self._log('overrule.jsonl',
+                        'REPORT\nitem: B-0001\nstatus: done\ncommits: none\nruling: overruled — no defect\n')
+        run = {'job': 'adjudicate-b-0001', 'item': 'B-0001', 'kind': 'adjudicate', 'pid': 1,
+               'started': 't1', 'ended': 't2', 'end_reason': lc.NOTHING_TO_LAND,
+               'launch_head': head, 'log': log}
+        path = self._write([run], 'overruled.jsonl')
+        self.assertEqual(lc.overruling(path, 'B-0001', head), 'adjudicate-b-0001')
+        # the before-picture: :685-687's own clause, unreachable while such a run could never finish
+        before = dict(run, end_reason=f'failed: {lc.EMPTY_BRANCH}')
+        path = self._write([before], 'not-overruled.jsonl')
+        self.assertIsNone(lc.overruling(path, 'B-0001', head))
+
+    def test_overruling_the_pushed_sha_and_unchanged_since_paths_still_work(self):
+        sha = 'c' * 12
+        pushed_ruling = ('REPORT\nitem: B-0001\nstatus: done\ncommits: deadbeef fix\n'
+                         f'ruling: upheld — fixed\npushed: yes {sha}\n')
+        log = self._log('pushed.jsonl', pushed_ruling)
+        run = {'job': 'adjudicate-b-0001', 'item': 'B-0001', 'kind': 'adjudicate', 'pid': 1,
+               'started': 't1', 'ended': 't2', 'end_reason': 'finished', 'log': log}
+        path = self._write([run], 'pushed-sha.jsonl')
+        other_head = 'b' * 40
+        self.assertIsNone(lc.overruling(path, 'B-0001', other_head))
+        self.assertEqual(lc.overruling(path, 'B-0001', sha + 'f' * 28), 'adjudicate-b-0001')
+        self.assertEqual(
+            lc.overruling(path, 'B-0001', other_head, unchanged_since=lambda s: s == sha),
+            'adjudicate-b-0001')
+
+    def test_review_answered_over_a_correct_run_with_nothing_to_change(self):
+        head = 'd' * 40
+        hold = {'kind': lc.REVIEW, 'at': 't3', 'text': 'rv/4-b-0001.md reads changes requested'}
+        lines = [{'job': 'h', 'pid': 1, 'started': 't1', 'item': 'B-0001', 'branch': 'b',
+                  'ended': 't2', 'end_reason': 'finished'},
+                 {'job': 'h', 'correction': hold}]
+        run = {'job': 'correct-b-0001', 'item': 'B-0001', 'kind': lc.CORRECT, 'pid': 2,
+               'started': 't4', 'ended': 't5', 'end_reason': lc.NOTHING_TO_LAND,
+               'launch_head': head}
+        path = self._write(lines + [run], 'answered.jsonl')
+        self.assertEqual(lc.review_answered(path, 'B-0001', 'rv/4-b-0001.md', head),
+                         'correct-b-0001')
+        # the before-picture: B-0149's own case, unreachable while such a run could never finish
+        before = dict(run, end_reason=f'failed: {lc.EMPTY_BRANCH}')
+        path = self._write(lines + [before], 'not-answered.jsonl')
+        self.assertIsNone(lc.review_answered(path, 'B-0001', 'rv/4-b-0001.md', head))
+        # still refused: a spent window, and a run launched on a different head
+        quota = dict(run, end_reason=lc.QUOTA_EXHAUSTED_REASON)
+        path = self._write(lines + [quota], 'quota.jsonl')
+        self.assertIsNone(lc.review_answered(path, 'B-0001', 'rv/4-b-0001.md', head))
+        other_head = dict(run, launch_head='e' * 40)
+        path = self._write(lines + [other_head], 'other-head.jsonl')
+        self.assertIsNone(lc.review_answered(path, 'B-0001', 'rv/4-b-0001.md', head))
+
+
 class OutcomeClassTests(unittest.TestCase):
     """T-0201, §2.1: one owner for what a session's end means."""
 
