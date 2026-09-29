@@ -2,6 +2,41 @@
 
 One entry per released version, newest first.
 
+## v0.1.76 — 2026-09-29
+
+### Features landed
+
+- F-0157 Sessions die with 'failed: empty branch' 12 times a week
+
+### Bugs fixed
+
+- B-0059 A spec landing commit resolves the Feature it names, and a spec on main reads spec-draft: the evidence does not know the lane's own conventions
+- B-0114 native landing: a merged spec/plan PR marks its Feature landed/Resolved, so no coder ever launches
+- B-0123 A failed daily run is never retried until the next day
+- B-0128 An adjudicator's 'no further sessions' ruling does not stick: the lane re-adjudicates the item
+- B-0149 CI-red cards count cancelled runs and fixed history
+
+### In progress
+
+- B-0147 Invariant I10 refused a write to features/F-0093.md
+- B-0150 doctor ci-pool row flags ASF's own ci_pool.reserve label as undeclared
+- F-0023 The grill: a request is interrogated before it is spent on
+- F-0158 Sessions die with 'failed: not pushed' 72 times a week
+- F-0169 CI gate:--- test_tick_steps: FAILED (rc N) is red 3.5 times a week
+- F-0170 32 pre-existing I3 writes: overlaps after the invariants audit; groom on no clock
+- F-0173 A ruling should survive a lane rebase (same patch-ids, new head)
+- F-0175 ASF collects trunk CI runs itself — CI facts go stale when a product's legacy collector is retired
+- F-0176 B-0123 loop: 'died without a result' while both logs end in a ruling; ready branch never published
+- F-0185 Connectors: declare each external service (CI, deploy, db, …) once per product — asf connect sets up auth, doctor/status/approvals/sessions all read it
+- F-0186 conventions.doc_paths: let a product declare extra document folders so approved spec branches land without a session
+- F-0187 conventions.shared_paths: lock files overlap every Task — serialise them at merge, not in the feeder
+- F-0188 coverage: a product declares references; generic reference coverage (generalises matrix_path + asf parity)
+- F-0234 Sessions die with 'dead pid' 5.5 times a week
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.76"`
+
 ## v0.1.75 — 2026-09-29
 
 ### Features landed
