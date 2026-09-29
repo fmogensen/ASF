@@ -48,6 +48,7 @@ The product yaml carries the overrides::
         legacy_prefixes: [hb/]    # heads under these prefixes (default none) …
         legacy_days: 7            # … deleted once their tip is older than this
         per_tick: 50              # the most deletes one pass makes
+        settled_days: 7           # a head whose work the record says is over (0 = off)
       outcome_share_pct: 10       # a failing outcome class over this share of 24 h files a Bug
       outcome_min_sessions: 20    # no rate below this many ended sessions in the window
       repeat_failure_n: 2         # the same item, the same class, this many times → a Bug
@@ -275,8 +276,14 @@ DEFAULT_PROBE_PORTS = (
 #: is ``legacy_days`` old. ``per_tick``: the most deletes one pass makes. A head an open PR, an
 #: open record item or an in-flight session names is never deleted, nor the trunk, a protected
 #: branch or a release branch.
+#: ``settled_days``: a head whose work is over — the trunk carries every commit on it, or the
+#: card its name names is done or removed in the record — goes this many days after its tip was
+#: committed, whatever prefix it wears. 0 turns that rule off.
+#: Keys whose 0 means "off", not "malformed".
+ZERO_OK = ('per_tick', 'settled_days')
+
 DEFAULT_BRANCH_RETENTION = {'archive_days': 14, 'legacy_prefixes': [], 'legacy_days': 7,
-                            'per_tick': 50}
+                            'per_tick': 50, 'settled_days': 7}
 
 #: ``review: {skip_under_lines: …}``: a Task of a ``size: s`` Feature whose diff adds and removes
 #: fewer lines than this lands on CI and the gate alone — no review session. 0 turns it off.
@@ -610,7 +617,7 @@ def _retention_problems(value):
     problems = []
     for key, v in value.items():
         where = f'branch_retention.{key}'
-        least = 0 if key == 'per_tick' else 1
+        least = 0 if key in ZERO_OK else 1
         if key not in DEFAULT_BRANCH_RETENTION:
             problems.append((where, 'is not a retention key '
                                     f"({', '.join(DEFAULT_BRANCH_RETENTION)})"))
@@ -947,7 +954,7 @@ class Conventions:
             if not isinstance(value, list):
                 return tuple(default)
             return tuple(p.strip() for p in value if isinstance(p, str) and p.strip())
-        least = 0 if key == 'per_tick' else 1
+        least = 0 if key in ZERO_OK else 1
         if isinstance(value, bool) or not isinstance(value, int) or value < least:
             return default
         return value
