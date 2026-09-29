@@ -1,5 +1,6 @@
 """F-0113: the S1 gate says its own name, and one plan feeds every view — the S1 lane's own
 invariant, held to a test: an S1 nobody and nothing is working cuts no tier-2 row."""
+import datetime
 import unittest
 
 from asf.env import Product
@@ -73,8 +74,11 @@ class AnUnworkedS1HoldsNothing(unittest.TestCase):
                           'asf set B-0057 severity=S2 --product sample'])
 
     def test_an_undecided_s1_holds_nothing(self):
+        # 270 days before the wall clock the gate reads (a fixed date aged a day a day)
+        since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=270,
+                                                                                  hours=1)
         bug = {'id': 'B-0057', 'type': 'bug', 'severity': 'S1', 'decided': False, 'state': 'New',
-              'stage_since': '2026-01-01T00:00:00Z'}
+              'stage_since': since.strftime('%Y-%m-%dT%H:%M:%SZ')}
         cut, uncut = self._plans(bug)
         g = self._assert_holds_nothing(cut, uncut)
         self.assertEqual([e[0] for e in g.unworked], ['B-0057'])

@@ -289,6 +289,12 @@ DEFAULT_PR_WAIT_MIN = 45
 DEFAULT_HEAD_WAIT_MAX_MIN = 20
 #: a run the relief cancelled and could not re-run in this long is dropped from the file
 RELIEF_TTL_S = 24 * 60 * 60
+#: refused ``gh run rerun`` calls on one cancelled run before a fresh run is dispatched for its
+#: branch instead (:func:`_rerun_cancelled`) — the replay is never asked for forever
+RERUN_REFUSALS_MAX = 3
+#: a cancelled run whose re-run and fresh dispatch were both refused (``stuck``) is tried again
+#: this often, not every pass; the status row names it meanwhile (:func:`stuck_lines`)
+STUCK_RETRY_S = 30 * 60
 #: an entry not asked about again in this long has left the line (its caller moved on)
 STALE_S = 30 * 60
 #: a run admitted this recently still holds its runners: its jobs queue before a runner is busy
@@ -840,12 +846,24 @@ class GitHubSource(Source):
         self.slug = product.repo_slug
 
     def _gh(self, args):
+        return self.gh_try(args)[0]
+
+    def gh_try(self, args):
+        """``(stdout, '')``, or ``(None, why)`` — ``why`` the last line ``gh`` printed (its
+        stderr: GitHub's own reason, e.g. ``run 1 cannot be rerun; …``), so a refused write is
+        logged with its cause, never a bare "refused" (2026-09-29, a product: 944 passes of
+        one re-run refused with no reason read)."""
         try:
             p = self._run(['gh', *args], capture_output=True, text=True, timeout=GH_TIMEOUT_S,
                           env=ci_pool._gh_env(self.product))
-        except (OSError, subprocess.TimeoutExpired):
-            return None
-        return p.stdout if p.returncode == 0 else None
+        except subprocess.TimeoutExpired:
+            return None, f'gh timed out after {GH_TIMEOUT_S}s'
+        except OSError as e:
+            return None, f'gh did not run: {e}'
+        if p.returncode == 0:
+            return p.stdout, ''
+        lines = (p.stderr or p.stdout or '').strip().splitlines()
+        return None, (lines[-1].strip() if lines else f'gh exited {p.returncode}')
 
     def runners(self):
         return self.backend.runners()
@@ -1396,15 +1414,17 @@ def phantom_lines(product, now=None):
 def runner_rows(product, now=None):
     """The doctor's ``ci runners`` rows, ``[(required, ok, detail)]``: one per phantom runner,
     red once it has been busy with no job past :data:`PHANTOM_RED_S`; one ok row when none is;
-    ``[]`` for a product the queue does not watch. No ``gh`` call."""
+    ``[]`` for a product the queue does not watch; one red row per cancelled run the queue could
+    neither re-run nor start fresh (:func:`stuck_lines`). No ``gh`` call."""
     if mode(product) == 'off':
         return []
     now = now or _now()
     ph = _phantoms(load(product.name), now)
+    stuck = [(True, False, text) for text in stuck_lines(product, now)]
     if not ph:
-        return [(True, True, 'no runner busy without a job')]
+        return [(True, True, 'no runner busy without a job'), *stuck]
     return [(True, _age(ph[n].get('since'), now) <= PHANTOM_RED_S, phantom_text(n, ph[n], now))
-            for n in sorted(ph, key=lambda n: (_parse(ph[n].get('since')) or now, n))]
+            for n in sorted(ph, key=lambda n: (_parse(ph[n].get('since')) or now, n))] + stuck
 
 
 # ---- the step-silence watch, across passes -----------------------------------------------------
@@ -2267,6 +2287,10 @@ def _rerun_cancelled(q, src, product, started, dry_run, out, now, items=None, li
             keep.append(rec)
             continue
         protected, who = got
+        stuck = rec.get('stuck') if isinstance(rec.get('stuck'), dict) else None
+        if stuck and _age(stuck.get('tried'), now) < STUCK_RETRY_S:
+            keep.append(rec)                # named on the status row; asked again later
+            continue
         changed = _workflow_change(src, product, rid, blobs)
         prio, label, rank = _rerun_priority(rec, items, product)
         d = q.admit(_rerun_key(rec), rec.get('kind') or 'pr', item=rec.get('item'),
@@ -2315,15 +2339,87 @@ def _rerun_cancelled(q, src, product, started, dry_run, out, now, items=None, li
             out(f'ci queue: would have {what}')
             keep.append(rec)
             continue
-        if src._gh(['run', 'rerun', str(rid), '-R', product.repo_slug]) is None:
-            out(f"ci queue: re-run of cancelled {rec.get('kind')} run {rid} refused — "
-                f"tried again next tick")
+        if not rec.get('refusals'):
+            ok, why = _gh_try(src, ['run', 'rerun', str(rid), '-R', product.repo_slug])
+            if ok is not None:
+                out(f'ci queue: {what}')
+                n += 1
+                continue
+            rec['refusals'], rec['refused_why'] = 1, why
+            out(f"ci queue: re-run of cancelled {rec.get('kind')} run {rid} ({rec.get('item')}) "
+                f"refused (1/{RERUN_REFUSALS_MAX}) — {why}; tried again next tick")
             keep.append(rec)
             continue
-        out(f'ci queue: {what}')
-        n += 1
+        n += _rerun_refused(rec, src, product, out, now, listing, blobs, keep)
     q.data['relief'] = keep
     return n
+
+
+def _gh_try(src, args):
+    """``(stdout, '')`` or ``(None, why)`` off any source: its :meth:`GitHubSource.gh_try` when
+    it has one, else its bare ``_gh`` (no reason to read)."""
+    got = getattr(src, 'gh_try', None)
+    if got is not None:
+        return got(args)
+    out = src._gh(args)
+    return (out, '') if out is not None else (None, 'gh refused (no reason read)')
+
+
+def _rerun_refused(rec, src, product, out, now, listing, blobs, keep):
+    """A cancelled run whose ``gh run rerun`` was refused before: asked again, each refusal
+    logged with its reason and counted on the record; at :data:`RERUN_REFUSALS_MAX` refusals a
+    fresh run of the branch head is started instead (:func:`_start_run`, the path a stale re-run
+    takes). Both refused: the record is marked ``stuck`` — named on the status row
+    (:func:`stuck_lines`), one ``STUCK`` line, asked again every :data:`STUCK_RETRY_S` rather
+    than every pass (2026-09-29, a product: one re-run refused 944 passes in a row, no reason
+    read, nothing escalated). 1 when a run started, else 0 (the record kept)."""
+    rid, kind, item = rec.get('id'), rec.get('kind'), rec.get('item')
+    stuck = rec.get('stuck') if isinstance(rec.get('stuck'), dict) else None
+    if stuck and _age(stuck.get('tried'), now) < STUCK_RETRY_S:
+        keep.append(rec)
+        return 0
+    if int(rec.get('refusals') or 0) < RERUN_REFUSALS_MAX:
+        ok, why = _gh_try(src, ['run', 'rerun', str(rid), '-R', product.repo_slug])
+        if ok is not None:
+            out(f"ci queue: re-ran {kind} run {rid} ({item}, {rec.get('label')}) — after "
+                f"{rec.get('refusals')} refused")
+            return 1
+        rec['refusals'], rec['refused_why'] = int(rec.get('refusals') or 0) + 1, why
+        if rec['refusals'] < RERUN_REFUSALS_MAX:
+            out(f"ci queue: re-run of cancelled {kind} run {rid} ({item}) refused "
+                f"({rec['refusals']}/{RERUN_REFUSALS_MAX}) — {why}; tried again next tick")
+            keep.append(rec)
+            return 0
+    fresh, fwhy = _start_run(product, src, rec.get('branch'), rec.get('workflow'),
+                             sha=rec.get('sha'), listing=listing, blobs=blobs, rerun=False)
+    if fresh:
+        out(f"ci queue: re-run of cancelled {kind} run {rid} ({item}) refused "
+            f"{rec.get('refusals')} times — last: {rec.get('refused_why')}; {fresh} instead")
+        return 1
+    why = (f"re-run refused {rec.get('refusals')} times (last: {rec.get('refused_why')}); "
+           f"fresh run refused too — {fwhy}")
+    if not stuck:
+        out(f"ci queue: STUCK {kind} run {rid} ({item}) on {rec.get('branch') or '?'} — {why}; "
+            f"tried again every {STUCK_RETRY_S // 60} min")
+    rec['stuck'] = {'since': (stuck or {}).get('since') or _iso(now), 'tried': _iso(now),
+                    'why': why}
+    keep.append(rec)
+    return 0
+
+
+def stuck_lines(product, now=None):
+    """One line per cancelled run the queue could neither re-run nor start fresh (``stuck``),
+    off the queue file — the status row's named failure. No ``gh`` call."""
+    now = now or _now()
+    out = []
+    for rec in load(product.name)['relief']:
+        s = rec.get('stuck') if isinstance(rec, dict) else None
+        if isinstance(s, dict):
+            mins = int(_age(s.get('since'), now) // 60)
+            out.append(f"CI START STUCK {rec.get('kind')} run {rec.get('id')} "
+                       f"({rec.get('item')}) on {rec.get('branch') or '?'} for {mins} min — "
+                       f"{s.get('why')}")
+    return out
 
 
 def _workflow_change(src, product, rid, blobs):
@@ -2978,14 +3074,17 @@ RERUN_CONCLUSIONS = frozenset({'cancelled', 'failure', 'timed_out', 'startup_fai
 _EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
 
 
-def _start_run(product, src, branch, workflow, sha=None, rid=None, listing=None, blobs=None):
+def _start_run(product, src, branch, workflow, sha=None, rid=None, listing=None, blobs=None,
+               rerun=True):
     """Start the CI run of an admitted start whose PR is open (a relief re-run, or a ``pr:``
     start whose PR the host has already): ``(what, '')`` or ``(None, why)``. A run of
     ``workflow`` on the branch's head (``sha``) already queued or in progress is the start;
     else ``rid`` (the run the relief cancelled), then the head's latest run when it was
     cancelled or failed, is re-run (``gh run rerun`` — never a run created on a workflow the
     trunk has changed since, :func:`_workflow_change`); else a fresh run is dispatched
-    (``gh workflow run``). Never raises."""
+    (``gh workflow run``). ``rerun=False`` skips the re-runs: the fresh dispatch a refused
+    re-run falls back to (:func:`_rerun_refused`). Every refusal carries ``gh``'s own reason.
+    Never raises."""
     slug, blobs = product.repo_slug, ({} if blobs is None else blobs)
     runs = [r for r in (_list_runs(src, product, workflow, listing) if workflow else None) or ()
             if branch and r.get('headBranch') == branch and (not sha or r.get('headSha') == sha)]
@@ -2993,8 +3092,8 @@ def _start_run(product, src, branch, workflow, sha=None, rid=None, listing=None,
     latest = runs[-1] if runs else None
     if latest is not None and latest.get('status') in QUEUED_STATUSES | {'in_progress'}:
         return f"run {latest.get('databaseId')} is {latest.get('status')} already", ''
-    cands = [str(rid)] if rid else []
-    if (latest is not None and latest.get('conclusion') in RERUN_CONCLUSIONS
+    cands = [str(rid)] if rid and rerun else []
+    if (rerun and latest is not None and latest.get('conclusion') in RERUN_CONCLUSIONS
             and str(latest.get('databaseId')) not in cands):
         cands.append(str(latest.get('databaseId')))
     tried = []
@@ -3003,14 +3102,16 @@ def _start_run(product, src, branch, workflow, sha=None, rid=None, listing=None,
         if changed:
             tried.append(f'run {c} is on an old {workflow} ({changed[0][:7]}→{changed[1][:7]})')
             continue
-        if src._gh(['run', 'rerun', c, '-R', slug]) is not None:
+        ok, why = _gh_try(src, ['run', 'rerun', c, '-R', slug])
+        if ok is not None:
             return f're-ran run {c}', ''
-        tried.append(f'gh run rerun {c} refused')
+        tried.append(f'gh run rerun {c} refused: {why}')
     if not branch or not workflow:
         return None, '; '.join(tried + ['no branch or workflow to dispatch a fresh run on'])
-    if src._gh(['workflow', 'run', workflow, '--ref', branch, '-R', slug]) is not None:
+    ok, why = _gh_try(src, ['workflow', 'run', workflow, '--ref', branch, '-R', slug])
+    if ok is not None:
         return f'dispatched a fresh {workflow} run on {branch}', ''
-    tried.append(f'gh workflow run {workflow} --ref {branch} refused')
+    tried.append(f'gh workflow run {workflow} --ref {branch} refused: {why}')
     return None, '; '.join(tried)
 
 
@@ -3246,7 +3347,7 @@ def status_clause(product, now=None, inflight=None, ceiling=None, source=None):
     clause = _status_clause(product, now, inflight, ceiling, source)
     if clause is None:
         return None
-    return '; '.join([clause, *phantom_lines(product, now)])
+    return '; '.join([clause, *phantom_lines(product, now), *stuck_lines(product, now)])
 
 
 def _status_clause(product, now, inflight, ceiling, source):
@@ -3332,6 +3433,8 @@ def cmd_queue(args, source=None, out=print):
     out(header(product.name, m, len(line.order)))
     for text in phantom_lines(product):
         out(f'runner: {text}')
+    for text in stuck_lines(product):
+        out(text)
     if not line.order:
         return 0
     free, ceiling, entries = line.free, line.ceiling, line.entries
