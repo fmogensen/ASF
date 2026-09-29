@@ -2236,6 +2236,27 @@ class ABlockedRunIsParkedUntilTheCardChanges(Home):
         s = pool_mod.load_sessions(self.product)['parked']
         self.assertNotIn('correction', s)
 
+    def test_a_replan_of_its_feature_after_the_park_releases_it(self):
+        feature = {'id': 'F-0001', 'type': 'feature', 'reshape': 'move T-0001 onto lib/x.py'}
+        items = dict(self.card(parent='F-0001', type='task'), **{'F-0001': feature})
+        rec = self.spawn('parked', {'ok': True, 'pid': 75,
+                                    'result': 'NEEDS OPERATOR: which account owns this?'})
+        git('push', '-q', 'origin', rec['branch'], cwd=rec['worktree'])
+        health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None, items=items)
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None,
+                                  items=items)
+        self.assertFalse([f for f in found if f[1] == 'released'], found)  # not re-planned yet
+        replanned = dict(items, **{'F-0001': dict(feature, reshape_applied='abc',
+                                                  reshape_applied_at='2999-01-01T00:00:00Z')})
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None,
+                                  items=replanned)
+        released = [d for j, w, d in found if w == 'released']
+        self.assertEqual(released, [f'{self.ITEM}: its Feature was re-planned — the park lifts'],
+                         found)
+        s = pool_mod.load_sessions(self.product)['parked']
+        self.assertNotIn('correction', s)
+        self.assertTrue(s['unparked'])
+
     def test_a_pushed_finished_run_with_a_needs_operator_line_is_not_parked(self):
         items = self.card()
         rec = self.spawn('done', {'ok': True, 'pid': 75,

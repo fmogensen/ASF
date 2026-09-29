@@ -53,6 +53,7 @@ import time
 
 from asf import gitpush, refguard
 from asf.evidence import review_store
+from asf.record import replan as replan_mod
 from asf.workers import cloud
 from asf.workers import cloudpid
 from asf.workers import headroom
@@ -636,6 +637,16 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
             pool_mod.update_session(product, job, correction=None)
             s.pop('correction', None)
             found.append((job, 'released', f'{s.get("item")}: the card changed — the park lifts'))
+        corr = lifecycle.pending_correction(s, registry)
+        if corr and corr.get('parked') and items is not None \
+                and replan_mod.replanned_since(items, s.get('item'), corr.get('at')):
+            # the park held the item on the plan a replan has since replaced (its Tasks, their
+            # after:): the work it waited on was re-cut, so the park lifts — no hand unpark
+            pool_mod.update_session(product, job, correction=None, unparked=pool_mod.now_iso(),
+                                    unpark_why='its Feature was re-planned')
+            s.pop('correction', None)
+            found.append((job, 'released', f'{s.get("item")}: its Feature was re-planned — '
+                                           'the park lifts'))
         if s.get('ended'):
             landed_sha = lifecycle.empty_on_a_landed_lane(registry, s)
             if landed_sha:
