@@ -21,8 +21,8 @@ import statistics
 from asf.scorecard.facts import ids_in, iso, to_dt
 
 #: A session whose job name starts with one of these is repair work, not first-time work.
-REPAIR_PREFIXES = ('correct', 'adjudicate', 'review', 'rereview', 'prereview', 'rebase', 'remerge',
-                   'relaunch', 'bounce', 'revise', 'hotfix')
+REPAIR_PREFIXES = ('correct', 'adjudicate', 'review', 'rereview', 'prereview', 'precheck', 'rebase',
+                   'remerge', 'relaunch', 'bounce', 'revise', 'hotfix')
 CORRECTION_PREFIXES = ('correct', 'bounce', 'revise')
 #: A run that ended with one of these reasons — and did not land — is a dead session.
 DEAD_PREFIXES = ('dead', 'failed', 'stopped', 'stalled', 'killed', 'timeout', 'timed out')
