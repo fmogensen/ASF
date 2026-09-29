@@ -160,8 +160,8 @@ class RecordCommandUsesTheProductRecordTests(unittest.TestCase):
         self.assertEqual(out.splitlines()[0], f"record: {os.path.realpath(self.backlog_dir)}", out)
 
 
-class UnparkTests(unittest.TestCase):
-    """F-0095 §2.5: ``asf unpark <item>`` appends the undo beside the park and clears it."""
+class UnparkHome(unittest.TestCase):
+    """F-0095 §2.5: shared harness for ``asf unpark <item>`` — the park and its undo."""
 
     PARK = {'kind': 'empty', 'text': 'nothing to land', 'at': '2026-09-01T10:00:00Z',
             'parked': True, 'reason': 'ended empty 2 times: the Task is parked'}
@@ -204,6 +204,26 @@ class UnparkTests(unittest.TestCase):
 
     def _lines(self):
         return [json.loads(x) for x in self._read().splitlines()]
+
+    def _park(self, at, reason, parked=True):
+        """A correction dict at ``at``: parked (the default) with ``reason`` as its release
+        text, or a plain hold naming ``reason`` as its ``text`` instead."""
+        if parked:
+            return {'kind': 'empty', 'text': 'nothing to land', 'at': at, 'parked': True,
+                    'reason': reason}
+        return {'kind': 'empty', 'text': reason, 'at': at}
+
+    def _run_row(self, job, kind, started, ended):
+        """A run of ``T-0017`` opened at ``started``, closed at ``ended`` when given — a second
+        run alongside the base ``LAUNCH``."""
+        row = {'job': job, 'item': 'T-0017', 'kind': kind, 'pid': 1, 'started': started}
+        if ended:
+            row['ended'] = ended
+        return row
+
+
+class UnparkTests(UnparkHome):
+    """F-0095 §2.5: ``asf unpark <item>`` appends the undo beside the park and clears it."""
 
     def test_unpark_clears_the_park_and_appends_one_line(self):
         from asf.workers import lifecycle
@@ -270,6 +290,192 @@ class UnparkTests(unittest.TestCase):
         self.assertEqual([(r.item_id, r.waits_on) for r in held], [('T-0017', 'operator')])
         self._run(['unpark', 'T-0017', '--product', 'sample'])
         after, ids = rows.correction_rows(items, env.load_product('sample'), set(), lifecycle.corrections(self.path))
+        self.assertEqual((after, ids), ([], set()))
+
+
+class UnparkReleasesEveryPark(UnparkHome):
+    """F-0218: one call releases every park ``T-0017`` holds, and names what still holds it."""
+
+    def _two_parked(self):
+        self._ledger(
+            self._run_row('coder-t-0017', 'coder', '2026-09-01T09:00:00Z',
+                          '2026-09-01T09:30:00Z'),
+            {'job': 'coder-t-0017',
+             'correction': self._park('2026-09-01T10:00:00Z',
+                                      'ended empty 2 times: the Task is parked')},
+            self._run_row('reviewer-t-0017', 'reviewer', '2026-09-01T09:05:00Z',
+                          '2026-09-01T09:35:00Z'),
+            {'job': 'reviewer-t-0017',
+             'correction': self._park('2026-09-01T10:05:00Z',
+                                      'ended empty 2 times: the Task is parked')},
+        )
+
+    def test_two_parks_on_one_item_go_in_one_call(self):
+        from asf.workers import lifecycle
+        self._two_parked()
+        rc, out = self._run(['unpark', 'T-0017', '--product', 'sample'])
+        self.assertEqual(rc, 0, out)
+        self.assertIn('coder-t-0017', out)
+        self.assertIn('reviewer-t-0017', out)
+        self.assertIn('released 2 parks', out)
+        self.assertEqual(lifecycle.corrections(self.path), {})
+        rc2, out2 = self._run(['unpark', 'T-0017', '--product', 'sample'])
+        self.assertEqual(rc2, 1, out2)
+        self.assertIn('not parked', out2)
+
+    def test_the_undo_is_one_line_per_park_and_every_park_line_stays(self):
+        self._two_parked()
+        before = self._read()
+        rc, out = self._run(['unpark', 'T-0017', '--why', 'already on the trunk',
+                             '--product', 'sample'])
+        self.assertEqual(rc, 0, out)
+        after = self._read()
+        self.assertTrue(after.startswith(before), 'every park line stays in the file')
+        appended = self._lines()[len(before.splitlines()):]
+        self.assertEqual(len(appended), 2)
+        for line in appended:
+            self.assertIsNone(line['correction'])
+        self.assertEqual(len({line['unparked'] for line in appended}), 1)
+        self.assertEqual({line['unpark_why'] for line in appended}, {'already on the trunk'})
+
+    def test_a_park_under_a_newer_plain_hold_is_released_and_the_hold_is_named(self):
+        from asf.workers import lifecycle
+        self._ledger(
+            self._run_row('coder-t-0017', 'coder', '2026-09-01T09:00:00Z',
+                          '2026-09-01T09:30:00Z'),
+            {'job': 'coder-t-0017',
+             'correction': self._park('2026-09-01T10:00:00Z',
+                                      'ended empty 2 times: the Task is parked')},
+            self._run_row('reviewer-t-0017', 'reviewer', '2026-09-01T09:05:00Z',
+                          '2026-09-01T09:35:00Z'),
+            {'job': 'reviewer-t-0017',
+             'correction': self._park('2026-09-01T10:05:00Z',
+                                      "the spec's §2 table is not in the diff", parked=False)},
+        )
+        rc, out = self._run(['unpark', 'T-0017', '--product', 'sample'])
+        self.assertEqual(rc, 0, out)
+        self.assertIn('released 1 park', out)
+        self.assertIn('1 correction still holds it', out)
+        self.assertIn('still held', out)
+        run = lifecycle.latest(self.path)['reviewer-t-0017']
+        self.assertTrue(lifecycle.pending_correction(run, self.path))
+        self.assertIn('T-0017', lifecycle.corrections(self.path))
+
+    def test_a_plain_correction_is_never_cleared(self):
+        from asf.workers import lifecycle
+        self._ledger(
+            self._run_row('coder-t-0017', 'coder', '2026-09-01T09:00:00Z',
+                          '2026-09-01T09:30:00Z'),
+            {'job': 'coder-t-0017',
+             'correction': self._park('2026-09-01T10:00:00Z',
+                                      'ended empty 2 times: the Task is parked')},
+            self._run_row('reviewer-t-0017', 'reviewer', '2026-09-01T09:05:00Z',
+                          '2026-09-01T09:35:00Z'),
+            {'job': 'reviewer-t-0017',
+             'correction': self._park('2026-09-01T10:05:00Z',
+                                      "the spec's §2 table is not in the diff", parked=False)},
+        )
+        self._run(['unpark', 'T-0017', '--product', 'sample'])
+        corrections = lifecycle.corrections(self.path)
+        self.assertIn('T-0017', corrections)
+        self.assertEqual(corrections['T-0017'].get('text'), "the spec's §2 table is not in the diff")
+
+    def test_three_parks_need_one_call(self):
+        from asf.workers import lifecycle
+        self._ledger(
+            self._run_row('coder-t-0017', 'coder', '2026-09-01T09:00:00Z',
+                          '2026-09-01T09:30:00Z'),
+            {'job': 'coder-t-0017',
+             'correction': self._park('2026-09-01T10:00:00Z',
+                                      'ended empty 2 times: the Task is parked')},
+            self._run_row('reviewer-t-0017', 'reviewer', '2026-09-01T09:05:00Z',
+                          '2026-09-01T09:35:00Z'),
+            {'job': 'reviewer-t-0017',
+             'correction': self._park('2026-09-01T10:05:00Z',
+                                      'ended empty 2 times: the Task is parked')},
+            self._run_row('harvest-t-0017', 'harvest', '2026-09-01T09:10:00Z',
+                          '2026-09-01T09:40:00Z'),
+            {'job': 'harvest-t-0017',
+             'correction': self._park('2026-09-01T10:10:00Z',
+                                      'ended empty 2 times: the Task is parked')},
+        )
+        before = self._read()
+        rc, out = self._run(['unpark', 'T-0017', '--product', 'sample'])
+        self.assertEqual(rc, 0, out)
+        self.assertIn('released 3 parks', out)
+        self.assertEqual(lifecycle.corrections(self.path), {})
+        appended = self._lines()[len(before.splitlines()):]
+        self.assertEqual(len(appended), 3)
+
+    def test_one_park_prints_its_count_and_still_exits_zero(self):
+        self._parked()
+        rc, out = self._run(['unpark', 'T-0017', '--product', 'sample'])
+        self.assertEqual(rc, 0, out)
+        self.assertIn('released 1 park on T-0017', out)
+        self.assertNotIn('parks', out)
+        self.assertNotIn('still', out)
+
+    def test_parked_jobs_is_oldest_first_and_one_entry_per_job(self):
+        from asf.workers import unpark
+        self._two_parked()
+        parks = unpark.parked_jobs(self.path, 'T-0017')
+        self.assertEqual([job for job, _ in parks], ['coder-t-0017', 'reviewer-t-0017'])
+
+        self._ledger(
+            self._run_row('coder-t-0017', 'coder', '2026-09-01T09:00:00Z',
+                          '2026-09-01T09:30:00Z'),
+            {'job': 'coder-t-0017',
+             'correction': self._park('2026-09-01T09:31:00Z',
+                                      'ended empty 2 times: the Task is parked')},
+            self._run_row('coder-t-0017', 'coder', '2026-09-01T11:00:00Z',
+                          '2026-09-01T11:30:00Z'),
+            {'job': 'coder-t-0017',
+             'correction': self._park('2026-09-01T11:31:00Z',
+                                      'ended empty 2 times: the Task is parked')},
+        )
+        parks = unpark.parked_jobs(self.path, 'T-0017')
+        self.assertEqual(len(parks), 1)
+        self.assertEqual(parks[0][0], 'coder-t-0017')
+        self.assertEqual(parks[0][1].get('at'), '2026-09-01T11:31:00Z')
+
+    def test_still_holding_reads_the_file_again_after_the_appends(self):
+        from unittest import mock
+        from asf.workers import unpark
+        self._parked()
+        real_update_session = unpark.pool_mod.update_session
+        calls = []
+
+        def wrapper(*args, **kwargs):
+            result = real_update_session(*args, **kwargs)
+            if not calls:
+                with open(self.path, 'a') as f:
+                    f.write(json.dumps(self._run_row(
+                        'harvest-t-0017', 'harvest', '2026-09-01T08:00:00Z',
+                        '2026-09-01T08:30:00Z')) + '\n')
+                    f.write(json.dumps({'job': 'harvest-t-0017',
+                        'correction': self._park('2026-09-01T10:30:00Z',
+                                                 'commits do not name T-0017')}) + '\n')
+            calls.append(1)
+            return result
+
+        with mock.patch.object(unpark.pool_mod, 'update_session', side_effect=wrapper):
+            rc, out = self._run(['unpark', 'T-0017', '--product', 'sample'])
+        self.assertEqual(rc, 0, out)
+        self.assertIn('released 1 park on T-0017 — 1 correction still holds it', out)
+        self.assertIn('still parked (harvest-t-0017):', out)
+        self.assertIn('— run `asf unpark T-0017` again', out)
+
+    def test_the_feeder_row_goes_after_one_call_when_two_parks_held_it(self):
+        from asf.feeder import rows
+        from asf.workers import lifecycle
+        items = {'T-0017': {'id': 'T-0017', 'type': 'task', 'state': 'New'}}
+        self._two_parked()
+        held, ids = rows.correction_rows(items, env.load_product('sample'), set(),
+                                         lifecycle.corrections(self.path))
+        self.assertEqual([(r.item_id, r.waits_on) for r in held], [('T-0017', 'operator')])
+        self._run(['unpark', 'T-0017', '--product', 'sample'])
+        after, ids = rows.correction_rows(items, env.load_product('sample'), set(),
+                                          lifecycle.corrections(self.path))
         self.assertEqual((after, ids), ([], set()))
 
 
