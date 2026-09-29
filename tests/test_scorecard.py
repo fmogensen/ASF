@@ -456,6 +456,26 @@ class VerifyTests(unittest.TestCase):
         self.assertIsNone(loop.moved(None, 1, 0.2))
 
 
+class DirectionTests(unittest.TestCase):
+    """The third verdict, pure — no fixture."""
+
+    def test_direction_pins_the_eight_cases(self):
+        self.assertEqual(loop.direction(10, 8, 0.2), 'moved')
+        self.assertEqual(loop.direction(10, 12, 0.2), 'got worse')
+        self.assertEqual(loop.direction(10, 11, 0.2), "didn't move")
+        self.assertEqual(loop.direction(10, 8.5, 0.2), "didn't move")
+        self.assertEqual(loop.direction(0, 0, 0.2), 'moved')
+        self.assertEqual(loop.direction(0, 1, 0.2), 'got worse')
+        self.assertIsNone(loop.direction(None, 1, 0.2))
+        self.assertIsNone(loop.direction(1, None, 0.2))
+
+    def test_moved_still_answers_as_it_does_today(self):
+        self.assertTrue(loop.moved(10, 8, 0.2))
+        self.assertFalse(loop.moved(10, 8.5, 0.2))
+        self.assertTrue(loop.moved(0, 0, 0.2))
+        self.assertIsNone(loop.moved(None, 1, 0.2))
+
+
 class RecordTests(unittest.TestCase):
     """The loop against a record on disk: load, drain, snapshot, the daily part."""
 

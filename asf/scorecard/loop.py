@@ -329,6 +329,21 @@ def moved(before, after, min_move):
     return after <= before * (1 - min_move)
 
 
+def direction(before, after, min_move):
+    """The verdict on one cause: ``'moved'`` (the number fell by ``min_move``), ``'got worse'``
+    (it rose by the same), ``"didn't move"`` (neither), or ``None`` when a reading is missing.
+    A zero that stayed zero moved; any rise off zero got worse."""
+    if before is None or after is None:
+        return None
+    if before <= 0:
+        return 'moved' if after <= 0 else 'got worse'
+    if after <= before * (1 - min_move):
+        return 'moved'
+    if after >= before * (1 + min_move):
+        return 'got worse'
+    return "didn't move"
+
+
 def verify(product, facts, cfg, state, cards_of, as_of, enqueue_fn=enqueue, root=None, epic_fn=epic_of):
     """For every filed cause whose card has landed ``verify_weeks`` ago: compare, record, reopen.
     ``cards_of(target)`` returns that target's cards (``{id: card}``). Returns ``[(key, verdict)]``."""
