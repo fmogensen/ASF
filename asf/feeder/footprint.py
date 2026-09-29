@@ -35,9 +35,26 @@ def globs_overlap(a, b):
     return ha != a and hb != b and (ha.startswith(hb) or hb.startswith(ha))
 
 
+def shared_globs(product):
+    """``conventions.shared_paths`` for ``product`` — a Product, a Conventions, or the plain
+    ``conventions:`` mapping — as a tuple; ``()`` for None and for a product that declares none.
+    The one reader of the key: the feeder, the widening rule, ``asf check``, I3, the groomer and
+    the lane all ask here, so a product cannot be exempt in one of them and not the others."""
+    if product is None:
+        return ()
+    conv = getattr(product, 'conventions', product)
+    return tuple(p for p in (conv.get('shared_paths') or ()) if p)
+
+
 def is_shared(glob, shared):
-    """True when ``glob`` names a ``shared_paths`` path (either matches the other)."""
-    return any(fnmatch.fnmatch(glob, s) or fnmatch.fnmatch(s, glob) for s in shared or ())
+    """True when the ``shared_paths`` set covers ``glob`` — ``uv.lock`` against ``uv.lock``, and
+    ``apps/web/package-lock.json`` against ``**/package-lock.json``.
+
+    One direction only: a glob *wider* than the shared set is never shared. Matched both ways,
+    ``*`` would be covered by any declared lockfile (``fnmatch('uv.lock', '*')``), and a Task
+    declaring ``writes: ['*']`` would overlap nothing at all — the footprint gate off for the
+    widest footprint there is (D2)."""
+    return any(fnmatch.fnmatch(glob, s) for s in shared or ())
 
 
 def overlaps(writes_a, writes_b, shared=()):
