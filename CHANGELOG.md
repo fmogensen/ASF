@@ -2,6 +2,21 @@
 
 One entry per released version, newest first.
 
+## v0.1.71 — 2026-09-29
+
+### In progress
+
+- F-0122 The /asf:* tables read backlog_dir, which the tick never pulls — views go stale
+- F-0148 Scorecard: a total across products and the week-over-week delta, as the daily rollup's first line
+- F-0150 Scorecard loop: a card whose number got worse is reverted, and adoptions are Decisions with both readings
+- F-0155 asf next/status read backlog_dir while the tick acts on its own clone — NEXT lags the tick
+- F-0156 711 branches carry no open PR
+- F-0157 Sessions die with 'failed: empty branch' 12 times a week
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.71"`
+
 ## v0.1.70 — 2026-09-28
 
 ### Features landed
