@@ -309,6 +309,82 @@ class ForeignPR(LaneFixture):
         self.run_lane(self.product('manual'), self.PRS)
         self.assertEqual(self.lane_of('hook-fix'), {})
 
+    def rows_for(self, occ):
+        return [r for r in feeder_rows.candidates({}, self.product('auto'), [], occupancy=occ)
+                if r.item_id == 'PR-0012']
+
+    def adopted_in_review(self):
+        self.push_lane('hook-fix', {'.githooks/pre-push': '#!/bin/sh\n'}, 'fix the pre-push hook')
+        self.run_lane(self.product('auto'), self.PRS)
+        self.assertEqual(self.lane_of('hook-fix')['state'], lane.REVIEW)
+        return sh(['git', 'rev-parse', 'hook-fix'], cwd=self.origin).stdout.strip()
+
+    def write_pr_cache(self, state, head):
+        with open(os.path.join(self.state_dir, lifecycle.PR_CACHE), 'w') as fh:
+            json.dump([{'number': 12, 'state': state, 'headRefOid': head,
+                        'headRefName': 'hook-fix'}], fh)
+
+    def test_merged_pr_asks_for_no_review_before_the_lane_catches_up(self):
+        """The record still says REVIEW (no lane pass since the merge); the evidence pass's PR
+        list says MERGED: no PUSHED → REVIEW row, and the item counts as landed."""
+        head = self.adopted_in_review()
+        path = os.path.join(self.state_dir, 'sessions.jsonl')
+        self.assertTrue(self.rows_for(lifecycle.occupancy(path)))
+        self.write_pr_cache('MERGED', 'someothersha')
+        occ = lifecycle.occupancy(path, ended=lifecycle.ended_prs(self.state_dir))
+        self.assertEqual(self.rows_for(occ), [])
+        self.assertNotIn('PR-0012', occ['review'])
+        self.assertIn('PR-0012', occ['landed'])
+        self.assertTrue(head)
+
+    def test_closed_pr_on_its_head_asks_for_nothing_on_a_new_head_it_does(self):
+        head = self.adopted_in_review()
+        path = os.path.join(self.state_dir, 'sessions.jsonl')
+        self.write_pr_cache('CLOSED', head)
+        occ = lifecycle.occupancy(path, ended=lifecycle.ended_prs(self.state_dir))
+        self.assertEqual(self.rows_for(occ), [])
+        self.assertNotIn('PR-0012', occ['landed'])
+        self.write_pr_cache('CLOSED', 'an-older-head')  # reopened and pushed since: still live
+        occ = lifecycle.occupancy(path, ended=lifecycle.ended_prs(self.state_dir))
+        self.assertTrue(self.rows_for(occ))
+
+    def test_no_or_unreadable_pr_cache_changes_nothing(self):
+        self.adopted_in_review()
+        self.assertEqual(lifecycle.ended_prs(self.state_dir), {})
+        with open(os.path.join(self.state_dir, lifecycle.PR_CACHE), 'w') as fh:
+            fh.write('{not json')
+        self.assertEqual(lifecycle.ended_prs(self.state_dir), {})
+
+    def test_a_correction_on_a_merged_prs_branch_is_dropped(self):
+        self.adopted_in_review()
+        path = os.path.join(self.state_dir, 'sessions.jsonl')
+        corr = {'PR-0012': {'kind': 'review', 'text': 'C1', 'branch': 'hook-fix'},
+                'T-0009': {'kind': 'review', 'text': 'C1', 'branch': 'worker/T-0009'}}
+        self.write_pr_cache('MERGED', None)
+        with mock.patch.object(lifecycle, 'corrections', return_value=dict(corr)):
+            occ = lifecycle.occupancy(path, ended=lifecycle.ended_prs(self.state_dir))
+        self.assertEqual(set(occ['corrections']), {'T-0009'})
+
+    def test_merged_pr_whose_branch_moved_after_the_merge_is_merged_not_reviewed(self):
+        """A review file pushed to the branch after the host merged the PR moves the head past
+        the merged one: the PR is over all the same (T11), never a new review round."""
+        head = self.adopted_in_review()
+        self.push_lane_on('hook-fix', {'reviews/1-pr-0012.md': 'verdict: approved\n'},
+                          'review(PR-0012): round 1 — approved')
+        merged = {'hook-fix': dict(self.PRS['hook-fix'], state='MERGED', head=head)}
+        self.run_lane(self.product('auto'), merged)
+        self.assertEqual(self.lane_of('hook-fix')['state'], lane.MERGED)
+        occ = lifecycle.occupancy(os.path.join(self.state_dir, 'sessions.jsonl'))
+        self.assertEqual(self.rows_for(occ), [])
+
+    def test_closed_pr_whose_branch_moved_after_the_close_is_stale(self):
+        head = self.adopted_in_review()
+        self.push_lane_on('hook-fix', {'reviews/1-pr-0012.md': 'verdict: approved\n'},
+                          'review(PR-0012): round 1 — approved')
+        closed = {'hook-fix': dict(self.PRS['hook-fix'], state='CLOSED', head=head)}
+        self.run_lane(self.product('auto'), closed)
+        self.assertEqual(self.lane_of('hook-fix')['state'], lane.STALE)
+
     def push_lane_on(self, branch, files, subject):
         """Add a commit on top of ``branch`` as a review session would."""
         sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)

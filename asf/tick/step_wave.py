@@ -100,8 +100,11 @@ def attempts(product):
 
 def occupancy(product):
     """The one answer to "is this item busy?" (:func:`asf.workers.lifecycle.occupancy`): live
-    runs, work waiting to land, the lane's states (off the run lines), pending corrections."""
-    return lifecycle.occupancy(pool_mod.sessions_path(product))
+    runs, work waiting to land, the lane's states (off the run lines), pending corrections — a
+    lane record naming a PR the evidence pass saw merged or closed held over by nothing
+    (:func:`asf.workers.lifecycle.ended_prs`)."""
+    path = pool_mod.sessions_path(product)
+    return lifecycle.occupancy(path, ended=lifecycle.ended_prs(os.path.dirname(path)))
 
 
 def corrections(product):

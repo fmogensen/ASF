@@ -226,7 +226,7 @@ class StubsImport(unittest.TestCase):
     def test_occupancy(self):
         from asf.workers import lifecycle
         self.assertEqual(list(inspect.signature(lifecycle.occupancy).parameters),
-                         ['path', 'lanes', 'alive', 'result'])
+                         ['path', 'lanes', 'alive', 'result', 'ended'])
 
 
 if __name__ == '__main__':
