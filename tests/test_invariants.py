@@ -253,6 +253,111 @@ class R12I9IsAnEvent(unittest.TestCase):
         self.assertEqual(seen, [('foreign-merge', {'branch': 'feature/T-0001', 'pr': 7})])
 
 
+class R12AnI9EventIsSaidOncePerBranch(unittest.TestCase):
+    def _sessions(self, lines):
+        state = tempfile.mkdtemp(prefix='inv_i9_seen_')
+        self.addCleanup(shutil.rmtree, state, True)
+        path = os.path.join(state, 'sessions.jsonl')
+        with open(path, 'w') as f:
+            for line in lines:
+                f.write(json.dumps(line) + '\n')
+        return path
+
+    @staticmethod
+    def _foreign_merge(branch, pr):
+        job = f'coder-{branch.replace("/", "-")}'
+        return [{'job': job, 'branch': branch, 'started': 'x'},
+                {'job': job, 'lane': {'state': 'PR_OPEN', 'pr': pr}},
+                {'job': job, 'lane': {'state': 'MERGED', 'pr': pr, 'method': 'external'}}]
+
+    def _report(self, path, lane_recs, out, event=None):
+        with mock.patch.object(invariants, '_sessions_path', return_value=path), \
+                mock.patch.object(invariants, 'lane_records', return_value=lane_recs):
+            return invariants.lane_report(env.Product('sample', {}), out=out, event=event)
+
+    def test_the_same_foreign_merge_is_said_once_across_two_reports(self):
+        path = self._sessions(self._foreign_merge('feature/T-0001', 7))
+        lane_recs = {'feature/T-0001': {'state': 'MERGED'}}
+        lines, seen = [], []
+        findings, events = self._report(path, lane_recs, lines.append,
+                                         lambda kind, **f: seen.append((kind, f)))
+        self.assertEqual(findings, [])
+        self.assertEqual(len(events), 1)
+        self.assertEqual(lines, ['EVENT I9: feature/T-0001 merged outside the lane (no MERGING intent)'])
+        self.assertEqual(seen, [('foreign-merge', {'branch': 'feature/T-0001', 'pr': 7})])
+
+        lines, seen = [], []
+        findings, events = self._report(path, lane_recs, lines.append,
+                                         lambda kind, **f: seen.append((kind, f)))
+        self.assertEqual((findings, events, lines, seen), ([], [], [], []))
+
+    def test_the_ledger_names_the_branch_and_its_pr(self):
+        path = self._sessions(self._foreign_merge('feature/T-0001', 7))
+        lane_recs = {'feature/T-0001': {'state': 'MERGED'}}
+        self._report(path, lane_recs, lambda s: None)
+        with mock.patch.object(invariants, '_sessions_path', return_value=path):
+            data = invariants.i9_seen(env.Product('sample', {}))
+        self.assertIn('feature/T-0001', data)
+        self.assertEqual(data['feature/T-0001']['pr'], 7)
+        self.assertTrue(data['feature/T-0001']['at'])
+
+    def test_a_branch_merged_outside_the_lane_later_is_still_said(self):
+        path = self._sessions(self._foreign_merge('feature/T-0001', 7))
+        lane_recs = {'feature/T-0001': {'state': 'MERGED'}, 'feature/T-0002': {'state': 'MERGED'}}
+        self._report(path, lane_recs, lambda s: None)
+
+        with open(path, 'a') as f:
+            for line in self._foreign_merge('feature/T-0002', 9):
+                f.write(json.dumps(line) + '\n')
+        lines = []
+        findings, events = self._report(path, lane_recs, lines.append)
+        self.assertEqual(findings, [])
+        self.assertEqual([(e['branch'], e['pr']) for e in events], [('feature/T-0002', 9)])
+        self.assertEqual(lines, ['EVENT I9: feature/T-0002 merged outside the lane (no MERGING intent)'])
+
+    def test_an_unreadable_ledger_says_it_again_rather_than_swallowing_it(self):
+        path = self._sessions(self._foreign_merge('feature/T-0001', 7))
+        ledger = os.path.join(os.path.dirname(path), invariants.I9_SEEN)
+        with open(ledger, 'w') as f:
+            f.write('not json')
+        with mock.patch.object(invariants, '_sessions_path', return_value=path):
+            self.assertEqual(invariants.i9_seen(env.Product('sample', {})), {})
+        lines = []
+        findings, events = self._report(path, {'feature/T-0001': {'state': 'MERGED'}}, lines.append)
+        self.assertEqual(findings, [])
+        self.assertEqual(len(events), 1)
+        self.assertEqual(lines, ['EVENT I9: feature/T-0001 merged outside the lane (no MERGING intent)'])
+
+    def test_an_unwritable_ledger_is_not_an_error(self):
+        path = self._sessions(self._foreign_merge('feature/T-0001', 7))
+        ledger = os.path.join(os.path.dirname(path), invariants.I9_SEEN)
+        os.makedirs(ledger)
+        lines = []
+        findings, events = self._report(path, {'feature/T-0001': {'state': 'MERGED'}}, lines.append)
+        self.assertEqual(len(events), 1)
+        self.assertIn('EVENT I9: feature/T-0001 merged outside the lane (no MERGING intent)', lines)
+        self.assertFalse(any('not checked' in line for line in lines), lines)
+
+    def test_the_fold_itself_stays_pure_and_the_audit_lists_everything(self):
+        path = self._sessions(self._foreign_merge('feature/T-0001', 7))
+        lane_recs = {'feature/T-0001': {'state': 'MERGED'}}
+        with mock.patch.object(invariants, '_sessions_path', return_value=path), \
+                mock.patch.object(invariants, 'lane_records', return_value=lane_recs):
+            ctx = invariants.lane_context(env.Product('sample', {}))
+            before = invariants.i9_events(ctx)
+            self._report(path, lane_recs, lambda s: None)
+            after = invariants.i9_events(ctx)
+        self.assertEqual([(e['branch'], e['pr']) for e in before], [('feature/T-0001', 7)])
+        self.assertEqual(before, after, 'i9_events is a pure fold: a report never changes its answer')
+
+    def test_a_quiet_tick_derives_no_path_and_cannot_be_darkened(self):
+        lines = []
+        with mock.patch.object(invariants, '_i9_path', side_effect=OSError('gone')):
+            findings, events = invariants.lane_report(env.Product('sample', {}), out=lines.append)
+        self.assertEqual((findings, events), ([], []))
+        self.assertFalse(any('not checked' in line for line in lines), lines)
+
+
 class R13TestsOnlyInvariants(unittest.TestCase):
     def test_r13_i6_i12_i13_are_never_tick_checks(self):
         registered = {i.id for i in invariants.INVARIANTS}
