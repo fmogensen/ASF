@@ -942,7 +942,10 @@ def naming_ids(subject, main=None):
     """The ids a commit subject (or a PR title) names as its item — the only way a commit names
     one (a product's F-0112: a PR body quoting `origin/<prefix>direct-F-0112` landed F-0112).
 
-    - the conventional scope: `feat(F-0112): …`, `fix(T-0359, T-0360)!: …`;
+    - the conventional scope: `feat(F-0112): …`, `fix(T-0359, T-0360)!: …`, and scopes stacked
+      one after another — `task(T-0448): task(T-0450): …`, one commit carrying two Tasks' work
+      (a product's T-0450 landed that way; crediting only the first sent its lane round a loop
+      of empty-branch corrections);
     - a lead id: `F-0113 — Parity … (#830)`, `[B-0004] …`, `fix: T-0361 …`;
     - a merge of the item's own branch: `Merge pull request #820 from o/<prefix>F-0112`,
       `Merge branch '<prefix>T-0359'`, `merge-queue: #752 (<prefix>T-0001 @ <sha>)` — the branch
@@ -951,11 +954,16 @@ def naming_ids(subject, main=None):
     Nothing else: an id in prose (`…, for F-0115`), in a branch path the subject quotes, in a
     `Revert "…"`, or in a PR body names nothing."""
     s = (subject or "").strip()
-    m = _SCOPE_SUBJECT.match(s)
-    if m:
-        ids = id_tokens(m["scope"])
-        if ids:
-            return ids
+    ids, rest = [], s
+    while True:  # stacked scopes: `task(T-0448): task(T-0450): …` names both
+        m = _SCOPE_SUBJECT.match(rest)
+        found = id_tokens(m["scope"]) if m else []
+        if not found:
+            break
+        ids += [i for i in found if i not in ids]
+        rest = rest[m.end():].lstrip()
+    if ids:
+        return ids
     m = _LEAD_SUBJECT.match(s)
     if m:
         return id_tokens(m["ids"])
