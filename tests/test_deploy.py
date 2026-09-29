@@ -3,12 +3,18 @@ product opts in, and every other case is one loud ``deploy:`` line naming what p
 import datetime
 import json
 import os
+import subprocess
 import types
 import unittest
 from unittest import mock
 
 from asf.evidence import sources
 from asf.harvest import deploy
+
+try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_deploy` does not
+    from gitfixture import Template
+except ImportError:  # pragma: no cover - import shape only
+    from tests.gitfixture import Template
 
 PROD, GREEN, RED, MAIN = 'a' * 40, 'b' * 40, 'c' * 40, 'd' * 40
 
@@ -428,7 +434,8 @@ class NamedTargets(unittest.TestCase):
         self.assertIn('MANUAL: site is 15 relevant commits behind — waits on a hand dispatch of'
                       ' site-deploy.yml', lines[0])
         rel = [c for c in sh.calls if 'rev-list' in c and '--' in c]
-        self.assertEqual(rel[0][-1], ':(glob)apps/site/**')
+        argv = rel[0]
+        self.assertEqual(argv[argv.index('--') + 1], ':(glob)apps/site/**')
 
     def test_an_auto_target_dispatches_its_own_workflow(self):
         sh = FakeSh([_run(PROD)], [_run(GREEN)], site=[_run(SITE)])
@@ -616,6 +623,138 @@ class RelevanceFilter(unittest.TestCase):
         self.assertFalse(deploy.filtered({'paths': [], 'exclude': []}))
         self.assertFalse(deploy.filtered({}))
         self.assertFalse(deploy.filtered({'paths': []}))
+
+
+def _relgit(args, cwd):
+    subprocess.run(['git'] + args, cwd=cwd, check=True, capture_output=True)
+
+
+def _relcommit(repo, files, message):
+    """One commit writing ``files`` ({path: content})."""
+    for path, content in files.items():
+        full = os.path.join(repo, path)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, 'w') as f:
+            f.write(content)
+    _relgit(['add', '-A'], repo)
+    _relgit(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', message], repo)
+
+
+def _build_relevance_repo(root):
+    """A base commit, then seven on ``main``: the card's own commit
+    (``apps/site/playwright.config.ts`` alone), an e2e spec, a ``__tests__`` file, a Markdown
+    note, a real source edit, a commit mixing one shipped file with a test file, and a commit
+    outside the target — the fixture P3 and Task 2's ``RelevanceAgainstGit`` measure against."""
+    origin = os.path.join(root, 'origin.git')
+    repo = os.path.join(root, 'repo')
+    _relgit(['init', '-q', '--bare', '-b', 'main', origin], root)
+    _relgit(['clone', '-q', origin, repo], root)
+    _relcommit(repo, {'apps/site/app.ts': 'export const v = 0;\n'}, 'seed')
+    _relcommit(repo, {'apps/site/playwright.config.ts': 'export default {};\n'},
+              "the card's own commit")
+    _relcommit(repo, {'apps/site/e2e/a.spec.ts': "test('x', () => {});\n"}, 'e2e spec')
+    _relcommit(repo, {'apps/site/__tests__/b.ts': 'export {};\n'}, 'unit test')
+    _relcommit(repo, {'apps/site/notes.md': '# notes\n'}, 'notes')
+    _relcommit(repo, {'apps/site/app.ts': 'export const v = 1;\n'}, 'a real source edit')
+    _relcommit(repo, {'apps/site/mixed.ts': 'export const m = 1;\n',
+                      'apps/site/mixed.test.ts': "test('m', () => {});\n"},
+              'one shipped file among test files')
+    _relcommit(repo, {'server/api.ts': 'export const api = 1;\n'}, 'outside the target')
+    _relgit(['push', '-q', 'origin', 'HEAD:main'], repo)
+
+
+def _build_card_repo(root):
+    """The card's exact defect, alone: a base commit, then one commit touching only
+    ``apps/site/playwright.config.ts`` — nothing else."""
+    origin = os.path.join(root, 'origin.git')
+    repo = os.path.join(root, 'repo')
+    _relgit(['init', '-q', '--bare', '-b', 'main', origin], root)
+    _relgit(['clone', '-q', origin, repo], root)
+    _relcommit(repo, {'apps/site/app.ts': 'export const v = 0;\n'}, 'seed')
+    _relcommit(repo, {'apps/site/playwright.config.ts': 'export default {};\n'},
+              "the card's own commit")
+    _relgit(['push', '-q', 'origin', 'HEAD:main'], repo)
+
+
+RELEVANCE_REPO = Template(_build_relevance_repo, prefix='relevance_test_')
+CARD_REPO = Template(_build_card_repo, prefix='relevance_card_test_')
+
+
+class RelevanceAgainstGit(unittest.TestCase):
+    """The counting half proved against real git, not ``FakeSh`` — the class that would have
+    caught the card: a commit touching only ``apps/site/playwright.config.ts`` counting 0 once
+    ``paths`` and the default excludes are both in play."""
+
+    def _repo(self):
+        return os.path.join(RELEVANCE_REPO.fresh(), 'repo')
+
+    def _shas(self, repo):
+        """The repo's commits on ``main``, oldest first: ``[base, playwright, e2e, tests, md,
+        source edit, mixed, outside]``."""
+        return deploy._sh(['git', '-C', repo, 'log', '--format=%H', '--reverse', 'main']
+                          ).splitlines()
+
+    def _product(self, repo, **cfg):
+        return types.SimpleNamespace(
+            repo_slug='o/r', repo_dir=repo, main='main',
+            conventions={'ci_workflow': 'ci.yml', 'deploy_workflow': 'deploy-prod.yml'},
+            deploy_sha={'targets': {'site': dict(
+                {'mode': 'manual', 'workflow': 'site-deploy.yml', 'paths': ['apps/site/**']},
+                **cfg)}})
+
+    def test_unfiltered_counts_every_commit(self):
+        repo = self._repo()
+        base = self._shas(repo)[0]
+        self.assertEqual(deploy._behind(self._product(repo), base, deploy._sh), 7)
+
+    def test_paths_alone_drops_the_commit_outside_the_target(self):
+        repo = self._repo()
+        base = self._shas(repo)[0]
+        p = self._product(repo)
+        self.assertEqual(deploy._behind(p, base, deploy._sh, ['apps/site/**']), 6)
+
+    def test_paths_plus_defaults_counts_only_the_source_edit_and_the_mixed_commit(self):
+        repo = self._repo()
+        shas = self._shas(repo)
+        base = shas[0]
+        p = self._product(repo)
+        excl = list(deploy.DEFAULT_EXCLUDES)
+        self.assertEqual(deploy._behind(p, base, deploy._sh, ['apps/site/**'], excl), 2)
+        got = deploy._sh(['git', '-C', repo, 'rev-list', f'{base}..origin/main', '--']
+                         + deploy.pathspecs(['apps/site/**'], excl))
+        self.assertEqual(set(got.splitlines()), {shas[5], shas[6]})
+
+    def test_exclude_only_counts_everything_except(self):
+        repo = self._repo()
+        base = self._shas(repo)[0]
+        p = self._product(repo)
+        excl = list(deploy.DEFAULT_EXCLUDES)
+        self.assertEqual(deploy._behind(p, base, deploy._sh, exclude=excl), 3)
+
+    def test_a_trailing_slash_exclude_drops_the_whole_directory(self):
+        repo = self._repo()
+        base = self._shas(repo)[0]
+        p = self._product(repo)
+        self.assertEqual(deploy._behind(p, base, deploy._sh, ['apps/site/**']), 6)
+        self.assertEqual(
+            deploy._behind(p, base, deploy._sh, ['apps/site/**'], ['apps/site/e2e/']), 5)
+
+    def test_the_cards_own_commit_counts_zero_and_decide_says_so(self):
+        repo = os.path.join(CARD_REPO.fresh(), 'repo')
+        base = self._shas(repo)[0]
+        p = self._product(repo)
+        excl = list(deploy.DEFAULT_EXCLUDES)
+        self.assertEqual(deploy._behind(p, base, deploy._sh, ['apps/site/**'], excl), 0)
+        f = deploy._blank(p, 'site')
+        f['deployed'] = base
+        f['main'] = deploy._sh(['git', '-C', repo, 'rev-parse', 'origin/main'])
+        deploy._set_behind(p, f, deploy._sh)
+        f = deploy._done(f)
+        self.assertEqual(f['relevant'], 0)
+        go, line = deploy.decide(p, f, 'site')
+        self.assertFalse(go)
+        self.assertIn('has every main commit touching apps/site/**', line)
+        self.assertNotIn('dispatching', line)
 
 
 class Validation(unittest.TestCase):
