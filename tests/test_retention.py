@@ -204,6 +204,7 @@ class RetentionConventions(unittest.TestCase):
         self.assertEqual(conv.retention('legacy_days'), 7)
         self.assertEqual(conv.retention('per_tick'), 50)
         self.assertEqual(conv.retention('legacy_prefixes'), ())
+        self.assertEqual(conv.retention('settled_days'), 7)
 
     def test_a_partial_block_keeps_the_other_defaults(self):
         conv = conventions.Conventions.from_mapping(
@@ -226,6 +227,39 @@ class RetentionConventions(unittest.TestCase):
         conv = conventions.Conventions.from_mapping({'branch_retention': 'yes'})
         self.assertIn('branch_retention', dict(conv.shape_findings()))
         self.assertEqual(conv.retention('archive_days'), 14)
+
+    def test_settled_days_zero_is_off_not_malformed(self):
+        conv = conventions.Conventions.from_mapping(
+            {'branch_retention': {'settled_days': 0}})
+        self.assertEqual(conv.retention('settled_days'), 0)
+        problems = dict(conventions.validate_mapping(
+            {'branch_retention': {'settled_days': 0}}))
+        self.assertNotIn('branch_retention.settled_days', problems)
+        conv = conventions.Conventions.from_mapping(
+            {'branch_retention': {'per_tick': 0}})
+        self.assertEqual(conv.retention('per_tick'), 0)
+        problems = dict(conventions.validate_mapping(
+            {'branch_retention': {'per_tick': 0}}))
+        self.assertNotIn('branch_retention.per_tick', problems)
+
+    def test_a_bad_settled_days_is_named_and_reads_as_seven(self):
+        for bad in (-1, True, 'soon'):
+            data = {'branch_retention': {'settled_days': bad}}
+            problems = dict(conventions.validate_mapping(data))
+            self.assertIn('branch_retention.settled_days', problems)
+            self.assertEqual(problems['branch_retention.settled_days'],
+                              f'must be a whole number >= 0, not {bad!r}')
+            conv = conventions.Conventions.from_mapping(data)
+            self.assertEqual(conv.retention('settled_days'), 7)
+
+    def test_a_partial_block_setting_only_settled_days_keeps_the_other_four(self):
+        conv = conventions.Conventions.from_mapping(
+            {'branch_retention': {'settled_days': 3}})
+        self.assertEqual(conv.retention('settled_days'), 3)
+        self.assertEqual(conv.retention('archive_days'), 14)
+        self.assertEqual(conv.retention('legacy_days'), 7)
+        self.assertEqual(conv.retention('per_tick'), 50)
+        self.assertEqual(conv.retention('legacy_prefixes'), ())
 
 
 if __name__ == '__main__':
