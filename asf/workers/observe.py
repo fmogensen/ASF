@@ -216,11 +216,53 @@ def read(cfg, accounts, source=None):
     return out, ''
 
 
-def identity_alive(observed, runs):
-    """``callable(pid) -> bool`` (D11): a pid one of ``runs`` recorded is alive only while an
-    observed session still sits there carrying that run's ``session`` — or, for a run recorded
-    before this change and so with no ``session`` of its own, while any observed session sits at
-    its pid. A pid no run recorded is alive iff it is observed at all."""
+def liveness_for(observed, runs, exists=None, is_ours=None, silent_min=None, silent_for=None):
+    """``callable(pid) -> one of lifecycle.LIVENESS`` for the pids ``runs`` recorded (F-0234).
+
+    ``exists`` defaults to :func:`asf.workers.lifecycle.pid_alive`. ``is_ours(pid)`` and
+    ``silent_for(pid)`` are optional measurements the caller supplies; without them
+    :func:`asf.workers.lifecycle.liveness` is asked with None for those facts and can only
+    answer ``ALIVE``, ``GONE`` or ``UNKNOWN``. The cheap facts are asked first, for every pid;
+    only a pid left ``UNKNOWN`` by them is asked again with the measurements, so a caller that
+    supplies ``is_ours``/``silent_for`` pays for them on the unmatched pids only."""
+    by_pid = {o.pid: o for o in observed}
+    run_by_pid = {}
+    for run in runs:
+        pid = run.get('pid')
+        if pid is not None and pid not in run_by_pid:
+            run_by_pid[pid] = run
+    exists_fn = exists or lifecycle.pid_alive
+    exists_seen = {}
+
+    def exists_memo(pid):
+        if pid not in exists_seen:
+            exists_seen[pid] = exists_fn(pid)
+        return exists_seen[pid]
+
+    def verdict(pid):
+        run = run_by_pid.get(pid)
+        o = by_pid.get(pid)
+        v = lifecycle.liveness(run, o, exists_memo)
+        if v != lifecycle.UNKNOWN:
+            return v
+        return lifecycle.liveness(run, o, exists_memo,
+                                   is_ours=is_ours(pid) if is_ours else None,
+                                   silent_min=silent_min,
+                                   silent_for=silent_for(pid) if silent_for else None)
+
+    return verdict
+
+
+def identity_alive(observed, runs, **kw):
+    """``callable(pid) -> bool`` (D11): a pid one of ``runs`` recorded is alive only while
+    :func:`liveness_for` calls it ``ALIVE`` or ``UNKNOWN`` for it — the two verdicts a run keeps
+    running under (F-0234, :data:`asf.workers.lifecycle.LIVE_VERDICTS`). A run recorded before
+    sessions existed and so with no ``session`` of its own is alive while any observed session
+    sits at its pid, exactly as before F-0234 — the OS question :func:`liveness_for` now asks
+    does not apply to a run this rule never had a session to check. A pid no run recorded is
+    alive iff it is observed at all. ``**kw`` (``exists``, ``is_ours``, ``silent_min``,
+    ``silent_for``) is passed to :func:`liveness_for`."""
+    verdict = liveness_for(observed, runs, **kw)
     by_pid = {o.pid: o for o in observed}
     run_by_pid = {}
     for run in runs:
@@ -232,9 +274,10 @@ def identity_alive(observed, runs):
         if cloudpid.is_token(pid):  # a cloud run is no process here: its status file answers
             return cloudpid.alive(pid)
         run = run_by_pid.get(pid)
-        o = by_pid.get(pid)
-        if run is not None:
-            return o is not None and (not run.get('session') or run.get('session') == o.session)
-        return pid in by_pid
+        if run is None:
+            return pid in by_pid          # unchanged: a pid no run recorded
+        if not run.get('session'):
+            return pid in by_pid          # unchanged: a run recorded before sessions existed
+        return verdict(pid) in lifecycle.LIVE_VERDICTS
 
     return alive

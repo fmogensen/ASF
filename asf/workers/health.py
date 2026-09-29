@@ -94,15 +94,51 @@ def record_items(product):
     return {k: v for k, v in raw.items() if isinstance(v, dict)} if isinstance(raw, dict) else None
 
 
+def _measurements(product, runs):
+    """The three keyword measurements :func:`asf.workers.observe.liveness_for` asks for only
+    when a pid is otherwise ``UNKNOWN`` (F-0234): ``is_ours`` (is the process there one of the
+    factory's headless workers, off its command line), ``silent_min`` (the product's configured
+    bound on a quiet log, or the default when there is no product to configure it) and
+    ``silent_for`` (minutes since the run recorded at a pid last moved its own log)."""
+    from asf.workers import stall as stall_mod
+    silent_min = (stall_mod.silent_minutes(product) if product is not None
+                  else stall_mod.DEFAULT_SILENT_MIN)
+    log_by_pid = {}
+    for run in runs:
+        pid = run.get('pid')
+        if pid is not None and pid not in log_by_pid:
+            log_by_pid[pid] = run.get('log')
+
+    def silent_for(pid):
+        log = log_by_pid.get(pid)
+        if not log:
+            return None
+        try:
+            return (time.time() - os.path.getmtime(log)) / 60
+        except OSError:
+            return None
+
+    return {'is_ours': lambda pid: is_print_worker(command_line(pid)),
+            'silent_min': silent_min, 'silent_for': silent_for}
+
+
+def _observe(product, runs, session_source=None):
+    """One ``observe.read`` for :func:`alive_for` (and, later, a verdict callable) to share:
+    ``(observed, why, kw)`` where ``kw`` is :func:`_measurements`'s dict — so a health pass pays
+    for the tick's one ``ps axeww`` call once, not once per callable it builds."""
+    cfg = spawn_mod.load_cfg()
+    observed, why = observe.read(cfg, pool_mod.accounts_from_config(cfg), source=session_source)
+    return observed, why, _measurements(product, runs)
+
+
 def alive_for(product, runs, session_source=None):
     """``callable(pid) -> bool`` (F-0076 D11): a run is alive only while an observed session
     still sits at its pid carrying that run's own ``session`` id — falls back to
     :func:`pid_alive` when observation is unreadable (D10)."""
-    cfg = spawn_mod.load_cfg()
-    observed, why = observe.read(cfg, pool_mod.accounts_from_config(cfg), source=session_source)
+    observed, why, kw = _observe(product, runs, session_source)
     if why:
         return pid_alive
-    return observe.identity_alive(observed, runs)
+    return observe.identity_alive(observed, runs, **kw)
 
 
 def remote_retire(run):
