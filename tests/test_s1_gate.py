@@ -1,6 +1,5 @@
 """F-0113: the S1 gate says its own name, and one plan feeds every view — the S1 lane's own
 invariant, held to a test: an S1 nobody and nothing is working cuts no tier-2 row."""
-import datetime as dt
 import unittest
 
 from asf.env import Product
@@ -11,14 +10,6 @@ def product(**extra):
     conv = {'branch_prefixes': {'spec': 'spec', 'plan': 'plan', 'task': 'task'}}
     conv.update(extra.pop('conventions', {}))
     return Product('sample', dict({'conventions': conv}, **extra))
-
-
-def since(days):
-    """``days`` ago, an hour clear of the day boundary. The gate's sentence carries an age, and
-    an age is measured against now: a pinned ``stage_since`` reads one day older every day the
-    suite runs and turns the gate red on a date nobody chose."""
-    return (dt.datetime.now(dt.timezone.utc)
-            - dt.timedelta(days=days, hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
 def ten_tier_2_rows_behind(bug):
@@ -83,7 +74,7 @@ class AnUnworkedS1HoldsNothing(unittest.TestCase):
 
     def test_an_undecided_s1_holds_nothing(self):
         bug = {'id': 'B-0057', 'type': 'bug', 'severity': 'S1', 'decided': False, 'state': 'New',
-              'stage_since': since(270)}
+              'stage_since': '2026-01-01T00:00:00Z'}
         cut, uncut = self._plans(bug)
         g = self._assert_holds_nothing(cut, uncut)
         self.assertEqual([e[0] for e in g.unworked], ['B-0057'])
