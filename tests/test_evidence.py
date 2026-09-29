@@ -675,6 +675,35 @@ class DocLaneCommitTests(unittest.TestCase):
         self.assertEqual(ev, {})
 
 
+class DocsOnlyMergeFactTests(unittest.TestCase):
+    """A product's T-0047 closed on "merge 85846c7 of cloud/transparent-meter-t1 lands T-0047" —
+    a merge whose only files were the writer's NO-CHANGE report under reviews_dir — and its
+    Feature later closed on that one commit. A lane merge of documents only lands nothing."""
+
+    def setUp(self):
+        self.r = ProductRepo()
+        self.addCleanup(self.r.close)
+        self.product = self.r.product(ci=None)
+        self.report = evidence.doc_dirs(self.product)[-1] + "t1-writer-report.md"
+
+    def evidence_for(self, commits, facts):
+        return evidence.id_evidence(self.product, [], [], commits=commits, green=[],
+                                    merges={"code": facts})
+
+    def test_a_writer_report_merge_is_not_the_landing(self):
+        ev = self.evidence_for(
+            [("w1", "T-0047/T1 writer report — NO-CHANGE, already covered by open PR #683",
+              [self.report])],
+            {"T-0047": {"sha": "w1", "branch": "cloud/t1", "pr": 728}})
+        self.assertFalse((ev.get("T-0047") or {}).get("commit"))
+
+    def test_a_merge_that_touches_code_still_lands(self):
+        ev = self.evidence_for(
+            [("c1", "the schema", ["packages/db/migrations/0234.sql", self.report])],
+            {"T-0047": {"sha": "c1", "branch": "cloud/t1", "pr": 683}})
+        self.assertEqual((ev["T-0047"]["commit"], ev["T-0047"]["merge"]), ("c1", "cloud/t1"))
+
+
 class NamingCommitTests(unittest.TestCase):
     """F-0112: PR #847 (`fix(bands): … (#847)`, head `fix/bands-foreign-collision`) quoted
     the branches `origin/cloud/direct-F-0112` and `origin/cloud/T-0359` in its body, and the

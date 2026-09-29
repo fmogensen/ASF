@@ -13,6 +13,7 @@ from asf import reviews
 from asf.env import Product
 from asf.record import check
 from asf.record import frontmatter
+from asf.evidence import closing
 from asf.record import ingest
 from asf.record.core import today
 from asf.record.index import do_index
@@ -738,6 +739,68 @@ class RemovedTaskTests(unittest.TestCase):
         self.assertEqual(self.run_ingest(ev), 0)
         meta, _body = read_meta(self.root, 'features', 'F-0001')
         self.assertEqual(meta['stage'], 'landed')
+
+    def orphan_tree(self, survivor_machine=('state: Active', 'stage_since: 2026-01-01T00:00:00Z',
+                                            'updated: 2026-01-01T00:00:00Z')):
+        # a product's F-0094: T-0047 landed; the rest were merged into T-0048, and a later groom
+        # removed T-0048 itself ("the deliverable is already on main")
+        write(self.root, 'E-0001', 'epic', 'Factory', 'epics')
+        write(self.root, 'F-0001', 'feature', 'Transparent meter', 'features', parent='E-0001',
+              machine_lines=['state: Active', 'stage: building 1/2',
+                             'stage_since: 2026-01-01T00:00:00Z', 'updated: 2026-01-01T00:00:00Z'])
+        write(self.root, 'T-0001', 'task', 'The schema', 'tasks', parent='F-0001')
+        write(self.root, 'T-0002', 'task', 'The catalogue', 'tasks', parent='F-0001',
+              typed_lines=['merged: [T-0003]',
+                           'removed: the deliverable is already on `main` (groom 2026-01-03)'],
+              machine_lines=survivor_machine)
+        write(self.root, 'T-0003', 'task', 'The web surfaces', 'tasks', parent='F-0001',
+              typed_lines=['removed: merged into T-0002 (groom 2026-01-02)'])
+
+    def orphan_evidence(self, survivor_commit=None):
+        ids = landed_ids('T-0001', 'a' * 40)
+        if survivor_commit:
+            ids.update(landed_ids('T-0002', survivor_commit))
+        return dict(EMPTY_EV, ci=True, features=matched_feature(), ids=ids)
+
+    def test_a_removed_survivor_does_not_close_the_feature_over_the_tasks_merged_into_it(self):
+        self.orphan_tree()
+        self.assertEqual(self.run_ingest(self.orphan_evidence()), 0)
+        feature, _b = read_meta(self.root, 'features', 'F-0001')
+        self.assertNotEqual(feature['state'], 'Closed')
+        self.assertIn('1/2 tasks Closed', feature['evidence'])
+        orphan, _b = read_meta(self.root, 'tasks', 'T-0003')
+        self.assertEqual(orphan['state'], 'New')
+        self.assertNotIn('rule: parent-closed', orphan['evidence'])
+
+    def test_a_survivor_that_landed_carries_the_tasks_merged_into_it(self):
+        self.orphan_tree()
+        self.assertEqual(self.run_ingest(self.orphan_evidence(survivor_commit='b' * 40)), 0)
+        feature, _b = read_meta(self.root, 'features', 'F-0001')
+        self.assertEqual(feature['state'], 'Closed')
+
+    def test_orphaned_tasks_follow_a_chain_of_survivors(self):
+        canonical = {
+            'T-0001': {'meta': {'type': 'task', 'removed': 'merged into T-0002 (groom x)'}},
+            'T-0002': {'meta': {'type': 'task', 'removed': 'merged into T-0003 (groom x)'}},
+            'T-0003': {'meta': {'type': 'task', 'removed': 'already on main'}},
+            'T-0004': {'meta': {'type': 'task', 'removed': 'merged into T-0005 (groom x)'}},
+            'T-0005': {'meta': {'type': 'task'}},
+        }
+        def own(state):
+            return ingest._Derived(closing.Closing(state, 'x'))
+        derived = {k: own('New') for k in canonical}
+        self.assertEqual(ingest.orphaned_tasks(canonical, derived), {'T-0001', 'T-0002'})
+        derived['T-0003'] = own('Closed')
+        self.assertEqual(ingest.orphaned_tasks(canonical, derived), set())
+
+    def test_a_survivor_held_closed_by_a_wrong_descent_does_not_vouch(self):
+        # the incident's second tick: the survivor itself was closed parent-closed, and the
+        # terminal hold keeps it Closed — its own evidence still lands nothing
+        self.orphan_tree(survivor_machine=('state: Closed', 'stage_since: 2026-01-01T00:00:00Z',
+                                           'updated: 2026-01-01T00:00:00Z'))
+        self.run_ingest(self.orphan_evidence())
+        feature, _b = read_meta(self.root, 'features', 'F-0001')
+        self.assertNotEqual(feature['state'], 'Closed')
 
     def test_story_on_a_removed_task_only_is_uncovered(self):
         write(self.root, 'E-0001', 'epic', 'Factory', 'epics')

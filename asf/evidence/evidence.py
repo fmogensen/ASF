@@ -1221,12 +1221,23 @@ def id_evidence(product, branches, prs, commits=None, green=None, merges=None):
             continue
         for iid in id_tokens(b, BRANCH_ID_TOKEN):
             rec(iid)["branches"].append(b)
-    for iid, fact in sorted(((merges or {}).get("code") or {}).items()):
+    commits = main_commits(product) if commits is None else commits
+    dirs = doc_dirs(product)
+    facts = sorted(((merges or {}).get("code") or {}).items())
+    # A lane merge whose diff is only documents — a writer report saying NO-CHANGE, a review, a
+    # fixer's "no change needed" — lands nothing: it names its item because the run was that
+    # item's, not because the item's work reached the trunk (a product's T-0047 closed on its
+    # writer report, and its Feature then closed on that one commit).
+    fact_paths = {sha: paths for sha, _s, paths in _commit_rows(commits)}
+    unread = [f["sha"] for _i, f in facts if f.get("sha") and f["sha"] not in fact_paths]
+    if unread:
+        fact_paths.update(commit_paths(product, unread))
+    for iid, fact in facts:
+        if docs_only(fact_paths.get(fact["sha"]), dirs):
+            continue
         r = rec(iid)
         r["commit"], r["merge"] = fact["sha"], fact.get("branch") or ""
         r["pr"] = fact.get("pr")
-    commits = main_commits(product) if commits is None else commits
-    dirs = doc_dirs(product)
     prefixes = branch_prefixes(product)
     known = {}
     # A Feature is never landed by its spec or plan: a commit whose diff is only documents under
