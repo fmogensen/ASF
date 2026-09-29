@@ -2163,7 +2163,7 @@ class DeliveredReadersTests(unittest.TestCase):
         path = self._write([before], 'not-overruled.jsonl')
         self.assertIsNone(lc.overruling(path, 'B-0001', head))
 
-    def test_overruling_the_pushed_sha_and_unchanged_since_paths_still_work(self):
+    def test_overruling_the_pushed_sha_and_same_code_paths_still_work(self):
         sha = 'c' * 12
         pushed_ruling = ('REPORT\nitem: B-0001\nstatus: done\ncommits: deadbeef fix\n'
                          f'ruling: upheld — fixed\npushed: yes {sha}\n')
@@ -2175,7 +2175,7 @@ class DeliveredReadersTests(unittest.TestCase):
         self.assertIsNone(lc.overruling(path, 'B-0001', other_head))
         self.assertEqual(lc.overruling(path, 'B-0001', sha + 'f' * 28), 'adjudicate-b-0001')
         self.assertEqual(
-            lc.overruling(path, 'B-0001', other_head, unchanged_since=lambda s: s == sha),
+            lc.overruling(path, 'B-0001', other_head, same_code=lambda s: s == sha),
             'adjudicate-b-0001')
 
     def test_review_answered_over_a_correct_run_with_nothing_to_change(self):
@@ -2201,6 +2201,106 @@ class DeliveredReadersTests(unittest.TestCase):
         other_head = dict(run, launch_head='e' * 40)
         path = self._write(lines + [other_head], 'other-head.jsonl')
         self.assertIsNone(lc.review_answered(path, 'B-0001', 'rv/4-b-0001.md', head))
+
+
+class RulingAcrossARebaseTests(unittest.TestCase):
+    """F-0173: :func:`lc.overruling` measures both shas a ruling offers — the ``pushed:`` claim
+    and, for a run that committed nothing, the ``launch_head`` fact — with a caller-supplied
+    ``same_code`` predicate, not sha identity alone. A stub predicate and no fixture repo: the
+    lane's own ``same_code`` wiring is F-0173's block A/B, in ``tests/test_lane.py``."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+
+    def _log(self, name, text):
+        log = os.path.join(self.d, name)
+        rec = {'type': 'result', 'subtype': 'success', 'is_error': False, 'result': text}
+        with open(log, 'w') as f:
+            f.write(json.dumps(rec) + '\n')
+        return log
+
+    def _write(self, lines, name):
+        path = os.path.join(self.d, name)
+        with open(path, 'w') as f:
+            for ln in lines:
+                f.write(json.dumps(ln) + '\n')
+        return path
+
+    def test_the_pushed_sha_through_the_predicate(self):
+        sha = 'c' * 12
+        text = ('REPORT\nitem: B-0001\nstatus: done\ncommits: deadbeef fix\n'
+                'ruling: upheld — fixed\npushed: yes ' + sha + '\n')
+        log = self._log('pushed-log.jsonl', text)
+        run = {'job': 'adjudicate-b-0001', 'item': 'B-0001', 'kind': 'adjudicate', 'pid': 1,
+               'started': 't1', 'ended': 't2', 'end_reason': 'finished', 'log': log}
+        path = self._write([run], 'pushed.jsonl')
+        other_head = 'b' * 40
+        self.assertEqual(
+            lc.overruling(path, 'B-0001', other_head, same_code=lambda s: s == sha),
+            'adjudicate-b-0001')
+
+    def test_the_launch_head_fact_through_the_predicate_when_the_pushed_sha_is_unreadable(self):
+        # B-1377's own last rulings, after a rebase: the pushed: sha is garbage, commits: none,
+        # and it is launch_head — the fact behind the claim — the predicate must be reached for.
+        head = 'a' * 40
+        text = ('REPORT\nitem: B-0001\nstatus: done\ncommits: none\n'
+                'ruling: overruled — no defect\npushed: yes deadbeef99999999\n')
+        log = self._log('rebased-log.jsonl', text)
+        run = {'job': 'adjudicate-b-0001', 'item': 'B-0001', 'kind': 'adjudicate', 'pid': 1,
+               'started': 't1', 'ended': 't2', 'end_reason': 'finished', 'launch_head': head,
+               'log': log}
+        path = self._write([run], 'rebased.jsonl')
+        new_head = 'b' * 40
+        self.assertEqual(
+            lc.overruling(path, 'B-0001', new_head, same_code=lambda s: s == head),
+            'adjudicate-b-0001')
+
+    def test_a_run_that_committed_offers_no_launch_head_candidate(self):
+        head = 'a' * 40
+        text = ('REPORT\nitem: B-0001\nstatus: done\ncommits: abc1234 fix: C1\n'
+                'ruling: upheld — fixed\npushed: yes deadbeef99999999\n')
+        log = self._log('committed-log.jsonl', text)
+        run = {'job': 'adjudicate-b-0001', 'item': 'B-0001', 'kind': 'adjudicate', 'pid': 1,
+               'started': 't1', 'ended': 't2', 'end_reason': 'finished', 'launch_head': head,
+               'log': log}
+        path = self._write([run], 'committed.jsonl')
+        new_head = 'b' * 40
+        self.assertIsNone(lc.overruling(path, 'B-0001', new_head, same_code=lambda s: s == head))
+
+    def test_a_predicate_that_accepts_nothing_is_not_called_when_the_head_already_matches(self):
+        sha = 'c' * 12
+        text = ('REPORT\nitem: B-0001\nstatus: done\ncommits: deadbeef fix\n'
+                'ruling: upheld — fixed\npushed: yes ' + sha + '\n')
+        log = self._log('matches-log.jsonl', text)
+        run = {'job': 'adjudicate-b-0001', 'item': 'B-0001', 'kind': 'adjudicate', 'pid': 1,
+               'started': 't1', 'ended': 't2', 'end_reason': 'finished', 'log': log}
+        path = self._write([run], 'matches.jsonl')
+        calls = []
+
+        def never(s):
+            calls.append(s)
+            return False
+
+        self.assertEqual(
+            lc.overruling(path, 'B-0001', sha + 'f' * 28, same_code=never),
+            'adjudicate-b-0001')
+        self.assertEqual(calls, [])
+        other_head = 'b' * 40
+        self.assertIsNone(lc.overruling(path, 'B-0001', other_head, same_code=never))
+        self.assertEqual(calls, [sha])
+
+    def test_same_code_none_is_sha_identity_only(self):
+        sha = 'c' * 12
+        text = ('REPORT\nitem: B-0001\nstatus: done\ncommits: deadbeef fix\n'
+                'ruling: upheld — fixed\npushed: yes ' + sha + '\n')
+        log = self._log('identity-log.jsonl', text)
+        run = {'job': 'adjudicate-b-0001', 'item': 'B-0001', 'kind': 'adjudicate', 'pid': 1,
+               'started': 't1', 'ended': 't2', 'end_reason': 'finished', 'log': log}
+        path = self._write([run], 'identity.jsonl')
+        self.assertEqual(lc.overruling(path, 'B-0001', sha + 'f' * 28), 'adjudicate-b-0001')
+        other_head = 'b' * 40
+        self.assertIsNone(lc.overruling(path, 'B-0001', other_head))
 
 
 class OutcomeClassTests(unittest.TestCase):

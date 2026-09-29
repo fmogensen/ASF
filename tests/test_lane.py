@@ -632,6 +632,62 @@ class LaneRepo(LaneFixture):
                 lane.lane_pass(product, self.state_dir, out=lambda *_: None)
                 self.assertEqual(self.lane_of('worker/T-0001')['state'], lane.BACK)
 
+    def test_a_ruling_stands_when_the_lane_rebases_the_branch_under_it(self):
+        """F-0173: the lane itself rebases a branch that is waiting on a done ruling (same
+        patches, new shas). The review is still current (B-0147) and the ruling still stands
+        (this card): the branch goes REVIEW → GATE, and the feeder is never asked for a second
+        adjudicate."""
+        path, head = self._adjudicated(None)
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)  # the lane saw this head as the tip
+        self.push_main({'t.txt': 't\n'}, 'chore: the trunk moves')
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        sh(['git', 'checkout', '-q', '-B', 'worker/T-0001', 'origin/worker/T-0001'],
+           cwd=self.worker)
+        sh(['git', 'rebase', '-q', 'origin/main'], cwd=self.worker)
+        sh(['git', 'push', '-q', '-f', 'origin', 'worker/T-0001'], cwd=self.worker)
+        new_head = sh(['git', 'rev-parse', 'origin/worker/T-0001'], cwd=self.worker).stdout.strip()
+        self.assertNotEqual(new_head, head)
+        self.assertEqual(
+            sh(['git', 'cat-file', '-e', head + '^{commit}'], cwd=self.repo).returncode, 0)
+        product = self.product(lane={'review': {'code': 'required'}})
+        lines = []
+        lane.lane_pass(product, self.state_dir, out=lines.append)
+        rec_ = self.lane_of('worker/T-0001')
+        self.assertEqual(rec_['state'], lane.GATE, lines)
+        self.assertIn('overruled', rec_['reason'])
+        self.assertIn('adjudicate-t-0001', rec_['reason'])
+        self.assertIsNone(lifecycle.pending_correction(lifecycle.latest(path)['adjudicate-t-0001'],
+                                                       path))
+        self.assertTrue(lifecycle.corrections(path)['T-0001']['settled'])
+
+    def test_a_rebase_that_carries_new_code_never_keeps_the_ruling(self):
+        """The bound on the test above: the branch is rebased *and* a real new commit is pushed
+        on top. The review is no longer current, the T5a arm is never reached, and the lane asks
+        for round 2 — exactly what
+        test_a_correct_session_that_pushes_new_commits_asks_for_a_new_review_round requires
+        without a rebase."""
+        path, head = self._adjudicated('d' * 40)
+        self.push_main({'t.txt': 't\n'}, 'chore: the trunk moves')
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        sh(['git', 'checkout', '-q', '-B', 'worker/T-0001', 'origin/worker/T-0001'],
+           cwd=self.worker)
+        sh(['git', 'rebase', '-q', 'origin/main'], cwd=self.worker)
+        sh(['git', 'push', '-q', '-f', 'origin', 'worker/T-0001'], cwd=self.worker)
+        self.write(self.worker, 'a.txt', 'fixed\n')
+        sh(['git', 'commit', '-qam', 'fix(T-0001): answer C1'], cwd=self.worker, env_=self.ident)
+        sh(['git', 'push', '-q', 'origin', 'worker/T-0001'], cwd=self.worker)
+        with open(path, 'a', encoding='utf-8') as f:
+            for ln in ({'job': 'correct-t-0001', 'item': 'T-0001', 'branch': 'worker/T-0001',
+                        'kind': 'correct', 'pid': 3, 'started': '2026-09-21T00:20:00Z'},
+                       {'job': 'correct-t-0001', 'ended': '2026-09-21T00:25:00Z',
+                        'end_reason': 'finished'}):
+                f.write(json.dumps(ln) + '\n')
+        product = self.product(lane={'review': {'code': 'required'}})
+        lane.lane_pass(product, self.state_dir, out=lambda *_: None)
+        rec_ = self.lane_of('worker/T-0001')
+        self.assertEqual((rec_['state'], rec_.get('round')), (lane.REVIEW, 2), rec_)
+        self.assertNotIn('T-0001', lifecycle.corrections(path))
+
     def test_a_correct_session_that_pushes_new_commits_asks_for_a_new_review_round(self):
         """After a session answering a review pushes new commits, the next lane state is a new
         REVIEW round on the new head — never another correction off the stale review file."""
