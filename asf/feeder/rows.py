@@ -43,7 +43,11 @@ The row kinds::
                            drops its not-yet-landed Tasks and their ``after:`` in one document the
                            record applies once it lands; until then the Feature's code rows wait
                            (``WAITS ON replan``). A spec/plan session to the caps
-                           (:func:`finish_first`, :func:`build_cap`)
+                           (:func:`finish_first`, :func:`build_cap`). An open Task whose PR is
+                           still in flight (PUSHED, in review, or waiting on a gate/merge) holds
+                           the row itself — ``WAITS ON <task> #<pr>`` — until that PR merges or
+                           closes (:func:`_tasks_in_flight`): a replan must not rewrite the Task
+                           a PR is about to land under
     DELIVERY → PLAN        a delivery lead (``delivers:``) with no plan yet: one session plans
                            every member as one document (brief ``delivery-plan``)
     DELIVERY → CODE        a delivery lead whose plan is approved: one session builds every open
@@ -1121,7 +1125,7 @@ def _one_feature_rows(items, product, f, busy, running, landed_shas, occupancy):
     elif word in ('plan-approved', 'building') and replan_mod.pending(f):
         # the Feature's plan is being replaced: its Tasks' rows wait on the replan, and claim
         # no footprint (a copy of ``running``) — the replan may move or drop every one of them
-        out.append(replan_row(f, product, occupancy))
+        out.append(replan_row(f, product, occupancy, items))
         out.extend(replan_wait(r, fid) if r.launches else r
                    for r in task_rows(items, product, f, busy, copy.copy(running), landed_shas))
     elif word in ('plan-approved', 'building'):
@@ -1136,13 +1140,43 @@ def replan_branch(product, fid):
     return branch_for(product, 'plan', f'{fid}-replan')
 
 
-def replan_row(feature, product, occupancy):
+def _tasks_in_flight(items, feature, occupancy):
+    """``[(task_id, pr)]``, sorted, of ``feature``'s open Tasks whose PR the lane still holds
+    open — ``occupancy``'s ``review``/``landing`` (:func:`asf.workers.lifecycle.occupancy`):
+    PUSHED, in review, or waiting on a gate/merge; a merged or closed PR has already dropped out
+    of both, so it never appears here. A ``reshape:`` must not rewrite the plan under a Task
+    whose PR is about to land (live case: F-0094's reshape against T-0048's PUSHED PR #954)."""
+    occ = occupancy or {}
+    held = dict(occ.get('landing') or {})
+    held.update(occ.get('review') or {})
+    out = []
+    for t in ix.feature_tasks(items, feature):
+        if not is_open(t):
+            continue
+        h = held.get(t['id'])
+        if h and h.get('pr'):
+            out.append((t['id'], h['pr']))
+    return sorted(out)
+
+
+def replan_row(feature, product, occupancy, items=None):
     """A Feature's pending ``reshape:`` (:func:`asf.record.replan.pending`): RESHAPE → REPLAN,
     one ``replan`` session on :func:`replan_branch` with the reshape text as its binding input —
-    or PUSHED → LAND while that branch waits on the lane. The record applies the landed replan
-    (:func:`asf.record.replan.apply_replans`) and records ``reshape_applied``, which ends it."""
+    or PUSHED → LAND while that branch waits on the lane. Any open Task of the Feature whose PR
+    is in flight (:func:`_tasks_in_flight`) holds the row first — ``WAITS ON <task> #<pr>``, one
+    per Task named on the same line — since a session rewriting Tasks a PR is about to land under
+    would race the merge; the row launches once every such PR has merged or closed. The record
+    applies the landed replan (:func:`asf.record.replan.apply_replans`) and records
+    ``reshape_applied``, which ends it."""
     fid = feature['id']
     branch = replan_branch(product, fid)
+    in_flight = _tasks_in_flight(items or {}, feature, occupancy)
+    if in_flight:
+        names = ', '.join(f'{tid} #{pr}' for tid, pr in in_flight)
+        return Row(tier=2, kind=REPLAN, item_id=fid, feature_id=fid,
+                   action=f'WAITS ON {names}', brief_kind=REPLAN_KIND, branch=branch,
+                   reason=f"{names} in flight: the replan waits for it to merge or close before "
+                          f"it rewrites the plan under it", waits_on=in_flight[0][0])
     waiting = _waiting_doc(fid, 'plan', product, occupancy, branch)
     if waiting:
         return Row(tier=2, kind=PUSHED_LAND, item_id=fid, feature_id=fid,
