@@ -971,6 +971,13 @@ def delivery_rows(items, product, busy, running, landed_shas=None):
                                reason='no writes: declared on any open member: the plan must name '
                                       'the files this delivery writes before a coder can start',
                                waits_on='writes'))
+                if lead.get('type') == 'task':
+                    # the same re-cut a lone Task with no writes gets (task_rows): without it the
+                    # delivery waits on a footprint no session is ever launched to declare
+                    out.append(Row(tier=2, kind=RESHAPE, item_id=lid, feature_id=fid,
+                                   action=LAUNCH, brief_kind='reshape',
+                                   branch=branch_for(product, 'plan', lid),
+                                   reason=NO_WRITES_RECUT))
                 continue
             other = footprint.first_conflict(union, running,
                                              _conventions(product).get('shared_paths') or ())
