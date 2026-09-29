@@ -308,7 +308,11 @@ def _parse_at(stamp):
         return None
 
 
-def _glob_hit(pattern, path):
+def path_hit(pattern, path):
+    """True when ``path`` answers to ``pattern`` — the one path-vs-glob rule: a trailing ``/``
+    is a root (prefix), anything else is an fnmatch glob that also matches as a directory
+    prefix. Read by :func:`landing_class`, :func:`shared_hits` and
+    :func:`asf.evidence.evidence.docs_only`."""
     pattern = str(pattern).strip()
     if not pattern:
         return False
@@ -317,17 +321,26 @@ def _glob_hit(pattern, path):
     return fnmatch.fnmatch(path, pattern) or path.startswith(pattern.rstrip('/') + '/')
 
 
-def landing_class(product, files):
-    """:data:`DOCS` when every path in ``files`` lies under a docs root — ``specs_dir``,
-    ``plans_dir``, ``reviews_dir`` or a ``conventions.doc_paths`` glob — else :data:`CODE`. The
-    one rule for docs vs code."""
+def doc_matchers(product):
+    """Every matcher a document path answers to: ``specs_dir``, ``plans_dir`` and ``reviews_dir``
+    as roots, then each ``conventions.doc_paths`` glob the product declared. The one list of what
+    counts as a document — :func:`landing_class` classes a branch by it and
+    :func:`asf.evidence.evidence.doc_dirs` reads it, so the landing and the evidence cannot
+    disagree about a folder."""
     conv = _conv(product)
-    roots = [str(conv.get(k)).strip('/') + '/' for k in ('specs_dir', 'plans_dir', 'reviews_dir')
-             if conv.get(k)]
-    globs = list(conv.get('doc_paths') or ())
+    roots = tuple(str(conv.get(k)).strip('/') + '/'
+                  for k in ('specs_dir', 'plans_dir', 'reviews_dir') if conv.get(k))
+    raw = conv.get('doc_paths')
+    globs = raw if isinstance(raw, (list, tuple)) else ()
+    return roots + tuple(g for g in (str(g).strip() for g in globs) if g)
+
+
+def landing_class(product, files):
+    """:data:`DOCS` when every path in ``files`` is a document (:func:`doc_matchers`) — else
+    :data:`CODE`. The one rule for docs vs code."""
+    matchers = doc_matchers(product)
     files = [f for f in files or () if f]
-    if files and all(any(f.startswith(r) for r in roots) or any(_glob_hit(g, f) for g in globs)
-                     for f in files):
+    if files and all(any(path_hit(m, f) for m in matchers) for f in files):
         return DOCS
     return CODE
 
@@ -343,7 +356,7 @@ def review_kind(kind):
 def shared_hits(conv, files):
     """The files among ``files`` under a ``conventions.shared_paths`` glob."""
     globs = list(conv.get('shared_paths') or ())
-    return [f for f in files or () if any(_glob_hit(g, f) for g in globs)]
+    return [f for f in files or () if any(path_hit(g, f) for g in globs)]
 
 
 # ---- git facts about one branch (moved from harvest) --------------------------------------------
