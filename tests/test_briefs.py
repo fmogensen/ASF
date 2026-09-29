@@ -531,6 +531,58 @@ class PreambleTest(unittest.TestCase):
         self.assertEqual(conv.reviews_dir, 'docs/reviews')
 
 
+class ReservedInFlightTests(unittest.TestCase):
+    """F-0208 T3: the planner reads what is held before it books — one untrimmable line under
+    ``Writes:`` and above ``Sessions in flight:``, absent for a product that declares no
+    sequence."""
+
+    SEQ_CONV = {'sequences': {'bands': 'db/migrations/NNNN_*.sql'}}
+    SNAP = {'sequences': {'bands': {'width': 4,
+                                    'held': {'289': ['worker/T-0361'], '290': ['worker/T-0361']}}},
+            'prs': {'worker/T-0361': {'number': 844}}}
+
+    def build(self, snap, conv=None):
+        p = product(conventions={**self.SEQ_CONV, **(conv or {})})
+        facts = dict(REPO_FACTS, reservations=snap)
+        return preamble_mod.build(p, ROWS['coder'], index(), [], facts)
+
+    def _line_index(self, text, prefix):
+        lines = text.splitlines()
+        return next(i for i, l in enumerate(lines) if l.startswith(prefix))
+
+    def test_the_line_names_the_holder_and_the_pull_request_above_sessions(self):
+        text = self.build(self.SNAP)
+        self.assertIn('Reserved in flight: bands 0289, 0290 (worker/T-0361, PR 844) — book '
+                      'past these', text)
+        self.assertLess(self._line_index(text, 'Reserved in flight:'),
+                        self._line_index(text, 'Sessions in flight:'))
+
+    def test_an_empty_map_says_none(self):
+        text = self.build({'sequences': {'bands': {'width': 4, 'held': {}}}, 'prs': {}})
+        self.assertIn(f'Reserved in flight: {preamble_mod.NONE}', text)
+
+    def test_no_snapshot_at_all_says_not_known_here(self):
+        text = self.build({})
+        self.assertIn(f'Reserved in flight: {preamble_mod.UNKNOWN}', text)
+
+    def test_a_product_declaring_no_sequence_gets_no_line_at_all(self):
+        p = product()
+        facts = dict(REPO_FACTS, reservations=self.SNAP)
+        text = preamble_mod.build(p, ROWS['coder'], index(), [], facts)
+        self.assertNotIn('Reserved in flight:', text)
+
+    def test_capped_at_the_brief_limit_with_a_plus_more_tail(self):
+        held = {str(289 + i): ['worker/T-0361'] for i in range(preamble_mod.reservations.BRIEF_LIMIT + 1)}
+        snap = {'sequences': {'bands': {'width': 4, 'held': held}}, 'prs': {}}
+        text = self.build(snap)
+        self.assertIn('+1 more', text)
+
+    def test_the_line_survives_a_preamble_forced_over_its_cap(self):
+        text = self.build(self.SNAP, {'preamble_max_lines': 1})
+        self.assertIn('Reserved in flight: bands 0289, 0290 (worker/T-0361, PR 844) — book '
+                      'past these', text)
+
+
 class WhereToLookTests(unittest.TestCase):
     """The code-computed section: one entry per ``writes:`` path the trunk carries, its top-level
     functions/classes with their line ranges, capped and trimmable like every other section."""
