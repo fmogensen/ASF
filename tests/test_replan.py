@@ -152,6 +152,58 @@ class APendingFeatureReshapeIsReplanned(unittest.TestCase):
         self.assertFalse([r for r in out if r.kind == rows.REPLAN])
 
 
+def landing(task, pr, state='PUSHED'):
+    """Occupancy shaped like :func:`asf.workers.lifecycle.occupancy`'s ``landing`` (a lane state
+    other than REVIEW) for one Task's PR — the live case: F-0094's T-0048, PR #954 PUSHED."""
+    return {'landing': {task: {'branch': 'cloud/' + task, 'state': state, 'pr': pr, 'why': ''}}}
+
+
+def in_review(task, pr, round_=1):
+    return {'review': {task: {'branch': 'cloud/' + task, 'round': round_, 'pr': pr, 'why': ''}}}
+
+
+class AReplanWaitsOnAnInFlightPR(unittest.TestCase):
+    """A Feature's reshape must not rewrite the plan under a Task whose PR is about to land."""
+
+    def test_a_pushed_pr_holds_the_replan(self):
+        out = by_item(rows.candidates(f0090_index(), product(), [], occupancy=landing('T-0027', 954)))
+        (r,) = out['F-0090']
+        self.assertEqual(r.kind, rows.REPLAN)
+        self.assertFalse(r.launches)
+        self.assertEqual(r.action, 'WAITS ON T-0027 #954')
+        self.assertEqual(r.waits_on, 'T-0027')
+
+    def test_a_pr_in_review_holds_the_replan_too(self):
+        out = by_item(rows.candidates(f0090_index(), product(), [], occupancy=in_review('T-0027', 954)))
+        (r,) = out['F-0090']
+        self.assertFalse(r.launches)
+        self.assertEqual(r.action, 'WAITS ON T-0027 #954')
+
+    def test_several_in_flight_prs_are_all_named_on_one_line(self):
+        idx = f0090_index()
+        idx['items']['T-0030']['state'] = 'Active'
+        occ = {'landing': {'T-0027': {'branch': 'cloud/T-0027', 'state': 'PUSHED', 'pr': 954},
+                           'T-0030': {'branch': 'cloud/T-0030', 'state': 'GATE', 'pr': 960}}}
+        out = by_item(rows.candidates(idx, product(), [], occupancy=occ))
+        (r,) = out['F-0090']
+        self.assertFalse(r.launches)
+        self.assertEqual(r.action, 'WAITS ON T-0027 #954, T-0030 #960')
+
+    def test_a_merged_pr_no_longer_holds_the_replan(self):
+        # merged/closed PRs drop out of occupancy's review/landing (asf.workers.lifecycle);
+        # none named here reads as nothing in flight
+        out = by_item(rows.candidates(f0090_index(), product(), [], occupancy={}))
+        (r,) = out['F-0090']
+        self.assertTrue(r.launches, r)
+
+    def test_a_closed_task_with_a_stale_landing_entry_does_not_hold_it(self):
+        idx = f0090_index()
+        idx['items']['T-0027']['state'] = 'Closed'
+        out = by_item(rows.candidates(idx, product(), [], occupancy=landing('T-0027', 954)))
+        (r,) = out['F-0090']
+        self.assertTrue(r.launches, r)
+
+
 class TheReplanRowRespectsTheCaps(unittest.TestCase):
 
     def ready_elsewhere(self, idx):
