@@ -294,7 +294,9 @@ DEFAULT_HISTORY = 10
 DEFAULT_TRUNK_WAIT_MIN = 20
 DEFAULT_S1_WAIT_MIN = 5
 DEFAULT_PR_WAIT_MIN = 45
+PR_WAIT_CEILING = 240
 DEFAULT_HEAD_WAIT_MAX_MIN = 20
+HEAD_WAIT_CEILING = 120
 #: a run the relief cancelled and could not re-run in this long is dropped from the file
 RELIEF_TTL_S = 24 * 60 * 60
 #: refused ``gh run rerun`` calls on one cancelled run before a fresh run is dispatched for its
@@ -518,20 +520,62 @@ def s1_wait_min(product):
     return v if ok else DEFAULT_S1_WAIT_MIN
 
 
-def pr_wait_min(product):
+def _declared_wait(product, field):
+    """The declared ``ci.queue.<field>`` value, or ``None`` when it is not a usable number."""
+    v = _qcfg(product).get(field)
+    ok = isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+    return v if ok else None
+
+
+def _measured_p50(product, measured):
+    """``measured`` when given (the test seam), else the last :func:`asf.ci_census.refresh`'s
+    p50 run wall minutes, or ``None`` (PD7). Imported inside the function: ``ci_census`` imports
+    ``ci_pool``, and ``ci_queue`` is imported from ``capacity``, so a module-level import here
+    invites a cycle."""
+    if measured is not None:
+        return measured
+    from asf import ci_census
+    return ci_census.run_wall_p50_min(product)
+
+
+def pr_wait_min(product, measured=None):
     """``ci.queue.pr_wait_min``: minutes an ordinary PR start waits before the starvation guard
-    admits it on half its expected jobs (default 45)."""
-    v = _qcfg(product).get('pr_wait_min')
-    ok = isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
-    return v if ok else DEFAULT_PR_WAIT_MIN
+    admits it on half its expected jobs (default 45); with none declared, twice the measured p50
+    run wall minutes, clamped to ``[DEFAULT_PR_WAIT_MIN, PR_WAIT_CEILING]``; with no measure at
+    all, the default (D17)."""
+    v = _declared_wait(product, 'pr_wait_min')
+    if v is not None:
+        return v
+    p50 = _measured_p50(product, measured)
+    if p50 is None:
+        return DEFAULT_PR_WAIT_MIN
+    return max(DEFAULT_PR_WAIT_MIN, min(PR_WAIT_CEILING, p50 * 2))
 
 
-def head_wait_max_min(product):
+def head_wait_max_min(product, measured=None):
     """``ci.queue.head_wait_max_min``: minutes the head of the line waits at the head before it
-    is admitted whatever is free (default 20)."""
-    v = _qcfg(product).get('head_wait_max_min')
-    ok = isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
-    return v if ok else DEFAULT_HEAD_WAIT_MAX_MIN
+    is admitted whatever is free (default 20); with none declared, the measured p50 run wall
+    minutes, clamped to ``[DEFAULT_HEAD_WAIT_MAX_MIN, HEAD_WAIT_CEILING]``; with no measure at
+    all, the default (D17)."""
+    v = _declared_wait(product, 'head_wait_max_min')
+    if v is not None:
+        return v
+    p50 = _measured_p50(product, measured)
+    if p50 is None:
+        return DEFAULT_HEAD_WAIT_MAX_MIN
+    return max(DEFAULT_HEAD_WAIT_MAX_MIN, min(HEAD_WAIT_CEILING, p50))
+
+
+def wait_source(product, measured=None):
+    """The short phrase the head guard's admission line prints for where
+    :func:`head_wait_max_min`'s value came from: the declared key, the measured p50, or the
+    default (PD11)."""
+    if _declared_wait(product, 'head_wait_max_min') is not None:
+        return 'ci.queue.head_wait_max_min'
+    p50 = _measured_p50(product, measured)
+    if p50 is None:
+        return 'the default'
+    return f'measured p50 run {p50} min'
 
 
 def dedupe_push(product):
@@ -1874,7 +1918,7 @@ def ceiling_held(order, entries, ceiling=None, inflight=None, admitted=0):
 
 
 def decide(key, order, entries, needs_of, free, ceiling=None, inflight=None, admitted=0,
-           now=None, pr_wait_min=None, head_wait_max_min=None):
+           now=None, pr_wait_min=None, head_wait_max_min=None, head_wait_source=''):
     """Pure: may ``key`` start now? ``(ok, why)``. ``order`` is the line; ``needs_of(key)`` the
     entry's ``{class: jobs}``; ``free`` the free slots per class (None: unknown — no runner
     check); ``ceiling``/``inflight`` the CI ceiling and runs in flight (None: no ceiling);
@@ -1886,7 +1930,9 @@ def decide(key, order, entries, needs_of, free, ceiling=None, inflight=None, adm
     that has waited at the head past ``head_wait_max_min`` is admitted whatever is free: runners
     free one at a time and go to jobs of runs already on the host, so a head that needs several
     would never see them free at once — the host queues its jobs behind theirs, and it holds
-    its place there. That ``why`` starts :data:`HEAD_GUARD`."""
+    its place there. That ``why`` starts :data:`HEAD_GUARD`, and names ``head_wait_max_min`` and
+    ``head_wait_source`` (:func:`wait_source`) when the caller passes one — today's string,
+    unchanged, when it does not (PD11)."""
     e = entries.get(key)
     if not fit_applies(e):
         return True, ''
@@ -1902,7 +1948,10 @@ def decide(key, order, entries, needs_of, free, ceiling=None, inflight=None, adm
             and key == head_of(order, entries, skip)):
         waited = head_wait_s(e, now)
         if waited != math.inf and waited > head_wait_max_min * 60:
-            return True, f'{HEAD_GUARD} {int(waited // 60)} min at the head (starvation guard)'
+            clause = (f'; limit {head_wait_max_min} min = {head_wait_source}'
+                      if head_wait_source else '')
+            return True, (f'{HEAD_GUARD} {int(waited // 60)} min at the head '
+                          f'(starvation guard{clause})')
     fits = backfill(key, order, entries, needs_of, free, skip)
     if fits:
         return True, fits
@@ -2148,7 +2197,8 @@ class Queue:
         ok, why = decide(key, order, entries, needs.get, free, self.ceiling(),
                          self._inflight, self.admitted_here, now=self.now,
                          pr_wait_min=pr_wait_min(self.product),
-                         head_wait_max_min=head_wait_max_min(self.product))
+                         head_wait_max_min=head_wait_max_min(self.product),
+                         head_wait_source=wait_source(self.product))
         pos = order.index(key) + 1
         if ok:
             if why.startswith(HEAD_GUARD):      # the head guard: one line naming the wait
@@ -3342,7 +3392,8 @@ def start_admitted(product, items=None, source=None, out=print, dry_run=False, n
                         and decide(k, order, entries, needs.get, q.free('pr'), q.ceiling(),
                                    q._inflight, q.admitted_here, now=q.now,
                                    pr_wait_min=pr_wait_min(product),
-                                   head_wait_max_min=head_wait_max_min(product))[0]), None)
+                                   head_wait_max_min=head_wait_max_min(product),
+                                   head_wait_source=wait_source(product))[0]), None)
             if key is None:
                 return n
             tried.add(key)
@@ -3515,7 +3566,8 @@ def live_line(product, source=None, inflight=None, now=None):
     line.decisions = [(k, *decide(k, order, entries, line.needs.get,
                                   q.free(entries[k].get('kind')), line.ceiling,
                                   line.inflight, now=q.now, pr_wait_min=pr_wait_min(product),
-                                  head_wait_max_min=head_wait_max_min(product)))
+                                  head_wait_max_min=head_wait_max_min(product),
+                                  head_wait_source=wait_source(product)))
                       for k in order]
     return line
 

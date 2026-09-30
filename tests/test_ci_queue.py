@@ -11,7 +11,7 @@ import time
 import unittest
 from unittest import mock
 
-from asf import ci_queue, env
+from asf import ci_census, ci_queue, env
 from asf.harvest import deploy
 
 
@@ -2291,8 +2291,8 @@ class TestHeadStarvation(Base):
         got = self.replay(p, 60)
         self.assertEqual([m for m, (h, _b) in got.items() if h], [25])
         self.assertTrue(all(not h for m, (h, _b) in got.items() if m <= 20))
-        self.assertIn('ci queue: task/T-0341 admitted after 25 min at the head (starvation guard)',
-                      self.lines)
+        self.assertIn('ci queue: task/T-0341 admitted after 25 min at the head '
+                      '(starvation guard; limit 20 min = the default)', self.lines)
         entries = ci_queue.load('p')['entries']
         self.assertNotIn('pr:task/T-0341', entries)
         # the next head's clock starts when it becomes the head, not when it entered the line
@@ -2318,16 +2318,16 @@ class TestHeadStarvation(Base):
         q = self.queue(p, self.gh(), minutes=31)
         self.assertFalse(self.admit(q, 'pr:old', 'worker/plan-x').admitted)
         self.assertTrue(self.admit(q, 'pr:feat', 'T-0341').admitted)
-        self.assertIn('ci queue: feat admitted after 21 min at the head (starvation guard)',
-                      self.lines)
+        self.assertIn('ci queue: feat admitted after 21 min at the head '
+                      '(starvation guard; limit 20 min = the default)', self.lines)
         # the unranked one is the head now, its clock started at 31: no cascade
         self.assertFalse(self.admit(self.queue(p, self.gh(), minutes=35), 'pr:old',
                                     'worker/plan-x').admitted)
         # the guard stays the backstop for the lowest rank: 21 min at the head, admitted
         self.assertTrue(self.admit(self.queue(p, self.gh(), minutes=52), 'pr:old',
                                    'worker/plan-x').admitted)
-        self.assertIn('ci queue: old admitted after 21 min at the head (starvation guard)',
-                      self.lines)
+        self.assertIn('ci queue: old admitted after 21 min at the head '
+                      '(starvation guard; limit 20 min = the default)', self.lines)
 
     def test_a_queue_file_from_before_the_guard_counts_the_wait_in_line(self):
         """No head recorded yet (the file predates the guard): the head that has waited 105
@@ -2348,7 +2348,7 @@ class TestHeadStarvation(Base):
         self.assertTrue(self.admit(self.queue(p, self.gh(), minutes=105), 'pr:task/T-0356',
                                    'T-0341').admitted)
         self.assertIn('ci queue: task/T-0356 admitted after 105 min at the head '
-                      '(starvation guard)', self.lines)
+                      '(starvation guard; limit 20 min = the default)', self.lines)
 
     def test_the_status_names_the_heads_wait(self):
         p = fanout_product(queue={'estimate': {'heavy': 4, 'light': 0}})
@@ -2952,8 +2952,142 @@ class TestBackfill(Base):
             self.assertFalse(self.ask(q, 'pr:feat/a', 'T-0341').admitted)
         q = self.queue(p, FakeGh(busy={'h1'}), minutes=21)
         self.assertTrue(self.ask(q, 'pr:feat/a', 'T-0341').admitted)
-        self.assertIn('ci queue: feat/a admitted after 21 min at the head (starvation guard)',
+        self.assertIn('ci queue: feat/a admitted after 21 min at the head '
+                      '(starvation guard; limit 20 min = the default)', self.lines)
+
+
+class WaitLimits(Base):
+    """``pr_wait_min`` and ``head_wait_max_min`` keep their declared value first; with none
+    declared, the measured p50 run wall minutes — ``measured=`` (the test seam) or, in
+    production, :func:`asf.ci_census.run_wall_p50_min` off the last census — clamped to each
+    reader's own floor and ceiling; with no measure at all, the constant (D17). The floor is
+    today's default, so no product's limit can come out shorter than it is tuned now."""
+
+    def test_head_wait_max_min_keeps_its_declared_value(self):
+        p = product(queue={'head_wait_max_min': 15})
+        self.assertEqual(ci_queue.head_wait_max_min(p, measured=33), 15)
+
+    def test_head_wait_max_min_follows_the_measured_p50(self):
+        self.assertEqual(ci_queue.head_wait_max_min(product(), measured=33), 33)
+
+    def test_head_wait_max_min_floor_never_shortens_the_tuned_default(self):
+        self.assertEqual(ci_queue.head_wait_max_min(product(), measured=6),
+                         ci_queue.DEFAULT_HEAD_WAIT_MAX_MIN)
+
+    def test_head_wait_max_min_clamps_to_its_ceiling(self):
+        self.assertEqual(ci_queue.head_wait_max_min(product(), measured=400),
+                         ci_queue.HEAD_WAIT_CEILING)
+
+    def test_head_wait_max_min_with_no_measure_at_all_is_the_constant(self):
+        self.assertEqual(ci_queue.head_wait_max_min(product()),
+                         ci_queue.DEFAULT_HEAD_WAIT_MAX_MIN)
+
+    def test_pr_wait_min_keeps_its_declared_value(self):
+        p = product(queue={'pr_wait_min': 30})
+        self.assertEqual(ci_queue.pr_wait_min(p, measured=33), 30)
+
+    def test_pr_wait_min_follows_twice_the_measured_p50(self):
+        self.assertEqual(ci_queue.pr_wait_min(product(), measured=33), 66)
+
+    def test_pr_wait_min_floor_never_shortens_the_tuned_default(self):
+        self.assertEqual(ci_queue.pr_wait_min(product(), measured=6),
+                         ci_queue.DEFAULT_PR_WAIT_MIN)
+
+    def test_pr_wait_min_clamps_to_its_ceiling(self):
+        self.assertEqual(ci_queue.pr_wait_min(product(), measured=400),
+                         ci_queue.PR_WAIT_CEILING)
+
+    def test_pr_wait_min_with_no_measure_at_all_is_the_constant(self):
+        self.assertEqual(ci_queue.pr_wait_min(product()), ci_queue.DEFAULT_PR_WAIT_MIN)
+
+    def test_with_no_census_file_at_all_neither_raises(self):
+        p = product()
+        self.assertFalse(os.path.exists(os.path.join(env.state_dir(p), ci_census.CENSUS_FILE)))
+        self.assertEqual(ci_queue.pr_wait_min(p), ci_queue.DEFAULT_PR_WAIT_MIN)
+        self.assertEqual(ci_queue.head_wait_max_min(p), ci_queue.DEFAULT_HEAD_WAIT_MAX_MIN)
+
+    def test_the_production_fallback_reads_the_last_census(self):
+        """PD7: with no ``measured=``, the reader falls to the p50 :func:`ci_census.refresh`
+        persisted in the census file's ``measure`` block, not a stream read of its own."""
+        p = product()
+        path = os.path.join(env.state_dir(p), ci_census.CENSUS_FILE)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump({'v': 1, 'measure': {'run_wall_p50_min': 33}}, f)
+        self.assertEqual(ci_queue.head_wait_max_min(p), 33)
+        self.assertEqual(ci_queue.pr_wait_min(p), 66)
+
+
+class HeadGuardLine(Base):
+    """The head guard's admission line names ``head_wait_max_min`` and where it came from, in
+    each of the three source forms (PD11); and :func:`ci_queue.decide`'s verdicts over a fixed
+    set of entries, needs and free counts are identical to today's for every limit value (O8) —
+    the ``why`` unchanged when no source is passed proves the tuple did not move."""
+
+    def fixture(self, waited_min):
+        since = ci_queue._iso(self.t0)
+        entries = {'pr:head': {'kind': 'pr', 'since': since, 'head_since': since}}
+        order = ['pr:head']
+        needs_of = lambda k: {'heavy': 3}
+        free = {'heavy': 0}
+        now = self.t0 + datetime.timedelta(minutes=waited_min)
+        return order, entries, needs_of, free, now
+
+    def test_the_why_is_todays_unchanged_when_no_source_is_passed(self):
+        order, entries, needs_of, free, now = self.fixture(25)
+        ok, why = ci_queue.decide('pr:head', order, entries, needs_of, free, now=now,
+                                  head_wait_max_min=20)
+        self.assertTrue(ok)
+        self.assertEqual(why, 'admitted after 25 min at the head (starvation guard)')
+
+    def test_the_line_names_a_declared_limit(self):
+        order, entries, needs_of, free, now = self.fixture(25)
+        ok, why = ci_queue.decide('pr:head', order, entries, needs_of, free, now=now,
+                                  head_wait_max_min=20,
+                                  head_wait_source='ci.queue.head_wait_max_min')
+        self.assertTrue(ok)
+        self.assertEqual(why, 'admitted after 25 min at the head '
+                             '(starvation guard; limit 20 min = ci.queue.head_wait_max_min)')
+
+    def test_the_line_names_a_measured_limit(self):
+        order, entries, needs_of, free, now = self.fixture(34)
+        ok, why = ci_queue.decide('pr:head', order, entries, needs_of, free, now=now,
+                                  head_wait_max_min=33,
+                                  head_wait_source='measured p50 run 33 min')
+        self.assertTrue(ok)
+        self.assertEqual(why, 'admitted after 34 min at the head '
+                             '(starvation guard; limit 33 min = measured p50 run 33 min)')
+
+    def test_the_line_names_the_default_limit(self):
+        order, entries, needs_of, free, now = self.fixture(25)
+        ok, why = ci_queue.decide('pr:head', order, entries, needs_of, free, now=now,
+                                  head_wait_max_min=20, head_wait_source='the default')
+        self.assertTrue(ok)
+        self.assertEqual(why, 'admitted after 25 min at the head '
+                             '(starvation guard; limit 20 min = the default)')
+
+    def test_this_end_to_end_wiring_names_the_source_through_admit(self):
+        p = product(queue={'head_wait_max_min': 15})
+        gh = FakeGh(busy={'h1', 'h2', 'h3'})   # every heavy runner busy
+        for m in (0, 14):
+            self.assertFalse(self.admit(self.queue(p, gh, minutes=m), 'pr:head', 'T-0341',
+                                        kind='pr', branch='head').admitted)
+        self.assertTrue(self.admit(self.queue(p, gh, minutes=16), 'pr:head', 'T-0341', kind='pr',
+                                   branch='head').admitted)
+        self.assertIn('ci queue: head admitted after 16 min at the head '
+                      '(starvation guard; limit 15 min = ci.queue.head_wait_max_min)',
                       self.lines)
+
+    def test_decides_verdicts_are_identical_to_todays_for_every_limit_value(self):
+        order, entries, needs_of, free, _now = self.fixture(0)
+        for limit in (6, 20, 33, 66, 120, 400):
+            for waited, admitted in ((limit - 1, False), (limit + 1, True)):
+                now = self.t0 + datetime.timedelta(minutes=waited)
+                ok, why = ci_queue.decide('pr:head', order, entries, needs_of, free, now=now,
+                                          head_wait_max_min=limit)
+                self.assertEqual(ok, admitted)
+                self.assertEqual(why, f'admitted after {waited} min at the head '
+                                      f'(starvation guard)' if admitted
+                                 else 'heavy 0 free, needs 3')
 
 
 class ItemOfRunTest(unittest.TestCase):
