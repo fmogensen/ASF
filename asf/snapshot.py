@@ -15,7 +15,9 @@ checkout. It starts this file, copied to ``<state>/<product>/code/launch.py`` at
 3. records the sha it runs in ``code/current`` (what ``asf doctor`` shows) and stamps the
    snapshot's use, then prunes the snapshots nothing has used for :data:`KEEP_UNUSED_S`
    (a long tick still running from the previous one keeps it);
-4. ``exec``s the interpreter with the given arguments, ``cwd`` and ``PYTHONPATH`` the snapshot.
+4. brings its own installed copy up to date with the snapshot's ``asf/snapshot.py``, for the
+   next launch — nothing else ever rewrites it;
+5. ``exec``s the interpreter with the given arguments, ``cwd`` and ``PYTHONPATH`` the snapshot.
 
 A snapshot that cannot be made refuses the tick (exit 2 with the reason): running from the live
 checkout instead is exactly the failure this exists to prevent, and the clock's log and the
@@ -124,6 +126,29 @@ def _remove(repo, path):
     shutil.rmtree(path, ignore_errors=True)
 
 
+def refresh_launcher(snapshot_dir, launcher):
+    """Bring the installed launcher up to date with the snapshot's own ``asf/snapshot.py``.
+
+    The clock runs a copy (``<code>/launch.py``) written once by ``asf clock install``; without
+    this, a fix to this file would ship and never be what the clock executes. The copy is
+    replaced for the *next* launch — this process goes on running the code it was started with.
+
+    Never called when this file is running as the package module: the source is another sha's
+    copy and the target is ``__file__``, which would be a developer's working file.
+    """
+    source = os.path.join(snapshot_dir, 'asf', 'snapshot.py')
+    try:
+        with open(source, encoding='utf-8') as f:
+            new = f.read()
+        with open(launcher, encoding='utf-8') as f:
+            if f.read() == new:
+                return False
+        _write(launcher, new)
+    except OSError:
+        return False
+    return True
+
+
 def prune(repo, code_dir, keep=(), now=None, keep_unused_s=KEEP_UNUSED_S):
     """Remove every snapshot (complete or not) not in ``keep`` whose last use is older than
     ``keep_unused_s``. Returns the shas removed."""
@@ -207,6 +232,9 @@ def main(argv=None):
         print(f'snapshot: REFUSED — no snapshot of {args.repo}: {e}', file=sys.stderr)
         return 2
     print(f'snapshot: {os.path.basename(snap)[:12]} ({snap})', flush=True)
+    me = os.path.abspath(__file__)
+    if os.path.basename(me) == LAUNCHER and refresh_launcher(snap, me):
+        print(f'snapshot: launcher refreshed from {os.path.basename(snap)[:12]}', flush=True)
     os.chdir(snap)
     os.execve(sys.executable, [sys.executable] + rest, launch_env(snap))
     return 0  # pragma: no cover - execve does not return

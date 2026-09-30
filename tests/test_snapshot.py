@@ -56,10 +56,10 @@ class SnapshotCase(unittest.TestCase):
         _git(['commit', '-q', '-m', msg], self.repo)
         return _git(['rev-parse', 'HEAD'], self.repo)
 
-    def launch(self, probe=PROBE):
+    def launch(self, probe=PROBE, launcher=None):
         env = hermetic.build()
         env['PYTHONPATH'] = self.repo    # what the clock had before: the live checkout first
-        return subprocess.run([sys.executable, self.launcher, '--repo', self.repo,
+        return subprocess.run([sys.executable, launcher or self.launcher, '--repo', self.repo,
                                '--code-dir', self.code, '--', *probe],
                               capture_output=True, text=True, env=env, cwd=self.code, timeout=60)
 
@@ -150,6 +150,129 @@ class SnapshotTickTest(SnapshotCase):
         with open(snapshot.__file__, encoding='utf-8') as f:
             text = f.read()
         self.assertNotRegex(text, r'(?m)^\s*(from asf|import asf)')
+
+
+class LauncherRefreshTests(SnapshotCase):
+    """Two clocks refreshing the same launcher at once is safe by ``_write``'s per-pid temp and
+    atomic ``os.replace`` — a property that needs no test of its own here, not a race."""
+
+    def setUp(self):
+        super().setUp()
+        # the launcher this Task adds has something to refresh from: a source checkout
+        with open(snapshot.__file__, encoding='utf-8') as f:
+            self.source_text = f.read()
+        import asf
+        with open(asf.__file__, encoding='utf-8') as f:
+            init_text = f.read()
+        os.makedirs(os.path.join(self.repo, 'asf'))
+        self.write('asf/__init__.py', init_text)
+        self.write('asf/snapshot.py', self.source_text)
+        self.head = self.commit('add asf package')
+
+    def stale_launcher_text(self):
+        marker = "print('LAUNCHER-STALE-MARKER', flush=True)\n"
+        lines = self.source_text.splitlines(keepends=True)
+        i = next(n for n, line in enumerate(lines) if line.startswith('import time'))
+        return ''.join(lines[:i + 1]) + marker + ''.join(lines[i + 1:])
+
+    def write_stale_launcher(self):
+        with open(self.launcher, 'w', encoding='utf-8') as f:
+            f.write(self.stale_launcher_text())
+
+    def test_a_stale_launcher_is_refreshed_for_the_next_launch_not_this_one(self):
+        self.write_stale_launcher()
+        r = self.launch()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f'snapshot: launcher refreshed from {self.head[:12]}', r.stdout)
+        self.assertIn('LAUNCHER-STALE-MARKER', r.stdout)    # the old code still ran this launch
+        with open(self.launcher, encoding='utf-8') as f:
+            self.assertEqual(f.read(), self.source_text)
+
+    def test_a_second_launch_at_the_same_head_refreshes_nothing(self):
+        self.write_stale_launcher()
+        first = self.launch()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        second = self.launch()
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertNotIn('launcher refreshed', second.stdout)
+        self.assertNotIn('LAUNCHER-STALE-MARKER', second.stdout)
+
+    def test_a_launcher_already_equal_to_the_snapshot_is_not_rewritten_at_all(self):
+        with open(self.launcher, 'w', encoding='utf-8') as f:
+            f.write(self.source_text)
+        before = os.stat(self.launcher)
+        r = self.launch()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn('launcher refreshed', r.stdout)
+        after = os.stat(self.launcher)
+        self.assertEqual(before.st_ino, after.st_ino)
+        self.assertEqual(before.st_mtime_ns, after.st_mtime_ns)
+
+    def test_it_never_refuses_the_tick(self):
+        # (1) a snapshot of a sha that has no asf/snapshot.py — a sha older than the file (PD4)
+        _git(['checkout', '-q', self.v1], self.repo)
+        self.write_stale_launcher()
+        r = self.launch()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn('launcher refreshed', r.stdout)
+        with open(self.launcher, encoding='utf-8') as f:
+            self.assertIn('LAUNCHER-STALE-MARKER', f.read())
+        _git(['checkout', '-q', 'main'], self.repo)
+
+        # (2) the snapshot's source is unreadable (PD7a)
+        snap = snapshot.ensure(self.repo, self.code)
+        source = os.path.join(snap, 'asf', 'snapshot.py')
+        os.chmod(source, 0o000)
+        self.write_stale_launcher()
+        try:
+            r = self.launch()
+        finally:
+            os.chmod(source, 0o644)      # restored before (3), which needs the source readable
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn('launcher refreshed', r.stdout)
+
+        # (3) the launcher's own directory is read-only (PD7b)
+        ro = os.path.join(self.tmp, 'ro')
+        os.makedirs(ro)
+        ro_launcher = os.path.join(ro, snapshot.LAUNCHER)
+        with open(ro_launcher, 'w', encoding='utf-8') as f:
+            f.write(self.stale_launcher_text())
+        os.chmod(ro, 0o500)
+        self.addCleanup(os.chmod, ro, 0o700)
+        r = self.launch(launcher=ro_launcher)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn('launcher refreshed', r.stdout)
+        with open(ro_launcher, encoding='utf-8') as f:
+            self.assertIn('LAUNCHER-STALE-MARKER', f.read())
+
+    def test_the_guard_never_overwrites_the_package_module_running_as_itself(self):
+        # make the fixture checkout's committed asf/snapshot.py differ, so a broken guard has
+        # something visible to write (PD6)
+        self.write('asf/snapshot.py', self.stale_launcher_text())
+        self.commit('stale asf/snapshot.py')
+        site_root = os.path.join(self.tmp, 'site')
+        site = os.path.join(site_root, 'asf')
+        os.makedirs(site)
+        import asf
+        with open(asf.__file__, encoding='utf-8') as f:
+            init_text = f.read()
+        with open(os.path.join(site, '__init__.py'), 'w', encoding='utf-8') as f:
+            f.write(init_text)
+        site_snapshot = os.path.join(site, 'snapshot.py')
+        with open(snapshot.__file__, encoding='utf-8') as f:
+            real_text = f.read()
+        with open(site_snapshot, 'w', encoding='utf-8') as f:
+            f.write(real_text)
+        env = hermetic.build()
+        env['PYTHONPATH'] = site_root
+        r = subprocess.run([sys.executable, '-m', 'asf.snapshot', '--repo', self.repo,
+                            '--code-dir', self.code, '--', *PROBE],
+                           capture_output=True, text=True, env=env, cwd=self.code, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(site_snapshot, encoding='utf-8') as f:
+            self.assertEqual(f.read(), real_text)
+        with open(snapshot.__file__, encoding='utf-8') as f:
+            self.assertEqual(f.read(), real_text)
 
 
 class DoctorShowsTheClocksSha(SnapshotCase):
