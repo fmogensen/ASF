@@ -324,6 +324,30 @@ class HookTest(unittest.TestCase):
                 self.assertEqual(rc, 0, out)
         self.assertNoLedger()
 
+    def test_a_package_filtered_turbo_run_and_the_pre_push_check_are_allowed(self):
+        # 2026-09-30: `turbo run test --filter=<pkg>` fell under the product's `turbo run test`
+        # pattern, and `pnpm gate:fast` under `^pnpm gate\b` — the briefs ask for both
+        self.write_product(self.FULL_SUITE + "  pre_push_check: pnpm gate:fast\n")
+        for cmd in ('turbo run test --filter=@demo/db', 'pnpm turbo run test --filter @demo/db',
+                    'npx turbo run test --filter=./packages/db', 'pnpm -F @demo/db test',
+                    'pnpm gate:fast', 'cd /repo && pnpm gate:fast --base main 2>&1 | tail -5'):
+            with self.subTest(cmd=cmd):
+                rc, out = self.call('Bash', {'command': cmd})
+                self.assertEqual(rc, 0, out)
+        self.assertNoLedger()
+        # a wildcard filter scopes nothing, and the full gate stays the CI's
+        for cmd in ("turbo run test --filter='*'", 'turbo run test --filter=...', 'pnpm gate',
+                    'pnpm gate:fastest'):
+            with self.subTest(cmd=cmd):
+                rc, out = self.call('Bash', {'command': cmd})
+                self.assertEqual(rc, 2, out)
+
+    def test_the_pre_push_check_is_a_command_string(self):
+        from asf import conventions
+        self.assertEqual(conventions.validate_mapping({'pre_push_check': 'pnpm gate:fast'}), [])
+        for bad in ('', ['pnpm', 'gate:fast'], True):
+            self.assertTrue(conventions.validate_mapping({'pre_push_check': bad}), bad)
+
     def test_a_product_without_external_ci_may_run_its_full_suite(self):
         self.write_product(self.FULL_SUITE.replace(
             'landing: pull-request', 'landing: fast-forward'))

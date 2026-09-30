@@ -439,6 +439,26 @@ class PreambleTest(unittest.TestCase):
                                       REPO_FACTS)
             self.assertNotIn('CI runs the full suite. Never run', text, conv)
 
+    def test_the_pre_push_check_is_a_must_run_in_every_code_brief(self):
+        # 2026-09-30: coder/correct PRs went red on the gate's cheap rule steps after a 16-min
+        # heavy run; the brief names the product's fast check as the one to pass before a push
+        p = product(conventions={'landing': 'pull-request', 'landing_checks': ['gate'],
+                                 'landing_checks_missing': 'wait',
+                                 'pre_push_check': 'pnpm gate:fast'})
+        for kind in ('coder', 'delivery-code', 'correct', 'fix-bug', 'direct'):
+            with self.subTest(kind=kind):
+                text = briefs.build(p, ROWS[kind], index(), [], REPO_FACTS).text
+                self.assertIn('MUST RUN BEFORE EVERY PUSH, AND PASS: `pnpm gate:fast`', text)
+                bare = briefs.build(product(), ROWS[kind], index(), [], REPO_FACTS).text
+                self.assertNotIn('MUST RUN BEFORE EVERY PUSH', bare)
+        self.assertNotIn('MUST RUN BEFORE EVERY PUSH',
+                         briefs.build(p, ROWS['review'], index(), [], REPO_FACTS).text)
+
+    def test_a_correct_brief_never_asks_for_the_full_suite(self):
+        text = briefs.build(product(), ROWS['correct'], index(), [], REPO_FACTS).text
+        self.assertNotIn('run the full suite', text)
+        self.assertIn('run the targeted tests for the files you changed', text)
+
     def test_no_external_ci_leaves_the_local_gate_as_it_is(self):
         for conv in ({}, {'landing': 'pull-request'},          # PRs, but nothing declared as CI
                      {'landing': 'fast-forward', 'landing_checks': ['build']}):
