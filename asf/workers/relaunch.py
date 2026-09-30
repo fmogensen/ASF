@@ -24,8 +24,8 @@ edit or a new correction all break the streak by construction.
 """
 import hashlib
 import re
-import subprocess
 
+from asf.workers import landing
 from asf.workers import lifecycle
 from asf.workers import report as report_mod
 
@@ -100,19 +100,20 @@ def _result_text(run):
         return ''
 
 
-def on_trunk(repo, main, text, exclude=()):
-    """The first commit ``text`` names that is an ancestor of ``origin/<main>`` in ``repo`` (a
-    claim "the work is already on the trunk" checked against git, never taken on its word), or
-    ''. ``exclude``: shas that prove nothing (the run's own launch head)."""
-    if not repo or not text:
+def on_trunk(repo, main, text, exclude=(), item='', writes=(), prs=()):
+    """The first commit ``text`` names that is on ``origin/<main>`` in ``repo`` AND attributable to
+    ``item`` (:func:`asf.workers.landing.attributable`: named by it, its PR's merge, or covering
+    its ``writes:``) — a claim "the work is already on the trunk" checked against git, never
+    taken on its word — or ''. A commit that is merely an ancestor of the trunk (the trunk head
+    a branch merged in) proves nothing. ``exclude``: shas that prove nothing (the run's own
+    launch head)."""
+    if not repo or not text or not item:
         return ''
     skip = {s[:7] for s in exclude if s}
     for sha in dict.fromkeys(SHA_RE.findall(text)):
         if sha[:7] in skip:
             continue
-        p = subprocess.run(['git', 'merge-base', '--is-ancestor', sha, f'origin/{main}'],
-                           cwd=repo, capture_output=True, text=True)
-        if p.returncode == 0:
+        if landing.attributable(repo, main, sha, item, writes, prs):
             return sha
     return ''
 
@@ -127,14 +128,16 @@ def landed_in(reason):
     return m.group(2) if m else ''
 
 
-def verdict(path, job, item, head=None, card='', cause='', repo=None, main='main', cap=CAP):
+def verdict(path, job, item, head=None, card='', cause='', repo=None, main='main', cap=CAP,
+            writes=()):
     """``None`` when the launch may go ahead, else the park's reason: :data:`CAP` launches of
     ``job`` on one state, or one whose report ended terminal on it (:func:`terminal`) while the
     branch still sits on the head it was handed."""
-    return assess(path, job, item, head, card, cause, repo, main, cap)[0]
+    return assess(path, job, item, head, card, cause, repo, main, cap, writes)[0]
 
 
-def assess(path, job, item, head=None, card='', cause='', repo=None, main='main', cap=CAP):
+def assess(path, job, item, head=None, card='', cause='', repo=None, main='main', cap=CAP,
+           writes=()):
     """``(reason, landed)``: :func:`verdict`'s reason (or None), and the sha of the commit the
     last report names that git verified on ``origin/<main>`` ('' when none) — the evidence a
     park closes its card on instead of waiting for a person (:mod:`asf.workers.trunkclose`)."""
@@ -151,8 +154,11 @@ def assess(path, job, item, head=None, card='', cause='', repo=None, main='main'
     n = len(runs)
     why = (f'{job} launched {n} time(s) on {at} with the card and cause unchanged'
            + (f', its last report: {claim[:300]}' if claim else ''))
-    landed = on_trunk(repo, main, text, exclude=[r.get('launch_head') for r in runs]) \
-        if claim else ''
+    landed = on_trunk(repo, main, text, exclude=[r.get('launch_head') for r in runs], item=item,
+                      writes=writes, prs=landing.run_prs(path, item)) if claim else ''
+    if landed and landing.open_work(repo, main, path, item, [r.get('branch') for r in runs],
+                                    ask_gh=False):
+        landed = ''  # the item's own commits are unmerged: nothing on the trunk is its landing
     if landed:
         why += (f' — the work it names is on origin/{main} at {landed[:9]} (verified): close '
                 f'{item} on that evidence')

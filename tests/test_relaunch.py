@@ -176,7 +176,7 @@ class TrunkEvidenceTests(_Ledger):
                                         capture_output=True, text=True).stdout.strip()
         git('init', '-q')
         git('-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '-q', '--allow-empty',
-            '-m', 'ci: the work')
+            '-m', 'task(T-0332): the work')
         self.sha = git('rev-parse', 'HEAD')
         git('update-ref', 'refs/remotes/origin/main', 'HEAD')
 
@@ -185,6 +185,16 @@ class TrunkEvidenceTests(_Ledger):
         why = self.verdict(head=HEAD, repo=self.repo)
         self.assertIn(f'on origin/main at {self.sha[:9]} (verified)', why)
         self.assertIn('close T-0332', why)
+
+    def test_a_trunk_commit_of_another_item_is_no_evidence(self):
+        git = lambda *a: subprocess.run(['git', *a], cwd=self.repo, check=True,  # noqa: E731
+                                        capture_output=True, text=True).stdout.strip()
+        git('-c', 'user.email=a@b', '-c', 'user.name=a', 'commit', '-q', '--allow-empty',
+            '-m', 'merge-queue: #977 (cloud/plan-T-0353 @ c364f06b7)')
+        other = git('rev-parse', 'HEAD')
+        git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+        self.run_once(report('done', f'the split — on origin/main under {other[:9]}'))
+        self.assertNotIn('verified', self.verdict(head=HEAD, repo=self.repo))
 
     def test_a_sha_not_on_main_is_no_evidence(self):
         self.run_once(report('done', 'the split — on origin/main under 1234567abc'))

@@ -26,6 +26,7 @@ trunk — no work of its own is left unlanded. With it:
 import re
 import subprocess
 
+from asf.workers import landing
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 from asf.workers import relaunch
@@ -52,13 +53,8 @@ def full_sha(repo, sha):
 
 def unlanded(repo, main, branch):
     """True when ``origin/<branch>`` carries a commit ``origin/<main>`` does not: the branch still
-    holds work of its own. A branch gone from origin, or none, holds nothing."""
-    if not branch:
-        return False
-    if _git(repo, ['rev-parse', '--verify', '-q', f'refs/remotes/origin/{branch}']) is None:
-        return False
-    n = _git(repo, ['rev-list', '--count', f'origin/{main}..origin/{branch}'])
-    return n is None or not n.isdigit() or int(n) > 0
+    holds work of its own (:func:`asf.workers.landing.unlanded`)."""
+    return landing.unlanded(repo, main, branch)
 
 
 def newest_ended(path, item):
@@ -89,12 +85,14 @@ def _is_ancestor(repo, sha, ref):
         capture_output=True).returncode == 0
 
 
-def trunk_sha(repo, main, run, text):
+def trunk_sha(repo, main, run, text, item='', writes=(), prs=()):
     """The first commit ``text`` names that is on ``origin/<main>`` and is not the run's own
     work: not its launch head, not a sha its REPORT's ``pushed:``/``commits:`` name
     (:func:`own_shas`), not a commit between its launch head and the head it pushed, and not a
-    trunk commit whose message names the run's branch (its merge). '' when there is none — a session
-    whose own output landed (a reshape's split) proves nothing about the Task's work."""
+    trunk commit whose message names the run's branch (its merge) — and that is attributable to
+    ``item`` (:func:`asf.workers.landing.attributable`: named by it, its PR's merge, or covering its
+    ``writes:``). '' when there is none — a session whose own output landed (a reshape's split), or
+    one naming the trunk head its branch merged in, proves nothing about the Task's work."""
     if not repo or not text:
         return ''
     launch = run.get('launch_head') or ''
@@ -108,16 +106,19 @@ def trunk_sha(repo, main, run, text):
             continue  # a commit the run itself made
         if branch and branch in (_git(repo, ['log', '-1', '--format=%B', sha]) or ''):
             continue  # the trunk's merge of the run's own branch (a merge queue's commit)
+        if not landing.attributable(repo, main, sha, item or run.get('item') or '', writes, prs):
+            continue  # merely an ancestor of the trunk: another item's commit, the head merged in
         return sha
     return ''
 
 
-def evidence(path, item, repo, main='main'):
+def evidence(path, item, repo, main='main', writes=(), ask_gh=True):
     """``(sha, run, claim)`` when ``item``'s work is verified on the trunk, else None: its newest
     ended run's REPORT ends ``status: done`` (:func:`asf.workers.relaunch.terminal`) and names a
     commit on ``origin/<main>`` that is not the run's own work (:func:`trunk_sha`), and the run's
-    branch holds nothing past the trunk (:func:`unlanded`). A run already closed here is no new
-    evidence."""
+    branch holds nothing past the trunk (:func:`unlanded`), nor does any other branch of the item's
+    runs or an open PR naming it (:func:`asf.workers.landing.open_work`). A run already closed
+    here is no new evidence."""
     if not repo or not item:
         return None
     run = newest_ended(path, item)
@@ -129,9 +130,11 @@ def evidence(path, item, repo, main='main'):
     claim = relaunch.terminal(text)
     if not claim.startswith(DONE):
         return None
-    sha = trunk_sha(repo, main, run, text)
+    sha = trunk_sha(repo, main, run, text, item, writes, landing.run_prs(path, item))
     if not sha or unlanded(repo, main, run.get('branch')):
         return None
+    if landing.open_work(repo, main, path, item, [run.get('branch')], ask_gh=ask_gh):
+        return None  # the item's own work is unmerged: nothing on the trunk closes it
     return full_sha(repo, sha) or sha, run, claim
 
 
@@ -148,7 +151,8 @@ def closes_before_launch(product, row_kind, item, out=print, dry_run=False):
         return False
     path = pool_mod.sessions_path(product)
     try:
-        hit = evidence(path, item, product.repo_dir, product.main)
+        hit = evidence(path, item, product.repo_dir, product.main,
+                       landing.item_writes(product, item))
     except Exception as e:  # noqa: BLE001 — the check never blocks a wave by failing
         out(f'trunk: evidence check failed for {item} — {e}')
         return False
@@ -192,7 +196,7 @@ def close_parked(product, out=print, dry_run=False):
     for item, job, corr in parked(path):
         if not relaunch.landed_in(corr.get('reason') or corr.get('text')):
             continue
-        hit = evidence(path, item, repo, product.main)
+        hit = evidence(path, item, repo, product.main, landing.item_writes(product, item))
         if not hit:
             continue
         sha, run, _claim = hit
