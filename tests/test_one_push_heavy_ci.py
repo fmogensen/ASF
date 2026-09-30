@@ -187,7 +187,8 @@ class HeavyAfterReview(unittest.TestCase):
                 'landing_checks_missing': 'wait'}
         if heavy:
             conv['ci'] = {'heavy_after_review': True}
-        product = env.Product('p', {'repo_slug': 'o/p', 'conventions': conv})
+        product = env.Product('p', {'repo_slug': 'o/p', 'conventions': conv,
+                                     'ci': {'workflow': 'ci.yml'}})
         tmp = tempfile.mkdtemp(prefix='heavy_')
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         runner = lane.Lane.__new__(lane.Lane)
@@ -286,6 +287,105 @@ class HeavyAfterReview(unittest.TestCase):
         after = {'id': 2, 'status': 'completed', 'created_at': '2027-01-15T09:00:05Z'}
         how, _written = self._gate(host, prev, [after])
         self.assertEqual(how, 'ci')
+
+    def test_a_docs_pr_is_never_labelled(self):
+        # a spec/plan PR lands on the landing checks alone: no heavy job answers for it
+        host = self._host()
+        f = {'branch': 'spec/F-0001', 'prev': {'state': lane.GATE, 'head': HEAD, 'pr': 7},
+             'class': lane.DOCS, 'head': HEAD}
+        self.CHECKS = [{'name': 'gate', 'bucket': 'pass'}, {'name': 'm8-e2e', 'bucket': 'pass'}]
+        try:
+            with mock.patch.object(harvest, '_gh', side_effect=self._gh([])), \
+                    mock.patch.object(lane.Lane, 'set', lambda *a, **k: None):
+                how = host.check_gate(f, 7, ['docs/specs/a.md'])
+        finally:
+            del self.CHECKS
+        self.assertEqual(how, 'ci')
+        self.assertFalse(any(c[:2] == ['pr', 'edit'] for c in self.calls))
+
+    def _gh_dispatch(self, runs):
+        inner = self._gh(runs)
+
+        def gh(args):
+            if args[:2] == ['workflow', 'run']:
+                self.calls.append(args)
+                return 0, '', ''
+            return inner(args)
+        return gh
+
+    def _gate_dispatch(self, host, prev, runs=()):
+        f = {'branch': 'worker/T-0001', 'prev': prev, 'class': lane.CODE, 'head': HEAD}
+        written = {}
+
+        def fake_set(ln, f, s, r, result=None, **kw):
+            written.update(state=s, reason=r, **kw)
+        with mock.patch.object(harvest, '_gh', side_effect=self._gh_dispatch(list(runs))), \
+                mock.patch.object(lane.Lane, 'set', fake_set):
+            return host.check_gate(f, 7, ['src/a.py']), written
+
+    def test_a_label_that_started_nothing_is_kicked_once(self):
+        host = self._host()
+        self.runner.now = lane._parse_at('2027-01-15T09:15:00Z')
+        prev = {'state': lane.WAITING_CI, 'head': HEAD, 'pr': 7, 'heavy': HEAD,
+                'heavy_at': '2027-01-15T09:00:00Z'}
+        before = {'id': 1, 'status': 'completed', 'created_at': '2027-01-15T08:00:00Z'}
+        how, written = self._gate_dispatch(host, prev, [before])
+        self.assertIsNone(how)
+        self.assertIn(['workflow', 'run', 'ci.yml', '--ref', 'worker/T-0001', '-R', 'o/p'],
+                      self.calls)
+        self.assertEqual(written['heavy_kick'], HEAD)
+        self.assertTrue(any('dispatched ci.yml' in l for l in self.lines))
+        # the next pass: looked at once — neither the runs nor a dispatch again
+        how, _ = self._gate_dispatch(host, dict(prev, heavy_kick=HEAD), [before])
+        self.assertIsNone(how)
+        self.assertFalse(any(c[:2] == ['workflow', 'run'] for c in self.calls))
+
+    def test_no_kick_before_its_time_or_when_the_label_ran(self):
+        host = self._host()
+        prev = {'state': lane.WAITING_CI, 'head': HEAD, 'pr': 7, 'heavy': HEAD,
+                'heavy_at': '2027-01-15T09:00:00Z'}
+        before = {'id': 1, 'status': 'completed', 'created_at': '2027-01-15T08:00:00Z'}
+        self.runner.now = lane._parse_at('2027-01-15T09:05:00Z')  # 5 min: not due
+        _how, written = self._gate_dispatch(host, prev, [before])
+        self.assertFalse(any(c[:2] == ['workflow', 'run'] for c in self.calls))
+        self.assertNotIn('heavy_kick', written)
+        # due, but the label's run exists (cancelled by the queue, say): no dispatch, looked at
+        self.runner.now = lane._parse_at('2027-01-15T09:15:00Z')
+        after = {'id': 2, 'status': 'completed', 'conclusion': 'cancelled',
+                 'created_at': '2027-01-15T09:00:05Z'}
+        self.JOBS = [{'name': 'gate', 'conclusion': 'success'},
+                     {'name': 'm8-e2e', 'conclusion': 'cancelled'}]
+        try:
+            _how, written = self._gate_dispatch(host, prev, [before, after])
+        finally:
+            del self.JOBS
+        self.assertFalse(any(c[:2] == ['workflow', 'run'] for c in self.calls))
+        self.assertEqual(written.get('heavy_kick'), HEAD)
+
+    def test_a_conflicting_pr_with_checks_missing_goes_back(self):
+        host = self._host()
+        self.runner.repo, self.runner.trunk = self.runner.state_dir, 'main'
+        f = {'branch': 'worker/T-0001', 'class': lane.CODE, 'head': HEAD,
+             'prev': {'state': lane.WAITING_CI, 'head': HEAD, 'pr': 7, 'heavy': HEAD,
+                      'heavy_at': '2027-01-15T09:00:00Z'}}
+        sent = []
+        with mock.patch.object(harvest, '_gh', side_effect=self._gh([])), \
+                mock.patch.object(lane, 'conflict_files', return_value=['a.sql']), \
+                mock.patch.object(lane, 'send_back', lambda ln, f, k, t, files:
+                                  sent.append((k, t, files))):
+            how = host.check_gate(f, 7, ['src/a.py'])
+        self.assertIsNone(how)
+        self.assertEqual(sent[0][0], 'conflict')
+        self.assertIn('no pull_request workflow', sent[0][1])
+        self.assertEqual(sent[0][2], ['a.sql'])
+
+    def test_the_kick_rides_the_head(self):
+        runner = lane.Lane.__new__(lane.Lane)
+        prev = {'state': lane.WAITING_CI, 'head': HEAD, 'heavy': HEAD, 'heavy_at': 'T',
+                'heavy_kick': HEAD}
+        f = {'branch': 'b', 'head': HEAD, 'prev': prev}
+        self.assertEqual(runner.record(f, lane.WAITING_CI, 'x')['heavy_kick'], HEAD)
+        self.assertNotIn('heavy_kick', runner.record(f, lane.BACK, 'kind=gate'))
 
     def test_the_approval_rides_the_head_and_leaves_with_it(self):
         runner = lane.Lane.__new__(lane.Lane)
