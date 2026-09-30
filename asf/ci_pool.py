@@ -468,6 +468,10 @@ class RunsOn:
     workflow: str
     job: str
     labels: object
+    #: the ``vars.`` names this reader could not resolve — the host did not name them. A runs-on
+    #: with any of these is unresolved (``labels`` is None) *and* says why, which is the
+    #: difference between "not judged" and "nothing in this pool may be removed" (F-0183).
+    needs_vars: frozenset = frozenset()
 
     @property
     def self_hosted(self):
@@ -491,6 +495,15 @@ class Backend:
 
     def runs_on(self):
         raise NotImplementedError
+
+    def variables(self):
+        """The host's own variables, ``{NAME: value}`` — what a workflow's ``${{ vars.NAME }}``
+        reads. ``{}`` for a host that has no such thing, which is also the safe answer: a name
+        that is not in this map is never resolved to an expression's default
+        (:func:`_label_token`). A host that *has* variables and could not be asked raises
+        :class:`BackendError`; :meth:`GitHubBackend.runs_on` turns that into the same ``{}`` and
+        keeps the reason."""
+        return {}
 
     def timeouts(self):
         """``{job or display name: minutes}`` over every workflow file — the declared
@@ -516,16 +529,35 @@ class BackendError(Exception):
 # -- workflow files: the runs-on of every job ---------------------------------------------------
 
 _EXPR_DEFAULT = re.compile(r"^\$\{\{.*\|\|\s*['\"]([^'\"]+)['\"]\s*\}\}$")
+_VARS_REF = re.compile(r"\bvars\.([A-Za-z_][A-Za-z0-9_-]*)")
 
 
-def _label_token(tok):
-    """A ``runs-on`` token's label: quotes stripped; ``${{ … || 'x' }}`` is its default ``x``;
-    any other expression is None (unresolvable)."""
+def _label_token(tok, variables=None):
+    """``(label, unresolved variable)`` for one ``runs-on`` token — the label lower-cased, or
+    None when this reader cannot know it, and the ``vars.`` name that made it unknowable.
+
+    Quotes are stripped. ``${{ vars.NAME }}`` and ``${{ vars.NAME || 'x' }}`` resolve from
+    ``variables`` (:meth:`Backend.variables`), matched the way the host matches a variable name,
+    without regard to case: the value when the host gives one, the expression's own ``'x'`` when
+    that value is empty — which is what ``||`` does with a falsy left side — and **None when the
+    host did not name the variable at all**. Absent is not unset: the value may come from an
+    organisation or an environment this reader does not read, and taking ``'x'`` for it is how a
+    live routing label came to be judged unused and removed (F-0183). Every other expression is
+    its ``|| 'x'`` default, else None, exactly as before."""
     t = tok.strip().strip('"').strip("'").strip()
-    if '${{' in t:
-        m = _EXPR_DEFAULT.match(t)
-        return _norm(m.group(1)) if m else None
-    return _norm(t) if t else None
+    if '${{' not in t:
+        return (_norm(t) if t else None), None
+    m = _EXPR_DEFAULT.match(t)
+    default = _norm(m.group(1)) if m else None
+    ref = _VARS_REF.search(t)
+    if ref is None:
+        return default, None
+    name = ref.group(1)
+    known = {k.upper(): v for k, v in (variables or {}).items()}
+    if name.upper() not in known:
+        return None, name
+    value = _norm(known[name.upper()])
+    return (value or default), None
 
 
 def _split_flow(text):
@@ -565,10 +597,12 @@ def _strip_comment(line):
     return line
 
 
-def parse_runs_on(workflow, text):
+def parse_runs_on(workflow, text, variables=None):
     """Every job's :class:`RunsOn` in one workflow file, in file order. A line reader, not a YAML
     parser: ``runs-on:`` as a scalar, a flow list, or a block list under it; the job is the
-    nearest key one level under ``jobs:``."""
+    nearest key one level under ``jobs:``. ``variables``: the host's own variables
+    (:meth:`Backend.variables`), which a ``runs-on`` may name through ``${{ vars.X }}``; without
+    them every such reference is unresolved, never its default."""
     lines = text.splitlines()
     out = []
     in_jobs, jobs_indent, job_indent, job = False, 0, None, '?'
@@ -596,13 +630,13 @@ def parse_runs_on(workflow, text):
         value = stripped[len('runs-on:'):].strip()
         if value.startswith('['):
             body = value[1:value.rfind(']')] if ']' in value else value[1:]
-            toks = [_label_token(t) for t in _split_flow(body)]
+            pairs = [_label_token(t, variables) for t in _split_flow(body)]
         elif value.startswith('{'):
-            toks = [None]                       # group/labels map: not judged
+            pairs = [(None, None)]              # group/labels map: not judged
         elif value:
-            toks = [_label_token(value)]
+            pairs = [_label_token(value, variables)]
         else:
-            toks = []
+            pairs = []
             while i < len(lines):
                 nxt = _strip_comment(lines[i]).rstrip()
                 if not nxt.strip():
@@ -610,12 +644,14 @@ def parse_runs_on(workflow, text):
                     continue
                 if not nxt.strip().startswith('- ') or len(nxt) - len(nxt.lstrip(' ')) < indent:
                     break
-                toks.append(_label_token(nxt.strip()[2:]))
+                pairs.append(_label_token(nxt.strip()[2:], variables))
                 i += 1
-            if not toks:
-                toks = [None]
+            if not pairs:
+                pairs = [(None, None)]
+        toks = [lab for lab, _v in pairs]
         labels = None if any(t is None for t in toks) else frozenset(toks)
-        out.append(RunsOn(workflow, job, labels))
+        out.append(RunsOn(workflow, job, labels,
+                          frozenset(v for _l, v in pairs if v)))
     return out
 
 
@@ -703,6 +739,10 @@ class GitHubBackend(Backend):
 
     WORKFLOW_DIR = '.github/workflows'
 
+    #: the reason the last :meth:`runs_on` read no variables, or None — printed beside the
+    #: unresolved rows so a token that may not read them is visible rather than inferred (C10)
+    vars_error = None
+
     def __init__(self, product, run=None):
         self.product = product
         ci = product.ci if isinstance(product.ci, dict) else {}
@@ -737,6 +777,13 @@ class GitHubBackend(Backend):
                                        if l.get('type') == 'read-only'))
                 for r in rows]
 
+    def variables(self):
+        if not self.slug:
+            raise BackendError('the product has no repo_slug')
+        rows = self._lines(['--paginate', f'repos/{self.slug}/actions/variables?per_page=100',
+                            '--jq', '.variables[]'])
+        return {str(v['name']): str(v.get('value') or '') for v in rows if v.get('name')}
+
     def _workflow_texts(self):
         """``[(basename, text)]`` for every ``.yml``/``.yaml`` in :data:`WORKFLOW_DIR` on the
         product's trunk, read raw with the product's own login."""
@@ -755,9 +802,13 @@ class GitHubBackend(Backend):
         return out
 
     def runs_on(self):
+        try:
+            variables, self.vars_error = self.variables(), None
+        except BackendError as e:
+            variables, self.vars_error = {}, str(e)
         out = []
         for name, text in self._workflow_texts():
-            out += parse_runs_on(name, text)
+            out += parse_runs_on(name, text, variables)
         return out
 
     def timeouts(self):
