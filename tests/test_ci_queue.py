@@ -43,7 +43,7 @@ class FakeGh:
     Every argv is logged."""
 
     def __init__(self, busy=(), offline=(), history=None, inflight=0, listed=None, files=None,
-                 pool=None, labels=None):
+                 pool=None, labels=None, running=()):
         self.busy, self.offline = set(busy), set(offline)
         #: ``{run id: [changed file]}``: the PR (numbered as its run) each run was for
         self.files = files or {}
@@ -53,6 +53,8 @@ class FakeGh:
         self.pool = pool if pool is not None else pool_data()
         #: ``{runner: [label]}``, replacing the hardcoded ``self-hosted`` + role when given
         self.labels = labels
+        #: ``[(run id, branch, sha, [runner name])]``: runs ``busy_runners()`` finds in progress
+        self.running = list(running)
         # three runs of ci.yml: heavy 3, 3, 2 jobs and one light job each
         self.history = history if history is not None else [
             [{'runner_name': 'h1'}, {'runner_name': 'h2'}, {'runner_name': 'h3'},
@@ -85,10 +87,33 @@ class FakeGh:
                 for i in range(1, len(self.history) + 1)])
         elif argv[:3] == ['gh', 'run', 'list']:
             out = str(self.inflight)
+        elif self.running and argv[:2] == ['gh', 'api'] and any(
+                'actions/runs?status=' in a for a in argv):
+            # unset ``running`` (the default): unreadable, today's behaviour against every other
+            # fake caller of this listing (the phantom watch among them)
+            status = next(a for a in argv if 'actions/runs?status=' in a
+                         ).split('status=')[1].split('&')[0]
+            rows = self.running if status == 'in_progress' else []
+            lines = [str(len(rows))] + [
+                json.dumps({'id': rid, 'status': 'in_progress', 'conclusion': None,
+                           'event': 'pull_request', 'head_branch': branch, 'head_sha': sha,
+                           'created_at': '2026-09-25T12:00:00Z',
+                           'path': '.github/workflows/ci.yml'})
+                for rid, branch, sha, _runners in rows]
+            out = '\n'.join(lines)
         elif argv[:2] == ['gh', 'api'] and any('/jobs' in a for a in argv):
             run_id = int(next(a for a in argv if '/jobs' in a).split('/runs/')[1].split('/')[0])
-            out = '\n'.join(json.dumps(j) for j in
-                            (self.history[run_id - 1] if run_id <= len(self.history) else ()))
+            running = next((r for r in self.running if r[0] == run_id), None)
+            if running is not None:
+                names = running[3]
+                out = '\n'.join(json.dumps({
+                    'name': n, 'status': 'in_progress',
+                    'labels': (self.labels or {}).get(n, []), 'runner_name': n,
+                    'created_at': '2026-09-25T12:00:00Z', 'started_at': None,
+                    'completed_at': None, 'steps': []}) for n in names)
+            else:
+                out = '\n'.join(json.dumps(j) for j in
+                                (self.history[run_id - 1] if run_id <= len(self.history) else ()))
         elif argv[:2] == ['gh', 'api'] and any('/pulls/' in a for a in argv):
             n = int(next(a for a in argv if '/pulls/' in a).split('/pulls/')[1].split('/')[0])
             out = '\n'.join(self.files.get(n) or ())
@@ -420,6 +445,67 @@ class TestFitDemand(Base):
         p = product(pool=fit_pool(), queue={'estimate': {'heavy': 4}})
         q = self.queue(p, FakeGh(pool=fit_pool(), labels=FIT_LABELS, history=fit_history()))
         self.assertEqual(q.needs('ci.yml'), {'heavy': 4, 'light': 1})
+
+
+class TestStartedOnce(Base):
+    def fit(self, minutes=0, **kw):
+        p = product(pool=fit_pool())
+        gh = FakeGh(pool=fit_pool(), labels=FIT_LABELS, history=fit_history(), **kw)
+        return p, gh, self.queue(p, gh, minutes=minutes)
+
+    def start(self):
+        _p, _gh, q = self.fit()
+        self.assertTrue(self.admit(q, 'pr:b', 'T-0500', branch='b').admitted)
+        rec, = q.data['started']
+        self.assertEqual((rec['key'], rec['branch'], rec['workflow']), ('pr:b', 'b', 'ci.yml'))
+        self.assertEqual(rec['needs'], {'heavy': 2, 'heavy[alpha-heavy]': 2, 'light': 1})
+
+    def test_a_started_run_whose_job_is_on_a_busy_runner_is_counted_once(self):
+        self.start()
+        # 2 min later — inside PICKUP_S — its two heavy jobs hold a1 and a2
+        _p, _gh, q = self.fit(minutes=2, busy={'a1', 'a2'},
+                              running=[(9, 'b', 'sha1', ['a1', 'a2'])])
+        free = q.free(keys={'heavy', 'heavy[alpha-heavy]', 'light'})
+        # today: heavy 0 — the two busy runners were subtracted twice (P8)
+        self.assertEqual(free, {'heavy': 2, 'heavy[alpha-heavy]': 0, 'light': 1})
+        rec, = q.data['started']
+        self.assertEqual(rec['placed'], {'heavy': 2, 'heavy[alpha-heavy]': 2})
+
+    def test_a_record_with_nothing_left_unplaced_is_dropped(self):
+        self.start()
+        _p, _gh, q = self.fit(minutes=2, busy={'a1', 'a2', 'l1'},
+                              running=[(9, 'b', 'sha1', ['a1', 'a2', 'l1'])])
+        # every job of the run holds a runner: the claim is the busy count, and nothing else
+        self.assertEqual(q.free(keys={'heavy', 'light'}), {'heavy': 2, 'light': 0})
+        self.assertEqual(q.data['started'], [])
+        # and the drop is written by the pass, not only held in memory
+        self.admit(q, 'pr:c', 'T-0341', branch='c')     # held: no alpha heavy is free
+        self.assertEqual(ci_queue.load('p')['started'], [])
+
+    def test_another_branchs_run_nets_nothing(self):
+        self.start()
+        _p, _gh, q = self.fit(minutes=2, busy={'a1', 'a2'},
+                              running=[(9, 'other', 'sha9', ['a1', 'a2'])])
+        self.assertEqual(q.free(keys={'heavy'})['heavy'], 0)   # still claimed: not its run
+
+    def test_an_unreadable_busy_map_counts_as_today(self):
+        self.start()
+        with mock.patch.object(ci_queue.GitHubSource, 'busy_runners', return_value=None):
+            _p, _gh, q = self.fit(minutes=2, busy={'a1', 'a2'},
+                                  running=[(9, 'b', 'sha1', ['a1', 'a2'])])
+            self.assertEqual(q.free(keys={'heavy'})['heavy'], 0)   # over-holds, never over-starts
+            self.assertEqual(q.data['started'][0]['needs']['heavy'], 2)
+
+    def test_an_empty_ledger_asks_the_host_for_nothing(self):
+        _p, gh, q = self.fit()
+        self.assertEqual(q.data['started'], [])
+        q.free(keys={'heavy'})
+        self.assertEqual([c for c in gh.calls if 'status=in_progress' in ' '.join(c)], [])
+
+    def test_a_record_is_still_forgotten_at_the_pickup_window(self):
+        self.start()
+        _p, _gh, q = self.fit(minutes=4)                        # PICKUP_S = 180 s
+        self.assertEqual(q.data['started'], [])
 
 
 class TestAdmission(Base):

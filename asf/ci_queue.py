@@ -63,8 +63,10 @@ runners API: an online runner that is not busy, counted at its ``slots`` — and
 a class does not answer alike (:func:`split_labels`), only a runner carrying the labels that
 requirement names beyond what every runner of the class carries, under its own fit key
 (:func:`fit_key`); a class whose runners are alike splits on nothing and keeps its plain class
-key. Runs this queue admitted in the last :data:`PICKUP_S` are subtracted too, because their jobs
-are queued on the host before any runner shows busy.
+key. Runs this queue admitted are subtracted too, but only for the part of their claim that has
+not yet reached a runner (:meth:`Queue._placed`): the moment one of a started run's jobs is seen
+on a busy runner, that runner counts once, as a busy runner, under every fit key it satisfies —
+never twice. :data:`PICKUP_S` is the backstop for a run whose jobs never appear on one.
 
 **Starvation guard.** An ordinary PR start (not a batch) that has waited in line longer than
 ``ci.queue.pr_wait_min`` (default 45) minutes is admitted once at least *half* its expected jobs
@@ -2175,6 +2177,13 @@ class Queue:
         self._raw_runners = None
         #: :meth:`Source.busy_runners` as this pass read it (None: not read, or unreadable)
         self.busy = None
+        #: :meth:`_placed`'s own lazy busy read, taken only when :attr:`busy` is still None
+        #: (never written there — C7, PD8); ``_placed_busy_read`` marks it taken, unreadable
+        #: included, so it is never asked twice
+        self._placed_busy = None
+        self._placed_busy_read = False
+        #: :meth:`_placed`'s per-pass memo: ``{fit key: slots still unplaced}``
+        self._placed_map = None
         self._read = False
         self.write = write and self.mode == 'on'
         self.data = prune(load(product.name), self.now) if self.mode != 'off' else None
@@ -2354,6 +2363,74 @@ class Queue:
                  for c, v in n.items()}
         return n
 
+    def _placed(self):
+        """Per fit key, the slots a started run's claim has left unplaced: netted against the
+        busy runners its own run already holds. The busy read is lazy and taken at most once a
+        pass (C7, PD8) — ``{}`` at once while ``self.data['started']`` is empty, no host call;
+        otherwise :attr:`busy` when the relief pass has already read it, else one
+        :meth:`Source.busy_runners` call, memoised — ``None`` (unreadable) included — in
+        :attr:`_placed_busy`, never written to :attr:`busy`. A busy runner is a started record's
+        own when the run it is on (``busy_runners()``'s ``run``) shares the record's ``branch``
+        and ``workflow`` (``os.path.basename`` of its ``path``), and its ``sha`` where the record
+        carries one — a record from before this carries none and matches on branch and workflow
+        alone. Such a runner's slots count against every fit key of the record's ``needs`` its
+        own class and labels satisfy, because that is every key whose supply already counts it
+        busy. The netting is written back: each kept record's own ``placed`` map, beside its
+        ``needs``; a record with nothing left unplaced is dropped from ``self.data['started']``.
+        Memoised in :attr:`_placed_map` for the pass — an unreadable busy read over-holds, never
+        over-starts."""
+        if self._placed_map is not None:
+            return self._placed_map
+        started = self.data['started']
+        if not started:
+            self._placed_map = {}
+            return self._placed_map
+        if self.busy is not None:
+            busy = self.busy
+        else:
+            if not self._placed_busy_read:
+                try:
+                    self._placed_busy = self.source.busy_runners()
+                except Exception:  # noqa: BLE001 — unreadable: nothing placed, over-holds as today
+                    self._placed_busy = None
+                self._placed_busy_read = True
+            busy = self._placed_busy
+        busy = busy or {}
+        by_name = {e.runner: e for e in self.pool}
+        roles = set(ci_pool.roles(self.pool))
+        runners = {r.name: r for r in self._runners}
+        residual, kept = {}, []
+        for rec in started:
+            placed = {}
+            for name, info in busy.items():
+                run = (info or {}).get('run') or {}
+                if (run.get('head_branch') != rec.get('branch')
+                        or os.path.basename(str(run.get('path') or '')) != rec.get('workflow')
+                        or (rec.get('sha') and run.get('head_sha') != rec['sha'])):
+                    continue
+                r = runners.get(name)
+                if r is None:
+                    continue
+                e = by_name.get(name)
+                rkey = class_key(e) if e else _label_key(r.labels, roles)
+                have, n = r.norm_labels(), (e.slots if e else 1)
+                for key in rec.get('needs') or {}:
+                    cls, asks = fit_asks(key)
+                    if cls == rkey and asks <= have:
+                        placed[key] = placed.get(key, 0) + n
+            rec['placed'] = placed
+            left = False
+            for c, need in (rec.get('needs') or {}).items():
+                r = max(0, need - placed.get(c, 0))
+                if r:
+                    residual[c] = residual.get(c, 0) + r
+                    left = True
+            if left:
+                kept.append(rec)
+        self.data['started'] = kept
+        self._placed_map = residual
+        return residual
+
     def free(self, kind=None, keys=()):
         """Free slots per class, and per fit key for each of ``keys``, less what started this pass
         and has not yet reached a runner (:meth:`_placed`). ``kind`` ``pr``: only the runners a PR
@@ -2372,10 +2449,9 @@ class Queue:
                 runners = (ci_pool.pr_runners(self._runners, self.reserves) if kind == 'pr'
                           else self._runners)
                 free.update(free_by_fit(runners, self.pool, fit_keys))
-        for s in self.data['started']:
-            for c, n in (s.get('needs') or {}).items():
-                if c in free:
-                    free[c] = max(0, free[c] - n)
+        for c, n in self._placed().items():
+            if c in free:
+                free[c] = max(0, free[c] - n)
         return free
 
     def drop(self, keys):
@@ -2450,7 +2526,11 @@ class Queue:
                 self.out(f"ci queue: {e['item']} starts — {why} ({label}, {_ordinal(pos)} in line)")
             entries.pop(key, None)
             self._mark_head()
-            self.data['started'].append({'key': key, 'at': _iso(self.now), 'needs': needs[key]})
+            started_branch = key.split(':', 1)[1] if ':' in key else e['item']
+            self.data['started'].append({'key': key, 'at': _iso(self.now), 'needs': needs[key],
+                                         'branch': started_branch, 'workflow': workflow,
+                                         'sha': e.get('sha')})
+            self._placed_map = None
             self.admitted_here += 1
             decision = Decision(True, '')
         else:
