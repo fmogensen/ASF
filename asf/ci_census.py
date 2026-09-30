@@ -223,11 +223,20 @@ def _place(host_runners, prev, sc):
     return tiers, floored
 
 
-def _moves_for(tiers, floored, prev, sc):
+def _moves_for(tiers, floored, prev, sc, host_runners):
+    """One :class:`Move` per runner whose tier changed since the last census (``to != frm``) —
+    plus one for a runner the floor (D8) re-selects for the *same* tier it already carried on
+    file, when the host itself no longer carries that tier's label. A failed trial's rollback
+    (``ci_pool.check_trials``, D10) strips the label from the host without touching the census
+    file; the floor then keeps re-picking that runner as its own best candidate every census
+    (``frm`` already reads the floored tier), so ``to == frm`` would otherwise hide the drift
+    forever and the fast tier stays empty on the host (D8's own "worst version")."""
+    labels = {r.name: r.norm_labels() for r in host_runners}
     moves = []
     for name in sorted(tiers):
         to, frm = tiers[name], prev.get(name)
-        if to == frm:
+        stuck = name in floored and to == frm and to not in labels.get(name, set())
+        if to == frm and not stuck:
             continue
         score = sc.get(name)
         moves.append(Move(runner=name, frm=frm, to=to, score=score, floored=name in floored,
@@ -252,7 +261,7 @@ def refresh(product, backend, root=None, now=None, out=print):
     rdgs = ci_measure.readings(events, now=now)
     sc = ci_measure.scores(rdgs)
     tiers, floored = _place(host_runners, prev, sc)
-    moves = _moves_for(tiers, floored, prev, sc)
+    moves = _moves_for(tiers, floored, prev, sc, host_runners)
 
     runners_doc = []
     for r in sorted(host_runners, key=lambda r: r.name):
@@ -386,7 +395,7 @@ def cmd_census(args, out=print):
     events = _read_events(root, datetime.datetime.now(datetime.timezone.utc))
     sc = ci_measure.scores(ci_measure.readings(events))
     tiers, floored = _place(host_runners, prev, sc)
-    moves = {mv.runner: mv for mv in _moves_for(tiers, floored, prev, sc)}
+    moves = {mv.runner: mv for mv in _moves_for(tiers, floored, prev, sc, host_runners)}
     rows = []
     for name in sorted(tiers):
         score = sc.get(name)

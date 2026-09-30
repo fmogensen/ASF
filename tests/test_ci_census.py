@@ -348,17 +348,56 @@ class PlacesFile(Home):
         self.assertTrue(any(l.startswith('ci place: ci-1') for l in lines))
 
     def test_no_moves_prints_the_summary_line_only(self):
+        # PD5/D8: ci-1 is floored (its lone-runner ratio is unmeasured) — a steady state needs
+        # the label actually on the host (refresh then apply_tiers, as the tick always pairs
+        # them), or the floor would keep re-emitting the move every census (the C fix).
         p = product()
         backend = FakeBackend([runner('ci-1')], [])
         root = tempfile.mkdtemp(dir=self.tmp)
         write_stream(root, burst('ci-1', 'gate', ci_measure.MIN_READINGS, seconds=100.0))
-        ci_census.refresh(p, backend, root=root, now=NOW, out=lambda *_: None)
+        moves = ci_census.refresh(p, backend, root=root, now=NOW, out=lambda *_: None)
+        ci_census.apply_tiers(p, backend, moves, out=lambda *_: None)
         places_path = os.path.join(env.state_dir(p), ci_census.PLACES_FILE)
         before = os.path.getsize(places_path)
         lines = []
         ci_census.refresh(p, backend, root=root, now=NOW, out=lines.append)
         self.assertEqual(lines, ['ci census: 1 runners — asf-fast 1'])
         self.assertEqual(os.path.getsize(places_path), before)
+
+
+class Reconcile(Home):
+    """C (review round 1): a floored promotion (D8) that fails its trial (D10) must not stay
+    silently unlabelled forever — the floor re-selects the same runner every census, and without
+    checking the host's actual labels that looked like ``to == frm``, no move."""
+
+    def test_a_rolled_back_floored_trial_is_re_placed_by_the_next_census(self):
+        p = product()
+        backend = FakeBackend([runner('ci-1')], [])
+        root = tempfile.mkdtemp(dir=self.tmp)  # no readings at all: ci-1's ratio is unmeasured
+
+        moves = ci_census.refresh(p, backend, root=root, now=NOW, out=lambda *_: None)
+        self.assertEqual([mv.to for mv in moves], [ci_census.FAST])
+        ci_census.apply_tiers(p, backend, moves, out=lambda *_: None)
+        self.assertIn('asf-fast', backend._runners['ci-1'].norm_labels())
+
+        since = ci_pool.load_trials(p.name)['ci-1']['since']
+        backend.jobs['ci-1'] = [{'name': 'gate', 'status': 'completed', 'conclusion': 'failure',
+                                 'url': 'https://ci/x', 'started_at': since}]
+        ci_pool.check_trials(p.name, backend, apply_changes=True, out=lambda *_: None)
+        self.assertNotIn('asf-fast', backend._runners['ci-1'].norm_labels())
+        self.assertEqual(ci_pool.load_trials(p.name)['ci-1']['state'], 'rolled_back')
+
+        # the census file still says FAST (unmoved by the rollback) — the next census must
+        # notice the host lost the label and re-place it, not treat frm == to as steady state.
+        lines = []
+        moves2 = ci_census.refresh(p, backend, root=root, now=NOW, out=lines.append)
+        self.assertEqual([(mv.runner, mv.frm, mv.to) for mv in moves2],
+                         [('ci-1', ci_census.FAST, ci_census.FAST)])
+        self.assertTrue(any(l.startswith('ci place: ci-1') for l in lines))
+
+        ci_census.apply_tiers(p, backend, moves2, out=lambda *_: None)
+        self.assertIn('asf-fast', backend._runners['ci-1'].norm_labels())
+        self.assertEqual(ci_pool.load_trials(p.name)['ci-1']['state'], 'pending')
 
 
 class Command(Home):
