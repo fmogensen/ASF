@@ -206,6 +206,8 @@ class DirectLaneRequiredChecks(unittest.TestCase):
         answers = list(answers)
 
         def gh(*_a, **_k):
+            if _a and list(_a[0][:2]) == ['api', 'graphql']:  # no snapshot: read per PR (REST)
+                return 1, '', 'graphql unavailable'
             return 0, json.dumps(answers.pop(0) if len(answers) > 1 else answers[0]), ''
 
         with mock.patch.object(harvest, '_gh', side_effect=gh), \
