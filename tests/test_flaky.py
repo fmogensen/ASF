@@ -198,9 +198,10 @@ class FakeRuns:
         self.runs_ = []
         self.logs = {}
 
-    def add(self, run_id, branch, ts, log, runner='r1', labels=('self-hosted', 'class-e2e')):
+    def add(self, run_id, branch, ts, log, runner='r1', labels=('self-hosted', 'class-e2e'),
+            created=None):
         self.runs_.append({'id': run_id, 'name': 'ci', 'branch': branch, 'ts': ts,
-                           'url': f'https://ci/{run_id}'})
+                           'created': created or ts, 'url': f'https://ci/{run_id}'})
         self.logs[run_id] = ([{'id': run_id * 10, 'runner_name': runner,
                                'labels': list(labels)}], log)
 
