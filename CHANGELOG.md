@@ -2,6 +2,31 @@
 
 One entry per released version, newest first.
 
+## v0.1.82 — 2026-09-30
+
+### Bugs fixed
+
+- B-0080 after: holds the coder row only — correction and adjudicate launch anyway, on Opus
+
+### In progress
+
+- F-0094 A decided Epic with no Features never starts: no row breaks an Epic into Features
+- F-0104 Products tick on a pinned live install; `asf upgrade` moves it to the merged head
+- F-0105 The landing gate runs 15–25 min on the operator's machine next to 8 sessions: gate on CI instead
+- F-0106 Plans cut Tasks already on trunk, and depend on ids that were never minted: coders end with an empty branch
+- F-0131 Classify every cancelled CI job as timeout, runner loss or failure, and list jobs near their limit
+- F-0133 Groom commits its own output; a foreign daily stamp never skips the native daily; new products groom by default
+- F-0135 Native PR landing: merge an ASF-opened PR when approved and green, so PR products need no merge-queue script
+- F-0137 Pause one product: the tick keeps recording and harvesting but launches nothing
+- F-0144 asf set cannot widen a Task's writes: footprint
+- F-0207 Pending upgrade starves: every owner tick defers because another owner tick is running
+- F-0229 Lane reaches MERGING with PR #None (plan/T-0189); I9 events repeat every tick
+- F-0232 Route a Task whose writes: touch the amendable set to the console at plan time, not a worker launch
+
+### Upgrade
+
+`pipx install --force "git+https://github.com/fmogensen/ASF.git@v0.1.82"`
+
 ## v0.1.81 — 2026-09-29
 
 ### Features landed
