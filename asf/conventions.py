@@ -40,6 +40,8 @@ The product yaml carries the overrides::
         skip_under_lines: 80      # a size: s Feature's Task under this many changed lines lands
                                   # on CI and the gate, no review session (0 = always review)
       worktree_setup: make deps   # run in every fresh worker worktree (unset = nothing)
+      pre_push_check: make lint   # the product's cheap gate checks: every code brief names it as
+                                  # the command that must pass before a push (unset = none)
       merge: auto                 # auto | manual (default manual): under auto the lane merges
                                   # every open PR on the trunk whose required checks are green
                                   # and whose factory review approved it — no operator click
@@ -203,6 +205,11 @@ DEFAULT_LANE_STALE_AFTER = '2d'
 #: A shell command run in every fresh worker worktree before its session starts (dependency
 #: install, codegen). None → nothing runs.
 DEFAULT_WORKTREE_SETUP = None
+#: ``conventions.pre_push_check``: the product's fast, host-safe slice of its CI gate (rule
+#: scripts, lint, spec and changeset checks — no database, no build) that every code-writing brief
+#: names as the command a session must run, and see pass, before any push; the approvals hook never
+#: refuses it as a full suite. None → the briefs name no such command.
+DEFAULT_PRE_PUSH_CHECK = None
 #: ``conventions.merge``: who clicks merge on a green, reviewed PR — ``manual`` (the operator: the
 #: merge-time approval holds stay as the matrix sets them) or ``auto`` (the lane: those holds are
 #: ``auto`` for the product, and an open PR no factory item made gets a factory review first).
@@ -452,9 +459,9 @@ _VAR_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 def validate_mapping(data):
     """The shaped keys of a ``conventions:`` mapping checked: ``[(dotted key, problem)]``, empty
     when they are well-formed. Only ``doc_paths``, ``shared_paths``, ``lane``, ``worktree_setup``,
-    ``auth_env``, ``full_suite_commands``, ``customer_content``, ``security`` and ``feeder`` are
-    checked — every other key is kept verbatim (see the module doc), so a product file written
-    for a newer ``asf`` still loads."""
+    ``pre_push_check``, ``auth_env``, ``full_suite_commands``, ``customer_content``,
+    ``security`` and ``feeder`` are checked — every other key is kept verbatim (see the module
+    doc), so a product file written for a newer ``asf`` still loads."""
     problems = []
     if not isinstance(data, dict):
         return problems
@@ -463,9 +470,10 @@ def validate_mapping(data):
             why = _path_list_problem(data[key])
             if why:
                 problems.append((key, why))
-    setup = data.get('worktree_setup')
-    if setup is not None and (isinstance(setup, (dict, list, bool)) or not str(setup).strip()):
-        problems.append(('worktree_setup', f'must be a command string, not {setup!r}'))
+    for key in ('worktree_setup', 'pre_push_check'):
+        setup = data.get(key)
+        if setup is not None and (isinstance(setup, (dict, list, bool)) or not str(setup).strip()):
+            problems.append((key, f'must be a command string, not {setup!r}'))
     suite = data.get('full_suite_commands')
     if suite is not None:
         if not isinstance(suite, list):
@@ -722,6 +730,9 @@ class Conventions:
     lane_stale_after: str = DEFAULT_LANE_STALE_AFTER
     #: The command run in every fresh worker worktree (:data:`DEFAULT_WORKTREE_SETUP`).
     worktree_setup: str = DEFAULT_WORKTREE_SETUP
+    #: The command a code brief must run and see pass before any push
+    #: (:data:`DEFAULT_PRE_PUSH_CHECK`).
+    pre_push_check: str = DEFAULT_PRE_PUSH_CHECK
     #: ``merge``: ``auto`` | ``manual`` (:data:`DEFAULT_MERGE`); any other value is a red doctor
     #: finding and reads as the default.
     merge: str = DEFAULT_MERGE

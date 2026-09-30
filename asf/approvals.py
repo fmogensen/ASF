@@ -371,9 +371,37 @@ def full_suite_patterns(product):
     return [p for p in value if isinstance(p, str) and p.strip()]
 
 
+#: A package filter that scopes a workspace run to named packages (``--filter=<pkg>``,
+#: ``--filter <pkg>``, pnpm's ``-F <pkg>``) — a targeted run, never the full suite, whatever
+#: the product's patterns say. A wildcard filter (``*``, ``...``, ``./**``) scopes nothing.
+_TARGETED_FILTER = re.compile(
+    r'(?:^|\s)(?:--filter(?:=|\s+)|-F\s+)(?![\'"]?(?:\*+|\.\.\.|\./\*\*)[\'"]?(?:\s|$))\S')
+
+
+def pre_push_check(product):
+    """``conventions.pre_push_check``: the product's cheap gate slice every code brief must run
+    before a push (:data:`asf.conventions.DEFAULT_PRE_PUSH_CHECK`), stripped; None when unset."""
+    conv = getattr(product, 'conventions', None)
+    value = conv.get('pre_push_check') if conv is not None else None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return ' '.join(value.split())
+
+
+def _allowed_targeted(product, simple):
+    """True when ``simple`` is a run the briefs ask for, not a full suite: the product's own
+    ``pre_push_check`` (with or without further arguments), or a run filtered to named packages."""
+    check = pre_push_check(product)
+    if check and (simple == check or simple.startswith(check + ' ')):
+        return True
+    return bool(_TARGETED_FILTER.search(simple))
+
+
 def full_suite_command(product, command):
     """The first simple command of ``command`` that one of the product's
-    ``full_suite_commands`` matches, or None. Heredoc bodies are data, never a run."""
+    ``full_suite_commands`` matches, or None. Heredoc bodies are data, never a run. The
+    product's ``pre_push_check`` and a package-filtered run (``--filter <pkg>``) are targeted,
+    so never refused."""
     patterns = full_suite_patterns(product)
     if not patterns or not command:
         return None
@@ -386,7 +414,7 @@ def full_suite_command(product, command):
         while words and _ASSIGNMENT.match(words[0]):
             words.pop(0)
         simple = ' '.join(words).strip()
-        if not simple:
+        if not simple or _allowed_targeted(product, simple):
             continue
         for p in patterns:
             try:

@@ -42,7 +42,7 @@ lands the branch — with every item, or with the ones under `left out` returned
 lane. A gate you cannot make green is the whole branch's problem: say so and stop.
 
 BEFORE THE PUSH: the plan's acceptance block for every item you committed, byte-identical and
-passing, and the product's gate once over the whole branch. Paste each last line in the report.
+passing, and the product's gate once over the whole branch. Paste each last line in the report.{pre_push_check}
 
 Final message: the pushed sha, one line per item (committed, left out, or already on the branch),
 the gate lines.

@@ -345,6 +345,27 @@ DIRECT_GATE_REMOTE = ("BEFORE THE PUSH: the tests you added and the ones coverin
                       "pull request, never here: do not run it.")
 
 
+#: The product's ``conventions.pre_push_check`` as a code brief names it: the cheap slice of
+#: the CI gate (rule scripts, lint, spec and changeset checks) a push must pass here first — a
+#: branch pushed without it went red on one of those rules after the heavy run, one correction
+#: and one re-review later. Rendered as its own paragraph, only when the product sets it.
+PRE_PUSH_RULE = ("MUST RUN BEFORE EVERY PUSH, AND PASS: `{command}` — the product's fast gate "
+                 "checks, next to the targeted tests above. It is not the full suite (the "
+                 "approvals hook allows it). Red here is fixed before the push, never pushed for "
+                 "CI to find; paste its last line in the report.")
+
+
+def pre_push_block(product):
+    """A blank line and :data:`PRE_PUSH_RULE` naming the product's ``pre_push_check``, or ``''``
+    when it sets none — the template places it right after a paragraph, so an unset check leaves
+    no trace."""
+    if product is None:
+        return ''
+    from asf import approvals
+    command = approvals.pre_push_check(product)
+    return '\n\n' + PRE_PUSH_RULE.format(command=command) if command else ''
+
+
 def _external_ci(product):
     if product is None:
         return False
@@ -370,6 +391,7 @@ def context(product, row, kind, facts):
         'kind': kind,
         'gate_before_push': gate_before_push(product),
         'gate_before_push_direct': gate_before_push_direct(product),
+        'pre_push_check': pre_push_block(product),
         'test_command': preamble_mod.conventions(product).test_command
         or '(none set — run the tests you add)',
         'row_kind': getattr(row, 'kind', '') or '',

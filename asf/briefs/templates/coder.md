@@ -17,7 +17,7 @@ constant that belongs in another module — name every one, as a full repo path,
 and sends this run back to you; that line is how the footprint grows, never a question to a person.
 
 {gate_before_push} Paste the last line of each in the report. A test you changed to make it pass is a
-failed Task, not a passed one.
+failed Task, not a passed one.{pre_push_check}
 
 PROVES — the acceptance lines your tests tick: {proves}
 Before the push, every line above that your tests now prove carries a trailer on its own line in
