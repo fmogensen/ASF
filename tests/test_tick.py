@@ -1,6 +1,7 @@
 """asf.tick.tick — the live tick works in its own clone and pushes (B-0013); the step manifest."""
 import argparse
 import contextlib
+import datetime
 import io
 import os
 import re
@@ -11,7 +12,7 @@ import time
 import unittest
 from unittest import mock
 
-from asf import env
+from asf import capacity, ci_queue, env
 from asf.tick import shadow, steps, summary, tick
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_tick` does not
@@ -30,12 +31,17 @@ def _args(**kw):
     return argparse.Namespace(**base)
 
 
-TIMING_RE = re.compile(r'^(\[(?:step|record):[a-z-]+\]|tick: total) \d+\.\ds$')
+#: an *ended* step, a record part, or the tick's total. No longer `$`-anchored: F-0142's end line
+#: carries owner/pid/at after its seconds, and this is the one place that shape is matched.
+TIMING_RE = re.compile(r'^(\[(?:step|record):[a-z-]+\]|tick: total) \d+\.\ds')
+#: F-0142's start line — a per-step log line too, so `untimed` strips it with the rest
+STEP_START_RE = re.compile(r'^\[step:[a-z-]+\] start ')
 
 
 def untimed(out):
     """``out`` without the per-step and per-record-part timing lines and the tick's total."""
-    return ''.join(l for l in out.splitlines(True) if not TIMING_RE.match(l.rstrip('\n')))
+    return ''.join(l for l in out.splitlines(True)
+                   if not (TIMING_RE.match(l.rstrip('\n')) or STEP_START_RE.match(l)))
 
 
 def steps_only(out):
@@ -769,8 +775,150 @@ class StepTimingTests(TickTestCase):
         self.assertIn('ValueError: the wave broke', tail)
 
     def test_the_line_shape(self):
-        self.assertEqual(tick.step_timing_line('wave', 3.14159), '[step:wave] 3.1s')
+        self.assertEqual(
+            tick.step_end_line('wave', 3.14159, ok=True, owner='asf', pid=7,
+                                at='2026-09-28T15:03:58Z'),
+            '[step:wave] 3.1s ok=yes owner=asf pid=7 at=2026-09-28T15:03:58Z')
+        self.assertEqual(
+            tick.step_end_line('wave', 3.14159, ok=False, owner='asf', pid=7,
+                                at='2026-09-28T15:03:58Z'),
+            '[step:wave] 3.1s ok=no owner=asf pid=7 at=2026-09-28T15:03:58Z')
+        self.assertEqual(
+            tick.step_start_line('wave', 'command', pid=7, at='2026-09-28T15:03:58Z'),
+            '[step:wave] start owner=command pid=7 at=2026-09-28T15:03:58Z')
+        self.assertTrue(
+            tick.step_end_line('wave', 3.14159, ok=True, owner='asf', pid=7,
+                                at='2026-09-28T15:03:58Z').startswith('[step:wave] 3.1s'))
         self.assertEqual(tick.total_line(12), 'tick: total 12.0s')
+
+
+class StepStartEndLines(TickTestCase):
+    """F-0142: a start line before each step the tick actually runs, and the grown end line after
+    it — printed around exactly the steps the loop runs, never around one it skips."""
+
+    START_RE = re.compile(r'^\[step:([a-z-]+)\] start owner=(\S+) pid=(\d+) at=(\S+)$')
+    END_RE = re.compile(r'^\[step:([a-z-]+)\] (\d+\.\d)s ok=(yes|no) owner=(\S+) pid=(\d+) at=(\S+)$')
+
+    def _start_fields(self, line):
+        m = self.START_RE.match(line)
+        self.assertIsNotNone(m, line)
+        step, owner, pid, at = m.groups()
+        return {'step': step, 'owner': owner, 'pid': int(pid), 'at': at}
+
+    def _end_fields(self, line):
+        m = self.END_RE.match(line)
+        self.assertIsNotNone(m, line)
+        step, seconds, ok, owner, pid, at = m.groups()
+        return {'step': step, 'seconds': seconds, 'ok': ok, 'owner': owner, 'pid': int(pid),
+                'at': at}
+
+    def test_the_pair_around_an_asf_step_and_a_command_step(self):
+        self.write_product("steps:\n  health: python3 -c 'print(1)'\n  batch: off\n")
+        rc, out = self.run_tick(steps='record,health')
+        self.assertEqual(rc, 0)
+        lines = out.splitlines()
+        starts = [l for l in lines if self.START_RE.match(l)]
+        ends = [l for l in lines if self.END_RE.match(l)]
+        self.assertEqual([self._start_fields(l)['step'] for l in starts], ['record', 'health'])
+        self.assertEqual([self._end_fields(l)['step'] for l in ends], ['record', 'health'])
+        record_start, health_start = starts
+        record_end, health_end = ends
+
+        def first(prefix):
+            return next(i for i, l in enumerate(lines) if l.startswith(prefix))
+
+        self.assertLess(lines.index(record_start), first('[record:clone]'))
+        self.assertLess(first('[record:clone]'), lines.index(record_end))
+        self.assertLess(lines.index(record_end), lines.index(health_start))
+        self.assertLess(lines.index(health_start), first('[command:health] 1'))
+        self.assertLess(first('[command:health] 1'), lines.index(health_end))
+
+        rf, re_ = self._start_fields(record_start), self._end_fields(record_end)
+        hf, he = self._start_fields(health_start), self._end_fields(health_end)
+        self.assertEqual((rf['owner'], re_['owner'], re_['ok']), ('asf', 'asf', 'yes'))
+        self.assertEqual((hf['owner'], he['owner'], he['ok']), ('command', 'command', 'yes'))
+        for fields in (rf, re_, hf, he):
+            self.assertEqual(fields['pid'], os.getpid())
+            datetime.datetime.strptime(fields['at'], '%Y-%m-%dT%H:%M:%SZ')
+
+    def test_a_step_that_raises_ends_ok_no(self):
+        from asf.tick import step_wave
+
+        def wave(ctx):
+            return _explode_in_the_wave()
+        with mock.patch.object(step_wave, 'run', wave):
+            rc, out = self.run_tick(steps='record,wave')
+        self.assertEqual(rc, 1)
+        lines = out.splitlines()
+        start_i = next(i for i, l in enumerate(lines) if l.startswith('[step:wave] start '))
+        failed_i = lines.index('[step:wave] FAILED the wave broke')
+        traceback_i = next(i for i, l in enumerate(lines)
+                            if l.startswith('Traceback (most recent call last):'))
+        end_i = next(i for i, l in enumerate(lines)
+                     if l.startswith('[step:wave] ') and self.END_RE.match(l))
+        self.assertTrue(start_i < failed_i < traceback_i < end_i)
+        self.assertEqual(self._end_fields(lines[end_i])['ok'], 'no')
+
+    def test_no_start_or_end_line_for_a_step_that_is_off(self):
+        self.write_product('steps:\n  batch: off\n')
+        rc, out = self.run_tick(steps='batch')
+        self.assertIn('tick: step batch off (another job runs it)', out)
+        self.assertNotIn('[step:batch]', out)
+
+    def test_no_start_or_end_line_when_daily_already_ran_today(self):
+        self.write_product("steps:\n  daily: python3 -c 'print(1)'\n")
+        self.run_tick(steps='daily')
+        rc, out = self.run_tick(steps='daily')
+        self.assertIn('tick: step daily already ran today', out)
+        self.assertNotIn('[step:daily]', out)
+
+    def test_no_start_line_but_an_ok_end_line_when_batch_is_at_ci_capacity(self):
+        self.write_product("steps:\n  batch: python3 -c 'print(1)'\n")
+        resolved = capacity.Resolved(sessions=4, sessions_bound='default', ci=2, ci_bound='product',
+                                      ci_inflight=3, batch={}, reserve={})
+        with mock.patch.object(capacity, 'resolve', return_value=resolved):
+            rc, out = self.run_tick(steps='batch')
+        self.assertIn('waits    batch — at ci capacity (3/2)', out)
+        self.assertNotIn('[step:batch] start', out)
+        end_lines = [l for l in out.splitlines()
+                     if l.startswith('[step:batch] ') and self.END_RE.match(l)]
+        self.assertEqual(len(end_lines), 1)
+        self.assertEqual(self._end_fields(end_lines[0])['ok'], 'yes')
+
+    def test_no_start_line_but_an_ok_end_line_when_the_ci_queue_holds_batch(self):
+        self.write_product("steps:\n  batch: python3 -c 'print(1)'\n")
+        resolved = capacity.Resolved(sessions=4, sessions_bound='default', ci=2, ci_bound='product',
+                                      ci_inflight=1, batch={}, reserve={})
+        with mock.patch.object(capacity, 'resolve', return_value=resolved), \
+                mock.patch.object(tick.ci_queue, 'admit',
+                                   return_value=ci_queue.Decision(False, 'held')):
+            rc, out = self.run_tick(steps='batch')
+        self.assertNotIn('[step:batch] start', out)
+        end_lines = [l for l in out.splitlines()
+                     if l.startswith('[step:batch] ') and self.END_RE.match(l)]
+        self.assertEqual(len(end_lines), 1)
+        self.assertEqual(self._end_fields(end_lines[0])['ok'], 'yes')
+
+    def test_no_start_or_end_line_when_the_steps_own_lock_is_held(self):
+        self.write_product("steps:\n  batch: python3 -c 'print(1)'\n")
+        held = tick.acquire_step_lock(env.load_product('sample'), 'batch')
+        self.addCleanup(held.close)
+        rc, out = self.run_tick(steps='batch')
+        self.assertIn('tick: step batch is already running — skipped', out)
+        self.assertNotIn('[step:batch]', out)
+
+    def test_the_start_line_is_in_the_log_while_the_step_still_runs(self):
+        log_path = os.path.join(self.tmp, 'tick.log')
+        script_path = os.path.join(self.tmp, 'count_start.py')
+        with open(script_path, 'w') as f:
+            f.write("import sys\n"
+                     "print(open(sys.argv[1]).read().count('[step:health] start '))\n")
+        self.write_product(f"steps:\n  health: python3 {script_path} {log_path}\n  batch: off\n")
+        with open(log_path, 'w') as f, contextlib.redirect_stdout(f):
+            tick.cmd_tick(_args(steps='health'))
+        with open(log_path) as f:
+            out = f.read()
+        self.assertIn('[command:health] 1', out)
 
 
 class TickLockTests(TickTestCase):
