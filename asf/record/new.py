@@ -17,8 +17,8 @@ SEVERITIES = ('S1', 'S2', 'S3')
 # Typed fields `--set` may write, beyond the ones that have their own flag.
 _COMMON_SET = ('rank', 'decided', 'blockedBy', 'links', 'priority', 'area', 'legacy_id')
 SETTABLE = {t: set(_COMMON_SET) for t in TYPES}
-SETTABLE['rule'] |= {'scope', 'enforced', 'reason', 'check'}
-SETTABLE['decision'] |= {'decided_by', 'date'}
+SETTABLE['rule'] |= {'scope', 'enforced', 'reason', 'check', 'supersedes', 'superseded_by'}
+SETTABLE['decision'] |= {'decided_by', 'date', 'supersedes', 'superseded_by'}
 #: A Feature's build route (:mod:`asf.feeder.rows`): ``lane: direct`` is one session end to end
 #: (DIRECT → BUILD), else the full pipeline; ``size: s`` on the full lane merges spec and plan
 #: into one session and lets its small Tasks skip the review; ``ab_pair`` names the experiment
