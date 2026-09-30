@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from asf import clockinstall, drift, env, scheduler, snapshot
+from asf import clockinstall, doctor, drift, env, scheduler, snapshot
 
 
 def _git(repo, *args):
@@ -339,3 +339,240 @@ class TrunkDistanceTests(unittest.TestCase):
             f.write(f'repo_dir: {self.repo}\nmain: main\n')
         with mock.patch.object(drift, 'factory_root', return_value=None):
             self.assertEqual(clockinstall.trunk(), (self.repo, self.head))
+
+
+class DoctorClockInstallRowTests(unittest.TestCase):
+    """``asf doctor``'s ``clock install`` row (F-0104 spec §3): one row per clock, R1-R4 each
+    proved, ``is_red`` true for the reds and false for the two ``skip`` rows, and the existing
+    ``clock code`` row untouched beside it (C4)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='clockinstall_doctor_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.agents = os.path.join(self.tmp, 'LaunchAgents')
+        os.makedirs(self.agents)
+        self.venvs = os.path.join(self.tmp, 'venvs')
+        os.makedirs(self.venvs)
+        self.patch_agents = mock.patch.object(scheduler, 'launch_agents_dir',
+                                              return_value=self.agents)
+        self.patch_agents.start()
+        self.addCleanup(self.patch_agents.stop)
+        self.patch_venvs = mock.patch.object(clockinstall, 'venvs_dir',
+                                             return_value=self.venvs)
+        self.patch_venvs.start()
+        self.addCleanup(self.patch_venvs.stop)
+
+        self.repo = os.path.join(self.tmp, 'trunk')
+        os.makedirs(self.repo)
+        subprocess.run(['git', 'init', '-q', '-b', 'main', self.repo], check=True)
+        _git(self.repo, 'config', 'user.email', 't@example.com')
+        _git(self.repo, 'config', 'user.name', 't')
+        self.c0 = self._commit('a')
+        self._commit('b')
+        self._commit('c')
+        self.head = self._commit('d')
+        _git(self.repo, 'branch', 'side', self.c0)
+        _git(self.repo, 'checkout', '-q', 'side')
+        self.side = self._commit('e')
+        _git(self.repo, 'checkout', '-q', 'main')
+        clockinstall._TRUNK_CACHE.clear()
+        self.patch_trunk = mock.patch.object(clockinstall, 'trunk',
+                                             return_value=(self.repo, self.head))
+        self.patch_trunk.start()
+        self.addCleanup(self.patch_trunk.stop)
+
+        self.product = env.Product('sample', {'repo_dir': self.tmp, 'backlog_dir': self.tmp,
+                                              'ci': {'provider': 'none'}})
+
+    def _commit(self, name):
+        with open(os.path.join(self.repo, name), 'w', encoding='utf-8') as f:
+            f.write(name)
+        _git(self.repo, 'add', '-A')
+        _git(self.repo, 'commit', '-q', '-m', name)
+        return _git(self.repo, 'rev-parse', 'HEAD')
+
+    def _rows(self, cfg=None):
+        return doctor.check_clock_installs(cfg if cfg is not None else {}, self.product)
+
+    # ---- R4: ok -------------------------------------------------------------
+
+    def test_a_pinned_current_clock_reads_ok_and_current(self):
+        python = _make_venv(self.venvs, 'asf-factory-live', {
+            'url': 'git+https://github.com/o/r.git', 'vcs_info': {'commit_id': self.head}})
+        _write_plist(os.path.join(self.agents, 'asf.sample.fast.plist'),
+                    [python, '-m', 'asf.cli', 'tick'])
+        required, ok, detail = self._rows()[0]
+        self.assertTrue(required)
+        self.assertTrue(ok)
+        self.assertIn('pinned asf-factory-live', detail)
+        self.assertIn(self.head[:7], detail)
+        self.assertIn(f'origin/main {self.head[:7]}', detail)
+        self.assertIn('current', detail)
+
+    def test_a_pinned_clock_behind_the_trunk_names_the_count(self):
+        python = _make_venv(self.venvs, 'asf-factory-live', {
+            'url': 'git+https://github.com/o/r.git', 'vcs_info': {'commit_id': self.c0}})
+        _write_plist(os.path.join(self.agents, 'asf.sample.daily.plist'),
+                    [python, '-m', 'asf.cli', 'tick'])
+        required, ok, detail = self._rows()[0]
+        self.assertTrue(required)
+        self.assertTrue(ok)
+        self.assertIn('behind by 3', detail)
+
+    def test_no_asf_checkout_on_this_host_answers_ok_and_says_it_could_not_tell(self):
+        python = _make_venv(self.venvs, 'asf-factory-live', {
+            'url': 'git+https://github.com/o/r.git', 'vcs_info': {'commit_id': self.head}})
+        _write_plist(os.path.join(self.agents, 'asf.sample.fast.plist'),
+                    [python, '-m', 'asf.cli', 'tick'])
+        with mock.patch.object(clockinstall, 'trunk', return_value=('', '')):
+            required, ok, detail = self._rows()[0]
+        self.assertTrue(required)
+        self.assertTrue(ok)
+        self.assertIn('no ASF checkout on this host', detail)
+        self.assertIn('distance not measured', detail)
+
+    # ---- R1: editable, checkout, unknown -------------------------------------
+
+    def test_an_editable_clock_is_red(self):
+        checkout = os.path.join(self.tmp, 'editable-checkout')
+        sha = _make_checkout(checkout)
+        python = _make_venv(self.venvs, 'asf-factory', {
+            'url': f'file://{checkout}', 'dir_info': {'editable': True}})
+        _write_plist(os.path.join(self.agents, 'asf.sample.fast.plist'),
+                    [python, '-m', 'asf.cli', 'tick'])
+        required, ok, detail = self._rows()[0]
+        self.assertTrue(required)
+        self.assertFalse(ok)
+        self.assertIn('editable asf-factory', detail)
+        self.assertIn(sha[:7], detail)
+        self.assertIn('the clock ticks a working tree', detail)
+        self.assertIn('reinstall it pinned: install.sh sample', detail)
+        self.assertNotIn('tools/install.sh', detail)  # PD3 — a forbidden token in asf/**/*.py
+
+    def test_an_unknown_clock_is_red(self):
+        _write_plist(os.path.join(self.agents, 'asf.sample.fast.plist'),
+                    ['/usr/bin/python3', '-m', 'asf.cli', 'tick'])
+        required, ok, detail = self._rows()[0]
+        self.assertTrue(required)
+        self.assertFalse(ok)
+        self.assertIn('unknown', detail)
+        self.assertIn('/usr/bin/python3', detail)
+
+    # ---- R2: a snapshot on a product that is not the factory's own source ---
+
+    def test_a_snapshot_clock_on_a_non_factory_product_is_red(self):
+        code_dir = os.path.join(self.tmp, 'code')
+        os.makedirs(code_dir)
+        with open(os.path.join(code_dir, snapshot.CURRENT), 'w', encoding='utf-8') as f:
+            f.write(self.head + '\n')
+        checkout = os.path.join(self.tmp, 'a-customer-repo')
+        argv = ['/usr/bin/python3', os.path.join(code_dir, snapshot.LAUNCHER), '--repo',
+                checkout, '--code-dir', code_dir, '--', '/usr/bin/python3', '-m', 'asf.cli',
+                'tick']
+        _write_plist(os.path.join(self.agents, 'asf.sample.fast.plist'), argv)
+        self.product = env.Product('sample', {'repo_dir': checkout, 'backlog_dir': self.tmp,
+                                              'ci': {'provider': 'none'}})
+        required, ok, detail = self._rows()[0]
+        self.assertTrue(required)
+        self.assertFalse(ok)
+        self.assertIn('snapshot of', detail)
+        self.assertIn(f'origin/main {self.head[:7]}', detail)
+        self.assertIn("this product is not the factory's own source", detail)
+        self.assertIn('reinstall it pinned: install.sh sample', detail)
+
+    # ---- R3: a sha that is not an ancestor of origin/main --------------------
+
+    def test_a_snapshot_clock_off_the_trunk_is_red_even_for_the_factory_product(self):
+        code_dir = os.path.join(self.tmp, 'code2')
+        os.makedirs(code_dir)
+        with open(os.path.join(code_dir, snapshot.CURRENT), 'w', encoding='utf-8') as f:
+            f.write(self.side + '\n')
+        argv = ['/usr/bin/python3', os.path.join(code_dir, snapshot.LAUNCHER), '--repo',
+                self.repo, '--code-dir', code_dir, '--', '/usr/bin/python3', '-m', 'asf.cli',
+                'tick']
+        _write_plist(os.path.join(self.agents, 'asf.sample.fast.plist'), argv)
+        self.product = env.Product('sample', {'repo_dir': doctor.package_root(),
+                                              'backlog_dir': self.tmp,
+                                              'ci': {'provider': 'none'}})
+        required, ok, detail = self._rows()[0]
+        self.assertTrue(required)
+        self.assertFalse(ok)
+        self.assertIn('NOT on origin/main', detail)
+        self.assertIn('unmerged work is ticking this product', detail)
+        self.assertNotIn('install.sh', detail)  # already pinned — the repair is not a reinstall
+
+    # ---- the two rows that are not judgements --------------------------------
+
+    def test_no_clock_plist_is_a_skip_row_not_a_red(self):
+        required, ok, detail = self._rows()[0]
+        self.assertFalse(required)
+        self.assertIsNone(ok)
+        self.assertIn('no clock plist', detail)
+        self.assertFalse(doctor.is_red([('clock install', required, ok, detail)]))
+
+    def test_a_non_launchd_scheduler_kind_is_a_skip_row(self):
+        required, ok, detail = self._rows(cfg={'scheduler': {'kind': 'cron'}})[0]
+        self.assertFalse(required)
+        self.assertIsNone(ok)
+        self.assertIn('kind:cron', detail)
+        self.assertFalse(doctor.is_red([('clock install', required, ok, detail)]))
+
+    # ---- is_red, as run() shapes the rows -------------------------------------
+
+    def test_is_red_true_for_each_of_the_four_reds(self):
+        cases = []
+        checkout = os.path.join(self.tmp, 'editable-checkout')
+        _make_checkout(checkout)
+        python = _make_venv(self.venvs, 'asf-factory', {
+            'url': f'file://{checkout}', 'dir_info': {'editable': True}})
+        _write_plist(os.path.join(self.agents, 'asf.sample.fast.plist'),
+                    [python, '-m', 'asf.cli', 'tick'])
+        cases.append(self._rows()[0])
+        for required, ok, detail in cases:
+            rows = [('clock install', required, ok, detail)]
+            self.assertTrue(doctor.is_red(rows), detail)
+
+    # ---- the memo -------------------------------------------------------------
+
+    def test_two_clocks_on_one_install_shell_git_once_for_the_pair(self):
+        python = _make_venv(self.venvs, 'asf-factory-live', {
+            'url': 'git+https://github.com/o/r.git', 'vcs_info': {'commit_id': self.c0}})
+        _write_plist(os.path.join(self.agents, 'asf.sample.fast.plist'),
+                    [python, '-m', 'asf.cli', 'tick'])
+        _write_plist(os.path.join(self.agents, 'asf.sample.daily.plist'),
+                    [python, '-m', 'asf.cli', 'tick'])
+        real_run = subprocess.run
+        with mock.patch('asf.clockinstall.subprocess.run', side_effect=real_run) as run_mock:
+            rows = self._rows()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(run_mock.call_count, 2)  # rev-list, merge-base — once, not twice
+
+    # ---- the existing row beside the new ones ----------------------------------
+
+    def test_clock_code_row_stays_present_and_green_beside_the_new_rows(self):
+        python = _make_venv(self.venvs, 'asf-factory-live', {
+            'url': 'git+https://github.com/o/r.git', 'vcs_info': {'commit_id': self.head}})
+        _write_plist(os.path.join(self.agents, 'asf.sample.fast.plist'),
+                    [python, '-m', 'asf.cli', 'tick'])
+        with mock.patch.object(doctor, 'check_config',
+                              return_value=(True, 'ok', {}, self.product)), \
+                mock.patch.object(doctor, 'check_repo', return_value=(True, '')), \
+                mock.patch.object(doctor, 'check_backlog', return_value=(True, '')), \
+                mock.patch.object(doctor, 'check_scheduler', return_value=(True, '')), \
+                mock.patch.object(doctor, 'check_cli_sessions', return_value=[]), \
+                mock.patch.object(doctor, 'check_one_factory', return_value=(True, '')), \
+                mock.patch.object(doctor.approvals, 'check_doctor', return_value=(True, '')), \
+                mock.patch.object(doctor, 'check_redaction_hooks', return_value=(True, '')), \
+                mock.patch.object(doctor, 'check_approvals_hook', return_value=(True, '')), \
+                mock.patch.object(doctor, 'check_drift', return_value=(True, '')), \
+                mock.patch.object(doctor, 'check_worker_secrets', return_value=(True, '')), \
+                mock.patch.object(doctor, 'check_clock_code', return_value=(True, 'stubbed')):
+            rows = doctor.run('sample')
+        clock_code = [r for r in rows if r[0] == 'clock code']
+        clock_install = [r for r in rows if r[0] == 'clock install']
+        self.assertEqual(len(clock_code), 1)
+        self.assertFalse(clock_code[0][1])   # required=False, unmoved (C4)
+        self.assertTrue(clock_code[0][2])    # still green
+        self.assertEqual(len(clock_install), 1)
+        self.assertTrue(clock_install[0][1])  # required=True
+        self.assertTrue(clock_install[0][2])  # ok — pinned and current
