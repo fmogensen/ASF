@@ -34,8 +34,13 @@ STATE_NAME = 'flaky.json'
 S1_RUNS = 3
 S1_WINDOW_DAYS = 7
 S1_TRUNK_RUNS = 2
-#: How far back the pass lists runs; a run already read (``seen``) is never read twice.
+#: How far back the window may ever reach — the floor under ``window_from`` (D4).
 LOOKBACK_DAYS = 7
+#: The steady-state window: longer than any single run, so a run created before the last pass and
+#: completed after it is still listed (D5, D6).
+SINCE_OVERLAP_HOURS = 24
+#: A listing this long has hit the API's result cap: runs older than it are unreachable (D3).
+TRUNCATED_ROWS = 1000
 #: Runs whose logs one pass reads at most, oldest first — the rest wait for the next pass.
 MAX_RUNS_PER_PASS = 30
 #: The run links a card body lists (newest first); every run id stays in ``links.runs``.
@@ -259,6 +264,11 @@ def _runner_class(labels, ignore=()):
     return rest[0] if rest else (names[0] if names else '')
 
 
+#: `GitHubRuns.workflow_id` has not yet resolved this instance's selector (`None` is itself a
+#: valid, cacheable outcome — the selector matched nothing — so it cannot double as "unresolved").
+_UNRESOLVED = object()
+
+
 class GitHubRuns:
     """The completed runs of one workflow and their job logs, off ``gh``. A test passes a fake
     with the same three methods."""
@@ -267,6 +277,8 @@ class GitHubRuns:
         self.product = product
         self.slug = getattr(product, 'repo_slug', None)
         self._run = run or subprocess.run
+        self._workflow_id = _UNRESOLVED
+        self.workflow_names = []
 
     def _gh(self, args):
         from asf import ci_pool
@@ -286,16 +298,48 @@ class GitHubRuns:
                 continue
         return out
 
+    @staticmethod
+    def _row(r):
+        return {'id': r['id'], 'name': r.get('name'), 'branch': r.get('head_branch') or '',
+                'ts': r.get('updated_at') or r.get('created_at') or '',
+                'created': r.get('created_at') or '', 'url': r.get('html_url') or ''}
+
+    def workflow_id(self, selector):
+        """The numeric id of the workflow ``selector`` names — its own id, its display ``name``,
+        or its file name (``conventions.ci_workflow`` may hold any of the three, P2) — or None
+        with :attr:`workflow_names` set to the names the listing held, for the caller's one line
+        (D2). Resolved once per instance (D3)."""
+        if self._workflow_id is _UNRESOLVED:
+            rows = self._lines(['api', f'repos/{self.slug}/actions/workflows?per_page=100',
+                                '--paginate', '--jq', '.workflows[]|{id,name,path}|@json'])
+            self.workflow_names = [r.get('name') or '' for r in rows]
+            match = next((r for r in rows if str(r.get('id')) == str(selector)
+                         or r.get('name') == selector
+                         or os.path.basename(r.get('path') or '') == selector), None)
+            self._workflow_id = match['id'] if match else None
+        return self._workflow_id
+
     def runs(self, workflow, since):
-        """``[{id, name, branch, ts, url}]``: completed runs created on or after ``since``."""
-        rows = self._lines(['api', f'repos/{self.slug}/actions/runs?created=%3E%3D{since}'
-                                   f'&status=completed&per_page=100', '--paginate', '--jq',
+        """``[{id, name, branch, ts, created, url}]``: the completed runs of ``workflow`` created
+        on or after ``since`` (an ISO timestamp). One workflow's runs, asked of the workflow (D1)
+        — ``repos/{slug}/actions/workflows/{id}/runs`` — so no display-name filter stands between
+        the listing and the pass. When the selector resolves to nothing the listing falls back to
+        every workflow's runs with the old filter, unchanged (D2)."""
+        wf_id = self.workflow_id(workflow)
+        if wf_id is None:
+            print(f"file-bugs: flaky — ci_workflow {workflow!r} matches none of: "
+                  f"{', '.join(self.workflow_names) or '(none)'}")
+            rows = self._lines(['api', f'repos/{self.slug}/actions/runs?created=%3E%3D{since}'
+                                       f'&status=completed&per_page=100', '--paginate', '--jq',
+                                '.workflow_runs[]|{id,name,head_branch,created_at,updated_at,'
+                                'html_url}|@json'])
+            return [self._row(r) for r in rows if r.get('name') == workflow]
+        rows = self._lines(['api', f'repos/{self.slug}/actions/workflows/{wf_id}/runs?'
+                                   f'created=%3E%3D{since}&status=completed&per_page=100',
+                            '--paginate', '--jq',
                             '.workflow_runs[]|{id,name,head_branch,created_at,updated_at,'
                             'html_url}|@json'])
-        return [{'id': r['id'], 'name': r.get('name'), 'branch': r.get('head_branch') or '',
-                 'ts': r.get('updated_at') or r.get('created_at') or '',
-                 'url': r.get('html_url') or ''}
-                for r in rows if r.get('name') == workflow]
+        return [self._row(r) for r in rows]
 
     def jobs(self, run_id):
         """``[{id, runner_name, labels}]``, or None when the listing failed."""
@@ -315,18 +359,53 @@ def state_path(product):
     return os.path.join(env.state_dir(product), STATE_NAME)
 
 
+def window_since(state, now):
+    """The pass's listing floor (D4): ``state['window_from']`` when it is inside the lookback
+    window; the full ``LOOKBACK_DAYS`` floor otherwise — including when there is no
+    ``window_from`` at all, which is a state file written before this card and today's exact
+    behaviour."""
+    floor = now - datetime.timedelta(days=LOOKBACK_DAYS)
+    since = parse_iso(state.get('window_from'))
+    if since is None or since < floor:
+        since = floor
+    return since.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def next_window(unread, now):
+    """Where the next pass should start listing from (D4): one second before the oldest unread
+    run's ``created_at`` — never its ``ts`` (D5), so a long run is not excluded by its own
+    completion — or ``now - SINCE_OVERLAP_HOURS`` when the pass left nothing unread (D6); floored
+    at ``now - LOOKBACK_DAYS`` either way. ``unread``: a run's own dict lacks ``created`` (a fake
+    source that predates this card), its ``ts`` stands in — losing D5's precision for that source,
+    never a ``KeyError``."""
+    floor = now - datetime.timedelta(days=LOOKBACK_DAYS)
+    if unread:
+        oldest = min(r.get('created') or r['ts'] for r in unread)
+        since = (parse_iso(oldest) or floor) - datetime.timedelta(seconds=1)
+    else:
+        since = now - datetime.timedelta(hours=SINCE_OVERLAP_HOURS)
+    return max(since, floor).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
 def collect(state, source, workflow, conv, now, out=print):
     """Read the unread completed runs of ``workflow`` into ``state``. Returns the keys touched."""
-    since = (now - datetime.timedelta(days=LOOKBACK_DAYS)).date().isoformat()
-    runs = sorted((r for r in source.runs(workflow, since) if str(r['id']) not in state['seen']),
-                  key=lambda r: r['ts'])[:MAX_RUNS_PER_PASS]
+    since = window_since(state, now)
+    listed = source.runs(workflow, since)
+    if len(listed) >= TRUNCATED_ROWS:
+        out(f"file-bugs: flaky — {len(listed)} runs listed since {since}: the window is "
+            f"truncated, runs older than it cannot be read")
+    unseen = sorted((r for r in listed if str(r['id']) not in state['seen']),
+                    key=lambda r: r['ts'])
+    runs, deferred = unseen[:MAX_RUNS_PER_PASS], unseen[MAX_RUNS_PER_PASS:]
     touched = set()
+    failed = []
     from asf import ci_pool
     product = getattr(source, 'product', None)
     ignore = ci_pool.reserve_labels(product) if product is not None else set()
     for r in runs:
         jobs = source.jobs(r['id'])
         if jobs is None:
+            failed.append(r)
             continue  # read again next pass
         flaky = []
         for j in jobs:
@@ -339,6 +418,7 @@ def collect(state, source, workflow, conv, now, out=print):
     cutoff = (now - datetime.timedelta(days=LOOKBACK_DAYS + 1)).strftime('%Y-%m-%dT%H:%M:%SZ')
     state['seen'] = {k: v for k, v in state['seen'].items() if v >= cutoff}
     state['last_pass'] = now.strftime('%Y-%m-%dT%H:%M:%SZ')
+    state['window_from'] = next_window(deferred + failed, now)
     if runs:
         out(f"file-bugs: flaky — read {len(runs)} run(s), {len(touched)} flaky test(s)")
     return touched
