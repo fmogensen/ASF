@@ -446,13 +446,39 @@ def fair_share(product, cfg, quota_source=None):
     return share + borrowed, usable, len(active), borrowed
 
 
-def batch_shape(product, cfg):
-    """The product's CI batch shape — only the keys of §2.1 whose value is an ``int >= 0``."""
+def _declared_batch(product):
     batch = _product_capacity(product).get('batch')
     if not isinstance(batch, dict):
         return {}
     return {k: v for k, v in batch.items()
             if k in ('per_run', 'parallel', 'runners') and isinstance(v, int) and v >= 0}
+
+
+def batch_shape(product, cfg):
+    """The product's CI batch shape — only the keys of §2.1 whose value is an ``int >= 0`` (P6).
+    A product that declares neither ``parallel`` nor ``runners`` gets both measured: ``runners``
+    is the sum of one full run's expected jobs per class (:func:`expected_run_needs`), and
+    ``parallel`` is how many such runs the pool holds at once — ``min(census slots //
+    needs[class])`` over the classes the run needs, floored at 1. The slots are the last
+    :func:`asf.ci_census.cached` census's, never the host's live online count (PD6). With no
+    census and no measure, neither key appears, exactly as today (P6)."""
+    out = _declared_batch(product)
+    if 'parallel' not in out and 'runners' not in out:
+        from asf import ci_census, ci_pool
+        needs = expected_run_needs(product)
+        slots = ci_pool.slots_by_role(ci_census.cached(product))
+        ratios = [slots[c] // n for c, n in needs.items() if c in slots]
+        if needs and slots and ratios:
+            out['runners'] = sum(needs.values())
+            out['parallel'] = max(1, min(ratios))
+    return out
+
+
+def batch_detail(product, cfg):
+    """``(shape, {key: 'product' | 'measured'})`` — what the doctor and status rows name."""
+    declared = _declared_batch(product)
+    shape = batch_shape(product, cfg)
+    return shape, {k: ('product' if k in declared else 'measured') for k in shape}
 
 
 def reserve(cfg):

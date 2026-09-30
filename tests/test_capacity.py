@@ -569,3 +569,96 @@ class BandwidthCiFree(Home):
 
     def test_no_runner_figure_falls_back_to_runs_in_flight(self):
         self.assertEqual(self._bw(pool_product(), None)['ci_free'], 0)
+
+
+def _write_census(p, entries):
+    """``entries``: ``[(runner, tier), ...]``, written straight to ``ci-census.json`` — the shape
+    :func:`asf.ci_census.cached` reads back."""
+    import json
+    from asf import ci_census
+    path = os.path.join(env.state_dir(p), ci_census.CENSUS_FILE)
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump({'v': ci_census.CENSUS_VERSION,
+                   'runners': [{'runner': r, 'tier': t} for r, t in entries]}, f)
+
+
+def _write_needs(name, needs, workflow='ci.yml'):
+    from asf import ci_queue
+    data = ci_queue.load(name)
+    data['expect'][workflow] = {'v': ci_queue.EXPECT_VERSION, 'needs': needs,
+                                'at': '2026-09-30T00:00:00Z'}
+    ci_queue.save(name, data)
+
+
+class BatchMeasured(Home):
+    """``capacity.batch``'s ``parallel`` and ``runners``, measured off the census and the queue's
+    expected run needs only when the product declares neither key (D16)."""
+
+    def _product(self, name='acme', **batch):
+        cap = {'batch': batch} if batch else {}
+        return product(name, {'repo_slug': f'{name}/x', 'ci': {'workflow': 'ci.yml'},
+                              'capacity': cap})
+
+    def test_no_census_gets_neither_key_exactly_as_today(self):
+        p = self._product()
+        _write_needs('acme', {'asf-fast': 2, 'asf-bulk': 4})
+        self.assertEqual(capacity.batch_shape(p, None), {})
+
+    def test_a_pool_of_two_fast_and_four_bulk_gives_one_run_at_a_time(self):
+        p = self._product()
+        _write_census(p, [('f1', 'asf-fast'), ('f2', 'asf-fast'),
+                          ('b1', 'asf-bulk'), ('b2', 'asf-bulk'),
+                          ('b3', 'asf-bulk'), ('b4', 'asf-bulk')])
+        _write_needs('acme', {'asf-fast': 2, 'asf-bulk': 4})
+        self.assertEqual(capacity.batch_shape(p, None), {'runners': 6, 'parallel': 1})
+
+    def test_a_pool_of_four_fast_and_eight_bulk_gives_two_runs_at_a_time(self):
+        p = self._product()
+        _write_census(p, [(f'f{i}', 'asf-fast') for i in range(1, 5)] +
+                         [(f'b{i}', 'asf-bulk') for i in range(1, 9)])
+        _write_needs('acme', {'asf-fast': 2, 'asf-bulk': 4})
+        self.assertEqual(capacity.batch_shape(p, None), {'runners': 6, 'parallel': 2})
+
+    def test_a_declared_parallel_leaves_runners_unmeasured(self):
+        p = self._product(parallel=3)
+        _write_census(p, [('f1', 'asf-fast'), ('f2', 'asf-fast')])
+        _write_needs('acme', {'asf-fast': 2})
+        self.assertEqual(capacity.batch_shape(p, None), {'parallel': 3})
+
+    def test_a_declared_per_run_still_gets_both_measured(self):
+        p = self._product(per_run=8)
+        _write_census(p, [('f1', 'asf-fast'), ('f2', 'asf-fast'),
+                          ('b1', 'asf-bulk'), ('b2', 'asf-bulk'),
+                          ('b3', 'asf-bulk'), ('b4', 'asf-bulk')])
+        _write_needs('acme', {'asf-fast': 2, 'asf-bulk': 4})
+        self.assertEqual(capacity.batch_shape(p, None),
+                         {'per_run': 8, 'runners': 6, 'parallel': 1})
+
+    def test_batch_detail_names_the_source_of_every_key(self):
+        p = self._product(parallel=3)
+        _write_census(p, [('f1', 'asf-fast'), ('f2', 'asf-fast')])
+        _write_needs('acme', {'asf-fast': 2})
+        self.assertEqual(capacity.batch_detail(p, None),
+                         ({'parallel': 3}, {'parallel': 'product'}))
+
+    def test_batch_detail_names_a_measured_pair(self):
+        p = self._product('bmac')
+        _write_census(p, [('f1', 'asf-fast'), ('f2', 'asf-fast'),
+                          ('b1', 'asf-bulk'), ('b2', 'asf-bulk'),
+                          ('b3', 'asf-bulk'), ('b4', 'asf-bulk')])
+        _write_needs('bmac', {'asf-fast': 2, 'asf-bulk': 4})
+        self.assertEqual(capacity.batch_detail(p, None),
+                         ({'runners': 6, 'parallel': 1},
+                          {'runners': 'measured', 'parallel': 'measured'}))
+
+    def test_backend_runners_is_never_called_and_no_gh_process_spawned(self):
+        from asf import ci_pool
+        p = self._product()
+        _write_census(p, [('f1', 'asf-fast'), ('f2', 'asf-fast'),
+                          ('b1', 'asf-bulk'), ('b2', 'asf-bulk'),
+                          ('b3', 'asf-bulk'), ('b4', 'asf-bulk')])
+        _write_needs('acme', {'asf-fast': 2, 'asf-bulk': 4})
+        with mock.patch.object(ci_pool, 'backend_for',
+                               side_effect=AssertionError('backend_for must not be called')), \
+             mock.patch('subprocess.run', side_effect=AssertionError('gh must not be called')):
+            self.assertEqual(capacity.batch_shape(p, None), {'runners': 6, 'parallel': 1})
