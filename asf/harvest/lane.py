@@ -2350,7 +2350,8 @@ class Lane:
             return {'conflict': res['conflict']}
         new = res['new']
         if not new:
-            self.out(f'rebase {b}: {res["why"]} — not rebased by the lane')
+            # already straight on the trunk (the conflict is with a branch stacked beside it),
+            # or a rebuild the guard refused: the session's round as before, nothing said here
             return None
         ok, line = self.pre_push_ok(new)
         if ok is False:

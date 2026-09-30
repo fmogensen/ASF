@@ -763,10 +763,11 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertTrue(self.origin_has('fix/B-0001'))
         self.assertFalse(self.record('fix/B-0001').get('harvested'))
 
-    def test_b0056_a_merge_commit_on_a_lane_branch_is_held_with_the_named_reason(self):
+    def test_b0056_a_merge_commit_on_a_lane_branch_is_dropped_by_the_lane_not_a_session(self):
         self.push_lane('fix/B-0001', [('fix(B-0001): the change', {'a.txt': 'a\n'})])
         # the trunk moves; the session merges it in (what a session did when its rebase could
-        # not be pushed) — the branch is no longer straight commits on the trunk
+        # not be pushed) — the branch is no longer straight commits on the trunk. Pure git
+        # mechanics: the lane rebuilds it as the trunk plus its own commit, no session, no round
         sh(['git', 'checkout', '-q', 'main'], cwd=self.worker)
         self.write(self.worker, 'm.txt', 'm\n')
         sh(['git', 'add', '-A'], cwd=self.worker)
@@ -778,15 +779,14 @@ class ProductHarvestTests(unittest.TestCase):
         self.session('fix-bug-b-0001', 'B-0001', 'fix/B-0001')
         before = self.origin_main()
         results, lines = self.harvest(self.product())
-        lines = [l for l in lines if not l.startswith('harvest: ')]  # the checkout's fast-forward
-        self.assertEqual(results, {'fix/B-0001': 'held'})
-        self.assertTrue(lines[0].startswith('held fix/B-0001: merge commit on a lane branch: '), lines)
-        self.assertIn('rebase onto it, never merge origin/fix/B-0001 or origin/main into it', lines[0])
-        self.assertTrue(lines[0].endswith(' — back to its session (round 1)'), lines)
-        rec = self.record('fix/B-0001')
-        self.assertEqual(rec['correction']['kind'], 'merge')
-        self.assertEqual(self.origin_main(), before)
-        self.assertTrue(self.origin_has('fix/B-0001'))
+        self.assertEqual(results, {'fix/B-0001': 'landed'}, lines)
+        self.assertTrue(any(l.startswith('dropped 0 trunk copies and 1 merge(s) from fix/B-0001')
+                            for l in lines), lines)
+        self.assertFalse(any('back to its session' in l for l in lines), lines)
+        self.assertEqual(sh(['git', 'rev-list', '--merges', f'{before}..main'],
+                            cwd=self.origin).stdout, '')
+        self.assertEqual(sh(['git', 'log', '--format=%s', f'{before}..main'],
+                            cwd=self.origin).stdout.split('\n')[0], 'fix(B-0001): the change')
 
     def test_b0057_a_spec_branch_whose_document_is_on_the_trunk_is_landed_without_a_gate(self):
         spec = 'docs/specs/f-0001.md'
