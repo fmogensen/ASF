@@ -24,12 +24,14 @@ def pool_data():
     ]
 
 
-def product(pool=True, cap=None, queue=None, name='p'):
+def product(pool=True, cap=None, queue=None, reserve=None, name='p'):
     ci = {'provider': 'github-actions', 'workflow': 'ci.yml'}
     if pool:
-        ci['pool'] = pool_data()
+        ci['pool'] = pool_data() if pool is True else pool
     if queue is not None:
         ci['queue'] = queue
+    if reserve is not None:
+        ci['reserve'] = reserve
     data = {'repo_slug': 'o/r', 'ci': ci}
     if cap is not None:
         data['capacity'] = cap
@@ -40,12 +42,17 @@ class FakeGh:
     """``subprocess.run`` for ``gh``: runners, a workflow's run history, its jobs, runs in flight.
     Every argv is logged."""
 
-    def __init__(self, busy=(), offline=(), history=None, inflight=0, listed=None, files=None):
+    def __init__(self, busy=(), offline=(), history=None, inflight=0, listed=None, files=None,
+                 pool=None, labels=None):
         self.busy, self.offline = set(busy), set(offline)
         #: ``{run id: [changed file]}``: the PR (numbered as its run) each run was for
         self.files = files or {}
         #: the completed runs ``gh run list`` names (default: every history run, a success)
         self.listed = listed
+        #: the runner rows the runners response iterates (default: the shared four-runner pool)
+        self.pool = pool if pool is not None else pool_data()
+        #: ``{runner: [label]}``, replacing the hardcoded ``self-hosted`` + role when given
+        self.labels = labels
         # three runs of ci.yml: heavy 3, 3, 2 jobs and one light job each
         self.history = history if history is not None else [
             [{'runner_name': 'h1'}, {'runner_name': 'h2'}, {'runner_name': 'h3'},
@@ -62,12 +69,16 @@ class FakeGh:
         self.calls.append(argv)
         out = ''
         if argv[:2] == ['gh', 'api'] and any('actions/runners' in a for a in argv):
+            def _labels(r):
+                if self.labels is not None:
+                    return [{'name': l, 'type': 'custom'} for l in self.labels.get(r['runner'], [])]
+                return [{'name': 'self-hosted', 'type': 'read-only'},
+                        {'name': r['role'], 'type': 'custom'}]
             out = '\n'.join(json.dumps({
                 'name': r['runner'], 'id': i, 'busy': r['runner'] in self.busy,
                 'status': 'offline' if r['runner'] in self.offline else 'online',
-                'labels': [{'name': 'self-hosted', 'type': 'read-only'},
-                           {'name': r['role'], 'type': 'custom'}]})
-                for i, r in enumerate(pool_data()))
+                'labels': _labels(r)})
+                for i, r in enumerate(self.pool))
         elif argv[:3] == ['gh', 'run', 'list'] and '--status' in argv:
             out = json.dumps(self.listed if self.listed is not None else [
                 {'databaseId': i, 'conclusion': 'success', 'attempt': 1}
@@ -299,6 +310,80 @@ class TestPeakConcurrency(Base):
         q.source._run = FakeGh(history=[[job('h1')]] * 3)    # the host changed mid-pass
         q.data['expect'].clear()
         self.assertEqual(q.needs('ci.yml'), first)
+
+
+def fit_pool():
+    return [{'runner': 'a1', 'provider': 'alpha', 'role': 'heavy'},
+            {'runner': 'a2', 'provider': 'alpha', 'role': 'heavy'},
+            {'runner': 'b1', 'provider': 'beta', 'role': 'heavy'},
+            {'runner': 'b2', 'provider': 'beta', 'role': 'heavy'},
+            {'runner': 'l1', 'provider': 'alpha', 'role': 'light', 'slots': 2}]
+
+
+FIT_LABELS = {'a1': ['self-hosted', 'heavy', 'alpha-heavy'],
+              'a2': ['self-hosted', 'heavy', 'alpha-heavy'],
+              'b1': ['self-hosted', 'heavy'], 'b2': ['self-hosted', 'heavy'],
+              'l1': ['self-hosted', 'light']}
+ASKS = ['self-hosted', 'alpha-heavy']
+
+
+def fit_history(runs=3):
+    """Each run: two heavy jobs that ask for the provider-scoped label, one light job."""
+    return [[job('a1', 0, 5, labels=ASKS), job('a2', 0, 5, labels=ASKS),
+             job('l1', 0, 5, labels=['self-hosted', 'light'])] for _ in range(runs)]
+
+
+class TestFitSupply(Base):
+    def fit(self, **kw):
+        p = product(pool=fit_pool())
+        gh = FakeGh(pool=fit_pool(), labels=FIT_LABELS, history=fit_history(), **kw)
+        return p, gh, self.queue(p, gh)
+
+    def test_only_labels_that_split_a_class_make_a_key(self):
+        from asf import ci_pool
+        p, gh, q = self.fit()
+        q._read_host()
+        self.assertEqual(ci_queue.split_labels(q._runners, ci_pool.load_pool(p)),
+                         {'heavy': frozenset({'alpha-heavy'}), 'light': frozenset()})
+        self.assertEqual(ci_queue.fit_key('heavy', {'alpha-heavy'}), 'heavy[alpha-heavy]')
+        self.assertEqual(ci_queue.fit_asks('heavy[alpha-heavy]'),
+                         ('heavy', frozenset({'alpha-heavy'})))
+
+    def test_a_free_runner_lacking_the_label_is_not_free_for_that_key(self):
+        _p, _gh, q = self.fit(busy={'a1', 'a2'})
+        free = q.free(keys={'heavy', 'heavy[alpha-heavy]', 'light'})
+        self.assertEqual(free['heavy'], 2)              # b1, b2 are idle heavies
+        self.assertEqual(free['heavy[alpha-heavy]'], 0)  # and neither carries the label
+        _p, _gh, q = self.fit(busy={'b1', 'b2'})
+        self.assertEqual(q.free(keys={'heavy[alpha-heavy]'})['heavy[alpha-heavy]'], 2)
+
+    def test_a_class_that_splits_on_nothing_keeps_its_class_key(self):
+        # the suite's own uniform fleet: every number as before (P5)
+        q = self.queue(product(), FakeGh(busy={'h1'}))
+        self.assertEqual(q.free(), {'heavy': 2, 'light': 2})
+        self.assertEqual(q.free(keys={'heavy', 'light'}), {'heavy': 2, 'light': 2})
+
+    def test_the_reservation_and_the_fit_key_compose(self):
+        # a PR start sees only the reserved subset, counted per key within it
+        p = product(pool=fit_pool(), reserve={'label': 'class-pr-heavy', 'of': 'heavy',
+                                              'keep_free': 1})
+        labels = {k: v + (['class-pr-heavy'] if k in ('a1', 'b1', 'b2') else [])
+                  for k, v in FIT_LABELS.items()}
+        q = self.queue(p, FakeGh(pool=fit_pool(), labels=labels, history=fit_history()))
+        self.assertEqual(q.free('pr', keys={'heavy', 'heavy[alpha-heavy]'}),
+                         {'heavy': 3, 'heavy[alpha-heavy]': 1})
+
+    def test_load_by_fit_agrees_with_load_by_class_on_a_bare_key(self):
+        from asf import ci_pool
+        for p, gh in ((product(pool=fit_pool()),
+                       FakeGh(pool=fit_pool(), labels=FIT_LABELS, history=fit_history())),
+                      (product(), FakeGh())):
+            q = self.queue(p, gh)
+            q._read_host()
+            pool = ci_pool.load_pool(p)
+            by_class = ci_queue.load_by_class(q._runners, pool)
+            self.assertEqual(ci_queue.load_by_fit(q._runners, pool, list(by_class)), by_class)
+
 
 class TestAdmission(Base):
     def test_holds_until_the_class_has_the_runners_the_run_needs(self):

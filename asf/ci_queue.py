@@ -17,10 +17,11 @@ tick asks again. Its entry keeps its place in line (``since``) while it keeps as
   it — with the ceiling's worth of runs always in flight a PR would never open — and an S1 or
   hotfix start, a trunk run and a deploy are exempt too; and
 - for a batch or an ordinary PR start only (:func:`fit_applies`), for every runner
-  class the run needs, the free runners are at least its expected jobs there, after what every
-  entry ahead of it in line needs of that class is set aside. An S1 or hotfix start, a trunk run
-  and a deploy reserve nothing: they start at once, even with no runner free — the host queues
-  their jobs anyway, and priority matters more than packing.
+  class the run needs, the free runners — online, not busy, and carrying what its jobs ask for —
+  are at least its expected jobs there, after what every entry ahead of it in line needs of that
+  class is set aside. An S1 or hotfix start, a trunk run and a deploy reserve nothing: they start
+  at once, even with no runner free — the host queues their jobs anyway, and priority matters more
+  than packing.
 
 *Expected jobs per class* are measured (:func:`needs_from_history`): over the last
 ``ci.queue.history`` (default 10) runs of the workflow that start triggers that completed
@@ -49,10 +50,13 @@ both types (``{heavy: 12}``) or each (``{heavy: {full: 12, light: 4}}``). The fi
 in the queue file keyed by the set of run ids it was measured from (re-measured only when that
 set changes, each run's own measure kept by id so only new runs are read; the ids are listed
 again after :data:`EXPECT_TTL_S`) and memoised per pass, so the hold line, the status Capacity row
-(:func:`status_clause`) and ``asf ci queue`` all name the one number. *Free runners* come from the runners API: an
-online runner that is not busy, counted at its ``slots``; runs this queue admitted in the last
-:data:`PICKUP_S` are subtracted too, because their jobs are queued on the host before any runner
-shows busy.
+(:func:`status_clause`) and ``asf ci queue`` all name the one number. *Free runners* come from the
+runners API: an online runner that is not busy, counted at its ``slots`` — and, for a requirement
+a class does not answer alike (:func:`split_labels`), only a runner carrying the labels that
+requirement names beyond what every runner of the class carries, under its own fit key
+(:func:`fit_key`); a class whose runners are alike splits on nothing and keeps its plain class
+key. Runs this queue admitted in the last :data:`PICKUP_S` are subtracted too, because their jobs
+are queued on the host before any runner shows busy.
 
 **Starvation guard.** An ordinary PR start (not a batch) that has waited in line longer than
 ``ci.queue.pr_wait_min`` (default 45) minutes is admitted once at least *half* its expected jobs
@@ -1380,6 +1384,78 @@ def free_by_class(runners, pool):
     return {c: v['online'] - v['busy'] for c, v in load_by_class(runners, pool).items()}
 
 
+def split_labels(runners, pool):
+    """``{class: frozenset(labels)}`` — per class, the labels some but not all of its online
+    runners carry: the only labels that can make one runner of a class unable to take another's
+    job. A class whose runners are alike splits on nothing, and keeps the plain class key. The
+    host's own defaults never split (:data:`asf.ci_pool.DEFAULT_LABELS`)."""
+    by_name = {e.runner: e for e in pool}
+    roles = set(ci_pool.roles(pool))
+    buckets = {class_key(e): [] for e in pool}
+    for r in runners or ():
+        if not r.online:
+            continue
+        e = by_name.get(r.name)
+        key = class_key(e) if e else _label_key(r.labels, roles)
+        if key in buckets:
+            buckets[key].append(r.norm_labels())
+    out = {}
+    for key, labels in buckets.items():
+        if not labels:
+            out[key] = frozenset()
+            continue
+        union = set().union(*labels)
+        common = set.intersection(*labels)
+        out[key] = frozenset(union - common) - ci_pool.DEFAULT_LABELS
+    return out
+
+
+def fit_key(cls, asks):
+    """``'heavy'`` for no labels, ``'heavy[alpha-heavy+class-pr-heavy]'`` for some: the class, and
+    the labels a job of it asks for beyond what every runner of the class carries."""
+    if not asks:
+        return cls
+    return f"{cls}[{'+'.join(sorted(asks))}]"
+
+
+def fit_asks(key):
+    """``(class, frozenset(labels))`` — :func:`fit_key` inverted."""
+    if '[' not in key:
+        return key, frozenset()
+    cls, rest = key.split('[', 1)
+    asks = rest[:-1]           # drop the trailing ']'
+    return cls, frozenset(asks.split('+')) if asks else frozenset()
+
+
+def load_by_fit(runners, pool, keys):
+    """``{fit key: {'online': slots, 'busy': slots}}`` for each of ``keys``: the runners of the
+    key's class carrying every label it names, at their slots, a busy runner holding all of them —
+    :func:`load_by_class` with one predicate added. A bare class key counts the whole class, so
+    :func:`load_by_class` and this agree wherever the class splits on nothing."""
+    by_name = {e.runner: e for e in pool}
+    roles = set(ci_pool.roles(pool))
+    out = {k: {'online': 0, 'busy': 0} for k in keys}
+    for r in runners:
+        if not r.online:
+            continue
+        e = by_name.get(r.name)
+        rkey = class_key(e) if e else _label_key(r.labels, roles)
+        n = e.slots if e else 1
+        have = r.norm_labels()
+        for k in keys:
+            cls, asks = fit_asks(k)
+            if cls == rkey and asks <= have:
+                out[k]['online'] += n
+                if r.busy:
+                    out[k]['busy'] += n
+    return out
+
+
+def free_by_fit(runners, pool, keys):
+    """``{fit key: free slots}`` — online, not busy, and carrying what the key asks for."""
+    return {k: v['online'] - v['busy'] for k, v in load_by_fit(runners, pool, keys).items()}
+
+
 def runners_text(runners, pool, product=None):
     """The status view's Runners row from one runner read: ``19 online · heavy 12/12 busy ·
     light 4/7 busy`` per class of the pool, a plain ``n online, n busy, n idle`` total when the
@@ -2180,14 +2256,24 @@ class Queue:
             n = {c: min(v, self._pr_cap[c]) if c in self._pr_cap else v for c, v in n.items()}
         return n
 
-    def free(self, kind=None):
-        """Free slots per class, less what started this pass. ``kind`` ``pr``: only the runners
-        a PR run may land on (:func:`asf.ci_pool.pr_runners`) — the trunk sees them all."""
+    def free(self, kind=None, keys=()):
+        """Free slots per class, and per fit key for each of ``keys``, less what started this pass
+        and has not yet reached a runner (:meth:`_placed`). ``kind`` ``pr``: only the runners a PR
+        run may land on (:func:`asf.ci_pool.pr_runners`) — so a reservation and a fit key compose,
+        each narrowing the same read. ``keys`` empty: the class keys alone, as before."""
         self._read_host()
         if self._free is None:
             return None
         base = self._free_pr if kind == 'pr' and self._free_pr is not None else self._free
-        free = dict(base)
+        if not keys:
+            free = dict(base)
+        else:
+            free = {k: base[k] for k in keys if k in base}
+            fit_keys = [k for k in keys if k not in base]
+            if fit_keys:
+                runners = (ci_pool.pr_runners(self._runners, self.reserves) if kind == 'pr'
+                          else self._runners)
+                free.update(free_by_fit(runners, self.pool, fit_keys))
         for s in self.data['started']:
             for c, n in (s.get('needs') or {}).items():
                 if c in free:
