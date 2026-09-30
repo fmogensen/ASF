@@ -224,7 +224,9 @@ head* longer than `ci.queue.head_wait_max_min` minutes (default 20) is admitted 
 the host queues its jobs behind the current ones, where it holds its place. The entry behind it
 starts its own clock only then, so admissions never cascade. One line:
 `ci queue: task/T-0356 admitted after 21 min at the head (starvation guard)`. The status row names
-the head's wait in line: `head T-0356 waits 105 min — heavy 0 free, needs 4 (Task F-0113 rank 2, 1st in line)`.
+both clocks and the threshold, because they are not the same number once a head has been admitted
+and the entry behind it has taken over: `head T-0356 waits 105 min (12 min at the head; admitted at
+20) — heavy 0 free, needs 4 (Task F-0113 rank 2, 1st in line)`.
 
 **Order.** S1 and hotfix items first, then trunk runs (every deploy waits on a green trunk), then
 S2 items, then every start whose branch maps to a record item, in the record's own order — the one
