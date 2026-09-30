@@ -18,7 +18,7 @@ import os
 import subprocess
 import time
 
-from asf import env
+from asf import env, gh_limit
 
 #: `pr_list`'s cache TTL, moved here with it.
 PR_TTL = 180
@@ -147,8 +147,11 @@ class GitHubHost(HostSource):
         self._cache = os.path.join(env.state_dir(product), "cache-prs.json")
 
     def _gh(self, args, timeout=180):
+        gh_limit.guard(args)
         r = _run(self._run, ["gh", *args], self.product.repo_dir, timeout,
                  capture_output=True, text=True)
+        if r is not None:  # a rate limit is never "no PRs" / "no runs"
+            gh_limit.inspect_proc(args, r)
         return r.stdout.strip() if r is not None else ""
 
     def prs(self):

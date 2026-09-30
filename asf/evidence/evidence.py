@@ -35,7 +35,7 @@ import subprocess
 import sys
 import time
 
-from asf import env, proves, reviews
+from asf import env, gh_limit, proves, reviews
 from asf.conventions import Conventions
 from asf.evidence import review
 from asf.evidence import review_store
@@ -80,9 +80,14 @@ def _cache_file(name, product):
 
 def sh(cmd, timeout=120, product=None):
     product = product or env.load_product()
+    is_gh = gh_limit.cmd_is_gh(cmd)
+    if is_gh:
+        gh_limit.guard()
     try:
         r = subprocess.run(cmd, shell=True, cwd=product.repo_dir, capture_output=True, text=True,
                            timeout=timeout)
+        if is_gh:  # a rate limit is never "no PRs" (RateLimited is no Exception: it leaves)
+            gh_limit.inspect_proc(cmd.split()[1:3], r)
         return r.stdout.strip()
     except Exception:
         return ""
