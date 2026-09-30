@@ -311,8 +311,9 @@ STALE_S = 30 * 60
 PICKUP_S = 3 * 60
 #: how long a workflow's measured jobs per class are reused before its run ids are listed again
 EXPECT_TTL_S = 10 * 60
-#: the measure's version: a cached figure from another version is read again
-EXPECT_VERSION = 5
+#: the measure's version: a cached figure from another version is read again. 6 adds the
+#: per-class ``hold`` to every ``per_run`` record (:meth:`Queue.hold_s`).
+EXPECT_VERSION = 6
 #: the run conclusions measured: a cancelled (or otherwise cut short) run says nothing of its size
 MEASURED_CONCLUSIONS = frozenset({'success', 'failure'})
 GH_TIMEOUT_S = 30
@@ -1292,6 +1293,31 @@ def run_peaks(jobs, pool, runners=()):
                                              label_classes(pool, runners)).items() if k in cap}
 
 
+def _run_hold(jobs, pool, runners=()):
+    """``{class: seconds}`` for one run's ``jobs`` in its latest attempt (:func:`latest_attempt`),
+    only the pool's classes: per class, the span from the earliest ``created_at`` among its jobs
+    of that class to the latest ``completed_at`` — how long the run held a runner of that class
+    (:meth:`Queue.hold_s`), floored at 0. A job with no runner or ``skipped`` never held one,
+    same as :func:`peak_concurrent`. A class whose jobs give neither timestamp is left out."""
+    by_name = {e.runner: e for e in pool}
+    cap = _caps(pool)
+    labels = label_classes(pool, runners)
+    starts, ends = {}, {}
+    for j in latest_attempt(jobs):
+        if not isinstance(j, dict) or not j.get('runner_name') or j.get('conclusion') == 'skipped':
+            continue
+        key = _job_class(j, by_name, labels)
+        if key is None or key not in cap:
+            continue
+        start, end = _parse(j.get('created_at')), _parse(j.get('completed_at'))
+        if start is not None:
+            starts[key] = min(starts.get(key, start), start)
+        if end is not None:
+            ends[key] = max(ends.get(key, end), end)
+    return {k: max(0, int((ends[k] - starts[k]).total_seconds()))
+            for k in starts if k in ends}
+
+
 def estimate(peaks, pool):
     """``{class: expected jobs}``: per class the p90 (:func:`_percentile`) of the per-run
     ``peaks`` (a run naming no job of a class counts 0 there), capped at the class's slots."""
@@ -2072,6 +2098,33 @@ class Queue:
                 out.pop(cls, None)
         return out
 
+    def hold_s(self, workflow, cls=None, run=FULL):
+        """The p90 seconds a ``run``-type run of ``workflow`` holds a runner of ``cls`` — per
+        run, its last ``completed_at`` among jobs of that class less its own ``created_at``
+        (what a runner of that class is unavailable for), p90 by nearest rank over the measured
+        runs (:data:`ESTIMATE_PERCENTILE`), from the same cache as :meth:`needs`. ``cls`` None:
+        every class, per run summed first. ``0`` when nothing is measured — never a refusal:
+        :func:`reserve_fit` reads it as *this run's hold is unknown*."""
+        if not workflow:
+            return 0
+        self.needs(workflow, run)      # ensures self._measure has run this pass
+        run = run if run in RUN_TYPES else FULL
+        cached = self.data['expect'].get(workflow)
+        vals = []
+        for rec in (cached or {}).get('per_run', {}).values():
+            if not isinstance(rec, dict):
+                continue
+            rtype = rec.get('type') if rec.get('type') in RUN_TYPES else FULL
+            if rtype != run:
+                continue
+            hold = rec.get('hold')
+            if not isinstance(hold, dict):
+                continue
+            v = sum(hold.values()) if cls is None else hold.get(cls)
+            if v is not None:
+                vals.append(v)
+        return _percentile(vals) if vals else 0
+
     @staticmethod
     def _cached_types(cached):
         return {FULL: dict(cached.get('needs') or {}),
@@ -2103,7 +2156,8 @@ class Queue:
                 if jobs is None:
                     continue
                 rec = {'attempt': a, 'peak': run_peaks(jobs, self.pool, self._runners or ()),
-                       'type': run_type(self.product, self.source.run_files(i))}
+                       'type': run_type(self.product, self.source.run_files(i)),
+                       'hold': _run_hold(jobs, self.pool, self._runners or ())}
             per_run[str(int(i))] = rec
             peaks.append(rec['peak'])
             types.append(rec.get('type') if rec.get('type') in RUN_TYPES else FULL)

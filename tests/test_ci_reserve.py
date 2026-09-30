@@ -14,6 +14,7 @@ import unittest
 from asf import ci_pool, ci_queue, env
 from asf.ci_pool import Runner
 
+R = Runner
 BASE = ['self-hosted', 'Linux', 'X64']
 LABEL = 'class-pr-heavy'
 
@@ -224,6 +225,62 @@ class Plan(unittest.TestCase):
         self.assertEqual(len(names), 10)                   # 9 heavy + the light one
         self.assertNotIn('ci-3', names)
         self.assertIn('ci-1b', names)
+
+    def test_an_idle_runner_is_kept_free_before_one_holding_a_pr_job(self):
+        L = ['self-hosted', 'heavy']
+        rs = [R('a', True, L), R('b', False, L),
+              R('c', True, L + ['class-pr-heavy']), R('d', True, L + ['class-pr-heavy'], busy=True)]
+        res = ci_pool.Reserve(label='class-pr-heavy', of='heavy', keep_free=2, spread_by='none')
+        # before: the plan picks 'd', mid-PR-job, over the idle 'c' (F-0219 P3)
+        self.assertEqual(['a', 'd'], ci_pool.reserve_plan(res, [], rs).reserved)
+        p = ci_pool.reserve_plan(res, [], rs, held={'d': 1200})
+        self.assertEqual(['a', 'c'], p.reserved)
+        self.assertEqual(['c'], p.remove)
+        self.assertEqual({}, p.held)
+
+    def test_all_candidates_held_keeps_the_one_finishing_soonest_and_says_so(self):
+        rs = [R(n, True, ['self-hosted', 'heavy', 'class-pr-heavy'], busy=True) for n in 'abc']
+        res = ci_pool.Reserve(label='class-pr-heavy', of='heavy', keep_free=1, spread_by='none')
+        p = ci_pool.reserve_plan(res, [], rs, held={'a': 900, 'b': 120, 'c': 3000})
+        self.assertEqual(['b'], p.reserved)            # never fewer kept free than keep_free
+        self.assertIn('still holding a PR job', p.text('main'))
+
+    def test_held_never_changes_how_many_are_kept_free(self):
+        rs = [R(n, True, ['self-hosted', 'heavy', 'class-pr-heavy'], busy=True) for n in 'abcd']
+        res = ci_pool.Reserve(label='class-pr-heavy', of='heavy', keep_free=2, spread_by='none')
+        held = {n: 600 for n in 'abcd'}
+        self.assertEqual(2, len(ci_pool.reserve_plan(res, [], rs, held=held).reserved))
+
+    def test_the_plan_is_idempotent_for_a_fixed_held(self):
+        rs = [R(n, True, ['self-hosted', 'heavy', 'class-pr-heavy'], busy=(n == 'b')) for n in 'abc']
+        res = ci_pool.Reserve(label='class-pr-heavy', of='heavy', keep_free=1)
+        held = {'b': 300}
+        first = ci_pool.reserve_plan(res, [], rs, held=held)
+        self.assertEqual(first.reserved, ci_pool.reserve_plan(res, [], rs, held=held).reserved)
+
+
+NOW = datetime.datetime(2026, 9, 27, 8, 30, tzinfo=datetime.timezone.utc)
+
+
+class HeldByPr(unittest.TestCase):
+    def setUp(self):
+        self.runners = [R('d', True, BASE + ['heavy', 'class-pr-heavy'])]
+
+    def test_an_unreadable_busy_map_leaves_the_plan_as_it_was(self):
+        self.assertEqual({}, ci_pool.held_by_pr(self.runners, None, lambda r: [], lambda w: 3600, NOW))
+
+    def test_a_job_past_the_p90_hold_is_expected_to_end_now(self):
+        busy = {'d': {'run': {'id': 7, 'event': 'pull_request', 'path': '.github/workflows/ci.yml'},
+                      'job': 'e2e', 'repo': 'o/r'}}
+        jobs = [{'name': 'e2e', 'status': 'in_progress', 'runner_name': 'd',
+                 'started_at': '2026-09-27T07:00:00Z'}]
+        got = ci_pool.held_by_pr(self.runners, busy, lambda r: jobs, lambda w: 600, NOW)  # 90 min in
+        self.assertEqual(0, got['d'])
+
+    def test_only_a_pull_request_run_holds(self):
+        busy = {'d': {'run': {'id': 7, 'event': 'push', 'path': '.github/workflows/ci.yml'},
+                      'job': 'e2e', 'repo': 'o/r'}}
+        self.assertEqual({}, ci_pool.held_by_pr(self.runners, busy, lambda r: [], lambda w: 600, NOW))
 
 
 class Apply(Home):
