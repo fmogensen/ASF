@@ -275,6 +275,80 @@ class LauncherRefreshTests(SnapshotCase):
             self.assertEqual(f.read(), real_text)
 
 
+class BoundedPoolTests(SnapshotCase):
+    """`prune`'s count bound (I3, C4): the pool is capped at ``KEEP_MAX`` beyond the current
+    sha, with ``IN_USE_S`` grace for whatever a tick is still running from."""
+
+    def commit_head(self, i):
+        self.write('pkg/b.py', f"X = 'head-{i}'\n")
+        return self.commit(f'head-{i}')
+
+    def test_ten_heads_leave_keep_max_plus_one_and_the_cap_not_the_age_did_it(self):
+        t0 = time.time()
+        shas = []
+        for i in range(1, 11):
+            shas.append(self.commit_head(i))
+            snapshot.ensure(self.repo, self.code, now=t0 + i)
+        # every one of the ten was minted inside in_use_s: the cap, not the age, did the removing
+        self.assertEqual(set(snapshot.snapshots(self.code)), set(shas))
+        self.assertLess(snapshot.IN_USE_S + 60, snapshot.KEEP_UNUSED_S)
+        current = snapshot.ensure(self.repo, self.code, now=time.time() + snapshot.IN_USE_S + 60)
+        survivors = snapshot.snapshots(self.code)
+        self.assertEqual(len(survivors), snapshot.KEEP_MAX + 1)
+        self.assertIn(os.path.basename(current), survivors)
+        worktrees = _git(['worktree', 'list'], self.repo)
+        for sha in shas:
+            if sha not in survivors:
+                self.assertNotIn(os.path.join(self.code, sha), worktrees)
+
+    def test_the_same_ten_past_keep_unused_s_leave_only_the_current_one(self):
+        t0 = time.time()
+        for i in range(1, 11):
+            self.commit_head(i)
+            snapshot.ensure(self.repo, self.code, now=t0 + i)
+        current = snapshot.ensure(self.repo, self.code,
+                                  now=time.time() + snapshot.KEEP_UNUSED_S + 60)
+        self.assertEqual(snapshot.snapshots(self.code), [os.path.basename(current)])
+
+    def test_the_in_use_s_grace_protects_a_running_ticks_tree_from_the_count_cap(self):
+        snapshot.ensure(self.repo, self.code)                          # self.v1, minted first
+        for i in range(1, snapshot.KEEP_MAX + 2):
+            self.commit_head(i)
+            snapshot.ensure(self.repo, self.code)
+        self.assertEqual(len(snapshot.snapshots(self.code)), snapshot.KEEP_MAX + 2)
+        marker = os.path.join(self.code, f'{self.v1}.ok')
+        recent = time.time() - 600
+        os.utime(marker, (recent, recent))
+        snapshot.prune(self.repo, self.code, now=time.time())
+        self.assertIn(self.v1, snapshot.snapshots(self.code))          # the grace protects it
+        stale = time.time() - 2 * 3600
+        os.utime(marker, (stale, stale))
+        snapshot.prune(self.repo, self.code, now=time.time())
+        self.assertNotIn(self.v1, snapshot.snapshots(self.code))       # past in_use_s, the cap bites
+
+    def test_keep_is_never_removed_under_any_combination_of_bounds(self):
+        for i in range(1, snapshot.KEEP_MAX + 3):
+            self.commit_head(i)
+        kept = snapshot.head_sha(self.repo)
+        snapshot.ensure(self.repo, self.code)
+        marker = os.path.join(self.code, f'{kept}.ok')
+        stale = time.time() - 2 * snapshot.KEEP_UNUSED_S
+        os.utime(marker, (stale, stale))
+        # over the cap (keep_max=0), past keep_unused_s, and outside the grace (in_use_s=0):
+        # `keep` is still absolute
+        snapshot.prune(self.repo, self.code, keep={kept}, now=time.time(), keep_max=0, in_use_s=0)
+        self.assertIn(kept, snapshot.snapshots(self.code))
+
+    def test_an_incomplete_directory_with_no_marker_is_pruned_on_its_own_mtime(self):
+        sha = 'a' * 40
+        path = os.path.join(self.code, sha)
+        os.makedirs(path)
+        stale = time.time() - snapshot.KEEP_UNUSED_S - 60
+        os.utime(path, (stale, stale))
+        snapshot.prune(self.repo, self.code, now=time.time())
+        self.assertFalse(os.path.exists(path))
+
+
 class DoctorShowsTheClocksSha(SnapshotCase):
     def test_clock_code_names_the_sha_and_the_head_to_come(self):
         from unittest import mock
