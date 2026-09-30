@@ -209,6 +209,16 @@ class RedHeadGoesBack(unittest.TestCase):
         self.assertEqual(sent, ['gate'])
         self.assertEqual(f['correction']['kind'], 'gate')
 
+    def test_the_red_head_is_read_on_a_new_runs_first_pass_and_every_open_state(self):
+        review = {'kind': 'review', 'text': 'C list'}
+        self.assertTrue(lane.reads_red(None, True, None))      # a run that ended, no state yet
+        self.assertFalse(lane.reads_red(None, False, None))    # a live session: nothing to read
+        for st in (lane.PUSHED, lane.BACK, lane.PR_OPEN, lane.REVIEW):
+            self.assertTrue(lane.reads_red(st, True, None), st)
+            self.assertTrue(lane.reads_red(st, True, review), st)
+        self.assertFalse(lane.reads_red(lane.BACK, True, {'kind': 'conflict'}))
+        self.assertFalse(lane.reads_red(lane.MERGED, True, None))
+
 
 class CorrectRowNamesTheFailures(unittest.TestCase):
     def row(self, correction):

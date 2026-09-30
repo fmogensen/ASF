@@ -1067,6 +1067,20 @@ def review_reason(facts):
     return nxt, f"{rv.get('path')} reads {rv.get('text') or 'no verdict'}"
 
 
+def reads_red(state, ended, correction):
+    """True when a branch's exact-head checks are read this pass (T5c/T5d): a red head goes back
+    to a session before any review round. Read in PR_OPEN/REVIEW, and in PUSHED/BACK and a new
+    run's first pass once it ended (no state yet) — one pass carries (none)/BACK → PUSHED →
+    PR_OPEN → REVIEW on these same facts, and a product's T-0042 got two more review rounds on a
+    head with two failed required checks because they were only read in PR_OPEN/REVIEW. Not
+    while another correction than a review one is pending (that one goes first)."""
+    if correction and (correction or {}).get('kind') != 'review':
+        return False
+    if state is None:
+        return bool(ended)
+    return state in (PUSHED, BACK, PR_OPEN, REVIEW)
+
+
 def next_state(prev, facts):
     """The pure transition: ``prev`` is the branch's last lane record (``{state, head, pr, at,
     reason}``, or None for a branch with none yet) and ``facts`` that branch's facts from
@@ -1398,12 +1412,8 @@ class Lane:
                     self.path, item, head,
                     lambda sha: review_mod.same_code(repo, conv, sha, f'origin/{b}',
                                                       trunk=f'origin/{trunk}'))
-        if prs and rec.get('state') in (PUSHED, BACK, PR_OPEN, REVIEW) and not f['foreign'] \
-                and (pr or {}).get('state') == 'OPEN' and pr.get('number') \
-                and (not f.get('correction') or f['correction'].get('kind') == 'review'):
-            # a red exact head goes back to a session before any review round (T5c) — read in
-            # PUSHED/BACK too: one pass carries BACK → PUSHED → PR_OPEN on these facts, and a
-            # pending review round on a red head is superseded by the gate correction (T5d)
+        if prs and not f['foreign'] and (pr or {}).get('state') == 'OPEN' and pr.get('number') \
+                and reads_red(rec.get('state'), f.get('ended'), f.get('correction')):
             f['checks_red'] = self.host.head_red(f, pr['number'])
         return f
 
