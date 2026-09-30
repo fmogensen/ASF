@@ -40,6 +40,7 @@ from asf import progress
 from asf.workers import githooks
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
+from asf.workers import pushlog
 from asf.workers import runtime as runtime_mod
 from asf.workers import stopgate
 
@@ -909,6 +910,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
                                 size=int(wp.get('id_range_size', DEFAULT_ID_SIZE)))
     brief_path = write_brief(product, row.job, brief_for(row, brief_text))
     stopgate.clear(product, row.job)  # a correction round arrives with a fresh bound
+    pushlog.clear(product, row.job)   # ... and counts its own pushes (one per correction round)
     add_dirs = [os.path.expanduser(d) for d in (product._get('job_grants') or [])]
     for d in getattr(row, 'add_dirs', None) or ():  # the row's own grants are the factory's dirs
         d = os.path.expanduser(d)
@@ -926,6 +928,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
                           env={**env.worker_env(cfg, product),
                                **githooks.item_env(getattr(product, 'conventions', None),
                                                    row.item, branch),
+                               **pushlog.env_for(product, row.job, row.kind),
                                'BACKLOG_ID_RANGE': id_range, 'ASF_SESSION': sid},
                           settings_file=settings_file(wp), hooks_dir=hooks_dir,
                           passthrough=passthrough, product_auth_env=product_auth_env,

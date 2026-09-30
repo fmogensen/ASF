@@ -144,6 +144,12 @@ OPEN_STATES = tuple(s for s in LANE_STATES if s not in TERMINAL_STATES)
 BUSY_STATES = tuple(s for s in OPEN_STATES if s != BACK)
 #: The states the gate (the detached harvest) decides; the in-process pass leaves them be.
 GATE_STATES = (GATE, WAITING, WAITING_CI)
+#: The states a head's heavy-CI approval (``ci.heavy_after_review``) does not survive: back to a
+#: session, a new head, or the branch's end.
+HEAVY_DROPS = (BACK, PUSHED) + TERMINAL_STATES
+#: The heavy-CI label's colour and description when the lane creates it in a repo.
+HEAVY_LABEL_COLOR = '5319e7'
+HEAVY_LABEL_DESCRIPTION = 'ASF: the review approved this head; heavy CI may run'
 #: The landing waits a pending correction turns BACK (:func:`correction_turns_back`): the
 #: branch waits on a PR, a review or the gate, and nothing but a session's push changes it.
 #: MERGING and QUEUED are a merge under way; PARKED is its owner's.
@@ -1703,6 +1709,11 @@ class Lane:
         rec = {'state': state, 'head': f.get('head'), 'pr': pr, 'at': now,
                'head_at': head_since(f.get('prev'), f.get('head'), now),
                'reason': reason, 'item': f.get('item')}
+        prev = f.get('prev') or {}
+        if prev.get('heavy') and prev['heavy'] == f.get('head') and state not in HEAVY_DROPS:
+            # ci.heavy_after_review: the head the lane approved for heavy CI stays approved
+            # through its gate's waits, and only there (GitHubHost.heavy_gate)
+            rec.update(heavy=prev['heavy'], heavy_at=prev.get('heavy_at'))
         rec.update({k: v for k, v in extra.items() if v is not None})
         return rec
 
@@ -1729,12 +1740,17 @@ class Lane:
     def set(self, f, state, reason, result=None, **extra):
         """Record one transition of ``f``'s branch; ``result`` goes in :attr:`results`."""
         rec = self.record(f, state, reason, **extra)
-        was = (f.get('prev') or {}).get('state')
+        prev = f.get('prev') or {}
+        was = prev.get('state')
         if self.dry_run:
             self.out(f"lane: DRY {f['branch']} {was or '-'} → {state} ({reason})")
         else:
             self.write(f, rec)
             self.out(f"lane: {f['branch']} {was or '-'} → {state} ({reason})")
+            if prev.get('heavy') and state in HEAVY_DROPS and state not in TERMINAL_STATES:
+                # back to a session, or a new head: the approval for heavy CI is history, and
+                # the label comes off before the correction's push can run the heavy jobs
+                self.host.unmark_heavy(rec.get('pr'), f['branch'])
         f['prev'] = rec
         if result:
             self.results[f['branch']] = result
@@ -3077,6 +3093,11 @@ class Host:
         no runs: 0."""
         return 0
 
+    def unmark_heavy(self, number, branch=None):
+        """Take the heavy-CI label off PR ``number`` (``ci.heavy_after_review``). No PR host:
+        nothing to take off."""
+        return False
+
 
 class FastForwardHost(Host):
     """``landing: fast-forward``: no PR host. ``open`` → None; ``status`` → merged when the head
@@ -3247,15 +3268,23 @@ class GitHubHost(Host):
             for c in checks)]
         missing = [n for n in required if n not in passed and n not in skipped]
         satisfied, running = {}, None
-        if (skipped or missing) and passed and \
+        since, heavy = None, self.product.conventions.heavy_after_review()
+        if heavy:
+            rec = f.get('prev') or {}
+            since = rec.get('heavy_at') if rec.get('heavy') == f.get('head') else None
+        if (skipped or missing) and passed and (since or not heavy) and \
                 merge_skipped(self.product.conventions) == MERGE_SKIPPED_PATH:
-            satisfied, running = self.path_filtered(f.get('head'), skipped, missing, passed)
+            satisfied, running = self.path_filtered(f.get('head'), skipped, missing, passed,
+                                                    since=since)
         return (passed, [n for n in skipped if n not in satisfied],
                 [n for n in missing if n not in satisfied], satisfied, running)
 
-    def path_filtered(self, head, skipped, missing, passed):
+    def path_filtered(self, head, skipped, missing, passed, since=None):
         """``({name: why}, running)``: the ``skipped`` and ``missing`` required checks the PR's
-        own workflow decided not to run — read off every GitHub Actions run on ``head``. Only
+        own workflow decided not to run — read off every GitHub Actions run on ``head`` (with
+        ``since``, an ISO stamp — the head's heavy-CI approval under ``ci.heavy_after_review`` —
+        only the runs created at or after it: a heavy job the workflow skipped because the head
+        was not yet approved is not a job it decided not to run). Only
         once each run completed (``running`` names the rest, and nothing is satisfied): a skipped
         check is satisfied when each job answering for it concluded ``skipped`` (a job ``if:``
         false), a missing one when no completed run has a job of that name (a path filter that
@@ -3266,6 +3295,10 @@ class GitHubHost(Host):
                          None)
         runs = data.get('workflow_runs') if isinstance(data, dict) else None
         runs = [r for r in runs if isinstance(r, dict)] if isinstance(runs, list) else []
+        if since:
+            floor = _parse_at(since)
+            runs = [r for r in runs if floor is not None and (_parse_at(r.get('created_at'))
+                                                              or 0) >= floor]
         if not runs:
             return {}, None
         open_ = [r for r in runs if r.get('status') != 'completed']
@@ -3381,9 +3414,71 @@ class GitHubHost(Host):
         except OSError:
             return 0
 
+    def mark_heavy(self, number):
+        """``(ok, why)``: put :meth:`asf.conventions.Conventions.heavy_label` on PR ``number``,
+        creating the label in the repo the first time it is missing."""
+        label = self.product.conventions.heavy_label()
+        rc, out, err = H._gh(['pr', 'edit', str(number), '-R', self.slug, '--add-label', label])
+        if rc != 0 and 'not found' in f'{out}\n{err}'.lower():
+            H._gh(['label', 'create', label, '-R', self.slug, '--color', HEAVY_LABEL_COLOR,
+                   '--description', HEAVY_LABEL_DESCRIPTION])
+            rc, out, err = H._gh(['pr', 'edit', str(number), '-R', self.slug,
+                                  '--add-label', label])
+        if rc != 0:
+            return False, H.tail(err or out) or f'gh pr edit exited {rc}'
+        return True, ''
+
+    def unmark_heavy(self, number, branch=None):
+        """Take the heavy-CI label off PR ``number`` — only under ``ci.heavy_after_review``;
+        True when gh took it off. Never raises."""
+        conv = self.product.conventions
+        if not number or not conv.heavy_after_review():
+            return False
+        try:
+            rc, _out, err = H._gh(['pr', 'edit', str(number), '-R', self.slug,
+                                   '--remove-label', conv.heavy_label()])
+        except OSError:
+            return False
+        if self.lane is not None:
+            self.lane.out(f'harvest: {branch or "?"}: PR #{number} heavy CI approval withdrawn'
+                          + ('' if rc == 0 else f' — label not removed: {H.tail(err)}'))
+        return rc == 0
+
+    def heavy_gate(self, f, number):
+        """``ci.heavy_after_review``: None when PR ``number``'s head is approved for heavy CI
+        already (its lane record's ``heavy`` is the head) or the product does not ask for it;
+        else the head is approved now — :meth:`mark_heavy`, the record's ``heavy``/``heavy_at``
+        written — and the PR waits: its heavy jobs start on the label, and no check of the head
+        is judged before they could have."""
+        lane, b, rec = self.lane, f['branch'], f.get('prev') or {}
+        head = f.get('head')
+        if not self.product.conventions.heavy_after_review() or not head:
+            return None
+        if rec.get('heavy') == head:
+            return None
+        if lane.dry_run:
+            lane.out(f'DRY: would approve {b} PR #{number} at {head[:9]} for heavy CI')
+            lane.results[b] = 'dry'
+            return 'dry'
+        at = now_iso()  # before the label: the run the label starts is created after it
+        ok, why = self.mark_heavy(number)
+        if not ok:
+            lane.out(f'waiting {b}: PR #{number} approved, heavy CI not requested — {why}')
+            wait(lane, f, f'heavy CI not requested: {why}', state=WAITING_CI)
+            return 'waiting'
+        lane.out(f'harvest: {b}: PR #{number} approved at {head[:9]} — heavy CI requested '
+                 f'({self.product.conventions.heavy_label()})')
+        wait(lane, f, f'heavy CI requested at {head[:9]}', state=WAITING_CI, heavy=head,
+             heavy_at=at)
+        return 'waiting'
+
     def check_gate(self, f, number, files):
         """The PR's checks before the gate: ``'gate'`` (gate it locally), ``'ci'`` (its required
-        checks passed under ``wait``), or None when it waits or went back."""
+        checks passed under ``wait``), or None when it waits or went back. Under
+        ``ci.heavy_after_review`` a head not yet approved for heavy CI is approved first
+        (:meth:`heavy_gate`) and waits."""
+        if self.heavy_gate(f, number):
+            return None
         lane, b, rec = self.lane, f['branch'], f.get('prev') or {}
         cls = f.get('class') or landing_class(self.product, files)
         required, why = self.merge_required(lane.state_dir, cls, f.get('head'))
@@ -3540,11 +3635,11 @@ def pr_checks(slug, number, required=(), rerun=()):
     product's B-1377 (2026-09-26) was held on "checks red: gate, gate-tests" the trunk relief
     had cancelled, and another session was launched on a head nothing was wrong with."""
     rc, stdout, err = H._gh(['pr', 'checks', str(number), '-R', slug, '--json',
-                             'name,bucket,link'])
+                             'name,bucket,link,workflow,startedAt'])
     if 'no checks reported' in f'{stdout}\n{err}':
         return 'green', 'no checks', []
     try:
-        checks = [c for c in json.loads(stdout) if isinstance(c, dict)]
+        checks = latest_checks([c for c in json.loads(stdout) if isinstance(c, dict)])
     except (json.JSONDecodeError, TypeError):
         return 'unknown', H.tail(err) or f'gh pr checks exited {rc}', []
     judged = ([c for c in checks if required_name(c.get('name'), required)] if required
@@ -3565,6 +3660,24 @@ def pr_checks(slug, number, required=(), rerun=()):
     if pending:
         return 'pending', ', '.join(pending), checks
     return 'green', f'{len(checks)} check(s)', checks
+
+
+def latest_checks(checks):
+    """One check per workflow and name — the newest run of it: a head with two runs of one
+    workflow (``ci.heavy_after_review``'s labelled run beside the push's light one, a run the
+    concurrency group cancelled beside the one that replaced it) is judged on the later, never on
+    a stale ``skipped`` or ``cancelled`` twin. A check not started yet (no ``startedAt``) is the
+    newest. The list's order is kept."""
+    def when(c):
+        at = str(c.get('startedAt') or '')
+        return '9999' if not at or at.startswith('0001') else at
+    best = {}
+    for i, c in enumerate(checks):
+        key = (c.get('workflow') or '', c.get('name') or '')
+        if key not in best or when(c) >= when(checks[best[key]]):
+            best[key] = i
+    keep = set(best.values())
+    return [c for i, c in enumerate(checks) if i in keep]
 
 
 #: The last lines of a red CI job's log a correction carries, up to and with its error line.
