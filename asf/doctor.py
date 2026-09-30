@@ -33,7 +33,10 @@ one is missing (its launches are refused). **worker push auth**
 present is not proof the token still works, or that no keychain a spawned session cannot reach is
 still in the way. An eleventh, **clock code** (:func:`check_clock_code`, informational), names
 the snapshot sha the clock last ticked from when the package runs from a checkout
-(:mod:`asf.snapshot`).
+(:mod:`asf.snapshot`). **clock install** (:func:`check_clock_installs`) reads each clock's own
+plist — which install will run the next tick, its sha, its distance from ``origin/main`` — and is
+red when what ticks is editable, a bare checkout, unplaceable, an unmerged sha, or a snapshot on a
+product that is not the factory's own source (:mod:`asf.clockinstall`, F-0104).
 
 A twelfth row, **console permissions** (:func:`asf.console_perms.check_doctor`, B-0131), is red
 when the operator's own console — not a worker account's — would still hit a permission prompt on
@@ -54,7 +57,7 @@ import shutil
 import subprocess
 import time
 
-from asf import approvals, conventions, drift, env, hooks, schema, scheduler, tokens
+from asf import approvals, clockinstall, conventions, drift, env, hooks, schema, scheduler, tokens
 from asf.workers import pool
 
 _SKIP_DIRS = {'.git', 'node_modules', '__pycache__', 'dist', 'build', '.next', 'vendor', 'venv',
@@ -364,6 +367,80 @@ def check_clock_code(product):
 
 def _age_s_since(at):
     return None if at is None else max(0.0, time.time() - at)
+
+
+def _clock_install_phrase(inst):
+    """The kind/venv/sha (or checkout) phrase a ``clock install`` row's detail opens with."""
+    sha = inst.sha[:7] if inst.sha else ''
+    if inst.kind == 'pinned':
+        return f'pinned {inst.venv} @ {sha or "(unknown)"}'
+    if inst.kind == 'editable':
+        return f'editable {inst.venv} @ {sha or "(unknown)"} ({inst.repo})'
+    if inst.kind == 'snapshot':
+        return f'snapshot of {inst.repo} @ {sha}' if sha else f'snapshot of {inst.repo} (no tick yet)'
+    if inst.kind == 'checkout':
+        return f'checkout {inst.repo} @ {sha or "(unknown)"}'
+    return 'unknown'
+
+
+def _clock_install_red(inst, factory, merged):
+    """``(ok, why)`` — the R1-R4 RED rule, in one place, applied per clock (F-0104 spec §3):
+    RED for a ``kind`` of ``editable``/``checkout``/``unknown`` (R1), a ``snapshot`` clock on a
+    product that is not the factory's own source (R2), or a sha that is not an ancestor of
+    ``origin/main`` (R3); ok otherwise (R4)."""
+    if inst.kind in ('editable', 'checkout'):
+        return False, 'the clock ticks a working tree'
+    if inst.kind == 'unknown':
+        return False, inst.why
+    if inst.kind == 'snapshot' and not factory:
+        return False, "this product is not the factory's own source"
+    if merged is False:
+        return False, 'NOT on origin/main — unmerged work is ticking this product'
+    return True, ''
+
+
+def check_clock_installs(cfg, product):
+    """[(required, ok, detail)] — one row per product clock: which install it runs, its sha, how
+    far behind origin/main, and RED when what ticks is not a pinned, merged install (F-0104)."""
+    job_kind = scheduler.kind(cfg)
+    if job_kind != 'launchd':
+        return [(False, None, f'kind:{job_kind} · no launchd plist to read')]
+    insts = clockinstall.for_product(product.name, cfg)
+    if not insts:
+        return [(False, None, '(none) · no clock plist in ~/Library/LaunchAgents — the '
+                              'SCHEDULER section names the clocks')]
+    repo, head = clockinstall.trunk(cfg)
+    factory = is_factory_repo(product)
+    ref = head[:7] if head else 'main'
+    repair = f'install.sh {product.name} {ref}'
+    rows = []
+    for inst in insts:
+        behind, merged = clockinstall.against_trunk(inst.sha, repo, head)
+        ok, why = _clock_install_red(inst, factory, merged)
+        phrase = _clock_install_phrase(inst)
+        if inst.kind == 'unknown':
+            detail = f'{inst.label} · unknown · {why}'
+        elif inst.kind in ('editable', 'checkout'):
+            detail = f'{inst.label} · {phrase} · {why} — reinstall it pinned: {repair}'
+        elif not ok:
+            trunk_phrase = (f'origin/main {head[:7]}' if head else
+                            'origin/main unknown (no ASF checkout on this host)')
+            tail = why if merged is False else f'{why} — reinstall it pinned: {repair}'
+            detail = f'{inst.label} · {phrase} · {trunk_phrase} · {tail}'
+        elif not head:
+            detail = (f'{inst.label} · {phrase} · origin/main unknown '
+                      '(no ASF checkout on this host) — distance not measured')
+        else:
+            trunk_phrase = f'origin/main {head[:7]}'
+            if behind is None:
+                tail = 'not found in origin/main — distance not measured'
+            elif behind == 0:
+                tail = 'current'
+            else:
+                tail = f'behind by {behind}'
+            detail = f'{inst.label} · {phrase} · {trunk_phrase} · {tail}'
+        rows.append((True, ok, detail))
+    return rows
 
 
 # name -> (required, probe argv); required tools missing/failing are red, optional ones are skip
@@ -853,6 +930,8 @@ def run(product_name):
     rows.append(('worker push auth', True, ok, detail))
     ok, detail = check_clock_code(product)
     rows.append(('clock code', False, ok, detail))
+    for required, ok, detail in check_clock_installs(cfg, product):
+        rows.append(('clock install', required, ok, detail))
     ok, detail = check_drift(product)
     rows.append(('drift', True, ok, detail))
     ok, detail = check_rule_checks(product)
