@@ -401,6 +401,90 @@ class Plan(Home):
         self.assertFalse(any(w[1] == 'stray' for w in self.backend.writes))
 
 
+def incident_pool():
+    return [{'runner': 'h1', 'box': 'b1', 'provider': 'alpha', 'size': 'l', 'role': 'heavy'}]
+
+
+INCIDENT_RUNS_ON_UNRESOLVED = [RunsOn('ci.yml', 'gate', None, frozenset({'CI_REQUIRED_LABEL'}))]
+
+
+class AHeldRemoval(Home):
+    """``plan`` holds what it cannot judge, and ``drift`` stops calling the runner stranded on a
+    job it could not read — the incident's own fixture (F-0183), unresolved and resolved."""
+
+    def setUp(self):
+        super().setUp()
+        self.p = product(incident_pool())
+        self.runner = runner('h1', 'heavy', 'vendor-heavy', 'vendor', 'provider-alpha')
+
+    def test_the_incident_apply_removes_nothing_when_the_variable_is_unresolved(self):
+        backend = FakeBackend([self.runner], INCIDENT_RUNS_ON_UNRESOLVED)
+        steps = ci_pool.plan(ci_pool.load_pool(self.p), backend.runners(), backend.runs_on())
+        step = steps[0]
+        self.assertEqual(step.remove, [])
+        self.assertEqual(sorted(step.held), ['vendor', 'vendor-heavy'])
+        self.assertIn('keep vendor, vendor-heavy — held: a runs-on names a variable this reader '
+                      'could not resolve', step.action)
+        failed = ci_pool.apply(steps, backend, self.p.name, out=lambda *_: None)
+        self.assertEqual(failed, 0)
+        self.assertEqual(backend.writes, [])
+
+    def test_the_incident_apply_keeps_the_label_the_resolved_runs_on_uses(self):
+        resolved = [ro('self-hosted', 'vendor-heavy', wf='ci.yml', job='gate')]
+        backend = FakeBackend([self.runner], resolved)
+        steps = ci_pool.plan(ci_pool.load_pool(self.p), backend.runners(), backend.runs_on())
+        step = steps[0]
+        self.assertEqual(step.blocked, ['vendor-heavy'])
+        self.assertEqual(step.remove, ['vendor'])
+        self.assertEqual(step.held, [])
+        failed = ci_pool.apply(steps, backend, self.p.name, out=lambda *_: None)
+        self.assertEqual(failed, 0)
+        self.assertEqual(backend.writes, [('remove', 'h1', 'vendor')])
+
+    def test_a_hold_never_stops_an_add_or_its_trial(self):
+        bare = runner('h1')  # no role, no provider label yet
+        backend = FakeBackend([bare], INCIDENT_RUNS_ON_UNRESOLVED)
+        steps = ci_pool.plan(ci_pool.load_pool(self.p), backend.runners(), backend.runs_on())
+        step = steps[0]
+        self.assertEqual(step.add, ['heavy', 'provider-alpha'])
+        self.assertTrue(step.trial)
+        failed = ci_pool.apply(steps, backend, self.p.name, out=lambda *_: None)
+        self.assertEqual(failed, 0)
+        self.assertEqual(backend.writes, [('add', 'h1', ('heavy', 'provider-alpha'))])
+        self.assertEqual(set(ci_pool.load_trials(self.p.name)), {'h1'})
+
+    def test_a_stale_class_label_and_a_reserve_label_are_removed_through_a_hold(self):
+        stray = runner('h1', 'heavy', 'provider-alpha', 'class-old', 'pr-heavy')
+        backend = FakeBackend([stray], INCIDENT_RUNS_ON_UNRESOLVED)
+        reserve = ci_pool.Reserve(label='pr-heavy', of='heavy', keep_free=1)
+        steps = ci_pool.plan(ci_pool.load_pool(self.p), backend.runners(), backend.runs_on(),
+                             reserves=[reserve])
+        step = steps[0]
+        self.assertEqual(sorted(step.remove), ['class-old', 'pr-heavy'])
+        self.assertEqual(step.held, [])
+
+    def test_the_doctor_names_the_variable_and_does_not_call_the_runner_stranded(self):
+        why = 'gh api repos: HTTP 403 (Resource not accessible by integration)'
+        got = ci_pool.drift(ci_pool.load_pool(self.p), [self.runner], INCIDENT_RUNS_ON_UNRESOLVED,
+                            why=why)
+        self.assertEqual(got, [(False, "runs-on unresolved: ci.yml:gate asks for "
+                                       "vars.CI_REQUIRED_LABEL — " + why +
+                                       "; no label is removed while it stands "
+                                       "(a stale class- label aside)")])
+        self.assertFalse(any(d.startswith('stranded:') for _ok, d in got))
+
+    def test_a_resolved_pool_is_judged_exactly_as_before(self):
+        runners = [runner('ci-1', 'alpha', 'heavy'), runner('ci-1b', 'alpha', 'light'),
+                  runner('ci-h1', 'beta-heavy')]
+        runs_on = [ro('self-hosted', 'alpha', 'heavy'), ro('self-hosted', 'alpha')]
+        steps = ci_pool.plan(ci_pool.load_pool(product()), runners, runs_on)
+        self.assertTrue(all(s.held == [] for s in steps))
+        by = {s.runner: s for s in steps}
+        self.assertEqual(by['ci-1'].add, ['provider-alpha'])
+        self.assertEqual(by['ci-1'].remove, [])
+        self.assertEqual(by['ci-1'].blocked, ['alpha'])
+
+
 class Trials(Home):
     def setUp(self):
         super().setUp()

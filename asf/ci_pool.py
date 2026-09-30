@@ -30,10 +30,14 @@ Three readers:
 
 - :func:`drift` — the ``asf doctor`` rows, read-only: a runner online that no job can reach, a
   ``runs-on`` no runner satisfies, a runner whose labels differ from its declared role, a
-  ``runs-on`` naming a provider-like label, a declared runner missing or offline.
+  ``runs-on`` naming a provider-like label, a declared runner missing or offline. While a
+  ``runs-on`` names a variable this reader could not resolve, that row replaces every ``stranded``
+  finding a job it could not read would otherwise cause.
 - :func:`plan` / :func:`apply` — ``asf ci reconcile``: per runner, the labels it carries, the
   labels it should, and the action. Adds happen before removes, across the whole pool, and a label
-  a current ``runs-on`` still needs is never removed ("blocked until workflows migrate").
+  a current ``runs-on`` still needs is never removed ("blocked until workflows migrate"). While any
+  ``runs-on`` is unresolved, every removal but a stale ``class-`` label's and a reservation's is
+  held instead ("held: a runs-on names a variable this reader could not resolve").
 - :func:`check_trials` — a runner newly enabled for a role is on trial for one job: the next
   reconcile or tick reads that job's result, keeps the runner, or rolls its labels back and leaves
   a Bug for the tick to file (:func:`tick`).
@@ -655,6 +659,25 @@ def parse_runs_on(workflow, text, variables=None):
     return out
 
 
+def unresolved_vars(runs_on):
+    """``[(workflow:job, [names])]`` — every ``runs-on`` naming a host variable this reader could
+    not resolve, in file order. While one stands, no label in the pool can be judged unused: any
+    of them may be the label that job runs on."""
+    return [(f'{ro.workflow}:{ro.job}', sorted(ro.needs_vars))
+            for ro in runs_on if ro.needs_vars]
+
+
+def unresolved_rows(runs_on, why=None):
+    """``[(False, detail)]`` — one row per unresolved ``runs-on``, for the doctor
+    (:func:`drift`) and for the reconcile's own footer. ``why``: the reason the variables could
+    not be read at all (:attr:`GitHubBackend.vars_error`), when there was one."""
+    return [(False, f"runs-on unresolved: {where} asks for "
+                    f"{', '.join('vars.' + n for n in names)} — "
+                    f"{why or 'the host did not name it'}; no label is removed while it stands "
+                    f"(a stale class- label aside)")
+            for where, names in unresolved_vars(runs_on)]
+
+
 _INT_RE = re.compile(r'^\d+$')
 
 
@@ -869,9 +892,11 @@ def _satisfies(runner, ro):
     return ro.labels is not None and ro.labels <= runner.norm_labels()
 
 
-def drift(pool, runners, runs_on, owned=frozenset()):
+def drift(pool, runners, runs_on, owned=frozenset(), why=None):
     """``[(ok, detail)]`` — one finding per drift, ``[(True, summary)]`` when there is none.
-    ``owned``: the labels ``ci.reserve`` places (:func:`reserve_labels`) — never a stray class."""
+    ``owned``: the labels ``ci.reserve`` places (:func:`reserve_labels`) — never a stray class.
+    ``why``: the reason a variables read failed (:attr:`GitHubBackend.vars_error`), passed to
+    :func:`unresolved_rows`."""
     declared = {e.runner: e for e in pool}
     role_set = set(roles(pool))
     by_name = {r.name: r for r in runners}
@@ -879,11 +904,15 @@ def drift(pool, runners, runs_on, owned=frozenset()):
     online = [r for r in runners if r.online]
     out = []
 
-    for r in online:
-        if not any(_satisfies(r, ro) for ro in jobs):
-            want = f" (its role {declared[r.name].role})" if r.name in declared else ''
-            out.append((False, f"stranded: {r.name} is online but no job's runs-on matches its "
-                               f"labels [{', '.join(sorted(r.norm_labels()))}]{want}"))
+    unresolved = unresolved_rows(runs_on, why)
+    out += unresolved
+
+    if not unresolved:
+        for r in online:
+            if not any(_satisfies(r, ro) for ro in jobs):
+                want = f" (its role {declared[r.name].role})" if r.name in declared else ''
+                out.append((False, f"stranded: {r.name} is online but no job's runs-on matches "
+                                   f"its labels [{', '.join(sorted(r.norm_labels()))}]{want}"))
 
     seen = set()
     for ro in jobs:
@@ -958,7 +987,8 @@ def doctor_rows(product, backend=None):
     except BackendError as e:
         return [(False, None, f'ci.pool: cannot read the CI host — {e}')] + classes
     rows = [(True, ok, detail) for ok, detail in drift(pool, runners, runs_on,
-                                                       owned=reserve_labels(product))]
+                                                       owned=reserve_labels(product),
+                                                       why=getattr(backend, 'vars_error', None))]
     return rows + reserve_rows(product, runners, pool) + classes
 
 
@@ -987,6 +1017,9 @@ class Step:
     add: list
     remove: list
     blocked: list
+    #: labels that would be removed but for a runs-on this reader could not resolve (F-0183):
+    #: unlike ``blocked``, the answer is to make the variable readable, not to migrate a job
+    held: list = dataclasses.field(default_factory=list)
     note: str = ''
     trial: bool = False
     entry: object = None
@@ -1003,6 +1036,9 @@ class Step:
             parts.append('remove ' + ', '.join(self.remove))
         if self.blocked:
             parts.append('keep ' + ', '.join(self.blocked) + ' — blocked until workflows migrate')
+        if self.held:
+            parts.append('keep ' + ', '.join(self.held) + ' — held: a runs-on names a variable '
+                                                          'this reader could not resolve')
         if self.trial:
             parts.append(f'trial: one {self.entry.role} job')
         return '; '.join(parts) or 'ok'
@@ -1020,6 +1056,7 @@ def plan(pool, runners, runs_on, trials=None, reserves=()):
     trials = trials or {}
     by_name = {r.name: r for r in runners}
     jobs = [ro for ro in runs_on if ro.self_hosted]
+    unresolved = bool(unresolved_vars(runs_on))
     rplans = [reserve_plan(res, pool, runners) for res in reserves]
     owned = {p.reserve.label for p in rplans}
     out = []
@@ -1038,14 +1075,18 @@ def plan(pool, runners, runs_on, trials=None, reserves=()):
                 target.add(lab)
         add = sorted(target - have)
         after = have | set(add)
-        remove, blocked = [], []
+        remove, held, blocked = [], [], []
         for label in sorted(have - target):
-            needed = label not in owned and any(label in ro.labels and ro.labels <= after
-                                                for ro in jobs)
-            (blocked if needed else remove).append(label)
+            if label not in owned and any(label in ro.labels and ro.labels <= after
+                                          for ro in jobs):
+                blocked.append(label)
+            elif unresolved and label not in owned and not label.startswith(CLASS_PREFIX):
+                held.append(label)
+            else:
+                remove.append(label)
         trial = e.role in add and e.runner not in trials
         out.append(Step(e.runner, _ordered(r.labels), _ordered(target), add, remove, blocked,
-                        trial=trial, entry=e, host=r))
+                        held=held, trial=trial, entry=e, host=r))
     declared = {e.runner for e in pool}
     for r in runners:
         if r.name not in declared:
@@ -1329,6 +1370,8 @@ def cmd_reconcile(args):
     mode = 'APPLY' if args.apply else 'DRY RUN — nothing changed; --apply writes the labels'
     print(f"== CI RECONCILE {product.name} ({mode})")
     print(plan_table(steps))
+    for _ok, detail in unresolved_rows(runs_on, getattr(backend, 'vars_error', None)):
+        print(detail)
     for name, verdict, detail in verdicts:
         print(f"trial {name}: {verdict} {detail}".rstrip())
     if not args.apply:
