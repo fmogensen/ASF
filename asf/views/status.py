@@ -323,19 +323,24 @@ def decisions_cell(root, product):
 
 
 def parked_cell(product):
-    """The items a park holds (a pending correction carrying ``parked``: the relaunch cap, an
-    empty or blocked end, a security hold) — each waits on a person or a state change, not a
-    session. Silent (None) when nothing is parked."""
+    """What a park holds, each with its scope (a pending correction carrying ``parked``: the
+    relaunch cap, an empty or blocked end, a security hold, an item park by hand — the item; a
+    branch or job park by hand — that branch or job alone) — each waits on a person or a state
+    change, not a session. Silent (None) when nothing is parked."""
     from asf.workers import lifecycle
     from asf.workers import pool as pool_mod
-    parked = {i: c for i, c in lifecycle.corrections(pool_mod.sessions_path(product)).items()
-              if c.get('parked')}
+    path = pool_mod.sessions_path(product)
+    parked = [(i, 'item' if c.get('scope') == 'item' else f"{c.get('kind')} on job {c.get('job')}",
+               c.get('reason') or c.get('kind') or '')
+              for i, c in sorted(lifecycle.corrections(path).items()) if c.get('parked')]
+    parked += [(p['item'], f"{p['scope']} {p.get('branch') if p['scope'] == 'branch' else p.get('on_job')}",
+                p.get('reason') or '')
+               for p in lifecycle.parks(path) if p.get('scope') in ('branch', 'job')]
     if not parked:
         return None
-    shown = '; '.join(f"{i}: {(c.get('reason') or c.get('kind') or '')[:120]}"
-                      for i, c in sorted(parked.items())[:3])
+    shown = '; '.join(f"{i} [{scope}]: {why[:120]}" for i, scope, why in parked[:3])
     more = f' (+{len(parked) - 3} more)' if len(parked) > 3 else ''
-    return f"{len(parked)} — {shown}{more} · `asf unpark <item>` releases one"
+    return f"{len(parked)} — {shown}{more} · `asf unpark <item|branch|job>` releases one"
 
 
 def quota_cell(cfg):

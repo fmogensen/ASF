@@ -287,6 +287,8 @@ def fold(lines):
         if is_reset(rec):
             clock = max([clock, rec[RESET].get('at') or ''])
             continue  # a boundary on its item's runs (:func:`resets`), never a run of its own
+        if is_park_line(rec):
+            continue  # an operator park or its release (:func:`parks`), never a run of its own
         corr = rec.get('correction')
         if isinstance(corr, dict) and corr.get('text') and not corr.get('at') and clock:
             rec = dict(rec, correction=dict(corr, at=clock))
@@ -312,11 +314,12 @@ class _Folded:
     """One registry content, folded: ``view`` is shared and never handed out — callers get
     ``marshal`` copies (fresh objects, nested values included), exactly as a fresh parse."""
 
-    def __init__(self, data, view, resets=None):
+    def __init__(self, data, view, resets=None, parks=None):
         self.data = data
         self.view = view
         self.blob = marshal.dumps(view)
         self.resets = resets or {}
+        self.parks = parks or {}
         self._by_item = None
 
     def by_item(self):
@@ -355,7 +358,7 @@ def _folded(path):
     if hit is not None and hit.data == data:
         return hit
     lines = _parse_registry(data, _product_from_registry_dir(path))
-    hit = _Folded(data, fold(lines), _resets(lines))
+    hit = _Folded(data, fold(lines), _resets(lines), _parks(lines))
     _REGISTRY_CACHE.pop(key, None)
     while len(_REGISTRY_CACHE) >= _REGISTRY_CACHE_MAX:
         _REGISTRY_CACHE.pop(next(iter(_REGISTRY_CACHE)))
@@ -403,6 +406,102 @@ def resets(path):
     item started before ``at`` is history: no round, correction, ruling or attempt of it counts
     (:func:`rounds_of`, :func:`corrections`, :func:`attempts`), and no landing waits on it."""
     return {k: dict(v) for k, v in _folded(path).resets.items()}
+
+
+# ---- operator parks: a hold at item, branch or job scope until ``asf unpark`` -----------------
+#: The key of a registry line that parks by hand (:func:`note_park`): ``{at, scope, branch,
+#: on_job, reason, why}``. Its job is :func:`park_job` — never a launch, never a run, so no later
+#: run "answers" it, no closed-PR reset (:func:`note_reset`) retires it and no correction written
+#: on a run overwrites it: only its release line (:data:`UNPARK`) lifts it.
+PARK = 'park'
+#: The key of the line that releases a park (``{at, why}``) — the same job as the park.
+UNPARK = 'unpark'
+#: A park's scopes: the whole item, one branch's rows, or one job's rows.
+SCOPE_ITEM, SCOPE_BRANCH, SCOPE_JOB = 'item', 'branch', 'job'
+#: The correction kind of a park written by hand (``asf park``).
+OPERATOR_PARK = 'operator park'
+
+
+def is_park_line(rec):
+    rec = rec or {}
+    return bool(rec.get('item')) and (isinstance(rec.get(PARK), dict)
+                                      or isinstance(rec.get(UNPARK), dict))
+
+
+def park_job(scope, target):
+    """``park-<target>``: the one registry job a park at ``scope`` on ``target`` is kept under."""
+    slug = re.sub(r'[^a-z0-9]+', '-', str(target).lower()).strip('-')
+    return f'park-{slug}' if scope == SCOPE_ITEM else f'park-{scope}-{slug}'
+
+
+def _parks(lines):
+    """``{park job: park}`` of every park no release line has lifted since, each carrying its
+    ``job`` and ``item``."""
+    out = {}
+    for rec in lines:
+        if not is_park_line(rec):
+            continue
+        if isinstance(rec.get(PARK), dict):
+            out[rec['job']] = dict(rec[PARK], job=rec['job'], item=rec['item'])
+        else:
+            out.pop(rec['job'], None)
+    return out
+
+
+def parks(path):
+    """Every standing operator park, oldest first: ``[{job, item, scope, branch, on_job,
+    reason, why, at}]``."""
+    return sorted((dict(p) for p in _folded(path).parks.values()),
+                  key=lambda p: (p.get('at') or '', p['job']))
+
+
+def park_holds(park, item, branch=None, job=None):
+    """True when ``park`` holds a row or run of ``item`` on ``branch`` for ``job``: an item park
+    holds the item, a branch park that branch alone, a job park that job alone."""
+    if (park or {}).get('item') != item:
+        return False
+    scope = park.get('scope') or SCOPE_ITEM
+    if scope == SCOPE_BRANCH:
+        return bool(branch) and branch == park.get('branch')
+    if scope == SCOPE_JOB:
+        return bool(job) and job == park.get('on_job')
+    return True
+
+
+def scoped_park_of(path, run):
+    """The standing branch or job park holding ``run`` (its item, branch and job), or None."""
+    for p in _folded(path).parks.values():
+        if (p.get('scope') or SCOPE_ITEM) != SCOPE_ITEM and \
+                park_holds(p, (run or {}).get('item'), run.get('branch'), run.get('job')):
+            return p
+    return None
+
+
+def item_park(path, item):
+    """The standing item-scope park on ``item``, or None."""
+    held = [p for p in _folded(path).parks.values()
+            if p.get('item') == item and (p.get('scope') or SCOPE_ITEM) == SCOPE_ITEM]
+    return dict(max(held, key=lambda p: p.get('at') or '')) if held else None
+
+
+def note_park(path, item, scope, reason, why, branch='', on_job='', now=None):
+    """Append one park line; returns its job."""
+    target = {SCOPE_BRANCH: branch, SCOPE_JOB: on_job}.get(scope) or item
+    job = park_job(scope, target)
+    rec = {'job': job, 'item': item,
+           PARK: {'at': now or now_iso_utc(), 'scope': scope, 'branch': branch or '',
+                  'on_job': on_job or '', 'reason': reason, 'why': why}}
+    with open(path, 'a', encoding='utf-8') as f:
+        f.write(json.dumps(rec, sort_keys=True) + '\n')
+    return job
+
+
+def note_unpark(path, park, why='', now=None):
+    """Append the line that releases ``park`` (as :func:`parks` returns it)."""
+    rec = {'job': park['job'], 'item': park['item'], UNPARK: {'at': now or now_iso_utc(),
+                                                              'why': why or ''}}
+    with open(path, 'a', encoding='utf-8') as f:
+        f.write(json.dumps(rec, sort_keys=True) + '\n')
 
 
 def before_reset(path, run):
@@ -930,7 +1029,8 @@ def corrections(path):
     whatever the round. ``same``: the holds in a row on this finding (:func:`repeats`) — what the
     ADJUDICATE row is decided on."""
     out = {}
-    for item in {r.get('item') for rs in _folded(path).view.values() for r in rs if r.get('item')}:
+    for item in {r.get('item') for rs in _folded(path).view.values() for r in rs if r.get('item')} \
+            | {p['item'] for p in _folded(path).parks.values()}:
         c = correction_of(path, item)
         if c:
             out[item] = c
@@ -938,14 +1038,24 @@ def corrections(path):
 
 
 def correction_of(path, item):
-    """:func:`corrections`' entry for one ``item``, or None when none is pending."""
-    held = [(r, pending_correction(r, path)) for r in item_runs(path, item)]
+    """:func:`corrections`' entry for one ``item``, or None when none is pending. An operator
+    park on the item (:func:`item_park`) is its correction whatever else is pending; a correction
+    on a run a branch or job park holds (:func:`scoped_park_of`) is not the item's — the park
+    speaks for that branch or job alone, and the item's other branches go on."""
+    park = item_park(path, item)
+    if park:
+        return {'kind': OPERATOR_PARK, 'text': park.get('reason') or '', 'at': park.get('at'),
+                'parked': True, 'reason': park.get('reason') or '', 'scope': SCOPE_ITEM,
+                'park_job': park['job'], 'rounds': rounds_of(path, item), 'same': 0,
+                'branch': None, 'ruled': False, 'settled': False, 'prs': ()}
+    held = [(r, pending_correction(r, path)) for r in item_runs(path, item)
+            if not scoped_park_of(path, r)]
     held = [(r, c) for r, c in held if c]
     if not held:
         return None
     run, corr = max(held, key=lambda rc: rc[1].get('at') or '')
     return dict(corr, rounds=rounds_of(path, item), same=repeats(corr), branch=run.get('branch'),
-                ruled=ruled(path, item, corr),
+                job=run.get('job'), ruled=ruled(path, item, corr),
                 settled=settled(path, item, corr.get('at')),
                 prs=settled_prs(path, item, corr.get('at')))
 
@@ -1011,7 +1121,9 @@ def occupancy(path, lanes=None, alive=None, result=None, ended=None):
     every branch whose lane state holds it), ``review`` (``{item: {branch, round, pr}}`` — lane
     REVIEW: a PUSHED → REVIEW row), ``landing`` (``{item: {branch, state, pr, why}}`` — the other
     lane states: a PUSHED → LAND row), ``branches`` (``{branch: why}`` of every waiting branch)
-    and ``docs`` (``{item: {kind: why}}``: a spec or plan pushed and waiting is not starved).
+    and ``docs`` (``{item: {kind: why}}``: a spec or plan pushed and waiting is not starved);
+    ``parks`` (:func:`parks`): the standing operator parks — a branch or job one holds only its
+    own rows (its branch is skipped here; the feeder turns its rows into one PARKED row).
 
     ``lanes`` (the argument): ``{branch: record}`` to use instead of the run lines' own.
     ``ended`` (:func:`ended_prs`): PRs the host says are merged or closed — a lane record still
@@ -1022,13 +1134,16 @@ def occupancy(path, lanes=None, alive=None, result=None, ended=None):
     live_items = {s['item']: f"session {s['job']} running" for s in inflight(path, alive)
                   if s.get('item')}
     out = {'busy': dict(live_items), 'waiting_landing': {}, 'corrections': corrections(path),
-           'lanes': {}, 'review': {}, 'landing': {}, 'branches': {}, 'docs': {}, 'landed': {}}
+           'lanes': {}, 'review': {}, 'landing': {}, 'branches': {}, 'docs': {}, 'landed': {},
+           'parks': parks(path)}
     dead_branches = set()
     for branch, run in by.items():
         item, kind = run.get('item'), run.get('kind')
         rec = (lanes or {}).get(branch) if lanes is not None else lane_of(run)
         if not item or item in live_items or before_reset(path, run):
             continue  # a reset item's old branch holds nothing: its PR was closed unmerged
+        if scoped_park_of(path, run):
+            continue  # a branch or job park speaks for it: the feeder's PARKED row (``parks``)
         over = pr_ended(rec, ended) if rec and rec.get('state') != lane_mod.MERGED else None
         if over:  # the PR is over: no review, landing or correction for it, whatever the record
             dead_branches.add(branch)
