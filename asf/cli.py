@@ -261,6 +261,15 @@ def build_parser():
     p_pr_hygiene = sub.add_parser('pr-hygiene', help='sort open PRs into land/fix lanes')
     p_pr_hygiene.add_argument('--product')
 
+    p_review_checks = sub.add_parser(
+        'review-checks', help='the mechanical pre-review: refuse a missing check table')
+    p_review_checks.add_argument('path')
+    from asf import reviews
+    p_review_checks.add_argument('--kind', choices=reviews.KINDS, required=True)
+    p_review_checks.add_argument('--card')
+    p_review_checks.add_argument('--json', action='store_true')
+    p_review_checks.add_argument('--product')
+
     p_doctor = sub.add_parser('doctor', help='is this product\'s ASF install sound — one table')
     p_doctor.add_argument('--product')
 
@@ -521,6 +530,10 @@ def _main(argv=None):
         from asf.harvest.pr_hygiene import main as pr_hygiene_main
         pr_hygiene_args = ['--product', args.product] if args.product else []
         return pr_hygiene_main(pr_hygiene_args)
+    if args.command == 'review-checks':
+        from asf.review_checks import cmd_review_checks
+        record = resolve_record(args, announce=_announce_stderr) if args.card else None
+        return cmd_review_checks(args, record)
     if args.command == 'doctor':
         from asf.doctor import cmd_doctor
         return cmd_doctor(args, root)
