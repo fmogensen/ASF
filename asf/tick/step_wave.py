@@ -73,6 +73,7 @@ from asf.workers import host as host_mod
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 from asf.workers import relaunch
+from asf.workers import landing
 from asf.workers import trunkclose
 
 #: PD9 — for a kind whose job name is not ``<brief kind>-<item id>``, the Row attribute that
@@ -504,8 +505,10 @@ def relaunch_capped(product, row, wrow, out=print):
     try:
         reason, landed = relaunch.assess(path, wrow.job, wrow.item, head=head,
                                          card=wrow.card_digest, cause=wrow.cause,
-                                         repo=product.repo_dir, main=product.main)
-        hit = trunkclose.evidence(path, wrow.item, product.repo_dir, product.main) \
+                                         repo=product.repo_dir, main=product.main,
+                                         writes=landing.item_writes(product, wrow.item))
+        hit = trunkclose.evidence(path, wrow.item, product.repo_dir, product.main,
+                                  landing.item_writes(product, wrow.item)) \
             if reason and landed else None
     except Exception as e:  # noqa: BLE001 — the cap never blocks a wave by failing
         out(f'relaunch: cap check failed for {wrow.job} — {e}')

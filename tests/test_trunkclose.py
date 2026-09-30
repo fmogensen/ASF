@@ -11,7 +11,7 @@ from unittest import mock
 
 from asf.evidence import evidence as evidence_mod
 from asf.tick import step_wave
-from asf.workers import lifecycle, pool as pool_mod, relaunch, trunkclose
+from asf.workers import landing, lifecycle, pool as pool_mod, relaunch, trunkclose
 
 CARD = 'eeda7f0410a1c9a4'
 HEAD = 'e0920dc75051f5f2f109068f70bd85d872fb5f9d'
@@ -34,7 +34,7 @@ class _Repo(unittest.TestCase):
         self.repo = os.path.join(self.d, 'repo')
         os.makedirs(self.repo)
         self.git('init', '-q')
-        self.commit('task(T-0331): the work T-0332 also needed')
+        self.commit('task(T-0332): the work, landed under its own name')
         self.sha = self.git('rev-parse', 'HEAD')
         self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
         self.product = mock.Mock(repo_dir=self.repo, main='main')
@@ -241,6 +241,106 @@ class ParkClosesTests(_Repo):
         self.write(dict(relaunch.park_fields(reason, CARD, '2026-09-30T06:00:00Z'), job=self.JOB))
         self.assertEqual(trunkclose.close_parked(self.product, lambda _l: None), [])
         self.assertIn(self.ITEM, lifecycle.corrections(self.path))
+
+
+class AttributionTests(_Repo):
+    """A trunk commit is evidence for the item only when it is the item's: named by it, its PR's
+    merge, or covering its ``writes:`` — never merely an ancestor of the trunk (a product's
+    T-0042, 2026-09-30: the session named the trunk head its branch had merged in)."""
+    JOB, ITEM, BRANCH = 'correct-t-0042', 'T-0042', 'cloud/T-0042'
+
+    def setUp(self):
+        super().setUp()
+        self.base = self.sha
+        self.git('checkout', '-q', '-b', 'work')
+        self.commit('task(T-0042): the inspector action')
+        self.commit('task(T-0402): the inspector sheet')
+        self.git('checkout', '-q', '-')
+        self.commit('merge-queue: #977 (cloud/plan-T-0353 @ c364f06b7fa5a54d702a4f82b90f9faba101ac29)')
+        self.other = self.git('rev-parse', 'HEAD')
+        self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+        self.git('checkout', '-q', 'work')
+        self.git('-c', 'user.email=a@b', '-c', 'user.name=a', 'merge', '-q', '--no-edit',
+                 '--no-ff', self.other)   # main merged into the branch: its second parent
+        self.head = self.git('rev-parse', 'HEAD')
+        self.git('update-ref', f'refs/remotes/origin/{self.BRANCH}', 'HEAD')
+        self.git('checkout', '-q', '-')
+        self.assertEqual(self.git('rev-parse', f'{self.head}^2'), self.other)
+
+    def test_t0042_the_trunk_head_merged_into_an_open_branch_is_no_evidence(self):
+        text = report('done', f'the work it names is on origin/main at {self.other[:9]}')
+        self.run_once(text, head=self.head)
+        self.assertIsNone(trunkclose.evidence(self.path, self.ITEM, self.repo))
+        self.assertFalse(trunkclose.closes_before_launch(self.product, 'coder', self.ITEM,
+                                                         lambda _l: None))
+        reason, landed = relaunch.assess(self.path, self.JOB, self.ITEM, head=self.head,
+                                         card=CARD, repo=self.repo)
+        self.assertTrue(reason)
+        self.assertEqual(landed, '')
+        self.assertNotIn('(verified)', reason)
+
+    def test_t0042_a_needs_input_park_on_the_merged_trunk_head_never_closes(self):
+        text = ('NEEDS OPERATOR: none — the work it names is on origin/main at '
+                f'{self.other[:9]}' + report('blocked', 'none'))
+        self.run_once(text, head=self.head)
+        reason, landed = relaunch.assess(self.path, self.JOB, self.ITEM, head=self.head,
+                                         card=CARD, repo=self.repo)
+        self.assertEqual(landed, '')
+        self.assertEqual(relaunch.landed_in(reason), '')
+        # a park written before the fix, carrying the false "(verified)" text, stays a park
+        old = (f'{self.JOB} launched 1 time(s) — the work it names is on origin/main at '
+               f'{self.other[:9]} (verified): close T-0042 on that evidence. Not relaunched')
+        self.write(dict(relaunch.park_fields(old, CARD, '2026-09-30T06:00:00Z'), job=self.JOB))
+        self.assertEqual(trunkclose.close_parked(self.product, lambda _l: None), [])
+        self.assertIn(self.ITEM, lifecycle.corrections(self.path))
+        self.assertEqual(self.writes, [])
+
+    def test_another_items_trunk_commit_is_no_evidence_even_with_no_branch_left(self):
+        self.git('update-ref', '-d', f'refs/remotes/origin/{self.BRANCH}')
+        self.run_once(report('done', f'already on origin/main at {self.other[:9]}'),
+                      head=self.head)
+        self.assertIsNone(trunkclose.evidence(self.path, self.ITEM, self.repo))
+
+    def test_an_attributable_commit_with_an_open_pr_holding_work_is_no_evidence(self):
+        self.git('update-ref', '-d', f'refs/remotes/origin/{self.BRANCH}')
+        self.commit('task(T-0042): landed part')
+        mine = self.git('rev-parse', 'HEAD')
+        self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+        self.run_once(report('done', f'on origin/main at {mine[:9]}'), head=self.head)
+        self.assertEqual(trunkclose.evidence(self.path, self.ITEM, self.repo, ask_gh=False)[0],
+                         mine)
+        with mock.patch.object(landing, 'open_prs', lambda _r, _i: ['cloud/T-0042-b']):
+            self.assertIsNone(trunkclose.evidence(self.path, self.ITEM, self.repo))
+
+    def test_a_commit_covering_the_writes_footprint_is_evidence(self):
+        self.git('update-ref', '-d', f'refs/remotes/origin/{self.BRANCH}')
+        os.makedirs(os.path.join(self.repo, 'apps'))
+        with open(os.path.join(self.repo, 'apps', 'panel.tsx'), 'w') as f:
+            f.write('x')
+        self.git('add', '-A')
+        self.commit('chore: the sweep')
+        sweep = self.git('rev-parse', 'HEAD')
+        self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+        self.run_once(report('done', f'on origin/main at {sweep[:9]}'), head=self.head)
+        self.assertIsNone(trunkclose.evidence(self.path, self.ITEM, self.repo, ask_gh=False))
+        self.assertEqual(trunkclose.evidence(self.path, self.ITEM, self.repo,
+                                             writes=['apps/panel.tsx'], ask_gh=False)[0], sweep)
+        self.assertIsNone(trunkclose.evidence(self.path, self.ITEM, self.repo, ask_gh=False,
+                                              writes=['apps/panel.tsx', 'apps/other.tsx']))
+
+    def test_the_items_own_pr_merge_is_evidence(self):
+        self.git('update-ref', '-d', f'refs/remotes/origin/{self.BRANCH}')
+        self.commit('The prompt inspector (#902)')
+        merged = self.git('rev-parse', 'HEAD')
+        self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+        self.write({'job': 'coder-t-0042', 'item': self.ITEM, 'branch': self.BRANCH,
+                    'lane': {'pr': 902}, 'started': '2026-09-30T04:00:00Z', 'pid': 1},
+                   {'job': 'coder-t-0042', 'ended': '2026-09-30T04:30:00Z',
+                    'end_reason': 'finished'})
+        self.run_once(report('done', f'on origin/main at {merged[:9]}'), head=self.head)
+        self.assertEqual(trunkclose.evidence(self.path, self.ITEM, self.repo, ask_gh=False)[0],
+                         merged)
+        self.assertFalse(landing.names(self.repo, 'main', merged, self.ITEM, prs=['903']))
 
 
 if __name__ == '__main__':
