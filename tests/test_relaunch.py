@@ -152,6 +152,20 @@ class RelaunchCapTests(_Ledger):
         self.assertTrue(occ['corrections'][self.ITEM]['parked'])
 
 
+class StatusParkedTests(_Ledger):
+
+    def test_status_names_a_parked_item_and_is_silent_without_one(self):
+        from asf.views import status
+        with mock.patch.object(pool_mod, 'sessions_path', lambda _p: self.path):
+            self.run_once(report('done'))
+            self.assertIsNone(status.parked_cell(None))
+            self.write(dict(relaunch.park_fields('looped twice', CARD, '2026-09-30T06:00:00Z'),
+                            job=self.JOB))
+            cell = status.parked_cell(None)
+        self.assertIn('T-0332: looped twice', cell)
+        self.assertTrue(cell.startswith('1 — '))
+
+
 class TrunkEvidenceTests(_Ledger):
 
     def setUp(self):
