@@ -11,8 +11,9 @@ The learning loop: four sources file or bump a Bug, keyed on the typed `signatur
   - `asf check` over the record: one Bug per error CLASS (``record_error_signatures``)
   - the CI logs of ``conventions.ci_workflow``: one counted Bug per flaky e2e test
     (:mod:`asf.tick.flaky`, keyed and counted in ``state/<p>/flaky.json``)
-A signature already carrying today's date in its typed `last_filed` is left alone — this is
-what makes a second same-day run a no-op instead of double-counting a still-open problem.
+A signature is left alone while it is still inside its own refile window — `refile_days` on the
+info dict, defaulting to one day — so a second run inside that window is a no-op instead of
+double-counting a still-open problem.
 """
 import datetime
 import glob
@@ -329,11 +330,30 @@ def _find_bug_by_signature(canonical, sig):
     return None
 
 
+#: How many days must pass before a source's Bug may be bumped again. 1 is "not again today",
+#: which is what the guard has always meant.
+DEFAULT_REFILE_DAYS = 1
+
+
+def _too_soon(last_filed, date, refile_days):
+    """True when `last_filed` is inside the window: a bump now would be double-counting a
+    problem still open. Falls back to string equality when either date will not parse, so a
+    hand-edited card is never re-filed by accident."""
+    if not last_filed:
+        return False
+    try:
+        last = datetime.date.fromisoformat(str(last_filed))
+        cur = datetime.date.fromisoformat(str(date))
+    except ValueError:
+        return last_filed == date
+    return (cur - last).days < refile_days
+
+
 def _file_or_bump_bug(root, canonical, sig, info, date, default_bug_epic=None):
     rec = _find_bug_by_signature(canonical, sig)
     if rec is not None:
         typed, _machine = frontmatter.split_machine(rec['meta'])
-        if typed.get('last_filed') == date:
+        if _too_soon(typed.get('last_filed'), date, info.get('refile_days', DEFAULT_REFILE_DAYS)):
             return 'skipped'
         old_count = typed.get('count') or 1
         new_count = old_count + 1
