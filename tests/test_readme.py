@@ -585,5 +585,46 @@ class ModelRoutingProseTests(unittest.TestCase):
             self.assertIn(needle, row, f'troubleshooting row is missing {needle!r}')
 
 
+class GroomDigestProseTests(unittest.TestCase):
+    """T-0773: the troubleshooting guide's `### The groom digest` subsection describes the digest
+    that exists — the two stale `(groom digest)` rows are gone from `### The record`, and the new
+    subsection names the sections a groom actually files a line under."""
+
+    def _read(self, path):
+        with open(os.path.join(REPO_ROOT, path), encoding='utf-8') as f:
+            return f.read()
+
+    def _section(self, text, heading):
+        """PD7: `### The groom digest` sits directly before `## The redaction hooks`, so a
+        terminator of `'###'` finds no next line and raises ``StopIteration``; terminate on any
+        heading depth instead."""
+        lines = text.splitlines()
+        start = next(i for i, l in enumerate(lines) if l.strip() == heading)
+        end = next(i for i in range(start + 1, len(lines)) if lines[i].startswith('#'))
+        return lines[start + 1:end]
+
+    def test_the_subsection_exists_and_states_the_bound(self):
+        section = '\n'.join(self._section(self._read('docs/guide/troubleshooting.md'),
+                                           '### The groom digest'))
+        self.assertIn('human-now', section)
+        self.assertIn('none to five a day', section)
+
+    def test_it_names_the_two_sections_that_replaced_the_stale_row(self):
+        section = '\n'.join(self._section(self._read('docs/guide/troubleshooting.md'),
+                                           '### The groom digest'))
+        self.assertIn('Spoken for', section)
+        self.assertIn('Housekeeping', section)
+
+    def test_it_still_carries_the_barred_row(self):
+        section = '\n'.join(self._section(self._read('docs/guide/troubleshooting.md'),
+                                           '### The groom digest'))
+        self.assertIn('approvals.<key> is not auto.', section)
+
+    def test_the_stale_spent_cap_row_is_gone(self):
+        text = self._read('docs/guide/troubleshooting.md')
+        self.assertNotIn(
+            'the adjudicate sessions for today are spent and the question is still open', text)
+
+
 if __name__ == '__main__':
     unittest.main()

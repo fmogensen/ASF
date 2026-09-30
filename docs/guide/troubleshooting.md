@@ -85,8 +85,20 @@ it never removes the interpreter running it, so that last step is always yours.
 | --- | --- | --- |
 | `NEEDS OPERATOR: run asf schema-migrate — <detail>` (exit 3) | the record's schema and the package's disagree; writes are refused | `asf schema-migrate --product <p> --drain`; if the record is newer, reinstall the newer `asf` |
 | `NEEDS OPERATOR: rule check <timed out\|failed>: R-nnnn — 3 runs in a row …` | a rule's check script is slow or broken — a factory problem, not a product Bug | fix the script, or raise `ASF_RULE_CHECK_TIMEOUT` in the tick job's environment ([rule cards](product-config.md#rule-cards)) |
-| `NEEDS OPERATOR: <item> — <why>; approvals.<key> is not auto.` (groom digest) | a groom policy would have decided it, but its class is held | answer it in the groom (`/asf:groom`) |
-| `NEEDS OPERATOR: <item> — <why>` (groom digest) | the adjudicate sessions for today are spent and the question is still open | answer it in the groom (`/asf:groom`) |
+
+### The groom digest
+
+`groom/<date>-digest.md`'s **For you** holds only actions the approvals matrix holds at
+`human-now` — typically none to five a day. A question a rule can answer is answered, a question
+an adjudicate session can answer is queued to one under **Spoken for**, and the groom's own
+bookkeeping goes to **Housekeeping**. None of those is yours.
+
+| line | meaning | fix |
+| --- | --- | --- |
+| `NEEDS OPERATOR: <item> — <why>; approvals.<key> is not auto.` (**For you**) | a groom policy would have decided it, but the action class the answer crosses is not `auto`. The only line a rule can put in **For you** | answer it in the groom (`/asf:groom`), or map `approvals.<key>` to `auto` |
+| `NEEDS OPERATOR: <what> — <the question>` (**For you**) | an adjudicate session ruled the question was not its to answer — money, credentials, or an action that cannot be undone — and escalated it with a recommendation | answer it in the groom (`/asf:groom`) |
+| `- <item> <why> — (spoken for: the next GROOM → ADJUDICATE)` (**Spoken for**) | today's adjudicate sessions are spent; the question is queued for tomorrow's, not parked on you | nothing |
+| `- <item> <why> (<section>)` (**Housekeeping**) | the groom's own bookkeeping past the day's adjudicate cap: an inbox card still undecided, a Feature with no Stories, a Story with no Tasks after plan-approved. Not an operator decision | nothing — the next groom asks again |
 
 ## The redaction hooks
 
