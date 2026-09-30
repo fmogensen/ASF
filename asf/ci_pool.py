@@ -66,6 +66,10 @@ TRIAL_HISTORY = 'ci-trials.jsonl'
 PASS = frozenset({'success'})
 FAIL = frozenset({'failure', 'timed_out', 'startup_failure'})
 GH_TIMEOUT_S = 30
+#: The host's own job limit when a workflow declares no ``timeout-minutes`` — six hours, which is
+#: what the host's annotation on a job that hit it names (``maximum execution time of 6h0m0s``).
+#: A job always has a limit; the workflow only chooses whether to say so (F-0131 P2).
+DEFAULT_JOB_TIMEOUT_MIN = 360
 
 
 # ---- the declared pool ------------------------------------------------------------------------
@@ -479,13 +483,18 @@ def is_default(label, runner=None):
 
 
 class Backend:
-    """The CI host behind the pool. ``runners`` and ``runs_on`` are read-only; the two label
-    writes are only ever called by :func:`apply` and the trial rollback."""
+    """The CI host behind the pool. ``runners``, ``runs_on`` and ``timeouts`` are read-only; the
+    two label writes are only ever called by :func:`apply` and the trial rollback."""
 
     def runners(self):
         raise NotImplementedError
 
     def runs_on(self):
+        raise NotImplementedError
+
+    def timeouts(self):
+        """``{job or display name: minutes}`` over every workflow file — the declared
+        ``timeout-minutes`` only. Raises :class:`BackendError`."""
         raise NotImplementedError
 
     def add_labels(self, runner, labels):
@@ -610,6 +619,67 @@ def parse_runs_on(workflow, text):
     return out
 
 
+_INT_RE = re.compile(r'^\d+$')
+
+
+def parse_timeouts(text):
+    """``{job: minutes}`` for one workflow file: every job that declares its own
+    ``timeout-minutes``, keyed by its key under ``jobs:`` *and*, when it declares one, by its
+    ``name:`` — the API reports a job under its display name, and a matrix leg under that name
+    plus its values (``tests (3.12)``, P3).
+
+    The same line reader as :func:`parse_runs_on`, and for the same reason it can be one: the
+    job's own ``timeout-minutes`` sits at the indent of its mapping keys, beside ``runs-on:``,
+    while a **step's** ``timeout-minutes`` is deeper, under ``steps:``. A job that declares none is
+    absent — its limit is the host's (:data:`DEFAULT_JOB_TIMEOUT_MIN`), which is not this parser's
+    to invent. A non-integer or templated value (``${{ … }}``) is skipped.
+    """
+    lines = text.splitlines()
+    out = {}
+    in_jobs, jobs_indent, job_indent, job = False, 0, None, None
+    key_indent, minutes, name = None, None, None
+    i = 0
+    while i < len(lines):
+        raw = _strip_comment(lines[i]).rstrip()
+        stripped = raw.strip()
+        indent = len(raw) - len(raw.lstrip(' '))
+        i += 1
+        if not stripped:
+            continue
+        if indent == 0:
+            in_jobs = stripped.startswith('jobs:')
+            jobs_indent, job_indent, job = 0, None, None
+            key_indent, minutes, name = None, None, None
+            continue
+        if not in_jobs:
+            continue
+        m = re.match(r'^([A-Za-z0-9_.-]+|"[^"]+"|\'[^\']+\'):(\s|$)', stripped)
+        if m and (job_indent is None or indent == job_indent) and indent > jobs_indent:
+            job_indent = indent
+            job = m.group(1).strip('"\'')
+            key_indent, minutes, name = None, None, None
+            continue
+        if job is None:
+            continue
+        if key_indent is None and indent > job_indent:
+            key_indent = indent
+        if indent != key_indent:
+            continue
+        if stripped.startswith('timeout-minutes:'):
+            value = stripped[len('timeout-minutes:'):].strip()
+            if _INT_RE.match(value):
+                minutes = int(value)
+        elif stripped.startswith('name:'):
+            name = stripped[len('name:'):].strip().strip('"\'')
+        else:
+            continue
+        if minutes is not None:
+            out[job] = minutes
+            if name:
+                out[name] = minutes
+    return out
+
+
 # -- GitHub Actions -----------------------------------------------------------------------------
 
 def _gh_env(product):
@@ -667,7 +737,9 @@ class GitHubBackend(Backend):
                                        if l.get('type') == 'read-only'))
                 for r in rows]
 
-    def runs_on(self):
+    def _workflow_texts(self):
+        """``[(basename, text)]`` for every ``.yml``/``.yaml`` in :data:`WORKFLOW_DIR` on the
+        product's trunk, read raw with the product's own login."""
         if not self.slug:
             raise BackendError('the product has no repo_slug')
         main = getattr(self.product, 'main', 'main')
@@ -679,7 +751,22 @@ class GitHubBackend(Backend):
                 continue
             text = self._api([f'repos/{self.slug}/contents/{path}?ref={main}',
                               '-H', 'Accept: application/vnd.github.raw'])
-            out += parse_runs_on(os.path.basename(path), text)
+            out.append((os.path.basename(path), text))
+        return out
+
+    def runs_on(self):
+        out = []
+        for name, text in self._workflow_texts():
+            out += parse_runs_on(name, text)
+        return out
+
+    def timeouts(self):
+        out = {}
+        for _name, text in self._workflow_texts():
+            for job, minutes in parse_timeouts(text).items():
+                # two workflows declaring the same job name: the larger limit, which under-claims
+                # timeouts rather than over-claims them (F-0131 C4's direction).
+                out[job] = max(minutes, out.get(job, 0))
         return out
 
     def add_labels(self, runner, labels):
