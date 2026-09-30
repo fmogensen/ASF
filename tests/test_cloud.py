@@ -6,6 +6,7 @@ dispatched: gh is a fake, git is a bare repo in a temp dir."""
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -22,6 +23,9 @@ from asf.workers import quota as quota_mod
 from asf.workers import runtime as runtime_mod
 from asf.workers import spawn as spawn_mod
 from asf.workers import wave as wave_mod
+
+import asf.briefs.build  # noqa: E402,F401 — the module; the package exports a build() function
+build_mod = sys.modules['asf.briefs.build']
 
 try:  # `unittest discover -s tests` puts tests/ on the path; `-m tests.test_cloud` does not
     from test_workers import Home, feature_row, git
@@ -151,6 +155,43 @@ class Settings(unittest.TestCase):
         self.assertIn('checked out on branch `task/t-0001` (base `main`)', text)
         self.assertIn('ASF-Session: sid-1', text)
         self.assertIn('ASF-Report: task-t-0001', text)
+
+
+class LocalKinds(unittest.TestCase):
+    """:data:`cloud.LOCAL_KINDS` — the closed exception list, and the placement rule it seeds
+    (F-0216 §1). Pure: no ``gh``, no clock, no home."""
+
+    def test_the_exception_list_is_three_kinds_and_every_one_is_a_kind(self):
+        self.assertEqual(cloud.LOCAL_KINDS, ('groom', 'groom-clerk', 'close'))
+        self.assertTrue(set(cloud.LOCAL_KINDS) <= set(build_mod.KINDS))
+
+    def test_every_other_kind_goes_to_the_cloud(self):
+        s = cloud.settings({'cloud': {'enabled': True, 'max_inflight': 1, 'default': True}})
+        for k in build_mod.KINDS:
+            self.assertEqual(cloud.first(pool_mod.Row('j', 'F-0001', kind=k), s),
+                             k not in cloud.LOCAL_KINDS, k)
+
+    def test_an_alias_is_never_a_row_kind(self):
+        for alias in build_mod.KIND_ALIASES:
+            self.assertIn(build_mod.normalize_kind(alias), build_mod.KINDS)
+            self.assertNotIn(alias, cloud.LOCAL_KINDS)
+
+    def test_the_floor_holds_in_the_overflow_path_too(self):
+        s = cloud.settings({'cloud': {'enabled': True, 'max_inflight': 1, 'rows': 'any'}})
+        self.assertFalse(cloud.eligible(pool_mod.Row('j', 'F-0001', kind='groom'), s))
+
+    def test_cloud_local_only_adds_and_never_removes(self):
+        s = cloud.settings({'cloud': {'enabled': True, 'max_inflight': 1,
+                                      'local_only': ['review']}})
+        self.assertTrue(cloud.local_only(pool_mod.Row('j', 'F-0001', kind='review'), s))
+        self.assertTrue(cloud.local_only(pool_mod.Row('j', 'F-0001', kind='groom'), s))
+        s = cloud.settings({'cloud': {'enabled': True, 'max_inflight': 1, 'local_only': []}})
+        self.assertTrue(cloud.local_only(pool_mod.Row('j', 'F-0001', kind='groom'), s))
+
+    def test_an_item_marked_local_only_never_leaves(self):
+        s = cloud.settings({'cloud': {'enabled': True, 'max_inflight': 1, 'default': True}})
+        row = pool_mod.Row('j', 'F-0001', kind='coder', local_only=True)
+        self.assertFalse(cloud.first(row, s))
 
 
 class Workflow(unittest.TestCase):
@@ -476,15 +517,14 @@ class DefaultPlacement(Lanes):
         self.assertEqual((self.lanes(launched), waits), ([('spec-1', 'cloud')], []))
         self.assertIn('→ acct-c (opus) cloud', lines[0])
 
-    def test_a_kind_off_the_list_stays_local(self):
-        row = pool_mod.Row('close-f-0001', 'F-0001', model='Opus', kind='close')
-        launched, _waits, _ = self.run_wave([row])
-        self.assertEqual(self.lanes(launched), [('close-f-0001', 'local')])
-        # rows: any takes every kind first
-        cfg = dict(self.cfg, cloud=dict(self.cfg['cloud'], rows='any'))
-        row = pool_mod.Row('close-f-0002', 'F-0002', model='Opus', kind='close')
-        launched, _waits, _ = self.run_wave([row], cfg=cfg)
-        self.assertEqual(self.lanes(launched), [('close-f-0002', 'cloud')])
+    def test_a_groom_row_stays_on_the_host(self):
+        # the floor holds with a free cloud seat, and a kind off the old allow-list —
+        # a fixer — goes to the cloud (F-0216 C1, C3)
+        groom = pool_mod.Row('groom-f-0001', 'F-0001', model='Opus', kind='groom')
+        fixer = pool_mod.Row('fixer-f-0002', 'F-0002', model='Opus', kind='fixer')
+        launched, _waits, _ = self.run_wave([groom, fixer])
+        self.assertEqual(self.lanes(launched),
+                         [('groom-f-0001', 'local'), ('fixer-f-0002', 'cloud')])
 
     def test_local_only_kinds_and_items_stay_local(self):
         cfg = dict(self.cfg, cloud=dict(self.cfg['cloud'], local_only=['spec']))
@@ -782,6 +822,13 @@ class Doctor(unittest.TestCase):
         from asf import doctor
         rows = doctor.check_cloud(self.cfg(runtime='nope'), self.product(slug=None))
         self.assertIn("cloud.runtime 'nope' is not one ASF runs", rows[0][2])
+
+    def test_the_default_row_names_the_floor(self):
+        # ON writes no `default` at this Task's sha, so pass it explicitly (F-0216 Task 1)
+        rows = cloud.checks(self.cfg(default=True), self.product(), FakeGh())
+        _name, _req, _ok, detail = next(r for r in rows if r[0] == 'default')
+        self.assertEqual(detail, 'cloud.default: true — the cloud lane is the default executor '
+                                 '(local: groom, groom-clerk, close)')
 
 
 if __name__ == '__main__':
