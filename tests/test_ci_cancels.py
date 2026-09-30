@@ -6,10 +6,55 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import unittest
 
 from asf import ci_cancels, ci_queue
+
+
+def _hook_free_env():
+    """The subprocess env for a throwaway fixture repo's own git calls: with the factory's
+    ``core.hooksPath`` override (set via ``GIT_CONFIG_*`` env vars for every git process in this
+    worktree, F-0230 PD11) stripped, so a fixture commit never runs the product's own commit
+    hooks, plus a fixed identity so the fixture never depends on a local ``user.name``/
+    ``user.email``."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_CONFIG')}
+    env['GIT_AUTHOR_NAME'] = env['GIT_COMMITTER_NAME'] = 'ci-cancels-fixture'
+    env['GIT_AUTHOR_EMAIL'] = env['GIT_COMMITTER_EMAIL'] = 'fixture@example.com'
+    return env
+
+
+def _git(args, cwd):
+    p = subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True,
+                        env=_hook_free_env())
+    if p.returncode != 0:
+        raise RuntimeError(f'git {args} in {cwd} failed: {p.stderr}')
+    return p.stdout.strip()
+
+
+def _init_repo():
+    """A tempdir holding one repo, ``main`` branch, one empty root commit."""
+    repo = tempfile.mkdtemp()
+    _git(['init', '-q', '-b', 'main'], repo)
+    _git(['config', 'user.email', 'fixture@example.com'], repo)
+    _git(['config', 'user.name', 'ci-cancels-fixture'], repo)
+    _git(['commit', '-q', '--allow-empty', '-m', 'root'], repo)
+    return repo
+
+
+def _commit(repo, msg, fname, content):
+    path = os.path.join(repo, fname)
+    with open(path, 'a', encoding='utf-8') as f:
+        f.write(content + '\n')
+    _git(['add', fname], repo)
+    _git(['commit', '-q', '-m', msg], repo)
+    return _git(['rev-parse', 'HEAD'], repo)
+
+
+def _amend(repo, msg, extra=()):
+    _git(['commit', '--amend', '-q', '-m', msg, *extra], repo)
+    return _git(['rev-parse', 'HEAD'], repo)
 
 
 def _literal_causes(path):
@@ -48,6 +93,189 @@ class Causes(unittest.TestCase):
         self.assertEqual(found, known,
                           f'{found ^ known} — a cause string landed in asf/ci_queue.py or '
                           f'asf/harvest/lane.py that F-0230 PD2 has not decided the partition of')
+
+    def test_a_claim_beats_every_inference(self):
+        """A run also superseded by a content-free re-push and also holding a merged PR is
+        `relief` when the ledger claims it `relief` — the claim is tried first (C4) and neither
+        the merge nor the head pair (unresolved, `repo=None`) is ever reached."""
+        run = {'id': 1, 'head_branch': 'worker/T-1', 'head_sha': 'aaa', 'event': 'pull_request',
+               'pr': 42, 'created_at': '2026-01-01T00:00:00Z', 'updated_at': '2026-01-01T01:00:00Z'}
+        later = {'id': 2, 'head_branch': 'worker/T-1', 'head_sha': 'bbb',
+                 'created_at': '2026-01-01T00:30:00Z', 'conclusion': 'success'}
+        claims = {'1': {'cause': 'relief'}}
+        prs = {42: '2026-01-01T00:45:00Z'}
+        got, stray = ci_cancels.cause(run, claims, [run, later], {}, prs, None, 'main', False)
+        self.assertEqual(got, 'relief')
+        self.assertIsNone(stray)
+
+    def test_a_job_at_its_limit_is_a_timeout_not_a_supersede(self):
+        later = {'id': 2, 'head_branch': 'b', 'head_sha': 'zzz',
+                 'created_at': '2026-01-01T00:30:00Z', 'conclusion': 'success'}
+        run = {'id': 1, 'head_branch': 'b', 'head_sha': 'aaa', 'event': 'push',
+               'created_at': '2026-01-01T00:00:00Z', 'updated_at': '2026-01-01T06:00:00Z',
+               'jobs': [{'name': 'build', 'started_at': '2026-01-01T00:00:00Z',
+                         'completed_at': '2026-01-01T06:00:00Z'}]}
+        got, stray = ci_cancels.cause(run, {}, [run, later], {}, {}, None, 'main', False)
+        self.assertEqual(got, 'timeout')
+        self.assertIsNone(stray)
+
+        short = dict(run, jobs=[{'name': 'build', 'started_at': '2026-01-01T00:00:00Z',
+                                  'completed_at': '2026-01-01T00:12:00Z'}])
+        got2, _stray2 = ci_cancels.cause(short, {}, [short, later], {}, {}, None, 'main', False)
+        self.assertNotEqual(got2, 'timeout')
+
+    def test_an_inferred_merge_needs_the_merge_before_the_cancel(self):
+        run = {'id': 1, 'head_branch': 'worker/T-1', 'head_sha': 'aaa', 'event': 'pull_request',
+               'pr': 7, 'created_at': '2026-01-01T00:00:00Z', 'updated_at': '2026-01-01T01:00:00Z'}
+        got, _stray = ci_cancels.cause(run, {}, [run], {}, {7: '2026-01-01T00:59:00Z'}, None,
+                                        'main', False)
+        self.assertEqual(got, 'merged')
+
+        got2, _stray2 = ci_cancels.cause(run, {}, [run], {}, {7: '2026-01-01T01:01:00Z'}, None,
+                                          'main', False)
+        self.assertNotEqual(got2, 'merged')
+
+    def test_a_push_run_a_pr_run_covers_is_dedupe(self):
+        push = {'id': 1, 'head_branch': 'worker/T-1', 'head_sha': 'sha1', 'event': 'push',
+                'created_at': '2026-01-01T00:00:00Z', 'updated_at': '2026-01-01T00:05:00Z'}
+        pr_run = {'id': 2, 'head_branch': 'worker/T-1', 'head_sha': 'sha1',
+                  'event': 'pull_request', 'created_at': '2026-01-01T00:00:00Z',
+                  'conclusion': 'success'}
+        got, _stray = ci_cancels.cause(push, {}, [push, pr_run], {}, {}, None, 'main', False)
+        self.assertEqual(got, 'dedupe')
+
+        got2, _stray2 = ci_cancels.cause(push, {}, [push], {}, {}, None, 'main', False)
+        self.assertNotEqual(got2, 'dedupe')
+
+    def test_the_superseding_run_must_have_started_before_the_cancel(self):
+        run = {'id': 1, 'head_branch': 'worker/T-1', 'head_sha': 'aaa', 'event': 'pull_request',
+               'created_at': '2026-01-01T00:00:00Z', 'updated_at': '2026-01-01T00:10:00Z'}
+        too_late = {'id': 2, 'head_branch': 'worker/T-1', 'head_sha': 'bbb',
+                    'created_at': '2026-01-01T00:11:00Z', 'conclusion': 'success'}
+        got, _stray = ci_cancels.cause(run, {}, [run, too_late], {}, {}, None, 'main', False)
+        self.assertEqual(got, 'unclaimed')
+
+    def test_nothing_explains_it_is_unclaimed_not_a_guess(self):
+        run = {'id': 1, 'head_branch': 'worker/T-1', 'head_sha': 'aaa', 'event': 'pull_request',
+               'created_at': '2026-01-01T00:00:00Z', 'updated_at': '2026-01-01T00:10:00Z'}
+        got, stray = ci_cancels.cause(run, {}, [run], {}, {}, None, 'main', False)
+        self.assertEqual(got, 'unclaimed')
+        self.assertIsNone(stray)
+
+    def test_a_superseded_claim_is_re_read_through_the_head_pair(self):
+        """F-0230 PD2: `superseded` is `explain_cancels`' own weak reading and is never honoured
+        as a claim — it is re-classified from the head pair like any unclaimed run, and comes
+        back `rewrite` here because the superseding head is a content-free rebase."""
+        repo = _init_repo()
+        try:
+            _git(['checkout', '-q', '-b', 'feature'], repo)
+            _commit(repo, 'F1', 'a.txt', 'x')
+            old = _commit(repo, 'F2', 'b.txt', 'y')
+            _git(['checkout', '-q', 'main'], repo)
+            _commit(repo, 'M1', 'trunk.txt', 'm')
+            # cause() calls head_kind with trunk=f'origin/{trunk}' (its own trunk is a bare
+            # branch name); this fixture has no remote, so give it the ref head_kind expects.
+            _git(['update-ref', 'refs/remotes/origin/main', 'main'], repo)
+            _git(['checkout', '-q', 'feature'], repo)
+            _git(['rebase', '-q', 'main'], repo)
+            new = _git(['rev-parse', 'HEAD'], repo)
+
+            run = {'id': 1, 'head_branch': 'feature', 'head_sha': old, 'event': 'push',
+                   'created_at': '2026-01-01T00:00:00Z', 'updated_at': '2026-01-01T00:10:00Z'}
+            superseder = {'id': 2, 'head_branch': 'feature', 'head_sha': new,
+                          'created_at': '2026-01-01T00:05:00Z', 'conclusion': 'success'}
+            claims = {'1': {'cause': 'superseded', 'by': 2}}
+            got, stray = ci_cancels.cause(run, claims, [run, superseder], {}, {}, repo, 'main',
+                                           False)
+            self.assertEqual(got, 'rewrite')
+            self.assertIsNone(stray)
+        finally:
+            shutil.rmtree(repo, ignore_errors=True)
+
+    def test_a_job_timeout_claim_resolves_to_timeout_without_limit_arithmetic(self):
+        """F-0230 PD2: `job-timeout` is the host's own annotation and is honoured as a claim — it
+        resolves to `timeout` straight from `HONOURED`, and this run carries no `jobs` at all, so
+        a wrong answer here could only come from skipping the claim."""
+        run = {'id': 1, 'head_branch': 'b', 'head_sha': 'aaa', 'event': 'push',
+               'created_at': '2026-01-01T00:00:00Z', 'updated_at': '2026-01-01T00:10:00Z'}
+        got, stray = ci_cancels.cause(run, {'1': {'cause': 'job-timeout'}}, [run], {}, {}, None,
+                                       'main', False)
+        self.assertEqual(got, 'timeout')
+        self.assertIsNone(stray)
+
+
+class HeadKind(unittest.TestCase):
+    def setUp(self):
+        self.repo = _init_repo()
+
+    def tearDown(self):
+        shutil.rmtree(self.repo, ignore_errors=True)
+
+    def test_a_rebase_onto_a_moved_trunk_is_a_rewrite(self):
+        _git(['checkout', '-q', '-b', 'feature'], self.repo)
+        _commit(self.repo, 'F1', 'a.txt', 'x')
+        old = _commit(self.repo, 'F2', 'b.txt', 'y')
+        _git(['checkout', '-q', 'main'], self.repo)
+        _commit(self.repo, 'M1', 'trunk.txt', 'm')
+        _git(['checkout', '-q', 'feature'], self.repo)
+        _git(['rebase', '-q', 'main'], self.repo)
+        new = _git(['rev-parse', 'HEAD'], self.repo)
+        self.assertEqual(
+            ci_cancels.head_kind(self.repo, old, new, trunk='main', fetch=False), 'rewrite')
+
+    def test_a_reword_and_a_signoff_are_rewrites(self):
+        _git(['checkout', '-q', '-b', 'feature'], self.repo)
+        _commit(self.repo, 'F1', 'a.txt', 'x')
+        old = _commit(self.repo, 'F2 original', 'b.txt', 'y')
+        reworded = _amend(self.repo, 'F2 reworded')
+        self.assertEqual(
+            ci_cancels.head_kind(self.repo, old, reworded, trunk='main', fetch=False), 'rewrite')
+        signed = _amend(self.repo, 'F2 original', extra=('-s',))
+        self.assertEqual(
+            ci_cancels.head_kind(self.repo, old, signed, trunk='main', fetch=False), 'rewrite')
+
+    def test_a_new_commit_on_top_is_a_newhead(self):
+        _git(['checkout', '-q', '-b', 'feature'], self.repo)
+        _commit(self.repo, 'F1', 'a.txt', 'x')
+        old = _commit(self.repo, 'F2', 'b.txt', 'y')
+        new = _commit(self.repo, 'F3', 'c.txt', 'z')
+        self.assertEqual(
+            ci_cancels.head_kind(self.repo, old, new, trunk='main', fetch=False), 'newhead')
+
+    def test_a_rebase_carrying_new_work_is_a_newhead(self):
+        _git(['checkout', '-q', '-b', 'feature'], self.repo)
+        _commit(self.repo, 'F1', 'a.txt', 'x')
+        old = _commit(self.repo, 'F2', 'b.txt', 'y')
+        _git(['checkout', '-q', 'main'], self.repo)
+        _commit(self.repo, 'M1', 'trunk.txt', 'm')
+        _git(['checkout', '-q', 'feature'], self.repo)
+        _git(['rebase', '-q', 'main'], self.repo)
+        new = _commit(self.repo, 'F3', 'c.txt', 'z')
+        self.assertEqual(
+            ci_cancels.head_kind(self.repo, old, new, trunk='main', fetch=False), 'newhead')
+
+    def test_a_dropped_commit_is_a_newhead(self):
+        root = _git(['rev-parse', 'HEAD'], self.repo)
+        _git(['checkout', '-q', '-b', 'feature'], self.repo)
+        f1 = _commit(self.repo, 'F1', 'a.txt', 'x')
+        old = _commit(self.repo, 'F2', 'b.txt', 'y')
+        _git(['checkout', '-q', '-b', 'onlyf1', root], self.repo)
+        _git(['cherry-pick', f1], self.repo)
+        new = _git(['rev-parse', 'HEAD'], self.repo)
+        self.assertEqual(
+            ci_cancels.head_kind(self.repo, old, new, trunk='main', fetch=False), 'newhead')
+
+    def test_an_unknown_sha_is_unresolved_and_never_raises(self):
+        self.assertEqual(
+            ci_cancels.head_kind(self.repo, 'a' * 40, 'b' * 40, trunk='main', fetch=False),
+            'unresolved')
+        nongit = tempfile.mkdtemp()
+        try:
+            self.assertEqual(
+                ci_cancels.head_kind(nongit, 'a' * 40, 'b' * 40, trunk='main', fetch=False),
+                'unresolved')
+        finally:
+            shutil.rmtree(nongit, ignore_errors=True)
 
 
 class Claims(unittest.TestCase):
