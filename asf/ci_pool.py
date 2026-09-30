@@ -380,29 +380,47 @@ class ReservePlan:
     #: runners the label goes on / comes off (an online runner carrying it without ``of`` too)
     add: list
     remove: list
+    #: of ``reserved``, the runners still holding a PR job: ``{name: seconds until free}`` —
+    #: the reservation does not hold for them yet
+    held: dict = dataclasses.field(default_factory=dict)
 
     def text(self, trunk='main'):
-        """``pr-heavy 9/12 (3 reserved for main)``."""
-        return (f"{self.reserve.short} {len(self.labeled)}/{len(self.candidates)} "
-                f"({len(self.reserved)} reserved for {trunk})")
+        """``pr-heavy 9/12 (3 reserved for main)``; ``… (3 reserved for main, 1 still holding a
+        PR job for ~12 min)`` when the plan had to keep a held runner free."""
+        base = (f"{self.reserve.short} {len(self.labeled)}/{len(self.candidates)} "
+                f"({len(self.reserved)} reserved for {trunk}")
+        if not self.held:
+            return base + ")"
+        mins = max(self.held.values()) // 60
+        return (f"{base}, {len(self.held)} still holding a PR job for ~{mins} min)")
 
     @property
     def settled(self):
         return not self.add and not self.remove
 
 
-def reserve_plan(res, pool, runners, unavailable=()):
+def reserve_plan(res, pool, runners, unavailable=(), held=None):
     """Which online runners carrying ``res.of`` carry ``res.label``: all but ``keep_free``.
     A runner in ``unavailable`` (busy with no job: :func:`asf.ci_queue.phantom_names`) counts as
     offline — it keeps nothing free for the trunk, so another runner is kept free in its place.
 
+    A runner in ``held`` is running a PR job: it keeps nothing free for the trunk until that job
+    ends, and taking the label off it now breaks the reservation the moment it is applied
+    (:func:`asf.ci_queue._broken_reserve` reads that as ``held by a pr job``, and the relief then
+    cancels the job to repair it). ``held`` maps such a runner to the seconds until its job is
+    expected to be done, so an idle runner is kept free before a held one, and of two held ones
+    the one finishing soonest. Unlike ``unavailable`` a held runner is still counted and still
+    eligible: the number kept free never changes.
+
     The runners kept free are chosen, one at a time, by: carrying ``prefer`` (when set) first;
-    then a box not yet holding a kept-free runner (``spread_by: box``; a runner outside the pool
-    is its own box); then one already without the label (no churn); then a box with more
-    candidates (it keeps one for PR runs too); then the name, last first. Offline runners are
-    neither counted nor touched. Pure: the same runners give the same plan (idempotent)."""
+    then the fewest seconds until the runner is free (0 when idle); then a box not yet holding a
+    kept-free runner (``spread_by: box``; a runner outside the pool is its own box); then one
+    already without the label (no churn); then a box with more candidates (it keeps one for PR
+    runs too); then the name, last first. Offline runners are neither counted nor touched.
+    Pure: the same runners give the same plan (idempotent) for a fixed ``(runners, held)``."""
     box = {e.runner: e.box for e in pool if e.box}
     gone = set(unavailable or ())
+    wait = {n: s for n, s in (held or {}).items()}
     cands = sorted((r for r in runners if r.online and r.name not in gone
                     and res.of in r.norm_labels()), key=lambda r: r.name)
 
@@ -416,6 +434,7 @@ def reserve_plan(res, pool, runners, unavailable=()):
     left = sorted(cands, key=lambda r: r.name, reverse=True)
     for _ in range(min(res.keep_free, len(cands))):
         pick = min(left, key=lambda r: (bool(res.prefer) and res.prefer not in r.norm_labels(),
+                                        wait.get(r.name, 0),
                                         used.get(box_of(r), 0), res.label in r.norm_labels(),
                                         -per_box[box_of(r)]))
         left.remove(pick)
@@ -428,16 +447,65 @@ def reserve_plan(res, pool, runners, unavailable=()):
     remove += sorted(r.name for r in runners if r.online and res.label in r.norm_labels()
                      and res.of not in r.norm_labels())
     return ReservePlan(res, [r.name for r in cands], [r.name for r in labeled],
-                       sorted(free_names), add, remove)
+                       sorted(free_names), add, remove,
+                       held={n: wait[n] for n in sorted(free_names) if n in wait})
 
 
-def reserve_plans(product, runners, pool=None, unavailable=None):
+def reserve_plans(product, runners, pool=None, unavailable=None, held=None):
     """One :func:`reserve_plan` per ``ci.reserve``; ``unavailable`` defaults to the phantom
-    runners the queue's pass has confirmed (its file, when there is one)."""
+    runners the queue's pass has confirmed (its file, when there is one). ``held`` is passed
+    through as given — a caller that wants the figure builds it (:func:`held_by_pr`)."""
     pool = load_pool(product) if pool is None else pool
     if unavailable is None:
         unavailable = _phantoms_of(product)
-    return [reserve_plan(r, pool, runners, unavailable) for r in load_reserve(product)]
+    return [reserve_plan(r, pool, runners, unavailable, held) for r in load_reserve(product)]
+
+
+def held_by_pr(runners, busy, jobs_of, hold_s, now):
+    """``{runner: seconds until its PR job is expected to be done}`` for each online runner
+    running a job of a ``pull_request`` run: ``hold_s(workflow)`` is the measured p90 seconds a
+    run of that workflow holds a runner (:meth:`asf.ci_queue.Queue.hold_s`), the remainder is
+    that less the job's elapsed, floored at 0 — a job already past the p90 is expected to end
+    now. ``busy`` is :meth:`asf.ci_queue.Source.busy_runners` (``{runner: {run, job, repo}}``)
+    and ``jobs_of(run_id)`` its jobs. ``{}`` when ``busy`` is None, and a runner whose job or
+    figure cannot be read is left out — the plan then ranks it as it does today. Pure; never
+    raises."""
+    if busy is None:
+        return {}
+    from asf import ci_queue
+    out = {}
+    for r in runners:
+        if not r.online:
+            continue
+        info = busy.get(r.name) or {}
+        run = info.get('run') or {}
+        if run.get('event') != 'pull_request':
+            continue
+        jobs = jobs_of(run.get('id')) or ()
+        j = next((x for x in jobs if isinstance(x, dict) and x.get('name') == info.get('job')
+                  and x.get('runner_name') == r.name), None)
+        started = ci_queue._parse((j or {}).get('started_at'))
+        if started is None:
+            continue
+        workflow = os.path.basename(str(run.get('path') or ''))
+        elapsed = max(0.0, (now - started).total_seconds())
+        out[r.name] = max(0, int(hold_s(workflow) - elapsed))
+    return out
+
+
+def _held(product, runners):
+    """``held`` for :func:`reserve_plans`, from the CI host; ``{}`` when anything is unreadable
+    (the plan then ranks as it did before this figure existed). The :class:`Queue` it builds
+    already reads ``busy_runners`` for the phantom pass, so this costs the tick no new ``gh``
+    call on a product that has a reservation, and nothing at all on one that does not (P16)."""
+    try:
+        from asf import ci_queue
+        q = ci_queue.Queue(product, write=False)
+        src = q.source
+        return held_by_pr(runners, src.busy_runners(), src.live_jobs,
+                          lambda wf: q.hold_s(wf), q.now)
+    except Exception:       # noqa: BLE001 — an unreadable host never changes the plan
+        return {}
 
 
 def _phantoms_of(product):
@@ -1360,7 +1428,7 @@ def tick_reserve(product, backend, out=print):
     except BackendError as e:
         out(f"ci reserve: not applied — cannot read the CI host ({e})")
         return []
-    plans = reserve_plans(product, runners)
+    plans = reserve_plans(product, runners, held=_held(product, runners))
     if any(not p.settled for p in plans):
         apply_reserve(plans, backend, runners, out=out)
         trunk = getattr(product, 'main', None) or 'main'
@@ -1472,7 +1540,7 @@ def cmd_reserve(args, backend=None, out=print):
     except BackendError as e:
         out(f"ci reserve: cannot read the CI host — {e}")
         return 2
-    plans = reserve_plans(product, runners)
+    plans = reserve_plans(product, runners, held=_held(product, runners))
     mode = 'APPLY' if args.apply else 'DRY RUN — nothing changed; --apply writes the labels'
     out(f"== CI RESERVE {product.name} ({mode})")
     out(reserve_table(plans, runners))

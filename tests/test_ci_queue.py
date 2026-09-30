@@ -132,6 +132,39 @@ class Base(unittest.TestCase):
 
 
 class TestMeasure(Base):
+    def setUp(self):
+        super().setUp()
+        self.product = product()
+
+    @staticmethod
+    def _hold_gh():
+        # one heavy run: h1 created 10:00, done 10:33; h2 created 10:02, done 11:06 — the class's
+        # span is the earliest created to the latest completed, 66 min (3960 s)
+        heavy = [
+            {'runner_name': 'h1', 'conclusion': 'success', 'created_at': '2026-09-25T10:00:00Z',
+             'started_at': '2026-09-25T10:00:30Z', 'completed_at': '2026-09-25T10:33:00Z'},
+            {'runner_name': 'h2', 'conclusion': 'success', 'created_at': '2026-09-25T10:02:00Z',
+             'started_at': '2026-09-25T10:02:30Z', 'completed_at': '2026-09-25T11:06:00Z'}]
+        return FakeGh(history=[heavy])
+
+    def queue(self, p=None, gh=None, minutes=0, **kw):
+        if p is None and gh is None:
+            q = super().queue(self.product, self._hold_gh(), minutes=minutes, **kw)
+            q.needs('ci.yml')
+            ci_queue.save(self.product.name, q.data)
+            return q
+        return super().queue(p, gh, minutes=minutes, **kw)
+
+    def empty_queue(self):
+        return super().queue(self.product, FakeGh(history=[]))
+
+    def test_the_hold_is_the_p90_of_created_to_the_last_job_of_the_class(self):
+        self.assertEqual(3960, self.queue().hold_s('ci.yml', 'heavy'))
+        self.assertEqual(6, ci_queue.load(self.product.name)['expect']['ci.yml']['v'])
+
+    def test_nothing_measured_is_zero_and_never_a_refusal(self):
+        self.assertEqual(0, self.empty_queue().hold_s('ci.yml', 'heavy'))
+
     def test_needs_are_the_median_per_class_capped_at_the_pool(self):
         pool = env.Product('p', {'ci': {'pool': pool_data()}})
         from asf import ci_pool
