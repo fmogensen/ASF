@@ -150,6 +150,11 @@ HEAVY_DROPS = (BACK, PUSHED) + TERMINAL_STATES
 #: The heavy-CI label's colour and description when the lane creates it in a repo.
 HEAVY_LABEL_COLOR = '5319e7'
 HEAVY_LABEL_DESCRIPTION = 'ASF: the review approved this head; heavy CI may run'
+#: How long a head approved for heavy CI may go without any workflow run created since the
+#: approval before the lane starts one itself (:meth:`GitHubHost.heavy_kick`): GitHub starts no
+#: ``labeled`` run while the PR's test merge ref still carries a workflow without that trigger
+#: (2026-09-30, the first product: nine PRs labelled two minutes after the trigger landed, none ran).
+HEAVY_KICK_S = 600
 #: The landing waits a pending correction turns BACK (:func:`correction_turns_back`): the
 #: branch waits on a PR, a review or the gate, and nothing but a session's push changes it.
 #: MERGING and QUEUED are a merge under way; PARKED is its owner's.
@@ -1714,6 +1719,8 @@ class Lane:
             # ci.heavy_after_review: the head the lane approved for heavy CI stays approved
             # through its gate's waits, and only there (GitHubHost.heavy_gate)
             rec.update(heavy=prev['heavy'], heavy_at=prev.get('heavy_at'))
+            if prev.get('heavy_kick') == prev['heavy']:
+                rec['heavy_kick'] = prev['heavy_kick']
         rec.update({k: v for k, v in extra.items() if v is not None})
         return rec
 
@@ -3472,15 +3479,80 @@ class GitHubHost(Host):
              heavy_at=at)
         return 'waiting'
 
+    def stalled(self, f, number):
+        """A PR whose required checks are skipped or missing, and nothing will run them:
+        ``'back'`` when its branch conflicts with the trunk — GitHub runs no ``pull_request``
+        workflow on a conflicting PR, so its checks never come and a day's missing-check wait
+        buys nothing: it goes back to be rebased (sent here). Else :meth:`heavy_kick`'s answer."""
+        lane, b = self.lane, f['branch']
+        files = conflict_files(lane.repo, lane.trunk, b) if lane.repo else []
+        if files:
+            if lane.dry_run:
+                lane.out(f'DRY: would send {b} back: PR #{number} conflicts in {", ".join(files)}')
+                lane.results[b] = 'dry'
+                return 'back'
+            send_back(lane, f, 'conflict', f'PR #{number} conflicts with origin/{lane.trunk} in '
+                      f'{", ".join(files)} — GitHub runs no pull_request workflow on a '
+                      f'conflicting PR, so its required checks never start; rebase the branch '
+                      f'onto origin/{lane.trunk} (git rebase origin/{lane.trunk}), never merge; '
+                      f'the factory publishes the rebased branch', files)
+            return 'back'
+        return self.heavy_kick(f, number)
+
+    def heavy_kick(self, f, number):
+        """``ci.heavy_after_review``: the head PR ``number`` was approved for heavy CI at
+        (the record's ``heavy``/``heavy_at``), once :data:`HEAVY_KICK_S` passed with its required
+        checks still skipped or missing, is looked at once: when no workflow run on it was created
+        since the approval, the label started nothing (a stale test merge ref without the
+        ``labeled`` trigger, an event GitHub dropped) and the lane dispatches the product's
+        ``ci.workflow`` on the branch — a run on the head, created after the approval, which the
+        gate reads like the labelled one. The head (the record's ``heavy_kick``, so it is looked at
+        once) or None: not due, not approved, unreadable, or nothing to dispatch."""
+        lane, b, rec, head = self.lane, f['branch'], f.get('prev') or {}, f.get('head')
+        if not head or not self.product.conventions.heavy_after_review() \
+                or rec.get('heavy') != head or rec.get('heavy_kick') == head:
+            return None
+        at = _parse_at(rec.get('heavy_at'))
+        now = lane.now or time.time()
+        if at is None or now - at < HEAVY_KICK_S:
+            return None
+        data = H.gh_json(['api', f'repos/{self.slug}/actions/runs?head_sha={head}&per_page=100'],
+                         None)
+        runs = data.get('workflow_runs') if isinstance(data, dict) else None
+        if not isinstance(runs, list):
+            return None
+        if any(isinstance(r, dict) and (_parse_at(r.get('created_at')) or 0) >= at
+               for r in runs):
+            return head  # the approval started a run: the queue and the checks own it from here
+        ci = self.product.ci if isinstance(getattr(self.product, 'ci', None), dict) else {}
+        workflow = ci.get('workflow')
+        if not workflow:
+            return None
+        mins = int((now - at) // 60)
+        if lane.dry_run:
+            lane.out(f'DRY: would dispatch {workflow} on {b}: PR #{number} approved at '
+                     f'{head[:9]} {mins} min ago, no run since')
+            return None
+        rc, out, err = H._gh(['workflow', 'run', workflow, '--ref', b, '-R', self.slug])
+        if rc != 0:
+            lane.out(f'harvest: {b}: PR #{number} no heavy run {mins} min after its approval — '
+                     f'dispatch of {workflow} refused: {H.tail(err or out)}')
+            return None
+        lane.out(f'harvest: {b}: PR #{number} no run on {head[:9]} {mins} min after its heavy-CI '
+                 f'approval — the label started nothing; dispatched {workflow} on the head')
+        return head
+
     def check_gate(self, f, number, files):
         """The PR's checks before the gate: ``'gate'`` (gate it locally), ``'ci'`` (its required
         checks passed under ``wait``), or None when it waits or went back. Under
         ``ci.heavy_after_review`` a head not yet approved for heavy CI is approved first
-        (:meth:`heavy_gate`) and waits."""
-        if self.heavy_gate(f, number):
-            return None
+        (:meth:`heavy_gate`) and waits — a code PR only: a docs PR's required checks are the
+        landing checks alone, which no heavy job answers for, so a label would buy a heavy run
+        nothing reads."""
         lane, b, rec = self.lane, f['branch'], f.get('prev') or {}
         cls = f.get('class') or landing_class(self.product, files)
+        if cls != DOCS and self.heavy_gate(f, number):
+            return None
         required, why = self.merge_required(lane.state_dir, cls, f.get('head'))
         if required is None:
             lane.out(f'waiting {b}: PR #{number} required checks unknown — {why}')
@@ -3554,6 +3626,13 @@ class GitHubHost(Host):
                      f'{running}')
             wait(lane, f, f'checks pending: {running}', state=WAITING_CI, since=since)
             return None
+        kick = {}
+        if skipped or missing:
+            stalled = self.stalled(f, number)
+            if stalled == 'back':
+                return None
+            if stalled:
+                kick = {'heavy_kick': stalled}
         for why in satisfied.values():
             lane.out(f'harvest: {b}: PR #{number} {why}')
         if skipped:
@@ -3562,7 +3641,8 @@ class GitHubHost(Host):
             # path-filtered) its completed workflow skipped it beside a required success
             lane.out(f'held {b}: PR #{number} required check(s) skipped, not green — '
                      f'{", ".join(skipped)}')
-            wait(lane, f, f'required checks skipped: {", ".join(skipped)}', state=WAITING_CI)
+            wait(lane, f, f'required checks skipped: {", ".join(skipped)}', state=WAITING_CI,
+                 **kick)
             return None
         if not missing:
             f['on_checks'] = True  # :meth:`recheck` judges the same skips again before MERGING
@@ -3572,7 +3652,7 @@ class GitHubHost(Host):
             lane.out(f'waiting {b}: PR #{number} required check(s) not run — {", ".join(missing)} '
                      f'(landing_checks_missing: wait, {int(waited // 60)}/{int(limit // 60)} min)')
             wait(lane, f, f'required checks missing: {", ".join(missing)}', state=WAITING_CI,
-                 since=since)
+                 since=since, **kick)
             return None
         lane.out(f'harvest: {b}: PR #{number} required check(s) never ran in {int(limit // 60)} '
                  f'min — {", ".join(missing)}: gating locally')
