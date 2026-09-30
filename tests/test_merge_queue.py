@@ -116,7 +116,7 @@ class QueueRepo(LaneFixture):
             merge_queue.run(ln, ready)
         return ln
 
-    def record_back(self, ln, f, kind, text, files):
+    def record_back(self, ln, f, kind, text, files, **_kw):
         ln.results[f['branch']] = 'back'
         self.backs.append((f['branch'], kind, text, list(files)))
 

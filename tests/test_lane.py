@@ -2101,6 +2101,164 @@ class TrunkCopiesDropped(LaneFixture):
         self.assertIn('rebuild guard', res['why'])
 
 
+class GitMechanicsNeverSpawnASession(LaneFixture):
+    """2026-09-30: pure git mechanics are the lane's, never a session's. A person or an agent
+    merged the trunk into a lane branch by hand (a merge alone: B-0056's hold sent a session to
+    rebase it); a branch the host calls conflicting went back to a session even when git
+    rebases it clean. The lane rebases it itself — the product's pre-push check run on the
+    result first, one push over a lease, the old tip archived — and only a textual conflict
+    (its files named) or a red check reaches a session."""
+
+    B, AUTHOR = NamingRepair.B, NamingRepair.AUTHOR
+    tip = NamingRepair.tip
+    commit = TrunkCommitsNeverReworded.commit
+    own = TrunkCopiesDropped.own
+    sessions = TrunkCopiesDropped.sessions
+
+    def setUp(self):
+        super().setUp()
+        self.lines = []
+
+    def branch(self, files=None):
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        sh(['git', 'checkout', '-q', '-B', self.B, 'origin/main'], cwd=self.worker)
+        self.commit('feat(T-0001): the door', files or {'a.txt': 'a\n'})
+        sh(['git', 'push', '-q', '-f', 'origin', self.B], cwd=self.worker)
+        return self.tip()
+
+    def archive(self, tag, old):
+        return sh(['git', 'rev-parse', '--verify', '-q',
+                   f'refs/heads/archive/{self.B}-{tag}-{old[:9]}'],
+                  cwd=self.origin).stdout.strip()
+
+    def facts(self, old):
+        self.session('coder-t-0001', 'T-0001', self.B)
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.repo)
+        return {'branch': self.B, 'kind': 'code', 'class': lane.CODE, 'item': 'T-0001',
+                'head': old, 'prev': rec(lane.GATE, head=old, pr=7), 'correction': None,
+                'run': {'job': 'coder-t-0001', 'item': 'T-0001', 'branch': self.B,
+                        'kind': 'coder'}}
+
+    def test_a_trunk_merged_in_by_hand_is_dropped_by_the_lane_not_a_session(self):
+        self.branch()
+        self.push_main({'y.txt': 'y\n'}, 'fix: y (#811)')
+        sh(['git', 'checkout', '-q', self.B], cwd=self.worker)
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        sh(['git', 'merge', '-q', '--no-edit', 'origin/main'], cwd=self.worker, env_=self.AUTHOR)
+        sh(['git', 'push', '-q', '-f', 'origin', self.B], cwd=self.worker)
+        old = self.tip()
+        self.session('coder-t-0001', 'T-0001', self.B)
+        trunk = self.origin_main()
+        lane.lane_pass(self.product(), self.state_dir, out=self.lines.append)
+        new = self.tip()
+        self.assertNotEqual(new, old)
+        self.assertEqual(self.own(new), ['feat(T-0001): the door'])
+        self.assertEqual(sh(['git', 'rev-list', '--merges', f'main..{new}'],
+                            cwd=self.origin).stdout, '')
+        self.assertEqual(sh(['git', 'rev-parse', f'{new}~1'], cwd=self.origin).stdout.strip(),
+                         trunk)
+        self.assertEqual(self.archive('copies', old), old)
+        self.assertEqual(lifecycle.corrections(self.sessions()), {})
+        self.assertFalse(any('back to its session' in l for l in self.lines), self.lines)
+        self.assertEqual(self.lane_of(self.B)['state'], lane.GATE)
+        self.assertEqual(self.origin_main(), trunk)
+
+    def test_a_conflict_git_rebases_clean_is_pushed_by_the_lane(self):
+        old = self.branch()
+        self.push_main({'y.txt': 'y\n'}, 'fix: y (#811)')
+        trunk = self.origin_main()
+        ln = lane.Lane(self.product(), self.state_dir, out=self.lines.append)
+        f = self.facts(old)
+        got = lane.send_back(ln, f, 'conflict', 'PR #7 merge refused — not mergeable', [])
+        self.assertEqual(got, 'rebased')
+        new = self.tip()
+        self.assertEqual(sh(['git', 'rev-parse', f'{new}~1'], cwd=self.origin).stdout.strip(),
+                         trunk)
+        self.assertEqual(self.own(new), ['feat(T-0001): the door'])
+        self.assertEqual(self.archive('rebase', old), old)
+        self.assertEqual(f['head'], new)
+        self.assertEqual(self.lane_of(self.B)['state'], lane.PUSHED)
+        self.assertEqual(lifecycle.corrections(self.sessions()), {})
+        self.assertTrue(any(l.startswith(f'rebased {self.B} onto origin/main') and 'no session'
+                            in l for l in self.lines), self.lines)
+        self.assertEqual(self.origin_main(), trunk)
+
+    def test_a_textual_conflict_goes_to_a_session_naming_the_files(self):
+        self.push_main({'c.txt': 'base\n'}, 'chore: c')
+        old = self.branch({'c.txt': 'branch\n'})
+        self.push_main({'c.txt': 'trunk\n'}, 'fix: c on the trunk (#813)')
+        ln = lane.Lane(self.product(), self.state_dir, out=self.lines.append)
+        f = self.facts(old)
+        got = lane.send_back(ln, f, 'conflict', 'PR #7 merge refused — not mergeable', [])
+        self.assertEqual(got, 'held')
+        self.assertEqual(self.tip(), old)
+        self.assertEqual(self.archive('rebase', old), '')
+        corr = lifecycle.corrections(self.sessions())['T-0001']
+        self.assertEqual(corr['kind'], 'conflict')
+        self.assertIn('git stops at', corr['text'])
+        self.assertIn('conflicts in c.txt', corr['text'])
+        self.assertEqual(self.lane_of(self.B)['state'], lane.BACK)
+
+    def test_the_pre_push_check_runs_before_the_mechanical_push(self):
+        old = self.branch()
+        self.push_main({'y.txt': 'y\n'}, 'fix: y (#811)')
+        marker = os.path.join(self.base, "checked")
+        check = f'test -f y.txt && test -f a.txt && echo ok > {marker}'
+        ln = lane.Lane(self.product(pre_push_check=check), self.state_dir,
+                       out=self.lines.append)
+        self.assertEqual(lane.send_back(ln, self.facts(old), 'conflict', 'x', []), 'rebased')
+        self.assertTrue(os.path.exists(marker))  # run on the rebased head: both files there
+        self.assertNotEqual(self.tip(), old)
+
+    def test_a_red_pre_push_check_is_a_session_naming_the_failure_and_pushes_nothing(self):
+        old = self.branch()
+        self.push_main({'y.txt': 'y\n'}, 'fix: y (#811)')
+        ln = lane.Lane(self.product(pre_push_check='echo R-1101 changeset names a private '
+                                                   'package; exit 3'),
+                       self.state_dir, out=self.lines.append)
+        got = lane.send_back(ln, self.facts(old), 'conflict', 'PR #7 merge refused', [])
+        self.assertEqual(got, 'held')
+        self.assertEqual(self.tip(), old)
+        self.assertEqual(self.archive('rebase', old), '')
+        corr = lifecycle.corrections(self.sessions())['T-0001']
+        self.assertIn('pre-push check fails', corr['text'])
+        self.assertIn('exit 3', corr['text'])
+        self.assertIn('R-1101 changeset names a private package', corr['text'])
+
+    def test_a_hand_merge_whose_rebuild_fails_the_pre_push_check_is_held_unpushed(self):
+        self.branch()
+        self.push_main({'y.txt': 'y\n'}, 'fix: y (#811)')
+        sh(['git', 'checkout', '-q', self.B], cwd=self.worker)
+        sh(['git', 'fetch', '-q', 'origin'], cwd=self.worker)
+        sh(['git', 'merge', '-q', '--no-edit', 'origin/main'], cwd=self.worker, env_=self.AUTHOR)
+        sh(['git', 'push', '-q', '-f', 'origin', self.B], cwd=self.worker)
+        old = self.tip()
+        self.session('coder-t-0001', 'T-0001', self.B)
+        lane.lane_pass(self.product(pre_push_check='echo lint: 2 findings; exit 1'),
+                       self.state_dir, out=self.lines.append)
+        self.assertEqual(self.tip(), old)
+        self.assertEqual(self.archive('copies', old), '')
+        corr = lifecycle.corrections(self.sessions())['T-0001']
+        self.assertEqual((corr['kind'], corr['rounds']), (lane.COPIES, 0))
+        self.assertIn('lint: 2 findings', corr['text'])
+
+    def test_a_live_session_or_a_foreign_branch_is_never_rebased_by_the_lane(self):
+        old = self.branch()
+        self.push_main({'y.txt': 'y\n'}, 'fix: y (#811)')
+        ln = lane.Lane(self.product(), self.state_dir, out=self.lines.append)
+        for extra in ({'live': True}, {'foreign': True}, {'kind': None}):
+            f = dict(self.facts(old), **extra)
+            self.assertIsNone(ln.rebase_onto_trunk(f))
+        self.assertEqual(self.tip(), old)
+
+    def test_a_merge_queue_conflict_with_a_batch_ahead_is_not_rebased(self):
+        ln = lane.Lane(self.product(), self.state_dir, out=self.lines.append)
+        f = self.facts(self.branch())
+        with mock.patch.object(lane.Lane, 'rebase_onto_trunk') as rb:
+            lane.send_back(ln, f, 'conflict', 'x', ['a.txt'], rebase=False)
+        rb.assert_not_called()
+
+
 class RefGuard(LaneFixture):
     """The product's host may protect nothing: every factory ref write refuses the trunk and a
     ``conventions.protected_refs`` ref itself, with one loud line."""

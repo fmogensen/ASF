@@ -1944,6 +1944,14 @@ class State:
         return f'{self.name}({self.reason})' if self.reason else self.name
 
 
+#: ``judge``'s verdict on a run whose worktree holds nothing origin lacks — no file, no commit —
+#: while its branch is not on origin (landed and deleted, or reaped): there is no work to push.
+NOTHING_UNPUSHED = f'failed: {NOT_PUSHED}: 0 uncommitted file(s), 0 unpushed commit(s)'
+#: The run kinds that work on a branch another run already pushed: a :data:`NOTHING_UNPUSHED`
+#: end of one is a no-op, never an ``unpushed`` hold that buys a session to push nothing.
+ON_A_PUSHED_BRANCH = ('correct', 'review', 'adjudicate', 'rebase')
+
+
 def push_gap(ev):
     """The reason a result that says ok is not ``finished``: what is not on origin (B-0051)."""
     return f'{NOT_PUSHED}: {ev.uncommitted} uncommitted file(s), {ev.unpushed} unpushed commit(s)'

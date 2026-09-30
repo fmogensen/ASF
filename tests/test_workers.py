@@ -2231,6 +2231,31 @@ class NothingToLandHealthTests(Home):
         s = pool_mod.load_sessions(self.product)['correct-1']
         self.assertEqual(s['end_reason'], lifecycle.NOTHING_TO_LAND)
 
+    def test_a_correct_run_with_nothing_unpushed_is_a_no_op_not_a_hold(self):
+        # 2026-09-26..28: correct/review sessions ended `not pushed: 0 uncommitted file(s), 0
+        # unpushed commit(s)` and each bought another session to push nothing
+        branch = 'correct/F-0009'
+        text = self._report('F-0009', 'correct', branch)
+        self.spawn('correct-9', 'F-0009', 'correct', {'ok': True, 'pid': 91, 'result': text},
+                   branch=branch)  # never pushed: its branch is not on origin
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertIn(('correct-9', 'ended', lifecycle.NOTHING_UNPUSHED), found)
+        rejudged = [d for j, w, d in found if j == 'correct-9' and w == 're-judged']
+        self.assertEqual(len(rejudged), 1, found)
+        self.assertFalse([f for f in found if f[0] == 'correct-9' and f[1] in ('held', 'parked')],
+                         found)
+        s = pool_mod.load_sessions(self.product)['correct-9']
+        self.assertEqual(s['end_reason'], lifecycle.NOTHING_TO_LAND)
+        self.assertNotIn('correction', s)
+
+    def test_a_coder_run_with_nothing_unpushed_is_still_held(self):
+        branch = 'coder/F-0010'
+        text = self._report('F-0010', 'coder', branch)
+        self.spawn('coder-10', 'F-0010', 'coder', {'ok': True, 'pid': 92, 'result': text},
+                   branch=branch)
+        found = health_mod.health(self.product, alive=lambda pid: False, out=lambda s: None)
+        self.assertTrue([f for f in found if f[0] == 'coder-10' and f[1] == 'held'], found)
+
     def test_a_coder_run_with_an_empty_branch_and_a_clean_report_is_still_held(self):
         branch = 'coder/F-0001'
         text = self._report('F-0001', 'coder', branch)

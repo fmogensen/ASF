@@ -390,7 +390,10 @@ def cut(lane, group, base_sha, base_ref, st):
                     + (f' beside {partner}' if partner else '')
                     + (f'; conflicts in {", ".join(files)}' if files else '')
                     + f' — rebase the branch onto origin/{trunk} (git rebase origin/{trunk}), '
-                    f'never merge; the factory publishes the rebased branch', files)
+                    f'never merge; the factory publishes the rebased branch', files,
+                    # a batch ahead of it is what it conflicts with: a rebase onto the trunk
+                    # alone cannot clear that, so the lane does not try one
+                    rebase=not base_ref)
                 continue
             members.append(f)
         if not members:
