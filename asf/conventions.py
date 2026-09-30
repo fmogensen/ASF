@@ -42,6 +42,10 @@ The product yaml carries the overrides::
       worktree_setup: make deps   # run in every fresh worker worktree (unset = nothing)
       pre_push_check: make lint   # the product's cheap gate checks: every code brief names it as
                                   # the command that must pass before a push (unset = none)
+      ci:
+        heavy_after_review: true  # default false: a PR's heavy CI jobs run only once its review
+                                  # approved the head — the lane labels it (heavy_label, default
+                                  # asf:heavy-ci); the light checks run on every push
       merge: auto                 # auto | manual (default manual): under auto the lane merges
                                   # every open PR on the trunk whose required checks are green
                                   # and whose factory review approved it — no operator click
@@ -326,7 +330,10 @@ LANE_KEYS = {'review': 'lane_review', 'stale_after': 'lane_stale_after'}
 #: fails loud: :meth:`Conventions.shape_findings` names it, and the doctor's ``conventions`` row
 #: is red with the key and the line.
 MAP_CONVENTIONS = ('models', 'branch_prefixes', 'harvest', 'git', 'branch_retention', 'commit',
-                   'budget', 'merge_queue', 'roles', 'sequences')
+                   'budget', 'merge_queue', 'roles', 'sequences', 'ci')
+#: ``ci.heavy_label``'s default: the PR label the lane puts on a head its review approved under
+#: ``ci.heavy_after_review`` — the product's workflow runs its heavy jobs only on a PR carrying it.
+DEFAULT_HEAVY_CI_LABEL = 'asf:heavy-ci'
 #: ``commit.signoff_check``'s default: a PR check whose name contains it is the sign-off check.
 DEFAULT_SIGNOFF_CHECK = 'DCO'
 #: The conventions that take one word or a map of those words per landing class (``default:``
@@ -921,6 +928,22 @@ class Conventions:
         value = self.map_of('commit').get('signoff_check')
         return str(value).strip() if isinstance(value, str) and value.strip() \
             else DEFAULT_SIGNOFF_CHECK
+
+    def heavy_after_review(self):
+        """``ci.heavy_after_review: true`` — review before heavy CI: every push runs the product's
+        light checks, and its heavy jobs run only once the lane put :meth:`heavy_label` on a PR
+        whose head the review approved (:meth:`asf.harvest.lane.GitHubHost.heavy_gate`). The
+        label comes off when the branch goes back to a session or its head moves. False unless
+        set."""
+        value = self.map_of('ci').get('heavy_after_review')
+        return value is True or str(value).strip().lower() in ('true', 'yes', 'on')
+
+    def heavy_label(self):
+        """``ci.heavy_label``: the PR label that approves a head for heavy CI —
+        :data:`DEFAULT_HEAVY_CI_LABEL` unless set."""
+        value = self.map_of('ci').get('heavy_label')
+        return value.strip() if isinstance(value, str) and value.strip() \
+            else DEFAULT_HEAVY_CI_LABEL
 
     def is_signoff_check(self, name):
         """True when a PR check called ``name`` is the product's sign-off check."""

@@ -51,6 +51,8 @@ When the failure below says the footprint was widened, the paths it added are in
 CORRECTION: the step failed with:
 FAIL: test_red_gate
 
+ONE PUSH: this is a correction round. Answer every point above in this one session, commit as you go, and push once — `git push` is your last act, never a push per fix. Each push starts the product's CI again and cancels the run before it; a second push in this session is recorded as a defect of the run.
+
 ## The heartbeat, the marker, and the report
 
 Print a progress line as you go — what you are doing, not that you are doing something. A session

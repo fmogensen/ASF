@@ -100,10 +100,33 @@ else
     common=$(git rev-parse --git-common-dir 2>/dev/null) && own="$common/hooks"
 fi
 
+same=0
 if [ -n "$own" ] && [ -d "$own" ]; then
     resolved=$(cd "$own" && pwd -P)
-    [ "$resolved" = "$here" ] && exit 0
+    [ "$resolved" = "$here" ] && same=1
 fi
+
+# one push per correction round (asf.workers.pushlog): a push the product's own pre-push hook
+# passed is logged — its local sha, one line — and a correction session is told on its second
+if [ "$name" = "pre-push" ] && [ -n "$ASF_PUSH_LOG" ]; then
+    input=$(cat)
+    rc=0
+    if [ "$same" = 0 ] && [ -n "$own" ] && [ -x "$own/$name" ]; then
+        if [ -n "$input" ]; then printf '%s\n' "$input"; fi | "$own/$name" "$@"
+        rc=$?
+    fi
+    if [ "$rc" = 0 ] && [ -n "$input" ]; then
+        printf '%s\n' "$input" | awk 'NF >= 4 && $2 !~ /^0+$/ { print $2 }' \
+            >> "$ASF_PUSH_LOG" 2>/dev/null || :
+        n=$(sort -u "$ASF_PUSH_LOG" 2>/dev/null | grep -c .)
+        if [ -n "$ASF_ONE_PUSH" ] && [ "${n:-0}" -gt 1 ]; then
+            echo "asf: push $n of this correction round — a correction pushes once, as its last act; each push restarts CI and cancels the run before it. This run's report counts it as a defect." >&2
+        fi
+    fi
+    exit $rc
+fi
+
+[ "$same" = 1 ] && exit 0
 
 if [ -n "$own" ] && [ -x "$own/$name" ]; then
     exec "$own/$name" "$@"

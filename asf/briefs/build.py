@@ -464,13 +464,24 @@ def replan_context(product, feature, items):
     }
 
 
+#: The one-push rule a correction round's brief ends with (:mod:`asf.workers.pushlog`).
+ONE_PUSH_RULE = ('\n\nONE PUSH: this is a correction round. Answer every point above in this one '
+                 'session, commit as you go, and push once — `git push` is your last act, never '
+                 'a push per fix. Each push starts the product\'s CI again and cancels the run '
+                 'before it; a second push in this session is recorded as a defect of the run.')
+
+
 def correction_text(row, kind):
     """A ``correct`` brief — or a spec/plan brief a refused landing sent back, or the adjudicate
     brief of a branch held at the round cap — ends with the failure the harvest recorded, under
-    stall's head."""
+    stall's head; a correction round (:data:`asf.workers.pushlog.ONE_PUSH_KINDS`) then with
+    :data:`ONE_PUSH_RULE`."""
+    from asf.workers import pushlog
     text = getattr(row, 'correction', '') or ''
-    return CORRECTION_HEAD + text.rstrip() \
-        if kind in ('correct', 'spec', 'plan', 'adjudicate', 'delivery-code') and text else ''
+    if not (kind in ('correct', 'spec', 'plan', 'adjudicate', 'delivery-code') and text):
+        return ''
+    return CORRECTION_HEAD + text.rstrip() + (ONE_PUSH_RULE if kind in pushlog.ONE_PUSH_KINDS
+                                              else '')
 
 
 def delivery_checks(facts):

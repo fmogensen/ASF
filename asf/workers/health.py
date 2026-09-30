@@ -59,6 +59,7 @@ from asf.workers import cloudpid
 from asf.workers import headroom
 from asf.workers import observe
 from asf.workers import pool as pool_mod
+from asf.workers import pushlog
 from asf.workers import report as report_mod
 from asf.workers import runtime as runtime_mod
 from asf.workers import lifecycle
@@ -732,6 +733,12 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
                                 runtime_session=runtime_mod.runtime_session(s.get('log')) or None)
         s.update(ended=now, end_reason=reason)
         found.append((job, 'ended', reason))
+        pushes, defect = pushlog.defect(product, s)
+        if pushes:  # one push per correction round: a second one is this run's defect
+            extra = {'defect': defect} if defect else {}
+            pool_mod.update_session(product, job, pushes=pushes, **extra)
+            if defect:
+                found.append((job, 'defect', defect))
         question = report_mod.needs_input(str((ev.result or {}).get('result') or ''))
         if lifecycle.quota_exhausted(s):
             # the account's window, not the work: its account stops until the reset, and the
