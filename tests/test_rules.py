@@ -404,6 +404,44 @@ class LoadRulesTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 6.0)
 
 
+class SupersededRuleTests(unittest.TestCase):
+    """F-0046 §1.4: a superseded rule is skipped, never counted as an unenforced gap, because
+    its successor is enforced in its place — and its script is never resolved or run."""
+
+    def setUp(self):
+        self.root = make_repo()
+        write_rule(self.root, 'R-0001', 'Live', typed_lines=['check: tools/checks/r1.sh'])
+        write_check(self.root, 'r1.sh',
+                    "#!/usr/bin/env bash\n"
+                    "echo 'R-0001 successor violation sha=abc1234 2026-09-21T06:00:00Z'\n"
+                    "exit 1\n")
+        self.marker = os.path.join(self.root, 'marker')
+        write_rule(self.root, 'R-0002', 'Superseded', typed_lines=[
+            'check: tools/checks/r2.sh', 'superseded_by: R-0001'])
+        write_check(self.root, 'r2.sh',
+                    "#!/usr/bin/env bash\n"
+                    f"touch {self.marker}\n"
+                    "echo 'R-0002 superseded violation sha=abc1234 2026-09-21T06:00:00Z'\n"
+                    "exit 1\n")
+        reindex(self.root)
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_superseded_rule_is_not_loaded(self):
+        self.assertEqual([r['id'] for r in rules.load_rules(self.root)], ['R-0001'])
+
+    def test_check_counts_and_runs_only_the_successor(self):
+        proc = run_rules(self.root, ['check'])
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        lines = proc.stdout.strip().split('\n')
+        self.assertEqual(lines[0], '== RULES 1 checked, 1 violations, 0 unenforced')
+        self.assertIn("R-0001 successor violation sha=abc1234 2026-09-21T06:00:00Z",
+                      proc.stdout)
+        self.assertNotIn("R-0002", proc.stdout)
+        self.assertFalse(os.path.exists(self.marker))
+
+
 if __name__ == '__main__':
     unittest.main()
 
