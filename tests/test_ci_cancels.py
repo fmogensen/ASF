@@ -9,8 +9,10 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from asf import ci_cancels, ci_queue
+from asf.metrics import metrics
 
 
 def _hook_free_env():
@@ -323,3 +325,82 @@ class Claims(unittest.TestCase):
             json.dump({'1': {'cause': 'relief', 'at': '2026-01-01T00:00:00Z'}, '2': 'not-a-dict'},
                       f)
         self.assertEqual(set(ci_cancels.claims(self.tmp)), {'1'})
+
+
+class RunListing(unittest.TestCase):
+    def test_the_workflow_filter_matches_the_path_basename_not_the_display_name(self):
+        """C — the run's ``name`` is the workflow file's ``name:`` YAML key (here ``tests``, as
+        in this repo's own .github/workflows/tests.yml), never the configured
+        ``product.ci['workflow']`` file name (``ci.yml``); only ``path`` carries the file name,
+        matched via ``os.path.basename`` the same way ``ci_queue.py:1041,3040`` already does."""
+        from asf import env
+        product = env.Product('sample', {'repo_slug': 'sample/sample', 'ci': {'workflow': 'ci.yml'}})
+
+        def fake_gh_lines(args, timeout=300):
+            return [{'id': 1, 'name': 'tests', 'path': '.github/workflows/ci.yml',
+                      'head_branch': 'b', 'head_sha': 'a' * 40, 'conclusion': 'cancelled',
+                      'created_at': '2026-09-21T01:00:00Z', 'updated_at': '2026-09-21T01:01:00Z',
+                      'run_attempt': 1, 'event': 'push', 'pr': [7]},
+                     {'id': 2, 'name': 'tests', 'path': '.github/workflows/other.yml',
+                      'head_branch': 'b', 'head_sha': 'a' * 40, 'conclusion': 'cancelled',
+                      'created_at': '2026-09-21T01:00:00Z', 'updated_at': '2026-09-21T01:01:00Z',
+                      'run_attempt': 1, 'event': 'push', 'pr': []}]
+
+        with mock.patch.object(metrics, 'gh_lines', side_effect=fake_gh_lines):
+            out = ci_cancels._run_listing(product, '2026-09-20')
+        self.assertEqual([r['id'] for r in out], [1])
+        self.assertEqual(out[0]['pr'], 7)
+
+
+class Table(unittest.TestCase):
+    def test_every_cause_is_a_row_even_at_zero(self):
+        classification = {'rows': [{'run': 1, 'branch': 'b', 'sha': 'a', 'cause': 'rewrite',
+                                     'group': 'wasted', 'minutes': 10},
+                                    {'run': 2, 'branch': 'b', 'sha': 'a', 'cause': 'relief',
+                                     'group': 'traded', 'minutes': 5}],
+                           'strays': 0}
+        table = ci_cancels.rows(classification)
+        self.assertEqual(tuple(r['cause'] for r in table), ci_cancels.CAUSES)
+        by_cause = {r['cause']: r for r in table}
+        self.assertEqual(by_cause['rewrite']['runs'], 1)
+        self.assertEqual(by_cause['relief']['runs'], 1)
+        for c in ci_cancels.CAUSES:
+            if c not in ('rewrite', 'relief'):
+                self.assertEqual(by_cause[c]['runs'], 0)
+                self.assertEqual(by_cause[c]['minutes'], 0)
+
+    def test_the_share_is_of_minutes_and_the_footer_is_red_past_the_threshold(self):
+        # rewrite carries WASTED_ALERT_PCT exactly (20 of 100 minutes); the rest is sound.
+        classification = {'rows': [{'run': 1, 'branch': 'b', 'sha': 'a', 'cause': 'rewrite',
+                                     'group': 'wasted', 'minutes': 20},
+                                    {'run': 2, 'branch': 'b', 'sha': 'a', 'cause': 'newhead',
+                                     'group': 'sound', 'minutes': 80}],
+                           'strays': 0}
+        table = ci_cancels.rows(classification)
+        self.assertEqual(sum(r['share'] for r in table), 100)
+        by_cause = {r['cause']: r for r in table}
+        self.assertEqual(by_cause['rewrite']['share'], ci_cancels.WASTED_ALERT_PCT)
+        rendered = ci_cancels.render('p', 'clause', table, classification['strays'])
+        self.assertIn('RED', rendered.splitlines()[-1])
+        self.assertIn('F-0203', rendered)
+        self.assertIn('unknown 0 %', rendered)
+
+        # one point below the threshold: OK, and the unknown share is still named.
+        under = {'rows': [{'run': 1, 'branch': 'b', 'sha': 'a', 'cause': 'rewrite',
+                            'group': 'wasted', 'minutes': 19},
+                           {'run': 2, 'branch': 'b', 'sha': 'a', 'cause': 'unresolved',
+                            'group': 'unknown', 'minutes': 81}],
+                 'strays': 0}
+        under_table = ci_cancels.rows(under)
+        under_rendered = ci_cancels.render('p', 'clause', under_table, under['strays'])
+        self.assertIn('OK', under_rendered.splitlines()[-1])
+        self.assertIn('unknown 81 %', under_rendered)
+
+    def test_the_title_line_is_the_registry_s(self):
+        from asf.views import header
+        table = ci_cancels.rows({'rows': [], 'strays': 0})
+        rendered = ci_cancels.render('acme', '2 days, 0 of 0 runs cancelled, 0 runner-minutes '
+                                              'thrown away', table, 0)
+        self.assertEqual(rendered.splitlines()[0],
+                          header.head('ci cancels', 'acme', '2 days, 0 of 0 runs cancelled, 0 '
+                                                             'runner-minutes thrown away'))

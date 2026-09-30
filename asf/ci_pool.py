@@ -1467,4 +1467,15 @@ def register(subparsers):
     ci_measure.register(sub)
     from asf import ci_queue
     ci_queue.register(sub)
+    from asf import ci_cancels
+    c = sub.add_parser('cancels', help='every cancelled run, told apart into one cause, as a '
+                                       'table (F-0230)')
+    env.add_product_arg(c)
+    c.add_argument('--days', type=int, default=2,
+                    help="the window in days (default 2) — past the factory's own two-day claim "
+                         "ledger every cancel in it falls back to inference")
+    c.add_argument('--no-fetch', action='store_true',
+                    help='never fetch an unresolvable head sha from origin')
+    c.add_argument('--json', action='store_true', help='the rows as a list of objects')
+    c.set_defaults(run=ci_cancels.cmd_cancels)
     return p
