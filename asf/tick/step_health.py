@@ -169,6 +169,18 @@ def widen_footprints(ctx, items, out=print):
         return None
 
 
+def close_landed_parks(ctx, out=print):
+    """A park whose reason carries verified trunk evidence closes its card on that sha
+    (:func:`asf.workers.trunkclose.close_parked`) instead of waiting for a person. A failure
+    here is one line; the sessions' health stands."""
+    from asf.workers import trunkclose
+    try:
+        return trunkclose.close_parked(ctx.product, out=out)
+    except Exception as e:  # noqa: BLE001 — never takes the health step down
+        out(f'trunk: parks not read — {type(e).__name__}: {e}')
+        return []
+
+
 def run(ctx, out=print, runtime_fn=_runtime):
     product = ctx.product
     items = health_mod.record_items(product)
@@ -176,6 +188,7 @@ def run(ctx, out=print, runtime_fn=_runtime):
     reap_worktrees(ctx, out=out)
     file_rulings(ctx, out=out)  # B-0064
     widen_footprints(ctx, items, out=out)
+    close_landed_parks(ctx, out=out)
     stalled = stall_mod.stall(product, out=out)
     ctx.counts['stalls'] += len(stalled)
     sessions = pool_mod.load_sessions(product)

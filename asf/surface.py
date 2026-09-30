@@ -54,6 +54,7 @@ COMMANDS = {
     'next':                 ('print what the next turn would start, most urgent first', None, None),
     'workers':              ('run the worker pool: spawn a wave, read its health, its stalls and its quota', HOST, 'spawn'),
     'unpark':               ('release an item the pool is holding', RECORD, None),
+    'park':                 ('hold an item or a branch until it is released', RECORD, None),
     'brief':                ('print the brief a worker would be given, for the next row or for one item', None, None),
     'import-sessions':      ("import an earlier runner's session log into the factory's metrics", RECORD, None),
     'approvals':            ('print the approval matrix and the open holds, or resolve one', RECORD, 'resolve'),

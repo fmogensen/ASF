@@ -73,6 +73,7 @@ from asf.workers import host as host_mod
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
 from asf.workers import relaunch
+from asf.workers import trunkclose
 
 #: PD9 — for a kind whose job name is not ``<brief kind>-<item id>``, the Row attribute that
 #: carries the job's key instead (the groom brief's job is ``groom-<date>``, D7).
@@ -488,7 +489,10 @@ def relaunch_capped(product, row, wrow, out=print):
     """True when ``wrow`` is not launched: the same job was handed the same state (head, card,
     cause) :data:`asf.workers.relaunch.CAP` times, or once with a terminal report
     (:func:`asf.workers.relaunch.verdict`). The job's newest run is parked instead — the feeder
-    shows it ``PARKED`` from the next read on. ``wrow.cause`` is set for the ledger either way."""
+    shows it ``PARKED`` from the next read on — unless the last report names a commit git
+    verifies on the trunk and the branch holds nothing past it: then the run is closed on that
+    sha (:func:`asf.workers.trunkclose.close`), never parked. ``wrow.cause`` is set for the
+    ledger either way."""
     wrow.cause = relaunch.cause_key(row.kind, getattr(row, 'correction', '') or '')
     path = pool_mod.sessions_path(product)
     head = None
@@ -498,14 +502,23 @@ def relaunch_capped(product, row, wrow, out=print):
                            cwd=product.repo_dir, capture_output=True, text=True)
         head = p.stdout.strip() if p.returncode == 0 else None
     try:
-        reason = relaunch.verdict(path, wrow.job, wrow.item, head=head,
-                                  card=wrow.card_digest, cause=wrow.cause,
-                                  repo=product.repo_dir, main=product.main)
+        reason, landed = relaunch.assess(path, wrow.job, wrow.item, head=head,
+                                         card=wrow.card_digest, cause=wrow.cause,
+                                         repo=product.repo_dir, main=product.main)
+        hit = trunkclose.evidence(path, wrow.item, product.repo_dir, product.main) \
+            if reason and landed else None
     except Exception as e:  # noqa: BLE001 — the cap never blocks a wave by failing
         out(f'relaunch: cap check failed for {wrow.job} — {e}')
         return False
     if not reason:
         return False
+    if hit:
+        # the park would only ask a person to close what git already proves landed
+        sha, run, _claim = hit
+        trunkclose.close(product, run['job'], sha, reason)
+        out(f'closed   {wrow.job:<24} {wrow.item:<10} — landed: {sha[:9]} (verified on '
+            f'origin/{product.main}); not relaunched, not parked')
+        return True
     pool_mod.update_session(product, wrow.job,
                             **relaunch.park_fields(reason, wrow.card_digest, pool_mod.now_iso()))
     out(f'parked   {wrow.job:<24} {wrow.item:<10} — {reason}')
@@ -750,6 +763,8 @@ def launch(ctx, out=print):
             job = job_name(row.brief_kind, row.item_id)
             out(f'waits    {job:<24} {row.item_id:<10} — held {cls} ({level})')
             continue
+        if trunkclose.closes_before_launch(product, row.brief_kind, row.item_id, out):
+            continue                            # its work is verified on the trunk: closed
         bypass = s1_bypass_open and (items.get(row.item_id) or {}).get('severity') == 'S1'
         if host_held and not bypass:             # a loaded host takes no new session this tick
             job = job_name(row.brief_kind, row.item_id)

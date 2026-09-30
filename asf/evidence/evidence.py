@@ -1134,7 +1134,9 @@ def merge_facts(product, path=None):
             if not sha or not item:
                 continue
             lane = run.get("lane") if isinstance(run.get("lane"), dict) else {}
-            kind = lane_kind(branch, prefixes)
+            # a run closed on verified trunk evidence (asf.workers.trunkclose) lands its item
+            # whatever lane its branch was: the sha is the item's work, not a document's merge
+            kind = None if run.get("trunk_closed") else lane_kind(branch, prefixes)
             if kind:
                 out["docs"].setdefault(item, []).append(
                     {"kind": kind, "sha": sha, "branch": branch,

@@ -41,7 +41,8 @@ Prints, in order:
   (:func:`asf.tick.land_spec.adopt`) and one ``lane: …``/``waiting …``/``held …``/``DRY: would
   …`` per open code branch or PR (:class:`asf.harvest.lane.Lane`);
 * ``== wave`` — one line per row the feeder would launch (``would launch``) or hold (``waits``),
-  and any ``INVARIANT …`` line the feeder check point logs
+  a ``would close`` line for a row (or a park) whose Task's work is verified on the trunk
+  (:mod:`asf.workers.trunkclose`), and any ``INVARIANT …`` line the feeder check point logs
   (:func:`asf.invariants.feeder_gate`) — dropped rows never launch here either; under host
   pressure (:func:`asf.tick.step_wave.host_hold`) every launching row is a ``waits … — held:
   host pressure …`` line and the section ends on ``wave: held: …``, as a live tick's would;
@@ -140,10 +141,15 @@ def _wave_rows(product, root, out):
     if not planned:
         out('(nothing planned)')
         return planned
+    from asf.workers import trunkclose
+    trunkclose.close_parked(product, out=out, dry_run=True)
     host_held, host_why, _reading = step_wave.host_hold(planned)
     for row in planned:
         key = getattr(row, step_wave.KIND_JOB_KEY.get(row.brief_kind, ''), None)
         job = step_wave.job_name(row.brief_kind, row.item_id, key=key)
+        if row.launches and trunkclose.closes_before_launch(product, row.brief_kind,
+                                                            row.item_id, out, dry_run=True):
+            continue
         if row.launches and host_held:
             out(f'waits        {job:<24} {row.item_id:<10} — held: {host_why}')
         elif row.launches:

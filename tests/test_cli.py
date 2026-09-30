@@ -261,6 +261,55 @@ class UnparkTests(unittest.TestCase):
         self.assertEqual(rc, 1, out)
         self.assertIn('not in the ledger', out)
 
+    def test_park_holds_an_item_until_unpark(self):
+        from asf.feeder import rows
+        from asf.workers import lifecycle
+        items = {'T-0017': {'id': 'T-0017', 'type': 'task', 'state': 'New'}}
+        self._ledger(dict(self.LAUNCH, ended='2026-09-01T09:30:00Z', end_reason='finished'))
+        before = self._read()
+        rc, out = self._run(['park', 'T-0017', '--why', 'waits on the vendor', '--product',
+                             'sample'])
+        self.assertEqual(rc, 0, out)
+        self.assertIn('parked T-0017 (job coder-t-0017): waits on the vendor', out)
+        self.assertEqual(len(self._read().splitlines()), len(before.splitlines()) + 1)
+        held, _ids = rows.correction_rows(items, env.load_product('sample'), set(),
+                                          lifecycle.corrections(self.path))
+        self.assertEqual([(r.item_id, r.waits_on) for r in held], [('T-0017', 'operator')])
+        self.assertIn('waits on the vendor', held[0].action)
+        rc, out = self._run(['park', 'T-0017', '--why', 'again', '--product', 'sample'])
+        self.assertEqual(rc, 1, out)
+        self.assertIn('already parked', out)
+        rc, out = self._run(['unpark', 'T-0017', '--product', 'sample'])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(lifecycle.corrections(self.path), {})
+
+    def test_park_on_a_branch_holds_the_item_its_run_is_on(self):
+        from asf.workers import lifecycle
+        self._ledger(dict(self.LAUNCH, branch='cloud/T-0017', ended='2026-09-01T09:30:00Z',
+                          end_reason='finished'))
+        rc, out = self._run(['park', 'cloud/T-0017', '--why', 'hold the branch',
+                             '--product', 'sample'])
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(lifecycle.corrections(self.path)['T-0017']['parked'])
+
+    def test_park_on_an_untouched_item_holds_it_without_a_launch_or_an_attempt(self):
+        from asf.workers import lifecycle
+        self._ledger(dict(self.LAUNCH, ended='2026-09-01T09:30:00Z', end_reason='finished'))
+        rc, out = self._run(['park', 'T-0099', '--why', 'not yet', '--product', 'sample'])
+        self.assertEqual(rc, 0, out)
+        self.assertIn('park-t-0099', out)
+        self.assertTrue(lifecycle.corrections(self.path)['T-0099']['parked'])
+        self.assertNotIn('T-0099', lifecycle.attempts(self.path))
+        self.assertEqual(lifecycle.inflight(self.path), [])
+        rc, out = self._run(['unpark', 'T-0099', '--product', 'sample'])
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn('T-0099', lifecycle.corrections(self.path))
+
+    def test_park_refuses_a_name_that_is_no_item_and_no_branch(self):
+        self._ledger(dict(self.LAUNCH))
+        rc, out = self._run(['park', 'no/such', '--why', 'x', '--product', 'sample'])
+        self.assertEqual(rc, 1, out)
+
     def test_the_feeder_stops_holding_the_row_once_unparked(self):
         from asf.feeder import rows
         from asf.workers import lifecycle
