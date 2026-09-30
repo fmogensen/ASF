@@ -84,6 +84,21 @@ def rel_link(folder, iid):
 
 # ---------------------------------------------------------------- loading --
 
+#: ``{abspath: (text, meta, body)}`` — a card parsed once per *version* of its text: the record
+#: step's thirteen-plus ``load_items`` calls (P6) used to reparse the whole corpus each. Keyed on
+#: content, never on mtime/size (a coarse filesystem clock can leave both unchanged across a
+#: rewrite, and ``load_items`` reads the file anyway, so the read is already paid for) — the shape
+#: ``lifecycle._REGISTRY_CACHE`` uses for the same reason. A parse error is not cached: a file
+#: that fails to parse is reported on every call, as it is now. ``meta`` is never handed out
+#: directly; every caller gets ``frontmatter.clone(meta)``, a copy it may mutate freely.
+_PARSE_CACHE = {}
+_PARSE_CACHE_MAX = 4096
+
+
+def clear_parse_cache():
+    _PARSE_CACHE.clear()
+
+
 def load_items(root, folders=None):
     """Scan item folders. Returns (by_id: {id: [record,...]}, parse_errors)."""
     folders = folders or ITEM_FOLDERS
@@ -100,13 +115,22 @@ def load_items(root, folders=None):
             relpath = os.path.relpath(path, root)
             with open(path, encoding='utf-8') as f:
                 text = f.read()
-            try:
-                meta, body = frontmatter.parse(text, path=relpath)
-            except frontmatter.FrontmatterError as e:
-                errors.append((e.file, e.line, e.why))
-                continue
+            key = os.path.abspath(path)
+            hit = _PARSE_CACHE.get(key)
+            if hit is not None and hit[0] == text:
+                _, meta, body = hit
+            else:
+                try:
+                    meta, body = frontmatter.parse(text, path=relpath)
+                except frontmatter.FrontmatterError as e:
+                    errors.append((e.file, e.line, e.why))
+                    continue
+                _PARSE_CACHE.pop(key, None)
+                while len(_PARSE_CACHE) >= _PARSE_CACHE_MAX:
+                    _PARSE_CACHE.pop(next(iter(_PARSE_CACHE)))
+                _PARSE_CACHE[key] = (text, meta, body)
             rec = {
-                'meta': meta, 'body': body, 'path': path, 'relpath': relpath,
+                'meta': frontmatter.clone(meta), 'body': body, 'path': path, 'relpath': relpath,
                 'folder': folder, 'name': name, 'text': text,
             }
             by_id.setdefault(meta.get('id'), []).append(rec)
