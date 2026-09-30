@@ -7,6 +7,7 @@ them all). ``cmd_next`` is ``asf next``.
 """
 import collections
 import json
+import re
 
 from asf import env
 from asf.feeder import rows as R
@@ -55,9 +56,15 @@ def _cell(v):
     return (v or '—').replace('|', '/')
 
 
+#: a correction the lane wrote for a PR head's red required checks: its first line names them
+_CHECKS_RED_RE = re.compile(r'^PR #\d+ checks red: ([^\n]+)')
+
+
 def action_cell(row):
     if row.launches:
-        return f"{R.LAUNCH} {row.brief_kind} on {row.branch}"
+        m = _CHECKS_RED_RE.match(row.correction or '') if row.brief_kind == 'correct' else None
+        red = f" — against the red check(s): {m.group(1)}" if m else ''
+        return f"{R.LAUNCH} {row.brief_kind} on {row.branch}{red}"
     return row.action
 
 
