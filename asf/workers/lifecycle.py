@@ -147,7 +147,7 @@ HOOK_REFUSAL_CAP = 2
 #: A hook's refusal text carries the redaction scanner's own ``redact: <file>:<line>`` line
 #: (:mod:`asf.redact`) anywhere in it — the same line a product's own pre-push hook prints when
 #: it runs that scan itself.
-HOOK_REDACTION_RE = re.compile(r'\bredact:\s*\S+:\d+\b')
+HOOK_REDACTION_RE = re.compile(r'\bredact:\s*\S+:\d+\b|\bredaction gate\b', re.I)
 
 #: Every class a session's ``end_reason`` falls into. ``finished`` and ``nothing to land`` are the
 #: only two that are not a failure; ``other`` is a failure whose signature this module does not
@@ -1069,8 +1069,10 @@ def occupancy(path, lanes=None, alive=None, result=None, ended=None):
         out['branches'][branch] = why
         if kind:
             out['docs'].setdefault(item, {})[kind] = why
+    # a park outlives its PR: a closed PR left the row that looped on it (a product's
+    # delivery-code-t-0042, its PR closed, launched 69 times) — only an unpark or a release lifts it
     out['corrections'] = {i: c for i, c in out['corrections'].items()
-                          if c.get('branch') not in dead_branches}
+                          if c.get('branch') not in dead_branches or c.get('parked')}
     return out
 
 
@@ -2160,6 +2162,9 @@ INCOMPLETE_CAP = 2
 #: relaunching it buys the same report again, so the item is parked until its card changes
 #: (F-0126) or `asf unpark` releases it.
 BLOCKED = 'blocked'
+#: The wave's relaunch cap (:mod:`asf.workers.relaunch`): a job handed the same head, card and
+#: cause twice — or once, when its report ended terminal — is parked, not launched again.
+RELAUNCH_CAP = 'relaunch cap'
 
 
 def incomplete_park_text(n, missing, item):
@@ -2477,28 +2482,30 @@ def footprint_hold(run, paths, fact, text, now, tests=()):
 
 
 def hook_refusal_hold(path, run, text, now):
-    """``(fields, line)``: ``run``'s push the repo's own pre-push hook refused. The first hold on
+    """``(fields, line)``: ``run``'s push the repo's own pre-push hook refused. A redaction
+    finding (:data:`HOOK_REDACTION_RE`) is parked as a security hold on the FIRST refusal: only a
+    person decides what a flagged secret needs, never another session. Otherwise the first hold on
     a finding spends no round — the hook, not the session, is what failed, so the item is simply
     relaunched to try again (B-0097). A *second* hold naming the same finding in a row
     (:func:`next_finding`, at :data:`HOOK_REFUSAL_CAP`) is never tried a third time blind: the
     hook has now said the identical thing twice, so this reads what it said and routes by it
-    (B-0140) — a redaction finding (:data:`HOOK_REDACTION_RE`) is parked as a security hold, since
-    only a person decides what a flagged secret needs, never another session; anything else is
-    marked ``at_cap`` so the item goes to ADJUDICATE the way any other stuck finding does
+    (B-0140) — anything else is marked ``at_cap`` so the item goes to ADJUDICATE the way any other stuck finding does
     (:func:`hold`). A lint or test naming paths outside the Task's own ``writes:`` is left as a
     plain ``hook refused`` correction either way: :mod:`asf.tick.widen_footprint` turns that into
     a ``footprint`` hold the same tick, before a wave ever reads this one's ``at_cap``."""
     branch = run.get('branch') or run.get('job')
     keys, same = next_finding(path, run, HOOK_REFUSED, text)
     corr = {'kind': HOOK_REFUSED, 'text': text, 'at': now, 'finding': keys, 'same': same}
-    if same < HOOK_REFUSAL_CAP:
-        return {'correction': corr}, f'held {branch}: {text} (no round spent)'
     if HOOK_REDACTION_RE.search(text):
-        reason = (f'a redaction finding refused the push {same} times running — a person '
+        # held on the first refusal: a product's correct-f-0086 was relaunched 100 times on one
+        # redaction finding, its streak reset each time by a lane hold in between
+        reason = (f'a redaction finding refused the push ({same} time(s) running) — a person '
                   'decides, not another session')
         corr.update(parked=True, reason=reason)
         return ({'correction': corr, 'operator_flagged': 1},
                 f'held {branch}: {reason} (security hold)')
+    if same < HOOK_REFUSAL_CAP:
+        return {'correction': corr}, f'held {branch}: {text} (no round spent)'
     corr['at_cap'] = True
     return ({'correction': corr},
             f'held {branch}: {text} — adjudicate pending (hook refused the same way {same} '

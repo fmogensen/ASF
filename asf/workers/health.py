@@ -659,7 +659,8 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
             s.pop('correction', None)
             found.append((job, 'released', f'{s.get("item")} is {closed}: no correction'))
         corr = lifecycle.pending_correction(s, registry)
-        if corr and corr.get('kind') == lifecycle.BLOCKED and corr.get('card') and items is not None \
+        if corr and corr.get('kind') in (lifecycle.BLOCKED, lifecycle.RELAUNCH_CAP) \
+                and corr.get('card') and items is not None \
                 and corr['card'] != lifecycle.card_fingerprint(product, s.get('item'), items):
             pool_mod.update_session(product, job, correction=None)
             s.pop('correction', None)

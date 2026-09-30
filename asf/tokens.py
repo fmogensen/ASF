@@ -89,6 +89,44 @@ def _fold(tally, usage):
             tally[d] = n if tally[d] is None else tally[d] + n
 
 
+def meter_runs(log_path):
+    """[:class:`Meter`] — one per run of the log, oldest first (:func:`meter`'s rule per run: a
+    ``system``/``init`` line opens a run; lines before the first one are a run of their own).
+    A job relaunched N times appends N runs to one log; the ledger ingests each. Never
+    raises: an unreadable log is no runs."""
+    out, cur = [], None
+    try:
+        with open(log_path, encoding='utf-8', errors='replace') as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    rec = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                kind = rec.get('type')
+                if kind == 'system' and rec.get('subtype') == 'init' or cur is None:
+                    cur = Meter(runs=1)
+                    out.append(cur)
+                cur.lines += 1
+                if kind == 'assistant':
+                    cur.turns += 1
+                    _fold(cur.by_dim, usage_of(rec))
+                elif kind == 'result':
+                    cur.result = rec
+    except (OSError, ValueError):
+        return []
+    for m in out:
+        if m.result is not None:
+            own = usage_of(m.result)
+            if any(n is not None for n in own.values()):
+                m.by_dim = own
+    return out
+
+
 def meter(log_path):
     """One pass over a job log: the last run's result, its tally and its turn count. Never raises.
 

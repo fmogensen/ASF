@@ -145,6 +145,9 @@ class Row:
         #: :func:`asf.briefs.build.card_digest` of the card as this row's brief stated it — what
         #: the ledger keeps so a later card change can be told from a dispute (F-0090 D4)
         self.card_digest = card_digest or ''
+        #: :func:`asf.workers.relaunch.cause_key` of the feeder row: what the relaunch cap
+        #: compares beside the head and the card (set by the wave)
+        self.cause = ''
         #: the row may run in the cloud lane (``cloud-ok``; :func:`asf.workers.cloud.eligible`)
         self.cloud_ok = bool(cloud_ok)
         #: the row never leaves the host (its item's ``local_only: true``;
