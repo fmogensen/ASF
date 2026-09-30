@@ -2,6 +2,7 @@
 (B-0045); a record command uses the product's record, not the cwd, even when the cwd is a
 product repo (B-0050)."""
 import contextlib
+import dataclasses
 import datetime
 import io
 import json
@@ -9,6 +10,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from asf import cli, env
 
@@ -270,7 +272,8 @@ class UnparkTests(unittest.TestCase):
         rc, out = self._run(['park', 'T-0017', '--why', 'waits on the vendor', '--product',
                              'sample'])
         self.assertEqual(rc, 0, out)
-        self.assertIn('parked T-0017 (job coder-t-0017): waits on the vendor', out)
+        self.assertIn('parked T-0017 at item T-0017 (park job park-t-0017): waits on the vendor',
+                      out)
         self.assertEqual(len(self._read().splitlines()), len(before.splitlines()) + 1)
         held, _ids = rows.correction_rows(items, env.load_product('sample'), set(),
                                           lifecycle.corrections(self.path))
@@ -283,14 +286,18 @@ class UnparkTests(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertEqual(lifecycle.corrections(self.path), {})
 
-    def test_park_on_a_branch_holds_the_item_its_run_is_on(self):
+    def test_park_on_a_branch_holds_that_branch_not_the_item(self):
         from asf.workers import lifecycle
         self._ledger(dict(self.LAUNCH, branch='cloud/T-0017', ended='2026-09-01T09:30:00Z',
                           end_reason='finished'))
         rc, out = self._run(['park', 'cloud/T-0017', '--why', 'hold the branch',
                              '--product', 'sample'])
         self.assertEqual(rc, 0, out)
-        self.assertTrue(lifecycle.corrections(self.path)['T-0017']['parked'])
+        self.assertIn('at branch cloud/T-0017', out)
+        self.assertNotIn('T-0017', lifecycle.corrections(self.path))
+        [park] = lifecycle.parks(self.path)
+        self.assertEqual((park['item'], park['scope'], park['branch']),
+                         ('T-0017', 'branch', 'cloud/T-0017'))
 
     def test_park_on_an_untouched_item_holds_it_without_a_launch_or_an_attempt(self):
         from asf.workers import lifecycle
@@ -299,6 +306,7 @@ class UnparkTests(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn('park-t-0099', out)
         self.assertTrue(lifecycle.corrections(self.path)['T-0099']['parked'])
+        self.assertEqual(lifecycle.corrections(self.path)['T-0099']['scope'], 'item')
         self.assertNotIn('T-0099', lifecycle.attempts(self.path))
         self.assertEqual(lifecycle.inflight(self.path), [])
         rc, out = self._run(['unpark', 'T-0099', '--product', 'sample'])
@@ -320,6 +328,152 @@ class UnparkTests(unittest.TestCase):
         self._run(['unpark', 'T-0017', '--product', 'sample'])
         after, ids = rows.correction_rows(items, env.load_product('sample'), set(), lifecycle.corrections(self.path))
         self.assertEqual((after, ids), ([], set()))
+
+
+class ScopedParkTests(unittest.TestCase):
+    """``asf park`` at the scope its target names, and ``asf unpark`` its exact undo — a
+    product's T-0042, 2026-09-30: ``asf park cloud/plan-T-0042`` parked the item, so its CORRECT
+    round on ``cloud/T-0042`` showed PARKED too, and ``asf unpark T-0042`` right after said "not
+    parked": a later run of the item on the other branch had "answered" the park."""
+
+    PLAN = {'job': 'adjudicate-t-0042', 'item': 'T-0042', 'kind': 'adjudicate', 'pid': 1,
+            'branch': 'cloud/plan-T-0042', 'started': '2026-09-30T07:00:00Z',
+            'ended': '2026-09-30T07:10:00Z', 'end_reason': 'finished'}
+    CODE = {'job': 'correct-t-0042', 'item': 'T-0042', 'kind': 'correct', 'pid': 2,
+            'branch': 'cloud/T-0042', 'started': '2026-09-30T06:00:00Z',
+            'ended': '2026-09-30T06:30:00Z', 'end_reason': 'finished'}
+    ITEMS = {'T-0042': {'id': 'T-0042', 'type': 'task', 'state': 'New'}}
+    setUp, tearDown = UnparkTests.setUp, UnparkTests.tearDown
+    _ledger, _run = UnparkTests._ledger, UnparkTests._run
+
+    def _two_branches(self):
+        plan_c = {'job': 'adjudicate-t-0042', 'correction': {
+            'kind': 'review', 'text': 'answer its C list on cloud/plan-T-0042',
+            'at': '2026-09-30T08:18:30Z'}}
+        code_c = {'job': 'correct-t-0042', 'correction': {
+            'kind': 'review', 'text': 'answer its C list on cloud/T-0042',
+            'at': '2026-09-30T07:30:00Z'}}
+        self._ledger(dict(self.CODE), dict(self.PLAN), code_c, plan_c)
+
+    def _append(self, *records):
+        with open(self.path, 'a') as f:
+            for r in records:
+                f.write(json.dumps(r) + '\n')
+
+    def _rows(self):
+        from asf.feeder import rows
+        from asf.workers import lifecycle
+        corr, _ids = rows.correction_rows(self.ITEMS, env.load_product('sample'), set(),
+                                          lifecycle.corrections(self.path))
+        return rows.hold_parks(corr, self.ITEMS, lifecycle.parks(self.path))
+
+    def test_a_branch_park_holds_only_that_branchs_rows(self):
+        from asf.feeder import rows
+        self._two_branches()
+        self.assertEqual([r.branch for r in self._rows()], ['cloud/plan-T-0042'])
+        rc, out = self._run(['park', 'cloud/plan-T-0042', '--why', 'looping on #964',
+                             '--product', 'sample'])
+        self.assertEqual(rc, 0, out)
+        got = sorted((r.branch, r.launches, r.action.startswith(rows.PARKED)) for r in self._rows())
+        self.assertEqual(got, [('cloud/T-0042', True, False), ('cloud/plan-T-0042', False, True)])
+        parked = [r for r in self._rows() if r.action.startswith(rows.PARKED)][0]
+        self.assertIn('branch cloud/plan-T-0042', parked.action)
+        self.assertIn('looping on #964', parked.action)
+
+    def test_a_job_park_holds_only_that_jobs_rows(self):
+        from asf.feeder import rows
+        from asf.workers import lifecycle
+        self._two_branches()
+        rc, out = self._run(['park', 'correct-t-0042', '--why', 'wait', '--product', 'sample'])
+        self.assertEqual(rc, 0, out)
+        self.assertIn('at job correct-t-0042', out)
+        [park] = lifecycle.parks(self.path)
+        self.assertEqual((park['scope'], park['on_job']), ('job', 'correct-t-0042'))
+        row = rows.Row(tier=2, kind=rows.FIX_CORRECT, item_id='T-0042', feature_id='',
+                       action=rows.LAUNCH, brief_kind='correct', branch='cloud/T-0042',
+                       reason='r')
+        other = dataclasses.replace(row, brief_kind='review')
+        held = rows.hold_parks([row, other], self.ITEMS, lifecycle.parks(self.path))
+        self.assertEqual([(r.brief_kind, r.launches) for r in held],
+                         [('review', True), ('correct', False)])
+        self.assertIn('job correct-t-0042', held[-1].action)
+
+    def test_an_item_park_holds_every_branch(self):
+        from asf.feeder import rows
+        self._two_branches()
+        rc, out = self._run(['park', 'T-0042', '--why', 'vendor', '--product', 'sample'])
+        self.assertEqual(rc, 0, out)
+        got = self._rows()
+        self.assertEqual(len(got), 1)
+        self.assertTrue(got[0].action.startswith(f'{rows.PARKED} operator park on item T-0042'))
+
+    def test_park_round_trips_past_a_later_run_a_reset_and_a_new_correction(self):
+        from asf.workers import lifecycle
+        for target in ('cloud/plan-T-0042', 'T-0042', 'adjudicate-t-0042'):
+            with self.subTest(target=target):
+                self._two_branches()
+                rc, out = self._run(['park', target, '--why', 'hold', '--product', 'sample'])
+                self.assertEqual(rc, 0, out)
+                # the other branch's round runs, the parked branch's PR is closed unmerged
+                # (the closed-PR reset) and the harvest writes a new correction on the job
+                self._append(dict(self.CODE, pid=3, started='2026-09-30T09:23:34Z',
+                                  ended='2026-09-30T09:38:16Z'),
+                             {'job': 'reset-t-0042', 'item': 'T-0042', 'reset': {
+                                 'at': '2026-09-30T09:40:00Z', 'pr': 964,
+                                 'branch': 'cloud/plan-T-0042', 'head': 'abc', 'archive': ''}},
+                             {'job': 'adjudicate-t-0042', 'correction': {
+                                 'kind': 'review', 'text': 'again',
+                                 'at': '2026-09-30T09:41:00Z'}})
+                self.assertEqual(len(lifecycle.parks(self.path)), 1)
+                rc, out = self._run(['unpark', target, '--product', 'sample'])
+                self.assertEqual(rc, 0, out)
+                self.assertIn('unparked T-0042', out)
+                self.assertEqual(lifecycle.parks(self.path), [])
+                rc, out = self._run(['unpark', target, '--product', 'sample'])
+                self.assertEqual(rc, 1, out)
+                self.assertIn('not parked', out)
+
+    def test_a_branch_park_is_not_refused_by_an_item_that_has_another_branch_parked(self):
+        from asf.workers import lifecycle
+        self._two_branches()
+        self.assertEqual(self._run(['park', 'cloud/plan-T-0042', '--why', 'a',
+                                    '--product', 'sample'])[0], 0)
+        rc, out = self._run(['park', 'cloud/plan-T-0042', '--why', 'b', '--product', 'sample'])
+        self.assertEqual(rc, 1, out)
+        self.assertIn('already parked', out)
+        self.assertEqual(self._run(['park', 'cloud/T-0042', '--why', 'c',
+                                    '--product', 'sample'])[0], 0)
+        self.assertEqual(len(lifecycle.parks(self.path)), 2)
+        rc, out = self._run(['unpark', 'cloud/T-0042', '--product', 'sample'])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual([p['branch'] for p in lifecycle.parks(self.path)], ['cloud/plan-T-0042'])
+
+    def test_unpark_of_an_item_releases_every_park_on_it(self):
+        from asf.workers import lifecycle
+        cap = {'kind': 'relaunch cap', 'text': 'looped', 'at': '2026-09-30T10:00:00Z',
+               'parked': True, 'reason': 'looped'}
+        self._ledger(dict(self.CODE), dict(self.PLAN),
+                     {'job': 'correct-t-0042', 'correction': dict(cap)},
+                     {'job': 'adjudicate-t-0042', 'correction': dict(cap)})
+        self._run(['park', 'cloud/plan-T-0042', '--why', 'hold', '--product', 'sample'])
+        rc, out = self._run(['unpark', 'T-0042', '--product', 'sample'])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out.count('unparked T-0042'), 3, out)
+        self.assertEqual(lifecycle.parks(self.path), [])
+        self.assertEqual(lifecycle.corrections(self.path), {})
+
+    def test_occupancy_and_status_name_the_scope(self):
+        from asf.views import status
+        from asf.workers import lifecycle
+        from asf.workers import pool as pool_mod
+        self._two_branches()
+        self._run(['park', 'cloud/plan-T-0042', '--why', 'hold', '--product', 'sample'])
+        occ = lifecycle.occupancy(self.path)
+        self.assertEqual([p['branch'] for p in occ['parks']], ['cloud/plan-T-0042'])
+        self.assertEqual(occ['corrections']['T-0042']['branch'], 'cloud/T-0042')
+        with mock.patch.object(pool_mod, 'sessions_path', lambda _p: self.path):
+            cell = status.parked_cell(None)
+        self.assertIn('T-0042 [branch cloud/plan-T-0042]', cell)
 
 
 class ReadmeParserTests(unittest.TestCase):

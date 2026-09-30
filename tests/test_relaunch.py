@@ -162,7 +162,7 @@ class StatusParkedTests(_Ledger):
             self.write(dict(relaunch.park_fields('looped twice', CARD, '2026-09-30T06:00:00Z'),
                             job=self.JOB))
             cell = status.parked_cell(None)
-        self.assertIn('T-0332: looped twice', cell)
+        self.assertIn(f'T-0332 [relaunch cap on job {self.JOB}]: looped twice', cell)
         self.assertTrue(cell.startswith('1 — '))
 
 

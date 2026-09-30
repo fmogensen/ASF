@@ -1591,6 +1591,34 @@ def over_budget_epics(rows, items, verdicts=None):
     return out
 
 
+def hold_parks(rows, items, parks):
+    """A branch or job park (``asf park <branch|job>``, :func:`asf.workers.lifecycle.parks`)
+    holds that branch's or that job's rows alone: each row of its item on the branch (or for the
+    job, ``<brief kind>-<item>``) gives way to one ``PARKED`` row naming the scope, and the
+    item's rows on its other branches go on. An item park is the item's correction instead
+    (:func:`correction_rows`)."""
+    scoped = [p for p in parks or () if (p.get('scope') or 'item') in ('branch', 'job')
+              and is_open(items.get(p.get('item')) or {})]
+    if not scoped:
+        return rows
+
+    def held(r):
+        job = f'{r.brief_kind}-{r.item_id}'.lower()
+        return any(p['item'] == r.item_id and (
+            (p['scope'] == 'branch' and r.branch and r.branch == p.get('branch'))
+            or (p['scope'] == 'job' and job == p.get('on_job'))) for p in scoped)
+    out = [r for r in rows if not held(r)]
+    for p in scoped:
+        item = items.get(p['item']) or {}
+        f = feature_of(items, item)
+        out.append(Row(tier={'S1': 0, 'S2': 1}.get(item.get('severity'), 2), kind=FIX_CORRECT,
+                       item_id=p['item'], feature_id=f['id'] if f else '',
+                       action=f'{PARKED} {p.get("reason") or p["scope"]}', brief_kind='correct',
+                       branch=p.get('branch') or '', reason=p.get('reason') or 'parked',
+                       waits_on='operator'))
+    return out
+
+
 def hold_classes(rows, product):
     """``feeder.hold`` (:attr:`asf.env.Product.feeder_hold`): each launching row of a held
     class becomes ``WAITS ON hold: <class>`` — no session, no slot, still shown."""
@@ -1670,6 +1698,7 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
     # a skipped S1/S2 Bug's WAITS row only where no other row already speaks for it
     spoken_for = {r.item_id for r in rows}
     rows += [r for r in bug_waits if r.item_id not in spoken_for]
+    rows = hold_parks(rows, items, occ.get('parks'))
     rows = hold_unlanded(rows, items, landed_shas)
     rows = hold_replanning(rows, items)
     rows = hold_classes(rows, product)
