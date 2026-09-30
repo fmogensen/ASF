@@ -79,7 +79,11 @@ no host call when it does not. One row per finding, or one `ok` row naming the s
 
 Jobs on hosted runners (no `self-hosted` in their `runs-on`) and a `runs-on` that is an
 expression ASF cannot resolve (`${{ matrix.os }}`) are not judged. `${{ vars.X || 'heavy' }}` is
-read as its default, `heavy`. A host that cannot be read is one `skip` row with the reason.
+read as the repository variable `X` — `asf` asks the host for it (`repos/<slug>/actions/
+variables`) — and falls back to `'heavy'` only when the host gives `X` an empty value. A name
+the host does not have is **unresolved**, not `'heavy'`: it may be set on the organisation or on
+an environment, and guessing there is how a live routing label gets removed. A host that cannot
+be read is one `skip` row with the reason.
 
 ## `asf ci reconcile`
 

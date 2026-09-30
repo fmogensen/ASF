@@ -117,24 +117,33 @@ class RunsOnParser(unittest.TestCase):
             '    steps:', '      - run: echo', '  hosted:', '    runs-on: ubuntu-latest',
             '  mat:', '    runs-on: ${{ matrix.os }}', '  blk:', '    runs-on:',
             '      - self-hosted', '      - light', ''])
-        got = {r.job: r.labels for r in ci_pool.parse_runs_on('ci.yml', text)}
-        self.assertEqual(got, {'gate': frozenset({'self-hosted', 'heavy'}),
-                               'hosted': frozenset({'ubuntu-latest'}), 'mat': None,
-                               'blk': frozenset({'self-hosted', 'light'})})
+        rows = {r.job: r for r in ci_pool.parse_runs_on('ci.yml', text)}
+        got = {job: r.labels for job, r in rows.items()}
+        self.assertEqual(got, {'gate': None, 'hosted': frozenset({'ubuntu-latest'}),
+                               'mat': None, 'blk': frozenset({'self-hosted', 'light'})})
+        self.assertEqual(rows['gate'].needs_vars, frozenset({'X'}))
 
 
 class FakeRun:
     """A fake ``gh``: a workflow directory listing plus each file's raw text, keyed by the
-    ``contents/<path>`` fragment ``_api`` builds. Every argv is logged."""
+    ``contents/<path>`` fragment ``_api`` builds, and — when given — the repo's variables.
+    Every argv is logged."""
 
-    def __init__(self, files, texts):
+    def __init__(self, files, texts, variables=None):
         self.files = files
         self.texts = texts
+        self.variables = variables
         self.calls = []
 
     def __call__(self, argv, **_kw):
         self.calls.append(argv)
         target = argv[2]
+        if any('actions/variables' in a for a in argv):
+            if self.variables is None:
+                return subprocess.CompletedProcess(argv, 1, '', 'not found')
+            out = '\n'.join(json.dumps({'name': k, 'value': v})
+                            for k, v in self.variables.items())
+            return subprocess.CompletedProcess(argv, 0, out, '')
         if 'workflows?ref=' in target:
             out = '\n'.join(json.dumps({'path': p}) for p in self.files)
             return subprocess.CompletedProcess(argv, 0, out, '')
@@ -142,6 +151,89 @@ class FakeRun:
             if f'contents/{path}?ref=' in target:
                 return subprocess.CompletedProcess(argv, 0, text, '')
         return subprocess.CompletedProcess(argv, 1, '', 'not found')
+
+
+INCIDENT_WORKFLOW = '\n'.join([
+    'on: push', 'jobs:', '  gate:',
+    '    runs-on: [self-hosted, "${{ vars.CI_REQUIRED_LABEL || \'heavy\' }}"]',
+    '    steps:', '      - run: echo', ''])
+
+
+class VarsInRunsOn(unittest.TestCase):
+    def test_a_set_variable_is_the_label_the_job_runs_on(self):
+        got = ci_pool.parse_runs_on('ci.yml', INCIDENT_WORKFLOW,
+                                    {'CI_REQUIRED_LABEL': 'vendor-heavy'})[0]
+        self.assertEqual(got.labels, frozenset({'self-hosted', 'vendor-heavy'}))
+        self.assertEqual(got.needs_vars, frozenset())
+
+    def test_a_name_the_host_did_not_give_is_unresolved_not_the_default(self):
+        for variables in ({}, None, {'OTHER': 'x'}):
+            got = ci_pool.parse_runs_on('ci.yml', INCIDENT_WORKFLOW, variables)[0]
+            self.assertIsNone(got.labels, variables)
+            self.assertEqual(got.needs_vars, frozenset({'CI_REQUIRED_LABEL'}), variables)
+
+    def test_an_empty_value_falls_to_the_expressions_own_default(self):
+        got = ci_pool.parse_runs_on('ci.yml', INCIDENT_WORKFLOW,
+                                    {'CI_REQUIRED_LABEL': ''})[0]
+        self.assertEqual(got.labels, frozenset({'self-hosted', 'heavy'}))
+        self.assertEqual(got.needs_vars, frozenset())
+
+        text = '\n'.join(['on: push', 'jobs:', '  gate:',
+                          '    runs-on: [self-hosted, "${{ vars.CI_REQUIRED_LABEL }}"]', ''])
+        got = ci_pool.parse_runs_on('ci.yml', text, {'CI_REQUIRED_LABEL': ''})[0]
+        self.assertIsNone(got.labels)
+        self.assertEqual(got.needs_vars, frozenset())
+
+    def test_the_name_is_matched_the_way_the_host_matches_it(self):
+        got = ci_pool.parse_runs_on('ci.yml', INCIDENT_WORKFLOW,
+                                    {'ci_required_label': 'vendor-heavy'})[0]
+        self.assertEqual(got.labels, frozenset({'self-hosted', 'vendor-heavy'}))
+
+    def test_a_bare_reference_resolves_and_a_block_list_resolves(self):
+        scalar = '\n'.join(['on: push', 'jobs:', '  gate:',
+                            '    runs-on: ${{ vars.X }}', ''])
+        block = '\n'.join(['on: push', 'jobs:', '  gate:', '    runs-on:',
+                           '      - self-hosted', '      - ${{ vars.X }}', ''])
+        for text in (scalar, block):
+            resolved = ci_pool.parse_runs_on('ci.yml', text, {'X': 'vendor-heavy'})[0]
+            self.assertIsNotNone(resolved.labels, text)
+            self.assertIn('vendor-heavy', resolved.labels)
+            self.assertEqual(resolved.needs_vars, frozenset())
+
+            unresolved = ci_pool.parse_runs_on('ci.yml', text, {})[0]
+            self.assertIsNone(unresolved.labels, text)
+            self.assertEqual(unresolved.needs_vars, frozenset({'X'}))
+
+    def test_every_other_expression_reads_as_it_did(self):
+        text = '\n'.join([
+            'on: push', 'jobs:',
+            '  mat:', '    runs-on: ${{ matrix.os }}',
+            '  inp:', '    runs-on: ${{ inputs.r || \'heavy\' }}',
+            '  env:', '    runs-on: ${{ env.R || \'heavy\' }}', ''])
+        rows = {r.job: r for r in ci_pool.parse_runs_on('ci.yml', text)}
+        self.assertIsNone(rows['mat'].labels)
+        self.assertEqual(rows['mat'].needs_vars, frozenset())
+        self.assertEqual(rows['inp'].labels, frozenset({'heavy'}))
+        self.assertEqual(rows['env'].labels, frozenset({'heavy'}))
+
+    def test_the_backend_reads_the_repos_variables_once_and_resolves_with_them(self):
+        run = FakeRun(['ci.yml'], {'ci.yml': INCIDENT_WORKFLOW},
+                      variables={'CI_REQUIRED_LABEL': 'vendor-heavy'})
+        backend = ci_pool.GitHubBackend(product(), run=run)
+        got = backend.runs_on()
+        var_calls = [c for c in run.calls if any('actions/variables' in a for a in c)]
+        self.assertEqual(len(var_calls), 1)
+        self.assertEqual(got[0].labels, frozenset({'self-hosted', 'vendor-heavy'}))
+        self.assertIsNone(backend.vars_error)
+
+    def test_a_variables_read_that_fails_is_no_variables_and_its_reason(self):
+        run = FakeRun(['ci.yml'], {'ci.yml': INCIDENT_WORKFLOW})
+        backend = ci_pool.GitHubBackend(product(), run=run)
+        got = backend.runs_on()
+        self.assertEqual(len(got), 1)
+        self.assertIsNone(got[0].labels)
+        self.assertIsNotNone(backend.vars_error)
+        self.assertIn('not found', backend.vars_error)
 
 
 class JobTimeouts(unittest.TestCase):
