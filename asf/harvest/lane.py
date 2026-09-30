@@ -122,6 +122,7 @@ from asf.evidence import review as review_mod
 from asf.evidence import review_store
 from asf.feeder import footprint, widen
 from asf.harvest import harvest as H
+from asf.harvest import pr_graph
 from asf.workers import githooks
 from asf.workers import host as host_mod
 from asf.workers import lifecycle
@@ -4038,16 +4039,18 @@ def pr_checks(slug, number, required=(), rerun=(), head=None):
     ``head``: the PR's exact head sha — its check runs from every event (:func:`head_runs`) join
     the rollup's, the newest run per workflow and name judging (a CI-queue dispatched run on the
     head counts, green or red; a run on any other sha never does)."""
-    rc, stdout, err = H._gh(['pr', 'checks', str(number), '-R', slug, '--json',
-                             'name,bucket,link,workflow,startedAt'])
-    none = 'no checks reported' in f'{stdout}\n{err}'
-    try:
-        rollup = [] if none else [c for c in json.loads(stdout) if isinstance(c, dict)]
-    except (json.JSONDecodeError, TypeError):
-        return 'unknown', H.tail(err) or f'gh pr checks exited {rc}', []
-    if head:
-        seen = {c.get('link') for c in rollup if c.get('link')}
-        rollup += [c for c in head_runs(slug, head, rollup) if c['link'] not in seen]
+    rollup = pr_graph.checks_for(slug, number, head)  # one query a tick for every open PR
+    if rollup is None:  # the snapshot cannot vouch for this PR: read it the REST way
+        rc, stdout, err = H._gh(['pr', 'checks', str(number), '-R', slug, '--json',
+                                 'name,bucket,link,workflow,startedAt'])
+        none = 'no checks reported' in f'{stdout}\n{err}'
+        try:
+            rollup = [] if none else [c for c in json.loads(stdout) if isinstance(c, dict)]
+        except (json.JSONDecodeError, TypeError):
+            return 'unknown', H.tail(err) or f'gh pr checks exited {rc}', []
+        if head:
+            seen = {c.get('link') for c in rollup if c.get('link')}
+            rollup += [c for c in head_runs(slug, head, rollup) if c['link'] not in seen]
     if not rollup:
         return 'green', 'no checks', []
     checks = latest_checks(rollup)
