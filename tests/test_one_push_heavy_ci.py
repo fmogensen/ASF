@@ -257,6 +257,28 @@ class HeavyAfterReview(unittest.TestCase):
         self.assertIn('m8-e2e', written['reason'])
         self.assertFalse(any(c[:2] == ['pr', 'edit'] for c in self.calls))
 
+    def _recheck(self, host, prev, runs):
+        f = {'branch': 'worker/T-0001', 'prev': prev, 'class': lane.CODE, 'head': HEAD,
+             'on_checks': True}
+        with mock.patch.object(harvest, '_gh', side_effect=self._gh(list(runs))):
+            return host.recheck(f, 7)
+
+    def test_a_label_less_run_skip_never_merges_at_the_merge_recheck(self):
+        # the head was never approved for heavy CI (no `heavy` on its record): the only run on
+        # it is the push's light one, which skipped the required heavy job — no merge
+        host = self._host()
+        before = {'id': 1, 'status': 'completed', 'created_at': '2027-01-15T08:00:00Z'}
+        why = self._recheck(host, {'state': lane.GATE, 'head': HEAD, 'pr': 7}, [before])
+        self.assertIn('not green at merge: m8-e2e', why)
+        self.assertFalse(any(c[0] == 'api' for c in self.calls))  # no skip ever credited
+        # approved later, but the only run is still the pre-approval one — no merge either
+        prev = {'state': lane.GATE, 'head': HEAD, 'pr': 7, 'heavy': HEAD,
+                'heavy_at': '2027-01-15T09:00:00Z'}
+        self.assertIn('not green at merge: m8-e2e', self._recheck(host, prev, [before]))
+        # the approved (labelled) run's own path-scoped skip counts
+        after = {'id': 2, 'status': 'completed', 'created_at': '2027-01-15T09:00:05Z'}
+        self.assertIsNone(self._recheck(host, prev, [before, after]))
+
     def test_a_skip_from_the_approved_run_counts(self):
         host = self._host()
         prev = {'state': lane.WAITING_CI, 'head': HEAD, 'pr': 7, 'heavy': HEAD,
