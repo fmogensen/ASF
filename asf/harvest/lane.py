@@ -83,12 +83,20 @@ Transitions (plan §2 plus the §9 overrides):
                                ``--no-verify`` once every tree is identical; a live session,
                                a second lease race or a refused push defers it (no hold); only
                                a rewrite it cannot do goes back to the session (no round)
-- T13c any open → PUSHED       copies of trunk commits under a factory branch (and any merge
-                               beside them; a merge alone is B-0056's hold): the lane rebuilds it as the trunk plus its own commits
+- T13c any open → PUSHED       copies of trunk commits or a merge of the trunk under a factory
+                               branch (a session or a person merged ``origin/<trunk>`` in): the
+                               lane rebuilds it as the trunk plus its own commits
                                (:meth:`Lane.drop_copies`), the old tip kept as
                                ``archive/<branch>-copies-<sha9>`` — no session; a pick that
                                conflicts pushes nothing and goes BACK with its files; a live
-                               session defers it
+                               session defers it; a rebuild its guard refuses stays B-0056's hold
+- T13r conflict → PUSHED       a branch sent back for a conflict with the trunk (the host refused
+                               the merge, the merge queue could not merge it, the gate could not
+                               stack it): the lane rebases its own commits onto the trunk itself
+                               (:meth:`Lane.rebase_onto_trunk`), runs the product's
+                               ``pre_push_check`` on the result and pushes it once — no session.
+                               Only a pick git cannot merge (a textual conflict, its files named)
+                               or a red pre-push check goes BACK to a session
 - T13s gate → PUSHED          the PR's sign-off check (``commit.signoff_check``, "DCO") red:
                                the lane signs the unsigned commits off itself
                                (:meth:`Lane.repair_signoff`) — a factory branch only
@@ -656,7 +664,7 @@ def _tree(repo, rev):
     return H.sh(['git', 'rev-parse', f'{rev}^{{tree}}'], cwd=repo).stdout.strip()
 
 
-def drop_trunk_copies(repo, trunk, branch):
+def drop_trunk_copies(repo, trunk, branch, always=False):
     """Rebuild ``origin/<branch>`` as ``origin/<trunk>`` plus its OWN commits — every non-merge
     commit past the trunk whose patch is not already on it — each applied in order by a
     three-way merge against its own parent (``git merge-tree --merge-base``: a cherry-pick with
@@ -666,7 +674,10 @@ def drop_trunk_copies(repo, trunk, branch):
     None), ``own`` (the shas kept), ``copies``, ``merges``, ``empty``, ``conflict``
     (``(sha, [files])`` of the first pick that conflicts — the rebuild stops there) and ``why``
     (why there is no ``new``). The guard: when the old tip merges cleanly into the trunk, the
-    rebuilt tree must be that merge's tree — never a change lost or brought back silently."""
+    rebuilt tree must be that merge's tree — never a change lost or brought back silently.
+    ``always``: rebuild a branch with neither copies nor merges too — a plain rebase onto the
+    trunk (:meth:`Lane.rebase_onto_trunk`); a branch already straight on the trunk's tip
+    rebuilds to its own tip, and that is no ``new``."""
     res = {'old': '', 'new': None, 'own': [], 'copies': [], 'merges': [], 'empty': [],
            'conflict': None, 'why': ''}
     tip = H.sh(['git', 'rev-parse', '--verify', '-q', f'origin/{branch}'], cwd=repo).stdout.strip()
@@ -684,8 +695,8 @@ def drop_trunk_copies(repo, trunk, branch):
     res['copies'] = [row[1] for row in rows if row[0] == '=']
     m = H.sh(['git', 'rev-list', '--merges', f'{base}..{tip}'], cwd=repo)
     res['merges'] = m.stdout.split() if m.returncode == 0 else []
-    if not res['copies']:  # a merge alone is B-0056's: held back to its session
-        res['why'] = 'no copy of a trunk commit on the branch'
+    if not (res['copies'] or res['merges'] or always):
+        res['why'] = 'no copy of a trunk commit and no merge on the branch'
         return res
     own = [row for row in rows if row[0] != '=']
     parent = base
@@ -739,8 +750,72 @@ def drop_trunk_copies(repo, trunk, branch):
                       f'origin/{trunk} — a dropped commit is not the trunk\'s change; nothing '
                       f'pushed')
         return res
+    if parent == tip:
+        res['why'] = f'already straight on origin/{trunk}: nothing to rebuild'
+        return res
     res['new'] = parent
     return res
+
+
+#: How long each of the product's ``worktree_setup`` and ``pre_push_check`` may run on a head the
+#: lane rebuilt, before the check counts as failed.
+PRE_PUSH_CHECK_TIMEOUT_S = 900
+#: Under the state dir: the throwaway checkouts the lane runs ``pre_push_check`` in.
+PRE_PUSH_DIR = 'pre-push-check'
+#: The output lines a failed ``pre_push_check`` hands the correction.
+PRE_PUSH_LINES = 15
+
+
+def _run_shell(command, cwd, timeout):
+    """``(returncode, output)`` of shell ``command`` in ``cwd``; ``returncode`` None on a
+    timeout, its whole process group killed."""
+    p = subprocess.Popen(command, shell=True, cwd=cwd, env=H.clean_env(dict(os.environ)),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT, text=True, start_new_session=True)
+    try:
+        out, _ = p.communicate(timeout=timeout)
+        return p.returncode, out or ''
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, 9)
+        except (ProcessLookupError, PermissionError):
+            p.kill()
+        out, _ = p.communicate()
+        return None, out or ''
+
+
+def pre_push_check_at(repo, state_dir, sha, command, setup=None,
+                      timeout=PRE_PUSH_CHECK_TIMEOUT_S):
+    """``(ok, line)``: the product's ``pre_push_check`` ``command`` run on ``sha`` in a throwaway
+    detached checkout under ``<state>/pre-push-check/`` — after ``setup`` (the product's
+    ``worktree_setup``) when given — the same check every session runs before its push. ``ok``
+    True when it passed; False when it failed (``line`` names the command, its exit and its last
+    :data:`PRE_PUSH_LINES` lines); None when no checkout could be made (nothing was judged)."""
+    holder = os.path.join(state_dir, PRE_PUSH_DIR)
+    try:
+        os.makedirs(holder, exist_ok=True)
+        path = tempfile.mkdtemp(prefix='wt-', dir=holder)
+        os.rmdir(path)
+    except OSError as e:
+        return None, f'no checkout to run `{command}` in: {e}'
+    add = H.sh(['git', 'worktree', 'add', '-q', '--detach', path, sha], cwd=repo)
+    if add.returncode != 0:
+        shutil.rmtree(path, ignore_errors=True)
+        return None, f'no checkout of {sha[:9]} to run `{command}` in: {H.tail(add.stderr)}'
+    try:
+        for what, cmd in (('worktree_setup', setup), ('pre_push_check', command)):
+            if not cmd:
+                continue
+            rc, out = _run_shell(cmd, path, timeout)
+            if rc != 0:
+                why = f'timed out after {timeout}s' if rc is None else f'exit {rc}'
+                lines = [l for l in out.splitlines() if l.strip()][-PRE_PUSH_LINES:]
+                return False, (f'`{cmd}` ({what}) failed on {sha[:9]}: {why}'
+                               + (':\n' + '\n'.join(lines) if lines else ''))
+        return True, ''
+    finally:
+        H.sh(['git', 'worktree', 'remove', '--force', path], cwd=repo)
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def has_adjudicate_commit(repo, trunk, branch):
@@ -2111,16 +2186,18 @@ class Lane:
 
     def drop_copies(self, f):
         """Trunk history under a factory branch — copies of trunk commits (``git cherry``
-        ``-``: a session that merged or rebased the trunk in, an old reword), with any merge
-        beside them (a merge alone is B-0056's hold) — is
+        ``-``: a session that merged or rebased the trunk in, an old reword) or a merge of the
+        trunk (a session or a person merged ``origin/<trunk>`` in: B-0056) — is
         dropped by the lane with no session (:func:`drop_trunk_copies`): the old tip archived as
         ``archive/<branch>-copies-<sha9>``, the branch rebuilt as ``origin/<trunk>`` plus its
         own commits and pushed over a lease on the archived tip, one line logged, and the branch
         goes on from PUSHED on the new head. A pick that conflicts pushes nothing: the branch is
         kept as is and held back to its session with the conflicting files (:data:`COPIES`).
         Never the trunk or a protected ref, never a branch under no factory prefix or a foreign
-        PR, never while a live session holds the branch (deferred until it ends). The record, or
-        None when nothing moved."""
+        PR, never while a live session holds the branch (deferred until it ends). The product's
+        ``pre_push_check`` runs on the rebuilt head before the push; a red one pushes nothing and
+        goes back with the check's output (:data:`COPIES`). The record, or None when nothing
+        moved."""
         b, old = f['branch'], f.get('head')
         prev = f.get('prev') or {}
         if not self.repo or not old or not f.get('kind') or f.get('foreign') \
@@ -2131,7 +2208,7 @@ class Lane:
         if corr.get('kind') == COPIES and prev.get('head') == old:
             return None  # held for its conflict: the session's rebase moves the head
         copies, merges = trunk_history(self.repo, self.trunk, b)
-        if not copies:  # a merge alone stays B-0056's hold: the session's rebase is published
+        if not copies and not merges:
             return None
         what = (f'{len(copies)} copies of origin/{self.trunk} commits' if copies else '') \
             + (' and ' if copies and merges else '') + (f'{len(merges)} merge(s)' if merges else '')
@@ -2168,33 +2245,33 @@ class Lane:
         if not new:
             self.out(f'drop copies {b} failed: {res["why"]} — the branch is kept as is')
             return None
-        archive = f'archive/{b}-copies-{old[:9]}'
-        if not self.ref_push(f'{old}:refs/heads/{archive}', f'archive {b}-copies'):
-            self.out(f'drop copies {b}: the old tip could not be archived — nothing pushed')
+        ok, line = self.pre_push_ok(new)
+        if ok is False:
+            text = (f'trunk history under the branch ({what}): the lane rebuilt it on '
+                    f'origin/{self.trunk} and the product\'s pre-push check fails on it — '
+                    f'{line}\nRebase the branch\'s own commits onto origin/{self.trunk} (git '
+                    f'rebase origin/{self.trunk}), fix what the check names, run it, never merge; '
+                    f'the factory publishes the rebased branch')
+            self.out(f'drop copies {b}: the pre-push check fails on the rebuilt head — the '
+                     f'branch is kept as is, back to its session')
+            if f.get('run') is None:
+                self.write(f, self.record(f, PUSHED, 'adopted'))
+            rec = self.set(f, BACK, f'kind={COPIES}')
+            self.results[b] = hold_with_correction(self.state_dir, b, f['run'], COPIES, text,
+                                                   self.out, head=old, main=self.trunk)
+            f['correction'] = {'kind': COPIES, 'text': text}
+            return rec
+        if ok is None:
+            self.out(f'drop copies {b}: deferred — {line}')
             return None
-        wt = self.ref_checkout()
-        if not wt:
-            self.out(f'drop copies {b} failed: {self.ref_wt_error}')
+        archive = self.publish_rebuilt(f, old, new, 'copies', 'drop copies')
+        if not archive:
             return None
-        r = gitpush.push(['-q', f'--force-with-lease=refs/heads/{b}:{old}', 'origin',
-                          f'{new}:refs/heads/{b}'], wt,
-                         timeout=gitpush.push_timeout(self.conv), log=self.out)
-        if r.returncode != 0:
-            self.out(f'drop copies {b} push refused: {push_why(r.stderr or r.stdout)} — kept')
-            return None
-        H.sh(['git', 'update-ref', f'refs/remotes/origin/{b}', new], cwd=self.repo)
         dropped = len(res['copies']) + len(res['empty'])
         self.out(f'dropped {dropped} trunk copies'
                  + (f' and {len(res["merges"])} merge(s)' if res['merges'] else '')
                  + f' from {b}: {old[:9]} → {new[:9]}, {len(res["own"])} own commit(s) on '
                  f'origin/{self.trunk} ({self.trunk_sha_now()[:9]}); old tip kept as {archive}')
-        f['head'] = new
-        f['refusal'] = lane_refusal(self.repo, self.trunk, b, f.get('item'), self.conv,
-                                    members=delivery_members(self.items, f.get('item')))
-        if f.get('review'):
-            f['review']['current'] = review_mod.is_current(self.repo, self.conv, f'origin/{b}',
-                                                           f['review'], new,
-                                                           trunk=f'origin/{self.trunk}')
         if corr.get('kind') in (lifecycle.NAMING, COPIES, 'merge'):
             H.mark_session(self.state_dir, (f.get('run') or {}).get('job') or b, correction=None)
             f['correction'] = None
@@ -2202,6 +2279,95 @@ class Lane:
             self.write(f, self.record(f, PUSHED, 'adopted'))
         state = BACK if f.get('correction') else PUSHED
         return self.set(f, state, f'dropped {dropped} trunk copies')
+
+    def pre_push_ok(self, sha):
+        """``(ok, line)``: the product's ``conventions.pre_push_check`` on ``sha``
+        (:func:`pre_push_check_at`) — the check a session runs before its push, run by the lane
+        before a push of its own that changes what the branch builds on. No check configured:
+        ``(True, '')``."""
+        command = approvals.pre_push_check(self.product)
+        if not command:
+            return True, ''
+        return pre_push_check_at(self.repo, self.state_dir, sha, command,
+                                 getattr(self.conv, 'worktree_setup', None))
+
+    def publish_rebuilt(self, f, old, new, tag, what):
+        """Publish ``new`` — ``f``'s branch rebuilt by the lane — in ONE push: the old tip
+        archived as ``archive/<branch>-<tag>-<sha9>``, the branch pushed from the ref checkout
+        over a lease on ``old`` (the product's hook runs: the content is new), the tracking ref,
+        ``f``'s head, its refusal and its review's currency read again. The archive's name, or
+        '' when nothing was pushed (the line says why)."""
+        b = f['branch']
+        archive = f'archive/{b}-{tag}-{old[:9]}'
+        if not self.ref_push(f'{old}:refs/heads/{archive}', f'archive {b}-{tag}'):
+            self.out(f'{what} {b}: the old tip could not be archived — nothing pushed')
+            return ''
+        wt = self.ref_checkout()
+        if not wt:
+            self.out(f'{what} {b} failed: {self.ref_wt_error}')
+            return ''
+        r = gitpush.push(['-q', f'--force-with-lease=refs/heads/{b}:{old}', 'origin',
+                          f'{new}:refs/heads/{b}'], wt,
+                         timeout=gitpush.push_timeout(self.conv), log=self.out)
+        if r.returncode != 0:
+            self.out(f'{what} {b} push refused: {push_why(r.stderr or r.stdout)} — kept')
+            return ''
+        H.sh(['git', 'update-ref', f'refs/remotes/origin/{b}', new], cwd=self.repo)
+        f['head'] = new
+        f['refusal'] = lane_refusal(self.repo, self.trunk, b, f.get('item'), self.conv,
+                                    members=delivery_members(self.items, f.get('item')))
+        if f.get('review'):
+            f['review']['current'] = review_mod.is_current(self.repo, self.conv, f'origin/{b}',
+                                                           f['review'], new,
+                                                           trunk=f'origin/{self.trunk}')
+        return archive
+
+    def rebase_onto_trunk(self, f):
+        """A branch sent back for a conflict with the trunk, rebased by the lane with no session:
+        its own commits picked onto a fresh ``origin/<trunk>`` (:func:`drop_trunk_copies`
+        ``always``: copies and merges dropped, no checkout), the product's ``pre_push_check`` run
+        on the result, then ONE push over a lease on the old tip (:meth:`publish_rebuilt`).
+        Git decides, never a session: a host that calls a branch conflicting which git merges
+        clean (a ``merge=union`` file, a stale ``mergeable``) is rebased here. A dict —
+        ``{'pushed': sha}``; ``{'conflict': (sha, files)}`` (a real textual conflict, nothing
+        pushed); ``{'check': line}`` (the check failed, nothing pushed) — or None when the lane
+        does not rebase it (not a factory branch, a live session, a draft, a dry run, a
+        protected ref, a branch that moved or needs nothing, a push that went nowhere)."""
+        b, old = f.get('branch'), f.get('head')
+        if not self.repo or not b or not old or not f.get('kind') or f.get('foreign') \
+                or f.get('live') or f.get('landed') or (f.get('pr') or {}).get('draft') \
+                or self.dry_run:
+            return None
+        if self.guarded(b, f'rebase {b}'):
+            return None
+        self.fresh_trunk()
+        H.sh(['git', 'fetch', '-q', 'origin', f'+refs/heads/{b}:refs/remotes/origin/{b}'],
+             cwd=self.repo)
+        res = drop_trunk_copies(self.repo, self.trunk, b, always=True)
+        if res['old'] != old:
+            return None  # moved since the facts: whatever moved it is read next pass
+        if res['conflict']:
+            return {'conflict': res['conflict']}
+        new = res['new']
+        if not new:
+            self.out(f'rebase {b}: {res["why"]} — not rebased by the lane')
+            return None
+        ok, line = self.pre_push_ok(new)
+        if ok is False:
+            return {'check': line}
+        if ok is None:
+            self.out(f'rebase {b}: {line} — not rebased by the lane')
+            return None
+        archive = self.publish_rebuilt(f, old, new, 'rebase', 'rebase')
+        if not archive:
+            return None
+        self.out(f'rebased {b} onto origin/{self.trunk} ({self.trunk_sha_now()[:9]}): '
+                 f'{old[:9]} → {new[:9]}, {len(res["own"])} own commit(s)'
+                 + (f', {len(res["copies"]) + len(res["empty"])} trunk copies dropped'
+                    if res['copies'] or res['empty'] else '')
+                 + (f', {len(res["merges"])} merge(s) dropped' if res['merges'] else '')
+                 + f' — no session; old tip kept as {archive}')
+        return {'pushed': new}
 
     def trunk_sha_now(self):
         return H.sh(['git', 'rev-parse', f'origin/{self.trunk}'], cwd=self.repo).stdout.strip()
@@ -2690,11 +2856,41 @@ def confirmed_group(tmp, trunk, entries, conv, asf_repo, hold, out, announce=Tru
     return None, None, deferred, candidates
 
 
-def send_back(lane, f, kind, text, files):
+def send_back(lane, f, kind, text, files, rebase=True):
     """Hand a branch the gate refused (the trunk alone green) back to a session. Code: its
     session, a round (:func:`hold_with_correction`). Docs: a :data:`LANDING_GATE` correction,
-    which the feeder turns into a STARVED → SPEC/PLAN session on that branch (R7)."""
+    which the feeder turns into a STARVED → SPEC/PLAN session on that branch (R7).
+
+    A ``conflict`` with the trunk is git's to settle first, never a session's (``rebase``, the
+    default): the lane rebases the branch itself (:meth:`Lane.rebase_onto_trunk`) and, when it
+    applies clean and the product's pre-push check passes, pushes it once and the branch goes on
+    from PUSHED — ``'rebased'``, no session. Only a textual conflict (its files named in the
+    correction) or a red pre-push check (its output named) reaches a session. ``rebase=False``:
+    the conflict is not with the trunk (a batch ahead of it in the merge queue), which a rebase
+    onto the trunk cannot clear."""
     b, run = f['branch'], f.get('run') or {}
+    if kind == 'conflict' and rebase and getattr(lane, 'repo', None) \
+            and not getattr(lane, 'dry_run', False):
+        got = lane.rebase_onto_trunk(f) or {}
+        if got.get('pushed'):
+            if f.get('run') is None:
+                lane.write(f, lane.record(f, PUSHED, 'adopted'))
+            lane.set(f, PUSHED, f'rebased onto {lane.trunk} by the lane (no session)')
+            corr = f.get('correction') or {}
+            if corr.get('kind') in ('conflict', lifecycle.NAMING, COPIES, 'merge'):
+                H.mark_session(lane.state_dir, run.get('job') or b, correction=None)
+                f['correction'] = None
+            lane.results[b] = 'rebased'
+            return 'rebased'
+        if got.get('conflict'):
+            sha, cfiles = got['conflict']
+            files = list(cfiles) or list(files or ())
+            text = (f'{text}. The lane tried the rebase itself and git stops at {sha[:9]}: '
+                    f'conflicts in {", ".join(cfiles) or "?"} — resolve exactly those files')
+        elif got.get('check'):
+            text = (f'{text}. The lane rebased it onto origin/{lane.trunk} cleanly, but the '
+                    f'product\'s pre-push check fails on the result (nothing was pushed): '
+                    f'{got["check"]}\nRebase, fix what the check names, run it, then push')
     if f.get('class') == DOCS and kind in ('gate', 'conflict'):
         doc = lane.conv.branch_kind(b) or 'document'
         what = 'does not rebase cleanly onto' if kind == 'conflict' else 'turns the gate red on'

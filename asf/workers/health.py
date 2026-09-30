@@ -772,6 +772,14 @@ def health(product, fix=False, alive=None, session_source=None, out=print, items
             pool_mod.update_session(product, job, end_reason=lifecycle.NOTHING_TO_LAND)
             s.update(end_reason=lifecycle.NOTHING_TO_LAND)
             found.append((job, 're-judged', f'{lifecycle.NOTHING_TO_LAND} — {why}'))
+        elif reason == lifecycle.NOTHING_UNPUSHED \
+                and s.get('kind') in lifecycle.ON_A_PUSHED_BRANCH:
+            # 0 uncommitted, 0 unpushed: nothing here origin lacks — a hold would buy a session
+            # to push nothing ("nothing to correct"), so the run is re-judged, no hold, no round
+            pool_mod.update_session(product, job, end_reason=lifecycle.NOTHING_TO_LAND)
+            s.update(end_reason=lifecycle.NOTHING_TO_LAND)
+            found.append((job, 're-judged', f'{lifecycle.NOTHING_TO_LAND} — 0 uncommitted, '
+                                            f'0 unpushed: nothing to push, no hold'))
         elif reason.startswith(UNPUSHED_REASON_PREFIXES):
             # the run's own work is the correction's input: the next session on the branch
             # commits and pushes it, or says why not (B-0051, B-0052)
