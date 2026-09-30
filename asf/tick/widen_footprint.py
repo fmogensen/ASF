@@ -28,6 +28,16 @@ Run by the ``health`` step, after health has ended the sessions and before the w
    * ``waits``: a path overlaps an open Task's ``writes:`` (Active in the record, or a run in
      play — ``asf check``'s intersection), or a path a widening earlier in the same pass added —
      re-decided every tick until it is free.
+   A path inside the Task's **Feature footprint** (:func:`asf.feeder.widen.delivery_footprint`,
+   the union of its sibling Tasks' ``writes:``) is widened whatever the cap or an earlier
+   widening say — the plan gave the Feature that path already — and when the run's own branch
+   diff already carries every widened path, no correction is spawned: the widening is recorded
+   and the run goes on to review as it is.
+
+   :func:`diff_facts` reads the same fact off the diff itself, before any REPORT: a finished run
+   whose branch touches paths outside ``writes:`` but all inside the Feature footprint gets them
+   added to ``writes:`` (recorded: History line, ledger ``widened``), no hold and no correction.
+   A diff reaching outside the Feature footprint keeps today's rules.
 3. :func:`revert_overlaps` — a widening already in the record whose paths intersect an open
    Task's ``writes:`` is undone: those paths leave ``writes:``, the Task gets ``after: <owner>``
    and a History line ``footprint widening reverted: overlaps <owner>``, one commit.
@@ -67,6 +77,17 @@ def tracked_paths(product, branch):
             if listed is not None:
                 return set(l for l in listed.splitlines() if l.strip())
     return None
+
+
+def branch_diff(product, branch):
+    """The paths ``origin/<branch>`` changes against its merge base with ``origin/<main>``, or
+    None when git cannot say (no repo, no such branch)."""
+    repo = getattr(product, 'repo_dir', None)
+    if not repo or not branch or not os.path.isdir(repo):
+        return None
+    listed = _git(repo, ['diff', '--name-only', '--no-renames',
+                         f'origin/{product.conventions.main}...origin/{branch}'])
+    return None if listed is None else [l for l in listed.splitlines() if l.strip()]
 
 
 def _task(items, item_id):
@@ -112,6 +133,79 @@ def report_facts(ctx, items, out=print, tracked_fn=tracked_paths):
         out(line)
         held.append(job)
     return held
+
+
+def diff_facts(ctx, items, out=print, diff_fn=branch_diff):
+    """Widen every finished coder/correct run whose branch diff touches paths outside its Task's
+    ``writes:`` that all sit inside the Task's Feature footprint: the card's ``writes:`` grows by
+    them (one History line, one commit — :func:`write_card`), the run carries ``widened``, and no
+    correction is written — the session's work goes on to review as it is. A diff reaching
+    outside the Feature footprint, a path under an ungranted approval, or one an open Task
+    writes is left to today's rules. A run is read once (``diff_read``). ``items`` is updated in
+    place. Returns ``{job: [paths]}``."""
+    product = ctx.product
+    path = pool_mod.sessions_path(product)
+    stamp = pool_mod.now_iso()[:16].replace('T', ' ')
+    done, in_play = {}, None
+    for job, run in sorted(lifecycle.latest(path).items()):
+        if run.get('kind') not in CLAIM_KINDS or run.get('diff_read') or not run.get('branch'):
+            continue
+        if run.get('end_reason') != lifecycle.FINISHED or lifecycle.landed(run):
+            continue
+        if lifecycle.pending_correction(run, path):
+            continue
+        item_id = run.get('item')
+        task = _task(items, item_id)
+        if task is None:
+            continue
+        files = diff_fn(product, run['branch'])
+        if files is None:  # a branch gone or unreadable: nothing to widen from, read once
+            pool_mod.update_session(product, job, diff_read=1)
+            continue
+        writes = widen.norm_writes(task.get('writes'))
+        extra = widen.outside(files, writes)
+        feature = widen.delivery_footprint(items, item_id)
+        if not extra or not widen.inside_feature(extra, feature):
+            pool_mod.update_session(product, job, diff_read=1)
+            continue
+        if in_play is None:
+            in_play = open_footprints(product, items)
+        v = widen.decide(item_id, extra, widen.max_files(product),
+                         protected_paths(product, item_id, extra), in_play, 0,
+                         footprint.shared_globs(product), in_feature=True)
+        if v.kind != widen.WIDEN:
+            pool_mod.update_session(product, job, diff_read=1)
+            out(f'footprint {item_id}: the diff reaches {" ".join(extra)} — {v.kind} '
+                f'{v.detail}'.rstrip() + ', left to review')
+            continue
+        wider = writes + list(v.paths)
+        fact = 'diff: inside the Feature footprint'
+        err = write_card(ctx.record_root(), item_id, {'writes': wider}, stamp,
+                         widen.HISTORY.format(paths=' '.join(v.paths), fact=fact),
+                         product=product)
+        if err:
+            pool_mod.update_session(product, job, diff_read=1)
+            out(f'widen {job}: {item_id} unchanged — {err}')
+            continue
+        if items is not None:
+            items[item_id] = dict(task, writes=wider)
+        in_play.append((item_id, list(v.paths)))
+        pool_mod.update_session(product, job, diff_read=1, widened=list(v.paths))
+        ctx.event('widened', job=job, item=item_id, text=' '.join(v.paths))
+        out(f'widened writes: +{" ".join(v.paths)} — {fact} ({item_id}; no correction, on to '
+            f'review)')
+        done[job] = list(v.paths)
+    if done:
+        err = _reindex(ctx.record_root())
+        if err:
+            out(f'widen: index not re-derived — {err}')
+    return done
+
+
+def diff_carries(product, branch, paths, diff_fn=branch_diff):
+    """True when ``origin/<branch>``'s own diff already changes every one of ``paths``."""
+    files = diff_fn(product, branch) if branch else None
+    return bool(files) and all(p in files for p in paths or ())
 
 
 #: How much of a refusal the ``footprint widened`` line and History carry as its reason.
@@ -287,8 +381,10 @@ def claims(run):
     return bool(report_mod.footprint_claim(text)[1])
 
 
-def apply(ctx, items, out=print):
-    """The rule's verdict on every pending ``footprint`` correction; ``{job: verdict}``."""
+def apply(ctx, items, out=print, diff_fn=branch_diff):
+    """The rule's verdict on every pending ``footprint`` correction; ``{job: verdict}``. Paths
+    inside the Task's Feature footprint are widened past the cap and a second widening; when
+    the run's branch already changes them all, no correction is spawned (:func:`diff_carries`)."""
     product = ctx.product
     path = pool_mod.sessions_path(product)
     stamp = pool_mod.now_iso()[:16].replace('T', ' ')
@@ -324,9 +420,11 @@ def apply(ctx, items, out=print):
             continue
         if in_play is None:
             in_play = open_footprints(product, items)
+        feature = widen.inside_feature(needs, widen.delivery_footprint(items, item_id))
         v = widen.decide(item_id, needs, widen.max_files(product),
                          protected_paths(product, item_id, needs), in_play,
-                         widenings(ctx, path, item_id), footprint.shared_globs(product))
+                         widenings(ctx, path, item_id), footprint.shared_globs(product),
+                         in_feature=feature)
         if v.kind == widen.WIDEN:
             wider = writes + list(v.paths)
             note = widen.HISTORY.format(paths=' '.join(v.paths), fact=fact)
@@ -337,6 +435,16 @@ def apply(ctx, items, out=print):
                 continue
             reindex = True
             in_play.append((item_id, list(v.paths)))  # a later widening this pass waits on it
+            if items is not None and item_id in items:
+                items[item_id] = dict(items[item_id], writes=wider)
+            if feature and diff_carries(product, run.get('branch'), v.paths, diff_fn):
+                # the session already made the change; only the plan's cut was wrong
+                pool_mod.update_session(product, job, widened=list(v.paths), correction=None)
+                ctx.event('widened', job=job, item=item_id, text=' '.join(v.paths))
+                out(f'widened writes: +{" ".join(v.paths)} — {fact}, inside the Feature '
+                    f'footprint and already in the diff ({item_id}; no correction, on to review)')
+                done[job] = v.kind
+                continue
             text = correction_text(wider, v.paths, fact, corr.get('tests') or (), corr.get('text'))
             pool_mod.update_session(product, job, widened=list(v.paths),
                                     correction=dict(corr, verdict=v.kind, text=text))
@@ -502,6 +610,7 @@ def run(ctx, out=print, items=None):
     """Both halves, in order: the REPORT facts, then the rule — and last, the repair of any
     widening already in the record that overlaps an open Task, then the order written over what
     is left."""
+    diff_facts(ctx, items, out=out)
     held = report_facts(ctx, items, out=out) + refusal_facts(ctx, items, out=out)
     verdicts = apply(ctx, items, out=out)
     revert_overlaps(ctx, items, out=out)

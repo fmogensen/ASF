@@ -117,19 +117,36 @@ def on_trunk(repo, main, text, exclude=()):
     return ''
 
 
+#: A park reason's verified trunk evidence, read back (:func:`landed_in`).
+LANDED_RE = re.compile(r'is on origin/(\S+) at ([0-9a-f]{7,40}) \(verified\)')
+
+
+def landed_in(reason):
+    """The sha a park ``reason`` says git verified on the trunk, or ''."""
+    m = LANDED_RE.search(reason or '')
+    return m.group(2) if m else ''
+
+
 def verdict(path, job, item, head=None, card='', cause='', repo=None, main='main', cap=CAP):
     """``None`` when the launch may go ahead, else the park's reason: :data:`CAP` launches of
     ``job`` on one state, or one whose report ended terminal on it (:func:`terminal`) while the
     branch still sits on the head it was handed."""
+    return assess(path, job, item, head, card, cause, repo, main, cap)[0]
+
+
+def assess(path, job, item, head=None, card='', cause='', repo=None, main='main', cap=CAP):
+    """``(reason, landed)``: :func:`verdict`'s reason (or None), and the sha of the commit the
+    last report names that git verified on ``origin/<main>`` ('' when none) — the evidence a
+    park closes its card on instead of waiting for a person (:mod:`asf.workers.trunkclose`)."""
     runs = streak(path, job, item, head, card, cause)
     if not runs:
-        return None
+        return None, ''
     text = _result_text(runs[0])
     claim = terminal(text)
     # the terminal shortcut needs the head known: a branch gone from origin (landed and deleted)
     # is relaunched fresh, and one run on it proves nothing about the next
     if len(runs) < cap and not (claim and head):
-        return None
+        return None, ''
     at = (runs[0].get('launch_head') or head or '')[:9] or 'an unchanged head'
     n = len(runs)
     why = (f'{job} launched {n} time(s) on {at} with the card and cause unchanged'
@@ -140,7 +157,7 @@ def verdict(path, job, item, head=None, card='', cause='', repo=None, main='main
         why += (f' — the work it names is on origin/{main} at {landed[:9]} (verified): close '
                 f'{item} on that evidence')
     return (f'{why}. Not relaunched: the row is parked until a new commit, review, card edit or '
-            f'decision changes its state, or `asf unpark {item}`')
+            f'decision changes its state, or `asf unpark {item}`'), landed
 
 
 def park_fields(reason, card, now):

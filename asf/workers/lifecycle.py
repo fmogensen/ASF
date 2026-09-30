@@ -908,12 +908,14 @@ def quota_exhausted(run):
 
 def attempts(path):
     """``{item: runs the registry holds for it}`` — every launch, ended or not, except a run
-    a spent window cut short (:func:`quota_exhausted`)."""
+    a spent window cut short (:func:`quota_exhausted`) and the run a hand ``asf park`` writes
+    to hold an item no session touched (kind ``park``: nothing was launched)."""
     out = {}
     folded = _folded(path)
     for rs in folded.view.values():  # read only: counts leave, never runs
         for r in rs:
-            if r.get('item') and not quota_exhausted(r) and not folded.before_reset(r):
+            if r.get('item') and not quota_exhausted(r) and not folded.before_reset(r) \
+                    and r.get('kind') != 'park':
                 out[r['item']] = out.get(r['item'], 0) + 1
     return out
 

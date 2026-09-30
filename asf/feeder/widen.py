@@ -197,8 +197,45 @@ def max_files(product):
     return v if isinstance(v, int) and v >= 0 else MAX_FILES
 
 
+def _feature_id(items, iid):
+    """The Feature above ``iid`` (itself for a Feature), walking ``parent:``; else ''."""
+    seen = set()
+    while iid and iid not in seen:
+        seen.add(iid)
+        item = (items or {}).get(iid) or {}
+        if item.get('type') == 'feature':
+            return iid
+        iid = item.get('parent')
+    return ''
+
+
+def delivery_footprint(items, task_id):
+    """The Feature footprint of ``task_id``: the ``writes:`` of every Task (not ``removed:``)
+    whose Feature — its parent, or the Feature its parent Story sits under — is ``task_id``'s,
+    flattened, first-seen order. ``[]`` when the Task reaches no Feature."""
+    fid = _feature_id(items, ((items or {}).get(task_id) or {}).get('parent'))
+    if not fid:
+        return []
+    out = []
+    for iid, t in sorted((items or {}).items()):
+        if t.get('type') != 'task' or t.get('removed') \
+                or _feature_id(items, t.get('parent')) != fid:
+            continue
+        for w in norm_writes(t.get('writes')):
+            if w not in out:
+                out.append(w)
+    return out
+
+
+def inside_feature(paths, feature_writes):
+    """True when every one of ``paths`` is inside the Feature footprint ``feature_writes``."""
+    paths = [p for p in paths or () if p]
+    return bool(paths) and bool(feature_writes) and all(covered(p, feature_writes)
+                                                        for p in paths)
+
+
 def decide(task_id, paths, limit=MAX_FILES, protected=None, running=(), widened_before=0,
-           shared=()):
+           shared=(), in_feature=False):
     """The ``widen_footprint`` verdict for ``task_id`` needing ``paths`` outside its ``writes:``.
 
     ``protected``: ``{path: (class, level)}`` — the paths under an approvals-protected glob whose
@@ -209,10 +246,13 @@ def decide(task_id, paths, limit=MAX_FILES, protected=None, running=(), widened_
     merge-serialised: it never makes this widening wait on another Task, and it is not counted
     toward ``limit`` — the cap judges a mis-cut plan, and the one file every dependency-adding
     Task touches is no evidence of one (D3). Every other refusal still applies to it: a second
-    widening is still a RESHAPE, and an approvals-protected path is still an approval."""
+    widening is still a RESHAPE, and an approvals-protected path is still an approval.
+    ``in_feature``: every path is inside the Task's Feature footprint (:func:`delivery_footprint`)
+    — neither the cap nor an earlier widening makes it a RESHAPE; approvals and an open Task's
+    overlap still apply."""
     paths = tuple(dict.fromkeys(p for p in paths or () if p))
     scoped = tuple(p for p in paths if not footprint.is_shared(p, shared))
-    if widened_before or len(scoped) > limit:
+    if not in_feature and (widened_before or len(scoped) > limit):
         return Verdict(RESHAPE, paths, RESHAPE_REASON.format(paths=' '.join(paths)))
     for p in paths:
         if (protected or {}).get(p):

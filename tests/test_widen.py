@@ -427,6 +427,94 @@ class WidenStepTests(WidenStepBase):
         self.assertEqual([r.kind for r in self.rows()], [feeder_rows.RESHAPE])
 
 
+class FeatureFootprintTests(WidenStepBase):
+    """A path inside the Task's Feature footprint (its sibling Tasks' ``writes:``) is widened by
+    rule — past the cap and a second widening — and a diff that already carries it spawns no
+    correction. Outside the Feature footprint, today's rules stand."""
+
+    def branch(self, *paths):
+        """Push ``worker/T-0001`` changing ``paths`` on top of main."""
+        _git(['checkout', '-q', '-b', 'worker/T-0001', 'main'], self.repo)
+        for rel in paths:
+            full = os.path.join(self.repo, rel)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, 'a') as f:
+                f.write('changed\n')
+        _git(['add', '-A'], self.repo)
+        _git(['commit', '-q', '-m', 'task(T-0001): work'], self.repo)
+        _git(['push', '-q', 'origin', 'worker/T-0001'], self.repo)
+        _git(['checkout', '-q', 'main'], self.repo)
+
+    def test_the_feature_footprint_is_the_union_of_its_tasks_writes(self):
+        items = {'F-1': {'type': 'feature'}, 'S-1': {'type': 'story', 'parent': 'F-1'},
+                 'T-1': {'type': 'task', 'parent': 'F-1', 'writes': ['a.py']},
+                 'T-2': {'type': 'task', 'parent': 'S-1', 'writes': ['b/ c.py']},
+                 'T-3': {'type': 'task', 'parent': 'F-1', 'writes': ['x.py'], 'removed': 'y'},
+                 'T-4': {'type': 'task', 'parent': 'F-2', 'writes': ['z.py']}}
+        self.assertEqual(widen.delivery_footprint(items, 'T-1'), ['a.py', 'b/', 'c.py'])
+        self.assertEqual(widen.delivery_footprint(items, 'T-4'), [])
+        self.assertTrue(widen.inside_feature(['b/q.py', 'a.py'], ['a.py', 'b/']))
+        self.assertFalse(widen.inside_feature(['z.py'], ['a.py']))
+        self.assertFalse(widen.inside_feature([], ['a.py']))
+
+    def test_inside_the_feature_neither_the_cap_nor_a_second_widening_reshapes(self):
+        v = widen.decide('T-1', ['a', 'b', 'c'], limit=1, widened_before=1, in_feature=True)
+        self.assertEqual(v.kind, widen.WIDEN)
+        self.assertEqual(widen.decide('T-1', ['a', 'b'], limit=1).kind, widen.RESHAPE)
+
+    def test_a_second_widening_inside_the_feature_widens(self):
+        self.finished('coder-t-0001', 'tests/test_b.py')
+        self.assertEqual(self.tick()[1], {'coder-t-0001': widen.WIDEN})
+        self.finished('correct-t-0001', 'lib/shared.py', kind='correct',
+                      started='2999-01-01T00:00:00Z')
+        _held, verdicts = self.tick()
+        self.assertEqual(verdicts, {'correct-t-0001': widen.WIDEN}, self.lines)
+        self.assertIn('lib/shared.py', self.writes())
+        self.assertFalse(self.items()['T-0001'].get('reshape'))
+
+    def test_a_diff_inside_the_feature_footprint_widens_with_no_correction(self):
+        self.branch('src/a.py', 'lib/shared.py')
+        self.finished('coder-t-0001', 'none')
+        self.tick()
+        self.assertEqual(self.writes(), ['src/a.py', 'tests/test_a.py', 'lib/shared.py'])
+        self.assertIn('footprint widened: +lib/shared.py (diff: inside the Feature footprint)',
+                      self.card_text('T-0001'))
+        path = pool_mod.sessions_path(self.product)
+        self.assertEqual(lifecycle.corrections(path), {})
+        run = lifecycle.latest(path)['coder-t-0001']
+        self.assertEqual(run['widened'], ['lib/shared.py'])
+        self.assertEqual(self.rows(), [])  # nothing launched: it goes on to review as it is
+        self.assertTrue(any('no correction' in l for l in self.lines), self.lines)
+        self.assertEqual(self.tick(), ([], {}))  # read once
+
+    def test_a_diff_outside_the_feature_footprint_keeps_todays_behaviour(self):
+        self.branch('src/a.py', 'lib/x.py')
+        self.finished('coder-t-0001', 'none')
+        self.tick()
+        self.assertEqual(self.writes(), ['src/a.py', 'tests/test_a.py'])
+        self.assertNotIn('footprint widened', self.card_text('T-0001'))
+        self.assertEqual(lifecycle.corrections(pool_mod.sessions_path(self.product)), {})
+
+    def test_a_diff_a_running_sibling_writes_waits_and_is_left_to_review(self):
+        self.active('T-0002', 'lib/shared.py')
+        self.branch('src/a.py', 'lib/shared.py')
+        self.finished('coder-t-0001', 'none')
+        self.tick()
+        self.assertEqual(self.writes(), ['src/a.py', 'tests/test_a.py'])
+        self.assertTrue(any('waits T-0002' in l for l in self.lines), self.lines)
+
+    def test_a_report_claim_the_diff_already_carries_is_widened_with_no_correction(self):
+        self.branch('src/a.py', 'lib/shared.py')
+        self.finished('coder-t-0001', 'lib/shared.py')
+        pool_mod.update_session(self.product, 'coder-t-0001', diff_read=1)  # the REPORT's path
+        _held, verdicts = self.tick()
+        self.assertEqual(verdicts, {'coder-t-0001': widen.WIDEN}, self.lines)
+        self.assertIn('lib/shared.py', self.writes())
+        path = pool_mod.sessions_path(self.product)
+        self.assertEqual(lifecycle.corrections(path), {})
+        self.assertEqual(self.rows(), [])
+
+
 class SharedPathWidenTests(WidenStepBase):
     """S-37301: a shared path widens freely, through the whole tick — the widen rule's exemption
     and I3's have to hold together, or the write the rule allows is refused before it lands
