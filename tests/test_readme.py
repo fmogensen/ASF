@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from asf import cli, env
+from asf import cli, doctor, env
 from asf.views import readme
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -535,6 +535,54 @@ class WorktreeSetupProseTests(unittest.TestCase):
         for needle in ('900', 'briefs/', '.setup.log', 'masked', 'removes the\n  worktree',
                        'idempotent', 'once per worktree', 'lane: cloud'):
             self.assertIn(needle, section)
+
+
+class ModelRoutingProseTests(unittest.TestCase):
+    """F-0211: the product-config guide documents `conventions.models` — the three-label routing
+    a job kind and item class run on — and the built-in table is quoted from `asf doctor` itself
+    so the two cannot drift."""
+
+    def _read(self, path):
+        with open(os.path.join(REPO_ROOT, path), encoding='utf-8') as f:
+            return f.read()
+
+    def _section(self, text, heading):
+        lines = text.splitlines()
+        start = next(i for i, l in enumerate(lines) if l.strip() == heading)
+        end = next(i for i in range(start + 1, len(lines)) if lines[i].startswith('###'))
+        return lines[start + 1:end]
+
+    def test_conventions_table_row_names_three_labels_and_the_map(self):
+        text = self._read('docs/guide/product-config.md')
+        row = [l for l in text.splitlines() if l.startswith('| `models:`')][0]
+        for needle in ('heavy', 'light', 'cheap', 'map'):
+            self.assertIn(needle, row, f'conventions-table row is missing {needle!r}')
+
+    def test_the_subsection_names_every_clause_an_operator_depends_on(self):
+        text = self._read('docs/guide/product-config.md')
+        section = '\n'.join(self._section(text, '### `models` — the model a session runs on'))
+        for needle in ('S1', 'S2', 'severity', 'task', 'story', 'feature', 'epic', 'default:',
+                       'asf doctor', 'model table', 'worker_pool.models',
+                       'a floor for every class you do not name'):
+            self.assertIn(needle, section, f'models subsection is missing {needle!r}')
+
+    def test_the_fenced_table_is_doctors_own_output(self):
+        text = self._read('docs/guide/product-config.md')
+        section = self._section(text, '### `models` — the model a session runs on')
+        # PD4: the override example opens a ```yaml fence and is skipped by its info string; the
+        # bare fence — exactly three backticks, no info string — is the doctor table, and it must
+        # stay the only bare fence before the table so this stays the first one found.
+        start = next(i for i, l in enumerate(section) if l.strip() == '```')
+        end = next(i for i in range(start + 1, len(section)) if section[i].strip() == '```')
+        table = section[start + 1:end]
+        expected = doctor.model_table_lines(env.Product('doc', {'repo_slug': 'a/b'}))
+        self.assertEqual(table, expected)
+
+    def test_the_troubleshooting_row_names_all_three_labels(self):
+        text = self._read('docs/guide/troubleshooting.md')
+        row = [l for l in text.splitlines() if 'worker_pool.models has no entry' in l][0]
+        for needle in ('heavy', 'light', 'cheap'):
+            self.assertIn(needle, row, f'troubleshooting row is missing {needle!r}')
 
 
 if __name__ == '__main__':
