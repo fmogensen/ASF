@@ -1,3 +1,4 @@
+import ast
 import os
 import shutil
 import subprocess
@@ -1078,3 +1079,45 @@ class TokenCaps(unittest.TestCase):
         findings, rows = self._rows({'spec': {'cache_read': 'off'}})
         self.assertTrue(any(not ok and 'spec.cache_read' in d for ok, d in findings), findings)
         self.assertFalse(doctor.is_red(rows))
+
+
+class RowNamesTests(unittest.TestCase):
+    """``ROWS`` is asserted against the source, not exercised live: ``run`` returns early on a bad
+    config, and most of its rows are appended from a loop or an ``if`` over a check's own findings
+    (a clock per product, a capacity finding, a CI pool row, and so on) — no single live run can be
+    relied on to reach every row in one pass. So this test parses ``asf/doctor.py`` with ``ast``,
+    walks ``run``, and collects the first element of every ``rows.append(...)`` call — a
+    ``Constant`` gives its value, a ``JoinedStr`` (the one f-string, ``cli:*``) gives its literal
+    prefix plus ``*`` — then asserts that set equals ``set(doctor.row_names())``, naming any row
+    that is in one and not the other. The repository already checks itself this way elsewhere
+    (``asf plugin check``, ``tools/check_conventions.sh``)."""
+
+    @staticmethod
+    def _appended_row_names():
+        path = os.path.join(PROJECT_ROOT, 'asf', 'doctor.py')
+        with open(path, encoding='utf-8') as f:
+            tree = ast.parse(f.read(), filename=path)
+        run_def = next(node for node in ast.walk(tree)
+                        if isinstance(node, ast.FunctionDef) and node.name == 'run')
+        names = set()
+        for call in ast.walk(run_def):
+            if not (isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Attribute) and call.func.attr == 'append'
+                    and isinstance(call.func.value, ast.Name) and call.func.value.id == 'rows'):
+                continue
+            first = call.args[0].elts[0]
+            if isinstance(first, ast.Constant):
+                names.add(first.value)
+            elif isinstance(first, ast.JoinedStr):
+                prefix = ''.join(v.value for v in first.values if isinstance(v, ast.Constant))
+                names.add(prefix + '*')
+            else:
+                raise AssertionError(f'unrecognised row-name expression at line {first.lineno}')
+        return names
+
+    def test_every_appended_row_name_is_declared_in_rows(self):
+        appended = self._appended_row_names()
+        declared = set(doctor.row_names())
+        self.assertEqual(appended, declared,
+                          f'appended in run() but not in ROWS: {appended - declared}; '
+                          f'in ROWS but never appended: {declared - appended}')
