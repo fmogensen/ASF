@@ -706,7 +706,9 @@ LANDING_FF = 'fast-forward'
 LANDING_PR = 'pull-request'
 FAIL_LINE_RE = re.compile(r'^(FAIL|ERROR)\b|\b(failed|FAILED|error|Error|violation)\b')
 #: asf's own gate scripts, run on top of the test command only when the repo harvested is this
-#: package's own (under its ``tools`` directory) — no product carries them.
+#: package's own (under its ``tools`` directory) — no product carries them. Read by the worker
+#: allow list too (:mod:`asf.workers.worker_perms`), so a lint appended here is allowed in every
+#: worker session with no second edit.
 ASF_GATE_SCRIPTS = ('check_generic', 'check_conventions')
 #: A leading ``NAME=value`` token of the test command: an environment assignment, not argv (§12).
 ENV_TOKEN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
@@ -847,6 +849,26 @@ def keep_red_output(text, verdict, only=None):
         return None
 
 
+def gate_commands(conv, asf_repo, only=None):
+    """``(cmds, env)``: every command the gate runs for ``conv``, in the order it runs them, and
+    the environment assignments lifted out of the test command's leading ``NAME=value`` tokens
+    (:func:`command_env`).
+
+    The product's test command first, then — on asf's own repo, and only when this is not a
+    bisection's targeted re-run (``only``) — one ``bash tools/<name>.sh`` per
+    :data:`ASF_GATE_SCRIPTS`. This is the one list: :func:`product_gate` runs it and
+    :mod:`asf.workers.worker_perms` permits it, so a lint appended to
+    :data:`ASF_GATE_SCRIPTS` is allowed in every worker session with no second edit.
+    """
+    cmds, extra = [], {}
+    if conv.test_command:
+        cmd, extra = command_env(shlex.split(str(conv.test_command)))
+        cmds.append(cmd)
+    if not only and asf_repo:
+        cmds += [['bash', os.path.join('tools', name + '.sh')] for name in ASF_GATE_SCRIPTS]
+    return cmds, extra
+
+
 def product_gate(tmp, conv, asf_repo, out=None, only=None, timing=True):
     """``(ok, first failing line, files, red modules)``: the product's test command, then — on
     asf's own repo — its generic and conventions checks. Each within ``harvest.gate_timeout_s``
@@ -859,15 +881,10 @@ def product_gate(tmp, conv, asf_repo, out=None, only=None, timing=True):
     duration still reaches ``gates.jsonl`` through :func:`asf.harvest.lane.gate_groups`'s own
     clock."""
     env = gate_env(tmp)
-    cmds = []
-    if conv.test_command:
-        cmd, extra = command_env(shlex.split(str(conv.test_command)))
-        cmds.append(cmd)
-        env.update(extra)
+    cmds, extra = gate_commands(conv, asf_repo, only)
+    env.update(extra)
     if only:
         env[ONLY_VAR] = ' '.join(only)
-    elif asf_repo:
-        cmds += [['bash', os.path.join('tools', name + '.sh')] for name in ASF_GATE_SCRIPTS]
     timeout = gate_timeout(conv)
     started = time.monotonic()
     count = [len(only) if only else '?']
