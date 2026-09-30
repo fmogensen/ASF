@@ -322,6 +322,22 @@ def decisions_cell(root, product):
     return f"{len(rows)} undecided — next: {shown}" if shown else f"{len(rows)} undecided"
 
 
+def parked_cell(product):
+    """The items a park holds (a pending correction carrying ``parked``: the relaunch cap, an
+    empty or blocked end, a security hold) — each waits on a person or a state change, not a
+    session. Silent (None) when nothing is parked."""
+    from asf.workers import lifecycle
+    from asf.workers import pool as pool_mod
+    parked = {i: c for i, c in lifecycle.corrections(pool_mod.sessions_path(product)).items()
+              if c.get('parked')}
+    if not parked:
+        return None
+    shown = '; '.join(f"{i}: {(c.get('reason') or c.get('kind') or '')[:120]}"
+                      for i, c in sorted(parked.items())[:3])
+    more = f' (+{len(parked) - 3} more)' if len(parked) > 3 else ''
+    return f"{len(parked)} — {shown}{more} · `asf unpark <item>` releases one"
+
+
 def quota_cell(cfg):
     from asf.workers import pool as pool_mod
     from asf.workers import quota as quota_mod
@@ -510,6 +526,7 @@ def render(root, product, cfg=None):
                        ('Record', lambda: record_cell(root)),
                        ('Ready to launch', lambda: ready_cell(root, product)),
                        ('Decisions', lambda: decisions_cell(root, product)),
+                       ('Parked', lambda: parked_cell(product)),
                        ('Quota 5h/7d', lambda: quota_cell(cfg)),
                        ('PAUSED', lambda: paused_cell(cfg, product)),
                        ('Cron', lambda: cron_cell(cfg, product)),
