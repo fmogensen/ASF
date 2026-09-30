@@ -184,6 +184,17 @@ class TestProductConventions(unittest.TestCase):
         self.assertIsNone(p.conventions.ci_dev_job)
         self.assertIsNone(p.conventions.deploy_workflow)
 
+    def test_factory_only_paths_returns_the_list(self):
+        p = self.product({'ci': {'factory_only_paths': ['docs/**/*.md', 'tools/**']}})
+        self.assertEqual(p.factory_only_paths, ['docs/**/*.md', 'tools/**'])
+
+    def test_factory_only_paths_defaults_to_empty(self):
+        self.assertEqual(self.product({}).factory_only_paths, [])
+        self.assertEqual(self.product({'ci': {'provider': 'gh-actions'}}).factory_only_paths, [])
+
+    def test_factory_only_paths_empty_for_ci_none(self):
+        self.assertEqual(self.product({'ci': 'none'}).factory_only_paths, [])
+
 
 class TestProduct(unittest.TestCase):
     def test_load_product_from_tmp_home(self):
@@ -279,6 +290,39 @@ class TestProductSchema(unittest.TestCase):
             bogus_top_level_key: 1
             """)
         self.assertIn("'bogus_top_level_key'", str(cm.exception))
+
+    def test_factory_only_paths_accepted_as_a_list(self):
+        p = self._load("""
+            repo_slug: a/b
+            ci:
+              factory_only_paths:
+                - docs/**/*.md
+                - tools/**
+            """)
+        self.assertEqual(p.factory_only_paths, ['docs/**/*.md', 'tools/**'])
+
+    def test_factory_only_paths_reported_at_its_line_when_a_scalar(self):
+        with self.assertRaises(env.ConfigError) as cm:
+            self._load("""
+            repo_slug: a/b
+            ci:
+              provider: gh-actions
+              factory_only_paths: docs/**/*.md
+            """)
+        self.assertIn("'ci.factory_only_paths'", str(cm.exception))
+        self.assertIn('line 4', str(cm.exception))
+
+    def test_factory_only_paths_reported_at_its_line_when_a_map(self):
+        with self.assertRaises(env.ConfigError) as cm:
+            self._load("""
+            repo_slug: a/b
+            ci:
+              provider: gh-actions
+              factory_only_paths:
+                docs: yes
+            """)
+        self.assertIn("'ci.factory_only_paths'", str(cm.exception))
+        self.assertIn('line 4', str(cm.exception))
 
     def test_the_documented_example_validates(self):
         self.assertEqual(env.validate_product_text(open(os.path.join(

@@ -216,6 +216,17 @@ ci:
   workflow: ci.yml
   # read as conventions.ci_dev_job — the job in that workflow whose success marks the dev sha.
   dev_job: test
+  # F-0038: path globs a push may touch and still be a factory-only change — process
+  # documentation, the factory's own scripts, review inputs and the tests that cover them.
+  # A push whose changed paths all match runs only the workflow's lint and factory-test jobs.
+  # Anything unmatched — or an empty diff — runs the full matrix. Globs are fnmatch over the
+  # repo-relative path, as customer_paths and amendable_paths are, so `*` crosses `/`:
+  # `docs/*` and `docs/**` name the same set. Unset, or empty: every push is FULL.
+  # Keep this list identical to the one the workflow named in `workflow:` carries;
+  # `asf doctor` has a row that says so when they drift.
+  factory_only_paths:
+    - docs/**/*.md
+    - tools/**
   budgets:
     minutes_per_day: 500
   runner_org: acme

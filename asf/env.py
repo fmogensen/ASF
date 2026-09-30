@@ -527,7 +527,7 @@ PRODUCT_FIELDS = {
 CI_FIELDS = {
     'provider': _STR, 'workflow': _STR, 'test_command': _STR, 'budgets': _MAP,
     'runner_org': _STR, 'labels': _LIST, 'dev_job': _STR, 'deploy_workflow': _STR,
-    'pool': _LIST, 'queue': _MAP, 'reserve': None,
+    'pool': _LIST, 'queue': _MAP, 'reserve': None, 'factory_only_paths': _LIST,
 }
 # `capacity:` is a map: this product's session/CI ceilings and its batch shape.
 CAPACITY_FIELDS = {'sessions': _STR, 'ci': _STR, 'weight': _STR, 'batch': _MAP}
@@ -804,6 +804,13 @@ class Product:
     @property
     def ci(self):
         return self._get('ci', {})
+
+    @property
+    def factory_only_paths(self):
+        """``ci.factory_only_paths`` — the globs a push may touch and still be FACTORY_ONLY.
+        Empty (the default) means the product has no such class: every push is FULL."""
+        ci = self._get('ci')
+        return (ci.get('factory_only_paths') or []) if isinstance(ci, dict) else []
 
     @property
     def deploy_sha(self):
