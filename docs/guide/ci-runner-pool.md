@@ -204,16 +204,27 @@ time), grouped by the class of the runner that actually ran it (the
 `class`, else the `role`) — never by the job's `runs-on`. A runner outside the pool is classed by
 its labels: a label every carrier of which sits in one class names that class, so a sub-label
 carried only by `heavy` runners counts in `heavy`, once, and never adds a demand of its own; a job
-listed twice counts once. The p90 of that over the runs, capped at what the pool has of that
+listed twice counts once. Within a class, a job also carries the labels it asked the host for; a
+**requirement key** is the class plus those of them some online runner of the class lacks —
+`heavy[alpha-heavy]` — and a class whose runners are alike splits on nothing and keeps its plain
+name, so most fleets never see a bracket. A hold line naming a bracketed key (`heavy[alpha-heavy]
+0 free, needs 2`) means the class itself has free runners, just none carrying that label; the
+answer is the same one the doctor gives an unsatisfiable job — ask for a role in `runs-on`
+([ADR 0002](../decisions/0002-ci-routing-labels-are-capabilities.md)) — never a label the queue
+writes itself. The p90 of that over the runs, capped at what the pool has of that
 class, per **run type**: a run whose PR changed only light paths (`ci.queue.light_paths`, default
 `docs/**` and `*.md`, or the product's docs roots) is `light`, every other run `full`, and each
 type is estimated from its own past runs (a type never seen is sized as `full`). A PR start is
 sized by the type its own changed files make; trunk, batch and deploy starts as `full`.
-`ci.queue.estimate` overrides the measure per class. Everything
+`ci.queue.estimate` overrides the measure per class — an override on a bare class replaces that
+class's whole demand, dropping any bracketed key of it, so a measured requirement never sits
+beside an operator's class-wide figure. Everything
 ahead in line has its expected jobs set aside first, so
 a heavy run at the head is not starved by lighter ones behind it; a run only needing a class with
-room still goes. A run admitted in the last three minutes still holds its runners, since its jobs
-queue on the host before any runner shows busy. **Starvation guard:** an ordinary PR start that
+room still goes. A run admitted holds its runners only for the part of its claim that has not yet
+reached one: the moment one of its jobs lands on a busy runner, that runner counts once, as a busy
+runner, never twice; the three-minute window is the backstop for a run whose jobs never appear on
+one. **Starvation guard:** an ordinary PR start that
 has waited longer than `ci.queue.pr_wait_min` minutes (default 45) starts once half its expected
 jobs per class (rounded up) are free, with one line:
 `ci queue: F-0112 starts — starvation guard — waited 1h05m (> 45m), heavy 4 free, needs 8; half is free`.
