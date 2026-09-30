@@ -231,3 +231,144 @@ def classify(runs, claims, timeouts, prs, repo, trunk, fetch=True):
         rows.append({'run': r.get('id'), 'branch': r.get('head_branch'), 'sha': r.get('head_sha'),
                       'cause': c, 'group': _group(c), 'minutes': r.get('cancelled_minutes', 0) or 0})
     return {'rows': rows, 'strays': strays}
+
+
+def _apportion(minutes):
+    """Integer percentages of ``minutes``' values (one per :data:`CAUSES` name) that sum to
+    exactly 100 when their total is non-zero — the largest-remainder method, so the table's
+    ``share`` column always adds up rather than drifting a point off from independent rounding.
+    Every share is 0 when no minutes were spent."""
+    total = sum(minutes.values())
+    if not total:
+        return {c: 0 for c in minutes}
+    raw = {c: (m / total) * 100 for c, m in minutes.items()}
+    floors = {c: int(v) for c, v in raw.items()}
+    remainder = 100 - sum(floors.values())
+    ranked = sorted(minutes, key=lambda c: raw[c] - floors[c], reverse=True)
+    shares = dict(floors)
+    for c in ranked[:remainder]:
+        shares[c] += 1
+    return shares
+
+
+def rows(classification):
+    """One row per cause in :data:`CAUSES` order, always — zeros included, so a cause that never
+    appears is a cause the operator can see is zero and ``unclaimed`` at zero is this card's own
+    success condition. Each row is ``{cause, group, runs, minutes, share}``; ``share`` is of
+    runner-minutes, not of runs, because runners are what the card is spending
+    (:func:`_apportion`)."""
+    counts = {c: 0 for c in CAUSES}
+    minutes = {c: 0 for c in CAUSES}
+    for r in classification['rows']:
+        c = r['cause']
+        counts[c] += 1
+        minutes[c] += r.get('minutes') or 0
+    shares = _apportion(minutes)
+    return [{'cause': c, 'group': _group(c), 'runs': counts[c], 'minutes': minutes[c],
+             'share': shares[c]} for c in CAUSES]
+
+
+def render(product_name, clause, table, strays=0):
+    """The spec's §4 table (F-0230): the registry's own first line
+    (:func:`asf.views.header.head`), one row per :data:`CAUSES` cause in order with the numeric
+    columns right-aligned, then the footer — ``RED`` at or above :data:`WASTED_ALERT_PCT` naming
+    ``rewrite`` as the waste and F-0203 (already approved and planned) as its cut, else ``OK``,
+    the ``unknown`` share printed beside it either way, and PD3's stray count named when it is
+    non-zero — a landed cause string this module has not been told the partition of."""
+    from asf.views import header
+    lines = [header.head('ci cancels', product_name, clause), '',
+             '| cause      | group   | runs | minutes | share |',
+             '| ---------- | ------- | ---: | ------: | ----: |']
+    for row in table:
+        lines.append(f"| {row['cause']:<10} | {row['group']:<7} | {row['runs']:>4} | "
+                      f"{row['minutes']:>7} | {row['share']:>3} % |")
+    wasted = sum(row['share'] for row in table if row['group'] == 'wasted')
+    unknown = sum(row['share'] for row in table if row['group'] == 'unknown')
+    status = 'RED' if wasted >= WASTED_ALERT_PCT else 'OK'
+    footer = (f"{status} — {wasted} % of the cancelled runner-minutes were thrown away by a "
+              f"content-free re-push (cause `rewrite`); F-0203 Tasks 2-4 cut exactly this. "
+              f"unknown {unknown} %.")
+    if strays:
+        footer += (f" strays {strays} — a landed cause string this module does not know the "
+                   f"partition of.")
+    lines += ['', footer]
+    return '\n'.join(lines)
+
+
+def _run_listing(product, since):
+    """Every finished run of ``product``'s CI workflow (``product.ci['workflow']``, P14) since
+    ``since`` (a date), each carrying ``event`` — the REST listing P7 names, with the one field
+    neither the queue's own ``gh run list`` nor ``metrics.ci_from_api``'s jq carries (F-0230
+    PD7). ``pr`` is the first PR number the run belongs to, or None."""
+    from asf.metrics import metrics
+    workflow = product.ci.get('workflow') if isinstance(product.ci, dict) else None
+    runs = metrics.gh_lines(
+        ['api', f'repos/{product.repo_slug}/actions/runs?created=%3E%3D{since}'
+                '&status=completed&per_page=100', '--paginate', '--jq',
+         '.workflow_runs[]|{id,name,head_branch,head_sha,conclusion,created_at,updated_at,'
+         'run_attempt,event,pr:[.pull_requests[].number]}|@json'])
+    out = []
+    for r in runs:
+        if workflow and r.get('name') != workflow:
+            continue
+        pr = r.get('pr') or []
+        out.append({**r, 'pr': pr[0] if pr else None})
+    return out
+
+
+def _jobs_of(product, run_id):
+    """A cancelled run's own jobs — name, conclusion, ``started_at``, ``completed_at`` — read for
+    cancelled runs only (C8): nothing here needs the jobs of a run that concluded ``success``."""
+    from asf.metrics import metrics
+    return metrics.gh_lines(
+        ['api', f'repos/{product.repo_slug}/actions/runs/{run_id}/jobs?per_page=100',
+         '--paginate', '--jq', '.jobs[]|{name,conclusion,started_at,completed_at}|@json'])
+
+
+def _merged_at_cache(product, numbers):
+    """``{pr number: merged_at or None}``, one ``gh api`` read per number — never
+    ``metrics.pr_info``, which returns ``merged`` as a bool and cannot answer the inferred
+    ``merged`` rule's *"at or before"* test (F-0230 PD7)."""
+    from asf.metrics import metrics
+    out = {}
+    for n in numbers:
+        d = metrics.gh_json(['api', f'repos/{product.repo_slug}/pulls/{n}'])
+        out[n] = (d or {}).get('merged_at')
+    return out
+
+
+def cmd_cancels(args, out=print):
+    """``asf ci cancels``: every cancelled run of the window, told apart into one of the nine
+    causes, as a table (§4). Writes nothing (C11): no claim, no metrics event, no state file —
+    a reading of the claims plus the host plus the clone, and re-reading it tomorrow with a
+    longer window gives a different and better answer."""
+    from asf import ci_pool
+    from asf.metrics import metrics
+    product = env.load_product(args.product)
+    days = getattr(args, 'days', None) or 2
+    since = metrics.days_back(metrics.today(), days)[0]
+    runs = _run_listing(product, since)
+    cancelled = [r for r in runs if r.get('conclusion') == 'cancelled']
+    for r in cancelled:
+        r['jobs'] = _jobs_of(product, r['id'])
+        r['cancelled_minutes'] = sum(
+            metrics.mins(j.get('started_at'), j.get('completed_at'))
+            for j in r['jobs'] if j.get('conclusion') == 'cancelled')
+    prs = _merged_at_cache(product, {r['pr'] for r in cancelled if r.get('pr') is not None})
+    backend = ci_pool.backend_for(product)
+    try:
+        timeouts = backend.timeouts() if backend is not None else {}
+    except ci_pool.BackendError:
+        timeouts = {}
+    classification = classify(runs, claims(env.state_dir(product)), timeouts, prs,
+                               product.repo_dir, product.main,
+                               fetch=not getattr(args, 'no_fetch', False))
+    table = rows(classification)
+    if getattr(args, 'json', False):
+        out(json.dumps(table))
+        return 0
+    total_minutes = sum(row['minutes'] for row in table)
+    clause = (f"{days} days, {len(cancelled)} of {len(runs)} runs cancelled, "
+              f"{total_minutes} runner-minutes thrown away")
+    out(render(product.name, clause, table, classification['strays']))
+    return 0

@@ -14,7 +14,8 @@ TITLES = {
     'stale': 'STALE',             'doctor': 'DOCTOR',
     'rules check': 'RULES',       'ci': 'CI',
     'ci queue': 'CI QUEUE',       'ci reconcile': 'CI RECONCILE',
-    'ci reserve': 'CI RESERVE',   'health': 'HEALTH',
+    'ci reserve': 'CI RESERVE',   'ci cancels': 'CI CANCELS',
+    'health': 'HEALTH',
     'performance': 'PERFORMANCE',
 }
 
