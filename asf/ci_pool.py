@@ -161,14 +161,22 @@ def _pool_problems(ci):
             r = _norm(role)
             if not LABEL_RE.match(r):
                 out.append((f'{key}.role', f'must be one label (letters, digits, . _ -), not {role!r}'))
+            elif r.startswith(ASF_PREFIX):
+                out.append((f'{key}.role', f"{role!r} is ASF's own namespace — a tier is placed, "
+                                           'never declared'))
             elif r.startswith(PROVIDER_PREFIX) or r in DEFAULT_LABELS:
                 out.append((f'{key}.role', f'{role!r} is not a capability: a role names what a '
                                            'runner can do (heavy, light), never its provider or OS'))
             elif isinstance(entry.get('provider'), str) and r == _norm(entry['provider']):
                 out.append((f'{key}.role', f'{role!r} is the provider — a role names a capability'))
         cls = entry.get('class')
-        if isinstance(cls, str) and cls and not LABEL_RE.match(_norm(cls)):
-            out.append((f'{key}.class', f'must be one label (letters, digits, . _ -), not {cls!r}'))
+        if isinstance(cls, str) and cls:
+            c = _norm(cls)
+            if not LABEL_RE.match(c):
+                out.append((f'{key}.class', f'must be one label (letters, digits, . _ -), not {cls!r}'))
+            elif c.startswith(ASF_PREFIX):
+                out.append((f'{key}.class', f"{cls!r} is ASF's own namespace — a tier is placed, "
+                                            'never declared'))
         slots = entry.get('slots')
         if slots is not None and (isinstance(slots, bool) or not isinstance(slots, int) or slots < 1):
             out.append((f'{key}.slots', f'must be a whole number >= 1, not {slots!r}'))
@@ -254,8 +262,15 @@ def pool_ci(product):
 # ---- reservations: runners kept free of a PR-only label -------------------------------------
 
 RESERVE_FIELDS = ('label', 'of', 'keep_free', 'spread_by', 'prefer')
-RESERVE_REQUIRED = ('label', 'of', 'keep_free')
+RESERVE_REQUIRED = ('of', 'keep_free')
 SPREAD_BY = ('box', 'none')
+
+
+def default_reserve_label(of):
+    """``asf-pr-<of>``, with a leading ``asf-`` on ``of`` stripped so ``of: asf-fast`` gives
+    ``asf-pr-fast`` rather than ``asf-pr-asf-fast``. The label a reserve gets when its product
+    file writes none (I8)."""
+    return ASF_PREFIX + 'pr-' + _norm(of).removeprefix(ASF_PREFIX)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -318,22 +333,32 @@ def reserve_problems(ci):
         if s is not None and s not in SPREAD_BY:
             out.append((f'{key}.spread_by', f"must be one of {', '.join(SPREAD_BY)}, not {s!r}"))
         lab = r.get('label')
+        of_val = r.get('of')
+        default = default_reserve_label(of_val) if isinstance(of_val, str) and of_val else None
         if isinstance(lab, str) and lab:
-            if _norm(lab) == _norm(r.get('of') or ''):
+            n = _norm(lab)
+            if n == _norm(of_val or ''):
                 out.append((f'{key}.label', 'must differ from `of`: it marks a subset of those runners'))
-            if _norm(lab) in labels:
-                out.append((f'{key}.label', f'{lab!r} is reserved twice'))
-            labels.add(_norm(lab))
+            if n.startswith(ASF_PREFIX) and n != default:
+                out.append((f'{key}.label', f"{lab!r} is ASF's own namespace — a reserve's "
+                                            "label is generated, never typed"))
+        resolved = _norm(lab) if isinstance(lab, str) and lab else default
+        if resolved:
+            if resolved in labels:
+                out.append((f'{key}.label', f'{resolved!r} is reserved twice'))
+            labels.add(resolved)
     return out
 
 
 def load_reserve(product):
     """The product's ``ci.reserve`` as :class:`Reserve` rows; ``[]`` when none is declared or
-    it does not validate (the product load refuses such a file anyway)."""
+    it does not validate (the product load refuses such a file anyway). A reserve with no
+    ``label`` gets :func:`default_reserve_label` (I8, PD9)."""
     ci = product.ci if isinstance(getattr(product, 'ci', None), dict) else {}
     if reserve_problems(ci):
         return []
-    return [Reserve(label=_norm(r['label']), of=_norm(r['of']), keep_free=int(r['keep_free']),
+    return [Reserve(label=_norm(r.get('label') or default_reserve_label(r.get('of') or '')),
+                    of=_norm(r['of']), keep_free=int(r['keep_free']),
                     spread_by=r.get('spread_by') or 'box', prefer=_norm(r.get('prefer') or ''))
             for r in _reserve_entries(ci) or ()]
 
@@ -920,11 +945,13 @@ def _satisfies(runner, ro):
     return ro.labels is not None and ro.labels <= runner.norm_labels()
 
 
-def drift(pool, runners, runs_on, owned=frozenset(), why=None):
+def drift(pool, runners, runs_on, owned=frozenset(), why=None, product=None):
     """``[(ok, detail)]`` — one finding per drift, ``[(True, summary)]`` when there is none.
     ``owned``: the labels ``ci.reserve`` places (:func:`reserve_labels`) — never a stray class.
     ``why``: the reason a variables read failed (:attr:`GitHubBackend.vars_error`), passed to
-    :func:`unresolved_rows`."""
+    :func:`unresolved_rows`. ``product``: when its pool is discovered (:func:`pool_mode`), a
+    ``runs-on`` asking for a label that is neither a tier ASF places nor a reservation is its own
+    required row (I7) instead of today's declared-pool ``provider-like label`` one."""
     declared = {e.runner: e for e in pool}
     role_set = set(roles(pool))
     by_name = {r.name: r for r in runners}
@@ -950,16 +977,30 @@ def drift(pool, runners, runs_on, owned=frozenset(), why=None):
             seen.add(ro.labels)
             out.append((False, f"unsatisfiable: {ro.text()} — no online runner carries all of it"))
 
-    flagged = set()
-    for ro in jobs:
-        for label in sorted(ro.labels):
-            if is_default(label) or label in role_set or (ro.workflow, label) in flagged:
-                continue
-            flagged.add((ro.workflow, label))
-            why = ('a provider label' if label.startswith(PROVIDER_PREFIX)
-                   else 'not a declared role (' + ', '.join(sorted(role_set)) + ')')
-            out.append((False, f"provider-like label in runs-on: {ro.workflow} asks for "
-                               f"'{label}', {why} — ask for a role"))
+    if pool_mode(product) == DISCOVER:
+        from asf import ci_census
+        tiers = ci_census.TIERS
+        flagged = set()
+        for ro in jobs:
+            for label in sorted(ro.labels):
+                if is_default(label) or label in tiers or label in owned \
+                        or (ro.workflow, ro.job, label) in flagged:
+                    continue
+                flagged.add((ro.workflow, ro.job, label))
+                out.append((False, f"runs-on: {ro.workflow}:{ro.job} asks for {label!r} — no "
+                                   f"tier ASF places ({', '.join(tiers)}) and no reservation; "
+                                   f"ASF cannot route it"))
+    else:
+        flagged = set()
+        for ro in jobs:
+            for label in sorted(ro.labels):
+                if is_default(label) or label in role_set or (ro.workflow, label) in flagged:
+                    continue
+                flagged.add((ro.workflow, label))
+                reason = ('a provider label' if label.startswith(PROVIDER_PREFIX)
+                          else 'not a declared role (' + ', '.join(sorted(role_set)) + ')')
+                out.append((False, f"provider-like label in runs-on: {ro.workflow} asks for "
+                                   f"'{label}', {reason} — ask for a role"))
 
     for e in pool:
         r = by_name.get(e.runner)
@@ -1016,7 +1057,8 @@ def doctor_rows(product, backend=None):
         return [(False, None, f'ci.pool: cannot read the CI host — {e}')] + classes
     rows = [(True, ok, detail) for ok, detail in drift(pool, runners, runs_on,
                                                        owned=reserve_labels(product),
-                                                       why=getattr(backend, 'vars_error', None))]
+                                                       why=getattr(backend, 'vars_error', None),
+                                                       product=product)]
     return rows + reserve_rows(product, runners, pool) + classes
 
 

@@ -106,7 +106,7 @@ class Validation(unittest.TestCase):
         self.assertEqual(ci_pool.load_reserve(product(reserve=bad)), [])
         self.assertTrue(ci_pool.reserve_problems({'reserve': 'yes'}))
         self.assertEqual({k for k, _w in ci_pool.reserve_problems({'reserve': [{}]})},
-                         {'ci.reserve[0].label', 'ci.reserve[0].of', 'ci.reserve[0].keep_free'})
+                         {'ci.reserve[0].of', 'ci.reserve[0].keep_free'})
 
     def test_the_product_file_accepts_ci_reserve(self):
         text = ('repo_slug: o/r\nci:\n  provider: github-actions\n  reserve: {label: class-pr, '
@@ -114,6 +114,44 @@ class Validation(unittest.TestCase):
         self.assertEqual(env.validate_product_text(text), [])
         text = text.replace('keep_free: 2', 'keep_free: two')
         self.assertTrue(any('keep_free' in str(p) for p in env.validate_product_text(text)))
+
+
+class ReserveDefault(unittest.TestCase):
+    """``ci.reserve.label`` is optional: a reserve with none gets ``asf-pr-<of>`` (I8, PD9)."""
+
+    def rproduct(self, reserve):
+        ci = {'provider': 'github-actions', 'reserve': reserve}
+        return env.Product('p', {'repo_slug': 'o/r', 'ci': ci})
+
+    def test_a_reserve_with_no_label_validates(self):
+        self.assertEqual(ci_pool.reserve_problems({'reserve': {'of': 'heavy', 'keep_free': 2}}), [])
+
+    def test_load_reserve_defaults_the_label_stripping_a_leading_asf_from_of(self):
+        [r] = ci_pool.load_reserve(self.rproduct({'of': 'asf-fast', 'keep_free': 2}))
+        self.assertEqual(r.label, 'asf-pr-fast')
+        [r2] = ci_pool.load_reserve(self.rproduct({'of': 'heavy', 'keep_free': 2}))
+        self.assertEqual(r2.label, 'asf-pr-heavy')
+
+    def test_a_hand_written_namespaced_label_is_refused(self):
+        keys = [k for k, _w in ci_pool.reserve_problems(
+            {'reserve': {'label': 'asf-anything', 'of': 'heavy', 'keep_free': 2}})]
+        self.assertEqual(keys, ['ci.reserve.label'])
+
+    def test_the_generated_default_still_validates_when_written_by_hand(self):
+        self.assertEqual(ci_pool.reserve_problems(
+            {'reserve': {'label': 'asf-pr-heavy', 'of': 'heavy', 'keep_free': 2}}), [])
+
+    def test_a_hand_written_label_outside_the_namespace_is_still_accepted_unchanged(self):
+        self.assertEqual(ci_pool.reserve_problems(
+            {'reserve': {'label': 'class-pr-heavy', 'of': 'heavy', 'keep_free': 2}}), [])
+        [r] = ci_pool.load_reserve(self.rproduct({'label': 'class-pr-heavy', 'of': 'heavy',
+                                                   'keep_free': 2}))
+        self.assertEqual(r.label, 'class-pr-heavy')
+
+    def test_two_reserves_that_both_default_over_the_same_of_collide(self):
+        entries = [{'of': 'heavy', 'keep_free': 1}, {'of': 'heavy', 'keep_free': 2}]
+        keys = [k for k, _w in ci_pool.reserve_problems({'reserve': entries})]
+        self.assertEqual(keys, ['ci.reserve[1].label'])
 
 
 class Plan(unittest.TestCase):
