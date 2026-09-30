@@ -28,17 +28,18 @@ dead run's worktree is brought up to ``origin/<branch>``, its brief ref is delet
 lands in the status file every liveness check reads — from then on health judges it like any run:
 pushed or not, empty or not.
 
-**Placement** (:func:`asf.workers.wave.wave`). With ``cloud.default: false`` (the default) the
-cloud is OVERFLOW: a row goes there when the local lane cannot take it — no local seat, or host
-pressure — ``cloud.enabled`` is true, the row is eligible (``cloud.rows: any``, or a ``cloud-ok``
-row) and the lane is under ``cloud.max_inflight`` (else ``worker_pool.caps.cloud_max_inflight``).
-With ``cloud.default: true`` the cloud is the DEFAULT executor: a row of a kind in
-:data:`DEFAULT_KINDS` (every kind with ``cloud.rows: any``; a ``cloud-ok`` row too) goes to the
-cloud first, up to ``max_inflight``; the local lane takes it when the cloud lane is full or
-unready. A row whose kind is in ``cloud.local_only`` or whose item carries ``local_only: true``
-never leaves the host, in either mode. Its accounts are ``cloud.accounts``, else the pool
-accounts with ``role: cloud``: the account whose token the repo secret holds; its quota bands and
-5h headroom apply as for any launch.
+**Placement** (:func:`asf.workers.wave.wave`). With ``cloud.default: true`` the cloud is the
+DEFAULT executor: every row goes there first except one whose kind is in :data:`LOCAL_KINDS` —
+the closed exception list of three kinds the lane structurally cannot collect — or in
+``cloud.local_only``, or whose item carries ``local_only: true``; the local lane takes such a row,
+and takes any other one too once the cloud lane is full or unready. With ``cloud.default: false``
+the cloud is OVERFLOW: a row goes there only when the local lane cannot take it — no local seat,
+or host pressure — ``cloud.enabled`` is true, the row is eligible (``cloud.rows: any``, or a
+``cloud-ok`` row) and the lane is under ``cloud.max_inflight`` (else
+``worker_pool.caps.cloud_max_inflight``); the exception list holds in this mode too — the
+overflow door never opens for a :data:`LOCAL_KINDS` row either. Its accounts are
+``cloud.accounts``, else the pool accounts with ``role: cloud``: the account whose token the repo
+secret holds; its quota bands and 5h headroom apply as for any launch.
 
 **Host pressure** holds the local lane only: a cloud row runs nothing here, and is bounded by
 ``max_inflight`` and its account's quota instead. The fair share bounds the local lane: the wave
@@ -94,10 +95,19 @@ REFUSED = {
 }
 ROWS_ANY = 'any'
 ROWS_CLOUD_OK = 'cloud-ok'
-#: the row kinds ``cloud.default: true`` sends to the cloud first (``task`` is the feeder's name
-#: for a ``coder`` row)
-DEFAULT_KINDS = ('coder', 'task', 'correct', 'review', 'adjudicate', 'fix-bug', 'spec',
-                 'spec-amend', 'plan', 'direct', 'groom')
+#: The closed list of kinds that never leave the factory host — the EXCEPTION, in both modes and
+#: under every setting. A kind is here only when the cloud lane has no channel back for its work:
+#: the lane collects a session by one pushed commit on the product branch and nothing else
+#: (asf.workers.actions's workflow, :func:`report_commit`), and these three produce none.
+#:
+#: ``groom``, ``groom-clerk`` — the brief forbids the commit and the push in as many words ("THE
+#:   REPOSITORY IS NOT YOUR WORK"), and the answers file it writes instead is a path on this host
+#:   that the next tick reads. In the cloud the run ends ``dead`` and the day's answers are lost.
+#: ``close`` — one report line, no commit, no push, and a brief that says to leave the branch
+#:   alone; there is nothing for the lane to carry back.
+#:
+#: ``cloud.local_only`` adds to this list. Nothing takes from it (F-0216 C4).
+LOCAL_KINDS = ('groom', 'groom-clerk', 'close')
 DEFAULT_TIMEOUT_MIN = 240
 DEFAULT_LAUNCH_WAIT_S = 30
 DEFAULT_RUNS_ON = ('ubuntu-latest',)
@@ -272,9 +282,13 @@ def lane_accounts(accounts, s):
 
 
 def local_only(row, s):
-    """The row never leaves the host: its kind is in ``cloud.local_only``, or its item says
-    ``local_only: true``."""
-    return getattr(row, 'kind', None) in s.local_only or truthy(getattr(row, 'local_only', False))
+    """The row never leaves the host: its kind is a :data:`LOCAL_KINDS` one (the floor, both
+    modes — F-0216 C3), a kind the operator added in ``cloud.local_only``, or its item says
+    ``local_only: true``. The kind is the canonical one: ``asf.tick.step_wave.worker_row``
+    carries ``brief.kind``, which is :func:`asf.briefs.build.normalize_kind`'s output."""
+    kind = getattr(row, 'kind', None)
+    return kind in LOCAL_KINDS or kind in s.local_only \
+        or truthy(getattr(row, 'local_only', False))
 
 
 def eligible(row, s):
@@ -287,12 +301,9 @@ def eligible(row, s):
 
 
 def first(row, s):
-    """``cloud.default: true``: the row goes to the cloud before the local lane — a kind in
-    :data:`DEFAULT_KINDS` (any kind with ``cloud.rows: any``), or a ``cloud-ok`` row, and not
-    local-only."""
-    if not s.default or local_only(row, s):
-        return False
-    return eligible(row, s) or getattr(row, 'kind', None) in DEFAULT_KINDS
+    """``cloud.default: true``: the row goes to the cloud lane before the local one. Every kind
+    but a local-only one — there is no allow-list."""
+    return bool(s.default) and not local_only(row, s)
 
 
 def is_cloud(run):
@@ -549,7 +560,8 @@ def checks(cfg, product, run_cmd=None):
              'cloud.enabled: true' if s.enabled else 'cloud.enabled: false — the lane takes no '
                                                      'launch')]
     rows.append(('default', False, s.default,
-                 'cloud.default: true — the cloud lane is the default executor' if s.default
+                 f'cloud.default: true — the cloud lane is the default executor '
+                 f'(local: {", ".join(LOCAL_KINDS)})' if s.default
                  else 'cloud.default: false — the cloud lane is overflow only'))
     if s.runtime in REFUSED:
         rows.append(('runtime', True, False,
