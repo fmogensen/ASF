@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import unittest
 
-from asf import capacity, ci_pool, env
+from asf import capacity, ci_census, ci_pool, env
 from asf.ci_pool import Runner, RunsOn
 
 
@@ -107,6 +107,34 @@ class Validation(unittest.TestCase):
         self.assertEqual(keys, ['ci.pool[0].slots'])
         ok = 'product: p\nci:\n  pool:\n    - {runner: a, box: b, provider: x, size: s, role: heavy}\n'
         self.assertEqual(env.validate_product_text(ok), [])
+
+
+class Namespace(unittest.TestCase):
+    """``asf-`` is ASF's own label namespace: a product file may not place a tier by hand."""
+
+    def problems(self, pool):
+        return dict(ci_pool.pool_problems({'pool': pool}))
+
+    def test_a_declared_role_beginning_asf_is_refused_and_named(self):
+        problems = self.problems([{'runner': 'a', 'provider': 'x', 'role': 'asf-fast'}])
+        self.assertEqual(list(problems), ['ci.pool[0].role'])
+        self.assertIn("ASF's own namespace", problems['ci.pool[0].role'])
+
+    def test_a_declared_class_beginning_asf_is_refused_and_named(self):
+        problems = self.problems([{'runner': 'a', 'provider': 'x', 'role': 'heavy',
+                                   'class': 'asf-x'}])
+        self.assertEqual(list(problems), ['ci.pool[0].class'])
+        self.assertIn("ASF's own namespace", problems['ci.pool[0].class'])
+
+    def test_a_role_or_class_outside_the_namespace_is_unaffected(self):
+        self.assertEqual(self.problems([{'runner': 'a', 'provider': 'x', 'role': 'heavy',
+                                        'class': 'heavy-fast'}]), {})
+
+    def test_the_product_file_refuses_a_namespaced_role(self):
+        text = ('product: p\nci:\n  provider: github-actions\n  pool:\n'
+                '    - {runner: a, provider: x, role: asf-fast}\n')
+        keys = [k for _ln, k, _w in env.validate_product_text(text)]
+        self.assertEqual(keys, ['ci.pool[0].role'])
 
 
 class RunsOnParser(unittest.TestCase):
@@ -341,6 +369,61 @@ class Drift(unittest.TestCase):
                 raise ci_pool.BackendError('401')
         rows = ci_pool.doctor_rows(product(), backend=Down())
         self.assertEqual([(r, ok) for r, ok, _d in rows], [(False, None)])
+
+
+def discovered(reserve=None, name='p'):
+    ci = {'provider': 'github-actions', 'pool': 'discover'}
+    if reserve is not None:
+        ci['reserve'] = reserve
+    return env.Product(name, {'repo_slug': 'o/r', 'ci': ci})
+
+
+class RunsOnRouting(Home):
+    """A self-hosted ``runs-on`` on a discovered pool asking for a label that is neither a tier
+    nor a reservation is a required red row naming the workflow, the job and the label (I7)."""
+
+    POOL = [ci_pool.PoolEntry(runner='ci-1', provider='', role='asf-fast'),
+           ci_pool.PoolEntry(runner='ci-2', provider='', role='asf-bulk')]
+    RUNNERS = [runner('ci-1', 'asf-fast'), runner('ci-2', 'asf-bulk')]
+
+    def findings(self, runs_on, reserve=None):
+        p = discovered(reserve=reserve)
+        owned = ci_pool.reserve_labels(p)
+        return [d for ok, d in ci_pool.drift(self.POOL, self.RUNNERS, runs_on, owned=owned,
+                                             product=p) if not ok]
+
+    def test_a_label_with_no_tier_and_no_reservation_is_a_required_row(self):
+        got = self.findings([ro('self-hosted', 'heavy')])
+        self.assertIn("runs-on: ci.yml:j asks for 'heavy' — no tier ASF places (asf-fast, "
+                      "asf-bulk) and no reservation; ASF cannot route it", got)
+
+    def test_a_tier_label_produces_no_routing_row(self):
+        got = self.findings([ro('self-hosted', 'asf-fast')])
+        self.assertEqual([d for d in got if d.startswith('runs-on:')], [])
+
+    def test_a_reserve_label_produces_no_routing_row(self):
+        label = ci_pool.default_reserve_label('asf-fast')
+        got = self.findings([ro('self-hosted', label)], reserve={'of': 'asf-fast', 'keep_free': 1})
+        self.assertEqual([d for d in got if d.startswith('runs-on:')], [])
+
+    def test_a_declared_pool_still_gets_todays_provider_like_row_and_nothing_new(self):
+        runners = [runner('ci-1', 'heavy'), runner('ci-1b', 'light'), runner('ci-h1', 'heavy')]
+        got = [d for ok, d in ci_pool.drift(ci_pool.load_pool(product()), runners,
+                                            [ro('self-hosted', 'stray')]) if not ok]
+        self.assertTrue(any(d.startswith('provider-like label in runs-on:') for d in got), got)
+        self.assertFalse(any(d.startswith('runs-on:') for d in got), got)
+
+    def test_doctor_rows_marks_the_new_row_required(self):
+        p = discovered()
+        path = os.path.join(env.state_dir(p), 'ci-census.json')
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump({'v': ci_census.CENSUS_VERSION,
+                      'runners': [{'runner': 'ci-1', 'tier': 'asf-fast'},
+                                  {'runner': 'ci-2', 'tier': 'asf-bulk'}]}, f)
+        b = FakeBackend(self.RUNNERS, [ro('self-hosted', 'heavy')])
+        rows = ci_pool.doctor_rows(p, backend=b)
+        hit = [(r, ok, d) for r, ok, d in rows if d.startswith('runs-on:')]
+        self.assertEqual([(r, ok) for r, ok, _d in hit], [(True, False)])
 
 
 class Plan(Home):
