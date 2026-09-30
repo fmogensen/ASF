@@ -17,8 +17,9 @@ import unittest
 from unittest import mock
 
 from asf import env, invariants, redact
+from asf.groom import inbox as inbox_mod
 from asf.record import frontmatter, ingest, stage
-from asf.record.core import load_items
+from asf.record.core import canonicalize, load_items
 from asf.record.index import do_index
 from asf.record.setfield import set_typed
 
@@ -424,6 +425,34 @@ class I11DerivedTextIsScrubbed(StageTestCase):
             _r, _s, findings = stage.guarded(self.root, 'index', copies, out=lambda *_: None)
         self.assertEqual([f.invariant for f in findings], ['I11'])
         self.assertNotIn('zorblax', read(self.root, rel))
+
+    def test_i11_an_intake_cards_title_is_scrubbed_but_its_file_name_is_not(self):
+        """P5 (asf/groom/inbox.py:118-125, called at :183): a card intake mints from a protected
+        title comes out with the title scrubbed, same as any other typed field. But the intake
+        *file*'s name is never scrubbed — :133 builds it from the raw title in ``cmd_inbox`` and
+        nothing rewrites it later — because the groom answers a Question by an ``inbox:<file>``
+        token matched against a real file on disk (F-0132 §Out); scrubbing the name would break
+        that match. Pinned as a decision, not a surprise."""
+        write(self.root, 'E-0001', 'epic', title='Billing')
+        with mock.patch.object(redact, 'default_patterns', return_value=self.PATS):
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = inbox_mod.cmd_inbox(
+                    types.SimpleNamespace(title='Pay for Zorblax account', body_file=None,
+                                           parent='E-0001', product=None),
+                    self.root)
+            self.assertEqual(rc, 0)
+            inbox_path = os.path.join(self.root, 'inbox', 'pay-for-zorblax-account.md')
+            self.assertTrue(os.path.isfile(inbox_path), "the file name is built from the raw title")
+
+            by_id, _ = load_items(self.root)
+            canonical, _ = canonicalize(by_id)
+            created = inbox_mod.process_inbox(self.root, canonical, '2026-01-01')
+        self.assertEqual(len(created), 1)
+        new_id = created[0]
+        self.assertIn('title: Pay for [redacted] account',
+                       read(self.root, f'features/{new_id}.md'))
+        # the file the operator dropped never had its name touched, before or after minting
+        self.assertFalse(os.path.isfile(inbox_path), "the mint moves the file out of inbox/")
 
     def test_a_removed_or_moved_card_has_no_derived_sections(self):
         write(self.root, 'E-0001', 'epic', title='Billing')
