@@ -1558,44 +1558,53 @@ def account_index(name):
 
 
 def sessions_from_registry(product, since_day=None, items=None, state_path=None, logs_dir=None):
-    """Events for every ended session of a product, from its own bookkeeping.
+    """Events for every ended session of a product, from its own bookkeeping — one per **run**.
 
-    The spine is the registry ``state/<p>/sessions.jsonl``; a job log under ``logs/jobs/<p>/``
-    with no registry line still counts (a session the registry lost, or one launched before the
-    ledger existed) — its file name is the job and its result line the whole record."""
+    The spine is the registry ``state/<p>/sessions.jsonl``, folded per run
+    (:func:`asf.workers.lifecycle.runs`: a launch line opens a run): a job relaunched N times is N
+    events, each paired with its own run of the job log (:func:`asf.tokens.meter_runs`, aligned
+    from the newest), so a row that loops on the tick is counted launch by launch (2026-09-30: a
+    product's two looping jobs, 145 launches in 15 h, reached the record as 2 rows). A job log
+    under ``logs/jobs/<p>/`` with no registry line still counts (a session the registry lost, or
+    one launched before the ledger existed) — its file name is the job and its last result line
+    the whole record."""
+    from asf.workers import lifecycle
     from asf.workers import pool as pool_mod
 
-    records = {}
-    if state_path is None and product is not None:
-        records = pool_mod.load_sessions(product)
-    elif state_path and os.path.isfile(state_path):
-        with open(state_path, encoding='utf-8') as f:
-            for line in f:
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(rec, dict) and rec.get('job'):
-                    records.setdefault(rec['job'], {}).update(rec)
+    path = state_path
+    if path is None and product is not None:
+        path = pool_mod.sessions_path(product)
+    by_job = lifecycle.runs(path) if path and os.path.isfile(path) else {}
     name = product.name if isinstance(product, env.Product) else product
     if logs_dir is None and name:
         logs_dir = os.path.dirname(job_log_path(name, 'x'))
     logs = {}
-    for path in sorted(glob.glob(os.path.join(logs_dir, '*.jsonl'))) if logs_dir else []:
-        logs[os.path.basename(path)[: -len('.jsonl')]] = path
+    for lp in sorted(glob.glob(os.path.join(logs_dir, '*.jsonl'))) if logs_dir else []:
+        logs[os.path.basename(lp)[: -len('.jsonl')]] = lp
     for job in logs:
-        records.setdefault(job, {'job': job})
+        by_job.setdefault(job, [{'job': job}])
     out = []
-    for job in sorted(records):
-        rec = records[job]
-        if not rec.get('ended'):
+    for job in sorted(by_job):
+        rs = [dict(r, job=job) for r in by_job[job]]
+        if not any(r.get('ended') for r in rs):
             continue
-        log = logs.get(job) or rec.get('log')
-        m = tokens.meter(log) if log else tokens.Meter()
-        ev = session_event(rec, m.result, items, by_dim=m.by_dim)
-        if ev is None or (since_day and ev['ts'][:10] < since_day):
-            continue
-        out.append(ev)
+        log = logs.get(job) or rs[-1].get('log')
+        meters = tokens.meter_runs(log) if log else []
+        # the log's runs and the ledger's, aligned from the newest: a log that lost its oldest
+        # runs (or a ledger that never had them) leaves the oldest unpaired, never shifted
+        paired = len(rs)
+        if not rs[-1].get('ended') and meters and meters[-1].result is not None:
+            paired -= 1  # the live run has not opened its run in the log yet
+        pad = len(meters) - paired
+        for i, rec in enumerate(rs):
+            if not rec.get('ended'):
+                continue
+            j = i + pad
+            m = meters[j] if 0 <= j < len(meters) else tokens.Meter()
+            ev = session_event(rec, m.result, items, by_dim=m.by_dim)
+            if ev is None or (since_day and ev['ts'][:10] < since_day):
+                continue
+            out.append(ev)
     return out
 
 

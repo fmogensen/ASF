@@ -72,6 +72,7 @@ from asf.workers import cloud as cloud_mod
 from asf.workers import host as host_mod
 from asf.workers import lifecycle
 from asf.workers import pool as pool_mod
+from asf.workers import relaunch
 
 #: PD9 — for a kind whose job name is not ``<brief kind>-<item id>``, the Row attribute that
 #: carries the job's key instead (the groom brief's job is ``groom-<date>``, D7).
@@ -483,6 +484,34 @@ def worker_row(row, brief, items, host_load_bypass=False):
                         local_only=cloud_mod.truthy(item.get('local_only')))
 
 
+def relaunch_capped(product, row, wrow, out=print):
+    """True when ``wrow`` is not launched: the same job was handed the same state (head, card,
+    cause) :data:`asf.workers.relaunch.CAP` times, or once with a terminal report
+    (:func:`asf.workers.relaunch.verdict`). The job's newest run is parked instead — the feeder
+    shows it ``PARKED`` from the next read on. ``wrow.cause`` is set for the ledger either way."""
+    wrow.cause = relaunch.cause_key(row.kind, getattr(row, 'correction', '') or '')
+    path = pool_mod.sessions_path(product)
+    head = None
+    if product.repo_dir and wrow.branch:
+        p = subprocess.run(['git', 'rev-parse', '--verify', '-q',
+                            f'refs/remotes/origin/{wrow.branch}'],
+                           cwd=product.repo_dir, capture_output=True, text=True)
+        head = p.stdout.strip() if p.returncode == 0 else None
+    try:
+        reason = relaunch.verdict(path, wrow.job, wrow.item, head=head,
+                                  card=wrow.card_digest, cause=wrow.cause,
+                                  repo=product.repo_dir, main=product.main)
+    except Exception as e:  # noqa: BLE001 — the cap never blocks a wave by failing
+        out(f'relaunch: cap check failed for {wrow.job} — {e}')
+        return False
+    if not reason:
+        return False
+    pool_mod.update_session(product, wrow.job,
+                            **relaunch.park_fields(reason, wrow.card_digest, pool_mod.now_iso()))
+    out(f'parked   {wrow.job:<24} {wrow.item:<10} — {reason}')
+    return True
+
+
 def host_hold(planned):
     """``(held, why, reading)`` of the host-pressure guard (:func:`asf.workers.host.pressure`,
     ``config.yaml host_guards``) — read only when a row would launch; the tick and ``asf tick
@@ -744,6 +773,12 @@ def launch(ctx, out=print):
         brief = _build(product, row, items, running,
                        repo_facts=repo_facts(product, row.branch))
         wrow = worker_row(row, brief, items, host_load_bypass=bypass)
+        parked = relaunch_capped(product, row, wrow, out)
+        if parked:
+            room += 1
+            if bypass:
+                s1_bypass_open, bypassed = True, False
+            continue
         worker_rows.append(wrow)
         texts[wrow.job] = brief.text
         kinds[wrow.job] = brief.kind

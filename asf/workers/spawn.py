@@ -937,7 +937,8 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
               'pid': result.pid, 'pgid': result.pid, 'worktree': worktree, 'branch': branch,
               'started': started, 'log': result.log_path, 'brief': brief_path,
               'id_range': id_range, 'runtime': runtime.name, 'session': sid,
-              'product': product.name, 'card_digest': getattr(row, 'card_digest', '') or ''}
+              'product': product.name, 'card_digest': getattr(row, 'card_digest', '') or '',
+              'cause': getattr(row, 'cause', '') or ''}
     launch_head = _launch_head(product.repo_dir, branch)
     if launch_head:
         # the head a held branch was handed back on: the loop guard counts launches on one sha

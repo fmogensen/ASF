@@ -995,6 +995,19 @@ class HookRefusalEscalation(unittest.TestCase):
         self.assertEqual(lc.derive(lc.latest(self.path)['fix-2'], lc.Evidence()).name,
                          lc.ADJUDICATE)
 
+    def test_the_first_redaction_refusal_is_a_security_hold(self):
+        # a product's correct-f-0086: 100 launches on one redaction finding, the "same" count
+        # reset each time by a lane hold in between — the first refusal parks
+        fields, line = self.hold(self.REDACT)
+        self.assertTrue(fields['correction']['parked'])
+        self.assertEqual(fields.get('operator_flagged'), 1)
+        self.assertIn('security hold', line)
+
+    def test_the_products_redaction_gate_wording_is_a_security_hold(self):
+        fields, _ = self.hold("the push was refused by the repo's own hook — no — pre-push "
+                              "redaction gate refuses (42 findings) on worker-lane labels")
+        self.assertTrue(fields['correction']['parked'])
+
     def test_a_second_identical_redaction_refusal_is_a_security_hold(self):
         self.hold(self.REDACT)
         fields, line = self.hold(self.REDACT)
