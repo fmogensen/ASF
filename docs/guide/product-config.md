@@ -78,7 +78,7 @@ The ones that matter most:
 | `landing` | derived | `fast-forward` or `pull-request` — below |
 | `harvest:` → `gate`, `branches_per_tick`, `gate_timeout_s` | `combined`, 12, 600 | how harvest gates: one gate over all eligible branches (bisecting on red) or `per-branch`; how many per run; seconds before a gate is killed and counted red |
 | `prs_per_tick` | 6 | PRs the `prs` step opens per tick |
-| `models:` → `<kind>: heavy\|light` | per kind | which of the two model labels a job kind runs on |
+| `models:` → `<kind>: heavy\|light\|cheap`, or a map of those by item class | per kind × class | which model label a job kind runs on, and which label each item class within that kind runs on — below |
 | `review:` → `skip_under_lines` | 80 | a Task of a `size: s` Feature whose diff changes fewer lines lands on CI and the gate alone, no review session (0: always review) |
 
 `ci.test_command` (under `ci:`, not `conventions:`) is the gate: the command a branch must pass
@@ -219,6 +219,68 @@ factory prefix.
 conventions:
   commit: {signoff: true}            # signoff_check: DCO (the default)
 ```
+
+### `models` — the model a session runs on
+
+Three labels, `heavy`, `light` and `cheap` — not a model id. `worker_pool.models` in
+`~/.ASF/config.yaml` is where a label becomes one: `{heavy: <id>, light: <id>, cheap: <id>}`. A
+label the pool has no entry for refuses the launch, **except `cheap`, which falls back to
+`light`** — a pool configured before `cheap` existed keeps running at the price it already paid,
+rather than refusing every cheap-tier job.
+
+The built-in default routes per brief kind **and** per item class: `heavy` for judgement that
+would be expensive to get wrong, `light` for a small, well-scoped change, `cheap` for clerical
+work with a right answer. A class is a Bug's severity — `S1`, `S2` or `S3` — and for anything
+that is not a Bug, its type: `task`, `story`, `feature` or `epic`. A brief with no item at all — a
+groom day, a rebase of a branch whose card has gone — takes the kind's own `default:` rather than
+any class row, since there is no item to classify.
+
+`asf doctor` prints the resolved table for the operator's own product, one `model table` row per
+kind — the built-in table below is exactly what it prints for a product with no override:
+
+```
+spec: heavy
+spec-amend: heavy
+plan: heavy
+spec-plan: heavy
+direct: heavy
+groom: heavy
+groom-clerk: cheap
+reshape: heavy
+replan: heavy
+review: heavy (S1 story feature epic) · light (S2 S3 task)
+adjudicate: heavy (S1) · light (S2 S3 task story feature epic)
+correct: heavy (S1) · light (S2 S3 task story feature epic)
+fix-bug: heavy (S1) · light (S2 S3 task story feature epic)
+coder: light
+fixer: light
+rebase: cheap
+close: cheap
+delivery-plan: heavy
+delivery-code: light
+```
+
+`conventions.models` overrides a row, in either of two shapes: a plain label, which covers every
+class of that kind, or a map of labels by class, with an optional `default:` for the classes it
+does not name.
+
+```yaml
+conventions:
+  models:
+    coder: heavy                                              # every class of coder brief
+    review: {S1: heavy, S2: light, S3: light, feature: heavy, default: light}
+    fix-bug:
+      S1: heavy
+      default: light
+```
+
+**`default:` is a floor for every class you do not name, including the ones the built-in table
+routes to `heavy`.** `review: {S2: light, default: light}` — the obvious way to write "make S2
+reviews cheap" — makes S2 Bug reviews light **and** Feature-level reviews light, where the
+built-in says `heavy`. Name the classes you mean to keep heavy, or leave `default:` out — a map
+without one keeps the built-in label for every class it does not name. A value that is neither a
+label nor a map of this shape is a red `conventions` row in `asf doctor`, never a silent default.
+Check the result with `asf doctor` before believing it.
 
 ### What approves a spec or a plan
 
