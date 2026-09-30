@@ -35,6 +35,8 @@ Transitions (plan §2 plus the §9 overrides):
                                class (a state, no round is spent)
 - T4  REVIEW → GATE            the review of the current head reads approved (or policy none)
 - T5  REVIEW → BACK            the review of the current head reads changes (rounds+1)
+- T5c PR_OPEN/REVIEW → BACK    a required check failed on the PR's exact head (any event's run):
+                               a correct round against the named failures, before any review
 - T5a REVIEW → GATE            ... unless an adjudicate ruling already answered it on the code
                                this head carries (:func:`asf.workers.lifecycle.overruling`): it
                                overruled the C list and pushed nothing — no second hold, no
@@ -1150,6 +1152,8 @@ def next_state(prev, facts):
         return PR_OPEN, 'open a PR'
     if s == PR_OPEN and f.get('mode') == 'pr' and not f.get('host'):
         return keep
+    if s in (PR_OPEN, REVIEW) and f.get('checks_red'):  # T5c: its exact head failed CI
+        return BACK, 'kind=gate'
     if s in (PR_OPEN, REVIEW):  # T3/T4/T5: a review of the head already there counts at once
         rv = f.get('review') or {}
         if not f.get('review_required'):
@@ -1390,6 +1394,11 @@ class Lane:
                     self.path, item, head,
                     lambda sha: review_mod.same_code(repo, conv, sha, f'origin/{b}',
                                                       trunk=f'origin/{trunk}'))
+        if prs and rec.get('state') in (PR_OPEN, REVIEW) and not f['foreign'] \
+                and (pr or {}).get('state') == 'OPEN' and pr.get('number') \
+                and not f.get('correction'):
+            # a red exact head goes back to a session before any review round (T5c)
+            f['checks_red'] = self.host.head_red(f, pr['number'])
         return f
 
     # ---- orphans --------------------------------------------------------------------------
@@ -2231,6 +2240,17 @@ class Lane:
         kind = reason.split('=', 1)[-1]
         if f.get('correction'):
             return self.set(f, BACK, reason)
+        if kind == 'gate' and f.get('checks_red'):
+            red, n = f['checks_red'], (f.get('pr') or {}).get('number')
+            text = f"PR #{n} checks red: {red['detail']}"
+            if self.dry_run:
+                self.out(f'DRY: would hold {b}: {text}')
+                self.results[b] = 'dry'
+                return None
+            send_back(self, f, 'gate', text + red_evidence(self.host.slug, red['checks'],
+                                                           red['names']), ())
+            f['correction'] = {'kind': 'gate', 'text': text}
+            return f.get('prev')
         if kind == 'review':
             rv = f.get('review') or {}
             text = f"{rv.get('path')} reads {rv.get('text')}: answer its C list on {b}"
@@ -3105,6 +3125,11 @@ class Host:
         nothing to take off."""
         return False
 
+    def head_red(self, f, number):
+        """The required checks that failed on PR ``number``'s exact head, before its review —
+        ``{names, detail, checks}``, or None. No PR host: none."""
+        return None
+
 
 class FastForwardHost(Host):
     """``landing: fast-forward``: no PR host. ``open`` → None; ``status`` → merged when the head
@@ -3197,7 +3222,8 @@ class GitHubHost(Host):
         p = H.gh_json(['pr', 'view', branch, '-R', self.slug, '--json',
                        'number,state,headRefOid,mergeCommit,autoMergeRequest'], {})
         required = self.required_checks(self.lane.state_dir) if p and self.lane else ()
-        state, _detail, _checks = (pr_checks(self.slug, p.get('number'), required, self.rerun_ids()) if p
+        state, _detail, _checks = (pr_checks(self.slug, p.get('number'), required, self.rerun_ids(),
+                                             head=p.get('headRefOid')) if p
                                    else ('none', '', []))
         return {'pr': p.get('number'), 'state': p.get('state'), 'head': p.get('headRefOid'),
                 'checks': {'green': 'passed', 'red': 'failed'}.get(state, state),
@@ -3253,7 +3279,8 @@ class GitHubHost(Host):
         required, why = self.merge_required(lane.state_dir, cls, f.get('head'))
         if required is None:
             return f'required checks unknown: {why}'
-        state, detail, checks = pr_checks(self.slug, number, required, self.rerun_ids())
+        state, detail, checks = pr_checks(self.slug, number, required, self.rerun_ids(),
+                                          head=exact_head(f))
         if state == 'red' or (state != 'green' and f.get('how') == 'ci'):
             return f'required checks {state} at merge: {detail}'
         if f.get('on_checks') and required:
@@ -3435,6 +3462,36 @@ class GitHubHost(Host):
             return False, H.tail(err or out) or f'gh pr edit exited {rc}'
         return True, ''
 
+    def head_red(self, f, number):
+        """``{names, detail, checks}``: the required checks that concluded failure on PR
+        ``number``'s exact head (:func:`exact_head`, runs from every event — a CI-queue dispatched
+        run counts), not red on the trunk too, not a sign-off (the gate repairs that) — or None.
+        A red head is a correct round against those failures, never another review or a rerun of
+        the item's delivery job (a product's T-0042, 2026-09-30: unparked on a head whose
+        dispatched run failed two suites, its row was a sixth review). Only ``fail`` counts: a
+        cancelled check is no defect of the code. Unreadable: None — the review goes on."""
+        head = exact_head(f)
+        if not head or not number:
+            return None
+        cls = f.get('class') or landing_class(self.product, f.get('files') or ())
+        required, _why = self.merge_required(self.lane.state_dir, cls, head)
+        if required is None:
+            return None
+        state, _detail, checks = pr_checks(self.slug, number, required, self.rerun_ids(),
+                                           head=head)
+        if state != 'red':
+            return None
+        conv = self.product.conventions
+        failed = [c.get('name') or '?' for c in checks if c.get('bucket') == 'fail'
+                  and (not required or required_name(c.get('name'), required))
+                  and not conv.is_signoff_check(c.get('name') or '')]
+        failed = list(dict.fromkeys(failed))
+        on_trunk = self.trunk_red(failed) if failed else {}
+        names = [n for n in failed if n not in on_trunk]
+        if not names:
+            return None
+        return {'names': names, 'detail': ', '.join(names), 'checks': checks}
+
     def unmark_heavy(self, number, branch=None):
         """Take the heavy-CI label off PR ``number`` — only under ``ci.heavy_after_review``;
         True when gh took it off. Never raises."""
@@ -3558,7 +3615,8 @@ class GitHubHost(Host):
             lane.out(f'waiting {b}: PR #{number} required checks unknown — {why}')
             wait(lane, f, f'required checks unknown: {why}', state=WAITING_CI)
             return None
-        state, detail, checks = pr_checks(self.slug, number, required, self.rerun_ids())
+        state, detail, checks = pr_checks(self.slug, number, required, self.rerun_ids(),
+                                          head=exact_head(f))
         ignored = not_required_red(checks, required)
         if ignored:
             lane.out(f'harvest: {b}: PR #{number} check(s) red but not required — '
@@ -3698,11 +3756,58 @@ class GitHubHost(Host):
         return {n: red[n] for n in want if n in red}
 
 
+def exact_head(f):
+    """The sha whose check runs judge ``f``'s PR: the branch head, when the PR's head is that
+    sha (or unknown) — never a run of another commit."""
+    head = f.get('head')
+    return head if head and (f.get('pr') or {}).get('head') in (None, '', head) else None
+
+
 #: the run id in a check's link (``…/actions/runs/<id>/job/<id>``)
 _RUN_RE = re.compile(r'/actions/runs/(\d+)')
 
 
-def pr_checks(slug, number, required=(), rerun=()):
+#: a check run's ``conclusion`` → the ``gh pr checks`` bucket it reads as (anything else that
+#: completed — ``failure``, ``timed_out``, ``action_required``, ``startup_failure`` — is ``fail``)
+_RUN_BUCKETS = {'success': 'pass', 'skipped': 'skipping', 'neutral': 'skipping',
+                'cancelled': 'cancel', 'stale': 'pending'}
+
+
+def head_runs(slug, sha, rollup=()):
+    """The check runs on commit ``sha`` from every event (``commits/<sha>/check-runs``), as
+    ``gh pr checks`` rows (``name, bucket, link, workflow, startedAt``). The PR's rollup shows only
+    its own events' runs: a ``workflow_dispatch`` run the CI queue started on the head (#321) is
+    never in it — green, it could never let the PR merge; red, it was invisible (a product's PR
+    #902, 2026-09-30: the rollup still read the cancelled ``pull_request`` run). A run's workflow
+    is its twin's in ``rollup`` (same run id, else same check name) — the dispatched workflow
+    carries the same job names — so :func:`latest_checks` sets one against the other. ``[]``
+    when unreadable."""
+    data = H.gh_json(['api', f'repos/{slug}/commits/{sha}/check-runs?per_page=100'], None)
+    runs = data.get('check_runs') if isinstance(data, dict) else None
+    if not isinstance(runs, list):
+        return []
+    by_run, by_name = {}, {}
+    for c in rollup or ():
+        m = _RUN_RE.search(c.get('link') or '')
+        if m:
+            by_run.setdefault(m.group(1), c.get('workflow') or '')
+        by_name.setdefault(c.get('name') or '', c.get('workflow') or '')
+    out = []
+    for r in runs:
+        if not isinstance(r, dict) or not r.get('name'):
+            continue
+        link = r.get('html_url') or ''
+        m = _RUN_RE.search(link)
+        done = r.get('status') == 'completed'
+        bucket = _RUN_BUCKETS.get(r.get('conclusion'), 'fail') if done else 'pending'
+        workflow = by_run.get(m.group(1)) if m and m.group(1) in by_run else \
+            by_name.get(r['name'], '')
+        out.append({'name': r['name'], 'bucket': bucket, 'link': link, 'workflow': workflow,
+                    'startedAt': r.get('started_at') or ''})
+    return out
+
+
+def pr_checks(slug, number, required=(), rerun=(), head=None):
     """``('green'|'pending'|'red'|'unknown', detail, checks)`` for PR ``number``'s checks. No
     checks at all is green. With ``required`` names (``landing_checks`` or branch protection) only
     those judge: a failed or cancelled required one is red, else an unfinished required one is
@@ -3713,15 +3818,24 @@ def pr_checks(slug, number, required=(), rerun=()):
     ``rerun``: ids of runs the CI queue cancelled and holds to re-run
     (:func:`asf.ci_queue.rerun_ids`) — a cancelled check of one is pending, never red: a
     product's B-1377 (2026-09-26) was held on "checks red: gate, gate-tests" the trunk relief
-    had cancelled, and another session was launched on a head nothing was wrong with."""
+    had cancelled, and another session was launched on a head nothing was wrong with.
+
+    ``head``: the PR's exact head sha — its check runs from every event (:func:`head_runs`) join
+    the rollup's, the newest run per workflow and name judging (a CI-queue dispatched run on the
+    head counts, green or red; a run on any other sha never does)."""
     rc, stdout, err = H._gh(['pr', 'checks', str(number), '-R', slug, '--json',
                              'name,bucket,link,workflow,startedAt'])
-    if 'no checks reported' in f'{stdout}\n{err}':
-        return 'green', 'no checks', []
+    none = 'no checks reported' in f'{stdout}\n{err}'
     try:
-        checks = latest_checks([c for c in json.loads(stdout) if isinstance(c, dict)])
+        rollup = [] if none else [c for c in json.loads(stdout) if isinstance(c, dict)]
     except (json.JSONDecodeError, TypeError):
         return 'unknown', H.tail(err) or f'gh pr checks exited {rc}', []
+    if head:
+        seen = {c.get('link') for c in rollup if c.get('link')}
+        rollup += [c for c in head_runs(slug, head, rollup) if c['link'] not in seen]
+    if not rollup:
+        return 'green', 'no checks', []
+    checks = latest_checks(rollup)
     judged = ([c for c in checks if required_name(c.get('name'), required)] if required
               else checks)
     held = {str(i) for i in rerun or ()}

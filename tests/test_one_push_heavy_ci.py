@@ -271,7 +271,8 @@ class HeavyAfterReview(unittest.TestCase):
         before = {'id': 1, 'status': 'completed', 'created_at': '2027-01-15T08:00:00Z'}
         why = self._recheck(host, {'state': lane.GATE, 'head': HEAD, 'pr': 7}, [before])
         self.assertIn('not green at merge: m8-e2e', why)
-        self.assertFalse(any(c[0] == 'api' for c in self.calls))  # no skip ever credited
+        self.assertFalse(any(c[0] == 'api' and '/actions/runs' in c[1]
+                             for c in self.calls))  # no skip ever credited
         # approved later, but the only run is still the pre-approval one — no merge either
         prev = {'state': lane.GATE, 'head': HEAD, 'pr': 7, 'heavy': HEAD,
                 'heavy_at': '2027-01-15T09:00:00Z'}

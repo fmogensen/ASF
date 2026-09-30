@@ -1576,6 +1576,9 @@ class ProductHarvestTests(unittest.TestCase):
         def gh(args):
             calls.append(list(args))
             head = sh(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], cwd=self.worker).stdout.strip()
+            tip = sh(['git', 'rev-parse', 'HEAD'], cwd=self.worker).stdout.strip()
+            if args[:1] == ['api'] and f'/commits/{tip}/check-runs' in args[1]:
+                return 0, json.dumps({'check_runs': []}), ''  # the PR head: its rollup is all
             if args[:1] == ['api'] and '/check-runs' in args[1] and trunk is not None:
                 return 0, json.dumps({'check_runs': [
                     {'name': n, 'status': 'completed', 'conclusion': c,
