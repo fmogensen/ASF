@@ -85,6 +85,107 @@ class MatrixTest(unittest.TestCase):
         with self.assertRaises(env.ConfigError):
             approvals.signals(_product(approval_signals={'spend_money': {'globs': ['x']}}))
 
+    def test_signals_key_set_includes_areas(self):
+        with self.assertRaises(env.ConfigError) as cm:
+            approvals.signals(_product(approval_signals={'spend_money': {'globs': ['x']}}))
+        self.assertIn('globs', str(cm.exception))
+
+        sig = approvals.signals(
+            _product(approval_signals={'spend_money': {'areas': ['billing']}}))
+        self.assertEqual(sig['spend_money']['areas'], ['billing'])
+
+        sig = approvals.signals(_product(approval_signals={
+            'spend_money': {'paths': ['billing/*'], 'commands': ['gh api .*billing'],
+                             'areas': ['billing']},
+        }))
+        self.assertEqual(sig['spend_money'], {
+            'paths': ['billing/*'], 'commands': ['gh api .*billing'], 'areas': ['billing'],
+        })
+
+        sig = approvals.signals(_product(approval_signals={'spend_money': {'areas': []}}))
+        self.assertEqual(sig['spend_money']['areas'], [])
+        sig = approvals.signals(_product(approval_signals={'spend_money': {}}))
+        self.assertEqual(sig['spend_money']['areas'], [])
+
+        with self.assertRaises(env.ConfigError):
+            approvals.signals(_product(approval_signals={'spend_money': ['not-a-dict']}))
+        with self.assertRaises(env.ConfigError):
+            approvals.signals(_product(approval_signals={'not_a_class': {'areas': ['x']}}))
+
+
+class AreaClassTest(unittest.TestCase):
+    def test_a_declared_area_resolves_to_its_class_and_level(self):
+        product = _product(
+            approvals={'spend_money': 'human-now'},
+            approval_signals={'spend_money': {'areas': ['billing']}})
+        self.assertEqual(approvals.area_class(product, 'billing'), ('spend_money', 'human-now'))
+
+    def test_matching_is_case_insensitive_and_strips_whitespace(self):
+        product = _product(
+            approvals={'spend_money': 'human-now'},
+            approval_signals={'spend_money': {'areas': ['billing']}})
+        for area in ('Billing', 'BILLING', ' billing '):
+            self.assertEqual(
+                approvals.area_class(product, area), ('spend_money', 'human-now'), area)
+
+    def test_globs_match_like_paths(self):
+        product = _product(
+            approvals={'spend_money': 'human-now'},
+            approval_signals={'spend_money': {'areas': ['billing/*', 'pay*']}})
+        self.assertEqual(
+            approvals.area_class(product, 'billing/invoices'), ('spend_money', 'human-now'))
+        self.assertIsNone(approvals.area_class(product, 'billing'))
+        self.assertEqual(
+            approvals.area_class(product, 'payments'), ('spend_money', 'human-now'))
+        self.assertEqual(
+            approvals.area_class(product, 'payroll'), ('spend_money', 'human-now'))
+
+    def test_an_undeclared_or_empty_area_is_none(self):
+        product = _product(
+            approvals={'spend_money': 'human-now'},
+            approval_signals={'spend_money': {'areas': ['billing']}})
+        self.assertIsNone(approvals.area_class(product, 'shipping'))
+        self.assertIsNone(approvals.area_class(product, ''))
+        self.assertIsNone(approvals.area_class(product, None))
+        self.assertIsNone(approvals.area_class(product, '   '))
+
+    def test_a_class_mapped_to_auto_is_not_a_bound(self):
+        product = _product(
+            approvals={'spend_money': 'auto'},
+            approval_signals={'spend_money': {'areas': ['billing']}})
+        self.assertIsNone(approvals.area_class(product, 'billing'))
+
+    def test_two_classes_declaring_the_same_area_resolve_to_the_earlier_in_catalogue_order(self):
+        names = [c.name for c in approvals.CLASSES]
+        self.assertLess(names.index('spend_money'), names.index('touch_legal'))
+        product = _product(
+            approvals={'spend_money': 'human-now', 'touch_legal': 'human-now'},
+            approval_signals={
+                'spend_money': {'areas': ['contracts']},
+                'touch_legal': {'areas': ['contracts']},
+            })
+        self.assertEqual(
+            approvals.area_class(product, 'contracts'), ('spend_money', 'human-now'))
+
+    def test_the_groom_read_classes_never_resolve_however_their_level_is_set(self):
+        for level in approvals.LEVELS:
+            product = _product(
+                approvals={'decide_feature': level, 'decide_bug': level},
+                approval_signals={
+                    'decide_feature': {'areas': ['billing']},
+                    'decide_bug': {'areas': ['billing']},
+                })
+            self.assertIsNone(approvals.area_class(product, 'billing'), level)
+
+    def test_touch_amendable_set_always_resolves(self):
+        product = _product(approval_signals={'touch_amendable_set': {'areas': ['rules']}})
+        self.assertEqual(
+            approvals.area_class(product, 'rules'), ('touch_amendable_set', 'human-now'))
+
+    def test_a_malformed_signal_gives_none_rather_than_raising(self):
+        product = _product(approval_signals={'not_a_class': {'areas': ['x']}})
+        self.assertIsNone(approvals.area_class(product, 'x'))
+
 
 class LedgerTest(unittest.TestCase):
     def setUp(self):
@@ -607,6 +708,19 @@ class CliTest(unittest.TestCase):
         _rc, out, _err = self.run_cli('approvals', '--product', 'demo')
         self.assertIn('signal command: gh api .*billing', self.rows(out)['spend_money'])
 
+    def test_an_area_signal_is_listed_after_paths_and_commands(self):
+        self.write_product(
+            'approvals:\n  spend_money: human-now\n'
+            "approval_signals:\n  spend_money:\n    paths: ['billing/*']\n"
+            "    commands: ['gh api .*billing']\n"
+            "    areas: ['billing', 'pricing']\n")
+        _rc, out, _err = self.run_cli('approvals', '--product', 'demo')
+        row = self.rows(out)['spend_money']
+        self.assertIn('signal area: billing', row)
+        self.assertIn('signal area: pricing', row)
+        self.assertLess(row.index('signal path:'), row.index('signal command:'))
+        self.assertLess(row.index('signal command:'), row.index('signal area:'))
+
     def test_list_shows_the_open_holds_and_resolve_closes_one(self):
         hold = self.refuse()
         rc, out, err = self.run_cli('approvals', 'list', '--product', 'demo')
@@ -690,6 +804,19 @@ class DoctorTest(unittest.TestCase):
         self.assertNotIn('touch_production', blind[0])
         # `file_bug` and `merge_routine_pr` default to auto — never held, never warned about
         self.assertNotIn('file_bug', blind[0])
+        # `decide_feature`/`decide_bug` are held (default `human-now`) but `_CODE_RECOGNISERS`
+        # already gives each a word — P13, held by a test rather than a measurement.
+        self.assertNotIn('decide_feature', blind[0])
+        self.assertNotIn('decide_bug', blind[0])
+
+    def test_an_area_signal_clears_the_blind_class_too(self):
+        ok, detail = self.check(
+            ALL_MAPPED + AMENDABLE
+            + "approval_signals:\n  spend_money:\n    areas: ['billing']\n"
+              "  touch_customer_data:\n    paths: ['data/customers/*']\n")
+        self.assertTrue(ok)
+        blind = [n for n in self.notes(detail) if 'unrecognisable' in n]
+        self.assertEqual(blind, [], detail)
 
     def test_a_signal_clears_the_blind_class_and_the_row_goes_quiet(self):
         ok, detail = self.check(
