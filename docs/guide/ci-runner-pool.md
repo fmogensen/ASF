@@ -76,6 +76,7 @@ no host call when it does not. One row per finding, or one `ok` row naming the s
 | `missing: <runner> … is declared but not registered` | the box lost its runner, or the name is wrong | re-register the runner, or fix `ci.pool` |
 | `offline: <runner> … — n <role> slot(s) lost` | the runner service is down | restart it on the box |
 | `undeclared: <runner> is registered but not in ci.pool` | a runner ASF does not manage | declare it, or remove it from the host |
+| `runs-on unresolved: <workflow>:<job> asks for vars.<NAME>` | the labels of that job are unknown, so no label can be judged unused | set `<NAME>` as a repository variable, or take the expression out of the `runs-on` |
 
 Jobs on hosted runners (no `self-hosted` in their `runs-on`) and a `runs-on` that is an
 expression ASF cannot resolve (`${{ matrix.os }}`) are not judged. `${{ vars.X || 'heavy' }}` is
@@ -83,7 +84,8 @@ read as the repository variable `X` — `asf` asks the host for it (`repos/<slug
 variables`) — and falls back to `'heavy'` only when the host gives `X` an empty value. A name
 the host does not have is **unresolved**, not `'heavy'`: it may be set on the organisation or on
 an environment, and guessing there is how a live routing label gets removed. A host that cannot
-be read is one `skip` row with the reason.
+be read is one `skip` row with the reason. While any `runs-on` is unresolved, the reconcile
+removes no label but a stale `class-` one, and the doctor says which variable it is waiting on.
 
 ## `asf ci reconcile`
 
@@ -107,6 +109,9 @@ ci-h1   linux, self-hosted, x64, beta-heavy     linux, self-hosted, x64, heavy, 
 - A label a current `runs-on` still needs on that runner is not removed: the row says
   `keep <label> — blocked until workflows migrate`, and the next reconcile after the migration
   removes it.
+- While any `runs-on` names a variable ASF could not resolve, no label is removed at all (a
+  stale `class-` label and a reservation's label aside — no `runs-on` may ask for either). The
+  row says `keep <label> — held: …`. Adds, and the trial that follows one, happen as usual.
 - A runner that is not in `ci.pool` is left untouched.
 
 **A trial of one job.** A runner that gains its role label (newly enabled for a role) is put on
