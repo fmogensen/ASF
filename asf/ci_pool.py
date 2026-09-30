@@ -54,6 +54,10 @@ import subprocess
 
 from asf import env, gh_limit
 
+#: ``ci.pool: discover`` — the pool is every runner the host reports, not a declared list
+DISCOVER = 'discover'
+#: ASF's own label namespace: a tier, a reserve's default label. A product file may not write one.
+ASF_PREFIX = 'asf-'
 PROVIDER_PREFIX = 'provider-'
 CLASS_PREFIX = 'class-'   # GitHub runner labels: letters, digits, '-', '_', '.' only
 #: the variable a product script reads the class from (else the ``class:`` label)
@@ -107,6 +111,18 @@ def _norm(label):
     return str(label).strip().lower()
 
 
+def pool_mode(product):
+    """``'discover'`` when ``ci.pool`` is :data:`DISCOVER`, ``'declared'`` for a list,
+    ``'none'`` when there is no ``ci.pool`` at all."""
+    ci = product.ci if isinstance(getattr(product, 'ci', None), dict) else {}
+    pool = ci.get('pool')
+    if pool == DISCOVER:
+        return 'discover'
+    if pool is None:
+        return 'none'
+    return 'declared'
+
+
 def pool_problems(ci):
     """``[(dotted key, problem)]`` for a ``ci.pool`` the readers cannot use — checked on every
     product load (:func:`asf.env.validate_product_text`), like ``deploy_sha``'s modes."""
@@ -119,6 +135,10 @@ def pool_problems(ci):
 
 def _pool_problems(ci):
     pool = ci['pool']
+    if pool == DISCOVER:
+        return []
+    if isinstance(pool, str):
+        return [('ci.pool', f"must be a list of runners or 'discover', not {pool!r}")]
     if not isinstance(pool, list):
         return [('ci.pool', f'must be a list of runners, not {pool!r}')]
     out, seen = [], set()
@@ -161,8 +181,16 @@ def _pool_problems(ci):
 
 
 def load_pool(product):
-    """The product's ``ci.pool`` as :class:`PoolEntry` rows, ``[]`` when none is declared."""
+    """The product's ``ci.pool`` as :class:`PoolEntry` rows, ``[]`` when none is declared.
+
+    ``ci.pool: discover`` returns the last census read off ``<state dir>/ci-census.json``
+    (:func:`asf.ci_census.cached`) — a file read, never the CI host, never raising (D1, D2). This
+    function sits on the ``asf status`` and ``asf capacity`` paths and in product validation, so a
+    network call here would put a ``gh`` failure behind read paths that cannot fail today."""
     ci = product.ci if isinstance(getattr(product, 'ci', None), dict) else {}
+    if ci.get('pool') == DISCOVER:
+        from asf import ci_census
+        return ci_census.cached(product)
     out = []
     for entry in ci.get('pool') or ():
         if not isinstance(entry, dict) or not entry.get('runner'):
@@ -1305,6 +1333,12 @@ def tick(ctx, backend=None, out=print):
     its reservation applied (:func:`tick_reserve`, one runner read). No trials file and no
     reservation, no CI host call."""
     product = ctx.product
+    if pool_mode(product) == DISCOVER:
+        backend = backend or backend_for(product)
+        if backend is not None:
+            from asf import ci_census
+            moves = ci_census.refresh(product, backend, root=ctx.record_root(), out=out)
+            ci_census.apply_tiers(product, backend, moves, out=out)
     if load_reserve(product):
         backend = backend or backend_for(product)
         if backend is not None:
@@ -1423,6 +1457,14 @@ def register(subparsers):
     s.add_argument('--apply', action='store_true',
                    help='write the labels now (adds before removes); default is a dry-run plan')
     s.set_defaults(run=cmd_reserve)
+    from asf import ci_census
+    c = sub.add_parser('census', help='ci.pool: discover — the census, the scores and the tier '
+                                      'moves it would make')
+    env.add_product_arg(c)
+    c.add_argument('--apply', action='store_true', help='take the census and write the labels')
+    c.set_defaults(run=ci_census.cmd_census)
+    from asf import ci_measure
+    ci_measure.register(sub)
     from asf import ci_queue
     ci_queue.register(sub)
     return p
