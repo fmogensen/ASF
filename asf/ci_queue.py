@@ -205,6 +205,14 @@ cancel. The line says why: ``relief: exempt <branch> — changes CI config``.
 
 **Duplicate branch pushes.** A workflow on both ``push`` and ``pull_request`` runs twice on a
 branch's head once it has a PR — two runs, one sha, twice the runners.
+**Every cancelled run gets one cause.** Each cancel the factory makes (relief, stall, duplicate
+push, the lane's post-merge cancel) names run id, branch, head sha, reason and what replaces it,
+and writes a claim (:func:`claim_cancel`, ``ci-cancels.json``). :func:`explain_cancels` (each
+pass) tells every other cancelled run apart: a job past its ``timeout-minutes`` is a verdict
+(named, never re-run), a concurrency supersede names the newer run, and an orphaned open-PR head
+or trunk run is re-run once. Relief never cancels a trunk run; ``relief: exempt`` is a run it
+left alone.
+
 :func:`cancel_duplicate_pushes` (every tick, from the lane's pass, before the relief and on the
 same listing — one ``gh run list`` per workflow per pass) cancels a ``push`` run on a non-trunk
 branch, queued or in progress, whose head sha also has a ``pull_request`` run of the same
@@ -824,6 +832,11 @@ class Source:
         """One run's ``{headBranch, headSha, status, conclusion}``, or None when unreadable."""
         return None
 
+    def cancel_cause(self, run_id):
+        """Why the host cancelled a run: ``(job, minutes)`` when one of its jobs passed its
+        ``timeout-minutes``, ``()`` when none did, None when unreadable."""
+        return None
+
     def busy_runners(self):
         """``{runner name: {'run': run, 'job': name, 'repo': slug}}`` for every job in progress
         on a runner, across every repo the runners serve; None when any of it is unreadable."""
@@ -1057,6 +1070,22 @@ class GitHubSource(Source):
         got = self._json(['run', 'view', str(run_id), '-R', self.slug, '--json',
                           'headBranch,headSha,status,conclusion'])
         return got if isinstance(got, dict) and got.get('headBranch') else None
+
+    def cancel_cause(self, run_id):
+        if not self.slug or not run_id:
+            return None
+        text = self._gh(['api', f'repos/{self.slug}/actions/runs/{run_id}/jobs', '--paginate',
+                         '--jq', '.jobs[]|select(.conclusion=="cancelled")|[.id,.name]|@tsv'])
+        if text is None:
+            return None
+        for line in text.splitlines():
+            jid, _, name = line.partition('\t')
+            notes = self._gh(['api', f'repos/{self.slug}/check-runs/{jid}/annotations',
+                              '--jq', '.[].message'])
+            got = re.search(r'exceeded the maximum execution time of (?:(\d+)m)?', notes or '')
+            if got:
+                return name, int(got.group(1) or 0)
+        return ()
 
     def run_workflow(self, run_id):
         if not self.slug or not run_id:
@@ -1528,8 +1557,10 @@ def update_stalls(product, src, items=None, out=print, dry_run=False, now=None):
         if src._gh(['run', 'cancel', str(rid), '-R', product.repo_slug]) is None:
             out(f'ci queue: cancel of stalled {kind} run {rid} refused — tried again next pass')
             continue
-        out(f'ci queue: cancelled in-progress {what}')
         branch, sha = rec['branch'], rec['sha']
+        out(f'ci queue: cancelled in-progress {what} [branch {branch}, head {_sha9(sha)}; '
+            f'replaced by its own re-run]')
+        claim_cancel(env.state_dir(product.name), rid, 'stall', step=rec['step'])
         prior = sum(1 for s in data['stalls']
                    if s.get('branch') == branch and s.get('sha') == sha)
         data['stalls'].append({'run': rid, 'branch': branch, 'sha': sha, 'step': rec['step'],
@@ -2211,6 +2242,145 @@ def _deploy_workflow(product, wf):
     return (isinstance(q, dict) and q.get('deploy') == wf) or 'deploy' in str(wf).lower()
 
 
+#: the durable claims of the cancels the factory makes: ``{run id: {cause, at, ...}}``
+CANCELS_FILE = 'ci-cancels.json'
+#: a claim is kept this long; an unclaimed cancelled run older than :data:`EXPLAIN_WINDOW_S` is
+#: not looked at, one older than :data:`ORPHAN_WINDOW_S` is told but never re-run
+CLAIM_TTL_S = 2 * 86400
+EXPLAIN_WINDOW_S = 6 * 3600
+ORPHAN_WINDOW_S = 90 * 60
+
+
+def _claims_path(state_dir):
+    return os.path.join(state_dir, CANCELS_FILE)
+
+
+def load_claims(state_dir):
+    try:
+        with open(_claims_path(state_dir), encoding='utf-8') as f:
+            got = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return got if isinstance(got, dict) else {}
+
+
+def claim_cancel(state_dir, run_id, cause, now=None, **extra):
+    """Write the claim of a cancel the factory just made: ``run_id`` was cancelled for ``cause``
+    (``relief``, ``stall``, ``duplicate-push``, ``merged-pr``, ...). The queue's explain step
+    (:func:`explain_cancels`) skips a claimed run, so every cancelled run gets one cause and the
+    factory's own are never guessed at. Never raises."""
+    try:
+        now = now or _now()
+        claims = {k: v for k, v in load_claims(state_dir).items()
+                  if isinstance(v, dict) and _age(v.get('at'), now) <= CLAIM_TTL_S}
+        claims[str(run_id)] = {'cause': cause, 'at': _iso(now), **extra}
+        os.makedirs(state_dir, exist_ok=True)
+        tmp = _claims_path(state_dir) + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(claims, f, indent=2, sort_keys=True)
+        os.replace(tmp, _claims_path(state_dir))
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def _sha9(sha):
+    return str(sha or '?')[:9]
+
+
+def explain_cancels(product, source=None, out=print, dry_run=False, listing=None, now=None):
+    """Give every cancelled run one cause. A run the factory cancelled itself is claimed
+    (:func:`claim_cancel`, or a ``relief`` / ``stalls`` record) and skipped. Any other cancelled
+    run in the last :data:`EXPLAIN_WINDOW_S` is the host's: told apart by its jobs' annotations —
+    a job past its ``timeout-minutes`` is a verdict (a re-run would time out again, so it is
+    named and left), anything else is a concurrency-group supersede. A supersede with a later run
+    on the branch names that run; one with none is an orphaned head: an open PR's head (or the
+    trunk's newest run) created in the last :data:`ORPHAN_WINDOW_S` gets ``gh run rerun``, any
+    other is told and left. One line each, run id, branch, head sha, reason, replacement; the
+    cause is claimed so it is said once. Unreadable jobs: nothing this pass. The number of
+    runs explained. Not a queued product: nothing, no ``gh`` call. Never raises."""
+    m = mode(product)
+    if m == 'off' or not product.repo_slug:
+        return 0
+    dry_run = dry_run or m == 'dry-run'
+    try:
+        return _explain(product, source, out, dry_run, listing, now)
+    except OSError:
+        return 0
+
+
+def _explain(product, source, out, dry_run, listing, now):
+    now = now or _now()
+    src = source or GitHubSource(product)
+    state_dir = env.state_dir(product.name)
+    claims = load_claims(state_dir)
+    data = load(product.name)
+    known = {str(r.get('id')) for r in data['relief']} | {str(s.get('run')) for s in data['stalls']}
+    trunk = getattr(product, 'main', None) or 'main'
+    open_heads = None
+    n = 0
+    for wf in sorted(w for w in {workflow_for(product, k) for k in ('pr', 'trunk', 'batch')}
+                     if w and not _deploy_workflow(product, w)):
+        runs = _list_runs(src, product, wf, listing) or ()
+        for r in runs:
+            rid = r.get('databaseId')
+            if (not rid or r.get('status') != 'completed' or r.get('conclusion') != 'cancelled'
+                    or str(rid) in claims or str(rid) in known):
+                continue
+            created = _parse(r.get('createdAt'))
+            if created is None or (now - created).total_seconds() > EXPLAIN_WINDOW_S:
+                continue
+            branch, sha = r.get('headBranch') or '?', r.get('headSha')
+            who = f'run {rid} on {branch} at {_sha9(sha)}'
+            got = src.cancel_cause(rid)
+            if got is None:
+                continue                        # unreadable: asked again next pass
+            if got:
+                job, mins = got
+                out(f'ci queue: {who} cancelled by the host — job {job} passed its {mins} min '
+                    f'timeout; a timeout is a verdict, not re-queued (a re-run would time out '
+                    f'again), replaced by nothing')
+                if not dry_run:
+                    claim_cancel(state_dir, rid, 'job-timeout', now, job=job)
+                n += 1
+                continue
+            later = sorted((x for x in runs if x.get('headBranch') == r.get('headBranch')
+                            and x.get('databaseId') != rid
+                            and (_parse(x.get('createdAt')) or created) > created),
+                           key=lambda x: str(x.get('createdAt')))
+            if later:
+                out(f'ci queue: {who} cancelled by the host — a newer run superseded it '
+                    f'(concurrency group), replaced by run {later[0].get("databaseId")} at '
+                    f'{_sha9(later[0].get("headSha"))}')
+                if not dry_run:
+                    claim_cancel(state_dir, rid, 'superseded', now, by=later[0].get('databaseId'))
+                n += 1
+                continue
+            fresh = (now - created).total_seconds() <= ORPHAN_WINDOW_S
+            if open_heads is None and fresh and r.get('event') == 'pull_request':
+                open_heads = {p.get('headRefOid') for p in src.prs() or ()
+                              if str(p.get('state')).upper() == 'OPEN'}
+            sound = fresh and (
+                (r.get('event') == 'pull_request' and sha in (open_heads or ()))
+                or (r.get('event') == 'push' and branch == trunk))
+            if not sound:
+                out(f'ci queue: {who} cancelled by the host, no later run on the branch — not an '
+                    f"open PR head or the trunk's newest run within "
+                    f'{ORPHAN_WINDOW_S // 60} min, replaced by nothing and left')
+                if not dry_run:
+                    claim_cancel(state_dir, rid, 'cancelled-left', now)
+                n += 1
+                continue
+            if dry_run:
+                out(f'ci queue: would re-run {who} — cancelled by the host with no later run')
+                continue
+            ok = src._gh(['run', 'rerun', str(rid), '-R', product.repo_slug]) is not None
+            out(f'ci queue: {who} cancelled by the host with no later run — '
+                + (f're-run of run {rid} requested' if ok else 're-run refused, not asked again'))
+            claim_cancel(state_dir, rid, 'orphan-rerun' if ok else 'orphan-refused', now)
+            n += 1
+    return n
+
+
 def cancel_duplicate_pushes(product, source=None, out=print, dry_run=False, listing=None):
     """Cancel every ``push`` run on a non-trunk branch, queued or in progress, whose head sha
     also has a ``pull_request`` run of the same workflow queued, in progress or completed green —
@@ -2252,6 +2422,7 @@ def cancel_duplicate_pushes(product, source=None, out=print, dry_run=False, list
                 out(f'ci queue: cancel of duplicate push {rid} refused')
                 continue
             out(f'ci queue: cancel {what}')
+            claim_cancel(env.state_dir(product.name), rid, 'duplicate-push', by=covers[sha])
             r['status'], r['conclusion'] = 'completed', 'cancelled'
             n += 1
     return n
@@ -3033,7 +3204,9 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
             out(f'ci queue: cancel of {state} {kind} run {rid} refused')
             continue
         else:
-            out(f'ci queue: cancelled {state} {what}')
+            out(f'ci queue: cancelled {state} {what} [branch {r.get("headBranch")}, head '
+                f'{_sha9(r.get("headSha"))}; replaced by its own re-run once {owner} starts]')
+            claim_cancel(env.state_dir(product.name), rid, 'relief', now, for_run=tid)
             rec = {'id': rid, 'kind': kind, 'item': item, 'prio': prio, 'label': label,
                    'workflow': wf, 'at': _iso(now), 'trunk_id': tid,
                    'trunk_sha': target.get('headSha'), 'trunk_created': _iso(created),
@@ -3257,6 +3430,7 @@ def queue_pass(product, items=None, source=None, out=print, dry_run=False, listi
         s = update_stalls(product, src, items=items, out=out, dry_run=dry_run, now=now)
         c, r = relieve_trunk(product, items=items, source=src, out=out, dry_run=dry_run,
                              now=now, listing=listing)
+        explain_cancels(product, source=src, out=out, dry_run=dry_run, listing=listing, now=now)
         start_admitted(product, items=items, source=src, out=out, dry_run=dry_run, now=now,
                        listing=listing)
         return n + s + c, r

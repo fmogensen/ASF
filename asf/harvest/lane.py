@@ -3362,7 +3362,7 @@ class GitHubHost(Host):
         try:
             runs = H.gh_json(['run', 'list', '-R', self.slug, '--branch', branch,
                               '--event', 'pull_request', '--limit', '20',
-                              '--json', 'databaseId,status'], [])
+                              '--json', 'databaseId,status,headSha'], [])
             n = 0
             for r in runs if isinstance(runs, list) else ():
                 if not isinstance(r, dict) or r.get('status') == 'completed':
@@ -3370,6 +3370,13 @@ class GitHubHost(Host):
                 if r.get('databaseId') and H._gh(['run', 'cancel', str(r['databaseId']),
                                                   '-R', self.slug])[0] == 0:
                     n += 1
+                    if self.lane is not None:
+                        from asf import ci_queue
+                        self.lane.out(
+                            f"harvest: cancelled run {r['databaseId']} on {branch} at "
+                            f"{str(r.get('headSha') or '?')[:9]} — its PR merged; replaced by "
+                            f"the trunk's run of the merge")
+                        ci_queue.claim_cancel(self.lane.state_dir, r['databaseId'], 'merged-pr')
             return n
         except OSError:
             return 0

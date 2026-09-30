@@ -254,7 +254,8 @@ class TestPhantomRelief(Base):
         self.assertEqual(self.lines, [
             "ci queue: cancelled in-progress pr run 121 (T-0341) — main's reserved runners "
             "r1, r2 held by a pr job; it holds a runner main's gate-tests (queued 4m) can take; "
-            "sunk 30 min"])
+            "sunk 30 min [branch task/T-0341, head 121121121; replaced by its own re-run once "
+            "main run 900 starts]"])
 
     def test_a_healthy_reservation_waits_for_the_usual_bar(self):
         p, host = product(), Host(busy=('h1', 'h2', 'h3'), trunk_queued_min=5)

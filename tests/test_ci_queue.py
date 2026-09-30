@@ -76,7 +76,8 @@ class FakeGh:
             out = str(self.inflight)
         elif argv[:2] == ['gh', 'api'] and any('/jobs' in a for a in argv):
             run_id = int(next(a for a in argv if '/jobs' in a).split('/runs/')[1].split('/')[0])
-            out = '\n'.join(json.dumps(j) for j in self.history[run_id - 1])
+            out = '\n'.join(json.dumps(j) for j in
+                            (self.history[run_id - 1] if run_id <= len(self.history) else ()))
         elif argv[:2] == ['gh', 'api'] and any('/pulls/' in a for a in argv):
             n = int(next(a for a in argv if '/pulls/' in a).split('/pulls/')[1].split('/')[0])
             out = '\n'.join(self.files.get(n) or ())
@@ -574,6 +575,106 @@ class TestDuplicatePush(Base):
         self.assertEqual(ci_queue.config_problems({'queue': {'dedupe_push': 'on'}}), [])
 
 
+class TestExplainCancels(Base):
+    """2026-09-29, a product: PR/batch/trunk runs 36618622420 and 36619311590 ended ``cancelled``
+    with no line in the queue log. Nobody cancelled them: their m5-soak job hit its 30 minute
+    ``timeout-minutes``, which the host reports as a cancel. Every cancelled run gets a cause."""
+    WHEN = '2026-09-25T11:30:00Z'
+
+    def run_of(self, rid, branch='task/T-0341', event='pull_request', when=None, sha=None):
+        return {'databaseId': rid, 'status': 'completed', 'conclusion': 'cancelled',
+                'event': event, 'headBranch': branch, 'headSha': sha or ('a' * 40),
+                'createdAt': when or self.WHEN}
+
+    def explain(self, runs, cause=(), prs=(), **kw):
+        gh = FakeGh()
+        base = gh.__call__
+
+        def run(argv, **k):
+            if argv[:3] == ['gh', 'run', 'list']:
+                gh.calls.append(argv)
+                return subprocess.CompletedProcess(argv, 0, json.dumps(runs), '')
+            if argv[:3] == ['gh', 'pr', 'list']:
+                return subprocess.CompletedProcess(argv, 0, json.dumps(list(prs)), '')
+            if argv[:2] == ['gh', 'api'] and any('/jobs' in a for a in argv):
+                gh.calls.append(argv)
+                return subprocess.CompletedProcess(argv, 0, '7\tm5-soak\n' if cause else '', '')
+            if argv[:2] == ['gh', 'api'] and any('/annotations' in a for a in argv):
+                return subprocess.CompletedProcess(argv, 0, cause, '')
+            return base(argv, **k)
+        p = kw.pop('p', None) or product()
+        n = ci_queue.explain_cancels(p, source=ci_queue.GitHubSource(p, run=run),
+                                     out=self.lines.append, now=self.t0, **kw)
+        return n, gh
+
+    TIMEOUT = 'The job has exceeded the maximum execution time of 30m0s\nThe operation was canceled.'
+
+    def test_a_job_timeout_is_named_and_not_rerun(self):
+        n, gh = self.explain([self.run_of(36618622420, 'worktree-m-batch', 'workflow_dispatch')],
+                             cause=self.TIMEOUT)
+        self.assertEqual(n, 1)
+        self.assertEqual(self.lines, [
+            'ci queue: run 36618622420 on worktree-m-batch at aaaaaaaaa cancelled by the host — '
+            'job m5-soak passed its 30 min timeout; a timeout is a verdict, not re-queued (a '
+            're-run would time out again), replaced by nothing'])
+        self.assertFalse([c for c in gh.calls if c[:3] == ['gh', 'run', 'rerun']])
+        self.assertEqual(ci_queue.load_claims(env.state_dir('p'))['36618622420']['cause'],
+                         'job-timeout')
+        self.lines.clear()
+        self.assertEqual(self.explain([self.run_of(36618622420)], cause=self.TIMEOUT)[0], 0)
+        self.assertEqual(self.lines, [])            # said once
+
+    def test_a_supersede_names_the_run_that_replaced_it(self):
+        later = dict(self.run_of(2), status='in_progress', conclusion='',
+                     createdAt='2026-09-25T11:40:00Z', headSha='b' * 40)
+        n, gh = self.explain([self.run_of(1), later])
+        self.assertEqual(n, 1)
+        self.assertIn('ci queue: run 1 on task/T-0341 at aaaaaaaaa cancelled by the host — a newer run '
+                      'superseded it (concurrency group), replaced by run 2 at bbbbbbbbb',
+                      self.lines)
+        self.assertFalse([c for c in gh.calls if c[:3] == ['gh', 'run', 'rerun']])
+
+    def test_an_orphaned_open_pr_head_is_rerun(self):
+        pr = {'number': 9, 'headRefName': 'task/T-0341', 'state': 'OPEN', 'isDraft': False,
+              'headRefOid': 'a' * 40}
+        n, gh = self.explain([self.run_of(1)], prs=[pr])
+        self.assertIn(['gh', 'run', 'rerun', '1', '-R', 'o/r'], gh.calls)
+        self.assertIn('ci queue: run 1 on task/T-0341 at aaaaaaaaa cancelled by the host with no '
+                      'later run — re-run of run 1 requested', self.lines)
+
+    def test_an_orphan_that_is_no_open_head_or_is_old_is_told_and_left(self):
+        n, gh = self.explain([self.run_of(1), self.run_of(3, 'task/T-0500', when='2026-09-25T08:00:00Z')])
+        self.assertFalse([c for c in gh.calls if c[:3] == ['gh', 'run', 'rerun']])
+        self.assertEqual(len([l for l in self.lines if 'replaced by nothing and left' in l]), 2)
+
+    def test_factory_cancels_are_claimed_and_never_guessed_at(self):
+        ci_queue.claim_cancel(env.state_dir('p'), 1, 'relief', self.t0)
+        data = ci_queue.load('p')
+        data['stalls'].append({'run': 2, 'branch': 'b', 'sha': 's', 'at': '2026-09-25T11:00:00Z'})
+        ci_queue.save('p', data)
+        n, gh = self.explain([self.run_of(1), self.run_of(2)])
+        self.assertEqual((n, self.lines), (0, []))
+        self.assertFalse([c for c in gh.calls if '/jobs' in ' '.join(c)])
+
+    def test_dry_run_and_off_change_nothing(self):
+        pr = {'number': 9, 'headRefName': 'task/T-0341', 'state': 'OPEN', 'isDraft': False,
+              'headRefOid': 'a' * 40}
+        n, gh = self.explain([self.run_of(1)], prs=[pr], dry_run=True)
+        self.assertFalse([c for c in gh.calls if c[:3] == ['gh', 'run', 'rerun']])
+        self.assertEqual(ci_queue.load_claims(env.state_dir('p')), {})
+        self.assertEqual(ci_queue.explain_cancels(product(pool=False), source=NoGh()), 0)
+
+    def test_the_duplicate_cancel_writes_its_claim(self):
+        t = TestDuplicatePush()
+        t.lines = self.lines
+        p = product()
+        gh, run = t.gh(t.runs())
+        t.dedupe(p, run)
+        claims = ci_queue.load_claims(env.state_dir('p'))
+        self.assertEqual(claims['36259590283']['cause'], 'duplicate-push')
+        self.assertEqual(claims['900']['by'], 901)
+
+
 class ReliefBase(Base):
     """A trunk run queued past ``trunk_wait_min`` behind PR and batch runs at a FIFO host."""
     WF = {'pr': 'pr.yml', 'trunk': 'ci.yml', 'batch': 'batch.yml'}
@@ -655,7 +756,9 @@ class TestTrunkRelief(ReliefBase):
         # PR S2, then PR Feature, then batch (1 + 1 + 2 >= 3); never S1, hotfix, started or behind
         self.assertEqual(self.cancels(gh), ['101', '102', '201'])
         self.assertEqual(self.lines[0], 'ci queue: cancelled queued pr run 101 (worker/plan-measure, other) — '
-                                        'main run 900 at fffffffff has waited 25m for runners')
+                                        'main run 900 at fffffffff has waited 25m for runners '
+                                    '[branch worker/plan-measure, head aaaaaaaaa; replaced by '
+                                    'its own re-run once main run 900 starts]')
         self.assertEqual(len(self.lines), 3)
         self.assertEqual([r['id'] for r in ci_queue.load('p')['relief']], [101, 102, 201])
         # the next tick with the trunk still queued cancels nothing more: the runs are gone
@@ -1004,7 +1107,8 @@ class TestTrunkJobStarvation(ReliefBase):
         self.assertEqual(self.lines[0],
                          'ci queue: cancelled queued pr run 106 (worker/late, other) — created after '
                          'main run 900 at fffffffff but holds the heavy queue ahead of its queued '
-                         'm3b-e2e (queued 25m)')
+                         'm3b-e2e (queued 25m) [branch worker/late, head aaaaaaaaa; replaced by '
+                         'its own re-run once main run 900 starts]')
         self.assertIn('created before main run 900', self.lines[1])
         self.assertEqual([r['id'] for r in ci_queue.load('p')['relief']], [106, 101])
 
@@ -1129,7 +1233,8 @@ class TestTrunkEscalation(ReliefBase):
         self.assertEqual(self.cancels(gh), ['111'])
         self.assertEqual(self.lines, [
             "ci queue: cancelled in-progress pr run 111 (T-0341) — its queued heavy jobs compete "
-            "with main's m6-e2e queued 45m; sunk 3 min"])
+            "with main's m6-e2e queued 45m; sunk 3 min [branch task/T-0341, head aaaaaaaaa; "
+            "replaced by its own re-run once main run 900 starts]"])
         rec = ci_queue.load('p')['relief']
         self.assertEqual([r['id'] for r in rec], [111])
         self.assertEqual(rec[0]['kind'], 'pr')
@@ -1281,7 +1386,8 @@ class TestS1PrRelief(ReliefBase):
         self.assertEqual(self.lines[-1],
                          'ci queue: cancelled queued pr run 120 (T-0341, Task F-0001 rank 1) — created after '
                          'S1 PR run 850 (B-0007) at sha850 but holds the heavy queue ahead of its '
-                         'queued m6-e2e (queued 8m)')
+                         'queued m6-e2e (queued 8m) [branch task/T-0341, head sha120; replaced '
+                         'by its own re-run once S1 PR run 850 (B-0007) starts]')
         self.assertIn('relief: exempt task/T-0500 — changes CI config', self.lines)
         rec = ci_queue.load('p')['relief']
         self.assertEqual([r['id'] for r in rec], [121, 120])
