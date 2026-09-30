@@ -31,7 +31,7 @@ import tempfile
 import time
 
 
-from asf import approvals, env, gitpush, hermetic, mutation_guard, redact, refguard
+from asf import approvals, env, gh_limit, gitpush, hermetic, mutation_guard, redact, refguard
 from asf.conventions import Conventions
 from asf.workers import health as health_mod
 from asf.workers import lifecycle
@@ -904,11 +904,13 @@ def _gh(args):
     cancel``, an ``api -X POST/PATCH/DELETE`` …) instead of running it — the backstop for a
     caller that never threaded its own ``dry_run`` flag this far; a read (``pr view``, ``pr
     checks``, a plain ``api`` GET) is never touched."""
+    gh_limit.guard(args)
     if mutation_guard.is_active() and mutation_guard.is_mutating_gh(args):
         line = mutation_guard.would_line('gh', args)
         print(line)
         return 1, '', line
     p = subprocess.run(['gh', *args], capture_output=True, text=True, env=clean_env())
+    gh_limit.inspect_proc(args, p)  # a rate limit is never a result
     return p.returncode, p.stdout, p.stderr
 
 

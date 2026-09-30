@@ -27,7 +27,7 @@ import re
 import subprocess
 import time
 
-from asf import env, gitpush
+from asf import env, gh_limit, gitpush
 from asf.workers import cloud
 from asf.workers import cloudpid
 from asf.workers import runtime as runtime_mod
@@ -202,11 +202,13 @@ class Gh:
         if self._env is None:
             from asf import ci_pool
             self._env = ci_pool._gh_env(self.product)
+        gh_limit.guard(args)
         try:
             p = self._run(['gh', *args], capture_output=True, text=True, timeout=GH_TIMEOUT_S,
                           env=self._env)
         except (OSError, subprocess.SubprocessError) as e:
             return False, '', f'gh {args[0]}: {type(e).__name__}'
+        gh_limit.inspect_proc(args, p)
         lines = (p.stderr or p.stdout or '').strip().splitlines()
         return p.returncode == 0, p.stdout or '', (lines[-1] if lines else f'exit {p.returncode}')
 

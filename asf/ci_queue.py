@@ -271,7 +271,7 @@ import re
 import subprocess
 import time
 
-from asf import ci_pool, env, mutation_guard
+from asf import ci_pool, env, gh_limit, mutation_guard
 
 QUEUE_FILE = 'ci-queue.json'
 KINDS = ('pr', 'trunk', 'batch', 'deploy')
@@ -869,8 +869,17 @@ class GitHubSource(Source):
         (:mod:`asf.mutation_guard`) refuses a mutating call (``run cancel``, ``run rerun``,
         ``workflow run`` …) itself, the backstop for a caller — this queue's own pass included —
         that never threaded its own ``dry_run`` flag this far; a read is never touched."""
-        if mutation_guard.is_active() and mutation_guard.is_mutating_gh(args):
+        gh_limit.guard(args)
+        writes = mutation_guard.is_mutating_gh(args)
+        if writes:
+            gh_limit.forget()  # a write can change any listing this pass read before it
+        if mutation_guard.is_active() and writes:
             return None, mutation_guard.would_line('gh', args)
+        real = self._run is subprocess.run  # an injected runner (a test) is never memoised
+        key = None if writes or not real else ('ci_queue', id(self._run), self.slug, tuple(args))
+        hit = gh_limit.memo_get(key) if key else None
+        if hit is not None:
+            return hit, ''
         try:
             p = self._run(['gh', *args], capture_output=True, text=True, timeout=GH_TIMEOUT_S,
                           env=ci_pool._gh_env(self.product))
@@ -878,7 +887,10 @@ class GitHubSource(Source):
             return None, f'gh timed out after {GH_TIMEOUT_S}s'
         except OSError as e:
             return None, f'gh did not run: {e}'
+        gh_limit.inspect_proc(args, p)  # a rate limit is never a result
         if p.returncode == 0:
+            if key:
+                gh_limit.memo_put(key, p.stdout)
             return p.stdout, ''
         lines = (p.stderr or p.stdout or '').strip().splitlines()
         return None, (lines[-1].strip() if lines else f'gh exited {p.returncode}')
@@ -936,6 +948,8 @@ class GitHubSource(Source):
         cached = getattr(self, '_live', {}).get(run_id)
         if cached is not None:
             return cached
+        if self._run is subprocess.run and gh_limit.low(self.product):
+            return None  # one call per live run, every pass: unknown under the reserve
         return self._repo_jobs(self.slug, run_id)
 
     def _runner_repos(self):

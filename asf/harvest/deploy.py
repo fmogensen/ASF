@@ -89,10 +89,16 @@ DEFAULT_EXCLUDES = (
 
 
 def _sh(cmd, cwd=None, timeout=60):
+    from asf import gh_limit
+    is_gh = gh_limit.cmd_is_gh(cmd)
+    if is_gh:
+        gh_limit.guard(cmd[1:])
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd)
     except (OSError, subprocess.TimeoutExpired):
         return None
+    if is_gh:  # a rate limit is never "no run" / "no deploy"
+        gh_limit.inspect_proc(cmd[1:], out)
     return out.stdout.strip() if out.returncode == 0 else None
 
 

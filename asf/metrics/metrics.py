@@ -30,7 +30,7 @@ import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
-from asf import env, gitpush, mutation_guard
+from asf import env, gh_limit, gitpush, mutation_guard
 from asf import tokens
 from asf.conventions import (DEFAULT_CHANGELOG_FILE, DEFAULT_RELEASE_INSTALL, DEFAULT_RELEASE_MIN_INTERVAL,
                              Conventions)
@@ -804,6 +804,7 @@ def gh(args, timeout=120, quiet=False):
     mutating call (`release create`, …) instead of running it — the same backstop
     :func:`asf.harvest.harvest._gh` and :meth:`asf.ci_queue.GitHubSource.gh_try` give their own
     callers; a read (`release view`, the backfill's listings) is never touched."""
+    gh_limit.guard(args)
     if mutation_guard.is_active() and mutation_guard.is_mutating_gh(args):
         if not quiet:
             print(mutation_guard.would_line('gh', args), file=sys.stderr)
@@ -813,6 +814,7 @@ def gh(args, timeout=120, quiet=False):
         p = subprocess.run(['gh'] + list(args), capture_output=True, text=True, timeout=timeout, env=env_vars)
     except (OSError, subprocess.TimeoutExpired):
         return None
+    gh_limit.inspect_proc(args, p)  # a rate limit is never a result
     if p.returncode != 0:
         if quiet:
             return None

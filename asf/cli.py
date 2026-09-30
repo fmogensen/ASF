@@ -442,15 +442,24 @@ def _published(cmd, args, record, message):
     return rc
 
 
+#: the exit status of a run GitHub's rate limit cut short (sysexits' "try again later")
+EX_TEMPFAIL = 75
+
+
 def main(argv=None):
     from asf import env, tables
     line_buffered(sys.stdout, sys.stderr)  # before BoxStream wraps stdout, which passes lines on
     finish = tables.install()   # markdown tables are drawn as box tables on a console
+    from asf import gh_limit
     try:
         return _main(argv)
     except env.ConfigError as e:
         print(needs_operator_line(e, _product_of(argv)))
         return 2
+    except gh_limit.RateLimited:
+        # a GitHub rate limit reached the top: nothing was decided on it (the wrapper printed
+        # its one line); the next run retries
+        return EX_TEMPFAIL
     finally:
         finish()
 

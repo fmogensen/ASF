@@ -281,12 +281,16 @@ class GitHubRuns:
         self.workflow_names = []
 
     def _gh(self, args):
-        from asf import ci_pool
+        from asf import ci_pool, gh_limit
+        gh_limit.guard(args)
+        if self._run is subprocess.run and gh_limit.low(self.product):
+            return None  # a history read, never urgent: unreadable under the reserve
         try:
             p = self._run(['gh', *args], capture_output=True, text=True, timeout=GH_TIMEOUT_S,
                           env=ci_pool._gh_env(self.product))
         except (OSError, subprocess.TimeoutExpired):
             return None
+        gh_limit.inspect_proc(args, p)
         return p.stdout if p.returncode == 0 else None
 
     def _lines(self, args):

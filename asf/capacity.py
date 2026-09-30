@@ -511,17 +511,24 @@ def ci_runs_in_flight(product, run=None, timeout=CI_TIMEOUT_S):
     repo_slug = getattr(product, 'repo_slug', None)
     if not workflow or not repo_slug:
         return None
-    from asf import ci_pool
-    try:
-        p = (run or subprocess.run)(
-            ['gh', 'run', 'list', '-R', repo_slug, '--workflow', workflow, '--limit', '50',
-             '--json', 'status', '--jq', '[.[] | select(.status != "completed")] | length'],
-            capture_output=True, text=True, timeout=timeout, env=ci_pool._gh_env(product))
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if p.returncode != 0:
-        return None
-    out = (p.stdout or '').strip()
+    from asf import ci_pool, gh_limit
+    if gh_limit.latched():
+        return None  # rate limited: unknown, and no call spent learning it again
+    key = ('capacity', id(subprocess.run), repo_slug, workflow) if run is None else None
+    out = gh_limit.memo_get(key) if key else None
+    if out is None:
+        try:
+            p = (run or subprocess.run)(
+                ['gh', 'run', 'list', '-R', repo_slug, '--workflow', workflow, '--limit', '50',
+                 '--json', 'status', '--jq', '[.[] | select(.status != "completed")] | length'],
+                capture_output=True, text=True, timeout=timeout, env=ci_pool._gh_env(product))
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if p.returncode != 0:
+            return None
+        out = (p.stdout or '').strip()
+        if key and out.isdigit():
+            gh_limit.memo_put(key, out)
     return int(out) if out.isdigit() else None
 
 

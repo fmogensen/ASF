@@ -597,8 +597,21 @@ def _reason(detail):
 def run_asf_step(step, ctx):
     """Run one ``asf`` step; any failure is one ``[step:<name>] FAILED`` line and rc 1 — never
     an exception out of the tick."""
+    from asf import gh_limit
     try:
         return _asf_step(step)(ctx) or 0
+    except gh_limit.RateLimited:
+        # GitHub's rate limit: whatever the step read is unknown, so it decided nothing — one
+        # line (already printed once by the wrapper), and the next tick decides. A record or a
+        # daily cut short is a failed one (nothing after a stale record runs; the daily reruns).
+        print(f"[step:{step}] skipped — GitHub rate limit; no GitHub decision this tick")
+        if step == 'record':
+            ctx.stale_reason = 'GitHub rate limit'
+            return 1
+        if step == 'daily':
+            steps.write_daily_failure(ctx.product, 'GitHub rate limit')
+            return 1
+        return 0
     except Exception as e:  # noqa: BLE001 — one step's failure never stops the rest
         import traceback
         detail = (getattr(e, 'stderr', None) or str(e) or type(e).__name__).strip()

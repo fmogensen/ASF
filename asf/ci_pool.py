@@ -48,7 +48,7 @@ import os
 import re
 import subprocess
 
-from asf import env
+from asf import env, gh_limit
 
 PROVIDER_PREFIX = 'provider-'
 CLASS_PREFIX = 'class-'   # GitHub runner labels: letters, digits, '-', '_', '.' only
@@ -715,14 +715,27 @@ class GitHubBackend(Backend):
     def _api(self, args, stdin=None):
         if self._env is None:
             self._env = _gh_env(self.product)
+        gh_limit.guard(args)
+        read = stdin is None and not any(a in ('-X', '--method', '-f', '-F', '--input')
+                                         for a in args)
+        real = self._run is subprocess.run  # an injected runner (a test) is never memoised
+        key = ('ci_pool', id(self._run), self.base, tuple(args)) if read and real else None
+        if not read:
+            gh_limit.forget()
+        hit = gh_limit.memo_get(key) if key else None
+        if hit is not None:
+            return hit
         try:
             p = self._run(['gh', 'api', *args], input=stdin, capture_output=True, text=True,
                           timeout=GH_TIMEOUT_S, env=self._env)
         except (OSError, subprocess.TimeoutExpired) as e:
             raise BackendError(f'gh api {args[0]}: {e}') from e
+        gh_limit.inspect_proc(['api', *args], p)
         if p.returncode != 0:
             lines = (p.stderr or p.stdout or '').strip().splitlines()
             raise BackendError(f"gh api {args[0]}: {lines[-1] if lines else 'failed'}")
+        if key:
+            gh_limit.memo_put(key, p.stdout)
         return p.stdout
 
     def _lines(self, args):
