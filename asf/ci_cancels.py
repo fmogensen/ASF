@@ -305,11 +305,11 @@ def _run_listing(product, since):
     runs = metrics.gh_lines(
         ['api', f'repos/{product.repo_slug}/actions/runs?created=%3E%3D{since}'
                 '&status=completed&per_page=100', '--paginate', '--jq',
-         '.workflow_runs[]|{id,name,head_branch,head_sha,conclusion,created_at,updated_at,'
+         '.workflow_runs[]|{id,name,path,head_branch,head_sha,conclusion,created_at,updated_at,'
          'run_attempt,event,pr:[.pull_requests[].number]}|@json'])
     out = []
     for r in runs:
-        if workflow and r.get('name') != workflow:
+        if workflow and os.path.basename(r.get('path') or '') != workflow:
             continue
         pr = r.get('pr') or []
         out.append({**r, 'pr': pr[0] if pr else None})

@@ -9,8 +9,10 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from asf import ci_cancels, ci_queue
+from asf.metrics import metrics
 
 
 def _hook_free_env():
@@ -323,6 +325,31 @@ class Claims(unittest.TestCase):
             json.dump({'1': {'cause': 'relief', 'at': '2026-01-01T00:00:00Z'}, '2': 'not-a-dict'},
                       f)
         self.assertEqual(set(ci_cancels.claims(self.tmp)), {'1'})
+
+
+class RunListing(unittest.TestCase):
+    def test_the_workflow_filter_matches_the_path_basename_not_the_display_name(self):
+        """C — the run's ``name`` is the workflow file's ``name:`` YAML key (here ``tests``, as
+        in this repo's own .github/workflows/tests.yml), never the configured
+        ``product.ci['workflow']`` file name (``ci.yml``); only ``path`` carries the file name,
+        matched via ``os.path.basename`` the same way ``ci_queue.py:1041,3040`` already does."""
+        from asf import env
+        product = env.Product('sample', {'repo_slug': 'sample/sample', 'ci': {'workflow': 'ci.yml'}})
+
+        def fake_gh_lines(args, timeout=300):
+            return [{'id': 1, 'name': 'tests', 'path': '.github/workflows/ci.yml',
+                      'head_branch': 'b', 'head_sha': 'a' * 40, 'conclusion': 'cancelled',
+                      'created_at': '2026-09-21T01:00:00Z', 'updated_at': '2026-09-21T01:01:00Z',
+                      'run_attempt': 1, 'event': 'push', 'pr': [7]},
+                     {'id': 2, 'name': 'tests', 'path': '.github/workflows/other.yml',
+                      'head_branch': 'b', 'head_sha': 'a' * 40, 'conclusion': 'cancelled',
+                      'created_at': '2026-09-21T01:00:00Z', 'updated_at': '2026-09-21T01:01:00Z',
+                      'run_attempt': 1, 'event': 'push', 'pr': []}]
+
+        with mock.patch.object(metrics, 'gh_lines', side_effect=fake_gh_lines):
+            out = ci_cancels._run_listing(product, '2026-09-20')
+        self.assertEqual([r['id'] for r in out], [1])
+        self.assertEqual(out[0]['pr'], 7)
 
 
 class Table(unittest.TestCase):
