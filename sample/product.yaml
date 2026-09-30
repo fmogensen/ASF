@@ -6,6 +6,8 @@ repo_dir: @REPO@
 backlog_dir: @BACKLOG@
 main: main
 conventions:
+  readme: README
+  readme_facts: readme-numbers.json
   specs_dir: specs
   plans_dir: plans
   reviews_dir: reviews

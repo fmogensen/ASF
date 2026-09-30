@@ -1,7 +1,7 @@
 """asf.tick.file_bugs — file/bump Bugs from ci, refusals, rule violations and the record's own
 standing errors (``asf file-bugs``).
 
-The learning loop: four sources file or bump a Bug, keyed on the typed `signature` field so
+The learning loop: six sources file or bump a Bug, keyed on the typed `signature` field so
 "same signature = same Bug" needs no id lookup table of its own:
   - metrics/ci: a `failed_step` seen >= 2 times in the last 24h
   - metrics/ticks: a file refused >= 2 times in the last 24h
@@ -11,6 +11,8 @@ The learning loop: four sources file or bump a Bug, keyed on the typed `signatur
   - `asf check` over the record: one Bug per error CLASS (``record_error_signatures``)
   - the CI logs of ``conventions.ci_workflow``: one counted Bug per flaky e2e test
     (:mod:`asf.tick.flaky`, keyed and counted in ``state/<p>/flaky.json``)
+  - `asf readme --check`: red, and the committed facts more than `README_STALE_DAYS` days old
+    (``readme_signatures``) — a drift nobody has refreshed away in a week
 A signature already carrying today's date in its typed `last_filed` is left alone — this is
 what makes a second same-day run a no-op instead of double-counting a still-open problem.
 """
@@ -36,6 +38,10 @@ CI_REFUSAL_WINDOW_H = 24
 #: A CI failure's Bug title opens with this, then its ``<job>: <failed step>`` signature — the
 #: groom's ``decide_or_close_ci_red`` reads the job back off it.
 CI_RED_TITLE = 'CI red: '
+
+#: How many days a red `asf readme --check` may sit unrefreshed before it is a Bug rather than a
+#: page a contributor has not gotten to yet (F-0030 §2.7).
+README_STALE_DAYS = 7
 
 #: The conventions a caller with no Product reads: the trunk is `main`, no batch lane, no
 #: default Bug Epic. The Epic a filed Bug is parented under is `conventions.default_bug_epic`;
@@ -250,6 +256,43 @@ def record_error_signatures(root, findings=None, canonical=None, shared=()):
         if d['places'] > len(d['evidence']):
             d['evidence'].append(f"and {d['places'] - len(d['evidence'])} more")
     return out
+
+
+def readme_signatures(root, now, conv):
+    """One signature, `readme/stale`, when `asf readme --check` is red over `root` (the
+    product's repo dir) **and** the committed facts have gone more than `README_STALE_DAYS`
+    days without a refresh (F-0030 §2.7) — the same staleness `asf readme --check --json`
+    reports as `stale_days`. A page with no span, a sound page, a red page still within its
+    grace period, or a red page with no committed facts file to date, all file nothing: the
+    first three are not a defect, and the last would be a guess."""
+    from asf.views import readme
+    if not root or not os.path.isdir(root):
+        return {}
+    try:
+        problems = readme.check(root, conv)
+    except (OSError, ValueError):
+        return {}
+    if not problems:
+        return {}
+    facts_path = os.path.join(root, conv.readme_facts)
+    if not os.path.isfile(facts_path):
+        return {}
+    try:
+        with open(facts_path, encoding='utf-8') as f:
+            day = json.load(f).get('day')
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not day:
+        return {}
+    stale_days = (now.date() - datetime.date.fromisoformat(day)).days
+    if stale_days <= README_STALE_DAYS:
+        return {}
+    sig = 'readme/stale'
+    return {sig: {
+        'title': truncate(f"README stale ({stale_days}d): {problems[0]}", 120),
+        'severity': 'S3', 'evidence': list(problems), 'runs': [],
+        'acceptance': ['`asf readme --check` reports no complaint'],
+    }}
 
 
 #: A rule check that failed this many runs in a row is surfaced once as a factory-side problem.
@@ -521,12 +564,14 @@ def cmd_file_bugs(args, root):
     default_bug_epic = epic
 
     rule_data = rule_check_results(root)
+    product = _product(args)
     signatures = {}
     signatures.update(ci_signatures(root, now, conv))
     signatures.update(refusal_signatures(root, now))
     signatures.update(rule_violation_signatures(root, rule_data))
     signatures.update(record_error_signatures(root, canonical=canonical,
                                               shared=footprint.shared_globs(conv)))
+    signatures.update(readme_signatures(product.repo_dir if product else None, now, conv))
     if rule_data is not None:
         report_check_failures(rule_data.get('broken') or [], ledger,
                               now.strftime('%Y-%m-%dT%H:%M:%SZ'))

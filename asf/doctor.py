@@ -566,6 +566,27 @@ def check_drift(product, installed=None):
     return True, drift.line(d)
 
 
+def check_readme(product):
+    """(ok, detail) — ``asf readme --check``'s own verdict on this product's page (F-0030 §2.7).
+    ``(None, detail)`` — skipped, not red — for a product whose README carries no span, or whose
+    repo dir does not resolve: a product that has not wired ``asf readme`` in yet is not a
+    complaint."""
+    from asf.views import readme
+    repo_dir = product.repo_dir
+    if not repo_dir or not os.path.isdir(repo_dir):
+        return None, 'repo_dir not a directory: %s' % repo_dir
+    try:
+        problems = readme.check(repo_dir, product.conventions)
+    except (OSError, ValueError) as e:
+        return None, 'cannot read the README — %s' % e
+    if problems is None:
+        return None, 'no spans — nothing to check'
+    if not problems:
+        return True, 'ok'
+    return False, '%d complaint%s — %s' % (len(problems), '' if len(problems) == 1 else 's',
+                                           problems[0])
+
+
 # ---- the capacity row --------------------------------------------------------
 #
 # Spec f-0079 §2.5 has this row read the operator's `capacity.total.sessions`, every product's
@@ -934,6 +955,8 @@ def run(product_name):
         rows.append(('clock install', required, ok, detail))
     ok, detail = check_drift(product)
     rows.append(('drift', True, ok, detail))
+    ok, detail = check_readme(product)
+    rows.append(('readme', True, ok, detail))
     ok, detail = check_rule_checks(product)
     rows.append(('rule-checks', False, ok, detail))
     ok, detail = check_briefs(product)

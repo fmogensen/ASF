@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -670,6 +671,57 @@ class TestFormatAndExit(unittest.TestCase):
         out = doctor.format_table('sample', rows)
         self.assertIn('skip', out)
         self.assertNotIn('RED', out)
+
+
+class ReadmeRowTests(unittest.TestCase):
+    """``check_readme`` — the ``readme`` doctor row (F-0030 §2.7)."""
+
+    SPANNED = ('## The argument\n\nWe ran <!--asf:n sessions-->9<!--/asf:n--> sessions.\n\n'
+               '## The mental model\n\nSome prose.\n\n'
+               '## The manual\n\nInstall it.\n')
+    FACTS = {'generated': 'x', 'record': 'x', 'record_generated': 'x', 'day': '2026-09-24',
+             'numbers': {'sessions': {'value': 9, 'text': '9', 'source': 'metrics/sessions'}}}
+
+    @staticmethod
+    def _write(repo, name, text):
+        path = os.path.join(repo, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+
+    def test_sound_page_is_ok(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, 'README.md', self.SPANNED)
+            self._write(d, 'docs/readme-numbers.json', json.dumps(self.FACTS))
+            ok, detail = doctor.check_readme(env.Product('x', {'repo_dir': d}))
+            self.assertTrue(ok, detail)
+
+    def test_hand_edited_span_is_red_naming_the_complaint(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, 'README.md', self.SPANNED.replace('-->9<!--', '-->99<!--'))
+            self._write(d, 'docs/readme-numbers.json', json.dumps(self.FACTS))
+            ok, detail = doctor.check_readme(env.Product('x', {'repo_dir': d}))
+            self.assertFalse(ok)
+            self.assertIn('sessions', detail)
+
+    def test_spanless_readme_is_skipped_not_red(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, 'README.md', 'No spans here.\n')
+            ok, detail = doctor.check_readme(env.Product('x', {'repo_dir': d}))
+            self.assertIsNone(ok, detail)
+
+    def test_a_repo_dir_that_does_not_resolve_is_skipped_not_red(self):
+        ok, detail = doctor.check_readme(env.Product('x', {'repo_dir': '/no/such/dir/at/all'}))
+        self.assertIsNone(ok, detail)
+
+    def test_the_table_still_formats_with_a_readme_row(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, 'README.md', self.SPANNED)
+            self._write(d, 'docs/readme-numbers.json', json.dumps(self.FACTS))
+            ok, detail = doctor.check_readme(env.Product('x', {'repo_dir': d}))
+            out = doctor.format_table('x', [('readme', True, ok, detail)])
+            self.assertIn('readme', out)
+            self.assertIn('ok', out)
 
 
 class TestCmdDoctorSubprocess(unittest.TestCase):

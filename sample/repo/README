@@ -1,1 +1,26 @@
-A tiny word counter: the second product ASF runs in its own tests (see ../README.md).
+## The argument
+
+A tiny word counter: the second product ASF runs in its own tests (see ../README.md) — its own
+record carries <!--asf:n items-->0<!--/asf:n--> cards over <!--asf:n window-->0<!--/asf:n-->,
+shipping <!--asf:n features_shipped-->0<!--/asf:n--> Features at
+<!--asf:n usd_per_feature-->0<!--/asf:n--> each.
+
+<!--asf:block scoreboard-->
+<!--/asf:block-->
+
+## The mental model
+
+A second layout, on purpose: whatever `asf readme`'s path this repo's own tree hard-codes, this
+one differs, so `conventions.readme` / `conventions.readme_facts` are what it actually reads.
+
+## The manual
+
+Sessions <!--asf:n sessions-->0<!--/asf:n--> (<!--asf:n session_hours-->0<!--/asf:n--> hours,
+<!--asf:n spend_usd-->0<!--/asf:n--> spend); CI runs <!--asf:n ci_runs-->0<!--/asf:n-->
+(<!--asf:n ci_green_pct-->0<!--/asf:n--> green); ticks <!--asf:n ticks-->0<!--/asf:n-->.
+
+<!--asf:block cost_per_feature-->
+<!--/asf:block-->
+
+<!--asf:block commands-->
+<!--/asf:block-->

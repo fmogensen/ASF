@@ -10,7 +10,7 @@ import unittest
 
 from asf.conventions import Conventions
 from asf.record import frontmatter
-from asf.record.core import today
+from asf.record.core import canonicalize, load_items, today
 from asf.schema import SCHEMA_VERSION
 from asf.tick import file_bugs
 
@@ -352,6 +352,82 @@ class RecordErrorSignatureTests(unittest.TestCase):
                          ['record error: bare decision reference …; write it as [[D-nnnn]]'])
         second = run(['file-bugs'], self.root)
         self.assertIn('0 filed', second.stdout)
+
+
+class ReadmeStaleTests(unittest.TestCase):
+    """``readme_signatures`` — the ``readme/stale`` Bug (F-0030 §2.7): a red ``asf readme
+    --check`` left unrefreshed for more than ``README_STALE_DAYS``."""
+
+    SPANNED = ('## The argument\n\nWe ran <!--asf:n sessions-->9<!--/asf:n--> sessions.\n\n'
+               '## The mental model\n\nSome prose.\n\n'
+               '## The manual\n\nInstall it.\n')
+
+    def setUp(self):
+        self.repo = tempfile.mkdtemp(prefix='filebugs_readme_')
+        self.conv = Conventions()
+        self.now = datetime.datetime(2026, 9, 30, 12, 0, tzinfo=datetime.timezone.utc)
+
+    def tearDown(self):
+        shutil.rmtree(self.repo, ignore_errors=True)
+
+    def _write(self, name, text):
+        path = os.path.join(self.repo, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+
+    @staticmethod
+    def _facts(day):
+        return {'generated': 'x', 'record': 'x', 'record_generated': 'x', 'day': day,
+                'numbers': {'sessions': {'value': 9, 'text': '9', 'source': 'metrics/sessions'}}}
+
+    def _hand_edited_and_red(self, day):
+        self._write('README.md', self.SPANNED.replace('-->9<!--', '-->99<!--'))
+        self._write('docs/readme-numbers.json', json.dumps(self._facts(day)))
+
+    def test_eight_days_behind_and_red_files_one_bug(self):
+        self._hand_edited_and_red('2026-09-22')  # 8 days behind self.now
+        sigs = file_bugs.readme_signatures(self.repo, self.now, self.conv)
+        self.assertEqual(list(sigs), ['readme/stale'], sigs)
+
+    def test_six_days_behind_files_nothing(self):
+        self._hand_edited_and_red('2026-09-24')  # 6 days behind self.now
+        self.assertEqual(file_bugs.readme_signatures(self.repo, self.now, self.conv), {})
+
+    def test_a_sound_page_files_nothing_however_old_its_facts(self):
+        self._write('README.md', self.SPANNED)
+        self._write('docs/readme-numbers.json', json.dumps(self._facts('2026-01-01')))
+        self.assertEqual(file_bugs.readme_signatures(self.repo, self.now, self.conv), {})
+
+    def test_red_with_no_facts_file_files_nothing_rather_than_crashing(self):
+        self._write('README.md', self.SPANNED.replace('-->9<!--', '-->99<!--'))
+        self.assertEqual(file_bugs.readme_signatures(self.repo, self.now, self.conv), {})
+
+    def test_a_second_run_bumps_rather_than_duplicates(self):
+        self._hand_edited_and_red('2026-09-22')
+        sigs = file_bugs.readme_signatures(self.repo, self.now, self.conv)
+        record = make_repo()
+        try:
+            by_id, _errors = load_items(record)
+            canonical, _dupes = canonicalize(by_id)
+            first = file_bugs._file_or_bump_bug(record, canonical, 'readme/stale',
+                                                sigs['readme/stale'], '2026-09-30')
+            self.assertEqual(first, 'filed')
+
+            by_id, _errors = load_items(record)
+            canonical, _dupes = canonicalize(by_id)
+            second = file_bugs._file_or_bump_bug(record, canonical, 'readme/stale',
+                                                 sigs['readme/stale'], '2026-10-01')
+            self.assertEqual(second, 'bumped')
+
+            bug = [n for n in os.listdir(os.path.join(record, 'bugs')) if n.endswith('.md')]
+            self.assertEqual(len(bug), 1, bug)
+            with open(os.path.join(record, 'bugs', bug[0])) as f:
+                meta, _body = frontmatter.parse(f.read(), path=f'bugs/{bug[0]}')
+            self.assertEqual(meta['count'], 2)
+            self.assertEqual(meta['last_filed'], '2026-10-01')
+        finally:
+            shutil.rmtree(record, ignore_errors=True)
 
 
 class FileBugsIntegrationTests(unittest.TestCase):
