@@ -23,33 +23,41 @@ tick asks again. Its entry keeps its place in line (``since``) while it keeps as
   at once, even with no runner free — the host queues their jobs anyway, and priority matters more
   than packing.
 
-*Expected jobs per class* are measured (:func:`needs_from_history`): over the last
-``ci.queue.history`` (default 10) runs of the workflow that start triggers that completed
-``success`` or ``failure`` (a cancelled run is dropped), each read at its *latest attempt* only
-(a superseded attempt's jobs never count, and attempts never overlap), per run and class the peak
-number of jobs the run *asked for at once* — each job that got a runner (``runner_name`` set,
-conclusion not ``skipped``) counted over its ``created_at``..``completed_at`` (queued or running;
-``started_at`` when the host gives no ``created_at``), so a skipped or conditional job never
-counts and sequential stages never add up. Counting from ``created_at``, not ``started_at``, is
-what makes it the run's *demand*: on a busy pool a fan-out of 12 jobs queued together starts a
-few at a time, and the jobs *running* at once only say how many runners were free — an estimate
-that shrinks exactly when the pool is contended. Jobs are grouped by the class of the runner that
-actually ran it (its ``ci.pool`` entry's ``class``, else its ``role``), never by the job's
-``runs-on``; a runner outside the pool, by its labels mapped through :func:`label_classes` (a
-label every carrier of which sits in one class names that class, so a sub-label such as
-``fast-heavy`` carried only by ``heavy`` runners counts in ``heavy``, once — labels never make a
-demand of their own that sums with the parent). A job listed twice (same job id) counts once. The
-estimate is the *p90* (:data:`ESTIMATE_PERCENTILE`, nearest rank) of that over the runs, capped at
-what the pool declares for that class, taken separately per *run type*: a run whose PR changed
-only light paths (:func:`run_type`: every file under ``ci.queue.light_paths``, default
-``docs/**`` and ``*.md``, or under the product's docs roots — the lane's docs class) is
-``light``, every other run (code, no PR, a trunk push) ``full``. A PR start is sized by the type
-its own changed files make; every other start (trunk, batch, deploy) as ``full``; a type with no
-run measured falls back to ``full``. ``ci.queue.estimate`` overrides the measure per class, for
-both types (``{heavy: 12}``) or each (``{heavy: {full: 12, light: 4}}``). The figure is cached
-in the queue file keyed by the set of run ids it was measured from (re-measured only when that
-set changes, each run's own measure kept by id so only new runs are read; the ids are listed
-again after :data:`EXPECT_TTL_S`) and memoised per pass, so the hold line, the status Capacity row
+*Expected jobs* are measured (:func:`needs_from_history`): over the last ``ci.queue.history``
+(default 10) runs of the workflow that start triggers that completed ``success`` or ``failure``
+(a cancelled run is dropped), each read at its *latest attempt* only (a superseded attempt's jobs
+never count, and attempts never overlap), per run the peak number of jobs the run *asked for at
+once* — each job that got a runner (``runner_name`` set, conclusion not ``skipped``) counted over
+its ``created_at``..``completed_at`` (queued or running; ``started_at`` when the host gives no
+``created_at``), so a skipped or conditional job never counts and sequential stages never add up.
+Counting from ``created_at``, not ``started_at``, is what makes it the run's *demand*: on a busy
+pool a fan-out of 12 jobs queued together starts a few at a time, and the jobs *running* at once
+only say how many runners were free — an estimate that shrinks exactly when the pool is
+contended. Jobs are grouped by the class of the runner that actually ran it (its ``ci.pool``
+entry's ``class``, else its ``role``), never by the job's ``runs-on``; a runner outside the pool,
+by its labels mapped through :func:`label_classes` (a label every carrier of which sits in one
+class names that class, so a sub-label such as ``fast-heavy`` carried only by ``heavy`` runners
+counts in ``heavy``, once — labels never make a demand of their own that sums with the parent).
+Within a class, a job also carries the labels it asked the host for; a *fit key*
+(:func:`fit_key`) is the class plus those of them some online runner of the class lacks
+(:func:`split_labels`), and a key's demand is the peak over the jobs asking for *at least* its
+labels — so the bare class key is exactly the class's peak as before, and each stricter key is
+the subset that needs it. A job listed twice (same job id) counts once. The estimate is the *p90*
+(:data:`ESTIMATE_PERCENTILE`, nearest rank) of that over the runs, capped at the slots that could
+serve the key, busy or not (:func:`fit_caps` — a key's class's declared cap where no runner is
+online to say otherwise), taken separately per *run type*: a run whose PR changed only light
+paths (:func:`run_type`: every file under ``ci.queue.light_paths``, default ``docs/**`` and
+``*.md``, or under the product's docs roots — the lane's docs class) is ``light``, every other
+run (code, no PR, a trunk push) ``full``. A PR start is sized by the type its own changed files
+make; every other start (trunk, batch, deploy) as ``full``; a type with no run measured falls
+back to ``full``. ``ci.queue.estimate`` overrides the measure (:func:`apply_override`): a bare
+class replaces that class's whole demand — every fit key of it drops, so a measured strict
+requirement never sits beside an operator's class-wide figure — for both types (``{heavy: 12}``)
+or each (``{heavy: {full: 12, light: 4}}``); a fit key given verbatim sets or removes that key
+alone. The figure is cached in the queue file keyed by the set of run ids it was measured from
+and, per run, the split it was measured under (re-measured when either changes, each run's own
+measure kept by id so only new runs are read; the ids are listed again after
+:data:`EXPECT_TTL_S`) and memoised per pass, so the hold line, the status Capacity row
 (:func:`status_clause`) and ``asf ci queue`` all name the one number. *Free runners* come from the
 runners API: an online runner that is not busy, counted at its ``slots`` — and, for a requirement
 a class does not answer alike (:func:`split_labels`), only a runner carrying the labels that
@@ -318,8 +326,9 @@ PICKUP_S = 3 * 60
 #: how long a workflow's measured jobs per class are reused before its run ids are listed again
 EXPECT_TTL_S = 10 * 60
 #: the measure's version: a cached figure from another version is read again. 6 adds the
-#: per-class ``hold`` to every ``per_run`` record (:meth:`Queue.hold_s`).
-EXPECT_VERSION = 6
+#: per-class ``hold`` to every ``per_run`` record (:meth:`Queue.hold_s`); 7 keys ``needs`` and
+#: ``per_run.peak`` by fit key (:func:`fit_key`) instead of by bare class.
+EXPECT_VERSION = 7
 #: the run conclusions measured: a cancelled (or otherwise cut short) run says nothing of its size
 MEASURED_CONCLUSIONS = frozenset({'success', 'failure'})
 GH_TIMEOUT_S = 30
@@ -649,8 +658,10 @@ def _count(v):
 
 
 def estimate_override(product, run):
-    """``{class: jobs}`` that ``ci.queue.estimate`` sets for a ``run`` type: ``{cls: n}`` for
-    both types, ``{cls: {full: n, light: m}}`` for each. A malformed value is ignored."""
+    """``{class or fit key: jobs}`` that ``ci.queue.estimate`` sets for a ``run`` type:
+    ``{cls: n}`` for both types, ``{cls: {full: n, light: m}}`` for each; a key may be a bare
+    class or a fit key (:func:`fit_key`) verbatim — :func:`apply_override` decides what each
+    means. A malformed value is ignored."""
     v = _qcfg(product).get('estimate')
     out = {}
     for cls, n in (v.items() if isinstance(v, dict) else ()):
@@ -658,6 +669,28 @@ def estimate_override(product, run):
             n = n.get(run)
         if _count(n):
             out[str(cls)] = n
+    return out
+
+
+def apply_override(need, product, run):
+    """``need`` (a ``{fit key: jobs}`` map) with ``ci.queue.estimate`` (:func:`estimate_override`)
+    applied: an override on a bare class **replaces that class's whole demand** — every fit key
+    of it drops, so a measured strict requirement never sits beside an operator's class-wide
+    figure — a value ``0`` or less removes the class and its fit keys; an override on a fit key
+    verbatim sets or removes that key alone, leaving the rest of its class as measured."""
+    out = dict(need)
+    for key, n in estimate_override(product, run).items():
+        cls, asks = fit_asks(key)
+        if asks:
+            if n > 0:
+                out[key] = n
+            else:
+                out.pop(key, None)
+            continue
+        for k in [k for k in out if fit_asks(k)[0] == cls]:
+            out.pop(k, None)
+        if n > 0:
+            out[cls] = n
     return out
 
 
@@ -1221,18 +1254,29 @@ def _job_class(job, by_name, labels):
     return found.pop() if len(found) == 1 else None
 
 
-def peak_concurrent(jobs, by_name, labels):
-    """``{class: peak jobs asked for at once}`` for one run's ``jobs``. A job counts only when it
-    got a runner (``runner_name`` set) and did not end ``skipped``, once (a job id listed twice is
-    one job), in one class (:func:`_job_class`); it holds its demand from ``created_at`` (queued:
-    the host wants a runner for it from then) to ``completed_at`` — ``started_at`` when there is
-    no ``created_at``; no ``completed_at``: to the end of the run; neither start: the whole run.
-    Jobs queued together count together however few the pool let run at once. A job ending as
-    another is queued does not overlap it, so sequential stages count once. ``labels`` is a
-    :func:`label_classes` map (or the pool's role labels)."""
+def _job_labels(job):
+    """The job's own labels, normalised: a plain string or ``{'name': …}`` per entry."""
+    return frozenset(ci_pool._norm(l if isinstance(l, str) else (l or {}).get('name', ''))
+                     for l in job.get('labels') or ())
+
+
+def peak_concurrent(jobs, by_name, labels, split=None):
+    """``{fit key: peak jobs asked for at once}`` for one run's ``jobs``. A job counts only when
+    it got a runner (``runner_name`` set) and did not end ``skipped``, once (a job id listed twice
+    is one job), in one class (:func:`_job_class`); it holds its demand from ``created_at``
+    (queued: the host wants a runner for it from then) to ``completed_at`` — ``started_at`` when
+    there is no ``created_at``; no ``completed_at``: to the end of the run; neither start: the
+    whole run. Jobs queued together count together however few the pool let run at once. A job
+    ending as another is queued does not overlap it, so sequential stages count once. ``labels``
+    is a :func:`label_classes` map (or the pool's role labels). ``split`` (:func:`split_labels`):
+    a job's *asks* are its own ``labels`` intersected with what splits its class, and a key's peak
+    is taken over the jobs asking for **at least** that key's labels — so the bare class key is
+    exactly the class's peak as before, and each strict key is the subset that needs it. ``split``
+    None or empty: one key per class, today's map byte for byte."""
     labels = _as_label_map(labels)
-    events = {}
+    split = split or {}
     ids = set()
+    spans = []                  # (class, asks, lo, hi)
     for j in jobs or ():
         if not isinstance(j, dict) or not j.get('runner_name') or j.get('conclusion') == 'skipped':
             continue
@@ -1241,24 +1285,34 @@ def peak_concurrent(jobs, by_name, labels):
             if jid in ids:
                 continue
             ids.add(jid)
-        key = _job_class(j, by_name, labels)
-        if key is None:
+        cls = _job_class(j, by_name, labels)
+        if cls is None:
             continue
         start = _parse(j.get('created_at')) or _parse(j.get('started_at'))
         end = _parse(j.get('completed_at')) if start is not None else None
         lo = start.timestamp() if start is not None else float('-inf')
         hi = end.timestamp() if end is not None else float('inf')
         hi = max(hi, lo)
-        ev = events.setdefault(key, [])
-        ev.append((lo, 1))
-        ev.append((hi, 0))       # at an equal time an end (0) sorts before a start (1)
-    out = {}
-    for key, ev in events.items():
+        asks = _job_labels(j) & split.get(cls, frozenset())
+        # at an equal time an end (0) sorts before a start (1)
+        spans.append((cls, asks, lo, hi))
+
+    def sweep(pairs):
         n = peak = 0
-        for _t, is_start in sorted(ev):
+        for _t, is_start in sorted(pairs):
             n += 1 if is_start else -1
             peak = max(peak, n)
-        out[key] = peak
+        return peak
+
+    keys_by_class = {}
+    for cls, asks, _lo, _hi in spans:
+        keys_by_class.setdefault(cls, set()).add(asks)
+    out = {}
+    for cls, asks_seen in keys_by_class.items():
+        for want in {frozenset()} | asks_seen:
+            ev = [t for c2, a2, lo, hi in spans if c2 == cls and want <= a2
+                  for t in ((lo, 1), (hi, 0))]
+            out[fit_key(cls, want)] = sweep(ev)
     return out
 
 
@@ -1288,15 +1342,18 @@ def _caps(pool):
 
 
 def run_peaks(jobs, pool, runners=()):
-    """``{class: peak jobs asked for at once}`` of one run's ``jobs`` in its latest attempt
+    """``{fit key: peak jobs asked for at once}`` of one run's ``jobs`` in its latest attempt
     (:func:`latest_attempt`), only the pool's classes. Each job counts in the class of the
     runner that ran it; ``runners`` (the live runner read) widens the label map for a runner
-    outside the pool. A job on a runner outside every class (a hosted runner) needs nothing of
-    the pool."""
+    outside the pool, and is where the split (:func:`split_labels`) comes from — none with no
+    live read, so no split and class keys, today's answer. A job on a runner outside every class
+    (a hosted runner) needs nothing of the pool."""
     by_name = {e.runner: e for e in pool}
     cap = _caps(pool)
+    split = split_labels(runners, pool) if runners else {}
     return {k: n for k, n in peak_concurrent(latest_attempt(jobs), by_name,
-                                             label_classes(pool, runners)).items() if k in cap}
+                                             label_classes(pool, runners), split).items()
+            if fit_asks(k)[0] in cap}
 
 
 def _run_hold(jobs, pool, runners=()):
@@ -1324,25 +1381,48 @@ def _run_hold(jobs, pool, runners=()):
             for k in starts if k in ends}
 
 
-def estimate(peaks, pool):
-    """``{class: expected jobs}``: per class the p90 (:func:`_percentile`) of the per-run
-    ``peaks`` (a run naming no job of a class counts 0 there), capped at the class's slots."""
+def fit_caps(pool, runners, keys):
+    """``{fit key: slots}`` — the slots that *could* serve each key, busy or not: the online
+    runners of its class carrying its labels (:func:`load_by_fit`); a key whose class is declared
+    but has no online runner falls back to the class's declared cap (:func:`_caps`), which is
+    never smaller than the strict key's true cap — and every key does when ``runners`` is empty
+    (no live read)."""
     cap = _caps(pool)
+    if not runners:
+        return {k: cap.get(fit_asks(k)[0], 0) for k in keys}
+    online = {c: v['online'] for c, v in load_by_class(runners, pool).items()}
+    load = load_by_fit(runners, pool, keys)
+    return {k: load[k]['online'] if online.get(fit_asks(k)[0]) else cap.get(fit_asks(k)[0], 0)
+            for k in keys}
+
+
+def estimate(peaks, pool, caps=None):
+    """``{fit key: expected jobs}``: per key the p90 (:func:`_percentile`) of the per-run
+    ``peaks`` (a run naming no job of a key counts 0 there), capped at ``caps`` (:func:`fit_caps`;
+    default the key's class's declared slots — a key not named in ``caps`` falls back to that
+    too, so a strict key is capped loosely rather than wrongly)."""
+    cap = _caps(pool)
+    caps = cap if caps is None else caps
     out = {}
-    for key in sorted({k for c in peaks for k in c if k in cap}):
+    for key in sorted({k for c in peaks for k in c}):
+        cls = fit_asks(key)[0]
+        if cls not in cap:
+            continue
         n = _percentile([c.get(key, 0) for c in peaks])
         if n > 0:
-            out[key] = min(n, cap[key])
+            out[key] = min(n, caps.get(key, cap[cls]))
     return out
 
 
 def needs_from_history(runs, pool, runners=()):
-    """``{class: expected jobs}`` from ``runs`` (each a list of jobs ``{id, runner_name, labels,
+    """``{fit key: expected jobs}`` from ``runs`` (each a list of jobs ``{id, runner_name, labels,
     conclusion, created_at, started_at, completed_at, run_attempt}``): the p90 over the runs of
-    each run's peak demand per class (:func:`run_peaks`), capped at the class."""
+    each run's peak demand per key (:func:`run_peaks`), capped at what could serve it
+    (:func:`fit_caps`)."""
     if not runs:
         return {}
-    return estimate([run_peaks(jobs, pool, runners) for jobs in runs], pool)
+    peaks = [run_peaks(jobs, pool, runners) for jobs in runs]
+    return estimate(peaks, pool, fit_caps(pool, runners, {k for p in peaks for k in p}))
 
 
 def needs_by_type(runs, types, pool, runners=()):
@@ -1350,13 +1430,15 @@ def needs_by_type(runs, types, pool, runners=()):
     (``types`` parallel to ``runs``). A type with no run measured is sized as ``full`` — and
     ``full`` with no full run, from every run."""
     peaks = [run_peaks(jobs, pool, runners) for jobs in runs]
-    return _by_type(peaks, types, pool)
+    caps = fit_caps(pool, runners, {k for p in peaks for k in p})
+    return _by_type(peaks, types, pool, caps)
 
 
-def _by_type(peaks, types, pool):
+def _by_type(peaks, types, pool, caps=None):
     split = {t: [p for p, k in zip(peaks, types) if k == t] for t in RUN_TYPES}
-    full = estimate(split[FULL] or peaks, pool) if peaks else {}
-    return {FULL: full, LIGHT: estimate(split[LIGHT], pool) if split[LIGHT] else dict(full)}
+    full = estimate(split[FULL] or peaks, pool, caps) if peaks else {}
+    return {FULL: full,
+            LIGHT: estimate(split[LIGHT], pool, caps) if split[LIGHT] else dict(full)}
 
 
 def load_by_class(runners, pool):
@@ -2086,6 +2168,8 @@ class Queue:
         self._free_pr = None
         #: per class, the online slots a PR run can reach, where a reservation makes it fewer
         self._pr_cap = {}
+        #: per fit key, memoised for the pass (:meth:`entry_needs`)
+        self._pr_fit_caps = {}
         self._runners = ()
         #: the runners as the host reports them (``_runners`` counts a phantom as offline)
         self._raw_runners = None
@@ -2160,21 +2244,16 @@ class Queue:
         return self._ceiling
 
     def needs(self, workflow, run=FULL):
-        """The expected jobs per class of one ``run`` type (``full`` / ``light``) of
+        """The expected jobs per fit key of one ``run`` type (``full`` / ``light``) of
         ``workflow``: memoised for this pass, cached in the file keyed by the run ids measured,
-        ``ci.queue.estimate`` over the measure (see the module doc)."""
+        ``ci.queue.estimate`` over the measure (:func:`apply_override`, see the module doc)."""
         if not workflow:
             return {}
         run = run if run in RUN_TYPES else FULL
         if workflow not in self._needs:
             self._needs[workflow] = self._measure(workflow)
         out = dict(self._needs[workflow].get(run) or {})
-        for cls, n in estimate_override(self.product, run).items():
-            if n > 0:
-                out[cls] = n
-            else:
-                out.pop(cls, None)
-        return out
+        return apply_override(out, self.product, run)
 
     def hold_s(self, workflow, cls=None, run=FULL):
         """The p90 seconds a ``run``-type run of ``workflow`` holds a runner of ``cls`` — per
@@ -2225,35 +2304,54 @@ class Queue:
         known = (cached or {}).get('per_run') if cached is not None else None
         known = known if isinstance(known, dict) else {}
         self._read_host()           # the live labels map a runner outside the pool to its class
+        # the split this pass measures under: a record from a different split (a runner outage,
+        # PD7) is re-measured rather than reused, or it would read as "no strict requirement"
+        # for as long as the per-run cache keeps it
+        split = {c: sorted(l) for c, l in split_labels(self._runners or (), self.pool).items()}
         per_run, peaks, types = {}, [], []
         for i, a in ids:
             rec = known.get(str(int(i)))
             if not (isinstance(rec, dict) and isinstance(rec.get('peak'), dict)
-                    and rec.get('attempt') == a):
+                    and rec.get('attempt') == a and rec.get('split') == split):
                 jobs = self.source.attempt_jobs(i, a)
                 if jobs is None:
                     continue
                 rec = {'attempt': a, 'peak': run_peaks(jobs, self.pool, self._runners or ()),
                        'type': run_type(self.product, self.source.run_files(i)),
-                       'hold': _run_hold(jobs, self.pool, self._runners or ())}
+                       'hold': _run_hold(jobs, self.pool, self._runners or ()), 'split': split}
             per_run[str(int(i))] = rec
             peaks.append(rec['peak'])
             types.append(rec.get('type') if rec.get('type') in RUN_TYPES else FULL)
-        n = _by_type(peaks, types, self.pool)
+        caps = fit_caps(self.pool, self._runners or (), {k for p in peaks for k in p})
+        n = _by_type(peaks, types, self.pool, caps)
         self.data['expect'][workflow] = {
             'at': _iso(self.now), 'needs': n.get(FULL, {}), 'light': n.get(LIGHT, {}),
             'runs': len(peaks), 'light_runs': types.count(LIGHT), 'ids': key, 'per_run': per_run,
             'v': EXPECT_VERSION}
         return n
 
+    def _pr_fit_cap(self, key):
+        """The PR-reachable slots of one fit key (memoised for the pass, over the one runner
+        read :meth:`_read_host` already took): a bare class from :attr:`_pr_cap`
+        (:meth:`_apply_runners`); a strict key from :func:`load_by_fit` over
+        :func:`asf.ci_pool.pr_runners`. None when nothing caps it."""
+        cls, asks = fit_asks(key)
+        if not asks:
+            return self._pr_cap.get(cls)
+        if key not in self._pr_fit_caps:
+            runners = ci_pool.pr_runners(self._runners, self.reserves)
+            self._pr_fit_caps[key] = load_by_fit(runners, self.pool, [key])[key]['online']
+        return self._pr_fit_caps[key]
+
     def entry_needs(self, entry):
-        """An entry's expected jobs per class (:meth:`needs`); a PR start's capped at what a
-        PR run can reach when ``ci.reserve`` keeps runners free for the trunk — it can never
-        be sized past the runners it may land on."""
+        """An entry's expected jobs per fit key (:meth:`needs`); a PR start's capped per key at
+        what a PR run can reach when ``ci.reserve`` keeps runners free for the trunk — it can
+        never be sized past the runners it may land on."""
         n = self.needs(entry.get('workflow'), entry.get('run', FULL))
         if entry.get('kind') == 'pr' and self.reserves:
             self._read_host()
-            n = {c: min(v, self._pr_cap[c]) if c in self._pr_cap else v for c, v in n.items()}
+            n = {c: min(v, self._pr_fit_cap(c)) if self._pr_fit_cap(c) is not None else v
+                 for c, v in n.items()}
         return n
 
     def free(self, kind=None, keys=()):
@@ -2335,7 +2433,7 @@ class Queue:
         self._mark_head()
         self._read_host()
         needs = {k: self.entry_needs(entries[k]) for k in order}
-        free = self.free(kind)
+        free = self.free(kind, {c for n in needs.values() for c in n})
         ok, why = decide(key, order, entries, needs.get, free, self.ceiling(),
                          self._inflight, self.admitted_here, now=self.now,
                          pr_wait_min=pr_wait_min(self.product),
@@ -3703,10 +3801,11 @@ def live_line(product, source=None, inflight=None, now=None):
     if not order:
         return line
     line.needs = {k: q.entry_needs(entries[k]) for k in order}
-    line.free, line.ceiling = q.free(), q.ceiling()
+    keys = {c for n in line.needs.values() for c in n}
+    line.free, line.ceiling = q.free(keys=keys), q.ceiling()
     line.inflight = q._inflight
     line.decisions = [(k, *decide(k, order, entries, line.needs.get,
-                                  q.free(entries[k].get('kind')), line.ceiling,
+                                  q.free(entries[k].get('kind'), keys), line.ceiling,
                                   line.inflight, now=q.now, pr_wait_min=pr_wait_min(product),
                                   head_wait_max_min=head_wait_max_min(product),
                                   head_wait_source=wait_source(product)))
@@ -3778,12 +3877,7 @@ def _snapshot_clause(product, now, inflight, ceiling, tag):
             and isinstance(cached, dict) and cached.get('v') == EXPECT_VERSION):
         # a fit hold re-stated from the one cached estimate the queue line reads
         run = head.get('run', FULL)
-        need = Queue._cached_types(cached).get(run) or {}
-        for cls, n in estimate_override(product, run).items():
-            if n > 0:
-                need[cls] = n
-            else:
-                need.pop(cls, None)
+        need = apply_override(Queue._cached_types(cached).get(run) or {}, product, run)
         short = [(c, a, need[c]) for c, a in sorted(held_free.items()) if need.get(c, 0) > a]
         why = (f"{head.get('item')} waits — {fit_reason(short)}{pos}" if short else
                f"{head.get('item')} waits — the runners fit now, asked again next tick{pos}")

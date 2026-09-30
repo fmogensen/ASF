@@ -171,7 +171,8 @@ class TestMeasure(Base):
 
     def test_the_hold_is_the_p90_of_created_to_the_last_job_of_the_class(self):
         self.assertEqual(3960, self.queue().hold_s('ci.yml', 'heavy'))
-        self.assertEqual(6, ci_queue.load(self.product.name)['expect']['ci.yml']['v'])
+        cached = ci_queue.load(self.product.name)['expect']['ci.yml']
+        self.assertEqual(ci_queue.EXPECT_VERSION, cached['v'])
 
     def test_nothing_measured_is_zero_and_never_a_refusal(self):
         self.assertEqual(0, self.empty_queue().hold_s('ci.yml', 'heavy'))
@@ -383,6 +384,42 @@ class TestFitSupply(Base):
             pool = ci_pool.load_pool(p)
             by_class = ci_queue.load_by_class(q._runners, pool)
             self.assertEqual(ci_queue.load_by_fit(q._runners, pool, list(by_class)), by_class)
+
+
+class TestFitDemand(Base):
+    def fit(self, **kw):
+        p = product(pool=fit_pool())
+        gh = FakeGh(pool=fit_pool(), labels=FIT_LABELS, history=fit_history(), **kw)
+        return p, gh, self.queue(p, gh)
+
+    def test_the_measure_counts_each_key_over_the_jobs_that_need_it(self):
+        _p, _gh, q = self.fit()
+        # the bare class key is the class's peak as before; the strict key is the subset
+        self.assertEqual(q.needs('ci.yml'),
+                         {'heavy': 2, 'heavy[alpha-heavy]': 2, 'light': 1})
+        self.assertEqual(q.data['expect']['ci.yml']['v'], ci_queue.EXPECT_VERSION)
+
+    def test_a_uniform_fleet_measures_exactly_as_before(self):
+        q = self.queue(product(), FakeGh())
+        self.assertEqual(q.needs('ci.yml'), {'heavy': 3, 'light': 1})
+
+    def test_the_run_is_held_while_only_the_wrong_heavies_are_free(self):
+        _p, _gh, q = self.fit(busy={'a1', 'a2'})
+        d = self.admit(q, 'pr:b', 'T-0500', branch='b')
+        self.assertFalse(d.admitted)
+        self.assertEqual(self.lines, ['ci queue: T-0500 waits — heavy[alpha-heavy] 0 free, '
+                                      'needs 2 (Task unranked, 1st in line)'])
+        self.assertEqual(q.data['entries']['pr:b']['free'], {'heavy[alpha-heavy]': 0})
+
+    def test_the_same_run_starts_when_the_runners_it_needs_are_free(self):
+        _p, _gh, q = self.fit(busy={'b1', 'b2'})
+        self.assertTrue(self.admit(q, 'pr:b', 'T-0500', branch='b').admitted)
+        self.assertEqual(self.lines, [])
+
+    def test_an_override_on_the_class_replaces_the_class(self):
+        p = product(pool=fit_pool(), queue={'estimate': {'heavy': 4}})
+        q = self.queue(p, FakeGh(pool=fit_pool(), labels=FIT_LABELS, history=fit_history()))
+        self.assertEqual(q.needs('ci.yml'), {'heavy': 4, 'light': 1})
 
 
 class TestAdmission(Base):
@@ -2018,11 +2055,17 @@ class TestSubLabels(Base):
         peak = ci_queue.peak_concurrent(jobs, by_name, ci_queue.label_classes(pool, runners))
         self.assertEqual(peak, {'heavy': 3})
         self.assertNotIn('fast-heavy', peak)
-        self.assertEqual(ci_queue.needs_from_history([jobs] * 5, pool, runners), {'heavy': 3})
+        # with the live runners taken (:func:`run_peaks`'s own split), the sub-label discriminates
+        # the class after all — every one of these jobs asks for it, so its own key sits beside
+        # the parent's at the same count, never summed with it
+        self.assertEqual(ci_queue.needs_from_history([jobs] * 5, pool, runners),
+                         {'heavy': 3, 'heavy[fast-heavy]': 3})
 
     def test_the_estimate_is_about_3_when_each_run_peaks_at_about_3_heavy(self):
         """Ten runs, half asking for ``heavy``, half for the sub-label, each 3 heavy at once (one
-        run 4, one 2) over staggered stages on a 12-runner class: the estimate is 3, not 6+."""
+        run 4, one 2) over staggered stages on a 12-runner class: the estimate is 3, not 6+ — and,
+        since the sub-label discriminates the live fleet, the same for its own key: the five runs
+        that never ask for it count 0 there, and the p90 still lands on 3."""
         pool = wide_pool()
         runners = live_runners(pool)
 
@@ -2040,7 +2083,7 @@ class TestSubLabels(Base):
 
         runs = [run(k, 3) for k in range(8)] + [run(8, 4), run(9, 2)]
         self.assertEqual(ci_queue.needs_from_history(runs, pool, runners),
-                         {'heavy': 3, 'light': 1})
+                         {'heavy': 3, 'heavy[fast-heavy]': 3, 'light': 1})
 
 
 class TestStarvationGuard(Base):
