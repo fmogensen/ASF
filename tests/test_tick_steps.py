@@ -350,8 +350,8 @@ class WaveStepTests(StepsTestCase):
         self.assertEqual(seen, {'capacity': 3, 'inflight': ['T-0001'], 'ids': ['B-0001', 'F-0001']})
         self.assertEqual(len(self.built), 1)
         facts = self.built[0][3]
-        self.assertTrue(facts['pushed'])
-        self.assertTrue(facts['last_commit'].endswith('work on fix/B-0001'))
+        self.assertTrue(facts['branch_exists'])
+        self.assertTrue(facts['head'].endswith('work on fix/B-0001 (origin/fix/B-0001)'))
         self.assertEqual(self.waved, [([('fix-bug-b-0001', 'B-0001', 'BUG', 'FIX', 'S1', 'Opus')], 1,
                                        ['brief for B-0001\n'])])
         self.assertEqual(self.lines, ['waits    -                        T-0002     — WAITS ON T-0001',
@@ -680,11 +680,6 @@ class WaveStepTests(StepsTestCase):
         self.assertIn('overlaid', seen['ids'])
         self.assertIsNone(seen['read']('docs/plans/no-such-plan.md'))
 
-    def test_unpushed_branch_facts(self):
-        facts = step_wave.repo_facts(self.product, 'fix/B-9999')
-        self.assertEqual(facts, {'branch': 'fix/B-9999', 'pushed': False, 'remote_sha': '',
-                                 'last_commit': ''})
-
     def test_job_name_takes_a_key_over_the_item_id(self):
         # PD9/D7: the groom brief's job is `groom-<date>`, stable while the row's item_id (the
         # oldest open question) drifts as questions get answered.
@@ -731,6 +726,53 @@ class WaveStepTests(StepsTestCase):
             step_wave.run(self.ctx(), out=self.lines.append)
         self.assertEqual(self.lines, ['wave: nothing to launch'])
         self.assertEqual(self.waved, [])
+
+
+class WaveFactsTests(StepsTestCase):
+    """T-0341: the launch path calls the one filler the contract test covers
+    (:func:`asf.briefs.facts.repo_facts`) instead of building its own four-key dict."""
+
+    def test_the_launched_brief_carries_facts_repo_facts(self):
+        from asf import briefs
+        from asf.briefs import facts, preamble
+        self.push_branch('fix/B-0001')
+        row = feeder_rows.Row(0, 'BUG → FIX', 'B-0001', '', 'would launch fix-b-0001 (Opus)',
+                              'fix-bug', 'fix/B-0001', 'S1 open')
+        built = []
+
+        def build(product, r, index, inflight, repo_facts=None):
+            built.append((r.item_id, index, inflight, repo_facts))
+            return briefs.build(product, r, index, inflight, repo_facts=repo_facts)
+
+        waved = []
+
+        def wave(product, rows, n, brief_fn=None, out=print, **_kw):
+            waved.extend(brief_fn(r) for r in rows)
+            out(f'launched {rows[0].job:<24} {rows[0].item:<10} → acct-a (opus) pid 1')
+            return [(rows[0], {'account': 'acct-a', 'model': 'opus', 'pid': 1})], []
+
+        def plan(index, product, inflight, capacity, attempts=None, occupancy=None,
+                 groom_state=None, held=None, s1_first=True, gate=None, bandwidth=None,
+                 **_kw):
+            return [row] if s1_first else []
+
+        with mock.patch.object(feeder_rows, 'plan_rows', plan), \
+                mock.patch.object(step_wave, '_build', build), \
+                mock.patch.object(step_wave, '_wave', wave), \
+                mock.patch.object(step_wave, 'lane_pass', lambda ctx, out, **_kw: {}):
+            step_wave.run(self.ctx(), out=self.lines.append)
+
+        self.assertEqual(len(built), 1)
+        item_id, index, inflight, repo_facts = built[0]
+        self.assertEqual(set(repo_facts), set(preamble.REPO_FACT_KEYS))
+        self.assertTrue(repo_facts['branch_exists'])
+        text = waved[0]
+        self.assertRegex(text, r'Head: [0-9a-f]{6,} work on fix/B-0001 \(origin/fix/B-0001\)')
+        self.assertIn('exists: yes', text)
+        self.assertFalse(hasattr(step_wave, 'repo_facts'))
+        same_facts = facts.repo_facts(self.product, row, index, inflight)
+        self.assertEqual(briefs.build(self.product, row, index, inflight,
+                                      repo_facts=same_facts).text, text)
 
 
 class LanePassBeforeTheWave(StepsTestCase):
