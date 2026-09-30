@@ -37,6 +37,8 @@ Transitions (plan §2 plus the §9 overrides):
 - T5  REVIEW → BACK            the review of the current head reads changes (rounds+1)
 - T5c PR_OPEN/REVIEW → BACK    a required check failed on the PR's exact head (any event's run):
                                a correct round against the named failures, before any review
+- T5d BACK → BACK              a pending review round on a head whose required checks failed:
+                               superseded by the T5c gate correction (the failures go first)
 - T5a REVIEW → GATE            ... unless an adjudicate ruling already answered it on the code
                                this head carries (:func:`asf.workers.lifecycle.overruling`): it
                                overruled the C list and pushed nothing — no second hold, no
@@ -1127,6 +1129,8 @@ def next_state(prev, facts):
         return PUSHED, f"head moved {rec['head'][:7]} → {head[:7]}"
     corr = f.get('correction')
     if s is None or s == BACK:
+        if corr and s == BACK and corr.get('kind') == 'review' and f.get('checks_red'):
+            return BACK, 'kind=gate'   # T5d: a red head's failures go before its review round
         if corr:
             return keep if s == BACK else (BACK, f"kind={corr.get('kind') or 'correction'}")
         if s == BACK:
@@ -1394,10 +1398,12 @@ class Lane:
                     self.path, item, head,
                     lambda sha: review_mod.same_code(repo, conv, sha, f'origin/{b}',
                                                       trunk=f'origin/{trunk}'))
-        if prs and rec.get('state') in (PR_OPEN, REVIEW) and not f['foreign'] \
+        if prs and rec.get('state') in (PUSHED, BACK, PR_OPEN, REVIEW) and not f['foreign'] \
                 and (pr or {}).get('state') == 'OPEN' and pr.get('number') \
-                and not f.get('correction'):
-            # a red exact head goes back to a session before any review round (T5c)
+                and (not f.get('correction') or f['correction'].get('kind') == 'review'):
+            # a red exact head goes back to a session before any review round (T5c) — read in
+            # PUSHED/BACK too: one pass carries BACK → PUSHED → PR_OPEN on these facts, and a
+            # pending review round on a red head is superseded by the gate correction (T5d)
             f['checks_red'] = self.host.head_red(f, pr['number'])
         return f
 
@@ -1815,7 +1821,8 @@ class Lane:
             if state is None or (prev and state == prev.get('state')
                                  and reason == prev.get('reason')):
                 break
-            if prev and state == prev.get('state') and state != REVIEW:
+            if prev and state == prev.get('state') and state != REVIEW \
+                    and (state, reason) != (BACK, 'kind=gate'):
                 break
             rec = self.enter(f, state, reason)
             if rec is None:
@@ -2238,7 +2245,8 @@ class Lane:
         correction is already that."""
         b = f['branch']
         kind = reason.split('=', 1)[-1]
-        if f.get('correction'):
+        if f.get('correction') and not (kind == 'gate' and f.get('checks_red')
+                                        and f['correction'].get('kind') == 'review'):
             return self.set(f, BACK, reason)
         if kind == 'gate' and f.get('checks_red'):
             red, n = f['checks_red'], (f.get('pr') or {}).get('number')
