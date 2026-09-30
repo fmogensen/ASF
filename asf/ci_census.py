@@ -225,17 +225,20 @@ def _place(host_runners, prev, sc):
 
 def _moves_for(tiers, floored, prev, sc, host_runners):
     """One :class:`Move` per runner whose tier changed since the last census (``to != frm``) —
-    plus one for a runner the floor (D8) re-selects for the *same* tier it already carried on
-    file, when the host itself no longer carries that tier's label. A failed trial's rollback
-    (``ci_pool.check_trials``, D10) strips the label from the host without touching the census
-    file; the floor then keeps re-picking that runner as its own best candidate every census
-    (``frm`` already reads the floored tier), so ``to == frm`` would otherwise hide the drift
-    forever and the fast tier stays empty on the host (D8's own "worst version")."""
+    plus one for a runner ``tier_of`` (or the floor, D8) recomputes to :data:`FAST` for the
+    *same* tier it already carried on file, when the host itself no longer carries the
+    ``asf-fast`` label. A failed trial's rollback (``ci_pool.check_trials``, D10) strips the
+    label from the host without touching the census file; on the next census ``tier_of``
+    recomputes ``FAST`` again — off the floor when the fast tier would otherwise be empty, or
+    off the runner's own still-qualifying ratio when it would not — so ``to == frm`` would
+    otherwise hide the drift forever and the fast tier stays empty on the host (D8's own "worst
+    version"). A demotion to :data:`BULK` needs no such check: an absent ``asf-fast`` label is
+    the point of :data:`BULK`, not drift."""
     labels = {r.name: r.norm_labels() for r in host_runners}
     moves = []
     for name in sorted(tiers):
         to, frm = tiers[name], prev.get(name)
-        stuck = name in floored and to == frm and to not in labels.get(name, set())
+        stuck = to == FAST and to == frm and to not in labels.get(name, set())
         if to == frm and not stuck:
             continue
         score = sc.get(name)

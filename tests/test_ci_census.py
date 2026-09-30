@@ -254,7 +254,11 @@ class Band(Home):
         root = tempfile.mkdtemp(dir=self.tmp)
         write_stream(root, burst('ci-1', 'gate', ci_measure.MIN_READINGS, seconds=100.0) +
                     burst('ci-2', 'gate', ci_measure.MIN_READINGS, seconds=100.0))
-        ci_census.refresh(p, backend, root=root, now=NOW, out=lambda *_: None)
+        moves = ci_census.refresh(p, backend, root=root, now=NOW, out=lambda *_: None)
+        # the tick always pairs refresh with apply_tiers (PD5/D8); without it the host never
+        # carries the label the census just computed, and the next census would rightly see
+        # that as drift, not a held band.
+        ci_census.apply_tiers(p, backend, moves, out=lambda *_: None)
         by_name = {e.runner: e.role for e in ci_pool.load_pool(p)}
         self.assertEqual(by_name['ci-2'], ci_census.FAST)
 
@@ -392,6 +396,43 @@ class Reconcile(Home):
         lines = []
         moves2 = ci_census.refresh(p, backend, root=root, now=NOW, out=lines.append)
         self.assertEqual([(mv.runner, mv.frm, mv.to) for mv in moves2],
+                         [('ci-1', ci_census.FAST, ci_census.FAST)])
+        self.assertTrue(any(l.startswith('ci place: ci-1') for l in lines))
+
+        ci_census.apply_tiers(p, backend, moves2, out=lambda *_: None)
+        self.assertIn('asf-fast', backend._runners['ci-1'].norm_labels())
+        self.assertEqual(ci_pool.load_trials(p.name)['ci-1']['state'], 'pending')
+
+    def test_a_rolled_back_merit_promoted_trial_is_re_placed_by_the_next_census(self):
+        # C (review round 2): the same drift, reached without the floor (D8) — ci-1 is promoted
+        # on its own ratio, ci-2 stays BULK and is never floored in, so `floored` is empty and
+        # round 2's `name in floored` gate missed exactly this path.
+        p = product()
+        backend = FakeBackend([runner('ci-1'), runner('ci-2')], [])
+        root = tempfile.mkdtemp(dir=self.tmp)
+        write_stream(root, burst('ci-1', 'gate', ci_measure.MIN_READINGS, seconds=100.0) +
+                    burst('ci-2', 'gate', ci_measure.MIN_READINGS, seconds=250.0))
+
+        moves = ci_census.refresh(p, backend, root=root, now=NOW, out=lambda *_: None)
+        by_runner = {mv.runner: mv for mv in moves}
+        self.assertEqual(by_runner['ci-1'].to, ci_census.FAST)
+        self.assertFalse(by_runner['ci-1'].floored)
+        ci_census.apply_tiers(p, backend, moves, out=lambda *_: None)
+        self.assertIn('asf-fast', backend._runners['ci-1'].norm_labels())
+
+        since = ci_pool.load_trials(p.name)['ci-1']['since']
+        backend.jobs['ci-1'] = [{'name': 'gate', 'status': 'completed', 'conclusion': 'failure',
+                                 'url': 'https://ci/x', 'started_at': since}]
+        ci_pool.check_trials(p.name, backend, apply_changes=True, out=lambda *_: None)
+        self.assertNotIn('asf-fast', backend._runners['ci-1'].norm_labels())
+        self.assertEqual(ci_pool.load_trials(p.name)['ci-1']['state'], 'rolled_back')
+
+        # ci-1's ratio still qualifies it for FAST on its own merits (ci-2 never reaches FAST,
+        # so the floor never fires) — the census file still says FAST, and the next census must
+        # still notice the host lost the label and re-place it.
+        lines = []
+        moves2 = ci_census.refresh(p, backend, root=root, now=NOW, out=lines.append)
+        self.assertEqual([(mv.runner, mv.frm, mv.to) for mv in moves2 if mv.runner == 'ci-1'],
                          [('ci-1', ci_census.FAST, ci_census.FAST)])
         self.assertTrue(any(l.startswith('ci place: ci-1') for l in lines))
 
