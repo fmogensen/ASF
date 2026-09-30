@@ -180,6 +180,35 @@ class RedHeadGoesBack(unittest.TestCase):
         self.assertEqual(sent, [('gate', 'PR #902 checks red: gate-tests, p1-e2e\nlog')])
         self.assertEqual(rec, {'state': lane.BACK})
 
+    def test_t5d_a_pending_review_round_on_a_red_head_turns_into_the_gate_round(self):
+        rec = {'state': lane.BACK, 'head': HEAD, 'pr': 902, 'reason': 'kind=review'}
+        review = {'kind': 'review', 'text': '7-t-0042.md reads changes'}
+        self.assertEqual(lane.next_state(rec, self.facts(checks_red=self.RED, correction=review)),
+                         (lane.BACK, 'kind=gate'))
+        self.assertEqual(lane.next_state(rec, self.facts(correction=review)),
+                         (lane.BACK, 'kind=review'))
+        gate = {'kind': 'gate', 'text': 'PR #902 checks red: gate-tests, p1-e2e'}
+        self.assertEqual(lane.next_state(dict(rec, reason='kind=gate'),
+                                         self.facts(checks_red=self.RED, correction=gate)),
+                         (lane.BACK, 'kind=gate'))
+
+    def test_t5d_the_gate_hold_replaces_the_pending_review_hold(self):
+        ln = lane.Lane.__new__(lane.Lane)
+        ln.dry_run, ln.results, ln.out = False, {}, lambda *_: None
+        ln.host = mock.Mock(slug='o/p')
+        f = self.facts(checks_red=self.RED, prev={'state': lane.BACK, 'reason': 'kind=review'},
+                       correction={'kind': 'review', 'text': 'C list'})
+        sent = []
+
+        def back(lane_, f_, kind, text, files):
+            sent.append(kind)
+            return 'held'
+        with mock.patch.object(lane, 'send_back', side_effect=back), \
+                mock.patch.object(lane, 'red_evidence', return_value=''):
+            ln.enter_back(f, 'kind=gate')
+        self.assertEqual(sent, ['gate'])
+        self.assertEqual(f['correction']['kind'], 'gate')
+
 
 class CorrectRowNamesTheFailures(unittest.TestCase):
     def row(self, correction):
