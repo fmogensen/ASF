@@ -69,8 +69,10 @@ head* (``head_since``) longer than ``ci.queue.head_wait_max_min`` (default 20) m
 whatever is free: the host queues its jobs behind the current ones and it holds its place there.
 The entry behind it starts its own clock only then, so admissions never cascade. Priority order and
 the exemptions are unchanged. One line: ``ci queue: task/T-0356 admitted after 21 min at the head
-(starvation guard)``; the status row names the head's wait in line (``head T-0356 waits 105 min —
-…``).
+(starvation guard)``; the status row names both clocks and the threshold, because they are not the
+same number once a head has been admitted and the entry behind it has taken over: ``head T-0356
+waits 105 min (12 min at the head; admitted at 20) — heavy 0 free, needs 4 (Task F-0113 rank 2,
+1st in line)``.
 
 **Backfill.** While the head does not fit, an entry behind it starts when it fits entirely in
 what is free once the head's claim is set aside (and those of the entries ahead of it that fit
@@ -3664,7 +3666,12 @@ def _status_clause(product, now, inflight, ceiling, source):
         key, ok, why = line.decisions[0]
         head = line.entries[key]
         pos = f" ({head.get('label') or 'other'}, 1st in line)"
-        said = 'would start' if ok else f'{_waits(head, line.queue.now)} — {why}'
+        # the guard's clock, beside the in-line wait, for the entry the guard governs: a batch
+        # the ceiling holds is printed as the head but is in `skip`, and no wait admits it
+        skip = ceiling_held(line.order, line.entries, line.ceiling, line.inflight)
+        guarded = key == head_of(line.order, line.entries, skip)
+        said = 'would start' if ok else (
+            f'{_waits(head, line.queue.now, head_wait_s(head, line.queue.now) if guarded else None, head_wait_max_min(product))} — {why}')
         return f"ci queue {len(line.order)}{tag}, head {head.get('item')} {said}{pos}"
     return _snapshot_clause(product, now, inflight, ceiling, tag)
 
@@ -3699,14 +3706,32 @@ def _snapshot_clause(product, now, inflight, ceiling, tag):
             why = f"{head.get('item')} waits — the ci ceiling has room now, asked again next tick{pos}"
         else:
             why = f"{head.get('item')} waits — {ceiling_reason(inflight, ceiling)}{pos}"
-    why = why.replace(' waits — ', f' {_waits(head, now or _now())} — ', 1)
+    at_head = None if head.get('at_ceiling') else head_wait_s(head, now or _now())
+    why = why.replace(' waits — ',
+                      f' {_waits(head, now or _now(), at_head, head_wait_max_min(product))} — ', 1)
     return f'ci queue {len(entries)}{tag}, head {why}'
 
 
-def _waits(entry, now):
-    """``waits 105 min``: the head's hold, with how long it has waited in line."""
+def _waits(entry, now, at_head_s=None, head_max_min=None):
+    """``waits 129 min (12 min at the head; admitted at 20)``: the head's hold — how long it has
+    waited *in line* (``since``), and, when the head guard governs this entry, the age the guard
+    actually counts (:func:`head_wait_s`, from ``head_since``) against
+    ``ci.queue.head_wait_max_min``.
+
+    The two are equal only while an entry has been the head since it joined the line; once a head
+    is admitted the entry behind it starts its own clock (:meth:`Queue._mark_head`), and printing
+    the in-line wait alone made a head 12 minutes old read as one starved for 129 (F-0182). The
+    at-head minutes are rendered as the guard renders them — ``int(s // 60)``, the same integer
+    its ``admitted after <n> min at the head`` line prints.
+
+    ``at_head_s``/``head_max_min`` are None where the guard does not govern the entry (a batch the
+    ci ceiling holds is printed as the head but is never admitted by the guard): then the wait
+    alone, as before."""
     waited = wait_text(entry, now)
-    return f'waits {waited}' if waited else 'waits'
+    text = f'waits {waited}' if waited else 'waits'
+    if at_head_s is None or at_head_s == math.inf or head_max_min is None:
+        return text
+    return f'{text} ({int(at_head_s // 60)} min at the head; admitted at {head_max_min})'
 
 
 def header(name, m, waiting):
