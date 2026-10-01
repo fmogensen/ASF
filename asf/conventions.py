@@ -31,6 +31,8 @@ The product yaml carries the overrides::
                                                           # [] = opt out (the set is empty)
       doc_paths: [README.md, docs/guide/*]   # more docs roots beside the specs/plans/reviews dirs
       shared_paths: [uv.lock]                # lockfiles: no footprint overlap, one per merge
+      shared_writes: [docs/registry.md]      # append-only registries: inside every Task's
+                                             # writes:, no widening, no overlap
       lane:
         review:                   # which landing class needs an ASF review before the gate
           docs: none              # none | required (default none)
@@ -468,14 +470,14 @@ _VAR_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 
 def validate_mapping(data):
     """The shaped keys of a ``conventions:`` mapping checked: ``[(dotted key, problem)]``, empty
-    when they are well-formed. Only ``doc_paths``, ``shared_paths``, ``lane``, ``worktree_setup``,
-    ``pre_push_check``, ``auth_env``, ``full_suite_commands``, ``customer_content``,
+    when they are well-formed. Only ``doc_paths``, ``shared_paths``, ``shared_writes``, ``lane``,
+    ``worktree_setup``, ``pre_push_check``, ``auth_env``, ``full_suite_commands``, ``customer_content``,
     ``security`` and ``feeder`` are checked — every other key is kept verbatim (see the module
     doc), so a product file written for a newer ``asf`` still loads."""
     problems = []
     if not isinstance(data, dict):
         return problems
-    for key in ('doc_paths', 'shared_paths'):
+    for key in ('doc_paths', 'shared_paths', 'shared_writes'):
         if data.get(key) is not None:
             why = _path_list_problem(data[key])
             if why:
@@ -751,6 +753,10 @@ class Conventions:
     doc_paths: list = field(default_factory=lambda: list(DEFAULT_DOC_PATHS))
     #: Lockfile-like globs outside footprint overlap (:data:`DEFAULT_SHARED_PATHS`).
     shared_paths: list = field(default_factory=lambda: list(DEFAULT_SHARED_PATHS))
+    #: Append-only shared files (a registry every Task may add a row to): inside every Task's
+    #: ``writes:`` without a widening, and no footprint overlap
+    #: (:func:`asf.feeder.footprint.shared_writes`).
+    shared_writes: list = field(default_factory=list)
     #: ``lane.review``: ``{docs: none|required, code: none|required}``, merged over
     #: :data:`DEFAULT_LANE_REVIEW` (a class the yaml leaves out keeps its default).
     lane_review: dict = field(default_factory=lambda: dict(DEFAULT_LANE_REVIEW))

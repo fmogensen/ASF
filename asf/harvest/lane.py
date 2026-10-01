@@ -372,8 +372,8 @@ def review_kind(kind):
 
 
 def shared_hits(conv, files):
-    """The files among ``files`` under a ``conventions.shared_paths`` glob."""
-    globs = list(conv.get('shared_paths') or ())
+    """The files among ``files`` under a ``conventions.shared_paths`` or ``shared_writes`` glob."""
+    globs = list(footprint.shared_globs(conv))
     return [f for f in files or () if any(_glob_hit(g, f) for g in globs)]
 
 
@@ -1103,6 +1103,8 @@ def hold_with_correction(state_dir, branch, record, kind, text, out, files=(), i
         out(f'foreign {branch}: gate red, its diff is docs only — re-gated next tick')
         return 'foreign'
     item_writes = widen.norm_writes(item_writes)
+    if item_writes:  # the append-only files every Task may touch are inside every footprint
+        item_writes += [w for w in footprint.shared_writes(conv) if w not in item_writes]
     reach, what = (item_writes, 'writes') if item_writes else (touched, 'diff')
     needs, tests, exercised = (widen_candidates(files, item_writes, touched, read, own)
                                if kind == 'gate' and files else ([], [], []))

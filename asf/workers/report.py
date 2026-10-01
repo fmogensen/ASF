@@ -34,6 +34,13 @@ NONE_RE = re.compile(r'^(none|n/a|-|—)$', re.I)
 UNPUSHED = 'unpushed work'
 #: A line a brief tells every session to print when a human must decide, answer or run something.
 OPERATOR_RE = re.compile(r'^\s*NEEDS OPERATOR\s*:\s*(?P<what>.+)$', re.M)
+#: A ``NEEDS OPERATOR:`` value that asks nothing: ``none``, ``none — <a note>``, ``omit``, ``n/a``.
+NO_QUESTION_RE = re.compile(r'^[\s`*_]*(none|nothing|omit(ted)?|n/a|-|—)(?![\w/])', re.I)
+#: A reshape session's answer that its Task stays whole — the reshape brief's own grammar,
+#: ``NO SPLIT: <id> does not split along <area> — <why>``, and the older form it replaces,
+#: ``NEEDS OPERATOR: <id> does not split along <area> — answer no on the split line``.
+NO_SPLIT_RE = re.compile(
+    r'^\s*(?:NO SPLIT|NEEDS OPERATOR)\s*:\s*(?P<what>.*\bdoes not split\b.*)$', re.M | re.I)
 BLOCKED = 'blocked'
 
 
@@ -106,24 +113,50 @@ def failure(text):
 
 
 def needs_input(text):
-    """The question a result's own text declares, or None: the first ``NEEDS OPERATOR:`` line, else
-    the ``status: blocked`` report's own words (its ``left out:``, else its first line).
+    """The question a result's own text declares, or None: the first ``NEEDS OPERATOR:`` line that
+    asks something, else the ``status: blocked`` report's own words (its ``left out:``, else its
+    first line).
+
+    Not a question: a ``NEEDS OPERATOR: none`` (``none — <a note>``, ``omit``, ``n/a``) — the
+    session said it has none, and its report is judged as what it is (done, nothing to land, a
+    named failure); a reshape's ``does not split`` answer (:func:`no_split`); and any report whose
+    ``needs writes:`` claims paths — the widening rule answers that (:mod:`asf.feeder.widen`).
 
     Only these two — both of them things the session *declared*, in the grammar every brief hands
     it (P8). No phrase list: a run that says "waiting for CI" in passing is not waiting for a
     human, and a list of such phrases flags the wrong sessions for ever (D5, D11)."""
     text = str(text or '')
-    m = OPERATOR_RE.search(text)
-    if m:
-        return m.group('what').strip()
+    for m in OPERATOR_RE.finditer(text):
+        what = m.group('what').strip()
+        if NO_QUESTION_RE.match(what) or NO_SPLIT_RE.match(m.group(0)):
+            continue  # "none" asks nothing; "does not split" is an answer, not a question
+        if _claims_writes(text):
+            return None  # a `needs writes:` claim is answered by the widening rule, not a person
+        return what
     rep = parse(text)
     if (rep.get('status') or '').strip().lower() != BLOCKED:
+        return None
+    if _claims_writes(text):
         return None
     left = _claim(rep.get('left out'))
     if left:
         return left
     stripped = text.strip()
     return stripped.splitlines()[0] if stripped else None
+
+
+def _claims_writes(text):
+    """True when the report's own ``needs writes:`` line names paths (never ``left out:`` prose)."""
+    source, tokens = footprint_claim(text)
+    return source == 'needs writes' and bool(tokens)
+
+
+def no_split(text):
+    """The reshape answer a result's text declares — ``<id> does not split along <area> …`` — or
+    ''. Its Task stays whole: the factory takes the answer itself (the item goes back to its own
+    row, :mod:`asf.tick.rejudge`), never a question for a person."""
+    m = NO_SPLIT_RE.search(str(text or ''))
+    return m.group('what').strip() if m else ''
 
 
 #: The statuses a session reports when its Task is not whole: only these may claim more footprint.

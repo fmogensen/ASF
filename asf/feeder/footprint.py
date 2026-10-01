@@ -7,6 +7,9 @@ Pure functions over plain lists — no filesystem.
 
 ``conventions.shared_paths`` (lockfiles) are no one's footprint: a glob under one never makes two
 Tasks overlap here; the lane serialises them at merge instead (one per tick).
+``conventions.shared_writes`` (append-only registries every Task may add a row to) are no one's
+footprint either, and more: they sit inside every Task's ``writes:`` (:func:`shared_writes`), so
+touching one is never a widening.
 """
 import fnmatch
 
@@ -36,14 +39,25 @@ def globs_overlap(a, b):
 
 
 def shared_globs(product):
-    """``conventions.shared_paths`` for ``product`` — a Product, a Conventions, or the plain
-    ``conventions:`` mapping — as a tuple; ``()`` for None and for a product that declares none.
+    """``conventions.shared_paths`` and ``shared_writes`` for ``product`` — a Product, a
+    Conventions, or the plain ``conventions:`` mapping — as a tuple; ``()`` for None and for a product that declares none.
     The one reader of the key: the feeder, the widening rule, ``asf check``, I3, the groomer and
     the lane all ask here, so a product cannot be exempt in one of them and not the others."""
     if product is None:
         return ()
     conv = getattr(product, 'conventions', product)
-    return tuple(p for p in (conv.get('shared_paths') or ()) if p)
+    return tuple(dict.fromkeys(p for p in [*(conv.get('shared_paths') or ()),
+                                           *(conv.get('shared_writes') or ())] if p))
+
+
+def shared_writes(product):
+    """``conventions.shared_writes`` for ``product`` (a Product, a Conventions, or the plain
+    ``conventions:`` mapping) as a tuple: the append-only files every Task's ``writes:`` holds
+    without declaring them — no widening, no overlap. ``()`` when the product declares none."""
+    if product is None:
+        return ()
+    conv = getattr(product, 'conventions', product)
+    return tuple(p for p in (conv.get('shared_writes') or ()) if p)
 
 
 def is_shared(glob, shared):

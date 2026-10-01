@@ -1854,8 +1854,11 @@ class TestOneCount(Base):
     """The status row and the queue read one in-flight count, from one function."""
 
     def test_the_queue_and_the_row_read_the_same_function_and_argv(self):
-        from asf import capacity
+        from asf import capacity, gh_limit
         from unittest import mock
+        # the read memo keys on id(subprocess.run): an earlier test's mock freed at the same
+        # address would answer for this one, and subprocess.run would never be called
+        gh_limit.reset()
         p = product(cap={'ci': 4})
         gh = FakeGh(inflight=5)
         self.assertEqual(ci_queue.GitHubSource(p, run=gh).inflight(), 5)
