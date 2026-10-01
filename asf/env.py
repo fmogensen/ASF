@@ -528,6 +528,9 @@ CI_FIELDS = {
     'provider': _STR, 'workflow': _STR, 'test_command': _STR, 'budgets': _MAP,
     'runner_org': _STR, 'labels': _LIST, 'dev_job': _STR, 'deploy_workflow': _STR,
     'pool': _LIST, 'queue': _MAP, 'reserve': None,
+    # flake-vs-defect triage (asf.flake): on by default; the reference runner class each
+    # quarantine entry names; how many days a flaked job stays quarantined (7)
+    'flake_triage': None, 'reference_class': _STR, 'quarantine_days': None,
 }
 # `capacity:` is a map: this product's session/CI ceilings and its batch shape.
 CAPACITY_FIELDS = {'sessions': _STR, 'ci': _STR, 'weight': _STR, 'batch': _MAP}

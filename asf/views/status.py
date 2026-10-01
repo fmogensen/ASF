@@ -190,6 +190,14 @@ def capacity_cell(cfg, product):
     return ', '.join(parts)
 
 
+def quarantine_cell(product):
+    """``Quarantine``: the CI jobs flake triage quarantined (:mod:`asf.flake`) — each with its
+    expiry, the sha it flaked on and its failed step/test — and the re-runs still in triage.
+    None (no row) when there are none."""
+    from asf import flake
+    return flake.status_cell(product)
+
+
 def ci_clause(inflight, gate):
     """The CI clause of the Capacity row. ``capacity.ci`` is a *start gate*, not a ceiling on
     every run: the tick holds its ``batch`` step (and the CI start queue, :mod:`asf.ci_queue`,
@@ -524,6 +532,7 @@ def render(root, product, cfg=None):
                        ('Agents', lambda: agents_cell(product)),
                        ('Merge', lambda: merge_cell(product)),
                        ('Capacity', lambda: capacity_cell(cfg, product)),
+                       ('Quarantine', lambda: quarantine_cell(product)),
                        ('Features in build', lambda: build_cell(root, product)),
                        ('Value', lambda: value_cell(root, product)),
                        ('A/B pairs', lambda: ab_pairs_cell(root, product)),
