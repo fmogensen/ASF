@@ -47,6 +47,17 @@ the PR once its required checks are success on its exact head (:func:`requested_
 member's merge commit carries :data:`TRAILER`; :mod:`asf.trunk_watch` flags every trunk commit
 that does not.
 
+**Attestation.** Landing fast-forwards the trunk to the very sha the batch run judged, so the
+trunk's own push run would judge that sha a second time. Before the push, :func:`attest` sets a
+commit status on the sha — context :data:`ATTEST_CONTEXT` (``asf/attested``), state
+``success``, ``target_url`` the batch run, description ``ASF-Batch-Run: <run id> …`` — and only
+for a batch whose required checks all concluded ``success`` at that exact sha (the green verdict
+:func:`land` is called on). The run id cannot be a trailer of the merge commit: the commit is
+made before the run exists, and amending it would change the sha the run gated. A product's CI
+reads the status on its ``push`` to the trunk and skips the heavy matrix, deploying from the
+attestation (``docs/guide/product-config.md``, *Main as attestation*). A refused status is told
+and never blocks the landing: the trunk run then judges the sha as before.
+
 The batch ref carries only merge commits of heads that already passed the product's pre-push
 hook on their own pushes, so it is pushed ``--no-verify``; the trunk push is refs-only by nature
 (the sha is already on origin). Both go from the operator's checkout, as the fast-forward landing
@@ -87,6 +98,10 @@ MERGE_SUBJECT = 'merge-queue: #{pr} ({branch} @ {head})'
 TRAILER = 'Landed-by: asf merge queue'
 #: ``state/<product>/land-requests.json``: the PRs ``asf land`` asked the queue to take
 REQUESTS_FILE = 'land-requests.json'
+#: the commit status context a landed batch sha carries (:func:`attest`)
+ATTEST_CONTEXT = 'asf/attested'
+#: the key the attestation's description names the batch run by (the trailer form)
+ATTEST_KEY = 'ASF-Batch-Run'
 #: how long a landed member's PR is given to read MERGED on the host before it is closed by hand
 PR_MARK_TRIES, PR_MARK_SLEEP_S = 3, 2
 #: the merge commits' identity when the checkout has none configured
@@ -263,7 +278,7 @@ def run(lane, ready):
                 for f in members:
                     lane.results[f['branch']] = 'queued'
                 chain.append(batch)
-            elif land(lane, batch, members, trunk_sha):
+            elif land(lane, batch, members, trunk_sha, runs=detail):
                 trunk_sha = batch['sha']
                 lane.trunk_sha = trunk_sha
             else:
@@ -365,6 +380,8 @@ def judge(lane, batch, members, heads, trunk_sha, st):
             return 'red', why, (checks, red)
     if state == 'pending' and _age_s(batch) > st['timeout_min'] * 60:
         return 'timeout', f"timed out after {st['timeout_min']} min — {why}", None
+    if state == 'green':
+        return state, why, attested_runs(runs, required)
     return state, why, None
 
 
@@ -474,7 +491,52 @@ def cut(lane, group, base_sha, base_ref, st):
         shutil.rmtree(holder, ignore_errors=True)
 
 
-def land(lane, batch, members, trunk_sha):
+def attested_runs(runs, required):
+    """The ids of the workflow runs whose jobs carry the ``required`` checks, every one of them
+    concluded ``success`` — most required checks first. ``[]`` when any required check is not
+    green or names no run (no attestation then)."""
+    from asf.harvest import deploy
+    count, order = {}, []
+    for name in required or ():
+        mine = [r for r in runs or () if deploy.job_key(r.get('name')) == name]
+        if not mine or any(r.get('status') != 'completed' or r.get('conclusion') != 'success'
+                           for r in mine):
+            return []
+        for r in mine:
+            m = lane_mod._RUN_RE.search(r.get('html_url') or r.get('details_url') or '')
+            if not m:
+                return []
+            if m.group(1) not in count:
+                order.append(m.group(1))
+            count[m.group(1)] = count.get(m.group(1), 0) + 1
+    return sorted(order, key=lambda i: (-count[i], order.index(i)))
+
+
+def attest(lane, sha, run_ids):
+    """Set :data:`ATTEST_CONTEXT` = ``success`` on ``sha``, its ``target_url`` the batch run
+    (``run_ids[0]``) and its description ``ASF-Batch-Run: <id>``: the exact sha a green batch
+    run gated. True when the host took it. Never raises; nothing without a run id."""
+    if not run_ids or not sha:
+        return False
+    rid = run_ids[0]
+    url = f'https://github.com/{lane.slug}/actions/runs/{rid}'
+    more = f' (+{len(run_ids) - 1} run)' if len(run_ids) > 1 else ''
+    desc = f'{ATTEST_KEY}: {rid}{more} — required checks green at this exact sha'
+    try:
+        rc, _o, err = H._gh(['api', '-X', 'POST', f'repos/{lane.slug}/statuses/{sha}',
+                             '-f', 'state=success', '-f', f'context={ATTEST_CONTEXT}',
+                             '-f', f'target_url={url}', '-f', f'description={desc[:140]}'])
+    except OSError as e:
+        rc, err = 1, str(e)
+    if rc != 0:
+        lane.out(f'merge queue: {sha[:12]} not attested — {H.tail(err) or f"gh exited {rc}"}; '
+                 'the trunk run judges it')
+        return False
+    lane.out(f'merge queue: attested {sha[:12]} — {ATTEST_CONTEXT} success, {ATTEST_KEY}: {rid}')
+    return True
+
+
+def land(lane, batch, members, trunk_sha, runs=None):
     """Fast-forward the trunk to the green batch sha — MERGING on every member first, MERGED at
     that sha after — then close what the host did not mark merged, delete the member branches
     and the batch ref. False when the CI queue holds the trunk start or the push was refused
@@ -484,6 +546,11 @@ def land(lane, batch, members, trunk_sha):
         for f in members:
             lane.results[f['branch']] = 'queued'
         return False
+    # the attestation goes on the sha before the trunk points at it: the trunk's push run reads
+    # it at its start (a status after the push would race it)
+    attested = attest(lane, sha, runs) if runs else False
+    if attested:
+        batch['attested'] = runs[0]
     for f in members:
         if not f.get('requested'):
             lane.set(f, lane_mod.MERGING, f'batch {ref} → {trunk} {sha[:12]}', sha=sha,
@@ -507,7 +574,8 @@ def land(lane, batch, members, trunk_sha):
                      green=f.get('green'))
         return False
     lane.fresh_trunk()
-    _ledger(lane, batch, True, f'green: fast-forwarded {trunk} to {sha[:12]}')
+    _ledger(lane, batch, True, f'green: fast-forwarded {trunk} to {sha[:12]}'
+            + (f" ({ATTEST_KEY}: {batch['attested']})" if batch.get('attested') else ''))
     for f in members:
         b = f['branch']
         if f.get('requested'):

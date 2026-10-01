@@ -220,6 +220,55 @@ conventions:
   commit: {signoff: true}            # signoff_check: DCO (the default)
 ```
 
+### Main as attestation (`merge: queue`)
+
+The merge queue fast-forwards the trunk to the very sha its batch run judged green, so the trunk's
+own `push` run judges that sha a second time. Before the trunk moves, the queue attests the sha:
+
+| field | value |
+|---|---|
+| commit status context | `asf/attested` |
+| state | `success` |
+| `target_url` | `https://github.com/<repo>/actions/runs/<batch run id>` |
+| description | `ASF-Batch-Run: <batch run id> — required checks green at this exact sha` |
+
+It is set only when every required check (`landing_checks` plus `required_jobs_from`, read at the
+batch sha) concluded `success` on that exact sha — never for a red, pending, cancelled, skipped,
+moved or stale batch — and before the trunk push, so the push run can read it at its start. A
+refused status never blocks the landing; the push run then judges the sha as before. The run id is
+not a trailer of the merge commit: the commit exists before its run does, and amending it would
+change the gated sha. `gates.jsonl` names it (`ASF-Batch-Run: <id>`) on the landing line.
+
+A product's CI skips its heavy matrix on such a push and deploys from the attestation with a first
+job that reads the status, and conditions on its output (the workflow needs
+`permissions: {statuses: read}`):
+
+```yaml
+jobs:
+  attested:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.read.outputs.run }}
+    steps:
+      - id: read
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          url=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/statuses" \
+            --jq '[.[] | select(.context == "asf/attested")][0] | select(.state == "success") | .target_url // empty')
+          echo "run=${url##*/}" >> "$GITHUB_OUTPUT"
+  heavy-suite:                       # every heavy job of the matrix
+    needs: attested
+    if: ${{ !cancelled() && needs.attested.outputs.run == '' }}
+  deploy:
+    needs: [attested, heavy-suite]
+    if: ${{ !cancelled() && (needs.attested.outputs.run != '' || needs.heavy-suite.result == 'success') }}
+```
+
+The newest `asf/attested` status per sha is the first in the list, so the `[0]` read is the
+current one. A push whose sha has none — a hotfix pushed past the queue, a refused status — runs
+the matrix as before.
+
 ### `models` — the model a session runs on
 
 Three labels, `heavy`, `light` and `cheap` — not a model id. `worker_pool.models` in
