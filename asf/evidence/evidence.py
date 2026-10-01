@@ -916,6 +916,19 @@ BRANCH_ID_TOKEN = re.compile(r"\b([EFSTBDR])-(\d{4})\b", re.IGNORECASE)
 #: that is the lane's subject convention, not because the item's work landed (B-0059: the
 #: landing of eight specs closed four Features).
 DOC_LANE_SUBJECT = re.compile(r"^(spec|plan|review|adjudicate)\(|^docs\((spec|plan|review)\)")
+#: A session's end marker — `asf: report <job>` (asf.workers.spawn.REPORT_SUBJECT), also after a
+#: product's commit-msg hook stacked an item scope onto it (`asf(F-1131): report plan-f-1131`,
+#: `plan(F-0116): asf(F-0116): report …`). It names the item its session ran for and lands none
+#: of its work: a product's F-1131 closed as landed on its plan session's empty report commit,
+#: with no plan on the trunk and not one Task built.
+REPORT_SUBJECT = re.compile(r"^(?:[A-Za-z][\w-]*\([^)]*\)!?:\s*)*asf(?:\([^)]*\))?!?:\s*report\s")
+
+
+def lands_nothing(subject):
+    """True when a commit subject (or a PR title) names its item by a lane convention — a spec,
+    plan, review or ruling commit, or a session's report commit — and so never by landing it."""
+    s = (subject or "").strip()
+    return bool(DOC_LANE_SUBJECT.match(s) or REPORT_SUBJECT.match(s))
 
 
 def id_tokens(text, rx=ID_TOKEN):
@@ -1253,7 +1266,7 @@ def id_evidence(product, branches, prs, commits=None, green=None, merges=None):
     # `plan(OPS-1): the F-0037 plan`). The paths and the lane branch decide, not the subject.
     for sha, subject, paths in _commit_rows(commits):  # newest first: first seen is newest
         known[sha] = paths
-        if DOC_LANE_SUBJECT.match(subject or "") or docs_only(paths, dirs):
+        if lands_nothing(subject) or docs_only(paths, dirs):
             continue
         for iid in naming_ids(subject, product.main):
             r = rec(iid)
@@ -1272,7 +1285,7 @@ def id_evidence(product, branches, prs, commits=None, green=None, merges=None):
     if unknown:
         known.update(commit_paths(product, unknown))
     for p, sha, ids in merged_prs:
-        if docs_only(known.get(sha), dirs):
+        if docs_only(known.get(sha), dirs) or lands_nothing(p.get("title")):
             continue
         for iid in ids:
             if (out.get(iid) or {}).get("commit"):

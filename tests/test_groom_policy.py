@@ -745,10 +745,13 @@ class ApprovalBoundTests(GroomAutoTestCase):
         plain open question — unlike a decided, spec-less Feature, which T6's suppression pass
         would otherwise speak for as ``CARD → SPEC`` before the bound is ever reached."""
         self.write_product(approvals={'groom': 'auto', 'new_epic': 'human-now'})
+        # five days undecided, relative to today: a fixed date aged past 14 days on 2026-10-01
+        # and the starvation rule (``Undecided > 14 days``) began to answer for it
+        since = (datetime.datetime.now(datetime.timezone.utc)
+                 - datetime.timedelta(days=5)).strftime('%Y-%m-%dT00:00:00Z')
         write_item(self.root, 'F-0001', 'feature', 'Undecided idea', parent='E-0009',
                   typed_lines=['decided: false'],
-                  machine_lines=['state: New', 'stage_since: 2026-09-17T00:00:00Z',
-                                 'updated: 2026-09-17T00:00:00Z'])
+                  machine_lines=['state: New', f'stage_since: {since}', f'updated: {since}'])
         run(['index'], self.root)
 
         r = self.run_groom()

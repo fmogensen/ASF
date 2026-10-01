@@ -338,7 +338,7 @@ def _trunk_naming(product):
     subject names the id — the same id token the evidence reads, a document-lane commit (a spec, a
     plan, a review) excepted. The log is read once, on first use."""
     import subprocess
-    from asf.evidence.evidence import DOC_LANE_SUBJECT, naming_ids
+    from asf.evidence.evidence import lands_nothing, naming_ids
     table = []
 
     def read():
@@ -356,7 +356,7 @@ def _trunk_naming(product):
         out = {}
         for line in r.stdout.splitlines():  # newest first: the first commit naming an id wins
             sha, _, subject = line.partition('\t')
-            if not sha or DOC_LANE_SUBJECT.search(subject):
+            if not sha or lands_nothing(subject):
                 continue
             for iid in naming_ids(subject, main):
                 out.setdefault(iid, sha)

@@ -674,6 +674,37 @@ class DocLaneCommitTests(unittest.TestCase):
                                 ("a1", "adjudicate(B-0004): a ruling")])
         self.assertEqual(ev, {})
 
+    def test_f1131_a_sessions_report_commit_lands_nothing(self):
+        # a product's F-1131 (2026-09-30): the plan session's empty report commit, its subject
+        # scoped by the product's commit-msg hook, reached the trunk and closed the Feature as
+        # landed with no plan merged and not one Task built
+        ev = self.evidence_for([("r1", "asf(F-1131): report plan-f-1131", []),
+                                ("r2", "asf: report plan-f-1127"),
+                                ("r3", "plan(F-0116): asf(F-0116): report adjudicate-f-0116 (#888)"),
+                                ("r4", "asf(F-0109)!: report adjudicate-f-0109")])
+        self.assertEqual(ev, {})
+
+    def test_a_report_commit_does_not_hide_the_items_own_work(self):
+        ev = self.evidence_for([("r1", "asf(T-0001): report coder-t-0001"),
+                                ("c1", "task(T-0001): the work"),
+                                ("c2", "asf(F-0002): reports page lists the runs")])
+        self.assertEqual(ev["T-0001"]["commit"], "c1")
+        self.assertEqual(ev["F-0002"]["commit"], "c2")  # `reports …` is work, not a report
+
+    def test_a_merged_pr_titled_as_a_report_lands_nothing(self):
+        pr = {"number": 990, "state": "MERGED", "headRefName": "fix/other",
+              "title": "asf(F-1131): report plan-f-1131", "mergeCommit": {"oid": self.r.head}}
+        ev = evidence.id_evidence(self.r.product(ci=None), [], [pr], commits=[], green=[])
+        self.assertFalse((ev.get("F-1131") or {}).get("commit"))
+
+    def test_lands_nothing(self):
+        for subject in ("spec(F-0001): x", "asf: report coder-t-0001",
+                        "asf(T-0001): report coder-t-0001", "task(T-1): asf(T-1): report x"):
+            self.assertTrue(evidence.lands_nothing(subject), subject)
+        for subject in ("asf(F-0001): the loop", "asf(F-0001): reports page", "", None,
+                        "task(T-0001): report the totals"):
+            self.assertFalse(evidence.lands_nothing(subject), subject)
+
 
 class DocsOnlyMergeFactTests(unittest.TestCase):
     """A product's T-0047 closed on "merge 85846c7 of cloud/transparent-meter-t1 lands T-0047" —

@@ -45,7 +45,7 @@ def names(repo, main, sha, item, prs=()):
     subject = body.split('\n', 1)[0].strip()
     if not item or not subject:
         return False
-    if not ev_mod.DOC_LANE_SUBJECT.match(subject) and item in ev_mod.naming_ids(subject, main):
+    if not ev_mod.lands_nothing(subject) and item in ev_mod.naming_ids(subject, main):
         return True
     trailers = _git(repo, ['log', '-1', '--format=%(trailers:only,unfold)', sha]) or ''
     for line in trailers.splitlines():

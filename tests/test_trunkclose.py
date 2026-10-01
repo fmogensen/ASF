@@ -342,6 +342,14 @@ class AttributionTests(_Repo):
                          merged)
         self.assertFalse(landing.names(self.repo, 'main', merged, self.ITEM, prs=['903']))
 
+    def test_a_report_commit_on_the_trunk_does_not_name_its_item(self):
+        self.commit('asf(T-0042): report correct-t-0042\n\nREPORT\nitem: T-0042\n\n'
+                    'ASF-Report: correct-t-0042')
+        rep = self.git('rev-parse', 'HEAD')
+        self.assertFalse(landing.names(self.repo, 'main', rep, self.ITEM))
+        self.commit('task(T-0042): the inspector, landed')
+        self.assertTrue(landing.names(self.repo, 'main', self.git('rev-parse', 'HEAD'), self.ITEM))
+
 
 if __name__ == '__main__':
     unittest.main()
