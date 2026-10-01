@@ -583,6 +583,22 @@ def stored_review_section(product, kind, branch, item_id):
             f"your worktree; this is its text:\n\n{fence}\n{text}\n{fence}")
 
 
+#: The kinds whose brief carries the item's standing adjudicate rulings verbatim
+#: (:mod:`asf.evidence.rulings`): the review that might re-raise a settled point, and the
+#: correction or fixer that might be sent to answer one.
+RULINGS_KINDS = ('review', 'correct', 'fixer')
+
+
+def rulings_section(product, kind, item):
+    """The item's standing rulings (:func:`asf.evidence.rulings.brief_section`) for a
+    :data:`RULINGS_KINDS` brief, or ''."""
+    if kind not in RULINGS_KINDS or product is None or not (item or {}).get('id'):
+        return ''
+    from asf.evidence import rulings
+    text = rulings.brief_section(rulings.standing(product, item))
+    return '\n\n' + text if text else ''
+
+
 def build(product, row, index, inflight=None, repo_facts=None):
     """The brief for one feeder row."""
     kind = normalize_kind(getattr(row, 'brief_kind', '') or getattr(row, 'kind', ''))
@@ -594,6 +610,7 @@ def build(product, row, index, inflight=None, repo_facts=None):
              render(load_template(kind), ctx).rstrip() + correction_text(row, kind)
              + customer_section(product, kind, facts['branch'])
              + foreign_review_text(kind, ctx) + refusal_section(product, ctx['item_id'])
+             + rulings_section(product, kind, facts['item'])
              + stored_review_section(product, kind, facts['branch'], ctx['item_id']),
              render(TAIL, ctx)]
     return Brief(kind=kind, item_id=ctx['item_id'], text='\n\n'.join(p.strip() for p in parts) + '\n',

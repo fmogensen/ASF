@@ -42,7 +42,9 @@ Transitions (plan §2 plus the §9 overrides):
 - T5a REVIEW → GATE            ... unless an adjudicate ruling already answered it on the code
                                this head carries (:func:`asf.workers.lifecycle.overruling`): it
                                overruled the C list and pushed nothing — no second hold, no
-                               second ruling
+                               second ruling — or every C item it raises is a point a standing
+                               ruling on the card settled (:func:`asf.evidence.rulings.
+                               reraised_only`): no BACK, no round; a new defect still blocks
 - T6  GATE → WAITING_CI        required checks pending/absent under ``landing_checks_missing``
 - T7  WAITING_CI → GATE        re-decided every harvest
 - T8  GATE → WAITING           trunk red alone (or a required check red on the trunk's latest
@@ -120,6 +122,7 @@ import time
 from asf import approvals, customer_content, env, gitpush, refguard, reviews
 from asf.evidence import review as review_mod
 from asf.evidence import review_store
+from asf.evidence import rulings as rulings_mod
 from asf.feeder import footprint, widen
 from asf.harvest import harvest as H
 from asf.harvest import pr_graph
@@ -1259,6 +1262,9 @@ def next_state(prev, facts):
         if rv.get('current') and rv.get('verdict') == review_mod.CHANGES:
             if f.get('overruled'):  # T5a: the ruling on this head already answered the review
                 return GATE, f"{rv.get('path')} overruled by {f['overruled']}'s ruling"
+            if f.get('ruled'):  # T5a': it only re-raises ruled points — no BACK, no round
+                return GATE, (f"{rv.get('path')} only re-raises points ruled by "
+                              f"{', '.join(f['ruled'])}")
             if f.get('review_answered'):  # T5b: answered without a commit — review it again
                 reason = (f"round {int(rv.get('round') or 0) + 1} wanted: {rv.get('path')} was "
                           f"answered by {f['review_answered']} without a commit")
@@ -1474,10 +1480,12 @@ class Lane:
             rv = review_mod.review_at(repo, conv, f'origin/{b}', item,
                                        reviews.required(review_kind(f['kind'])),
                                        store=os.path.join(self.state_dir, review_store.DIRNAME))
+            body = ''
             if rv:
                 rv['current'] = review_mod.is_current(repo, conv, f'origin/{b}', rv, head,
                                                        trunk=f'origin/{trunk}')
-                rv['customer_row'] = customer_content.has_customer_row(rv.pop('body', ''))
+                body = rv.pop('body', '')
+                rv['customer_row'] = customer_content.has_customer_row(body)
             f['review'] = rv
             if rv and rv.get('current') and rv.get('verdict') == review_mod.CHANGES:
                 f['review_answered'] = lifecycle.review_answered(self.path, item, rv.get('path'),
@@ -1488,6 +1496,11 @@ class Lane:
                     self.path, item, head,
                     lambda sha: review_mod.same_code(repo, conv, sha, f'origin/{b}',
                                                       trunk=f'origin/{trunk}'))
+                # T5a': a C list that only re-raises points a standing ruling settled
+                if not f['overruled']:
+                    card = (self.items or {}).get(item or '') or {'id': item}
+                    f['ruled'] = rulings_mod.reraised_only(
+                        body, rulings_mod.standing(self.product, card))
         if prs and not f['foreign'] and (pr or {}).get('state') == 'OPEN' and pr.get('number') \
                 and reads_red(rec.get('state'), f.get('ended'), f.get('correction')):
             f['checks_red'] = self.host.head_red(f, pr['number'])
