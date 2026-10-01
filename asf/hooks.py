@@ -56,7 +56,14 @@ RUNTIME_AGENT_GLOBS = ('.claude/agents/*.md',)
 
 #: The hooks built into ``asf`` — ``{name: the events it answers}`` — run by :func:`cmd_hook`
 #: instead of a check script (F-0031 §2.3). A built-in name shadows a script of the same name.
-BUILTIN = {'approvals': ('PreToolUse',)}
+#: ``unpushed`` is the session exit contract (:mod:`asf.workers.stopgate`): a factory session's
+#: ``Stop`` is refused while its branch's work is off origin.
+BUILTIN = {'approvals': ('PreToolUse',), 'unpushed': ('Stop',)}
+
+#: The ``(event, name)`` entries every worker account's own settings carry, product-less: each
+#: built-in hook on each event it answers. Both read the session's ``ASF_JOB``/``ASF_PRODUCT``
+#: and let anything that is not a factory session through.
+ACCOUNT_HOOKS = tuple((event, name) for name, events in BUILTIN.items() for event in events)
 
 #: The two git hooks the redaction gate installs (F-0075, D10). Each name doubles as the
 #: ``asf redact`` mode it execs (``--pre-commit`` / ``--pre-push``).
@@ -377,7 +384,7 @@ def install(product, rules_dir=RULES_DIR, which=shutil.which, cfg=None):
 
     accounts = pool.accounts_from_config(cfg or env.load_config())
     for account in accounts:
-        _write_merged(account_settings_path(account), [('PreToolUse', 'approvals')], asf_path, None)
+        _write_merged(account_settings_path(account), ACCOUNT_HOOKS, asf_path, None)
 
     git_ok, git_detail = ensure_git_hooks(product, which=which)
     if not git_ok:
@@ -398,6 +405,27 @@ def install(product, rules_dir=RULES_DIR, which=shutil.which, cfg=None):
     if refusals:
         return 2, '\n'.join([summary] + refusals)
     return 0, summary
+
+
+def ensure_account_hooks(account, which=shutil.which):
+    """Merge :data:`ACCOUNT_HOOKS` into ``account``'s own settings file before a launch, so a
+    built-in hook added after ``asf hooks install`` last ran (the ``unpushed`` Stop gate) binds
+    the next session without an operator step. Writes only on a change; never raises — a launch
+    is never refused for this. True when the entries are in place."""
+    try:
+        if account is None:
+            return False
+        if not account.config_dir:
+            from asf.workers import runtime  # local: runtime is the session's side
+            if runtime.session_home(account) is None:
+                return False  # the operator's own HOME: only `asf hooks install` writes there
+        asf_path, refusal = runnable_asf(which)
+        if refusal:
+            return False
+        _write_merged(account_settings_path(account), ACCOUNT_HOOKS, asf_path, None)
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def approvals_missing(accounts, repo_dir=None):
@@ -446,6 +474,9 @@ def check_script(name, product_name=None, cwd=None):
 
 
 def cmd_hook(args):
+    if args.name == 'unpushed':
+        from asf.workers import stopgate
+        return stopgate.run_hook(sys.stdin.read(), os.environ, product=args.product)
     if args.name in BUILTIN:
         from asf import approvals  # local: asf.approvals reads this module's runtime globs
         return approvals.run_hook(sys.stdin.read(), os.environ, product=args.product)
@@ -461,7 +492,8 @@ def register(subparsers):
     p.add_argument('--product')
     p.set_defaults(run=cmd_hooks)
     p = subparsers.add_parser(
-        'hook', help='run one hook: a built-in (approvals), else tools/checks/<name>.sh')
+        'hook', help='run one hook: a built-in (approvals, unpushed), else '
+                     'tools/checks/<name>.sh')
     p.add_argument('name')
     p.add_argument('--product')
     p.set_defaults(run=cmd_hook)

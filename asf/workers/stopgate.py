@@ -11,7 +11,9 @@ never drifts from what :mod:`asf.workers.health` will later judge the run on.
 It is bounded (§2.3): a run's stop may be refused only ``conventions.stop_gate_rounds`` times
 (default :data:`asf.conventions.DEFAULT_STOP_GATE_ROUNDS`), then the gate stands aside and the
 factory's own publish/correction path is the net — an unbounded gate would turn one stuck session
-into an infinite one. It never commits and never pushes for the session: it refuses and names the
+into an infinite one. The stop it lets through is not silent: the run's ledger line gets an
+``unpushed`` defect (:func:`record_released`), and the health pass then handles the run as it
+handles any unpushed end — publish what is there, or hold it back. It never commits and never pushes for the session: it refuses and names the
 commands, because a hook that wrote to git from inside a live session would race the session's
 own git, and the session is the one that knows what its commit message should say.
 
@@ -96,21 +98,30 @@ def spent(product, job, conv, payload):
     return (not wrote) and bool((payload or {}).get('stop_hook_active'))
 
 
-def refusal_lines(branch, detail, item, kind):
+def refusal_lines(branch, detail, item, kind, checks=()):
     """The block the session reads. Names the evidence and the exact commands, and nothing else
     — pure, no io, no clock. The commit line is dropped when ``detail`` counts no uncommitted
     file, so a session that committed and only forgot the push is not told to ``git add``; the
-    push line is never dropped (§1.1: whatever is missing, the branch must reach origin)."""
+    push line is never dropped (§1.1: whatever is missing, the branch must reach origin).
+    ``checks`` — the product's pre-push check for the run's kind (:func:`pre_push_commands`) —
+    each come before the push. The push is one push, once (the one-push rule): every commit
+    first, then a single ``git push``. Trailers are the factory's: the lane adds the sign-off and
+    any trailer the product requires on publish, so the session is never sent back for them."""
     from asf.briefs import preamble
     prefix = preamble.SUBJECT_KIND.get(kind or '', 'task')
     uncommitted = _uncommitted_count(detail)
     lines = [f'REFUSED: your work is not on origin — {detail}',
-             f'This is branch {branch}. Finish it before you end your turn:']
+             f'This is branch {branch}. Finish it before you end your turn, in this order:']
     if uncommitted:
         lines.append(f"  git add -A && git commit -s -m '{prefix}({item}): <what you did>'")
-    lines.append(f'  git push origin {branch}')
-    lines.append(f'A commit subject must name {item} as a token. Never force-push, never '
-                 '--no-verify, never a')
+    for command in checks:
+        lines.append(f'  {command}    # the pre-push check: red is fixed and committed first')
+    lines.append(f'  git push origin {branch}    # ONE push, after the last commit')
+    lines.append('Commit everything first and push once — never a push per commit: each push '
+                 'starts CI again.')
+    lines.append(f'A commit subject must name {item} as a token; the factory adds the sign-off '
+                 'and other trailers itself.')
+    lines.append('Never force-push, never --no-verify, never a')
     lines.append('branch but this one. If the push is refused as non-fast-forward, stop there — '
                  'do not merge and')
     lines.append('do not force — and say `pushed: rebased <sha> — the factory publishes` in your '
@@ -123,6 +134,38 @@ def _uncommitted_count(detail):
         return int(str(detail).split('uncommitted', 1)[0].strip().rsplit(' ', 1)[-1])
     except (ValueError, IndexError):
         return 1  # unrecognised text: show the safer, fuller command rather than drop it
+
+
+def pre_push_commands(product, kind):
+    """The pre-push commands the refusal names for a run of ``kind``: a doc kind's steps
+    (:func:`asf.approvals.pre_push_steps`) or the code check (:func:`asf.approvals.pre_push_check`),
+    as the brief of that kind names them (#486/#602); ``[]`` when the product sets none."""
+    from asf import approvals
+    steps = [run for run, _note in approvals.pre_push_steps(product, kind)]
+    if steps:
+        return steps
+    if kind in approvals.PRE_PUSH_DOC_KEYS:
+        return []
+    command = approvals.pre_push_check(product)
+    return [command] if command else []
+
+
+#: The defect the run's ledger line carries when the gate let a dirty or unpushed stop through.
+RELEASED_DEFECT = ('unpushed: the stop gate refused {n} time(s), then let the session end with '
+                   '{branch} off origin ({detail})')
+
+
+def record_released(product, job, branch, detail, n):
+    """Write the released stop into the run's ledger line — ``stop_gate: released`` and an
+    ``unpushed`` ``defect`` — so the session's exit is on the record as a defect and not as a
+    clean end; the health pass then handles the run as any unpushed end. Never raises."""
+    from asf.workers import pool
+    try:
+        pool.update_session(product, job, stop_gate='released', stop_refusals=n,
+                            defect=RELEASED_DEFECT.format(n=n, branch=branch, detail=detail))
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def stood_aside_line(branch, detail, n):
@@ -180,7 +223,11 @@ def _run(stdin_text, environ, out, product, job):
     if ok:
         return 0
     if spent(prod, job, prod.conventions, payload):
-        print(stood_aside_line(branch, detail, refusals(prod, job)), file=out)
+        n = refusals(prod, job)
+        if n:  # a gate disabled (0 rounds) refused nothing: no defect of its making
+            record_released(prod, job, branch, detail, n)
+        print(stood_aside_line(branch, detail, n), file=out)
         return 0
-    print('\n'.join(refusal_lines(branch, detail, run.get('item'), run.get('kind'))), file=out)
+    print('\n'.join(refusal_lines(branch, detail, run.get('item'), run.get('kind'),
+                                   pre_push_commands(prod, run.get('kind')))), file=out)
     return 2

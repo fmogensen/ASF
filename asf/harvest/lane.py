@@ -504,6 +504,49 @@ def signoff_branch(repo, trunk, branch, why=None):
     return rebuild_branch(repo, trunk, branch, sign, why)
 
 
+def _add_trailers(repo, message, pairs, if_exists):
+    """``message`` with each ``(key, value)`` of ``pairs`` as a trailer (``git
+    interpret-trailers --if-exists <if_exists>``), or None when git refused it."""
+    if not pairs:
+        return message
+    args = ['git', 'interpret-trailers', '--if-exists', if_exists]
+    for key, value in pairs:
+        args += ['--trailer', f'{key}: {value}']
+    r = subprocess.run(args, input=message, cwd=repo, capture_output=True, text=True,
+                       env=H.clean_env(dict(os.environ)))
+    return r.stdout if r.returncode == 0 and r.stdout.strip() else None
+
+
+def normalise_message(repo, message, ident, item, signoff=False, trailers=None):
+    """``message`` with the trailers the lane writes on publish, or None when git could not
+    rewrite it: ``Signed-off-by: <author>`` when ``signoff`` and the author has not signed off;
+    each ``trailers`` key (``{item}`` in its value is the item id) set to its value — added when
+    missing, replaced when it differs. The subject is :meth:`Lane.repair_naming`'s. A message
+    that needs none of it comes back unchanged, byte for byte."""
+    if signoff:
+        name, email = ident['GIT_AUTHOR_NAME'], ident['GIT_AUTHOR_EMAIL']
+        if not signed_off(message, name, email):
+            message = _add_trailers(repo, message, [('Signed-off-by', f'{name} <{email}>')],
+                                    'addIfDifferent')
+            if message is None:
+                return None
+    want = [(k, v.replace('{item}', item or '')) for k, v in (trailers or {}).items()]
+    have = {line.strip().lower() for line in message.splitlines()}
+    missing = [(k, v) for k, v in want if f'{k.lower()}: {v.lower()}' not in have]
+    return _add_trailers(repo, message, missing, 'replace') if missing else message
+
+
+def normalise_branch(repo, trunk, branch, item, signoff=False, trailers=None, why=None):
+    """``(new_tip, n)``: the branch's own commits (:func:`own_commits` — never a trunk commit,
+    never a merge) with every message through :func:`normalise_message` — the sign-off and the
+    product's trailers — trees, authors, committers and dates identical, through
+    :func:`rebuild_branch`'s guard. ``(None, 0)`` when every message is already right or the
+    branch cannot be rewritten safely (the reason appended to ``why``)."""
+    return rebuild_branch(repo, trunk, branch,
+                          lambda message, ident: normalise_message(
+                              repo, message, ident, item, signoff, trailers), why)
+
+
 def own_commits(repo, trunk, branch):
     """``(base, shas, why)``: the commits that are ``origin/<branch>``'s own, oldest first, on
     ``base`` (its merge-base with ``origin/<trunk>``) — ``git rev-list --no-merges
@@ -1906,6 +1949,9 @@ class Lane:
         if self.repo:
             moved = self.drop_copies(f) or moved
             prev = f.get('prev') or {}
+        # the lane writes the trailers, not the session: once per new head
+        if self.repo:
+            self.normalise_commits(f)
         # a branch already held for naming (a session pending, none running): reworded here
         if prev.get('state') == BACK and not f.get('live') \
                 and (f.get('correction') or {}).get('kind') == lifecycle.NAMING:
@@ -2299,6 +2345,72 @@ class Lane:
             self.write(f, self.record(f, PUSHED, 'adopted'))
         state = BACK if f.get('correction') else PUSHED
         return self.set(f, state, f'dropped {dropped} trunk copies')
+
+    def normalise_commits(self, f):
+        """The session exit contract's half the lane owns: a factory branch's own commits get
+        the sign-off (``commit.signoff``) and the product's ``commit.trailers`` written by the
+        lane on publish (:func:`normalise_branch`) — before CI judges the head, so a red DCO
+        check and a session sent back for a trailer never happen (the subject's item id is
+        :meth:`repair_naming`'s, also with no session). Once per new head (the head the last
+        record did not carry), the trunk fetched first (:meth:`fresh_trunk`, once a pass), never
+        while a live session holds the branch, never on a foreign PR, a branch
+        under no factory prefix, a protected ref (:meth:`guarded`) or one past PUSHED's reach
+        (MERGING, QUEUED, PARKED, terminal). Every rewritten commit carries the tree of the one
+        it replaces (:func:`trees_identical`) and the push is over a lease on the tip read,
+        refs only (no new content for the product's pre-push hook to judge). A branch that is
+        not its own straight line is left to :meth:`drop_copies` / the naming refusal. Never a
+        state of its own: ``f``'s head, refusal and review currency move to the new head and the
+        pass goes on. True when it pushed."""
+        b, old, item = f['branch'], f.get('head'), f.get('item')
+        prev = f.get('prev') or {}
+        if not self.repo or not old or not item or not f.get('kind') or f.get('foreign') \
+                or f.get('live') or f.get('landed') or f.get('on_trunk') \
+                or (f.get('pr') or {}).get('draft') or prev.get('head') == old \
+                or prev.get('state') in (MERGING, QUEUED, PARKED) + TERMINAL_STATES:
+            return False
+        conv = self.conv
+        signoff = bool(conv is not None and conv.signoff())
+        trailers = conv.commit_trailers() if conv is not None else {}
+        if not signoff and not trailers:
+            return False  # nothing the product requires: no git read at all
+        if not getattr(self, '_normalise_fetched', False):
+            self.fresh_trunk()  # a stale trunk ref would count trunk commits as the branch's
+            self._normalise_fetched = True
+        new, n = normalise_branch(self.repo, self.trunk, b, item, signoff, trailers)
+        if not new:
+            return False
+        same, differ = trees_identical(self.repo, old, new)
+        if not same:
+            self.out(f'normalise {b}: the rewrite changed more than messages ({differ}) — '
+                     f'nothing pushed')
+            return False
+        if self.dry_run:
+            self.out(f'DRY: would write the trailers on {n} commit(s) of {b}')
+            return False
+        if self.guarded(b, f'normalise {b}'):
+            return False
+        wt = self.ref_checkout()
+        if not wt:
+            self.out(f'normalise {b}: deferred — {self.ref_wt_error}')
+            return False
+        r = gitpush.push(['-q', f'--force-with-lease=refs/heads/{b}:{old}', 'origin',
+                          f'{new}:refs/heads/{b}'], wt, refs_only=True,
+                         timeout=gitpush.push_timeout(self.conv), log=self.out)
+        if r.returncode != 0:
+            self.out(f'normalise {b}: deferred — push refused '
+                     f'({push_why(r.stderr or r.stdout)})')
+            return False
+        H.sh(['git', 'update-ref', f'refs/remotes/origin/{b}', new], cwd=self.repo)
+        self.out(f'normalised {n} commit message(s) on {b} (trailers): {old[:9]} → '
+                 f'{new[:9]}, trees identical — no session')
+        f['head'] = new
+        f['refusal'] = lane_refusal(self.repo, self.trunk, b, item, self.conv,
+                                    members=delivery_members(self.items, item))
+        if f.get('review'):
+            f['review']['current'] = review_mod.is_current(self.repo, self.conv, f'origin/{b}',
+                                                           f['review'], new,
+                                                           trunk=f'origin/{self.trunk}')
+        return True
 
     def pre_push_ok(self, sha):
         """``(ok, line)``: the product's ``conventions.pre_push_check`` on ``sha``
