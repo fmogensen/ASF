@@ -234,8 +234,30 @@ def inside_feature(paths, feature_writes):
                                                         for p in paths)
 
 
+def attributed_paths(items, task_id, paths, live=(), closed=None):
+    """The ``paths`` another Feature's plan already delivered: a Task other than ``task_id``
+    whose ``writes:`` hold the path (``asf check``'s intersection test) has landed or closed,
+    and no owner of it holds a live footprint — ``live``: the Task ids in play
+    (:func:`asf.tick.widen_footprint.open_footprints`). ``closed(item_id)``: whether a Task is
+    landed or closed (the record's own reading, :func:`asf.workers.lifecycle.closed_state`). A
+    path with no owner is new scope, and one an open Task writes is a wait: neither is
+    attributed."""
+    live = set(live or ())
+    if closed is None:
+        def closed(iid):
+            return ((items or {}).get(iid) or {}).get('state') in ('Resolved', 'Closed')
+    out = []
+    for p in paths or ():
+        owners = [iid for iid, t in (items or {}).items()
+                  if iid != task_id and t.get('type') == 'task'
+                  and any(writes_intersect(p, w) for w in norm_writes(t.get('writes')))]
+        if any(closed(o) for o in owners) and not any(o in live for o in owners):
+            out.append(p)
+    return out
+
+
 def decide(task_id, paths, limit=MAX_FILES, protected=None, running=(), widened_before=0,
-           shared=(), in_feature=False):
+           shared=(), in_feature=False, attributed=(), whole=False):
     """The ``widen_footprint`` verdict for ``task_id`` needing ``paths`` outside its ``writes:``.
 
     ``protected``: ``{path: (class, level)}`` — the paths under an approvals-protected glob whose
@@ -249,10 +271,15 @@ def decide(task_id, paths, limit=MAX_FILES, protected=None, running=(), widened_
     widening is still a RESHAPE, and an approvals-protected path is still an approval.
     ``in_feature``: every path is inside the Task's Feature footprint (:func:`delivery_footprint`)
     — neither the cap nor an earlier widening makes it a RESHAPE; approvals and an open Task's
-    overlap still apply."""
+    overlap still apply. ``attributed``: the paths a landed/closed Task already delivered, with no live
+    owner beside it (:func:`attributed_paths`) — counted like ``in_feature`` path by path: a widening onto a
+    file the plan already delivered is no evidence of a mis-cut Task.
+    ``whole``: the Task's reshape session answered that it does not split — a RESHAPE would
+    only buy the same answer again, so the cap and an earlier widening are lifted for it."""
     paths = tuple(dict.fromkeys(p for p in paths or () if p))
-    scoped = tuple(p for p in paths if not footprint.is_shared(p, shared))
-    if not in_feature and (widened_before or len(scoped) > limit):
+    rest = tuple(p for p in paths if not covered(p, attributed or ()))
+    scoped = tuple(p for p in rest if not footprint.is_shared(p, shared))
+    if not (in_feature or whole) and ((widened_before and rest) or len(scoped) > limit):
         return Verdict(RESHAPE, paths, RESHAPE_REASON.format(paths=' '.join(paths)))
     for p in paths:
         if (protected or {}).get(p):

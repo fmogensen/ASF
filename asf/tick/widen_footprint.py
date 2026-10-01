@@ -43,6 +43,7 @@ Run by the ``health`` step, after health has ended the sessions and before the w
    and a History line ``footprint widening reverted: overlaps <owner>``, one commit.
 """
 import os
+import re
 import subprocess
 
 from asf import approvals
@@ -95,6 +96,23 @@ def _task(items, item_id):
     return item if item.get('type') == 'task' and not lifecycle.closed_state(items, item_id) else None
 
 
+def reach(product, task):
+    """What ``task`` may write without a widening: its ``writes:`` and the product's
+    ``conventions.shared_writes`` — the append-only files every Task may add to."""
+    writes = widen.norm_writes((task or {}).get('writes'))
+    return writes + [w for w in footprint.shared_writes(product) if w not in writes]
+
+
+#: The record stage's I3 refusal, read back: the Active Task a widening would intersect.
+I3_RE = re.compile(r"I3: writes: intersects Active task (\S+?)'s writes:")
+
+
+def refused_by(err):
+    """The Task id an I3 refusal (:func:`write_card`'s error) names, or ''."""
+    m = I3_RE.search(err or '')
+    return m.group(1) if m else ''
+
+
 def report_facts(ctx, items, out=print, tracked_fn=tracked_paths):
     """Hold every finished coder/correct run whose REPORT claims paths outside its Task's
     ``writes:``. A run whose claim was read is marked ``footprint_read`` and not read again (one
@@ -119,7 +137,7 @@ def report_facts(ctx, items, out=print, tracked_fn=tracked_paths):
         needs = []
         if tokens:
             needs = widen.outside(widen.resolve(tokens, tracked_fn(product, run.get('branch'))),
-                                  task.get('writes'))
+                                  reach(product, task))
         if not needs:
             if tokens:  # a claim read and found inside the footprint: not read again
                 pool_mod.update_session(product, job, footprint_read=1)
@@ -163,7 +181,7 @@ def diff_facts(ctx, items, out=print, diff_fn=branch_diff):
             pool_mod.update_session(product, job, diff_read=1)
             continue
         writes = widen.norm_writes(task.get('writes'))
-        extra = widen.outside(files, writes)
+        extra = widen.outside(files, reach(product, task))
         feature = widen.delivery_footprint(items, item_id)
         if not extra or not widen.inside_feature(extra, feature):
             pool_mod.update_session(product, job, diff_read=1)
@@ -246,7 +264,7 @@ def refusal_facts(ctx, items, out=print, tracked_fn=tracked_paths):
             continue
         tokens = widen.path_tokens(corr.get('text'))
         needs = widen.outside(widen.resolve(tokens, tracked_fn(product, run.get('branch'))),
-                              task.get('writes')) if tokens else []
+                              reach(product, task)) if tokens else []
         if not needs:  # the hook names the session's own files: the plain correction stands
             pool_mod.update_session(product, job, correction=dict(corr, footprint_read=1))
             continue
@@ -410,8 +428,9 @@ def apply(ctx, items, out=print, diff_fn=branch_diff):
             done[job] = DROPPED
             continue
         writes = widen.norm_writes(task.get('writes'))
-        needs = widen.outside(corr.get('needs'), writes)
-        if not needs:  # the record already carries every path: a plain correction on the wider footprint
+        needs = widen.outside(corr.get('needs'), reach(product, task))
+        if not needs:  # the record already carries every path (or the product shares it with
+            # every Task, conventions.shared_writes): a plain correction on the wider footprint
             text = correction_text(writes, corr.get('needs') or (), fact, corr.get('tests') or (),
                                    corr.get('text'))
             pool_mod.update_session(product, job, correction=dict(corr, verdict=widen.WIDEN,
@@ -420,16 +439,32 @@ def apply(ctx, items, out=print, diff_fn=branch_diff):
             continue
         if in_play is None:
             in_play = open_footprints(product, items)
-        feature = widen.inside_feature(needs, widen.delivery_footprint(items, item_id))
+        own = widen.delivery_footprint(items, item_id)
+        feature = widen.inside_feature(needs, own)
+        attributed = widen.attributed_paths(
+            items, item_id, needs, {t for t, _w in in_play if t != item_id},
+            closed=lambda iid: ((items or {}).get(iid) or {}).get('state') in lifecycle.DONE_STATES)
         v = widen.decide(item_id, needs, widen.max_files(product),
                          protected_paths(product, item_id, needs), in_play,
                          widenings(ctx, path, item_id), footprint.shared_globs(product),
-                         in_feature=feature)
+                         in_feature=feature, attributed=attributed,
+                         whole=bool(corr.get('whole')) or feeder_rows.recut_declined(task))
         if v.kind == widen.WIDEN:
             wider = writes + list(v.paths)
             note = widen.HISTORY.format(paths=' '.join(v.paths), fact=fact)
             err = write_card(ctx.record_root(), item_id, {'writes': wider}, stamp, note,
                              product=product)
+            owner = refused_by(err)
+            if owner:
+                # the record's own guard found a live Task writing the same file: a wait on
+                # that Task, re-decided every tick — never a refusal repeated with no owner named
+                if corr.get('verdict') != widen.WAITS or corr.get('detail') != owner:
+                    pool_mod.update_session(product, job, correction=dict(
+                        corr, verdict=widen.WAITS, detail=owner))
+                out(f'waits    {item_id}: widening +{" ".join(v.paths)} overlaps {owner} '
+                    f'(the record\'s I3)')
+                done[job] = widen.WAITS
+                continue
             if err:
                 out(f'widen {job}: {item_id} unchanged — {err}')
                 continue

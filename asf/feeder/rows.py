@@ -193,6 +193,16 @@ CONFLICTING = 'CONFLICTING'
 #: the leading `no writes:` (F-0126 D4).
 NO_WRITES_RECUT = ('no writes: declared — this Task came from a plan section with no '
                    'stories:/writes:/after: lines; re-cut that section so it carries them')
+#: The ``reshape_declined:`` entry a Task carries once a reshape session answered that it does
+#: not split (:mod:`asf.tick.rejudge`): it stays whole. A no-writes re-cut is not launched again —
+#: the same session would buy the same answer — and the Task waits on its ``writes:`` in its own
+#: row; a footprint the Task outgrows is widened, never reshaped (:func:`asf.feeder.widen.decide`).
+WHOLE = 'no split'
+
+
+def recut_declined(item):
+    """True when ``item``'s reshape was answered "does not split" already (:data:`WHOLE`)."""
+    return WHOLE in ((item or {}).get('reshape_declined') or ())
 
 
 @dataclasses.dataclass
@@ -1008,7 +1018,7 @@ def delivery_rows(items, product, busy, running, landed_shas=None):
                                reason='no writes: declared on any open member: the plan must name '
                                       'the files this delivery writes before a coder can start',
                                waits_on='writes'))
-                if lead.get('type') == 'task':
+                if lead.get('type') == 'task' and not recut_declined(lead):
                     # the same re-cut a lone Task with no writes gets (task_rows): without it the
                     # delivery waits on a footprint no session is ever launched to declare
                     out.append(Row(tier=2, kind=RESHAPE, item_id=lid, feature_id=fid,
@@ -1330,7 +1340,7 @@ def task_rows(items, product, feature, busy, running, landed_shas=None):
                            branch=branch_for(product, 'code', t['id']),
                            reason='no writes: declared: the plan must name the files this Task '
                                   'writes before a coder can start', waits_on='writes'))
-            if recut is None:   # one plan document, one session, one branch (D2)
+            if recut is None and not recut_declined(t):  # one plan, one session, one branch (D2)
                 recut = t['id']
                 out.append(Row(tier=2, kind=RESHAPE, item_id=t['id'], feature_id=feature['id'],
                                action=LAUNCH, brief_kind='reshape',

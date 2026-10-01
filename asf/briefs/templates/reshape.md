@@ -13,8 +13,10 @@ DELIVERABLE, on branch `{branch}` cut from `origin/{main}`:
 When the reason is `footprint: needs <paths>`, the factory found {item_id}'s `writes:` too narrow
 (its coder, or its gate, named those paths as ones it must change): cut it so every part's
 `writes:` holds the files its acceptance needs, those paths among them.
-If a part cannot pass its own acceptance without another part, say so and leave {item_id} whole:
-`NEEDS OPERATOR: {item_id} does not split along <area> — answer no on the split line`.
+If a part cannot pass its own acceptance without another part, leave {item_id} whole and say so
+on a line of its own: `NO SPLIT: {item_id} does not split along <area> — <why>`. That is an answer,
+not a question: the factory takes it, drops the reshape and sends {item_id} back to its own row
+(a footprint reason becomes a widening of {item_id}'s `writes:`) — no person is asked.
 
 If {item_id}'s work — or that of a Task it delivers — is ALREADY on `origin/{main}` under another
 commit, there is nothing to cut: verify it, run the test that covers it, and push one empty,

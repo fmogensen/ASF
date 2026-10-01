@@ -169,6 +169,18 @@ def widen_footprints(ctx, items, out=print):
         return None
 
 
+def rejudge(ctx, items, out=print):
+    """:mod:`asf.tick.rejudge`: a park written for a question the report never asked is
+    released, and a reshape's "does not split" answer is taken — before the widening rule, which
+    reads what they hand back. A failure here is one line; the sessions' health stands."""
+    from asf.tick import rejudge as rejudge_mod
+    try:
+        return rejudge_mod.run(ctx, items, out=out)
+    except Exception as e:  # noqa: BLE001 — never takes the health step down
+        out(f'rejudge: skipped — {type(e).__name__}: {e}')
+        return None
+
+
 def close_landed_parks(ctx, out=print):
     """A park whose reason carries verified trunk evidence closes its card on that sha
     (:func:`asf.workers.trunkclose.close_parked`) instead of waiting for a person. A failure
@@ -187,6 +199,7 @@ def run(ctx, out=print, runtime_fn=_runtime):
     found = health_mod.health(product, fix=True, out=out, items=items)
     reap_worktrees(ctx, out=out)
     file_rulings(ctx, out=out)  # B-0064
+    rejudge(ctx, items, out=out)
     widen_footprints(ctx, items, out=out)
     close_landed_parks(ctx, out=out)
     stalled = stall_mod.stall(product, out=out)

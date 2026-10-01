@@ -161,6 +161,9 @@ conventions:
   doc_paths: [README.md, docs/guide/*]
   # globs many Tasks touch without owning (lockfiles): no footprint overlap, one per merge (default []).
   shared_paths: [uv.lock]
+  # append-only shared files every Task may add a row to (a registry, a band table): inside every
+  # Task's writes: without a widening, and no footprint overlap (default []).
+  shared_writes: [docs/registry.md]
   # pages a customer reads (asf/customer_content.py): a branch adding an internal note, TODO,
   # lorem ipsum or unresolved placeholder under these globs is held (file:line), a deploy whose
   # tree carries one is refused, and a review of such a diff owes a `read as the customer` row.

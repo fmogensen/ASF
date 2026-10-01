@@ -438,7 +438,7 @@ def context(product, row, kind, facts):
         'round': facts['round'],
         'next_round': facts['next_round'],
         'head': facts['head'] or preamble_mod.UNKNOWN,
-        'writes': ', '.join(facts['writes']) if facts['writes'] else '(none declared)',
+        'writes': writes_text(product, facts['writes']),
         'tests': ', '.join(facts['tests']) if facts['tests'] else '(name the test you add)',
         'delivers': ', '.join(facts['delivers']) or '(none)',
         'delivery_count': len(facts['delivers']),
@@ -619,6 +619,21 @@ def rulings_section(product, kind, item):
     from asf.evidence import rulings
     text = rulings.brief_section(rulings.standing(product, item))
     return '\n\n' + text if text else ''
+
+
+def writes_text(product, writes):
+    """The ``{writes}`` a brief prints: the item's footprint, then the product's
+    ``conventions.shared_writes`` — append-only files any Task may add to without a widening
+    (:func:`asf.feeder.footprint.shared_writes`). ``(none declared)`` for an empty footprint."""
+    from asf.feeder import footprint
+    if not writes:
+        return '(none declared)'
+    shared = [w for w in footprint.shared_writes(product) if w not in writes]
+    text = ', '.join(writes)
+    if shared:
+        text += (f" — plus the shared append-only files any Task may add to: {', '.join(shared)}"
+                 f" (append your own rows; never rewrite or reorder another's)")
+    return text
 
 
 def build(product, row, index, inflight=None, repo_facts=None):
