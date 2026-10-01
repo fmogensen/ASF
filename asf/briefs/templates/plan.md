@@ -29,4 +29,4 @@ COVERAGE: the plan is approvable only when every Story of the Feature is on at l
 End the plan with the line `coverage: <covered>/<total> stories; uncovered: <ids or none>`.
 Mint Task ids only from `BACKLOG_ID_RANGE`.
 
-Final message: the pushed sha, the plan path, the Task count and the wave order, the coverage line.
+{pre_push_doc}Final message: the pushed sha, the plan path, the Task count and the wave order, the coverage line.

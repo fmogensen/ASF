@@ -454,6 +454,34 @@ class PreambleTest(unittest.TestCase):
         self.assertNotIn('MUST RUN BEFORE EVERY PUSH',
                          briefs.build(p, ROWS['review'], index(), [], REPO_FACTS).text)
 
+    def test_the_doc_kinds_name_their_own_pre_push_steps_in_order(self):
+        steps = {'code': 'pnpm gate:fast',
+                 'spec': [{'run': 'node scripts/feature-matrix.mjs', 'note': 'only if the design spec changed'}],
+                 'plan': ['node scripts/bands.mjs reserve migration <n> --plan <path>',
+                          {'run': 'node scripts/registers-check.mjs', 'note': 'red on a booked band'}]}
+        p = product(conventions={'landing': 'pull-request', 'landing_checks': ['gate'],
+                                 'landing_checks_missing': 'wait', 'pre_push_check': steps})
+        for kind in ('plan', 'replan'):
+            with self.subTest(kind=kind):
+                text = briefs.build(p, ROWS[kind], index(), [], REPO_FACTS).text
+                self.assertIn('MUST RUN BEFORE PUSH', text)
+                a = text.index('1. `node scripts/bands.mjs reserve migration <n> --plan <path>`')
+                b = text.index('2. `node scripts/registers-check.mjs` — red on a booked band')
+                self.assertLess(a, b)
+                self.assertNotIn('feature-matrix', text)
+                self.assertNotIn('MUST RUN BEFORE EVERY PUSH', text)
+        text = briefs.build(p, ROWS['spec'], index(), [], REPO_FACTS).text
+        self.assertIn('1. `node scripts/feature-matrix.mjs` — only if the design spec changed', text)
+        self.assertNotIn('bands.mjs', text)
+        # the code kinds take the map's `code`
+        code = briefs.build(p, ROWS['coder'], index(), [], REPO_FACTS).text
+        self.assertIn('MUST RUN BEFORE EVERY PUSH, AND PASS: `pnpm gate:fast`', code)
+        # a string-valued check leaves the doc briefs alone
+        s = product(conventions={'pre_push_check': 'pnpm gate:fast'})
+        for kind in ('spec', 'plan', 'replan'):
+            self.assertNotIn('MUST RUN BEFORE PUSH',
+                             briefs.build(s, ROWS[kind], index(), [], REPO_FACTS).text)
+
     def test_a_correct_brief_never_asks_for_the_full_suite(self):
         text = briefs.build(product(), ROWS['correct'], index(), [], REPO_FACTS).text
         self.assertNotIn('run the full suite', text)

@@ -22,4 +22,4 @@ mints no ids and needs no `BACKLOG_ID_RANGE`.
 
 End the plan with `delivers: <ids, in build order>` and `budget: <n> items, <m> globs`.
 
-Final message: the pushed sha, the plan path, the item count, the build order.
+{pre_push_doc}Final message: the pushed sha, the plan path, the item count, the build order.

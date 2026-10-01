@@ -37,4 +37,4 @@ after the other.
 If the decision cannot be carried out without adding scope the spec does not carry, write no
 replan and say so: `NEEDS OPERATOR: {item_id} — <what the decision leaves open>`.
 
-Final message: the pushed sha, the replan path, and per Task: rewritten, new or dropped.
+{pre_push_doc}Final message: the pushed sha, the replan path, and per Task: rewritten, new or dropped.

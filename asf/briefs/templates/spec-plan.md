@@ -38,4 +38,4 @@ End the document with the line `coverage: <covered>/<total> stories; uncovered: 
 Mint Story and Task ids only from the range this session was given (`BACKLOG_ID_RANGE`); never
 reuse an id the record already carries.
 
-Final message: the pushed sha, the two paths, the Story count, the Task count, the coverage line.
+{pre_push_doc}Final message: the pushed sha, the two paths, the Story count, the Task count, the coverage line.

@@ -539,10 +539,15 @@ class Verdict(unittest.TestCase):
         self.assertIn('gate-tests', why)
         state, why = merge_queue.verdict([check_run('gate'), check_run('gate-tests', None, 'queued')], req)
         self.assertEqual(state, 'pending')
-        for bad in ('skipped', 'failure', 'cancelled', 'timed_out', 'neutral', 'action_required'):
+        for bad in ('skipped', 'failure', 'timed_out', 'neutral', 'action_required'):
             state, why = merge_queue.verdict([check_run('gate'), check_run('gate-tests', bad)], req)
             self.assertEqual(state, 'red', bad)
             self.assertIn(bad, why)
+        # a cancelled run judged no code: never red
+        state, why = merge_queue.verdict([check_run('gate'), check_run('gate-tests', 'cancelled')],
+                                         req)
+        self.assertEqual(state, 'pending')
+        self.assertIn('cancelled', why)
         # a matrix leg names the job first; a red one the product does not require is noise
         self.assertEqual(merge_queue.verdict([check_run('gate (ubuntu)'), check_run('gate-tests'),
                                               check_run('m2-e2e', 'failure')], req)[0], 'green')
