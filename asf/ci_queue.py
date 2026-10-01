@@ -294,7 +294,12 @@ KINDS = ('pr', 'trunk', 'batch', 'deploy')
 MODES = ('on', 'dry-run', 'off')
 FIELDS = ('mode', 'history', 'workflows', 'trunk_wait_min', 'trunk_escalate_min', 'pr_wait_min',
           'light_paths', 'estimate', 'relief_exempt_paths', 's1_wait_min', 'dedupe_push',
-          'dedupe_exempt_branches', 'head_wait_max_min')
+          'dedupe_exempt_branches', 'head_wait_max_min', 'relief_saturation')
+#: ``ci.queue.relief_saturation`` default: the share of a class's online runners that must be
+#: busy before starvation relief cancels a run for it — below it the class is not saturated and
+#: a cancel frees nothing the waiting run could not already have had (35 of 48 cancels on a
+#: product, 2026-09-30, at ~29 % heavy utilisation)
+DEFAULT_RELIEF_SATURATION = 0.5
 #: the branches whose ``push`` runs are never cancelled as duplicates of a PR run
 DEFAULT_DEDUPE_EXEMPT = ('train/*', 'release/*')
 #: a run's type: ``light`` when its PR changed only light paths, else ``full``
@@ -515,6 +520,23 @@ def history(product):
     return v if isinstance(v, int) and not isinstance(v, bool) and v >= 1 else DEFAULT_HISTORY
 
 
+def relief_saturation(product):
+    """``ci.queue.relief_saturation``: the busy share (0–1] of the classes a protected run waits
+    for at which relief may cancel (default :data:`DEFAULT_RELIEF_SATURATION`)."""
+    v = _qcfg(product).get('relief_saturation')
+    ok = isinstance(v, (int, float)) and not isinstance(v, bool) and 0 < v <= 1
+    return float(v) if ok else DEFAULT_RELIEF_SATURATION
+
+
+def saturation(runners, pool, classes):
+    """``(busy, online)`` slots over ``classes`` (the pool's class keys) from one runner read —
+    a phantom already counted offline by the caller. ``(0, 0)`` when none of them is known."""
+    load = load_by_class(runners or (), pool)
+    busy = sum(load[c]['busy'] for c in classes if c in load)
+    online = sum(load[c]['online'] for c in classes if c in load)
+    return busy, online
+
+
 def trunk_wait_min(product):
     """``ci.queue.trunk_wait_min``: minutes a queued trunk run waits before relief (default 20)."""
     v = _qcfg(product).get('trunk_wait_min')
@@ -725,6 +747,10 @@ def config_problems(ci):
         w = q.get(k)
         if w is not None and (isinstance(w, bool) or not isinstance(w, (int, float)) or w <= 0):
             out.append((f'ci.queue.{k}', f'must be a number of minutes > 0, not {w!r}'))
+    rs = q.get('relief_saturation')
+    if rs is not None and (isinstance(rs, bool) or not isinstance(rs, (int, float))
+                           or not 0 < rs <= 1):
+        out.append(('ci.queue.relief_saturation', f'must be a share in (0, 1], not {rs!r}'))
     h = q.get('history')
     if h is not None and (isinstance(h, bool) or not isinstance(h, int) or h < 1):
         out.append(('ci.queue.history', f'must be a whole number >= 1, not {h!r}'))
@@ -2097,6 +2123,14 @@ def backfill(key, order, entries, needs_of, free, skip=()):
     return f'{BACKFILL} — fits in free {classes} while head {head} waits'
 
 
+def ceiling_gate(ceiling, free):
+    """The ``capacity.ci`` ceiling as the queue applies it: only when the runners could not be
+    read (``free`` None). With a runner read a batch start is admitted by the free capacity of
+    the classes it needs against its per-run need (the runner fit, :func:`shortfall`) — a fixed
+    count of runs in flight held a batch 63 min while the heavy class sat ~29 % busy."""
+    return ceiling if free is None else None
+
+
 def ceiling_held(order, entries, ceiling=None, inflight=None, admitted=0):
     """The entries of ``order`` the ceiling holds now (batch starts at or above it): they cannot
     start whatever is free, so a PR behind one is never held for the runners it would take."""
@@ -2124,6 +2158,7 @@ def decide(key, order, entries, needs_of, free, ceiling=None, inflight=None, adm
     e = entries.get(key)
     if not fit_applies(e):
         return True, ''
+    ceiling = ceiling_gate(ceiling, free)
     skip = ceiling_held(order, entries, ceiling, inflight, admitted)
     if key in skip:
         return False, ceiling_reason(inflight, ceiling, admitted)
@@ -2539,8 +2574,8 @@ class Queue:
             e['at_ceiling'] = why.startswith('at the ci ceiling')
             # a fit hold keeps its free count per class; the needs are re-read from the one
             # cached estimate wherever the hold is shown again (:func:`status_clause`)
-            skip = ceiling_held(order, entries, self.ceiling(), self._inflight,
-                                self.admitted_here)
+            skip = ceiling_held(order, entries, ceiling_gate(self.ceiling(), free),
+                                self._inflight, self.admitted_here)
             e['free'] = ({c: a for c, a, _n in shortfall(key, order, needs.get, free, skip=skip)}
                          if not e['at_ceiling'] and free is not None else None)
             if self.mode == 'dry-run':
@@ -3471,6 +3506,18 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
         free = q.free()
         if not need or free is None or _covered(need, free, {}):
             return 0        # nothing measured, runners unreadable, or the runners are there already
+    # a cancel only where the classes the protected run waits for are saturated: below
+    # ci.queue.relief_saturation busy, a runner of them is idle and a cancel frees nothing the
+    # host could not already hand it. A broken reservation (a kept-free runner held) is the
+    # reservation's own repair and goes on whatever the load.
+    if not bad:
+        want_cls = set(classes) if starved else set(need or {})
+        busy, online = saturation(q._runners, q.pool, want_cls)
+        floor = relief_saturation(product)
+        if online and busy < floor * online:
+            out(f"relief: none for {owner} — {'/'.join(sorted(want_cls))} {busy}/{online} busy "
+                f"({100 * busy // online} %), below {int(floor * 100)} %: not saturated")
+            return 0
     done = {rec.get('id') for rec in q.data['relief']}
     pr_wf, batch_wf = workflow_for(product, 'pr'), workflow_for(product, 'batch')
     cands = []
@@ -3933,7 +3980,8 @@ def _status_clause(product, now, inflight, ceiling, source):
         pos = f" ({head.get('label') or 'other'}, 1st in line)"
         # the guard's clock, beside the in-line wait, for the entry the guard governs: a batch
         # the ceiling holds is printed as the head but is in `skip`, and no wait admits it
-        skip = ceiling_held(line.order, line.entries, line.ceiling, line.inflight)
+        skip = ceiling_held(line.order, line.entries, ceiling_gate(line.ceiling, line.free),
+                            line.inflight)
         guarded = key == head_of(line.order, line.entries, skip)
         said = 'would start' if ok else (
             f'{_waits(head, line.queue.now, head_wait_s(head, line.queue.now) if guarded else None, head_wait_max_min(product))} — {why}')

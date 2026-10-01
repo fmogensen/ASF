@@ -187,11 +187,13 @@ product until the runners it will need are free:
 A push the CI host turns into a run on its own cannot be delayed once made, so the push (or the
 PR, or the merge) is what is held.
 
-**When a run starts.** A batch start needs runs in flight below the CI ceiling (`capacity.ci`,
-above): the ceiling is the batch step's gate and holds no other start — with the ceiling's worth of
-runs always in flight, a PR held by it would never open. Runs in flight are one count, read by the
-queue and the status row alike: the runs of `ci.workflow` not completed — queued or running, PR,
-trunk and batch alike. A batch held at the ceiling sets no runners aside for the starts behind it.
+**When a run starts.** A batch start is admitted by free runner capacity, not by a count of runs:
+the free runners of each class it needs must cover its per-run need (the fit below). The CI ceiling
+(`capacity.ci`, above) is only the fallback when the runners cannot be read — then a batch start
+needs runs in flight below it, and it holds no other start. A fixed count held a batch 63 min while
+the heavy class sat ~29 % busy. Runs in flight are one count, read by the queue and the status row
+alike: the runs of `ci.workflow` not completed — queued or running, PR, trunk and batch alike. A
+batch held at the fallback ceiling sets no runners aside for the starts behind it.
 A batch or an ordinary PR start needs its runners (an S1 or hotfix start, a trunk run and a deploy
 reserve nothing, so PR runs in flight never hold the trunk every deploy waits on): per runner class,
 the free runners (online, not busy, at their `slots`, from the runners API) must cover the run's
@@ -306,6 +308,12 @@ escalation applies. Never the trunk run, an S1 or hotfix run, a run already in p
 escalation) or a CI-changing PR's run. Each cancel is re-run once the S1 run's required jobs have
 runners. One line each:
 `ci queue: cancelled queued pr run 120 (T-0341, Feature) — created after S1 PR run 850 (B-0007) at sha850 but holds the heavy queue ahead of its queued m6-e2e (queued 8m)`.
+
+**Saturation floor.** Relief cancels only where the classes the protected run waits for are
+saturated: at least `ci.queue.relief_saturation` (default 0.5) of their online runners busy. Below
+it a runner of that class is idle, and a cancel frees nothing the host could not hand the waiting
+run already. A broken reservation (a kept-free runner held by a PR job) is repaired whatever the
+load: `ci.reserve.keep_free` stays the trunk's.
 
 **CI-config exemption.** Relief (queued-run cancel and in-progress escalation alike) never
 cancels a run whose PR changed a file under `.github/workflows/**` or `.github/actionlint.yaml`

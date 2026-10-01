@@ -456,7 +456,12 @@ def _run_steps(args, product, ctx, rows, chosen, locks=None):
         else:
             if resolved is None:
                 resolved = capacity.resolve(product)
-            if (step == 'batch' and resolved.ci is not None and resolved.ci_inflight is not None
+            # the fixed in-flight ceiling gates the batch step only for a product the CI queue
+            # does not admit: a queued one is admitted by free runner capacity against the
+            # run's need (asf.ci_queue.ceiling_gate), the ceiling its fallback when the runners
+            # are unreadable
+            if (step == 'batch' and ci_queue.mode(product) == 'off' and resolved.ci is not None
+                    and resolved.ci_inflight is not None
                     and resolved.ci_inflight >= resolved.ci):
                 print(f"waits    batch — at ci capacity ({resolved.ci_inflight}/{resolved.ci})")
                 step_rc = 0
