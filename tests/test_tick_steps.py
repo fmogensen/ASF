@@ -1407,6 +1407,20 @@ class BatchStep(StepsTestCase):
         self.assertIn('waits    batch — at ci capacity (3/2)', out)
         self.assertNotIn('[command:batch]', out)
 
+    def test_a_queued_product_at_the_ceiling_is_admitted_by_free_runners(self):
+        """Under the CI queue the run count is no gate: the queue admits the batch by free
+        runner capacity against its need — here it does, at 3 runs in flight of 2."""
+        from asf import ci_queue
+        with mock.patch.object(capacity, 'resolve', return_value=self.resolved(2, 3)), \
+                mock.patch.object(ci_queue, 'mode', return_value='on'), \
+                mock.patch.object(ci_queue, 'admit',
+                                  return_value=ci_queue.Decision(True)) as admit:
+            rc, out = self.run_tick(steps='batch')
+        self.assertEqual(rc, 0)
+        admit.assert_called_once()
+        self.assertNotIn('at ci capacity', out)
+        self.assertIn('[command:batch] batch ran', out)
+
     def test_under_the_ceiling_the_command_runs(self):
         with mock.patch.object(capacity, 'resolve', return_value=self.resolved(2, 1)):
             rc, out = self.run_tick(steps='batch')

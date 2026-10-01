@@ -179,7 +179,12 @@ def capacity_cell(cfg, product):
     parts = [f"sessions {inflight}/{r.sessions}" + (f" (operator total {total})" if total is not None else "")]
     if lane:
         parts.append(lane)
-    if r.ci is not None:
+    if r.ci is not None and ci_queue.mode(product) != 'off':
+        # a queued product admits its batch by free runner capacity (asf.ci_queue.ceiling_gate):
+        # the ceiling only stands in when the runners cannot be read — the queue clause says so
+        parts.append(f"ci {capacity_mod.ci_inflight_text(r.ci_inflight)} (batch admitted by "
+                     f"free runners; ceiling {r.ci} only when they are unreadable)")
+    elif r.ci is not None:
         parts.append(ci_clause(r.ci_inflight, r.ci))
     # the CI start queue: its depth and the head's decision now, computed live by the function
     # `asf ci queue` prints (one runner read, the cached estimate, this row's own in-flight

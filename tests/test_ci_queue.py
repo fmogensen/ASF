@@ -1089,6 +1089,30 @@ class TestTrunkRelief(ReliefBase):
         self.assertEqual(self.relieve(p, run, minutes=1), (0, 0))
         self.assertEqual(self.cancels(gh), [])
 
+    def test_no_relief_cancel_under_50_percent_utilisation(self):
+        """1 of 3 heavy busy: the trunk run's 3 do not fit in the 2 free, but the class is not
+        saturated — a cancel frees nothing the host could not hand it. No cancel."""
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        gh, run = self.gh(self.runs(), busy=('h1',))
+        self.assertEqual(self.relieve(p, run), (0, 0))
+        self.assertEqual(self.cancels(gh), [])
+        self.assertIn('relief: none for main run 900 — heavy 1/3 busy (33 %), below 50 %: not '
+                      'saturated', self.lines)
+
+    def test_relief_cancels_only_once_the_class_is_saturated(self):
+        p = self.product(relief_saturation=1.0)
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        gh, run = self.gh(self.runs(), busy=('h1', 'h2'))      # 67 %: under a 100 % floor
+        self.assertEqual(self.relieve(p, run), (0, 0))
+        gh, run = self.gh(self.runs(), busy=('h1', 'h2', 'h3'))  # saturated: lowest first
+        self.assertEqual(self.relieve(p, run, minutes=1), (3, 0))
+        self.assertEqual(self.cancels(gh), ['101', '102', '201'])
+        self.assertEqual(ci_queue.config_problems({'queue': {'relief_saturation': 1.5}}),
+                         [('ci.queue.relief_saturation', 'must be a share in (0, 1], not 1.5')])
+
     def test_cancelled_runs_are_rerun_through_the_queue_once_the_trunk_starts(self):
         p = self.product()
         os.makedirs(env.state_dir('p'), exist_ok=True)
@@ -1775,22 +1799,50 @@ class TestS1PrRelief(ReliefBase):
         self.assertEqual([r['id'] for r in ci_queue.load('p')['relief']], [777])
 
 
+class NoRunnersGh(FakeGh):
+    """``gh`` whose runner read fails (the in-flight count still reads): the ceiling's fallback."""
+
+    def __call__(self, argv, **kw):
+        if argv[:2] == ['gh', 'api'] and any('actions/runners' in a for a in argv):
+            self.calls.append(argv)
+            return subprocess.CompletedProcess(argv, 1, '', 'unreachable')
+        return super().__call__(argv, **kw)
+
+
 class TestCeiling(Base):
-    def test_capacity_ci_is_the_batch_steps_ceiling(self):
+    """``capacity.ci`` is no longer the batch's gate: a batch start is admitted by the free
+    capacity of the classes it needs against its per-run need. The fixed in-flight ceiling holds
+    a batch only when the runners cannot be read."""
+
+    def test_admission_under_budget_a_batch_starts_on_free_heavy_whatever_runs_are_in_flight(self):
+        for n, inflight in enumerate((4, 9)):     # the old gate held both: 4/4 and 9/4
+            p = product(cap={'ci': 4}, name=f'b{n}')
+            d = self.admit(self.queue(p, FakeGh(inflight=inflight)), 'batch', 'batch',
+                           kind='batch')
+            self.assertTrue(d.admitted, self.lines)
+        self.assertEqual(self.lines, [])
+
+    def test_admission_saturated_a_batch_waits_for_heavy_capacity(self):
+        p = product(cap={'ci': 4})
+        d = self.admit(self.queue(p, FakeGh(inflight=1, busy={'h1', 'h2', 'h3'})), 'batch',
+                       'batch', kind='batch')
+        self.assertFalse(d.admitted)
+        self.assertEqual(self.lines, ['ci queue: batch waits — heavy 0 free, needs 3 '
+                                      '(other, 1st in line)'])
+
+    def test_capacity_ci_is_the_fallback_when_the_runners_are_unreadable(self):
         p = product(cap={'ci': 2})
-        d = self.admit(self.queue(p, FakeGh(inflight=2)), 'batch', 'batch', kind='batch')
+        d = self.admit(self.queue(p, NoRunnersGh(inflight=2)), 'batch', 'batch', kind='batch')
         self.assertFalse(d.admitted)
         self.assertEqual(self.lines, ['ci queue: batch waits — at the ci ceiling (2 runs in '
                                       'flight; batch starts below 2) (other, 1st in line)'])
         p2 = product(cap={'ci': 2}, name='p2')
-        q = self.queue(p2, FakeGh(inflight=1), minutes=1)
+        q = self.queue(p2, NoRunnersGh(inflight=1), minutes=1)
         self.assertTrue(self.admit(q, 'pr:a', 'T-0500').admitted)
         self.assertFalse(self.admit(q, 'batch', 'batch', kind='batch').admitted)  # 1 + 1 admitted
         self.assertIn('1 runs in flight + 1 started this pass', self.lines[-1])
 
     def test_a_feature_pr_at_the_ceiling_starts_when_the_runners_fit(self):
-        """The ceiling's worth of runs is always in flight: a Feature PR held by it would never
-        open. At the ceiling it is governed by the runner fit alone."""
         p = product(cap={'ci': 4})
         q = self.queue(p, FakeGh(inflight=4))
         self.assertTrue(self.admit(q, 'pr:feat', 'T-0341').admitted)
@@ -1799,22 +1851,8 @@ class TestCeiling(Base):
         self.assertFalse(self.admit(q, 'pr:feat2', 'T-0341').admitted)   # the fit still holds
         self.assertEqual(self.lines, ['ci queue: T-0341 waits — heavy 1 free, needs 3 '
                                       '(Task F-0001 rank 1, 1st in line)'])
-        self.lines.clear()
-        q = self.queue(p, FakeGh(inflight=4), minutes=10)
-        self.assertFalse(self.admit(q, 'batch', 'batch', kind='batch').admitted)
-        self.assertIn('at the ci ceiling', self.lines[-1])
-
-    def test_a_batch_held_at_the_ceiling_sets_no_runners_aside(self):
-        p = product(cap={'ci': 4}, name='b')
-        self.assertFalse(self.admit(self.queue(p, FakeGh(inflight=4)), 'batch', 'batch',
-                                    kind='batch').admitted)
-        q = self.queue(p, FakeGh(inflight=4), minutes=1)
-        self.assertTrue(self.admit(q, 'pr:task', 'T-0500').admitted)   # behind it in line
-
 
     def test_s1_hotfix_trunk_and_deploy_starts_are_exempt_from_ceiling_and_fit(self):
-        """PR runs fill the ceiling (4/4): a trunk run ranked right after the S1 still starts;
-        a batch waits at the ceiling, an ordinary or Feature PR starts on the runner fit."""
         p = product(cap={'ci': 4})
         q = self.queue(p, FakeGh(inflight=4))
         self.assertTrue(self.admit(q, 'trunk:t', 'T-0500', kind='trunk').admitted)
@@ -1824,13 +1862,6 @@ class TestCeiling(Base):
         self.assertTrue(self.admit(q, 'pr:fix', 'B-0007').admitted)
         q = self.queue(p, FakeGh(inflight=4), minutes=30)
         self.assertTrue(self.admit(q, 'deploy:prod', 'deploy prod', kind='deploy').admitted)
-        self.lines.clear()
-        q = self.queue(p, FakeGh(inflight=4), minutes=40)
-        self.assertTrue(self.admit(q, 'pr:feat', 'T-0341').admitted)
-        self.assertFalse(self.admit(q, 'batch', 'batch', kind='batch').admitted)
-        self.assertEqual(len(self.lines), 1)
-        self.assertIn('at the ci ceiling', self.lines[0])
-        # exempt from the runner fit too: the host queues its jobs
         self.lines.clear()
         q = self.queue(p, FakeGh(inflight=4, busy={'h1', 'h2'}), minutes=50)
         self.assertTrue(self.admit(q, 'trunk:t2', 'T-0500', kind='trunk').admitted)
@@ -1874,43 +1905,36 @@ class TestOneCount(Base):
         from asf.views import status
         p = product(cap={'ci': 4})
         self.t0 = ci_queue._now()   # the row reads the file as of now
-        self.assertFalse(self.admit(self.queue(p, FakeGh(inflight=4)), 'batch', 'batch',
+        self.assertFalse(self.admit(self.queue(p, NoRunnersGh(inflight=4)), 'batch', 'batch',
                                     kind='batch').admitted)
         self.assertIn('(4 runs in flight;', self.lines[-1])
-        with mock.patch('subprocess.run', side_effect=FakeGh(inflight=5)):
+        with mock.patch('subprocess.run', side_effect=NoRunnersGh(inflight=5)):
             cell = status.capacity_cell({}, p)
-        self.assertIn('ci 5 runs in flight (batch starts below 4 — batch waits)', cell)
+        self.assertIn('ci 5 runs in flight (batch admitted by free runners; ceiling 4 only '
+                      'when they are unreadable)', cell)
         self.assertIn('head batch waits 0 min — at the ci ceiling (5 runs in flight; batch '
                       'starts below 4) (other, 1st in line)', cell)
         self.assertNotIn('4 runs in flight', cell)
         self.assertNotIn('4/4', cell)
         # the count dropped below the ceiling: the head is not said to be at it
-        with mock.patch('subprocess.run', side_effect=FakeGh(inflight=2)):
+        with mock.patch('subprocess.run', side_effect=NoRunnersGh(inflight=2)):
             cell = status.capacity_cell({}, p)
         self.assertIn('ci 2 runs in flight', cell)
         self.assertNotIn('at the ci ceiling', cell)
 
-    def test_a_batch_at_the_ceiling_is_not_said_to_be_on_the_heads_clock(self):
-        """The ceiling holds the batch whatever is free, so the head guard will never admit it:
-        the row prints its wait and promises no admission — even though the guard's own head,
-        the unranked PR behind it, is a real entry."""
+    def test_a_saturated_batch_is_a_fit_hold_on_the_heads_clock(self):
+        """With the runners read, a batch is held by the runner fit, not the run count: the
+        row names the heavy shortfall and the head guard's clock."""
         p = product(cap={'ci': 4})
         self.t0 = ci_queue._now()
         gh = FakeGh(inflight=4, busy={'h1', 'h2', 'h3'})
         self.assertFalse(self.admit(self.queue(p, gh), 'batch', 'batch', kind='batch').admitted)
-        self.assertFalse(self.admit(self.queue(p, gh, minutes=1), 'pr:old',
-                                    'worker/plan-x').admitted)
-        entries = ci_queue.load('p')['entries']
-        order = ci_queue.line_order(entries)
-        self.assertEqual(order, ['batch', 'pr:old'])
-        skip = ci_queue.ceiling_held(order, entries, 4, 4)
-        self.assertEqual(ci_queue.head_of(order, entries, skip), 'pr:old')
         row = ci_queue.status_clause(p, now=self.t0 + datetime.timedelta(minutes=1),
                                      inflight=4, ceiling=4,
                                      source=ci_queue.GitHubSource(p, run=gh))
-        self.assertEqual(row, 'ci queue 2, head batch waits 1 min — at the ci ceiling '
-                              '(4 runs in flight; batch starts below 4) (other, 1st in line)')
-        self.assertNotIn('at the head', row)
+        self.assertIn('head batch waits 1 min', row)
+        self.assertIn('heavy 0 free, needs 3', row)
+        self.assertNotIn('at the ci ceiling', row)
 
     def test_a_ceiling_hold_behind_the_head_does_not_silence_the_clause(self):
         p = product(cap={'ci': 4})
