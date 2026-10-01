@@ -386,6 +386,11 @@ class LandedIsTheMergeFact(unittest.TestCase):
 class DocsOnlyTests(unittest.TestCase):
     DIRS = ("docs/specs/", "docs/plans/", "docs/reviews/")
 
+    def product(self, *globs):
+        conv = {"specs_dir": "docs/specs", "plans_dir": "docs/plans",
+                "reviews_dir": "docs/reviews", "doc_paths": list(globs)}
+        return env.Product("p", {"conventions": conv})
+
     def test_only_documents(self):
         self.assertTrue(evidence.docs_only(["docs/plans/a.md", "docs/reviews/r.md"], self.DIRS))
 
@@ -400,6 +405,40 @@ class DocsOnlyTests(unittest.TestCase):
         self.assertEqual(evidence.lane_kind("cloud/plan-F-0019", pre), "plan")
         self.assertEqual(evidence.lane_kind("origin/cloud/spec-F-0129", pre), "spec")
         self.assertIsNone(evidence.lane_kind("cloud/t-0900-reader", pre))
+
+    def test_a_declared_doc_path_is_a_document(self):
+        dirs = evidence.doc_dirs(self.product("decisions/**"))
+        self.assertIn("decisions/**", dirs)
+        self.assertTrue(evidence.docs_only(["docs/specs/f-0186.md", "decisions/0007-x.md"], dirs))
+
+    def test_an_undeclared_path_is_a_landing(self):
+        dirs = evidence.doc_dirs(self.product())
+        self.assertEqual(dirs, self.DIRS)
+        self.assertFalse(evidence.docs_only(["docs/specs/f-0186.md", "decisions/0007-x.md"], dirs))
+
+    def test_code_beside_a_declared_doc_path_is_still_a_landing(self):
+        dirs = evidence.doc_dirs(self.product("decisions/**"))
+        self.assertFalse(evidence.docs_only(["decisions/0007-x.md", "src/a.ts"], dirs))
+
+    def test_the_landing_and_the_evidence_read_one_list(self):
+        from asf.harvest import lane
+        p = self.product("decisions/**", "README.md")
+        self.assertEqual(tuple(evidence.doc_dirs(p)), tuple(lane.doc_matchers(p)))
+
+    def test_a_queue_squash_of_a_declared_doc_path_lands_no_feature(self):
+        """The subject a merge queue composes is not the lane's, so the paths decide
+        (`asf/harvest/lane.py:2918-2921`)."""
+        p = self.product("decisions/**")
+        dirs = evidence.doc_dirs(p)
+        self.assertTrue(evidence.docs_only(
+            ["docs/specs/f-0186.md", "decisions/0007-x.md"], dirs))
+
+    def test_a_misshapen_doc_paths_is_no_document_at_all(self):
+        p = env.Product("p", {"conventions": {"doc_paths": "decisions/**"}})
+        self.assertEqual(tuple(evidence.doc_dirs(p)), self.DIRS)
+        self.assertFalse(evidence.docs_only(["src/a.py"], evidence.doc_dirs(p)))
+        from asf.harvest import lane
+        self.assertEqual(lane.landing_class(p, ["src/a.py"]), lane.CODE)
 
 
 if __name__ == "__main__":

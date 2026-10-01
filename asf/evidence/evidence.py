@@ -1077,17 +1077,21 @@ def commit_paths(product, shas):
 
 
 def doc_dirs(product):
-    """The directories a document lane writes: ``specs_dir``, ``plans_dir``, ``reviews_dir``."""
-    conv = product.conventions if product is not None else Conventions()
-    return tuple(str(d).strip("/") + "/" for d in (conv.specs_dir, conv.plans_dir, conv.reviews_dir)
-                 if d)
+    """The matchers a document lane writes: ``specs_dir``, ``plans_dir``, ``reviews_dir`` and the
+    product's ``conventions.doc_paths`` globs — :func:`asf.harvest.lane.doc_matchers`, so the
+    evidence and the landing read one list. Computed once per pass and handed to
+    :func:`docs_only`."""
+    from asf.harvest import lane  # local: lane reads this module (§ the import direction)
+    return tuple(lane.doc_matchers(product if product is not None else Conventions()))
 
 
 def docs_only(paths, dirs):
-    """True when every path a commit touched is a spec, plan or review document. A commit whose
-    paths are unknown (none read) is not judged docs-only — it stays landing evidence."""
+    """True when every path a commit touched is a document — a spec, a plan, a review, or a path
+    the product declared in ``conventions.doc_paths``. A commit whose paths are unknown (none
+    read) is not judged docs-only — it stays landing evidence."""
+    from asf.harvest import lane  # local: lane reads this module
     paths = [p for p in paths or () if p]
-    return bool(paths) and all(any(p.startswith(d) for d in dirs) for p in paths)
+    return bool(paths) and all(any(lane.path_hit(d, p) for d in dirs) for p in paths)
 
 
 #: The lane kinds whose merged PR is a document landing, never the Feature's code landing
