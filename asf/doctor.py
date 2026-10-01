@@ -962,6 +962,8 @@ def run(product_name):
         rows.append(('ci runners', required, ok, detail))
     for required, ok, detail in check_queue_bypass(product):
         rows.append(('queue bypass', required, ok, detail))
+    for required, ok, detail in check_trunk_ruleset(product):
+        rows.append(('trunk ruleset', required, ok, detail))
     for required, ok, detail in check_ci_classes(product):
         rows.append(('ci classes', required, ok, detail))
     for required, ok, detail in check_cloud(cfg, product):
@@ -1063,6 +1065,17 @@ def check_queue_bypass(product):
         return trunk_watch.doctor_rows(product)
     except Exception as e:  # noqa: BLE001 — an unreadable file is one unknown row
         return [(True, None, f'cannot read the trunk watch — {e}')]
+
+
+def check_trunk_ruleset(product, gh=None):
+    """[(required, ok, detail)] — the host's ruleset on the trunk requires the merge queue's
+    status (:func:`asf.trunk_ruleset.doctor_rows`): green names the ruleset and its break-glass
+    call, red when it is missing or disabled. No rows for a product not on ``merge: queue``."""
+    from asf import trunk_ruleset
+    try:
+        return trunk_ruleset.doctor_rows(product, gh=gh)
+    except Exception as e:  # noqa: BLE001 — an unreadable host is one unknown row
+        return [(True, None, f'cannot read the trunk ruleset — {e}')]
 
 
 def check_ci_classes(product, backend=None):

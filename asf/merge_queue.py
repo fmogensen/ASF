@@ -351,6 +351,8 @@ def judge(lane, batch, members, heads, trunk_sha, st):
     state, why = verdict(runs, required)
     checks = flake.batch_checks(runs)
     flake.settle(lane.product, lane.state_dir, lane.slug, sha, checks, out=lane.out)
+    if state == 'green':
+        batch['run_url'] = run_url(runs)
     if state == 'red':
         red = [n.split(' ', 1)[0] for n in why.split(', ')]
         # flake-vs-defect triage (asf.flake): a failed required job is re-run once on the batch
@@ -492,6 +494,7 @@ def land(lane, batch, members, trunk_sha):
         why = f'{trunk} moved under the batch'
         push = None
     else:
+        attest(lane, batch)
         started = time.monotonic()
         push = gitpush.push(['-q', 'origin', f'{sha}:refs/heads/{trunk}'], lane.repo,
                             refs_only=True, timeout=gitpush.push_timeout(lane.conv), log=out)
@@ -528,6 +531,35 @@ def land(lane, batch, members, trunk_sha):
                 f'the trunk run judges it now')
     _delete_ref(lane, batch)
     return True
+
+
+def run_url(runs):
+    """The workflow run the batch's check runs belong to (a job link cut at ``/job/``), or ''."""
+    for r in runs or ():
+        link = str(r.get('details_url') or r.get('html_url') or '')
+        if '/actions/runs/' in link:
+            return link.split('/job/', 1)[0]
+    return ''
+
+
+def attest(lane, batch):
+    """Post :meth:`asf.conventions.Conventions.queue_status` = success on the batch sha, just
+    before the trunk push: the one door. The trunk's ruleset requires that status, so a sha the
+    queue did not land (a direct ``gh pr merge``, a hand push) is refused by the host itself —
+    every session shares one GitHub user, so no bypass actor could tell them apart. A failed post
+    is a line, not a verdict: the push goes on, and the host's refusal (if a ruleset requires the
+    status) holds the batch for the next pass."""
+    sha, ref = batch['sha'], batch['ref']
+    context = lane.conv.queue_status()
+    url = batch.get('run_url') or f'https://github.com/{lane.slug}/commit/{sha}'
+    desc = f"batch {ref}: {len(batch.get('members') or ())} PR(s) green"[:140]
+    rc, out, err = H._gh(['api', '-X', 'POST', f'repos/{lane.slug}/statuses/{sha}',
+                          '-f', 'state=success', '-f', f'context={context}',
+                          '-f', f'description={desc}', '-f', f'target_url={url}'])
+    if rc != 0:
+        lane.out(f'merge queue: {context} not posted on {sha[:12]} — '
+                 f'{H.tail(err or out) or f"gh exit {rc}"}')
+    return rc == 0
 
 
 # ---- helpers ------------------------------------------------------------------------------------
