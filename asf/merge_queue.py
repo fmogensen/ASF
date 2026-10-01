@@ -54,7 +54,7 @@ import shutil
 import tempfile
 import time
 
-from asf import ci_queue, gitpush, refguard
+from asf import ci_queue, flake, gitpush, refguard
 from asf.harvest import harvest as H
 from asf.harvest import lane as lane_mod
 from asf.workers import lifecycle
@@ -333,13 +333,22 @@ def judge(lane, batch, members, heads, trunk_sha, st):
     if runs is None:
         return 'pending', 'check runs unreadable', None
     state, why = verdict(runs, required)
-    if state == 'pending' and _age_s(batch) > st['timeout_min'] * 60:
-        return 'timeout', f"timed out after {st['timeout_min']} min — {why}", None
+    checks = flake.batch_checks(runs)
+    flake.settle(lane.product, lane.state_dir, lane.slug, sha, checks, out=lane.out)
     if state == 'red':
         red = [n.split(' ', 1)[0] for n in why.split(', ')]
-        checks = [{'name': r.get('name'), 'link': r.get('html_url') or r.get('details_url') or ''}
-                  for r in runs]
-        return 'red', why, (checks, red)
+        # flake-vs-defect triage (asf.flake): a failed required job is re-run once on the batch
+        # sha before the batch is split or a member sent back
+        failed = [c for c in checks if c.get('bucket') == 'fail' and flake.job_key(c['name']) in red]
+        defects, held = flake.triage(lane.product, lane.state_dir, lane.slug, sha, failed,
+                                     where=f'batch {ref}', out=lane.out)
+        other = [n for n in red if n not in {flake.job_key(c['name']) for c in failed}]
+        if held and not defects and not other:
+            state, why = 'pending', f"re-running {', '.join(held)} (flake triage)"
+        else:
+            return 'red', why, (checks, red)
+    if state == 'pending' and _age_s(batch) > st['timeout_min'] * 60:
+        return 'timeout', f"timed out after {st['timeout_min']} min — {why}", None
     return state, why, None
 
 

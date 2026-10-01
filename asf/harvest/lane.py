@@ -3714,6 +3714,9 @@ class GitHubHost(Host):
             return None
         state, _detail, checks = pr_checks(self.slug, number, required, self.rerun_ids(),
                                            head=head)
+        from asf import flake
+        out = self.lane.out if callable(getattr(self.lane, 'out', None)) else print
+        flake.settle(self.product, self.lane.state_dir, self.slug, head, checks, out=out)
         if state != 'red':
             return None
         conv = self.product.conventions
@@ -3723,6 +3726,13 @@ class GitHubHost(Host):
         failed = list(dict.fromkeys(failed))
         on_trunk = self.trunk_red(failed) if failed else {}
         names = [n for n in failed if n not in on_trunk]
+        if not names:
+            return None
+        # flake-vs-defect triage (asf.flake): a red job is re-run once on this head before any
+        # correct round; green on its re-run is a flake (quarantined), red again a defect
+        red = [c for c in checks if c.get('bucket') == 'fail' and c.get('name') in names]
+        names, _held = flake.triage(self.product, self.lane.state_dir, self.slug, head, red,
+                                    where=f'PR #{number}', out=out)
         if not names:
             return None
         return {'names': names, 'detail': ', '.join(names), 'checks': checks}
