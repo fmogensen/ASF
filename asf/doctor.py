@@ -960,6 +960,10 @@ def run(product_name):
         rows.append(('ci pool', required, ok, detail))
     for required, ok, detail in check_ci_runners(product):
         rows.append(('ci runners', required, ok, detail))
+    for required, ok, detail in check_queue_bypass(product):
+        rows.append(('queue bypass', required, ok, detail))
+    for required, ok, detail in check_ci_classes(product):
+        rows.append(('ci classes', required, ok, detail))
     for required, ok, detail in check_cloud(cfg, product):
         rows.append(('cloud lane', required, ok, detail))
     slow = check_gate_speed(product)
@@ -1048,6 +1052,28 @@ def check_ci_runners(product, now=None):
         return ci_queue.runner_rows(product, now=now)
     except Exception as e:  # noqa: BLE001 — an unreadable file is one unknown row
         return [(False, None, f'cannot read the ci queue file — {e}')]
+
+
+def check_queue_bypass(product):
+    """[(required, ok, detail)] — the trunk commits that did not come through the merge queue
+    (:func:`asf.trunk_watch.doctor_rows`, off the tick's state file): one red row each with its
+    sha, author and PR. No rows for a product not on ``merge: queue``."""
+    from asf import trunk_watch
+    try:
+        return trunk_watch.doctor_rows(product)
+    except Exception as e:  # noqa: BLE001 — an unreadable file is one unknown row
+        return [(True, None, f'cannot read the trunk watch — {e}')]
+
+
+def check_ci_classes(product, backend=None):
+    """[(required, ok, detail)] — every required CI job resolves to exactly one runner class,
+    and no runner carries a provider label its declared provider contradicts
+    (:func:`asf.runner_classes.doctor_rows`). Read-only; no rows without a declared pool."""
+    from asf import runner_classes
+    try:
+        return runner_classes.doctor_rows(product, backend=backend)
+    except Exception as e:  # noqa: BLE001 — an unreadable host is one unknown row
+        return [(True, None, f'cannot judge runner classes — {e}')]
 
 
 def check_cloud(cfg, product):

@@ -41,6 +41,12 @@ commits). A green batch above a pending one waits for it.
 (QUEUED, ``batch``, ``sha``) is on its run line as every other lane state. A product not on
 ``merge: queue`` never reads or writes either: :func:`asf.harvest.lane.merge_prs` is unchanged.
 
+**One door.** A PR no factory item made — a hotfix, a CI change, a product session's own —
+enters the same way: ``asf land <pr>`` (:func:`cmd_land`) records a request, and the pass takes
+the PR once its required checks are success on its exact head (:func:`requested_ready`). Each
+member's merge commit carries :data:`TRAILER`; :mod:`asf.trunk_watch` flags every trunk commit
+that does not.
+
 The batch ref carries only merge commits of heads that already passed the product's pre-push
 hook on their own pushes, so it is pushed ``--no-verify``; the trunk push is refs-only by nature
 (the sha is already on origin). Both go from the operator's checkout, as the fast-forward landing
@@ -77,6 +83,10 @@ DEFAULTS = {'ref_prefix': 'batch/', 'batch_size': 3, 'inflight': 2, 'timeout_min
 START_KINDS = ('trunk', 'batch')
 #: the subject of each member's merge commit on the batch ref: the trail names the members
 MERGE_SUBJECT = 'merge-queue: #{pr} ({branch} @ {head})'
+#: the trailer on each member's merge commit: what :mod:`asf.trunk_watch` reads a queue landing by
+TRAILER = 'Landed-by: asf merge queue'
+#: ``state/<product>/land-requests.json``: the PRs ``asf land`` asked the queue to take
+REQUESTS_FILE = 'land-requests.json'
 #: how long a landed member's PR is given to read MERGED on the host before it is closed by hand
 PR_MARK_TRIES, PR_MARK_SLEEP_S = 3, 2
 #: the merge commits' identity when the checkout has none configured
@@ -185,7 +195,8 @@ def run(lane, ready):
     st = settings(lane.conv)
     data = load(lane.state_dir)
     runs = lifecycle.by_branch(lane.path)
-    if not data['batches'] and not ready and not any(
+    asked = load_requests(lane.state_dir)
+    if not data['batches'] and not ready and not asked and not any(
             lifecycle.lane_of(r).get('state') == lane_mod.QUEUED and lifecycle.lane_of(r).get('batch')
             for r in runs.values()):
         return
@@ -210,7 +221,7 @@ def run(lane, ready):
                 # a member the lane already moved on (PUSHED, MERGED, STALE …) keeps that
                 # record; only one still QUEUED here, its head moved under it, is written
                 if (f.get('prev') or {}).get('state') == lane_mod.QUEUED:
-                    lane_mod.wait(lane, f, f'merge queue: {what} in batch {ref}')
+                    _wait(lane, f, f'merge queue: {what} in batch {ref}')
             gone = {f['branch'] for f, _w in detail}
             settled |= gone
             loose.extend(f for f in members if f['branch'] not in gone)
@@ -222,7 +233,7 @@ def run(lane, ready):
         elif state == 'timeout':
             _drop(lane, batch, why)
             for f in members:
-                lane_mod.wait(lane, f, f'merge queue: batch {ref} {why}')
+                _wait(lane, f, f'merge queue: batch {ref} {why}')
             settled |= {f['branch'] for f in members}
             dropped.add(ref)
         elif state == 'red':
@@ -230,7 +241,7 @@ def run(lane, ready):
             _drop(lane, batch, f'red on {why}')
             if len(members) == 1:
                 checks, red = detail
-                lane_mod.send_back(lane, members[0], 'gate',
+                _send_back(lane, members[0], 'gate',
                                    f"batch {ref} @ {batch['sha'][:12]} (this PR alone on {trunk} "
                                    f"{batch['base'][:9]}) checks red: {why}"
                                    + lane_mod.red_evidence(lane.slug, checks, red), ())
@@ -270,16 +281,18 @@ def run(lane, ready):
             f = _member_facts({'ref': rec['batch']}, {'branch': b, 'head': rec.get('head'),
                                                       'pr': rec.get('pr'), 'item': rec.get('item')},
                               runs)
-            lane_mod.wait(lane, f, f"merge queue: batch {rec['batch']} is not in flight — gated again")
+            _wait(lane, f, f"merge queue: batch {rec['batch']} is not in flight — gated again")
 
-    # ---- cut what is ready, the halves of a split first
+    # ---- cut what is ready, the halves of a split first; then the PRs `asf land` asked for
+    ready = list(ready) + requested_ready(lane, heads, trunk_sha,
+                                          taken | {f['branch'] for f in ready} | handed)
     fresh = []
     for f in list(ready) + loose:
         if f['branch'] in taken:
             continue
         taken.add(f['branch'])
         if f in loose and heads.get(f['branch']) != f['head']:   # handed back, and moved since
-            lane_mod.wait(lane, f, 'merge queue: head moved')
+            _wait(lane, f, 'merge queue: head moved')
             continue
         fresh.append(f)
     halves = len(groups)
@@ -288,7 +301,7 @@ def run(lane, ready):
             for f in group:
                 lane.out(f"waiting {f['branch']}: PR #{_pr(f)} green — merge queue full "
                          f"({len(chain)} batch(es) in flight, merge_queue.inflight)")
-                lane_mod.wait(lane, f, f'merge queue: {len(chain)} batch(es) in flight',
+                _wait(lane, f, f'merge queue: {len(chain)} batch(es) in flight',
                               green=f.get('green'))
             continue
         # a split's halves are cut on the trunk, not on each other: each run then answers for
@@ -313,6 +326,9 @@ def judge(lane, batch, members, heads, trunk_sha, st):
         rec = f.get('prev') or {}
         if heads.get(f['branch']) != f['head']:
             moved.append((f, 'head moved'))
+        elif f.get('requested'):   # an `asf land` PR: its request is its record
+            if str(_pr(f)) not in load_requests(lane.state_dir):
+                moved.append((f, 'left the queue (its asf land request was withdrawn)'))
         elif rec.get('state') != lane_mod.QUEUED or rec.get('batch') != ref:
             moved.append((f, f"left the queue ({rec.get('state') or 'no record'})"))
     if moved:
@@ -380,14 +396,14 @@ def cut(lane, group, base_sha, base_ref, st):
         if add.returncode != 0:
             for f in group:
                 out(f"held {f['branch']}: merge queue worktree failed: {H.tail(add.stderr)}")
-                lane_mod.wait(lane, f, 'merge queue: worktree add failed', 'held')
+                _wait(lane, f, 'merge queue: worktree add failed', 'held')
             return None
         ident = _ident(lane.repo)
         members = []
         for f in group:
             b, head = f['branch'], f['head']
             subject = MERGE_SUBJECT.format(pr=_pr(f), branch=b, head=head)
-            merge = H.sh(['git', 'merge', '--no-ff', '--no-edit', '-m', subject, head],
+            merge = H.sh(['git', 'merge', '--no-ff', '--no-edit', '-m', subject, '-m', TRAILER, head],
                          cwd=tmp, env=ident)
             if merge.returncode != 0:
                 files = H.sh(['git', 'diff', '--name-only', '--diff-filter=U'],
@@ -396,7 +412,7 @@ def cut(lane, group, base_sha, base_ref, st):
                 partner = next((m['branch'] for m in members
                                 if set(m.get('files') or ()) & set(files)), None)
                 on = f'{base_ref} (a batch ahead of it)' if base_ref else trunk
-                lane_mod.send_back(
+                _send_back(
                     lane, f, 'conflict',
                     f"PR #{_pr(f)} does not merge onto {on} in the merge queue"
                     + (f' beside {partner}' if partner else '')
@@ -416,14 +432,14 @@ def cut(lane, group, base_sha, base_ref, st):
                                  out=out)
         if guard:
             for f in members:
-                lane_mod.wait(lane, f, f'merge queue: {guard}', 'held')
+                _wait(lane, f, f'merge queue: {guard}', 'held')
             return None
         # the CI start queue's key is the first member's: a batch held and cut again next pass
         # keeps its place in line
         kind = st['start_kind']
         if not _admits(lane, f"{kind}:{members[0]['branch']}", kind, members[0], sha):
             for f in members:
-                lane_mod.wait(lane, f, lane_mod.CI_QUEUE, green=f.get('green'))
+                _wait(lane, f, lane_mod.CI_QUEUE, green=f.get('green'))
             return None
         started = time.monotonic()
         push = gitpush.push(['-q', 'origin', f'{sha}:refs/heads/{ref}'], tmp, refs_only=True,
@@ -433,7 +449,7 @@ def cut(lane, group, base_sha, base_ref, st):
             why = lane_mod.push_why(push.stderr or push.stdout) or 'push refused'
             for f in members:
                 out(f"held {f['branch']}: merge queue push of {ref} refused — {why}")
-                lane_mod.wait(lane, f, f'merge queue: push of {ref} refused: {why}', 'held',
+                _wait(lane, f, f'merge queue: push of {ref} refused: {why}', 'held',
                               green=f.get('green'))
             return None
         batch = {'ref': ref, 'sha': sha, 'base': base_sha, 'base_ref': base_ref,
@@ -441,8 +457,13 @@ def cut(lane, group, base_sha, base_ref, st):
                  'members': [{'branch': f['branch'], 'pr': _pr(f), 'head': f['head'],
                               'item': f.get('item'), 'kind': f.get('kind'),
                               'class': f.get('class'), 'files': list(f.get('files') or ()),
-                              'green': f.get('green')} for f in members]}
+                              'green': f.get('green'),
+                              **({'requested': True} if f.get('requested') else {})}
+                             for f in members]}
         for f in members:
+            if f.get('requested'):   # no lane record: the batch and the request are its record
+                lane.results[f['branch']] = 'queued'
+                continue
             lane.set(f, lane_mod.QUEUED, f'batch {ref}', result='queued', batch=ref, sha=sha,
                      green=f.get('green'))
         out(f"merge queue: cut {ref} @ {sha[:12]} on {base_ref or trunk} {base_sha[:9]} — "
@@ -464,8 +485,9 @@ def land(lane, batch, members, trunk_sha):
             lane.results[f['branch']] = 'queued'
         return False
     for f in members:
-        lane.set(f, lane_mod.MERGING, f'batch {ref} → {trunk} {sha[:12]}', sha=sha,
-                 method='queue', batch=ref)
+        if not f.get('requested'):
+            lane.set(f, lane_mod.MERGING, f'batch {ref} → {trunk} {sha[:12]}', sha=sha,
+                     method='queue', batch=ref)
     if not lane.is_ancestor(trunk_sha, sha):    # read again just before the push
         why = f'{trunk} moved under the batch'
         push = None
@@ -478,6 +500,9 @@ def land(lane, batch, members, trunk_sha):
     if push is None or push.returncode != 0:
         out(f'merge queue: {ref} not landed — {why}; judged again next pass')
         for f in members:
+            if f.get('requested'):
+                lane.results[f['branch']] = 'queued'
+                continue
             lane.set(f, lane_mod.QUEUED, f'batch {ref}', result='queued', batch=ref, sha=sha,
                      green=f.get('green'))
         return False
@@ -485,9 +510,13 @@ def land(lane, batch, members, trunk_sha):
     _ledger(lane, batch, True, f'green: fast-forwarded {trunk} to {sha[:12]}')
     for f in members:
         b = f['branch']
-        rec = lane.record(f, lane_mod.MERGED, 'method=queue', sha=sha, method='queue', batch=ref)
-        lane.write(f, rec, harvested=sha, correction=None)
-        f['prev'] = rec
+        if f.get('requested'):
+            drop_request(lane.state_dir, _pr(f))
+        else:
+            rec = lane.record(f, lane_mod.MERGED, 'method=queue', sha=sha, method='queue',
+                              batch=ref)
+            lane.write(f, rec, harvested=sha, correction=None)
+            f['prev'] = rec
         lane.host.merged += 1
         out(f'landed {b} → PR #{_pr(f)} {sha} (batch {ref}){f.get("delivery_note") or ""}')
         lane.results[b] = 'landed'
@@ -512,7 +541,8 @@ def _member_facts(batch, m, runs):
     return {'branch': m['branch'], 'item': m.get('item'), 'kind': m.get('kind'),
             'head': m.get('head'), 'run': run, 'prev': lifecycle.lane_of(run) or None,
             'pr': {'number': m.get('pr'), 'state': 'OPEN'}, 'files': list(m.get('files') or ()),
-            'class': m.get('class'), 'how': 'ci', 'green': m.get('green'), 'batch': batch['ref']}
+            'class': m.get('class'), 'how': 'ci', 'green': m.get('green'), 'batch': batch['ref'],
+            'requested': bool(m.get('requested'))}
 
 
 def _pack(entries, size):
@@ -573,3 +603,196 @@ def _close_if_open(lane, f, ref, sha):
     if lane.host.close(n, f'Landed by the factory merge queue: batch `{ref}` fast-forwarded '
                           f'{lane.trunk} to {sha[:12]}, which contains this head.'):
         lane.out(f'prs: closed PR #{n} — landed in batch {ref} at {sha[:12]}')
+
+
+def _wait(lane, f, reason, *args, **kw):
+    """:func:`asf.harvest.lane.wait` for a lane branch; for an ``asf land`` PR (no lane record)
+    a line and a result only — its request stays, and the next pass takes it up again."""
+    if f.get('requested'):
+        lane.out(f"merge queue: {f['branch']} (PR #{_pr(f)}, asf land) waits — {reason}")
+        lane.results[f['branch']] = 'waiting'
+        return
+    lane_mod.wait(lane, f, reason, *args, **kw)
+
+
+def _send_back(lane, f, kind, text, files, rebase=True):
+    """:func:`asf.harvest.lane.send_back` for a lane branch. An ``asf land`` PR has no session to
+    go back to: its request is marked ``red`` at this head (``kind``: ``gate`` or ``conflict``)
+    and is not taken again until the head moves — the PR's own author answers it."""
+    if not f.get('requested'):
+        lane_mod.send_back(lane, f, kind, text, files, rebase=rebase)
+        return
+    lane.out(f"merge queue: {f['branch']} (PR #{_pr(f)}, asf land) {kind} at "
+             f"{(f.get('head') or '')[:12]} — {text}; taken again once its head moves")
+    lane.results[f['branch']] = 'back'
+    reqs = load_requests(lane.state_dir)
+    r = reqs.get(str(_pr(f)))
+    if r is not None:
+        r['red'] = {'head': f.get('head'), 'kind': kind, 'why': text[:400], 'at': now_iso()}
+        save_requests(lane.state_dir, reqs)
+
+
+# ---- `asf land <pr>`: the designed way in for a PR no factory item made ------------------------
+#
+# A hotfix, a CI change or a product session's own PR used to land with a direct `gh pr merge`:
+# a sha nobody gated, beside the queue. `asf land <pr>` writes a request instead; the queue's next
+# pass takes the PR once its required checks are success **on its exact head** (the same set and
+# the same verdict as every batch, :func:`required_set` / :func:`verdict`), cuts it into a batch
+# with the rest, and lands it only when the batch sha is green — the one door to the trunk. The
+# request is the PR's only record (no lane record, no review session): a red head or a conflict
+# marks it red until the head moves; a withdrawn request (`asf land --withdraw`) or a PR closed
+# or merged elsewhere drops it.
+
+def requests_path(state_dir):
+    return os.path.join(state_dir, REQUESTS_FILE)
+
+
+def load_requests(state_dir):
+    """``{'<pr>': {pr, branch, at, by?, red?}}``; an unreadable file is no request."""
+    try:
+        with open(requests_path(state_dir), encoding='utf-8') as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    reqs = data.get('requests') if isinstance(data, dict) else None
+    return {str(k): v for k, v in (reqs or {}).items()
+            if isinstance(v, dict) and v.get('branch') and v.get('pr')}
+
+
+def save_requests(state_dir, reqs):
+    os.makedirs(state_dir, exist_ok=True)
+    tmp = requests_path(state_dir) + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as fh:
+        json.dump({'requests': reqs}, fh, sort_keys=True, indent=1)
+    os.replace(tmp, requests_path(state_dir))
+
+
+def add_request(state_dir, number, branch, by=None):
+    reqs = load_requests(state_dir)
+    reqs[str(int(number))] = {'pr': int(number), 'branch': branch, 'at': now_iso(),
+                              **({'by': by} if by else {})}
+    save_requests(state_dir, reqs)
+    return reqs[str(int(number))]
+
+
+def drop_request(state_dir, number):
+    reqs = load_requests(state_dir)
+    if reqs.pop(str(number), None) is not None:
+        save_requests(state_dir, reqs)
+        return True
+    return False
+
+
+def requested_ready(lane, heads, trunk_sha, taken=()):
+    """The entries for the ``asf land`` PRs whose required checks are success on their exact
+    head now — in request order, none already in a batch (``taken``). A PR whose branch left
+    origin is read once on the host: closed or merged elsewhere drops the request. A head marked
+    red stays out until it moves; a pending one waits with a line."""
+    reqs = load_requests(lane.state_dir)
+    out, changed = [], False
+    for key, r in sorted(reqs.items(), key=lambda kv: (kv[1].get('at') or '', kv[0])):
+        b, n = r['branch'], r['pr']
+        if b in taken:
+            continue
+        head = heads.get(b)
+        if not head:
+            got = H.gh_json(['pr', 'view', str(n), '-R', lane.slug, '--json', 'state'], None)
+            state = got.get('state') if isinstance(got, dict) else None
+            if state and state != 'OPEN':
+                lane.out(f'merge queue: asf land PR #{n} is {state.lower()} — request dropped')
+                reqs.pop(key)
+                changed = True
+            else:
+                lane.out(f'merge queue: asf land PR #{n}: {b} is not on origin — waits')
+            continue
+        if (r.get('red') or {}).get('head') == head:
+            continue
+        H.sh(['git', 'fetch', '-q', 'origin', f'+refs/heads/{b}:refs/remotes/origin/{b}'],
+             cwd=lane.repo)
+        required, why = required_set(lane, head, trunk_sha)
+        if required is None:
+            lane.out(f'merge queue: asf land PR #{n} waits — required checks unknown: {why}')
+            continue
+        runs = check_runs(lane.slug, head)
+        if runs is None:
+            lane.out(f'merge queue: asf land PR #{n} waits — check runs unreadable')
+            continue
+        state, why = verdict(runs, required)
+        if state == 'red':
+            lane.out(f'merge queue: asf land PR #{n} red at its head {head[:12]} — {why}; '
+                     f'taken once a new head is green')
+            r['red'] = {'head': head, 'kind': 'checks', 'why': why, 'at': now_iso()}
+            changed = True
+            continue
+        if state != 'green':
+            lane.out(f'merge queue: asf land PR #{n} pending at {head[:12]} — {why}')
+            continue
+        files = [l for l in H.sh(['git', 'diff', '--name-only', f'{trunk_sha}...{head}'],
+                                 cwd=lane.repo).stdout.splitlines() if l.strip()]
+        out.append({'branch': b, 'item': lane_mod.pr_item(n), 'kind': lane.conv.branch_kind(b),
+                    'head': head, 'run': None, 'prev': None,
+                    'pr': {'number': n, 'state': 'OPEN'}, 'files': files,
+                    'class': lane_mod.CODE, 'how': 'ci', 'green': None, 'requested': True})
+    if changed:
+        save_requests(lane.state_dir, reqs)
+    return out
+
+
+def cmd_land(args):
+    """``asf land <pr>``: ask the merge queue to land PR ``<pr>`` (see the parser's help)."""
+    from asf import env
+    product = env.load_product(args.product)
+    state_dir = env.state_dir(product)
+    conv = product.conventions
+    if not conv.merge_queue():
+        print(f"land: {product.name} is not on conventions.merge: queue — no queue to enter")
+        return 2
+    n = int(args.pr)
+    if args.withdraw:
+        print(f'land: PR #{n} request withdrawn' if drop_request(state_dir, n)
+              else f'land: PR #{n} had no request')
+        return 0
+    slug = lane_mod.repo_slug(product)
+    got = H.gh_json(['pr', 'view', str(n), '-R', slug, '--json',
+                     'number,state,baseRefName,headRefName,isCrossRepository'], None)
+    if not isinstance(got, dict) or not got.get('headRefName'):
+        print(f'land: PR #{n} not readable on {slug}')
+        return 1
+    if got.get('state') != 'OPEN':
+        print(f"land: PR #{n} is {str(got.get('state')).lower()}, not open")
+        return 1
+    if got.get('baseRefName') != conv.main:
+        print(f"land: PR #{n} targets {got.get('baseRefName')}, not {conv.main}")
+        return 1
+    if got.get('isCrossRepository'):
+        print(f'land: PR #{n} is from a fork — the queue merges branches on {slug} only')
+        return 1
+    add_request(state_dir, n, got['headRefName'], by=os.environ.get('USER'))
+    print(f"land: PR #{n} ({got['headRefName']}) requested — the merge queue takes it once its "
+          f"required checks are success on its exact head, and lands it when its batch is green "
+          f"(asf land {n} --withdraw takes the request back)")
+    return 0
+
+
+LAND_HELP = ('land a PR no factory item made (a hotfix, a CI change, a session\'s own PR) through '
+             'the merge queue — the one door to the trunk')
+LAND_DESCRIPTION = """\
+Every landing on the trunk goes through the merge queue (conventions.merge: queue).
+`asf land <pr>` asks the queue to take PR <pr>: on its next pass, once the PR's required
+checks (landing_checks plus the deploy's required jobs) are success on its exact head, the
+queue cuts it into a batch with the factory's PRs, runs the batch's full CI, and
+fast-forwards the trunk only when the batch sha is green. A red head or a conflict marks
+the request red until the head moves; a PR closed or merged elsewhere drops it.
+Never `gh pr merge` onto the trunk: asf status and asf doctor flag every trunk commit
+that did not come through the queue."""
+
+
+def register(sub):
+    import argparse
+    p = sub.add_parser('land', help=LAND_HELP, description=LAND_DESCRIPTION,
+                       formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument('pr', type=int, help='the PR number')
+    p.add_argument('--product')
+    p.add_argument('--withdraw', action='store_true', help='take the request back')
+    p.set_defaults(func=cmd_land)
+    return p
