@@ -34,4 +34,4 @@ The Stories the record already holds for this Feature: {stories}
 Mint any new Story id only from the range this session was given (`BACKLOG_ID_RANGE`); never
 reuse an id the record already carries.
 
-Final message: the pushed sha, the spec path, the sections written, the Story count.
+{pre_push_doc}Final message: the pushed sha, the spec path, the sections written, the Story count.

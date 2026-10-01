@@ -226,7 +226,10 @@ MERGE_METHODS = ('--squash', '--merge', '--rebase')
 SUBJECT_METHODS = ('--squash', '--merge')
 #: ``gh pr checks`` buckets that make a PR red, and those that count as run and passed — a
 #: required check a path filter skipped (``skipping``) decided it is not needed: passed (§12).
-RED_BUCKETS = ('fail', 'cancel')
+#: A ``cancel`` is never red: a run a newer push or the host cancelled judged no code (the CI
+#: queue re-runs it), so :func:`pr_checks` holds it pending, never a correction.
+RED_BUCKETS = ('fail',)
+CANCEL_BUCKET = 'cancel'
 #: the one bucket that is green for a required check: a skipped required check (a path filter,
 #: an ``if:``) is not green — it tested nothing (2026-09-26 incident)
 PASS_BUCKETS = ('pass',)
@@ -238,8 +241,9 @@ SKIP_BUCKET = 'skipping'
 #: only: a deploy never counts a skipped job green.
 MERGE_SKIPPED_PATH = 'path-filtered'
 MERGE_SKIPPED_NEVER = 'never'
-#: A trunk check run that ended in one of these is red (:meth:`GitHubHost.trunk_red`).
-TRUNK_RED_CONCLUSIONS = ('failure', 'cancelled', 'timed_out', 'startup_failure')
+#: A trunk check run that ended in one of these is red (:meth:`GitHubHost.trunk_red`); a
+#: ``cancelled`` run is no verdict at all and is skipped for the run before it.
+TRUNK_RED_CONCLUSIONS = ('failure', 'timed_out', 'startup_failure')
 #: How many trunk commits, newest first, are read for a check's latest completed run.
 TRUNK_RED_DEPTH = 5
 #: ``conventions.landing_checks_missing`` values.
@@ -3947,8 +3951,8 @@ class GitHubHost(Host):
 
 
     def trunk_red(self, names):
-        """``{name: sha}`` — each of ``names`` with a completed run on the trunk that failed, was
-        cancelled or timed out, with the commit that run judged. The trunk's first-parent history
+        """``{name: sha}`` — each of ``names`` with a completed run on the trunk that failed or timed
+        out (a cancelled run judges nothing), with the commit that run judged. The trunk's first-parent history
         is walked newest first (at most :data:`TRUNK_RED_DEPTH` commits) until every name has a
         completed run; a check still running on the newest commit is judged by the one before. A
         sha with more than one completed run for a name (a rerun) is red if any of them is —
@@ -3974,7 +3978,8 @@ class GitHubHost(Host):
                 break
             for name in sorted(left):
                 done = [r for r in runs if r.get('name') == name
-                        and r.get('status') == 'completed']
+                        and r.get('status') == 'completed'
+                        and r.get('conclusion') != 'cancelled']
                 if not done:
                     continue
                 left.discard(name)
@@ -4039,9 +4044,9 @@ def head_runs(slug, sha, rollup=()):
 def pr_checks(slug, number, required=(), rerun=(), head=None):
     """``('green'|'pending'|'red'|'unknown', detail, checks)`` for PR ``number``'s checks. No
     checks at all is green. With ``required`` names (``landing_checks`` or branch protection) only
-    those judge: a failed or cancelled required one is red, else an unfinished required one is
+    those judge: a failed required one is red (a cancelled one is pending, never red), else an unfinished required one is
     pending — a red check the product does not require (a DCO bot, an advisory test job) never
-    turns the PR red. With none required, any failed or cancelled check is red, else any not
+    turns the PR red. With none required, any failed check is red, else any not
     finished is pending. ``checks`` is always the full list.
 
     ``rerun``: ids of runs the CI queue cancelled and holds to re-run
@@ -4055,10 +4060,14 @@ def pr_checks(slug, number, required=(), rerun=(), head=None):
     rollup = pr_graph.checks_for(slug, number, head)  # one query a tick for every open PR
     if rollup is None:  # the snapshot cannot vouch for this PR: read it the REST way
         rc, stdout, err = H._gh(['pr', 'checks', str(number), '-R', slug, '--json',
-                                 'name,bucket,link,workflow,startedAt'])
+                                 'name,bucket,state,link,workflow,startedAt'])
         none = 'no checks reported' in f'{stdout}\n{err}'
         try:
             rollup = [] if none else [c for c in json.loads(stdout) if isinstance(c, dict)]
+            for c in rollup:  # `gh` lists a cancelled run's bucket as fail on some versions
+                if c.get('bucket') == 'fail' and str(c.get('state') or '').upper() in (
+                        'CANCELLED', 'CANCELED'):
+                    c['bucket'] = CANCEL_BUCKET
         except (json.JSONDecodeError, TypeError):
             return 'unknown', H.tail(err) or f'gh pr checks exited {rc}', []
         if head:
@@ -4073,15 +4082,16 @@ def pr_checks(slug, number, required=(), rerun=(), head=None):
 
     def rerun_of(c):
         m = _RUN_RE.search(c.get('link') or '')
-        return c.get('bucket') == 'cancel' and bool(m) and m.group(1) in held
+        return c.get('bucket') == CANCEL_BUCKET and bool(m) and m.group(1) in held
 
-    red = [c.get('name') or '?' for c in judged
-           if c.get('bucket') in RED_BUCKETS and not rerun_of(c)]
+    red = [c.get('name') or '?' for c in judged if c.get('bucket') in RED_BUCKETS]
     if red:
         return 'red', ', '.join(red), checks
     pending = [c.get('name') or '?' for c in judged if c.get('bucket') == 'pending']
     pending += [f"{c.get('name') or '?'} (cancelled by the CI queue, re-run queued)"
                 for c in judged if rerun_of(c)]
+    pending += [f"{c.get('name') or '?'} (cancelled, awaiting a re-run)"
+                for c in judged if c.get('bucket') == CANCEL_BUCKET and not rerun_of(c)]
     if pending:
         return 'pending', ', '.join(pending), checks
     return 'green', f'{len(checks)} check(s)', checks

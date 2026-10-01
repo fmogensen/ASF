@@ -141,7 +141,8 @@ def verdict(runs, required):
     """``('green'|'pending'|'red', why)`` for check ``runs`` against the ``required`` names. A
     required check is green only when a run of it (its job name up to the first space: a matrix
     leg answers for its job) concluded ``success``; one still running or not created is
-    pending; one that concluded anything else — ``skipped`` included — is red. A red check the
+    pending; one ``cancelled`` is pending (it judged no code); one that concluded anything else —
+    ``skipped`` included — is red. A red check the
     product does not require is never a verdict. No required names: pending, and the line says
     so — a queue with nothing to gate on lands nothing."""
     from asf.harvest import deploy
@@ -156,6 +157,8 @@ def verdict(runs, required):
         for r in mine:
             if r.get('status') != 'completed':
                 pending.append(f"{name} ({r.get('status') or 'pending'})")
+            elif r.get('conclusion') == 'cancelled':   # a cut-short run judged no code
+                pending.append(f'{name} (cancelled)')
             elif r.get('conclusion') != 'success':
                 red.append(f"{name} ({r.get('conclusion') or 'no conclusion'})")
     if red:

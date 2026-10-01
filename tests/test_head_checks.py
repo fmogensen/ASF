@@ -63,7 +63,8 @@ class HeadRuns(unittest.TestCase):
     def test_the_rollup_alone_never_sees_the_dispatched_run(self):
         with mock.patch.object(harvest, '_gh', side_effect=fake_gh()):
             state, detail, _ = lane.pr_checks('o/p', 902, ('gate', 'gate-tests', 'p1-e2e'))
-        self.assertEqual((state, detail), ('red', 'gate, gate-tests, p1-e2e'))  # cancels only
+        self.assertEqual(state, 'pending')  # cancels only: never red
+        self.assertIn('gate-tests (cancelled', detail)
 
     def test_a_dispatched_run_on_the_head_judges(self):
         calls = []
@@ -87,7 +88,7 @@ class HeadRuns(unittest.TestCase):
     def test_unreadable_runs_leave_the_rollup(self):
         with mock.patch.object(harvest, '_gh', side_effect=fake_gh(runs='nope')):
             self.assertEqual(lane.pr_checks('o/p', 902, ('gate',), head=HEAD)[:2],
-                             ('red', 'gate'))
+                             ('pending', 'gate (cancelled, awaiting a re-run)'))
 
     def test_only_the_exact_head(self):
         self.assertEqual(lane.exact_head({'head': HEAD, 'pr': {'head': HEAD}}), HEAD)

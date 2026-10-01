@@ -2437,9 +2437,20 @@ class ProductHarvestTests(unittest.TestCase):
                            'link': 'https://github.com/o/p/actions/runs/6/job/9'}])
         with mock.patch.object(harvest, '_gh', return_value=(1, out, '')):
             self.assertEqual(lane.pr_checks('o/p', 1, ('gate',), rerun=(5,))[0], 'pending')
-            self.assertEqual(lane.pr_checks('o/p', 1, ('lint',), rerun=(5,))[:2],
-                             ('red', 'lint'))  # a cancel nobody will re-run stays red
-            self.assertEqual(lane.pr_checks('o/p', 1, ('gate',))[:2], ('red', 'gate'))
+            # a cancelled check is never red, re-run held or not (it judged no code)
+            self.assertEqual(lane.pr_checks('o/p', 1, ('lint',), rerun=(5,))[0], 'pending')
+            self.assertEqual(lane.pr_checks('o/p', 1, ('gate',))[:2],
+                             ('pending', 'gate (cancelled, awaiting a re-run)'))
+
+    def test_a_cancelled_check_gh_lists_as_fail_is_never_red(self):
+        out = json.dumps([{'name': 'gate', 'bucket': 'fail', 'state': 'CANCELLED',
+                           'link': 'https://github.com/o/p/actions/runs/5/job/9'},
+                          {'name': 'lint', 'bucket': 'fail', 'state': 'FAILURE',
+                           'link': 'https://github.com/o/p/actions/runs/6/job/9'}])
+        with mock.patch.object(harvest, '_gh', return_value=(1, out, '')):
+            self.assertEqual(lane.pr_checks('o/p', 1, ('gate',))[0], 'pending')
+            self.assertEqual(lane.pr_checks('o/p', 1, ('lint',))[:2], ('red', 'lint'))
+            self.assertEqual(lane.pr_checks('o/p', 1)[:2], ('red', 'lint'))  # none named
 
     def test_pr_checks_judges_only_the_required_names(self):
         out = json.dumps([{'name': 'gate', 'bucket': 'pass'},

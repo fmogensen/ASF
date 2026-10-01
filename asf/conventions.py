@@ -212,7 +212,10 @@ DEFAULT_WORKTREE_SETUP = None
 #: ``conventions.pre_push_check``: the product's fast, host-safe slice of its CI gate (rule
 #: scripts, lint, spec and changeset checks — no database, no build) that every code-writing brief
 #: names as the command a session must run, and see pass, before any push; the approvals hook never
-#: refuses it as a full suite. None → the briefs name no such command.
+#: refuses it as a full suite. None → the briefs name no such command. A map ``{code: "<cmd>",
+#: spec: [...], plan: [...]}`` gives each brief kind its own: ``code`` is the string form, and
+#: ``spec`` / ``plan`` list the ordered steps (a command, or ``{run, note}``) the spec, plan and
+#: replan briefs run before their push; ``<n>`` / ``<path>`` placeholders match one argument.
 DEFAULT_PRE_PUSH_CHECK = None
 #: ``conventions.merge``: who clicks merge on a green, reviewed PR — ``manual`` (the operator: the
 #: merge-time approval holds stay as the matrix sets them) or ``auto`` (the lane: those holds are
@@ -477,8 +480,26 @@ def validate_mapping(data):
             why = _path_list_problem(data[key])
             if why:
                 problems.append((key, why))
+    push = data.get('pre_push_check')
+    if isinstance(push, dict):
+        for sub, value in push.items():
+            if sub == 'code':
+                if not isinstance(value, str) or not value.strip():
+                    problems.append(('pre_push_check.code', f'must be a command string, not {value!r}'))
+            elif sub in ('spec', 'plan'):
+                items = value if isinstance(value, list) else [value]
+                for item in items:
+                    run = item.get('run') if isinstance(item, dict) else item
+                    if not isinstance(run, str) or not run.strip():
+                        problems.append((f'pre_push_check.{sub}',
+                                         f'must be a list of commands (a string or {{run, note}}), '
+                                         f'and {item!r} is not one'))
+            else:
+                problems.append((f'pre_push_check.{sub}', 'is not one of code, spec, plan'))
     for key in ('worktree_setup', 'pre_push_check'):
         setup = data.get(key)
+        if key == 'pre_push_check' and isinstance(setup, dict):
+            continue
         if setup is not None and (isinstance(setup, (dict, list, bool)) or not str(setup).strip()):
             problems.append((key, f'must be a command string, not {setup!r}'))
     suite = data.get('full_suite_commands')
@@ -739,7 +760,7 @@ class Conventions:
     worktree_setup: str = DEFAULT_WORKTREE_SETUP
     #: The command a code brief must run and see pass before any push
     #: (:data:`DEFAULT_PRE_PUSH_CHECK`).
-    pre_push_check: str = DEFAULT_PRE_PUSH_CHECK
+    pre_push_check: object = DEFAULT_PRE_PUSH_CHECK
     #: ``merge``: ``auto`` | ``manual`` (:data:`DEFAULT_MERGE`); any other value is a red doctor
     #: finding and reads as the default.
     merge: str = DEFAULT_MERGE

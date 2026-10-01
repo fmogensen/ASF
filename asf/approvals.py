@@ -378,21 +378,79 @@ _TARGETED_FILTER = re.compile(
     r'(?:^|\s)(?:--filter(?:=|\s+)|-F\s+)(?![\'"]?(?:\*+|\.\.\.|\./\*\*)[\'"]?(?:\s|$))\S')
 
 
+def _pre_push_value(product):
+    conv = getattr(product, 'conventions', None)
+    return conv.get('pre_push_check') if conv is not None else None
+
+
 def pre_push_check(product):
     """``conventions.pre_push_check``: the product's cheap gate slice every code brief must run
-    before a push (:data:`asf.conventions.DEFAULT_PRE_PUSH_CHECK`), stripped; None when unset."""
-    conv = getattr(product, 'conventions', None)
-    value = conv.get('pre_push_check') if conv is not None else None
+    before a push (:data:`asf.conventions.DEFAULT_PRE_PUSH_CHECK`), stripped; None when unset.
+    A plain string is the code kinds' command; a map ``{code, spec, plan}`` carries it under
+    ``code`` (the doc kinds' steps: :func:`pre_push_steps`)."""
+    value = _pre_push_value(product)
+    if isinstance(value, dict):
+        value = value.get('code')
     if not isinstance(value, str) or not value.strip():
         return None
     return ' '.join(value.split())
 
 
+#: The doc-kind lists a brief kind runs before its push, in order (``spec`` then ``plan``).
+PRE_PUSH_DOC_KEYS = {'spec': ('spec',), 'spec-amend': ('spec',), 'plan': ('plan',),
+                     'replan': ('plan',), 'delivery-plan': ('plan',),
+                     'spec-plan': ('spec', 'plan')}
+
+
+def pre_push_steps(product, kind):
+    """``[(command, note)]``: the ordered doc-kind pre-push steps ``conventions.pre_push_check``
+    names for brief ``kind`` (``spec``/``plan`` lists of a string or ``{run, note}``); ``[]`` for
+    a string-valued check, an unset one, or a code kind. ``note`` is ``''`` when absent."""
+    value = _pre_push_value(product)
+    if not isinstance(value, dict):
+        return []
+    steps = []
+    for key in PRE_PUSH_DOC_KEYS.get(kind, ()):
+        items = value.get(key)
+        for item in (items if isinstance(items, list) else [items] if items else []):
+            run, note = (item.get('run'), item.get('note')) if isinstance(item, dict) else (item, '')
+            if isinstance(run, str) and run.strip():
+                step = (' '.join(run.split()), ' '.join(str(note or '').split()))
+                if step not in steps:
+                    steps.append(step)
+    return steps
+
+
+_PLACEHOLDER = re.compile(r'<[^<>\s]+>')
+
+
+def _step_matches(step, simple):
+    """True when ``simple`` is the step ``step`` exactly, each ``<name>`` placeholder standing
+    for one argument."""
+    pattern = ''.join(r'\S+' if _PLACEHOLDER.fullmatch(t) else re.escape(t)
+                      for t in re.split(r'(<[^<>\s]+>)', step) if t)
+    return re.fullmatch(pattern, simple) is not None
+
+
+def _doc_steps_allowed(product, simple):
+    value = _pre_push_value(product)
+    if not isinstance(value, dict):
+        return False
+    for kind in PRE_PUSH_DOC_KEYS:
+        for run, _note in pre_push_steps(product, kind):
+            if _step_matches(run, simple):
+                return True
+    return False
+
+
 def _allowed_targeted(product, simple):
     """True when ``simple`` is a run the briefs ask for, not a full suite: the product's own
-    ``pre_push_check`` (with or without further arguments), or a run filtered to named packages."""
+    ``pre_push_check`` (with or without further arguments), one of its doc-kind steps (exactly,
+    placeholders matching arguments), or a run filtered to named packages."""
     check = pre_push_check(product)
     if check and (simple == check or simple.startswith(check + ' ')):
+        return True
+    if _doc_steps_allowed(product, simple):
         return True
     return bool(_TARGETED_FILTER.search(simple))
 

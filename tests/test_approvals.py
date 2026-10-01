@@ -342,6 +342,28 @@ class HookTest(unittest.TestCase):
                 rc, out = self.call('Bash', {'command': cmd})
                 self.assertEqual(rc, 2, out)
 
+    def test_the_doc_pre_push_steps_are_allowed_with_placeholders_as_arguments(self):
+        self.write_product(self.FULL_SUITE + "  pre_push_check:\n    code: pnpm gate:fast\n"
+                           "    plan:\n"
+                           "      - node scripts/bands.mjs reserve migration <n> --plan <path>\n"
+                           "      - node scripts/registers-check.mjs\n")
+        for cmd in ('node scripts/bands.mjs reserve migration 12 --plan docs/plans/f-1.md',
+                    'node scripts/registers-check.mjs', 'pnpm gate:fast'):
+            with self.subTest(cmd=cmd):
+                rc, out = self.call('Bash', {'command': cmd})
+                self.assertEqual(rc, 0, out)
+        from asf import approvals
+        self.assertTrue(approvals._step_matches('a <n> b <path>', 'a 3 b x/y.md'))
+        for cmd in ('a 3 b', 'a 3 b x y', 'a  b x'):
+            self.assertFalse(approvals._step_matches('a <n> b <path>', cmd), cmd)
+
+    def test_the_pre_push_check_may_be_a_map_by_kind(self):
+        from asf import conventions
+        ok = {'code': 'pnpm gate:fast', 'spec': ['a'], 'plan': ['b <n>', {'run': 'c', 'note': 'n'}]}
+        self.assertEqual(conventions.validate_mapping({'pre_push_check': ok}), [])
+        for bad in ({'code': ''}, {'plan': [1]}, {'plan': [{'note': 'x'}]}, {'doc': ['x']}):
+            self.assertTrue(conventions.validate_mapping({'pre_push_check': bad}), bad)
+
     def test_the_pre_push_check_is_a_command_string(self):
         from asf import conventions
         self.assertEqual(conventions.validate_mapping({'pre_push_check': 'pnpm gate:fast'}), [])

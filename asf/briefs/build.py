@@ -355,6 +355,27 @@ PRE_PUSH_RULE = ("MUST RUN BEFORE EVERY PUSH, AND PASS: `{command}` — the prod
                  "CI to find; paste its last line in the report.")
 
 
+#: The doc kinds' steps (``conventions.pre_push_check: {spec: [...], plan: [...]}``): each one
+#: after rebasing onto the trunk, in order, with the product's note on why.
+PRE_PUSH_DOC_RULE = ("MUST RUN BEFORE PUSH, in this order, after rebasing onto `origin/{main}` "
+                     "(the approvals hook allows exactly these commands; red is fixed before the "
+                     "push, never pushed for CI to find; paste each last line in the report):")
+
+
+def pre_push_doc_block(product, kind):
+    """The paragraph :data:`PRE_PUSH_DOC_RULE` (a blank line after it) with the numbered steps the product names for
+    doc brief ``kind``, or ``''`` when it names none."""
+    from asf import approvals
+    steps = approvals.pre_push_steps(product, kind) if product is not None else []
+    if not steps:
+        return ''
+    main = getattr(product, 'main', 'main')
+    lines = [PRE_PUSH_DOC_RULE.format(main=main)]
+    for i, (run, note) in enumerate(steps, 1):
+        lines.append(f'  {i}. `{run}`' + (f' — {note}' if note else ''))
+    return '\n'.join(lines) + '\n\n'
+
+
 def pre_push_block(product):
     """A blank line and :data:`PRE_PUSH_RULE` naming the product's ``pre_push_check``, or ``''``
     when it sets none — the template places it right after a paragraph, so an unset check leaves
@@ -392,6 +413,7 @@ def context(product, row, kind, facts):
         'gate_before_push': gate_before_push(product),
         'gate_before_push_direct': gate_before_push_direct(product),
         'pre_push_check': pre_push_block(product),
+        'pre_push_doc': pre_push_doc_block(product, kind),
         'test_command': preamble_mod.conventions(product).test_command
         or '(none set — run the tests you add)',
         'row_kind': getattr(row, 'kind', '') or '',

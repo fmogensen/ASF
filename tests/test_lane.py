@@ -2598,7 +2598,7 @@ class SkippedRequiredCheck(unittest.TestCase):
         self.assertIsNone(how)
         self.assertEqual(got[0], lane.WAITING_CI)
         self.assertIn('gate-tests', got[1])
-        red = [{'name': 'gate', 'bucket': 'pass'}, {'name': 'gate-tests', 'bucket': 'cancel'},
+        red = [{'name': 'gate', 'bucket': 'pass'}, {'name': 'gate-tests', 'bucket': 'pass'},
                {'name': 'e2e', 'bucket': 'fail'}]
         how, got = self._gate(host, red)
         self.assertIsNone(how)
