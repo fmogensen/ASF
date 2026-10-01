@@ -921,6 +921,8 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
     sid = lifecycle.session_id(product.name, row.job, started)
     with _STATE_LOCK:
         hooks_dir = githooks.ensure(product)
+        from asf import hooks as hooks_mod  # local: hooks imports pool, the launch's side
+        hooks_mod.ensure_account_hooks(account)  # the Stop gate binds every session
     job = runtime_mod.Job(product.name, row.job, worktree, brief_path, model,
                           account=account, add_dirs=add_dirs,
                           permission_mode=wp.get('permission_mode')

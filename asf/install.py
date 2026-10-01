@@ -588,8 +588,9 @@ def _uninstall_clocks(product_name, cfg, dry_run):
 
 
 def _drop_asf_hook_entries(settings):
-    """``settings`` with every hook entry :func:`hooks._is_ours` recognises as the approvals hook
-    (the only one ``hooks.install`` ever writes into an account's own settings file) removed;
+    """``settings`` with every hook entry :func:`hooks._is_ours` recognises as a built-in hook
+    (:data:`asf.hooks.BUILTIN` — the only ones ``hooks.install`` writes into an account's own
+    settings file) removed;
     every other key, and every other hook entry, is kept untouched. Returns
     ``(new_settings, changed)``."""
     settings = dict(settings)
@@ -599,7 +600,9 @@ def _drop_asf_hook_entries(settings):
         new_groups = []
         for g in groups:
             before = g.get('hooks') or []
-            kept = [h for h in before if not hooks._is_ours(h.get('command'), 'approvals', None)]
+            kept = [h for h in before
+                    if not any(hooks._is_ours(h.get('command'), name, None)
+                               for name in hooks.BUILTIN)]
             changed = changed or len(kept) != len(before)
             if kept:
                 new_groups.append(dict(g, hooks=kept))

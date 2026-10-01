@@ -41,6 +41,10 @@ The product yaml carries the overrides::
       review:
         skip_under_lines: 80      # a size: s Feature's Task under this many changed lines lands
                                   # on CI and the gate, no review session (0 = always review)
+      commit:
+        signoff: true             # every factory commit carries Signed-off-by (default false)
+        trailers: {Refs: '{item}'}  # more trailers every factory commit carries; the lane
+                                  # writes them and the sign-off on publish, the session never has to
       worktree_setup: make deps   # run in every fresh worker worktree (unset = nothing)
       pre_push_check: make lint   # the product's cheap gate checks: every code brief names it as
                                   # the command that must pass before a push (unset = none)
@@ -948,6 +952,22 @@ class Conventions:
         fails (:meth:`asf.harvest.lane.Lane.repair_signoff`). False unless set."""
         value = self.map_of('commit').get('signoff')
         return value is True or str(value).strip().lower() in ('true', 'yes', 'on', '1')
+
+    def commit_trailers(self):
+        """``commit.trailers``: ``{key: value}`` — the trailers every factory commit must carry
+        beyond the sign-off (a product's ``Refs: {item}``, say); ``{item}`` in a value is the
+        branch's item id. The lane writes them on publish
+        (:meth:`asf.harvest.lane.Lane.normalise_commits`), the session never has to. ``{}``
+        unless set; a key or value that is not a plain one-line string is skipped."""
+        value = self.map_of('commit').get('trailers')
+        if not isinstance(value, dict):
+            return {}
+        out = {}
+        for k, v in value.items():
+            if isinstance(k, str) and isinstance(v, (str, int)) and k.strip() \
+                    and ':' not in k and '\n' not in str(v) and str(v).strip():
+                out[k.strip()] = str(v).strip()
+        return out
 
     def signoff_check(self):
         """``commit.signoff_check``: the text (case-insensitive) a PR check's name contains when
