@@ -475,6 +475,13 @@ def lane_push_cell(product):
     return lane.ref_push_line(product)
 
 
+def bypass_cell(product):
+    """``RED N commit(s) … bypassed the merge queue`` when a trunk commit did not come through
+    it (:mod:`asf.trunk_watch`, off its state file), else None (no row)."""
+    from asf import trunk_watch
+    return trunk_watch.status_cell(product)
+
+
 def merge_cell(product):
     """``auto``, ``queue`` or ``manual`` — ``conventions.merge``: whether the lane merges a green,
     reviewed PR itself (directly, or through its merge queue) or the operator clicks merge."""
@@ -537,7 +544,8 @@ def render(root, product, cfg=None):
                        ('Cron', lambda: cron_cell(cfg, product)),
                        ('Groom', lambda: groom_cell(root, product)),
                        ('Gate', lambda: gate_cell(product)),
-                       ('Lane pushes', lambda: lane_push_cell(product))):
+                       ('Lane pushes', lambda: lane_push_cell(product)),
+                       ('Queue bypass', lambda: bypass_cell(product))):
         try:
             text = cell()
         except Exception as e:  # noqa: BLE001 — one unreadable row never loses the table

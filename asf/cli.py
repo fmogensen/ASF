@@ -355,6 +355,8 @@ def build_parser():
     actions.register(sub)
     from asf.harvest import deploy
     deploy.register(sub)
+    from asf import merge_queue
+    merge_queue.register(sub)
 
     return p
 

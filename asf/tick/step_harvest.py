@@ -149,6 +149,16 @@ def deploy_pass(product, out=print):
         out(f'deploy: FAILED {(str(e) or type(e).__name__).strip().splitlines()[0]}')
 
 
+def trunk_watch_pass(product, out):
+    """One look at the trunk's new commits (:mod:`asf.trunk_watch`): a line per commit that
+    bypassed the merge queue. Detection only; never raises into the step."""
+    from asf import trunk_watch
+    try:
+        trunk_watch.tick(product, out)
+    except Exception as e:  # noqa: BLE001 — the watch never stops a harvest
+        out(f'trunk watch: failed — {type(e).__name__}: {e}')
+
+
 def run(ctx, out=print, spawn=None):
     """The step: report the last background run, then start the next one unless one still
     holds the lock. Never waits on a gate."""
@@ -157,6 +167,7 @@ def run(ctx, out=print, spawn=None):
         out('harvest: no repo_dir — nothing to harvest')
         return 0
     deploy_pass(product, out)
+    trunk_watch_pass(product, out)
     lock = harvest.try_lock(os.path.abspath(env.state_dir(product)))
     if lock is None:
         rec = read_status(product)
