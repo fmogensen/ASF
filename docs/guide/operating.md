@@ -187,6 +187,38 @@ offline runners. `asf ci reconcile` plans the fix. See [the CI runner pool](ci-r
 
 `/asf:parity` (one row per Story) and `/asf:prod` (deploy state and what shipped) complete the set.
 
+## The trunk ruleset: one door to the trunk
+
+Under `merge: queue` the merge queue is the only way onto the trunk, and the host enforces it.
+Just before the queue fast-forwards the trunk to a green batch sha, it posts the commit status
+`asf/queue` = success on that exact sha (`conventions.ci.queue_status` renames the context;
+the description names the batch, the link is the batch's CI run). A repository ruleset on the
+trunk requires that status:
+
+- target: the trunk branch (`refs/heads/main`); enforcement `active`; **no bypass actors**
+- rules: `deletion`, `non_fast_forward` (no force-push), `required_status_checks` with the one
+  context `asf/queue` (`strict_required_status_checks_policy: false`; no pull-request rule)
+
+Every session and worker pushes as the same GitHub user, so a bypass actor would protect
+nothing: the status is the key. A `gh pr merge`, the web merge button or a hand push makes a sha
+nobody posted `asf/queue` on, and GitHub refuses it (`Required status check "asf/queue" is
+expected`). The queue's own push carries it and goes through.
+
+`asf doctor` shows a `trunk ruleset` row: green names the ruleset id and both calls below; red
+when no active ruleset on the trunk requires the status (it names a disabled one to enable).
+
+**Break-glass.** Only when the queue itself cannot land and the trunk must move now — the queue
+is broken and its fix has to land, or a production incident needs a hotfix the queue cannot
+carry — and only with the operator told. Disable, land the one change, re-enable at once:
+
+```sh
+gh api -X PUT repos/<owner>/<repo>/rulesets/<id> -f enforcement=disabled   # open the trunk
+gh api -X PUT repos/<owner>/<repo>/rulesets/<id> -f enforcement=active     # close it again
+```
+
+`asf doctor` prints the exact pair with the id filled in. Until the ruleset is active again the
+doctor row is red, and `queue bypass` lists every commit that landed outside the queue.
+
 ## Holds, and "back to its session"
 
 When harvest cannot land a branch — its gate is red, its rebase conflicts on a file ASF does not
