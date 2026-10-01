@@ -152,6 +152,44 @@ class RelaunchCapTests(_Ledger):
         self.assertTrue(occ['corrections'][self.ITEM]['parked'])
 
 
+class HeadCapTests(_Ledger):
+    """A product's ``correct-t-0042`` (2026-09-30): four correction rounds on head ``3fe323b``
+    in 2h40m. Each round's cause was its correction text, and the text named the review file
+    of the moment (``7-t-0042.md``, then ``8-t-0042.md``, then the red checks): a review filed
+    between rounds on the same head wrote a new cause, and the (job, item, cause) streak broke
+    every time. A head that did not move takes at most :data:`relaunch.CAP` correction rounds."""
+    JOB, ITEM = 'correct-t-0042', 'T-0042'
+    PARTIAL = report('partial')
+
+    def test_a_third_correction_on_one_head_parks_whatever_the_cause(self):
+        self.run_once(self.PARTIAL, cause='7b35ed73')
+        self.assertIsNone(self.verdict(head=HEAD, cause='a52059b4'))
+        self.run_once(self.PARTIAL, cause='a52059b4')
+        why = self.verdict(head=HEAD, cause='b0d61586')
+        self.assertIn('launched 2 time(s) on e0920dc75 without a new commit', why)
+        self.assertIn('a52059b4, 7b35ed73', why)
+
+    def test_a_review_between_rounds_does_not_reset_it(self):
+        self.run_once(self.PARTIAL, cause='7b35ed73')
+        self.run_once(report('done'), job='review-t-0042', cause='bf60facf')
+        self.run_once(self.PARTIAL, cause='a52059b4')
+        self.assertIsNotNone(self.verdict(head=HEAD, cause='b0d61586'))
+
+    def test_a_new_commit_a_card_edit_or_an_unpark_buys_a_round(self):
+        self.run_once(self.PARTIAL, cause='7b35ed73')
+        self.run_once(self.PARTIAL, cause='a52059b4')
+        self.assertIsNone(self.verdict(head='f' * 40, cause='b0d61586'))
+        self.assertIsNone(self.verdict(head=HEAD, card='79176bdca68333ee', cause='b0d61586'))
+        self.write({'job': self.JOB, 'unparked': '2026-09-30T05:59:00Z'})
+        self.assertIsNone(self.verdict(head=HEAD, cause='b0d61586'))
+
+    def test_another_kind_keeps_the_cause_streak(self):
+        for cause in ('c1', 'c2'):
+            self.run_once(report('partial'), job='review-t-0042', cause=cause)
+        self.assertIsNone(relaunch.verdict(self.path, 'review-t-0042', self.ITEM, head=HEAD,
+                                           card=CARD, cause='c3'))
+
+
 class StatusParkedTests(_Ledger):
 
     def test_status_names_a_parked_item_and_is_silent_without_one(self):

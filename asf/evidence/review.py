@@ -49,8 +49,12 @@ HEAD_LINE_RE = re.compile(r'^[\s*#>|_-]*head[\s*_]*:[\s*_`]*(?P<sha>[0-9a-f]{7,4
 LEGACY_WORD_RE = re.compile(r'APPROVED|CHANGES REQUESTED|BOUNCE|REVISE', re.I)
 #: The legacy file name: ``<prefix>-review-r<n>.md`` (an optional letter after the round).
 LEGACY_NAME_RE = re.compile(r'(?P<prefix>.+)-review-r(?P<n>\d+)[a-z]?\.md')
-#: How much of a review is read for its verdict.
-READ_CHARS = 20000
+#: How much of a review is read for its verdict. A delivery review holds one check table per
+#: member and closes with its ``verdict:`` line and its C list: a product's T-0042 rounds 6–9
+#: (2026-09-30, 24–25k characters each) put both past a 20,000-character window, so each
+#: "approved, C: none" review read as changes (its table cut mid-row) and sent the branch back
+#: to a correction with nothing to answer — 11 sessions in 24h. Read the whole review.
+READ_CHARS = 1_000_000
 
 
 def verdict_of(text, required=()):

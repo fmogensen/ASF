@@ -21,6 +21,16 @@ other park writes): the feeder's FIX → CORRECT row shows it ``PARKED <reason>`
 status, no session is launched on it, a card change or a re-plan lifts it (health), and
 ``asf unpark`` releases it by hand. A new commit, a new review (a commit on the branch), a card
 edit or a new correction all break the streak by construction.
+
+**One head, at most :data:`CAP` correction rounds.** A correction's cause is its text, and the
+text names the review file it answers (``7-t-0042.md``, then ``8-t-0042.md``) or the red checks
+of the moment — so on one unmoved head every round carried a new cause, and the streak above
+broke each time (a product's ``correct-t-0042``, 2026-09-30: four launches on ``3fe323b`` in
+2h40m, the causes ``7b35…``, ``7b35…``, ``a520…``, ``b0d6…``; a review session between them
+filed a fresh round on the same head and wrote the next text). For the kinds in
+:data:`HEAD_CAPPED` the cause is not compared: :func:`head_streak` counts the job's runs launched
+on the head about to be launched on, with the same card, since the item's last unpark, and at
+:data:`CAP` the row parks — only a new commit (or a card edit, or ``asf unpark``) buys a round.
 """
 import hashlib
 import re
@@ -36,6 +46,9 @@ RELAUNCH_CAP = 'relaunch cap'
 #: A report status that says the session has nothing more to do on this state.
 TERMINAL_STATUSES = ('done', report_mod.BLOCKED)
 SHA_RE = re.compile(r'\b[0-9a-f]{7,40}\b')
+#: Kinds whose launches on one head are capped whatever their cause text (:func:`head_streak`):
+#: a correction round on a head that did not move is the same round again.
+HEAD_CAPPED = ('correct',)
 
 
 def cause_key(row_kind, correction=''):
@@ -61,7 +74,7 @@ def streak(path, job, item, head=None, card='', cause=''):
     runs in it must also agree among themselves on the head (so a branch that moved between them
     breaks it even when the current head is unknown). A spent window's run is not counted."""
     all_runs = lifecycle.item_runs(path, item) if item else []
-    since = max((r.get('unparked') or '' for r in all_runs), default='')
+    since = _since_unpark(all_runs)
     rs = sorted((r for r in all_runs if r.get('job') == job and r.get('ended')
                  and not lifecycle.quota_exhausted(r) and (r.get('started') or '') > since),
                 key=lambda r: r.get('started') or '', reverse=True)
@@ -76,6 +89,33 @@ def streak(path, job, item, head=None, card='', cause=''):
             break
         out.append(r)
     return out
+
+
+def _since_unpark(all_runs):
+    return max((r.get('unparked') or '' for r in all_runs), default='')
+
+
+def head_streak(path, job, item, head, card=''):
+    """The ended runs of ``job`` (a :data:`HEAD_CAPPED` kind), newest first, launched on ``head``
+    with the same card since the item's latest unpark — the cause not compared, since a
+    correction's text changes with every review round filed on the same head. ``[]`` when the
+    head is unknown: only a known head can be shown unmoved."""
+    if not head or not item:
+        return []
+    all_runs = lifecycle.item_runs(path, item)
+    since = _since_unpark(all_runs)
+    out = []
+    for r in all_runs:
+        if r.get('job') != job or not r.get('ended') or lifecycle.quota_exhausted(r) \
+                or (r.get('started') or '') <= since or r.get('kind') not in HEAD_CAPPED:
+            continue
+        have = r.get('launch_head') or ''
+        if not have or not (have.startswith(head) or head.startswith(have)):
+            continue
+        if card and r.get('card_digest') and r['card_digest'] != card:
+            continue
+        out.append(r)
+    return sorted(out, key=lambda r: r.get('started') or '', reverse=True)
 
 
 def terminal(text):
@@ -142,6 +182,14 @@ def assess(path, job, item, head=None, card='', cause='', repo=None, main='main'
     last report names that git verified on ``origin/<main>`` ('' when none) — the evidence a
     park closes its card on instead of waiting for a person (:mod:`asf.workers.trunkclose`)."""
     runs = streak(path, job, item, head, card, cause)
+    on_head = head_streak(path, job, item, head, card)
+    if len(on_head) >= cap and len(on_head) > len(runs):
+        # the cause moved round to round, the head did not: the same correction again
+        at = head[:9]
+        causes = ', '.join(dict.fromkeys((r.get('cause') or '?')[:8] for r in on_head))
+        return (f'{job} launched {len(on_head)} time(s) on {at} without a new commit (the '
+                f'card unchanged, the cause moved: {causes}). Not relaunched: the row is parked '
+                f'until a new commit or card edit changes its state, or `asf unpark {item}`'), ''
     if not runs:
         return None, ''
     text = _result_text(runs[0])
