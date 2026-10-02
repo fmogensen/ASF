@@ -4313,21 +4313,58 @@ def red_step(slug, job_id):
     try:
         rc, text, _e = H._gh(['api', '-H', 'Accept: application/vnd.github.raw',
                               f"repos/{slug}/contents/{path}?ref={job['head_sha']}"])
-        import yaml
-        doc = yaml.safe_load(text) if rc == 0 else None
+        return step, (workflow_step_run(text, job.get('name'), step) if rc == 0 else None)
     except Exception:
         return step, None
-    jobs = (doc or {}).get('jobs') if isinstance(doc, dict) else None
-    for key, j in (jobs or {}).items():
-        if not isinstance(j, dict):
+
+
+def _unquote(v):
+    v = v.strip()
+    return v[1:-1] if len(v) > 1 and v[0] == v[-1] and v[0] in '"\'' else v
+
+
+def workflow_step_run(text, job_name, step_name):
+    """The ``run:`` of the step named ``step_name`` in workflow ``text``, preferring the job whose
+    key or ``name:`` is ``job_name`` — read line by line (the standard library has no YAML), a
+    block scalar (``|`` / ``>``) dedented, else the inline value; None when no such step runs a
+    command."""
+    lines = (text or '').splitlines()
+    found, job, jobs_at = [], None, None
+    for i, l in enumerate(lines):
+        ind = len(l) - len(l.lstrip())
+        if l.strip() == 'jobs:' and ind == 0:
+            jobs_at = i
+        elif jobs_at is not None and ind == 2 and re.match(r'[\w.-]+:\s*$', l.strip()):
+            job = {'key': l.strip()[:-1], 'name': None}
+        elif job and ind == 4 and l.strip().startswith('name:'):
+            job['name'] = _unquote(l.strip()[5:])
+        m = re.match(r'(\s*)-\s+name:\s*(.+)$', l)
+        if not m or _unquote(m.group(2)) != step_name:
             continue
-        if job.get('name') not in (key, j.get('name')) and \
-                not str(job.get('name') or '').startswith(f'{key} ('):
-            continue
-        for s in j.get('steps') or ():
-            if isinstance(s, dict) and s.get('name') == step and s.get('run'):
-                return step, str(s['run']).strip()
-    return step, None
+        dash = len(m.group(1))
+        run = None
+        for j in range(i + 1, len(lines) + 1):
+            if j == len(lines) or (lines[j].strip() and len(lines[j]) - len(lines[j].lstrip()) <= dash):
+                break
+            k = re.match(r'\s*run:\s*(.*)$', lines[j])
+            if not k:
+                continue
+            kind, body = k.group(1).strip(), []
+            if kind[:1] in '|>' and kind:
+                keyind = len(lines[j]) - len(lines[j].lstrip())
+                for t in lines[j + 1:]:
+                    if t.strip() and len(t) - len(t.lstrip()) <= keyind:
+                        break
+                    body.append(t)
+                width = min([len(t) - len(t.lstrip()) for t in body if t.strip()] or [0])
+                run = '\n'.join(t[width:].rstrip() for t in body).strip()
+            else:
+                run = _unquote(kind)
+            break
+        if run:
+            mine = job and job_name in (job['key'], job['name'])
+            found.append((not mine, run))
+    return sorted(found)[0][1] if found else None
 
 
 def red_brief(check, step, tests, cmd):
