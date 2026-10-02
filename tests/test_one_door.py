@@ -72,6 +72,53 @@ class AsfLand(QueueRepo):
         self.assertEqual(self.batches(), [])
         self.assertEqual(self.backs, [])  # no session to send it back to
 
+    def test_a_conflicting_pr_is_red_at_once_and_shown_in_queue_and_status(self):
+        # a conflict means GitHub never starts its CI: no check runs at all
+        self.gh.mergeable[7] = 'CONFLICTING'
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.batches(), [])
+        req = merge_queue.load_requests(self.state_dir)['7']
+        self.assertEqual(req['red']['kind'], 'conflict')
+        self.assertEqual(req['red']['head'], self.head)
+        self.assertEqual(req['red']['why'], 'conflicts with main — merge or rebase it')
+        mine = [l for l in self.lines if 'PR #7' in l]
+        self.assertEqual(len(mine), 1, self.lines)
+        self.assertIn('conflicts with main — merge or rebase it', mine[0])
+        self.assertEqual(self.backs, [])
+        self.assertIn('asf land #7 (red: conflicts with main — merge or rebase it)',
+                      trunk_watch.waiting(self.product()))
+        self.assertEqual(status.land_red_cell(self.product()),
+                         'RED #7 conflicts with main — merge or rebase it')
+        # not judged again until the head moves
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(len([l for l in self.lines if 'PR #7' in l]), 0)
+
+    def test_a_pending_pr_that_does_not_conflict_is_not_marked(self):
+        self.gh.mergeable[7] = 'MERGEABLE'
+        self.queue_pass(self.lane(), [])
+        self.assertNotIn('red', merge_queue.load_requests(self.state_dir)['7'])
+        self.assertIsNone(status.land_red_cell(self.product()))
+
+    def test_a_conflicting_factory_branch_is_left_to_the_lane(self):
+        self.push_lane('worker/T-0009', {'y.txt': 'y\n'}, 'feat: y')
+        merge_queue.add_request(self.state_dir, 9, 'worker/T-0009')
+        self.gh.mergeable[9] = 'CONFLICTING'
+        self.queue_pass(self.lane(), [])
+        self.assertNotIn('red', merge_queue.load_requests(self.state_dir)['9'])
+
+    def test_a_land_request_and_a_factory_member_that_conflict_never_share_a_batch(self):
+        self.push_lane('worker/T-0001', {'x.txt': 'factory x\n'}, 'feat: x')
+        self.green(self.head)
+        factory = self.entry('worker/T-0001', 1, files=('x.txt',))
+        self.queue_pass(self.lane(), [factory])
+        (batch,) = self.batches()
+        # the factory member is first (ready list first); the land request waits on it
+        self.assertEqual([m['branch'] for m in batch['members']], ['worker/T-0001'])
+        self.assertEqual(self.backs, [])
+        self.assertTrue(any('waits on #1 (conflicting files: x.txt)' in l for l in self.lines),
+                        self.lines)
+        self.assertNotIn('red', merge_queue.load_requests(self.state_dir)['7'])
+
     def test_withdrawn_request_leaves_the_queue(self):
         self.assertTrue(merge_queue.drop_request(self.state_dir, 7))
         self.green(self.head)
