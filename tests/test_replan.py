@@ -372,6 +372,40 @@ after: new 1
         self.assertTrue(f['reshape_applied_at'])
         self.assertEqual(replan.pending(dict(f, type='feature')), '')
 
+    def test_a_rewritten_task_keeps_the_paths_the_factory_widened_it_onto(self):
+        # a product's T-0500 (2026-10-02): widened onto three files outside its plan, then its
+        # Feature's replan landed and rewrote writes: without them — the next correct session
+        # reported `needs writes` for the very same files and the Task went to a reshape
+        path = os.path.join(self.root, 'tasks', 'T-0030.md')
+        with open(path, encoding='utf-8') as f:
+            text = f.read()
+        text = text.replace('writes: [lib/t-0030.py]',
+                            'writes: [lib/t-0030.py, lib/widened.py, tests/test_plan.py]')
+        text = text.replace('- 2026-09-01: created\n', (
+            '- 2026-09-01: created\n'
+            '- 2026-09-02 10:00 footprint widened: +lib/widened.py tests/test_plan.py '
+            'lib/reverted.py (report: needs writes)\n'
+            '- 2026-09-02 11:00 footprint widening reverted: overlaps T-0032\n'))
+        self.assertIn('lib/widened.py', text)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(text)
+        self.apply()
+        t30 = read_card(self.root, 'task', 'T-0030')
+        # the replan's own paths first, the kept widening after; a widened path the replan lists
+        # is not doubled, a reverted one (no longer on writes:) is not brought back, and the plan
+        # path the replan dropped (lib/t-0030.py) stays dropped
+        self.assertEqual(t30['writes'], ['lib/plan.py', 'tests/test_plan.py', 'lib/widened.py'])
+        self.assertIn('T-0030: keeps its widened lib/widened.py', ' '.join(self.lines))
+        # a Task never widened is rewritten exactly as the replan says
+        self.assertEqual(read_card(self.root, 'task', 'T-0032')['writes'], ['lib/t-0032.py'])
+
+    def test_kept_widenings_reads_the_cards_history_and_its_current_writes(self):
+        rec = {'meta': {'writes': ['a.py', 'b.py', 'c.py']},
+               'text': '- x footprint widened: +b.py c.py d.py (report: needs writes)\n'}
+        self.assertEqual(replan.kept_widenings(rec, ['a.py', 'c.py']), ['b.py'])
+        self.assertEqual(replan.kept_widenings({'meta': {'writes': ['a.py']}, 'text': ''},
+                                               ['z.py']), [])
+
     def test_a_second_pass_is_a_no_op(self):
         self.apply()
         self.assertEqual(self.apply(), {})

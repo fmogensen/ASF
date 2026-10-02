@@ -29,7 +29,8 @@ lands it.
 
 Once it is on the trunk, the tick's record step applies it (:func:`apply_replans`) — the
 record, never the session, writes the cards: a rewritten Task gets the replan's title,
-``writes:``, ``after:`` (and ``stories:`` when given), and ``links.plan`` the replan's path, so
+``writes:`` (plus the paths the factory widened it onto that are still on it: its branch already
+touches them, :func:`kept_widenings`), ``after:`` (and ``stories:`` when given), and ``links.plan`` the replan's path, so
 the plan-order pass reads the new order and not the old plan's; a new Task is minted under the
 Feature; a dropped Task is ``removed:``. A section naming a Task that already landed, or one of
 another Feature, changes nothing (landed work is kept). An ``after:`` naming a card that can
@@ -147,6 +148,20 @@ def replanned_since(items, item_id, at):
     return False
 
 
+def kept_widenings(rec, writes):
+    """The paths of ``rec``'s current ``writes:`` that a ``footprint widened: +…`` History line
+    added and that the replan's ``writes`` does not list, in the card's order. A replan rewrites
+    the plan, never the branch: the Task's commits already touch the paths the factory widened it
+    onto, so dropping them sent its next correct session back to ``needs writes`` for the very
+    files it had been given — and the Task to a reshape. A widening ``asf`` reverted is no longer
+    in ``writes:`` and so is not kept."""
+    from asf.feeder.widen import widened_paths    # lazy: the feeder imports this module
+    widened = set(widened_paths((rec or {}).get('text')))
+    listed = set(writes or ())
+    return [w for w in ((rec or {}).get('meta') or {}).get('writes') or ()
+            if w in widened and w not in listed]
+
+
 # ---- the record pass --------------------------------------------------------
 
 def _done(meta):
@@ -251,7 +266,10 @@ def _apply(root, product, read_plan, out=print):
             if t['title']:
                 updates['title'] = t['title']
             if t['writes'] is not None:
-                updates['writes'] = t['writes']
+                kept = kept_widenings(canonical[tid], t['writes'])
+                updates['writes'] = list(t['writes']) + kept
+                if kept:
+                    lines.append(f"{tid}: keeps its widened {' '.join(kept)}")
             if t['after'] is not None:
                 updates['after'] = resolve(t['after'], tid)
             if t['stories'] is not None:
