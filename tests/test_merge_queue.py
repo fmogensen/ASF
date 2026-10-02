@@ -37,6 +37,7 @@ class FakeGH:
         self.checks = {}      # sha -> [check_run]
         self.pr_state = {}    # number -> OPEN|MERGED
         self.mergeable = {}   # number -> CONFLICTING|MERGEABLE (default UNKNOWN)
+        self.head_oid = {}    # number -> current head sha (when a test reads it)
         self.annotations = {}  # job id -> [annotation]
         self.calls = []
         self.logs, self.steps = {}, {}
@@ -50,7 +51,10 @@ class FakeGH:
             return 0, json.dumps({'check_runs': self.checks.get(sha, [])}), ''
         if args[:2] == ['pr', 'view']:
             n = int(args[2])
-            return 0, json.dumps({'state': self.pr_state.get(n, 'OPEN'), 'mergeable': self.mergeable.get(n, 'UNKNOWN')}), ''
+            out = {'state': self.pr_state.get(n, 'OPEN'), 'mergeable': self.mergeable.get(n, 'UNKNOWN')}
+            if n in self.head_oid:
+                out['headRefOid'] = self.head_oid[n]
+            return 0, json.dumps(out), ''
         if args[:2] == ['pr', 'close']:
             self.pr_state[int(args[2])] = 'CLOSED'
             return 0, '', ''
