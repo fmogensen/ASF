@@ -1145,6 +1145,11 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
             lane.out(f'merge queue: asf land PR #{n} waits — check runs unreadable')
             continue
         state, why = verdict(admission_runs(runs), required)
+        if state == 'pending' and runs and all(r.get('status') == 'completed' for r in runs) \
+                and all(w.endswith('(not started)') for w in why.split(', ')):
+            # the head's CI is done and never ran these (a path filter, a matrix the filter
+            # skipped under its unexpanded name): the batch run judges them
+            state, why = 'green', ''
         if state == 'pending' and not lane.conv.branch_kind(b) and conflicts_with_trunk(lane, n):
             # GitHub starts no pull_request CI on a PR that conflicts with the trunk: its checks
             # never arrive, and waiting for them would be silent for good. A factory branch is
@@ -1177,7 +1182,8 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
 
 def admission_runs(runs):
     """A land request's head runs as admission reads them: a required job the PR's own CI
-    ``skipped`` (a path filter: a scripts-only change runs no suites on its PR) reads as passed.
+    ``skipped`` (a path filter: a scripts-only change runs no suites on its PR) reads as passed,
+    and so does one that never started once every run on the head has completed.
     Admission is not landing — the batch ref runs the whole matrix, and there a skipped required
     check is red (:func:`verdict`); without this a path-filtered PR could never enter the queue."""
     return [dict(r, conclusion='success') if r.get('status') == 'completed'
