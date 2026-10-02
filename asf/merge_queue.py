@@ -320,6 +320,27 @@ def regate_holds(lane, heads, trunk_sha):
     for b, run in lifecycle.by_branch(lane.path).items():
         rec = lifecycle.lane_of(run)
         corr = (run or {}).get('correction') or {}
+        if (rec.get('state') == lane_mod.BACK and corr.get('kind') == 'conflict'
+                and '(a batch ahead of it)' in (corr.get('text') or '')
+                and heads.get(b) and heads[b] == rec.get('head')):
+            # told it conflicts with a batch ahead, rebuild skipped: when it conflicts with the
+            # trunk itself, the lane's mechanical rebuild (#570) is owed
+            tfiles = _trunk_conflict(lane, rec['head'])
+            if tfiles is not None:
+                f = {'branch': b, 'run': run, 'prev': rec, 'head': rec['head'],
+                     'item': rec.get('item'), 'pr': {'number': rec.get('pr'), 'state': 'OPEN'},
+                     'class': lane_mod.CODE}
+                lane.out(f"merge queue: {b} (PR #{rec.get('pr')}) conflicts with {lane.trunk} "
+                         f"itself, not a batch ahead — the lane rebuilds it")
+                lane_mod.send_back(
+                    lane, f, 'conflict',
+                    f"PR #{rec.get('pr')} does not merge onto {lane.trunk}"
+                    + (f'; conflicts in {", ".join(tfiles)}' if tfiles else '')
+                    + f' — rebase the branch onto origin/{lane.trunk} (git rebase '
+                    f'origin/{lane.trunk}), never merge; the factory publishes the rebased branch',
+                    tfiles)
+                out.append(b)
+            continue
         if rec.get('state') != lane_mod.BACK or corr.get('kind') != lane_mod.LANDING_GATE:
             continue
         if not heads.get(b) or heads[b] != rec.get('head'):
@@ -353,7 +374,8 @@ def run(lane, ready):
     runs = lifecycle.by_branch(lane.path)
     asked = load_requests(lane.state_dir)
     gated = any(lifecycle.lane_of(r).get('state') == lane_mod.BACK
-                and ((r or {}).get('correction') or {}).get('kind') == lane_mod.LANDING_GATE
+                and ((r or {}).get('correction') or {}).get('kind') in (lane_mod.LANDING_GATE,
+                                                                        'conflict')
                 for r in runs.values())
     if not data['batches'] and not ready and not asked and not gated and not any(
             lifecycle.lane_of(r).get('state') == lane_mod.QUEUED and lifecycle.lane_of(r).get('batch')

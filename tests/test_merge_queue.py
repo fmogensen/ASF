@@ -901,3 +901,31 @@ class RegateHolds(QueueRepo):
         flake.save(self.state_dir, data)
         self.pass_()
         self.assertEqual(self.lane_of('spec/F-1')['state'], lane.BACK)
+
+
+class StaleBatchAheadConflict(RegateHolds):
+    def session_job(self, job):
+        self.session(job, 'F-1', 'spec/F-1', kind='coder')
+        run = lifecycle.by_branch(os.path.join(self.state_dir, 'sessions.jsonl'))['spec/F-1']
+        fields, _l = lifecycle.hold(
+            os.path.join(self.state_dir, 'sessions.jsonl'), dict(run, branch='spec/F-1', job=job),
+            'conflict', 'PR #7 does not merge onto b (a batch ahead of it) in the merge queue',
+            '2026-10-02T07:22:59Z', head=self.head)
+        harvest.mark_session(self.state_dir, job, **fields)
+        ln = self.lane()
+        ln.set({'branch': 'spec/F-1', 'run': run, 'prev': {}, 'head': self.head, 'item': 'F-1'},
+               lane.BACK, 'kind=conflict', head=self.head, pr=7)
+
+    def test_a_clean_branch_is_left_alone_and_a_trunk_conflict_goes_to_the_rebuild(self):
+        sent = []
+        with mock.patch.object(lane, 'send_back', side_effect=lambda *a, **k: sent.append(a)):
+            merge_queue.run(self.lane(), [])
+        self.assertEqual(sent, [])                      # merges onto the trunk: nothing owed
+        self.push_main({'specs/f1.md': 'trunk\n'}, 'trunk f1')
+        with mock.patch.object(lane, 'send_back', side_effect=lambda *a, **k: sent.append(a)):
+            merge_queue.run(self.lane(), [])
+        (a,) = sent
+        self.assertEqual((a[2], a[4]), ('conflict', ['specs/f1.md']))
+
+    test_a_hold_on_a_job_nobody_re_ran_is_gated_again = None
+    test_a_hold_the_triage_re_ran_stands = None
