@@ -289,6 +289,8 @@ def build_parser():
     register_workers(sub)
     from asf.workers.unpark import register as register_unpark
     register_unpark(sub)
+    from asf.workers.correct import register as register_correct
+    register_correct(sub)
     from asf.briefs import register as register_briefs
     register_briefs(sub)
     from asf.metrics.import_sessions import register as register_import_sessions
