@@ -38,6 +38,7 @@ class FakeGH:
         self.pr_state = {}    # number -> OPEN|MERGED
         self.mergeable = {}   # number -> CONFLICTING|MERGEABLE (default UNKNOWN)
         self.calls = []
+        self.logs, self.steps = {}, {}
 
     def __call__(self, args):
         self.calls.append(list(args))
@@ -52,7 +53,17 @@ class FakeGH:
             return 0, '', ''
         if args[:2] == ['run', 'list']:
             return 0, '[]', ''
+        if args[0] == 'api' and '/actions/jobs/' in args[-1]:
+            job = args[-1].split('/actions/jobs/')[1].split('/')[0]
+            if args[-1].endswith('/logs'):
+                return (0, self.logs[job], '') if job in self.logs else (1, '', 'not found')
+            if job in self.steps:
+                return 0, json.dumps({'steps': [{'name': self.steps[job], 'conclusion': 'failure'}],
+                                      'run_id': 7, 'name': 'rules', 'head_sha': ''}), ''
         return 0, '', ''
+
+    logs = {}     # job id -> its log
+    steps = {}    # job id -> its failed step
 
 
 class QueueRepo(LaneFixture):
@@ -329,6 +340,206 @@ class RedBatch(QueueRepo):
             self.assertEqual(r['state'], lane.MERGED)
         self.assertEqual(self.lane_of('worker/T-0001')['sha'], first['sha'])
         self.assertEqual(self.lane_of('worker/T-0003')['sha'], second['sha'])
+
+
+def job_run(name, job, conclusion='failure'):
+    """A check run with a numeric job id (flake triage and the log reader key on it)."""
+    return {'name': name, 'status': 'completed', 'conclusion': conclusion,
+            'html_url': f'https://github.com/o/p/actions/runs/7/job/{job}'}
+
+
+def rules_log(*findings):
+    """A failed ``rules`` job's log: the step's header group, its output, the runner's error."""
+    body = ['==> gate:fast: lint (0s)', 'Checked 2869 files in 2s. No fixes applied.',
+            '==> gate:fast: brand parity (strict) (7s)', 'stale-tokens: 0 finding(s)']
+    if findings:
+        body.append(f'unaliased-literal: {len(findings)} finding(s)')
+        body += [f'  {f} — oklch(' for f in findings]
+    body.append(f'brand parity: {len(findings)} finding(s) across its four rules')
+    stamp = '2026-10-02T06:37:57.1639137Z '
+    lines = ['##[group]Run ./scripts/gate-fast.sh --all', 'shell: /usr/bin/bash -e {0}',
+             '##[endgroup]'] + body + ['##[error]Process completed with exit code 1.',
+                                       'Post job cleanup.']
+    return '\n'.join('\ufeff' * (i == 0) + stamp + l for i, l in enumerate(lines)) + '\n'
+
+
+class Culprit(QueueRepo):
+    """One member's real defect fails the batch: the failing job's log names its files, so it
+    goes back alone (job, step, lines) and the innocent members are cut again at once."""
+
+    def setUp(self):
+        super().setUp()
+        self.setUpBacks()
+        self.push_lane('worker/T-0001', {'apps/site/day-bars.tsx': 'x\n'}, 'feat: bars')
+        self.push_lane('worker/T-0002', {'b.txt': 'b\n'}, 'feat: b')
+        self.push_lane('worker/T-0003', {'c.txt': 'c\n'}, 'feat: c')
+
+    def entries(self):
+        return [self.entry('worker/T-0001', 1, 'T-0001', files=('apps/site/day-bars.tsx',)),
+                self.entry('worker/T-0002', 2, 'T-0002', files=('b.txt',)),
+                self.entry('worker/T-0003', 3, 'T-0003', files=('c.txt',))]
+
+    def red_upstream(self, sha, job):
+        """``rules`` (not required) failed; the required jobs behind it were skipped."""
+        self.gh.checks[sha] = [job_run('rules', job), check_run('gate', 'skipped'),
+                               check_run('gate-tests', 'skipped')]
+        self.gh.logs[job] = rules_log('apps/site/day-bars.tsx:10', 'apps/site/day-bars.tsx:11')
+        self.gh.steps[job] = 'gate:fast (brand parity)'
+
+    def test_a_culprit_found_by_its_files_goes_back_and_the_rest_land(self):
+        self.queue_pass(self.lane(), self.entries())
+        (batch,) = self.batches()
+        self.red_upstream(batch['sha'], '101')
+        # red once: flake triage re-runs the failed upstream job first — nobody blamed yet
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.backs, [])
+        self.assertEqual([b['ref'] for b in self.batches()], [batch['ref']])
+        self.assertIn(['run', 'rerun', '--job', '101', '-R', SLUG], self.gh.calls)
+        # red again on its re-run: a real defect, and the log names T-0001's file
+        self.red_upstream(batch['sha'], '102')
+        ln = self.queue_pass(self.lane(), [])
+        self.assertEqual([(b, k) for b, k, _t, _f in self.backs], [('worker/T-0001', 'gate')])
+        _b, _k, text, files = self.backs[0]
+        self.assertEqual(files, ['apps/site/day-bars.tsx'])
+        for want in ('rules failed', 'gate:fast (brand parity)', 'unaliased-literal: 2 finding(s)',
+                     'apps/site/day-bars.tsx:10 — oklch(', 'apps/site/day-bars.tsx:11 — oklch(',
+                     batch['sha'][:12]):
+            self.assertIn(want, text)
+        self.assertNotIn('b.txt', text)
+        (again,) = self.batches()
+        self.assertNotEqual(again['ref'], batch['ref'])
+        self.assertEqual([m['branch'] for m in again['members']], ['worker/T-0002', 'worker/T-0003'])
+        self.assertEqual(again['base'], batch['base'])
+        for b in ('worker/T-0002', 'worker/T-0003'):
+            self.assertEqual((self.lane_of(b)['state'], ln.results[b]), (lane.QUEUED, 'queued'))
+        self.assertTrue(any('cut again without it' in l for l in self.lines), self.lines)
+        # the innocent members land on their own run
+        self.green(again['sha'])
+        self.gh.pr_state = {2: 'MERGED', 3: 'MERGED'}
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.heads()['main'], again['sha'])
+        self.assertEqual(self.lane_of('worker/T-0002')['state'], lane.MERGED)
+        self.assertEqual(len(self.backs), 1)
+
+    def test_a_culprit_found_by_bisect_when_the_log_names_no_file(self):
+        """The log names no file: the batch splits in halves, each cut on the trunk, until the
+        red member stands alone — the innocent halves land on the way."""
+        self.queue_pass(self.lane(), self.entries()[1:] + self.entries()[:1])   # T2, T3, T1
+        (batch,) = self.batches()
+        self.gh.checks[batch['sha']] = [check_run('gate', 'failure'), check_run('gate-tests')]
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.backs, [])
+        first, second = self.batches()
+        self.assertEqual([m['branch'] for m in first['members']], ['worker/T-0002'])
+        self.assertEqual([m['branch'] for m in second['members']], ['worker/T-0003', 'worker/T-0001'])
+        self.green(first['sha'])
+        self.gh.checks[second['sha']] = [check_run('gate', 'failure'), check_run('gate-tests')]
+        self.gh.pr_state = {2: 'MERGED'}
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.heads()['main'], first['sha'])
+        self.assertEqual(self.backs, [])
+        # the landing made the red half stale: it is cut again on the new tip, and splits there
+        (pair,) = self.batches()
+        self.assertEqual([m['branch'] for m in pair['members']], ['worker/T-0003', 'worker/T-0001'])
+        self.gh.checks[pair['sha']] = [check_run('gate', 'failure'), check_run('gate-tests')]
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.backs, [])
+        (left, right) = self.batches()
+        self.assertEqual([[m['branch'] for m in b['members']] for b in (left, right)],
+                         [['worker/T-0003'], ['worker/T-0001']])
+        self.green(left['sha'])
+        self.gh.checks[right['sha']] = [check_run('gate', 'failure'), check_run('gate-tests')]
+        self.gh.pr_state = {2: 'MERGED', 3: 'MERGED'}
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.heads()['main'], left['sha'])
+        (alone,) = self.batches()                       # stale again: cut alone on the new tip
+        self.assertEqual([m['branch'] for m in alone['members']], ['worker/T-0001'])
+        self.gh.checks[alone['sha']] = [check_run('gate', 'failure'), check_run('gate-tests')]
+        self.queue_pass(self.lane(), [])
+        self.assertEqual([b for b, _k, _t, _f in self.backs], ['worker/T-0001'])
+        self.assertIn('this PR alone', self.backs[0][2])
+        self.assertEqual(self.batches(), [])
+
+    def test_a_lone_culprit_is_told_the_failed_upstream_job_not_only_the_skipped_ones(self):
+        self.queue_pass(self.lane(), self.entries()[:1])
+        (batch,) = self.batches()
+        self.red_upstream(batch['sha'], '101')
+        self.queue_pass(self.lane(), [])            # re-run first
+        self.red_upstream(batch['sha'], '102')
+        self.queue_pass(self.lane(), [])
+        ((b, kind, text, files),) = self.backs
+        self.assertEqual((b, kind, files), ('worker/T-0001', 'gate', ['apps/site/day-bars.tsx']))
+        self.assertIn('rules failed', text)
+        self.assertIn('apps/site/day-bars.tsx:10 — oklch(', text)
+        self.assertIn('this PR alone', text)
+
+    def test_a_flake_blames_no_member(self):
+        self.queue_pass(self.lane(), self.entries())
+        (batch,) = self.batches()
+        self.red_upstream(batch['sha'], '101')
+        self.queue_pass(self.lane(), [])
+        # the re-run went green, and the jobs behind it ran green
+        self.gh.checks[batch['sha']] = [job_run('rules', '102', 'success'), check_run('gate'),
+                                        check_run('gate-tests')]
+        self.gh.pr_state = {1: 'MERGED', 2: 'MERGED', 3: 'MERGED'}
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.backs, [])
+        self.assertEqual(self.heads()['main'], batch['sha'])
+        for b in ('worker/T-0001', 'worker/T-0002', 'worker/T-0003'):
+            self.assertEqual(self.lane_of(b)['state'], lane.MERGED)
+
+    def test_red_on_the_trunk_too_blames_no_member(self):
+        self.queue_pass(self.lane(), self.entries())
+        (batch,) = self.batches()
+        self.gh.checks[batch['sha']] = [check_run('rules', 'failure'), check_run('gate', 'skipped'),
+                                        check_run('gate-tests', 'skipped')]
+        with mock.patch.object(lane.GitHubHost, 'trunk_red',
+                               lambda _self, names: {'rules': 'f' * 40} if 'rules' in names else {}):
+            self.queue_pass(self.lane(), [])
+        self.assertEqual(self.backs, [])
+        self.assertEqual(self.batches(), [])            # dropped, never split
+        self.assertNotIn(batch['ref'], self.heads())
+        for b in ('worker/T-0001', 'worker/T-0002', 'worker/T-0003'):
+            r = self.lane_of(b)
+            self.assertEqual(r['state'], lane.WAITING)
+            self.assertIn('red on main too', r['reason'])
+        self.assertEqual(self.heads()['main'], batch['base'])
+
+    def test_every_member_named_is_no_verdict_the_batch_splits(self):
+        self.queue_pass(self.lane(), self.entries()[:2])
+        (batch,) = self.batches()
+        self.gh.checks[batch['sha']] = [job_run('rules', '101'), check_run('gate', 'skipped'),
+                                        check_run('gate-tests', 'skipped')]
+        self.gh.logs['101'] = rules_log('apps/site/day-bars.tsx:10', 'b.txt:1')
+        with mock.patch.object(merge_queue.flake, 'triage', lambda *a, **k: (['rules'], [])):
+            self.queue_pass(self.lane(), [])
+        self.assertEqual(self.backs, [])
+        self.assertEqual([[m['branch'] for m in b['members']] for b in self.batches()],
+                         [['worker/T-0001'], ['worker/T-0002']])
+
+
+class EscapeSequences(unittest.TestCase):
+    """``gh api`` 2.101 refuses a coloured job log unless asked: the read retries with the flag."""
+
+    def test_a_refused_log_is_read_again_with_the_flag(self):
+        seen = []
+
+        def run(cmd, **_kw):
+            seen.append(cmd)
+            if harvest.GH_ESCAPES in cmd:
+                return subprocess.CompletedProcess(cmd, 0, 'the log\x1b[0m', '')
+            return subprocess.CompletedProcess(cmd, 1, '', 'the response contains terminal escape '
+                                               'sequences; pass --allow-escape-sequences to output it')
+        with mock.patch.object(harvest.subprocess, 'run', side_effect=run):
+            rc, out, _err = harvest._gh(['api', 'repos/o/p/actions/jobs/1/logs'])
+        self.assertEqual((rc, out), (0, 'the log\x1b[0m'))
+        self.assertEqual(seen[1], ['gh', 'api', harvest.GH_ESCAPES, 'repos/o/p/actions/jobs/1/logs'])
+
+    def test_any_other_failure_is_not_retried(self):
+        with mock.patch.object(harvest.subprocess, 'run', return_value=subprocess.CompletedProcess(
+                ['gh'], 1, '', 'HTTP 404')) as run:
+            self.assertEqual(harvest._gh(['api', 'repos/o/p/x'])[0], 1)
+        self.assertEqual(run.call_count, 1)
 
 
 class MovingParts(QueueRepo):

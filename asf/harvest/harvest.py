@@ -911,7 +911,27 @@ def _gh(args):
         return 1, '', line
     p = subprocess.run(['gh', *args], capture_output=True, text=True, env=clean_env())
     gh_limit.inspect_proc(args, p)  # a rate limit is never a result
+    if escapes_refused(args, p.returncode, getattr(p, 'stderr', '')):
+        args = with_escapes(args)
+        p = subprocess.run(['gh', *args], capture_output=True, text=True, env=clean_env())
+        gh_limit.inspect_proc(args, p)
     return p.returncode, p.stdout, p.stderr
+
+
+#: ``gh api`` (2.101 on) refuses to print a response holding terminal escape sequences — a CI
+#: job's log, coloured by its tools — unless asked to; an older ``gh`` has no such flag. So the
+#: flag is added only on that refusal: a job log read never comes back empty for its colours.
+GH_ESCAPES = '--allow-escape-sequences'
+
+
+def escapes_refused(args, rc, err):
+    """True when ``gh api`` refused a response for its escape sequences (:data:`GH_ESCAPES`)."""
+    return rc != 0 and list(args[:1]) == ['api'] and GH_ESCAPES in (err or '') \
+        and GH_ESCAPES not in args
+
+
+def with_escapes(args):
+    return ['api', GH_ESCAPES, *args[1:]]
 
 
 def gh_json(args, default):
