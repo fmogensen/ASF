@@ -311,7 +311,9 @@ def waiting(product):
         prs = ', '.join(f"#{m.get('pr')}" for m in b.get('members') or ())
         out.append(f"batch {b['ref']} ({prs})")
     for _k, r in merge_queue.ordered_requests(merge_queue.load_requests(sd)):
-        out.append(f"asf land #{r['pr']}" + (' (priority)' if r.get('priority') else ''))
+        red = r.get('red')
+        out.append(f"asf land #{r['pr']}" + (' (priority)' if r.get('priority') else '')
+                   + (f" (red: {red.get('why')})" if red else ''))
     return out
 
 

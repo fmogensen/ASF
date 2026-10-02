@@ -379,7 +379,8 @@ def run(lane, ready):
         # its own half (stacked, the upper half would re-run the red whole)
         stack = chain and i >= halves
         base_sha, base_ref = (chain[-1]['sha'], chain[-1]['ref']) if stack else (trunk_sha, None)
-        batch = cut(lane, group, base_sha, base_ref, st)
+        batch = cut(lane, group, base_sha, base_ref, st,
+                    base_members=chain[-1]['members'] if base_ref else ())
         if batch:
             chain.append(batch)
             save(lane.state_dir, {'batches': chain})
@@ -461,10 +462,15 @@ def required_set(lane, sha, trunk_sha):
     return tuple(dict.fromkeys(list(at_batch) + list(at_trunk))), None
 
 
-def cut(lane, group, base_sha, base_ref, st):
+def cut(lane, group, base_sha, base_ref, st, base_members=()):
     """Merge each entry of ``group`` ``--no-ff`` onto ``base_sha`` in a throwaway worktree, push
     the result once as a new batch ref and QUEUE the members on it. The batch record, or None
-    when nothing was cut (every member conflicted, the CI queue or the push held it)."""
+    when nothing was cut (every member conflicted, the CI queue or the push held it).
+
+    Two entries that conflict with each other never share a batch: the later one (group order,
+    priority first) is deferred — ``waits on #N (conflicting files: …)`` — and cut on a later pass,
+    after the earlier one landed or went. The same for a conflict with a batch ahead
+    (``base_members``): it waits on that batch's PR instead of going red."""
     trunk, out = lane.trunk, lane.out
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d-%H%M%S')
     holder = tempfile.mkdtemp(prefix='merge-queue-')
@@ -487,13 +493,27 @@ def cut(lane, group, base_sha, base_ref, st):
                 files = H.sh(['git', 'diff', '--name-only', '--diff-filter=U'],
                              cwd=tmp).stdout.split()
                 H.sh(['git', 'merge', '--abort'], cwd=tmp)
-                partner = next((m['branch'] for m in members
-                                if set(m.get('files') or ()) & set(files)), None)
+                mine = set(files)
+                partner = next((m for m in members if set(m.get('files') or ()) & mine), None)
+                if partner is None and members:   # not by its own file list: by what the batch changed
+                    changed = set(H.sh(['git', 'diff', '--name-only', base_sha, 'HEAD'],
+                                       cwd=tmp).stdout.split())
+                    partner = members[-1] if changed & mine else None
+                ahead = next((m for m in base_members if set(m.get('files') or ()) & mine), None) \
+                    if base_ref and partner is None else None
+                other = partner or ahead
+                if other is not None:
+                    n = _pr(other) if partner else other.get('pr')
+                    why = (f"waits on #{n} (conflicting files: {', '.join(files) or '?'})"
+                           + (f' in batch {base_ref}' if ahead else ''))
+                    out(f"merge queue: {b} (PR #{_pr(f)}) {why} — kept out of this batch, "
+                        f"cut after it")
+                    _wait(lane, f, f'merge queue: {why}', green=f.get('green'))
+                    continue
                 on = f'{base_ref} (a batch ahead of it)' if base_ref else trunk
                 _send_back(
                     lane, f, 'conflict',
                     f"PR #{_pr(f)} does not merge onto {on} in the merge queue"
-                    + (f' beside {partner}' if partner else '')
                     + (f'; conflicts in {", ".join(files)}' if files else '')
                     + f' — rebase the branch onto origin/{trunk} (git rebase origin/{trunk}), '
                     f'never merge; the factory publishes the rebased branch', files,
@@ -852,6 +872,21 @@ def ordered_requests(reqs):
                                                 kv[1].get('at') or '', kv[0]))
 
 
+def conflicts_with_trunk(lane, n):
+    """True when the host reads PR ``n`` as ``mergeable: CONFLICTING`` (one lean read; UNKNOWN or
+    unreadable is False)."""
+    got = H.gh_json(['pr', 'view', str(n), '-R', lane.slug, '--json', 'mergeable'], None)
+    return isinstance(got, dict) and got.get('mergeable') == 'CONFLICTING'
+
+
+def red_requests(state_dir):
+    """``[(pr, why)]``: the ``asf land`` requests marked red, by PR number."""
+    reqs = load_requests(state_dir)
+    return [(int(k), (r.get('red') or {}).get('why') or 'red') for k, r in
+            sorted(reqs.items(), key=lambda kv: int(kv[0]) if str(kv[0]).isdigit() else 0)
+            if r.get('red')]
+
+
 def requested_ready(lane, heads, trunk_sha, taken=()):
     """The entries for the ``asf land`` PRs whose required checks are success on their exact
     head now — in request order, none already in a batch (``taken``). A PR whose branch left
@@ -887,6 +922,15 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
             lane.out(f'merge queue: asf land PR #{n} waits — check runs unreadable')
             continue
         state, why = verdict(runs, required)
+        if state == 'pending' and not lane.conv.branch_kind(b) and conflicts_with_trunk(lane, n):
+            # GitHub starts no pull_request CI on a PR that conflicts with the trunk: its checks
+            # never arrive, and waiting for them would be silent for good. A factory branch is
+            # the lane's own (its conflict path rebuilds it); this one is its author's.
+            why = f'conflicts with {lane.trunk} — merge or rebase it'
+            lane.out(f'merge queue: asf land PR #{n} red at {head[:12]} — {why}')
+            r['red'] = {'head': head, 'kind': 'conflict', 'why': why, 'at': now_iso()}
+            changed = True
+            continue
         if state == 'red':
             lane.out(f'merge queue: asf land PR #{n} red at its head {head[:12]} — {why}; '
                      f'taken once a new head is green')

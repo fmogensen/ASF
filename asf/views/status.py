@@ -503,6 +503,18 @@ def trunk_stall_cell(product):
     return trunk_watch.stall_cell(product)
 
 
+def land_red_cell(product):
+    """``RED #N <why>`` for each ``asf land`` request the queue marked red (a conflict with the
+    trunk, red checks) — it waits for a new head, so it must show; None (no row) when none."""
+    from asf import merge_queue
+    if not getattr(product.conventions, 'merge_queue', lambda: False)():
+        return None
+    got = merge_queue.red_requests(env.state_dir(product))
+    if not got:
+        return None
+    return 'RED ' + '; '.join(f'#{n} {why}' for n, why in got)
+
+
 def merge_cell(product):
     """``auto``, ``queue`` or ``manual`` — ``conventions.merge``: whether the lane merges a green,
     reviewed PR itself (directly, or through its merge queue) or the operator clicks merge."""
@@ -568,6 +580,7 @@ def render(root, product, cfg=None):
                        ('Gate', lambda: gate_cell(product)),
                        ('Lane pushes', lambda: lane_push_cell(product)),
                        ('Queue bypass', lambda: bypass_cell(product)),
+                       ('Land requests', lambda: land_red_cell(product)),
                        ('Trunk stall', lambda: trunk_stall_cell(product))):
         try:
             text = cell()

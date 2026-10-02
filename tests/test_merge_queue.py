@@ -36,6 +36,7 @@ class FakeGH:
     def __init__(self):
         self.checks = {}      # sha -> [check_run]
         self.pr_state = {}    # number -> OPEN|MERGED
+        self.mergeable = {}   # number -> CONFLICTING|MERGEABLE (default UNKNOWN)
         self.calls = []
 
     def __call__(self, args):
@@ -45,7 +46,7 @@ class FakeGH:
             return 0, json.dumps({'check_runs': self.checks.get(sha, [])}), ''
         if args[:2] == ['pr', 'view']:
             n = int(args[2])
-            return 0, json.dumps({'state': self.pr_state.get(n, 'OPEN'), 'mergeable': 'UNKNOWN'}), ''
+            return 0, json.dumps({'state': self.pr_state.get(n, 'OPEN'), 'mergeable': self.mergeable.get(n, 'UNKNOWN')}), ''
         if args[:2] == ['pr', 'close']:
             self.pr_state[int(args[2])] = 'CLOSED'
             return 0, '', ''
@@ -389,20 +390,45 @@ class MovingParts(QueueRepo):
         self.assertEqual(self.heads()['main'], batch['base'])
         self.assertTrue(any('moved on origin' in l for l in self.lines), self.lines)
 
-    def test_a_conflicting_member_goes_back_and_the_rest_are_cut(self):
+    def test_two_conflicting_members_never_share_a_batch_the_later_waits(self):
         self.push_lane('worker/T-0003', {'a.txt': 'other a\n'}, 'feat: a too')
         ln = self.queue_pass(self.lane(), [self.entry('worker/T-0001', 1),
                                     self.entry('worker/T-0003', 3, 'T-0003', files=('a.txt',)),
                                     self.entry('worker/T-0002', 2, 'T-0002')])
         (batch,) = self.batches()
         self.assertEqual([m['branch'] for m in batch['members']], ['worker/T-0001', 'worker/T-0002'])
-        self.assertEqual(len(self.backs), 1)
-        b, kind, text, files = self.backs[0]
-        self.assertEqual((b, kind), ('worker/T-0003', 'conflict'))
-        self.assertEqual(files, ['a.txt'])
-        self.assertIn('worker/T-0001', text)           # the member it collides with, named
-        self.assertIn('git rebase origin/main', text)
-        self.assertEqual(ln.results['worker/T-0003'], 'back')
+        self.assertEqual(self.backs, [])               # not failed, not sent back
+        waiting = self.lane_of('worker/T-0003')
+        self.assertEqual(waiting['state'], lane.WAITING)
+        self.assertIn('waits on #1 (conflicting files: a.txt)', waiting['reason'])
+        self.assertTrue(any('waits on #1' in l for l in self.lines), self.lines)
+
+    def test_a_conflict_found_only_by_the_merge_still_defers_the_later_member(self):
+        self.push_lane('worker/T-0003', {'a.txt': 'other a\n'}, 'feat: a too')
+        # the entry's file list does not name a.txt: git's own conflict names the partner
+        self.queue_pass(self.lane(), [self.entry('worker/T-0001', 1, files=('z.txt',)),
+                                      self.entry('worker/T-0003', 3, 'T-0003', files=('y.txt',))])
+        (batch,) = self.batches()
+        self.assertEqual([m['branch'] for m in batch['members']], ['worker/T-0001'])
+        self.assertEqual(self.backs, [])
+        self.assertIn('waits on #1', self.lane_of('worker/T-0003')['reason'])
+
+    def test_a_member_conflicting_with_a_batch_ahead_waits_on_it_then_is_cut_after(self):
+        self.push_lane('worker/T-0003', {'a.txt': 'other a\n'}, 'feat: a too')
+        self.queue_pass(self.lane(), [self.entry('worker/T-0001', 1)])
+        (first,) = self.batches()
+        self.queue_pass(self.lane(), [self.entry('worker/T-0003', 3, 'T-0003', files=('a.txt',))])
+        self.assertEqual(self.backs, [])
+        self.assertEqual(len(self.batches()), 1)
+        self.assertIn(f"waits on #1 (conflicting files: a.txt) in batch {first['ref']}",
+                      self.lane_of('worker/T-0003')['reason'])
+
+    def test_a_conflict_with_the_trunk_alone_still_goes_back(self):
+        self.push_lane('worker/T-0003', {'a.txt': 'other a\n'}, 'feat: a too')
+        self.push_main({'a.txt': 'trunk a\n'}, 'trunk a')
+        self.queue_pass(self.lane(), [self.entry('worker/T-0003', 3, 'T-0003', files=('a.txt',))])
+        self.assertEqual([(b, k) for b, k, _t, _f in self.backs], [('worker/T-0003', 'conflict')])
+        self.assertIn('git rebase origin/main', self.backs[0][2])
 
     def test_the_queue_is_bounded_and_the_rest_wait_with_their_green_kept(self):
         for i in range(3, 8):
