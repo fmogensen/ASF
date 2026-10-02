@@ -37,10 +37,13 @@ class FakeGH:
         self.checks = {}      # sha -> [check_run]
         self.pr_state = {}    # number -> OPEN|MERGED
         self.mergeable = {}   # number -> CONFLICTING|MERGEABLE (default UNKNOWN)
+        self.annotations = {}  # job id -> [annotation]
         self.calls = []
 
     def __call__(self, args):
         self.calls.append(list(args))
+        if args[0] == 'api' and args[1].endswith('/annotations'):
+            return 0, json.dumps(self.annotations.get(args[1].split('/')[-2], [])), ''
         if args[0] == 'api' and '/check-runs' in args[1]:
             sha = args[1].split('/commits/')[1].split('/')[0]
             return 0, json.dumps({'check_runs': self.checks.get(sha, [])}), ''

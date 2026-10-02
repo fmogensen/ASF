@@ -3609,3 +3609,120 @@ class TestRefusedRerun(ReliefBase):
         self.assertIn('timed out', ci_queue.GitHubSource(p, run=slow).gh_try(['x'])[1])
         self.assertEqual(ci_queue.GitHubSource(p, run=DeadGh()).gh_try(['x']),
                          (None, 'unreachable'))
+
+
+class TestPriorityBatch(Base):
+    """A batch holding an ``asf land --priority`` request — or any batch once the trunk has stood
+    still past half ``ci.trunk_stall_hours`` — gets runner priority: it starts at trunk priority,
+    PR starts behind it are held until its jobs have runners (no guard lets one past), relief
+    never cancels its run, and the re-run of its cancelled run asks at trunk priority."""
+    WHY = 'holds asf land --priority #1022'
+
+    def start_batch(self, p, gh, sha='s' * 40):
+        q = self.queue(p, gh)
+        d = ci_queue.admit(p, 'batch:ci/gate-manifest', 'batch', item='PR-1022', items=ITEMS,
+                           branch='ci/gate-manifest', queue=q, sha=sha,
+                           run_branch='batch/20261002-1022', urgent=self.WHY)
+        return q, d
+
+    def test_a_priority_batch_starts_at_once_and_holds_pr_starts_until_its_jobs_have_runners(self):
+        p = product()
+        _q, d = self.start_batch(p, FakeGh(busy={'h1', 'h2', 'h3'}))
+        self.assertTrue(d.admitted)                       # no runner free: it starts even so
+        self.assertIn('batch/20261002-1022 starts first — holds asf land --priority #1022',
+                      self.lines[-1])
+        rec, = ci_queue.load('p')['started']
+        self.assertEqual((rec['branch'], rec['urgent']), ('batch/20261002-1022', self.WHY))
+        # 10 min on — past the 3-min pickup window — its runners are still set aside, and 35 min
+        # on the head guard (20 min at the head) still does not let a PR past it
+        for minutes in (10, 35):
+            d = self.admit(self.queue(p, FakeGh(), minutes=minutes), 'pr:task/T-0500', 'T-0500')
+            self.assertFalse(d.admitted)
+            self.assertIn('runners set aside for priority batch batch/20261002-1022',
+                          self.lines[-1])
+        # its hold ends at URGENT_HOLD_S at the latest: nothing starves for good
+        d = self.admit(self.queue(p, FakeGh(), minutes=50), 'pr:task/T-0500', 'T-0500')
+        self.assertTrue(d.admitted)
+
+    def test_the_hold_ends_once_its_jobs_are_on_runners(self):
+        p = product()
+        self.start_batch(p, FakeGh(), sha='s1')
+        gh = FakeGh(busy={'h1', 'h2', 'h3', 'l1'},
+                    running=[(9, 'batch/20261002-1022', 's1', ['h1', 'h2', 'h3', 'l1'])])
+        q = self.queue(p, gh, minutes=10)
+        q.free(keys={'heavy'})
+        self.assertEqual(q.data['started'], [])           # placed: the claim is the busy count
+        self.assertEqual(q._urgent_left, '')
+
+    def test_an_ordinary_batch_start_still_waits_its_turn(self):
+        p = product()
+        q = self.queue(p, FakeGh(busy={'h1', 'h2', 'h3'}))
+        d = ci_queue.admit(p, 'batch:x', 'batch', item='x', items=ITEMS, queue=q)
+        self.assertFalse(d.admitted)
+
+    def test_an_urgent_record_is_pruned_at_the_hold_not_the_pickup_window(self):
+        at = '2026-09-25T12:00:00Z'
+        data = {'entries': {}, 'started': [{'key': 'a', 'at': at}, {'key': 'b', 'at': at,
+                                                                    'urgent': self.WHY}]}
+        kept = ci_queue.prune(data, self.t0 + datetime.timedelta(minutes=10))['started']
+        self.assertEqual([s['key'] for s in kept], ['b'])
+        kept = ci_queue.prune(data, self.t0 + datetime.timedelta(minutes=46))['started']
+        self.assertEqual(kept, [])
+
+    def test_a_cancelled_priority_batch_run_is_rerun_at_trunk_priority(self):
+        rec = {'kind': 'batch', 'branch': 'batch/x', 'id': 5}
+        p = product()
+        with mock.patch.object(ci_queue, 'urgent_batch', return_value=self.WHY):
+            self.assertEqual(ci_queue._rerun_priority(rec, ITEMS, p)[:2],
+                             (ci_queue.TRUNK, 'batch, priority'))
+        with mock.patch.object(ci_queue, 'urgent_batch', return_value=''):
+            self.assertEqual(ci_queue._rerun_priority(rec, ITEMS, p)[0], ci_queue.OTHER)
+
+
+class TestUrgentBatch(Base):
+    def product(self):
+        repo = os.path.join(self.tmp, 'repo')
+        os.makedirs(repo, exist_ok=True)
+        return env.Product('p', {'repo_dir': repo, 'repo_slug': 'o/r', 'conventions': {
+            'merge': 'queue', 'merge_queue': {'ref_prefix': 'batch/'},
+            'ci': {'trunk_stall_hours': 4}}})
+
+    def write(self, name, data):
+        with open(os.path.join(env.state_dir('p'), name), 'w', encoding='utf-8') as fh:
+            json.dump(data, fh)
+
+    def test_a_batch_holding_a_priority_request(self):
+        p = self.product()
+        self.write('merge-queue.json', {'batches': [
+            {'ref': 'batch/a', 'sha': 'a', 'members': [{'pr': 7, 'branch': 'x'}]},
+            {'ref': 'batch/b', 'sha': 'b', 'members': [{'pr': 1022, 'branch': 'ci/g',
+                                                        'priority': True}]}]})
+        self.assertEqual(ci_queue.urgent_batch(p, 'batch/b'), 'holds asf land --priority #1022')
+        self.assertEqual(ci_queue.urgent_batch(p, 'batch/a'), '')
+        self.assertEqual(ci_queue.urgent_batch(p, 'cloud/T-1'), '')     # not a batch ref
+        self.assertEqual(ci_queue.urgent_batch(
+            p, 'batch/new', members=[{'pr': 9, 'priority': True}]), 'holds asf land --priority #9')
+
+    def test_any_batch_once_the_trunk_is_still_past_half_the_stall_limit(self):
+        p = self.product()
+        self.write('merge-queue.json', {'batches': [
+            {'ref': 'batch/a', 'sha': 'a', 'members': [{'pr': 7, 'branch': 'x'}]}]})
+        now = self.t0
+        self.write('trunk-watch.json', {'moved_at': now.timestamp() - 1.5 * 3600})
+        self.assertEqual(ci_queue.urgent_batch(p, 'batch/a', now=now), '')       # 1.5h < 2h
+        self.write('trunk-watch.json', {'moved_at': now.timestamp() - 2.5 * 3600})
+        self.assertIn('trunk still 2.5h (> half of 4h',
+                      ci_queue.urgent_batch(p, 'batch/a', now=now))
+
+
+class TestPriorityBatchRelief(ReliefBase):
+    def test_relief_never_cancels_a_priority_batch_run(self):
+        p = self.product()
+        os.makedirs(env.state_dir('p'), exist_ok=True)
+        self.seed(self.t0)
+        gh, run = self.gh(self.runs())
+        with mock.patch.object(ci_queue, 'urgent_batch', return_value='holds asf land --priority #1'):
+            self.relieve(p, run)
+        self.assertNotIn('201', self.cancels(gh))
+        self.assertTrue(any('relief: exempt main — priority batch' in l for l in self.lines),
+                        self.lines)

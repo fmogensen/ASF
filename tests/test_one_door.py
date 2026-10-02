@@ -139,6 +139,35 @@ class AsfLand(QueueRepo):
         (batch,) = self.batches()
         self.assertEqual([m['pr'] for m in batch['members']], [9, 7])
 
+    def test_a_priority_request_is_cut_ahead_of_a_full_chain_and_lands_first(self):
+        mq = {'merge_queue': {'ref_prefix': 'batch/', 'batch_size': 3, 'inflight': 1}}
+        self.green(self.head)
+        self.queue_pass(self.lane(self.product(**mq)), [])
+        (ahead,) = self.batches()                          # #7 fills the one in-flight slot
+        self.push_lane('hotfix/fix-y', {'y.txt': 'y\n'}, 'hotfix: y')
+        merge_queue.add_request(self.state_dir, 9, 'hotfix/fix-y', priority=True)
+        self.green(self.heads()['hotfix/fix-y'])
+        trunk = self.heads()['main']
+        self.queue_pass(self.lane(self.product(**mq)), [])
+        first, second = self.batches()                     # cut, and put first in the chain
+        self.assertEqual([m['pr'] for m in first['members']], [9])
+        self.assertTrue(first['members'][0]['priority'])
+        self.assertEqual((first['base'], first['base_ref']), (trunk, None))
+        self.assertEqual(second['ref'], ahead['ref'])
+        self.assertTrue(any('priority #9 cut ahead of 1 batch(es) in flight' in l
+                            for l in self.lines), self.lines)
+        # a second pass cuts nothing more past the limit: one priority batch at a time
+        self.queue_pass(self.lane(self.product(**mq)), [])
+        self.assertEqual(len(self.batches()), 2)
+        # it lands first; the batch it jumped is cut again on the new tip
+        self.green(first['sha'])
+        self.gh.pr_state = {9: 'MERGED'}
+        self.queue_pass(self.lane(self.product(**mq)), [])
+        self.assertEqual(self.heads()['main'], first['sha'])
+        (again,) = self.batches()
+        self.assertEqual([m['pr'] for m in again['members']], [7])
+        self.assertEqual(again['base'], first['sha'])
+
     def test_land_priority_flag_is_parsed_and_persisted(self):
         from asf import cli
         p = cli.build_parser()

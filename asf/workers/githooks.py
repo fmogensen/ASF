@@ -107,15 +107,29 @@ if [ -n "$own" ] && [ -d "$own" ]; then
 fi
 
 # one push per correction round (asf.workers.pushlog): a push the product's own pre-push hook
-# passed is logged — its local sha, one line — and a correction session is told on its second
-if [ "$name" = "pre-push" ] && [ -n "$ASF_PUSH_LOG" ]; then
+# passed is logged — its local sha, one line — and a correction session is told on its second.
+# A session pushes only to factory branches (ASF_PUSH_ALLOW, asf.workers.spawn.push_allow): a
+# refs/heads/ ref under none of its prefixes is refused before anything else runs
+if [ "$name" = "pre-push" ] && { [ -n "$ASF_PUSH_LOG" ] || [ -n "$ASF_PUSH_ALLOW" ]; }; then
     input=$(cat)
+    if [ -n "$ASF_PUSH_ALLOW" ] && [ -n "$input" ]; then
+        bad=$(printf '%s\n' "$input" | awk -v allow="$ASF_PUSH_ALLOW" '
+            NF >= 4 && $3 ~ /^refs\/heads\// {
+                b = substr($3, 12); ok = 0; n = split(allow, a, " ")
+                for (i = 1; i <= n; i++) if (a[i] != "" && index(b, a[i]) == 1) ok = 1
+                if (!ok) print b
+            }')
+        if [ -n "$bad" ]; then
+            echo "asf: push refused — an ASF session pushes only to factory branches, not:" $bad >&2
+            exit 1
+        fi
+    fi
     rc=0
     if [ "$same" = 0 ] && [ -n "$own" ] && [ -x "$own/$name" ]; then
         if [ -n "$input" ]; then printf '%s\n' "$input"; fi | "$own/$name" "$@"
         rc=$?
     fi
-    if [ "$rc" = 0 ] && [ -n "$input" ]; then
+    if [ "$rc" = 0 ] && [ -n "$input" ] && [ -n "$ASF_PUSH_LOG" ]; then
         printf '%s\n' "$input" | awk 'NF >= 4 && $2 !~ /^0+$/ { print $2 }' \
             >> "$ASF_PUSH_LOG" 2>/dev/null || :
         n=$(sort -u "$ASF_PUSH_LOG" 2>/dev/null | grep -c .)
