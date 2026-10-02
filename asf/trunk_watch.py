@@ -310,8 +310,8 @@ def waiting(product):
     for b in merge_queue.load(sd)['batches']:
         prs = ', '.join(f"#{m.get('pr')}" for m in b.get('members') or ())
         out.append(f"batch {b['ref']} ({prs})")
-    for n in sorted(merge_queue.load_requests(sd), key=lambda k: int(k) if str(k).isdigit() else 0):
-        out.append(f'asf land #{n}')
+    for _k, r in merge_queue.ordered_requests(merge_queue.load_requests(sd)):
+        out.append(f"asf land #{r['pr']}" + (' (priority)' if r.get('priority') else ''))
     return out
 
 

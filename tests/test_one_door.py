@@ -78,6 +78,27 @@ class AsfLand(QueueRepo):
         self.queue_pass(self.lane(), [])
         self.assertEqual(self.batches(), [])
 
+    def test_priority_request_goes_first_in_the_batch_and_the_view(self):
+        self.push_lane('hotfix/fix-y', {'y.txt': 'y\n'}, 'hotfix: y')
+        merge_queue.add_request(self.state_dir, 9, 'hotfix/fix-y', priority=True)
+        self.assertEqual(merge_queue.load_requests(self.state_dir)['9']['priority'], True)
+        self.assertNotIn('priority', merge_queue.load_requests(self.state_dir)['7'])
+        self.assertEqual([r['pr'] for _k, r in merge_queue.ordered_requests(
+            merge_queue.load_requests(self.state_dir))], [9, 7])
+        self.assertEqual(trunk_watch.waiting(self.product), ['asf land #9 (priority)', 'asf land #7'])
+        for b in ('hotfix/fix-x', 'hotfix/fix-y'):
+            self.green(self.heads()[b])
+        self.queue_pass(self.lane(), [])
+        (batch,) = self.batches()
+        self.assertEqual([m['pr'] for m in batch['members']], [9, 7])
+
+    def test_land_priority_flag_is_parsed_and_persisted(self):
+        from asf import cli
+        p = cli.build_parser()
+        for flag in ('--priority', '--front'):
+            self.assertTrue(p.parse_args(['land', '7', flag]).priority)
+        self.assertFalse(p.parse_args(['land', '7']).priority)
+
     def test_land_is_a_cli_command_with_help(self):
         from asf import cli
         p = cli.build_parser() if hasattr(cli, 'build_parser') else None

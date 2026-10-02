@@ -352,10 +352,13 @@ def run(lane, ready):
             _wait(lane, f, f"merge queue: batch {rec['batch']} is not in flight — gated again")
 
     # ---- cut what is ready, the halves of a split first; then the PRs `asf land` asked for
-    ready = list(ready) + requested_ready(lane, heads, trunk_sha,
-                                          taken | {f['branch'] for f in ready} | handed)
+    asked_ready = requested_ready(lane, heads, trunk_sha,
+                                  taken | {f['branch'] for f in ready} | handed)
+    # `asf land --priority`: ahead of the factory's members and the other requests (stable: the
+    # rest keep their order); only the batches already in CI stay in front of it
+    ready = sorted(list(ready) + asked_ready, key=lambda f: not f.get('priority'))
     fresh = []
-    for f in list(ready) + loose:
+    for f in sorted(list(ready) + loose, key=lambda f: not f.get('priority')):
         if f['branch'] in taken:
             continue
         taken.add(f['branch'])
@@ -824,10 +827,11 @@ def save_requests(state_dir, reqs):
     os.replace(tmp, requests_path(state_dir))
 
 
-def add_request(state_dir, number, branch, by=None):
+def add_request(state_dir, number, branch, by=None, priority=False):
     reqs = load_requests(state_dir)
     reqs[str(int(number))] = {'pr': int(number), 'branch': branch, 'at': now_iso(),
-                              **({'by': by} if by else {})}
+                              **({'by': by} if by else {}),
+                              **({'priority': True} if priority else {})}
     save_requests(state_dir, reqs)
     return reqs[str(int(number))]
 
@@ -840,6 +844,13 @@ def drop_request(state_dir, number):
     return False
 
 
+def ordered_requests(reqs):
+    """``[(key, request)]`` in line order: the ``--priority`` requests first, then each group in
+    the order it was asked."""
+    return sorted(reqs.items(), key=lambda kv: (not kv[1].get('priority'),
+                                                kv[1].get('at') or '', kv[0]))
+
+
 def requested_ready(lane, heads, trunk_sha, taken=()):
     """The entries for the ``asf land`` PRs whose required checks are success on their exact
     head now — in request order, none already in a batch (``taken``). A PR whose branch left
@@ -847,7 +858,7 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
     red stays out until it moves; a pending one waits with a line."""
     reqs = load_requests(lane.state_dir)
     out, changed = [], False
-    for key, r in sorted(reqs.items(), key=lambda kv: (kv[1].get('at') or '', kv[0])):
+    for key, r in ordered_requests(reqs):
         b, n = r['branch'], r['pr']
         if b in taken:
             continue
@@ -889,7 +900,8 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
         out.append({'branch': b, 'item': lane_mod.pr_item(n), 'kind': lane.conv.branch_kind(b),
                     'head': head, 'run': None, 'prev': None,
                     'pr': {'number': n, 'state': 'OPEN'}, 'files': files,
-                    'class': lane_mod.CODE, 'how': 'ci', 'green': None, 'requested': True})
+                    'class': lane_mod.CODE, 'how': 'ci', 'green': None, 'requested': True,
+                    **({'priority': True} if r.get('priority') else {})})
     if changed:
         save_requests(lane.state_dir, reqs)
     return out
@@ -924,8 +936,10 @@ def cmd_land(args):
     if got.get('isCrossRepository'):
         print(f'land: PR #{n} is from a fork — the queue merges branches on {slug} only')
         return 1
-    add_request(state_dir, n, got['headRefName'], by=os.environ.get('USER'))
-    print(f"land: PR #{n} ({got['headRefName']}) requested — the merge queue takes it once its "
+    add_request(state_dir, n, got['headRefName'], by=os.environ.get('USER'),
+                priority=bool(args.priority))
+    print(f"land: PR #{n} ({got['headRefName']}) requested"
+          f"{' at the front of the line' if args.priority else ''} — the merge queue takes it once its "
           f"required checks are success on its exact head, and lands it when its batch is green "
           f"(asf land {n} --withdraw takes the request back)")
     return 0
@@ -938,7 +952,8 @@ Every landing on the trunk goes through the merge queue (conventions.merge: queu
 `asf land <pr>` asks the queue to take PR <pr>: on its next pass, once the PR's required
 checks (landing_checks plus the deploy's required jobs) are success on its exact head, the
 queue cuts it into a batch with the factory's PRs, runs the batch's full CI, and
-fast-forwards the trunk only when the batch sha is green. A red head or a conflict marks
+fast-forwards the trunk only when the batch sha is green. `--priority` (or `--front`) puts the
+request ahead of the factory's PRs and the other requests (behind the batches already in CI). A red head or a conflict marks
 the request red until the head moves; a PR closed or merged elsewhere drops it.
 Never `gh pr merge` onto the trunk: asf status and asf doctor flag every trunk commit
 that did not come through the queue."""
@@ -950,6 +965,9 @@ def register(sub):
                        formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('pr', type=int, help='the PR number')
     p.add_argument('--product')
+    p.add_argument('--priority', '--front', dest='priority', action='store_true',
+                   help='go to the front of the line: ahead of the factory\'s PRs and the other '
+                        'land requests, behind batches already in CI')
     p.add_argument('--withdraw', action='store_true', help='take the request back')
     p.set_defaults(func=cmd_land)
     return p

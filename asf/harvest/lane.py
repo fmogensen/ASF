@@ -4258,11 +4258,100 @@ def red_log_lines(log, n=RED_LOG_LINES):
     return kept[-n:]
 
 
+#: a failing test's line in a test runner's log: node:test / vitest / jest marks (``✖``, ``✗``,
+#: ``×``), TAP ``not ok N - name``, jest / vitest ``FAIL <file> [> name]``
+_FAIL_RE = re.compile(r'^\s*(?:[\u2716\u2717\u00d7\u2718]\s+(?P<a>.+)|not ok \d+\s*-?\s*(?P<b>.+)'
+                      r'|FAIL\s+(?P<c>\S.*))$')
+_FAIL_SKIP = re.compile(r'^(failing tests?|failed tests?|tests? failed|\d+ failed)\b', re.I)
+_DURATION_RE = re.compile(r'\s*\(\d+(?:\.\d+)?\s*m?s\)\s*$')
+RED_TESTS_MAX = 20
+
+
+def red_tests(log):
+    """The failing test names a job ``log`` names, in order, each once: node:test ``✖ name``,
+    vitest / jest ``✗`` / ``×`` / ``FAIL file > name``, TAP ``not ok N - name`` (a trailing
+    duration and a ``# SKIP`` / ``# TODO`` directive stripped)."""
+    out = []
+    for raw in (log or '').splitlines():
+        line = _ANSI_RE.sub('', _LOG_TS_RE.sub('', raw)).rstrip()
+        m = _FAIL_RE.match(line)
+        if not m:
+            continue
+        name = next(g for g in m.group('a', 'b', 'c') if g).strip()
+        if re.search(r'#\s*(SKIP|TODO)\b', name, re.I):
+            continue
+        name = _DURATION_RE.sub('', name).strip()
+        if name and not _FAIL_SKIP.match(name) and name not in out:
+            out.append(name)
+    return out[:RED_TESTS_MAX]
+
+
+def _gh_json(args):
+    try:
+        rc, out, _err = H._gh(args)
+        return json.loads(out) if rc == 0 and out.strip() else None
+    except (OSError, ValueError):
+        return None
+
+
+def red_step(slug, job_id):
+    """``(step name, run command)`` of the failing step of job ``job_id``: the name from the job's
+    own steps, the ``run:`` read from the workflow file at the job's head (the run's ``path``,
+    the workflow job named as the check is, its step named as the failing one). Either is None
+    when it cannot be read — never raises."""
+    job = _gh_json(['api', f'repos/{slug}/actions/jobs/{job_id}'])
+    if not isinstance(job, dict):
+        return None, None
+    step = next((s.get('name') for s in job.get('steps') or ()
+                 if isinstance(s, dict) and s.get('conclusion') == 'failure'), None)
+    if not step:
+        return None, None
+    run = _gh_json(['api', f"repos/{slug}/actions/runs/{job.get('run_id')}"])
+    path = str((run or {}).get('path') or '').split('@', 1)[0]
+    if not path or not job.get('head_sha'):
+        return step, None
+    try:
+        rc, text, _e = H._gh(['api', '-H', 'Accept: application/vnd.github.raw',
+                              f"repos/{slug}/contents/{path}?ref={job['head_sha']}"])
+        import yaml
+        doc = yaml.safe_load(text) if rc == 0 else None
+    except Exception:
+        return step, None
+    jobs = (doc or {}).get('jobs') if isinstance(doc, dict) else None
+    for key, j in (jobs or {}).items():
+        if not isinstance(j, dict):
+            continue
+        if job.get('name') not in (key, j.get('name')) and \
+                not str(job.get('name') or '').startswith(f'{key} ('):
+            continue
+        for s in j.get('steps') or ():
+            if isinstance(s, dict) and s.get('name') == step and s.get('run'):
+                return step, str(s['run']).strip()
+    return step, None
+
+
+def red_brief(check, step, tests, cmd):
+    """The correct brief's block for one red check: the failing step, the failing test names, the
+    command that reproduces the step locally (when the workflow's ``run:`` could be read), and
+    the rule — nothing is pushed until that and ``pre_push_check`` pass locally."""
+    out = [f"Failing step ({check}): {step or 'not read from the job'}"]
+    if tests:
+        out.append('Failing tests:' + ''.join(f'\n  - {t}' for t in tests))
+    if cmd:
+        out.append('Reproduce this step locally:\n' + '\n'.join(f'  {l}' for l in cmd.splitlines()))
+    out.append("Do not push until " + ('that reproduction and ' if cmd else '')
+               + "the product's pre_push_check pass locally.")
+    return '\n'.join(out)
+
+
 def red_evidence(slug, checks, red):
     """What the session needs to answer a red CI check (a product, 2026-09-26: five rounds on
     ``PR #795 checks red: gate`` alone, none told which lint failed where): per ``red`` check,
-    its link and the lines its job's log ended on (:func:`red_log_lines`). ``''`` when no red
-    check has a job link or no log reads — never raises."""
+    its link and the lines its job's log ended on (:func:`red_log_lines`), then the correct
+    brief (:func:`red_brief`): the failing step, the failing tests (:func:`red_tests`), the
+    command that reproduces the step (:func:`red_step`) and the rule not to push before it
+    and the ``pre_push_check`` pass. ``''`` when no red check has a job link or no log reads —
+    never raises."""
     out = []
     for c in checks or ():
         link = c.get('link') or ''
@@ -4275,7 +4364,12 @@ def red_evidence(slug, checks, red):
             continue
         lines = red_log_lines(log) if rc == 0 else []
         if lines:
-            out.append(f"\n{c.get('name')}: {link}\n" + '\n'.join(lines))
+            step, cmd = red_step(slug, m.group(1))
+            tests = red_tests(log)
+            block = ''
+            if step or tests:
+                block = '\n' + red_brief(c.get('name'), step, tests, cmd)
+            out.append(f"\n{c.get('name')}: {link}\n" + '\n'.join(lines) + block)
     return ''.join(out)
 
 
