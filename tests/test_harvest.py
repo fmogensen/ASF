@@ -2385,6 +2385,56 @@ class ProductHarvestTests(unittest.TestCase):
         self.assertNotIn('\x1b', text)
         self.assertNotIn('2026-09-26T03', text)
 
+    def test_a_red_check_names_the_step_the_tests_and_the_local_repro(self):
+        """A product, 2026-10-02: a gate step's unit tests went red and the correct round was
+        told only the log tail. The brief names the failing step, the failing test names, the
+        step's ``run:`` read from the workflow at the head, and the rule not to push before that
+        and ``pre_push_check`` pass locally."""
+        log = ('2026-10-02T03:19:49.2Z ##[group]Run node --test scripts/\n'
+               '2026-10-02T03:19:50.0Z \u2714 other test (1.2ms)\n'
+               '2026-10-02T03:19:50.0Z \u2716 F-1133: no new ci.yml job (2.5ms)\n'
+               '2026-10-02T03:19:50.0Z not ok 4 - deploy-dev needs every job\n'
+               '2026-10-02T03:19:50.0Z \u2716 failing tests:\n'
+               '2026-10-02T03:19:50.0Z \u2716 F-1133: no new ci.yml job (2.5ms)\n'
+               '2026-10-02T03:19:50.0Z ##[error]Process completed with exit code 1.\n')
+        self.assertEqual(lane.red_tests(log), ['F-1133: no new ci.yml job',
+                                               'deploy-dev needs every job'])
+        self.assertEqual(lane.red_tests('FAIL src/a.test.ts\n \u00d7 adds up (3 ms)\n'),
+                         ['src/a.test.ts', 'adds up'])
+        workflow = ('jobs:\n  gate:\n    name: gate\n    steps:\n'
+                    '      - name: classifier unit tests\n        run: |\n'
+                    '          node --test scripts/\n')
+
+        def gh(args):
+            if args[:2] == ['api', 'repos/o/p/actions/jobs/77/logs']:
+                return 0, log, ''
+            if args[:2] == ['api', 'repos/o/p/actions/jobs/77']:
+                return 0, json.dumps({'name': 'gate', 'run_id': 5, 'head_sha': 'abc',
+                                      'steps': [{'name': 'Set up job', 'conclusion': 'success'},
+                                                {'name': 'classifier unit tests',
+                                                 'conclusion': 'failure'}]}), ''
+            if args[:2] == ['api', 'repos/o/p/actions/runs/5']:
+                return 0, json.dumps({'path': '.github/workflows/ci.yml@refs/heads/x'}), ''
+            if 'repos/o/p/contents/.github/workflows/ci.yml?ref=abc' in args:
+                return 0, workflow, ''
+            return 1, '', 'nope'
+        with mock.patch.object(harvest, '_gh', side_effect=gh):
+            text = lane.red_evidence('o/p', [{'name': 'gate', 'bucket': 'fail',
+                                              'link': 'https://x/runs/5/job/77'}], ['gate'])
+        self.assertIn('Failing step (gate): classifier unit tests', text)
+        self.assertIn('  - F-1133: no new ci.yml job\n  - deploy-dev needs every job', text)
+        self.assertIn('Reproduce this step locally:\n  node --test scripts/', text)
+        self.assertIn('Do not push until that reproduction and the product\'s pre_push_check '
+                      'pass locally.', text)
+        # the workflow unreadable: step and tests still named, no repro, the rule still given
+        with mock.patch.object(harvest, '_gh', side_effect=lambda a: (
+                (0, log, '') if a[1].endswith('/logs') else gh(a) if a[1].endswith('jobs/77')
+                else (1, '', 'nope'))):
+            text = lane.red_evidence('o/p', [{'name': 'gate', 'bucket': 'fail',
+                                              'link': 'https://x/runs/5/job/77'}], ['gate'])
+        self.assertNotIn('Reproduce', text)
+        self.assertIn("Do not push until the product's pre_push_check pass locally.", text)
+
     def test_red_log_lines_never_raise(self):
         with mock.patch.object(harvest, '_gh', return_value=(1, '', 'HTTP 404')):
             self.assertEqual(lane.red_evidence('o/p', [{'name': 'gate', 'bucket': 'fail',
