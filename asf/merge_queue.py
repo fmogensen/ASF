@@ -32,6 +32,12 @@ head whose checks ran against an older trunk. Under ``merge: queue`` the lane in
    bisection answers for its own half — whichever lands first makes the other stale, and that
    one is cut again on the new tip.
 
+**Rebuild.** A batch whose run the CI start queue (:mod:`asf.ci_queue`) cancelled and can
+neither re-run nor replace — its run made on a workflow the trunk has changed since, or STUCK
+(re-run and fresh dispatch refused) — is not waited out: the start queue asks for a rebuild
+(:func:`request_rebuild`), and the next pass drops the batch and cuts its members again on the
+trunk's tip, a new sha whose push starts a fresh run.
+
 **Stacking.** Up to ``merge_queue.inflight`` batches form a chain: each is cut on the sha of the
 one before it, not the trunk, so two batches overlap in CI instead of queueing. The chain's
 order is the landing order; a dropped batch drops every batch stacked on it (they contain its
@@ -98,6 +104,9 @@ MERGE_SUBJECT = 'merge-queue: #{pr} ({branch} @ {head})'
 TRAILER = 'Landed-by: asf merge queue'
 #: ``state/<product>/land-requests.json``: the PRs ``asf land`` asked the queue to take
 REQUESTS_FILE = 'land-requests.json'
+#: ``state/<product>/merge-queue-rebuild.json``: ``{ref: {why, at}}`` — batches the CI start
+#: queue gave up on (a cancelled run on a stale workflow, or stuck); the next pass rebuilds them
+REBUILD_FILE = 'merge-queue-rebuild.json'
 #: the commit status context a landed batch sha carries (:func:`attest`)
 ATTEST_CONTEXT = 'asf/attested'
 #: the key the attestation's description names the batch run by (the trailer form)
@@ -151,6 +160,50 @@ def save(state_dir, data):
     with open(tmp, 'w', encoding='utf-8') as fh:
         json.dump(data, fh, sort_keys=True, indent=1)
     os.replace(tmp, path(state_dir))
+
+
+def load_rebuilds(state_dir):
+    """``{ref: {why, at}}``: the batches asked to be rebuilt (:func:`request_rebuild`)."""
+    try:
+        with open(os.path.join(state_dir, REBUILD_FILE), encoding='utf-8') as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, dict)} if isinstance(data, dict) else {}
+
+
+def _save_rebuilds(state_dir, data):
+    os.makedirs(state_dir, exist_ok=True)
+    target = os.path.join(state_dir, REBUILD_FILE)
+    tmp = target + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as fh:
+        json.dump(data, fh, sort_keys=True, indent=1)
+    os.replace(tmp, target)
+
+
+def holds(state_dir, ref):
+    """True while the chain holds the batch ``ref``."""
+    return any(b.get('ref') == ref for b in load(state_dir)['batches'])
+
+
+def request_rebuild(state_dir, ref, why):
+    """Ask the next pass to drop batch ``ref`` and cut its members again on the trunk's tip —
+    a new batch sha whose push starts a fresh run on the trunk's own workflow. The CI start
+    queue's answer to a batch run it can neither re-run nor replace
+    (:func:`asf.ci_queue._rerun_cancelled`): a stale or stuck batch never blocks the queue.
+    True when the chain holds ``ref`` (the request is written), else False."""
+    if not holds(state_dir, ref):
+        return False
+    data = load_rebuilds(state_dir)
+    data[ref] = {'why': why, 'at': now_iso()}
+    _save_rebuilds(state_dir, data)
+    return True
+
+
+def _clear_rebuild(state_dir, ref):
+    data = load_rebuilds(state_dir)
+    if data.pop(ref, None) is not None:
+        _save_rebuilds(state_dir, data)
 
 
 # ---- the verdict on one sha ---------------------------------------------------------------------
@@ -348,6 +401,9 @@ def judge(lane, batch, members, heads, trunk_sha, st):
             moved.append((f, f"left the queue ({rec.get('state') or 'no record'})"))
     if moved:
         return 'moved', ', '.join(f"{f['branch']} {w}" for f, w in moved), moved
+    asked = load_rebuilds(lane.state_dir).get(ref)
+    if asked:   # the CI start queue gave up on its run: cut again on the tip, a fresh run
+        return 'stale', f"rebuilt on {lane.trunk} — {asked.get('why') or 'its run is stuck'}", None
     tip = heads.get(ref)
     if not tip:
         return 'stale', f'{ref} is gone from origin', None
@@ -672,6 +728,7 @@ def _admits(lane, key, kind, f, sha):
 
 def _drop(lane, batch, why):
     lane.out(f"merge queue: batch {batch['ref']} dropped — {why}")
+    _clear_rebuild(lane.state_dir, batch['ref'])
     _delete_ref(lane, batch)
 
 

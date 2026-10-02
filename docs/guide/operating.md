@@ -206,6 +206,17 @@ expected`). The queue's own push carries it and goes through.
 
 `asf doctor` shows a `trunk ruleset` row: green names the ruleset id and both calls below; red
 when no active ruleset on the trunk requires the status (it names a disabled one to enable).
+The `queue bypass` row counts only trunk commits from after that ruleset was created (or after
+`merge_queue.watch_since`, an ISO date), so the merges that made the ruleset necessary do not
+keep it red.
+
+**Trunk stall.** When the trunk has not moved for more than `conventions.ci.trunk_stall_hours`
+(default 4) while landings wait — a batch in the merge queue, or an `asf land` request — every
+tick logs one `trunk watch: STALL` line and `asf status` / `asf doctor` show a red `Trunk stall`
+row naming what waits. A batch whose cancelled CI run the start queue can neither re-run nor
+replace (made on a workflow the trunk has changed since, or STUCK) never holds the queue: the
+start queue drops it from the line and the merge queue cuts its members again on the trunk's tip
+on its next pass — a new batch sha, a fresh run.
 
 **Break-glass.** Only when the queue itself cannot land and the trunk must move now — the queue
 is broken and its fix has to land, or a production incident needs a hotfix the queue cannot

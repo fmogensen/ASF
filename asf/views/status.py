@@ -495,6 +495,14 @@ def bypass_cell(product):
     return trunk_watch.status_cell(product)
 
 
+def trunk_stall_cell(product):
+    """``RED <trunk> has not moved for Xh … while N landing(s) wait`` past
+    ``conventions.ci.trunk_stall_hours`` (:func:`asf.trunk_watch.stall`, off its state files),
+    else None (no row)."""
+    from asf import trunk_watch
+    return trunk_watch.stall_cell(product)
+
+
 def merge_cell(product):
     """``auto``, ``queue`` or ``manual`` — ``conventions.merge``: whether the lane merges a green,
     reviewed PR itself (directly, or through its merge queue) or the operator clicks merge."""
@@ -559,7 +567,8 @@ def render(root, product, cfg=None):
                        ('Groom', lambda: groom_cell(root, product)),
                        ('Gate', lambda: gate_cell(product)),
                        ('Lane pushes', lambda: lane_push_cell(product)),
-                       ('Queue bypass', lambda: bypass_cell(product))):
+                       ('Queue bypass', lambda: bypass_cell(product)),
+                       ('Trunk stall', lambda: trunk_stall_cell(product))):
         try:
             text = cell()
         except Exception as e:  # noqa: BLE001 — one unreadable row never loses the table

@@ -343,6 +343,9 @@ MAP_CONVENTIONS = ('models', 'branch_prefixes', 'harvest', 'git', 'branch_retent
 #: ``ci.heavy_label``'s default: the PR label the lane puts on a head its review approved under
 #: ``ci.heavy_after_review`` — the product's workflow runs its heavy jobs only on a PR carrying it.
 DEFAULT_HEAVY_CI_LABEL = 'asf:heavy-ci'
+#: ``ci.trunk_stall_hours``'s default: the trunk standing still this long while landings
+#: wait is the stall alarm (:mod:`asf.trunk_watch`)
+DEFAULT_TRUNK_STALL_HOURS = 4
 #: ``ci.queue_status``'s default: the commit status the merge queue posts (success) on a batch sha
 #: just before it moves the trunk there — the context the trunk's ruleset requires, so only a
 #: sha the queue landed can reach the trunk.
@@ -1002,6 +1005,15 @@ class Conventions:
         value = self.map_of('ci').get('queue_status')
         return value.strip() if isinstance(value, str) and value.strip() \
             else DEFAULT_QUEUE_STATUS
+
+    def trunk_stall_hours(self):
+        """``ci.trunk_stall_hours``: how long the trunk may stand still while landings wait
+        before :mod:`asf.trunk_watch` raises its stall alarm — :data:`DEFAULT_TRUNK_STALL_HOURS`
+        unless set to a positive number."""
+        value = self.map_of('ci').get('trunk_stall_hours')
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+            return value
+        return DEFAULT_TRUNK_STALL_HOURS
 
     def is_signoff_check(self, name):
         """True when a PR check called ``name`` is the product's sign-off check."""
