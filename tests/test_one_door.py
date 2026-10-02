@@ -9,6 +9,7 @@
 * :mod:`asf.runner_classes`: a required job whose ``runs-on`` reaches runners of two classes is
   red, so is a runner carrying a label of a provider other than its declared one.
 """
+import datetime
 import os
 import shutil
 import tempfile
@@ -103,6 +104,12 @@ class TrunkWatch(unittest.TestCase):
         p = mock.patch.object(env, 'state_dir', lambda *_a, **_k: self.state_dir)
         p.start()
         self.addCleanup(p.stop)
+        # the ruleset read: none active unless a test says so (never the real host)
+        self.ruleset = None
+        rs = mock.patch.object(trunk_watch, 'ruleset_since', lambda *_a, **_k: (
+            (self.ruleset, 42) if self.ruleset is not None else (None, None)))
+        rs.start()
+        self.addCleanup(rs.stop)
         self.product = env.Product('sample', {
             'repo_dir': self.repo, 'repo_slug': 'o/p', 'main': 'main',
             'conventions': {'landing': 'pull-request', 'merge': 'queue'}})
@@ -155,6 +162,96 @@ class TrunkWatch(unittest.TestCase):
         ((required, ok, _detail),) = trunk_watch.doctor_rows(self.product)
         self.assertEqual((required, ok), (True, True))
         self.assertIsNone(status.bypass_cell(self.product))
+
+    def commit_at(self, branch, rel, message, when):
+        """A merge on ``main`` dated ``when`` (epoch seconds)."""
+        stamp = f'@{int(when)} +0000'
+        prev = dict(self.ident)
+        self.ident.update(GIT_AUTHOR_DATE=stamp, GIT_COMMITTER_DATE=stamp)
+        try:
+            return self.merge(branch, rel, message)
+        finally:
+            self.ident = prev
+
+    def test_bypasses_before_the_ruleset_was_active_never_count(self):
+        """2026-10-01, a product: 14 merges from before the trunk ruleset kept the bypass row
+        red for days after the ruleset made a bypass impossible."""
+        import time as _t
+        now = _t.time()
+        self.merge('worker/T-1', 'a.txt', ['-m', 'merge-queue: #1 (worker/T-1 @ abc)'])
+        old = self.commit_at('hotfix/old', 'b.txt', ['-m', 'Merge pull request #8 from o/x'],
+                             now - 7200)
+        new = self.commit_at('hotfix/new', 'c.txt', ['-m', 'Merge pull request #9 from o/y'],
+                             now - 600)
+        self.ruleset = int(now - 3600)                   # active an hour ago
+        lines = []
+        got = trunk_watch.tick(self.product, out=lines.append, now=now)
+        self.assertEqual([b['sha'] for b in got], [new])
+        self.assertNotIn(old, ' '.join(lines))
+        self.assertIn(new[:9], ' '.join(lines))
+        cell = status.bypass_cell(self.product)
+        self.assertTrue(cell.startswith('RED 1 commit(s)'), cell)
+        self.assertNotIn(old[:9], cell)
+
+    def test_merge_queue_watch_since_overrides_the_ruleset(self):
+        import time as _t
+        now = _t.time()
+        self.merge('worker/T-1', 'a.txt', ['-m', 'merge-queue: #1 (worker/T-1 @ abc)'])
+        self.commit_at('hotfix/old', 'b.txt', ['-m', 'Merge pull request #8 from o/x'],
+                       now - 7200)
+        since = datetime.datetime.fromtimestamp(now - 3600, datetime.timezone.utc)
+        product = env.Product('sample', {
+            'repo_dir': self.repo, 'repo_slug': 'o/p', 'main': 'main',
+            'conventions': {'landing': 'pull-request', 'merge': 'queue',
+                            'merge_queue': {'watch_since': since.isoformat()}}})
+        self.assertEqual(trunk_watch.tick(product, out=lambda _l: None, now=now), [])
+        ((required, ok, detail),) = trunk_watch.doctor_rows(product, now=now)
+        self.assertEqual((required, ok), (True, True))
+        self.assertIn('merge_queue.watch_since', detail)
+        self.assertIsNone(status.bypass_cell(product))
+
+    def test_a_trunk_standing_still_while_landings_wait_is_a_red_stall(self):
+        import time as _t
+        now = _t.time()
+        self.commit_at('worker/T-1', 'a.txt', ['-m', 'merge-queue: #1 (worker/T-1 @ abc)'],
+                       now - 5 * 3600)
+        # nothing waits: no alarm however old the tip
+        lines = []
+        trunk_watch.tick(self.product, out=lines.append, now=now)
+        self.assertFalse([l for l in lines if 'STALL' in l], lines)
+        self.assertIsNone(status.trunk_stall_cell(self.product))
+        ((_r, ok, _d),) = trunk_watch.stall_rows(self.product, now=now)
+        self.assertTrue(ok)
+        # a batch in flight and an asf land request: 5h > 4h (the default) is red, every tick
+        merge_queue.save(self.state_dir, {'batches': [
+            {'ref': 'batch/x', 'sha': 'a' * 40, 'members': [{'branch': 'w', 'pr': 5}]}]})
+        merge_queue.add_request(self.state_dir, 7, 'hotfix/y')
+        for _ in range(2):
+            lines.clear()
+            trunk_watch.tick(self.product, out=lines.append, now=now)
+            stall = [l for l in lines if l.startswith('trunk watch: STALL main has not moved')]
+            self.assertEqual(len(stall), 1, lines)
+        for part in ('5.0h', '> 4h', 'trunk_stall_hours', '2 landing(s)', 'batch/x (#5)',
+                     'asf land #7'):
+            self.assertIn(part, stall[0])
+        cell = status.trunk_stall_cell(self.product)
+        self.assertTrue(cell.startswith('RED main has not moved'), cell)
+        from asf import doctor
+        ((required, ok, detail),) = doctor.check_trunk_stall(self.product)
+        self.assertEqual((required, ok), (True, False))
+        self.assertIn('has not moved', detail)
+        # a higher limit: quiet again
+        product = env.Product('sample', {
+            'repo_dir': self.repo, 'repo_slug': 'o/p', 'main': 'main',
+            'conventions': {'landing': 'pull-request', 'merge': 'queue',
+                            'ci': {'trunk_stall_hours': 6}}})
+        self.assertIsNone(trunk_watch.stall(product, now))
+        # the trunk moves: the stall clears
+        self.merge('worker/T-2', 'b.txt', ['-m', 'merge-queue: #2 (worker/T-2 @ def)'])
+        lines.clear()
+        trunk_watch.tick(self.product, out=lines.append, now=now + 60)
+        self.assertFalse([l for l in lines if 'STALL' in l], lines)
+        self.assertIsNone(status.trunk_stall_cell(self.product))
 
     def test_a_product_not_on_the_queue_is_not_watched(self):
         product = env.Product('sample', {'repo_dir': self.repo, 'main': 'main',

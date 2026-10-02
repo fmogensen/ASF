@@ -964,6 +964,8 @@ def run(product_name):
         rows.append(('queue bypass', required, ok, detail))
     for required, ok, detail in check_trunk_ruleset(product):
         rows.append(('trunk ruleset', required, ok, detail))
+    for required, ok, detail in check_trunk_stall(product):
+        rows.append(('trunk stall', required, ok, detail))
     for required, ok, detail in check_ci_classes(product):
         rows.append(('ci classes', required, ok, detail))
     for required, ok, detail in check_cloud(cfg, product):
@@ -1063,6 +1065,17 @@ def check_queue_bypass(product):
     from asf import trunk_watch
     try:
         return trunk_watch.doctor_rows(product)
+    except Exception as e:  # noqa: BLE001 — an unreadable file is one unknown row
+        return [(True, None, f'cannot read the trunk watch — {e}')]
+
+
+def check_trunk_stall(product):
+    """[(required, ok, detail)] — red while the trunk has stood still past
+    ``conventions.ci.trunk_stall_hours`` with landings waiting (:func:`asf.trunk_watch.stall_rows`,
+    off the tick's state files). No rows for a product not on ``merge: queue``."""
+    from asf import trunk_watch
+    try:
+        return trunk_watch.stall_rows(product)
     except Exception as e:  # noqa: BLE001 — an unreadable file is one unknown row
         return [(True, None, f'cannot read the trunk watch — {e}')]
 

@@ -2877,6 +2877,11 @@ def _rerun_cancelled(q, src, product, started, dry_run, out, now, items=None, li
                 f"not re-run within {RELIEF_TTL_S // 3600}h")
             entries.pop(_rerun_key(rec), None)
             continue
+        if _batch_ref(product, rec.get('branch')):
+            why = _batch_gone_stale(src, product, rec, blobs)
+            if why:                         # never waited out: the merge queue rebuilds it
+                _rebuild_batch(q, product, rec, why, dry_run, out, keep)
+                continue
         got = started(rec)
         if got is None:                     # what it was cancelled for still waits
             keep.append(rec)
@@ -2945,9 +2950,63 @@ def _rerun_cancelled(q, src, product, started, dry_run, out, now, items=None, li
                 f"refused (1/{RERUN_REFUSALS_MAX}) — {why}; tried again next tick")
             keep.append(rec)
             continue
-        n += _rerun_refused(rec, src, product, out, now, listing, blobs, keep)
+        n += _rerun_refused(rec, src, product, out, now, listing, blobs, keep, q=q)
     q.data['relief'] = keep
     return n
+
+
+def _batch_ref(product, branch):
+    """True when ``branch`` is one of the merge queue's batch refs (``merge: queue`` and the
+    ``merge_queue.ref_prefix``): a run the merge queue owns — it is rebuilt, not replayed."""
+    conv = getattr(product, 'conventions', None)
+    if not branch or conv is None or not getattr(conv, 'merge_queue', lambda: False)():
+        return False
+    from asf import merge_queue
+    return str(branch).startswith(merge_queue.settings(conv)['ref_prefix'])
+
+
+def _batch_gone_stale(src, product, rec, blobs):
+    """Why a cancelled batch run is past re-running, or None (re-run it as any other): the
+    merge queue no longer holds the batch; it is STUCK or its re-run was refused
+    :data:`RERUN_REFUSALS_MAX` times; or it was made on a workflow the trunk has changed since
+    (:func:`_workflow_change`) — a replay would revive the old definition, and a fresh
+    dispatch on a batch ref judges a sha the queue no longer gates."""
+    from asf import merge_queue
+    ref = rec.get('branch')
+    if not merge_queue.holds(env.state_dir(product.name), ref):
+        return 'the merge queue no longer holds it'
+    stuck = rec.get('stuck') if isinstance(rec.get('stuck'), dict) else None
+    if stuck:
+        return f"STUCK — {stuck.get('why')}"
+    if int(rec.get('refusals') or 0) >= RERUN_REFUSALS_MAX:
+        return (f"re-run refused {rec.get('refusals')} times (last: "
+                f"{rec.get('refused_why')})")
+    changed = _workflow_change(src, product, rec.get('id'), blobs)
+    if changed:
+        return (f"its run is on an old {rec.get('workflow') or 'workflow'} "
+                f"({changed[0][:7]}→{changed[1][:7]})")
+    return None
+
+
+def _rebuild_batch(q, product, rec, why, dry_run, out, keep):
+    """Drop a cancelled batch run's relief record and its place in line, and ask the merge
+    queue to rebuild the batch (:func:`asf.merge_queue.request_rebuild`): its next pass cuts the
+    members again on the trunk's tip — a new sha, a fresh run on the trunk's workflow. One
+    line; the record kept in a dry run."""
+    from asf import merge_queue
+    ref, rid = rec.get('branch'), rec.get('id')
+    trunk = getattr(product.conventions, 'main', None) or 'the trunk'
+    if dry_run:
+        out(f'ci queue: would drop batch {ref} (run {rid}) — {why}; the merge queue rebuilds '
+            f'it on {trunk}')
+        keep.append(rec)
+        return
+    q.data['entries'].pop(_rerun_key(rec), None)
+    if merge_queue.request_rebuild(env.state_dir(product.name), ref, why):
+        out(f'ci queue: batch {ref} (cancelled run {rid}) dropped — {why}; the merge queue '
+            f'rebuilds it on {trunk} next pass, a fresh run on the new batch sha')
+    else:
+        out(f'ci queue: batch {ref} (cancelled run {rid}) dropped — {why}; nothing to re-run')
 
 
 def _gh_try(src, args):
@@ -2960,7 +3019,7 @@ def _gh_try(src, args):
     return (out, '') if out is not None else (None, 'gh refused (no reason read)')
 
 
-def _rerun_refused(rec, src, product, out, now, listing, blobs, keep):
+def _rerun_refused(rec, src, product, out, now, listing, blobs, keep, q=None):
     """A cancelled run whose ``gh run rerun`` was refused before: asked again, each refusal
     logged with its reason and counted on the record; at :data:`RERUN_REFUSALS_MAX` refusals a
     fresh run of the branch head is started instead (:func:`_start_run`, the path a stale re-run
@@ -2985,6 +3044,10 @@ def _rerun_refused(rec, src, product, out, now, listing, blobs, keep):
                 f"({rec['refusals']}/{RERUN_REFUSALS_MAX}) — {why}; tried again next tick")
             keep.append(rec)
             return 0
+    if q is not None and _batch_ref(product, rec.get('branch')):
+        _rebuild_batch(q, product, rec, f"re-run refused {rec.get('refusals')} times (last: "
+                                        f"{rec.get('refused_why')})", False, out, keep)
+        return 0
     fresh, fwhy = _start_run(product, src, rec.get('branch'), rec.get('workflow'),
                              sha=rec.get('sha'), listing=listing, blobs=blobs, rerun=False)
     if fresh:
