@@ -608,7 +608,7 @@ def stored_review_section(product, kind, branch, item_id):
 #: The kinds whose brief carries the item's standing adjudicate rulings verbatim
 #: (:mod:`asf.evidence.rulings`): the review that might re-raise a settled point, and the
 #: correction or fixer that might be sent to answer one.
-RULINGS_KINDS = ('review', 'correct', 'fixer')
+RULINGS_KINDS = ('review', 'correct', 'fixer', 'adjudicate')
 
 
 def rulings_section(product, kind, item):
