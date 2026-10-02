@@ -1102,12 +1102,29 @@ def conflicts_with_trunk(lane, n):
     return isinstance(got, dict) and got.get('mergeable') == 'CONFLICTING'
 
 
-def red_requests(state_dir):
-    """``[(pr, why)]``: the ``asf land`` requests marked red, by PR number."""
+def red_requests(state_dir, head_of=None):
+    """``[(pr, why)]``: the ``asf land`` requests marked red, by PR number. A red belongs to the
+    head it was judged at: with ``head_of`` (``pr -> current head sha or None``) a request whose
+    current head is known and is not the red's head is stale and not listed."""
     reqs = load_requests(state_dir)
-    return [(int(k), (r.get('red') or {}).get('why') or 'red') for k, r in
-            sorted(reqs.items(), key=lambda kv: int(kv[0]) if str(kv[0]).isdigit() else 0)
-            if r.get('red')]
+    out = []
+    for k, r in sorted(reqs.items(), key=lambda kv: int(kv[0]) if str(kv[0]).isdigit() else 0):
+        red = r.get('red')
+        if not red:
+            continue
+        cur = head_of(int(k)) if head_of else None
+        if cur and red.get('head') and cur != red.get('head'):
+            continue
+        out.append((int(k), red.get('why') or 'red'))
+    return out
+
+
+def host_head(slug):
+    """``pr -> the PR's current head sha`` read on the host (None when unreadable)."""
+    def head_of(n):
+        got = H.gh_json(['pr', 'view', str(n), '-R', slug, '--json', 'headRefOid'], None)
+        return got.get('headRefOid') if isinstance(got, dict) else None
+    return head_of
 
 
 def requested_ready(lane, heads, trunk_sha, taken=()):
@@ -1134,6 +1151,10 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
             continue
         if (r.get('red') or {}).get('head') == head:
             continue
+        if r.get('red'):
+            # the head moved: the old head's red is not this head's verdict
+            r.pop('red')
+            changed = True
         H.sh(['git', 'fetch', '-q', 'origin', f'+refs/heads/{b}:refs/remotes/origin/{b}'],
              cwd=lane.repo)
         required, why = required_set(lane, head, trunk_sha)
@@ -1159,6 +1180,22 @@ def requested_ready(lane, heads, trunk_sha, taken=()):
             r['red'] = {'head': head, 'kind': 'conflict', 'why': why, 'at': now_iso()}
             changed = True
             continue
+        if state == 'red':
+            failed = [{'name': c.get('name'), 'link': c.get('html_url')}
+                      for c in runs if c.get('status') == 'completed'
+                      and c.get('conclusion') not in (None, 'success', 'skipped', 'neutral',
+                                                      'cancelled')]
+            lost = failed and all(
+                flake.infra_red(lane.slug, flake._ids(c['link'])[1], H._gh) for c in failed)
+            defects, held = ([], [])
+            if lost:    # only runner loss is re-run here; any other red is the head's own
+                defects, held = flake.triage(lane.product, lane.state_dir, lane.slug, head,
+                                             failed, where=f'asf land #{n}', out=lane.out)
+            if held and not defects:
+                # lost with its runner: re-run, not a red head
+                lane.out(f"merge queue: asf land PR #{n} pending at {head[:12]} — re-running "
+                         f"{', '.join(held)} (infra, flake triage)")
+                continue
         if state == 'red':
             lane.out(f'merge queue: asf land PR #{n} red at its head {head[:12]} — {why}; '
                      f'taken once a new head is green')

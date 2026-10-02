@@ -509,7 +509,9 @@ def land_red_cell(product):
     from asf import merge_queue
     if not getattr(product.conventions, 'merge_queue', lambda: False)():
         return None
-    got = merge_queue.red_requests(env.state_dir(product))
+    got = merge_queue.red_requests(env.state_dir(product),
+                                    merge_queue.host_head(product.repo_slug)
+                                    if product.repo_slug else None)
     if not got:
         return None
     return 'RED ' + '; '.join(f'#{n} {why}' for n, why in got)

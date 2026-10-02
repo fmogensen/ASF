@@ -22,7 +22,7 @@ from asf.harvest import lane
 from asf.views import status
 
 from tests.test_lane import sh
-from tests.test_merge_queue import QueueRepo, check_run
+from tests.test_merge_queue import QueueRepo, check_run, job_run
 
 
 class AsfLand(QueueRepo):
@@ -94,6 +94,60 @@ class AsfLand(QueueRepo):
         self.queue_pass(self.lane(), [])
         self.assertEqual(self.batches(), [])
         self.assertEqual(self.backs, [])  # no session to send it back to
+
+    def test_an_old_head_red_never_judges_the_new_head_and_the_line_is_kept(self):
+        merge_queue.add_request(self.state_dir, 9, 'hotfix/other', priority=True)
+        before = [k for k, _r in merge_queue.ordered_requests(
+            merge_queue.load_requests(self.state_dir))]
+        reqs = merge_queue.load_requests(self.state_dir)
+        reqs['7']['red'] = {'head': 'o' * 40, 'kind': 'checks', 'why': 'gate-tests (failure)',
+                            'at': 'x'}
+        merge_queue.save_requests(self.state_dir, reqs)
+        # the status row ignores a red judged at another head than the PR's current one
+        self.gh.head_oid[7] = self.head
+        self.assertIsNone(status.land_red_cell(self.product()))
+        # the pass: the current head is still running -> pending, the stale red is cleared
+        self.gh.checks[self.head] = [check_run('gate'), check_run('gate-tests', None, 'in_progress')]
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.batches(), [])
+        req = merge_queue.load_requests(self.state_dir)['7']
+        self.assertNotIn('red', req)
+        self.assertTrue(any('PR #7 pending' in l for l in self.lines), self.lines)
+        self.assertEqual([k for k, _r in merge_queue.ordered_requests(
+            merge_queue.load_requests(self.state_dir))], before)
+        self.assertEqual(before[0], '9')                 # the priority one still first
+
+    def test_a_red_on_the_current_head_is_red_and_shown(self):
+        self.gh.head_oid[7] = self.head
+        self.gh.checks[self.head] = [check_run('gate'), check_run('gate-tests', 'failure')]
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(status.land_red_cell(self.product()), 'RED #7 gate-tests (failure)')
+
+    def test_a_runner_loss_on_the_current_head_is_infra_and_re_run_not_red(self):
+        self.gh.head_oid[7] = self.head
+        self.gh.checks[self.head] = [check_run('gate'), job_run('gate-tests', '555')]
+        self.gh.annotations['555'] = [
+            {'annotation_level': 'failure',
+             'message': 'The runner has received a shutdown signal.'}]
+        self.queue_pass(self.lane(), [])
+        self.assertNotIn('red', merge_queue.load_requests(self.state_dir)['7'])
+        self.assertIsNone(status.land_red_cell(self.product()))
+        self.assertIn(['run', 'rerun', '--job', '555', '-R', 'o/p'], self.gh.calls)
+        self.assertTrue(any('PR #7 pending' in l and 'infra' in l for l in self.lines),
+                        self.lines)
+
+    def test_a_head_moving_clears_the_old_red(self):
+        self.gh.checks[self.head] = [check_run('gate'), check_run('gate-tests', 'failure')]
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(merge_queue.load_requests(self.state_dir)['7']['red']['head'], self.head)
+        self.push_lane('hotfix/fix-x', {'x.txt': 'y\n'}, 'hotfix: y')
+        new = self.heads()['hotfix/fix-x']
+        self.assertNotEqual(new, self.head)
+        self.gh.head_oid[7] = new
+        self.assertIsNone(status.land_red_cell(self.product()))
+        self.gh.checks[new] = [check_run('gate', None, 'in_progress')]
+        self.queue_pass(self.lane(), [])
+        self.assertNotIn('red', merge_queue.load_requests(self.state_dir)['7'])
 
     def test_a_conflicting_pr_is_red_at_once_and_shown_in_queue_and_status(self):
         # a conflict means GitHub never starts its CI: no check runs at all
