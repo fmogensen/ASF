@@ -101,7 +101,7 @@ class MergePrTests(unittest.TestCase):
         r, log = run(behind='0\n1\n0')
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(log.count('pr merge'), 1)
-        self.assertEqual(log.count('git merge-base'), 3)
+        self.assertEqual(log.count('git merge-base'), 4)
 
     def test_a_refused_merge_loops(self):
         r, log = run(merge_rc=1, attempts=2)
