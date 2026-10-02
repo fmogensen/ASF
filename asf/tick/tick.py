@@ -361,6 +361,9 @@ def cmd_tick(args, root=None):
         return 2
 
     from asf import upgrade
+    off = upgrade.checkout_off_main()
+    if off:
+        print(f'tick: warning — {off}', file=sys.stderr)
     if upgrade.waiting(product.name):
         return 0  # a pending upgrade needs a gap between ticks: this one does not start
 
