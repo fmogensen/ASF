@@ -61,6 +61,18 @@ class AsfLand(QueueRepo):
         self.assertIn(merge_queue.TRAILER, body)
         self.assertTrue(trunk_watch.is_queue_commit(subject, body))
 
+    def test_a_head_whose_ci_skipped_a_required_job_by_path_is_admitted_the_batch_still_judges_it(self):
+        self.gh.checks[self.head] = [check_run('gate'), check_run('gate-tests', 'skipped')]
+        self.queue_pass(self.lane(), [])
+        (batch,) = self.batches()
+        self.assertEqual([m['branch'] for m in batch['members']], ['hotfix/fix-x'])
+        self.assertNotIn('red', merge_queue.load_requests(self.state_dir)['7'])
+        # on the batch sha a skipped required check is red, as ever: it never lands so
+        self.gh.checks[batch['sha']] = [check_run('gate'), check_run('gate-tests', 'skipped')]
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.heads()['main'], batch['base'])
+        self.assertEqual(merge_queue.load_requests(self.state_dir)['7']['red']['head'], self.head)
+
     def test_a_red_head_is_marked_and_never_cut_until_it_moves(self):
         self.gh.checks[self.head] = [check_run('gate'), check_run('gate-tests', 'failure')]
         self.queue_pass(self.lane(), [])
