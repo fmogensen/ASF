@@ -641,6 +641,22 @@ class MovingParts(QueueRepo):
         self.assertIn(f"waits on #1 (conflicting files: a.txt) in batch {first['ref']}",
                       self.lane_of('worker/T-0003')['reason'])
 
+    def test_a_conflict_with_the_trunk_behind_a_batch_goes_to_the_lane_rebuild(self):
+        # the trunk conflict is told apart from a batch ahead: it is the lane's rebuild's (rebase on)
+        self.push_lane('worker/T-0003', {'a.txt': 'other a\n'}, 'feat: a too')
+        self.push_main({'a.txt': 'trunk a\n'}, 'trunk a')
+        self.queue_pass(self.lane(), [self.entry('worker/T-0002', 2, 'T-0002', files=('b.txt',))])
+        (first,) = self.batches()
+        sent = []
+        with mock.patch.object(lane, 'send_back', side_effect=lambda ln, f, k, t, fl, **kw: (
+                sent.append((k, t, list(fl), kw)), ln.results.__setitem__(f['branch'], 'back'))):
+            merge_queue.run(self.lane(), [self.entry('worker/T-0003', 3, 'T-0003', files=('q.txt',))])
+        (kind, text, files, kw), = sent
+        self.assertEqual((kind, files), ('conflict', ['a.txt']))
+        self.assertTrue(kw.get('rebase', True), kw)
+        self.assertNotIn('a batch ahead', text)
+        self.assertEqual(len(self.batches()), 1)
+
     def test_a_conflict_with_the_trunk_alone_still_goes_back(self):
         self.push_lane('worker/T-0003', {'a.txt': 'other a\n'}, 'feat: a too')
         self.push_main({'a.txt': 'trunk a\n'}, 'trunk a')
@@ -839,3 +855,49 @@ class DirectConflictAsksGit(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RegateHolds(QueueRepo):
+    """A landing-gate hold the flake triage never judged is cleared and the branch gated again."""
+
+    def setUp(self):
+        super().setUp()
+        self.setUpBacks()
+        self.push_lane('spec/F-1', {'specs/f1.md': 'x\n'}, 'spec: f1')
+        self.head = self.heads()['spec/F-1']
+        self.batch_sha = 'a4e3330dac07d62db5b036cde63a0ff0e8e66cf1'
+        self.session_job('adjudicate-f-1')
+
+    def session_job(self, job):
+        self.session(job, 'F-1', 'spec/F-1', kind='spec')
+        run = lifecycle.by_branch(os.path.join(self.state_dir, 'sessions.jsonl'))['spec/F-1']
+        fields, _line = lifecycle.hold(
+            os.path.join(self.state_dir, 'sessions.jsonl'), dict(run, branch='spec/F-1', job=job),
+            lane.LANDING_GATE,
+            f'the spec turns the gate red on main - batch b @ {self.batch_sha[:12]} checks red: '
+            f'gate (failure)', '2026-10-02T07:22:59Z', head=self.head,
+            finding=['gate (failure)'])
+        harvest.mark_session(self.state_dir, job, **fields)
+        f = {'branch': 'spec/F-1', 'run': run, 'prev': {}, 'head': self.head, 'item': 'F-1'}
+        ln = self.lane()
+        ln.set(f, lane.BACK, 'kind=landing-gate', head=self.head, pr=7)
+
+    def pass_(self):
+        return self.queue_pass(self.lane(), [])
+
+    def test_a_hold_on_a_job_nobody_re_ran_is_gated_again(self):
+        self.gh.checks[self.batch_sha[:12]] = [{'name': 'gate', 'status': 'completed',
+                                               'conclusion': 'failure', 'id': 5}]
+        self.pass_()
+        self.assertEqual(self.lane_of('spec/F-1')['state'], lane.PUSHED)
+        run = lifecycle.by_branch(os.path.join(self.state_dir, 'sessions.jsonl'))['spec/F-1']
+        self.assertFalse((run.get('correction') or {}).get('text'))
+
+    def test_a_hold_the_triage_re_ran_stands(self):
+        from asf import flake
+        data = flake.load(self.state_dir)
+        data['reruns'][f'{self.batch_sha}|gate'] = {'name': 'gate', 'sha': self.batch_sha,
+                                                    'attempts': 1, 'at': flake._iso(flake._now())}
+        flake.save(self.state_dir, data)
+        self.pass_()
+        self.assertEqual(self.lane_of('spec/F-1')['state'], lane.BACK)

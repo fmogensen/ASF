@@ -263,6 +263,79 @@ def verdict(runs, required):
 
 # ---- the pass -----------------------------------------------------------------------------------
 
+# ---- a landing-gate hold the triage never judged: gated again -----------------------------------
+#
+# A spec/plan PR sent BACK as ``landing-gate`` over a red batch job asks its session to change a
+# document so a product job passes — right only when that job's red is the document's. A hold
+# written before flake triage existed (#603, #621) named jobs nobody re-ran, a job the product does
+# not require, or runner loss. Such a hold is no defect of the document: it is cleared and the
+# branch goes back through the gate (and so the next batch, whose red is triaged first).
+
+_BATCH_SHA_RE = re.compile(r'@ ([0-9a-f]{7,40})\b')
+
+
+def _hold_regate_why(lane, run, head, trunk_sha):
+    """Why the landing-gate hold of ``run`` is no document defect (a sentence), or None when it
+    stands: every job it names must be unrequired, lost with its runner, or never re-run by the
+    flake triage on the batch sha it names."""
+    corr = (run or {}).get('correction') or {}
+    jobs = [flake.job_key(str(n).split(' (')[0]) for n in corr.get('finding') or ()]
+    m = _BATCH_SHA_RE.search(corr.get('text') or '')
+    if corr.get('kind') != lane_mod.LANDING_GATE or not jobs or not m:
+        return None
+    short = m.group(1)
+    required, _why = required_set(lane, head, trunk_sha)
+    if required is None:
+        return None
+    triaged = set()
+    for key in flake.load(lane.state_dir).get('reruns', {}):
+        sha, _, name = key.partition('|')
+        if sha.startswith(short) or short.startswith(sha):
+            triaged.add(name)
+    runs = None
+    reasons = []
+    for job in dict.fromkeys(jobs):
+        if job not in required:
+            reasons.append(f'{job} is not a required check')
+            continue
+        if runs is None:
+            runs = check_runs(lane.slug, short) or []
+        lost = next((flake.infra_red(lane.slug, flake._ids(r.get('html_url'))[1] or r.get('id'), H._gh) for r in runs
+                     if flake.job_key(r.get('name')) == job
+                     and r.get('conclusion') not in (None, 'success', 'skipped', 'neutral')), None)
+        if lost:
+            reasons.append(f'{job} lost its runner ({lost})')
+        elif job not in triaged:
+            reasons.append(f'{job} was never re-run by flake triage')
+        else:
+            return None
+    return '; '.join(reasons)
+
+
+def regate_holds(lane, heads, trunk_sha):
+    """Clear each landing-gate hold :func:`_hold_regate_why` finds no document defect in, at the
+    branch's current head, and put the branch back at PUSHED: the gate takes it again. Returns the
+    branches cleared."""
+    out = []
+    for b, run in lifecycle.by_branch(lane.path).items():
+        rec = lifecycle.lane_of(run)
+        corr = (run or {}).get('correction') or {}
+        if rec.get('state') != lane_mod.BACK or corr.get('kind') != lane_mod.LANDING_GATE:
+            continue
+        if not heads.get(b) or heads[b] != rec.get('head'):
+            continue    # moved: its own session's answer is in flight
+        why = _hold_regate_why(lane, run, rec['head'], trunk_sha)
+        if not why:
+            continue
+        f = {'branch': b, 'run': run, 'prev': rec, 'head': rec['head'], 'item': rec.get('item')}
+        lane.set(f, lane_mod.PUSHED, f'gated again: the landing-gate hold was no document defect — {why}')
+        H.mark_session(lane.state_dir, run.get('job') or b, correction=None)
+        lane.out(f"merge queue: {b} (PR #{rec.get('pr')}) landing-gate hold cleared — {why}; "
+                 f"gated again")
+        out.append(b)
+    return out
+
+
 def run(lane, ready):
     """The queue's one pass, from the detached harvest: judge the batches in flight (landing,
     dropping or splitting each), then cut new ones from ``ready`` — the green, approved PR
@@ -279,7 +352,10 @@ def run(lane, ready):
     data = load(lane.state_dir)
     runs = lifecycle.by_branch(lane.path)
     asked = load_requests(lane.state_dir)
-    if not data['batches'] and not ready and not asked and not any(
+    gated = any(lifecycle.lane_of(r).get('state') == lane_mod.BACK
+                and ((r or {}).get('correction') or {}).get('kind') == lane_mod.LANDING_GATE
+                for r in runs.values())
+    if not data['batches'] and not ready and not asked and not gated and not any(
             lifecycle.lane_of(r).get('state') == lane_mod.QUEUED and lifecycle.lane_of(r).get('batch')
             for r in runs.values()):
         return
@@ -287,6 +363,7 @@ def run(lane, ready):
     trunk_sha = H.sh(['git', 'rev-parse', f'origin/{trunk}'], cwd=lane.repo).stdout.strip()
     lane.trunk_sha = trunk_sha
     heads = lane.remote_heads()
+    regate_holds(lane, heads, trunk_sha)
 
     chain, groups, loose, settled = [], [], [], set()
     dropped = set()     # the dropped batches: every batch stacked on one of them goes too
@@ -680,6 +757,19 @@ def required_set(lane, sha, trunk_sha):
     return tuple(dict.fromkeys(list(at_batch) + list(at_trunk))), None
 
 
+def _trunk_conflict(lane, head):
+    """``None`` when ``head`` merges onto the trunk tip alone; else the files git names in the
+    conflict (a list, possibly empty when git names none). A test merge (``git merge-tree``)
+    in the repo: no worktree, nothing written to a ref."""
+    tip = getattr(lane, 'trunk_sha', None) or f'origin/{lane.trunk}'
+    got = H.sh(['git', 'merge-tree', '--write-tree', '--name-only', '--no-messages', tip, head],
+               cwd=lane.repo)
+    if got.returncode != 1:     # 0 merges clean; anything else: git could not judge, no verdict
+        return None
+    lines = (got.stdout or '').splitlines()[1:]
+    return sorted({l.strip() for l in lines if l.strip()})
+
+
 def cut(lane, group, base_sha, base_ref, st, base_members=()):
     """Merge each entry of ``group`` ``--no-ff`` onto ``base_sha`` in a throwaway worktree, push
     the result once as a new batch ref and QUEUE the members on it. The batch record, or None
@@ -712,6 +802,20 @@ def cut(lane, group, base_sha, base_ref, st, base_members=()):
                              cwd=tmp).stdout.split()
                 H.sh(['git', 'merge', '--abort'], cwd=tmp)
                 mine = set(files)
+                # the trunk first: a branch that does not merge onto the trunk alone is the
+                # lane's mechanical rebuild's (#570), whatever batch it was cut behind
+                tfiles = _trunk_conflict(lane, head)
+                if tfiles is not None:
+                    out(f"merge queue: {b} (PR #{_pr(f)}) conflicts with {trunk} itself"
+                        f"{' (' + ', '.join(tfiles) + ')' if tfiles else ''} — not with a batch "
+                        f"ahead of it; the lane rebuilds it on {trunk}")
+                    _send_back(
+                        lane, f, 'conflict',
+                        f"PR #{_pr(f)} does not merge onto {trunk}"
+                        + (f'; conflicts in {", ".join(tfiles)}' if tfiles else '')
+                        + f' — rebase the branch onto origin/{trunk} (git rebase origin/{trunk}), '
+                        f'never merge; the factory publishes the rebased branch', tfiles)
+                    continue
                 partner = next((m for m in members if set(m.get('files') or ()) & mine), None)
                 if partner is None and members:   # not by its own file list: by what the batch changed
                     changed = set(H.sh(['git', 'diff', '--name-only', base_sha, 'HEAD'],
