@@ -365,6 +365,17 @@ def check_clock_code(product):
     return True, detail
 
 
+def check_install_checkout(product):
+    """[(ok, detail)] — red when the checkout the product's clock runs from is not clean on
+    ``main`` at ``origin/main`` (:func:`asf.upgrade.checkout_off_main`). No row unless a clock
+    launcher is installed under this ASF_HOME: only then does a checkout run a live factory."""
+    from asf import scheduler, upgrade
+    if not os.path.exists(scheduler.launcher_path(product.name)):
+        return []
+    off = upgrade.checkout_off_main()
+    return [(off is None, off or 'clean on main at origin/main, or not a checkout')]
+
+
 def _age_s_since(at):
     return None if at is None else max(0.0, time.time() - at)
 
@@ -928,6 +939,8 @@ def run(product_name):
     rows.append(('worker secrets', True, ok, detail))
     ok, detail = check_worker_push_auth(cfg, product)
     rows.append(('worker push auth', True, ok, detail))
+    for ok, detail in check_install_checkout(product):
+        rows.append(('install checkout', True, ok, detail))
     ok, detail = check_clock_code(product)
     rows.append(('clock code', False, ok, detail))
     for required, ok, detail in check_clock_installs(cfg, product):

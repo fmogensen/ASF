@@ -45,6 +45,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 
 from asf import __version__, env, schema
@@ -314,6 +315,40 @@ def batch_hold(repo, installed, head, now=None, cfg=None):
     if (now or time.time()) >= due or urgent(repo, installed, head):
         return None
     return due
+
+
+def _git(root, *args, run=subprocess.run):
+    r = run(['git', '-C', root, *args], capture_output=True, text=True, timeout=15)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def checkout_off_main(root=None, run=subprocess.run):
+    """Why the install is an editable checkout that is NOT on ``main`` at ``origin/main`` — one
+    phrase naming the branch and sha — else ``None`` (a pipx install, or a checkout that is clean
+    on main at origin/main). The live factory runs from such a checkout: a feature branch or a
+    detached head checked out there changes what every tick executes."""
+    root = root or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        top = _git(root, 'rev-parse', '--show-toplevel', run=run)
+        if not top or os.path.realpath(top) != os.path.realpath(root):
+            return None  # not an editable checkout of its own repo
+        sha = _git(root, 'rev-parse', 'HEAD', run=run) or '?'
+        branch = _git(root, 'symbolic-ref', '--short', '-q', 'HEAD', run=run)
+        origin = _git(root, 'rev-parse', '--verify', '-q', 'origin/main', run=run)
+        dirty = _git(root, 'status', '--porcelain', '--untracked-files=no', run=run)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    problems = []
+    if branch != 'main':
+        problems.append(f'on {branch or "a detached head"}')
+    if origin and sha != origin:
+        problems.append(f'HEAD {sha[:7]} is not origin/main {origin[:7]}')
+    if dirty:
+        problems.append('uncommitted changes')
+    if not problems:
+        return None
+    return (f'the editable install at {root} is {"; ".join(problems)} '
+            f'(branch {branch or "(detached)"}, sha {sha[:7]})')
 
 
 def upgrade_command(url, ref):
@@ -655,6 +690,19 @@ def render(rows):
 
 def cmd_upgrade(args, run=subprocess.run):
     if not args.skip_pipx:
+        off = checkout_off_main(run=run)
+        if off:
+            print(f'upgrade: warning — {off}', file=sys.stderr)
+            if not getattr(args, 'ref', None):
+                try:
+                    on_branch = _git(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                     'symbolic-ref', '--short', '-q', 'HEAD', run=run) == 'main'
+                except (OSError, subprocess.SubprocessError):
+                    on_branch = True
+                if not on_branch:
+                    print('upgrade: refused — the install checkout is not on main; '
+                          'pass --ref <sha-or-tag> to install a named commit')
+                    return 2
         rc = install(getattr(args, 'ref', None), run=run, owner=getattr(args, 'owner', None),
                      wait_s=getattr(args, 'wait', None) or 0,
                      sleep=getattr(args, 'sleep', None) or _drain_sleep)
