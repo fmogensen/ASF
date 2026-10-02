@@ -73,6 +73,17 @@ class AsfLand(QueueRepo):
         self.assertEqual(self.heads()['main'], batch['base'])
         self.assertEqual(merge_queue.load_requests(self.state_dir)['7']['red']['head'], self.head)
 
+    def test_a_required_job_that_never_started_on_a_finished_head_is_admitted(self):
+        self.gh.checks[self.head] = [check_run('gate'),
+                                     check_run('gate-tests${{ matrix.suffix }}', 'skipped')]
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(len(self.batches()), 1)
+
+    def test_a_required_job_not_started_while_the_head_still_runs_waits(self):
+        self.gh.checks[self.head] = [check_run('gate', None, 'in_progress')]
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.batches(), [])
+
     def test_a_red_head_is_marked_and_never_cut_until_it_moves(self):
         self.gh.checks[self.head] = [check_run('gate'), check_run('gate-tests', 'failure')]
         self.queue_pass(self.lane(), [])
