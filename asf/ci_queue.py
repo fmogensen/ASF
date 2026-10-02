@@ -287,7 +287,7 @@ import re
 import subprocess
 import time
 
-from asf import ci_pool, env, gh_limit, mutation_guard
+from asf import attestation, ci_pool, env, gh_limit, mutation_guard
 
 QUEUE_FILE = 'ci-queue.json'
 KINDS = ('pr', 'trunk', 'batch', 'deploy')
@@ -962,6 +962,11 @@ class Source:
         """The blob sha of the file at ``path`` at ``ref``, or None when unreadable."""
         return None
 
+    def attested(self, sha):
+        """True when ``sha`` carries the merge queue's attestation (:mod:`asf.attestation`);
+        False when it does not or it is unreadable."""
+        return False
+
 
 class GitHubSource(Source):
     def __init__(self, product, run=None):
@@ -1228,6 +1233,10 @@ class GitHubSource(Source):
             return None
         text = self._gh(['api', f'repos/{self.slug}/contents/{path}?ref={ref}', '--jq', '.sha'])
         return (text or '').strip() or None
+
+    def attested(self, sha):
+        return attestation.product_attested(self.product, sha,
+                                            read=lambda path: self._json(['api', path]))
 
     def inflight(self):
         from asf import capacity
@@ -3287,7 +3296,9 @@ def _item_of_run(branch, title, items):
 
 def _required_names(product, sha):
     """The job names that make a trunk run at ``sha`` deployable to prod (``deploy_sha.prod
-    .required_jobs_from`` read at ``sha``, else ``required_jobs``); empty: every job counts."""
+    .required_jobs_from`` read at ``sha``, else ``required_jobs``); empty: every job counts. On
+    an attested sha (:mod:`asf.attestation`) the heavy ones end ``skipped``, never queued, so
+    only the ones the run does run (the gate, the rules) can starve it."""
     try:
         from asf.harvest import deploy
         names, _src = deploy.required_jobs(product, 'prod', sha)
@@ -3558,6 +3569,13 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
         serving = [r.norm_labels() for r in q._runners
                    if r.online and any(w <= r.norm_labels() for w in want)]
     elif not run_level:
+        return 0
+    elif src.attested(target.get('headSha')):
+        # the merge queue attested the sha: its heavy jobs skip there, so the run-level sizing
+        # (measured on full runs) overstates what it waits for — only a starved required job
+        # (the jobs it does run: the gate, the rules) is relieved, above
+        out(f"relief: none for {owner} — {sha} is attested ({attestation.context(product)}): "
+            'its heavy jobs skip, no required job starved')
         return 0
     else:
         need = q.needs(twf)

@@ -1006,6 +1006,14 @@ class Conventions:
         return value.strip() if isinstance(value, str) and value.strip() \
             else DEFAULT_QUEUE_STATUS
 
+    def attest_status(self):
+        """``ci.attest_status``: the commit status context the merge queue attests a green batch
+        sha by (:func:`asf.merge_queue.attest`) and every reader of the trunk's required checks
+        counts as their verdict (:mod:`asf.attestation`) — ``asf/attested`` unless set."""
+        from asf.attestation import CONTEXT
+        value = self.map_of('ci').get('attest_status')
+        return value.strip() if isinstance(value, str) and value.strip() else CONTEXT
+
     def trunk_stall_hours(self):
         """``ci.trunk_stall_hours``: how long the trunk may stand still while landings wait
         before :mod:`asf.trunk_watch` raises its stall alarm — :data:`DEFAULT_TRUNK_STALL_HOURS`

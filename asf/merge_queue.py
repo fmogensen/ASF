@@ -77,7 +77,7 @@ import shutil
 import tempfile
 import time
 
-from asf import ci_queue, flake, gitpush, refguard
+from asf import attestation, ci_queue, flake, gitpush, refguard
 from asf.harvest import harvest as H
 from asf.harvest import lane as lane_mod
 from asf.workers import lifecycle
@@ -108,7 +108,7 @@ REQUESTS_FILE = 'land-requests.json'
 #: queue gave up on (a cancelled run on a stale workflow, or stuck); the next pass rebuilds them
 REBUILD_FILE = 'merge-queue-rebuild.json'
 #: the commit status context a landed batch sha carries (:func:`attest`)
-ATTEST_CONTEXT = 'asf/attested'
+ATTEST_CONTEXT = attestation.CONTEXT
 #: the key the attestation's description names the batch run by (the trailer form)
 ATTEST_KEY = 'ASF-Batch-Run'
 #: how long a landed member's PR is given to read MERGED on the host before it is closed by hand
@@ -580,9 +580,10 @@ def attest(lane, sha, run_ids):
     url = f'https://github.com/{lane.slug}/actions/runs/{rid}'
     more = f' (+{len(run_ids) - 1} run)' if len(run_ids) > 1 else ''
     desc = f'{ATTEST_KEY}: {rid}{more} — required checks green at this exact sha'
+    context = attestation.context(getattr(lane, 'product', None))
     try:
         rc, _o, err = H._gh(['api', '-X', 'POST', f'repos/{lane.slug}/statuses/{sha}',
-                             '-f', 'state=success', '-f', f'context={ATTEST_CONTEXT}',
+                             '-f', 'state=success', '-f', f'context={context}',
                              '-f', f'target_url={url}', '-f', f'description={desc[:140]}'])
     except OSError as e:
         rc, err = 1, str(e)
@@ -590,7 +591,7 @@ def attest(lane, sha, run_ids):
         lane.out(f'merge queue: {sha[:12]} not attested — {H.tail(err) or f"gh exited {rc}"}; '
                  'the trunk run judges it')
         return False
-    lane.out(f'merge queue: attested {sha[:12]} — {ATTEST_CONTEXT} success, {ATTEST_KEY}: {rid}')
+    lane.out(f'merge queue: attested {sha[:12]} — {context} success, {ATTEST_KEY}: {rid}')
     return True
 
 

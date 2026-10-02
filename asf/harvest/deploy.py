@@ -69,6 +69,7 @@ import os
 import re
 import subprocess
 
+from asf import attestation
 from asf.evidence import sources
 
 DEFAULT_INPUT = 'sha'
@@ -553,7 +554,9 @@ def _jobs_verdict(product, run, req, sh):
     rule, reading the jobs of its latest attempt (``gh run view --json jobs``); ``rule`` names
     what decided. A required
     job is green only when it concluded ``success``: ``skipped``, ``neutral``, ``cancelled`` or
-    missing never are. The run's own conclusion never stands in for its jobs — a run whose path
+    missing never are — except ``skipped`` on a sha the merge queue attested
+    (:mod:`asf.attestation`): the batch run judged that exact sha green, so the trunk push skipped
+    its heavy jobs. A required job that ran there and did not succeed is red all the same. The run's own conclusion never stands in for its jobs — a run whose path
     filter skipped the suites concludes ``success`` too (2026-09-26: a docs-only tip, suites
     skipped, was announced for prod over a code commit whose run had not finished)."""
     names = ', '.join(req)
@@ -562,16 +565,29 @@ def _jobs_verdict(product, run, req, sh):
     if view is None:
         return False, f"run {run.get('databaseId')} jobs unreadable (gh run view)"
     jobs = [j for j in view.get('jobs') or [] if isinstance(j, dict)]
+    attested, covered = None, []
     for name in req:
         mine = [j for j in jobs if job_key(j.get('name')) == name]
-        if not mine or any(j.get('conclusion') != 'success' for j in mine):
-            got = ', '.join(sorted({str(j.get('conclusion') or j.get('status') or '?')
-                                    for j in mine})) or 'missing'
-            return False, f'required job {name} not green ({got})'
+        if mine and all(j.get('conclusion') == 'success' for j in mine):
+            continue
+        if mine and all(j.get('conclusion') == 'success'
+                        or j.get('conclusion') in attestation.ATTESTED_CONCLUSIONS for j in mine):
+            if attested is None:  # read once, and only when a required job skipped
+                attested = attestation.product_attested(
+                    product, run.get('headSha'), read=lambda p: _json(sh(['gh', 'api', p]), dict))
+            if attested:
+                covered.append(name)
+                continue
+        got = ', '.join(sorted({str(j.get('conclusion') or j.get('status') or '?')
+                                for j in mine})) or 'missing'
+        return False, f'required job {name} not green ({got})'
     other = [f"{job_key(j.get('name'))} {j.get('conclusion') or j.get('status') or 'unknown'}"
              for j in jobs if job_key(j.get('name')) not in req
              and j.get('conclusion') not in ('success', 'skipped', 'neutral')]
     tail = f" ({', '.join(other)}, not required)" if other else ''
+    if covered:
+        tail += (f" ({', '.join(covered)} skipped on the trunk, attested by "
+                 f"{attestation.context(product)})")
     return True, f'green on required jobs [{names}]{tail}'
 
 
