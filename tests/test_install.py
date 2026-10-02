@@ -27,8 +27,9 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def _git(args, cwd=None):
     env = {k: v for k, v in os.environ.items() if k not in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE')}
-    return subprocess.run(['git'] + args, cwd=cwd, check=True, capture_output=True, text=True,
-                          env=env).stdout.strip()
+    # no background `gc --auto`/maintenance: it races the temp dir's removal (ENOTEMPTY on .git/objects/pack)
+    return subprocess.run(['git', '-c', 'gc.auto=0', '-c', 'maintenance.auto=false'] + args, cwd=cwd,
+                          check=True, capture_output=True, text=True, env=env).stdout.strip()
 
 
 def _publish(tree, origin):

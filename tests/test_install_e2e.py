@@ -77,6 +77,8 @@ class InstallFromZeroTests(unittest.TestCase):
         os.makedirs(cls.home)
         cls.asf_home = os.path.join(cls.home, '.ASF')
         stub_dir = os.path.join(cls.tmp, 'bin')
+        fake_clis(stub_dir, names=('claude',), rc=1)  # a real `claude` on PATH would answer the
+        # plugin probe and rewrite ~/.claude/settings.json in its own key order: not hermetic
         fake_clis(stub_dir)  # every doctor CLI answers at once, gh included: no ci.provider to
         # discover is undiscovered, not `none`, so `asf doctor`'s cli:gh row stays required
         base = dict(os.environ, ASF_HOME=cls.asf_home, PYTHONPATH=ROOT,
