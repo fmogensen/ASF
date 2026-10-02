@@ -208,6 +208,15 @@ sunk, until the starved jobs fit; never S1, hotfix, the trunk or a CI-changing P
 as above: ``cancelled in-progress pr run 121 (T-0341) — main's reserved runners r1, r2 held by a
 pr job; it holds a runner main's gate-tests (queued 4m) can take; sunk 30 min``.
 
+**Priority batch.** A merge-queue batch that holds an ``asf land --priority`` request — or any
+batch once the trunk has stood still past half ``ci.trunk_stall_hours`` while landings wait
+(:func:`urgent_batch`) — gets runner priority: its start (and the re-run of its cancelled run) goes
+at trunk priority, relief never cancels its run, and its claim stays set aside for
+:data:`URGENT_HOLD_S` (not :data:`PICKUP_S`) until its jobs are on runners — every PR or batch start
+behind it waits for those runners meanwhile, and neither the head guard nor the PR starvation
+guard lets one past (2026-10-02: a batch needing 5 heavy waited ``heavy 1–3 free, needs 5`` for
+hours behind a steady stream of PR runs while a priority ``asf land`` request sat uncut).
+
 **Every hold is one line**: ``ci queue: T-0341 waits — heavy 0 free, needs 3 (S2, 4th in line)``.
 
 **CI-config exemption.** A run whose PR changed a file under ``.github/workflows/**`` or
@@ -330,6 +339,9 @@ STUCK_RETRY_S = 30 * 60
 STALE_S = 30 * 60
 #: a run admitted this recently still holds its runners: its jobs queue before a runner is busy
 PICKUP_S = 3 * 60
+#: how long a priority batch's claim (:func:`urgent_batch`) stays set aside while its jobs wait
+#: for runners: PR starts behind it are held that long at most, so neither side starves for good
+URGENT_HOLD_S = 45 * 60
 #: how long a workflow's measured jobs per class are reused before its run ids are listed again
 EXPECT_TTL_S = 10 * 60
 #: the measure's version: a cached figure from another version is read again. 6 adds the
@@ -1648,7 +1660,8 @@ def rerun_ids(state_dir):
 def prune(data, now):
     data['entries'] = {k: v for k, v in data['entries'].items()
                        if _age(v.get('seen'), now) <= STALE_S}
-    data['started'] = [s for s in data['started'] if _age(s.get('at'), now) <= PICKUP_S]
+    data['started'] = [s for s in data['started']
+                       if _age(s.get('at'), now) <= (URGENT_HOLD_S if s.get('urgent') else PICKUP_S)]
     data['stalls'] = [s for s in data.get('stalls') or ()
                       if _age(s.get('at'), now) <= STALL_HISTORY_TTL_S]
     return data
@@ -2149,7 +2162,8 @@ def ceiling_held(order, entries, ceiling=None, inflight=None, admitted=0):
 
 
 def decide(key, order, entries, needs_of, free, ceiling=None, inflight=None, admitted=0,
-           now=None, pr_wait_min=None, head_wait_max_min=None, head_wait_source=''):
+           now=None, pr_wait_min=None, head_wait_max_min=None, head_wait_source='',
+           urgent=''):
     """Pure: may ``key`` start now? ``(ok, why)``. ``order`` is the line; ``needs_of(key)`` the
     entry's ``{class: jobs}``; ``free`` the free slots per class (None: unknown — no runner
     check); ``ceiling``/``inflight`` the CI ceiling and runs in flight (None: no ceiling);
@@ -2163,7 +2177,8 @@ def decide(key, order, entries, needs_of, free, ceiling=None, inflight=None, adm
     would never see them free at once — the host queues its jobs behind theirs, and it holds
     its place there. That ``why`` starts :data:`HEAD_GUARD`, and names ``head_wait_max_min`` and
     ``head_wait_source`` (:func:`wait_source`) when the caller passes one — today's string,
-    unchanged, when it does not (PD11)."""
+    unchanged, when it does not (PD11). ``urgent``: a priority batch's claim is set aside in
+    ``free`` (:func:`urgent_batch`) — no guard admits past it; the hold names it."""
     e = entries.get(key)
     if not fit_applies(e):
         return True, ''
@@ -2176,6 +2191,11 @@ def decide(key, order, entries, needs_of, free, ceiling=None, inflight=None, adm
     short = shortfall(key, order, needs_of, free, skip=skip)
     if not short:
         return True, ''
+    if urgent:
+        fits = backfill(key, order, entries, needs_of, free, skip)
+        if fits:
+            return True, fits
+        return False, f'{fit_reason(short)}; runners set aside for {urgent}'
     if (head_wait_max_min is not None and now is not None
             and key == head_of(order, entries, skip)):
         waited = head_wait_s(e, now)
@@ -2228,6 +2248,8 @@ class Queue:
         self._placed_busy_read = False
         #: :meth:`_placed`'s per-pass memo: ``{fit key: slots still unplaced}``
         self._placed_map = None
+        #: :meth:`_placed`'s word on a priority batch whose claim is still unplaced ('' none)
+        self._urgent_left = ''
         self._read = False
         self.write = write and self.mode == 'on'
         self.data = prune(load(product.name), self.now) if self.mode != 'off' else None
@@ -2426,6 +2448,7 @@ class Queue:
         if self._placed_map is not None:
             return self._placed_map
         started = self.data['started']
+        self._urgent_left = ''
         if not started:
             self._placed_map = {}
             return self._placed_map
@@ -2471,6 +2494,8 @@ class Queue:
                     left = True
             if left:
                 kept.append(rec)
+                if rec.get('urgent') and not self._urgent_left:
+                    self._urgent_left = f"priority batch {rec.get('branch')}"
         self.data['started'] = kept
         self._placed_map = residual
         return residual
@@ -2528,14 +2553,19 @@ class Queue:
         self.data['head'] = head
 
     def admit(self, key, kind, item=None, prio=OTHER, label='other', workflow=None, run=FULL,
-              sha=None, rank=None):
+              sha=None, rank=None, run_branch=None, urgent=''):
         """May the start ``key`` go now? Enqueues it (keeping its place), decides, and on
         admission moves it to ``started``. A hold prints its one line. ``run``: the run type
         (:func:`run_type`) the start is sized as; ``sha``: the head it starts on, re-set on a
         new push (the entry keeps its place); ``rank``: the record's order key of a ``RANKED``
-        start (:func:`record_rank`), re-read every ask."""
+        start (:func:`record_rank`), re-read every ask. ``run_branch``: the branch the host's run
+        will be on when it is not the key's (a merge-queue batch ref); ``urgent``: why this start
+        is a priority batch (:func:`urgent_batch`) — it goes at trunk priority and its claim is
+        set aside until its jobs are on runners (:data:`URGENT_HOLD_S`)."""
         if self.mode == 'off':
             return Decision(True, bypass=True)
+        if urgent and prio > TRUNK:
+            prio, label = TRUNK, f'{label}, priority'
         workflow = workflow or workflow_for(self.product, kind)
         entries = self.data['entries']
         e = entries.get(key) or {'since': _iso(self.now)}
@@ -2558,7 +2588,8 @@ class Queue:
                          self._inflight, self.admitted_here, now=self.now,
                          pr_wait_min=pr_wait_min(self.product),
                          head_wait_max_min=head_wait_max_min(self.product),
-                         head_wait_source=wait_source(self.product))
+                         head_wait_source=wait_source(self.product),
+                         urgent=self._urgent_left if free is not None else '')
         pos = order.index(key) + 1
         if ok:
             if why.startswith(HEAD_GUARD):      # the head guard: one line naming the wait
@@ -2570,10 +2601,15 @@ class Queue:
                 self.out(f"ci queue: {e['item']} starts — {why} ({label}, {_ordinal(pos)} in line)")
             entries.pop(key, None)
             self._mark_head()
-            started_branch = key.split(':', 1)[1] if ':' in key else e['item']
+            started_branch = run_branch or (key.split(':', 1)[1] if ':' in key else e['item'])
             self.data['started'].append({'key': key, 'at': _iso(self.now), 'needs': needs[key],
                                          'branch': started_branch, 'workflow': workflow,
-                                         'sha': e.get('sha')})
+                                         'sha': e.get('sha'),
+                                         **({'urgent': urgent} if urgent else {})})
+            if urgent:
+                held = ', '.join(f'{c} {n}' for c, n in sorted(needs[key].items())) or 'none'
+                self.out(f'ci queue: {started_branch} starts first — {urgent}; its runners '
+                         f'({held}) are set aside until its jobs have them')
             self._placed_map = None
             self.admitted_here += 1
             decision = Decision(True, '')
@@ -2600,10 +2636,12 @@ class Queue:
 
 
 def admit(product, key, kind, item=None, items=None, branch='', files=(), workflow=None,
-          source=None, out=print, inflight=None, queue=None, draft=False, sha=None):
+          source=None, out=print, inflight=None, queue=None, draft=False, sha=None,
+          run_branch=None, urgent=''):
     """One start's question, for a caller with no :class:`Queue` of its own. ``draft``: the
     branch's PR is a draft — parked by its owner — so it never starts and leaves the line.
-    ``sha``: the branch head the start is for (:meth:`Queue.admit`)."""
+    ``sha``: the branch head the start is for; ``run_branch``/``urgent``: a merge-queue batch's
+    ref and why it has runner priority (:meth:`Queue.admit`, :func:`urgent_batch`)."""
     q = queue or Queue(product, source=source, out=out, inflight=inflight)
     if q.mode == 'off':
         return Decision(True, bypass=True)
@@ -2615,7 +2653,7 @@ def admit(product, key, kind, item=None, items=None, branch='', files=(), workfl
     rank = record_rank(item, items)[0] if prio == RANKED else None
     run = run_type(product, files) if kind == 'pr' else FULL
     return q.admit(key, kind, item=item, prio=prio, label=label, workflow=workflow, run=run,
-                   sha=sha, rank=rank)
+                   sha=sha, rank=rank, run_branch=run_branch, urgent=urgent)
 
 
 def forget(product, branch, queue=None, source=None, out=print):
@@ -2902,9 +2940,11 @@ def _rerun_cancelled(q, src, product, started, dry_run, out, now, items=None, li
             continue
         changed = _workflow_change(src, product, rid, blobs)
         prio, label, rank = _rerun_priority(rec, items, product)
+        urgent = (urgent_batch(product, rec.get('branch'))
+                  if rec.get('kind') == 'batch' else '')
         d = q.admit(_rerun_key(rec), rec.get('kind') or 'pr', item=rec.get('item'),
                     prio=prio, label=label, workflow=rec.get('workflow'), sha=rec.get('sha'),
-                    rank=rank)
+                    rank=rank, urgent=urgent)
         if not d.admitted or d.line:        # held (or a dry-run mode hold): next tick asks again
             keep.append(rec)
             continue
@@ -2972,6 +3012,34 @@ def _batch_ref(product, branch):
         return False
     from asf import merge_queue
     return str(branch).startswith(merge_queue.settings(conv)['ref_prefix'])
+
+
+def urgent_batch(product, branch, members=None, now=None):
+    """Why the merge-queue batch on ``branch`` has runner priority, or '': it holds an ``asf land
+    --priority`` request (``members``, else its record in the merge queue's chain), or the trunk
+    has stood still past half ``ci.trunk_stall_hours`` while landings wait
+    (:func:`asf.trunk_watch.still_hours`). Off the state files only; never raises."""
+    try:
+        if not _batch_ref(product, branch) and members is None:
+            return ''
+        from asf import merge_queue, trunk_watch
+        if members is None:
+            batch = next((b for b in merge_queue.load(env.state_dir(product.name))['batches']
+                          if b.get('ref') == branch), None)
+            if batch is None:
+                return ''
+            members = batch.get('members') or ()
+        asked = [m for m in members if isinstance(m, dict) and m.get('priority')]
+        if asked:
+            return f"holds asf land --priority #{asked[0].get('pr')}"
+        hours = trunk_watch.still_hours(product, now=now.timestamp() if now else None)
+        limit = product.conventions.trunk_stall_hours()
+        if hours is not None and hours > limit / 2:
+            return (f'trunk still {hours:.1f}h (> half of {limit}h, '
+                    f'conventions.ci.trunk_stall_hours)')
+    except Exception:  # noqa: BLE001 — a priority read never breaks the queue
+        return ''
+    return ''
 
 
 def _batch_gone_stale(src, product, rec, blobs):
@@ -3115,6 +3183,8 @@ def _rerun_priority(rec, items, product=None):
     (``OTHER``); a PR run as its branch's item stands in the record now (:func:`priority`); with
     no record at hand, what the record held when it was cancelled."""
     if rec.get('kind') == 'batch':
+        if product is not None and urgent_batch(product, rec.get('branch')):
+            return TRUNK, 'batch, priority', None
         return OTHER, 'batch', None
     if items is None:
         label = rec.get('label') or 'other'
@@ -3621,6 +3691,11 @@ def _relieve_for(product, q, src, items, listed, now, target, out, dry_run, owne
             prio, label = priority(item, items, branch, product=product)
             if prio == S1:
                 continue                        # an S1 or hotfix run is never cancelled
+            if kind == 'batch':
+                why = urgent_batch(product, branch)
+                if why:                         # a priority batch's run is never cancelled
+                    out(f'relief: exempt {branch} — priority batch ({why})')
+                    continue
             head = r.get('headSha')
             if head not in exempt_files:
                 exempt_files[head] = src.run_files(rid)
@@ -3836,7 +3911,8 @@ def start_admitted(product, items=None, source=None, out=print, dry_run=False, n
                                    q._inflight, q.admitted_here, now=q.now,
                                    pr_wait_min=pr_wait_min(product),
                                    head_wait_max_min=head_wait_max_min(product),
-                                   head_wait_source=wait_source(product))[0]), None)
+                                   head_wait_source=wait_source(product),
+                                   urgent=q._urgent_left)[0]), None)
             if key is None:
                 return n
             tried.add(key)
@@ -4011,7 +4087,8 @@ def live_line(product, source=None, inflight=None, now=None):
                                   q.free(entries[k].get('kind'), keys), line.ceiling,
                                   line.inflight, now=q.now, pr_wait_min=pr_wait_min(product),
                                   head_wait_max_min=head_wait_max_min(product),
-                                  head_wait_source=wait_source(product)))
+                                  head_wait_source=wait_source(product),
+                                  urgent=q._urgent_left))
                       for k in order]
     return line
 

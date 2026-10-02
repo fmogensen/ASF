@@ -154,6 +154,80 @@ def branch_for(product, row):
     return row.branch or f'{product.branch_prefix(row.kind)}/{row.job}'
 
 
+#: the session kinds that never push: the only ones that may work on a non-factory branch
+READ_ONLY_KINDS = frozenset({'review'})
+
+
+def _land_requested(product, item):
+    """The PR number when ``item`` is a ``PR-<n>`` the product asked ``asf land`` to take, else
+    None (never raises: an unreadable request file is no request)."""
+    from asf.harvest import lane as lane_mod   # local: the lane imports the workers
+    m = lane_mod.PR_ITEM_RE.match(str(item or ''))
+    if not m:
+        return None
+    try:
+        from asf import merge_queue
+        reqs = merge_queue.load_requests(env.state_dir(product))
+    except Exception:  # noqa: BLE001
+        return None
+    n = int(m.group(1))
+    return n if any(int(r.get('pr') or 0) == n for r in reqs.values()) else None
+
+
+def _kind_prefix(product, kind):
+    """The prefix a ``kind`` session's own branch is minted under (:func:`branch_for`)."""
+    try:
+        return f'{product.branch_prefix(kind)}/' if kind else ''
+    except Exception:  # noqa: BLE001
+        return ''
+
+
+def _factory_branch(product, branch, kind=None):
+    """A branch under the factory's prefixes, or the one a ``kind`` session is minted under."""
+    conv = getattr(product, 'conventions', None)
+    of = getattr(conv, 'branch_kind', None)
+    mine = _kind_prefix(product, kind)
+    return bool(branch) and (bool(callable(of) and of(branch))
+                             or bool(mine and branch.startswith(mine)))
+
+
+def _foreign(row):
+    """A row for a PR no factory item made (``PR-<n>``, the lane's foreign-PR adoption): the
+    one way a session reaches a branch the factory did not cut."""
+    from asf.harvest import lane as lane_mod   # local: the lane imports the workers
+    return bool(row.branch) and lane_mod.is_pr_item(row.item)
+
+
+def spawn_refusal(product, row, branch):
+    """Why ``row`` must not launch, or '' — the spawn guard. An ``asf land`` request's PR is the
+    merge queue's to land, never factory work; and a session never works on a branch outside the
+    factory's prefixes (a person's or a product session's own branch: ``ci/…``) unless it is a
+    kind that never pushes (:data:`READ_ONLY_KINDS`)."""
+    n = _land_requested(product, row.item)
+    if n:
+        return (f'{row.job}: PR #{n} is an asf land request — the merge queue lands it as it '
+                f'is; it is never factory work')
+    if (_foreign(row) and not _factory_branch(product, branch, row.kind)
+            and row.kind not in READ_ONLY_KINDS):
+        return (f'{row.job}: {branch} is not a factory branch — an ASF session never pushes to '
+                f'a branch outside the factory prefixes')
+    return ''
+
+
+def push_allow(product, row, branch):
+    """``ASF_PUSH_ALLOW``: the branch prefixes (and the session's own factory-minted branch) a
+    session's ``pre-push`` hook lets it push to (:data:`asf.workers.githooks.ASF_HOOK`) —
+    every other ``refs/heads/`` ref is refused. '' when the product names no prefixes."""
+    conv = getattr(product, 'conventions', None)
+    allow = list(getattr(conv, 'all_prefixes', lambda: ())() or ()) if conv is not None else []
+    if not allow:
+        return ''
+    allow.append(_kind_prefix(product, row.kind))
+    if branch and not _foreign(row):   # a factory item's own branch, whatever its prefix
+        allow.append(branch)
+    return ' '.join(dict.fromkeys(a for a in allow if a and ' ' not in a))
+
+
 def _holding_worktree(repo, branch):
     """The worktree that holds ``branch``: the one with it checked out, or — what ``git worktree
     list`` shows only as *detached* — one with a rebase of it in progress (2026-09-26: a dead
@@ -892,6 +966,9 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
         raise SpawnError(str(e), clear=e.clear) from None
     model = model_arg(row.model, cfg)
     branch = branch_for(product, row)
+    refusal = spawn_refusal(product, row, branch)
+    if refusal:  # before anything is made: a refused launch leaves nothing behind
+        raise SpawnError(refusal)
     worktree = make_worktree(product, row.job, branch, kind=row.kind)
     cloud = getattr(runtime, 'lane', 'local') == 'cloud'
     setup_s = None
@@ -931,6 +1008,7 @@ def spawn(product, row, account, brief_text, runtime=None, cfg=None):
                                **githooks.item_env(getattr(product, 'conventions', None),
                                                    row.item, branch),
                                **pushlog.env_for(product, row.job, row.kind),
+                               'ASF_PUSH_ALLOW': push_allow(product, row, branch),
                                'BACKLOG_ID_RANGE': id_range, 'ASF_SESSION': sid},
                           settings_file=settings_file(wp), hooks_dir=hooks_dir,
                           passthrough=passthrough, product_auth_env=product_auth_env,

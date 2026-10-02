@@ -1432,10 +1432,31 @@ class Lane:
                 out[b] = f
         return out
 
+    def land_requested(self, pr, rec):
+        """True when the branch's PR (or its lane record's) is an ``asf land`` request: the
+        merge queue's to land as it is, never adopted as factory work. Read once a pass."""
+        if getattr(self, '_land_prs', None) is None:
+            from asf import merge_queue   # local: the merge queue imports the lane
+            self._land_prs = {str(r.get('pr')) for r in
+                              merge_queue.load_requests(self.state_dir).values()}
+        n = (pr or {}).get('number') or (rec or {}).get('pr')
+        return bool(n) and str(n) in self._land_prs
+
     def branch_facts(self, b, run, head, pr, prs, running):
         conv, trunk, repo = self.conv, self.trunk, self.repo
         rec = lifecycle.lane_of(run)
         item = item_of(b, run)
+        if (run is None or is_pr_item(item)) and self.land_requested(pr, rec):
+            # an `asf land` request is never factory work: no adoption, no review or correct
+            # round, no push — and an adoption from before this rule is closed (STALE)
+            if run is not None and rec.get('state') not in TERMINAL_STATES and not self.dry_run:
+                f = {'branch': b, 'run': run, 'item': item, 'head': head, 'prev': rec,
+                     'pr': pr}
+                self.write(f, self.record(f, STALE, 'an asf land request: the merge queue '
+                                                    'lands it, never factory work'))
+                self.out(f'lane: {b} {rec.get("state") or "-"} → {STALE} (an asf land '
+                         f'request — the merge queue lands it, never factory work)')
+            return None
         if not prs and rec.get('pr'):
             pr = {'number': rec['pr'], 'state': 'OPEN'}
         f = {'branch': b, 'item': item, 'kind': conv.branch_kind(b), 'head': head, 'run': run,

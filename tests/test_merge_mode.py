@@ -281,6 +281,29 @@ class ForeignPR(LaneFixture):
 
     PRS = {'hook-fix': {'number': 12, 'state': 'OPEN', 'base': 'main', 'title': 'fix the hook'}}
 
+    def test_an_asf_land_request_is_never_adopted_as_factory_work(self):
+        from asf import merge_queue
+        self.push_lane('hook-fix', {'.githooks/pre-push': '#!/bin/sh\n'}, 'fix the pre-push hook')
+        merge_queue.add_request(self.state_dir, 12, 'hook-fix')
+        self.run_lane(self.product('auto'), self.PRS)
+        self.assertEqual(self.lane_of('hook-fix'), {})          # no synthetic run, no lane state
+        occ = lifecycle.occupancy(os.path.join(self.state_dir, 'sessions.jsonl'))
+        self.assertNotIn('PR-0012', occ['review'])
+        self.assertEqual([r for r in feeder_rows.candidates({}, self.product('auto'), [],
+                                                             occupancy=occ)
+                          if r.item_id == 'PR-0012'], [])
+
+    def test_an_adoption_from_before_the_rule_is_closed_once_it_is_a_land_request(self):
+        from asf import merge_queue
+        self.push_lane('hook-fix', {'.githooks/pre-push': '#!/bin/sh\n'}, 'fix the pre-push hook')
+        self.run_lane(self.product('auto'), self.PRS)
+        self.assertEqual(self.lane_of('hook-fix')['state'], lane.REVIEW)
+        merge_queue.add_request(self.state_dir, 12, 'hook-fix')
+        self.run_lane(self.product('auto'), self.PRS)
+        self.assertEqual(self.lane_of('hook-fix')['state'], lane.STALE)
+        occ = lifecycle.occupancy(os.path.join(self.state_dir, 'sessions.jsonl'))
+        self.assertNotIn('PR-0012', occ['review'])
+
     def test_auto_adopts_it_and_asks_the_lane_for_a_review_session(self):
         self.push_lane('hook-fix', {'.githooks/pre-push': '#!/bin/sh\n'}, 'fix the pre-push hook')
         self.run_lane(self.product('auto'), self.PRS)

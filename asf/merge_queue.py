@@ -49,6 +49,14 @@ one before it, not the trunk, so two batches overlap in CI instead of queueing. 
 order is the landing order; a dropped batch drops every batch stacked on it (they contain its
 commits). A green batch above a pending one waits for it.
 
+**Priority.** ``asf land --priority`` goes first in line, and a full chain does not hold it: a
+batch of the priority requests alone is cut on the trunk's tip beyond ``merge_queue.inflight`` and
+put at the front of the chain, so it lands first (the batches behind it are cut again on the new
+tip). One such batch at a time. Its CI start has runner priority
+(:func:`asf.ci_queue.urgent_batch`): trunk priority, never cancelled by relief, its runners set
+aside from the PR starts behind it until its jobs have them — as has any batch once the trunk has
+stood still past half ``ci.trunk_stall_hours``.
+
 **State.** ``state/<product>/merge-queue.json`` holds the chain; each member's lane record
 (QUEUED, ``batch``, ``sha``) is on its run line as every other lane state. A product not on
 ``merge: queue`` never reads or writes either: :func:`asf.harvest.lane.merge_prs` is unchanged.
@@ -403,6 +411,25 @@ def run(lane, ready):
         fresh.append(f)
     halves = len(groups)
     for i, group in enumerate(groups + _pack(fresh, st['batch_size'])):
+        jump = (len(chain) >= st['inflight'] and any(f.get('priority') for f in group)
+                and not any(m.get('priority') for b in chain for m in b['members']))
+        if jump:
+            # `asf land --priority` is never held behind a full chain: its requests alone are
+            # cut on the trunk beyond merge_queue.inflight and go to the front of the chain
+            rest = [f for f in group if not f.get('priority')]
+            for f in rest:
+                lane.out(f"waiting {f['branch']}: PR #{_pr(f)} green — merge queue full "
+                         f"({len(chain)} batch(es) in flight, merge_queue.inflight)")
+                _wait(lane, f, f'merge queue: {len(chain)} batch(es) in flight',
+                      green=f.get('green'))
+            group = [f for f in group if f.get('priority')]
+            lane.out(f"merge queue: priority {', '.join(f'#{_pr(f)}' for f in group)} cut "
+                     f"ahead of {len(chain)} batch(es) in flight (asf land --priority)")
+            batch = cut(lane, group, trunk_sha, None, st)
+            if batch:
+                chain.insert(0, batch)
+                save(lane.state_dir, {'batches': chain})
+            continue
         if len(chain) >= st['inflight']:
             for f in group:
                 lane.out(f"waiting {f['branch']}: PR #{_pr(f)} green — merge queue full "
@@ -726,7 +753,9 @@ def cut(lane, group, base_sha, base_ref, st, base_members=()):
         # the CI start queue's key is the first member's: a batch held and cut again next pass
         # keeps its place in line
         kind = st['start_kind']
-        if not _admits(lane, f"{kind}:{members[0]['branch']}", kind, members[0], sha):
+        urgent = ci_queue.urgent_batch(lane.product, ref, members=members)
+        if not _admits(lane, f"{kind}:{members[0]['branch']}", kind, members[0], sha,
+                       run_branch=ref, urgent=urgent):
             for f in members:
                 _wait(lane, f, lane_mod.CI_QUEUE, green=f.get('green'))
             return None
@@ -747,7 +776,8 @@ def cut(lane, group, base_sha, base_ref, st, base_members=()):
                               'item': f.get('item'), 'kind': f.get('kind'),
                               'class': f.get('class'), 'files': list(f.get('files') or ()),
                               'green': f.get('green'),
-                              **({'requested': True} if f.get('requested') else {})}
+                              **({'requested': True} if f.get('requested') else {}),
+                              **({'priority': True} if f.get('priority') else {})}
                              for f in members]}
         for f in members:
             if f.get('requested'):   # no lane record: the batch and the request are its record
@@ -931,14 +961,16 @@ def _ident(repo):
     return None if has.returncode == 0 else dict(os.environ, **IDENT)
 
 
-def _admits(lane, key, kind, f, sha):
+def _admits(lane, key, kind, f, sha, run_branch=None, urgent=''):
     """The CI start queue's answer for a batch or trunk start (:mod:`asf.ci_queue`), asked as
-    the first member ``f`` (its item ranks the start)."""
+    the first member ``f`` (its item ranks the start); ``run_branch`` the batch ref its run is
+    on, ``urgent`` why it has runner priority (:func:`asf.ci_queue.urgent_batch`)."""
     if lane.ci_queue is None:
         lane.ci_queue = ci_queue.Queue(lane.product, out=lane.out)
     return ci_queue.admit(lane.product, key, kind, item=f.get('item') or f['branch'],
                           items=lane.items, branch=f['branch'], files=f.get('files') or (),
-                          queue=lane.ci_queue, sha=sha).admitted
+                          queue=lane.ci_queue, sha=sha, run_branch=run_branch,
+                          urgent=urgent).admitted
 
 
 def _drop(lane, batch, why):

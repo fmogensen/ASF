@@ -5,7 +5,10 @@
   shown by ``asf status``) and no correct round; red again is a real defect — the correct round
   goes as before;
 * a job in quarantine that goes red is re-run, not corrected, until its entry expires;
-* a merge-queue batch red on one job is re-run before it is split or a member sent back.
+* a merge-queue batch red on one job is re-run before it is split or a member sent back;
+* a job lost with its runner (an infra red: ``The runner has received a shutdown signal``, ``lost
+  communication with the server``, ``The operation was canceled`` alone) is re-run, never sent
+  to a correct round and never counted toward the flake budget.
 """
 import datetime
 import json
@@ -35,13 +38,19 @@ class FakeGH:
     """``gh`` as head_red calls it: the PR's checks (one list per pass), a re-run that is taken
     or refused, the failed job's steps and log."""
 
-    def __init__(self, rollup, rerun_rc=0, rerun_err=''):
+    def __init__(self, rollup, rerun_rc=0, rerun_err='', annotations=None):
         self.rollup, self.rerun_rc, self.rerun_err, self.calls = rollup, rerun_rc, rerun_err, []
+        #: ``{job id: [annotation message]}``: the failure annotations a job carries
+        self.annotations = annotations or {}
 
     def __call__(self, args):
         self.calls.append(list(args))
         if args[:2] == ['pr', 'checks']:
             return 0, json.dumps(self.rollup), ''
+        if args[0] == 'api' and args[1].endswith('/annotations'):
+            job = args[1].split('/check-runs/')[1].split('/')[0]
+            return 0, json.dumps([{'annotation_level': 'failure', 'message': m}
+                                  for m in self.annotations.get(job, ())]), ''
         if args[0] == 'api' and '/check-runs' in args[1]:
             return 0, json.dumps({'check_runs': []}), ''
         if args[:2] == ['run', 'rerun']:
@@ -131,6 +140,56 @@ class Triage(unittest.TestCase):
                     rerun_err='run 100 cannot be rerun; This workflow is already running')
         self.assertIsNone(self.head_red(gh))
 
+    def test_a_job_lost_with_its_runner_is_rerun_and_never_quarantined(self):
+        shutdown = ('The runner has received a shutdown signal. This can happen when the runner '
+                    'service is stopped, or a manually started runner is canceled.')
+        gh = FakeGH([check('gate', 'pass', 11), check('gate-tests', 'fail', 12)],
+                    annotations={'12': [shutdown, 'The operation was canceled.']})
+        self.assertIsNone(self.head_red(gh))                 # infra: re-run, no correct round
+        self.assertEqual(gh.reruns(), [['run', 'rerun', '--job', '12', '-R', 'o/p']])
+        self.assertTrue(any('lost its runner' in l for l in self.lines), self.lines)
+        gh.rollup = [check('gate', 'pass', 11),
+                     check('gate-tests', 'pass', 22, at='2026-10-01T10:30:00Z')]
+        self.assertIsNone(self.head_red(gh))                 # green on its re-run
+        self.assertEqual(flake.load(self.state_dir)['quarantine'], [])   # no flake counted
+        self.assertEqual(self.queued_cards(), [])
+        self.assertTrue(any('runner loss (infra)' in l for l in self.lines), self.lines)
+
+    def test_runner_loss_twice_is_still_rerun_and_a_real_red_after_it_gets_its_one_rerun(self):
+        lost = {'12': ['The self-hosted runner: runner-3 lost communication with the server.'],
+                '22': ['The operation was canceled.']}
+        gh = FakeGH([check('gate-tests', 'fail', 12)], annotations=lost)
+        self.assertIsNone(self.head_red(gh))
+        gh.rollup = [check('gate-tests', 'fail', 22, at='2026-10-01T10:30:00Z')]
+        self.assertIsNone(self.head_red(gh))                 # lost again: re-run, no defect
+        gh.rollup = [check('gate-tests', 'fail', 32, at='2026-10-01T11:00:00Z')]
+        self.assertIsNone(self.head_red(gh))                 # a real red: its one flake re-run
+        self.assertEqual(len(gh.reruns()), 3)
+        gh.rollup = [check('gate-tests', 'fail', 42, at='2026-10-01T11:30:00Z')]
+        self.assertEqual(self.head_red(gh)['names'], ['gate-tests'])   # red twice: a defect
+
+    def test_runner_loss_past_the_cap_is_held_never_corrected(self):
+        gh = FakeGH([], annotations={str(j): ['The operation was canceled.']
+                                     for j in range(10, 100)})
+        for i in range(flake.INFRA_RERUNS + 2):
+            gh.rollup = [check('gate-tests', 'fail', 10 + i, at=f'2026-10-01T1{i}:00:00Z')]
+            self.assertIsNone(self.head_red(gh))
+        self.assertEqual(len(gh.reruns()), flake.INFRA_RERUNS)
+        self.assertEqual(sum('held for the runner pool' in l for l in self.lines), 1)
+
+    def test_a_refused_rerun_of_a_runner_loss_is_held_not_corrected(self):
+        gh = FakeGH([check('gate-tests', 'fail', 12)], rerun_rc=1, rerun_err='HTTP 403',
+                    annotations={'12': ['The operation was canceled.']})
+        self.assertIsNone(self.head_red(gh))
+
+    def test_a_test_failure_beside_a_cancel_is_no_infra_red(self):
+        self.assertFalse(flake.is_infra(['Process completed with exit code 1.',
+                                         'The operation was canceled.']))
+        self.assertFalse(flake.is_infra([]))
+        self.assertFalse(flake.is_infra(['The job running on runner r1 has exceeded the maximum '
+                                         'execution time of 30 minutes.']))
+        self.assertTrue(flake.is_infra(['The operation was canceled.']))
+
     def test_triage_off_corrects_at_once(self):
         self.product = env.Product('p', {'repo_slug': 'o/p', 'ci': {'flake_triage': 'off'},
                                          'conventions': {'landing': 'pull-request',
@@ -138,6 +197,11 @@ class Triage(unittest.TestCase):
         gh = FakeGH([check('gate-tests', 'fail', 12)])
         self.assertEqual(self.head_red(gh)['names'], ['gate-tests'])
         self.assertEqual(gh.reruns(), [])
+
+
+def reruns(gh):
+    """The ``gh run rerun`` calls a mocked ``gh`` saw (the annotation reads aside)."""
+    return [c for c in gh.call_args_list if list(c.args[0][:2]) == ['run', 'rerun']]
 
 
 class Quarantine(unittest.TestCase):
@@ -163,10 +227,10 @@ class Quarantine(unittest.TestCase):
         for job in (12, 22, 32):
             defects, held, gh = self.triage(job)
             self.assertEqual((defects, held), ([], ['gate-tests']))
-            gh.assert_called_once()
+            self.assertEqual(len(reruns(gh)), 1)
         defects, _held, gh = self.triage(42)                 # past QUARANTINE_RERUNS on one sha
         self.assertEqual(defects, ['gate-tests'])
-        gh.assert_not_called()
+        self.assertEqual(reruns(gh), [])
 
     def test_quarantine_expiry(self):
         self.quarantine('2026-09-30T12:00:00Z')               # expired yesterday
@@ -176,7 +240,7 @@ class Quarantine(unittest.TestCase):
         self.assertEqual(held, ['gate-tests'])
         defects, held, gh = self.triage(22)                   # red on its re-run: a defect
         self.assertEqual((defects, held), (['gate-tests'], []))
-        gh.assert_not_called()
+        self.assertEqual(reruns(gh), [])
 
     def test_status_row_shows_a_live_entry(self):
         self.quarantine('2099-10-05T12:00:00Z')
@@ -210,6 +274,25 @@ class BatchTriage(QueueRepo):
         self.assertEqual(self.heads()['main'], batch['sha'])
         (q,) = flake.load(self.state_dir)['quarantine']
         self.assertEqual((q['job'], q['sha']), ('gate', batch['sha']))
+
+    def test_a_batch_job_lost_with_its_runner_is_rerun_then_lands_with_no_quarantine(self):
+        self.queue_pass(self.lane(), [self.entry('worker/T-0001', 1, 'T-0001')])
+        (batch,) = self.batches()
+        red = check_run('gate-tests', 'failure')
+        red['html_url'] = LINK.format(run=7, job=71)
+        self.gh.annotations['71'] = [{'annotation_level': 'failure',
+                                      'message': 'The runner has received a shutdown signal.'}]
+        self.gh.checks[batch['sha']] = [check_run('gate'), red]
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.backs, [])                      # no correct round, no split
+        self.assertIn(['run', 'rerun', '--job', '71', '-R', 'o/p'], self.gh.calls)
+        green = check_run('gate-tests')
+        green['html_url'] = LINK.format(run=7, job=72)
+        self.gh.checks[batch['sha']] = [check_run('gate'), green]
+        self.gh.pr_state = {1: 'MERGED'}
+        self.queue_pass(self.lane(), [])
+        self.assertEqual(self.heads()['main'], batch['sha'])
+        self.assertEqual(flake.load(self.state_dir)['quarantine'], [])
 
     def test_a_batch_red_on_its_rerun_goes_back(self):
         self.queue_pass(self.lane(), [self.entry('worker/T-0001', 1, 'T-0001')])

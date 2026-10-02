@@ -12,6 +12,14 @@ merge-queue batch sha (:func:`asf.merge_queue.run`) is first **re-run once** on 
 * the re-run is **red again**: a real defect — the correct round (or the batch split) goes as
   before, its job's evidence the re-run's own log.
 
+An **infra red** — a job lost with its runner, not judged by it: every failure annotation the
+host wrote on it names runner loss (:data:`INFRA_SIGNATURES` — ``The runner has received a
+shutdown signal``, ``lost communication with the server``, ``The operation was canceled`` with
+nothing else beside it, …) — is re-run, never sent to a correct round, and never counts toward
+the flake budget: no quarantine entry, no attempt spent (:func:`infra_red`). Past
+:data:`INFRA_RERUNS` runner losses on one sha it is held, still never a correct round — a session
+cannot fix a runner.
+
 A job **in quarantine** that goes red is re-run, not corrected — up to :data:`QUARANTINE_RERUNS`
 times on one sha — until its entry expires; past that cap the red is a defect even so (a real
 break in a flaky job is never hidden for a week).
@@ -53,6 +61,19 @@ _TEST_RES = (
     re.compile(r'^\s*--- FAIL:\s+(\S+)'),
 )
 _RUNNING = ('already running', 'in progress', 'is running', 'not completed')
+#: re-runs of one job on one sha lost to its runner before it is held (never corrected)
+INFRA_RERUNS = 3
+#: the host's own words for a job its runner was lost under (lower case, a substring of a
+#: failure annotation): the job never ran to a verdict, so its red says nothing of the change
+INFRA_SIGNATURES = (
+    'the runner has received a shutdown signal',
+    'lost communication with the server',
+    'runner has lost communication',
+    'lost communication with the runner',
+    'the job was not acquired by runner',
+    'the hosted runner encountered an error',
+    'the operation was canceled',
+)
 
 
 def _now():
@@ -150,6 +171,33 @@ def _gh():
     return H._gh
 
 
+def is_infra(messages):
+    """True when ``messages`` — a failed job's failure annotations — all name runner loss
+    (:data:`INFRA_SIGNATURES`) and there is at least one. A test failure's ``Process completed
+    with exit code 1`` or a ``timeout-minutes`` verdict beside it is no infra red."""
+    msgs = [str(m or '').strip().lower() for m in messages or ()]
+    msgs = [m for m in msgs if m]
+    return bool(msgs) and all(any(sig in m for sig in INFRA_SIGNATURES) for m in msgs)
+
+
+def infra_red(slug, job_id, gh):
+    """The runner-loss annotation of failed job ``job_id`` (one ``gh api`` call: its check run's
+    annotations — a job id is its check run id), or None when it is no infra red or unreadable
+    (an unreadable job is judged as before)."""
+    if not job_id or not slug:
+        return None
+    try:
+        rc, o, _e = gh(['api', f'repos/{slug}/check-runs/{job_id}/annotations'])
+        got = json.loads(o) if rc == 0 and o else None
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(got, list):
+        return None
+    fails = [a.get('message') for a in got if isinstance(a, dict)
+             and str(a.get('annotation_level') or 'failure').lower() == 'failure']
+    return fails[0].strip().splitlines()[0] if is_infra(fails) else None
+
+
 def triage(product, state_dir, slug, sha, red, where='', out=print, now=None, gh=None):
     """Split the red checks ``red`` (dicts with ``name`` and ``link``) on ``sha`` into
     ``(defects, rerun)``: names that go to a correct round now, and names held for a re-run
@@ -177,11 +225,24 @@ def triage(product, state_dir, slug, sha, red, where='', out=print, now=None, gh
         if rec and job_id and job_id == rec.get('last_job'):
             held.append(name)       # the host still shows the job that was re-run: wait
             continue
-        if rec and int(rec.get('attempts') or 0) >= limit:
-            defects.append(name)    # red again on its re-run: a real defect
-            continue
         if not job_id:
             defects.append(name)
+            continue
+        lost = infra_red(slug, job_id, gh)
+        if lost:
+            # lost with its runner: re-run, never a correct round, never the flake budget
+            n_lost = int((rec or {}).get('infra') or 0)
+            if n_lost >= INFRA_RERUNS:
+                if not (rec or {}).get('infra_held'):
+                    rec['infra_held'] = True
+                    started.append(None)    # remember the hold (saved below)
+                    out(f'flake triage: {where} {name} @ {sha[:9]} lost its runner '
+                        f'{n_lost + 1} times ({lost}) — held for the runner pool, never a '
+                        f'correct round')
+                held.append(name)
+                continue
+        elif rec and int(rec.get('attempts') or 0) >= limit:
+            defects.append(name)    # red again on its re-run: a real defect
             continue
         try:
             rc, o, err = gh(['run', 'rerun', '--job', job_id, '-R', slug])
@@ -189,24 +250,32 @@ def triage(product, state_dir, slug, sha, red, where='', out=print, now=None, gh
             rc, o, err = 1, '', str(e)
         if rc != 0:
             text = f'{o}\n{err}'.lower()
-            if any(w in text for w in _RUNNING):
-                held.append(name)   # the run is still judging the rest: next pass
+            if any(w in text for w in _RUNNING) or lost:
+                held.append(name)   # still judging the rest, or infra: the next pass asks again
                 continue
             defects.append(name)
             continue
-        attempts = int((rec or {}).get('attempts') or 0) + 1
+        attempts = int((rec or {}).get('attempts') or 0) + (0 if lost else 1)
         data['reruns'][key] = {'name': name, 'sha': sha, 'run': run_id,
                                'job': (rec or {}).get('job') or job_id, 'last_job': job_id,
                                'link': (rec or {}).get('link') or c.get('link') or '',
                                'attempts': attempts, 'at': _iso(now), 'where': where,
-                               'quarantined': bool(q)}
+                               'quarantined': bool(q),
+                               'infra': int((rec or {}).get('infra') or 0) + (1 if lost else 0)}
         held.append(name)
-        started.append(name)
+        started.append((name, lost))
     if started and not save(state_dir, data):
         return names, []            # nothing remembers the re-run: correct as before
-    for name in started:
-        why = 'quarantined, re-run instead of corrected' if active(data, name, now) \
-            else 'red once: re-run before any correct round'
+    for got in started:
+        if got is None:
+            continue
+        name, lost = got
+        if lost:
+            why = f'lost its runner ({lost}): infra, re-run — no correct round, no flake count'
+        elif active(data, name, now):
+            why = 'quarantined, re-run instead of corrected'
+        else:
+            why = 'red once: re-run before any correct round'
         out(f'flake triage: {where} {name} @ {sha[:9]} {why}')
     return defects, held
 
@@ -289,6 +358,10 @@ def settle(product, state_dir, slug, sha, checks, out=print, now=None, gh=None, 
         if not green or any(c.get('bucket') == 'fail' for c in now_checks):
             continue
         del data['reruns'][key]
+        if rec.get('infra') and not int(rec.get('attempts') or 0):
+            out(f"flake triage: {rec.get('where')} {rec['name']} @ {sha[:9]} green on re-run — "
+                'its red was runner loss (infra): no quarantine, no flake count')
+            continue
         if active(data, rec['name'], now):
             out(f"flake triage: {rec.get('where')} {rec['name']} @ {sha[:9]} green on re-run — "
                 'already quarantined')

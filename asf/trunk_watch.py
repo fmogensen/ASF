@@ -317,6 +317,21 @@ def waiting(product):
     return out
 
 
+def still_hours(product, now=None, state=None):
+    """Hours the trunk tip has stood still while :func:`waiting` names a landing, or None (not
+    watched, not read yet, or nothing waits). Off the state files only."""
+    if not watched(product):
+        return None
+    state = load(_state_dir(product)) if state is None else state
+    moved = state.get('moved_at')
+    if not isinstance(moved, (int, float)) or isinstance(moved, bool):
+        return None
+    now = time.time() if now is None else now
+    if not waiting(product):
+        return None
+    return max(0.0, (now - moved) / 3600)
+
+
 def stall(product, now=None, state=None):
     """The stall alarm's text — ``<trunk> has not moved for Xh (> Nh, …) while K landing(s)
     wait: …`` — when the trunk tip has stood still longer than
