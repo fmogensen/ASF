@@ -1128,14 +1128,15 @@ def occupancy(path, lanes=None, alive=None, result=None, ended=None):
     ``lanes`` (the argument): ``{branch: record}`` to use instead of the run lines' own.
     ``ended`` (:func:`ended_prs`): PRs the host says are merged or closed — a lane record still
     naming one holds nothing and asks for nothing, and a correction on its branch is dropped.
-    A merged PR's item counts as ``landed``."""
+    A merged PR's item counts as ``landed`` (``{item: sha}``), and ``landed_on`` names the
+    branch that landing was recorded on (:func:`asf.workers.landing.verify_landings`)."""
     from asf.harvest import lane as lane_mod  # the lane's states, no cycle at import
     by = by_branch(path)
     live_items = {s['item']: f"session {s['job']} running" for s in inflight(path, alive)
                   if s.get('item')}
     out = {'busy': dict(live_items), 'waiting_landing': {}, 'corrections': corrections(path),
            'lanes': {}, 'review': {}, 'landing': {}, 'branches': {}, 'docs': {}, 'landed': {},
-           'parks': parks(path)}
+           'landed_on': {}, 'parks': parks(path)}
     dead_branches = set()
     for branch, run in by.items():
         item, kind = run.get('item'), run.get('kind')
@@ -1149,11 +1150,13 @@ def occupancy(path, lanes=None, alive=None, result=None, ended=None):
             dead_branches.add(branch)
             if over == 'MERGED':
                 out['landed'][item] = (rec or {}).get('sha') or ''
+                out['landed_on'][item] = branch
             continue
         if landed(run) or (rec or {}).get('state') == lane_mod.MERGED:
             # its branch landed and the record may not have caught up yet: not busy, not
             # waiting — and not an idle branch either (the feeder's idle-branch rule reads this)
             out['landed'][item] = run.get('harvested') or (rec or {}).get('sha') or ''
+            out['landed_on'][item] = branch
         why = None
         if rec and rec.get('state'):
             state = rec['state']

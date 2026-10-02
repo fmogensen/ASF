@@ -1221,7 +1221,8 @@ def announce_console_amends(product, rows, out):
     said = {rec.get('item') for rec in read(product) if rec.get('event') == 'amend-announced'}
     announced = []
     for row in rows:
-        if row.kind != CONSOLE_AMEND or row.item_id in said:
+        if row.kind != CONSOLE_AMEND or not row.amend or row.item_id in said:
+            # a member waiting on its after: (amend '') is not the console's yet
             continue
         out(f'NEEDS OPERATOR: {row.item_id} writes {row.amend} (amendable set) — no worker'
             f' session edits it: the console makes the edit on {row.branch} and pushes it')

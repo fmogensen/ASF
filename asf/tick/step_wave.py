@@ -282,20 +282,72 @@ def plan_inputs(product, root, index=None):
     taken off un-overlaid items differs from the one the tick recorded at launch, and ``asf next``
     and the status cell would call stale every Task whose order the plan derives (D3)."""
     triage = {}
+    if index is None:
+        from asf.views import index_reader
+        index = (index_reader.load(root)[0]
+                 if root and os.path.isfile(os.path.join(root, 'index.json')) else {})
+        if index and product.repo_dir and _triage_wanted():
+            index = plan_order.overlay(index, plan_order.trunk_reader(product))
     if _triage_wanted():
-        if index is None:
-            from asf.views import index_reader
-            index = (index_reader.load(root)[0]
-                     if os.path.isfile(os.path.join(root, 'index.json')) else {})
-            if index and product.repo_dir:
-                index = plan_order.overlay(index, plan_order.trunk_reader(product))
         triage = _triage_facts(product, root, index)
-    return {'attempts': attempts(product), 'occupancy': occupancy(product),
+    occ, tries = occupancy(product), attempts(product)
+    landed_shas, unverified = landings(product, occ, index)
+    return {'attempts': tries, 'occupancy': occ,
             'groom_state': groom_state(product, root) if groom_policy.groom_auto(product) else None,
             'held': set(approvals.parked(product)),
             'gate': invariant_gate(product),
             'bandwidth': capacity_mod.bandwidth(product),
+            'landed_shas': landed_shas, 'unverified_landed': unverified,
+            'adjudicated': adjudications(product, index, tries),
             **triage}
+
+
+def landings(product, occ, index):
+    """``(landed_shas, unverified_landed)`` for ``plan_rows``: the open items the lifecycle
+    records as landed, split by whether the landing holds up as theirs
+    (:func:`asf.workers.landing.verify_landings`). Never a failure: a product with no repo, or
+    a git that cannot answer, verifies nothing."""
+    from asf.feeder import rows as feeder_rows
+    from asf.workers import landing
+    try:
+        items = feeder_rows.items_of(index) if index else {}
+        return landing.verify_landings(product, occ, items, path=pool_mod.sessions_path(product))
+    except Exception:  # noqa: BLE001 — a verification that cannot run claims nothing
+        return {}, {}
+
+
+def adjudications(product, index, tries):
+    """``{item: {'runs', 'at', 'same_card'}}`` for the items past the attempt limit
+    (:func:`asf.feeder.rows.attempt_limit`) an adjudicate session has ended on: how many, the
+    newest's start, and whether it was handed the card as it stands now (its ``card_digest`` is
+    :func:`asf.briefs.build.card_digest` today; a run that recorded none counts as the same
+    card). The feeder's over-limit row reads it (:func:`asf.feeder.rows._capped`): adjudicated on
+    this card already is a PARKED row, never a silent drop and never the same session again."""
+    from asf.feeder import rows as feeder_rows
+    limit = feeder_rows.attempt_limit(product)
+    over = {i for i, n in (tries or {}).items() if n > limit}
+    if not over:
+        return {}
+    digest = importlib.import_module('asf.briefs.build').card_digest
+    out = {}
+    for rs in lifecycle.runs(pool_mod.sessions_path(product)).values():
+        for run in rs:
+            item = run.get('item')
+            if item not in over or run.get('kind') != 'adjudicate' or not run.get('ended') \
+                    or lifecycle.quota_exhausted(run):
+                continue
+            cur = out.setdefault(item, {'runs': 0, 'at': '', 'digest': ''})
+            cur['runs'] += 1
+            if (run.get('started') or '') >= cur['at']:
+                cur['at'], cur['digest'] = run.get('started') or '', run.get('card_digest') or ''
+    for item, cur in out.items():
+        try:
+            now = digest(product, item, index) if index else ''
+        except Exception:  # noqa: BLE001 — a card that cannot be digested is unchanged
+            now = ''
+        cur['same_card'] = not cur['digest'] or not now or cur.pop('digest') == now
+        cur.pop('digest', None)
+    return out
 
 
 def invariant_gate(product):

@@ -425,7 +425,10 @@ def collect(product, row, index, inflight=None, repo_facts=None):
     read_round = rnd or 1
     review_path = review_path_for(product, slug,
                                   read_round if kind in ANSWER_KINDS else rnd + 1 if rnd else 1)
-    delivers = [str(i) for i in item.get('delivers') or []]
+    # a member the console edits, or one a cycle defers, is not built on this branch
+    skip = set().union(*feeder_rows.left_out(product, items, item.get('id'))) \
+        if item.get('delivers') else set()
+    delivers = [str(i) for i in item.get('delivers') or [] if i not in skip]
     return {
         'kind': kind,
         'items': items,

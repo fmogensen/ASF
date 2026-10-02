@@ -162,3 +162,47 @@ def item_writes(product, item):
     it = items.get(item) or items.get(item.upper()) or {}
     w = it.get('writes') if isinstance(it, dict) else None
     return [str(x) for x in w] if isinstance(w, list) else []
+
+
+def verify_landings(product, occupancy, items, path=None, repo=None, main=None):
+    """``(verified, unverified)`` over the open Tasks and Bugs the lifecycle records as landed
+    (:func:`asf.workers.lifecycle.occupancy`'s ``landed``, its branch in ``landed_on``) while the
+    record still holds them open.
+
+    ``verified`` — ``{item: (sha, subject)}``, the feeder's ``landed_shas``: the sha is on
+    ``origin/<main>`` AND :func:`attributable` to the item (named by it, its PR's merge, or
+    covering its ``writes:`` — never a mere ancestor, never another PR's merge-queue commit), and
+    the branch is not a document lane. An ``after:`` on such an item no longer waits for the
+    ingest to catch up (#560's rules, the same the relaunch cap and trunk close apply).
+
+    ``unverified`` — ``{item: why}``: a landing that does not hold up as the item's own — a
+    spec/plan-lane merge (a reshape's split, a plan: a document, not the item's work), or a
+    sha on the trunk that is not attributable to it. A landing whose sha the trunk does not
+    carry yet (origin not fetched) is neither: it is left as the lifecycle says."""
+    from asf.evidence import evidence as ev
+    occ = occupancy or {}
+    landed, on = occ.get('landed') or {}, occ.get('landed_on') or {}
+    repo = repo or getattr(product, 'repo_dir', None)
+    main = main or getattr(getattr(product, 'conventions', None), 'main', None) or 'main'
+    prefixes = ev.branch_prefixes(product)
+    verified, unverified = {}, {}
+    for iid, sha in sorted(landed.items()):
+        card = (items or {}).get(iid) or {}
+        if card.get('type') not in ('task', 'bug') or card.get('state', 'New') in ('Resolved',
+                                                                                  'Closed'):
+            continue
+        branch = on.get(iid) or ''
+        kind = ev.lane_kind(branch, prefixes)
+        if kind:
+            unverified[iid] = (f'its landing ({sha[:9] or "no sha"}) was recorded on the {kind} '
+                               f'lane ({branch}): a document merged, not its work')
+            continue
+        if not repo or not sha or not on_trunk(repo, main, sha):
+            continue
+        writes = [str(w) for w in card.get('writes') or ()]
+        if attributable(repo, main, sha, iid, writes, run_prs(path, iid)):
+            verified[iid] = (sha, _git(repo, ['log', '-1', '--format=%s', sha]) or '')
+        else:
+            unverified[iid] = (f'its recorded landing {sha[:9]} on origin/{main} is not its '
+                               f'commit (not named by it, not its PR merge, not its writes:)')
+    return verified, unverified

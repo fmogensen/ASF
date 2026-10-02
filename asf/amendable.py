@@ -153,6 +153,23 @@ def reaches(product, globs, glob_set=None):
     return None
 
 
+def console_members(product, items, lead_id):
+    """The members of ``lead_id``'s delivery (``delivers:``, the lead itself aside) still open
+    whose ``writes:`` reach the set — the console's edits, never a worker's. They are left out
+    of the delivery's footprint, its brief and its completeness check, and get a CONSOLE → AMEND
+    row of their own: one close-out member must not park every code member beside it (a
+    product's T-0027 delivery, held whole by T-0037's ``docs/process/README.md``)."""
+    lead = (items or {}).get(lead_id) or {}
+    out = []
+    for m in lead.get('delivers') or ():
+        card = (items or {}).get(m)
+        if m == lead_id or not card or card.get('state') in ('Resolved', 'Closed'):
+            continue
+        if reaches(product, list(card.get('writes') or ())):
+            out.append(m)
+    return out
+
+
 def partition(product, globs, glob_set=None):
     """``(inside, outside)`` — the globs of ``globs`` that reach the amendable set
     (:func:`reaches`'s own two-way test) and those that do not, each in the order given.
