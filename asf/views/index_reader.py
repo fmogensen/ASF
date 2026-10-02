@@ -22,20 +22,28 @@ class Items(dict):
     cards whose state is done. A removed card is out of every row, but not out of history — groom
     removes a card that landed ("it landed…"), and an ``after:`` naming it must still read it
     landed (:func:`asf.feeder.rows.landed_ids`), or its successors wait on it for ever (a
-    product's T-0360)."""
+    product's T-0360). :attr:`retired_open`: ``{id: card}`` of the removed cards that are not
+    done — a groom merge's folded card, or work groomed away: an ``after:`` naming one must read
+    its survivor (its ``merged:`` list, its ``removed: merged into …``), or drop the edge, never
+    wait on it for ever (a product's T-0163 on T-0162)."""
 
     retired_done = {}
+    retired_open = {}
 
 
 def live(raw):
     """``raw`` (``{id: card}``, removed cards included) as an :class:`Items`: the cards not
-    removed, with the removed ones that are done kept aside in ``retired_done`` (and any
-    ``raw`` already carries)."""
+    removed, with the removed ones that are done kept aside in ``retired_done`` and the others
+    in ``retired_open`` (and any ``raw`` already carries)."""
     out = Items((k, v) for k, v in raw.items() if isinstance(v, dict) and not v.get('removed'))
     retired = dict(getattr(raw, 'retired_done', {}))
     retired.update((k, v) for k, v in raw.items()
                    if isinstance(v, dict) and v.get('removed') and v.get('state') in DONE_STATES)
     out.retired_done = retired
+    gone = dict(getattr(raw, 'retired_open', {}))
+    gone.update((k, v) for k, v in raw.items()
+                if isinstance(v, dict) and v.get('removed') and v.get('state') not in DONE_STATES)
+    out.retired_open = gone
     return out
 
 

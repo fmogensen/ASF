@@ -1126,5 +1126,60 @@ def ingest_into(root, ev, product=None):
             write_on_prod_event(root, iid, old, now)
 
     tick_proven(canonical, ev, now[:16].replace('T', ' '), task_ev)
+    note_dead_after(canonical, now)
 
     return do_index(root)
+
+
+def dead_after_lines(canonical):
+    """``{id: [line]}``: for each live, open Task whose ``after:`` names a card groom removed,
+    the line its History records once — the survivor the feeder reads it as when that took a
+    chain of merges (a survivor removed in turn), or that the edge is dropped (removed outright: the work is not
+    coming). The feeder already reads the edge so (:func:`asf.feeder.rows.after_of`); the line
+    is the record of why the Task stopped waiting on an id that no longer lands."""
+    from asf.feeder import rows as feeder_rows  # local: the feeder reads the record's modules
+    raw = {iid: dict(rec['meta'], id=iid) for iid, rec in canonical.items()}
+    items = feeder_rows.items_of(raw)
+    absorbed = feeder_rows.absorbers(items)
+    gone = feeder_rows._retired(items)
+    out = {}
+    for iid, item in items.items():
+        if item.get('type') != 'task' or not feeder_rows.is_open(item):
+            continue
+        lines = []
+        dead = dict(feeder_rows.dead_after(items, item, absorbed))
+        for a in item.get('after') or ():
+            if a not in gone:
+                continue
+            why = str(gone[a].get('removed') or 'removed')
+            if a in dead:
+                lines.append(f"after: {a} removed ({why}) — dropped, its work is not coming")
+                continue
+            seen, cur = [a], a
+            while cur in absorbed and absorbed[cur] not in seen:
+                cur = absorbed[cur]
+                seen.append(cur)
+            if len(seen) > 2:  # one hop the survivor's own merged: always said; a chain is news
+                lines.append(f"after: {a} removed ({why}) — read as {cur} "
+                             f"(via {', '.join(seen[1:-1])})")
+        if lines:
+            out[iid] = lines
+    return out
+
+
+def note_dead_after(canonical, now):
+    """Append :func:`dead_after_lines` to each Task's History, each line once."""
+    stamp = now[:16].replace('T', ' ')
+    for iid, lines in dead_after_lines(canonical).items():
+        rec = canonical[iid]
+        with open(rec['path'], encoding='utf-8') as f:
+            text = f.read()
+        meta, body = frontmatter.parse(text, path=rec['relpath'])
+        new = [f"- {stamp} ingest: {line}" for line in lines
+               if f"ingest: {line.split(' — ')[0]}" not in body]
+        if not new:
+            continue
+        body2 = append_history_lines(body, new)
+        if body2 != body:
+            with open(rec['path'], 'w', encoding='utf-8') as f:
+                f.write(frontmatter.render(meta, body2))

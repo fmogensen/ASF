@@ -247,6 +247,7 @@ def items_of(index):
     kept = ix.live(raw)
     out = Items(with_blockers(dict(kept), raw))
     out.retired_done = kept.retired_done
+    out.retired_open = kept.retired_open
     return out
 
 
@@ -434,33 +435,78 @@ def landed_ids(items, landed_shas=None):
     return done | set(getattr(items, 'retired_done', ())) | set(landed_shas or {})
 
 
+#: a removal line that names the card carrying the removed card's work on: a groom merge's
+#: (:func:`asf.groom.groom.merge_tasks`, ``merged into T-0158 (…)``) or a duplicate's
+#: (``duplicate of T-0305 (same parent and footprint) (…)``)
+MERGED_INTO_RE = re.compile(r'\b(?:merged into|duplicate of)\s+([A-Za-z]-\d{4})\b')
+
+
+def _retired(items):
+    """Every removed card the index reader set aside: done (``retired_done``) or not
+    (``retired_open``)."""
+    return {**getattr(items, 'retired_open', {}), **getattr(items, 'retired_done', {})}
+
+
 def absorbers(items):
-    """``{merged id: absorber id}`` off every live card's ``merged:`` list — and every retired
-    done card's (:attr:`Items.retired_done`), since an absorber that landed may be removed in
-    turn. A groom merge removes the merged card, and the index reader drops a removed card, so
-    an ``after:`` naming it would name an id that never lands again."""
+    """``{merged id: absorber id}`` off every card's ``merged:`` list — live, and removed
+    (:attr:`Items.retired_done`, :attr:`Items.retired_open`), since an absorber may be removed
+    in turn, merged into a third card — and off every removed card's own ``removed: merged into
+    <id>`` (or ``duplicate of <id>``) line. A groom merge removes the merged card, and the index reader drops a removed
+    card, so an ``after:`` naming it would name an id that never lands again (a product's T-0163
+    waited on T-0162, merged into T-0159, itself merged into T-0158 — Closed)."""
     out = {}
-    for v in list(items.values()) + list(getattr(items, 'retired_done', {}).values()):
+    retired = _retired(items)
+    for v in list(items.values()) + list(retired.values()):
         for m in v.get('merged') or ():
             if isinstance(m, str):
                 out.setdefault(m, v.get('id'))
+    for iid, v in retired.items():
+        m = MERGED_INTO_RE.search(str(v.get('removed') or ''))
+        if m and m.group(1).upper() != iid:
+            out.setdefault(iid, m.group(1).upper())
     return out
 
 
 def after_of(items, item, absorbed=None):
     """``item``'s ``after:`` with each merged-away id read as the card that absorbed it (a chain
     followed to its end); an absorber the item itself is dropped — it does not wait on its own
-    work."""
+    work. A dependency on a card groom removed outright — not done, merged into nothing — is a
+    dead edge and dropped (:func:`dead_after`): its work is not coming, so nothing may wait on
+    it. A chain that ends on a removed card that never landed is kept: the scope folded into it
+    is still the Feature's work, and :func:`orphaned_after` names it for a decision."""
     absorbed = absorbers(items) if absorbed is None else absorbed
     out = []
+    gone = getattr(items, 'retired_open', {})
     for a in item.get('after') or ():
-        seen = {a}
+        seen, hops = {a}, 0
         while a in absorbed and absorbed[a] not in seen:
             a = absorbed[a]
             seen.add(a)
+            hops += 1
+        if a in gone and not hops:
+            continue  # removed outright: a dead edge (dead_after says so)
         if a != item.get('id') and a not in out:
             out.append(a)
     return out
+
+
+def dead_after(items, item, absorbed=None):
+    """``[(id, why)]``: the ``after:`` entries :func:`after_of` drops as dead — a card groom
+    removed outright, not done and merged into nothing, so its work is never coming."""
+    absorbed = absorbers(items) if absorbed is None else absorbed
+    gone = getattr(items, 'retired_open', {})
+    return [(a, str(gone[a].get('removed') or 'removed'))
+            for a in item.get('after') or () if a in gone and a not in absorbed]
+
+
+def orphaned_after(items, ids):
+    """The first of ``ids`` (an :func:`after_of` list) that is a removed card never landed — a
+    merge survivor groom removed in turn — with its removal line, else ``(None, '')``."""
+    gone = getattr(items, 'retired_open', {})
+    for a in ids:
+        if a in gone:
+            return a, str(gone[a].get('removed') or 'removed')
+    return None, ''
 
 
 def is_open(item):
@@ -872,18 +918,66 @@ def branch_rows(items, product, busy, held=(), landed_shas=None):
     return out
 
 
-def _delivery_union(items, lead):
+def _delivery_union(items, lead, leave_out=()):
     """The ordered union of ``writes:`` across ``lead``'s open ``delivers:`` members (the lead
-    itself included, since ``delivers[0]`` is the lead) — the delivery's whole footprint."""
+    itself included, since ``delivers[0]`` is the lead) — the delivery's whole footprint.
+    ``leave_out``: members not built on the delivery's branch (:func:`asf.amendable.console_members`)."""
     out = []
     for m in lead.get('delivers') or ():
         member = items.get(m)
-        if member is None or not is_open(member):
+        if member is None or not is_open(member) or m in leave_out:
             continue
         for w in member.get('writes') or ():
             if w not in out:
                 out.append(w)
     return out
+
+
+def deferred_members(items, lead_id, landed_shas=None):
+    """The open members of ``lead_id``'s delivery (the lead aside) the delivery cannot build:
+    an ``after:`` of theirs outside the delivery has not landed and itself waits — through its
+    own ``after:`` chain — on a member of this delivery. Holding the whole delivery on it is a
+    cycle no tick breaks (a product's T-0027 delivery: T-0030 after T-0456, T-0456 after
+    T-0027). Such a member, and every member after it, is left out: the delivery lands without
+    them (F-0102 D11) and they come back on their own rows once their predecessors land."""
+    lead = items.get(lead_id) or {}
+    members = [m for m in lead.get('delivers') or () if m in items and is_open(items[m])]
+    inside = set(members)
+    landed = landed_ids(items, landed_shas)
+    absorbed = absorbers(items)
+
+    def waits_on_delivery(x):
+        stack, seen = [x], set()
+        while stack:
+            y = stack.pop()
+            if y in seen:
+                continue
+            seen.add(y)
+            for a in after_of(items, items.get(y) or {}, absorbed):
+                if a in inside:
+                    return True
+                if a not in landed:
+                    stack.append(a)
+        return False
+    out = []
+    for m in members:
+        if m == lead_id:
+            continue
+        deps = after_of(items, items[m], absorbed)
+        if any(d in out for d in deps) or any(
+                d not in inside and d not in landed and waits_on_delivery(d) for d in deps):
+            out.append(m)
+    return out
+
+
+def left_out(product, items, lead_id, landed_shas=None):
+    """``(console, deferred)``: the members of ``lead_id``'s delivery not built on its branch —
+    the console's (:func:`asf.amendable.console_members`) and the ones a cycle defers
+    (:func:`deferred_members`). The feeder's union and holds, the brief's list and the lane's
+    completeness check all leave them out alike."""
+    console = amendable.console_members(product, items, lead_id) if product is not None else []
+    deferred = [m for m in deferred_members(items, lead_id, landed_shas) if m not in console]
+    return console, deferred
 
 
 def running_footprints(items, busy):
@@ -984,11 +1078,17 @@ def delivery_rows(items, product, busy, running, landed_shas=None):
                         if m in items and is_open(items[m]) and m not in on_trunk]
         if not open_members:
             continue
-        others = [m for m in open_members if m != lid]
         stage = lead.get('stage') or 'card'
         word = stage.split(' ')[0]
         # a Feature delivery's plan is its Feature's, approved by construction (asf.record.slice)
         code_stage = slice_ or word in BUILD_STAGES
+        # a member only the console may edit, or one a cross-delivery cycle defers, is not the
+        # delivery's to build: each gets its own row below
+        console, deferred = left_out(product, items, lid, landed_shas) if code_stage else ([], [])
+        console = [m for m in console if m in open_members]
+        deferred = [m for m in deferred if m in open_members]
+        skip = set(console) | set(deferred)
+        others = [m for m in open_members if m != lid and m not in skip]
         kind = DELIVERY_CODE if code_stage else DELIVERY_PLAN
         brief = 'delivery-code' if code_stage else 'delivery-plan'
         branch = branch_for(product, 'code' if code_stage else 'plan', lid)
@@ -1008,10 +1108,10 @@ def delivery_rows(items, product, busy, running, landed_shas=None):
                                        action=LAUNCH, brief_kind=brief, branch=branch,
                                        reason=''), f_['id']))
         elif code_stage and (amend := console_amend_row(
-                product, lid, fid, _delivery_union(items, lead), branch, brief)):
+                product, lid, fid, _delivery_union(items, lead, skip), branch, brief)):
             out.append(amend)
         elif code_stage:
-            union = _delivery_union(items, lead)
+            union = _delivery_union(items, lead, skip)
             if not union:       # D1: an empty footprint claims nothing and can build nothing
                 out.append(Row(tier=2, kind=kind, item_id=lid, feature_id=fid,
                                action='WAITS ON writes', brief_kind=brief, branch=branch,
@@ -1025,16 +1125,29 @@ def delivery_rows(items, product, busy, running, landed_shas=None):
                                    action=LAUNCH, brief_kind='reshape',
                                    branch=branch_for(product, 'plan', lid),
                                    reason=NO_WRITES_RECUT))
+                out += [console_member_row(items, product, m, fid, landed_shas) for m in console]
+                out += [deferred_member_row(items, product, m, lid, fid, landed_shas)
+                        for m in deferred]
                 continue
+            # an after: outside the delivery holds it here, before it claims a footprint: a
+            # delivery that only hold_unlanded turns into a WAITS row would still have taken
+            # its union into `running` and held every Task sharing a file with it
+            built = [m for m in open_members if m not in skip]
+            ahead = [a for m in built for a in after_of(items, items[m])
+                     if a not in built and a not in landed_ids(items, landed_shas)]
             other = footprint.first_conflict(union, running,
                                              footprint.shared_globs(product))
-            if other:
+            if ahead:
+                out.append(Row(tier=2, kind=kind, item_id=lid, feature_id=fid,
+                               action=f'WAITS ON {ahead[0]}', brief_kind=brief, branch=branch,
+                               reason=f'after: {ahead[0]} has not landed', waits_on=ahead[0]))
+            elif other:
                 out.append(Row(tier=2, kind=kind, item_id=lid, feature_id=fid,
                                action=f'WAITS ON {other}', brief_kind=brief, branch=branch,
                                reason=f'writes: overlaps {other}', waits_on=other))
             else:
-                what = (f'{len(open_members)} Tasks of {fid}: one branch, one PR, one review'
-                        if slice_ else f'{len(open_members)} items, plan approved')
+                what = (f'{len(built)} Tasks of {fid}: one branch, one PR, one review'
+                        if slice_ else f'{len(built)} items, plan approved')
                 out.append(Row(tier=2, kind=kind, item_id=lid, feature_id=fid, action=LAUNCH,
                                brief_kind=brief, branch=branch,
                                reason=f'{what}, footprint free'))
@@ -1049,7 +1162,39 @@ def delivery_rows(items, product, busy, running, landed_shas=None):
                            action=f'WAITS ON delivery {lid}', brief_kind='task', branch=branch,
                            reason=f'delivered by {lid}: the delivery speaks for it',
                            waits_on='delivery'))
+        out += [console_member_row(items, product, m, fid, landed_shas) for m in console]
+        out += [deferred_member_row(items, product, m, lid, fid, landed_shas) for m in deferred]
     return out
+
+
+def deferred_member_row(items, product, mid, lid, fid, landed_shas=None):
+    """The row of a member :func:`deferred_members` left out of ``lid``'s delivery: it waits on
+    its first unlanded ``after:``, and builds on its own row once the delivery has landed."""
+    landed = landed_ids(items, landed_shas)
+    pending = [a for a in after_of(items, items[mid]) if a not in landed] or [lid]
+    return Row(tier=2, kind=PLAN_CODE, item_id=mid, feature_id=fid,
+               action=f'WAITS ON {pending[0]}', brief_kind='task',
+               branch=branch_for(product, 'code', mid),
+               reason=f'left out of delivery {lid}: after: {pending[0]} waits on that delivery '
+                      f'— it builds on its own row once {pending[0]} lands',
+               waits_on=pending[0])
+
+
+def console_member_row(items, product, mid, fid, landed_shas=None):
+    """The CONSOLE → AMEND row of a delivery member only the console may edit
+    (:func:`asf.amendable.console_members`): ``WAITS ON <id>`` while an ``after:`` of it has not
+    landed (its delivery's code members first), then the console's edit. It never holds the
+    delivery's code members, and launches nothing."""
+    member = items[mid]
+    branch = branch_for(product, 'code', mid)
+    landed = landed_ids(items, landed_shas)
+    pending = [a for a in after_of(items, member) if a not in landed]
+    row = console_amend_row(product, mid, fid, member.get('writes'), branch)
+    if pending:
+        return dataclasses.replace(row, action=f'WAITS ON {pending[0]}', waits_on=pending[0],
+                                   amend='', reason=f'after: {pending[0]} has not landed; then '
+                                                    f'{row.reason}')
+    return row
 
 
 def feature_rows(items, product, busy, running, landed_shas=None, occupancy=None):
@@ -1308,6 +1453,16 @@ def task_rows(items, product, feature, busy, running, landed_shas=None):
         # a coder started before it finds the surface missing and writes nothing (B-0076).
         # Footprint-disjoint tasks still run in parallel — a plan says so by leaving `after:` off.
         pending = [a for a in after_of(items, t, absorbed) if a not in landed]
+        orphan, removed = orphaned_after(items, pending)
+        if orphan:
+            # the survivor of a groom merge was removed in turn, unlanded: the scope folded into
+            # it is still to do, and nothing will ever land it — a person decides, never a wait
+            out.append(Row(tier=2, kind=PLAN_CODE, item_id=t['id'], feature_id=feature['id'],
+                           action=NEEDS_DECISION, brief_kind='task',
+                           branch=branch_for(product, 'code', t['id']),
+                           reason=f"after: {orphan} was removed unlanded ({removed}): re-point "
+                                  f"after: or re-cut its scope", waits_on='decision'))
+            continue
         if pending:
             out.append(Row(tier=2, kind=PLAN_CODE, item_id=t['id'], feature_id=feature['id'],
                            action=f"WAITS ON {pending[0]}", brief_kind='task',
@@ -1500,7 +1655,7 @@ def groom_rows(index, product, busy, groom_state, inflight):
     return out
 
 
-def hold_unlanded(rows, items, landed_shas=None):
+def hold_unlanded(rows, items, landed_shas=None, product=None):
     """B-0080: ``after:`` holds every row kind, not only PLAN → CODE. An item whose predecessor
     has not landed is not in dispute, it is waiting: a launching row for it (code, correct,
     adjudicate, rebase, close) becomes ``WAITS ON <id>`` — no session, no round. The groom row
@@ -1509,7 +1664,10 @@ def hold_unlanded(rows, items, landed_shas=None):
     A :data:`DELIVERY_PLAN`/:data:`DELIVERY_CODE` row's scan reads the lead **and** every member
     of its ``delivers:`` — an ``after:`` any of them names holds the whole delivery on the first
     unlanded predecessor found. An ``after:`` naming another member of the same delivery is
-    not a hold: it is the order the one session commits in (``delivery: feature``)."""
+    not a hold: it is the order the one session commits in (``delivery: feature``). A member
+    the delivery leaves out (:func:`left_out`, given ``product``: the console's, or one a cycle
+    defers) is not built on the branch, so its ``after:`` holds its own row, never the
+    delivery's."""
     landed = landed_ids(items, landed_shas)
     absorbed = absorbers(items)
     out, said = [], set()
@@ -1519,7 +1677,9 @@ def hold_unlanded(rows, items, landed_shas=None):
             # sibling of the delivery is commit order, not a hold
             lid = delivery_lead_of(items, items.get(r.item_id) or {}) or r.item_id
             lead = items.get(lid) or {}
-            ids = list(lead.get('delivers') or ())
+            skip = set().union(*left_out(product, items, lid, landed_shas)) \
+                if product is not None and r.kind == DELIVERY_CODE else set()
+            ids = [m for m in lead.get('delivers') or () if m not in skip]
             if r.item_id not in ids:
                 ids = [r.item_id] + ids
             pending, seen = [], set(ids)
@@ -1641,20 +1801,59 @@ def hold_classes(rows, product):
             if r.kind in kinds and r.launches else r for r in rows]
 
 
-def _capped(row, attempts, limit, product):
-    """None above the limit; the STALEMATE row at it; the row itself below it (rows.bug_rows)."""
+def _capped(row, attempts, limit, product, adjudicated=None):
+    """The row itself below the limit; the STALEMATE row at it (rows.bug_rows). Above it, never
+    nothing: an item silently dropped is parity work no table shows (a product's T-0338, 51
+    sessions, and T-0349, 39, vanished from NEXT). So past the limit it is the STALEMATE row
+    again — one adjudicate session per card state, its launches bounded by the relaunch cap
+    (:mod:`asf.workers.relaunch`) on the head — unless ``adjudicated`` (``{item: {'runs', 'at',
+    'same_card'}}``, :func:`asf.tick.step_wave.adjudications`) says an adjudicate session already
+    ended on this same card: then a non-launching ``PARKED`` row with the reason."""
     n = attempts.get(row.item_id, 0)
-    if n > limit:
-        return None
+    if n < limit:
+        return row
     if n == limit:
         return dataclasses.replace(
             row, kind=STALEMATE, brief_kind='adjudicate', action=LAUNCH,
             reason=f"{row.kind} after {n} sessions: adjudicate, not another attempt")
-    return row
+    adj = (adjudicated or {}).get(row.item_id) or {}
+    if adj.get('same_card'):
+        why = (f"{row.kind} after {n} sessions (limit {limit}); adjudicated "
+               f"{adj.get('runs') or 1} time(s), last {str(adj.get('at') or '?')[:16]}, on this "
+               f"same card: a card edit or a person's decision moves it")
+        return dataclasses.replace(row, kind=STALEMATE, brief_kind='adjudicate',
+                                   action=f'{PARKED} adjudicated, card unchanged',
+                                   reason=why, waits_on='operator')
+    return dataclasses.replace(
+        row, kind=STALEMATE, brief_kind='adjudicate', action=LAUNCH,
+        reason=f"{row.kind} after {n} sessions (limit {limit}): adjudicate this card state, not "
+               f"another attempt")
+
+
+def unverified_rows(items, product, unverified, spoken):
+    """A NEEDS DECISION row per open Task/Bug the lifecycle records as landed although the
+    landing is not its own (``unverified``: ``{item: why}``) and no other row speaks for: the
+    landing holds it from an idle-branch relaunch (:func:`branch_rows`), and the record will not
+    close it — without this row it would sit in no table while its successors wait on it (a
+    product's T-0091: its reshape's plan merge, recorded at another PR's merge-queue commit)."""
+    out = []
+    for iid, why in sorted((unverified or {}).items()):
+        item = items.get(iid)
+        if not item or not is_open(item) or iid in spoken or item['type'] not in ('task', 'bug'):
+            continue
+        f = _task_feature(items, item) if item['type'] == 'task' else feature_of(items, item)
+        kind = 'task' if item['type'] == 'task' else 'fix'
+        out.append(Row(tier={'S1': 0, 'S2': 1}.get(item.get('severity'), 2), kind=PLAN_CODE,
+                       item_id=iid, feature_id=f['id'] if f else '', action=NEEDS_DECISION,
+                       brief_kind='task' if kind == 'task' else 'fix-bug',
+                       branch=_branch_of(item, product, kind),
+                       reason=f'recorded landed, not verified as its work: {why}',
+                       waits_on='decision'))
+    return out
 
 
 def candidates(index, product, inflight, attempts=None, occupancy=None, groom_state=None,
-               landed_shas=None, decision_limit=None):
+               landed_shas=None, decision_limit=None, adjudicated=None, unverified_landed=None):
     """Every row the index supports right now, uncut by capacity, in emit order: tier, then the
     Feature's order (:func:`feature_order`: Epic rank, Feature rank, id), then within a Feature
     the stalemate, branch housekeeping, new work.
@@ -1667,7 +1866,11 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
     Resolved/Closed is never busy: its work is on the trunk whatever the ledger says.
     ``groom_state``: §2.5's fact for the GROOM → ADJUDICATE row; a caller that passes none gets
     none. ``decision_limit``: how many UNDECIDED → DECIDE rows (``None``: ``decision_rows``;
-    ``0``: all)."""
+    ``0``: all). ``adjudicated``: :func:`_capped`'s fact — the items past the attempt limit an
+    adjudicate session already ended on, per card state. ``unverified_landed``: ``{item: why}``,
+    the open items the lifecycle records as landed whose landing does not hold up as theirs
+    (:func:`asf.workers.landing.verify_landings`): each gets a NEEDS DECISION row — never a
+    silent no-row, never a coder relaunched over a landing the lane recorded."""
     items = items_of(index)
     occ = occupancy or {}
     corrections = occ.get('corrections') or {}
@@ -1708,14 +1911,15 @@ def candidates(index, product, inflight, attempts=None, occupancy=None, groom_st
     # a skipped S1/S2 Bug's WAITS row only where no other row already speaks for it
     spoken_for = {r.item_id for r in rows}
     rows += [r for r in bug_waits if r.item_id not in spoken_for]
+    rows += unverified_rows(items, product, unverified_landed, busy | {r.item_id for r in rows})
     rows = hold_parks(rows, items, occ.get('parks'))
-    rows = hold_unlanded(rows, items, landed_shas)
+    rows = hold_unlanded(rows, items, landed_shas, product)
     rows = hold_replanning(rows, items)
     rows = hold_classes(rows, product)
     rows = over_budget_epics(rows, items)          # F-0052
     cap, attempts = attempt_limit(product), attempts or {}
-    rows = [c for c in (_capped(r, attempts, cap, product) if r.launches and r.kind in CAPPED_KINDS
-                        else r for r in rows) if c is not None]
+    rows = [_capped(r, attempts, cap, product, adjudicated)
+            if r.launches and r.kind in CAPPED_KINDS else r for r in rows]
 
     landed = landed_ids(items, landed_shas)
     absorbed = absorbers(items)
@@ -1942,7 +2146,8 @@ def finish_first(rows, items, product, inflight, held=()):
 
 def plan_rows(index, product, inflight, capacity, attempts=None, occupancy=None,
               groom_state=None, landed_shas=None, decision_limit=None, held=None, exclude=None,
-              s1_first=True, gate=None, bandwidth=None):
+              s1_first=True, gate=None, bandwidth=None, adjudicated=None,
+              unverified_landed=None):
     """The rows the tick emits: tiered, S1 first, cut to ``capacity`` less what is in flight.
     ``s1_first=False``: no S1 cut of the tier-2 rows (:func:`asf.feeder.tiers.select`).
     ``held``: the item ids an approval hold parks — shown, but given no slot. ``exclude``: the
@@ -1955,7 +2160,8 @@ def plan_rows(index, product, inflight, capacity, attempts=None, occupancy=None,
     from asf.feeder import tiers
     rows = candidates(index, product, inflight, attempts, occupancy=occupancy,
                       groom_state=groom_state, landed_shas=landed_shas,
-                      decision_limit=decision_limit)
+                      decision_limit=decision_limit, adjudicated=adjudicated,
+                      unverified_landed=unverified_landed)
     if exclude:
         from asf.invariants import row_key
         rows = [r for r in rows if not (r.launches and row_key(r) in exclude)]

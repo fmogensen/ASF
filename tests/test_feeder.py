@@ -641,6 +641,20 @@ class ConsoleAmendRowsTest(unittest.TestCase):
                'delivered_by': 'F-0097', 'writes': ['asf/briefs/templates/groom.md']}
         out = rows.delivery_rows(rows.items_of({'items': {'F-0097': lead, 'B-0034': bug}}),
                                  product(), set(), [])
+        # the member only the console may edit is the console's row; the lead is not held by it
+        mine = {r.item_id: r for r in out}
+        self.assertEqual((mine['B-0034'].kind, mine['B-0034'].launches, mine['B-0034'].waits_on),
+                         (rows.CONSOLE_AMEND, False, 'console'))
+        self.assertNotEqual(mine['F-0097'].kind, rows.CONSOLE_AMEND)
+
+    def test_a_lead_whose_own_writes_reach_the_set_waits_on_the_console(self):
+        lead = {'id': 'F-0097', 'type': 'feature', 'state': 'New', 'rank': 1,
+                'stage': 'plan-approved', 'delivers': ['F-0097', 'B-0034'],
+                'writes': ['asf/briefs/templates/groom.md']}
+        bug = {'id': 'B-0034', 'type': 'bug', 'state': 'New', 'severity': 'S2', 'decided': True,
+               'delivered_by': 'F-0097', 'writes': ['b.py']}
+        out = rows.delivery_rows(rows.items_of({'items': {'F-0097': lead, 'B-0034': bug}}),
+                                 product(), set(), [])
         code = [r for r in out if r.item_id == 'F-0097'][0]
         self.assertEqual((code.kind, code.launches, code.waits_on),
                          (rows.CONSOLE_AMEND, False, 'console'))
@@ -1102,7 +1116,8 @@ class ForeignCardRowTests(unittest.TestCase):
 
 
 class CapOverEveryLaunchingKindTest(unittest.TestCase):
-    """F-0080 §2.6 / §3.6: one adjudicate row at the limit, silence above it, for every kind."""
+    """F-0080 §2.6 / §3.6: one adjudicate row at the limit, for every kind; above it the
+    adjudicate row per card state, or a PARKED row once adjudicated on it — never silence."""
 
     def feature(self, **over):
         f = {'id': 'F-0001', 'type': 'feature', 'title': 'F', 'decided': True, 'rank': 1,
@@ -1146,10 +1161,35 @@ class CapOverEveryLaunchingKindTest(unittest.TestCase):
                                  [(rows.STALEMATE, 'adjudicate', True)])
                 self.assertIn(kind, got[0].reason)
 
-    def test_each_kind_is_silent_above_the_limit(self):
+    def test_each_kind_is_never_silent_above_the_limit(self):
+        # a product's T-0338 (51 sessions) and T-0349 (39) vanished from NEXT: above the limit
+        # the item is the adjudicate row again — one session per card state, the relaunch cap
+        # bounding its launches on one head
         for kind, idx, iid in self.cases():
             with self.subTest(kind=kind):
-                self.assertEqual(self.of(idx, kind, iid, 4), [])
+                got = self.of(idx, kind, iid, 4)
+                self.assertEqual([(r.kind, r.brief_kind, r.launches) for r in got],
+                                 [(rows.STALEMATE, 'adjudicate', True)])
+                self.assertIn('after 4 sessions', got[0].reason)
+
+    def test_adjudicated_on_the_same_card_is_a_parked_row_not_a_drop(self):
+        for kind, idx, iid in self.cases():
+            with self.subTest(kind=kind):
+                out = rows.candidates(idx, product(), [], attempts={iid: 51}, adjudicated={
+                    iid: {'runs': 20, 'at': '2026-09-26T14:55:20Z', 'same_card': True}})
+                got = [r for r in out if r.item_id == iid and r.kind in (kind, rows.STALEMATE)]
+                self.assertEqual([(r.kind, r.launches, r.waits_on) for r in got],
+                                 [(rows.STALEMATE, False, 'operator')])
+                self.assertTrue(got[0].action.startswith(rows.PARKED))
+                self.assertIn('adjudicated 20 time(s)', got[0].reason)
+
+    def test_a_card_changed_since_its_adjudication_is_adjudicated_again(self):
+        idx = self.task_index()
+        out = rows.candidates(idx, product(), [], attempts={'T-0001': 9}, adjudicated={
+            'T-0001': {'runs': 2, 'at': '2026-09-26T00:00:00Z', 'same_card': False}})
+        got = [r for r in out if r.item_id == 'T-0001']
+        self.assertEqual([(r.kind, r.brief_kind, r.launches) for r in got],
+                         [(rows.STALEMATE, 'adjudicate', True)])
 
     def test_the_limit_is_conventions_attempt_limit(self):
         p = product(conventions={'attempt_limit': 1})

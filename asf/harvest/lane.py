@@ -1539,10 +1539,14 @@ class Lane:
             f['refusal'] = lane_refusal(repo, trunk, b, item, conv, members=members)
             if not f['refusal'] and feature_delivery(self.items, item):
                 # a Feature delivery not whole: no PR, back to its session (T9i). An F-0102
-                # cross-item delivery keeps its D11: the branch lands without a member
-                f['refusal'] = incomplete_refusal(repo, trunk, b, members, run)
+                # cross-item delivery keeps its D11: the branch lands without a member. A member
+                # the delivery leaves out (the console's, one a cycle defers) is never built here
+                from asf.feeder import rows as feeder_rows  # local: the feeder imports the briefs
+                skip = set().union(*feeder_rows.left_out(self.product, self.items, item))
+                built = tuple(m for m in members if m not in skip)
+                f['refusal'] = incomplete_refusal(repo, trunk, b, built, run)
                 if f['refusal']:  # the hold's finding: the members still missing (progress is a new finding)
-                    f['incomplete'] = members_named(repo, trunk, b, members)[1]
+                    f['incomplete'] = members_named(repo, trunk, b, built)[1]
         f['customer'] = customer_content.touched(conv, f['files'])
         # a customer page is never landed unread: its diff needs a review whatever its class
         f['review_required'] = f['review_required'] or bool(f['customer'])
