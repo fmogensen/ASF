@@ -26,11 +26,17 @@ head whose checks ran against an older trunk. Under ``merge: queue`` the lane in
    marked merged within a few seconds (each member head is a parent of the batch, so it
    normally does) is closed with a comment naming the sha; the member branches and the batch
    ref are deleted;
-4. **splits** a red batch: one member goes BACK to its session with the red checks and their log
-   tails (the gate's own path); several are cut again as two halves, each on the trunk alone
-   (not stacked: stacked, the upper half would only re-run the red whole), so every run of a
-   bisection answers for its own half — whichever lands first makes the other stale, and that
-   one is cut again on the new tip.
+4. **isolates the culprit** of a red batch — once flake triage (:mod:`asf.flake`) re-ran the
+   failed job and it went red again, and never when the trunk fails the same check (then nobody
+   is blamed: the members wait). The failed job is the one that *failed*, a ``needs:`` upstream
+   the product does not require included (it is what skipped the required ones). Its log's
+   ``path:line`` findings are mapped to each member's own diff: the member(s) they name go BACK
+   with the job, the failing step, those lines and the local reproduction (:func:`blame`,
+   :func:`culprit_text`), and the rest are cut again at once. A lone member is the culprit. When
+   the log names no file only some members changed, the batch is cut again as two halves, each
+   on the trunk alone (not stacked: stacked, the upper half would only re-run the red whole), so
+   every run of a bisection answers for its own half — whichever lands first makes the other
+   stale, and that one is cut again on the new tip.
 
 **Rebuild.** A batch whose run the CI start queue (:mod:`asf.ci_queue`) cancelled and can
 neither re-run nor replace — its run made on a workflow the trunk has changed since, or STUCK
@@ -73,6 +79,7 @@ landing, and a batch ref that matches a protected pattern is refused before it i
 import datetime
 import json
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -307,17 +314,45 @@ def run(lane, ready):
         elif state == 'red':
             _ledger(lane, batch, False, f'red: {why}')
             _drop(lane, batch, f'red on {why}')
-            if len(members) == 1:
-                checks, red = detail
-                _send_back(lane, members[0], 'gate',
-                                   f"batch {ref} @ {batch['sha'][:12]} (this PR alone on {trunk} "
-                                   f"{batch['base'][:9]}) checks red: {why}"
-                                   + lane_mod.red_evidence(lane.slug, checks, red), ())
+            checks, red = detail
+            roots = root_failures(checks, why) or [c for c in checks
+                                                   if flake.job_key(c.get('name')) in red]
+            on_trunk = _red_on_trunk(lane, [c.get('name') for c in roots] or red)
+            if on_trunk:
+                # the trunk fails the same check: not this batch's defect — nobody is sent back
+                # and nobody is split out; the members wait and are gated again
+                said = ', '.join(f'{n} @ {s[:9]}' for n, s in sorted(on_trunk.items()))
+                lane.out(f'merge queue: {ref} red on {why} — red on {trunk} too ({said}): '
+                         f'no member is blamed, the batch waits for {trunk} to go green')
+                for f in members:
+                    _wait(lane, f, f'merge queue: {", ".join(sorted(on_trunk))} red on {trunk} '
+                                   f'too ({said}) — not this PR\'s', green=f.get('green'))
+                settled |= {f['branch'] for f in members}
             else:
-                half = len(members) // 2
-                lane.out(f'merge queue: {ref} splits — {len(members[:half])} and '
-                         f'{len(members[half:])} PR(s), each cut on {trunk} alone')
-                groups.extend([members[:half], members[half:]])
+                found = failure_findings(lane.slug, roots)
+                culprits = blame(lane, batch, members, found)
+                if len(members) == 1:
+                    culprits = culprits or {members[0]['branch']: []}
+                fallback = (checks, [c.get('name') for c in roots] or red)
+                for f in members:
+                    if f['branch'] in culprits:
+                        _send_back(lane, f, 'gate',
+                                   culprit_text(lane, batch, f, why, found, culprits[f['branch']],
+                                                len(members) == 1, fallback),
+                                   sorted({p for p, _n, _t in culprits[f['branch']]}))
+                innocent = [f for f in members if f['branch'] not in culprits]
+                if culprits and innocent:
+                    lane.out(f"merge queue: {ref} red on {why} — the failure is "
+                             f"{', '.join(f'#{_pr(f)}' for f in members if f['branch'] in culprits)}"
+                             f"'s (its files, named in the failing job's log); "
+                             f"{', '.join(f'#{_pr(f)}' for f in innocent)} cut again without it")
+                    loose.extend(innocent)
+                elif not culprits:
+                    half = len(members) // 2
+                    lane.out(f'merge queue: {ref} splits — {len(members[:half])} and '
+                             f'{len(members[half:])} PR(s), each cut on {trunk} alone (the failing '
+                             f'job\'s log names no file only some of them changed)')
+                    groups.extend([members[:half], members[half:]])
             dropped.add(ref)
         elif state == 'pending':
             age = int(_age_s(batch) // 60)
@@ -430,12 +465,15 @@ def judge(lane, batch, members, heads, trunk_sha, st):
         batch['run_url'] = run_url(runs)
     if state == 'red':
         red = [n.split(' ', 1)[0] for n in why.split(', ')]
-        # flake-vs-defect triage (asf.flake): a failed required job is re-run once on the batch
-        # sha before the batch is split or a member sent back
-        failed = [c for c in checks if c.get('bucket') == 'fail' and flake.job_key(c['name']) in red]
+        # flake-vs-defect triage (asf.flake): a failed job is re-run once on the batch sha before
+        # the batch is split or a member sent back — a failed required job, and a failed job a
+        # required one was skipped behind (a ``needs:`` upstream: its re-run re-runs them)
+        failed = root_failures(checks, why)
         defects, held = flake.triage(lane.product, lane.state_dir, lane.slug, sha, failed,
                                      where=f'batch {ref}', out=lane.out)
-        other = [n for n in red if n not in {flake.job_key(c['name']) for c in failed}]
+        explained = {flake.job_key(c['name']) for c in failed} | (
+            _skipped(why) if failed else set())
+        other = [n for n in red if n not in explained]
         if held and not defects and not other:
             state, why = 'pending', f"re-running {', '.join(held)} (flake triage)"
         else:
@@ -445,6 +483,159 @@ def judge(lane, batch, members, heads, trunk_sha, st):
     if state == 'green':
         return state, why, attested_runs(runs, required)
     return state, why, None
+
+
+# ---- a red batch: whose is it -------------------------------------------------------------------
+#
+# A red batch used to be bisected blind: one member's real defect failed every batch it was in,
+# each level of the split costing a full CI run, and the innocent members waited out every one.
+# The failing job's own log usually names the defect's files (``path:line``): mapped to each
+# member's diff, it names the culprit at once — the culprit goes back with the job, the step and
+# those lines, the rest are cut again on the spot. Only when the log names no file that only some
+# members changed does the batch split in halves. Never on a flake (``asf.flake`` re-ran the job
+# and it went red again first), and never when the trunk fails the same check.
+
+#: ``path:line`` in a CI log line: a repo path (a dot extension) and the line it names
+_PATH_LINE_RE = re.compile(r'(?<![\w@./-])((?:[\w@.+-]+/)*[\w@.+-]+\.[A-Za-z0-9]{1,8}):(\d+)')
+#: how many of a failed step's output lines are read for findings
+FINDING_LINES = 400
+#: how many finding lines a culprit's correct brief names
+BRIEF_FINDINGS = 30
+
+
+def _skipped(why):
+    """The required names a verdict's ``why`` reads as ``skipped``."""
+    return {n.split(' ', 1)[0] for n in (why or '').split(', ') if n.endswith('(skipped)')}
+
+
+def root_failures(checks, why):
+    """The failed checks (``bucket`` ``fail``) behind a red verdict ``why``: each failed required
+    job, and — when a required job was ``skipped`` — every failed job, since a ``needs:`` upstream
+    that failed (a ``rules`` job the product does not require) is what skipped it. The skipped
+    jobs judged no code: the upstream's failure is the defect, and its log the evidence."""
+    red = {n.split(' ', 1)[0] for n in (why or '').split(', ') if n}
+    skipped = _skipped(why)
+    return [c for c in checks or () if c.get('bucket') == 'fail'
+            and (flake.job_key(c.get('name')) in red or skipped)]
+
+
+def _red_on_trunk(lane, names):
+    """``{name: sha}``: the ``names`` red on the trunk too (the host's own reading); ``{}`` when
+    the host cannot say."""
+    reader = getattr(getattr(lane, 'host', None), 'trunk_red', None)
+    if not reader or not names:
+        return {}
+    try:
+        return dict(reader(list(dict.fromkeys(n for n in names if n))) or {})
+    except Exception:   # a reading that fails is no verdict: the batch is judged as before
+        return {}
+
+
+def failure_findings(slug, roots):
+    """Per failed check in ``roots``: ``{name, link, step, cmd, tests, lines, paths}`` — its
+    failed step's output (``lines``) and the ``(path, line, text)`` each ``path:line`` in it names.
+    A check whose log does not read keeps ``lines`` and ``paths`` empty. Never raises."""
+    out = []
+    for c in roots or ():
+        link = c.get('link') or ''
+        m = lane_mod._JOB_RE.search(link)
+        item = {'name': c.get('name'), 'link': link, 'step': None, 'cmd': None, 'tests': [],
+                'lines': [], 'paths': []}
+        out.append(item)
+        if not m:
+            continue
+        try:
+            rc, log, _e = H._gh(['api', f'repos/{slug}/actions/jobs/{m.group(1)}/logs'])
+        except OSError:
+            continue
+        if rc != 0 or not log:
+            continue
+        item['lines'] = lane_mod.red_log_lines(log, FINDING_LINES)
+        item['tests'] = lane_mod.red_tests(log)
+        try:
+            item['step'], item['cmd'] = lane_mod.red_step(slug, m.group(1))
+        except Exception:
+            pass
+        for text in item['lines']:
+            for p, n in _PATH_LINE_RE.findall(text):
+                item['paths'].append((p[2:] if p.startswith('./') else p, int(n), text.strip()))
+    return out
+
+
+def _member_files(lane, batch, f):
+    """The files member ``f`` changes against the batch's base: its own diff (``base...head``),
+    else the file list the batch recorded for it."""
+    base, head = batch.get('base'), f.get('head')
+    if base and head:
+        got = H.sh(['git', 'diff', '--name-only', f'{base}...{head}'], cwd=lane.repo)
+        if got.returncode == 0:
+            return {l.strip() for l in got.stdout.splitlines() if l.strip()}
+    return set(f.get('files') or ())
+
+
+def _owns(path, files):
+    """The file of ``files`` a log ``path`` names: itself, or a file it ends with (a runner's
+    absolute checkout path)."""
+    if path in files:
+        return path
+    return next((x for x in files if path.endswith('/' + x)), None)
+
+
+def blame(lane, batch, members, found):
+    """``{branch: [(path, line, text)]}``: the members the failing jobs' logs name — each one a
+    finding's file is in its own diff. Empty (no verdict: the batch splits) when no finding maps
+    to a member, or — with several members — when every member is named (the log cannot tell
+    them apart)."""
+    paths = [x for item in found for x in item['paths']]
+    if not paths:
+        return {}
+    named = {}
+    for f in members:
+        files = _member_files(lane, batch, f)
+        mine = [x for x in paths if _owns(x[0], files)]
+        if mine:
+            named[f['branch']] = [(_owns(p, files), n, t) for p, n, t in mine]
+    if not named or (len(members) > 1 and len(named) == len(members)):
+        return {}
+    return named
+
+
+def culprit_text(lane, batch, f, why, found, mine, lone, fallback):
+    """The correct round's text for the culprit ``f``: the batch and its red verdict, then per
+    failed job its link, the log lines naming this PR's files (each under the heading it is listed
+    under — a rule's name), else the tail of its failed step, and the named-failure brief
+    (:func:`asf.harvest.lane.red_brief`: the step, the tests, the local reproduction). No log
+    read: the red checks' evidence as before (``fallback``: ``(checks, names)``)."""
+    ref, sha, trunk = batch['ref'], batch['sha'], lane.trunk
+    where = (f"this PR alone on {trunk} {batch['base'][:9]}" if lone else
+             f"{len(batch['members'])} PRs on {trunk} {batch['base'][:9]}; the failing job's log "
+             f"names files only this PR changes, the others are cut again without it")
+    head = f"batch {ref} @ {sha[:12]} ({where}) checks red: {why}"
+    mine_text = {t for _p, _n, t in mine}
+    blocks = []
+    for item in found:
+        lines = item['lines']
+        if not lines:
+            continue
+        named = []
+        for i, l in enumerate(lines):
+            if l.strip() not in mine_text:
+                continue
+            ind = len(l) - len(l.lstrip())
+            top = next((h for h in reversed(lines[:i]) if h.strip()
+                        and len(h) - len(h.lstrip()) < ind), None) if ind else None
+            if top and top not in named:
+                named.append(top)
+            named.append(l)
+        shown = (["Findings in this PR's files:"] + named[:BRIEF_FINDINGS]) if named \
+            else lines[-lane_mod.RED_LOG_LINES:]
+        brief = lane_mod.red_brief(item['name'], item['step'], item['tests'], item['cmd'])
+        blocks.append(f"\n{item['name']} failed: {item['link']}\n" + '\n'.join(shown)
+                      + '\n' + brief)
+    if blocks:
+        return head + ''.join(blocks)
+    checks, names = fallback
+    return head + lane_mod.red_evidence(lane.slug, checks, names)
 
 
 def required_set(lane, sha, trunk_sha):

@@ -291,6 +291,13 @@ class GitHubRuns:
         except (OSError, subprocess.TimeoutExpired):
             return None
         gh_limit.inspect_proc(args, p)
+        from asf.harvest import harvest as H
+        if H.escapes_refused(args, p.returncode, getattr(p, 'stderr', '')):   # a coloured job log (gh 2.101)
+            try:
+                p = self._run(['gh', *H.with_escapes(args)], capture_output=True, text=True,
+                              timeout=GH_TIMEOUT_S, env=ci_pool._gh_env(self.product))
+            except (OSError, subprocess.TimeoutExpired):
+                return None
         return p.stdout if p.returncode == 0 else None
 
     def _lines(self, args):
