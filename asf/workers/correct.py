@@ -6,7 +6,11 @@ newest run (kind :data:`OPERATOR`), so the feeder turns it into the item's FIX �
 the brief quotes the text under the usual correction head. Nothing here bypasses a rule:
 
 * the round counts (:data:`asf.workers.lifecycle.ROUND_CAP`): an item that has used its rounds
-  is refused — it goes to adjudication, not to another correction;
+  goes to adjudication, not to another correction — and the instruction goes with it as an
+  operator ruling (:func:`attach_ruling`): filed on the card's ``## History`` as an
+  ``adjudicate (operator)`` line, so it binds every later review (:mod:`asf.evidence.rulings`),
+  and written as the held run's correction at the cap, so the feeder's STALEMATE → ADJUDICATE
+  row carries it and the adjudicate brief quotes it;
 * the row is a ``correct`` row, so the one-push rule (:mod:`asf.workers.pushlog`) and the
   relaunch cap (:mod:`asf.workers.relaunch`) apply to its session as to any other;
 * an item parked by hand, or with a session still running, is refused — ``asf unpark`` first.
@@ -15,6 +19,7 @@ the brief quotes the text under the usual correction head. Nothing here bypasses
 reference fix instead of re-deriving it; that PR is a reference, never landed.
 """
 import datetime
+import os
 import re
 
 from asf import env
@@ -74,11 +79,13 @@ def cmd_correct(args, fetch=None):
         print(f'asf correct: {item} has a session running — correct it when it ends')
         return 1
     rounds = lifecycle.rounds_of(path, item)
-    if rounds >= lifecycle.ROUND_CAP:
-        print(f'asf correct: {item} has used its {lifecycle.ROUND_CAP} correction rounds — it goes '
-              f'to adjudication, not another correction')
-        return 1
     run = max(runs, key=lambda r: r.get('started') or '')
+    if rounds >= lifecycle.ROUND_CAP:
+        if getattr(args, 'from_pr', None):
+            print(f'asf correct: {item} has used its {lifecycle.ROUND_CAP} correction rounds — '
+                  f'at the cap the instruction is an operator ruling; give it without --from-pr')
+            return 1
+        return attach_ruling(product, item, run, why)
     number = getattr(args, 'from_pr', None)
     base, shas = (None, [])
     if number:
@@ -94,6 +101,59 @@ def cmd_correct(args, fetch=None):
     pool_mod.update_session(product, run['job'], correction=corr, rounds=rounds + 1)
     print(f'corrected {item} on {run["branch"]} (round {rounds + 1} of {lifecycle.ROUND_CAP}, '
           f'job {run["job"]}): {why}')
+    return 0
+
+
+#: The head an operator ruling's correction text opens with: the adjudicate brief quotes it.
+RULING_HEAD = ('OPERATOR RULING (asf correct, {at}) — binding. The operator has ruled on this item '
+               'at the correction-round cap; it is filed on the card\'s History as '
+               '`adjudicate (operator)`. Rule every open finding by it, carry it out on {branch}, '
+               'and give it as your report\'s `ruling:`:\n\n')
+
+
+def file_ruling(product, item, text, stamp):
+    """Appends ``- <stamp> adjudicate (operator): <text>`` to ``item``'s card ``## History``
+    in the product's record and publishes it (commit and push, when the record is a checkout).
+    ``''`` when filed, else why not."""
+    from asf.evidence import rulings
+    from asf.record import frontmatter, publish, stage
+    from asf.record.ingest import append_history_lines
+    root = getattr(product, 'backlog_dir', None)
+    card = rulings._card_file(product, item)
+    if not root or not card or not os.path.isfile(card):
+        return f'no card for {item} in the record'
+    line = f'- {stamp} adjudicate ({OPERATOR}): {" ".join(text.split())}'
+    rel = os.path.relpath(card, root)
+
+    def _write(_root, path, relpath):
+        with open(path, encoding='utf-8') as f:
+            meta, body = frontmatter.parse(f.read(), path=relpath)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(frontmatter.render(meta, append_history_lines(body, [line])))
+
+    _r, _staged, findings = stage.guarded(root, 'correct', _write, (card, rel), product=product,
+                                          only=[rel])
+    if findings:
+        return 'refused: ' + '; '.join(f'{f.invariant}: {f.message}' for f in findings)
+    if not publish.publish(root, card, f'record: {item} operator ruling (asf correct)'):
+        return 'filed, but the record push was refused'
+    return ''
+
+
+def attach_ruling(product, item, run, why):
+    """At the round cap: ``why`` becomes an operator ruling — filed on the card's History
+    (:func:`file_ruling`) and written as ``run``'s correction at the cap (``same`` =
+    :data:`~asf.workers.lifecycle.ROUND_CAP`, ``at_cap``), so the feeder's ADJUDICATE row takes
+    it with its text. No round is spent."""
+    now = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    filed = file_ruling(product, item, why, now[:16].replace('T', ' '))
+    text = RULING_HEAD.format(at=now, branch=run['branch']) + why
+    corr = {'kind': OPERATOR, 'text': text, 'at': now, 'same': lifecycle.ROUND_CAP,
+            'at_cap': True, 'operator_ruling': True}
+    pool_mod.update_session(product, run['job'], correction=corr)
+    print(f'{item} has used its {lifecycle.ROUND_CAP} correction rounds: the instruction goes to '
+          f'its adjudication as an operator ruling (job {run["job"]}, {run["branch"]})'
+          + (f'; card History: {filed}' if filed else '; filed on the card\'s History'))
     return 0
 
 

@@ -100,12 +100,46 @@ class CorrectTests(unittest.TestCase):
         self.assertEqual(rc, 1, out)
         self.assertEqual(self.read(), before)
 
-    def test_the_round_cap_refuses(self):
+    def card(self):
+        backlog = os.path.join(self.tmp, 'backlog')
+        os.makedirs(os.path.join(backlog, 'tasks'), exist_ok=True)
+        with open(env.product_path('sample'), 'w') as f:
+            f.write(f'product: sample\nrepo_slug: x/y\nbacklog_dir: {backlog}\n')
+        path = os.path.join(backlog, 'tasks', 'T-0017.md')
+        with open(path, 'w') as f:
+            f.write('---\nid: T-0017\ntype: task\ntitle: t\n---\n## Description\nd\n\n'
+                    '## History\n- 2026-09-01 09:00 created\n')
+        return path
+
+    def test_at_the_round_cap_the_instruction_goes_to_adjudication_as_a_ruling(self):
+        import importlib
+        build = importlib.import_module("asf.briefs.build")
+        from asf.evidence import rulings
+        card = self.card()
+        self.ledger(dict(self.RUN, rounds=lifecycle.ROUND_CAP))
+        rc, out = self.run_cmd(why='D12 stands: remove the provider entry; push once.')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('operator ruling', out)
+        self.assertEqual(lifecycle.rounds_of(self.path, 'T-0017'), lifecycle.ROUND_CAP)
+        [row] = self.rows()
+        self.assertEqual((row.kind, row.brief_kind), (rows.STALEMATE, 'adjudicate'))
+        self.assertIn('OPERATOR RULING', row.correction)
+        self.assertIn('D12 stands: remove the provider entry', row.correction)
+        brief = build.correction_text(row, 'adjudicate')
+        self.assertIn('OPERATOR RULING', brief)
+        self.assertIn('D12 stands', brief)
+        with open(card) as f:
+            self.assertIn('adjudicate (operator): D12 stands', f.read())
+        [ruling] = rulings.standing(env.load_product('sample'), 'T-0017')
+        self.assertEqual(ruling['job'], 'operator')
+        self.assertIn('D12 stands', rulings.brief_section([ruling]))
+        self.assertIn('adjudicate', build.RULINGS_KINDS)
+
+    def test_at_the_cap_a_from_pr_is_refused(self):
         self.ledger(dict(self.RUN, rounds=lifecycle.ROUND_CAP))
         before = self.read()
-        rc, out = self.run_cmd()
+        rc, out = self.run_cmd(pr=12, fetch=lambda a: {})
         self.assertEqual(rc, 1, out)
-        self.assertIn('adjudication', out)
         self.assertEqual(self.read(), before)
 
     def test_a_round_is_spent(self):

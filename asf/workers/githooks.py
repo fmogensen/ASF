@@ -129,6 +129,16 @@ if [ "$name" = "pre-push" ] && { [ -n "$ASF_PUSH_LOG" ] || [ -n "$ASF_PUSH_ALLOW
         if [ -n "$input" ]; then printf '%s\n' "$input"; fi | "$own/$name" "$@"
         rc=$?
     fi
+    # CI judges the branch merged into the trunk, by the trunk's own check list and scripts: the
+    # product's pre-push check runs once more on that merge (asf.workers.trunkmerge)
+    if [ "$rc" = 0 ] && [ -n "$input" ] && [ -n "$ASF_PRODUCT" ]; then
+        cli="$HOME/.local/bin/asf"
+        [ -x "$cli" ] || cli=$(command -v asf 2>/dev/null)
+        if [ -n "$cli" ]; then
+            printf '%s\n' "$input" | "$cli" trunk-check --pre-push --product "$ASF_PRODUCT"
+            rc=$?
+        fi
+    fi
     if [ "$rc" = 0 ] && [ -n "$input" ] && [ -n "$ASF_PUSH_LOG" ]; then
         printf '%s\n' "$input" | awk 'NF >= 4 && $2 !~ /^0+$/ { print $2 }' \
             >> "$ASF_PUSH_LOG" 2>/dev/null || :
