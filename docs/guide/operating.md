@@ -230,6 +230,19 @@ gh api -X PUT repos/<owner>/<repo>/rulesets/<id> -f enforcement=active     # clo
 `asf doctor` prints the exact pair with the id filled in. Until the ruleset is active again the
 doctor row is red, and `queue bypass` lists every commit that landed outside the queue.
 
+## Merging an agent PR: `tools/merge-pr.sh <pr>`
+
+This is THE way to merge an agent PR; a bare `gh pr merge` is not allowed. The repo has no merge
+queue and no branch protection, and `--match-head-commit` only proves the PR head is unchanged, not
+that main is: two PRs, each green on its own head, merged one after the other have broken main
+together. The script merges only a head that contains `origin/main` at that moment and has the
+required checks (`tests (3.12)`, `tests (3.13)`) green on that exact sha. A head behind main is
+updated (`gh pr update-branch --rebase`, a merge of main if the rebase is refused) and the checks
+are awaited again on the new head, polling with backoff. If main moves again in between it goes
+round again, three rounds at most, then exits non-zero. Red checks refuse. On success it prints
+the merged sha; then `git pull --ff-only` in the main checkout and `asf upgrade --wait`.
+`MERGE_PR_CHECKS`, `MERGE_PR_ATTEMPTS`, `MERGE_PR_POLL` and `MERGE_PR_TIMEOUT` tune it.
+
 ## Holds, and "back to its session"
 
 When harvest cannot land a branch — its gate is red, its rebase conflicts on a file ASF does not
